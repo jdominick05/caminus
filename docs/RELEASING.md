@@ -51,7 +51,7 @@ modules use helpers the fork adds), which the job fetches from github.com/jdomin
    a clean tree, the kernel tree hash recomputed at the tag, the sdist's objects identical to the wheel's, and no private
    or secret text in either archive. Then `twine check --strict`. The verified files go to the next job as an artifact.
 2. **publish** (environment `pypi`, no token permissions): waits for the environment's required reviewer, then uploads the
-   two files with `pypa/gh-action-pypi-publish` and the environment secret `PYPI_API_TOKEN` (a PyPI token scoped to the
+   two files with twine 6.1.0 (`twine upload`; not pypa/gh-action-pypi-publish, whose Docker image cannot be pinned by commit SHA) and the environment secret `PYPI_API_TOKEN` (a PyPI token scoped to the
    `caminus` project).
 
 Every job runs only in `jdominick05/caminus` (`if: github.repository == ...`), so a fork or a mirror never publishes.
