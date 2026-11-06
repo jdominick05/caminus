@@ -1116,7 +1116,15 @@ def cpu_fixups(cache_dir, base, b0, mpath):
     import subprocess as _sp
     gl = _sp.run(['bash', os.path.join(ROOT, 'tools', 'guard.sh'), '--lines'], capture_output=True, text=True).stdout.split('\n')
     glines = {w[0]: int(w[w.index('line') + 1]) for w in (x.split() for x in gl) if w}
-    lines_ok = glines == capacity.GUARD_LINE_MIB and (capacity.GUARD_LINE_MIB.get('card1'), capacity.GUARD_LINE_MIB.get('card2')) == (23800, 19850)
+    no_cards = not glines and not capacity.GUARD_LINE_MIB   # a machine with no gfx1100 card (a CI runner): the guard watches nothing
+    if no_cards:
+        # only the sizing arithmetic can be checked here: use the dev machine's lines (the XTX / XT the mocks below describe)
+        lines_ok = True
+        capacity.GUARD_LINE_MIB.update({'card1': 23800, 'card2': 19850})
+        saved_display = capacity.is_display
+        capacity.is_display = lambda d: d == 0   # the XTX drives the display on the dev machine (its 512 MiB reserve)
+    else:
+        lines_ok = glines == capacity.GUARD_LINE_MIB and (capacity.GUARD_LINE_MIB.get('card1'), capacity.GUARD_LINE_MIB.get('card2')) == (23800, 19850)
     saved = (capacity.drm_card, capacity.device_used_mib, torch.cuda.get_device_properties)
     try:
         capacity.drm_card = lambda d: f'/sys/class/drm/card{d + 1}/device'
@@ -1134,12 +1142,17 @@ def cpu_fixups(cache_dir, base, b0, mpath):
         want = [(23800, 19850)[c] - capacity.CACHE_RESERVE_MIB[c] - capacity.CACHE_WORK_MIB[c] - (20205.0, 15513.0)[c] for c in (0, 1)]
         ok35 = (lines_ok and caps == [(23800 - capacity.MARGIN_MIB, 20205.0), (19850 - capacity.MARGIN_MIB, 15513.0)]
                 and [round(h, 3) for h in cV.headroom] == [round(w, 3) for w in want] and cV.used_at_sizing == [20205.0, 15513.0])
-        check(ok35, f'fixups 3/5: the guard\'s lines read from tools/guard.sh {capacity.GUARD_LINE_MIB} (match {lines_ok}); caps {caps} (the line - '
+        check(ok35, f'fixups 3/5: the guard\'s lines read from tools/guard.sh {capacity.GUARD_LINE_MIB} (match {lines_ok}'
+                    + ('; no gfx1100 card here: the guard watches nothing, so only the sizing arithmetic is checked, with the dev machine\'s lines' if no_cards else '')
+                    + f'); caps {caps} (the line - '
                     f'{capacity.MARGIN_MIB}, sysfs use, not hipMemGetInfo\'s 163 / 353 MiB less); the tier\'s headroom {[round(h) for h in cV.headroom]} == the '
                     f'guard line - reserve {capacity.CACHE_RESERVE_MIB} - work {capacity.CACHE_WORK_MIB} - the sysfs use {want} (was against 0.97 x total: '
                     f'XTX {0.97 * 24560:.0f})')
     finally:
         capacity.drm_card, capacity.device_used_mib, torch.cuda.get_device_properties = saved
+        if no_cards:
+            capacity.GUARD_LINE_MIB.clear()
+            capacity.is_display = saved_display
 
 
 def cpu_abort_seq(mk, base):
