@@ -1,0 +1,24 @@
+#!/bin/sh
+# qwen-k3: Qwen Code against a local Caminus server (caminus serve, 127.0.0.1:8092), in a Qwen home of its own.
+#
+#   packaging/harness/qwen-code/qwen-k3 [qwen arguments...]          # k3-coder (thinking); /model k3-coder-nothink inside
+#   CAMINUS_QWEN_HOME=DIR packaging/harness/qwen-code/qwen-k3        # another home (default ~/.config/caminus/qwen-home)
+#
+# QWEN_HOME points Qwen Code's global directory (settings, sessions, memory, credentials) at CAMINUS_QWEN_HOME
+# (Qwen Code's source, Storage.getGlobalQwenDir: the global settings path is QWEN_HOME/settings.json), so your own providers,
+# hooks and MCP servers do not apply here: copy what you want into $CAMINUS_QWEN_HOME/settings.json (not verified that no
+# other code path reads ~/.qwen). On the first run the home is created and settings.json copied from this directory;
+# after that the copy is yours to edit. A project's own .qwen/settings.json still applies (Qwen Code's workspace scope).
+# The server does not check API keys; CAMINUS_API_KEY only has to be non-empty.
+set -eu
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)   # readlink: works through a symlink on PATH
+HOME_DIR=${CAMINUS_QWEN_HOME:-$HOME/.config/caminus/qwen-home}
+if [ ! -f "$HOME_DIR/settings.json" ]; then
+    mkdir -p "$HOME_DIR"
+    chmod 700 "$HOME_DIR"
+    cp "$HERE/settings.json" "$HOME_DIR/settings.json"
+    echo "qwen-k3: created $HOME_DIR (settings.json from $HERE)" >&2
+fi
+export QWEN_HOME="$HOME_DIR"
+export CAMINUS_API_KEY="${CAMINUS_API_KEY:-caminus-local}"
+exec qwen "$@"

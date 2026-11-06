@@ -1,0 +1,39 @@
+#!/bin/sh
+# claude-k3: Claude Code against a local Caminus server (caminus serve's Anthropic route, 127.0.0.1:8092), with a Claude Code
+# config directory of its own.
+#
+#   packaging/harness/claude-code/claude-k3 [claude arguments...]                 # main model k3-coder, small model -nothink
+#   CAMINUS_MODEL=k3-coder-nothink packaging/harness/claude-code/claude-k3        # the no-thinking profile for everything
+#   MAX_THINKING_TOKENS=16000 packaging/harness/claude-code/claude-k3              # ask Claude Code to send `thinking`
+#
+# CLAUDE_CONFIG_DIR points Claude Code's config directory at CAMINUS_CLAUDE_HOME (default ~/.config/caminus/claude-home): its
+# global config and user settings move there (checked in the 2.1.318 binary: globalConfig = join(CLAUDE_CONFIG_DIR || homedir(),
+# ".claude.json"), userSettings = CLAUDE_CONFIG_DIR/settings.json), so your own settings, MCP servers and skills do not apply.
+# Not verified that no other code path reads ~/.claude; a project's own .claude/ directory still applies. The first run asks
+# the usual first-run questions (theme, folder trust).
+# ANTHROPIC_AUTH_TOKEN: any value (the server does not check keys; it goes out as a Bearer header to 127.0.0.1 only);
+# ANTHROPIC_API_KEY is unset so a real key in your environment is never sent to the local server.
+# Thinking: k3-coder thinks on the Anthropic route only when the request carries `thinking` (Anthropic's convention);
+# without it the reply has no reasoning. /caminus/status agent.tokens.reasoning shows whether any arrives.
+# The variable names were checked present in the installed Claude Code binary (2.1.318, 11-06); their behaviour follows
+# Claude Code's documentation and was not exercised here (no harness was run).
+set -eu
+CONF=${CAMINUS_CLAUDE_HOME:-$HOME/.config/caminus/claude-home}
+mkdir -p "$CONF"
+chmod 700 "$CONF"
+MAIN=${CAMINUS_MODEL:-k3-coder}
+SMALL=${CAMINUS_SMALL_MODEL:-k3-coder-nothink}
+export CLAUDE_CONFIG_DIR="$CONF"
+export ANTHROPIC_BASE_URL="${CAMINUS_URL:-http://127.0.0.1:8092}"        # no /v1: Claude Code appends /v1/messages
+export ANTHROPIC_AUTH_TOKEN="${CAMINUS_API_KEY:-caminus-local}"
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_MODEL="$MAIN"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MAIN"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MAIN"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL"
+export ANTHROPIC_SMALL_FAST_MODEL="$SMALL"                                 # the older name of the small / fast model
+export CLAUDE_CODE_SUBAGENT_MODEL="$MAIN"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 DISABLE_AUTOUPDATER=1
+export API_TIMEOUT_MS="${API_TIMEOUT_MS:-900000}"                          # a cold 262K prompt takes ~110 s before its first token
+exec claude "$@"

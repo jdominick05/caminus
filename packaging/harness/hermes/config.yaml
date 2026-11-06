@@ -1,0 +1,34 @@
+# Hermes Agent against a local Caminus server (caminus serve on 127.0.0.1:8092), as the config.yaml of a Hermes home of its
+# own (packaging/harness/hermes/hermes-k3 sets HERMES_HOME, which keeps Hermes' state out of ~/.hermes).
+# k3-coder thinks (medium effort, pinned by the model id: a reasoning_effort Hermes sends is ignored, so the prompt cache
+# keeps its prefix); k3-coder-low and k3-coder-xhigh think at low / extra-high effort; k3-coder-nothink does not. Switch inside a
+# session with /model custom:caminus:<id> (k3-coder, k3-coder-nothink, k3-coder-low, k3-coder-xhigh).
+# The server does not check API keys. Written from Hermes' own docs (Hermes' website/docs: providers.md "Named
+# Custom Providers", configuring-models.md, configuration.md "auxiliary"); not run against the server here.
+providers:
+  caminus:
+    api: http://127.0.0.1:8092/v1
+    api_key: caminus-local
+    transport: chat_completions
+    discover_models: false
+    models:
+      k3-coder:
+        context_length: 262144
+      k3-coder-nothink:
+        context_length: 262144
+      k3-coder-low:
+        context_length: 262144
+      k3-coder-xhigh:
+        context_length: 262144
+
+model:
+  default: k3-coder
+  provider: custom:caminus
+  context_length: 262144
+
+auxiliary:
+  # session titles on the no-thinking profile (short side requests: with max_tokens they run in the prompt cache's side slot
+  # and never displace the conversation)
+  title_generation:
+    provider: main
+    model: k3-coder-nothink

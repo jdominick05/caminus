@@ -1,0 +1,84 @@
+# CI on every push and pull request: what runs without a GPU and without the model files (docs/RELEASING.md).
+# It never builds the shipped code objects: the toolchain that built and validated them (TheRock ROCm 10.2.0a20261011) is
+# not available to CI. The compile-only kernel build is kernels.yml; the release check is release.yml.
+# Every action is pinned by its commit SHA, the release tag in the trailing comment.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash   # (bash -eo pipefail: a failing command in a pipe fails the step)
+
+jobs:
+  cpu:
+    name: CPU suites, sdist, vendored code, privacy scan
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      HIP_VISIBLE_DEVICES: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Dependencies (the declared ones and tests/serve's references at their tested versions; PyTorch's CPU wheel; build, twine)
+        run: |
+          python -m pip install numpy==2.5.4 jinja2==3.1.6 tokenizers==0.23.3
+          python -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install transformers==5.20.2 anthropic==2.3.0
+          python -m pip install build==1.2.2.post1 twine==6.1.0 'pkginfo>=1.12'
+
+      - name: Byte-compile every Python file
+        run: python -I -m compileall -q python tools tests
+
+      - name: The privacy and secret scan of the tree
+        run: python -I tools/privacy_scan.py .
+
+      - name: The Coder's tokenizer metadata for tests/serve (the first 11 MiB of shard 1, a vocab-only GGUF)
+        # Optional: without it tests/serve is skipped, not failed. An HTTP Range request at the manifest's pinned revision
+        # (head stops the transfer even if a server ignored the range); the tool refuses a cut inside the metadata.
+        continue-on-error: true
+        env:
+          HEAD_BYTES: '11534336'
+        run: |
+          url=$(python -I tools/gguf_vocab_only.py --url coder-1)
+          { curl -fsSL --retry 3 --max-time 300 -r "0-$((HEAD_BYTES - 1))" "$url" || true; } | head -c "$HEAD_BYTES" > "$RUNNER_TEMP/coder-head.gguf"
+          python -I tools/gguf_vocab_only.py "$RUNNER_TEMP/coder-head.gguf" "$RUNNER_TEMP/coder-vocab.gguf"
+          echo "CODER=$RUNNER_TEMP/coder-vocab.gguf" >> "$GITHUB_ENV"
+
+      - name: The CPU suites (each skipped when what it needs is missing; tests/ci_cpu.py --list says what)
+        run: |
+          python -I tests/ci_cpu.py --list
+          python -I tests/ci_cpu.py --scratch "$RUNNER_TEMP/ci"
+
+      - name: The sdist (without code objects; the release's sdist carries them) and twine check
+        run: |
+          python -m build --sdist --outdir "$RUNNER_TEMP/sdist" .
+          python -m twine check --strict "$RUNNER_TEMP"/sdist/*
+
+      - name: Vendored code (gguf-py at upstream llama.cpp 5aeac37a35; ggml's MMQ at the ignite-llama fork commit e4e3f8eda)
+        # kernels/ggml_mmq's headers name the fork's development commit 842653396, published as e4e3f8eda with identical
+        # ggml/, common/ and src/: vendor_mmq reads the files at e4e3f8eda and compares them with headers labelled 842653396.
+        run: |
+          src="$RUNNER_TEMP/llama.cpp"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/ggml-org/llama.cpp.git 5aeac37a35b44fde4bdffaec9159f2fcb253b622
+          python -I tools/vendor_gguf.py --check --src "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/jdominick05/ignite-llama.git e4e3f8edac36544e7c06139eb03e35288797e73e
+          python -I tools/vendor_mmq.py --check --src "$src" --commit e4e3f8edac36544e7c06139eb03e35288797e73e --label 842653396

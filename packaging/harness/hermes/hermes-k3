@@ -1,0 +1,22 @@
+#!/bin/sh
+# hermes-k3: Hermes Agent against a local Caminus server (caminus serve, 127.0.0.1:8092), in a Hermes home of its own.
+#
+#   packaging/harness/hermes/hermes-k3 [hermes arguments...]          # k3-coder (thinking)
+#   CAMINUS_HERMES_HOME=DIR packaging/harness/hermes/hermes-k3        # another home (default ~/.config/caminus/hermes-home)
+#
+# HERMES_HOME points Hermes' state (config, sessions, memory, skills, logs, auth) at CAMINUS_HERMES_HOME. A HERMES_HOME outside
+# ~/.hermes (and not under a profiles/ directory) is its own root (Hermes' source: hermes_constants._hermes_root_of), so
+# the root auth.json that profiles fall back to is in it too. Not verified that no other code path reads ~/.hermes.
+# Do not use `hermes -p NAME` for this: profiles live under ~/.hermes/profiles. On the first run the home is created and
+# config.yaml copied from this directory; after that the copy is yours to edit.
+set -eu
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)   # readlink: works through a symlink on PATH
+HOME_DIR=${CAMINUS_HERMES_HOME:-$HOME/.config/caminus/hermes-home}
+if [ ! -f "$HOME_DIR/config.yaml" ]; then
+    mkdir -p "$HOME_DIR"
+    chmod 700 "$HOME_DIR"
+    cp "$HERE/config.yaml" "$HOME_DIR/config.yaml"
+    echo "hermes-k3: created $HOME_DIR (config.yaml from $HERE)" >&2
+fi
+export HERMES_HOME="$HOME_DIR"
+exec hermes "$@"

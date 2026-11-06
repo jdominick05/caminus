@@ -1,0 +1,55 @@
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "k3-coder",
+        "name": "Caminus k3-coder (thinking)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8092/v1",
+        "generationConfig": {
+          "timeout": 900000,
+          "contextWindowSize": 262000
+        }
+      },
+      {
+        "id": "k3-coder-nothink",
+        "name": "Caminus k3-coder-nothink (no thinking)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8092/v1",
+        "generationConfig": {
+          "timeout": 900000,
+          "contextWindowSize": 262000
+        }
+      },
+      {
+        "id": "k3-coder-low",
+        "name": "Caminus k3-coder-low (thinking, low effort)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8092/v1",
+        "generationConfig": {
+          "timeout": 900000,
+          "contextWindowSize": 262000
+        }
+      },
+      {
+        "id": "k3-coder-xhigh",
+        "name": "Caminus k3-coder-xhigh (thinking, extra-high effort)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8092/v1",
+        "generationConfig": {
+          "timeout": 900000,
+          "contextWindowSize": 262000
+        }
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "k3-coder"
+  },
+  "fastModel": "k3-coder-nothink"
+}

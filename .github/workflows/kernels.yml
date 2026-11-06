@@ -1,0 +1,70 @@
+# COMPILE-ONLY, optional: build every kernel with a stock ROCm to catch source breakage (docs/RELEASING.md).
+# It never produces release artifacts and nothing is uploaded. Its code objects are NOT expected to equal the shipped ones:
+# those come from TheRock ROCm 10.2.0a20261011 on the maintainer's machine (tools/release_build.sh, checked against
+# packaging/gfx1100-kernels.sha256), a toolchain CI does not have, and the objects that include ggml headers also carry a
+# compile-unit id hashed from their include paths (docs/RELEASING.md); the comparison at the end is informational only.
+# build.sh's paths are TheRock's ($ROCM_PATH/bin/amdclang++, llvm/bin, lib/llvm/bin); a stock ROCm 6.x lays out the same
+# names (llvm is lib/llvm), which this job is the first to exercise. build.sh compiles against the ignite-llama fork's ggml
+# headers at e4e3f8eda (github.com/jdominick05/ignite-llama; the K3 modules need helpers the fork adds).
+# Every action is pinned by its commit SHA, the release tag in the trailing comment (the container image is a tag).
+name: kernels (compile-only)
+
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash   # (bash -eo pipefail: a failing command in a pipe fails the step)
+
+jobs:
+  compile:
+    name: build.sh with a stock ROCm (compile-only)
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: rocm/dev-ubuntu-24.04:6.4.1
+    steps:
+      - name: Tools (git for the checkout, patchelf and rocBLAS for build.sh's C++ runtime tests, Python for the summary)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates patchelf rocblas-dev python3
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: The ggml headers (the ignite-llama fork at e4e3f8eda)
+        run: |
+          ig="$RUNNER_TEMP/ignite-llama"
+          git init -q "$ig"
+          git -C "$ig" fetch -q --depth 1 https://github.com/jdominick05/ignite-llama.git e4e3f8edac36544e7c06139eb03e35288797e73e
+          git -C "$ig" checkout -q FETCH_HEAD
+
+      - name: ./build.sh (every kernels/*.hip, then the C++ runtime tests)
+        env:
+          ROCM_PATH: /opt/rocm
+          TORCHLIB: /opt/rocm/lib
+          PATCHELF: /usr/bin/patchelf
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          IGNITE="$RUNNER_TEMP/ignite-llama" ./build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
+          echo "built $(ls build/*.hsaco | wc -l) code objects"
+
+      - name: "Informational: the objects against the shipped hashes (differences are expected with this toolchain and these paths)"
+        run: |
+          python3 - <<'EOF'
+          import hashlib, os
+          want = dict(reversed(l.split()) for l in open('packaging/gfx1100-kernels.sha256') if l.strip())
+          same = [n for n, h in sorted(want.items())
+                  if os.path.isfile(f'build/{n}') and hashlib.sha256(open(f'build/{n}', 'rb').read()).hexdigest() == h]
+          missing = [n for n in want if not os.path.isfile(f'build/{n}')]
+          print(f'{len(same)} of {len(want)} runtime objects equal the shipped ones; missing: {missing or "none"}')
+          if missing:
+              raise SystemExit('a runtime object was not built')
+          EOF

@@ -1,0 +1,49 @@
+{
+  "_doc": "Reference inputs and llama.cpp reference numbers for tools/k3_smoke.py. Every number names its source. llama.cpp: ignite-llama build-hip-therock, llama-server on both cards (-sm layer -ts 550,450, -fa on, q8_0 KV, -ub 256, -lm dio), greedy (top_k 1, seed 1), ignore_eos, no prompt cache, prompt = the first 200 ids of each e2e text's tokens.txt (the same prompts k3_smoke uses). tok/s = llama-server's predicted_per_second (eval time only, prompt excluded). acceptance = draft_n_accepted / draft_n; tokens_per_pass = llama-server's 'mean len'. Draft max 3 for every speculative row (= K3 verify T = 4). JOB = the development job's scratch directory (ephemeral; archived under $ARTIFACTS/backups). The Coder's ref_dumps, JOB/m0/floor*.* and the JOB/m0 / JOB/m2/mtp sources below are copied to $ARTIFACTS/refs (d281-short, smoke-provenance; MANIFEST.md); the REAP-308 ref_dumps are not copied yet (MANIFEST.md says how).",
+  "texts": ["prose", "code", "shell"],
+  "prompt_tokens": 200,
+  "models": {
+    "coder": {
+      "gguf": "$CODER",
+      "ref_dumps": "$ARTIFACTS/refs/d281-short/e2e_{text}_decode",
+      "ref_dumps_source": "tools/gg_golden one-token decode dumps of the Coder (q8_0 KV); the _batch siblings give the D-281 floor (llama.cpp batch vs decode on the same tokens)",
+      "floor_full": {"mean_kld": 0.0076, "top1": 96.9, "positions": 768, "source": "JOB/m0/floor_coder.txt (JOB/m0/floor.py, 256 positions x 3 texts)"},
+      "llama": {
+        "plain":  {"n": 256, "tok_s": {"prose": 44.23, "code": 44.21, "shell": 38.00},
+                   "source": "M0: JOB/m0/srv-none32k.log (bench256.py, rep 2 of each text). Shell rep 2 (38.00) is a low outlier: shell rep 1 was 43.81 and the MTP session's plain shell 43.94 (plain_mtp_session); the plan quotes plain as 44.2"},
+        "dflash": {"n": 256, "tok_s": {"prose": 92.39, "code": 89.14, "shell": 65.06},
+                   "acceptance": {"prose": 78.9, "code": 74.9, "shell": 44.9},
+                   "tokens_per_pass": {"prose": 3.36, "code": 3.23, "shell": 2.34},
+                   "source": "M0: JOB/m0/srv-dflash32k.log (bench256.py, rep 2; DFlash2 Q8_0 on ROCm1, --spec-draft-n-max 3)"},
+        "mtp1":   {"n": 256, "tok_s": {"prose": 65.10, "code": 65.54, "shell": 60.22},
+                   "acceptance": {"prose": 94.7, "code": 97.7, "shell": 81.4},
+                   "source": "MTP reference run: JOB/m2/mtp/res-mtp1.json (spec_client.py full, greedy rows; sidecar mtp-Qwen3.8-Flash-Next-Coder-MTP-IQ4_XS.gguf, --spec-type draft-mtp --spec-draft-n-max 1)"},
+        "mtp3":   {"n": 256, "tok_s": {"prose": 85.92, "code": 79.77, "shell": 67.56},
+                   "acceptance": {"prose": 81.1, "code": 72.5, "shell": 56.7},
+                   "source": "MTP reference run: JOB/m2/mtp/res-mtp3.json (greedy rows, --spec-draft-n-max 3, --spec-draft-p-min 0)"},
+        "plain_mtp_session":  {"n": 256, "tok_s": {"prose": 44.08, "code": 44.07, "shell": 43.94},
+                   "source": "MTP reference run: JOB/m2/mtp/res-plain.json (same session as mtp1 / mtp3)"},
+        "dflash_mtp_session": {"n": 256, "tok_s": {"prose": 91.28, "code": 88.35, "shell": 64.37},
+                   "acceptance": {"prose": 78.9, "code": 74.9, "shell": 44.9},
+                   "source": "MTP reference run: JOB/m2/mtp/res-dflash3.json (same session as mtp1 / mtp3)"}
+      }
+    },
+    "reap": {
+      "gguf": "$REAP",
+      "ref_dumps": "$REAP_DUMPS/e2e_{text}_decode",
+      "ref_dumps_source": "tools/gg_golden one-token decode dumps of REAP-308-UI (q8_0 KV); the _batch siblings give the D-281 floor",
+      "floor_full": null,
+      "llama": {
+        "plain":  {"n": 256, "tok_s": {"prose": 52.53, "code": 53.80, "shell": 53.77},
+                   "source": "M0: JOB/m0/srv-r308-none32k.log (bench256.py, rep 2 of each text)"},
+        "dflash": {"n": 256, "tok_s": {"prose": 62.65, "code": 88.60, "shell": 76.29},
+                   "acceptance": {"prose": 44.3, "code": 78.1, "shell": 63.4},
+                   "tokens_per_pass": {"prose": 2.33, "code": 3.34, "shell": 2.89},
+                   "source": "M0: JOB/m0/srv-r308-dflash32k.log (bench256.py, rep 2; --spec-draft-n-max 3)"},
+        "mtp1": null,
+        "mtp3": null
+      }
+    }
+  },
+  "drafter": "$DFLASH"
+}

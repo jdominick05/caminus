@@ -1,0 +1,113 @@
+"""Where the engine's gfx1100 code objects come from, and what they were built from (docs/RELEASE-PLAN.md, "Code objects").
+
+kernel_dir(): CAMINUS_KERNEL_DIR (or kernel_dir in ~/.config/caminus/config.toml), else a checkout's build/ (this package
+imported from python/ beside build.sh and kernels/: every test and tool keeps reading ./build.sh's output), else the package's
+own hsaco/gfx1100 (an installed wheel). caminus.hip loads from it, and the prompt cache's engine key hashes its *.hsaco.
+
+The installed package carries RUNTIME_SET (what serving, replay and `caminus doctor --gpu` load), staged from build/ by
+tools/stage_kernels.py together with provenance.json: the toolchain, each object's compile command as build.sh ran it, the
+source commit and dirty flag, a content hash of kernels/ + build.sh, the ggml headers' commit, each object's sha256 and size.
+Not shipped: the *_trace profiling builds, the *_swiglu test builds, gg_mmvf_ref, the dormant S1 engine and training kernels,
+the probes (build them from a checkout and point CAMINUS_KERNEL_DIR at build/)."""
+import hashlib
+import json
+import os
+
+from . import config
+
+ARCH = 'gfx1100'
+PKG = os.path.dirname(os.path.abspath(__file__))
+PACKAGE_DIR = os.path.join(PKG, 'hsaco', ARCH)
+PROVENANCE = 'provenance.json'
+
+K3 = ('k3_gguf_gsq', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_qsa', 'k3_gguf_gsq_qsa_mt', 'k3_gguf_gsq_mtp', 'k3_gguf_gsq_mtp_mt',
+      'k3_gguf_draft', 'k3_gguf', 'k3_gguf_mt', 'k3_guard')
+MMQ_FORMATS = ('iq2_s', 'iq3_s', 'iq3_xxs', 'iq4_nl', 'iq4_xs', 'q2_0', 'q4_k', 'q5_k', 'q6_k', 'q8_0', 'glue')   # build.sh's lists
+MOE_FORMATS = ('iq2_s', 'iq3_s', 'iq3_xxs', 'iq4_xs', 'iq4_nl', 'q2_0', 'glue')
+PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'prefill_tp', 'prefill_dense_q6_k', 'gemm')
+           + tuple(f'prefill_mmq_{f}' for f in MMQ_FORMATS) + tuple(f'prefill_moe_{f}' for f in MOE_FORMATS))
+RUNTIME_SET = K3 + PREFILL + ('smoke',)
+
+
+def checkout_build():
+    """a checkout's build/ when this package is imported from <repo>/python/caminus (None otherwise)"""
+    root = os.path.dirname(os.path.dirname(PKG))
+    if os.path.isfile(os.path.join(root, 'build.sh')) and os.path.isdir(os.path.join(root, 'kernels')):
+        return os.path.join(root, 'build')
+    return None
+
+
+def kernel_dir():
+    """(directory, where): where 'env CAMINUS_KERNEL_DIR' / 'file ...' / 'checkout' / 'package'"""
+    v, w = config.lookup('kernel_dir')
+    if v:
+        return os.path.abspath(v), w
+    b = checkout_build()
+    if b is not None:
+        return b, 'checkout'
+    return PACKAGE_DIR, 'package'
+
+
+def missing_message(name, d, where):
+    if where == 'package':
+        hint = (f'{name} is not part of the installed runtime set (kernels.RUNTIME_SET; trace and test builds are not shipped): '
+                'build it from a checkout with ./build.sh and set CAMINUS_KERNEL_DIR=<checkout>/build')
+    elif where == 'checkout':
+        hint = 'run ./build.sh in the checkout'
+    else:
+        hint = f'the directory comes from {where}'
+    return f'code object {name}.hsaco not found in {d} ({hint})'
+
+
+def provenance(d=None):
+    """the directory's provenance.json (None when it has none, e.g. a checkout's build/)"""
+    d = d or kernel_dir()[0]
+    p = os.path.join(d, PROVENANCE)
+    if not os.path.isfile(p):
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            h.update(b)
+    return h.hexdigest()
+
+
+def verify(d=None):
+    """check the directory's objects against its provenance: [(name, ok, detail)] for every object provenance lists and every
+    RUNTIME_SET name; [] with prov None when the directory has no provenance"""
+    d = d or kernel_dir()[0]
+    prov = provenance(d)
+    if prov is None:
+        return None, []
+    out = []
+    objs = prov.get('objects', {})
+    for nm in sorted(set(objs) | {n + '.hsaco' for n in RUNTIME_SET}):
+        p = os.path.join(d, nm)
+        if nm not in objs:
+            out.append((nm, False, 'not listed in provenance.json'))
+        elif not os.path.isfile(p):
+            out.append((nm, False, 'missing'))
+        else:
+            got = sha256(p)
+            out.append((nm, got == objs[nm]['sha256'], 'sha256 ' + ('matches' if got == objs[nm]['sha256'] else f'{got[:12]} != {objs[nm]["sha256"][:12]}')))
+    return prov, out
+
+
+def describe(d=None):
+    """one line: where the code objects come from and what built them"""
+    if d is None:
+        d, where = kernel_dir()
+    else:
+        where = 'given'
+    prov = provenance(d)
+    if prov is None:
+        return f'code objects: {d} ({where}; no provenance.json: built in place)'
+    s, t = prov.get('source', {}), prov.get('toolchain', {})
+    return (f'code objects: {d} ({where}): {len(prov.get("objects", {}))} for {prov.get("arch")}, built {prov.get("built", "?")} '
+            f'from {s.get("commit", "?")[:12]}{" (dirty)" if s.get("dirty") else ""} (kernel tree {s.get("kernel_tree_sha256", "?")[:12]}) '
+            f'with {t.get("name", "?")} {t.get("version", "?")}')

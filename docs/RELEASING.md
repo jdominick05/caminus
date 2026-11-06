@@ -1,0 +1,111 @@
+# Releasing Caminus: CI and the PyPI release
+
+Three GitHub Actions workflows (`.github/workflows/`) and two tools carry a release. One fact shapes all of it: **CI never
+builds the shipped code objects.** The gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
+(10.2.0a20261011: amdclang++ and the offload driver's device LTO), and the gates that validated them hold their exact
+instructions and bitwise numerics (docs/RELEASE-PLAN.md, "Code objects"). That toolchain is not available at a public URL CI
+could install from, and a different compiler gives different code. So the maintainer builds the release files on the
+development machine, and CI checks them against hashes committed in the repository.
+
+Every action the workflows use is pinned by its commit SHA, with the release tag in a trailing comment
+(`actions/checkout@08c6903c... # v5.0.0`); to update one, replace both.
+
+## ci.yml: every push and pull request
+
+On `ubuntu-24.04`, no GPU, no model files:
+
+| Step | What |
+|---|---|
+| Dependencies | numpy, Jinja2 and tokenizers at their tested versions; tests/serve's references (transformers' `apply_chat_template`, the anthropic SDK's stream accumulator); PyTorch's CPU wheel (nothing in CI launches a kernel); build and twine |
+| Byte-compile | `python -I -m compileall -q python tools tests` |
+| Privacy scan | `tools/privacy_scan.py .`: secret patterns, machine paths, agent job directories, session links, quoted maintainer instructions and private names (matched by salted digests, so the tool names none of them) |
+| Tokenizer metadata | the first 11 MiB of the Coder's shard 1 at the manifest's pinned revision (an HTTP Range request), turned into a vocab-only GGUF by `tools/gguf_vocab_only.py` for tests/serve; optional: without it tests/serve is skipped |
+| CPU suites | `tests/ci_cpu.py`: tests/serve, test_packaging and the other suites that need no model weights; the suites that need the Coder's weights are skipped with the reason (`tests/ci_cpu.py --list`) |
+| sdist | `python -m build --sdist` and `twine check --strict` (CI's sdist has no code objects; the release's does) |
+| Vendored code | `tools/vendor_gguf.py --check` against upstream llama.cpp at 5aeac37a35; `tools/vendor_mmq.py --check --commit e4e3f8eda` against the ignite-llama fork (github.com/jdominick05/ignite-llama): kernels/ggml_mmq's headers name the fork's development commit 842653396, published as e4e3f8eda with identical `ggml/`, `common/` and `src/`, so the check reads the files at e4e3f8eda and compares them with headers that carry the label 842653396 (`--label`, its default) |
+
+The same checks run locally, except the downloads:
+
+```bash
+python -I tools/privacy_scan.py .
+CODER=/path/to/a/Coder/shard-1-or-vocab-only.gguf python -I tests/ci_cpu.py --scratch <a new directory>
+python -I tools/vendor_gguf.py --check --src <a llama.cpp clone holding 5aeac37a35>
+python -I tools/vendor_mmq.py --check --src <an ignite-llama clone holding e4e3f8eda>   # --commit e4e3f8eda --label 842653396: the defaults
+```
+
+tests/serve's `test_cancel_latency` is timing-sensitive; on a busy shared runner it is the likeliest flake.
+
+## kernels.yml: compile-only, weekly and on demand
+
+It builds every kernel with a stock ROCm (the `rocm/dev-ubuntu-24.04` image) to catch source breakage, and prints how many
+runtime objects happen to equal the shipped ones. It never produces release artifacts, uploads nothing, and its objects are
+not expected to equal the shipped ones. build.sh compiles against the ignite-llama fork's ggml headers at e4e3f8eda (the K3
+modules use helpers the fork adds), which the job fetches from github.com/jdominick05/ignite-llama.
+
+## release.yml: a published GitHub Release (or by hand with its tag)
+
+1. **verify** (`contents: read` only): checks out the tag, downloads the Release's attached `caminus-X.Y.Z-py3-none-any.whl`,
+   `caminus-X.Y.Z.tar.gz` and `SHA256SUMS`, and runs `tools/verify_release.py DIST --tag vX.Y.Z`: one version everywhere,
+   SHA256SUMS, the wheel's RECORD, the code objects exactly `caminus.kernels.RUNTIME_SET` with each sha256 equal to
+   provenance.json and to the committed `packaging/gfx1100-kernels.sha256` at the tag, provenance naming the tag's commit and
+   a clean tree, the kernel tree hash recomputed at the tag, the sdist's objects identical to the wheel's, and no private
+   or secret text in either archive. Then `twine check --strict`. The verified files go to the next job as an artifact.
+2. **publish** (environment `pypi`, no token permissions): waits for the environment's required reviewer, then uploads the
+   two files with `pypa/gh-action-pypi-publish` and the environment secret `PYPI_API_TOKEN` (a PyPI token scoped to the
+   `caminus` project).
+
+Every job runs only in `jdominick05/caminus` (`if: github.repository == ...`), so a fork or a mirror never publishes.
+
+## Making a release (the maintainer)
+
+1. **The version:** set `__version__` in `python/caminus/__init__.py` (and the docs that name it). A version can be uploaded to
+   PyPI once; a fix is the next patch version.
+2. **The code-object hashes** (only when kernels/ or build.sh changed since the last release): in a fresh clone,
+   `PY=<python with ROCm PyTorch> ROCM_PATH=<TheRock> IGNITE=<ignite-llama at e4e3f8eda> tools/release_build.sh --write-hashes`,
+   review the change to `packaging/gfx1100-kernels.sha256` and commit it.
+3. **Tag** the release commit `vX.Y.Z` and push the commit and the tag.
+4. **Build** in a fresh clone at the tag: `PY=... ROCM_PATH=... IGNITE=... tools/release_build.sh`. It refuses a tree with
+   changes or earlier build output, runs ./build.sh and tools/stage_kernels.py, refuses staged objects that differ from the
+   committed hashes, builds the wheel and the sdist into `dist/`, makes them reproducible (`tools/repro_dist.py`, below),
+   writes `dist/SHA256SUMS` and runs tools/verify_release.py. (`--untagged` does the same at an untagged commit for a
+   rehearsal; the files name the commit, so a rehearsal's dist of the commit that is tagged later verifies against the tag,
+   and equals a build at the tag byte for byte.)
+5. **Try the wheel** in a fresh environment: `pip install torch --index-url https://download.pytorch.org/whl/rocm7.2`, then the
+   wheel; `caminus doctor`, `caminus doctor --gpu`, a short `caminus serve` (docs/INSTALL.md).
+6. **Create the GitHub Release** with the three files attached, e.g.
+   `gh release create vX.Y.Z dist/caminus-X.Y.Z-py3-none-any.whl dist/caminus-X.Y.Z.tar.gz dist/SHA256SUMS --title "Caminus X.Y.Z" --notes-file NOTES.md`.
+   Publishing it starts release.yml.
+7. **Approve** the `pypi` deployment once verify has passed (the run's page on GitHub). The upload follows.
+
+## Reproducible release files
+
+Two `release_build.sh` runs of the same commit give the same wheel, sdist and SHA256SUMS, byte for byte (the code objects
+themselves are checked against `packaging/gfx1100-kernels.sha256`). Nothing in them depends on when or where they were built:
+
+- `SOURCE_DATE_EPOCH` defaults to the commit's committer time (`git log -1 --format=%ct`; an exported value wins and is
+  printed). It is provenance.json's `built` (`built_from: SOURCE_DATE_EPOCH`; tools/stage_kernels.py) and the wheel's entry
+  times (setuptools' bdist_wheel reads it).
+- `tools/repro_dist.py dist` rewrites the sdist, which setuptools writes with the checkout's file times, the build account's
+  uid / gid and user / group names, the umask's modes and the clock's gzip time: every member at `SOURCE_DATE_EPOCH`, owner
+  0:0 with no names, modes 0644 / 0755, gzip level 9 with that time and no file name; and the wheel's entry modes (0644 /
+  0755; its RECORD hashes contents only). Member order and contents are unchanged and checked.
+- `tools/verify_release.py` checks that form (one time, == provenance's `built`), so release.yml refuses files built another
+  way.
+
+**The code objects also depend on two absolute paths.** clang's HIP compile gives every object a compile-unit id, a symbol
+`__hip_cuid_<hash>` whose hash covers the compile command's options, and those hold the absolute `-I<IGNITE>/ggml/...`
+include paths and the toolchain's (`ROCM_PATH`) paths. The 28 objects that include ggml headers (`k3_gguf*`,
+`prefill_mmq_*`, `prefill_moe_*`, `prefill_dense_*`) therefore differ when `IGNITE` or `ROCM_PATH` is another path string:
+the same instructions and read-only data (`.text` and `.rodata` identical), 36 to 841 bytes of symbol names and the symbol
+hash and string tables built from them; the 8 others do not. The repository's own path and the temporary directory
+do not enter them. A byte-for-byte rebuild needs the same toolchain, the same fork commit at the same absolute `IGNITE` path and
+the same `ROCM_PATH` string as the release build; `packaging/gfx1100-kernels.sha256` holds the release build's hashes, and
+kernels.yml's "N of 36 equal" count is low for this reason as well as the compiler's.
+
+To check a published release on the maintainer's layout: clone the tag, run `tools/release_build.sh` with those paths, and
+compare `dist/SHA256SUMS` with the Release's.
+
+## The privacy scan's private names
+
+`tools/privacy_scan.py` holds salted sha256 digests of lowercased private terms (words, word pairs and path segment pairs),
+never the terms. To add one: `python -I tools/privacy_scan.py --digest 'the term'` and add the digest to `PRIVATE`.

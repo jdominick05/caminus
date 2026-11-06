@@ -1,0 +1,3 @@
+# The sdist (docs/RELEASE-PLAN.md): the package with its staged code objects and provenance (setup.py checks them), the
+# licences and the PyPI readme. Not the tests: they need this repository and its model paths.
+prune tests

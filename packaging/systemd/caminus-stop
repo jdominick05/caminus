@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# packaging/systemd/caminus-stop WAIT_S [MAINPID]: caminus.service's ExecStop= (final round 2, the lead's ruling of 11-06).
+# SIGTERM goes to the server alone, then this waits (at most WAIT_S seconds) for the unit's main process, tools/guard.sh, to
+# exit. MAINPID comes last because systemd leaves $MAINPID unset (the word dropped) when the main process has already exited
+# (a GUARD KILL, a GPU fault, a crash): then there is nothing to stop and this returns 0 at once. A MAINPID that is not
+# tools/guard.sh (a reused PID) is never signalled under.
+# The order that follows: the server drains (at most --drain-s 60 s) and parks the live conversation (at most --park-s 90 s),
+# then exits; gpu-high, its parent, puts the clocks back to auto; timeout exits; the guard, whose watch ran the whole
+# time (VRAM / RAM kill lines, the kernel-log fault watcher), sees its child gone, prints its rc line (to its stdout: the
+# journal) and exits; this script returns; systemd finds the unit's processes gone.
+# Why: with KillMode=control-group systemd's SIGTERM reached guard.sh, timeout and gpu-high together with the server, so the
+# guard stopped watching while the server drained and parked, its rc line was lost, and gpu-high died before `perf auto`
+# (the clocks stayed high after a stop). The unit now has KillMode=mixed: after this script, a main process still running gets
+# SIGTERM (the guard alone), and whatever is left after TimeoutStopSec gets SIGKILL.
+# The server: the process named `caminus` (caminus serve names itself before it builds anything) among the guard's
+# descendants; before it has named itself, the command gpu-high runs (gpu-high's child). Read-only otherwise: no file is
+# written, nothing but that one process is signalled.
+set -u
+wait_s=${1:?usage: caminus-stop WAIT_S [MAINPID]}
+main=${2:-}
+case $wait_s in ''|*[!0-9]*) echo "caminus-stop: WAIT_S must be a number of seconds (usage: caminus-stop WAIT_S [MAINPID])"; exit 2;; esac
+
+alive() {   # a process that exists and is not a zombie (the unit's manager reaps the main process; a test driver may not yet)
+    local s
+    s=$(awk '/^State:/{print $2}' "/proc/$1/status" 2>/dev/null) || return 1
+    [ -n "$s" ] && [ "$s" != Z ]
+}
+
+descendants() {   # pid comm ppid of every descendant of $1
+    ps -e -o pid=,ppid=,comm= | awk -v root="$1" '
+        { pid[NR] = $1; ppid[NR] = $2; comm[NR] = $3; n = NR }
+        END {
+            keep[root] = 1; changed = 1
+            while (changed) { changed = 0
+                for (i = 1; i <= n; i++) if (!(pid[i] in keep) && (ppid[i] in keep)) { keep[pid[i]] = 1; changed = 1 } }
+            for (i = 1; i <= n; i++) if (pid[i] != root && (pid[i] in keep)) print pid[i], comm[i], ppid[i]
+        }'
+}
+
+if [ -z "$main" ]; then
+    echo "caminus-stop: no main process (it had exited: systemd leaves \$MAINPID unset); nothing to stop"
+    exit 0
+fi
+if ! alive "$main"; then
+    echo "caminus-stop: the main process $main is not running"
+    exit 0
+fi
+if ! tr '\0' ' ' < "/proc/$main/cmdline" 2>/dev/null | grep -qE 'guard[^ /]*\.sh'; then
+    echo "caminus-stop: pid $main is not tools/guard.sh ($(cat "/proc/$main/comm" 2>/dev/null)): nothing signalled"
+    exit 0
+fi
+tree=$(descendants "$main")
+srv=$(awk '$2 == "caminus" {print $1; exit}' <<< "$tree")
+if [ -z "$srv" ]; then
+    gh=$(awk '$2 == "gpu-high" {print $1; exit}' <<< "$tree")
+    [ -n "$gh" ] && srv=$(awk -v gh="$gh" '$3 == gh && $2 != "sudo" && $2 != "flock" && $2 != "gpu-perf" {print $1; exit}' <<< "$tree")
+fi
+if [ -z "$srv" ]; then
+    echo "caminus-stop: no server process under $main (already gone?); waiting for the guard to exit"
+else
+    echo "caminus-stop: SIGTERM to the server (pid $srv) only; waiting for the guard (pid $main) to exit"
+    kill -TERM "$srv" 2>/dev/null
+fi
+t0=$SECONDS
+while alive "$main"; do
+    if (( SECONDS - t0 >= wait_s )); then
+        echo "caminus-stop: the guard (pid $main) still runs after ${wait_s} s: systemd stops the unit (SIGTERM to the guard, then SIGKILL)"
+        exit 1
+    fi
+    sleep 1
+done
+echo "caminus-stop: the guard exited after $(( SECONDS - t0 )) s"
+exit 0

@@ -1,0 +1,42 @@
+# Caminus as a systemd USER unit (M7 ops). A file in the repo: nothing installs or enables it. How to link it, and what each
+# line is for: packaging/systemd/README.md. Paths assume the checkout at ~/src/caminus and the drafter conda env.
+[Unit]
+Description=Caminus inference server (K3 engine, OpenAI / Anthropic API on 127.0.0.1:8092)
+Documentation=file://%h/src/caminus/packaging/systemd/README.md
+# one engine on the cards at a time: fn-server.service is the development machine's llama-server user unit on the same GPUs
+# (put your own engine's unit here, or drop the line). Conflicts= cannot reach an engine started outside systemd: stop it first
+Conflicts=fn-server.service
+# a GPU fault recorded by tools/guard.sh blocks every start until it has been inspected (CLAUDE.md, GPU safety)
+ConditionPathExists=!%h/.local/state/k3/GPU_FAULT_STOP
+
+[Service]
+Type=simple
+WorkingDirectory=%h/src/caminus
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/caminus
+# every GPU process runs under tools/guard.sh: its VRAM (XTX 23,800 / XT 19,850 MiB) and host RAM (MemAvailable 1,500 MiB) kill
+# lines, the amdgpu kernel-log fault watcher (page fault / reset / wedge / timeout: kill + the STOP file), and the gpu-high
+# clocks; 0 = no time limit. The server's output goes to the guard's log ~/.local/state/caminus/serve.log, the guard's own
+# lines (its rc line at the end) to its stdout: the journal (journalctl --user -u caminus); its 1 Hz VRAM / RAM line to
+# serve.log.mon beside the log, which grows ~2.5 MB a day while the unit runs and is never rotated (truncate it while the
+# unit is stopped). The server's flags are caminus serve's (python -I tools/caminus_serve.py --help)
+ExecStart=%h/src/caminus/tools/guard.sh %h/.local/state/caminus/serve.log 0 %h/miniforge3/envs/drafter/bin/python -I %h/src/caminus/tools/caminus_serve.py --port 8092
+# a stop signals the SERVER ALONE (final round 2): ExecStop sends SIGTERM to the server by its PID (the process named caminus
+# under the guard) and waits for the main process, the guard, to exit. The server drains (the running request cancelled at its
+# next pass boundary, at most 60 s) and parks the live conversation (at most 90 s), then exits; gpu-high puts the clocks back
+# to auto; the guard, watching the whole time, prints its rc line (the journal) and exits. KillMode=mixed: a guard still
+# running after ExecStop gets systemd's SIGTERM (it alone), and once the guard exits systemd SIGKILLs every process left at
+# once (systemd.kill(5)): a server still parking past ExecStop's 170 s wait loses its park and the clocks stay high. (Before,
+# KillMode=control-group sent SIGTERM to guard.sh, timeout and gpu-high together with the server: no watch while it parked,
+# no rc line, the clocks left high.) TimeoutStopSec covers ExecStop's bounded wait (170 s >= drain 60 + park 90). $MAINPID comes
+# last: systemd leaves it unset when the guard has already exited (a GUARD KILL, a fault), and caminus-stop then returns at once
+ExecStop=%h/src/caminus/packaging/systemd/caminus-stop 170 $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=180
+# never restarted automatically: after a GPU fault the guard kills the run and records STOP; a restart loop is what lost the
+# desktop on 11-01
+Restart=no
+
+[Install]
+WantedBy=default.target

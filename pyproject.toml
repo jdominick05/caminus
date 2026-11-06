@@ -1,0 +1,50 @@
+# The installable `caminus` package (docs/RELEASE-PLAN.md): a pure py3-none-any wheel with the prebuilt gfx1100 code objects
+# and the guard as package data. Build: ./build.sh && python -I tools/stage_kernels.py && pip wheel . --no-deps
+# --no-build-isolation -w dist (setup.py refuses a wheel without a complete staged set). PyTorch (the ROCm build) is not
+# declared: PyPI's torch is a CUDA build.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "caminus"
+dynamic = ["version"]
+description = "An RDNA3 inference engine (one persistent GPU launch per token) serving the Qwen3.8-Flash-Next GSQ-RCO Coder on two gfx1100 cards, with an OpenAI / Anthropic API"
+readme = "packaging/pypi/README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "LICENSES/*", "THIRD_PARTY.md"]
+authors = [{ name = "jdominick05" }]
+keywords = ["inference", "llm", "moe", "rocm", "hip", "rdna3", "radeon", "gfx1100", "megakernel"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy>=2.2.6", "jinja2>=3.1", "tokenizers>=0.20"]
+
+[project.urls]
+Source = "https://github.com/jdominick05/caminus"
+Documentation = "https://github.com/jdominick05/caminus/blob/main/docs/INSTALL.md"
+Issues = "https://github.com/jdominick05/caminus/issues"
+
+[project.scripts]
+caminus = "caminus.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["caminus", "caminus.*"]
+
+[tool.setuptools.package-data]
+caminus = ["hsaco/gfx1100/*.hsaco", "hsaco/gfx1100/provenance.json", "share/guard.sh"]
+
+[tool.setuptools.dynamic]
+version = { attr = "caminus.__version__" }
