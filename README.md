@@ -3,6 +3,14 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/caminus/"><img src="https://img.shields.io/pypi/v/caminus?label=pypi&labelColor=3b4252&color=88c0d0" alt="PyPI version"></a>
+  <img src="https://img.shields.io/badge/status-early%20testing-ebcb8b?labelColor=3b4252" alt="status: early testing">
+  <a href="docs/hardware.md"><img src="https://img.shields.io/badge/GPU-RX%207900%20XTX%20%2F%20XT-8fbcbb?labelColor=3b4252" alt="GPU: RX 7900 XTX / XT"></a>
+  <img src="https://img.shields.io/badge/Linux-Python%203.12-81a1c1?labelColor=3b4252&logo=linux&logoColor=d8dee9" alt="Linux, Python 3.12">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-b48ead?labelColor=3b4252" alt="AGPL-3.0-or-later"></a>
+</p>
+
+<p align="center">
   <b>Fast local coding models on your AMD Radeon RX 7900 cards.</b><br>
   Caminus is an inference engine written from the GPU kernels up for Radeon RDNA3 cards. It serves coding models to tools
   like Qwen Code through OpenAI- and Anthropic-compatible APIs. On the same cards it writes 1.1 to 2.4 times as fast as
