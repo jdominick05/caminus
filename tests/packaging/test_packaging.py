@@ -274,7 +274,7 @@ def stage_kernels(S):
     r = subprocess.run([PY, '-I', os.path.join(ROOT, 'tools', 'release', 'stage_kernels.py'), '--out', st, '--allow-dirty'], capture_output=True, text=True,
                        env=noepoch)
     prov, res = K.verify(st)
-    check('kernels: a staged copy verifies against its provenance', r.returncode == 0 and prov is not None and len(res) == 36 and all(ok for _, ok, _ in res),
+    check('kernels: a staged copy verifies against its provenance', r.returncode == 0 and prov is not None and len(res) == len(K.RUNTIME_SET) and all(ok for _, ok, _ in res),
           (r.stdout + r.stderr).strip()[-300:])
     check('kernels: provenance carries the toolchain, the commands, the sources and no home path',
           prov is not None and prov['toolchain']['version'] and all(o['command'] for o in prov['objects'].values())
