@@ -16,7 +16,9 @@ the branch `release`; `main` stays what the user runs.
 | Console script | `caminus` with subcommands `serve`, `download`, `doctor`, `purge`, `replay`, `flight`, `kv-cache`, `guard`, `version` | one entry point; the old `tools/replay.py`, `tools/flight.py`, `tools/kv_cache.py` stay as thin wrappers of the same code |
 
 **Dependencies declared:** `numpy`, `jinja2`, `tokenizers` (lower bounds only; tested with numpy 2.5.4, Jinja2 3.1.6, tokenizers
-0.23.3).
+0.23.3). Jinja2's floor is 3.1.6, a security floor: the chat template comes from the model file and renders in Jinja2's sandbox,
+which has known escapes before 3.1.6 (CVE-2024-56326, CVE-2025-27516); `caminus.serve.template` refuses an older one and
+`caminus doctor` reports it.
 
 **PyTorch is not declared.** The ROCm build of PyTorch is not on PyPI: a declared `torch` makes pip pull a CUDA build. The user
 installs it from PyTorch's ROCm index first (`pip install torch --index-url https://download.pytorch.org/whl/rocm7.2`; tested

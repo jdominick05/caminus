@@ -77,7 +77,14 @@ def check_deps(R):
     for mod in ('numpy', 'jinja2', 'tokenizers'):
         try:
             m = importlib.import_module(mod)
-            R.add('PASS', 'deps', f'{mod} {getattr(m, "__version__", "?")}')
+            v = getattr(m, "__version__", "?")
+            if mod == 'jinja2':
+                from ..serve.template import JINJA2_MIN, jinja2_version_ok
+                if not jinja2_version_ok(v):
+                    R.add('FAIL', 'deps', f'jinja2 {v}: before {".".join(map(str, JINJA2_MIN))} its sandbox (which renders the model\'s '
+                                          f'chat template) has known escapes: pip install "jinja2>={".".join(map(str, JINJA2_MIN))}"')
+                    continue
+            R.add('PASS', 'deps', f'{mod} {v}')
         except ImportError as e:
             R.add('FAIL', 'deps', f'{mod} not importable ({e}): pip install {mod}')
     try:

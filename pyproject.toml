@@ -25,7 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["numpy>=2.2.6", "jinja2>=3.1", "tokenizers>=0.20"]
+dependencies = ["numpy>=2.2.6", "jinja2>=3.1.6", "tokenizers>=0.20"]
 
 [project.urls]
 Source = "https://github.com/jdominick05/caminus"

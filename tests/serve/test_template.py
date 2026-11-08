@@ -114,6 +114,19 @@ def cases():
     return c
 
 
+class TestJinja2Floor(unittest.TestCase):
+    """the chat template comes from the model file: a Jinja2 with known sandbox escapes (before 3.1.6) is refused"""
+    def test_versions(self):
+        from caminus.serve.template import jinja2_version_ok
+        for v, ok in (('3.1.5', False), ('3.1.4', False), ('3.0.3', False), ('2.11.3', False), ('3.1.6', True),
+                      ('3.1.7', True), ('3.2', True), ('3.2.0rc1', True), ('4.0.0', True), ('garbage', False)):
+            self.assertEqual(jinja2_version_ok(v), ok, v)
+
+    def test_installed_is_accepted(self):
+        from caminus.serve.template import jinja2_version_ok
+        self.assertTrue(jinja2_version_ok(), 'the tested environment has Jinja2 >= 3.1.6')
+
+
 class TestTemplate(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

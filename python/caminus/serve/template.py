@@ -111,8 +111,24 @@ def _strftime_now(fmt):
     return datetime.now().strftime(fmt)
 
 
+# The sandbox below renders the chat template stored in the model file: input from whoever made the GGUF. Jinja2 before 3.1.6
+# has sandbox escapes (CVE-2024-56326, an indirect reference to str.format, fixed in 3.1.5; CVE-2025-27516, the attr filter
+# selecting str.format, fixed in 3.1.6), so an older Jinja2 is refused here, whatever installed it (pyproject declares 3.1.6)
+JINJA2_MIN = (3, 1, 6)
+
+
+def jinja2_version_ok(v=None):
+    """True when Jinja2 version string v (default: the installed one) is at least JINJA2_MIN"""
+    import re
+    m = re.match(r'(\d+)\.(\d+)(?:\.(\d+))?', jinja2.__version__ if v is None else v)
+    return bool(m) and tuple(int(x or 0) for x in m.groups()) >= JINJA2_MIN
+
+
 class ChatTemplate:
     def __init__(self, source):
+        if not jinja2_version_ok():
+            raise RuntimeError(f'Jinja2 {jinja2.__version__} has known sandbox escapes and the chat template comes from the model '
+                               f'file: pip install "jinja2>={".".join(map(str, JINJA2_MIN))}"')
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
                                             extensions=[jinja2.ext.loopcontrols])
         env.filters['tojson'] = _tojson
