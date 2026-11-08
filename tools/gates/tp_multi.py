@@ -20,7 +20,7 @@ if not 1 <= len(a) <= 2: print(__doc__); sys.exit(2)
 T = int(a[0]); NPOS = int(a[1]) if len(a) > 1 else 24
 torch = C.setup_torch()
 import numpy as np
-from caminus.flashnext_tp import FlashNextTP
+from caminus.engine.flashnext_tp import FlashNextTP
 toks = C.tokens(tok_path)[:NPOS]
 print(f'model {model}; tokens {tok_path}; T {T}; NPOS {NPOS}; engine kwargs {kw}; K3_QSA_TAPE {os.environ.get("K3_QSA_TAPE")}; '
       f'K3_PER_WGP {os.environ.get("K3_PER_WGP")}; compaction_proactiveness {C.proactiveness()}', flush=True)

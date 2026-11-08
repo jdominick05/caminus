@@ -9,7 +9,7 @@ mkdir -p build
 # k3_gguf.hip includes llama.cpp's ggml-cuda headers (vecdotq.cuh: the GGUF block formats) from the ignite-llama tree
 IG=${IGNITE:-$HOME/src/ignite-llama}
 GG=$IG/ggml
-# provenance inputs for tools/stage_kernels.py (docs/RELEASE-PLAN.md): build/BUILD-INFO (the toolchain, the sources' commit,
+# provenance inputs for tools/stage_kernels.py (docs/dev/packaging.md): build/BUILD-INFO (the toolchain, the sources' commit,
 # dirty flag and content hash, the ggml headers' commit) and build/BUILD-CMDS.tsv (each object's command as run below, with the
 # toolchain and ignite paths normalized to <ROCM_PATH> / <IGNITE>). Recording changes no compile flag
 : > build/BUILD-INFO; : > build/BUILD-CMDS.tsv
@@ -71,9 +71,9 @@ PF=(-O3 -DNDEBUG -fPIC -std=gnu++17 -DGGML_USE_HIP -D__HIP_PLATFORM_AMD__=1 -D__
     -DGGML_SCHED_MAX_COPIES=4 -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SHARED -DUSE_PROF_API=1 -D_GNU_SOURCE
     -D_XOPEN_SOURCE=600 -Ikernels -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda")
 mkdir -p build/obj
-pfbuild() {   # pfbuild OUT OBJ SRC DEFINE: the pipeline above (a full HIP compile with device LTO, then the gfx1100 object unbundled)
-    local out=$1 o=$2 src=$3 def=$4
-    local -a c1=("$TR/llvm/bin/clang++" -x hip --offload-arch="$ARCH" "${PF[@]}" "$def" -c -o "$o.o" "$src")
+pfbuild() {   # pfbuild OUT OBJ SRC DEFINE...: the pipeline above (a full HIP compile with device LTO, then the gfx1100 object unbundled)
+    local out=$1 o=$2 src=$3; shift 3
+    local -a c1=("$TR/llvm/bin/clang++" -x hip --offload-arch="$ARCH" "${PF[@]}" "$@" -c -o "$o.o" "$src")
     local -a c2=("$TR/lib/llvm/bin/llvm-objcopy" --dump-section=.hip_fatbin="$o.fatbin" "$o.o" /dev/null)
     local -a c3=("$TR/lib/llvm/bin/clang-offload-bundler" --unbundle --type=o --input="$o.fatbin"
                  --targets=hipv4-amdgcn-amd-amdhsa--"$ARCH" --output="$out")
@@ -81,10 +81,10 @@ pfbuild() {   # pfbuild OUT OBJ SRC DEFINE: the pipeline above (a full HIP compi
     "${c1[@]}"; "${c2[@]}"; "${c3[@]}"
     echo "$out"
 }
-for v in IQ2_S IQ3_S IQ3_XXS IQ4_NL IQ4_XS Q2_0 Q4_K Q5_K Q6_K Q8_0 GLUE; do
+for v in IQ2_S IQ3_S IQ3_XXS IQ4_NL IQ4_XS Q2_0 Q3_K Q4_K Q5_K Q6_K Q8_0 GLUE GLUE8; do
     n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/prefill_mmq_$n; out=build/prefill_mmq_$n.hsaco
-    if [ "$v" = GLUE ]; then def=-DK3_MMQ_GLUE; else def=-DK3_MMQ_TYPE=GGML_TYPE_$v; fi
-    pfbuild "$out" "$o" kernels/prefill_mmq.hip "$def"
+    case $v in GLUE) def=(-DK3_MMQ_GLUE) ;; GLUE8) def=(-DK3_MMQ_GLUE -DK3_MMQ_IDS_K=8) ;; *) def=(-DK3_MMQ_TYPE=GGML_TYPE_$v) ;; esac   # GLUE8: qwen35moe's top-8
+    pfbuild "$out" "$o" kernels/prefill_mmq.hip "${def[@]}"
 done
 # kernels/prefill_moe.hip (the batched prefill's own MoE grouped GEMMs; it compiles the vendored MMQ's per-format load_tiles /
 # vec_dot): the same pipeline and flags as prefill_mmq, one object per MoE format (the Coder's gate / up IQ2_S IQ3_S IQ3_XXS

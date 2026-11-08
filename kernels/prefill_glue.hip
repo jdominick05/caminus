@@ -1,4 +1,4 @@
-// Batched prefill glue (docs/agentic/spec-prefill-cache.md M5 S3; host side python/caminus/prefill_ops.py): the per-token
+// Batched prefill glue (docs/specs/spec-prefill-cache.md M5 S3; host side python/caminus/prefill_ops.py): the per-token
 // K3 decode ops of a layer, run over a whole chunk of T tokens with ordinary launches (not K3: no tape, no persistent
 // kernel). Every kernel here computes each output element with the expressions of its K3 decode op
 // (kernels/k3_gguf_ops.h) in the same order, so it is BITWISE that op on the same inputs (gate G1, tests/test_prefill_glue.py,
@@ -45,7 +45,9 @@
 typedef __attribute__((address_space(1))) const float GF;   // global (not flat) loads, as k3.hip
 typedef __attribute__((address_space(1))) float GW;         // global stores, as k3_gguf_ops.h
 typedef __attribute__((address_space(1))) const uint32_t GU32;
+#ifndef GLUE_NI
 #define GLUE_NI 10                                           // n_embd 2560 = GLUE_NI x 256 threads
+#endif                                                       // (prefill_glue_q35.hip: 8, qwen35moe's n_embd 2048)
 
 // ---- helpers, copied from kernels/k3_gguf_ops.h (same code, so the same instructions and bits) ----------------------
 template <bool MAX>
@@ -486,6 +488,66 @@ extern "C" __global__ void __launch_bounds__(256) NAME(const uint32_t * W2, cons
         int xd, float * out, int N, int T, int ldo, int rpb) { bf16_mv_body<NI, TT, R>(W2, X, xscl, xw, xd, out, N, T, ldo, rpb); }
 PF_BF16_MV(pf_bf16_mv_n5, 5, 8, 4)      // K 2560: x for 8 tokens in 80 VGPRs, 4 rows per round
 PF_BF16_MV(pf_bf16_mv_n20, 20, 2, 2)    // K 10240: x for 2 tokens in 80 VGPRs, 2 rows per round
+#ifdef PF_Q35
+PF_BF16_MV(pf_bf16_mv_n4, 4, 8, 4)      // K 2048 (qwen35moe's ssm alpha / beta, GSQ): x for 8 tokens in 64 VGPRs, 4 rows per round
+
+// ---- pf_f32_mv: OP_F32_MV over T tokens (qwen35moe's F32 router logits and shared-expert gate) ----------------------
+// out[t * ldo + r] = W[r] . x[t], W fp32 [N, K] row-major, x fp32 [T, K], K = 128 NW. Each element in OP_F32_MV's order:
+// lane l sums the float4s at k = 4 l + 128 m, m ascending, from acc0() with the decode op's own expression
+// (acc += w.x * x.x + w.y * x.y + w.z * x.z + w.w * x.w; its K3_F32_U batching only groups the loads), then the wave sum
+// (the DPP butterfly: the pairs of warp_reduce_sum<32>'s xor 16 .. 1). Grid (ceil(T / TT), ceil(N / 8)): wave v takes
+// row 8 blockIdx.y + v, keeps its NW float4s of W in registers and walks the workgroup's TT tokens.
+typedef __attribute__((address_space(1))) const float4 GF4;
+template <int NW, int TT>
+__device__ __forceinline__ void f32_mv_body(const float * W, const float * X, float * out, int N, int T, int ldo) {
+    const int v = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int row = blockIdx.y * 8 + v, t0 = blockIdx.x * TT, nt = min(TT, T - t0);
+    if (row >= N || nt <= 0) return;                                   // (wave-uniform; no barrier below)
+    constexpr int K = 128 * NW;
+    float4 wv[NW];
+#pragma unroll
+    for (int m = 0; m < NW; m++) wv[m] = *(GF4 *)(W + (size_t)row * K + 4 * lane + 128 * m);
+    for (int j = 0; j < nt; j++) {
+        const float * x = X + (size_t)(t0 + j) * K;
+        float4 xv[NW];
+#pragma unroll
+        for (int m = 0; m < NW; m++) xv[m] = *(GF4 *)(x + 4 * lane + 128 * m);
+        float acc = acc0();
+#pragma unroll
+        for (int m = 0; m < NW; m++) acc += wv[m].x * xv[m].x + wv[m].y * xv[m].y + wv[m].z * xv[m].z + wv[m].w * xv[m].w;
+        acc = wsum(acc);
+        if (lane == 0) out[(size_t)(t0 + j) * ldo + row] = acc;
+    }
+}
+extern "C" __global__ void __launch_bounds__(256) pf_f32_mv_k2048(const float * W, const float * X, float * out, int N, int T, int ldo) {
+    f32_mv_body<16, 16>(W, X, out, N, T, ldo);
+}
+#endif
+#ifdef PF_Q35D
+// pf_f32_mv_k5120: the same element order at K 5120 (qwen35 dense: AREX-2's F32 ssm alpha / beta [48, 5120]); W's 40 float4s
+// per lane stay in registers, x is loaded one float4 at a time inside the sum (the loads' order is not the sums': the same bits)
+typedef __attribute__((address_space(1))) const float4 GF4D;
+extern "C" __global__ void __launch_bounds__(256) pf_f32_mv_k5120(const float * W, const float * X, float * out, int N, int T, int ldo) {
+    constexpr int NW = 40, TT = 16, K = 128 * NW;
+    const int v = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int row = blockIdx.y * 8 + v, t0 = blockIdx.x * TT, nt = min(TT, T - t0);
+    if (row >= N || nt <= 0) return;
+    float4 wv[NW];
+#pragma unroll
+    for (int m = 0; m < NW; m++) wv[m] = *(GF4D *)(W + (size_t)row * K + 4 * lane + 128 * m);
+    for (int j = 0; j < nt; j++) {
+        const float * x = X + (size_t)(t0 + j) * K;
+        float acc = acc0();
+#pragma unroll
+        for (int m = 0; m < NW; m++) {
+            const float4 xv = *(GF4D *)(x + 4 * lane + 128 * m);
+            acc += wv[m].x * xv.x + wv[m].y * xv.y + wv[m].z * xv.z + wv[m].w * xv.w;
+        }
+        acc = wsum(acc);
+        if (lane == 0) out[(size_t)(t0 + j) * ldo + row] = acc;
+    }
+}
+#endif
 
 // ---- pf_silu_bf16 / pf_to_bf16: the WMMA GEMMs' bf16 A operands ----------------------------------------------------
 // y[t, j] = bf16(silu(fma(rs, x[t, j], 0))) for t < T (x row stride ldx), 0 for T <= t < Tpad; y [Tpad, K]

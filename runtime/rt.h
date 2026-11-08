@@ -43,7 +43,7 @@ struct Arena {
     void reset(size_t to = 0) { used = to; }
 };
 
-// tensors from an .idx/.bin pair written by tools/dump_golden.py (`name dtype d0,d1,.. offset nbytes`)
+// tensors from an .idx/.bin pair written by training/tools/dump_golden.py (`name dtype d0,d1,.. offset nbytes`)
 struct TensorFile {
     std::map<std::string, Tensor> t;
     void load(const std::string & stem, Arena & arena);       // uploads every tensor
@@ -69,7 +69,7 @@ struct Args {
 
 void launch(hipFunction_t f, dim3 grid, dim3 block, Args & a, hipStream_t s, unsigned shmem = 0);
 
-// Triton kernels exported by tools/capture_triton.py (build/triton/manifest.txt): the exact code objects and
+// Triton kernels exported by training/tools/capture_triton.py (build/triton/manifest.txt): the exact code objects and
 // parameter lists a PyTorch forward launched. call() passes named pointers from `ptrs`, the recorded scalars, then
 // Triton's two trailing scratch pointers (null: no captured kernel uses scratch).
 struct TritonLaunch {

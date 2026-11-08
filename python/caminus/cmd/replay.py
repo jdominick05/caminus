@@ -1,4 +1,4 @@
-"""Replay a flight-recorder bundle offline (M7, the flight recorder; docs/agentic/spec-metrics.md section 11): rebuild the
+"""Replay a flight-recorder bundle offline (M7, the flight recorder; docs/specs/spec-metrics.md section 11): rebuild the
 serving engine, put it in the request's start state, rerun the turn through the server's own session code with the bundle's
 sampling parameters and Philox seed, and diff the generated tokens and the first logits row against the bundle. Bitwise
 expected; anything else is a finding.
@@ -50,7 +50,7 @@ def main(argv=None):
     ap.add_argument('--json', default=None)
     ap.add_argument('--force', action='store_true')
     a = ap.parse_args(argv)
-    from ..torchcheck import refusal
+    from ..device.torchcheck import refusal
     msg = refusal('caminus replay')
     if msg:
         print(msg, file=sys.stderr)
@@ -63,17 +63,20 @@ def main(argv=None):
     rq, eng, ref = B['request'], B.get('engine'), B.get('cache_ref') or {}
     if eng is None:
         raise SystemExit('replay: the bundle has no engine part (saved by a session without an engine: MockSession)')
+    from .. import arch as _arch
     from ..serve import cli
     from ..serve.k3_session import K3Session
     from ..serve.generate import TokenText, run_generation
     from ..serve.sampler import Sampler, SamplingParams
     from ..serve.stats import EngineStats
     from ..serve.tokenizer import QwenTokenizer
-    from .. import promptcache as PC
+    from ..cache import prompt as PC
     import torch
-    for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
-    assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'
     model = a.model or B.get('model_path') or cli.DEFAULT_GGUF
+    A = _arch.of(model)
+    if A.cards == 2:                            # (the two-card engines: the Coder, Qwen3-Coder-Next)
+        for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
+        assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'
     cdir = os.path.abspath(a.cache_dir or os.path.join(bdir, f'replay-{os.getpid()}'))
     for bad in (os.path.realpath(PC.DEFAULT_DIR),):
         if os.path.realpath(cdir) == bad or os.path.realpath(cdir).startswith(bad + os.sep):
@@ -87,22 +90,12 @@ def main(argv=None):
             try: os.link(src, linked)
             except OSError: shutil.copyfile(src, linked); os.chmod(linked, 0o600)
     t0 = time.time()
-    # the serving configuration (caminus serve's build order), the cache in the scratch directory (no retention eviction)
-    from .. import flashnext  # noqa: F401
-    from gguf import GGUFReader
-    from .. import dflash_k3 as dk, prefill as P
-    from ..flashnext_tp import FlashNextTP
+    # the serving configuration: caminus serve's own build (the architecture registry's Arch.build: the bundle's architecture
+    # picks the engine, its prompt path and drafter), the cache in the scratch directory (no retention eviction)
     T = int(eng.get('T', 4))
-    if eng.get('drafter', True):
-        dpath = a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER
-        rd = GGUFReader(dpath, 'r'); f = {x.name: x for x in rd.fields.values()}
-        layers = [int(v) for v in f['dflash.target_layers'].contents()]; del rd, f
-        m = FlashNextTP(model, ntok=T, max_ctx=int(eng['max_ctx']), feature_layers=layers, feature_card=0,
-                        vram_drafters=(('dflash', dk.geom(dpath), None),), vram_prefill=2048)
-        df = dk.DFlashK3(m, dpath); dr = dk.DFlashK3Drafter(df)
-    else:
-        m = FlashNextTP(model, ntok=T, max_ctx=int(eng['max_ctx']), vram_prefill=2048); dr = None
-    pf = P.Prefill(m, chunk=2048)
+    opt = dict(model=model, max_ctx=int(eng['max_ctx']), chunk=2048, no_drafter=not eng.get('drafter', True),
+               drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER)
+    m, pf, df, dr = A.build(opt, log=print, T=T)
     for d in m.devs: torch.cuda.synchronize(d)
     pc = PC.PromptCache(m, pf, dr, cache_dir=cdir, retention_days=1e6)
     out = dict(bundle=bdir, request_id=B.get('request_id'), reason=B.get('reason'), source=ref.get('source'), state=ref.get('state'))
@@ -116,15 +109,13 @@ def main(argv=None):
             if not a.force:
                 print('RESULT KEY MISMATCH'); return 2
         stats = EngineStats()
-        sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=None)
+        tok = QwenTokenizer.from_gguf(model)      # (the session's end ids are the model's own, as caminus serve's)
+        sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=None, eos_ids=cli.eos_ids_of(tok))
         ids = [int(t) for t in rq['prompt']]
         pe = ref.get('prompt_end')
         if linked is not None:
             r = pc.load_entry(os.path.basename(linked), at=pe)
             out['loaded'] = dict(st=r['st'], cached=r['cached'])
-            sess.toks, sess.st = list(pc.log), dict(pc.st)
-            sess._mark()
-        tok = QwenTokenizer.from_gguf(model)
         prm = SamplingParams(**rq['params'])
         orig = [int(t) for t in rq['generated']]
         max_new = int(rq['max_new']) if rq.get('finish') in ('eos', 'stop', 'length') else len(orig)

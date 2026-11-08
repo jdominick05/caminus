@@ -5,7 +5,7 @@ Filter chain, in llama.cpp's default order (common/common.h `samplers`; src/llam
     -> top_k -> top_p -> min_p -> temperature -> draw
 Temperature comes last, so top_p and min_p see untempered logits, as in llama.cpp. Each filter keeps llama.cpp's
 float32 arithmetic and the order of its sums (sequential in the current candidate order), so the surviving set and
-its probabilities equal llama.cpp's (gate: tests/serve/test_sampler.py against tools/sampler_ref.cpp).
+its probabilities equal llama.cpp's (gate: tests/serve/test_sampler.py against tools/reference/sampler_ref.cpp).
 Not ported: DRY, top-n-sigma, typical-p, XTC, dynamic temperature, mirostat, logit bias, grammar (all off in the
 harness configurations).
 
@@ -385,7 +385,7 @@ class Sampler:
 
 
 def sampled_generate(m, sampler, prompt, n_new, draft=None, stop_ids=(), stats=None, q_draft=False):
-    """caminus.spec.generate with sampling. m: an engine with ntok = T and verify(seq, i0, commit) -> [T, V] rows
+    """caminus.decode.spec.generate with sampling. m: an engine with ntok = T and verify(seq, i0, commit) -> [T, V] rows
     (row j predicts the token after seq[i0 + j]). draft(tokens, k) -> k tokens (or, with q_draft, (tokens, q) where
     q[j] = (ids, probs) is the drafter's distribution for draft j). Returns (tokens, commit): prompt + generated tokens,
     and the lazy commit that leaves the engine state at every token but the last (as a plain run stopped there).

@@ -11,7 +11,7 @@ A Job carries the prompt ids and the generation settings in, and an event queue 
 A job cancelled before it starts gets ('done', result with finish 'cancel') without touching the engine.
 The HTTP thread sets job.cancel on a client disconnect; the worker sees it at the next pass boundary.
 
-Metrics (docs/agentic/spec-metrics.md): with `stats` (stats.EngineStats) the worker reports each job's begin / end
+Metrics (docs/specs/spec-metrics.md): with `stats` (stats.EngineStats) the worker reports each job's begin / end
 (or error), counts the generated ids as reasoning (up to and including </think> when the request thinks) or answer,
 and keeps the content class of the text being generated (agentmon.ContentClass) for DFlash's per-class acceptance.
 Job carries what /slots shows: id_task (a process-wide counter), n_predict (the client's requested max tokens, -1
@@ -103,7 +103,7 @@ class EngineWorker:
         self.recent = collections.OrderedDict()
         self.model_path = None
         self.bundles = []               # (request id, reason, path or None, note) of every bundle tried
-        self.idle_s = getattr(session, 'idle_s', None) if idle_s == 'session' else idle_s
+        self.idle_s = session.idle_s if idle_s == 'session' else idle_s
         self._idle_due = False
         self.tok = tokenizer
         self.max_queue = max_queue
@@ -162,7 +162,7 @@ class EngineWorker:
 
     def _loop(self):
         while True:
-            idle = getattr(self.sess, 'idle', None) if self.idle_s else None
+            idle = self.sess.idle if self.idle_s else None
             if idle is not None and self._idle_due:
                 try:
                     job = self.q.get(timeout=self.idle_s)
@@ -208,10 +208,7 @@ class EngineWorker:
             return
         self.stats['jobs'] += 1
         try:
-            if getattr(self.sess, 'wants_max_new', False):
-                cached = self.sess.plan(job.prompt_ids, max_new=job.max_new)
-            else:
-                cached = self.sess.plan(job.prompt_ids)
+            cached = self.sess.plan(job.prompt_ids, max_new=job.max_new)
             job.events.put(('start', {'queue_ms': (job.t_start - job.t_submit) * 1e3,
                                       'prompt_n': len(job.prompt_ids), 'cached_n': cached}))
             tt = TokenText(self.tok, job.stops, self.sess.eos_ids)
@@ -314,9 +311,8 @@ class EngineWorker:
 
     # ------------------------------------------------------------------------------------------------ the flight recorder
     def _marks(self):
-        rm = getattr(self.sess, 'request_marks', None)
         try:
-            return rm() if rm is not None else {}
+            return self.sess.request_marks()
         except Exception:   # noqa: BLE001
             return {}
 
@@ -329,8 +325,7 @@ class EngineWorker:
         """the request's record for a bundle (kept for the last RECENT requests)"""
         import numpy as np
         s = self.sess
-        bs = getattr(s, 'bundle_state', None)
-        st = dict(bs(job.prompt_ids)) if bs is not None else {}
+        st = dict(s.bundle_state(job.prompt_ids))
         sgen = st.pop('generated', None) or []
         gen = list(res.gen_ids) if res is not None else list(sgen)
         rec = dict(request_id=job.request_id, prompt=np.asarray(job.prompt_ids, dtype=np.int32), generated=[int(t) for t in gen],
@@ -391,11 +386,7 @@ class EngineWorker:
         meta = {k: v for k, v in rec.items() if k not in ('prompt', 'first', 'pe', 'source', 'cached', 'prompt_sha')}
         meta = dict(request_id=rec['request_id'], reason=reason, model_path=self.model_path,
                     request=dict(meta, prompt=[int(t) for t in rec['prompt']]))
-        exp = getattr(self.sess, 'export_bundle', None)
-        if exp is not None:
-            meta.update(exp(path, rec, fl))
-        else:
-            meta['cache_ref'] = dict(source=rec.get('source'), state=None, note='this session keeps no engine state (MockSession)')
+        meta.update(self.sess.export_bundle(path, rec, fl))
         out = fl.finish_bundle(path, meta, first_logits=rec.get('first'))
         self.bundles.append((rec['request_id'], reason, path, (out.get('cache_ref') or {}).get('note')))
         return path, out

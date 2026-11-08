@@ -18,7 +18,7 @@ TOKENS = os.path.join(D281_SHORT, 'e2e_code_decode', 'tokens.txt')
 # set: MANIFEST.md): the Coder's trunk / QSA dumps and REAP-308's
 REF_CODER = os.path.join(ARTIFACTS, 'm1', 's3', 'ref')
 REF_REAP = os.path.join(ARTIFACTS, 'm1', 's6', 'verify', 'ref')
-LC = os.path.join(ARTIFACTS, 'qsa', 'lc')   # the long-context probes and llama.cpp references (tools/lc_probes.py, gg_golden --lc)
+LC = os.path.join(ARTIFACTS, 'qsa', 'lc')   # the long-context probes and llama.cpp references (tools/eval/lc_probes.py, gg_golden --lc)
 
 
 def model_path(name):

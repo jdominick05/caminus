@@ -1,0 +1,1 @@
+"""Device plumbing: the code-object loader (hip), where the code objects come from (kernels), the cards and guard lines (machine), VRAM budgets against those lines (capacity), the ROCm-torch check (torchcheck), the prefill launchers' shared buffer checks (bufcheck) and the WMMA GEMM both the prefill and the training stack use (gemm)."""

@@ -1,4 +1,4 @@
-// The batched prefill's tensor-parallel glue (docs/agentic/spec-prefill-cache.md M5 S5; host side python/caminus/prefill_tp.py):
+// The batched prefill's tensor-parallel glue (docs/specs/spec-prefill-cache.md M5 S5; host side python/caminus/prefill_tp.py):
 // the exchange's sum and the FFN glue between S2's quantized GEMMs, over a chunk of tokens with ordinary launches (not K3).
 // Each kernel computes an element with the expressions of the K3 decode op it stands for (kernels/k3_gguf_ops.h), in its
 // order, contraction off:

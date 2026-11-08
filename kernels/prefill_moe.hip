@@ -1,5 +1,5 @@
 // Batched prefill, the routed experts' grouped GEMMs of our own (project decision 11-03: prefill GEMM kernels of our own;
-// docs/agentic/spec-prefill-cache.md). Replaces the vendored MMQ's mul_mat_id for the MoE gate / up / down projections:
+// docs/specs/spec-prefill-cache.md). Replaces the vendored MMQ's mul_mat_id for the MoE gate / up / down projections:
 //
 //   k3_moe_group   (-DK3_MOE_GLUE) the grouping, ONE launch per layer and micro-chunk: the router's ids (clamped in range and
 //                  distinct per token by k3_mmq_ids_clamp first, on the same stream) -> expert_bounds, ids_dst (compact

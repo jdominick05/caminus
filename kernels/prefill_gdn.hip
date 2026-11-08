@@ -1,4 +1,4 @@
-// Batched prefill: the GDN (gated delta net) half of a layer over a chunk of T tokens (docs/agentic/spec-prefill-cache.md
+// Batched prefill: the GDN (gated delta net) half of a layer over a chunk of T tokens (docs/specs/spec-prefill-cache.md
 // M5 S4; host side python/caminus/prefill_gdn.py). Ordinary launches (not K3: no tape, no persistent kernel). Every kernel
 // computes each output element with the expressions of its K3 decode op (kernels/k3_gguf_ops.h) in the same order, so it
 // is BITWISE that op on the same inputs (gate G1, tests/test_prefill_gdn.py, against the K3 op itself run per token
@@ -397,7 +397,11 @@ extern "C" __global__ void __launch_bounds__(256) pf_gdn_norm(const float * o, c
     const float scale = rsqrtf(tot / K + eps);
     for (int i = tid; i < K; i += 256) {
         const float nrm = (scale * orow[i]) * w[i];
+#ifdef PF_GDN_SILU   // qwen35moe / qwen3next (K3_GDN_SILU): nrm * gg_silu(z), gg_silu's expression (k3_gguf_ops.h)
+        yr[i] = nrm * (zr[i] / (1.0f + expf(-zr[i])));
+#else
         const float sgm = 1.0f / (1.0f + expf(-zr[i]));
         yr[i] = nrm * sgm;
+#endif
     }
 }

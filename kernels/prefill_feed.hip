@@ -1,4 +1,4 @@
-// Prefill host feed, device half (python/caminus/prefill_feed.py; docs/agentic/spec-prefill-cache.md S1 "Host feed"):
+// Prefill host feed, device half (python/caminus/prefill_feed.py; docs/specs/spec-prefill-cache.md S1 "Host feed"):
 // the raw GGUF rows of a whole chunk are uploaded (PLE: the chunk's distinct rows, 90 B of IQ4_NL each; the token embedding:
 // only the token ids, the IQ4_XS table lives on the card) and dequantized here, instead of per position on the host.
 // Bitwise the host's dequantization (gguf-py quants.py / caminus.flashnext.dequantize_rows): every value is the same

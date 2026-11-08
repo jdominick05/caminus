@@ -1,4 +1,4 @@
-// The batched prefill's attention core (docs/agentic/spec-prefill-cache.md M5 S6, milestone A: dense attention up to
+// The batched prefill's attention core (docs/specs/spec-prefill-cache.md M5 S6, milestone A: dense attention up to
 // capacity.QSA_EXACT = 2051 positions; host side python/caminus/prefill_attn.py): the per-token K3 decode ops of an
 // attention layer's core run over a chunk of rows with ordinary launches (not K3). Each kernel computes every element
 // with the expressions of its K3 decode op (kernels/k3_gguf_ops.h, kernels/k3_attn_split.h) in the same order, so it is
@@ -44,8 +44,10 @@
 
 #define ATTN_SS 32                    // list positions per split (= kernels/k3_attn_split.h, caminus.k3.ATTN_SS)
 #define ATTN_CPR 2                    // cells per wave per scoring round (k3_attn_split.h's default; the Coder's modules)
+#ifndef ATTN_G                       // (prefill_attn_q35.hip: 8 and 8, qwen35moe's 16 q / 2 kv heads = k3_gguf_q35*)
 #define ATTN_VH 12                    // query heads per V pass
 #define ATTN_G 12                     // query heads per kv head
+#endif
 #define ATTN_D 256                    // head dim
 #define ATTN_RS 260                   // floats per partial record: m, l, 0, 0, acc[256]
 #define QSA_ROWB 136                  // one 128-value indexer row: 4 x block_q8_0 (= kernels/k3_qsa_ops.h)

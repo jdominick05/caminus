@@ -137,6 +137,21 @@ MODEL_PROFILES = {
     'k3-coder-nothink': {'enable_thinking': False, 'reasoning_effort': 'medium'},
 }
 DEFAULT_MODEL = 'k3-coder'
+
+
+def set_model_alias(alias, thinking=True):
+    """the model ids of a server whose model is not the Coder (caminus serve --model-alias, the one-card engines): alias
+    (thinking on) and alias-nothink (off) replace the k3-coder profiles in place (the server lists MODEL_PROFILES, imported
+    by name), and alias becomes the default for unknown ids. The k3-coder ids (and their reasoning_effort profiles: the
+    Coder's template has the effort line, Qwen3.6's has none) stay only for the Coder. thinking=False: a model whose
+    template has no think block (Qwen3-Coder-Next): both ids render and parse with thinking off (the reply is content; a
+    thinking parse would take all of it as reasoning, since no '</think>' ever comes)"""
+    global DEFAULT_MODEL
+    if alias == 'k3-coder': return
+    MODEL_PROFILES.clear()
+    MODEL_PROFILES.update({alias: {'enable_thinking': bool(thinking), 'reasoning_effort': 'medium'},
+                           f'{alias}-nothink': {'enable_thinking': False, 'reasoning_effort': 'medium'}})
+    DEFAULT_MODEL = alias
 CLIENT_KWARGS = ('enable_thinking', 'reasoning_effort', 'preserve_thinking')
 
 
@@ -261,7 +276,7 @@ class PromptBuilder:
                                     **(kwargs or {}))
 
     def build(self, messages, tools=None, model=DEFAULT_MODEL, client_kwargs=None, add_generation_prompt=True, marks=False):
-        """marks: also give prompt.marks, the prompt cache's message boundaries (caminus.promptcache, docs/agentic/
+        """marks: also give prompt.marks, the prompt cache's message boundaries (caminus.cache.prompt, docs/specs/
         spec-cache-api.md) as token positions: 'root' = the end of the system block (system text + tools: what a sub-agent or a
         new conversation with the same setup shares), 'user' = the start of the last user turn (a user message, or the user
         turn that carries the trailing tool results). Found in the marked render (literal special-token text inside content
@@ -271,7 +286,7 @@ class PromptBuilder:
         profile, kw = resolve_template_kwargs(model, client_kwargs, self.allow_client_effort)
         marked = self.render_marked(messages, tools, kw, add_generation_prompt)
         ids = self.tok.encode_prompt(marked)
-        if self.prepend_bos:
+        if self.prepend_bos and self.tok.bos_id is not None:     # (no BOS in the vocabulary: none, as llama.cpp tokenizes it)
             ids = [self.tok.bos_id] + ids
         mk = self.marks_of(marked, ids) if marks else None
         return Prompt(unmark(marked), ids, profile, kw, mk)

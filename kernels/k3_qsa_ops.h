@@ -1,4 +1,4 @@
-// QSA indexer ops for the K3 engine (docs/agentic/spec-qsa.md sections 1 and 3, steps S2-S4): the indexer cache append with
+// QSA indexer ops for the K3 engine (docs/specs/spec-qsa.md sections 1 and 3, steps S2-S4): the indexer cache append with
 // pooling, the pool scores and the top-512 pool selection of qwen4exp's QSA layers. Included by kernels/k3_gguf_ops.h only
 // when K3_QSA is defined: kernels/k3_gguf_gsq_qsa.hip / _qsa_mt.hip, the GSQ-RCO Coder's one- / multi-token trunk modules
 // plus these ops (separate code objects: inlined into k3_gguf_gsq* they cost the trunk's tapes ~0.7 ms per token). Graph reference: ignite-llama src/models/qwen4exp.cpp build_qsa_sel and

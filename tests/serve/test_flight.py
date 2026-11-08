@@ -5,7 +5,7 @@
   * the server: one JSONL line per generation request (errors and client-gone included) with the plan's fields and no request
     text; replay bundles on demand (POST /caminus/flight/bundle, the most recent request or one of the last 8) and
     automatically on a reasoning loop, a tool-call parse failure and retry exhaustion (before the session reset).
-The GPU half (the start state saved, tools/replay.py bitwise) is tests/test_serve_k3.py flight + tools/replay.py.
+The GPU half (the start state saved, tools/replay.py bitwise) is tests/e2e/test_serve_k3.py flight + tools/replay.py.
 Run:  HIP_VISIBLE_DEVICES= python -I tests/serve/run_all.py"""
 import json
 import os
@@ -112,8 +112,8 @@ class TestRecorder(unittest.TestCase):
 class _StateSession(MockSession):
     """MockSession with K3Session's bundle hooks (bundle_state / request_marks / export_bundle), so the worker's record and
     bundle paths run as on the real engine"""
-    def prefill(self, ids, cancel=None, marks=None):
-        r = super().prefill(ids, cancel, marks)
+    def prefill(self, ids, cancel=None, marks=None, max_new=None):
+        r = super().prefill(ids, cancel, marks, max_new)
         self._prompt, self._first = list(ids), (None if r is None else list(r[:8]))
         return r
 

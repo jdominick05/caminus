@@ -280,9 +280,7 @@ class TestOverhead(unittest.TestCase):
                 d = (clock() - t_pass) * 1e3        # the drafter's ms
                 t0 = clock()                        # sample_pass: the K3 / sampler split
                 t1 = clock()
-                st.pass_k3_ms = (t1 - t0) * 1e3
-                st.pass_sampler_ms = (clock() - t1) * 1e3
-                st.pass_cards = ((16.0, 15.0), (0.8, 1.7), 7864320)
+                st.pass_split((t1 - t0) * 1e3, (clock() - t1) * 1e3, ((16.0, 15.0), (0.8, 1.7), 7864320))
                 st.tokens(0, 3)                     # worker: ids by kind, the content class
                 st.cls = cc.feed(' x = y + 1\n')
                 st.pass_done(t_pass, d, 1, 3, 2, 3, cls)
@@ -367,7 +365,7 @@ class TestM7Ops(unittest.TestCase):
                 st.begin(job, 4096)
                 st.prefill_done(U_PF)
                 st.first_token()
-                st.pass_cards = ((16.0, 15.0), None, 7864320)
+                st.pass_split(0.0, 0.0, ((16.0, 15.0), None, 7864320))
                 st.pass_done(st.clock(), 0.5, 1, 3, 2, 3, 'prose')
                 st.end(job, U_RES)
             stop.set()
@@ -423,7 +421,7 @@ class TestM7Ops(unittest.TestCase):
         self.assertIsNone(st.spec_view()['plain_source'])
         st.plain_estimate(12.5)
         self.assertEqual((st.spec_view()['plain_source'], st.spec_view()['plain_ms_per_token']), ('estimate', 12.5))
-        st.pass_cards = ((16.0, 15.5), None, 7864320)
+        st.pass_split(0.0, 0.0, ((16.0, 15.5), None, 7864320))
         st.pass_done(st.clock(), 1.0, 1, 3, 1, 2)
         self.assertEqual((st.card_pass[0].count, st.card_pass[1].count, st.card_wait[0].count), (1, 1, 0))
         self.assertEqual((st.target_pass.window(), st.link_bytes), ([16.0], 7864320))
@@ -451,11 +449,11 @@ class TestM7Ops(unittest.TestCase):
         self.assertIn('caminus:pgmigrate_total 100', text)
         self.assertIn('caminus:pgmigrate_all_total 150', text)
         # the real session's refusal kinds (caminus.serve.k3_session.refusal_kind; CPU: nothing is launched)
-        from caminus.capacity import CapacityError
-        from caminus.k3 import ContextBoundsError
-        from caminus.prefill import PrefillRefused
-        from caminus.prefill_ops import RoutingError
-        from caminus.promptcache import CacheRefused
+        from caminus.device.capacity import CapacityError
+        from caminus.engine.k3 import ContextBoundsError
+        from caminus.prefill.coder import PrefillRefused
+        from caminus.prefill.glue import RoutingError
+        from caminus.cache.prompt import CacheRefused
         from caminus.serve.k3_session import refusal_kind
         self.assertEqual([refusal_kind(e) for e in (RoutingError('x'), PrefillRefused('x'), ContextBoundsError('x'), CapacityError('x'),
                                                     CacheRefused('x'), RuntimeError('a wait gave up'), ValueError('x'))],

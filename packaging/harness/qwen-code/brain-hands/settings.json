@@ -1,0 +1,44 @@
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "arex-2",
+        "name": "AREX-2 brain (thinking; dense 27B on the XTX, :8092)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8092/v1",
+        "generationConfig": { "timeout": 1800000, "contextWindowSize": 65000 }
+      },
+      {
+        "id": "arex-2-nothink",
+        "name": "AREX-2 brain (no thinking)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8092/v1",
+        "generationConfig": { "timeout": 1800000, "contextWindowSize": 65000 }
+      },
+      {
+        "id": "qwen3.6",
+        "name": "Qwen3.6 hands (thinking; MoE 35B-A3B on the XT, :8093)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8093/v1",
+        "generationConfig": { "timeout": 900000, "contextWindowSize": 131000 }
+      },
+      {
+        "id": "qwen3.6-nothink",
+        "name": "Qwen3.6 hands (no thinking)",
+        "envKey": "CAMINUS_API_KEY",
+        "baseUrl": "http://127.0.0.1:8093/v1",
+        "generationConfig": { "timeout": 900000, "contextWindowSize": 131000 }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "arex-2" },
+  "fastModel": "qwen3.6-nothink",
+  "agents": {
+    "builtin": { "exploreModel": "qwen3.6" },
+    "modelGrades": { "hands": "qwen3.6", "hands-quick": "qwen3.6-nothink" },
+    "allowedGrades": ["hands", "hands-quick"],
+    "maxParallelAgentsByModel": { "qwen3.6": 1, "qwen3.6-nothink": 1 }
+  },
+  "context": { "fileName": ["QWEN.md", "BRAIN.md"] }
+}

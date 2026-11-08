@@ -1,4 +1,4 @@
-// Batched prefill, quantized GEMMs (docs/agentic/spec-prefill-cache.md S2): llama.cpp's ggml-cuda MMQ, vendored in
+// Batched prefill, quantized GEMMs (docs/specs/spec-prefill-cache.md S2): llama.cpp's ggml-cuda MMQ, vendored in
 // kernels/ggml_mmq/ (MIT, tools/vendor_mmq.py; THIRD_PARTY.md), instantiated for the GSQ-RCO Coder's 10 GEMM formats on
 // gfx1100. Modules of their own: the K3 decode code objects include none of it (they stay byte-identical).
 // python/caminus/mmq.py launches these kernels (it replaces ggml's host launch code: J selection, grids, the q8_1
@@ -42,6 +42,7 @@
 // the J values of the RDNA3 config's fallback=false rows (mmq-config-rdna3.cuh): Q2_0 has 8, the other 9 formats 6
 #define K3_MMQ_JS(X, T) K3_MMQ_J_##T(X, T)
 #define K3_MMQ_J_GGML_TYPE_Q2_0(X, T) K3_MMQ_J8(X, T)
+#define K3_MMQ_J_GGML_TYPE_Q3_K(X, T) K3_MMQ_J6(X, T)     // (qwen35moe HauhauCS Q3_K_P: caminus.prefill35)
 #define K3_MMQ_J_GGML_TYPE_IQ2_S(X, T) K3_MMQ_J6(X, T)
 #define K3_MMQ_J_GGML_TYPE_IQ3_S(X, T) K3_MMQ_J6(X, T)
 #define K3_MMQ_J_GGML_TYPE_IQ3_XXS(X, T) K3_MMQ_J6(X, T)
@@ -106,7 +107,10 @@ K3_QUANT_INST(MMQ_Q8_1_DS_LAYOUT_D4, true)
 K3_QUANT_INST(MMQ_Q8_1_DS_LAYOUT_DS4, false)
 K3_QUANT_INST(MMQ_Q8_1_DS_LAYOUT_DS4, true)
 
-template __global__ void mm_ids_helper<10>(const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1,
+#ifndef K3_MMQ_IDS_K                 // experts per token of mm_ids_helper's instance: the Coder's 10 (build/prefill_mmq_glue);
+#define K3_MMQ_IDS_K 10              // build/prefill_mmq_glue8: 8 (qwen35moe, -DK3_MMQ_IDS_K=8, caminus.prefill35)
+#endif
+template __global__ void mm_ids_helper<K3_MMQ_IDS_K>(const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1,
     int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds, const int n_tokens, const int n_expert_used_var,
     const int nchannels_y, const int si1, const int sis1, const bool write_inverse);
 

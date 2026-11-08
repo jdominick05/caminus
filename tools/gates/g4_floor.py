@@ -1,4 +1,4 @@
-"""The G4 floor (docs/agentic/spec-prefill-cache.md section 3, G4): llama.cpp's OWN prefill-then-decode against its own
+"""The G4 floor (docs/specs/spec-prefill-cache.md section 3, G4): llama.cpp's OWN prefill-then-decode against its own
 one-token decode, on the same positions, at a given n_ubatch. The end-to-end gate S6 runs is our prefill(N) then K3
 decode against llama.cpp's one-token decode; this measures what llama.cpp itself scores on that comparison, so the bar
 is llama.cpp's own floor, not zero (MMQ never equals the decode matvec bitwise: spec S3 note).
@@ -11,6 +11,8 @@ is llama.cpp's own floor, not zero (MMQ never equals the decode matvec bitwise: 
   python -I tools/gates/g4_floor.py cmp OUT [--json F]  (CPU only)
   python -I tools/gates/g4_floor.py depth-cmp OUT [--json F]  (CPU only)
   python -I tools/gates/g4_floor.py pool OUT.json --ref LABEL=BIN ... --pd LABEL=BIN ... [--expect REF:PD=MEAN ...]
+  python -I tools/gates/g4_floor.py pd-jobs OUT --refs DIR [--p0 128] [--ub 512]   (any model's e2e refs: the pd protocol)
+  python -I tools/gates/g4_floor.py pd-cmp OUT --refs DIR [--p0 128] [--json F]    (CPU only)
                                                        (CPU only: a floor pooled over run pairings, the sweep's method)
 
 Protocols (tokens: the D-281 short texts, refs/d281-short/e2e_{prose,code,shell}_decode/tokens.txt; the 2K contexts:
@@ -43,6 +45,11 @@ qsa/lc/d1792/ctx.ids and the first 2304 tokens of qsa/lc/d8192/ctx.ids):
          OUT.tsv) or a qsax job's DIR/logits.bin (rows in DIR/steps.tsv); every run must hold the same (position, token)
          rows (control). --expect REF:PD=MEAN: a pairing whose mean must reproduce an earlier computation (control, to 1e-9).
          Run to run (FNV / argmax rows differing) among the --ref runs and among the --pd runs is reported.
+  pd     (any model's e2e refs, e.g. $ARTIFACTS/q36/refs-gsq: the protocol of tests/prefill/test_q36_prefill.py e2e) per text of
+         DIR/e2e_{prose,code,shell}_decode (llama.cpp's stored one-token decode dumps): memory cleared, tokens [0, P0) as ONE
+         prompt pass, then P0 .. n - 1 one per llama_decode; those rows vs the stored dump's (control: the lc-mode one-token
+         decode == the dump by FNV-1a, every row), twice (r1 with logits, r2 hashes only: run to run). The floor over the
+         three texts: mean KLD, its 95 % bootstrap interval over positions, top-1; per text as well.
 Controls (cmp): the lc-mode one-token decode of the short texts == the stored dumps (FNV-1a of every row); the N = 1792
 run at ub 512 == qsa/lc/ref/tf1792_r1 (gg_golden --lc's tf job, the stored long-context reference, by FNV); the
 one-token references at ub 2048 == at ub 512 (FNV); the short protocol at ub 2048 == at ub 512 (FNV).
@@ -198,6 +205,59 @@ def cmd_cmp(a):
                 for k, v in R.items()}
         json.dump(slim, open(jout, 'w'), indent=1)
     print('RESULT ' + ('PASS' if not bad else f'FAIL ({len(bad)} controls: {bad})'))
+    return 0 if not bad else 1
+
+
+def pd_dump(refs, t):
+    GD = os.path.join(refs, f'e2e_{t}_decode')
+    idx = {int(r[0]): r for r in (l.rstrip('\n').split('\t') for l in open(os.path.join(GD, 'index.tsv'))) if r[2] == 'result_output'}
+    return GD, idx
+
+
+def cmd_pd_jobs(a):
+    out = a.pop(0); refs = opt(a, '--refs', None); p0 = opt(a, '--p0', 128, int); ub = opt(a, '--ub', 512, int)
+    if not refs: raise SystemExit('pd-jobs: --refs DIR (e2e_{prose,code,shell}_decode)')
+    os.makedirs(out, exist_ok=True); d = os.path.join(out, f'pd_ub{ub}'); os.makedirs(d, exist_ok=True)
+    J = ['nctx 512', f'ubatch {ub}']
+    for t in TEXTS:
+        tf = os.path.join(refs, f'e2e_{t}_decode', 'tokens.txt'); n = len(tokens(tf))
+        assert p0 < n <= 512, (t, p0, n)
+        J.append(f'tfx dec_{t} {tf} 0 {n} 1 0 {d}/dec_{t}')
+        J.append(f'tfx pd_{t}_r1 {tf} {p0} {n - p0} 512 1 {d}/pd_{t}_r1')   # (B 512 = n_batch at nctx 512: the prompt in one pass)
+        J.append(f'tfx pd_{t}_r2 {tf} {p0} {n - p0} 512 0 {d}/pd_{t}_r2')   # (B 512 = n_batch at nctx 512: the prompt in one pass)
+    jf = os.path.join(out, f'jobs_pd_ub{ub}.txt'); open(jf, 'w').write('\n'.join(J) + '\n')
+    print(jf)
+
+
+def cmd_pd_cmp(a):
+    out = a.pop(0); refs = opt(a, '--refs', None); p0 = opt(a, '--p0', 128, int); jout = opt(a, '--json', None)
+    if not refs: raise SystemExit('pd-cmp: --refs DIR')
+    ubs = sorted(int(n[5:]) for n in os.listdir(out) if n.startswith('pd_ub'))
+    R = dict(p0=p0, refs=refs, controls={}, floor={}); bad = []
+    for ub in ubs:
+        d = os.path.join(out, f'pd_ub{ub}'); parts = []
+        for t in TEXTS:
+            GD, idx = pd_dump(refs, t)
+            dec = tsv(os.path.join(d, f'dec_{t}.tsv')); pos = [int(r[0]) for r in dec]
+            rows = np.stack([np.fromfile(os.path.join(GD, idx[p][8]), dtype=np.float32) for p in pos])
+            nd = sum(1 for r, w in zip(dec, fnv_rows(rows.view(np.uint8))) if r[3] != w)
+            name = f'control: lc-mode one-token decode of {t} (ub {ub}) == the stored dump, {len(dec)} rows by FNV-1a'
+            R['controls'][name] = dict(ok=nd == 0, rows_differ=nd); print(('PASS ' if nd == 0 else 'FAIL ') + name + f' ({nd} rows differ)', flush=True)
+            if nd: bad.append(name)
+            r1, r2 = tsv(os.path.join(d, f'pd_{t}_r1.tsv')), tsv(os.path.join(d, f'pd_{t}_r2.tsv'))
+            pp = [int(r[0]) for r in r1]; assert pp == list(range(p0, p0 + len(r1))), (t, pp[:2])
+            nv = os.path.getsize(os.path.join(d, f'pd_{t}_r1.bin')) // (4 * len(r1))
+            oth = np.fromfile(os.path.join(d, f'pd_{t}_r1.bin'), dtype=np.float32).reshape(len(r1), nv)
+            ref = np.stack([np.fromfile(os.path.join(GD, idx[p][8]), dtype=np.float32) for p in pp])
+            s = stats(ref, oth, pp); s['r2_rows_differ'] = sum(1 for x, y in zip(r1, r2) if x[3] != y[3]); parts.append(s)
+            R['floor'][f'ub{ub}_{t}'] = s
+            print(f'  PD ' + line(f'ub {ub} {t} positions {p0} .. {pp[-1]}', s) + f'; run to run {s["r2_rows_differ"]} rows differ', flush=True)
+        s = merge(parts); s['boot95'] = boot(s['kld']); R['floor'][f'ub{ub}_ALL'] = s
+        print(f'  PD ' + line(f'ub {ub} ALL', s) + f'; 95 % bootstrap of the mean {s["boot95"][0]:.5f} .. {s["boot95"][1]:.5f}', flush=True)
+    if jout:
+        json.dump({k: ({kk: {x: y for x, y in vv.items() if x not in ('kld', 'agree')} for kk, vv in v.items()} if k == 'floor' else v)
+                   for k, v in R.items()}, open(jout, 'w'), indent=1)
+    print('RESULT ' + ('PASS' if not bad else f'FAIL ({len(bad)} controls)'))
     return 0 if not bad else 1
 
 
@@ -371,12 +431,14 @@ def cmd_pool(a):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ('jobs', 'cmp', 'depth-jobs', 'depth-cmp', 'pool'): print(__doc__); sys.exit(2)
+    if not a or a[0] not in ('jobs', 'cmp', 'depth-jobs', 'depth-cmp', 'pool', 'pd-jobs', 'pd-cmp'): print(__doc__); sys.exit(2)
     c = a.pop(0)
     if c == 'jobs': cmd_jobs(a); sys.exit(0)
     if c == 'depth-jobs': cmd_depth_jobs(a); sys.exit(0)
     if c == 'depth-cmp': sys.exit(cmd_depth_cmp(a))
     if c == 'pool': sys.exit(cmd_pool(a))
+    if c == 'pd-jobs': cmd_pd_jobs(a); sys.exit(0)
+    if c == 'pd-cmp': sys.exit(cmd_pd_cmp(a))
     sys.exit(cmd_cmp(a))
 
 

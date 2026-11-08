@@ -1,0 +1,1 @@
+"""Speculative decoding: the DFlash drafter inside K3 (dflash), the old torch DFlash drafter kept for A/B (dflash_torch), the MTP drafter and the per-content-class PolicyDrafter (mtp), the speculative loop and exact cache hits (spec), and chunked long fills, epoch-tagged snapshots and generation (longctx)."""

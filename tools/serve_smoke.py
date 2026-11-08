@@ -945,9 +945,9 @@ def stage_timing(a):
         return
     import numpy as np
     import torch
-    sys.path.insert(0, os.path.join(ROOT, 'python')); sys.path.insert(0, os.path.join(ROOT, 'tests'))
+    sys.path.insert(0, os.path.join(ROOT, 'python')); sys.path.insert(0, os.path.join(ROOT, 'tests', 'e2e')); sys.path.insert(0, os.path.join(ROOT, 'tests', 'cache'))
     import test_serve_k3 as TS
-    from caminus import longctx
+    from caminus.decode import longctx
     for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
     assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'
     pcd = os.path.join(a.scratch, 'timing', 'pc'); os.makedirs(pcd, mode=0o700, exist_ok=True)

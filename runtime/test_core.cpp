@@ -1,6 +1,6 @@
 // Milestone 4a, part 1: embedding, RMSNorm, the MLP path and the residual add against the PyTorch golden dump,
 // each block from its own golden inputs (a mismatch cannot spread into later blocks).
-//   build/test_core GOLDEN_DIR      (GOLDEN_DIR from tools/dump_golden.py)
+//   build/test_core GOLDEN_DIR      (GOLDEN_DIR from training/tools/dump_golden.py)
 // Expected: embedding, MLP (actq -> rocBLAS -> silu*u -> actq -> rocBLAS) and residual bit-exact; RMSNorm within
 // fp32 rounding (torch's fused kernel sums in its own order).
 #include "rt.h"

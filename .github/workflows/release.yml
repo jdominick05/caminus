@@ -1,4 +1,4 @@
-# The PyPI release (docs/RELEASING.md). The maintainer builds the wheel and sdist locally (tools/release_build.sh, the
+# The PyPI release (docs/dev/releasing.md). The maintainer builds the wheel and sdist locally (tools/release/release_build.sh, the
 # toolchain CI does not have) and attaches them with SHA256SUMS to a GitHub Release; publishing that Release (or running this
 # workflow by hand with its tag) verifies the attached files against the tag and then waits for the `pypi` environment's
 # required reviewer before anything is uploaded. Nothing here builds code objects.
@@ -66,7 +66,7 @@ jobs:
           ls -l "$RUNNER_TEMP/dist"
 
       - name: Verify (versions, SHA256SUMS, provenance == this commit, each code object == packaging/gfx1100-kernels.sha256)
-        run: python -I tools/verify_release.py "$RUNNER_TEMP/dist" --tag "$TAG"
+        run: python -I tools/release/verify_release.py "$RUNNER_TEMP/dist" --tag "$TAG"
 
       - name: twine check
         run: python -m twine check --strict "$RUNNER_TEMP"/dist/caminus-*

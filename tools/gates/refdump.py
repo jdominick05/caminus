@@ -27,7 +27,7 @@ def save(a):
     if os.path.exists(out_path): sys.exit(f'refdump save: {out_path} exists: refusing to overwrite (write new dumps to a fresh path)')
     if per_wgp: os.environ['K3_PER_WGP'] = str(per_wgp)
     torch = C.setup_torch()
-    from caminus.flashnext_tp import FlashNextTP
+    from caminus.engine.flashnext_tp import FlashNextTP
     toks = C.tokens(tok_path)
     print(f'model {model}; tokens {tok_path} ({len(toks)}); n {n}; per_wgp {per_wgp}; engine kwargs {kw}; K3_QSA_TAPE '
           f'{os.environ.get("K3_QSA_TAPE")}; compaction_proactiveness {C.proactiveness()}', flush=True)

@@ -1,7 +1,7 @@
 """`caminus serve`: the OpenAI / Anthropic server on the K3 engine (M7).
 
     caminus serve [--config FILE] [--model GGUF] [--drafter GGUF | --no-drafter]
-        [--host 127.0.0.1] [--port 8092] [--max-ctx 262144] [--chunk 2048] [--cache-dir ~/.cache/caminus/kv] [--no-disk-cache]
+        [--host 127.0.0.1] [--port 8092] [--max-ctx auto|N] [--chunk 2048] [--cache-dir ~/.cache/caminus/kv] [--no-disk-cache]
         [--log-dir DIR] [--no-stats] [--hw-root /] [--idle-park-s 28800] [--max-queue 16] [--model-alias k3-coder]
         [--drain-s 60] [--park-s 90] [--no-side-route]
 
@@ -11,13 +11,18 @@ tools/k3_serve.py is the mock launcher. Paths default through caminus.config: --
 DFlash GGUF, --cache-dir / --flight-dir under ~/.cache/caminus.) A config file (JSON, or TOML by its .toml suffix) gives the same keys with underscores (model, drafter, port,
 max_ctx, cache_dir, ...); flags override it.
 
+What a model is served with (its engine, prompt path, drafter, cards, max_ctx auto, model ids) is the architecture
+registry's (caminus.arch, by the GGUF's architecture); this module reads it once per start (arch.of) and never branches on
+the architecture itself.
+
 Order: the process names itself `caminus` (before any thread starts: llm-top finds it by /proc comm), the HTTP surface comes
 up answering 503 'Loading model' (llama-server's behaviour; /health too), then the engine is built in the serving order
-(FlashNextTP T = 4 at max_ctx with the DFlash features and the prefill counted in its VRAM check, the DFlash drafter, the
-batched prefill, the prompt cache last: its VRAM tier is sized from the headroom left), and the server switches to the
-K3Session. The model profiles are template.MODEL_PROFILES (`k3-coder`: medium reasoning, `k3-coder-nothink`: thinking off,
-`k3-coder-xhigh`, `k3-coder-low`). Every GPU process runs under tools/guard.sh (CLAUDE.md); tests use --port 0, a scratch
---cache-dir and a scratch --flight-dir.
+(Arch.build; the Coder: FlashNextTP T = 4 at max_ctx with the DFlash features and the prefill counted in its VRAM check, the
+DFlash drafter, the batched prefill), the prompt cache last (its VRAM tier is sized from the headroom left), and the server
+switches to the K3Session. The model ids: the Coder's are template.MODEL_PROFILES (`k3-coder`: medium reasoning,
+`k3-coder-nothink`: thinking off, `k3-coder-xhigh`, `k3-coder-low`); any other model answers to its own id
+(arch.default_alias: the catalog's, e.g. `qwen3.6`, `arex-2`) and that id's -nothink. Every GPU process runs under
+tools/guard.sh (CLAUDE.md); tests use --port 0, a scratch --cache-dir and a scratch --flight-dir.
 The per-request log is the flight recorder (--flight-dir: one JSONL line per request); the old access log (--log-dir DIR, one
 more JSONL row per request) is off by default (the lead's ruling of 11-05: two rows per request were redundant) and kept as an
 option. Side-slot routing is on (K3Session / PromptCache.route: short requests unrelated to the conversation, such as harness
@@ -35,6 +40,7 @@ import sys
 import threading
 import time
 
+from .. import arch as _arch
 from .. import config as _config
 
 # the model paths and cache directories from caminus.config (the environment, ~/.config/caminus/config.toml, then the XDG
@@ -42,9 +48,9 @@ from .. import config as _config
 DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, host='127.0.0.1',
-                port=8092, max_ctx=262144, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False,
+                port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False,
                 log_dir='', no_stats=False, no_side_route=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
-                model_alias='k3-coder', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
+                model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
                 flight_dir=_config.flight_dir(), flight_cap_gb=10.0)
 
 
@@ -66,15 +72,52 @@ def load_config(path):
     return out
 
 
-def parse(argv):
+def options_json():
+    """every option caminus serve accepts, for caminus panel's advanced layout (and scripts): flag, dest, type (int / float /
+    str / bool / ctx), the default caminus serve uses, the help text; read from the parser itself, so it never drifts"""
+    out = []
+    for act in parser()._actions:
+        if not act.option_strings or act.dest == 'help':
+            continue
+        flag = max(act.option_strings, key=len)
+        if act.nargs == 0:
+            typ = 'bool'
+        elif act.type is ctx_arg:
+            typ = 'ctx'
+        elif act.type in (int, float):
+            typ = act.type.__name__
+        else:
+            typ = 'str'
+        out.append(dict(flag=flag, dest=act.dest, type=typ, default=DEFAULTS.get(act.dest), help=act.help or '',
+                        choices=list(act.choices) if act.choices else None))
+    return out
+
+
+def ctx_arg(v):
+    """--max-ctx: a positive int or 'auto'"""
+    if str(v).strip().lower() == 'auto': return 'auto'
+    n = int(v)
+    if n < 1: raise argparse.ArgumentTypeError(f'max_ctx {v!r}: a positive int or auto')
+    return n
+
+
+def parser():
     ap = argparse.ArgumentParser(prog='caminus serve', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--config', default=None, help='a JSON / TOML file with the options below (flags override it)')
-    ap.add_argument('--model', help='the Coder GGUF (its first shard; default: caminus.config coder)')
-    ap.add_argument('--drafter', help='the DFlash GGUF (default: caminus.config dflash)')
+    ap.add_argument("--model", help="the GGUF (default: caminus.config coder); its architecture picks how it is served "
+                                    "(caminus.arch): the Coder (its first shard; two cards), a one-card model: qwen35moe "
+                                    "(Qwen3.6-35B-A3B) / qwen35 (dense: AREX-2), or qwen3next (Qwen3-Coder-Next; two cards). "
+                                    "The cards are picked from the host (caminus.device.host: the bigger card first for a "
+                                    "two-card model, the smallest that fits for a one-card one); HIP_VISIBLE_DEVICES limits the choice")
+    ap.add_argument('--drafter', help='the Coder\'s DFlash GGUF (default: caminus.config dflash)')
     ap.add_argument('--no-drafter', action='store_true', default=None, help='no DFlash drafter (plain decode)')
     ap.add_argument('--host')
     ap.add_argument('--port', type=int, help='0: any free port (printed)')
-    ap.add_argument('--max-ctx', type=int, help='the engine\'s KV positions (default 262,144: the model\'s cap)')
+    ap.add_argument('--max-ctx', type=ctx_arg, help='the engine\'s KV positions, or auto (the default): the largest context '
+                                                   'that fits the card(s) now with a working prompt cache (Arch.auto_max_ctx; the '
+                                                   'Coder: 262,144)')
+    ap.add_argument('--auto-cache-slots', type=int, help='max_ctx auto: VRAM checkpoint slots the context must leave room for '
+                                                         '(default 4; more: a smaller context, more cached restore points)')
     ap.add_argument('--chunk', type=int, help='the batched prefill\'s chunk (tokens)')
     ap.add_argument('--cache-dir', help='the prompt cache\'s disk tier (default ~/.cache/caminus/kv)')
     ap.add_argument('--no-disk-cache', action='store_true', default=None, help='no disk tier (VRAM checkpoints only)')
@@ -90,7 +133,8 @@ def parse(argv):
                                                      '(default 28800: 8 hours; 0 = never); only when it gained >= 4096 positions '
                                                      'since its last park. A clean shutdown parks it too (--park-s)')
     ap.add_argument('--max-queue', type=int)
-    ap.add_argument('--model-alias')
+    ap.add_argument('--model-alias', help="the model id the server answers to (default '': the model's own: the catalog's for a "
+                                          "catalog file, else its architecture's: k3-coder, qwen3.6, qwen3.5, qwen3-coder-next)")
     ap.add_argument('--ping', type=float)
     ap.add_argument('--incremental-tool-args', action='store_true', default=None)
     ap.add_argument('--flight-dir', help="the flight recorder: one JSONL line per request and replay bundles (default "
@@ -98,7 +142,11 @@ def parse(argv):
     ap.add_argument('--flight-cap-gb', type=float, help='the flight directory\'s size cap (default 10 GB; the oldest bundles go first)')
     ap.add_argument('--drain-s', type=float, help='shutdown: seconds to wait for the running job to stop (default 60)')
     ap.add_argument('--park-s', type=float, help='shutdown: seconds the park of the live conversation may take (default 90; 0 = no park)')
-    a = ap.parse_args(argv)
+    return ap
+
+
+def parse(argv):
+    a = parser().parse_args(argv)
     opt = dict(DEFAULTS)
     if a.config:
         opt.update(load_config(a.config))
@@ -120,72 +168,99 @@ class LoadingSession:
         raise RuntimeError(f'the engine is loading ({name})')
 
 
+def eos_ids_of(tok):
+    """the ids that end a generation, from the model's own vocabulary: its eos (<|im_end|>) and <|endoftext|> (the Coder and
+    Qwen3.6 / AREX-2: 248046, 248044; Qwen3-Coder-Next's 151,936-token vocabulary: 151645, 151643)"""
+    return tuple(dict.fromkeys(i for i in (tok.eos_id, tok.special.get('<|endoftext|>')) if i is not None and i >= 0))
+
+
 def build_engine(opt, stats, log=print):
     """the serving configuration in its order; returns (K3Session, parts dict)"""
     import torch
-    from .. import flashnext                     # noqa: F401  (puts gguf-py on the path)
-    from gguf import GGUFReader
-    from .. import dflash_k3 as dk, prefill as P, promptcache as PC
-    from ..flashnext_tp import FlashNextTP
+    from ..cache import prompt as PC
     from .k3_session import K3Session
+    pl = opt.get('placement')
+    if pl and torch.cuda.device_count() != len(pl['cards']):   # (HIP read HIP_VISIBLE_DEVICES before main() set it: the cards
+        raise RuntimeError(f'caminus serve: HIP sees {torch.cuda.device_count()} devices, the placement chose {len(pl["cards"])} '
+                           f'({", ".join(pl["names"])}): HIP started before the cards were chosen')   # would not be the ones chosen)
     t0 = time.time()
-    T = 4
-    if opt['no_drafter']:
-        m = FlashNextTP(opt['model'], ntok=T, max_ctx=int(opt['max_ctx']), vram_prefill=int(opt['chunk']))
-        df = dr = None
-    else:
-        rd = GGUFReader(opt['drafter'], 'r'); f = {x.name: x for x in rd.fields.values()}
-        layers = [int(v) for v in f['dflash.target_layers'].contents()]; del rd, f
-        dg = dk.geom(opt['drafter'])
-        m = FlashNextTP(opt['model'], ntok=T, max_ctx=int(opt['max_ctx']), feature_layers=layers, feature_card=0,
-                        vram_drafters=(('dflash', dg, None),), vram_prefill=int(opt['chunk']))
-        df = dk.DFlashK3(m, opt['drafter'])
-        dr = dk.DFlashK3Drafter(df)
-    pf = P.Prefill(m, chunk=int(opt['chunk']))
+    m, pf, df, dr = _arch.of(opt['model']).build(opt, log)
     for d in m.devs: torch.cuda.synchronize(d)
     disk = not opt['no_disk_cache']
     pc = PC.PromptCache(m, pf, dr, cache_dir=opt['cache_dir'] if disk else None, disk=disk)
-    sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=(float(opt['idle_park_s']) or None), side_route=not opt['no_side_route'])
+    sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=(float(opt['idle_park_s']) or None), side_route=not opt['no_side_route'],
+                     eos_ids=opt.get('eos_ids') or (248046, 248044))
     log(f'caminus serve: engine built in {time.time() - t0:.1f} s: max_ctx {m.max_ctx} (usable {sess.max_ctx}), qsa {m.qsa}, '
         f'drafter {"DFlash (device accept)" if dr is not None else "none"}, prefill chunk {pf.chunk} (T* {pf.crossover}), '
-        f'cache {pc.n_slots} VRAM slots ({pc.tier_mib[0]:.0f} / {pc.tier_mib[1]:.0f} MiB), disk {"on: " + pc.store.root if pc.store else "off"}, '
+        f'cache {pc.n_slots} VRAM slots ({" / ".join(f"{v:.0f}" for v in pc.tier_mib)} MiB), disk {"on: " + pc.store.root if pc.store else "off"}, '
         f'side slot {pc.side_rows} positions (routing {"on" if sess.side_route else "off"})',
         flush=True)
     return sess, dict(m=m, df=df, dr=dr, pf=pf, pc=pc)
 
 
 def main(argv=None):
-    opt = parse(sys.argv[1:] if argv is None else argv)
-    from ..torchcheck import absent
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if '--options-json' in argv:                 # (caminus panel's advanced layout: nothing is loaded, no GPU)
+        import json
+        print(json.dumps(options_json()))
+        return 0
+    opt = parse(argv)
+    from ..device.torchcheck import absent
     msg = absent('caminus serve')             # (no torch import here: set_process_name below runs before any thread starts; the
-                                              # console command checks the build itself before the guard, caminus.hip at its first call)
+                                              # console command checks the build itself before the guard, caminus.device.hip at its first call)
     if msg:
         print(msg, file=sys.stderr)
         return 2
-    for k, what, env in (('model', 'the Coder GGUF (its first shard)', 'CAMINUS_CODER'), ('drafter', 'the DFlash GGUF', 'CAMINUS_DFLASH')):
-        if (k == 'model' or not opt['no_drafter']) and not os.path.isfile(opt[k]):
-            print(f'caminus serve: {what} {opt[k]} does not exist: run `caminus download`, set {env} (or {"coder" if k == "model" else "dflash"} '
-                  f'in {_config.config_path()}), or pass --{k}' + ('' if k == 'model' else ' (--no-drafter: plain decoding)'), file=sys.stderr)
-            return 2
+    if not opt['model'] or not os.path.isfile(opt['model']):
+        print(f'caminus serve: the model GGUF {opt["model"]} does not exist: run `caminus download` (or caminus pull NAME), set '
+              f'CAMINUS_CODER (or coder in {_config.config_path()}), or pass --model', file=sys.stderr)
+        return 2
+    A = _arch.of(opt['model'])                   # (the GGUF's header, read once: every later question asks the registry)
+    # (only an architecture with a drafter needs its file: the Coder's DFlash)
+    if A.drafter and not opt['no_drafter'] and not (opt['drafter'] and os.path.isfile(opt['drafter'])):
+        print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
+              f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
+        return 2
+    if not A.drafter and not opt['no_drafter'] and opt['drafter'] != DEFAULT_DRAFTER:
+        print(f'caminus serve: --drafter ignored: no drafter for {A.name} in K3 yet', flush=True)
+    # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
+    # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
+    from ..device import host as _host
+    try:
+        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs))
+    except _host.PlacementError as e:
+        print(f'caminus serve: {e}', file=sys.stderr)
+        return 2
+    os.environ['HIP_VISIBLE_DEVICES'] = pl['hip_visible']
+    opt['placement'] = dict(cards=[c['pci'] for c in pl['cards']], names=[c['label'] for c in pl['cards']], split=pl['split'])
+    print(f"caminus serve: cards {pl['note']} (HIP_VISIBLE_DEVICES={pl['hip_visible']})", flush=True)
     from .server import K3Server, set_process_name
     set_process_name('caminus')                  # on the main thread, before any thread starts
     from .hw import HwReader
     from .stats import EngineStats
     from .tokenizer import QwenTokenizer
     tok = QwenTokenizer.from_gguf(opt['model'])
-    stats = EngineStats(enabled=not opt['no_stats'])
+    # the ids that end a generation, from the model's own vocabulary: its eos (<|im_end|>) and <|endoftext|> (the Coder and
+    # Qwen3.6 / AREX-2: 248046, 248044; Qwen3-Coder-Next's 151,936-token vocabulary: 151645, 151643)
+    opt['eos_ids'] = eos_ids_of(tok)
+    opt['max_ctx'] = ctx_arg(opt['max_ctx'])     # (a config file's value too)
+    if opt['max_ctx'] == 'auto':                 # the default: as big a context as the card(s) hold (user, 11-07)
+        opt['max_ctx'] = A.auto_max_ctx(opt)
+    opt['model_alias'] = opt['model_alias'] or _arch.default_alias(opt['model'])
+    A.set_ids(opt['model_alias'], tok)
+    stats = EngineStats(enabled=not opt['no_stats'], physics=A.physics(0))
     hw = None
     flight = None
     if opt['flight_dir']:
         from .flight import FlightRecorder
         flight = FlightRecorder(opt['flight_dir'], cap_gb=float(opt['flight_cap_gb']))
-    srv = K3Server(LoadingSession(int(opt['max_ctx']) - 2), tok, host=opt['host'], port=int(opt['port']),
+    srv = K3Server(LoadingSession(_arch.usable_ctx(opt['max_ctx'], A.T), eos_ids=opt['eos_ids']), tok, host=opt['host'], port=int(opt['port']),
                    log_dir=opt['log_dir'] or None, ping_interval=float(opt['ping']), max_queue=int(opt['max_queue']),
                    incremental_tool_args=bool(opt['incremental_tool_args']), model_path=opt['model'], hw=hw, stats=stats,
                    loading=True, model_alias=opt['model_alias'], flight=flight)
     srv.start(background=True)
     print(f'caminus serve: http://{opt["host"]}:{srv.port} (loading)  pid={os.getpid()}', flush=True)
-    from .. import kernels
+    from ..device import kernels
     print(f'caminus serve: {kernels.describe()}', flush=True)
     try:
         sess, parts = build_engine(opt, stats)
@@ -197,7 +272,8 @@ def main(argv=None):
         # the hardware reader on the engine's own cards (by PCI slot, engine order), its 1 Hz sampler thread (VRAM, power,
         # clocks, energy by phase, KFD evictions, page migrations); then the clock check (read only)
         from .k3_session import engine_pci
-        hw = HwReader(root=opt['hw_root'], cards=engine_pci(parts['m']), phase=lambda: stats.phase, on_host=stats.host_sample)
+        hw = HwReader(root=opt['hw_root'], cards=engine_pci(parts['m']), names=tuple(stats.physics.card_names), phase=lambda: stats.phase,
+                      on_host=stats.host_sample)
         srv.hw = hw
         hw.start(srv.hw_interval)
         chk = hw.clock_check()
@@ -244,7 +320,7 @@ def shutdown(srv, sess, pc, drain_s=60.0, park_s=90.0, log=print):
         log(f'caminus serve: shutdown: drain failed: {type(e).__name__}: {e}', flush=True)
     if not ok:
         log(f'caminus serve: shutdown: the engine thread did not stop within {drain_s:.0f} s: no park (the state is not known)', flush=True)
-    elif getattr(sess, 'shutdown_park', None) is not None and park_s > 0:
+    elif park_s > 0:
         box = {}
 
         def run():

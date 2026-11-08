@@ -1,0 +1,6 @@
+{
+  "server_url": "http://127.0.0.1:8092",
+  "backend": "caminus",
+  "server_process": "caminus",
+  "sessions_dir": "~/.config/caminus/qwen-home-bh/projects"
+}

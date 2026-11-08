@@ -1,5 +1,5 @@
 """The engine stats hook and the metric recorder behind /metrics, /slots and /caminus/status
-(docs/agentic/spec-metrics.md; AGENTIC-PLAN 2026-11-04 'llm-top support' and 'the full Caminus metric set').
+(docs/specs/spec-metrics.md; AGENTIC-PLAN 2026-11-04 'llm-top support' and 'the full Caminus metric set').
 
 EngineStats is one object per server. The engine thread (worker.py, generate.py, the EngineSession) is the only writer
 of its engine-side fields and calls the hook methods below at points the loop already has: host timestamps from
@@ -9,7 +9,7 @@ migrations). Every writer holds `lock` for its few adds (M7 ops: a scrape used t
 them, and take_bucket's swap lost the engine's concurrent adds). Readers (GET /metrics, /slots, /caminus/status) take
 snapshot() under the same lock (a copy of the counters and the rings, ~0.1 ms) and compute quantiles and format the text
 on their own thread after it is released, so a scrape never holds the engine thread for more than the copy (tests/serve/
-test_stats.py: the cost per pass and per request; tests/test_serve_k3.py scrape: decode with and without a 10 Hz scraper).
+test_stats.py: the cost per pass and per request; tests/e2e/test_serve_k3.py scrape: decode with and without a 10 Hz scraper).
 
 The hook (engine thread; every method is a no-op when `enabled` is False, so the M7 <= 3 % gate can A/B it):
     begin(job)                         a request reached the engine (job: worker.Job)
@@ -18,14 +18,15 @@ The hook (engine thread; every method is a no-op when `enabled` is False, so the
     first_token()                      the first token of the reply was emitted (ends TTFT)
     pass_done(t0, draft_ms, fed, drafted, accepted, emitted)
                                        one decode pass, from its drafter call (t0) to its emitted tokens' bookkeeping;
-                                       the session's K3 / sampler split and per-card numbers are in pass_k3_ms,
-                                       pass_sampler_ms, pass_cards (set by EngineSession.sample_pass / the engine)
+                                       the session's K3 / sampler split and per-card numbers: its pass_split()
+    pass_split(k3_ms, sampler_ms, cards)
+                                       the session's report of the pass in flight (EngineSession.sample_pass)
     tokens(n_reasoning, n_answer)      generated ids by kind (the worker counts them around </think>)
     forced(n)                          n forced tool-call ids emitted (n_decoded / n_remain / position, no pass record)
     end(job, res) / error(job, kind)   the request is over
   engine-only (M7; MockSession synthesizes them):
     bail(recovered), retry(), refusal(kind, n), evicted(ms), pgmigrate(n),
-    cache_update(counters, gauges)     the prompt cache's own names (docs/agentic/spec-cache-api.md, Metrics)
+    cache_update(counters, gauges)     the prompt cache's own names (docs/specs/spec-cache-api.md, Metrics)
     route(decision)                    the side-slot routing decision of a request (PromptCache.route's dict: route 'main' /
                                        'side', reason, shared, root, need, main_n, side_rows; impl:m7-finish)
     plain_estimate(ms)                 a plain pass's ms per token estimated by the session (DraftPolicy: a DFlash pass less
@@ -89,7 +90,7 @@ class PhysicsConfig:
     """the bandwidth floor of a decode token. Per card: the bytes one token streams (weights at the engine's TP split)
     and the card's measured streaming bandwidth. mode 'max': the floor is the slowest card's bytes / bandwidth (the
     cards stream in parallel, a pass waits for both); 'sum': all bytes / summed bandwidth (only a perfectly balanced
-    split reaches it). Defaults: the Coder IQ1_M at TP=2 (docs/agentic/spec-gsq-port.md section 2: 3.60 / 2.87 GB per
+    split reaches it). Defaults: the Coder IQ1_M at TP=2 (docs/specs/spec-gsq-port.md section 2: 3.60 / 2.87 GB per
     token at 881 / 774 GB/s -> 4.09 ms, mode 'max'; 'sum' gives 3.91 ms).
     kv_bytes_per_token: per card, KV + indexer rows (AGENTIC-PLAN 0.5: 13,056 B of KV across both cards, 6,528 each,
     plus 2,040 B of indexer replicated). qsa_from: the first position QSA attention serves (capacity.QSA_EXACT 2051:
@@ -269,7 +270,7 @@ class EngineStats:
         # ---- decode passes
         self.pass_series = {p: Series('decode_pass_' + p, 'ms', W) for p in PASS_PARTS}
         self.emitted = Series('tokens_per_pass', 'tokens', W, COUNT_EDGES)
-        self.pass_k3_ms = 0.0           # scratch: set by sample_pass for the pass in flight
+        self.pass_k3_ms = 0.0           # the pass in flight, from the session's pass_split() (pass_done reads them)
         self.pass_sampler_ms = 0.0
         self.pass_cards = None          # scratch: (card ms tuple, exchange-wait ms tuple or None, link bytes) or None
         self.plain_ms = None            # EMA of plain (undrafted) passes' ms per emitted token (measured)
@@ -427,12 +428,17 @@ class EngineStats:
             t['total'].add(total + r['queue_ms'])
             self.phase = 'decode'
 
+    def pass_split(self, k3_ms, sampler_ms, cards=None):
+        """the session's report of the pass in flight (EngineSession.sample_pass, before it returns): k3_ms the engine's
+        pass, sampler_ms the sampling, cards (per-card pass ms tuple, exchange-wait ms tuple or None, link bytes) or None.
+        pass_done reads and clears it (the engine thread only: no lock)"""
+        self.pass_k3_ms, self.pass_sampler_ms, self.pass_cards = float(k3_ms), float(sampler_ms), cards
+
     def pass_done(self, t0, draft_ms, fed, drafted, accepted, emitted, cls=None):
         """one decode pass: t0 = clock() before its drafter call; accepted = drafts accepted (a prefix of the drafts:
         positions 0 .. accepted - 1); drafted = the pass's real drafts (0 for a plain pass: filler drafts are not drafts,
         run_generation asks the session); cls = the content class when the pass started (default: the current one). The
-        K3 / sampler split and the per-card numbers come from the scratch fields the session set (pass_k3_ms,
-        pass_sampler_ms, pass_cards)"""
+        K3 / sampler split and the per-card numbers come from the session's pass_split() for the pass"""
         if not self.enabled:
             return
         total = (self.clock() - t0) * 1e3

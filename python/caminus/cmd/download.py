@@ -2,7 +2,7 @@
 sha256), into the model directory (caminus.config.model_dir: CAMINUS_MODEL_DIR, model_dir in ~/.config/caminus/config.toml,
 default ~/.local/share/caminus/models) as <repository name>/<path>, where caminus serve finds them by default.
 
-  caminus download [--dir DIR] [--only coder|dflash] [--verify] [--dry-run]
+  caminus download [--model NAME] [--dir DIR] [--only coder|dflash] [--verify] [--dry-run]   (NAME: caminus models; default the Coder)
 
   * resumable: a file arrives as NAME.part; an interrupted run (Ctrl-C, a dropped connection: up to 8 attempts with backoff)
     continues it with an HTTP Range request; a server that ignores Range restarts the file;
@@ -232,11 +232,19 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog='caminus download', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dir', default=None, help='the model directory (default: caminus.config model_dir)')
     ap.add_argument('--only', choices=('coder', 'dflash'), default=None)
+    ap.add_argument('--model', default=None, help="a named model's files (caminus models; default: the Coder's: coder + dflash)")
     ap.add_argument('--verify', action='store_true', help='hash files already present against the manifest')
     ap.add_argument('--dry-run', action='store_true', help='say what would be fetched; fetch nothing')
     ap.add_argument('--manifest', default=None, help=argparse.SUPPRESS)   # (tests / mirrors: a JSON list of caminus.models.Item rows)
     a = ap.parse_args(argv)
-    items = load_manifest(a.manifest) if a.manifest else list(models.ITEMS)
+    if a.manifest:
+        items = load_manifest(a.manifest)
+    else:
+        name = a.model or 'coder'
+        if name not in models.BY_NAME:
+            print(f'download: unknown model {name!r} (caminus models: {", ".join(models.BY_NAME)})', file=sys.stderr)
+            return 2
+        items = [models.BY_KEY[k] for k in models.BY_NAME[name].items]
     if a.only:
         items = [it for it in items if it.role.startswith(a.only)]
     dest = os.path.abspath(os.path.expanduser(a.dir or config.model_dir()))

@@ -43,7 +43,7 @@ until it is decided. Events:
 
 REFERENCE. The rules for well-formed output are llama.cpp's (ignite-llama common/parsers/qwen3-coder.cpp, the PEG
 parser it builds, and common_chat_peg_mapper in common/chat-peg-parser.cpp), gated by tests/serve/test_toolparse.py
-against tools/qwen_parse_ref.cpp (llama.cpp's own parser) on >= 500 synthesized outputs under random chunkings:
+against tools/reference/qwen_parse_ref.cpp (llama.cpp's own parser) on >= 500 synthesized outputs under random chunkings:
   * the generation prompt ends '<think>\\n', so a thinking turn starts in the reasoning; with enable_thinking=false it
     starts in the content;
   * reasoning: leading whitespace dropped, trailing kept; it ends at '</think>' (consumed) or at '<tool_call>' (not

@@ -2,7 +2,7 @@
 
 `caminus.service` runs `caminus serve` (the K3 engine on both cards, the OpenAI / Anthropic API on 127.0.0.1:8092) as a
 systemd **user** unit **from a checkout**: it assumes the checkout at `~/src/caminus` and a conda env named `drafter` with ROCm
-PyTorch (edit `ExecStart=` for yours). It is not a unit for the pip-installed package (docs/INSTALL.md runs `caminus serve`
+PyTorch (edit `ExecStart=` for yours). It is not a unit for the pip-installed package (docs/quickstart.md runs `caminus serve`
 from a terminal). Nothing in the repo installs or enables it; these are the steps to take by hand.
 
 ## Link and start it

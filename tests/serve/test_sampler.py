@@ -1,6 +1,6 @@
 """S3 gates (CPU only, MockEngine): Philox known answers, filter-chain parity with llama.cpp's sampler on fixed logits,
 chi-square of sampled frequencies against the filtered distribution, seeded determinism, and output with drafting ==
-without drafting. Needs build/sampler_ref and build/philox_ref (tools/build_sampler_ref.sh; built on demand).
+without drafting. Needs build/sampler_ref and build/philox_ref (tools/reference/build_sampler_ref.sh; built on demand).
 K3_SAMPLER_ROWS sets the parity row count (default 1000, full 248320-token vocab)."""
 import math
 import os
@@ -25,18 +25,18 @@ ROWS = int(os.environ.get('K3_SAMPLER_ROWS', '1000'))
 
 
 def _need_refs(test):
-    """skip `test` when the references cannot be built here: tools/build_sampler_ref.sh links sampler_ref against the
+    """skip `test` when the references cannot be built here: tools/reference/build_sampler_ref.sh links sampler_ref against the
     ignite-llama fork's CPU libllama ($IGNITE/build-cpu/bin; absent on a machine without the fork, e.g. CI)"""
     if os.path.exists(SAMPLER_REF) and os.path.exists(PHILOX_REF):
         return
     lib = os.path.join(os.environ.get('IGNITE', os.path.expanduser('~/src/ignite-llama')), 'build-cpu', 'bin', 'libllama.so')
     if not os.path.exists(lib):
-        test.skipTest(f'no build/sampler_ref + build/philox_ref and no {lib} to build them from (tools/build_sampler_ref.sh)')
+        test.skipTest(f'no build/sampler_ref + build/philox_ref and no {lib} to build them from (tools/reference/build_sampler_ref.sh)')
 
 
 def _ensure_refs():
     if not (os.path.exists(SAMPLER_REF) and os.path.exists(PHILOX_REF)):
-        subprocess.run([os.path.join(ROOT, 'tools', 'build_sampler_ref.sh')], check=True, capture_output=True)
+        subprocess.run([os.path.join(ROOT, 'tools', 'reference', 'build_sampler_ref.sh')], check=True, capture_output=True)
 
 
 # ---------------------------------------------------------------- chi-square without scipy

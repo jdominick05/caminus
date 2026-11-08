@@ -1,4 +1,4 @@
-// DFlash 2 drafter ops for the K3 engine (docs/agentic/spec-drafters.md 1, S2-S3; python/caminus/dflash_k3.py). Included
+// DFlash 2 drafter ops for the K3 engine (docs/specs/spec-drafters.md 1, S2-S3; python/caminus/dflash_k3.py). Included
 // by kernels/k3_gguf_ops.h only when K3_DRAFT is defined (kernels/k3_gguf_draft.hip): the trunk's code objects do not
 // contain any of this. Scratch LDS reuses AQ's storage (5148 B in the multi-token GSQ module): a segment's tasks never hold
 // AQ data across these ops (they are not fp32-activation GG ops), so the module keeps the trunk's LDS size and occupancy.

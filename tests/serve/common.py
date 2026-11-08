@@ -77,11 +77,11 @@ QWEN_PARSE_REF = os.environ.get('K3_QWEN_PARSE_REF', os.path.join(HERE, '..', '.
 
 @functools.lru_cache(None)
 def qwen_parse_ref_binary():
-    """llama.cpp's chat-output parser behind a JSONL driver (tools/qwen_parse_ref.cpp), built on first use with
-    tools/build_qwen_parse_ref.sh against ignite-llama's CPU build; None when it cannot be built"""
+    """llama.cpp's chat-output parser behind a JSONL driver (tools/reference/qwen_parse_ref.cpp), built on first use with
+    tools/reference/build_qwen_parse_ref.sh against ignite-llama's CPU build; None when it cannot be built"""
     path = os.path.abspath(QWEN_PARSE_REF)
     if not os.path.exists(path):
-        script = os.path.join(HERE, '..', '..', 'tools', 'build_qwen_parse_ref.sh')
+        script = os.path.join(HERE, '..', '..', 'tools', 'reference', 'build_qwen_parse_ref.sh')
         r = subprocess.run([script], env=dict(os.environ, OUT=path), capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(path):
             return None
@@ -98,11 +98,11 @@ def chat_template_file():
 
 def qwen_parse_ref(cases):
     """run llama.cpp's parser on cases ({'tools', 'enable_thinking', 'tool_choice', 'parallel', 'text',
-    'partial_at'}); returns one result dict per case (see tools/qwen_parse_ref.cpp)"""
+    'partial_at'}); returns one result dict per case (see tools/reference/qwen_parse_ref.cpp)"""
     import json
     binary = qwen_parse_ref_binary()
     if binary is None:
-        raise RuntimeError('qwen_parse_ref is not available (tools/build_qwen_parse_ref.sh failed)')
+        raise RuntimeError('qwen_parse_ref is not available (tools/reference/build_qwen_parse_ref.sh failed)')
     inp = ''.join(json.dumps(c, ensure_ascii=False) + '\n' for c in cases)
     r = subprocess.run([binary, chat_template_file()], input=inp.encode('utf-8'), capture_output=True, timeout=600)
     if r.returncode != 0:

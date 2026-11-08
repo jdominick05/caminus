@@ -1,0 +1,40 @@
+◆ caminus top 0.1.0  k3-coder · caminus-mock · :8092                                                     IDLE  hh:mm:ss
+ waiting for a request                                                                                                 
+╭─ CONTEXT ───────────────────────────────────────────────────────╮ ╭─ THROUGHPUT ─────────────────────────────────────╮
+│ ██████████████████████████████████████························· │ │ read                                    0 tok/s  │
+│ █ reused  █ read  █ written  1.2k / 2.1k  (60%)                 │ │ write                                 0.0 tok/s  │
+│ engine  dense attention (QSA from 2.1k) · KV 12.5 MB per card … │ │ cache reuse   ███████···················· 24.9%  │
+│                                                                 │ │ dflash                           —   ·  3.2% all │
+│ model   caminus-mock.gguf                                       │ │ tok/draft       —  · 0.1 all  by pos ▁▁▁         │
+│ context 2.1k tokens · 1 slot                                    │ │ since start: 21k read · 7.1k reused · 2.6k writ… │
+│ build   caminus-0123abc                                         │ │ avg 326 tok/s read · 51.2 tok/s write · peak ct… │
+│                                                                 │ │                                                  │
+│ no Qwen Code session active in the last 6 h                     │ │ spill RAM 0.31 GB · swap 0.4 GB @ 0.0 MB/s       │
+╰─────────────────────────────────────────────────────────────────╯ │ load  GPU 97% · CPU 0.8 of N cores … │
+╭─ CAMINUS  (engine · /caminus/status) ───────────────────────────╮ │ ▸ idle · no fallbacks · 8.3 GB VRAM headroom     │
+│ speed   ████················ 20.0% of 4.09 ms floor · pass 20%  │ ╰──────────────────────────────────────────────────╯
+│ token   ████████████████████ 20.4 ms/token · 1.09 tok/pass      │ ╭─ SAVINGS  (vs API · llm-top.json) ───────────────╮
+│         ■ k3 18.0 ■ drafter 0.01 ■ sampler 2.04 ■ host 0.32 ms  │ │ saved $493.6 since Oct 13 · $21.5/day · today $… │
+│                                                                 │ │ in    1412.0M  (96% cache hits)  out 21.7M       │
+│ ttft    ████████████████████ 2.97 s mean · p50 2.96 s           │ │ API   $504.6  − power ≈ $11.0  · 18340 requests  │
+│         ■ queue 901ms ■ restore 8.29ms ■ batched 2.03s          │ │ today in 61.3M · out 1.0M  912 requests          │
+│         ■ handoff 1.99ms ■ passes 17.2ms ■ host 3.11ms · prefi… │ ╰──────────────────────────────────────────────────╯
+│                                                                 │ ╭─ MACHINE ────────────────────────────────────────╮
+│ dflash  3.2% accepted · 1.09 tok/pass · 0.69x vs plain 14.0 ms  │ │ VRAM1 ██████████████████████····  20.2 / 24 GB   │
+│         prose 3% ▁▁▁  code —  shell —  tool —                   │ │ VRAM2 ████████████████████······  15.5 / 20 GB   │
+│                                                                 │ │ 1 RX 7900 XTX · 2 RX 7900 XT · model on 1+2      │
+│ cache   7.1k reused · vram 6.3k · disk 813 · exact 0            │ │ RAM   ██████████················  25.8 / 64 GB   │
+│         vram ███████ 8/8 1.2 GB · disk █······ 5.4 / 30 GB      │ │ caminus memory 1.4 GB · 38.2 GB RAM free         │
+│         restore p50 0.67ms p95 260ms · from vram 7 · disk 1 · … │ │ power 517 W · 0.094 tok/J decode · 0.692 prefill │
+│                                                                 │ │ XTX   286 W 2482 MHz  78C high · margin 3.0 GB   │
+│ cards   XTX 19.8 ms + 1.02 ms wait · XT 18.6 ms + 2.24 ms wait… │ │ XT    231 W 2394 MHz  78C high · margin 4.2 GB   │
+│ health  ✓ no bails, retries, KFD evictions, refusals or errors  │ ╰──────────────────────────────────────────────────╯
+│ agents  32 requests · 0 tool calls · 0 parse failures · 32 qwe… │ ╭─ AGENTS  (tab = switch) ─────────────────────────╮
+│         0 loops · thinking 2.4k / answer 240 · 29 at max_tokens │ │ no agent sessions in the last 6 h                │
+╰─────────────────────────────────────────────────────────────────╯ ╰──────────────────────────────────────────────────╯
+╭─ ACTIVITY  (server requests since llm-top started) ──────────────────────────────────────────────────────────────────╮
+│ no requests yet: they show up here as they finish                                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ tab switch agent · q quit · composition is estimated from session text since the last compaction

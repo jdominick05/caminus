@@ -1,0 +1,40 @@
+◆ caminus top 0.1.0  qwen3-coder · Qwen3-Coder-30B-A3B-Q4_K_M · :8092                                    IDLE  hh:mm:ss
+ waiting for a request                                                                                                 
+╭─ CONTEXT ───────────────────────────────────────────────────────╮ ╭─ THROUGHPUT ─────────────────────────────────────╮
+│ ······························································· │ │ read   ▂▄▅▇█                            0 tok/s  │
+│ █ reused  █ read  █ written  0 / 131k?  (0%)                    │ │ write ▇▇████             ▇████████    0.0 tok/s  │
+│                                                                 │ │ cache reuse   █████████████████████████·· 93.0%  │
+│ model   Qwen3-Coder-30B-A3B-Q4_K_M.gguf                         │ │ dflash        ▄▅▆▇▇▇▆▆▅▄▃▂▁▁▁▁ 47.9% · 43.6% all │
+│ context 131k tokens · 1 slot                                    │ │ tok/draft      2.6 · 2.5 all  by pos ▇▇▆▆▅▅▅▄▄▄▃ │
+│                                                                 │ │ since start: 9.8M read · 131.4M reused · 1.6M w… │
+│ no Qwen Code session active in the last 6 h                     │ │ avg 2486 tok/s read · 76.2 tok/s write · peak c… │
+╰─────────────────────────────────────────────────────────────────╯ │                                                  │
+╭─ CAMINUS  (engine · /caminus/status) ───────────────────────────╮ │ spill RAM 0.31 GB · swap 0.4 GB @ 0.0 MB/s       │
+│ reading /caminus/status…                                        │ │ load  GPU 97% · CPU 0.8 of N cores … │
+╰─────────────────────────────────────────────────────────────────╯ │ ▸ idle · no fallbacks · 2.4 GB VRAM headroom     │
+                                                                    ╰──────────────────────────────────────────────────╯
+                                                                    ╭─ SAVINGS  (vs API · llm-top.json) ───────────────╮
+                                                                    │ saved $499.0 since Oct 13 · $21.7/day · today $… │
+                                                                    │ in    1412.0M  (96% cache hits)  out 21.7M       │
+                                                                    │ API   $504.6  − power ≈ $5.55  · 18340 requests  │
+                                                                    │ today in 61.3M · out 1.0M  912 requests          │
+                                                                    │ Claude Sonnet 5.5: $2 in · $2.5 write · $0.1 hi… │
+                                                                    ╰──────────────────────────────────────────────────╯
+                                                                    ╭─ MACHINE ────────────────────────────────────────╮
+                                                                    │ VRAM  ███████████████████████···  21.6 / 24 GB   │
+                                                                    │ RAM   ██████████················  25.8 / 64 GB   │
+                                                                    │ caminus memory 1.4 GB · 38.2 GB RAM free         │
+                                                                    ╰──────────────────────────────────────────────────╯
+                                                                    ╭─ AGENTS  (tab = switch) ─────────────────────────╮
+                                                                    │ no agent sessions in the last 6 h                │
+                                                                    ╰──────────────────────────────────────────────────╯
+╭─ ACTIVITY  (server requests since llm-top started) ──────────────────────────────────────────────────────────────────╮
+│ no requests yet: they show up here as they finish                                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ tab switch agent · q quit · composition is estimated from session text since the last compaction

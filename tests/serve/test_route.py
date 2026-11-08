@@ -1,5 +1,5 @@
-"""M7 finish (impl:m7-finish), CPU only, on MockSession: the request's max_new reaches a session that asks for it
-(wants_max_new: K3Session's side-slot routing needs to know a side call's generation fits the side slot), the routing decision
+"""M7 finish (impl:m7-finish), CPU only, on MockSession: the request's max_new reaches every session's plan / prefill (the
+session contract; K3Session's side-slot routing needs to know a side call's generation fits the side slot), the routing decision
 in /metrics (caminus:cache_route_total, caminus:cache_side_active) and /caminus/status (cache.route), the flight line's
 cache.slot; caminus serve's --log-dir off by default and --no-side-route; a client that resets its keep-alive connection draws
 no traceback (the server's handle_error), any other handler error still does.
@@ -19,10 +19,9 @@ from caminus.serve.engine import MockSession
 
 
 class _RouteSession(MockSession):
-    """MockSession that asks for max_new (as K3Session does) and reports a routing decision per request: 'side' for a prompt
+    """MockSession that records max_new (which K3Session routes by) and reports a routing decision per request: 'side' for a prompt
     shorter than side_below tokens, else 'main' (a stand-in for PromptCache.route; the K3 session's own rule is tested in
-    tests/test_prompt_cache.py cpu_route and on the GPU in tests/test_serve_k3.py side)"""
-    wants_max_new = True
+    tests/cache/test_prompt_cache.py cpu_route and on the GPU in tests/e2e/test_serve_k3.py side)"""
     side_below = 0
 
     def plan(self, ids, max_new=None):
@@ -69,8 +68,8 @@ class TestMaxNew(unittest.TestCase):
         self.assertEqual(sess.plans[1][1], sess.prefills[1][1])
         self.assertEqual(sess.prefills[1][1], sess.max_ctx - n2)
 
-    def test_plain_session_unchanged(self):
-        """a session without wants_max_new is called as before (no max_new keyword)"""
+    def test_plain_session_takes_max_new(self):
+        """MockSession (no routing) gets max_new too and ignores it: one call signature for every session"""
         eng = U.ScriptedEngine(ntok=4)
         sess = MockSession(eng, max_ctx=4096, eos_ids=(248046, 248044))
         calls = []
@@ -78,7 +77,7 @@ class TestMaxNew(unittest.TestCase):
 
         def prefill(ids, cancel=None, marks=None, **kw):
             calls.append(kw)
-            return orig(ids, cancel, marks=marks)
+            return orig(ids, cancel, marks=marks, **kw)
         sess.prefill = prefill
         srv = _server(sess)
         try:
@@ -86,7 +85,7 @@ class TestMaxNew(unittest.TestCase):
         finally:
             srv.stop()
         self.assertEqual(st, 200)
-        self.assertEqual(calls, [{}])
+        self.assertEqual(calls, [{'max_new': 3}])
 
 
 class TestRouteMetrics(unittest.TestCase):

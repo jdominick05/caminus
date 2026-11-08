@@ -1,7 +1,7 @@
-"""setuptools glue for pyproject.toml (docs/RELEASE-PLAN.md). Two things pyproject cannot say:
+"""setuptools glue for pyproject.toml (docs/dev/packaging.md). Two things pyproject cannot say:
 
   * build/ holds ./build.sh's code objects, so setuptools builds in .pybuild/ instead;
-  * a wheel is refused unless the gfx1100 runtime set is staged in python/caminus/hsaco/gfx1100 (tools/stage_kernels.py) and
+  * a wheel is refused unless the gfx1100 runtime set is staged in python/caminus/hsaco/gfx1100 (tools/release/stage_kernels.py) and
     every object matches its provenance.json: a wheel without its code objects would install and then fail at the first
     launch."""
 import hashlib
@@ -19,9 +19,9 @@ STAGED = os.path.join(HERE, 'python', 'caminus', 'hsaco', 'gfx1100')
 
 def check_staged():
     sys.path.insert(0, os.path.join(HERE, 'python'))
-    from caminus import kernels
+    from caminus.device import kernels
     sys.path.pop(0)
-    hint = 'stage them first: ./build.sh && python -I tools/stage_kernels.py'
+    hint = 'stage them first: ./build.sh && python -I tools/release/stage_kernels.py'
     p = os.path.join(STAGED, 'provenance.json')
     if not os.path.isfile(p):
         raise SystemExit(f'caminus: no staged code objects ({p} missing): {hint}')

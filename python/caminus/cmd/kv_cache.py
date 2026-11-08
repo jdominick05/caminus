@@ -1,4 +1,4 @@
-"""The prompt cache's disk tier from the command line (caminus.promptcache.DiskStore; CPU only, nothing launched).
+"""The prompt cache's disk tier from the command line (caminus.cache.prompt.DiskStore; CPU only, nothing launched).
 
   caminus kv-cache list  [--dir DIR]                                     (from a checkout: python -I tools/kv_cache.py ...)
   caminus kv-cache purge [--dir DIR] [--older-than-days D]     (no age: every entry)
@@ -16,11 +16,11 @@ def main(argv=None):
     ap.add_argument('--older-than-days', type=float, default=None)
     a = ap.parse_args(argv)
     try:
-        from .. import promptcache as pc          # (imports torch: the disk tier's staging buffers are torch tensors, CPU only)
+        from ..cache import prompt as pc          # (imports torch: the disk tier's staging buffers are torch tensors, CPU only)
     except ImportError as e:
         if e.name != 'torch' and not (e.name or '').startswith('torch.'):
             raise
-        from ..torchcheck import status
+        from ..device.torchcheck import status
         print(f'kv_cache: {a.cmd} refused: {status()[2]}', file=sys.stderr)
         return 2
     try:

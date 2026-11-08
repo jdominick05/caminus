@@ -1,5 +1,5 @@
-# The installable `caminus` package (docs/RELEASE-PLAN.md): a pure py3-none-any wheel with the prebuilt gfx1100 code objects
-# and the guard as package data. Build: ./build.sh && python -I tools/stage_kernels.py && pip wheel . --no-deps
+# The installable `caminus` package (docs/dev/packaging.md): a pure py3-none-any wheel with the prebuilt gfx1100 code objects
+# and the guard as package data. Build: ./build.sh && python -I tools/release/stage_kernels.py && pip wheel . --no-deps
 # --no-build-isolation -w dist (setup.py refuses a wheel without a complete staged set). PyTorch (the ROCm build) is not
 # declared: PyPI's torch is a CUDA build.
 [build-system]
@@ -29,7 +29,7 @@ dependencies = ["numpy>=2.2.6", "jinja2>=3.1", "tokenizers>=0.20"]
 
 [project.urls]
 Source = "https://github.com/jdominick05/caminus"
-Documentation = "https://github.com/jdominick05/caminus/blob/main/docs/INSTALL.md"
+Documentation = "https://github.com/jdominick05/caminus/blob/main/docs/quickstart.md"
 Issues = "https://github.com/jdominick05/caminus/issues"
 
 [project.scripts]
@@ -44,7 +44,8 @@ where = ["python"]
 include = ["caminus", "caminus.*"]
 
 [tool.setuptools.package-data]
-caminus = ["hsaco/gfx1100/*.hsaco", "hsaco/gfx1100/provenance.json", "share/guard.sh"]
+caminus = ["hsaco/gfx1100/*.hsaco", "hsaco/gfx1100/provenance.json", "share/guard.sh", "share/caminus-panel",
+           "share/harness/qwen-code/brain-hands/BRAIN.md", "share/harness/qwen-code/brain-hands/agents/hands.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "caminus.__version__" }

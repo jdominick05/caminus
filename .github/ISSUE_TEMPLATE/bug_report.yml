@@ -1,0 +1,45 @@
+name: Bug report
+description: Something went wrong, crashed, or gave wrong output.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Caminus is early testing software, so every report helps.
+        Please don't paste private conversations or code: a short description of the request is enough.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, and what went wrong? Include any error message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: false
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Which model was running (for example qwen3.6 or coder)?
+    validations:
+      required: false
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `caminus doctor`
+      description: Run `caminus doctor` and paste everything it prints.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: The server's log (optional)
+      description: "`caminus logs NAME` prints it. The last 50 lines are usually enough."
+      render: shell
+    validations:
+      required: false

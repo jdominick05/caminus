@@ -1,4 +1,4 @@
-# CI on every push and pull request: what runs without a GPU and without the model files (docs/RELEASING.md).
+# CI on every push and pull request: what runs without a GPU and without the model files (docs/dev/releasing.md).
 # It never builds the shipped code objects: the toolchain that built and validated them (TheRock ROCm 10.2.0a20261011) is
 # not available to CI. The compile-only kernel build is kernels.yml; the release check is release.yml.
 # Every action is pinned by its commit SHA, the release tag in the trailing comment.
@@ -6,6 +6,7 @@ name: ci
 
 on:
   push:
+    branches-ignore: [cla-signatures]   # (the CLA bot's signature commits: cla.yml)
   pull_request:
 
 permissions:
@@ -48,7 +49,7 @@ jobs:
         run: python -I -m compileall -q python tools tests
 
       - name: The privacy and secret scan of the tree
-        run: python -I tools/privacy_scan.py .
+        run: python -I tools/release/privacy_scan.py .
 
       - name: The Coder's tokenizer metadata for tests/serve (the first 11 MiB of shard 1, a vocab-only GGUF)
         # Optional: without it tests/serve is skipped, not failed. An HTTP Range request at the manifest's pinned revision
@@ -57,9 +58,9 @@ jobs:
         env:
           HEAD_BYTES: '11534336'
         run: |
-          url=$(python -I tools/gguf_vocab_only.py --url coder-1)
+          url=$(python -I tools/release/gguf_vocab_only.py --url coder-1)
           { curl -fsSL --retry 3 --max-time 300 -r "0-$((HEAD_BYTES - 1))" "$url" || true; } | head -c "$HEAD_BYTES" > "$RUNNER_TEMP/coder-head.gguf"
-          python -I tools/gguf_vocab_only.py "$RUNNER_TEMP/coder-head.gguf" "$RUNNER_TEMP/coder-vocab.gguf"
+          python -I tools/release/gguf_vocab_only.py "$RUNNER_TEMP/coder-head.gguf" "$RUNNER_TEMP/coder-vocab.gguf"
           echo "CODER=$RUNNER_TEMP/coder-vocab.gguf" >> "$GITHUB_ENV"
 
       - name: The CPU suites (each skipped when what it needs is missing; tests/ci_cpu.py --list says what)
@@ -79,6 +80,6 @@ jobs:
           src="$RUNNER_TEMP/llama.cpp"
           git init -q "$src"
           git -C "$src" fetch -q --depth 1 https://github.com/ggml-org/llama.cpp.git 5aeac37a35b44fde4bdffaec9159f2fcb253b622
-          python -I tools/vendor_gguf.py --check --src "$src"
+          python -I tools/release/vendor_gguf.py --check --src "$src"
           git -C "$src" fetch -q --depth 1 https://github.com/jdominick05/ignite-llama.git e4e3f8edac36544e7c06139eb03e35288797e73e
-          python -I tools/vendor_mmq.py --check --src "$src" --commit e4e3f8edac36544e7c06139eb03e35288797e73e --label 842653396
+          python -I tools/release/vendor_mmq.py --check --src "$src" --commit e4e3f8edac36544e7c06139eb03e35288797e73e --label 842653396

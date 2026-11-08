@@ -3,16 +3,17 @@
         GGUF metadata): per-card budget at 32K / 128K / 262K, without and with the drafters (MTP, DFlash, both), each checked
         against the cap (the guard's line - margin, plus the card's current use); --split: the engine's gdn_keys,moe_blocks
         (FlashNextTP's defaults 10,12), which the prefill rows depend on
-  guard.sh LOG SECS python -I tools/k3_capacity.py measure MAX_CTX NTOK [--model coder|reap] [--drafter mtp|dflash] [--ring N] [--no-idx]
+  guard.sh LOG SECS python -I tools/k3_capacity.py measure MAX_CTX NTOK [--model coder|reap] [--drafter mtp|dflash] [--ring N] [--no-idx] [--split GK,MB]
         loads FlashNextTP (vram_check off; with a drafter: its smoke factory, checks on), runs 3 passes and prints device-level
         used MiB per card (sysfs) idle / after the load / after the passes (guard.sh's log line has the peaks) and the
         context-sized buffers' MiB. --ring N: the DFlash ring's rows (default capacity.dflash_ring; the old sizing was the
-        power of two >= max(4096, MAX_CTX)). --gen N (<= 64): then N tokens generated with the drafter at small positions
+        power of two >= max(4096, MAX_CTX)). --split GK,MB: the engine's TP split (no drafter; default 10,12), with the
+        projected fixed part (capacity.fixed_mib) printed beside the measured one. --gen N (<= 64): then N tokens generated with the drafter at small positions
         (DFlash: its device-accept loop), so its own launches are in the peaks
 See caminus/capacity.py for the per-position bytes and the measured fixed parts."""
 import os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
-from caminus import capacity  # noqa: E402
+from caminus.device import capacity  # noqa: E402
 
 from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
 MODELS = dict(coder=devpaths.coder(), reap=devpaths.reap())
@@ -31,9 +32,9 @@ def opt(a, name, default, f=str):
 
 def dflash_geom():
     """(layers, kv heads, head dim, window) of the DFlash drafter (GGUF metadata only; no GPU context)"""
-    from caminus import flashnext  # noqa: F401  (gguf-py on the path)
+    from caminus.engine import flashnext  # noqa: F401  (gguf-py on the path)
     from gguf import GGUFReader
-    from caminus.dflash_k3 import DRAFTER
+    from caminus.decode.dflash import DRAFTER
     f = {x.name: x for x in GGUFReader(DRAFTER, 'r').fields.values()}
     hp = lambda k: int(f[f'dflash.{k}'].contents())
     return hp('block_count'), hp('attention.head_count_kv'), hp('attention.key_length'), hp('attention.sliding_window')
@@ -42,7 +43,13 @@ def dflash_geom():
 def table(a):
     model = opt(a, '--model', 'coder'); ntok = opt(a, '--ntok', 4, int); prefill = opt(a, '--prefill', 2048, int)
     split = tuple(int(v) for v in opt(a, '--split', '10,12').split(','))
-    g = capacity.geometry(MODELS[model]); dg = dflash_geom()
+    from caminus.prefill.feed import feed_shape      # (first: puts gguf-py on the path)
+    from gguf import GGUFReader
+    rd = GGUFReader(MODELS[model], 'r'); g = capacity.geometry(rd); dg = dflash_geom()
+    try: fs = feed_shape(rd, MODELS[model])                # (the batched prefill's feed shapes from this file)
+    except (AssertionError, KeyError) as e:
+        fs = None; print(f'feed shapes: not a Coder feed ({type(e).__name__} {e}): the Coder\'s are counted (caminus.prefill.plan.CODER_FEED)')
+    del rd
     total, used = sysfs_mib('total'), sysfs_mib('used')
     # the guard's own kill lines (capacity.GUARD_LINE_MIB by DRM card, as the runtime checks: capacity.caps_mib)
     cap = [min(capacity.GUARD_LINE_MIB[os.path.basename(os.path.dirname(d))], capacity.CAP_FRAC * t) - capacity.MARGIN_MIB for d, t in zip(SYSFS, total)]
@@ -56,7 +63,7 @@ def table(a):
     for n in (2048, 32768, 131072, 262144):
         for dr, pf in (((), None), (('mtp',), None), (('dflash',), None), (('mtp', 'dflash'), None), (('dflash',), prefill)):
             if pf == 0: continue
-            b = capacity.budget(g, n, ntok, model, dr, dflash_geom=dg, prefill=pf, split=split)
+            b = capacity.budget(g, n, ntok, model, dr, dflash_geom=dg, prefill=pf, split=split, feed=fs)
             fixed = [sum(r[1 + c] for r in b['rows'] if 'fixed' in r[0]) for c in (0, 1)]
             ctx = [b['total'][c] - fixed[c] for c in (0, 1)]
             free = [cap[c] - used[c] - b['total'][c] for c in (0, 1)]
@@ -78,23 +85,26 @@ def table(a):
 def measure(a):
     model = opt(a, '--model', 'coder'); drafter = opt(a, '--drafter', None); ring = opt(a, '--ring', None, int); idx = '--no-idx' not in a
     ngen = opt(a, '--gen', 0, int)
+    sp = opt(a, '--split', None, lambda v: tuple(int(x) for x in v.split(',')))
+    if sp is not None and drafter is not None: print('--split: without --drafter'); sys.exit(2)
     if not 0 <= ngen <= 64 or (ngen and drafter is None): print('--gen N: 0 .. 64 tokens, with --drafter'); sys.exit(2)
     if not idx: a.remove('--no-idx')
     max_ctx, ntok = int(a[0]), int(a[1])
     idle = sysfs_mib('used')
     import torch
-    from caminus.flashnext_tp import FlashNextTP
+    from caminus.engine.flashnext_tp import FlashNextTP
     for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
     t0 = time.time()
     if drafter == 'dflash':
-        from caminus import dflash_k3 as dk
+        from caminus.decode import dflash as dk
         cfg = dict(gguf=MODELS[model])
         m, dr, _info = dk.smoke_factory(dict(cfg, drafter=dk.DRAFTER), ntok, max_ctx=max_ctx, ring=ring)
     elif drafter == 'mtp':
-        from caminus import mtp
+        from caminus.decode import mtp
         m, dr, _info = mtp.smoke_factory(dict(gguf=MODELS[model]), ntok, max_ctx=max_ctx)
     else:
-        m = FlashNextTP(MODELS[model], ntok=ntok, max_ctx=max_ctx, idx_cache=idx, vram_check=False)
+        m = FlashNextTP(MODELS[model], ntok=ntok, max_ctx=max_ctx, idx_cache=idx, vram_check=False,
+                        **(dict(gdn_keys=sp[0], moe_blocks=sp[1]) if sp else {}))
     for d in (0, 1): torch.cuda.synchronize(d)
     t_load = time.time() - t0
     loaded = sysfs_mib('used')
@@ -105,7 +115,7 @@ def measure(a):
     for d in (0, 1): torch.cuda.synchronize(d)
     after = sysfs_mib('used'); gen = None
     if ngen:   # the drafter's own launches (device accept for DFlash): a short generation at small positions
-        from caminus import spec
+        from caminus.decode import spec
         st = {}; t1 = time.time()
         out = dr.generate(m, toks, ngen, stats=st) if drafter == 'dflash' else spec.generate(m, toks, ngen, dr, st)
         for d in (0, 1): torch.cuda.synchronize(d)
@@ -125,6 +135,10 @@ def measure(a):
     print(f'  context-sized buffers per card: {ctx:.1f} MiB ({ {k: round(v / capacity.MIB, 1) for k, v in cb.items()} })')
     print(f'  fixed (after passes - idle - ctx): XTX {after[0] - idle[0] - ctx:.0f}  XT {after[1] - idle[1] - ctx:.0f} MiB '
           f'(the peak: guard.sh\'s line minus idle minus ctx)')
+    if sp:
+        pj = capacity.fixed_mib(model, ntok, capacity.model_bytes(m.rd), split=sp, tensors=capacity.split_tensors(m.rd))
+        print(f'  split {sp[0]} / {sp[1]}: projected fixed (capacity.fixed_mib) XTX {pj[0]:.0f}  XT {pj[1]:.0f} MiB vs measured '
+              f'{after[0] - idle[0] - ctx:.0f} / {after[1] - idle[1] - ctx:.0f}: ' + ('PROJECTION HOLDS' if all(pj[c] >= after[c] - idle[c] - ctx for c in (0, 1)) else 'PROJECTION LOW'))
     print(f'MEASURE idle={idle[0]:.0f},{idle[1]:.0f} ctx={ctx:.1f} after={after[0]:.0f},{after[1]:.0f}' + (f' gen={gen[0]:.0f},{gen[1]:.0f}' if gen else ''))
 
 

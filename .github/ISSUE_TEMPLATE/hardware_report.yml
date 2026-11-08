@@ -1,0 +1,48 @@
+name: Hardware report
+description: Tell us how Caminus ran on your cards, even if everything worked.
+title: "Hardware report: "
+labels: ["hardware", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you! Caminus has been tested on one machine so far. Reports like yours decide which cards and setups get
+        supported next. A report that says "it all worked" is just as useful as one that says it didn't.
+  - type: input
+    id: cards
+    attributes:
+      label: Your cards
+      description: For example "RX 7900 GRE" or "2x RX 7900 XTX".
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `caminus doctor`
+      description: Paste everything it prints. It lists your cards, their PCIe links and memory.
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: worked
+    attributes:
+      label: What worked
+      options:
+        - label: "`caminus doctor --gpu` passed"
+        - label: A one-card model started and answered (qwen3.6, qwen3.6-hauhau or arex-2)
+        - label: A two-card model started and answered (coder or qwen3-coder-next)
+        - label: Qwen Code or another tool worked against it
+  - type: textarea
+    id: speed
+    attributes:
+      label: Speeds you saw (optional)
+      description: The tok/s numbers from the panel or `caminus top`, and for which model.
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Errors, crashes, your Linux distribution and kernel, anything that seemed odd.
+    validations:
+      required: false

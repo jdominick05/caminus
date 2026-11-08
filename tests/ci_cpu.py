@@ -6,7 +6,7 @@ Each suite runs when what it needs is here and is SKIPPED with the reason otherw
 failure); nothing touches a GPU (HIP_VISIBLE_DEVICES is emptied for every child). What a suite may need:
   torch   PyTorch importable (any build: CI installs the CPU wheel; nothing here launches a kernel)
   vocab   $CODER names a GGUF with the Coder's metadata: the tokenizer and the chat template (tests/serve). The weights are not
-          needed: CI writes a vocab-only GGUF from the first 11 MiB of shard 1 (tools/gguf_vocab_only.py)
+          needed: CI writes a vocab-only GGUF from the first 11 MiB of shard 1 (tools/release/gguf_vocab_only.py)
   coder   $CODER names the Coder's real shard 1 (its tensors; shard 2 beside it): the prefill launchers' CPU refusals
 DIR (required, never under /tmp; it must not exist or be empty) gets one subdirectory and one log per suite. Exit 1 when any
 suite that ran failed; the log's tail is printed for each failure."""
@@ -24,25 +24,30 @@ ROOT = os.path.dirname(HERE)
 # (name, argv with {coder} / {scratch} placeholders, needs)
 SUITES = [
     ('serve', ['tests/serve/run_all.py'], {'vocab'}),
-    ('packaging', ['tests/test_packaging.py', '--scratch', '{scratch}'], set()),
-    ('pass_police', ['tests/test_pass_police.py'], set()),
-    ('sweep_cmp', ['tests/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
-    ('bounds_host', ['tests/test_bounds_host.py'], {'torch'}),
-    ('ple_aio', ['tests/test_ple_aio.py'], {'torch'}),
-    ('spec_policy', ['tests/test_spec_policy.py', 'cpu'], {'torch'}),
-    ('prompt_cache', ['tests/test_prompt_cache.py', 'cpu', '--cache-dir', '{scratch}'], {'torch'}),
-    ('dflash_ring_fuzz', ['tests/test_dflash_ring_fuzz.py'], {'torch'}),
-    ('prefill_feed', ['tests/test_prefill_feed.py', '{coder}', '--cpu'], {'torch', 'coder'}),
-    ('prefill_safety', ['tests/test_prefill_safety.py', '{coder}', 'cpu'], {'torch', 'coder'}),
-    ('prefill_gdn', ['tests/test_prefill_gdn.py', '{coder}', 'cpu', 'vram'], {'torch', 'coder'}),
-    ('prefill_glue', ['tests/test_prefill_glue.py', '{coder}', 'vram'], {'torch', 'coder'}),
-    ('prefill_dense', ['tests/test_prefill_dense.py', '{coder}', 'cpu'], {'torch', 'coder'}),
-    ('prefill_moe', ['tests/test_prefill_moe.py', '{coder}', 'cpu'], {'torch', 'coder'}),
-    ('prefill_moe_canary', ['tests/test_prefill_moe_canary.py', '{coder}', 'review'], {'torch', 'coder'}),
-    ('prefill_tp', ['tests/test_prefill_tp.py', '{coder}', 'cpu'], {'torch', 'coder'}),
-    ('prefill_s6', ['tests/test_prefill_s6.py', '{coder}', 'cpu'], {'torch', 'coder'}),
-    ('prefill_attn', ['tests/test_prefill_attn.py', '{coder}', 'cpu'], {'torch', 'coder'}),
-    ('prefill_qsa', ['tests/test_prefill_qsa.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('packaging', ['tests/packaging/test_packaging.py', '--scratch', '{scratch}'], set()),
+    ('arch', ['tests/test_arch.py', '--scratch', '{scratch}'], set()),
+    ('host', ['tests/device/test_host.py', '--scratch', '{scratch}'], set()),
+    ('manage', ['tests/cmd/test_manage.py', '--scratch', '{scratch}'], set()),
+    ('docs', ['tests/docs/test_docs.py'], set()),
+    ('pass_police', ['tests/engine/test_pass_police.py'], set()),
+    ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
+    ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),
+    ('ple_aio', ['tests/engine/test_ple_aio.py'], {'torch'}),
+    ('spec_policy', ['tests/decode/test_spec_policy.py', 'cpu'], {'torch'}),
+    ('prompt_cache', ['tests/cache/test_prompt_cache.py', 'cpu', '--cache-dir', '{scratch}'], {'torch'}),
+    ('dflash_ring_fuzz', ['tests/decode/test_dflash_ring_fuzz.py'], {'torch'}),
+    ('prefill_driver', ['tests/prefill/test_prefill_driver.py'], {'torch'}),
+    ('prefill_feed', ['tests/prefill/test_prefill_feed.py', '{coder}', '--cpu'], {'torch', 'coder'}),
+    ('prefill_safety', ['tests/prefill/test_prefill_safety.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('prefill_gdn', ['tests/prefill/test_prefill_gdn.py', '{coder}', 'cpu', 'vram'], {'torch', 'coder'}),
+    ('prefill_glue', ['tests/prefill/test_prefill_glue.py', '{coder}', 'vram'], {'torch', 'coder'}),
+    ('prefill_dense', ['tests/prefill/test_prefill_dense.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('prefill_moe', ['tests/prefill/test_prefill_moe.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('prefill_moe_canary', ['tests/prefill/test_prefill_moe_canary.py', '{coder}', 'review'], {'torch', 'coder'}),
+    ('prefill_tp', ['tests/prefill/test_prefill_tp.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('prefill_s6', ['tests/prefill/test_prefill_s6.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('prefill_attn', ['tests/prefill/test_prefill_attn.py', '{coder}', 'cpu'], {'torch', 'coder'}),
+    ('prefill_qsa', ['tests/prefill/test_prefill_qsa.py', '{coder}', 'cpu'], {'torch', 'coder'}),
 ]
 
 

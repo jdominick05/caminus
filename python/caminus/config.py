@@ -1,4 +1,4 @@
-"""Caminus's paths in one place (docs/RELEASE-PLAN.md): the environment first, then the config file, then the XDG defaults.
+"""Caminus's paths in one place (docs/dev/packaging.md): the environment first, then the config file, then the XDG defaults.
 No machine's own path is a default.
 
   config file   $CAMINUS_CONFIG, else $XDG_CONFIG_HOME/caminus/config.toml (~/.config/caminus/config.toml); optional; string
@@ -12,9 +12,11 @@ No machine's own path is a default.
   kv_dir       CAMINUS_KV_DIR                 $XDG_CACHE_HOME/caminus/kv (~/.cache/caminus/kv: the prompt cache's disk tier)
   flight_dir   CAMINUS_FLIGHT_DIR             $XDG_CACHE_HOME/caminus/flight (the flight recorder)
   state_dir    CAMINUS_STATE_DIR              $XDG_STATE_HOME/caminus (~/.local/state/caminus: the guard's log of caminus serve)
-  kernel_dir   CAMINUS_KERNEL_DIR             none: caminus.kernels finds the code objects (a checkout's build/, else the
+  kernel_dir   CAMINUS_KERNEL_DIR             none: caminus.device.kernels finds the code objects (a checkout's build/, else the
                                               package's own)
-  gguf_py      CAMINUS_GGUF_PY (old: K3_GGUF_PY)   the vendored gguf-py reader (caminus/_vendor; tools/vendor_gguf.py)
+  gguf_py      CAMINUS_GGUF_PY (old: K3_GGUF_PY)   the vendored gguf-py reader (caminus/_vendor; tools/release/vendor_gguf.py)
+  model_search CAMINUS_MODEL_SEARCH           none: more directories (':'-separated) where caminus models / start look for
+                                              the model files, three levels deep, by name and size (files kept elsewhere)
 
 Command-line flags (caminus serve --model / --drafter / --cache-dir / --flight-dir, --config FILE) override all of these.
 Tests and dev tools keep their own environment-driven paths (CLAUDE.md)."""
@@ -31,6 +33,7 @@ KEYS = {
     'state_dir': ('CAMINUS_STATE_DIR',),
     'kernel_dir': ('CAMINUS_KERNEL_DIR',),
     'gguf_py': ('CAMINUS_GGUF_PY', 'K3_GGUF_PY'),
+    'model_search': ('CAMINUS_MODEL_SEARCH',),
 }
 VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_vendor')
 

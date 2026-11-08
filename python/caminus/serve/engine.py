@@ -6,10 +6,10 @@ A session keeps a TOKEN LOG: the ids whose state the live sequence holds, all of
 are appended as they are fed back; the last sampled token of a completion (EOS, or the token a stop ended on) is not
 fed, so after a completion the log is prompt + reply[:-1].
 
-    plan(ids)                  -> cached_n: how many leading ids prefill() would reuse (no side effect)
-                                  (a session with `wants_max_new` gets plan(ids, max_new=) and prefill(..., max_new=): the
-                                  request's generation limit, for the K3 session's side-slot routing)
-    prefill(ids, cancel, marks=None)
+    plan(ids, max_new=None)    -> cached_n: how many leading ids prefill() would reuse (no side effect). max_new: the
+                                  request's generation limit (the server always passes it; the K3 session's side-slot routing
+                                  uses it, MockSession ignores it)
+    prefill(ids, cancel, marks=None, max_new=None)
                                -> logits [V] for the token after ids. marks: the prompt cache's message boundaries
                                   (template.PromptBuilder.build(marks=True).marks; sessions that take none ignore them;
                                   `wants_marks` tells the server to compute them). The live sequence becomes ids: the session
@@ -17,30 +17,39 @@ fed, so after a completion the log is prompt + reply[:-1].
                                   a checkpoint), then processes the rest in passes of at most ntok tokens. Returns None
                                   when cancel is set between passes (the log then holds the part already processed).
                                   last_prefill: PrefillStats.
-    verify(feed)               -> logits [len(feed), V]: one pass appending feed (1 .. ntok tokens) provisionally;
-                                  row j predicts the token after log + feed[:j + 1].
-    accept(n)                  keep the first n tokens of the last verify's feed (the rest are rolled back). Every
-                                  verify must be followed by an accept before the next verify / end.
+    verify(feed)               one pass appending feed (1 .. ntok tokens) provisionally, its logits not returned: the
+                                  server's forced tokens beyond one pass (processed like a prompt). Returns None.
+    accept(n)                  keep the first n tokens of the last pass's feed (the rest are rolled back). Every
+                                  verify / sample_pass must be followed by an accept before the next pass / end.
     sample_pass(feed, drafts, sampler, history, stop_ids)
-                               -> the emitted ids of one pass: verify(feed + drafts) and sample-and-match on the
-                                  rows from the last feed token on (host sampling). An engine with a device sampler
-                                  (M7) overrides this and returns ids instead of logits; the caller still calls accept.
+                               -> the emitted ids of one pass over feed + drafts. The base class samples on the host:
+                                  pass_rows(feed + drafts) -> logits [len, V] (row j predicts the token after
+                                  log + body[:j + 1]), then sample-and-match on the rows from the last feed token on. An
+                                  engine with a device sampler (M7) overrides sample_pass and needs no pass_rows.
     end()                      completion end: the state is made exact and checkpointed (checkpoint c)
     reset()                    drop the live state and every checkpoint (after an EngineError)
     abort()                    after a host-side exception (not an EngineError) between calls: roll back an
                                   unaccepted verify, make the state exact at the committed log, keep every
                                   checkpoint. Raises if the state cannot be made consistent (the caller then resets).
                                   The base class resets (always safe); an engine that can roll back overrides it.
-    tokens, ntok, max_ctx, n_vocab, eos_ids
+    tokens, ntok, max_ctx, n_vocab, eos_ids, last_prefill
+  Declared with a default on EngineSession (a session overrides what it has; the server never probes for them):
+    stats, wants_marks (prefill uses marks: the server computes them), drafter (a session-bound drafter, else the
+    server's own), drafts_real (False: the coming pass's drafts are filler, not counted), idle_s / idle() (the worker's
+    idle timer: idle() after idle_s seconds without a request; None: never), shutdown_park() (the clean shutdown's park:
+    None = nothing parked), request_marks() (the session's bail / recovery counters, for a request's flight line),
+    bundle_state(prompt) / export_bundle(path, rec, flight) (the flight recorder's replay bundles: the start state).
+  contract_problems(sess) lists what a session lacks (tests/serve/test_session.py; K3Session in
+  tests/cache/test_prompt_cache.py cpu).
 
 Errors: EngineError (a pass failed: bail retries exhausted). The live state is then undefined; the caller resets the
 session and answers 503 / 529.
 
-Metrics (docs/agentic/spec-metrics.md): `stats` is the server's stats.EngineStats (None: nothing recorded). A session
+Metrics (docs/specs/spec-metrics.md): `stats` is the server's stats.EngineStats (None: nothing recorded). A session
 reports through it from the engine thread only, with host timestamps and counters: prefill_progress(n) per prompt
-pass, cached_known(n) once the reused prefix is known, pass_k3_ms / pass_sampler_ms around each sample_pass (the base
-class times its verify and its host sampling; an engine with a device sampler sets them itself), pass_cards (per-card
-pass and exchange-wait ms, link bytes) for engines that know them, and the engine-only hooks (bail, retry, refusal,
+pass, cached_known(n) once the reused prefix is known, pass_split(k3_ms, sampler_ms, cards) for each sample_pass (the base
+class times its pass_rows and its host sampling; an engine with a device sampler reports its own; cards: per-card pass and
+exchange-wait ms, link bytes, for engines that know them), and the engine-only hooks (bail, retry, refusal,
 evicted, cache_update with the prompt cache's own counter names). last_prefill carries the TTFT split (restore,
 batched, hand-off, K3 passes), the cache source in the prompt cache's names and the LCP.
 
@@ -92,27 +101,34 @@ def common_prefix(a, b):
 
 
 class EngineSession:
-    """the interface (see the module docstring); sample_pass has the host default"""
+    """the interface (see the module docstring): every member the server and the worker use, declared here with its
+    default; sample_pass has the host default (over pass_rows)"""
     ntok = 1
     max_ctx = 0
     n_vocab = 0
     eos_ids = ()
-    stats = None
-    wants_marks = False
-    wants_max_new = False   # True: plan / prefill also take max_new= (the request's generation limit; K3Session's routing)
+    last_prefill = None     # PrefillStats of the last prefill()
+    stats = None            # serve.stats.EngineStats (the server sets it), or None: nothing recorded
+    wants_marks = False     # True: prefill() uses the prompt cache's marks, so the server computes them
     drafter = None          # a session-bound drafter(tokens, k) (the K3 session's), or None: the server's own
+    drafts_real = True      # False: the coming pass's drafts are filler (run_generation counts no drafts for it)
+    idle_s = None           # seconds without a request before the worker calls idle() (None: never)
 
     @property
     def tokens(self):
         raise NotImplementedError
 
-    def plan(self, ids):
+    def plan(self, ids, max_new=None):
         raise NotImplementedError
 
-    def prefill(self, ids, cancel=None, marks=None):
+    def prefill(self, ids, cancel=None, marks=None, max_new=None):
         raise NotImplementedError
 
     def verify(self, feed):
+        raise NotImplementedError
+
+    def pass_rows(self, feed):
+        """host sampling's pass (the base sample_pass): logits [len(feed), V]; a device-sampler session needs none"""
         raise NotImplementedError
 
     def accept(self, n):
@@ -131,16 +147,72 @@ class EngineSession:
         """history: every token before the one being sampled at the first row used (it ends with feed)"""
         st = self.stats
         if st is None or not st.enabled:
-            rows = self.verify(list(feed) + list(drafts))
+            rows = self.pass_rows(list(feed) + list(drafts))
             return sampler.sample_and_match(rows[len(feed) - 1:], list(drafts), history, stop_ids)
         clock = st.clock
         t0 = clock()
-        rows = self.verify(list(feed) + list(drafts))
+        rows = self.pass_rows(list(feed) + list(drafts))
         t1 = clock()
         out = sampler.sample_and_match(rows[len(feed) - 1:], list(drafts), history, stop_ids)
-        st.pass_k3_ms = (t1 - t0) * 1e3
-        st.pass_sampler_ms = (clock() - t1) * 1e3
+        st.pass_split((t1 - t0) * 1e3, (clock() - t1) * 1e3)
         return out
+
+    # -- optional parts, each with the default of a session that has no such state -------------------------------------------
+    def idle(self):
+        """no request for idle_s seconds (the worker's idle timer): nothing to park"""
+        return None
+
+    def shutdown_park(self):
+        """a clean shutdown's park (caminus serve): None, nothing parked"""
+        return None
+
+    def request_marks(self):
+        """the session's own counters a request's flight line reports as deltas (bails, recoveries): none"""
+        return {}
+
+    def bundle_state(self, prompt=None):
+        """the flight recorder's record of the request's start state: none"""
+        return {}
+
+    def export_bundle(self, path, rec, flight):
+        """a replay bundle's start state written under path: none (the bundle replays from cold)"""
+        return dict(cache_ref=dict(source=rec.get('source'), state=None, note='this session keeps no engine state (MockSession)'))
+
+
+CONTRACT_ATTRS = ('tokens', 'ntok', 'max_ctx', 'n_vocab', 'eos_ids', 'last_prefill', 'stats', 'wants_marks', 'drafter',
+                  'drafts_real', 'idle_s')
+CONTRACT_CALLS = {'plan': ('ids', 'max_new'), 'prefill': ('ids', 'cancel', 'marks', 'max_new'), 'verify': ('feed',),
+                  'accept': ('n',), 'end': (), 'reset': (), 'abort': (), 'idle': (), 'shutdown_park': (), 'request_marks': (),
+                  'sample_pass': ('feed', 'drafts', 'sampler', 'history', 'stop_ids'), 'bundle_state': ('prompt',),
+                  'export_bundle': ('path', 'rec', 'flight')}
+
+
+def contract_problems(sess):
+    """what sess lacks of the session contract (the module docstring), as strings: [] for a conforming session. sess: an
+    instance (every attribute readable, the sizes positive) or a class (K3Session where no engine can be built: the calls
+    and the sampling route only). Every call takes its parameters by name; a session samples by overriding sample_pass (a
+    device sampler) or by pass_rows (the base class's host sampling)"""
+    import inspect
+    cls = sess if isinstance(sess, type) else type(sess)
+    out = [] if issubclass(cls, EngineSession) else ['not an EngineSession']
+    if not isinstance(sess, type):
+        for a in CONTRACT_ATTRS:
+            try: getattr(sess, a)
+            except Exception as e:   # noqa: BLE001
+                out.append(f'{a}: {type(e).__name__}: {e}')
+        for a in ('ntok', 'max_ctx', 'n_vocab'):
+            v = getattr(sess, a, None)
+            if not isinstance(v, int) or v < 1: out.append(f'{a}: {v!r} (a positive int)')
+        if not isinstance(getattr(sess, 'eos_ids', None), tuple): out.append('eos_ids: not a tuple')
+    for name, params in CONTRACT_CALLS.items():
+        fn = getattr(sess, name, None)
+        if not callable(fn):
+            out.append(f'{name}: not callable'); continue
+        have = inspect.signature(fn).parameters
+        out += [f'{name}: no parameter {p!r}' for p in params if p not in have]
+    if getattr(cls, 'sample_pass', None) is EngineSession.sample_pass and getattr(cls, 'pass_rows', None) is EngineSession.pass_rows:
+        out.append('neither sample_pass (a device sampler) nor pass_rows (host sampling) is implemented')
+    return out
 
 
 class MockSession(EngineSession):
@@ -255,7 +327,7 @@ class MockSession(EngineSession):
                 best, src = len(k), 'disk'
         return best, src
 
-    def plan(self, ids):
+    def plan(self, ids, max_new=None):
         return self._best(ids)[0]
 
     def cache_gauges(self):
@@ -301,6 +373,9 @@ class MockSession(EngineSession):
         return rows
 
     def verify(self, feed):
+        self._verify(feed)
+
+    def pass_rows(self, feed):
         return self._verify(feed)
 
     def _accept(self, n):
@@ -322,13 +397,13 @@ class MockSession(EngineSession):
         out = super().sample_pass(feed, drafts, sampler, history, stop_ids)
         sy, st = self.synth, self.stats
         if sy is not None and st is not None and st.enabled:
+            smp = st.pass_sampler_ms
             if sy.clock is not None:
                 sy.clock.advance(sy.sampler_ms / 1e3)
-                st.pass_sampler_ms = sy.sampler_ms
+                smp = sy.sampler_ms
             k3 = st.pass_k3_ms
             n = len(feed) + len(drafts)
-            st.pass_cards = (tuple(k3 * f for f in sy.card_split), tuple(k3 * f for f in sy.wait_split),
-                             sy.link_bytes_per_row * n)
+            st.pass_split(k3, smp, (tuple(k3 * f for f in sy.card_split), tuple(k3 * f for f in sy.wait_split), sy.link_bytes_per_row * n))
             self.decode_passes += 1
             if sy.bail_every and self.decode_passes % sy.bail_every == 0:
                 st.bail(True)
@@ -336,7 +411,7 @@ class MockSession(EngineSession):
                 st.evicted(sy.evicted_ms)
         return out
 
-    def prefill(self, ids, cancel=None, marks=None):
+    def prefill(self, ids, cancel=None, marks=None, max_new=None):
         with self._lock:
             clock = self._clock()
             st_ = self.stats

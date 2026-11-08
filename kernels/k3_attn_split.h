@@ -23,19 +23,23 @@
 #define QSA_TOPK 512
 #define QSA_SELW 516
 #endif
-#define ATTN_SS 32                    // list positions per split (one LDS stage; = caminus.k3.ATTN_SS)
+#ifndef ATTN_SS
+#define ATTN_SS 32                    // list positions per split (one LDS stage; = caminus.k3.ATTN_SS_OF[module])
+#endif
 #ifndef ATTN_CPR
 #define ATTN_CPR 2                    // cells per wave per scoring round (1 or 2)
 #endif
 #ifndef ATTN_VH
 #define ATTN_VH 12                    // query heads per V pass (12 or 6: accumulators per thread)
 #endif
+#ifndef ATTN_G
 #define ATTN_G 12                     // query heads per kv head (the Coder: 24 / 2)
+#endif
 #define ATTN_D 256                    // head dim
 #define ATTN_RS 260                   // floats per partial record: m, l, 0, 0, acc[256]
 #define ATTN_LDS ((__attribute__((address_space(3))) float *)AQ)   // [ATTN_SS][ATTN_G] scores / p, then cells [ATTN_SS]
 static_assert(AQ_ALLOC * (int)sizeof(block_q8_1) >= (ATTN_SS * ATTN_G + ATTN_SS + 1) * 4, "OP_ATTN_PART's scratch lives in AQ's storage");
-static_assert(ATTN_G % ATTN_VH == 0 && (ATTN_CPR == 1 || ATTN_CPR == 2) && ATTN_SS == 32, "OP_ATTN_PART's layout");
+static_assert(ATTN_G % ATTN_VH == 0 && (ATTN_CPR == 1 || ATTN_CPR == 2) && (ATTN_SS == 32 || ATTN_SS == 64 || ATTN_SS == 128), "OP_ATTN_PART's layout");
 static_assert(ATTN_D == 256, "one thread per dim of V (256 threads)");
 
 struct AttnList { int n, np4, tail0, nvc; const int * pl; };
@@ -114,8 +118,14 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
         // this lane's K bytes in a position's row (+ cell * pb): q8_0 its block and qs offset, f16 its 8 halves
         const uint8_t * kb = sg.W + (type ? (size_t)(g * 8 + (lane >> 2)) * sizeof(block_q8_0) : (size_t)(g * ATTN_D + 8 * lane) * 2);
         const int ko = 2 + (lane & 3) * 8, ci = ATTN_CPR == 2 ? (lane >> 4) & 1 : 0;
+#if ATTN_SS == 32
 #pragma unroll 1
         for (int cb = 4 * wave; cb < min(nb, 4 * wave + 4); cb += ATTN_CPR) {
+#else   // (the qwen3next / qwen35moe modules' longer splits) wave w scores cells (SS / 8) w .. (SS / 8) (w + 1) - 1
+        constexpr int ATTN_CW = ATTN_SS / 8;
+#pragma unroll 1
+        for (int cb = ATTN_CW * wave; cb < min(nb, ATTN_CW * wave + ATTN_CW); cb += ATTN_CPR) {
+#endif
             float kf[ATTN_CPR][8];
 #pragma unroll
             for (int i = 0; i < ATTN_CPR; i++) {
@@ -169,6 +179,7 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
     const AttnTask a = attn_task(sg, t);
     float * rec = attn_rec(sg, a);
     const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]), lane = K3TID % 32, wave = K3WAVE, NS = a.NS;
+#if ATTN_SS == 32
 #pragma unroll 1
     for (int h = wave; h < ATTN_G; h += 8) {
         const float v = lane < nb ? sp[lane * ATTN_G + h] : -INFINITY;
@@ -178,6 +189,26 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
         const float l = wred<false>(p);
         if (lane == 0) { float * rh = rec + (size_t)h * NS * ATTN_RS; rh[0] = m; rh[1] = l; }
     }
+#else   // SS / 32 cells per lane (lane + 32 i): the lane's max / sum, then the wave's (fixed order: deterministic)
+    constexpr int ATTN_R = ATTN_SS / 32;
+#pragma unroll 1
+    for (int h = wave; h < ATTN_G; h += 8) {
+        float v[ATTN_R], mx = -INFINITY;
+#pragma unroll
+        for (int i = 0; i < ATTN_R; i++) { const int c = lane + 32 * i; v[i] = c < nb ? sp[c * ATTN_G + h] : -INFINITY; mx = fmaxf(mx, v[i]); }
+        const float m = wred<true>(mx);
+        float ps = 0.0f;
+#pragma unroll
+        for (int i = 0; i < ATTN_R; i++) {
+            const int c = lane + 32 * i;
+            const float p = c < nb ? expf(v[i] - m) : 0.0f;
+            if (c < nb) sp[c * ATTN_G + h] = p;
+            ps = ps + p;
+        }
+        const float l = wred<false>(ps);
+        if (lane == 0) { float * rh = rec + (size_t)h * NS * ATTN_RS; rh[0] = m; rh[1] = l; }
+    }
+#endif
     }
     __syncthreads();
     {   // V: this thread's value of each cell (q8_0: its block and qs byte; f16: its half)
@@ -218,6 +249,51 @@ __device__ __forceinline__ void op_attn_comb(const Seg & sg, int q) {
     if (L.n <= 0 || sg.K != ATTN_D) { out[tid] = 0.0f; return; }
     const int ns = (L.n + ATTN_SS - 1) / ATTN_SS;
     const float * rec = (const float *)sg.a + (size_t)q * NS * ATTN_RS;
+#ifdef K3_ATTN_COMB_FAST
+    // (the qwen3next / qwen35moe modules) the same m, l and acc as the serial walk below, with more loads in flight: at
+    // 32K cells the walk was 76% of the pair (1,024 splits, 16 heads = 16 workgroups, one dependent record read at a time;
+    // tools/attn_bench.py --trace, XT: COMB 463 of 613 us). m: the whole workgroup's max over the splits (fmaxf over
+    // finite values is exact and order-free: the serial max's value); then the sums in u order, the next COMB_U splits'
+    // record words loaded before any of them is used (the same additions in the same order: the same bits)
+    __shared__ float comb_m[8];
+    {
+        const int lane = tid % 32, wave = tid / 32;
+        float mm = -INFINITY;
+        for (int u = tid; u < ns; u += 256) mm = fmaxf(mm, rec[(size_t)u * ATTN_RS]);
+        mm = wred<true>(mm);
+        if (lane == 0) comb_m[wave] = mm;
+        __syncthreads();
+    }
+    float m = comb_m[0];
+#pragma unroll
+    for (int w = 1; w < 8; w++) m = fmaxf(m, comb_m[w]);
+    __syncthreads();
+    constexpr int COMB_U = 8;
+    float l = 0.0f, acc = 0.0f;
+    int u = 0;
+#pragma unroll 1
+    for (; u + COMB_U <= ns; u += COMB_U) {
+        float r0[COMB_U], r1[COMB_U], ra[COMB_U];
+#pragma unroll
+        for (int j = 0; j < COMB_U; j++) {
+            const float * ru = rec + (size_t)(u + j) * ATTN_RS;
+            r0[j] = ru[0]; r1[j] = ru[1]; ra[j] = ru[4 + tid];
+        }
+#pragma unroll
+        for (int j = 0; j < COMB_U; j++) {
+            const float f = expf(r0[j] - m);
+            l = l + r1[j] * f;
+            acc = acc + ra[j] * f;
+        }
+    }
+#pragma unroll 1
+    for (; u < ns; u++) {
+        const float * ru = rec + (size_t)u * ATTN_RS;
+        const float f = expf(ru[0] - m);
+        l = l + ru[1] * f;
+        acc = acc + ru[4 + tid] * f;
+    }
+#else
     float m = rec[0];
     for (int u = 1; u < ns; u++) m = fmaxf(m, rec[(size_t)u * ATTN_RS]);
     float l = 0.0f, acc = 0.0f;
@@ -228,5 +304,6 @@ __device__ __forceinline__ void op_attn_comb(const Seg & sg, int q) {
         l = l + ru[1] * f;
         acc = acc + ru[4 + tid] * f;
     }
+#endif
     out[tid] = acc * (1.0f / l);
 }

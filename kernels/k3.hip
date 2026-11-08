@@ -1,4 +1,4 @@
-// K3 decode engine, M1 skeleton (docs/K3-megakernel-design.md): one persistent kernel runs a TAPE of segments built on
+// K3 decode engine, M1 skeleton (docs/dev/engine-design.md): one persistent kernel runs a TAPE of segments built on
 // the host from a model description. Each segment = an op, a number of tasks and (optionally) the segment it depends on.
 // Every workgroup walks the segments in order: it waits until the dependency's tasks are all done, then claims tasks of
 // the segment until none are left, publishing each finished task. A workgroup only ever waits on segments whose tasks
@@ -352,7 +352,7 @@ extern "C" __global__ void __launch_bounds__(256, K3_WAVES_PER_EU) K3_RUN_ATTR k
     }
 }
 
-// ---- k3_run2: teams (measurement of lever 1, docs/K3-megakernel-design.md "M1 engine skeleton, measured"). The grid
+// ---- k3_run2: teams (measurement of lever 1, docs/dev/engine-design.md "M1 engine skeleton, measured"). The grid
 // is cut into up to 4 teams by `tb` (team j = workgroups [tb[j], tb[j + 1]), tb[nteam] = grid); a segment with team >= 0
 // is run only by that team (team -1: everyone). With stage-1 and stage-2 segments alternating over two teams each
 // (even / odd blocks), a workgroup claims its next segment and issues that task's weight loads two segments before the

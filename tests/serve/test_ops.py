@@ -129,7 +129,7 @@ class TestKvCacheCli(unittest.TestCase):
         import subprocess
         import sys
         import tempfile
-        from caminus import promptcache as pc
+        from caminus.cache import prompt as pc
         tool = os.path.join(ROOT, 'tools', 'kv_cache.py')
         env = dict(os.environ, HIP_VISIBLE_DEVICES='')
         with tempfile.TemporaryDirectory() as d:
@@ -158,8 +158,11 @@ class _FakePC:
     def fence(self):
         pass
 
+    def live_tokens(self):
+        return self.log[:self.st['i0']]
+
     def park(self, background=False):
-        from caminus.promptcache import tok_sha
+        from caminus.cache.prompt import tok_sha
         sig = (tok_sha(self.log), len(self.log), 1)
         if self.parked is not None and self.parked[0] == sig:
             return None if background else self.parked[1]
@@ -178,7 +181,7 @@ class TestIdlePark(unittest.TestCase):
     def _sess(self, pc):
         from caminus.serve.k3_session import K3Session
         s = K3Session.__new__(K3Session)
-        s.pc, s.toks, s._park_mark, s._park_pending = pc, list(pc.log), None, None
+        s.pc, s._park_mark, s._park_pending = pc, None, None   # (the session reads the log through pc)
         s.counters = {'parks': 0, 'idle_skipped': 0}
         return s
 
@@ -189,15 +192,15 @@ class TestIdlePark(unittest.TestCase):
         self.assertEqual((pc.writes, s.counters['idle_skipped']), (0, 1))
         self.assertEqual(s.shutdown_park(), 'park-1')            # a shutdown parks any change
         self.assertEqual(s.shutdown_park(), 'unchanged')
-        pc.log = list(range(3000 + 4095)); s.toks = list(pc.log)
+        pc.log = list(range(3000 + 4095)); pc.st = dict(i0=len(pc.log), commit=1)
         s.idle()                                                 # gained 4,095 since the shutdown park: skipped
         self.assertEqual(pc.writes, 1)
-        pc.log = list(range(3000 + 4096)); s.toks = list(pc.log)
+        pc.log = list(range(3000 + 4096)); pc.st = dict(i0=len(pc.log), commit=1)
         s.idle()                                                 # gained 4,096: a background park
         self.assertEqual((pc.writes, s.counters['parks']), (2, 2))
         s.idle()                                                 # landed (pc.parked): nothing gained since
         self.assertEqual(pc.writes, 2)
-        pc.log = [7] + list(range(5000)); s.toks = list(pc.log)  # another line of 5,001 positions: its whole log counts
+        pc.log = [7] + list(range(5000)); pc.st = dict(i0=len(pc.log), commit=1)  # another line of 5,001 positions: its whole log counts
         s.idle()
         self.assertEqual(pc.writes, 3)
 

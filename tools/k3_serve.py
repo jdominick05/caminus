@@ -8,7 +8,7 @@ The tokenizer and chat template come from the GGUF (vocab only; no tensors are r
 in --log-dir DIR (default '': off, as caminus serve: the flight recorder's line is the per-request log). The process names itself `caminus` (/proc/<pid>/comm)
 before any thread starts, so llm-top finds it.
 
-Monitoring (docs/agentic/spec-metrics.md): llama-server's /health, /props, /slots, /metrics plus the caminus: series
+Monitoring (docs/specs/spec-metrics.md): llama-server's /health, /props, /slots, /metrics plus the caminus: series
 and GET /caminus/status. The mock fills the engine-internal metrics with synthetic values (mock_engine.SynthProfile:
 per-card split, batched prefill at 2,900 tok/s, restores, cache tiers; --no-synth turns it off). Hardware readings
 need --hw-root (a sysfs root: '/' reads the real cards) or --hw-fixture DIR (writes a synthetic two-card tree there

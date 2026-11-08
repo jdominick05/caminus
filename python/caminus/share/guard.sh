@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# guard.sh LOG SECS CMD...: every GPU command runs under it (CLAUDE.md, GPU safety; docs/RELEASE-PLAN.md, "Guard"). Shipped in
+# guard.sh LOG SECS CMD...: every GPU command runs under it (CLAUDE.md, GPU safety; docs/dev/packaging.md, "Guard"). Shipped in
 # the package (caminus/share/guard.sh; `caminus serve` runs itself under it; tools/guard.sh is a link to this file).
 # guard.sh --lines [ROOT]: print the watched cards and their lines (from ROOT's sysfs, default /) and exit; nothing runs.
 #
@@ -10,8 +10,8 @@
 #   * watched: every amdgpu card whose KFD node is gfx1100 (gfx_target_version 110000, the target Caminus ships), in DRM order;
 #     an iGPU / other target is not watched (its small VRAM carve-out holds the desktop: a 0.97 line would kill for nothing)
 #   * line: floor(floor(total_MiB * 97 / 100) / 50) * 50 (0.97 of the card, rounded down to 50 MiB): here the XTX's 24,560 MiB
-#     -> 23,800 and the XT's 20,464 -> 19,850, the old fixed lines. caminus.machine computes the same for caminus.capacity
-#   * the display-driving card (a connected connector or boot_vga = 1) is flagged: caminus.capacity keeps its 512 MiB reserve
+#     -> 23,800 and the XT's 20,464 -> 19,850, the old fixed lines. caminus.device.machine computes the same for caminus.device.capacity
+#   * the display-driving card (a connected connector or boot_vga = 1) is flagged: caminus.device.capacity keeps its 512 MiB reserve
 #     below the line (the desktop's own VRAM grows); the guard kills at the line as for every card
 #   * the fault watch reads `journalctl -k` when this user can (the systemd-journal / adm groups), else `dmesg` (when
 #     kernel.dmesg_restrict = 0), else it says at the start, in the log and on stdout, that the watch is OFF and how to enable it

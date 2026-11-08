@@ -23,7 +23,7 @@ PATH = C.model_path(C.opt(a, '--model', 'coder')); TOK = C.opt(a, '--tokens', C.
 if not 2 <= len(a) <= 3: print(__doc__); sys.exit(2)
 T = int(a[0]); NP = int(a[1]); MODES = (a[2] if len(a) > 2 else 'tiny,tiny0,tiny1,delay1').split(',')
 torch = C.setup_torch()
-from caminus.flashnext_tp import FlashNextTP
+from caminus.engine.flashnext_tp import FlashNextTP
 toks = C.tokens(TOK)
 print(f'model {PATH}; tokens {TOK}; T {T}; passes {NP}; modes {MODES}; compaction_proactiveness {C.proactiveness()}', flush=True)
 m = FlashNextTP(PATH, ntok=T)

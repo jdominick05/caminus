@@ -1,4 +1,4 @@
-"""The monitoring surface's renderers (docs/agentic/spec-metrics.md): llama-server's /metrics, /slots and /props
+"""The monitoring surface's renderers (docs/specs/spec-metrics.md): llama-server's /metrics, /slots and /props
 shapes, plus the Caminus series and the versioned JSON status. Read side only: every function here runs on an HTTP
 thread and reads stats.EngineStats, the server's own counters and the hardware reader's latest reading.
 
@@ -367,7 +367,7 @@ def task_params(p, n_predict=-1, stream=False, spec_types='none'):
 
 # ------------------------------------------------------------------------------------------------ JSON status
 def status(st, srv, cards, energy, hist=True):
-    """GET /caminus/status (version STATUS_VERSION): every group of docs/agentic/spec-metrics.md as plain JSON, the
+    """GET /caminus/status (version STATUS_VERSION): every group of docs/specs/spec-metrics.md as plain JSON, the
     per-card data as a list, windows as p50 / p95 / mean / max and (hist) cumulative bucket counts"""
     ph = st.physics_view()
     sv = st.spec_view()

@@ -28,7 +28,7 @@ int main(int argc, char ** argv) {
     HIP_CHECK(hipStreamSynchronize(s));
     const Diff d = compare(hid, G["hidden"]);
     printf("final hidden: rel err %.2e, max abs %.3g\n", d.rel, d.max_abs);
-    if (argc > 2) {   // the hidden states for tools/score_hidden.py
+    if (argc > 2) {   // the hidden states for training/tools/score_hidden.py
         auto hh = to_host_f32(hid); FILE * f = fopen(argv[2], "wb"); fwrite(hh.data(), 4, hh.size(), f); fclose(f);
         printf("wrote %s\n", argv[2]);
     }
@@ -41,9 +41,9 @@ int main(int argc, char ** argv) {
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / n;
     printf("forward (1 x %lld tokens): %.2f ms = %.0f tok/s\n", (long long)G["tokens"].numel(), ms, G["tokens"].numel() / ms * 1e3);
     // The W4A4 core is chaotic: +-1 ulp noise on PyTorch's own RMSNorm outputs moves its final hidden states by
-    // 0.20-0.21 relative (tools/score_hidden.py). So this checks the chain stays inside that envelope; whether the
-    // forward predicts as well is scored by the loss (tools/score_hidden.py), the real acceptance test.
+    // 0.20-0.21 relative (training/tools/score_hidden.py). So this checks the chain stays inside that envelope; whether the
+    // forward predicts as well is scored by the loss (training/tools/score_hidden.py), the real acceptance test.
     const bool ok = d.rel < 0.25;
-    printf(ok ? "PASS (inside the measured chaos envelope; score the loss with tools/score_hidden.py)\n" : "FAIL\n");
+    printf(ok ? "PASS (inside the measured chaos envelope; score the loss with training/tools/score_hidden.py)\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

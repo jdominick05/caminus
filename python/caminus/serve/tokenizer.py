@@ -4,7 +4,8 @@ Encoding follows llama.cpp (llama-vocab.cpp) so that ids match `llama-tokenize` 
   * special-token partition first: USER_DEFINED tokens (<think>, <tool_call>, ...) are always split out, CONTROL
     tokens (<|im_start|>, <|im_end|>, ...) only when parse_special is true (tokenizer_st_partition); UNUSED tokens
     ([PAD248077] ...) never are;
-  * each text fragment is BPE-encoded with the qwen35 pre-tokenizer regex and GPT-2 byte-level mapping;
+  * each text fragment is BPE-encoded with the GGUF's pre-tokenizer regex (qwen35, or qwen2 for Qwen3-Coder-Next) and
+    GPT-2 byte-level mapping;
   * no Unicode normalization (llama.cpp's BPE path has none; HF's tokenizer.json applies NFC: the two differ only
     on non-NFC input, see `nfc`).
 The BPE runs in HF `tokenizers` (Rust, releases the GIL); the special-token split is a Python regex.
@@ -23,7 +24,11 @@ from .vocab import CONTROL, NORMAL, UNUSED, USER_DEFINED, load_gguf_vocab
 # (?i:'s|'t|'re|'ve|'m|'ll|'d) for the first group, which is the same set.
 QWEN35_PRE = (r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}"
               r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
-PRE_REGEX = {'qwen35': QWEN35_PRE}
+# llama.cpp's qwen2 pre-tokenizer (LLAMA_VOCAB_PRE_TYPE_QWEN2: Qwen3-Coder-Next / Qwen3-Next's 151,936-token vocab): the
+# same groups without the \p{M} marks
+QWEN2_PRE = (r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
+             r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
+PRE_REGEX = {'qwen35': QWEN35_PRE, 'qwen2': QWEN2_PRE}
 
 # literal-tag marks (template.py writes them, encode_prompt reads them): MARK replaces the '<' of a literal special
 # token text, ESC escapes MARK/ESC characters that were already in the input. Both are Unicode private-use.
@@ -58,7 +63,8 @@ class QwenTokenizer:
             raise ValueError(f'unsupported tokenizer {vocab.model}/{vocab.pre}')
         self.vocab = vocab
         self.n_vocab = len(vocab.tokens)
-        self.eos_id, self.bos_id = vocab.eos_id, vocab.bos_id
+        # (a vocabulary without a BOS token, bos_token_id absent: -1 in the GGUF reader, e.g. Qwen3-Coder-Next's: None)
+        self.eos_id, self.bos_id = vocab.eos_id, (vocab.bos_id if vocab.bos_id is not None and vocab.bos_id >= 0 else None)
         bpe_vocab = {t: i for i, (t, ty) in enumerate(zip(vocab.tokens, vocab.types)) if ty == NORMAL}
         merges = [tuple(m.split(' ')) for m in vocab.merges]
         tk = Tokenizer(models.BPE(vocab=bpe_vocab, merges=merges, ignore_merges=False, fuse_unk=False,

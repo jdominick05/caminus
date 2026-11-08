@@ -6,7 +6,7 @@ CPU-safe by default: it reads sysfs and the KFD topology and imports PyTorch, bu
 so it runs beside a server. Checked: Python and the platform, the package and every code object against its provenance, the
 dependencies and the vendored gguf-py reader, PyTorch (a ROCm build, else the install command), the gfx1100 cards (count, VRAM
 total and in use, the guard's lines, the display-driving card, other GPU processes, the PCIe links), clocks and runtime PM,
-the guard (present, its lines == caminus.machine, gpu-high, the STOP file, the kernel log readable for the fault watch), host
+the guard (present, its lines == caminus.device.machine, gpu-high, the STOP file, the kernel log readable for the fault watch), host
 RAM, the model files (sizes; --verify: sha256, slow), disk space for the caches, port 8092, the configuration in effect.
 --gpu (runs itself under the guard): loads the `smoke` code object on each gfx1100 card, runs one bounded saxpy and checks
 the result, then peer access between the first two cards."""
@@ -19,7 +19,8 @@ import socket
 import subprocess
 import sys
 
-from .. import config, kernels, machine, models
+from .. import config, models
+from ..device import host, kernels, machine
 
 LEVELS = ('PASS', 'INFO', 'WARN', 'FAIL')
 
@@ -89,7 +90,7 @@ def check_deps(R):
 
 
 def check_torch(R):
-    from ..torchcheck import status
+    from ..device.torchcheck import status
     ok, ver, detail = status()
     R.add('PASS' if ok else 'FAIL', 'torch', detail)
 
@@ -102,31 +103,46 @@ def kfd_procs():
         return None
 
 
-def check_gpus(R):
-    cards = machine.cards()
-    w = [c for c in cards if c['watched']]
-    others = [c for c in cards if not c['watched']]
-    if not cards:
-        R.add('FAIL', 'gpu', 'no amdgpu card in /sys/class/drm (the amdgpu driver, ROCm)')
+def check_gpus(R, root='/'):
+    """the host's GPUs (caminus.device.host, D-292): one supported card runs the one-card models, two the two-card ones (the
+    pair placement would pick, on adequate links); unsupported cards are listed and not used"""
+    gs = host.gpus(root)
+    w = [c for c in gs if c['watched']]
+    u = host.usable(gs)
+    if not gs:
+        R.add('FAIL', 'gpu', 'no GPU in /sys/class/drm (the amdgpu driver, ROCm)')
         return w
-    if not os.path.isdir('/sys/class/kfd/kfd/topology'):
+    if not os.path.isdir(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology')):
         R.add('FAIL', 'gpu', 'no KFD topology (/sys/class/kfd): the amdgpu compute stack is not available')
-    R.add('PASS' if len(w) >= 2 else 'FAIL', 'gpu', f'{len(w)} gfx1100 card(s)' + ('' if len(w) >= 2 else
-          ': Caminus runs the Coder on two (tested: RX 7900 XTX 24 GB + RX 7900 XT 20 GB, P2P)'))
-    for c in w:
+    R.add('PASS' if u else 'FAIL', 'gpu', f'{len(u)} supported card(s)' + ('' if u else
+          ': Caminus runs on AMD RX 7900 XTX / XT (gfx1100) cards; other AMD hardware: please send a hardware report'))
+    for c in u:
         used = _read(os.path.join(c['dev'], 'mem_info_vram_used'))
         used = int(used) >> 20 if used else None
-        speed, width = _read(os.path.join(c['dev'], 'current_link_speed')), _read(os.path.join(c['dev'], 'current_link_width'))
         lvl = 'PASS' if used is not None and used < 1024 else 'WARN'
-        R.add(lvl, 'gpu', f'{c["label"]} {c["card"]} {c["pci"]}: {c["total_mib"]} MiB, {used} MiB in use'
+        R.add(lvl, 'gpu', f'{host.describe(c)}: {c["total_mib"]} MiB, {used} MiB in use'
               + (' (something holds VRAM: another engine or test? Caminus needs the cards idle)' if lvl == 'WARN' else '')
               + f'; guard line {c["line_mib"]} MiB' + ('; drives a display (512 MiB kept free below its line)' if c['display'] else '')
-              + (f'; link {speed} x{width}' if speed else ''))
-    if len(w) >= 2 and (w[0]['total_mib'] < 24000 or w[1]['total_mib'] < 20000):
-        R.add('WARN', 'gpu', 'smaller cards than tested (24 + 20 GB): the default 262,144-token context may not fit (caminus serve '
-              'refuses it at startup; try a lower --max-ctx)')
-    for c in others:
-        R.add('INFO', 'gpu', f'{c["label"]} {c["card"]} {c["pci"]}: {c["total_mib"]} MiB, gfx_target {c["gfx"]}: not used, not watched')
+              + f'; {host.link_text(c["link"])}' + (f' (slowest hop at {c["link"]["at"]})' if c['link'] and c['link']['at'] != c['pci'] else ''))
+    if len(u) == 1:
+        R.add('PASS', 'gpu', 'one card: the one-card models run (Qwen3.6, AREX-2); the two-card models (the Coder, Qwen3-Coder-Next) need two')
+    elif len(u) >= 2:
+        try:
+            pr = host.pair(gs)
+            sp = host.split(pr)
+            R.add('PASS', 'gpu', f'two-card models on {" + ".join(host.describe(c) for c in pr)} (card 0 first), split '
+                  f'{sp["gdn_keys"]} / {sp["moe_blocks"]}')
+            if tuple(c['label'] for c in pr) != ('XTX', 'XT'):
+                R.add('WARN', 'gpu', 'the Coder runs only on an RX 7900 XTX + XT in this release (on this pair its prompt path is '
+                      'untested); Qwen3-Coder-Next runs on any pair')
+        except host.PlacementError as e:
+            R.add('WARN', 'gpu', f'two-card models: {e}')
+    for lv, _, text in host.problems(gs):
+        if lv == 'warn' and 'link' not in text:          # (the link rule is on the pair line above)
+            R.add('WARN', 'gpu', text)
+    for c in gs:
+        if c['status'] == 'unsupported' and c['integrated']:
+            R.add('INFO', 'gpu', f'{host.describe(c)}: integrated GPU ({c["total_mib"]} MiB), not used')
     ps = kfd_procs()
     if ps:
         names = []
@@ -194,7 +210,7 @@ def check_guard(R, w):
     got = [x.split()[0] + ':' + x.split()[5] for x in r.stdout.splitlines() if x.strip()]
     want = [f'{c["card"]}:{c["line_mib"]}' for c in w]
     R.add('PASS' if r.returncode == 0 and got == want and want else 'FAIL', 'guard',
-          f'{GUARD}: lines {", ".join(got) or "none"}' + ('' if got == want else f' != caminus.machine {want}'))
+          f'{GUARD}: lines {", ".join(got) or "none"}' + ('' if got == want else f' != caminus.device.machine {want}'))
     stop = os.environ.get('K3_GUARD_STOP', os.path.expanduser('~/.local/state/k3/GPU_FAULT_STOP'))
     if os.path.exists(stop):
         R.add('FAIL', 'guard', f'a GPU fault was recorded in {stop}: every guarded run refuses (exit 98); read the kernel-log lines in '
@@ -260,7 +276,7 @@ def check_disk(R):
             R.add('WARN', 'disk', f'{key} {p}: {e}'); continue
         if key == 'model_dir':   # (the files caminus download would still fetch into it)
             where = {'coder-1': config.coder(), 'coder-2': shard2(config.coder() or ''), 'dflash': config.dflash()}
-            miss = [it for it in models.ITEMS if not (where.get(it.key) and os.path.isfile(where[it.key]))]
+            miss = [models.BY_KEY[k] for k in models.BY_NAME['coder'].items if not (where.get(k) and os.path.isfile(where[k]))]   # (the default download: the Coder's files)
             need = sum(it.size for it in miss) / 1e9 + 1
             if not miss:
                 R.add('PASS', 'disk', f'{key} {p}: {fr:.0f} GB free (every model file present)'); continue
@@ -291,20 +307,13 @@ def check_config(R):
 
 def gpu_probe(R):
     """the GPU path (under the guard): the smoke object on each gfx1100 card, one saxpy, then peer access"""
-    w = machine.watched()
-    gpus = []
-    nodes = sorted((int(n), n) for n in os.listdir('/sys/class/kfd/kfd/topology/nodes') if n.isdigit())
-    for _, n in nodes:   # HIP's order: the GPU nodes by node id (simd_count > 0)
-        props = dict(x.split() for x in (_read(f'/sys/class/kfd/kfd/topology/nodes/{n}/properties') or '').splitlines() if len(x.split()) == 2)
-        if int(props.get('simd_count', 0)) > 0:
-            gpus.append(int(props.get('gfx_target_version', 0)))
-    want = [i for i, g in enumerate(gpus) if g == machine.GFX_TARGET]
+    u = [c for c in host.usable(host.gpus()) if c['hip'] is not None]
     if 'HIP_VISIBLE_DEVICES' not in os.environ:
-        os.environ['HIP_VISIBLE_DEVICES'] = ','.join(map(str, want))   # (no context on another GPU, e.g. the iGPU)
+        os.environ['HIP_VISIBLE_DEVICES'] = ','.join(str(c['hip']) for c in u)   # (no context on another GPU, e.g. the iGPU)
     import ctypes
     import time
     import torch
-    from ..hip import Module
+    from ..device.hip import Module
     n = 1 << 20
     devs = [d for d in range(torch.cuda.device_count()) if torch.cuda.get_device_properties(d).gcnArchName.startswith('gfx1100')]
     if not devs:
@@ -320,9 +329,10 @@ def gpu_probe(R):
             R.add('PASS' if ok else 'FAIL', 'gpu-run', f'cuda:{d} {torch.cuda.get_device_name(d)}: smoke.hsaco loaded, saxpy of {n} floats '
                   + ('exact' if ok else 'WRONG') + f' ({(time.perf_counter() - t0) * 1e3:.0f} ms with the load)')
             del x, y, m
-    if len(devs) >= 2:
-        p = torch.cuda.can_device_access_peer(devs[0], devs[1]) and torch.cuda.can_device_access_peer(devs[1], devs[0])
-        R.add('PASS' if p else 'FAIL', 'gpu-run', f'peer access cuda:{devs[0]} <-> cuda:{devs[1]}: {"yes" if p else "no (the TP exchange needs P2P)"}')
+    for i, a in enumerate(devs):          # every pair a two-card model could get (caminus.device.host.pair picks one of them)
+        for b in devs[i + 1:]:
+            p = torch.cuda.can_device_access_peer(a, b) and torch.cuda.can_device_access_peer(b, a)
+            R.add('PASS' if p else 'WARN', 'gpu-run', f'peer access cuda:{a} <-> cuda:{b}: {"yes" if p else "no: two-card models cannot use this pair (the TP exchange needs P2P; another slot or the BIOS IOMMU / ACS settings)"}')
 
 
 def run(verify=False, gpu=False):

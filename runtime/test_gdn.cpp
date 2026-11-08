@@ -1,5 +1,5 @@
 // Milestone 4a, part 3: the S1 GatedDeltaNet blocks against the golden dump, from each block's golden input h,
-// with fla's own Triton kernels replayed from build/triton (tools/capture_triton.py) between our ops:
+// with fla's own Triton kernels replayed from build/triton (training/tools/capture_triton.py) between our ops:
 //   q/k/v/g projections (actq + rocBLAS), a/b projections (bf16 cast + rocBLAS), cat -> causal conv (Triton) ->
 //   contiguous q/k/v -> l2norm q, k -> beta sigmoid -> gate cumsum -> kkt solve -> recompute w/u -> state
 //   recurrence -> chunk output (Triton) -> gated RMSNorm (Triton) -> o projection (actq + rocBLAS).

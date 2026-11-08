@@ -19,6 +19,22 @@ if [ ! -f "$HOME_DIR/settings.json" ]; then
     cp "$HERE/settings.json" "$HOME_DIR/settings.json"
     echo "qwen-k3: created $HOME_DIR (settings.json from $HERE)" >&2
 fi
+# the server's context (max_ctx auto sizes it to the cards: 262,144 is a cap, not a given): every Caminus provider's
+# contextWindowSize set to it, rounded down to a thousand, before each launch (caminus qwen does the same through setup)
+python3 -I - "$HOME_DIR/settings.json" "${CAMINUS_URL:-http://127.0.0.1:8092}" <<'PYEOF' || true
+import json, sys, urllib.request
+path, url = sys.argv[1], sys.argv[2].rstrip('/')
+try:
+    n = int(json.load(urllib.request.urlopen(url + '/props', timeout=5))['default_generation_settings']['n_ctx'])
+except Exception as e:
+    sys.exit(f'qwen-k3: the server at {url} did not report its context ({e}); settings.json kept as it is')
+s = json.load(open(path)); w = n // 1000 * 1000; changed = 0
+for p in (s.get('modelProviders') or {}).get('openai', []):
+    if p.get('envKey') == 'CAMINUS_API_KEY' and p.setdefault('generationConfig', {}).get('contextWindowSize') != w:
+        p['generationConfig']['contextWindowSize'] = w; changed += 1
+if changed:
+    json.dump(s, open(path, 'w'), indent=2); print(f'qwen-k3: context window {w} from the server ({changed} providers)', file=sys.stderr)
+PYEOF
 export QWEN_HOME="$HOME_DIR"
 export CAMINUS_API_KEY="${CAMINUS_API_KEY:-caminus-local}"
 exec qwen "$@"

@@ -1,0 +1,1 @@
+"""The dormant S1 training stack (since the 10-31 inference-first pivot): fused activation quantization (actq), GDN state kernels (gdn), the adaptive head loss (headloss), linears (linear, qlinear), weight quantization (wquant), fusion patches (fuse)."""

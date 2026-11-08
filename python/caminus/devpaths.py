@@ -8,6 +8,7 @@ their paths come from caminus.config. Every value comes from the environment; no
   REAP               the REAP-308 GGUF (the regression model; not distributed)
   ARTIFACTS          the directory of reference dumps, stored results and big outputs (not distributed)
   HF_TOKENIZER_JSON  the base model's tokenizer.json (two optional tokenizer cross-checks skip without it)
+  GSQ / HAUHAU / AREX / Q3N   the other catalog models (catalog()); unset: where `caminus pull` puts them
 
 An unset variable with no fallback gives the literal placeholder '$NAME' (joined with the rest of the path): reading it fails with
 an error that names the variable to set. Where a missing value would create a directory or file (a scratch or output default),
@@ -52,6 +53,15 @@ def mtp():
         return os.path.expanduser(v)
     from . import config
     return config.get('mtp') or '$MTP'
+
+
+def catalog(key, name):
+    """a catalog model's file (caminus.models ITEMS key): $name when set, else where `caminus pull` puts it (model_dir)"""
+    v = os.environ.get(name)
+    if v:
+        return os.path.expanduser(v)
+    from . import config, models
+    return os.path.join(config.model_dir(), models.local_rel(models.BY_KEY[key]))
 
 
 def reap():

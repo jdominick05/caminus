@@ -1,4 +1,4 @@
-"""Agent-behaviour signals for the metrics (docs/agentic/spec-metrics.md, 'agent behaviour' and 'DFlash'): the content
+"""Agent-behaviour signals for the metrics (docs/specs/spec-metrics.md, 'agent behaviour' and 'DFlash'): the content
 class of the text being generated, the harness behind a User-Agent, the tool-call outcome of a parsed reply, and the
 loop detector over the reasoning. None of them keeps any text: classes, counts and line hashes only.
 

@@ -1,4 +1,4 @@
-"""Compare two tools/lc_baseline.py results (OUT/k3_qsa.json or k3_baseline.json) on everything that is not a timing: per
+"""Compare two tools/eval/lc_baseline.py results (OUT/k3_qsa.json or k3_baseline.json) on everything that is not a timing: per
 depth the teacher-forced numbers against llama.cpp (KLD mean / max / per 64 positions, top-1, llama.cpp's own drift: exact
 float equality, so the same logits give the same numbers and any drift in them shows) and every probe's greedy answer
 (the text, copy found, == llama.cpp, the first divergence and llama.cpp's gap there). Fill / pass / snapshot times, the

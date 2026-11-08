@@ -1,10 +1,10 @@
 """Tape inventory of a Flash-Next (qwen4exp) GGUF for the K3 TP engine: which (op, format) pairs its tapes need, per op,
-with the layers that need them; checked against a module's capability set (caminus.k3.MODULE_CAPS) and printed as the
+with the layers that need them; checked against a module's capability set (caminus.engine.k3.MODULE_CAPS) and printed as the
 per-op format whitelists a module build takes (spec-gsq-port.md 4b).
 
   python -I tools/gg_inventory.py MODEL.gguf [--module k3_gguf_gsq] [--tape [--ntok T]] [--json OUT]
 
-Header mode (default, CPU only): maps every tensor the way python/caminus/flashnext_tp.py's tapes use it. --tape also
+Header mode (default, CPU only): maps every tensor the way python/caminus/engine/flashnext_tp.py's tapes use it. --tape also
 builds the tapes on the GPU (FlashNextTP local_only, tape_only: nothing is launched) and checks that the tapes'
 formatted segments are exactly the header inventory, and that every pair is in the module's set. Exit 0 = all inside.
 Host-side tensors (token_embd, the PLE table: dequantized by gguf-py) are listed apart, with gguf-py support."""
@@ -51,7 +51,7 @@ def header_inventory(path, caps):
         add(mv_kind(T[n + '.weight']), 'out')
     host = {n: T[n] for n in ('token_embd.weight',) if n in T}
     # the other shards (split GGUF): only the PLE table is used, on the host
-    from caminus.flashnext import split_tensors
+    from caminus.engine.flashnext import split_tensors
     for n, x in split_tensors(path, rd).items(): host[n] = x['qtype'].name
     if 'per_layer_token_embd.weight' in T: host['per_layer_token_embd.weight'] = T['per_layer_token_embd.weight']
     for n, fm in host.items():
@@ -81,7 +81,7 @@ def main():
     tape = '--tape' in a
     if tape: a.remove('--tape')
     path = a[0]
-    from caminus import k3
+    from caminus.engine import k3
     caps = k3.MODULE_CAPS[k3.module_for(module, ntok)]
     inv, host, errs = header_inventory(path, caps)
     pend = k3.PENDING.get(k3.module_for(module, ntok), frozenset())
@@ -103,7 +103,7 @@ def main():
     if tape:
         import time
         import torch
-        from caminus.flashnext_tp import FlashNextTP
+        from caminus.engine.flashnext_tp import FlashNextTP
         for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
         t0 = time.time()
         m = FlashNextTP(path, module=module, local_only=True, tape_only=True, ntok=ntok)

@@ -4,7 +4,7 @@
                                Prefill, dr: DFlashK3Drafter(df) (device accept) or None, pc: PromptCache(m, pf, dr)
                                (build it last: the VRAM tier is sized from what the others left)
 
-The mapping (docs/agentic/spec-cache-api.md, "M7 dependencies"):
+The mapping (docs/specs/spec-cache-api.md, "M7 dependencies"):
   plan(ids, max_new)     -> pc.plan(ids, side='auto', max_new=max_new)['cached']
   prefill(ids, cancel, marks, max_new)
                          -> pc.prepare(ids, marks, side='auto', cancel=cancel, max_new=max_new) (side-slot routing, then restore
@@ -35,14 +35,13 @@ The mapping (docs/agentic/spec-cache-api.md, "M7 dependencies"):
   verify(feed)           -> a pass whose logits nobody reads (forced tool-call tokens beyond one pass): verify_tokens,
                             its features injected (the drafter stays in step)
   end()                  -> pc.commit(log, state): the completion's accepted tokens reported, the live state kept
-  abort()                -> (a host-side exception between calls, or inside a call) whatever is in flight drained, then the
-                            state the device holds is kept: a pass that ran or was launched (the target's launch epoch
-                            FlashNextTP.token moved since the session's state was set) and was not accepted is dropped (the next
-                            pass at its position commits 0: the device applied the commit it was launched with), a refusal
-                            before the launch keeps the commit; pc.commit: the VRAM tier and the live state are kept. When the
-                            device state is not known (a failure while the prompt was processed or during a bail recovery, a
-                            drain that failed) the live state is dropped (pc.drop_live: every checkpoint kept). reset only when
-                            the engine is poisoned
+  abort()                -> (a host-side exception between calls, or inside a call) whatever is in flight drained, then ONE
+                            report to the cache (pc.settle(returned, drained)), which decides what the device holds (it owns the
+                            live state and ran the prompt phase and the recoveries, so it knows when the state is not known):
+                            a pass that ran or was launched and was not accepted is dropped (the next pass at its position
+                            commits 0), a refusal before the launch keeps the commit, an unknown state or a failed drain drops
+                            the live state (every checkpoint kept), an engine reset since the last completed operation drops
+                            it too; reset only when the engine is poisoned
   reset()                -> pc.reset()
   idle()                 -> pc.park(background=True) (the worker calls it when no request came for idle_s seconds: 8 hours by
                             default, the user's ruling of 11-05), only when the live log gained >= pc.auto_park_min tokens
@@ -53,13 +52,13 @@ The mapping (docs/agentic/spec-cache-api.md, "M7 dependencies"):
                             within the idle time loses nothing (the caller bounds its time); an active side call is ended first
 
 Bail recovery: when a pass fails after the engine's bitwise retries (FlashNextTP's, or the drafter step's), the live state is
-undefined. The session drains anything in flight, restores the request's prompt-end checkpoint (pc.recover: every checkpoint
-kept; in a side call, which takes no checkpoints, pc.recover(at, ids) ends the side call with the main line intact and
-processes the side request's prompt again to the same state), replays the request's processed tokens teacher-forced with K3
+undefined. The session drains anything in flight; the cache (pc.recover_pass; in the prompt phase pc.prompt itself) restores
+the request's prompt-end checkpoint (every checkpoint kept; in a side call, which takes no checkpoints, it ends the side call
+with the main line intact and processes the side request's prompt again to the same state), replays the request's processed tokens teacher-forced with K3
 passes (bitwise the passes it lost: a T-token pass equals one-token steps) and runs the failed pass again: the same logits, so
 the same tokens (greedy, or the same Philox draws). The client sees a delay, not an error. A failure while the prompt is
-processed drops the live state (checkpoints kept; in a side call only the side call's state: pc.drop_live ends it with the
-main line intact) and processes the prompt again. Counted in stats (bail(True), pc.stats['recovered']); after
+processed drops the live state (checkpoints kept; in a side call only the side call's state: the cache ends it with the
+main line intact) and processes the prompt again (pc.prompt). Counted in stats (bail(True), pc.stats['recovered']); after
 `max_recoveries` failures in one request, or without the prompt-end checkpoint, EngineError (the worker resets: 503 / 529).
 Test hook: K3_TEST_HOOKS=police-controls with K3_TEST_BAIL=<n> makes this session's n-th target pass (0-based) bail on
 every attempt (a 1 us wait bound on every tape: the designed bail path, tools/gates/forcebail.py's 'tiny' mode), so the
@@ -69,7 +68,7 @@ Draft only when it pays: caminus.serve.draftpolicy.DraftPolicy (per content clas
 with the drafter's inject only, so it stays in step). The session's `drafter` is the callable the server's generation loop
 asks for drafts (run_generation's drafter(tokens, k)).
 
-Metrics (docs/agentic/spec-metrics.md; M7 ops): cached_known before processing, prefill_progress per chunk of the batched
+Metrics (docs/specs/spec-metrics.md; M7 ops): cached_known before processing, prefill_progress per chunk of the batched
 prefill and per K3 prompt pass (the cancel object passed to prepare() carries a progress(position) the prefill and the cache
 call); the pass split pass_k3_ms (the verify, or verify + step) / pass_sampler_ms (the device sampler's wait + host
 sampling); pass_cards per decode pass: each card's span of the target's pass (FlashNextTP.enable_card_timing: device events
@@ -86,25 +85,30 @@ import time
 import numpy as np
 import torch
 
-from .. import capacity, longctx, passpolice
-from ..k3 import ContextBoundsError
-from ..prefill import PrefillRefused
-from ..prefill_ops import RoutingError
+from .. import arch as _arch
+from ..device import capacity
+from ..decode import longctx
+from ..engine import passpolice
+from ..engine.k3 import ContextBoundsError
+from ..prefill.coder import PrefillRefused
+from ..prefill.glue import RoutingError
 from . import candsample as CS
 from .draftpolicy import DraftPolicy
 from .engine import EngineError, EngineSession, PrefillStats, common_prefix
 from .mock_engine import EngineStateError
+from ..cache.livestate import is_bail
+from ..cache.prompt import RecoveryFailed
 
 RESTORE_OF = {'live': 'live', 'vram': 'checkpoint', 'spill': 'checkpoint', 'disk': 'disk', 'cold': 'cold'}
 IDLE_PARK_S = 28800.0       # 8 hours (decision 11-05: an idle park after hours, not minutes, as servers usually do)
 EXCHANGE_WAIT_NOTE = ('not measured on this engine: the TP exchange waits inside the persistent kernel (OP_XCHG spins on the '
                       "peer's flag), so the wait is part of each card's pass span; separating it needs device timestamps inside "
-                      'the kernel (the *_trace builds, tools/k3_trace.py), which the serving code objects do not have')
+                      'the kernel (the *_trace builds, benchmarks/k3_trace.py), which the serving code objects do not have')
 
 
 def refusal_kind(e):
     """the metrics' refusal kind of a host refusal (refusals_total{kind}), or None for anything else"""
-    from ..promptcache import CacheError
+    from ..cache.prompt import CacheError
     if isinstance(e, RoutingError): return 'routing_flag'
     if isinstance(e, PrefillRefused): return 'prefill'
     if isinstance(e, ContextBoundsError): return 'bounds'
@@ -135,7 +139,12 @@ def engine_physics(m, pc=None):
     cannot be read (the defaults stay)"""
     import torch as _t
     card = None
+    if hasattr(m, 'physics_bytes'):                    # (a one-card engine counts its own bytes: Qwen35One.physics_bytes)
+        try: card = tuple(float(x) for x in m.physics_bytes())
+        except Exception:                               # noqa: BLE001
+            card = None
     try:
+        if card is not None: raise StopIteration
         frac = float(m.k_used) / float(m.n_exp)
         per = [0.0, 0.0]
         def nb(x):
@@ -150,12 +159,14 @@ def engine_physics(m, pc=None):
             seen.add(name)
             for c in (0, 1): per[c] += nb(v[c])
         card = tuple(per) if min(per) > 0 else None
+    except StopIteration:
+        pass
     except Exception:                                   # noqa: BLE001 - the spec defaults stay
         card = None
     kv = None
     try:
         L = pc.layout
-        kv = tuple(len(L.kv[c]) * L.pb[c] + (L.na * L.rb * 1.25 if L.idx else 0.0) for c in (0, 1))
+        kv = tuple(len(L.kv[c]) * L.pb[c] + (L.na * L.rb * 1.25 if L.idx else 0.0) for c in range(len(L.devs)))
     except Exception:                                   # noqa: BLE001
         kv = None
     return card, kv
@@ -178,9 +189,25 @@ class NullPolice:
         return []
 
 
-def _bail(e):
-    """True for a pass that failed after the engine's bitwise retries (FlashNextTP / DFlashK3 'a wait gave up ...')"""
-    return isinstance(e, RuntimeError) and 'a wait gave up' in str(e)
+_bail = is_bail     # (a pass that failed after the engine's bitwise retries: caminus.cache.livestate)
+
+
+class _Hooks:
+    """what the prompt cache calls back while it runs a request phase for the session (PromptCache.prompt / recover_pass):
+    arm(on) before / after each pass attempt (the test bail hook), event(kind, side) after a recovery (counters, stats)"""
+    __slots__ = ('s',)
+
+    def __init__(self, sess):
+        self.s = sess
+
+    def arm(self, on):
+        if on:
+            self.s._arm()
+        else:
+            self.s._armed = False
+
+    def event(self, kind, side=False):
+        self.s._event(kind, side)
 
 
 class _Progress:
@@ -228,8 +255,9 @@ class K3Session(EngineSession):
             m._pass_police = NullPolice()
         self.T = self.ntok = int(m.ntok)
         # a generation of n_new tokens after n prompt tokens needs n + n_new + T - 2 positions (spec.positions_needed): the server
-        # keeps prompt + max_new <= max_ctx, so the session's limit is the engine's less T - 2
-        self.max_ctx = int(m.max_ctx) - (self.T - 2)
+        # keeps prompt + max_new <= max_ctx, so the session's limit is the engine's less T - 2 (never above the engine's rows: a
+        # T = 1 engine, the one-card Qwen35One, keeps its max_ctx; arch.usable_ctx, which the loading server reports too)
+        self.max_ctx = _arch.usable_ctx(m.max_ctx, self.T)
         self.n_vocab = int(m.T['output.weight'].shape[1])
         self.vh = int(m.vh)
         self.eos_ids = tuple(eos_ids)
@@ -239,25 +267,20 @@ class K3Session(EngineSession):
         self.idle_s = idle_s
         self.wants_marks = bool(marks)
         # side-slot routing (PromptCache.route): on by default (caminus serve --no-side-route turns it off); the server passes
-        # max_new to plan / prefill (wants_max_new), so a side call's generation is known to fit the side slot
+        # max_new to plan / prefill, so a side call's generation is known to fit the side slot
         self.side_route = bool(side_route) and bool(getattr(pc, 'side_rows', 0))
-        self.wants_max_new = True
         self.last_route = None      # the last request's routing decision (PromptCache.route's dict)
         self._side = False          # the request in flight runs in the side slot
         self.drafter = SessionDrafter(self) if dr is not None else None
-        self.toks, self.st = [], dict(i0=0, commit=0)
         self.last_prefill = PrefillStats()
         self._planned = None
         self._pass = None           # the last pass awaiting accept: dict(i0, F, seq)
         self._dev = None            # the last device step's next drafts: (anchor position, anchor, drafts)
         self._kind = None           # what _drafts() gave for the coming pass: 'dflash' | 'device' | 'filler' | 'plain'
         self._mode = 'draft'
-        self._pe = None             # the request's prompt-end state (prepare()'s st): the recovery checkpoint
-        self._prompt = None
-        self._rec_n = 0
+        self._hooks = _Hooks(self)
         self._inflight = None       # 'step': a device step under way (abort drains the drafter's step when it was launched)
         self._step_ep = None        # the drafter's launch epoch (DFlashK3.token) before that step
-        self._ep = None             # the target's launch epoch when (toks, st) last matched the device (None: not known)
         self._bails_seen = len(getattr(m, 'bails', ()))
         self.counters = dict(device_passes=0, host_greedy_passes=0, sampled_passes=0, full_rows=0, wide_rows=0, plain_passes=0,
                              recoveries=0, recover_failed=0, prefill_recoveries=0, cancelled_prefills=0, aborts=0, aborts_commit0=0,
@@ -284,15 +307,19 @@ class K3Session(EngineSession):
                 ph.card_bytes, self.physics_source = card, 'engine'
             if kv is not None:
                 ph.kv_bytes_per_token = kv
-            ph.qsa_from = int(capacity.QSA_EXACT)
+            q = getattr(m, 'qsa_from', capacity.QSA_EXACT)   # (None: dense attention at every depth, the one-card engines)
+            ph.qsa_from = int(q) if q is not None else 1 << 40
             ph.source = self.physics_source
-            try:   # the guard's lines and the display card's reserve from this machine (caminus.machine; here (23800, 19850) / (512, 0))
+            try:   # the guard's lines and the display card's reserve from this machine (caminus.device.machine; here (23800, 19850) / (512, 0))
                 devs = list(getattr(m, 'devs', ()))
                 if len(devs) == len(ph.guard_mib):
                     ph.guard_mib = tuple(int(capacity.guard_line_mib(d)) for d in devs)
                     ph.reserve_mib = tuple(capacity.DISPLAY_RESERVE_MIB if capacity.is_display(d) else 0 for d in devs)
                     cs = [capacity._machine.by_card(capacity.drm_card(d)) for d in devs]
-                    if all(cs): ph.card_names = tuple(c['label'] for c in cs)
+                    if all(cs):
+                        ph.card_names = tuple(c['label'] for c in cs)
+                        from ..arch import CARD_BW     # (each card's bandwidth by its label, as the names: not by position)
+                        ph.card_bw = tuple(CARD_BW.get(c['label'], CARD_BW['XT']) for c in cs)
             except Exception:   # noqa: BLE001 - a stand-in engine without cards keeps the defaults
                 pass
         # test hook (passpolice's positive control, here on this session's own passes)
@@ -303,7 +330,9 @@ class K3Session(EngineSession):
         if self._bail_at is not None:
             print(f'K3Session: TEST HOOK ARMED: pass {self._bail_at} bails on every attempt (K3_TEST_BAIL)', flush=True)
             self._wrap_launch()
-        dev = [torch.device(f'cuda:{d}') for d in m.devs]
+        # the device sampler's vocabulary shards: FlashNextTP's two cards, or a one-card engine's two column views of its row on
+        # one card (Qwen35One.shard_devs: candsample merges two shards' candidates exactly either way)
+        dev = [torch.device(f'cuda:{d}') for d in getattr(m, 'shard_devs', m.devs)]
         # the pinned candidate buffers' width: top_k <= 64 + the default penalty window (64 ids) + the pass's drafts + the
         # tie margin; a wider k' (a longer penalty window) takes the full rows (_sampled_pass): no large pinned buffers
         kmax = self.kmax = CS.MAX_TOP_K + 64 + 2 * self.T + CS.TIE_MARGIN + 8
@@ -314,39 +343,51 @@ class K3Session(EngineSession):
         self._ev = [None, None]
         import collections
         self.samp_t = collections.deque(maxlen=4096)    # per sampled pass: (rows wait ms, host sampling ms, rows emitted)
-        self._mark()
 
     # ------------------------------------------------------------------------------------------------ helpers
+    @property
+    def toks(self):
+        """the live tokens: the prompt cache's (it owns the live state; caminus.cache.livestate). The cache's own list while the
+        state is live: read it, never modify it"""
+        return self.pc.live_tokens()
+
+    @property
+    def st(self):
+        """the live state dict(i0, commit): the prompt cache's (read only)"""
+        return self.pc.st
+
     @property
     def tokens(self):
         return tuple(self.toks)
 
-    def _mark(self):
-        """(toks, st) match the device now: keep the target's launch epoch (FlashNextTP.token grows by one at every launch, a
-        retry too) and its sequence epoch (FlashNextTP.seq grows at every engine reset). abort() compares them: a launch since
-        then ran at st's position and applied st's commit on the device; a reset since then left none of st on the device"""
-        self._ep = int(getattr(self.m, 'token', 0))
-        self._seq_ep = getattr(self.m, 'seq', None)
+    @property
+    def _pe(self):
+        """the request's prompt-end state (the bail recovery's checkpoint): the cache's"""
+        return self.pc.pe
 
-    def _intact(self, ep, seq):
-        """nothing changed since the mark ep: no launch, no engine reset, the cache's live state still the session's (a refusal
-        before prepare() touched anything)"""
-        m, pc = self.m, self.pc
-        return (ep is not None and int(getattr(m, 'token', 0)) == ep and getattr(m, 'seq', None) == seq
-                and dict(pc.st) == dict(self.st) and list(pc.log) == self.toks[:int(self.st['i0'])])
+    @property
+    def _prompt(self):
+        return self.pc.prompt_ids
 
-    def _drop_live(self):
-        """the device state is not known: the cache forgets its live state (pc.drop_live: every checkpoint kept, the next
-        request restores one or starts cold) and the session's log empties. In a side call only the side call's state is lost:
-        the cache ends it with the main line intact, and the session's log and state follow the main line's"""
-        if self.pc.drop_live() == 'side':
-            self.toks, self.st = list(self.pc.log), dict(self.pc.st)
-            self.counters['side_dropped'] += 1
-        else:
-            self.toks, self.st = [], dict(i0=0, commit=0)
-        self._pass, self._dev = None, None
-        self.counters['dropped_live'] += 1
-        self._mark()
+    def _event(self, kind, side):
+        """a recovery the cache ran for this session's request: its counters and stats (as before, at the same moments)"""
+        st_ = self.stats
+        on = st_ is not None and st_.enabled
+        if kind == 'prefill_recovery':
+            self.counters['prefill_recoveries'] += 1
+            if on: st_.bail(True)
+            if side: self.counters['side_recoveries'] += 1
+        elif kind == 'recover_failed':
+            self.counters['recover_failed'] += 1
+            if st_ is not None: st_.bail(False)
+        elif kind == 'recovered':
+            nb = len(getattr(self.m, 'bails', ()))
+            if on:
+                st_.retry(max(0, nb - self._bails_seen))   # (the failed pass's attempts and any in the replay: pass_retries_total)
+                st_.bail(True)
+            self._bails_seen = nb
+            self.counters['recoveries'] += 1
+            if side: self.counters['side_recoveries'] += 1
 
     def _wrap_launch(self):
         m, sess = self.m, self
@@ -402,10 +443,10 @@ class K3Session(EngineSession):
             raise ValueError('empty prompt')
         clock = self.stats.clock if self.stats is not None else time.perf_counter
         t0 = clock()
-        self._pe, self._prompt, self.last_first_logits = None, None, None    # (this request's, once known: the flight recorder)
+        self.last_first_logits = None
         pfs = PrefillStats(prompt_n=len(ids))
         pfs.lcp = common_prefix(self.toks, ids)
-        self._pass, self._dev, self._rec_n = None, None, 0
+        self._pass, self._dev = None, None
         n_plan = 0
         if self.stats is not None:
             pl = self._planned
@@ -416,33 +457,35 @@ class K3Session(EngineSession):
         mk = None
         if marks:
             mk = {k: v for k, v in marks.items() if isinstance(v, int) and 0 < v < len(ids)}
-        # (toks, st) stay the previous request's until this prompt's state is known (the cancelled branch, _first): a failure on
-        # the way leaves the device state unknown, so abort() drops the live state instead of committing the previous one
-        ep0, seq0 = self._ep, getattr(self.m, 'seq', None)
-        self._ep = None
+        # the cache runs the prompt phase (prepare, its bail retry, the prompt's last pass and its recovery): it knows when the
+        # device state is not known, and abort() asks it (PromptCache.settle)
         self._side = False
         on = self.stats is not None and self.stats.enabled
-        while True:
-            prog = _Progress(cancel, self.stats, n_plan) if on else cancel
-            try:
-                r = self.pc.prepare(ids, mk or None, side=self._route_arg(), cancel=prog, max_new=max_new)
-                break
-            except (ContextBoundsError, PrefillRefused) as e:
-                if self._intact(ep0, seq0):
-                    self._ep = ep0                  # (refused before anything ran: the live state stands)
-                if self.stats is not None:
-                    self.stats.refusal('prefill' if isinstance(e, PrefillRefused) else 'context')
-                raise EngineStateError(str(e)) from None
-            except RuntimeError as e:
-                if isinstance(e, RoutingError) and self.stats is not None:
-                    self.stats.refusal('routing_flag')
-                if not _bail(e) or self._rec_n >= self.max_recoveries or self.m.poisoned:
-                    raise EngineError(f'prefill: {e}') from None
-                self._rec_n += 1; self.counters['prefill_recoveries'] += 1
-                if self.stats is not None and self.stats.enabled: self.stats.bail(True)
-                # (the live state is lost, every checkpoint kept: prepare again; in a side call only the side call's state: the
-                # main line back, intact)
-                if self.pc.drop_live() == 'side': self.counters['side_recoveries'] += 1
+        prog = _Progress(cancel, self.stats, n_plan) if on else cancel
+        pc = self.pc
+        try:
+            r = pc.prompt(ids, mk or None, side=self._route_arg(), cancel=prog, max_new=max_new,
+                          max_recoveries=self.max_recoveries, hooks=self._hooks)
+        except RecoveryFailed as f:
+            raise EngineError(str(f)) from None
+        except (ContextBoundsError, PrefillRefused) as e:
+            if pc.phase != 'prepare':
+                self._refused(e)
+                raise
+            if self.stats is not None:
+                self.stats.refusal('prefill' if isinstance(e, PrefillRefused) else 'context')
+            raise EngineStateError(str(e)) from None
+        except RuntimeError as e:
+            if pc.phase != 'prepare':
+                self._refused(e)
+                raise
+            if isinstance(e, RoutingError) and self.stats is not None:
+                self.stats.refusal('routing_flag')
+            raise EngineError(f'prefill: {e}') from None
+        except Exception as e:                           # noqa: BLE001 - re-raised
+            if pc.phase == 'first':
+                self._refused(e)
+            raise
         st = r['st']
         self._side = bool(r.get('side'))
         rt = r.get('route') or dict(route='side' if self._side else 'main', reason='off')
@@ -456,8 +499,6 @@ class K3Session(EngineSession):
         batched = last is not None and last is not last_before
         last = last or {}
         if r.get('cancelled'):
-            self.toks, self.st = ids[:int(st['i0'])], dict(st)
-            self._mark()
             pfs.cancelled = True
             pfs.processed_n = int(st['i0']) - pfs.cached_n
             pfs.ms = (clock() - t0) * 1e3
@@ -465,14 +506,12 @@ class K3Session(EngineSession):
             self.counters['cancelled_prefills'] += 1
             self._report_cache()
             return None
-        self._pe = (int(st['i0']), int(st['commit']))
-        self._prompt = ids
         pfs.exact = int(st['i0']) == len(ids)
-        tp = clock()
-        self.last_first_logits = None
-        lg = self._first(ids, st)
+        self._armed = False
+        self._bail_stats()
+        lg = r['logits'].numpy()
         self.last_first_logits = lg
-        pfs.passes_ms = (clock() - tp) * 1e3 + max(0.0, r['ms'].get('process', 0.0) - (last.get('prefill_ms', 0.0) + last.get('inject_ms', 0.0) if batched else 0.0))
+        pfs.passes_ms = float(r['ms']['first']) + max(0.0, r['ms'].get('process', 0.0) - (last.get('prefill_ms', 0.0) + last.get('inject_ms', 0.0) if batched else 0.0))
         if batched:
             pfs.batched_ms = float(last.get('prefill_ms', 0.0))
             pfs.handoff_ms = float(last.get('inject_ms', 0.0))
@@ -483,75 +522,19 @@ class K3Session(EngineSession):
         self._report_cache()
         return lg
 
-    def _first(self, ids, st):
-        """the first logits (position len(ids) - 1) from the prepared state: longctx.first_logits (the prompt's last pass,
-        teacher-forced, its features injected), then pc.extend; recovers from a failed pass like any other"""
-        while True:
-            self._arm()
-            try:
-                lg, st2 = longctx.first_logits(self.m, st, ids, draft=self.dr)
-                break
-            except Exception as e:
-                self._refused(e)
-                if not _bail(e):
-                    raise
-                st = self._recover_state(e, ids, replay=False)    # (the prompt-end state: first_logits runs again from it)
-        self._armed = False
-        self._bail_stats()
-        self.pc.extend(ids, st2)
-        self.toks, self.st = list(ids), dict(st2)
-        self._mark()
-        return lg.numpy()
-
     # ------------------------------------------------------------------------------------------------ recovery
-    def _recover_state(self, err, toks, replay=True):
-        """a pass failed after the engine's retries: restore the request's prompt-end checkpoint, replay toks (the processed
-        tokens before the failed pass) teacher-forced with K3 passes (replay=False: the prompt-end state itself); returns the
-        state to run the failed pass from (positions < len(toks) processed). EngineError when it cannot (no checkpoint, too many
-        failures, poisoned). (A drafter step queued behind a failed verify was drained by DFlashK3Drafter.device_step.)
-        replay=True: the session's state is set to the returned one (positions < len(toks) processed); until then it is not
-        known (an exception in here makes abort() drop the live state)"""
-        self._armed = False
-        self._rec_n += 1
-        st_ = self.stats
+    def _recover(self, err):
+        """a pass of the generation failed after the engine's retries: the cache restores the request's prompt-end checkpoint
+        and replays the processed tokens (PromptCache.recover_pass); the failed pass then runs again from the returned state.
+        EngineError when it cannot (no checkpoint, too many failures, poisoned). (A drafter step queued behind a failed verify
+        was drained by DFlashK3Drafter.device_step.)"""
         self._inflight = None
-        self._ep = None
-        self._sync()
-        if self._rec_n > self.max_recoveries or self._pe is None or self.m.poisoned:
-            self.counters['recover_failed'] += 1
-            if st_ is not None: st_.bail(False)
-            raise EngineError(f'{err} (recovery: {"poisoned" if self.m.poisoned else "no prompt-end state" if self._pe is None else "too many failures"})')
-        r = self.pc.recover(self._pe, ids=self._prompt if self._side else None)
-        if r is None:
-            self.counters['recover_failed'] += 1
-            if st_ is not None: st_.bail(False)
-            raise EngineError(f'{err} (recovery: the prompt-end checkpoint {self._pe} is gone)')
-        st = r['st']
-        if replay and int(st['i0']) < len(toks):
-            while True:
-                self._arm()
-                try:
-                    _, st = longctx.first_logits(self.m, st, toks, draft=self.dr)
-                    break
-                except RuntimeError as e:
-                    if not _bail(e):
-                        raise
-                    return self._recover_state(e, toks)
-            self.pc.extend(toks, st)
-        nb = len(getattr(self.m, 'bails', ()))
-        if st_ is not None and st_.enabled:
-            st_.retry(max(0, nb - self._bails_seen))   # (the failed pass's attempts and any in the replay: pass_retries_total)
-            st_.bail(True)
-        self._bails_seen = nb
-        self.counters['recoveries'] += 1
-        if self._side: self.counters['side_recoveries'] += 1
-        print(f'K3Session: a pass failed after the engine\'s retries ({err}); recovered from the prompt-end checkpoint {self._pe}, '
-              f'{len(toks) - self._pe[0]} positions replayed', flush=True)
+        try:
+            st = self.pc.recover_pass(err, list(self.toks), max_recoveries=self.max_recoveries, hooks=self._hooks)
+        except RecoveryFailed as f:
+            raise EngineError(str(f)) from None
         self._dev = None
-        if replay:
-            self.st = dict(st)
-            self._mark()
-        return dict(st)
+        return st
 
     # ------------------------------------------------------------------------------------------------ drafts
     def _drafts(self, toks, k):
@@ -581,7 +564,7 @@ class K3Session(EngineSession):
             except RuntimeError as e:
                 if not _bail(e):
                     raise
-                self.st = self._recover_state(e, self.toks)
+                self._recover(e)
                 continue
             self.drafts_real = df_st['draft_launches'] + df_st['fused'] > n0     # (no draft launch: the drafter's filler)
             if not self.drafts_real:
@@ -590,13 +573,12 @@ class K3Session(EngineSession):
 
     # ------------------------------------------------------------------------------------------------ passes
     def _seq(self, feed, drafts):
-        i0 = len(self.toks)
-        if i0 != int(self.st['i0']):
-            raise EngineStateError(f'K3Session: the log ({i0}) and the state ({self.st}) disagree')
+        toks = self.toks
+        i0 = len(toks)
         body = [int(t) for t in feed] + [int(t) for t in drafts]
         if not 1 <= len(feed) <= self.T or len(body) > self.T:
             raise EngineStateError(f'K3Session: a pass of {len(feed)} fed + {len(drafts)} drafts with T = {self.T}')
-        return i0, self.toks + body + [body[-1]] * (self.T - len(body))
+        return i0, toks + body + [body[-1]] * (self.T - len(body))
 
     def verify(self, feed):
         """a pass whose logits are not read (forced tool-call tokens beyond one pass): its features injected; returns None"""
@@ -614,7 +596,7 @@ class K3Session(EngineSession):
                 self._refused(e)
                 if not _bail(e):
                     raise
-                self.st = self._recover_state(e, self.toks)
+                self._recover(e)
         self._armed = False
         self._bail_stats()
         self._pass = dict(i0=i0, F=len(feed), seq=seq)
@@ -628,10 +610,8 @@ class K3Session(EngineSession):
         if not 0 <= n <= p['F'] + (self.T - p['F']):
             raise EngineStateError(f'accept {n} of a {self.T}-token pass')
         i0 = p['i0']
-        self.toks = p['seq'][:i0 + n]
-        self.st = dict(i0=i0 + n, commit=n)
+        self.pc.append(p['seq'][i0:i0 + n], dict(i0=i0 + n, commit=n))   # (the pass's accepted tokens: the cache's live state moves)
         self._pass = None
-        self._mark()
 
     def sample_pass(self, feed, drafts, sampler, history, stop_ids=()):
         if self._pass is not None:
@@ -654,8 +634,8 @@ class K3Session(EngineSession):
             try:
                 if greedy_plain and self.dr is not None and kind in ('device', 'dflash') and F + k == self.T and self.dr.step_ok(i0):
                     self._arm()
-                    if self.df.pending is not None: self.df.flush()
-                    self._step_ep = int(getattr(self.df, 'token', 0))
+                    if self.df.queued is not None: self.df.flush()
+                    self._step_ep = int(self.df.token)
                     self._inflight = 'step'
                     r, nd, tm = self.dr.device_step(self.m, seq, i0, commit, F, timed=(self.policy.n % 16 == 1))
                     self._inflight = None
@@ -691,7 +671,7 @@ class K3Session(EngineSession):
                 self._refused(e)
                 if not _bail(e):
                     raise
-                self.st = self._recover_state(e, self.toks)
+                self._recover(e)
                 if kind == 'device':
                     kind = 'dflash'             # (the device drafts are host ints: the same pass runs again)
         self._armed = False
@@ -705,10 +685,9 @@ class K3Session(EngineSession):
         self._bail_stats()
         t1 = clock()
         if on:
-            st.pass_k3_ms = ((tw or t1) - t0) * 1e3
-            st.pass_sampler_ms = (t1 - (tw or t1)) * 1e3
             cm = getattr(self.m, 'card_ms', None) if self.card_timing else None
-            st.pass_cards = (cm, None, self.link_bytes_per_pass) if (cm is not None or self.link_bytes_per_pass) else None
+            st.pass_split(((tw or t1) - t0) * 1e3, (t1 - (tw or t1)) * 1e3,
+                          (cm, None, self.link_bytes_per_pass) if (cm is not None or self.link_bytes_per_pass) else None)
         if self.dr is not None and kind in ('device', 'dflash', 'plain'):
             self.policy.record('plain' if kind == 'plain' else 'draft', self._cls(), i0, (t1 - t0) * 1e3, len(out), step_ms)
             if on:
@@ -814,65 +793,59 @@ class K3Session(EngineSession):
         if self._pass is not None:
             raise EngineStateError('end without accept')
         if self.toks:
-            self.pc.commit(self.toks, self.st)
+            self.pc.commit(self.toks, self.st)   # (the passes were appended as they ran: what end() adds is extend()'s whole-log check)
         self._report_cache()
 
     def abort(self):
-        """after a host-side exception (the worker's 'internal' error; between calls or inside one): drain what is in flight,
-        then keep the state the device holds and report it (pc.commit: the VRAM tier and the live state stay):
+        """after a host-side exception (the worker's 'internal' error; between calls or inside one): drain what is in flight
+        (the target pass launched since the cache last vouched for the state: its status re-read; the drafter's step behind
+        it), then report once to the cache, which decides (PromptCache.settle; live state step 3, 11-07: before, the session
+        decided with its own copy of the state and its own epochs):
           * a pass that returned and was not accepted: dropped, (its i0, commit 0);
-          * a target pass launched since the session's state was set (FlashNextTP.token moved: an exception inside a pass after
-            the launch, e.g. in the drafter's step, the device sampler or the inject) and not returned: the same, (st's i0,
-            commit 0). The launch applied st's commit on the device; committing it again in the next pass would apply it twice;
+          * a target pass launched and not returned (an exception inside a pass after the launch, e.g. in the drafter's step,
+            the device sampler or the inject): (st's i0, commit 0): the launch applied st's commit on the device; committing
+            it again in the next pass would apply it twice;
           * no launch since: st as it was (a refusal before the launch keeps its commit);
           * not known (a failure while the prompt was processed or during a bail recovery, a drain that failed, a launch at
-            another position): the live state is dropped (pc.drop_live: every checkpoint kept, the next request restores one);
-          * the engine was reset since the mark (FlashNextTP.seq moved, e.g. inside end(): the cache resets its slot when it
-            refuses a state): the live state is dropped too (final round 4, the verifier's Y2: committing st again would tell
-            the cache the device holds a state it lost; pc.drop_live takes in a reset made outside the cache: cold).
-        reset() only when the engine is poisoned (or the cache refuses the state)"""
+            another position): the live state is dropped (every checkpoint kept, the next request restores one);
+          * the engine was reset since the last completed operation (e.g. inside end(): the cache resets its slot when it
+            refuses a state): dropped too (final round 4, the verifier's Y2).
+        The cache resets only when the engine is poisoned (or it refuses the state); the session then forgets what it had in
+        flight"""
         self.counters['aborts'] += 1
-        m, df = self.m, self.df
+        m, df, pc = self.m, self.df, self.pc
         inf, self._inflight = self._inflight, None
-        launched = self._ep is not None and int(getattr(m, 'token', 0)) != self._ep
+        launched = pc.launched()
         drained = True
         if launched:
             try: m.finish_pass(int(self.st['i0']), int(self.st['commit']))   # (a pass already waited for: its status re-read)
             except BaseException: drained = False      # noqa: BLE001
-        if inf == 'step' and df is not None and int(getattr(df, 'token', 0)) != self._step_ep:
+        if inf == 'step' and df is not None and int(df.token) != self._step_ep:
             try: drained &= not df.step_wait()          # (the drafter's step behind it: its result taken, or its bail reported)
             except BaseException: drained = False      # noqa: BLE001
         self._sync()
-        if m.poisoned:
-            self.reset()
-            return
-        self._dev = None
-        p, self._pass = self._pass, None
-        if getattr(m, 'seq', None) != getattr(self, '_seq_ep', None):
-            self._drop_live()
-            return
-        if p is not None:
-            self.st = dict(i0=p['i0'], commit=0)
-        elif self._ep is None or not drained or (launched and int(m.h_i32[16]) != int(self.st['i0'])):
-            self._drop_live()
-            return
-        elif launched:
-            self.st = dict(i0=int(self.st['i0']), commit=0)
-            self.counters['aborts_commit0'] += 1
+        p, self._pass, self._dev = self._pass, None, None
         try:
-            if self.toks:
-                self.pc.commit(self.toks, self.st)
-        except Exception:                               # noqa: BLE001 - the state cannot be kept: drop it
-            self.reset()
+            out = pc.settle(returned=p is not None, drained=drained)
+        except Exception:                               # noqa: BLE001 - the cache refused the state and reset: so does the session
+            self._forget()
             raise
-        self._mark()
+        if out == 'reset':
+            self._forget()
+        elif out in ('dropped', 'dropped_side'):
+            self.counters['dropped_live'] += 1
+            if out == 'dropped_side': self.counters['side_dropped'] += 1
+        elif out == 'commit0':
+            self.counters['aborts_commit0'] += 1
+
+    def _forget(self):
+        """the session's own part of a reset (the cache's live state went cold): nothing in flight"""
+        self._pass, self._dev, self._inflight = None, None, None
+        self._bails_seen = len(getattr(self.m, 'bails', ()))
 
     def reset(self):
         self.pc.reset()
-        self.toks, self.st = [], dict(i0=0, commit=0)
-        self._pass, self._dev, self._inflight = None, None, None
-        self._bails_seen = len(getattr(self.m, 'bails', ()))
-        self._mark()
+        self._forget()
 
     def _resolve_park(self):
         """a background park requested earlier: its mark counts once pc.parked shows it landed (a refused / failed one never)"""
@@ -884,7 +857,7 @@ class K3Session(EngineSession):
     def park_gain(self):
         """positions the live log holds beyond this session's last park of the same line (the whole log for another line, or
         when nothing was parked); 0 for an unchanged slot"""
-        from ..promptcache import tok_sha
+        from ..cache.prompt import tok_sha
         log = list(self.pc.log)
         mk = self._park_mark
         if mk is not None and mk[0] <= len(log) and tok_sha(log[:mk[0]]) == mk[1]:
@@ -897,14 +870,12 @@ class K3Session(EngineSession):
         if self.pc.side is None:
             return False
         self.pc.end_side()
-        self.toks, self.st = list(self.pc.log), dict(self.pc.st)
         self._pass, self._dev = None, None
         self.counters['side_ended'] += 1
-        self._mark()
         return True
 
     def _park(self, background):
-        from ..promptcache import tok_sha
+        from ..cache.prompt import tok_sha
         log = list(self.pc.log)
         mk = (len(log), tok_sha(log))
         nm = self.pc.park(background=background)

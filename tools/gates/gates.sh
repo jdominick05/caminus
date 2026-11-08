@@ -13,9 +13,9 @@
 #   multi           T=4 == one-token: trunk 24 and 200 positions, QSA dual and always 200 positions                    (~2.5 min)
 #   forcebail       Coder forced bails, T=1 and T=4, 40 passes each: every pass bitwise the uninterrupted run          (~45 s)
 #   forcebail-reap  the same on REAP-308                                                                                (~45 s)
-#   short           D-281 at short context: tests/test_flashnext_e2e.py on refs/d281-short (768 positions vs llama.cpp
+#   short           D-281 at short context: tests/engine/test_flashnext_e2e.py on refs/d281-short (768 positions vs llama.cpp
 #                   one-token decode, floor 0.0076, top-1 >= 95.9 %), and every result line == the stored log           (~45 s)
-#   lc              long-context D-281 at 1792 + 8192 (tools/lc_baseline.py --qsa) == the stored k3_qsa.json            (~1.5 min)
+#   lc              long-context D-281 at 1792 + 8192 (tools/eval/lc_baseline.py --qsa) == the stored k3_qsa.json            (~1.5 min)
 #   lc32            the same at 32768                                                                                    (~3.5 min)
 #   all             trunk grids qsa reap multi forcebail short lc lc32
 # Env: ARTIFACTS, CODER (both required), REAP (the reap stages), PY (a python with ROCm PyTorch; CLAUDE.md, Models and data).
@@ -76,7 +76,7 @@ multi) chk "T=4 == one-token, trunk, 24 positions" "$OUT/multi4.log" 900 "$PY" -
 forcebail) for t in 1 4; do chk "forced bails, Coder, T=$t, 40 passes" "$OUT/fb_t$t.log" 600 "$PY" -I -B "$T/forcebail.py" $t 40 --model "$CODER"; done ;;
 forcebail-reap) for t in 1 4; do chk "forced bails, REAP-308, T=$t, 40 passes" "$OUT/fb_reap_t$t.log" 600 "$PY" -I -B "$T/forcebail.py" $t 40 --model "$REAP"; done ;;
 short) refs_ok '/refs/d281-short/' d281-short || continue
-       chk "D-281 short (768 positions vs llama.cpp)" "$OUT/e2e_tp.log" 1800 "$PY" -I -B tests/test_flashnext_e2e.py \
+       chk "D-281 short (768 positions vs llama.cpp)" "$OUT/e2e_tp.log" 1800 "$PY" -I -B tests/engine/test_flashnext_e2e.py \
            "$REFS/d281-short/e2e_prose_decode" "$REFS/d281-short/e2e_code_decode" "$REFS/d281-short/e2e_shell_decode" --model "$CODER" --tp
        E2E='^(e2e_|   engine top-1 flips|replica mismatches|ALL:|PASS|FAIL)'   # the result lines (not load times or stderr)
        if diff <(grep -E "$E2E" "$OUT/e2e_tp.log") <(grep -E "$E2E" "$CUR/e2e_tp.log") > "$OUT/e2e_tp.diff" 2>&1
@@ -85,7 +85,7 @@ short) refs_ok '/refs/d281-short/' d281-short || continue
 lc|lc32) refs_ok '/qsa/lc/' lc-probes || continue
        if [ $s = lc ]; then dep=1792,8192; secs=2400; else dep=32768; secs=3000; fi
        lcdir "$OUT/$s"
-       chk "long-context D-281 $dep (tools/lc_baseline.py --qsa)" "$OUT/lc_run_$s.log" $secs "$PY" -I -B tools/lc_baseline.py run "$OUT/$s" --qsa --depths $dep
+       chk "long-context D-281 $dep (tools/eval/lc_baseline.py --qsa)" "$OUT/lc_run_$s.log" $secs "$PY" -I -B tools/eval/lc_baseline.py run "$OUT/$s" --qsa --depths $dep
        if HIP_VISIBLE_DEVICES= "$PY" -I -B "$T/lc_cmp.py" "$OUT/$s/k3_qsa.json" "$CUR/${s}_k3_qsa.json" > "$OUT/lc_cmp_$s.txt" 2>&1
        then note PASS "long-context $dep: every non-timing number == refs/current/${s}_k3_qsa.json"
        else note FAIL "long-context $dep vs refs/current/${s}_k3_qsa.json: $(tail -1 "$OUT/lc_cmp_$s.txt")"; fi ;;

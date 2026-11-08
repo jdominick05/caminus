@@ -1,4 +1,4 @@
-"""The monitoring surface (docs/agentic/spec-metrics.md) through the HTTP server on MockSession, CPU only:
+"""The monitoring surface (docs/specs/spec-metrics.md) through the HTTP server on MockSession, CPU only:
   * llama-server's shapes: /props, /slots and the /metrics block against the keys, JSON types, names, HELP texts and
     label llama-server writes (tools/server: get_res_props, server_slot::to_json, task_params::to_json, to_metrics;
     the types as in llm-top's captured fixtures), /health 200 / 503 'Loading model';
@@ -30,7 +30,7 @@ from caminus.serve.mock_engine import MockDrafter, MockEngine, ScriptedEngine, S
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 PY = sys.executable
-SPEC = os.path.join(REPO, 'docs', 'agentic', 'spec-metrics.md')
+SPEC = os.path.join(REPO, 'docs', 'specs', 'spec-metrics.md')
 SYS = {'role': 'system', 'content': 'You are a coding agent.'}
 
 # llama-server's keys and JSON types (llm-top's captured testdata: props.json, slots.json)
@@ -375,7 +375,7 @@ class TestSurface(unittest.TestCase):
 
 # ==================================================================================================== the spec
 class TestSpecCoverage(unittest.TestCase):
-    """every series /metrics writes and every status field is documented in docs/agentic/spec-metrics.md"""
+    """every series /metrics writes and every status field is documented in docs/specs/spec-metrics.md"""
 
     def test_documented(self):
         with open(SPEC, encoding='utf-8') as f:

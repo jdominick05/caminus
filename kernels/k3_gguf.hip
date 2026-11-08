@@ -66,6 +66,9 @@ GG_MV(gg_mv_iq2_s,   GGML_TYPE_IQ2_S,   VDR_IQ2_S_Q8_1_MMVQ,   vec_dot_iq2_s_q8_
 GG_MV(gg_mv_iq3_s,   GGML_TYPE_IQ3_S,   VDR_IQ3_S_Q8_1_MMVQ,   vec_dot_iq3_s_q8_1)
 GG_MV(gg_mv_q2_0,    GGML_TYPE_Q2_0,    VDR_Q2_0_Q8_1_MMVQ,    vec_dot_q2_0_q8_1)
 #endif
+#ifdef K3_MV_Q3K   // kernels/k3_gguf_q35h.hip only: Q3_K's standalone matvec (tests/test_q36_formats.py, caminus.gguf.matvec)
+GG_MV(gg_mv_q3_k,    GGML_TYPE_Q3_K,    VDR_Q3_K_Q8_1_MMVQ,    vec_dot_q3_K_q8_1)
+#endif
 #ifdef K3_GSQ
 // h[i] = silu(g[i]) * u[i] with the engine's own gg_silu: the standalone composition of OP_GG_MOE_GU (tests)
 extern "C" __global__ void gg_silu_mul(const float * g, const float * u, float * h, int n) {

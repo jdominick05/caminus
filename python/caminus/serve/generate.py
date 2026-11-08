@@ -23,7 +23,7 @@ generation then ends 'length'). With thinking off the caller appends them to the
 
 Metrics: with `stats` (default: the session's), the loop reports the prompt (prefill_done), the first token
 (first_token) and every decode pass (pass_done: from its drafter call to its emitted tokens' bookkeeping, the drafts
-it accepted, the content class it started in), host timestamps only (docs/agentic/spec-metrics.md)."""
+it accepted, the content class it started in), host timestamps only (docs/specs/spec-metrics.md)."""
 import time
 from dataclasses import dataclass, field
 
@@ -138,21 +138,18 @@ def run_generation(sess, prompt, sampler, max_new, on_tokens, cancel=None, stop_
     force: (trigger_id, forced_ids) or None; tool_open_id: the <tool_call> id (a call before the trigger cancels the
     forcing). marks: the prompt cache's message boundaries, passed to sess.prefill when given. Raises EngineError from the
     session. Returns GenResult."""
-    st = stats if stats is not None else getattr(sess, 'stats', None)
+    st = stats if stats is not None else sess.stats
     if st is not None and not st.enabled:
         st = None
     clock = st.clock if st is not None else None
     stop_ids = frozenset(sess.eos_ids if stop_ids is None else stop_ids)
     res = GenResult(prompt_n=len(prompt))
-    kw = {} if marks is None else dict(marks=marks)
-    if getattr(sess, 'wants_max_new', False):
-        kw['max_new'] = int(max_new)            # (the K3 session's side-slot routing: the generation must fit the side slot)
-    row = sess.prefill(prompt, cancel, **kw)
+    row = sess.prefill(prompt, cancel, marks=marks, max_new=int(max_new))   # (max_new: the K3 session's side-slot routing)
     pf = sess.last_prefill
     res.cached_n, res.prefill_ms, res.prefill_passes, res.restore = pf.cached_n, pf.ms, pf.passes, pf.restore
     res.prefill = dict(source=pf.source, restore_ms=round(pf.restore_ms, 3), batched_ms=round(pf.batched_ms, 3),
                        handoff_ms=round(pf.handoff_ms, 3), passes_ms=round(pf.passes_ms, 3), exact=bool(pf.exact), lcp=int(pf.lcp),
-                       slot=getattr(pf, 'slot', 'main'))
+                       slot=pf.slot)
     res.prefill_end_t = time.perf_counter()
     if st is not None:
         st.prefill_done(pf)
@@ -250,7 +247,7 @@ def run_generation(sess, prompt, sampler, max_new, on_tokens, cancel=None, stop_
             draft_ms = (clock() - t_pass) * 1e3
         # a session that knows its drafts were filler (a plain pass, a drafter window gap) says so in drafts_real:
         # they are verified like drafts but count as none (the DFlash counters, the plain pass time)
-        n_real = len(drafts) if getattr(sess, 'drafts_real', True) else 0
+        n_real = len(drafts) if sess.drafts_real else 0
         res.drafted += n_real
         out = sess.sample_pass(feed, drafts, sampler, hist, stop_ids)
         feed_len = len(feed)

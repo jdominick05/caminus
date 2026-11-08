@@ -1,6 +1,6 @@
 """MockEngine: a CPU stand-in for the K3 engine (FlashNextTP) with the same pass interface, for the server tests.
 
-Interface (mirrors caminus.flashnext_tp.FlashNextTP and caminus.spec.generate):
+Interface (mirrors caminus.engine.flashnext_tp.FlashNextTP and caminus.decode.spec.generate):
     ntok                      tokens per pass (T)
     reset()                   zeroed state
     verify(seq, i0, commit)   one pass over positions i0 .. len(seq) - 1 (at most T). `commit` first makes the
@@ -105,7 +105,7 @@ class MockDrafter:
 
 @dataclass
 class SynthProfile:
-    """plausible engine-internal numbers for MockSession (docs/agentic/spec-metrics.md): the values only the real
+    """plausible engine-internal numbers for MockSession (docs/specs/spec-metrics.md): the values only the real
     engine can measure (per-card pass and exchange-wait split, link bytes, the batched prefill and its hand-off,
     restore times by source, cache tier sizes, occasional recovered bails and KFD evictions).
 

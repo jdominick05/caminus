@@ -1,0 +1,28 @@
+#!/bin/sh
+# qwen-bh: Qwen Code as a brain / hands team on two local Caminus servers (caminus start --team brain-hands):
+# AREX-2 (dense) on the XTX at 127.0.0.1:8092 is the main model (the brain), Qwen3.6-35B-A3B (MoE) on the XT at :8093 runs
+# the `hands` subagent, the built-in Explore agent and the side calls (fastModel). A Qwen home of its own:
+#
+#   packaging/harness/qwen-code/brain-hands/qwen-bh [qwen arguments...]
+#   CAMINUS_BH_HOME=DIR ...                     # another home (default ~/.config/caminus/qwen-home-bh)
+#
+# On the first run the home is created from this directory (settings.json, agents/hands.md, BRAIN.md: the brain's policy,
+# read as a context file next to QWEN.md) and, when ~/.qwen/QWEN.md exists, QWEN.md is linked to it (your global notes);
+# after that the copies are yours to edit. The servers do not check API keys; CAMINUS_API_KEY only has to be non-empty.
+set -eu
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+HOME_DIR=${CAMINUS_BH_HOME:-$HOME/.config/caminus/qwen-home-bh}
+if [ ! -f "$HOME_DIR/settings.json" ]; then
+    mkdir -p "$HOME_DIR/agents"; chmod 700 "$HOME_DIR"
+    cp "$HERE/settings.json" "$HOME_DIR/settings.json"
+    cp "$HERE/agents/hands.md" "$HOME_DIR/agents/hands.md"
+    cp "$HERE/BRAIN.md" "$HOME_DIR/BRAIN.md"
+    [ -f "$HOME/.qwen/QWEN.md" ] && [ ! -e "$HOME_DIR/QWEN.md" ] && ln -s "$HOME/.qwen/QWEN.md" "$HOME_DIR/QWEN.md"
+    echo "qwen-bh: created $HOME_DIR (settings.json, agents/hands.md, BRAIN.md from $HERE)" >&2
+fi
+for p in 8092 8093; do
+    curl -s -m 2 "http://127.0.0.1:$p/health" | grep -q '"ok"' || echo "qwen-bh: no server answering on :$p (caminus start --team brain-hands)" >&2
+done
+export QWEN_HOME="$HOME_DIR"
+export CAMINUS_API_KEY="${CAMINUS_API_KEY:-caminus-local}"
+exec qwen "$@"

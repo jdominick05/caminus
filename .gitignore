@@ -2,8 +2,12 @@ build/
 __pycache__/
 *.pyc
 dist/
-# the staged code objects (tools/stage_kernels.py) and setuptools' build output (setup.py: build/ holds the kernels)
+# the staged code objects (tools/release/stage_kernels.py) and setuptools' build output (setup.py: build/ holds the kernels)
 python/caminus/hsaco/
 .pybuild/
 *.egg-info/
 docs/banner-options/
+panel/caminus-panel
+python/caminus/share/caminus-panel
+panel/.gate-tmp/
+panel/caminuspanel

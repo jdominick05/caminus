@@ -14,7 +14,7 @@ Routes
                                      llama-server's monitoring surface, its names and shapes (llm-top reads it):
                                      /health 200 {"status": "ok"} or 503 'Loading model' while loading; /props with
                                      an engine marker ("engine": "caminus"); /metrics with the llamacpp: series and
-                                     the caminus: ones (docs/agentic/spec-metrics.md)
+                                     the caminus: ones (docs/specs/spec-metrics.md)
   GET  /caminus/status               the versioned JSON status: every metric group, histograms, per-card data
 (the same paths without /v1 are accepted for the OpenAI routes, as llama-server does.)
 
@@ -331,7 +331,7 @@ class K3Server:
         self.sess = session
         self.flight = flight        # serve.flight.FlightRecorder or None (the per-request JSONL line, replay bundles)
         self.tok = tokenizer
-        self.stats = stats or getattr(session, 'stats', None) or EngineStats(physics=physics)
+        self.stats = stats or session.stats or EngineStats(physics=physics)
         session.stats = self.stats
         self.hw = hw
         self.hw_interval = hw_interval
@@ -417,7 +417,7 @@ class K3Server:
             raise RuntimeError('K3Server.set_session: only while loading')
         session.stats = self.stats
         self.sess = self.worker.sess = session
-        self.worker.idle_s = getattr(session, 'idle_s', None)
+        self.worker.idle_s = session.idle_s
         self.drafter = drafter
         self.spec_types = getattr(drafter, 'spec_type', 'draft-dflash') if drafter is not None else 'none'
 
@@ -457,7 +457,7 @@ class K3Server:
     def _build(self, norm, model):
         try:
             return self.builder.build(norm['messages'], norm['tools'], model=model, client_kwargs=norm['client_kwargs'],
-                                      marks=bool(getattr(self.sess, 'wants_marks', False)))
+                                      marks=bool(self.sess.wants_marks))
         except (ValueError, TypeError) as e:          # TemplateRequestError is a ValueError
             raise HttpError(400, f'cannot render the prompt: {e}') from None
         except Exception as e:                       # noqa: BLE001 - other jinja errors are request errors too
@@ -555,15 +555,16 @@ class K3Server:
         p = req.get('prompt')
         if isinstance(p, list) and len(p) == 1 and isinstance(p[0], (str, list)):
             p = p[0]
-        bos = self.tok.bos_id
+        bos = self.tok.bos_id                       # (None: the vocabulary has no BOS token, nothing is prepended)
+        head = [] if bos is None else [bos]
         if isinstance(p, str):
             if not p:
                 raise HttpError(400, "'prompt' is empty")
-            ids = [bos] + self.tok.encode(p)
+            ids = head + self.tok.encode(p)
         elif isinstance(p, list) and p and all(isinstance(t, int) and not isinstance(t, bool) for t in p):
             if not all(0 <= t < self.tok.n_vocab for t in p):
                 raise HttpError(400, 'token id out of range')
-            ids = list(p) if p[0] == bos else [bos] + list(p)
+            ids = list(p) if bos is None or p[0] == bos else [bos] + list(p)
         else:
             raise HttpError(400, "'prompt' must be a string or a list of token ids (one prompt)")
         mt = _num(req, 'max_tokens', 1, MAX_TOKENS_HI, integer=True)
@@ -751,7 +752,7 @@ class K3Server:
                                    'supports_string_content': True, 'supports_system_role': True,
                                    'supports_tool_calls': True, 'supports_tools': True,
                                    'supports_typed_content': True},
-            'bos_token': tok.vocab.tokens[tok.bos_id],
+            'bos_token': tok.vocab.tokens[tok.bos_id] if tok.bos_id is not None else '',
             'eos_token': tok.vocab.tokens[eos] if eos is not None else '',
             'build_info': self.build_info, 'is_sleeping': False, 'cors_proxy_enabled': False,
             'engine': ENGINE,

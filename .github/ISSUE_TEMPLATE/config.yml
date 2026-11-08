@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/jdominick05/caminus/blob/main/docs/troubleshooting.md
+    about: Common errors and what to do about them.

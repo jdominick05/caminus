@@ -1,4 +1,4 @@
-"""K3 server front end (docs/agentic/spec-server.md, track P of docs/AGENTIC-PLAN.md).
+"""K3 server front end (docs/specs/spec-server.md, track P of docs/AGENTIC-PLAN.md).
 
 CPU-only pieces: GGUF vocab reader, tokenizer and streaming detokenizer (tokenizer.py), the chat template rendered as
 transformers renders it plus literal-tag marking and the per-model effort pin (template.py), request normalization

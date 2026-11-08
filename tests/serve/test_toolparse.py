@@ -1,6 +1,6 @@
 """T0 gate for the output parser (spec-server.md section 8, step S2), CPU only.
 
-  Parity      toolparse.OutputParser == llama.cpp's parser (tools/qwen_parse_ref.cpp, which runs common/chat* from
+  Parity      toolparse.OutputParser == llama.cpp's parser (tools/reference/qwen_parse_ref.cpp, which runs common/chat* from
               ignite-llama's CPU build) on N_CASES synthesized well-formed outputs (parsegen.py), each under 7
               chunkings: one shot, per character, 3 random, the S1 tokenizer's token pieces, and random cuts. Exact:
               reasoning_content, content, tool names and argument strings byte for byte. At every cut boundary the

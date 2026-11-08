@@ -1,4 +1,4 @@
-"""Running a command of the installed package under its own guard (caminus/share/guard.sh, docs/RELEASE-PLAN.md "Guard").
+"""Running a command of the installed package under its own guard (caminus/share/guard.sh, docs/dev/packaging.md "Guard").
 
 The guard exports CAMINUS_GUARD to what it runs, so a command started by the guard (or under any outer guard, as the tests run
 everything) does not wrap itself a second time. caminus serve execs the guard (the guard becomes the process the terminal or a

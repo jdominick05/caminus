@@ -13,16 +13,16 @@ never touches the GPU):
                    token read back, the same tokens as m2/s7/spec_k3.py plain's step().argmax()):
                    a 16-token warm-up, then N greedy tokens after each 200-token prompt, 2 reps (rep 2 reported, rep 1
                    faults in memory-mapped rows); rep 1 == rep 2 tokens
-  spec:NAME    one speculative method from DRAFTERS (dflash: caminus.dflash_k3, the DFlash 2 drafter in K3, or with
-               --dflash-impl torch the torch drafter caminus.dflash; dflash_hostacc: the K3 drafter with the host accept;
-               dflash_torch: always the torch one; mtp: caminus.mtp in K3;
+  spec:NAME    one speculative method from DRAFTERS (dflash: caminus.decode.dflash, the DFlash 2 drafter in K3, or with
+               --dflash-impl torch the torch drafter caminus.decode.dflash_torch; dflash_hostacc: the K3 drafter with the host accept;
+               dflash_torch: always the torch one; mtp: caminus.decode.mtp in K3;
                T - 1 drafts per pass). Its own
-               engine + drafter, a warm-up generation, then N tokens per prompt with caminus.spec.generate, 2 reps:
+               engine + drafter, a warm-up generation, then N tokens per prompt with caminus.decode.spec.generate, 2 reps:
                tok/s (generation tokens after the prompt pass / generation wall), tokens per pass, acceptance, the
                pass breakdown; gate: output identical to the plain tokens of the tp1 stage (and rep 1 == rep 2)
 A method plugs in as a factory(cfg, T) -> (engine, drafter, info) in DRAFTERS; the MTP one is looked up as
-caminus.mtp.smoke_factory (python/caminus/mtp.py) and is "pending" while that module / function does not exist.
---spec defaults to dflash,mtp when an MTP sidecar is configured (CAMINUS_MTP, or config.toml's mtp: what caminus.mtp loads),
+caminus.decode.mtp.smoke_factory (python/caminus/decode/mtp.py) and is "pending" while that module / function does not exist.
+--spec defaults to dflash,mtp when an MTP sidecar is configured (CAMINUS_MTP, or config.toml's mtp: what caminus.decode.mtp loads),
 else to dflash with a printed note (the sidecar is not distributed; this is a development machine's tool).
 The table puts K3 next to llama.cpp's reference numbers from tools/smoke_ref.json (each with its source and N).
 CAMINUS_SMOKE_INSTALLED=1: the stages import the installed caminus package (run with that environment's python), not this
@@ -73,7 +73,7 @@ def _logp(x):
 
 
 def kld(ref, oth):
-    """KLD(ref || oth) in float64 over the full vocab (tests/test_flashnext_e2e.py)"""
+    """KLD(ref || oth) in float64 over the full vocab (tests/engine/test_flashnext_e2e.py)"""
     import numpy as np
     lp, lq = _logp(ref), _logp(oth); return float((np.exp(lp) * (lp - lq)).sum())
 
@@ -125,7 +125,7 @@ def _torch_setup():
 def stage_tp1(cfg, a):
     import numpy as np
     torch = _torch_setup()
-    from caminus.flashnext_tp import FlashNextTP
+    from caminus.engine.flashnext_tp import FlashNextTP
     t0 = time.time(); m = FlashNextTP(cfg['gguf'], max_ctx=a.max_ctx); out = dict(load_s=time.time() - t0, grids=[e.grid for e in m.engines])
     print(f'tp1: loaded in {out["load_s"]:.1f} s; grids {out["grids"]}', flush=True)
     # (a) teacher forced
@@ -168,17 +168,17 @@ def stage_tp1(cfg, a):
     return out
 
 
-DFLASH_IMPL = 'k3'   # --dflash-impl: 'k3' (caminus.dflash_k3, the drafter inside K3) or 'torch' (caminus.dflash, the old arm)
+DFLASH_IMPL = 'k3'   # --dflash-impl: 'k3' (caminus.decode.dflash, the drafter inside K3) or 'torch' (caminus.decode.dflash_torch, the old arm)
 
 
 def _dflash_factory(cfg, T, max_ctx=2048):
-    """spec:dflash: the K3 drafter with the device accept (caminus.dflash_k3.smoke_factory: its layers on the XT, the inject on
+    """spec:dflash: the K3 drafter with the device accept (caminus.decode.dflash.smoke_factory: its layers on the XT, the inject on
     the XTX from the target's features there, the target's head shards on both cards + an XTX copy of part of the XT's;
     spec.generate hands the generation to DFlashK3Drafter.generate, the S3 loop) unless --dflash-impl torch, or the model is
     not the GSQ-RCO Coder (the K3 drafter reads the Coder's IQ4_XS token_embd / Q6_K head). Its "draft" ms is the step
     launch's device time on the XT (the accept + inject + draft), "verify" the rest of the pass"""
     if DFLASH_IMPL == 'k3' and cfg.get('name', 'coder') == 'coder':
-        from caminus import dflash_k3
+        from caminus.decode import dflash as dflash_k3
         return dflash_k3.smoke_factory(cfg, T, max_ctx)
     return _dflash_torch_factory(cfg, T, max_ctx)
 
@@ -186,16 +186,16 @@ def _dflash_factory(cfg, T, max_ctx=2048):
 def _dflash_hostacc_factory(cfg, T, max_ctx=2048):
     """spec:dflash_hostacc: the same K3 drafter in spec.generate's generic loop (the host accept, the inject fused into the
     next draft launch): the device accept's A/B (the same drafts pass for pass; "draft" = the draft call's host wall)"""
-    from caminus import dflash_k3
+    from caminus.decode import dflash as dflash_k3
     m, dr, info = dflash_k3.smoke_factory(cfg, T, max_ctx); dr.device_accept = False
     return m, dr, dict(info, impl='k3 host accept')
 
 
 def _dflash_torch_factory(cfg, T, max_ctx=2048):
-    from caminus.flashnext_tp import FlashNextTP
-    from gguf import GGUFReader                       # (caminus.flashnext puts gguf-py on the path)
-    from caminus.dflash import DFlash2
-    from caminus import spec
+    from caminus.engine.flashnext_tp import FlashNextTP
+    from gguf import GGUFReader                       # (caminus.engine.flashnext puts gguf-py on the path)
+    from caminus.decode.dflash_torch import DFlash2
+    from caminus.decode import spec
     rd = GGUFReader(cfg['drafter'], 'r'); f = {x.name: x for x in rd.fields.values()}
     layers = [int(v) for v in f['dflash.target_layers'].contents()]; del rd, f
     m = FlashNextTP(cfg['gguf'], ntok=T, feature_layers=layers, max_ctx=max_ctx)
@@ -206,7 +206,7 @@ def _dflash_torch_factory(cfg, T, max_ctx=2048):
 
 
 def _mtp_factory(cfg, T, max_ctx=2048):
-    from caminus import mtp                            # python/caminus/mtp.py: smoke_factory(cfg, T) -> (engine, drafter, info)
+    from caminus.decode import mtp                            # python/caminus/decode/mtp.py: smoke_factory(cfg, T) -> (engine, drafter, info)
     return mtp.smoke_factory(cfg, T) if max_ctx == 2048 else mtp.smoke_factory(cfg, T, max_ctx=max_ctx)
 
 
@@ -220,7 +220,7 @@ def mtp_available():
 
 def stage_spec(cfg, a, name):
     torch = _torch_setup()
-    from caminus import spec
+    from caminus.decode import spec
     t0 = time.time(); m, dr, info = DRAFTERS[name](cfg, a.T, a.max_ctx); T = m.ntok
     out = dict(load_s=time.time() - t0, T=T, info=info)
     print(f'spec:{name}: T={T}, engine + drafter ready in {out["load_s"]:.1f} s; {info}', flush=True)
@@ -391,14 +391,14 @@ def default_spec():
 def check_args(a):
     """the positions every stage touches, against --max-ctx, before anything is loaded or launched: a list of problems.
     tf: positions 0 .. tf - 1; plain: the prompt (<= a.prompt tokens) then n greedy tokens, positions up to prompt + n - 1;
-    spec: caminus.spec.positions_needed (a T-token pass reaches T - 1 positions past the last accepted token)"""
+    spec: caminus.decode.spec.positions_needed (a T-token pass reaches T - 1 positions past the last accepted token)"""
     bad = []
     for k in ('n', 'tf', 'T', 'max_ctx'):
         if getattr(a, k) < 1: bad.append(f'--{k.replace("_", "-")} {getattr(a, k)} < 1')
     if bad: return bad
     if a.tf > a.max_ctx: bad.append(f'--tf {a.tf} > --max-ctx {a.max_ctx}')
     if a.prompt + a.n > a.max_ctx: bad.append(f'prompt {a.prompt} + --n {a.n} = {a.prompt + a.n} positions > --max-ctx {a.max_ctx}')
-    spec_need = max(a.prompt - 1, a.prompt + a.n - 2) + a.T   # = caminus.spec.positions_needed (not imported: no torch here)
+    spec_need = max(a.prompt - 1, a.prompt + a.n - 2) + a.T   # = caminus.decode.spec.positions_needed (not imported: no torch here)
     if [s for s in a.spec.split(',') if s] and spec_need > a.max_ctx:
         bad.append(f'speculative stages need prompt {a.prompt} + --n {a.n} + --T {a.T} - 2 = {spec_need} positions > --max-ctx {a.max_ctx}')
     return bad
@@ -416,7 +416,7 @@ def main():
     ap.add_argument('--compare', nargs=2, metavar=('A', 'B')); ap.add_argument('--tol', type=float, default=2.0)
     ap.add_argument('--max-ctx', type=int, default=2048, help='KV cache positions of the engines (FlashNextTP max_ctx)')
     ap.add_argument('--dflash-impl', default='k3', choices=('k3', 'torch'),
-                    help='spec:dflash runs the K3 drafter (caminus.dflash_k3) or the torch one (caminus.dflash; also spec:dflash_torch)')
+                    help='spec:dflash runs the K3 drafter (caminus.decode.dflash) or the torch one (caminus.decode.dflash_torch; also spec:dflash_torch)')
     ap.add_argument('--stage'); ap.add_argument('--part'); ap.add_argument('--plain-json')
     a = ap.parse_args(); a.prompt = 200
     global DFLASH_IMPL; DFLASH_IMPL = a.dflash_impl
@@ -429,7 +429,7 @@ def main():
     if bad: print(f'k3_smoke: refusing the arguments (nothing launched): {bad}'); sys.exit(2)
     ref = load_ref(); cfg = dict(ref['models'][a.model]); cfg['drafter'] = ref['drafter']; cfg['name'] = a.model
     if not guarded():
-        print('k3_smoke: refusing to run outside guard.sh (every GPU command runs as guard.sh LOG SECS CMD...); see docs/SMOKE.md'); sys.exit(3)
+        print('k3_smoke: refusing to run outside guard.sh (every GPU command runs as guard.sh LOG SECS CMD...); see docs/dev/smoke.md'); sys.exit(3)
     if a.stage:                                       # child
         res = stage_tp1(cfg, a) if a.stage == 'tp1' else stage_spec(cfg, a, a.stage.split(':', 1)[1])
         json.dump(res, open(a.part, 'w')); return
@@ -455,7 +455,7 @@ def main():
         a.plain_json = os.path.join(a.out, f'.{stamp}.plain.json'); json.dump(dict(plain=res['plain']), open(a.plain_json, 'w'))
     for s in names:
         if s == 'mtp' and not mtp_available():
-            R['stages']['spec:mtp'] = 'pending'; print('== stage spec:mtp: pending (python/caminus/mtp.py smoke_factory not there yet)'); continue
+            R['stages']['spec:mtp'] = 'pending'; print('== stage spec:mtp: pending (python/caminus/decode/mtp.py smoke_factory not there yet)'); continue
         if a.plain_json is None: R['stages'][f'spec:{s}'] = None; continue
         part = os.path.join(a.out, f'.{stamp}.{s}.json')
         rc, timing[f'spec:{s}'], R['stages'][f'spec:{s}'] = child(f'spec:{s}', a, part)

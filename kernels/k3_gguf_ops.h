@@ -11,7 +11,7 @@
 // (K3_FMTS_<op>, below: the REAP-308 four by default, kernels/k3_gguf_gsq.hip sets the Coder's from tools/gg_inventory.py);
 // k3.Engine refuses tapes whose (op, format) pairs a module does not implement
 enum { GG_IQ3_XXS = 0, GG_IQ4_NL = 1, GG_Q6_K = 2, GG_Q8_0 = 3, GG_Q4_K = 4, GG_Q5_K = 5, GG_IQ4_XS = 6, GG_IQ2_S = 7,
-       GG_IQ3_S = 8, GG_Q2_0 = 9 };
+       GG_IQ3_S = 8, GG_Q2_0 = 9, GG_Q3_K = 10 };   // Q3_K: the qwen35moe modules (HauhauCS Q3_K_P)
 // per-op format whitelists (comma lists of the enum above; empty = the op is compiled out). Code size and registers: every
 // listed format is one more instance of the op in k3_run (one register-heavy instance sets the occupancy of the kernel)
 #ifndef K3_FMTS_MV
@@ -219,6 +219,7 @@ __device__ __forceinline__ float gg_row(const void * vx, const block_q8_1 * y, i
         else if constexpr (TYPE == GGML_TYPE_IQ2_S) tmp += vec_dot_iq2_s_q8_1(vx, &y[kby], ib, kqs);
         else if constexpr (TYPE == GGML_TYPE_IQ3_S) tmp += vec_dot_iq3_s_q8_1(vx, &y[kby], ib, kqs);
         else if constexpr (TYPE == GGML_TYPE_Q2_0) tmp += vec_dot_q2_0_q8_1(vx, &y[kby], ib, kqs);
+        else if constexpr (TYPE == GGML_TYPE_Q3_K) tmp += vec_dot_q3_K_q8_1(vx, &y[kby], ib, kqs);
         else tmp += vec_dot_q8_0_q8_1(vx, &y[kby], ib, kqs);
     }
     return warp_reduce_sum<32>(tmp);
@@ -236,8 +237,15 @@ __device__ __forceinline__ float gg_row(const void * vx, const block_q8_1 * y, i
 #ifndef K3_TG_Q5_K
 #define K3_TG_Q5_K 2
 #endif
+#ifndef K3_TG_IQ3_S
+#define K3_TG_IQ3_S TG   // IQ3_S as a dense format (k3_gguf_q3n's ssm_ba) sets its own: TG 4 spilled there
+#endif
+#ifndef K3_TG_Q3_K
+#define K3_TG_Q3_K TG    // Q3_K (the qwen35moe HauhauCS modules) may set its own
+#endif
 template <ggml_type TYPE>
-constexpr int gg_tg() { return TYPE == GGML_TYPE_IQ4_XS ? K3_TG_IQ4_XS : TYPE == GGML_TYPE_Q5_K ? K3_TG_Q5_K : TG; }
+constexpr int gg_tg() { return TYPE == GGML_TYPE_IQ4_XS ? K3_TG_IQ4_XS : TYPE == GGML_TYPE_Q5_K ? K3_TG_Q5_K :
+                               TYPE == GGML_TYPE_IQ3_S ? K3_TG_IQ3_S : TYPE == GGML_TYPE_Q3_K ? K3_TG_Q3_K : TG; }
 template <ggml_type TYPE, int VDR, int G = TG>
 __device__ __forceinline__ void gg_row_tg(const void * vx, const block_q8_1 * y, int kb, int row, int ncols, int lane, int nt, float * out) {
     constexpr int qk = ggml_cuda_type_traits<TYPE>::qk, qi = ggml_cuda_type_traits<TYPE>::qi;
@@ -261,6 +269,7 @@ __device__ __forceinline__ void gg_row_tg(const void * vx, const block_q8_1 * y,
             else if constexpr (TYPE == GGML_TYPE_IQ2_S) tmp[j] += vec_dot_iq2_s_q8_1(vx, yj, ib, kqs);
             else if constexpr (TYPE == GGML_TYPE_IQ3_S) tmp[j] += vec_dot_iq3_s_q8_1(vx, yj, ib, kqs);
             else if constexpr (TYPE == GGML_TYPE_Q2_0) tmp[j] += vec_dot_q2_0_q8_1(vx, yj, ib, kqs);
+            else if constexpr (TYPE == GGML_TYPE_Q3_K) tmp[j] += vec_dot_q3_K_q8_1(vx, yj, ib, kqs);
             else tmp[j] += vec_dot_q8_0_q8_1(vx, yj, ib, kqs);
         }
     }
@@ -501,6 +510,7 @@ __device__ __forceinline__ float gg_row_n(const void * vx, const block_q8_1 * y,
         else if constexpr (TYPE == GGML_TYPE_IQ2_S) v[i] = vec_dot_iq2_s_q8_1(vx, &y[kc * (qk / QK8_1)], ib, kqs);
         else if constexpr (TYPE == GGML_TYPE_IQ3_S) v[i] = vec_dot_iq3_s_q8_1(vx, &y[kc * (qk / QK8_1)], ib, kqs);
         else if constexpr (TYPE == GGML_TYPE_Q2_0) v[i] = vec_dot_q2_0_q8_1(vx, &y[kc * (qk / QK8_1)], ib, kqs);
+        else if constexpr (TYPE == GGML_TYPE_Q3_K) v[i] = vec_dot_q3_K_q8_1(vx, &y[kc * (qk / QK8_1)], ib, kqs);
         else v[i] = vec_dot_q8_0_q8_1(vx, &y[kc * (qk / QK8_1)], ib, kqs);
     }
     float tmp = 0.0f;
@@ -1360,7 +1370,7 @@ __device__ __forceinline__ void op_gdn_gates(const Seg & sg) {
     }
 }
 
-// OP_GDN_STEP: the gated delta rule per value head h, k / q head = h % nk (ggml_repeat tiling); state M[h][col][i]
+// OP_GDN_STEP: the gated delta rule per value head h, k / q head = h % nk (ggml_repeat tiling; K3_GDN_GROUPED: h / (H / nk), qwen3next); state M[h][col][i]
 //   (llama.cpp's transposed layout: S[i][col] at col * S + i). Per token: kv = sum_i M[col][i] k[i];
 //   delta = (v[col] - g kv) beta; M = g M + k[i] delta; attn[col] = scale sum_i M[col][i] q[i], g = exp(gate[h]),
 //   scale = 1 / sqrt(S). Lazy commit (speculative verification): the stored state is the one before the previous pass's
@@ -1385,7 +1395,11 @@ __device__ __forceinline__ void op_gdn_step(const Seg & sg, int t) {
     // S == 128 (host-checked): a state column is 128 contiguous floats, one float4 per lane of a wave, so every load is
     // coalesced; a task is 32 columns of one head (4 per wave), the two dot products are wave reductions
     constexpr int S = 128, CPT = 32, CPW = CPT / 8;
+#ifdef K3_GDN_GROUPED   // qwen3next: q / k repeat-interleaved (ggml_repeat_4d over a unit axis): value head h reads key head h / (H / nk)
+    const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, nk = sg.pad1, H = sg.N, kh = h / (H / nk), T = seg_T(sg);
+#else
     const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, nk = sg.pad1, kh = h % nk, H = sg.N, T = seg_T(sg);
+#endif
     const int lane = K3TID % 32, wave = K3WAVE, mprev = ((const int *)sg.asum)[1];
     const int RS = nk * S + H * S + 2 * H;                         // a saved input record per token
     float * base = (float *)sg.aux; const float * rec = base + (size_t)H * S * S;
@@ -1445,7 +1459,7 @@ __device__ __forceinline__ void op_gdn_save(const Seg & sg, int tt) {
 }
 
 // OP_GDN_NORM: per value head: out = ((o * rsqrt(mean(o^2) + eps)) * w) * sigmoid(z) (build_norm RMS with the ssm_norm
-//   weight, then ggml_mul by ggml_sigmoid(z): qwen4exp's sigmoid output gate). Seg.a = o [H, S], Seg.W = fp32 w [S],
+//   weight, then ggml_mul by ggml_sigmoid(z): qwen4exp's sigmoid output gate; K3_GDN_SILU: gg_silu(z), qwen3next's / qwen35moe's). Seg.a = o [H, S], Seg.W = fp32 w [S],
 //   Seg.gs = fp32 z [H, S], Seg.y = out [H, S], N = H, K = S, rs = eps; one task per head.
 __device__ __forceinline__ void op_gdn_norm(const Seg & sg, int t) {
 #pragma clang fp contract(off)
@@ -1460,8 +1474,12 @@ __device__ __forceinline__ void op_gdn_norm(const Seg & sg, int t) {
     const float scale = rsqrtf(tot / K + sg.rs);
     for (int i = tid; i < K; i += blockDim.x) {
         const float nrm = (scale * o[i]) * w[i];
+#ifdef K3_GDN_SILU   // qwen3next / qwen35moe build_norm_gated: ggml_mul(normalized, ggml_silu(gate))
+        const float v = nrm * gg_silu(z[i]);
+#else
         const float sgm = 1.0f / (1.0f + expf(-z[i]));
         const float v = nrm * sgm;
+#endif
         y[i] = v;
         if (sg.asum) q8_emit((void *)sg.asum, (size_t)t * K + i, v);
     }
@@ -1902,6 +1920,7 @@ __device__ __forceinline__ void gg_dispatch_##FN(const Seg & sg, int t) {       
     GG_IF(FN, GG_IQ2_S,   GGML_TYPE_IQ2_S,   VDR_IQ2_S_Q8_1_MMVQ)                                                           \
     GG_IF(FN, GG_IQ3_S,   GGML_TYPE_IQ3_S,   VDR_IQ3_S_Q8_1_MMVQ)                                                           \
     GG_IF(FN, GG_Q2_0,    GGML_TYPE_Q2_0,    VDR_Q2_0_Q8_1_MMVQ)                                                            \
+    GG_IF(FN, GG_Q3_K,    GGML_TYPE_Q3_K,    VDR_Q3_K_Q8_1_MMVQ)                                                            \
     GG_IF(FN, GG_Q8_0,    GGML_TYPE_Q8_0,    VDR_Q8_0_Q8_1_MMVQ)                                                            \
 }
 GG_DEF_DISPATCH(gg_op_mv_t)

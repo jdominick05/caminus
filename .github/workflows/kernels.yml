@@ -1,8 +1,8 @@
-# COMPILE-ONLY, optional: build every kernel with a stock ROCm to catch source breakage (docs/RELEASING.md).
+# COMPILE-ONLY, optional: build every kernel with a stock ROCm to catch source breakage (docs/dev/releasing.md).
 # It never produces release artifacts and nothing is uploaded. Its code objects are NOT expected to equal the shipped ones:
-# those come from TheRock ROCm 10.2.0a20261011 on the maintainer's machine (tools/release_build.sh, checked against
+# those come from TheRock ROCm 10.2.0a20261011 on the maintainer's machine (tools/release/release_build.sh, checked against
 # packaging/gfx1100-kernels.sha256), a toolchain CI does not have, and the objects that include ggml headers also carry a
-# compile-unit id hashed from their include paths (docs/RELEASING.md); the comparison at the end is informational only.
+# compile-unit id hashed from their include paths (docs/dev/releasing.md); the comparison at the end is informational only.
 # build.sh's paths are TheRock's ($ROCM_PATH/bin/amdclang++, llvm/bin, lib/llvm/bin); a stock ROCm 6.x lays out the same
 # names (llvm is lib/llvm), which this job is the first to exercise. build.sh compiles against the ignite-llama fork's ggml
 # headers at e4e3f8eda (github.com/jdominick05/ignite-llama; the K3 modules need helpers the fork adds).

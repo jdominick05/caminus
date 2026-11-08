@@ -11,7 +11,7 @@ When new third-party code comes in, list it here in the same commit and keep its
 ## llama.cpp / ggml (MIT)
 
 https://github.com/ggml-org/llama.cpp, used through the ignite-llama fork (https://github.com/jdominick05/ignite-llama at
-commit e4e3f8eda: build.sh compiles against its ggml headers; docs/INSTALL.md, "Building from source"). The development
+commit e4e3f8eda: build.sh compiles against its ggml headers; docs/dev/building.md). The development
 builds used the fork's commit 842653396, published as e4e3f8eda with identical `ggml/`, `common/` and `src/`; the vendored
 files below name 842653396 in their headers.
 
@@ -19,13 +19,13 @@ files below name 842653396 in their headers.
 |---|---|
 | `kernels/k3_gguf.hip` | compiles in ggml-cuda's GGUF block formats and dot products (`vecdotq.cuh` and the headers it includes) |
 | `kernels/gg_mmvf_ref.hip` | compiles ggml-cuda's `mmvf.cu` unchanged, as the BF16 matvec reference for tests |
-| `kernels/ggml_mmq/` (vendored) | ggml-cuda's MMQ for the batched prefill, copied from the fork at commit 842653396 (published as e4e3f8eda; identical `ggml/`, `common/`, `src/`) by `tools/vendor_mmq.py` (`--check --commit e4e3f8eda` compares the files against their headers' recorded label 842653396; each file keeps the MIT notice in its header and lists its changes): `mmq.cuh` (device code verbatim; only the RDNA3 config included, the host launch code removed), `mmq-config-rdna3.cuh`, `mmq-load-tiles.cuh`, `mmq-vec-dot.cuh` (unchanged), `quantize_mmq.cuh` (the `quantize_mmq_q8_1` kernel of `quantize.cu`), `mmid.cuh` (the `mm_ids_helper` kernel of `mmid.cu`). They build against the fork's base headers (`common.cuh`, `mma.cuh`, `vecdotq.cuh`, `ggml-common.h`), as `k3_gguf.hip` does |
-| `kernels/prefill_mmq.hip`, `python/caminus/mmq.py` | instantiate and launch the vendored kernels (the launch logic follows ggml's `mmq.cu` / `mmq.cuh` host code: argument layout, J choice, q8_1 buffer padding, mul_mat_id grouping); the MIT notice is in `mmq.py`'s header |
-| `kernels/prefill_moe.hip`, `python/caminus/moe.py` | the prefill's own MoE GEMMs: call the vendored `load_tiles` / `write_back`; the K loop is a modified copy of `mul_mat_q_process_tile` (mmq.cuh), the tile product `moe_vec_dot` a modified copy of `vec_dot_q8_0_q8_1_mma` / `vec_dot_q8_0_16_q8_1_mma` (mmq-vec-dot.cuh), the fused epilogue repeats `quantize_mmq_q8_1`'s D4 expressions (quantize.cu); the MIT notice is in the kernel file's header and in `moe.py`'s |
-| `kernels/prefill_dense.hip`, `python/caminus/dense.py` | the prefill's own dense Q6_K GEMMs: call the vendored `load_tiles` / `vec_dot` (the control variant) and `write_back`; the K loop is a modified copy of `mul_mat_q` / `mul_mat_q_process_tile` (mmq.cuh), the weight tile `dense_load_x_q6_K` a modified copy of `ggml_cuda_mmq_load_tiles_q6_K` (mmq-load-tiles.cuh), the tile product `dense_vec_dot_q6_K` a modified copy of `ggml_cuda_mmq_vec_dot_q6_K_q8_1_mma` (mmq-vec-dot.cuh); the MIT notice is in the kernel file's header and in `dense.py`'s |
-| `tools/gg_golden.cpp`, `tools/gg_mmq_ref.cpp` | link libggml / libllama to dump reference tensors (gg_mmq_ref: ggml_mul_mat / ggml_mul_mat_id outputs and timings) |
-| `tools/dflash_dump.cpp` | a modified copy of llama.cpp's `examples/speculative-simple/speculative-simple.cpp` (the speculative loop kept; a per-pass JSON log and a cb_eval tensor dumper for the DFlash drafter added); links libllama; the MIT notice is in the file's header |
-| `python/caminus/dflash.py` | a PyTorch port of the DFlash drafter's forward (`src/models/dflash.cpp`) and the draft-dflash loop (`common/speculative.cpp`), used as the reference of the K3 drafter module; the MIT notice is in the file's header |
+| `kernels/ggml_mmq/` (vendored) | ggml-cuda's MMQ for the batched prefill, copied from the fork at commit 842653396 (published as e4e3f8eda; identical `ggml/`, `common/`, `src/`) by `tools/release/vendor_mmq.py` (`--check --commit e4e3f8eda` compares the files against their headers' recorded label 842653396; each file keeps the MIT notice in its header and lists its changes): `mmq.cuh` (device code verbatim; only the RDNA3 config included, the host launch code removed), `mmq-config-rdna3.cuh`, `mmq-load-tiles.cuh`, `mmq-vec-dot.cuh` (unchanged), `quantize_mmq.cuh` (the `quantize_mmq_q8_1` kernel of `quantize.cu`), `mmid.cuh` (the `mm_ids_helper` kernel of `mmid.cu`). They build against the fork's base headers (`common.cuh`, `mma.cuh`, `vecdotq.cuh`, `ggml-common.h`), as `k3_gguf.hip` does |
+| `kernels/prefill_mmq.hip`, `python/caminus/prefill/mmq.py` | instantiate and launch the vendored kernels (the launch logic follows ggml's `mmq.cu` / `mmq.cuh` host code: argument layout, J choice, q8_1 buffer padding, mul_mat_id grouping); the MIT notice is in `mmq.py`'s header |
+| `kernels/prefill_moe.hip`, `python/caminus/prefill/moe.py` | the prefill's own MoE GEMMs: call the vendored `load_tiles` / `write_back`; the K loop is a modified copy of `mul_mat_q_process_tile` (mmq.cuh), the tile product `moe_vec_dot` a modified copy of `vec_dot_q8_0_q8_1_mma` / `vec_dot_q8_0_16_q8_1_mma` (mmq-vec-dot.cuh), the fused epilogue repeats `quantize_mmq_q8_1`'s D4 expressions (quantize.cu); the MIT notice is in the kernel file's header and in `moe.py`'s |
+| `kernels/prefill_dense.hip`, `python/caminus/prefill/dense.py` | the prefill's own dense Q6_K GEMMs: call the vendored `load_tiles` / `vec_dot` (the control variant) and `write_back`; the K loop is a modified copy of `mul_mat_q` / `mul_mat_q_process_tile` (mmq.cuh), the weight tile `dense_load_x_q6_K` a modified copy of `ggml_cuda_mmq_load_tiles_q6_K` (mmq-load-tiles.cuh), the tile product `dense_vec_dot_q6_K` a modified copy of `ggml_cuda_mmq_vec_dot_q6_K_q8_1_mma` (mmq-vec-dot.cuh); the MIT notice is in the kernel file's header and in `dense.py`'s |
+| `tools/reference/gg_golden.cpp`, `tools/reference/gg_mmq_ref.cpp` | link libggml / libllama to dump reference tensors (gg_mmq_ref: ggml_mul_mat / ggml_mul_mat_id outputs and timings) |
+| `tools/reference/dflash_dump.cpp` | a modified copy of llama.cpp's `examples/speculative-simple/speculative-simple.cpp` (the speculative loop kept; a per-pass JSON log and a cb_eval tensor dumper for the DFlash drafter added); links libllama; the MIT notice is in the file's header |
+| `python/caminus/decode/dflash_torch.py` | a PyTorch port of the DFlash drafter's forward (`src/models/dflash.cpp`) and the draft-dflash loop (`common/speculative.cpp`), used as the reference of the K3 drafter module; the MIT notice is in the file's header |
 
 ```
 MIT License
@@ -57,7 +57,7 @@ https://github.com/ggml-org/llama.cpp, `gguf-py/` (its own LICENSE below).
 
 | Where | How |
 |---|---|
-| `python/caminus/_vendor/gguf/` (vendored) | gguf-py's GGUF reader at upstream commit 5aeac37a35 (the ignite-llama fork's gguf-py at e4e3f8eda is identical), copied by `tools/vendor_gguf.py` (`--check` verifies it): `constants.py`, `gguf_reader.py`, `quants.py`, `lazy.py` unchanged below a header with the MIT notice; `__init__.py` reduced to those modules (upstream's also imports the writer, tensor mapping, vocab, utility and metadata modules). Vendored because the Coder's Q2_0 tensors postdate gguf-py 0.19.0, the last version bump (docs/RELEASE-PLAN.md) |
+| `python/caminus/_vendor/gguf/` (vendored) | gguf-py's GGUF reader at upstream commit 5aeac37a35 (the ignite-llama fork's gguf-py at e4e3f8eda is identical), copied by `tools/release/vendor_gguf.py` (`--check` verifies it): `constants.py`, `gguf_reader.py`, `quants.py`, `lazy.py` unchanged below a header with the MIT notice; `__init__.py` reduced to those modules (upstream's also imports the writer, tensor mapping, vocab, utility and metadata modules). Vendored because the Coder's Q2_0 tensors postdate gguf-py 0.19.0, the last version bump (docs/dev/packaging.md) |
 
 ```
 MIT License
@@ -123,7 +123,7 @@ https://github.com/fla-org/flash-linear-attention (the installed `flash-linear-a
 
 | Where | What follows fla |
 |---|---|
-| `kernels/gdn.hip`, `python/caminus/gdn.py` | HIP implementations of fla's Gated DeltaNet chunk state recurrences `chunk_gated_delta_rule_fwd_h` / `_bwd_dhu` (`fla/ops/common/chunk_delta_h.py`): the same algorithm and operand roundings, written for gfx1100 (dormant training code). both files carry the MIT notice in their headers |
+| `kernels/gdn.hip`, `python/caminus/train/gdn.py` | HIP implementations of fla's Gated DeltaNet chunk state recurrences `chunk_gated_delta_rule_fwd_h` / `_bwd_dhu` (`fla/ops/common/chunk_delta_h.py`): the same algorithm and operand roundings, written for gfx1100 (dormant training code). both files carry the MIT notice in their headers |
 
 ```
 MIT License

@@ -1,4 +1,4 @@
-"""The model files Caminus serves: where each comes from, its size and sha256 (docs/RELEASE-PLAN.md, `caminus download`).
+"""The model files Caminus serves: where each comes from, its size and sha256 (docs/dev/packaging.md, `caminus download`).
 
 Nothing here is redistributed: the files are downloaded from their public Hugging Face repositories at the pinned revisions.
 The local layout under the model directory (caminus.config.model_dir) is `<repository name>/<path in the repository>`, so the
@@ -13,7 +13,10 @@ Sources of the numbers (2026-11-06):
     this path, with this size and this LFS sha256; both repositories are public and not gated (the drafter: Apache-2.0).
 `caminus download` still refuses any mismatch (size or sha256) and keeps nothing it could not verify.
 """
+import os
 from collections import namedtuple
+
+from . import arch as _arch
 
 Item = namedtuple('Item', 'key role repo revision path size sha256 source')
 
@@ -27,8 +30,68 @@ ITEMS = (
     Item('dflash', 'dflash', 'incoai/Qwen3.8-Flash-Next-DFlash2-GGUF', '4f5a39be8f0a9e9a573ac9824251830a8f4096d9',
          'Qwen3.8-Flash-Next-DFlash2-Q8_0.gguf', 652101024,
          '541f4d6ee230747a34d4a2c6890e6e08cc8b19c461226dc1829701a544e46e8a', 'hf-lfs'),
+    # the one-card and Qwen3-Coder-Next files (11-07): revision and LFS sha256 from this machine's `hf download` metadata,
+    # each checked against Hugging Face's API (paths-info at the pinned revision: path, size, LFS sha256) on 2026-11-07
+    Item('qwen3.6', 'qwen3.6', 'chtisgit/Qwen3.6-35B-A3B-2Bit-GSQ-hybrid-GGUF', '34a912bde355affe80eb1af654475a6fe9feff5f',
+         'Qwen3.6-35B-A3B-GSQ-hybrid.gguf', 12217776832,
+         '8e50912f5d0703401ca21b09deb2ee8a84d03536ade6fb44815fcb40a0b03596', 'hf-lfs'),
+    Item('qwen3.6-hauhau', 'qwen3.6-hauhau', 'HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive',
+         'f12a584fecbeb5f20001130d8ecd66c9327ae685', 'Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q3_K_P.gguf', 19023337600,
+         '18508f37fc7787f260df7ac1a3934b15dd9496d050b2d4b864241b493588fe95', 'hf-lfs'),
+    Item('arex-2', 'arex-2', 'bartowski/BAAI_AREX-2-GGUF', 'b5817eb07865e9619f1516140472f61d66268922',
+         'BAAI_AREX-2-Q4_K_M.gguf', 17203416160,
+         '45453eed75a1c32b0ee203c1864ed388b46868305fb523d88f4484faa0837b4a', 'hf-lfs'),
+    Item('qwen3-coder-next', 'qwen3-coder-next', 'unsloth/Qwen3-Coder-Next-GGUF', 'ce09c67b53bc8739eef83fe67b2f5d293c270632',
+         'Qwen3-Coder-Next-UD-IQ3_S.gguf', 29690687488,
+         'fddff90a6e3b9f0aee320a2710024c458cd5f3b07f0b7bdfb33fcf23c08e5389', 'hf-lfs'),
 )
 BY_KEY = {it.key: it for it in ITEMS}
+
+# The named models `caminus models` / `caminus pull` / `caminus start` know: the files (ITEMS keys; the first is what caminus
+# serve --model takes), the GGUF architecture, the cards it needs (from the architecture registry, caminus.arch: 1 = any one
+# card it fits, by caminus serve's max_ctx auto; 2 = both), the model id the server answers to (a server finds it here by its
+# file: arch.default_alias), and the measured speeds (docs: decode and prefill tok/s, the cards alone).
+Model = namedtuple('Model', 'name title arch cards items alias speed notes')
+
+
+def _model(name, title, arch, items, alias, speed, notes):
+    return Model(name, title, arch, _arch.lookup(arch).cards, items, alias, speed, notes)
+
+
+CATALOG = (
+    _model('coder', 'Qwen3.8-Flash-Next Coder IQ1_M + DFlash2', 'qwen4exp', ('coder-1', 'coder-2', 'dflash'), 'k3-coder',
+           '~104 tok/s decode, 123-203 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
+    _model('qwen3.6', 'Qwen3.6-35B-A3B GSQ-hybrid (2-bit)', 'qwen35moe', ('qwen3.6',), 'qwen3.6',
+           '175 tok/s decode, 5,227 tok/s prefill 2K (one XTX)', 'fits either card at 262K'),
+    _model('qwen3.6-hauhau', 'Qwen3.6-35B-A3B HauhauCS Q3_K_P', 'qwen35moe', ('qwen3.6-hauhau',), 'qwen3.6',
+           '192 tok/s decode, 4,136 tok/s prefill 2K (one XTX)', 'the 24 GB card only'),
+    _model('arex-2', 'AREX-2 27B dense Q4_K_M', 'qwen35', ('arex-2',), 'arex-2',
+           '41 tok/s decode, 928 tok/s prefill 2K (one XTX)', 'the 24 GB card only; ~119K context'),
+    _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
+           '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
+)
+BY_NAME = {m.name: m for m in CATALOG}
+
+
+def model_of(path):
+    """the catalog model whose first file this is (the same file name and size: what caminus start finds and passes as
+    --model), or None"""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    base = os.path.basename(path)
+    for m in CATALOG:
+        it = BY_KEY[m.items[0]]
+        if os.path.basename(it.path) == base and it.size == size:
+            return m
+    return None
+
+
+def drafter_item(m):
+    """the ITEMS key of the drafter file m's architecture loads (its role is the drafter's name: 'dflash'), or None"""
+    d = _arch.lookup(m.arch).drafter
+    return next((k for k in m.items if d is not None and BY_KEY[k].role == d), None)
 
 
 def local_rel(it):

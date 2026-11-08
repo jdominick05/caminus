@@ -1,4 +1,4 @@
-"""Hardware readings for the metrics (docs/agentic/spec-metrics.md, 'TP / hardware'): VRAM, power, clocks and their
+"""Hardware readings for the metrics (docs/specs/spec-metrics.md, 'TP / hardware'): VRAM, power, clocks and their
 state per card from amdgpu's sysfs, read-only, under a root directory so tests run on fixture trees (write_fixture).
 
     HwReader(root='/', cards=None, min_interval=1.0, phase=None)
@@ -18,7 +18,7 @@ current_link_speed / width, uevent (PCI_SLOT_NAME), power/control and power/runt
 temp1_input / temp2_input (edge / junction, m°C)}. A missing or unreadable file is None.
 
 Host counters (M7 ops; read by the sampler thread, host only): this process's KFD queue evictions
-(/sys/class/kfd/kfd/proc/<pid>/stats_*/evicted_ms per node, caminus.passpolice.KfdEvictions: pread at offset 0) and the
+(/sys/class/kfd/kfd/proc/<pid>/stats_*/evicted_ms per node, caminus.engine.passpolice.KfdEvictions: pread at offset 0) and the
 system's page migrations (/proc/vmstat pgmigrate_success: system-wide, not per process). Each sample hands the rises since
 the previous one to on_host(evicted_ms, pgmigrate, busy) (the server's EngineStats.host_sample): the eviction as the largest
 per-node rise (one eviction stops every node at once: passpolice's rule, never the sum), busy = the engine phase was not
@@ -33,7 +33,7 @@ import os
 import threading
 import time
 
-from ..passpolice import KfdEvictions
+from ..engine.passpolice import KfdEvictions
 
 GIB = 1 << 30
 MIB = 1 << 20

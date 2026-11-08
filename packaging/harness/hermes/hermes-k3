@@ -18,5 +18,19 @@ if [ ! -f "$HOME_DIR/config.yaml" ]; then
     cp "$HERE/config.yaml" "$HOME_DIR/config.yaml"
     echo "hermes-k3: created $HOME_DIR (config.yaml from $HERE)" >&2
 fi
+# the server's context (max_ctx auto sizes it to the cards: 262,144 is a cap, not a given): every context_length in the
+# home's config.yaml set to it, rounded down to a thousand, before each launch
+python3 -I - "$HOME_DIR/config.yaml" "${CAMINUS_URL:-http://127.0.0.1:8092}" <<'PYEOF' || true
+import json, re, sys, urllib.request
+path, url = sys.argv[1], sys.argv[2].rstrip('/')
+try:
+    n = int(json.load(urllib.request.urlopen(url + '/props', timeout=5))['default_generation_settings']['n_ctx'])
+except Exception as e:
+    sys.exit(f'hermes-k3: the server at {url} did not report its context ({e}); config.yaml kept as it is')
+t = open(path).read(); w = n // 1000 * 1000
+u = re.sub(r'(context_length:\s*)\d+', lambda m: m.group(1) + str(w), t)
+if u != t:
+    open(path, 'w').write(u); print(f'hermes-k3: context length {w} from the server', file=sys.stderr)
+PYEOF
 export HERMES_HOME="$HOME_DIR"
 exec hermes "$@"
