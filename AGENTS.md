@@ -112,7 +112,9 @@ GPU safety (a fault on the display card can take the desktop down):
 - Every device wait is time-bounded (`limit_us`; TP 200 ms + a bitwise retry); every launch well under 200 ms. Never a
   spin-forever or no-timeout variant.
 - Every allocation is projected and checked against the guard's line before it happens (`capacity`); a display card keeps
-  512 MiB free.
+  512 MiB free. The opt-in host KV cache (`FlashNextTP(kv_host=True)`: pinned host memory both cards address,
+  `device/hip.py host_mapped`) is checked against MemAvailable and the GTT page limit (`capacity.check_host_kv`) first;
+  only buffers from `host_mapped` pass the launch checker as host memory.
 
 Correctness:
 - Bitwise: a K3 change leaves logits, router ids and replicas bitwise equal to the previous reference, across `K3_PER_WGP`

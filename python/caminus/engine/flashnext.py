@@ -368,7 +368,7 @@ class FlashNextK3:
     between the cards, and gets the logits back. q8_0 KV cache, as the daily server."""
 
     def __init__(self, path, split=26, devices=(0, 1), max_ctx=2048, q8=True, module=None, layers=None, grid=None, build=True,
-                 limit_us=200_000, max_retries=8):
+                 limit_us=200_000, max_retries=8, ctx_extend=False):
         """layers = (l0, l1): build only those layers on devices[0], no head (per-layer tests drive it with run_layers).
         module: the engine's code object; None picks it from the tensor formats (pick_module).
         limit_us / max_retries: the wait bound per kernel wait and the retries of a launch whose waits gave up, as
@@ -397,7 +397,7 @@ class FlashNextK3:
         self.n_ctx_train = int(hp('context_length')) if 'qwen4exp.context_length' in f else None
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or max_ctx < 1:
             raise ValueError(f'max_ctx {max_ctx!r}: a positive int (the KV cache positions)')
-        if self.n_ctx_train is not None and max_ctx > self.n_ctx_train:
+        if self.n_ctx_train is not None and max_ctx > self.n_ctx_train and not ctx_extend:   # (ctx_extend: the opt-in 1M mode)
             raise ValueError(f'max_ctx {max_ctx} > the model context_length {self.n_ctx_train}')
         max_ctx = int(max_ctx)
         self.q8, self.max_ctx, self.devs, self.split, self.module = q8, max_ctx, devices, split, module

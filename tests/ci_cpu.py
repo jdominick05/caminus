@@ -32,6 +32,7 @@ SUITES = [
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
     ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),
+    ('kv_host', ['tests/device/test_kv_host_cpu.py'], {'torch'}),
     ('ple_aio', ['tests/engine/test_ple_aio.py'], {'torch'}),
     ('spec_policy', ['tests/decode/test_spec_policy.py', 'cpu'], {'torch'}),
     ('prompt_cache', ['tests/cache/test_prompt_cache.py', 'cpu', '--cache-dir', '{scratch}'], {'torch'}),

@@ -86,6 +86,30 @@ def tp_ctx_bytes(g, max_ctx, idx=True):
     return dict(kv=kv, idxraw=raw, idxpool=pool)
 
 
+HOST_KV_MARGIN_MIB = 4096   # host RAM left for everything else while the KV cache is pinned (kv_host)
+
+
+def host_kv_room():
+    """(MemAvailable, the GTT page limit (ttm pages_limit: what all pinned GPU-mapped host memory may total), in MiB"""
+    ma = None
+    for l in open('/proc/meminfo'):
+        if l.startswith('MemAvailable:'): ma = int(l.split()[1]) / 1024
+    try: lim = int(open('/sys/module/ttm/parameters/pages_limit').read()) * 4096 / MIB
+    except OSError: lim = None
+    return ma, lim
+
+
+def check_host_kv(nbytes):
+    """kv_host: refuse (CapacityError) a host KV cache that would leave less than HOST_KV_MARGIN_MIB of MemAvailable or pass
+    the GTT page limit, before anything is allocated"""
+    need = nbytes / MIB; ma, lim = host_kv_room()
+    if ma is not None and need + HOST_KV_MARGIN_MIB > ma:
+        raise CapacityError(f'host KV cache {need:.0f} MiB + {HOST_KV_MARGIN_MIB} MiB margin > MemAvailable {ma:.0f} MiB')
+    if lim is not None and need > 0.95 * lim:
+        raise CapacityError(f'host KV cache {need:.0f} MiB > 95 % of the GTT page limit {lim:.0f} MiB (ttm pages_limit)')
+    return need
+
+
 def tp_qsa_bytes(g, max_ctx, ntok=4):
     """per card: what the QSA tapes add beyond the indexer caches (FlashNextTP(qsa)): the replicated indexer weights
     (k_proj [idx_dim] + q_proj [idx_heads * idx_dim] rows of D BF16, the two norms fp32) of every attention layer, the
