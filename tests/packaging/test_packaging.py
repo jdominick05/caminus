@@ -148,7 +148,17 @@ def guard_lines(root):
 
 
 def stage_guard(S):
+    from caminus.cmd import guarded
     from caminus.device import machine, capacity
+    # Exercise the real child interpreter flags without starting the guard, importing torch or touching a GPU.
+    for name in ('serve', 'replay', 'doctor'):
+        cmd = guarded.command(name, [], os.path.join(S, name + '.log'), 1)
+        child = cmd[4:cmd.index('-c')]
+        r = subprocess.run(child + ['-c', 'import faulthandler, sys; print(faulthandler.is_enabled()); '
+                                    'sys.exit(0 if faulthandler.is_enabled() else 1)'],
+                           capture_output=True, text=True, timeout=10)
+        check(f'guard: {name}: fatal-error tracebacks enabled in the isolated child',
+              r.returncode == 0 and r.stdout.strip() == 'True', f'rc={r.returncode} {r.stdout} {r.stderr}')
     A = '0x1002'
     trees = {
         'this machine': ([('card1', 24560, '0x744c', 128, 1, {'DP-1': 'disconnected', 'HDMI-A-1': 'connected'}, A, '0000:03:00.0'),

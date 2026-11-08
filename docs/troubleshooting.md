@@ -48,6 +48,10 @@ the memory.
 start anything (exit 98) until you've looked at it: read `journalctl -k` around that time, then delete the stop file
 `~/.local/state/k3/GPU_FAULT_STOP`. Please report it with the doctor output and those kernel log lines.
 
+**"Segmentation fault" or "Fatal Python error"**: guarded Python commands enable fatal-error tracebacks. Save
+`caminus logs NAME` before restarting the server (a restart replaces its log), and include the traceback and kernel log
+lines from that time in your bug report. A native crash may leave no Python traceback if it happens on a runtime thread.
+
 **Slower than the numbers in the docs**: the cards may be running at normal clocks (about 13% slower); see
 [getting full speed](hardware.md#getting-full-speed). The server's log says at startup whether the clocks are high.
 
