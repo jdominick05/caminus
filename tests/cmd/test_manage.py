@@ -139,9 +139,17 @@ def main():
         fp = os.environ.get(var)
         if item and fp and os.path.exists(fp):
             ce = dict(ce, paths=dict(ce['paths'], **{item: fp}), **({'path': fp} if var == 'CODER' else {}))
-    real = bool(os.environ.get('CODER')) and os.path.exists(os.environ['CODER'])   # (a stub catalog file can't be projected)
+    def projection_runs():   # (CI's $CODER is a vocab-only GGUF and the catalog holds stubs: no tensors to project)
+        try:
+            arch.of(ce['path']).auto_need(dict(model=ce['path'], drafter=None, no_drafter=True, chunk=2048, max_ctx='auto',
+                                               auto_cache_slots=4), 4, cards=xx)
+            return True
+        except Exception as e:
+            print(f'NOTE cards: the Coder\'s projection can\'t run here ({type(e).__name__}: {str(e)[:80]})', flush=True)
+            return False
+    real = projection_runs()
     if not real or manage.pair_fits(cm, ce) is None:
-        print('NOTE cards: the Coder\'s real file ($CODER) or torch is not here: its projection checks are skipped', flush=True)
+        print('NOTE cards: the Coder\'s projection checks are skipped', flush=True)
     else:
         dr = 'with its drafter' if (ce['paths'].get(models.drafter_item(cm)) or '') else 'without its drafter'
         check(manage.pick_cards(cm, ce, None, set()) == [0, 1], f'cards: XTX + XTX: the Coder fits by its projection ({dr})')
