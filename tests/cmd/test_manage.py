@@ -139,14 +139,15 @@ def main():
         fp = os.environ.get(var)
         if item and fp and os.path.exists(fp):
             ce = dict(ce, paths=dict(ce['paths'], **{item: fp}), **({'path': fp} if var == 'CODER' else {}))
-    if manage.pair_fits(cm, ce) is None:
-        print('NOTE cards: the Coder\'s file (or torch) is not here: its projection checks are skipped', flush=True)
+    real = bool(os.environ.get('CODER')) and os.path.exists(os.environ['CODER'])   # (a stub catalog file can't be projected)
+    if not real or manage.pair_fits(cm, ce) is None:
+        print('NOTE cards: the Coder\'s real file ($CODER) or torch is not here: its projection checks are skipped', flush=True)
     else:
         dr = 'with its drafter' if (ce['paths'].get(models.drafter_item(cm)) or '') else 'without its drafter'
         check(manage.pick_cards(cm, ce, None, set()) == [0, 1], f'cards: XTX + XTX: the Coder fits by its projection ({dr})')
     manage.ROOT = TH.tree(os.path.join(S, 'sysfs-xt2'), [TH.card('card1', '0000:03:00.0', TH.XT, 128, display=True),
                                                          TH.card('card2', '0000:06:00.0', TH.XT, 129)])
-    if manage.pair_fits(cm, ce) is not None:
+    if real and manage.pair_fits(cm, ce) is not None:
         try:
             manage.pick_cards(cm, ce, None, set()); check(False, 'cards: XT + XT: the Coder refused (card 0 must be a 24 GB XTX)')
         except manage.ManageError as err:
