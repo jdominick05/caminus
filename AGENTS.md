@@ -50,6 +50,10 @@ CLAUDE.md imports this file.
 - `device/host.py`: the host's cards from sysfs + KFD topology, never torch; `caminus serve` places itself and sets
   `HIP_VISIBLE_DEVICES` before HIP starts. `device/capacity.py`: every VRAM projection and check.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
+- `panel/openrgb.go`: optional agent-state lighting over backwards-compatible SDK v3. Active per-LED modes need no
+  mode change; `openrgb.switch_modes` opts into temporary Direct/Custom/Static mode changes. Restore the first-seen
+  colors and complete mode payload on exit, using freshly discovered identities and matching layouts after reconnects.
+  Never resize zones, save modes/profiles or write through stale device IDs. Test against mock SDK servers.
 - `share/guard.sh` (linked as `tools/guard.sh`): the GPU guard, shipped in the package.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.

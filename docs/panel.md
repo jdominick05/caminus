@@ -51,6 +51,31 @@ The panel remembers your layout and option values in `~/.config/caminus/panel.js
 `m` in **SERVERS**, or `caminus top` in a terminal, opens a live view of a running server: its speed, how much of each
 prompt came from the cache, each card's memory and power, and any errors.
 
+### Agent-state lighting
+
+The monitor can light your PC through OpenRGB. Start OpenRGB's **SDK Server**, then add this section to
+`~/.config/caminus/top.json` (keep any other settings):
+
+```json
+{
+  "openrgb": {
+    "enabled": true,
+    "host": "127.0.0.1:6742",
+    "brightness": 0.65,
+    "switch_modes": false
+  }
+}
+```
+
+By default, the monitor uses devices already in a per-LED mode, such as Direct. Set `switch_modes` to `true` if you want
+it to temporarily select a supported Direct, Custom or Static mode. On a normal exit it restores the colors and full
+mode settings that OpenRGB reported when it first connected. A lost connection or changed device layout can require
+reapplying your OpenRGB profile.
+
+`devices` limits the lights to matching device names, for example `["MYSTIC", "Vengeance"]`; leaving it empty includes
+every usable device. The monitor never changes your zone sizes or saves a profile. Pause other lighting effects while
+using it. The RGB status appears in **AGENTS**. Preview frames (`-once`) and the headless web view leave lighting alone.
+
 ## The brain / hands team
 
 With two cards you can run two models together: AREX-2 plans on the 24 GB card (the brain) and Qwen3.6 does the work on
