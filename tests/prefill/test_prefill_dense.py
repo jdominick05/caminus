@@ -37,11 +37,22 @@ REAL = os.path.join(ART, 'impl-moe-gemm', 'real')
 SENT = -5913691                  # the sentinel word 0xFFA5C3A5: a NaN as fp32
 GUARD = 1 << 20                  # bytes of sentinel before and after every guarded allocation
 # (name, gguf tensor, layer with a Q6_K copy, rows / K per card): FlashNextTP's shard shapes
-SHAPES = [('qkv', 'attn_qkv', 0, (6400, 2560), (3840, 2560)), ('z', 'attn_gate', 1, (3840, 2560), (2304, 2560)),
-          ('ssm_out', 'ssm_out', 0, (2560, 3840), (2560, 2304)), ('q', 'attn_q', 31, (6144, 2560), (6144, 2560)),
+def _tp_split(default=(10, 12)):
+    """--tp-split GK,MB (taken out of sys.argv before argparse): the TP split whose card shapes are run (default the
+    measured XTX + XT split 10 / 12; 8,10: the even split of equal pairs)"""
+    if '--tp-split' not in sys.argv: return default
+    i = sys.argv.index('--tp-split'); v = tuple(int(x) for x in sys.argv[i + 1].split(',')); del sys.argv[i:i + 2]
+    print(f'split: gdn_keys {v[0]}, moe_blocks {v[1]}', flush=True)
+    return v
+
+
+GK, MB = _tp_split()
+_kc, _mb = (GK, 16 - GK), (MB, 20 - MB)          # GDN key heads and 32-wide intermediate blocks per card
+SHAPES = [('qkv', 'attn_qkv', 0, (640 * _kc[0], 2560), (640 * _kc[1], 2560)), ('z', 'attn_gate', 1, (384 * _kc[0], 2560), (384 * _kc[1], 2560)),
+          ('ssm_out', 'ssm_out', 0, (2560, 384 * _kc[0]), (2560, 384 * _kc[1])), ('q', 'attn_q', 31, (6144, 2560), (6144, 2560)),
           ('k', 'attn_k', 3, (256, 2560), (256, 2560)), ('v', 'attn_v', 3, (256, 2560), (256, 2560)),
-          ('o', 'attn_output', 7, (2560, 3072), (2560, 3072)), ('sg', 'ffn_gate_shexp', 4, (384, 2560), (256, 2560)),
-          ('su', 'ffn_up_shexp', 2, (384, 2560), (256, 2560))]
+          ('o', 'attn_output', 7, (2560, 3072), (2560, 3072)), ('sg', 'ffn_gate_shexp', 4, (32 * _mb[0], 2560), (32 * _mb[1], 2560)),
+          ('su', 'ffn_up_shexp', 2, (32 * _mb[0], 2560), (32 * _mb[1], 2560))]
 COUNT = dict(qkv=22, z=14, ssm_out=29, q=5, k=11, v=10, o=11, sg=13, su=13)   # Q6_K layers of each (the Coder's GGUF)
 
 

@@ -50,7 +50,16 @@ HC, D, LR, NEXP, KU = 4, 2560, 320, 256, 10
 TS = (1, 4, 512, 777, 2048)
 SPLITS = ((1024, 1024), (777, 1271), (512, 788, 748), (5, 3, 2040), (1, 4, 2043))
 # the TP split's GDN rows (flashnext_tp._build_tapes, gdn_keys 10): card c's ssm alpha / beta rows and qkv / conv channels
-GK = 10; KC, KS = [GK, 16 - GK], [0, GK]
+def _tp_split(default=(10, 12)):
+    """--tp-split GK,MB (taken out of sys.argv before argparse): the TP split whose card shapes are run (default the
+    measured XTX + XT split 10 / 12; 8,10: the even split of equal pairs)"""
+    if '--tp-split' not in sys.argv: return default
+    i = sys.argv.index('--tp-split'); v = tuple(int(x) for x in sys.argv[i + 1].split(',')); del sys.argv[i:i + 2]
+    print(f'split: gdn_keys {v[0]}, moe_blocks {v[1]}', flush=True)
+    return v
+
+
+GK = _tp_split()[0]; KC, KS = [GK, 16 - GK], [0, GK]   # (--tp-split)
 VRUNS = [[(16 * g + KS[c], 16 * g + KS[c] + KC[c]) for g in range(3)] for c in (0, 1)]
 QKV_R = [[(128 * KS[c], 128 * (KS[c] + KC[c])), (2048 + 128 * KS[c], 2048 + 128 * (KS[c] + KC[c]))] +
          [(4096 + 128 * a, 4096 + 128 * b) for a, b in VRUNS[c]] for c in (0, 1)]

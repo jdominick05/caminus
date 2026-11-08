@@ -44,6 +44,7 @@ import test_prefill_moe as tpm   # noqa: E402  (its Layer slicing, the MMQ refer
 FAILS, NUMBERS = [], {}
 NEXP, KU, D = tpm.NEXP, tpm.KU, tpm.D
 T_CHUNK = 2048
+SPLIT = (10, 12)                 # (gdn_keys, moe_blocks): FlashNextTP's split; --tp-split GK,MB (the even split 8,10)
 SEQS = ((512,), (1024,), (2048,), (777, 1271), (1000, 1048), (1, 2047), (512, 788, 748))
 SENT = -5913691                  # the sentinel word 0xFFA5C3A5: a NaN as fp32, a negative id as int32
 GUARD = 1 << 20                  # bytes of sentinel before and after every guarded allocation
@@ -173,7 +174,7 @@ def stage_review(rd):
     print(f'review: {len(PC)} pieces (absolute position, offset, tokens), {len(sizes)} sizes: {sizes}', flush=True)
     worst = {}
     for c in (0, 1):
-        d = mmq.card_dims(g, c, 10, 12); ffc = d['ffc']; lay = mmq.workspace_layout(T_CHUNK, d)
+        d = mmq.card_dims(g, c, *SPLIT); ffc = d['ffc']; lay = mmq.workspace_layout(T_CHUNK, d)
         ok, bad = carve_equals_workspace(torch, mmq, d)
         check(ok, f'review card {c}: this script\'s carve == mmq.Workspace\'s views (names, offsets, counts, dtypes){" " + str(bad) if bad else ""}')
         offs, off = {}, 0
@@ -314,7 +315,7 @@ def stage_canary(torch, rd, layers, cards, rkinds, piece_set, js_mode):
         totals['launches'] += 1
 
     for c in cards:
-        d = mmq.card_dims(g, c, 10, 12); lay = mmq.workspace_layout(T_CHUNK, d)
+        d = mmq.card_dims(g, c, *SPLIT); lay = mmq.workspace_layout(T_CHUNK, d)
         ok, bad = carve_equals_workspace(torch, mmq, d)
         if not check(ok, f'canary card {c}: the carve == mmq.Workspace\'s views {bad if bad else ""}'): return
         gws = Guarded(torch, dev, sum(lay.values()), f'workspace card {c}')
@@ -435,11 +436,11 @@ def stage_d2h(torch, rd, coder, rounds, layers):
     nl = int(f['qwen4exp.block_count'].contents()); fai = int(f['qwen4exp.full_attention_interval'].contents())
     ple_layers = sorted(int(v) for v in f['qwen4exp.ple.layers'].contents())
     HC, S = g['hc'], g['ssm_state']; nvk = g['ssm_heads'] // g['ssm_groups']
-    kc = [10, g['ssm_groups'] - 10]; H = [nvk * x for x in kc]; CH = [(2 + nvk) * S * x for x in kc]
+    kc = [SPLIT[0], g['ssm_groups'] - SPLIT[0]]; H = [nvk * x for x in kc]; CH = [(2 + nvk) * S * x for x in kc]
     M = mmq.MMQ(dev, formats=moe.FORMATS); O = moe.MoE(dev, M)
     Ws, Ls = [], []
     for c in (0, 1):
-        d = mmq.card_dims(g, c, 10, 12); lay = mmq.workspace_layout(T_CHUNK, d)
+        d = mmq.card_dims(g, c, *SPLIT); lay = mmq.workspace_layout(T_CHUNK, d)
         blk = torch.zeros(sum(lay.values()), dtype=torch.uint8, device=dev); W = carve(torch, blk, lay); W.blk = blk; Ws.append(W)
         for il in layers: Ls.append((c, GLayer(torch, dev, rd, il, c)))
     xr = {il: torch.from_numpy(tpm.load_real('d8192', il, 0, T_CHUNK)[0]).to(dev) for il in layers}
@@ -551,8 +552,15 @@ def main():
     ap.add_argument('--routings', default=','.join(ROUTINGS)); ap.add_argument('--pieces', default='all', choices=('all', 'tiny'))
     ap.add_argument('--js', default='all', choices=('all', 'prod')); ap.add_argument('--rounds', type=int, default=200)
     ap.add_argument('--d2h-layers', default='1,17'); ap.add_argument('--json', default=None)
+    ap.add_argument('--tp-split', default=None, help='GK,MB: the split whose card shapes are checked (default 10,12, the '
+                    'measured XTX + XT split; 8,10: the even split, both cards\' down shards 320 wide with a K-split tail)')
     a = ap.parse_args()
     layers = [int(v) for v in a.layers.split(',')]; cards = [int(v) for v in a.cards.split(',')]
+    if a.tp_split:
+        global SPLIT
+        SPLIT = tuple(int(v) for v in a.tp_split.split(','))
+        nbt = tpm.MBR[-1][1]; tpm.MBR[:] = [(0, SPLIT[1]), (SPLIT[1], nbt)]     # (the shards' block ranges: tests/test_prefill_moe.Layer)
+        print(f'split: gdn_keys {SPLIT[0]}, moe_blocks {SPLIT[1]} (card 0 ffc {32 * SPLIT[1]}, card 1 {32 * (nbt - SPLIT[1])})', flush=True)
     rkinds = [v for v in a.routings.split(',') if v]
     assert all(r in ROUTINGS for r in rkinds), rkinds
     from caminus.engine import flashnext   # noqa: F401  (gguf-py on the path)
