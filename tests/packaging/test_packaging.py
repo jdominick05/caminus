@@ -6,7 +6,9 @@ Stages (default: all):
   config    caminus.config: environment > config.toml > XDG defaults, legacy names, refusals of a bad file
   guard     guard.sh --lines (bash) == caminus.device.machine (Python) on synthetic sysfs trees (this machine's layout, a headless
             card, card10 ordering, a display on the second card, an iGPU, a non-AMD card) and on this machine's own sysfs
-            (XTX 23,800 / XT 19,850, the display on the XTX); capacity's lines and the cache reserve from it
+            (XTX 23,800 / XT 19,850, the display on the XTX); capacity's lines and the cache reserve from it; the fault
+            watch live on this machine's cards (a fake kernel log: a display-core REG_WAIT timeout is noted, page faults and
+            ring timeouts still exit 99; skipped without a gfx1100 card)
   kernels   caminus.device.kernels: the directory order (CAMINUS_KERNEL_DIR, a checkout's build/, the package's), provenance
             verify on a staged scratch copy (a changed byte and a missing object found); provenance's `built` from
             SOURCE_DATE_EPOCH when set (a bad value refused), else build.sh's time
@@ -204,6 +206,49 @@ def stage_guard(S):
     check('guard: tools/guard.sh is the shipped guard', os.path.realpath(os.path.join(ROOT, 'tools', 'guard.sh'))
           == os.path.realpath(os.path.join(ROOT, 'python', 'caminus', 'share', 'guard.sh')))
     check('guard: no machine path in the guard', not any(s in txt for s in ('/home/', '/run/' 'media', 'gpu' '-fan')))
+    stage_guard_faults(S, os.path.join(ROOT, 'python', 'caminus', 'share', 'guard.sh'))
+
+
+def stage_guard_faults(S, guard):
+    """the fault watch, live on this machine's cards (sysfs read only, no GPU context): a fake journalctl on PATH feeds the
+    kernel log, the STOP file is a scratch path, `env` stands in for gpu-high (the clocks are not touched). A display-core
+    REG_WAIT timeout (a monitor sleeping) is noted and the run continues; a page fault or a ring timeout beside it still
+    kills the run with exit 99 and records only the fault lines"""
+    import shlex
+    import shutil
+    boot = 'amdgpu 0000:03:00.0: [drm] fb0: amdgpudrmfb frame buffer device'          # (makes the fake journal readable)
+    dcn = 'amdgpu 0000:03:00.0: [drm] REG_WAIT timeout 1us * 100 tries - dcn32_program_compbuf_size line:148'
+    pf = 'amdgpu 0000:06:00.0: [gfxhub] page fault (src_id:0 ring:24 vmid:8 pasid:32771)'
+    ring = 'amdgpu 0000:06:00.0: [drm] *ERROR* ring comp_1.0.0 timeout, signaled seq=11, emitted seq=12'
+
+    def run(name, lines):
+        d = os.path.join(S, 'faults', name)
+        os.makedirs(os.path.join(d, 'bin'))
+        kl = os.path.join(d, 'kernel.log')
+        open(kl, 'w').write(''.join(x + '\n' for x in lines))
+        jc = os.path.join(d, 'bin', 'journalctl')
+        open(jc, 'w').write(f'#!/bin/sh\ncat {shlex.quote(kl)}\n')
+        os.chmod(jc, 0o755)
+        stop = os.path.join(d, 'STOP')
+        env = dict(os.environ, PATH=os.path.join(d, 'bin') + os.pathsep + os.environ.get('PATH', ''), K3_GUARD_STOP=stop,
+                   CAMINUS_GPU_HIGH=shutil.which('env'))
+        env.pop('CAMINUS_GUARD', None)
+        log = os.path.join(d, 'run.log')
+        r = subprocess.run(['bash', guard, log, '60', 'sleep', '4'], env=env, capture_output=True, text=True, timeout=120)
+        return (r.returncode, open(log).read() if os.path.exists(log) else '',
+                open(stop).read() if os.path.exists(stop) else None)
+
+    rc, log, stop = run('display', [boot, dcn])
+    if rc == 97:
+        print('NOTE guard: no gfx1100 card here: the live fault-watch checks are skipped', flush=True)
+        return
+    check('guard: a display-core REG_WAIT timeout (monitor sleep) is noted, not a fault: the run completes, no STOP',
+          rc == 0 and stop is None and 'GUARD NOTE: a display-engine register wait' in log, f'rc {rc} stop {stop!r} {log[-300:]}')
+    rc, log, stop = run('pagefault', [boot, dcn, pf])
+    check('guard: a page fault beside it is still a fault: exit 99, STOP holds the fault line and not the display line',
+          rc == 99 and stop is not None and pf in stop and dcn not in stop and 'GPU FAULT' in log, f'rc {rc} stop {stop!r}')
+    rc, log, stop = run('ring', [boot, ring])
+    check('guard: a ring timeout is still a fault (exit 99)', rc == 99 and stop is not None and ring in stop, f'rc {rc} stop {stop!r}')
 
 
 # --------------------------------------------------------------------------------------------------------------- kernels

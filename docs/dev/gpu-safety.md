@@ -13,6 +13,11 @@ The guard watches every gfx1100 card. It kills the process when a card passes 97
 memory, and on any amdgpu page fault, reset or timeout in the kernel log. `caminus serve`, `caminus replay` and
 `caminus doctor --gpu` start themselves under it.
 
+One kind of timeout is left out: the display core's register waits (`REG_WAIT timeout <n>us * <n> tries - <function>`),
+which time out when a monitor sleeps, wakes or changes mode. They come from the display engine, not from a compute queue,
+so the guard writes a `GUARD NOTE` and the run continues. A page fault, reset, wedge or ring timeout next to them is still
+a fault (tests/packaging/test_packaging.py `guard`).
+
 - **Exit 99: a GPU fault.** Stop all GPU work. Don't rerun anything, not even "just to check". Read `journalctl -k`.
 - **Exit 98: a fault is on record.** Every guarded run refuses until a person has inspected the fault and removed
   `~/.local/state/k3/GPU_FAULT_STOP` by hand.

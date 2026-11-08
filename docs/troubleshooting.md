@@ -66,6 +66,10 @@ profilers attached through `ROCP_TOOL_LIBRARIES` or `HSA_TOOLS_LIB` are preserve
 and a runtime with the upstream fix. The HIP/HSA runtime comes from PyTorch, separately from the kernel compiler version
 printed at startup. Preserve the logs if a crash persists with the workaround.
 
+**"GUARD REFUSED" after your monitors went to sleep**: in Caminus 0.2.0 the guard took a display timeout for a GPU fault.
+If every line in `~/.local/state/k3/GPU_FAULT_STOP` says `REG_WAIT timeout`, it was your monitor, not the GPU: delete the
+file and start again. Later versions only note these lines and keep running.
+
 **Slower than the numbers in the docs**: the cards may be running at normal clocks (about 13% slower); see
 [getting full speed](hardware.md#getting-full-speed). The server's log says at startup whether the clocks are high.
 
