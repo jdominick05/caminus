@@ -48,6 +48,10 @@ the memory.
 start anything (exit 98) until you've looked at it: read `journalctl -k` around that time, then delete the stop file
 `~/.local/state/k3/GPU_FAULT_STOP`. Please report it with the doctor output and those kernel log lines.
 
+**"GUARD REFUSED" after your monitors went to sleep**: in Caminus 0.2.0 the guard took a display timeout for a GPU fault.
+If every line in `~/.local/state/k3/GPU_FAULT_STOP` says `REG_WAIT timeout`, it was your monitor, not the GPU: delete the
+file and start again. Later versions only note these lines and keep running.
+
 **Slower than the numbers in the docs**: the cards may be running at normal clocks (about 13% slower); see
 [getting full speed](hardware.md#getting-full-speed). The server's log says at startup whether the clocks are high.
 
