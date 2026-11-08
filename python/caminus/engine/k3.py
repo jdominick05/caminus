@@ -76,7 +76,7 @@ Q3N_MODULES = ('k3_gguf_q3n', 'k3_gguf_q3n_mt')
 # Qwen3.6-35B-A3B (qwen35moe) on ONE card (python/caminus/engine/qwen35_one.py), HauhauCS Q3_K_P formats (kernels/k3_gguf_q35h.hip):
 # K3_GDN_SILU, tiled GDN heads (the default), split attention with 8 query heads per kv head
 Q35H_MODULES = ('k3_gguf_q35h', 'k3_gguf_q35h_mt', 'k3_gguf_q35h_trace')
-Q35D_MODULES = ('k3_gguf_q35d',)   # the dense qwen35 line (AREX-2): one card, T = 1 (no _mt build yet)   # (_trace: K3_TRACE timestamps, measurement only)
+Q35D_MODULES = ('k3_gguf_q35d', 'k3_gguf_q35d_mt')   # the dense qwen35 line (AREX-2): one card; _mt: T > 1 (verify passes)   # (_trace: K3_TRACE timestamps, measurement only)
 Q35G_MODULES = ('k3_gguf_q35g', 'k3_gguf_q35g_mt')   # the 2-bit GSQ checkpoint (kernels/k3_gguf_q35g.hip)
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
@@ -235,6 +235,7 @@ def module_for(module, T):
     elif T > 1 and module == 'k3_gguf_q3n' and os.environ.get('K3_MT', '1') != '0': m = 'k3_gguf_q3n_mt'
     elif T > 1 and module == 'k3_gguf_q35h' and os.environ.get('K3_MT', '1') != '0': m = 'k3_gguf_q35h_mt'
     elif T > 1 and module == 'k3_gguf_q35g' and os.environ.get('K3_MT', '1') != '0': m = 'k3_gguf_q35g_mt'
+    elif T > 1 and module == 'k3_gguf_q35d' and os.environ.get('K3_MT', '1') != '0': m = 'k3_gguf_q35d_mt'
     if os.environ.get('K3_QSA_ENTRY') == '1' and m in QSA_OF: m = QSA_OF[m]
     return m
 

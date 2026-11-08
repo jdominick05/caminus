@@ -7,10 +7,10 @@
           engine) over the full vocabulary and top-1 agreement, a replica check after every position; llama.cpp's own
           batch-vs-decode floor from the _batch dumps. D-281 bar: mean KLD <= the floor's, top-1 >= the floor's - 1 point
   bitwise the repo's K3 invariants on the whole tape, teacher-forced over the code text's first NPOS positions (--npos,
-          default 96): a one-token reference at the default grid; T = 4 verify passes (k3_gguf_q3n_mt) == it, bitwise
+          default 96): a one-token reference at the default grid; T = 4 verify passes (--ntok T: another width; k3_gguf_q3n_mt) == it, bitwise
           per logits row (tools/gates/tp_multi.py's rule); K3_PER_WGP = 3 / 6 / 7 one-token runs == it (the race check);
           replicas equal after every run
-usage: tools/guard.sh LOG SECS python -I tests/engine/test_q3n_e2e.py REFS [layers|e2e|bitwise|all] [--model GGUF] [--max-ctx N] [--npos N]
+usage: tools/guard.sh LOG SECS python -I tests/engine/test_q3n_e2e.py REFS [layers|e2e|bitwise|all] [--model GGUF] [--max-ctx N] [--npos N] [--ntok T]
   REFS: the tools/reference/q3n_refs.sh output dir (e2e_{prose,code,shell}_{decode,batch}, golden_layers)"""
 import os
 import sys
@@ -26,6 +26,8 @@ if '--model' in args: i = args.index('--model'); PATH = args[i + 1]; del args[i:
 if '--max-ctx' in args: i = args.index('--max-ctx'); MAXC = int(args[i + 1]); del args[i:i + 2]
 NPOS = 96
 if '--npos' in args: i = args.index('--npos'); NPOS = int(args[i + 1]); del args[i:i + 2]
+NT = 4                                    # bitwise: the verify width (--ntok: a drafter's block, e.g. 8)
+if '--ntok' in args: i = args.index('--ntok'); NT = int(args[i + 1]); del args[i:i + 2]
 if not args: raise SystemExit(__doc__)
 REFS = args[0]; CMD = args[1] if len(args) > 1 else 'all'
 if CMD not in ('layers', 'e2e', 'bitwise', 'all'): raise SystemExit(__doc__)
@@ -131,15 +133,15 @@ def one_token_rows(toks, n, per_wgp=None):
 
 def cmd_bitwise():
     toks = [int(v) for v in open(f'{REFS}/e2e_code_decode/tokens.txt').read().split()]
-    n = min(NPOS, len(toks)) // 4 * 4; assert n >= 8, n
+    n = min(NPOS, len(toks)) // NT * NT; assert n >= 2 * NT, n
     ref, rep, grid = one_token_rows(toks, n)
     ok('one-token reference: replicas equal', rep == (True, True), f'({n} positions of the code text, grid {grid})')
-    m = engine_class(PATH)(PATH, max_ctx=MAXC, ntok=4); m.reset(); out = []
+    m = engine_class(PATH)(PATH, max_ctx=MAXC, ntok=NT); m.reset(); out = []
     mods = [e.module for e in m.engines]
-    for i0 in range(0, n, 4): out.append(m.verify(toks, i0, 0 if i0 == 0 else 4).cpu())
+    for i0 in range(0, n, NT): out.append(m.verify(toks, i0, 0 if i0 == 0 else NT).cpu())
     out = torch.cat(out); rep4 = m.check_replicas(); del m; torch.cuda.empty_cache()
     same = [beq(out[i], ref[i]) for i in range(n)]
-    ok('T = 4 verify == one-token steps, bitwise', all(same) and rep4 == (True, True),
+    ok(f'T = {NT} verify == one-token steps, bitwise', all(same) and rep4 == (True, True),
        f'({sum(same)}/{n} rows; modules {mods}; max |diff| {(out - ref).abs().max().item():.3e}; replicas {rep4})')
     for pw in (3, 6, 7):
         rows, repg, g = one_token_rows(toks, n, per_wgp=pw)
