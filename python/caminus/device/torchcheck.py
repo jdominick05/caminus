@@ -7,6 +7,18 @@ INSTALL = f'pip install torch --index-url {ROCM_INDEX}'
 TESTED = '2.14.1+rocm7.2'
 
 
+def prepare_runtime():
+    """Serving/replay defaults, before torch imports or HIP initializes; an explicitly attached profiler keeps control.
+
+    ROCm 7.2's InterceptQueue can overflow its host staging buffer under deep dispatch queues (ROCm/rocm-systems#4066,
+    #5071). AREX-2 long prefill reproduced the AsyncEventsLoop crash; disabling optional profiler registration avoids
+    that queue wrapper. Explicit values (0 enables profiling) and tool libraries are never overridden.
+    """
+    import os
+    if not os.environ.get('ROCP_TOOL_LIBRARIES') and not os.environ.get('HSA_TOOLS_LIB'):
+        os.environ.setdefault('HSA_TOOLS_DISABLE_REGISTER', '1')
+
+
 def status():
     """(ok, torch version or None, detail): ok when torch imports and is a ROCm (HIP) build. Imports torch, initializes no
     device (torch.version only)"""

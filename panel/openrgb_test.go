@@ -44,8 +44,17 @@ func ctrlData(d mockDev) []byte {
 	}
 	for _, m := range modes {
 		str(m)
-		for range 12 { // value, flags, speed min/max, brightness min/max, colors min/max, speed, brightness, direction, color mode
-			u32(0)
+		for j := range 12 { // value, flags, speed min/max, brightness min/max, colors min/max, speed, brightness, direction, color mode
+			v := 0
+			if m == "Direct" {
+				switch j {
+				case 1:
+					v = modePerLED
+				case 11:
+					v = 1
+				}
+			}
+			u32(v)
 		}
 		u16(1) // one mode color
 		u32(0xff)
@@ -87,6 +96,55 @@ func ctrlData(d mockDev) []byte {
 	return append(binary.LittleEndian.AppendUint32(nil, uint32(len(b)+4)), b...)
 }
 
+// A separately encoded SDK v3 response: a v6 server serializes this older layout when asked for v3.
+func ctrlData3(d mockDev) []byte {
+	var b []byte
+	u16 := func(v int) { b = binary.LittleEndian.AppendUint16(b, uint16(v)) }
+	u32 := func(v int) { b = binary.LittleEndian.AppendUint32(b, uint32(v)) }
+	str := func(s string) { u16(len(s) + 1); b = append(append(b, s...), 0) }
+	u32(0)
+	for _, s := range []string{d.name, "Vendor", "desc", "1.0", "serial", "HID: " + d.name} {
+		str(s)
+	}
+	u16(2)
+	if d.mode == "Direct" {
+		u32(0)
+	} else {
+		u32(1)
+	}
+	for _, name := range []string{"Direct", "Static"} {
+		str(name)
+		flags, colorMode := 0, 3
+		if name == "Direct" {
+			flags, colorMode = modePerLED|16, 1
+		}
+		// The nondefault speed, brightness and mode color must survive restoration byte for byte.
+		for _, v := range []int{7, flags, 1, 100, 0, 100, 0, 2, 37, 63, 1, colorMode} {
+			u32(v)
+		}
+		u16(1)
+		u32(0x123456)
+	}
+	u16(len(d.zones))
+	for i, n := range d.zones {
+		str("JARGB " + string(rune('1'+i)))
+		for _, v := range []int{1, 0, 240, n} {
+			u32(v)
+		}
+		u16(0)
+	}
+	u16(len(d.colors))
+	for range d.colors {
+		str("LED")
+		u32(0)
+	}
+	u16(len(d.colors))
+	for _, c := range d.colors {
+		b = append(b, c.r, c.g, c.b, 0)
+	}
+	return append(binary.LittleEndian.AppendUint32(nil, uint32(len(b)+4)), b...)
+}
+
 type sdkPkt struct {
 	dev, id uint32
 	data    []byte
@@ -94,7 +152,7 @@ type sdkPkt struct {
 
 type mockSDK struct {
 	ln    net.Listener
-	devs  []mockDev
+	data  [][]byte
 	mu    sync.Mutex
 	got   []sdkPkt
 	conns []net.Conn
@@ -105,7 +163,10 @@ func newMockSDK(t *testing.T, devs ...mockDev) *mockSDK {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &mockSDK{ln: ln, devs: devs}
+	m := &mockSDK{ln: ln}
+	for _, d := range devs {
+		m.data = append(m.data, ctrlData3(d))
+	}
 	t.Cleanup(func() { ln.Close() })
 	go func() {
 		for {
@@ -136,14 +197,19 @@ func (m *mockSDK) serve(c net.Conn) {
 		}
 		m.mu.Lock()
 		m.got = append(m.got, p)
+		count := len(m.data)
+		var description []byte
+		if p.id == pktData && int(p.dev) < count {
+			description = append([]byte(nil), m.data[p.dev]...)
+		}
 		m.mu.Unlock()
 		switch p.id {
 		case pktProto:
-			o.send(0, pktProto, u32(5))
+			o.send(0, pktProto, u32(6))
 		case pktCount:
-			o.send(0, pktCount, u32(uint32(len(m.devs))))
+			o.send(0, pktCount, u32(uint32(count)))
 		case pktData:
-			o.send(p.dev, pktData, ctrlData(m.devs[p.dev]))
+			o.send(p.dev, pktData, description)
 		}
 	}
 }
@@ -202,21 +268,23 @@ func TestLedsPacket(t *testing.T) {
 
 func TestLookColors(t *testing.T) {
 	steady := look{ledRGB{200, 100, 0}, "", 0}
-	if c := steady.colors(nil, 3, 0, 0.5); len(c) != 3 || c[2] != (ledRGB{100, 50, 0}) {
+	if c := steady.zoneColors(3, 0, 0.5, rgbLayout{}); len(c) != 3 || c[2] != (ledRGB{100, 50, 0}) {
 		t.Errorf("steady at half brightness: %v", c)
 	}
 	br := look{ledRGB{200, 0, 0}, "breathe", time.Second}
-	lo, hi := br.colors(nil, 1, 0, 1)[0], br.colors(nil, 1, 500*time.Millisecond, 1)[0]
+	lo, hi := br.zoneColors(1, 0, 1, rgbLayout{})[0], br.zoneColors(1, 500*time.Millisecond, 1, rgbLayout{})[0]
 	if lo.r != 30 || hi.r != 200 {
 		t.Errorf("breathe from %v to %v, want 30 to 200", lo, hi)
 	}
 	// a chase runs in each zone on its own: the spot is at the start of both zones at t=0
-	ch := look{ledRGB{0, 250, 0}, "chase", time.Second}
-	c := ch.colors([]int{4, 4}, 8, 0, 1)
+	ch := defaultConfig.OpenRGB
+	ci := ctrlInfo{zones: []int{4, 4}, zoneNames: []string{"strip 1", "strip 2"}, colors: make([]ledRGB, 8)}
+	c := ch.frame(ci, phWriting, 0)
 	if c[0].g <= c[2].g || c[4].g <= c[6].g || c[0] != c[4] {
 		t.Errorf("chase frame %v", c)
 	}
-	if c := ch.colors([]int{4}, 6, 0, 1); len(c) != 6 || c[4] == (ledRGB{}) {
+	ci.zones, ci.zoneNames, ci.colors = []int{4}, []string{"strip"}, make([]ledRGB, 6)
+	if c := ch.frame(ci, phWriting, 0); len(c) != 6 || c[4] == (ledRGB{}) {
 		t.Errorf("LEDs past the zones left dark: %v", c)
 	}
 	cfg := rgbCfg{Colors: map[string]string{phWaiting: "#ff00ff", phWriting: "bogus"}}
@@ -269,10 +337,10 @@ func TestOpenRGBMock(t *testing.T) {
 	go l.run()
 
 	waitFor(t, "a frame", func() bool { return len(m.packets(pktUpdateLEDs)) > 0 })
-	if p := m.packets(pktClientName); len(p) != 1 || string(p[0].data) != "llm-top\x00" {
+	if p := m.packets(pktClientName); len(p) != 1 || string(p[0].data) != "Caminus Top\x00" {
 		t.Errorf("client name %v", p)
 	}
-	if v := m.packets(pktData)[0].data; binary.LittleEndian.Uint32(v) != 5 {
+	if v := m.packets(pktData)[0].data; binary.LittleEndian.Uint32(v) != 3 {
 		t.Errorf("controller data asked at protocol %d", binary.LittleEndian.Uint32(v))
 	}
 	idle := ledsPacket([]ledRGB{looks[phIdle].c, looks[phIdle].c, looks[phIdle].c})

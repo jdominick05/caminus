@@ -2,9 +2,9 @@
 // Copyright (C) 2026 jdominick05
 
 // OpenRGB: lights the machine's RGB devices by what the agent is doing, through OpenRGB's SDK server (TCP, default
-// 127.0.0.1:6742, protocol 1-5). It is the one connection llm-top writes over, and it is off unless the config
-// says "openrgb": {"enabled": true}. Only devices already in Direct mode are driven (no mode switches, which on
-// some hardware write to flash), and the colors they had when first seen are put back on exit.
+// 127.0.0.1:6742, backwards-compatible SDK v3). It is off unless the config says "openrgb": {"enabled": true}.
+// Active per-LED modes work without a mode change. switch_modes opts into temporary mode changes; the original
+// colors and complete mode payload are restored on exit. No zone sizing, profile saves or firmware saves.
 package main
 
 import (
@@ -65,8 +65,8 @@ func (st *state) rgbPhase() string {
 
 type ledRGB struct{ r, g, b uint8 }
 
-// look is how a phase shows: fx "" is steady, "breathe" pulses every LED, "chase" runs a bright spot along each
-// zone over a dim base. LEDs want saturated colors; the TUI's pastel palette would come out nearly white.
+// look is how a phase shows. The renderer samples rings circularly and strips linearly. Saturated colors keep
+// states recognizable on LEDs; a pastel palette would come out nearly white.
 type look struct {
 	c      ledRGB
 	fx     string
@@ -75,15 +75,15 @@ type look struct {
 
 var looks = map[string]look{
 	phOffline: {ledRGB{60, 0, 0}, "", 0},
-	phLoading: {ledRGB{255, 70, 0}, "breathe", 2 * time.Second},
+	phLoading: {ledRGB{255, 70, 0}, "orbit", 2 * time.Second},
 	phIdle:    {ledRGB{0, 40, 60}, "", 0},
 	phQuiet:   {ledRGB{0, 40, 60}, "", 0},
 	phBetween: {ledRGB{0, 60, 255}, "", 0},
 	phWaiting: {ledRGB{0, 220, 180}, "breathe", 3 * time.Second},
-	phReading: {ledRGB{255, 170, 0}, "breathe", time.Second},
+	phReading: {ledRGB{255, 170, 0}, "sweep", 1800 * time.Millisecond},
 	phWriting: {ledRGB{0, 255, 40}, "chase", 1200 * time.Millisecond},
-	phTool:    {ledRGB{255, 100, 0}, "", 0},
-	phCompact: {ledRGB{255, 30, 0}, "chase", 700 * time.Millisecond},
+	phTool:    {ledRGB{255, 100, 0}, "gloss", 3 * time.Second},
+	phCompact: {ledRGB{255, 30, 0}, "converge", 1600 * time.Millisecond},
 }
 
 func (c ledRGB) scale(k float64) ledRGB {
@@ -101,47 +101,19 @@ func parseHex(s string) (ledRGB, bool) {
 	return ledRGB{uint8(v >> 16), uint8(v >> 8), uint8(v)}, true
 }
 
-// colors gives n LEDs at time t. zones are the zones' LED counts; LEDs past them count as one more zone.
-func (l look) colors(zones []int, n int, t time.Duration, br float64) []ledRGB {
-	out := make([]ledRGB, n)
-	ph := 0.0
-	if l.period > 0 {
-		ph = math.Mod(float64(t)/float64(l.period), 1)
-	}
-	switch l.fx {
-	case "breathe":
-		c := l.c.scale(br * (0.15 + 0.85*(0.5-0.5*math.Cos(2*math.Pi*ph))))
-		for i := range out {
-			out[i] = c
-		}
-	case "chase":
-		i := 0
-		for _, z := range append(append([]int(nil), zones...), n) {
-			z = min(z, n-i)
-			for j := 0; j < z; j++ {
-				d := math.Abs(float64(j) + 0.5 - ph*float64(z))
-				d = min(d, float64(z)-d) // the spot wraps around
-				out[i+j] = l.c.scale(br * max(0.12, 1-d/2.5))
-			}
-			i += z
-		}
-	default:
-		c := l.c.scale(br)
-		for i := range out {
-			out[i] = c
-		}
-	}
-	return out
-}
-
 // ---------- config ----------
 
 type rgbCfg struct {
-	Enabled    bool              `json:"enabled"`
-	Host       string            `json:"host"`
-	Devices    []string          `json:"devices"`    // name substrings, case-insensitive; empty = every Direct-mode device
-	Brightness float64           `json:"brightness"` // 0-1
-	Colors     map[string]string `json:"colors"`     // phase -> #rrggbb
+	Enabled     bool              `json:"enabled"`
+	Host        string            `json:"host"`
+	Devices     []string          `json:"devices"`         // name substrings, case-insensitive; empty = every usable per-LED device
+	Brightness  float64           `json:"brightness"`      // 0-1
+	Colors      map[string]string `json:"colors"`          // phase -> #rrggbb
+	SwitchModes bool              `json:"switch_modes"`    // opt in: temporarily select a per-LED mode
+	FPS         int               `json:"fps"`             // 1-60; 20 by default
+	Speed       float64           `json:"speed"`           // 0.1-4; 1 by default
+	FadeMS      int               `json:"fade_ms"`         // 0-2000; 0 disables crossfades
+	Zones       map[string]string `json:"zones,omitempty"` // zone name -> ring, reverse-ring, strip
 }
 
 func (c rgbCfg) look(ph string) look {
@@ -174,7 +146,9 @@ const (
 	pktClientName = 50
 	pktListChange = 100
 	pktUpdateLEDs = 1050
-	orgbProto     = 5 // highest version parsed here; 6 changes device ids and the controller layout
+	pktUpdateMode = 1101
+	orgbProto     = 3 // request this layout even from newer servers (v6 changes device IDs)
+	modePerLED    = 1 << 5
 )
 
 var errListChanged = errors.New("OpenRGB device list changed")
@@ -190,8 +164,17 @@ func (o *orgbConn) send(dev, id uint32, data []byte) error {
 	binary.LittleEndian.PutUint32(b[4:], dev)
 	binary.LittleEndian.PutUint32(b[8:], id)
 	binary.LittleEndian.PutUint32(b[12:], uint32(len(data)))
-	_, err := o.c.Write(append(b, data...))
-	return err
+	for b = append(b, data...); len(b) > 0; {
+		n, err := o.c.Write(b)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		b = b[n:]
+	}
+	return nil
 }
 
 func (o *orgbConn) read() (id uint32, data []byte, err error) {
@@ -213,7 +196,7 @@ func (o *orgbConn) read() (id uint32, data []byte, err error) {
 
 // recv waits for a reply with id want; a device list change on the way aborts (indices may have moved).
 func (o *orgbConn) recv(want uint32) ([]byte, error) {
-	for {
+	for range 64 {
 		id, b, err := o.read()
 		switch {
 		case err != nil:
@@ -224,6 +207,7 @@ func (o *orgbConn) recv(want uint32) ([]byte, error) {
 			return b, nil
 		}
 	}
+	return nil, errors.New("too many unrelated OpenRGB packets")
 }
 
 func u32(v uint32) []byte { return binary.LittleEndian.AppendUint32(nil, v) }
@@ -261,30 +245,93 @@ func (r *pkReader) str() string {
 }
 
 type ctrlInfo struct {
-	name, loc string
-	mode      string // active mode's name
-	zones     []int  // LEDs per zone
-	colors    []ledRGB
+	name, loc, serial string
+	kind              int
+	mode              string // active mode's name
+	active            int
+	modes             []orgbMode
+	zones             []int // LEDs per zone
+	zoneNames         []string
+	colors            []ledRGB
 }
 
-// parseController reads a REQUEST_CONTROLLER_DATA reply (data_size first) up to the colors.
+type orgbMode struct {
+	name             string
+	flags, colorMode uint32
+	fieldsAt         int
+	raw              []byte // the entire wire payload, including speed, brightness and mode colors
+}
+
+func (m orgbMode) perLED() bool { return m.flags&modePerLED != 0 && m.colorMode == 1 }
+
+func (ci ctrlInfo) selectedMode(switchModes bool) int {
+	if len(ci.modes) == 0 {
+		return -1
+	}
+	if ci.modes[ci.active].perLED() {
+		return ci.active
+	}
+	if switchModes {
+		for _, name := range []string{"Direct", "Custom", "Static"} {
+			for i, m := range ci.modes {
+				if strings.EqualFold(m.name, name) && m.perLED() {
+					return i
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// A rescan may change indices, replace a controller, or resize its zones. Only a matching identity AND layout
+// can use an old snapshot; otherwise even a correctly re-discovered index could receive the wrong LED count.
+func (ci ctrlInfo) key() string {
+	k := fmt.Sprintf("%q|%q|%q|%d|%d", ci.name, ci.serial, ci.loc, ci.kind, len(ci.colors))
+	for i, n := range ci.zones {
+		k += fmt.Sprintf("|%q:%d", ci.zoneNames[i], n)
+	}
+	for _, m := range ci.modes {
+		k += fmt.Sprintf("|%q:%d:%d", m.name, m.flags, m.colorMode)
+	}
+	return k
+}
+
+func modePacket(index int, m orgbMode, fullBrightness bool) []byte {
+	b := binary.LittleEndian.AppendUint32(nil, uint32(8+len(m.raw)))
+	b = binary.LittleEndian.AppendUint32(b, uint32(index))
+	b = append(b, m.raw...)
+	if fullBrightness && m.flags&16 != 0 {
+		fields := b[8+m.fieldsAt:]
+		binary.LittleEndian.PutUint32(fields[9*4:], binary.LittleEndian.Uint32(fields[5*4:]))
+	}
+	return b
+}
+
+// parseController reads a complete REQUEST_CONTROLLER_DATA reply. Never use partial descriptions to write hardware.
 func parseController(b []byte, proto uint32) (ctrlInfo, error) {
 	var ci ctrlInfo
 	r := &pkReader{b: b}
-	r.u32() // data_size
-	r.u32() // type
+	if r.u32() != len(b) || proto < 3 || proto > 5 {
+		return ci, errors.New("invalid OpenRGB controller size or version")
+	}
+	ci.kind = r.u32()
 	ci.name = r.str()
 	if proto >= 1 {
 		r.str() // vendor
 	}
 	r.str() // description
 	r.str() // version
-	r.str() // serial
+	ci.serial = r.str()
 	ci.loc = r.str()
 	nm, active := r.u16(), r.u32()
+	ci.active = active
 	for i := 0; i < nm && !r.bad; i++ {
+		start := len(b) - len(r.b)
 		name := r.str()
-		r.take(4 * 4) // value, flags, speed min/max
+		fieldsAt := len(b) - len(r.b) - start
+		r.u32() // value
+		flags := uint32(r.u32())
+		r.take(2 * 4) // speed min/max
 		if proto >= 3 {
 			r.take(2 * 4) // brightness min/max
 		}
@@ -292,15 +339,20 @@ func parseController(b []byte, proto uint32) (ctrlInfo, error) {
 		if proto >= 3 {
 			r.take(4) // brightness
 		}
-		r.take(2 * 4)       // direction, color mode
+		r.u32() // direction
+		colorMode := uint32(r.u32())
 		r.take(4 * r.u16()) // mode colors
+		if r.bad {
+			break
+		}
+		ci.modes = append(ci.modes, orgbMode{name, flags, colorMode, fieldsAt, append([]byte(nil), b[start:len(b)-len(r.b)]...)})
 		if i == active {
 			ci.mode = name
 		}
 	}
 	nz := r.u16()
 	for i := 0; i < nz && !r.bad; i++ {
-		r.str()       // name
+		ci.zoneNames = append(ci.zoneNames, r.str())
 		r.take(3 * 4) // type, leds min/max
 		ci.zones = append(ci.zones, r.u32())
 		r.take(r.u16()) // matrix map
@@ -325,8 +377,21 @@ func parseController(b []byte, proto uint32) (ctrlInfo, error) {
 		c := r.take(4)
 		ci.colors = append(ci.colors, ledRGB{c[0], c[1], c[2]})
 	}
-	if r.bad {
-		return ci, fmt.Errorf("OpenRGB controller data cut short (%d bytes)", len(b))
+	if proto >= 5 {
+		for n := r.u16(); n > 0 && !r.bad; n-- {
+			r.str() // alternate LED display names
+		}
+		r.u32() // controller flags
+	}
+	if r.bad || len(r.b) != 0 || (len(ci.modes) != 0 && active >= len(ci.modes)) || nl != nc {
+		return ci, fmt.Errorf("invalid OpenRGB controller data (%d bytes)", len(b))
+	}
+	total := 0
+	for _, n := range ci.zones {
+		total += n
+	}
+	if total > nc {
+		return ci, errors.New("OpenRGB zones exceed the device's LED count")
 	}
 	return ci, nil
 }
@@ -334,10 +399,17 @@ func parseController(b []byte, proto uint32) (ctrlInfo, error) {
 // ---------- driver ----------
 
 type orgbDev struct {
-	idx   uint32
-	key   string // name + location, stable across reconnects
-	zones []int
-	sent  []ledRGB
+	idx  uint32
+	key  string // physical identity and LED/mode layout, stable across index changes
+	info ctrlInfo
+	mode int
+	sent []ledRGB
+	anim rgbAnimator
+}
+
+type orgbSnapshot struct {
+	info                 ctrlInfo
+	touched, modeChanged bool
 }
 
 // rgbLights runs the OpenRGB connection; status is shown in AGENTS.
@@ -351,15 +423,16 @@ type rgbLights struct {
 
 	mu     sync.Mutex
 	status string
-	orig   map[string][]ledRGB // colors when first seen, put back on exit
+	orig   map[string]*orgbSnapshot // first-seen colors and mode; owned by run's goroutine
 }
 
 func newRGB(cfg rgbCfg, st *state) *rgbLights {
+	cfg = cfg.normalized()
 	if cfg.Host == "" {
 		cfg.Host = defaultConfig.OpenRGB.Host
 	}
 	return &rgbLights{cfg: cfg, st: st, quit: make(chan struct{}), done: make(chan struct{}),
-		status: "connecting to OpenRGB", orig: map[string][]ledRGB{}}
+		status: "connecting to OpenRGB", orig: map[string]*orgbSnapshot{}}
 }
 
 func (l *rgbLights) Status() string {
@@ -393,12 +466,13 @@ func (l *rgbLights) run() {
 		case errors.Is(err, errListChanged):
 			wait = time.Second
 		case err != nil:
-			l.set(fmt.Sprintf("OpenRGB not answering on %s", shortHost(l.cfg.Host)))
+			l.set(fmt.Sprintf("OpenRGB not answering on %s: %v", shortHost(l.cfg.Host), err))
 		case len(devs) == 0:
-			l.set("OpenRGB: no device in Direct mode")
+			l.set("OpenRGB: no per-LED device ready (select Direct mode or enable switch_modes)")
 			wait = 30 * time.Second // a mode change sends no list update; look again now and then
 		default:
 			if l.drive(o, devs) {
+				o.c.Close()
 				return
 			}
 			wait = time.Second
@@ -409,9 +483,12 @@ func (l *rgbLights) run() {
 		select {
 		case <-l.quit:
 			if l.dirty { // quit between connections: the devices still show the last frame
-				if o, devs, err := l.connect(); err == nil {
-					changed, replies := listen(o)
-					l.restore(o, devs, replies, changed)
+				if o, devs, err := l.connect(); o != nil {
+					if err == nil {
+						changed, replies := listen(o)
+						l.restore(o, devs, replies, changed)
+					}
+					o.c.Close()
 				}
 			}
 			return
@@ -432,20 +509,27 @@ func (l *rgbLights) connect() (*orgbConn, []orgbDev, error) {
 		return o, nil, err
 	}
 	b, err := o.recv(pktProto) // a protocol 0 server never answers: the deadline ends it
-	if err != nil || len(b) < 4 {
+	if err != nil {
 		return o, nil, fmt.Errorf("OpenRGB protocol: %w", err)
 	}
-	o.proto = min(binary.LittleEndian.Uint32(b), orgbProto)
-	if err := o.send(0, pktClientName, []byte("llm-top\x00")); err != nil {
+	if len(b) != 4 || binary.LittleEndian.Uint32(b) < orgbProto {
+		return o, nil, errors.New("OpenRGB SDK v3 or newer is required")
+	}
+	o.proto = orgbProto
+	if err := o.send(0, pktClientName, []byte("Caminus Top\x00")); err != nil {
 		return o, nil, err
 	}
 	if err := o.send(0, pktCount, nil); err != nil {
 		return o, nil, err
 	}
-	if b, err = o.recv(pktCount); err != nil || len(b) < 4 {
+	if b, err = o.recv(pktCount); err != nil {
 		return o, nil, fmt.Errorf("OpenRGB count: %w", err)
 	}
+	if len(b) != 4 || binary.LittleEndian.Uint32(b) > 1024 {
+		return o, nil, errors.New("invalid OpenRGB controller count")
+	}
 	var devs []orgbDev
+	seen := map[string]bool{}
 	for i := uint32(0); i < binary.LittleEndian.Uint32(b); i++ {
 		if err := o.send(i, pktData, u32(o.proto)); err != nil {
 			return o, nil, err
@@ -455,15 +539,21 @@ func (l *rgbLights) connect() (*orgbConn, []orgbDev, error) {
 			return o, nil, err
 		}
 		ci, err := parseController(d, o.proto)
-		if err != nil || !strings.EqualFold(ci.mode, "Direct") || len(ci.colors) == 0 || !l.cfg.wants(ci.name) {
+		if err != nil {
+			return o, nil, err
+		}
+		mode := ci.selectedMode(l.cfg.SwitchModes)
+		if mode < 0 || len(ci.colors) == 0 || !l.cfg.wants(ci.name) {
 			continue
 		}
-		dv := orgbDev{idx: i, key: ci.name + "|" + ci.loc, zones: ci.zones}
-		l.mu.Lock()
-		if l.orig[dv.key] == nil {
-			l.orig[dv.key] = ci.colors
+		dv := orgbDev{idx: i, key: ci.key(), info: ci, mode: mode}
+		if seen[dv.key] {
+			return o, nil, errors.New("OpenRGB devices have duplicate identities; refusing ambiguous restoration")
 		}
-		l.mu.Unlock()
+		seen[dv.key] = true
+		if l.orig[dv.key] == nil {
+			l.orig[dv.key] = &orgbSnapshot{info: ci}
+		}
 		devs = append(devs, dv)
 	}
 	_ = c.SetDeadline(time.Time{})
@@ -473,9 +563,27 @@ func (l *rgbLights) connect() (*orgbConn, []orgbDev, error) {
 // drive sends frames until quit (true, after restoring the colors), a device list change or an error.
 func (l *rgbLights) drive(o *orgbConn, devs []orgbDev) bool {
 	changed, replies := listen(o)
-	tk := time.NewTicker(80 * time.Millisecond) // ~12 fps: plenty for LEDs, gentle on SMBus RAM sticks
+	for _, d := range devs {
+		select {
+		case <-changed:
+			return false
+		case <-l.quit:
+			l.restore(o, devs, replies, changed)
+			return true
+		default:
+		}
+		if l.cfg.SwitchModes {
+			s := l.orig[d.key]
+			s.touched, s.modeChanged, l.dirty = true, true, true
+			_ = o.c.SetWriteDeadline(time.Now().Add(time.Second))
+			if o.send(d.idx, pktUpdateMode, modePacket(d.mode, d.info.modes[d.mode], true)) != nil {
+				return false
+			}
+		}
+	}
+	tk := time.NewTicker(time.Second / time.Duration(l.cfg.FPS))
 	defer tk.Stop()
-	start, last := time.Now(), ""
+	last := ""
 	for {
 		select {
 		case <-l.quit:
@@ -491,21 +599,23 @@ func (l *rgbLights) drive(o *orgbConn, devs []orgbDev) bool {
 				l.set(fmt.Sprintf("%s on %d device%s", ph, len(devs), map[bool]string{true: "s"}[len(devs) != 1]))
 				last = ph
 			}
-			lk := l.cfg.look(ph)
 			for i := range devs {
 				d := &devs[i]
-				l.mu.Lock()
-				n := len(l.orig[d.key])
-				l.mu.Unlock()
-				cs := lk.colors(d.zones, n, now.Sub(start), l.cfg.Brightness)
+				cs := d.anim.frame(l.cfg, d.info, ph, now)
 				if equalRGB(cs, d.sent) {
 					continue
 				}
 				_ = o.c.SetWriteDeadline(now.Add(time.Second)) // a hung OpenRGB must not block quitting
+				select {
+				case <-changed:
+					return false
+				default:
+				}
+				l.orig[d.key].touched, l.dirty = true, true
 				if o.send(d.idx, pktUpdateLEDs, ledsPacket(cs)) != nil {
 					return false
 				}
-				d.sent, l.dirty = cs, true
+				d.sent = cs
 			}
 		}
 	}
@@ -534,13 +644,25 @@ func listen(o *orgbConn) (changed chan struct{}, replies chan uint32) {
 // restore puts each device's first-seen colors back, then waits for one round trip so OpenRGB has read them
 // before the socket closes.
 func (l *rgbLights) restore(o *orgbConn, devs []orgbDev, replies <-chan uint32, changed <-chan struct{}) {
+	defer o.c.Close()
 	_ = o.c.SetWriteDeadline(time.Now().Add(time.Second))
 	for _, d := range devs {
-		l.mu.Lock()
-		cs := l.orig[d.key]
-		l.mu.Unlock()
-		if o.send(d.idx, pktUpdateLEDs, ledsPacket(cs)) != nil {
+		select {
+		case <-changed:
+			return // old indices are no longer safe, even for restoring
+		default:
+		}
+		s := l.orig[d.key]
+		if !s.touched {
+			continue
+		}
+		if o.send(d.idx, pktUpdateLEDs, ledsPacket(s.info.colors)) != nil {
 			return
+		}
+		if s.modeChanged {
+			if o.send(d.idx, pktUpdateMode, modePacket(s.info.active, s.info.modes[s.info.active], false)) != nil {
+				return
+			}
 		}
 	}
 	if o.send(0, pktCount, nil) != nil {

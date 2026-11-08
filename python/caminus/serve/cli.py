@@ -49,7 +49,7 @@ DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, host='127.0.0.1',
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False,
-                log_dir='', no_stats=False, no_side_route=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
+                log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
                 flight_dir=_config.flight_dir(), flight_cap_gb=10.0)
 
@@ -127,6 +127,8 @@ def parser():
                     help='every request to the prompt cache\'s main slot (default: short requests unrelated to the conversation '
                          'go to its side slot: PromptCache.route)')
     ap.add_argument('--no-stats', action='store_true', default=None, help='the metrics hook off')
+    ap.add_argument('--no-loop-guard', action='store_true', default=None,
+                    help='allow sustained identical prose lines in answers (default: stop after eight; code and tool payloads excluded)')
     ap.add_argument('--hw-root', help="a sysfs root for the hardware readings (default '/': the engine's own cards, by PCI slot; "
                                       "'' = no hardware readings)")
     ap.add_argument('--idle-park-s', type=float, help='park the live conversation in the background after this many idle seconds '
@@ -205,7 +207,8 @@ def main(argv=None):
         print(json.dumps(options_json()))
         return 0
     opt = parse(argv)
-    from ..device.torchcheck import absent
+    from ..device.torchcheck import absent, prepare_runtime
+    prepare_runtime()                           # tools/caminus_serve.py also enters here directly under an outer guard
     msg = absent('caminus serve')             # (no torch import here: set_process_name below runs before any thread starts; the
                                               # console command checks the build itself before the guard, caminus.device.hip at its first call)
     if msg:
@@ -257,7 +260,7 @@ def main(argv=None):
     srv = K3Server(LoadingSession(_arch.usable_ctx(opt['max_ctx'], A.T), eos_ids=opt['eos_ids']), tok, host=opt['host'], port=int(opt['port']),
                    log_dir=opt['log_dir'] or None, ping_interval=float(opt['ping']), max_queue=int(opt['max_queue']),
                    incremental_tool_args=bool(opt['incremental_tool_args']), model_path=opt['model'], hw=hw, stats=stats,
-                   loading=True, model_alias=opt['model_alias'], flight=flight)
+                   loading=True, model_alias=opt['model_alias'], flight=flight, loop_guard=not opt['no_loop_guard'])
     srv.start(background=True)
     print(f'caminus serve: http://{opt["host"]}:{srv.port} (loading)  pid={os.getpid()}', flush=True)
     from ..device import kernels

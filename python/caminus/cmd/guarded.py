@@ -21,7 +21,8 @@ def under_guard():
 
 def command(name, argv, log, secs):
     boot = f'import sys; sys.path.insert(0, {PARENT!r}); from caminus.__main__ import main; sys.exit(main())'
-    return ['bash', GUARD, log, str(int(secs)), sys.executable, '-I', '-c', boot, name, *argv]
+    # -I ignores PYTHONFAULTHANDLER; enable it explicitly so native failures leave thread tracebacks in the guard's log.
+    return ['bash', GUARD, log, str(int(secs)), sys.executable, '-I', '-X', 'faulthandler', '-c', boot, name, *argv]
 
 
 def log_path(name):

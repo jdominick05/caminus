@@ -96,6 +96,8 @@
   "/agent/finish:dict",
   "/agent/harness/none:int",
   "/agent/harness:dict",
+  "/agent/loop/answer_repeat_threshold:int",
+  "/agent/loop/answer_repeated_lines:int",
   "/agent/loop/live_max_repeat:int",
   "/agent/loop/repeat_threshold:int",
   "/agent/loop/repeated_lines:int",
@@ -640,6 +642,7 @@
   "[]/speculative:bool"
  ],
  "/metrics": [
+  "caminus:answer_repeated_lines_total",
   "caminus:bails_total",
   "caminus:cache_disk_bytes",
   "caminus:cache_disk_cap_bytes",

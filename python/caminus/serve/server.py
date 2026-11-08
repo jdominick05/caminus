@@ -141,7 +141,14 @@ _ANTHROPIC_TYPES = {400: 'invalid_request_error', 404: 'not_found_error', 405: '
 
 def _err_text(ev):
     """the message of a worker ('error', kind, msg) event"""
-    return f"{'engine' if ev[1] == 'engine' else 'internal'} error: {ev[2]}"
+    kind = ev[1] if ev[1] in ('engine', 'loop') else 'internal'
+    return f'{kind} error: {ev[2]}'
+
+
+def _worker_status(ev, anthropic=False):
+    if ev[1] == 'loop':
+        return 422
+    return (529 if anthropic else 503) if ev[1] == 'engine' else 500
 
 
 def openai_error(status, message, etype=None, code=None):
@@ -327,9 +334,10 @@ class K3Server:
     def __init__(self, session, tokenizer, host='127.0.0.1', port=8092, log_dir=None, ping_interval=10.0,
                  max_queue=16, incremental_tool_args=False, drafter=None, sampling=None, model_path=None,
                  builder=None, stats=None, physics=None, hw=None, hw_interval=1.0, proc_name='caminus',
-                 loading=False, model_alias='k3-coder', flight=None):
+                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True):
         self.sess = session
         self.flight = flight        # serve.flight.FlightRecorder or None (the per-request JSONL line, replay bundles)
+        self.loop_guard = bool(loop_guard)
         self.tok = tokenizer
         self.stats = stats or session.stats or EngineStats(physics=physics)
         session.stats = self.stats
@@ -593,7 +601,8 @@ class K3Server:
                   n_predict=spec.n_predict, thinking=spec.thinking, marks=spec.marks,
                   slot_params=MX.task_params(spec.params, spec.n_predict, spec.stream, self.spec_types),
                   request_id=new_request_id(), tools=spec.tools, parse_tools=spec.parse_tools, parallel=spec.parallel,
-                  prefix_text=spec.prefix_text, profile=spec.profile, harness=spec.harness)
+                  prefix_text=spec.prefix_text, profile=spec.profile, harness=spec.harness,
+                  loop_guard=self.loop_guard and spec.api != 'completions')
         try:
             return self.worker.submit(job)
         except QueueFull as e:
@@ -664,6 +673,9 @@ class K3Server:
             out['engine'] = getattr(r, 'engine_counts', None)
         out['tool_calls'] = None if tools is None else dict(ok=tools[0], failures=tools[1], lenient=tools[2])
         out['loop'] = None if loop is None else dict(flagged=bool(loop[0]), repeated_lines=int(loop[1]))
+        if out['loop'] is not None:
+            out['loop'].update(answer_repeated_lines=int(loop[2]) if len(loop) > 2 else 0,
+                               guard_stopped=bool(getattr(job, 'loop_stopped', False)))
         rec = self.worker.recent.get(out['request_id']) if out['request_id'] else None
         out['verdict'] = rec.get('verdict') if rec else None
         out['bundles'] = [b[2] and os.path.basename(b[2]) for b in self.worker.bundles if b[0] == out['request_id']] or None
@@ -1089,7 +1101,9 @@ class K3Handler(BaseHTTPRequestHandler):
             self._row = srv.log_row(route, spec, job, t_recv, 500, error=f'{type(e).__name__}: {e}')
         finally:
             if self._loop is not None:
-                self._loopres = self._loop.finish()
+                flagged, repeated = self._loop.finish()
+                self._loopres = (flagged or bool(getattr(job, 'loop_stopped', False)), repeated,
+                                 int(getattr(job, 'answer_repeated', 0)))
                 srv.stats.loop_report(*self._loopres)
                 self._loop = None
 
@@ -1133,8 +1147,8 @@ class K3Handler(BaseHTTPRequestHandler):
         if not spec.stream:
             text, ev = self._wait_done(job)
             if ev[0] == 'error':
-                st = 503 if ev[1] == 'engine' else 500
-                self._send(st, openai_error(st, _err_text(ev)))
+                st = _worker_status(ev)
+                self._send(st, openai_error(st, _err_text(ev), code='generation_loop' if ev[1] == 'loop' else None))
                 return st, ev[2]
             parser.feed(text)
             parser.finish()
@@ -1173,12 +1187,13 @@ class K3Handler(BaseHTTPRequestHandler):
                 begin()
                 send_events(parser.feed(ev[1]))
             elif ev[0] == 'error':
-                st = 503 if ev[1] == 'engine' else 500
+                st = _worker_status(ev)
                 if not began:
-                    self._send(st, openai_error(st, _err_text(ev)))
+                    self._send(st, openai_error(st, _err_text(ev), code='generation_loop' if ev[1] == 'loop' else None))
                 else:
-                    self._sse({'error': {'message': _err_text(ev), 'type': 'server_error', 'param': None,
-                                         'code': None}})
+                    self._sse({'error': {'message': _err_text(ev),
+                                         'type': 'invalid_request_error' if ev[1] == 'loop' else 'server_error', 'param': None,
+                                         'code': 'generation_loop' if ev[1] == 'loop' else None}})
                 return st, ev[2]
             elif ev[0] == 'done':
                 r = ev[1]
@@ -1289,7 +1304,7 @@ class K3Handler(BaseHTTPRequestHandler):
         if not spec.stream:
             text, ev = self._wait_done(job)
             if ev[0] == 'error':
-                st = 529 if ev[1] == 'engine' else 500
+                st = _worker_status(ev, anthropic=True)
                 self._send(st, anthropic_error(st, _err_text(ev)))
                 return st, ev[2]
             parser.feed(text)
@@ -1343,7 +1358,8 @@ class K3Handler(BaseHTTPRequestHandler):
                 begin()
                 send(parser.feed(ev[1]))
             elif ev[0] == 'error':
-                st, et = (529, 'overloaded_error') if ev[1] == 'engine' else (500, 'api_error')
+                st = _worker_status(ev, anthropic=True)
+                et = 'overloaded_error' if ev[1] == 'engine' else 'api_error'
                 if not state['began']:
                     self._send(st, anthropic_error(st, _err_text(ev), et))
                 else:

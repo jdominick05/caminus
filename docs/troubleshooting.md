@@ -48,6 +48,24 @@ the memory.
 start anything (exit 98) until you've looked at it: read `journalctl -k` around that time, then delete the stop file
 `~/.local/state/k3/GPU_FAULT_STOP`. Please report it with the doctor output and those kernel log lines.
 
+**"Segmentation fault" or "Fatal Python error"**: guarded Python commands enable fatal-error tracebacks. Save
+`caminus logs NAME` before restarting the server (a restart replaces its log), and include the traceback and kernel log
+lines from that time in your bug report. A native crash may leave no Python traceback if it happens on a runtime thread.
+
+**A native traceback names `rocr::core::Runtime::AsyncEventsLoop`**: some ROCm 7.2 runtimes bundled with PyTorch have a
+[queue-interception heap overflow](https://github.com/ROCm/rocm-systems/pull/4066) when many kernels are queued.
+[ROCm issue #5071](https://github.com/ROCm/rocm-systems/issues/5071) reports this workaround for the crash, now the default
+for Caminus's serve and replay launchers. For an older installed build:
+
+```bash
+HSA_TOOLS_DISABLE_REGISTER=1 caminus restart NAME
+```
+
+This disables optional ROCm profiler registration for that server. Explicit `HSA_TOOLS_DISABLE_REGISTER` values and
+profilers attached through `ROCP_TOOL_LIBRARIES` or `HSA_TOOLS_LIB` are preserved. GPU profiling needs registration enabled
+and a runtime with the upstream fix. The HIP/HSA runtime comes from PyTorch, separately from the kernel compiler version
+printed at startup. Preserve the logs if a crash persists with the workaround.
+
 **"GUARD REFUSED" after your monitors went to sleep**: in Caminus 0.2.0 the guard took a display timeout for a GPU fault.
 If every line in `~/.local/state/k3/GPU_FAULT_STOP` says `REG_WAIT timeout`, it was your monitor, not the GPU: delete the
 file and start again. Later versions only note these lines and keep running.
@@ -60,6 +78,13 @@ takes about 40 s with `coder`. `qwen3-coder-next` reads prompts much more slowly
 
 **HTTP 503 or 529 after an error**: a step failed its retries. The server stays up and the next request starts fresh from
 the cache. It saved a replay file for a bug report: `caminus flight list` shows it.
+
+**Repeated acknowledgements in an answer**: chat responses stop after eight consecutive identical nonempty prose lines
+of at least 24 characters, ending in sentence punctuation. Fenced code and tool payloads are excluded. The request returns
+HTTP 422 with `generation_loop` (OpenAI), or an error event if streaming already began; it is not reported as a successful
+completion. The flight recorder attempts a `loop` replay bundle, subject to its usual size and rate limits. Use
+`--no-loop-guard` for intentional repeated prose. This limits runaway output; it does not establish model accuracy over
+long sessions. Raw `/v1/completions` output is unchanged.
 
 ## Disk space
 

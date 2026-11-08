@@ -78,13 +78,15 @@ class StopMatcher:
 class TokenText:
     """ids -> released text with EOS skipping, UTF-8 holdback and stop-string holdback"""
 
-    def __init__(self, tokenizer, stops=(), eos_ids=()):
+    def __init__(self, tokenizer, stops=(), eos_ids=(), loop_guard=None):
         self.dec = StreamDecoder(tokenizer)
         self.stop = StopMatcher(stops)
         self.eos = frozenset(eos_ids)
+        self.loop_guard = loop_guard
+        self.loop_stopped = False
 
     def feed(self, ids):
-        """-> (text, n_keep): n_keep is None, or the number of ids of this batch to keep when a stop matched"""
+        """-> (text, n_keep): retain through the token completing a stop string or the optional answer-loop guard"""
         out = []
         for j, t in enumerate(ids):
             if t in self.eos:
@@ -95,6 +97,9 @@ class TokenText:
             rel, hit = self.stop.feed(txt)
             if rel:
                 out.append(rel)
+                if self.loop_guard is not None and self.loop_guard.feed(rel):
+                    self.loop_stopped = True
+                    return ''.join(out), j + 1
             if hit:
                 return ''.join(out), j + 1
         return ''.join(out), None
@@ -105,7 +110,11 @@ class TokenText:
             return ''
         tail = self.dec.flush()
         rel, hit = self.stop.feed(tail) if tail else ('', False)
-        return rel + ('' if hit else self.stop.flush())
+        out = rel + ('' if hit else self.stop.flush())
+        if self.loop_guard is not None:
+            self.loop_guard.feed(out)
+            self.loop_stopped = self.loop_guard.finish()
+        return out
 
 
 @dataclass

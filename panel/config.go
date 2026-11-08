@@ -43,10 +43,12 @@ var defaultConfig = config{
 		"nothing answers there, the ports the caminus process listens on are tried). sessions_dir: Qwen Code " +
 		"projects dir (empty = ~/.qwen/projects). hold_file: first line shown as HOLD while it exists. vram_gb / " +
 		"context: 0 = detect. openrgb: light RGB devices by agent state through OpenRGB's SDK server (enabled, host, " +
-		"devices = name substrings, empty = all in Direct mode; brightness 0-1; colors = phase -> #rrggbb). web: " +
+		"devices = name substrings, empty = all in per-LED mode; brightness 0-1; colors = phase -> #rrggbb; " +
+		"switch_modes = opt into temporary Direct/Custom/Static mode changes, restored on exit; fps 1-60; " +
+		"speed 0.1-4; fade_ms 0-2000; zones = zone name -> ring/reverse-ring/strip). web: " +
 		"serve the dashboard to browsers while the TUI runs (enabled, listen = host:port, token = required as " +
 		"?token= when set; -web serves without the TUI).",
-	OpenRGB:  rgbCfg{Host: "127.0.0.1:6742", Brightness: 1},
+	OpenRGB:  rgbCfg{Host: "127.0.0.1:6742", Brightness: 1, FPS: 20, Speed: 1, FadeMS: 300},
 	Web:      webCfg{Listen: ":8765"},
 	priceCfg: defaultPrices,
 }

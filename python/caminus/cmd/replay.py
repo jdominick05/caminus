@@ -50,7 +50,8 @@ def main(argv=None):
     ap.add_argument('--json', default=None)
     ap.add_argument('--force', action='store_true')
     a = ap.parse_args(argv)
-    from ..device.torchcheck import refusal
+    from ..device.torchcheck import refusal, prepare_runtime
+    prepare_runtime()                           # tools/replay.py enters here without the console dispatcher's precheck
     msg = refusal('caminus replay')
     if msg:
         print(msg, file=sys.stderr)
@@ -119,7 +120,9 @@ def main(argv=None):
         prm = SamplingParams(**rq['params'])
         orig = [int(t) for t in rq['generated']]
         max_new = int(rq['max_new']) if rq.get('finish') in ('eos', 'stop', 'length') else len(orig)
-        tt = TokenText(tok, rq.get('stops') or [], sess.eos_ids)
+        from ..serve.agentmon import AnswerLoopGuard
+        guard = AnswerLoopGuard(rq.get('thinking', False)) if rq.get('loop_guard', False) else None
+        tt = TokenText(tok, rq.get('stops') or [], sess.eos_ids, loop_guard=guard)
 
         def on_tokens(gids):
             return tt.feed(gids)[1]

@@ -12,6 +12,7 @@ import math
 import time
 
 from . import stats as S
+from .agentmon import AnswerLoopGuard
 
 # ------------------------------------------------------------------------------------------------ Prometheus text
 LLAMA_COUNTERS = (
@@ -254,6 +255,7 @@ def prometheus(st, srv, cards, energy):
         harness = dict(st.harness)
         tool_calls, fails, lenient = st.tool_calls, dict(st.tool_failures), st.tool_lenient
         loops, repeated = st.loop_flagged, st.loop_repeated
+        answer_repeated = st.answer_loop_repeated
     m(P + 'requests_total', 'counter', 'Generation requests by harness (from the User-Agent, a fixed set)',
       [({'harness': h}, v) for h, v in sorted(harness.items())])
     m(P + 'tool_calls_total', 'counter', 'Tool calls parsed and reported', [(None, tool_calls)])
@@ -265,10 +267,11 @@ def prometheus(st, srv, cards, energy):
       [({'kind': 'reasoning'}, st.tokens_reasoning), ({'kind': 'answer'}, st.tokens_answer)])
     m(P + 'finish_total', 'counter', 'Requests by finish reason', [({'reason': k}, v) for k, v in st.finish.items()])
     m(P + 'max_tokens_hits_total', 'counter', 'Requests that ended at max_tokens', [(None, st.max_tokens_hits)])
-    m(P + 'loop_requests_total', 'counter', 'Requests whose reasoning repeated a line LoopDetector.REPEAT times or '
-      'more', [(None, loops)])
+    m(P + 'loop_requests_total', 'counter', 'Requests with repeated reasoning or a stopped answer loop', [(None, loops)])
     m(P + 'reasoning_repeated_lines_total', 'counter', 'Reasoning line occurrences beyond the first, per request, '
       'summed', [(None, repeated)])
+    m(P + 'answer_repeated_lines_total', 'counter', 'Consecutive repeated prose answer lines beyond the first',
+      [(None, answer_repeated)])
     m(P + 'loop_live_repeats', 'gauge', "The current request's highest repeat count of one reasoning line",
       [(None, st.loop_live)])
     # ---- server
@@ -378,6 +381,7 @@ def status(st, srv, cards, energy, hist=True):
         agent = {'harness': dict(sorted(st.harness.items())), 'tool_calls': st.tool_calls,
                  'tool_call_failures': dict(st.tool_failures), 'tool_call_lenient': st.tool_lenient,
                  'loop': {'requests_flagged': st.loop_flagged, 'repeated_lines': st.loop_repeated,
+                          'answer_repeated_lines': st.answer_loop_repeated, 'answer_repeat_threshold': AnswerLoopGuard.REPEAT,
                           'live_max_repeat': st.loop_live, 'repeat_threshold': _loop_threshold()}}
     agent.update({'tokens': {'reasoning': st.tokens_reasoning, 'answer': st.tokens_answer},
                   'finish': dict(st.finish), 'max_tokens_hits': st.max_tokens_hits})

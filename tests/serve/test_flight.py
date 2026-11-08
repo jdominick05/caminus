@@ -244,6 +244,95 @@ class TestServer(unittest.TestCase):
         for b in self.bundles():
             self.assertEqual(b['format'], 1)
 
+    def test_answer_loop_is_stopped_and_bundled(self):
+        # A repeated acknowledgement after </think> used to stream until max_tokens without a loop verdict or bundle.
+        line = 'Got it. Thanks for the additional context!'
+        msgs = [SYS, {'role': 'user', 'content': 'Continue the task.'}]
+        reply = {'role': 'assistant', 'reasoning_content': 'Continue carefully.', 'content': (line + '\n\n') * 78}
+        _, scripted = U.script(self.eng, msgs, reply, None)
+        status, _, body = U.post_json(self.srv, '/v1/chat/completions',
+                                     {'model': 'k3-coder', 'messages': msgs, 'temperature': 0, 'max_tokens': 4096})
+        self.assertEqual(status, 422, body)
+        self.assertEqual(body['error']['code'], 'generation_loop')
+        row = self.lines(1)[0]
+        self.assertTrue(row['loop']['guard_stopped'])
+        self.assertTrue(row['loop']['flagged'])
+        self.assertEqual(row['verdict'], 'loop')
+        self.assertLess(row['completion_tokens'], len(scripted) // 2)
+        deadline = time.time() + 5
+        while not self.bundles() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual([b['reason'] for b in self.bundles()], ['loop'])
+        self.assertTrue(self.bundles()[0]['request']['loop_guard'])
+        self.assertEqual(U.request(self.srv, 'GET', '/health')[0], 200)
+        # Stopping output must preserve the session contract and leave the worker able to serve another request.
+        status, _, _ = self.chat([SYS, {'role': 'user', 'content': 'A different short request.'}],
+                                 {'role': 'assistant', 'reasoning_content': 'Respond briefly.', 'content': 'Ready to continue.'})
+        self.assertEqual(status, 200)
+
+    def test_answer_loop_wire_errors(self):
+        line = 'Got it. Thanks for the additional context!'
+        count = 0
+        for model in ('k3-coder', 'k3-coder-nothink'):
+            for api in ('openai', 'anthropic'):
+                for stream in (False, True):
+                    count += 1
+                    with self.subTest(model=model, api=api, stream=stream):
+                        msgs = [SYS, {'role': 'user', 'content': f'Loop wire case {model} {api} {stream}.'}]
+                        reply = {'role': 'assistant', 'reasoning_content': '', 'content': (line + '\n\n') * 78}
+                        U.script(self.eng, msgs, reply, None, model=model)
+                        body = {'model': model, 'messages': msgs, 'temperature': 0, 'max_tokens': 4096, 'stream': stream}
+                        route = '/v1/chat/completions'
+                        if api == 'anthropic':
+                            route = '/v1/messages'
+                            body['messages'], body['system'] = msgs[1:], SYS['content']
+                            if model == 'k3-coder':
+                                body['thinking'] = {'type': 'enabled', 'budget_tokens': 1024}
+                        status, _, data = U.request(self.srv, 'POST', route, body)
+                        if stream:
+                            self.assertEqual(status, 200)
+                            events, _ = U.parse_sse(data)
+                            payloads = [json.loads(text) for _, text in events if text != '[DONE]']
+                            errors = [p['error'] for p in payloads if 'error' in p]
+                            self.assertEqual(len(errors), 1, payloads[-2:])
+                            self.assertIn('generation_loop', errors[0]['message'])
+                            if api == 'openai':
+                                self.assertEqual(errors[0]['type'], 'invalid_request_error')
+                                self.assertEqual(errors[0]['code'], 'generation_loop')
+                            self.assertNotIn('[DONE]', [text for _, text in events])
+                            self.assertNotIn('message_stop', [event for event, _ in events])
+                            self.assertFalse(any(c.get('finish_reason') for p in payloads for c in p.get('choices', [])))
+                        else:
+                            self.assertEqual(status, 422, data[:300])
+                            error = json.loads(data)['error']
+                            self.assertIn('generation_loop', error['message'])
+                            if api == 'openai':
+                                self.assertEqual(error['code'], 'generation_loop')
+        rows = self.lines(count)
+        self.assertEqual([r['status'] for r in rows], [422] * count)
+        self.assertTrue(all(r['loop']['guard_stopped'] and r['verdict'] == 'loop' for r in rows))
+        _, _, status = U.request(self.srv, 'GET', '/caminus/status')
+        loop = json.loads(status)['agent']['loop']
+        self.assertEqual(loop['requests_flagged'], count)
+        self.assertEqual(loop['repeated_lines'], 0)
+        self.assertEqual(loop['answer_repeated_lines'], count * 7)
+
+    def test_answer_loop_opt_out_and_raw_completions(self):
+        line = 'Got it. Thanks for the additional context!'
+        self.srv.loop_guard = False
+        status, _, body = self.chat([SYS, {'role': 'user', 'content': 'Intentionally repeat a sentence.'}],
+                                    {'role': 'assistant', 'reasoning_content': '', 'content': (line + '\n\n') * 78})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['choices'][0]['message']['content'].count(line), 78)
+        self.srv.loop_guard = True
+        tok = common.tokenizer()
+        prompt = [tok.bos_id] + tok.encode_prompt('A literal raw completion.')
+        self.eng.register(prompt, tok.encode_prompt((line + '\n\n') * 78) + [tok.eos_id])
+        status, _, body = U.post_json(self.srv, '/v1/completions',
+                                     {'model': 'k3-coder', 'prompt': prompt, 'temperature': 0, 'max_tokens': 4096})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['choices'][0]['text'].count(line), 78)
+
 
 class TestServerStateSession(TestServer):
     """the same with a session that has K3Session's bundle hooks (the record merges its state; the GPU run's TypeError)"""

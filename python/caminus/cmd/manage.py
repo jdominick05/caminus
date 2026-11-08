@@ -33,6 +33,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -212,7 +213,7 @@ def log_error(path):
     except OSError:
         return ''
     for l in reversed(lines):
-        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'killed')):
+        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'GUARD REFUSED', 'killed')):
             return l.strip()[-300:]
     return ''
 
@@ -606,20 +607,45 @@ def cmd_panel(argv):
 
 
 def top_config(s):
-    """a monitor config for one server (its port, the Caminus backend, the Qwen Code sessions of Caminus's Qwen home)"""
+    """Merge monitor preferences into a server's generated config; leave the preferences file untouched."""
     from . import qwen_code
+    source = os.path.abspath(os.path.expanduser(os.environ.get('LLMTOP_CONFIG') or
+                              os.path.join(config.xdg('XDG_CONFIG_HOME', '.config'), 'caminus', 'top.json')))
+    prefs = {}
+    try:
+        with open(source, encoding='utf-8-sig') as f:
+            prefs = json.load(f)
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError, ValueError) as err:
+        raise ManageError(f'cannot read monitor settings {source}: {err}') from None
+    if not isinstance(prefs, dict):
+        raise ManageError(f'monitor settings {source}: expected a JSON object')
+    # Go resolves paths against the generated file. Keep a preference's relative hold file beside its source.
+    hold = prefs.get('hold_file')
+    if isinstance(hold, str) and hold:
+        hold = os.path.expanduser(hold)
+        prefs['hold_file'] = hold if os.path.isabs(hold) else os.path.join(os.path.dirname(source), hold)
+    prefs.update(server_url=f"http://127.0.0.1:{s['port']}", backend='caminus', server_process='caminus',
+                 sessions_dir=os.path.join(qwen_code.home_for(s), 'projects'))
     d = os.path.join(config.state_dir(), 'servers', s['name'])
     p = os.path.join(d, 'top.json')
     os.makedirs(d, mode=0o700, exist_ok=True)
-    with open(p, 'w') as f:
-        json.dump({'server_url': f"http://127.0.0.1:{s['port']}", 'backend': 'caminus', 'server_process': 'caminus',
-                   'sessions_dir': os.path.join(qwen_code.home_for(s), 'projects')}, f, indent=1)
+    fd, tmp = tempfile.mkstemp(prefix='.top-', suffix='.json', dir=d)  # 0600: preferences can include a web token
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(prefs, f, indent=1)
+        os.replace(tmp, p)  # concurrent monitor launches never read a partial config
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
     return p
 
 
 def cmd_top(argv):
     ap = argparse.ArgumentParser(prog='caminus top')
     ap.add_argument('name', nargs='?')
+    ap.add_argument('-config', '--config', dest='monitor_config', metavar='FILE', help='use a monitor config directly')
     a, rest = ap.parse_known_args(argv)
     ss = [s for s in all_servers() if alive(s.get('guard_pid'))]
     if a.name:
@@ -627,4 +653,9 @@ def cmd_top(argv):
     if not ss:
         print('caminus top: no running server' + (f' named {a.name!r}' if a.name else '') + ' (caminus ps)', file=sys.stderr)
         return 1
-    return exec_panel(['top', '-config', top_config(ss[0]), *rest])
+    try:
+        p = os.path.expanduser(a.monitor_config) if a.monitor_config else top_config(ss[0])
+    except (ManageError, OSError) as err:
+        print(f'caminus top: {err}', file=sys.stderr)
+        return 1
+    return exec_panel(['top', '-config', p, *rest])

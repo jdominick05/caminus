@@ -34,8 +34,9 @@ def main():
     md, st = os.path.join(S, 'models'), os.path.join(S, 'state')
     os.environ.update(CAMINUS_MODEL_DIR=md, CAMINUS_STATE_DIR=st, CAMINUS_KV_DIR=os.path.join(S, 'kv'),
                       CAMINUS_FLIGHT_DIR=os.path.join(S, 'flight'), CAMINUS_QWEN_HOME=os.path.join(S, 'qwen-home'),
-                      CAMINUS_CONFIG=os.path.join(S, 'none.toml'), XDG_DATA_HOME=os.path.join(S, 'data'))
-    for k in ('CAMINUS_CODER', 'K3_GGUF', 'CAMINUS_DFLASH', 'CAMINUS_MODEL_SEARCH'):
+                      CAMINUS_CONFIG=os.path.join(S, 'none.toml'), XDG_DATA_HOME=os.path.join(S, 'data'),
+                      XDG_CONFIG_HOME=os.path.join(S, 'config'))
+    for k in ('CAMINUS_CODER', 'K3_GGUF', 'CAMINUS_DFLASH', 'CAMINUS_MODEL_SEARCH', 'LLMTOP_CONFIG'):
         os.environ.pop(k, None)
     from caminus import models
     from caminus.cmd import manage, qwen_code
@@ -162,9 +163,18 @@ def main():
     dead = subprocess.Popen(['true']); dead.wait()
     put('crashed', dead.pid, 'caminus serve: http://127.0.0.1:1 (loading)  pid=1\nRuntimeError: something broke\n', 18092)
     put('clean', dead.pid, 'caminus serve: http://127.0.0.1:1 (loading)  pid=1\ncaminus serve: stopped in 0.2 s\n', 18093)
+    guard_refusal = 'GUARD REFUSED: a GPU fault was recorded ($HOME/.local/state/k3/GPU_FAULT_STOP). Stop all GPU work and report to the lead.'
+    put('guard-refused', dead.pid, guard_refusal + '\n', 18095)
     v = {x['name']: x for x in map(manage.server_view, manage.all_servers())}
     check(v['crashed']['state'] == 'failed' and 'something broke' in v['crashed']['error'], f"ps: a crashed server is failed ({v['crashed']['error']})")
     check(v['clean']['state'] == 'stopped', 'ps: a cleanly stopped server is stopped')
+    check(v['guard-refused']['state'] == 'failed' and v['guard-refused']['error'] == guard_refusal,
+          'ps: a guard refusal preserves the startup failure reason')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        manage.cmd_ps(['--json'])
+    refused = next(s for s in json.loads(buf.getvalue())['servers'] if s['name'] == 'guard-refused')
+    check(refused['error'] == guard_refusal, 'ps --json: the panel receives the guard refusal reason')
     # a live 'guard' (a sleeping child whose command line holds guard.sh) not answering HTTP -> loading
     g = os.path.join(S, 'guard.sh')
     with open(g, 'w') as f:
@@ -190,6 +200,69 @@ def main():
             check('not downloaded' in str(err), f'start: a model not on disk is refused ({err})')
     finally:
         live.kill(); live.wait()
+
+    # ---- monitor: preserve global RGB/display preferences while routing each server to its own sessions and port
+    prefs_dir = os.path.join(S, 'config', 'caminus')
+    os.makedirs(prefs_dir, exist_ok=True)
+    prefs_path = os.path.join(prefs_dir, 'top.json')
+    prefs = {'openrgb': {'enabled': True, 'fps': 10, 'speed': .5, 'zones': {'Fan': 'ring'}},
+             'web': {'enabled': False, 'listen': '127.0.0.1:8765'}, 'hold_file': 'maintenance.hold',
+             'server_url': 'http://old-server:1', 'sessions_dir': 'old-sessions'}
+    original = b'\xef\xbb\xbf' + json.dumps(prefs).encode()
+    with open(prefs_path, 'wb') as f:
+        f.write(original)
+    monitor = dict(name='monitor', model='qwen3.6', port=18096)
+    generated = manage.top_config(monitor)
+    with open(generated) as f:
+        top = json.load(f)
+    check(top['openrgb'] == prefs['openrgb'] and top['web'] == prefs['web'],
+          'top: RGB and display preferences survive the generated server config')
+    check(top['server_url'] == 'http://127.0.0.1:18096' and
+          top['sessions_dir'] == os.path.join(qwen_code.home_for(monitor), 'projects') and
+          top['hold_file'] == os.path.join(prefs_dir, 'maintenance.hold'),
+          'top: server routing wins; relative preference paths still belong to the source directory')
+    with open(prefs_path, 'rb') as f:
+        check(f.read() == original, 'top: user preferences left byte-identical')
+    check(os.stat(generated).st_mode & 0o777 == 0o600, 'top: generated preferences are private (0600)')
+    custom = os.path.join(S, 'custom-top.json')
+    with open(custom, 'w') as f:
+        json.dump({'openrgb': {'enabled': True, 'brightness': .25}}, f)
+    os.environ['LLMTOP_CONFIG'] = custom
+    with open(manage.top_config(monitor)) as f:
+        check(json.load(f)['openrgb']['brightness'] == .25, 'top: LLMTOP_CONFIG chooses the preference source')
+    with open(generated, 'rb') as f:
+        previous = f.read()
+    for bad in ('{broken', '[]', 'null'):
+        with open(custom, 'w') as f:
+            f.write(bad)
+        try:
+            manage.top_config(monitor)
+            check(False, 'top: invalid preferences refused')
+        except manage.ManageError:
+            with open(generated, 'rb') as f:
+                check(f.read() == previous, 'top: invalid preferences refused without replacing the runtime config')
+    # Explicit configs bypass the generated template, with or without a positional server name.
+    before_servers, before_alive, before_exec = manage.all_servers, manage.alive, manage.exec_panel
+    launched = []
+    manage.all_servers, manage.alive = lambda: [monitor], lambda pid: True
+    manage.exec_panel = lambda args: launched.append(args) or 0
+    try:
+        for argv in (['-config', prefs_path], ['monitor', '--config', prefs_path]):
+            check(manage.cmd_top(argv) == 0 and launched[-1] == ['top', '-config', prefs_path],
+                  'top: explicit -config reaches the monitor even when global preferences are broken')
+    finally:
+        manage.all_servers, manage.alive, manage.exec_panel = before_servers, before_alive, before_exec
+        os.environ.pop('LLMTOP_CONFIG')
+    from unittest.mock import patch
+    with patch.object(manage.os, 'replace', side_effect=OSError('simulated publish failure')):
+        try:
+            manage.top_config(monitor)
+            check(False, 'top: config publication failure surfaced')
+        except OSError:
+            with open(generated, 'rb') as f:
+                check(f.read() == previous, 'top: failed publication leaves the previous runtime config intact')
+    check(not [n for n in os.listdir(os.path.dirname(generated)) if n.startswith('.top-')],
+          'top: failed publication cleans up only its own temporary file')
 
     # ---- Qwen Code: the merge keeps the user's own providers and choices, swaps only Caminus's entries
     user = {'modelProviders': {'openai': [{'id': 'my-own', 'baseUrl': 'https://example.invalid/v1', 'envKey': 'MY_KEY'},

@@ -252,8 +252,9 @@ A pass counts in the class it started in.
 | `caminus:tokens_generated_total{kind}` | counter | tokens | `reasoning` (up to and including `</think>`) / `answer` |
 | `caminus:finish_total{reason}` | counter | requests | `eos`, `stop`, `length`, `cancel`, `error` |
 | `caminus:max_tokens_hits_total` | counter | requests | requests that ended at max_tokens (finish `length`) |
-| `caminus:loop_requests_total` | counter | requests | requests whose reasoning repeated one line `LoopDetector.REPEAT` (3) times or more |
+| `caminus:loop_requests_total` | counter | requests | requests with repeated reasoning or an answer stopped by `AnswerLoopGuard` |
 | `caminus:reasoning_repeated_lines_total` | counter | lines | reasoning line occurrences beyond the first, summed over requests |
+| `caminus:answer_repeated_lines_total` | counter | lines | consecutive repeated eligible answer prose lines beyond the first |
 | `caminus:loop_live_repeats` | gauge | | the current request's highest repeat count of one reasoning line (0 between requests) |
 
 **The loop detector** (`agentmon.LoopDetector`) runs on the HTTP thread over the raw text as it streams:
@@ -263,6 +264,22 @@ A pass counts in the class it started in.
 
 Together with `caminus:max_tokens_hits_total`, it is the "live loop detector" the bake-off plan asks for. Neither the
 threshold nor the minimum line length has been tuned on real traces yet.
+
+**Answer containment** (`agentmon.AnswerLoopGuard`) runs in the engine worker's `TokenText`, after stop-string and UTF-8
+holdback. It stops chat output at the token completing eight consecutive identical nonempty prose lines of at least 24
+characters. Eligible lines start with a letter and end in sentence punctuation (Markdown emphasis/headings may surround
+them). Blank lines may separate repeats; other nonempty lines reset the run. Reasoning, fenced code and tool payloads are
+excluded. State is bounded to a 4096-character partial line, a previous-line hash, counters and the content classifier;
+overlong lines are skipped. The threshold contains an observed 78-copy acknowledgement loop and is not a general quality
+gate. `--no-loop-guard` disables it; raw completions are excluded.
+
+The existing stop callback preserves the committed state at the last retained token. The worker returns a `loop` error
+without resetting the engine: HTTP 422 before streaming, or an SSE error after headers, with no successful stream ending.
+The OpenAI error type is `invalid_request_error` with code `generation_loop`, including in SSE errors, so clients can
+distinguish it from a transient server failure. Anthropic uses `api_error` with that identifier in its message. Request rows
+record `finish: stop`, `verdict: loop`, `loop.guard_stopped: true`, and `loop.answer_repeated_lines`. The reasoning repeat
+counter keeps its original meaning. `/caminus/status` adds `agent.loop.answer_repeated_lines` and
+`agent.loop.answer_repeat_threshold`. Replay bundles store the `loop_guard` setting so replay uses the same token cut.
 
 ### Server
 
@@ -551,7 +568,7 @@ restore, batched, handoff, passes, total), `decode_ms_per_token`, `dflash` (draf
 - on demand: `POST /caminus/flight/bundle {"request_id": ID}` (default the most recent request; one of the last 8), queued
   FIFO with the requests; `tools/flight.py bundle [--url] [--request ID]`;
 - automatically (at most 12 an hour): a pass that failed past its retries (`EngineError`, saved before the session reset drops
-  the VRAM tier), a reasoning loop (`agentmon.LoopDetector` on the reply's text) or a tool-call parse failure (unclosed,
+  the VRAM tier), a reasoning loop (`agentmon.LoopDetector` on the reply's text), an answer stopped by `AnswerLoopGuard`, or a tool-call parse failure (unclosed,
   undeclared, malformed: the same parser the HTTP thread runs, judged on the engine thread so nothing moves before the save).
 
 A bundle holds `bundle.json` (format 1: the token log (prompt ids, generated ids), the sampling parameters with the Philox seed,

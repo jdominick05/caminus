@@ -62,6 +62,9 @@ def dispatch(cmd, rest):
         from .cmd import qwen_code
         return qwen_code.launch(rest)
     help_only = any(a in ('-h', '--help', '--options-json') for a in rest)   # (no torch, no guard: nothing is loaded)
+    if cmd in ('serve', 'replay') and not help_only:
+        from .device.torchcheck import prepare_runtime
+        prepare_runtime()                         # before the pre-guard torch check imports its profiling hooks
     if cmd in ('serve', 'replay') and not help_only and not guarded.under_guard():
         # the engine needs the ROCm PyTorch: say so here, in the terminal, before the guard takes over (its log would hide it);
         # under a guard the command checks itself (serve without importing torch before it names its process)

@@ -328,6 +328,7 @@ class EngineStats:
         self.tool_lenient = 0
         self.loop_flagged = 0
         self.loop_repeated = 0
+        self.answer_loop_repeated = 0
         self.loop_live = 0              # the current request's highest repeat count of one reasoning line
         self.max_tokens_hits = 0
 
@@ -677,10 +678,11 @@ class EngineStats:
     def loop_live_set(self, repeats):
         self.loop_live = repeats
 
-    def loop_report(self, flagged, repeated):
+    def loop_report(self, flagged, repeated, answer_repeated=0):
         with self.lock:
             self.loop_flagged += bool(flagged)
             self.loop_repeated += repeated
+            self.answer_loop_repeated += answer_repeated
             self.loop_live = 0
 
     # ============================================================================ readers
