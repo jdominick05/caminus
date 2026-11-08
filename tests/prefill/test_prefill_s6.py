@@ -121,6 +121,8 @@ def sha_rows(t, lo, hi):
 
 
 # ---- stage: cpu ---------------------------------------------------------------------------------------------------------
+SPLIT = {}                       # FlashNextTP's TP split (--tp-split); empty: the engine's default 10 / 12
+
 class FakeEngine:
     def __init__(self): self.poisoned, self.max_ctx, self.ntok, self.seq, self.token = None, 4096, 4, 0, 0
 
@@ -253,7 +255,7 @@ class Rig:
         t0 = time.time()
         # (the prefill as it is built below, counted before the target loads; plan_bf16: the 'wmma' buffers counted now and
         # allocated later, by stage_speed's dense-path A/B: caminus.prefill.plan.check_counted)
-        self.m = FlashNextTP(coder, ntok=4, max_ctx=max_ctx, feature_layers=layers, feature_card=0, vram_drafters=(('dflash', dg, None),),
+        self.m = FlashNextTP(coder, ntok=4, max_ctx=max_ctx, feature_layers=layers, feature_card=0, vram_drafters=(('dflash', dg, None),), **SPLIT,
                              vram_prefill=dict(chunk=chunk, q6k=q6k, q6k_buffers=q6k_buffers if plan_bf16 is None else plan_bf16))
         self.df = dk.DFlashK3(self.m, dk.DRAFTER); self.dr = dk.DFlashK3Drafter(self.df)
         self.pf = P.Prefill(self.m, chunk=chunk, router_logits=router, wmma_out=wmma_out, moe=moe, q6k=q6k, q6k_buffers=q6k_buffers)
@@ -915,6 +917,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('coder'); ap.add_argument('stages', nargs='+')
     ap.add_argument('--small', action='store_true'); ap.add_argument('--json', default=None); ap.add_argument('--reps', type=int, default=3)
+    ap.add_argument('--tp-split', default=None, help='GK,MB: the TP split (FlashNextTP gdn_keys / moe_blocks; default the engine\'s 10,12; 8,10: the even split)')
     ap.add_argument('--max-ctx', type=int, default=4096); ap.add_argument('--router', default=None, help='wmma | exact (the prefill router logits; default: prefill_ops)')
     ap.add_argument('--wmma-out', default=None, help='fp32 | bf16 (the WMMA GEMMs\' output, router logits included; default: prefill_ops.WMMA_OUT)')
     ap.add_argument('--moe', default=None, help='own | mmq | ab (the routed experts\' path, ChunkStack.moe; default prefill_tp.MOE_PATH; ab: '
@@ -923,6 +926,9 @@ def main():
     ap.add_argument('--q6k', default=None, help='own | wmma | mmq | ab (the dense Q6_K GEMMs\' path, ChunkStack.q6k; default prefill_tp.Q6K_PATH; '
                                                 'ab: the default, and speed times the other two interleaved)')
     a = ap.parse_args()
+    if a.tp_split:
+        SPLIT.update(zip(('gdn_keys', 'moe_blocks'), (int(v) for v in a.tp_split.split(','))))
+        print(f'split: {SPLIT}', flush=True)
     if 'cpu' in a.stages: stage_cpu()
     gpu = [s for s in a.stages if s != 'cpu']
     if gpu:

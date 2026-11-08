@@ -10,7 +10,7 @@ from its Hugging Face repository and checks every file before using it.
 | `qwen3.6` | Qwen3.6-35B-A3B, 2-bit (GSQ) | 1, any | 12.2 GB | 175 tok/s | 5,227 tok/s |
 | `qwen3.6-hauhau` | Qwen3.6-35B-A3B, HauhauCS Q3_K_P | 1, 24 GB | 19.0 GB | 192 tok/s | 4,136 tok/s |
 | `arex-2` | AREX-2 27B (a dense model) | 1, 24 GB | 17.2 GB | 41 tok/s | 928 tok/s |
-| `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: XTX + XT | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
+| `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-coder-next` | Qwen3-Coder-Next 80B-A3B, IQ3_S | 2 | 29.7 GB | 136 tok/s | 135 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
@@ -21,9 +21,9 @@ where each number comes from and how llama.cpp does on the same cards.
 
 - **One card:** start with `qwen3.6`. It fits either card with a 262K-token context. With a 24 GB card,
   `qwen3.6-hauhau` writes a little faster.
-- **An XTX + XT:** `coder` handles the longest work: 262K tokens of context, a prompt cache that keeps whole conversations,
-  and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from disk. Other
-  pairs of cards come in a later release.
+- **An XTX + XT or two XTX:** `coder` handles the longest work: 262K tokens of context, a prompt cache that keeps whole
+  conversations, and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from
+  disk. Two XT cards are too small for it.
 - **Planning:** `arex-2` is a dense 27B model, so it's slower. It's meant to plan while `qwen3.6` does the work, in the
   [brain / hands team](panel.md#the-brain--hands-team).
 - **`qwen3-coder-next`** writes fast but reads prompts slowly for now (a 32K-token prompt takes about six minutes). Use it

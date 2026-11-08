@@ -28,7 +28,7 @@ The [quickstart](https://github.com/jdominick05/caminus/blob/main/docs/quickstar
 | Qwen3.6-35B-A3B, 2-bit | 1 | 175 tok/s |
 | Qwen3.6-35B-A3B HauhauCS | 1 (24 GB) | 192 tok/s |
 | AREX-2 27B | 1 (24 GB) | 41 tok/s |
-| Qwen3.8-Flash-Next Coder (262K context) | 2 (XTX + XT) | 104 tok/s; 123-203 with its drafter |
+| Qwen3.8-Flash-Next Coder (262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter |
 | Qwen3-Coder-Next 80B | 2 | 136 tok/s |
 
 Details: [models](https://github.com/jdominick05/caminus/blob/main/docs/models.md) ·

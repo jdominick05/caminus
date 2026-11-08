@@ -160,7 +160,7 @@ card, runs one saxpy and checks P2P access.
 
 ## Limits found, not changed here
 
-- The engine itself still assumes this pair of cards: `cuda:0` must be the larger card (replay asserts an XTX at 0), the fixed
+- The engine itself still assumes a 24 GB card 0: `cuda:0` must be the larger card (replay asserts an XTX at 0), the fixed
   VRAM parts in `caminus.device.capacity` were measured on the XTX + XT (another pair is checked against its own guard lines with
   these measured parts), and an unmeasured model is refused rather than guessed. The guard, the paths and the package are
   portable; the engine's capacity tables are not (yet).

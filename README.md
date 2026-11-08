@@ -50,7 +50,7 @@ through it in about ten minutes, plus the download.
 | Every other GPU | Not supported yet |
 
 One card runs the one-card models. Two cards run two models side by side, or a two-card model: Qwen3-Coder-Next on any
-pair, the Qwen3.8 Coder on an XTX + XT for now. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
+pair, the Qwen3.8 Coder on an XTX + XT or two XTX. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
 
 **Got other AMD hardware?** Please try Caminus on it and
 [send a hardware report](https://github.com/jdominick05/caminus/issues/new?template=hardware_report.yml), even when it
@@ -64,7 +64,7 @@ are welcome too.
 | Qwen3.6-35B-A3B, 2-bit (12 GB) | 1 | 175 tok/s | 107 tok/s |
 | Qwen3.6-35B-A3B HauhauCS (19 GB) | 1 (24 GB) | 192 tok/s | 122 tok/s |
 | AREX-2 27B (17 GB) | 1 (24 GB) | 41 tok/s | 36 tok/s |
-| Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
+| Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
 | Qwen3-Coder-Next 80B (30 GB) | 2 | 136 tok/s | 82 tok/s |
 
 Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:

@@ -248,12 +248,13 @@ def problems(gs):
     return out
 
 
-def place(n_cards, fits=None, env=None, root='/'):
+def place(n_cards, fits=None, env=None, root='/', split_of=None):
     """the cards a server runs on, chosen before the GPU runtime starts (caminus serve): dict(cards, split, hip_visible,
     note). n_cards: the architecture's card count (1 or 2). fits(cards) -> bool: the model's projection at the minimum
     context on those cards (None: every card fits; the engine's own check still runs). env: HIP_VISIBLE_DEVICES, when set,
     limits the choice to those GPUs (HIP's own indices) and is rewritten so process device i is the engine's card i: a
-    two-card model's pair is put in engine order whatever order it was given in. Unsupported cards are refused by name."""
+    two-card model's pair is put in engine order whatever order it was given in. Unsupported cards are refused by name.
+    split_of(cards): the model's own split (caminus.arch.Arch.split); default split()"""
     env = os.environ if env is None else env
     gs = gpus(root)
     given = (env.get('HIP_VISIBLE_DEVICES') or '').strip()
@@ -276,7 +277,7 @@ def place(n_cards, fits=None, env=None, root='/'):
         raise PlacementError(f'HIP_VISIBLE_DEVICES={given} gives {len(usable(pool))} supported card(s): a two-card model needs two')
     if n_cards >= 2:
         cards = pair(pool)
-        sp = split(cards)
+        sp = (split_of or split)(cards)
         if not ok(cards):                       # (a model may also raise PlacementError with its own reason: arch.Coder.fits)
             raise PlacementError(f"{' + '.join(describe(c) for c in cards)}: the model does not fit these two cards at its minimum "
                                  f"context (32,768 positions) with a working prompt cache, with what they hold now (caminus ps: another "

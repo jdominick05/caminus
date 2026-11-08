@@ -230,7 +230,7 @@ def main(argv=None):
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host
     try:
-        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs))
+        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
     except _host.PlacementError as e:
         print(f'caminus serve: {e}', file=sys.stderr)
         return 2
