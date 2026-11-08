@@ -135,8 +135,8 @@ Process:
 
 ## Conventions
 
-- Workflow: make agent changes directly on `testing`, with a separate commit for each logical change. Create a topic
-  branch or pull request only when explicitly requested. The user merges `testing` into `main` and tags releases.
+- Workflow: topic branch -> pull request into `testing` -> `main` for releases (tags). Never open pull requests against
+  `main`.
 - Commits: `<area> : <what>`, with the gates run and measured before / after in the body; disclose AI assistance with an
   `Assisted-by: <model>` trailer; no session links.
 - Scope: MoE / low-active models (AREX-2 is the one dense exception); drafters are DFlash and MTP only.
