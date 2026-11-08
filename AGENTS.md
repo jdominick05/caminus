@@ -12,8 +12,9 @@ CLAUDE.md imports this file.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
 - Tested on one machine only: an RX 7900 XTX (drives the monitors) + an RX 7900 XT on a PCIe 4.0 x4 link, 29 GiB RAM, Linux.
-- The Coder runs only at its measured split (XTX + XT, 10 / 12) in 0.2: `arch.Coder.pair_refusal`. Its VRAM at other splits is
-  projected (`capacity.fixed_mib(tensors=)`), but its batched prefill at the even split (320-wide MoE down shards) has never run.
+- The Coder runs at its measured split (10 / 12) on every pair (`arch.Coder.split`), so it needs a 24 GB card 0: XTX + XT
+  (tested) or XTX + XTX (same shapes, unmeasured). The even split (8 / 10) can't prefill: each card's expert slice is 320
+  rows and the vendored MMQ only takes whole 128-row tiles (the shared expert's non-Q6_K gate / up go through `mmq.mm`).
 - The bitwise reference is llama.cpp: the ignite-llama fork at e4e3f8eda (github.com/jdominick05/ignite-llama). Kernel
   builds and the gates need it; the installed package doesn't. Older notes name its development commit 842653396.
 - Comments cite a private history: commit hashes, decision ids (D-281 = the KLD floor gate below), step names

@@ -129,12 +129,13 @@ def check_gpus(R, root='/'):
     elif len(u) >= 2:
         try:
             pr = host.pair(gs)
-            sp = host.split(pr)
-            R.add('PASS', 'gpu', f'two-card models on {" + ".join(host.describe(c) for c in pr)} (card 0 first), split '
-                  f'{sp["gdn_keys"]} / {sp["moe_blocks"]}')
-            if tuple(c['label'] for c in pr) != ('XTX', 'XT'):
-                R.add('WARN', 'gpu', 'the Coder runs only on an RX 7900 XTX + XT in this release (on this pair its prompt path is '
-                      'untested); Qwen3-Coder-Next runs on any pair')
+            from .. import arch
+            cs = arch.CODER.split(pr)
+            R.add('PASS', 'gpu', f'two-card models on {" + ".join(host.describe(c) for c in pr)} (card 0 first); the Coder\'s split '
+                  f'{cs["gdn_keys"]} / {cs["moe_blocks"]}')
+            if pr[0]['total_mib'] < 22 * 1024:
+                R.add('WARN', 'gpu', 'the Coder needs a 24 GB RX 7900 XTX as card 0 (it holds the bigger share of its split); '
+                      'Qwen3-Coder-Next and the one-card models run on this pair')
         except host.PlacementError as e:
             R.add('WARN', 'gpu', f'two-card models: {e}')
     for lv, _, text in host.problems(gs):

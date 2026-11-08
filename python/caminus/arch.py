@@ -172,6 +172,12 @@ class Arch:
         """why this two-card model must not run on these cards (caminus.device.host dicts, engine order), or None"""
         return None
 
+    def split(self, cards):
+        """the TP split this two-card model runs at on these cards (engine order): caminus.device.host.split's, unless the
+        architecture needs its own"""
+        from .device import host
+        return host.split(cards)
+
     def extras_mib(self, opt, devs, cards=None):
         """per card, what the server loads beside the engine, its prefill and the prompt cache: a drafter (DFlash / MTP: its
         weights, its ring, the feature export, the T > 1 verify buffers), so max_ctx auto leaves room for it. The one-card
@@ -265,10 +271,25 @@ class Coder(Arch):
     # split moves the GDN state (by key head) between the cards
     SLOT_MIB = (77.04, 86.53)
 
+    def split(self, cards):
+        """the measured split on every pair: its batched prefill runs each card's share of the experts through MMQ, whose
+        vendored kernels take whole 128-row tiles only, and the even split (8 / 10) gives each card 320 rows (the shared
+        expert's IQ4_XS / Q4_K / Q5_K gate and up in 35 of the 48 layers would be refused); 10 / 12 gives 384 / 256. Card 0
+        holds the bigger share, so the pair needs a 24 GB card 0 (fits: XTX + XT, XTX + XTX)"""
+        from .device import capacity as C
+        return dict(gdn_keys=C.MEASURED_SPLIT[0], moe_blocks=C.MEASURED_SPLIT[1])
+
     def _split(self, opt, cards):
-        from .device import host
-        sp = host.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or host.TUNED_SPLIT[('XTX', 'XT')])
+        sp = self.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or self.split(None))
         return int(sp['gdn_keys']), int(sp['moe_blocks'])
+
+    def fits(self, opt, cards):
+        ok = super().fits(opt, cards)
+        if not ok and len(cards) >= 2 and cards[0]['total_mib'] < 22 * 1024:
+            from .device import host
+            raise host.PlacementError(f"the Coder needs a 24 GB RX 7900 XTX as card 0 (it holds the bigger share of the split): "
+                                      f"{' + '.join(host.describe(c) for c in cards)} is too small")
+        return ok
 
     def auto_need(self, opt, slots, cards=None):
         """the Coder's projection per card at its pair's split (D-292): FlashNextTP's own check (capacity.fixed_mib with the
@@ -299,24 +320,6 @@ class Coder(Arch):
                                 qsa_ctx=c if c > C.QSA_EXACT else 0).need_mib()
             return [fx[k] + sum(ctx.values()) / C.MIB + pf[k] + side + (0 if measured else (slots + 2) * slot[k]) for k in (0, 1)]
         return min(int(g['ctx_train']), CODER_CTX), [0, 1], max(slot), need
-
-    def pair_refusal(self, cards):
-        """0.2 serves the Coder on the measured pair only (D-293): at another split its VRAM is projected (fixed_mib with
-        the moved tensors) but its batched prefill has never run there (the even split gives both cards 320-wide MoE down
-        shards, each with a K-split tail: a shape the own-MoE path and its canaries were not verified at)"""
-        from .device import host, capacity as C
-        sp = host.split(cards)
-        if (int(sp['gdn_keys']), int(sp['moe_blocks'])) != C.MEASURED_SPLIT:
-            return ('the Coder runs only on an RX 7900 XTX + XT in this release: on ' + ' + '.join(host.describe(c) for c in cards)
-                    + ' its memory is projected but its prompt path is untested (a later release; hardware reports welcome)')
-        return None
-
-    def fits(self, opt, cards):
-        why = self.pair_refusal(cards) if len(cards) >= 2 else None
-        if why:
-            from .device import host
-            raise host.PlacementError(why)
-        return super().fits(opt, cards)
 
     def slack_mib(self, opt, cards=None):
         """none at the measured split (its parts are measured, auto_need), AUTO_SLACK_MIB at any other"""

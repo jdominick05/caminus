@@ -20,13 +20,13 @@ even when everything works. That's how cards move from untested to supported.
 | Cards | What you can run |
 |---|---|
 | One | The one-card models. `qwen3.6` fits any supported card; `qwen3.6-hauhau` and `arex-2` need a 24 GB card. |
-| Two | `qwen3-coder-next`; `coder` on an XTX + XT; or two one-card models side by side. |
+| Two | `qwen3-coder-next`; `coder` on an XTX + XT or two XTX; or two one-card models side by side. |
 | Three or more | Two cards for a two-card model; one-card models on the rest. |
 
 Caminus finds your cards itself and gives the bigger card the bigger share of a two-card model. `qwen3-coder-next` runs on
-any pair. `coder` runs on an XTX + XT in this release: on other pairs its memory can be projected, but its prompt reading
-hasn't been tested there yet, so Caminus refuses it rather than guess. On two XT cards the projection also comes out short
-of memory; a hardware report from such a pair helps.
+any pair. `coder` needs an XTX as its first card, which holds the bigger share: it runs on an XTX + XT or on two XTX, and
+two XT cards are too small. Two XTX run the same split and the same kernels as the XTX + XT it was tested on, so expect at
+least the XTX + XT speeds; it hasn't been measured on two XTX yet, and a hardware report from such a pair helps.
 
 ## Slots and links
 

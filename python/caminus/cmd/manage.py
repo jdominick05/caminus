@@ -333,6 +333,35 @@ def fits_fn(entry, ctx=None):
     return lambda g: A.fits(opt, [g])
 
 
+def pair_fits(m, entry, ctx=None):
+    """why(cards) for a two-card catalog model: None when the registry's projection at 32K positions (or --ctx) fits those
+    cards now, with its drafter when that file is here (caminus.arch.Arch.fits, sysfs only; the projection caminus serve
+    places itself with), else the reason. None when it can't run here (the model file missing, no torch, a header it can't
+    read): the server decides then"""
+    try:
+        from .. import arch
+        A = arch.of(entry['path'])
+    except Exception:
+        return None
+    dk = models.drafter_item(m)
+    dpath = (entry.get('paths') or {}).get(dk) if dk else None
+    opt = dict(model=entry['path'], drafter=dpath, no_drafter=not dpath, chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4)
+
+    def fit(cards):
+        try:
+            if A.fits(opt, cards):
+                return None
+        except host.PlacementError as e:
+            return str(e)
+        except Exception as e:                   # (the projection could not run here: the server's own placement decides)
+            print(f'caminus: {m.name}: the memory projection did not run ({type(e).__name__}: {e}); the server checks at start',
+                  file=sys.stderr)
+            return None
+        return (f"doesn't fit {' + '.join(host.describe(c) for c in cards)} at {int(ctx or 32768):,} positions with a working "
+                f"prompt cache (what the cards hold now counts: caminus ps)")
+    return fit
+
+
 def pick_cards(m, entry, card, held, ctx=None):
     """the card positions (caminus ps's index) a model runs on, in engine order. held: the positions other servers hold"""
     gs = host.gpus(ROOT)
@@ -352,6 +381,10 @@ def pick_cards(m, entry, card, held, ctx=None):
             why = arch.lookup(m.arch).pair_refusal(pr)
         except Exception:                        # (no registry here: the server's own placement still refuses)
             why = None
+        if why:
+            raise ManageError(f'{m.name}: {why}')
+        fit = pair_fits(m, entry, ctx)
+        why = fit(pr) if fit is not None else None
         if why:
             raise ManageError(f'{m.name}: {why}')
         return [by_pci[g['pci']] for g in pr]

@@ -128,11 +128,30 @@ def main():
           'position 1, first); AREX-2 on the XTX')
     manage.ROOT = TH.tree(os.path.join(S, 'sysfs-xtx2'), [TH.card('card1', '0000:03:00.0', TH.XTX, 128, display=True),
                                                           TH.card('card2', '0000:06:00.0', TH.XTX, 129)])
-    try:
-        pick('coder'); check(False, 'cards: XTX + XTX: the Coder refused in 0.2 (the measured pair only)')
-    except manage.ManageError as err:
-        check('RX 7900 XTX + XT' in str(err), f'cards: XTX + XTX: the Coder refused in 0.2, the reason named ({str(err)[:110]})')
-    check(pick('qwen3-coder-next') == [0, 1], 'cards: XTX + XTX: Qwen3-Coder-Next runs on any pair')
+    check(pick('coder') == [0, 1] and pick('qwen3-coder-next') == [0, 1], 'cards: XTX + XTX: the Coder and Qwen3-Coder-Next placed')
+    from caminus import arch
+    from caminus.device import host as H
+    xx = H.pair(H.gpus(manage.ROOT))
+    check(arch.CODER.split(xx) == dict(gdn_keys=10, moe_blocks=12) and arch.lookup('qwen3next').split(xx) == dict(gdn_keys=8, moe_blocks=10),
+          'split: XTX + XTX: the Coder at its measured 10 / 12 (128-row expert shards), Qwen3-Coder-Next at the even 8 / 10')
+    cm = models.BY_NAME['coder']; ce = manage.model_entry(cm)
+    for var, item in (('CODER', cm.items[0]), ('DFLASH', models.drafter_item(cm))):   # (the developer's files: CLAUDE.md's exports)
+        fp = os.environ.get(var)
+        if item and fp and os.path.exists(fp):
+            ce = dict(ce, paths=dict(ce['paths'], **{item: fp}), **({'path': fp} if var == 'CODER' else {}))
+    if manage.pair_fits(cm, ce) is None:
+        print('NOTE cards: the Coder\'s file (or torch) is not here: its projection checks are skipped', flush=True)
+    else:
+        dr = 'with its drafter' if (ce['paths'].get(models.drafter_item(cm)) or '') else 'without its drafter'
+        check(manage.pick_cards(cm, ce, None, set()) == [0, 1], f'cards: XTX + XTX: the Coder fits by its projection ({dr})')
+    manage.ROOT = TH.tree(os.path.join(S, 'sysfs-xt2'), [TH.card('card1', '0000:03:00.0', TH.XT, 128, display=True),
+                                                         TH.card('card2', '0000:06:00.0', TH.XT, 129)])
+    if manage.pair_fits(cm, ce) is not None:
+        try:
+            manage.pick_cards(cm, ce, None, set()); check(False, 'cards: XT + XT: the Coder refused (card 0 must be a 24 GB XTX)')
+        except manage.ManageError as err:
+            check('24 GB RX 7900 XTX as card 0' in str(err), f'cards: XT + XT: the Coder refused by its projection ({str(err)[:120]})')
+    check(pick('qwen3-coder-next') == [0, 1], 'cards: XT + XT: Qwen3-Coder-Next placed')
     manage.ROOT = TH.tree(os.path.join(S, 'sysfs-one'), [TH.card('card0', '0000:03:00.0', TH.XT, 128)])
     try:
         pick('coder'); check(False, 'cards: one card: the Coder refused')
