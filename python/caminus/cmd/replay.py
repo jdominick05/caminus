@@ -50,7 +50,8 @@ def main(argv=None):
     ap.add_argument('--json', default=None)
     ap.add_argument('--force', action='store_true')
     a = ap.parse_args(argv)
-    from ..device.torchcheck import refusal
+    from ..device.torchcheck import refusal, prepare_runtime
+    prepare_runtime()                           # tools/replay.py enters here without the console dispatcher's precheck
     msg = refusal('caminus replay')
     if msg:
         print(msg, file=sys.stderr)

@@ -52,6 +52,20 @@ start anything (exit 98) until you've looked at it: read `journalctl -k` around 
 `caminus logs NAME` before restarting the server (a restart replaces its log), and include the traceback and kernel log
 lines from that time in your bug report. A native crash may leave no Python traceback if it happens on a runtime thread.
 
+**A native traceback names `rocr::core::Runtime::AsyncEventsLoop`**: some ROCm 7.2 runtimes bundled with PyTorch have a
+[queue-interception heap overflow](https://github.com/ROCm/rocm-systems/pull/4066) when many kernels are queued.
+[ROCm issue #5071](https://github.com/ROCm/rocm-systems/issues/5071) reports this workaround for the crash, now the default
+for Caminus's serve and replay launchers. For an older installed build:
+
+```bash
+HSA_TOOLS_DISABLE_REGISTER=1 caminus restart NAME
+```
+
+This disables optional ROCm profiler registration for that server. Explicit `HSA_TOOLS_DISABLE_REGISTER` values and
+profilers attached through `ROCP_TOOL_LIBRARIES` or `HSA_TOOLS_LIB` are preserved. GPU profiling needs registration enabled
+and a runtime with the upstream fix. The HIP/HSA runtime comes from PyTorch, separately from the kernel compiler version
+printed at startup. Preserve the logs if a crash persists with the workaround.
+
 **Slower than the numbers in the docs**: the cards may be running at normal clocks (about 13% slower); see
 [getting full speed](hardware.md#getting-full-speed). The server's log says at startup whether the clocks are high.
 

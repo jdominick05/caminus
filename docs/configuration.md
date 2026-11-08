@@ -42,6 +42,10 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--idle-park-s N` | Save an idle conversation to disk after N seconds (default 8 hours). |
 | `--config FILE` | Read options from a JSON or TOML file (the same names with underscores). |
 
+Serve and replay disable optional ROCm profiler registration by default to avoid a
+[runtime crash](troubleshooting.md#while-it-runs). An explicit `HSA_TOOLS_DISABLE_REGISTER=0` enables registration for GPU
+profiling; use a runtime containing the upstream fix. An attached `ROCP_TOOL_LIBRARIES` or `HSA_TOOLS_LIB` is also respected.
+
 ## Monitoring a server
 
 Each server serves `/health`, `/metrics` (Prometheus), `/slots` and `/caminus/status` (JSON). None of them include the text

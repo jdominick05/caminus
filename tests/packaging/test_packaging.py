@@ -22,6 +22,8 @@ Stages (default: all):
             ROCm install line and exit 2, never a traceback, never starting the guard; with a CUDA build (a stub torch whose
             version.hip is None) serve does the same (serve / replay check the build; kv-cache / purge only need torch to
             import); --help and doctor still work
+  runtime   serve / replay entry points configure ROCm profiler registration before the first torch import; explicit values
+            and attached profiling tools are preserved (a stub torch stops the child before any GPU code)
 The scratch directory is required (never /tmp); it must not exist or be empty."""
 import argparse
 import hashlib
@@ -618,7 +620,39 @@ def stage_repro(S):
           r.stderr[-200:])
 
 
-STAGES = ('config', 'guard', 'kernels', 'repro', 'download', 'doctor', 'cli', 'torch')
+def stage_runtime(S):
+    stub = os.path.join(S, 'stub')
+    w(os.path.join(stub, 'torch', '__init__.py'),
+      "import os\nraise RuntimeError('runtime-probe:' + os.environ.get('HSA_TOOLS_DISABLE_REGISTER', '<unset>'))\n")
+    model = os.path.join(S, 'model.gguf')
+    w(model, '')
+    base = dict(os.environ, HIP_VISIBLE_DEVICES='', CAMINUS_CONFIG=os.path.join(S, 'none.toml'))
+    for name in ('HSA_TOOLS_DISABLE_REGISTER', 'ROCP_TOOL_LIBRARIES', 'HSA_TOOLS_LIB', 'CAMINUS_GUARD'):
+        base.pop(name, None)
+    cases = [('default', {}, '1'), ('explicit profiling', {'HSA_TOOLS_DISABLE_REGISTER': '0'}, '0'),
+             ('attached profiler', {'ROCP_TOOL_LIBRARIES': '/tools/profiler.so'}, '<unset>'),
+             ('legacy HSA tool', {'HSA_TOOLS_LIB': '/tools/hsa-tool.so'}, '<unset>')]
+    # The serving entry point reaches torch through architecture inspection; stop there, before placement or a GPU call.
+    serve = 'from caminus.serve import cli; cli._arch.of = lambda path: __import__("torch"); '
+    entries = [
+        ('serve', {}, f'from caminus.__main__ import main; main(["serve", "--model", {model!r}])'),
+        ('guarded serve', {'CAMINUS_GUARD': '1'}, serve + f'from caminus.__main__ import main; main(["serve", "--model", {model!r}])'),
+        ('direct serve', {}, serve + f'cli.main(["--model", {model!r}])'),
+        ('replay', {}, 'from caminus.__main__ import main; main(["replay", "missing-bundle"])'),
+        ('guarded replay', {'CAMINUS_GUARD': '1'}, 'from caminus.__main__ import main; main(["replay", "missing-bundle"])'),
+        ('direct replay', {}, 'from caminus.cmd.replay import main; main(["missing-bundle"])'),
+    ]
+    for entry, extra, code in entries:
+        for label, values, expected in cases:
+            boot = (f'import sys; sys.path[:0] = {[stub, os.path.join(ROOT, "python")]!r}\n'
+                    f'try:\n    {code}\nexcept RuntimeError as error:\n'
+                    f'    print(str(error)); sys.exit(0 if str(error) == {"runtime-probe:" + expected!r} else 1)\n'
+                    'raise SystemExit("torch import probe was not reached")\n')
+            r = subprocess.run([PY, '-I', '-c', boot], env=dict(base, **extra, **values), capture_output=True, text=True, timeout=10)
+            check(f'runtime: {entry}: {label} before torch import', r.returncode == 0, (r.stdout + r.stderr)[-300:])
+
+
+STAGES = ('config', 'guard', 'kernels', 'repro', 'download', 'doctor', 'cli', 'torch', 'runtime')
 
 
 def main():

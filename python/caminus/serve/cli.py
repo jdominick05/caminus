@@ -205,7 +205,8 @@ def main(argv=None):
         print(json.dumps(options_json()))
         return 0
     opt = parse(argv)
-    from ..device.torchcheck import absent
+    from ..device.torchcheck import absent, prepare_runtime
+    prepare_runtime()                           # tools/caminus_serve.py also enters here directly under an outer guard
     msg = absent('caminus serve')             # (no torch import here: set_process_name below runs before any thread starts; the
                                               # console command checks the build itself before the guard, caminus.device.hip at its first call)
     if msg:
