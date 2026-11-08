@@ -163,9 +163,18 @@ def main():
     dead = subprocess.Popen(['true']); dead.wait()
     put('crashed', dead.pid, 'caminus serve: http://127.0.0.1:1 (loading)  pid=1\nRuntimeError: something broke\n', 18092)
     put('clean', dead.pid, 'caminus serve: http://127.0.0.1:1 (loading)  pid=1\ncaminus serve: stopped in 0.2 s\n', 18093)
+    guard_refusal = 'GUARD REFUSED: a GPU fault was recorded ($HOME/.local/state/k3/GPU_FAULT_STOP). Stop all GPU work and report to the lead.'
+    put('guard-refused', dead.pid, guard_refusal + '\n', 18095)
     v = {x['name']: x for x in map(manage.server_view, manage.all_servers())}
     check(v['crashed']['state'] == 'failed' and 'something broke' in v['crashed']['error'], f"ps: a crashed server is failed ({v['crashed']['error']})")
     check(v['clean']['state'] == 'stopped', 'ps: a cleanly stopped server is stopped')
+    check(v['guard-refused']['state'] == 'failed' and v['guard-refused']['error'] == guard_refusal,
+          'ps: a guard refusal preserves the startup failure reason')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        manage.cmd_ps(['--json'])
+    refused = next(s for s in json.loads(buf.getvalue())['servers'] if s['name'] == 'guard-refused')
+    check(refused['error'] == guard_refusal, 'ps --json: the panel receives the guard refusal reason')
     # a live 'guard' (a sleeping child whose command line holds guard.sh) not answering HTTP -> loading
     g = os.path.join(S, 'guard.sh')
     with open(g, 'w') as f:

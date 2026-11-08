@@ -213,7 +213,7 @@ def log_error(path):
     except OSError:
         return ''
     for l in reversed(lines):
-        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'killed')):
+        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'GUARD REFUSED', 'killed')):
             return l.strip()[-300:]
     return ''
 
