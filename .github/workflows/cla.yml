@@ -34,7 +34,7 @@ jobs:
           path-to-signatures: signatures/version1/cla.json
           path-to-document: https://github.com/jdominick05/caminus/blob/main/CLA.md
           branch: cla-signatures
-          allowlist: jdominick05
+          allowlist: jdominick05,dependabot[bot]
           lock-pullrequest-aftermerge: false
           custom-notsigned-prcomment: >-
             Thanks for the pull request! Before it can be merged, please read the

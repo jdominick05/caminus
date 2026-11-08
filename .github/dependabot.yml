@@ -1,0 +1,27 @@
+# Dependabot version updates: weekly, one grouped pull request per ecosystem, into testing (pull requests never target main
+# here; its branch rules: AGENTS.md, Conventions). Security-update pull requests are off: GitHub opens those against the
+# default branch whatever this file says, so a Dependabot alert is fixed by hand through a pull request into testing.
+#   github-actions  the workflows pin each action by its commit SHA with the release in a trailing comment; Dependabot
+#                   updates both
+#   gomod           the panel's modules (panel/go.mod)
+# Not pip: pyproject.toml declares lower bounds only, and raising them would only force users onto newer versions; the
+# Python dependencies are covered by Dependabot alerts. Not the vendored code: gguf-py and ggml's MMQ are pinned and checked
+# by tools/release/vendor_gguf.py / vendor_mmq.py.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: testing
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directory: /panel
+    target-branch: testing
+    schedule:
+      interval: weekly
+    groups:
+      panel-modules:
+        patterns: ["*"]
