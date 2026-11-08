@@ -8,6 +8,8 @@ A Job carries the prompt ids and the generation settings in, and an event queue 
     ('error', kind, msg)   kind 'engine' (EngineError: the session was reset; answer 503 / 529) or 'internal'
                            (any other exception, a bug: the session is aborted, not reset, so the committed state
                            and the checkpoints survive; reset only if abort() fails; answer 500)
+                          or 'loop' (sustained answer repetition stopped through the normal stop callback; answer 422,
+                          or an SSE error, and preserve the session for the next request)
 A job cancelled before it starts gets ('done', result with finish 'cancel') without touching the engine.
 The HTTP thread sets job.cancel on a client disconnect; the worker sees it at the next pass boundary.
 
@@ -24,7 +26,7 @@ import threading
 import time
 import traceback
 
-from .agentmon import ContentClass, LoopDetector, tool_call_report
+from .agentmon import AnswerLoopGuard, ContentClass, LoopDetector, tool_call_report
 from .engine import EngineError
 from .generate import GenResult, TokenText, run_generation
 from .sampler import Sampler
@@ -39,7 +41,7 @@ class QueueFull(RuntimeError):
 class Job:
     def __init__(self, prompt_ids, params, max_new, stops=(), force=None, drafter=None, tag='', n_predict=None,
                  slot_params=None, thinking=False, marks=None, request_id=None, tools=None, parse_tools=True, parallel=True,
-                 prefix_text='', profile='', harness=''):
+                 prefix_text='', profile='', harness='', loop_guard=False):
         self.prompt_ids = list(prompt_ids)
         # the flight recorder's (M7 ops): the request id, and what the engine thread needs to judge the reply (the loop flag,
         # tool-call parse failures) and to save a replay bundle
@@ -65,6 +67,9 @@ class Job:
         self.c_submit = self.c_start = None     # the stats clock's stamps (queue time in the metrics)
         self.result = None
         self.stop_matched = None
+        self.loop_stopped = False
+        self.answer_repeated = 0
+        self.loop_guard = bool(loop_guard)
 
     def queue_ms(self):
         if self.c_submit is None or self.c_start is None:
@@ -211,7 +216,8 @@ class EngineWorker:
             cached = self.sess.plan(job.prompt_ids, max_new=job.max_new)
             job.events.put(('start', {'queue_ms': (job.t_start - job.t_submit) * 1e3,
                                       'prompt_n': len(job.prompt_ids), 'cached_n': cached}))
-            tt = TokenText(self.tok, job.stops, self.sess.eos_ids)
+            guard = AnswerLoopGuard(job.thinking) if job.loop_guard else None
+            tt = TokenText(self.tok, job.stops, self.sess.eos_ids, loop_guard=guard)
             es = so if so is not None and so.enabled else None
             if es is not None:
                 es.begin(job, self.sess.max_ctx)
@@ -252,6 +258,8 @@ class EngineWorker:
                     if texts is not None:
                         texts.append(tail)
             job.stop_matched = tt.stop.matched
+            job.loop_stopped = tt.loop_stopped
+            job.answer_repeated = guard.repeated if guard is not None else 0
             job.result = res
             self._counts(res, marks0)
             st = self.stats
@@ -269,7 +277,10 @@ class EngineWorker:
             rec = self._record(job, res) if self.flight is not None else None
             if rec is not None:
                 rec['verdict'] = self._verdict(job, ''.join(texts), res)     # (before 'done': the HTTP thread's line reads it)
-            job.events.put(('done', res))
+            if job.loop_stopped:
+                job.events.put(('error', 'loop', 'Repeated answer prose: generation stopped (generation_loop).'))
+            else:
+                job.events.put(('done', res))
             if rec is not None and rec['verdict'] is not None and self._auto_ok():
                 try:
                     self._bundle(rec, rec['verdict'])
@@ -332,6 +343,7 @@ class EngineWorker:
                    finish=res.finish if res is not None else 'error', params=dataclasses.asdict(job.params), max_new=job.max_new,
                    stops=list(job.stops), force=None if job.force is None else [job.force[0], list(job.force[1])], marks=job.marks,
                    thinking=job.thinking, profile=job.profile, route=job.tag, n_predict=job.n_predict, engine_counts=getattr(res, 'engine_counts', None),
+                   loop_guard=job.loop_guard,
                    **st)
         if job.request_id is not None:
             self.recent[job.request_id] = rec
@@ -355,6 +367,8 @@ class EngineWorker:
         'tool_parse' (a tool call unclosed, undeclared or malformed; a call cut by max_tokens is not a parse failure), or None"""
         try:
             reason = None
+            if job.loop_stopped:
+                return 'loop'
             if job.thinking:
                 ld = LoopDetector(True)
                 ld.feed(text)

@@ -1,6 +1,7 @@
 """Agent-behaviour signals for the metrics (docs/specs/spec-metrics.md, 'agent behaviour' and 'DFlash'): the content
 class of the text being generated, the harness behind a User-Agent, the tool-call outcome of a parsed reply, and the
-loop detector over the reasoning. None of them keeps any text: classes, counts and line hashes only.
+loop detector over the reasoning and the answer-loop guard. Only bounded partial lines are held while streaming;
+monitoring records classes, counts and hashes, never request text.
 
 ContentClass (engine thread, fed the released text of each pass): 'tool' inside <tool_call> ... </tool_call>, 'shell'
 inside a call of a shell tool (run_shell_command, bash, ...) or a fenced block tagged bash / sh / console / ...,
@@ -235,3 +236,86 @@ class LoopDetector:
             self._line(self.buf)
         self.buf = ''
         return self.flagged, self.repeated
+
+
+class AnswerLoopGuard:
+    """Stop a sustained run of identical prose sentences, outside thinking, fenced code and tool payloads.
+
+    Eight consecutive nonempty lines of at least 24 characters is deliberately stricter than the reasoning metric.
+    A real runaway acknowledgement reached 78 copies while that reasoning-only metric stayed clear. This contains
+    that failure; it is not a general quality judgement. State is bounded: one line, its hash and a content classifier.
+    """
+    REPEAT = 8
+    MIN_LINE = 24
+    MAX_LINE = 4096
+
+    def __init__(self, thinking):
+        self.thinking = bool(thinking)
+        self.tail = ''
+        self.buf = ''
+        self.discard = False
+        self.content = ContentClass()
+        self.previous = None
+        self.run = self.max_repeat = self.repeated = 0
+
+    @property
+    def flagged(self):
+        return self.max_repeat >= self.REPEAT
+
+    def _reset_run(self):
+        self.previous, self.run = None, 0
+
+    def _line(self, line):
+        before = self.content.cls
+        after = self.content.feed(line + '\n')
+        if before != 'prose' or after != 'prose' or any(m in line for m in (TOOL_OPEN, TOOL_CLOSE, FENCE)):
+            self._reset_run()
+            return
+        line = line.strip()
+        if not line:                            # a repeated paragraph can have blank lines between its sentences
+            return
+        plain = line.strip('*#>_` ')
+        if len(line) < self.MIN_LINE or not plain or not plain[0].isalpha() or plain[-1] not in '.!?。！？':
+            self._reset_run()
+            return
+        h = hash(line)
+        if h == self.previous:
+            self.run += 1
+            self.repeated += 1
+        else:
+            self.previous, self.run = h, 1
+        self.max_repeat = max(self.max_repeat, self.run)
+
+    def feed(self, text):
+        if self.thinking:
+            s = self.tail + text
+            end = s.find(THINK_END)
+            if end < 0:
+                self.tail = s[-(len(THINK_END) - 1):]
+                return False
+            self.thinking, self.tail = False, ''
+            text = s[end + len(THINK_END):]
+        for part in text.splitlines(keepends=True):
+            complete = part.endswith('\n')
+            if self.discard:
+                self.content.feed(part)
+                if complete:
+                    self.discard = False
+                continue
+            self.buf += part
+            if len(self.buf) > self.MAX_LINE:
+                self.content.feed(self.buf)
+                self.buf, self.discard = '', not complete
+                self._reset_run()
+            elif complete:
+                self._line(self.buf[:-1])
+                self.buf = ''
+            if self.flagged:
+                return True
+        return self.flagged
+
+    def finish(self):
+        if not self.thinking and not self.discard and self.buf:
+            self._line(self.buf)
+        self.buf, self.tail = '', ''
+        return self.flagged

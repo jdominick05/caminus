@@ -75,6 +75,13 @@ takes about 40 s with `coder`. `qwen3-coder-next` reads prompts much more slowly
 **HTTP 503 or 529 after an error**: a step failed its retries. The server stays up and the next request starts fresh from
 the cache. It saved a replay file for a bug report: `caminus flight list` shows it.
 
+**Repeated acknowledgements in an answer**: chat responses stop after eight consecutive identical nonempty prose lines
+of at least 24 characters, ending in sentence punctuation. Fenced code and tool payloads are excluded. The request returns
+HTTP 422 with `generation_loop` (OpenAI), or an error event if streaming already began; it is not reported as a successful
+completion. The flight recorder attempts a `loop` replay bundle, subject to its usual size and rate limits. Use
+`--no-loop-guard` for intentional repeated prose. This limits runaway output; it does not establish model accuracy over
+long sessions. Raw `/v1/completions` output is unchanged.
+
 ## Disk space
 
 `caminus purge` lists what the prompt cache and the request log hold; `caminus purge --yes` deletes it. Stop your models

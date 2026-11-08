@@ -39,6 +39,7 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--max-ctx N` | A smaller context than the largest that fits. |
 | `--no-drafter` | `coder` only: turn off the drafter. |
 | `--no-disk-cache` | Don't save conversations to disk. |
+| `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |
 | `--idle-park-s N` | Save an idle conversation to disk after N seconds (default 8 hours). |
 | `--config FILE` | Read options from a JSON or TOML file (the same names with underscores). |
 
