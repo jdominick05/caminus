@@ -5,7 +5,8 @@
 #
 # Runs `timeout SECS [gpu-high] CMD` in a session of its own, logs a 1 Hz line to LOG.mon (time, used MiB per watched card,
 # host MemAvailable MiB), and kills the run when a watched card's sysfs mem_info_vram_used passes its line, host MemAvailable
-# falls below 1500 MiB, or the kernel log shows an amdgpu page fault / GPU reset / wedge / timeout (exit 99, and the STOP file).
+# falls below 1500 MiB, or the kernel log shows an amdgpu page fault / GPU reset / wedge / timeout (exit 99, and the STOP file;
+# the display core's REG_WAIT timeouts from a monitor sleeping or changing mode are noted, not counted).
 # Every limit comes from the machine, never weaker than before:
 #   * watched: every amdgpu card whose KFD node is gfx1100 (gfx_target_version 110000, the target Caminus ships), in DRM order;
 #     an iGPU / other target is not watched (its small VRAM carve-out holds the desktop: a 0.97 line would kill for nothing)
@@ -84,6 +85,11 @@ fi
 LOG=$1; SECS=$2; shift 2
 STOP=${K3_GUARD_STOP:-$HOME/.local/state/k3/GPU_FAULT_STOP}; mkdir -p "$(dirname "$STOP")" "$(dirname "$LOG")"
 FAULTS='amdgpu.*(page fault|GPU reset|wedged|timeout)'
+# The display core's register waits (its REG_WAIT macro: "REG_WAIT timeout <n>us * <n> tries - <function> line:<n>") time out
+# when a monitor sleeps, wakes or changes mode. They come from the display engine, not from a compute queue, so they are
+# logged as a note and never count as a fault (a monitor sleeping overnight used to record a fault and refuse every later
+# start). Page faults, resets, wedges and ring timeouts on the same lines' cards stay faults.
+DISPLAY_NOISE='REG_WAIT timeout [0-9]+us \* [0-9]+ tries - '
 if [ -e "$STOP" ]; then echo "GUARD REFUSED: a GPU fault was recorded ($STOP). Stop all GPU work and report to the lead." | tee "$LOG"; exit 98; fi
 discover
 if [ ${#CARDS[@]} -eq 0 ]; then
@@ -100,6 +106,7 @@ klog() {   # the kernel log since the run started
         dmesg) dmesg 2>/dev/null | awk -v u0="$U0" '{ if (match($0, /^\[ *[0-9]+\.[0-9]+\]/)) { t = substr($0, 2, RLENGTH - 2) + 0; if (t >= u0) print } }' ;;
     esac
 }
+faults() { klog | grep -E "$FAULTS" | grep -vE "$DISPLAY_NOISE"; }   # the fault lines, the display core's register waits left out
 GH=${CAMINUS_GPU_HIGH:-$(command -v gpu-high 2>/dev/null || true)}
 [ -z "$GH" ] && [ -x "$HOME/.local/bin/gpu-high" ] && GH=$HOME/.local/bin/gpu-high
 : > "$LOG"
@@ -115,7 +122,7 @@ else
 fi
 export CAMINUS_GUARD=$$     # (caminus serve: already guarded, no second guard)
 setsid timeout "$SECS" "${RUN[@]}" "$@" >> "$LOG" 2>&1 &
-P=$!; t0=$(date +%s.%N); mina=999999
+P=$!; t0=$(date +%s.%N); mina=999999; noted=0
 PEAK=(); for ((i = 0; i < ${#CARDS[@]}; i++)); do PEAK+=(0); done
 while kill -0 $P 2>/dev/null; do
   a=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
@@ -130,12 +137,16 @@ while kill -0 $P 2>/dev/null; do
   (( a < mina )) && mina=$a
   (( a < 1500 )) && kill_=1
   if (( kill_ )); then echo "GUARD KILL$over avail=$a MiB (lines: used/line MiB; host MemAvailable floor 1500)" | tee -a "$LOG"; kill -TERM -- -$P; sleep 3; kill -KILL -- -$P 2>/dev/null; fi
-  F=$(klog | grep -E "$FAULTS" | head -3)
+  F=$(faults | head -3)
+  if (( ! noted )); then
+    D=$(klog | grep -E "$DISPLAY_NOISE" | head -1)
+    [ -n "$D" ] && { note "GUARD NOTE: a display-engine register wait timed out (a monitor sleeping, waking or changing mode); not a GPU fault, the run continues: $D"; noted=1; }
+  fi
   if [ -n "$F" ]; then echo "$F" >> "$STOP"; echo "GPU FAULT: $F -- killed the run; STOP all GPU work, do not re-run, report to the lead." | tee -a "$LOG"; kill -TERM -- -$P; sleep 3; kill -KILL -- -$P 2>/dev/null; fi
   sleep 1
 done
 wait $P; rc=$?
-[ -e "$STOP" ] && grep -qE "$FAULTS" <(klog) && rc=99
+[ -e "$STOP" ] && [ -n "$(faults)" ] && rc=99
 peaks=; for ((i = 0; i < ${#CARDS[@]}; i++)); do peaks+=" peak ${LABELS[i]} ${PEAK[i]} MiB"; done
 echo "rc=$rc wall=$(echo "$(date +%s.%N) - $t0" | bc) s$peaks min avail ${mina} MiB"
 exit $rc
