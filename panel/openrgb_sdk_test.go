@@ -127,6 +127,37 @@ func TestOpenRGBDuplicateIdentityWritesNothing(t *testing.T) {
 	}
 }
 
+func TestOpenRGBEmptyControllerDoesNotBlockOtherDevices(t *testing.T) {
+	m := newMockSDK(t, mockDev{"empty", "Direct", nil, nil}, mockDev{"board", "Direct", []int{2}, make([]ledRGB, 2)})
+	b := m.data[0]
+	ci, err := parseController(b, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := pkReader{b: b}
+	r.take(8)
+	for range 6 {
+		r.str()
+	}
+	offset := len(b) - len(r.b)
+	modeBytes := 0
+	for _, mode := range ci.modes {
+		modeBytes += len(mode.raw)
+	}
+	// Remove both mode blocks and report an empty list, as an unconfigured controller may do.
+	m.data[0] = append(append(append([]byte(nil), b[:offset]...), make([]byte, 6)...), b[offset+6+modeBytes:]...)
+	binary.LittleEndian.PutUint32(m.data[0], uint32(len(m.data[0])))
+	l := newRGB(rgbCfg{Host: m.ln.Addr().String(), Brightness: 1}, &state{srv: serverState{Polled: true, Up: true}})
+	go l.run()
+	waitFor(t, "usable controller after an empty one", func() bool { return len(m.packets(pktUpdateLEDs)) > 0 })
+	l.stop()
+	for _, p := range m.packets(pktUpdateLEDs) {
+		if p.dev != 1 {
+			t.Fatal("wrote to a controller without a lighting mode")
+		}
+	}
+}
+
 type partialSDKConn struct {
 	net.Conn
 	data  []byte

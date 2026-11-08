@@ -265,6 +265,9 @@ type orgbMode struct {
 func (m orgbMode) perLED() bool { return m.flags&modePerLED != 0 && m.colorMode == 1 }
 
 func (ci ctrlInfo) selectedMode(switchModes bool) int {
+	if len(ci.modes) == 0 {
+		return -1
+	}
 	if ci.modes[ci.active].perLED() {
 		return ci.active
 	}
@@ -380,7 +383,7 @@ func parseController(b []byte, proto uint32) (ctrlInfo, error) {
 		}
 		r.u32() // controller flags
 	}
-	if r.bad || len(r.b) != 0 || len(ci.modes) == 0 || active >= len(ci.modes) || nl != nc {
+	if r.bad || len(r.b) != 0 || (len(ci.modes) != 0 && active >= len(ci.modes)) || nl != nc {
 		return ci, fmt.Errorf("invalid OpenRGB controller data (%d bytes)", len(b))
 	}
 	total := 0
