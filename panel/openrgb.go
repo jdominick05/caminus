@@ -65,8 +65,8 @@ func (st *state) rgbPhase() string {
 
 type ledRGB struct{ r, g, b uint8 }
 
-// look is how a phase shows: fx "" is steady, "breathe" pulses every LED, "chase" runs a bright spot along each
-// zone over a dim base. LEDs want saturated colors; the TUI's pastel palette would come out nearly white.
+// look is how a phase shows. The renderer samples rings circularly and strips linearly. Saturated colors keep
+// states recognizable on LEDs; a pastel palette would come out nearly white.
 type look struct {
 	c      ledRGB
 	fx     string
@@ -75,15 +75,15 @@ type look struct {
 
 var looks = map[string]look{
 	phOffline: {ledRGB{60, 0, 0}, "", 0},
-	phLoading: {ledRGB{255, 70, 0}, "breathe", 2 * time.Second},
+	phLoading: {ledRGB{255, 70, 0}, "orbit", 2 * time.Second},
 	phIdle:    {ledRGB{0, 40, 60}, "", 0},
 	phQuiet:   {ledRGB{0, 40, 60}, "", 0},
 	phBetween: {ledRGB{0, 60, 255}, "", 0},
 	phWaiting: {ledRGB{0, 220, 180}, "breathe", 3 * time.Second},
-	phReading: {ledRGB{255, 170, 0}, "breathe", time.Second},
+	phReading: {ledRGB{255, 170, 0}, "sweep", 1800 * time.Millisecond},
 	phWriting: {ledRGB{0, 255, 40}, "chase", 1200 * time.Millisecond},
-	phTool:    {ledRGB{255, 100, 0}, "", 0},
-	phCompact: {ledRGB{255, 30, 0}, "chase", 700 * time.Millisecond},
+	phTool:    {ledRGB{255, 100, 0}, "gloss", 3 * time.Second},
+	phCompact: {ledRGB{255, 30, 0}, "converge", 1600 * time.Millisecond},
 }
 
 func (c ledRGB) scale(k float64) ledRGB {
@@ -101,48 +101,19 @@ func parseHex(s string) (ledRGB, bool) {
 	return ledRGB{uint8(v >> 16), uint8(v >> 8), uint8(v)}, true
 }
 
-// colors gives n LEDs at time t. zones are the zones' LED counts; LEDs past them count as one more zone.
-func (l look) colors(zones []int, n int, t time.Duration, br float64) []ledRGB {
-	out := make([]ledRGB, n)
-	ph := 0.0
-	if l.period > 0 {
-		ph = math.Mod(float64(t)/float64(l.period), 1)
-	}
-	switch l.fx {
-	case "breathe":
-		c := l.c.scale(br * (0.15 + 0.85*(0.5-0.5*math.Cos(2*math.Pi*ph))))
-		for i := range out {
-			out[i] = c
-		}
-	case "chase":
-		i := 0
-		for _, z := range append(append([]int(nil), zones...), n) {
-			z = min(z, n-i)
-			for j := 0; j < z; j++ {
-				d := math.Abs(float64(j) + 0.5 - ph*float64(z))
-				d = min(d, float64(z)-d) // the spot wraps around
-				out[i+j] = l.c.scale(br * max(0.12, 1-d/2.5))
-			}
-			i += z
-		}
-	default:
-		c := l.c.scale(br)
-		for i := range out {
-			out[i] = c
-		}
-	}
-	return out
-}
-
 // ---------- config ----------
 
 type rgbCfg struct {
 	Enabled     bool              `json:"enabled"`
 	Host        string            `json:"host"`
-	Devices     []string          `json:"devices"`      // name substrings, case-insensitive; empty = every Direct-mode device
-	Brightness  float64           `json:"brightness"`   // 0-1
-	Colors      map[string]string `json:"colors"`       // phase -> #rrggbb
-	SwitchModes bool              `json:"switch_modes"` // opt in: temporarily select a per-LED mode
+	Devices     []string          `json:"devices"`         // name substrings, case-insensitive; empty = every usable per-LED device
+	Brightness  float64           `json:"brightness"`      // 0-1
+	Colors      map[string]string `json:"colors"`          // phase -> #rrggbb
+	SwitchModes bool              `json:"switch_modes"`    // opt in: temporarily select a per-LED mode
+	FPS         int               `json:"fps"`             // 1-60; 20 by default
+	Speed       float64           `json:"speed"`           // 0.1-4; 1 by default
+	FadeMS      int               `json:"fade_ms"`         // 0-2000; 0 disables crossfades
+	Zones       map[string]string `json:"zones,omitempty"` // zone name -> ring, reverse-ring, strip
 }
 
 func (c rgbCfg) look(ph string) look {
@@ -425,12 +396,12 @@ func parseController(b []byte, proto uint32) (ctrlInfo, error) {
 // ---------- driver ----------
 
 type orgbDev struct {
-	idx   uint32
-	key   string // physical identity and LED/mode layout, stable across index changes
-	zones []int
-	info  ctrlInfo
-	mode  int
-	sent  []ledRGB
+	idx  uint32
+	key  string // physical identity and LED/mode layout, stable across index changes
+	info ctrlInfo
+	mode int
+	sent []ledRGB
+	anim rgbAnimator
 }
 
 type orgbSnapshot struct {
@@ -453,6 +424,7 @@ type rgbLights struct {
 }
 
 func newRGB(cfg rgbCfg, st *state) *rgbLights {
+	cfg = cfg.normalized()
 	if cfg.Host == "" {
 		cfg.Host = defaultConfig.OpenRGB.Host
 	}
@@ -571,7 +543,7 @@ func (l *rgbLights) connect() (*orgbConn, []orgbDev, error) {
 		if mode < 0 || len(ci.colors) == 0 || !l.cfg.wants(ci.name) {
 			continue
 		}
-		dv := orgbDev{idx: i, key: ci.key(), zones: ci.zones, info: ci, mode: mode}
+		dv := orgbDev{idx: i, key: ci.key(), info: ci, mode: mode}
 		if seen[dv.key] {
 			return o, nil, errors.New("OpenRGB devices have duplicate identities; refusing ambiguous restoration")
 		}
@@ -606,9 +578,9 @@ func (l *rgbLights) drive(o *orgbConn, devs []orgbDev) bool {
 			}
 		}
 	}
-	tk := time.NewTicker(80 * time.Millisecond) // ~12 fps: plenty for LEDs, gentle on SMBus RAM sticks
+	tk := time.NewTicker(time.Second / time.Duration(l.cfg.FPS))
 	defer tk.Stop()
-	start, last := time.Now(), ""
+	last := ""
 	for {
 		select {
 		case <-l.quit:
@@ -624,11 +596,9 @@ func (l *rgbLights) drive(o *orgbConn, devs []orgbDev) bool {
 				l.set(fmt.Sprintf("%s on %d device%s", ph, len(devs), map[bool]string{true: "s"}[len(devs) != 1]))
 				last = ph
 			}
-			lk := l.cfg.look(ph)
 			for i := range devs {
 				d := &devs[i]
-				n := len(d.info.colors)
-				cs := lk.colors(d.zones, n, now.Sub(start), l.cfg.Brightness)
+				cs := d.anim.frame(l.cfg, d.info, ph, now)
 				if equalRGB(cs, d.sent) {
 					continue
 				}

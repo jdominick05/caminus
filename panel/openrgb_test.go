@@ -268,21 +268,23 @@ func TestLedsPacket(t *testing.T) {
 
 func TestLookColors(t *testing.T) {
 	steady := look{ledRGB{200, 100, 0}, "", 0}
-	if c := steady.colors(nil, 3, 0, 0.5); len(c) != 3 || c[2] != (ledRGB{100, 50, 0}) {
+	if c := steady.zoneColors(3, 0, 0.5, rgbLayout{}); len(c) != 3 || c[2] != (ledRGB{100, 50, 0}) {
 		t.Errorf("steady at half brightness: %v", c)
 	}
 	br := look{ledRGB{200, 0, 0}, "breathe", time.Second}
-	lo, hi := br.colors(nil, 1, 0, 1)[0], br.colors(nil, 1, 500*time.Millisecond, 1)[0]
+	lo, hi := br.zoneColors(1, 0, 1, rgbLayout{})[0], br.zoneColors(1, 500*time.Millisecond, 1, rgbLayout{})[0]
 	if lo.r != 30 || hi.r != 200 {
 		t.Errorf("breathe from %v to %v, want 30 to 200", lo, hi)
 	}
 	// a chase runs in each zone on its own: the spot is at the start of both zones at t=0
-	ch := look{ledRGB{0, 250, 0}, "chase", time.Second}
-	c := ch.colors([]int{4, 4}, 8, 0, 1)
+	ch := defaultConfig.OpenRGB
+	ci := ctrlInfo{zones: []int{4, 4}, zoneNames: []string{"strip 1", "strip 2"}, colors: make([]ledRGB, 8)}
+	c := ch.frame(ci, phWriting, 0)
 	if c[0].g <= c[2].g || c[4].g <= c[6].g || c[0] != c[4] {
 		t.Errorf("chase frame %v", c)
 	}
-	if c := ch.colors([]int{4}, 6, 0, 1); len(c) != 6 || c[4] == (ledRGB{}) {
+	ci.zones, ci.zoneNames, ci.colors = []int{4}, []string{"strip"}, make([]ledRGB, 6)
+	if c := ch.frame(ci, phWriting, 0); len(c) != 6 || c[4] == (ledRGB{}) {
 		t.Errorf("LEDs past the zones left dark: %v", c)
 	}
 	cfg := rgbCfg{Colors: map[string]string{phWaiting: "#ff00ff", phWriting: "bogus"}}
