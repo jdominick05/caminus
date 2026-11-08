@@ -14,6 +14,7 @@ to get started: the defaults work.
 | Server logs and state | `~/.local/state/caminus` | `state_dir` / `CAMINUS_STATE_DIR` |
 | Qwen Code's home for Caminus | `~/.config/caminus/qwen-home` | `CAMINUS_QWEN_HOME` |
 | The panel's settings | `~/.config/caminus/panel.json` | |
+| The live monitor's settings, including OpenRGB | `~/.config/caminus/top.json` | `LLMTOP_CONFIG` |
 
 `caminus doctor` prints the paths in effect.
 

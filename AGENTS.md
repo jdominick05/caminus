@@ -57,6 +57,8 @@ CLAUDE.md imports this file.
 - `panel/openrgb_effects.go`: clocked, hardware-free RGB renderer. Detect eight-LED motherboard JARGB 2/3 rings or use
   explicit zone layouts; keep other zones linear. Phase transitions start from the displayed frame, including when
   interrupted. Brightness, frame rate and animation speed are bounded; tests use a fake clock and mock devices.
+- `cmd/manage.py:top_config` carries monitor preferences into each server's generated config. Preserve the source file,
+  resolve its relative paths before merging, and let the selected server determine its address and agent sessions.
 - `share/guard.sh` (linked as `tools/guard.sh`): the GPU guard, shipped in the package.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.

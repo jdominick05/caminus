@@ -70,6 +70,10 @@ The monitor can light your PC through OpenRGB. Start OpenRGB's **SDK Server**, t
 }
 ```
 
+`caminus top` and the panel's monitor inherit these preferences while choosing the selected server's address and agent
+sessions. `LLMTOP_CONFIG` selects another preferences file. `caminus top -config FILE` uses a complete monitor config
+directly. Your preferences file is left untouched.
+
 By default, the monitor uses devices already in a per-LED mode, such as Direct. Set `switch_modes` to `true` if you want
 it to temporarily select a supported Direct, Custom or Static mode. On a normal exit it restores the colors and full
 mode settings that OpenRGB reported when it first connected. A lost connection or changed device layout can require
