@@ -159,8 +159,9 @@ Codex flags P0 / P1 issues only. In this repository these are P1:
 ### GPU safety and correctness
 - A change under `kernels/`, or to code that builds a K3 tape (`python/caminus/engine/`, `decode/`, `prefill/`), lists its
   GPU gates and their results in the pull request body: bitwise against the previous reference (T-token verify passes
-  equal to one-token steps, and the `K3_PER_WGP=3/6/7` grids), or the D-281 KLD floor where a change cannot be bitwise by
-  design. Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
+  equal to one-token steps, and the `K3_PER_WGP=3/6/7` grids), or, where a change cannot be bitwise by design, the KLD
+  floor (mean KLD against llama.cpp's one-token decode within llama.cpp's own batch-versus-decode floor, top-1 within one
+  point). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
 - Flag a device wait without a time bound (`limit_us`), a GPU allocation that is not projected and checked through
   `caminus.device.capacity` before it happens, and a position-indexed host entry that does not call `k3.check_span`.
 - Flag a GPU command in a script, test or doc that does not run under `tools/guard.sh`.
