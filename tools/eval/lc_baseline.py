@@ -5,7 +5,7 @@ results in OUT/k3_qsa.json).
   guard.sh LOG SECS python -I tools/eval/lc_baseline.py ramp [--max 32768] [--T 4]
       ms per T-token pass at depths 0 .. 32K (no fill: zero KV rows, the same work); stops before a depth whose projected pass
       passes 50 ms
-  guard.sh LOG SECS python -I tools/eval/lc_baseline.py run OUT [--depths 1792,8192,32768] [--qsa]
+  guard.sh LOG SECS python -I tools/eval/lc_baseline.py run OUT [--depths 1792,8192,32768] [--qsa] [--kv-host]
       per depth: ONE fill of the context (caminus.decode.longctx.fill: T=4 passes, progress + tok/s), snapshot; then from the
       snapshot each probe (restore before each): teacher-forced logits at D .. D + 255 vs llama.cpp's (KLD float64 over the
       full vocabulary, top-1 agreement; llama.cpp's run 1 vs run 2 as its own drift), and the six greedy answers (24 tokens)
@@ -31,14 +31,15 @@ def opt(a, name, default, f=str):
     return default
 
 
-def engine(max_ctx, T=4, use_qsa=False):
+def engine(max_ctx, T=4, use_qsa=False, kv_host=False):
     import torch
     from caminus.engine import passpolice
     from caminus.engine.flashnext_tp import FlashNextTP
     for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
     t0 = time.time()
-    if use_qsa: m = FlashNextTP(MODEL, ntok=T, max_ctx=max(max_ctx, 2056), qsa=True)   # the model's QSA attention
-    else: m = FlashNextTP(MODEL, ntok=T, max_ctx=max_ctx, dense_beyond_qsa=True)       # TEST-ONLY: full attention past 2051
+    kw = dict(kv_host=True) if kv_host else {}   # (--kv-host: the KV cache in host memory; the results must not change)
+    if use_qsa: m = FlashNextTP(MODEL, ntok=T, max_ctx=max(max_ctx, 2056), qsa=True, **kw)   # the model's QSA attention
+    else: m = FlashNextTP(MODEL, ntok=T, max_ctx=max_ctx, dense_beyond_qsa=True, **kw)       # TEST-ONLY: full attention past 2051
     pol = passpolice.of(m); atexit.register(lambda: print(pol.summary(), flush=True))     # before the first pass
     print(f'engine: max_ctx {m.max_ctx}, T={T}, {"QSA (modules " + str([e.module for e in m.engines]) + ")" if m.qsa else "dense_beyond_qsa (test only)"}, '
           f'loaded in {time.time() - t0:.1f} s; vram plan fixed {m.vram_plan["fixed_mib"]} + ctx {m.vram_plan["ctx_mib"]:.0f} MiB per card', flush=True)
@@ -81,12 +82,14 @@ def run(a):
     import lc_probes as L
     use_qsa = '--qsa' in a
     if use_qsa: a.remove('--qsa')
+    kv_host = '--kv-host' in a
+    if kv_host: a.remove('--kv-host')
     out = a[0]; meta = json.load(open(os.path.join(out, 'probes.json')))
     want = opt(a, '--depths', None)
     res_name = 'k3_qsa.json' if use_qsa else 'k3_baseline.json'
     depths = [d for d in meta['depths'] if want is None or str(d['D']) in want.split(',')]
     need = max(max(d['D'] + meta['ntf'], max(p['P'] + meta['ngen'] for p in d['probes'])) for d in depths)
-    m = engine((need + 8 + 255) // 256 * 256, use_qsa=use_qsa)
+    m = engine((need + 8 + 255) // 256 * 256, use_qsa=use_qsa, kv_host=kv_host)
     w0 = [int(x) for x in open(os.path.join(out, f'd{depths[0]["D"]}', 'ctx.ids')).read().split()]
     for _ in range(3): m.verify_tokens(w0, 0, 0)   # warm-up (first-launch costs off the policed passes); fill resets
     res = dict(model=MODEL, T=m.ntok, max_ctx=m.max_ctx, qsa=m.qsa, depths=[])
