@@ -28,6 +28,32 @@ check(refused(13_056 * MIB, (17_000.0, 15_222.0)), 'refused when it would leave 
 check(refused(14_600 * MIB, (40_000.0, 15_222.0)), 'refused past 95 % of the GTT page limit')
 check(not refused(6_528 * MIB, (20_000.0, None)), 'no GTT limit readable: MemAvailable alone decides')
 
+# the projection follows the cache format FlashNextTP allocates (q8_0: 544 bytes per position per layer and card on the
+# Coder; fp32: 1,024), and _check_vram hands check_host_kv that figure for both cards
+g = dict(n_attn=12, nkv=2, hd=256, idx_dim=128)
+n1m = 1 << 20
+check(C.tp_kv_bytes(g, n1m, True) == 12 * n1m * 544 and C.tp_kv_bytes(g, n1m, False) == 12 * n1m * 1024
+      and C.tp_ctx_bytes(g, n1m)['kv'] == C.tp_kv_bytes(g, n1m, True) and C.tp_ctx_bytes(g, n1m, q8=False)['kv'] == C.tp_kv_bytes(g, n1m, False),
+      'tp_kv_bytes: 544 (q8_0) / 1,024 (fp32) bytes per position per layer and card; tp_ctx_bytes counts the same')
+from caminus.engine.flashnext_tp import FlashNextTP
+class _Stop(Exception): pass
+seen, saved = [], (C.model_bytes, C.fixed_mib, C.check_host_kv)
+C.model_bytes = lambda rd: 1; C.fixed_mib = lambda *a, **k: [1.0, 1.0]
+def _rec(nb): seen.append(nb); raise _Stop()
+C.check_host_kv = _rec
+try:
+    for q8 in (True, False):
+        m = FlashNextTP.__new__(FlashNextTP)
+        m.__dict__.update(rd=None, gdn_keys=10, moe_blocks=12, model_tag='gsq', ntok=4, geom=g, max_ctx=n1m, idx_cache=True,
+                          kv_host=True, q8=q8, qsa=True)
+        seen.clear()
+        try: m._check_vram(0)
+        except _Stop: pass
+        want = 2 * C.tp_kv_bytes(g, n1m, q8)
+        check(seen == [want], f'_check_vram (kv_host, q8={q8}) checks {want // MIB:,} MiB of host memory for both cards ({[x // MIB for x in seen]})')
+finally:
+    C.model_bytes, C.fixed_mib, C.check_host_kv = saved
+
 # the launch checker: a fake registry entry over a real CPU buffer (no hipHostMalloc on a CPU-only runner)
 buf = torch.zeros(4096, dtype=torch.uint8)
 hip._HOST.append((buf.data_ptr(), buf.numel(), buf))

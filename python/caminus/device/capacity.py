@@ -78,9 +78,16 @@ def geometry(path_or_reader):
                 ssm_heads=int(hp('ssm.time_step_rank')), ssm_state=int(hp('ssm.state_size')))
 
 
-def tp_ctx_bytes(g, max_ctx, idx=True):
+def tp_kv_bytes(g, max_ctx, q8=True):
+    """per card: the TP engine's KV cache bytes for max_ctx positions in its cache format (q8_0 K and V, else fp32: the
+    bytes FlashNextTP allocates, kernels/k3_gguf_ops.h kv_pos_bytes; VRAM or, with kv_host, pinned host memory)"""
+    m = g['nkv'] // 2 * g['hd']
+    return g['n_attn'] * max_ctx * (2 * q8_bytes(m) if q8 else 4 * m)
+
+
+def tp_ctx_bytes(g, max_ctx, idx=True, q8=True):
     """per card: the TP engine's context-sized buffers (bytes) for max_ctx positions"""
-    kv = g['n_attn'] * 2 * q8_bytes(g['nkv'] // 2 * g['hd']) * max_ctx
+    kv = tp_kv_bytes(g, max_ctx, q8)
     raw = g['n_attn'] * q8_bytes(g['idx_dim']) * max_ctx if idx else 0
     pool = g['n_attn'] * q8_bytes(g['idx_dim']) * ((max_ctx + 3) // 4) if idx else 0
     return dict(kv=kv, idxraw=raw, idxpool=pool)

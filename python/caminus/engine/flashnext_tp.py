@@ -218,7 +218,7 @@ class FlashNextTP(FlashNextK3):
             raise capacity.CapacityError(f'FlashNextTP: no measured fixed VRAM for this model ({self.model_tag} module, '
                                          f'{wb} tensor bytes; measured: {capacity.MODEL_BYTES}): run tools/k3_capacity.py measure and add '
                                          f'it to capacity.FIXED_MIB / MODEL_BYTES, or build with vram_check=False')
-        cb = capacity.tp_ctx_bytes(self.geom, self.max_ctx, self.idx_cache)
+        cb = capacity.tp_ctx_bytes(self.geom, self.max_ctx, self.idx_cache, q8=getattr(self, 'q8', True))   # (the cache format allocated)
         if getattr(self, 'kv_host', False):   # (both cards' caches in host memory, not in VRAM; the CPU tests' stand-ins have no kv_host)
             capacity.check_host_kv(2 * cb.pop('kv'))
         if self.qsa: cb.update(capacity.tp_qsa_bytes(self.geom, self.max_ctx, self.ntok))
@@ -683,6 +683,7 @@ class FlashNextTP(FlashNextK3):
                     assert bph * GGML_QUANT_SIZES[self.T[f'{p}.attn_output.weight'].tensor_type][0] == hd
                     ao = self._cols(f'{p}.attn_output.weight', [[(nh * bph * c, nh * bph * (c + 1))] for c in (0, 1)])
                     pb = (2 * nkv * hd // 32 * 34) if self.q8 else 4 * nkv * hd
+                    assert self.geom['n_attn'] * self.max_ctx * pb == capacity.tp_kv_bytes(self.geom, self.max_ctx, self.q8), pb   # (what _check_vram counted)
                     if qsa_t or idxraw_t:   # the indexer (replicated on both cards: each computes the same selection for its kv head)
                         ikw, iqw = self._rep_bf16(f'{p}.indexer.k_proj.weight'), self._rep_bf16(f'{p}.indexer.q_proj.weight')
                         ikn, iqn = self._rep_f32(f'{p}.indexer.k_norm.weight'), self._rep_f32(f'{p}.indexer.q_norm.weight')

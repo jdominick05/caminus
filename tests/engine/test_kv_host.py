@@ -12,7 +12,7 @@ import os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
 from caminus.engine import k3
-from caminus.device import hip, bufcheck
+from caminus.device import hip, bufcheck, capacity
 
 a = sys.argv[1:]
 END = int(a[a.index('--end') + 1]) if '--end' in a else 2200
@@ -24,6 +24,10 @@ def ok(name, cond, info=''):
 
 ROWS = 4096
 PB = k3.kv_pos_bytes(NKV * D, True)
+# projected before the first allocation: the pinned host-mapped cache (check_host_kv) and, on the card, the VRAM cache,
+# the chain's vectors (T = 4) and 128 MiB for the engines alive at once (tape, sync arrays, guard)
+capacity.check_host_kv(ROWS * PB)
+capacity.check([torch.cuda.current_device()], [(ROWS * PB + 4 * 4 * H * D * 4) / capacity.MIB + 128], 'test_kv_host (cache, vectors, engines)')
 # alloc
 h = hip.host_mapped(ROWS * PB)
 ok('host_mapped: exact size, zeroed, registered', h.numel() == ROWS * PB and h.device.type == 'cpu' and int(h[:4096].sum()) == 0
