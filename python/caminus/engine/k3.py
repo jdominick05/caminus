@@ -58,7 +58,10 @@ DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_
 # them as nops, so Engine.build refuses them there. env K3_QSA_ENTRY=1: every k3_gguf_gsq{,_mt} tape on the QSA module
 # (measures that module's cost on the trunk's tapes)
 OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
-QSA_OPS = {OP_IDX_APPEND: 'IDX_APPEND', OP_QSA_SCORE: 'SCORE', OP_QSA_SELECT: 'SELECT', OP_ATTN_SEL: 'ATTN_SEL'}
+OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
+QSA_OPS = {OP_IDX_APPEND: 'IDX_APPEND', OP_QSA_SCORE: 'SCORE', OP_QSA_SELECT: 'SELECT', OP_ATTN_SEL: 'ATTN_SEL', OP_QSA_PSEL: 'PSEL'}
+QSA_PSEL_H1, QSA_PSEL_H2, QSA_PSEL_FILTER, QSA_PSEL_FINISH, QSA_PSEL_ZERO = 0, 1, 2, 3, 4   # (Seg.pad1: the phase)
+QSA_PSEL_MAXP = 64
 QSA_MODULES = ('k3_gguf_gsq_qsa', 'k3_gguf_gsq_qsa_mt')
 QSA_OF = {'k3_gguf_gsq': 'k3_gguf_gsq_qsa', 'k3_gguf_gsq_mt': 'k3_gguf_gsq_qsa_mt'}
 QSA_D, QSA_H, QSA_ROWB, QSA_TOPK, QSA_SELW = 128, 4, 136, 512, 516   # = kernels/k3_qsa_ops.h (row: 4 block_q8_0)
@@ -768,6 +771,56 @@ class Engine:
         self.segs.append(Seg(OP_QSA_SELECT, self.T, dep, 1, None, None, score.data_ptr(), pos.data_ptr(), sel.data_ptr(),
                              0.0, int(pool_rows), K, 0, 0, -1, 0, 0))
         return len(self.segs) - 1
+
+    def qsa_select_par(self, score, pos, sel, pool_rows, dep=-1, slices=None):
+        """qsa_select's SEL rows (bitwise the same: the same radix rule on the same exact counts, the same ascending emit)
+        from five segments instead of one: ZERO (this layer's counts, no dependency), HIST1 / HIST2 / FILTER over `slices`
+        slices of each row's scores (one task per row and slice), FINISH (one task per row: the last two radix passes over
+        the few candidates left, then the emit; returned: give it the extra dependency qsa_select would have, Engine.also).
+        slices: None = ceil(pool_rows / 2048) capped at QSA_PSEL_MAXP. The slices' id lists (LIST [T][LS]) and counts are
+        one buffer per engine and slice count, shared by every layer of the tape: a later layer's HIST1 must wait for the
+        previous layer's FINISH (checked: the next layer's indexer query depends on this layer's attention anyway)"""
+        self._qsa_module()
+        assert score.dtype == torch.float32 and score.is_contiguous() and score.dim() == 2 and score.shape[0] == self.T, score.shape
+        assert sel.dtype == torch.int32 and sel.is_contiguous() and sel.numel() == self.T * QSA_SELW, (sel.dtype, sel.numel())
+        K = int(score.shape[1])
+        if isinstance(pool_rows, bool) or not isinstance(pool_rows, (int, np.integer)) or not 0 < pool_rows <= K:
+            raise ValueError(f'qsa_select_par: pool_rows {pool_rows!r} outside [1, {K}] (the SCORE row stride)')
+        reg = getattr(self, '_qsa_scores', {}).get(score.data_ptr())
+        if reg is not None:
+            if pool_rows != reg[0]:
+                raise ValueError(f'qsa_select_par: pool_rows {pool_rows} != {reg[0]}, the IDXPOOL rows of the SCORE (segment {reg[1]})')
+            if not self._waits_for(dep, reg[1]):
+                raise ValueError(f'qsa_select_par: dep {dep} does not wait for the SCORE (segment {reg[1]}) that writes its scores')
+        P = min(QSA_PSEL_MAXP, -(-int(pool_rows) // 2048)) if slices is None else slices
+        if isinstance(P, bool) or not isinstance(P, (int, np.integer)) or not 1 <= P <= QSA_PSEL_MAXP:
+            raise ValueError(f'qsa_select_par: slices {P!r} outside [1, {QSA_PSEL_MAXP}]')
+        P = int(P)
+        LS = P * ((-(-int(pool_rows) // P) + 255) // 256 * 256)    # LIST row: P slices of the longest slice (nv = pool_rows)
+        self._guard_pos(pos, 4 * pool_rows)
+        if not hasattr(self, '_psel'): self._psel = {}
+        key = (P, LS)
+        if key not in self._psel:
+            self._psel[key] = dict(list=torch.zeros(self.T * LS, dtype=torch.int32, device='cuda'),
+                                   cnt=torch.zeros(self.T * 2 * P, dtype=torch.int32, device='cuda'), last=None)
+        sh = self._psel[key]
+        if sh['last'] is not None and not self._waits_for(dep, sh['last']):
+            raise ValueError(f'qsa_select_par: dep {dep} does not wait for the previous FINISH (segment {sh["last"]}) that '
+                             f'reads the shared slice lists')
+        hist = torch.zeros(self.T * 512, dtype=torch.int32, device='cuda')
+        self.keep += [score, pos, sel, sh['list'], sh['cnt'], hist]
+        def seg(phase, ntask, d):
+            sg = Seg(OP_QSA_PSEL, ntask, d, P, sh['list'].data_ptr(), sh['cnt'].data_ptr(), score.data_ptr(), pos.data_ptr(),
+                     sel.data_ptr(), 0.0, int(pool_rows), K, 0, 0, -1, phase, LS)
+            sg.aux = hist.data_ptr(); self.segs.append(sg)
+            return len(self.segs) - 1
+        z = seg(QSA_PSEL_ZERO, 1, -1)
+        h1 = self.also(seg(QSA_PSEL_H1, self.T * P, dep), z)
+        h2 = seg(QSA_PSEL_H2, self.T * P, h1)
+        f = seg(QSA_PSEL_FILTER, self.T * P, h2)
+        fin = seg(QSA_PSEL_FINISH, self.T, f)
+        sh['last'] = fin
+        return fin
 
     def _waits_for(self, dep, seg):
         """True when a segment depending on `dep` starts after segment `seg` finished: seg reachable from dep through the

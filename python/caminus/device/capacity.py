@@ -90,11 +90,14 @@ def tp_qsa_bytes(g, max_ctx, ntok=4):
     """per card: what the QSA tapes add beyond the indexer caches (FlashNextTP(qsa)): the replicated indexer weights
     (k_proj [idx_dim] + q_proj [idx_heads * idx_dim] rows of D BF16, the two norms fp32) of every attention layer, the
     pool-score scratch [T][max_ctx / 4] fp32, the selection rows [layers][T][516] int32, the indexer activations and the
-    two-tape backfill's fp32 rows [layers][min(QSA_BACKFILL, max_ctx)][idx_dim]"""
+    two-tape backfill's fp32 rows [layers][min(QSA_BACKFILL, max_ctx)][idx_dim], and the parallel selection's scratch (the
+    slices' id lists [T][P x slice] and counts, each layer's histograms [T][2][256])"""
     na, di, hi, D = g['n_attn'], g['idx_dim'], g['idx_heads'], g['D']
     w = na * ((di + hi * di) * D * 2 + 2 * di * 4)
-    return dict(qsa_weights=w, qsa_score=ntok * ((max_ctx + 3) // 4) * 4, qsa_sel=na * ntok * 516 * 4, qsa_act=ntok * (di + 2 * hi * di) * 4,
-                qsa_backfill=na * min(QSA_BACKFILL, max_ctx) * di * 4)
+    prow = (max_ctx + 3) // 4; P = min(64, -(-prow // 2048)); LS = P * ((-(-prow // P) + 255) // 256 * 256)
+    return dict(qsa_weights=w, qsa_score=ntok * prow * 4, qsa_sel=na * ntok * 516 * 4, qsa_act=ntok * (di + 2 * hi * di) * 4,
+                qsa_backfill=na * min(QSA_BACKFILL, max_ctx) * di * 4,
+                qsa_psel=ntok * (LS + 2 * P) * 4 + na * ntok * 512 * 4)   # (Engine.qsa_select_par: slice lists + counts, per-layer counts)
 
 
 # measured fixed VRAM per card (MiB): (XTX, XT), device-level peak during the load and 3 passes, minus the idle baseline and

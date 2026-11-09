@@ -53,6 +53,22 @@ class Slots:
         return np.frombuffer(buf, dtype=np.uint32)[::self.stride // 4]
 
 
+QSA_SCORE_NTASK = 384   # the indexer score's tasks: 64 left the 12 layers' scoring latency-bound at depth (T = 4 pass at 131K
+                        # 27.50 -> 26.38 ms with 384, logits bitwise: each pool's arithmetic does not depend on its task)
+
+
+def qsa_score_ntask(prow):
+    """OP_QSA_SCORE's task count for a tape of prow pool rows: env K3_QSA_NTASK (A/B), else QSA_SCORE_NTASK; capped at
+    its 32-pool chunks"""
+    return max(1, min(int(os.environ.get('K3_QSA_NTASK') or QSA_SCORE_NTASK), (prow + 31) // 32))
+
+
+def qsa_psel():
+    """the pool selection as OP_QSA_PSEL (Engine.qsa_select_par: the same SEL rows bit for bit, spread over slices) unless
+    env K3_QSA_PSEL=0 (the one-workgroup OP_QSA_SELECT: A/B)"""
+    return os.environ.get('K3_QSA_PSEL', '1') != '0'
+
+
 class FlashNextTP(FlashNextK3):
     def __init__(self, path, devices=(0, 1), max_ctx=2048, q8=True, module=None, local_only=False, gdn_keys=10, moe_blocks=12, vocab_share=None, ntok=1, feature_layers=(), limit_us=200_000, max_retries=8, tape_only=False, feature_card=0,
                  idx_cache=True, dense_beyond_qsa=False, vram_check=True, vram_reserve_mib=(0, 0), qsa=None, qsa_tape=None, vram_drafters=(),
@@ -696,8 +712,8 @@ class FlashNextTP(FlashNextK3):
                             if self.q8: qd = E[c].hadamard(s['qo'], hd, dep=qd)
                             na = Tn * nh * hd
                             if qsa_t:   # SCORE after this pass's pools (IDX_APPEND), SELECT (also waits for q), ATTN_SEL (+ the KV row)
-                                sc_ = E[c].also(E[c].qsa_score(iqo_, pool, pos[c], score_, dep=iqd), ia)
-                                sl_ = E[c].also(E[c].qsa_select(score_, pos[c], sel, prow, dep=sc_), qd)
+                                sc_ = E[c].also(E[c].qsa_score(iqo_, pool, pos[c], score_, dep=iqd, ntask=qsa_score_ntask(prow)), ia)
+                                sl_ = E[c].also((E[c].qsa_select_par if qsa_psel() else E[c].qsa_select)(score_, pos[c], sel, prow, dep=sc_), qd)
                                 a_ = E[c].also(E[c].attn_sel(s['qo'], cache, pos[c], sel, s['att'][:na], nh, nkv, hd, 1.0 / np.sqrt(hd), q8=self.q8, dep=sl_, **akw(c)), ap)
                             else:
                                 a_ = E[c].also(E[c].attn_dec(s['qo'], cache, pos[c], s['att'][:na], nh, nkv, hd, 1.0 / np.sqrt(hd), q8=self.q8, dep=ap, **akw(c)), qd)
