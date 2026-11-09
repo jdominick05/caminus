@@ -161,6 +161,35 @@ class Transcript(unittest.TestCase):
         self.assertNotIn('hunter22hunter22', s)
         self.assertNotIn('AAAA', s)
 
+    def test_redact_structured_credentials(self):
+        """credentials in JSON / YAML / env / header form, as tool output shows them, never reach a hosted advisor; ordinary
+        fields that only contain the word stay readable"""
+        pw, ak, tk = 'database-' + 'secret-value', 'k-' + '0123456789abcdef', 'tok-' + 'zyxwvutsrq987654'
+        cases = [
+            '{"password": "%s", "user": "app"}' % pw,
+            "{'api_key': '%s'}" % ak,
+            '{"apiKey":"%s","token": "%s"}' % (ak, tk),
+            '{"client_secret": "%s", "db_password" : "a phrase with spaces"}' % pw,
+            'password: %s' % pw,
+            'DB_PASSWORD=%s' % pw,
+            'export AWS_SECRET_ACCESS_KEY=%s' % ak,
+            'GITHUB_TOKEN=%s' % tk,
+            'Authorization: Bearer %s' % tk,
+            'curl -H "Authorization: Basic %s"' % tk,
+            '"refresh_token": "%s"' % tk,
+        ]
+        for c in cases:
+            out = transcript.redact(c)
+            for v in (pw, ak, tk, 'a phrase with spaces'):
+                self.assertNotIn(v, out, c)
+            self.assertIn('[redacted]', out, c)
+        self.assertIn('"user": "app"', transcript.redact(cases[0]))
+        out = transcript.redact('OPENAI_API_KEY=sk-' + 'proj-abcdefghijklmnopqrstuvwxyz\nPORT=8080')
+        self.assertEqual(out, 'OPENAI_API_KEY=[redacted key]\nPORT=8080')      # (replaced once, not twice)
+        for keep in ('max_tokens=8000', '"tokens": 512', 'token_count: 12', 'the token was rejected: expired',
+                     'passwords must be 12 characters', 'secretary: Dana'):
+            self.assertEqual(transcript.redact(keep), keep)
+
     def test_standing_goal_in_brief(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, 't.jsonl')

@@ -12,20 +12,27 @@ EARLY_STEPS = 6               # ... plus the first steps after the request when 
                               # checks (ls, versions, docker ps, configs) often hold the clue a long session later needs
 BRIEF_CHARS = 32000           # the whole brief, bounded
 
-# obvious credentials: provider key prefixes, private key blocks, key=value pairs naming a secret
+# obvious credentials: provider key prefixes, private key blocks, fields naming a secret (bare, env-style or quoted JSON /
+# YAML keys: db_password=..., "client_secret": "...", AWS_SECRET_ACCESS_KEY=...), and Authorization header schemes
+_KEY = (r'(?:[A-Za-z0-9]+[_.-])*(?:api[_-]?key|apikey|secret(?:[_-]?(?:access[_-]?)?key)?|(?:access|auth|refresh|session|id)?[_-]?token|'
+        r'passw(?:or)?d|passphrase|pwd|authorization|private[_-]?key|access[_-]?key|credentials?)')
 _SECRET_RES = [
     re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----', re.S),
     re.compile(r'\b(sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|'
                r'xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|hf_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|'
                r'pypi-[A-Za-z0-9_-]{30,})\b'),
-    re.compile(r'(?i)\b((?:api[_-]?key|secret|token|passw(?:or)?d|authorization|bearer)\s*[:=]\s*["\']?)([^\s"\']{8,})'),
+    re.compile(r'(?i)\b(Bearer|Basic|Token)(\s+)[A-Za-z0-9._~+/=-]{8,}'),
+    # the field, its closing quote if quoted, the separator; then a quoted value (all of it, spaces included) or a bare one
+    # (not one an earlier pattern already replaced: '[redacted ...]')
+    re.compile(r'(?i)(?<![A-Za-z0-9])(["\']?' + _KEY + r'["\']?\s*[:=]\s*)(?:(["\'])((?:\\.|(?!\2).)+)\2|([^\s"\',;}\]\[][^\s"\',;}\]]{2,}))'),
 ]
 
 
 def redact(s):
     s = _SECRET_RES[0].sub('[redacted private key]', s)
     s = _SECRET_RES[1].sub('[redacted key]', s)
-    return _SECRET_RES[2].sub(lambda m: m.group(1) + '[redacted]', s)
+    s = _SECRET_RES[2].sub(lambda m: m.group(1) + m.group(2) + '[redacted]', s)
+    return _SECRET_RES[3].sub(lambda m: m.group(1) + (f'{m.group(2)}[redacted]{m.group(2)}' if m.group(2) else '[redacted]'), s)
 
 
 ERR_LINE = re.compile(r'\b(?:error|fatal|exception|traceback|failed|failure|denied|refused|not found|no such file|undefined|segmentation fault|panicked)\b', re.I)
