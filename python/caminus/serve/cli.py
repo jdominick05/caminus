@@ -48,7 +48,7 @@ from .. import config as _config
 DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, host='127.0.0.1',
-                port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False,
+                port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, kv_host=False,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
                 flight_dir=_config.flight_dir(), flight_cap_gb=10.0)
@@ -121,6 +121,10 @@ def parser():
     ap.add_argument('--chunk', type=int, help='the batched prefill\'s chunk (tokens)')
     ap.add_argument('--cache-dir', help='the prompt cache\'s disk tier (default ~/.cache/caminus/kv)')
     ap.add_argument('--no-disk-cache', action='store_true', default=None, help='no disk tier (VRAM checkpoints only)')
+    ap.add_argument('--kv-host', action='store_true', default=None, help='the Coder: its attention KV cache in pinned host memory '
+                                                                      '(both cards read it directly; frees VRAM; same results). A '
+                                                                      '--max-ctx past the model\'s context_length implies it (the '
+                                                                      'long-context mode: also NTK RoPE scaling, no disk tier)')
     ap.add_argument('--log-dir', help="an access log: one more JSONL row per request in DIR (default '' = off: the flight "
                                       "recorder's line is the per-request log)")
     ap.add_argument('--no-side-route', action='store_true', default=None,
@@ -249,6 +253,8 @@ def main(argv=None):
     opt['max_ctx'] = ctx_arg(opt['max_ctx'])     # (a config file's value too)
     if opt['max_ctx'] == 'auto':                 # the default: as big a context as the card(s) hold (user, 11-07)
         opt['max_ctx'] = A.auto_max_ctx(opt)
+    long_note = A.long_context(opt)              # (an explicit --max-ctx past the model's context_length: the long-context mode)
+    if long_note: print(f'caminus serve: {long_note}', flush=True)
     opt['model_alias'] = opt['model_alias'] or _arch.default_alias(opt['model'])
     A.set_ids(opt['model_alias'], tok)
     stats = EngineStats(enabled=not opt['no_stats'], physics=A.physics(0))

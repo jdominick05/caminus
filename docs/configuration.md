@@ -37,11 +37,29 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | Option | What it does |
 |---|---|
 | `--max-ctx N` | A smaller context than the largest that fits. |
+| `--kv-host` | `coder` only: keep the attention cache in system memory (the cards read it directly). Same results, less VRAM. |
 | `--no-drafter` | `coder` only: turn off the drafter. |
 | `--no-disk-cache` | Don't save conversations to disk. |
 | `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |
 | `--idle-park-s N` | Save an idle conversation to disk after N seconds (default 8 hours). |
 | `--config FILE` | Read options from a JSON or TOML file (the same names with underscores). |
+
+### Long context (`coder`, up to 1M tokens)
+
+`--max-ctx` above the model's own 262,144 tokens turns on the long-context mode, for example `caminus serve --max-ctx
+1048576`. It is opt-in, and a server at 262,144 or less is unchanged. What changes:
+
+- The attention cache moves to pinned system memory: about 13 GB at 1,048,576 tokens, split over the two cards. The server
+  checks free memory and the GPU's system-memory limit before it allocates, and refuses to start when they're short.
+- Positions are stretched (NTK RoPE scaling, factor 4) so the model can recall past its training length. In our tests it
+  found 3 of 3 planted values at 1,040,384 tokens, including one 936K tokens back; without the scaling it missed that one.
+  The stretch costs a little at short range: KL divergence 0.0077 against llama.cpp, versus 0.0057 without it.
+- No disk cache: saving a conversation would write the whole cache. A server restart, or a second conversation, means
+  processing the prompt again: about 1,100 tokens/s at 350K and 770 tokens/s at 1M, so a full 1M prompt takes about 22
+  minutes. A harness timeout shorter than that ends a cold request at that size. A conversation that grows turn by turn
+  only processes its new tokens.
+- Decoding is slower at depth: about 34 tokens/s at 1M without the drafter. With it, short tests ran at 50 to 85
+  tokens/s at 350K to 1M, depending on how predictable the reply is.
 
 Serve and replay disable optional ROCm profiler registration by default to avoid a
 [runtime crash](troubleshooting.md#while-it-runs). An explicit `HSA_TOOLS_DISABLE_REGISTER=0` enables registration for GPU

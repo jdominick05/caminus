@@ -132,6 +132,29 @@ def main():
     check(not any(hasattr(cli, n) for n in ('ONE_CARD_ARCHS', 'TP_ARCHS', 'model_arch', 'build_model', 'auto_max_ctx')),
           'cli: no architecture table or builder of its own')
 
+    # ---- the Coder's long-context mode (an explicit --max-ctx past its context_length) and --kv-host
+    check(cli.parse([])['kv_host'] is False and cli.parse(['--kv-host'])['kv_host'] is True, 'cli: --kv-host (default off)')
+    real_facts = arch.coder_facts
+    arch.coder_facts = lambda path: {'geom': {'ctx_train': 262144}}
+    try:
+        base = dict(model='/m/c1.gguf', max_ctx=262144, no_disk_cache=False, no_drafter=False)
+        o = dict(base)
+        check(arch.CODER.long_context(o) is None and o == base and arch.CODER._engine_kw(o) == {},
+              'long mode: max_ctx <= the context_length changes nothing (the daily mode)')
+        o = dict(base, kv_host=True)
+        check(arch.CODER.long_context(o) is None and arch.CODER._engine_kw(o) == {'kv_host': True},
+              'long mode: --kv-host alone moves the KV only (no RoPE scaling)')
+        o = dict(base, max_ctx=1048576); note = arch.CODER.long_context(o)
+        check(bool(note) and o['kv_host'] is True and o['long_ntk'] == arch.LONG_NTK == 4.0 and o['no_disk_cache'] is True
+              and arch.CODER._engine_kw(o) == {'kv_host': True, 'ctx_extend': True, 'rope_ntk': 4.0},
+              f'long mode: max_ctx 1048576 -> host KV, NTK s = 4, ctx_extend, no disk tier ({note})')
+        o = dict(base, max_ctx=1048576, no_disk_cache=True, no_drafter=True); note = arch.CODER.long_context(o)
+        check('T = 1' in note and 'no disk tier' in note, 'long mode: the note says plain T = 1 decoding without a drafter')
+        check(arch.ARCHS['qwen35moe'].long_context(dict(base, max_ctx=1048576)) is None,
+              'long mode: the Coder only (the other models\' engines refuse such a max_ctx)')
+    finally:
+        arch.coder_facts = real_facts
+
     # ---- caminus start's flags: the drafter by the architecture, no --model-alias
     from caminus.cmd import manage
     cod, q36 = models.BY_NAME['coder'], models.BY_NAME['qwen3.6']

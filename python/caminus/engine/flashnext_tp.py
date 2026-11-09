@@ -219,7 +219,8 @@ class FlashNextTP(FlashNextK3):
                                          f'{wb} tensor bytes; measured: {capacity.MODEL_BYTES}): run tools/k3_capacity.py measure and add '
                                          f'it to capacity.FIXED_MIB / MODEL_BYTES, or build with vram_check=False')
         cb = capacity.tp_ctx_bytes(self.geom, self.max_ctx, self.idx_cache)
-        if self.kv_host: capacity.check_host_kv(2 * cb.pop('kv'))   # (both cards' caches in host memory, not in VRAM)
+        if getattr(self, 'kv_host', False):   # (both cards' caches in host memory, not in VRAM; the CPU tests' stand-ins have no kv_host)
+            capacity.check_host_kv(2 * cb.pop('kv'))
         if self.qsa: cb.update(capacity.tp_qsa_bytes(self.geom, self.max_ctx, self.ntok))
         ctx = sum(cb.values()) / capacity.MIB
         dr = [0.0, 0.0]
