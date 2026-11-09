@@ -368,7 +368,7 @@ class FlashNextK3:
     between the cards, and gets the logits back. q8_0 KV cache, as the daily server."""
 
     def __init__(self, path, split=26, devices=(0, 1), max_ctx=2048, q8=True, module=None, layers=None, grid=None, build=True,
-                 limit_us=200_000, max_retries=8, ctx_extend=False):
+                 limit_us=200_000, max_retries=8, ctx_extend=False, rope_ntk=None):
         """layers = (l0, l1): build only those layers on devices[0], no head (per-layer tests drive it with run_layers).
         module: the engine's code object; None picks it from the tensor formats (pick_module).
         limit_us / max_retries: the wait bound per kernel wait and the retries of a launch whose waits gave up, as
@@ -387,7 +387,13 @@ class FlashNextK3:
         self.nh, self.nkv, self.hd, self.nrot = int(hp('attention.head_count')), int(hp('attention.head_count_kv')), int(hp('attention.key_length')), int(hp('rope.dimension_count'))
         import ctypes
         libm = ctypes.CDLL('libm.so.6'); libm.powf.restype = ctypes.c_float; libm.powf.argtypes = [ctypes.c_float, ctypes.c_float]
-        self.theta_scale = libm.powf(float(hp('rope.freq_base')), -2.0 / self.nrot)
+        base = float(hp('rope.freq_base'))
+        if rope_ntk is not None:   # (the opt-in long mode: NTK-aware base scaling, base * s^(n_rot / (n_rot - 2)), every rotation)
+            if not ctx_extend or not 1.0 < float(rope_ntk) <= 64.0:
+                raise ValueError(f'rope_ntk {rope_ntk!r}: only with ctx_extend, a factor in (1, 64]')
+            base = base * float(rope_ntk) ** (self.nrot / (self.nrot - 2.0))
+        self.rope_base = base
+        self.theta_scale = libm.powf(base, -2.0 / self.nrot)
         self.extra = split_tensors(path, self.rd)   # tensors in the other shards of a split GGUF (only the PLE table is used)
         self.ple = PLE(self.rd, self.extra)
         self.dr = DirectReader(path)

@@ -72,13 +72,15 @@ def qsa_psel():
 class FlashNextTP(FlashNextK3):
     def __init__(self, path, devices=(0, 1), max_ctx=2048, q8=True, module=None, local_only=False, gdn_keys=10, moe_blocks=12, vocab_share=None, ntok=1, feature_layers=(), limit_us=200_000, max_retries=8, tape_only=False, feature_card=0,
                  idx_cache=True, dense_beyond_qsa=False, vram_check=True, vram_reserve_mib=(0, 0), qsa=None, qsa_tape=None, vram_drafters=(),
-                 vram_prefill=None, kv_host=False, ctx_extend=False):
+                 vram_prefill=None, kv_host=False, ctx_extend=False, rope_ntk=None):
         """local_only: the exchanges return each card's own partial (no peer): each card's time alone, the ceiling.
         kv_host (the opt-in long-context mode): every attention layer's KV cache in pinned host memory that both cards
         address directly (caminus.device.hip.host_mapped; one buffer per card), not in VRAM: the same bytes at the same
         offsets, so the same results, read over PCIe. Checked before any allocation against the host's MemAvailable and
         the kernel's GTT page limit (ttm pages_limit), and left out of the VRAM projection.
-        ctx_extend: allow max_ctx past the model's context_length (no position scaling: the model's own RoPE).
+        ctx_extend: allow max_ctx past the model's context_length (by default no position scaling: the model's own RoPE).
+        rope_ntk: with ctx_extend, NTK-aware RoPE base scaling by this factor (base * s^(n_rot / (n_rot - 2))) for every
+        rotation (attention, the indexer, the prefill): changes the logits at every position, so not the daily mode.
         Card 0's share: gdn_keys of the 16 GDN key heads (even), moe_blocks of each expert's intermediate in 32s,
         vocab_share of the output rows (attention is always one kv head each; None: 0.6, the GSQ-RCO Coder 0.5). The XT's fixed cost per segment is higher,
         so the XTX takes more: each card alone ~11.6-12.5 ms (even split: XTX 10.9, XT 13.2). End to end the split
@@ -124,7 +126,7 @@ class FlashNextTP(FlashNextK3):
         ChunkStack that would allocate more than it is refused before it allocates (plan.check_counted); None = no prefill
         planned (each allocation still checks the cards' caps: caminus.prefill.mmq.Workspace, feed.PrefillFeed(devices=...),
         glue.GlueWorkspace)."""
-        super().__init__(path, devices=devices, max_ctx=max_ctx, q8=q8, module=module, build=False, ctx_extend=ctx_extend)   # metadata only
+        super().__init__(path, devices=devices, max_ctx=max_ctx, q8=q8, module=module, build=False, ctx_extend=ctx_extend, rope_ntk=rope_ntk)   # metadata only
         self.kv_host = bool(kv_host); self._kvh = [None, None]
         if isinstance(ntok, bool) or not isinstance(ntok, int) or not 1 <= ntok <= self.max_ctx:
             raise ValueError(f'ntok {ntok!r}: an int in [1, max_ctx {self.max_ctx}]')

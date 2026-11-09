@@ -6,7 +6,7 @@ the same tokens is reported next to it (the floor: two llama.cpp runs that diffe
 top-1 disagreement the reference's top-1 / top-2 logit gap is printed (rounding noise flips only near-ties).
 D-281 bar: over all texts, mean KLD <= llama.cpp's own batch-vs-decode mean KLD and top-1 >= that floor's top-1 - 1 point
 (needs the batch dumps; without them the old absolute bar, mean KLD <= 0.001 and top-1 >= 99%, is applied).
-  python tests/engine/test_flashnext_e2e.py DECODE_DIR [DECODE_DIR ...] [--model model.gguf] [--split 26] [--tp [--tp-split GK,MB]]
+  python tests/engine/test_flashnext_e2e.py DECODE_DIR [DECODE_DIR ...] [--model model.gguf] [--split 26] [--tp [--tp-split GK,MB] [--rope-ntk S]]
 (--tp: the two-card tensor-parallel engine, caminus.engine.flashnext_tp, with a replica check after every position; --tp-split:
 its gdn_keys, moe_blocks, default FlashNextTP's 10,12: the even 8,10 an equal pair gets is a D-281 gate, never bitwise the refs)"""
 import os, sys, time
@@ -23,6 +23,8 @@ TP = '--tp' in args
 TPS = {}
 if '--tp-split' in args: i = args.index('--tp-split'); TPS = dict(zip(('gdn_keys', 'moe_blocks'), map(int, args[i + 1].split(',')))); del args[i:i + 2]
 if TP: args.remove('--tp')
+if '--rope-ntk' in args:   # (the opt-in long mode's RoPE scaling: measures its cost at short context; never the gate's default)
+    i = args.index('--rope-ntk'); TPS = dict(TPS, rope_ntk=float(args[i + 1]), ctx_extend=True); del args[i:i + 2]
 def logp(x): x = x - x.max(); return x - np.log(np.exp(x).sum())
 def kld(ref, oth):
     lp, lq = logp(ref), logp(oth); return float((np.exp(lp) * (lp - lq)).sum())
