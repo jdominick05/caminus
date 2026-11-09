@@ -70,6 +70,11 @@ printed at startup. Preserve the logs if a crash persists with the workaround.
 If every line in `~/.local/state/k3/GPU_FAULT_STOP` says `REG_WAIT timeout`, it was your monitor, not the GPU: delete the
 file and start again. Later versions only note these lines and keep running.
 
+**The whole desktop lags, and the kernel log shows `MES ring buffer is full`** (`journalctl -k | grep MES`): a card's
+scheduler firmware stopped responding, usually after it woke from power saving. Reboot; the guard refuses GPU work until
+then. We have seen it with Linux kernel 7.0.0-42 on an RX 7900 XT and not with 7.0.0-38: if it comes back, boot the older
+kernel from the GRUB menu (Advanced options) and report it with the log lines.
+
 **Slower than the numbers in the docs**: the cards may be running at normal clocks (about 13% slower); see
 [getting full speed](hardware.md#getting-full-speed). The server's log says at startup whether the clocks are high.
 

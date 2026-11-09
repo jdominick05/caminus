@@ -7,8 +7,8 @@ Stages (default: all):
   guard     guard.sh --lines (bash) == caminus.device.machine (Python) on synthetic sysfs trees (this machine's layout, a headless
             card, card10 ordering, a display on the second card, an iGPU, a non-AMD card) and on this machine's own sysfs
             (XTX 23,800 / XT 19,850, the display on the XTX); capacity's lines and the cache reserve from it; the fault
-            watch live on this machine's cards (a fake kernel log: a display-core REG_WAIT timeout is noted, page faults and
-            ring timeouts still exit 99; skipped without a gfx1100 card)
+            watch live on this machine's cards (a fake kernel log: a display-core REG_WAIT timeout is noted, page faults,
+            ring timeouts and an unresponsive MES still exit 99; skipped without a gfx1100 card)
   kernels   caminus.device.kernels: the directory order (CAMINUS_KERNEL_DIR, a checkout's build/, the package's), provenance
             verify on a staged scratch copy (a changed byte and a missing object found); provenance's `built` from
             SOURCE_DATE_EPOCH when set (a bad value refused), else build.sh's time
@@ -249,6 +249,15 @@ def stage_guard_faults(S, guard):
           rc == 99 and stop is not None and pf in stop and dcn not in stop and 'GPU FAULT' in log, f'rc {rc} stop {stop!r}')
     rc, log, stop = run('ring', [boot, ring])
     check('guard: a ring timeout is still a fault (exit 99)', rc == 99 and stop is not None and ring in stop, f'rc {rc} stop {stop!r}')
+    mes = 'amdgpu 0000:06:00.0: MES failed to respond to msg=MISC (WAIT_REG_MEM)'
+    full = 'amdgpu 0000:06:00.0: MES ring buffer is full.'
+    dmub = 'amdgpu 0000:06:00.0: [drm] Wait for DMUB auto-load failed: 3'
+    rc, log, stop = run('mes', [boot, dmub, mes, full])
+    check('guard: an unresponsive MES (failed to respond, ring buffer full) is a fault (exit 99), the DMUB note is not recorded',
+          rc == 99 and stop is not None and mes in stop and dmub not in stop, f'rc {rc} stop {stop!r}')
+    rc, log, stop = run('dmub', [boot, dmub])
+    check('guard: a DMUB auto-load failure alone (a card waking from runtime suspend) is not a fault', rc == 0 and stop is None,
+          f'rc {rc} stop {stop!r}')
 
 
 # --------------------------------------------------------------------------------------------------------------- kernels

@@ -40,6 +40,7 @@ PREFILL_MODULES_MIB = 64.0   # Prefill35's code objects, streams and its padded 
 CARD_BW = {'XTX': 881e9, 'XT': 774e9}           # measured streaming bandwidth (stats.PhysicsConfig's defaults, per card name)
 CODER_CTX = 262144           # the Coder's max_ctx auto: its context_length, the measured fit with DFlash
 LONG_NTK = 4.0               # the Coder's long-context mode (Coder.long_context): NTK RoPE scaling factor
+LONG_CACHE_CAP_GB = 64.0     # its disk tier's default cap: a full 1M park is about 16 GB with its checkpoints
 
 # the header keys meta() keeps, under the architecture's prefix: what the projections below read
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
@@ -254,13 +255,19 @@ class Coder(Arch):
         """an explicit max_ctx past the Coder's context_length (262,144): the KV cache in pinned host memory (kv_host: 13 GB at
         1M for both cards, checked against MemAvailable and the GTT limit), ctx_extend, NTK RoPE scaling by LONG_NTK (measured at
         1,040,384: 3/3 needles to 936K back, 2/3 without; its cost at short context: KLD 0.0077 vs 0.0057 unscaled, llama.cpp's
-        floor 0.0076) and no disk tier (a park would write the whole KV: 13 GB at 1M). The daily mode (<= 262,144) is unchanged"""
+        floor 0.0076). The disk tier stays on (0.2.2; it was off in 0.2.1): a park writes the conversation's KV rows, about 12.4 KB
+        per token (5 GB at 400K, a full 1M one about 16 GB with its checkpoints), so the cap is LONG_CACHE_CAP_GB unless set: a
+        conversation another one pushed out (a harness's background job too big for the side slot, a second session) comes
+        back from disk in seconds instead of being read again (a 494,882-token conversation took 587 s, 11-09). The daily
+        mode (<= 262,144) is unchanged"""
         n_ctx = int(coder_facts(opt['model'])['geom']['ctx_train'])
         if int(opt['max_ctx']) <= n_ctx: return None
         opt['kv_host'] = True; opt['long_ntk'] = LONG_NTK
-        disk = not opt.get('no_disk_cache'); opt['no_disk_cache'] = True
+        disk = not opt.get('no_disk_cache')
+        if disk and not opt.get('cache_cap_gb'): opt['cache_cap_gb'] = LONG_CACHE_CAP_GB
         return (f'long-context mode: max_ctx {int(opt["max_ctx"])} past the model\'s {n_ctx}: KV in host memory, RoPE base x '
-                f'{LONG_NTK:g}^(n_rot / (n_rot - 2)), {"the disk tier turned off (a park would write the whole KV)" if disk else "no disk tier"}'
+                f'{LONG_NTK:g}^(n_rot / (n_rot - 2)), '
+                f'{"the disk tier capped at " + format(float(opt["cache_cap_gb"]), "g") + " GB (a park writes about 12.4 KB per token)" if disk else "no disk tier"}'
                 f'{", plain decoding at T = 1" if opt.get("no_drafter") else ""}')
 
     def _engine_kw(self, opt):
@@ -321,10 +328,9 @@ class Coder(Arch):
     def auto_need(self, opt, slots, cards=None):
         """the Coder's projection per card at its pair's split (D-292): FlashNextTP's own check (capacity.fixed_mib with the
         split's moved tensors, the context-sized buffers, the QSA tapes, the batched prefill's plan) + the prompt cache's
-        side rows and slots + 2 checkpoint slots; the DFlash drafter in extras_mib"""
+        slots + 2 checkpoint slots (its side rows are host memory); the DFlash drafter in extras_mib"""
         from .device import capacity as C
         from .prefill.plan import PrefillPlan
-        from .cache.prompt import SIDE_ROWS
         fa = coder_facts(opt['model']); g, st = fa['geom'], fa['tensors']
         sp, T, chunk = self._split(opt, cards), self.T, int(opt['chunk'])
         fx = C.fixed_mib('coder', T, fa['bytes'], split=sp, tensors=st)
@@ -336,16 +342,15 @@ class Coder(Arch):
         # the measured pair (XTX + XT at the tuned split): its parts and its prompt cache were measured together (262,144 with
         # DFlash: 15 checkpoint slots, XTX 23,071 MiB at ready, tools/serve_smoke.py 11-06), and there card 0's context and
         # prefill buffers land in blocks the load freed (~1 GB under their bytes at 262,144), so its projection is the
-        # engine's own check + the side rows, the tier taking what is left; any other split adds the checkpoint slots and
+        # engine's own check, the tier taking what is left (the side slot's rows are host memory since 0.2.2, not VRAM); any other split adds the checkpoint slots and
         # slack_mib (unmeasured: conservative, so a pair is refused rather than guessed)
         measured = sp == C.MEASURED_SPLIT
         def need(c):
             ctx = C.tp_ctx_bytes(g, c, True)
             if c > C.QSA_EXACT: ctx.update(C.tp_qsa_bytes(g, c, T))
-            side = sum(C.tp_ctx_bytes(g, min(SIDE_ROWS, c), True).values()) / C.MIB
             pf = PrefillPlan.of(g, chunk, gdn_keys=sp[0], moe_blocks=sp[1], T_pass=T, n_feat=nf, feature_card=0,
                                 qsa_ctx=c if c > C.QSA_EXACT else 0).need_mib()
-            return [fx[k] + sum(ctx.values()) / C.MIB + pf[k] + side + (0 if measured else (slots + 2) * slot[k]) for k in (0, 1)]
+            return [fx[k] + sum(ctx.values()) / C.MIB + pf[k] + (0 if measured else (slots + 2) * slot[k]) for k in (0, 1)]
         return min(int(g['ctx_train']), CODER_CTX), [0, 1], max(slot), need
 
     def slack_mib(self, opt, cards=None):
@@ -381,11 +386,9 @@ class OneCard(Arch):
         return self._shapes[k]
 
     def auto_need(self, opt, slots, cards=None):
-        from .cache.prompt import SIDE_ROWS
         sh = self.shape(opt['model']); p = sh.projection_parts(); chunk = int(opt['chunk'])
         slot = (p['gdn'] + p['kv_pos']) / 2 ** 20 * 1.05 + 1.0          # a checkpoint: the recurrent state + T = 1 tail rows
-        need = lambda c: [sh.projection_mib(c) + one_card_extra_mib(sh, chunk, c) + min(SIDE_ROWS, c) * p['kv_pos'] / 2 ** 20
-                          + (slots + 2) * slot]
+        need = lambda c: [sh.projection_mib(c) + one_card_extra_mib(sh, chunk, c) + (slots + 2) * slot]   # (the side rows: host memory)
         return sh.n_ctx_train or 262144, [0], slot, need
 
     def build(self, opt, log=print, T=None):
@@ -416,10 +419,9 @@ class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
     def auto_need(self, opt, slots, cards=None):
-        from .cache.prompt import SIDE_ROWS
         sh = tp_shape(opt['model'])
         slot = (sh['state'] + sh['kv_pos']) / 2 ** 20 * 1.05 + 1.0
-        need = lambda c: [sh['need_mib'](c) + min(SIDE_ROWS, c) * sh['kv_pos'] / 2 ** 20 + (slots + 2) * slot] * 2
+        need = lambda c: [sh['need_mib'](c) + (slots + 2) * slot] * 2   # (the side rows: host memory)
         return sh['n_ctx'], [0, 1], slot, need
 
     def build(self, opt, log=print, T=None):

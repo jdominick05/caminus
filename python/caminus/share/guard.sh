@@ -5,7 +5,7 @@
 #
 # Runs `timeout SECS [gpu-high] CMD` in a session of its own, logs a 1 Hz line to LOG.mon (time, used MiB per watched card,
 # host MemAvailable MiB), and kills the run when a watched card's sysfs mem_info_vram_used passes its line, host MemAvailable
-# falls below 1500 MiB, or the kernel log shows an amdgpu page fault / GPU reset / wedge / timeout (exit 99, and the STOP file;
+# falls below 1500 MiB, or the kernel log shows an amdgpu page fault / GPU reset / wedge / timeout / an unresponsive MES (exit 99, and the STOP file;
 # the display core's REG_WAIT timeouts from a monitor sleeping or changing mode are noted, not counted).
 # Every limit comes from the machine, never weaker than before:
 #   * watched: every amdgpu card whose KFD node is gfx1100 (gfx_target_version 110000, the target Caminus ships), in DRM order;
@@ -84,7 +84,11 @@ if [ $# -lt 3 ]; then
 fi
 LOG=$1; SECS=$2; shift 2
 STOP=${K3_GUARD_STOP:-$HOME/.local/state/k3/GPU_FAULT_STOP}; mkdir -p "$(dirname "$STOP")" "$(dirname "$LOG")"
-FAULTS='amdgpu.*(page fault|GPU reset|wedged|timeout)'
+# (the MES lines: the card's scheduler firmware stopped taking work. Seen 11-09 on kernel 7.0.0-42 after the RX 7900 XT woke from
+# runtime suspend: "MES failed to respond to msg=MISC (WAIT_REG_MEM)", then "MES ring buffer is full" every 2 s, fence
+# fallbacks on every card and the desktop lagging; only a reboot brought the card back. The DMUB firmware's "auto-load failed"
+# on such a wake is not a fault by itself: on kernel 7.0.0-38 it recovers)
+FAULTS='amdgpu.*(page fault|GPU reset|wedged|timeout|MES failed to respond|MES ring buffer is full)'
 # The display core's register waits (its REG_WAIT macro: "REG_WAIT timeout <n>us * <n> tries - <function> line:<n>") time out
 # when a monitor sleeps, wakes or changes mode. They come from the display engine, not from a compute queue, so they are
 # logged as a note and never count as a fault (a monitor sleeping overnight used to record a fault and refuse every later

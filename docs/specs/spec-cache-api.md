@@ -23,7 +23,7 @@ against. The lead reviews it before M7 starts; changes after that need the lead.
 
 ```python
 pc = PromptCache(m, pf, draft=None, cache_dir=None, cap_gb=30, retention_days=7, min_free_gb=10, disk=True,
-                 n_slots=None, max_slots=64, side_rows=8192, auto_park_min=4096, every=8192, spill_min_gap=None)
+                 n_slots=None, max_slots=64, side_rows=98304, auto_park_min=4096, every=8192, spill_min_gap=None)
 ```
 
 - **Build order.** Build the cache last, after the engine (`FlashNextTP(..., vram_drafters=, vram_prefill=)`), the drafter
@@ -35,8 +35,9 @@ pc = PromptCache(m, pf, draft=None, cache_dir=None, cap_gb=30, retention_days=7,
   the slot count is the smaller of the two cards' fits, at most `max_slots`. Every other capacity check reads the same
   sysfs use against the same lines (`capacity.caps_mib`).
 - **Counting.** The tier is counted by `capacity.cache_tier_mib` and checked by `capacity.check` before allocation:
-  `n_slots` checkpoint slots, the io slot and, with `side_rows`, the side slot's checkpoint and row area. `side_rows` is
-  clamped to the engine's `max_ctx` (final round 4), and the area counted is the clamped one.
+  `n_slots` checkpoint slots, the io slot and, with `side_rows`, the side slot's checkpoint. The side slot's row area is
+  host memory since 0.2.2, not in the tier (`pc.side_host_bytes`). `side_rows` is clamped to the engine's `max_ctx`
+  (final round 4), and halved down to 8,192 when the area would not fit in MemAvailable with the host margin.
   `capacity.budget(cache=pc.tier)` adds it to a projection.
 - **Refusals at construction.**
   - `capacity.CapacityError`: fewer than 2 slots fit.
@@ -234,15 +235,21 @@ without one.
 
 ## The side slot
 
-- **Use.** `prepare(ids, side=True)` is for short side calls (titles, summaries) of at most `side_rows - T` positions.
+- **Use.** `prepare(ids, side=True)` is for side calls (titles, summaries, a harness's background memory jobs) of at most
+  `side_rows - T` positions. `side_rows` is 98,304 since 0.2.2 (8,192 before): Qwen Code 0.26.9 sends two background
+  memory jobs (29,555 and 35,582 tokens, `max_tokens` 32,000) on every user message, and at 8,192 they took the main slot.
 - **What it saves.**
   - The main live state goes into the side checkpoint slot.
-  - The main rows from the side call's start (the deepest main checkpoint the side request shares, else 0) up to
-    `min(main i0, side_rows)` are copied to the side area.
+  - The main rows from the side call's start (the deepest main checkpoint the side request shares, else 0) are copied to
+    the side area, which is host memory laid out by position: first up to the prompt + T + `SIDE_CHUNK` (4,096) rows,
+    then more before each pass writes there (`append()` covers the next pass's T rows, `SIDE_CHUNK` at a time), never
+    past `min(main i0, side_rows)`. A side call copies the rows it overwrites, not the whole area; the area's pages are
+    committed only where rows were copied.
 - **During the call.** The call runs from that checkpoint, or from a cold start that keeps the rows in place, and takes
   no checkpoints.
 - **Generation limit.** Generation must stay below `limit = side_rows`. A side pass past it drops the main slot
-  (`CacheStateError` from `extend` / `commit`).
+  (`CacheStateError` from `extend` / `commit`). Passes are reported one at a time (`append()`, as the server does): a
+  multi-pass `extend()` / `commit()` whose passes wrote past the copied rows also drops the main slot.
 - **Return to main.** The next `prepare(..., side=False)` puts the main rows and state back first. The main slot's next
   request is then served as if no side call had happened, bitwise.
 - **Several side calls.** Consecutive side calls continue the side log when it is a prefix. Otherwise the main slot is

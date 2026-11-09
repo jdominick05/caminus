@@ -18,6 +18,11 @@ which time out when a monitor sleeps, wakes or changes mode. They come from the 
 so the guard writes a `GUARD NOTE` and the run continues. A page fault, reset, wedge or ring timeout next to them is still
 a fault (tests/packaging/test_packaging.py `guard`).
 
+An unresponsive MES is a fault too (`MES failed to respond`, `MES ring buffer is full`): the card's scheduler firmware has
+stopped taking work, and only a reboot brings it back. Seen on kernel 7.0.0-42 after an RX 7900 XT woke from runtime
+suspend, with fence fallbacks on every card and the desktop lagging; kernel 7.0.0-38 does not show it. The DMUB firmware's
+`Wait for DMUB auto-load failed` on such a wake is not a fault by itself.
+
 - **Exit 99: a GPU fault.** Stop all GPU work. Don't rerun anything, not even "just to check". Read `journalctl -k`.
 - **Exit 98: a fault is on record.** Every guarded run refuses until a person has inspected the fault and removed
   `~/.local/state/k3/GPU_FAULT_STOP` by hand.
