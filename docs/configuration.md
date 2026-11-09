@@ -40,6 +40,7 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--kv-host` | `coder` only: keep the attention cache in system memory (the cards read it directly). Same results, less VRAM. |
 | `--no-drafter` | `coder` only: turn off the drafter. |
 | `--no-disk-cache` | Don't save conversations to disk. |
+| `--cache-cap-gb N` | The most the saved conversations may take on disk (default 30 GB; 64 GB in the long-context mode). |
 | `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |
 | `--idle-park-s N` | Save an idle conversation to disk after N seconds (default 8 hours). |
 | `--config FILE` | Read options from a JSON or TOML file (the same names with underscores). |
@@ -54,10 +55,12 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 - Positions are stretched (NTK RoPE scaling, factor 4) so the model can recall past its training length. In our tests it
   found 3 of 3 planted values at 1,040,384 tokens, including one 936K tokens back; without the scaling it missed that one.
   The stretch costs a little at short range: KL divergence 0.0077 against llama.cpp, versus 0.0057 without it.
-- No disk cache: saving a conversation would write the whole cache. A server restart, or a second conversation, means
-  processing the prompt again: about 1,100 tokens/s at 350K and 770 tokens/s at 1M, so a full 1M prompt takes about 22
-  minutes. A harness timeout shorter than that ends a cold request at that size. A conversation that grows turn by turn
-  only processes its new tokens.
+- Conversations are still saved to disk (since 0.2.2; 0.2.1 turned this off in this mode). Saving one writes its whole
+  attention cache, about 12.4 KB per token (5 GB at 400K tokens), so the disk cap is 64 GB here unless you set
+  `--cache-cap-gb`. When another conversation pushes yours out (a second session, or a harness's background job too
+  big for the side slot), yours comes back from disk in seconds instead of being read again: about 1,100 tokens/s at
+  350K and 770 tokens/s at 1M, so a full 1M prompt read from scratch takes about 22 minutes. A harness timeout shorter
+  than that ends a cold request at that size. A conversation that grows turn by turn only processes its new tokens.
 - Decoding is slower at depth: about 34 tokens/s at 1M without the drafter. With it, short tests ran at 50 to 85
   tokens/s at 350K to 1M, depending on how predictable the reply is.
 

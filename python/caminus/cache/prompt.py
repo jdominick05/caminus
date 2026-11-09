@@ -78,10 +78,16 @@ max_ctx, the DFlash feature layers and card, the drafter's identity (its GGUF fi
 versions, and the engine build (sha256 over every code object of caminus.device.kernels.kernel_dir() and over this package's python sources). Chunk size, micro-
 chunks and HIP graphs are not in it: they change no bit (G2b; graph replay == eager). An entry with another key is refused.
 
-The side slot (side calls of <= side_rows positions: titles, summaries): the KV is by position, so a side call overwrites the
-main slot's rows from its own start; the main live state goes to the side checkpoint slot and its rows [r0, min(i0,
-side_rows)) to the side area; the next main request puts them back first. Side calls take no checkpoints; a side pass must
-stay below side_rows (prepare's limit), else the main slot is dropped.
+The side slot (side calls of <= side_rows positions: titles, summaries, a harness's background memory jobs): the KV is by
+position, so a side call overwrites the main slot's rows from its own start; the main live state goes to the side checkpoint
+slot and its rows [r0, r1) to the side area; the next main request puts them back first. The side area is host memory
+(pageable: its pages are committed as rows are copied, so it costs RAM only for the rows a side call touched, and no VRAM),
+laid out by position, and r1 grows with the side call: the prompt + T + SIDE_CHUNK rows on entry, then before each pass
+(append() moves r1 to cover the next pass's T rows, SIDE_CHUNK at a time; never past the main line's i0, whose rows past it
+hold nothing of the main line). A side call costs the copy of the rows it overwrites, not of the whole area (8,192 rows were
+copied on every entry before 0.2.2). Side calls take no checkpoints; a side pass must stay below side_rows (prepare's
+limit), and a report of passes that wrote past r1 (extend() after several passes) drops the main slot, as does a pass past
+side_rows.
 Side-slot routing (M7, the lead's ruling of 11-05; prepare(side='auto') / plan(side='auto') / route()): a request goes to the
 side slot when it does not match the main line (it shares fewer tokens with it than the main line's root mark, or than
 SIDE_MATCH_MIN when no root is known, and the live state is not a prefix of it), fits (prompt + max_new + T <= side_rows), the
@@ -109,7 +115,13 @@ DEFAULT_CAP_GB = 30.0
 DEFAULT_RETENTION_DAYS = 7.0
 DEFAULT_MIN_FREE_GB = 10.0           # never write an entry that would leave less free space on the disk
 EVERY = 8192                         # a checkpoint every EVERY freshly prefilled tokens
-SIDE_ROWS = 8192                     # the side slot's positions
+# the side slot's positions. 98,304 (0.2.2): a harness's background jobs must fit with their max_new (route(): prompt +
+# max_new + T <= side_rows). Measured 11-09 on Qwen Code 0.26.9: its memory extractor (29,555 tokens) and a fixed 35,582-token
+# job, both with max_tokens 32,000, ran on every user message; at 8,192 they took the main slot and the conversation was read
+# again (a 494,882-token conversation: 587 s). The area is host memory: the Coder's is 803 MiB per card at this size, committed
+# only as rows are copied.
+SIDE_ROWS = 98304
+SIDE_CHUNK = 4096                    # the side area's copy grows by this many rows ahead of the side call's passes
 # route(): with no root mark known, a request "matches" the main line when it shares at least this many tokens with it
 # (measured 11-05 under the server's template: unrelated chats share 2 .. 11 tokens: the BOS, '<|im_start|>', the role, a
 # common system-prompt opening)
@@ -774,6 +786,13 @@ class PromptCache:
         # of the clamped rows; final round 4: --max-ctx 4096 sized an 8192-row area)
         self.side_rows = min(int(side_rows), int(m.max_ctx)) if side_rows else 0
         side_b = [_up(b) for b in L.rows_bytes(self.side_rows)] if self.side_rows else [0] * len(m.devs)
+        if self.side_rows and vram_check:
+            # (the side area is host memory, committed only as rows are copied: a side call as big as the area commits all of it,
+            # so it must fit in MemAvailable with the host margin; else the area halves, down to 8,192 rows)
+            ma, _ = capacity.host_kv_room()
+            while ma is not None and self.side_rows > 8192 and sum(side_b) / capacity.MIB + capacity.HOST_KV_MARGIN_MIB > ma:
+                self.side_rows = max(8192, self.side_rows // 2)
+                side_b = [_up(b) for b in L.rows_bytes(self.side_rows)]
         extra = 1 + (1 if self.side_rows else 0)                 # the io slot (+ the side slot's checkpoint)
         slot_mib = [b / capacity.MIB for b in L.nbytes]
         self.headroom = None
@@ -789,7 +808,7 @@ class PromptCache:
             self.lines = [capacity.guard_line_mib(d) for d in m.devs]
             self.used_at_sizing = [capacity.used_mib(d) for d in m.devs]
             self.headroom = [self.lines[c] - res[c] - work[c] - self.used_at_sizing[c] for c in range(len(m.devs))]
-            fit = min(int((self.headroom[c] - side_b[c] / capacity.MIB - extra * slot_mib[c]) // slot_mib[c]) for c in range(len(m.devs)))
+            fit = min(int((self.headroom[c] - extra * slot_mib[c]) // slot_mib[c]) for c in range(len(m.devs)))
             if n_slots is None: n_slots = min(int(max_slots), fit)
             if int(n_slots) > fit:
                 raise capacity.CapacityError(f'promptcache: {n_slots} slots asked, room for {fit} (headroom {" / ".join(f"{h:.0f}" for h in self.headroom)} MiB)')
@@ -798,16 +817,18 @@ class PromptCache:
         if n_slots < 2:
             raise capacity.CapacityError(f'promptcache: room for {n_slots} checkpoint slots of {" / ".join(f"{v:.0f}" for v in slot_mib)} MiB '
                                          f'(headroom {self.headroom} MiB after the reserve): at least 2 needed')
-        self.tier = dict(slot_bytes=tuple(L.nbytes), n_slots=n_slots, side_bytes=tuple(side_b), extra_slots=extra)
-        self.tier_mib = capacity.cache_tier_mib(L.nbytes, n_slots, side_b, extra)
+        self.tier = dict(slot_bytes=tuple(L.nbytes), n_slots=n_slots, side_bytes=tuple(0 for _ in side_b), extra_slots=extra)
+        self.side_host_bytes = tuple(side_b)   # (the side area: host memory, not in the VRAM tier)
+        self.tier_mib = capacity.cache_tier_mib(L.nbytes, n_slots, self.tier['side_bytes'], extra)
         if vram_check:
             self.vram_rows = capacity.check(m.devs, self.tier_mib, f'PromptCache VRAM tier ({n_slots} + {extra} slots of '
-                                            f'{" / ".join(f"{v:.1f}" for v in slot_mib)} MiB' + (f', side area {self.side_rows} rows' if self.side_rows else '') + ')')
+                                            f'{" / ".join(f"{v:.1f}" for v in slot_mib)} MiB' + (f', side area {self.side_rows} rows in host memory' if self.side_rows else '') + ')')
         self.n_slots, self.io_slot = n_slots, n_slots
         self.side_slot = n_slots + 1 if self.side_rows else None
         dev = [next(t.device for k, t in m.state.items() if k[0] == c) for c in range(len(m.devs))]
         self.buf = [torch.zeros(n_slots + extra, L.nbytes[c], dtype=torch.uint8, device=dev[c]) for c in range(len(m.devs))]
-        self.side_buf = [torch.zeros(side_b[c], dtype=torch.uint8, device=dev[c]) for c in range(len(m.devs))] if self.side_rows else []
+        # (torch.empty on the host: pageable, the pages committed only where rows are copied; never read before a copy writes it)
+        self.side_buf = [torch.empty(side_b[c], dtype=torch.uint8) for c in range(len(m.devs))] if self.side_rows else []
         self.free = list(range(n_slots))
         self.ckpts, self.side, self.parked = [], None, None
         self.main_root = None        # the main line's root mark (the end of its system + tools block; route())
@@ -1258,6 +1279,8 @@ class PromptCache:
             self._cold(); raise CacheStateError(f'promptcache.extend: the state ({i0}, {commit}) does not continue the live log ({p0} tokens): the slot was reset')
         if self.side is not None and i0 + self.T > self.side_rows:
             self._lose_main(); raise CacheStateError(f'promptcache.extend: a side pass reached {i0 + self.T} > side_rows {self.side_rows}: the main slot was dropped')
+        if self.side is not None:
+            self._side_written(i0, commit, 'extend'); self._side_cover(i0 + self.T)
         self._follow(p0, i0)
         self.log, self.st = toks[:i0], dict(i0=i0, commit=commit)
         self._mark(); self.live.known = True; self.live.vouch(self.m)
@@ -1276,6 +1299,8 @@ class PromptCache:
             self._cold(); raise CacheStateError(f'promptcache.append: the state ({i0}, {commit}) does not continue the live state ({p0}) by {len(toks)} tokens: the slot was reset')
         if self.side is not None and i0 + self.T > self.side_rows:
             self._lose_main(); raise CacheStateError(f'promptcache.append: a side pass reached {i0 + self.T} > side_rows {self.side_rows}: the main slot was dropped')
+        if self.side is not None:
+            self._side_written(i0, commit, 'append'); self._side_cover(i0 + self.T)
         self._follow(p0, i0)
         if len(self.log) != p0:
             self.log = self.log[:p0]           # (a dropped live state keeps its log for matching: extend() would cut it the same way)
@@ -1633,6 +1658,9 @@ class PromptCache:
         entry's name (None: nothing to park, refused, or running in the background)"""
         self.fence(); self._check_engine()
         if self.store is None: raise CacheError('promptcache.park: no disk tier')
+        # (the KV may be host memory the cards write (kv_host: the long-context mode): the pipeline syncs only the devices of its
+        # VRAM extents, so every card is synced here, before the host reads rows a pass wrote)
+        self._sync()
         if self.side is not None: raise CacheError('promptcache.park: a side call is active (the next main request ends it)')
         if self.st['i0'] < 1: return None
         sig = (tok_sha(self.log), int(self.st['i0']), int(self.st['commit']))
@@ -1799,19 +1827,46 @@ class PromptCache:
 
     # -- the side slot --------------------------------------------------------------------------------------------------
     def _rows(self, c, a, b, area):
-        """[(engine view, side-area view)] of card c's KV / IDXRAW / IDXPOOL bytes of positions [a, b)"""
-        m, L = self.m, self.layout
-        out, o = [], 0
+        """[(engine view, side-area view)] of card c's KV / IDXRAW / IDXPOOL bytes of positions [a, b). The side area is laid out
+        by position (each tensor a segment of side_rows positions), so the copy can grow in pieces: [r0, r1) then [r1, r1')"""
+        m, L, n = self.m, self.layout, self.side_rows
+        out, base = [], 0
         for k in L.kv[c]:
-            nb = (b - a) * L.pb[c]; out.append((_u8(m.state[k])[a * L.pb[c]:b * L.pb[c]], area[o:o + nb])); o += nb
+            pb = L.pb[c]; out.append((_u8(m.state[k])[a * pb:b * pb], area[base + a * pb:base + b * pb])); base += n * pb
         if L.idx:
-            raw, pool = m.state[(c, 'idxraw')], m.state[(c, 'idxpool')]
-            nb = (b - a) * L.rb
-            for l in range(L.na): out.append((raw[l, a:b].reshape(-1), area[o:o + nb])); o += nb
-            j0, j1 = a // 4, (b + 3) // 4; nb = (j1 - j0) * L.rb
-            for l in range(L.na): out.append((pool[l, j0:j1].reshape(-1), area[o:o + nb])); o += nb
-        assert o <= area.numel(), (o, area.numel())
+            raw, pool, rb = m.state[(c, 'idxraw')], m.state[(c, 'idxpool')], L.rb
+            for l in range(L.na):
+                out.append((raw[l, a:b].reshape(-1), area[base + a * rb:base + b * rb])); base += n * rb
+            j0, j1, nj = a // 4, (b + 3) // 4, (n + 3) // 4
+            for l in range(L.na):
+                out.append((pool[l, j0:j1].reshape(-1), area[base + j0 * rb:base + j1 * rb])); base += nj * rb
+        assert base <= area.numel() and b <= n, (base, area.numel(), b, n)
         return out
+
+    def _side_cover(self, upto):
+        """make the side area hold the main line's rows below min(upto, its i0, side_rows): copy [r1, r1') before a side pass
+        writes there. r1' is rounded up to SIDE_CHUNK past upto (and to a multiple of 4, so a pool entry is never half copied
+        after the side call wrote its other half). Nothing to copy at or past the main line's i0"""
+        sd = self.side
+        lim = min(int(sd['st']['i0']), self.side_rows)
+        r1 = int(sd['r1'])
+        if r1 >= lim or upto <= r1: return
+        new = min(lim, -(-(int(upto) + SIDE_CHUNK) // 4) * 4)
+        for c in range(len(self.m.devs)):
+            with _ctx(self.side_buf[c]):
+                for e, a_ in self._rows(c, r1, new, self.side_buf[c]): a_.copy_(e)
+        self._sync()
+        sd['r1'] = new; self.stats['side_copied_rows'] += new - r1
+
+    def _side_written(self, i0, commit, where):
+        """after passes in a side call: the last pass wrote up to i0 - commit + T - 1; past r1 (and below the main line's i0) it
+        overwrote main rows that were never copied: the main slot cannot come back"""
+        sd = self.side
+        top = int(i0) - int(commit) + self.T
+        if top > int(sd['r1']) and int(sd['r1']) < min(int(sd['st']['i0']), self.side_rows):
+            self._lose_main()
+            raise CacheStateError(f'promptcache.{where}: side passes wrote up to {top} past the side area\'s copied rows ({sd["r1"]}): '
+                                  f'the main slot was dropped (a side call reports each pass with append())')
 
     def _side_continues(self, ids):
         """an active side call's log continues into ids (the side live state is usable for them)"""
@@ -1843,7 +1898,7 @@ class PromptCache:
             mlog, mst = list(self.log), dict(self.st)
             start = self._side_start_ck(mlog, self.ckpts, ids)
             r0 = 0 if start is None else start.pos - start.commit
-            r1 = max(r0, min(int(mst['i0']), self.side_rows))
+            r1 = max(r0, min(int(mst['i0']), self.side_rows, -(-(n + self.T + SIDE_CHUNK) // 4) * 4))
             if self.draft is not None: self.draft.flush()
             dm = self._save(self._slot_bufs(self.side_slot), mst['i0'], mst['commit'])
             main = Ckpt(pos=mst['i0'], commit=mst['commit'], fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)),
@@ -1855,7 +1910,9 @@ class PromptCache:
             self.side = dict(log=mlog, st=mst, main=main, r0=r0, r1=r1, ckpts=self.ckpts, start=start)
             self.ckpts = []
             src, reuse = self._side_start(start, mlog)
-        else: src, reuse = 'live', int(self.st['i0'])     # (the side log continues)
+        else:
+            src, reuse = 'live', int(self.st['i0'])     # (the side log continues)
+            self._side_cover(n + self.T)
         ms = dict(park=0.0, restore=(time.perf_counter() - t0) * 1e3)
         tq = time.perf_counter()
         st, _, cut = self._process(ids, None, take=False, cancel=cancel)

@@ -1090,6 +1090,7 @@ def cpu_fixups(cache_dir, base, b0, mpath):
     cpu_export(mk, base, fd)
     cpu_supersede(mk, base, fd)
     cpu_side_rows(mk, base)
+    cpu_side_grow(mk, base)
     cpu_append(mk, base)
     cpu_session(mk, base)
 
@@ -1512,19 +1513,67 @@ def cpu_supersede(mk, base, fd):
 
 
 def cpu_side_rows(mk, base):
-    """final round 4 (hardening): the side slot's positions are clamped to the engine's max_ctx (a side call never needs more), and
-    the VRAM tier counts the clamped area: side_rows 8192 asked on a 4096-position engine -> 4096, its area the bytes of 4096 rows"""
+    """final round 4 (hardening): the side slot's positions are clamped to the engine's max_ctx (a side call never needs more);
+    since 0.2.2 the side area is host memory (pageable), sized for the clamped rows and not in the VRAM tier"""
     from caminus.cache import prompt as pc
     e, p, c, _, _ = mk(side=8192)
     want = [pc._up(b) for b in c.layout.rows_bytes(e.max_ctx)]
-    got = (c.side_rows, list(c.tier['side_bytes']), [int(t.numel()) for t in c.side_buf])
+    got = (c.side_rows, list(c.tier['side_bytes']), list(c.side_host_bytes), [int(t.numel()) for t in c.side_buf],
+           [t.device.type for t in c.side_buf])
     c.close()
     e2, p2, c2, _, _ = mk(side=512)
-    small = (c2.side_rows, list(c2.tier['side_bytes'])); want2 = [pc._up(b) for b in c2.layout.rows_bytes(512)]
+    small = (c2.side_rows, list(c2.tier['side_bytes']), list(c2.side_host_bytes)); want2 = [pc._up(b) for b in c2.layout.rows_bytes(512)]
     c2.close()
-    check(got == (e.max_ctx, want, want) and small == (512, want2),
-          f'final 4 (side_rows <= max_ctx): side_rows 8192 on a {e.max_ctx}-position engine -> {got[0]}, the side area {got[1]} B per card '
-          f'(the tier counts {got[1]}, want {want}); 512 kept: {small}')
+    zero = [0] * len(want)
+    check(got == (e.max_ctx, zero, want, want, ['cpu'] * len(want)) and small == (512, zero, want2),
+          f'final 4 (side_rows <= max_ctx): side_rows 8192 on a {e.max_ctx}-position engine -> {got[0]}, the side area {got[2]} B per card '
+          f'in host memory ({got[4]}), none in the VRAM tier ({got[1]}); 512 kept: {small}')
+
+
+def cpu_side_grow(mk, base):
+    """0.2.2: the side area's copy grows with the side call. Entering copies the main rows below the prompt + T + SIDE_CHUNK;
+    append() (one pass at a time, as the server reports them) copies more before the next pass writes there. The main line
+    comes back bitwise as with no side call. A multi-pass report (extend()) that wrote past the copied rows drops the main
+    slot with an explicit error, as a pass past side_rows does"""
+    from caminus.cache import prompt as pc
+    from caminus.decode import longctx
+    keep = pc.SIDE_CHUNK
+    pc.SIDE_CHUNK = 16
+    try:
+        e, p, c, _, _ = mk(side=512)
+        M = base[:1500]; o = c.prepare(M, dict(root=400)); tM, sM = gen(e, o['st'], M, 20); c.commit(tM, sM)
+        S = base[:400] + base[2000:2050]
+        oS = c.prepare(S, side=True); r1_enter = int(c.side['r1'])
+        t, st = S, dict(oS['st'])
+        for _ in range(30):                   # one pass at a time, each reported with append()
+            p0 = int(c.st['i0'])
+            t, st = longctx.generate(e, st, t, 1)
+            c.append(t[p0:int(st['i0'])], st)
+        r1_end, copied = int(c.side['r1']), int(c.stats['side_copied_rows'])
+        M2 = tM + base[2700:2800]; oM2 = c.prepare(M2)
+        got = digest(e, oM2['st']['i0'])
+        c.close()
+        e2, p2, c2, _, _ = mk(side=512)
+        o2 = c2.prepare(M, dict(root=400)); t2, s2 = gen(e2, o2['st'], M, 20); c2.commit(t2, s2)
+        o2b = c2.prepare(M2); ref = digest(e2, o2b['st']['i0'])
+        c2.close()
+        n = len(S)
+        ok = (oS['side'] and r1_enter == -(-(n + c.T + 16) // 4) * 4 and r1_end > r1_enter and copied == r1_end - r1_enter
+              and oM2['source'] == 'live' and got == ref)
+        check(ok, f'side grow: entering copied rows to {r1_enter} (prompt {n} + T + 16), 30 per-pass appends grew it to {r1_end} '
+                  f'({copied} more rows); the main request after it ({oM2["source"]}) == no side call, bitwise: {got == ref}')
+        # a multi-pass report past the copied rows: the main slot dropped, explicitly
+        e3, p3, c3, _, _ = mk(side=512)
+        o3 = c3.prepare(M, dict(root=400)); t3, s3 = gen(e3, o3['st'], M, 20); c3.commit(t3, s3)
+        o3s = c3.prepare(S, side=True); r1_3 = int(c3.side['r1'])
+        t3s, s3s = gen(e3, o3s["st"], S, 40)
+        try: c3.extend(t3s, s3s); r = 'not refused'
+        except pc.CacheStateError as e_: r = str(e_)
+        check('past the side area' in r and c3.side is None and c3.log == [],
+              f'side grow: a multi-pass report that wrote past the copied rows ({r1_3}) dropped the main slot ({r[:70]})')
+        c3.close()
+    finally:
+        pc.SIDE_CHUNK = keep
 
 
 # ---- the GPU rig (both cards, under tools/guard.sh) ---------------------------------------------------------------------------
@@ -1550,7 +1599,7 @@ def host_note():
 class Rig:
     """FlashNextTP T = 4 at max_ctx (the Coder's dual-tape QSA engine), the DFlash drafter (features on the XTX; one generic-loop
     wrapper for everything: the cache's drafter and the generations), the prefill at chunk 2048, and the PromptCache"""
-    def __init__(self, torch, coder, max_ctx, cache_dir, small=False, cache_kw=None):
+    def __init__(self, torch, coder, max_ctx, cache_dir, small=False, cache_kw=None, kv_host=False):
         from caminus.engine import flashnext   # noqa: F401  (puts gguf-py on the path)
         from gguf import GGUFReader
         from caminus.decode import dflash as dk
@@ -1564,7 +1613,7 @@ class Rig:
         self.idle = vram_used()
         t0 = time.time()
         self.m = FlashNextTP(coder, ntok=4, max_ctx=max_ctx, feature_layers=layers, feature_card=0,
-                             vram_drafters=(('dflash', self.dg, None),), vram_prefill=2048)
+                             vram_drafters=(('dflash', self.dg, None),), vram_prefill=2048, kv_host=kv_host)
         self.df = dk.DFlashK3(self.m, dk.DRAFTER); self.dr = dk.DFlashK3Drafter(self.df, device_accept=False)
         self.pf = P.Prefill(self.m, chunk=2048)
         self.sync()
@@ -2195,6 +2244,7 @@ def main():
     ap.add_argument('--max-ctx', type=int, default=33024)
     ap.add_argument('--cards', type=int, default=2, help='cpu: the fake engine\'s cards (1: the one-card Qwen35One\'s shape)')
     ap.add_argument('--t', type=int, default=4, help='cpu: the fake engine\'s pass rows (1: Qwen35One at T = 1)')
+    ap.add_argument('--kv-host', action='store_true', help='GPU: the KV cache in host memory (FlashNextTP(kv_host=True), the long-context mode\'s)')
     a = ap.parse_args()
     global FAKE_CARDS, FAKE_T
     FAKE_CARDS, FAKE_T = a.cards, a.t
@@ -2209,7 +2259,7 @@ def main():
         for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
         assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'
         print(host_note(), flush=True)
-        R = Rig(torch, coder, a.max_ctx, os.path.join(cache_dir, 'gpu'), small=a.small)
+        R = Rig(torch, coder, a.max_ctx, os.path.join(cache_dir, 'gpu'), small=a.small, kv_host=a.kv_host)
         for s_ in gpu:
             t0 = time.time(); print(f'== stage {s_} ({host_note()})', flush=True)
             {'vram': lambda: stage_vram(R), 'g3': lambda: stage_g3(R, a.small), 'evict': lambda: stage_evict(R, a.small),

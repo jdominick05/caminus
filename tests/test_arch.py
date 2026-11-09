@@ -145,9 +145,14 @@ def main():
         check(arch.CODER.long_context(o) is None and arch.CODER._engine_kw(o) == {'kv_host': True},
               'long mode: --kv-host alone moves the KV only (no RoPE scaling)')
         o = dict(base, max_ctx=1048576); note = arch.CODER.long_context(o)
-        check(bool(note) and o['kv_host'] is True and o['long_ntk'] == arch.LONG_NTK == 4.0 and o['no_disk_cache'] is True
+        check(bool(note) and o['kv_host'] is True and o['long_ntk'] == arch.LONG_NTK == 4.0 and o['no_disk_cache'] is False
+              and o['cache_cap_gb'] == arch.LONG_CACHE_CAP_GB == 64.0 and '64 GB' in note
               and arch.CODER._engine_kw(o) == {'kv_host': True, 'ctx_extend': True, 'rope_ntk': 4.0},
-              f'long mode: max_ctx 1048576 -> host KV, NTK s = 4, ctx_extend, no disk tier ({note})')
+              f'long mode: max_ctx 1048576 -> host KV, NTK s = 4, ctx_extend, the disk tier kept with a 64 GB cap ({note})')
+        o = dict(base, max_ctx=1048576, cache_cap_gb=120.0); note = arch.CODER.long_context(o)
+        check(o['cache_cap_gb'] == 120.0 and '120 GB' in note, f'long mode: an explicit --cache-cap-gb is kept ({note})')
+        check(cli.parse([])['cache_cap_gb'] is None and cli.parse(['--cache-cap-gb', '80'])['cache_cap_gb'] == 80.0,
+              'cli: --cache-cap-gb (default: the cache\'s own 30 GB)')
         o = dict(base, max_ctx=1048576, no_disk_cache=True, no_drafter=True); note = arch.CODER.long_context(o)
         check('T = 1' in note and 'no disk tier' in note, 'long mode: the note says plain T = 1 decoding without a drafter')
         check(arch.ARCHS['qwen35moe'].long_context(dict(base, max_ctx=1048576)) is None,

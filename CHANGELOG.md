@@ -3,6 +3,21 @@
 Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (two-card: XTX + XT) unless a line says
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md).
 
+## Unreleased
+
+### Fixed
+
+- **Background requests no longer push your conversation out.** Qwen Code sends two background memory jobs (about 30K
+  and 36K tokens) every time you send a message, including a steer mid-task or a redirect after Ctrl+C. They were too big
+  for the server's side slot, so they took the main one and your conversation had to be read again (one 494,882-token
+  conversation took 587 s). The side slot now holds 98,304 positions and keeps its copy of your rows in system memory, not
+  VRAM, copying only the rows a side request overwrites.
+- **The long-context mode saves conversations to disk again** (`--max-ctx` past 262,144). A conversation pushed out by
+  another one comes back in seconds instead of being read again. Saving writes about 12.4 KB per token, so the disk cap
+  is 64 GB in this mode; `--cache-cap-gb` sets it.
+- **The guard stops on an unresponsive GPU scheduler** (`MES failed to respond`, `MES ring buffer is full`), seen with
+  Linux kernel 7.0.0-42 on an RX 7900 XT. See [docs/troubleshooting.md](docs/troubleshooting.md).
+
 ## 0.2.1 (2026-11-09)
 
 ### New
