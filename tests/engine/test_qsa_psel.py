@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import numpy as np
 import torch
 from caminus.engine import k3, qsa
+from caminus.device import capacity
 
 MOD = 'k3_gguf_gsq'
 fails = []
@@ -31,6 +32,13 @@ class Sel:
     """one tape of `layers` chained selections over [T][prow] host-given score buffers: OP_QSA_SELECT (par False) or
     OP_QSA_PSEL (par True, `slices`)"""
     def __init__(self, T, prow, par, slices=None, layers=1, per_wgp=None):
+        # projected before the first allocation (capacity.check against the guard's line): the score buffers and SEL rows,
+        # the parallel selection's slice lists, counts and per-layer histograms, and 64 MiB for the engine (tape, sync
+        # arrays, guard)
+        P = min(k3.QSA_PSEL_MAXP, -(-prow // 2048)) if slices is None else slices
+        LS = P * ((-(-prow // P) + 255) // 256 * 256)
+        need = layers * T * (prow + k3.QSA_SELW) * 4 + (T * (LS + 2 * P) * 4 + layers * T * 512 * 4 if par else 0)
+        capacity.check([torch.cuda.current_device()], [need / capacity.MIB + 64], f'test_qsa_psel Sel(T={T}, pool rows {prow}, {layers} layers)')
         cu = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device='cuda')
         self.T, self.prow = T, prow
         self.score = [cu(T, prow) for _ in range(layers)]
