@@ -96,7 +96,7 @@ tools/guard.sh LOG 600 python -I tools/k3_smoke.py --model coder          # ends
 tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # decode ms/token
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
-tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~14 min)
+tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~16 min)
 ```
 
 After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills); rerun the gates at `K3_PER_WGP=3/6/7`

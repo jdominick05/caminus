@@ -485,7 +485,12 @@ __device__ __forceinline__ bool qsa_psel_finish(const Seg & sg, int t) {
     }
     int need;
     unsigned prefix = qsa_psel_prefix16(c.hrow, L, need);
-    if (tid < PE) { apre[tid + 1] = c.cnt[tid]; cpre[tid + 1] = c.cnt[P + tid]; }   // the slices' counts (PE <= QSA_PSEL_MAXP)
+    if (tid < PE) {   // the slices' counts (PE <= QSA_PSEL_MAXP), clamped to the slice: a bailed pass runs every task on
+                      // whatever its inputs hold (another pass's counts), and every index below stays inside its slice
+        const int len = min(nv, (tid + 1) * SL) - tid * SL;
+        const int a = min(max(c.cnt[tid], 0), len);
+        apre[tid + 1] = a; cpre[tid + 1] = min(max(c.cnt[P + tid], 0), len - a);
+    }
     __syncthreads();
     if (tid == 0) {   // -> prefix counts (in LDS: one thread, 64 steps)
         apre[0] = 0; cpre[0] = 0;
@@ -497,7 +502,7 @@ __device__ __forceinline__ bool qsa_psel_finish(const Seg & sg, int t) {
     auto cand = [&](int j) -> int {
         int lo = 0, hi = PE - 1;
         while (lo < hi) { const int m = (lo + hi + 1) >> 1; if (cpre[m] <= j) lo = m; else hi = m - 1; }
-        return list[lo * SL + SL - 1 - (j - cpre[lo])];
+        return min(max(list[lo * SL + SL - 1 - (j - cpre[lo])], 0), nv - 1);   // (ids < nv unless a bail left garbage)
     };
     bool fall = C > QSA_PSEL_CMAX;
     if (!fall) {
@@ -538,16 +543,16 @@ __device__ __forceinline__ bool qsa_psel_finish(const Seg & sg, int t) {
                 const int id = list[lo * SL + (a - apre[lo])];
                 int below = 0;
                 for (int u = 0; u < ntc; u++) below += L[u] < id;
-                out[4 + a + below] = id;
+                if (a + below < QSA_TOPK) out[4 + a + below] = id;
             }
             for (int k = tid; k < ntc; k += blockDim.x) {
-                const int id = L[k], v = id / SL;
+                const int id = L[k], v = min(id / SL, PE - 1);
                 int below = 0;
                 for (int u = 0; u < ntc; u++) below += L[u] < id;
                 const int * al = list + v * SL;
                 int b0 = 0, b1 = apre[v + 1] - apre[v];
                 while (b0 < b1) { const int m = (b0 + b1) >> 1; if (al[m] < id) b0 = m + 1; else b1 = m; }
-                out[4 + below + apre[v] + b0] = id;
+                if (below + apre[v] + b0 < QSA_TOPK) out[4 + below + apre[v] + b0] = id;
             }
             if (tid == 0) { out[0] = QSA_TOPK; out[1] = ntail; out[2] = nv; out[3] = (int)prefix; }
             return true;
