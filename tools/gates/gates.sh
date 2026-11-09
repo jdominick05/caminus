@@ -18,7 +18,9 @@
 #                   one-token decode, floor 0.0076, top-1 >= 95.9 %), and every result line == the stored log           (~45 s)
 #   lc              long-context D-281 at 1792 + 8192 (tools/eval/lc_baseline.py --qsa) == the stored k3_qsa.json            (~1.5 min)
 #   lc32            the same at 32768                                                                                    (~3.5 min)
-#   all             trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32
+#   kvhost          the KV cache in host memory (FlashNextTP(kv_host=True), the long-context mode's cache): the short and lc
+#                   runs again with --kv-host, every result line / non-timing number == the same stored references      (~2.5 min)
+#   all             trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32 kvhost
 # Env: ARTIFACTS, CODER (both required), REAP (the reap stages), PY (a python with ROCm PyTorch; CLAUDE.md, Models and data).
 # Ends with a SUMMARY (one line per check) and exits 0 only when every check passed.
 set -u
@@ -61,7 +63,7 @@ lcdir() {   # a fresh lc_baseline OUT dir: the probe files and llama.cpp referen
   mkdir -p "$1"; for f in probes.json d1792 d8192 d32768 ref; do [ -e "$1/$f" ] || ln -s "$LC/$f" "$1/$f"; done; }
 echo "gates.sh: repo $REPO at $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)$([ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] || echo ' + uncommitted changes'); OUT $OUT"
 echo "compaction_proactiveness $(cat /proc/sys/vm/compaction_proactiveness 2>/dev/null); stages: $*"
-ST=("$@"); [ "${ST[*]}" = all ] && ST=(trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32)
+ST=("$@"); [ "${ST[*]}" = all ] && ST=(trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32 kvhost)
 cd "$REPO" || exit 2
 for s in "${ST[@]}"; do echo "== stage $s ($(date +%T))"; case $s in
 trunk) refs_ok '/m1/s3/ref/sp_g\.pt$' trunk && rd g "$RC/sp_g.pt" 900 --model "$CODER" ;;
@@ -91,6 +93,18 @@ lc|lc32) refs_ok '/qsa/lc/' lc-probes || continue
        if HIP_VISIBLE_DEVICES= "$PY" -I -B "$T/lc_cmp.py" "$OUT/$s/k3_qsa.json" "$CUR/${s}_k3_qsa.json" > "$OUT/lc_cmp_$s.txt" 2>&1
        then note PASS "long-context $dep: every non-timing number == refs/current/${s}_k3_qsa.json"
        else note FAIL "long-context $dep vs refs/current/${s}_k3_qsa.json: $(tail -1 "$OUT/lc_cmp_$s.txt")"; fi ;;
+kvhost) refs_ok '/refs/d281-short/' d281-short && refs_ok '/qsa/lc/' lc-probes || continue
+       chk "host-memory KV: the short KLD floor gate (768 positions)" "$OUT/e2e_tp_kvh.log" 1800 "$PY" -I -B tests/engine/test_flashnext_e2e.py \
+           "$REFS/d281-short/e2e_prose_decode" "$REFS/d281-short/e2e_code_decode" "$REFS/d281-short/e2e_shell_decode" --model "$CODER" --tp --kv-host
+       E2E='^(e2e_|   engine top-1 flips|replica mismatches|ALL:|PASS|FAIL)'
+       if diff <(grep -E "$E2E" "$OUT/e2e_tp_kvh.log") <(grep -E "$E2E" "$CUR/e2e_tp.log") > "$OUT/e2e_tp_kvh.diff" 2>&1
+       then note PASS "host-memory KV, short KLD floor: every result line == the stored log (refs/current/e2e_tp.log)"
+       else note FAIL "host-memory KV, short KLD floor: lines differ from refs/current/e2e_tp.log ($OUT/e2e_tp_kvh.diff)"; fi
+       lcdir "$OUT/lc_kvh"
+       chk "host-memory KV: long-context KLD 1792,8192" "$OUT/lc_run_kvh.log" 2400 "$PY" -I -B tools/eval/lc_baseline.py run "$OUT/lc_kvh" --qsa --kv-host --depths 1792,8192
+       if HIP_VISIBLE_DEVICES= "$PY" -I -B "$T/lc_cmp.py" "$OUT/lc_kvh/k3_qsa.json" "$CUR/lc_k3_qsa.json" > "$OUT/lc_cmp_kvh.txt" 2>&1
+       then note PASS "host-memory KV, long-context 1792,8192: every non-timing number == refs/current/lc_k3_qsa.json"
+       else note FAIL "host-memory KV, long-context 1792,8192 vs refs/current/lc_k3_qsa.json: $(tail -1 "$OUT/lc_cmp_kvh.txt")"; fi ;;
 *) note FAIL "unknown stage $s" ;;
 esac; done
 echo "SUMMARY ($(date +%T)): $(( ${#SUM[@]} - NFAIL )) passed, $NFAIL failed"

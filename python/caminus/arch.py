@@ -39,6 +39,7 @@ AUTO_SLACK_MIB = 384.0       # max_ctx auto: kept on top (the projections' own e
 PREFILL_MODULES_MIB = 64.0   # Prefill35's code objects, streams and its padded alpha / beta copies (a few MiB each)
 CARD_BW = {'XTX': 881e9, 'XT': 774e9}           # measured streaming bandwidth (stats.PhysicsConfig's defaults, per card name)
 CODER_CTX = 262144           # the Coder's max_ctx auto: its context_length, the measured fit with DFlash
+LONG_NTK = 4.0               # the Coder's long-context mode (Coder.long_context): NTK RoPE scaling factor
 
 # the header keys meta() keeps, under the architecture's prefix: what the projections below read
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
@@ -230,6 +231,11 @@ class Arch:
                 return False
         return True
 
+    def long_context(self, opt):
+        """the long-context mode's settings into opt for an explicit max_ctx past the model's context_length (a note for the
+        log), or None: only the Coder has one (its KV in host memory); every other model refuses such a max_ctx in its engine"""
+        return None
+
     def physics(self, d=0):
         """the stats hook's card model (caminus.serve.stats.PhysicsConfig), or None: EngineStats' default, the Coder's cards"""
         return None
@@ -244,13 +250,34 @@ class Arch:
 class Coder(Arch):
     kind, cards, T, drafter, engine = 'coder', 2, 4, 'dflash', 'engine.flashnext_tp:FlashNextTP'
 
+    def long_context(self, opt):
+        """an explicit max_ctx past the Coder's context_length (262,144): the KV cache in pinned host memory (kv_host: 13 GB at
+        1M for both cards, checked against MemAvailable and the GTT limit), ctx_extend, NTK RoPE scaling by LONG_NTK (measured at
+        1,040,384: 3/3 needles to 936K back, 2/3 without; its cost at short context: KLD 0.0077 vs 0.0057 unscaled, llama.cpp's
+        floor 0.0076) and no disk tier (a park would write the whole KV: 13 GB at 1M). The daily mode (<= 262,144) is unchanged"""
+        n_ctx = int(coder_facts(opt['model'])['geom']['ctx_train'])
+        if int(opt['max_ctx']) <= n_ctx: return None
+        opt['kv_host'] = True; opt['long_ntk'] = LONG_NTK
+        disk = not opt.get('no_disk_cache'); opt['no_disk_cache'] = True
+        return (f'long-context mode: max_ctx {int(opt["max_ctx"])} past the model\'s {n_ctx}: KV in host memory, RoPE base x '
+                f'{LONG_NTK:g}^(n_rot / (n_rot - 2)), {"the disk tier turned off (a park would write the whole KV)" if disk else "no disk tier"}'
+                f'{", plain decoding at T = 1" if opt.get("no_drafter") else ""}')
+
+    def _engine_kw(self, opt):
+        """FlashNextTP's placement / long-context arguments from opt (kv_host, the long mode's ctx_extend + rope_ntk)"""
+        kw = dict(kv_host=True) if opt.get('kv_host') else {}
+        if opt.get('long_ntk'): kw.update(ctx_extend=True, rope_ntk=float(opt['long_ntk']))
+        return kw
+
     def build(self, opt, log=print, T=None):
         T = self.T if T is None else int(T)
         from .engine.flashnext_tp import FlashNextTP
         from .prefill import coder as P
         chunk, max_ctx = int(opt['chunk']), int(opt['max_ctx'])
         sp = dict((opt.get('placement') or {}).get('split') or {})     # (caminus.device.host.split of the placed pair; else the default)
+        sp.update(self._engine_kw(opt))
         if opt['no_drafter']:
+            if opt.get('long_ntk'): T = 1   # (the long mode without a drafter: plain T = 1 passes, ~29.7 ms/token at 1M)
             m = FlashNextTP(opt['model'], ntok=T, max_ctx=max_ctx, vram_prefill=chunk, **sp)
             return m, P.Prefill(m, chunk=chunk), None, None
         from .decode import dflash as dk

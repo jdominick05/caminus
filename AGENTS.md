@@ -96,7 +96,7 @@ tools/guard.sh LOG 600 python -I tools/k3_smoke.py --model coder          # ends
 tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # decode ms/token
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
-tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~16 min)
+tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 ```
 
 After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills); rerun the gates at `K3_PER_WGP=3/6/7`
@@ -112,7 +112,9 @@ GPU safety (a fault on the display card can take the desktop down):
 - Every device wait is time-bounded (`limit_us`; TP 200 ms + a bitwise retry); every launch well under 200 ms. Never a
   spin-forever or no-timeout variant.
 - Every allocation is projected and checked against the guard's line before it happens (`capacity`); a display card keeps
-  512 MiB free.
+  512 MiB free. The opt-in host KV cache (`FlashNextTP(kv_host=True)`: pinned host memory both cards address,
+  `device/hip.py host_mapped`) is checked against MemAvailable and the GTT page limit (`capacity.check_host_kv`) first;
+  only buffers from `host_mapped` pass the launch checker as host memory.
 
 Correctness:
 - Bitwise: a K3 change leaves logits, router ids and replicas bitwise equal to the previous reference, across `K3_PER_WGP`

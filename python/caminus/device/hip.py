@@ -36,6 +36,43 @@ def check(err):
         raise RuntimeError(f'HIP error {err}: {hip().hipGetErrorString(err).decode()}')
 
 
+# host memory every card reads and writes by its address (the 1M-context mode keeps the attention KV cache there):
+# hipHostMalloc portable (every device) | mapped | non-coherent (coarse-grained: each card caches it in its L2 like device
+# memory, so a pass's own writes are seen by its later reads through the same L2). Allocated exactly (torch's pinned
+# allocator rounds a block up to a power of two). The registry lets caminus.device.bufcheck accept these buffers and no
+# other host tensor
+_HOST = []
+HIP_HOST_FLAGS = 0x1 | 0x2 | 0x80000000   # hipHostMallocPortable | hipHostMallocMapped | hipHostMallocNonCoherent
+
+
+def host_mapped(nbytes):
+    """a zeroed uint8 CPU tensor of exactly nbytes in pinned host memory mapped into every card's address space (the device
+    address equals the host address: checked)"""
+    h = hip(); p = ctypes.c_void_p(); dp = ctypes.c_void_p()
+    h.hipHostMalloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint]
+    h.hipHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint]
+    check(h.hipHostMalloc(ctypes.byref(p), ctypes.c_size_t(int(nbytes)), ctypes.c_uint(HIP_HOST_FLAGS)))
+    check(h.hipHostGetDevicePointer(ctypes.byref(dp), p, 0))
+    if dp.value != p.value:
+        h.hipHostFree(p)
+        raise RuntimeError(f'host_mapped: device address 0x{dp.value:x} != host address 0x{p.value:x} (no unified addressing)')
+    buf = (ctypes.c_uint8 * int(nbytes)).from_address(p.value)
+    t = torch.frombuffer(buf, dtype=torch.uint8)
+    t.zero_()
+    _HOST.append((p.value, int(nbytes), buf))
+    return t
+
+
+def is_host_mapped(t):
+    """t lies inside a host_mapped() buffer"""
+    a, n = t.data_ptr(), t.numel() * t.element_size()
+    return any(p <= a and a + n <= p + m for p, m, _ in _HOST)
+
+
+def host_mapped_bytes():
+    return sum(m for _, m, _ in _HOST)
+
+
 class Kernel:
     def __init__(self, fn, name):
         self.fn, self.name = fn, name

@@ -64,6 +64,13 @@ def _overlap(op, R, writes, same_ok):
                                 ' (this kernel has no in-place form)'))
 
 
+
+def _host_mapped(t):
+    """a CPU tensor inside a caminus.device.hip.host_mapped() buffer (pinned, mapped into every card: the 1M-context mode's
+    KV cache) passes the device check; any other host tensor does not"""
+    from .hip import is_host_mapped
+    return is_host_mapped(t)
+
 class LaunchCheck:
     """the host checks of one launch with each buffer stated once (one per launcher module: its message prefix, its
     default pointer alignment, how it names dtypes). check(dev, op, bufs, writes, same_ok=(), opt=(), names=None):
@@ -85,7 +92,8 @@ class LaunchCheck:
             t = b[0]
             if t is None and n in opt: continue
             what = names.get(n, n) if names else n
-            if not isinstance(t, torch.Tensor) or t.device != dev or not t.is_contiguous():
+            host = isinstance(t, torch.Tensor) and t.device.type == 'cpu' and _host_mapped(t)   # (device.hip.host_mapped)
+            if not isinstance(t, torch.Tensor) or (t.device != dev and not host) or not t.is_contiguous():
                 raise ValueError(f'{mod}: {what} must be a contiguous tensor on {dev}')
             if t.dtype != b[1]:
                 raise ValueError(f'{mod}: {what} must be {str(b[1])[6:] if self.short else b[1]} (is {t.dtype})')
