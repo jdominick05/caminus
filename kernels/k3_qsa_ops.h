@@ -318,3 +318,261 @@ __device__ __forceinline__ void op_qsa_select(const Seg & sg, int r) {
     }
     if (tid == 0) { out[0] = min(base, QSA_TOPK); out[1] = ntail; out[2] = nv; out[3] = (int)prefix; }
 }
+
+// OP_QSA_PSEL: OP_QSA_SELECT's selection spread over up to QSA_PSEL_MAXP slices of each row's scores (one workgroup per
+//   slice), its output bitwise equal: the same 4-pass radix rule on the same exact integer histograms, then the same
+//   ascending emit. Measured on the XT (12 layers, T = 1): the one-workgroup select costs 4.0 ms per token at 65,536
+//   visible pools (262K context) and 15.1 ms at 262,144 (1M), one compute unit of 84 walking every score five times;
+//   scoring the same pools costs 1.2 / 4.7 ms. Five segments per layer, in tape order (Seg.pad1 = the phase):
+//   ZERO   (1 task, no dependency): HIST = 0 (this layer's [T][2][256] counts: once per pass, so a rerun starts clean)
+//   HIST1  (T * P tasks: row r = task / P, slice s = task % P): the slice's top-byte counts -> HIST[r][0] (device-scope
+//          integer atomics: exact in any order)
+//   HIST2  (T * P): b1 / need from HIST[r][0] (qsa_pick: op_qsa_select's rule), then the second-byte counts of the keys
+//          whose top byte is b1 -> HIST[r][1]
+//   FILTER (T * P): b1, b2; the slice's keys whose top 16 bits are above (b1, b2) ("above": always selected) listed
+//          ascending from the start of the slice's LIST region, those equal to it (the candidates) from its end; counts ->
+//          CNT[r][0][s] / CNT[r][1][s]
+//   FINISH (T tasks): passes 3 and 4 over the candidates (bits 15..0: the threshold key and need, exactly as over every
+//          score: only the candidates match the 16-bit prefix), the candidates above it and the `need` lowest-indexed
+//          equal to it (TC, in LDS), then each "above" pool's output slot = its rank + the TC ids below it and each TC
+//          pool's = the TC ids below it + the "above" ids below it. More than QSA_PSEL_CMAX candidates, or more keys equal
+//          to the threshold than `need` (ties straddling rank 512): op_qsa_select itself (exact, slow; FINISH's task)
+//   Slices: SL = ceil(nv / P) rounded up to 256, slice s = [s * SL, min(nv, (s + 1) * SL)); LIST rows hold P * SL ints
+//   (the host sizes them for nv = N). Seg.a = SCORE fp32 [T][K], Seg.y = SEL int32 [T][QSA_SELW], Seg.asum = pos,
+//   Seg.W = LIST int32 [T][LS], Seg.gs = CNT int32 [T][2][P], Seg.aux = HIST int32 [T][2][256], rows_per_task = P,
+//   N = pool rows (nv clamp), K = SCORE row stride, pad1 = phase, pad2 = LS.
+enum { OP_QSA_PSEL = 43 };
+enum { QSA_PSEL_H1 = 0, QSA_PSEL_H2 = 1, QSA_PSEL_FILTER = 2, QSA_PSEL_FINISH = 3, QSA_PSEL_ZERO = 4 };
+#define QSA_PSEL_MAXP 64
+#define QSA_PSEL_CMAX 4096           // candidates FINISH takes (their two passes and the TC gather: global, L2-resident)
+// LDS (ints of AQ's storage, 720 in the one-token module): [0, 512) the 256-bin histogram, then TC (<= 512 ids);
+// [512, 544) misc (0..7 values, 8..15 / 16..23 wave scratch); [544, 609) the "above" prefix counts; [609, 674) the candidates'
+#define QSA_PSEL_LDS 674
+static_assert(AQ_ALLOC * (int)sizeof(block_q8_1) >= QSA_PSEL_LDS * 4, "OP_QSA_PSEL's scratch lives in AQ's storage");
+typedef __attribute__((address_space(3))) int qsa_lds_int;
+
+// op_qsa_select's bin rule for one radix pass: b = 255, above = 0; while (b > 0 && above + hist[b] < need) above +=
+// hist[b--]. With S(b) = sum of hist[b' >= b] (non-increasing): b = #{b : S(b) >= need} - 1 (0 when none), above =
+// S(b + 1). misc[0] = b, misc[1] = above on return (after a barrier); misc[8..15] is wave scratch.
+__device__ __forceinline__ void qsa_pick(const qsa_lds_int * hist, int need, qsa_lds_int * misc) {
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32;
+    int x = hist[255 - tid];
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) { const int y = __shfl_up(x, o, 32); if (lane >= o) x += y; }
+    if (lane == 31) misc[8 + wave] = x;
+    __syncthreads();
+    for (int v = 0; v < wave; v++) x += misc[8 + v];                  // S(255 - tid)
+    const unsigned m = __builtin_amdgcn_ballot_w32(x >= need);
+    if (lane == 0) misc[16 + wave] = __builtin_popcount(m);
+    __syncthreads();
+    int cnt = 0;
+    for (int v = 0; v < 8; v++) cnt += misc[16 + v];
+    const int b = cnt > 0 ? cnt - 1 : 0;
+    if (tid == 254 - b) misc[1] = x;                                  // S(b + 1) (thread 255 - (b + 1))
+    if (b == 255 && tid == 0) misc[1] = 0;
+    if (tid == 0) misc[0] = b;
+    __syncthreads();
+}
+
+// the row's two leading digits (b1, b2) and the need left after them, from the global HIST[r] (FILTER and FINISH)
+__device__ __forceinline__ unsigned qsa_psel_prefix16(const int * hrow, qsa_lds_int * L, int & need) {
+    qsa_lds_int * misc = L + 512;
+    const int tid = K3TID;
+    need = QSA_TOPK;
+    unsigned prefix = 0;
+    for (int d = 0; d < 2; d++) {
+        L[tid] = hrow[d * 256 + tid];
+        __syncthreads();
+        qsa_pick(L, need, misc);
+        prefix |= (unsigned)misc[0] << (24 - 8 * d); need -= misc[1];
+        __syncthreads();
+    }
+    return prefix;
+}
+
+struct QsaPsel { int r, s, pos, nv, SL, PE, P; const float * sc; int * hrow, * list, * cnt; };
+__device__ __forceinline__ bool qsa_psel_ctx(const Seg & sg, int t, bool finish, QsaPsel & c) {
+    const int T = seg_T(sg); c.P = sg.rows_per_task;
+    c.r = finish ? t : t / c.P; c.s = finish ? 0 : t % c.P;
+    c.pos = ((const int *)sg.asum)[0] + c.r;
+    if (c.r >= T || c.pos < 0) return false;
+    c.nv = min((c.pos + 1) >> 2, sg.N);
+    c.SL = (((c.nv + c.P - 1) / c.P) + 255) / 256 * 256; c.PE = (c.nv + c.SL - 1) / c.SL;   // slice length, non-empty slices
+    c.sc = (const float *)sg.a + (size_t)c.r * sg.K;
+    c.hrow = (int *)sg.aux + c.r * 512;
+    c.list = (int *)sg.W + (size_t)c.r * sg.pad2;
+    c.cnt = (int *)sg.gs + c.r * 2 * c.P;
+    return true;
+}
+
+// HIST1 / HIST2
+__device__ __forceinline__ void qsa_psel_hist(const Seg & sg, int t, bool second) {
+    qsa_lds_int * L = QSA_LDS, * misc = QSA_LDS + 512;
+    const int tid = K3TID;
+    QsaPsel c;
+    if (!qsa_psel_ctx(sg, t, false, c) || c.nv <= QSA_TOPK || c.s >= c.PE) return;
+    const int i0 = c.s * c.SL, i1 = min(c.nv, i0 + c.SL);
+    unsigned b1 = 0;
+    if (second) {
+        L[tid] = c.hrow[tid];
+        __syncthreads();
+        qsa_pick(L, QSA_TOPK, misc);
+        b1 = (unsigned)misc[0];
+        __syncthreads();
+    }
+    L[tid] = 0;   // (256 threads, 256 bins)
+    __syncthreads();
+    const int shift = second ? 16 : 24;
+#pragma unroll 4
+    for (int i = i0 + tid; i < i1; i += blockDim.x) {
+        const unsigned k = qsa_key(c.sc[i]);
+        if (!second || (k >> 24) == b1)
+            __hip_atomic_fetch_add(L + ((k >> shift) & 255), 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_WORKGROUP);
+    }
+    __syncthreads();
+    const int n = L[tid];
+    if (n) __hip_atomic_fetch_add(c.hrow + (second ? 256 : 0) + tid, n, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+}
+
+// FILTER: each wave a contiguous run of SL / 8 keys (a multiple of 32): count, then write at the wave's offset
+__device__ __forceinline__ void qsa_psel_filter(const Seg & sg, int t) {
+    qsa_lds_int * L = QSA_LDS, * misc = QSA_LDS + 512;
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32;
+    QsaPsel c;
+    if (!qsa_psel_ctx(sg, t, false, c) || c.nv <= QSA_TOPK || c.s >= c.PE) return;
+    const int i0 = c.s * c.SL, i1 = min(c.nv, i0 + c.SL);
+    int need;
+    const unsigned p16 = qsa_psel_prefix16(c.hrow, L, need) >> 16;
+    const int SW = c.SL / 8, w0 = i0 + wave * SW, w1 = min(i1, w0 + SW);
+    int na = 0, nc = 0;
+    for (int c0 = w0; c0 < w1; c0 += 32) {
+        const int i = c0 + lane;
+        const unsigned h = i < w1 ? qsa_key(c.sc[i]) >> 16 : 0u;
+        na += __builtin_popcount(__builtin_amdgcn_ballot_w32(i < w1 && h > p16));
+        nc += __builtin_popcount(__builtin_amdgcn_ballot_w32(i < w1 && h == p16));
+    }
+    if (lane == 0) { misc[8 + wave] = na; misc[16 + wave] = nc; }
+    __syncthreads();
+    int ao = 0, co = 0, at = 0, ct = 0;
+    for (int v = 0; v < 8; v++) { const int a = misc[8 + v], b = misc[16 + v]; at += a; ct += b; if (v < wave) { ao += a; co += b; } }
+    const unsigned lt = (1u << lane) - 1u;
+    for (int c0 = w0; c0 < w1; c0 += 32) {
+        const int i = c0 + lane;
+        const unsigned h = i < w1 ? qsa_key(c.sc[i]) >> 16 : 0u;
+        const bool ab = i < w1 && h > p16, cd = i < w1 && h == p16;
+        const unsigned am = __builtin_amdgcn_ballot_w32(ab), cm = __builtin_amdgcn_ballot_w32(cd);
+        if (ab) c.list[i0 + ao + __builtin_popcount(am & lt)] = i;
+        if (cd) c.list[i0 + c.SL - 1 - (co + __builtin_popcount(cm & lt))] = i;
+        ao += __builtin_popcount(am); co += __builtin_popcount(cm);
+    }
+    if (tid == 0) { c.cnt[c.s] = at; c.cnt[c.P + c.s] = ct; }
+}
+
+// FINISH (one task per row)
+__device__ __forceinline__ bool qsa_psel_finish(const Seg & sg, int t) {
+    qsa_lds_int * L = QSA_LDS, * misc = QSA_LDS + 512, * apre = QSA_LDS + 544, * cpre = QSA_LDS + 609;
+    const int tid = K3TID;
+    QsaPsel c;
+    if (!qsa_psel_ctx(sg, t, true, c)) return true;
+    const int nv = c.nv, SL = c.SL, PE = c.PE, P = c.P;
+    const float * sc = c.sc; const int * list = c.list;
+    int * out = (int *)sg.y + (size_t)c.r * QSA_SELW;
+    const int ntail = (c.pos + 1) & 3;
+    if (nv <= QSA_TOPK) {
+        for (int i = tid; i < nv; i += blockDim.x) out[4 + i] = i;
+        if (tid == 0) { out[0] = nv; out[1] = ntail; out[2] = nv; out[3] = 0; }
+        return true;
+    }
+    int need;
+    unsigned prefix = qsa_psel_prefix16(c.hrow, L, need);
+    if (tid < PE) {   // the slices' counts (PE <= QSA_PSEL_MAXP), clamped to the slice: a bailed pass runs every task on
+                      // whatever its inputs hold (another pass's counts), and every index below stays inside its slice
+        const int len = min(nv, (tid + 1) * SL) - tid * SL;
+        const int a = min(max(c.cnt[tid], 0), len);
+        apre[tid + 1] = a; cpre[tid + 1] = min(max(c.cnt[P + tid], 0), len - a);
+    }
+    __syncthreads();
+    if (tid == 0) {   // -> prefix counts (in LDS: one thread, 64 steps)
+        apre[0] = 0; cpre[0] = 0;
+        for (int v = 1; v <= PE; v++) { apre[v] += apre[v - 1]; cpre[v] += cpre[v - 1]; }
+    }
+    __syncthreads();
+    const int G = apre[PE], C = cpre[PE];
+    // candidate j -> its pool id (slice: the last v with cpre[v] <= j)
+    auto cand = [&](int j) -> int {
+        int lo = 0, hi = PE - 1;
+        while (lo < hi) { const int m = (lo + hi + 1) >> 1; if (cpre[m] <= j) lo = m; else hi = m - 1; }
+        return min(max(list[lo * SL + SL - 1 - (j - cpre[lo])], 0), nv - 1);   // (ids < nv unless a bail left garbage)
+    };
+    bool fall = C > QSA_PSEL_CMAX;
+    if (!fall) {
+        for (int shift = 8; shift >= 0; shift -= 8) {
+            const unsigned hm = 0xFFFFFFFFu << (shift + 8);
+            L[tid] = 0;
+            __syncthreads();
+            for (int j = tid; j < C; j += blockDim.x) {
+                const unsigned k = qsa_key(sc[cand(j)]);
+                if ((k & hm) == prefix) __hip_atomic_fetch_add(L + ((k >> shift) & 255), 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_WORKGROUP);
+            }
+            __syncthreads();
+            qsa_pick(L, need, misc);
+            prefix |= (unsigned)misc[0] << shift; need -= misc[1];
+            __syncthreads();
+        }
+        // TC: the candidates above the threshold key and, when exactly `need` keys equal it, those too (ties straddling
+        // rank 512, more equal keys than need: op_qsa_select's own ascending emit below decides which)
+        if (tid == 0) { misc[2] = 0; misc[3] = 0; }
+        __syncthreads();
+        for (int j = tid; j < C; j += blockDim.x) {
+            const int id = cand(j); const unsigned k = qsa_key(sc[id]);
+            if (k >= prefix) {
+                const int o = __hip_atomic_fetch_add(misc + 2, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_WORKGROUP);
+                if (o < QSA_TOPK) L[o] = id;
+                if (k == prefix) __hip_atomic_fetch_add(misc + 3, 1, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_WORKGROUP);
+            }
+        }
+        __syncthreads();
+        const int ntc = misc[2];
+        fall = misc[3] != need || G + ntc != QSA_TOPK;
+        if (!fall) {
+            // emit (TC unsorted in L, distinct ids): "above" pool at global rank a -> a + #TC ids below it; TC pool id ->
+            // #TC ids below it + #"above" ids below it (a binary search in its slice's ascending list)
+            for (int a = tid; a < G; a += blockDim.x) {
+                int lo = 0, hi = PE - 1;
+                while (lo < hi) { const int m = (lo + hi + 1) >> 1; if (apre[m] <= a) lo = m; else hi = m - 1; }
+                const int id = list[lo * SL + (a - apre[lo])];
+                int below = 0;
+                for (int u = 0; u < ntc; u++) below += L[u] < id;
+                if (a + below < QSA_TOPK) out[4 + a + below] = id;
+            }
+            for (int k = tid; k < ntc; k += blockDim.x) {
+                const int id = L[k], v = min(id / SL, PE - 1);
+                int below = 0;
+                for (int u = 0; u < ntc; u++) below += L[u] < id;
+                const int * al = list + v * SL;
+                int b0 = 0, b1 = apre[v + 1] - apre[v];
+                while (b0 < b1) { const int m = (b0 + b1) >> 1; if (al[m] < id) b0 = m + 1; else b1 = m; }
+                if (below + apre[v] + b0 < QSA_TOPK) out[4 + below + apre[v] + b0] = id;
+            }
+            if (tid == 0) { out[0] = QSA_TOPK; out[1] = ntail; out[2] = nv; out[3] = (int)prefix; }
+            return true;
+        }
+    }
+    __syncthreads();
+    return false;   // -> op_qsa_select(sg, row) from the dispatcher (one inlined copy: a second one here costs k3_run ~11
+                    // VGPR spills; Seg.a / y / asum / N / K are op_qsa_select's)
+}
+
+// false: FINISH leaves this row to op_qsa_select (task t = the row)
+__device__ __forceinline__ bool op_qsa_psel(const Seg & sg, int t) {
+    const int phase = sg.pad1;
+    if (phase == QSA_PSEL_ZERO) {
+        int * hist = (int *)sg.aux;
+        for (int i = K3TID; i < seg_T(sg) * 512; i += blockDim.x) hist[i] = 0;
+        return true;
+    }
+    if (phase == QSA_PSEL_H1 || phase == QSA_PSEL_H2) { qsa_psel_hist(sg, t, phase == QSA_PSEL_H2); return true; }
+    if (phase == QSA_PSEL_FILTER) { qsa_psel_filter(sg, t); return true; }
+    if (phase == QSA_PSEL_FINISH) return qsa_psel_finish(sg, t);
+    return true;
+}

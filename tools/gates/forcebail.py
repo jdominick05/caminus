@@ -2,6 +2,9 @@
 uninterrupted (the reference) and once with bails injected; every pass's logits must be bitwise equal and the replicas
 equal at the end, and every injected pass must have bailed.
   guard.sh LOG SECS python -I tools/gates/forcebail.py T NPASS [modes] [--model coder|reap|PATH] [--tokens FILE]
+                                                       [--ctx MAX_CTX --start P]
+    --ctx / --start: the engine at max_ctx MAX_CTX (past 2051: the Coder's QSA tapes) and the schedule from position P,
+    after a batched prefill of [0, P) in every run (passes past 2051 run the indexer's pool selection: P >= 2052)
     modes: comma list cycled over the injected passes (default tiny,tiny0,tiny1,delay1), from
     tiny   both cards' wait bound 1 us for the first attempt (bails at the first wait that has to poll: depth ~0)
     tiny0 / tiny1   only card 0 / card 1 (the other card runs on, on the bailed card's garbage partials)
@@ -20,13 +23,18 @@ import common as C
 
 a = sys.argv[1:]
 PATH = C.model_path(C.opt(a, '--model', 'coder')); TOK = C.opt(a, '--tokens', C.TOKENS)
+CTX = C.opt(a, '--ctx', 2048, int); START = C.opt(a, '--start', 0, int)
 if not 2 <= len(a) <= 3: print(__doc__); sys.exit(2)
 T = int(a[0]); NP = int(a[1]); MODES = (a[2] if len(a) > 2 else 'tiny,tiny0,tiny1,delay1').split(',')
 torch = C.setup_torch()
 from caminus.engine.flashnext_tp import FlashNextTP
 toks = C.tokens(TOK)
 print(f'model {PATH}; tokens {TOK}; T {T}; passes {NP}; modes {MODES}; compaction_proactiveness {C.proactiveness()}', flush=True)
-m = FlashNextTP(PATH, ntok=T)
+m = FlashNextTP(PATH, ntok=T, max_ctx=CTX, **(dict(vram_prefill=2048) if START else {}))
+if START:
+    from caminus.prefill import coder as PF
+    pf = PF.Prefill(m, chunk=2048)
+print(f'max_ctx {CTX}; qsa {m.qsa}; start {START}', flush=True)
 LIM = m.limit_us
 stress = MODES == ['stress']
 if stress: LIM = int(os.environ.get('LIMIT_US', 20000))
@@ -34,7 +42,7 @@ if stress: LIM = int(os.environ.get('LIMIT_US', 20000))
 
 def schedule():
     """(i0, commit) per pass"""
-    out, i0, commit, cyc = [], 0, 0, [4, 1, 3, 2]
+    out, i0, commit, cyc = [], START, 0, [4, 1, 3, 2]
     for p in range(NP):
         out.append((i0, commit))
         c = 1 if T == 1 else min(T, cyc[p % 4])
@@ -43,18 +51,20 @@ def schedule():
 
 
 SCH = schedule(); assert SCH[-1][0] + T <= len(toks)
-orig_pass, orig_run = m._pass, [e.run for e in m.engines]
+orig_pass = m._pass
 inj = {'pass': -1, 'mode': None, 'first': False}
 
 
-def run_c(c):
+def wrap(e, c):
+    orig = e.run
     def f(*a, **k):
         if inj['first'] and inj['mode'] == 'delay1' and c == 1: time.sleep(0.030)
-        return orig_run[c](*a, **k)
-    return f
+        return orig(*a, **k)
+    e.run = f
 
 
-for c in (0, 1): m.engines[c].run = run_c(c)
+for tape in m._tapes.values():   # (every tape's engines: past 2051 the passes run on the QSA tape's, not m.engines at start)
+    for c, e in enumerate(tape): wrap(e, c)
 
 
 NEG = os.environ.get('NEG') == '1'   # negative control: retry with the original commit (double commit) -> must FAIL
@@ -84,6 +94,9 @@ m._pass = hooked_pass
 
 def run(inject):
     m.reset(); out = []; nb0 = len(m.bails); got = {}
+    if START:
+        st = pf.run(toks, 0, 0, START)
+        assert st['i0'] == START and st['commit'] == 0, st
     for p, (i0, commit) in enumerate(SCH):
         injp = inject and not stress and p >= 2 and (p - 2) % 5 == 0
         inj['mode'] = MODES[((p - 2) // 5) % len(MODES)] if injp else None; inj['first'] = injp

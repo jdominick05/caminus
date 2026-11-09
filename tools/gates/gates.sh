@@ -13,11 +13,12 @@
 #   multi           T=4 == one-token: trunk 24 and 200 positions, QSA dual and always 200 positions                    (~2.5 min)
 #   forcebail       Coder forced bails, T=1 and T=4, 40 passes each: every pass bitwise the uninterrupted run          (~45 s)
 #   forcebail-reap  the same on REAP-308                                                                                (~45 s)
+#   forcebail-qsa   the same on the Coder's QSA tapes: max_ctx 4096, passes from 2100 (the pool selection runs)        (~2 min)
 #   short           D-281 at short context: tests/engine/test_flashnext_e2e.py on refs/d281-short (768 positions vs llama.cpp
 #                   one-token decode, floor 0.0076, top-1 >= 95.9 %), and every result line == the stored log           (~45 s)
 #   lc              long-context D-281 at 1792 + 8192 (tools/eval/lc_baseline.py --qsa) == the stored k3_qsa.json            (~1.5 min)
 #   lc32            the same at 32768                                                                                    (~3.5 min)
-#   all             trunk grids qsa reap multi forcebail short lc lc32
+#   all             trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32
 # Env: ARTIFACTS, CODER (both required), REAP (the reap stages), PY (a python with ROCm PyTorch; CLAUDE.md, Models and data).
 # Ends with a SUMMARY (one line per check) and exits 0 only when every check passed.
 set -u
@@ -60,7 +61,7 @@ lcdir() {   # a fresh lc_baseline OUT dir: the probe files and llama.cpp referen
   mkdir -p "$1"; for f in probes.json d1792 d8192 d32768 ref; do [ -e "$1/$f" ] || ln -s "$LC/$f" "$1/$f"; done; }
 echo "gates.sh: repo $REPO at $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)$([ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] || echo ' + uncommitted changes'); OUT $OUT"
 echo "compaction_proactiveness $(cat /proc/sys/vm/compaction_proactiveness 2>/dev/null); stages: $*"
-ST=("$@"); [ "${ST[*]}" = all ] && ST=(trunk grids qsa reap multi forcebail short lc lc32)
+ST=("$@"); [ "${ST[*]}" = all ] && ST=(trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32)
 cd "$REPO" || exit 2
 for s in "${ST[@]}"; do echo "== stage $s ($(date +%T))"; case $s in
 trunk) refs_ok '/m1/s3/ref/sp_g\.pt$' trunk && rd g "$RC/sp_g.pt" 900 --model "$CODER" ;;
@@ -74,6 +75,7 @@ multi) chk "T=4 == one-token, trunk, 24 positions" "$OUT/multi4.log" 900 "$PY" -
          chk "T=4 == one-token, QSA $tape, 200 positions" "$OUT/qmulti4_$tape.log" 900 "$PY" -I -B "$T/tp_multi.py" 4 200 --model "$CODER" --max-ctx 4096 --tape $tape
        done ;;
 forcebail) for t in 1 4; do chk "forced bails, Coder, T=$t, 40 passes" "$OUT/fb_t$t.log" 600 "$PY" -I -B "$T/forcebail.py" $t 40 --model "$CODER"; done ;;
+forcebail-qsa) for t in 1 4; do chk "forced bails, Coder QSA (max_ctx 4096, passes from 2100), T=$t, 40 passes" "$OUT/fbq_t$t.log" 900 "$PY" -I -B "$T/forcebail.py" $t 40 --model "$CODER" --ctx 4096 --start 2100 --tokens "$LC/d8192/ctx.ids"; done ;;
 forcebail-reap) for t in 1 4; do chk "forced bails, REAP-308, T=$t, 40 passes" "$OUT/fb_reap_t$t.log" 600 "$PY" -I -B "$T/forcebail.py" $t 40 --model "$REAP"; done ;;
 short) refs_ok '/refs/d281-short/' d281-short || continue
        chk "D-281 short (768 positions vs llama.cpp)" "$OUT/e2e_tp.log" 1800 "$PY" -I -B tests/engine/test_flashnext_e2e.py \

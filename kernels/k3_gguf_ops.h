@@ -2059,7 +2059,10 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op != OP_GG_MV) {   // (kernels/k3_gguf_gsq_qsa*.hip only)
         if (sg.op == OP_IDX_APPEND) { op_idx_append(sg, t); return true; }
         if (sg.op == OP_QSA_SCORE) { op_qsa_score(sg, t); return true; }
-        if (sg.op == OP_QSA_SELECT) { op_qsa_select(sg, t); return true; }
+        if (sg.op == OP_QSA_SELECT || sg.op == OP_QSA_PSEL) {   // (one call site of op_qsa_select: OP_QSA_PSEL's FINISH falls back to it)
+            if (sg.op == OP_QSA_SELECT || !op_qsa_psel(sg, t)) op_qsa_select(sg, t);
+            return true;
+        }
         return false;
     }
 #else

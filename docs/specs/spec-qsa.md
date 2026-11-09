@@ -88,6 +88,19 @@ New ops. The q/k projections use #55's BF16 matvec (**a dependency**); OP_QK_NR 
    - nv <= 512: emit 0..nv-1 (the identity);
    - otherwise: find the threshold bin from HIST, refine the candidates in that bin with a 3-byte radix (1 KB of LDS, reusing MVP), then do one ascending emit pass over SCORE with block-prefix compaction: `>` threshold always, `==` threshold in index order up to the remaining count;
    - then zero HIST. A bail retry must memset it from the host.
+3b. **OP_QSA_PSEL** (the shipped selection since the parallel-select change; `Engine.qsa_select_par`, `K3_QSA_PSEL=0` keeps
+   OP_QSA_SELECT for A/B): the same SEL rows bit for bit, spread over up to 64 slices of each row's scores. One-workgroup
+   OP_QSA_SELECT made five serial passes over every score on one compute unit: 4.0 ms per token at 262K and 15 ms at 1M
+   (12 layers, XT). Five segments per layer:
+   - ZERO (no dependency: this layer's [T][2][256] counts, every pass, so a rerun starts clean);
+   - HIST1 / HIST2 (one task per row and slice): the top byte, then the second byte of the keys in the chosen top bin,
+     with device-scope integer atomics (exact in any order);
+   - FILTER: per slice, the ids above the 16-bit prefix (always selected) listed ascending and the ids equal to it (the
+     candidates) apart;
+   - FINISH (one task per row): the last two radix passes over the candidates, then each id's output slot by counting.
+     More than 4096 candidates, or more keys equal to the threshold than needed (ties straddling rank 512), fall back to
+     OP_QSA_SELECT's own code for that row (exact, slow).
+   12 layers at T = 1 / 4: 0.42 / 0.56 ms at 262K, 0.61 / 0.81 ms at 1M (tests/engine/test_qsa_psel.py time, XT).
 4. **OP_ATTN_SEL**: op_attn_dec (:1027-1085) with the cell list `4*SEL[i]+j`, then the tail cells, in ascending order, with the same 512-chunk online softmax over list positions. **For ctx <= 2051 the list is the identity, so it is bitwise equal to today's OP_ATTN_DEC.**
    - Hadamard, KV append and the gate stay as they are.
 
