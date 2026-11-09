@@ -74,7 +74,7 @@ Decode is how fast a model writes, at short context. Prompt reading, context siz
 
 - **Use Caminus:** [quickstart](docs/quickstart.md) · [the panel](docs/panel.md) · [models](docs/models.md) ·
   [hardware](docs/hardware.md) · [harnesses](docs/harnesses.md) · [troubleshooting](docs/troubleshooting.md) ·
-  [without the panel](docs/cli.md) · [configuration](docs/configuration.md)
+  [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [what changed](CHANGELOG.md)
 - **Contribute:** [CONTRIBUTING.md](CONTRIBUTING.md) · [how it works](docs/dev/architecture.md) ·
   [building from source](docs/dev/building.md) · [testing](docs/dev/testing.md)
 - **AI agents working on this code:** [AGENTS.md](AGENTS.md)
