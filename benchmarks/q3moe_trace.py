@@ -9,6 +9,7 @@ import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
 import torch
+from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q3moe_one import Q3MoEOne
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--warm', type=int, default=8)
@@ -35,6 +36,8 @@ for module in A.modules:
     tok = 785
     for _ in range(A.warm): tok = int(torch.argmax(eng.step(tok)))
     if module.endswith('_trace'):
+        tr_mib = G * S * 8 * 8 / 2 ** 20 + 1                     # the trace: 8 int64 words per (workgroup, segment)
+        capacity.check([eng.dev], [tr_mib], f'q3moe_trace: the trace buffer ({G} workgroups x {S} segments: {tr_mib:.0f} MiB)')
         tr = torch.zeros(G * S * 8, dtype=torch.int64, device='cuda'); per_seg = []
         totals = []
         for _ in range(A.tokens):

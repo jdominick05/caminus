@@ -37,9 +37,14 @@ from caminus.engine.q3moe_one import Q3MoEOne
 print(torch.cuda.get_device_name(0), flush=True)
 t0 = time.time(); eng = Q3MoEOne(A.gguf, max_ctx=512); print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB)', flush=True)
 ok = True
-# the device embedding row (OP_OWN_EMB) bitwise our host decoder, on a spread of token ids
 from caminus import own_dequant
+from caminus.device import capacity
 from caminus.engine import k3
+# beside the engine's own projection, this test's buffers: the logits of every reference position kept on the card twice
+# (the default grid's, and the grid being compared), a tape per compared grid, the embedding check's rows
+own_mib = 2 * len(ref) * eng.vocab * 4 / 2 ** 20 + 3 * Q3MoEOne.TAPE_MIB + 2
+capacity.check([eng.dev], [own_mib], f'test_q3moe_one: its own buffers ({len(ref)} positions of logits x 2: {own_mib:.0f} MiB)')
+# the device embedding row (OP_OWN_EMB) bitwise our host decoder, on a spread of token ids
 ids_chk = [0, 1, 785, 6722, 9625, 151642, 151935]
 e2 = k3.Engine(module=eng.module); tk_d = torch.zeros(len(ids_chk), dtype=torch.int32, device='cuda')
 xs = torch.zeros(len(ids_chk), eng.D, device='cuda')

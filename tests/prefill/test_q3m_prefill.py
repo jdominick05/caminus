@@ -13,6 +13,7 @@ New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
+from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q3moe_one import Q3MoEOne
 from caminus.prefill.driver import PrefillRefused
@@ -43,6 +44,10 @@ def score(rows, cand):
 
 eng = Q3MoEOne(A.gguf, max_ctx=N + 64, module=A.module)
 pf = Q3MPrefill(eng, chunk=128)
+# beside the engine and the prefill (which project their own memory): three snapshots of the prefilled cache rows of
+# every layer (the default chunking, chunks of 16, with stops), kept for the bitwise comparisons
+snap_mib = 3 * eng.nl * P * 2 * eng.nkv * eng.hd * 2 / 2 ** 20 + 2
+capacity.check([eng.dev], [snap_mib], f'test_q3m_prefill: its cache snapshots ({P} rows x {eng.nl} layers x 3: {snap_mib:.0f} MiB)')
 cache_bytes = lambda: [L['cache'][:P * 2 * eng.nkv * eng.hd].clone() for L in eng.L]   # (the prefilled rows: later ones hold the last run's decode)
 
 

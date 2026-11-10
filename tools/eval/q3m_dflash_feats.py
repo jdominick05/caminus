@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import numpy as np, torch
 from caminus import ggufio
 from caminus.bpe import BPE
+from caminus.device import capacity
 from caminus.engine.q3moe_one import Q3MoEOne
 from caminus.prefill.q3m import Q3MPrefill
 path = sys.argv[1]; out = sys.argv[2]
@@ -22,11 +23,18 @@ prompts = ["Write a Python function that parses a CSV file of orders and returns
            "Give me three ideas for a weekend trip near the mountains, with a short plan for each."]
 A, B = [1, 12, 23, 34, 45], [2, 13, 24, 35, 46]
 D = eng.D
-for pi, ptxt in enumerate(prompts):
-    ids = tk.encode(f"<|im_start|>user\n{ptxt}<|im_end|>\n<|im_start|>assistant\n")
+NGEN = 400
+enc = [tk.encode(f"<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n") for p in prompts]
+# beside the engine and the prefill (which project their own memory): the residual of the longest sequence recorded at ten
+# layers, and the two five-layer concatenations made from them before they go to the host (fp32 [n, D] each)
+n_max = max(len(e) for e in enc) + NGEN
+if n_max > eng.max_ctx: raise SystemExit(f'a prompt + {NGEN} tokens is {n_max} positions (max_ctx {eng.max_ctx})')
+rec_mib = (len(A) + len(B)) * 2 * n_max * D * 4 / 2 ** 20 + 16
+capacity.check([eng.dev], [rec_mib], f'q3m_dflash_feats: the recorded residuals ({n_max} positions: {rec_mib:.0f} MiB)')
+for pi, ids in enumerate(enc):
     eng.reset(); pf.run(ids, 0, 0, len(ids) - 1); eng.pos_host = len(ids) - 1
     gen = []; t = ids[-1]
-    for i in range(400):
+    for i in range(NGEN):
         t = int(torch.argmax(eng.step(t))); gen.append(t)
     seq = ids + gen; n = len(seq)
     rec = {}

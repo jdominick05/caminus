@@ -30,7 +30,7 @@ for a in A.arms:
     ARMS.append((name, o))
 print(torch.cuda.get_device_name(0), flush=True)
 max_ctx = A.max_ctx or max(depths) + A.tokens + 1
-eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, **ARMS[0][1])
+eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, **ARMS[0][1])   # (+ a tape per arm, built below)
 print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB', flush=True)
 keys = ('E', 'S', 'dstage', 'hstage', 'tok', 'pos')
 forms = {}

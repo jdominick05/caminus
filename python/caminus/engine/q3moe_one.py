@@ -151,6 +151,9 @@ class Q3MoEOne:
         self.emb_dev = torch.from_numpy(np.ascontiguousarray(np.asarray(self.emb.data()))).to('cuda')
 
     # -- the tape ----------------------------------------------------------------------------------------------------------
+    TAPE_MIB = 4   # an upper bound of one tape's buffers (S and the stage; held below): what each further tape a caller
+                   # builds (an A/B's arms, a test's grids) adds to the card beside the projection
+
     def _build_tape(self):
         D, hd, nh, nkv, KU, FF = self.D, self.hd, self.nh, self.nkv, self.k_used, self.ffn
         B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
@@ -163,6 +166,7 @@ class Q3MoEOne:
         # the per-pass inputs, one block: [0] the token, [1] its position (one copy from the pinned stage per token)
         self.hstage = torch.zeros(2, dtype=torch.int32, pin_memory=True)
         self.dstage = B(2, torch.int32); self.tok, self.pos = self.dstage[0:1], self.dstage[1:2]
+        assert sum(v.numel() * v.element_size() for v in s.values()) <= self.TAPE_MIB * 2 ** 20, 'TAPE_MIB'
         E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=1, limit_us=self.limit_us)
         # (a touch of each workgroup's first task's weights before its dependency wait measured no gain: XT, interleaved,
         #  48 tokens: whole task 8.873, 16 KB 8.820, off 8.609 ms/token)

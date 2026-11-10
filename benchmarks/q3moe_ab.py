@@ -17,7 +17,10 @@ ap.add_argument('--grids', type=int, nargs='+', default=None, help='arms = the d
 print(torch.cuda.get_device_name(0), flush=True)
 ARMS = (('attn 5 seg', dict(attn_one=False)), ('attn 1 seg', dict(attn_one=True)))   # (name, Q3MoEOne tape options); the first is the base
 if A.grids: ARMS = tuple((f'grid {g}', dict(per_wgp=g)) for g in A.grids)
-eng = Q3MoEOne(A.gguf, max_ctx=max(2 * A.tokens * len(ARMS), A.positions) + 64, **ARMS[0][1])
+# beside the engine's own projection: one further tape per arm after the first, and a position's buffers cloned for the
+# comparison (x, h, ids, wts, logits: under 1 MiB, copied to the host at once)
+eng = Q3MoEOne(A.gguf, max_ctx=max(2 * A.tokens * len(ARMS), A.positions) + 64,
+               vram_extra_mib=(len(ARMS) - 1) * Q3MoEOne.TAPE_MIB + 2, **ARMS[0][1])
 forms = {ARMS[0][0]: (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos)}
 for name, opt in ARMS[1:]:
     for k, v in opt.items(): setattr(eng, k, v)
