@@ -1,5 +1,5 @@
 """Where a Qwen3-30B-A3B decode token's time goes in Q3MoEOne (engine/q3moe_one.py), from K3_TRACE timestamps (module
-k3_gguf_q3m_own_trace): per segment, the hop (its dependencies' last publish -> its first workgroup past the wait) and the
+k3_gguf_q3m_lean_trace, the decode tape's module): per segment, the hop (its dependencies' last publish -> its first workgroup past the wait) and the
 span (first workgroup past the wait -> its last publish); the critical path (walked back through each segment's later
 dependency) summed per op kind; medians over --tokens traced tokens after --warm untraced ones. Also the host's view:
 step() wall time against the launch's GPU time (events) on the plain module.
@@ -14,7 +14,7 @@ from caminus.engine.q3moe_one import Q3MoEOne
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--warm', type=int, default=8)
 ap.add_argument('--tokens', type=int, default=10)
 ap.add_argument('--detail', type=int, default=None, help='print this layer\'s segments (last traced token)')
-ap.add_argument('--modules', nargs='+', default=['k3_gguf_q3m_own_trace'], help='one engine per run: the card holds one copy')
+ap.add_argument('--modules', nargs='+', default=['k3_gguf_q3m_lean_trace'], help='one engine per run: the card holds one copy')
 A = ap.parse_args()
 OPN = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int)}
 

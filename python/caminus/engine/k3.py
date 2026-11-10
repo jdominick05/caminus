@@ -61,6 +61,7 @@ OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
 OP_OWN_MV = 44     # = kernels/k3_own_ops.h: Caminus's own quantized matvec (the *_own modules only; spec-own-quant.md)
 OP_OWN_F16 = 45    # = kernels/k3_own_ops.h: fp32 -> fp16 (the one-round-trip tiles' activations)
 OP_OWN_ATTN = 50   # = kernels/k3_own_ops.h: a query head's whole decode attention (the qwen3moe modules)
+OP_OWN_ATTS = 51   # = kernels/k3_own_atts.h: the decode attention split over positions (qwen3moe modules; speed at depth)
 OP_OWN_SWIGLU16, OP_OWN_MOE_SUM, OP_OWN_EMB, OP_OWN_ADD_RMS16 = 46, 47, 48, 49   # = kernels/k3_own_ops.h: fp16(silu(g) * u); x += weighted sum of slots;
                                                                                # the embedding row; residual add + rms norm + fp16 in one
 OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
@@ -89,7 +90,7 @@ Q35G_MODULES = ('k3_gguf_q35g', 'k3_gguf_q35g_mt')   # the 2-bit GSQ checkpoint 
 OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (kernels/k3_gguf_q35d_own.hip; T = 1 only)
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
-Q3M_LEAN_MODULES = ('k3_gguf_q3m_lean',)   # (kernels/k3_gguf_q3m_lean.hip: the decode tape's ops only; Q3M_LEAN_OPS below)
+Q3M_LEAN_MODULES = ('k3_gguf_q3m_lean', 'k3_gguf_q3m_lean_trace')   # (kernels/k3_gguf_q3m_lean.hip: the decode tape's ops only; Q3M_LEAN_OPS below)
 Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES   # (_trace: K3_TRACE timestamps, measurement only)
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
@@ -161,8 +162,10 @@ MODULE_CAPS.update({m: frozenset({('MV', 'Q4_K'), ('MV', 'Q6_K'), ('F32_MV', 'F3
 # inlined keeps more scalars live than it has SGPRs: the reloads cost every segment hop of every wave, XT 5.33 -> 4.78 ms
 # per token at the same grid). Engine.build refuses any other op on it (an unknown op would run as a no-op on the device).
 MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT_FMT for g in ('', '_gu')} |
-                                 {('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTN', '-'), ('F32_MV', 'F32')}) for m in Q3M_LEAN_MODULES})
-Q3M_LEAN_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ATTN, OP_OWN_ADD_RMS16, OP_F32_MV, OP_ROUTER, OP_OWN_EMB}
+                                 {('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTS', '-'), ('F32_MV', 'F32')}) for m in Q3M_LEAN_MODULES})
+# (the attention: OP_OWN_ATTS, split over positions; OP_OWN_ATTN, one task per query head, stays in the full module as its
+#  oracle and for A/Bs)
+Q3M_LEAN_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ATTS, OP_OWN_ADD_RMS16, OP_F32_MV, OP_ROUTER, OP_OWN_EMB}
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -181,6 +184,7 @@ def seg_kind(sg):
     if sg.op == OP_OWN_EMB: return ('OWN_EMB', GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_OWN_ADD_RMS16: return ('OWN_ADD_RMS16', '-')
     if sg.op == OP_OWN_ATTN: return ('OWN_ATTN', '-')
+    if sg.op == OP_OWN_ATTS: return ('OWN_ATTS', '-')
     if sg.op == OP_OWN_MV:
         a = (('a16_1rt_gu' if sg.pad1 & OWN_GU else 'a16_1rt') if sg.pad1 & OWN_A16_1RT and sg.pad1 < 32
              else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
@@ -740,6 +744,43 @@ class Engine:
         self.keep += [q, kv, par, cache, pos, out16]
         self.segs.append(Seg(OP_OWN_ATTN, heads, dep, 1, cache.data_ptr(), kv.data_ptr(), q.data_ptr(), pos.data_ptr(),
                              out16.data_ptr(), scale, heads, dim, dim, 0, team, kv_heads, 0, 0, par.data_ptr()))
+        return len(self.segs) - 1
+
+    ATS_RS, ATS_CNT, ATS_PAD = 16 + 8 * 128, 64, 64   # = kernels/k3_own_atts.h: floats per split record, counter words
+                                                       # before the records, cache rows past the last position
+
+    @staticmethod
+    def atts_scratch_floats(kv_heads, splits, heads_per_task=8):
+        """the fp32 words of own_atts' scratch (counters, then the split records of every (kv head, head group))"""
+        return Engine.ATS_CNT + kv_heads * (8 // heads_per_task) * splits * Engine.ATS_RS
+
+    def own_atts(self, qkv, scratch, par, cache, pos, out16, heads, kv_heads, dim, scale, splits=64, lmin=128, heads_per_task=8,
+                 dep=-1, team=-1):
+        """the decode attention split over positions (OP_OWN_ATTS, kernels/k3_own_atts.h; the qwen3moe modules): q / k norm +
+        RoPE, the cache row, flash-decoding splits of the positions (one task = a split of one kv head, all its query heads),
+        the merge by the last task of each kv head, fp16 out. qkv fp32 = q [heads * dim] | k [kv_heads * dim] | v (the
+        matvecs' outputs, one buffer); scratch fp32 [atts_scratch_floats(kv_heads, splits)], ZEROED before the first run
+        (its counters return to zero after every launch); par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache
+        f16 with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
+        rows before them); out16 fp16 [heads * dim]. splits: tasks per kv head (a fixed number: the split layout depends only on the
+        position, never on the grid); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
+        kv head one task takes (8: the modules' build; the same bits at any value). n_rot = dim = 128, 8 query heads per kv head, T = 1."""
+        M = kv_heads * dim
+        if self.T != 1 or dim != 128 or heads != 8 * kv_heads: raise ValueError('own_atts: T = 1, head dim 128, 8 query heads per kv head')
+        if not 1 <= splits <= 64 or lmin < 32 or lmin % 32: raise ValueError(f"own_atts: splits {splits} (1 .. 64: the merge holds every split's m, l in LDS), lmin {lmin} (a multiple of 32)")
+        if heads_per_task != 8:   # (the device code takes 1 / 2 / 4 only when built with ATS_GH_RUNTIME: measured slower)
+            raise ValueError(f'own_atts: heads_per_task {heads_per_task}: the qwen3moe modules are built for 8')
+        hs = 8 // heads_per_task
+        assert kv_heads * hs <= self.ATS_CNT
+        assert qkv.dtype == par.dtype == scratch.dtype == torch.float32 and cache.dtype == out16.dtype == torch.float16
+        assert qkv.numel() >= heads * dim + 2 * M and par.numel() >= 2 * dim + 2 and out16.numel() >= heads * dim
+        assert scratch.numel() >= self.atts_scratch_floats(kv_heads, splits, heads_per_task) and qkv.data_ptr() % 16 == 0 and scratch.data_ptr() % 16 == 0
+        rows = kv_rows(cache, M, False) - self.ATS_PAD
+        if rows < 1: raise ValueError(f'own_atts: the cache needs {self.ATS_PAD} padding rows past its last position')
+        self._guard_pos(pos, rows)   # (the guard bounds the row it writes; a chunk's loads run up to ATS_PAD - 1 rows past it)
+        self.keep += [qkv, scratch, par, cache, pos, out16]
+        self.segs.append(Seg(OP_OWN_ATTS, splits * kv_heads * hs, dep, heads_per_task, cache.data_ptr(), scratch.data_ptr(), qkv.data_ptr(), pos.data_ptr(),
+                             out16.data_ptr(), scale, heads, dim, dim, splits, team, kv_heads, lmin, 0, par.data_ptr()))
         return len(self.segs) - 1
 
     def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None):

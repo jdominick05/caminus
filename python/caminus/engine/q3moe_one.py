@@ -24,13 +24,19 @@ from .own_layout import q6k_planes
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_gguf_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
+ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: splits per kv head, fewest positions per split. XT, a chain of 48 attention
+                                # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
+                                # 322 / 631; S 64 Lmin 64: 10.3 / 14.0 / 24.9 / 35.0 (Lmin 128: 10.8 / 16.1 / 30.5 / 35.2).
+                                # Measured and dropped: copies of the tape with fewer splits and smaller head groups for
+                                # shallow positions (slower at every depth tried: XT 4.79 -> 4.99 ms at positions 8 .. 48)
 PER_WGP = 6   # workgroups per WGP (12 waves per SIMD of the 16 that fit): interleaved at the same positions, 5 rounds,
               # the lean module, positions 8 .. 72 / 104: XT 8: 4.776, 7: 4.591, 6: 4.513, 5: 4.547 ms per token; XTX 8:
               # 4.143, 7: 4.172, 6: 4.093, 5: 4.056. A segment's hop costs each active wave its share of the SIMD
 
 
 class Q3MoEOne:
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp=PER_WGP, gu=True, attn_batched=True, attn_one=True):
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp=PER_WGP, gu=True, attn_batched=True, attn_one=True,
+                 attn_split=True, splits=ATS_SPLITS, lmin=ATS_LMIN):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -52,13 +58,16 @@ class Q3MoEOne:
         self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
         self.attn_batched = attn_batched   # OP_ATTN_DEC's loads in batches (the same bits; False: one round trip each)
         self.attn_one = attn_one   # the fused tape: q / k norm + RoPE, cache row, attention, fp16 out as one segment
+        self.attn_split = attn_split   # ... split over positions (OP_OWN_ATTS: speed at depth); False: one task per query head
+        self.splits, self.lmin = splits, lmin
         self.emb = F.T['token_embd.weight']
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoEOne: token_embd is {self.emb.type} (Q4_K only)')
         wbytes = sum(t.n_bytes for t in F.tensors)
-        kv = self.nl * max_ctx * k3.kv_pos_bytes(self.nkv * self.hd, False)
-        self.vram_mib = (wbytes + kv) / 2 ** 20 + 256
+        self.cache_rows = max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
+        kv = self.nl * self.cache_rows * k3.kv_pos_bytes(self.nkv * self.hd, False)
+        self.vram_mib = (wbytes + kv + 4 * k3.Engine.atts_scratch_floats(self.nkv, splits)) / 2 ** 20 + 256
         capacity.check([self.dev], [self.vram_mib], f'Q3MoEOne {os.path.basename(path)} (max_ctx {max_ctx}: {self.vram_mib:.0f} MiB)')
         torch.cuda.set_device(self.dev)
         self.pos_host = 0
@@ -69,7 +78,7 @@ class Q3MoEOne:
     def module(self):
         """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
         if self._module is not None: return self._module
-        return MODULE_LEAN if self.fused and self.gu and self.attn_one else MODULE
+        return MODULE_LEAN if self.fused and self.gu and self.attn_one and self.attn_split else MODULE
 
     @module.setter
     def module(self, m): self._module = m
@@ -97,7 +106,7 @@ class Q3MoEOne:
                                q_norm=self._f32(p + 'attn_q_norm.weight'), k_norm=self._f32(p + 'attn_k_norm.weight'),
                                qk_par=None,   # (OP_OWN_ATTN's block: q_norm | k_norm | theta_scale, eps; built below)
                                router=self._f32(p + 'ffn_gate_inp.weight', (self.n_exp, self.D)),
-                               cache=torch.zeros(self.max_ctx * 2 * self.nkv * self.hd, dtype=torch.float16, device='cuda')))
+                               cache=torch.zeros(self.cache_rows * 2 * self.nkv * self.hd, dtype=torch.float16, device='cuda')))
         for d in self.L:
             d['qk_par'] = torch.cat([d['q_norm'], d['k_norm'], torch.tensor([self.theta_scale, self.eps], dtype=torch.float32,
                                                                               device='cuda')]).contiguous()
@@ -109,8 +118,10 @@ class Q3MoEOne:
     def _build_tape(self):
         D, hd, nh, nkv, KU, FF = self.D, self.hd, self.nh, self.nkv, self.k_used, self.ffn
         B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
-        s = self.S = dict(x=B(D), h=B(D), h16=B(D, torch.float16), q=B(nh * hd), k=B(nkv * hd), v=B(nkv * hd),
-                          kv=B(2 * nkv * hd), qo=B(nh * hd), ko=B(nkv * hd), att=B(nh * hd), att16=B(nh * hd, torch.float16), o=B(D),
+        qkv = B(nh * hd + 2 * nkv * hd)   # q | k | v: the matvecs' outputs, one buffer (OP_OWN_ATTS reads it whole)
+        s = self.S = dict(x=B(D), h=B(D), h16=B(D, torch.float16), q=qkv[:nh * hd], k=B(nkv * hd), v=B(nkv * hd),
+                          kv=qkv[nh * hd:], qkv=qkv, ats=B(k3.Engine.atts_scratch_floats(nkv, self.splits)),
+                          qo=B(nh * hd), ko=B(nkv * hd), att=B(nh * hd), att16=B(nh * hd, torch.float16), o=B(D),
                           logit=B(self.n_exp), ids=B(KU, torch.int32), wts=B(KU), g=B(KU * FF), u=B(KU * FF),
                           a16=B(KU * FF, torch.float16), d=B(KU * D), logits=B(self.vocab))
         # the per-pass inputs, one block: [0] the token, [1] its position (one copy from the pinned stage per token)
@@ -131,7 +142,8 @@ class Q3MoEOne:
         mv = lambda w, x16, out, dep, rpt='qkv', **kw: E.own_matvec_1rt(w[3], w[0], w[1], w[2], x16, out, dep=dep,
                                                                        rows_per_task=self.RPT[rpt], **kw)
         prev = E.own_emb(self.emb_dev, 'Q4_K', int(self.emb.shape[1]), D, self.tok, s['x'])
-        if self.fused: return self._tape_fused(E, s, mv, prev)
+        if self.fused:
+            return self._tape_fused(E, s, mv, prev)
         for d in self.L:
             n1 = E.rms_mul(s['x'].view(1, D), d['attn_norm'].view(1, D), s['h'].view(1, D), self.eps, dep=prev)
             c1 = E.own_f16(s['h'], s['h16'], dep=n1)
@@ -180,8 +192,12 @@ class Q3MoEOne:
                 k_ = mv(d['attn_k'], s['h16'], s['kv'][:M], n1)
                 jn = E.also(E.nop(1, 0, dep=k_), v_)
                 q_ = mv(d['attn_q'], s['h16'], s['q'], n1)
-                c2 = E.also(E.own_attn(s['q'], s['kv'], d['qk_par'], d['cache'], self.pos, s['att16'], nh, nkv, hd,
-                                       1.0 / np.sqrt(hd), dep=q_), jn)
+                if self.attn_split:
+                    c2 = E.also(E.own_atts(s['qkv'], s['ats'], d['qk_par'], d['cache'], self.pos, s['att16'], nh, nkv, hd,
+                                           1.0 / np.sqrt(hd), splits=self.splits, lmin=self.lmin, dep=q_), jn)
+                else:
+                    c2 = E.also(E.own_attn(s['q'], s['kv'], d['qk_par'], d['cache'], self.pos, s['att16'], nh, nkv, hd,
+                                           1.0 / np.sqrt(hd), dep=q_), jn)
             else:
                 q_ = mv(d['attn_q'], s['h16'], s['q'], n1)
                 k_ = mv(d['attn_k'], s['h16'], s['k'], n1)

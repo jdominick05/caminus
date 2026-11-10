@@ -1947,7 +1947,10 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #ifdef K3_Q3M_LEAN   // the qwen3moe decode tape's ops and no other (kernels/k3_gguf_q3m_lean.hip); OP_OWN_MV: the
                      // one-round-trip tiles only (caminus.engine.k3 refuses any other op or form on this module)
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
+    if (sg.op == OP_OWN_ATTS) { own_op_atts(sg, t); return true; }
+#ifdef K3_Q3M_LEAN_ATTN   // (measurement builds only: the per-head attention too, for A/Bs inside one code object)
     if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
+#endif
     if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_ROUTER) { op_router(sg, t); return true; }
@@ -2016,7 +2019,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #ifdef K3_OWN_Q3M
     if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
     if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
-    if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
+    if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }   // (OP_OWN_ATTS: the lean modules only; here it took k3_run 89 -> 109 VGPRs)
 #endif
 #endif
 #ifdef K3_GSQ

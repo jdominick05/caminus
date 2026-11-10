@@ -464,4 +464,5 @@ __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
     __asm__ volatile("" : "+v"(o32));
     if (tid < D) ((_Float16 *)sg.y)[(size_t)h * D + tid] = (_Float16)o32;
 }
+#include "k3_own_atts.h"   // OP_OWN_ATTS: the attention split over positions (speed at depth)
 #endif
