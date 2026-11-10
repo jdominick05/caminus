@@ -311,3 +311,87 @@ __device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W,
         if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
     }
 }
+
+// ---- Q6_K in Caminus's plane layout, one round trip per pass. GGUF's Q6_K block (ql[128] | qh[64] | scales[16] | d) is
+// 210 bytes, so in place its parts are not 16-byte aligned; at load the matrix is rearranged into three planes, same total
+// bytes: A = per row, per block, ql | qh (192 B); B = per row, per block, the 16 int8 scales; C = per row, per block, d (fp16).
+// Row r of an R-row matrix with NB blocks per row: A at r * NB * 192, B at R * NB * 192 + r * NB * 16, C at R * NB * 208 +
+// r * NB * 2 (caminus.engine.own_layout.q6k_planes). A lane unit is 64 values: half n and 16 columns c16 of a block, all four
+// quarters: ql bytes n * 64 + c16 (quarters 0 low, 2 high) and n * 64 + 32 + c16 (1 low, 3 high), qh bytes n * 32 + c16 (bits
+// 2 qd), scales n * 8 + c16 / 16 + 2 qd; value n * 128 + 32 qd + c16 + (0 .. 15) = d * scale * (q - 32).
+template <int K, int RW, int UP = 1>
+__device__ __forceinline__ void own_rows_q6k_planes(const uint8_t * __restrict__ Wm, int nrows_total, int row0, int nrows,
+                                                    const _Float16 * __restrict__ x16, float * __restrict__ out, int lane) {
+    constexpr int NB = K / 256, NUNITS = NB * 4, NU = (NUNITS + 31) / 32;
+    const uint8_t * A = Wm;
+    const int8_t * B = (const int8_t *)(Wm + (size_t)nrows_total * NB * 192);
+    const uint16_t * C = (const uint16_t *)(Wm + (size_t)nrows_total * NB * 208);
+    const h2_t off = {(_Float16)1056.0f, (_Float16)1056.0f};   // 1024 + 32: fp16 (1024 + q) - 1056 = q - 32, exact
+    float acc[RW];
+#pragma unroll
+    for (int r = 0; r < RW; r++) acc[r] = 0.0f;
+#pragma unroll
+    for (int i0 = 0; i0 < NU; i0 += UP) {
+        u32x4_t q0[RW][UP], q1[RW][UP], qh[RW][UP], sc[RW][UP], xv[UP][4][2];
+        uint16_t dh[RW][UP];
+#pragma unroll
+        for (int i = 0; i < UP; i++) {                       // every load of the pass, unconditionally
+            const int u = lane + 32 * (i0 + i), uu = (i0 + i < NU && u < NUNITS) ? u : 0;
+            const int b = uu >> 2, n = (uu >> 1) & 1, c16 = (uu & 1) * 16;
+#pragma unroll
+            for (int r = 0; r < RW; r++) {
+                const size_t rr = (size_t)min(row0 + r, nrows - 1);
+                const uint8_t * a = A + (rr * NB + b) * 192;
+                q0[r][i] = *(const u32x4_t *)(a + n * 64 + c16);
+                q1[r][i] = *(const u32x4_t *)(a + n * 64 + 32 + c16);
+                qh[r][i] = *(const u32x4_t *)(a + 128 + n * 32 + c16);
+                sc[r][i] = *(const u32x4_t *)(B + (rr * NB + b) * 16);
+                dh[r][i] = C[rr * NB + b];
+            }
+#pragma unroll
+            for (int qd = 0; qd < 4; qd++) {
+                const _Float16 * xp = x16 + b * 256 + n * 128 + qd * 32 + c16;
+                xv[i][qd][0] = *(const u32x4_t *)xp; xv[i][qd][1] = *(const u32x4_t *)(xp + 8);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < UP; i++) {
+            const int u = lane + 32 * (i0 + i);
+            if (i0 + i >= NU || u >= NUNITS) continue;
+            const int n = (u >> 1) & 1, c16 = (u & 1) * 16;
+#pragma unroll
+            for (int r = 0; r < RW; r++) {
+                const float d = (float)__builtin_bit_cast(_Float16, dh[r][i]);
+                const uint32_t scw[4] = {sc[r][i].x, sc[r][i].y, sc[r][i].z, sc[r][i].w};
+                const uint32_t lw0[4] = {q0[r][i].x, q0[r][i].y, q0[r][i].z, q0[r][i].w};
+                const uint32_t lw1[4] = {q1[r][i].x, q1[r][i].y, q1[r][i].z, q1[r][i].w};
+                const uint32_t hw[4] = {qh[r][i].x, qh[r][i].y, qh[r][i].z, qh[r][i].w};
+                float a = acc[r];
+#pragma unroll
+                for (int qd = 0; qd < 4; qd++) {
+                    const int si = n * 8 + c16 / 16 + 2 * qd;                       // scale index (0 .. 15), per lane
+                    const float s = (float)(int8_t)((scw[si >> 2] >> (8 * (si & 3))) & 0xffu);
+                    const uint32_t xw[8] = {xv[i][qd][0].x, xv[i][qd][0].y, xv[i][qd][0].z, xv[i][qd][0].w,
+                                            xv[i][qd][1].x, xv[i][qd][1].y, xv[i][qd][1].z, xv[i][qd][1].w};
+                    float aq = 0.0f;
+#pragma unroll
+                    for (int w = 0; w < 4; w++) {
+                        const uint32_t lo = ((qd & 1) ? lw1[w] : lw0[w]) >> ((qd & 2) ? 4 : 0);
+                        const uint32_t q = (lo & 0x0f0f0f0fu) | (((hw[w] >> (2 * qd)) & 0x03030303u) << 4);   // 0 .. 63
+                        const uint32_t p01 = __builtin_amdgcn_perm(0u, q, 0x0c010c00u) | 0x64006400u;
+                        const uint32_t p23 = __builtin_amdgcn_perm(0u, q, 0x0c030c02u) | 0x64006400u;
+                        aq = __builtin_amdgcn_fdot2(as_h2(p01) - off, as_h2(xw[2 * w]), aq, false);
+                        aq = __builtin_amdgcn_fdot2(as_h2(p23) - off, as_h2(xw[2 * w + 1]), aq, false);
+                    }
+                    a = __builtin_fmaf(d * s, aq, a);
+                }
+                acc[r] = a;
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < RW; r++) {
+        const float s = wave_sum(acc[r]);
+        if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
+    }
+}

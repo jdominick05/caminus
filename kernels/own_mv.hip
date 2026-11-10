@@ -56,3 +56,22 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_q4_k_1rt_k##KK(const ui
 OWN_Q4K_1RT(2048)
 OWN_Q4K_1RT(4096)
 OWN_Q4K_1RT(768)
+
+// Q6_K in the plane layout (own_rows_q6k_planes), 2 rows per wave, fp16 activations; nrows_total = the matrix's rows (the
+// planes' strides), nrows = the rows to compute (<= nrows_total)
+#define OWN_Q6K_PL(KK)                                                                                                      \
+extern "C" __global__ void __launch_bounds__(256) own_mv_q6_k_pl_k##KK(const uint8_t * W, int nrows, const _Float16 * x16,   \
+        float * out) {                                                                                                  \
+    const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * 2;                                                  \
+    if (row0 < nrows) own_rows_q6k_planes<KK, 2>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31);                     \
+}
+OWN_Q6K_PL(2048)
+OWN_Q6K_PL(4096)
+OWN_Q6K_PL(768)
+
+// a plain read of n16 16-byte words (the bandwidth ceiling of the same bytes): grid-stride, XOR into one word per thread
+extern "C" __global__ void __launch_bounds__(256) own_read(const u32x4_t * __restrict__ p, long n16, uint32_t * __restrict__ sink) {
+    uint32_t a = 0;
+    for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n16; i += (long)gridDim.x * 256) { const u32x4_t v = p[i]; a ^= v.x ^ v.y ^ v.z ^ v.w; }
+    if (a == 0x9e3779b9u) sink[0] = a;   // (never true in practice: keeps the loads)
+}
