@@ -26,7 +26,7 @@ MODULE = 'k3_gguf_q3m_own'
 
 
 class Q3MoEOne:
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None, gu=True):
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None, gu=True, attn_batched=True):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -46,6 +46,7 @@ class Q3MoEOne:
         self.rpt = rpt   # rows per matvec task: 'auto' = each stage's tasks fit the resident grid once, or a number
         self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid; the grid tests set 3 / 6 / 7)
         self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
+        self.attn_batched = attn_batched   # OP_ATTN_DEC's loads in batches (the same bits; False: one round trip each)
         self.emb = F.T['token_embd.weight']
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
@@ -122,7 +123,8 @@ class Q3MoEOne:
             kd = E.qk_nr(s['k'], hd, nkv, hd, d['k_norm'], self.pos, s['ko'], hd, self.theta_scale, self.eps, dep=k_)
             ap = E.also(E.kv_append(s['ko'], s['v'], d['cache'], self.pos, dep=kd), v_)
             qd = E.qk_nr(s['q'], hd, nh, hd, d['q_norm'], self.pos, s['qo'], hd, self.theta_scale, self.eps, dep=q_)
-            a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap), qd)
+            a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
+                                   batched=self.attn_batched), qd)
             c2 = E.own_f16(s['att'], s['att16'], dep=a_)
             o_ = mv(d['attn_output'], s['att16'], s['o'], c2, rpt='o')
             r1 = E.own_moe_sum(s['o'], s['x'], dep=o_)
@@ -154,7 +156,8 @@ class Q3MoEOne:
             kd = E.qk_nr(s['k'], hd, nkv, hd, d['k_norm'], self.pos, s['ko'], hd, self.theta_scale, self.eps, dep=k_)
             ap = E.also(E.kv_append(s['ko'], s['v'], d['cache'], self.pos, dep=kd), v_)
             qd = E.qk_nr(s['q'], hd, nh, hd, d['q_norm'], self.pos, s['qo'], hd, self.theta_scale, self.eps, dep=q_)
-            a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap), qd)
+            a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
+                                   batched=self.attn_batched), qd)
             c2 = E.own_f16(s['att'], s['att16'], dep=a_)
             o_ = mv(d['attn_output'], s['att16'], s['o'], c2, rpt='o')
             n2 = E.own_add_rms16(s['x'], d['ffn_norm'], s['h'], s['h16'], self.eps, d=s['o'], slots=1, dep=o_)

@@ -207,4 +207,92 @@ __device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
         if (j < NI) { const float v = (xv[j] * scale) * wn[j]; h[tid + 256 * j] = v; h16[tid + 256 * j] = (_Float16)v; }
     __syncthreads();
 }
+// OP_ATTN_DEC in the qwen3moe modules: op_attn_dec's arithmetic in its order (the same bits; kernels/k3_gguf_ops.h), with
+// Seg.aux set the loads issued in batches. The serial form takes one load round trip per (position, 32 dims) of a
+// wave's scores and one per position of a thread's V sum: 9.8 us per layer at position 14, 110 us at position 226 (XT
+// trace: 5.3 of 12.0 ms per token). Batched: a wave scores two positions per round with their 4 K loads each (and q's)
+// in flight (head dim a multiple of 128: host-checked), a thread sums V over 8 positions per round, each sum in the
+// same order as before. One workgroup per head still walks every position: the cost stays linear in the position.
+__device__ __forceinline__ void own_op_attn_dec(const Seg & sg, int h) {
+    constexpr int CH = 512;
+    __shared__ float sc[CH]; __shared__ float red[8];
+    // (the batched form reads the f16 cache's halves itself: kv_get's branch on the cache type, and its conversion
+    // next to each load, kept every load a round trip of its own)
+    const bool fast = sg.aux != nullptr && sg.work == 0;
+    const int heads = sg.N / seg_T(sg), tt = h / heads;          // task = token * heads + head
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, D = sg.K, nkv = sg.pad1, g = (h - tt * heads) / (heads / nkv);
+    const int npos = ((const int *)sg.asum)[0] + tt + 1, M = nkv * D, type = sg.work;
+    const size_t pb = kv_pos_bytes(M, type);
+    const float * q = (const float *)sg.a + (size_t)h * D;
+    const uint8_t * cache = sg.W;
+    float run_m = -INFINITY, run_s = 0.0f, acc[2] = {0.0f, 0.0f};
+#pragma unroll 1
+    for (int c0 = 0; c0 < npos; c0 += CH) {
+        const int n = min(CH, npos - c0);
+        if (!fast) {
+            for (int t = wave; t < n; t += 8) {
+                float a = 0.0f;
+                for (int d = lane; d < D; d += 32) a += q[d] * kv_get(cache + (size_t)(c0 + t) * pb, M, type, 0, g * D + d);
+                a = warp_reduce_sum<32>(a);
+                if (lane == 0) sc[t] = a * sg.rs;
+            }
+        } else {
+            for (int t = wave; t < n; t += 16) {                 // positions t and t + 8 (the second clamped, unused past n)
+                const int t1 = min(t + 8, n - 1);
+                float a0 = 0.0f, a1 = 0.0f;
+                const _Float16 * kp0 = (const _Float16 *)(cache + (size_t)(c0 + t) * pb) + g * D;
+                const _Float16 * kp1 = (const _Float16 *)(cache + (size_t)(c0 + t1) * pb) + g * D;
+                for (int d = lane; d < D; d += 128) {
+                    float qv[4]; _Float16 k0[4], k1[4];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) { qv[j] = q[d + 32 * j]; k0[j] = kp0[d + 32 * j]; k1[j] = kp1[d + 32 * j]; }
+                    __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                    for (int j = 0; j < 4; j++) { a0 += qv[j] * (float)k0[j]; a1 += qv[j] * (float)k1[j]; }
+                    __builtin_amdgcn_sched_barrier(0);
+                }
+                a0 = warp_reduce_sum<32>(a0); a1 = warp_reduce_sum<32>(a1);
+                if (lane == 0) { sc[t] = a0 * sg.rs; if (t + 8 < n) sc[t + 8] = a1 * sg.rs; }
+            }
+        }
+        __syncthreads();
+        float m = -INFINITY;
+        for (int t = tid; t < n; t += blockDim.x) m = fmaxf(m, sc[t]);
+        m = warp_reduce_max<32>(m); if (lane == 0) red[wave] = m; __syncthreads();
+        m = red[0]; for (int w = 1; w < 8; w++) m = fmaxf(m, red[w]); __syncthreads();
+        const float mn = fmaxf(run_m, m), corr = expf(run_m - mn);
+        float sum = 0.0f;
+        for (int t = tid; t < n; t += blockDim.x) { const float e = expf(sc[t] - mn); sc[t] = e; sum += e; }
+        sum = warp_reduce_sum<32>(sum); if (lane == 0) red[wave] = sum; __syncthreads();
+        sum = 0.0f; for (int w = 0; w < 8; w++) sum += red[w];
+        run_s = c0 == 0 ? sum : run_s * corr + sum;
+        for (int j = 0; j < 2; j++) {
+            const int d = tid + j * (int)blockDim.x;
+            if (d >= D) break;
+            float part = 0.0f;
+            if (!fast) {
+                for (int t = 0; t < n; t++) part += sc[t] * kv_get(cache + (size_t)(c0 + t) * pb, M, type, 1, g * D + d);
+            } else {
+                const _Float16 * vb = (const _Float16 *)(cache + (size_t)c0 * pb) + M + g * D + d;   // (V of position c0)
+                for (int t = 0; t < n; t += 8) {
+                    _Float16 v[8];
+#pragma unroll
+                    for (int i = 0; i < 8; i++) v[i] = vb[(size_t)min(t + i, n - 1) * (2 * M)];   // (2 M halves per position)
+                    __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                    for (int i = 0; i < 8; i++) { if (t + i < n) part += sc[t + i] * (float)v[i]; }
+                    __builtin_amdgcn_sched_barrier(0);
+                }
+            }
+            acc[j] = c0 == 0 ? part : acc[j] * corr + part;
+        }
+        run_m = mn;
+        __syncthreads();
+    }
+    const float inv = 1.0f / run_s;
+    for (int j = 0; j < 2; j++) {
+        const int d = tid + j * (int)blockDim.x;
+        if (d < D) ((float *)sg.y)[(size_t)h * D + d] = acc[j] * inv;
+    }
+}
 #endif

@@ -701,7 +701,8 @@ class Engine:
         """True on the modules whose attention is the split pair (ATTN_SPLIT_MODULES)"""
         return getattr(self, "module", None) in ATTN_SPLIT_MODULES
 
-    def attn_dec(self, q, cache, pos, out, heads, kv_heads, dim, scale, q8=False, dep=-1, team=-1, max_cells=None, part=None):
+    def attn_dec(self, q, cache, pos, out, heads, kv_heads, dim, scale, q8=False, dep=-1, team=-1, max_cells=None, part=None,
+                 batched=False):
         """decode attention over positions 0..pos (f16 or q8_0 cache), grouped kv heads. On the split modules
         (split_attn()): the OP_ATTN_PART / OP_ATTN_COMB pair (_attn_split; max_cells / part there), the COMB's index returned"""
         if self.split_attn():
@@ -709,10 +710,12 @@ class Engine:
             return self._attn_split(q, cache, pos, None, out, heads, kv_heads, dim, scale, q8, dep, max_cells, part)
         assert max_cells is None and part is None, 'max_cells / part: the split attention modules only'
         assert dim <= 512, 'op_attn_dec holds at most 2 accumulators per thread'
+        if batched and (self.module not in Q3M_MODULES or dim % 128):   # (the same bits, the loads in batches: k3_own_ops.h)
+            raise ValueError('attn_dec(batched=True): the qwen3moe modules, head dim a multiple of 128')
         self._guard_pos(pos, kv_rows(cache, kv_heads * dim, q8))   # (the guard bounds the rows it reads)
         self.keep += [q, cache, pos, out]
         self.segs.append(Seg(OP_ATTN_DEC, self.T * heads, dep, 1, cache.data_ptr(), None, q.data_ptr(), pos.data_ptr(), out.data_ptr(),
-                             scale, self.T * heads, dim, 1, int(q8), team, kv_heads, 0))
+                             scale, self.T * heads, dim, 1, int(q8), team, kv_heads, 0, 0, 1 if batched else None))
         return len(self.segs) - 1
 
     def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None):

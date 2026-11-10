@@ -10,10 +10,14 @@ import numpy as np
 import torch
 from caminus.engine.q3moe_one import Q3MoEOne
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--tokens', type=int, default=64)
-ap.add_argument('--rounds', type=int, default=3, help='speed rounds (each: every form, interleaved token by token)'); A = ap.parse_args()
+ap.add_argument('--rounds', type=int, default=3, help='speed rounds (each: every form, interleaved token by token)')
+ap.add_argument('--positions', type=int, default=24, help='positions of the bitwise comparison (the 24-token text repeated)')
+ap.add_argument('--grids', type=int, nargs='+', default=None, help='arms = the default tape at these workgroups per WGP '
+                '(the first is the base) instead of the tape forms'); A = ap.parse_args()
 print(torch.cuda.get_device_name(0), flush=True)
-ARMS = (('fused', dict(gu=False)), ('fused+gu', dict(gu=True)))   # (name, Q3MoEOne tape options); the first is the base
-eng = Q3MoEOne(A.gguf, max_ctx=2 * A.tokens * len(ARMS) + 64, **ARMS[0][1])
+ARMS = (('attn serial', dict(attn_batched=False)), ('attn batched', dict(attn_batched=True)))   # (name, Q3MoEOne tape options); the first is the base
+if A.grids: ARMS = tuple((f'grid {g}', dict(per_wgp=g)) for g in A.grids)
+eng = Q3MoEOne(A.gguf, max_ctx=max(2 * A.tokens * len(ARMS), A.positions) + 64, **ARMS[0][1])
 forms = {ARMS[0][0]: (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos)}
 for name, opt in ARMS[1:]:
     for k, v in opt.items(): setattr(eng, k, v)
@@ -24,16 +28,17 @@ def use(k): eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = forms[k]
 # (1) bitwise: the same 24 tokens from position 0 through each form (the KV caches are overwritten position by position);
 #     each form twice (is a form bitwise itself?), the residual / norm / expert ids / logits kept per position
 seq = [785, 6722, 315, 9625, 374, 12095, 13, 576, 6722, 315, 15344, 374, 21718, 13, 576, 6722, 315, 9856, 374, 19846, 13, 576, 6722, 315]
+seq = (seq * (A.positions // len(seq) + 1))[:A.positions]
 KEYS = ('x', 'h', 'ids', 'wts', 'logits')
 def run(k):
     use(k); eng.reset(); r = []
-    for t in seq:
-        eng.step(t); r.append({b: eng.S[b].clone().cpu().numpy() for b in KEYS})
+    for i, t in enumerate(seq):   # (every buffer at the first 24 positions, then the logits only)
+        eng.step(t); r.append({b: eng.S[b].clone().cpu().numpy() for b in (KEYS if i < 24 else ('logits',))})
     return r
 out = {k: run(k) for k in forms}; again = {k: run(k) for k in forms}
 bit = lambda a, b: np.array_equal(a.view(np.uint32), b.view(np.uint32))
 for k in forms:
-    ok = all(bit(a[b], c[b]) for a, c in zip(out[k], again[k]) for b in KEYS)
+    ok = all(bit(a[b], c[b]) for a, c in zip(out[k], again[k]) for b in a)
     print(('PASS' if ok else 'FAIL') + f' {k} bitwise itself on a second run', flush=True)
 BASE = ARMS[0][0]
 for name in list(forms)[1:]:

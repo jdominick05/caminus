@@ -1982,7 +1982,11 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #elif defined(K3_QSA)   // (the QSA modules: one attention body, op_attn_sel; Seg.gs = nullptr for OP_ATTN_DEC: the identity list)
     if (sg.op == OP_ATTN_DEC || sg.op == OP_ATTN_SEL) { op_attn_sel(sg, t); return true; }
 #else
+#ifdef K3_OWN_Q3M   // (the same arithmetic; Seg.aux: its loads in batches, kernels/k3_own_ops.h)
+    if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }
+#else
     if (sg.op == OP_ATTN_DEC) { op_attn_dec(sg, t); return true; }
+#endif
 #endif
     if (sg.op == OP_GATE_MUL) { op_gate_mul(sg, t); return true; }
     if (sg.op == OP_GDN_CONV) { op_gdn_conv(sg, t); return true; }

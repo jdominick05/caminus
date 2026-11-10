@@ -289,15 +289,19 @@ __device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W,
             for (int r = 0; r < RW; r++) {
                 const uint8_t * blk = W + (size_t)min(row0 + r, nrows - 1) * RB + (size_t)b * 144;
                 qs[r][i] = *(const u32x4_t *)(blk + 16 + 32 * j + 16 * h);
-#if defined(OWN_READONLY) && OWN_READONLY >= 2   // (measurement: the quant bytes only, no header / activation loads)
+#if defined(OWN_READONLY) && OWN_READONLY == 2   // (measurement: the fold below cancels, so the compiler drops every load)
                 hd[r][i] = qs[r][i];
+#elif defined(OWN_READONLY) && OWN_READONLY >= 4  // (measurement: the quant bytes only; 3: quants + headers, no activations)
+                hd[r][i] = qs[r][i] ^ qs[r][i];
 #else
                 hd[r][i] = *(const u32x4_t *)blk;
 #endif
             }
             const _Float16 * xp = x16 + b * 256 + 64 * j + 16 * h;
-#if defined(OWN_READONLY) && OWN_READONLY >= 2
+#if defined(OWN_READONLY) && OWN_READONLY == 2
             xl[i][0] = xl[i][1] = xh[i][0] = xh[i][1] = qs[0][i]; (void)xp;
+#elif defined(OWN_READONLY) && OWN_READONLY >= 3
+            xl[i][0] = xl[i][1] = xh[i][0] = xh[i][1] = qs[0][i] ^ qs[0][i]; (void)xp;
 #else
             xl[i][0] = *(const u32x4_t *)xp; xl[i][1] = *(const u32x4_t *)(xp + 8);
             xh[i][0] = *(const u32x4_t *)(xp + 32); xh[i][1] = *(const u32x4_t *)(xp + 40);
