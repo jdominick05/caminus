@@ -190,6 +190,40 @@ class Transcript(unittest.TestCase):
                      'passwords must be 12 characters', 'secretary: Dana'):
             self.assertEqual(transcript.redact(keep), keep)
 
+    def test_key_block_redacted_before_the_cut(self):
+        """a private key in a long tool output (`cat id_ed25519; ls -l`): redacted before the output is cut to its share of
+        the brief; a cut that kept the BEGIN line and dropped the END line let the key's lines through. A key whose BEGIN
+        or END a tool already cut off is redacted too (raw and JSON-escaped newlines)"""
+        kl = [(f'K{i}q' + 'A1b2C3d4e5F6' * 6)[:70] for i in range(5)]   # (base64-shaped lines, not a key)
+        blk = '-----BEGIN OPENSSH ' + 'PRIVATE KEY-----\n' + '\n'.join(kl) + '\n-----END OPENSSH ' + 'PRIVATE KEY-----'
+        listing = '\n'.join(f'drwxr-xr-x 2 u u 4096 Nov 10 12:00 dir{i:03d}' for i in range(40))
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 't.jsonl')
+            write_transcript(p, [rec('user', [{'text': 'set up the deploy key'}]),
+                                 rec('tool_result', [{'functionResponse': {'name': 'run_shell_command',
+                                                                           'response': {'output': blk + '\n' + listing}}}])])
+            b = transcript.brief(p, 'x')
+        self.assertIn('[redacted private key]', b)
+        self.assertIn('dir039', b)                                    # (the rest of the output stays)
+        for l in kl:
+            self.assertNotIn(l, b)
+        lines = blk.split('\n')
+        for frag in ('\n'.join(lines[:4]) + '\n[... 900 chars cut ...]', '[... 900 chars cut ...]\n' + '\n'.join(lines[3:]),
+                     json.dumps('\n'.join(lines[:4]))[1:-1] + ' [cut]', '[cut] ' + json.dumps('\n'.join(lines[3:]))[1:-1]):
+            out = transcript.redact('out: ' + frag + ' tail')
+            self.assertIn('[redacted private key]', out, frag)
+            self.assertTrue(out.endswith(' tail'), out)
+            for l in kl:
+                self.assertNotIn(l, out, frag)
+        big = 'A' * 2_000_000 + '\n-----END RSA ' + 'PRIVATE KEY-----'                   # (bounded: no slow regex)
+        t0 = time.monotonic()
+        self.assertEqual(transcript.redact(big), 'A' * (2_000_000 - 16383) + '[redacted private key]')
+        self.assertLess(time.monotonic() - t0, 2.0)
+        t0 = time.monotonic()                                     # (parts joined by _ . -: no quadratic scan)
+        run = 'a.b-' * 100_000 + ' my.app.prod.eu.west.db.password=hunter2hunter2'
+        self.assertTrue(transcript.redact(run).endswith('password=[redacted]'))
+        self.assertLess(time.monotonic() - t0, 2.0)
+
     def test_standing_goal_in_brief(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, 't.jsonl')
@@ -432,6 +466,24 @@ class RefusalRecords(unittest.TestCase):
     def test_clean_answer_is_no_record(self):
         from qwen_advisor import refusal
         self.assertIsNone(refusal.record(dict(ok=True, text='Run pip install -e .', provider='mistral', model='m', tried=[])))
+
+    def test_policy_steering_vs_technical_advice(self):
+        """policy steering is a refusal; an error named "illegal instruction" / "illegal option" in technical advice is not"""
+        from qwen_advisor import refusal
+        for t in ('That path is circumvention; stop and do not weaponize it.',
+                  'Bypassing the paywall is not permitted; do not continue.',
+                  'Proceed only if you have written authorization; otherwise stop.',
+                  'Your authorization does not cover that, so stop here.',
+                  'You are not authorized to test this host, so stop.',
+                  'This is illegal; stop the extraction.',
+                  'Run it only on systems you own; do not scan this range.',
+                  'That is not authorized; stop.', 'Stop the search; that is circumvention and not authorized.',
+                  'This is not permitted, so do not continue.', 'That is illegal access to the account; stop.'):
+            self.assertEqual(refusal.refusal_kind(t), 'policy', t)
+        for t in ('The binary dies with an illegal instruction: do not run the AVX-512 build on this CPU, rebuild with -march=x86-64-v3.',
+                  "zsh: illegal hardware instruction means the same; don't retry it.",
+                  "BSD sed says 'illegal option -- r': do not pass -r there, use -E."):
+            self.assertIsNone(refusal.refusal_kind(t), t)
 
     def test_chain_budget_stops_early(self):
         os.environ['QWEN_ADVISOR_FAKE'] = 'REFUSE:cyber||REFUSE:cyber||REFUSE:cyber'

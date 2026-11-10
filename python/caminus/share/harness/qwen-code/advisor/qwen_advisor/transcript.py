@@ -14,7 +14,9 @@ BRIEF_CHARS = 32000           # the whole brief, bounded
 
 # obvious credentials: provider key prefixes, private key blocks, fields naming a secret (bare, env-style or quoted JSON /
 # YAML keys: db_password=..., "client_secret": "...", AWS_SECRET_ACCESS_KEY=...), and Authorization header schemes
-_KEY = (r'(?:[A-Za-z0-9]+[_.-])*(?:api[_-]?key|apikey|secret(?:[_-]?(?:access[_-]?)?key)?|(?:access|auth|refresh|session|id)?[_-]?token|'
+# (the name's prefix: at most 6 parts, so a long run of parts joined by _ . - costs linear time, not quadratic; a longer name
+# still matches, from a later part: the lookbehind below allows a start after any separator)
+_KEY = (r'(?:[A-Za-z0-9]+[_.-]){0,6}(?:api[_-]?key|apikey|secret(?:[_-]?(?:access[_-]?)?key)?|(?:access|auth|refresh|session|id)?[_-]?token|'
         r'passw(?:or)?d|passphrase|pwd|authorization|private[_-]?key|access[_-]?key|credentials?)')
 _SECRET_RES = [
     re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----', re.S),
@@ -26,10 +28,26 @@ _SECRET_RES = [
     # (not one an earlier pattern already replaced: '[redacted ...]')
     re.compile(r'(?i)(?<![A-Za-z0-9])(["\']?' + _KEY + r'["\']?\s*[:=]\s*)(?:(["\'])((?:\\.|(?!\2).)+)\2|([^\s"\',;}\]\[][^\s"\',;}\]]{2,}))'),
 ]
+# a private key cut off before the hook saw it (a tool's own output limit): a BEGIN line and the base64 lines after it, or
+# the base64 lines before an END line, newlines raw or JSON-escaped. The END side is matched on the reversed text before the
+# marker, anchored, so its cost stays linear
+_PEM_HEAD = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:\r?\n|\\r\\n|\\n)[A-Za-z0-9+/=]+)*')
+_PEM_END = re.compile(r'-----END [A-Z ]*PRIVATE KEY-----')
+_B64_LINES_REV = re.compile(r'(?:(?:\n\r?|n\\(?:r\\)?)(?:[A-Za-mo-z0-9+/=]|n(?!\\))+)+')   # (an n before a backslash: an escaped newline)
+
+
+def _pem_tails(s):
+    out, k = [], 0
+    for m in _PEM_END.finditer(s):
+        t = _B64_LINES_REV.match(s[max(k, m.start() - 16384):m.start()][::-1])
+        out += [s[k:m.start() - (t.end() if t else 0)], '[redacted private key]']
+        k = m.end()
+    return ''.join(out) + s[k:] if out else s
 
 
 def redact(s):
     s = _SECRET_RES[0].sub('[redacted private key]', s)
+    s = _pem_tails(_PEM_HEAD.sub('[redacted private key]', s))
     s = _SECRET_RES[1].sub('[redacted key]', s)
     s = _SECRET_RES[2].sub(lambda m: m.group(1) + m.group(2) + '[redacted]', s)
     return _SECRET_RES[3].sub(lambda m: m.group(1) + (f'{m.group(2)}[redacted]{m.group(2)}' if m.group(2) else '[redacted]'), s)
@@ -39,7 +57,8 @@ ERR_LINE = re.compile(r'\b(?:error|fatal|exception|traceback|failed|failure|deni
 
 
 def _clip(s, n, tail=False):
-    s = s.strip()
+    """s redacted, then cut to about n chars (redacted first: a cut can split a secret, a key block from its END line)"""
+    s = redact(s).strip()
     if len(s) <= n:
         return s
     if tail:   # tool output: the end usually carries the error; error lines from the cut middle are kept too
@@ -110,11 +129,12 @@ def goal(records):
 
 
 def steps(records):
-    """(the user's latest request, earlier user requests (newest first, up to 2), recent steps as text lines)"""
+    """(the user's latest request, earlier user requests (newest first, up to 2), the steps since the request, oldest
+    first, as (label, raw text, chars, tail) for line(): formatted only for the steps the brief shows)"""
     users = [(i, t) for i, r in enumerate(records) if (t := _user_text(r))]
     last_i, task = users[-1] if users else (-1, '')
     earlier = [t for _, t in users[:-1]][-2:][::-1]
-    lines = []
+    out = []
     for r in records[last_i + 1:]:
         typ = r.get('type')
         for p in _parts(r):
@@ -122,18 +142,24 @@ def steps(records):
                 continue
             if typ == 'assistant' and isinstance(p.get('text'), str) and not p.get('thought'):
                 if p['text'].strip():
-                    lines.append('AGENT: ' + _clip(p['text'], 700))
+                    out.append(('AGENT: ', p['text'], 700, False))
             elif isinstance(p.get('functionCall'), dict):
                 fc = p['functionCall']
-                lines.append(f'CALL {fc.get("name")}: ' + _clip(_jdump(fc.get('args', {})), 500))
+                out.append((f'CALL {fc.get("name")}: ', fc.get('args', {}), 500, False))
             elif isinstance(p.get('functionResponse'), dict):
                 fr = p['functionResponse']
                 resp = fr.get('response', {})
                 body = resp.get('output', resp) if isinstance(resp, dict) else resp
                 if isinstance(resp, dict) and resp.get('error'):
                     body = resp['error']
-                lines.append(f'RESULT {fr.get("name")}: ' + _clip(body if isinstance(body, str) else _jdump(body), 1100, tail=True))
-    return task, earlier, lines
+                out.append((f'RESULT {fr.get("name")}: ', body, 1100, True))
+    return task, earlier, out
+
+
+def line(step):
+    """one step as the brief's text line: redacted, then clipped"""
+    label, v, n, tail = step
+    return label + _clip(v if isinstance(v, str) else _jdump(v), n, tail=tail)
 
 
 def brief(path, signal_text, detail='', question='', cwd=''):
@@ -151,8 +177,8 @@ def brief(path, signal_text, detail='', question='', cwd=''):
     head.append('\nTHE USER\'S LATEST ' + ('MESSAGE' if g else 'REQUEST') + ':\n' + (_clip(task, 5000) or '(not found in the transcript)'))
     if earlier:
         head.append('\nEARLIER REQUESTS (newest first):\n' + '\n---\n'.join(_clip(t, 1200) for t in earlier))
-    recent = lines[-MAX_STEPS:]
-    early = lines[:min(EARLY_STEPS, max(0, len(lines) - MAX_STEPS))]
+    recent = [line(s) for s in lines[-MAX_STEPS:]]
+    early = [line(s) for s in lines[:min(EARLY_STEPS, max(0, len(lines) - MAX_STEPS))]]
     gap = len(lines) - len(recent) - len(early)
     text = '\n'.join(head)
     if early:
@@ -162,4 +188,4 @@ def brief(path, signal_text, detail='', question='', cwd=''):
     text += f'\n\nTHE AGENT\'S RECENT STEPS (oldest first, {len(recent)} of {len(lines)} since the request):\n' + '\n'.join(recent)
     if len(text) > BRIEF_CHARS:
         text = text[:BRIEF_CHARS // 3] + '\n[... cut ...]\n' + text[-(BRIEF_CHARS * 2 // 3):]
-    return redact(text)
+    return redact(text)   # (again, on the whole brief: every part was redacted before its cut in _clip)
