@@ -59,13 +59,16 @@ compared with it on the same tokens.
 | The last 64 of 16,384 (prefill, then decode) | 8.80e-04, 62 / 64 | 5.06e-03, 60 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
 | The last 64 of 40,896 (prefill, then decode) | 6.64e-04, 64 / 64 | 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
 
-Caminus is 6 to 9 times closer to the reference than llama.cpp. The reason is the activation precision: these kernels
-multiply the weights by fp16 activations, llama.cpp's by int8.
+Caminus is about 6 times closer to the reference than llama.cpp (5.8 to 8.6 times over the three rows). The reason is
+the activation precision: these kernels multiply the weights by fp16 activations, llama.cpp's by int8.
 
 How exact the reference is: at 128 tokens the fp32 reference differs from the float64 one by a mean KLD of 6.5e-11. At
 depth an fp32 reference is less sharp. Two fp32 evaluations whose attention products have different shapes (so their
 sums run in a different order) differ by 7e-05 at 16,384 tokens and 1.8e-04 at 40,896, with top-1 equal at all 64
-positions. Differences below about 2e-04 mean nothing there. Both engines sit well above that.
+positions. Differences below about 2e-04 mean nothing there. Both engines sit well above that. The two depth rows
+were measured again, against another fp32 evaluation of the reference, when the engine's attention layout changed:
+llama.cpp's own figures moved with the reference (5.16e-03 to 5.06e-03 and 5.35e-03 to 5.73e-03), by more than that
+2e-04 at 40,896, so read the depth rows to one digit.
 
 Through the server at the full 40,960-token context, a passphrase placed at 37 % of a 37,659-token prompt is found.
 
@@ -130,8 +133,35 @@ Two checks hold this, and both run without trusting a list written by hand:
 
 ## Where the remaining time is
 
-At short context a token takes 4.03 ms against a 2.24 ms bound. Measured on the XT with builds that drop the loads or
-the arithmetic (an earlier build, 4.38 ms per token there):
+At short context a token takes 4.03 ms against a 2.24 ms bound. One traced token on the RX 7900 XTX
+(`benchmarks/q3moe_trace.py`; the trace build takes 4.22 ms), each stage's time on the critical path against the time
+its weights take at the card's 858 GB/s:
+
+| Stage, per layer | Weights read | At bus speed | Measured | Over, per token |
+|---|---|---|---|---|
+| Expert gate and up | 14.2 MB | 16.5 µs | 20.7 µs | 0.20 ms |
+| Expert down | 8.7 MB | 10.1 µs | 15.2 µs | 0.24 ms |
+| Attention q, k, v | 6.0 MB | 7.0 µs | 10.5 µs | 0.17 ms |
+| Attention output | 4.7 MB | 5.5 µs | 8.6 µs | 0.15 ms |
+| Router matvec | 1.0 MB | 1.2 µs | 2.3 µs | 0.05 ms |
+| Output head (once) | 255 MB | 297.5 µs | 300.6 µs | 0.00 ms |
+| Attention, 8 positions | none | | 11.9 µs | 0.57 ms |
+| Add + norm (twice) | none | | 3.6 µs each | 0.35 ms |
+| Router top 8 | none | | 3.4 µs | 0.16 ms |
+| Hand-offs between stages | | | 0.2 µs each | 0.09 ms |
+
+- **A long stage runs at the bus's speed:** the output head, 255 MB in one stage, takes 99 % of its bound's time.
+- **Every weight stage of a layer costs 3 to 5 µs on top of its bytes**, whatever its size: 0.81 ms per token over
+  the 48 layers. That is the stage starting and ending (the first loads' latency with an idle bus, the last tasks'
+  stores and publishes), not a slow kernel.
+- **The stages that read no weights take 1.09 ms per token** with the bus idle: the attention, the two adds and
+  norms and the router's top 8 of every layer. Each is one task wide (the attention: one task per split).
+- So the 1.99 ms above the bound is the model's shape on this engine: 5 weight stages and 4 others per layer, 48
+  times. What would take it down is fewer, longer stages per token (a model with fewer and wider layers, or stages
+  whose weights can be read together), not a faster kernel for any one of them.
+
+An earlier measurement on the XT, with builds that drop the loads or the arithmetic (an earlier build, 4.38 ms per
+token there):
 
 | Part | Time |
 |---|---|
@@ -159,8 +189,9 @@ Looked at and left alone, each with the same bits as the build it was timed agai
 - **Wider matvec tiles.** Four rows per wave instead of two, two unit passes at once, or an unrolled pass, with the
   register cap raised to fit them (120 or 144 registers, no spills): 0.01 to 0.44 ms per token slower. More bytes in
   flight per wave with fewer workgroups does not read faster.
-- **Other task sizes.** 8, 32, 48, 64 or 80 rows per task for any one stage: equal within 0.01 ms or slower (8 rows
-  for the down projection: 0.26 ms slower, about 1.3 µs per extra claim and publish of each workgroup).
+- **Other task sizes.** 8, 32, 48, 64 or 80 rows per task for any one stage: equal within 0.01 ms or slower. Fewer claims
+  (32 to 80 rows per task) are not faster, so the claim is not what a task costs. 8 rows for the down projection is
+  0.26 ms slower, but there half of a workgroup's 8 waves have no rows (two rows per wave).
 - **Wider add + norm reads** after the down projection (2, 4 or 8 round trips' worth at once): within 0.01 ms, or
   slower.
 - **Touching a stage's weights before its wait:** from 0.1 ms faster to 0.2 ms slower by stage and depth; no setting
@@ -206,7 +237,10 @@ over a prefilled context, `benchmarks/q3moe_verify.py --depths 512,4096,16384,40
   card's bandwidth before any overhead. Unquantized that leaves nothing at 4,096 positions and beyond; quantized to
   4 bits it would read in about 0.25 ms, with its acceptance to be measured again.
 - **Decoding got faster after this was first measured, and the ratios fell with it** (they were 1.21×, 1.14×, 1.07×
-  and 1.04×): a pass of T tokens gained less from the smaller grid than a decode step did.
+  and 1.04×). The verify engine runs on the decode engine's grid, and the smaller grid suits it less: at depth 512
+  the passes of 2, 3 and 4 got slower (5.99, 7.53, 9.19 ms before), as did the passes of 3 and 4 at 40,900; at 4,096
+  and 16,384 they gained, but less than a decode step. With the earlier grid's pass of 3 a draft may cost 1.4 ms at
+  depth 512 instead of 1.1; a grid of the verify engine's own was not tried.
 
 Why a T-token pass is not cheap here (the pass of 4, from its trace):
 
