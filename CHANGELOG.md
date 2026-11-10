@@ -5,6 +5,14 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ## Unreleased
 
+### New
+
+- **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
+  card: 231 tok/s at short context, 187 with 4K tokens of context, 104 at its full 40,960 (llama.cpp on the same
+  card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,493 tok/s (llama.cpp: 3,853). Every step from the
+  GGUF file to the output token is code written for Caminus, and its output is 5 to 7 times closer to an exact
+  reference of the model than llama.cpp's. See [docs/dev/qwen3-30b-a3b.md](docs/dev/qwen3-30b-a3b.md).
+
 ### Fixed
 
 - **Background requests no longer push your conversation out.** Qwen Code sends two background memory jobs (about 30K

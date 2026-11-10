@@ -6,9 +6,10 @@ CLAUDE.md imports this file.
 ## What this is
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
-- It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
+- It serves six models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
   cards, with the DFlash2 drafter), Qwen3.6-35B-A3B GSQ and HauhauCS (one card), AREX-2 27B (one card, the only dense
-  model), Qwen3-Coder-Next (two cards). `python/caminus/models.py` is the catalog.
+  model), Qwen3-Coder-Next (two cards), Qwen3-30B-A3B Q4_K_M (one 24 GB card, on Caminus's own code from the GGUF file
+  to the token: docs/dev/qwen3-30b-a3b.md). `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
 - Tested on one machine only: an RX 7900 XTX (drives the monitors) + an RX 7900 XT on a PCIe 4.0 x4 link, 29 GiB RAM, Linux.
@@ -34,6 +35,7 @@ CLAUDE.md imports this file.
 | Building, testing, GPU rules | docs/dev/building.md, testing.md, gpu-safety.md |
 | Adding a model family | docs/dev/adding-a-model.md |
 | Where each published number comes from | docs/dev/benchmarks.md |
+| The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
 
 ## Layout (the parts that need a reason)
@@ -50,7 +52,9 @@ CLAUDE.md imports this file.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
-- `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`.
+- `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
+  `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
+  tokenizers library off its path).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
   `q3m.py` (qwen3moe) is the exception: its own WMMA kernels (`kernels/q3m_prefill.hip`) are G-model gated, not
   bitwise; chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see that file's attention).
