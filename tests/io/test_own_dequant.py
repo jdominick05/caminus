@@ -32,6 +32,9 @@ tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
 for name, ours, ref in tabs:
     ok = ours.shape == ref.shape and np.array_equal(ours.astype(np.float64), ref.astype(np.float64)); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name} equals the table of gguf-py')
+hdr = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'kernels', 'iq_grids.h')
+ok = open(hdr).read() == iq_tables.c_header(); bad += not ok
+print(('PASS' if ok else 'FAIL') + ' kernels/iq_grids.h is the tables\' own header (iq_tables.c_header)')
 if A.gguf is None:
     print('RESULT', 'PASS' if bad == 0 else 'FAIL'); sys.exit(1 if bad else 0)
 F = ggufio.GGUFFile(A.gguf)

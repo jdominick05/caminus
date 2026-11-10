@@ -145,3 +145,28 @@ def _grid(hx, n):
 GRID_IQ2_XXS = _grid(_GRID_IQ2_XXS, 8)   # uint8 [256, 8]
 GRID_IQ3_XXS = _grid(_GRID_IQ3_XXS, 4)   # uint8 [256, 4]
 GRID_IQ3_S = _grid(_GRID_IQ3_S, 4)       # uint8 [512, 4]
+
+
+def c_header():
+    """kernels/iq_grids.h: the three grids for the kernels (an entry's byte k = its magnitude k, little-endian words).
+    Regenerate: python -I python/caminus/iq_tables.py > kernels/iq_grids.h (tests/io/test_own_dequant.py compares)."""
+    notice = __doc__[__doc__.index('MIT License'):]
+    out = ['// The grids of GGUF\'s IQ3_XXS, IQ3_S and IQ2_XXS block formats for the kernels (kernels/own_quant_iq.h): format',
+           '// constants, ggml\'s data (llama.cpp, ggml/src/ggml-common.h: iq3xxs_grid, iq3s_grid, iq2xxs_grid). An entry is 4',
+           '// (IQ3) or 8 (IQ2_XXS) magnitudes, byte k = magnitude k. Generated from python/caminus/iq_tables.py (c_header);',
+           '// do not edit. Listed in THIRD_PARTY.md.', '//'] + ['// ' + l if l else '//' for l in notice.split('\n')]
+    out += ['#pragma once', '#include <stdint.h>']
+    for name, g, ty, sfx in (('IQ3XXS_GRID', GRID_IQ3_XXS, 'uint32_t', 'u'), ('IQ3S_GRID', GRID_IQ3_S, 'uint32_t', 'u'),
+                             ('IQ2XXS_GRID', GRID_IQ2_XXS, 'uint64_t', 'ull')):
+        assert g.min() >= 1 and g.max() <= 127          # (the kernels negate a magnitude bytewise: no zero, no carry)
+        w = [int.from_bytes(bytes(e.tolist()), 'little') for e in g]
+        per, digits = (8, 8) if ty == 'uint32_t' else (4, 16)
+        out.append(f'static const __device__ {ty} {name}[{len(w)}] = {{')
+        out += ['    ' + ', '.join(f'0x{v:0{digits}x}{sfx}' for v in w[i:i + per]) + ',' for i in range(0, len(w), per)]
+        out.append('};')
+    return '\n'.join(out) + '\n'
+
+
+if __name__ == '__main__':
+    import sys
+    sys.stdout.write(c_header())

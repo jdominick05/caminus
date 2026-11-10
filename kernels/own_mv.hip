@@ -13,6 +13,7 @@
 #include <hip/hip_runtime.h>
 
 #include "own_quant.h"
+#include "own_quant_iq.h"
 
 // ---- the activations each mode reads, from fp32 x [K] (K % 32 == 0) -----------------------------------------------------
 // own_q8: int8 per 32 values: d = amax / 127 (fp32), q = round-to-nearest-even(x / d), and the exact fp32 sum of the block's x
@@ -68,6 +69,31 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_q6_k_pl_k##KK(const uin
 OWN_Q6K_PL(2048)
 OWN_Q6K_PL(4096)
 OWN_Q6K_PL(768)
+
+// the codebook formats' tiles (kernels/own_quant_iq.h) at the experts' K values (2048: gate / up, 768: down), RW rows per
+// wave, fp16 activations
+#define OWN_IQ_1RT(FMT, KK, RW)                                                                                              \
+extern "C" __global__ void __launch_bounds__(256) own_mv_##FMT##_1rt_k##KK##_r##RW(const uint8_t * W, int nrows,           \
+        const _Float16 * x16, float * out) {                                                                            \
+    const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * RW;                                                 \
+    if (row0 < nrows) own_rows_##FMT##_1rt<KK, RW>(W, row0, nrows, x16, out, threadIdx.x & 31);                          \
+}
+OWN_IQ_1RT(iq4xs, 2048, 2)
+OWN_IQ_1RT(iq4xs, 768, 2)
+// the grid formats: the workgroup stages its grid in LDS first (iq*_stage)
+#define OWN_IQG_1RT(NAME, FMT, KK, RW)                                                                                       \
+extern "C" __global__ void __launch_bounds__(256) own_mv_##NAME##_1rt_k##KK##_r##RW(const uint8_t * W, int nrows,          \
+        const _Float16 * x16, float * out) {                                                                            \
+    NAME##_stage(threadIdx.x);                                                                                          \
+    const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * RW;                                                 \
+    if (row0 < nrows) own_rows_iqg_1rt<FMT, KK, RW>(W, row0, nrows, x16, out, threadIdx.x & 31);                         \
+}
+OWN_IQG_1RT(iq3xxs, 0, 2048, 2)
+OWN_IQG_1RT(iq3xxs, 0, 768, 2)
+OWN_IQG_1RT(iq3s, 1, 2048, 2)
+OWN_IQG_1RT(iq3s, 1, 768, 2)
+OWN_IQG_1RT(iq2xxs, 2, 2048, 2)
+OWN_IQG_1RT(iq2xxs, 2, 768, 2)
 
 // a plain read of n16 16-byte words (the bandwidth ceiling of the same bytes): grid-stride, XOR into one word per thread
 extern "C" __global__ void __launch_bounds__(256) own_read(const u32x4_t * __restrict__ p, long n16, uint32_t * __restrict__ sink) {
