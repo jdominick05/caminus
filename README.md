@@ -66,7 +66,7 @@ are welcome too.
 | AREX-2 27B (17 GB) | 1 (24 GB) | 41 tok/s | 36 tok/s |
 | Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
 | Qwen3-Coder-Next 80B (30 GB) | 2 | 136 tok/s | 82 tok/s |
-| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB) | 231 tok/s | 148 tok/s |
+| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB) | 246 tok/s | 148 tok/s |
 
 Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:
 [models](docs/models.md). Where every number comes from: [benchmarks](docs/dev/benchmarks.md).
