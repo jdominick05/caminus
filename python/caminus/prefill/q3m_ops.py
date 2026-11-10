@@ -10,6 +10,7 @@ import ctypes
 import torch
 
 from ..device import hip
+from ..engine import k3
 
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
@@ -76,7 +77,16 @@ class Ops:
     def swiglu(self, g, u, y16, n):
         self.mod.q3p_swiglu((min(-(-n // 256), 4096),), (256,), g, u, y16, I(n))
 
+    def _span(self, what, cache, pos0, n, nkv):
+        """the host check before a position-indexed launch (neither kernel clamps): positions pos0 .. pos0 + n - 1 must be
+        rows of this cache (2 * nkv * 128 fp16 per row), else k3.ContextBoundsError and nothing is launched"""
+        if n < 1 or nkv < 1: raise ValueError(f'q3m {what}: n {n}, nkv {nkv}')
+        k3.check_span(pos0, n, cache.numel() // (2 * nkv * 128), what=f'q3m {what}')
+
     def qk_rope(self, qkv, ldq, nh, nkv, par, pos0, q16, cache, n):
+        self._span('qk_rope', cache, pos0, n, nkv)
+        if ldq < (nh + 2 * nkv) * 128 or qkv.numel() < (n - 1) * ldq + (nh + 2 * nkv) * 128 or q16.numel() < n * nh * 128:
+            raise ValueError(f'q3m qk_rope: {n} tokens need qkv rows of {(nh + 2 * nkv) * 128} (stride {ldq}) and {n * nh * 128} q16')
         self.mod.q3p_qk_rope((n, nh + nkv), (128,), qkv, I(ldq), I(nh), I(nkv), par, I(pos0), q16, cache)
 
     def attn_blocks(self, pos0, n):
@@ -86,8 +96,12 @@ class Ops:
 
     def attn(self, q16, cache, pos0, n, nkv, scale, out16, i0=0, i1=None):
         """blocks [i0, i1) of the chunk's attn_blocks (one launch; the caller splits long chunks by blocks)"""
+        self._span('attn', cache, pos0, n, nkv)
         b0, nb = self.attn_blocks(pos0, n)
         i1 = nb if i1 is None else i1
+        if not 0 <= i0 < i1 <= nb: raise ValueError(f'q3m attn: blocks [{i0}, {i1}) of {nb}')
+        if min(q16.numel(), out16.numel()) < n * nkv * 8 * 128:
+            raise ValueError(f'q3m attn: {n} tokens need {n * nkv * 8 * 128} values of q16 and out16')
         import math
         self.mod.q3p_attn((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(nkv),
                           F(scale * math.log2(math.e)), out16)

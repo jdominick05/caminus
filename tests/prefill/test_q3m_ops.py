@@ -1,5 +1,6 @@
 """kernels/q3m_prefill.hip (the qwen3moe batched prefill's own kernels) against float64 on the model's real rows and random
-activations; needs the Qwen3-30B-A3B Q4_K_M GGUF and one card (~1.5 GB).
+activations; needs the Qwen3-30B-A3B Q4_K_M GGUF and one card (under 1 GB: projected from the file's header and checked
+against the card's guard line before the first transfer).
 
   GEMMs     Q4_K dense (blk.0 attn_q), Q6_K dense (blk.0 attn_v: the decode's plane layout), Q4_K experts (blk.0 gate) and
             Q6_K experts (blk.0 down) through q3p_group's work items, token counts that leave partial tiles: max and
@@ -7,13 +8,16 @@ activations; needs the Qwen3-30B-A3B Q4_K_M GGUF and one card (~1.5 GB).
   glue      q3p_emb bitwise caminus.own_dequant's rows; add_rms16, router, swiglu vs float64; topk's ids equal numpy's
             ranking of the same float32 probabilities and its weights within float32 rounding
   attention q3p_qk_rope vs float64 (norm + RoPE; the cache rows) and q3p_attn vs float64 causal attention over random
-            fp16 rows below the chunk, at a depth with partial chunks; and the same output when launched in token splits
+            fp16 rows below the chunk, at a depth with partial chunks; and the same output when launched in token splits;
+            a span outside the cache is refused by the launch wrappers before any launch
   tools/guard.sh LOG 600 python -I tests/prefill/test_q3m_ops.py GGUF
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
 from caminus import ggufio, own_dequant
+from caminus.device import capacity
+from caminus.engine import k3
 from caminus.engine.own_layout import q6k_planes
 from caminus.prefill import q3m_ops
 from caminus.prefill.q3m_ops import Ops
@@ -22,6 +26,14 @@ path = sys.argv[1]
 F = ggufio.GGUFFile(path)
 dev = torch.device('cuda:0')
 print(torch.cuda.get_device_name(0), flush=True)
+# every model tensor this test puts on the card (each stays cached by the allocator after its section), the test's own
+# buffers (the largest: the experts' fp32 output, 1,200 x 2,048) and the HIP context
+TENSORS = ('blk.0.attn_q.weight', 'blk.0.attn_v.weight', 'blk.1.attn_k.weight', 'blk.0.ffn_gate_exps.weight',
+           'blk.0.ffn_down_exps.weight', 'token_embd.weight', 'blk.3.ffn_gate_inp.weight')
+WORK_MIB, CONTEXT_MIB = 96, 256
+need_mib = sum(F.T[name].n_bytes for name in TENSORS) / 2 ** 20 + WORK_MIB + CONTEXT_MIB
+capacity.check([0], [need_mib], f'test_q3m_ops ({need_mib:.0f} MiB projected)')
+print(f'projected {need_mib:.0f} MiB', flush=True)
 O = Ops(dev)
 g = np.random.default_rng(5)
 ok = True
@@ -177,5 +189,23 @@ o3 = torch.zeros_like(out)
 O.attn(q16, cache, pos0, cut, nkv, 1.0 / np.sqrt(hd), o3); O.attn(q16[cut:], cache, pos0 + cut, n - cut, nkv, 1.0 / np.sqrt(hd), o3[cut:])
 torch.cuda.synchronize()
 check(torch.equal(out.view(torch.int16), o3.view(torch.int16)), f'attn: the chunk cut at token {cut} (position {pos0 + cut}) gives the same bits')
+
+# ---- a span outside the cache: refused on the host, nothing launched, the cache and the outputs keep their bytes
+qd = torch.from_numpy(qkv).to(dev)
+keep = (cache.clone(), q16.clone(), out.clone())
+sc_ = 1.0 / np.sqrt(hd)
+for what, fn in (('qk_rope at position -1', lambda: O.qk_rope(qd, nh * hd + 2 * M, nh, nkv, par, -1, q16, cache, n)),
+                 ('qk_rope one row past the cache', lambda: O.qk_rope(qd, nh * hd + 2 * M, nh, nkv, par, ctx - n + 1, q16, cache, n)),
+                 ('attn at position -1', lambda: O.attn(q16, cache, -1, n, nkv, sc_, out)),
+                 ('attn one row past the cache', lambda: O.attn(q16, cache, ctx - n + 1, n, nkv, sc_, out)),
+                 ('attn at a position that is not an int', lambda: O.attn(q16, cache, 1000.5, n, nkv, sc_, out))):
+    try: fn(); r = False
+    except k3.ContextBoundsError: r = True
+    torch.cuda.synchronize()
+    same = all(torch.equal(a.view(torch.int16), b.view(torch.int16)) for a, b in zip((cache, q16, out), keep))
+    check(r and same, f'{what}: refused before the launch, cache / q16 / output unchanged')
+torch.cuda.synchronize()
+print(f'peak {torch.cuda.max_memory_reserved(0) / 2 ** 20:.0f} MiB reserved by the allocator (projected {need_mib:.0f})', flush=True)
+check(torch.cuda.max_memory_reserved(0) / 2 ** 20 <= need_mib, 'the allocator stayed under the projection')
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
