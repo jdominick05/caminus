@@ -284,7 +284,8 @@ class Q3MoEOne:
     def step(self, tok, trace=None):
         """one token at the next position: its logits (fp32 [vocab], on the device; valid until the next step); trace: an
         int64 buffer [grid * segments * 8] for the _trace module's timestamps"""
-        if self.pos_host >= self.max_ctx: raise k3.ContextBoundsError(f'Q3MoEOne: position {self.pos_host} past max_ctx {self.max_ctx}')
+        if self.poisoned: raise k3.ContextBoundsError(f'Q3MoEOne step: refused until reset(): {self.poisoned}')
+        k3.check_span(self.pos_host, 1, self.max_ctx, what='Q3MoEOne step')   # (before the staging block is written)
         if not 0 <= int(tok) < self.vocab: raise ValueError(f'Q3MoEOne: token {tok} outside the vocabulary ({self.vocab})')
         with torch.cuda.device(self.dev):
             self.hstage[0] = int(tok); self.hstage[1] = self.pos_host

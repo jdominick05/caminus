@@ -50,17 +50,22 @@ Through the HTTP server (`tools/serve_smoke1.py`, one request each): 225 tok/s o
 ### Accuracy
 
 The reference is the same model computed in floating point with exactly decoded weights: float64 on the CPU at short
-context (`tools/reference/q3moe_ref.py`), fp32 on a card at depth (`tools/reference/q3moe_ref32.py`, which differs from
-the float64 one by a mean KLD of 6.5e-11). Both engines are compared with it on the same tokens.
+context (`tools/reference/q3moe_ref.py`), fp32 on a card at depth (`tools/reference/q3moe_ref32.py`). Both engines are
+compared with it on the same tokens.
 
 | Where | Caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 | Tool |
 |---|---|---|---|
 | 128 tokens, decode | 4.66e-04, 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` |
-| The last 64 of 16,384 (prefill, then decode) | 9.61e-04, 62 / 64 | 5.06e-03, 60 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
-| The last 64 of 40,896 (prefill, then decode) | 7.97e-04, 64 / 64 | 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
+| The last 64 of 16,384 (prefill, then decode) | 9.75e-04, 62 / 64 | 5.16e-03, 60 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
+| The last 64 of 40,896 (prefill, then decode) | 9.17e-04, 64 / 64 | 5.35e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
 
-Caminus is 5 to 7 times closer to the reference than llama.cpp. The reason is the activation precision: these kernels
+Caminus is 5 to 6 times closer to the reference than llama.cpp. The reason is the activation precision: these kernels
 multiply the weights by fp16 activations, llama.cpp's by int8.
+
+How exact the reference is: at 128 tokens the fp32 reference differs from the float64 one by a mean KLD of 6.5e-11. At
+depth an fp32 reference is less sharp. Two fp32 evaluations whose attention products have different shapes (so their
+sums run in a different order) differ by 7e-05 at 16,384 tokens and 1.8e-04 at 40,896, with top-1 equal at all 64
+positions. Differences below about 2e-04 mean nothing there. Both engines sit well above that.
 
 Through the server at the full 40,960-token context, a passphrase placed at 37 % of a 37,659-token prompt is found.
 

@@ -1,7 +1,7 @@
 """Q3MoEOne (qwen3moe on one card, Caminus's own code from the GGUF to the logits) against caminus.ref_q3moe (the float64
 host forward on the same reader, decoders and tokenizer): the same token sequence (the prompt, then the reference's own
 greedy continuation) through both; per position top-1 agreement, KLD(ref || gpu) and max |logit difference|; then the
-engine's own greedy text and its decode speed. Prints PASS / FAIL lines and RESULT PASS | FAIL.
+engine's own greedy text and its decode speed; the standalone step's host refusals. Prints PASS / FAIL lines and RESULT PASS | FAIL.
 Gate (spec-own-quant.md, first form): top-1 equal at every position, mean KLD < 1e-3.
   tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache FILE.npz [--prompt TEXT] [--new 3]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
@@ -84,4 +84,19 @@ for _ in range(A.speed):
     t1 = time.perf_counter(); lg = eng.step(int(torch.argmax(lg))); ts.append(time.perf_counter() - t1)
 ms = 1e3 * float(np.median(ts))
 print(f'decode: median {ms:.3f} ms/token = {1e3 / ms:.1f} tok/s over {A.speed} steps (pos {eng.pos_host}; host embedding + launch + sync)')
+# the standalone step's host checks: a position outside [0, max_ctx) and a poisoned engine are refused before the staging
+# block is written (the stage and the KV rows compared)
+from caminus.engine import k3
+def refused(what, pos=None, poison=None):
+    global ok
+    p0, st0, kv0 = eng.pos_host, eng.hstage.clone(), eng.L[0]['cache'][:4096].clone()
+    if pos is not None: eng.pos_host = pos
+    if poison: eng.poisoned = poison
+    try: eng.step(seq[0]); r = False
+    except k3.ContextBoundsError: r = True
+    r &= torch.equal(eng.hstage, st0) and torch.equal(eng.L[0]['cache'][:4096], kv0) and eng.pos_host == (p0 if pos is None else pos)
+    eng.pos_host, eng.poisoned = p0, None
+    print(('PASS' if r else 'FAIL') + f' step refused, nothing staged or written: {what}'); ok &= r
+refused('position -1', pos=-1); refused(f'position max_ctx ({eng.max_ctx})', pos=eng.max_ctx)
+refused('a non-int position', pos=1.5); refused('a poisoned engine', poison='test')
 print('RESULT', 'PASS' if ok else 'FAIL')

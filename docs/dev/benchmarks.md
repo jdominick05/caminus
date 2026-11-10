@@ -102,7 +102,7 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 | Prefill of 512 / 4,096 / 32,768 tokens | **5,230 / 6,493 / 2,791 tok/s** | 4,330 / 3,853 / 1,794 tok/s | `benchmarks/q3moe_prefill.py --chunk 2048 --rounds 3` from empty; llama.cpp: pp512, pp4096, pp32768 |
 | Through the server | decode 225 tok/s short, 182 after 6,587 prompt tokens, 113 after 37,659; that prompt read at 2,472 tok/s, first token in 15.3 s | | `tools/serve_smoke1.py --max-ctx 40960 --needle 38000 --block-imports gguf,tokenizers`: one request each |
 | Mean KLD against the reference, 128 tokens | **4.66e-04**, top-1 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
-| The same for the last 64 of 16,384 / 40,896 tokens | **9.61e-04**, 62 / 64; **7.97e-04**, 64 / 64 | 5.06e-03, 60 / 64; 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
+| The same for the last 64 of 16,384 / 40,896 tokens | **9.75e-04**, 62 / 64; **9.17e-04**, 64 / 64 | 5.16e-03, 60 / 64; 5.35e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
 
 ## Not measured
 

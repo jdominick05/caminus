@@ -23,16 +23,30 @@ import struct
 import numpy as np
 import torch
 
+from ..device import capacity
+
 CFG = dict(layers=5, D=2048, heads=32, kv_heads=4, head_dim=128, ffn=6144, eps=1e-6, theta=1e6, window=2048, block=8,
            mask_token=151669, draft_vocab=32000, aux_layers=(1, 12, 23, 34, 45))
 
 
-def read_safetensors(path, device='cpu'):
-    """{name: tensor} from a safetensors file (BF16 -> float32, I64, BOOL), parsed from its header"""
-    out = {}
+def safetensors_header(path):
+    """(the header's {name: entry}, the data's file offset)"""
     with open(path, 'rb') as f:
         n = struct.unpack('<Q', f.read(8))[0]
-        head = json.loads(f.read(n)); base = 8 + n
+        return json.loads(f.read(n)), 8 + n
+
+
+def loaded_bytes(head):
+    """bytes read_safetensors's tensors take once loaded (BF16 widened to fp32: twice the file's)"""
+    return sum((v['data_offsets'][1] - v['data_offsets'][0]) * (2 if v['dtype'] == 'BF16' else 1)
+               for k, v in head.items() if k != '__metadata__')
+
+
+def read_safetensors(path, device='cpu'):
+    """{name: tensor} from a safetensors file (BF16 -> float32 on the host, I64, BOOL), parsed from its header"""
+    out = {}
+    head, base = safetensors_header(path)
+    with open(path, 'rb') as f:
         for k, v in head.items():
             if k == '__metadata__': continue
             a, b = v['data_offsets']; f.seek(base + a); raw = np.frombuffer(f.read(b - a), dtype=np.uint8)
@@ -45,9 +59,20 @@ def read_safetensors(path, device='cpu'):
 
 
 class DFlashQ3MRef:
-    def __init__(self, path, device='cuda', cfg=CFG):
-        self.c = dict(cfg)
+    def __init__(self, path, device='cuda', cfg=CFG, vram_check=True):
+        self.c = c = dict(cfg)
         f = os.path.join(path, 'model.safetensors') if os.path.isdir(path) else path
+        # VRAM, projected from the file's header before anything is on the card: the widened weights + one pass's
+        # workspace over a full window (per layer: the sources, k and v and their per-query-head copies, the scores and
+        # their softmax; the block's logits) + 256 MiB (the runtime's own memory, allocator rounding)
+        rows = c['window'] + c['block']
+        work = rows * (2 * c['D'] + (2 * c['kv_heads'] + 2 * c['heads']) * c['head_dim']) * 4 \
+            + 3 * c['heads'] * c['block'] * rows * 4 + 2 * c['block'] * c['draft_vocab'] * 4
+        self.vram_mib = (loaded_bytes(safetensors_header(f)[0]) + work) / 2 ** 20 + 256
+        dv = torch.device(device)
+        if vram_check and dv.type == 'cuda':
+            capacity.check([torch.cuda.current_device() if dv.index is None else dv.index], [self.vram_mib],
+                           f'DFlashQ3MRef {os.path.basename(os.path.dirname(f) or f)} ({self.vram_mib:.0f} MiB projected)')
         self.w = read_safetensors(f, device)
         self.dev = device
         d2t = self.w['d2t']
