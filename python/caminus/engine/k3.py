@@ -152,7 +152,7 @@ MODULE_CAPS.update({m: CAPS_Q35D for m in Q35D_MODULES})
 # OP_OWN_MV's formats and activation precisions (kernels/k3_own_ops.h): ('OWN_MV', '<format>/<a32 | a16f>')
 OWN_FMT, OWN_ACT = {'Q6_K': 2, 'Q4_K': 4, 'Q8_0': 3}, {'a32': 0, 'a16f': 1}
 # the one-round-trip tiles (Engine.own_matvec_1rt): pad1 = OWN_A16_1RT | OWN_GROUPED | OWN_X_PER_SLOT; Q4_K and Q6_K (planes)
-OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT, OWN_GU, OWN_X_PER_TOKEN = 2, 4, 8, 16, 32   # (OWN_X_PER_TOKEN and pad1 bits 8 .. 11, the tokens: the verify module)
+OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT, OWN_GU, OWN_X_PER_TOKEN, OWN_UNION = 2, 4, 8, 16, 32, 64   # (the last two and pad1 bits 8 .. 11, the tokens: the verify module)
 OWN_1RT_FMT = ('Q4_K', 'Q6_K')
 _CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT}
              | {('OWN_F16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_MOE_SUM', '-')})
@@ -192,7 +192,7 @@ def seg_kind(sg):
     if sg.op == OP_OWN_ATTS: return ('OWN_ATTS', '-')
     if sg.op == OP_OWN_MV:
         a = (('a16_1rt' + ('_gu' if sg.pad1 & OWN_GU else '') + ('_xt' if sg.pad1 & OWN_X_PER_TOKEN else '') + ('_mt' if sg.pad1 >> 8 > 1 else ''))
-             if sg.pad1 & OWN_A16_1RT and (sg.pad1 & 0xff) < 64 else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
+             if sg.pad1 & OWN_A16_1RT and (sg.pad1 & 0xff) < 128 else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
         return ('OWN_MV', f"{GG_FMT_NAME.get(sg.work, f'?{sg.work}') if sg.work in OWN_FMT.values() else f'?{sg.work}'}/{a}")
     if sg.op == OP_GG_Q8_1: return ('Q8_1', Q8_1_MODE.get(sg.work, f'?{sg.work}'))
     if sg.op in DF_OPS: return ('DF', DF_OPS[sg.op])
@@ -515,7 +515,7 @@ class Engine:
         return len(self.segs) - 1
 
     def own_matvec_1rt(self, w, fmt, rows, ncols, x16, out, ids=None, total_rows=None, x_per_slot=False, rows_per_task=16,
-                       dep=-1, team=-1, up=None, tokens=1, x_stride=0, out_stride=0, x_per_token=False):
+                       dep=-1, team=-1, up=None, tokens=1, x_stride=0, out_stride=0, x_per_token=False, union=False):
         """Caminus's own one-round-trip matvec tiles (OP_OWN_MV, kernels/own_quant.h own_rows_q4k_1rt / own_rows_q6k_planes in
         their K3 form), fp16 activations x16. Q4_K: raw GGUF blocks; Q6_K: engine.own_layout.q6k_planes of the whole matrix.
           ids None: out[r] = row r . x16, r < rows (w holds rows rows).
@@ -528,13 +528,16 @@ class Engine:
           The verify module (Q3M_VER_MODULES) only:
           tokens > 1 (no ids, no up): one segment for every token of a pass; token t reads x16 at t * x_stride values and
           writes out at t * out_stride values (each token's rows are the one-token segment's bits);
-          x_per_token (ids, no x_per_slot): 8 slots per token, slot s reads x16[s // 8] ([S / 8, ncols])."""
+          x_per_token (ids, no x_per_slot): 8 slots per token, slot s reads x16[s // 8] ([S / 8, ncols]);
+          union (ids, at most 32 slots): slots with the same id share one read of the expert's rows (the same bits)."""
         if self.T != 1: raise ValueError('own_matvec_1rt: T = 1 only')
-        if tokens != 1 or x_per_token:
+        if tokens != 1 or x_per_token or union:
             if self.module not in Q3M_VER_MODULES: raise ValueError(f'own_matvec_1rt: module {self.module} has no T-token forms ({Q3M_VER_MODULES})')
             if not 1 <= tokens <= 15 or (tokens > 1 and (ids is not None or up is not None or x_per_token)):
                 raise ValueError(f'own_matvec_1rt: tokens {tokens} (1 .. 15; with ids or up: 1)')
             if x_per_token and (ids is None or x_per_slot or ids.numel() % 8): raise ValueError('own_matvec_1rt: x_per_token needs ids, 8 slots per token, no x_per_slot')
+            if union and (ids is None or ids.numel() > 32): raise ValueError('own_matvec_1rt: union needs ids, at most 32 slots')
+            if tokens > 4: raise ValueError(f'own_matvec_1rt: tokens {tokens} (the module holds 4 per tile: OWN_MT)')
             if tokens > 1 and (x_stride < ncols or out_stride < rows or x_stride >= 2 ** 31 or out_stride >= 2 ** 31):
                 raise ValueError(f'own_matvec_1rt: x_stride {x_stride} (>= {ncols}), out_stride {out_stride} (>= {rows})')
         if fmt not in OWN_1RT_FMT: raise ValueError(f'own_matvec_1rt: {fmt} ({OWN_1RT_FMT})')
@@ -555,7 +558,8 @@ class Engine:
         if up is not None and (rows_per_task % 16 or rows_per_task > 64):   # (the gate sums' LDS slots: OWN_GU_RPT)
             raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of 16, at most 64 (got {rows_per_task})')
         pad1 = (OWN_A16_1RT | (OWN_GROUPED if ids is not None else 0) | (OWN_X_PER_SLOT if x_per_slot else 0)
-                | (OWN_GU if up is not None else 0) | (OWN_X_PER_TOKEN if x_per_token else 0) | ((tokens << 8) if tokens > 1 else 0))
+                | (OWN_GU if up is not None else 0) | (OWN_X_PER_TOKEN if x_per_token else 0) | (OWN_UNION if union else 0)
+                | ((tokens << 8) if tokens > 1 else 0))
         strides = (x_stride | (out_stride << 32)) if tokens > 1 else None   # (Seg.gs: the two strides, low | high half)
         self.keep += [w, x16, out] + ([ids] if ids is not None else []) + ([up] if up is not None else [])
         N = S * rows
@@ -788,7 +792,7 @@ class Engine:
         return Engine.ATS_CNT + kv_heads * (8 // heads_per_task) * splits * Engine.ATS_RS
 
     def own_atts(self, qkv, scratch, par, cache, pos, out16, heads, kv_heads, dim, scale, splits=64, lmin=128, heads_per_task=8,
-                 dep=-1, team=-1):
+                 dep=-1, team=-1, tok=0, row_only=False, no_store=False):
         """the decode attention split over positions (OP_OWN_ATTS, kernels/k3_own_atts.h; the qwen3moe modules): q / k norm +
         RoPE, the cache row, flash-decoding splits of the positions (one task = a split of one kv head, all its query heads),
         the merge by the last task of each kv head, fp16 out. qkv fp32 = q [heads * dim] | k [kv_heads * dim] | v (the
@@ -797,8 +801,14 @@ class Engine:
         f16 with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
         rows before them); out16 fp16 [heads * dim]. splits: tasks per kv head (a fixed number: the split layout depends only on the
         position, never on the grid); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
-        kv head one task takes (8: the modules' build; the same bits at any value). n_rot = dim = 128, 8 query heads per kv head, T = 1."""
+        kv head one task takes (8: the modules' build; the same bits at any value). n_rot = dim = 128, 8 query heads per kv head, T = 1.
+        The verify module (Q3M_VER_MODULES) only: tok: the segment's position is pos[0] + tok (one position word for a
+        pass's block of tokens); row_only: norm + RoPE and the store of the position's cache row, nothing else (one task per
+        kv head); no_store: the attention without the row store (a row_only segment it depends on wrote the row)."""
         M = kv_heads * dim
+        if tok or row_only or no_store:
+            if self.module not in Q3M_VER_MODULES: raise ValueError(f'own_atts: module {self.module} has no block forms ({Q3M_VER_MODULES})')
+            if not 0 <= tok <= 255 or (row_only and no_store) or kv_heads > 255: raise ValueError(f'own_atts: tok {tok}, row_only {row_only}, no_store {no_store}')
         if self.T != 1 or dim != 128 or heads != 8 * kv_heads: raise ValueError('own_atts: T = 1, head dim 128, 8 query heads per kv head')
         if not 1 <= splits <= 64 or lmin < 32 or lmin % 32: raise ValueError(f"own_atts: splits {splits} (1 .. 64: the merge holds every split's m, l in LDS), lmin {lmin} (a multiple of 32)")
         if heads_per_task != 8:   # (the device code takes 1 / 2 / 4 only when built with ATS_GH_RUNTIME: measured slower)
@@ -810,10 +820,12 @@ class Engine:
         assert scratch.numel() >= self.atts_scratch_floats(kv_heads, splits, heads_per_task) and qkv.data_ptr() % 16 == 0 and scratch.data_ptr() % 16 == 0
         rows = kv_rows(cache, M, False) - self.ATS_PAD
         if rows < 1: raise ValueError(f'own_atts: the cache needs {self.ATS_PAD} padding rows past its last position')
-        self._guard_pos(pos, rows)   # (the guard bounds the row it writes; a chunk's loads run up to ATS_PAD - 1 rows past it)
+        if rows - tok < 1: raise ValueError(f'own_atts: tok {tok} leaves no usable cache row')
+        self._guard_pos(pos, rows - tok)   # (the guard bounds the row it writes; a chunk's loads run up to ATS_PAD - 1 rows past it)
         self.keep += [qkv, scratch, par, cache, pos, out16]
-        self.segs.append(Seg(OP_OWN_ATTS, splits * kv_heads * hs, dep, heads_per_task, cache.data_ptr(), scratch.data_ptr(), qkv.data_ptr(), pos.data_ptr(),
-                             out16.data_ptr(), scale, heads, dim, dim, splits, team, kv_heads, lmin, 0, par.data_ptr()))
+        self.segs.append(Seg(OP_OWN_ATTS, kv_heads if row_only else splits * kv_heads * hs, dep, heads_per_task, cache.data_ptr(), scratch.data_ptr(),
+                             qkv.data_ptr(), pos.data_ptr(), out16.data_ptr(), scale, heads, dim, dim, splits, team,
+                             kv_heads | (int(row_only) | 2 * int(no_store)) << 8 | tok << 16, lmin, 0, par.data_ptr()))
         return len(self.segs) - 1
 
     def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None):

@@ -7,6 +7,9 @@
 // (the host refuses T > 1 for now).
 #pragma once
 #include "own_quant.h"
+#ifdef K3_Q3M_VER
+#include "own_quant_mt.h"   // the T-token tiles: a pass's weight words held, each token's sums in turn
+#endif
 enum { OP_OWN_MV = 44 };
 enum { OWN_Q6_K = 2, OWN_Q4_K = 4, OWN_Q8_0 = 3 };   // (the GG_* numbers of the same formats: k3.py GG_FMT)
 enum { OWN_A32 = 0, OWN_A16F = 1 };
@@ -33,14 +36,18 @@ enum { OWN_A16_1RT = 2, OWN_GROUPED = 4, OWN_X_PER_SLOT = 8, OWN_GU = 16 };
 // The verify module (K3_Q3M_VER, kernels/k3_q3m_ver.hip: T tokens per pass) only:
 //   Seg.pad1 bits 8 .. 11 = tokens NT (0: one), without OWN_GROUPED / OWN_GU: token tk reads its activations at
 //     Seg.a + tk * xs (fp16 values) and writes its rows at Seg.y + tk * ys (fp32 values); xs / ys = the low / high half of
-//     Seg.gs. One tile call per (row pair, token): each token's sums are the decode's statements (the same bits); the
-//     pair's weight bytes come from memory for the first token and from the cache for the others.
+//     Seg.gs. One tile per row pair (own_quant_mt.h): its weight words are loaded once and every token's sums run on
+//     them, each the decode's statements (the same bits).
 //   OWN_X_PER_TOKEN (with OWN_GROUPED, without OWN_X_PER_SLOT): 8 slots per token, slot s reads the input of token s / 8
 //     at Seg.a + (s / 8) * K (the experts' gate | up of every token as one segment).
-// A task index is the token for the one-task ops below (OP_OWN_EMB, OP_OWN_ADD_RMS16): OWN_TK.
-enum { OWN_X_PER_TOKEN = 32 };
+//   OWN_UNION (with OWN_GROUPED, at most 32 slots): slots that hold the same expert id are computed together by the
+//     first of them (one read of the expert's rows, one sum per member slot on the member's own input and into its own
+//     rows); the other member slots' row pairs do nothing. A wave finds the members itself: lane l compares slot l's id.
+// A task index is the token for the one-task ops below (OP_OWN_EMB, OP_OWN_ADD_RMS16).
+enum { OWN_X_PER_TOKEN = 32, OWN_UNION = 64 };
 // (every T-token statement sits under K3_Q3M_VER: the other modules compile the text they compiled before)
 #ifdef K3_Q3M_VER
+typedef __attribute__((address_space(3))) float AS3F;
 #define OWN_TK_ARG , t
 #else
 #define OWN_TK_ARG
@@ -69,6 +76,9 @@ __device__ __forceinline__ void own_1rt_acc(const uint8_t * W, const Seg & sg, i
 // The gate sums wait in LDS, indexed by the row mod OWN_GU_RPT (rows_per_task <= OWN_GU_RPT, a multiple of 16: host-checked).
 enum { OWN_GU_RPT = 64 };
 __shared__ float OWN_GU_G[OWN_GU_RPT];   // (lane 0 of the wave that owns a row writes and reads its slot)
+#ifdef K3_Q3M_VER
+__shared__ float OWN_GU_GM[OWN_MT * OWN_GU_RPT];   // (the same per member of a pass: [member][row mod OWN_GU_RPT])
+#endif
 __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, int lane) {
     const bool grouped = sg.pad1 & OWN_GROUPED, per_slot = sg.pad1 & OWN_X_PER_SLOT;
 #ifdef K3_OWN_Q3M
@@ -96,20 +106,44 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
         const _Float16 * x = (const _Float16 *)sg.a + (per_slot ? (size_t)slot * sg.K : 0);
         float res[OWN_K3_RW];
 #ifdef K3_Q3M_VER
-        if (sg.pad1 & OWN_X_PER_TOKEN) x += (size_t)(slot >> 3) * sg.K;
-        for (int tk = 0; tk < NT; tk++) {
-            float * yt = (float *)sg.y + (size_t)tk * ys;
-            own_1rt_acc(m ? (const uint8_t *)sg.aux : sg.W, sg, grow, lim, total, x + (size_t)tk * xs, lane, res);
-            if (lane == 0) {
+        (void)x; (void)res;
+        const bool uni = sg.pad1 & OWN_UNION;
+        uint32_t mask = 0;
+        if (uni) {                                                     // the slots that hold this slot's expert
+            const int S = sg.N / re;
+            const int idl = ((const int *)sg.asum)[min(lane, S - 1)];
+            const int er = (int)__builtin_amdgcn_readfirstlane(((const int *)sg.asum)[slot]);
+            mask = (uint32_t)__builtin_amdgcn_uicmp((unsigned)(lane < S ? idl : ~er), (unsigned)er, 32);   // (32: ICMP_EQ)
+            if (mask & ((1u << slot) - 1u)) continue;                  // (an earlier slot computes these rows for this one)
+        }
+        const int nt = uni ? min((int)OWN_MT, (int)__builtin_popcount(mask)) : grouped ? 1 : NT;
+        const auto member = [&](int j) -> int {                        // the slot of member j (not OWN_UNION: this slot)
+            if (!uni) return slot;
+            uint32_t mk = mask;
+            for (int k = 0; k < j; k++) mk &= mk - 1u;
+            return mk ? (int)__builtin_ctz(mk) : slot;
+        };
+        const auto xoff = [&](int j) -> size_t {                       // member / token j's activations, from Seg.a
+            if (!grouped) return (size_t)j * xs;
+            const int s = member(j);
+            return per_slot ? (size_t)s * sg.K : (sg.pad1 & OWN_X_PER_TOKEN) ? (size_t)(s >> 3) * sg.K : 0;
+        };
+        float rm[OWN_MT][OWN_K3_RW];
+        const uint8_t * Wm = m ? (const uint8_t *)sg.aux : sg.W;
+        if (sg.work == OWN_Q4_K) own_rows_q4k_1rt_mt<OWN_K3_RW>(Wm, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+        if (sg.work == OWN_Q6_K) own_rows_q6k_planes_mt<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+        if (lane == 0) {
+#pragma unroll
+            for (int j = 0; j < OWN_MT; j++) {
+                if (j >= nt) break;
+                const size_t yo = grouped ? (size_t)member(j) * re + r : (size_t)j * ys + row;
 #pragma unroll
                 for (int i = 0; i < OWN_K3_RW; i++) {
                     if (grow + i >= lim) continue;
-                    if (!gu) yt[row + i] = res[i];
-                    else if (!m) OWN_GU_G[(row + i) & (OWN_GU_RPT - 1)] = res[i];
-                    else {
-                        const float gv = OWN_GU_G[(row + i) & (OWN_GU_RPT - 1)];
-                        ((_Float16 *)sg.y)[row + i] = (_Float16)(gv / (1.0f + expf(-gv)) * res[i]);
-                    }
+                    AS3F * gp = (AS3F *)OWN_GU_GM + j * OWN_GU_RPT + ((row + i) & (OWN_GU_RPT - 1));
+                    if (!gu) ((float *)sg.y)[yo + i] = rm[j][i];
+                    else if (!m) *gp = rm[j][i];
+                    else { const float gv = *gp; ((_Float16 *)sg.y)[yo + i] = (_Float16)(gv / (1.0f + expf(-gv)) * rm[j][i]); }
                 }
             }
         }
