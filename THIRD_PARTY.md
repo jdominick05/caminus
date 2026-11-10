@@ -26,6 +26,7 @@ files below name 842653396 in their headers.
 | `tools/reference/gg_golden.cpp`, `tools/reference/gg_mmq_ref.cpp` | link libggml / libllama to dump reference tensors (gg_mmq_ref: ggml_mul_mat / ggml_mul_mat_id outputs and timings) |
 | `tools/reference/dflash_dump.cpp` | a modified copy of llama.cpp's `examples/speculative-simple/speculative-simple.cpp` (the speculative loop kept; a per-pass JSON log and a cb_eval tensor dumper for the DFlash drafter added); links libllama; the MIT notice is in the file's header |
 | `python/caminus/decode/dflash_torch.py` | a PyTorch port of the DFlash drafter's forward (`src/models/dflash.cpp`) and the draft-dflash loop (`common/speculative.cpp`), used as the reference of the K3 drafter module; the MIT notice is in the file's header |
+| `python/caminus/iq_tables.py` | the codebooks of the IQ block formats as data (`kvalues_iq4nl`, `iq2xxs_grid`, `iq3xxs_grid`, `iq3s_grid` of ggml-common.h, taken through gguf-py's `quants.py`): format constants read by Caminus's own decoders; the notice is in the file |
 
 ```
 MIT License
