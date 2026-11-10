@@ -1902,6 +1902,9 @@ __device__ __forceinline__ void op_hc_avg(const Seg & sg, int t) {
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #include "k3_attn_split.h"
 #endif
+#ifdef K3_OWN   // Caminus's own quantized matvec (kernels/k3_own_ops.h; the *_own modules only: every other module unchanged)
+#include "k3_own_ops.h"
+#endif
 // a GG op's format dispatch over its whitelist MASK: FN<type, vdr>(sg, t) for Seg.work. The REAP-308 four keep the switch
 // they always had, written out in k3_extra_op (unlisted formats decode as Q8_0): its code object is unchanged (the same
 // switch inside a forceinline function, or a generic lambda, changed k3_run's code). Any other mask goes through
@@ -1991,6 +1994,9 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_HC_MEAN) { op_hc_mean(sg, t); return true; }
     if (sg.op == OP_HC_POST) { op_hc_post(sg, t); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
+#ifdef K3_OWN
+    if (sg.op == OP_OWN_MV) { own_op_mv(sg, t); return true; }
+#endif
 #ifdef K3_GSQ
     if (sg.op == OP_BF16_MV) {
 #ifdef K3_MTP_SWIGLU

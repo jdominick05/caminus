@@ -58,6 +58,7 @@ DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_
 # them as nops, so Engine.build refuses them there. env K3_QSA_ENTRY=1: every k3_gguf_gsq{,_mt} tape on the QSA module
 # (measures that module's cost on the trunk's tapes)
 OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
+OP_OWN_MV = 44     # = kernels/k3_own_ops.h: Caminus's own quantized matvec (the *_own modules only; spec-own-quant.md)
 OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
 QSA_OPS = {OP_IDX_APPEND: 'IDX_APPEND', OP_QSA_SCORE: 'SCORE', OP_QSA_SELECT: 'SELECT', OP_ATTN_SEL: 'ATTN_SEL', OP_QSA_PSEL: 'PSEL'}
 QSA_PSEL_H1, QSA_PSEL_H2, QSA_PSEL_FILTER, QSA_PSEL_FINISH, QSA_PSEL_ZERO = 0, 1, 2, 3, 4   # (Seg.pad1: the phase)
@@ -81,8 +82,9 @@ Q3N_MODULES = ('k3_gguf_q3n', 'k3_gguf_q3n_mt')
 Q35H_MODULES = ('k3_gguf_q35h', 'k3_gguf_q35h_mt', 'k3_gguf_q35h_trace')
 Q35D_MODULES = ('k3_gguf_q35d', 'k3_gguf_q35d_mt')   # the dense qwen35 line (AREX-2): one card; _mt: T > 1 (verify passes)   # (_trace: K3_TRACE timestamps, measurement only)
 Q35G_MODULES = ('k3_gguf_q35g', 'k3_gguf_q35g_mt')   # the 2-bit GSQ checkpoint (kernels/k3_gguf_q35g.hip)
-ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES
-ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
+OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (kernels/k3_gguf_q35d_own.hip; T = 1 only)
+ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES
+ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
 ATTN_SS_OF = {m: ATTN_SS for m in ATTN_SPLIT_MODULES}
 # GGUF block formats (Seg.work of the GG ops), = the enum in kernels/k3_gguf_ops.h. 4-9 (the GSQ-RCO Coder's) are
@@ -137,6 +139,9 @@ CAPS_Q35G = frozenset({('MV', 'Q8_0'), ('MOE_GU', 'Q2_0'), ('MOE_DOWN', 'Q2_0'),
 MODULE_CAPS.update({m: CAPS_Q35G for m in Q35G_MODULES})
 CAPS_Q35D = frozenset({('MV', f) for f in ('Q4_K', 'Q5_K', 'Q6_K', 'Q8_0')} | {('F32_MV', 'F32')} | _Q8_1)   # (AREX-2 Q4_K_M)
 MODULE_CAPS.update({m: CAPS_Q35D for m in Q35D_MODULES})
+# OP_OWN_MV's formats and activation precisions (kernels/k3_own_ops.h): ('OWN_MV', '<format>/<a32 | a16f>')
+OWN_FMT, OWN_ACT = {'Q6_K': 2, 'Q4_K': 4, 'Q8_0': 3}, {'a32': 0, 'a16f': 1}
+MODULE_CAPS.update({m: CAPS_Q35D | {('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT} for m in OWN_MODULES})
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -149,6 +154,9 @@ def seg_kind(sg):
     if sg.op in _OP_KIND: return (_OP_KIND[sg.op], GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_F32_MV: return ('F32_MV', 'F32')
     if sg.op == OP_BF16_MV: return ('BF16_MV', 'BF16')
+    if sg.op == OP_OWN_MV:
+        a = {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}')
+        return ('OWN_MV', f"{GG_FMT_NAME.get(sg.work, f'?{sg.work}') if sg.work in OWN_FMT.values() else f'?{sg.work}'}/{a}")
     if sg.op == OP_GG_Q8_1: return ('Q8_1', Q8_1_MODE.get(sg.work, f'?{sg.work}'))
     if sg.op in DF_OPS: return ('DF', DF_OPS[sg.op])
     if sg.op in QSA_OPS: return ('QSA', QSA_OPS[sg.op])
@@ -450,6 +458,23 @@ class Engine:
                              x.data_ptr(), None, out.data_ptr(), 0.0 if silu_scale is None else float(silu_scale), nrows, ncols,
                              1, work, team if ntok is None else rows, mmvf_warps(ncols), ncols * 2))   # pad1: W, pad2: row bytes
         if ntok is not None: self.team_fixed.add(len(self.segs) - 1)
+        return len(self.segs) - 1
+
+    def own_matvec(self, w, fmt, nrows, ncols, x, out, act='a32', rows_per_task=32, dep=-1, team=-1):
+        """Caminus's own quantized matvec (OP_OWN_MV, the *_own modules): raw GGUF blocks w of nrows contiguous rows (format
+        fmt: Q6_K / Q4_K / Q8_0) times the fp32 activation x [ncols] -> fp32 out [nrows]; act: 'a32' (fp32 activation) or
+        'a16f' (fp16 in registers). T = 1 only; rows_per_task a multiple of 4 (a wave takes 4 rows)"""
+        if self.T != 1: raise ValueError('own_matvec: T = 1 only (no multi-token own module yet)')
+        if fmt not in OWN_FMT or act not in OWN_ACT: raise ValueError(f'own_matvec: {fmt} / {act} ({sorted(OWN_FMT)} / {sorted(OWN_ACT)})')
+        if rows_per_task % 4 or rows_per_task < 4: raise ValueError(f'own_matvec: rows_per_task {rows_per_task} (a multiple of 4)')
+        qk = 32 if fmt == 'Q8_0' else 256
+        if ncols % qk: raise ValueError(f'own_matvec: K {ncols} is not a multiple of {fmt} blocks ({qk})')
+        assert x.dtype == torch.float32 and x.numel() >= ncols and out.numel() >= nrows and x.data_ptr() % 16 == 0, (x.dtype, x.numel(), out.numel())
+        bs = {'Q6_K': 210, 'Q4_K': 144, 'Q8_0': 34}[fmt]
+        assert w.numel() * w.element_size() >= nrows * ncols // qk * bs and w.data_ptr() % 4 == 0, (w.numel(), nrows, ncols)
+        self.keep += [w, x, out]
+        self.segs.append(Seg(OP_OWN_MV, (nrows + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
+                             x.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_FMT[fmt], team, OWN_ACT[act], 0))
         return len(self.segs) - 1
 
     def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1):
