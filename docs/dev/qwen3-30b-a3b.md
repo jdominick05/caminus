@@ -161,16 +161,16 @@ over a prefilled context, `benchmarks/q3moe_verify.py --depths 512,4096,16384,40
 
 | Context depth | Decode, per token | Pass of 2 | Pass of 3 | Pass of 4 | Best per accepted token | Against decode |
 |---|---|---|---|---|---|---|
-| 512 | 4.42 ms | 6.18 ms | 7.71 ms | 9.30 ms | 3.59 ms (3) | 1.23× |
-| 4,096 | 5.32 ms | 7.89 ms | 9.85 ms | 11.97 ms | 4.58 ms (3) | 1.16× |
-| 16,384 | 6.92 ms | 10.79 ms | 13.89 ms | 16.97 ms | 6.37 ms (2) | 1.09× |
-| 40,900 | 9.56 ms | 15.41 ms | 20.63 ms | 25.64 ms | 9.10 ms (2) | 1.05× |
+| 512 | 4.22 ms | 5.99 ms | 7.53 ms | 9.19 ms | 3.50 ms (3) | 1.21× |
+| 4,096 | 5.11 ms | 7.72 ms | 9.68 ms | 11.79 ms | 4.50 ms (3) | 1.14× |
+| 16,384 | 6.74 ms | 10.68 ms | 13.70 ms | 16.86 ms | 6.31 ms (2) | 1.07× |
+| 40,900 | 9.41 ms | 15.35 ms | 20.51 ms | 25.62 ms | 9.07 ms (2) | 1.04× |
 
 - **Tokens per pass.** A pass of T tokens checks T − 1 drafts and always yields one token of its own. With the
   [RedHatAI DFlash speculator](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-speculator.dflash) for this model (its
   reference PyTorch implementation, in a draft, verify, accept loop on this model's own greedy text) the first, second
   and third draft were accepted in 69 %, 46 % and 25 % of passes: 1.69, 2.15 and 2.40 tokens per pass of 2, 3 and 4.
-- **These figures are before the drafter runs.** To break even, a draft may cost 1.8 ms at depth 512 and 0.8 ms at
+- **These figures are before the drafter runs.** To break even, a draft may cost 1.5 ms at depth 512 and 0.6 ms at
   40,900. The reference implementation takes 8 to 12 ms per draft on this card.
 
 Why a T-token pass is not cheap here (the pass of 4, from its trace):
@@ -179,7 +179,7 @@ Why a T-token pass is not cheap here (the pass of 4, from its trace):
 |---|---|---|
 | Experts (gate, up, down) | 4.8 ms | 4.8 ms |
 | Dense matvecs (k, v, output, head) | 2.7 ms | 2.5 ms |
-| Attention | 1.0 ms | 17.2 ms |
+| Attention | 1.0 ms | 17.4 ms |
 | Norms, router, joins, cache row stores | 1.4 ms | 1.5 ms |
 
 1. **Neighbouring tokens use different experts.** Four consecutive tokens route to 19 to 20 distinct experts per layer

@@ -118,6 +118,8 @@ class Q3MoEVerify:
                 prev = mv(d['ffn_down_exps'], S['a16'], S['d'], sw, rpt='down', ids=ids, total_rows=eng.n_exp * D,
                           x_per_slot=True, union=uni)
             nf = E.own_add_rms16(S['x'], eng.out_norm, S['h'], S['h16'], eng.eps, d=S['d'], slots=KU, w=S['wts'], dep=prev, tokens=T)
+            if eng.link_keepalive and eng._ka is not None:   # (Q3MoEOne's link keep-alive segment, on its host buffers: a
+                self.ka_seg = E.own_add_rms16(eng._ka[0], eng.out_norm, eng._ka[1], eng._ka[2], eng.eps, dep=prev)   # pass is one long launch too)
             mv(eng.head, S['h16'], S['logits'], nf, rpt='head', **mt(D, eng.vocab))
             E.build()
 

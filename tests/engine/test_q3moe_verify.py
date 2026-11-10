@@ -96,8 +96,14 @@ for N in depths + [8]:
             same &= all(np.array_equal(bits(vers[T].feats(t)), f4[b * T + t]) for t in range(T))
     check(same and all(np.isfinite(f.view(np.float32)).all() and f.any() for f in f4), f'{what}: tap features ({len(ver.taps)} layers) bitwise equal from T 1, 2 and {MAX_T} passes')
 
-# host refusals: nothing is written (the last cache row of a layer and the staged block stay as they were)
+# the link keep-alive segment (Q3MoEOne's, on its host buffers) is in every verify tape and runs in a pass
 ver = vers[MAX_T]; N = depths[0]; toks = ids_all[N:N + MAX_T]
+eng._ka[0].fill_(1.0); eng._ka[1].zero_(); ver.run(toks, N)
+want = eng.out_norm.detach().float().cpu() / float(np.sqrt(1.0 + eng.eps))
+check(all(v.E.segs[v.ka_seg].op == k3.OP_OWN_ADD_RMS16 for v in vers.values()) and bool(torch.allclose(eng._ka[1], want, rtol=1e-5, atol=1e-7)),
+      'the link keep-alive segment is in every verify tape and ran in a pass (the norm of its host input, in host memory)')
+eng._ka[0].zero_()
+# host refusals: nothing is written (the last cache row of a layer and the staged block stay as they were)
 def state(): return (bits(eng.L[0]['cache'][-64:].float()), bits(ver.S['stage'].float()), bits(ver.S['logits'][:64]))
 def refused(fn, exc):
     s0 = state()
