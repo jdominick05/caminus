@@ -25,19 +25,46 @@ from .own_layout import q6k_planes
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
-ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: splits per kv head, fewest positions per split. XT, a chain of 48 attention
+ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the engine takes as many as its card's grid
+                                # holds at once: splits_for), fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
                                 # 322 / 631; S 64 Lmin 64: 10.3 / 14.0 / 24.9 / 35.0 (Lmin 128: 10.8 / 16.1 / 30.5 / 35.2).
                                 # Measured and dropped: copies of the tape with fewer splits and smaller head groups for
                                 # shallow positions (slower at every depth tried: XT 4.79 -> 4.99 ms at positions 8 .. 48)
-PER_WGP = 6   # workgroups per WGP (12 waves per SIMD of the 16 that fit): interleaved at the same positions, 5 rounds,
-              # the lean module, positions 8 .. 72 / 104: XT 8: 4.776, 7: 4.591, 6: 4.513, 5: 4.547 ms per token; XTX 8:
-              # 4.143, 7: 4.172, 6: 4.093, 5: 4.056. A segment's hop costs each active wave its share of the SIMD
+GRID_WGS = 200   # the engine's grid on a card: the workgroups-per-WGP count whose grid is nearest this many workgroups
+                 # (RX 7900 XTX, 48 WGPs: 4 = 192 workgroups; RX 7900 XT, 42 WGPs: 5 = 210), with the attention split
+                 # into as many tasks as that grid runs at once (splits_for). Interleaved at the same positions, 3
+                 # rounds of 24 tokens, with the link keep-alive in the tape, ms per token at depth 8 / 1,024 / 4,096 /
+                 # 16,384 / 40,900 (workgroups per WGP, splits):
+                 #   XTX  6, 64 (the grid and the layout before): 4.110 / 4.331 / 5.085 / 6.675 / 9.393
+                 #        5, 60: 3.932 / 4.215 / 4.735 / 6.242 / 9.141     4, 48: 3.968 / 4.206 / 4.679 / 6.183 / 8.986
+                 #        3, 36: 4.076 / 4.334 / 4.812 / 6.230 / 8.969     4, 40: 3.975 / 4.191 / 4.665 / 6.220 / 9.147
+                 #   XT   6, 64 (before): 4.775 / 5.147 / 5.858 / 7.612    6, 63: 4.709 / 5.130 / 5.782 / 7.560
+                 #        5, 52: 4.768 / 5.024 / 5.646 / 7.345             4, 42: 4.816 / 5.116 / 5.637 / 7.412
+                 # A segment's hop costs each active wave its share of the SIMD, so fewer workgroups than fit hop faster;
+                 # the attention's tasks must fit the grid at once (XTX, 5 per WGP with 64 splits at 40,900: 10.634).
+
+
+def card_per_wgp():
+    """workgroups per WGP of the engine's grid on the current card (GRID_WGS), at most the 8 a 96-VGPR module keeps
+    resident"""
+    wgps = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return max(1, min(8, int(GRID_WGS / wgps + 0.5)))
+
+
+def splits_for(nkv):
+    """OP_OWN_ATTS splits per kv head on the current card: as many as the card's own grid (card_per_wgp) runs at once
+    (one workgroup per (split, kv head) task), at most ATS_SPLITS. A second round of attention tasks costs a whole
+    task. The count follows the card, never the grid a caller sets on one engine: the logits are the same bits at
+    every grid on a card. Past splits * ATS_LMIN positions two cards with different counts sum the attention in
+    different orders (each is gated against the reference on its own)"""
+    wgps = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return max(1, min(ATS_SPLITS, card_per_wgp() * wgps // int(nkv)))
 
 
 class Q3MoEOne:
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp=PER_WGP, gu=True, attn_batched=True, attn_one=True,
-                 attn_split=True, splits=ATS_SPLITS, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8,
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp='card', gu=True, attn_batched=True, attn_one=True,
+                 attn_split=True, splits=None, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8,
                  link_keepalive=True):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
@@ -64,12 +91,13 @@ class Q3MoEOne:
         # same bits: 4.279 -> 4.093 ms per token (one such segment per layer: 4.077; a host thread reading device memory
         # instead: 4.09); RX 7900 XT (no L1 on its path): 4.734 -> 4.727
         self.link_keepalive = bool(link_keepalive); self._ka = None
-        self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid, 8; the grid tests set 3 / 7 / 8)
+        self.per_wgp = per_wgp   # workgroups per WGP ('card': card_per_wgp, set once the device is current; None: the
+                                 # module's resident grid, 8; the grid tests set 3 / 7 / 8)
         self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
         self.attn_batched = attn_batched   # OP_ATTN_DEC's loads in batches (the same bits; False: one round trip each)
         self.attn_one = attn_one   # the fused tape: q / k norm + RoPE, cache row, attention, fp16 out as one segment
         self.attn_split = attn_split   # ... split over positions (OP_OWN_ATTS: speed at depth); False: one task per query head
-        self.splits, self.lmin = splits, lmin
+        self.splits, self.lmin = splits, lmin   # (splits None: splits_for the card, set with the tape's buffers)
         self.emb = F.T['token_embd.weight']
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
@@ -77,11 +105,12 @@ class Q3MoEOne:
         wbytes = sum(t.n_bytes for t in F.tensors)
         self.cache_rows = max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
         kv = self.nl * self.cache_rows * k3.kv_pos_bytes(self.nkv * self.hd, False)
-        self.vram_mib = (wbytes + kv + 4 * k3.Engine.atts_scratch_floats(self.nkv, splits)) / 2 ** 20 + 256
+        self.vram_mib = (wbytes + kv + 4 * k3.Engine.atts_scratch_floats(self.nkv, splits or ATS_SPLITS)) / 2 ** 20 + 256   # (the most splits a card takes)
         if vram_check:   # (vram_extra_mib: what the caller adds right after: a prefill's buffers, a drafter)
             capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
                            f'Q3MoEOne {os.path.basename(path)} (max_ctx {max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
         torch.cuda.set_device(self.dev)
+        if self.per_wgp == 'card': self.per_wgp = card_per_wgp()
         self.pos_host = 0
         # the server's engine contract (Qwen35One's / FlashNextTP's names; caminus.serve.k3_session and caminus.cache.prompt
         # read them): one card, T = 1, no recurrent state (a checkpoint is KV rows only; the lazy commit commits nothing),
@@ -165,6 +194,7 @@ class Q3MoEOne:
 
     def _build_tape(self):
         D, hd, nh, nkv, KU, FF = self.D, self.hd, self.nh, self.nkv, self.k_used, self.ffn
+        if self.splits is None: self.splits = splits_for(nkv)
         B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
         qkv = B(nh * hd + 2 * nkv * hd)   # q | k | v: the matvecs' outputs, one buffer (OP_OWN_ATTS reads it whole)
         s = self.S = dict(x=B(D), h=B(D), h16=B(D, torch.float16), q=qkv[:nh * hd], k=B(nkv * hd), v=B(nkv * hd),

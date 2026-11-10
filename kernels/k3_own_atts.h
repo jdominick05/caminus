@@ -22,8 +22,10 @@
 //   Seg.y = fp16 out [heads][128];  N = heads, K = 128, out_f32 = n_rot, work = splits S, pad1 = kv heads,
 //   pad2 = Lmin (the fewest positions per split), rows_per_task = GH (1, 2, 4, 8), rs = the score scale.
 //   Tasks: t = (s * kv_heads + g) * (8 / GH) + hs; heads g * 8 + hs * GH .. + GH - 1.
-// The split layout of npos = pos + 1 positions: L = max(Lmin, roundup32(ceil(npos / S))) positions per split, nact =
-// ceil(npos / L) active splits; split s holds [s L, min(npos, (s + 1) L)); the last active split holds pos itself, computes
+// The split layout of npos = pos + 1 positions: L = max(Lmin, ceil(npos / S) rounded up to whole chunks of ATS_CH = 64)
+// positions per split (a split's last, partial chunk costs a round trip like a whole one: at 16,384 positions on the XTX
+// 6.432 ms per token with splits of 288 positions, 6.245 with 320), nact = ceil(npos / L) active splits; split s holds
+// [s L, min(npos, (s + 1) L)); the last active split holds pos itself, computes
 // the position's k / v (norm + RoPE, f16 rounding; its hs == 0 task writes the cache row). Inactive splits do nothing.
 // nact == 1: the task writes the output itself. Otherwise each active task writes its record, then counts itself on its
 // (g, hs) counter (release); the one that counts nact merges the nact records (acquire) and resets the counter.
@@ -81,7 +83,7 @@ __device__ __forceinline__ _Float16 ats_h(float x) { __asm__ volatile("" : "+v"(
 
 // the split layout of npos positions: L positions per split, nact active splits
 __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, int & nact) {
-    L = (npos + S - 1) / S; L = (L + 31) & ~31; L = max(L, Lmin);
+    L = (npos + S - 1) / S; L = (L + ATS_CH - 1) / ATS_CH * ATS_CH; L = max(L, Lmin);
     nact = (npos + L - 1) / L;
 }
 
