@@ -1902,6 +1902,9 @@ __device__ __forceinline__ void op_hc_avg(const Seg & sg, int t) {
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #include "k3_attn_split.h"
 #endif
+#ifdef K3_OWN   // Caminus's own quantized matvec (kernels/k3_own_ops.h; the *_own modules only: every other module unchanged)
+#include "k3_own_ops.h"
+#endif
 // a GG op's format dispatch over its whitelist MASK: FN<type, vdr>(sg, t) for Seg.work. The REAP-308 four keep the switch
 // they always had, written out in k3_extra_op (unlisted formats decode as Q8_0): its code object is unchanged (the same
 // switch inside a forceinline function, or a generic lambda, changed k3_run's code). Any other mask goes through
@@ -1979,7 +1982,11 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #elif defined(K3_QSA)   // (the QSA modules: one attention body, op_attn_sel; Seg.gs = nullptr for OP_ATTN_DEC: the identity list)
     if (sg.op == OP_ATTN_DEC || sg.op == OP_ATTN_SEL) { op_attn_sel(sg, t); return true; }
 #else
+#ifdef K3_OWN_Q3M   // (the same arithmetic; Seg.aux: its loads in batches, kernels/k3_own_ops.h)
+    if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }
+#else
     if (sg.op == OP_ATTN_DEC) { op_attn_dec(sg, t); return true; }
+#endif
 #endif
     if (sg.op == OP_GATE_MUL) { op_gate_mul(sg, t); return true; }
     if (sg.op == OP_GDN_CONV) { op_gdn_conv(sg, t); return true; }
@@ -1991,6 +1998,17 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_HC_MEAN) { op_hc_mean(sg, t); return true; }
     if (sg.op == OP_HC_POST) { op_hc_post(sg, t); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
+#ifdef K3_OWN
+    if (sg.op == OP_OWN_MV) { own_op_mv(sg, t); return true; }
+    if (sg.op == OP_OWN_F16) { own_op_f16(sg, t); return true; }
+    if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
+    if (sg.op == OP_OWN_MOE_SUM) { own_op_moe_sum(sg, t); return true; }
+#ifdef K3_OWN_Q3M
+    if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
+    if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }   // (OP_OWN_ATTS: the lean modules only; here it took k3_run 89 -> 109 VGPRs)
+#endif
+#endif
 #ifdef K3_GSQ
     if (sg.op == OP_BF16_MV) {
 #ifdef K3_MTP_SWIGLU

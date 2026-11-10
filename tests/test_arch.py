@@ -58,10 +58,10 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35moe', 'qwen3next', 'qwen4exp'], f'archs: the four served ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'], f'archs: the five served ({sorted(arch.ARCHS)})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
-                    'qwen3next': ('tp', 2, 1, None)}, f'archs: kind, cards, T, drafter ({shape})')
+                    'qwen3moe': ('one-card', 1, 1, None), 'qwen3next': ('tp', 2, 1, None)}, f'archs: kind, cards, T, drafter ({shape})')
     check(arch.lookup('llama') is arch.CODER, 'archs: any other architecture takes the Coder\'s path')
     check(arch.usable_ctx(262144, 4) == 262142 and arch.usable_ctx(90112, 1) == 90112, 'usable_ctx: the engine less T - 2')
 
@@ -71,16 +71,22 @@ def main():
     check(models.drafter_item(models.BY_NAME['coder']) == 'dflash', 'catalog: the Coder\'s drafter file is dflash')
     check(all(models.drafter_item(m) is None for m in models.CATALOG if m.name != 'coder'), 'catalog: no other model loads a drafter yet')
 
-    # ---- meta: the header read once per file; tp_shape from it
+    # ---- meta: the header read once per file; tp_shape from it (arch.meta reads it with caminus.ggufio, gguf-py only for
+    # a file that reader refuses: opens through either count)
     config.ensure_gguf()
     import gguf
+    from caminus import ggufio
     opens = []
-    real = gguf.GGUFReader
+    real, real_own = gguf.GGUFReader, ggufio.GGUFFile
 
     class Counting(real):
         def __init__(self, path, *x, **k):
             opens.append(path); super().__init__(path, *x, **k)
-    gguf.GGUFReader = Counting
+
+    class CountingOwn(real_own):
+        def __init__(self, path, *x, **k):
+            opens.append(path); super().__init__(path, *x, **k)
+    gguf.GGUFReader = Counting; ggufio.GGUFFile = CountingOwn
     try:
         q3n = os.path.join(S, 'tiny-q3n.gguf')
         hp = {'qwen3next.context_length': 65536, 'qwen3next.block_count': 8, 'qwen3next.full_attention_interval': 4,
@@ -122,7 +128,7 @@ def main():
         write_gguf(llama, 'llama', {}, [('blk.0.ffn_up.weight', 32, 32)])
         check(arch.of(llama) is arch.CODER, 'of: an unknown architecture is given the Coder\'s entry')
     finally:
-        gguf.GGUFReader = real
+        gguf.GGUFReader = real; ggufio.GGUFFile = real_own
 
     # ---- caminus serve's options: --model-alias '' = the model's own id
     from caminus.serve import cli
@@ -177,7 +183,8 @@ def main():
         print('SKIP max_ctx auto: no torch', flush=True)
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
-        check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3next': 'Qwen3NextTP'},
+        check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne',
+                        'qwen3next': 'Qwen3NextTP'},
               f'engine_class: every entry\'s engine imports ({names})')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib

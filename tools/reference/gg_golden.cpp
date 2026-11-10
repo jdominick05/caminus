@@ -28,6 +28,8 @@
 //   Each job prints a JOB line: fill seconds and tok/s, decode ms per token.
 // G4 floor jobs (docs/specs/spec-prefill-cache.md G4: llama.cpp's own prefill-then-decode against its one-token decode;
 // tools/gates/g4_floor.py drives them; the jobs above are unchanged):
+//     kv f16 | kv q8_0 / onecard           (optional, before the jobs) the KV cache type (default q8_0); one card, no layer
+//                                           split (HIP_VISIBLE_DEVICES picks it): llama.cpp at its defaults on one card
 //     ubatch N                              (optional, before the jobs) n_ubatch N instead of 512 (n_batch stays 2048 and
 //                                           must be >= N); every job of the run uses it
 //     tfx NAME TOKFILE D NPOS B SAVE OUT    memory cleared, tokens [0, D) as prompt passes of B tokens each (no logits;
@@ -195,26 +197,30 @@ static uint64_t lc_fnv(const float * lg, int nv) {
 
 static int lc_mode(int argc, char ** argv) {
     if (argc < 4) { fprintf(stderr, "usage: %s MODEL --lc JOBS\n", argv[0]); return 1; }
-    std::ifstream jf(argv[3]); std::string line; std::vector<std::vector<std::string>> jobs; int nctx = 0, nub = 512;
+    std::ifstream jf(argv[3]); std::string line; std::vector<std::vector<std::string>> jobs; int nctx = 0, nub = 512; std::string kvt = "q8_0"; bool onecard = false;   // (kv f16 | onecard: optional lines before the jobs)
     while (std::getline(jf, line)) {
         std::istringstream ls(line); std::vector<std::string> w; std::string x;
         while (ls >> x) w.push_back(x);
         if (w.empty() || w[0][0] == '#') continue;
         if (w[0] == "nctx") { if (w.size() != 2) { fprintf(stderr, "JOBS: bad nctx line (nctx N)\n"); return 1; } nctx = atoi(w[1].c_str()); }
         else if (w[0] == "ubatch") { if (w.size() != 2 || atoi(w[1].c_str()) < 1 || atoi(w[1].c_str()) > 2048) { fprintf(stderr, "JOBS: bad ubatch line (ubatch N, 1..2048)\n"); return 1; } nub = atoi(w[1].c_str()); }
+        else if (w[0] == "kv") { if (w.size() != 2 || (w[1] != "f16" && w[1] != "q8_0")) { fprintf(stderr, "JOBS: bad kv line (kv f16|q8_0)\n"); return 1; } kvt = w[1]; }
+        else if (w[0] == "onecard") onecard = true;
         else jobs.push_back(w);
     }
     if (nctx <= 0) { fprintf(stderr, "JOBS: nctx N first\n"); return 1; }
     llama_backend_init();
     llama_model_params mp = llama_model_default_params();
     static float split[16] = {0.55f, 0.45f};
-    mp.n_gpu_layers = 999; mp.split_mode = LLAMA_SPLIT_MODE_LAYER; mp.load_mode = LLAMA_LOAD_MODE_DIRECT_IO; mp.tensor_split = split;
+    mp.n_gpu_layers = 999; mp.load_mode = LLAMA_LOAD_MODE_DIRECT_IO;
+    if (onecard) mp.split_mode = LLAMA_SPLIT_MODE_NONE;              // (one visible card: HIP_VISIBLE_DEVICES picks it)
+    else { mp.split_mode = LLAMA_SPLIT_MODE_LAYER; mp.tensor_split = split; }
     double t0 = now_s();
     llama_model * model = llama_model_load_from_file(argv[1], mp);
     if (!model) { fprintf(stderr, "model load failed\n"); return 1; }
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = nctx; cp.n_batch = 2048; cp.n_ubatch = nub; cp.n_seq_max = 1;
-    cp.type_k = cp.type_v = GGML_TYPE_Q8_0; cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    cp.type_k = cp.type_v = kvt == "f16" ? GGML_TYPE_F16 : GGML_TYPE_Q8_0; cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     // the qsa jobs' dumps (inactive outside their one-token steps: nothing is asked for, the graph is not split)
     Golden g; g.active = false; g.prefix = "indexer_";
     bool any_qsa = false;
@@ -223,8 +229,9 @@ static int lc_mode(int argc, char ** argv) {
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "context failed\n"); return 1; }
     const int nv = llama_vocab_n_tokens(llama_model_get_vocab(model));
-    printf("LOAD %.1f s; n_ctx %u n_batch %u n_ubatch %u, KV q8_0, flash attention on, split layer 0.55/0.45, n_vocab %d\n",
-           now_s() - t0, llama_n_ctx(ctx), llama_n_batch(ctx), llama_n_ubatch(ctx), nv);
+    printf("LOAD %.1f s; n_ctx %u n_batch %u n_ubatch %u, KV %s, flash attention on, %s, n_vocab %d\n",
+           now_s() - t0, llama_n_ctx(ctx), llama_n_batch(ctx), llama_n_ubatch(ctx), kvt.c_str(),
+           onecard ? "one card" : "split layer 0.55/0.45", nv);
     fflush(stdout);
     auto ids_ok = [nv](const std::vector<llama_token> & t, const std::string & name) {
         for (size_t i = 0; i < t.size(); i++)

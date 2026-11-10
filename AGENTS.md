@@ -6,17 +6,21 @@ CLAUDE.md imports this file.
 ## What this is
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
-- It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
+- It serves six models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
   cards, with the DFlash2 drafter), Qwen3.6-35B-A3B GSQ and HauhauCS (one card), AREX-2 27B (one card, the only dense
-  model), Qwen3-Coder-Next (two cards). `python/caminus/models.py` is the catalog.
+  model), Qwen3-Coder-Next (two cards), Qwen3-30B-A3B Q4_K_M (one 24 GB card, on Caminus's own code from the GGUF file
+  to the token: docs/dev/qwen3-30b-a3b.md). `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
 - Tested on one machine only: an RX 7900 XTX (drives the monitors) + an RX 7900 XT on a PCIe 4.0 x4 link, 29 GiB RAM, Linux.
 - The Coder runs at its measured split (10 / 12) on every pair (`arch.Coder.split`), so it needs a 24 GB card 0: XTX + XT
   (tested) or XTX + XTX (same shapes, unmeasured). The even split (8 / 10) can't prefill: each card's expert slice is 320
   rows and the vendored MMQ only takes whole 128-row tiles (the shared expert's non-Q6_K gate / up go through `mmq.mm`).
-- The bitwise reference is llama.cpp: the ignite-llama fork at e4e3f8eda (github.com/jdominick05/ignite-llama). Kernel
-  builds and the gates need it; the installed package doesn't. Older notes name its development commit 842653396.
+- llama.cpp is the yardstick, not the source of the math: the ignite-llama fork at e4e3f8eda
+  (github.com/jdominick05/ignite-llama). Quantized pairs still on its math (ggml-cuda's vec_dot, the vendored MMQ) are
+  gated bitwise against it; each pair moves to Caminus's own kernels under docs/specs/spec-own-quant.md, which ends
+  with no decode module or prefill object including a ggml-cuda header. Kernel builds and the gates need the fork; the
+  installed package doesn't. Older notes name its development commit 842653396.
 - Comments cite a private history: commit hashes, decision ids (D-281 = the KLD floor gate below), step names
   (`impl:package`), plan documents not in this tree. Treat them as labels; code and tests are the authority.
 
@@ -31,6 +35,7 @@ CLAUDE.md imports this file.
 | Building, testing, GPU rules | docs/dev/building.md, testing.md, gpu-safety.md |
 | Adding a model family | docs/dev/adding-a-model.md |
 | Where each published number comes from | docs/dev/benchmarks.md |
+| The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
 
 ## Layout (the parts that need a reason)
@@ -38,13 +43,21 @@ CLAUDE.md imports this file.
 - `kernels/*.hip`: device code only; `./build.sh` writes `build/*.hsaco` and records provenance.
 - The `k3_gguf*.hip` files are ONE engine compiled with different op / format whitelists: a persistent kernel has one
   register allocation for all its ops (budget 96 VGPRs, 0 spills) and a ~120-160 KB body against a 32 KB I-cache.
+- A decode module holds only the ops its model's decode tape runs (`k3_q3m_lean.hip`: 7 ops, `k3.Q3M_LEAN_OPS`, built without the ggml headers).
+  Every op inlined into `k3_run` adds live scalars; past the SGPRs, each segment hop of each wave pays the reloads
+  (qwen3moe: 190 spilled scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid, same bits). An op for prefill,
+  verify or a drafter goes into its own module, never into a decode module; the host refuses it there.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
-- `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`.
+- `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
+  `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
+  tokenizers library off its path).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
+  `q3m.py` (qwen3moe) is the exception: its own WMMA kernels (`kernels/q3m_prefill.hip`) are G-model gated, not
+  bitwise; chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see that file's attention).
 - `cache/prompt.py` + `cache/livestate.py`: the prompt cache owns the only live state (token log, (i0, commit), counters).
 - `serve/`: HTTP + SSE, template, tool parser, sampler; `EngineSession` declares the session contract
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
@@ -106,7 +119,8 @@ tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch D
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 ```
 
-After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills); rerun the gates at `K3_PER_WGP=3/6/7`
+After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills; `.sgpr_spill_count` not up: spilled
+scalars slow every hop, a change in one op measured +13 % on all of them); rerun the gates at `K3_PER_WGP=3/6/7`
 (`gates.sh OUT grids qsa`: still bitwise); first runs on a non-display card (`caminus ps` lists the cards).
 
 ## Invariants
@@ -128,6 +142,11 @@ Correctness:
   grids, with T = 4 passes equal to one-token steps.
 - D-281: a change that can't be bitwise by design keeps mean KLD vs llama.cpp's one-token decode within llama.cpp's own
   batch-vs-decode floor (0.0076 on the Coder) and top-1 within 1 point.
+- Own quantized math (docs/specs/spec-own-quant.md): a change of a quantized (op, format) pair's math passes G-acc (per-op
+  error vs fp64 on real rows and recorded activations, mean and p99, at most llama.cpp's), G-model (KLD vs the fp32
+  activation reference mode at most llama.cpp's, top-1 agreement at least llama.cpp's), G-self (the bitwise rule above,
+  against our own previous output) and G-speed (interleaved A/B in the real module). KLD vs llama.cpp is then a
+  divergence bound only.
 - Bounds: every position-indexed host entry calls `k3.check_span`; device accesses clamp and set `err`; contexts past the
   allocation are refused, never written.
 - Routing ids are clamped on the device before every mm_ids_helper launch; a chunk with its routing flag set is refused.
@@ -170,7 +189,8 @@ Codex flags P0 / P1 issues only. In this repository these are P1:
   GPU gates and their results in the pull request body: bitwise against the previous reference (T-token verify passes
   equal to one-token steps, and the `K3_PER_WGP=3/6/7` grids), or, where a change cannot be bitwise by design, the KLD
   floor (mean KLD against llama.cpp's one-token decode within llama.cpp's own batch-versus-decode floor, top-1 within one
-  point). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
+  point), or, where it changes a quantized pair's math, the docs/specs/spec-own-quant.md gates (G-acc, G-model, G-self,
+  G-speed, with their numbers). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
 - Flag a device wait without a time bound (`limit_us`), a GPU allocation that is not projected and checked through
   `caminus.device.capacity` before it happens, and a position-indexed host entry that does not call `k3.check_span`.
 - Flag a GPU command in a script, test or doc that does not run under `tools/guard.sh`.

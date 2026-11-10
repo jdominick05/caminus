@@ -7,6 +7,10 @@ flight directories only, then from outside, with a stdlib client (tools/serve_sm
             card), then the tool's result back as the next turn (the prompt cache: the live line continued)
   anthropic an Anthropic /v1/messages stream: a text block
   long      a ~8K-token prompt (the batched prefill): TTFT and prompt tok/s from the timings
+  needle    (--needle N) a passphrase at 37 % of a ~N-token prompt of synthetic records: the answer holds it; TTFT, prompt tok/s
+  --block-imports gguf,tokenizers: the server runs under an import hook refusing those packages, and every code object it
+            reports having loaded (/props caminus.code_objects, read after the requests) has no ggml / llama.cpp header in
+            its source's include closure (the own-code gate)
   surface   /metrics (llamacpp: names and caminus: series), /caminus/status (one card, its name and guard line), no request
             text in the metrics / status / slots / flight files (a marker string), llm-top -once (--llm-top BIN)
   abort     a stream closed by the client after a few events, then a request: HTTP 200
@@ -30,6 +34,19 @@ sys.path.insert(0, HERE)
 import serve_smoke as S   # noqa: E402  (its request / SSE helpers, check, safe_dir, llm_top_check, the guard lines)
 
 
+# --block-imports: run tools/caminus_serve.py under a meta-path hook that raises ImportError for the named packages (and
+# prints the refusal), so a server that serves at all is proof none of them is needed on its path
+BLOCKER = '''import sys, importlib.abc, runpy
+class _Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if name.split('.')[0] in {block!r}:
+            print('serve_smoke1: import refused: ' + name, flush=True); raise ImportError('blocked by serve_smoke1: ' + name)
+sys.meta_path.insert(0, _Block())
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+
+
 class Server1:
     """tools/caminus_serve.py on one card, its output followed (the port, the pid, 'ready on')"""
     def __init__(self, tag, a):
@@ -37,7 +54,9 @@ class Server1:
         cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'caminus_serve.py'), '--port', '0', '--model', a.model,
                '--max-ctx', str(a.max_ctx), '--cache-dir', os.path.join(a.scratch, 'kv'), '--flight-dir', os.path.join(a.scratch, 'flight')]
         if a.alias: cmd += ['--model-alias', a.alias]
-        print(f'{tag}: HIP_VISIBLE_DEVICES={a.card} {" ".join(cmd[2:])}', flush=True)
+        if a.block_imports:   # the server with an import hook that refuses these top-level packages (the own-code gate)
+            cmd = cmd[:2] + ['-c', BLOCKER.format(block=tuple(a.block_imports.split(','))), cmd[2]] + cmd[3:]
+        print(f'{tag}: HIP_VISIBLE_DEVICES={a.card} {" ".join(c for c in cmd[2:] if not c.startswith("import sys"))}', flush=True)
         self.t0 = time.time()
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                   env=dict(os.environ, PYTHONUNBUFFERED='1', HIP_VISIBLE_DEVICES=str(a.card)))
@@ -83,6 +102,8 @@ def main():
     ap.add_argument('--max-ctx', default='auto');   # (auto: the server's default, the largest context that fits)
     ap.add_argument('--alias', default=None)
     ap.add_argument('--llm-top', default=None); ap.add_argument('--restart', action='store_true')
+    ap.add_argument('--needle', type=int, default=0, help='also a needle at 37 %% of a prompt of about this many tokens')
+    ap.add_argument('--block-imports', default='', help='comma list of packages the server must not import (e.g. gguf,tokenizers)')
     a = ap.parse_args()
     a.cards = a.cards or len(str(a.card).split(','))
     a.scratch = S.safe_dir(a.scratch); os.makedirs(a.scratch, mode=0o700, exist_ok=True)
@@ -145,6 +166,28 @@ def main():
     check(r['status'] == 200 and m['content'].strip(), f'long: prompt {tm.get("prompt_n")} tokens at {tm.get("prompt_per_second")} tok/s, '
                                                        f'TTFT {tt * 1e3:.0f} ms (the first event), decode {tm.get("predicted_per_second")} tok/s')
     S.NUMBERS['long'] = dict(prompt_n=tm.get('prompt_n'), prompt_tps=tm.get('prompt_per_second'), ttft_ms=tt * 1e3)
+    if a.needle:   # a needle at 37 % of a ~a.needle-token prompt (serve_smoke's synthetic records): retrieved, TTFT, prompt speed
+        needle = 'amber-falcon-2291'
+        probe = S.records(44, 400, -1, needle)
+        cnt = S.request(port, 'POST', '/v1/messages/count_tokens', {'model': alias, 'messages': [{'role': 'user', 'content': probe}]},
+                        {'anthropic-version': '2023-06-01', 'x-api-key': 'dummy'})
+        per = (cnt.get('json') or {}).get('input_tokens', 12000) / 400.0
+        n = int((a.needle - 200) / per); at = int(n * 0.37)
+        text = S.records(44, n, at, needle) + f'\n\nWhich passphrase is stated in record {at:06d}? Answer with the passphrase only.'
+        r, m = chat(port, f'{alias}-nothink', [{'role': 'user', 'content': text}], temperature=0, max_tokens=24)
+        tm = m.get('timings') or {}; tt = (r['t_first'] or r['t_end']) - r['t_send']; ans = m.get('content', '')
+        check(r['status'] == 200 and needle in ans, f'needle: prompt {tm.get("prompt_n")} tokens (record {at} of {n}) at '
+              f'{tm.get("prompt_per_second")} tok/s, TTFT {tt * 1e3:.0f} ms, decode {tm.get("predicted_per_second")} tok/s; answer {ans[:40]!r}')
+        S.NUMBERS['needle'] = dict(prompt_n=tm.get('prompt_n'), prompt_tps=tm.get('prompt_per_second'), ttft_ms=tt * 1e3,
+                                   decode_tps=tm.get('predicted_per_second'), found=needle in ans, answer=ans[:60])
+    if a.block_imports:   # the own-code gate's device half: what the process loaded, by its own record
+        from own_closure import audit
+        objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []
+        rep = {o: audit(o + '.hip') for o in objs}
+        bad = {o: (r[1], r[2]) for o, r in rep.items() if r[1] or r[2]}
+        refused = [l for l in srv.lines if 'import refused' in l]
+        check(objs and not bad and not refused, f'own code: the server loaded {objs}: no ggml / llama.cpp header in their include '
+              f'closures ({bad or "none"}); imports refused by the hook: {len(refused)} ({a.block_imports} never asked for)')
     # the monitoring surface
     st, met = S.get(port, '/metrics'); st2, status = S.get(port, '/caminus/status'); st3, slots = S.get(port, '/slots')
     cards = (status or {}).get('cards') if isinstance(status, dict) else None

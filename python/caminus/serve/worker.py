@@ -41,7 +41,7 @@ class QueueFull(RuntimeError):
 class Job:
     def __init__(self, prompt_ids, params, max_new, stops=(), force=None, drafter=None, tag='', n_predict=None,
                  slot_params=None, thinking=False, marks=None, request_id=None, tools=None, parse_tools=True, parallel=True,
-                 prefix_text='', profile='', harness='', loop_guard=False):
+                 prefix_text='', profile='', harness='', loop_guard=False, think_open=True):
         self.prompt_ids = list(prompt_ids)
         # the flight recorder's (M7 ops): the request id, and what the engine thread needs to judge the reply (the loop flag,
         # tool-call parse failures) and to save a replay bundle
@@ -58,7 +58,8 @@ class Job:
         self.id_task = next(_TASK_IDS)
         self.n_predict = self.max_new if n_predict is None else int(n_predict)
         self.slot_params = slot_params
-        self.thinking = bool(thinking)  # the prompt opened a think block: ids up to </think> are reasoning
+        self.thinking = bool(thinking)  # the request thinks: ids up to </think> are reasoning
+        self.think_open = bool(think_open)   # the prompt opened the block itself (False: the model writes '<think>' first)
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self.t_submit = time.perf_counter()
@@ -376,7 +377,8 @@ class EngineWorker:
                     reason = 'loop'
             if reason is None and job.tools and job.parse_tools:
                 from .toolparse import OutputParser, ToolSet
-                p = OutputParser(ToolSet(job.tools), thinking=job.thinking, parse_tools=True, parallel=job.parallel)
+                p = OutputParser(ToolSet(job.tools), thinking=job.thinking, parse_tools=True, parallel=job.parallel,
+                                 think_open=job.think_open)
                 if job.prefix_text:
                     p.feed(job.prefix_text)
                 p.feed(text)

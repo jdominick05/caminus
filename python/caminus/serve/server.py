@@ -238,6 +238,7 @@ class GenSpec:
     prefix_text: str = ''       # forced text that ends the prompt (thinking off)
     tools: list = None
     thinking: bool = False
+    think_open: bool = True     # the prompt itself opened the think block (it ends '<think>\n'); False: the model opens it
     parse_tools: bool = True
     parallel: bool = True
     include_usage: bool = False
@@ -544,11 +545,12 @@ class K3Server:
         if required or force_name is not None:
             force, prefix_text = self._force(force_name, thinking)
         ids = list(prompt.ids)
+        think_open = not thinking or self.tok.decode(ids[-4:]).endswith('<think>\n')
         if prefix_text:
             ids += self.tok.encode(prefix_text)
         return GenSpec(api=api, model=model, stream=stream, prompt_ids=ids, params=params,
                        max_new=self._max_new(len(ids), mt), stops=stops, force=force, prefix_text=prefix_text,
-                       tools=tools, thinking=thinking, parse_tools=parse_tools, parallel=parallel,
+                       tools=tools, thinking=thinking, think_open=think_open, parse_tools=parse_tools, parallel=parallel,
                        include_usage=include_usage, profile=prompt.profile, n_tools=len(names),
                        n_predict=-1 if mt is None else mt, marks=prompt.marks)
 
@@ -598,7 +600,7 @@ class K3Server:
 
     def submit(self, spec):
         job = Job(spec.prompt_ids, spec.params, spec.max_new, spec.stops, spec.force, self.drafter, tag=spec.api,
-                  n_predict=spec.n_predict, thinking=spec.thinking, marks=spec.marks,
+                  n_predict=spec.n_predict, thinking=spec.thinking, think_open=spec.think_open, marks=spec.marks,
                   slot_params=MX.task_params(spec.params, spec.n_predict, spec.stream, self.spec_types),
                   request_id=new_request_id(), tools=spec.tools, parse_tools=spec.parse_tools, parallel=spec.parallel,
                   prefix_text=spec.prefix_text, profile=spec.profile, harness=spec.harness,
@@ -770,7 +772,9 @@ class K3Server:
             'engine': ENGINE,
             'caminus': {'build_info': self.build_info, 'status': '/caminus/status', 'status_version': STATUS_VERSION,
                         'metrics_prefix': 'caminus:', 'speculative_types': self.spec_types,
-                        'stats_enabled': self.stats.enabled},
+                        'stats_enabled': self.stats.enabled,
+                        # (the code objects loaded so far, from caminus.device.hip when the process has it: a mock server has none)
+                        'code_objects': list(getattr(sys.modules.get('caminus.device.hip'), 'LOADED', ()))},
             'n_ctx': self.max_ctx,
             'model': os.path.basename(self.model_path) if self.model_path else 'mock',
             'models': list(MODEL_PROFILES)}
@@ -1123,7 +1127,7 @@ class K3Handler(BaseHTTPRequestHandler):
 
     def _parser(self, spec):
         p = OutputParser(ToolSet(spec.tools), thinking=spec.thinking, parse_tools=spec.parse_tools,
-                         parallel=spec.parallel)
+                         parallel=spec.parallel, think_open=spec.think_open)
         pre = p.feed(spec.prefix_text) if spec.prefix_text else []
         return p, pre
 

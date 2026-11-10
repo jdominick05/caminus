@@ -488,7 +488,8 @@ def _is_prefix_of_any(s, words):
 
 # ---------------------------------------------------------------------------------------------------- parser
 # states
-R_LEAD, R, C_LEAD, C, T_OPEN, T_NAME, T_BODY, P_NAME, P_VALUE, T_END, T_AFTER, T_JSON, DONE = range(13)
+R_LEAD, R, C_LEAD, C, T_OPEN, T_NAME, T_BODY, P_NAME, P_VALUE, T_END, T_AFTER, T_JSON, DONE, R_OPEN = range(14)
+THINK_OPEN = '<think>'
 
 _BODY_WORDS = (PARAM_OPEN, FUNC_CLOSE, TOOL_CLOSE, TOOL_OPEN)
 _VALUE_FOLLOW = (PARAM_OPEN, FUNC_CLOSE, TOOL_CLOSE)
@@ -497,15 +498,19 @@ _VALUE_FOLLOW = (PARAM_OPEN, FUNC_CLOSE, TOOL_CLOSE)
 class OutputParser:
     """incremental reasoning / content / tool-call splitter; see the module docstring.
 
-    tools: the request's tools (OpenAI, bare or Anthropic form); thinking: the generation prompt opened a think
-    block (enable_thinking true); parse_tools: False for tool_choice none (tool calls stay content); parallel:
-    parallel_tool_calls (False: only the first call counts, the rest of the output is dropped)."""
+    tools: the request's tools (OpenAI, bare or Anthropic form); thinking: the request thinks (enable_thinking true);
+    think_open: the generation prompt itself opened the think block (it ends '<think>\\n': Qwen3.6's template). False (the
+    Qwen3 template: thinking on leaves the prompt at 'assistant\\n' and the model writes '<think>' first): one leading
+    '<think>' of the output is consumed, and output that does not start with it is content, not reasoning (llama.cpp's
+    reasoning parse when thinking is not forced open: an answer without tags must not end up with empty content); parse_tools:
+    False for tool_choice none (tool calls stay content); parallel: parallel_tool_calls (False: only the first call
+    counts, the rest of the output is dropped)."""
 
-    def __init__(self, tools=None, thinking=True, parse_tools=True, parallel=True):
+    def __init__(self, tools=None, thinking=True, parse_tools=True, parallel=True, think_open=True):
         self.toolset = tools if isinstance(tools, ToolSet) else ToolSet(tools)
         self.parse_tools = bool(parse_tools) and bool(self.toolset)
         self.parallel = parallel
-        self.state = R_LEAD if thinking else C_LEAD
+        self.state = (R_LEAD if think_open else R_OPEN) if thinking else C_LEAD
         self.buf = ''
         self.msg = ParsedMessage()
         self.notes = []             # leniency applied (for logs / metrics)
@@ -614,6 +619,15 @@ class OutputParser:
 
     def _step(self, final):
         st, buf = self.state, self.buf
+        if st == R_OPEN:            # (the model opens its own think block: one leading '<think>' consumed, held while partial;
+            i = _ws(buf, 0); rest = buf[i:]   #  no '<think>': the output is content)
+            if rest.startswith(THINK_OPEN):
+                self.buf = rest[len(THINK_OPEN):]; self.state = R_LEAD
+            elif rest and (final or not THINK_OPEN.startswith(rest)):
+                self.buf = rest; self.state = C_LEAD
+            else:
+                self.buf = rest
+            return
         if st in (R_LEAD, C_LEAD):
             i = _ws(buf, 0)
             self.buf = buf[i:]

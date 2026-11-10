@@ -58,6 +58,12 @@ DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_
 # them as nops, so Engine.build refuses them there. env K3_QSA_ENTRY=1: every k3_gguf_gsq{,_mt} tape on the QSA module
 # (measures that module's cost on the trunk's tapes)
 OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
+OP_OWN_MV = 44     # = kernels/k3_own_ops.h: Caminus's own quantized matvec (the *_own modules only; spec-own-quant.md)
+OP_OWN_F16 = 45    # = kernels/k3_own_ops.h: fp32 -> fp16 (the one-round-trip tiles' activations)
+OP_OWN_ATTN = 50   # = kernels/k3_own_ops.h: a query head's whole decode attention (the qwen3moe modules)
+OP_OWN_ATTS = 51   # = kernels/k3_own_atts.h: the decode attention split over positions (qwen3moe modules; speed at depth)
+OP_OWN_SWIGLU16, OP_OWN_MOE_SUM, OP_OWN_EMB, OP_OWN_ADD_RMS16 = 46, 47, 48, 49   # = kernels/k3_own_ops.h: fp16(silu(g) * u); x += weighted sum of slots;
+                                                                               # the embedding row; residual add + rms norm + fp16 in one
 OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
 QSA_OPS = {OP_IDX_APPEND: 'IDX_APPEND', OP_QSA_SCORE: 'SCORE', OP_QSA_SELECT: 'SELECT', OP_ATTN_SEL: 'ATTN_SEL', OP_QSA_PSEL: 'PSEL'}
 QSA_PSEL_H1, QSA_PSEL_H2, QSA_PSEL_FILTER, QSA_PSEL_FINISH, QSA_PSEL_ZERO = 0, 1, 2, 3, 4   # (Seg.pad1: the phase)
@@ -81,8 +87,13 @@ Q3N_MODULES = ('k3_gguf_q3n', 'k3_gguf_q3n_mt')
 Q35H_MODULES = ('k3_gguf_q35h', 'k3_gguf_q35h_mt', 'k3_gguf_q35h_trace')
 Q35D_MODULES = ('k3_gguf_q35d', 'k3_gguf_q35d_mt')   # the dense qwen35 line (AREX-2): one card; _mt: T > 1 (verify passes)   # (_trace: K3_TRACE timestamps, measurement only)
 Q35G_MODULES = ('k3_gguf_q35g', 'k3_gguf_q35g_mt')   # the 2-bit GSQ checkpoint (kernels/k3_gguf_q35g.hip)
-ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES
-ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
+OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (kernels/k3_gguf_q35d_own.hip; T = 1 only)
+# qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
+# engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
+Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
+Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES   # (_trace: K3_TRACE timestamps, measurement only)
+ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES
+ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
 ATTN_SS_OF = {m: ATTN_SS for m in ATTN_SPLIT_MODULES}
 # GGUF block formats (Seg.work of the GG ops), = the enum in kernels/k3_gguf_ops.h. 4-9 (the GSQ-RCO Coder's) are
@@ -137,6 +148,24 @@ CAPS_Q35G = frozenset({('MV', 'Q8_0'), ('MOE_GU', 'Q2_0'), ('MOE_DOWN', 'Q2_0'),
 MODULE_CAPS.update({m: CAPS_Q35G for m in Q35G_MODULES})
 CAPS_Q35D = frozenset({('MV', f) for f in ('Q4_K', 'Q5_K', 'Q6_K', 'Q8_0')} | {('F32_MV', 'F32')} | _Q8_1)   # (AREX-2 Q4_K_M)
 MODULE_CAPS.update({m: CAPS_Q35D for m in Q35D_MODULES})
+# OP_OWN_MV's formats and activation precisions (kernels/k3_own_ops.h): ('OWN_MV', '<format>/<a32 | a16f>')
+OWN_FMT, OWN_ACT = {'Q6_K': 2, 'Q4_K': 4, 'Q8_0': 3}, {'a32': 0, 'a16f': 1}
+# the one-round-trip tiles (Engine.own_matvec_1rt): pad1 = OWN_A16_1RT | OWN_GROUPED | OWN_X_PER_SLOT; Q4_K and Q6_K (planes)
+OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT, OWN_GU = 2, 4, 8, 16
+OWN_1RT_FMT = ('Q4_K', 'Q6_K')
+_CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT}
+             | {('OWN_F16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_MOE_SUM', '-')})
+_CAPS_Q3M = frozenset({('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTN', '-')} | {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT})   # (K3_OWN_Q3M: compiled into the qwen3moe modules only)
+MODULE_CAPS.update({m: CAPS_Q35D | _CAPS_OWN for m in OWN_MODULES})
+MODULE_CAPS.update({m: frozenset({('MV', 'Q4_K'), ('MV', 'Q6_K'), ('F32_MV', 'F32')}) | _Q8_1 | _CAPS_OWN | _CAPS_Q3M for m in Q3M_MODULES})
+# the lean qwen3moe decode module: k3_run's dispatch holds these ops and nothing else (a k3_run with every GGUF-engine op
+# inlined keeps more scalars live than it has SGPRs: the reloads cost every segment hop of every wave, XT 5.33 -> 4.78 ms
+# per token at the same grid). Engine.build refuses any other op on it (an unknown op would run as a no-op on the device).
+MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT_FMT for g in ('', '_gu')} |
+                                 {('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTS', '-'), ('F32_MV', 'F32')}) for m in Q3M_LEAN_MODULES})
+# (the attention: OP_OWN_ATTS, split over positions; OP_OWN_ATTN, one task per query head, stays in the full module as its
+#  oracle and for A/Bs)
+Q3M_LEAN_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ATTS, OP_OWN_ADD_RMS16, OP_F32_MV, OP_ROUTER, OP_OWN_EMB}
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -149,6 +178,17 @@ def seg_kind(sg):
     if sg.op in _OP_KIND: return (_OP_KIND[sg.op], GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_F32_MV: return ('F32_MV', 'F32')
     if sg.op == OP_BF16_MV: return ('BF16_MV', 'BF16')
+    if sg.op == OP_OWN_F16: return ('OWN_F16', '-')
+    if sg.op == OP_OWN_SWIGLU16: return ('OWN_SWIGLU16', '-')
+    if sg.op == OP_OWN_MOE_SUM: return ('OWN_MOE_SUM', '-')
+    if sg.op == OP_OWN_EMB: return ('OWN_EMB', GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
+    if sg.op == OP_OWN_ADD_RMS16: return ('OWN_ADD_RMS16', '-')
+    if sg.op == OP_OWN_ATTN: return ('OWN_ATTN', '-')
+    if sg.op == OP_OWN_ATTS: return ('OWN_ATTS', '-')
+    if sg.op == OP_OWN_MV:
+        a = (('a16_1rt_gu' if sg.pad1 & OWN_GU else 'a16_1rt') if sg.pad1 & OWN_A16_1RT and sg.pad1 < 32
+             else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
+        return ('OWN_MV', f"{GG_FMT_NAME.get(sg.work, f'?{sg.work}') if sg.work in OWN_FMT.values() else f'?{sg.work}'}/{a}")
     if sg.op == OP_GG_Q8_1: return ('Q8_1', Q8_1_MODE.get(sg.work, f'?{sg.work}'))
     if sg.op in DF_OPS: return ('DF', DF_OPS[sg.op])
     if sg.op in QSA_OPS: return ('QSA', QSA_OPS[sg.op])
@@ -452,6 +492,106 @@ class Engine:
         if ntok is not None: self.team_fixed.add(len(self.segs) - 1)
         return len(self.segs) - 1
 
+    def own_matvec(self, w, fmt, nrows, ncols, x, out, act='a32', rows_per_task=32, dep=-1, team=-1):
+        """Caminus's own quantized matvec (OP_OWN_MV, the *_own modules): raw GGUF blocks w of nrows contiguous rows (format
+        fmt: Q6_K / Q4_K / Q8_0) times the fp32 activation x [ncols] -> fp32 out [nrows]; act: 'a32' (fp32 activation) or
+        'a16f' (fp16 in registers). T = 1 only; rows_per_task a multiple of 4 (a wave takes 4 rows)"""
+        if self.T != 1: raise ValueError('own_matvec: T = 1 only (no multi-token own module yet)')
+        if fmt not in OWN_FMT or act not in OWN_ACT: raise ValueError(f'own_matvec: {fmt} / {act} ({sorted(OWN_FMT)} / {sorted(OWN_ACT)})')
+        if rows_per_task % 4 or rows_per_task < 4: raise ValueError(f'own_matvec: rows_per_task {rows_per_task} (a multiple of 4)')
+        qk = 32 if fmt == 'Q8_0' else 256
+        if ncols % qk: raise ValueError(f'own_matvec: K {ncols} is not a multiple of {fmt} blocks ({qk})')
+        assert x.dtype == torch.float32 and x.numel() >= ncols and out.numel() >= nrows and x.data_ptr() % 16 == 0, (x.dtype, x.numel(), out.numel())
+        bs = {'Q6_K': 210, 'Q4_K': 144, 'Q8_0': 34}[fmt]
+        assert w.numel() * w.element_size() >= nrows * ncols // qk * bs and w.data_ptr() % 4 == 0, (w.numel(), nrows, ncols)
+        self.keep += [w, x, out]
+        self.segs.append(Seg(OP_OWN_MV, (nrows + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
+                             x.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_FMT[fmt], team, OWN_ACT[act], 0))
+        return len(self.segs) - 1
+
+    def own_matvec_1rt(self, w, fmt, rows, ncols, x16, out, ids=None, total_rows=None, x_per_slot=False, rows_per_task=16,
+                       dep=-1, team=-1, up=None):
+        """Caminus's own one-round-trip matvec tiles (OP_OWN_MV, kernels/own_quant.h own_rows_q4k_1rt / own_rows_q6k_planes in
+        their K3 form), fp16 activations x16. Q4_K: raw GGUF blocks; Q6_K: engine.own_layout.q6k_planes of the whole matrix.
+          ids None: out[r] = row r . x16, r < rows (w holds rows rows).
+          ids (int32 [S] on the device, clamped there to the matrix's experts): w is the whole expert tensor, total_rows =
+          experts * rows; slot s computes expert ids[s]'s rows into out[s * rows + r]; x16 is [ncols] shared, or [S, ncols]
+          with x_per_slot (each expert its own input). rows_per_task: even (a wave takes 2 rows at a time, the 8 waves of
+          a workgroup take a task's row pairs in turn; 16 = one pair per wave). T = 1 only.
+          up (the qwen3moe modules): a second matrix of w's shape, format and layout (the experts' up; w their gate): out is
+          then fp16 [S * rows] = fp16(silu(w row . x) * (up row . x)), the down matvec's input, in the one segment."""
+        if self.T != 1: raise ValueError('own_matvec_1rt: T = 1 only')
+        if fmt not in OWN_1RT_FMT: raise ValueError(f'own_matvec_1rt: {fmt} ({OWN_1RT_FMT})')
+        if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:
+            raise ValueError(f'own_matvec_1rt: K {ncols} (a multiple of 256), rows {rows} (even), rows_per_task {rows_per_task}')
+        S = 1 if ids is None else ids.numel()
+        total = rows if ids is None else int(total_rows)
+        if total % rows: raise ValueError(f'own_matvec_1rt: total_rows {total} is not experts x {rows}')
+        bs = {'Q6_K': 210, 'Q4_K': 144}[fmt]
+        assert x16.dtype == torch.float16 and x16.numel() >= ncols * (S if x_per_slot else 1) and x16.data_ptr() % 16 == 0
+        assert out.dtype == (torch.float32 if up is None else torch.float16) and out.numel() >= S * rows
+        for m in (w,) if up is None else (w, up):
+            assert m.numel() * m.element_size() >= total * ncols // 256 * bs and m.data_ptr() % 16 == 0, (m.numel(), total, ncols)
+        if ids is not None: assert ids.dtype == torch.int32 and ids.is_cuda
+        if up is not None and (rows_per_task % 16 or rows_per_task > 64):   # (the gate sums' LDS slots: OWN_GU_RPT)
+            raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of 16, at most 64 (got {rows_per_task})')
+        pad1 = (OWN_A16_1RT | (OWN_GROUPED if ids is not None else 0) | (OWN_X_PER_SLOT if x_per_slot else 0)
+                | (OWN_GU if up is not None else 0))
+        self.keep += [w, x16, out] + ([ids] if ids is not None else []) + ([up] if up is not None else [])
+        N = S * rows
+        self.segs.append(Seg(OP_OWN_MV, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
+                             x16.data_ptr(), None if ids is None else ids.data_ptr(), out.data_ptr(), 0.0, N, ncols, total,
+                             OWN_FMT[fmt], team, pad1, rows, 0, None if up is None else up.data_ptr()))
+        return len(self.segs) - 1
+
+    def own_f16(self, x, out, rows_per_task=1024, dep=-1, team=-1):
+        """out fp16 [n] = x fp32 [n] (round to nearest even)"""
+        n = x.numel(); assert x.dtype == torch.float32 and out.dtype == torch.float16 and out.numel() >= n
+        self.keep += [x, out]
+        self.segs.append(Seg(OP_OWN_F16, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None, None, x.data_ptr(),
+                             None, out.data_ptr(), 0.0, n, 0, 0, 0, team, 0, 0))
+        return len(self.segs) - 1
+
+    def own_swiglu16(self, g, u, y16, rows_per_task=1024, dep=-1, team=-1):
+        """y16 fp16 [n] = silu(g) * u (g, u fp32 [n]: the gate / up matvecs' outputs)"""
+        n = g.numel(); assert u.numel() == n and y16.dtype == torch.float16 and y16.numel() >= n
+        self.keep += [g, u, y16]
+        self.segs.append(Seg(OP_OWN_SWIGLU16, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, u.data_ptr(), None,
+                             g.data_ptr(), None, y16.data_ptr(), 0.0, n, 0, 0, 0, team, 0, 0))
+        return len(self.segs) - 1
+
+    def own_moe_sum(self, d, x, slots=1, w=None, rows_per_task=1024, dep=-1, team=-1):
+        """x [n] += sum over slots s of w[s] * d[s * n:(s + 1) * n] (fma in slot order; w None: weights 1, slots 1 = x += d)"""
+        n = x.numel(); assert d.numel() >= slots * n and (w is None or w.numel() >= slots) and 1 <= slots <= 64
+        self.keep += [d, x] + ([w] if w is not None else [])
+        self.segs.append(Seg(OP_OWN_MOE_SUM, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None,
+                             None if w is None else w.data_ptr(), d.data_ptr(), None, x.data_ptr(), 0.0, n, 0, 0, 0, team, slots, 0))
+        return len(self.segs) - 1
+
+    def own_add_rms16(self, x, nw, h, h16, eps, d=None, slots=0, w=None, dep=-1, team=-1):
+        """one workgroup: x += sum over slots s of w[s] * d[s] (slots 0: no add; w None: weights 1), then h = rms_norm(x) *
+        nw (fp32) and h16 = fp16(h) (kernels/k3_own_ops.h OP_OWN_ADD_RMS16: OP_OWN_MOE_SUM -> OP_RMS_MUL -> OP_OWN_F16's
+        math in one segment, every load of a step issued together; equal to them to rounding, not bitwise)."""
+        n = x.numel(); assert nw.numel() == n and h.numel() >= n and h16.dtype == torch.float16 and h16.numel() >= n
+        if n % 256 or not 256 <= n <= 2048: raise ValueError(f'own_add_rms16: n {n} (a multiple of 256, at most 2048)')
+        assert 0 <= slots <= 8 and (slots == 0 or d.numel() >= slots * n) and (w is None or w.numel() >= slots)
+        self.keep += [x, nw, h, h16] + ([d] if d is not None else []) + ([w] if w is not None else [])
+        self.segs.append(Seg(OP_OWN_ADD_RMS16, 1, dep, 1, nw.data_ptr(), None if w is None else w.data_ptr(),
+                             None if d is None else d.data_ptr(), h.data_ptr(), x.data_ptr(), eps, n, n, 0, 0, team, slots, 0,
+                             0, h16.data_ptr()))
+        return len(self.segs) - 1
+
+    def own_emb(self, w, fmt, vocab, D, tok, x, dep=-1, team=-1):
+        """x fp32 [D] = row tok[0] (an int32 on the device, clamped to the vocabulary there) of the embedding matrix w (raw
+        GGUF blocks, Q4_K), decoded as caminus.own_dequant does (bitwise)"""
+        if fmt != 'Q4_K': raise ValueError(f'own_emb: {fmt} (Q4_K only)')
+        rb = D // 256 * 144
+        assert D % 256 == 0 and w.numel() * w.element_size() >= vocab * rb and tok.dtype == torch.int32 and x.numel() >= D
+        self.keep += [w, tok, x]
+        self.segs.append(Seg(OP_OWN_EMB, 1, dep, 1, w.data_ptr(), None, tok.data_ptr(), None, x.data_ptr(), 0.0, D, rb, 0,
+                             OWN_FMT[fmt], team, 0, vocab))
+        return len(self.segs) - 1
+
     def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1):
         """F32 weights w [N, K] (row-major) times fp32 x [K] -> out [N]"""
         N, K = w.shape; N = self.T * N; assert K % 4 == 0; self.keep += [w, x, out]
@@ -574,7 +714,8 @@ class Engine:
         """True on the modules whose attention is the split pair (ATTN_SPLIT_MODULES)"""
         return getattr(self, "module", None) in ATTN_SPLIT_MODULES
 
-    def attn_dec(self, q, cache, pos, out, heads, kv_heads, dim, scale, q8=False, dep=-1, team=-1, max_cells=None, part=None):
+    def attn_dec(self, q, cache, pos, out, heads, kv_heads, dim, scale, q8=False, dep=-1, team=-1, max_cells=None, part=None,
+                 batched=False):
         """decode attention over positions 0..pos (f16 or q8_0 cache), grouped kv heads. On the split modules
         (split_attn()): the OP_ATTN_PART / OP_ATTN_COMB pair (_attn_split; max_cells / part there), the COMB's index returned"""
         if self.split_attn():
@@ -582,10 +723,64 @@ class Engine:
             return self._attn_split(q, cache, pos, None, out, heads, kv_heads, dim, scale, q8, dep, max_cells, part)
         assert max_cells is None and part is None, 'max_cells / part: the split attention modules only'
         assert dim <= 512, 'op_attn_dec holds at most 2 accumulators per thread'
+        if batched and (self.module not in Q3M_MODULES or dim % 128):   # (the same bits, the loads in batches: k3_own_ops.h)
+            raise ValueError('attn_dec(batched=True): the qwen3moe modules, head dim a multiple of 128')
         self._guard_pos(pos, kv_rows(cache, kv_heads * dim, q8))   # (the guard bounds the rows it reads)
         self.keep += [q, cache, pos, out]
         self.segs.append(Seg(OP_ATTN_DEC, self.T * heads, dep, 1, cache.data_ptr(), None, q.data_ptr(), pos.data_ptr(), out.data_ptr(),
-                             scale, self.T * heads, dim, 1, int(q8), team, kv_heads, 0))
+                             scale, self.T * heads, dim, 1, int(q8), team, kv_heads, 0, 0, 1 if batched else None))
+        return len(self.segs) - 1
+
+    def own_attn(self, q, kv, par, cache, pos, out16, heads, kv_heads, dim, scale, dep=-1, team=-1):
+        """a query head's decode attention as one task per head (OP_OWN_ATTN, the qwen3moe modules): qk_nr of q and k,
+        kv_append, attn_dec and the fp16 output in their arithmetic. q fp32 [heads * dim] and kv fp32 [2][kv_heads * dim]
+        (k | v) are the matvecs' outputs; par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache f16; out16 fp16
+        [heads * dim]. n_rot = dim = 128, T = 1."""
+        M = kv_heads * dim
+        if self.T != 1 or dim != 128 or heads % kv_heads: raise ValueError('own_attn: T = 1, head dim 128, grouped kv heads')
+        assert q.dtype == kv.dtype == par.dtype == torch.float32 and cache.dtype == out16.dtype == torch.float16
+        assert q.numel() >= heads * dim and kv.numel() >= 2 * M and par.numel() >= 2 * dim + 2 and out16.numel() >= heads * dim
+        self._guard_pos(pos, kv_rows(cache, M, False))   # (the guard bounds the row it writes and the rows it reads)
+        self.keep += [q, kv, par, cache, pos, out16]
+        self.segs.append(Seg(OP_OWN_ATTN, heads, dep, 1, cache.data_ptr(), kv.data_ptr(), q.data_ptr(), pos.data_ptr(),
+                             out16.data_ptr(), scale, heads, dim, dim, 0, team, kv_heads, 0, 0, par.data_ptr()))
+        return len(self.segs) - 1
+
+    ATS_RS, ATS_CNT, ATS_PAD = 16 + 8 * 128, 64, 64   # = kernels/k3_own_atts.h: floats per split record, counter words
+                                                       # before the records, cache rows past the last position
+
+    @staticmethod
+    def atts_scratch_floats(kv_heads, splits, heads_per_task=8):
+        """the fp32 words of own_atts' scratch (counters, then the split records of every (kv head, head group))"""
+        return Engine.ATS_CNT + kv_heads * (8 // heads_per_task) * splits * Engine.ATS_RS
+
+    def own_atts(self, qkv, scratch, par, cache, pos, out16, heads, kv_heads, dim, scale, splits=64, lmin=128, heads_per_task=8,
+                 dep=-1, team=-1):
+        """the decode attention split over positions (OP_OWN_ATTS, kernels/k3_own_atts.h; the qwen3moe modules): q / k norm +
+        RoPE, the cache row, flash-decoding splits of the positions (one task = a split of one kv head, all its query heads),
+        the merge by the last task of each kv head, fp16 out. qkv fp32 = q [heads * dim] | k [kv_heads * dim] | v (the
+        matvecs' outputs, one buffer); scratch fp32 [atts_scratch_floats(kv_heads, splits)], ZEROED before the first run
+        (its counters return to zero after every launch); par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache
+        f16 with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
+        rows before them); out16 fp16 [heads * dim]. splits: tasks per kv head (a fixed number: the split layout depends only on the
+        position, never on the grid); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
+        kv head one task takes (8: the modules' build; the same bits at any value). n_rot = dim = 128, 8 query heads per kv head, T = 1."""
+        M = kv_heads * dim
+        if self.T != 1 or dim != 128 or heads != 8 * kv_heads: raise ValueError('own_atts: T = 1, head dim 128, 8 query heads per kv head')
+        if not 1 <= splits <= 64 or lmin < 32 or lmin % 32: raise ValueError(f"own_atts: splits {splits} (1 .. 64: the merge holds every split's m, l in LDS), lmin {lmin} (a multiple of 32)")
+        if heads_per_task != 8:   # (the device code takes 1 / 2 / 4 only when built with ATS_GH_RUNTIME: measured slower)
+            raise ValueError(f'own_atts: heads_per_task {heads_per_task}: the qwen3moe modules are built for 8')
+        hs = 8 // heads_per_task
+        assert kv_heads * hs <= self.ATS_CNT
+        assert qkv.dtype == par.dtype == scratch.dtype == torch.float32 and cache.dtype == out16.dtype == torch.float16
+        assert qkv.numel() >= heads * dim + 2 * M and par.numel() >= 2 * dim + 2 and out16.numel() >= heads * dim
+        assert scratch.numel() >= self.atts_scratch_floats(kv_heads, splits, heads_per_task) and qkv.data_ptr() % 16 == 0 and scratch.data_ptr() % 16 == 0
+        rows = kv_rows(cache, M, False) - self.ATS_PAD
+        if rows < 1: raise ValueError(f'own_atts: the cache needs {self.ATS_PAD} padding rows past its last position')
+        self._guard_pos(pos, rows)   # (the guard bounds the row it writes; a chunk's loads run up to ATS_PAD - 1 rows past it)
+        self.keep += [qkv, scratch, par, cache, pos, out16]
+        self.segs.append(Seg(OP_OWN_ATTS, splits * kv_heads * hs, dep, heads_per_task, cache.data_ptr(), scratch.data_ptr(), qkv.data_ptr(), pos.data_ptr(),
+                             out16.data_ptr(), scale, heads, dim, dim, splits, team, kv_heads, lmin, 0, par.data_ptr()))
         return len(self.segs) - 1
 
     def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None):
@@ -930,6 +1125,11 @@ class Engine:
                 flagged = {OP_RMS_MUL: sg.aux, OP_QK_NR: sg.aux, OP_KV_APPEND: sg.aux, OP_ATTN_DEC: sg.pad2}.get(sg.op, 1)
                 if sg.op not in DRAFT_OPS or not flagged:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}{"" if flagged else ", unflagged"})')
+        if self.module in Q3M_LEAN_MODULES:   # (only the decode tape's ops are compiled into its k3_run)
+            for i, sg in enumerate(self.segs):
+                if sg.op not in Q3M_LEAN_OPS:
+                    raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): the lean decode module runs '
+                                     f'only {sorted(Q3M_LEAN_OPS)}; use k3_gguf_q3m_own for the other tape forms')
         q = [i for i, sg in enumerate(self.segs) if sg.op in QSA_OPS]
         if q and (self.module not in QSA_MODULES or self.teams is not None):   # (k3_run elsewhere runs them as nops)
             raise ValueError(f'k3: module {self.module} has no QSA ops (segments {q[:8]}; k3_run in {QSA_MODULES} only)')

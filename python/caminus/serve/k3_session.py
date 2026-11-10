@@ -90,7 +90,7 @@ from ..device import capacity
 from ..decode import longctx
 from ..engine import passpolice
 from ..engine.k3 import ContextBoundsError
-from ..prefill.coder import PrefillRefused
+from ..prefill.driver import PrefillRefused   # (its home: the Coder's prefill module re-exports it but loads the vendored MMQ and gguf-py)
 from ..prefill.glue import RoutingError
 from . import candsample as CS
 from .draftpolicy import DraftPolicy

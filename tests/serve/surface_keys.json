@@ -3,6 +3,7 @@
   "/bos_token:str",
   "/build_info:str",
   "/caminus/build_info:str",
+  "/caminus/code_objects:list",
   "/caminus/metrics_prefix:str",
   "/caminus/speculative_types:str",
   "/caminus/stats_enabled:bool",

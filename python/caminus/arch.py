@@ -12,6 +12,7 @@ what a model needs; nothing else branches on a GGUF's general.architecture to bu
              layer)
   qwen3next  Qwen3-Coder-Next: Qwen3NextTP on both cards, T = 1, no drafter yet, no batched prefill yet (KPassOnly: every
              prompt runs as K3 passes)
+  qwen3moe   Qwen3-30B-A3B: Q3MoEOne on one card (own code from the GGUF to the logits), T = 1, no drafter yet, KPassOnly
 
 Any other architecture takes the Coder's path, as before the registry: FlashNextTP refuses a GGUF it cannot load.
 
@@ -86,15 +87,33 @@ def meta(path):
     of every tensor of this file but token_embd, which the engines keep on the host)"""
     k = _file_key(path)
     if k not in _META:
-        _config.ensure_gguf()
-        from gguf import GGUFReader
-        rd = GGUFReader(path, 'r'); f = {x.name: x for x in rd.fields.values()}
-        a = f['general.architecture'].contents()
-        hp = {h: f[f'{a}.{h}'].contents() for h in HP_KEYS if f'{a}.{h}' in f}
-        w = sum(int(t.n_bytes) for t in rd.tensors if t.name != 'token_embd.weight')
-        del rd, f
+        from . import ggufio
+        try:                       # (Caminus's own reader; gguf-py only for a file it cannot read: a tensor type it lacks)
+            F = ggufio.GGUFFile(path)
+        except ggufio.GGUFError:
+            F = None
+        if F is not None:
+            try:
+                a = F.meta['general.architecture']
+                hp = {h: _plain(F.meta[f'{a}.{h}']) for h in HP_KEYS if f'{a}.{h}' in F.meta}
+                w = sum(int(t.n_bytes) for t in F.tensors if t.name != 'token_embd.weight')
+            finally:
+                F.close()
+        else:
+            _config.ensure_gguf()
+            from gguf import GGUFReader
+            rd = GGUFReader(path, 'r'); f = {x.name: x for x in rd.fields.values()}
+            a = f['general.architecture'].contents()
+            hp = {h: f[f'{a}.{h}'].contents() for h in HP_KEYS if f'{a}.{h}' in f}
+            w = sum(int(t.n_bytes) for t in rd.tensors if t.name != 'token_embd.weight')
+            del rd, f
         _META[k] = dict(arch=a, hp=hp, weights=w)
     return _META[k]
+
+
+def _plain(v):
+    """a header value as gguf-py's contents() gives it (a numeric array as a list)"""
+    return v.tolist() if hasattr(v, 'tolist') else v
 
 
 def _read_int(p):
@@ -140,6 +159,7 @@ class Arch:
     T = 1
     drafter = None
     engine = None            # 'module:Class' under caminus
+    tokenizer = 'hf'         # caminus.serve.tokenizer.QwenTokenizer's BPE engine: 'hf' (the tokenizers library) or 'own'
 
     def __init__(self, name, alias):
         self.name, self.alias = name, alias
@@ -415,6 +435,31 @@ class OneCard(Arch):
                              reserve_mib=(capacity.DISPLAY_RESERVE_MIB if c and c['display'] else 0,), card_names=(name,))
 
 
+class Q3MoE(OneCard):
+    """qwen3moe (Qwen3-30B-A3B): Q3MoEOne on one card, T = 1, Caminus's own code from the GGUF to the logits; no drafter yet;
+    the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
+    (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
+    engine = 'engine.q3moe_one:Q3MoEOne'
+    tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
+    PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
+
+    def auto_need(self, opt, slots, cards=None):
+        from .engine.q3moe_one import Q3MoEOne
+        from .prefill import q3m
+        path = opt['model']
+        n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
+        slot = Q3MoEOne.kv_pos_mib(path) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
+        pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
+        need = lambda c: [Q3MoEOne.projection_mib(path, c) + pf + (slots + 2) * slot]   # (the side rows: host memory)
+        return n_ctx, [0], slot, need
+
+    def build(self, opt, log=print, T=None):
+        from .engine.q3moe_one import Q3MoEOne
+        from .prefill.q3m import Q3MPrefill
+        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
+        return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
+
+
 class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
@@ -433,6 +478,7 @@ class TwoCardTP(Arch):
 
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
+                             Q3MoE('qwen3moe', 'qwen3-30b-a3b'),
                              TwoCardTP('qwen3next', 'qwen3-coder-next'))}
 CODER = ARCHS['qwen4exp']
 
