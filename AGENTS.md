@@ -15,8 +15,11 @@ CLAUDE.md imports this file.
 - The Coder runs at its measured split (10 / 12) on every pair (`arch.Coder.split`), so it needs a 24 GB card 0: XTX + XT
   (tested) or XTX + XTX (same shapes, unmeasured). The even split (8 / 10) can't prefill: each card's expert slice is 320
   rows and the vendored MMQ only takes whole 128-row tiles (the shared expert's non-Q6_K gate / up go through `mmq.mm`).
-- The bitwise reference is llama.cpp: the ignite-llama fork at e4e3f8eda (github.com/jdominick05/ignite-llama). Kernel
-  builds and the gates need it; the installed package doesn't. Older notes name its development commit 842653396.
+- llama.cpp is the yardstick, not the source of the math: the ignite-llama fork at e4e3f8eda
+  (github.com/jdominick05/ignite-llama). Quantized pairs still on its math (ggml-cuda's vec_dot, the vendored MMQ) are
+  gated bitwise against it; each pair moves to Caminus's own kernels under docs/specs/spec-own-quant.md, which ends
+  with no decode module or prefill object including a ggml-cuda header. Kernel builds and the gates need the fork; the
+  installed package doesn't. Older notes name its development commit 842653396.
 - Comments cite a private history: commit hashes, decision ids (D-281 = the KLD floor gate below), step names
   (`impl:package`), plan documents not in this tree. Treat them as labels; code and tests are the authority.
 
@@ -121,6 +124,11 @@ Correctness:
   grids, with T = 4 passes equal to one-token steps.
 - D-281: a change that can't be bitwise by design keeps mean KLD vs llama.cpp's one-token decode within llama.cpp's own
   batch-vs-decode floor (0.0076 on the Coder) and top-1 within 1 point.
+- Own quantized math (docs/specs/spec-own-quant.md): a change of a quantized (op, format) pair's math passes G-acc (per-op
+  error vs fp64 on real rows and recorded activations, mean and p99, at most llama.cpp's), G-model (KLD vs the fp32
+  activation reference mode at most llama.cpp's, top-1 agreement at least llama.cpp's), G-self (the bitwise rule above,
+  against our own previous output) and G-speed (interleaved A/B in the real module). KLD vs llama.cpp is then a
+  divergence bound only.
 - Bounds: every position-indexed host entry calls `k3.check_span`; device accesses clamp and set `err`; contexts past the
   allocation are refused, never written.
 - Routing ids are clamped on the device before every mm_ids_helper launch; a chunk with its routing flag set is refused.
@@ -163,7 +171,8 @@ Codex flags P0 / P1 issues only. In this repository these are P1:
   GPU gates and their results in the pull request body: bitwise against the previous reference (T-token verify passes
   equal to one-token steps, and the `K3_PER_WGP=3/6/7` grids), or, where a change cannot be bitwise by design, the KLD
   floor (mean KLD against llama.cpp's one-token decode within llama.cpp's own batch-versus-decode floor, top-1 within one
-  point). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
+  point), or, where it changes a quantized pair's math, the docs/specs/spec-own-quant.md gates (G-acc, G-model, G-self,
+  G-speed, with their numbers). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
 - Flag a device wait without a time bound (`limit_us`), a GPU allocation that is not projected and checked through
   `caminus.device.capacity` before it happens, and a position-indexed host entry that does not call `k3.check_span`.
 - Flag a GPU command in a script, test or doc that does not run under `tools/guard.sh`.
