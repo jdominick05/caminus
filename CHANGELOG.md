@@ -12,6 +12,10 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,493 tok/s (llama.cpp: 3,853). Every step from the
   GGUF file to the output token is code written for Caminus, and its output is 5 to 6 times closer to an exact
   reference of the model than llama.cpp's. See [docs/dev/qwen3-30b-a3b.md](docs/dev/qwen3-30b-a3b.md).
+- **Qwen Code sees how much context it has left.** After each batch of tool calls, one line in the tool result says how
+  many tokens are used and how many are left before automatic compaction, so the model can plan the end of a long task.
+  The prompt cache keeps working. On by default; `caminus qwen-code setup --context-note off` turns it off. See
+  [harnesses](docs/harnesses.md#the-context-note).
 - **The advisor, an add-on for Qwen Code.** When the model gets stuck (failing commands in a row, the same call over
   and over, a long run), a second model reads the task and the recent steps and sends a short hint, added to the newest
   message so the prompt cache keeps working. The second model can be local (another model on your other card, or any
