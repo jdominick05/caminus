@@ -175,7 +175,7 @@ Why a T-token pass is not cheap here (the pass of 4, from its trace):
 
 What would change the picture is arithmetic that takes T columns for the price of one: the WMMA matrix instructions the
 prefill uses. An op built on them needs about 240 vector registers, against the 96 the persistent kernel is held to so
-that 8 workgroups per compute unit stay resident. That trade, and a drafter on Caminus's own kernels, are not built.
+that 16 waves fit on each SIMD. That trade, and a drafter on Caminus's own kernels, are not built.
 
 ## Limits
 

@@ -1,8 +1,10 @@
 """Q3MoEVerify (qwen3moe, T-token verify passes on kernels/k3_q3m_ver.hip) against Q3MoEOne's decode steps on the same
 tokens and positions: the logits and the next decode step bit for bit, for T = 1 .. 4, on real consecutive tokens (this
 repository's docs as text) over a prefilled context, and on one token repeated from an empty context (the tokens of a
-pass then route alike: an expert has up to 4 member slots); a wrong token at row 2 leaves rows 0 and 1 right and the right pass after it gives every
-row; tap features equal across T; the host refusals leave the cache and the stage untouched.
+pass then route alike: an expert has up to 4 member slots). Before each T's passes the cache rows of the checked span are
+overwritten in every layer, so the passes' own row stores are what the later rows and the decode step after them read.
+A wrong token at row 2 leaves rows 0 and 1 right and changes rows 2 and 3; the right pass after it gives every row and
+the decode step after it. Tap features are equal across T; the host refusals leave the cache and the stage untouched.
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   tools/guard.sh LOG 900 python -I tests/engine/test_q3moe_verify.py GGUF [--depths 512,2048]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
@@ -37,6 +39,7 @@ pf = Q3MPrefill(eng, chunk=512)
 vers = {T: Q3MoEVerify(eng, T) for T in range(1, MAX_T + 1)}
 print(f'engine {eng.vram_mib:.0f} MiB at max_ctx {max_ctx}; verify tapes: ' +
       ', '.join(f'T {T}: {len(v.E.segs)} segments, {v.mib:.1f} MiB' for T, v in vers.items()), flush=True)
+RW = 2 * eng.nkv * eng.hd                                 # elements of one position's cache row (k | v)
 ok = True
 def check(c, msg):
     global ok
@@ -61,24 +64,29 @@ for N in depths + [8]:
     nxt = bits(eng.step(toks[0]))                          # (position N + G: the step after the checked span)
     what = f'depth {N}, ' + ('real tokens' if real else 'one token repeated')
     for T, ver in vers.items():
+        for d in eng.L: d['cache'][N * RW:(N + G) * RW] = 3.0   # (the decode steps' rows of the span are gone: the passes store their own)
         bad = 0; dis = []
         for b in range(G // T):
             ver.run(toks[b * T:(b + 1) * T], N + b * T); dis.append(ver.distinct())
             bad += sum(int((bits(ver.logits(t)) != ref[b * T + t]).sum()) for t in range(T))
         eng.pos_host = N + G                               # the cache rows N .. N + G - 1 are now the verify passes'
         same_next = np.array_equal(bits(eng.step(toks[0])), nxt)
-        check(bad == 0 and same_next, f'{what}, T {T}: {G // T} passes bitwise the decode steps\' logits ({bad} words differ); the decode step '
-              f'after them {"the same" if same_next else "DIFFERS"}; distinct experts per layer {np.mean(dis):.1f} of {8 * T}')
+        check(bad == 0 and same_next, f'{what}, T {T}: {G // T} passes over overwritten cache rows bitwise the decode steps\' logits ({bad} words '
+              f'differ); the decode step after them {"the same" if same_next else "DIFFERS"}; distinct experts per layer {np.mean(dis):.1f} of {8 * T}')
     if not real:
         check(np.mean(dis) < 8.5, f'{what}: the tokens of a T {MAX_T} pass route alike ({np.mean(dis):.2f} distinct experts per layer: '
               f'{MAX_T} member slots per expert)')
-    # a wrong token at row 2: rows 0 and 1 stay right; the right pass after it gives every row
+    # a wrong token at row 2: rows 0 and 1 stay right, rows 2 and 3 change (row 3 reads row 2's cache row); the right
+    # pass after it gives every row, and its row stores give the decode step after it
     ver = vers[MAX_T]; w = list(toks[:MAX_T]); w[2] = (w[2] + 1) % eng.vocab
     ver.run(w, N)
-    r01 = all(np.array_equal(bits(ver.logits(t)), ref[t]) for t in (0, 1)); r2 = not np.array_equal(bits(ver.logits(2)), ref[2]) or not real
+    r01 = all(np.array_equal(bits(ver.logits(t)), ref[t]) for t in (0, 1))
+    r23 = all(not np.array_equal(bits(ver.logits(t)), ref[t]) for t in (2, 3))
     ver.run(toks[:MAX_T], N)
     back = all(np.array_equal(bits(ver.logits(t)), ref[t]) for t in range(MAX_T))
-    check(r01 and r2 and back, f'{what}: a wrong token at row 2 leaves rows 0, 1 right ({r01}), changes row 2 ({r2}); the right pass after it gives every row ({back})')
+    eng.pos_host = N + MAX_T; after = np.array_equal(bits(eng.step(toks[MAX_T])), ref[MAX_T])
+    check(r01 and r23 and back and after, f'{what}: a wrong token at row 2 leaves rows 0, 1 right ({r01}), changes rows 2, 3 ({r23}); the right pass after it '
+          f'gives every row ({back}) and the decode step after it ({after})')
     # tap features: a row's features do not depend on the T of the pass that computed it
     f4 = [bits(ver.feats(t)) for t in range(MAX_T)]
     same = True
