@@ -71,16 +71,22 @@ def main():
     check(models.drafter_item(models.BY_NAME['coder']) == 'dflash', 'catalog: the Coder\'s drafter file is dflash')
     check(all(models.drafter_item(m) is None for m in models.CATALOG if m.name != 'coder'), 'catalog: no other model loads a drafter yet')
 
-    # ---- meta: the header read once per file; tp_shape from it
+    # ---- meta: the header read once per file; tp_shape from it (arch.meta reads it with caminus.ggufio, gguf-py only for
+    # a file that reader refuses: opens through either count)
     config.ensure_gguf()
     import gguf
+    from caminus import ggufio
     opens = []
-    real = gguf.GGUFReader
+    real, real_own = gguf.GGUFReader, ggufio.GGUFFile
 
     class Counting(real):
         def __init__(self, path, *x, **k):
             opens.append(path); super().__init__(path, *x, **k)
-    gguf.GGUFReader = Counting
+
+    class CountingOwn(real_own):
+        def __init__(self, path, *x, **k):
+            opens.append(path); super().__init__(path, *x, **k)
+    gguf.GGUFReader = Counting; ggufio.GGUFFile = CountingOwn
     try:
         q3n = os.path.join(S, 'tiny-q3n.gguf')
         hp = {'qwen3next.context_length': 65536, 'qwen3next.block_count': 8, 'qwen3next.full_attention_interval': 4,
@@ -122,7 +128,7 @@ def main():
         write_gguf(llama, 'llama', {}, [('blk.0.ffn_up.weight', 32, 32)])
         check(arch.of(llama) is arch.CODER, 'of: an unknown architecture is given the Coder\'s entry')
     finally:
-        gguf.GGUFReader = real
+        gguf.GGUFReader = real; ggufio.GGUFFile = real_own
 
     # ---- caminus serve's options: --model-alias '' = the model's own id
     from caminus.serve import cli

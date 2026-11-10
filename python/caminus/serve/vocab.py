@@ -34,6 +34,29 @@ def _field_str(f, i):
 
 
 def load_gguf_vocab(path):
+    """the tokenizer fields of a GGUF: Caminus's own reader (caminus.ggufio) first, gguf-py for a file it cannot read"""
+    from .. import ggufio
+    try:
+        F = ggufio.GGUFFile(path)
+    except ggufio.GGUFError:
+        return _load_gguf_vocab_ggufpy(path)
+    try:
+        m = F.meta
+        lst = lambda v: v.tolist() if hasattr(v, 'tolist') else list(v)
+        v = Vocab(tokens=list(m['tokenizer.ggml.tokens']), types=[int(x) for x in lst(m['tokenizer.ggml.token_type'])],
+                  merges=list(m['tokenizer.ggml.merges']), pre=m.get('tokenizer.ggml.pre', ''), model=m.get('tokenizer.ggml.model', ''),
+                  chat_template=m.get('tokenizer.chat_template', '') or '', eos_id=int(m.get('tokenizer.ggml.eos_token_id', -1)),
+                  bos_id=int(m.get('tokenizer.ggml.bos_token_id', -1)), pad_id=int(m.get('tokenizer.ggml.padding_token_id', -1)),
+                  add_bos=bool(m.get('tokenizer.ggml.add_bos_token', False)))
+        for k in m:
+            if k in ('general.name', 'general.architecture') or k.startswith('general.sampling.'):
+                v.meta[k] = lst(m[k]) if hasattr(m[k], 'tolist') else m[k]
+        return v
+    finally:
+        F.close()
+
+
+def _load_gguf_vocab_ggufpy(path):
     if GGUF_PY not in sys.path:
         sys.path.insert(0, GGUF_PY)
     from gguf import GGUFReader                      # noqa: E402  (gguf-py, see GGUF_PY)

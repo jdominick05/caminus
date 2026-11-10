@@ -10,14 +10,14 @@ Checks, per position:
 Positions cover the split layout's edges (npos at multiples of 32 and of lmin, one split / several, the last split
 holding a single position, the chunk edges 128 / 129) and depth (default up to 8,192; --deep adds 16K / 40K, which need
 the cache to fit: f16 rows 2 KiB per position, three copies).
-  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py [--module k3_gguf_q3m_lean] [--deep]
+  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py [--module k3_q3m_lean] [--deep]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
 from caminus.engine import k3
 ap = argparse.ArgumentParser()
-ap.add_argument('--module', default='k3_gguf_q3m_lean'); ap.add_argument('--oracle-module', default='k3_gguf_q3m_own')
+ap.add_argument('--module', default='k3_q3m_lean'); ap.add_argument('--oracle-module', default='k3_gguf_q3m_own')
 ap.add_argument('--splits', type=int, default=64); ap.add_argument('--lmin', type=int, default=128)
 ap.add_argument('--deep', action='store_true'); ap.add_argument('--grids', default='3,7')
 ap.add_argument('--every', type=int, default=0, help='also every position 0 .. N - 1')

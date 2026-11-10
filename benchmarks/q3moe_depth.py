@@ -4,7 +4,7 @@ directly (no prompt is processed first): decode time does not depend on the cach
 attention reads, so a 40K-position measurement takes seconds instead of 40,960 real passes. Prints one line per depth
 and arm, then RESULT DONE.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_depth.py GGUF [--depths 8,1024,4096,16384,40900] [--max-ctx N]
-      [--arms new=k3_gguf_q3m_lean old=k3_gguf_q3m_own:attn_split=0 ...]
+      [--arms new=k3_q3m_lean old=k3_gguf_q3m_own:attn_split=0 ...]
 An arm is name=module[@workgroups per WGP][:option=int ...] (engine options: attn_split, splits, lmin, gh, ...)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -16,7 +16,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('gguf'); ap.add_argument('--depths', default='8,1024,2048,4096,8192')
 ap.add_argument('--max-ctx', type=int, default=None, help='default: the deepest position + the tokens timed')
 ap.add_argument('--tokens', type=int, default=24); ap.add_argument('--rounds', type=int, default=3)
-ap.add_argument('--arms', nargs='+', default=['default=k3_gguf_q3m_lean'])
+ap.add_argument('--arms', nargs='+', default=['default=k3_q3m_lean'])
 A = ap.parse_args()
 depths = [int(x) for x in A.depths.split(',')]
 ARMS = []

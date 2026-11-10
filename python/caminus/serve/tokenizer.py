@@ -16,7 +16,6 @@ splits only at real special-token text, then un-marks each fragment and encodes 
 import codecs
 import re
 
-from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers
 
 from .vocab import CONTROL, NORMAL, UNUSED, USER_DEFINED, load_gguf_vocab
 
@@ -58,24 +57,35 @@ def bytes_to_unicode():
 
 
 class QwenTokenizer:
-    def __init__(self, vocab, nfc=False):
+    def __init__(self, vocab, nfc=False, engine='hf'):
+        """engine: 'hf' (the Hugging Face tokenizers library's BPE) or 'own' (caminus.bpe: Caminus's own, the qwen2
+        pre-tokenizer only); the special tokens, the marks and the decoding below are this class's either way"""
         if vocab.model != 'gpt2' or vocab.pre not in PRE_REGEX:
             raise ValueError(f'unsupported tokenizer {vocab.model}/{vocab.pre}')
+        if engine not in ('hf', 'own'): raise ValueError(f'QwenTokenizer: engine {engine!r} (hf / own)')
+        self.engine = engine
         self.vocab = vocab
         self.n_vocab = len(vocab.tokens)
         # (a vocabulary without a BOS token, bos_token_id absent: -1 in the GGUF reader, e.g. Qwen3-Coder-Next's: None)
         self.eos_id, self.bos_id = vocab.eos_id, (vocab.bos_id if vocab.bos_id is not None and vocab.bos_id >= 0 else None)
-        bpe_vocab = {t: i for i, (t, ty) in enumerate(zip(vocab.tokens, vocab.types)) if ty == NORMAL}
-        merges = [tuple(m.split(' ')) for m in vocab.merges]
-        tk = Tokenizer(models.BPE(vocab=bpe_vocab, merges=merges, ignore_merges=False, fuse_unk=False,
-                                  byte_fallback=False))
-        if nfc:
-            tk.normalizer = normalizers.NFC()
-        tk.pre_tokenizer = pre_tokenizers.Sequence([
-            pre_tokenizers.Split(Regex(PRE_REGEX[vocab.pre]), behavior='isolated', invert=False),
-            pre_tokenizers.ByteLevel(add_prefix_space=False, trim_offsets=False, use_regex=False)])
-        tk.decoder = decoders.ByteLevel()
-        self._bpe = tk
+        if engine == 'own':
+            from ..bpe import BPE
+            self._own = BPE({'tokenizer.ggml.model': vocab.model, 'tokenizer.ggml.pre': vocab.pre, 'tokenizer.ggml.tokens': vocab.tokens,
+                             'tokenizer.ggml.token_type': vocab.types, 'tokenizer.ggml.merges': vocab.merges}, nfc=nfc)
+            self._bpe = None
+        else:
+            from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers
+            bpe_vocab = {t: i for i, (t, ty) in enumerate(zip(vocab.tokens, vocab.types)) if ty == NORMAL}
+            merges = [tuple(m.split(' ')) for m in vocab.merges]
+            tk = Tokenizer(models.BPE(vocab=bpe_vocab, merges=merges, ignore_merges=False, fuse_unk=False,
+                                      byte_fallback=False))
+            if nfc:
+                tk.normalizer = normalizers.NFC()
+            tk.pre_tokenizer = pre_tokenizers.Sequence([
+                pre_tokenizers.Split(Regex(PRE_REGEX[vocab.pre]), behavior='isolated', invert=False),
+                pre_tokenizers.ByteLevel(add_prefix_space=False, trim_offsets=False, use_regex=False)])
+            tk.decoder = decoders.ByteLevel()
+            self._bpe = tk
         # special tokens: llama.cpp's cache_special_tokens = CONTROL | USER_DEFINED | UNKNOWN (minus "unused" control)
         self.control = {t: i for i, (t, ty) in enumerate(zip(vocab.tokens, vocab.types))
                         if ty == CONTROL and 'unused' not in t}
@@ -109,6 +119,8 @@ class QwenTokenizer:
         """BPE only: no special-token matching at all (the text is ordinary text)"""
         if not text:
             return []
+        if self._bpe is None:
+            return self._own.encode(text, special=False)
         return self._bpe.encode(text, add_special_tokens=False).ids
 
     def _split(self, text, parse_special):
@@ -129,13 +141,16 @@ class QwenTokenizer:
         frags = [p for sp, p in parts if not sp]
         if fragment_fn is not None:
             frags = [fragment_fn(f) for f in frags]
-        enc = self._bpe.encode_batch(frags, add_special_tokens=False) if frags else []
+        if self._bpe is None:
+            enc = [self._own.encode(f, special=False) for f in frags]
+        else:
+            enc = [e.ids for e in self._bpe.encode_batch(frags, add_special_tokens=False)] if frags else []
         ids, k = [], 0
         for sp, p in parts:
             if sp:
                 ids.append(p)
             else:
-                ids.extend(enc[k].ids)
+                ids.extend(enc[k])
                 k += 1
         return ids
 

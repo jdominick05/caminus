@@ -102,7 +102,8 @@ class BPE:
     """BPE(meta): meta = a GGUF's metadata (caminus.ggufio.GGUFFile.meta). encode(text, special=True) -> [ids];
     decode(ids) -> str; .eos, .bos, .vocab_size"""
 
-    def __init__(self, meta):
+    def __init__(self, meta, nfc=True):
+        self.nfc = bool(nfc)       # (False: no normalization, llama.cpp's tokenizer; the serve tokenizer's default)
         if meta.get('tokenizer.ggml.model') != 'gpt2':
             raise ValueError(f"bpe: tokenizer.ggml.model {meta.get('tokenizer.ggml.model')!r} (byte-level BPE 'gpt2' only)")
         pre = meta.get('tokenizer.ggml.pre')
@@ -155,10 +156,13 @@ class BPE:
         while special and i < n:
             m = next((t for t in self._first.get(text[i], ()) if text.startswith(t, i)), None)
             if m is None: i += 1; continue
-            for p in pretokenize(unicodedata.normalize('NFC', text[start:i])): ids += self._bpe(p)
+            for p in pretokenize(self._norm(text[start:i])): ids += self._bpe(p)
             ids.append(self.id_of[m]); i += len(m); start = i
-        for p in pretokenize(unicodedata.normalize('NFC', text[start:])): ids += self._bpe(p)
+        for p in pretokenize(self._norm(text[start:])): ids += self._bpe(p)
         return ids
+
+    def _norm(self, t):
+        return unicodedata.normalize('NFC', t) if self.nfc else t
 
     def decode_bytes(self, ids):
         out = bytearray()

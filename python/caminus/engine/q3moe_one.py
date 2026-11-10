@@ -24,7 +24,7 @@ from . import k3
 from .own_layout import q6k_planes
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
-MODULE_LEAN = 'k3_gguf_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
+MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
 ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: splits per kv head, fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
                                 # 322 / 631; S 64 Lmin 64: 10.3 / 14.0 / 24.9 / 35.0 (Lmin 128: 10.8 / 16.1 / 30.5 / 35.2).

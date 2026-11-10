@@ -29,6 +29,7 @@ SUITES = [
     ('host', ['tests/device/test_host.py', '--scratch', '{scratch}'], set()),
     ('manage', ['tests/cmd/test_manage.py', '--scratch', '{scratch}'], set()),
     ('docs', ['tests/docs/test_docs.py'], set()),
+    ('own_code', ['tests/test_own_code.py'], set()),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
     ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),

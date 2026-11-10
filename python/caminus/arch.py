@@ -87,15 +87,33 @@ def meta(path):
     of every tensor of this file but token_embd, which the engines keep on the host)"""
     k = _file_key(path)
     if k not in _META:
-        _config.ensure_gguf()
-        from gguf import GGUFReader
-        rd = GGUFReader(path, 'r'); f = {x.name: x for x in rd.fields.values()}
-        a = f['general.architecture'].contents()
-        hp = {h: f[f'{a}.{h}'].contents() for h in HP_KEYS if f'{a}.{h}' in f}
-        w = sum(int(t.n_bytes) for t in rd.tensors if t.name != 'token_embd.weight')
-        del rd, f
+        from . import ggufio
+        try:                       # (Caminus's own reader; gguf-py only for a file it cannot read: a tensor type it lacks)
+            F = ggufio.GGUFFile(path)
+        except ggufio.GGUFError:
+            F = None
+        if F is not None:
+            try:
+                a = F.meta['general.architecture']
+                hp = {h: _plain(F.meta[f'{a}.{h}']) for h in HP_KEYS if f'{a}.{h}' in F.meta}
+                w = sum(int(t.n_bytes) for t in F.tensors if t.name != 'token_embd.weight')
+            finally:
+                F.close()
+        else:
+            _config.ensure_gguf()
+            from gguf import GGUFReader
+            rd = GGUFReader(path, 'r'); f = {x.name: x for x in rd.fields.values()}
+            a = f['general.architecture'].contents()
+            hp = {h: f[f'{a}.{h}'].contents() for h in HP_KEYS if f'{a}.{h}' in f}
+            w = sum(int(t.n_bytes) for t in rd.tensors if t.name != 'token_embd.weight')
+            del rd, f
         _META[k] = dict(arch=a, hp=hp, weights=w)
     return _META[k]
+
+
+def _plain(v):
+    """a header value as gguf-py's contents() gives it (a numeric array as a list)"""
+    return v.tolist() if hasattr(v, 'tolist') else v
 
 
 def _read_int(p):
@@ -141,6 +159,7 @@ class Arch:
     T = 1
     drafter = None
     engine = None            # 'module:Class' under caminus
+    tokenizer = 'hf'         # caminus.serve.tokenizer.QwenTokenizer's BPE engine: 'hf' (the tokenizers library) or 'own'
 
     def __init__(self, name, alias):
         self.name, self.alias = name, alias
@@ -421,6 +440,7 @@ class Q3MoE(OneCard):
     the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
     (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
     engine = 'engine.q3moe_one:Q3MoEOne'
+    tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
     PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
     def auto_need(self, opt, slots, cards=None):

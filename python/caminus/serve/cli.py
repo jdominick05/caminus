@@ -248,7 +248,7 @@ def main(argv=None):
     from .hw import HwReader
     from .stats import EngineStats
     from .tokenizer import QwenTokenizer
-    tok = QwenTokenizer.from_gguf(opt['model'])
+    tok = QwenTokenizer.from_gguf(opt['model'], engine=A.tokenizer)   # (the architecture's BPE: 'own' for qwen3moe)
     # the ids that end a generation, from the model's own vocabulary: its eos (<|im_end|>) and <|endoftext|> (the Coder and
     # Qwen3.6 / AREX-2: 248046, 248044; Qwen3-Coder-Next's 151,936-token vocabulary: 151645, 151643)
     opt['eos_ids'] = eos_ids_of(tok)
