@@ -1,9 +1,10 @@
 """caminus.bpe (our byte-level BPE, built from the GGUF's metadata) against the Hugging Face tokenizers library (the
 oracle, from the model's tokenizer.json): ids equal on every text, and decode(encode(text)) == NFC(text). Texts: every
 .py / .md / .hip / .h / .sh / .go file of this repository, split into 4 KB chunks, plus a Unicode stress set (scripts,
-digits, contractions, mixed whitespace, special tokens). Prints PASS / FAIL and RESULT PASS | FAIL.
+digits, contractions, mixed whitespace, special tokens, and unbroken runs of 20,000 letters: a run is one piece, and the
+merge must stay fast on it). Prints PASS / FAIL and RESULT PASS | FAIL.
   python -I tests/io/test_bpe.py GGUF TOKENIZER_JSON"""
-import os, sys, unicodedata
+import os, random, sys, time, unicodedata
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 sys.path.insert(0, os.path.join(ROOT, 'python'))
 from caminus import ggufio
@@ -29,7 +30,16 @@ stress = [
     "a\n \nb \n  \n c", "   \n", " ", "\n", "", "x" * 300, "ab" * 200 + "!", "'''", "''s", "don't'S", "x'll'Ll'LL",
     "def f(x):\n    return x  # comment\n\n\n\tclass A:\n\t\tpass\n", "Ελληνικά Русский עברית العربية हिन्दी ไทย",
 ]
-texts += stress
+rng = random.Random(7)
+runs = [''.join(rng.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(20000)), 'ab' * 10000, 'a' * 20000,
+        ''.join(rng.choice('日本語中文한국어テキスト') for _ in range(20000)), ''.join(rng.choice('etaoinshrdlu') for _ in range(20000))]
+t0 = time.perf_counter()
+for t in runs: ours.encode(t)
+dt = time.perf_counter() - t0
+print(('PASS' if dt < 5.0 else 'FAIL') + f' {len(runs)} unbroken runs of 20,000 characters encode in {dt:.2f} s (< 5 s)')
+slow = dt >= 5.0
+ours._cache.clear()
+texts += stress + runs
 bad = 0
 for i, t in enumerate(texts):
     a, b = ours.encode(t), ref.encode(t, add_special_tokens=False).ids
@@ -43,4 +53,4 @@ for i, t in enumerate(texts):
         bad += 1; print(f'  round trip differs on text {i}')
 ntok = sum(len(ours.encode(t)) for t in stress)
 print(('PASS' if bad == 0 else f'FAIL {bad}') + f' of {len(texts)} texts: ids equal the oracle and decode round-trips ({ntok} stress tokens)')
-print('RESULT', 'PASS' if bad == 0 else 'FAIL')
+print('RESULT', 'PASS' if bad == 0 and not slow else 'FAIL')

@@ -12,7 +12,7 @@ to the output token on Caminus's own code); the Hugging Face tokenizers library 
   bytes become the GPT-2 byte alphabet's characters; (4) merges apply by rank (the lowest-ranked adjacent pair first,
   left to right), and the resulting symbols are the token ids.
   Decoding reverses (3) (special tokens decode to their text); decode(encode(t)) is NFC(t)."""
-import unicodedata
+import heapq, unicodedata
 
 # Unicode White_Space (what the regex engines the reference tokenizers use mean by \s)
 _WS = frozenset('\t\n\v\f\r \x85\xa0     　' + ''.join(chr(c) for c in range(0x2000, 0x200b)))
@@ -125,23 +125,43 @@ class BPE:
         self.vocab_size = len(self.tokens)
         self._cache = {}
 
+    def _merge(self, sym):
+        """the merges of one piece: always the lowest-ranked adjacent pair, the leftmost first. A heap of (rank, left
+        position) over a linked list of symbols, O(n log n): a piece has no length bound (a run of letters is one piece),
+        and rescanning every pair after every merge took seconds from a few thousand characters on. A popped entry is
+        stale unless its position still holds a pair of that rank (ranks are unique per pair)"""
+        n = len(sym)
+        if n < 2: return sym
+        rank = self.rank
+        nxt = list(range(1, n + 1)); prv = list(range(-1, n - 1))   # (nxt == n: the end; a merged-away symbol is None)
+        heap = []
+        for k in range(n - 1):
+            r = rank.get((sym[k], sym[k + 1]))
+            if r is not None: heap.append((r, k))
+        heapq.heapify(heap)
+        while heap:
+            r, k = heapq.heappop(heap)
+            a = sym[k]
+            if a is None: continue
+            j = nxt[k]
+            if j >= n or rank.get((a, sym[j])) != r: continue
+            sym[k] = a + sym[j]; sym[j] = None
+            nj = nxt[j]; nxt[k] = nj
+            if nj < n:
+                prv[nj] = k
+                r2 = rank.get((sym[k], sym[nj]))
+                if r2 is not None: heapq.heappush(heap, (r2, k))
+            p = prv[k]
+            if p >= 0:
+                r2 = rank.get((sym[p], sym[k]))
+                if r2 is not None: heapq.heappush(heap, (r2, p))
+        return [s for s in sym if s is not None]
+
     def _bpe(self, piece):
         word = ''.join(self.b2c[b] for b in piece.encode('utf-8'))
         hit = self._cache.get(word)
         if hit is not None: return hit
-        sym = list(word)
-        while len(sym) > 1:
-            best, bi = None, -1
-            for k in range(len(sym) - 1):
-                r = self.rank.get((sym[k], sym[k + 1]))
-                if r is not None and (best is None or r < best): best, bi = r, k
-            if best is None: break
-            a, b = sym[bi], sym[bi + 1]
-            out, k = [], 0
-            while k < len(sym):                      # every occurrence of the pair, left to right
-                if k < len(sym) - 1 and sym[k] == a and sym[k + 1] == b: out.append(a + b); k += 2
-                else: out.append(sym[k]); k += 1
-            sym = out
+        sym = self._merge(list(word))
         ids = []
         for s in sym:
             t = self.id_of.get(s)

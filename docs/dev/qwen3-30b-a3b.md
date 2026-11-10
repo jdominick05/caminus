@@ -124,7 +124,7 @@ the arithmetic (an earlier build, 4.38 ms per token there):
 | Weight loads | 1.51 ms |
 | Arithmetic and activations | 0.57 ms |
 
-So the bytes are already read at close to the bandwidth; about half of a token is the hand-off between segments (432
+About half of a token is the hand-off between segments (432
 dependent stages in series, about 5 µs each). Decoding the quantized formats is the smallest part. At depth the attention's reads
 dominate and the share of the bound rises to 72 %.
 

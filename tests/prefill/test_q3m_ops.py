@@ -198,6 +198,9 @@ for what, fn in (('qk_rope at position -1', lambda: O.qk_rope(qd, nh * hd + 2 * 
                  ('qk_rope one row past the cache', lambda: O.qk_rope(qd, nh * hd + 2 * M, nh, nkv, par, ctx - n + 1, q16, cache, n)),
                  ('attn at position -1', lambda: O.attn(q16, cache, -1, n, nkv, sc_, out)),
                  ('attn one row past the cache', lambda: O.attn(q16, cache, ctx - n + 1, n, nkv, sc_, out)),
+                 ('qk_rope one row past the rows its caller allows (an engine\'s max_ctx, before the cache\'s padding rows)',
+                  lambda: O.qk_rope(qd, nh * hd + 2 * M, nh, nkv, par, ctx - 64 - n + 1, q16, cache, n, rows=ctx - 64)),
+                 ('attn one row past the rows its caller allows', lambda: O.attn(q16, cache, ctx - 64 - n + 1, n, nkv, sc_, out, rows=ctx - 64)),
                  ('attn at a position that is not an int', lambda: O.attn(q16, cache, 1000.5, n, nkv, sc_, out))):
     try: fn(); r = False
     except k3.ContextBoundsError: r = True

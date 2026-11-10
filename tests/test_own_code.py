@@ -48,6 +48,45 @@ print('imported', len({MODS!r}))
 r = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True)
 check(r.returncode == 0, f'serve modules for qwen3moe import with gguf and tokenizers refused: {(r.stdout + r.stderr).strip().splitlines()[-1][:160]}')
 
+# the BPE merge without a model: a small vocabulary trained here (so every merge ranks after the merges of its parts),
+# caminus.bpe against the plain definition (the lowest-ranked pair, every occurrence left to right, rescan), and an
+# unbroken run of 40,000 letters inside a time bound (a piece has no length limit; the rescan is quadratic)
+import collections, random, time
+from caminus import bpe as _bpe
+rng = random.Random(11); corpus = [''.join(rng.choice('aaabbcde') for _ in range(rng.randint(2, 40))) for _ in range(400)]
+words, merges = [list(w) for w in corpus], []
+for _ in range(300):
+    cnt = collections.Counter((w[k], w[k + 1]) for w in words for k in range(len(w) - 1))
+    if not cnt: break
+    (a, b), _n = max(cnt.items(), key=lambda kv: (kv[1], kv[0]))
+    merges.append((a, b))
+    for w in words:
+        k = 0
+        while k < len(w) - 1:
+            if w[k] == a and w[k + 1] == b: w[k:k + 2] = [a + b]
+            k += 1
+alpha = _bpe.byte_alphabet()
+toks = [alpha[b] for b in range(256)] + [a + b for a, b in merges]
+tk = _bpe.BPE({'tokenizer.ggml.model': 'gpt2', 'tokenizer.ggml.pre': 'qwen2', 'tokenizer.ggml.tokens': toks,
+               'tokenizer.ggml.merges': [f'{a} {b}' for a, b in merges]})
+def plain(word):
+    sym = list(word)
+    while len(sym) > 1:
+        best = min((tk.rank[(sym[k], sym[k + 1])], k) for k in range(len(sym) - 1) if (sym[k], sym[k + 1]) in tk.rank) \
+            if any((sym[k], sym[k + 1]) in tk.rank for k in range(len(sym) - 1)) else None
+        if best is None: break
+        a, b = sym[best[1]], sym[best[1] + 1]; out, k = [], 0
+        while k < len(sym):
+            if k < len(sym) - 1 and sym[k] == a and sym[k + 1] == b: out.append(a + b); k += 2
+            else: out.append(sym[k]); k += 1
+        sym = out
+    return [tk.id_of[x] for x in sym]
+pieces = [''.join(rng.choice('aaabbcdef') for _ in range(rng.randint(1, 200))) for _ in range(600)] + ['a' * 301, 'ab' * 150, 'abc', 'f']
+bad = sum(tk._bpe(w) != plain(w) for w in pieces)
+check(bad == 0, f'the BPE merge == the plain definition on {len(pieces)} pieces ({len(merges)} trained merges; {bad} differ)')
+long_run = ''.join(rng.choice('aaabbcde') for _ in range(40000)); t0 = time.perf_counter(); n_ids = len(tk._bpe(long_run)); dt = time.perf_counter() - t0
+check(dt < 5.0, f'an unbroken run of 40,000 letters merges in {dt:.2f} s (< 5 s; {n_ids} tokens)')
+
 ap = argparse.ArgumentParser(); ap.add_argument('--model', default=None)
 A = ap.parse_args()
 if not A.model or not os.path.isfile(A.model):

@@ -282,9 +282,6 @@ class Q3MoEOne:
         self.state = {(0, il, 'kv'): d['cache'][:self.max_ctx * row] for il, d in enumerate(self.L)}
 
     # -- decode ------------------------------------------------------------------------------------------------------------
-    def reset(self):
-        self.pos_host = 0
-
     def step(self, tok, trace=None):
         """one token at the next position: its logits (fp32 [vocab], on the device; valid until the next step); trace: an
         int64 buffer [grid * segments * 8] for the _trace module's timestamps"""
