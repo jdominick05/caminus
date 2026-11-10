@@ -62,7 +62,8 @@ class Tensor:
 
 class GGUFFile:
     """GGUFFile(path): .version, .meta (key -> value: int / float / bool / str / list / numpy array for numeric arrays),
-    .tensors (in file order), .T (name -> Tensor), .data_start, .alignment; the file stays memory-mapped (close())"""
+    .tensors (in file order), .T (name -> Tensor), .table_start, .data_start, .alignment; the file stays memory-mapped
+    (close())"""
 
     def __init__(self, path):
         self.path = os.fspath(path)
@@ -79,6 +80,7 @@ class GGUFFile:
         for _ in range(nkv):
             k = self._str()
             self.meta[k] = self._value(self._u('<I'))
+        self.table_start = self._p   # (the tensor table's first byte: the header and the metadata end here)
         info = []
         for _ in range(nt):
             name = self._str(); nd = self._u('<I')
