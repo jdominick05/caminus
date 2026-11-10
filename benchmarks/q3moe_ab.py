@@ -15,7 +15,7 @@ ap.add_argument('--positions', type=int, default=24, help='positions of the bitw
 ap.add_argument('--grids', type=int, nargs='+', default=None, help='arms = the default tape at these workgroups per WGP '
                 '(the first is the base) instead of the tape forms'); A = ap.parse_args()
 print(torch.cuda.get_device_name(0), flush=True)
-ARMS = (('attn serial', dict(attn_batched=False)), ('attn batched', dict(attn_batched=True)))   # (name, Q3MoEOne tape options); the first is the base
+ARMS = (('attn 5 seg', dict(attn_one=False)), ('attn 1 seg', dict(attn_one=True)))   # (name, Q3MoEOne tape options); the first is the base
 if A.grids: ARMS = tuple((f'grid {g}', dict(per_wgp=g)) for g in A.grids)
 eng = Q3MoEOne(A.gguf, max_ctx=max(2 * A.tokens * len(ARMS), A.positions) + 64, **ARMS[0][1])
 forms = {ARMS[0][0]: (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos)}

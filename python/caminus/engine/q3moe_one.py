@@ -26,7 +26,7 @@ MODULE = 'k3_gguf_q3m_own'
 
 
 class Q3MoEOne:
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None, gu=True, attn_batched=True):
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None, gu=True, attn_batched=True, attn_one=True):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -47,6 +47,7 @@ class Q3MoEOne:
         self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid; the grid tests set 3 / 6 / 7)
         self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
         self.attn_batched = attn_batched   # OP_ATTN_DEC's loads in batches (the same bits; False: one round trip each)
+        self.attn_one = attn_one   # the fused tape: q / k norm + RoPE, cache row, attention, fp16 out as one segment
         self.emb = F.T['token_embd.weight']
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
@@ -81,8 +82,12 @@ class Q3MoEOne:
                                                                       'ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps')},
                                attn_norm=self._f32(p + 'attn_norm.weight'), ffn_norm=self._f32(p + 'ffn_norm.weight'),
                                q_norm=self._f32(p + 'attn_q_norm.weight'), k_norm=self._f32(p + 'attn_k_norm.weight'),
+                               qk_par=None,   # (OP_OWN_ATTN's block: q_norm | k_norm | theta_scale, eps; built below)
                                router=self._f32(p + 'ffn_gate_inp.weight', (self.n_exp, self.D)),
                                cache=torch.zeros(self.max_ctx * 2 * self.nkv * self.hd, dtype=torch.float16, device='cuda')))
+        for d in self.L:
+            d['qk_par'] = torch.cat([d['q_norm'], d['k_norm'], torch.tensor([self.theta_scale, self.eps], dtype=torch.float32,
+                                                                              device='cuda')]).contiguous()
         self.out_norm = self._f32('output_norm.weight')
         self.head = self._w('output.weight')
         self.emb_dev = torch.from_numpy(np.ascontiguousarray(np.asarray(self.emb.data()))).to('cuda')
@@ -92,7 +97,7 @@ class Q3MoEOne:
         D, hd, nh, nkv, KU, FF = self.D, self.hd, self.nh, self.nkv, self.k_used, self.ffn
         B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
         s = self.S = dict(x=B(D), h=B(D), h16=B(D, torch.float16), q=B(nh * hd), k=B(nkv * hd), v=B(nkv * hd),
-                          qo=B(nh * hd), ko=B(nkv * hd), att=B(nh * hd), att16=B(nh * hd, torch.float16), o=B(D),
+                          kv=B(2 * nkv * hd), qo=B(nh * hd), ko=B(nkv * hd), att=B(nh * hd), att16=B(nh * hd, torch.float16), o=B(D),
                           logit=B(self.n_exp), ids=B(KU, torch.int32), wts=B(KU), g=B(KU * FF), u=B(KU * FF),
                           a16=B(KU * FF, torch.float16), d=B(KU * D), logits=B(self.vocab))
         # the per-pass inputs, one block: [0] the token, [1] its position (one copy from the pinned stage per token)
@@ -144,21 +149,31 @@ class Q3MoEOne:
 
     def _tape_fused(self, E, s, mv, prev):
         """the tape with the residual add, the RMS norm and the fp16 copy as one segment (OP_OWN_ADD_RMS16; the three-stage
-        form's math, equal to rounding): per layer 17 segments, 13 dependent stages (was 21 / 16)"""
+        form's math, equal to rounding). Per layer 12 segments with the options' defaults: gate | up | SwiGLU as one
+        (gu) and the attention as one behind a no-op join of k and v (attn_one: OP_OWN_ATTN, the five segments' bits);
+        17 with both off (the unfused tape: 21)"""
         D, hd, nh, nkv, KU, FF = self.D, self.hd, self.nh, self.nkv, self.k_used, self.ffn
         for il, d in enumerate(self.L):
             # the attention's norm, after the previous layer's experts are added to the residual (layer 0: no add)
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], self.eps, d=s['d'] if il else None,
                                  slots=KU if il else 0, w=s['wts'] if il else None, dep=prev)
             q_ = mv(d['attn_q'], s['h16'], s['q'], n1)
-            k_ = mv(d['attn_k'], s['h16'], s['k'], n1)
-            v_ = mv(d['attn_v'], s['h16'], s['v'], n1)
-            kd = E.qk_nr(s['k'], hd, nkv, hd, d['k_norm'], self.pos, s['ko'], hd, self.theta_scale, self.eps, dep=k_)
-            ap = E.also(E.kv_append(s['ko'], s['v'], d['cache'], self.pos, dep=kd), v_)
-            qd = E.qk_nr(s['q'], hd, nh, hd, d['q_norm'], self.pos, s['qo'], hd, self.theta_scale, self.eps, dep=q_)
-            a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
-                                   batched=self.attn_batched), qd)
-            c2 = E.own_f16(s['att'], s['att16'], dep=a_)
+            if self.attn_one:   # k | v into one buffer; the attention waits for q and (through a no-op join) k and v
+                M = nkv * hd
+                k_ = mv(d['attn_k'], s['h16'], s['kv'][:M], n1)
+                v_ = mv(d['attn_v'], s['h16'], s['kv'][M:], n1)
+                jn = E.also(E.nop(1, 0, dep=k_), v_)
+                c2 = E.also(E.own_attn(s['q'], s['kv'], d['qk_par'], d['cache'], self.pos, s['att16'], nh, nkv, hd,
+                                       1.0 / np.sqrt(hd), dep=jn), q_)
+            else:
+                k_ = mv(d['attn_k'], s['h16'], s['k'], n1)
+                v_ = mv(d['attn_v'], s['h16'], s['v'], n1)
+                kd = E.qk_nr(s['k'], hd, nkv, hd, d['k_norm'], self.pos, s['ko'], hd, self.theta_scale, self.eps, dep=k_)
+                ap = E.also(E.kv_append(s['ko'], s['v'], d['cache'], self.pos, dep=kd), v_)
+                qd = E.qk_nr(s['q'], hd, nh, hd, d['q_norm'], self.pos, s['qo'], hd, self.theta_scale, self.eps, dep=q_)
+                a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
+                                       batched=self.attn_batched), qd)
+                c2 = E.own_f16(s['att'], s['att16'], dep=a_)
             o_ = mv(d['attn_output'], s['att16'], s['o'], c2, rpt='o')
             n2 = E.own_add_rms16(s['x'], d['ffn_norm'], s['h'], s['h16'], self.eps, d=s['o'], slots=1, dep=o_)
             rl = E.f32_mv(d['router'], s['h'], s['logit'], dep=n2)

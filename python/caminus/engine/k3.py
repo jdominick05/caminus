@@ -60,6 +60,7 @@ DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_
 OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
 OP_OWN_MV = 44     # = kernels/k3_own_ops.h: Caminus's own quantized matvec (the *_own modules only; spec-own-quant.md)
 OP_OWN_F16 = 45    # = kernels/k3_own_ops.h: fp32 -> fp16 (the one-round-trip tiles' activations)
+OP_OWN_ATTN = 50   # = kernels/k3_own_ops.h: a query head's whole decode attention (the qwen3moe modules)
 OP_OWN_SWIGLU16, OP_OWN_MOE_SUM, OP_OWN_EMB, OP_OWN_ADD_RMS16 = 46, 47, 48, 49   # = kernels/k3_own_ops.h: fp16(silu(g) * u); x += weighted sum of slots;
                                                                                # the embedding row; residual add + rms norm + fp16 in one
 OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
@@ -152,7 +153,7 @@ OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT, OWN_GU = 2, 4, 8, 16
 OWN_1RT_FMT = ('Q4_K', 'Q6_K')
 _CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT}
              | {('OWN_F16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_MOE_SUM', '-')})
-_CAPS_Q3M = frozenset({('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-')} | {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT})   # (K3_OWN_Q3M: compiled into the qwen3moe modules only)
+_CAPS_Q3M = frozenset({('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTN', '-')} | {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT})   # (K3_OWN_Q3M: compiled into the qwen3moe modules only)
 MODULE_CAPS.update({m: CAPS_Q35D | _CAPS_OWN for m in OWN_MODULES})
 MODULE_CAPS.update({m: frozenset({('MV', 'Q4_K'), ('MV', 'Q6_K'), ('F32_MV', 'F32')}) | _Q8_1 | _CAPS_OWN | _CAPS_Q3M for m in Q3M_MODULES})
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
@@ -172,6 +173,7 @@ def seg_kind(sg):
     if sg.op == OP_OWN_MOE_SUM: return ('OWN_MOE_SUM', '-')
     if sg.op == OP_OWN_EMB: return ('OWN_EMB', GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_OWN_ADD_RMS16: return ('OWN_ADD_RMS16', '-')
+    if sg.op == OP_OWN_ATTN: return ('OWN_ATTN', '-')
     if sg.op == OP_OWN_MV:
         a = (('a16_1rt_gu' if sg.pad1 & OWN_GU else 'a16_1rt') if sg.pad1 & OWN_A16_1RT and sg.pad1 < 32
              else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
@@ -716,6 +718,21 @@ class Engine:
         self.keep += [q, cache, pos, out]
         self.segs.append(Seg(OP_ATTN_DEC, self.T * heads, dep, 1, cache.data_ptr(), None, q.data_ptr(), pos.data_ptr(), out.data_ptr(),
                              scale, self.T * heads, dim, 1, int(q8), team, kv_heads, 0, 0, 1 if batched else None))
+        return len(self.segs) - 1
+
+    def own_attn(self, q, kv, par, cache, pos, out16, heads, kv_heads, dim, scale, dep=-1, team=-1):
+        """a query head's decode attention as one task per head (OP_OWN_ATTN, the qwen3moe modules): qk_nr of q and k,
+        kv_append, attn_dec and the fp16 output in their arithmetic. q fp32 [heads * dim] and kv fp32 [2][kv_heads * dim]
+        (k | v) are the matvecs' outputs; par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache f16; out16 fp16
+        [heads * dim]. n_rot = dim = 128, T = 1."""
+        M = kv_heads * dim
+        if self.T != 1 or dim != 128 or heads % kv_heads: raise ValueError('own_attn: T = 1, head dim 128, grouped kv heads')
+        assert q.dtype == kv.dtype == par.dtype == torch.float32 and cache.dtype == out16.dtype == torch.float16
+        assert q.numel() >= heads * dim and kv.numel() >= 2 * M and par.numel() >= 2 * dim + 2 and out16.numel() >= heads * dim
+        self._guard_pos(pos, kv_rows(cache, M, False))   # (the guard bounds the row it writes and the rows it reads)
+        self.keep += [q, kv, par, cache, pos, out16]
+        self.segs.append(Seg(OP_OWN_ATTN, heads, dep, 1, cache.data_ptr(), kv.data_ptr(), q.data_ptr(), pos.data_ptr(),
+                             out16.data_ptr(), scale, heads, dim, dim, 0, team, kv_heads, 0, 0, par.data_ptr()))
         return len(self.segs) - 1
 
     def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None):

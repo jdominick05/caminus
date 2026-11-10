@@ -213,9 +213,14 @@ __device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
 // trace: 5.3 of 12.0 ms per token). Batched: a wave scores two positions per round with their 4 K loads each (and q's)
 // in flight (head dim a multiple of 128: host-checked), a thread sums V over 8 positions per round, each sum in the
 // same order as before. One workgroup per head still walks every position: the cost stays linear in the position.
+// LDS of the two attention ops below (a workgroup runs one at a time): [0, 512) scores (OP_OWN_ATTN's norms first: their
+// rows [0, 256), their sums [256, 264)), [512, 520) reductions, then OP_OWN_ATTN's q, k and v [128] each. k3.hip's MVP /
+// MVS are not in these modules (no OP_MATVEC_G128 code): borrowing them grew the kernel's LDS from 12.9 to 21.1 KB.
+enum { OWN_AT_CH = 512, OWN_AT_Q = OWN_AT_CH + 8 };
+__shared__ float OWN_AT[OWN_AT_Q + 3 * 128];
 __device__ __forceinline__ void own_op_attn_dec(const Seg & sg, int h) {
-    constexpr int CH = 512;
-    __shared__ float sc[CH]; __shared__ float red[8];
+    constexpr int CH = OWN_AT_CH;
+    __attribute__((address_space(3))) float * sc = (__attribute__((address_space(3))) float *)OWN_AT, * red = sc + CH;
     // (the batched form reads the f16 cache's halves itself: kv_get's branch on the cache type, and its conversion
     // next to each load, kept every load a round trip of its own)
     const bool fast = sg.aux != nullptr && sg.work == 0;
@@ -294,5 +299,125 @@ __device__ __forceinline__ void own_op_attn_dec(const Seg & sg, int h) {
         const int d = tid + j * (int)blockDim.x;
         if (d < D) ((float *)sg.y)[(size_t)h * D + d] = acc[j] * inv;
     }
+}
+// OP_OWN_ATTN: one query head's decode attention as one task: the q and k norms + RoPE (op_qk_nr), the position's cache
+// row (op_kv_append, f16), the attention over positions 0 .. pos (own_op_attn_dec, batched) and its fp16 output
+// (OP_OWN_F16): five segments' work in one, every sum in their order (the same bits). Head dim 128, n_rot = the head dim,
+// f16 cache, T = 1 (host-checked).
+//   Seg.a = q fp32 [heads][D] and Seg.gs = k | v fp32 [2][kv heads * D], the matvecs' outputs; Seg.aux = fp32 [2 D + 2]:
+//   q_norm [D], k_norm [D], theta_scale, eps; Seg.W = the cache, Seg.asum = int32 pos [1], Seg.y = fp16 out [heads][D];
+//   N = heads, K = D, out_f32 = n_rot, pad1 = kv heads, rs = the score scale.
+// Threads 0 .. 127 run q's norm and rotation, 128 .. 255 its kv head's k (the same lanes and waves as op_qk_nr's one
+// head per task, so the same partial sums); the position's own k and v are used from LDS as the f16 cache would return
+// them, and the kv head's first query head writes them to the cache (later positions' tasks read it, never this one's).
+enum { OP_OWN_ATTN = 50 };
+__device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
+// Every multiply-add below is written out, in the form the compiler gives the five segments' ops: left to it here, it
+// merged the norm's square with the wave sum's first add (whole heads' scales moved by an ulp) and the output's
+// multiply with its fp16 conversion (v_fma_mixlo_f16: one rounding where fp32 -> fp16 makes two).
+#pragma clang fp contract(off)
+    constexpr int CH = OWN_AT_CH;
+    __attribute__((address_space(3))) float * sc = (__attribute__((address_space(3))) float *)OWN_AT, * qkv = sc + OWN_AT_Q;   // (q, k, v [128] each)
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, D = sg.K, nrot = sg.out_f32, heads = sg.N, nkv = sg.pad1;
+    const int G = heads / nkv, g = h / G, M = nkv * D, pos = ((const int *)sg.asum)[0], npos = pos + 1;
+    const size_t pb = kv_pos_bytes(M, 0);
+    const float * par = (const float *)sg.aux; const float * kvr = (const float *)sg.gs;
+    const uint8_t * cache = sg.W;
+    const bool isk = tid >= D; const int i = isk ? tid - D : tid;
+    // -- the two norms + rotations (op_qk_nr's statements), every global input in one round trip
+    const float theta_scale = par[2 * D], eps = par[2 * D + 1];
+    const float * xp = isk ? kvr + (size_t)g * D + i : (const float *)sg.a + (size_t)h * D + i;
+    const float x = *xp, w = par[tid], vr = kvr[(size_t)M + (size_t)g * D + i];
+    float ss = x * x;
+    ss = warp_reduce_sum<32>(ss); if (lane == 0) sc[256 + wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 4; q++) tot += sc[256 + (isk ? 4 : 0) + q];
+    const float scale = rsqrtf(tot / D + eps);
+    sc[tid] = (scale * x) * w;
+    __syncthreads();
+    {
+        const float fpos = (float)pos;
+        const int j = i < nrot / 2 ? i : i - nrot / 2, nb = isk ? D : 0;
+        const float theta = fpos * powf(theta_scale, (float)j);
+        const float c = cosf(theta), sn = sinf(theta);
+        const float x0 = sc[nb + j], x1 = sc[nb + j + nrot / 2];
+        const float y = i < nrot / 2 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
+        if (!isk) qkv[i] = y;
+        else {
+            const _Float16 kh = (_Float16)y, vh = (_Float16)vr;
+            qkv[D + i] = (float)kh; qkv[2 * D + i] = (float)vh;
+            if (h == g * G) {
+                _Float16 * cw = (_Float16 *)((uint8_t *)sg.W + (size_t)pos * pb);
+                cw[g * D + i] = kh; cw[M + g * D + i] = vh;
+            }
+        }
+    }
+    __syncthreads();
+    // -- the attention (own_op_attn_dec's batched form; the last position from LDS)
+    float qv[4];
+#pragma unroll
+    for (int j = 0; j < 4; j++) qv[j] = qkv[lane + 32 * j];
+    float run_m = -INFINITY, run_s = 0.0f, acc = 0.0f;
+#pragma unroll 1
+    for (int c0 = 0; c0 < npos; c0 += CH) {
+        const int n = min(CH, npos - c0), nc = c0 + n == npos ? n - 1 : n;   // nc: the chunk's positions in the cache
+        for (int t = wave; t < nc; t += 16) {                 // positions t and t + 8 (the second clamped, unused past nc)
+            const int t1 = min(t + 8, nc - 1);
+            const _Float16 * kp0 = (const _Float16 *)(cache + (size_t)(c0 + t) * pb) + g * D + lane;
+            const _Float16 * kp1 = (const _Float16 *)(cache + (size_t)(c0 + t1) * pb) + g * D + lane;
+            _Float16 k0[4], k1[4];
+#pragma unroll
+            for (int j = 0; j < 4; j++) { k0[j] = kp0[32 * j]; k1[j] = kp1[32 * j]; }
+            __builtin_amdgcn_sched_barrier(0);
+            float a0 = 0.0f, a1 = 0.0f;
+#pragma unroll
+            for (int j = 0; j < 4; j++) { a0 = __builtin_fmaf(qv[j], (float)k0[j], a0); a1 = __builtin_fmaf(qv[j], (float)k1[j], a1); }
+            __builtin_amdgcn_sched_barrier(0);
+            a0 = warp_reduce_sum<32>(a0); a1 = warp_reduce_sum<32>(a1);
+            if (lane == 0) { sc[t] = a0 * sg.rs; if (t + 8 < nc) sc[t + 8] = a1 * sg.rs; }
+        }
+        if (nc < n && wave == 0) {                            // this position's k: from LDS
+            float a = 0.0f;
+#pragma unroll
+            for (int j = 0; j < 4; j++) a = __builtin_fmaf(qv[j], qkv[D + lane + 32 * j], a);
+            a = warp_reduce_sum<32>(a);
+            if (lane == 0) sc[nc] = a * sg.rs;
+        }
+        __syncthreads();
+        float m = -INFINITY;
+        for (int t = tid; t < n; t += blockDim.x) m = fmaxf(m, sc[t]);
+        m = warp_reduce_max<32>(m); if (lane == 0) sc[CH + wave] = m; __syncthreads();
+        m = sc[CH]; for (int q = 1; q < 8; q++) m = fmaxf(m, sc[CH + q]); __syncthreads();
+        const float mn = fmaxf(run_m, m), corr = expf(run_m - mn);
+        float sum = 0.0f;
+        for (int t = tid; t < n; t += blockDim.x) { const float e = expf(sc[t] - mn); sc[t] = e; sum += e; }
+        sum = warp_reduce_sum<32>(sum); if (lane == 0) sc[CH + wave] = sum; __syncthreads();
+        sum = 0.0f; for (int q = 0; q < 8; q++) sum += sc[CH + q];
+        run_s = c0 == 0 ? sum : __builtin_fmaf(run_s, corr, sum);
+        if (tid < D) {
+            float part = 0.0f;
+            const _Float16 * vb = (const _Float16 *)(cache + (size_t)c0 * pb) + M + g * D + tid;   // (V of position c0)
+            for (int t = 0; t < nc; t += 8) {
+                _Float16 v[8];
+#pragma unroll
+                for (int q = 0; q < 8; q++) v[q] = vb[(size_t)min(t + q, nc - 1) * (2 * M)];       // (2 M halves per position)
+                __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                for (int q = 0; q < 8; q++) { if (t + q < nc) part = __builtin_fmaf(sc[t + q], (float)v[q], part); }
+                __builtin_amdgcn_sched_barrier(0);
+            }
+            if (nc < n) part = __builtin_fmaf(sc[nc], qkv[2 * D + tid], part);
+            acc = c0 == 0 ? part : __builtin_fmaf(acc, corr, part);
+        }
+        run_m = mn;
+        __syncthreads();
+    }
+    const float inv = 1.0f / run_s;
+    // acc * inv rounded to fp32, then to fp16, as the five segments' fp32 buffer makes it. The backend selects
+    // v_fma_mixlo_f16 for the fp16 conversion of a multiply or a multiply-add (one rounding: exact fp16 ties land on
+    // the other neighbour, about one value in 8000), whatever the contraction setting; the empty asm hides the fp32
+    // product from that pattern at no instruction.
+    float o32 = acc * inv;
+    __asm__ volatile("" : "+v"(o32));
+    if (tid < D) ((_Float16 *)sg.y)[(size_t)h * D + tid] = (_Float16)o32;
 }
 #endif

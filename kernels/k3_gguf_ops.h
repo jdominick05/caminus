@@ -2006,6 +2006,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #ifdef K3_OWN_Q3M
     if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
     if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
+    if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
 #endif
 #endif
 #ifdef K3_GSQ
