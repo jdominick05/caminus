@@ -19,23 +19,22 @@ on the same file and card (`llama-bench -ngl 99 -fa 1`).
 
 | Context depth | Caminus | llama.cpp | Bandwidth bound | Share of the bound |
 |---|---|---|---|---|
-| 8 | **246 tok/s** (4.07 ms) | 148 tok/s | 447 tok/s | 55 % |
-| 1,024 | **232 tok/s** (4.31 ms) | | 425 tok/s | 55 % |
-| 4,096 | **196 tok/s** (5.09 ms) | 134 tok/s | 369 tok/s | 53 % |
-| 16,384 | **149 tok/s** (6.70 ms) | 110 tok/s | 243 tok/s | 61 % |
-| 32,768 | **116 tok/s** (8.60 ms) | 90 tok/s | 167 tok/s | 70 % |
-| 40,900 | **106 tok/s** (9.40 ms) | | 144 tok/s | 74 % |
+| 8 | **248 tok/s** (4.03 ms) | 148 tok/s | 447 tok/s | 55 % |
+| 1,024 | **235 tok/s** (4.26 ms) | | 425 tok/s | 55 % |
+| 4,096 | **213 tok/s** (4.69 ms) | 134 tok/s | 369 tok/s | 58 % |
+| 16,384 | **161 tok/s** (6.20 ms) | 110 tok/s | 243 tok/s | 66 % |
+| 32,768 | **124 tok/s** (8.04 ms) | 90 tok/s | 167 tok/s | 74 % |
+| 40,900 | **111 tok/s** (9.03 ms) | | 144 tok/s | 77 % |
 
 - **Caminus:** `benchmarks/q3moe_depth.py --depths 8,1024,4096,16384,32768,40900 --tokens 32 --rounds 5`. One token per
-  pass, the median of 5 rounds of 32 tokens at each depth; the rounds differ by at most 0.05 ms (0.34 ms in one
-  round at 32,768).
+  pass, the median of 5 rounds of 32 tokens at each depth; the rounds differ by at most 0.03 ms.
 - **llama.cpp:** `tg64` at depths 0, 4,096, 16,384 and 32,768 (`-d`), 2 repetitions.
 - **Bandwidth bound:** the bytes one token must read, divided by the 858 GB/s this card sustained in the decode-floor
   study. A token reads 1.92 GB of weights (every dense matrix, 8 of the 128 experts per layer, the output head) plus
   98,304 bytes of KV cache per position of context. Nothing that reads every byte once per token can beat it.
 
-Through the HTTP server (`tools/serve_smoke1.py`, one request each): 231 tok/s on a short chat, 190 tok/s after a
-6,587-token prompt, 116 tok/s after a 37,659-token prompt.
+Through the HTTP server (`tools/serve_smoke1.py`, one request each): 238 tok/s on a short chat, 195 tok/s after a
+6,587-token prompt, 123 tok/s after a 37,659-token prompt.
 
 ### Prompt reading (the batched prefill)
 
@@ -57,10 +56,10 @@ compared with it on the same tokens.
 | Where | Caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 | Tool |
 |---|---|---|---|
 | 128 tokens, decode | 4.66e-04, 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` |
-| The last 64 of 16,384 (prefill, then decode) | 9.75e-04, 62 / 64 | 5.16e-03, 60 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
-| The last 64 of 40,896 (prefill, then decode) | 9.17e-04, 64 / 64 | 5.35e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
+| The last 64 of 16,384 (prefill, then decode) | 8.80e-04, 62 / 64 | 5.06e-03, 60 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
+| The last 64 of 40,896 (prefill, then decode) | 6.64e-04, 64 / 64 | 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` |
 
-Caminus is 5 to 6 times closer to the reference than llama.cpp. The reason is the activation precision: these kernels
+Caminus is 6 to 9 times closer to the reference than llama.cpp. The reason is the activation precision: these kernels
 multiply the weights by fp16 activations, llama.cpp's by int8.
 
 How exact the reference is: at 128 tokens the fp32 reference differs from the float64 one by a mean KLD of 6.5e-11. At
@@ -106,7 +105,16 @@ Two checks hold this, and both run without trusting a list written by hand:
 - **Experts.** The router's 8 experts per layer run as one grouped matvec; gate, up and the SwiGLU are one segment.
 - **Attention.** Head dimension 128, an fp16 KV cache. Past the first 64 positions the context is split across
   workgroups that would otherwise idle; each split's rows are read once for all 8 query heads of a KV head, and the
-  splits are merged with an online softmax. This is what holds speed at depth: 0.124 µs per position per token.
+  splits are merged with an online softmax. This is what holds speed at depth: 0.118 µs per position per token.
+- **The grid follows the card.** The kernel fits 8 workgroups on each of a card's workgroup processors, but a segment
+  hop costs every resident wave its share of the processor, so fewer hop faster. The engine takes the count whose
+  grid is nearest 200 workgroups (the XTX: 4 per processor, 192; the XT: 5, 210) and splits the attention into exactly
+  as many tasks as that grid runs at once (48 splits per KV head on the XTX, 52 on the XT): one more round of
+  attention tasks costs a whole task. A split is whole chunks of 64 positions, since a partial chunk costs a memory
+  round trip like a whole one. Against 6 per processor with 64 splits rounded to 32 positions, on the XTX: 4.11 →
+  3.97 ms per token at depth 8, 5.09 → 4.68 at 4,096, 9.39 → 8.99 at 40,900 (interleaved). Logits are the same bits
+  at every grid on one card. Past 3,072 positions (48 splits of 64) the two cards' splits differ, so they sum the
+  attention in different orders and their logits differ in the last bits; each is gated against the reference on its own.
 - **A decode module holds only the ops its tape runs.** Every op inlined into the persistent kernel adds live
   scalars, and past the scalar registers every segment hop of every wave reloads them. Trimming the kernel to the
   tape's 7 ops gave 0.5 ms per token with the same bits.
@@ -114,7 +122,7 @@ Two checks hold this, and both run without trusting a list written by hand:
   link power saving (ASPM L1) on the card's path, the link sleeps meanwhile and the launch's completion reaches the
   host about 0.2 ms late, on every token. One more one-task segment beside the final norm reads and writes 20 KB of
   host memory the card addresses, so the link is awake when the launch ends. No kernel change and no system setting;
-  the same bits. On this XTX that is 233 → 246 tok/s at short context; the XT in this machine has no L1 on its path
+  the same bits. On this XTX that was 233 → 246 tok/s at short context when it went in; the XT in this machine has no L1 on its path
   and measures the same either way.
 - **Prompt reading.** The weights stay exact in fp16 in one WMMA operand (Q4_K: scale × quant is an integer up to 945;
   Q6_K: quant − 32), the activations are fp16, the accumulation fp32. Chunks of 2,048 tokens; a prompt's last token
@@ -122,12 +130,12 @@ Two checks hold this, and both run without trusting a list written by hand:
 
 ## Where the remaining time is
 
-At short context a token takes 4.07 ms against a 2.24 ms bound. Measured on the XT with builds that drop the loads or
+At short context a token takes 4.03 ms against a 2.24 ms bound. Measured on the XT with builds that drop the loads or
 the arithmetic (an earlier build, 4.38 ms per token there):
 
 | Part | Time |
 |---|---|
-| What is left with no loads and no arithmetic: the tape walk, each task's claim, the barriers, the result stores, the publishes | 2.29 ms |
+| What is left with no loads and no arithmetic: each task's claim, the barriers, the result stores, the publishes, and the stages that are one task wide (the norms, the router, the attention at short context), which run while the memory bus idles | 2.29 ms |
 | Weight loads | 1.51 ms |
 | Arithmetic and activations | 0.57 ms |
 
@@ -135,9 +143,30 @@ About half of a token is what its 432 dependent stages cost before they load or 
 time is inside the stages, not between them: in a trace of one token (`benchmarks/q3moe_trace.py`, XT), the hand-off from
 a stage's last publish to the next stage's first workgroup past its wait is 0.1 to 0.5 µs, 0.1 ms over the whole token.
 Decoding the quantized formats is the smallest part. At depth the attention's reads dominate and the share of the bound
-rises to 74 %.
+rises to 77 %.
 
-Three smaller suspects were looked at and left alone:
+Where the time inside a stage goes, from builds that stamp one phase each (XT):
+
+- **A matvec task's time rises with the workgroup's age on the bus, not with its neighbours.** The first task of a
+  gate|up stage takes 12 µs in the first workgroups and 16 µs in the last at 6 workgroups per processor, and the last
+  take 1.2 to 1.3 times the first at 3 and at 8 as well.
+- **The attention at short context is 11 µs of fixed steps:** 2.8 µs to the norm sums, 0.8 to the scaled and rotated
+  query and the cache row, 4.3 to the first chunk's scores, 0.9 to the softmax, 0.8 to the value sums, 1.2 to the
+  output. Each further chunk of a split adds about 10 µs.
+
+Looked at and left alone, each with the same bits as the build it was timed against:
+
+- **Wider matvec tiles.** Four rows per wave instead of two, two unit passes at once, or an unrolled pass, with the
+  register cap raised to fit them (120 or 144 registers, no spills): 0.01 to 0.44 ms per token slower. More bytes in
+  flight per wave with fewer workgroups does not read faster.
+- **Other task sizes.** 8, 32, 48, 64 or 80 rows per task for any one stage: equal within 0.01 ms or slower (8 rows
+  for the down projection: 0.26 ms slower, about 1.3 µs per extra claim and publish of each workgroup).
+- **Wider add + norm reads** after the down projection (2, 4 or 8 round trips' worth at once): within 0.01 ms, or
+  slower.
+- **Touching a stage's weights before its wait:** from 0.1 ms faster to 0.2 ms slower by stage and depth; no setting
+  gains at every depth.
+- **The attention's key loads one step early** (the first chunk's during the norm, the next chunk's during the value
+  sums; needs 113 registers): 0.05 to 0.2 ms per token slower at 4,096 to 16,384 positions.
 
 - **Folding each one-task stage into the wide stage before it** can save at most the hand-offs around it: 0.06 ms per
   token, from the trace.
@@ -161,26 +190,32 @@ over a prefilled context, `benchmarks/q3moe_verify.py --depths 512,4096,16384,40
 
 | Context depth | Decode, per token | Pass of 2 | Pass of 3 | Pass of 4 | Best per accepted token | Against decode |
 |---|---|---|---|---|---|---|
-| 512 | 4.22 ms | 5.99 ms | 7.53 ms | 9.19 ms | 3.50 ms (3) | 1.21× |
-| 4,096 | 5.11 ms | 7.72 ms | 9.68 ms | 11.79 ms | 4.50 ms (3) | 1.14× |
-| 16,384 | 6.74 ms | 10.68 ms | 13.70 ms | 16.86 ms | 6.31 ms (2) | 1.07× |
-| 40,900 | 9.41 ms | 15.35 ms | 20.51 ms | 25.62 ms | 9.07 ms (2) | 1.04× |
+| 512 | 4.15 ms | 6.08 ms | 7.78 ms | 9.52 ms | 3.59 ms (2) | 1.16× |
+| 4,096 | 4.70 ms | 7.41 ms | 9.39 ms | 11.53 ms | 4.37 ms (3) | 1.08× |
+| 16,384 | 6.25 ms | 10.02 ms | 13.42 ms | 16.65 ms | 5.92 ms (2) | 1.06× |
+| 40,900 | 9.06 ms | 15.00 ms | 20.68 ms | 26.23 ms | 8.86 ms (2) | 1.02× |
 
 - **Tokens per pass.** A pass of T tokens checks T − 1 drafts and always yields one token of its own. With the
   [RedHatAI DFlash speculator](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-speculator.dflash) for this model (its
   reference PyTorch implementation, in a draft, verify, accept loop on this model's own greedy text) the first, second
   and third draft were accepted in 69 %, 46 % and 25 % of passes: 1.69, 2.15 and 2.40 tokens per pass of 2, 3 and 4.
-- **These figures are before the drafter runs.** To break even, a draft may cost 1.5 ms at depth 512 and 0.6 ms at
-  40,900. The reference implementation takes 8 to 12 ms per draft on this card.
+- **These figures are before the drafter runs.** To break even, a draft may cost 1.1 ms at depth 512, 0.7 ms at
+  4,096, 0.6 ms at 16,384 and 0.3 ms at 40,900. The reference implementation takes 8 to 12 ms per draft on this
+  card. An estimate for the same drafter on kernels of its own, not a measurement: a draft reads 705 MiB of bf16
+  weights (its 5 layers, its output head and the projection of the big model's features), about 0.9 ms at this
+  card's bandwidth before any overhead. Unquantized that leaves nothing at 4,096 positions and beyond; quantized to
+  4 bits it would read in about 0.25 ms, with its acceptance to be measured again.
+- **Decoding got faster after this was first measured, and the ratios fell with it** (they were 1.21×, 1.14×, 1.07×
+  and 1.04×): a pass of T tokens gained less from the smaller grid than a decode step did.
 
 Why a T-token pass is not cheap here (the pass of 4, from its trace):
 
 | Part of a pass of 4 (its critical path) | At depth 512 | At depth 40,900 |
 |---|---|---|
-| Experts (gate, up, down) | 4.8 ms | 4.8 ms |
-| Dense matvecs (k, v, output, head) | 2.7 ms | 2.5 ms |
-| Attention | 1.0 ms | 17.4 ms |
-| Norms, router, joins, cache row stores | 1.4 ms | 1.5 ms |
+| Experts (gate, up, down) | 5.3 ms | 5.3 ms |
+| Dense matvecs (k, v, output, head) | 2.2 ms | 2.3 ms |
+| Attention | 1.0 ms | 17.9 ms |
+| Norms, router, joins, cache row stores | 1.4 ms | 1.4 ms |
 
 1. **Neighbouring tokens use different experts.** Four consecutive tokens route to 19 to 20 distinct experts per layer
    of their 32 slots (two tokens: 12.6 of 16). The verify module computes each distinct expert once, but the weights a
@@ -191,7 +226,7 @@ Why a T-token pass is not cheap here (the pass of 4, from its trace):
    sums are T times as many: `attn_output` takes 10.8 µs per layer for one token and 32.9 µs for four (RX 7900 XT), and
    18.0 µs in a build that kept every load and skipped the extra sums. With one token repeated, so that four tokens
    share all 8 experts, gate and up still take 53.6 µs against 24.7 µs for one token.
-3. **At depth every token reads the whole context.** Four attentions over 40,900 positions are 17 of the pass's 26 ms.
+3. **At depth every token reads the whole context.** Four attentions over 40,900 positions are 18 of the traced pass's 27 ms.
 
 What would change the picture is arithmetic that takes T columns for the price of one: the WMMA matrix instructions the
 prefill uses. An op built on them needs about 240 vector registers, against the 96 the persistent kernel is held to so

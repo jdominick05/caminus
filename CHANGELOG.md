@@ -8,9 +8,9 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 ### New
 
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
-  card: 246 tok/s at short context, 196 with 4K tokens of context, 106 at its full 40,960 (llama.cpp on the same
+  card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,493 tok/s (llama.cpp: 3,853). Every step from the
-  GGUF file to the output token is code written for Caminus, and its output is 5 to 6 times closer to an exact
+  GGUF file to the output token is code written for Caminus, and its output is about 6 times closer to an exact
   reference of the model than llama.cpp's. See [docs/dev/qwen3-30b-a3b.md](docs/dev/qwen3-30b-a3b.md).
 - **Qwen Code sees how much context it has left.** After each batch of tool calls, one line in the tool result says how
   many tokens are used and how many are left before automatic compaction, so the model can plan the end of a long task.
