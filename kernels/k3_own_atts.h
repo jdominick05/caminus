@@ -101,12 +101,26 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
 #else
     constexpr int GH = ATS_G;
 #endif
+#ifdef K3_Q3M_VER
+    // the verify module (T tokens per pass, kernels/k3_q3m_ver.hip): Seg.pad1 = kv heads | flags << 8 | token << 16.
+    //   token: this segment's position is Seg.asum[0] + token (one position word for the pass's block)
+    //   flag 1: the cache row only (tasks = kv heads: task g is kv head g of the split that holds the position)
+    //   flag 2: no row store (a flag-1 segment stored it: the tokens' attentions then wait for the rows, not each other)
+    const int nkv = sg.pad1 & 255, vf = (int)__builtin_amdgcn_readfirstlane((sg.pad1 >> 8) & 255);
+    const int S = sg.work, heads = sg.N, M = nkv * ATS_D, HS = ATS_G / GH;
+    asm volatile("" : "+s"(t));
+    const int pos = (int)__builtin_amdgcn_readfirstlane(((const int *)sg.asum)[0]) + ((sg.pad1 >> 16) & 255), npos = pos + 1;
+    int Ls, nact; ats_layout(npos, S, sg.pad2, Ls, nact);
+    const int hs = t % HS, sgi = t / HS, s = (vf & 1) ? nact - 1 : sgi / nkv, g = (vf & 1) ? sgi : sgi - s * nkv, h0 = g * ATS_G + hs * GH;
+    if (s >= nact || g >= nkv) return;
+#else
     const int nkv = sg.pad1, S = sg.work, heads = sg.N, M = nkv * ATS_D, HS = ATS_G / GH;
     asm volatile("" : "+s"(t));
     const int hs = t % HS, sgi = t / HS, s = sgi / nkv, g = sgi - s * nkv, h0 = g * ATS_G + hs * GH;   // h0: the first head
     const int pos = (int)__builtin_amdgcn_readfirstlane(((const int *)sg.asum)[0]), npos = pos + 1;
     int Ls, nact; ats_layout(npos, S, sg.pad2, Ls, nact);
     if (s >= nact) return;                       // (uniform: an inactive split)
+#endif
     const int a0 = s * Ls, b0 = min(npos, a0 + Ls);
     const bool last = s == nact - 1;
     const float * par = (const float *)sg.aux;
@@ -164,11 +178,19 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
             if (hw == 0) {
                 const float x0 = tk[j], x1 = tk[j + ATS_D / 2];
                 const float y = i < ATS_D / 2 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
+#ifdef K3_Q3M_VER
+                const _Float16 kh = (_Float16)y; kk[i] = (float)kh; if (hs == 0 && !(vf & 2)) cw[g * ATS_D + i] = kh;
+            } else { const _Float16 vh = (_Float16)xk; vv[i] = (float)vh; if (hs == 0 && !(vf & 2)) cw[M + g * ATS_D + i] = vh; }
+#else
                 const _Float16 kh = (_Float16)y; kk[i] = (float)kh; if (hs == 0) cw[g * ATS_D + i] = kh;
             } else { const _Float16 vh = (_Float16)xk; vv[i] = (float)vh; if (hs == 0) cw[M + g * ATS_D + i] = vh; }
+#endif
         }
     }
     ats_bar();
+#ifdef K3_Q3M_VER
+    if (vf & 1) return;                          // (the row only)
+#endif
     // -- the chunks of ATS_CH = 64 positions
     AtsG * cache = (AtsG *)sg.W;
     const int qd = lane >> 2, qq = lane & 3, tp = wave * 8 + qd, dp = tid & 63, pq = tid >> 6;   // (tp: this quad's position)

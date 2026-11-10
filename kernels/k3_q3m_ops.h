@@ -197,10 +197,10 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #ifdef K3_Q3M_LEAN_ATTN   // (measurement builds only: the per-head attention too, for A/Bs inside one code object)
     if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
 #endif
-    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg OWN_TK_ARG); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_ROUTER) { op_router(sg, t); return true; }
-    if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
+    if (sg.op == OP_OWN_EMB) { own_op_emb(sg OWN_TK_ARG); return true; }
     return false;
 }
 __device__ __forceinline__ uint32_t * k3_extra_warm(const Seg &) { return nullptr; }

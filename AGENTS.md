@@ -44,6 +44,8 @@ CLAUDE.md imports this file.
 - The `k3_gguf*.hip` files are ONE engine compiled with different op / format whitelists: a persistent kernel has one
   register allocation for all its ops (budget 96 VGPRs, 0 spills) and a ~120-160 KB body against a 32 KB I-cache.
 - A decode module holds only the ops its model's decode tape runs (`k3_q3m_lean.hip`: 7 ops, `k3.Q3M_LEAN_OPS`, built without the ggml headers).
+  `k3_q3m_ver.hip` is the same ops in T-token forms for verify passes (`engine/q3moe_verify.py`): every T-token
+  statement sits under `#ifdef K3_Q3M_VER` with the decode text in `#else`, so the decode module's object never changes.
   Every op inlined into `k3_run` adds live scalars; past the SGPRs, each segment hop of each wave pays the reloads
   (qwen3moe: 190 spilled scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid, same bits). An op for prefill,
   verify or a drafter goes into its own module, never into a decode module; the host refuses it there.
