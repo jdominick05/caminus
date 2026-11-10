@@ -74,7 +74,7 @@ Through the server at the full 40,960-token context, a passphrase placed at 37 %
 | Step | Code |
 |---|---|
 | Reading the GGUF file | `python/caminus/ggufio.py` |
-| Tokenizer (byte-level BPE from the file's metadata) | `python/caminus/bpe.py`; equal to the Hugging Face `tokenizers` library on 3.8M tokens of test text |
+| Tokenizer (byte-level BPE from the file's metadata) | `python/caminus/bpe.py`; equal to the Hugging Face `tokenizers` library on 3.9M tokens of test text |
 | Weight decoding, Q4_K and Q6_K | `kernels/own_quant.h`, written from the block layouts; host copy `python/caminus/own_dequant.py` |
 | Decode: one GPU launch per token | `kernels/k3_q3m_lean.hip` (the persistent kernel `kernels/k3.hip` with 7 ops: `k3_own_ops.h`, `k3_own_atts.h`, `k3_q3m_ops.h`), driven by `python/caminus/engine/q3moe_one.py` |
 | Prompt reading | `kernels/q3m_prefill.hip` (quantized matrix products on RDNA3's WMMA instructions), driven by `python/caminus/prefill/q3m.py` |

@@ -12,7 +12,7 @@ the include closure of every code object it reports having loaded).
   python -I tests/test_own_code.py [--model GGUF]"""
 import argparse, os, re, subprocess, sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-sys.path.insert(0, os.path.join(ROOT, 'python')); sys.path.insert(0, os.path.join(ROOT, 'tools'))
+sys.path.insert(0, os.path.join(ROOT, 'tools')); sys.path.insert(0, os.path.join(ROOT, 'python'))   # (python/ first: tools/caminus.py would shadow the package)
 from own_closure import audit   # noqa: E402
 ok = True
 
