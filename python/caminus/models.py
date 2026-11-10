@@ -45,6 +45,13 @@ ITEMS = (
          'Qwen3-Coder-Next-UD-IQ3_S.gguf', 29690687488,
          'fddff90a6e3b9f0aee320a2710024c458cd5f3b07f0b7bdfb33fcf23c08e5389', 'hf-lfs'),
 )
+# Qwen3-30B-A3B (11-10): the official Q4_K_M; revision, size and LFS sha256 from Hugging Face's API on 2026-11-10 (the
+# local file's sha256 computed and equal)
+ITEMS = ITEMS + (
+    Item('qwen3-30b-a3b', 'qwen3-30b-a3b', 'Qwen/Qwen3-30B-A3B-GGUF', 'e4d4bafdfb96a411a163846265362aceb0b9c63a',
+         'Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824,
+         '0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5', 'hf-lfs'),
+)
 BY_KEY = {it.key: it for it in ITEMS}
 
 # The named models `caminus models` / `caminus pull` / `caminus start` know: the files (ITEMS keys; the first is what caminus
@@ -69,6 +76,8 @@ CATALOG = (
            '41 tok/s decode, 928 tok/s prefill 2K (one XTX)', 'the 24 GB card only; ~119K context'),
     _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
            '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
+    _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
+           '230 tok/s decode at short context, 184 at 4K, 101 at 40.9K (one XTX)', '40,960 context: the 24 GB card only'),
 )
 BY_NAME = {m.name: m for m in CATALOG}
 

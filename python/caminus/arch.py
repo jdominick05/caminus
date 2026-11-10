@@ -12,6 +12,7 @@ what a model needs; nothing else branches on a GGUF's general.architecture to bu
              layer)
   qwen3next  Qwen3-Coder-Next: Qwen3NextTP on both cards, T = 1, no drafter yet, no batched prefill yet (KPassOnly: every
              prompt runs as K3 passes)
+  qwen3moe   Qwen3-30B-A3B: Q3MoEOne on one card (own code from the GGUF to the logits), T = 1, no drafter yet, KPassOnly
 
 Any other architecture takes the Coder's path, as before the registry: FlashNextTP refuses a GGUF it cannot load.
 
@@ -415,6 +416,27 @@ class OneCard(Arch):
                              reserve_mib=(capacity.DISPLAY_RESERVE_MIB if c and c['display'] else 0,), card_names=(name,))
 
 
+class Q3MoE(OneCard):
+    """qwen3moe (Qwen3-30B-A3B): Q3MoEOne on one card, T = 1, Caminus's own code from the GGUF to the logits; no drafter yet;
+    the prompt runs as K3 passes (KPassOnly) until its own batched prefill lands. Full depth (context_length 40,960) fits the
+    24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
+    engine = 'engine.q3moe_one:Q3MoEOne'
+
+    def auto_need(self, opt, slots, cards=None):
+        from .engine.q3moe_one import Q3MoEOne
+        path = opt['model']
+        n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
+        slot = Q3MoEOne.kv_pos_mib(path) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
+        need = lambda c: [Q3MoEOne.projection_mib(path, c) + (slots + 2) * slot]   # (the side rows: host memory)
+        return n_ctx, [0], slot, need
+
+    def build(self, opt, log=print, T=None):
+        from .engine.q3moe_one import Q3MoEOne
+        from .prefill.kpass import KPassOnly
+        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
+        return m, KPassOnly(m), None, None
+
+
 class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
@@ -433,6 +455,7 @@ class TwoCardTP(Arch):
 
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
+                             Q3MoE('qwen3moe', 'qwen3-30b-a3b'),
                              TwoCardTP('qwen3next', 'qwen3-coder-next'))}
 CODER = ARCHS['qwen4exp']
 

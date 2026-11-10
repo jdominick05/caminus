@@ -13,6 +13,7 @@ Per layer (fp32 residual x; h16 = fp16 activations for the matvecs):
 Then rms(x) * output_norm -> fp16 -> the head (Q6_K planes) -> logits (fp32 [vocab])."""
 import ctypes
 import os
+import sys
 
 import numpy as np
 import torch
@@ -36,7 +37,7 @@ PER_WGP = 6   # workgroups per WGP (12 waves per SIMD of the 16 that fit): inter
 
 class Q3MoEOne:
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp=PER_WGP, gu=True, attn_batched=True, attn_one=True,
-                 attn_split=True, splits=ATS_SPLITS, lmin=ATS_LMIN):
+                 attn_split=True, splits=ATS_SPLITS, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -68,10 +69,45 @@ class Q3MoEOne:
         self.cache_rows = max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
         kv = self.nl * self.cache_rows * k3.kv_pos_bytes(self.nkv * self.hd, False)
         self.vram_mib = (wbytes + kv + 4 * k3.Engine.atts_scratch_floats(self.nkv, splits)) / 2 ** 20 + 256
-        capacity.check([self.dev], [self.vram_mib], f'Q3MoEOne {os.path.basename(path)} (max_ctx {max_ctx}: {self.vram_mib:.0f} MiB)')
+        if vram_check:   # (vram_extra_mib: what the caller adds right after: a prefill's buffers, a drafter)
+            capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
+                           f'Q3MoEOne {os.path.basename(path)} (max_ctx {max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
         torch.cuda.set_device(self.dev)
         self.pos_host = 0
+        # the server's engine contract (Qwen35One's / FlashNextTP's names; caminus.serve.k3_session and caminus.cache.prompt
+        # read them): one card, T = 1, no recurrent state (a checkpoint is KV rows only; the lazy commit commits nothing),
+        # dense attention at every depth, no drafter features yet
+        self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
+        self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
+        self.devs = [self.dev]
+        self.T = F.T                                          # (the GGUF's tensors by name: K3Session reads output.weight's shape)
+        self.qsa, self.qsa_limit, self.idx_cache, self.dual, self.local_only = False, None, False, False, True
+        self.qsa_from = None
+        self.feature_layers, self.feature_card, self.features, self.ple_layers = [], 0, None, None
+        self.gdn_keys = self.moe_blocks = 0; self.vocab_share = 1.0
+        self._during = None
+        self.model_tag = 'qwen3moe'
         with torch.cuda.device(self.dev): self._load(); self._build_tape()
+
+    @staticmethod
+    def projection_mib(path, max_ctx, splits=ATS_SPLITS):
+        """MiB the engine allocates on its card at max_ctx, from the file's header alone (nothing on a card): __init__'s own
+        check counts the same terms"""
+        F = ggufio.GGUFFile(path)
+        try:
+            nl, nkv, hd = int(F.hp('block_count')), int(F.hp('attention.head_count_kv')), int(F.hp('attention.key_length'))
+            w = sum(t.n_bytes for t in F.tensors)
+        finally:
+            F.close()
+        kv = nl * (int(max_ctx) + k3.Engine.ATS_PAD) * 4 * nkv * hd
+        return (w + kv + 4 * k3.Engine.atts_scratch_floats(nkv, splits)) / 2 ** 20 + 256
+
+    @staticmethod
+    def kv_pos_mib(path):
+        """MiB of KV cache per position (every layer)"""
+        F = ggufio.GGUFFile(path)
+        try: return int(F.hp('block_count')) * 4 * int(F.hp('attention.head_count_kv')) * int(F.hp('attention.key_length')) / 2 ** 20
+        finally: F.close()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
     @property
@@ -170,7 +206,7 @@ class Q3MoEOne:
         nf = E.rms_mul(s['x'].view(1, D), self.out_norm.view(1, D), s['h'].view(1, D), self.eps, dep=prev)
         cf = E.own_f16(s['h'], s['h16'], dep=nf)
         mv(self.head, s['h16'], s['logits'], cf, rpt='head')
-        E.build()
+        E.build(); self._server_buffers()
 
     def _tape_fused(self, E, s, mv, prev):
         """the tape with the residual add, the RMS norm and the fp16 copy as one segment (OP_OWN_ADD_RMS16; the three-stage
@@ -223,7 +259,23 @@ class Q3MoEOne:
             prev = mv(d['ffn_down_exps'], s['a16'], s['d'], sw, rpt='down', ids=s['ids'], total_rows=self.n_exp * D, x_per_slot=True)
         nf = E.own_add_rms16(s['x'], self.out_norm, s['h'], s['h16'], self.eps, d=s['d'], slots=KU, w=s['wts'], dep=prev)
         mv(self.head, s['h16'], s['logits'], nf, rpt='head')
-        E.build()
+        E.build(); self._server_buffers()
+
+    def _server_buffers(self):
+        """the server contract's views and staging (K3Session, the prompt cache): logits [1, vocab] and its two column halves
+        (the device sampler's shards, on this card), the argmax read-back, the status words, the done event, the KV caches
+        as positional states (the first max_ctx rows: the padding rows past them are never a position)"""
+        self.logits = self.S['logits'].view(1, self.vocab)
+        self.vh = self.vocab // 2
+        self.logits_half = [self.logits[:, :self.vh], self.logits[:, self.vh:]]
+        self.shard_devs = [self.dev, self.dev]
+        self.d_max = (torch.zeros(1, device='cuda'), torch.zeros(1, dtype=torch.int64, device='cuda'))
+        self.h_max = (torch.zeros(1, pin_memory=True), torch.zeros(1, dtype=torch.int64, pin_memory=True))
+        self.h_st = torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True)
+        self.ev_done = torch.cuda.Event()
+        self.engines = [self.E]
+        row = 2 * self.nkv * self.hd
+        self.state = {(0, il, 'kv'): d['cache'][:self.max_ctx * row] for il, d in enumerate(self.L)}
 
     # -- decode ------------------------------------------------------------------------------------------------------------
     def reset(self):
@@ -241,3 +293,129 @@ class Q3MoEOne:
             torch.cuda.synchronize()
         self.pos_host += 1
         return self.S['logits']
+
+    # -- the server's engine contract (caminus.serve.k3_session, caminus.cache.prompt: Qwen35One's names, T = 1) -----------
+    @property
+    def staged(self):
+        """the position the staging block holds for the next launch (the prompt cache and the session read it)"""
+        return int(self.hstage[1])
+
+    def reset(self):
+        """a new sequence: positions restart at 0 (every KV row is written before any pass reads it); clears poisoned"""
+        self.pos_host = 0
+        self.seq += 1; self.fresh = True; self.poisoned = None
+
+    def prefetch(self, tokens, positions):
+        """nothing to read ahead: the speculative loop's hook"""
+
+    def _check(self, tokens, i0, commit, what):
+        if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
+        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=1, what=what)
+        if tokens is not None and len(tokens) < i0 + 1:
+            raise k3.ContextBoundsError(f'{what}: position {i0} but {len(tokens)} tokens')
+
+    def _stage(self, tokens, i0):
+        tok = int(tokens[i0])
+        if not 0 <= tok < self.vocab: raise ValueError(f'Q3MoEOne: token {tok} outside the vocabulary ({self.vocab})')
+        self.hstage[0] = tok; self.hstage[1] = int(i0)
+
+    def step_token(self, tokens, i):
+        """position i; returns only the greedy next token (argmax on the card, the first index on ties)"""
+        return self._run(tokens, i, 0 if self.fresh else 1, True)[0]
+
+    def verify(self, tokens, i0, commit):
+        """position i0 in one pass (commit: the previous pass's tokens to commit, nothing to do here: no recurrent state);
+        returns logits [1, vocab] (a fresh tensor per pass)"""
+        self._run(tokens, i0, commit, False)
+        return self.logits.clone()
+
+    def verify_tokens(self, tokens, i0, commit):
+        return self._run(tokens, i0, commit, True)
+
+    def _run(self, tokens, i0, commit, tok):
+        self._check(tokens, i0, commit, 'Q3MoEOne pass')
+        self._stage(tokens, i0); self.fresh = False; self._tok = tok
+        for attempt in range(self.max_retries + 1):
+            bad = self._pass(i0, commit if attempt == 0 else 0)
+            if not bad: break
+            self.bails.append((i0, attempt, bad))
+            print(f'k3 qwen3moe: a wait gave up at position {i0} (attempt {attempt + 1}), running the pass again: ' + '; '.join(bad),
+                  file=sys.stderr, flush=True)
+        else:
+            raise RuntimeError(f'k3 qwen3moe: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
+        self.pos_host = i0 + 1
+        if not tok: return None
+        return [int(self.h_max[1][0])]
+
+    def _pass(self, i0, commit):
+        self._pass_launch(i0, commit)
+        return self._pass_wait(i0)
+
+    def _pass_launch(self, i0, commit):
+        """the launch from the staged block (and the logits' argmax read back when self._tok); K3Session's test hook wraps it"""
+        self._check(None, i0, commit, 'Q3MoEOne._pass')
+        if int(self.hstage[1]) != i0: raise k3.ContextBoundsError(f'Q3MoEOne._pass: staged position {int(self.hstage[1])} != {i0}')
+        self.token += 1
+        with torch.cuda.device(self.dev):
+            self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)
+            self.E.run(check=False)
+            if self._tok:
+                torch.max(self.logits, dim=1, out=self.d_max)
+                self.h_max[0].copy_(self.d_max[0], non_blocking=True); self.h_max[1].copy_(self.d_max[1], non_blocking=True)
+            self.h_st.copy_(self.E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
+            self.ev_done.record()
+
+    def _pass_wait(self, i0):
+        """wait for the launch, read its status; the bounds guard poisons and raises, a wait that gave up is returned as its
+        report. A bailed pass leaves OP_OWN_ATTS's merge counters wherever its tasks got: every task still ran once, so
+        they are back at zero, but they are cleared here too before the retry"""
+        self.ev_done.synchronize()
+        st = self.h_st.tolist()
+        b = k3.bounds_status(st)
+        if b:
+            with torch.cuda.device(self.dev): torch.cuda.synchronize(); self.E.sync.zero_(); self.S['ats'][:k3.Engine.ATS_CNT].zero_()
+            self.poisoned = f'the device bound guard caught an out-of-range value at pass position {i0}: {b}'
+            raise k3.ContextBoundsError(f'k3 qwen3moe: {self.poisoned}')
+        if st[1]:
+            with torch.cuda.device(self.dev):
+                torch.cuda.synchronize()
+                names = {v: k for k, v in vars(k3).items() if k.startswith('OP_')}
+                rep = f'segment {st[2]} = {names.get(self.E.segs[st[2]].op)} (seen {st[3]}); {self.E.stall_report()}'
+                self.E.sync.zero_(); self.S['ats'][:k3.Engine.ATS_CNT].zero_()
+            return [rep]
+        return []
+
+    def launch_tokens(self, tokens, i0, commit):
+        """verify()'s pass launched without waiting or reading anything back (the device sampler queues behind it); then
+        finish_pass(i0, commit)"""
+        self._check(tokens, i0, commit, 'Q3MoEOne pass')
+        self._stage(tokens, i0); self._tok = False; self.fresh = False
+        self._pass_launch(i0, commit)
+
+    def finish_pass(self, i0, commit):
+        """wait for launch_tokens' pass; a bailed pass runs again before returning. True when it was rerun (whatever was
+        queued behind the first launch read a bailed pass's outputs and must run again)"""
+        bad = self._pass_wait(i0)
+        if not bad:
+            self.pos_host = i0 + 1; return False
+        for attempt in range(1, self.max_retries + 1):
+            self.bails.append((i0, attempt - 1, bad))
+            print(f'k3 qwen3moe: a wait gave up at position {i0} (attempt {attempt}), running the pass again: ' + '; '.join(bad),
+                  file=sys.stderr, flush=True)
+            bad = self._pass(i0, 0)
+            if not bad:
+                self.pos_host = i0 + 1; return True
+        self.bails.append((i0, self.max_retries, bad))
+        raise RuntimeError(f'k3 qwen3moe: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
+
+    def physics_bytes(self):
+        """per card (one): the weight bytes one decode pass reads (every tensor once, the routed experts at k_used / n_exp
+        of their bytes: the average token), for the server's physics floor"""
+        tot = 0.0
+        for t in self.F.tensors:
+            tot += t.n_bytes * (self.k_used / self.n_exp if '_exps.' in t.name else 1.0) if t.name != 'token_embd.weight' else self.D * 144 / 256
+        return (float(tot),)
+
+    def check_replicas(self):
+        """one card: no replicas: always (True, True)"""
+        return True, True

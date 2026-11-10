@@ -470,7 +470,8 @@ def stage_download(S):
         check('download: the command line (--dry-run fetches nothing; then the file)', r0.returncode == 0 and r1.returncode == 0
               and open(f2, 'rb').read() == d2 and 'done' in r1.stdout, (r0.stdout + r0.stderr + r1.stdout + r1.stderr)[-300:])
         check('download: the real manifest is well formed', all(len(it.sha256) == 64 and len(it.revision) == 40 and it.size > 0 for it in models.ITEMS)
-              and [it.key for it in models.ITEMS] == ['coder-1', 'coder-2', 'dflash', 'qwen3.6', 'qwen3.6-hauhau', 'arex-2', 'qwen3-coder-next']
+              and [it.key for it in models.ITEMS] == ['coder-1', 'coder-2', 'dflash', 'qwen3.6', 'qwen3.6-hauhau', 'arex-2', 'qwen3-coder-next',
+                                                      'qwen3-30b-a3b']
               and all(k in models.BY_KEY for m in models.CATALOG for k in m.items))
     finally:
         srv.close()

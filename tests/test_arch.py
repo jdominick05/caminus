@@ -58,10 +58,10 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35moe', 'qwen3next', 'qwen4exp'], f'archs: the four served ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'], f'archs: the five served ({sorted(arch.ARCHS)})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
-                    'qwen3next': ('tp', 2, 1, None)}, f'archs: kind, cards, T, drafter ({shape})')
+                    'qwen3moe': ('one-card', 1, 1, None), 'qwen3next': ('tp', 2, 1, None)}, f'archs: kind, cards, T, drafter ({shape})')
     check(arch.lookup('llama') is arch.CODER, 'archs: any other architecture takes the Coder\'s path')
     check(arch.usable_ctx(262144, 4) == 262142 and arch.usable_ctx(90112, 1) == 90112, 'usable_ctx: the engine less T - 2')
 
@@ -177,7 +177,8 @@ def main():
         print('SKIP max_ctx auto: no torch', flush=True)
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
-        check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3next': 'Qwen3NextTP'},
+        check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne',
+                        'qwen3next': 'Qwen3NextTP'},
               f'engine_class: every entry\'s engine imports ({names})')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
