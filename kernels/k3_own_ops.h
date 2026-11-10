@@ -199,7 +199,7 @@ __device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
     float ss = 0.0f;
 #pragma unroll
     for (int j = 0; j < 8; j++) if (j < NI) ss = __builtin_fmaf(xv[j], xv[j], ss);
-    ss = warp_reduce_sum<32>(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
     float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
     const float scale = rsqrtf(tot / N + sg.rs);
 #pragma unroll
@@ -238,7 +238,7 @@ __device__ __forceinline__ void own_op_attn_dec(const Seg & sg, int h) {
             for (int t = wave; t < n; t += 8) {
                 float a = 0.0f;
                 for (int d = lane; d < D; d += 32) a += q[d] * kv_get(cache + (size_t)(c0 + t) * pb, M, type, 0, g * D + d);
-                a = warp_reduce_sum<32>(a);
+                a = wave_sum(a);
                 if (lane == 0) sc[t] = a * sg.rs;
             }
         } else {
@@ -256,19 +256,19 @@ __device__ __forceinline__ void own_op_attn_dec(const Seg & sg, int h) {
                     for (int j = 0; j < 4; j++) { a0 += qv[j] * (float)k0[j]; a1 += qv[j] * (float)k1[j]; }
                     __builtin_amdgcn_sched_barrier(0);
                 }
-                a0 = warp_reduce_sum<32>(a0); a1 = warp_reduce_sum<32>(a1);
+                a0 = wave_sum(a0); a1 = wave_sum(a1);
                 if (lane == 0) { sc[t] = a0 * sg.rs; if (t + 8 < n) sc[t + 8] = a1 * sg.rs; }
             }
         }
         __syncthreads();
         float m = -INFINITY;
         for (int t = tid; t < n; t += blockDim.x) m = fmaxf(m, sc[t]);
-        m = warp_reduce_max<32>(m); if (lane == 0) red[wave] = m; __syncthreads();
+        m = wave_max(m); if (lane == 0) red[wave] = m; __syncthreads();
         m = red[0]; for (int w = 1; w < 8; w++) m = fmaxf(m, red[w]); __syncthreads();
         const float mn = fmaxf(run_m, m), corr = expf(run_m - mn);
         float sum = 0.0f;
         for (int t = tid; t < n; t += blockDim.x) { const float e = expf(sc[t] - mn); sc[t] = e; sum += e; }
-        sum = warp_reduce_sum<32>(sum); if (lane == 0) red[wave] = sum; __syncthreads();
+        sum = wave_sum(sum); if (lane == 0) red[wave] = sum; __syncthreads();
         sum = 0.0f; for (int w = 0; w < 8; w++) sum += red[w];
         run_s = c0 == 0 ? sum : run_s * corr + sum;
         for (int j = 0; j < 2; j++) {
@@ -344,7 +344,7 @@ __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
     const float * xp = isk ? kvr + (size_t)g * D + i : (const float *)sg.a + (size_t)h * D + i;
     const float x = *xp, w = par[tid], vr = kvr[(size_t)M + (size_t)g * D + i];
     float ss = x * x;
-    ss = warp_reduce_sum<32>(ss); if (lane == 0) sc[256 + wave] = ss; __syncthreads();
+    ss = wave_sum(ss); if (lane == 0) sc[256 + wave] = ss; __syncthreads();
     float tot = 0.0f; for (int q = 0; q < 4; q++) tot += sc[256 + (isk ? 4 : 0) + q];
     const float scale = rsqrtf(tot / D + eps);
     sc[tid] = (scale * x) * w;
@@ -407,18 +407,18 @@ __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
             float a = 0.0f;
 #pragma unroll
             for (int j = 0; j < 4; j++) a = __builtin_fmaf(qv[j], qkv[D + lane + 32 * j], a);
-            a = warp_reduce_sum<32>(a);
+            a = wave_sum(a);
             if (lane == 0) sc[nc] = a * sg.rs;
         }
         __syncthreads();
         float m = -INFINITY;
         for (int t = tid; t < n; t += blockDim.x) m = fmaxf(m, sc[t]);
-        m = warp_reduce_max<32>(m); if (lane == 0) sc[CH + wave] = m; __syncthreads();
+        m = wave_max(m); if (lane == 0) sc[CH + wave] = m; __syncthreads();
         m = sc[CH]; for (int q = 1; q < 8; q++) m = fmaxf(m, sc[CH + q]); __syncthreads();
         const float mn = fmaxf(run_m, m), corr = expf(run_m - mn);
         float sum = 0.0f;
         for (int t = tid; t < n; t += blockDim.x) { const float e = expf(sc[t] - mn); sc[t] = e; sum += e; }
-        sum = warp_reduce_sum<32>(sum); if (lane == 0) sc[CH + wave] = sum; __syncthreads();
+        sum = wave_sum(sum); if (lane == 0) sc[CH + wave] = sum; __syncthreads();
         sum = 0.0f; for (int q = 0; q < 8; q++) sum += sc[CH + q];
         run_s = c0 == 0 ? sum : __builtin_fmaf(run_s, corr, sum);
         if (tid < D) {

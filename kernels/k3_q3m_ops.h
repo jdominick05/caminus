@@ -2,30 +2,19 @@
 // plus exactly the ops of the decode tape (k3.Q3M_LEAN_OPS): Caminus's own OP_OWN_EMB / ADD_RMS16 / MV / ATTS
 // (kernels/k3_own_ops.h) and the engine's OP_F32_MV / OP_ROUTER. The last two and their helpers are copied verbatim from
 // kernels/k3_gguf_ops.h (the same statements: the module's k3_run is instruction for instruction the one the ggml-include
-// build produced, checked by disassembly when this file changed); the wave reductions the own ops call are written here
-// with ggml's statement order (xor partners width / 2 .. 1, __shfl_xor), so their bits are the same too.
+// build produced, checked by disassembly when this file changed); the wave reductions are own_quant.h's wave_sum / wave_max
+// (the xor butterfly, partners 16 .. 1: the order every reference and gate of these ops was recorded with).
 #pragma once
 #include <stdint.h>
 
-template <int width = 32>
-__device__ __forceinline__ float warp_reduce_sum(float x) {
-#pragma unroll
-    for (int offset = width / 2; offset > 0; offset >>= 1) x += __shfl_xor(x, offset, width);
-    return x;
-}
-template <int width = 32>
-__device__ __forceinline__ float warp_reduce_max(float x) {
-#pragma unroll
-    for (int offset = width / 2; offset > 0; offset >>= 1) x = fmaxf(x, __shfl_xor(x, offset, width));
-    return x;
-}
+#include "own_quant.h"   // wave_sum / wave_max: the xor-butterfly wave reductions (partners 16, 8, 4, 2, 1)
 
 // tokens per pass (speculative verification): Seg.team (k3_run ignores teams; <= 1 means one token)
 __device__ __forceinline__ int seg_T(const Seg & sg) { return sg.team > 1 ? sg.team : 1; }
 
 // wave-wide xor-butterfly reductions on DPP / permlanex16 (VALU) instead of ds_bpermute (an LDS round trip per step):
 // the same partners in the same order (16, 8, 4, 2, 1), and each step's op (add, fmaxf) is commutative, so every lane
-// gets warp_reduce_sum<32> / warp_reduce_max<32>'s bits. All 32 lanes must be active (as for the shuffles).
+// gets wave_sum / wave_max's bits. All 32 lanes must be active (as for the shuffles).
 template <bool MAX>
 __device__ __forceinline__ float wred(float x) {
     const unsigned u = __builtin_bit_cast(unsigned, x);
@@ -78,7 +67,7 @@ __device__ __forceinline__ void op_f32_mv(const Seg & sg, int t) {
             for (int u = 0; u < K3_F32_U; u++) if (k0 + u * 128 < sg.K)
                 acc += wv[u].x * xv[u].x + wv[u].y * xv[u].y + wv[u].z * xv[u].z + wv[u].w * xv[u].w;
         }
-        acc = warp_reduce_sum<32>(acc);
+        acc = wave_sum(acc);
         if (lane == 0) ((float *)sg.y)[row] = acc;
     }
 }

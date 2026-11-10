@@ -772,7 +772,9 @@ class K3Server:
             'engine': ENGINE,
             'caminus': {'build_info': self.build_info, 'status': '/caminus/status', 'status_version': STATUS_VERSION,
                         'metrics_prefix': 'caminus:', 'speculative_types': self.spec_types,
-                        'stats_enabled': self.stats.enabled},
+                        'stats_enabled': self.stats.enabled,
+                        # (the code objects loaded so far, from caminus.device.hip when the process has it: a mock server has none)
+                        'code_objects': list(getattr(sys.modules.get('caminus.device.hip'), 'LOADED', ()))},
             'n_ctx': self.max_ctx,
             'model': os.path.basename(self.model_path) if self.model_path else 'mock',
             'models': list(MODEL_PROFILES)}

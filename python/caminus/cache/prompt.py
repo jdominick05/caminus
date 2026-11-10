@@ -1431,7 +1431,7 @@ class PromptCache:
         that a refusal (ContextBoundsError / PrefillRefused) before prepare() changed anything keeps the previous one (a
         refusal: the previous state stands). self.phase is where an exception left: 'prepare' or 'first'"""
         from ..engine.k3 import ContextBoundsError
-        from ..prefill.coder import PrefillRefused
+        from ..prefill.driver import PrefillRefused
         from ..decode import longctx
         h = hooks or _NO_HOOKS
         ids = [int(t) for t in ids]

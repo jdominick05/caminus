@@ -7,11 +7,13 @@
   - with a qwen3moe GGUF given (--model; skipped otherwise): its header facts (arch.meta) and vocabulary through
     caminus.ggufio equal gguf-py's, and QwenTokenizer(engine='own') gives the 'hf' engine's ids on every source file of
     this tree (4 KB chunks) and a Unicode stress set, special tokens parsed and not
-The end-to-end form: tools/serve_smoke1.py --block-imports gguf,tokenizers (a GPU run).
+The end-to-end form: tools/serve_smoke1.py --block-imports gguf,tokenizers (a GPU run: the server under an import hook, and
+the include closure of every code object it reports having loaded).
   python -I tests/test_own_code.py [--model GGUF]"""
 import argparse, os, re, subprocess, sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-sys.path.insert(0, os.path.join(ROOT, 'python'))
+sys.path.insert(0, os.path.join(ROOT, 'python')); sys.path.insert(0, os.path.join(ROOT, 'tools'))
+from own_closure import audit   # noqa: E402
 ok = True
 
 
@@ -20,30 +22,10 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
-def closure(name, seen=None, macros=None):
-    """the kernels/ files a kernel file includes, transitively: #include "x", and #include NAME with NAME #defined as a
-    "file" earlier on the path (k3.hip's K3_EXTRA_OPS_HEADER); <system> headers are the toolchain's"""
-    seen = set() if seen is None else seen
-    macros = {} if macros is None else macros
-    p = os.path.join(ROOT, 'kernels', name)
-    if name in seen: return seen
-    seen.add(name)
-    if not os.path.isfile(p): return seen
-    for m in re.finditer(r'^\s*#\s*(?:define\s+(\w+)\s+"([^"]+)"|include\s+"([^"]+)"|include\s+(\w+))', open(p).read(), re.M):
-        if m.group(1): macros[m.group(1)] = m.group(2)
-        elif m.group(3): closure(m.group(3), seen, macros)
-        elif m.group(4) in macros: closure(macros[m.group(4)], seen, macros)
-        else: seen.add('?' + m.group(4))     # (an include through an undefined macro: reported as missing)
-    return seen
-
-
-GGML = re.compile(r'(common|vecdotq|quantize|mmq|mmvq|convert|ggml[\w-]*)\.(cuh|h)$')
 for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'q3m_prefill.hip'):
-    cl = closure(top)
-    missing = [f for f in cl if not os.path.isfile(os.path.join(ROOT, 'kernels', f))]
-    bad = sorted(f for f in cl if GGML.search(f) or 'ggml' in f)
+    cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
-ref = sorted(f for f in closure('k3_gguf_q3m_own.hip') if GGML.search(f) or 'ggml' in f)
+ref = audit('k3_gguf_q3m_own.hip')[2]
 check(bool(ref), f'the detector itself: the full GGUF module (k3_gguf_q3m_own.hip) is flagged ({ref})')
 bs = open(os.path.join(ROOT, 'build.sh')).read()
 check(re.search(r'kernels/k3_q3m\*\.hip\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\)', bs) is not None and

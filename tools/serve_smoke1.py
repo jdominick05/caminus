@@ -8,7 +8,9 @@ flight directories only, then from outside, with a stdlib client (tools/serve_sm
   anthropic an Anthropic /v1/messages stream: a text block
   long      a ~8K-token prompt (the batched prefill): TTFT and prompt tok/s from the timings
   needle    (--needle N) a passphrase at 37 % of a ~N-token prompt of synthetic records: the answer holds it; TTFT, prompt tok/s
-  --block-imports gguf,tokenizers: the server runs under an import hook refusing those packages (the own-code gate)
+  --block-imports gguf,tokenizers: the server runs under an import hook refusing those packages, and every code object it
+            reports having loaded (/props caminus.code_objects, read after the requests) has no ggml / llama.cpp header in
+            its source's include closure (the own-code gate)
   surface   /metrics (llamacpp: names and caminus: series), /caminus/status (one card, its name and guard line), no request
             text in the metrics / status / slots / flight files (a marker string), llm-top -once (--llm-top BIN)
   abort     a stream closed by the client after a few events, then a request: HTTP 200
@@ -178,6 +180,14 @@ def main():
               f'{tm.get("prompt_per_second")} tok/s, TTFT {tt * 1e3:.0f} ms, decode {tm.get("predicted_per_second")} tok/s; answer {ans[:40]!r}')
         S.NUMBERS['needle'] = dict(prompt_n=tm.get('prompt_n'), prompt_tps=tm.get('prompt_per_second'), ttft_ms=tt * 1e3,
                                    decode_tps=tm.get('predicted_per_second'), found=needle in ans, answer=ans[:60])
+    if a.block_imports:   # the own-code gate's device half: what the process loaded, by its own record
+        from own_closure import audit
+        objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []
+        rep = {o: audit(o + '.hip') for o in objs}
+        bad = {o: (r[1], r[2]) for o, r in rep.items() if r[1] or r[2]}
+        refused = [l for l in srv.lines if 'import refused' in l]
+        check(objs and not bad and not refused, f'own code: the server loaded {objs}: no ggml / llama.cpp header in their include '
+              f'closures ({bad or "none"}); imports refused by the hook: {len(refused)} ({a.block_imports} never asked for)')
     # the monitoring surface
     st, met = S.get(port, '/metrics'); st2, status = S.get(port, '/caminus/status'); st3, slots = S.get(port, '/slots')
     cards = (status or {}).get('cards') if isinstance(status, dict) else None

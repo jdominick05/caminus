@@ -13,6 +13,7 @@ _hip = None
 # patched (None: every launch goes straight to HIP). See Kernel.__call__
 RECORD = None
 BUILD, BUILD_FROM = _kernels.kernel_dir()   # (directory, where it came from)
+LOADED = []    # the code objects this process loaded, in order (Module): /props caminus.code_objects, the own-code gate
 
 
 def hip():
@@ -101,6 +102,7 @@ class Module:
         self.handle = ctypes.c_void_p()
         check(hip().hipModuleLoadData(ctypes.byref(self.handle), self._image))
         self._fns = {}
+        if name not in LOADED: LOADED.append(name)
 
     def __getattr__(self, name):
         if name.startswith('_') or name == 'handle':

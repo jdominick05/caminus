@@ -28,6 +28,11 @@ __device__ __forceinline__ float wave_sum(float v) {
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor(v, o, 32);
     return v;
 }
+__device__ __forceinline__ float wave_max(float v) {   // the same partners, fmaxf: every lane ends with the wave's maximum
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
+    return v;
+}
 typedef _Float16 h2_t __attribute__((ext_vector_type(2)));
 __device__ __forceinline__ h2_t as_h2(uint32_t u) { return __builtin_bit_cast(h2_t, u); }
 
