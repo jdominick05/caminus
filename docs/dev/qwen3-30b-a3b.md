@@ -128,12 +128,61 @@ So the bytes are already read at close to the bandwidth; about half of a token i
 dependent stages in series, about 5 µs each). Decoding the quantized formats is the smallest part. At depth the attention's reads
 dominate and the share of the bound rises to 72 %.
 
+## Speculative decoding: what a verify pass costs
+
+Speculative decoding drafts a few tokens with a small model and checks them with the big one in one pass. It pays when
+a pass over T tokens costs much less than T decode steps. For this model on this card it does not, so the server does
+not use it. The measurement stays here because the reasons say where the compute and the bandwidth go.
+
+`python/caminus/engine/q3moe_verify.py` runs T tokens (up to 4) in one launch on a verify module,
+`kernels/k3_q3m_ver.hip`: the decode module's ops in T-token forms. Its logits and cache rows are bit for bit those of
+T decode steps (`tests/engine/test_q3moe_verify.py`). RX 7900 XTX, real consecutive tokens (this repository's docs)
+over a prefilled context, `benchmarks/q3moe_verify.py --depths 512,4096,16384,40900 --trace 4 --accept 0.693,0.457,0.253`:
+
+| Context depth | Decode, per token | Pass of 2 | Pass of 3 | Pass of 4 | Best per accepted token | Against decode |
+|---|---|---|---|---|---|---|
+| 512 | 4.42 ms | 6.18 ms | 7.71 ms | 9.30 ms | 3.59 ms (3) | 1.23× |
+| 4,096 | 5.32 ms | 7.89 ms | 9.85 ms | 11.97 ms | 4.58 ms (3) | 1.16× |
+| 16,384 | 6.92 ms | 10.79 ms | 13.89 ms | 16.97 ms | 6.37 ms (2) | 1.09× |
+| 40,900 | 9.56 ms | 15.41 ms | 20.63 ms | 25.64 ms | 9.10 ms (2) | 1.05× |
+
+- **Tokens per pass.** A pass of T tokens checks T − 1 drafts and always yields one token of its own. With the
+  [RedHatAI DFlash speculator](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-speculator.dflash) for this model (its
+  reference PyTorch implementation, in a draft, verify, accept loop on this model's own greedy text) the first, second
+  and third draft were accepted in 69 %, 46 % and 25 % of passes: 1.69, 2.15 and 2.40 tokens per pass of 2, 3 and 4.
+- **These figures are before the drafter runs.** To break even, a draft may cost 1.8 ms at depth 512 and 0.8 ms at
+  40,900. The reference implementation takes 8 to 12 ms per draft on this card.
+
+Why a T-token pass is not cheap here (the pass of 4, from its trace):
+
+| Part of a pass of 4 (its critical path) | At depth 512 | At depth 40,900 |
+|---|---|---|
+| Experts (gate, up, down) | 4.8 ms | 4.8 ms |
+| Dense matvecs (k, v, output, head) | 2.7 ms | 2.5 ms |
+| Attention | 1.0 ms | 17.2 ms |
+| Norms, router, joins, cache row stores | 1.4 ms | 1.5 ms |
+
+1. **Neighbouring tokens use different experts.** Four consecutive tokens route to 19 to 20 distinct experts per layer
+   of their 32 slots (two tokens: 12.6 of 16). The verify module computes each distinct expert once, but the weights a
+   pass must read still grow almost with T. A dense model's verify pass reads the same weights for every token; this
+   model's sparsity, which makes one token cheap, works against batching.
+2. **The decode kernels have no arithmetic to spare.** A decode tile finishes one token's sums in about the time its
+   weight bytes take to arrive. For T tokens the verify tiles read the bytes once and hold them in registers, but the
+   sums are T times as many: `attn_output` takes 10.8 µs per layer for one token and 32.9 µs for four (RX 7900 XT), and
+   18.0 µs in a build that kept every load and skipped the extra sums. With one token repeated, so that four tokens
+   share all 8 experts, gate and up still take 53.6 µs against 24.7 µs for one token.
+3. **At depth every token reads the whole context.** Four attentions over 40,900 positions are 17 of the pass's 26 ms.
+
+What would change the picture is arithmetic that takes T columns for the price of one: the WMMA matrix instructions the
+prefill uses. An op built on them needs about 240 vector registers, against the 96 the persistent kernel is held to so
+that 8 workgroups per compute unit stay resident. That trade, and a drafter on Caminus's own kernels, are not built.
+
 ## Limits
 
 - One card with 24 GB: the full 40,960-token context needs 22.4 GB. A 20 GB card can't hold 32,768 tokens of it, which
   is the server's minimum.
 - One model file is tested: `Qwen/Qwen3-30B-A3B-GGUF`, `Qwen3-30B-A3B-Q4_K_M.gguf`. The kernels cover Q4_K and Q6_K.
-- No speculative decoding yet.
+- Speculative decoding is measured, not enabled (see above): `caminus serve` decodes this model one token per pass.
 - One machine. Numbers from other cards are welcome.
 
 ## Reproduce
@@ -150,6 +199,8 @@ python -I tests/test_own_code.py --model $M                       # the own-code
 tools/guard.sh LOG 900  python -I tests/engine/test_q3moe_one.py $M
 tools/guard.sh LOG 1800 python -I benchmarks/q3moe_depth.py $M --depths 8,1024,4096,16384,32768,40900 --tokens 32 --rounds 5
 tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py $M --lengths 512,4096,32768 --chunk 2048 --rounds 3
+tools/guard.sh LOG 900  python -I tests/engine/test_q3moe_verify.py $M
+tools/guard.sh LOG 1800 python -I benchmarks/q3moe_verify.py $M --depths 512,4096,16384,40900 --trace 4 --accept 0.693,0.457,0.253
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model $M --scratch DIR --card 0 --max-ctx 40960 \
     --needle 38000 --block-imports gguf,tokenizers
 

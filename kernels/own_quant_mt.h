@@ -3,10 +3,13 @@
 // activations (token j's at x16 + xo(j) fp16 values). Per token the statements are the one-token tile's
 // (own_rows_q4k_1rt / own_rows_q6k_planes with K = 0, UP = 1, UNR = 1) in its order, so every sum has that tile's bits.
 //   nt (wave-uniform): tokens of this pass, 1 .. OWN_MT;  res[j][r]: token j's sum of row row0 + r, in every lane.
-// What a token more costs is its arithmetic, not memory (XT trace, T = 4, real tokens, per layer: attn_output 10.8 us
-// for one token, 32.9 for four, 18.0 with OWN_MT_NOARITH; k | v 12.7 / 23.9 / 12.7; the head 350 / 516 / 381): the
-// weights' bytes are read once whatever the token count, and issuing token j + 1's activation loads ahead of token j's
-// sums changed nothing (11.46 vs 11.54 ms per pass). Each token decodes the quant words again (nibbles -> fp16).
+// What a token more costs is its arithmetic, not memory (XT, T = 4, real tokens, per layer: attn_output 10.8 us for one
+// token, 32.9 for four, 18.0 in a build that skipped the sums of tokens 1 .. 3 and kept their loads; k | v 12.7 / 23.9 /
+// 12.7; the head 350 / 516 / 381): the weights' bytes are read once whatever the token count, and issuing token j + 1's
+// activation loads ahead of token j's sums changed nothing (11.46 vs 11.54 ms per pass). Each token decodes the quant
+// words again (nibbles -> fp16). The experts (OWN_UNION, k3_own_ops.h): gate | up 24.7 us for one token; for four, 53.6
+// with one token repeated (8 distinct experts, every one with 4 member slots: the rows read once, 4 sums each) and
+// 64.9 on real tokens (20.1 distinct of 32 slots): the member sums and the distinct experts' bytes both count.
 #pragma once
 #include "own_quant.h"
 #ifndef OWN_MT
@@ -43,9 +46,6 @@ __device__ __forceinline__ void own_rows_q4k_1rt_mt(const uint8_t * __restrict__
             xl[0] = *(const u32x4_t *)xp; xl[1] = *(const u32x4_t *)(xp + 8);
             xh[0] = *(const u32x4_t *)(xp + 32); xh[1] = *(const u32x4_t *)(xp + 40);
             if (u >= NUNITS) continue;
-#ifdef OWN_MT_NOARITH   // measurement only: tokens past the first keep their loads and skip their sums
-            if (j) { acc[j][0] += (float)((xl[0].x ^ xl[1].x ^ xh[0].x ^ xh[1].x) & 0xffu); continue; }
-#endif
             const int ju = (u & 7) >> 1;
             __builtin_amdgcn_sched_barrier(0);
             const float sxl = sum16h(xl[0], xl[1]), sxh = sum16h(xh[0], xh[1]);
@@ -112,9 +112,6 @@ __device__ __forceinline__ void own_rows_q6k_planes_mt(const uint8_t * __restric
 #pragma unroll
             for (int qd = 0; qd < 4; qd++) xv[qd] = *(const u32x4_t *)(xp + qd * 32);
             if (u >= NUNITS) continue;
-#ifdef OWN_MT_NOARITH
-            if (j) { acc[j][0] += (float)((xv[0].x ^ xv[1].x ^ xv[2].x ^ xv[3].x) & 0xffu); continue; }
-#endif
 #pragma unroll
             for (int r = 0; r < RW; r++) {
                 __builtin_amdgcn_sched_barrier(0);
