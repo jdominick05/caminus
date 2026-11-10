@@ -1,6 +1,7 @@
 """OutputParser(think_open=False): the Qwen3 template leaves a thinking prompt at 'assistant\n' and the model writes '<think>'
 itself; one leading '<think>' of the output is consumed (held while it is partial across chunks), the rest as with a prompt
-that opened the block. think_open=True (Qwen3.6's template: the prompt ends '<think>\n') keeps a literal tag as reasoning."""
+that opened the block; output that does not start with the tag is content (llama.cpp's parse: an answer without tags must
+not come back with empty content). think_open=True (Qwen3.6's template: the prompt ends '<think>\n') keeps a literal tag as reasoning."""
 import itertools
 import os
 import sys
@@ -27,11 +28,14 @@ class ThinkOpen(unittest.TestCase):
             for cuts in itertools.combinations(range(1, len(text)), k):
                 self.assertEqual(parse(text, cuts, think_open=False), ('Let me add them.\n', '17 * 23 = 391.'), cuts)
 
-    def test_no_tag(self):
-        self.assertEqual(parse('plain reasoning</think>answer', (), think_open=False), ('plain reasoning', 'answer'))
+    def test_no_tag_is_content(self):
+        for cuts in ((), (1,), (3, 9)):
+            self.assertEqual(parse('The answer is 391.', cuts, think_open=False), ('', 'The answer is 391.'), cuts)
+            self.assertEqual(parse('\n\nThe answer is 391.', cuts, think_open=False), ('', 'The answer is 391.'), cuts)
 
-    def test_partial_lookalike_kept(self):
-        self.assertEqual(parse('<thinx</think>q', (3,), think_open=False), ('<thinx', 'q'))
+    def test_partial_lookalike_is_content(self):
+        self.assertEqual(parse('<thinx q', (3,), think_open=False), ('', '<thinx q'))
+        self.assertEqual(parse('<thi', (), think_open=False), ('', '<thi'))
 
     def test_only_one_tag(self):
         self.assertEqual(parse('<think><think>x</think>y', (), think_open=False), ('<think>x', 'y'))

@@ -77,14 +77,18 @@ class Ops:
     def swiglu(self, g, u, y16, n):
         self.mod.q3p_swiglu((min(-(-n // 256), 4096),), (256,), g, u, y16, I(n))
 
-    def _span(self, what, cache, pos0, n, nkv):
+    def _span(self, what, cache, pos0, n, nkv, rows):
         """the host check before a position-indexed launch (neither kernel clamps): positions pos0 .. pos0 + n - 1 must be
-        rows of this cache (2 * nkv * 128 fp16 per row), else k3.ContextBoundsError and nothing is launched"""
+        among the cache's first `rows` positions (2 * nkv * 128 fp16 per row; None: every row of the allocation; an
+        engine's cache has padding rows past its max_ctx, so its prefill passes max_ctx), else k3.ContextBoundsError
+        and nothing is launched"""
         if n < 1 or nkv < 1: raise ValueError(f'q3m {what}: n {n}, nkv {nkv}')
-        k3.check_span(pos0, n, cache.numel() // (2 * nkv * 128), what=f'q3m {what}')
+        alloc = cache.numel() // (2 * nkv * 128)
+        if rows is not None and not 0 <= int(rows) <= alloc: raise ValueError(f'q3m {what}: rows {rows} of a cache of {alloc}')
+        k3.check_span(pos0, n, alloc if rows is None else int(rows), what=f'q3m {what}')
 
-    def qk_rope(self, qkv, ldq, nh, nkv, par, pos0, q16, cache, n):
-        self._span('qk_rope', cache, pos0, n, nkv)
+    def qk_rope(self, qkv, ldq, nh, nkv, par, pos0, q16, cache, n, rows=None):
+        self._span('qk_rope', cache, pos0, n, nkv, rows)
         if ldq < (nh + 2 * nkv) * 128 or qkv.numel() < (n - 1) * ldq + (nh + 2 * nkv) * 128 or q16.numel() < n * nh * 128:
             raise ValueError(f'q3m qk_rope: {n} tokens need qkv rows of {(nh + 2 * nkv) * 128} (stride {ldq}) and {n * nh * 128} q16')
         self.mod.q3p_qk_rope((n, nh + nkv), (128,), qkv, I(ldq), I(nh), I(nkv), par, I(pos0), q16, cache)
@@ -94,9 +98,9 @@ class Ops:
         b0 = pos0 // AT_T
         return b0, (pos0 + n - 1) // AT_T - b0 + 1
 
-    def attn(self, q16, cache, pos0, n, nkv, scale, out16, i0=0, i1=None):
+    def attn(self, q16, cache, pos0, n, nkv, scale, out16, i0=0, i1=None, rows=None):
         """blocks [i0, i1) of the chunk's attn_blocks (one launch; the caller splits long chunks by blocks)"""
-        self._span('attn', cache, pos0, n, nkv)
+        self._span('attn', cache, pos0, n, nkv, rows)
         b0, nb = self.attn_blocks(pos0, n)
         i1 = nb if i1 is None else i1
         if not 0 <= i0 < i1 <= nb: raise ValueError(f'q3m attn: blocks [{i0}, {i1}) of {nb}')
