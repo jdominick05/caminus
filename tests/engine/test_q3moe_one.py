@@ -58,17 +58,17 @@ for i in range(len(ref)):
           f'KLD {kld:.2e}  max |dlogit| {np.abs(r - g).max():.3e}', flush=True)
 print(('PASS' if top_ok else 'FAIL') + ' top-1 equal at every position'); ok &= top_ok
 print(('PASS' if np.mean(klds) < 1e-3 else 'FAIL') + f' mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}) < 1e-3'); ok &= np.mean(klds) < 1e-3
-# G-self across grids: the tape at 3 / 6 / 7 workgroups per WGP gives the resident grid's logits bitwise (same weights, same
-# KV caches rewritten position by position)
+# G-self across grids: the tape at 3 / 7 / 8 workgroups per WGP gives the default grid's (6) logits bitwise (same weights,
+# same KV caches rewritten position by position)
 def run_seq():
     eng.reset(); return [eng.step(t).clone() for t in seq[:len(ref)]]
-base = run_seq(); keep = (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos); gs_ok = True
-for pw in (3, 6, 7):
+base = run_seq(); keep = (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos); gs_ok = True; pw0 = eng.per_wgp
+for pw in (3, 7, 8):
     eng.per_wgp = pw
     with torch.cuda.device(eng.dev): eng._build_tape()
     gs_ok &= all(torch.equal(a, b) for a, b in zip(base, run_seq()))
-eng.per_wgp = None; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
-print(('PASS' if gs_ok else 'FAIL') + f' logits bitwise the resident grid\'s at 3 / 6 / 7 workgroups per WGP ({len(ref)} positions)'); ok &= gs_ok
+eng.per_wgp = pw0; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
+print(('PASS' if gs_ok else 'FAIL') + f' logits bitwise the default grid\'s ({pw0} per WGP) at 3 / 7 / 8 workgroups per WGP ({len(ref)} positions)'); ok &= gs_ok
 # the engine's own greedy text, from the prompt
 eng.reset()
 for t in ids: lg = eng.step(t)

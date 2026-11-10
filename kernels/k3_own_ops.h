@@ -311,6 +311,15 @@ __device__ __forceinline__ void own_op_attn_dec(const Seg & sg, int h) {
 // head per task, so the same partial sums); the position's own k and v are used from LDS as the f16 cache would return
 // them, and the kv head's first query head writes them to the cache (later positions' tasks read it, never this one's).
 enum { OP_OWN_ATTN = 50 };
+#ifndef OWN_AT_KB
+#define OWN_AT_KB 4    // positions of K a wave has in flight per round trip (4 two-byte loads each: 4 VGPRs a position)
+#endif
+#ifndef OWN_AT_VB
+#define OWN_AT_VB 8    // positions of V a thread has in flight per round trip (one two-byte load each)
+#endif
+#ifndef OWN_AT_VF
+#define OWN_AT_VF 8    // scores read from LDS together in the V sum (divides OWN_AT_VB)
+#endif
 __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
 // Every multiply-add below is written out, in the form the compiler gives the five segments' ops: left to it here, it
 // merged the norm's square with the wave sum's first add (whole heads' scales moved by an ulp) and the output's
@@ -318,8 +327,14 @@ __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
 #pragma clang fp contract(off)
     constexpr int CH = OWN_AT_CH;
     __attribute__((address_space(3))) float * sc = (__attribute__((address_space(3))) float *)OWN_AT, * qkv = sc + OWN_AT_Q;   // (q, k, v [128] each)
+    // (the attention's loads below: a scalar base per position + the 32-bit lane / thread offset, global not flat: a flat
+    //  load takes a 64-bit address per lane in two VGPRs, 32 positions in flight then cost k3_run 250 spilled VGPRs)
+    typedef __attribute__((address_space(1))) const _Float16 OwnGH;
     const int tid = K3TID, lane = tid % 32, wave = tid / 32, D = sg.K, nrot = sg.out_f32, heads = sg.N, nkv = sg.pad1;
-    const int G = heads / nkv, g = h / G, M = nkv * D, pos = ((const int *)sg.asum)[0], npos = pos + 1;
+    const uint32_t ulane = (uint32_t)tid & 31u, utid = (uint32_t)tid & 255u;
+    // (the position through readfirstlane: a value loaded through a flat pointer counts as different per lane, and with
+    //  it every loop bound and load address below: per-lane compares, selects and 64-bit vector adds for each load)
+    const int G = heads / nkv, g = h / G, M = nkv * D, pos = (int)__builtin_amdgcn_readfirstlane(((const int *)sg.asum)[0]), npos = pos + 1;
     const size_t pb = kv_pos_bytes(M, 0);
     const float * par = (const float *)sg.aux; const float * kvr = (const float *)sg.gs;
     const uint8_t * cache = sg.W;
@@ -360,20 +375,33 @@ __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
 #pragma unroll 1
     for (int c0 = 0; c0 < npos; c0 += CH) {
         const int n = min(CH, npos - c0), nc = c0 + n == npos ? n - 1 : n;   // nc: the chunk's positions in the cache
-        for (int t = wave; t < nc; t += 16) {                 // positions t and t + 8 (the second clamped, unused past nc)
-            const int t1 = min(t + 8, nc - 1);
-            const _Float16 * kp0 = (const _Float16 *)(cache + (size_t)(c0 + t) * pb) + g * D + lane;
-            const _Float16 * kp1 = (const _Float16 *)(cache + (size_t)(c0 + t1) * pb) + g * D + lane;
-            _Float16 k0[4], k1[4];
+        for (int t = (int)__builtin_amdgcn_readfirstlane(wave); t < nc; t += 8 * OWN_AT_KB) {   // a wave's positions t, t + 8, ..: OWN_AT_KB per round trip
+            _Float16 kk[OWN_AT_KB][4];                         // (positions past nc reread the last one and store nothing)
 #pragma unroll
-            for (int j = 0; j < 4; j++) { k0[j] = kp0[32 * j]; k1[j] = kp1[32 * j]; }
-            __builtin_amdgcn_sched_barrier(0);
-            float a0 = 0.0f, a1 = 0.0f;
+            for (int p = 0; p < OWN_AT_KB; p++) {
+                const OwnGH * kp = (const OwnGH *)(cache + (size_t)(c0 + min(t + 8 * p, nc - 1)) * pb) + g * D;   // (wave-uniform)
 #pragma unroll
-            for (int j = 0; j < 4; j++) { a0 = __builtin_fmaf(qv[j], (float)k0[j], a0); a1 = __builtin_fmaf(qv[j], (float)k1[j], a1); }
+                for (int j = 0; j < 4; j++) kk[p][j] = kp[ulane + 32u * j];
+            }
             __builtin_amdgcn_sched_barrier(0);
-            a0 = warp_reduce_sum<32>(a0); a1 = warp_reduce_sum<32>(a1);
-            if (lane == 0) { sc[t] = a0 * sg.rs; if (t + 8 < nc) sc[t + 8] = a1 * sg.rs; }
+            float a[OWN_AT_KB];
+#pragma unroll
+            for (int p = 0; p < OWN_AT_KB; p++) {
+                a[p] = 0.0f;
+#pragma unroll
+                for (int j = 0; j < 4; j++) a[p] = __builtin_fmaf(qv[j], (float)kk[p][j], a[p]);
+            }
+            // the positions' lane sums stage by stage (each position wave_sum's order): a stage's cross-lane permutes
+            // are LDS-path instructions, issued together they share one round trip; one position after another paid
+            // five each
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+#pragma unroll
+                for (int p = 0; p < OWN_AT_KB; p++) a[p] += __shfl_xor(a[p], o, 32);
+            }
+#pragma unroll
+            for (int p = 0; p < OWN_AT_KB; p++) { if (lane == 0 && t + 8 * p < nc) sc[t + 8 * p] = a[p] * sg.rs; }
+            __builtin_amdgcn_sched_barrier(0);
         }
         if (nc < n && wave == 0) {                            // this position's k: from LDS
             float a = 0.0f;
@@ -395,15 +423,31 @@ __device__ __forceinline__ void own_op_attn(const Seg & sg, int h) {
         run_s = c0 == 0 ? sum : __builtin_fmaf(run_s, corr, sum);
         if (tid < D) {
             float part = 0.0f;
-            const _Float16 * vb = (const _Float16 *)(cache + (size_t)c0 * pb) + M + g * D + tid;   // (V of position c0)
-            for (int t = 0; t < nc; t += 8) {
-                _Float16 v[8];
+            // (V of a position: after its K, M halves in; a position past nc rereads the last one. One scalar address at a
+            //  time, behind a fence: the scheduler otherwise computes a round trip's addresses first, all live at once)
+            const uint8_t * const vlast = cache + (size_t)(c0 + nc - 1) * pb + (size_t)(M + g * D) * 2;
+            for (int t = 0; t < nc; t += OWN_AT_VB) {          // OWN_AT_VB positions per round trip, summed in position order
+                _Float16 v[OWN_AT_VB];
+                const uint8_t * vrow = cache + (size_t)(c0 + t) * pb + (size_t)(M + g * D) * 2;
 #pragma unroll
-                for (int q = 0; q < 8; q++) v[q] = vb[(size_t)min(t + q, nc - 1) * (2 * M)];       // (2 M halves per position)
+                for (int q = 0; q < OWN_AT_VB; q++) {
+                    v[q] = ((const OwnGH *)(t + q < nc ? vrow : vlast))[utid];
+                    vrow += pb;
+                    __builtin_amdgcn_sched_barrier(0);
+                }
                 __builtin_amdgcn_sched_barrier(0);
+                // the scores OWN_AT_VF at a time, read from LDS together and unconditionally (an index past the chunk
+                // rereads its last slot, unused): one read inside each position's branch was an LDS round trip a position
 #pragma unroll
-                for (int q = 0; q < 8; q++) { if (t + q < nc) part = __builtin_fmaf(sc[t + q], (float)v[q], part); }
-                __builtin_amdgcn_sched_barrier(0);
+                for (int q0 = 0; q0 < OWN_AT_VB; q0 += OWN_AT_VF) {
+                    float w[OWN_AT_VF];
+#pragma unroll
+                    for (int q = 0; q < OWN_AT_VF; q++) w[q] = sc[min(t + q0 + q, CH - 1)];
+                    __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                    for (int q = 0; q < OWN_AT_VF; q++) { if (t + q0 + q < nc) part = __builtin_fmaf(w[q], (float)v[q0 + q], part); }
+                    __builtin_amdgcn_sched_barrier(0);
+                }
             }
             if (nc < n) part = __builtin_fmaf(sc[nc], qkv[2 * D + tid], part);
             acc = c0 == 0 ? part : __builtin_fmaf(acc, corr, part);

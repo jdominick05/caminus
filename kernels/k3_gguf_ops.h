@@ -1944,6 +1944,16 @@ GG_DEF_DISPATCH(gg_gu_dense_t)
 
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
+#ifdef K3_Q3M_LEAN   // the qwen3moe decode tape's ops and no other (kernels/k3_gguf_q3m_lean.hip); OP_OWN_MV: the
+                     // one-round-trip tiles only (caminus.engine.k3 refuses any other op or form on this module)
+    if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
+    if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
+    if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
+    if (sg.op == OP_ROUTER) { op_router(sg, t); return true; }
+    if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
+    return false;
+#else
     if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
 #ifdef K3_DRAFT
     if (k3_draft_flagged(sg, t)) return true;
@@ -2088,6 +2098,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #endif
     GG_DISPATCH(K3_MASK_MV, gg_op_mv_t, sg, t);
     return true;
+#endif
 }
 
 // touch(): pull [p, p + n) toward L2: one dword per 128-byte line, one line per thread per round, the value sunk into an

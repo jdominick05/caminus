@@ -41,6 +41,10 @@ CLAUDE.md imports this file.
 - `kernels/*.hip`: device code only; `./build.sh` writes `build/*.hsaco` and records provenance.
 - The `k3_gguf*.hip` files are ONE engine compiled with different op / format whitelists: a persistent kernel has one
   register allocation for all its ops (budget 96 VGPRs, 0 spills) and a ~120-160 KB body against a 32 KB I-cache.
+- A decode module holds only the ops its model's decode tape runs (`k3_gguf_q3m_lean.hip`: 7 ops, `k3.Q3M_LEAN_OPS`).
+  Every op inlined into `k3_run` adds live scalars; past the SGPRs, each segment hop of each wave pays the reloads
+  (qwen3moe: 190 spilled scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid, same bits). An op for prefill,
+  verify or a drafter goes into its own module, never into a decode module; the host refuses it there.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
@@ -102,7 +106,8 @@ tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch D
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 ```
 
-After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills); rerun the gates at `K3_PER_WGP=3/6/7`
+After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills; `.sgpr_spill_count` not up: spilled
+scalars slow every hop, a change in one op measured +13 % on all of them); rerun the gates at `K3_PER_WGP=3/6/7`
 (`gates.sh OUT grids qsa`: still bitwise); first runs on a non-display card (`caminus ps` lists the cards).
 
 ## Invariants

@@ -22,11 +22,15 @@ from ..device import capacity
 from . import k3
 from .own_layout import q6k_planes
 
-MODULE = 'k3_gguf_q3m_own'
+MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
+MODULE_LEAN = 'k3_gguf_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
+PER_WGP = 6   # workgroups per WGP (12 waves per SIMD of the 16 that fit): interleaved at the same positions, 5 rounds,
+              # the lean module, positions 8 .. 72 / 104: XT 8: 4.776, 7: 4.591, 6: 4.513, 5: 4.547 ms per token; XTX 8:
+              # 4.143, 7: 4.172, 6: 4.093, 5: 4.056. A segment's hop costs each active wave its share of the SIMD
 
 
 class Q3MoEOne:
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None, gu=True, attn_batched=True, attn_one=True):
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp=PER_WGP, gu=True, attn_batched=True, attn_one=True):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -42,9 +46,9 @@ class Q3MoEOne:
         self.theta_scale = libm.powf(float(hp('rope.freq_base')), -2.0 / self.hd)
         n_ctx = int(hp('context_length'))
         if not isinstance(max_ctx, int) or not 1 <= max_ctx <= n_ctx: raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
-        self.dev, self.max_ctx, self.limit_us, self.module, self.fused = int(device), max_ctx, limit_us, module, fused
+        self.dev, self.max_ctx, self.limit_us, self.module, self.fused = int(device), max_ctx, limit_us, module, fused   # (module None: by the tape form)
         self.rpt = rpt   # rows per matvec task: 'auto' = each stage's tasks fit the resident grid once, or a number
-        self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid; the grid tests set 3 / 6 / 7)
+        self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid, 8; the grid tests set 3 / 7 / 8)
         self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
         self.attn_batched = attn_batched   # OP_ATTN_DEC's loads in batches (the same bits; False: one round trip each)
         self.attn_one = attn_one   # the fused tape: q / k norm + RoPE, cache row, attention, fp16 out as one segment
@@ -61,6 +65,15 @@ class Q3MoEOne:
         with torch.cuda.device(self.dev): self._load(); self._build_tape()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
+    @property
+    def module(self):
+        """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
+        if self._module is not None: return self._module
+        return MODULE_LEAN if self.fused and self.gu and self.attn_one else MODULE
+
+    @module.setter
+    def module(self, m): self._module = m
+
     def _w(self, name):
         """(format, rows per matrix, K, device bytes in our layout) of a Q4_K / Q6_K matrix (experts: the whole tensor)"""
         t = self.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()

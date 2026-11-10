@@ -89,7 +89,8 @@ Q35G_MODULES = ('k3_gguf_q35g', 'k3_gguf_q35g_mt')   # the 2-bit GSQ checkpoint 
 OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (kernels/k3_gguf_q35d_own.hip; T = 1 only)
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
-Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace')   # (_trace: K3_TRACE timestamps, measurement only)
+Q3M_LEAN_MODULES = ('k3_gguf_q3m_lean',)   # (kernels/k3_gguf_q3m_lean.hip: the decode tape's ops only; Q3M_LEAN_OPS below)
+Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES   # (_trace: K3_TRACE timestamps, measurement only)
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
@@ -156,6 +157,12 @@ _CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT
 _CAPS_Q3M = frozenset({('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTN', '-')} | {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT})   # (K3_OWN_Q3M: compiled into the qwen3moe modules only)
 MODULE_CAPS.update({m: CAPS_Q35D | _CAPS_OWN for m in OWN_MODULES})
 MODULE_CAPS.update({m: frozenset({('MV', 'Q4_K'), ('MV', 'Q6_K'), ('F32_MV', 'F32')}) | _Q8_1 | _CAPS_OWN | _CAPS_Q3M for m in Q3M_MODULES})
+# the lean qwen3moe decode module: k3_run's dispatch holds these ops and nothing else (a k3_run with every GGUF-engine op
+# inlined keeps more scalars live than it has SGPRs: the reloads cost every segment hop of every wave, XT 5.33 -> 4.78 ms
+# per token at the same grid). Engine.build refuses any other op on it (an unknown op would run as a no-op on the device).
+MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT_FMT for g in ('', '_gu')} |
+                                 {('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTN', '-'), ('F32_MV', 'F32')}) for m in Q3M_LEAN_MODULES})
+Q3M_LEAN_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ATTN, OP_OWN_ADD_RMS16, OP_F32_MV, OP_ROUTER, OP_OWN_EMB}
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -1077,6 +1084,11 @@ class Engine:
                 flagged = {OP_RMS_MUL: sg.aux, OP_QK_NR: sg.aux, OP_KV_APPEND: sg.aux, OP_ATTN_DEC: sg.pad2}.get(sg.op, 1)
                 if sg.op not in DRAFT_OPS or not flagged:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}{"" if flagged else ", unflagged"})')
+        if self.module in Q3M_LEAN_MODULES:   # (only the decode tape's ops are compiled into its k3_run)
+            for i, sg in enumerate(self.segs):
+                if sg.op not in Q3M_LEAN_OPS:
+                    raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): the lean decode module runs '
+                                     f'only {sorted(Q3M_LEAN_OPS)}; use k3_gguf_q3m_own for the other tape forms')
         q = [i for i, sg in enumerate(self.segs) if sg.op in QSA_OPS]
         if q and (self.module not in QSA_MODULES or self.teams is not None):   # (k3_run elsewhere runs them as nops)
             raise ValueError(f'k3: module {self.module} has no QSA ops (segments {q[:8]}; k3_run in {QSA_MODULES} only)')
