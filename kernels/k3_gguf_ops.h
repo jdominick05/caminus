@@ -1997,6 +1997,8 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #ifdef K3_OWN
     if (sg.op == OP_OWN_MV) { own_op_mv(sg, t); return true; }
     if (sg.op == OP_OWN_F16) { own_op_f16(sg, t); return true; }
+    if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
+    if (sg.op == OP_OWN_MOE_SUM) { own_op_moe_sum(sg, t); return true; }
 #endif
 #ifdef K3_GSQ
     if (sg.op == OP_BF16_MV) {

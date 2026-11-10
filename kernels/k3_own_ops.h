@@ -73,3 +73,22 @@ __device__ __forceinline__ void own_op_f16(const Seg & sg, int t) {
     const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task);
     for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) ((_Float16 *)sg.y)[i] = (_Float16)((const float *)sg.a)[i];
 }
+// OP_OWN_SWIGLU16: y16[i] = fp16(silu(g[i]) * u[i]), i < N; Seg.a = g, Seg.W = u (fp32: the gate / up matvecs' outputs),
+// Seg.y = y16 (the down matvec's fp16 input). silu(g) = g / (1 + exp(-g)). A task = rows_per_task values.
+// OP_OWN_MOE_SUM: x[i] += sum over slots s < pad1 of w[s] * d[s * N + i] (fma in slot order; Seg.gs = w, or nullptr:
+// every weight 1, i.e. x += d for pad1 = 1: the attention's residual add). Seg.a = d, Seg.y = x. A task = rows_per_task.
+enum { OP_OWN_SWIGLU16 = 46, OP_OWN_MOE_SUM = 47 };
+__device__ __forceinline__ void own_op_swiglu16(const Seg & sg, int t) {
+    const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task);
+    const float * g = (const float *)sg.a; const float * u = (const float *)sg.W; _Float16 * y = (_Float16 *)sg.y;
+    for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) { const float gv = g[i]; y[i] = (_Float16)(gv / (1.0f + expf(-gv)) * u[i]); }
+}
+__device__ __forceinline__ void own_op_moe_sum(const Seg & sg, int t) {
+    const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task), S = sg.pad1;
+    const float * d = (const float *)sg.a; const float * w = (const float *)sg.gs; float * x = (float *)sg.y;
+    for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < S; s++) acc = w ? __builtin_fmaf(w[s], d[(size_t)s * sg.N + i], acc) : acc + d[(size_t)s * sg.N + i];
+        x[i] += acc;
+    }
+}
