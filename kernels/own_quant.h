@@ -237,6 +237,22 @@ __device__ __forceinline__ void q4k_sm(const u32x4_t & hd, int s, float & sc, fl
     sc = (float)(lo ? (a & 63u) : ((b & 0xfu) | ((c >> 6) << 4)));
     m = (float)(lo ? (b & 63u) : ((b >> 4) | ((a >> 6) << 4)));
 }
+// the scales and mins of sub-blocks 2 j and 2 j + 1 (a lane unit's two), both at once: q4k_sm's values without its
+// lane-dependent selects, which the compiler turned into branches (K3, qwen3moe decode, XT, interleaved, 5 rounds x 48
+// tokens, the same bits: 5.476 -> 5.419 ms per token). The 12 scale bytes: [0..3] = scale
+// s (6 bits) | scale 4 + s's high 2 bits, [4..7] the same for the mins, [8..11] = scale 4 + s's low 4 bits | min 4 + s's
+// low 4 bits << 4. Sub-blocks 2 j, 2 j + 1 are bytes 2 (j & 1), 2 (j & 1) + 1 of each group: one shift by 16 (j & 1)
+// brings them to bytes 0, 1; j < 2 reads the 6-bit fields, j >= 2 joins the nibbles with the high bits; the four
+// values leave as bytes (v_cvt_f32_ubyte).
+__device__ __forceinline__ void q4k_sm2(const u32x4_t & hd, int j, float & sc0, float & m0, float & sc1, float & m1) {
+    const int sh = 16 * (j & 1);
+    const uint32_t a = hd.y >> sh, b = hd.z >> sh, l = hd.w >> sh;
+    const uint32_t s_lo = a & 0x3f3fu, m_lo = b & 0x3f3fu;
+    const uint32_t s_hi = (l & 0x0f0fu) | ((a >> 2) & 0x3030u), m_hi = ((l >> 4) & 0x0f0fu) | ((b >> 2) & 0x3030u);
+    const uint32_t sv = j < 2 ? s_lo : s_hi, mv = j < 2 ? m_lo : m_hi;
+    sc0 = (float)(sv & 0xffu); sc1 = (float)((sv >> 8) & 0xffu);
+    m0 = (float)(mv & 0xffu); m1 = (float)((mv >> 8) & 0xffu);
+}
 // sum over 16 quant nibbles (4 dwords, nibble n of dword w at shift sh) times 16 fp16 x values (2 u32x4) in fp32
 // fence: decode each 4-value group right before its two dot2s (K3 form: see own_rows_q4k_1rt's UNR)
 __device__ __forceinline__ float q4k_dot16(const u32x4_t & q, int sh, const u32x4_t & xa, const u32x4_t & xb,
@@ -248,6 +264,9 @@ __device__ __forceinline__ float q4k_dot16(const u32x4_t & q, int sh, const u32x
     for (int w = 0; w < 4; w++) {
         if (fence) __builtin_amdgcn_sched_barrier(0);
         const uint32_t n = (qw[w] >> sh) & 0x0f0f0f0fu;                                // 4 nibbles as bytes
+        // bytes 0, 1 -> fp16 1024 + q: the 0x64 high bytes come from the permute's other source (selector 4), no OR
+        // (the 0x64 bytes from the permute's other source, no OR: 32 instructions fewer per pass and the same bits, but
+        //  in K3 with q4k_sm2 the token was slower: XT, interleaved, 5 rounds: 5.479 -> 5.551 ms; alone 5.474 -> 5.428)
         const uint32_t p01 = __builtin_amdgcn_perm(0u, n, 0x0c010c00u) | 0x64006400u;  // bytes 0, 1 -> fp16 1024 + q
         const uint32_t p23 = __builtin_amdgcn_perm(0u, n, 0x0c030c02u) | 0x64006400u;
         s = __builtin_amdgcn_fdot2(as_h2(p01) - off, as_h2(xw[2 * w]), s, false);
@@ -332,7 +351,7 @@ __device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W,
                 const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i].x & 0xffffu));
                 const float dm = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i].x >> 16));
                 float sc0, m0, sc1, m1;
-                q4k_sm(hd[r][i], 2 * j, sc0, m0); q4k_sm(hd[r][i], 2 * j + 1, sc1, m1);
+                q4k_sm2(hd[r][i], j, sc0, m0, sc1, m1);
                 float a = acc[r];
                 a = __builtin_fmaf(d * sc0, q4k_dot16(qs[r][i], 0, xl[i][0], xl[i][1], UNR == 1), a);
                 a = __builtin_fmaf(-dm * m0, sxl, a);
