@@ -30,6 +30,21 @@ __device__ __forceinline__ void own_op_mv_a(const Seg & sg, int r0, int r1, int 
 // A task = rows_per_task rows of the output (a multiple of 2 * 8: two rows per wave), never spanning two slots
 // (rows_per_task divides pad2). Ids are clamped to [0, experts) on read (Seg.dep2p1 unused here; Seg.rs unused).
 enum { OWN_A16_1RT = 2, OWN_GROUPED = 4, OWN_X_PER_SLOT = 8, OWN_GU = 16 };
+// The verify module (K3_Q3M_VER, kernels/k3_q3m_ver.hip: T tokens per pass) only:
+//   Seg.pad1 bits 8 .. 11 = tokens NT (0: one), without OWN_GROUPED / OWN_GU: token tk reads its activations at
+//     Seg.a + tk * xs (fp16 values) and writes its rows at Seg.y + tk * ys (fp32 values); xs / ys = the low / high half of
+//     Seg.gs. One tile call per (row pair, token): each token's sums are the decode's statements (the same bits); the
+//     pair's weight bytes come from memory for the first token and from the cache for the others.
+//   OWN_X_PER_TOKEN (with OWN_GROUPED, without OWN_X_PER_SLOT): 8 slots per token, slot s reads the input of token s / 8
+//     at Seg.a + (s / 8) * K (the experts' gate | up of every token as one segment).
+// A task index is the token for the one-task ops below (OP_OWN_EMB, OP_OWN_ADD_RMS16): OWN_TK.
+enum { OWN_X_PER_TOKEN = 32 };
+// (every T-token statement sits under K3_Q3M_VER: the other modules compile the text they compiled before)
+#ifdef K3_Q3M_VER
+#define OWN_TK_ARG , t
+#else
+#define OWN_TK_ARG
+#endif
 #ifndef OWN_K3_RW
 #define OWN_K3_RW 2   // rows per wave in K3 (2: the activation loads shared by two rows)
 #endif
@@ -63,6 +78,11 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
 #endif
     const int rpt = sg.rows_per_task, r0 = t * rpt, r1 = min(sg.N, r0 + rpt);
     const int re = grouped ? sg.pad2 : sg.N, total = sg.out_f32;
+#ifdef K3_Q3M_VER
+    const int NT = max(1, (int)__builtin_amdgcn_readfirstlane((sg.pad1 >> 8) & 15));
+    const uint64_t st = (uint64_t)sg.gs;
+    const size_t xs = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)st), ys = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)(st >> 32));
+#endif
     // it < 0: the gate's pairs (OWN_GU only), it >= 0: the up's, or the one matrix's. One bound for both forms: a
     // separate trip count (2 rpt | rpt) is one more value live across the tile (1 spilled VGPR in the _trace build)
     for (int it = OWN_K3_RW * wave - (gu ? rpt : 0); it < rpt; it += 8 * OWN_K3_RW) {   // (8 waves x OWN_K3_RW rows)
@@ -75,6 +95,25 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
         const int grow = e * re + r, lim = e * re + min(re, r + min(OWN_K3_RW, r1 - row));
         const _Float16 * x = (const _Float16 *)sg.a + (per_slot ? (size_t)slot * sg.K : 0);
         float res[OWN_K3_RW];
+#ifdef K3_Q3M_VER
+        if (sg.pad1 & OWN_X_PER_TOKEN) x += (size_t)(slot >> 3) * sg.K;
+        for (int tk = 0; tk < NT; tk++) {
+            float * yt = (float *)sg.y + (size_t)tk * ys;
+            own_1rt_acc(m ? (const uint8_t *)sg.aux : sg.W, sg, grow, lim, total, x + (size_t)tk * xs, lane, res);
+            if (lane == 0) {
+#pragma unroll
+                for (int i = 0; i < OWN_K3_RW; i++) {
+                    if (grow + i >= lim) continue;
+                    if (!gu) yt[row + i] = res[i];
+                    else if (!m) OWN_GU_G[(row + i) & (OWN_GU_RPT - 1)] = res[i];
+                    else {
+                        const float gv = OWN_GU_G[(row + i) & (OWN_GU_RPT - 1)];
+                        ((_Float16 *)sg.y)[row + i] = (_Float16)(gv / (1.0f + expf(-gv)) * res[i]);
+                    }
+                }
+            }
+        }
+#else
         own_1rt_acc(m ? (const uint8_t *)sg.aux : sg.W, sg, grow, lim, total, x, lane, res);
         if (lane == 0) {
 #pragma unroll
@@ -88,6 +127,7 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
                 }
             }
         }
+#endif
     }
 }
 __device__ __forceinline__ void own_op_mv(const Seg & sg, int t) {
@@ -129,10 +169,17 @@ __device__ __forceinline__ void own_op_moe_sum(const Seg & sg, int t) {
 // the same way (no fma: (d * sc) * q - dmin * m, each product and the difference rounded to fp32), so the device row is
 // bitwise the host decoder's. One task.
 enum { OP_OWN_EMB = 48 };
+#ifdef K3_Q3M_VER   // (task tk = token tk: its id at Seg.a[tk], its row at Seg.y + tk * N)
+__device__ __forceinline__ void own_op_emb(const Seg & sg, int tk) {
+    const int tok = min(max(((const int *)sg.a)[tk], 0), sg.pad2 - 1);
+    const uint8_t * row = sg.W + (size_t)tok * sg.K;
+    float * x = (float *)sg.y + (size_t)tk * sg.N;
+#else
 __device__ __forceinline__ void own_op_emb(const Seg & sg) {
     const int tok = min(max(((const int *)sg.a)[0], 0), sg.pad2 - 1);
     const uint8_t * row = sg.W + (size_t)tok * sg.K;
     float * x = (float *)sg.y;
+#endif
     for (int i = (int)K3TID; i < sg.N; i += blockDim.x) {
         const uint8_t * blk = row + (size_t)(i >> 8) * 144;
         const int j = i & 255, sb = j >> 5, l = j & 31, is = sb >> 1, hi = sb & 1;
@@ -158,11 +205,20 @@ enum { OP_OWN_ADD_RMS16 = 49 };
 #ifndef OWN_ADD_S
 #define OWN_ADD_S 1   // slots per round trip of the add (x 8 elements of loads in flight); 2 spilled k3_run (15 VGPRs), 4: 23
 #endif
+#ifdef K3_Q3M_VER   // (task tk = token tk: its rows d [tk][S][N], w [tk][S], x / h / h16 [tk][N]; nw shared)
+__device__ __forceinline__ void own_op_add_rms16(const Seg & sg, int tk) {
+    __shared__ float part[8];
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, S = sg.pad1, NI = N >> 8;
+    const float * d = (const float *)sg.a + (size_t)tk * S * N; const float * nw = (const float *)sg.W;
+    const float * w = sg.gs ? (const float *)sg.gs + (size_t)tk * S : nullptr;
+    float * x = (float *)sg.y + (size_t)tk * N; float * h = (float *)sg.asum + (size_t)tk * N; _Float16 * h16 = (_Float16 *)sg.aux + (size_t)tk * N;
+#else
 __device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
     __shared__ float part[8];
     const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, S = sg.pad1, NI = N >> 8;
     const float * d = (const float *)sg.a; const float * w = (const float *)sg.gs; const float * nw = (const float *)sg.W;
     float * x = (float *)sg.y; float * h = (float *)sg.asum; _Float16 * h16 = (_Float16 *)sg.aux;
+#endif
     float acc[8], xv[8];
 #pragma unroll
     for (int j = 0; j < 8; j++) acc[j] = 0.0f;

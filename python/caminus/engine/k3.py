@@ -91,7 +91,8 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
-Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES   # (_trace: K3_TRACE timestamps, measurement only)
+Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
+Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + Q3M_VER_MODULES   # (_trace: K3_TRACE timestamps, measurement only)
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
@@ -151,7 +152,7 @@ MODULE_CAPS.update({m: CAPS_Q35D for m in Q35D_MODULES})
 # OP_OWN_MV's formats and activation precisions (kernels/k3_own_ops.h): ('OWN_MV', '<format>/<a32 | a16f>')
 OWN_FMT, OWN_ACT = {'Q6_K': 2, 'Q4_K': 4, 'Q8_0': 3}, {'a32': 0, 'a16f': 1}
 # the one-round-trip tiles (Engine.own_matvec_1rt): pad1 = OWN_A16_1RT | OWN_GROUPED | OWN_X_PER_SLOT; Q4_K and Q6_K (planes)
-OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT, OWN_GU = 2, 4, 8, 16
+OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT, OWN_GU, OWN_X_PER_TOKEN = 2, 4, 8, 16, 32   # (OWN_X_PER_TOKEN and pad1 bits 8 .. 11, the tokens: the verify module)
 OWN_1RT_FMT = ('Q4_K', 'Q6_K')
 _CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT}
              | {('OWN_F16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_MOE_SUM', '-')})
@@ -166,6 +167,10 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT
 # (the attention: OP_OWN_ATTS, split over positions; OP_OWN_ATTN, one task per query head, stays in the full module as its
 #  oracle and for A/Bs)
 Q3M_LEAN_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ATTS, OP_OWN_ADD_RMS16, OP_F32_MV, OP_ROUTER, OP_OWN_EMB}
+# the verify module: the same ops, and the matvec's T-token forms (_mt: one segment for every token of the pass; _gu_xt:
+# the experts' gate | up with each token's own input)
+MODULE_CAPS.update({m: MODULE_CAPS['k3_q3m_lean'] | {('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT_FMT for g in ('_mt', '_gu_xt')}
+                    for m in Q3M_VER_MODULES})
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -186,8 +191,8 @@ def seg_kind(sg):
     if sg.op == OP_OWN_ATTN: return ('OWN_ATTN', '-')
     if sg.op == OP_OWN_ATTS: return ('OWN_ATTS', '-')
     if sg.op == OP_OWN_MV:
-        a = (('a16_1rt_gu' if sg.pad1 & OWN_GU else 'a16_1rt') if sg.pad1 & OWN_A16_1RT and sg.pad1 < 32
-             else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
+        a = (('a16_1rt' + ('_gu' if sg.pad1 & OWN_GU else '') + ('_xt' if sg.pad1 & OWN_X_PER_TOKEN else '') + ('_mt' if sg.pad1 >> 8 > 1 else ''))
+             if sg.pad1 & OWN_A16_1RT and (sg.pad1 & 0xff) < 64 else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}'))
         return ('OWN_MV', f"{GG_FMT_NAME.get(sg.work, f'?{sg.work}') if sg.work in OWN_FMT.values() else f'?{sg.work}'}/{a}")
     if sg.op == OP_GG_Q8_1: return ('Q8_1', Q8_1_MODE.get(sg.work, f'?{sg.work}'))
     if sg.op in DF_OPS: return ('DF', DF_OPS[sg.op])
@@ -510,7 +515,7 @@ class Engine:
         return len(self.segs) - 1
 
     def own_matvec_1rt(self, w, fmt, rows, ncols, x16, out, ids=None, total_rows=None, x_per_slot=False, rows_per_task=16,
-                       dep=-1, team=-1, up=None):
+                       dep=-1, team=-1, up=None, tokens=1, x_stride=0, out_stride=0, x_per_token=False):
         """Caminus's own one-round-trip matvec tiles (OP_OWN_MV, kernels/own_quant.h own_rows_q4k_1rt / own_rows_q6k_planes in
         their K3 form), fp16 activations x16. Q4_K: raw GGUF blocks; Q6_K: engine.own_layout.q6k_planes of the whole matrix.
           ids None: out[r] = row r . x16, r < rows (w holds rows rows).
@@ -519,8 +524,19 @@ class Engine:
           with x_per_slot (each expert its own input). rows_per_task: even (a wave takes 2 rows at a time, the 8 waves of
           a workgroup take a task's row pairs in turn; 16 = one pair per wave). T = 1 only.
           up (the qwen3moe modules): a second matrix of w's shape, format and layout (the experts' up; w their gate): out is
-          then fp16 [S * rows] = fp16(silu(w row . x) * (up row . x)), the down matvec's input, in the one segment."""
+          then fp16 [S * rows] = fp16(silu(w row . x) * (up row . x)), the down matvec's input, in the one segment.
+          The verify module (Q3M_VER_MODULES) only:
+          tokens > 1 (no ids, no up): one segment for every token of a pass; token t reads x16 at t * x_stride values and
+          writes out at t * out_stride values (each token's rows are the one-token segment's bits);
+          x_per_token (ids, no x_per_slot): 8 slots per token, slot s reads x16[s // 8] ([S / 8, ncols])."""
         if self.T != 1: raise ValueError('own_matvec_1rt: T = 1 only')
+        if tokens != 1 or x_per_token:
+            if self.module not in Q3M_VER_MODULES: raise ValueError(f'own_matvec_1rt: module {self.module} has no T-token forms ({Q3M_VER_MODULES})')
+            if not 1 <= tokens <= 15 or (tokens > 1 and (ids is not None or up is not None or x_per_token)):
+                raise ValueError(f'own_matvec_1rt: tokens {tokens} (1 .. 15; with ids or up: 1)')
+            if x_per_token and (ids is None or x_per_slot or ids.numel() % 8): raise ValueError('own_matvec_1rt: x_per_token needs ids, 8 slots per token, no x_per_slot')
+            if tokens > 1 and (x_stride < ncols or out_stride < rows or x_stride >= 2 ** 31 or out_stride >= 2 ** 31):
+                raise ValueError(f'own_matvec_1rt: x_stride {x_stride} (>= {ncols}), out_stride {out_stride} (>= {rows})')
         if fmt not in OWN_1RT_FMT: raise ValueError(f'own_matvec_1rt: {fmt} ({OWN_1RT_FMT})')
         if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:
             raise ValueError(f'own_matvec_1rt: K {ncols} (a multiple of 256), rows {rows} (even), rows_per_task {rows_per_task}')
@@ -528,18 +544,22 @@ class Engine:
         total = rows if ids is None else int(total_rows)
         if total % rows: raise ValueError(f'own_matvec_1rt: total_rows {total} is not experts x {rows}')
         bs = {'Q6_K': 210, 'Q4_K': 144}[fmt]
-        assert x16.dtype == torch.float16 and x16.numel() >= ncols * (S if x_per_slot else 1) and x16.data_ptr() % 16 == 0
-        assert out.dtype == (torch.float32 if up is None else torch.float16) and out.numel() >= S * rows
+        assert x16.dtype == torch.float16 and x16.data_ptr() % 16 == 0
+        assert x16.numel() >= (ncols * (S if x_per_slot else S // 8 if x_per_token else 1) if tokens == 1 else (tokens - 1) * x_stride + ncols)
+        assert (x_stride * 2) % 16 == 0, x_stride   # (each token's activations 16-byte aligned, as the first's)
+        assert out.dtype == (torch.float32 if up is None else torch.float16)
+        assert out.numel() >= (S * rows if tokens == 1 else (tokens - 1) * out_stride + rows)
         for m in (w,) if up is None else (w, up):
             assert m.numel() * m.element_size() >= total * ncols // 256 * bs and m.data_ptr() % 16 == 0, (m.numel(), total, ncols)
         if ids is not None: assert ids.dtype == torch.int32 and ids.is_cuda
         if up is not None and (rows_per_task % 16 or rows_per_task > 64):   # (the gate sums' LDS slots: OWN_GU_RPT)
             raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of 16, at most 64 (got {rows_per_task})')
         pad1 = (OWN_A16_1RT | (OWN_GROUPED if ids is not None else 0) | (OWN_X_PER_SLOT if x_per_slot else 0)
-                | (OWN_GU if up is not None else 0))
+                | (OWN_GU if up is not None else 0) | (OWN_X_PER_TOKEN if x_per_token else 0) | ((tokens << 8) if tokens > 1 else 0))
+        strides = (x_stride | (out_stride << 32)) if tokens > 1 else None   # (Seg.gs: the two strides, low | high half)
         self.keep += [w, x16, out] + ([ids] if ids is not None else []) + ([up] if up is not None else [])
         N = S * rows
-        self.segs.append(Seg(OP_OWN_MV, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
+        self.segs.append(Seg(OP_OWN_MV, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), strides,
                              x16.data_ptr(), None if ids is None else ids.data_ptr(), out.data_ptr(), 0.0, N, ncols, total,
                              OWN_FMT[fmt], team, pad1, rows, 0, None if up is None else up.data_ptr()))
         return len(self.segs) - 1
@@ -568,41 +588,54 @@ class Engine:
                              None if w is None else w.data_ptr(), d.data_ptr(), None, x.data_ptr(), 0.0, n, 0, 0, 0, team, slots, 0))
         return len(self.segs) - 1
 
-    def own_add_rms16(self, x, nw, h, h16, eps, d=None, slots=0, w=None, dep=-1, team=-1):
+    def own_add_rms16(self, x, nw, h, h16, eps, d=None, slots=0, w=None, dep=-1, team=-1, tokens=1):
         """one workgroup: x += sum over slots s of w[s] * d[s] (slots 0: no add; w None: weights 1), then h = rms_norm(x) *
         nw (fp32) and h16 = fp16(h) (kernels/k3_own_ops.h OP_OWN_ADD_RMS16: OP_OWN_MOE_SUM -> OP_RMS_MUL -> OP_OWN_F16's
         math in one segment, every load of a step issued together; equal to them to rounding, not bitwise)."""
-        n = x.numel(); assert nw.numel() == n and h.numel() >= n and h16.dtype == torch.float16 and h16.numel() >= n
+        # tokens > 1 (the verify module): one task per token; x / h / h16 [tokens, n], d [tokens, slots, n], w [tokens, slots]
+        if tokens != 1 and self.module not in Q3M_VER_MODULES: raise ValueError(f'own_add_rms16: module {self.module} has no T-token form')
+        n = x.numel() // tokens; assert x.numel() == tokens * n and nw.numel() == n and h.numel() >= tokens * n
+        assert h16.dtype == torch.float16 and h16.numel() >= tokens * n
         if n % 256 or not 256 <= n <= 2048: raise ValueError(f'own_add_rms16: n {n} (a multiple of 256, at most 2048)')
-        assert 0 <= slots <= 8 and (slots == 0 or d.numel() >= slots * n) and (w is None or w.numel() >= slots)
+        assert 0 <= slots <= 8 and (slots == 0 or d.numel() >= tokens * slots * n) and (w is None or w.numel() >= tokens * slots)
         self.keep += [x, nw, h, h16] + ([d] if d is not None else []) + ([w] if w is not None else [])
-        self.segs.append(Seg(OP_OWN_ADD_RMS16, 1, dep, 1, nw.data_ptr(), None if w is None else w.data_ptr(),
+        self.segs.append(Seg(OP_OWN_ADD_RMS16, tokens, dep, 1, nw.data_ptr(), None if w is None else w.data_ptr(),
                              None if d is None else d.data_ptr(), h.data_ptr(), x.data_ptr(), eps, n, n, 0, 0, team, slots, 0,
                              0, h16.data_ptr()))
         return len(self.segs) - 1
 
-    def own_emb(self, w, fmt, vocab, D, tok, x, dep=-1, team=-1):
+    def own_emb(self, w, fmt, vocab, D, tok, x, dep=-1, team=-1, tokens=1):
         """x fp32 [D] = row tok[0] (an int32 on the device, clamped to the vocabulary there) of the embedding matrix w (raw
         GGUF blocks, Q4_K), decoded as caminus.own_dequant does (bitwise)"""
         if fmt != 'Q4_K': raise ValueError(f'own_emb: {fmt} (Q4_K only)')
         rb = D // 256 * 144
-        assert D % 256 == 0 and w.numel() * w.element_size() >= vocab * rb and tok.dtype == torch.int32 and x.numel() >= D
+        # tokens > 1 (the verify module): one task per token; tok int32 [tokens], x [tokens, D]
+        if tokens != 1 and self.module not in Q3M_VER_MODULES: raise ValueError(f'own_emb: module {self.module} has no T-token form')
+        assert D % 256 == 0 and w.numel() * w.element_size() >= vocab * rb and tok.dtype == torch.int32 and x.numel() >= tokens * D
+        assert tok.numel() >= tokens
         self.keep += [w, tok, x]
-        self.segs.append(Seg(OP_OWN_EMB, 1, dep, 1, w.data_ptr(), None, tok.data_ptr(), None, x.data_ptr(), 0.0, D, rb, 0,
+        self.segs.append(Seg(OP_OWN_EMB, tokens, dep, 1, w.data_ptr(), None, tok.data_ptr(), None, x.data_ptr(), 0.0, D, rb, 0,
                              OWN_FMT[fmt], team, 0, vocab))
         return len(self.segs) - 1
 
-    def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1):
-        """F32 weights w [N, K] (row-major) times fp32 x [K] -> out [N]"""
-        N, K = w.shape; N = self.T * N; assert K % 4 == 0; self.keep += [w, x, out]
+    def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1, tokens=1):
+        """F32 weights w [N, K] (row-major) times fp32 x [K] -> out [N]; tokens > 1 (the verify module): x [tokens, K] ->
+        out [tokens, N] in one segment"""
+        if tokens != 1:
+            if self.module not in Q3M_VER_MODULES or self.T != 1: raise ValueError(f'f32_mv: tokens {tokens} on {self.module}')
+            team = tokens; assert x.numel() >= tokens * w.shape[1] and out.numel() >= tokens * w.shape[0]
+        N, K = w.shape; N = self.T * tokens * N; assert K % 4 == 0; self.keep += [w, x, out]
         self.segs.append(Seg(OP_F32_MV, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
                              x.data_ptr(), None, out.data_ptr(), 0.0, N, K, 1, 0, team, 0, K * 4))   # pad2: row bytes (prefetch)
         return len(self.segs) - 1
 
-    def router(self, logits, k, ids, wts, clamp=6.103515625e-5, dep=-1, team=-1):
-        """softmax gating, top-k ids (int32) and normalised weights (llama.cpp build_moe_ffn, norm_w)"""
-        E = logits.numel() // self.T; assert E <= 1024 and k <= 64; self.keep += [logits, ids, wts]
-        self.segs.append(Seg(OP_ROUTER, self.T, dep, 0, None, wts.data_ptr(), logits.data_ptr(), None, ids.data_ptr(), clamp,
+    def router(self, logits, k, ids, wts, clamp=6.103515625e-5, dep=-1, team=-1, tokens=1):
+        """softmax gating, top-k ids (int32) and normalised weights (llama.cpp build_moe_ffn, norm_w); tokens > 1 (the
+        verify module): logits [tokens, E] -> ids / wts [tokens, k], one task per token"""
+        if tokens != 1 and (self.module not in Q3M_VER_MODULES or self.T != 1): raise ValueError(f'router: tokens {tokens} on {self.module}')
+        nt = self.T * tokens
+        E = logits.numel() // nt; assert E <= 1024 and k <= 64 and ids.numel() >= nt * k and wts.numel() >= nt * k; self.keep += [logits, ids, wts]
+        self.segs.append(Seg(OP_ROUTER, nt, dep, 0, None, wts.data_ptr(), logits.data_ptr(), None, ids.data_ptr(), clamp,
                              E, 0, 1, 0, team, k, 0))
         return len(self.segs) - 1
 
@@ -1125,7 +1158,7 @@ class Engine:
                 flagged = {OP_RMS_MUL: sg.aux, OP_QK_NR: sg.aux, OP_KV_APPEND: sg.aux, OP_ATTN_DEC: sg.pad2}.get(sg.op, 1)
                 if sg.op not in DRAFT_OPS or not flagged:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}{"" if flagged else ", unflagged"})')
-        if self.module in Q3M_LEAN_MODULES:   # (only the decode tape's ops are compiled into its k3_run)
+        if self.module in Q3M_LEAN_MODULES + Q3M_VER_MODULES:   # (only the decode tape's ops are compiled into its k3_run)
             for i, sg in enumerate(self.segs):
                 if sg.op not in Q3M_LEAN_OPS:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): the lean decode module runs '
