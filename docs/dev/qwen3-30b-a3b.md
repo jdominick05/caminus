@@ -19,22 +19,23 @@ on the same file and card (`llama-bench -ngl 99 -fa 1`).
 
 | Context depth | Caminus | llama.cpp | Bandwidth bound | Share of the bound |
 |---|---|---|---|---|
-| 8 | **231 tok/s** (4.32 ms) | 148 tok/s | 447 tok/s | 52 % |
-| 1,024 | **219 tok/s** (4.57 ms) | | 425 tok/s | 52 % |
-| 4,096 | **187 tok/s** (5.34 ms) | 134 tok/s | 369 tok/s | 51 % |
-| 16,384 | **144 tok/s** (6.93 ms) | 110 tok/s | 243 tok/s | 59 % |
-| 32,768 | **113 tok/s** (8.84 ms) | 90 tok/s | 167 tok/s | 68 % |
-| 40,900 | **104 tok/s** (9.63 ms) | | 144 tok/s | 72 % |
+| 8 | **246 tok/s** (4.07 ms) | 148 tok/s | 447 tok/s | 55 % |
+| 1,024 | **232 tok/s** (4.31 ms) | | 425 tok/s | 55 % |
+| 4,096 | **196 tok/s** (5.09 ms) | 134 tok/s | 369 tok/s | 53 % |
+| 16,384 | **149 tok/s** (6.70 ms) | 110 tok/s | 243 tok/s | 61 % |
+| 32,768 | **116 tok/s** (8.60 ms) | 90 tok/s | 167 tok/s | 70 % |
+| 40,900 | **106 tok/s** (9.40 ms) | | 144 tok/s | 74 % |
 
 - **Caminus:** `benchmarks/q3moe_depth.py --depths 8,1024,4096,16384,32768,40900 --tokens 32 --rounds 5`. One token per
-  pass, the median of 5 rounds of 32 tokens at each depth; the rounds differ by at most 0.03 ms.
+  pass, the median of 5 rounds of 32 tokens at each depth; the rounds differ by at most 0.05 ms (0.34 ms in one
+  round at 32,768).
 - **llama.cpp:** `tg64` at depths 0, 4,096, 16,384 and 32,768 (`-d`), 2 repetitions.
 - **Bandwidth bound:** the bytes one token must read, divided by the 858 GB/s this card sustained in the decode-floor
   study. A token reads 1.92 GB of weights (every dense matrix, 8 of the 128 experts per layer, the output head) plus
   98,304 bytes of KV cache per position of context. Nothing that reads every byte once per token can beat it.
 
-Through the HTTP server (`tools/serve_smoke1.py`, one request each): 225 tok/s on a short chat, 182 tok/s after a
-6,587-token prompt, 113 tok/s after a 37,659-token prompt.
+Through the HTTP server (`tools/serve_smoke1.py`, one request each): 231 tok/s on a short chat, 190 tok/s after a
+6,587-token prompt, 116 tok/s after a 37,659-token prompt.
 
 ### Prompt reading (the batched prefill)
 
@@ -109,13 +110,19 @@ Two checks hold this, and both run without trusting a list written by hand:
 - **A decode module holds only the ops its tape runs.** Every op inlined into the persistent kernel adds live
   scalars, and past the scalar registers every segment hop of every wave reloads them. Trimming the kernel to the
   tape's 7 ops gave 0.5 ms per token with the same bits.
+- **The PCIe link stays awake.** A token is one launch of about 4 ms with no traffic between the host and the card. With
+  link power saving (ASPM L1) on the card's path, the link sleeps meanwhile and the launch's completion reaches the
+  host about 0.2 ms late, on every token. One more one-task segment beside the final norm reads and writes 20 KB of
+  host memory the card addresses, so the link is awake when the launch ends. No kernel change and no system setting;
+  the same bits. On this XTX that is 233 → 246 tok/s at short context; the XT in this machine has no L1 on its path
+  and measures the same either way.
 - **Prompt reading.** The weights stay exact in fp16 in one WMMA operand (Q4_K: scale × quant is an integer up to 945;
   Q6_K: quant − 32), the activations are fp16, the accumulation fp32. Chunks of 2,048 tokens; a prompt's last token
   runs as a decode pass.
 
 ## Where the remaining time is
 
-At short context a token takes 4.32 ms against a 2.24 ms bound. Measured on the XT with builds that drop the loads or
+At short context a token takes 4.07 ms against a 2.24 ms bound. Measured on the XT with builds that drop the loads or
 the arithmetic (an earlier build, 4.38 ms per token there):
 
 | Part | Time |
@@ -128,7 +135,18 @@ About half of a token is what its 432 dependent stages cost before they load or 
 time is inside the stages, not between them: in a trace of one token (`benchmarks/q3moe_trace.py`, XT), the hand-off from
 a stage's last publish to the next stage's first workgroup past its wait is 0.1 to 0.5 µs, 0.1 ms over the whole token.
 Decoding the quantized formats is the smallest part. At depth the attention's reads dominate and the share of the bound
-rises to 72 %.
+rises to 74 %.
+
+Three smaller suspects were looked at and left alone:
+
+- **Folding each one-task stage into the wide stage before it** can save at most the hand-offs around it: 0.06 ms per
+  token, from the trace.
+- **The kernel's 53 spilled scalars** (an estimate from the disassembly, not a timing): under 0.05 ms per token. They
+  sit in register lanes, not in memory (the kernel has no stack frame; the full module, with 217, has one). Each of the
+  96 restores is one instruction, 58 of them run once per segment, the rest sit in the claim and wait loops and in three
+  small loops that read no global memory. None is in a loop that reads weights.
+- **Larger matvec tasks**, so that each stage fits the resident workgroups once, are 0.05 to 0.29 ms per token slower
+  than 16 rows per task (XT, short context, interleaved, the same bits).
 
 ## Speculative decoding: what a verify pass costs
 
