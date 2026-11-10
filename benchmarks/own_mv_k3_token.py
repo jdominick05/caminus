@@ -2,7 +2,9 @@
 paper's token: 48 layers x (q, k, v, o, router, 8 x gate, 8 x up, 8 x down) + the vocab head = 1,393 matvecs), on the
 real GGUF (read with caminus.ggufio), module k3_gguf_q35d_own:
   own    Caminus's one-round-trip tiles (OP_OWN_MV a16_1rt), the 8 experts of a layer grouped into one segment by device
-         ids: 48 x 8 + 1 = 385 segments; fp16 activations; Q6_K in our plane layout (engine/own_layout.py)
+         ids: 48 x 8 + 1 = 385 segments; fp16 activations; Q6_K in our plane layout (engine/own_layout.py); one arm per
+         --rpt (rows per task). (A 16 KB touch of each workgroup's first task before the dependency wait, as the GGUF
+         matvecs have, measured no gain here: chain 4.504 ms with and without, XT)
   llama  llama.cpp's matvec (OP_GG_MV, q8_1 activations precomputed: their quantize segments are not timed), one segment
          per matrix: 1,393 segments
   both   the router as OP_F32_MV (the same in both arms)
@@ -29,6 +31,8 @@ ap.add_argument('gguf')
 ap.add_argument('--rounds', type=int, default=5)
 ap.add_argument('--experts', type=int, default=32)
 ap.add_argument('--log', default=None)
+ap.add_argument('--rpt', nargs='+', default=['16'], help="own arms: rows per task (multiples of 16; the head keeps 64), or "
+                'auto<k>: about k tasks per workgroup in every segment')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
 MOD = 'k3_gguf_q35d_own'
@@ -182,17 +186,28 @@ tok_bytes = sum(d[r][1] * d[r][5] * (KU if '_exps' in r else 1) for d in L for r
     + sum(d['router'].numel() * 4 for d in L) + th.n_bytes
 
 
-def tape_own(struct):
+NWG = k3.resident_grid(MOD)
+
+
+def pick_rpt(rpt, n):
+    """rows per task: a number, or 'auto<k>' = about k tasks per workgroup of the grid (a multiple of 16, at least 16)"""
+    if isinstance(rpt, int): return min(rpt, n)
+    k = int(rpt[4:] or 1)
+    return max(16, -(-n // (NWG * k * 16)) * 16)
+
+
+def tape_own(struct, rpt):
     e = k3.Engine(module=MOD); prev = -1
     dp = lambda: prev if struct == 'chain' else -1
     for il, d in enumerate(L):
         for r, x, o in (('attn_q', x16, o_q), ('attn_k', x16, o_k), ('attn_v', x16, o_v), ('attn_output', xo16, o_o)):
-            f, rows, K, wo, _, _ = d[r]; prev = e.own_matvec_1rt(wo, f, rows, K, x, o, dep=dp())
+            f, rows, K, wo, _, _ = d[r]; prev = e.own_matvec_1rt(wo, f, rows, K, x, o, dep=dp(), rows_per_task=pick_rpt(rpt, rows))
         prev = e.f32_mv(d['router'], x32, o_r, dep=dp())
         for r, x, o, ps in (('ffn_gate_exps', x16, o_g, False), ('ffn_up_exps', x16, o_u, False), ('ffn_down_exps', xd16, o_d, True)):
             f, rows, K, wo, _, _ = d[r]
-            prev = e.own_matvec_1rt(wo, f, rows, K, x, o, ids=ids[il], total_rows=rows * EL, x_per_slot=ps, dep=dp())
-    e.own_matvec_1rt(head_o, 'Q6_K', HR, HK, x16, o_h, rows_per_task=64, dep=dp())
+            prev = e.own_matvec_1rt(wo, f, rows, K, x, o, ids=ids[il], total_rows=rows * EL, x_per_slot=ps, dep=dp(),
+                                    rows_per_task=pick_rpt(rpt, KU * rows) if isinstance(rpt, str) else rpt)
+    e.own_matvec_1rt(head_o, 'Q6_K', HR, HK, x16, o_h, rows_per_task=64 if isinstance(rpt, int) else pick_rpt(rpt, HR), dep=dp())
     return e.build()
 
 
@@ -216,18 +231,18 @@ say(f'token: {tok_bytes / 2**30:.3f} GiB of weights (router included); own {NL *
 ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 res = {}
 for struct in ('chain', 'free'):
-    to = tape_own(struct)
+    tapes = {f'own-{rpt}': tape_own(struct, int(rpt) if rpt.isdigit() else rpt) for rpt in A.rpt}
     tl = [tape_llama(struct, picks[r]) for r in range(A.rounds + 1)]
-    tm = {'own': [], 'llama': []}
+    tm = {k: [] for k in list(tapes) + ['llama']}
     for r in range(A.rounds + 1):
         ids.copy_(torch.from_numpy(picks[r]))
-        for arm, tp in (('own', to), ('llama', tl[r])):
+        for arm, tp in list(tapes.items()) + [('llama', tl[r])]:
             torch.cuda.synchronize(); ev[0].record(); tp.run(); ev[1].record(); torch.cuda.synchronize()
             if r: tm[arm].append(ev[0].elapsed_time(ev[1]))
-    for arm in ('own', 'llama'):
+    for arm in tm:
         ms = float(np.median(tm[arm])); res[(struct, arm)] = ms
-        say(f'  {struct:5s} {arm:5s} {ms:7.3f} ms/token  {tok_bytes / ms / 1e6:6.1f} GB/s  (min {min(tm[arm]):.3f}, max {max(tm[arm]):.3f})')
-    del to, tl
+        say(f'  {struct:5s} {arm:8s} {ms:7.3f} ms/token  {tok_bytes / ms / 1e6:6.1f} GB/s  (min {min(tm[arm]):.3f}, max {max(tm[arm]):.3f})')
+    del tapes, tl
 say('RESULT ' + ('PASS' if ok_all else 'FAIL'))
 if A.log:
     with open(A.log, 'a') as f: f.write('\n'.join(OUT) + '\n')
