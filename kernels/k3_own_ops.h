@@ -29,34 +29,65 @@ __device__ __forceinline__ void own_op_mv_a(const Seg & sg, int r0, int r1, int 
 //   Seg.out_f32 the matrix's total rows (Q6_K planes' strides)
 // A task = rows_per_task rows of the output (a multiple of 2 * 8: two rows per wave), never spanning two slots
 // (rows_per_task divides pad2). Ids are clamped to [0, experts) on read (Seg.dep2p1 unused here; Seg.rs unused).
-enum { OWN_A16_1RT = 2, OWN_GROUPED = 4, OWN_X_PER_SLOT = 8 };
+enum { OWN_A16_1RT = 2, OWN_GROUPED = 4, OWN_X_PER_SLOT = 8, OWN_GU = 16 };
 #ifndef OWN_K3_RW
 #define OWN_K3_RW 2   // rows per wave in K3 (2: the activation loads shared by two rows)
 #endif
-// rows grow .. lim - 1 of the matrix (total rows: the Q6_K planes' strides); row grow + i -> out[i]. One body per format
-// for every K (the tiles' runtime-K form): three K-specialised bodies cost K3 69 spilled VGPRs.
-__device__ __forceinline__ void own_1rt_rows(const Seg & sg, int grow, int lim, int total, const _Float16 * x, float * out,
-                                             int lane) {
-    // own_rows_* write out[row0 + i]: hand them out - grow so that row grow + i lands in out[i]
+// rows grow .. lim - 1 of the matrix W (total rows: the Q6_K planes' strides): res[i] = row grow + i's sum, in every lane.
+// One body per format for every K (the tiles' runtime-K form): three K-specialised bodies cost K3 69 spilled VGPRs.
+__device__ __forceinline__ void own_1rt_acc(const uint8_t * W, const Seg & sg, int grow, int lim, int total,
+                                            const _Float16 * x, int lane, float * res) {
 #ifndef OWN_K3_NO_Q4   // (OWN_K3_NO_*: register-budget experiments only)
-    if (sg.work == OWN_Q4_K) own_rows_q4k_1rt<0, OWN_K3_RW, 1, 1>(sg.W, grow, lim, x, out - grow, lane, sg.K);
+    if (sg.work == OWN_Q4_K) own_rows_q4k_1rt<0, OWN_K3_RW, 1, 1>(W, grow, lim, x, nullptr, lane, sg.K, res);
 #endif
 #ifndef OWN_K3_NO_Q6
-    if (sg.work == OWN_Q6_K) own_rows_q6k_planes<0, OWN_K3_RW, 1, 1>(sg.W, total, grow, lim, x, out - grow, lane, sg.K);
+    if (sg.work == OWN_Q6_K) own_rows_q6k_planes<0, OWN_K3_RW, 1, 1>(W, total, grow, lim, x, nullptr, lane, sg.K, res);
 #endif
 }
+// OWN_GU (the qwen3moe modules): the segment computes TWO matrices of the same shape and format on the same input, the
+// experts' gate (Seg.W) and up (Seg.aux), and stores y16[row] = fp16(silu(gate . x) * (up . x)) (Seg.y fp16: the down
+// matvec's input; OP_OWN_SWIGLU16's expression on the two tiles' sums). One segment instead of three: 'up' no longer
+// queues behind 'gate' (every workgroup held a gate task: its first workgroup arrived 12-13 us after the router, XT
+// trace) and the SwiGLU's hand-off is gone. A wave takes its row pairs of the gate, then the same pairs of the up: ONE
+// loop over (matrix, pair) with one tile call. A matrix loop inside the row loop keeps the row's state live across the
+// first tile: 2 spilled VGPRs in k3_run, whether the gate sums wait in registers (5), as scalars (2) or in LDS (2).
+// The gate sums wait in LDS, indexed by the row mod OWN_GU_RPT (rows_per_task <= OWN_GU_RPT, a multiple of 16: host-checked).
+enum { OWN_GU_RPT = 64 };
+__shared__ float OWN_GU_G[OWN_GU_RPT];   // (lane 0 of the wave that owns a row writes and reads its slot)
 __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, int lane) {
     const bool grouped = sg.pad1 & OWN_GROUPED, per_slot = sg.pad1 & OWN_X_PER_SLOT;
-    const int r0 = t * sg.rows_per_task, r1 = min(sg.N, r0 + sg.rows_per_task);
+#ifdef K3_OWN_Q3M
+    const bool gu = sg.pad1 & OWN_GU;
+#else
+    const bool gu = false;
+#endif
+    const int rpt = sg.rows_per_task, r0 = t * rpt, r1 = min(sg.N, r0 + rpt);
     const int re = grouped ? sg.pad2 : sg.N, total = sg.out_f32;
-    for (int row = r0 + OWN_K3_RW * wave; row < r1; row += 8 * OWN_K3_RW) {   // (8 waves x OWN_K3_RW rows)
+    // it < 0: the gate's pairs (OWN_GU only), it >= 0: the up's, or the one matrix's. One bound for both forms: a
+    // separate trip count (2 rpt | rpt) is one more value live across the tile (1 spilled VGPR in the _trace build)
+    for (int it = OWN_K3_RW * wave - (gu ? rpt : 0); it < rpt; it += 8 * OWN_K3_RW) {   // (8 waves x OWN_K3_RW rows)
+        const bool m = gu && it >= 0;                                  // (the second matrix)
+        const int row = r0 + (it < 0 ? it + rpt : it);
+        if (row >= r1) continue;
         const int slot = grouped ? row / re : 0, r = row - slot * re;
         int e = grouped ? (int)__builtin_amdgcn_readfirstlane(((const int *)sg.asum)[slot]) : 0;
         e = min(max(e, 0), total / re - 1);                           // (ids clamped to the matrix's experts)
         const int grow = e * re + r, lim = e * re + min(re, r + min(OWN_K3_RW, r1 - row));
         const _Float16 * x = (const _Float16 *)sg.a + (per_slot ? (size_t)slot * sg.K : 0);
-        float * out = (float *)sg.y + row;                            // (= y[slot * re + r])
-        own_1rt_rows(sg, grow, lim, total, x, out, lane);
+        float res[OWN_K3_RW];
+        own_1rt_acc(m ? (const uint8_t *)sg.aux : sg.W, sg, grow, lim, total, x, lane, res);
+        if (lane == 0) {
+#pragma unroll
+            for (int i = 0; i < OWN_K3_RW; i++) {
+                if (grow + i >= lim) continue;
+                if (!gu) ((float *)sg.y)[row + i] = res[i];          // (= y[slot * re + r + i])
+                else if (!m) OWN_GU_G[(row + i) & (OWN_GU_RPT - 1)] = res[i];   // (a task's rows: distinct mod OWN_GU_RPT)
+                else {
+                    const float gv = OWN_GU_G[(row + i) & (OWN_GU_RPT - 1)];
+                    ((_Float16 *)sg.y)[row + i] = (_Float16)(gv / (1.0f + expf(-gv)) * res[i]);
+                }
+            }
+        }
     }
 }
 __device__ __forceinline__ void own_op_mv(const Seg & sg, int t) {

@@ -1,21 +1,22 @@
 """Q3MoEOne tape forms A/B on one engine's weights and KV caches (engine/q3moe_one.py): the same token sequence through
 each form at the same positions (each form its own caches would differ: so one form runs a sequence, the caches are
 reset by position, then the other), logits compared bitwise per position (G-self), then decode speed interleaved token
-by token at different positions (median GPU time).
-  tools/guard.sh LOG 900 python -I benchmarks/q3moe_ab.py GGUF [--tokens 64]
+by token at different positions (median GPU time; --rounds rounds).
+  tools/guard.sh LOG 900 python -I benchmarks/q3moe_ab.py GGUF [--tokens 64] [--rounds 3]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
 import torch
 from caminus.engine.q3moe_one import Q3MoEOne
-ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--tokens', type=int, default=64); A = ap.parse_args()
+ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--tokens', type=int, default=64)
+ap.add_argument('--rounds', type=int, default=3, help='speed rounds (each: every form, interleaved token by token)'); A = ap.parse_args()
 print(torch.cuda.get_device_name(0), flush=True)
-ARMS = (('3-stage/16', False, 16), ('fused/16', True, 16), ('fused/auto', True, 'auto'))
-eng = Q3MoEOne(A.gguf, max_ctx=2 * A.tokens * len(ARMS) + 64, fused=ARMS[0][1], rpt=ARMS[0][2])
+ARMS = (('fused', dict(gu=False)), ('fused+gu', dict(gu=True)))   # (name, Q3MoEOne tape options); the first is the base
+eng = Q3MoEOne(A.gguf, max_ctx=2 * A.tokens * len(ARMS) + 64, **ARMS[0][1])
 forms = {ARMS[0][0]: (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos)}
-for name, fused, rpt in ARMS[1:]:
-    eng.fused, eng.rpt = fused, rpt
+for name, opt in ARMS[1:]:
+    for k, v in opt.items(): setattr(eng, k, v)
     with torch.cuda.device(eng.dev): eng._build_tape()
     forms[name] = (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos)
 print('rows per task:', eng.RPT, flush=True)
@@ -40,13 +41,17 @@ for name in list(forms)[1:]:
     d = [float(np.abs(a['logits'].astype(np.float64) - b['logits'].astype(np.float64)).max()) for a, b in zip(out[BASE], out[name])]
     t1 = sum(int(a['logits'].argmax()) == int(b['logits'].argmax()) for a, b in zip(out[BASE], out[name]))
     print(f"  {name} vs {BASE}: {'bitwise' if eq else 'not bitwise'}; max |d logits| pos 0 {d[0]:.3e}, all {max(d):.3e}; top-1 equal {t1} / {len(seq)}", flush=True)
-# (2) speed, interleaved
-ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]; tm = {k: [] for k in forms}; tok = 785
-eng.reset()
-for i in range(A.tokens):
-    for k in forms:
-        use(k); ev[0].record(); lg = eng.step(tok); ev[1].record(); torch.cuda.synchronize()
-        tm[k].append(ev[0].elapsed_time(ev[1])); tok = int(torch.argmax(lg))
-for k, t in tm.items():
-    t = t[8:]; print(f'  {k:11s} {np.median(t):.3f} ms/token = {1e3 / np.median(t):.1f} tok/s (p10 {np.percentile(t, 10):.3f}, p90 {np.percentile(t, 90):.3f})')
+# (2) speed, interleaved token by token; A.rounds rounds, each from position 0 (the median of the rounds' medians)
+ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]; med = {k: [] for k in forms}
+for rd in range(A.rounds):
+    tm = {k: [] for k in forms}; tok = 785; eng.reset()
+    for i in range(A.tokens):
+        for k in forms:
+            use(k); ev[0].record(); lg = eng.step(tok); ev[1].record(); torch.cuda.synchronize()
+            tm[k].append(ev[0].elapsed_time(ev[1])); tok = int(torch.argmax(lg))
+    for k, t in tm.items(): med[k].append(float(np.median(t[8:])))
+    print(f'  round {rd}: ' + ', '.join(f'{k} {med[k][-1]:.3f}' for k in forms) + ' ms/token', flush=True)
+for k in forms:
+    m = float(np.median(med[k]))
+    print(f'  {k:11s} {m:.3f} ms/token = {1e3 / m:.1f} tok/s (median of {A.rounds} rounds; min {min(med[k]):.3f}, max {max(med[k]):.3f})')
 print('RESULT DONE')

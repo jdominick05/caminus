@@ -26,7 +26,7 @@ MODULE = 'k3_gguf_q3m_own'
 
 
 class Q3MoEOne:
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None):
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=MODULE, fused=True, rpt=16, per_wgp=None, gu=True):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -45,6 +45,7 @@ class Q3MoEOne:
         self.dev, self.max_ctx, self.limit_us, self.module, self.fused = int(device), max_ctx, limit_us, module, fused
         self.rpt = rpt   # rows per matvec task: 'auto' = each stage's tasks fit the resident grid once, or a number
         self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid; the grid tests set 3 / 6 / 7)
+        self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
         self.emb = F.T['token_embd.weight']
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
@@ -159,9 +160,14 @@ class Q3MoEOne:
             n2 = E.own_add_rms16(s['x'], d['ffn_norm'], s['h'], s['h16'], self.eps, d=s['o'], slots=1, dep=o_)
             rl = E.f32_mv(d['router'], s['h'], s['logit'], dep=n2)
             ro = E.router(s['logit'], KU, s['ids'], s['wts'], dep=rl)
-            g_ = mv(d['ffn_gate_exps'], s['h16'], s['g'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF)
-            u_ = mv(d['ffn_up_exps'], s['h16'], s['u'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF)
-            sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
+            if self.gu:
+                assert d['ffn_gate_exps'][:3] == d['ffn_up_exps'][:3], 'gate and up: one shape and format'
+                sw = mv(d['ffn_gate_exps'], s['h16'], s['a16'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF,
+                        up=d['ffn_up_exps'][3])
+            else:
+                g_ = mv(d['ffn_gate_exps'], s['h16'], s['g'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF)
+                u_ = mv(d['ffn_up_exps'], s['h16'], s['u'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF)
+                sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             prev = mv(d['ffn_down_exps'], s['a16'], s['d'], sw, rpt='down', ids=s['ids'], total_rows=self.n_exp * D, x_per_slot=True)
         nf = E.own_add_rms16(s['x'], self.out_norm, s['h'], s['h16'], self.eps, d=s['d'], slots=KU, w=s['wts'], dep=prev)
         mv(self.head, s['h16'], s['logits'], nf, rpt='head')

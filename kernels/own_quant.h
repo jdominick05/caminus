@@ -271,7 +271,8 @@ __device__ __forceinline__ float sum16h(const u32x4_t & xa, const u32x4_t & xb) 
 template <int K, int RW, int UP = 2, int UNR = 64>
 __device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W, int row0, int nrows,
                                                  const _Float16 * __restrict__ x16, float * __restrict__ out, int lane,
-                                                 int Kr = K) {   // (K = 0: the runtime Kr, as own_rows_q6k_planes)
+                                                 int Kr = K, float * res = nullptr) {   // (K = 0: the runtime Kr; res: the
+                                                 // rows' sums are returned in res[RW] (every lane) and nothing is stored)
     const int NB = (K ? K : Kr) / 256, NUNITS = NB * 8, NU = (NUNITS + 31) / 32;
     const size_t RB = (size_t)NB * 144;
     float acc[RW];
@@ -339,7 +340,8 @@ __device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W,
 #pragma unroll
     for (int r = 0; r < RW; r++) {
         const float s = wave_sum(acc[r]);
-        if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
+        if (res) res[r] = s;
+        else if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
     }
 }
 
@@ -358,7 +360,7 @@ typedef uint32_t u32x2_t __attribute__((ext_vector_type(2)));
 template <int K, int RW, int UP = 1, int UNR = 64>   // (UNR: as own_rows_q4k_1rt)
 __device__ __forceinline__ void own_rows_q6k_planes(const uint8_t * __restrict__ Wm, int nrows_total, int row0, int nrows,
                                                     const _Float16 * __restrict__ x16, float * __restrict__ out, int lane,
-                                                    int Kr = K) {
+                                                    int Kr = K, float * res = nullptr) {   // (res: as own_rows_q4k_1rt)
     const int NB = (K ? K : Kr) / 256, NUNITS = NB * 8, NU = (NUNITS + 31) / 32;
     const uint8_t * A = Wm;
     const uint8_t * B = Wm + (size_t)nrows_total * NB * 192;
@@ -444,6 +446,7 @@ __device__ __forceinline__ void own_rows_q6k_planes(const uint8_t * __restrict__
 #pragma unroll
     for (int r = 0; r < RW; r++) {
         const float s = wave_sum(acc[r]);
-        if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
+        if (res) res[r] = s;
+        else if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
     }
 }
