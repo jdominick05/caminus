@@ -60,6 +60,7 @@ DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_
 OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
 OP_OWN_MV = 44     # = kernels/k3_own_ops.h: Caminus's own quantized matvec (the *_own modules only; spec-own-quant.md)
 OP_OWN_F16 = 45    # = kernels/k3_own_ops.h: fp32 -> fp16 (the one-round-trip tiles' activations)
+OP_OWN_SWIGLU16, OP_OWN_MOE_SUM = 46, 47   # = kernels/k3_own_ops.h: fp16(silu(g) * u); x += weighted sum of slots
 OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
 QSA_OPS = {OP_IDX_APPEND: 'IDX_APPEND', OP_QSA_SCORE: 'SCORE', OP_QSA_SELECT: 'SELECT', OP_ATTN_SEL: 'ATTN_SEL', OP_QSA_PSEL: 'PSEL'}
 QSA_PSEL_H1, QSA_PSEL_H2, QSA_PSEL_FILTER, QSA_PSEL_FINISH, QSA_PSEL_ZERO = 0, 1, 2, 3, 4   # (Seg.pad1: the phase)
@@ -84,6 +85,9 @@ Q35H_MODULES = ('k3_gguf_q35h', 'k3_gguf_q35h_mt', 'k3_gguf_q35h_trace')
 Q35D_MODULES = ('k3_gguf_q35d', 'k3_gguf_q35d_mt')   # the dense qwen35 line (AREX-2): one card; _mt: T > 1 (verify passes)   # (_trace: K3_TRACE timestamps, measurement only)
 Q35G_MODULES = ('k3_gguf_q35g', 'k3_gguf_q35g_mt')   # the 2-bit GSQ checkpoint (kernels/k3_gguf_q35g.hip)
 OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (kernels/k3_gguf_q35d_own.hip; T = 1 only)
+# qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
+# engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
+Q3M_MODULES = ('k3_gguf_q3m_own',)
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
@@ -145,8 +149,10 @@ OWN_FMT, OWN_ACT = {'Q6_K': 2, 'Q4_K': 4, 'Q8_0': 3}, {'a32': 0, 'a16f': 1}
 # the one-round-trip tiles (Engine.own_matvec_1rt): pad1 = OWN_A16_1RT | OWN_GROUPED | OWN_X_PER_SLOT; Q4_K and Q6_K (planes)
 OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT = 2, 4, 8
 OWN_1RT_FMT = ('Q4_K', 'Q6_K')
-MODULE_CAPS.update({m: CAPS_Q35D | {('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}
-                    | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT} | {('OWN_F16', '-')} for m in OWN_MODULES})
+_CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT}
+             | {('OWN_F16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_MOE_SUM', '-')})
+MODULE_CAPS.update({m: CAPS_Q35D | _CAPS_OWN for m in OWN_MODULES})
+MODULE_CAPS.update({m: frozenset({('MV', 'Q4_K'), ('MV', 'Q6_K'), ('F32_MV', 'F32')}) | _Q8_1 | _CAPS_OWN for m in Q3M_MODULES})
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -160,6 +166,8 @@ def seg_kind(sg):
     if sg.op == OP_F32_MV: return ('F32_MV', 'F32')
     if sg.op == OP_BF16_MV: return ('BF16_MV', 'BF16')
     if sg.op == OP_OWN_F16: return ('OWN_F16', '-')
+    if sg.op == OP_OWN_SWIGLU16: return ('OWN_SWIGLU16', '-')
+    if sg.op == OP_OWN_MOE_SUM: return ('OWN_MOE_SUM', '-')
     if sg.op == OP_OWN_MV:
         a = 'a16_1rt' if sg.pad1 & OWN_A16_1RT and sg.pad1 < 16 else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}')
         return ('OWN_MV', f"{GG_FMT_NAME.get(sg.work, f'?{sg.work}') if sg.work in OWN_FMT.values() else f'?{sg.work}'}/{a}")
@@ -517,6 +525,22 @@ class Engine:
         self.keep += [x, out]
         self.segs.append(Seg(OP_OWN_F16, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None, None, x.data_ptr(),
                              None, out.data_ptr(), 0.0, n, 0, 0, 0, team, 0, 0))
+        return len(self.segs) - 1
+
+    def own_swiglu16(self, g, u, y16, rows_per_task=1024, dep=-1, team=-1):
+        """y16 fp16 [n] = silu(g) * u (g, u fp32 [n]: the gate / up matvecs' outputs)"""
+        n = g.numel(); assert u.numel() == n and y16.dtype == torch.float16 and y16.numel() >= n
+        self.keep += [g, u, y16]
+        self.segs.append(Seg(OP_OWN_SWIGLU16, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, u.data_ptr(), None,
+                             g.data_ptr(), None, y16.data_ptr(), 0.0, n, 0, 0, 0, team, 0, 0))
+        return len(self.segs) - 1
+
+    def own_moe_sum(self, d, x, slots=1, w=None, rows_per_task=1024, dep=-1, team=-1):
+        """x [n] += sum over slots s of w[s] * d[s * n:(s + 1) * n] (fma in slot order; w None: weights 1, slots 1 = x += d)"""
+        n = x.numel(); assert d.numel() >= slots * n and (w is None or w.numel() >= slots) and 1 <= slots <= 64
+        self.keep += [d, x] + ([w] if w is not None else [])
+        self.segs.append(Seg(OP_OWN_MOE_SUM, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None,
+                             None if w is None else w.data_ptr(), d.data_ptr(), None, x.data_ptr(), 0.0, n, 0, 0, 0, team, slots, 0))
         return len(self.segs) - 1
 
     def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1):
