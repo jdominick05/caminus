@@ -77,7 +77,8 @@ llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-
 ## Documentation
 
 - **Use Caminus:** [quickstart](docs/quickstart.md) · [the panel](docs/panel.md) · [models](docs/models.md) ·
-  [hardware](docs/hardware.md) · [harnesses](docs/harnesses.md) · [troubleshooting](docs/troubleshooting.md) ·
+  [hardware](docs/hardware.md) · [harnesses](docs/harnesses.md) · [the advisor](docs/advisor.md) ·
+  [troubleshooting](docs/troubleshooting.md) ·
   [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [what changed](CHANGELOG.md)
 - **Contribute:** [CONTRIBUTING.md](CONTRIBUTING.md) · [how it works](docs/dev/architecture.md) ·
   [building from source](docs/dev/building.md) · [testing](docs/dev/testing.md)

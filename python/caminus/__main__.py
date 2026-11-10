@@ -5,6 +5,8 @@
   ps        the running servers and the cards; stop NAME | --all, restart NAME, logs NAME [-f], top [NAME]
   panel     the control panel (a terminal UI: basic and advanced layouts)
   qwen      Qwen Code on the running server, in Caminus's own Qwen home (qwen-code status | setup [--install])
+  advisor   the Qwen Code advisor add-on: a hosted or local model steers Qwen Code when it looks lost
+            (advisor setup [--local-only] | status | update | uninstall)
   serve     the OpenAI / Anthropic server in the foreground (runs itself under the guard; its log in
             ~/.local/state/caminus/serve.log)
   download  the model files from their Hugging Face repositories (resume, size and sha256 checks)
@@ -21,7 +23,7 @@ them). PyTorch is not a declared dependency: install the ROCm build (caminus.dev
 import sys
 
 COMMANDS = ('serve', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard', 'version',
-            'models', 'pull', 'start', 'stop', 'restart', 'ps', 'logs', 'top', 'panel', 'qwen-code', 'qwen')
+            'models', 'pull', 'start', 'stop', 'restart', 'ps', 'logs', 'top', 'panel', 'qwen-code', 'qwen', 'advisor')
 MANAGE = {'models': 'cmd_models', 'pull': 'cmd_pull', 'start': 'cmd_start', 'stop': 'cmd_stop', 'restart': 'cmd_restart',
           'ps': 'cmd_ps', 'logs': 'cmd_logs', 'top': 'cmd_top', 'panel': 'cmd_panel'}
 
@@ -61,6 +63,9 @@ def dispatch(cmd, rest):
     if cmd == 'qwen':
         from .cmd import qwen_code
         return qwen_code.launch(rest)
+    if cmd == 'advisor':
+        from .cmd import advisor
+        return advisor.main(rest)
     help_only = any(a in ('-h', '--help', '--options-json') for a in rest)   # (no torch, no guard: nothing is loaded)
     if cmd in ('serve', 'replay') and not help_only:
         from .device.torchcheck import prepare_runtime
