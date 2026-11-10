@@ -120,13 +120,15 @@ the arithmetic (an earlier build, 4.38 ms per token there):
 
 | Part | Time |
 |---|---|
-| Task structure: claims, dependency waits, publishes, with no loads and no arithmetic | 2.29 ms |
+| What is left with no loads and no arithmetic: the tape walk, each task's claim, the barriers, the result stores, the publishes | 2.29 ms |
 | Weight loads | 1.51 ms |
 | Arithmetic and activations | 0.57 ms |
 
-About half of a token is the hand-off between segments (432
-dependent stages in series, about 5 µs each). Decoding the quantized formats is the smallest part. At depth the attention's reads
-dominate and the share of the bound rises to 72 %.
+About half of a token is what its 432 dependent stages cost before they load or compute anything, about 5 µs each. That
+time is inside the stages, not between them: in a trace of one token (`benchmarks/q3moe_trace.py`, XT), the hand-off from
+a stage's last publish to the next stage's first workgroup past its wait is 0.1 to 0.5 µs, 0.1 ms over the whole token.
+Decoding the quantized formats is the smallest part. At depth the attention's reads dominate and the share of the bound
+rises to 72 %.
 
 ## Limits
 
