@@ -157,15 +157,20 @@ class Q3MoEOne:
             # the attention's norm, after the previous layer's experts are added to the residual (layer 0: no add)
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], self.eps, d=s['d'] if il else None,
                                  slots=KU if il else 0, w=s['wts'] if il else None, dep=prev)
-            q_ = mv(d['attn_q'], s['h16'], s['q'], n1)
             if self.attn_one:   # k | v into one buffer; the attention waits for q and (through a no-op join) k and v
+                # v and k before q: workgroups claim in tape order, the first done with the previous stage first. With q
+                # first the last (slowest) ones got v, and the join's publish (2.3 us after v, + a wake-up) sat on the
+                # critical path; this way q's tail ends the stage and the join is long done (XT, interleaved, 3 rounds x
+                # 48 tokens, the same bits: 5.561 -> 5.495 ms per token).
                 M = nkv * hd
-                k_ = mv(d['attn_k'], s['h16'], s['kv'][:M], n1)
                 v_ = mv(d['attn_v'], s['h16'], s['kv'][M:], n1)
+                k_ = mv(d['attn_k'], s['h16'], s['kv'][:M], n1)
                 jn = E.also(E.nop(1, 0, dep=k_), v_)
+                q_ = mv(d['attn_q'], s['h16'], s['q'], n1)
                 c2 = E.also(E.own_attn(s['q'], s['kv'], d['qk_par'], d['cache'], self.pos, s['att16'], nh, nkv, hd,
-                                       1.0 / np.sqrt(hd), dep=jn), q_)
+                                       1.0 / np.sqrt(hd), dep=q_), jn)
             else:
+                q_ = mv(d['attn_q'], s['h16'], s['q'], n1)
                 k_ = mv(d['attn_k'], s['h16'], s['k'], n1)
                 v_ = mv(d['attn_v'], s['h16'], s['v'], n1)
                 kd = E.qk_nr(s['k'], hd, nkv, hd, d['k_norm'], self.pos, s['ko'], hd, self.theta_scale, self.eps, dep=k_)
