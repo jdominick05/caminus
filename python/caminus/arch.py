@@ -418,23 +418,26 @@ class OneCard(Arch):
 
 class Q3MoE(OneCard):
     """qwen3moe (Qwen3-30B-A3B): Q3MoEOne on one card, T = 1, Caminus's own code from the GGUF to the logits; no drafter yet;
-    the prompt runs as K3 passes (KPassOnly) until its own batched prefill lands. Full depth (context_length 40,960) fits the
-    24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
+    the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
+    (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
     engine = 'engine.q3moe_one:Q3MoEOne'
+    PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
     def auto_need(self, opt, slots, cards=None):
         from .engine.q3moe_one import Q3MoEOne
+        from .prefill import q3m
         path = opt['model']
         n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
         slot = Q3MoEOne.kv_pos_mib(path) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
-        need = lambda c: [Q3MoEOne.projection_mib(path, c) + (slots + 2) * slot]   # (the side rows: host memory)
+        pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
+        need = lambda c: [Q3MoEOne.projection_mib(path, c) + pf + (slots + 2) * slot]   # (the side rows: host memory)
         return n_ctx, [0], slot, need
 
     def build(self, opt, log=print, T=None):
         from .engine.q3moe_one import Q3MoEOne
-        from .prefill.kpass import KPassOnly
+        from .prefill.q3m import Q3MPrefill
         m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
-        return m, KPassOnly(m), None, None
+        return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 
 class TwoCardTP(Arch):

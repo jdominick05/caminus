@@ -52,6 +52,8 @@ CLAUDE.md imports this file.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`.
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
+  `q3m.py` (qwen3moe) is the exception: its own WMMA kernels (`kernels/q3m_prefill.hip`) are G-model gated, not
+  bitwise; chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see that file's attention).
 - `cache/prompt.py` + `cache/livestate.py`: the prompt cache owns the only live state (token log, (i0, commit), counters).
 - `serve/`: HTTP + SSE, template, tool parser, sampler; `EngineSession` declares the session contract
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
