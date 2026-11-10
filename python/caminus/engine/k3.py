@@ -59,6 +59,7 @@ DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_
 # (measures that module's cost on the trunk's tapes)
 OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT, OP_ATTN_SEL = 37, 38, 39, 40
 OP_OWN_MV = 44     # = kernels/k3_own_ops.h: Caminus's own quantized matvec (the *_own modules only; spec-own-quant.md)
+OP_OWN_F16 = 45    # = kernels/k3_own_ops.h: fp32 -> fp16 (the one-round-trip tiles' activations)
 OP_QSA_PSEL = 43   # = kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection over slices of the scores (Engine.qsa_select_par)
 QSA_OPS = {OP_IDX_APPEND: 'IDX_APPEND', OP_QSA_SCORE: 'SCORE', OP_QSA_SELECT: 'SELECT', OP_ATTN_SEL: 'ATTN_SEL', OP_QSA_PSEL: 'PSEL'}
 QSA_PSEL_H1, QSA_PSEL_H2, QSA_PSEL_FILTER, QSA_PSEL_FINISH, QSA_PSEL_ZERO = 0, 1, 2, 3, 4   # (Seg.pad1: the phase)
@@ -141,7 +142,11 @@ CAPS_Q35D = frozenset({('MV', f) for f in ('Q4_K', 'Q5_K', 'Q6_K', 'Q8_0')} | {(
 MODULE_CAPS.update({m: CAPS_Q35D for m in Q35D_MODULES})
 # OP_OWN_MV's formats and activation precisions (kernels/k3_own_ops.h): ('OWN_MV', '<format>/<a32 | a16f>')
 OWN_FMT, OWN_ACT = {'Q6_K': 2, 'Q4_K': 4, 'Q8_0': 3}, {'a32': 0, 'a16f': 1}
-MODULE_CAPS.update({m: CAPS_Q35D | {('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT} for m in OWN_MODULES})
+# the one-round-trip tiles (Engine.own_matvec_1rt): pad1 = OWN_A16_1RT | OWN_GROUPED | OWN_X_PER_SLOT; Q4_K and Q6_K (planes)
+OWN_A16_1RT, OWN_GROUPED, OWN_X_PER_SLOT = 2, 4, 8
+OWN_1RT_FMT = ('Q4_K', 'Q6_K')
+MODULE_CAPS.update({m: CAPS_Q35D | {('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}
+                    | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT} | {('OWN_F16', '-')} for m in OWN_MODULES})
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -154,8 +159,9 @@ def seg_kind(sg):
     if sg.op in _OP_KIND: return (_OP_KIND[sg.op], GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_F32_MV: return ('F32_MV', 'F32')
     if sg.op == OP_BF16_MV: return ('BF16_MV', 'BF16')
+    if sg.op == OP_OWN_F16: return ('OWN_F16', '-')
     if sg.op == OP_OWN_MV:
-        a = {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}')
+        a = 'a16_1rt' if sg.pad1 & OWN_A16_1RT and sg.pad1 < 16 else {v: k for k, v in OWN_ACT.items()}.get(sg.pad1, f'?{sg.pad1}')
         return ('OWN_MV', f"{GG_FMT_NAME.get(sg.work, f'?{sg.work}') if sg.work in OWN_FMT.values() else f'?{sg.work}'}/{a}")
     if sg.op == OP_GG_Q8_1: return ('Q8_1', Q8_1_MODE.get(sg.work, f'?{sg.work}'))
     if sg.op in DF_OPS: return ('DF', DF_OPS[sg.op])
@@ -475,6 +481,42 @@ class Engine:
         self.keep += [w, x, out]
         self.segs.append(Seg(OP_OWN_MV, (nrows + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
                              x.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_FMT[fmt], team, OWN_ACT[act], 0))
+        return len(self.segs) - 1
+
+    def own_matvec_1rt(self, w, fmt, rows, ncols, x16, out, ids=None, total_rows=None, x_per_slot=False, rows_per_task=16,
+                       dep=-1, team=-1):
+        """Caminus's own one-round-trip matvec tiles (OP_OWN_MV, kernels/own_quant.h own_rows_q4k_1rt / own_rows_q6k_planes in
+        their K3 form), fp16 activations x16. Q4_K: raw GGUF blocks; Q6_K: engine.own_layout.q6k_planes of the whole matrix.
+          ids None: out[r] = row r . x16, r < rows (w holds rows rows).
+          ids (int32 [S] on the device, clamped there to the matrix's experts): w is the whole expert tensor, total_rows =
+          experts * rows; slot s computes expert ids[s]'s rows into out[s * rows + r]; x16 is [ncols] shared, or [S, ncols]
+          with x_per_slot (each expert its own input). rows_per_task: a multiple of 16 (8 waves x 2 rows). T = 1 only."""
+        if self.T != 1: raise ValueError('own_matvec_1rt: T = 1 only')
+        if fmt not in OWN_1RT_FMT: raise ValueError(f'own_matvec_1rt: {fmt} ({OWN_1RT_FMT})')
+        if ncols % 256 or rows % 2 or rows_per_task % 16 or rows_per_task < 16:
+            raise ValueError(f'own_matvec_1rt: K {ncols} (a multiple of 256), rows {rows} (even), rows_per_task {rows_per_task}')
+        S = 1 if ids is None else ids.numel()
+        total = rows if ids is None else int(total_rows)
+        if total % rows: raise ValueError(f'own_matvec_1rt: total_rows {total} is not experts x {rows}')
+        bs = {'Q6_K': 210, 'Q4_K': 144}[fmt]
+        assert x16.dtype == torch.float16 and x16.numel() >= ncols * (S if x_per_slot else 1) and x16.data_ptr() % 16 == 0
+        assert out.dtype == torch.float32 and out.numel() >= S * rows
+        assert w.numel() * w.element_size() >= total * ncols // 256 * bs and w.data_ptr() % 16 == 0, (w.numel(), total, ncols)
+        if ids is not None: assert ids.dtype == torch.int32 and ids.is_cuda
+        pad1 = OWN_A16_1RT | (OWN_GROUPED if ids is not None else 0) | (OWN_X_PER_SLOT if x_per_slot else 0)
+        self.keep += [w, x16, out] + ([ids] if ids is not None else [])
+        N = S * rows
+        self.segs.append(Seg(OP_OWN_MV, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), None,
+                             x16.data_ptr(), None if ids is None else ids.data_ptr(), out.data_ptr(), 0.0, N, ncols, total,
+                             OWN_FMT[fmt], team, pad1, rows))
+        return len(self.segs) - 1
+
+    def own_f16(self, x, out, rows_per_task=1024, dep=-1, team=-1):
+        """out fp16 [n] = x fp32 [n] (round to nearest even)"""
+        n = x.numel(); assert x.dtype == torch.float32 and out.dtype == torch.float16 and out.numel() >= n
+        self.keep += [x, out]
+        self.segs.append(Seg(OP_OWN_F16, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None, None, x.data_ptr(),
+                             None, out.data_ptr(), 0.0, n, 0, 0, 0, team, 0, 0))
         return len(self.segs) - 1
 
     def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1):

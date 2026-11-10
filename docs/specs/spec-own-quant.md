@@ -101,8 +101,11 @@ existing modules keep identical code (`.text` / `.rodata`) until a pair moves.
 
 1. This spec; the gate tool (G-acc recording and comparison, the reference mode for G-model).
 2. GPU baseline on a non-display card: per-op time against bytes over bandwidth for the current llama.cpp-math modules.
-3. Own decode matvec, one pair at a time: MV Q6_K, MV Q4_K, MV Q8_0, then the rest of the dense pairs, then the MoE pairs.
-   int8 and fp16 activations measured side by side on the first pair before the choice is made for all.
+3. First target: Qwen3-30B-A3B (Q4_K_M: Q4_K and Q6_K only), every step from the GGUF file to the output token on
+   Caminus's own code, with the decode's matvecs at the bytes / bandwidth limit: the one-round-trip tiles (Q4_K in
+   place, Q6_K in a plane layout made at load), the 8 experts of a layer grouped into one op by device ids, fp16
+   activations. Then Swift 1.5's formats (IQ3_S, IQ4_XS, IQ3_XXS, Q4_K), then the other served models' pairs.
+   int8 and fp16 activations were measured side by side first: fp16 is 40x more accurate at the same speed.
 4. BF16 matvec in our own order.
 5. Prefill GEMMs, designed to reproduce the decode's per-row order where the hardware allows.
 6. Remove the ggml-cuda includes from the decode modules and prefill objects; update THIRD_PARTY.md.
