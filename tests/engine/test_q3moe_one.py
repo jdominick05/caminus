@@ -63,7 +63,7 @@ for i in range(len(ref)):
           f'KLD {kld:.2e}  max |dlogit| {np.abs(r - g).max():.3e}', flush=True)
 print(('PASS' if top_ok else 'FAIL') + ' top-1 equal at every position'); ok &= top_ok
 print(('PASS' if np.mean(klds) < 1e-3 else 'FAIL') + f' mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}) < 1e-3'); ok &= np.mean(klds) < 1e-3
-# G-self across grids: the tape at 3 / 7 / 8 workgroups per WGP gives the default grid's (6) logits bitwise (same weights,
+# G-self across grids: the tape at 3 / 7 / 8 workgroups per WGP gives the card's own grid's (q3moe_one.card_per_wgp) logits bitwise (same weights,
 # same KV caches rewritten position by position)
 def run_seq():
     eng.reset(); return [eng.step(t).clone() for t in seq[:len(ref)]]

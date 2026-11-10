@@ -12,7 +12,7 @@ from its Hugging Face repository and checks every file before using it.
 | `arex-2` | AREX-2 27B (a dense model) | 1, 24 GB | 17.2 GB | 41 tok/s | 928 tok/s |
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-coder-next` | Qwen3-Coder-Next 80B-A3B, IQ3_S | 2 | 29.7 GB | 136 tok/s | 135 tok/s |
-| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 246 tok/s | 6,493 tok/s |
+| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,493 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
@@ -28,8 +28,8 @@ where each number comes from and how llama.cpp does on the same cards.
 - **Planning:** `arex-2` is a dense 27B model, so it's slower. It's meant to plan while `qwen3.6` does the work, in the
   [brain / hands team](panel.md#the-brain--hands-team).
 - **`qwen3-30b-a3b`** is the fastest writer on one 24 GB card and the most exact (4-bit weights, no llama.cpp code on its
-  path). Its context is 40,960 tokens, the model's own limit, so it suits shorter work: 196 tok/s with 4K tokens of
-  context, 106 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
+  path). Its context is 40,960 tokens, the model's own limit, so it suits shorter work: 213 tok/s with 4K tokens of
+  context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
 - **`qwen3-coder-next`** writes fast but reads prompts slowly for now (a 32K-token prompt takes about six minutes). Use it
   for short prompts until its fast prompt reading lands.
 
