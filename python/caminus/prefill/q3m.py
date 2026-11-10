@@ -27,9 +27,10 @@ from ..engine import k3
 from . import q3m_ops
 from .driver import PrefillDriver, PrefillRefused
 
-# T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Set from tests/prefill/test_q3m_prefill.py
-# speed (K3 ~4.3 ms a token on the XTX at short depth)
-CROSSOVER = 16
+# T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Measured 11-10 (benchmarks/q3moe_prefill.py,
+# XTX, chunk 2048, from empty, medians of 5; K3 ~4.35 ms a token there): span 4: 28.6 ms (K3 17.4); 6: 29.4 (26.1); 8: 34.0
+# (34.8); 16: 37.6 (69.6); 32: 43.4 (139)
+CROSSOVER = 8
 ATTN_TP = 1 << 24          # token-positions per attention launch (tokens x the deepest position they read)
 ROUTER_FLOOR = 6.103515625e-5
 

@@ -7,6 +7,7 @@ flight directories only, then from outside, with a stdlib client (tools/serve_sm
             card), then the tool's result back as the next turn (the prompt cache: the live line continued)
   anthropic an Anthropic /v1/messages stream: a text block
   long      a ~8K-token prompt (the batched prefill): TTFT and prompt tok/s from the timings
+  needle    (--needle N) a passphrase at 37 % of a ~N-token prompt of synthetic records: the answer holds it; TTFT, prompt tok/s
   surface   /metrics (llamacpp: names and caminus: series), /caminus/status (one card, its name and guard line), no request
             text in the metrics / status / slots / flight files (a marker string), llm-top -once (--llm-top BIN)
   abort     a stream closed by the client after a few events, then a request: HTTP 200
@@ -83,6 +84,7 @@ def main():
     ap.add_argument('--max-ctx', default='auto');   # (auto: the server's default, the largest context that fits)
     ap.add_argument('--alias', default=None)
     ap.add_argument('--llm-top', default=None); ap.add_argument('--restart', action='store_true')
+    ap.add_argument('--needle', type=int, default=0, help='also a needle at 37 %% of a prompt of about this many tokens')
     a = ap.parse_args()
     a.cards = a.cards or len(str(a.card).split(','))
     a.scratch = S.safe_dir(a.scratch); os.makedirs(a.scratch, mode=0o700, exist_ok=True)
@@ -145,6 +147,20 @@ def main():
     check(r['status'] == 200 and m['content'].strip(), f'long: prompt {tm.get("prompt_n")} tokens at {tm.get("prompt_per_second")} tok/s, '
                                                        f'TTFT {tt * 1e3:.0f} ms (the first event), decode {tm.get("predicted_per_second")} tok/s')
     S.NUMBERS['long'] = dict(prompt_n=tm.get('prompt_n'), prompt_tps=tm.get('prompt_per_second'), ttft_ms=tt * 1e3)
+    if a.needle:   # a needle at 37 % of a ~a.needle-token prompt (serve_smoke's synthetic records): retrieved, TTFT, prompt speed
+        needle = 'amber-falcon-2291'
+        probe = S.records(44, 400, -1, needle)
+        cnt = S.request(port, 'POST', '/v1/messages/count_tokens', {'model': alias, 'messages': [{'role': 'user', 'content': probe}]},
+                        {'anthropic-version': '2023-06-01', 'x-api-key': 'dummy'})
+        per = (cnt.get('json') or {}).get('input_tokens', 12000) / 400.0
+        n = int((a.needle - 200) / per); at = int(n * 0.37)
+        text = S.records(44, n, at, needle) + f'\n\nWhich passphrase is stated in record {at:06d}? Answer with the passphrase only.'
+        r, m = chat(port, f'{alias}-nothink', [{'role': 'user', 'content': text}], temperature=0, max_tokens=24)
+        tm = m.get('timings') or {}; tt = (r['t_first'] or r['t_end']) - r['t_send']; ans = m.get('content', '')
+        check(r['status'] == 200 and needle in ans, f'needle: prompt {tm.get("prompt_n")} tokens (record {at} of {n}) at '
+              f'{tm.get("prompt_per_second")} tok/s, TTFT {tt * 1e3:.0f} ms, decode {tm.get("predicted_per_second")} tok/s; answer {ans[:40]!r}')
+        S.NUMBERS['needle'] = dict(prompt_n=tm.get('prompt_n'), prompt_tps=tm.get('prompt_per_second'), ttft_ms=tt * 1e3,
+                                   decode_tps=tm.get('predicted_per_second'), found=needle in ans, answer=ans[:60])
     # the monitoring surface
     st, met = S.get(port, '/metrics'); st2, status = S.get(port, '/caminus/status'); st3, slots = S.get(port, '/slots')
     cards = (status or {}).get('cards') if isinstance(status, dict) else None
