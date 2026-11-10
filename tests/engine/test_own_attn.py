@@ -9,6 +9,7 @@ New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
+from caminus.device import capacity
 from caminus.engine import k3
 ap = argparse.ArgumentParser()
 ap.add_argument('--positions', type=int, default=660); ap.add_argument('--module', default='k3_gguf_q3m_own')
@@ -16,6 +17,9 @@ A = ap.parse_args()
 nh, nkv, hd = 32, 4, 128                       # qwen3moe's attention: 32 query heads, 4 kv heads, head dim 128
 M, CTX = nkv * hd, A.positions
 g = torch.Generator().manual_seed(7)
+# two forms, each with its own cache (f16 rows, 2 KiB per position) and under 1 MiB of rows, and the HIP context
+need_mib = 2 * (CTX * 2 * M * 2 / 2 ** 20 + 1) + 256
+capacity.check([0], [need_mib], f'test_own_attn ({CTX} positions: {need_mib:.0f} MiB projected)')
 B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
 qn = (torch.rand(hd, generator=g) * 2 + 0.5).cuda(); kn = (torch.rand(hd, generator=g) * 2 + 0.5).cuda()
 ts = float(np.float32(1e6) ** np.float32(-2.0 / hd)); eps = 1e-6; scale = 1.0 / np.sqrt(hd)

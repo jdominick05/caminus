@@ -8,13 +8,15 @@ Checks, per position:
     rounding margin (the split changes only the summation order);
   - determinism: a second run, and engines at other grids (K3_PER_WGP 3 / 7 workgroups per WGP), give the same bits.
 Positions cover the split layout's edges (npos at multiples of 32 and of lmin, one split / several, the last split
-holding a single position, the chunk edges 128 / 129) and depth (default up to 8,192; --deep adds 16K / 40K, which need
-the cache to fit: f16 rows 2 KiB per position, three copies).
+holding a single position, the chunk edges 128 / 129) and depth (default up to 8,192; --deep adds 16K / 40K). Every form
+keeps its own cache (f16 rows, 2 KiB per position): the peak is projected from the arguments and checked against the
+card's guard line before the first transfer (defaults: about 360 MiB, --deep: about 745 MiB).
   tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py [--module k3_q3m_lean] [--deep]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
+from caminus.device import capacity
 from caminus.engine import k3
 ap = argparse.ArgumentParser()
 ap.add_argument('--module', default='k3_q3m_lean'); ap.add_argument('--oracle-module', default='k3_gguf_q3m_own')
@@ -32,6 +34,14 @@ if A.every: POS = sorted(set(POS) | set(range(A.every)))
 CTX = max(POS) + 1
 g = torch.Generator().manual_seed(11)
 dev = 'cuda'
+GH = [int(x) for x in A.gh.split(',')]
+# one cache per form (the oracle, the reference split form, then every grid, head group and smaller split count below),
+# each form's scratch and q / k / v / output rows (under 1 MiB together), and the HIP context
+FORMS = 2 + len([w for w in A.grids.split(',') if w]) + len(GH) - 1 + len([x for x in (16, 4) if x < A.splits])
+CACHE_MIB = (CTX + k3.Engine.ATS_PAD) * 2 * M * 2 / 2 ** 20
+need_mib = FORMS * (CACHE_MIB + 1) + 256
+capacity.check([0], [need_mib], f'test_own_atts ({FORMS} forms x {CACHE_MIB:.0f} MiB of cache: {need_mib:.0f} MiB projected)')
+print(f'{FORMS} forms, {CACHE_MIB:.0f} MiB of cache each: {need_mib:.0f} MiB projected', flush=True)
 qn = (torch.rand(hd, generator=g) * 2 + 0.5); kn = (torch.rand(hd, generator=g) * 2 + 0.5)
 ts = float(np.float32(1e6) ** np.float32(-2.0 / hd)); eps = 1e-6; scale = 1.0 / np.sqrt(hd)
 par = torch.cat([qn, kn, torch.tensor([ts, eps], dtype=torch.float32)]).to(dev).contiguous()
@@ -77,7 +87,6 @@ def ref64(q, k, v, cache_np, p):
 
 
 u16 = lambda t: t.cpu().numpy().view(np.uint16)
-GH = [int(x) for x in A.gh.split(',')]
 EO, O = oracle(); ES, S = split()
 # the forms that must give the reference form's bits: other grids, other head groups (every position), and fewer splits
 # (16, 4: while npos <= S * lmin both layouts are L = lmin)
@@ -118,5 +127,8 @@ w = np.array([x[1:] for x in worst])
 check(np.all(w[:, 1] <= w[:, 0] * 1.10 + 2e-5), f'mean error vs float64 within 10 % of the oracle\'s at every position '
       f'(split {w[:, 1].mean():.3e} vs oracle {w[:, 0].mean():.3e} on average)')
 check(np.all(w[:, 3] <= w[:, 2] * 1.5 + 1e-3), f'max error vs float64 within the oracle\'s rounding (split {w[:, 3].max():.3e}, oracle {w[:, 2].max():.3e})')
+assert len(others) + 2 == FORMS, (len(others), FORMS)
+peak = torch.cuda.max_memory_reserved(0) / 2 ** 20
+check(peak <= need_mib, f'the allocator stayed under the projection ({peak:.0f} of {need_mib:.0f} MiB)')
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
