@@ -45,7 +45,9 @@ include = ["caminus", "caminus.*"]
 
 [tool.setuptools.package-data]
 caminus = ["hsaco/gfx1100/*.hsaco", "hsaco/gfx1100/provenance.json", "share/guard.sh", "share/caminus-panel",
-           "share/harness/qwen-code/brain-hands/BRAIN.md", "share/harness/qwen-code/brain-hands/agents/hands.md"]
+           "share/harness/qwen-code/brain-hands/BRAIN.md", "share/harness/qwen-code/brain-hands/agents/hands.md",
+           "share/harness/qwen-code/advisor/*.py", "share/harness/qwen-code/advisor/qwen_advisor/*.py",
+           "share/harness/qwen-code/advisor/commands/*.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "caminus.__version__" }

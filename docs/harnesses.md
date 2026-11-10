@@ -21,6 +21,11 @@ Caminus sizes each model's context to your cards, so it isn't always 262K. Every
 or with `caminus qwen`, Caminus sets Qwen Code's context window to what the running server actually holds, so Qwen Code
 compacts the conversation before it runs out of room.
 
+### The advisor (optional)
+
+When the model gets stuck, a second model (local or hosted) can send it a hint. `caminus advisor setup --local-only`
+sets it up with a model on your other card; see [the advisor](advisor.md).
+
 ## Any OpenAI- or Anthropic-compatible tool
 
 A running server answers on your own machine only:

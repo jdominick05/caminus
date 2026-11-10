@@ -61,6 +61,9 @@ CLAUDE.md imports this file.
 - `cmd/manage.py:top_config` carries monitor preferences into each server's generated config. Preserve the source file,
   resolve its relative paths before merging, and let the selected server determine its address and agent sessions.
 - `share/guard.sh` (linked as `tools/guard.sh`): the GPU guard, shipped in the package.
+- `share/harness/qwen-code/advisor/`: the Qwen Code advisor add-on (`caminus advisor`, docs/advisor.md), shipped as
+  package data and installed as a copy into `$XDG_DATA_HOME/qwen-advisor/app`. Its hook must always exit 0 and add text
+  to the newest message only (cache-safe); the local provider is standard library only. Tests: tests/harness/test_advisor.py.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.
 
