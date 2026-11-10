@@ -64,6 +64,10 @@ CLAUDE.md imports this file.
 - `share/harness/qwen-code/advisor/`: the Qwen Code advisor add-on (`caminus advisor`, docs/advisor.md), shipped as
   package data and installed as a copy into `$XDG_DATA_HOME/qwen-advisor/app`. Its hook must always exit 0 and add text
   to the newest message only (cache-safe); the local provider is standard library only. Tests: tests/harness/test_advisor.py.
+- `share/harness/qwen-code/context_note.py`: the context note, a PostToolBatch hook `caminus qwen-code setup` copies into
+  each Caminus Qwen home (on by default, `--context-note off`): after each tool batch, the tokens used and left before
+  Qwen Code's automatic compaction, from the transcript's usage record for that batch. Its thresholds mirror Qwen Code's
+  `computeThresholds`; it always exits 0. Tests: tests/harness/test_context_note.py.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.
 
