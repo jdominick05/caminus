@@ -1,7 +1,7 @@
 """caminus qwen-code status | setup, caminus qwen: Qwen Code against a Caminus server, in a Qwen home of Caminus's own.
 
   caminus qwen-code status [--json]                      installed? which version, which home, set up for which server
-  caminus qwen-code setup [--server NAME] [--install] [--home DIR] [--json]
+  caminus qwen-code setup [--server NAME] [--install] [--home DIR] [--context-note on|off] [--json]
   caminus qwen [--server NAME] [--model NAME] [qwen's own arguments...]
 
 The home is CAMINUS_QWEN_HOME, else ~/.config/caminus/qwen-home (the brain / hands team: ~/.config/caminus/qwen-home-bh):
@@ -16,11 +16,18 @@ that point at Caminus (envKey CAMINUS_API_KEY) are swapped, model.name / fastMod
 unset; everything else stays, and the old file is kept as settings.json.bak-<time> first. The team setup also writes the
 `hands` subagent (agents/hands.md) and the brain's policy (BRAIN.md) when they are missing.
 
+setup also registers the context note (share/harness/qwen-code/context_note.py, a PostToolBatch hook copied into the
+home's hooks/): after each batch of tool calls the model reads how many tokens it has used and how many are left before
+Qwen Code compacts the conversation, appended to the batch's last tool result (cache-safe). On by default;
+--context-note off removes it and is remembered (a file context-note.off in the home), --context-note on brings it back;
+other hooks (the advisor's) are untouched. CAMINUS_CONTEXT_NOTE=0 silences it for one session.
+
 --install puts Qwen Code PIN (the version these configs were written against) into Caminus's own npm prefix
 ($XDG_DATA_HOME/caminus/harness/qwen-code): your own Qwen Code install, if any, is not touched. It needs Node.js / npm."""
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +39,9 @@ from . import manage
 PIN = '0.26.9'
 PKG = '@qwen-code/qwen-code'
 SHARE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'share', 'harness', 'qwen-code')
+NOTE = 'caminus-context-note'      # the context note's hook entry name in settings.json
+NOTE_SRC = os.path.join(SHARE, 'context_note.py')
+NOTE_OFF = 'context-note.off'      # in a home: --context-note off was chosen there
 
 
 def prefix():
@@ -123,6 +133,52 @@ def merged(old, provs, main_id, fast_id, team=None):
     return new
 
 
+def note_on(home, choice=None):
+    """whether the context note is on for this home: choice 'on' / 'off' sets it (remembered), None keeps it (default on)"""
+    off = os.path.join(home, NOTE_OFF)
+    if choice == 'off':
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        open(off, 'w').close()
+    elif choice == 'on' and os.path.exists(off):
+        os.remove(off)
+    return not os.path.exists(off)
+
+
+def with_note(st, home, on):
+    """settings st with the context note's hook entry for this home written once (on) or removed (off); every other hook
+    stays. On, the hook script is copied into <home>/hooks first: Qwen Code never runs it from the package directory (a
+    removed package would leave a missing file, and python's exit 2 for it blocks the turn)"""
+    hooks = st.get('hooks') if isinstance(st.get('hooks'), dict) else {}
+    for ev in list(hooks):
+        if not isinstance(hooks[ev], list):
+            continue
+        kept = []
+        for g in hooks[ev]:
+            if isinstance(g, dict) and isinstance(g.get('hooks'), list) and g['hooks']:
+                hs = [h for h in g['hooks'] if not (isinstance(h, dict) and h.get('name') == NOTE)]
+                if hs:
+                    kept.append(dict(g, hooks=hs))
+            else:
+                kept.append(g)
+        if kept:
+            hooks[ev] = kept
+        else:
+            del hooks[ev]
+    if on:
+        dst = os.path.join(home, 'hooks', 'context_note.py')
+        os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+        shutil.copy2(NOTE_SRC, dst)
+        cmd = ' '.join(shlex.quote(x) for x in (sys.executable, '-I', dst, '--settings', os.path.join(home, 'settings.json')))
+        if not isinstance(hooks.get('PostToolBatch'), list):
+            hooks['PostToolBatch'] = []
+        hooks['PostToolBatch'].append({'hooks': [{'type': 'command', 'name': NOTE, 'command': cmd, 'timeout': 10}]})
+    if hooks:
+        st['hooks'] = hooks
+    else:
+        st.pop('hooks', None)
+    return st
+
+
 def write_settings(home, settings, say):
     os.makedirs(home, mode=0o700, exist_ok=True)
     os.chmod(home, 0o700)
@@ -140,7 +196,7 @@ def write_settings(home, settings, say):
     return p
 
 
-def setup(server=None, home=None, say=print):
+def setup(server=None, home=None, say=print, note=None):
     rs = running()
     if not rs:
         raise manage.ManageError('no Caminus server is running (caminus start MODEL): setup reads its model ids and context')
@@ -163,7 +219,7 @@ def setup(server=None, home=None, say=print):
         mp = ag.setdefault('maxParallelAgentsByModel', {})
         for i in ids_h:
             mp.setdefault(i, 1)
-        p = write_settings(h, st, say)
+        p = write_settings(h, with_note(st, h, note_on(h, note)), say)
         for rel in ('agents/hands.md', 'BRAIN.md'):
             src, dst = os.path.join(SHARE, 'brain-hands', rel), os.path.join(h, rel)
             if os.path.isfile(src) and not os.path.exists(dst):
@@ -177,6 +233,7 @@ def setup(server=None, home=None, say=print):
     provs, ids = providers(s)
     h = home or home_for(s)
     st = merged(read_settings(h), provs, ids[0], next((i for i in ids if i.endswith('-nothink')), ids[0]))
+    st = with_note(st, h, note_on(h, note))
     return f"set up for {s['name']} ({', '.join(ids)}) in {write_settings(h, st, say)}", h
 
 
@@ -210,7 +267,9 @@ def status():
         for s in rs:
             if f"http://127.0.0.1:{s['port']}/v1" in urls:
                 target = target or s['name']
+    hooks = json.dumps((read_settings(base_home()) or {}).get('hooks') or {})
     return dict(installed=bool(b), binary=b or '', version=version(b) if b else '', pinned=PIN, home=base_home(),
+                context_note=NOTE in hooks,
                 configured=target is not None or os.path.isfile(os.path.join(base_home(), 'settings.json')),
                 npm=bool(shutil.which('npm')), target=target or '')
 
@@ -221,6 +280,7 @@ def main(argv):
     ap.add_argument('--server')
     ap.add_argument('--home')
     ap.add_argument('--install', action='store_true')
+    ap.add_argument('--context-note', choices=('on', 'off'), help='the context-left line after each tool batch (default: on; remembered)')
     ap.add_argument('--json', action='store_true')
     a = ap.parse_args(argv)
     if a.what == 'status':
@@ -230,12 +290,13 @@ def main(argv):
         else:
             print(f"Qwen Code: {'installed ' + st['version'] + ' (' + st['binary'] + ')' if st['installed'] else 'not installed'}")
             print(f"home: {st['home']} ({'set up' + (' for ' + st['target'] if st['target'] else '') if st['configured'] else 'not set up'})")
+            print(f"context note: {'on' if st['context_note'] else 'off'} (caminus qwen-code setup --context-note on|off)")
         return 0
 
     def go(say):
         if a.install:
             install(say)
-        note, _ = setup(a.server, os.path.expanduser(a.home) if a.home else None, say)
+        note, _ = setup(a.server, os.path.expanduser(a.home) if a.home else None, say, note=a.context_note)
         return note
     return manage.run_action(a, go)
 

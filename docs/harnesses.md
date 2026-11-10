@@ -21,6 +21,23 @@ Caminus sizes each model's context to your cards, so it isn't always 262K. Every
 or with `caminus qwen`, Caminus sets Qwen Code's context window to what the running server actually holds, so Qwen Code
 compacts the conversation before it runs out of room.
 
+### The context note
+
+The model can't see how full its context is. So after each batch of tool calls, Caminus adds one line to the last tool
+result, like this:
+
+```text
+[context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
+```
+
+The model can then plan the rest of the task, finishing or writing notes before Qwen Code compacts the conversation. The
+line stays in the conversation, so the prompt cache keeps working. The numbers come from the model's last call plus a
+high estimate of the new tool output, so the room left is never overstated.
+
+It's on in Caminus's Qwen homes. To turn it off, run `caminus qwen-code setup --context-note off` (it stays off), or set
+`CAMINUS_CONTEXT_NOTE=0` for one session. Subagents don't get it. After updating Caminus, run `caminus qwen-code setup`
+once and restart Qwen Code.
+
 ### The advisor (optional)
 
 When the model gets stuck, a second model (local or hosted) can send it a hint. `caminus advisor setup --local-only`
