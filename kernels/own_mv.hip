@@ -44,3 +44,15 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_##FMT##_##MODE(const ui
 OWN_INST(q6_k)
 OWN_INST(q4_k)
 OWN_INST(q8_0)
+
+// the one-round-trip Q4_K tile at this model's K values (Qwen3-30B-A3B: 2048 = n_embd, 4096 = q heads x 128, 768 = the
+// experts' ffn), 2 rows per wave, fp16 activations
+#define OWN_Q4K_1RT(KK)                                                                                                     \
+extern "C" __global__ void __launch_bounds__(256) own_mv_q4_k_1rt_k##KK(const uint8_t * W, int nrows, const _Float16 * x16, \
+        float * out) {                                                                                                  \
+    const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * 2;                                                  \
+    if (row0 < nrows) own_rows_q4k_1rt<KK, 2>(W, row0, nrows, x16, out, threadIdx.x & 31);                               \
+}
+OWN_Q4K_1RT(2048)
+OWN_Q4K_1RT(4096)
+OWN_Q4K_1RT(768)

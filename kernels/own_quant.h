@@ -217,3 +217,97 @@ __device__ __forceinline__ void own_rows_q8_0(const uint8_t * __restrict__ W, in
     }
 }
 
+
+// ---- Q4_K, one dependent round trip per pass (the decode-floor tile's structure, from its measured lesson: loads that
+// wait on each other in series cost ~0.5 us each). A lane unit is 16 bytes of one block's quants: unit u = lane + 32 i,
+// block u / 8, part p = u % 8 -> chunk j = p / 2, half h = p % 2, quant bytes 16 + 32 j + 16 h of the block; its 16 low
+// nibbles are values 64 j + 16 h + (0 .. 15) (sub-block 2 j), its high nibbles the same + 32 (sub-block 2 j + 1). Every
+// load of a pass (each row's 16-byte header d | dmin | scales[12] and quant unit, the lane's fp16 activations) is issued
+// unconditionally, from a valid address, before any arithmetic; the 6-bit scale / min decode is a select, not a branch.
+// RW rows per wave, UP units per lane per pass (K = 2048: 2 units, one pass; 4096: two passes; 768: lanes 24-31 idle).
+// Activations: fp16 [K] (x16); sums of x per 16-value run in fp32 (v_dot2 with ones) for the min terms, shared by the rows.
+typedef uint32_t u32x4_t __attribute__((ext_vector_type(4)));
+__device__ __forceinline__ uint32_t q4k_byte(const u32x4_t & hd, int k) {   // scale byte k (0 .. 11) of a header
+    const uint32_t d = k < 4 ? hd.y : k < 8 ? hd.z : hd.w;                    // (selects: v_cndmask, no branch)
+    return (d >> (8 * (k & 3))) & 0xffu;
+}
+__device__ __forceinline__ void q4k_sm(const u32x4_t & hd, int s, float & sc, float & m) {   // sub-block s: scale, min
+    const uint32_t a = q4k_byte(hd, s & 7), b = q4k_byte(hd, s + 4), c = q4k_byte(hd, (s - 4) & 3);
+    const bool lo = s < 4;
+    sc = (float)(lo ? (a & 63u) : ((b & 0xfu) | ((c >> 6) << 4)));
+    m = (float)(lo ? (b & 63u) : ((b >> 4) | ((a >> 6) << 4)));
+}
+// sum over 16 quant nibbles (4 dwords, nibble n of dword w at shift sh) times 16 fp16 x values (2 u32x4) in fp32
+__device__ __forceinline__ float q4k_dot16(const u32x4_t & q, int sh, const u32x4_t & xa, const u32x4_t & xb) {
+    const h2_t off = {(_Float16)1024.0f, (_Float16)1024.0f};
+    const uint32_t qw[4] = {q.x, q.y, q.z, q.w}, xw[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
+    float s = 0.0f;
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t n = (qw[w] >> sh) & 0x0f0f0f0fu;                                // 4 nibbles as bytes
+        const uint32_t p01 = __builtin_amdgcn_perm(0u, n, 0x0c010c00u) | 0x64006400u;  // bytes 0, 1 -> fp16 1024 + q
+        const uint32_t p23 = __builtin_amdgcn_perm(0u, n, 0x0c030c02u) | 0x64006400u;
+        s = __builtin_amdgcn_fdot2(as_h2(p01) - off, as_h2(xw[2 * w]), s, false);
+        s = __builtin_amdgcn_fdot2(as_h2(p23) - off, as_h2(xw[2 * w + 1]), s, false);
+    }
+    return s;
+}
+__device__ __forceinline__ float sum16h(const u32x4_t & xa, const u32x4_t & xb) {
+    const h2_t one = {(_Float16)1.0f, (_Float16)1.0f};
+    const uint32_t xw[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
+    float s = 0.0f;
+#pragma unroll
+    for (int k = 0; k < 8; k++) s = __builtin_amdgcn_fdot2(as_h2(xw[k]), one, s, false);
+    return s;
+}
+template <int K, int RW, int UP = 2>
+__device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W, int row0, int nrows,
+                                                 const _Float16 * __restrict__ x16, float * __restrict__ out, int lane) {
+    constexpr int NB = K / 256, NUNITS = NB * 8, NU = (NUNITS + 31) / 32;
+    constexpr size_t RB = (size_t)NB * 144;
+    float acc[RW];
+#pragma unroll
+    for (int r = 0; r < RW; r++) acc[r] = 0.0f;
+#pragma unroll
+    for (int i0 = 0; i0 < NU; i0 += UP) {
+        u32x4_t hd[RW][UP], qs[RW][UP], xl[UP][2], xh[UP][2];
+#pragma unroll
+        for (int i = 0; i < UP; i++) {                       // every load of the pass, unconditionally
+            const int u = lane + 32 * (i0 + i), uu = (i0 + i < NU && u < NUNITS) ? u : 0;
+            const int b = uu >> 3, j = (uu & 7) >> 1, h = uu & 1;
+#pragma unroll
+            for (int r = 0; r < RW; r++) {
+                const uint8_t * blk = W + (size_t)min(row0 + r, nrows - 1) * RB + (size_t)b * 144;
+                hd[r][i] = *(const u32x4_t *)blk;
+                qs[r][i] = *(const u32x4_t *)(blk + 16 + 32 * j + 16 * h);
+            }
+            const _Float16 * xp = x16 + b * 256 + 64 * j + 16 * h;
+            xl[i][0] = *(const u32x4_t *)xp; xl[i][1] = *(const u32x4_t *)(xp + 8);
+            xh[i][0] = *(const u32x4_t *)(xp + 32); xh[i][1] = *(const u32x4_t *)(xp + 40);
+        }
+#pragma unroll
+        for (int i = 0; i < UP; i++) {
+            const int u = lane + 32 * (i0 + i);
+            if (i0 + i >= NU || u >= NUNITS) continue;
+            const int j = (u & 7) >> 1;
+            const float sxl = sum16h(xl[i][0], xl[i][1]), sxh = sum16h(xh[i][0], xh[i][1]);
+#pragma unroll
+            for (int r = 0; r < RW; r++) {
+                const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i].x & 0xffffu));
+                const float dm = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i].x >> 16));
+                float sc0, m0, sc1, m1;
+                q4k_sm(hd[r][i], 2 * j, sc0, m0); q4k_sm(hd[r][i], 2 * j + 1, sc1, m1);
+                float a = acc[r];
+                a = __builtin_fmaf(d * sc0, q4k_dot16(qs[r][i], 0, xl[i][0], xl[i][1]), a);
+                a = __builtin_fmaf(-dm * m0, sxl, a);
+                a = __builtin_fmaf(d * sc1, q4k_dot16(qs[r][i], 4, xh[i][0], xh[i][1]), a);
+                acc[r] = __builtin_fmaf(-dm * m1, sxh, a);
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < RW; r++) {
+        const float s = wave_sum(acc[r]);
+        if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
+    }
+}
