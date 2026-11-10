@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from .. import ggufio
-from ..device import capacity
+from ..device import capacity, hip
 from . import k3
 from .own_layout import q6k_planes
 
@@ -37,7 +37,8 @@ PER_WGP = 6   # workgroups per WGP (12 waves per SIMD of the 16 that fit): inter
 
 class Q3MoEOne:
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp=PER_WGP, gu=True, attn_batched=True, attn_one=True,
-                 attn_split=True, splits=ATS_SPLITS, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8):
+                 attn_split=True, splits=ATS_SPLITS, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8,
+                 link_keepalive=True):
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -55,6 +56,14 @@ class Q3MoEOne:
         if not isinstance(max_ctx, int) or not 1 <= max_ctx <= n_ctx: raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
         self.dev, self.max_ctx, self.limit_us, self.module, self.fused = int(device), max_ctx, limit_us, module, fused   # (module None: by the tape form)
         self.rpt = rpt   # rows per matvec task: 'auto' = each stage's tasks fit the resident grid once, or a number
+        # the fused tape: one more one-task segment beside the final norm whose buffers are host memory the card addresses
+        # (_tape_fused). A decode token is one launch of ~4 ms with no traffic between the host and the card; with PCIe
+        # ASPM L1 on the card's path the link sleeps meanwhile and the launch's completion then reaches the host ~0.2 ms
+        # late, on every token. The segment's loads and stores cross the link while the head runs (~0.3 ms, longer than
+        # the wake-up), so the link is awake when the launch ends. RX 7900 XTX, interleaved, 64 tokens x 5 rounds, the
+        # same bits: 4.279 -> 4.093 ms per token (one such segment per layer: 4.077; a host thread reading device memory
+        # instead: 4.09); RX 7900 XT (no L1 on its path): 4.734 -> 4.727
+        self.link_keepalive = bool(link_keepalive); self._ka = None
         self.per_wgp = per_wgp   # workgroups per WGP (None: the module's resident grid, 8; the grid tests set 3 / 7 / 8)
         self.gu = gu             # the fused tape: gate, up and the SwiGLU as one segment (False: three)
         self.attn_batched = attn_batched   # OP_ATTN_DEC's loads in batches (the same bits; False: one round trip each)
@@ -167,6 +176,16 @@ class Q3MoEOne:
         self.hstage = torch.zeros(2, dtype=torch.int32, pin_memory=True)
         self.dstage = B(2, torch.int32); self.tok, self.pos = self.dstage[0:1], self.dstage[1:2]
         assert sum(v.numel() * v.element_size() for v in s.values()) <= self.TAPE_MIB * 2 ** 20, 'TAPE_MIB'
+        if self.link_keepalive and self.fused and self._ka is None:
+            # 20 KB of pinned host memory, mapped once per engine and shared by every tape built on it; no VRAM. The
+            # same host-memory check as a host KV cache, before the allocation; refused, the tape runs without it
+            try: capacity.check_host_kv(10 * D)
+            except capacity.CapacityError as e:
+                self.link_keepalive = False
+                print(f'k3 qwen3moe: no link keep-alive segment ({e})', file=sys.stderr, flush=True)
+        if self.link_keepalive and self.fused and self._ka is None:
+            hm = hip.host_mapped(10 * D)
+            self._ka = (hm[:4 * D].view(torch.float32), hm[4 * D:8 * D].view(torch.float32), hm[8 * D:].view(torch.float16))
         E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=1, limit_us=self.limit_us)
         # (a touch of each workgroup's first task's weights before its dependency wait measured no gain: XT, interleaved,
         #  48 tokens: whole task 8.873, 16 KB 8.820, off 8.609 ms/token)
@@ -262,6 +281,8 @@ class Q3MoEOne:
                 sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             prev = mv(d['ffn_down_exps'], s['a16'], s['d'], sw, rpt='down', ids=s['ids'], total_rows=self.n_exp * D, x_per_slot=True)
         nf = E.own_add_rms16(s['x'], self.out_norm, s['h'], s['h16'], self.eps, d=s['d'], slots=KU, w=s['wts'], dep=prev)
+        if self.link_keepalive:   # (see __init__: nothing depends on it and nothing reads its norm)
+            self.ka_seg = E.own_add_rms16(self._ka[0], self.out_norm, self._ka[1], self._ka[2], self.eps, dep=prev)
         mv(self.head, s['h16'], s['logits'], nf, rpt='head')
         E.build(); self._server_buffers()
 

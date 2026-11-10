@@ -74,6 +74,20 @@ for pw in (3, 7, 8):
     gs_ok &= all(torch.equal(a, b) for a, b in zip(base, run_seq()))
 eng.per_wgp = pw0; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
 print(('PASS' if gs_ok else 'FAIL') + f' logits bitwise the default grid\'s ({pw0} per WGP) at 3 / 7 / 8 workgroups per WGP ({len(ref)} positions)'); ok &= gs_ok
+# the link keep-alive (one segment on host-mapped memory beside the final norm): the tape without it gives the same bits
+from caminus.device import hip
+eng.link_keepalive = False
+with torch.cuda.device(eng.dev): eng._build_tape()
+n_off = len(eng.E.segs); ka_ok = all(torch.equal(a, b) for a, b in zip(base, run_seq()))
+eng.link_keepalive = True; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
+ka_ok &= len(eng.E.segs) == n_off + 1 and eng.E.segs[eng.ka_seg].op == k3.OP_OWN_ADD_RMS16 and all(hip.is_host_mapped(t) for t in eng._ka)
+# ... and the segment runs: a pass turns host input x = 1 into its norm (rms 1, so h = the norm weights; fp16 beside it)
+eng._ka[0].fill_(1.0); eng._ka[1].zero_(); eng._ka[2].zero_(); eng.reset(); eng.step(seq[0])
+want = eng.out_norm.detach().float().cpu() / float(np.sqrt(1.0 + eng.eps))
+ka_run = bool(torch.allclose(eng._ka[1], want, rtol=1e-5, atol=1e-7)) and bool(torch.allclose(eng._ka[2].float(), want, rtol=2e-3, atol=1e-4))
+eng._ka[0].zero_()
+print(('PASS' if ka_ok else 'FAIL') + f' the link keep-alive: one segment more ({n_off} + 1) on host-mapped buffers; logits bitwise the tape without it'); ok &= ka_ok
+print(('PASS' if ka_run else 'FAIL') + ' the link keep-alive segment ran: the device wrote the norm of its host input into host memory'); ok &= ka_run
 # the engine's own greedy text, from the prompt
 eng.reset()
 for t in ids: lg = eng.step(t)
