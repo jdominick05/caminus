@@ -37,6 +37,17 @@ from caminus.engine.q3moe_one import Q3MoEOne
 print(torch.cuda.get_device_name(0), flush=True)
 t0 = time.time(); eng = Q3MoEOne(A.gguf, max_ctx=512); print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB)', flush=True)
 ok = True
+# the device embedding row (OP_OWN_EMB) bitwise our host decoder, on a spread of token ids
+from caminus import own_dequant
+from caminus.engine import k3
+ids_chk = [0, 1, 785, 6722, 9625, 151642, 151935]
+e2 = k3.Engine(module=eng.module); tk_d = torch.zeros(len(ids_chk), dtype=torch.int32, device='cuda')
+xs = torch.zeros(len(ids_chk), eng.D, device='cuda')
+for j, t in enumerate(ids_chk): tk_d[j] = t; e2.own_emb(eng.emb_dev, 'Q4_K', eng.vocab, eng.D, tk_d[j:j + 1], xs[j])
+e2.build().run(); torch.cuda.synchronize()
+same = all(np.array_equal(xs[j].cpu().numpy().view(np.uint32), own_dequant.rows(eng.emb, t, t + 1).reshape(-1).view(np.uint32))
+           for j, t in enumerate(ids_chk))
+print(('PASS' if same else 'FAIL') + f' device embedding rows bitwise the host decoder ({len(ids_chk)} tokens)'); ok &= same
 def lsm(v): v = v - v.max(); return v - np.log(np.exp(v).sum())
 klds, top_ok = [], True
 for i in range(len(ref)):
@@ -47,6 +58,17 @@ for i in range(len(ref)):
           f'KLD {kld:.2e}  max |dlogit| {np.abs(r - g).max():.3e}', flush=True)
 print(('PASS' if top_ok else 'FAIL') + ' top-1 equal at every position'); ok &= top_ok
 print(('PASS' if np.mean(klds) < 1e-3 else 'FAIL') + f' mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}) < 1e-3'); ok &= np.mean(klds) < 1e-3
+# G-self across grids: the tape at 3 / 6 / 7 workgroups per WGP gives the resident grid's logits bitwise (same weights, same
+# KV caches rewritten position by position)
+def run_seq():
+    eng.reset(); return [eng.step(t).clone() for t in seq[:len(ref)]]
+base = run_seq(); keep = (eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos); gs_ok = True
+for pw in (3, 6, 7):
+    eng.per_wgp = pw
+    with torch.cuda.device(eng.dev): eng._build_tape()
+    gs_ok &= all(torch.equal(a, b) for a, b in zip(base, run_seq()))
+eng.per_wgp = None; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
+print(('PASS' if gs_ok else 'FAIL') + f' logits bitwise the resident grid\'s at 3 / 6 / 7 workgroups per WGP ({len(ref)} positions)'); ok &= gs_ok
 # the engine's own greedy text, from the prompt
 eng.reset()
 for t in ids: lg = eng.step(t)

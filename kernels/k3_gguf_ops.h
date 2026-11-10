@@ -1999,6 +1999,10 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_OWN_F16) { own_op_f16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
     if (sg.op == OP_OWN_MOE_SUM) { own_op_moe_sum(sg, t); return true; }
+#ifdef K3_OWN_Q3M
+    if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg); return true; }
+#endif
 #endif
 #ifdef K3_GSQ
     if (sg.op == OP_BF16_MV) {

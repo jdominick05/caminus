@@ -92,3 +92,88 @@ __device__ __forceinline__ void own_op_moe_sum(const Seg & sg, int t) {
         x[i] += acc;
     }
 }
+#ifdef K3_OWN_Q3M   // the qwen3moe engine's ops (kernels/k3_gguf_q3m_own.hip): out of the other own module's register allocation
+// OP_OWN_EMB: x fp32 [N] = the Q4_K row tok of the embedding matrix W (raw GGUF blocks, Seg.K = row bytes), tok =
+// ((const int *)Seg.a)[0] clamped to [0, Seg.pad2) (the vocabulary). The arithmetic is caminus.own_dequant's, rounded
+// the same way (no fma: (d * sc) * q - dmin * m, each product and the difference rounded to fp32), so the device row is
+// bitwise the host decoder's. One task.
+enum { OP_OWN_EMB = 48 };
+__device__ __forceinline__ void own_op_emb(const Seg & sg) {
+    const int tok = min(max(((const int *)sg.a)[0], 0), sg.pad2 - 1);
+    const uint8_t * row = sg.W + (size_t)tok * sg.K;
+    float * x = (float *)sg.y;
+    for (int i = (int)K3TID; i < sg.N; i += blockDim.x) {
+        const uint8_t * blk = row + (size_t)(i >> 8) * 144;
+        const int j = i & 255, sb = j >> 5, l = j & 31, is = sb >> 1, hi = sb & 1;
+        const uint8_t * s = blk + 4;
+        const uint32_t sc = sb < 4 ? (s[sb] & 63u) : ((s[sb + 4] & 0xfu) | ((s[sb - 4] >> 6) << 4));
+        const uint32_t m = sb < 4 ? (s[sb + 4] & 63u) : ((s[sb + 4] >> 4) | ((s[sb] >> 6) << 4));
+        const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(blk[0] | (blk[1] << 8)));
+        const float dm = (float)__builtin_bit_cast(_Float16, (uint16_t)(blk[2] | (blk[3] << 8)));
+        const float q = (float)((blk[16 + is * 32 + l] >> (4 * hi)) & 15);
+        x[i] = __fsub_rn(__fmul_rn(__fmul_rn(d, (float)sc), q), __fmul_rn(dm, (float)m));
+    }
+}
+// OP_OWN_ADD_RMS16: one task (one workgroup) = the residual add, the RMS norm and the fp16 copy in one segment:
+//   x[i] += sum over slots s < pad1 of w[s] * d[s * N + i]   (fma in slot order from 0; pad1 = 0: no add; w nullptr: + d)
+//   h[i] = (x[i] * rsqrt(sum x^2 / N + eps)) * nw[i];   h16[i] = fp16(h[i])
+// Seg.a = d, Seg.gs = w (nullptr: weights 1), Seg.y = x (in / out), Seg.W = nw, Seg.asum = h (fp32), Seg.aux = h16,
+// Seg.rs = eps, Seg.N = the row length = 256 * NI, NI <= 8 (host-checked): a thread owns elements tid + 256 j.
+// Every load of a step is issued before its arithmetic (d: OWN_ADD_S slots x 8 elements per round trip, then x; nw
+// during the reduction; a slot past pad1 rereads the last one and is not added). Measured (XT, trace): the three ops this replaces
+// (OP_OWN_MOE_SUM, OP_RMS_MUL's general loop, OP_OWN_F16) ran one load per loop turn, ~0.35 us each in series: 6.4 +
+// 6.2 + 2.3 us; the same loops in one segment were no faster (7.15 vs 7.07 ms per token).
+enum { OP_OWN_ADD_RMS16 = 49 };
+#ifndef OWN_ADD_S
+#define OWN_ADD_S 1   // slots per round trip of the add (x 8 elements of loads in flight); 2 spilled k3_run (15 VGPRs), 4: 23
+#endif
+__device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
+    __shared__ float part[8];
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, S = sg.pad1, NI = N >> 8;
+    const float * d = (const float *)sg.a; const float * w = (const float *)sg.gs; const float * nw = (const float *)sg.W;
+    float * x = (float *)sg.y; float * h = (float *)sg.asum; _Float16 * h16 = (_Float16 *)sg.aux;
+    float acc[8], xv[8];
+#pragma unroll
+    for (int j = 0; j < 8; j++) acc[j] = 0.0f;
+#pragma unroll
+    for (int s0 = 0; s0 < 8; s0 += OWN_ADD_S) {
+        if (s0 >= S) continue;
+        float wv[OWN_ADD_S], dv[OWN_ADD_S][8];
+#pragma unroll
+        for (int c = 0; c < OWN_ADD_S; c++) {
+            const int sl = min(s0 + c, S - 1);
+            wv[c] = w ? w[sl] : 1.0f;
+#pragma unroll
+            for (int j = 0; j < 8; j++) dv[c][j] = d[(size_t)sl * N + tid + 256 * min(j, NI - 1)];
+        }
+        __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+        for (int c = 0; c < OWN_ADD_S; c++) {
+            if (s0 + c >= S) continue;
+#pragma unroll
+            for (int j = 0; j < 8; j++) acc[j] = w ? __builtin_fmaf(wv[c], dv[c][j], acc[j]) : acc[j] + dv[c][j];
+        }
+        __builtin_amdgcn_sched_barrier(0);
+    }
+#pragma unroll
+    for (int j = 0; j < 8; j++) xv[j] = x[tid + 256 * min(j, NI - 1)];
+    if (S > 0) {
+#pragma unroll
+        for (int j = 0; j < 8; j++) { xv[j] += acc[j]; if (j < NI) x[tid + 256 * j] = xv[j]; }
+    }
+    __builtin_amdgcn_sched_barrier(0);
+    float wn[8];
+#pragma unroll
+    for (int j = 0; j < 8; j++) wn[j] = nw[tid + 256 * min(j, NI - 1)];   // (in flight during the reduction below)
+    float ss = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 8; j++) if (j < NI) ss = __builtin_fmaf(xv[j], xv[j], ss);
+    ss = warp_reduce_sum<32>(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / N + sg.rs);
+#pragma unroll
+    for (int j = 0; j < 8; j++)
+        if (j < NI) { const float v = (xv[j] * scale) * wn[j]; h[tid + 256 * j] = v; h16[tid + 256 * j] = (_Float16)v; }
+    __syncthreads();
+}
+#endif

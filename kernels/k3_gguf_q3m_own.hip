@@ -4,6 +4,7 @@
 // 8 query heads per kv head) / F32 router matvec / router. No llama.cpp op runs in this model's tape; the GG matvec
 // formats below stay compiled only as the yardstick arm of the benchmarks (until the module drops the ggml headers).
 #define K3_OWN
+#define K3_OWN_Q3M
 #define K3_FMTS_MV GG_Q4_K, GG_Q6_K
 #define K3_FMTS_MOE_GU
 #define K3_FMTS_MOE_DOWN

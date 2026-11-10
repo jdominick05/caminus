@@ -33,6 +33,8 @@ ap.add_argument('--experts', type=int, default=32)
 ap.add_argument('--log', default=None)
 ap.add_argument('--rpt', nargs='+', default=['16'], help="own arms: rows per task (multiples of 16; the head keeps 64), or "
                 'auto<k>: about k tasks per workgroup in every segment')
+ap.add_argument('--timing-only', action='store_true', help='skip the bitwise / error checks and the llama.cpp arm '
+                '(a measurement build of the module, e.g. -DOWN_READONLY: the tiles with free arithmetic)')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
 MOD = 'k3_gguf_q35d_own'
@@ -115,6 +117,7 @@ for role in ('attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate_exps', 'ffn_
         il = first_layer(role, fmt)
         if il is not None: cases.append((role, fmt, F.T[f'blk.{il}.{role}.weight']))
 cases.append(('head', 'Q6_K', F.T['output.weight']))
+if A.timing_only: cases = []
 for role, fmt, t in cases:
     rows, K, E = dims(t); qt = GGMLQuantizationType[fmt]
     grouped = E > 1
@@ -232,11 +235,11 @@ ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 res = {}
 for struct in ('chain', 'free'):
     tapes = {f'own-{rpt}': tape_own(struct, int(rpt) if rpt.isdigit() else rpt) for rpt in A.rpt}
-    tl = [tape_llama(struct, picks[r]) for r in range(A.rounds + 1)]
-    tm = {k: [] for k in list(tapes) + ['llama']}
+    tl = [None if A.timing_only else tape_llama(struct, picks[r]) for r in range(A.rounds + 1)]
+    tm = {k: [] for k in list(tapes) + ([] if A.timing_only else ['llama'])}
     for r in range(A.rounds + 1):
         ids.copy_(torch.from_numpy(picks[r]))
-        for arm, tp in list(tapes.items()) + [('llama', tl[r])]:
+        for arm, tp in list(tapes.items()) + ([] if A.timing_only else [('llama', tl[r])]):
             torch.cuda.synchronize(); ev[0].record(); tp.run(); ev[1].record(); torch.cuda.synchronize()
             if r: tm[arm].append(ev[0].elapsed_time(ev[1]))
     for arm in tm:

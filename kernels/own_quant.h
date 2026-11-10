@@ -287,13 +287,33 @@ __device__ __forceinline__ void own_rows_q4k_1rt(const uint8_t * __restrict__ W,
 #pragma unroll
             for (int r = 0; r < RW; r++) {
                 const uint8_t * blk = W + (size_t)min(row0 + r, nrows - 1) * RB + (size_t)b * 144;
-                hd[r][i] = *(const u32x4_t *)blk;
                 qs[r][i] = *(const u32x4_t *)(blk + 16 + 32 * j + 16 * h);
+#if defined(OWN_READONLY) && OWN_READONLY >= 2   // (measurement: the quant bytes only, no header / activation loads)
+                hd[r][i] = qs[r][i];
+#else
+                hd[r][i] = *(const u32x4_t *)blk;
+#endif
             }
             const _Float16 * xp = x16 + b * 256 + 64 * j + 16 * h;
+#if defined(OWN_READONLY) && OWN_READONLY >= 2
+            xl[i][0] = xl[i][1] = xh[i][0] = xh[i][1] = qs[0][i]; (void)xp;
+#else
             xl[i][0] = *(const u32x4_t *)xp; xl[i][1] = *(const u32x4_t *)(xp + 8);
             xh[i][0] = *(const u32x4_t *)(xp + 32); xh[i][1] = *(const u32x4_t *)(xp + 40);
+#endif
         }
+#if defined(OWN_READONLY)   // measurement only (benchmarks: what the tile costs with free arithmetic): the same loads, folded by xor
+#pragma unroll
+        for (int i = 0; i < UP; i++) {
+            const u32x4_t xo = xl[i][0] ^ xl[i][1] ^ xh[i][0] ^ xh[i][1];
+#pragma unroll
+            for (int r = 0; r < RW; r++) {
+                const u32x4_t v = hd[r][i] ^ qs[r][i] ^ xo;
+                acc[r] += (float)((v.x ^ v.y ^ v.z ^ v.w) & 0xffu);
+            }
+        }
+        continue;
+#endif
 #pragma unroll
         for (int i = 0; i < UP; i++) {
             const int u = lane + 32 * (i0 + i);
@@ -364,12 +384,31 @@ __device__ __forceinline__ void own_rows_q6k_planes(const uint8_t * __restrict__
                 q0[r][i] = *(const u32x2_t *)(a + n * 64 + c8);
                 q1[r][i] = *(const u32x2_t *)(a + n * 64 + 32 + c8);
                 qh[r][i] = *(const u32x2_t *)(a + 128 + n * 32 + c8);
+#if defined(OWN_READONLY) && OWN_READONLY >= 2   // (as own_rows_q4k_1rt)
+                sc[r][i] = q0[r][i].x; dh[r][i] = (uint16_t)q0[r][i].y; (void)B; (void)C;
+            }
+#pragma unroll
+            for (int qd = 0; qd < 4; qd++) xv[i][qd] = (u32x4_t){q0[0][i].x, q0[0][i].y, q1[0][i].x, q1[0][i].y};
+#else
                 sc[r][i] = *(const uint32_t *)(B + rb * 16 + n * 8 + 4 * ((uu & 3) >> 1));
                 dh[r][i] = C[rb];
             }
 #pragma unroll
             for (int qd = 0; qd < 4; qd++) xv[i][qd] = *(const u32x4_t *)(x16 + b * 256 + n * 128 + qd * 32 + c8);
+#endif
         }
+#ifdef OWN_READONLY   // (as own_rows_q4k_1rt)
+#pragma unroll
+        for (int i = 0; i < UP; i++) {
+            const u32x4_t xo = xv[i][0] ^ xv[i][1] ^ xv[i][2] ^ xv[i][3];
+#pragma unroll
+            for (int r = 0; r < RW; r++) {
+                const u32x2_t v = q0[r][i] ^ q1[r][i] ^ qh[r][i];
+                acc[r] += (float)((v.x ^ v.y ^ sc[r][i] ^ dh[r][i] ^ xo.x ^ xo.y ^ xo.z ^ xo.w) & 0xffu);
+            }
+        }
+        continue;
+#endif
 #pragma unroll
         for (int i = 0; i < UP; i++) {
             const int u = lane + 32 * (i0 + i);
