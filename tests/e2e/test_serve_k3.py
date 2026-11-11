@@ -587,7 +587,12 @@ def stage_supersede(R, small):
 def stage_t1e(R, small):
     from caminus.serve import candsample as CS, sampler as S
     m, sess = R.m, R.sess
-    src = toks_of('d8192')[:1200]
+    try:
+        src = toks_of('d8192')[:1200]
+    except FileNotFoundError:   # (no stored long-context text: real text from this repository's docs, the same length)
+        text = ''.join(open(os.path.join(ROOT, 'docs', 'dev', f), encoding='utf-8').read() for f in ('engine-design.md', 'architecture.md'))
+        src = R.tok.encode(text)[:1200]
+        print(f'NOTE t1e: no $ARTIFACTS text; {len(src)} tokens of docs/dev/engine-design.md + architecture.md instead', flush=True)
     R.pc.reset()
     rng = np.random.default_rng(3)
     T = m.ntok; i0 = commit = 0; n_rows = n_cand = 0; bad = []

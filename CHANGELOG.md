@@ -26,6 +26,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   OpenAI-compatible server; `caminus advisor setup --local-only` installs nothing) or hosted (Anthropic or Mistral).
   `/advise` asks on demand. See [docs/advisor.md](docs/advisor.md).
 
+- **The sampler's candidates come from Caminus's own kernel.** Each row's largest logits (the top-k the sampler draws
+  from, and the raw logits of the penalty window) were picked with PyTorch's `torch.topk`; a Caminus kernel does it now
+  (`kernels/own_topk.hip`), with a fixed order among equal values, so reruns pick the same candidates. PyTorch still
+  allocates the GPU memory and loads the HIP runtime.
+
 ### Fixed
 
 - **The two-card check re-reads a PCIe link before refusing a card, and judges a link the driver has lowered at full
