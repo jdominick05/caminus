@@ -108,6 +108,8 @@ no prediction was reworded.
   the 8-bit-activation runs are made on the XT and the 4-bit files and the Q4_0 control on the RX 7900 XTX, each
   under its own guard; the reference tool's first run is the XT's. Arm A's logits are computed on both cards, and
   their distance is reported with the table: what the card itself adds to a distance.
+  Written before any logits exist: every distance is to arm R as computed on the XT. Where a prediction compares
+  an arm computed on the XTX with arm A (P1), A's number is the XTX's; P2, P3 and P4 each compare arms of one card.
 
 ## Stop rules
 
