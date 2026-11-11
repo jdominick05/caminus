@@ -25,7 +25,7 @@ official file's, byte for byte (`tools/eval/gguf_splice.py` writes each file and
 | A | the official Q4_K_M | gate, up Q4_K; down Q4_K 24, Q6_K 24 | 1.097 GB | 1.920 GB | 2.24 ms, 447 tok/s |
 | B | unsloth IQ4_XS | IQ4_XS everywhere | 0.963 GB | 1.785 GB | 2.08 ms, 481 tok/s |
 | C | unsloth UD-IQ3_XXS | gate, up IQ3_XXS 32, IQ3_S 16; down IQ3_XXS 25, IQ4_XS 13, IQ3_S 10 | 0.743 GB | 1.565 GB | 1.82 ms, 548 tok/s |
-| D | own requant | IQ2_XXS everywhere | 0.467 GB (estimate) | 1.290 GB (estimate) | 1.50 ms, 665 tok/s |
+| D | own requant | IQ2_XXS everywhere | 0.467 GB | 1.290 GB | 1.50 ms, 665 tok/s |
 
 Bytes count 8 of 128 experts per layer at short context (`tools/eval/gguf_census.py`). In arm C the gate and the up
 tensor of a layer always share a format, so the tape keeps its shape: one segment computes both.
@@ -51,10 +51,9 @@ and on real tensors. The codebooks are format constants that cannot be derived; 
 `caminus.iq_tables` with their notice. The 8 sign bits of a group are a 7-bit index plus its parity, so signs need no
 table.
 
-In the decode kernel a 16-value table fits in registers, and the three grids go to the workgroup's local memory (5 KB
-for all three), staged at the start of a launch by the arms that need them. A grid read depends on the index load, so
-a pass of the tile becomes a memory round trip and then a local one: that second dependent step is what this study
-measures.
+In the decode kernel a 16-value table fits in registers, and the grids go to the workgroup's local memory, staged at
+the start of a launch by the arms that need them. A grid read depends on the index load, so a pass of the tile becomes
+a memory round trip and then a local one: that second dependent step is what this study measures.
 
 ## Predictions
 
@@ -117,7 +116,71 @@ read, written down before the IQ2_XXS tile's first run:
 
 - Arm D uses unsloth's importance matrix (the one behind B and C), not one computed here.
 - The splice writes the file itself (`tools/eval/gguf_splice.py`); the vendored gguf-py has no writer.
-- All three grids need 5 KB of local memory, not 3.
+- All three grids need 5 KB of local memory, not 3. The module holds 3 KB: see the next section.
 - The draft called the 2.29 ms a token spends outside loads and arithmetic "hand-off". A trace has since shown that
   time is inside the stages: the hand-offs are 0.09 ms of a token.
 - The decode engine took a per-card grid after the draft was written; the reference line and stop rule 3 follow it.
+
+## Fitting four formats into one module
+
+Stop rule 3 was tested at build time, before any arm ran in the decode kernel. The first build of a module with all
+four tiles had 21 spilled VGPRs. The module the arms run has none: `k3_run` at 96 VGPRs, 0 spilled, 66 spilled scalars
+(the shipped module: 96, 0, 53), and the shipped module's code is unchanged, instruction for instruction. Four things
+got it there, each a finding about this compiler and card.
+
+| Step | k3_run | What it showed |
+|---|---|---|
+| Four tile bodies beside Q4_K and Q6_K | 21 spilled VGPRs | every body's loop state is live across the dispatch |
+| One body for the three grid formats, the format a runtime value | 7 spilled | their code differs in offsets and one shift, not in shape |
+| The lane number through an opaque copy inside each format's branch | 0 spilled, but 97 VGPRs | from one shared lane value the compiler hoisted every tile's addresses out of the row loop, where they stayed live across whichever tile ran |
+| The module's local memory kept at the shipped size | 96 VGPRs, 1 spilled | with the grids' 5 KB the local memory crossed 16 KB, and k3_run came out at 97 VGPRs under every register cap tried; at the shipped size it is 96 |
+| The grid formats read from a record layout | 96 VGPRs, 0 spilled | in the GGUF block a unit of 32 weights needs five loads at five offsets; as one record it is one 16-byte load, plus one 8-byte load of its block's header |
+
+- **Local memory at the shipped size:** this module's router ranks 256 experts, not 1,024 (the model has 128), and the
+  IQ2_XXS grid shares its words with the two IQ3 grids. A launch stages the IQ3 grids or the IQ2_XXS grid; the engine
+  refuses a tape that needs both. No arm does.
+- **The record layout** holds the same bytes as the GGUF blocks, rearranged once at load
+  (`caminus.engine.own_layout.iq_records`, with its inverse and a test), as the engine already does for Q6_K. So the
+  arms' bytes per token, and the bandwidth bound, are unchanged.
+- **Both changes came after the predictions were written,** forced by stop rule 3. No number in the predictions table
+  was touched. The record layout removes loads from the grid tiles, so it can only move C and D toward the low end of
+  their ranges.
+
+## Results so far
+
+### The tiles alone (RX 7900 XT)
+
+One launch per matvec on each arm's real expert tensors, 8 of 128 experts per layer, cold between matvecs
+(`benchmarks/own_mv_census.py`). A launch costs about 12 µs here, so these times say which kernel is faster on the
+same matrix, not how fast the format is in a token. Error is against float64 on 256 sampled rows, as a fraction of the
+output's rms: mean / 99th percentile.
+
+| Format | Shape | Read only | llama.cpp | Own tile | Error, llama.cpp | Error, own |
+|---|---|---|---|---|---|---|
+| IQ4_XS | 2048 × 768 | 9.23 µs | 10.84 µs | 10.05 µs | 9.7e-3 / 2.9e-2 | 1.8e-4 / 5.1e-4 |
+| IQ3_XXS | 768 × 2048 | 12.35 µs | 14.90 µs | 13.10 µs | 8.1e-3 / 2.8e-2 | 1.8e-4 / 5.8e-4 |
+| IQ3_XXS | 2048 × 768 | 9.00 µs | 10.62 µs | 9.82 µs | 8.2e-3 / 2.8e-2 | 1.7e-4 / 5.7e-4 |
+| IQ3_S | 768 × 2048 | 12.50 µs | 14.20 µs | 13.04 µs | 7.9e-3 / 2.5e-2 | 2.0e-4 / 5.5e-4 |
+| IQ3_S | 2048 × 768 | 9.06 µs | 10.93 µs | 9.52 µs | 8.8e-3 / 2.7e-2 | 1.6e-4 / 4.6e-4 |
+| IQ2_XXS | 768 × 2048 | 12.49 µs | (no kernel) | 13.26 µs | | 1.5e-4 / 4.8e-4 |
+| IQ2_XXS | 2048 × 768 | 9.02 µs | (no kernel) | 9.68 µs | | 1.7e-4 / 5.2e-4 |
+
+- **Stop rules 2 and 4 hold** for IQ4_XS, IQ3_XXS and IQ3_S: every own tile is faster than llama.cpp's kernel on the
+  same matrix and 40 to 60 times closer to float64. The own tiles' error is the fp16 activations' rounding: against
+  float64 on the rounded activations it is 5e-8 to 1e-7 (`tests/engine/test_own_iq_ops.py`).
+- **IQ2_XXS, rule 2 as written for it:** holds (1.7e-4 / 5.2e-4 at worst against 2.0e-4 / 5.8e-4).
+- **IQ2_XXS, rule 4 as written for it:** not shown by these two runs. Against the IQ3_XXS tile it is 1.4 % faster on the
+  2048 × 768 shape and 1.2 % slower on 768 × 2048 (13.26 against 13.10 µs), where the two runs' read-only kernels
+  differ by as much (12.49 against 12.35 µs). The comparison is repeated with the two files alternated before arm D
+  is timed.
+
+### The tiles in the decode kernel (RX 7900 XT)
+
+`tests/engine/test_own_iq_ops.py` on arms B, C and D: RESULT PASS on each.
+
+- Every expert role and format of an arm as one tape (one launch stages the grids that arm needs together): each
+  segment's rows are bitwise the standalone kernel's, per expert slot, at 3, 5, 7 and 8 workgroups per WGP.
+- The fused gate and up segment gives the same bits at every grid and equals silu(gate) × up of the standalone sums
+  to fp16 rounding.
+- The engine refuses, before any launch: a grid format on the shipped module, a tape with grid formats that does not
+  start with the embedding (its segment carries the grids to stage), and IQ2_XXS with an IQ3 format on one tape.
