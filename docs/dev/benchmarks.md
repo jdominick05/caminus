@@ -195,6 +195,26 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 | Mean KLD against the reference, 128 tokens | **4.66e-04**, top-1 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
 | The same for the last 64 of 16,384 / 40,896 tokens | **8.80e-04**, 62 / 64; **6.64e-04**, 64 / 64 | 5.06e-03, 60 / 64; 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
 
+## Two-card yardstick: stock llama.cpp, tensor and layer split
+
+Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT with stock llama.cpp (ggml-org master 7bcbc04, built for gfx1100):
+`llama-bench -dev ROCm0/ROCm1 -sm tensor|layer -ts 53/47 -ngl 99 -fa 1 -p 2048 -n 128 -r 2`, decode (tg128) / prefill
+(pp2048) in tok/s. `-sm tensor` splits each layer across the cards, as Caminus's two-card engines do; `-sm layer` gives
+each card whole layers.
+
+| | Caminus | llama.cpp `-sm tensor` | llama.cpp `-sm layer` |
+|---|---|---|---|
+| Swift 1.5 Q4_K_M | 59.8 / 982 | 43.5 / 859 | 33.5 / 1,400 |
+| ThinkingCap RCO 4.2 bpw | 65.4 / 936 | 46.0 / 978 | 36.3 / 1,509 |
+| Qwen3-Coder-Next UD-IQ3_S | 136.5 / ~135 (no batched prefill yet) | 72.5 / 2,046 (even split) | 80.8 / 3,625 |
+| The Coder (IQ1_M) | 104; 123-203 with its drafter / ~2,800 | 39.6 / 1,336 | 40.5 / 2,328 |
+
+- Files larger than the host's page cache (Qwen3-Coder-Next, the Coder on a 29 GiB host) need `-lm dio`: with the
+  default memory-mapped loading llama-bench stalls after loading the weights, both cards idle.
+- Qwen3-Coder-Next with `-sm tensor -ts 53/47` stops on `GGML_ASSERT(split_state.ne[j] % div == 0)`; the even split runs.
+- The ignite-llama fork (842653396) gives the same dense-model numbers within noise (`-sm tensor -ts 53/47`: 43.6 / 910
+  and 46.3 / 969); `-sm row` does not run on it.
+
 ## Not measured
 
 - Any other pair of GPUs, any other host, kernel or driver version.
