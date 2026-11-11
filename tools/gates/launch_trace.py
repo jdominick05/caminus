@@ -133,9 +133,11 @@ def serve(a):
     i1 = quiet()
     S.check(all(r['status'] == 200 for _, r, _ in out), 'three requests inside the window: HTTP ' + ' / '.join(str(r['status']) for _, r, _ in out))
     import hashlib
-    for what, r, m in out:
-        print(f'REPLY {what}: sha256 {hashlib.sha256((m.get("content") or "").encode()).hexdigest()[:16]}, '
-              f'{len(m.get("content") or "")} characters, finish {m.get("finish")}', flush=True)
+    for what, r, m in out:     # (the thinking text and the answer: a 48-token reply of a thinking model can be all thinking)
+        rs, ct = m.get('reasoning') or '', m.get('content') or ''
+        print(f'REPLY {what}: sha256 {hashlib.sha256((rs + chr(0) + ct).encode()).hexdigest()[:16]}, '
+              f'{len(rs)} + {len(ct)} characters (thinking + answer), finish {m.get("finish")}', flush=True)
+        S.check(len(rs) + len(ct) > 0, f'{what}: the reply holds text')
     st, props = S.get(port[0], '/props')
     loaded = ((props.get('caminus') or {}).get('code_objects') or []) if isinstance(props, dict) else []
     p.send_signal(signal.SIGTERM)
