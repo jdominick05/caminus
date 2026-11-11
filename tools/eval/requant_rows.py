@@ -12,9 +12,11 @@ writes one (BASE's header and metadata bytes, a new tensor table, each tensor at
 The fit, the same for both scales: per group (a row, or a block) the d and codes that minimize
 sum_j imp_j (w_j - d c_j)^2, with w the donor's decoded Q8_0 weights and imp_j the imatrix's value for the tensor's
 expert and input column j (--imatrix, llama.cpp's legacy file: the mean squared activation; 1 without it). Candidates
-d0 = +- max|w| / t over a grid of t, each refined by three rounds of (assign the nearest code, refit d by least
-squares); the best d is rounded to fp16 and the codes are assigned again against the rounded value. A negative d is
-allowed (the containers decode it; it mirrors the level set).
+d0 = +- c rms(w) over a geometric grid of c (in units of the group's rms, not of its largest weight: a row of 2,048
+weights has its best step at a small fraction of its largest one, where a 32-value block has it near max / 7), each
+refined by three rounds of (assign the nearest code, refit d by least squares); the best d is rounded to fp16 and the
+codes are assigned again against the rounded value. A negative d is allowed (the containers decode it; it mirrors
+the level set). The file is written as OUT.part and renamed when it is complete.
 
 Also logged per tensor, not written: the fit's error with the level set shifted by half a step (codes +-0.5 .. : a
 symmetric set without a zero), to tell what the container's level set costs.
@@ -39,7 +41,7 @@ A = ap.parse_args()
 CH = 64 << 20
 TYPE_ID, BLK, LO, HI, ZERO = {4: (2, 32, -8, 7, 8), 2: (42, 64, -1, 2, 1)}[A.bits]   # (ggml type, values per block, code range, the stored code of 0)
 BB = 18                                                                              # bytes per block, both containers
-TS = {4: np.linspace(4.0, 10.0, 25), 2: np.linspace(0.5, 2.6, 22)}[A.bits]            # max|w| / d0 candidates
+CS = {4: np.geomspace(0.10, 1.0, 16), 2: np.geomspace(0.35, 3.0, 16)}[A.bits]          # d0 / rms(w) candidates
 B, D = ggufio.GGUFFile(A.base), ggufio.GGUFFile(A.donor)
 if os.path.exists(A.out): sys.exit(f'{A.out} exists')
 assert ggufio.TYPES[TYPE_ID][1:] == (BLK, BB), ggufio.TYPES[TYPE_ID]
@@ -84,14 +86,16 @@ def fit(w, imp, off):
     """w [e, r, nb, BLK] fp32, imp [e, 1, nb, BLK] -> (d [e, r, nb or 1, 1] already rounded to fp16, integer codes c
     (w ~ d (c + off)) as fp32, the weighted error per group); off 0 = the container's level set, 0.5 = the shifted one"""
     dims = (2, 3) if A.scale == 'row' else (3,)
-    amax = w.abs().amax(dims, keepdim=True)
-    best_e = torch.full_like(amax, float('inf')); best_d = torch.zeros_like(amax)
+    rms = w.square().mean(dims, keepdim=True).sqrt_()
+    best_e = torch.full_like(rms, float('inf')); best_d = torch.zeros_like(rms)
+
+    lo, hi = (LO, HI) if off == 0 else (-(1 << (A.bits - 1)), (1 << (A.bits - 1)) - 1)   # (shifted: +-0.5 .. +-(2^(bits-1) - 0.5))
 
     def assign(d):
-        return (torch.where(d != 0, w / d, torch.zeros_like(w)) - off).round_().clamp_(LO, HI).add_(off)
-    for t in TS:
+        return (torch.where(d != 0, w / d, torch.zeros_like(w)) - off).round_().clamp_(lo, hi).add_(off)
+    for cs in CS:
         for sg in (1.0, -1.0):
-            d = amax * (sg / float(t))
+            d = rms * (sg * float(cs))
             for _ in range(3):
                 c = assign(d); ic = imp * c
                 num = (ic * w).sum(dims, keepdim=True); den = (ic * c).sum(dims, keepdim=True)
@@ -148,7 +152,7 @@ for t, nb in plan:
     off = (off + (nb or t.n_bytes) + al - 1) // al * al
 head = bytes(B._mm[:B.table_start])
 data_start = (len(head) + len(table) + al - 1) // al * al
-with open(A.out, 'wb') as f:
+with open(A.out + '.part', 'wb') as f:
     f.write(head); f.write(table); f.write(b'\0' * (data_start - len(head) - len(table)))
     for (t, nb), o in zip(plan, offs):
         assert f.tell() == data_start + o
@@ -162,6 +166,7 @@ with open(A.out, 'wb') as f:
             assert n == nb, (t.name, n, nb)
         f.write(b'\0' * (-n % al))
     f.flush(); os.fsync(f.fileno())
+os.replace(A.out + '.part', A.out)
 
 # -- the checks ---------------------------------------------------------------------------------------------------------
 O = ggufio.GGUFFile(A.out); bad = 0

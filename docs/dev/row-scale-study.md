@@ -52,7 +52,8 @@ Every file is the official Q4_K_M file with its expert tensors replaced (`tools/
 
 `tools/reference/q3moe_ref32.py` computes each arm's logits in fp32 from its exactly decoded weights, so no engine's
 rounding is in the comparison: the differences are the formats'. One token sequence for every arm (the tree's own
-docs and sources, the first 2,048 tokens), the last 1,024 positions scored against arm R:
+docs and sources as tokenized for the engine's 16,384-token depth gate, its first 2,048 tokens), the last 1,024
+positions scored against arm R:
 
 - mean, median and 99th percentile of KLD(R ‖ arm),
 - top-1 agreement with R.
@@ -77,6 +78,26 @@ B 1.785, C 1.565, D 1.290, W4r 1.728 (10 % under A), W2r 1.275 (34 % under A). O
 with its decode removed is 0.50 ms shorter than A's of 4.5 ms (the IQ study's loads-only builds), so **a 2-bit tile
 with a free unpack could gain about 11 % of a token there, and a 4-bit one about 3 %**; the decode half asks how
 much of that a real tile keeps.
+
+## Changes to the tools after the predictions were committed
+
+Both were made after the fitter's first run had printed its first three tensors and before any file was complete;
+no prediction was reworded.
+
+- **The starting scales** were multiples of the group's largest weight (as a 32-value block wants). A row of 2,048
+  weights has its best step at a small fraction of its largest weight, outside that grid, so the grid is now a
+  geometric range of multiples of the group's rms (4-bit 0.10 to 1.0, 2-bit 0.35 to 3.0, 16 values, both signs).
+  On layer 0 this moved the 2-bit row fit's weighted error from 0.1437 to 0.1419 (down), 0.1782 to 0.1729 (gate).
+- **The shifted level set's logged error** clamped its codes to the container's range around the half step, which
+  gave the levels -0.5, +0.5, +1.5, +2.5: not the symmetric set the plan describes. It now clamps to ±0.5, ±1.5.
+  Only the logged comparison for P5 changed; the codes written to the files never used it. This fix came after
+  the wrong set's first output, which contradicted P5 (layer 0's down: 0.2400 for the "shifted" set against
+  0.1437 for the container's), so it is checked independently: the fitter's statements on unit-Gaussian rows of
+  2,048 values on the CPU give 0.1461 for the container's set, 0.1189 for ±0.5, ±1.5 (the known optimum of a
+  uniform 4-level quantizer on a Gaussian is 0.1188) and 0.2547 for the first run's clamp, with exactly those
+  level sets.
+- The fitter writes `OUT.part` and renames it when the file is complete, so an interrupted run leaves no file under
+  an arm's name.
 
 ## Stop rules
 
