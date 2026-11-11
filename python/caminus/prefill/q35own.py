@@ -69,9 +69,11 @@ class Ops(q3m_ops.Ops):
         getattr(self.mod, MM_KERNEL[fmt])(grid, (256,), wb, I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
 
     def add_rms16(self, x, nw, eps, h16, n, N, d=None, h=None):
-        """per row: x += d (d None: no add); h = rms_norm(x) * nw (fp32, h None: not written); h16 = fp16(h)"""
+        """per row: x += d (d None: no add); h = rms_norm(x) * nw (fp32, always written: the kernel's fp16 rounding
+        depends on it, see kernels/q35_prefill.hip); h16 = the decode op's fp16 copy"""
         if N % 256 or not 256 <= N <= 65536: raise ValueError(f'q35 add_rms16: N {N} (a multiple of 256)')
-        self.mod.q35p_add_rms16((int(n),), (256,), x, NULL if d is None else d, nw, F(eps), NULL if h is None else h, h16, I(N))
+        if h is None: raise ValueError('q35 add_rms16: h (the fp32 output) is required')
+        self.mod.q35p_add_rms16((int(n),), (256,), x, NULL if d is None else d, nw, F(eps), h, h16, I(N))
 
     def gdn_norm16(self, o, w, z, y16, n, H, K, eps):
         self.mod.q35p_gdn_norm16((int(n) * int(H),), (256,), o, w, z, y16, I(K), F(eps))

@@ -195,7 +195,10 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q5k(
 // (kernels/k3_q35_ops.h q35_op_add_rms16; q3p_add_rms16 stops at N = 2048 and adds weighted slots):
 //   x[i] += d[i]   (d nullptr: no add);   h[i] = (x[i] * rsqrt(sum x^2 / N + eps)) * nw[i];   h16[i] = fp16(h[i])
 // The same order of operations: a thread's fma chain over its elements tid + 256 j in j order, the wave sum (xor 16 .. 1),
-// the eight waves in order, no contraction. h nullptr: the fp32 copy is not written. Grid n.
+// the eight waves in order, no contraction. Grid n. h is always written, as the decode op writes it: the compiler rounds
+// the fp16 copy straight from the last product (v_fma_mixlo_f16: one rounding, the decode module's instruction) only
+// when that product's fp32 store sits in the same basic block. Behind `if (h)` it took v_cvt_f16_f32 of the rounded fp32
+// value instead (two roundings): 11 and 15 of 189,440 fp16 values differed from the decode's on the RX 7900 XT.
 extern "C" __global__ void __launch_bounds__(256) q35p_add_rms16(float * __restrict__ x, const float * __restrict__ d,
                                                                  const float * __restrict__ nw, float eps, float * __restrict__ h,
                                                                  _Float16 * __restrict__ h16, int N) {
@@ -217,7 +220,7 @@ extern "C" __global__ void __launch_bounds__(256) q35p_add_rms16(float * __restr
     for (int j = 0; j < NI; j++) {
         const int i = tid + 256 * j;
         const float v = (xr[i] * scale) * nw[i];
-        if (h) h[(size_t)t * N + i] = v;
+        h[(size_t)t * N + i] = v;
         h16[(size_t)t * N + i] = (_Float16)v;
     }
 }
