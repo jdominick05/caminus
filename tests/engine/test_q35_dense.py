@@ -162,21 +162,21 @@ if A.model:
     REFL, RESID = z['logits'], z['resid']   # (read once: an npz member is re-read from the file at every access)
     NP = min(A.positions, len(REFL), A.max_ctx)
     for n in A.depths:
-        t0 = time.time(); eng = Dense35Own(A.model, max_ctx=A.max_ctx, module=MOD, debug_layers=n)
+        t0 = time.time(); eng = Dense35Own(A.model, max_ctx=A.max_ctx, module=A.module, debug_layers=n)
         m = min(A.depth_positions, NP)
         xs = torch.stack(run(eng, seq[:m], 'x')).double().cpu().numpy(); r = RESID[n - 1, :m].astype(np.float64)
         err = np.abs(xs - r).max(axis=1) / np.abs(r).max(axis=1)
         check(err.max() < 1e-2 and np.isfinite(xs).all(), f'the residual after block {n - 1}: largest error / largest value {err.max():.1e} '
               f'over {m} positions (< 1e-2; {time.time() - t0:.0f} s)')
         del eng, xs; gc.collect(); torch.cuda.empty_cache()
-    t0 = time.time(); eng = Dense35Own(A.model, max_ctx=A.max_ctx, module=MOD)
+    t0 = time.time(); eng = Dense35Own(A.model, max_ctx=A.max_ctx, module=A.module)
     print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB projected; {eng.nl} blocks; grid {eng.per_wgp} per WGP; '
           f'{len(eng.E.segs)} segments: {sorted(eng.E.inventory().items())})', flush=True)
     # this part's own buffers: the logits of every compared position kept on the card twice, a tape per compared grid
     own = 2 * NP * eng.vocab * 4 / 2 ** 20 + 3 * Dense35Own.TAPE_MIB + 2
     capacity.check([eng.dev], [own], f'test_q35_dense: its own buffers ({NP} positions of logits x 2: {own:.0f} MiB)')
     ids_chk = [0, 1, 785, 6722, 9625, eng.vocab - 1]
-    e2 = k3.Engine(module=MOD); tk_d = torch.zeros(len(ids_chk), dtype=torch.int32, device='cuda'); xs = torch.zeros(len(ids_chk), eng.D, device='cuda')
+    e2 = k3.Engine(module=eng.module); tk_d = torch.zeros(len(ids_chk), dtype=torch.int32, device='cuda'); xs = torch.zeros(len(ids_chk), eng.D, device='cuda')
     for j, t in enumerate(ids_chk): tk_d[j] = t; e2.own_emb(eng.emb_dev, eng.emb.type, eng.vocab, eng.D, tk_d[j:j + 1], xs[j])
     e2.build().run(); torch.cuda.synchronize()
     check(all(np.array_equal(xs[j].cpu().numpy().view(np.uint32), own_dequant.rows(eng.emb, t, t + 1).reshape(-1).view(np.uint32))
