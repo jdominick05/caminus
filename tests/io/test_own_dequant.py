@@ -24,6 +24,19 @@ for name, (qk, bs, _) in sorted(own_dequant.DECODERS.items()):
     ref = quants.dequantize(raw, GGMLQuantizationType[name]).astype(np.float32).reshape(-1)
     ok = np.array_equal(ours.view(np.uint32), ref.view(np.uint32)); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name}: {A.random} random blocks bitwise gguf-py')
+try:   # the fp32 reference's torch decoders (tools/reference/q3moe_ref32.py) are the host decoders' bits; skipped without torch
+    import importlib.util, torch
+    sp = importlib.util.spec_from_file_location('q3moe_ref32', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools',
+                                                                            'reference', 'q3moe_ref32.py'))
+    r32 = importlib.util.module_from_spec(sp); sp.loader.exec_module(r32)
+    for name, (qk, bs, f) in sorted(own_dequant.DECODERS.items()):
+        raw = rng.integers(0, 256, 300 * bs, dtype=np.uint8)
+        with np.errstate(invalid='ignore'): a = f(raw)
+        b = r32.DECODERS[name](torch.from_numpy(raw)).numpy(); fin = ~np.isnan(a)   # (random scales can be NaN: the same places; the bits elsewhere)
+        ok = np.array_equal(np.isnan(a), np.isnan(b)) and np.array_equal(a[fin].view(np.uint32), b[fin].view(np.uint32)) and fin.mean() > 0.9; bad += not ok
+        print(('PASS' if ok else 'FAIL') + f' {name}: the fp32 reference\'s torch decoder is bitwise the host decoder (300 random blocks; NaN in the same places)')
+except ImportError:
+    print('SKIP the fp32 reference\'s torch decoders (no torch here)')
 for name, (bs, rs, hs) in sorted(own_layout.IQ_REC.items()):   # the kernels' record layout: the same bytes, and back
     raw = rng.integers(0, 256, 6 * 3 * bs, dtype=np.uint8)
     rec = own_layout.iq_records(raw, 6, 768, name)

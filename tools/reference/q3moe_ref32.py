@@ -12,7 +12,7 @@ import argparse, glob, math, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
 import torch
-from caminus import ggufio
+from caminus import ggufio, iq_tables
 from caminus.bpe import BPE
 from caminus.device import capacity
 
@@ -53,6 +53,81 @@ def q6_k(raw):
     return (ds * q.view(-1, 2, 4, 2, 16)).reshape(-1)
 
 
+# ---- the codebook formats: caminus.own_dequant's iq4_xs / iq3_xxs / iq3_s / iq2_xxs in torch, the same float32 statements
+_TAB = {}
+
+
+def tab(name, dev):
+    """a table of caminus.iq_tables on the device"""
+    if (name, str(dev)) not in _TAB: _TAB[(name, str(dev))] = torch.from_numpy(np.ascontiguousarray(getattr(iq_tables, name))).to(dev)
+    return _TAB[(name, str(dev))]
+
+
+def _pm(bits):
+    """uint8 [...] -> float32 [..., 8]: +1 where the bit is clear, -1 where it is set (bit i = value i)"""
+    sh = torch.arange(8, device=bits.device, dtype=torch.uint8)
+    one = torch.ones((), device=bits.device)
+    return torch.where(((bits[..., None] >> sh) & 1) == 0, one, -one)
+
+
+def _signs7(idx):
+    par = idx ^ (idx >> 4); par = par ^ (par >> 2); par = par ^ (par >> 1)
+    return idx | ((par & 1) << 7)
+
+
+def _nib(b):
+    return torch.stack([b & 0xF, b >> 4], dim=2).reshape(b.shape[0], -1)
+
+
+def _su32(b):
+    """uint8 [n, 32] (8 u32) -> (scale float32 [n, 8], signs float32 [n, 8, 32])"""
+    u = b.contiguous().view(torch.int32).view(-1, 8).long() & 0xffffffff
+    idx = ((u[:, :, None] >> torch.tensor([0, 7, 14, 21], device=b.device)) & 0x7F).to(torch.uint8)
+    return (u >> 28).float(), _pm(_signs7(idx)).reshape(-1, 8, 32)
+
+
+def iq4_xs(raw):
+    b = raw.view(-1, 136); n = b.shape[0]
+    d = f16(b[:, 0:2]).view(n, 1)
+    sh = b[:, 2:4].contiguous().view(torch.int16).long().view(n, 1) & 0xffff
+    ls = _nib(b[:, 4:8]).long() | (((sh >> (2 * torch.arange(8, device=b.device))) & 3) << 4)
+    dl = (d * (ls - 32).float()).view(n, 8, 1)
+    qs = b[:, 8:136].view(n, 8, 16)
+    q = tab('KVALUES_IQ4', b.device)[torch.cat([qs & 0xF, qs >> 4], dim=2).long()].float()
+    return (dl * q).reshape(-1)
+
+
+def iq3_xxs(raw):
+    b = raw.view(-1, 98); n = b.shape[0]
+    d = f16(b[:, 0:2]).view(n, 1)
+    s, sg = _su32(b[:, 66:98])
+    db = ((d * (0.5 + s)) * 0.5).view(n, 8, 1)
+    g = tab('GRID_IQ3_XXS', b.device)[b[:, 2:66].long()].float().view(n, 8, 32)
+    return (db * g * sg).reshape(-1)
+
+
+def iq3_s(raw):
+    b = raw.view(-1, 110); n = b.shape[0]
+    d = f16(b[:, 0:2]).view(n, 1)
+    db = (d * (1 + 2 * _nib(b[:, 106:110]).long()).float()).view(n, 8, 1)
+    hi = ((b[:, 66:74, None] >> torch.arange(8, device=b.device, dtype=torch.uint8)) & 1).long()
+    g = tab('GRID_IQ3_S', b.device)[b[:, 2:66].reshape(n, 8, 8).long() | (hi << 8)].float().view(n, 8, 32)
+    return (db * g * _pm(b[:, 74:106]).reshape(n, 8, 32)).reshape(-1)
+
+
+def iq2_xxs(raw):
+    b = raw.view(-1, 66); n = b.shape[0]
+    d = f16(b[:, 0:2]).view(n, 1)
+    w = b[:, 2:66].reshape(n, 8, 8)
+    s, sg = _su32(w[:, :, 4:8].reshape(n, 32))
+    db = ((d * (0.5 + s)) * 0.25).view(n, 8, 1)
+    g = tab('GRID_IQ2_XXS', b.device)[w[:, :, 0:4].long()].float().view(n, 8, 32)
+    return (db * g * sg).reshape(-1)
+
+
+DECODERS = {'Q4_K': q4_k, 'Q6_K': q6_k, 'IQ4_XS': iq4_xs, 'IQ3_XXS': iq3_xxs, 'IQ3_S': iq3_s, 'IQ2_XXS': iq2_xxs}
+
+
 class W:
     """a GGUF tensor's rows decoded on the card"""
     def __init__(self, F, dev):
@@ -63,7 +138,7 @@ class W:
         r0 = 0 if r0 is None else r0; r1 = R if r1 is None else r1
         if t.type == 'F32': return torch.from_numpy(np.asarray(t.data()).view(np.float32)[r0 * K:r1 * K].copy()).to(self.dev).view(r1 - r0, K)
         raw = torch.from_numpy(np.ascontiguousarray(np.asarray(t.data())[r0 * rb:r1 * rb])).to(self.dev)
-        return {'Q4_K': q4_k, 'Q6_K': q6_k}[t.type](raw).view(r1 - r0, K)
+        return DECODERS[t.type](raw).view(r1 - r0, K)
 
 
 def rms(x, w, eps):

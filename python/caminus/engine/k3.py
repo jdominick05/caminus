@@ -162,6 +162,7 @@ OWN_1RT_FMT = ('Q4_K', 'Q6_K')
 # segment, the embedding's unused Seg.out_f32: Engine.build sets them from the tape's own segments)
 OWN_IQ_FMT = {'IQ3_XXS': 0, 'IQ4_XS': 6, 'IQ3_S': 8, 'IQ2_XXS': 11}
 OWN_IQ_STAGE = {OWN_IQ_FMT['IQ3_XXS']: 1, OWN_IQ_FMT['IQ3_S']: 2, OWN_IQ_FMT['IQ2_XXS']: 4}
+ROUTER_NE = {m: 256 for m in Q3M_IQ_MODULES}   # experts OP_ROUTER ranks where a module sets K3_ROUTER_NE (elsewhere 1024)
 OWN_IQ_PAD = 16   # (= engine.own_layout.IQ_PAD: bytes a grid tile's loads may run past the last record)
 OWN_BLOCK = {'Q6_K': 210, 'Q4_K': 144, 'IQ4_XS': 136, 'IQ3_XXS': 98, 'IQ3_S': 110, 'IQ2_XXS': 66}   # bytes per 256 weights
 OWN_FMT_NAME = {v: k for k, v in {**OWN_FMT, **OWN_IQ_FMT}.items()}
@@ -653,6 +654,8 @@ class Engine:
         if tokens != 1 and (self.module not in Q3M_VER_MODULES or self.T != 1): raise ValueError(f'router: tokens {tokens} on {self.module}')
         nt = self.T * tokens
         E = logits.numel() // nt; assert E <= 1024 and k <= 64 and ids.numel() >= nt * k and wts.numel() >= nt * k; self.keep += [logits, ids, wts]
+        if E > ROUTER_NE.get(self.module, 1024):   # (the op ranks in local memory: more experts would write past its words)
+            raise ValueError(f'router: {E} experts on {self.module} (its router ranks {ROUTER_NE[self.module]}: K3_ROUTER_NE)')
         self.segs.append(Seg(OP_ROUTER, nt, dep, 0, None, wts.data_ptr(), logits.data_ptr(), None, ids.data_ptr(), clamp,
                              E, 0, 1, 0, team, k, 0))
         return len(self.segs) - 1
