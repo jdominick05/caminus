@@ -16,7 +16,8 @@ directory each time: some suites refuse leftovers from a previous run.
 
 Up to 8 suites run at once (`--jobs N`; `--jobs 1` runs them one after another). Each suite is its own process with its
 own scratch directory and log, the results print in the same order either way, and the suites that load the Coder's
-tensors never overlap one another.
+tensors never overlap one another. A suite that fails prints its failure reports (FAIL / ERROR lines and tracebacks)
+and the end of its log; the whole log is `<scratch>/<suite>.log`.
 
 `cd panel && go test ./...` tests the panel.
 
