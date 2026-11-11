@@ -25,7 +25,8 @@ def check(c, msg):
 for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
             'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
             'k3_q3m_rs4.hip', 'k3_q3m_rs2.hip', 'own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
-            'k3_q35_swift.hip', 'k3_q35_swift_trace.hip'):   # (the dense qwen35 line's decode module: the same rule)
+            'k3_q35_swift.hip', 'k3_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)
+            'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip'):   # (its prefill's objects)
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
 ref = audit('k3_gguf_q3m_own.hip')[2]
@@ -38,7 +39,8 @@ check(re.search(r'kernels/k3_q3m\*\.hip\|kernels/k3_q35_\*\.hip\)\s*extra=\(-mll
 
 # the serve path under an import hook refusing gguf and tokenizers
 MODS = ('caminus.serve.cli', 'caminus.serve.server', 'caminus.serve.k3_session', 'caminus.serve.worker', 'caminus.serve.generate',
-        'caminus.cache.prompt', 'caminus.decode.longctx', 'caminus.engine.q3moe_one', 'caminus.prefill.q3m', 'caminus.serve.tokenizer')
+        'caminus.cache.prompt', 'caminus.decode.longctx', 'caminus.engine.q3moe_one', 'caminus.prefill.q3m', 'caminus.serve.tokenizer',
+        'caminus.engine.q35_dense', 'caminus.prefill.q35own')   # (+ the dense qwen35 line on own code: Swift 1.5)
 code = f'''import sys, importlib.abc
 class B(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path, target=None):
@@ -46,11 +48,11 @@ class B(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, B()); sys.path.insert(0, {os.path.join(ROOT, 'python')!r})
 for m in {MODS!r}: __import__(m)
 from caminus import arch
-assert arch.ARCHS['qwen3moe'].tokenizer == 'own'
+assert arch.ARCHS['qwen3moe'].tokenizer == 'own' and arch.ARCHS['qwen35-own'].tokenizer == 'own'
 print('imported', len({MODS!r}))
 '''
 r = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True)
-check(r.returncode == 0, f'serve modules for qwen3moe import with gguf and tokenizers refused: {(r.stdout + r.stderr).strip().splitlines()[-1][:160]}')
+check(r.returncode == 0, f'serve modules for qwen3moe and the own-code qwen35 line import with gguf and tokenizers refused: {(r.stdout + r.stderr).strip().splitlines()[-1][:160]}')
 
 # the BPE merge without a model: a small vocabulary trained here (so every merge ranks after the merges of its parts),
 # caminus.bpe against the plain definition (the lowest-ranked pair, every occurrence left to right, rescan), and an

@@ -58,10 +58,13 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'], f'archs: the five served ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'], f'archs: the six served ({sorted(arch.ARCHS)})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
-                    'qwen3moe': ('one-card', 1, 1, None), 'qwen3next': ('tp', 2, 1, None)}, f'archs: kind, cards, T, drafter ({shape})')
+                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, None), 'qwen3next': ('tp', 2, 1, None)},
+          f'archs: kind, cards, T, drafter ({shape})')
+    check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
+          'archs: the own-code qwen35 entry takes the own tokenizer, AREX-2\'s entry keeps its own')
     check(arch.lookup('llama') is arch.CODER, 'archs: any other architecture takes the Coder\'s path')
     check(arch.usable_ctx(262144, 4) == 262142 and arch.usable_ctx(90112, 1) == 90112, 'usable_ctx: the engine less T - 2')
 
@@ -124,6 +127,17 @@ def main():
         write_gguf(other, 'qwen35', {'qwen35.context_length': 4096}, [('blk.0.ffn_up.weight', 32, 32)])
         check(models.model_of(other) is None and arch.default_alias(other) == 'qwen3.5',
               'default_alias: the same name at another size is not the catalog\'s file (the architecture\'s id)')
+        # Swift 1.5 and AREX-2 are both qwen35 files: the catalog's file takes its model's entry (the own-code engine), found
+        # by name and size without opening it; AREX-2's file and any other qwen35 file keep the header's entry
+        sw = models.BY_KEY['swift-1.5']
+        scat = os.path.join(S, 'catalog', os.path.basename(sw.path))
+        with open(scat, 'wb') as f:
+            f.truncate(sw.size)                       # (sparse)
+        n0 = len(opens)
+        check(arch.of(scat) is arch.ARCHS['qwen35-own'] and arch.default_alias(scat) == 'swift-1.5' and len(opens) == n0,
+              'of: Swift 1.5\'s catalog file takes the own-code entry and answers swift-1.5 (not opened)')
+        check(arch.of(cat) is arch.ARCHS['qwen35'], 'of: AREX-2\'s catalog file keeps the qwen35 entry (OneCard)')
+        check(arch.of(other) is arch.ARCHS['qwen35'], 'of: a qwen35 file outside the catalog keeps the header\'s entry')
         llama = os.path.join(S, 'tiny-llama.gguf')
         write_gguf(llama, 'llama', {}, [('blk.0.ffn_up.weight', 32, 32)])
         check(arch.of(llama) is arch.CODER, 'of: an unknown architecture is given the Coder\'s entry')
@@ -183,9 +197,14 @@ def main():
         print('SKIP max_ctx auto: no torch', flush=True)
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
-        check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne',
+        check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
                         'qwen3next': 'Qwen3NextTP'},
               f'engine_class: every entry\'s engine imports ({names})')
+        # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
+        # engine served greedy requests without them and failed its first sampled one on the card)
+        need = ('step', 'verify', 'verify_tokens', 'step_token', 'launch_tokens', 'finish_pass', 'reset', 'prefetch')
+        lack = {n: [a for a in need if not callable(getattr(x.engine_class(), a, None))] for n, x in arch.ARCHS.items()}
+        check(not any(lack.values()), f'engine_class: every engine has the session\'s pass methods (missing: {lack})')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:

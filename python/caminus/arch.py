@@ -460,6 +460,34 @@ class Q3MoE(OneCard):
         return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 
+class Dense35(OneCard):
+    """the dense qwen35 line on Caminus's own code (Swift 1.5 Q4_K_M): Dense35Own on one card, T = 1, the own reader,
+    kernels and tokenizer; the prompt through its own batched prefill (caminus.prefill.q35own.Q35OwnPrefill). Selected
+    through its catalog model (of(): the file's catalog model names this entry), never by the header: AREX-2 is a qwen35
+    file too and keeps OneCard's engine. No drafter yet."""
+    engine = 'engine.q35_dense:Dense35Own'
+    tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
+    PREFILL_CHUNK = 2048       # (XT, from empty, 2,048 positions: chunk 2048 771 tok/s, 1024 760; 538 MiB at 2048)
+
+    def auto_need(self, opt, slots, cards=None):
+        from .engine.q35_dense import Dense35Own
+        from .prefill import q35own
+        path = opt['model']
+        n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
+        slot = (Dense35Own.recurrent_mib(path) + Dense35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: the states + one tail row)
+        pf = q35own.buffer_need_mib(q35own.shapes_of(path), self.PREFILL_CHUNK) + PREFILL_MODULES_MIB
+        need = lambda c: [Dense35Own.projection_mib(path, c) + pf + (slots + 2) * slot]   # (the side rows: host memory)
+        return n_ctx, [0], slot, need
+
+    def build(self, opt, log=print, T=None):
+        from .engine.q35_dense import Dense35Own
+        from .prefill import q35own
+        path = opt['model']
+        extra = q35own.buffer_need_mib(q35own.shapes_of(path), self.PREFILL_CHUNK) + PREFILL_MODULES_MIB
+        m = Dense35Own(path, device=0, max_ctx=int(opt['max_ctx']), vram_extra_mib=extra)
+        return m, q35own.Q35OwnPrefill(m, chunk=self.PREFILL_CHUNK), None, None
+
+
 class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
@@ -478,7 +506,7 @@ class TwoCardTP(Arch):
 
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
-                             Q3MoE('qwen3moe', 'qwen3-30b-a3b'),
+                             Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
                              TwoCardTP('qwen3next', 'qwen3-coder-next'))}
 CODER = ARCHS['qwen4exp']
 
@@ -489,7 +517,12 @@ def lookup(name):
 
 
 def of(path):
-    """the entry for a GGUF, by its header's general.architecture (meta: read once per file)"""
+    """the entry for a GGUF: its catalog model's (caminus.models.model_of: the same file name and size), else its header's
+    general.architecture (meta: read once per file). The catalog decides where two models share a header architecture
+    and run on different engines: Swift 1.5 (Dense35, own code) and AREX-2 (OneCard) are both qwen35 files"""
+    from . import models
+    m = models.model_of(path)
+    if m is not None and m.arch in ARCHS: return ARCHS[m.arch]
     return lookup(meta(path)['arch'])
 
 
