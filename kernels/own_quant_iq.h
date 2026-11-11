@@ -116,21 +116,27 @@ __device__ __forceinline__ void own_rows_iq4xs_1rt(const uint8_t * __restrict__ 
 
 // ---- the grid formats: IQ3_XXS, IQ3_S, IQ2_XXS. A group of 4 (IQ3) or 8 (IQ2_XXS) weights is one index into a grid of
 // magnitudes (kernels/iq_grids.h) plus a sign bit per weight; a unit of 32 weights has one scale. The grids live in the
-// workgroup's local memory (LDS: 1 KB, 2 KB, 2 KB), staged once per launch by iq*_stage (256 threads, then a barrier):
-// a pass is the weight loads (one memory round trip, as own_rows_q4k_1rt), then the grid reads the index bytes name (a
-// second, local round trip), then the arithmetic. Blocks are read in place; they are 2-byte aligned (98, 110, 66 B),
-// so the 4- and 8-byte loads are unaligned.
+// workgroup's local memory (LDS: 1 KB, 2 KB, 2 KB; one 3 KB array), staged once per launch by iq_stage (256 threads,
+// then a barrier): a pass is the weight loads (one memory round trip, as own_rows_q4k_1rt), then the grid reads the
+// index bytes name (a second, local round trip), then the arithmetic.
+// The matrix is read in Caminus's record layout (caminus.engine.own_layout.iq_records; the same bytes as the GGUF
+// blocks, which are 98 / 110 / 66 B and whose fields a unit needs sit at five different offsets): plane A = a record
+// per unit of 32 weights, plane B = a header per block, then 16 bytes of padding. A unit is then ONE 16-byte load
+// and its block's header ONE 8-byte load (both may run past their record into the next bytes of the buffer). In place,
+// a row's unit took five loads at five lane-dependent addresses, and the addresses alone cost k3_run a spilled VGPR.
 #include "iq_grids.h"
-__shared__ uint32_t IQ_G3X[256];
-__shared__ uint32_t IQ_G3S[512];
-__shared__ uint32_t IQ_G2X[512];   // (entry e: words 2 e, 2 e + 1)
-__device__ __forceinline__ void iq3xxs_stage(int tid) { IQ_G3X[tid] = IQ3XXS_GRID[tid]; __syncthreads(); }
-__device__ __forceinline__ void iq3s_stage(int tid) {
-    IQ_G3S[tid] = IQ3S_GRID[tid]; IQ_G3S[256 + tid] = IQ3S_GRID[256 + tid]; __syncthreads();
-}
-__device__ __forceinline__ void iq2xxs_stage(int tid) {
-    const uint64_t e = IQ2XXS_GRID[tid];
-    IQ_G2X[2 * tid] = (uint32_t)e; IQ_G2X[2 * tid + 1] = (uint32_t)(e >> 32); __syncthreads();
+// One array for the three grids, IQ2_XXS's over the two IQ3 grids' words: 3 KB, not 5. A launch stages IQ3_XXS and / or
+// IQ3_S, or IQ2_XXS (the host refuses a tape that needs both kinds). Why: the compiler sizes a kernel's register
+// budget by the workgroups its LDS lets a CU hold; K3's decode module sits just under the size where 4 fit (15,748 of
+// 16,384 B), and with 5 KB more k3_run was allowed, and took, 97 VGPRs.
+enum { IQ_G3X = 0, IQ_G3S = 256, IQ_G2X = 0, IQ_GN = 768 };   // the grids' first words (IQ2_XXS entry e: words 2 e, 2 e + 1)
+__shared__ uint32_t IQ_G[IQ_GN];
+// which: bit 0 IQ3_XXS, bit 1 IQ3_S, or bit 2 alone IQ2_XXS; all 256 threads of the workgroup call it (one barrier)
+__device__ __forceinline__ void iq_stage(int tid, int which) {
+    if (which & 1) IQ_G[IQ_G3X + tid] = IQ3XXS_GRID[tid];
+    if (which & 2) { IQ_G[IQ_G3S + tid] = IQ3S_GRID[tid]; IQ_G[IQ_G3S + 256 + tid] = IQ3S_GRID[256 + tid]; }
+    if (which & 4) { const uint64_t e = IQ2XXS_GRID[tid]; IQ_G[IQ_G2X + 2 * tid] = (uint32_t)e; IQ_G[IQ_G2X + 2 * tid + 1] = (uint32_t)(e >> 32); }
+    __syncthreads();
 }
 // 4 magnitude bytes m (1 .. 127 each) and 4 sign bits sb (bit k set: weight k is negative) -> 4 bytes weight + 128:
 // the bits spread to one per byte (a multiply), -m = ~m + 1 per byte (m >= 1: no carry leaves a byte)
@@ -149,42 +155,41 @@ __device__ __forceinline__ float iq_dot4(uint32_t u, uint32_t x0, uint32_t x1, f
 // the 8 sign bits of 8 weights from their 7-bit code: the code and its parity (IQ3_XXS, IQ2_XXS)
 __device__ __forceinline__ uint32_t iq_signs8(uint32_t s7) { return s7 | ((__builtin_popcount(s7) & 1u) << 7); }
 
-// One body for the three formats (FMT 0 IQ3_XXS, 1 IQ3_S, 2 IQ2_XXS); parameters as own_rows_iq4xs_1rt. Per row and
-// unit ib of block base B:
-//   IQ3_XXS (98 B):  d fp16 at 0; 8 index bytes at 2 + 8 ib (4 weights each); the word at 66 + 4 ib: four 7-bit sign
-//                    codes (8 weights each) | scale s << 28; weight = d (0.5 + s) 0.5 * +-grid
-//   IQ3_S (110 B):   d at 0; 8 index bytes at 2 + 8 ib; qh byte at 66 + ib (bit k: index k's bit 8); 32 sign bits at
-//                    74 + 4 ib; the scale nibble ib of the 4 bytes at 106; weight = d (1 + 2 s) * +-grid
-//   IQ2_XXS (66 B):  d at 0; at 2 + 8 ib: 4 index bytes (8 weights each), then four 7-bit sign codes | s << 28;
-//                    weight = d (0.5 + s) 0.25 * +-grid
+// One body for the three formats (FMT 0 IQ3_XXS, 1 IQ3_S, 2 IQ2_XXS; FMT 3: the format is the runtime, wave-uniform
+// fmt: K3's form, one body in k3_run instead of three). Wm = the record layout of nrows_total rows; other parameters as
+// own_rows_iq4xs_1rt. Record (RS bytes) and header (HS bytes) of a unit ib of a block:
+//   IQ3_XXS  record 12: 8 index bytes (4 weights each) | four 7-bit sign codes (8 weights each) and scale s << 28;
+//            header 2: d (fp16);                     weight = d (0.5 + s) 0.5 * +-grid
+//   IQ3_S    record 13: 8 index bytes | 32 sign bits | qh (bit k: index k's bit 8);
+//            header 6: d | the block's 8 scale nibbles; weight = d (1 + 2 s) * +-grid
+//   IQ2_XXS  record 8: 4 index bytes (8 weights each) | four 7-bit sign codes and scale s << 28;
+//            header 2: d;                             weight = d (0.5 + s) 0.25 * +-grid
 template <int FMT, int K, int RW, int UP = 2, int UNR = 64>
-__device__ __forceinline__ void own_rows_iqg_1rt(const uint8_t * __restrict__ W, int row0, int nrows,
+__device__ __forceinline__ void own_rows_iqg_1rt(const uint8_t * __restrict__ Wm, int nrows_total, int row0, int nrows,
                                                  const _Float16 * __restrict__ x16, float * __restrict__ out, int lane,
-                                                 int Kr = K, float * res = nullptr) {
-    const int BS = FMT == 0 ? 98 : FMT == 1 ? 110 : 66;
+                                                 int Kr = K, float * res = nullptr, int fmt = FMT) {
+    const int F = FMT < 3 ? FMT : fmt;
+    const bool f3x = F == 0, f3s = F == 1, f2x = F == 2;
+    const int RS = f3x ? 12 : f3s ? 13 : 8, HS = f3s ? 6 : 2;
     const int NB = (K ? K : Kr) / 256, NUNITS = NB * 8, NU = (NUNITS + 31) / 32;
-    const size_t RB = (size_t)NB * BS;
+    const uint8_t * A = Wm;
+    const uint8_t * B = Wm + (size_t)nrows_total * NUNITS * RS;
     float acc[RW];
 #pragma unroll
     for (int r = 0; r < RW; r++) acc[r] = 0.0f;
 #pragma unroll UNR
     for (int i0 = 0; i0 < NU; i0 += UP) {
-        u32x2_t qi[RW][UP];              // the index bytes (IQ2_XXS: indices | signs and scale)
-        uint32_t sg[RW][UP], ex[RW][UP]; // IQ3: the sign word; IQ3_S: qh byte | the scale bytes' word << 8
-        uint16_t dh[RW][UP];
+        u32x4_t rc[RW][UP];
+        u32x2_t hd[RW][UP];
         u32x4_t xv[UP][4];
 #pragma unroll
         for (int i = 0; i < UP; i++) {                       // every weight and activation load of the pass
             const int u = lane + 32 * (i0 + i), uu = (i0 + i < NU && u < NUNITS) ? u : 0;
-            const int b = uu >> 3, ib = uu & 7;
 #pragma unroll
             for (int r = 0; r < RW; r++) {
-                const uint8_t * blk = W + (size_t)min(row0 + r, nrows - 1) * RB + (size_t)b * BS;
-                qi[r][i] = *(const u32x2_t *)(blk + 2 + 8 * ib);
-                dh[r][i] = *(const uint16_t *)blk;
-                sg[r][i] = FMT == 0 ? *(const uint32_t *)(blk + 66 + 4 * ib) : FMT == 1 ? *(const uint32_t *)(blk + 74 + 4 * ib)
-                                                                                         : qi[r][i].y;
-                ex[r][i] = FMT == 1 ? ((uint32_t)blk[66 + ib] | ((uint32_t)blk[106 + (ib >> 1)] << 8)) : 0u;
+                const size_t rw = (size_t)min(row0 + r, nrows - 1);
+                rc[r][i] = *(const u32x4_t *)(A + (rw * NUNITS + uu) * RS);
+                hd[r][i] = *(const u32x2_t *)(B + (rw * NB + (uu >> 3)) * HS);
             }
 #pragma unroll
             for (int qd = 0; qd < 4; qd++) xv[i][qd] = *(const u32x4_t *)(x16 + 32 * uu + 8 * qd);
@@ -194,8 +199,10 @@ __device__ __forceinline__ void own_rows_iqg_1rt(const uint8_t * __restrict__ W,
         for (int i = 0; i < UP; i++) {
             const u32x4_t xo = xv[i][0] ^ xv[i][1] ^ xv[i][2] ^ xv[i][3];
 #pragma unroll
-            for (int r = 0; r < RW; r++)
-                acc[r] += (float)((qi[r][i].x ^ qi[r][i].y ^ sg[r][i] ^ ex[r][i] ^ dh[r][i] ^ xo.x ^ xo.y ^ xo.z ^ xo.w) & 0xffu);
+            for (int r = 0; r < RW; r++) {
+                const u32x4_t v = rc[r][i] ^ xo;
+                acc[r] += (float)((v.x ^ v.y ^ v.z ^ v.w ^ hd[r][i].x ^ hd[r][i].y) & 0xffu);
+            }
         }
         continue;
 #endif
@@ -209,25 +216,25 @@ __device__ __forceinline__ void own_rows_iqg_1rt(const uint8_t * __restrict__ W,
 #pragma unroll
             for (int r = 0; r < RW; r++) {
                 if (UNR == 1) __builtin_amdgcn_sched_barrier(0);
-                const float d = (float)__builtin_bit_cast(_Float16, dh[r][i]);
-                const uint32_t iw[2] = {qi[r][i].x, qi[r][i].y}, sw = sg[r][i];
+                const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i].x & 0xffffu));
+                const uint32_t iw[2] = {rc[r][i].x, rc[r][i].y}, sw = f2x ? rc[r][i].y : rc[r][i].z;
+                const uint32_t qh = f3s ? rc[r][i].w : 0u, scn = (hd[r][i].x >> 16) | (hd[r][i].y << 16);
                 uint32_t m[8];                               // the grid reads: 8 words (4 weights each)
 #pragma unroll
                 for (int k = 0; k < 8; k++) {
-                    if (FMT == 0) m[k] = IQ_G3X[(iw[k >> 2] >> (8 * (k & 3))) & 0xffu];
-                    else if (FMT == 1) m[k] = IQ_G3S[((iw[k >> 2] >> (8 * (k & 3))) & 0xffu) | (((ex[r][i] >> k) & 1u) << 8)];
-                    else m[k] = IQ_G2X[2 * ((iw[0] >> (8 * (k >> 1))) & 0xffu) + (k & 1)];
+                    const uint32_t b4 = (iw[k >> 2] >> (8 * (k & 3))) & 0xffu;     // IQ3: index byte k
+                    const uint32_t b2 = (iw[0] >> (8 * (k >> 1))) & 0xffu;         // IQ2_XXS: index byte k / 2, its word k % 2
+                    m[k] = IQ_G[f2x ? IQ_G2X + 2 * b2 + (k & 1) : (f3s ? IQ_G3S : IQ_G3X) + (b4 | (((qh >> k) & 1u) << 8))];
                 }
                 float s = 0.0f;
 #pragma unroll
                 for (int k = 0; k < 8; k++) {
                     if (UNR == 1 && !(k & 1)) __builtin_amdgcn_sched_barrier(0);
-                    const uint32_t sb = FMT == 1 ? sw >> (4 * k) : iq_signs8((sw >> (7 * (k >> 1))) & 127u) >> (4 * (k & 1));
+                    const uint32_t sb = f3s ? sw >> (4 * k) : iq_signs8((sw >> (7 * (k >> 1))) & 127u) >> (4 * (k & 1));
                     s = iq_dot4(iq_signed(m[k], sb), xw[2 * k], xw[2 * k + 1], s);
                 }
-                const float sc = FMT == 0 ? (0.5f + (float)(sw >> 28)) * 0.5f
-                               : FMT == 1 ? 1.0f + 2.0f * (float)((ex[r][i] >> (8 + 4 * (ib & 1))) & 0xfu)
-                                          : (0.5f + (float)(sw >> 28)) * 0.25f;
+                const float sc = f3s ? 1.0f + 2.0f * (float)((scn >> (4 * ib)) & 0xfu)
+                                     : (0.5f + (float)(sw >> 28)) * (f3x ? 0.5f : 0.25f);
                 acc[r] = __builtin_fmaf(d * sc, s, acc[r]);
             }
         }

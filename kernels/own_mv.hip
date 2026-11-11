@@ -80,13 +80,14 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_##FMT##_1rt_k##KK##_r##
 }
 OWN_IQ_1RT(iq4xs, 2048, 2)
 OWN_IQ_1RT(iq4xs, 768, 2)
-// the grid formats: the workgroup stages its grid in LDS first (iq*_stage)
+// the grid formats, W in the record layout of its nrows rows (own_layout.iq_records): the workgroup stages its grid in
+// LDS first (iq_stage)
 #define OWN_IQG_1RT(NAME, FMT, KK, RW)                                                                                       \
 extern "C" __global__ void __launch_bounds__(256) own_mv_##NAME##_1rt_k##KK##_r##RW(const uint8_t * W, int nrows,          \
         const _Float16 * x16, float * out) {                                                                            \
-    NAME##_stage(threadIdx.x);                                                                                          \
+    iq_stage(threadIdx.x, 1 << FMT);                                                                                    \
     const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * RW;                                                 \
-    if (row0 < nrows) own_rows_iqg_1rt<FMT, KK, RW>(W, row0, nrows, x16, out, threadIdx.x & 31);                         \
+    if (row0 < nrows) own_rows_iqg_1rt<FMT, KK, RW>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31);                  \
 }
 OWN_IQG_1RT(iq3xxs, 0, 2048, 2)
 OWN_IQG_1RT(iq3xxs, 0, 768, 2)

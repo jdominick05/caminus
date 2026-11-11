@@ -288,6 +288,9 @@ extern "C" __global__ void __launch_bounds__(256, K3_WAVES_PER_EU) K3_RUN_ATTR k
         if (what && blockIdx.x == 0 && threadIdx.x == 0) k3_guard_report(sy, what, val, what == -1 ? gcap : gT);
         if (what) return;
     }
+#ifdef K3_LAUNCH_HOOK   // (a module's own per-launch setup of its workgroup-local memory: kernels/k3_own_ops.h, K3_Q3M_IQ)
+    K3_LAUNCH_HOOK(tape);
+#endif
     for (int s = 0; s < nseg; s++) {
         const Seg sg = tape[s];
 #ifdef K3_NO_G128

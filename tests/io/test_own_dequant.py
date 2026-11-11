@@ -8,6 +8,7 @@ import argparse, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
 from caminus import ggufio, iq_tables, own_dequant
+from caminus.engine import own_layout
 from caminus.config import ensure_gguf
 ensure_gguf()
 from gguf import quants, GGMLQuantizationType   # (the oracle only)
@@ -23,6 +24,12 @@ for name, (qk, bs, _) in sorted(own_dequant.DECODERS.items()):
     ref = quants.dequantize(raw, GGMLQuantizationType[name]).astype(np.float32).reshape(-1)
     ok = np.array_equal(ours.view(np.uint32), ref.view(np.uint32)); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name}: {A.random} random blocks bitwise gguf-py')
+for name, (bs, rs, hs) in sorted(own_layout.IQ_REC.items()):   # the kernels' record layout: the same bytes, and back
+    raw = rng.integers(0, 256, 6 * 3 * bs, dtype=np.uint8)
+    rec = own_layout.iq_records(raw, 6, 768, name)
+    ok = (rec.size == raw.size + own_layout.IQ_PAD and np.array_equal(own_layout.iq_from_records(rec, 6, 768, name), raw)
+          and np.array_equal(np.sort(rec[:raw.size]), np.sort(raw))); bad += not ok
+    print(('PASS' if ok else 'FAIL') + f' {name}: the record layout holds the blocks\' bytes and inverts')
 for cls in (quants.IQ2_XXS, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
 tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
         ('GRID_IQ2_XXS', iq_tables.GRID_IQ2_XXS, quants.IQ2_XXS.grid.reshape(256, 8)),

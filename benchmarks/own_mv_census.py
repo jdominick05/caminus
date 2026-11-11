@@ -21,7 +21,7 @@ from caminus import ggufio
 from caminus.device import capacity
 from caminus.device.hip import Module
 from caminus.engine import gguf as G            # (llama.cpp's gg_mv_* launchers: the yardstick arm; puts gguf-py on the path)
-from caminus.engine.own_layout import q6k_planes
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
 from gguf import quants, GGMLQuantizationType   # (the test oracle only)
 
 ap = argparse.ArgumentParser()
@@ -76,6 +76,7 @@ def run_read(w, out_sink):
 def to_dev(raw, fmt, rows, K, own):
     b = np.ascontiguousarray(raw)
     if own and fmt == 'Q6_K': b = q6k_planes(b, rows, K)
+    if own and fmt in IQ_REC: b = iq_records(b, rows, K, fmt)
     return torch.from_numpy(b.copy()).to(dev)
 
 
