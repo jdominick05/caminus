@@ -129,13 +129,15 @@ __device__ __forceinline__ void own_rows_iq4xs_1rt(const uint8_t * __restrict__ 
 // IQ3_S, or IQ2_XXS (the host refuses a tape that needs both kinds). Why: the compiler sizes a kernel's register
 // budget by the workgroups its LDS lets a CU hold; K3's decode module sits just under the size where 4 fit (15,748 of
 // 16,384 B), and with 5 KB more k3_run was allowed, and took, 97 VGPRs.
-enum { IQ_G3X = 0, IQ_G3S = 256, IQ_G2X = 0, IQ_GN = 768 };   // the grids' first words (IQ2_XXS entry e: words 2 e, 2 e + 1)
+// IQ2_XXS entry e (8 weights) is words e (weights 0 .. 3) and 256 + e (4 .. 7): a lookup's address is then an index byte
+// plus one bit times 256 in every format (IQ3_S: its index's ninth bit), and the tile's eight lookups are one statement.
+enum { IQ_G3X = 0, IQ_G3S = 256, IQ_G2X = 0, IQ_GN = 768 };   // the grids' first words
 __shared__ uint32_t IQ_G[IQ_GN];
 // which: bit 0 IQ3_XXS, bit 1 IQ3_S, or bit 2 alone IQ2_XXS; all 256 threads of the workgroup call it (one barrier)
 __device__ __forceinline__ void iq_stage(int tid, int which) {
     if (which & 1) IQ_G[IQ_G3X + tid] = IQ3XXS_GRID[tid];
     if (which & 2) { IQ_G[IQ_G3S + tid] = IQ3S_GRID[tid]; IQ_G[IQ_G3S + 256 + tid] = IQ3S_GRID[256 + tid]; }
-    if (which & 4) { const uint64_t e = IQ2XXS_GRID[tid]; IQ_G[IQ_G2X + 2 * tid] = (uint32_t)e; IQ_G[IQ_G2X + 2 * tid + 1] = (uint32_t)(e >> 32); }
+    if (which & 4) { const uint64_t e = IQ2XXS_GRID[tid]; IQ_G[IQ_G2X + tid] = (uint32_t)e; IQ_G[IQ_G2X + 256 + tid] = (uint32_t)(e >> 32); }
     __syncthreads();
 }
 // 4 magnitude bytes m (1 .. 127 each) and 4 sign bits sb (bit k set: weight k is negative) -> 4 bytes weight + 128:
@@ -217,24 +219,35 @@ __device__ __forceinline__ void own_rows_iqg_1rt(const uint8_t * __restrict__ Wm
             for (int r = 0; r < RW; r++) {
                 if (UNR == 1) __builtin_amdgcn_sched_barrier(0);
                 const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i].x & 0xffffu));
-                const uint32_t iw[2] = {rc[r][i].x, rc[r][i].y}, sw = f2x ? rc[r][i].y : rc[r][i].z;
-                const uint32_t qh = f3s ? rc[r][i].w : 0u, scn = (hd[r][i].x >> 16) | (hd[r][i].y << 16);
+                // What differs between the formats is settled here, once per unit, so that the eight lookups and the eight
+                // dot4 below are the same statements in every format. With the format chosen inside each lookup and each
+                // sign nibble, a token of the IQ2_XXS arm took 5.63 ms in the runtime-format body (RX 7900 XT, depth 8);
+                // settled per unit 5.12 ms; with the format fixed at compile time 4.95 ms. Same bits in the three.
+                //   index bytes: 8 (IQ3), or IQ2_XXS's 4, each twice (its entry's two words: bit 8 set for the second)
+                //   signs: 32 bits (IQ3_S), or four 7-bit codes, each with its parity as the eighth bit
+                const uint32_t sw = f2x ? rc[r][i].y : rc[r][i].z, scn = (hd[r][i].x >> 16) | (hd[r][i].y << 16);
+                uint32_t iw[2] = {rc[r][i].x, rc[r][i].y}, qh = 0u, gb = 0u, sg = sw, si = sw >> 28;
+                if (f3s) { qh = rc[r][i].w; gb = IQ_G3S; si = (scn >> (4 * ib)) & 0xfu; }
+                else {     // (branches on the wave-uniform format: 0.02 to 0.05 ms per token under selects of both forms)
+                    sg = iq_signs8(sw & 127u) | (iq_signs8((sw >> 7) & 127u) << 8) |
+                         (iq_signs8((sw >> 14) & 127u) << 16) | (iq_signs8((sw >> 21) & 127u) << 24);
+                    if (f2x) {
+                        iw[1] = __builtin_amdgcn_perm(0u, iw[0], 0x03030202u); iw[0] = __builtin_amdgcn_perm(0u, iw[0], 0x01010000u);
+                        qh = 0xaau;
+                    }
+                }
                 uint32_t m[8];                               // the grid reads: 8 words (4 weights each)
 #pragma unroll
-                for (int k = 0; k < 8; k++) {
-                    const uint32_t b4 = (iw[k >> 2] >> (8 * (k & 3))) & 0xffu;     // IQ3: index byte k
-                    const uint32_t b2 = (iw[0] >> (8 * (k >> 1))) & 0xffu;         // IQ2_XXS: index byte k / 2, its word k % 2
-                    m[k] = IQ_G[f2x ? IQ_G2X + 2 * b2 + (k & 1) : (f3s ? IQ_G3S : IQ_G3X) + (b4 | (((qh >> k) & 1u) << 8))];
-                }
+                for (int k = 0; k < 8; k++)
+                    m[k] = IQ_G[gb + (((iw[k >> 2] >> (8 * (k & 3))) & 0xffu) | (((qh >> k) & 1u) << 8))];
                 float s = 0.0f;
 #pragma unroll
                 for (int k = 0; k < 8; k++) {
                     if (UNR == 1 && !(k & 1)) __builtin_amdgcn_sched_barrier(0);
-                    const uint32_t sb = f3s ? sw >> (4 * k) : iq_signs8((sw >> (7 * (k >> 1))) & 127u) >> (4 * (k & 1));
-                    s = iq_dot4(iq_signed(m[k], sb), xw[2 * k], xw[2 * k + 1], s);
+                    s = iq_dot4(iq_signed(m[k], sg >> (4 * k)), xw[2 * k], xw[2 * k + 1], s);
                 }
-                const float sc = f3s ? 1.0f + 2.0f * (float)((scn >> (4 * ib)) & 0xfu)
-                                     : (0.5f + (float)(sw >> 28)) * (f3x ? 0.5f : 0.25f);
+                // (0.5 + s) 0.5 = (1 + 2 s) 0.25 and (0.5 + s) 0.25 = (1 + 2 s) 0.125, exactly: one form for the three
+                const float sc = (float)(1u + 2u * si) * (f3s ? 1.0f : f3x ? 0.25f : 0.125f);
                 acc[r] = __builtin_fmaf(d * sc, s, acc[r]);
             }
         }

@@ -79,9 +79,18 @@ __device__ __forceinline__ void own_1rt_acc(const uint8_t * W, const Seg & sg, i
         own_rows_iq4xs_1rt<0, OWN_K3_RW, 1, 1>(W, grow, lim, x, nullptr, l, sg.K, res);
     }
 #endif
+#ifdef OWN_K3_IQG_ONE   // (a timing experiment, never a shipped build: the grid body with ONE format fixed at compile time,
+                        //  0 IQ3_XXS / 1 IQ3_S / 2 IQ2_XXS, OWN_K3_IQG_UP units per pass, no lane copy)
+    if (sg.work == OWN_IQ3_XXS || sg.work == OWN_IQ3_S || sg.work == OWN_IQ2_XXS)
+        own_rows_iqg_1rt<OWN_K3_IQG_ONE, 0, OWN_K3_RW, OWN_K3_IQG_UP, 1>(W, total, grow, lim, x, nullptr, lane, sg.K, res);
+#define OWN_K3_NO_IQG
+#endif
 #ifndef OWN_K3_NO_IQG   // (one body for the three grid formats: three were 13 more spilled VGPRs in k3_run)
     if (sg.work == OWN_IQ3_XXS || sg.work == OWN_IQ3_S || sg.work == OWN_IQ2_XXS) {
-        int l = lane; asm volatile("" : "+v"(l));
+        int l = lane;
+#ifndef OWN_K3_IQG_NOCOPY   // (a timing experiment: the runtime-format body without the opaque lane copy)
+        asm volatile("" : "+v"(l));
+#endif
         own_rows_iqg_1rt<3, 0, OWN_K3_RW, 1, 1>(W, total, grow, lim, x, nullptr, l, sg.K, res,
                                                 sg.work == OWN_IQ3_XXS ? 0 : sg.work == OWN_IQ3_S ? 1 : 2);
     }

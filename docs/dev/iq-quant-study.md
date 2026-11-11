@@ -234,10 +234,11 @@ module in the same process. ms per token, median of the five rounds (lowest .. h
 Against A on the same module in the same round, at depth 8: B −0.003 to −0.023 ms, C +0.656 to +0.683, D +0.532 to
 +0.556; at 4,096: B +0.003 to +0.032, C +0.788 to +0.814, D +0.694 to +0.722.
 
-- **H2's direction holds and its numbers do not.** Every arm sits above its reference line, as predicted, but all
-  three ranges were too low: B by 0.12 ms, C by 0.86, D by 0.99. The model behind them (a stage costs its bytes at the
-  bus's speed plus a fixed 4 to 5 µs) is wrong for these formats: **arms C and D are slower than A**, with 18 % and
-  33 % fewer bytes per token.
+- **H2's direction holds and its numbers do not.** Every arm sits above its reference line, as predicted, but the
+  ranges were too low: B by 0.12 ms and C by 0.86 (D, not scored, sits 0.99 above its range). The model behind them
+  (a stage costs its bytes at the bus's speed plus a fixed 4 to 5 µs) is wrong for these tiles in this module:
+  **arms C and D are slower than A**, with 18 % and 33 % fewer bytes per token. How much of that is the formats and
+  how much the module's one shared grid body is taken apart under "After scoring" below.
 - **B ties A.** Its 7 % fewer bytes buy 0.00 to 0.02 ms at depth 8 and nothing at 4,096.
 - **Carrying the four formats costs A 0.10 ms** per token at depth 8 and 0.17 at 4,096 (same bits, shipped module
   against study module in one process): the study module spills 66 scalars against 53.
@@ -254,10 +255,11 @@ One traced token per arm (`benchmarks/q3moe_trace.py --modules k3_q3m_iq_trace`)
 | C, its IQ4_XS layers (down only, 13) | | 15.36 | 12.8–14.0 | |
 | D (IQ2_XXS, not scored) | 26.15 | 20.29 | 11.7–17 / 8.8–12 | 2.61 ms |
 
-- **The cost is inside the expert stages.** The stages outside them agree across arms to 0.06 ms; staging the grids
-  into shared memory at the launch does not show (the embedding segment, whose prologue stages them, takes 3.5 to
-  3.8 µs on every arm).
-- **The grid formats are bound by their decode, not by the bus.** A layer's gate and up are 16 matvecs of 768 × 2048
+- **The cost is inside the expert stages.** The stages outside them agree across arms to 0.06 ms. Staging the grids
+  into shared memory happens at the launch, before the trace's first timestamp, so the trace cannot see it; the wall
+  clock can. C is 0.667 ms slower than A on the wall and 0.669 ms in the trace, of which the expert stages are
+  0.613; D is 0.547 and 0.515: staging costs at most the 0.03 ms between them.
+- **In this module the grid formats are bound by their decode, not by the bus.** A layer's gate and up are 16 matvecs of 768 × 2048
   on 192 workgroups at once, 25.2 M weights: 20.7 µs as Q4_K (1.21 × 10^12 weights/s), 28.8 µs on C (0.87), 26.2 µs
   as IQ2_XXS (0.96). An IQ3_XXS layer's 9.6 MB of gate and up arrive at 334 GB/s of the bus's 858. Every "per stage" range is
   missed on the high side, IQ4_XS by 0.3 and 1.1 µs.
@@ -278,7 +280,12 @@ loads-only build (the same tapes with every expert weight read and no arithmetic
 | C | 5.769 | 4.189 | 1.580 – 1.596 | 0.75–1.2 |
 | D (not scored) | 5.633 | 4.017 | 1.616 – 1.621 | 0.7–1.1 |
 
-- **H1 holds as worded** (no arm's decode exceeds its loads), B inside its range; **C's range is missed** by 0.4 ms.
+- **H1, read two ways.** Its "fails if" clause compares an arm's decode time with its loads time, and the table's
+  loads-only token is everything but the decode (the attention, the head and every other stage included): by that
+  reading it holds (C: 1.59 against 4.19 ms), with B inside its range and **C's range missed** by 0.4 ms. By its
+  title ("decoding stays the smallest part") and per stage it fails for the grid formats: an IQ3_XXS layer's gate and
+  up take 28.9 µs on the RX 7900 XTX for 11.2 µs of bytes at the bus's speed, so the decode is the larger part of
+  the stage.
 - **The bytes do buy their share when nothing is decoded:** loads-only tokens fall from 4.53 ms (A) to 4.37, 4.19 and
   4.02 ms. The decode then takes back 0.2 ms (B), 1.2 ms (C) and 1.2 ms (D) more than Q4_K's.
 - A's decode on the shipped module is 0.31 ms here, not the 0.57 ms the predictions quote: that figure was measured
@@ -305,8 +312,9 @@ teacher-forced over the same 128 tokens. The fp32 reference against the float64 
   is position 37, where the reference's two best tokens are 1.8 % apart (0.018 in log probability; the engine has
   them 0.076 the other way, llama.cpp 0.117 the reference's way). The RX 7900 XTX gives the same numbers (mean KLD
   4.221e-04, 127 of 128).
-- The engine's means are set by a few positions, not by its arithmetic (medians 2e-06 to 3e-05): a router pick
-  flips where two experts tie, as shown for arm D above.
+- The engine's means are set by a few positions (medians 2e-06 to 3e-05; C has eight positions above 1e-03). A
+  router pick flipping where two experts tie is shown for arm D at one position above; for the positions here it is
+  inferred, not tested.
 
 ### llama.cpp on the same files (RX 7900 XTX)
 
@@ -325,3 +333,53 @@ beside it from the table above (decode, the study module, depth 8 and 4,096):
 llama.cpp's decode moves by 4 % across the four arms (148.8 to 155.1 tok/s) for a third fewer bytes: there too the
 bytes are not what a token waits for. Its prefill is 10 % slower on B and C than on A, and 1 % on D.
 
+## After scoring: the shared grid body taken apart (RX 7900 XT)
+
+Nothing above is rescored: every table above is the study module as it was when the predictions were scored. This
+section asks what the scored result leaves open: arms C and D decode slower than A with fewer bytes; is that the
+formats, or the one shared body the 96-register fit forced on the three grid formats?
+
+Two experiment builds answer it. Neither is an arm and neither ships: the module with the grid body's format fixed at
+compile time to arm D's (`OWN_K3_IQG_ONE`), and the shared body without its opaque lane copy (`OWN_K3_IQG_NOCOPY`).
+`benchmarks/q3moe_depth.py --depths 8,4096 --tokens 32 --rounds 5`, the builds of an arm interleaved as separate
+processes, ms per token at depth 8 / 4,096 (decode):
+
+| Arm | Shared body as scored | Shared body reworked | Format fixed at compile time | Loads only |
+|---|---|---|---|---|
+| A | 4.935 / 5.756 | 4.936 / 5.736 | | 4.555 / 5.323 |
+| B | 4.964 / 5.799 | 4.964 / 5.771 | | 4.406 / 5.171 |
+| C | 5.785 / 6.695 | 5.097 / 5.943 | (three formats in one file: no such build) | 4.197 / 4.976 |
+| D | 5.639 / 6.540 | 5.121 / 5.983 | 4.957 / 5.837 | 4.028 / 4.801 |
+
+- **Most of the scored gap was the shared body's form, not the formats.** As scored, the body chose the format inside
+  each of a unit's eight grid lookups and eight sign nibbles (both forms computed, then a select). Reworked, what
+  differs between the formats is settled once per unit and the lookups and dot products are the same statements for
+  all three: IQ2_XXS's grid is staged as two half-tables, so a lookup's address is an index byte plus one bit × 256
+  in every format; the sign codes are expanded to 32 sign bits once; the scale is (1 + 2 s) times a constant. C gains
+  0.69 ms per token and D 0.52; A and B do not move.
+- **Same bits.** Logits of 128 positions on B, C and D are bitwise the scored module's, A's are bitwise the shipped
+  module's, and `tests/engine/test_own_iq_ops.py --layers all` passes on C and D (worst row 2.1e-6 of the rms against
+  float64). So the accuracy table above holds for the reworked body as it stands.
+- **D, taken apart:** with its format fixed at compile time arm D ties A on the same module (4.957 against 4.936 ms).
+  Its bytes save 0.53 ms of loads and its decode takes 0.93 ms against Q4_K's 0.38: IQ2_XXS's decode costs what its
+  bytes save. One code object for three formats costs another 0.16 ms (5.121 against 4.957). The opaque lane copy is
+  not that cost: without it the token is 0.01 to 0.02 ms faster, below what this benchmark resolves.
+- **C's floor is unknown.** Only its gain is measured (5.785 to 5.097 ms); it is still 0.16 ms slower than A. No
+  single-format build can run a file with three expert formats.
+- **Decode time (full minus loads only) with the reworked body:** A 0.38 ms, B 0.56, C 0.90 (1.59 as scored),
+  D 1.09 (1.61 as scored; 0.93 with the format fixed).
+- **k3_run:** 96 VGPRs, 0 spilled, 64 spilled scalars (66 as scored); the trace build 96, 0, 79. The shipped
+  modules' code is unchanged, instruction for instruction; of the 67 kernel sources, 64 preprocess to the same text
+  as before the rework (the study module, its trace build and the standalone matvec kernels differ).
+
+The standalone tiles share the body, so the alternated census of stop rule 4 was run again on the reworked one
+(`benchmarks/own_mv_census.py`, every role of the token, 5 rounds, the two files alternated three times; µs per
+matvec, own tile and (own minus read-only)):
+
+| Shape (role) | IQ3_XXS | IQ2_XXS |
+|---|---|---|
+| 768 × 2048 (gate) | 13.22, 13.12, 13.18 (0.74, 0.68, 0.84) | 12.95, 13.27, 13.34 (0.47, 0.73, 0.53) |
+| 768 × 2048 (up) | 13.22, 13.25, 13.21 (0.78, 0.71, 0.84) | 13.29, 13.34, 13.17 (0.85, 0.75, 0.52) |
+| 2048 × 768 (down) | 9.74, 9.46, 9.54 (0.54, 0.57, 0.55) | 9.72, 9.39, 9.40 (0.53, 0.50, 0.49) |
+
+The two tiles are within this instrument's spread of each other on every shape. The rule stays unruled.
