@@ -6,9 +6,9 @@ CLAUDE.md imports this file.
 ## What this is
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
-- It serves seven models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
+- It serves eight models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
   cards, with the DFlash2 drafter), Qwen3.6-35B-A3B GSQ and HauhauCS (one card), AREX-2 27B (one card, dense),
-  Qwen3-Coder-Next (two cards), Qwen3-30B-A3B Q4_K_M and Swift 1.5 27B Q4_K_M (dense; each on one 24 GB card, on
+  Qwen3-Coder-Next (two cards), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.

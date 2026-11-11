@@ -76,6 +76,7 @@ are welcome too.
 | Qwen3-Coder-Next 80B (30 GB) | 2 | 136 tok/s | 82 tok/s |
 | Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB) | 248 tok/s | 148 tok/s |
 | Swift 1.5 27B Q4_K_M (17 GB) | 1 (24 GB) | 42 tok/s | 37 tok/s |
+| ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1 | 47 tok/s | 40 tok/s |
 
 Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:
 [models](docs/models.md). Where every number comes from: [benchmarks](docs/dev/benchmarks.md).

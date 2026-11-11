@@ -112,10 +112,9 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
   The attention reads every earlier position per query head, so both the prompt rate and decode fall with depth.
 - Swift 1.5 needs a 24 GB card. With its prompt cache it projects 19.1 GiB at 12K, past an XT's room.
 
-### ThinkingCap RCO 4.2 bpw (dense 27B, own code; decode and prefill, not served yet)
+### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)
 
-Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. No serving yet; the grid and task sizes are
-untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized
+Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The grid and task sizes are untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized
 (`tests/engine/test_q35_dense.py --model GGUF --ref REF.npz`).
 
 | | RX 7900 XTX | RX 7900 XT |
@@ -134,6 +133,11 @@ untuned. Caminus's figure is the median of positions 64 .. 127 with each step sy
   own prefill-then-decode of the same rows: 4.5e-4, 64/64 (`tools/guard.sh LOG 1800 python -I
   tests/prefill/test_q35_prefill.py GGUF --ref REF.npz --llama LL.bin --speed 2048`, which also prints the prefill speed
   above).
+- The served path (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N
+  --block-imports gguf,tokenizers`; the XTX with `--max-ctx 32768 --needle 28000 --restart`):
+  - XTX: greedy decode 49.5 tok/s; a 6,760-token prompt at 707 tok/s, then decode at 30 tok/s; a 27,712-token prompt at
+    326 tok/s (the needle found), then decode at 16 tok/s;
+  - XT: the server picks 53,248 tokens of context by itself; greedy decode 40.9 tok/s; a 6,760-token prompt at 532 tok/s.
 
 ### Qwen3-30B-A3B Q4_K_M
 

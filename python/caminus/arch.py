@@ -461,7 +461,8 @@ class Q3MoE(OneCard):
 
 
 class Dense35(OneCard):
-    """the dense qwen35 line on Caminus's own code (Swift 1.5 Q4_K_M): Dense35Own on one card, T = 1, the own reader,
+    """the dense qwen35 line on Caminus's own code (Swift 1.5 Q4_K_M, ThinkingCap RCO 4.2 bpw: Dense35Own picks its decode
+    module from the file's formats, the prefill its object): Dense35Own on one card, T = 1, the own reader,
     kernels and tokenizer; the prompt through its own batched prefill (caminus.prefill.q35own.Q35OwnPrefill). Selected
     through its catalog model (of(): the file's catalog model names this entry), never by the header: AREX-2 is a qwen35
     file too and keeps OneCard's engine. No drafter yet."""

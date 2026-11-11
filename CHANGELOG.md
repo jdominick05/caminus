@@ -7,6 +7,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### New
 
+- **Two dense 27B models on Caminus's own code.** `caminus pull swift-1.5` (Swift 1.5, Q4_K_M, a 24 GB card) and
+  `caminus pull thinkingcap` (ThinkingCap, 4.2 bits per weight, either card) are served from the GGUF file to the output
+  token with code written for Caminus. ThinkingCap decodes at 47 tok/s on an XTX and 39 on an XT (llama.cpp on the same
+  cards: 40 and 34) and reads a 2K prompt at 942 tok/s; its output is about 1,000 times closer to an exact reference of
+  the model than llama.cpp's. Neither has a drafter yet. See [models](docs/models.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the
