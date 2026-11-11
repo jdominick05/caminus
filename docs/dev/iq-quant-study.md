@@ -285,7 +285,7 @@ loads-only build (the same tapes with every expert weight read and no arithmetic
   reading it holds (C: 1.59 against 4.19 ms), with B inside its range and **C's range missed** by 0.4 ms. By its
   title ("decoding stays the smallest part") and per stage it fails for the grid formats: an IQ3_XXS layer's gate and
   up take 28.9 µs on the RX 7900 XTX for 11.2 µs of bytes at the bus's speed, so the decode is the larger part of
-  the stage.
+  the stage. (With the body reworked after scoring, below, the same stage takes 20.0 µs.)
 - **The bytes do buy their share when nothing is decoded:** loads-only tokens fall from 4.53 ms (A) to 4.37, 4.19 and
   4.02 ms. The decode then takes back 0.2 ms (B), 1.2 ms (C) and 1.2 ms (D) more than Q4_K's.
 - A's decode on the shipped module is 0.31 ms here, not the 0.57 ms the predictions quote: that figure was measured
@@ -362,7 +362,8 @@ processes, ms per token at depth 8 / 4,096 (decode):
   float64). So the accuracy table above holds for the reworked body as it stands.
 - **D, taken apart:** with its format fixed at compile time arm D ties A on the same module (4.957 against 4.936 ms).
   Its bytes save 0.53 ms of loads and its decode takes 0.93 ms against Q4_K's 0.38: IQ2_XXS's decode costs what its
-  bytes save. One code object for three formats costs another 0.16 ms (5.121 against 4.957). The opaque lane copy is
+  bytes save. One code object for three formats costs another 0.16 ms on this card (5.121 against 4.957; on the
+  RX 7900 XTX it costs nothing, below). The opaque lane copy is
   not that cost: without it the token is 0.01 to 0.02 ms faster, below what this benchmark resolves.
 - **C's floor is unknown.** Only its gain is measured (5.785 to 5.097 ms); it is still 0.16 ms slower than A. No
   single-format build can run a file with three expert formats.
@@ -383,3 +384,63 @@ matvec, own tile and (own minus read-only)):
 | 2048 × 768 (down) | 9.74, 9.46, 9.54 (0.54, 0.57, 0.55) | 9.72, 9.39, 9.40 (0.53, 0.50, 0.49) |
 
 The two tiles are within this instrument's spread of each other on every shape. The rule stays unruled.
+
+
+### The reworked body on the RX 7900 XTX
+
+Every table of the scored results is the RX 7900 XTX, so the rework was run there too: the same objects, the engine
+tests per arm (all pass, logits as on the RX 7900 XT), then `benchmarks/q3moe_depth.py --depths 8,1024,4096,16384
+--tokens 32 --rounds 5` with an arm's builds interleaved, ms per token (decode):
+
+| Arm, build | Depth 8 | 1,024 | 4,096 | 16,384 |
+|---|---|---|---|---|
+| A, shipped module | 4.048 | 4.236 | 4.710 | 6.201 |
+| A, study module as scored | 4.142 | 4.347 | 4.881 | 6.378 |
+| A, study module reworked | 4.137 | 4.302 | 4.795 | 6.273 |
+| B as scored | 4.131 | 4.357 | 4.888 | 6.425 |
+| B reworked | 4.129 | 4.345 | 4.857 | 6.381 |
+| C as scored | 4.807 | 5.095 | 5.663 | 7.204 |
+| C reworked | 4.175 | 4.424 | 4.939 | 6.478 |
+| D as scored | 4.692 | 4.965 | 5.564 | 7.076 |
+| D reworked | 4.130 | 4.350 | 4.858 | 6.364 |
+| D, format fixed at compile time | 4.140 | 4.383 | 4.908 | 6.407 |
+
+`benchmarks/q3moe_trace.py` on the reworked trace build, µs per layer, gate and up as one stage / down:
+
+| Arm | Gate and up | Down |
+|---|---|---|
+| A | 20.91 (Q4_K) | 16.09 (Q6_K), 14.77 (Q4_K) |
+| B | 21.11 | 15.07 |
+| C | 20.02 (IQ3_XXS), 20.75 (IQ3_S) | 16.43 (IQ3_XXS), 17.31 (IQ3_S), 15.28 (IQ4_XS) |
+| D | 19.34 | 16.44 |
+
+- **On this card the four arms are within 0.05 ms of each other at depth 8** on the one module (4.129 to 4.175 ms);
+  as scored, C and D were 0.67 and 0.55 ms behind A. C gains 0.63 ms per token and D 0.56. At 4,096 and 16,384 A is
+  ahead again by 0.06 to 0.2 ms (the reworked object is 0.09 to 0.1 ms faster for A itself at these depths, B and D
+  0.03 to 0.06; why A gains from a body it does not run was not isolated).
+- **The cost of one code object for three formats is the RX 7900 XT's alone.** Here the build with the format fixed
+  at compile time is no faster than the shared body (4.140 against 4.130 ms, and 0.03 to 0.05 ms slower at depth).
+- **Fewer bytes still buy nothing.** D reads 33 % fewer expert bytes than A and C 18 %; neither is faster than A at
+  any depth. A grid format's stage now takes what Q4_K's takes (19.3 to 20.8 µs against 20.9 for gate and up), so
+  the bytes it saves go to its decode, on both cards. llama.cpp shows the same on the same files (above).
+- The study module still costs arm A 0.07 to 0.09 ms against the shipped one (64 against 53 spilled scalars).
+
+### Accuracy at 16,384 tokens (H4's second depth)
+
+`tools/gates/q3moe_depth_gmodel.py --decode-only`: 16,384 teacher-forced one-token steps on the reworked module (no
+prefill, which the codebook formats do not have yet), the last 64 positions scored against the arm's own fp32
+reference; llama.cpp fills the prompt in batches and decodes the same 64. B, C and D on the RX 7900 XT, A on the RX
+7900 XTX.
+
+| Arm | Caminus mean KLD (max) | llama.cpp mean KLD (max) | llama.cpp over Caminus | Top-1 of 64, Caminus / llama.cpp |
+|---|---|---|---|---|
+| A (study module) | 1.61e-03 (2.9e-02) | 5.06e-03 (3.9e-02) | 3.1 | 61 / 60 |
+| B | 8.59e-04 (7.0e-03) | 4.48e-03 (4.6e-02) | 5.2 | 64 / 61 |
+| C | 2.03e-03 (1.8e-02) | 8.71e-03 (7.3e-02) | 4.3 | 64 / 61 |
+| D (not scored) | 1.48e-03 (7.5e-03) | 6.94e-03 (7.1e-02) | 4.7 | 64 / 60 |
+
+- **H4 holds at this depth on A, B and C:** the ratio is at least 3 and the engine's top-1 is at least llama.cpp's.
+  A's ratio is the closest to the line (3.1).
+- Both engines are further from the reference here than at 128 tokens (the engine's means are 3 to 30 times
+  larger). Which stage that comes from was not measured.
+
