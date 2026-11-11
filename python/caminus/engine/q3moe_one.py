@@ -180,7 +180,7 @@ class Q3MoEOne:
         elif t.type in RS_CONT:   # (-> the codes and, a fifth entry, the row scales; a row with two scales is refused there)
             b, sc = rs_planes(b, R, K, t.type)
             return (MODULE_RS[t.type][1], int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda'), torch.from_numpy(sc).to('cuda'))
-        elif t.type not in ('Q4_K', 'IQ4_XS'): raise ValueError(f'Q3MoEOne: {name} is {t.type} ({sorted(k3.OWN_BLOCK)} only)')
+        elif t.type not in ('Q4_K', 'IQ4_XS'): raise ValueError(f'Q3MoEOne: {name} is {t.type} ({sorted((set(k3.OWN_BLOCK) - set(k3.OWN_RS_FMT)) | set(RS_CONT))} only)')
         return t.type, int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda')
 
     def _f32(self, name, shape=None):

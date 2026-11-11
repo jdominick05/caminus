@@ -132,6 +132,13 @@ def q4_0(raw):
     return (_f16(b[:, 0:2].copy()).reshape(-1, 1) * q.astype(np.float32)).reshape(-1)
 
 
+def q4_1(raw):
+    """Q4_1: 20-byte blocks of 32: d (fp16), m (fp16), 16 bytes as Q4_0's; value = d q + m, q in 0 .. 15"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 20); qs = b[:, 4:]
+    q = np.concatenate([qs & 0xF, qs >> 4], axis=1).astype(np.float32)
+    return (_f16(b[:, 0:2].copy()).reshape(-1, 1) * q + _f16(b[:, 2:4].copy()).reshape(-1, 1)).reshape(-1)
+
+
 def q2_0(raw):
     """Q2_0 (ggml type 42): 18-byte blocks of 64: d (fp16), 16 bytes (value j in bits 2 (j % 4) of byte j / 4); the
     levels are -1, 0, +1, +2 times d"""
@@ -142,7 +149,7 @@ def q2_0(raw):
 
 DECODERS = {'Q4_K': (256, 144, q4_k), 'Q6_K': (256, 210, q6_k), 'IQ4_XS': (256, 136, iq4_xs),
             'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s), 'IQ2_XXS': (256, 66, iq2_xxs),
-            'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q2_0': (64, 18, q2_0)}
+            'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q4_1': (32, 20, q4_1), 'Q2_0': (64, 18, q2_0)}
 
 
 def dequant(raw, type_name, n_values):

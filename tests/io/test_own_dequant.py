@@ -18,7 +18,7 @@ bad = 0; nvals = 0
 rng = np.random.default_rng(20261110)
 for name, (qk, bs, _) in sorted(own_dequant.DECODERS.items()):
     raw = rng.integers(0, 256, (A.random, bs), dtype=np.uint8)
-    for o in {'Q4_K': (0, 2), 'Q6_K': (208,)}.get(name, (0,)):          # (the fp16 block scales: finite and small)
+    for o in {'Q4_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2)}.get(name, (0,)):          # (the fp16 block scales: finite and small)
         raw[:, o:o + 2] = (rng.standard_normal(A.random) * 0.01).astype(np.float16).view(np.uint8).reshape(-1, 2)
     ours = own_dequant.dequant(raw.reshape(-1), name, A.random * qk)
     ref = quants.dequantize(raw, GGMLQuantizationType[name]).astype(np.float32).reshape(-1)

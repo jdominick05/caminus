@@ -139,6 +139,12 @@ def q4_0(raw):
     return (f16(b[:, 0:2]).view(-1, 1) * q.float()).reshape(-1)
 
 
+def q4_1(raw):
+    b = raw.view(-1, 20); qs = b[:, 4:]
+    q = torch.cat([qs & 0xF, qs >> 4], dim=1).float()
+    return (f16(b[:, 0:2]).view(-1, 1) * q + f16(b[:, 2:4]).view(-1, 1)).reshape(-1)
+
+
 def q2_0(raw):
     b = raw.view(-1, 18); qs = b[:, 2:]
     q = ((qs[:, :, None] >> torch.tensor([0, 2, 4, 6], device=b.device, dtype=torch.uint8)) & 3).reshape(-1, 64).to(torch.int8) - 1
@@ -152,7 +158,7 @@ def act8(v):
 
 
 DECODERS = {'Q4_K': q4_k, 'Q6_K': q6_k, 'IQ4_XS': iq4_xs, 'IQ3_XXS': iq3_xxs, 'IQ3_S': iq3_s, 'IQ2_XXS': iq2_xxs,
-            'Q8_0': q8_0, 'Q4_0': q4_0, 'Q2_0': q2_0}
+            'Q8_0': q8_0, 'Q4_0': q4_0, 'Q4_1': q4_1, 'Q2_0': q2_0}
 
 
 class W:

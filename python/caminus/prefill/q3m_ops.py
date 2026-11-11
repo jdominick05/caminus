@@ -47,7 +47,7 @@ class Ops:
         """y[dst] = W x16[src] in fp32. Dense (n tokens: src = dst = t) or experts (work = (items, nitems, bound, xs, yd) from
         group(): bound = the grid's work-item count, the device's *nitems decides). x16: fp16, row stride ldx; y: fp32, row
         stride ldy (a view's data_ptr: a column offset into a wider row)"""
-        fmt, R, K, wb = W
+        fmt, R, K, wb = W[:4]   # (a row-scale study tensor carries a fifth entry, its scales: its format is refused below)
         if K % 256: raise ValueError(f'q3m mm: K {K} is not a multiple of 256')
         if (work is None) == (n is None): raise ValueError('q3m mm: n (dense) or work (experts), one of them')
         if work is None:
