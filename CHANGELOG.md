@@ -12,6 +12,10 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,493 tok/s (llama.cpp: 3,853). Every step from the
   GGUF file to the output token is code written for Caminus, and its output is about 6 times closer to an exact
   reference of the model than llama.cpp's. See [docs/dev/qwen3-30b-a3b.md](docs/dev/qwen3-30b-a3b.md).
+- **What the experts' weight format buys, measured.** Two studies on Qwen3-30B-A3B: the IQ codebook formats decode in
+  the time their smaller files save (no faster than Q4_K_M at any depth), and plain 4-bit codes with one scale per row
+  gain 2 to 3 % at about the same accuracy. Study modules only; the served engine is unchanged. See
+  [the IQ quant study](docs/dev/iq-quant-study.md) and [the row-scale study](docs/dev/row-scale-study.md).
 - **Qwen Code sees how much context it has left.** After each batch of tool calls, one line in the tool result says how
   many tokens are used and how many are left before automatic compaction, so the model can plan the end of a long task.
   The prompt cache keeps working. On by default; `caminus qwen-code setup --context-note off` turns it off. See
