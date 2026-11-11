@@ -21,13 +21,14 @@ from caminus import ggufio
 from caminus.device import capacity
 from caminus.device.hip import Module
 from caminus.engine import gguf as G            # (llama.cpp's gg_mv_* launchers: the yardstick arm; puts gguf-py on the path)
-from caminus.engine.own_layout import q6k_planes
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
 from gguf import quants, GGMLQuantizationType   # (the test oracle only)
 
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf')
 ap.add_argument('--rounds', type=int, default=5)
 ap.add_argument('--layers', type=int, default=48)
+ap.add_argument('--roles', default=None, help='comma-separated roles (default: all), e.g. ffn_gate_exps,ffn_down_exps')
 ap.add_argument('--log', default=None, help='append the result lines to this file too')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
@@ -61,7 +62,9 @@ def slice_bytes(t, e, rows, K):
 
 
 def own_kernel(fmt, K):
-    nm = {'Q4_K': f'own_mv_q4_k_1rt_k{K}', 'Q6_K': f'own_mv_q6_k_pl_k{K}'}.get(fmt)
+    nm = {'Q4_K': f'own_mv_q4_k_1rt_k{K}', 'Q6_K': f'own_mv_q6_k_pl_k{K}', 'IQ4_XS': f'own_mv_iq4xs_1rt_k{K}_r2',
+          'IQ3_XXS': f'own_mv_iq3xxs_1rt_k{K}_r2', 'IQ3_S': f'own_mv_iq3s_1rt_k{K}_r2',
+          'IQ2_XXS': f'own_mv_iq2xxs_1rt_k{K}_r2'}.get(fmt)
     return getattr(OWN, nm) if nm and hasattr(OWN, nm) else None
 
 
@@ -73,10 +76,12 @@ def run_read(w, out_sink):
 def to_dev(raw, fmt, rows, K, own):
     b = np.ascontiguousarray(raw)
     if own and fmt == 'Q6_K': b = q6k_planes(b, rows, K)
+    if own and fmt in IQ_REC: b = iq_records(b, rows, K, fmt)
     return torch.from_numpy(b.copy()).to(dev)
 
 
 ROLES = ['attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps', 'head']
+if A.roles: ROLES = [r for r in ROLES if r in A.roles.split(',')]
 PER_TOKEN = {'attn_q': NL, 'attn_k': NL, 'attn_v': NL, 'attn_output': NL, 'ffn_gate_exps': NL * KU, 'ffn_up_exps': NL * KU,
              'ffn_down_exps': NL * KU, 'head': 1}
 say(f'{torch.cuda.get_device_name(0)}  {os.path.basename(A.gguf)}  layers {NL}, experts {KU} of {NE}')

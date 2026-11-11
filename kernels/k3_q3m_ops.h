@@ -115,9 +115,12 @@ __device__ __forceinline__ void router_rank(const int * pb, int E32, int b0, int
     }
     r0 = c0s[0] + c0s[1]; r1 = c1s[0] + c1s[1];
 }
+#ifndef K3_ROUTER_NE
+#define K3_ROUTER_NE 1024   // the most experts a router ranks (its probabilities' LDS words; the host checks Seg.N against it)
+#endif
 __device__ __forceinline__ void op_router(const Seg & sg, int tt) {
 #pragma clang fp contract(off)
-    __shared__ float rv[8]; __shared__ int probs[1024]; __shared__ int sel[64];   // sel[0..7]: the sum partials first
+    __shared__ float rv[8]; __shared__ int probs[K3_ROUTER_NE]; __shared__ int sel[64];   // sel[0..7]: the sum partials first
     const int tid = K3TID, wave = K3WAVE, lane = tid % 32, E = sg.N, k = sg.pad1;
     const float * lg = (const float *)sg.a + (size_t)tt * E;        // task tt = token tt: logits [T, E] -> ids / wts [T, k]
     int * ids_out = (int *)sg.y + tt * k; float * wts_out = (float *)sg.gs + tt * k;

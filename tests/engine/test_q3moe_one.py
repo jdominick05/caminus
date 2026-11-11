@@ -4,6 +4,7 @@ greedy continuation) through both; per position top-1 agreement, KLD(ref || gpu)
 engine's own greedy text and its decode speed; the standalone step's host refusals. Prints PASS / FAIL lines and RESULT PASS | FAIL.
 Gate (spec-own-quant.md, first form): top-1 equal at every position, mean KLD < 1e-3.
   tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache FILE.npz [--prompt TEXT] [--new 3]
+      [--module k3_q3m_iq] [--same-as k3_q3m_iq]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -13,6 +14,8 @@ ap.add_argument('gguf'); ap.add_argument('--ref-cache', required=True)
 ap.add_argument('--prompt', default='The capital of France is'); ap.add_argument('--new', type=int, default=3)
 ap.add_argument('--ref-only', action='store_true', help='compute / check the reference cache only (CPU)')
 ap.add_argument('--speed', type=int, default=64, help='decode steps timed after the check')
+ap.add_argument('--same-as', default=None, help='also run the tape on this module: its logits must be the same bits')
+ap.add_argument('--module', default=None, help='the code object (default: the engine\'s choice for the file)')
 A = ap.parse_args()
 from caminus import ggufio
 from caminus.bpe import BPE
@@ -35,7 +38,7 @@ if A.ref_only: sys.exit(0)
 import torch
 from caminus.engine.q3moe_one import Q3MoEOne
 print(torch.cuda.get_device_name(0), flush=True)
-t0 = time.time(); eng = Q3MoEOne(A.gguf, max_ctx=512); print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB)', flush=True)
+t0 = time.time(); eng = Q3MoEOne(A.gguf, max_ctx=512, module=A.module); print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB), module {eng.module}', flush=True)
 ok = True
 from caminus import own_dequant
 from caminus.device import capacity
@@ -74,6 +77,12 @@ for pw in (3, 7, 8):
     gs_ok &= all(torch.equal(a, b) for a, b in zip(base, run_seq()))
 eng.per_wgp = pw0; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
 print(('PASS' if gs_ok else 'FAIL') + f' logits bitwise the default grid\'s ({pw0} per WGP) at 3 / 7 / 8 workgroups per WGP ({len(ref)} positions)'); ok &= gs_ok
+if A.same_as:   # another module's k3_run on the same weights and buffers (the study module against the shipped one)
+    m0 = eng.module; eng.per_wgp = pw0; eng.module = A.same_as
+    with torch.cuda.device(eng.dev): eng._build_tape()
+    other = run_seq(); nd = sum(int((a.view(torch.int32) != b.view(torch.int32)).sum()) for a, b in zip(base, other))
+    eng.module = m0; eng.E, eng.S, eng.dstage, eng.hstage, eng.tok, eng.pos = keep
+    print(('PASS' if nd == 0 else 'FAIL') + f' logits on {A.same_as} bitwise {m0}\'s ({len(ref)} positions, {nd} words differ)'); ok &= nd == 0
 # the link keep-alive (one segment on host-mapped memory beside the final norm): the tape without it gives the same bits
 from caminus.device import hip
 eng.link_keepalive = False

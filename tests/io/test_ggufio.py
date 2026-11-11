@@ -43,8 +43,13 @@ for path in sys.argv[1:]:
         if good and a.n_bytes:
             d = a.data(); rb = np.asarray(b.data).reshape(-1).view(np.uint8)
             good = d[:64].tobytes() == rb[:64].tobytes() and d[-64:].tobytes() == rb[-64:].tobytes()
+            n = a.n_bytes; m = min(n, 4096)   # (pread: the same bytes read into ordinary memory, at both ends and across a middle)
+            good = good and all(a.pread(x, y).tobytes() == d[x:y].tobytes() for x, y in ((0, m), (n - m, n), (n // 2, min(n, n // 2 + m)), (n, n)))
         if not good: nbad += 1; print('  tensor mismatch', a, b.name, b.tensor_type.name, list(b.shape), int(b.data_offset), int(b.n_bytes))
     check(nbad == 0, f'{path}: {nbad} of {len(ours.tensors)} tensors differ')
     print(f'{os.path.basename(path)}: {len(ours.meta)} keys, {len(ours.tensors)} tensors, arch {ours.arch}, data at {ours.data_start}')
+    try: ours.tensors[0].pread(0, ours.tensors[0].n_bytes + 1); r = False
+    except ggufio.GGUFError: r = True
+    check(r, f'{path}: pread past a tensor\'s end is refused')
     ours.close()
 print('RESULT', 'PASS' if ok else 'FAIL')

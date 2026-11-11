@@ -4,19 +4,30 @@ bytes in the decode's layout: Q4_K raw blocks, Q6_K planes); an expert tensor is
 
   Ops(dev).mm(W, x16, ldx, y, ldy, n=...)                  dense: y[t] = W x16[t] for t < n (fp32 out, row stride ldy)
   Ops(dev).mm(W, x16, ldx, y, ldy, work=(items, nitems, bound, xs, yd))   experts: the grouped pairs (group())
-  emb / add_rms16 / router / topk / group / swiglu / qk_rope / attn: one kernel each (kernels/q3m_prefill.hip)"""
+  emb / add_rms16 / router / topk / group / swiglu / qk_rope / attn: one kernel each (kernels/q3m_prefill.hip)
+The study object q3m_prefill_iq (kernels/q3m_prefill_iq.hip, docs/dev/iq-quant-study.md) adds mm for the codebook formats
+(IQ4_XS raw blocks; IQ3_XXS / IQ3_S / IQ2_XXS in engine.own_layout.iq_records' layout); on the shipped object the host
+refuses them."""
 import ctypes
 
 import torch
 
 from ..device import hip
 from ..engine import k3
+from ..engine.own_layout import IQ_REC, IQ_PAD
 
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MM_M, MM_N = 64, 128        # a GEMM workgroup: tokens x rows
 AT_T = 16                   # q3p_attn: tokens per workgroup
 BLOCK_BYTES = {'Q4_K': 144, 'Q6_K': 210}
+IQ_MODULE = 'q3m_prefill_iq'                                      # the study object: the shipped kernels + the four below
+IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_XXS': 'q3p_mm_iq2xxs'}
+
+
+def formats(module):
+    """the weight formats a prefill object's mm takes"""
+    return tuple(BLOCK_BYTES) + (tuple(IQ_KERNEL) if module == IQ_MODULE else ())
 
 
 def items_bound(npairs, n_exp):
@@ -27,6 +38,7 @@ def items_bound(npairs, n_exp):
 class Ops:
     def __init__(self, dev, module='q3m_prefill'):
         self.dev = torch.device(dev) if not isinstance(dev, torch.device) else dev
+        self.module = module
         with torch.cuda.device(self.dev):
             self.mod = hip.Module(module)
 
@@ -35,7 +47,7 @@ class Ops:
         """y[dst] = W x16[src] in fp32. Dense (n tokens: src = dst = t) or experts (work = (items, nitems, bound, xs, yd) from
         group(): bound = the grid's work-item count, the device's *nitems decides). x16: fp16, row stride ldx; y: fp32, row
         stride ldy (a view's data_ptr: a column offset into a wider row)"""
-        fmt, R, K, wb = W
+        fmt, R, K, wb = W[:4]   # (a row-scale study tensor carries a fifth entry, its scales: its format is refused below)
         if K % 256: raise ValueError(f'q3m mm: K {K} is not a multiple of 256')
         if (work is None) == (n is None): raise ValueError('q3m mm: n (dense) or work (experts), one of them')
         if work is None:
@@ -50,8 +62,14 @@ class Ops:
         elif fmt == 'Q6_K':
             rtot = wb.numel() // (K // 256 * BLOCK_BYTES['Q6_K'])
             self.mod.q3p_mm_q6k(grid, (256,), wb, I(R), I(rtot), I(K), x16, I(ldx), xs, y, I(ldy), yd, items, nitems, I(ntok))
+        elif fmt in IQ_KERNEL and self.module == IQ_MODULE:
+            if fmt in IQ_REC:                                # (the record layout: its planes are placed by the buffer's rows)
+                rtot, rem = divmod(wb.numel() - IQ_PAD, K // 256 * IQ_REC[fmt][0])
+                if rem or rtot < R: raise ValueError(f'q3m mm: {fmt} buffer of {wb.numel()} B is not iq_records of rows x {K}')
+            else: rtot = 0
+            getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(rtot), I(K), x16, I(ldx), xs, y, I(ldy), yd, items, nitems, I(ntok))
         else:
-            raise ValueError(f'q3m mm: {fmt} (Q4_K / Q6_K)')
+            raise ValueError(f'q3m mm: {fmt} on {self.module} ({", ".join(formats(self.module))})')
 
     # -- the glue ----------------------------------------------------------------------------------------------------------
     def emb(self, W, rb, vocab, toks, x, n, N):

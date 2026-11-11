@@ -10,8 +10,16 @@
 #ifdef K3_Q3M_VER
 #include "own_quant_mt.h"   // the T-token tiles: a pass's weight words held, each token's sums in turn
 #endif
+#ifdef K3_Q3M_IQ
+#include "own_quant_iq.h"   // the codebook formats' tiles (the IQ study module, kernels/k3_q3m_iq.hip)
+#endif
 enum { OP_OWN_MV = 44 };
+enum { OWN_IQ3_XXS = 0, OWN_IQ4_XS = 6, OWN_IQ3_S = 8, OWN_IQ2_XXS = 11 };   // (K3_Q3M_IQ only; GG_* numbers, IQ2_XXS: its own)
 enum { OWN_Q6_K = 2, OWN_Q4_K = 4, OWN_Q8_0 = 3 };   // (the GG_* numbers of the same formats: k3.py GG_FMT)
+#ifdef K3_Q3M_RS
+#include "own_quant_rs.h"   // row-scaled integer codes (the row-scale study's modules)
+enum { OWN_RS4 = 12, OWN_RS2 = 13 };   // (K3_Q3M_RS only; k3.py OWN_RS_FMT)
+#endif
 enum { OWN_A32 = 0, OWN_A16F = 1 };
 
 template <class ACT>
@@ -57,15 +65,66 @@ typedef __attribute__((address_space(3))) float AS3F;
 #endif
 // rows grow .. lim - 1 of the matrix W (total rows: the Q6_K planes' strides): res[i] = row grow + i's sum, in every lane.
 // One body per format for every K (the tiles' runtime-K form): three K-specialised bodies cost K3 69 spilled VGPRs.
+#ifdef K3_Q3M_RS   // (the row-scale modules: + the matrix's row scales, Seg.gs: [total], or [gate's | up's] with OWN_GU)
+#define OWN_RS_PAR , const float * rsc
+#define OWN_RS_ARG , sg.gs + (m ? total : 0)
+#else
+#define OWN_RS_PAR
+#define OWN_RS_ARG
+#endif
 __device__ __forceinline__ void own_1rt_acc(const uint8_t * W, const Seg & sg, int grow, int lim, int total,
-                                            const _Float16 * x, int lane, float * res) {
+                                            const _Float16 * x, int lane, float * res OWN_RS_PAR) {
 #ifndef OWN_K3_NO_Q4   // (OWN_K3_NO_*: register-budget experiments only)
     if (sg.work == OWN_Q4_K) own_rows_q4k_1rt<0, OWN_K3_RW, 1, 1>(W, grow, lim, x, nullptr, lane, sg.K, res);
 #endif
 #ifndef OWN_K3_NO_Q6
     if (sg.work == OWN_Q6_K) own_rows_q6k_planes<0, OWN_K3_RW, 1, 1>(W, total, grow, lim, x, nullptr, lane, sg.K, res);
 #endif
+#ifdef K3_Q3M_RS   // (the row-scale study's modules, kernels/k3_q3m_rs4.hip / _rs2.hip: ONE bit width per code object)
+    if (sg.work == (K3_Q3M_RS == 4 ? OWN_RS4 : OWN_RS2)) {
+        int l = lane; asm volatile("" : "+v"(l));   // (as the IQ tiles below: what the tile derives from the lane stays in its branch)
+        own_rows_rs_1rt<K3_Q3M_RS, 0, OWN_K3_RW, 1, 1>(W, rsc, grow, lim, x, nullptr, l, sg.K, res);
+    }
+#endif
+#ifdef K3_Q3M_IQ   // (IQ4_XS: blocks in place; the grid formats: the record layout, and the grids own_iq_stage put in LDS)
+    // The lane through an empty asm inside each branch: what a tile derives from the lane (its unit, the offsets of its
+    // loads) is then computed in the branch. Derived from the one `lane`, the compiler hoisted every tile's values out
+    // of the row loop, where they were live across whichever tile ran: 7 spilled VGPRs in k3_run with the four tiles.
+#ifndef OWN_K3_NO_IQ4
+    if (sg.work == OWN_IQ4_XS) {
+        int l = lane; asm volatile("" : "+v"(l));
+        own_rows_iq4xs_1rt<0, OWN_K3_RW, 1, 1>(W, grow, lim, x, nullptr, l, sg.K, res);
+    }
+#endif
+#ifdef OWN_K3_IQG_ONE   // (a timing experiment, never a shipped build: the grid body with ONE format fixed at compile time,
+                        //  0 IQ3_XXS / 1 IQ3_S / 2 IQ2_XXS, OWN_K3_IQG_UP units per pass, no lane copy)
+    if (sg.work == OWN_IQ3_XXS || sg.work == OWN_IQ3_S || sg.work == OWN_IQ2_XXS)
+        own_rows_iqg_1rt<OWN_K3_IQG_ONE, 0, OWN_K3_RW, OWN_K3_IQG_UP, 1>(W, total, grow, lim, x, nullptr, lane, sg.K, res);
+#define OWN_K3_NO_IQG
+#endif
+#ifndef OWN_K3_NO_IQG   // (one body for the three grid formats: three were 13 more spilled VGPRs in k3_run)
+    if (sg.work == OWN_IQ3_XXS || sg.work == OWN_IQ3_S || sg.work == OWN_IQ2_XXS) {
+        int l = lane;
+#ifndef OWN_K3_IQG_NOCOPY   // (a timing experiment: the runtime-format body without the opaque lane copy)
+        asm volatile("" : "+v"(l));
+#endif
+        own_rows_iqg_1rt<3, 0, OWN_K3_RW, 1, 1>(W, total, grow, lim, x, nullptr, l, sg.K, res,
+                                                sg.work == OWN_IQ3_XXS ? 0 : sg.work == OWN_IQ3_S ? 1 : 2);
+    }
+#endif
+#endif
 }
+#ifdef K3_Q3M_IQ
+// k3_run's launch hook: every workgroup stages the grids the tape's first segment asks for (Seg.out_f32 of the tape's
+// OP_OWN_EMB: OWN_STAGE_* bits, set by the host from the formats on the tape; 0: nothing is staged and nothing waits;
+// IQ2_XXS never with an IQ3 grid: they share the LDS words, own_quant_iq.h)
+enum { OWN_STAGE_IQ3_XXS = 1, OWN_STAGE_IQ3_S = 2, OWN_STAGE_IQ2_XXS = 4 };
+__device__ __forceinline__ void own_iq_stage(const Seg * tape) {
+    const int f = tape[0].op == 48 ? tape[0].out_f32 : 0;   // (48: OP_OWN_EMB)
+    if (f) iq_stage((int)K3TID, f);
+}
+#define K3_LAUNCH_HOOK(tape) own_iq_stage(tape)
+#endif
 // OWN_GU (the qwen3moe modules): the segment computes TWO matrices of the same shape and format on the same input, the
 // experts' gate (Seg.W) and up (Seg.aux), and stores y16[row] = fp16(silu(gate . x) * (up . x)) (Seg.y fp16: the down
 // matvec's input; OP_OWN_SWIGLU16's expression on the two tiles' sums). One segment instead of three: 'up' no longer
@@ -148,7 +207,7 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
             }
         }
 #else
-        own_1rt_acc(m ? (const uint8_t *)sg.aux : sg.W, sg, grow, lim, total, x, lane, res);
+        own_1rt_acc(m ? (const uint8_t *)sg.aux : sg.W, sg, grow, lim, total, x, lane, res OWN_RS_ARG);
         if (lane == 0) {
 #pragma unroll
             for (int i = 0; i < OWN_K3_RW; i++) {

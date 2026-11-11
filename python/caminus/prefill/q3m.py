@@ -66,18 +66,24 @@ def shapes_of(path):
         F.close()
 
 
+MM_KEYS = ('attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps')
+
+
 class Q3MPrefill(PrefillDriver):
     """the batched prefill of a Q3MoEOne engine m, chunks of up to `chunk` tokens; buffers preallocated (checked against the
     card's guard line first: capacity.check)"""
 
-    def __init__(self, m, chunk=1024, crossover=None, check=True, module='q3m_prefill'):
+    def __init__(self, m, chunk=1024, crossover=None, check=True, module=None):
         self.m, self.chunk = m, int(chunk)
         if not 16 <= self.chunk <= 4096: raise ValueError(f'Q3MPrefill: chunk {chunk} (16 .. 4096)')
         self.dev = dev = torch.device(f'cuda:{m.dev}')
         self.crossover = CROSSOVER if crossover is None else int(crossover)
+        fmts = {L[key][0] for L in m.L for key in MM_KEYS}
+        if module is None:   # (a file with codebook-format tensors: the study object, as the engine picks its decode module)
+            module = q3m_ops.IQ_MODULE if fmts & set(q3m_ops.IQ_KERNEL) else 'q3m_prefill'
         for il, L in enumerate(m.L):
-            for key in ('attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps'):
-                if L[key][0] not in q3m_ops.BLOCK_BYTES: raise ValueError(f'Q3MPrefill: blk.{il} {key} is {L[key][0]}')
+            for key in MM_KEYS:
+                if L[key][0] not in q3m_ops.formats(module): raise ValueError(f'Q3MPrefill: blk.{il} {key} is {L[key][0]} ({module})')
         T = self.chunk
         self.need_mib = buffer_need_mib(m, T)
         if check: capacity.check([dev.index], [self.need_mib], f'Q3MPrefill buffers (chunk {T})')

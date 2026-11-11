@@ -51,6 +51,18 @@ class Tensor:
     def data(self):
         return np.frombuffer(self._f._mm, dtype=np.uint8, count=self.n_bytes, offset=self.offset)
 
+    def pread(self, a, b):
+        """bytes a .. b of the tensor as a uint8 array in ordinary memory (os.preadv, not the mapping): the source for
+        a copy to a card from a file that does not fit in free RAM. A card copying straight from the mapping's pages
+        stalls once the page cache is full (measured: a 32.5 GB file on a 29 GiB host, no progress after 23 GB)"""
+        if not 0 <= a <= b <= self.n_bytes: raise GGUFError(f'{self.name}: bytes {a} .. {b} outside its {self.n_bytes}')
+        out = bytearray(b - a); mv = memoryview(out); n = 0
+        while n < b - a:
+            k = os.preadv(self._f._fd.fileno(), [mv[n:n + (1 << 30)]], self.offset + a + n)
+            if k <= 0: raise GGUFError(f'{self.name}: short read at byte {a + n}')
+            n += k
+        return np.frombuffer(out, dtype=np.uint8)
+
     def rows(self):
         """(rows, bytes per row) of a matrix: rows = the product of every dim but the innermost"""
         _, bs, ts = TYPES[self.type_id]
@@ -62,7 +74,8 @@ class Tensor:
 
 class GGUFFile:
     """GGUFFile(path): .version, .meta (key -> value: int / float / bool / str / list / numpy array for numeric arrays),
-    .tensors (in file order), .T (name -> Tensor), .data_start, .alignment; the file stays memory-mapped (close())"""
+    .tensors (in file order), .T (name -> Tensor), .table_start, .data_start, .alignment; the file stays memory-mapped
+    (close())"""
 
     def __init__(self, path):
         self.path = os.fspath(path)
@@ -79,6 +92,7 @@ class GGUFFile:
         for _ in range(nkv):
             k = self._str()
             self.meta[k] = self._value(self._u('<I'))
+        self.table_start = self._p   # (the tensor table's first byte: the header and the metadata end here)
         info = []
         for _ in range(nt):
             name = self._str(); nd = self._u('<I')

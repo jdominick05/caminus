@@ -3,7 +3,9 @@ passes (teacher-forced), their logits against tools/reference/q3moe_ref32.py's f
 llama.cpp's own prefill-then-decode of the same tokens (build/gg_golden --lc 'tfx NAME TOKENS N-M M 2048 1 OUT' with
 'kv f16' and 'onecard': its default KV type, one card). Gate: mean KLD(ref || ours) <= llama.cpp's and top-1 >= llama.cpp's.
   tools/guard.sh LOG 1800 python -I tools/gates/q3moe_depth_gmodel.py GGUF --ref REF32.npz [--llama LL.bin] [--tokens-out T.txt]
---tokens-out writes the reference's token ids (one line) for gg_golden's job file."""
+--tokens-out writes the reference's token ids (one line) for gg_golden's job file.
+--decode-only: no prefill; all N positions as one-token K3 passes (a file whose expert formats the prefill has no
+kernels for; about 6 ms per position on a 24 GB card)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
@@ -27,6 +29,7 @@ def line(name, s):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--ref', required=True)
     ap.add_argument('--llama', default=None); ap.add_argument('--tokens-out', default=None); ap.add_argument('--module', default=None)
+    ap.add_argument('--decode-only', action='store_true')
     A = ap.parse_args()
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']; N, M = len(seq), len(ref)
     if A.tokens_out:
@@ -36,9 +39,13 @@ if __name__ == '__main__':
     from caminus.prefill.q3m import Q3MPrefill
     print(torch.cuda.get_device_name(0), f'N {N}, the last {M} positions', flush=True)
     eng = Q3MoEOne(A.gguf, max_ctx=N + 8, module=A.module)
-    pf = Q3MPrefill(eng, chunk=2048)
-    pf.run(seq, 0, 0, N - M)
-    eng.pos_host = N - M
+    if A.decode_only:
+        for t in seq[:N - M]: eng.step(t)
+        print(f'decode only: {N - M} one-token passes, then the {M} scored ones', flush=True)
+    else:
+        pf = Q3MPrefill(eng, chunk=2048)
+        pf.run(seq, 0, 0, N - M)
+        eng.pos_host = N - M
     ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq[N - M:]])
     so = score(ref, ours); print(line('caminus', so), flush=True)
     ok = True

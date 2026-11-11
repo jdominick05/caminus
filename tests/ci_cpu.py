@@ -32,6 +32,7 @@ SUITES = [
     ('context_note', ['tests/harness/test_context_note.py', '--scratch', '{scratch}'], set()),
     ('docs', ['tests/docs/test_docs.py'], set()),
     ('own_code', ['tests/test_own_code.py'], set()),
+    ('own_dequant', ['tests/io/test_own_dequant.py'], set()),
     ('own_formats', ['tests/io/test_own_formats.py'], set()),
     ('ref_q35', ['tests/test_ref_q35.py', '--scratch', '{scratch}'], set()),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),

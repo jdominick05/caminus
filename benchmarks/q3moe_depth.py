@@ -22,8 +22,12 @@ depths = [int(x) for x in A.depths.split(',')]
 ARMS = []
 for a in A.arms:
     name, spec = a.split('=', 1); spec, *kv = spec.split(':'); mod, _, g = spec.partition('@')
-    if mod not in k3.MODULE_CAPS:   # (a measurement build of the full module's ops under another name)
-        k3.MODULE_CAPS[mod] = k3.MODULE_CAPS['k3_gguf_q3m_own']; k3.Q3M_MODULES = k3.Q3M_MODULES + (mod,)
+    if mod not in k3.MODULE_CAPS:   # (a measurement build under another name: of the module its name starts with, else the full one's ops)
+        base = max((m for m in k3.Q3M_LEAN_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES) if mod.startswith(m + '_')), key=len, default='k3_gguf_q3m_own')
+        k3.MODULE_CAPS[mod] = k3.MODULE_CAPS[base]; k3.Q3M_MODULES = k3.Q3M_MODULES + (mod,)
+        if base in k3.Q3M_LEAN_MODULES: k3.Q3M_LEAN_MODULES = k3.Q3M_LEAN_MODULES + (mod,)
+        if base in k3.Q3M_IQ_MODULES: k3.Q3M_IQ_MODULES = k3.Q3M_IQ_MODULES + (mod,); k3.ROUTER_NE[mod] = k3.ROUTER_NE[base]
+        if base in k3.Q3M_RS_MODULES: k3.Q3M_RS_MODULES[mod] = k3.Q3M_RS_MODULES[base]
     o = dict(module=mod)
     if g: o['per_wgp'] = int(g)
     for x in kv: k_, v_ = x.split('='); o[k_] = int(v_)
@@ -38,6 +42,7 @@ for name, opt in ARMS:
     for k, v in opt.items(): setattr(eng, k, v)
     with torch.cuda.device(eng.dev): eng._build_tape()
     forms[name] = tuple(getattr(eng, k) for k in keys)
+    print(f'  arm {name}: {eng.module}, {eng.per_wgp} workgroups per WGP ({k3.resident_grid(eng.module, eng.per_wgp)} in all)', flush=True)
 def use(n):
     for k, v in zip(keys, forms[n]): setattr(eng, k, v)
 ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]

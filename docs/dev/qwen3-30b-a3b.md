@@ -285,6 +285,26 @@ What would change the picture is arithmetic that takes T columns for the price o
 prefill uses. An op built on them needs about 240 vector registers, against the 96 the persistent kernel is held to so
 that 16 waves fit on each SIMD. That trade, and a drafter on Caminus's own kernels, are not built.
 
+## Follow-up studies: the experts' weight format
+
+Two studies change only the format of the expert tensors (144 of the file's 579 tensors, 57 % of the bytes a token
+reads), with their predictions written down before the first timed run, and measure what a format buys on these cards:
+
+- **[The IQ quant study](iq-quant-study.md):** IQ4_XS, unsloth's UD-IQ3_XXS mix and IQ2_XXS in the decode and prefill
+  kernels. Each format's decode costs about what its bytes save: on the RX 7900 XTX all four files are within 0.05 ms of
+  each other per token at short context, and none is faster than Q4_K_M at depth, even with a third fewer bytes.
+  llama.cpp shows the same on the same files.
+- **[The row-scale study](row-scale-study.md):** plain 4-bit and 2-bit codes with one scale per row. 4 bits decode 2 to
+  3 % faster than the shipped engine at short context, at about the official file's accuracy; 2 bits made by rounding
+  are not usable without training (72 % top-1 agreement). 8-bit activations cost almost no accuracy but save at most
+  0.08 ms per token in decode, so their place is the batched prefill and the verify pass.
+- Both studies measure the same ceiling: with the experts' arithmetic left out entirely, a token takes 3.76 ms with
+  4-bit experts and 3.32 ms with 2-bit ones on the RX 7900 XTX (266 and 301 tok/s). The rest of the gap to the
+  bandwidth bound is the per-stage cost described above, which no weight format changes.
+- The official file's experts are not the most accurate at their size: IQ4_XS, or Q4_0 made with an importance matrix,
+  is about half its distance to a reference with Q8_0 experts (the official file may also come from other source
+  weights; that split is not measured).
+
 ## Limits
 
 - One card with 24 GB: the full 40,960-token context needs 22.4 GB. A 20 GB card can't hold 32,768 tokens of it, which
