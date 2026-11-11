@@ -26,6 +26,16 @@ from ..device import capacity
 
 MAX_T = 4                        # own_quant_mt.h's OWN_MT, and 8 expert slots per token in one 32-lane compare
 DFLASH_TAPS = (1, 12, 23, 34, 45)   # the residual entering these layers: the DFlash speculator's target features
+WIDE_T, WIDE_WGP = 3, 7          # a pass of WIDE_T or more tokens runs on WIDE_WGP workgroups per WGP, a shorter one on
+                                 # the decode engine's grid (4 on the RX 7900 XTX, 5 on the XT). Each pass at 4 .. 8 per
+                                 # WGP, interleaved in one process, medians of 3 processes, the same bits at every grid
+                                 # (benchmarks/q3moe_verify.py --ver-wgp). XTX, ms per pass at depth 512 / 4,096 /
+                                 # 16,384 / 40,900, decode's grid -> 7: T 3 7.82 / 9.45 / 13.41 / 20.76 -> 7.60 / 9.32 /
+                                 # 13.06 / 19.90; T 4 at 512 / 4,096 9.54 / 11.58 -> 9.05 / 11.09 (XT: T 3 9.40 / 11.17
+                                 # -> 9.23 / 11.16, T 4 11.58 / 13.94 -> 11.17 / 13.53). 6 ties 7 within 0.07 ms for T 3
+                                 # and loses up to 0.20 for T 4; 8 is slower than decode's grid everywhere. A pass of 2
+                                 # has no one grid: on the XTX 7 gives 6.10 / 7.42 / 10.02 / 15.00 -> 6.12 / 7.22 /
+                                 # 9.90 / 15.38 and 6 gives 6.06 / 7.01 / 10.29 / 15.88, so it stays on decode's
 
 
 def _join(E, segs):
@@ -60,7 +70,9 @@ class Q3MoEVerify:
 
     def __init__(self, eng, T, module='k3_q3m_ver', per_wgp=None, taps=DFLASH_TAPS, vram_check=True):
         """eng: a Q3MoEOne (its weights, cache and position bounds); T: tokens per pass, 1 .. 4; module: k3_q3m_ver or
-        k3_q3m_ver_trace; taps: layers whose entering residual each pass keeps per token (feats)"""
+        k3_q3m_ver_trace; per_wgp: workgroups per WGP of this tape's grid (None: WIDE_WGP from WIDE_T tokens on, else
+        the decode engine's; the logits are the same bits at every grid); taps: layers whose entering residual each
+        pass keeps per token (feats)"""
         if not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Q3MoEVerify: T {T!r}: 1 .. {MAX_T}')
         if module not in k3.Q3M_VER_MODULES: raise ValueError(f'Q3MoEVerify: module {module!r} is not a verify module {k3.Q3M_VER_MODULES}')
         if eng.k_used != 8: raise ValueError(f'Q3MoEVerify: {eng.k_used} experts per token (the grouped segments take 8 slots per token)')
@@ -69,9 +81,11 @@ class Q3MoEVerify:
         self.eng, self.T, self.taps, self.module = eng, T, taps, module
         self.mib = self.need_mib(T, eng, taps)
         if vram_check: capacity.check([eng.dev], [self.mib], f'Q3MoEVerify T {T}: its tape buffers ({self.mib:.1f} MiB)')
-        self._build(per_wgp)
+        # (a decode engine without a grid of its own, per_wgp None, hands K3_PER_WGP or the module default on)
+        self.per_wgp = int(per_wgp) if per_wgp else (WIDE_WGP if T >= WIDE_T and eng.per_wgp else eng.per_wgp)
+        self._build()
 
-    def _build(self, per_wgp):
+    def _build(self):
         eng, T, taps = self.eng, self.T, self.taps
         D, hd, nh, nkv, KU, FF = eng.D, eng.hd, eng.nh, eng.nkv, eng.k_used, eng.ffn
         M = nkv * hd; sc = 1.0 / np.sqrt(hd); QW = nh * hd + 2 * M; NL = len(eng.L); uni = T > 1
@@ -82,7 +96,7 @@ class Q3MoEVerify:
             self.hst = torch.zeros(T + 1, dtype=torch.int32, pin_memory=True)
             dst = S['stage']; pw = dst[T:T + 1]                     # the token ids, then the pass's first position
             na = k3.Engine.atts_scratch_floats(nkv, eng.splits)
-            E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, per_wgp or eng.per_wgp), T=1,
+            E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=1,
                                    limit_us=eng.limit_us)
             mv = lambda w, x16, out, dep, rpt='qkv', **kw: E.own_matvec_1rt(w[3], w[0], w[1], w[2], x16, out, dep=dep,
                                                                            rows_per_task=eng.RPT[rpt], **kw)

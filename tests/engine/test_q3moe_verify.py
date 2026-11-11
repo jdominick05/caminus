@@ -5,6 +5,8 @@ pass then route alike: an expert has up to 4 member slots). Before each T's pass
 overwritten in every layer, so the passes' own row stores are what the later rows and the decode step after them read.
 A wrong token at row 2 leaves rows 0 and 1 right and changes rows 2 and 3; the right pass after it gives every row and
 the decode step after it. Tap features are equal across T; the host refusals leave the cache and the stage untouched.
+A pass of 3 or 4 tokens runs on a grid of its own (WIDE_WGP): passes of 2 on that grid, and passes of 4 on the decode
+engine's grid and on 3 workgroups per WGP, give the same logits.
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   tools/guard.sh LOG 900 python -I tests/engine/test_q3moe_verify.py GGUF [--depths 512,2048]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
@@ -20,7 +22,7 @@ from caminus.bpe import BPE
 from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q3moe_one import Q3MoEOne
-from caminus.engine.q3moe_verify import Q3MoEVerify, MAX_T
+from caminus.engine.q3moe_verify import Q3MoEVerify, MAX_T, WIDE_T, WIDE_WGP
 from caminus.prefill.q3m import Q3MPrefill
 
 depths = [int(x) for x in A.depths.split(',')]
@@ -32,13 +34,14 @@ if len(ids_all) < max(depths) + G: raise SystemExit(f'the docs are {len(ids_all)
 print(torch.cuda.get_device_name(0), flush=True)
 # beside the engine: a verify tape per T, the prefill (which projects its own buffers), and this test's reference logits
 max_ctx = max(depths) + G + 8
-eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=sum(Q3MoEVerify.need_mib(T) for T in range(1, MAX_T + 1)))
+eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=sum(Q3MoEVerify.need_mib(T) for T in list(range(1, MAX_T + 1)) + [2, MAX_T, MAX_T]))
 own_mib = (G + MAX_T) * eng.vocab * 4 / 2 ** 20 + 8
 capacity.check([eng.dev], [own_mib], f'test_q3moe_verify: its own buffers ({G} positions of logits: {own_mib:.0f} MiB)')
 pf = Q3MPrefill(eng, chunk=512)
 vers = {T: Q3MoEVerify(eng, T) for T in range(1, MAX_T + 1)}
-print(f'engine {eng.vram_mib:.0f} MiB at max_ctx {max_ctx}; verify tapes: ' +
-      ', '.join(f'T {T}: {len(v.E.segs)} segments, {v.mib:.1f} MiB' for T, v in vers.items()), flush=True)
+alt = [Q3MoEVerify(eng, T, per_wgp=w) for T, w in ((2, WIDE_WGP), (MAX_T, eng.per_wgp), (MAX_T, 3))]   # the grids the defaults do not run
+print(f'engine {eng.vram_mib:.0f} MiB at max_ctx {max_ctx}, {eng.per_wgp} workgroups per WGP; verify tapes: ' +
+      ', '.join(f'T {T}: {len(v.E.segs)} segments, {v.mib:.1f} MiB, {v.per_wgp} per WGP' for T, v in vers.items()), flush=True)
 RW = 2 * eng.nkv * eng.hd                                 # elements of one position's cache row (k | v)
 ok = True
 def check(c, msg):
@@ -73,6 +76,15 @@ for N in depths + [8]:
         same_next = np.array_equal(bits(eng.step(toks[0])), nxt)
         check(bad == 0 and same_next, f'{what}, T {T}: {G // T} passes over overwritten cache rows bitwise the decode steps\' logits ({bad} words '
               f'differ); the decode step after them {"the same" if same_next else "DIFFERS"}; distinct experts per layer {np.mean(dis):.1f} of {8 * T}')
+    if N == depths[0]:
+        check(all(v.per_wgp == (WIDE_WGP if T >= WIDE_T else eng.per_wgp) for T, v in vers.items()) and len({(v.T, v.E.grid) for v in list(vers.values()) + alt}) == MAX_T + len(alt),
+              f'a pass of {WIDE_T} or more tokens takes {WIDE_WGP} workgroups per WGP, a shorter one the decode engine\'s {eng.per_wgp}; the other tapes are on other grids')
+        for ver in alt:
+            T = ver.T; bad = 0
+            for b in range(G // T):
+                ver.run(toks[b * T:(b + 1) * T], N + b * T)
+                bad += sum(int((bits(ver.logits(t)) != ref[b * T + t]).sum()) for t in range(T))
+            check(bad == 0, f'{what}, T {T} at {ver.per_wgp} workgroups per WGP (grid {ver.E.grid}): bitwise the decode steps\' logits ({bad} words differ)')
     if not real:
         check(np.mean(dis) < 8.5, f'{what}: the tokens of a T {MAX_T} pass route alike ({np.mean(dis):.2f} distinct experts per layer: '
               f'{MAX_T} member slots per expert)')
