@@ -28,6 +28,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Fixed
 
+- **The two-card check re-reads a PCIe link before refusing a card, and judges a link the driver has lowered at full
+  speed.** On the test machine the check once refused the XTX as "on a PCIe 1.0 x1 link" while it sat in its x16 slot.
+  The cause was not found and the reading has not come back. When the graphics driver reports that it has lowered an
+  idle card's link to save power, the check now judges the link at the driver's full speed, and `caminus doctor` shows
+  the idle reading too.
 - **Qwen3-30B-A3B reads a prompt with very large activations.** If 32 activations in a row averaged over 2,047, the
   prompt reader's Q4_K product turned that token into NaN and the request failed. Such a token now takes a scaled
   path and is as accurate as any other; every other token gives the same bits as before. It costs 0.9 % of a prompt's

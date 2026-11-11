@@ -130,7 +130,9 @@ def check_gpus(R, root='/'):
         R.add(lvl, 'gpu', f'{host.describe(c)}: {c["total_mib"]} MiB, {used} MiB in use'
               + (' (something holds VRAM: another engine or test? Caminus needs the cards idle)' if lvl == 'WARN' else '')
               + f'; guard line {c["line_mib"]} MiB' + ('; drives a display (512 MiB kept free below its line)' if c['display'] else '')
-              + f'; {host.link_text(c["link"])}' + (f' (slowest hop at {c["link"]["at"]})' if c['link'] and c['link']['at'] != c['pci'] else ''))
+              + f'; {host.link_text(c["link"])}' + (f' (slowest hop at {c["link"]["at"]})' if c['link'] and c['link']['at'] != c['pci'] else '')
+              + (f'; idle now at {host.link_text(dict(gts=c["link"]["now_gts"], width=c["link"]["now_width"]))} (the driver\'s link power saving)'
+                 if host.link_lowered(c['link']) else ''))
     if len(u) == 1:
         R.add('PASS', 'gpu', 'one card: the one-card models run (Qwen3.6, AREX-2); the two-card models (the Coder, Qwen3-Coder-Next) need two')
     elif len(u) >= 2:
