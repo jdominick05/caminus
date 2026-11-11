@@ -4,7 +4,10 @@ fp32, RoPE angles in float64, layer-major over the whole prompt on one card (the
 attention in query chunks and its experts one by one). Logits of the last M positions. Cross-check: at N = 128 against
 tools/reference/q3moe_ref.py's float64 rows (mean KLD ~1e-7 expected).
 The text: the tree's own docs and python sources (public), concatenated in sorted order, the first N tokens; or --seq.
-  tools/guard.sh LOG 1800 python -I tools/reference/q3moe_ref32.py GGUF OUT.npz --n N [--last 64] [--seq SEQ.npz]
+  tools/guard.sh LOG 1800 python -I tools/reference/q3moe_ref32.py GGUF OUT.npz --n N [--last 64] [--seq SEQ.npz] [--act8]
+--act8 (docs/dev/row-scale-study.md): every expert matvec's input vector (the normed hidden state for gate and up, the
+SwiGLU product for down) is rounded to 8-bit integers with one scale per vector (its largest magnitude -> 127) before
+the product; everything else as without it.
 OUT.npz: seq (int64 [N]), logits (float32 [M, vocab]) for positions N - M .. N - 1. Its peak VRAM is projected from the shapes
 (peak_mib), checked against the card's cap before the first device transfer, and set as the process's allocator limit:
 8.1 GB at N = 40,960, --qchunk 256 (measured at 40,896: 7.8 GB)."""
@@ -125,7 +128,31 @@ def iq2_xxs(raw):
     return (db * g * sg).reshape(-1)
 
 
-DECODERS = {'Q4_K': q4_k, 'Q6_K': q6_k, 'IQ4_XS': iq4_xs, 'IQ3_XXS': iq3_xxs, 'IQ3_S': iq3_s, 'IQ2_XXS': iq2_xxs}
+def q8_0(raw):
+    b = raw.view(-1, 34)
+    return (f16(b[:, 0:2]).view(-1, 1) * b[:, 2:].contiguous().view(torch.int8).float()).reshape(-1)
+
+
+def q4_0(raw):
+    b = raw.view(-1, 18); qs = b[:, 2:]
+    q = torch.cat([qs & 0xF, qs >> 4], dim=1).to(torch.int8) - 8
+    return (f16(b[:, 0:2]).view(-1, 1) * q.float()).reshape(-1)
+
+
+def q2_0(raw):
+    b = raw.view(-1, 18); qs = b[:, 2:]
+    q = ((qs[:, :, None] >> torch.tensor([0, 2, 4, 6], device=b.device, dtype=torch.uint8)) & 3).reshape(-1, 64).to(torch.int8) - 1
+    return (f16(b[:, 0:2]).view(-1, 1) * q.float()).reshape(-1)
+
+
+def act8(v):
+    """v [..., n] rounded to 8-bit integers with one scale per vector (max |v| -> 127), back in fp32"""
+    s = v.abs().amax(-1, keepdim=True) / 127.0
+    return torch.where(s > 0, (v / s).round() * s, v)
+
+
+DECODERS = {'Q4_K': q4_k, 'Q6_K': q6_k, 'IQ4_XS': iq4_xs, 'IQ3_XXS': iq3_xxs, 'IQ3_S': iq3_s, 'IQ2_XXS': iq2_xxs,
+            'Q8_0': q8_0, 'Q4_0': q4_0, 'Q2_0': q2_0}
 
 
 class W:
@@ -150,7 +177,7 @@ SLACK_MIB = 1280   # the runtime's own memory, and blocks the allocator has free
                    # the projection less 1024 of it
 
 
-def peak_mib(F, N, qchunk, nl, D, nh, nkv, hd, E, ff):
+def peak_mib(F, N, qchunk, nl, D, nh, nkv, hd, E, ff, a8=False):
     """an upper bound of main()'s peak device memory in MiB as the guard reads it (sysfs), from the shapes: the largest of
     its three phases + SLACK_MIB
       attention   x, h; q before and after RoPE, att, k and v per query head; k and v twice for the rotation's
@@ -163,7 +190,7 @@ def peak_mib(F, N, qchunk, nl, D, nh, nkv, hd, E, ff):
     whole = max(int(np.prod(t.shape)) for n, t in F.T.items() if n != 'token_embd.weight' and '_exps.' not in n)
     dec = lambda n: 16 * n
     attn = 2 * res + 5 * N * nh * hd * 4 + 4 * N * nkv * hd * 4 + 2 * nh * qchunk * N * 4 + qchunk * N + 3 * N * hd * 8 + dec(nh * hd * D)
-    moe = 4 * res + 3 * N * E * 4 + 2 * N * 8 * 8 + 3 * N * ff * 4 + dec(3 * ff * D)
+    moe = (5 if a8 else 4) * res + 3 * N * E * 4 + 2 * N * 8 * 8 + (4 if a8 else 3) * N * ff * 4 + dec(3 * ff * D)   # (--act8: the rounded h, and a rounded SwiGLU product)
     head = res + dec(whole)
     emb = N * F.T['token_embd.weight'].rows()[1]   # (the prompt's raw embedding rows, on the card until they are decoded)
     return (max(attn, moe, head) + emb) / 2 ** 20 + SLACK_MIB
@@ -178,6 +205,7 @@ def tree_text():
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('out'); ap.add_argument('--n', type=int, required=True)
     ap.add_argument('--last', type=int, default=64); ap.add_argument('--seq', default=None); ap.add_argument('--qchunk', type=int, default=256)
+    ap.add_argument('--act8', action='store_true', help='8-bit expert matvec inputs, one scale per vector (the row-scale study)')
     A = ap.parse_args()
     dev = torch.device('cuda:0')
     F = ggufio.GGUFFile(A.gguf); Wt = W(F, dev)   # (W reads a tensor when it is asked for: nothing on the card yet)
@@ -188,12 +216,12 @@ def main():
     else: seq = BPE(F.meta).encode(tree_text())[:A.n]
     N = len(seq)
     if N < A.n: raise SystemExit(f'the text has {N} tokens < {A.n}')
-    need = peak_mib(F, N, A.qchunk, nl, D, nh, nkv, hd, E, ff)
+    need = peak_mib(F, N, A.qchunk, nl, D, nh, nkv, hd, E, ff, A.act8)
     capacity.check([0], [need], f'q3moe_ref32 (N {N}, --qchunk {A.qchunk}: {need:.0f} MiB projected; lower --qchunk or --n)')
     # the projection is also this process's allocator limit: PyTorch's caching allocator otherwise keeps every freed block
     # (measured at N = 16,384 without it: 19,964 MiB reserved for 3.6 GB of live tensors)
     torch.cuda.set_per_process_memory_fraction(min(1.0, (need - 1024) * 2 ** 20 / torch.cuda.get_device_properties(0).total_memory), 0)
-    print(torch.cuda.get_device_name(0), f'N {N}; projected peak {need:.0f} MiB', flush=True)
+    print(torch.cuda.get_device_name(0), f'N {N}; projected peak {need:.0f} MiB' + ('; 8-bit expert inputs' if A.act8 else ''), flush=True)
     te = F.T['token_embd.weight']; _, rb = te.rows()
     raw = torch.from_numpy(np.ascontiguousarray(np.asarray(te.data()).reshape(-1, rb)[np.array(seq)])).to(dev)
     x = q4_k(raw.view(-1)).view(N, D)
@@ -239,16 +267,18 @@ def main():
         pr = torch.softmax(lg, -1); wv, ids = torch.topk(pr, k, -1)               # (ties: the lower index first, as torch.topk)
         wv = wv / wv.sum(-1, keepdim=True)
         y = torch.zeros_like(x)
+        hq = act8(h) if A.act8 else h
         for e in range(E):
             sel = (ids == e).nonzero()
             if not len(sel): continue
             t_, s_ = sel[:, 0], sel[:, 1]
-            g_ = h[t_] @ Wt.rows(p + 'ffn_gate_exps.weight', e * ff, (e + 1) * ff).T
-            u_ = h[t_] @ Wt.rows(p + 'ffn_up_exps.weight', e * ff, (e + 1) * ff).T
-            dn = (g_ * torch.sigmoid(g_) * u_) @ Wt.rows(p + 'ffn_down_exps.weight', e * D, (e + 1) * D).T
+            g_ = hq[t_] @ Wt.rows(p + 'ffn_gate_exps.weight', e * ff, (e + 1) * ff).T
+            u_ = hq[t_] @ Wt.rows(p + 'ffn_up_exps.weight', e * ff, (e + 1) * ff).T
+            m_ = g_ * torch.sigmoid(g_) * u_
+            dn = (act8(m_) if A.act8 else m_) @ Wt.rows(p + 'ffn_down_exps.weight', e * D, (e + 1) * D).T
             y.index_add_(0, t_, dn * wv[t_, s_][:, None])
         x = x + y
-        del h, y, lg, pr, wv, ids
+        del h, hq, y, lg, pr, wv, ids
         torch.cuda.empty_cache()
         if il % 8 == 0 or il == nl - 1: print(f'  layer {il} done', flush=True)
     hl = rms(x[N - A.last:], Wt.rows('output_norm.weight')[0], eps).clone()

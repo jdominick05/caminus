@@ -2,7 +2,8 @@
 (docs/specs/spec-own-quant.md); gguf-py's dequantize is the test oracle (tests/io/test_own_dequant.py: bitwise equal).
 The arithmetic follows the formats' definition in float32: Q4_K y = (d * sc) * q - (dmin * m); Q6_K y = (d * sc) * q;
 the codebook formats (their tables: caminus.iq_tables) IQ4_XS y = (d * (ls - 32)) * kv[q]; IQ3_XXS y = ((d * (0.5 + s))
-* 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS y = ((d * (0.5 + s)) * 0.25) * grid * sign.
+* 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS y = ((d * (0.5 + s)) * 0.25) * grid * sign;
+the plain block formats Q8_0 y = d * q (int8), Q4_0 y = d * (q - 8), Q2_0 (ggml type 42) y = d * (q - 1).
 
   dequant(raw, type_name, n_values) -> float32 [n_values]   (raw: the blocks' bytes, uint8)
   rows(t, r0, r1)                    -> float32 [r1 - r0, K] (a caminus.ggufio.Tensor's rows r0 .. r1 - 1)"""
@@ -118,8 +119,30 @@ def iq2_xxs(raw):
     return (db * g * sg).reshape(-1)
 
 
+def q8_0(raw):
+    """Q8_0: 34-byte blocks of 32: d (fp16), 32 int8"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 34)
+    return (_f16(b[:, 0:2].copy()).reshape(-1, 1) * b[:, 2:].view(np.int8).astype(np.float32)).reshape(-1)
+
+
+def q4_0(raw):
+    """Q4_0: 18-byte blocks of 32: d (fp16), 16 bytes (value j in byte j's low nibble, value j + 16 in its high one)"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 18); qs = b[:, 2:]
+    q = np.concatenate([qs & 0xF, qs >> 4], axis=1).astype(np.int8) - np.int8(8)
+    return (_f16(b[:, 0:2].copy()).reshape(-1, 1) * q.astype(np.float32)).reshape(-1)
+
+
+def q2_0(raw):
+    """Q2_0 (ggml type 42): 18-byte blocks of 64: d (fp16), 16 bytes (value j in bits 2 (j % 4) of byte j / 4); the
+    levels are -1, 0, +1, +2 times d"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 18); qs = b[:, 2:]
+    q = ((qs[:, :, None] >> np.array([0, 2, 4, 6], dtype=np.uint8)) & 3).reshape(-1, 64).astype(np.int8) - np.int8(1)
+    return (_f16(b[:, 0:2].copy()).reshape(-1, 1) * q.astype(np.float32)).reshape(-1)
+
+
 DECODERS = {'Q4_K': (256, 144, q4_k), 'Q6_K': (256, 210, q6_k), 'IQ4_XS': (256, 136, iq4_xs),
-            'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s), 'IQ2_XXS': (256, 66, iq2_xxs)}
+            'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s), 'IQ2_XXS': (256, 66, iq2_xxs),
+            'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q2_0': (64, 18, q2_0)}
 
 
 def dequant(raw, type_name, n_values):
