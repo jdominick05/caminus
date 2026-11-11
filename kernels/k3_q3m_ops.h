@@ -193,6 +193,7 @@ __device__ __forceinline__ float kv_get(const uint8_t * pos_base, int M, int typ
 
 #include "k3_own_ops.h"
 
+#ifndef K3_OPS_NO_DISPATCH   // (kernels/k3_q35_ops.h takes the ops above and dispatches its own tape's)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
@@ -219,3 +220,4 @@ __device__ __forceinline__ void k3_extra_prefetch(const Seg & sg, int t) {
     if (cap) n = min(n, cap - 1);
     touch(sg.W + (size_t)r0 * row_bytes, (uint32_t)n);
 }
+#endif

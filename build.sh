@@ -48,7 +48,7 @@ for src in kernels/*.hip; do
     # batches instead of one wait per dependent pair (attn_qkv 29.7 -> 17.6 us, hc_*_down 15 -> 10), same instructions
     # otherwise (bitwise); TP decode 13.56 -> 12.19 ms/token. It does not trade registers for occupancy: register-heavy
     # code spills at the 96-VGPR cap sooner than under the default scheduler (check llvm-readelf after changes)
-    case "$src" in kernels/k3_q3m*.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;   # (the qwen3moe decode module: k3_gguf's scheduler, no ggml headers)
+    case "$src" in kernels/k3_q3m*.hip|kernels/k3_q35_*.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;   # (the own decode modules: k3_gguf's scheduler, no ggml headers)
     esac
     case "$src" in *k3_gguf*.hip) extra=(-DGGML_USE_HIP -D__HIP_PLATFORM_AMD__ -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda" -mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;
     # gg_mmvf_ref: ignite's mmvf.cu as is, with ignite's compile flags (build-hip-therock compile_commands.json): the BF16
