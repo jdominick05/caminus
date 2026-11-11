@@ -2,9 +2,9 @@
 (docs/specs/spec-own-quant.md); gguf-py's dequantize is the test oracle (tests/io/test_own_dequant.py: bitwise equal).
 The arithmetic follows the formats' definition in float32: Q4_K and Q5_K y = (d * sc) * q - (dmin * m); Q6_K
 y = (d * sc) * q; the codebook formats (their tables: caminus.iq_tables) IQ4_XS y = (d * (ls - 32)) * kv[q];
-IQ3_XXS y = ((d * (0.5 + s)) * 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS
+IQ3_XXS y = ((d * (0.5 + s)) * 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS and IQ2_S
 y = ((d * (0.5 + s)) * 0.25) * grid * sign; the plain block formats Q8_0 y = d * q (int8), Q4_0 y = d * (q - 8),
-Q4_1 y = d * q + m, Q2_0 (ggml type 42) y = d * (q - 1).
+Q4_1 y = d * q + m, Q2_0 (ggml type 42) y = d * (q - 1); BF16 y = the value's 16 bits as the high half of a float32 (exact).
 
   dequant(raw, type_name, n_values) -> float32 [n_values]   (raw: the blocks' bytes, uint8)
   rows(t, r0, r1)                    -> float32 [r1 - r0, K] (a caminus.ggufio.Tensor's rows r0 .. r1 - 1)"""
@@ -125,6 +125,23 @@ def iq2_xxs(raw):
     return (db * g * sg).reshape(-1)
 
 
+def iq2_s(raw):
+    """IQ2_S: 82-byte blocks of 256: d (fp16), qs[32] (the low 8 bits of a 10-bit grid index per 8 values), signs[32]
+    (a bit per value), qh[8] (the indices' 2 high bits, 4 per byte: a byte per 32 values), scales[8] (a nibble per 16
+    values: a byte's low nibble, then its high one)"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 82); n = b.shape[0]
+    d = _f16(b[:, 0:2].copy()).reshape(n, 1)
+    db = ((d * (np.float32(0.5) + _nib(b[:, 74:82]).astype(np.float32))) * np.float32(0.25)).reshape(n, 16, 1)
+    hi = ((b[:, 66:74, None] >> np.array([0, 2, 4, 6], dtype=np.uint8)) & 3).astype(np.uint16).reshape(n, 32)
+    g = iq_tables.GRID_IQ2_S[b[:, 2:34].astype(np.uint16) | (hi << 8)].astype(np.float32).reshape(n, 16, 16)
+    return (db * g * _pm(b[:, 34:66]).reshape(n, 16, 16)).reshape(-1)
+
+
+def bf16(raw):
+    """BF16: 2-byte values, the high half of a float32 (the widening is exact)"""
+    return (np.asarray(raw, dtype=np.uint8).view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+
+
 def q5_k(raw):
     """Q5_K: 176-byte blocks of 256: d, dmin (fp16), 12 bytes of 6-bit scales / mins (as Q4_K), qh[32] (the fifth bits:
     bit j of qh[l] belongs to value j * 32 + l), qs[128] (the low 4 bits: 4 chunks of 64 values, low nibbles then high)"""
@@ -176,8 +193,8 @@ def q2_0(raw):
 
 DECODERS = {'Q4_K': (256, 144, q4_k), 'Q6_K': (256, 210, q6_k), 'Q5_K': (256, 176, q5_k),
             'IQ4_XS': (256, 136, iq4_xs), 'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s),
-            'IQ2_XXS': (256, 66, iq2_xxs), 'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q4_1': (32, 20, q4_1),
-            'Q2_0': (64, 18, q2_0)}
+            'IQ2_XXS': (256, 66, iq2_xxs), 'IQ2_S': (256, 82, iq2_s), 'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q4_1': (32, 20, q4_1),
+            'Q2_0': (64, 18, q2_0), 'BF16': (1, 2, bf16)}
 
 
 def dequant(raw, type_name, n_values):

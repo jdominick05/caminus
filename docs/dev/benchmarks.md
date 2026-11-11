@@ -112,6 +112,23 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
   The attention reads every earlier position per query head, so both the prompt rate and decode fall with depth.
 - Swift 1.5 needs a 24 GB card. With its prompt cache it projects 19.1 GiB at 12K, past an XT's room.
 
+### ThinkingCap RCO 4.2 bpw (dense 27B, own code; decode module only)
+
+Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Decode only: no prefill and no serving yet, and
+the grid and task sizes are untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized
+(`tests/engine/test_q35_dense.py --model GGUF --ref REF.npz`).
+
+| | RX 7900 XTX | RX 7900 XT |
+|---|---|---|
+| Caminus decode (short context) | 46.9 tok/s (21.33 ms) | 39.4 tok/s (25.37 ms) |
+| llama.cpp decode (tg128) | 40.5 | 34.1 |
+
+- Accuracy, against the float64 reference (`tools/reference/q35_ref.py`), 128 positions: mean KLD 2.4e-7, top-1 128/128.
+  llama.cpp's one-token decode of the same rows: 2.7e-4, 128/128
+  (`tools/guard.sh LOG 1800 python -I tools/gates/q35_gmodel.py GGUF --ref REF.npz --llama LLAMA.bin`).
+- Per-matvec error against float64 on real rows: 1.0-1.9e-4 mean on every shape and format, against llama.cpp's 6.2-9.6e-3
+  (`tools/guard.sh LOG 1800 python -I benchmarks/own_mv_census.py GGUF`).
+
 ### Qwen3-30B-A3B Q4_K_M
 
 Measured 2026-11-10 on the RX 7900 XTX; llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`. The model runs on

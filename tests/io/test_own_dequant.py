@@ -64,9 +64,10 @@ for name, (bits, bv, bs) in sorted(own_layout.RS_CONT.items()):   # the row-scal
         except ValueError: pass
         bad += not ok
         print(('PASS' if ok else 'FAIL') + f' {name} K {K}: the row-scale planes decode to the container\'s values, invert, and refuse a row with two scales')
-for cls in (quants.IQ2_XXS, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
+for cls in (quants.IQ2_XXS, quants.IQ2_S, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
 tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
         ('GRID_IQ2_XXS', iq_tables.GRID_IQ2_XXS, quants.IQ2_XXS.grid.reshape(256, 8)),
+        ('GRID_IQ2_S', iq_tables.GRID_IQ2_S, quants.IQ2_S.grid.reshape(1024, 8)),
         ('GRID_IQ3_XXS', iq_tables.GRID_IQ3_XXS, quants.IQ3_XXS.grid.reshape(256, 4)),
         ('GRID_IQ3_S', iq_tables.GRID_IQ3_S, quants.IQ3_S.grid.reshape(512, 4)),
         ('the sign bytes', own_dequant._signs7(np.arange(128)), np.frombuffer(quants.IQ2_XXS.ksigns, np.uint8))]
@@ -76,6 +77,8 @@ for name, ours, ref in tabs:
 hdr = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'kernels', 'iq_grids.h')
 ok = open(hdr).read() == iq_tables.c_header(); bad += not ok
 print(('PASS' if ok else 'FAIL') + ' kernels/iq_grids.h is the tables\' own header (iq_tables.c_header)')
+ok = open(os.path.join(os.path.dirname(hdr), 'iq2s_grid.h')).read() == iq_tables.c_header_iq2s(); bad += not ok
+print(('PASS' if ok else 'FAIL') + ' kernels/iq2s_grid.h is the tables\' own packed IQ2_S header (iq_tables.c_header_iq2s)')
 if A.gguf is None:
     print('RESULT', 'PASS' if bad == 0 else 'FAIL'); sys.exit(1 if bad else 0)
 F = ggufio.GGUFFile(A.gguf)

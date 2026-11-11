@@ -124,4 +124,31 @@ check(refused(lambda: e_q35.own_matvec16(w8, 'Q4_K', 8, 256, B(256, torch.float1
       'this module refuses a format without a rows tile, an odd task size, a weighted or two-slot add, the q8 KV cache')
 e_bad = k3.Engine(module='k3_q35_swift'); e_bad.own_f16(B(256), B(256, torch.float16))
 check(refused(lambda: e_bad.build()), 'a tape with an op outside the module\'s dispatch does not build')
+
+# ---- the ThinkingCap module (k3_q35_tcap: kernels/k3_q35t_ops.h) ----------------------------------------------------------
+PT = os.path.join(A.scratch, 'tiny-q35-tcap.gguf'); tiny_q35.write(PT, variant='tcap')
+lt = ref_q35.Q35Ref(PT).feed([1, 7, 3, 60])
+check(lt.shape == (4, info['V']) and np.isfinite(lt).all() and np.abs(lt).max() > 1e-3,
+      f'the reference reads the tiny ThinkingCap-format model (IQ2_S embedding, BF16 alpha / beta; |logit| up to {np.abs(lt).max():.2f})')
+mt = Dense35Own(PT, max_ctx=64, vram_check=False); Et = mt.E; it = Et.inventory()
+check(mt.module == 'k3_q35_tcap' and m.module == 'k3_q35_swift', f'the module comes from the file\'s formats ({mt.module}; Swift\'s: {m.module})')
+want_t = ({('OWN_MV', f'{f}/a16_1rt') for f in k3.OWN_Q35T_1RT} | {('OWN_MV16', 'Q8_0'), ('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'),
+          ('OWN_EMB', 'IQ2_S'), ('OWN_ADD_RMS16', '-')})
+check(set(it) == want_t, f'the ThinkingCap tape holds every tile, no fused gate|up, BF16 alpha / beta as F32: {sorted(it.items())}')
+check(not Et.unsupported() and all(sg.op in k3.Q35S_OPS for sg in Et.segs) and Et.refuse is None,
+      f'{len(Et.segs)} segments, every op one the ThinkingCap module dispatches')
+check(Et.segs[0].op == k3.OP_OWN_EMB and Et.segs[0].out_f32 == 1 | 2 | 8,
+      f'the embedding carries the grids to stage: IQ3_XXS | IQ3_S | IQ2_S = 11 (got {Et.segs[0].out_f32})')
+check(abs(Dense35Own.projection_mib(PT, 64) - mt.vram_mib) < 1e-9, 'the projection counts the widened BF16 and the record tails as the engine')
+srct = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35t_ops.h')).read()
+dev_t = {k for k in re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', srct.split('k3_extra_op(')[1])}
+check(dev_t == host_ops, f'kernels/k3_q35t_ops.h dispatches k3.Q35S_OPS too ({len(dev_t)} ops)')
+check(int(re.search(r'OWN_IQ2_S = (\d+)', srct).group(1)) == k3.OWN_Q35T_FMT['IQ2_S'], 'the IQ2_S format number is k3\'s')
+e_tc = k3.Engine(module='k3_q35_tcap')
+check(refused(lambda: e_tc.own_matvec_1rt(torch.zeros(8 * 144 + 16, dtype=torch.uint8), 'Q4_K', 8, 256, B(256, torch.float16), B(8))) and
+      refused(lambda: e_tc.own_matvec_1rt(torch.zeros(16 * 176, dtype=torch.uint8), 'Q5_K', 8, 256, B(256, torch.float16), B(8, torch.float16),
+                                          up=torch.zeros(16 * 176, dtype=torch.uint8))) and
+      refused(lambda: e_q35.own_matvec_1rt(torch.zeros(8 * 82 + 16, dtype=torch.uint8), 'IQ2_S', 8, 256, B(256, torch.float16), B(8))) and
+      refused(lambda: e_q35.own_emb(torch.zeros(64 * 82, dtype=torch.uint8), 'IQ2_S', 64, 256, torch.zeros(1, dtype=torch.int32), B(256))),
+      'the ThinkingCap module refuses Q4_K and a fused gate|up; the Swift module refuses IQ2_S matvecs and embeddings')
 print('RESULT', 'PASS' if ok else 'FAIL')

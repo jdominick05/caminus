@@ -52,6 +52,10 @@ CLAUDE.md imports this file.
   `k3_q35_swift.hip` is the dense qwen35 line's decode module on own code (`k3.Q35S_OPS`, `engine/q35_dense.py`; not
   yet served): its header `k3_q35_ops.h` takes `k3_q3m_ops.h`'s ops under `K3_OPS_NO_DISPATCH` and dispatches its own
   tape's, so an edit there must leave the qwen3moe modules' machine code unchanged (compare the `.text` sections).
+  `k3_q35_tcap.hip` is the same line's module for ThinkingCap's formats (`k3.Q35T_MODULES`): `k3_q35t_ops.h` takes
+  `k3_q35_ops.h`'s ops under `K3_Q35_NO_DISPATCH` and adds the IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K
+  one-round-trip matvec, the IQ2_S embedding and a launch hook staging the IQ grids; an edit there must leave
+  `k3_q35_swift`'s `.text` unchanged. `engine/q35_dense.py module_of` picks the module from the file's formats.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
