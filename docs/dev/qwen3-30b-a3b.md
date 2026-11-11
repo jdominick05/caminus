@@ -89,9 +89,10 @@ Through the server at the full 40,960-token context, a passphrase placed at 37 %
 The platform underneath is the compiler (LLVM in ROCm), the HIP runtime, and PyTorch, which Caminus uses to allocate
 device memory and launch its kernels; the sampler's candidates (the largest logits of each row) come from Caminus's own
 kernel (`kernels/own_topk.hip`, `python/caminus/device/topk.py`). `tools/gates/launch_trace.py` lists every kernel
-served requests launch (from the HIP runtime's own dispatch log). In decode, besides Caminus's kernels and the runtime's
-copy and fill kernels, two PyTorch kernels are left: the greedy path's argmax (`torch.max` over the logits, one per
-token) and a few small integer fills (`zero_()`). llama.cpp is the
+served requests launch (from the HIP runtime's own dispatch log). Across a new prompt's prefill, greedy decode and
+sampled decode with penalties, one PyTorch kernel is left besides Caminus's kernels and the runtime's copy and fill
+kernels: the greedy path's argmax (`torch.max` over the logits, one per token). Loading the model also runs PyTorch's
+fill kernels (`zero_()`) and one `torch.cat`. llama.cpp is the
 yardstick for speed and accuracy and a test oracle. Its GGUF reader and the `tokenizers` library stay in the
 repository for the other models and for the tests that compare against them.
 
