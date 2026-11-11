@@ -1,7 +1,6 @@
 # Row-scaled integer codes on Qwen3-30B-A3B's experts: a test
 
-Status: the quality half is measured and scored (Results: quality); the decode tile is written and predicted, not yet run
-on a card. Follows [the IQ quant study](iq-quant-study.md), which found that
+Status: both halves are measured and scored (Results: quality, Results: speed). Follows [the IQ quant study](iq-quant-study.md), which found that
 the codebook formats' smaller files buy no decode speed on these cards: their decode costs what their bytes save.
 
 ## The question
@@ -152,15 +151,19 @@ computed on the XT at every position (KLD 0, 1,024 of 1,024 top-1), so no column
 | P2 | W4b within 30 % of W4L | W4b 20 % **below** W4L (and 6 % below W4Lg) | **Holds.** The fitter is not the handicap: on the same container it is closer to R than llama-quantize's. |
 | P3 | W2r at least 3 times D, top-1 below 85 %; W2b between | W2r 2.73 times D, top-1 72.3 %; W2b 1.95 times D | **Missed by the ratio (2.73 against 3), not failed** (the fail line is 1.5). The substance stands: 2 bits by rounding does not hold up. |
 | P4 | R with 8-bit activations 0.1 to 1 times A | 0.29 times A | **Holds.** |
-| P5 | the shifted 2-bit set's fit error at least 20 % below the container's on every role | by the fitter's per-role lines: down 1.7 % **above**, gate 12.3 % below, up 13.3 % below | **Fails** by its letter on down, and no role reaches 20 %. Per tensor the shifted set is 9 to 16 % better on every one of the first 116 tensors logged (a 4 % exception on one gate), so the per-role line for down, a sum weighted by each tensor's activation energy, is carried by the last layer (blk.47: 19 % worse shifted). The level set is worth about 13 % of the fit error, not 20, and not on the tensor that weighs most. |
+| P5 | the shifted 2-bit set's fit error at least 20 % below the container's on every role | W2r, by the fitter's per-role lines: down 1.7 % **above**, gate 12.3 % below, up 13.3 % below | **Fails** by its letter on down, and no role reaches 20 %. Of W2r's 144 tensors, 123 have a per-tensor line on record (layers 0 to 38 and 45 to 47; the rest scrolled out of the kept log): the shifted set is 4 to 17 % better on 122 of them (median 15 %) and 19 % worse on one, the last layer's `ffn_down`. For that one tensor to turn the down role's line from about 15 % below to 1.7 % above, it has to carry about half of the role's weighted error (arithmetic on the two figures, not a measurement). With a scale per 64 values (W2b, all 144 lines on record) the shifted set gains less: 0 to 8 % on 141 tensors, worse on three (the last `ffn_down` by 17 %, layer 0's gate and up); per role down 5.2 % above, gate 3.2 % and up 3.9 % below. |
 
 What the table says:
 
 - **The row scale is what costs at 4 bits, and it costs 2.3 times** (W4r 0.0325 against W4b 0.0144). It still lands
-  at 1.19 times the official file's distance and above its top-1 agreement (92.7 % against 92.0 %), at 4.0 bits per
-  expert weight against 4.5 to 6.6. The tail is heavier: p99 0.289 against 0.190.
-- **Arm A is not a strong baseline at its size.** The official file's experts were made without this imatrix; plain
-  Q4_0 with it (W4b, W4L) and IQ4_XS (B) are all about half A's distance. A row-scale file competes with A, not
+  at 1.19 times the official file's distance with the same top-1 agreement (92.7 % against 92.0 %: 7 positions of
+  1,024, inside the noise). The tail is heavier: p99 0.289 against 0.190. On the device its experts are 4.0 bits per
+  weight plus one fp32 per row; the study file keeps the Q4_0 container and is W4b's size (17.3 GB).
+- **Arm A is not a strong baseline at its size.** Plain Q4_0 with unsloth's imatrix (W4b, W4L) and IQ4_XS (B)
+  are all about half A's distance. The official file carries no `quantize.imatrix` metadata (llama-quantize writes
+  those keys when it is given one: unsloth's Q8_0 and this study's llama-quantize files have them), and its name
+  metadata reads "Qwen3 30B Gptq Fp16": its experts may also come from other source weights than unsloth's Q8_0, so
+  part of A's distance to R may be the source and not the quantization. That split is not measured here. A row-scale file competes with A, not
   with the best 4.5-bit file.
 - **llama.cpp's own rule about the first `ffn_down` layers is measurable** (W4L 0.0181 with them at Q4_0, W4Lg 0.0153
   with its six Q4_1 tensors), and this fitter's Q4_0 beats both without it.
@@ -218,3 +221,71 @@ Correctness before any timing: `tests/engine/test_own_rs_ops.py` on each file (t
 2. A file is only scored if `requant_rows.py` ends RESULT PASS on it (metadata and every other tensor are the base
    file's bytes; with a row scale, one scale per row in every expert tensor).
 3. Every GPU command runs under `tools/guard.sh`, first on the RX 7900 XT.
+
+## Results: speed
+
+Correctness first, on each card before its timings: `tests/engine/test_own_rs_ops.py` on both files (RX 7900 XT, then
+RX 7900 XTX: RESULT PASS on each; the tile against float64 on every row, mean 5e-08 and max 1e-06 of the rms; the
+K3 op bitwise its standalone kernel at four grids), and on the XT `tests/engine/test_q3moe_one.py` on both files
+against their fp32 references (mean KLD 1.5e-06 and 2.4e-07, top-1 equal at every position) and on the official file
+on each row-scale module (logits bitwise the lean module's). Every object of the comparison was built from one source
+tree into one directory; `k3_run` is 96 VGPRs with 0 VGPR spills in each.
+
+Decode, ms per token (tokens per second), medians of three passes of five rounds of 32 tokens; each arm's full and
+loads-only builds interleaved in one process. The widest spread of one build across its passes is about 0.05 ms.
+
+| | XT, depth 8 | XT, 4,096 | XTX, depth 8 | XTX, 4,096 |
+|---|---|---|---|---|
+| Official file, lean module (as shipped) | 4.840 (206.6) | 5.660 (176.7) | 4.053 (246.7) | 4.705 (212.5) |
+| Official file, row-scale module | 4.914 / 4.920 | 5.734 / 5.746 | 4.125 / 4.125 | 4.802 / 4.815 |
+| **W4r** (`k3_q3m_rs4`) | **4.697 (212.9)** | 5.551 (180.1) | **3.972 (251.8)** | 4.653 (214.9) |
+| **W2r** (`k3_q3m_rs2`) | **4.394 (227.6)** | 5.257 (190.2) | **3.716 (269.1)** | 4.408 (226.9) |
+| B, IQ4_XS (`k3_q3m_iq`) | 4.925 (203.0) | 5.750 (173.9) | 4.129 (242.2) | 4.864 (205.6) |
+| D, IQ2_XXS (`k3_q3m_iq`) | 5.115 (195.5) | 5.978 (167.3) | 4.128 (242.2) | 4.878 (205.0) |
+| Loads only: official / W4r / W2r | 4.527 / 4.368 / 3.841 | 5.303 / 5.183 / 4.650 | 3.848 / 3.759 / 3.322 | 4.439 / 4.318 / 3.934 |
+| Loads only: B / D | 4.369 / 4.004 | 5.161 / 4.792 | 3.744 / 3.454 | 4.329 / 4.048 |
+
+Full minus loads-only (what the arithmetic adds to a token whose expert bytes are read anyway), paired inside each
+process:
+
+| | XT, depth 8 | XT, 4,096 | XTX, depth 8 | XTX, 4,096 |
+|---|---|---|---|---|
+| Official file on the lean module | 0.317 | 0.359 | 0.205 | 0.266 |
+| Official file on a row-scale module | 0.397 | 0.425 / 0.444 | 0.260 / 0.266 | 0.354 / 0.375 |
+| W4r | 0.329 | 0.368 | 0.220 | 0.329 |
+| W2r | 0.552 | 0.607 | 0.392 | 0.471 |
+| B, IQ4_XS | 0.559 | 0.593 | 0.392 | 0.535 |
+| D, IQ2_XXS | 1.106 | 1.184 | 0.674 | 0.830 |
+
+| | Predicted | Measured | |
+|---|---|---|---|
+| S1 | the official file 0.03 to 0.15 slower on the row-scale modules | 0.075 (`rs4`), 0.077 (`rs2`), paired per process | **Holds.** 13 more spilled scalars cost 0.08 ms. |
+| S2 | W4r's and W2r's full minus loads-only 0.20 to 0.40, equal, below the official file's on the same module | W4r 0.329 (official 0.397); W2r 0.552 | **Fails on W2r**: outside the range, not W4r's, and above the official file's. W4r's part holds. |
+| S3 | W4r 0.10 to 0.30 faster than the official file on the same module | 0.217 | **Holds.** Against the shipped lean module the gain is 0.143. |
+| S4 | W2r 0.45 to 0.70 faster on the same module, at least 0.30 against the lean module | 0.526; 0.446 | **Holds.** |
+| S5 | each gain at 4,096 positions within 0.05 of its gain at 8 | W4r 0.217 -> 0.183; W2r 0.526 -> 0.489 | **Holds**, with both gains 0.03 to 0.04 smaller at depth: close to the spread between processes. On the XTX the gains do not move (0.153 -> 0.149, 0.409 -> 0.407). |
+| S6 | on the XTX W4r 0.08 to 0.25, W2r 0.35 to 0.60 faster on the same module | 0.153; 0.409 | **Holds.** |
+
+What the tables say:
+
+- **A plain 4-bit tile with one scale per row is the cheapest arithmetic measured here, and the gain is small.**
+  W4r is 0.14 ms (XT) and 0.08 ms (XTX) faster than the shipped engine on the official file at depth 8: 3 % and 2 %.
+  It reads 0.16 ms fewer bytes and computes for the same 0.33 ms the lean module's Q4_K tile takes. At 4,096
+  positions on the XTX the gain against the shipped module is 0.05 ms: at the edge of what counts as a difference.
+- **2 bits read 0.69 ms less than the official file on the XT and give back 0.24 ms of it in arithmetic.** The S2
+  prediction (the arithmetic is per weight, so the same at both widths) is wrong: W2r's full minus loads-only is
+  0.55 ms against W4r's 0.33. The tile does the same number of multiply-adds for half the bytes, so the faster the
+  loads finish, the more of the arithmetic is left uncovered by them: at 2 bits the experts' stage is no longer
+  bound by the bytes alone. The quality half rules W2r out, so its tile is not tuned further; the number stands as
+  what plain 2-bit codes would have to beat.
+- **The codebook formats pay for their bytes in arithmetic; the plain codes do not.** D reads 0.52 ms less than the
+  official file on the XT and computes 0.79 ms more (5.115 against 4.840); W2r reads 0.69 ms less and computes
+  0.24 ms more. At the same expert bytes per token (IQ4_XS and W4r both load in 4.37 ms on the XT), the plain tile
+  is 0.23 ms faster than the codebook's (4.697 against 4.925).
+- **The loads-only rows are the ceiling of any weight format on this engine**: with free arithmetic, 4-bit experts
+  give 4.37 ms (229 tok/s) on the XT and 3.76 ms (266 tok/s) on the XTX at depth 8; 2-bit experts 3.84 ms (260) and
+  3.32 ms (301). Everything else in a token (attention, the router, the output head, the hand-offs) is in those
+  figures and does not shrink with the experts.
+- **What an int8-activation form of the 4-bit tile could win is bounded by W4r's 0.33 ms (XT) and 0.22 ms (XTX)**
+  of arithmetic, at a quality cost the quality half measured (KLD 0.0325 -> 0.0365 on W4r).
+
