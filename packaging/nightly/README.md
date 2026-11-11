@@ -2,8 +2,8 @@
 
 `caminus-nightly.timer` starts `caminus-nightly.service` every night at midnight (local time). The service runs
 `tools/release/nightly.sh`: when the head of `testing` has a green CI run and no nightly yet, it builds that commit the
-way a release is built and publishes it as a GitHub pre-release; `.github/workflows/nightly.yml` then verifies the files
-and uploads the wheel to PyPI. What the script does, step by step, and why it runs on the maintainer's machine:
+way a release is built, publishes it as a GitHub pre-release and starts `.github/workflows/nightly.yml` on `testing`,
+which verifies the files and uploads the wheel to PyPI. What the script does, step by step, and why it runs on the maintainer's machine:
 [docs/dev/releasing.md](../../docs/dev/releasing.md), "Nightly builds". Nothing in the repository installs or enables the
 timer; these are the steps to take by hand.
 
@@ -46,8 +46,9 @@ token kept in a desktop keyring when nobody is logged in (set `GH_TOKEN` in the 
   two build logs beside the clones in `~/.local/state/caminus-nightly/builds/<date>-<commit>-<time>/`. The script keeps the
   last two build directories and deletes older ones.
 - **A failed night** changes nothing public unless it died between pushing the tag and creating the pre-release; the next
-  run finishes that from the tag. A pre-release whose PyPI upload failed: run the `nightly` workflow by hand on the tag
-  (`gh workflow run nightly.yml --ref <tag> -f tag=<tag>`; GitHub allows that once `nightly.yml` is on `main`).
+  run finishes that from the tag. A pre-release whose PyPI upload failed or was not started: start the workflow by hand,
+  on the branch (`gh workflow run nightly.yml --ref testing -f tag=<tag>`; GitHub allows that once `nightly.yml` is on
+  `main`, and the workflow refuses any ref but `testing`).
 - **One nightly a day at most**, and none when `testing` did not move: a PyPI version is published once.
 - **The service runs the head of `testing`** (it updates its clone first), with the account's GitHub rights. It builds
   and runs only what was merged there.

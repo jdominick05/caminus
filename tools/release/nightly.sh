@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The nightly build, run on the maintainer's machine by a timer (packaging/nightly/; docs/dev/releasing.md, "Nightly
 # builds"): when the branch head has a green CI run and no nightly yet, build it the way a release is built and publish it
-# as a GitHub pre-release. .github/workflows/nightly.yml then verifies the pre-release's files and uploads the wheel to
-# PyPI as caminus X.Y.Z.devYYYYMMDD. It runs here and not in CI for the release's reason: CI does not have the toolchain
+# as a GitHub pre-release, then start .github/workflows/nightly.yml on the branch, which verifies the pre-release's files
+# and uploads the wheel to PyPI as caminus X.Y.Z.devYYYYMMDD. It runs here and not in CI for the release's reason: CI does not have the toolchain
 # that builds the shipped code objects.
 #
 #   tools/release/nightly.sh                  build and publish, or say why there is nothing to do (exit 0 either way)
@@ -22,9 +22,13 @@
 #      the wheel, the sdist, SHA256SUMS, verify_release.py
 #   6. nightly_plan.py check-tag and the privacy scan of the tagged tree; only then the tag is pushed and the pre-release
 #      created with the three files (gh release create --prerelease --latest=false)
+#   7. starts the nightly workflow on the branch for that tag (gh workflow run nightly.yml --ref BRANCH -f tag=TAG).
+#      GitHub runs the workflow file of the ref it is started on, so the checks are always the reviewed branch's, never a
+#      tag's copy. A start that GitHub refuses (it allows one only once nightly.yml is on the default branch) is
+#      reported and is not a failure: the pre-release stands
 # A head that has its tag but no pre-release (a run that died between the two) is finished from the tag: clone B only.
-# A pre-release without its PyPI upload: run the nightly workflow by hand on the tag
-# (gh workflow run nightly.yml --ref TAG -f tag=TAG).
+# A pre-release without its PyPI upload: start the workflow by hand
+# (gh workflow run nightly.yml --ref testing -f tag=TAG).
 #
 # Environment (the timer's env file: packaging/nightly/nightly.env.example):
 #   NIGHTLY_GIT_NAME, NIGHTLY_GIT_EMAIL   the identity of the nightly commit and tag (required; it becomes public)
@@ -188,4 +192,8 @@ fi
 [ "$resume" = 1 ] || git -C "$W/b" push -q "$URL" "refs/tags/v$VER:refs/tags/v$VER" || die "cannot push the tag v$VER"
 gh release create "v$VER" "${files[@]}" -R "$REPO" --verify-tag --prerelease --latest=false \
     --title "Caminus nightly $VER" --notes-file "$W/notes.md" || die "the tag v$VER is pushed but its pre-release was not created: the next run finishes it"
-finish "published $VER ($BRANCH at $short): https://github.com/$REPO/releases/tag/v$VER"
+# ---- 7. the PyPI upload: the workflow of the branch, never of the tag
+pypi="the PyPI workflow is started"
+gh workflow run nightly.yml -R "$REPO" --ref "$BRANCH" -f "tag=v$VER" > "$W/dispatch.log" 2>&1 \
+    || pypi="the PyPI workflow was NOT started ($(tr '\n' ' ' < "$W/dispatch.log" | cut -c1-160)); by hand: gh workflow run nightly.yml -R $REPO --ref $BRANCH -f tag=v$VER"
+finish "published $VER ($BRANCH at $short): https://github.com/$REPO/releases/tag/v$VER; $pypi"

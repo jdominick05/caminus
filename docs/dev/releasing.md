@@ -90,18 +90,27 @@ midnight (local time) by a systemd user timer ([packaging/nightly/](../../packag
    from the committed hashes (every nightly is also a reproducibility test of the build) and ends with
    `verify_release.py`;
 6. checks the tag (`nightly_plan.py check-tag`) and scans the tagged tree (`privacy_scan.py`), and only then pushes the
-   tag and creates the pre-release (`--prerelease --latest=false`, so the "Latest" release stays the last real one).
+   tag and creates the pre-release (`--prerelease --latest=false`, so the "Latest" release stays the last real one);
+7. starts `nightly.yml` on the branch for that tag (`gh workflow run nightly.yml --ref testing -f tag=vX.Y.Z.devYYYYMMDD`).
 
-`tools/release/nightly.sh --dry-run` does everything except the push and the pre-release.
+`tools/release/nightly.sh --dry-run` does everything except the push, the pre-release and that start.
 
-**nightly.yml** runs when that pre-release is published (or by hand with its tag; release.yml skips pre-releases). No
-person approves a nightly, so its verify job is the gate between a published pre-release and PyPI:
+**nightly.yml** has one trigger, a start by hand or by the script, and it runs **on the branch `testing` only**. GitHub
+runs the workflow file of the ref a run starts on. A run for a release event would execute the copy in the tag's commit,
+so a crafted tag could carry an edited copy that skips every check and uploads any version of `caminus`; started on
+`testing`, the file is always the reviewed one, because the branch takes changes through pull requests only. Two things
+hold that in place: the verify job refuses any other ref, and the environment `pypi-nightly`, which the PyPI trusted
+publisher names, admits the branch `testing` and no tag. GitHub starts a workflow this way only once its file is on
+the default branch, so the upload begins after the first merge of `testing` into `main` that holds `nightly.yml`; until
+then the script reports that the start was refused and the pre-release stands.
 
-- the tag has the nightly form and its Release is a pre-release;
+No person approves a nightly, so the verify job is the gate between a published pre-release and PyPI:
+
+- the run is on `refs/heads/testing`, the tag has the nightly form and its Release is a pre-release;
 - `nightly_plan.py check-tag --branch origin/testing`: the tag's commit has one parent, the parent is a commit of
   `testing`, and the commit changes only `python/caminus/__init__.py` (its `__version__` line, to the tag's version) and the
-  hashes file (hash lines only). The job runs **`testing`'s copy of the checker** (a second checkout) on the tag's
-  repository, before any file of the tag runs: a tag that passes holds no tool that `testing` does not, so the tag's
+  hashes file (hash lines only). The job runs **its own checkout's copy of the checker** on a second checkout that
+  holds the tag, before any file of the tag runs: a tag that passes holds no tool that `testing` does not, so the tag's
   own `verify_release.py` below is reviewed code;
 - a completed, successful `ci.yml` push run exists on that parent;
 - `verify_release.py --tag`: everything it checks for a release, which includes that every package file in the wheel is
@@ -112,13 +121,8 @@ Its publish job (environment `pypi-nightly`, `id-token: write` and nothing else,
 with twine 6.1.0 through PyPI Trusted Publishing: the job's OIDC identity is exchanged for a short-lived upload token
 (PyPI's documented manual exchange), so no PyPI secret is stored for it. It runs only when the repository variable
 `NIGHTLY_PYPI` is `true`. The PyPI project's trusted publisher names owner `jdominick05`, repository `caminus`, workflow
-`nightly.yml` and environment `pypi-nightly`; the environment is limited to tags matching `v*.dev*`, so a run by hand
-names the tag as its ref too: `gh workflow run nightly.yml --ref vX.Y.Z.devYYYYMMDD -f tag=vX.Y.Z.devYYYYMMDD` (GitHub
-starts a workflow by hand only once its file is on the default branch, `main`).
-
-What the gate does not guard: for a release event GitHub runs `nightly.yml` as the tag's commit holds it. So the gate
-catches a faulty or altered build from the maintainer's machine; it does not stop someone who can already push tags
-and publish releases in this repository.
+`nightly.yml` and environment `pypi-nightly`. PyPI does not limit a publisher to dev versions, which is why the
+environment's branch rule and the `testing`-only trigger matter: **do not widen the environment to tags.**
 
 What a nightly is not: a release's GPU gates and manual tests (step 5 of "Making a release") are not run on it. Every
 change in it passed its own pull request's gates on the way into `testing`.

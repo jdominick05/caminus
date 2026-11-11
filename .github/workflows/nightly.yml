@@ -1,27 +1,29 @@
 # The nightly's PyPI upload (docs/dev/releasing.md, "Nightly builds"). The maintainer's machine builds a nightly of `testing`
 # with the real toolchain and publishes it as a GitHub pre-release tagged vX.Y.Z.devYYYYMMDD (tools/release/nightly.sh, on a
-# timer); publishing that pre-release (or running this workflow by hand with its tag) verifies the attached files against
-# the tag and uploads the wheel to PyPI as caminus X.Y.Z.devYYYYMMDD. Nothing here builds code objects.
+# timer), then starts this workflow ON THE BRANCH `testing` with that tag as its input. The workflow verifies the
+# attached files against the tag and uploads the wheel to PyPI as caminus X.Y.Z.devYYYYMMDD. Nothing here builds code
+# objects.
+# Why it is started on the branch and has no release trigger: GitHub runs the workflow file of the ref a run starts on.
+# A run for a release event would execute the copy in the tag's commit, so a crafted tag could carry an edited copy
+# that skips every check and uploads any version. Started on `testing`, the file is always the reviewed one (the
+# branch takes changes through pull requests only), and the environment pypi-nightly, which the PyPI trusted publisher
+# names, admits the branch `testing` and no tag. The verify job refuses any other ref.
 # No person approves a nightly, so verify is the gate: the tag is one commit on top of a commit of `testing` that changes
 # only the version line and the code-object hashes, CI was green on that commit, and the files are the tag's
 # (tools/release/verify_release.py: versions, hashes, provenance, every package file byte for byte the checkout's).
-# The tag is checked by the checker of `testing` itself (a second checkout), before any file of the tag runs: a tag that
-# passes holds no tool that `testing` does not, so the tag's own verify_release.py is then reviewed code.
-# What this does not guard: for a release event GitHub runs this file as the tag's commit holds it, so the gate catches
-# a faulty or altered build, not someone who can already push tags and publish releases here.
+# The tag is checked by this run's own checkout of `testing` before any file of the tag runs: a tag that passes holds
+# no tool that `testing` does not, so the tag's own verify_release.py is then reviewed code.
 # The upload uses PyPI Trusted Publishing (a short-lived token minted from this job's OIDC identity; no stored secret) and
-# runs only when the repository variable NIGHTLY_PYPI is 'true': the trusted publisher on PyPI names this workflow file and
-# the environment pypi-nightly.
+# runs only when the repository variable NIGHTLY_PYPI is 'true'.
+# GitHub starts a workflow this way only once its file is on the default branch (`main`).
 # Every action is pinned by its commit SHA, the release tag in the trailing comment.
 name: nightly
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: 'the nightly tag (vX.Y.Z.devYYYYMMDD) whose attached files to verify and upload'
+        description: 'the nightly tag (vX.Y.Z.devYYYYMMDD) whose attached files to verify and upload; start the run on testing'
         required: true
         type: string
 
@@ -38,33 +40,32 @@ defaults:
 jobs:
   verify:
     name: verify the nightly's files against its tag
-    if: >-
-      github.repository == 'jdominick05/caminus' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event.release.prerelease && contains(github.event.release.tag_name, '.dev')))
+    if: github.repository == 'jdominick05/caminus'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
       actions: read
     env:
-      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
-      - name: The tag has the form vX.Y.Z.devYYYYMMDD and its Release is a pre-release
+      - name: This run is the workflow of testing; the tag has the form vX.Y.Z.devYYYYMMDD and its Release is a pre-release
         run: |
+          if [ "$GITHUB_REF" != refs/heads/testing ]; then
+            echo "::error::started on $GITHUB_REF: the nightly workflow runs on refs/heads/testing only (gh workflow run nightly.yml --ref testing -f tag=...)"; exit 1
+          fi
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]{8}$ ]]; then
             echo "::error::not a nightly tag: '$TAG' (vX.Y.Z.devYYYYMMDD)"; exit 1
           fi
           pre=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft --jq '.isPrerelease and (.isDraft | not)')
           if [ "$pre" != true ]; then echo "::error::the Release of $TAG is not a published pre-release"; exit 1; fi
 
-      # the checker comes from `testing` (reviewed code), never from the tag it checks
-      - name: Check out testing (the trusted tools)
+      # the checker comes from this run's own commit of `testing` (reviewed code), never from the tag it checks
+      - name: Check out this run's commit of testing (the trusted tools)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: testing
           path: trusted
           persist-credentials: false
 
@@ -124,7 +125,7 @@ jobs:
   publish:
     name: upload the wheel to PyPI (Trusted Publishing)
     needs: verify
-    if: github.repository == 'jdominick05/caminus' && vars.NIGHTLY_PYPI == 'true'
+    if: github.repository == 'jdominick05/caminus' && github.ref == 'refs/heads/testing' && vars.NIGHTLY_PYPI == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
