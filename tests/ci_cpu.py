@@ -1,6 +1,6 @@
 """The CPU suites in one run, as CI runs them (.github/workflows/ci.yml) and as anyone can run them locally:
 
-  python -I tests/ci_cpu.py --scratch DIR [--only NAME,...] [--list]
+  python -I tests/ci_cpu.py --scratch DIR [--only NAME,...] [--jobs N] [--list]
 
 Each suite runs when what it needs is here and is SKIPPED with the reason otherwise (a missing model or library is never a
 failure); nothing touches a GPU (HIP_VISIBLE_DEVICES is emptied for every child). What a suite may need:
@@ -9,13 +9,19 @@ failure); nothing touches a GPU (HIP_VISIBLE_DEVICES is emptied for every child)
           needed: CI writes a vocab-only GGUF from the first 11 MiB of shard 1 (tools/release/gguf_vocab_only.py)
   coder   $CODER names the Coder's real shard 1 (its tensors; shard 2 beside it): the prefill launchers' CPU refusals
 DIR (required, never under /tmp; it must not exist or be empty) gets one subdirectory and one log per suite. Exit 1 when any
-suite that ran failed; the log's tail is printed for each failure."""
+suite that ran failed; the log's tail is printed for each failure.
+--jobs N suites run at once (default: the CPU count, at most 8; 1 = one after another). Every suite is its own process with
+its own scratch directory and log, and the results print in the list's order whatever finishes first. The suites that
+need `coder` never overlap one another at any N: each loads the Coder's tensors into host memory."""
 import argparse
+import concurrent.futures
+import contextlib
 import importlib.util
 import os
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,6 +95,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--scratch', required=False)
     ap.add_argument('--only', default='', help='comma-separated suite names')
+    ap.add_argument('--jobs', type=int, default=min(8, os.cpu_count() or 1), help='suites run at once (1 = one after another)')
     ap.add_argument('--list', action='store_true', help='print the suites and what each needs, then exit')
     a = ap.parse_args(argv)
     have = available()
@@ -112,28 +119,40 @@ def main(argv=None):
     env = dict(os.environ, HIP_VISIBLE_DEVICES='')
     env.setdefault('TMPDIR', os.path.join(S, 'tmp'))
     os.makedirs(env['TMPDIR'], exist_ok=True)
-    results = []
-    for name, args, needs in SUITES:
-        if only and name not in only:
-            continue
-        miss = [f'{n}: {have[n]}' for n in sorted(needs) if have[n]]
-        if miss:
-            results.append((name, 'SKIP', '; '.join(miss)))
-            print(f'SKIP {name}: {"; ".join(miss)}', flush=True)
-            continue
+    if a.jobs < 1:
+        raise SystemExit('ci_cpu: --jobs must be at least 1')
+    heavy = threading.Lock()   # (the suites that load the Coder's tensors: one at a time)
+
+    def run(name, args, needs):
         sub = os.path.join(S, name)
         argv_ = [x.replace('{coder}', os.environ.get('CODER', '')).replace('{scratch}', sub) for x in args]
         log = os.path.join(S, f'{name}.log')
-        t0 = time.time()
-        with open(log, 'w') as f:
-            rc = subprocess.run([sys.executable, '-I'] + argv_, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT).returncode
-        dt = time.time() - t0
-        results.append((name, 'PASS' if rc == 0 else 'FAIL', f'{dt:.0f} s' + ('' if rc == 0 else f', exit {rc}, {log}')))
-        print(f'{"PASS" if rc == 0 else "FAIL"} {name} ({dt:.0f} s)', flush=True)
-        if rc != 0:
-            with open(log, errors='replace') as f:
-                tail = f.read().splitlines()[-60:]
-            print('\n'.join('    ' + x for x in tail), flush=True)
+        with heavy if 'coder' in needs else contextlib.nullcontext():
+            t0 = time.time()
+            with open(log, 'w') as f:
+                rc = subprocess.run([sys.executable, '-I'] + argv_, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT).returncode
+            return rc, time.time() - t0, log
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:
+        todo = []
+        for name, args, needs in SUITES:
+            if only and name not in only:
+                continue
+            miss = [f'{n}: {have[n]}' for n in sorted(needs) if have[n]]
+            todo.append((name, '; '.join(miss), None if miss else pool.submit(run, name, args, needs)))
+        for name, miss, fut in todo:   # (in the list's order: a line prints when its suite and every earlier one is done)
+            if fut is None:
+                results.append((name, 'SKIP', miss))
+                print(f'SKIP {name}: {miss}', flush=True)
+                continue
+            rc, dt, log = fut.result()
+            results.append((name, 'PASS' if rc == 0 else 'FAIL', f'{dt:.0f} s' + ('' if rc == 0 else f', exit {rc}, {log}')))
+            print(f'{"PASS" if rc == 0 else "FAIL"} {name} ({dt:.0f} s)', flush=True)
+            if rc != 0:
+                with open(log, errors='replace') as f:
+                    tail = f.read().splitlines()[-60:]
+                print('\n'.join('    ' + x for x in tail), flush=True)
     fails = [n for n, r, _ in results if r == 'FAIL']
     print(f'ci_cpu: {sum(r == "PASS" for _, r, _ in results)} passed, {len(fails)} failed, '
           f'{sum(r == "SKIP" for _, r, _ in results)} skipped' + (f' (failed: {", ".join(fails)})' if fails else ''))

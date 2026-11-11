@@ -1,11 +1,34 @@
 #!/usr/bin/env bash
 # Build every kernels/*.hip into a gfx1100 code object (build/<name>.hsaco), then the C++ runtime tests.
 # Code objects are runtime-neutral: PyTorch's HIP 7.2 runtime and TheRock's both load them via hipModuleLoadData.
+# BUILD_JOBS compiles run at once (default: the CPU count, at most 8; 1 = one after another). Every object is its own
+# compiler run with its own intermediates, so the count changes no byte of any output, and the output's order (this
+# script's stdout, build/BUILD-CMDS.tsv) is the serial order either way.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 TR=${ROCM_PATH:-$HOME/rocm-therock/10.2.0a20261011}
 ARCH=${ARCH:-gfx1100}
-mkdir -p build
+mkdir -p build/obj
+JOBS=${BUILD_JOBS:-$(n=$(nproc); echo $((n < 8 ? n : 8)))}
+case "$JOBS" in ''|*[!0-9]*|0) echo "build.sh: BUILD_JOBS='$JOBS' is not a count" >&2; exit 2 ;; esac
+QUEUE=()
+slot() {   # slot OUT: wait for a free job slot, then register OUT; the caller starts its job right after, as
+           #   { COMMANDS > "$(joblog OUT)" 2>&1 && : > "$(jobok OUT)"; } &
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n 2> /dev/null || true; done
+    rm -f "$(jobok "$1")"; QUEUE+=("$1")
+}
+joblog() { echo "build/obj/$(basename "$1").log"; }
+jobok() { echo "build/obj/$(basename "$1").ok"; }
+finish() {   # wait for every job; print each one's output and name in the order started; exit 1 naming the failed ones
+    wait
+    local out bad=()
+    for out in "${QUEUE[@]}"; do
+        cat "$(joblog "$out")"
+        if [ -e "$(jobok "$out")" ]; then echo "$out"; else bad+=("$out"); fi
+    done
+    QUEUE=()
+    [ ${#bad[@]} = 0 ] || { echo "build.sh: FAILED: ${bad[*]}" >&2; exit 1; }
+}
 # k3_gguf.hip includes llama.cpp's ggml-cuda headers (vecdotq.cuh: the GGUF block formats) from the ignite-llama tree
 IG=${IGNITE:-$HOME/src/ignite-llama}
 GG=$IG/ggml
@@ -60,8 +83,7 @@ for src in kernels/*.hip; do
     cmd=("$TR/bin/amdclang++" -x hip --rocm-path="$TR" --offload-arch="$ARCH" --offload-device-only --no-gpu-bundle-output
          -mcode-object-version=5 -O3 -std=$std -Ikernels "${extra[@]}" -o "$out" "$src")
     logcmd "$out" "${cmd[*]}"
-    "${cmd[@]}"
-    echo "$out"
+    slot "$out"; { "${cmd[@]}" > "$(joblog "$out")" 2>&1 && : > "$(jobok "$out")"; } &
 done
 # kernels/prefill_mmq.hip (the batched prefill's quantized GEMMs: ggml-cuda's MMQ vendored in kernels/ggml_mmq, MIT): one
 # code object per format and one for the glue, each built the way ignite builds the same kernels (its compile_commands
@@ -72,7 +94,6 @@ done
 PF=(-O3 -DNDEBUG -fPIC -std=gnu++17 -DGGML_USE_HIP -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 -DGGML_HIP_GRAPHS -DGGML_HIP_NO_VMM
     -DGGML_SCHED_MAX_COPIES=4 -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SHARED -DUSE_PROF_API=1 -D_GNU_SOURCE
     -D_XOPEN_SOURCE=600 -Ikernels -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda")
-mkdir -p build/obj
 pfbuild() {   # pfbuild OUT OBJ SRC DEFINE...: the pipeline above (a full HIP compile with device LTO, then the gfx1100 object unbundled)
     local out=$1 o=$2 src=$3; shift 3
     local -a c1=("$TR/llvm/bin/clang++" -x hip --offload-arch="$ARCH" "${PF[@]}" "$@" -c -o "$o.o" "$src")
@@ -80,8 +101,7 @@ pfbuild() {   # pfbuild OUT OBJ SRC DEFINE...: the pipeline above (a full HIP co
     local -a c3=("$TR/lib/llvm/bin/clang-offload-bundler" --unbundle --type=o --input="$o.fatbin"
                  --targets=hipv4-amdgcn-amd-amdhsa--"$ARCH" --output="$out")
     logcmd "$out" "${c1[*]} && ${c2[*]} && ${c3[*]}"
-    "${c1[@]}"; "${c2[@]}"; "${c3[@]}"
-    echo "$out"
+    slot "$out"; { { "${c1[@]}" && "${c2[@]}" && "${c3[@]}"; } > "$(joblog "$out")" 2>&1 && : > "$(jobok "$out")"; } &
 }
 for v in IQ2_S IQ3_S IQ3_XXS IQ4_NL IQ4_XS Q2_0 Q3_K Q4_K Q5_K Q6_K Q8_0 GLUE GLUE8; do
     n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/prefill_mmq_$n; out=build/prefill_mmq_$n.hsaco
@@ -103,6 +123,7 @@ for v in Q6_K; do
     n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/prefill_dense_$n; out=build/prefill_dense_$n.hsaco
     pfbuild "$out" "$o" kernels/prefill_dense.hip -DK3_DENSE_TYPE=GGML_TYPE_$v
 done
+finish
 # the C++ runtime and its tests, linked to torch's bundled HIP runtime and rocBLAS (the binaries training runs)
 TORCHLIB=${TORCHLIB:-$HOME/miniforge3/envs/drafter/lib/python3.12/site-packages/torch/lib}
 PATCHELF=${PATCHELF:-$HOME/miniforge3/envs/drafter/bin/patchelf}
@@ -110,9 +131,10 @@ CXX="$TR/bin/amdclang++ -O2 -std=c++20 -I$TR/include -Iruntime -D__HIP_PLATFORM_
 LINK="$TORCHLIB/libamdhip64.so $TORCHLIB/librocblas.so -Wl,-rpath,$TORCHLIB"   # full paths: not TheRock's runtime
 for t in runtime/test_*.cpp; do
     out="build/$(basename "$t" .cpp)"
-    $CXX runtime/rt.cpp runtime/s1.cpp "$t" -o "$out" $LINK
     # torch ships these under unversioned names and its own libraries NEED those names; record the same, so the
     # process loads exactly one copy of each (a soname-versioned entry would not be found, or load a second copy)
-    "$PATCHELF" --replace-needed libamdhip64.so.7 libamdhip64.so --replace-needed librocblas.so.5 librocblas.so "$out"
-    echo "$out"
+    slot "$out"; { { $CXX runtime/rt.cpp runtime/s1.cpp "$t" -o "$out" $LINK &&
+        "$PATCHELF" --replace-needed libamdhip64.so.7 libamdhip64.so --replace-needed librocblas.so.5 librocblas.so "$out"; } \
+        > "$(joblog "$out")" 2>&1 && : > "$(jobok "$out")"; } &
 done
+finish

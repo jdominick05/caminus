@@ -85,6 +85,9 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 - **Nightly builds.** When `testing` changed, its head is built overnight with the release toolchain and published as a
   GitHub pre-release and as a dev version on PyPI: `pip install "caminus>=0.2.2.dev0"` takes the newest build. See
   [docs/dev/releasing.md](docs/dev/releasing.md#nightly-builds-nightlysh-on-a-timer-then-nightlyyml).
+- **Faster builds and CPU tests.** `./build.sh` compiles up to 8 code objects at once (`BUILD_JOBS`; 174 s -> 30 s on
+  16 threads, every output byte-identical to the serial build) and `tests/ci_cpu.py` runs up to 8 suites at once
+  (`--jobs`; 157 s -> 76 s without the model files).
 - Codex reviews every pull request into `testing`; its rules are in AGENTS.md. Dependabot proposes weekly updates for the
   workflows' pinned actions and the panel's Go modules.
 - The dense Qwen3.5 line (AREX-2) has a multi-token verify module, the groundwork for a drafter; the server does not use it

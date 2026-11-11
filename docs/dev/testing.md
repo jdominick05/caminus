@@ -14,6 +14,10 @@ host-side refusals of every GPU launcher, the drafters' host code, packaging, ca
 docs check. Suites that need the model files or PyTorch skip with a reason when those are missing. Use a fresh scratch
 directory each time: some suites refuse leftovers from a previous run.
 
+Up to 8 suites run at once (`--jobs N`; `--jobs 1` runs them one after another). Each suite is its own process with its
+own scratch directory and log, the results print in the same order either way, and the suites that load the Coder's
+tensors never overlap one another.
+
 `cd panel && go test ./...` tests the panel.
 
 ## GPU tests
