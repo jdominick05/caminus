@@ -1,8 +1,10 @@
 """caminus.own_dequant (our host decoders) bitwise against gguf-py's dequantize (the oracle): first on --random random
 blocks of every format it decodes (every bit pattern of the indices, signs and scales occurs; d is a small fp16), with
-the codebooks of caminus.iq_tables against gguf-py's tables; then, given a file, on real tensors: up to --rows rows each
-of every tensor kind in a decoded format (layer 0, a middle and the last layer, the experts' first, a middle and the last
-expert, the head and the embedding). Prints PASS / FAIL and RESULT PASS | FAIL.
+the codebooks of caminus.iq_tables against gguf-py's tables; then, given a file, on real tensors: up to --rows rows
+each (the first, the middle and the last rows) of every tensor kind in the file, per format: for each (format, name
+within a block) the first, the middle and the last block that has it (so a format only two tensors use is covered,
+and a multi-token-prediction block after the trunk too), plus the head and the embedding. A format own_dequant has
+no decoder for FAILs. Prints PASS / FAIL and RESULT PASS | FAIL.
   python -I tests/io/test_own_dequant.py [GGUF] [--rows 64] [--random 4096]"""
 import argparse, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -18,7 +20,7 @@ bad = 0; nvals = 0
 rng = np.random.default_rng(20261110)
 for name, (qk, bs, _) in sorted(own_dequant.DECODERS.items()):
     raw = rng.integers(0, 256, (A.random, bs), dtype=np.uint8)
-    for o in {'Q4_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2)}.get(name, (0,)):          # (the fp16 block scales: finite and small)
+    for o in {'Q4_K': (0, 2), 'Q5_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2)}.get(name, (0,)):          # (the fp16 block scales: finite and small)
         raw[:, o:o + 2] = (rng.standard_normal(A.random) * 0.01).astype(np.float16).view(np.uint8).reshape(-1, 2)
     ours = own_dequant.dequant(raw.reshape(-1), name, A.random * qk)
     ref = quants.dequantize(raw, GGMLQuantizationType[name]).astype(np.float32).reshape(-1)
@@ -30,6 +32,7 @@ try:   # the fp32 reference's torch decoders (tools/reference/q3moe_ref32.py) ar
                                                                             'reference', 'q3moe_ref32.py'))
     r32 = importlib.util.module_from_spec(sp); sp.loader.exec_module(r32)
     for name, (qk, bs, f) in sorted(own_dequant.DECODERS.items()):
+        if name not in r32.DECODERS: continue   # (the reference decodes the formats of the files it reads: not Q5_K)
         raw = rng.integers(0, 256, 300 * bs, dtype=np.uint8)
         with np.errstate(invalid='ignore'): a = f(raw)
         b = r32.DECODERS[name](torch.from_numpy(raw)).numpy(); fin = ~np.isnan(a)   # (random scales can be NaN: the same places; the bits elsewhere)
@@ -76,9 +79,16 @@ print(('PASS' if ok else 'FAIL') + ' kernels/iq_grids.h is the tables\' own head
 if A.gguf is None:
     print('RESULT', 'PASS' if bad == 0 else 'FAIL'); sys.exit(1 if bad else 0)
 F = ggufio.GGUFFile(A.gguf)
-nl = int(F.hp('block_count') or 1)
-pick = [t for t in F.tensors if (t.type in own_dequant.DECODERS or t.type == 'F32') and
-        (not re.match(r'blk\.\d+\.', t.name) or int(t.name.split('.')[1]) in (0, nl // 2, nl - 1))]
+HAVE = set(own_dequant.DECODERS) | {'F32', 'F16'}
+groups = {}
+for t in F.tensors:
+    m = re.match(r'blk\.\d+\.(.*)', t.name)
+    groups.setdefault((t.type, m.group(1) if m else t.name), []).append(t)
+pick = [g[i] for g in groups.values() for i in sorted({0, len(g) // 2, len(g) - 1})]
+missing = sorted({t.type for t in pick} - HAVE)
+if missing: print(f'FAIL no own decoder for {missing}')
+pick = [t for t in pick if t.type in HAVE]
+bad += len(missing); nvals = 0; per = {}
 for t in pick:
     R, rb = t.rows(); K = t.shape[0]
     for r0 in sorted({0, R // 2, max(0, R - A.rows)}):
@@ -86,9 +96,11 @@ for t in pick:
         ours = own_dequant.rows(t, r0, r1)
         raw = np.asarray(t.data()[r0 * rb:r1 * rb]).reshape(r1 - r0, rb)
         ref = (raw.view(np.float32).reshape(r1 - r0, K) if t.type == 'F32' else
+               raw.view(np.float16).astype(np.float32).reshape(r1 - r0, K) if t.type == 'F16' else
                quants.dequantize(raw, GGMLQuantizationType[t.type]).astype(np.float32).reshape(r1 - r0, K))
         if not np.array_equal(ours.view(np.uint32), ref.view(np.uint32)):
             bad += 1; print(f'  differs: {t.name} rows {r0}..{r1}: max |d| {np.abs(ours - ref).max():.3e}')
-        nvals += ours.size
-print(('PASS' if bad == 0 else f'FAIL {bad}') + f' own_dequant bitwise gguf-py on {len(pick)} tensors ({nvals / 1e6:.1f} M values)')
+        nvals += ours.size; per[t.type] = per.get(t.type, 0) + ours.size
+print(('PASS' if bad == 0 else f'FAIL {bad}') + f' own_dequant bitwise gguf-py on {len(pick)} tensors ({nvals / 1e6:.1f} M values: ' +
+      ', '.join(f'{k} {v / 1e6:.1f} M' for k, v in sorted(per.items())) + ')')
 print('RESULT', 'PASS' if bad == 0 else 'FAIL'); sys.exit(1 if bad else 0)
