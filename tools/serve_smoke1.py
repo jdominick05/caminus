@@ -54,6 +54,7 @@ class Server1:
         cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'caminus_serve.py'), '--port', '0', '--model', a.model,
                '--max-ctx', str(a.max_ctx), '--cache-dir', os.path.join(a.scratch, 'kv'), '--flight-dir', os.path.join(a.scratch, 'flight')]
         if a.alias: cmd += ['--model-alias', a.alias]
+        cmd += ['--cards', str(a.cards)]   # (2 with --card 0,1: a one-card model's two-card form, e.g. swift-1.5 / thinkingcap)
         if a.block_imports:   # the server with an import hook that refuses these top-level packages (the own-code gate)
             cmd = cmd[:2] + ['-c', BLOCKER.format(block=tuple(a.block_imports.split(','))), cmd[2]] + cmd[3:]
         print(f'{tag}: HIP_VISIBLE_DEVICES={a.card} {" ".join(c for c in cmd[2:] if not c.startswith("import sys"))}', flush=True)
@@ -98,7 +99,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--model', required=True); ap.add_argument('--scratch', required=True)
     ap.add_argument('--card', default='1', help='HIP_VISIBLE_DEVICES of the server (1: the XT, 0: the XTX; 0,1: a two-card engine)')
-    ap.add_argument('--cards', type=int, default=None, help='the cards /caminus/status must list (default: the --card count)')
+    ap.add_argument('--cards', type=int, default=None, help='the cards the server runs the model on (caminus serve --cards) and '
+                    '/caminus/status must list (default: the --card count)')
     ap.add_argument('--max-ctx', default='auto');   # (auto: the server's default, the largest context that fits)
     ap.add_argument('--alias', default=None)
     ap.add_argument('--llm-top', default=None); ap.add_argument('--restart', action='store_true')

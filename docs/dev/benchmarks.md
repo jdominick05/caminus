@@ -139,6 +139,38 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The gr
     326 tok/s (the needle found), then decode at 16 tok/s;
   - XT: the server picks 53,248 tokens of context by itself; greedy decode 40.9 tok/s; a 6,760-token prompt at 532 tok/s.
 
+### Swift 1.5 and ThinkingCap on two cards (tensor parallel, own code end to end)
+
+Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT (`caminus serve --cards 2`). Each card holds half of every layer's heads
+and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), and the two cards add their partial results
+128 times per token. The grid and task sizes are the one-card engines'; nothing is tuned for two cards yet.
+
+| | Swift 1.5 Q4_K_M | ThinkingCap RCO 4.2 bpw |
+|---|---|---|
+| Decode, two cards (short context, the engine) | 59.8 tok/s (even split) | 65.4 tok/s (16.73 -> 15.29 ms at the bandwidth split) |
+| Decode, two cards (served, greedy) | 63.6 tok/s | 67.8 tok/s |
+| Decode, one XTX (for comparison) | 42 tok/s | 46.9 tok/s |
+| Prefill, 2,048 positions from empty | 982 tok/s | 936 tok/s |
+| Context the server picks by itself | 262,144 | (262,144 fits: 16.6 / 16.1 GB projected) |
+
+- Accuracy against the float64 reference, 128 positions: mean KLD 2.5e-7 (Swift) and 2.2e-7 (ThinkingCap), top-1 128/128;
+  llama.cpp's one-card decode 2.7e-4 (`tools/guard.sh LOG 1800 python -I tools/gates/q35_gmodel.py GGUF --ref REF.npz
+  --llama LLAMA.bin --cards 2 --speed 64`, which also checks the replicated residual is the same bits on both cards after
+  every token).
+- Prefill 64 positions on both cards, then 64 two-card decode passes: mean KLD 2.4e-7 (Swift) and 4.5e-7 (ThinkingCap),
+  top-1 64/64; llama.cpp's own prefill-then-decode 3.2e-4 / 4.5e-4. Chunk geometry and the prompt cache's stops change no bit
+  (`tests/prefill/test_q35_prefill_tp.py GGUF --ref REF.npz --llama LL.bin --speed 2048`).
+- The exchange alone: 128 exchanges of a 5,120-float partial cost 0.82 ms per token (6.7 us each) on this machine's link
+  (`benchmarks/q35_tp_xchg.py`).
+- The feed-forward split, ThinkingCap decode: 15.75 ms at 50 / 50, 15.29 ms at 53 / 47, 15.13 ms at 56 / 44.
+- The prefill does not gain from the second card yet: its exchanges run between the layers' halves without overlap (a
+  2,048-token chunk moves 2 x 64 x 2,048 x 5,120 floats each way).
+- The served path (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1 --cards 2
+  --block-imports gguf,tokenizers`; ThinkingCap with `--max-ctx 32768 --needle 28000 --restart`): ThinkingCap reads a
+  6,760-token prompt at 759 tok/s and a 27,712-token one at 403 tok/s (the needle found), decode 15 tok/s at that depth;
+  Swift reads 6,760 tokens at 790 tok/s.
+- llama.cpp on the same two cards: not measured yet.
+
 ### Qwen3-30B-A3B Q4_K_M
 
 Measured 2026-11-10 on the RX 7900 XTX; llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`. The model runs on

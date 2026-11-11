@@ -56,6 +56,11 @@ CLAUDE.md imports this file.
   `k3_q35_ops.h`'s ops under `K3_Q35_NO_DISPATCH` and adds the IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K
   one-round-trip matvec, the IQ2_S embedding and a launch hook staging the IQ grids; an edit there must leave
   `k3_q35_swift`'s `.text` unchanged. `engine/q35_dense.py module_of` picks the module from the file's formats.
+  Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
+  `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
+  modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
+  The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
+  (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the

@@ -290,7 +290,7 @@ def engine_key(m, pf, draft=None, build=None):
         numerics=numerics(pf), routing=dict(crossover=None if pf.crossover is None else int(pf.crossover)),
         tp=dict(devices=[int(d) for d in m.devs], names=[torch.cuda.get_device_name(d) for d in m.devs] if cuda else [],
                 gdn_keys=int(m.gdn_keys), moe_blocks=int(m.moe_blocks), vocab_share=float(m.vocab_share), ntok=int(m.ntok),
-                local_only=bool(getattr(m, 'local_only', False))),
+                local_only=bool(getattr(m, 'local_only', False)), **dict(getattr(m, 'tp_key', None) or {})),
         qsa=dict(qsa=bool(m.qsa), dual=bool(getattr(m, 'dual', False)), qsa_limit=m.qsa_limit, max_ctx=int(m.max_ctx),
                  idx_cache=bool(m.idx_cache)),
         features=dict(layers=[int(x) for x in m.feature_layers], card=int(m.feature_card)),

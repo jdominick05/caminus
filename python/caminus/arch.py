@@ -261,6 +261,15 @@ class Arch:
         """the stats hook's card model (caminus.serve.stats.PhysicsConfig), or None: EngineStats' default, the Coder's cards"""
         return None
 
+    def variant(self, cards):
+        """the entry that serves this model on `cards` cards (None: its own count). An architecture with a two-card form names
+        it in TWO_CARD (the dense own line: Dense35 -> Dense35TP); any other count than its own is refused (ValueError)"""
+        if cards is None or int(cards) == self.cards: return self
+        alt = TWO_CARD.get(self.name) if int(cards) == 2 else None
+        if alt is None:
+            raise ValueError(f'{self.alias}: runs on {self.cards} card{"s" if self.cards > 1 else ""} only (not {cards})')
+        return ARCHS[alt]
+
     def set_ids(self, alias, tok):
         """the model ids the server lists (caminus.serve.template): alias (thinking on, unless the model's chat template never
         opens a think block: Qwen3-Coder-Next has no thinking mode) and alias-nothink"""
@@ -489,6 +498,46 @@ class Dense35(OneCard):
         return m, q35own.Q35OwnPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 
+class Dense35TP(Arch):
+    """the dense qwen35 line on Caminus's own code on TWO cards (caminus serve --cards 2 for swift-1.5 / thinkingcap): Dense35TP
+    (engine/q35_dense_tp.py: tensor parallelism, the two-card build of the file's module), T = 1, its own two-card prefill
+    (caminus.prefill.q35own_tp.Q35OwnPrefillTP). Never picked from a header or the catalog: Dense35.variant(2) names it. The
+    feed-forward rows split by the cards' streaming bandwidth (ffn_share: card 0's part; the attention and DeltaNet heads
+    split evenly)."""
+    kind, cards, T, engine = 'tp', 2, 1, 'engine.q35_dense_tp:Dense35TP'
+    tokenizer = 'own'
+    PREFILL_CHUNK = 2048
+
+    def split(self, cards):
+        """{'ffn_share': card 0's part of the feed-forward rows}: the cards' measured streaming bandwidth (CARD_BW) by label"""
+        if not cards: return {'ffn_share': 0.5}
+        bw = [CARD_BW.get(c.get('label'), CARD_BW['XT']) for c in cards]
+        return {'ffn_share': round(bw[0] / (bw[0] + bw[1]), 3)}
+
+    def _share(self, opt, cards=None):
+        sp = self.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or {})
+        return float(sp.get('ffn_share', 0.5))
+
+    def auto_need(self, opt, slots, cards=None):
+        from .engine.q35_dense_tp import Dense35TP as E
+        from .prefill.q35own_tp import buffer_need_tp_mib, tp_shapes
+        path, share = opt['model'], self._share(opt, cards)
+        n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
+        slot = (E.recurrent_mib(path) + E.kv_pos_mib(path)) * 1.05 + 1.0     # (a checkpoint, per card: its states + one tail row)
+        pf = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(tp_shapes(path, share), self.PREFILL_CHUNK)]
+        need = lambda c: [v + p + (slots + 2) * slot for v, p in zip(E.projection_mib(path, c, share), pf)]
+        return n_ctx, [0, 1], slot, need
+
+    def build(self, opt, log=print, T=None):
+        from .engine.q35_dense_tp import Dense35TP as E
+        from .prefill.q35own_tp import Q35OwnPrefillTP, buffer_need_tp_mib, tp_shapes
+        path, share = opt['model'], self._share(opt)
+        extra = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(tp_shapes(path, share), self.PREFILL_CHUNK)]
+        m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), ffn_share=share, vram_extra_mib=extra)
+        log(f'caminus serve: two cards: feed-forward rows {m.f0} / {m.ffn - m.f0} (ffn_share {share})', flush=True)
+        return m, Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None
+
+
 class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
@@ -508,7 +557,8 @@ class TwoCardTP(Arch):
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
                              Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
-                             TwoCardTP('qwen3next', 'qwen3-coder-next'))}
+                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'))}
+TWO_CARD = {'qwen35-own': 'qwen35-own-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
 CODER = ARCHS['qwen4exp']
 
 

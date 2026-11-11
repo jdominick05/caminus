@@ -350,4 +350,11 @@ def place(n_cards, fits=None, env=None, root='/', split_of=None):
         cards = [one(pool, lambda g: ok([g]))]
         sp = None
     return dict(cards=cards, split=sp, hip_visible=hip_visible(cards),
-                note=' + '.join(describe(c) for c in cards) + (f", split {sp['gdn_keys']} / {sp['moe_blocks']}" if sp else ''))
+                note=' + '.join(describe(c) for c in cards) + (', split ' + split_note(sp) if sp else ''))
+
+
+def split_note(sp):
+    """a TP split for the log: the Coder's 'gdn_keys / moe_blocks' (as before), else every key = value (the dense own line's
+    ffn_share)"""
+    if 'gdn_keys' in sp and 'moe_blocks' in sp: return f"{sp['gdn_keys']} / {sp['moe_blocks']}"
+    return ', '.join(f'{k} {v}' for k, v in sorted(sp.items()))

@@ -13,8 +13,8 @@ from its Hugging Face repository and checks every file before using it.
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-coder-next` | Qwen3-Coder-Next 80B-A3B, IQ3_S | 2 | 29.7 GB | 136 tok/s | 135 tok/s |
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,432 tok/s |
-| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB | 17.4 GB | 42 tok/s | 771 tok/s (measured on an XT) |
-| `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any | 14.3 GB | 47 tok/s | 942 tok/s |
+| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 17.4 GB | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
+| `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 14.3 GB | 47 tok/s; 68 on two cards | 942 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
@@ -54,6 +54,10 @@ caminus start qwen3.6      # picks the card and the largest context that fits
 
 Caminus sizes the context to your cards: up to 262,144 tokens (40,960 for `qwen3-30b-a3b`). It refuses to start a model
 that can't hold at least 32,768 tokens on your cards, rather than run out of memory later.
+
+`swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
+--cards 2`). Each card holds half of every layer, so the model writes about 1.4 times as fast and the full 262,144-token
+context fits. Reading a prompt is about as fast as on one XTX for now.
 
 ## The names your tools use
 

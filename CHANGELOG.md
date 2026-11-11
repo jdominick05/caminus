@@ -12,6 +12,10 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   token with code written for Caminus. ThinkingCap decodes at 47 tok/s on an XTX and 39 on an XT (llama.cpp on the same
   cards: 40 and 34) and reads a 2K prompt at 942 tok/s; its output is about 1,000 times closer to an exact reference of
   the model than llama.cpp's. Neither has a drafter yet. See [models](docs/models.md).
+- **The two dense 27B models on two cards.** `caminus start swift-1.5 --cards 2` (or `thinkingcap`, or `caminus serve
+  --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
+  context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
+  yet. See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the
