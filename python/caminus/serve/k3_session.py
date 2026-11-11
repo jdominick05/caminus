@@ -86,7 +86,7 @@ import numpy as np
 import torch
 
 from .. import arch as _arch
-from ..device import capacity
+from ..device import capacity, topk
 from ..decode import longctx
 from ..engine import passpolice
 from ..engine.k3 import ContextBoundsError
@@ -282,7 +282,7 @@ class K3Session(EngineSession):
         self._inflight = None       # 'step': a device step under way (abort drains the drafter's step when it was launched)
         self._step_ep = None        # the drafter's launch epoch (DFlashK3.token) before that step
         self._bails_seen = len(getattr(m, 'bails', ()))
-        self.counters = dict(device_passes=0, host_greedy_passes=0, sampled_passes=0, full_rows=0, wide_rows=0, plain_passes=0,
+        self.counters = dict(own_topk=0, device_passes=0, host_greedy_passes=0, sampled_passes=0, full_rows=0, wide_rows=0, plain_passes=0,
                              recoveries=0, recover_failed=0, prefill_recoveries=0, cancelled_prefills=0, aborts=0, aborts_commit0=0,
                              dropped_live=0, parks=0, filler_passes=0, idle_skipped=0, side_calls=0, side_recoveries=0,
                              side_ended=0, side_dropped=0)
@@ -341,6 +341,7 @@ class K3Session(EngineSession):
         self._h_idx = [torch.zeros(self.T, kmax, dtype=torch.int64, pin_memory=True) for _ in (0, 1)]
         self._h_pen = [torch.zeros(self.T, kmax, dtype=torch.float32, pin_memory=True) for _ in (0, 1)]
         self._ev = [None, None]
+        self._cand = None           # (topk.Candidates per shard: the device sampler's own kernel and its buffers)
         import collections
         self.samp_t = collections.deque(maxlen=4096)    # per sampled pass: (rows wait ms, host sampling ms, rows emitted)
 
@@ -709,18 +710,22 @@ class K3Session(EngineSession):
         if not 0 < kp <= self.kmax or len(pid) > self.kmax:
             raise ValueError(f'K3Session.queue_rows: k\' {kp} / {len(pid)} penalty ids past the candidate buffers ({self.kmax} wide)')
         m = self.m
+        if self._cand is None:      # (built on the first sampled pass: an engine may create its logits shards on its first pass)
+            self._cand = [topk.Candidates(self._dev_t[c], self.T, self.kmax) for c in (0, 1)]
         for c in (0, 1):
+            cand = self._cand[c]
             with torch.cuda.device(self._dev_t[c]):
                 L = m.logits_half[c][r0:r0 + R]
-                v, ix = torch.topk(L, min(kp, L.shape[1]), dim=1)
-                self._h_val[c][:R, :v.shape[1]].copy_(v, non_blocking=True)
-                self._h_idx[c][:R, :ix.shape[1]].copy_(ix, non_blocking=True)
                 lo, hi = (0, self.vh) if c == 0 else (self.vh, self.n_vocab)
                 sel = pid[(pid >= lo) & (pid < hi)]
+                cand.run(L, kp, sel - lo)          # (Caminus's own kernel: top-kp values and ids, the penalty ids' raw values)
+                # whole rows of the buffers (contiguous blocks: one copy each, no copy kernel); rows_wait reads the first kp
+                self._h_val[c][:R].copy_(cand.val[:R], non_blocking=True)
+                self._h_idx[c][:R].copy_(cand.idx[:R], non_blocking=True)
                 if len(sel):
-                    g = L.index_select(1, torch.as_tensor(sel - lo, device=L.device))
-                    self._h_pen[c][:R, :len(sel)].copy_(g, non_blocking=True)
+                    self._h_pen[c][:R].copy_(cand.pen[:R], non_blocking=True)
                 e = torch.cuda.Event(); e.record(); self._ev[c] = e
+        self.counters['own_topk'] += 1
 
     def cards_wait(self, R, kp):
         """queue_rows' candidates as arrays (V0, I0, V1, I1) [R, k'] (values descending, global ids; views of the pinned

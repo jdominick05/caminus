@@ -30,7 +30,7 @@ MOE_FORMATS = ('iq2_s', 'iq3_s', 'iq3_xxs', 'iq4_xs', 'iq4_nl', 'q2_0', 'glue')
 PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'prefill_tp', 'prefill_dense_q6_k', 'gemm',
             'prefill_glue_q35', 'prefill_glue_q35d', 'prefill_gdn_q35', 'prefill_attn_q35', 'prefill_attn_q35d')   # (caminus.prefill.q35)
            + tuple(f'prefill_mmq_{f}' for f in MMQ_FORMATS) + tuple(f'prefill_moe_{f}' for f in MOE_FORMATS))
-RUNTIME_SET = K3 + PREFILL + ('smoke',)
+RUNTIME_SET = K3 + PREFILL + ('own_topk', 'smoke')   # (own_topk: the device sampler's candidates, serve/k3_session.py)
 
 
 def checkout_build():

@@ -87,7 +87,8 @@ Through the server at the full 40,960-token context, a passphrase placed at 37 %
 | Prompt cache, sampler, chat template, tool-call parser, HTTP and SSE | `python/caminus/cache/`, `python/caminus/serve/` |
 
 The platform underneath is the compiler (LLVM in ROCm), the HIP runtime, and PyTorch, which Caminus uses to allocate
-device memory, launch its kernels and pick the largest logits for the sampler (`torch.topk`). llama.cpp is the
+device memory and launch its kernels; the sampler's candidates (the largest logits of each row) come from Caminus's own
+kernel (`kernels/own_topk.hip`, `python/caminus/device/topk.py`). llama.cpp is the
 yardstick for speed and accuracy and a test oracle. Its GGUF reader and the `tokenizers` library stay in the
 repository for the other models and for the tests that compare against them.
 

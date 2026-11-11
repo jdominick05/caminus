@@ -3,7 +3,8 @@ instead of whole logits rows, bitwise the host reference sampler (sampler.py) on
 
 The TP engine leaves each verify row's logits split by vocabulary on its two cards (card 0: ids [0, vh), card 1: [vh, V)).
 Copying a whole row to the host is ~1 MB (the XT's half over the x4 link). Instead each card returns, per row:
-  * its k' largest raw logits with their ids (torch.topk, sorted; the order among equal values unspecified), and
+  * its k' largest raw logits with their ids (caminus.device.topk, Caminus's own kernel: value descending, ids ascending
+    on ties, the lowest ids kept at the cut), and
   * the raw logits of the penalty ids in its range (every id of the rows' penalty windows: the history's last
     penalty_last_n tokens plus the pass's drafts),
 and the host merges them here: the penalties applied to the candidates with sampler.apply_penalties' float32 arithmetic,
@@ -14,7 +15,7 @@ Each card alone holds >= k' - n_pen = top_k + TIE_MARGIN unpenalized candidates 
 candidate s_k is >= max(v_c). When s_k > v_c on both cards, no token outside the candidates can enter top_k or tie its
 last member, so top_k selects the same tokens in the same order (value descending, ids ascending on ties) as on the full
 row; top_p, min_p and temperature then act on those survivors only (llama.cpp's chain), so the Candidates are equal.
-When s_k == v_c on a card (a tie at the cut; torch.topk may have left out a lower id of equal value), or any value is
+When s_k == v_c on a card (a tie at the cut: equal values may lie outside the candidates), or any value is
 not finite, or top_k is 0 or above MAX_TOP_K, the row falls back to the full row (`need_full`). Greedy (temperature
 <= 0) needs only the maximum: the same argument with k = 1 (the first maximum: the lowest id).
 
@@ -312,7 +313,7 @@ def emulate_rows(full_rows, vh, prm, history, drafts, tie_order='high'):
             v = r[lo:hi]
             key = (np.arange(hi - lo)[::-1] if tie_order == 'high' else np.arange(hi - lo))
             vv = np.where(np.isnan(v), np.inf, v).astype(np.float64)
-            o = np.lexsort((key, -vv, ~np.isnan(v)))[:kp]           # NaN first (torch.topk's rule), value descending, ties
+            o = np.lexsort((key, -vv, ~np.isnan(v)))[:kp]           # NaN first (the device kernel's rule, as torch.topk's), value descending, ties
             cards.append((v[o].astype(np.float32), (o + lo).astype(np.int64)))
         out.append(Row(cards=cards, pid=pid, pvals=r[pid] if len(pid) else np.zeros(0, np.float32)))
     return out

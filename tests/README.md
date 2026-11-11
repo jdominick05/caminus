@@ -11,7 +11,7 @@ arguments (most take the GGUF path). The directories mirror the package (`python
 | `cache/` | the prompt cache: a CPU stand-in engine (`cpu`, every shape via `--cards 1\|2 --t 1\|4`) and the GPU tiers | CPU and GPU |
 | `serve/` | the server front end (unittest, `run_all.py`): template, tokenizer, tool parser, sampler, metrics, worker, the session contract (`test_session.py`: `contract_problems`, the monitoring surface pinned in `surface_keys.json`) | CPU |
 | `e2e/` | the real server on the real engine (`test_serve_k3.py`) | GPU |
-| `device/` | the toolchain smoke, the WMMA GEMM | GPU |
+| `device/` | the toolchain smoke, the WMMA GEMM, the sampler's own top-k (`test_topk.py`) | GPU |
 | `cmd/`, `packaging/`, `tools/` | the management CLI, the installable package, tool self-tests | CPU |
 | `test_arch.py` (top level, as `caminus/arch.py` is) | the architecture registry and its readers: the catalog, caminus serve's options, caminus start's flags | CPU |
 | `docs/test_docs.py` | the docs check: every relative link and #anchor in README / CONTRIBUTING / GLOSSARY / docs/*.md / docs/dev/*.md resolves, every `caminus COMMAND` the user docs show exists, every script the public AGENTS.md names exists | CPU (stdlib) |
