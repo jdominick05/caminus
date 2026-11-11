@@ -1,7 +1,7 @@
 """Qwen3-30B-A3B batched prefill speed (caminus.prefill.q3m.Q3MPrefill): positions [0, L) of random tokens per length,
 medians over --rounds, prompt tok/s = L / seconds (prefill only: the last token's K3 pass is the decode's). With --ops,
 one more run per length with every launch timed by HIP events (the time per op kind: GEMM by matrix, attention, glue).
-  tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops]"""
+  tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops] [--prefill-module M]"""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -11,12 +11,13 @@ from caminus.prefill.q3m import Q3MPrefill
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf'); ap.add_argument('--lengths', default='512,4096'); ap.add_argument('--chunk', type=int, default=1024)
 ap.add_argument('--max-ctx', type=int, default=None); ap.add_argument('--rounds', type=int, default=3); ap.add_argument('--ops', action='store_true')
+ap.add_argument('--prefill-module', default=None, help='the prefill code object (default: by the file\'s formats; q3m_prefill_iq times a Q4_K_M file on the IQ study\'s object)')
 A = ap.parse_args()
 Ls = [int(x) for x in A.lengths.split(',')]
 print(torch.cuda.get_device_name(0), flush=True)
 eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8)
-pf = Q3MPrefill(eng, chunk=A.chunk)
-print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
+pf = Q3MPrefill(eng, chunk=A.chunk, module=A.prefill_module)
+print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
 g = np.random.default_rng(0)
 for L in Ls:
     toks = g.integers(0, 151000, L).tolist()
