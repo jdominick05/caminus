@@ -9,7 +9,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
-  card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,493 tok/s (llama.cpp: 3,853). Every step from the
+  card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the
   GGUF file to the output token is code written for Caminus, and its output is about 6 times closer to an exact
   reference of the model than llama.cpp's. See [docs/dev/qwen3-30b-a3b.md](docs/dev/qwen3-30b-a3b.md).
 - **Qwen Code sees how much context it has left.** After each batch of tool calls, one line in the tool result says how
@@ -24,6 +24,10 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Fixed
 
+- **Qwen3-30B-A3B reads a prompt with very large activations.** If 32 activations in a row averaged over 2,047, the
+  prompt reader's Q4_K product turned that token into NaN and the request failed. Such a token now takes a scaled
+  path and is as accurate as any other; every other token gives the same bits as before. It costs 0.9 % of a prompt's
+  time.
 - **Background requests no longer push your conversation out.** Qwen Code sends two background memory jobs (about 30K
   and 36K tokens) every time you send a message, including a steer mid-task or a redirect after Ctrl+C. They were too big
   for the server's side slot, so they took the main one and your conversation had to be read again (one 494,882-token
