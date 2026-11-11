@@ -173,7 +173,8 @@ What the table says:
   A usable plain 2-bit file needs training (or at least calibration through the model), which this test excludes.
 - **8-bit activations with one scale per vector, computed at run time, cost 0.0079** on Q8_0 experts: under a third
   of what the official file's expert quantization costs. On W4r they add 0.004 (12 %); on W2r nothing measurable.
-  No calibration data was needed. The int8-activation tile is worth writing.
+  No calibration data was needed. So an int8-activation tile was worth measuring; the probe below bounds what it
+  wins in decode (at most 0.08 ms of a token), and it is not built.
 
 ## The speed half: the tile, and its predictions
 

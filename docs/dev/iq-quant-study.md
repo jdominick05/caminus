@@ -1,25 +1,26 @@
 # IQ quant study: codebook formats in Qwen3-30B-A3B's experts
 
-Measured; two rulings are open (the end of the report below). This page holds the report, then the plan and the
+Measured and scored, arm D included since its two stand-in stop rules were ruled (the end of the report below).
+This page holds the report, then the plan and the
 predictions as they were written down before the first timed run on the RX 7900 XTX, then every result in the order
 it was measured.
 
 ## Report: predictions against outcomes
 
 Four files that differ only in their expert tensors (144 of 579): A the official Q4_K_M (1.920 GB read per token),
-B IQ4_XS (1.785), C unsloth's UD-IQ3_XXS mix (1.565), D IQ2_XXS (1.290). One decode module for every arm; arm D's
-times are reported and not scored (stop rule 4, below).
+B IQ4_XS (1.785), C unsloth's UD-IQ3_XXS mix (1.565), D IQ2_XXS (1.290). One decode module for every arm; arm D is
+scored by the rulings on its stand-in stop rules 2 and 4 (the end of the report).
 
 **The answer: on these cards the codebook formats' smaller files buy no decode speed.** Each format's decode costs
 what its bytes save.
 
 | | Predicted | Measured, as scored | Verdict |
 |---|---|---|---|
-| H1: decode time of a token, RX 7900 XT (full minus loads-only) | B 0.55–0.75 ms, C 0.75–1.2 (D 0.7–1.1); fails if an arm's decode exceeds its own loads time | B 0.57–0.60, C 1.58–1.60 (D 1.62) against loads-only tokens of 4.37, 4.19 (4.02) ms | Not failed by its clause; B in range, **C's range missed** by 0.4 ms. Per stage the clause's intent fails for the grid formats: an IQ3_XXS layer's gate and up took 28.9 µs for 11.2 µs of bytes |
-| H2: whole token, RX 7900 XTX, depth 8 | B 3.90–4.00 ms, C 3.70–3.95 (D 3.40–3.70); fails if an arm lands on or below its reference line (3.87, 3.62, 3.30) | B 4.122, C 4.807 (D 4.688); A on the same module 4.141 | Direction holds (every arm above its line); **both ranges missed** on the high side, B by 0.12 ms, C by 0.86 |
-| H2 per stage, µs per layer, gate and up / down | IQ4_XS 19.7–21.0 / 12.8–14.0; IQ3_XXS 15.4–20 / 10.7–13.5; IQ3_S 16.8–21 / 11.3–14 | 21.29 / 15.09; 28.87 / 21.48; 28.35 / 22.52 | **Every range missed** on the high side |
-| H3: prefill of 4,096 tokens | B within 10 % of A; C and D 10–40 % slower; fails if C or D is at or above A's speed | RX 7900 XT: B 5.5 % slower, C 5.7 % (D 4.9 %); RX 7900 XTX: B 5.4–5.7 %, C 5.4–6.1 % (D 4.4–4.9 %) | Not failed; B in range; **C's range missed** on the fast side |
-| H4: llama.cpp's mean KLD over the engine's, each against the arm's own fp32 reference | at least 3 on every arm at 128 tokens and at 16,384; top-1 at least llama.cpp's | 128 tokens: A 6.1, B 12.6, C 4.8 (D 95); 16,384: A 3.1, B 5.2, C 4.3 (D 4.7). Top-1 at 128: 128 / 127, 128 / 125, **127 / 128** on C (128 / 126); at 16,384 the engine's is higher on every arm | Ratio holds everywhere; **the top-1 clause fails on C at 128 tokens by one position** (two tokens 1.8 % apart in the reference) |
+| H1: decode time of a token, RX 7900 XT (full minus loads-only) | B 0.55–0.75 ms, C 0.75–1.2, D 0.7–1.1; fails if an arm's decode exceeds its own loads time | B 0.57–0.60, C 1.58–1.60, D 1.62 against loads-only tokens of 4.37, 4.19, 4.02 ms | Not failed by its clause; B in range, **C's and D's ranges missed** by 0.4 and 0.5 ms. Per stage the clause's intent fails for the grid formats: an IQ3_XXS layer's gate and up took 28.9 µs for 11.2 µs of bytes |
+| H2: whole token, RX 7900 XTX, depth 8 | B 3.90–4.00 ms, C 3.70–3.95, D 3.40–3.70; fails if an arm lands on or below its reference line (3.87, 3.62, 3.30) | B 4.122, C 4.807, D 4.688; A on the same module 4.141 | Direction holds (every arm above its line); **every range missed** on the high side, B by 0.12 ms, C by 0.86, D by 0.99 |
+| H2 per stage, µs per layer, gate and up / down | IQ4_XS 19.7–21.0 / 12.8–14.0; IQ3_XXS 15.4–20 / 10.7–13.5; IQ3_S 16.8–21 / 11.3–14; IQ2_XXS 11.7–17 / 8.8–12 | 21.29 / 15.09; 28.87 / 21.48; 28.35 / 22.52; 26.15 / 20.29 | **Every range missed** on the high side |
+| H3: prefill of 4,096 tokens | B within 10 % of A; C and D 10–40 % slower; fails if C or D is at or above A's speed | RX 7900 XT: B 5.5 % slower, C 5.7 %, D 4.9 %; RX 7900 XTX: B 5.4–5.7 %, C 5.4–6.1 %, D 4.4–4.9 % | Not failed; B in range; **C's and D's ranges missed** on the fast side |
+| H4: llama.cpp's mean KLD over the engine's, each against the arm's own fp32 reference | at least 3 on every arm at 128 tokens and at 16,384; top-1 at least llama.cpp's | 128 tokens: A 6.1, B 12.6, C 4.8, D 95; 16,384: A 3.1, B 5.2, C 4.3, D 4.7. Top-1 at 128: 128 / 127, 128 / 125, **127 / 128** on C, 128 / 126 on D; at 16,384 the engine's is higher on every arm | Ratio holds everywhere, D included; **the top-1 clause fails on C at 128 tokens by one position** (two tokens 1.8 % apart in the reference) |
 | H5: the splice changes nothing outside the experts | byte for byte | equal sha256 | Holds |
 
 After scoring, nothing above was rescored:
@@ -34,13 +35,19 @@ After scoring, nothing above was rescored:
 - **Carrying four formats in one decode module costs arm A 0.10 ms** per token on the RX 7900 XTX (the study module
   against the shipped one, same bits), which is why the study module is not the shipped one.
 
-Open, for a person to rule:
+The two rulings, made after this report was first written (arm D was reported and not scored until then; the
+results below keep that wording where they were written, and every D figure in them is the one scored here):
 
 1. **Stop rule 4's stand-in for IQ2_XXS** (the tile not slower per matvec than the IQ3_XXS tile) tripped by its
    letter on medians (1 to 3 % slower) and did not by the tile's time minus its read-only time; the launch-bound
-   instrument moves by more than the difference between processes. Until it is ruled, arm D stays unscored.
+   instrument moves by more than the difference between processes, and on the reworked body the two tiles are within
+   its spread on every shape. **Ruled as held in intent:** the rule is there so that the comparison measures
+   formats, not implementations, and the two tiles share one body.
 2. **Stop rule 2's stand-in for IQ2_XXS** (error within the worst of the other three tiles) held in the first census
-   and misses on the 99th percentile in the rerun over all layers (6.7e-4 against 6.1e-4; the mean holds).
+   and misses on the 99th percentile in the rerun over all layers (6.7e-4 against 6.1e-4; the mean holds). **Ruled
+   as held in intent:** the rule is there to catch a decode bug. The host decoder is bitwise gguf-py's (rule 1), the
+   K3 op is bitwise its standalone kernel, and the tile's arithmetic did not change between the two censuses (5.2e-4
+   and 6.7e-4 at the p99): the samples did.
 
 ## The question
 
@@ -222,7 +229,8 @@ output's rms: mean / 99th percentile.
   own minus read-only it is faster on down, overlaps on gate and is slower on up. The same kernel on the same matrix
   moves between 9.3 and 12 µs across processes here (the gate rows; one read-only run took longer than its own
   tile, shown as –), and a launch-bound time cannot see what a format costs inside a token (below). The rule is
-  left unruled and arm D's times below are reported but not scored.
+  left unruled and arm D's times below are reported but not scored. (Ruled later as held in intent, with rule 2's
+  stand-in: see the end of the report. Arm D is scored.)
 
 ### The tiles in the decode kernel (RX 7900 XT)
 
@@ -268,13 +276,13 @@ module in the same process. ms per token, median of the five rounds (lowest .. h
 | A, study module | 4.141 (4.140 .. 4.142) | 4.350 | 4.870 | 6.408 | | |
 | B | 4.122 (4.118 .. 4.139) | 4.353 | 4.888 | 6.427 | 3.90–4.00 | 3.87 |
 | C | 4.807 (4.798 .. 4.824) | 5.092 | 5.677 | 7.194 | 3.70–3.95 | 3.62 |
-| D (not scored: rule 4) | 4.688 (4.673 .. 4.696) | 4.970 | 5.568 | 7.077 | 3.40–3.70 | 3.30 |
+| D | 4.688 (4.673 .. 4.696) | 4.970 | 5.568 | 7.077 | 3.40–3.70 | 3.30 |
 
 Against A on the same module in the same round, at depth 8: B −0.003 to −0.023 ms, C +0.656 to +0.683, D +0.532 to
 +0.556; at 4,096: B +0.003 to +0.032, C +0.788 to +0.814, D +0.694 to +0.722.
 
 - **H2's direction holds and its numbers do not.** Every arm sits above its reference line, as predicted, but the
-  ranges were too low: B by 0.12 ms and C by 0.86 (D, not scored, sits 0.99 above its range). The model behind them
+  ranges were too low: B by 0.12 ms and C by 0.86 (D sits 0.99 above its range). The model behind them
   (a stage costs its bytes at the bus's speed plus a fixed 4 to 5 µs) is wrong for these tiles in this module:
   **arms C and D are slower than A**, with 18 % and 33 % fewer bytes per token. How much of that is the formats and
   how much the module's one shared grid body is taken apart under "After scoring" below.
@@ -292,7 +300,7 @@ One traced token per arm (`benchmarks/q3moe_trace.py --modules k3_q3m_iq_trace`)
 | C, its IQ3_XXS layers (32 gate and up, 25 down) | 28.87 | 21.48 | 15.4–20 / 10.7–13.5 | |
 | C, its IQ3_S layers (16, 10) | 28.35 | 22.52 | 16.8–21 / 11.3–14 | |
 | C, its IQ4_XS layers (down only, 13) | | 15.36 | 12.8–14.0 | |
-| D (IQ2_XXS, not scored) | 26.15 | 20.29 | 11.7–17 / 8.8–12 | 2.61 ms |
+| D (IQ2_XXS) | 26.15 | 20.29 | 11.7–17 / 8.8–12 | 2.61 ms |
 
 - **The cost is inside the expert stages.** The stages outside them agree across arms to 0.06 ms. Staging the grids
   into shared memory happens at the launch, before the trace's first timestamp, so the trace cannot see it; the wall
@@ -317,7 +325,7 @@ loads-only build (the same tapes with every expert weight read and no arithmetic
 | A, study module | 4.932 | 4.530 | 0.402 – 0.403 | |
 | B | 4.945 | 4.374 | 0.565 – 0.600 | 0.55–0.75 |
 | C | 5.769 | 4.189 | 1.580 – 1.596 | 0.75–1.2 |
-| D (not scored) | 5.633 | 4.017 | 1.616 – 1.621 | 0.7–1.1 |
+| D | 5.633 | 4.017 | 1.616 – 1.621 | 0.7–1.1 |
 
 - **H1, read two ways.** Its "fails if" clause compares an arm's decode time with its loads time, and the table's
   loads-only token is everything but the decode (the attention, the head and every other stage included): by that
@@ -422,15 +430,16 @@ matvec, own tile and (own minus read-only)):
 | 768 × 2048 (up) | 13.22, 13.25, 13.21 (0.78, 0.71, 0.84) | 13.29, 13.34, 13.17 (0.85, 0.75, 0.52) |
 | 2048 × 768 (down) | 9.74, 9.46, 9.54 (0.54, 0.57, 0.55) | 9.72, 9.39, 9.40 (0.53, 0.50, 0.49) |
 
-The two tiles are within this instrument's spread of each other on every shape. The rule stays unruled.
+The two tiles are within this instrument's spread of each other on every shape. The rule stayed unruled here (and
+was ruled later as held in intent: see the end of the report).
 
 The same rerun's errors against float64 differ from the first census's (every role and all 48 layers here, a role
 filter there): the own IQ3_XXS tile reads 2.1e-4 mean / 6.1e-4 p99 at worst (up) and the IQ2_XXS tile 2.1e-4 / 6.7e-4
 (down; 1.1e-4 / 3.0e-4 on gate). So in this run stop rule 2's stand-in for IQ2_XXS ("within the worst of the three
 other own codebook tiles") holds on the mean and **misses on the p99 by its letter** (6.7e-4 against 6.1e-4), where
 the first census had it holding (5.2e-4 against 5.8e-4). The tile's arithmetic did not change between the two (the
-logits are bitwise the scored module's); the samples did. Arm D stays unscored, and this is one more reason the
-ruling on its stand-in rules is the reader's.
+logits are bitwise the scored module's); the samples did. Arm D stayed unscored here; both stand-in rules were
+ruled later as held in intent (the end of the report), and arm D is scored.
 
 
 ### The reworked body on the RX 7900 XTX
@@ -484,9 +493,9 @@ reference; llama.cpp fills the prompt in batches and decodes the same 64. B, C a
 | A (study module) | 1.61e-03 (2.9e-02) | 5.06e-03 (3.9e-02) | 3.1 | 61 / 60 |
 | B | 8.59e-04 (7.0e-03) | 4.48e-03 (4.6e-02) | 5.2 | 64 / 61 |
 | C | 2.03e-03 (1.8e-02) | 8.71e-03 (7.3e-02) | 4.3 | 64 / 61 |
-| D (not scored) | 1.48e-03 (7.5e-03) | 6.94e-03 (7.1e-02) | 4.7 | 64 / 60 |
+| D | 1.48e-03 (7.5e-03) | 6.94e-03 (7.1e-02) | 4.7 | 64 / 60 |
 
-- **H4 holds at this depth on A, B and C:** the ratio is at least 3 and the engine's top-1 is at least llama.cpp's.
+- **H4 holds at this depth on every arm:** the ratio is at least 3 and the engine's top-1 is at least llama.cpp's.
   A's ratio is the closest to the line (3.1).
 - Both engines are further from the reference here than at 128 tokens (the engine's means are 3 to 30 times
   larger). Which stage that comes from was not measured.
@@ -503,7 +512,7 @@ reference; chunk geometry changes no bit):
 |---|---|---|---|---|
 | B | 7.44e-05 | 1.38e-04 | 1.83e-03 | 64 / 63 |
 | C | 2.21e-04 | 2.27e-04 | 2.24e-03 | 64 / 63 |
-| D (not scored) | 4.90e-05 | 5.62e-05 | 4.26e-03 | 64 / 64 |
+| D | 4.90e-05 | 5.62e-05 | 4.26e-03 | 64 / 64 |
 
 `benchmarks/q3moe_prefill.py --lengths 512,4096 --chunk 1024 --rounds 3`, the arms interleaved as separate processes,
 twice; prompt tokens per second at 4,096 tokens (prefill), both runs:
@@ -512,13 +521,14 @@ twice; prompt tokens per second at 4,096 tokens (prefill), both runs:
 |---|---|---|---|
 | A, shipped object | 4,364 / 4,362 | 5,852 / 5,839 | |
 | A, study object | 4,364 / 4,361 | 5,839 / 5,832 | |
-| B | 4,125 / 4,118 | 5,521 / 5,522 | 5.4 % slower |
-| C | 4,115 / 4,110 | 5,494 / 5,524 | 5.6 to 5.9 % slower |
-| D (not scored) | 4,149 / 4,142 | 5,566 / 5,584 | 4.4 to 4.7 % slower |
+| B | 4,125 / 4,118 | 5,521 / 5,522 | 5.4 to 5.7 % slower |
+| C | 4,115 / 4,110 | 5,494 / 5,524 | 5.4 to 6.1 % slower |
+| D | 4,149 / 4,142 | 5,566 / 5,584 | 4.4 to 4.9 % slower |
 
 - **H3 is not failed** (no codebook arm reaches A's prompt speed) and **B is inside its range** (within 10 % of A).
-  **C's range is missed on the fast side:** predicted 10 to 40 % slower, measured 5.6 to 5.9 % (D, unscored, 4.4 to
-  4.7 %). The RX 7900 XT gives the same picture (5.0 to 5.8 % slower).
+  **C's and D's ranges are missed on the fast side:** predicted 10 to 40 % slower, measured 5.4 to 6.1 % (D 4.4 to
+  4.9 %; each run against A's shipped object in the same run). The RX 7900 XT gives the same picture (4.9 to 5.8 %
+  slower).
 - The study object costs arm A nothing in prefill (within 0.2 %).
 - As in decode, the smaller files do not read a prompt faster: prefill is bound by the matrix products, and a
   codebook block costs a little more to turn into a WMMA operand than a Q4_K block.
