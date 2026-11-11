@@ -21,11 +21,12 @@ import torch
 from .. import ggufio
 from ..device import capacity, hip
 from . import k3
-from .own_layout import q6k_planes, iq_records, IQ_REC
+from .own_layout import q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
 MODULE_IQ = 'k3_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
+MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
 ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the engine takes as many as its card's grid
                                 # holds at once: splits_for), fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
@@ -102,6 +103,7 @@ class Q3MoEOne:
         self.emb = F.T['token_embd.weight']
         # the codebook formats among the matrices (they pick the module: MODULE_IQ)
         self.iq = {t.type for t in F.tensors if t.type in k3.OWN_IQ_FMT and t.name != 'token_embd.weight'}
+        self.rs = {t.type for t in F.tensors if t.type in RS_CONT and t.name != 'token_embd.weight'}   # (-> MODULE_RS: one code width per module)
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoEOne: token_embd is {self.emb.type} (Q4_K only)')
@@ -156,6 +158,10 @@ class Q3MoEOne:
         """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
         if self._module is not None: return self._module
         lean = self.fused and self.gu and self.attn_one and self.attn_split
+        if self.rs:
+            if not lean or self.iq or len(self.rs) > 1:
+                raise ValueError(f'Q3MoEOne: {sorted(self.rs)} tensors run on their own module (one width, no codebook format, the default tape form)')
+            return MODULE_RS[next(iter(self.rs))][0]
         if self.iq:
             if not lean: raise ValueError(f'Q3MoEOne: {sorted(self.iq)} tensors run on {MODULE_IQ} only (the default tape form)')
             return MODULE_IQ
@@ -171,6 +177,9 @@ class Q3MoEOne:
         b = np.asarray(t.data())
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
         elif t.type in IQ_REC: b = iq_records(b, R, K, t.type)
+        elif t.type in RS_CONT:   # (-> the codes and, a fifth entry, the row scales; a row with two scales is refused there)
+            b, sc = rs_planes(b, R, K, t.type)
+            return (MODULE_RS[t.type][1], int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda'), torch.from_numpy(sc).to('cuda'))
         elif t.type not in ('Q4_K', 'IQ4_XS'): raise ValueError(f'Q3MoEOne: {name} is {t.type} ({sorted(k3.OWN_BLOCK)} only)')
         return t.type, int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda')
 
@@ -191,6 +200,8 @@ class Q3MoEOne:
                                router=self._f32(p + 'ffn_gate_inp.weight', (self.n_exp, self.D)),
                                cache=torch.zeros(self.cache_rows * 2 * self.nkv * self.hd, dtype=torch.float16, device='cuda')))
         for d in self.L:
+            if len(d['ffn_gate_exps']) > 4:   # (the row-scale tile's fused gate | up: the gate's scales, then the up's)
+                d['gu_rs'] = torch.cat([d['ffn_gate_exps'][4], d['ffn_up_exps'][4]]).contiguous()
             d['qk_par'] = torch.cat([d['q_norm'], d['k_norm'], torch.tensor([self.theta_scale, self.eps], dtype=torch.float32,
                                                                               device='cuda')]).contiguous()
         self.out_norm = self._f32('output_norm.weight')
@@ -238,7 +249,8 @@ class Q3MoEOne:
         self.RPT = dict(qkv=rpt_of((nh + 2 * nkv) * hd), o=rpt_of(D), gu=rpt_of(2 * KU * FF), down=rpt_of(KU * D),
                         head=64 if self.rpt != 'auto' else rpt_of(self.vocab))
         mv = lambda w, x16, out, dep, rpt='qkv', **kw: E.own_matvec_1rt(w[3], w[0], w[1], w[2], x16, out, dep=dep,
-                                                                       rows_per_task=self.RPT[rpt], **kw)
+                                                                       rows_per_task=self.RPT[rpt],
+                                                                       **({'scales': w[4]} if len(w) > 4 and 'scales' not in kw else {}), **kw)
         prev = E.own_emb(self.emb_dev, 'Q4_K', int(self.emb.shape[1]), D, self.tok, s['x'])
         if self.fused:
             return self._tape_fused(E, s, mv, prev)
@@ -313,7 +325,7 @@ class Q3MoEOne:
             if self.gu:
                 assert d['ffn_gate_exps'][:3] == d['ffn_up_exps'][:3], 'gate and up: one shape and format'
                 sw = mv(d['ffn_gate_exps'], s['h16'], s['a16'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF,
-                        up=d['ffn_up_exps'][3])
+                        up=d['ffn_up_exps'][3], **({'scales': d['gu_rs']} if 'gu_rs' in d else {}))
             else:
                 g_ = mv(d['ffn_gate_exps'], s['h16'], s['g'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF)
                 u_ = mv(d['ffn_up_exps'], s['h16'], s['u'], ro, rpt='gu', ids=s['ids'], total_rows=self.n_exp * FF)

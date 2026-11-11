@@ -43,6 +43,24 @@ for name, (bs, rs, hs) in sorted(own_layout.IQ_REC.items()):   # the kernels' re
     ok = (rec.size == raw.size + own_layout.IQ_PAD and np.array_equal(own_layout.iq_from_records(rec, 6, 768, name), raw)
           and np.array_equal(np.sort(rec[:raw.size]), np.sort(raw))); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name}: the record layout holds the blocks\' bytes and inverts')
+for name, (bits, bv, bs) in sorted(own_layout.RS_CONT.items()):   # the row-scale planes: the codes as the kernel reads them
+    for K in (2048, 768):
+        rows = 10; raw = rng.integers(0, 256, (rows, K // bv, bs), dtype=np.uint8)
+        d = (rng.standard_normal(rows) * 0.01).astype(np.float16); raw[:, :, :2] = d.view(np.uint8).reshape(rows, 1, 2)
+        codes, sc = own_layout.rs_planes(raw.reshape(-1), rows, K, name)
+        ok = (codes.size == rows * K * bits // 8 and np.array_equal(sc, d.astype(np.float32))
+              and np.array_equal(own_layout.rs_from_planes(codes, sc, rows, K, name), raw.reshape(-1)))
+        if bits == 4:   # a unit of 32 values: 16 bytes, value b in byte b's low nibble, b + 16 in its high one; d (q - 8)
+            u = codes.reshape(rows, K // 32, 16); q = np.concatenate([u & 15, u >> 4], -1).astype(np.float32) - 8
+        else:           # a dword of 16 values: (dword >> 2 i) & 0x03030303 = values 4 i .. 4 i + 3 as four bytes; d (q - 1)
+            dw = codes.reshape(rows, K // 16, 4).copy().view('<u4')[..., 0]
+            q = np.stack([((dw >> (2 * i)) & 0x03030303).astype('<u4').view(np.uint8).reshape(rows, K // 16, 4) for i in range(4)], -2).astype(np.float32) - 1
+        ok = ok and np.array_equal((sc[:, None] * q.reshape(rows, K)).astype(np.float32), own_dequant.DECODERS[name][2](raw.reshape(-1)).reshape(rows, K))
+        two = raw.copy(); two[3, 5, 0] ^= 1
+        try: own_layout.rs_planes(two.reshape(-1), rows, K, name); ok = False
+        except ValueError: pass
+        bad += not ok
+        print(('PASS' if ok else 'FAIL') + f' {name} K {K}: the row-scale planes decode to the container\'s values, invert, and refuse a row with two scales')
 for cls in (quants.IQ2_XXS, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
 tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
         ('GRID_IQ2_XXS', iq_tables.GRID_IQ2_XXS, quants.IQ2_XXS.grid.reshape(256, 8)),
