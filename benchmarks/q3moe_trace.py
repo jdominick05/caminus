@@ -24,7 +24,7 @@ def seg_name(sg):
     n = OPN.get(sg.op, str(sg.op))
     if n == 'OWN_MV':
         role = {(4096, 2048): 'q', (512, 2048): 'k|v', (2048, 4096): 'o', (151936, 2048): 'head'}.get((sg.N, sg.K))
-        if role is None: role = 'down' if sg.K == 768 else 'gate|up'
+        if role is None: role = ('down ' if sg.K == 768 else 'gate|up ') + k3.OWN_FMT_NAME.get(sg.work, str(sg.work))   # (an expert stage: with its format)
         return 'mv ' + role
     return n.lower()
 

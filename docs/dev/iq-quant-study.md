@@ -143,8 +143,7 @@ got it there, each a finding about this compiler and card.
   (`caminus.engine.own_layout.iq_records`, with its inverse and a test), as the engine already does for Q6_K. So the
   arms' bytes per token, and the bandwidth bound, are unchanged.
 - **Both changes came after the predictions were written,** forced by stop rule 3. No number in the predictions table
-  was touched. The record layout removes loads from the grid tiles, so it can only move C and D toward the low end of
-  their ranges.
+  was touched.
 
 ## Results so far
 
@@ -169,10 +168,22 @@ output's rms: mean / 99th percentile.
   same matrix and 40 to 60 times closer to float64. The own tiles' error is the fp16 activations' rounding: against
   float64 on the rounded activations it is 5e-8 to 1e-7 (`tests/engine/test_own_iq_ops.py`).
 - **IQ2_XXS, rule 2 as written for it:** holds (1.7e-4 / 5.2e-4 at worst against 2.0e-4 / 5.8e-4).
-- **IQ2_XXS, rule 4 as written for it:** not shown by these two runs. Against the IQ3_XXS tile it is 1.4 % faster on the
-  2048 × 768 shape and 1.2 % slower on 768 × 2048 (13.26 against 13.10 µs), where the two runs' read-only kernels
-  differ by as much (12.49 against 12.35 µs). The comparison is repeated with the two files alternated before arm D
-  is timed.
+- **IQ2_XXS, rule 4 as written for it: not settled by this instrument.** The first two runs: 1.4 % faster than the
+  IQ3_XXS tile on the 2048 × 768 shape, 1.2 % slower on 768 × 2048 (13.26 against 13.10 µs), where the two runs'
+  read-only kernels differ by as much. Repeated with the two files alternated three times (7 rounds each), µs per
+  matvec, own tile and (own minus read-only):
+
+  | Shape (role) | IQ3_XXS | IQ2_XXS |
+  |---|---|---|
+  | 768 × 2048 (gate) | 9.54, 9.57, 9.50 (0.26, 0.46, –) | 9.62, 12.15, 9.82 (0.39, 0.33, 0.59) |
+  | 768 × 2048 (up) | 13.04, 12.99, 12.98 (0.74, 0.72, 0.82) | 13.01, 13.33, 13.17 (0.69, 0.97, 0.89) |
+  | 2048 × 768 (down) | 9.54, 9.50, 9.55 (0.59, 0.65, 0.67) | 9.67, 9.59, 9.82 (0.57, 0.49, 0.64) |
+
+  By the medians of the own tile, IQ2_XXS is 1 to 3 % slower on every shape, which trips the rule by its letter. By
+  own minus read-only it is faster on down, overlaps on gate and is slower on up. The same kernel on the same matrix
+  moves between 9.3 and 12 µs across processes here (the gate rows; one read-only run took longer than its own
+  tile, shown as –), and a launch-bound time cannot see what a format costs inside a token (below). The rule is
+  left unruled and arm D's times below are reported but not scored.
 
 ### The tiles in the decode kernel (RX 7900 XT)
 
@@ -184,3 +195,133 @@ output's rms: mean / 99th percentile.
   to fp16 rounding.
 - The engine refuses, before any launch: a grid format on the shipped module, a tape with grid formats that does not
   start with the embedding (its segment carries the grids to stage), and IQ2_XXS with an IQ3 format on one tape.
+
+### The arms in the decode engine (RX 7900 XT, then RX 7900 XTX)
+
+`tests/engine/test_own_iq_ops.py --layers all` on arms B, C and D (XT): all 144 expert tensors of each arm, 16 drawn
+experts each, every row of every slot against float64 on the activations the tile reads: worst mean 1.2e-7, worst
+row 2.1e-6 of the rms; bitwise the standalone kernels at every grid. RESULT PASS on each.
+
+`tests/engine/test_q3moe_one.py` per arm against a float64 reference computed from that arm's own decoded weights
+(seven positions), on both cards:
+
+| Arm | Module | Top-1 | Mean KLD (max) | Grids 3 / 7 / 8 |
+|---|---|---|---|---|
+| A | shipped, and the study module | equal | 3.99e-06 (2.59e-05) | same bits; the two modules' logits differ in 0 words |
+| B | study | equal | 4.45e-07 (1.69e-06) | same bits |
+| C | study | equal | 3.23e-06 (1.99e-05) | same bits |
+| D | study | equal | 2.65e-04 (1.83e-03) | same bits |
+
+D's one high position is a router tie, not arithmetic: at position 4, layer 37, the reference's 8th and 9th expert
+have probabilities 0.01993560 and 0.01993237, and the engine picks the other one. The float64 reference with that one
+pick swapped agrees with the engine to a KLD of 1.3e-06 at that position (1.83e-03 without the swap) and 1.9e-07 at
+the next (1.4e-05).
+
+### Whole tokens (RX 7900 XTX), and the predictions scored
+
+`benchmarks/q3moe_depth.py --tokens 32 --rounds 3`, five rounds of processes in the order A, B, C, D (one arm's file
+in the page cache at a time), every arm on the study module `k3_q3m_iq` at the card's grid; A also on the shipped
+module in the same process. ms per token, median of the five rounds (lowest .. highest):
+
+| Arm | Depth 8 | 1,024 | 4,096 | 16,384 | Predicted at depth 8 | Reference line |
+|---|---|---|---|---|---|---|
+| A, shipped module | 4.041 (4.028 .. 4.046) | 4.235 | 4.700 | 6.221 | | 4.03 |
+| A, study module | 4.141 (4.140 .. 4.142) | 4.350 | 4.870 | 6.408 | | |
+| B | 4.122 (4.118 .. 4.139) | 4.353 | 4.888 | 6.427 | 3.90–4.00 | 3.87 |
+| C | 4.807 (4.798 .. 4.824) | 5.092 | 5.677 | 7.194 | 3.70–3.95 | 3.62 |
+| D (not scored: rule 4) | 4.688 (4.673 .. 4.696) | 4.970 | 5.568 | 7.077 | 3.40–3.70 | 3.30 |
+
+Against A on the same module in the same round, at depth 8: B −0.003 to −0.023 ms, C +0.656 to +0.683, D +0.532 to
++0.556; at 4,096: B +0.003 to +0.032, C +0.788 to +0.814, D +0.694 to +0.722.
+
+- **H2's direction holds and its numbers do not.** Every arm sits above its reference line, as predicted, but all
+  three ranges were too low: B by 0.12 ms, C by 0.86, D by 0.99. The model behind them (a stage costs its bytes at the
+  bus's speed plus a fixed 4 to 5 µs) is wrong for these formats: **arms C and D are slower than A**, with 18 % and
+  33 % fewer bytes per token.
+- **B ties A.** Its 7 % fewer bytes buy 0.00 to 0.02 ms at depth 8 and nothing at 4,096.
+- **Carrying the four formats costs A 0.10 ms** per token at depth 8 and 0.17 at 4,096 (same bits, shipped module
+  against study module in one process): the study module spills 66 scalars against 53.
+
+One traced token per arm (`benchmarks/q3moe_trace.py --modules k3_q3m_iq_trace`), µs per layer on the critical path:
+
+| Arm | Expert gate and up | Expert down | Predicted | Everything else in the token |
+|---|---|---|---|---|
+| A (Q4_K) | 20.73 | 15.46 | (20.7 / 15.2 measured before) | 2.58 ms |
+| B (IQ4_XS) | 21.29 | 15.09 | 19.7–21.0 / 12.8–14.0 | 2.59 ms |
+| C (IQ3_XXS and IQ3_S; down also IQ4_XS) | 28.79 | 20.16 | 15.4–21 / 10.7–14 | 2.64 ms |
+| C, its IQ3_XXS layers (32 gate and up, 25 down) | 28.87 | 21.48 | 15.4–20 / 10.7–13.5 | |
+| C, its IQ3_S layers (16, 10) | 28.35 | 22.52 | 16.8–21 / 11.3–14 | |
+| C, its IQ4_XS layers (down only, 13) | | 15.36 | 12.8–14.0 | |
+| D (IQ2_XXS, not scored) | 26.15 | 20.29 | 11.7–17 / 8.8–12 | 2.61 ms |
+
+- **The cost is inside the expert stages.** The stages outside them agree across arms to 0.06 ms; staging the grids
+  into shared memory at the launch does not show (the embedding segment, whose prologue stages them, takes 3.5 to
+  3.8 µs on every arm).
+- **The grid formats are bound by their decode, not by the bus.** A layer's gate and up are 16 matvecs of 768 × 2048
+  on 192 workgroups at once, 25.2 M weights: 20.7 µs as Q4_K (1.21 × 10^12 weights/s), 28.8 µs on C (0.87), 26.2 µs
+  as IQ2_XXS (0.96). An IQ3_XXS layer's 9.6 MB of gate and up arrive at 334 GB/s of the bus's 858. Every "per stage" range is
+  missed on the high side, IQ4_XS by 0.3 and 1.1 µs.
+- **Why the standalone table above did not show it:** one matvec per launch is bound by the launch (12 µs), and the
+  whole card decodes 1.6 M weights. A token's stage gives the same card sixteen times the weights in the same wall
+  time.
+
+### Loads against decode (RX 7900 XT)
+
+`benchmarks/q3moe_depth.py --depths 8,4096`, three rounds of processes; each arm on the study module and on its
+loads-only build (the same tapes with every expert weight read and no arithmetic). ms per token at depth 8, median:
+
+| Arm | Full | Loads only | Decode (full − loads only, per round) | Predicted |
+|---|---|---|---|---|
+| A, shipped module | 4.833 | 4.519 | 0.310 – 0.315 | (0.57 measured earlier) |
+| A, study module | 4.932 | 4.530 | 0.402 – 0.403 | |
+| B | 4.945 | 4.374 | 0.565 – 0.600 | 0.55–0.75 |
+| C | 5.769 | 4.189 | 1.580 – 1.596 | 0.75–1.2 |
+| D (not scored) | 5.633 | 4.017 | 1.616 – 1.621 | 0.7–1.1 |
+
+- **H1 holds as worded** (no arm's decode exceeds its loads), B inside its range; **C's range is missed** by 0.4 ms.
+- **The bytes do buy their share when nothing is decoded:** loads-only tokens fall from 4.53 ms (A) to 4.37, 4.19 and
+  4.02 ms. The decode then takes back 0.2 ms (B), 1.2 ms (C) and 1.2 ms (D) more than Q4_K's.
+- A's decode on the shipped module is 0.31 ms here, not the 0.57 ms the predictions quote: that figure was measured
+  before the engine took its per-card grid.
+
+### Accuracy per arm at 128 tokens (RX 7900 XT)
+
+`tools/gates/q3moe_gmodel.py` per arm: the engine's logits and llama.cpp's one-token decode (f16 KV, one card)
+against an fp32 reference computed from that arm's own decoded weights (`tools/reference/q3moe_ref32.py`, which
+gained the four codebook decoders: bitwise the host decoders on random blocks, `tests/io/test_own_dequant.py`),
+teacher-forced over the same 128 tokens. The fp32 reference against the float64 one: mean KLD 6.9e-11 over arm A's
+128 positions, at most 1.9e-10 over seven positions of B, C and D, top-1 equal everywhere.
+
+| Arm | Caminus mean KLD (max) | llama.cpp mean KLD (max) | llama.cpp over Caminus | Top-1, Caminus / llama.cpp |
+|---|---|---|---|---|
+| A (study module) | 4.66e-04 (9.7e-03) | 2.83e-03 (4.0e-02) | 6.1 | 128 / 127 |
+| B | 1.45e-04 (4.2e-03) | 1.82e-03 (1.9e-02) | 12.6 | 128 / 125 |
+| C | 4.22e-04 (1.5e-02) | 2.03e-03 (1.4e-02) | 4.8 | 127 / 128 |
+| D | 4.34e-05 (2.2e-03) | 4.14e-03 (1.2e-01) | 95 | 128 / 126 |
+
+- **H4's ratio holds on every arm** (at least 3; measured 4.8 to 95).
+- **H4's top-1 clause fails on C by one token:** the engine misses one of 128 where llama.cpp misses none, so the
+  gate script ends RESULT FAIL on C. On A, B and D the engine misses none and llama.cpp misses 1, 3 and 2. The miss
+  is position 37, where the reference's two best tokens are 1.8 % apart (0.018 in log probability; the engine has
+  them 0.076 the other way, llama.cpp 0.117 the reference's way). The RX 7900 XTX gives the same numbers (mean KLD
+  4.221e-04, 127 of 128).
+- The engine's means are set by a few positions, not by its arithmetic (medians 2e-06 to 3e-05): a router pick
+  flips where two experts tie, as shown for arm D above.
+
+### llama.cpp on the same files (RX 7900 XTX)
+
+`llama-bench -ngl 99 -fa 1 -p 512,4096 -n 64 -d 0,4096 -r 3` (under the guard, one file at a time), tok/s; Caminus
+beside it from the table above (decode, the study module, depth 8 and 4,096):
+
+| File | llama.cpp decode, empty / at 4,096 | Caminus decode, 8 / 4,096 | llama.cpp prefill of 4,096 |
+|---|---|---|---|
+| A, the official Q4_K_M | 149.8 / 135.3 | 241.5 / 205.3 (shipped module 247.5 / 212.8) | 3,885 |
+| B (IQ4_XS experts) | 152.0 / 137.0 | 242.6 / 204.6 | 3,511 |
+| C (UD-IQ3_XXS experts) | 148.8 / 134.4 | 208.0 / 176.2 | 3,484 |
+| D (IQ2_XXS experts) | 155.1 / 137.5 | 213.3 / 179.6 | 3,837 |
+| unsloth IQ4_XS, as published | 154.7 / 139.3 | (not run: the study measures the spliced arms only) | 3,552 |
+| unsloth UD-IQ3_XXS, as published | 150.1 / 134.9 | (not run) | 3,533 |
+
+llama.cpp's decode moves by 4 % across the four arms (148.8 to 155.1 tok/s) for a third fewer bytes: there too the
+bytes are not what a token waits for. Its prefill is 10 % slower on B and C than on A, and 1 % on D.
+
