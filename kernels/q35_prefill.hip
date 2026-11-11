@@ -190,3 +190,34 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q5k(
             if (t < it.cnt) Y[(size_t)(ydst ? ydst[it.off + t] : it.off + t) * ldy + r] = acc[mt][v];
         }
 }
+
+// ---- q35p_add_rms16: per token (one workgroup of 256), OP_OWN_ADD_RMS16's statements for any row length N = 256 NI --------
+// (kernels/k3_q35_ops.h q35_op_add_rms16; q3p_add_rms16 stops at N = 2048 and adds weighted slots):
+//   x[i] += d[i]   (d nullptr: no add);   h[i] = (x[i] * rsqrt(sum x^2 / N + eps)) * nw[i];   h16[i] = fp16(h[i])
+// The same order of operations: a thread's fma chain over its elements tid + 256 j in j order, the wave sum (xor 16 .. 1),
+// the eight waves in order, no contraction. h nullptr: the fp32 copy is not written. Grid n.
+extern "C" __global__ void __launch_bounds__(256) q35p_add_rms16(float * __restrict__ x, const float * __restrict__ d,
+                                                                 const float * __restrict__ nw, float eps, float * __restrict__ h,
+                                                                 _Float16 * __restrict__ h16, int N) {
+#pragma clang fp contract(off)
+    __shared__ float part[8];
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, NI = N >> 8, t = blockIdx.x;
+    float * xr = x + (size_t)t * N;
+    const float * dr = d ? d + (size_t)t * N : nullptr;
+    float ss = 0.0f;
+    for (int j = 0; j < NI; j++) {
+        const int i = tid + 256 * j;
+        float xv = xr[i];
+        if (dr) { xv = xv + dr[i]; xr[i] = xv; }
+        ss = __builtin_fmaf(xv, xv, ss);
+    }
+    ss = wsum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / N + eps);
+    for (int j = 0; j < NI; j++) {
+        const int i = tid + 256 * j;
+        const float v = (xr[i] * scale) * nw[i];
+        if (h) h[(size_t)t * N + i] = v;
+        h16[(size_t)t * N + i] = (_Float16)v;
+    }
+}
