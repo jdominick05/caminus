@@ -385,6 +385,14 @@ matvec, own tile and (own minus read-only)):
 
 The two tiles are within this instrument's spread of each other on every shape. The rule stays unruled.
 
+The same rerun's errors against float64 differ from the first census's (every role and all 48 layers here, a role
+filter there): the own IQ3_XXS tile reads 2.1e-4 mean / 6.1e-4 p99 at worst (up) and the IQ2_XXS tile 2.1e-4 / 6.7e-4
+(down; 1.1e-4 / 3.0e-4 on gate). So in this run stop rule 2's stand-in for IQ2_XXS ("within the worst of the three
+other own codebook tiles") holds on the mean and **misses on the p99 by its letter** (6.7e-4 against 6.1e-4), where
+the first census had it holding (5.2e-4 against 5.8e-4). The tile's arithmetic did not change between the two (the
+logits are bitwise the scored module's); the samples did. Arm D stays unscored, and this is one more reason the
+ruling on its stand-in rules is the reader's.
+
 
 ### The reworked body on the RX 7900 XTX
 
