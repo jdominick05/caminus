@@ -91,6 +91,15 @@ The run scripts stop on any of these.
    measure implementations, not formats.
 5. A tensor outside the experts differs from the official file's.
 
+Rules 2 and 4 name llama.cpp's matvec kernel, and the build of it used here has none for IQ2_XXS. For arm D they
+read, written down before the IQ2_XXS tile's first run:
+
+- **Rule 2 for IQ2_XXS:** the tile's mean and p99 error against fp64 stay within the worst of the three other own
+  codebook tiles on their own matrices (mean 2.0e-4, p99 5.8e-4 of the output's rms). All four share the activation
+  format and the summation, so a larger error would be a decode bug, not rounding.
+- **Rule 4 for IQ2_XXS:** the tile is not slower per matvec than the own IQ3_XXS tile on the same shape (it reads
+  fewer bytes and does the same arithmetic).
+
 ## How it is run
 
 - **A study module, not the shipped one.** All four arms run one new decode module that holds every format's tile.
