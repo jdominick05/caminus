@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(os.pat
 sys.path.insert(0, os.path.join(ROOT, 'tools')); sys.path.insert(0, os.path.join(ROOT, 'python'))
 import serve_smoke as S   # noqa: E402  (request / SSE helpers, check, safe_dir, FAILS)
 
-SHADER = re.compile(r'(?:Graph )?ShaderName : ([^\s,]+)')
+SHADER = re.compile(r'(?:Graph )?ShaderName : (.+?)(?:, device id : \d+)?\s*$')   # (the whole name: C++ ones hold spaces)
 PROBE_CHILD = '''import sys, ctypes
 sys.path.insert(0, {py!r})
 import torch
@@ -130,6 +130,7 @@ def serve(a):
     try: p.wait(300)
     except subprocess.TimeoutExpired: p.kill(); p.wait(60)
     log.close()
+    json.dump(dict(window=[i0, i1], lines=len(lines)), open(os.path.join(a.scratch, 'window.json'), 'w'))   # (server.log's lines)
     own = symbols(loaded, a.root)
     inside = [m for line in lines[i0:i1] for m in SHADER.findall(line)]
     before = Counter(m for line in lines[:i0] for m in SHADER.findall(line))
