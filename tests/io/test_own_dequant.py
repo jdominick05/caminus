@@ -64,9 +64,10 @@ for name, (bits, bv, bs) in sorted(own_layout.RS_CONT.items()):   # the row-scal
         except ValueError: pass
         bad += not ok
         print(('PASS' if ok else 'FAIL') + f' {name} K {K}: the row-scale planes decode to the container\'s values, invert, and refuse a row with two scales')
-for cls in (quants.IQ2_XXS, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
+for cls in (quants.IQ2_XXS, quants.IQ2_S, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
 tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
         ('GRID_IQ2_XXS', iq_tables.GRID_IQ2_XXS, quants.IQ2_XXS.grid.reshape(256, 8)),
+        ('GRID_IQ2_S', iq_tables.GRID_IQ2_S, quants.IQ2_S.grid.reshape(1024, 8)),
         ('GRID_IQ3_XXS', iq_tables.GRID_IQ3_XXS, quants.IQ3_XXS.grid.reshape(256, 4)),
         ('GRID_IQ3_S', iq_tables.GRID_IQ3_S, quants.IQ3_S.grid.reshape(512, 4)),
         ('the sign bytes', own_dequant._signs7(np.arange(128)), np.frombuffer(quants.IQ2_XXS.ksigns, np.uint8))]
