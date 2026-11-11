@@ -311,11 +311,12 @@ class Dense35Own:
     def prefetch(self, tokens, positions):
         """nothing to read ahead: the speculative loop's hook"""
 
-    def step(self, tok):
+    def step(self, tok, trace=None):
         """one token at the next position (the previous token committed into the recurrent states): its logits (fp32
-        [vocab], on the device; valid until the next step)"""
+        [vocab], on the device; valid until the next step); trace: an int64 buffer [grid * segments * 8] for a _trace
+        module's timestamps (benchmarks/q3moe_trace.py --engine dense35)"""
         i0 = self.pos_host
-        self._run_tok(int(tok), i0, 0 if self.fresh else 1, False)
+        self._run_tok(int(tok), i0, 0 if self.fresh else 1, False, trace)
         return self.buf['logits']
 
     def _check(self, tokens, i0, commit, what):
@@ -368,11 +369,11 @@ class Dense35Own:
         self._check(tokens, i0, commit, 'Dense35Own pass')
         return self._run_tok(int(tokens[i0]), i0, commit, tok)
 
-    def _run_tok(self, token, i0, commit, tok):
+    def _run_tok(self, token, i0, commit, tok, trace=None):
         self._check(None, i0, commit, 'Dense35Own pass')
         self._stage(token, i0); self.fresh = False; self._tok = tok
         for attempt in range(self.max_retries + 1):
-            bad = self._pass(i0, commit if attempt == 0 else 0)   # (a bailed pass committed already: its rerun commits nothing)
+            bad = self._pass(i0, commit if attempt == 0 else 0, trace)   # (a bailed pass committed already: its rerun commits nothing)
             if not bad: break
             self.bails.append((i0, attempt, bad))
             print(f'k3 qwen35: a wait gave up at position {i0} (attempt {attempt + 1}), running the pass again: ' + '; '.join(bad),
@@ -383,11 +384,11 @@ class Dense35Own:
         if not tok: return None
         return [int(self.h_max[1][0])]
 
-    def _pass(self, i0, commit):
-        self._pass_launch(i0, commit)
+    def _pass(self, i0, commit, trace=None):
+        self._pass_launch(i0, commit, trace)
         return self._pass_wait(i0)
 
-    def _pass_launch(self, i0, commit):
+    def _pass_launch(self, i0, commit, trace=None):
         """the launch from the staged block (and the logits' argmax read back when self._tok)"""
         self._check(None, i0, commit, 'Dense35Own._pass')
         if int(self.hstage[17]) != i0: raise k3.ContextBoundsError(f'Dense35Own._pass: staged position {int(self.hstage[17])} != {i0}')
@@ -395,7 +396,7 @@ class Dense35Own:
         self.hstage[1] = int(commit)
         with torch.cuda.device(self.dev):
             self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)
-            self.E.run(check=False)
+            self.E.run(check=False) if trace is None else self.E.run(check=False, trace=trace)
             if self._tok:
                 torch.max(self.logits, dim=1, out=self.d_max)
                 self.h_max[0].copy_(self.d_max[0], non_blocking=True); self.h_max[1].copy_(self.d_max[1], non_blocking=True)

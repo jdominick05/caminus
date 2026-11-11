@@ -4,6 +4,8 @@ span (first workgroup past the wait -> its last publish); the critical path (wal
 dependency) summed per op kind; medians over --tokens traced tokens after --warm untraced ones. Also the host's view:
 step() wall time against the launch's GPU time (events) on the plain module.
   tools/guard.sh LOG 900 python -I benchmarks/q3moe_trace.py GGUF [--warm 8] [--tokens 10]
+--engine dense35: the same for the dense qwen35 line's Dense35Own (engine/q35_dense.py; Swift 1.5, module
+k3_q35_swift_trace): per-stage hop and span in Caminus's own persistent engine, the stage cost a model is sized on.
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -12,11 +14,16 @@ import torch
 from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q3moe_one import Q3MoEOne
+from caminus.engine.q35_dense import Dense35Own
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--warm', type=int, default=8)
 ap.add_argument('--tokens', type=int, default=10)
 ap.add_argument('--detail', type=int, default=None, help='print this layer\'s segments (last traced token)')
-ap.add_argument('--modules', nargs='+', default=['k3_q3m_lean_trace'], help='one engine per run: the card holds one copy')
+ap.add_argument('--modules', nargs='+', default=None, help='one engine per run: the card holds one copy (default: the '
+                                                           'engine\'s _trace module)')
+ap.add_argument('--engine', choices=('q3moe', 'dense35'), default='q3moe')
 A = ap.parse_args()
+if A.modules is None: A.modules = ['k3_q35_swift_trace' if A.engine == 'dense35' else 'k3_q3m_lean_trace']
+ENG = Dense35Own if A.engine == 'dense35' else Q3MoEOne
 OPN = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int)}
 
 
@@ -24,14 +31,16 @@ def seg_name(sg):
     n = OPN.get(sg.op, str(sg.op))
     if n == 'OWN_MV':
         role = {(4096, 2048): 'q', (512, 2048): 'k|v', (2048, 4096): 'o', (151936, 2048): 'head'}.get((sg.N, sg.K))
+        if A.engine == 'dense35': return f'mv {sg.N}x{sg.K} ' + k3.OWN_FMT_NAME.get(sg.work, str(sg.work))
         if role is None: role = ('down ' if sg.K == 768 else 'gate|up ') + k3.OWN_FMT_NAME.get(sg.work, str(sg.work))   # (an expert stage: with its format)
         return 'mv ' + role
+    if n == 'OWN_MV16': return f'mv16 {sg.N}x{sg.K} ' + k3.GG_FMT_NAME.get(sg.work, str(sg.work))
     return n.lower()
 
 
 print(torch.cuda.get_device_name(0), flush=True)
 for module in A.modules:
-    eng = Q3MoEOne(A.gguf, max_ctx=256, module=module); E = eng.E
+    eng = ENG(A.gguf, max_ctx=256, module=module); E = eng.E
     S = len(E.segs); G = E.grid; names = [seg_name(sg) for sg in E.segs]
     tok = 785
     for _ in range(A.warm): tok = int(torch.argmax(eng.step(tok)))

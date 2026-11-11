@@ -8,7 +8,7 @@ loads (docs/specs/spec-own-quant.md). Each keeps the matrix's byte count, so a t
   q6k_from_planes            the inverse (tests).
   iq_records(raw, rows, K, fmt)   IQ3_XXS / IQ3_S / IQ2_XXS (98 / 110 / 66-byte blocks) -> plane A: a record per unit of 32
                              weights (12 / 13 / 8 B: its index bytes, sign bits and, IQ3_S, its qh byte); plane B: a header
-                             per block (d; IQ3_S: d | the four scale bytes); then IQ_PAD zero bytes (a kernel's 16- and
+                             per block (d; IQ3_S: d | the four scale bytes; IQ2_S: a 10-byte record, d); then IQ_PAD zero bytes (a kernel's 16- and
                              8-byte loads run past the last record and header). Read by kernels/own_quant_iq.h
                              own_rows_iqg_1rt.
   iq_from_records            the inverse (tests).
@@ -46,7 +46,7 @@ def q6k_from_planes(pl, rows, K):
 
 IQ_PAD = 16
 # format -> (block bytes, record bytes, header bytes)
-IQ_REC = {'IQ3_XXS': (98, 12, 2), 'IQ3_S': (110, 13, 6), 'IQ2_XXS': (66, 8, 2)}
+IQ_REC = {'IQ3_XXS': (98, 12, 2), 'IQ3_S': (110, 13, 6), 'IQ2_XXS': (66, 8, 2), 'IQ2_S': (82, 10, 2)}
 
 
 def iq_records(raw, rows, K, fmt):
@@ -64,6 +64,9 @@ def iq_records(raw, rows, K, fmt):
     elif fmt == 'IQ3_S':
         A[:, :, :8] = b[:, 2:66].reshape(n, 8, 8); A[:, :, 8:12] = b[:, 74:106].reshape(n, 8, 4); A[:, :, 12] = b[:, 66:74]
         B[:, 2:] = b[:, 106:110]
+    elif fmt == 'IQ2_S':   # a unit: its 4 index bytes | 4 sign bytes | qh byte | scale byte (kernels/own_quant_iq2s.h)
+        A[:, :, :4] = b[:, 2:34].reshape(n, 8, 4); A[:, :, 4:8] = b[:, 34:66].reshape(n, 8, 4)
+        A[:, :, 8] = b[:, 66:74]; A[:, :, 9] = b[:, 74:82]
     else:
         A[:, :, :] = b[:, 2:66].reshape(n, 8, 8)
     return out
@@ -81,6 +84,9 @@ def iq_from_records(rec, rows, K, fmt):
     elif fmt == 'IQ3_S':
         out[:, 2:66] = A[:, :, :8].reshape(n, 64); out[:, 74:106] = A[:, :, 8:12].reshape(n, 32); out[:, 66:74] = A[:, :, 12]
         out[:, 106:110] = B[:, 2:]
+    elif fmt == 'IQ2_S':
+        out[:, 2:34] = A[:, :, :4].reshape(n, 32); out[:, 34:66] = A[:, :, 4:8].reshape(n, 32)
+        out[:, 66:74] = A[:, :, 8]; out[:, 74:82] = A[:, :, 9]
     else:
         out[:, 2:66] = A.reshape(n, 64)
     return out.reshape(-1)

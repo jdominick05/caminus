@@ -329,6 +329,26 @@ def c_header():
     return '\n'.join(out) + '\n'
 
 
+def c_header_iq2s():
+    """kernels/iq2s_grid.h: IQ2_S's grid packed for the kernels (kernels/own_quant_iq2s.h): an entry's 8 magnitudes take
+    only 8, 25 and 43, so each is a 2-bit code (0, 1, 2; weight k at bits 2k), an entry 16 bits, two entries per word
+    (entry 2 w in word w's low half): 2 KB, the size of IQ3_S's grid, where bytes would be 8 KB of the workgroup's LDS.
+    Regenerate: python -I -c "from caminus import iq_tables; print(iq_tables.c_header_iq2s(), end='')" > kernels/iq2s_grid.h"""
+    notice = __doc__[__doc__.index('MIT License'):]
+    code = {8: 0, 25: 1, 43: 2}
+    ent = [sum(code[int(m)] << (2 * k) for k, m in enumerate(e)) for e in GRID_IQ2_S]
+    w = [ent[2 * i] | (ent[2 * i + 1] << 16) for i in range(len(ent) // 2)]
+    out = ['// The grid of GGUF\'s IQ2_S block format for the kernels (kernels/own_quant_iq2s.h), packed: entry e (8 weights)',
+           '// is 16 bits, weight k\'s magnitude a 2-bit code at bits 2k (0: 8, 1: 25, 2: 43), entries 2 w and 2 w + 1 in word',
+           '// w (low, high half). ggml\'s data (llama.cpp, ggml/src/ggml-common.h: iq2s_grid). Generated from',
+           '// python/caminus/iq_tables.py (c_header_iq2s); do not edit. Listed in THIRD_PARTY.md.', '//'] + \
+          ['// ' + l if l else '//' for l in notice.split('\n')]
+    out += ['#pragma once', '#include <stdint.h>', f'static const __device__ uint32_t IQ2S_GRID[{len(w)}] = {{']
+    out += ['    ' + ', '.join(f'0x{v:08x}u' for v in w[i:i + 8]) + ',' for i in range(0, len(w), 8)]
+    out.append('};')
+    return '\n'.join(out) + '\n'
+
+
 if __name__ == '__main__':
     import sys
     sys.stdout.write(c_header())
