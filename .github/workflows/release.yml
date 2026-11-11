@@ -1,7 +1,8 @@
 # The PyPI release (docs/dev/releasing.md). The maintainer builds the wheel and sdist locally (tools/release/release_build.sh, the
 # toolchain CI does not have) and attaches them with SHA256SUMS to a GitHub Release; publishing that Release (or running this
 # workflow by hand with its tag) verifies the attached files against the tag and then waits for the `pypi` environment's
-# required reviewer before anything is uploaded. Nothing here builds code objects.
+# required reviewer before anything is uploaded. Nothing here builds code objects. Pre-releases are skipped (the nightlies:
+# nightly.yml).
 # Every action is pinned by its commit SHA, the release tag in the trailing comment.
 name: release
 
@@ -28,7 +29,8 @@ defaults:
 jobs:
   verify:
     name: verify the Release's files against the tag
-    if: github.repository == 'jdominick05/caminus'
+    # (a pre-release is not this workflow's: a nightly, vX.Y.Z.devYYYYMMDD, goes through nightly.yml)
+    if: github.repository == 'jdominick05/caminus' && (github.event_name != 'release' || !github.event.release.prerelease)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

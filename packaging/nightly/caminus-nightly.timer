@@ -1,0 +1,12 @@
+# Every night at midnight, local time (packaging/nightly/README.md). Persistent: a night the machine was off is made up
+# at the next start.
+[Unit]
+Description=Caminus nightly build, every night at midnight
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

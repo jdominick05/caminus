@@ -112,6 +112,7 @@ python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI run
 python -I tools/release/privacy_scan.py .           # no secrets, machine paths or session links in the tree (CI runs it)
 python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
 tools/release/release_build.sh                      # reproducible release files from a clean clone at a tag (docs/dev/releasing.md)
+tools/release/nightly.sh --dry-run                  # the nightly of `testing` up to its verified files; without the flag it PUBLISHES (a timer's job)
 
 # GPU: always under the guard
 tools/guard.sh LOG 600 python -I tools/k3_smoke.py --model coder          # ends RESULT PASS (needs $ARTIFACTS)

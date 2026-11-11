@@ -1,12 +1,14 @@
-"""Check a release's wheel and sdist before they go to PyPI (.github/workflows/release.yml; tools/release/release_build.sh runs it
-too). CPU only, no network. Run it in a checkout of the release tag:
+"""Check a release's (or a nightly's) wheel and sdist before they go to PyPI (.github/workflows/release.yml and nightly.yml;
+tools/release/release_build.sh runs it too). CPU only, no network. Run it in a checkout of the release tag:
 
   python -I tools/release/verify_release.py DIST --tag vX.Y.Z      DIST: caminus-X.Y.Z-py3-none-any.whl, caminus-X.Y.Z.tar.gz, SHA256SUMS
+  python -I tools/release/verify_release.py DIST --tag vX.Y.Z.devYYYYMMDD   a nightly's files at its tag (docs/dev/releasing.md)
   python -I tools/release/verify_release.py DIST --untagged        a rehearsal at an untagged commit (the version from the tree)
 
 Checked: the tag's form and that it names HEAD; DIST holds exactly the two files and SHA256SUMS, whose hashes match; one version
 everywhere (the tag, the file names, the wheel's METADATA, the sdist's PKG-INFO, python/caminus/__init__.py); the wheel's tag
-(py3-none-any) and its RECORD hashes; its code objects are exactly caminus.device.kernels.RUNTIME_SET, each one's sha256 and size equal
+(py3-none-any) and its RECORD hashes; every file of the package in the wheel is the checkout's file byte for byte
+(only the code objects, their provenance.json and the panel are built); its code objects are exactly caminus.device.kernels.RUNTIME_SET, each one's sha256 and size equal
 provenance.json's and the committed packaging/gfx1100-kernels.sha256's; provenance.json names this commit, a clean tree, gfx1100,
 build.sh's sha256 and the kernel tree hash recomputed here (tools/release/stage_kernels.py's rule); the sdist carries the same code
 objects and provenance.json byte for byte; no text file in either archive matches tools/release/privacy_scan.py; the archives are in
@@ -35,6 +37,8 @@ import privacy_scan  # noqa: E402
 import stage_kernels  # noqa: E402
 
 HSACO = 'caminus/hsaco/gfx1100/'
+PANEL = 'caminus/share/caminus-panel'
+TAG_RE = re.compile(r'v(\d+\.\d+\.\d+(?:\.dev\d{8})?)')   # a release, or a nightly (tools/release/nightly_plan.py)
 FAILS = []
 
 
@@ -92,8 +96,8 @@ def main(argv=None):
     check('a git checkout (HEAD resolves)', bool(re.fullmatch(r'[0-9a-f]{40}', head)), head)
     tv = tree_version()
     if a.tag:
-        m = re.fullmatch(r'v(\d+\.\d+\.\d+)', a.tag)
-        if not check(f'the tag {a.tag!r} has the form vX.Y.Z', bool(m)):
+        m = TAG_RE.fullmatch(a.tag)
+        if not check(f'the tag {a.tag!r} has the form vX.Y.Z or vX.Y.Z.devYYYYMMDD', bool(m)):
             return 1
         ver = m.group(1)
         tc = git('rev-parse', '--verify', '--quiet', f'refs/tags/{a.tag}^{{commit}}').stdout.strip()
@@ -135,6 +139,18 @@ def main(argv=None):
         if p not in files or got != val:
             bad.append(p)
     check('wheel RECORD: every file\'s hash', not bad and di + 'RECORD' in files, str(bad[:5]))
+    tracked = set(git('ls-files', '-z', 'python/caminus').stdout.split('\0'))
+    differ = []
+    for p, b in sorted(files.items()):
+        if p.startswith(di) or p.startswith(HSACO) or p == PANEL:
+            continue
+        src = os.path.join(ROOT, 'python', p)
+        if 'python/' + p not in tracked or not os.path.isfile(src):
+            differ.append(p + ' (not a tracked file)')
+        elif open(src, 'rb').read() != b:
+            differ.append(p)
+    check('wheel: every package file is the checkout\'s tracked file, byte for byte (the code objects and the panel are the built ones)',
+          not differ, str(differ[:5]))
     objs = {p[len(HSACO):]: b for p, b in files.items() if p.startswith(HSACO) and p.endswith('.hsaco')}
     want = sorted(n + '.hsaco' for n in kernels.RUNTIME_SET)
     check(f'wheel code objects == the runtime set ({len(want)})', sorted(objs) == want,

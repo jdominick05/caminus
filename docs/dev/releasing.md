@@ -1,7 +1,7 @@
-# Releasing Caminus: CI and the PyPI release
+# Releasing Caminus: CI, the PyPI release and the nightly builds
 
-Three GitHub Actions workflows (`.github/workflows/`) and two tools carry a release. One fact shapes all of it: **CI never
-builds the shipped code objects.** The gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
+Four GitHub Actions workflows (`.github/workflows/`) and a few tools carry a release and the nightly builds. One fact
+shapes all of it: **CI never builds the shipped code objects.** The gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
 (10.2.0a20261011: amdclang++ and the offload driver's device LTO), and the gates that validated them hold their exact
 instructions and bitwise numerics (docs/dev/packaging.md, "Code objects"). That toolchain is not available at a public URL CI
 could install from, and a different compiler gives different code. So the maintainer builds the release files on the
@@ -55,6 +55,69 @@ modules use helpers the fork adds), which the job fetches from github.com/jdomin
    `caminus` project).
 
 Every job runs only in `jdominick05/caminus` (`if: github.repository == ...`), so a fork or a mirror never publishes.
+
+## Nightly builds: nightly.sh on a timer, then nightly.yml
+
+A nightly is the head of `testing`, built like a release and published without a person in the loop: a GitHub
+pre-release tagged `vX.Y.Z.devYYYYMMDD` with the wheel, the sdist and SHA256SUMS, and the wheel on PyPI as
+`caminus X.Y.Z.devYYYYMMDD`. `X.Y.Z` is the next release (the tree's `__version__` when it has no tag yet, else its next
+patch), so a nightly sorts after the last release and before the next one, and `pip install caminus` never picks one.
+
+```bash
+pip install "caminus>=0.2.2.dev0"            # the newest build, nightly or release
+pip install "caminus==0.2.2.dev20261112"     # one nightly
+```
+
+Name a dev version in the request, as above, rather than passing `--pre`: pip then takes pre-releases of Caminus only,
+while `--pre` also takes pre-releases of every dependency, which nothing here is tested against.
+
+**The build runs on the maintainer's machine** for the reason at the top of this page: `tools/release/nightly.sh`, started at
+midnight (local time) by a systemd user timer ([packaging/nightly/](../../packaging/nightly/README.md)). A run:
+
+1. does nothing when `HOLD` exists in its state directory, or while a guarded GPU job other than the server is running
+   (it builds the kernels twice, which would disturb a benchmark's timings);
+2. reads the head of `testing` and the nightly tags. A head that has its nightly tag and pre-release is done: one nightly
+   per commit, none when the branch did not move. The test keeps no state of its own
+   (`tools/release/nightly_plan.py built`: a nightly tag whose commit's parent is the head), so a night that was skipped
+   or failed is made up by the next run;
+3. needs a completed, successful `ci.yml` push run on that commit;
+4. in a fresh clone at the head: `release_build.sh --write-hashes` (the kernels, by the real toolchain), then **one
+   commit** on top of the head with the version and that build's `packaging/gfx1100-kernels.sha256`, tagged
+   `vX.Y.Z.devYYYYMMDD`. The commit is on no branch; the tag is its only name. It exists because the files are verified
+   the way a release's are: a clean checkout whose `__init__.py` holds the version, hashes committed at that commit,
+   provenance naming it;
+5. in a second fresh clone at the tag: `release_build.sh`, which builds the kernels again, refuses objects that differ
+   from the committed hashes (every nightly is also a reproducibility test of the build) and ends with
+   `verify_release.py`;
+6. checks the tag (`nightly_plan.py check-tag`) and scans the tagged tree (`privacy_scan.py`), and only then pushes the
+   tag and creates the pre-release (`--prerelease --latest=false`, so the "Latest" release stays the last real one).
+
+`tools/release/nightly.sh --dry-run` does everything except the push and the pre-release.
+
+**nightly.yml** runs when that pre-release is published (or by hand with its tag; release.yml skips pre-releases). No
+person approves a nightly, so its verify job is the gate between a published pre-release and PyPI:
+
+- the tag has the nightly form and its Release is a pre-release;
+- `nightly_plan.py check-tag --branch origin/testing`: the tag's commit has one parent, the parent is a commit of
+  `testing`, and the commit changes only `python/caminus/__init__.py` (its `__version__` line, to the tag's version) and the
+  hashes file (hash lines only);
+- a completed, successful `ci.yml` push run exists on that parent;
+- `verify_release.py --tag`: everything it checks for a release, which includes that every package file in the wheel is
+  the checkout's tracked file byte for byte. Only the code objects, their provenance and the panel come from the
+  maintainer's build, as in a release.
+
+Its publish job (environment `pypi-nightly`, `id-token: write` and nothing else, no checkout) uploads **the wheel only**
+with twine 6.1.0 through PyPI Trusted Publishing: the job's OIDC identity is exchanged for a short-lived upload token
+(PyPI's documented manual exchange), so no PyPI secret is stored for it. It runs only when the repository variable
+`NIGHTLY_PYPI` is `true`. The PyPI project's trusted publisher names owner `jdominick05`, repository `caminus`, workflow
+`nightly.yml` and environment `pypi-nightly`; the environment is limited to tags matching `v*.dev*`, so a run by hand
+names the tag as its ref too: `gh workflow run nightly.yml --ref vX.Y.Z.devYYYYMMDD -f tag=vX.Y.Z.devYYYYMMDD`.
+
+What a nightly is not: a release's GPU gates and manual tests (step 5 of "Making a release") are not run on it. Every
+change in it passed its own pull request's gates on the way into `testing`.
+
+Costs to know about: each nightly leaves a tag and a pre-release on GitHub and a 6.5 MB wheel on PyPI, for good (a PyPI
+version cannot be replaced or reused; the project's default size limit is 10 GB).
 
 ## Making a release (the maintainer)
 
