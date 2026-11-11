@@ -196,6 +196,46 @@ __device__ __forceinline__ void own_rows_q4_k(const uint8_t * __restrict__ W, in
     }
 }
 
+// ---- Q5_K: 256 values per 176-byte block: fp16 d, fp16 dmin, scales[12] (Q4_K's), qh[32] (the fifth bits: bit s of qh[l]
+// belongs to value s * 32 + l, sub-block s), qs[128] (the low four bits, laid out as Q4_K's qs). w = d * sc * q - dmin * m
+// with q = 0 .. 31. A lane takes chunk j, columns c4 .. c4 + 3 as in own_rows_q4_k: 8 values, 2 groups
+template <class ACT>
+__device__ __forceinline__ void own_rows_q5_k(const uint8_t * __restrict__ W, int row0, int nrows, int K,
+                                                     const void * __restrict__ x, const float * __restrict__ xd,
+                                                     const float * __restrict__ xs, float * __restrict__ out, int lane) {
+    // rows row0 .. row0 + OWN_R - 1 that are < nrows (one wave; lane = 0 .. 31)
+    const int nb = K / 256, rb = nb * 176, j = lane >> 3, c4 = (lane & 7) * 4;
+    float acc[OWN_R] = {};
+    for (int b = 0; b < nb; b++) {
+        const int vlo = b * 256 + j * 64 + c4, vhi = vlo + 32;
+        ACT alo, ahi;
+        load_act(alo, x, xd, vlo); load_act(ahi, x, xd, vhi);
+        const float mlo = minsum(alo, xs, vlo, c4 == 0), mhi = minsum(ahi, xs, vhi, c4 == 0);
+#pragma unroll
+        for (int r = 0; r < OWN_R; r++) {
+            if (row0 + r >= nrows) continue;
+            const uint8_t * blk = W + (size_t)(row0 + r) * rb + b * 176;
+            const float d = f16f(*(const uint16_t *)blk), dmin = f16f(*(const uint16_t *)(blk + 2));
+            int sc0, m0, sc1, m1;
+            q4k_scale_min(blk + 4, 2 * j, sc0, m0); q4k_scale_min(blk + 4, 2 * j + 1, sc1, m1);
+            const uint32_t qh = *(const uint32_t *)(blk + 16 + c4);            // (176-byte blocks: 4-byte aligned)
+            const uint32_t qs = *(const uint32_t *)(blk + 48 + j * 32 + c4);
+            const uint32_t lo = (qs & 0x0f0f0f0fu) | (((qh >> (2 * j)) & 0x01010101u) << 4);
+            const uint32_t hi = ((qs >> 4) & 0x0f0f0f0fu) | (((qh >> (2 * j + 1)) & 0x01010101u) << 4);
+            float s = acc[r];
+            s = __builtin_fmaf(d * (float)sc0, dot4u(lo, alo), s);
+            s = __builtin_fmaf(-dmin * (float)m0, mlo, s);
+            s = __builtin_fmaf(d * (float)sc1, dot4u(hi, ahi), s);
+            acc[r] = __builtin_fmaf(-dmin * (float)m1, mhi, s);
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < OWN_R; r++) {
+        const float s = wave_sum(acc[r]);
+        if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
+    }
+}
+
 // ---- Q8_0: 32 values per 34-byte block: fp16 d, int8 qs[32]; w = d * q. A lane takes 4 values of one block (8 lanes per
 // block, 4 blocks per wave step): 1 group
 template <class ACT>

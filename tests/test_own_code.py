@@ -24,15 +24,17 @@ def check(c, msg):
 
 for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
             'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
-            'k3_q3m_rs4.hip', 'k3_q3m_rs2.hip', 'own_mv_rs.hip'):           # (the row-scale study's: docs/dev/row-scale-study.md)
+            'k3_q3m_rs4.hip', 'k3_q3m_rs2.hip', 'own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
+            'k3_q35_swift.hip', 'k3_q35_swift_trace.hip'):   # (the dense qwen35 line's decode module: the same rule)
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
 ref = audit('k3_gguf_q3m_own.hip')[2]
 check(bool(ref), f'the detector itself: the full GGUF module (k3_gguf_q3m_own.hip) is flagged ({ref})')
 bs = open(os.path.join(ROOT, 'build.sh')).read()
-check(re.search(r'kernels/k3_q3m\*\.hip\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\)', bs) is not None and
-      'k3_q3m' not in ''.join(re.findall(r'\*k3_gguf\*\.hip\).*', bs)),
-      'build.sh: k3_q3m*.hip get max-ilp and no ggml include path; q3m_prefill.hip the generic loop')
+gg_case = ''.join(re.findall(r'\*k3_gguf\*\.hip\).*', bs))
+check(re.search(r'kernels/k3_q3m\*\.hip\|kernels/k3_q35_\*\.hip\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\)', bs) is not None and
+      'k3_q3m' not in gg_case and 'k3_q35' not in gg_case,
+      'build.sh: k3_q3m*.hip and k3_q35_*.hip get max-ilp and no ggml include path; q3m_prefill.hip the generic loop')
 
 # the serve path under an import hook refusing gguf and tokenizers
 MODS = ('caminus.serve.cli', 'caminus.serve.server', 'caminus.serve.k3_session', 'caminus.serve.worker', 'caminus.serve.generate',

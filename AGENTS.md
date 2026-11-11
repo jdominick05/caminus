@@ -49,6 +49,9 @@ CLAUDE.md imports this file.
   Every op inlined into `k3_run` adds live scalars; past the SGPRs, each segment hop of each wave pays the reloads
   (qwen3moe: 190 spilled scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid, same bits). An op for prefill,
   verify or a drafter goes into its own module, never into a decode module; the host refuses it there.
+  `k3_q35_swift.hip` is the dense qwen35 line's decode module on own code (`k3.Q35S_OPS`, `engine/q35_dense.py`; not
+  yet served): its header `k3_q35_ops.h` takes `k3_q3m_ops.h`'s ops under `K3_OPS_NO_DISPATCH` and dispatches its own
+  tape's, so an edit there must leave the qwen3moe modules' machine code unchanged (compare the `.text` sections).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
