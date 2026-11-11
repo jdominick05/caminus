@@ -9,7 +9,8 @@ failure); nothing touches a GPU (HIP_VISIBLE_DEVICES is emptied for every child)
           needed: CI writes a vocab-only GGUF from the first 11 MiB of shard 1 (tools/release/gguf_vocab_only.py)
   coder   $CODER names the Coder's real shard 1 (its tensors; shard 2 beside it): the prefill launchers' CPU refusals
 DIR (required, never under /tmp; it must not exist or be empty) gets one subdirectory and one log per suite. Exit 1 when any
-suite that ran failed; the log's tail is printed for each failure.
+suite that ran failed; for each failure its failure reports (FAIL / ERROR lines, tracebacks) and its log's tail are printed.
+Suites run with PYTHONUNBUFFERED=1, so a report sits in the log where it happened.
 --jobs N suites run at once (default: the CPU count, at most 8; 1 = one after another). Every suite is its own process with
 its own scratch directory and log, and the results print in the list's order whatever finishes first. The suites that
 need `coder` never overlap one another at any N: each loads the Coder's tensors into host memory."""
@@ -18,6 +19,7 @@ import concurrent.futures
 import contextlib
 import importlib.util
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -91,6 +93,22 @@ def available():
     }
 
 
+def failure_lines(lines, tail=60, around=30, most=12):
+    """what a failed suite's log shows: every failure report (a line starting FAIL or ERROR, unittest's FAIL: / ERROR:
+    blocks, a Traceback) with the lines after it, at most `most` of them, then the last `tail` lines; '    ...' where
+    lines are left out"""
+    keep = set(range(max(0, len(lines) - tail), len(lines)))
+    marks = [i for i, x in enumerate(lines) if re.match(r'(FAIL|ERROR)[: ]|Traceback \(most recent call last\)', x)]
+    for i in marks[:most]:
+        keep.update(range(i, min(i + around, len(lines))))
+    out, prev = [], -1
+    for i in sorted(keep):
+        if i != prev + 1:
+            out.append('    ...')
+        out.append('    ' + lines[i]); prev = i
+    return '\n'.join(out)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--scratch', required=False)
@@ -116,7 +134,7 @@ def main(argv=None):
     unknown = only - {n for n, _, _ in SUITES}
     if unknown:
         raise SystemExit(f'ci_cpu: unknown suites {sorted(unknown)}')
-    env = dict(os.environ, HIP_VISIBLE_DEVICES='')
+    env = dict(os.environ, HIP_VISIBLE_DEVICES='', PYTHONUNBUFFERED='1')   # (a suite's prints and its tracebacks in the order written)
     env.setdefault('TMPDIR', os.path.join(S, 'tmp'))
     os.makedirs(env['TMPDIR'], exist_ok=True)
     if a.jobs < 1:
@@ -151,8 +169,7 @@ def main(argv=None):
             print(f'{"PASS" if rc == 0 else "FAIL"} {name} ({dt:.0f} s)', flush=True)
             if rc != 0:
                 with open(log, errors='replace') as f:
-                    tail = f.read().splitlines()[-60:]
-                print('\n'.join('    ' + x for x in tail), flush=True)
+                    print(failure_lines(f.read().splitlines()), flush=True)
     fails = [n for n, r, _ in results if r == 'FAIL']
     print(f'ci_cpu: {sum(r == "PASS" for _, r, _ in results)} passed, {len(fails)} failed, '
           f'{sum(r == "SKIP" for _, r, _ in results)} skipped' + (f' (failed: {", ".join(fails)})' if fails else ''))
