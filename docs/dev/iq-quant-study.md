@@ -1,7 +1,46 @@
 # IQ quant study: codebook formats in Qwen3-30B-A3B's experts
 
-A study in progress. This page holds its plan and its predictions, written down before the first timed run on the
-RX 7900 XTX. Results will be added below the predictions and scored against them.
+Measured; two rulings are open (the end of the report below). This page holds the report, then the plan and the
+predictions as they were written down before the first timed run on the RX 7900 XTX, then every result in the order
+it was measured.
+
+## Report: predictions against outcomes
+
+Four files that differ only in their expert tensors (144 of 579): A the official Q4_K_M (1.920 GB read per token),
+B IQ4_XS (1.785), C unsloth's UD-IQ3_XXS mix (1.565), D IQ2_XXS (1.290). One decode module for every arm; arm D's
+times are reported and not scored (stop rule 4, below).
+
+**The answer: on these cards the codebook formats' smaller files buy no decode speed.** Each format's decode costs
+what its bytes save.
+
+| | Predicted | Measured, as scored | Verdict |
+|---|---|---|---|
+| H1: decode time of a token, RX 7900 XT (full minus loads-only) | B 0.55–0.75 ms, C 0.75–1.2 (D 0.7–1.1); fails if an arm's decode exceeds its own loads time | B 0.57–0.60, C 1.58–1.60 (D 1.62) against loads-only tokens of 4.37, 4.19 (4.02) ms | Not failed by its clause; B in range, **C's range missed** by 0.4 ms. Per stage the clause's intent fails for the grid formats: an IQ3_XXS layer's gate and up took 28.9 µs for 11.2 µs of bytes |
+| H2: whole token, RX 7900 XTX, depth 8 | B 3.90–4.00 ms, C 3.70–3.95 (D 3.40–3.70); fails if an arm lands on or below its reference line (3.87, 3.62, 3.30) | B 4.122, C 4.807 (D 4.688); A on the same module 4.141 | Direction holds (every arm above its line); **both ranges missed** on the high side, B by 0.12 ms, C by 0.86 |
+| H2 per stage, µs per layer, gate and up / down | IQ4_XS 19.7–21.0 / 12.8–14.0; IQ3_XXS 15.4–20 / 10.7–13.5; IQ3_S 16.8–21 / 11.3–14 | 21.29 / 15.09; 28.87 / 21.48; 28.35 / 22.52 | **Every range missed** on the high side |
+| H3: prefill of 4,096 tokens | B within 10 % of A; C and D 10–40 % slower; fails if C or D is at or above A's speed | RX 7900 XT: B 5.5 % slower, C 5.7 % (D 4.9 %); RX 7900 XTX: B 5.4–5.7 %, C 5.4–6.1 % (D 4.4–4.9 %) | Not failed; B in range; **C's range missed** on the fast side |
+| H4: llama.cpp's mean KLD over the engine's, each against the arm's own fp32 reference | at least 3 on every arm at 128 tokens and at 16,384; top-1 at least llama.cpp's | 128 tokens: A 6.1, B 12.6, C 4.8 (D 95); 16,384: A 3.1, B 5.2, C 4.3 (D 4.7). Top-1 at 128: 128 / 127, 128 / 125, **127 / 128** on C (128 / 126); at 16,384 the engine's is higher on every arm | Ratio holds everywhere; **the top-1 clause fails on C at 128 tokens by one position** (two tokens 1.8 % apart in the reference) |
+| H5: the splice changes nothing outside the experts | byte for byte | equal sha256 | Holds |
+
+After scoring, nothing above was rescored:
+
+- **Most of the scored gap was the study module's shared grid body, not the formats.** Reworked (same bits), the
+  arms tie Q4_K_M at short context on the RX 7900 XTX: 4.137 ms (A), 4.129 (B), 4.175 (C), 4.130 (D) at depth 8;
+  4.795, 4.857, 4.939, 4.858 at 4,096; 6.273, 6.381, 6.478, 6.364 at 16,384. A third fewer bytes (D) is 0.2 %
+  faster at depth 8 and 1.3 to 1.5 % slower at depth.
+- **Where the bytes go:** arm D's loads-only token is 0.53 ms shorter than A's on the RX 7900 XT, and its decode
+  takes 0.93 to 1.09 ms against Q4_K's 0.38.
+- **llama.cpp shows the same thing on the same files:** its decode moves by 4 % across the four arms.
+- **Carrying four formats in one decode module costs arm A 0.10 ms** per token on the RX 7900 XTX (the study module
+  against the shipped one, same bits), which is why the study module is not the shipped one.
+
+Open, for a person to rule:
+
+1. **Stop rule 4's stand-in for IQ2_XXS** (the tile not slower per matvec than the IQ3_XXS tile) tripped by its
+   letter on medians (1 to 3 % slower) and did not by the tile's time minus its read-only time; the launch-bound
+   instrument moves by more than the difference between processes. Until it is ruled, arm D stays unscored.
+2. **Stop rule 2's stand-in for IQ2_XXS** (error within the worst of the other three tiles) held in the first census
+   and misses on the 99th percentile in the rerun over all layers (6.7e-4 against 6.1e-4; the mean holds).
 
 ## The question
 
