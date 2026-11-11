@@ -52,6 +52,21 @@ ITEMS = ITEMS + (
          'Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824,
          '0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5', 'hf-lfs'),
 )
+# Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
+# Face's API on 2026-11-11 (each local file's sha256 computed and equal). Files only so far: no named model serves them yet
+# (CATALOG gets them when their own-kernel engine serves), so `caminus pull` / `caminus start` do not list them.
+# Licences: Swift 1.5 the Swift Open License 1.0, ThinkingCap PolyForm Small Business 1.0.0, the drafter Apache-2.0.
+ITEMS = ITEMS + (
+    Item('swift-1.5', 'swift-1.5', 'ukisai/Swift-1.5-Qwen3.8-27B-GGUF', '14bfe4b42be4a925d98816db830155f476c605e7',
+         'Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf', 17442399936,
+         '2ebba0ff1e63c1ac3fadd4e83efcea189f47f33ec72c91877af94de6ebe30590', 'hf-lfs'),
+    Item('thinkingcap', 'thinkingcap', 'bottlecapai/ThinkingCap-Qwen3.8-27B-GGUF-RCO-4.2bpw',
+         '67c3324641f39f169e1cbc8280f9748e890f3046', 'ThinkingCap-Qwen3.8-27B-RCO-4.2bpw.gguf', 14309041504,
+         'bfb7712f21ad131d64321c4f9ce42417be0fe7a52bd2ff69d263012ddf631654', 'hf-lfs'),
+    Item('dflash2-27b', 'dflash', 'incoai/Qwen3.8-27B-DFlash2-GGUF', '144eb06583b4fb0b6e54bc814b16a206a240f4d2',
+         'Qwen3.8-27B-DFlash2-Q8_0.gguf', 2056414816,
+         '651a1b2930c9825080480f79cf38057e681c9b175d580a357c14f67cf77ccf49', 'hf-lfs'),
+)
 BY_KEY = {it.key: it for it in ITEMS}
 
 # The named models `caminus models` / `caminus pull` / `caminus start` know: the files (ITEMS keys; the first is what caminus

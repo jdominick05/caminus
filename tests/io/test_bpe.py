@@ -29,6 +29,11 @@ stress = [
     "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call><|endoftext|>", "\u00a0nbsp\u2003em\u3000ideo\u2028ls\u2029ps\x85nel",
     "a\n \nb \n  \n c", "   \n", " ", "\n", "", "x" * 300, "ab" * 200 + "!", "'''", "''s", "don't'S", "x'll'Ll'LL",
     "def f(x):\n    return x  # comment\n\n\n\tclass A:\n\t\tpass\n", "Ελληνικά Русский עברית العربية हिन्दी ไทย",
+    # combining marks (the qwen35 pre-tokenizer keeps a mark on its word; qwen2 cuts there): decomposed sequences NFC
+    # cannot compose, marks after a space / digit / symbol / newline, a mark alone, Indic and Thai vowel signs
+    "q\u0301 x\u0323\u0304 z\u20dd", " \u0301a", "5\u0301 7\u20e3", "!\u0301?", "\n\u0301\n", "\u0301", "\u0301\u0302\u0303",
+    "a\u0301\u0302b c \u0303 d", "'s\u0301 don't\u0301", "हिन्दी में क्षत्रिय ज़िंदगी", "ภาษาไทย น้ำ ผู้ใหญ่", "தமிழ் மொழி కృష్ణ",
+    "שָׁלוֹם عَرَبِيّ", "e\u0301\u0301\u0301 \u0301\u0301x", "x \u0301", "-\u0301-", "  \u0301  ", "1\u03012", "\u0301\r\n\u0302",
 ]
 rng = random.Random(7)
 runs = [''.join(rng.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(20000)), 'ab' * 10000, 'a' * 20000,

@@ -1,5 +1,5 @@
 """Caminus's own byte-level BPE tokenizer, built from a GGUF's tokenizer metadata (tokenizer.ggml.model 'gpt2'; the
-pre-tokenizer 'qwen2'). Written from the format's definition (docs/specs/spec-own-quant.md: every step from the GGUF file
+pre-tokenizers 'qwen2' and 'qwen35'). Written from the format's definition (docs/specs/spec-own-quant.md: every step from the GGUF file
 to the output token on Caminus's own code); the Hugging Face tokenizers library and llama.cpp are test oracles only.
 
   Encoding: (1) special tokens (token types 3 control and 4 user-defined) are split out first, longest match first;
@@ -11,6 +11,9 @@ to the output token on Caminus's own code); the Hugging Face tokenizers library 
   scanned by hand here (the first alternative that matches at a position wins, as in the regex); (3) each piece's UTF-8
   bytes become the GPT-2 byte alphabet's characters; (4) merges apply by rank (the lowest-ranked adjacent pair first,
   left to right), and the resulting symbols are the token ids.
+  The 'qwen35' pre-tokenizer (Qwen3.5 on, Qwen3.8 included) differs in two classes only: a run of letters also takes
+  combining marks ([\\p{L}\\p{M}]+), and a run of symbols stops at a mark ([^\\s\\p{L}\\p{M}\\p{N}]+), so a mark stays
+  on its word. Its normalizer is NFC as well.
   Decoding reverses (3) (special tokens decode to their text); decode(encode(t)) is NFC(t)."""
 import heapq, unicodedata
 
@@ -28,6 +31,10 @@ def _is_l(c):
 
 def _is_n(c):
     return unicodedata.category(c)[0] == 'N'
+
+
+def _is_lm(c):
+    return unicodedata.category(c)[0] in 'LM'
 
 
 def byte_alphabet():
@@ -49,9 +56,11 @@ def _fold(c):
     return 's' if c == 'ſ' else c.lower()
 
 
-def pretokenize(text):
-    """the qwen2 pre-tokenizer's pieces of text (no special tokens in it)"""
+def pretokenize(text, marks=False):
+    """the qwen2 pre-tokenizer's pieces of text (no special tokens in it); marks=True: the qwen35 one (a run of letters
+    takes combining marks, a run of symbols stops at one)"""
     out, i, n = [], 0, len(text)
+    run = _is_lm if marks else _is_l                 # a character of alternative (b)'s run
     while i < n:
         c = text[i]
         # (a) contractions
@@ -62,21 +71,22 @@ def pretokenize(text):
                     hit = len(w); break
             if hit:
                 out.append(text[i:i + 1 + hit]); i += 1 + hit; continue
-        # (b) one optional non-letter / non-digit / non-CR-LF character, then letters
+        # (b) one optional non-letter / non-digit / non-CR-LF character, then letters (qwen35: letters or marks; a mark
+        # may be the optional character too, and the result is the same run)
         j = i
-        if not (c in '\r\n' or _is_l(c) or _is_n(c)) and i + 1 < n and _is_l(text[i + 1]): j = i + 1
-        if _is_l(text[j]):
+        if not (c in '\r\n' or _is_l(c) or _is_n(c)) and i + 1 < n and run(text[i + 1]): j = i + 1
+        if run(text[j]):
             k = j
-            while k < n and _is_l(text[k]): k += 1
+            while k < n and run(text[k]): k += 1
             out.append(text[i:k]); i = k; continue
         # (c) one digit
         if _is_n(c):
             out.append(c); i += 1; continue
-        # (d) an optional space, symbols (not whitespace, letters or digits), then any CR / LF
+        # (d) an optional space, symbols (not whitespace, letters or digits; qwen35: nor marks), then any CR / LF
         j = i + 1 if c == ' ' else i
-        if j < n and not (_is_ws(text[j]) or _is_l(text[j]) or _is_n(text[j])):
+        if j < n and not (_is_ws(text[j]) or run(text[j]) or _is_n(text[j])):
             k = j
-            while k < n and not (_is_ws(text[k]) or _is_l(text[k]) or _is_n(text[k])): k += 1
+            while k < n and not (_is_ws(text[k]) or run(text[k]) or _is_n(text[k])): k += 1
             while k < n and text[k] in '\r\n': k += 1
             out.append(text[i:k]); i = k; continue
         if _is_ws(c):
@@ -107,8 +117,9 @@ class BPE:
         if meta.get('tokenizer.ggml.model') != 'gpt2':
             raise ValueError(f"bpe: tokenizer.ggml.model {meta.get('tokenizer.ggml.model')!r} (byte-level BPE 'gpt2' only)")
         pre = meta.get('tokenizer.ggml.pre')
-        if pre not in ('qwen2',):
-            raise ValueError(f"bpe: pre-tokenizer {pre!r} (qwen2 only so far)")
+        if pre not in ('qwen2', 'qwen35'):
+            raise ValueError(f"bpe: pre-tokenizer {pre!r} (qwen2 and qwen35 only so far)")
+        self.pre, self._marks = pre, pre == 'qwen35'
         self.tokens = list(meta['tokenizer.ggml.tokens'])
         types = list(meta.get('tokenizer.ggml.token_type', [1] * len(self.tokens)))
         self.id_of = {t: i for i, t in enumerate(self.tokens)}
@@ -176,9 +187,9 @@ class BPE:
         while special and i < n:
             m = next((t for t in self._first.get(text[i], ()) if text.startswith(t, i)), None)
             if m is None: i += 1; continue
-            for p in pretokenize(self._norm(text[start:i])): ids += self._bpe(p)
+            for p in pretokenize(self._norm(text[start:i]), self._marks): ids += self._bpe(p)
             ids.append(self.id_of[m]); i += len(m); start = i
-        for p in pretokenize(self._norm(text[start:])): ids += self._bpe(p)
+        for p in pretokenize(self._norm(text[start:]), self._marks): ids += self._bpe(p)
         return ids
 
     def _norm(self, t):
