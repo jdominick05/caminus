@@ -103,7 +103,8 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
 
 - Accuracy: prefill 64 positions, then 64 decode passes against the float64 reference: mean KLD 3.0e-7, top-1 64/64.
   llama.cpp's own prefill-then-decode on the same rows: 3.2e-4, 64/64 (`tests/prefill/test_q35_prefill.py`).
-- The served path on the XTX (`tools/serve_smoke1.py --max-ctx 32768 --needle 28000 --block-imports gguf,tokenizers`):
+- The served path on the XTX (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0
+  --max-ctx 32768 --needle 28000 --restart --block-imports gguf,tokenizers`):
   - greedy decode 44 tok/s;
   - a 6,760-token prompt at 748 tok/s, then decode at 28 tok/s;
   - a 27,712-token prompt at 335 tok/s, then decode at 15 tok/s.

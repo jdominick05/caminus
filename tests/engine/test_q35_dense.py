@@ -118,9 +118,24 @@ eng.reset(); eng.step(SEQ[0])
 try: eng.verify(SEQ, 64, 1); refused = False
 except k3.ContextBoundsError: refused = True
 check(refused and not eng.poisoned, 'a position past the KV cache is refused on the host')
+def run_lf(e, seq):
+    """the device sampler's pass: launch_tokens then finish_pass at each position (the previous one committed), the logits
+    read after each pass (K3Session._sampled_pass's order)"""
+    e.reset(); out = []
+    for i in range(len(seq)):
+        c = 0 if i == 0 else 1
+        e.launch_tokens(seq, i, c); e.finish_pass(i, c)
+        out.append(e.logits.reshape(-1).clone())
+    torch.cuda.synchronize(); return out
+
+
+check(all(torch.equal(a.reshape(-1), b) for a, b in zip(base, run_lf(eng, SEQ))) and not eng.bails,
+      f'launch_tokens + finish_pass (the device sampler\'s pass): bitwise the step() logits at every position')
 for pw in (3, 6, 7):
     e2 = Dense35Own(P, max_ctx=64, module=MOD, per_wgp=pw)
     check(all(torch.equal(a, b) for a, b in zip(base, run(e2, SEQ))), f'the tape at {pw} workgroups per WGP: bitwise the default grid ({eng.per_wgp})')
+    check(all(torch.equal(a.reshape(-1), b) for a, b in zip(base, run_lf(e2, SEQ))),
+          f'launch_tokens + finish_pass at {pw} workgroups per WGP: bitwise the default grid\'s step() logits')
     del e2
 e3 = Dense35Own(P, max_ctx=64, module=MOD, gu=False)
 d3 = max(float((a - b).abs().max()) for a, b in zip(base, run(e3, SEQ)))
