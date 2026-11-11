@@ -1,6 +1,7 @@
 # Row-scaled integer codes on Qwen3-30B-A3B's experts: a test
 
-Status: both halves are measured and scored (Results: quality, Results: speed). Follows [the IQ quant study](iq-quant-study.md), which found that
+Status: both halves and the int8-activation probe are measured and scored (Results: quality, Results: speed, The
+int8-activation probe). Follows [the IQ quant study](iq-quant-study.md), which found that
 the codebook formats' smaller files buy no decode speed on these cards: their decode costs what their bytes save.
 
 ## The question
@@ -311,4 +312,34 @@ interleaved in one process, three passes):
 | A1: 4 bits | the probe token is 0.13 to 0.25 ms faster than W4r's full tile (probe minus loads-only 0.08 to 0.20) | less than 0.05 faster: the 0.33 ms is not the fp16 arithmetic's instructions, and int8 activations buy nothing here |
 | A2: 2 bits | the probe token is 0.25 to 0.43 faster than W2r's full tile (probe minus loads-only 0.12 to 0.30) | less than 0.10 faster |
 | A3: the widths | probe minus loads-only is 0.03 to 0.12 higher on W2r than on W4r (the same instructions over shorter loads; S2 predicted equal and failed) | equal within 0.03, or more than 0.15 apart |
+
+**Result** (RX 7900 XT; every object built from one tree into one directory; the probe objects are 96 VGPRs, 0 VGPR
+spills, 66 spilled scalars as the full ones, with 32 `v_dot2acc_f32_f16` fewer and 24 `v_dot4` more than the full
+object; medians of three passes, differences paired inside each process):
+
+| ms per token | W4r, depth 8 | W4r, 4,096 | W2r, depth 8 | W2r, 4,096 |
+|---|---|---|---|---|
+| Full tile | 4.696 | 5.532 | 4.406 | 5.260 |
+| Probe (int8 activations in memory) | 4.616 | 5.435 | 4.263 | 5.091 |
+| Loads only | 4.388 | 5.178 | 3.856 | 4.648 |
+| Full minus probe | 0.081 | 0.100 | 0.148 | 0.169 |
+| Probe minus loads-only | 0.223 | 0.257 | 0.407 | 0.443 |
+
+| | Predicted | Measured | |
+|---|---|---|---|
+| A1 | the probe 0.13 to 0.25 faster than W4r's full tile | 0.081 | **Missed low** (the fail line is 0.05). |
+| A2 | the probe 0.25 to 0.43 faster than W2r's full tile | 0.148 | **Missed low** (the fail line is 0.10). |
+| A3 | probe minus loads-only 0.03 to 0.12 higher on W2r than on W4r | 0.184 higher | **Fails** (more than 0.15 apart). |
+
+- **Int8 activations are worth at most 0.08 ms of a 4.70 ms token here (1.7 %)**, and that is before the activations
+  are produced: the probe reads bytes that are already there. A third of the instructions per unit removed a quarter
+  of what the tile adds to its loads. What is left (0.22 ms on W4r) is not the multiply-adds: the loads-only build
+  reads no activations and reduces nothing per row, so the remainder is the activation reads, the per-row
+  reduction across the wave and the dependence of every sum on its loads, which an integer form keeps.
+- The RX 7900 XTX was not run: its full minus loads-only is smaller (0.22 ms against the XT's 0.33), so its bound is
+  lower still.
+- **So the int8-activation tile is not built.** 8-bit activations are nearly free in accuracy (P4), and on this
+  engine nearly worthless in decode speed: a matvec over 8 active experts is bound by reading the weights, and the
+  activations are 2 KB that every row shares. Where int8 activations pay is where the activations are the large
+  operand: batched prefill and verify passes (a GEMM over many tokens), which this probe does not measure.
 
