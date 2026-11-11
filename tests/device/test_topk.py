@@ -119,7 +119,8 @@ for pattern, R, n, k, wide in cases:
     same_t = all(np.array_equal(np.sort(v[r, :kk]), np.sort(tvn[r])) for r in range(R) if not nan_rows[r]
                  ) if pattern != 'zeros' else True   # (torch's ±0 order differs; NaN never compares equal)
     again = cand.run(L, k, pid); torch.cuda.synchronize()
-    rerun = again == kk and np.array_equal(cand.val.cpu().numpy(), v) and np.array_equal(cand.idx.cpu().numpy(), ix)
+    rerun = (again == kk and np.array_equal(cand.val.cpu().numpy().view(np.uint32), v.view(np.uint32))   # (as bits: NaN != NaN)
+             and np.array_equal(cand.idx.cpu().numpy(), ix))
     check(exact and pen_ok and canary and side and same_t and rerun,
           f'{pattern:7s} R={R} n={n} k={k}{" (a column slice)" if wide else ""}: oracle {exact}, penalty values {pen_ok}, '
           f'canaries {canary and side}, torch.topk values {same_t}, rerun bitwise {rerun}')
