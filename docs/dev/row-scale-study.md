@@ -98,6 +98,16 @@ no prediction was reworded.
   level sets.
 - The fitter writes `OUT.part` and renames it when the file is complete, so an interrupted run leaves no file under
   an arm's name.
+- **How the tools read a file.** The fitter and the reference tool copied tensor bytes to the card straight from
+  the memory-mapped file. The donor is 32.5 GB on a host with 29 GiB of RAM: the first complete fit slowed when the
+  page cache filled (23 GB in) and then stopped advancing, the card idle and no fault recorded; it was stopped by
+  process id at 119 of 144 tensors and its partial file discarded. Both tools now read tensor bytes into ordinary
+  memory (`ggufio.Tensor.pread`), and the fitter drops the donor's and the output's pages from the page cache as it
+  goes. The fit is the same: the restarted run printed the first run's layer-0 errors digit for digit.
+- **Both cards at once.** The window was planned for the RX 7900 XT alone. After the restart the 2-bit files and
+  the 8-bit-activation runs are made on the XT and the 4-bit files and the Q4_0 control on the RX 7900 XTX, each
+  under its own guard; the reference tool's first run is the XT's. Arm A's logits are computed on both cards, and
+  their distance is reported with the table: what the card itself adds to a distance.
 
 ## Stop rules
 

@@ -125,12 +125,11 @@ stats = collections.defaultdict(lambda: np.zeros(5))   # role -> sums of (weight
 def requant(t):
     """the container bytes of BASE tensor t's requantized form, as numpy chunks in file order"""
     d8 = D.T[t.name]; K = int(t.shape[0]); R, rb = d8.rows(); ff = R // E; nb = K // BLK
-    raw = np.asarray(d8.data()).reshape(E, ff * rb)
     im = IM[t.name].reshape(E, K) if IM is not None else np.ones((E, K), np.float32)
     role = re.sub(r'^blk\.\d+\.', '', t.name); st = np.zeros(5)
     for e0 in range(0, E, A.chunk):
         e1 = min(E, e0 + A.chunk)
-        b = torch.from_numpy(np.ascontiguousarray(raw[e0:e1])).to(dev).view(e1 - e0, ff, K // 32, 34)
+        b = torch.from_numpy(d8.pread(e0 * ff * rb, e1 * ff * rb)).to(dev).view(e1 - e0, ff, K // 32, 34)   # (ordinary memory, never the mapping's pages)
         w = (b[..., 0:2].contiguous().view(torch.float16).float() * b[..., 2:].contiguous().view(torch.int8).float()).view(e1 - e0, ff, nb, BLK)
         del b
         imp = torch.from_numpy(np.ascontiguousarray(im[e0:e1])).to(dev).view(e1 - e0, 1, nb, BLK)
@@ -140,6 +139,7 @@ def requant(t):
         st[4] += float(fit(w, imp, 0.5)[2].sum())
         del w, imp
         yield out
+    os.posix_fadvise(D._fd.fileno(), d8.offset, d8.n_bytes, os.POSIX_FADV_DONTNEED)   # (32 GB of donor must not fill the page cache)
     stats[role] += st
     print(f'  {t.name}: weighted relative error {st[0] / st[1]:.4e} (shifted level set {st[4] / st[1]:.4e}), plain {st[2] / st[3]:.4e}', flush=True)
 
@@ -164,6 +164,7 @@ with open(A.out + '.part', 'wb') as f:
             n = 0
             for chunk in requant(t): f.write(chunk.tobytes()); n += chunk.size
             assert n == nb, (t.name, n, nb)
+            f.flush(); os.fdatasync(f.fileno()); os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)   # (nor the output)
         f.write(b'\0' * (-n % al))
     f.flush(); os.fsync(f.fileno())
 os.replace(A.out + '.part', A.out)

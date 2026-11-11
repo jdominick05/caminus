@@ -164,7 +164,7 @@ class W:
         t = self.F.T[name]; K = int(t.shape[0]); R, rb = t.rows()
         r0 = 0 if r0 is None else r0; r1 = R if r1 is None else r1
         if t.type == 'F32': return torch.from_numpy(np.asarray(t.data()).view(np.float32)[r0 * K:r1 * K].copy()).to(self.dev).view(r1 - r0, K)
-        raw = torch.from_numpy(np.ascontiguousarray(np.asarray(t.data())[r0 * rb:r1 * rb])).to(self.dev)
+        raw = torch.from_numpy(t.pread(r0 * rb, r1 * rb)).to(self.dev)   # (ordinary memory: an arm's file can be larger than free RAM)
         return DECODERS[t.type](raw).view(r1 - r0, K)
 
 
