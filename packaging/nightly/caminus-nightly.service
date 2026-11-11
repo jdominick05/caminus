@@ -1,0 +1,20 @@
+# The nightly build as a systemd USER unit (packaging/nightly/README.md; docs/dev/releasing.md, "Nightly builds").
+# It runs tools/release/nightly.sh from a clone of the public repository kept for this job alone
+# (~/.local/share/caminus-nightly/src), brought to the head of `testing` first, so the script is always the reviewed one.
+# The env file holds the toolchain paths and the nightly commit's identity (nightly.env.example).
+[Unit]
+Description=Caminus nightly build (testing -> a GitHub pre-release)
+Documentation=https://github.com/jdominick05/caminus/blob/testing/docs/dev/releasing.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/caminus-nightly/env
+# wait for the network (a run that was missed while the machine was off starts right after boot), then update the clone
+ExecStartPre=/bin/sh -c 'for i in $$(seq 40); do git ls-remote -q https://github.com/jdominick05/caminus.git refs/heads/testing > /dev/null 2>&1 && exit 0; sleep 15; done; echo "no network after 10 minutes" >&2; exit 1'
+ExecStartPre=/usr/bin/git -C %h/.local/share/caminus-nightly/src pull -q --ff-only origin testing
+ExecStart=%h/.local/share/caminus-nightly/src/tools/release/nightly.sh
+# two kernel builds: only on idle CPU and disk time
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+TimeoutStartSec=4h

@@ -22,6 +22,11 @@ pip install caminus
 
 PyTorch goes first because its AMD build isn't on PyPI.
 
+**Nightly builds.** To run what is on the development branch before it is released, install with
+`pip install "caminus>=0.2.2.dev0"` instead: that takes the newest build, nightly or release. A nightly is built
+automatically from the `testing` branch whenever it changed; it passed the automatic tests, not a release's GPU tests.
+Don't use `--pre` for this: it also installs test versions of the packages Caminus depends on.
+
 ## 2. Check your machine
 
 ```bash

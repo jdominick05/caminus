@@ -37,6 +37,7 @@ SUITES = [
     ('ref_q35', ['tests/test_ref_q35.py', '--scratch', '{scratch}'], set()),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
+    ('nightly_plan', ['tests/tools/test_nightly_plan.py', '--scratch', '{scratch}'], set()),
     ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),
     ('kv_host', ['tests/device/test_kv_host_cpu.py'], {'torch'}),
     ('ple_aio', ['tests/engine/test_ple_aio.py'], {'torch'}),

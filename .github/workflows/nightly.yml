@@ -1,0 +1,166 @@
+# The nightly's PyPI upload (docs/dev/releasing.md, "Nightly builds"). The maintainer's machine builds a nightly of `testing`
+# with the real toolchain and publishes it as a GitHub pre-release tagged vX.Y.Z.devYYYYMMDD (tools/release/nightly.sh, on a
+# timer), then starts this workflow ON THE BRANCH `testing` with that tag as its input. The workflow verifies the
+# attached files against the tag and uploads the wheel to PyPI as caminus X.Y.Z.devYYYYMMDD. Nothing here builds code
+# objects.
+# Why it is started on the branch and has no release trigger: GitHub runs the workflow file of the ref a run starts on.
+# A run for a release event would execute the copy in the tag's commit, so a crafted tag could carry an edited copy
+# that skips every check and uploads any version. Started on `testing`, the file is always the reviewed one (the
+# branch takes changes through pull requests only), and the environment pypi-nightly, which the PyPI trusted publisher
+# names, admits the branch `testing` and no tag. The verify job refuses any other ref.
+# No person approves a nightly, so verify is the gate: the tag is one commit on top of a commit of `testing` that changes
+# only the version line and the code-object hashes, CI was green on that commit, and the files are the tag's
+# (tools/release/verify_release.py: versions, hashes, provenance, every package file byte for byte the checkout's).
+# The tag is checked by this run's own checkout of `testing` before any file of the tag runs: a tag that passes holds
+# no tool that `testing` does not, so the tag's own verify_release.py is then reviewed code.
+# The upload uses PyPI Trusted Publishing (a short-lived token minted from this job's OIDC identity; no stored secret) and
+# runs only when the repository variable NIGHTLY_PYPI is 'true'.
+# GitHub starts a workflow this way only once its file is on the default branch (`main`).
+# Every action is pinned by its commit SHA, the release tag in the trailing comment.
+name: nightly
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'the nightly tag (vX.Y.Z.devYYYYMMDD) whose attached files to verify and upload; start the run on testing'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: verify the nightly's files against its tag
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: This run is the workflow of testing; the tag has the form vX.Y.Z.devYYYYMMDD and its Release is a pre-release
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/testing ]; then
+            echo "::error::started on $GITHUB_REF: the nightly workflow runs on refs/heads/testing only (gh workflow run nightly.yml --ref testing -f tag=...)"; exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]{8}$ ]]; then
+            echo "::error::not a nightly tag: '$TAG' (vX.Y.Z.devYYYYMMDD)"; exit 1
+          fi
+          pre=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft --jq '.isPrerelease and (.isDraft | not)')
+          if [ "$pre" != true ]; then echo "::error::the Release of $TAG is not a published pre-release"; exit 1; fi
+
+      # the checker comes from this run's own commit of `testing` (reviewed code), never from the tag it checks
+      - name: Check out this run's commit of testing (the trusted tools)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out the tag (the candidate; nothing in it runs before the tag check passes)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: twine
+        run: python -m pip install twine==6.1.0 'pkginfo>=1.12'
+
+      - name: The tag is one version-and-hashes commit on top of a commit of testing (testing's checker on the tag's repository)
+        run: python -I trusted/tools/release/nightly_plan.py --repo candidate check-tag "$TAG" --branch origin/testing
+
+      - name: CI was green on that commit
+        run: |
+          base=$(git -C candidate rev-parse "refs/tags/$TAG^{commit}^")
+          green=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$base" --event push --json status,conclusion \
+                    --jq 'map(select(.status == "completed" and .conclusion == "success")) | length')
+          echo "$base: $green successful ci.yml push run(s)"
+          if [ "$green" -lt 1 ]; then echo "::error::no completed, successful ci.yml push run on $base"; exit 1; fi
+
+      - name: Download the pre-release's wheel, sdist and SHA256SUMS
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/dist" \
+             --pattern 'caminus-*.whl' --pattern 'caminus-*.tar.gz' --pattern SHA256SUMS
+          ls -l "$RUNNER_TEMP/dist"
+
+      # (the tag's own copy: it compares the files with its own checkout, and the tag check above proved it is a copy that
+      # a commit of testing holds)
+      - name: Verify (versions, SHA256SUMS, provenance == this commit, package files == this checkout, code objects == the committed hashes)
+        run: python -I candidate/tools/release/verify_release.py "$RUNNER_TEMP/dist" --tag "$TAG"
+
+      - name: twine check
+        run: python -m twine check --strict "$RUNNER_TEMP"/dist/caminus-*
+
+      - name: Hand the verified wheel to the publish job (PyPI gets the wheel only; the sdist stays on the pre-release)
+        run: |
+          mkdir -p "$RUNNER_TEMP/publish"
+          cp "$RUNNER_TEMP"/dist/caminus-*.whl "$RUNNER_TEMP/publish/"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-wheel
+          path: ${{ runner.temp }}/publish/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: upload the wheel to PyPI (Trusted Publishing)
+    needs: verify
+    if: github.repository == 'jdominick05/caminus' && github.ref == 'refs/heads/testing' && vars.NIGHTLY_PYPI == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi-nightly
+      url: https://pypi.org/project/caminus/#history
+    permissions:
+      id-token: write   # (the OIDC identity PyPI exchanges for an upload token; this job checks nothing out)
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nightly-wheel
+          path: dist/
+
+      - name: The file to upload
+        run: ls -l dist/ && sha256sum dist/*
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      # PyPI's documented manual exchange (docs.pypi.org/trusted-publishers/using-a-publisher): this job's OIDC token, with
+      # the audience pypi, for a short-lived upload token. twine directly, pinned, for release.yml's reason: the pypa
+      # publish action runs a Docker image that a commit-SHA pin does not find. --skip-existing makes a second run of the
+      # same tag a no-op (a PyPI file is never replaced)
+      - name: Upload to PyPI (twine 6.1.0, a token minted from this job's identity)
+        run: |
+          python -m pip install --disable-pip-version-check 'twine==6.1.0'
+          resp=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=pypi")
+          oidc_token=$(jq -r '.value' <<< "$resp")
+          resp=$(curl -sS -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"${oidc_token}\"}")
+          api_token=$(jq -r '.token // empty' <<< "$resp")
+          if [ -z "$api_token" ]; then
+            jq -r '.message // empty, (.errors // [] | .[] | "\(.code): \(.description)")' <<< "$resp" || true
+            echo "::error::PyPI minted no token (is the trusted publisher set for this workflow file and the environment pypi-nightly?)"; exit 1
+          fi
+          echo "::add-mask::$api_token"
+          python -m twine check dist/*
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" TWINE_NON_INTERACTIVE=1 python -m twine upload --verbose --skip-existing dist/*
