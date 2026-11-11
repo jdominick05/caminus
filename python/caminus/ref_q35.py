@@ -78,6 +78,7 @@ class Q35Ref:
         if sec is not None and 2 * sum(int(v) for v in sec) != self.nrot:
             raise ValueError(f'ref_q35: rope sections {list(sec)} do not cover the {self.nrot} rotated dims')
         self.pool = ThreadPoolExecutor(threads or min(16, os.cpu_count() or 1))
+        self.census = None   # a dict: gets the largest |value| of each matvec input kind (and of the residual stream)
         self.reset()
 
     def reset(self):
@@ -98,6 +99,9 @@ class Q35Ref:
             out[a - r0:min(r1, a + step) - r0] = own_dequant.rows(t, a, min(r1, a + step))
         list(self.pool.map(piece, range(r0, r1, step)))
         return out
+
+    def _see(self, kind, a):
+        if self.census is not None: self.census[kind] = max(self.census.get(kind, 0.0), float(np.abs(a).max()))
 
     def vec(self, name):
         return self.W(name).reshape(-1)
@@ -137,6 +141,7 @@ class Q35Ref:
         self.state[il] = St
         z = (h @ self.W(p + 'attn_gate.weight').T).reshape(N, NV, S)
         fin = self.rms(o, self.vec(p + 'ssm_norm.weight')) * silu(z)
+        self._see('ssm_out input', fin)
         return fin.reshape(N, NV * S) @ self.W(p + 'ssm_out.weight').T
 
     def _attn(self, il, h, pos):
@@ -157,7 +162,8 @@ class Q35Ref:
             sc = np.where(seen[:, None, :], sc, -np.inf)
             pr = np.exp(sc - sc.max(axis=-1, keepdims=True)); pr /= pr.sum(axis=-1, keepdims=True)
             att[:, kv * G:(kv + 1) * G] = np.einsum('nht,td->nhd', pr, V[:, kv])
-        return (att * sigmoid(gate)).reshape(N, H * HD) @ self.W(p + 'attn_output.weight').T
+        att *= sigmoid(gate); self._see('attn_output input', att)
+        return att.reshape(N, H * HD) @ self.W(p + 'attn_output.weight').T
 
     # -- a chunk of tokens -----------------------------------------------------------------------------------------------
     def feed(self, ids, last=None, trace=None, log=None):
@@ -169,17 +175,17 @@ class Q35Ref:
         pos = self.pos + np.arange(N, dtype=np.float64)
         for il in range(self.L):
             p = f'blk.{il}.'
-            h = self.rms(x, self.vec(p + 'attn_norm.weight'))
+            h = self.rms(x, self.vec(p + 'attn_norm.weight')); self._see('block input (attn_norm)', h)
             x = x + (self._gdn(il, h) if self.gdn[il] else self._attn(il, h, pos))
-            h = self.rms(x, self.vec(p + 'post_attention_norm.weight'))
+            h = self.rms(x, self.vec(p + 'post_attention_norm.weight')); self._see('FFN input (post_attention_norm)', h)
             a = silu(h @ self.W(p + 'ffn_gate.weight').T)
-            a *= h @ self.W(p + 'ffn_up.weight').T
-            x = x + a @ self.W(p + 'ffn_down.weight').T
+            a *= h @ self.W(p + 'ffn_up.weight').T; self._see('ffn_down input', a)
+            x = x + a @ self.W(p + 'ffn_down.weight').T; self._see('residual stream', x)
             if trace is not None: trace.append(x.copy())
             if log: log(il)
         self.pos += N
         M = N if last is None else min(N, int(last))
-        hN = self.rms(x[N - M:], self.vec('output_norm.weight'))
+        hN = self.rms(x[N - M:], self.vec('output_norm.weight')); self._see('head input (output_norm)', hN)
         R, _ = self.F.T['output.weight'].rows()
         return np.concatenate([hN @ self.W('output.weight', r0, min(R, r0 + HEAD_ROWS)).T for r0 in range(0, R, HEAD_ROWS)], axis=1)
 
