@@ -4,7 +4,9 @@ against the card's guard line before the first transfer).
 
   GEMMs     Q4_K dense (blk.0 attn_q), Q6_K dense (blk.0 attn_v: the decode's plane layout), Q4_K experts (blk.0 gate) and
             Q6_K experts (blk.0 down) through q3p_group's work items, token counts that leave partial tiles: max and
-            mean |y - ref| / rms(ref) within fp32-accumulation bounds (the weights are exact in the B operand)
+            mean |y - ref| / rms(ref) within fp32-accumulation bounds (the weights are exact in the B operand); Q4_K with
+            tokens whose sub-block sums pass fp16's range (the min term's fallback): finite, the same bound, and every
+            other token bitwise its rows without them
   glue      q3p_emb bitwise caminus.own_dequant's rows; add_rms16, router, swiglu vs float64; topk's ids equal numpy's
             ranking of the same float32 probabilities and its weights within float32 rounding
   attention q3p_qk_rope vs float64 (norm + RoPE; the cache rows) and q3p_attn vs float64 causal attention over random
@@ -64,6 +66,52 @@ for name, n in (('blk.0.attn_q.weight', 100), ('blk.0.attn_v.weight', 77), ('blk
     ref = x.astype(np.float64) @ own_dequant.rows(t, 0, R).astype(np.float64).T
     mx, mn = rel(y.cpu().numpy(), ref)
     check(np.isfinite(y.cpu().numpy()).all() and mx < 2e-5 and mn < 2e-6, f'mm {fmt} dense {name} n {n}: max {mx:.2e}, mean {mn:.2e} of rms')
+
+# ---- the Q4_K min term past fp16's range: a token whose 32-value sums of x pass 65,504 takes the kernel's / 64 fallback
+# (its min term as dmin MS / 64 on the ordinary path plus 63 dmin MS / 64 in the rare branch). Against its twin (the same
+# activations / 64, which the ordinary path computes; a power-of-two scale commutes with the rounding) it is 64 x the
+# twin's rows within 1e-6 of each row's sum |w| |x| (the second product's rounding, and the low parts of a token's small
+# sums, which fall below fp16's normal range after / 64). Every other token keeps its bits (the fallback is per token,
+# per block). Against float64 every large token, the fallback's and token 77 on the ordinary path alike, is within 5e-5
+# of its rows' sum |w| |x|: with activations in the thousands the min term's two large parts cancel (measured: 1.4e-5 on
+# both paths)
+w, t = W('blk.0.attn_q.weight'); fmt, R, K, _ = w
+n = 100
+x = (g.standard_normal((n, K)) * 0.7).astype(np.float16)
+x[np.abs(x) < 2.0 ** -7] = 0   # (no activation of a token or its twin below fp16's normal range after / 64)
+y0 = torch.full((n, R), np.nan, dtype=torch.float32, device=dev)
+O.mm(w, torch.from_numpy(x).to(dev), K, y0, R, n=n); torch.cuda.synchronize()
+# token: (block, sub-blocks, level): sums about 67,200 / -73,600 / 96,000 in each of 8 sub-blocks (token 64: the second
+# workgroup's first token); token 77 sums exactly 65,280, just inside fp16 (the fallback must not take it)
+big = {3: (1, [2], 2100.0), 50: (5, [7], -2300.0), 64: (7, list(range(8)), 3000.0), 77: (2, [4], 2040.0)}
+twin = {3: 10, 50: 90, 64: 70}
+xb = x.copy()
+for tk, (blk, sbs, lv) in big.items():
+    for sb in sbs:
+        c0 = blk * 256 + sb * 32
+        xb[tk, c0:c0 + 32] = (lv + np.round(g.standard_normal(32) * 3) * 2).astype(np.float16)   # (even: exact / 64)
+    if tk == 77: xb[tk, blk * 256 + 128:blk * 256 + 160] = 2040.0
+for tk, tw in twin.items():
+    xb[tw] = (xb[tk].astype(np.float32) / 64).astype(np.float16)
+    assert np.array_equal(xb[tw].astype(np.float32) * 64, xb[tk].astype(np.float32))
+y1 = torch.full((n, R), np.nan, dtype=torch.float32, device=dev)
+O.mm(w, torch.from_numpy(xb).to(dev), K, y1, R, n=n); torch.cuda.synchronize()
+y0n, y1n = y0.cpu().numpy(), y1.cpu().numpy()
+moved = set(big) | set(twin.values())
+others = [p for p in range(n) if p not in moved]
+check(np.array_equal(y1n[others].view(np.uint32), y0n[others].view(np.uint32)),
+      f'mm Q4_K min-term fallback: the {len(others)} other tokens of the same workgroups keep their bits')
+deq = own_dequant.rows(t, 0, R).astype(np.float64)
+scale = lambda tk: np.abs(deq) @ np.abs(xb[tk].astype(np.float64))
+for tk, tw in twin.items():
+    y64 = y1n[tw] * np.float32(64)
+    e = float((np.abs(y1n[tk].astype(np.float64) - y64) / scale(tk)).max())
+    check(np.isfinite(y1n[tk]).all() and e < 1e-6,
+          f'mm Q4_K min-term fallback: token {tk} ({len(big[tk][1])} sums near {32 * big[tk][2]:,.0f}) is 64 x its twin (x / 64, the ordinary path) within {e:.1e} of its rows\' sum |w| |x|')
+for tk in big:
+    ref = deq @ xb[tk].astype(np.float64); e = np.abs(y1n[tk] - ref) / scale(tk)
+    check(np.isfinite(y1n[tk]).all() and float(e.max()) < 5e-5,
+          f'mm Q4_K min-term: token {tk} (sums near {32 * big[tk][2]:,.0f}) finite, max error {float(e.max()):.2e} of its rows\' sum |w| |x|')
 
 # ---- expert GEMMs through q3p_group
 n, k, E = 150, 8, 128

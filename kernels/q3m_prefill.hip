@@ -10,6 +10,7 @@
 //   Q4_K  w = d sc q - dmin m: B = sc * q (an integer <= 945: exact in fp16) over the whole 256-value block, then
 //         acc += d * P - dmin * MS, with MS = sum over the 8 sub-blocks of m * (sum of x over the sub-block) as one more
 //         WMMA: A = the per-token sub-block sums split hi + lo in fp16 (8 + 8 columns, error ~2^-22 of the sum), B = m twice
+//         (a token whose sum would overflow fp16 stores its sums / 64 and gets the rest back in a rare branch: MMF below)
 //   Q6_K  w = d sc (q - 32): B = q - 32 (exact) per 16-value sub-block, acc += (d * sc) * P
 // so a product's only rounding is the fp32 accumulation (the decode's matvec: fp16 x, fp32 sums; llama.cpp's MMQ: int8 x).
 // A workgroup (8 waves) computes 64 tokens x 128 rows: wave w rows 16 w .. 16 w + 15 (lane l: row l & 15; lanes 16 .. 31
@@ -43,6 +44,15 @@ __device__ __forceinline__ f8_t wmma(const h16_t & a, const h16_t & b, const f8_
 // LDS: x [64][MM_XP] fp16; Q4_K sub-block sums [64][16] fp16 (hi 0..7, lo 8..15)
 __shared__ _Float16 MMX[MM_M * MM_XP];
 __shared__ _Float16 MMS[MM_M * 16];
+// The sums' fp16 split overflows past 65,504 (32 activations averaging over 2,047): hi = inf, and hi m + lo m = NaN for
+// every row of that token. A token whose sum would overflow in block b stores all 8 of its sums of that block divided by
+// 64 (a power of two: |s| / 64 <= 32 x 65,504 / 64 stays finite) and is tagged MMF[t] = b + 1; MMBIG = b + 1 says that
+// some token of the block was. The block's ordinary min term then adds dmin MS / 64 for that token, and a branch taken
+// only in such a block adds the other 63 / 64 (63 dmin is exact in fp32). The ordinary path is the code as it was, plus
+// one never-taken branch per stage and per block: every token whose split stays finite keeps its bits (measured: the
+// same cache rows and logits over 8,192 prefilled positions). Tags carry the block index, so nothing is reset.
+__shared__ int MMF[MM_M];
+__shared__ int MMBIG;
 
 // stage block b of the item's tokens: thread (token t = tid / 4, quarter q = tid % 4: values 64 q .. 64 q + 63); with
 // sums: the fp32 sums of sub-blocks 2 q and 2 q + 1 (32 values each), split hi + lo fp16
@@ -64,6 +74,7 @@ __device__ __forceinline__ void mm_stage(const _Float16 * __restrict__ X, int ld
     for (int i = 0; i < 8; i++) dst[i] = v[i];
     if (SUMS) {
         const h2_t one = {(_Float16)1.0f, (_Float16)1.0f};
+        float sk[2]; bool fin = true;
 #pragma unroll
         for (int hsb = 0; hsb < 2; hsb++) {
             float s = 0.0f;
@@ -75,6 +86,20 @@ __device__ __forceinline__ void mm_stage(const _Float16 * __restrict__ X, int ld
             }
             const _Float16 hi = (_Float16)s; const _Float16 lo = (_Float16)(s - (float)hi);
             MMS[t * 16 + 2 * q + hsb] = hi; MMS[t * 16 + 8 + 2 * q + hsb] = lo;
+            sk[hsb] = s; fin = fin && __builtin_isfinite((float)hi);
+        }
+        const uint32_t wm = __builtin_amdgcn_ballot_w32(!fin);
+        if (wm) {   // wave-uniform, never taken unless a sum overflows fp16: the token's 4 threads (lanes 4 t' .. 4 t' + 3)
+            if ((wm >> (tid & 28)) & 0xfu) {   // all rewrite their sums / 64
+#pragma unroll
+                for (int hsb = 0; hsb < 2; hsb++) {
+                    const float ss = sk[hsb] * 0.015625f;
+                    const _Float16 hi = (_Float16)ss; const _Float16 lo = (_Float16)(ss - (float)hi);
+                    MMS[t * 16 + 2 * q + hsb] = hi; MMS[t * 16 + 8 + 2 * q + hsb] = lo;
+                }
+                if (q == 0) MMF[t] = b + 1;
+            }
+            if ((tid & 31) == 0) MMBIG = b + 1;
         }
     }
 }
@@ -128,6 +153,8 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q4k(
     f8_t acc[4];
 #pragma unroll
     for (int mt = 0; mt < 4; mt++) acc[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    if (tid < MM_M) MMF[tid] = 0;   // the overflow tags (above MMF): ordered before block 0's stage by its first barrier
+    if (tid == 0) MMBIG = 0;
     for (int b = 0; b < NB; b++) {
         // this lane's block: header (d, dmin, scales) and the 128 quant bytes, all in flight before the stage's barrier
         const u32x4_t * bp = (const u32x4_t *)(wrow + (size_t)b * 144);
@@ -175,6 +202,27 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q4k(
             const f8_t MS = wmma(AS, BM, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
 #pragma unroll
             for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[mt][v], __builtin_fmaf(-dmin, MS[v], acc[mt][v]));
+        }
+        if (__builtin_amdgcn_readfirstlane(MMBIG) == b + 1) {   // rare: the other 63 / 64 of the scaled tokens' min term
+            // (the block's header is read again rather than held: nothing of the ordinary path stays live for this)
+            const u32x4_t hd2 = *(const u32x4_t *)(wrow + (size_t)b * 144);
+            int sc2[8], m2[8];
+            q4k_scales(hd2, sc2, m2);
+            uint32_t bm2[8];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const h2_t p2 = {(_Float16)m2[2 * i], (_Float16)m2[2 * i + 1]};
+                bm2[i] = as_u(p2); bm2[4 + i] = as_u(p2);
+            }
+            const float dm63 = rok ? -63.0f * (float)__builtin_bit_cast(_Float16, ((const uint16_t *)&hd2)[1]) : 0.0f;
+#pragma unroll
+            for (int mt = 0; mt < 4; mt++) {
+                const u32x4_t * sp = (const u32x4_t *)(MMS + (mt * 16 + (lane & 15)) * 16);
+                const f8_t MS = wmma(h16of(sp[0], sp[1]), __builtin_bit_cast(h16_t, bm2), (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#pragma unroll
+                for (int v = 0; v < 8; v++)   // (MS[v] is token mt 16 + 2 v + lane / 16)
+                    if (MMF[mt * 16 + 2 * v + (lane >> 4)] == b + 1) acc[mt][v] = __builtin_fmaf(dm63, MS[v], acc[mt][v]);
+            }
         }
     }
     if (!rok) return;
