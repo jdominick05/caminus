@@ -21,10 +21,11 @@ import torch
 from .. import ggufio
 from ..device import capacity, hip
 from . import k3
-from .own_layout import q6k_planes
+from .own_layout import q6k_planes, iq_records, IQ_REC
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
+MODULE_IQ = 'k3_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
 ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the engine takes as many as its card's grid
                                 # holds at once: splits_for), fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
@@ -99,6 +100,8 @@ class Q3MoEOne:
         self.attn_split = attn_split   # ... split over positions (OP_OWN_ATTS: speed at depth); False: one task per query head
         self.splits, self.lmin = splits, lmin   # (splits None: splits_for the card, set with the tape's buffers)
         self.emb = F.T['token_embd.weight']
+        # the codebook formats among the matrices (they pick the module: MODULE_IQ)
+        self.iq = {t.type for t in F.tensors if t.type in k3.OWN_IQ_FMT and t.name != 'token_embd.weight'}
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoEOne: token_embd is {self.emb.type} (Q4_K only)')
@@ -152,17 +155,23 @@ class Q3MoEOne:
     def module(self):
         """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
         if self._module is not None: return self._module
-        return MODULE_LEAN if self.fused and self.gu and self.attn_one and self.attn_split else MODULE
+        lean = self.fused and self.gu and self.attn_one and self.attn_split
+        if self.iq:
+            if not lean: raise ValueError(f'Q3MoEOne: {sorted(self.iq)} tensors run on {MODULE_IQ} only (the default tape form)')
+            return MODULE_IQ
+        return MODULE_LEAN if lean else MODULE
 
     @module.setter
     def module(self, m): self._module = m
 
     def _w(self, name):
-        """(format, rows per matrix, K, device bytes in our layout) of a Q4_K / Q6_K matrix (experts: the whole tensor)"""
+        """(format, rows per matrix, K, device bytes in our layout) of a matrix (experts: the whole tensor): Q4_K and
+        IQ4_XS as the GGUF blocks, Q6_K as planes, IQ3_XXS / IQ3_S / IQ2_XXS as records (engine.own_layout)"""
         t = self.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         b = np.asarray(t.data())
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
-        elif t.type != 'Q4_K': raise ValueError(f'Q3MoEOne: {name} is {t.type} (Q4_K / Q6_K only)')
+        elif t.type in IQ_REC: b = iq_records(b, R, K, t.type)
+        elif t.type not in ('Q4_K', 'IQ4_XS'): raise ValueError(f'Q3MoEOne: {name} is {t.type} ({sorted(k3.OWN_BLOCK)} only)')
         return t.type, int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda')
 
     def _f32(self, name, shape=None):
