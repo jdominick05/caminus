@@ -288,7 +288,14 @@ class TestSurface(unittest.TestCase):
         line = 'Maybe the import path is wrong, check it again.'
         self.chat([SYS, {'role': 'user', 'content': 'Agent: why does it fail?'}],
                   {'role': 'assistant', 'reasoning_content': '\n'.join([line] * 4), 'content': 'Fixed the path.'})
-        a = status(self.srv)['agent']
+        # (the server reports a request's tool and loop results in the handler's finally, after the reply is written: a
+        # status read right after the reply can come first, so wait, bounded, for the last request's report)
+        t0 = time.time()
+        while True:
+            a = status(self.srv)['agent']
+            if a['loop']['requests_flagged'] - a0['loop']['requests_flagged'] >= 1 or time.time() - t0 > 5:
+                break
+            time.sleep(0.02)
         d = {k: a['harness'].get(k, 0) - a0['harness'].get(k, 0) for k in set(a['harness']) | set(a0['harness'])}
         self.assertEqual(d.get('qwen-code'), 1)
         self.assertEqual(d.get('claude-code'), 1)
