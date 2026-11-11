@@ -221,3 +221,139 @@ extern "C" __global__ void __launch_bounds__(256) q35p_add_rms16(float * __restr
         h16[(size_t)t * N + i] = (_Float16)v;
     }
 }
+
+// ---- the attention and GDN glue of the dense qwen35 line on own code (Swift's decode module: kernels/k3_q35_swift.hip) ---
+// Each kernel below runs its decode op's statements (kernels/k3_q35_ops.h, k3_own_ops.h) over a chunk's rows with one
+// workgroup of 256 threads per decode task, so it is bitwise that op on the same inputs (tests/prefill/test_q35_prefill_ops.py
+// against the K3 ops on k3_q35_swift, one token per pass). The ops the prefill takes from other objects as they are:
+// pf_qk_nr (prefill_attn_q35d: OP_QK_NR's statements), pf_gdn_gates / pf_gdn_l2 / pf_gdn_step (prefill_gdn_q35),
+// pf_gdn_conv / pf_conv_state / pf_f32_mv_k5120 (prefill_glue_q35d).
+
+__device__ __forceinline__ float q35p_silu(float x) { return x / (1.0f + expf(-x)); }   // (k3_q35_ops.h q35_silu)
+
+// q35p_gdn_norm16: OP_GDN_NORM16 per (row, value head): y16 = fp16(((o * rsqrt(mean(o^2) + eps)) * w) * silu(z)).
+// o / z: [T * H, K] fp32, w [K], y16 [T * H, K]. Grid T * H.
+extern "C" __global__ void __launch_bounds__(256) q35p_gdn_norm16(const float * __restrict__ o, const float * __restrict__ w,
+                                                                  const float * __restrict__ z, _Float16 * __restrict__ y16,
+                                                                  int K, float eps) {
+#pragma clang fp contract(off)
+    __shared__ float part[8];
+    const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
+    const size_t t = blockIdx.x;
+    const float * orow = o + t * K, * zr = z + t * K;
+    _Float16 * y = y16 + t * K;
+    float ss = 0.0f;
+    for (int i = tid; i < K; i += blockDim.x) ss += orow[i] * orow[i];
+    ss = wsum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / K + eps);
+    for (int i = tid; i < K; i += blockDim.x) {
+        const float nrm = (scale * orow[i]) * w[i];
+        const float v = nrm * q35p_silu(zr[i]);
+        y[i] = (_Float16)v;
+    }
+}
+
+// q35p_kv_append16: OP_KV_APPEND's f16 rows: cache[pos0 + t] = (k[t], v[t]) as fp16 ([K | V] per position, 2 M halves).
+// k / v: [T, M] fp32 at row strides ldk / ldv. A row at or past `rows` is not written and sets *err |= 1 (the host refuses
+// such chunks first: k3.check_span). Grid T.
+extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float * __restrict__ k, int ldk, const float * __restrict__ v,
+                                                                   int ldv, _Float16 * __restrict__ cache, int M, int pos0, int rows,
+                                                                   int * __restrict__ err) {
+    const int tt = blockIdx.x, pos = pos0 + tt;
+    if (pos < 0 || pos >= rows) { if (threadIdx.x == 0) atomicOr(err, 1); return; }
+    _Float16 * c = cache + (size_t)pos * 2 * M;
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        c[i] = (_Float16)k[(size_t)tt * ldk + i];
+        c[M + i] = (_Float16)v[(size_t)tt * ldv + i];
+    }
+}
+
+// q35p_attn16: OP_ATTN_DEC over a chunk's rows (own_op_attn_dec's batched form on the f16 cache, k3_own_ops.h): one
+// workgroup per (row, query head), the decode's task index h = row * heads + head; row r sees cache positions 0 .. pos0 + r.
+// The same statements in the same order: 512-position chunks, a wave scores positions t and t + 8 (4 K loads of each in
+// flight), wave_max / wave_sum, the 8 wave partials in order, online softmax with expf, a thread sums V over 8 positions
+// per round for its dims tid and tid + 256. q: [rows of this launch, heads, D] fp32 (the q norm + RoPE output), out the
+// same shape. D a multiple of 128 and <= 512, heads a multiple of nkv (host-checked). Rows r0 .. r0 + gridDim.x / heads - 1
+// of the chunk: the host splits a chunk into launches by token-positions (every launch well under the 200 ms bound).
+#define Q35P_AT_CH 512
+extern "C" __global__ void __launch_bounds__(256) q35p_attn16(const float * __restrict__ qin, const _Float16 * __restrict__ cache,
+                                                              int pos0, int r0, int heads, int nkv, int D, float scale,
+                                                              float * __restrict__ out) {
+    constexpr int CH = Q35P_AT_CH;
+    __shared__ float sc[CH], red[8];
+    const int h = blockIdx.x, tt = h / heads;                      // (task = row * heads + head, rows from r0)
+    const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32, g = (h - tt * heads) / (heads / nkv);
+    const int npos = pos0 + r0 + tt + 1, M = nkv * D;
+    const size_t pb = (size_t)2 * M;                               // (halves per position)
+    const float * q = qin + (size_t)h * D;
+    float run_m = -INFINITY, run_s = 0.0f, acc[2] = {0.0f, 0.0f};
+#pragma unroll 1
+    for (int c0 = 0; c0 < npos; c0 += CH) {
+        const int n = min(CH, npos - c0);
+        for (int t = wave; t < n; t += 16) {                       // positions t and t + 8 (the second clamped, unused past n)
+            const int t1 = min(t + 8, n - 1);
+            float a0 = 0.0f, a1 = 0.0f;
+            const _Float16 * kp0 = cache + (size_t)(c0 + t) * pb + g * D;
+            const _Float16 * kp1 = cache + (size_t)(c0 + t1) * pb + g * D;
+            for (int d = lane; d < D; d += 128) {
+                float qv[4]; _Float16 k0[4], k1[4];
+#pragma unroll
+                for (int j = 0; j < 4; j++) { qv[j] = q[d + 32 * j]; k0[j] = kp0[d + 32 * j]; k1[j] = kp1[d + 32 * j]; }
+                __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                for (int j = 0; j < 4; j++) { a0 += qv[j] * (float)k0[j]; a1 += qv[j] * (float)k1[j]; }
+                __builtin_amdgcn_sched_barrier(0);
+            }
+            a0 = wsum(a0); a1 = wsum(a1);
+            if (lane == 0) { sc[t] = a0 * scale; if (t + 8 < n) sc[t + 8] = a1 * scale; }
+        }
+        __syncthreads();
+        float m = -INFINITY;
+        for (int t = tid; t < n; t += blockDim.x) m = fmaxf(m, sc[t]);
+        m = wmax(m); if (lane == 0) red[wave] = m; __syncthreads();
+        m = red[0]; for (int w = 1; w < 8; w++) m = fmaxf(m, red[w]); __syncthreads();
+        const float mn = fmaxf(run_m, m), corr = expf(run_m - mn);
+        float sum = 0.0f;
+        for (int t = tid; t < n; t += blockDim.x) { const float e = expf(sc[t] - mn); sc[t] = e; sum += e; }
+        sum = wsum(sum); if (lane == 0) red[wave] = sum; __syncthreads();
+        sum = 0.0f; for (int w = 0; w < 8; w++) sum += red[w];
+        run_s = c0 == 0 ? sum : run_s * corr + sum;
+        for (int j = 0; j < 2; j++) {
+            const int d = tid + j * (int)blockDim.x;
+            if (d >= D) break;
+            float part = 0.0f;
+            const _Float16 * vb = cache + (size_t)c0 * pb + M + g * D + d;   // (V of position c0)
+            for (int t = 0; t < n; t += 8) {
+                _Float16 vv[8];
+#pragma unroll
+                for (int i = 0; i < 8; i++) vv[i] = vb[(size_t)min(t + i, n - 1) * pb];
+                __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                for (int i = 0; i < 8; i++) { if (t + i < n) part += sc[t + i] * (float)vv[i]; }
+                __builtin_amdgcn_sched_barrier(0);
+            }
+            acc[j] = c0 == 0 ? part : acc[j] * corr + part;
+        }
+        run_m = mn;
+        __syncthreads();
+    }
+    const float inv = 1.0f / run_s;
+    for (int j = 0; j < 2; j++) {
+        const int d = tid + j * (int)blockDim.x;
+        if (d < D) out[(size_t)h * D + d] = acc[j] * inv;
+    }
+}
+
+// q35p_gate_mul16: OP_GATE_MUL16 over values i < N: y16[i] = fp16(a[i] * sigmoid(gate[h * stride + off + d])), h = i / D,
+// d = i % D (the q GEMM's [q | gate] head pairs: stride 2 D, offset D; h counts heads across the chunk's rows).
+extern "C" __global__ void __launch_bounds__(256) q35p_gate_mul16(const float * __restrict__ a, const float * __restrict__ gt,
+                                                                  _Float16 * __restrict__ y, long long N, int D, int stride, int off) {
+#pragma clang fp contract(off)
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < N; i += (long long)gridDim.x * blockDim.x) {
+        const long long h = i / D; const int d = (int)(i - h * D);
+        const float sgm = 1.0f / (1.0f + expf(-gt[(size_t)h * stride + off + d]));
+        const float v = a[i] * sgm;
+        y[i] = (_Float16)v;
+    }
+}
