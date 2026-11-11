@@ -93,6 +93,22 @@ def available():
     }
 
 
+def default_jobs(per_gib=2):
+    """suites at once by default: the CPU count, at most 8, and at most one per per_gib GiB of the host's MemAvailable (a
+    suite takes up to ~1.5 GiB; with a served model holding host memory, 8 at once took MemAvailable under the GPU
+    guard's 1500 MiB floor, and the guard self-test's real guard killed its run)"""
+    avail = None
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    avail = int(line.split()[1]) / (1 << 20)
+    except OSError:
+        pass
+    n = min(8, os.cpu_count() or 1)
+    return n if avail is None else max(1, min(n, int(avail // per_gib)))
+
+
 def failure_lines(lines, tail=60, around=30, most=12):
     """what a failed suite's log shows: every failure report (a line starting FAIL or ERROR, unittest's FAIL: / ERROR:
     blocks, a Traceback) with the lines after it, at most `most` of them, then the last `tail` lines; '    ...' where
@@ -113,7 +129,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--scratch', required=False)
     ap.add_argument('--only', default='', help='comma-separated suite names')
-    ap.add_argument('--jobs', type=int, default=min(8, os.cpu_count() or 1), help='suites run at once (1 = one after another)')
+    ap.add_argument('--jobs', type=int, default=default_jobs(), help='suites run at once (1 = one after another; default: the CPU '
+                    'count, at most 8, and at most one per 2 GiB of MemAvailable)')
     ap.add_argument('--list', action='store_true', help='print the suites and what each needs, then exit')
     a = ap.parse_args(argv)
     have = available()
