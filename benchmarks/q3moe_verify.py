@@ -7,7 +7,9 @@ before it was) it also prints the ms per accepted token for each T: a pass of T 
 yields one token of its own.
 Every pass is first checked bit for bit against the decode steps. Prints one line per depth, then RESULT PASS | FAIL.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_verify.py GGUF [--depths 512,4096] [--T 1,2,3,4] [--trace 4]
-      [--accept 0.693,0.457,0.253]
+      [--accept 0.693,0.457,0.253] [--ver-wgp 4,6,8]
+--ver-wgp: the verify tapes at each of these workgroups per WGP (interleaved in one process, every one checked bit for
+bit), to choose the verify engine's grid on a card; without it, the verify engine's own default.
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, glob, os, sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
@@ -26,6 +28,7 @@ ap.add_argument('gguf'); ap.add_argument('--depths', default='512,4096')
 ap.add_argument('--T', default='1,2,3,4'); ap.add_argument('--tokens', type=int, default=48); ap.add_argument('--rounds', type=int, default=6)
 ap.add_argument('--trace', type=int, default=0, help='T of the traced pass (0: none)')
 ap.add_argument('--accept', default='', help='fraction of passes in which draft 1, 2, 3 is accepted, e.g. 0.693,0.457,0.253')
+ap.add_argument('--ver-wgp', default='', help='workgroups per WGP of the verify tapes, e.g. 4,6,8 (default: the verify engine\'s own)')
 A = ap.parse_args()
 depths = [int(x) for x in A.depths.split(',')]; Ts = [int(x) for x in A.T.split(',')]; G = A.tokens
 acc = [float(x) for x in A.accept.split(',')] if A.accept else []
@@ -39,15 +42,17 @@ if max(depths) + G > min(n_ctx, len(ids_all)): raise SystemExit(f'--depths: the 
 print(torch.cuda.get_device_name(0), flush=True)
 # beside the engine: a verify tape per T (and the traced one), the prefill (which projects its own buffers), and this
 # script's reference logits and trace buffer
-tapes = sum(Q3MoEVerify.need_mib(T) for T in Ts) + (Q3MoEVerify.need_mib(A.trace) if A.trace else 0)
+WG = [int(x) for x in A.ver_wgp.split(',')] if A.ver_wgp else [None]
+tapes = len(WG) * sum(Q3MoEVerify.need_mib(T) for T in Ts) + (Q3MoEVerify.need_mib(A.trace) if A.trace else 0)
 eng = Q3MoEOne(A.gguf, max_ctx=min(n_ctx, max(depths) + G + 64), vram_extra_mib=tapes)
-vers = {T: Q3MoEVerify(eng, T) for T in Ts}
+vers = {(T, w): Q3MoEVerify(eng, T, per_wgp=w) for T in Ts for w in WG}   # key: (T, workgroups per WGP or None)
+lab = lambda k: f'T {k[0]}' + (f' @{k[1]}' if k[1] else '')
 vt = Q3MoEVerify(eng, A.trace, module='k3_q3m_ver_trace') if A.trace else None
 own_mib = 8 + (vt.E.grid * len(vt.E.segs) * 8 * 8 / 2 ** 20 if vt else 0)
 capacity.check([eng.dev], [own_mib], f'q3moe_verify: its trace buffer ({own_mib:.0f} MiB)')
 pf = Q3MPrefill(eng, chunk=512)
 print(f'engine {eng.vram_mib:.0f} MiB at max_ctx {eng.max_ctx}; {len(ids_all)} tokens of text; tapes: ' +
-      ', '.join(f'T {T}: {len(v.E.segs)} segments' for T, v in vers.items()), flush=True)
+      ', '.join(f'{lab(k)}: {len(v.E.segs)} segments, grid {v.E.grid}' for k, v in vers.items()) + f'; decode grid {eng.E.grid}', flush=True)
 ok = True
 bits = lambda t: t.detach().cpu().numpy().view(np.uint32).copy()
 ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
@@ -67,26 +72,26 @@ for N in depths:
     eng.reset(); pf.run(ids_all[:N], 0, 0, N); eng.pos_host = N
     ref = [bits(eng.step(t)) for t in toks]
     dis = {}
-    for T, ver in vers.items():
-        bad = 0; d = []
+    for k, ver in vers.items():
+        T = k[0]; bad = 0; d = []
         for b in range(G // T):
             ver.run(toks[b * T:(b + 1) * T], N + b * T); d.append(ver.distinct())
             bad += sum(int((bits(ver.logits(t)) != ref[b * T + t]).sum()) for t in range(T))
-        dis[T] = float(np.mean(d)); ok &= bad == 0
-        if bad: print(f'FAIL depth {N}, T {T}: {bad} logit words differ from the decode steps\'', flush=True)
-    dec, res = [], {T: [] for T in Ts}
+        dis[k] = float(np.mean(d)); ok &= bad == 0
+        if bad: print(f'FAIL depth {N}, {lab(k)}: {bad} logit words differ from the decode steps\'', flush=True)
+    dec, res = [], {k: [] for k in vers}
     for rd in range(A.rounds):
         eng.pos_host = N; ev[0].record()
         for t in toks: eng.step(t)
         ev[1].record(); torch.cuda.synchronize(); dec.append(ev[0].elapsed_time(ev[1]) / G)
-        for T, ver in vers.items():
-            nb = G // T; ev[0].record()
+        for k, ver in vers.items():
+            T = k[0]; nb = G // T; ev[0].record()
             for b in range(nb): ver.run(toks[b * T:(b + 1) * T], N + b * T)
-            ev[1].record(); torch.cuda.synchronize(); res[T].append(ev[0].elapsed_time(ev[1]) / nb)
-    d = float(np.median(dec[1:])); med = {T: float(np.median(v[1:])) for T, v in res.items()}
+            ev[1].record(); torch.cuda.synchronize(); res[k].append(ev[0].elapsed_time(ev[1]) / nb)
+    d = float(np.median(dec[1:])); med = {k: float(np.median(v[1:])) for k, v in res.items()}
     print(f'depth {N:6d}: decode {d:.3f} ms per token | ' + ' | '.join(
-        f'T {T}: {med[T]:.3f} ms per pass, {dis[T]:.1f} of {8 * T} experts distinct' +
-        (f', {med[T] / exp_tok(T):.3f} ms per accepted token ({exp_tok(T):.3f} per pass)' if acc and T > 1 else '') for T in Ts), flush=True)
+        f'{lab(k)}: {med[k]:.3f} ms per pass, {dis[k]:.1f} of {8 * k[0]} experts distinct' +
+        (f', {med[k] / exp_tok(k[0]):.3f} ms per accepted token ({exp_tok(k[0]):.3f} per pass)' if acc and k[0] > 1 else '') for k in vers), flush=True)
     if vt:
         E = vt.E; S = len(E.segs); Gd = E.grid; T = vt.T
         names = [seg_name(sg) for sg in E.segs]

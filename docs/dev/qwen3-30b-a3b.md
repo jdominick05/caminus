@@ -221,35 +221,54 @@ over a prefilled context, `benchmarks/q3moe_verify.py --depths 512,4096,16384,40
 
 | Context depth | Decode, per token | Pass of 2 | Pass of 3 | Pass of 4 | Best per accepted token | Against decode |
 |---|---|---|---|---|---|---|
-| 512 | 4.15 ms | 6.08 ms | 7.78 ms | 9.52 ms | 3.59 ms (2) | 1.16× |
-| 4,096 | 4.70 ms | 7.41 ms | 9.39 ms | 11.53 ms | 4.37 ms (3) | 1.08× |
-| 16,384 | 6.25 ms | 10.02 ms | 13.42 ms | 16.65 ms | 5.92 ms (2) | 1.06× |
-| 40,900 | 9.06 ms | 15.00 ms | 20.68 ms | 26.23 ms | 8.86 ms (2) | 1.02× |
+| 512 | 4.15 ms | 6.10 ms | 7.59 ms | 9.04 ms | 3.53 ms (3) | 1.18× |
+| 4,096 | 4.70 ms | 7.41 ms | 9.32 ms | 11.08 ms | 4.33 ms (3) | 1.09× |
+| 16,384 | 6.24 ms | 10.00 ms | 13.08 ms | 15.67 ms | 5.91 ms (2) | 1.06× |
+| 40,900 | 9.05 ms | 14.98 ms | 19.86 ms | 25.30 ms | 8.85 ms (2) | 1.02× |
 
 - **Tokens per pass.** A pass of T tokens checks T − 1 drafts and always yields one token of its own. With the
   [RedHatAI DFlash speculator](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-speculator.dflash) for this model (its
   reference PyTorch implementation, in a draft, verify, accept loop on this model's own greedy text) the first, second
   and third draft were accepted in 69 %, 46 % and 25 % of passes: 1.69, 2.15 and 2.40 tokens per pass of 2, 3 and 4.
-- **These figures are before the drafter runs.** To break even, a draft may cost 1.1 ms at depth 512, 0.7 ms at
+- **These figures are before the drafter runs.** To break even, a draft may cost 1.3 ms at depth 512, 0.8 ms at
   4,096, 0.6 ms at 16,384 and 0.3 ms at 40,900. The reference implementation takes 8 to 12 ms per draft on this
   card. An estimate for the same drafter on kernels of its own, not a measurement: a draft reads 705 MiB of bf16
   weights (its 5 layers, its output head and the projection of the big model's features), about 0.9 ms at this
   card's bandwidth before any overhead. Unquantized that leaves nothing at 4,096 positions and beyond; quantized to
   4 bits it would read in about 0.25 ms, with its acceptance to be measured again.
-- **Decoding got faster after this was first measured, and the ratios fell with it** (they were 1.21×, 1.14×, 1.07×
-  and 1.04×). The verify engine runs on the decode engine's grid, and the smaller grid suits it less: at depth 512
-  the passes of 2, 3 and 4 got slower (5.99, 7.53, 9.19 ms before), as did the passes of 3 and 4 at 40,900; at 4,096
-  and 16,384 they gained, but less than a decode step. With the earlier grid's pass of 3 a draft may cost 1.4 ms at
-  depth 512 instead of 1.1; a grid of the verify engine's own was not tried.
+- **A pass of 3 or 4 tokens runs on a larger grid than a decode step.** The decode engine takes the grid nearest 200
+  workgroups (4 per WGP on this card, 5 on the RX 7900 XT); a pass of 3 or 4 takes 7 per WGP, a pass of 2 the decode
+  grid (`WIDE_T`, `WIDE_WGP` in the verify engine). Every pass at 4 to 8 workgroups per WGP, interleaved in one
+  process, medians of three processes, the same bits at every grid (`benchmarks/q3moe_verify.py --ver-wgp 4,5,6,7,8`):
+
+  | Pass, depth (RX 7900 XTX) | 4 per WGP | 5 | 6 | 7 | 8 |
+  |---|---|---|---|---|---|
+  | 2 tokens, 512 | 6.10 ms | 6.01 ms | 6.06 ms | 6.12 ms | 6.54 ms |
+  | 2 tokens, 4,096 | 7.42 ms | 7.28 ms | 7.01 ms | 7.22 ms | 7.63 ms |
+  | 2 tokens, 16,384 | 10.02 ms | | 10.29 ms | 9.90 ms | |
+  | 2 tokens, 40,900 | 15.00 ms | | 15.88 ms | 15.38 ms | |
+  | 3 tokens, 512 | 7.82 ms | 7.64 ms | 7.57 ms | 7.60 ms | 8.12 ms |
+  | 3 tokens, 4,096 | 9.45 ms | 9.35 ms | 9.37 ms | 9.32 ms | 9.81 ms |
+  | 3 tokens, 16,384 | 13.41 ms | | 13.00 ms | 13.06 ms | |
+  | 3 tokens, 40,900 | 20.76 ms | | 19.96 ms | 19.90 ms | |
+  | 4 tokens, 512 | 9.54 ms | 9.34 ms | 9.12 ms | 9.05 ms | 9.69 ms |
+  | 4 tokens, 4,096 | 11.58 ms | 11.32 ms | 11.15 ms | 11.09 ms | 11.69 ms |
+
+  On the RX 7900 XT (5 per WGP for decode) 7 per WGP takes a pass of 3 from 9.40 to 9.23 ms at depth 512 and leaves it
+  at 11.17 ms at 4,096, and a pass of 4 from 11.58 to 11.17 ms and from 13.94 to 13.53 ms. A pass of 2 has no one best
+  grid: 6 per WGP gains 0.4 ms at 4,096 and loses 0.3 and 0.9 ms at 16,384 and 40,900, so it stays on the decode grid.
+  The larger grid moved the best pass at depth 512 and 4,096 from 1.16× and 1.08× to 1.18× and 1.09×, and the draft
+  that breaks even from 1.1 and 0.7 ms to 1.3 and 0.8 ms; at 16,384 and 40,900, where a pass of 2 is the best, nothing
+  changed.
 
 Why a T-token pass is not cheap here (the pass of 4, from its trace):
 
 | Part of a pass of 4 (its critical path) | At depth 512 | At depth 40,900 |
 |---|---|---|
-| Experts (gate, up, down) | 5.3 ms | 5.3 ms |
-| Dense matvecs (k, v, output, head) | 2.2 ms | 2.3 ms |
-| Attention | 1.0 ms | 17.9 ms |
-| Norms, router, joins, cache row stores | 1.4 ms | 1.4 ms |
+| Experts (gate, up, down) | 4.6 ms | 4.7 ms |
+| Dense matvecs (k, v, output, head) | 2.7 ms | 2.6 ms |
+| Attention | 1.0 ms | 16.9 ms |
+| Norms, router, joins, cache row stores | 1.5 ms | 1.5 ms |
 
 1. **Neighbouring tokens use different experts.** Four consecutive tokens route to 19 to 20 distinct experts per layer
    of their 32 slots (two tokens: 12.6 of 16). The verify module computes each distinct expert once, but the weights a
@@ -260,7 +279,7 @@ Why a T-token pass is not cheap here (the pass of 4, from its trace):
    sums are T times as many: `attn_output` takes 10.8 µs per layer for one token and 32.9 µs for four (RX 7900 XT), and
    18.0 µs in a build that kept every load and skipped the extra sums. With one token repeated, so that four tokens
    share all 8 experts, gate and up still take 53.6 µs against 24.7 µs for one token.
-3. **At depth every token reads the whole context.** Four attentions over 40,900 positions are 18 of the traced pass's 27 ms.
+3. **At depth every token reads the whole context.** Four attentions over 40,900 positions are 17 of the traced pass's 26 ms.
 
 What would change the picture is arithmetic that takes T columns for the price of one: the WMMA matrix instructions the
 prefill uses. An op built on them needs about 240 vector registers, against the 96 the persistent kernel is held to so
