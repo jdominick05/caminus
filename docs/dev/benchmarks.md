@@ -169,7 +169,17 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
   --block-imports gguf,tokenizers`; ThinkingCap with `--max-ctx 32768 --needle 28000 --restart`): ThinkingCap reads a
   6,760-token prompt at 759 tok/s and a 27,712-token one at 403 tok/s (the needle found), decode 15 tok/s at that depth;
   Swift reads 6,760 tokens at 790 tok/s.
-- llama.cpp on the same two cards: not measured yet.
+- llama.cpp on the same two cards (`llama-bench -dev ROCm0/ROCm1 -ngl 99 -fa 1 -p 2048 -n 128 -r 3`):
+
+  | | Swift 1.5 decode / prefill | ThinkingCap decode / prefill |
+  |---|---|---|
+  | `-sm tensor` (each layer split across the cards, as here) | 42.1 / 798 tok/s | 44.6 / 924 tok/s |
+  | `-sm tensor -ts 53/47` | 43.6 / 910 tok/s | 46.3 / 969 tok/s |
+  | `-sm layer -ts 53/47` (half the layers on each card) | 33.7 / 1,366 tok/s | 36.5 / 1,508 tok/s |
+
+  Tensor mode is the like-for-like comparison: decode here is 1.37x / 1.41x its best, prefill 1.08x / 0.97x. Layer mode
+  reads prompts faster (no exchanges between the cards) and writes slower. `-sm row` does not run on this fork ("device
+  ROCm0 does not support split buffers").
 
 ### Qwen3-30B-A3B Q4_K_M
 
