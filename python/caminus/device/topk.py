@@ -14,7 +14,9 @@ import torch
 from . import capacity, hip
 
 THREADS = 256
-KCAP = 1024          # the kernel's largest k (its LDS sort buffer: TK_KCAP)
+KCAP = 512           # the kernel's largest k (its LDS sort buffer: TK_KCAP)
+CHUNK = 2048         # columns per workgroup (TK_CHUNK)
+MAXCHUNKS = 256      # chunks per row (TK_MAXCHUNKS): rows of at most 524,288 columns
 
 _mods = {}           # device index -> the own_topk module loaded on it
 
@@ -46,6 +48,8 @@ class Candidates:
         self._h_pid = torch.zeros(self.width, dtype=torch.int32, pin_memory=True)
         self._ev_pid = None  # (the last copy out of _h_pid: waited for before _h_pid is written again)
         self._last_pid = None  # (the ids on the device now: the same list again is not uploaded again)
+        self._scr = None       # (the chunks' lists and the per-row counts: sized for the widest row seen, on first use)
+        self._check = check
         self.launches = 0    # (the session's own-path counter reads this)
 
     def run(self, L, k, pid=None):
@@ -62,6 +66,9 @@ class Candidates:
                              f'strides {L.stride()})')
         if not 0 < k <= self.width:
             raise ValueError(f'topk.run: k {k} outside 1 .. {self.width} (the candidate buffers)')
+        chunks = (n + CHUNK - 1) // CHUNK
+        if chunks > MAXCHUNKS:
+            raise ValueError(f'topk.run: {n} columns past the kernel\'s {MAXCHUNKS * CHUNK}')
         npid = 0 if pid is None else len(pid)
         if npid > self.width:
             raise ValueError(f'topk.run: {npid} penalty ids past the candidate buffers ({self.width} wide)')
@@ -70,6 +77,15 @@ class Candidates:
             if int(p.min()) < 0 or int(p.max()) >= n:
                 raise ValueError(f'topk.run: a penalty id outside the shard\'s {n} columns')
         with torch.cuda.device(self.dev):
+            if self._scr is None or self._scr[0] < chunks:
+                nbytes = self.rows * chunks * self.width * 8 + self.rows * chunks * 4 + self.rows * 4
+                if self._check:
+                    capacity.check([self.dev.index], [nbytes / capacity.MIB], f'device sampler chunk lists ({self.rows} x {chunks} x {self.width})')
+                self._scr = (chunks, torch.empty(self.rows * chunks * self.width, dtype=torch.int32, device=self.dev),
+                             torch.empty(self.rows * chunks * self.width, dtype=torch.int32, device=self.dev),
+                             torch.zeros(self.rows * chunks, dtype=torch.int32, device=self.dev),
+                             torch.zeros(self.rows, dtype=torch.int32, device=self.dev))   # (done: zero between launches)
+            _, lk, li, ln, done = self._scr
             if npid and not (self._last_pid is not None and len(self._last_pid) == npid and bool(torch.equal(self._last_pid, p))):
                 if self._ev_pid is not None:
                     self._ev_pid.synchronize()   # (a queued copy may still read _h_pid; it ran long ago in the session's order)
@@ -77,8 +93,8 @@ class Candidates:
                 self.pid[:npid].copy_(self._h_pid[:npid], non_blocking=True)
                 self._ev_pid = torch.cuda.Event(); self._ev_pid.record()
                 self._last_pid = p.clone()
-            _kernel(self.dev.index)((R,), (THREADS,), L, ctypes.c_longlong(L.stride(0)), ctypes.c_int(n),
+            _kernel(self.dev.index)((chunks, R), (THREADS,), L, ctypes.c_longlong(L.stride(0)), ctypes.c_int(n),
                                     ctypes.c_int(int(k)), self.val, self.idx, ctypes.c_int(self.width), self.pid,
-                                    ctypes.c_int(npid), self.pen, ctypes.c_int(self.width))
+                                    ctypes.c_int(npid), self.pen, ctypes.c_int(self.width), lk, li, ln, done)
         self.launches += 1
         return min(int(k), n)

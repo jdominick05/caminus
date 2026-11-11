@@ -6,7 +6,8 @@ exact host oracle and against torch.topk / index_select, then its time beside to
 The oracle is the contract itself, in numpy: per row the k largest values by the kernel's key (NaN first, -0.0 just below
 +0.0), value descending and id ascending, ties at the cut keeping the lowest ids; values compared as bits. Rows: random,
 heavy ties, ties exactly at the cut, -inf rows with a few finite values, NaNs, signed zeros, a row narrower than k; logits
-shards as column slices of a wider tensor (the engines' layout); 1 to 9 rows. Canaries around every output must hold,
+shards as column slices of a wider tensor (the engines' layout); 1 to 9 rows; rows of one chunk (2048 columns) up to a
+whole vocabulary (151,936 columns: 75 chunks), with ties at the row's cut spread over several chunks. Canaries around every output must hold,
 reruns must be bitwise equal, and inputs the kernel cannot take must be refused before a launch.
 """
 import argparse
@@ -51,7 +52,8 @@ dev = torch.device('cuda', 0)
 name = torch.cuda.get_device_name(dev)
 print(f'NOTE device: {name} (HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")})', flush=True)
 VH, ROWS, WIDTH = 75968, 9, 176                      # (a Qwen vocabulary's half; the session's rows and kmax at T = 9)
-capacity.check([dev.index], [(ROWS * (2 * VH + 3) * 4 * 3 + ROWS * WIDTH * 16 * 3) / capacity.MIB], 'test_topk inputs and buffers')
+capacity.check([dev.index], [(ROWS * (4 * VH + 3) * 4 * 3 + ROWS * WIDTH * 16 * 3 + ROWS * 75 * WIDTH * 8) / capacity.MIB],
+               'test_topk inputs and buffers')
 rng = np.random.default_rng(7)
 
 
@@ -94,7 +96,7 @@ cases = [('random', 1, VH, 136, True), ('random', 9, VH, 136, True), ('random', 
          ('random', 3, VH, 176, True), ('ties', 9, VH, 136, True), ('cut', 4, VH, 136, False),
          ('cut', 9, VH, 140, True), ('neginf', 3, VH, 136, False), ('nan', 4, VH, 136, True),
          ('zeros', 3, VH, 64, False), ('random', 2, 8, 136, False), ('random', 3, 1000, 176, True),
-         ('random', 1, 75967, 100, True)]
+         ('random', 1, 75967, 100, True), ('random', 2, 151936, 136, False), ('cut', 2, 151936, 136, False)]
 for pattern, R, n, k, wide in cases:
     cand = topk.Candidates(dev, ROWS, WIDTH)
     for t, fill in ((cand.val, -7.0), (cand.idx, -7), (cand.pen, -7.0)):
