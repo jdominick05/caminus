@@ -1,0 +1,362 @@
+// The batched prefill of the dense qwen35 line (Qwen3.8-27B finetunes, Swift 1.5 Q4_K_M first) on Caminus's own kernels:
+// no ggml-cuda code, written from the GGUF block layouts. This object holds q3m_prefill.hip's kernels (its Q4_K / Q6_K
+// GEMMs and glue: included as they are, so that file's own object does not change) and the two formats Swift adds:
+//
+// ---- q35p_mm_q8_0 / q35p_mm_q5k: Y[ydst[i]][r] = X[xsrc[i]] . W[r] in fp32, q3p_mm_q4k's interface and tiling --------------
+// The decode engine's raw GGUF blocks are read in place. Activations fp16, products and sums fp32 through RDNA3's WMMA,
+// the weights EXACT in the B operand:
+//   Q8_0  w = d q (32 values a block, 34 B: d then 32 int8): B = q (|q| <= 128: exact in fp16) over 16 values, the
+//         block's two k-steps into P, then acc += d * P
+//   Q5_K  w = d sc q - dmin m (256 values a block, 176 B: d, dmin, the 12 scale bytes as Q4_K's, qh[32], qs[128]; q =
+//         the nibble | bit s of qh[l] << 4 for value l of sub-block s): B = sc * q (<= 63 x 31 = 1953: exact), then Q4_K's
+//         acc += d * P - dmin * MS with the same sub-block sums and the same rare overflow branch
+// so a product's only rounding is the fp32 accumulation, as in q3p_mm_q4k / q3p_mm_q6k.
+#include "q3m_prefill.hip"
+
+// ---- Q8_0 ------------------------------------------------------------------------------------------------------------
+// 16 int8 (2-byte aligned: a block starts at an even offset) -> fp16 q, exact: (q ^ 0x80) is q + 128 as an unsigned byte,
+// fp16(1024 + (q + 128)) - 1152 = q
+__device__ __forceinline__ h16_t q8_b(const uint8_t * p, bool ok) {
+    const uint16_t * h = (const uint16_t *)p;
+    const h2_t o2 = {(_Float16)(-1152.0f), (_Float16)(-1152.0f)};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t u = ok ? (((uint32_t)h[2 * w] | ((uint32_t)h[2 * w + 1] << 16)) ^ 0x80808080u) : 0x80808080u;
+        const uint32_t p01 = __builtin_amdgcn_perm(0u, u, 0x0c010c00u) | 0x64006400u;
+        const uint32_t p23 = __builtin_amdgcn_perm(0u, u, 0x0c030c02u) | 0x64006400u;
+        o[2 * w] = as_u(as_h2(p01) + o2); o[2 * w + 1] = as_u(as_h2(p23) + o2);
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+
+extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
+        const uint8_t * __restrict__ W, int R, int K, const _Float16 * __restrict__ X, int ldx, const int * __restrict__ xsrc,
+        float * __restrict__ Y, int ldy, const int * __restrict__ ydst, const MMItem * __restrict__ items, const int * __restrict__ nitems,
+        int ntok) {
+    MMItem it;
+    if (items) { if ((int)blockIdx.x >= *nitems) return; it = items[blockIdx.x]; }
+    else { it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off); }
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int r = blockIdx.y * MM_N + wave * 16 + (lane & 15);
+    const bool rok = r < R;
+    const int NB = K / 256;                       // (staging steps of 256 values: 8 Q8_0 blocks each)
+    const size_t RB = (size_t)(K / 32) * 34;
+    const uint8_t * wrow = W + ((size_t)it.e * R + (rok ? r : 0)) * RB;
+    f8_t acc[4];
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++) acc[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    for (int b = 0; b < NB; b++) {
+        __syncthreads();
+        mm_stage<false>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+        __syncthreads();
+#pragma unroll 1
+        for (int j = 0; j < 8; j++) {          // (rolled: unrolled, the 8 blocks' loads were hoisted: 256 VGPRs, 171 spilled)
+            const uint8_t * bp = wrow + (size_t)(b * 8 + j) * 34;
+            const float d = rok ? (float)__builtin_bit_cast(_Float16, *(const uint16_t *)bp) : 0.0f;
+            f8_t P[4];
+#pragma unroll
+            for (int mt = 0; mt < 4; mt++) P[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+            for (int hf = 0; hf < 2; hf++) {
+                const h16_t B = q8_b(bp + 2 + 16 * hf, rok);
+#pragma unroll
+                for (int mt = 0; mt < 4; mt++) P[mt] = wmma(mm_a(mt, j * 32 + hf * 16, lane), B, P[mt]);
+            }
+#pragma unroll
+            for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+                for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[mt][v], acc[mt][v]);
+            __builtin_amdgcn_sched_barrier(0);    // (one block at a time: q3p_mm_q6k's register lesson)
+        }
+    }
+    if (!rok) return;
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+        for (int v = 0; v < 8; v++) {
+            const int t = mt * 16 + 2 * v + (lane >> 4);
+            if (t < it.cnt) Y[(size_t)(ydst ? ydst[it.off + t] : it.off + t) * ldy + r] = acc[mt][v];
+        }
+}
+
+// ---- Q5_K ------------------------------------------------------------------------------------------------------------
+// 16 values: nibbles (4 dwords, shift sh) | bit s of the qh bytes (4 dwords) << 4 -> fp16 sc * q (exact)
+__device__ __forceinline__ h16_t q5k_b(const u32x4_t & qw, int sh, const u32x4_t & hw, int s, _Float16 sc) {
+    const h2_t s2 = {sc, sc}, o2 = {(_Float16)(-1024.0f) * sc, (_Float16)(-1024.0f) * sc};
+    const uint32_t w4[4] = {qw.x, qw.y, qw.z, qw.w}, h4[4] = {hw.x, hw.y, hw.z, hw.w};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t n = ((w4[w] >> sh) & 0x0f0f0f0fu) | (((h4[w] >> s) & 0x01010101u) << 4);
+        const uint32_t p01 = __builtin_amdgcn_perm(0u, n, 0x0c010c00u) | 0x64006400u;
+        const uint32_t p23 = __builtin_amdgcn_perm(0u, n, 0x0c030c02u) | 0x64006400u;
+        o[2 * w] = as_u(__builtin_elementwise_fma(as_h2(p01), s2, o2));
+        o[2 * w + 1] = as_u(__builtin_elementwise_fma(as_h2(p23), s2, o2));
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+
+extern "C" __global__ void __launch_bounds__(256) q35p_mm_q5k(
+        const uint8_t * __restrict__ W, int R, int K, const _Float16 * __restrict__ X, int ldx, const int * __restrict__ xsrc,
+        float * __restrict__ Y, int ldy, const int * __restrict__ ydst, const MMItem * __restrict__ items, const int * __restrict__ nitems,
+        int ntok) {
+    MMItem it;
+    if (items) { if ((int)blockIdx.x >= *nitems) return; it = items[blockIdx.x]; }
+    else { it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off); }
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int r = blockIdx.y * MM_N + wave * 16 + (lane & 15);
+    const bool rok = r < R;
+    const int NB = K / 256;
+    const size_t RB = (size_t)NB * 176;
+    const uint8_t * wrow = W + ((size_t)it.e * R + (rok ? r : 0)) * RB;
+    f8_t acc[4];
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++) acc[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    if (tid < MM_M) MMF[tid] = 0;
+    if (tid == 0) MMBIG = 0;
+    for (int b = 0; b < NB; b++) {
+        const u32x4_t * bp = (const u32x4_t *)(wrow + (size_t)b * 176);
+        const u32x4_t hd = bp[0];                 // d, dmin, the 12 scale bytes (Q4_K's header)
+        const u32x4_t qh0 = bp[1], qh1 = bp[2];   // qh[0 .. 15], qh[16 .. 31]
+        u32x4_t qs[8];
+#pragma unroll
+        for (int i = 0; i < 8; i++) qs[i] = bp[3 + i];
+        __syncthreads();
+        mm_stage<true>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+        __syncthreads();
+        int sc[8], m[8];
+        q4k_scales(hd, sc, m);
+        f8_t P[4];
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++) P[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+#pragma unroll
+            for (int hf = 0; hf < 2; hf++) {
+#pragma unroll
+                for (int hi = 0; hi < 2; hi++) {
+                    const int s = 2 * j + hi;
+                    const h16_t B = q5k_b(qs[2 * j + hf], 4 * hi, hf ? qh1 : qh0, s, rok ? (_Float16)sc[s] : (_Float16)0.0f);
+#pragma unroll
+                    for (int mt = 0; mt < 4; mt++) P[mt] = wmma(mm_a(mt, s * 32 + hf * 16, lane), B, P[mt]);
+                }
+            }
+        }
+        uint32_t bm[8];
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const h2_t p = {(_Float16)m[2 * i], (_Float16)m[2 * i + 1]};
+            bm[i] = as_u(p); bm[4 + i] = as_u(p);
+        }
+        const h16_t BM = __builtin_bit_cast(h16_t, bm);
+        const uint16_t * hp = (const uint16_t *)&hd;
+        const float d = rok ? (float)__builtin_bit_cast(_Float16, hp[0]) : 0.0f;
+        const float dmin = rok ? (float)__builtin_bit_cast(_Float16, hp[1]) : 0.0f;
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++) {
+            const u32x4_t * sp = (const u32x4_t *)(MMS + (mt * 16 + (lane & 15)) * 16);
+            const f8_t MS = wmma(h16of(sp[0], sp[1]), BM, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#pragma unroll
+            for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[mt][v], __builtin_fmaf(-dmin, MS[v], acc[mt][v]));
+        }
+        if (__builtin_amdgcn_readfirstlane(MMBIG) == b + 1) {   // rare: q3p_mm_q4k's overflow branch, unchanged
+            const u32x4_t hd2 = *(const u32x4_t *)(wrow + (size_t)b * 176);
+            int sc2[8], m2[8];
+            q4k_scales(hd2, sc2, m2);
+            uint32_t bm2[8];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const h2_t p2 = {(_Float16)m2[2 * i], (_Float16)m2[2 * i + 1]};
+                bm2[i] = as_u(p2); bm2[4 + i] = as_u(p2);
+            }
+            const float dm63 = rok ? -63.0f * (float)__builtin_bit_cast(_Float16, ((const uint16_t *)&hd2)[1]) : 0.0f;
+#pragma unroll
+            for (int mt = 0; mt < 4; mt++) {
+                const u32x4_t * sp = (const u32x4_t *)(MMS + (mt * 16 + (lane & 15)) * 16);
+                const f8_t MS = wmma(h16of(sp[0], sp[1]), __builtin_bit_cast(h16_t, bm2), (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#pragma unroll
+                for (int v = 0; v < 8; v++)
+                    if (MMF[mt * 16 + 2 * v + (lane >> 4)] == b + 1) acc[mt][v] = __builtin_fmaf(dm63, MS[v], acc[mt][v]);
+            }
+        }
+    }
+    if (!rok) return;
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+        for (int v = 0; v < 8; v++) {
+            const int t = mt * 16 + 2 * v + (lane >> 4);
+            if (t < it.cnt) Y[(size_t)(ydst ? ydst[it.off + t] : it.off + t) * ldy + r] = acc[mt][v];
+        }
+}
+
+// ---- q35p_add_rms16: per token (one workgroup of 256), OP_OWN_ADD_RMS16's statements for any row length N = 256 NI --------
+// (kernels/k3_q35_ops.h q35_op_add_rms16; q3p_add_rms16 stops at N = 2048 and adds weighted slots):
+//   x[i] += d[i]   (d nullptr: no add);   h[i] = (x[i] * rsqrt(sum x^2 / N + eps)) * nw[i];   h16[i] = fp16(h[i])
+// The same order of operations: a thread's fma chain over its elements tid + 256 j in j order, the wave sum (xor 16 .. 1),
+// the eight waves in order, no contraction. Grid n. h is always written, as the decode op writes it: the compiler rounds
+// the fp16 copy straight from the last product (v_fma_mixlo_f16: one rounding, the decode module's instruction) only
+// when that product's fp32 store sits in the same basic block. Behind `if (h)` it took v_cvt_f16_f32 of the rounded fp32
+// value instead (two roundings): 11 and 15 of 189,440 fp16 values differed from the decode's on the RX 7900 XT.
+extern "C" __global__ void __launch_bounds__(256) q35p_add_rms16(float * __restrict__ x, const float * __restrict__ d,
+                                                                 const float * __restrict__ nw, float eps, float * __restrict__ h,
+                                                                 _Float16 * __restrict__ h16, int N) {
+#pragma clang fp contract(off)
+    __shared__ float part[8];
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, NI = N >> 8, t = blockIdx.x;
+    float * xr = x + (size_t)t * N;
+    const float * dr = d ? d + (size_t)t * N : nullptr;
+    float ss = 0.0f;
+    for (int j = 0; j < NI; j++) {
+        const int i = tid + 256 * j;
+        float xv = xr[i];
+        if (dr) { xv = xv + dr[i]; xr[i] = xv; }
+        ss = __builtin_fmaf(xv, xv, ss);
+    }
+    ss = wsum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / N + eps);
+    for (int j = 0; j < NI; j++) {
+        const int i = tid + 256 * j;
+        const float v = (xr[i] * scale) * nw[i];
+        h[(size_t)t * N + i] = v;
+        h16[(size_t)t * N + i] = (_Float16)v;
+    }
+}
+
+// ---- the attention and GDN glue of the dense qwen35 line on own code (Swift's decode module: kernels/k3_q35_swift.hip) ---
+// Each kernel below runs its decode op's statements (kernels/k3_q35_ops.h, k3_own_ops.h) over a chunk's rows with one
+// workgroup of 256 threads per decode task, so it is bitwise that op on the same inputs (tests/prefill/test_q35_prefill_ops.py
+// against the K3 ops on k3_q35_swift, one token per pass). The ops the prefill takes from other objects as they are:
+// pf_qk_nr (prefill_attn_q35d: OP_QK_NR's statements), pf_gdn_gates / pf_gdn_l2 / pf_gdn_step (prefill_gdn_q35),
+// pf_gdn_conv / pf_conv_state / pf_f32_mv_k5120 (prefill_glue_q35d).
+
+__device__ __forceinline__ float q35p_silu(float x) { return x / (1.0f + expf(-x)); }   // (k3_q35_ops.h q35_silu)
+
+// q35p_gdn_norm16: OP_GDN_NORM16 per (row, value head): y16 = fp16(((o * rsqrt(mean(o^2) + eps)) * w) * silu(z)).
+// o / z: [T * H, K] fp32, w [K], y16 [T * H, K]. Grid T * H.
+extern "C" __global__ void __launch_bounds__(256) q35p_gdn_norm16(const float * __restrict__ o, const float * __restrict__ w,
+                                                                  const float * __restrict__ z, _Float16 * __restrict__ y16,
+                                                                  int K, float eps) {
+#pragma clang fp contract(off)
+    __shared__ float part[8];
+    const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
+    const size_t t = blockIdx.x;
+    const float * orow = o + t * K, * zr = z + t * K;
+    _Float16 * y = y16 + t * K;
+    float ss = 0.0f;
+    for (int i = tid; i < K; i += blockDim.x) ss += orow[i] * orow[i];
+    ss = wsum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / K + eps);
+    for (int i = tid; i < K; i += blockDim.x) {
+        const float nrm = (scale * orow[i]) * w[i];
+        const float v = nrm * q35p_silu(zr[i]);
+        y[i] = (_Float16)v;
+    }
+}
+
+// q35p_kv_append16: OP_KV_APPEND's f16 rows: cache[pos0 + t] = (k[t], v[t]) as fp16 ([K | V] per position, 2 M halves).
+// k / v: [T, M] fp32 at row strides ldk / ldv. A row at or past `rows` is not written and sets *err |= 1 (the host refuses
+// such chunks first: k3.check_span). Grid T.
+extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float * __restrict__ k, int ldk, const float * __restrict__ v,
+                                                                   int ldv, _Float16 * __restrict__ cache, int M, int pos0, int rows,
+                                                                   int * __restrict__ err) {
+    const int tt = blockIdx.x, pos = pos0 + tt;
+    if (pos < 0 || pos >= rows) { if (threadIdx.x == 0) atomicOr(err, 1); return; }
+    _Float16 * c = cache + (size_t)pos * 2 * M;
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        c[i] = (_Float16)k[(size_t)tt * ldk + i];
+        c[M + i] = (_Float16)v[(size_t)tt * ldv + i];
+    }
+}
+
+// q35p_attn16: OP_ATTN_DEC over a chunk's rows (own_op_attn_dec's batched form on the f16 cache, k3_own_ops.h): one
+// workgroup per (row, query head), the decode's task index h = row * heads + head; row r sees cache positions 0 .. pos0 + r.
+// The same statements in the same order: 512-position chunks, a wave scores positions t and t + 8 (4 K loads of each in
+// flight), wave_max / wave_sum, the 8 wave partials in order, online softmax with expf, a thread sums V over 8 positions
+// per round for its dims tid and tid + 256. q: [rows of this launch, heads, D] fp32 (the q norm + RoPE output), out the
+// same shape. D a multiple of 128 and <= 512, heads a multiple of nkv (host-checked). Rows r0 .. r0 + gridDim.x / heads - 1
+// of the chunk: the host splits a chunk into launches by token-positions (every launch well under the 200 ms bound).
+#define Q35P_AT_CH 512
+extern "C" __global__ void __launch_bounds__(256) q35p_attn16(const float * __restrict__ qin, const _Float16 * __restrict__ cache,
+                                                              int pos0, int r0, int heads, int nkv, int D, float scale,
+                                                              float * __restrict__ out) {
+    constexpr int CH = Q35P_AT_CH;
+    __shared__ float sc[CH], red[8];
+    const int h = blockIdx.x, tt = h / heads;                      // (task = row * heads + head, rows from r0)
+    const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32, g = (h - tt * heads) / (heads / nkv);
+    const int npos = pos0 + r0 + tt + 1, M = nkv * D;
+    const size_t pb = (size_t)2 * M;                               // (halves per position)
+    const float * q = qin + (size_t)h * D;
+    float run_m = -INFINITY, run_s = 0.0f, acc[2] = {0.0f, 0.0f};
+#pragma unroll 1
+    for (int c0 = 0; c0 < npos; c0 += CH) {
+        const int n = min(CH, npos - c0);
+        for (int t = wave; t < n; t += 16) {                       // positions t and t + 8 (the second clamped, unused past n)
+            const int t1 = min(t + 8, n - 1);
+            float a0 = 0.0f, a1 = 0.0f;
+            const _Float16 * kp0 = cache + (size_t)(c0 + t) * pb + g * D;
+            const _Float16 * kp1 = cache + (size_t)(c0 + t1) * pb + g * D;
+            for (int d = lane; d < D; d += 128) {
+                float qv[4]; _Float16 k0[4], k1[4];
+#pragma unroll
+                for (int j = 0; j < 4; j++) { qv[j] = q[d + 32 * j]; k0[j] = kp0[d + 32 * j]; k1[j] = kp1[d + 32 * j]; }
+                __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                for (int j = 0; j < 4; j++) { a0 += qv[j] * (float)k0[j]; a1 += qv[j] * (float)k1[j]; }
+                __builtin_amdgcn_sched_barrier(0);
+            }
+            a0 = wsum(a0); a1 = wsum(a1);
+            if (lane == 0) { sc[t] = a0 * scale; if (t + 8 < n) sc[t + 8] = a1 * scale; }
+        }
+        __syncthreads();
+        float m = -INFINITY;
+        for (int t = tid; t < n; t += blockDim.x) m = fmaxf(m, sc[t]);
+        m = wmax(m); if (lane == 0) red[wave] = m; __syncthreads();
+        m = red[0]; for (int w = 1; w < 8; w++) m = fmaxf(m, red[w]); __syncthreads();
+        const float mn = fmaxf(run_m, m), corr = expf(run_m - mn);
+        float sum = 0.0f;
+        for (int t = tid; t < n; t += blockDim.x) { const float e = expf(sc[t] - mn); sc[t] = e; sum += e; }
+        sum = wsum(sum); if (lane == 0) red[wave] = sum; __syncthreads();
+        sum = 0.0f; for (int w = 0; w < 8; w++) sum += red[w];
+        run_s = c0 == 0 ? sum : run_s * corr + sum;
+        for (int j = 0; j < 2; j++) {
+            const int d = tid + j * (int)blockDim.x;
+            if (d >= D) break;
+            float part = 0.0f;
+            const _Float16 * vb = cache + (size_t)c0 * pb + M + g * D + d;   // (V of position c0)
+            for (int t = 0; t < n; t += 8) {
+                _Float16 vv[8];
+#pragma unroll
+                for (int i = 0; i < 8; i++) vv[i] = vb[(size_t)min(t + i, n - 1) * pb];
+                __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+                for (int i = 0; i < 8; i++) { if (t + i < n) part += sc[t + i] * (float)vv[i]; }
+                __builtin_amdgcn_sched_barrier(0);
+            }
+            acc[j] = c0 == 0 ? part : acc[j] * corr + part;
+        }
+        run_m = mn;
+        __syncthreads();
+    }
+    const float inv = 1.0f / run_s;
+    for (int j = 0; j < 2; j++) {
+        const int d = tid + j * (int)blockDim.x;
+        if (d < D) out[(size_t)h * D + d] = acc[j] * inv;
+    }
+}
+
+// q35p_gate_mul16: OP_GATE_MUL16 over values i < N: y16[i] = fp16(a[i] * sigmoid(gate[h * stride + off + d])), h = i / D,
+// d = i % D (the q GEMM's [q | gate] head pairs: stride 2 D, offset D; h counts heads across the chunk's rows).
+extern "C" __global__ void __launch_bounds__(256) q35p_gate_mul16(const float * __restrict__ a, const float * __restrict__ gt,
+                                                                  _Float16 * __restrict__ y, long long N, int D, int stride, int off) {
+#pragma clang fp contract(off)
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < N; i += (long long)gridDim.x * blockDim.x) {
+        const long long h = i / D; const int d = (int)(i - h * D);
+        const float sgm = 1.0f / (1.0f + expf(-gt[(size_t)h * stride + off + d]));
+        const float v = a[i] * sgm;
+        y[i] = (_Float16)v;
+    }
+}

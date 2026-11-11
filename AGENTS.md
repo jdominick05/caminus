@@ -61,8 +61,9 @@ CLAUDE.md imports this file.
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
-  `q3m.py` (qwen3moe) is the exception: its own WMMA kernels (`kernels/q3m_prefill.hip`) are G-model gated, not
-  bitwise; chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see that file's attention).
+  `q3m.py` (qwen3moe) and `q35own.py` (the dense qwen35 line on own code) are the exceptions: their own WMMA GEMMs
+  (`kernels/q3m_prefill.hip`, `kernels/q35_prefill.hip`) are G-model gated, not bitwise (q35own's other ops are bitwise
+  their decode ops); chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see q3m_prefill's attention).
 - `cache/prompt.py` + `cache/livestate.py`: the prompt cache owns the only live state (token log, (i0, commit), counters).
 - `serve/`: HTTP + SSE, template, tool parser, sampler; `EngineSession` declares the session contract
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
