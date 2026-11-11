@@ -40,12 +40,15 @@ Through the HTTP server (`tools/serve_smoke1.py`, one request each): 238 tok/s o
 
 | Prompt length | Caminus | llama.cpp |
 |---|---|---|
-| 512 | **5,230 tok/s** | 4,330 tok/s |
-| 4,096 | **6,493 tok/s** | 3,853 tok/s |
-| 32,768 | **2,791 tok/s** | 1,794 tok/s |
+| 512 | **5,166 tok/s** | 4,330 tok/s |
+| 4,096 | **6,432 tok/s** | 3,853 tok/s |
+| 32,768 | **2,791 tok/s** (before the overflow guard) | 1,794 tok/s |
 
 `benchmarks/q3moe_prefill.py --lengths 512,4096,32768 --chunk 2048 --rounds 3` from an empty context; llama.cpp:
-`llama-bench` `pp512`, `pp4096`, `pp32768`. Through the server, a 37,659-token prompt takes 15.3 s to the first token.
+`llama-bench` `pp512`, `pp4096`, `pp32768`. 512 and 4,096 are the medians of three processes on 2026-11-11, with the
+Q4_K kernel's overflow guard (below); without it the same runs read 5,214 and 6,490 tok/s, so the guard costs 0.9 %.
+32,768 was measured on 2026-11-10 without the guard and not since; an earlier form of the guard cost 0.7 % there.
+Through the server, a 37,659-token prompt takes 15.3 s to the first token.
 
 ### Accuracy
 
@@ -128,8 +131,11 @@ Two checks hold this, and both run without trusting a list written by hand:
   the same bits. On this XTX that was 233 → 246 tok/s at short context when it went in; the XT in this machine has no L1 on its path
   and measures the same either way.
 - **Prompt reading.** The weights stay exact in fp16 in one WMMA operand (Q4_K: scale × quant is an integer up to 945;
-  Q6_K: quant − 32), the activations are fp16, the accumulation fp32. Chunks of 2,048 tokens; a prompt's last token
-  runs as a decode pass.
+  Q6_K: quant − 32), the activations are fp16, the accumulation fp32. Q4_K's offset term takes each 32-value sum of
+  the activations as two fp16 parts. A token whose sum would pass fp16's range (65,504: 32 activations averaging over
+  2,047) stores its sums divided by 64 and gets the other 63 / 64 of that term in a branch only such a block takes, so
+  it stays finite (it used to come out as NaN); every other token computes exactly as before. The guard costs 0.9 % of
+  a prompt's time. Chunks of 2,048 tokens; a prompt's last token runs as a decode pass.
 
 ## Where the remaining time is
 
@@ -156,9 +162,10 @@ its weights take at the card's 858 GB/s:
   stores and publishes), not a slow kernel.
 - **The stages that read no weights take 1.09 ms per token** with the bus idle: the attention, the two adds and
   norms and the router's top 8 of every layer. Each is one task wide (the attention: one task per split).
-- So the 1.99 ms above the bound is the model's shape on this engine: 5 weight stages and 4 others per layer, 48
-  times. What would take it down is fewer, longer stages per token (a model with fewer and wider layers, or stages
-  whose weights can be read together), not a faster kernel for any one of them.
+- So the 1.98 ms the traced token spends above the bound (1.79 ms without the trace's stamps) is the model's shape on
+  this engine: 5 weight stages and 4 others per layer, 48 times. What would take it down is fewer, longer stages per
+  token (a model with fewer and wider layers, or stages whose weights can be read together), not a faster kernel for
+  any one of them.
 
 An earlier measurement on the XT, with builds that drop the loads or the arithmetic (an earlier build, 4.38 ms per
 token there):
