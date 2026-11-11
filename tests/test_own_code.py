@@ -22,7 +22,8 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
-for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip'):
+for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
+            'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip'):   # (the IQ study's objects: docs/dev/iq-quant-study.md)
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
 ref = audit('k3_gguf_q3m_own.hip')[2]
