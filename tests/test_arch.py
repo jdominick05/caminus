@@ -200,6 +200,11 @@ def main():
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
                         'qwen3next': 'Qwen3NextTP'},
               f'engine_class: every entry\'s engine imports ({names})')
+        # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
+        # engine served greedy requests without them and failed its first sampled one on the card)
+        need = ('step', 'verify', 'verify_tokens', 'step_token', 'launch_tokens', 'finish_pass', 'reset', 'prefetch')
+        lack = {n: [a for a in need if not callable(getattr(x.engine_class(), a, None))] for n, x in arch.ARCHS.items()}
+        check(not any(lack.values()), f'engine_class: every engine has the session\'s pass methods (missing: {lack})')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:

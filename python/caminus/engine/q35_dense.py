@@ -341,6 +341,29 @@ class Dense35Own:
     def verify_tokens(self, tokens, i0, commit):
         return self._run(tokens, i0, commit, True)
 
+    def launch_tokens(self, tokens, i0, commit):
+        """verify()'s pass launched without waiting or reading anything back (the device sampler queues behind it); then
+        finish_pass(i0, commit)"""
+        self._check(tokens, i0, commit, 'Dense35Own pass')
+        self._stage(int(tokens[i0]), i0); self._tok = False; self.fresh = False
+        self._pass_launch(i0, commit)
+
+    def finish_pass(self, i0, commit):
+        """wait for launch_tokens' pass; a bailed pass runs again before returning. True when it was rerun (whatever was
+        queued behind the first launch read a bailed pass's outputs and must run again)"""
+        bad = self._pass_wait(i0)
+        if not bad:
+            self.pos_host = i0 + 1; return False
+        for attempt in range(1, self.max_retries + 1):
+            self.bails.append((i0, attempt - 1, bad))
+            print(f'k3 qwen35: a wait gave up at position {i0} (attempt {attempt}), running the pass again: ' + '; '.join(bad),
+                  file=sys.stderr, flush=True)
+            bad = self._pass(i0, 0)                    # (a bailed pass committed already: its rerun commits nothing)
+            if not bad:
+                self.pos_host = i0 + 1; return True
+        self.bails.append((i0, self.max_retries, bad))
+        raise RuntimeError(f'k3 qwen35: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
+
     def _run(self, tokens, i0, commit, tok):
         self._check(tokens, i0, commit, 'Dense35Own pass')
         return self._run_tok(int(tokens[i0]), i0, commit, tok)
