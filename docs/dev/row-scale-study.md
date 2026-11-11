@@ -331,15 +331,23 @@ object; medians of three passes, differences paired inside each process):
 | A2 | the probe 0.25 to 0.43 faster than W2r's full tile | 0.148 | **Missed low** (the fail line is 0.10). |
 | A3 | probe minus loads-only 0.03 to 0.12 higher on W2r than on W4r | 0.184 higher | **Fails** (more than 0.15 apart). |
 
-- **Int8 activations are worth at most 0.08 ms of a 4.70 ms token here (1.7 %)**, and that is before the activations
-  are produced: the probe reads bytes that are already there. A third of the instructions per unit removed a quarter
-  of what the tile adds to its loads. What is left (0.22 ms on W4r) is not the multiply-adds: the loads-only build
-  reads no activations and reduces nothing per row, so the remainder is the activation reads, the per-row
-  reduction across the wave and the dependence of every sum on its loads, which an integer form keeps.
-- The RX 7900 XTX was not run: its full minus loads-only is smaller (0.22 ms against the XT's 0.33), so its bound is
-  lower still.
-- **So the int8-activation tile is not built.** 8-bit activations are nearly free in accuracy (P4), and on this
-  engine nearly worthless in decode speed: a matvec over 8 active experts is bound by reading the weights, and the
-  activations are 2 KB that every row shares. Where int8 activations pay is where the activations are the large
-  operand: batched prefill and verify passes (a GEMM over many tokens), which this probe does not measure.
+- **Int8 activations are worth at most 0.08 ms of a 4.70 ms token here (1.7 %) in this tile's form**, and that is
+  before the activations are produced: the probe reads bytes that are already there. Per unit of 32 weights and row
+  the probe runs 8 `v_dot4` where the full tile runs 16 `v_dot2acc_f32_f16` and builds an fp16 pair of codes for each
+  (plus 8 `v_dot4` per unit for the activations' sum, shared by its rows), and reads 32 activation bytes where the
+  full tile reads 64. That removed a quarter of what the tile adds to its loads (0.08 of 0.31 ms). The other 0.22 ms
+  is not attributed by this probe: it still holds the probe's own integer multiply-adds, the activation reads (the
+  loads-only build reads none) and the waiting of every sum on its loads.
+- The RX 7900 XTX was not run. Its full minus loads-only is smaller (0.22 ms against the XT's 0.33), so a smaller
+  bound is expected there; that is an expectation, not a measurement.
+- **So the int8-activation tile is not built.** 8-bit activations are nearly free in accuracy (P4), and in this
+  engine's decode they are bounded at 1.7 % of a token before their own cost. Expected, not measured here: int8
+  activations pay where the activations are the large operand, as in batched prefill and verify passes (a GEMM over
+  many tokens); a decode matvec over 8 active experts reads megabytes of weights against a few KB of activations that
+  every row shares.
 
+**The measurement builds.** A loads-only or probe object is a two-line source, `#define OWN_READONLY 1` (or
+`#define OWN_A8_PROBE 1`) followed by `#include "k3_q3m_rs4.hip"` (`_rs2`, `_lean`, `_iq`), compiled with its
+module's own command from `build.sh` under the name `<module>_ro` (`<module>_a8p`).
+`benchmarks/q3moe_depth.py --arms NAME=<object>` gives an object named after a module that module's ops. Every
+object of one comparison is built from one tree into one directory (`CAMINUS_KERNEL_DIR`).
