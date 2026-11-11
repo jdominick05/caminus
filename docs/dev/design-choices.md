@@ -9,7 +9,7 @@ page replaces them going forward.
 | Support RX 7900 XTX and XT first; other gfx1100 cards are allowed but untested. | Every kernel is tuned and verified on those two. Hardware reports widen the list. |
 | No card is hardcoded. Cards are found by PCI address and placed by size, then link speed, then address. | Users have any mix and order of cards. A deterministic order keeps prompt-cache keys valid. |
 | Engine changes must be bitwise equal to the previous build, or held to llama.cpp's own noise. | It's the only way to change fast code often without silently losing quality. |
-| Serve mixture-of-experts and low-active-parameter models; AREX-2 is the one dense model. | Decode speed on these cards is bound by bytes read per token. |
+| Serve mixture-of-experts and low-active-parameter models; the dense exceptions are AREX-2 and the Qwen3.8 27B line (Swift 1.5). | Decode speed on these cards is bound by bytes read per token. |
 | Drafters are DFlash and MTP only. | Measured to pay on agent workloads; copy and n-gram drafters weren't kept. |
 | One persistent kernel launch per pass. | Launch overhead dominates small-batch decoding on these cards. |
 | Development happens in the public repository: topic branches into `testing`, then `main` for releases. | Contributors see and review the real history. |

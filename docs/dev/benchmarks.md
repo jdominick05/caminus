@@ -90,6 +90,27 @@ prompt), in tok/s.
 Qwen3-Coder-Next decodes slower than llama.cpp at 32K and reads prompts about 20 times slower: its batched prefill
 isn't written yet. Tools: `tests/prefill/test_q36_prefill.py` (ops, handoff, e2e, speed) and `tools/serve_smoke1.py`.
 
+### Swift 1.5 Q4_K_M (dense 27B, own code)
+
+Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untuned: decode short context only.
+
+| | RX 7900 XTX | RX 7900 XT |
+|---|---|---|
+| Caminus decode (short context) | 42 tok/s (23.8 ms) | 36 tok/s (27.5 ms) |
+| llama.cpp decode (tg128) | 37.1 | 31.8 |
+| Caminus prefill, 2,048 positions from empty | — | 771 (chunk 2048), 760 (chunk 1024) |
+| llama.cpp prefill (pp2048 / pp512) | — | 763 / 770 |
+
+- Accuracy: prefill 64 positions, then 64 decode passes against the float64 reference: mean KLD 3.0e-7, top-1 64/64.
+  llama.cpp's own prefill-then-decode on the same rows: 3.2e-4, 64/64 (`tests/prefill/test_q35_prefill.py`).
+- The served path on the XTX (`tools/serve_smoke1.py --max-ctx 32768 --needle 28000 --block-imports gguf,tokenizers`):
+  - greedy decode 44 tok/s;
+  - a 6,760-token prompt at 748 tok/s, then decode at 28 tok/s;
+  - a 27,712-token prompt at 335 tok/s, then decode at 15 tok/s.
+
+  The attention reads every earlier position per query head, so both the prompt rate and decode fall with depth.
+- Swift 1.5 needs a 24 GB card. With its prompt cache it projects 19.1 GiB at 12K, past an XT's room.
+
 ### Qwen3-30B-A3B Q4_K_M
 
 Measured 2026-11-10 on the RX 7900 XTX; llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`. The model runs on

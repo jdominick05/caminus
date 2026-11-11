@@ -19,7 +19,7 @@ even when everything works. That's how cards move from untested to supported.
 
 | Cards | What you can run |
 |---|---|
-| One | The one-card models. `qwen3.6` fits any supported card; `qwen3.6-hauhau` and `arex-2` need a 24 GB card. |
+| One | The one-card models. `qwen3.6` fits any supported card; `qwen3.6-hauhau`, `arex-2`, `qwen3-30b-a3b` and `swift-1.5` need a 24 GB card. |
 | Two | `qwen3-coder-next`; `coder` on an XTX + XT or two XTX; or two one-card models side by side. |
 | Three or more | Two cards for a two-card model; one-card models on the rest. |
 

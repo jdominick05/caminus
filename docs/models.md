@@ -13,6 +13,7 @@ from its Hugging Face repository and checks every file before using it.
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-coder-next` | Qwen3-Coder-Next 80B-A3B, IQ3_S | 2 | 29.7 GB | 136 tok/s | 135 tok/s |
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,432 tok/s |
+| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB | 17.4 GB | 42 tok/s | 771 tok/s (measured on an XT) |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
@@ -30,6 +31,9 @@ where each number comes from and how llama.cpp does on the same cards.
 - **`qwen3-30b-a3b`** is the fastest writer on one 24 GB card and the most exact (4-bit weights, no llama.cpp code on its
   path). Its context is 40,960 tokens, the model's own limit, so it suits shorter work: 213 tok/s with 4K tokens of
   context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
+- **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
+  path). It writes at about `arex-2`'s speed. It has no drafter yet, and its speed drops at depth: about 15 tok/s with
+  28K tokens of context.
 - **`qwen3-coder-next`** writes fast but reads prompts slowly for now (a 32K-token prompt takes about six minutes). Use it
   for short prompts until its fast prompt reading lands.
 
@@ -48,7 +52,7 @@ that can't hold at least 32,768 tokens on your cards, rather than run out of mem
 ## The names your tools use
 
 Each server answers to its model id and to the same id with `-nothink` (no thinking before answering): `qwen3.6` (both
-Qwen3.6 files), `arex-2`, `qwen3-coder-next`, `qwen3-30b-a3b`. The Coder answers to `k3-coder`, `k3-coder-nothink`, `k3-coder-low` and `k3-coder-xhigh`
+Qwen3.6 files), `arex-2`, `qwen3-coder-next`, `qwen3-30b-a3b`, `swift-1.5`. The Coder answers to `k3-coder`, `k3-coder-nothink`, `k3-coder-low` and `k3-coder-xhigh`
 (the last two set how long it thinks).
 
 ## Licences
@@ -58,6 +62,7 @@ Caminus doesn't include any model weights. Each model has its own licence; read 
 | Model | Licence |
 |---|---|
 | Qwen3.6-35B-A3B (both files), AREX-2, Qwen3-Coder-Next, Qwen3-30B-A3B | Apache-2.0 |
+| Swift 1.5 | the Swift Open License 1.0 |
 | The DFlash drafter | Apache-2.0 |
 | Qwen3.8-Flash-Next Coder | treat it as `qwen-community-1.0`, the base model's licence (its card says Apache-2.0 in one place and the base licence in another) |
 
