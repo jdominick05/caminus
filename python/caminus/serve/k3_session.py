@@ -341,7 +341,9 @@ class K3Session(EngineSession):
         self._h_idx = [torch.zeros(self.T, kmax, dtype=torch.int64, pin_memory=True) for _ in (0, 1)]
         self._h_pen = [torch.zeros(self.T, kmax, dtype=torch.float32, pin_memory=True) for _ in (0, 1)]
         self._ev = [None, None]
-        self._cand = None           # (topk.Candidates per shard: the device sampler's own kernel and its buffers)
+        # the device sampler's own kernel and its buffers, one per shard, allocated (and checked against each card's cap)
+        # here, when the session is built: a request never meets an allocation
+        self._cand = [topk.Candidates(dev[c], self.T, kmax, cols=w) for c, w in ((0, self.vh), (1, self.n_vocab - self.vh))]
         import collections
         self.samp_t = collections.deque(maxlen=4096)    # per sampled pass: (rows wait ms, host sampling ms, rows emitted)
 
@@ -710,8 +712,6 @@ class K3Session(EngineSession):
         if not 0 < kp <= self.kmax or len(pid) > self.kmax:
             raise ValueError(f'K3Session.queue_rows: k\' {kp} / {len(pid)} penalty ids past the candidate buffers ({self.kmax} wide)')
         m = self.m
-        if self._cand is None:      # (built on the first sampled pass: an engine may create its logits shards on its first pass)
-            self._cand = [topk.Candidates(self._dev_t[c], self.T, self.kmax) for c in (0, 1)]
         for c in (0, 1):
             cand = self._cand[c]
             with torch.cuda.device(self._dev_t[c]):

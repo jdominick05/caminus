@@ -1,7 +1,7 @@
 """The device sampler's candidates on Caminus's own kernel (kernels/own_topk.hip), in place of torch.topk / index_select.
 
-`Candidates(dev, rows, width)` holds one card's device buffers (checked against the card's cap through caminus.device.capacity
-before they exist); `Candidates.run(L, k, pid)` queues, on the current stream of that card, for each row of L (a float32
+`Candidates(dev, rows, width, cols=None)` holds one card's device buffers (checked against the card's cap through
+caminus.device.capacity before they exist; cols, the shard's width, sizes the chunk lists up front, else on first use); `Candidates.run(L, k, pid)` queues, on the current stream of that card, for each row of L (a float32
 logits shard: [R, n] with contiguous columns, any row stride, such as a column slice of the engine's logits) the k largest
 values and their column ids (value descending, id ascending; ties at the cut keep the lowest ids; NaN ranks first, as in
 torch.topk) and the raw values of the penalty columns pid. The results stay in the buffers `val`, `idx` (int64) and `pen`
@@ -30,7 +30,7 @@ def _kernel(d):
 
 
 class Candidates:
-    def __init__(self, dev, rows, width, check=True):
+    def __init__(self, dev, rows, width, cols=None, check=True):
         dev = torch.device(dev)
         if dev.type != 'cuda':
             raise ValueError(f'topk.Candidates: {dev} is not a GPU')
@@ -50,7 +50,22 @@ class Candidates:
         self._last_pid = None  # (the ids on the device now: the same list again is not uploaded again)
         self._scr = None       # (the chunks' lists and the per-row counts: sized for the widest row seen, on first use)
         self._check = check
+        if cols is not None:
+            self._lists(-(-int(cols) // CHUNK))
         self.launches = 0    # (the session's own-path counter reads this)
+
+    def _lists(self, chunks):
+        """the chunks' lists and the per-row counts for rows of up to `chunks` chunks (checked through capacity first)"""
+        if not 0 < chunks <= MAXCHUNKS:
+            raise ValueError(f'topk.Candidates: {chunks} chunks outside 1 .. {MAXCHUNKS} (rows of at most {MAXCHUNKS * CHUNK} columns)')
+        nbytes = self.rows * chunks * self.width * 8 + self.rows * chunks * 4 + self.rows * 4
+        if self._check:
+            capacity.check([self.dev.index], [nbytes / capacity.MIB], f'device sampler chunk lists ({self.rows} x {chunks} x {self.width})')
+        with torch.cuda.device(self.dev):
+            self._scr = (chunks, torch.empty(self.rows * chunks * self.width, dtype=torch.int32, device=self.dev),
+                         torch.empty(self.rows * chunks * self.width, dtype=torch.int32, device=self.dev),
+                         torch.zeros(self.rows * chunks, dtype=torch.int32, device=self.dev),
+                         torch.zeros(self.rows, dtype=torch.int32, device=self.dev))   # (done: zero between launches)
 
     def run(self, L, k, pid=None):
         """queue the candidates of every row of L (see the module docstring); pid: column ids inside this shard (a host
@@ -78,13 +93,7 @@ class Candidates:
                 raise ValueError(f'topk.run: a penalty id outside the shard\'s {n} columns')
         with torch.cuda.device(self.dev):
             if self._scr is None or self._scr[0] < chunks:
-                nbytes = self.rows * chunks * self.width * 8 + self.rows * chunks * 4 + self.rows * 4
-                if self._check:
-                    capacity.check([self.dev.index], [nbytes / capacity.MIB], f'device sampler chunk lists ({self.rows} x {chunks} x {self.width})')
-                self._scr = (chunks, torch.empty(self.rows * chunks * self.width, dtype=torch.int32, device=self.dev),
-                             torch.empty(self.rows * chunks * self.width, dtype=torch.int32, device=self.dev),
-                             torch.zeros(self.rows * chunks, dtype=torch.int32, device=self.dev),
-                             torch.zeros(self.rows, dtype=torch.int32, device=self.dev))   # (done: zero between launches)
+                self._lists(chunks)
             _, lk, li, ln, done = self._scr
             if npid and not (self._last_pid is not None and len(self._last_pid) == npid and bool(torch.equal(self._last_pid, p))):
                 if self._ev_pid is not None:

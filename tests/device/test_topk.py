@@ -8,7 +8,8 @@ The oracle is the contract itself, in numpy: per row the k largest values by the
 heavy ties, ties exactly at the cut, -inf rows with a few finite values, NaNs, signed zeros, a row narrower than k; logits
 shards as column slices of a wider tensor (the engines' layout); 1 to 9 rows; rows of one chunk (2048 columns) up to a
 whole vocabulary (151,936 columns: 75 chunks), with ties at the row's cut spread over several chunks. Canaries around every output must hold,
-reruns must be bitwise equal, and inputs the kernel cannot take must be refused before a launch.
+reruns (300 launches of one input) must be bitwise equal, and inputs the kernel cannot take must be refused before a
+launch.
 """
 import argparse
 import os
@@ -126,6 +127,21 @@ for pattern, R, n, k, wide in cases:
     check(exact and pen_ok and canary and side and same_t and rerun,
           f'{pattern:7s} R={R} n={n} k={k}{" (a column slice)" if wide else ""}: oracle {exact}, penalty values {pen_ok}, '
           f'canaries {canary and side}, torch.topk values {same_t}, rerun bitwise {rerun}')
+
+# ---- repeat launches: the last chunk of each row merges (an atomic count per row): 300 launches each equal to the first
+for n, R, k in ((VH, 9, 136), (151936, 2, 176), (2048, 9, 64)):
+    cand = topk.Candidates(dev, ROWS, WIDTH, cols=n)
+    x = torch.from_numpy(make('ties', R, n)).to(dev)
+    pid = np.unique(rng.choice(n, 40, replace=False))
+    kk = cand.run(x, k, pid); torch.cuda.synchronize()
+    v0, i0, p0 = cand.val[:R, :kk].clone(), cand.idx[:R, :kk].clone(), cand.pen[:R, :len(pid)].clone()
+    bad = 0
+    for _ in range(300):
+        cand.run(x, k, pid)
+        bad += int(not (torch.equal(cand.val[:R, :kk].view(torch.int32), v0.view(torch.int32)) and torch.equal(cand.idx[:R, :kk], i0)
+                        and torch.equal(cand.pen[:R, :len(pid)].view(torch.int32), p0.view(torch.int32))))
+    torch.cuda.synchronize()
+    check(bad == 0, f'300 launches at R={R} n={n} k={k} ({-(-n // topk.CHUNK)} chunks): every one equal to the first ({bad} differ)')
 
 # ---- refusals before any launch
 cand = topk.Candidates(dev, ROWS, WIDTH)
