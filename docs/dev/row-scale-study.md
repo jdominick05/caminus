@@ -289,3 +289,26 @@ What the tables say:
 - **What an int8-activation form of the 4-bit tile could win is bounded by W4r's 0.33 ms (XT) and 0.22 ms (XTX)**
   of arithmetic, at a quality cost the quality half measured (KLD 0.0325 -> 0.0365 on W4r).
 
+## The int8-activation probe
+
+P4 held (8-bit activations cost a KLD of 0.0079 on Q8_0 experts), and the speed results bound what such a tile can
+win: the arithmetic W4r adds to its loads, 0.33 ms on the RX 7900 XT. Before anything is built for it, one
+measurement build says how much of that an integer tile would remove: `OWN_A8_PROBE` in `kernels/own_quant_rs.h`
+reads a unit's 32 activations as 32 bytes of the activation buffer (half the bytes of fp16), multiplies them with the
+unit's codes through `sudot4` (8 instructions per unit and row where the fp16 form takes 16 `fdot2` and builds an
+fp16 pair for each), and scales the unit's integer sum once. Its sums are not the model's (the bytes are whatever the
+buffer holds), as with the loads-only builds: it is timed, never scored.
+
+What it leaves out, so that it is an upper bound: producing the int8 activations (a quantizing step inside the ops
+that write the experts' inputs, or segments of their own, with their hops), and reading a scale per unit if the
+format has one.
+
+Written before the probe is built or run (RX 7900 XT, depth 8, the file's full, loads-only and probe builds
+interleaved in one process, three passes):
+
+| | Prediction | Fails if |
+|---|---|---|
+| A1: 4 bits | the probe token is 0.13 to 0.25 ms faster than W4r's full tile (probe minus loads-only 0.08 to 0.20) | less than 0.05 faster: the 0.33 ms is not the fp16 arithmetic's instructions, and int8 activations buy nothing here |
+| A2: 2 bits | the probe token is 0.25 to 0.43 faster than W2r's full tile (probe minus loads-only 0.12 to 0.30) | less than 0.10 faster |
+| A3: the widths | probe minus loads-only is 0.03 to 0.12 higher on W2r than on W4r (the same instructions over shorter loads; S2 predicted equal and failed) | equal within 0.03, or more than 0.15 apart |
+

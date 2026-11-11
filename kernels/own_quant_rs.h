@@ -62,6 +62,36 @@ __device__ __forceinline__ float rs_dot32(const Rs2 & c, const uint32_t * xa, co
     }
     return s;
 }
+#if defined(OWN_A8_PROBE)
+// Measurement only (docs/dev/row-scale-study.md, "The int8-activation probe"): what the tile costs when its activations
+// are int8 codes already in memory. A unit's 32 activations are read as 32 bytes of the activation buffer (whatever is
+// there: the sums are NOT the model's, as in the loads-only builds), go through sudot4 against the unit's codes (8
+// instructions per unit and row against 16 fdot2 and the fp16 forms of the codes), and the unit's integer sum is scaled
+// once, by a constant standing in for the activations' scale. zero code z: sum (q - z) a = sum q a - z sum a, the
+// unit's sum a taken once for all rows.
+__device__ __forceinline__ int rs_zero(const Rs4 &) { return 8; }
+__device__ __forceinline__ int rs_zero(const Rs2 &) { return 1; }
+__device__ __forceinline__ int rs_idot32(const Rs4 & c, const uint32_t * a) {
+    const uint32_t qw[4] = {c.q.x, c.q.y, c.q.z, c.q.w};
+    int s = 0;
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+#pragma unroll
+        for (int w = 0; w < 4; w++) s = __builtin_amdgcn_sudot4(false, (int)((qw[w] >> (4 * h)) & 0x0f0f0f0fu), true, (int)a[4 * h + w], s, false);
+    }
+    return s;
+}
+__device__ __forceinline__ int rs_idot32(const Rs2 & c, const uint32_t * a) {
+    const uint32_t cw[2] = {c.q.x, c.q.y};
+    int s = 0;
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) s = __builtin_amdgcn_sudot4(false, (int)((cw[h] >> (2 * i)) & 0x03030303u), true, (int)a[4 * h + i], s, false);
+    }
+    return s;
+}
+#endif
 
 // rows row0 .. row0 + RW - 1 (< nrows) of the matrix W, fp16 activations x16 [K]; sc: the matrix's row scales.
 // K = 0: the row length is the runtime Kr (K3: one body for every K). UP / UNR / res: as own_rows_q4k_1rt.
@@ -87,6 +117,9 @@ __device__ __forceinline__ void own_rows_rs_1rt(const uint8_t * __restrict__ W, 
             const _Float16 * xp = x16 + 32 * uu;
 #if defined(OWN_READONLY)   // (measurement: the codes only)
             xl[i][0] = xl[i][1] = xh[i][0] = xh[i][1] = (u32x4_t){0u, 0u, 0u, 0u}; (void)xp;
+#elif defined(OWN_A8_PROBE)  // (measurement: 32 bytes of the buffer as the unit's int8 activations; inside its 2 K bytes)
+            xl[i][0] = *(const u32x4_t *)((const uint8_t *)x16 + 32 * (size_t)uu); xl[i][1] = *(const u32x4_t *)((const uint8_t *)x16 + 32 * (size_t)uu + 16);
+            xh[i][0] = xh[i][1] = (u32x4_t){0u, 0u, 0u, 0u}; (void)xp;
 #else
             xl[i][0] = *(const u32x4_t *)xp; xl[i][1] = *(const u32x4_t *)(xp + 8);
             xh[i][0] = *(const u32x4_t *)(xp + 16); xh[i][1] = *(const u32x4_t *)(xp + 24);
@@ -97,6 +130,21 @@ __device__ __forceinline__ void own_rows_rs_1rt(const uint8_t * __restrict__ W, 
         for (int i = 0; i < UP; i++) {
 #pragma unroll
             for (int r = 0; r < RW; r++) acc[r] += (float)((rs_fold(c[r][i]) ^ xl[i][0].x) & 0xffu);
+        }
+        continue;
+#endif
+#if defined(OWN_A8_PROBE)
+#pragma unroll
+        for (int i = 0; i < UP; i++) {
+            const int u = lane + 32 * (i0 + i);
+            if (i0 + i >= NU || u >= NUNITS) continue;
+            const uint32_t a[8] = {xl[i][0].x, xl[i][0].y, xl[i][0].z, xl[i][0].w, xl[i][1].x, xl[i][1].y, xl[i][1].z, xl[i][1].w};
+            int sa = 0;
+#pragma unroll
+            for (int j = 0; j < 8; j++) sa = __builtin_amdgcn_sudot4(true, (int)a[j], true, 0x01010101, sa, false);
+#pragma unroll
+            for (int r = 0; r < RW; r++)
+                acc[r] = __builtin_fmaf((float)(rs_idot32(c[r][i], a) - rs_zero(c[r][i]) * sa), 1e-6f, acc[r]);
         }
         continue;
 #endif
