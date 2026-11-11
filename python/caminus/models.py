@@ -53,8 +53,9 @@ ITEMS = ITEMS + (
          '0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5', 'hf-lfs'),
 )
 # Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
-# Face's API on 2026-11-11 (each local file's sha256 computed and equal). Files only so far: no named model serves them yet
-# (CATALOG gets them when their own-kernel engine serves), so `caminus pull` / `caminus start` do not list them.
+# Face's API on 2026-11-11 (each local file's sha256 computed and equal). CATALOG names Swift 1.5 (its own-code engine
+# serves); ThinkingCap and the drafter join it when their engines do, so until then `caminus pull` / `caminus start` do
+# not list them.
 # Licences: Swift 1.5 the Swift Open License 1.0, ThinkingCap PolyForm Small Business 1.0.0, the drafter Apache-2.0.
 ITEMS = ITEMS + (
     Item('swift-1.5', 'swift-1.5', 'ukisai/Swift-1.5-Qwen3.8-27B-GGUF', '14bfe4b42be4a925d98816db830155f476c605e7',
@@ -91,6 +92,8 @@ CATALOG = (
            '41 tok/s decode, 928 tok/s prefill 2K (one XTX)', 'the 24 GB card only; ~119K context'),
     _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
            '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
+    _model('swift-1.5', 'Swift 1.5 (Qwen3.8 27B dense) Q4_K_M (own code end to end)', 'qwen35-own', ('swift-1.5',), 'swift-1.5',
+           '36 tok/s decode on an XT, 42 on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'one card; no drafter yet'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )

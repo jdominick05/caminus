@@ -140,6 +140,17 @@ class Dense35Own:
         finally: F.close()
 
     @staticmethod
+    def recurrent_mib(path):
+        """MiB of every Gated DeltaNet block's state (the recurrent state with its saved-input record, the conv state and
+        its previous inputs): what a prompt-cache checkpoint holds beside the KV rows"""
+        F = ggufio.GGUFFile(path)
+        try:
+            c = _shapes(F); n_gdn = sum(1 for g in block_kinds(F) if g)
+            CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
+            return n_gdn * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], 1) + CH * 3 + CH) * 4 / 2 ** 20
+        finally: F.close()
+
+    @staticmethod
     def kv_pos_mib(path):
         """MiB of KV cache per position (every attention block)"""
         F = ggufio.GGUFFile(path)
