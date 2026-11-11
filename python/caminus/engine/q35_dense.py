@@ -31,10 +31,21 @@ import torch
 from .. import ggufio
 from ..device import capacity
 from . import k3
-from .own_layout import q6k_planes
+from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD
 from .q3moe_one import card_per_wgp
 
 MODULE = 'k3_q35_swift'
+MODULE_TCAP = 'k3_q35_tcap'   # (ThinkingCap's formats: kernels/k3_q35t_ops.h)
+SWIFT_FMT = frozenset({'Q4_K', 'Q6_K', 'Q8_0', 'Q5_K', 'F32'})   # (the matrices the Swift module's tiles read)
+
+
+def module_of(F):
+    """the decode module a file's formats need: the Swift module when every trunk matrix is Q4_K / Q6_K / Q8_0 / Q5_K (or
+    F32) and the embedding Q4_K; else the ThinkingCap module (its matrices IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K /
+    Q8_0, BF16 alpha / beta, an IQ2_S or Q4_K embedding)"""
+    nl = trunk_blocks(F); mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
+    fm = {t.type for t in F.tensors if not t.name.startswith(mtp) and len(t.shape) == 2 and t.name != 'token_embd.weight'}
+    return MODULE if fm <= SWIFT_FMT and F.T['token_embd.weight'].type == 'Q4_K' else MODULE_TCAP
 RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV rows are written before any pass reads them)
 
 
@@ -65,6 +76,8 @@ def _projection_bytes(F, max_ctx):
     c = _shapes(F); nl = c['nl']
     mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     w = sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp))
+    w += sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp) and t.type == 'BF16')   # (widened to F32 on load)
+    w += IQ_PAD * sum(1 for t in F.tensors if not t.name.startswith(mtp) and t.type in IQ_REC)   # (the record layout's tail)
     n_attn = sum(1 for g in block_kinds(F) if not g)
     CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
     gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], 1) + CH * 3 + CH) * 4
@@ -76,7 +89,9 @@ class Dense35Own:
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
                  rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None):
-        """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32). device: the
+        """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
+        or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
+        picks it from the file's formats (module_of). device: the
         torch / HIP device index. max_ctx: KV cache positions. per_wgp: workgroups per WGP ('card': the qwen3moe engine's
         per-card grid; a number for the grid tests). gu: the feed-forward's gate, up and SwiGLU as one segment where the
         two matrices share a one-round-trip format (False: three segments everywhere). rpt / rpt16: rows per task of the
@@ -104,12 +119,16 @@ class Dense35Own:
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or not 1 <= max_ctx <= n_ctx:
             raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
         self.dev, self.max_ctx, self.limit_us = int(device), int(max_ctx), limit_us
-        self.module = module or MODULE
-        self.per_wgp, self.gu, self.rpt, self.rpt16 = per_wgp, bool(gu), int(rpt), int(rpt16)
+        self.module = module or module_of(F)
+        self.tcap = self.module in k3.Q35T_MODULES
+        if self.module not in k3.Q35_MODULES: raise ValueError(f'Dense35Own: module {self.module} ({k3.Q35_MODULES})')
+        # (no gate | up fusion on the ThinkingCap module: its feed-forward's gate and up differ in format in most blocks)
+        self.per_wgp, self.gu, self.rpt, self.rpt16 = per_wgp, bool(gu) and not self.tcap, int(rpt), int(rpt16)
         self.nl_build = self.nl if debug_layers is None else int(debug_layers)
         assert 1 <= self.nl_build <= self.nl, debug_layers
         self.emb = F.T['token_embd.weight']
-        if self.emb.type != 'Q4_K': raise ValueError(f'Dense35Own: token_embd is {self.emb.type} (Q4_K only)')
+        if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
+            raise ValueError(f'Dense35Own: token_embd is {self.emb.type} on module {self.module}')
         # VRAM, checked against the card's cap before a byte is read (vram_extra_mib: what the caller adds right after)
         self.vram_mib = _projection_bytes(F, self.max_ctx) / 2 ** 20 + 256
         if vram_check:
@@ -166,11 +185,13 @@ class Dense35Own:
         if (rows is not None and R != rows) or (cols is not None and K != cols):
             raise ValueError(f'Dense35Own: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
         b = t.pread(0, t.n_bytes)
-        if t.type == 'F32':
-            return dict(name=name, fmt='F32', rows=R, K=K, w=torch.from_numpy(b.view(np.float32).reshape(R, K)).to('cuda'))
+        if t.type in ('F32', 'BF16'):   # (BF16: widened to F32, exactly: the high half of a float32)
+            f = b.view(np.float32) if t.type == 'F32' else (b.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+            return dict(name=name, fmt='F32', rows=R, K=K, w=torch.from_numpy(f.reshape(R, K).copy()).to('cuda'))
+        ok = k3.OWN_Q35T_1RT + ('Q8_0',) if self.tcap else ('Q4_K', 'Q8_0', 'Q5_K', 'Q6_K')
+        if t.type not in ok: raise ValueError(f'Dense35Own: {name} is {t.type} ({ok} on module {self.module}, or F32 / BF16 alpha / beta)')
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
-        elif t.type not in ('Q4_K', 'Q8_0', 'Q5_K'):
-            raise ValueError(f'Dense35Own: {name} is {t.type} (Q4_K / Q6_K / Q8_0 / Q5_K, or F32 for alpha / beta)')
+        elif t.type in IQ_REC: b = iq_records(b, R, K, t.type)
         return dict(name=name, fmt=t.type, rows=R, K=K, w=torch.from_numpy(np.ascontiguousarray(b)).to('cuda'))
 
     def _f32(self, name, n):
@@ -232,14 +253,14 @@ class Dense35Own:
             """W's matvec on the fp16 activations x16 (an F32 matrix: on the fp32 x32)"""
             if W['fmt'] == 'F32':
                 return named(E.f32_mv(W['w'], x32, out, rows_per_task=4, dep=dep), W['name'])
-            if W['fmt'] in k3.OWN_1RT_FMT:
+            if W['fmt'] in (k3.OWN_Q35T_1RT if self.tcap else k3.OWN_1RT_FMT):
                 kw = {} if up is None else dict(up=up['w'])
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt, dep=dep, **kw),
                              W['name'])
             assert up is None
             return named(E.own_matvec16(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt16, dep=dep), W['name'])
 
-        prev = E.own_emb(self.emb_dev, 'Q4_K', self.vocab, D, self.tok, s['x'])
+        prev = E.own_emb(self.emb_dev, self.emb.type, self.vocab, D, self.tok, s['x'])
         for il, d in enumerate(self.L):
             self.layer_seg.append((il, len(E.segs)))
             # the block's norm, after the previous block's feed-forward is added to the residual (block 0: no add)

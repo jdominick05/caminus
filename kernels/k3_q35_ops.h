@@ -320,6 +320,7 @@ __device__ __forceinline__ void q35_op_gate_mul16(const Seg & sg, int t) {
     }
 }
 
+#ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
@@ -342,3 +343,4 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 }
 __device__ __forceinline__ uint32_t * k3_extra_warm(const Seg &) { return nullptr; }
 __device__ __forceinline__ void k3_extra_prefetch(const Seg &, int) {}
+#endif

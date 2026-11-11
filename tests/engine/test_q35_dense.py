@@ -1,5 +1,6 @@
-"""Dense35Own (the dense qwen35 line on one card, Caminus's own code from the GGUF to the logits; module k3_q35_swift)
-against caminus.ref_q35 (the float64 host forward on the same reader and decoders).
+"""Dense35Own (the dense qwen35 line on one card, Caminus's own code from the GGUF to the logits; module k3_q35_swift, or
+with --variant tcap ThinkingCap's formats on k3_q35_tcap) against caminus.ref_q35 (the float64 host forward on the same
+reader and decoders).
 
 Without a model file, on the tiny synthetic quantized model of tests/engine/tiny_q35.py (every matrix format the module
 has a tile for; small inputs: the first run of new kernel code):
@@ -14,7 +15,7 @@ With --model and --ref (the npz of tools/reference/q35_ref.py --trace: seq, logi
 Gates: the matvecs within 1e-5 of the row's sum |w x|; the tiny model's residuals within 1 % of the block's largest value
 and its logits' mean KLD < 1e-3; the model's mean KLD < 1e-3 and top-1 equal at all but at most 1 position in 100.
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
-  tools/guard.sh LOG 600 python -I tests/engine/test_q35_dense.py --scratch DIR
+  tools/guard.sh LOG 600 python -I tests/engine/test_q35_dense.py --scratch DIR [--variant tcap]
   tools/guard.sh LOG 1800 python -I tests/engine/test_q35_dense.py --scratch DIR --model GGUF --ref FILE.npz
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, gc, os, sys, time
@@ -26,6 +27,7 @@ ap.add_argument('--scratch', required=True); ap.add_argument('--model'); ap.add_
 ap.add_argument('--positions', type=int, default=128); ap.add_argument('--depths', type=int, nargs='*', default=[1, 4])
 ap.add_argument('--depth-positions', type=int, default=12); ap.add_argument('--max-ctx', type=int, default=256)
 ap.add_argument('--module', default=None)
+ap.add_argument('--variant', choices=('swift', 'tcap'), default='swift', help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap)')
 A = ap.parse_args()
 if bool(A.model) != bool(A.ref): ap.error('--model and --ref go together')
 os.makedirs(A.scratch, exist_ok=True)
@@ -34,8 +36,10 @@ import tiny_q35
 from caminus import ggufio, own_dequant, ref_q35
 from caminus.device import capacity
 from caminus.engine import k3
-from caminus.engine.q35_dense import MODULE, Dense35Own
-MOD = A.module or MODULE
+from caminus.engine.q35_dense import MODULE, MODULE_TCAP, Dense35Own
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
+MOD = A.module or (MODULE_TCAP if A.variant == 'tcap' else MODULE)
+TC = MOD in k3.Q35T_MODULES
 ok = True
 
 
@@ -54,7 +58,7 @@ print(torch.cuda.get_device_name(0), flush=True)
 DEV = torch.cuda.current_device()
 
 # ---- the tiny model ------------------------------------------------------------------------------------------------------
-P = os.path.join(A.scratch, 'tiny-q35-quant.gguf'); info = tiny_q35.write(P)
+P = os.path.join(A.scratch, f'tiny-q35-{A.variant}.gguf'); info = tiny_q35.write(P, variant=A.variant)
 SEQ = [1, 7, 3, 60, 7, 2, 33, 9, 9, 41]
 NB = info['blocks']
 # this part's own buffers and its engines (one per depth, three more for the options; each a few MiB): checked once
@@ -63,25 +67,34 @@ capacity.check([DEV], [(NB + 4) * Dense35Own.projection_mib(P, 64) + 16], 'test_
 # the matvec of every quantized matrix of the tiny file on fp16 activations, against float64
 F = ggufio.GGUFFile(P); rng = np.random.default_rng(2); worst = {}
 E = k3.Engine(module=MOD); outs = []
+ONE_RT = k3.OWN_Q35T_1RT if TC else k3.OWN_1RT_FMT
+FMTS = set(ONE_RT) | ({'Q8_0'} if TC else {'Q8_0', 'Q5_K'})
+# the embedding first: on the ThinkingCap module its segment carries the grids the matvecs read (and its rows are checked)
+emb_t = F.T['token_embd.weight']; emb_w = torch.from_numpy(np.ascontiguousarray(emb_t.pread(0, emb_t.n_bytes))).cuda()
+emb_ids = [0, 5, info['V'] - 1]; emb_tok = torch.tensor(emb_ids, dtype=torch.int32, device='cuda')
+emb_x = torch.zeros(len(emb_ids), info['D'], device='cuda')
+for j in range(len(emb_ids)): E.own_emb(emb_w, emb_t.type, info['V'], info['D'], emb_tok[j:j + 1], emb_x[j])
 for t in F.tensors:
-    if t.type not in ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K') or t.name == 'token_embd.weight': continue
+    if t.type not in FMTS or t.name == 'token_embd.weight': continue
     R, _ = t.rows(); K = int(t.shape[0])
     x = (rng.standard_normal(K) * 2).astype(np.float16); x16 = torch.from_numpy(x).cuda(); out = torch.zeros(R, device='cuda')
     raw = t.pread(0, t.n_bytes)
-    if t.type in k3.OWN_1RT_FMT:
-        from caminus.engine.own_layout import q6k_planes
-        w = torch.from_numpy(np.ascontiguousarray(q6k_planes(raw, R, K) if t.type == 'Q6_K' else raw)).cuda()
+    if t.type in ONE_RT:
+        lay = q6k_planes(raw, R, K) if t.type == 'Q6_K' else iq_records(raw, R, K, t.type) if t.type in IQ_REC else raw
+        w = torch.from_numpy(np.ascontiguousarray(lay)).cuda()
         E.own_matvec_1rt(w, t.type, R, K, x16, out, rows_per_task=16)
     else:
         w = torch.from_numpy(np.ascontiguousarray(raw)).cuda()
         E.own_matvec16(w, t.type, R, K, x16, out, rows_per_task=32)
     outs.append((t, x, out, w, x16))
 E.build().run(); torch.cuda.synchronize()
+check(all(np.array_equal(emb_x[j].cpu().numpy().view(np.uint32), own_dequant.rows(emb_t, i, i + 1).reshape(-1).view(np.uint32))
+          for j, i in enumerate(emb_ids)), f'the {emb_t.type} embedding rows bitwise the host decoder ({len(emb_ids)} tokens)')
 for t, x, out, _, _ in outs:
     R, _ = t.rows(); W = own_dequant.rows(t, 0, R).astype(np.float64); xd = x.astype(np.float64)
     rel = float((np.abs(out.double().cpu().numpy() - W @ xd) / (np.abs(W) @ np.abs(xd))).max())
     worst[t.type] = max(worst.get(t.type, 0.0), rel)
-check(set(worst) == {'Q4_K', 'Q6_K', 'Q8_0', 'Q5_K'} and max(worst.values()) < 1e-5,
+check(set(worst) == FMTS - ({'Q4_K'} if TC else set()) and max(worst.values()) < 1e-5,
       f'{len(outs)} matvecs on fp16 activations against float64, worst error / sum |w x| per format: ' +
       ', '.join(f'{k} {v:.1e}' for k, v in sorted(worst.items())) + ' (< 1e-5)')
 F.close(); del E, outs
@@ -164,7 +177,7 @@ if A.model:
     capacity.check([eng.dev], [own], f'test_q35_dense: its own buffers ({NP} positions of logits x 2: {own:.0f} MiB)')
     ids_chk = [0, 1, 785, 6722, 9625, eng.vocab - 1]
     e2 = k3.Engine(module=MOD); tk_d = torch.zeros(len(ids_chk), dtype=torch.int32, device='cuda'); xs = torch.zeros(len(ids_chk), eng.D, device='cuda')
-    for j, t in enumerate(ids_chk): tk_d[j] = t; e2.own_emb(eng.emb_dev, 'Q4_K', eng.vocab, eng.D, tk_d[j:j + 1], xs[j])
+    for j, t in enumerate(ids_chk): tk_d[j] = t; e2.own_emb(eng.emb_dev, eng.emb.type, eng.vocab, eng.D, tk_d[j:j + 1], xs[j])
     e2.build().run(); torch.cuda.synchronize()
     check(all(np.array_equal(xs[j].cpu().numpy().view(np.uint32), own_dequant.rows(eng.emb, t, t + 1).reshape(-1).view(np.uint32))
               for j, t in enumerate(ids_chk)), f'device embedding rows bitwise the host decoder ({len(ids_chk)} tokens)')
