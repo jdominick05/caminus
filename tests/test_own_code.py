@@ -28,6 +28,7 @@ for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3
             'k3_q35_swift.hip', 'k3_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)
             'own_mv_q35.hip',                                 # (its standalone own tiles: ThinkingCap's formats, IQ2_S included)
             'k3_q35_tcap.hip', 'k3_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
+            'q35_prefill_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
             'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip'):   # (its prefill's objects)
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')

@@ -1,5 +1,6 @@
 """G1 of the dense qwen35 line's own prefill (caminus.prefill.q35own): every op but the GEMMs, over a chunk's rows, BITWISE
-its K3 decode op on Swift's decode module (k3_q35_swift) on the same inputs, one token per pass.
+its K3 decode op on the file's decode module (Swift's k3_q35_swift; ThinkingCap's k3_q35_tcap with the q35_prefill_tcap
+object) on the same inputs, one token per pass.
 
   tools/guard.sh LOG 900 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35_prefill_ops.py GGUF
 
@@ -10,7 +11,8 @@ Real norm / conv / gate weights of the file (Tensor.pread: ordinary memory), ran
   GDN        gates (incl. the softplus branches), the conv + its state, l2, the recurrence, the fp16 output norm: 37 rows from
              random conv / recurrent states; the decode's lazy commit (one more pass commits the last token) against the
              prefill's states written once
-  norm       the residual add + RMS norm at 5120 (with and without the add), the F32 alpha matvec, the Q4_K embedding rows,
+  norm       the residual add + RMS norm at 5120 (with and without the add), the F32 alpha matvec (BF16: widened, as the
+             engine loads it), the embedding rows (Q4_K, or ThinkingCap's IQ2_S),
              the fp16 swiglu
 Prints PASS / FAIL lines, the largest attention launch's time, and RESULT PASS | FAIL."""
 import os
@@ -27,7 +29,6 @@ from caminus.device import capacity  # noqa: E402
 from caminus.engine import k3  # noqa: E402
 from caminus.engine.q35_dense import _shapes, block_kinds  # noqa: E402
 
-MOD = 'k3_q35_swift'
 FAILS = []
 
 
@@ -66,14 +67,18 @@ def main():
     f32 = lambda name: torch.from_numpy(np.array(F.T[name].pread(0, F.T[name].n_bytes).view(np.float32))).to(dev)
     ROWS, T, V = 1024, 37, 4096
     CH, KD, VD, QH, M = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd, nkv * hd
-    emb_rb = D // 256 * 144
+    TE = F.T['token_embd.weight'].type
+    TC = TE == 'IQ2_S'
+    MOD = 'k3_q35_tcap' if TC else 'k3_q35_swift'
+    emb_rb = D // 256 * (82 if TC else 144)
+    print(f'NOTE decode module {MOD}, prefill object {"q35_prefill_tcap" if TC else "q35_prefill"}; embedding {TE}', flush=True)
     mib = (2 * ROWS * 2 * M * 2 + 16 * T * (2 * QH + CH + 2 * D + ffn) * 4 + 2 * NV * S * S * 4 + V * emb_rb + NV * D * 4) / capacity.MIB
     capacity.check([dev.index], [mib * 1.5 + 64], 'q35 prefill G1 buffers')   # (before anything is allocated)
     from caminus.prefill.q35own import Ops
     from caminus.prefill.attn import Attn
     from caminus.prefill.gdn import Gdn
     from caminus.prefill.glue import Glue
-    O, A, Gd, Gl = Ops(dev), Attn(dev, name='prefill_attn_q35d'), Gdn(dev, module='prefill_gdn_q35'), Glue(dev, module='prefill_glue_q35d')
+    O, A, Gd, Gl = Ops(dev, module='q35_prefill_tcap' if TC else 'q35_prefill'), Attn(dev, name='prefill_attn_q35d'), Gdn(dev, module='prefill_gdn_q35'), Glue(dev, module='prefill_glue_q35d')
     rng = np.random.default_rng(5)
     put = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(dev)
     z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=dev)
@@ -187,8 +192,10 @@ def main():
         w = 'add + norm' if with_add else 'norm'
         same(f'{w} at {D}: x', x2, ox); same(f'{w} at {D}: h', h2, oh); same(f'{w} at {D}: h16', h162, oh16)
         del E
-    if F.T[f'blk.{ig}.ssm_alpha.weight'].type == 'F32':
-        Wa = f32(f'blk.{ig}.ssm_alpha.weight').view(NV, D)
+    if F.T[f'blk.{ig}.ssm_alpha.weight'].type in ('F32', 'BF16'):
+        ta = F.T[f'blk.{ig}.ssm_alpha.weight']; ra = ta.pread(0, ta.n_bytes)
+        wa = ra.view(np.float32) if ta.type == 'F32' else (ra.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+        Wa = torch.from_numpy(np.array(wa)).to(dev).view(NV, D)
         E = k3.Engine(module=MOD, T=1); hh, oa = z(D), z(NV)
         E.f32_mv(Wa, hh, oa, rows_per_task=4); E.build()
         o1 = z(T, NV)
@@ -201,12 +208,12 @@ def main():
     embw = put(te.pread(0, V * emb_rb))
     toks = [0, 1, 17, 1234, V - 1, 5, 4000]
     E = k3.Engine(module=MOD, T=1); tk, ex = z(1, dt=torch.int32), z(D)
-    E.own_emb(embw, 'Q4_K', V, D, tk, ex); E.build()
+    E.own_emb(embw, TE, V, D, tk, ex); E.build()
     e1 = z(len(toks), D)
     for i, t in enumerate(toks): tk.fill_(t); E.run(); e1[i].copy_(ex)
     tk2 = put(np.array(toks, dtype=np.int32)); e2 = z(len(toks) * D)
-    O.emb(embw, emb_rb, V, tk2, e2, len(toks), D); torch.cuda.synchronize(dev)
-    same('Q4_K embedding rows', e2, e1); del E
+    (O.emb_iq2s if TC else O.emb)(embw, emb_rb, V, tk2, e2, len(toks), D); torch.cuda.synchronize(dev)
+    same(f'{TE} embedding rows', e2, e1); del E
     g = put((rng.standard_normal((T, ffn)) * 3.0).astype(np.float32)); u = put((rng.standard_normal((T, ffn)) * 2.0).astype(np.float32))
     E = k3.Engine(module=MOD, T=1); gg, uu, y16 = z(ffn), z(ffn), z(ffn, dt=torch.float16)
     E.own_swiglu16(gg, uu, y16); E.build()
