@@ -23,7 +23,9 @@ NVIDIA cards and won't work.
 `render` and `video` groups (log out and back in after adding yourself). Other cards: see [hardware](hardware.md).
 
 **"two-card models refused on this pair"**: one of the cards sits on a link slower than PCIe 4.0 x4, or the board doesn't
-allow direct card-to-card access. Move the card to a faster slot. One-card models still run.
+allow direct card-to-card access. Move the card to a faster slot. One-card models still run. When the graphics driver
+reports that it has lowered an idle card's link to save power, the check judges the link at full speed, and
+`caminus doctor` shows the idle reading as "idle now at".
 
 **"the fault watch is off" (GUARD WARNING)**: the guard can't read the kernel log. Add yourself to the `systemd-journal`
 group and log in again.

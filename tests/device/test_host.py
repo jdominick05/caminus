@@ -104,6 +104,59 @@ def main():
           'this layout: a one-card model on the smallest card it fits (11 GiB -> XT, 21 GiB -> XTX)')
     check(H.one(g, lambda c: True, held={'0000:06:00.0'})['label'] == 'XTX', 'this layout: a held card is skipped')
 
+    # -- the driver's link power saving: an idle card's hops read a lower level of pp_dpm_pcie; the link is the fastest level --
+    T16 = ('0: 2.5GT/s, x1 78Mhz', '1: 5.0GT/s, x4 156Mhz', '2: 16.0GT/s, x16 623Mhz')
+    T4 = ('0: 2.5GT/s, x1 78Mhz', '1: 5.0GT/s, x4 156Mhz', '2: 16.0GT/s, x4 623Mhz')
+
+    def dpm(r, name, levels, star):
+        w(os.path.join(r, 'sys', 'class', 'drm', name, 'device', 'pp_dpm_pcie'),
+          ''.join(f'{lv} *\n' if i == star else f'{lv}\n' for i, lv in enumerate(levels)))
+
+    def idle(tag, xtx_link, xtx_star, levels=T16):
+        r = tree(os.path.join(S, tag), [card('card1', '0000:03:00.0', XTX, 128, display=True, link=xtx_link),
+                                        card('card2', '0000:06:00.0', XT, 129, link=(16.0, 4))])
+        dpm(r, 'card1', levels, xtx_star); dpm(r, 'card2', T4, 2)
+        return H.gpus(r)
+
+    check(H.dpm_link(os.path.join(S, 'this', 'sys', 'class', 'drm', 'card1', 'device')) == (None, None), 'no pp_dpm_pcie: no table')
+    g = idle('idle0', (2.5, 1), 0)
+    lk = g[0]['link']
+    check(H.link_text(lk) == 'PCIe 4.0 x16' and g[0]['link_ok'] and H.link_lowered(lk) and (lk['now_gts'], lk['now_width']) == (2.5, 1),
+          f'an idle XTX at the table\'s lowest level (hops read 2.5 GT/s x1): its link is the fastest level, the reading kept ({H.link_text(lk)}, now {lk["now_gts"]:g} GT/s x{lk["now_width"]})')
+    p = H.pair(g)
+    check(labels(p) == ['XTX', 'XT'] and H.link_side(p) == 1 and H.problems(g) == [] and not H.link_lowered(g[1]['link'])
+          and H.link_text(g[1]['link']) == 'PCIe 4.0 x4',
+          'an idle XTX: the pair, the exchange side and the report are those of the busy machine')
+    g = idle('idle1', (5.0, 4), 1)
+    check(H.link_text(g[0]['link']) == 'PCIe 4.0 x16' and g[0]['link_ok'], 'an idle XTX at the middle level: the same')
+    g = idle('full', (16.0, 16), 2)
+    check(not H.link_lowered(g[0]['link']) and g[0]['link']['at'] == '0000:03:00.0' and H.link_text(g[0]['link']) == 'PCIe 4.0 x16',
+          'the table at its fastest level: the link is the reading')
+    for tag, lnk, star, what in (('slow-top', (2.5, 1), 2, 'the table says the fastest level and a hop reads 2.5 GT/s x1'),
+                                 ('slow-nostar', (2.5, 1), None, 'no level is marked current and a hop reads 2.5 GT/s x1'),
+                                 ('slow-below', (2.5, 1), 1, 'a hop reads slower than the level the table marks current')):
+        g = idle(tag, lnk, star)
+        ok, msg = refuses(lambda: H.pair(g), 'XTX', 'PCIe 1.0 x1', 'PCIe 4.0 x4')
+        check(ok and not g[0]['link_ok'] and not H.link_lowered(g[0]['link']), f'{what}: judged as it reads, the pair refused ({msg})')
+    g = idle('slot-x1', (2.5, 1), 0, levels=('0: 2.5GT/s, x1 78Mhz', '1: 8.0GT/s, x4 156Mhz'))
+    check(not g[0]['link_ok'] and H.link_text(g[0]['link']) == 'PCIe 3.0 x4' and refuses(lambda: H.pair(g), 'PCIe 3.0 x4')[0],
+          'an idle card whose fastest level is below the minimum: refused by that level, not by the idle reading')
+    # a lowered card behind a slower link the driver does not set (on a real board a chipset uplink; in this fixture the
+    # path's top hop stands for it, the hops below it read the lowered level): that link caps it, at its own reading
+    r = tree(os.path.join(S, 'uplink'), [card('card1', '0000:03:00.0', XTX, 128, display=True, link=(16.0, 4)),
+                                         card('card2', '0000:06:00.0', XT, 129, link=(16.0, 4))])
+    up = os.path.join(r, 'sys', 'devices', 'pci0000:00', '0000:00:01.1', '0000:01:00.0')
+    for d in (up, os.path.join(up, '0000:02:00.0'), os.path.join(up, '0000:02:00.0', '0000:03:00.0')):
+        w(os.path.join(d, 'current_link_speed'), '2.5 GT/s PCIe\n'); w(os.path.join(d, 'current_link_width'), '1\n')
+    dpm(r, 'card1', T16, 0); dpm(r, 'card2', T4, 2)
+    g = H.gpus(r)
+    check(H.link_text(g[0]['link']) == 'PCIe 4.0 x4' and g[0]['link']['at'] == '0000:00:01.1' and H.link_lowered(g[0]['link'])
+          and g[0]['link_ok'], f'a lowered card behind an x4 link the driver does not set: judged at that x4 ({H.link_text(g[0]["link"])} at {g[0]["link"]["at"]})')
+    r = tree(os.path.join(S, 'apu-table'), [card('card1', '0000:03:00.0', XTX, 128, link=(8.0, 4))])
+    w(os.path.join(r, 'sys', 'class', 'drm', 'card1', 'device', 'pp_dpm_pcie'), '\n')
+    g = H.gpus(r)
+    check(H.link_text(g[0]['link']) == 'PCIe 3.0 x4' and not H.link_lowered(g[0]['link']), 'an empty table (an APU\'s): the reading')
+
     # -- the DRM order swapped (the XT is card1 / HIP 0): the engine order still puts the XTX first ------------------------
     r = tree(os.path.join(S, 'swapped'), [card('card1', '0000:03:00.0', XT, 128), card('card2', '0000:06:00.0', XTX, 129, display=True)])
     p = H.pair(H.gpus(r))
