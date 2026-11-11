@@ -4,6 +4,8 @@
 
 <p align="center">
   <a href="https://pypi.org/project/caminus/"><img src="https://img.shields.io/pypi/v/caminus?label=pypi&labelColor=3b4252&color=88c0d0" alt="PyPI version"></a>
+  <a href="https://github.com/jdominick05/caminus/releases/latest"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?label=release&labelColor=3b4252&color=5e81ac" alt="newest release"></a>
+  <a href="https://github.com/jdominick05/caminus/releases"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?include_prereleases&filter=*.dev*&label=nightly&labelColor=3b4252&color=a3be8c" alt="newest nightly build"></a>
   <img src="https://img.shields.io/badge/status-early%20testing-ebcb8b?labelColor=3b4252" alt="status: early testing">
   <a href="docs/hardware.md"><img src="https://img.shields.io/badge/GPU-RX%207900%20XTX%20%2F%20XT-8fbcbb?labelColor=3b4252" alt="GPU: RX 7900 XTX / XT"></a>
   <img src="https://img.shields.io/badge/Linux-Python%203.12-81a1c1?labelColor=3b4252&logo=linux&logoColor=d8dee9" alt="Linux, Python 3.12">
@@ -39,6 +41,12 @@ caminus panel
 
 In the panel you download a model, start it, and open Qwen Code on it. The [quickstart](docs/quickstart.md) walks you
 through it in about ten minutes, plus the download.
+
+**Nightly builds.** When the `testing` branch changes, it is built overnight and published as a
+[pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
+release will have, tested less. To try one, install the wheel attached to it, for example
+`pip install https://github.com/jdominick05/caminus/releases/download/v0.2.2.dev20261111/caminus-0.2.2.dev20261111-py3-none-any.whl`,
+and please report what breaks.
 
 ## Supported hardware
 
