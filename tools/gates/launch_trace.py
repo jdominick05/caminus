@@ -45,8 +45,11 @@ SHADER = re.compile(r'(?:Graph )?ShaderName : (.+?)(?:, device id : \d+)?[ \t]*$
 PROBE_CHILD = '''import sys, ctypes
 sys.path.insert(0, {py!r})
 import torch
+from caminus.device import capacity
 from caminus.device.hip import Module
-m = Module('smoke'); n = 1 << 16
+n = 1 << 16
+capacity.check([0], [2 * n * 4 / capacity.MIB], 'launch_trace probe buffers')   # (before anything is allocated)
+m = Module('smoke')
 x = torch.ones(n, device='cuda'); y = torch.ones(n, device='cuda')
 m.saxpy(((n + 255) // 256,), (256,), y, x, ctypes.c_float(2.0), ctypes.c_int(n)); torch.cuda.synchronize()
 print('PROBE DONE', flush=True)
