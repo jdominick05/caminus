@@ -41,7 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(os.pat
 sys.path.insert(0, os.path.join(ROOT, 'tools')); sys.path.insert(0, os.path.join(ROOT, 'python'))
 import serve_smoke as S   # noqa: E402  (request / SSE helpers, check, safe_dir, FAILS)
 
-SHADER = re.compile(r'(?:Graph )?ShaderName : (.+?)(?:, device id : \d+)?\s*$')   # (the whole name: C++ ones hold spaces)
+SHADER = re.compile(r'(?:Graph )?ShaderName : (.+?)(?:, device id : \d+)?[ \t]*$', re.M)   # (the whole name: C++ ones hold spaces)
 PROBE_CHILD = '''import sys, ctypes
 sys.path.insert(0, {py!r})
 import torch
