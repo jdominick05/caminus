@@ -89,6 +89,8 @@ def iq_from_records(rec, rows, K, fmt):
 # container type -> (bits per code, values per block, block bytes): d (fp16) then the codes
 RS_CONT = {'Q4_0': (4, 32, 18), 'Q2_0': (2, 64, 18)}
 _RS_SH = np.array([0, 2, 4, 6], dtype=np.uint8)
+# a container byte's four 2-bit values, one per byte of a dword (value k in byte k)
+_RS_SPREAD = np.array([(v & 3) | ((v >> 2) & 3) << 8 | ((v >> 4) & 3) << 16 | ((v >> 6) & 3) << 24 for v in range(256)], dtype='<u4')
 
 
 def rs_planes(raw, rows, K, fmt):
@@ -105,12 +107,12 @@ def rs_planes(raw, rows, K, fmt):
     if bits == 4: return np.ascontiguousarray(b[:, :, 2:]).reshape(-1), scales
     # 2 bits: the container's byte B holds values 4 B .. 4 B + 3 at bits 0, 2, 4, 6; the kernel's dword of 16 values
     # holds value 4 i + k at bits 8 k + 2 i, so (dword >> 2 i) & 0x03030303 is values 4 i .. 4 i + 3 as four bytes
-    out = np.empty((rows, K // 16, 4), dtype=np.uint8)
-    for r0 in range(0, rows, 8192):   # (a slice of rows at a time: the unpacked values are four times the codes)
-        q = np.ascontiguousarray(b[r0:r0 + 8192, :, 2:]).reshape(-1, K // 16, 4)
-        c = (q[..., None] >> _RS_SH) & 3                                   # [rows, dwords, i, k] = value 4 i + k
-        out[r0:r0 + 8192] = c[..., 0, :] | (c[..., 1, :] << 2) | (c[..., 2, :] << 4) | (c[..., 3, :] << 6)
-    return out.reshape(-1), scales
+    # (by table: container byte i of a dword spreads its four values over the dword's four bytes, shifted left by 2 i)
+    out = np.empty((rows, K // 16), dtype='<u4')
+    for r0 in range(0, rows, 16384):   # (a slice of rows at a time: the table's dwords are four times the codes)
+        q = _RS_SPREAD[np.ascontiguousarray(b[r0:r0 + 16384, :, 2:]).reshape(-1, K // 16, 4)]
+        out[r0:r0 + 16384] = q[..., 0] | (q[..., 1] << 2) | (q[..., 2] << 4) | (q[..., 3] << 6)
+    return out.view(np.uint8).reshape(-1), scales
 
 
 def rs_from_planes(codes, scales, rows, K, fmt):
