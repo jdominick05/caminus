@@ -109,9 +109,9 @@ export HF_TOKENIZER_JSON=/path/to/tokenizer.json   # optional: two tokenizer cro
 ## Commands
 
 ```
-./build.sh                                          # kernels -> build/*.hsaco (+ C++ runtime tests); ROCM_PATH, IGNITE, TORCHLIB, PATCHELF
+./build.sh                                          # kernels -> build/*.hsaco (+ C++ runtime tests); ROCM_PATH, IGNITE, TORCHLIB, PATCHELF; BUILD_JOBS compiles at once (same bytes at any count)
 (cd panel && go build -o caminus-panel . && go test ./...)
-python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI runs them (a FRESH DIR; skips with the reason what's missing)
+python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI runs them (a FRESH DIR; skips with the reason what's missing; --jobs N suites at once)
 python -I tools/release/privacy_scan.py .           # no secrets, machine paths or session links in the tree (CI runs it)
 python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
 tools/release/release_build.sh                      # reproducible release files from a clean clone at a tag (docs/dev/releasing.md)
