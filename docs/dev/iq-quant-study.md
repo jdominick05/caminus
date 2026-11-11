@@ -444,3 +444,35 @@ reference; llama.cpp fills the prompt in batches and decodes the same 64. B, C a
 - Both engines are further from the reference here than at 128 tokens (the engine's means are 3 to 30 times
   larger). Which stage that comes from was not measured.
 
+### Prefill (H3), RX 7900 XT then RX 7900 XTX
+
+The codebook formats' prefill GEMMs are a study object of their own (`kernels/q3m_prefill_iq.hip`: the shipped
+prefill object plus four kernels, weights exact in the WMMA's B operand). Gates on both cards:
+`tests/prefill/test_q3m_iq_ops.py` (every role and format against float64 on real expert rows: worst row 9.6e-6 of
+the rms) and `tests/prefill/test_q3m_prefill.py` per arm (64 positions prefilled, 64 decoded, against the arm's fp32
+reference; chunk geometry changes no bit):
+
+| Arm | Prefill then decode, mean KLD | Decode only | llama.cpp prefill then decode | Top-1, Caminus / llama.cpp |
+|---|---|---|---|---|
+| B | 7.44e-05 | 1.38e-04 | 1.83e-03 | 64 / 63 |
+| C | 2.21e-04 | 2.27e-04 | 2.24e-03 | 64 / 63 |
+| D (not scored) | 4.90e-05 | 5.62e-05 | 4.26e-03 | 64 / 64 |
+
+`benchmarks/q3moe_prefill.py --lengths 512,4096 --chunk 1024 --rounds 3`, the arms interleaved as separate processes,
+twice; prompt tokens per second at 4,096 tokens (prefill), both runs:
+
+| Arm | RX 7900 XT | RX 7900 XTX | Against A on the XTX |
+|---|---|---|---|
+| A, shipped object | 4,364 / 4,362 | 5,852 / 5,839 | |
+| A, study object | 4,364 / 4,361 | 5,839 / 5,832 | |
+| B | 4,125 / 4,118 | 5,521 / 5,522 | 5.4 % slower |
+| C | 4,115 / 4,110 | 5,494 / 5,524 | 5.6 to 5.9 % slower |
+| D (not scored) | 4,149 / 4,142 | 5,566 / 5,584 | 4.4 to 4.7 % slower |
+
+- **H3 is not failed** (no codebook arm reaches A's prompt speed) and **B is inside its range** (within 10 % of A).
+  **C's range is missed on the fast side:** predicted 10 to 40 % slower, measured 5.6 to 5.9 % (D, unscored, 4.4 to
+  4.7 %). The RX 7900 XT gives the same picture (5.0 to 5.8 % slower).
+- The study object costs arm A nothing in prefill (within 0.2 %).
+- As in decode, the smaller files do not read a prompt faster: prefill is bound by the matrix products, and a
+  codebook block costs a little more to turn into a WMMA operand than a Q4_K block.
+
