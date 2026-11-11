@@ -93,7 +93,7 @@ CATALOG = (
     _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
            '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
     _model('swift-1.5', 'Swift 1.5 (Qwen3.8 27B dense) Q4_K_M (own code end to end)', 'qwen35-own', ('swift-1.5',), 'swift-1.5',
-           '36 tok/s decode on an XT, 42 on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'one card; no drafter yet'),
+           '42 tok/s decode on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'the 24 GB card only; no drafter yet'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )
