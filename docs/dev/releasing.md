@@ -100,7 +100,9 @@ person approves a nightly, so its verify job is the gate between a published pre
 - the tag has the nightly form and its Release is a pre-release;
 - `nightly_plan.py check-tag --branch origin/testing`: the tag's commit has one parent, the parent is a commit of
   `testing`, and the commit changes only `python/caminus/__init__.py` (its `__version__` line, to the tag's version) and the
-  hashes file (hash lines only);
+  hashes file (hash lines only). The job runs **`testing`'s copy of the checker** (a second checkout) on the tag's
+  repository, before any file of the tag runs: a tag that passes holds no tool that `testing` does not, so the tag's
+  own `verify_release.py` below is reviewed code;
 - a completed, successful `ci.yml` push run exists on that parent;
 - `verify_release.py --tag`: everything it checks for a release, which includes that every package file in the wheel is
   the checkout's tracked file byte for byte. Only the code objects, their provenance and the panel come from the
@@ -111,7 +113,12 @@ with twine 6.1.0 through PyPI Trusted Publishing: the job's OIDC identity is exc
 (PyPI's documented manual exchange), so no PyPI secret is stored for it. It runs only when the repository variable
 `NIGHTLY_PYPI` is `true`. The PyPI project's trusted publisher names owner `jdominick05`, repository `caminus`, workflow
 `nightly.yml` and environment `pypi-nightly`; the environment is limited to tags matching `v*.dev*`, so a run by hand
-names the tag as its ref too: `gh workflow run nightly.yml --ref vX.Y.Z.devYYYYMMDD -f tag=vX.Y.Z.devYYYYMMDD`.
+names the tag as its ref too: `gh workflow run nightly.yml --ref vX.Y.Z.devYYYYMMDD -f tag=vX.Y.Z.devYYYYMMDD` (GitHub
+starts a workflow by hand only once its file is on the default branch, `main`).
+
+What the gate does not guard: for a release event GitHub runs `nightly.yml` as the tag's commit holds it. So the gate
+catches a faulty or altered build from the maintainer's machine; it does not stop someone who can already push tags
+and publish releases in this repository.
 
 What a nightly is not: a release's GPU gates and manual tests (step 5 of "Making a release") are not run on it. Every
 change in it passed its own pull request's gates on the way into `testing`.

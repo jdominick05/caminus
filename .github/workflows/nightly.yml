@@ -5,6 +5,10 @@
 # No person approves a nightly, so verify is the gate: the tag is one commit on top of a commit of `testing` that changes
 # only the version line and the code-object hashes, CI was green on that commit, and the files are the tag's
 # (tools/release/verify_release.py: versions, hashes, provenance, every package file byte for byte the checkout's).
+# The tag is checked by the checker of `testing` itself (a second checkout), before any file of the tag runs: a tag that
+# passes holds no tool that `testing` does not, so the tag's own verify_release.py is then reviewed code.
+# What this does not guard: for a release event GitHub runs this file as the tag's commit holds it, so the gate catches
+# a faulty or altered build, not someone who can already push tags and publish releases here.
 # The upload uses PyPI Trusted Publishing (a short-lived token minted from this job's OIDC identity; no stored secret) and
 # runs only when the repository variable NIGHTLY_PYPI is 'true': the trusted publisher on PyPI names this workflow file and
 # the environment pypi-nightly.
@@ -56,9 +60,19 @@ jobs:
           pre=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft --jq '.isPrerelease and (.isDraft | not)')
           if [ "$pre" != true ]; then echo "::error::the Release of $TAG is not a published pre-release"; exit 1; fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # the checker comes from `testing` (reviewed code), never from the tag it checks
+      - name: Check out testing (the trusted tools)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: testing
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out the tag (the candidate; nothing in it runs before the tag check passes)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
+          path: candidate
           fetch-depth: 0
           persist-credentials: false
 
@@ -69,12 +83,12 @@ jobs:
       - name: twine
         run: python -m pip install twine==6.1.0 'pkginfo>=1.12'
 
-      - name: The tag is one version-and-hashes commit on top of a commit of testing
-        run: python -I tools/release/nightly_plan.py check-tag "$TAG" --branch origin/testing
+      - name: The tag is one version-and-hashes commit on top of a commit of testing (testing's checker on the tag's repository)
+        run: python -I trusted/tools/release/nightly_plan.py --repo candidate check-tag "$TAG" --branch origin/testing
 
       - name: CI was green on that commit
         run: |
-          base=$(git rev-parse "refs/tags/$TAG^{commit}^")
+          base=$(git -C candidate rev-parse "refs/tags/$TAG^{commit}^")
           green=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$base" --event push --json status,conclusion \
                     --jq 'map(select(.status == "completed" and .conclusion == "success")) | length')
           echo "$base: $green successful ci.yml push run(s)"
@@ -87,8 +101,10 @@ jobs:
              --pattern 'caminus-*.whl' --pattern 'caminus-*.tar.gz' --pattern SHA256SUMS
           ls -l "$RUNNER_TEMP/dist"
 
+      # (the tag's own copy: it compares the files with its own checkout, and the tag check above proved it is a copy that
+      # a commit of testing holds)
       - name: Verify (versions, SHA256SUMS, provenance == this commit, package files == this checkout, code objects == the committed hashes)
-        run: python -I tools/release/verify_release.py "$RUNNER_TEMP/dist" --tag "$TAG"
+        run: python -I candidate/tools/release/verify_release.py "$RUNNER_TEMP/dist" --tag "$TAG"
 
       - name: twine check
         run: python -m twine check --strict "$RUNNER_TEMP"/dist/caminus-*

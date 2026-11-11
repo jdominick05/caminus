@@ -47,7 +47,7 @@ token kept in a desktop keyring when nobody is logged in (set `GH_TOKEN` in the 
   last two build directories and deletes older ones.
 - **A failed night** changes nothing public unless it died between pushing the tag and creating the pre-release; the next
   run finishes that from the tag. A pre-release whose PyPI upload failed: run the `nightly` workflow by hand on the tag
-  (`gh workflow run nightly.yml --ref <tag> -f tag=<tag>`).
+  (`gh workflow run nightly.yml --ref <tag> -f tag=<tag>`; GitHub allows that once `nightly.yml` is on `main`).
 - **One nightly a day at most**, and none when `testing` did not move: a PyPI version is published once.
 - **The service runs the head of `testing`** (it updates its clone first), with the account's GitHub rights. It builds
   and runs only what was merged there.
