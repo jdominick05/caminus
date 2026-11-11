@@ -13,7 +13,8 @@
 #   1. nothing, when $NIGHTLY_HOME/HOLD exists or a guarded GPU job other than the server is running (two kernel builds
 #      would disturb its timings); the commit is picked up by the next run
 #   2. reads the branch head and the nightly tags; a head whose nightly tag and pre-release both exist is done. The test
-#      is stateless (tools/release/nightly_plan.py built): a skipped or failed night repairs itself at the next run
+#      is stateless (tools/release/nightly_plan.py built): a skipped or failed night repairs itself at the next run,
+#      up to the pre-release. The start of the PyPI workflow (step 7) is the one step no later run repeats
 #   3. needs a completed, successful ci.yml push run on that commit
 #   4. clone A at the head: release_build.sh --write-hashes (the kernels, built by the real toolchain), then ONE commit
 #      on top of the head holding the version X.Y.Z.devYYYYMMDD and that build's code-object hashes, tagged

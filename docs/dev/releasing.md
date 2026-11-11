@@ -92,6 +92,8 @@ midnight (local time) by a systemd user timer ([packaging/nightly/](../../packag
 6. checks the tag (`nightly_plan.py check-tag`) and scans the tagged tree (`privacy_scan.py`), and only then pushes the
    tag and creates the pre-release (`--prerelease --latest=false`, so the "Latest" release stays the last real one);
 7. starts `nightly.yml` on the branch for that tag (`gh workflow run nightly.yml --ref testing -f tag=vX.Y.Z.devYYYYMMDD`).
+   This is the one step a later run does not repeat: a start that failed or was refused is done by hand with that
+   command (`~/.local/state/caminus-nightly/last` says so).
 
 `tools/release/nightly.sh --dry-run` does everything except the push, the pre-release and that start.
 
