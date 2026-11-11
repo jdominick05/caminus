@@ -33,6 +33,8 @@ ap.add_argument('gguf')
 ap.add_argument('--rounds', type=int, default=5)
 ap.add_argument('--layers', type=int, default=None, help='the first N layers (default: all)')
 ap.add_argument('--roles', default=None, help='comma-separated roles (default: all), e.g. ffn_gate_exps,ffn_down_exps')
+ap.add_argument('--q5k', choices=('1rt', 'general'), default='1rt', help='dense: the Q5_K tile (own_rows_q5k_1rt or the general rows tile)')
+ap.add_argument('--formats', default=None, help='comma-separated formats to time (default: all)')
 ap.add_argument('--log', default=None, help='append the result lines to this file too')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
@@ -44,6 +46,7 @@ DENSE = F.meta.get('general.architecture') == 'qwen35' and F.hp('expert_count') 
 KU, NE = (1, 1) if DENSE else (int(F.hp('expert_used_count')), int(F.hp('expert_count')))
 if DENSE: NL = min(A.layers or 10 ** 6, int(F.hp('block_count')) - int(F.hp('nextn_predict_layers', 0)))   # (the trunk)
 OWNQ = Module('own_mv_q35') if DENSE else None
+GEN = ('Q8_0',) if A.q5k == '1rt' else ('Q5_K', 'Q8_0')   # (the general rows tiles: 4 rows per wave)
 OUT = []
 
 
@@ -71,7 +74,8 @@ def slice_bytes(t, e, rows, K):
 def own_kernel(fmt, K):
     if DENSE:   # (K3's form: runtime K; Q5_K / Q8_0 the general rows tiles OP_OWN_MV16 runs, 4 rows per wave)
         nm = {'IQ4_XS': 'own_mv_iq4xs_k3', 'IQ3_XXS': 'own_mv_iq3xxs_k3', 'IQ3_S': 'own_mv_iq3s_k3', 'IQ2_S': 'own_mv_iq2s_k3',
-              'Q6_K': 'own_mv_q6_k_pl_k3', 'Q5_K': 'own_mv_q5_k_a16', 'Q8_0': 'own_mv_q8_0_a16'}.get(fmt)
+              'Q6_K': 'own_mv_q6_k_pl_k3', 'Q5_K': 'own_mv_q5_k_k3' if A.q5k == '1rt' else 'own_mv_q5_k_a16',
+              'Q8_0': 'own_mv_q8_0_a16'}.get(fmt)
         return getattr(OWNQ, nm) if nm else None
     nm = {'Q4_K': f'own_mv_q4_k_1rt_k{K}', 'Q6_K': f'own_mv_q6_k_pl_k{K}', 'IQ4_XS': f'own_mv_iq4xs_1rt_k{K}_r2',
           'IQ3_XXS': f'own_mv_iq3xxs_1rt_k{K}_r2', 'IQ3_S': f'own_mv_iq3s_1rt_k{K}_r2',
@@ -106,6 +110,7 @@ for role in ROLES:
         rows, K, ne = shape_of(t)
         groups.setdefault((t.type, rows, K, ne), []).append(t)
     for (fmt, rows, K, ne), ts in groups.items():
+        if A.formats and fmt not in A.formats.split(','): continue
         rb = ts[0].n_bytes // ne // rows
         per = PER_TOKEN[role] * len(ts) // sum(len(v) for v in groups.values())   # this group's share of the role's matvecs
         mat_bytes = rows * rb
@@ -139,7 +144,7 @@ for role in ROLES:
             e = np.abs(out.double().cpu().numpy()[srows] - yref) / sc; acc['llama'] = (e.mean(), np.percentile(e, 99))
         if kown:
             if not DENSE: run_own = lambda w: kown(((rows + 15) // 16,), (256,), w, ctypes.c_int(rows), x16, out)
-            else: run_own = lambda w: kown(((rows + (31 if fmt in ('Q5_K', 'Q8_0') else 15)) // (32 if fmt in ('Q5_K', 'Q8_0') else 16),),
+            else: run_own = lambda w: kown(((rows + (31 if fmt in GEN else 15)) // (32 if fmt in GEN else 16),),
                                            (256,), w, ctypes.c_int(rows), ctypes.c_int(K), x16, out)
             out.zero_(); run_own(Wo[0]); torch.cuda.synchronize()
             e = np.abs(out.double().cpu().numpy()[srows] - yref) / sc; acc['own'] = (e.mean(), np.percentile(e, 99))

@@ -7,6 +7,7 @@
 #include "own_quant.h"
 #include "own_quant_iq.h"
 #include "own_quant_iq2s.h"
+#include "own_quant_q5k.h"
 
 // K3's form of each tile (kernels/k3_own_ops.h own_1rt_acc: runtime K, 2 rows per wave, one unit per lane per pass,
 // UNR 1 behind the scheduling fences): the code a decode module runs, at any of the K values above. (The default
@@ -27,6 +28,10 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_iq2s_k3(const uint8_t *
         float * out) {
     iq2s_stage(threadIdx.x);
     Q35_ROW0; if (row0 < nrows) own_rows_iq2s_1rt<0, 2, 1, 1>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31, K);
+}
+extern "C" __global__ void __launch_bounds__(256) own_mv_q5_k_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
+        float * out) {
+    Q35_ROW0; if (row0 < nrows) own_rows_q5k_1rt<0, 2, 1, 1>(W, row0, nrows, x16, out, threadIdx.x & 31, K);
 }
 extern "C" __global__ void __launch_bounds__(256) own_mv_q6_k_pl_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
         float * out) {
