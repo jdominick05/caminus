@@ -15,6 +15,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'python'))
+os.environ['CAMINUS_ALLOW_PAUSED'] = '1'   # (the paused models' entries are fixtures here: tests/cmd/test_manage.py checks the pause)
 
 FAILS = []
 

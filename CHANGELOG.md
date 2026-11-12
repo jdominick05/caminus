@@ -56,6 +56,13 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   (`kernels/own_topk.hip`), with a fixed order among equal values, so reruns pick the same candidates. PyTorch still
   allocates the GPU memory and loads the HIP runtime.
 
+### Changed
+
+- **Qwen3.6 and Qwen3-Coder-Next are paused for this release.** They aren't measured on the current code, so the panel
+  and `caminus models` no longer list them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the
+  reason. The brain / hands team (AREX-2 + Qwen3.6) is paused with them. This release ships the Qwen3.8 Coder, AREX-2,
+  Swift 1.5, ThinkingCap and Qwen3-30B-A3B. `CAMINUS_ALLOW_PAUSED=1` still serves the paused models, unmeasured.
+
 ### Fixed
 
 - **The two-card check re-reads a PCIe link before refusing a card, and judges a link the driver has lowered at full

@@ -119,6 +119,10 @@ column above are `offline`, `loading`, `idle` / `quiet`, `between`, `waiting`, `
 
 ## The brain / hands team
 
+> [!NOTE]
+> **Paused for this release**, with Qwen3.6 (its hands): `b` and `caminus start --team brain-hands` say so and start
+> nothing. It comes back with Qwen3.6.
+
 With two cards you can run two models together: AREX-2 plans on the 24 GB card (the brain) and Qwen3.6 does the work on
 the other card (the hands). Press `b` in the advanced layout, or run `caminus start --team brain-hands`. Qwen Code then
 uses the brain as its main model and hands tasks to Qwen3.6.

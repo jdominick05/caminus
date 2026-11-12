@@ -68,7 +68,7 @@ A running server answers on your own machine only:
 | OpenAI base URL | `http://127.0.0.1:8092/v1` |
 | Anthropic base URL | `http://127.0.0.1:8092` |
 | API key | anything: the server doesn't check it |
-| Model name | the server's id, for example `qwen3.6` or `qwen3.6-nothink` ([the names](models.md#the-names-your-tools-use)) |
+| Model name | the server's id, for example `thinkingcap` or `thinkingcap-nothink` ([the names](models.md#the-names-your-tools-use)) |
 
 The first server takes port 8092, the next 8093, and so on. `caminus ps` shows each server's address. Both APIs support
 streaming and tool calls. Don't expose the port to your network: there's no authentication.
@@ -82,7 +82,7 @@ own under `~/.config/caminus/`, so your own settings stay where they are. Instal
 | Tool | Run | Notes |
 |---|---|---|
 | Hermes Agent | `packaging/harness/hermes/hermes-k3` | Set up for `coder`. For another model, edit the model names in `~/.config/caminus/hermes-home/config.yaml` after the first run. |
-| Claude Code | `packaging/harness/claude-code/claude-k3` | Set up for `coder`. For another model: `CAMINUS_MODEL=qwen3.6 CAMINUS_SMALL_MODEL=qwen3.6-nothink packaging/harness/claude-code/claude-k3`. It never sends a real Anthropic key. |
+| Claude Code | `packaging/harness/claude-code/claude-k3` | Set up for `coder`. For another model: `CAMINUS_MODEL=thinkingcap CAMINUS_SMALL_MODEL=thinkingcap-nothink packaging/harness/claude-code/claude-k3`. It never sends a real Anthropic key. |
 
 Each time it starts, the Hermes wrapper sets its context length to what the running server holds. Claude Code doesn't
 read a context size from the server: with a model whose context is below about 200K tokens it can send a prompt the server

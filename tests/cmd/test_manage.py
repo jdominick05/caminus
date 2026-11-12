@@ -12,6 +12,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
+# the paused models (caminus.models.PAUSED) stay in these fixtures; paused_checks() runs a child without the variable
+PAUSED_ENV = {k: v for k, v in os.environ.items() if k != 'CAMINUS_ALLOW_PAUSED'}
+os.environ['CAMINUS_ALLOW_PAUSED'] = '1'
 
 FAILS = []
 
@@ -344,8 +347,50 @@ def main():
     check(st_['home'] == home and st_['target'] == 'qwen3.6', f"qwen-code status: home {st_['home']}, set up for {st_['target']}")
     check(not os.path.exists(os.path.expanduser('~/.qwen/settings.json.bak-x')), 'qwen-code: nothing written under ~/.qwen')
 
+    paused_checks(S)
     print(f'RESULT {"PASS" if not FAILS else "FAIL (" + str(len(FAILS)) + ")"}')
     return 0 if not FAILS else 1
+
+
+PAUSED_CHILD = r'''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from caminus import arch, models
+from caminus.cmd import download, manage
+out = dict(catalog=[m.name for m in models.CATALOG], all=[m.name for m in models.ALL])
+out['pull'] = manage.cmd_pull(['qwen3.6', '--dry-run'])
+out['download'] = download.main(['--model', 'qwen3-coder-next', '--dry-run'])
+try:
+    manage.start_one('qwen3.6-hauhau', wait=False); out['start'] = 'started'
+except manage.ManageError as e:
+    out['start'] = str(e)
+out['team'] = manage.cmd_start(['--team', 'brain-hands', '--json'])
+out['serve'] = {a: arch.paused(arch.ARCHS[a]) for a in ('qwen35moe', 'qwen3next', 'qwen35', 'qwen35-own', 'qwen3moe', 'qwen4exp')}
+print(json.dumps(out))
+'''
+
+
+def paused_checks(S):
+    """without CAMINUS_ALLOW_PAUSED: the paused models are left out of the catalog and refused by pull, download, start and
+    caminus serve's architecture check, each with the reason; the five shipped models stay"""
+    env = dict(PAUSED_ENV, CAMINUS_CONFIG=os.path.join(S, 'paused-none.toml'), CAMINUS_MODEL_DIR=os.path.join(S, 'paused-models'))
+    r = subprocess.run([sys.executable, '-I', '-c', PAUSED_CHILD, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python')],
+                       capture_output=True, text=True, env=env)
+    try:
+        o = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        check(False, f'paused: the child printed no JSON (rc {r.returncode}): {r.stderr[-400:]}'); return
+    check(o['catalog'] == ['coder', 'arex-2', 'swift-1.5', 'thinkingcap', 'qwen3-30b-a3b'] and len(o['all']) == 8,
+          f'paused: the catalog offers the five shipped models ({o["catalog"]}), the tree keeps all eight')
+    check(o['pull'] == 2 and o['download'] == 2 and 'paused' in r.stderr and 'Qwen3-Coder-Next is paused' in r.stderr,
+          f'paused: caminus pull / caminus download refuse a paused model with the reason (pull {o["pull"]}, download {o["download"]})')
+    check('paused' in o['start'], f'paused: caminus start refuses a paused model ({o["start"]})')
+    check(o['team'] not in (0, None) and 'brain-hands team is paused' in r.stdout + r.stderr,
+          f'paused: caminus start --team brain-hands is refused before any server starts (rc {o["team"]})')
+    sv = o['serve']
+    check(all(sv[a] and 'CAMINUS_ALLOW_PAUSED=1' in sv[a] for a in ('qwen35moe', 'qwen3next'))
+          and not any(sv[a] for a in ('qwen35', 'qwen35-own', 'qwen3moe', 'qwen4exp')),
+          'paused: caminus serve refuses the qwen35moe and qwen3next architectures only (AREX-2\'s qwen35 is served)')
 
 
 if __name__ == '__main__':

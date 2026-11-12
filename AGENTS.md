@@ -6,9 +6,8 @@ CLAUDE.md imports this file.
 ## What this is
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
-- It serves eight models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
-  cards, with the DFlash2 drafter), Qwen3.6-35B-A3B GSQ and HauhauCS (one card), AREX-2 27B (one card, dense),
-  Qwen3-Coder-Next (two cards), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
+- It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
+  cards, with the DFlash2 drafter), AREX-2 27B (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 also takes
   `--draft mtp` (its own multi-token-prediction block on one card; `decode/mtp35.py`). `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
@@ -77,6 +76,10 @@ CLAUDE.md imports this file.
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
+- Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS) and Qwen3-Coder-Next. Their engines and kernels stay; `models.PAUSED` keeps them
+  out of the catalog, the panel and `caminus pull` / `start` (and the brain / hands team), and `arch.PAUSED` makes
+  `caminus serve` refuse their architectures (qwen35moe, qwen3next). `CAMINUS_ALLOW_PAUSED=1` lifts both (development
+  and gates). Re-enabling one: remove it from both, then rerun its benchmarks.md rows.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the

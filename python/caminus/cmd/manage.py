@@ -114,10 +114,13 @@ def cmd_models(argv):
 
 def cmd_pull(argv):
     ap = argparse.ArgumentParser(prog='caminus pull')
-    ap.add_argument('name', choices=[m.name for m in models.CATALOG])
+    ap.add_argument('name', choices=[m.name for m in models.CATALOG] + [n for n in models.PAUSED if models.paused(n)])
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args(argv)
+    if models.paused(a.name):                    # (a paused model's name: refused with the reason, not "invalid choice")
+        print(f'caminus pull: {models.paused(a.name)}', file=sys.stderr)
+        return 2
     from . import download
     args = ['--model', a.name] + (['--dry-run'] if a.dry_run else [])
     if a.json:
@@ -425,6 +428,8 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
 
 def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None,
               cards=None):
+    if models.paused(model_name):
+        raise ManageError(models.paused(model_name))
     if model_name not in models.BY_NAME:
         raise ManageError(f'unknown model {model_name!r} (caminus models: {", ".join(models.BY_NAME)})')
     m = models.BY_NAME[model_name]
@@ -552,6 +557,9 @@ def cmd_start(argv):
 
     def go(say):
         if a.team:
+            why = next((models.paused(n) for _, n, _, _ in TEAMS[a.team] if models.paused(n)), None)
+            if why:                               # (before either server starts: a half-started team holds a card)
+                raise ManageError(f'the {a.team} team is paused with its model: {why}')
             cs = sorted(card_view(), key=lambda c: (-c['total_mib'], c['pci'] or c['card']))   # (the biggest card is the brain)
             if len(cs) < 2:
                 raise ManageError('the brain / hands team needs two supported cards')

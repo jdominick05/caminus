@@ -7,12 +7,12 @@ By the end of this page you'll be able to do everything the panel does from a te
 
 ```bash
 caminus models                 # what's available, what's on disk, how many cards each model needs
-caminus pull qwen3.6           # download a model (resumes; checks every file's size and hash)
-caminus start qwen3.6          # start it in the background on the best card, with the largest context that fits
+caminus pull thinkingcap       # download a model (resumes; checks every file's size and hash)
+caminus start thinkingcap      # start it in the background on the best card, with the largest context that fits
 caminus ps                     # running servers, their addresses, and your cards
-caminus logs qwen3.6 -f        # follow a server's log
+caminus logs thinkingcap -f    # follow a server's log
 caminus top                    # the live monitor
-caminus stop qwen3.6           # stop it (--all stops every server)
+caminus stop thinkingcap       # stop it (--all stops every server)
 ```
 
 `caminus start` options:
@@ -23,7 +23,7 @@ caminus stop qwen3.6           # stop it (--all stops every server)
 | `--ctx N` | A context of N tokens instead of the largest that fits. |
 | `--name NAME` | Call the server NAME (default: the model's name). |
 | `--port N` | Listen on port N (default: the first free port from 8092). |
-| `--team brain-hands` | Start AREX-2 and Qwen3.6 together on two cards ([the team](panel.md#the-brain--hands-team)). |
+| `--team brain-hands` | Start AREX-2 and Qwen3.6 together on two cards ([the team](panel.md#the-brain--hands-team)); paused with Qwen3.6 for this release. |
 
 `caminus restart NAME` restarts a server with the same settings.
 

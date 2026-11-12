@@ -58,8 +58,8 @@ and please report what breaks.
 | Other cards with the same chip (gfx1100): RX 7900 GRE, Radeon Pro W7900, W7800 | Untested: Caminus will try them |
 | Every other GPU | Not supported yet |
 
-One card runs the one-card models. Two cards run two models side by side, or a two-card model: Qwen3-Coder-Next on any
-pair, the Qwen3.8 Coder on an XTX + XT or two XTX. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
+One card runs the one-card models. Two cards run two models side by side, or a two-card model: the Qwen3.8 Coder on an
+XTX + XT or two XTX, or Swift 1.5 and ThinkingCap across both cards. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
 
 **Got other AMD hardware?** Please try Caminus on it and
 [send a hardware report](https://github.com/jdominick05/caminus/issues/new?template=hardware_report.yml), even when it
@@ -69,20 +69,20 @@ are welcome too.
 ## Models
 
 > [!NOTE]
-> **Qwen models only, for now.** Every model below is a Qwen model or a finetune of one (the Qwen3, Qwen3.6, Qwen3.8 and
-> Qwen3-Coder families), and the server speaks Qwen's chat template and tool-call format. Other model families (Llama,
+> **Qwen models only, for now.** Every model below is a Qwen model or a finetune of one (the Qwen3 and Qwen3.8 families), and the server speaks Qwen's chat template and tool-call format. Other model families (Llama,
 > Gemma, Mistral, DeepSeek and others) won't load. This may change in the future.
 
 | Model | Cards | Decode | llama.cpp, same cards |
 |---|---|---|---|
-| Qwen3.6-35B-A3B, 2-bit (12 GB) | 1 | 175 tok/s | 107 tok/s |
-| Qwen3.6-35B-A3B HauhauCS (19 GB) | 1 (24 GB) | 192 tok/s | 122 tok/s |
 | AREX-2 27B (17 GB) | 1 (24 GB) | 41 tok/s | 36 tok/s |
 | Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
-| Qwen3-Coder-Next 80B (30 GB) | 2 | 136 tok/s | 82 tok/s |
 | Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB) | 248 tok/s | 148 tok/s |
 | Swift 1.5 27B Q4_K_M (17 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
 | ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1; or 2 | 47 tok/s; 68 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
+
+**Paused for this release:** Qwen3.6-35B-A3B (both files) and Qwen3-Coder-Next. They aren't measured on the current
+code, so `caminus pull`, `caminus start` and `caminus serve` refuse them for now; they come back once they are measured
+again.
 
 Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:
 [models](docs/models.md). Where every number comes from: [benchmarks](docs/dev/benchmarks.md).
