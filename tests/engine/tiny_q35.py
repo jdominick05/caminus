@@ -80,9 +80,13 @@ def quant(rng, fmt, rows, K):
     return b.reshape(-1)
 
 
-def write(path, seed=5, variant='swift'):
-    """variant 'swift': Swift's formats (Q4_K / Q6_K / Q8_0 / Q5_K, F32 alpha / beta); 'tcap': ThinkingCap's"""
+def write(path, seed=5, variant='swift', tp=False):
+    """variant 'swift': Swift's formats (Q4_K / Q6_K / Q8_0 / Q5_K, F32 alpha / beta); 'tcap': ThinkingCap's. tp: shapes the
+    two-card split cuts on block boundaries (engine/q35_dense_tp.py): 4 key heads / 8 value heads (half a card's value
+    heads' columns = 512), 4 query heads / 2 kv heads, a 256-token vocabulary (128 head rows per card)"""
     rng = np.random.default_rng(seed)
+    NK, NV, H, HKV, V = (4, 8, 4, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
+    CH = 2 * NK * S + NV * S
     tc = variant == 'tcap'
     FMTS = FORMATS_TCAP if tc else FORMATS
     f32 = lambda *shape, sc=0.3: (rng.standard_normal(shape) * sc).astype(np.float32)
@@ -129,4 +133,4 @@ def write(path, seed=5, variant='swift'):
     blob = head + info
     with open(path, 'wb') as f:
         f.write(blob + b'\0' * (-len(blob) % 32) + data)
-    return dict(path=path, D=D, V=V, blocks=len(KINDS), kinds=list(KINDS), formats=FMTS)
+    return dict(path=path, D=D, V=V, blocks=len(KINDS), kinds=list(KINDS), formats=FMTS, NK=NK, NV=NV, H=H, HKV=HKV)

@@ -97,7 +97,15 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
     if (sg.op == OP_OWN_EMB) { q35t_op_emb(sg); return true; }
+#ifdef K3_TP   // (the two-card module k3_q35_tcap_tp; k3_xchg.h through k3_q35_ops.h)
+    if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
+#endif
     return false;
 }
+#ifdef K3_TP
+__device__ __forceinline__ uint32_t * k3_extra_warm(const Seg & sg) { return xchg_warm(sg); }
+__device__ __forceinline__ void k3_extra_prefetch(const Seg & sg, int) { xchg_prefetch(sg); }
+#else
 __device__ __forceinline__ uint32_t * k3_extra_warm(const Seg &) { return nullptr; }
 __device__ __forceinline__ void k3_extra_prefetch(const Seg &, int) {}
+#endif

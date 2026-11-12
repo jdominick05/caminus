@@ -24,33 +24,10 @@ from . import k3
 from ..device import capacity
 from .flashnext import FlashNextK3, EPS, quants      # (puts gguf-py on the path)
 from gguf.constants import GGML_QUANT_SIZES          # noqa: E402
+from .tp_slots import Slots, _hip                     # noqa: E402,F401  (re-exported: qwen3next_tp, tests)
 
 
 QSA_LAYER_HOOKS = 'qsa-scores'   # K3_TEST_HOOKS value: every QSA layer its own SCORE / indexer-query rows (test-only, tools/eval/qsa_depth.py)
-
-
-def _hip():
-    return ctypes.CDLL(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libamdhip64.so'))
-
-
-class Slots:
-    """receive slots for the exchanges, in uncached VRAM of one card (a peer's PCIe writes are only seen there):
-    n slots of 16 header words (word 0 = the epoch flag) + N floats"""
-    def __init__(self, dev, n, N):
-        hip = _hip(); self.stride = (16 + N) * 4; size = n * self.stride; p = ctypes.c_void_p()
-        hip.hipSetDevice(dev)
-        assert hip.hipExtMallocWithFlags(ctypes.byref(p), ctypes.c_size_t(size), ctypes.c_uint(3)) == 0   # Uncached
-        assert hip.hipMemset(p, 0, ctypes.c_size_t(size)) == 0 and hip.hipDeviceSynchronize() == 0
-        self.base, self.size, self.dev = p.value, size, dev
-
-    def slot(self, i):
-        return self.base + i * self.stride
-
-    def flags(self):
-        """the epoch words of every slot (host copy, for debugging)"""
-        hip = _hip(); buf = (ctypes.c_uint32 * (self.size // 4))()
-        hip.hipSetDevice(self.dev); hip.hipMemcpy(buf, ctypes.c_void_p(self.base), ctypes.c_size_t(self.size), 2)
-        return np.frombuffer(buf, dtype=np.uint32)[::self.stride // 4]
 
 
 QSA_SCORE_NTASK = 384   # the indexer score's tasks: 64 left the 12 layers' scoring latency-bound at depth (T = 4 pass at 131K

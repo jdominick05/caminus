@@ -51,7 +51,7 @@ DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, h
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
-                flight_dir=_config.flight_dir(), flight_cap_gb=10.0)
+                flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None)
 
 
 def load_config(path):
@@ -109,6 +109,8 @@ def parser():
                                     "(Qwen3.6-35B-A3B) / qwen35 (dense: AREX-2), or qwen3next (Qwen3-Coder-Next; two cards). "
                                     "The cards are picked from the host (caminus.device.host: the bigger card first for a "
                                     "two-card model, the smallest that fits for a one-card one); HIP_VISIBLE_DEVICES limits the choice")
+    ap.add_argument('--cards', type=int, choices=(1, 2), help='the cards the model runs on (default: its own count; 2: the '
+                    'dense own-code models swift-1.5 / thinkingcap on two cards, tensor parallel)')
     ap.add_argument('--drafter', help='the Coder\'s DFlash GGUF (default: caminus.config dflash)')
     ap.add_argument('--no-drafter', action='store_true', default=None, help='no DFlash drafter (plain decode)')
     ap.add_argument('--host')
@@ -191,7 +193,8 @@ def build_engine(opt, stats, log=print):
         raise RuntimeError(f'caminus serve: HIP sees {torch.cuda.device_count()} devices, the placement chose {len(pl["cards"])} '
                            f'({", ".join(pl["names"])}): HIP started before the cards were chosen')   # would not be the ones chosen)
     t0 = time.time()
-    m, pf, df, dr = _arch.of(opt['model']).build(opt, log)
+    A = _arch.ARCHS[opt['arch']] if opt.get('arch') else _arch.of(opt['model']).variant(opt.get('cards'))
+    m, pf, df, dr = A.build(opt, log)
     for d in m.devs: torch.cuda.synchronize(d)
     disk = not opt['no_disk_cache']
     pc = PC.PromptCache(m, pf, dr, cache_dir=opt['cache_dir'] if disk else None, disk=disk,
@@ -225,6 +228,12 @@ def main(argv=None):
               f'CAMINUS_CODER (or coder in {_config.config_path()}), or pass --model', file=sys.stderr)
         return 2
     A = _arch.of(opt['model'])                   # (the GGUF's header, read once: every later question asks the registry)
+    try:
+        A = A.variant(opt.get('cards'))           # (--cards 2: a one-card model's two-card form, where it has one)
+    except ValueError as e:
+        print(f'caminus serve: --cards {opt["cards"]}: {e}', file=sys.stderr)
+        return 2
+    opt['arch'] = A.name
     # (only an architecture with a drafter needs its file: the Coder's DFlash)
     if A.drafter and not opt['no_drafter'] and not (opt['drafter'] and os.path.isfile(opt['drafter'])):
         print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '

@@ -333,14 +333,14 @@ def fits_fn(entry, ctx=None):
     return lambda g: A.fits(opt, [g])
 
 
-def pair_fits(m, entry, ctx=None):
+def pair_fits(m, entry, ctx=None, cards=None):
     """why(cards) for a two-card catalog model: None when the registry's projection at 32K positions (or --ctx) fits those
     cards now, with its drafter when that file is here (caminus.arch.Arch.fits, sysfs only; the projection caminus serve
     places itself with), else the reason. None when it can't run here (the model file missing, no torch, a header it can't
     read): the server decides then"""
     try:
         from .. import arch
-        A = arch.of(entry['path'])
+        A = arch.of(entry['path']).variant(cards)   # (cards 2 for a one-card model: its two-card form)
     except Exception:
         return None
     dk = models.drafter_item(m)
@@ -362,8 +362,9 @@ def pair_fits(m, entry, ctx=None):
     return fit
 
 
-def pick_cards(m, entry, card, held, ctx=None):
-    """the card positions (caminus ps's index) a model runs on, in engine order. held: the positions other servers hold"""
+def pick_cards(m, entry, card, held, ctx=None, cards=None):
+    """the card positions (caminus ps's index) a model runs on, in engine order. held: the positions other servers hold.
+    cards: how many (default: the model's own; 2 for a one-card model with a two-card form: caminus start --cards 2)"""
     gs = host.gpus(ROOT)
     cs = card_view(gs)
     if not cs:
@@ -371,19 +372,19 @@ def pick_cards(m, entry, card, held, ctx=None):
     by_pci = {c['pci']: c['index'] for c in cs}
     held_pci = {c['pci'] for c in cs if c['index'] in held}
     free = [c for c in cs if c['index'] not in held]
-    if m.cards >= 2:
+    if (cards or m.cards) >= 2:
         try:
             pr = host.pair(gs, held=held_pci)
         except host.PlacementError as e:
             raise ManageError(f'{m.name}: {e}' + (' (caminus ps)' if held else '')) from None
         try:
             from .. import arch
-            why = arch.lookup(m.arch).pair_refusal(pr)
+            why = arch.lookup(m.arch).variant(cards).pair_refusal(pr)
         except Exception:                        # (no registry here: the server's own placement still refuses)
             why = None
         if why:
             raise ManageError(f'{m.name}: {why}')
-        fit = pair_fits(m, entry, ctx)
+        fit = pair_fits(m, entry, ctx, cards=cards)
         why = fit(pr) if fit is not None else None
         if why:
             raise ManageError(f'{m.name}: {why}')
@@ -422,7 +423,8 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
     return serve + list(extra)
 
 
-def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None):
+def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None,
+              cards=None):
     if model_name not in models.BY_NAME:
         raise ManageError(f'unknown model {model_name!r} (caminus models: {", ".join(models.BY_NAME)})')
     m = models.BY_NAME[model_name]
@@ -434,7 +436,15 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     if any(s['name'] == name for s in running):
         raise ManageError(f'{name} is already running (caminus ps)')
     held = {d for s in running for d in s.get('devices', [])}
-    devs = devs_override or pick_cards(m, e, card, held, ctx=ctx)
+    nc = int(cards) if cards else m.cards
+    if nc != m.cards:                            # (--cards 2: the model's two-card form, where its architecture has one)
+        try:
+            from .. import arch
+            arch.lookup(m.arch).variant(nc)
+        except ValueError as ex:
+            raise ManageError(f'{m.name}: {ex}') from None
+        extra = list(extra) + ['--cards', str(nc)]
+    devs = devs_override or pick_cards(m, e, card, held, ctx=ctx, cards=nc)
     busy = busy_elsewhere(devs)
     if busy:
         raise ManageError(f'VRAM in use on {", ".join(busy)} by a process Caminus did not start: stop it first')
@@ -529,6 +539,8 @@ def cmd_start(argv):
     ap.add_argument('model', nargs='?')
     ap.add_argument('--name')
     ap.add_argument('--card', help='auto (default), or a card index')
+    ap.add_argument('--cards', type=int, choices=(1, 2), help='how many cards (default: the model\'s own; 2: swift-1.5 / '
+                    'thinkingcap on two cards, tensor parallel)')
     ap.add_argument('--port', type=int)
     ap.add_argument('--ctx', help='auto (default: the largest context that fits) or a number of positions')
     ap.add_argument('--team', choices=sorted(TEAMS))
@@ -549,7 +561,8 @@ def cmd_start(argv):
                 s = start_one(model_name, name=role, card=str(dev), port=port, wait=not a.no_wait, log=say)
                 notes.append(f"{role}: {model_name} on {'+'.join(s['card_names'])} :{s['port']}")
             return '; '.join(notes)
-        s = start_one(a.model, name=a.name, card=a.card, port=a.port, ctx=a.ctx, extra=extra, wait=not a.no_wait, log=say)
+        s = start_one(a.model, name=a.name, card=a.card, port=a.port, ctx=a.ctx, extra=extra, wait=not a.no_wait, log=say,
+                      cards=a.cards)
         return f"{s['name']}: {s['model']} on {'+'.join(s['card_names'])} at http://127.0.0.1:{s['port']}"
     return run_action(a, go)
 

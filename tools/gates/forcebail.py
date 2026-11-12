@@ -17,6 +17,8 @@ all reads and writes stay in bounds). Not for unattended runs: NEG=1 (env), the 
 original commit, a double commit: the gate must FAIL), and the stress mode (needs an external compaction stressor).
 Ported from tmp/m1/s5/forcebail_coder.py (the Coder, the default) and tmp/ceiling/s11/forcebail.py (--model reap) with the
 same hooks and schedule. Expected (MANIFEST.md): T=1 40 and T=4 40: 40/40 passes bitwise equal, bails 8, RESULT PASS.
+  --engine dense35tp: the dense own line's two-card engine (caminus.engine.q35_dense_tp.Dense35TP, --model its GGUF; T = 1
+  only, every pass a verify at the next position; no --ctx / --start) under the same schedule and injections.
   --engine dense35: the dense own line's one-card engine (caminus.engine.q35_dense.Dense35Own, --model its GGUF, the card in
   HIP_VISIBLE_DEVICES; T = 1 only, every pass a verify at the next position; modes 'tiny' only; no --ctx / --start).
   SAMERUN=1 (env): a second uninterrupted run against the reference instead (determinism without any injection)."""
@@ -33,12 +35,17 @@ T = int(a[0]); NP = int(a[1]); MODES = (a[2] if len(a) > 2 else 'tiny,tiny0,tiny
 torch = C.setup_torch()
 toks = C.tokens(TOK)
 print(f'model {PATH}; engine {ENGINE}; tokens {TOK}; T {T}; passes {NP}; modes {MODES}; compaction_proactiveness {C.proactiveness()}', flush=True)
-DENSE = ENGINE == 'dense35'
+DENSE = ENGINE in ('dense35tp', 'dense35')
 if ENGINE == 'dense35':
     from caminus.engine.q35_dense import Dense35Own
     if T != 1 or START or MODES != ['tiny']: print('--engine dense35: T = 1, no --start, modes tiny'); sys.exit(2)
     m = Dense35Own(PATH, max_ctx=CTX)
     m._tapes = {'one': m.engines}
+elif DENSE:
+    from caminus.engine.q35_dense_tp import Dense35TP
+    if T != 1 or START: print('--engine dense35tp: T = 1, no --start'); sys.exit(2)
+    m = Dense35TP(PATH, max_ctx=CTX)
+    m._tapes = {'one': m.engines}                     # (the hooks below walk every tape's engines)
 else:
     from caminus.engine.flashnext_tp import FlashNextTP
     m = FlashNextTP(PATH, ntok=T, max_ctx=CTX, **(dict(vram_prefill=2048) if START else {}))
@@ -83,7 +90,7 @@ last = {}
 
 
 def hooked_pass(*args):
-    if DENSE: i0, commit = args[0], args[1]                 # (Dense35Own._pass(i0, commit, trace=None))
+    if DENSE: i0, commit = args[0], args[1]                 # (Dense35Own / Dense35TP._pass(i0, commit, trace=None))
     else: xt, ple, i0, commit = args
     if NEG:
         if inj['first'] or (i0 not in last): last[i0] = commit
