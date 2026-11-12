@@ -64,6 +64,11 @@ CLAUDE.md imports this file.
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
   spec_T 1). Its T-token statements sit under `#ifdef K3_Q3M_VER` in `k3_q35_ops.h`, so `k3_q35_swift`'s `.text`
   stays unchanged; `tests/engine/test_q35_verify.py` is its bitwise gate.
+  `k3_q35_swift_mtp.hip` (`k3.Q35M_MODULES`, `engine/q35_mtp.py`) is Swift's drafter: its multi-token-prediction block
+  (all Q4_0: `kernels/own_quant_q4_0.h`) in T-row tapes plus `OP_OWN_ARGMAX`, whose key the next chained step's embedding
+  reads on the device. Its device dispatch keeps the trunk's ops (without them `k3_run` took 96 VGPRs and spilled 5);
+  `k3.Q35M_OPS` and its `MODULE_CAPS` are what refuse them, and Q4_K is compiled out of its matvec op.
+  `tests/engine/test_q35_mtp.py` is its gate (T-row rounds bitwise one-row rounds; drafts against the fp32 block).
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's

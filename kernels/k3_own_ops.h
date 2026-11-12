@@ -9,6 +9,10 @@
 #include "own_quant.h"
 #ifdef K3_Q3M_VER
 #include "own_quant_mt.h"   // the T-token tiles: a pass's weight words held, each token's sums in turn
+#ifdef K3_Q35_MTP   // (the dense qwen35 drafter module, kernels/k3_q35_swift_mtp.hip: Swift's prediction block is Q4_0)
+#include "own_quant_q4_0.h"
+enum { OWN_Q4_0 = 14 };   // (k3.py OWN_MTP_FMT)
+#endif
 #endif
 #ifdef K3_Q3M_IQ
 #include "own_quant_iq.h"   // the codebook formats' tiles (the IQ study module, kernels/k3_q3m_iq.hip)
@@ -190,7 +194,11 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
         float rm[OWN_MT][OWN_K3_RW];
         const uint8_t * Wm = m ? (const uint8_t *)sg.aux : sg.W;
 #ifdef K3_Q35_VER   // (the dense qwen35 verify module: the weights unpacked once per pass for every token, the same bits)
+#ifdef K3_Q35_MTP   // (the drafter module: Q4_0 and the Q6_K head, no Q4_K tile in its register allocation)
+        if (sg.work == OWN_Q4_0) own_rows_q4_0_1rt<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+#else
         if (sg.work == OWN_Q4_K) own_rows_q4k_1rt_mt2<OWN_K3_RW>(Wm, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+#endif
         if (sg.work == OWN_Q6_K) own_rows_q6k_planes_mt2<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
 #else
         if (sg.work == OWN_Q4_K) own_rows_q4k_1rt_mt<OWN_K3_RW>(Wm, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
@@ -269,7 +277,11 @@ __device__ __forceinline__ void own_op_moe_sum(const Seg & sg, int t) {
 enum { OP_OWN_EMB = 48 };
 #ifdef K3_Q3M_VER   // (task tk = token tk: its id at Seg.a[tk], its row at Seg.y + tk * N)
 __device__ __forceinline__ void own_op_emb(const Seg & sg, int tk) {
+#ifdef K3_Q35_MTP   // (Seg.pad1 = 1: the token is OP_OWN_ARGMAX's key at Seg.a, the low half ~index: a chained draft step)
+    const int tok = min(max(sg.pad1 ? (int)~(uint32_t)((const unsigned long long *)sg.a)[0] : ((const int *)sg.a)[tk], 0), sg.pad2 - 1);
+#else
     const int tok = min(max(((const int *)sg.a)[tk], 0), sg.pad2 - 1);
+#endif
     const uint8_t * row = sg.W + (size_t)tok * sg.K;
     float * x = (float *)sg.y + (size_t)tk * sg.N;
 #else

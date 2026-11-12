@@ -81,7 +81,11 @@ __device__ __forceinline__ void q35_op_add_rms16(const Seg & sg) {
     const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, NI = N >> 8;
     const size_t o = (size_t)tk * N;
     const float * d = (const float *)sg.a + o; const float * nw = (const float *)sg.W;
+#ifdef K3_Q35_MTP   // (the drafter module: h16's token stride is Seg.K, so two norms fill the halves of eh_proj's [e; h] rows)
+    float * x = (float *)sg.y + o; float * h = (float *)sg.asum + o; _Float16 * h16 = (_Float16 *)sg.aux + (size_t)tk * sg.K;
+#else
     float * x = (float *)sg.y + o; float * h = (float *)sg.asum + o; _Float16 * h16 = (_Float16 *)sg.aux + o;
+#endif
     const bool add = sg.pad1 > 0;
     float ss = 0.0f;
 #pragma unroll 1
@@ -366,10 +370,46 @@ __device__ __forceinline__ void q35_gdn_save_guarded(const Seg & sg, int t, Sync
     if (ok) q35_op_gdn_save(sg, t);
 }
 
+#ifdef K3_Q35_MTP
+// OP_OWN_ARGMAX (the drafter module): the greedy token of logits fp32 [N] (Seg.a) as a 64-bit key at Seg.y: the value's
+// order-preserving bits << 32 | ~index, combined with atomicMax over the tasks, so the key is the largest value and,
+// among equal values, the lowest index (a NaN counts as the lowest value): the host's first-maximum rule. The key word
+// starts at 0 (the pass's stage copy writes it). A task = Seg.rows_per_task values; each wave's maximum, the eight in
+// LDS, one atomic per task.
+enum { OP_OWN_ARGMAX = 55 };
+__device__ __forceinline__ void q35_op_argmax(const Seg & sg, int t) {
+    __shared__ unsigned long long part[8];
+    const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task);
+    unsigned long long best = 0ull;
+    for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) {
+        const float v = ((const float *)sg.a)[i];
+        uint32_t u = __builtin_bit_cast(uint32_t, v);
+        u = v != v ? 0u : (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+        const unsigned long long k = ((unsigned long long)u << 32) | (uint32_t)~(uint32_t)i;
+        best = k > best ? k : best;
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) { const unsigned long long b = __shfl_xor(best, o, 32); best = b > best ? b : best; }
+    if (K3TID % 32 == 0) part[K3TID / 32] = best;
+    __syncthreads();
+    if (K3TID == 0) {
+        unsigned long long m = part[0];
+        for (int q = 1; q < 8; q++) m = part[q] > m ? part[q] : m;
+        atomicMax((unsigned long long *)sg.y, m);
+    }
+    __syncthreads();
+}
+#endif
+
 #ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
+#ifdef K3_Q35_MTP   // (the drafter module; it keeps the trunk's dispatch below, whose ops its tape never runs: without
+    // them k3_run took 96 VGPRs and spilled 5 (the batched attention's loads), with them 89 and none. The host refuses
+    // those ops on this module: k3.Q35M_OPS / MODULE_CAPS)
+    if (sg.op == OP_OWN_ARGMAX) { q35_op_argmax(sg, t); return true; }
+#endif
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }

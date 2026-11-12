@@ -96,7 +96,8 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
 Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
 Q35T_MODULES = ('k3_q35_tcap', 'k3_q35_tcap_trace', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_trace')   # (kernels/k3_q35_tcap.hip: ThinkingCap's formats on the same tape; kernels/k3_q35t_ops.h)
-Q35V_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace')   # (kernels/k3_q35_swift_ver.hip: the Swift module's ops with their T-token forms, for verify passes: engine/q35_dense_verify.py)
+Q35M_MODULES = ('k3_q35_swift_mtp',)   # (kernels/k3_q35_swift_mtp.hip: Swift's multi-token-prediction block, the drafter: engine/q35_mtp.py)
+Q35V_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace') + Q35M_MODULES   # (kernels/k3_q35_swift_ver.hip: the Swift module's ops with their T-token forms, for verify passes: engine/q35_dense_verify.py)
 Q35S_MODULES = ('k3_q35_swift', 'k3_q35_swift_trace', 'k3_q35_swift_tp', 'k3_q35_swift_tp_trace') + Q35V_MODULES   # (kernels/k3_q35_swift.hip: the dense qwen35 line's decode tape on own ops, no ggml headers; Q35S_OPS below)
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
 Q3M_IQ_MODULES = ('k3_q3m_iq', 'k3_q3m_iq_trace')
@@ -184,7 +185,7 @@ OWN_Q35T_FMT = {'IQ2_S': 7, 'Q5_K': 5}
 OWN_Q35T_1RT = ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S', 'Q5_K', 'Q6_K')
 OWN_Q35T_STAGE = {OWN_IQ_FMT['IQ3_XXS']: 1, OWN_IQ_FMT['IQ3_S']: 2, OWN_Q35T_FMT['IQ2_S']: 8}
 OWN_BLOCK.update({'IQ2_S': 82, 'Q5_K': 176})
-OWN_FMT_NAME = {v: k for k, v in {**OWN_FMT, **OWN_IQ_FMT, **OWN_RS_FMT, **OWN_Q35T_FMT}.items()}
+OWN_FMT_NAME = {v: k for k, v in {**OWN_FMT, **OWN_IQ_FMT, **OWN_RS_FMT, **OWN_Q35T_FMT, 'Q4_0': 14}.items()}
 _CAPS_OWN = (frozenset({('OWN_MV', f'{f}/{a}') for f in OWN_FMT for a in OWN_ACT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_1RT_FMT}
              | {('OWN_F16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_MOE_SUM', '-')})
 _CAPS_Q3M = frozenset({('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_ATTN', '-')} | {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT})   # (K3_OWN_Q3M: compiled into the qwen3moe modules only)
@@ -213,6 +214,16 @@ Q35S_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_MV16, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, O
 # (the verify modules: the T-token forms and not the fused gate | up, which no verify tape runs and no gate has run there)
 MODULE_CAPS.update({m: (MODULE_CAPS[m] - {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT}) | {('OWN_MV', f'{f}/a16_1rt_mt') for f in OWN_1RT_FMT}
                     for m in Q35V_MODULES})
+# the drafter module (K3_Q35_MTP): its tape's pairs only. Its device dispatch keeps the trunk's ops (kernels/k3_q35_ops.h:
+# the register allocation), so this set and Q35M_OPS are what refuse them; Q4_K is compiled out of its OP_OWN_MV
+OWN_MTP_FMT = {'Q4_0': 14}   # (= kernels/k3_own_ops.h OWN_Q4_0)
+OWN_BLOCK['Q4_0'] = 144      # (8 blocks of 18 bytes per 256 weights; the plane layout keeps the byte count)
+MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_MV', 'Q4_0/a16_1rt_mt'), ('OWN_MV', 'Q6_K/a16_1rt'),
+                                  ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_ARGMAX', '-')})
+                    for m in Q35M_MODULES})
+OP_OWN_ARGMAX = 55   # = kernels/k3_q35_ops.h (the drafter module): the greedy token's key, atomicMax over the tasks
+Q35M_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC,
+            OP_GATE_MUL16, OP_OWN_ARGMAX}
 Q35_MODULES = Q35S_MODULES + Q35T_MODULES   # (the two dense qwen35 own modules: the same op set, Q35S_OPS; kernels/k3_q35t_ops.h dispatches it too)
 # their two-card builds (K3_TP: kernels/k3_xchg.h's OP_XCHG; engine/q35_dense_tp.py): one-card module -> two-card module
 Q35_TP_OF = {'k3_q35_swift': 'k3_q35_swift_tp', 'k3_q35_tcap': 'k3_q35_tcap_tp', 'k3_q35_swift_trace': 'k3_q35_swift_tp_trace',
@@ -242,6 +253,7 @@ def seg_kind(sg):
     if sg.op == OP_OWN_MOE_SUM: return ('OWN_MOE_SUM', '-')
     if sg.op == OP_OWN_EMB: return ('OWN_EMB', GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_OWN_ADD_RMS16: return ('OWN_ADD_RMS16', '-')
+    if sg.op == 55: return ('OWN_ARGMAX', '-')   # (OP_OWN_ARGMAX: the drafter module only)
     if sg.op == OP_OWN_ATTN: return ('OWN_ATTN', '-')
     if sg.op == OP_OWN_ATTS: return ('OWN_ATTS', '-')
     if sg.op == OP_OWN_MV16: return ('OWN_MV16', GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
@@ -616,8 +628,11 @@ class Engine:
           union (ids, at most 32 slots): slots with the same id share one read of the expert's rows (the same bits).
           The row-scale modules (Q3M_RS_MODULES) only, fmt RS4 / RS2: w (and up) are engine.own_layout.rs_planes' codes,
           scales its fp32 row scales on the device: [total_rows], or with up [2 * total_rows] (w's, then up's)."""
-        if self.T != 1 and not (self.module in Q35V_MODULES and tokens == self.T):
-            raise ValueError(f'own_matvec_1rt: T = 1 (on {Q35V_MODULES}: tokens = T; T {self.T}, tokens {tokens})')
+        if self.T != 1 and not (self.module in Q35V_MODULES and tokens == self.T) and not (self.module in Q35M_MODULES and tokens == 1):
+            raise ValueError(f'own_matvec_1rt: T = 1 (on {Q35V_MODULES}: tokens = T; on {Q35M_MODULES} also 1; T {self.T}, tokens {tokens})')
+        mtp = self.module in Q35M_MODULES
+        if mtp and fmt not in ('Q4_0', 'Q6_K'): raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} (Q4_0, Q6_K)')
+        if not mtp and fmt == 'Q4_0': raise ValueError(f'own_matvec_1rt: Q4_0 on {self.module} (the drafter module {Q35M_MODULES} only)')
         if tokens != 1 or x_per_token or union:
             if self.module not in Q3M_VER_MODULES + Q35V_MODULES or (self.module in Q35V_MODULES and (x_per_token or union)): raise ValueError(f'own_matvec_1rt: module {self.module} has no T-token forms ({Q3M_VER_MODULES})')
             if not 1 <= tokens <= 15 or (tokens > 1 and (ids is not None or up is not None or x_per_token)):
@@ -631,7 +646,7 @@ class Engine:
         q35t = self.module in Q35T_MODULES
         if q35t and (fmt not in OWN_Q35T_1RT or up is not None or ids is not None or tokens != 1):
             raise ValueError(f'own_matvec_1rt: module {self.module} runs {OWN_Q35T_1RT}, one matrix, no ids, one token (got {fmt})')
-        if not q35t and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
+        if not q35t and not mtp and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
             raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} ({OWN_1RT_FMT}; {sorted(OWN_IQ_FMT)} on {Q3M_IQ_MODULES}; {Q3M_RS_MODULES})')
         if (scales is not None) != rs: raise ValueError(f'own_matvec_1rt: scales are the row-scale formats\' ({sorted(OWN_RS_FMT)}), and they need them (fmt {fmt})')
         if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:
@@ -664,7 +679,7 @@ class Engine:
                              scales.data_ptr() if rs else strides,
                              x16.data_ptr(), None if ids is None else ids.data_ptr(), out.data_ptr(), 0.0, N, ncols, total,
                              OWN_FMT[fmt] if fmt in OWN_FMT else OWN_IQ_FMT[fmt] if fmt in OWN_IQ_FMT else OWN_Q35T_FMT[fmt] if fmt in OWN_Q35T_FMT
-                             else OWN_RS_FMT[fmt], team, pad1, rows, 0, None if up is None else up.data_ptr()))
+                             else OWN_MTP_FMT[fmt] if fmt in OWN_MTP_FMT else OWN_RS_FMT[fmt], team, pad1, rows, 0, None if up is None else up.data_ptr()))
         return len(self.segs) - 1
 
     def own_f16(self, x, out, rows_per_task=1024, dep=-1, team=-1):
@@ -691,7 +706,7 @@ class Engine:
                              None if w is None else w.data_ptr(), d.data_ptr(), None, x.data_ptr(), 0.0, n, 0, 0, 0, team, slots, 0))
         return len(self.segs) - 1
 
-    def own_add_rms16(self, x, nw, h, h16, eps, d=None, slots=0, w=None, dep=-1, team=-1, tokens=1):
+    def own_add_rms16(self, x, nw, h, h16, eps, d=None, slots=0, w=None, dep=-1, team=-1, tokens=1, h16_stride=None):
         """one workgroup: x += sum over slots s of w[s] * d[s] (slots 0: no add; w None: weights 1), then h = rms_norm(x) *
         nw (fp32) and h16 = fp16(h) (kernels/k3_own_ops.h OP_OWN_ADD_RMS16: OP_OWN_MOE_SUM -> OP_RMS_MUL -> OP_OWN_F16's
         math in one segment, every load of a step issued together; equal to them to rounding, not bitwise)."""
@@ -699,7 +714,10 @@ class Engine:
         if tokens != 1 and self.module not in Q3M_VER_MODULES + Q35V_MODULES: raise ValueError(f'own_add_rms16: module {self.module} has no T-token form')
         if self.module in Q35V_MODULES and tokens != self.T: raise ValueError(f'own_add_rms16: tokens {tokens} on a T = {self.T} tape')
         n = x.numel() // tokens; assert x.numel() == tokens * n and nw.numel() == n and h.numel() >= tokens * n
-        assert h16.dtype == torch.float16 and h16.numel() >= tokens * n
+        # h16_stride (the drafter module only): token t's h16 at t * h16_stride values (the norms of eh_proj's [e; h] rows)
+        hs = n if h16_stride is None else int(h16_stride)
+        if h16_stride is not None and (self.module not in Q35M_MODULES or hs < n or hs % 8): raise ValueError(f'own_add_rms16: h16_stride {h16_stride} ({Q35M_MODULES} only; >= {n}, a multiple of 8)')
+        assert h16.dtype == torch.float16 and h16.numel() >= (tokens - 1) * hs + n and h16.data_ptr() % 16 == 0
         if self.module in Q35_MODULES:   # (kernels/k3_q35_ops.h's form: any row length, one addend with weight 1)
             if n % 256 or not 256 <= n <= 65536 or slots > 1 or w is not None or (tokens != 1 and self.module not in Q35V_MODULES):
                 raise ValueError(f'own_add_rms16 on {self.module}: n {n} (a multiple of 256, at most 65536), slots {slots} (0 / 1), no weights')
@@ -707,24 +725,39 @@ class Engine:
         assert 0 <= slots <= 8 and (slots == 0 or d.numel() >= tokens * slots * n) and (w is None or w.numel() >= tokens * slots)
         self.keep += [x, nw, h, h16] + ([d] if d is not None else []) + ([w] if w is not None else [])
         self.segs.append(Seg(OP_OWN_ADD_RMS16, tokens, dep, 1, nw.data_ptr(), None if w is None else w.data_ptr(),
-                             None if d is None else d.data_ptr(), h.data_ptr(), x.data_ptr(), eps, n, n, 0, 0, team, slots, 0,
+                             None if d is None else d.data_ptr(), h.data_ptr(), x.data_ptr(), eps, n, hs, 0, 0, team, slots, 0,
                              0, h16.data_ptr()))
         return len(self.segs) - 1
 
-    def own_emb(self, w, fmt, vocab, D, tok, x, dep=-1, team=-1, tokens=1):
+    def own_emb(self, w, fmt, vocab, D, tok, x, dep=-1, team=-1, tokens=1, key=False):
         """x fp32 [D] = row tok[0] (an int32 on the device, clamped to the vocabulary there) of the embedding matrix w (raw
-        GGUF blocks, Q4_K), decoded as caminus.own_dequant does (bitwise)"""
+        GGUF blocks, Q4_K), decoded as caminus.own_dequant does (bitwise). key (the drafter module, one token): tok is
+        own_argmax's int64 key word on the device, the token its low half's complement (a chained draft step)"""
+        if key and (self.module not in Q35M_MODULES or tokens != 1 or tok.dtype != torch.int64):
+            raise ValueError(f'own_emb(key=True): {Q35M_MODULES}, one token, an int64 key word (module {self.module}, tokens {tokens}, {tok.dtype})')
         if fmt != 'Q4_K' and not (fmt == 'IQ2_S' and self.module in Q35T_MODULES):
             raise ValueError(f'own_emb: {fmt} on {self.module} (Q4_K; IQ2_S on {Q35T_MODULES})')
         rb = D // 256 * OWN_BLOCK[fmt]
         # tokens > 1 (the verify module): one task per token; tok int32 [tokens], x [tokens, D]
         if tokens != 1 and self.module not in Q3M_VER_MODULES + Q35V_MODULES: raise ValueError(f'own_emb: module {self.module} has no T-token form')
         if self.module in Q35V_MODULES and tokens != self.T: raise ValueError(f'own_emb: tokens {tokens} on a T = {self.T} tape')
-        assert D % 256 == 0 and w.numel() * w.element_size() >= vocab * rb and tok.dtype == torch.int32 and x.numel() >= tokens * D
+        assert D % 256 == 0 and w.numel() * w.element_size() >= vocab * rb and tok.dtype == (torch.int64 if key else torch.int32) and x.numel() >= tokens * D
         assert tok.numel() >= tokens
         self.keep += [w, tok, x]
         self.segs.append(Seg(OP_OWN_EMB, tokens, dep, 1, w.data_ptr(), None, tok.data_ptr(), None, x.data_ptr(), 0.0, D, rb, 0,
-                             OWN_FMT[fmt] if fmt in OWN_FMT else OWN_Q35T_FMT[fmt], team, 0, vocab))
+                             OWN_FMT[fmt] if fmt in OWN_FMT else OWN_Q35T_FMT[fmt], team, 1 if key else 0, vocab))
+        return len(self.segs) - 1
+
+    def own_argmax(self, logits, n, key, rows_per_task=8192, dep=-1, team=-1):
+        """the drafter module: key int64 [1] (zero before the launch) = the greedy token of logits fp32 [n] as a 64-bit key,
+        order-preserving value bits << 32 | ~index (atomicMax over the tasks: the largest value, the lowest index among
+        equals; NaN the lowest). key_token(k) decodes it on the host; own_emb(key=True) on the device"""
+        if self.module not in Q35M_MODULES: raise ValueError(f'own_argmax: the drafter module {Q35M_MODULES} only (module {self.module})')
+        assert logits.dtype == torch.float32 and logits.numel() >= n and key.dtype == torch.int64 and key.numel() >= 1
+        assert key.data_ptr() % 8 == 0 and 1 <= n < 2 ** 31 and rows_per_task >= 256
+        self.keep += [logits, key]
+        self.segs.append(Seg(OP_OWN_ARGMAX, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None, None,
+                             logits.data_ptr(), None, key.data_ptr(), 0.0, n, 0, 0, 0, team, 0, 0))
         return len(self.segs) - 1
 
     def f32_mv(self, w, x, out, rows_per_task=8, dep=-1, team=-1, tokens=1):
@@ -1331,8 +1364,9 @@ class Engine:
             if self.segs and self.segs[0].op == OP_OWN_EMB: self.segs[0].out_f32 = bits
         if self.module in Q35_MODULES:   # (as the lean qwen3moe module: an op outside its dispatch would run as a no-op)
             for i, sg in enumerate(self.segs):
-                if sg.op not in Q35S_OPS and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES):
-                    raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(Q35S_OPS)}')
+                ops = Q35M_OPS if self.module in Q35M_MODULES else Q35S_OPS
+                if sg.op not in ops and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES):
+                    raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(ops)}')
                 if sg.op == OP_ATTN_DEC and sg.work: raise ValueError(f'k3: module {self.module}: the f16 KV cache only (segment {i})')
         q = [i for i, sg in enumerate(self.segs) if sg.op in QSA_OPS]
         if q and (self.module not in QSA_MODULES or self.teams is not None):   # (k3_run elsewhere runs them as nops)
@@ -1399,3 +1433,8 @@ class Engine:
                 diag = self.stall_report()
                 self.sync.zero_()   # err would otherwise stay set and fail every later launch at once
                 raise RuntimeError(f'k3: a wait gave up at segment {st[2]} (done count seen {st[3]}); {diag}')
+
+
+def key_token(k):
+    """the token of an own_argmax key (an int64 as read back from the device)"""
+    return int((~int(k)) & 0xffffffff)

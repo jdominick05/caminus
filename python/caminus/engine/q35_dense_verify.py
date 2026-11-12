@@ -61,7 +61,7 @@ class Dense35Verify:
         pass, 1 .. 4; module: k3_q35_swift_ver or its _trace build; per_wgp: workgroups per WGP of this tape's grid
         (None: the decode engine's; the bits are the same at every grid)"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
-        if module not in k3.Q35V_MODULES: raise ValueError(f'Dense35Verify: module {module!r} is not a verify module {k3.Q35V_MODULES}')
+        if module not in k3.Q35V_MODULES or module in k3.Q35M_MODULES: raise ValueError(f'Dense35Verify: module {module!r} is not a verify module {k3.Q35V_MODULES} (the drafter module {k3.Q35M_MODULES} runs engine/q35_mtp.py)')
         if eng.tcap or eng.module not in k3.Q35S_MODULES: raise ValueError(f'Dense35Verify: the Swift module only (the engine runs {eng.module})')
         if eng.spec_T < T: raise ValueError(f'Dense35Verify: the engine keeps {eng.spec_T} tokens\' saved inputs (spec_T), the tape runs {T}')
         if eng.nl_build != eng.nl: raise ValueError('Dense35Verify: an engine built with debug_layers')
