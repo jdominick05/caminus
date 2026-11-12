@@ -136,6 +136,13 @@ def main():
         n0 = len(opens)
         check(arch.of(scat) is arch.ARCHS['qwen35-own'] and arch.default_alias(scat) == 'swift-1.5' and len(opens) == n0,
               'of: Swift 1.5\'s catalog file takes the own-code entry and answers swift-1.5 (not opened)')
+        tc = models.BY_KEY['thinkingcap']
+        tcat = os.path.join(S, 'catalog', os.path.basename(tc.path))
+        with open(tcat, 'wb') as f:
+            f.truncate(tc.size)                       # (sparse)
+        n0 = len(opens)
+        check(arch.of(tcat) is arch.ARCHS['qwen35-own'] and arch.default_alias(tcat) == 'thinkingcap' and len(opens) == n0,
+              'of: ThinkingCap\'s catalog file takes the own-code entry and answers thinkingcap (not opened)')
         check(arch.of(cat) is arch.ARCHS['qwen35'], 'of: AREX-2\'s catalog file keeps the qwen35 entry (OneCard)')
         check(arch.of(other) is arch.ARCHS['qwen35'], 'of: a qwen35 file outside the catalog keeps the header\'s entry')
         llama = os.path.join(S, 'tiny-llama.gguf')

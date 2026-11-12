@@ -85,7 +85,7 @@ def main():
         check(out.returncode == 0 and names == [m.name for m in models.CATALOG] and
               {m['name']: m['present'] for m in doc['models']} == {'coder': False, 'qwen3.6': True, 'qwen3.6-hauhau': False,
                                                                    'arex-2': True, 'qwen3-coder-next': False, 'swift-1.5': False,
-                                                                   'qwen3-30b-a3b': False},
+                                                                   'thinkingcap': False, 'qwen3-30b-a3b': False},
               f'caminus models --json: {names}')
     except ValueError:
         check(False, f'caminus models --json printed no JSON: {out.stdout[:200]} {out.stderr[-300:]}')
