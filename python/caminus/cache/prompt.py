@@ -328,12 +328,14 @@ def engine_key(m, pf, draft=None, build=None):
         numerics=numerics(pf), routing=dict(crossover=None if pf.crossover is None else int(pf.crossover)),
         tp=dict(devices=[int(d) for d in m.devs], names=[torch.cuda.get_device_name(d) for d in m.devs] if cuda else [],
                 gdn_keys=int(m.gdn_keys), moe_blocks=int(m.moe_blocks), vocab_share=float(m.vocab_share), ntok=int(m.ntok),
-                local_only=bool(getattr(m, 'local_only', False)), **dict(getattr(m, 'tp_key', None) or {})),
+                local_only=bool(getattr(m, 'local_only', False)), **dict(getattr(m, 'tp_key', None) or {}),
+                **({'spec_T': int(m.spec_T)} if hasattr(m, 'spec_T') else {})),   # (the dense own line: the verify width, when drafting)
         qsa=dict(qsa=bool(m.qsa), dual=bool(getattr(m, 'dual', False)), qsa_limit=m.qsa_limit, max_ctx=int(m.max_ctx),
                  idx_cache=bool(m.idx_cache)),
         features=dict(layers=[int(x) for x in m.feature_layers], card=int(m.feature_card)),
         drafter=None if df is None else dict(gguf=_fp(df.path), ring=int(df.ring), window=int(df.window), T=int(df.T),
-                                             nl=int(df.nl), nkv=int(df.nkv), hd=int(df.hd)),
+                                             nl=int(df.nl), nkv=int(df.nkv), hd=int(df.hd),
+                                             **({'kind': str(df.kind)} if getattr(df, 'kind', 'dflash') != 'dflash' else {})),
         runtime=dict(torch=torch.__version__, hip=getattr(torch.version, 'hip', None)),
         build=build or build_hash())
 
@@ -723,8 +725,8 @@ class Layout:
     """the per-card checkpoint layout of an engine (and drafter): the recurrent states (m.state minus the positional caches,
     in m.state's order), the tail (T positions of every KV / IDXRAW layer and the pools they touch), and on the drafter's card
     the DFlash window rows (W + T positions of every ring layer). nbytes[c]: one slot's bytes on card c (ALIGN multiple)"""
-    def __init__(self, m, df=None):
-        self.devs = [int(d) for d in m.devs]; T = self.T = int(m.ntok); self.max_ctx = int(m.max_ctx)
+    def __init__(self, m, df=None, T=None):
+        self.devs = [int(d) for d in m.devs]; T = self.T = int(m.ntok) if T is None else int(T); self.max_ctx = int(m.max_ctx)
         nc = len(self.devs)
         self.state, self.kv, self.off = [[] for _ in range(nc)], [[] for _ in range(nc)], [{} for _ in range(nc)]
         for k, t in m.state.items():
@@ -770,8 +772,8 @@ class Layout:
 class Ckpt:
     """a checkpoint record: pos / commit (the state (i0, commit)), the host state, its kind, where its bytes are (a VRAM slot,
     or disk = (entry name, [segment per card])), the token-prefix hash, the drafter's window meta"""
-    __slots__ = ('pos', 'commit', 'fresh', 'pool_ok', 'kind', 'slot', 'disk', 'tok_sha', 'df', 'created', 'used')
-    META = ('pos', 'commit', 'fresh', 'pool_ok', 'kind', 'tok_sha', 'df')
+    __slots__ = ('pos', 'commit', 'fresh', 'pool_ok', 'last_T', 'kind', 'slot', 'disk', 'tok_sha', 'df', 'created', 'used')
+    META = ('pos', 'commit', 'fresh', 'pool_ok', 'last_T', 'kind', 'tok_sha', 'df')
 
     def __init__(self, **kw):
         for k in self.__slots__: setattr(self, k, kw.get(k))
@@ -808,14 +810,19 @@ class PromptCache:
         self.m, self.pf, self.draft = m, pf, draft
         self.spill_min_gap = int(every if spill_min_gap is None else spill_min_gap)
         self.df = getattr(draft, 'df', None)
-        if draft is not None and (self.df is None or not hasattr(draft, 'window_state')):
-            raise CacheError(f'promptcache: drafter {type(draft).__name__}: only the DFlash K3 drafter (DFlashK3Drafter) or none '
-                             f'(MTP needs per-pass rows a batched prefill does not give)')
+        if draft is not None and (self.df is None or not hasattr(draft, 'window_state')
+                                  or getattr(self.df, 'kind', 'dflash') not in ('dflash', 'mtp')):
+            raise CacheError(f'promptcache: drafter {type(draft).__name__}: the DFlash K3 drafter (DFlashK3Drafter), '
+                             f'an MTP drafter (kind mtp), or none')
         if pf.m is not m: raise CacheError('promptcache: the prefill belongs to another engine')
         if self.df is not None and getattr(self.df, 'tgt', None) is not m:
             raise CacheError('promptcache: the drafter belongs to another engine (extend() reads its target\'s launch epoch)')
-        self.T, self.every, self.auto_park_min = int(m.ntok), int(every), auto_park_min
-        self.layout = L = Layout(m, self.df)
+        # (an MTP session's passes are the T = spec_T verify passes: the tail rows and the commit bounds cover that many)
+        T = int(m.ntok)
+        if self.df is not None and getattr(self.df, 'kind', None) == 'mtp':
+            T = int(getattr(m, 'spec_T', 1))
+        self.T, self.every, self.auto_park_min = T, int(every), auto_park_min
+        self.layout = L = Layout(m, self.df, T=T)
         # (normalized through JSON: an entry's header read back from disk holds lists where the key had tuples, and an unpark
         # compares the two whole)
         self.key = json.loads(json.dumps(key or engine_key(m, pf, draft))); self.key_sha = key_hash(self.key)
@@ -979,6 +986,10 @@ class PromptCache:
                 if win is not None: self.draft.import_window(win, ck.df)
         self._sync()
         m.fresh = bool(ck.fresh); m._during = None
+        # (the saved pass's width: a spec_T > 1 engine's commit_max after the restore; an entry written before the
+        # field existed falls back to the commit itself, the width the K3 loop's last pass ran)
+        if hasattr(m, 'last_T'):
+            m.last_T = int(ck.last_T) if ck.last_T is not None else int(ck.commit)
         if getattr(m, 'ple_layers', None) and m.ple._direct(): m.ple._drain()
         # the indexer's valid pools: those below the tail as the device has them, the tail's as the checkpoint saw them
         v = min(int(current_pool_ok), a // 4)
@@ -1007,7 +1018,8 @@ class PromptCache:
         s = self.free.pop(0)
         t0 = time.perf_counter()
         dm = self._save(self._slot_bufs(s), pos, commit); self._sync()
-        ck = Ckpt(pos=pos, commit=commit, fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)), kind=kind, slot=s,
+        ck = Ckpt(pos=pos, commit=commit, fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)),
+                  last_T=int(getattr(self.m, 'last_T', 0)), kind=kind, slot=s,
                   tok_sha=tok_sha(self.log[:pos]), df=dm)
         self.ckpts.append(ck); self.ckpts.sort(key=lambda x: (x.pos, x.commit))
         self.stats['checkpoints'] += 1; self.stats['checkpoint_ms'] += (time.perf_counter() - t0) * 1e3
@@ -1326,9 +1338,17 @@ class PromptCache:
             s = next((x for x in k3_stops if x > i0), None)
             f = T if s is None else min(T, s - i0)
             seq = ids[:i0 + f] + [ids[i0 + f - 1]] * (T - f)
-            m.verify_tokens(seq, i0, commit)
-            if self.draft is not None:
-                self.draft.inject(i0, m.features); self.draft.prefill(ids, i0 + f)   # (DFlashK3Drafter.prefill: the inject now)
+            if self.df is not None and getattr(self.df, 'kind', None) == 'mtp':
+                # the prompt tail's passes are the T-wide verify passes (T = spec_T); the MTP drafter takes the pass's
+                # h rows (its ring and the block rows i0 + 1 .. i0 + T filled from them)
+                ver = getattr(m, 'ver', None)
+                if ver is None: raise CacheError('promptcache: the MTP drafter but the engine has no verify tape (m.ver)')
+                ver.run(list(seq[i0:i0 + T]), i0, commit, argmax=False)
+                self.draft.take_h(i0, ver.buf['h'][:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
+            else:
+                m.verify_tokens(seq, i0, commit)
+                if self.draft is not None:
+                    self.draft.inject(i0, m.features); self.draft.prefill(ids, i0 + f)   # (DFlashK3Drafter.prefill: the inject now)
             commit, i0 = f, i0 + f
             self.log, self.st = ids[:i0], dict(i0=i0, commit=commit)
             if prog is not None: prog(i0)                  # (M7 ops: the server's live prompt progress, host only)
@@ -1664,7 +1684,8 @@ class PromptCache:
         live = None
         if not any(ck.pos == i0 and ck.commit == commit for ck in srcs):
             dm = self._save(self._slot_bufs(self.io_slot), i0, commit); self._sync()
-            live = Ckpt(pos=i0, commit=commit, fresh=bool(m.fresh), pool_ok=int(getattr(m, '_pool_ok', 0)), kind='live',
+            live = Ckpt(pos=i0, commit=commit, fresh=bool(m.fresh), pool_ok=int(getattr(m, '_pool_ok', 0)),
+                        last_T=int(getattr(m, 'last_T', 0)), kind='live',
                         slot=self.io_slot, tok_sha=tok_sha(self.log), df=dm)
             srcs.append(live)
         cks, out = [], []
@@ -1972,6 +1993,7 @@ class PromptCache:
             if self.draft is not None: self.draft.flush()
             dm = self._save(self._slot_bufs(self.side_slot), mst['i0'], mst['commit'])
             main = Ckpt(pos=mst['i0'], commit=mst['commit'], fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)),
+                        last_T=int(getattr(self.m, 'last_T', 0)),
                         kind='main', slot=self.side_slot, tok_sha=tok_sha(mlog), df=dm)
             for c in range(len(self.m.devs)):
                 with _ctx(self.side_buf[c]):

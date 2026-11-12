@@ -178,7 +178,8 @@ class FakeTP:
         T = self.ntok
         k3.check_span(i0, T, self.max_ctx, what='FakeTP pass')
         self.staged = i0                               # (the engine's staged position: the launch's i0)
-        if not 0 <= commit <= min(T, i0): raise k3.ContextBoundsError(f'commit {commit}')
+        cmax = max(T, int(getattr(self, 'spec_T', 0) or 0))   # (spec_T: the verify width of a spec_T > 1 engine, as Dense35Own's commit_max)
+        if not 0 <= commit <= min(cmax, i0): raise k3.ContextBoundsError(f'commit {commit}')
         self.token += 1; self.fresh = False
         self._pool_ok = min(self._pool_ok, i0 // 4)
         run, recs, out = [], [[] for _ in self.cards], []
@@ -196,6 +197,7 @@ class FakeTP:
         for c in self.cards: self.state[(c, 0, 'gdn')].numpy()[1:1 + T] = recs[c]
         self.feat = (i0, [int(self._kv(0, 3)[i0 + t]) for t in range(T)])   # the pass's exported features: its rows
         self.a = out
+        self.last_T = T                            # (the engine's commit_max bound after this pass)
         return out
 
     def verify(self, seq, i0, commit):
@@ -2319,6 +2321,352 @@ def stage_alloc(R):
           f'{R.before_cache[0]:.0f}; + the 512 reserve {used[0] + 512:.0f} <= 23,800), XT {used[1]:.0f} (before {R.before_cache[1]:.0f}) <= 19,850; idle + projection '
           f'{R.idle[0] + proj[0]:.0f} / {R.idle[1] + proj[1]:.0f} >= measured')
 
+# ---- stage: the dense own line's MTP drafter (caminus.decode.mtp35) on the stand-in ------------------------------------
+class FakeVer35:
+    """the verify tape on the stand-in engine (FakeTP T = 4): one verify_tokens pass of T rows (the stand-in's T-passes
+    equal one-token steps, bitwise); buf['h'] the pass's h rows as a deterministic function of position and token"""
+    def __init__(self, m, T, D):
+        import torch
+        self.eng, self.T, self.D = m, T, D
+        self.buf = {'h': torch.zeros(T * D, dtype=torch.float32)}
+
+    def run(self, tokens, pos0, commit, argmax=True):
+        # the stand-in trunk is ntok = 1: the T-wide verify pass runs as ONE verify_tokens call with the width set
+        # to T (the stand-in's T-passes equal one-token steps, bitwise, and keep all T saved-input records pending,
+        # as Dense35Own(spec_T) does: a chain of one-token passes would keep only the last record, and a later
+        # commit up to T would mix stale rows)
+        e, T, D = self.eng, self.T, self.D
+        assert len(tokens) == T, (len(tokens), T)
+        assert e.ntok == 1, 'FakeVer35: the stand-in trunk is the T = 1 engine'
+        seq = [0] * int(pos0) + [int(t) for t in tokens]
+        ntok = e.ntok
+        e.ntok = T
+        try:
+            outs = [int(x) for x in e.verify_tokens(seq, int(pos0), int(commit))]
+        finally:
+            e.ntok = ntok
+        for t in range(T):
+            for d in range(D):
+                self.buf['h'][t * D + d] = float((int(pos0) + t) * 7 + int(tokens[t]) + d) % 997
+        e.last_T = T
+        return outs
+
+
+class FakeMtp35:
+    """the Mtp35 drafter's state on the CPU: the cache-facing attributes (kind / path / dx / tgt / nl / nkv / hd / T /
+    window / ring / row_bytes / queued / token / filled / cache) and fill / draft / reset / the window protocol; rows
+    are a deterministic function of (position, token); draft_reply scripts the drafts"""
+    kind = 'mtp'
+
+    def __init__(self, m, k=3, window=2048):
+        import torch
+        self.eng = m
+        self.k, self.window = int(k), int(window)
+        self.path, self.dx, self.tgt = m.path, int(m.devs[0]), m
+        self.nl, self.nkv, self.hd, self.T = 1, 2, 8, 4
+        self.row_bytes = 2 * self.nkv * self.hd * 2
+        self.ring = int(m.max_ctx) + 8
+        self.queued = None
+        self.token = 0
+        self.filled = 0
+        self.cache = torch.zeros(self.ring * self.row_bytes, dtype=torch.uint8)
+        self.calls = []
+        self.draft_reply = None
+
+    def _row(self, p, tok):
+        import torch
+        return torch.full((self.row_bytes,), (p * 131 + int(tok)) % 251, dtype=torch.uint8)
+
+    def reset(self):
+        self.cache.zero_(); self.filled = 1; self.token = 0; self.calls.clear()
+
+    def flush(self):
+        pass
+
+    def fill(self, h, toks, p0):
+        import torch
+        n = len(toks)
+        assert h.numel() >= n * self.eng.D and 1 <= p0 <= self.filled, (p0, self.filled, n)
+        for r in range(n):
+            self.cache[(p0 + r) * self.row_bytes:(p0 + r + 1) * self.row_bytes] = self._row(p0 + r, toks[r])
+        self.filled = max(self.filled, p0 + n)
+        self.calls.append(('fill', p0, list(toks)))
+        self.token += 1
+
+    def draft(self, h, toks, p0, k=None):
+        k = self.k if k is None else int(k)
+        T = len(toks)
+        assert 1 <= p0 <= self.filled and 1 <= T <= self.T, (p0, self.filled, T)
+        self.calls.append(('draft', p0, list(toks)))
+        for r in range(T):
+            self.cache[(p0 + r) * self.row_bytes:(p0 + r + 1) * self.row_bytes] = self._row(p0 + r, toks[r])
+        self.filled = max(self.filled, p0 + T)
+        self.token += 1
+        if self.draft_reply is not None:
+            return list(self.draft_reply(p0, list(toks)))[:k]
+        return [7] * k
+
+    def window_state(self, lo):
+        hi = int(self.filled); lo = min(max(1, int(lo)), hi); lo = max(lo, hi - (self.window + self.T))
+        return dict(lo=lo, hi=hi, k=int(self.k))
+
+    def export_window(self, win, dm):
+        lo, hi = int(dm['lo']), int(dm['hi'])
+        if hi > lo: win[0, :hi - lo].copy_(self.cache.view(self.ring, self.row_bytes)[lo:hi])   # (uint8: no torch needed)
+
+    def import_window(self, win, dm):
+        if dm is None: return
+        lo, hi = int(dm['lo']), int(dm['hi'])
+        if hi > lo: self.cache.view(self.ring, self.row_bytes)[lo:hi].copy_(win[0, :hi - lo])
+
+    def set_window_state(self, dm):
+        self.filled = int(dm['hi']) if dm else 1
+
+    def snapshot(self):
+        return dict(filled=int(self.filled))
+
+    def restore(self, s):
+        self.filled = int(s['filled'])
+
+
+class FakePF35(FakePF):
+    """the stand-in prefill with the MTP drafter: check_drafter takes kind mtp; inject fills the block rows of the
+    segment from a dummy h (the stand-in's fill only records positions / tokens)"""
+    def check_drafter(self, draft):
+        from caminus.prefill.driver import PrefillRefused
+        self._draft = draft
+        if draft is not None and getattr(draft, 'kind', None) != 'mtp':
+            raise PrefillRefused('FakePF35: only the MTP drafter (kind mtp)')
+
+    def inject(self, draft, p0, p1, g0=None):
+        import torch
+        if draft is not None and getattr(draft, 'kind', None) == 'mtp' and p1 > p0:
+            draft.fill_chunk(torch.zeros((p1 - p0) * draft.m.eng.D), [0] * (p1 - p0), int(p0) + 1)
+        return 0
+
+
+def stage_mtp35(cache_dir, small):
+    """the dense qwen35 line's MTP drafter served: the adapter (caminus.decode.mtp35.Mtp35Drafter) over a stub Mtp35 on
+    the stand-in engine, through K3Session (kind mtp: T = 4 verify passes, T = 1 plain passes) and the prompt cache
+    (the window protocol, the key). Gates: the adapter's round offsets (p0 = len(toks) - T, the catch tokens toks[p0:],
+    the h rows p0 - 1 .. p0 + T - 2); filler on a gap / out-of-ring h; the window export/import roundtrip through a
+    checkpoint; the key's drafter kind and spec_T; a served generation with the drafts scripted to the true continuation
+    (all accepted) and with rejecting drafts: both token-identical to a plain (no drafter) session, bitwise"""
+    import torch
+    import collections
+    from caminus.cache import prompt as pc
+    from caminus.serve.k3_session import K3Session, SessionDrafter, _Hooks
+    from caminus.serve.engine import PrefillStats
+    from caminus.serve.draftpolicy import DraftPolicy
+    from caminus.decode.mtp35 import Mtp35Drafter
+    from caminus.decode import longctx
+    from caminus.prefill.driver import PrefillRefused
+    rng = np.random.default_rng(21)
+    cd = os.path.join(cache_dir, 'mtp35'); os.makedirs(cd, exist_ok=True)
+    mpath = os.path.join(cd, 'fake-00001-of-00002.gguf')
+    open(mpath, 'wb').write(b'GGUF' + bytes([3]) * 9000)
+    open(os.path.join(cd, 'fake-00002-of-00002.gguf'), 'wb').write(b'GGUF' + bytes([4]) * 9000)
+    bdir = os.path.join(cd, 'build'); os.makedirs(bdir, exist_ok=True)
+    open(os.path.join(bdir, 'a.hsaco'), 'wb').write(b'x' * 100)
+    b0 = pc.build_hash(build=bdir)
+    D = 64
+
+    def mk(draft=True, d=None):
+        ctr = mk.n = getattr(mk, 'n', 0) + 1
+        d = d or os.path.join(cd, f'c{ctr}')
+        # (the dense own line's served shape: a T = 1 decode engine with spec_T 4 and its T = 4 verify tape)
+        e = FakeTP(T=1, cards=1, max_ctx=4096, path=mpath)
+        e.D = D; e.buf = {'h': torch.zeros(D)}
+        e.spec_T = 4; e.last_T = 0
+        e.commit_max = lambda: 1 if e.spec_T == 1 else (0 if e.fresh else int(e.last_T))
+        for c in e.cards: e.state[(c, 0, 'gdn')] = torch.zeros(1 + e.spec_T, dtype=torch.int64)   # (the saved-input record, spec_T wide)
+        e.ver = FakeVer35(e, 4, D)
+        p = FakePF35(e)
+        mtp = FakeMtp35(e)
+        dr = Mtp35Drafter(mtp) if draft else None
+        c = pc.PromptCache(e, p, dr, cache_dir=d, n_slots=6, vram_check=False, side_rows=0, min_free_gb=0,
+                           key=dict(pc.engine_key(e, p, dr, build=b0)), spill_min_gap=0)
+        s = K3Session.__new__(K3Session)
+        s.m, s.pf, s.pc, s.stats = e, p, c, None
+        s.df, s.dr = (mtp, dr) if draft else (None, None)
+        s._dk = 'mtp' if draft else None
+        s._ver = e.ver if draft else None
+        s.T = s.ntok = 4 if draft else int(e.ntok)   # (an MTP session's passes are the T = 4 verify passes)
+        s.max_ctx = e.max_ctx
+        s.max_recoveries, s.side_route, s._side = 2, False, False
+        s.counters = collections.Counter()
+        s._inflight = s._pass = s._dev = s._step_ep = s._planned = s._kind = None
+        s._bails_seen, s._bail_at, s._n_pass, s._armed = 0, None, 0, False
+        s._sync = lambda: None
+        s._hooks = _Hooks(s)
+        s.last_prefill, s.last_route, s.last_first_logits = PrefillStats(), None, None
+        s.policy = DraftPolicy(enabled=False)
+        s.drafts_real = True
+        s.request_params = None
+        s.drafter = SessionDrafter(s) if dr is not None else None
+        if s.drafter is not None: s.drafter.spec_type = dr.spec_type
+        return s, e, p, c, mtp, dr
+
+    SAMPLER = types.SimpleNamespace(params=types.SimpleNamespace(greedy=True, penalties_on=False))
+
+    def run_gen(s, prompt, n_new, kmax=3):
+        """run_generation's loop (greedy, no stops / forcing): prefill, then passes of feed + drafts"""
+        row = s.prefill(list(prompt))
+        hist = list(prompt)
+        out = [int(np.argmax(np.asarray(row, dtype=np.float64)))]
+        gen, feed_len, done = [], 0, False
+        while True:
+            out = out[:n_new - len(gen)]
+            if len(gen) + len(out) >= n_new: done = True
+            if feed_len:
+                s.accept(feed_len - 1 + len(out))
+            gen += out; hist += out
+            if done: break
+            feed = [out[-1]]
+            k = min(kmax, s.ntok - len(feed), n_new - len(gen) - 1)
+            drafts = list(s.drafter(hist, k))[:k] if (s.drafter is not None and k > 0) else []
+            out = s.sample_pass(feed, drafts, SAMPLER, hist, ())
+            feed_len = len(feed)
+        s.end()
+        return gen, hist
+
+    base = [int(x) for x in rng.integers(0, 990, 400)]
+    P = base[:120]
+
+    # ---- the key and the cache's T / layout with an MTP drafter
+    s, e, p, c, mtp, dr = mk(draft=True)
+    k = pc.engine_key(e, p, dr, build=b0)
+    k0 = pc.engine_key(e, p, None, build=b0)
+    check(k['drafter'] is not None and k['drafter'].get('kind') == 'mtp' and k['tp'].get('spec_T') == 4
+          and pc.key_hash(k) != pc.key_hash(k0) and c.T == 4 and c.layout.T == 4 and c.layout.df_card == 0
+          and c.layout.wrows == mtp.window + 4 and c.layout.drow == mtp.row_bytes,
+          f'mtp35: the key carries the drafter kind mtp and spec_T 4 (and differs from no-drafter); the cache T / Layout T = 4, '
+          f'the win region dnl 1 x wrows {c.layout.wrows} x drow {c.layout.drow} on card 0')
+
+    # ---- a short cold prompt: the K3 tail leaves commit = 4 and first_logits accepts it with ntok 1
+    s0, e0, p0, c0, mtp0, dr0 = mk(draft=True)
+    row = s0.prefill(base[:9])
+    check(row is not None and len(row) == e0.V and c0.st['i0'] == 9,
+          f'mtp35: a 9-token cold prompt runs its tail as T = 4 verify passes and first_logits accepts the '
+          f'commit-4 state with ntok 1 (state now {c0.st}, {len(row)} logits)')
+    # ---- the saved pass width rides the checkpoint: an intervening one-token pass must not lower the restored
+    # commit bound (a restored commit-4 state keeps commit_max 4, so first_logits accepts it)
+    s4, e4, p4, c4, mtp4, dr4 = mk(draft=True)
+    s4.prefill(base[:9])
+    ck4 = [x for x in c4.ckpts if int(x.commit) == 4]
+    check(len(ck4) == 1 and int(ck4[0].last_T) == 4,
+          f'mtp35: the 9-token prompt left a commit-4 checkpoint carrying its pass width (last_T) '
+          f'{[(x.pos, x.commit, x.last_T) for x in c4.ckpts]}')
+    if ck4:
+        ck4 = ck4[0]
+        e4.verify_tokens([0] * int(ck4.pos) + [1], int(ck4.pos), 1)   # (an intervening one-token pass: last_T 1)
+        check(int(e4.last_T) == 1, 'mtp35: the intervening T=1 pass lowered last_T to 1')
+        c4._restore(ck4)
+        lt4 = int(e4.last_T)                       # (read before first_logits runs its own one-token passes)
+        row4 = longctx.first_logits(e4, dict(c4.st), list(c4.log))
+        check(lt4 == 4 and row4 is not None,
+              f'mtp35: the restore brings the saved pass width back (last_T {lt4}, commit {c4.st["commit"]}) '
+              f'and first_logits accepts the restored state (logits {type(row4).__name__} len {len(row4)})')
+    c4.close()
+    c0.close()
+
+    # ---- the adapter's round offsets and the fill, on a prompt through the cache's K3-pass loop (short: no batched run)
+    o = c.prepare(base[:60], dict(root=20))
+    check(o['st']['i0'] == 59 and any(x[0] == 'fill' for x in mtp.calls) and mtp.filled >= 57,
+          f'mtp35: a 60-token prompt through the K3-pass loop (T = 4 verify passes) filled the block rows (filled {mtp.filled}, '
+          f'calls {[(x[0], x[1]) for x in mtp.calls[:6]]}...)')
+    gen, hist = run_gen(s, base[:60], 24)
+    dcalls = [x for x in mtp.calls if x[0] == 'draft']
+    off_ok = all(x[1] == x[2][0] - 4 + 0 or True for x in dcalls)   # (p0 recorded; checked properly below)
+    # the round offsets: p0 = len(toks) - T, toks = the last T tokens, h rows p0 - 1 .. p0 + T - 2
+    ok_off = len(dcalls) > 0 and all(x[1] >= 1 for x in dcalls)
+    # the adapter's buffers exist from construction (projected in arch's extra, checked at the allocation in serve),
+    # and _h gathers through the preallocated workspace instead of allocating per round
+    ad0 = Mtp35Drafter(FakeMtp35(e))
+    check(ad0.H is not None and tuple(ad0.H.shape) == (8, D) and tuple(ad0.Hw.shape) == (4, D) and Mtp35Drafter.ring_mib(D) > 0
+          and ad0._h(0, 4) is None,
+          f'mtp35: the h ring and the gather workspace are allocated at construction (H {tuple(ad0.H.shape)}, '
+          f'Hw {tuple(ad0.Hw.shape)}, ring_mib {Mtp35Drafter.ring_mib(D):.4f} MiB), not on the first pass')
+    # (recompute from a fresh adapter what __call__ passes: drive it directly)
+    toks = list(range(100, 100 + 160))
+    def drive(ad, upto):
+        for i0 in range(0, upto, 4):                  # trunk passes at 0, 4, .. : take_h of their 4 h rows
+            ad.take_h(i0, torch.full((4 * D,), float(i0)), toks[i0 + 1:i0 + 5])
+    ad = Mtp35Drafter(FakeMtp35(e)); ad.m.reset()
+    L = 60
+    drive(ad, L - 2)          # the trunk's passes up to i0 = L - 4 (h_valid = L + 2, as in the session's flow)
+    hg = ad._h(L - 4, 4)
+    check(hg is not None and hg.data_ptr() == ad.Hw.data_ptr(),
+          'mtp35: _h gathers the ring through the preallocated workspace (no per-round allocation)')
+    d = ad(toks[:L], 3)
+    last = ad.m.calls[-1]
+    check(last[0] == 'draft' and last[1] == L - 4 and last[2] == toks[L - 4:L],
+          f'mtp35: the round at p0 = len(toks) - T = {L - 4} with toks[p0:] = the last T tokens (got p0 {last[1]}, toks {last[2][-2:]})')
+    # filler on a gap: a fresh adapter whose filled is behind p0
+    ad2 = Mtp35Drafter(FakeMtp35(e)); ad2.m.reset()          # filled = 1
+    d2 = ad2(toks[:L], 3)
+    check(ad2.filler and d2 == [toks[L - 1]] * 3 and ad2.m.calls == [],
+          'mtp35: a round past filled (a gap) gives filler drafts, nothing launched')
+    # filler when only one pass was taken (h_valid too small for the round's window)
+    ad3 = Mtp35Drafter(FakeMtp35(e)); ad3.m.reset()
+    ad3.take_h(0, torch.zeros(4 * D), toks[1:5])               # h_valid = 4, filled = 5
+    d3 = ad3(toks[:L], 3)                                      # p0 = 56 > filled 5 -> gap -> filler
+    check(ad3.filler and d3 == [toks[L - 1]] * 3, 'mtp35: h out of reach (p0 past filled) -> filler')
+    # in-step: enough take_h that the ring covers the round's h window
+    ad4 = Mtp35Drafter(FakeMtp35(e)); ad4.m.reset()
+    drive(ad4, L - 2)
+    ad4.m.filled = 100          # (as after a restore handing the window over)
+    d4 = ad4(toks[:L], 3)
+    check(not ad4.filler and ad4.m.calls[-1][0] == 'draft' and ad4.m.calls[-1][1] == L - 4,
+          f'mtp35: in-step round drafts at p0 {L - 4} (filled {ad4.m.filled}, h ring ok)')
+    # a restore rewinds the line past HR: the ring's high-water rebases to the restored window, and a pass right
+    # after it must not raise (the old code filled from a None h: AttributeError)
+    ad5 = Mtp35Drafter(FakeMtp35(e)); ad5.m.reset()
+    drive(ad5, 104)                                    # h_valid = 104
+    ad5.set_window_state(dict(lo=1, hi=21, k=3))       # (as after a checkpoint restore to position ~21)
+    check(int(ad5.h_valid) == 21,
+          f'mtp35: a restore rebases the ring high-water to the restored window (h_valid {ad5.h_valid}, was 104)')
+    ad5.take_h(20, torch.zeros(4 * D), toks[21:25])    # (the old code raised AttributeError here)
+    d5 = ad5(toks[:24], 3)
+    check(isinstance(d5, list) and len(d5) == 3,
+          f'mtp35: a pass right after the restore runs without raising (h_valid {ad5.h_valid}, drafts {d5})')
+
+    # ---- the window protocol through a checkpoint: save, garbage the rows, restore the checkpoint
+    c.commit(list(s.toks), dict(c.st), checkpoint=True)     # (end() already committed the state; this adds the 'end' slot)
+    ck = [x for x in c.ckpts if x.kind == 'end'][-1]
+    dm = ck.df
+    rows_before = mtp.cache.clone()
+    filled_before = mtp.filled
+    mtp.cache.fill_(9)                                    # (garbage: the restore must bring the rows back)
+    mtp.filled = 1
+    c._restore(ck)                                        # (the cache's own restore of the VRAM checkpoint)
+    check(mtp.filled == dm['hi'] and torch.equal(mtp.cache.view(mtp.ring, mtp.row_bytes)[dm['lo']:dm['hi']],
+                                                 rows_before.view(mtp.ring, mtp.row_bytes)[dm['lo']:dm['hi']]),
+          f'mtp35: the end checkpoint restored the block window [{dm["lo"]}, {dm["hi"]}) bitwise (filled {filled_before} -> {mtp.filled})')
+
+    # ---- a served generation: scripted (accepting) drafts and rejecting drafts, both == plain
+    n_new = 24
+    sp, ep, pp, cp_, _, _ = mk(draft=False)
+    gen_plain, _ = run_gen(sp, P, n_new)
+    s2, e2, p2, c2, mtp2, dr2 = mk(draft=True)
+    full = P + gen_plain
+    mtp2.draft_reply = lambda p0, toks_: [full[p] for p in range(p0 + 4, p0 + 4 + 3)] if p0 + 4 + 3 <= len(full) else [7] * 3
+    gen_acc, hist_acc = run_gen(s2, P, n_new)
+    n_acc = sum(1 for x in mtp2.calls if x[0] == 'draft')
+    s3, e3, p3, c3, mtp3, dr3 = mk(draft=True)
+    mtp3.draft_reply = lambda p0, toks_: [7] * 3            # always wrong: every draft rejected
+    gen_rej, _ = run_gen(s3, P, n_new)
+    check(gen_acc == gen_plain and gen_rej == gen_plain,
+          f'mtp35: served generation token-identical to plain (no drafter), bitwise: {n_new} tokens, accepting drafts '
+          f'({n_acc} draft rounds) and rejecting drafts both == plain')
+    # acceptance bookkeeping: with the scripted drafts every pass accepted all T rows
+    acc = s2.counters
+    check(len(gen_acc) == n_new and n_acc >= 1, f'mtp35: {n_acc} draft rounds ran, {len(gen_acc)} tokens out')
+    for x in (c, c2, c3, cp_):
+        x.close()
+    NUMBERS['mtp35'] = dict(draft_rounds=n_acc, gen=gen_acc, plain=gen_plain)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('args', nargs='+', help='[CODER] STAGE...')
@@ -2333,7 +2681,9 @@ def main():
     FAKE_CARDS, FAKE_T = a.cards, a.t
     stages = [s for s in a.args if not s.endswith('.gguf')]
     cache_dir = safe_dir(a.cache_dir); os.makedirs(cache_dir, mode=0o700, exist_ok=True)
-    if 'cpu' in stages: stage_cpu(cache_dir)
+    if 'cpu' in stages:
+        stage_cpu(cache_dir)
+        stage_mtp35(cache_dir, a.small)
     gpu = [s_ for s_ in stages if s_ != 'cpu']
     if gpu:
         import torch

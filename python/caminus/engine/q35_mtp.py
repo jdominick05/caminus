@@ -56,7 +56,28 @@ class Mtp35:
         buf = 4 * MAX_T * (6 * D + 2 * D + 3 * QH + 2 * QH + 4 * eng.nkv * eng.hd + 2 * ffn) + 2 * MAX_T * (2 * D + 2 * D + QH + ffn)
         return (w + kv + buf + 4 * eng.vocab) / 2 ** 20 + 4 * (k + 2 * MAX_T) + 8.0
 
-    def __init__(self, eng, k=3, module=MODULE, per_wgp=None, vram_check=True):
+    @staticmethod
+    def projection_mib(path, max_ctx, k=3):
+        """need_mib from the file's header alone (nothing on a card), for the loader's max_ctx auto and fits: the block's
+        weights, its KV cache at max_ctx, the tapes' buffers"""
+        from .. import ggufio
+        F = ggufio.GGUFFile(path)
+        try:
+            il = block_of(F)
+            if il is None: raise ValueError(f'Mtp35: {os.path.basename(path)} has no multi-token-prediction block')
+            p = f'blk.{il}.'
+            w = sum(t.n_bytes for n, t in F.T.items() if n.startswith(p))
+            hp = F.hp
+            D = int(hp('embedding_length')); nh = int(hp('attention.head_count')); nkv = int(hp('attention.head_count_kv'))
+            hd = int(hp('attention.key_length')); ffn = int(hp('feed_forward_length')); vocab = int(F.T['output.weight'].shape[1])
+            kv = (int(max_ctx) + MAX_T + k) * 2 * nkv * hd * 2
+            QH = nh * hd
+            buf = 4 * MAX_T * (6 * D + 2 * D + 3 * QH + 2 * QH + 4 * nkv * hd + 2 * ffn) + 2 * MAX_T * (2 * D + 2 * D + QH + ffn)
+            return (w + kv + buf + 4 * vocab) / 2 ** 20 + 4 * (k + 2 * MAX_T) + 8.0
+        finally:
+            F.close()
+
+    def __init__(self, eng, k=3, module=MODULE, per_wgp=None, vram_check=True, window=2048):
         """eng: a Dense35Own on the Swift module (its card, max_ctx, head and embedding); k: drafts per round (1 .. 4)"""
         if module not in k3.Q35M_MODULES: raise ValueError(f'Mtp35: module {module!r} ({k3.Q35M_MODULES})')
         if eng.tcap or eng.module not in k3.Q35S_MODULES: raise ValueError(f'Mtp35: the Swift module only (the engine runs {eng.module})')
@@ -73,6 +94,15 @@ class Mtp35:
         self.per_wgp = int(per_wgp) if per_wgp else eng.per_wgp
         self.filled = 0      # block KV rows 1 .. filled - 1 hold rows from the trunk's h (row 0: zero)
         self.bails = []
+        self.token = 0       # the launch-epoch counter the prompt cache's live state reads (one per round)
+        # the cache-facing identity (caminus.cache.prompt Layout / engine_key read these off the drafter's df, as of DFlashK3)
+        self.kind = 'mtp'
+        self.path, self.dx, self.tgt = eng.path, int(eng.dev), eng
+        self.nl, self.nkv, self.hd = 1, eng.nkv, eng.hd
+        self.T, self.window = MAX_T, int(window)
+        self.ring = int(eng.max_ctx) + MAX_T + self.k   # the block KV's rows (the 'ring' of a by-position cache)
+        self.row_bytes = 2 * eng.nkv * eng.hd * 2
+        self.queued = None   # (DFlash's pending inject: none here; the cache checks it before a checkpoint)
         with torch.cuda.device(eng.dev): self._load(); self._build()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
@@ -183,6 +213,54 @@ class Mtp35:
         with torch.cuda.device(self.eng.dev): self.cache[:2 * self.eng.nkv * self.eng.hd].zero_()
         self.filled = 1
 
+    def flush(self):
+        """nothing is ever queued (queued is None): the K3 session / cache call this per pass"""
+
+    # -- the prompt cache's window protocol (caminus.cache.prompt, as DFlashK3's) ------------------------------------
+    # The block's KV is by position, not a ring: a checkpoint saves the window [lo, filled) of rows (W + T rows at
+    # most, the layout's win region: dnl=1, wrows=W+T, drow=row_bytes). Rows below lo are not saved: past a restore
+    # the block's dense attention reads them stale, so drafts there are inexact (the verify decides every token; only
+    # acceptance sags, measured after a restore in the served gates).
+    def window_state(self, lo):
+        """the window of this state readable from lo: dict(lo, hi=filled) (rows 1 .. filled - 1 hold trunk-h pairs)"""
+        hi = int(self.filled)
+        lo = min(max(1, int(lo)), hi)
+        lo = max(lo, hi - (self.window + self.T))     # (the layout's wrows)
+        return dict(lo=lo, hi=hi, k=int(self.k))
+
+    def export_window(self, win, dm):
+        """rows dm['lo'] .. dm['hi'] - 1 of the block KV into the slot's win region (win: [1, wrows, row_bytes] uint8)"""
+        lo, hi = int(dm['lo']), int(dm['hi'])
+        if hi <= lo: return
+        n = hi - lo
+        if n > win.shape[1]: raise ValueError(f'Mtp35 export_window: {n} rows past the slot window {win.shape[1]}')
+        with torch.cuda.device(self.eng.dev):
+            src = self.cache.view(torch.uint8).view(self.rows, self.row_bytes)
+            win[0, :n].copy_(src[lo:hi])
+
+    def import_window(self, win, dm):
+        """the slot's win region back into the block KV rows dm['lo'] .. dm['hi'] - 1"""
+        if dm is None: return
+        lo, hi = int(dm['lo']), int(dm['hi'])
+        if hi <= lo: return
+        n = hi - lo
+        with torch.cuda.device(self.eng.dev):
+            dst = self.cache.view(torch.uint8).view(self.rows, self.row_bytes)
+            dst[lo:hi].copy_(win[0, :n])
+
+    def set_window_state(self, dm):
+        """the restored window's high-water mark: rows below dm['hi'] hold their saved pairs, later ones are rewritten
+        before any read (a round refuses a gap past filled)"""
+        self.filled = int(dm['hi']) if dm is not None else 1
+
+    def snapshot(self):
+        """caminus.decode.longctx: the host state of a sequence (the KV rows are by position: the cache's window export
+        carries them; here only the pointer)"""
+        return dict(filled=int(self.filled))
+
+    def restore(self, s):
+        self.filled = int(s['filled'])
+
     def _rows(self, h, n):
         if h.dtype != torch.float32 or h.device.index != self.eng.dev or h.numel() < n * self.eng.D:
             raise ValueError(f'Mtp35: h must be fp32 [{n}, {self.eng.D}] on card {self.eng.dev} (got {h.dtype} {tuple(h.shape)} on {h.device})')
@@ -226,7 +304,9 @@ class Mtp35:
             for attempt in range(self.eng.max_retries + 1):
                 # (the keys start at 0 for every attempt: the stage copy writes them)
                 bad = self._launch(order)
-                if not bad: return
+                if not bad:
+                    self.token += 1
+                    return
                 self.bails.append((what, attempt, bad))
                 print(f'k3 qwen35 mtp: a wait gave up ({what}, attempt {attempt + 1}), running it again: ' + '; '.join(bad), file=sys.stderr, flush=True)
             raise RuntimeError(f'k3 qwen35 mtp: a wait gave up ({what}) in {self.eng.max_retries + 1} attempts: ' + '; '.join(bad))

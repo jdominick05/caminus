@@ -128,9 +128,10 @@ class Ops(q3m_ops.Ops):
         self.mod.q35p_gate_mul16((min(-(-int(N) // 256), 8192),), (256,), a, gate, y16, ctypes.c_longlong(int(N)), I(D), I(stride), I(off))
 
 
-def layout(m, T):
+def layout(m, T, export_h=False):
     """(f32 counts, f16 counts, i32 counts) of Q35OwnPrefill's buffers for engine m (Dense35Own, or shapes_of) at chunk T.
-    `work` is shared by the layer kinds and the feed-forward (each is dead before the next one writes)"""
+    `work` is shared by the layer kinds and the feed-forward (each is dead before the next one writes). export_h: the
+    per-row export of the trunk's final h (the MTP drafter's fill input; the output norm runs on every chunk then)"""
     D, nh, nkv, hd, ffn, S, NK, NV = m.D, m.nh, m.nkv, m.hd, m.ffn, m.S, m.NK, m.NV
     CH, KD, VD, QH = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd
     gdn = 2 * CH + 2 * KD + 2 * VD                       # qkv, conv, qk, z, o
@@ -138,12 +139,15 @@ def layout(m, T):
     f32 = dict(x=T * D, h=T * D, blk=T * D, ffp=T * D, al=T * NV, be=T * NV, gates=T * 2 * NV,
                work=T * max(gdn, att, 2 * ffn))
     f16 = dict(h16=T * D, x16=T * max(VD, QH, ffn))     # (the output GEMMs' fp16 input: fin16 / gat16 / the swiglu)
+    if export_h:                                        # (the exported h: fp32 + its fp16 copy, one chunk wide)
+        f32['hout'] = T * D
+        f16['h16o'] = T * D
     i32 = dict(toks=T, err=1)
     return f32, f16, i32
 
 
-def buffer_need_mib(m, T):
-    f32, f16, i32 = layout(m, T)
+def buffer_need_mib(m, T, export_h=False):
+    f32, f16, i32 = layout(m, T, export_h=export_h)
     return (4 * sum(f32.values()) + 2 * sum(f16.values()) + 4 * sum(i32.values())) / capacity.MIB
 
 
@@ -161,8 +165,12 @@ class Q35OwnPrefill(PrefillDriver):
     """the batched prefill of a Dense35Own engine m, chunks of up to `chunk` tokens; buffers preallocated (checked against
     the card's guard line first: capacity.check)"""
 
-    def __init__(self, m, chunk=1024, crossover=None, check=True):
+    def __init__(self, m, chunk=1024, crossover=None, check=True, export_h=None):
         self.m, self.chunk = m, int(chunk)
+        # export_h: export every chunk row's final h (the MTP drafter's fill input) and fill the block per chunk;
+        # default on when the engine carries an MTP drafter (m.mtp35, set by the architecture's build)
+        self.export_h = bool(getattr(m, 'mtp35', None) is not None) if export_h is None else bool(export_h)
+        self._draft = None
         if not 16 <= self.chunk <= 4096: raise ValueError(f'Q35OwnPrefill: chunk {chunk} (16 .. 4096)')
         if m.nl_build != m.nl: raise ValueError('Q35OwnPrefill: a debug_layers engine is refused')
         self.dev = dev = torch.device(f'cuda:{m.dev}')
@@ -179,9 +187,9 @@ class Q35OwnPrefill(PrefillDriver):
         attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
         if attn is None: raise ValueError(f'Q35OwnPrefill: {m.nh // m.nkv} query heads per kv head')
         T = self.chunk
-        self.need_mib = buffer_need_mib(m, T)
+        self.need_mib = buffer_need_mib(m, T, export_h=self.export_h)
         if check: capacity.check([dev.index], [self.need_mib], f'Q35OwnPrefill buffers (chunk {T})')
-        f32, f16, i32 = layout(m, T)
+        f32, f16, i32 = layout(m, T, export_h=self.export_h)
         with torch.cuda.device(dev):
             self.O = Ops(dev, module=MODULE_TCAP if self.tcap else MODULE)
             self.Gl = Glue(dev, module='prefill_glue_q35d')
@@ -199,7 +207,13 @@ class Q35OwnPrefill(PrefillDriver):
     MM_KEYS = dict(gdn=('qkv', 'z', 'so'), attn=('q', 'k', 'v', 'o'))
 
     def check_drafter(self, draft):
-        if draft is not None: raise PrefillRefused('Q35OwnPrefill: no drafter yet')
+        self._draft = draft
+        if draft is not None and getattr(draft, 'kind', None) != 'mtp':
+            raise PrefillRefused('Q35OwnPrefill: only the MTP drafter (kind mtp), or none')
+
+    def inject(self, draft, p0, p1, g0=None):
+        """the MTP block's rows were filled per chunk from the exported h (_run_chunk); nothing to inject at a segment end"""
+        return 0
 
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums)"""
@@ -242,7 +256,7 @@ class Q35OwnPrefill(PrefillDriver):
                 Gl.gdn_conv(qkv, L['conv_w'], L['conv_st'], conv, CH, n)
                 Gd.l2(conv, qk, n, 2 * NK, eps, ldx=CH)
                 Gd.step(qk, conv[2 * KD:], gt, L['gdn'], att, n, NV, NK, CH)
-                if il == last: break                       # (the last layer: only its recurrent states are needed)
+                if il == last and not self.export_h: break  # (the last layer: only its recurrent states are needed)
                 O.mm(L['z'], h16, D, z, VD, n=n)
                 O.gdn_norm16(att, L['nw'], z, x16, n, NV, S, eps)
                 O.mm(L['so'], x16, VD, blk, D, n=n)
@@ -257,7 +271,7 @@ class Q35OwnPrefill(PrefillDriver):
                 O.mm(L['k'], h16, D, kr, M, n=n); O.mm(L['v'], h16, D, vr, M, n=n)
                 A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n)
                 O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
-                if il == last: break                       # (the last layer: only its cache rows are needed)
+                if il == last and not self.export_h: break  # (the last layer: only its cache rows are needed)
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
                 A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
                 for r0, r1 in O.attn_rows(p, n):
@@ -269,6 +283,10 @@ class Q35OwnPrefill(PrefillDriver):
             O.mm(L['fg'], h16, D, g, ffn, n=n); O.mm(L['fu'], h16, D, u, ffn, n=n)
             O.swiglu(g, u, x16, n * ffn)
             O.mm(L['fd'], x16, ffn, ffp, D, n=n)
+        if self.export_h:
+            # the trunk's final h per row (rms(x + ffp) * out_norm, fp32 + its fp16 copy): the MTP drafter's fill input.
+            # Prefill numerics (the WMMA GEMMs), not the decode tape's matvec: the served gate is acceptance + token identity
+            O.add_rms16(x, m.out_norm, eps, self.h16o[:n * D], n, D, d=ffp, h=self.hout[:n * D])
 
     def check_flags(self, what='prefill'):
         e = int(self.err.item())
@@ -278,6 +296,14 @@ class Q35OwnPrefill(PrefillDriver):
 
     def _run_chunk(self, toks, k, j, a, b, segs, bounds):
         self._chunk(toks, a, b)
+        if self.export_h:
+            dr = self._draft
+            if dr is not None and getattr(dr, 'kind', None) == 'mtp':
+                # fill the MTP block rows a + 1 .. b from this chunk's exported h and the tokens at those positions
+                # (the token at b past the prompt's end is clamped: the row is rewritten by the pass that verifies it)
+                n = b - a
+                ts = [int(toks[min(p, len(toks) - 1)]) for p in range(a + 1, b + 1)]
+                dr.fill_chunk(self.hout[:n * self.m.D], ts, a + 1)
 
     def _run_settle(self):
         torch.cuda.synchronize(self.dev); self.check_flags('prefill')

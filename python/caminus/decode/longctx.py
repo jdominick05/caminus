@@ -234,7 +234,12 @@ def first_logits(m, st, toks, draft=None, max_pass_ms=None):
     the first pass, which rewrites the features it would read, and every pass's features are injected after it, as fill()
     does, so the drafter can continue the returned state); without it a drafter left pending would later inject the
     features of this function's passes. Returns (logits, state)"""
-    i0, commit = spec.resume_point(toks, st['i0'], st['commit'], m.ntok)
+    # (the commit bound is the last pass's width, not ntok: a dense own-line engine served with spec_T > 1 runs its
+    # prompt tail as verify passes, so its state can hold commit up to spec_T with ntok 1)
+    T = int(m.ntok)
+    _cm = getattr(m, 'commit_max', None)
+    if _cm is not None: T = max(T, int(_cm()))
+    i0, commit = spec.resume_point(toks, st['i0'], st['commit'], T)
     if draft is not None and hasattr(draft, 'flush'): draft.flush()
     keep = []
     def last(p, lg):

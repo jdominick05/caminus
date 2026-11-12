@@ -72,7 +72,7 @@ def main():
           'variant: a model without a two-card form refuses --cards 2; the two-card split weighs the feed-forward rows by bandwidth')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
-                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, None), 'qwen3next': ('tp', 2, 1, None),
+                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
                     'qwen35-own-tp': ('tp', 2, 1, None)},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
@@ -224,6 +224,24 @@ def main():
         need = ('step', 'verify', 'verify_tokens', 'step_token', 'launch_tokens', 'finish_pass', 'reset', 'prefetch')
         lack = {n: [a for a in need if not callable(getattr(x.engine_class(), a, None))] for n, x in arch.ARCHS.items()}
         check(not any(lack.values()), f'engine_class: every engine has the session\'s pass methods (missing: {lack})')
+        # the dense own line's projection with --draft mtp runs end to end on a synthetic nextn file (regression: the
+        # adapter ring's D must come from shapes_of, not from a header key meta() does not keep - KeyError at startup)
+        q35 = os.path.join(S, 'tiny-q35own.gguf')
+        hp35 = {'qwen35.context_length': 4096, 'qwen35.block_count': 2, 'qwen35.nextn_predict_layers': 1,
+                'qwen35.embedding_length': 64, 'qwen35.feed_forward_length': 128, 'qwen35.attention.head_count': 4,
+                'qwen35.attention.head_count_kv': 2, 'qwen35.attention.key_length': 16, 'qwen35.rope.dimension_count': 8,
+                'qwen35.ssm.state_size': 16, 'qwen35.ssm.group_count': 1, 'qwen35.ssm.time_step_rank': 8,
+                'qwen35.ssm.conv_kernel': 4, 'qwen35.ssm.inner_size': 32}
+        write_gguf(q35, 'qwen35', hp35, [('token_embd.weight', 64, 997), ('output.weight', 64, 997),
+                                         ('blk.1.nextn.eh_proj.weight', 8, 8)])
+        own = arch.ARCHS['qwen35-own']
+        from caminus.decode.mtp35 import Mtp35Drafter
+        nm, _, _, need_m = own.auto_need(dict(model=q35, draft='mtp'), 4)
+        _, _, _, need_o = own.auto_need(dict(model=q35, draft='off'), 4)
+        ring = Mtp35Drafter.ring_mib(64)
+        check(nm == 4096 and need_m(4096)[0] > need_o(4096)[0] and ring > 0,
+              f'qwen35-own auto_need --draft mtp on a synthetic nextn file: {need_m(4096)[0]:.1f} MiB vs off '
+              f'{need_o(4096)[0]:.1f} (the adapter ring {ring:.4f} MiB included), no header-key error')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:
