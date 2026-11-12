@@ -12,6 +12,10 @@ loads (docs/specs/spec-own-quant.md). Each keeps the matrix's byte count, so a t
                              8-byte loads run past the last record and header). Read by kernels/own_quant_iq.h
                              own_rows_iqg_1rt.
   iq_from_records            the inverse (tests).
+  q4_0_planes(raw, rows, K)  Q4_0 (18-byte blocks: d | 16 code bytes; 2-byte aligned) -> plane A = every block's 16 code
+                             bytes, row-major (one aligned 16-byte load per block), plane B = every block's d (fp16).
+                             Read by kernels/own_quant_q4_0.h own_rows_q4_0_1rt.
+  q4_0_from_planes           the inverse (tests).
   rs_planes(raw, rows, K, fmt)    the row-scale study's form (docs/dev/row-scale-study.md): a Q4_0 / Q2_0 tensor whose
                              blocks all repeat their row's scale -> (codes, scales): the codes alone, K * bits / 8 bytes
                              per row (4 bits: Q4_0's 16 code bytes per 32 values as they are; 2 bits: each 16 values
@@ -41,6 +45,24 @@ def q6k_from_planes(pl, rows, K):
     out[:, :, :192] = a[:n1].reshape(rows, nb, 192)
     out[:, :, 192 + Q6K_SC] = a[n1:n1 + n2].reshape(rows, nb, 16)
     out[:, :, 208:210] = a[n1 + n2:].reshape(rows, nb, 2)
+    return out.reshape(-1)
+
+
+def q4_0_planes(raw, rows, K):
+    """raw: uint8 [rows * K / 32 * 18] (GGUF Q4_0 rows, contiguous) -> uint8, same size, the plane layout"""
+    if K % 32: raise ValueError(f'q4_0_planes: K {K} is not a multiple of 32')
+    b = np.asarray(raw, dtype=np.uint8)
+    if b.size != rows * (K // 32) * 18: raise ValueError(f'q4_0_planes: {b.size} bytes, expected {rows} x {K // 32} x 18')
+    b = b.reshape(rows, K // 32, 18)
+    return np.concatenate([b[:, :, 2:].reshape(-1), b[:, :, :2].reshape(-1)])
+
+
+def q4_0_from_planes(pl, rows, K):
+    nb = K // 32
+    a = np.asarray(pl, dtype=np.uint8)
+    out = np.empty((rows, nb, 18), dtype=np.uint8)
+    out[:, :, 2:] = a[:rows * nb * 16].reshape(rows, nb, 16)
+    out[:, :, :2] = a[rows * nb * 16:].reshape(rows, nb, 2)
     return out.reshape(-1)
 
 

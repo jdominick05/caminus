@@ -7,7 +7,7 @@ own hsaco/gfx1100 (an installed wheel). caminus.device.hip loads from it, and th
 The installed package carries RUNTIME_SET (what serving, replay and `caminus doctor --gpu` load), staged from build/ by
 tools/release/stage_kernels.py together with provenance.json: the toolchain, each object's compile command as build.sh ran it, the
 source commit and dirty flag, a content hash of kernels/ + build.sh, the ggml headers' commit, each object's sha256 and size.
-Not shipped: the *_trace profiling builds, the *_swiglu test builds, gg_mmvf_ref, the dormant S1 engine and training kernels,
+Not shipped: the *_trace profiling builds, the *_swiglu test builds, gg_mmvf_ref and gg_mv_ref, the dormant S1 engine and training kernels,
 the probes (build them from a checkout and point CAMINUS_KERNEL_DIR at build/)."""
 import hashlib
 import json

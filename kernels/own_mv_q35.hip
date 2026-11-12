@@ -46,3 +46,20 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_q6_k_pl_k3(const uint8_
 }
 Q35_GEN(q5_k)
 Q35_GEN(q8_0)
+
+// Q4_0 (the multi-token-prediction block; kernels/own_quant_q4_0.h, plane layout): nt tokens (1 .. OWN_MT) per launch,
+// token j's activations at x16 + j * K, its outputs at out + j * nrows; the per-token bits are the same at every nt
+// (benchmarks/q35_mtp_gacc.py checks)
+#include "own_quant_q4_0.h"
+struct XOStride { int s; __device__ __forceinline__ size_t operator()(int j) const { return (size_t)j * s; } };
+extern "C" __global__ void __launch_bounds__(256) own_mv_q4_0_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
+        float * out, int nt) {
+    Q35_ROW0;
+    if (row0 >= nrows) return;
+    float res[OWN_MT][2];
+    own_rows_q4_0_1rt<2>(W, nrows, row0, nrows, x16, XOStride{K}, nt, threadIdx.x & 31, K, res);
+    if ((threadIdx.x & 31) == 0)
+        for (int j = 0; j < nt; j++)
+            for (int r = 0; r < 2; r++)
+                if (row0 + r < nrows) out[(size_t)j * nrows + row0 + r] = res[j][r];
+}
