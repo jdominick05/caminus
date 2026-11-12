@@ -280,6 +280,12 @@ without one.
   inside the shared prefix: a short conversation's question (the whole conversation, then the question) reads only the
   rest, a long one's (the opening, then the last 40 entries) reads that tail. The next main request finds the main slot as
   it was. The server caps a side question's reply at 16,384 tokens, so a longer prompt still fits with its reply.
+- **Side questions against the stored conversation.** `side_question_ids(ids, marks, max_new)`: when the history the
+  harness sent (`ids[root:user]`) ends the main line token for token (`tail_match(...)['whole']`), the request with the
+  main line in place of that history (dict ids, marks, tail, sent), else None. The server's worker swaps it in before
+  planning (so plan, prefill, generation and the reported prompt tokens see the request that runs) when it fits the side
+  slot with its reply and adds older turns. `tail_match` is reported for every side question (`/caminus/status`
+  cache.route.last.tail, the flight line's cache.side_question; `side_question_sent` when swapped).
 - **A failure inside a side call loses only the side call** (M7 finish). `_drop_live()` during a side call ends it with the
   main line back intact, its live state kept (a side pass writes below side_rows only, and the main rows it can overwrite are in
   the side area; the drafter's pending inject of the failed call is dropped, never launched): `stats['side_dropped']`.

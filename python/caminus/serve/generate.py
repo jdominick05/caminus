@@ -159,7 +159,7 @@ def run_generation(sess, prompt, sampler, max_new, on_tokens, cancel=None, stop_
     res.cached_n, res.prefill_ms, res.prefill_passes, res.restore = pf.cached_n, pf.ms, pf.passes, pf.restore
     res.prefill = dict(source=pf.source, restore_ms=round(pf.restore_ms, 3), batched_ms=round(pf.batched_ms, 3),
                        handoff_ms=round(pf.handoff_ms, 3), passes_ms=round(pf.passes_ms, 3), exact=bool(pf.exact), lcp=int(pf.lcp),
-                       slot=pf.slot)
+                       slot=pf.slot, tail=getattr(pf, 'tail', None))
     res.prefill_end_t = time.perf_counter()
     if st is not None:
         st.prefill_done(pf)

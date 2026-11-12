@@ -90,6 +90,7 @@ class PrefillStats:
     handoff_ms: float = 0.0
     passes_ms: float = 0.0
     slot: str = 'main'          # 'side': the request ran in the prompt cache's side slot (K3Session's side-slot routing)
+    tail: dict = None           # a side question's history against the stored conversation (cache/prompt.py tail_match), else None
 
 
 def common_prefix(a, b):

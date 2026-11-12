@@ -931,6 +931,7 @@ def cpu_side_question(mk, base):
     question (the whole conversation plus the question) and a long-chat one (the opening, then other turns) both start
     from a main checkpoint inside the shared prefix, and the conversation's next turn continues the main slot ('live')
     == the same main requests with no side question: state bitwise, tokens equal"""
+    from caminus.cache import prompt as pc
     other = [int(x) for x in np.random.default_rng(13).integers(0, 990, 3000)]
     e, p, c, dr, dev = mk(draft=True, side=2048)
     M = base[:1500]
@@ -963,7 +964,47 @@ def cpu_side_question(mk, base):
     check(ok, f'side question: routes {rows}, hint other than side refused {bad_hint}; the short-chat one in the side slot from '
               f'{oq["source"]} {oq["cached"]}, the long-chat one from {ol["source"]} {ol["cached"]}; the next main turn continues the main '
               f'slot ({o3["source"]} {o3["cached"]}) == no side question: state bitwise, {len(t3)} tokens equal')
-    c.close(); c5.close()
+    # tail_match: the harness's history against the stored conversation (a measurement; the routing does not read it)
+    tm = pc.tail_match
+    log = base[:2000]; Q = other[2500:2530]
+    t_whole = tm(log, base[:400] + base[1500:2000] + Q, 400, 900)
+    t_trim = tm(log, base[:400] + base[1500:2000] + [999] + Q, 400, 901)                  # (one token after the stored line)
+    t_mid = tm(log, base[:400] + base[1500:1700] + [999] + base[1701:2000] + Q, 400, 900)  # (a changed token inside)
+    t_none = tm(log, base[:400] + other[100:600] + Q, 400, 900)
+    t_old = tm(log, base[:400] + base[1000:1500] + Q, 400, 900)                            # (an older stretch, not the end)
+    ok_t = (t_whole['whole'] and t_whole['matched'] == 500 and t_whole['gap'] == 0 and t_whole['trim'] == 0 and t_whole['opening']
+            and t_trim['whole'] and t_trim['trim'] == 1 and t_trim['matched'] == 500
+            and not t_mid['whole'] and t_mid['matched'] == 299 and t_mid['gap'] == 0
+            and not t_none['whole'] and t_none['matched'] == 0 and not t_old['whole'] and t_old['gap'] == 500
+            and tm(log, base[:400] + Q, None, 400) is None)
+    e9, p9, c9, dr9, _ = mk(draft=True, side=2048)
+    o9 = c9.prepare(M, dict(root=400), side='auto', max_new=20); t9, s9 = gen(e9, o9['st'], M, 20, dr9); c9.commit(t9, s9)
+    q9 = t9 + other[1600:1630]
+    r9 = c9.prepare(q9, dict(root=400, user=len(t9)), side='auto', max_new=16, hint='side')
+    r9t = r9['route'].get('tail') or {}
+    # (the main line holds every token but the last one emitted: it is fed by the next pass, so the history ends one past it)
+    ok_t &= (r9['route']['reason'] == 'side_question' and r9t.get('whole') and r9t.get('trim') == 1 and r9t.get('gap') == 0
+             and r9t.get('matched') == len(t9) - 400 - 1 and r9t.get('main_n') == len(t9) - 1 and c9.stats['side_question_whole'] == 1)
+    # side_question_ids: a long chat's side question (the opening, then only its last turns) asked against the stored line
+    qt = base[:400] + t9[-300:] + Q
+    rw = c9.side_question_ids(qt, dict(root=400, user=700), 16)
+    none_cases = (c9.side_question_ids(base[:400] + other[100:400] + Q, dict(root=400, user=700), 16),   # (not in the line)
+                  c9.side_question_ids(q9, dict(root=400, user=len(t9)), 16),                           # (nothing older)
+                  c9.side_question_ids(qt, dict(root=400, user=700), 5000),                             # (does not fit)
+                  c9.side_question_ids(qt, None, 16))
+    rwq = c9.prepare(rw['ids'], rw['marks'], side='auto', max_new=16, hint='side') if rw else None
+    ok_t &= (rw is not None and rw['ids'] == t9 + Q and rw['marks'] == dict(root=400, user=len(t9)) and rw['sent'] == len(qt)
+             and all(x is None for x in none_cases) and rwq['side'] and rwq['source'] == 'vram' and rwq['cached'] >= 1000
+             and rwq['processed'] <= 64 and c9.stats['side_question_rewritten'] == 1)
+    nx9 = c9.prepare(t9 + other[2700:2710], side='auto', max_new=16)
+    ok_t &= nx9['source'] == 'live' and nx9['route']['reason'] == 'match'
+    check(ok_t, f'tail_match: a history ending the stored line {t_whole}; one token past it (trim 1); a changed token inside '
+                f'(matched {t_mid["matched"]} back from the end); not there ({t_none["matched"]}); an older stretch (gap {t_old["gap"]}); '
+                f'no marks: None; a real side question through prepare: {r9t}; a long chat\'s side question ({len(qt)} tokens sent) '
+                f'asked against the stored conversation ({rw and len(rw["ids"])} tokens: {rwq and rwq["source"]} {rwq and rwq["cached"]} '
+                f'cached, {rwq and rwq["processed"]} read), none when not in the line / nothing older / no fit / no marks; the next '
+                f'main turn {nx9["source"]}')
+    c.close(); c5.close(); c9.close()
 
 
 def cpu_export(mk, base, fd):

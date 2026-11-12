@@ -130,6 +130,40 @@ SIDE_CHUNK = 4096                    # the side area's copy grows by this many r
 # (measured 11-05 under the server's template: unrelated chats share 2 .. 11 tokens: the BOS, '<|im_start|>', the role, a
 # common system-prompt opening)
 SIDE_MATCH_MIN = 64
+TAIL_ANCHOR = 32      # tail_match: the tokens before a side question's question that locate its history in the main line
+TAIL_TRIM = 4         # ... tried this many tokens short of the question too (the stored reply may lack the template's
+                      # last token or two after its end, e.g. the newline after <|im_end|>)
+
+
+def tail_match(log, ids, root, user):
+    """how a side question's history lines up with the main line (numbers only, no text): ids is the side question's prompt,
+    root / user its template marks (the end of the system block, the start of the question's user turn), log the main line's
+    tokens. dict(opening: ids[:root] == log[:root], tail: user - root (the history the harness sent), matched: the longest run
+    of the history, back from its end, found as a contiguous run in log (tokens), trim: tokens left off the history's end to
+    find it, at: where that run ends in log, gap: len(log) - at (tokens of the main line past it), whole: the whole history
+    matched and it ends the main line (gap <= TAIL_TRIM): the only case an answer from the stored conversation would see the
+    same messages the harness sent plus older ones), or None without both marks"""
+    if root is None or user is None or not 0 < root <= user <= len(ids): return None
+    L = user - root
+    out = dict(opening=lcp(log, ids) >= root, tail=L, matched=0, trim=None, at=None, gap=None, whole=False, main_n=len(log))
+    if L <= 0 or not log: return out
+    lg = np.asarray(log, dtype=np.int64)
+    best = None
+    for d in range(0, min(TAIL_TRIM, L - 1) + 1):
+        K = min(TAIL_ANCHOR, L - d)
+        anchor = np.asarray(ids[user - d - K:user - d], dtype=np.int64)
+        if K <= 0 or lg.size < K: continue
+        win = np.lib.stride_tricks.sliding_window_view(lg, K)
+        ends = np.nonzero((win == anchor).all(axis=1))[0] + K      # (end positions in log of each copy of the anchor)
+        for j in ends[-8:].tolist():                                # (the last few copies: a repeated anchor is rare)
+            m = K
+            while m < L - d and j - m - 1 >= 0 and log[j - m - 1] == ids[user - d - m - 1]: m += 1
+            if best is None or m > best[0] or (m == best[0] and len(log) - j < best[2]): best = (m, d, len(log) - j, j)
+        if best is not None and best[0] == L - d: break
+    if best is not None:
+        m, d, gap, j = best
+        out.update(matched=m, trim=d, at=j, gap=gap, whole=(m == L - d and gap <= TAIL_TRIM and out['opening']))
+    return out
 POSITIONAL = ('kv', 'idxraw', 'idxpool')
 DISK_GBPS = 2.0                      # the cost model's load rate (O_DIRECT reads measured 3.5 GB/s on root, 11-04: conservative)
 PREFILL_TOK_S = 2500.0               # the cost model's prefill rate (S7: 2,806-2,909 tok/s from empty)
@@ -1130,6 +1164,26 @@ class PromptCache:
         else: out.update(route='side', reason='unrelated')
         return out
 
+    def side_question_ids(self, ids, marks, max_new):
+        """a side question asked against the stored conversation: when the history the harness sent (ids[root:user], its
+        recent turns only: Qwen Code's /btw sends the last 40) exactly ends the main line (tail_match: whole), the same request
+        with the whole stored conversation in place of that history, dict(ids, marks, tail, sent): the main line up to the
+        history's end, then ids from there (the question and the generation prompt). The side call then starts from the
+        deepest main checkpoint and reads only what is new, instead of reading the history again at other positions; the
+        model sees the conversation's older turns too. None (ask as sent) when the history does not end the main line
+        token for token (another conversation, or a turn the asker had not seen), when the stored line adds nothing older,
+        or when the result with max_new does not fit the side slot"""
+        self.fence()
+        mk = marks or {}
+        log = self._main_line()[0]
+        t = tail_match(log, ids, mk.get('root'), mk.get('user'))
+        if not t or not t['whole'] or not self.side_rows: return None
+        at, cut = int(t['at']), int(mk['user']) - int(t['trim'])
+        new = list(log[:at]) + [int(x) for x in ids[cut:]]
+        if len(new) <= len(ids) or len(new) + int(max_new) + self.T > self.side_rows: return None
+        self.stats['side_question_rewritten'] += 1
+        return dict(ids=new, marks=dict(root=mk['root'], user=at + int(t['trim'])), tail=t, sent=len(ids))
+
     def _root_after(self, old_root, old_log, ids, marks):
         """the main line's root mark after a main request: its own marks' root, else the previous one when the request keeps it
         (shares the old line up to it), else None (route() then falls back to the line's 'root' checkpoints)"""
@@ -1195,6 +1249,10 @@ class PromptCache:
             rt = self.route(ids, max_new, hint=hint); side = rt['route'] == 'side'
             self.stats['route_side' if side else 'route_main'] += 1
             if rt['reason'] == 'side_question': self.stats['route_side_question'] += 1
+            if hint == 'side':   # (a measurement: does the harness's history end the stored conversation? Routing unchanged)
+                mk = marks or {}
+                rt['tail'] = tail_match(self._main_line()[0], ids, mk.get('root'), mk.get('user'))
+                if rt['tail'] and rt['tail']['whole']: self.stats['side_question_whole'] += 1
         if side:
             out = self._prepare_side(ids, cancel); out['route'] = rt
             return out

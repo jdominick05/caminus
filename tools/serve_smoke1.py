@@ -20,7 +20,7 @@ usage: tools/guard.sh LOG SECS python -I tools/serve_smoke1.py --model GGUF --sc
            [--alias qwen3.6] [--llm-top BIN] [--restart]
 Prints PASS / FAIL lines and RESULT; exit 0 only if every check passed. The scratch directory is refused under
 ~/.cache/caminus, $ARTIFACTS or /tmp (serve_smoke.safe_dir)."""
-import argparse
+import argparse, glob
 import json
 import os
 import re
@@ -208,6 +208,41 @@ def main():
               f'side question: route {lq.get("route")} / {lq.get("reason")}, prompt {tq.get("prompt_n")} new of {tq.get("cache_n")} '
               f'cached, answer {q["content"][:40]!r}; the next turn: route {ln.get("route")} / {ln.get("reason")}, prompt '
               f'{tn.get("prompt_n")} new of {tn.get("cache_n")} cached (the main slot continued)')
+        # (a measurement, not gated: the side question's history against the stored conversation, as /caminus/status and the
+        #  flight line give it; a thinking-mode chat too, whose replies carry reasoning the template may drop from history: its
+        #  system prompt is longer than the first chat's, so it becomes the main line)
+        tl = lq.get('tail') or {}
+        fl = os.path.join(a.scratch, 'flight'); time.sleep(0.5)   # (the flight line is written as the request ends)
+        rows = []
+        for fn in sorted(glob.glob(os.path.join(fl, '*.jsonl'))):
+            with open(fn, encoding='utf-8') as f: rows += [json.loads(x) for x in f if x.strip()]
+        fq = [r_.get('cache', {}).get('side_question') for r_ in rows if (r_.get('cache') or {}).get('side_question')]
+        # a long chat's side question as Qwen Code sends one (the opening, then only the last turns): asked against the stored
+        # conversation when its history ends it (tail whole above), else as sent
+        conv3 = conv + [{'role': 'user', 'content': 'And one in Faro?'}, {'role': 'assistant', 'content': n3['content']}]
+        cut = [conv[0]] + conv3[-2:] + [{'role': 'user', 'content': BTW}]
+        rc, qc = chat(port, f'{alias}-nothink', cut, temperature=0, max_tokens=64)
+        tc = qc.get('timings') or {}
+        time.sleep(0.5)
+        rows = []
+        for fn in sorted(glob.glob(os.path.join(fl, '*.jsonl'))):
+            with open(fn, encoding='utf-8') as f: rows += [json.loads(x) for x in f if x.strip()]
+        sent = [(r_.get('cache') or {}).get('side_question_sent') for r_ in rows if (r_.get('cache') or {}).get('side_question_sent')]
+        want = bool(tl.get('whole'))
+        check(rc['status'] == 200 and qc['content'].strip() and (len(sent) == 1) == want,
+              f'a long chat\'s side question (history: the last turn only): {"asked against the stored conversation" if sent else "asked as sent"} '
+              f'(expected {"stored" if want else "as sent"}: tail whole {want}; {sent[0] if sent else "-"} tokens sent), prompt '
+              f'{tc.get("prompt_n")} new of {tc.get("cache_n")} cached, answer {qc["content"][:60]!r}')
+        convt = [{'role': 'system', 'content': S.guidelines(12, 60000, 'Assistant rules') + f' ({marker})'},
+                 {'role': 'user', 'content': 'Name one river in Spain.'}]
+        _, k1 = chat(port, alias, convt, temperature=0, max_tokens=400)
+        convt += [{'role': 'assistant', 'content': k1['content'], 'reasoning_content': k1['reasoning'] or None}]
+        chat(port, f'{alias}-nothink', convt + [{'role': 'user', 'content': BTW}], temperature=0, max_tokens=64)
+        tk = ((((S.get(port, '/caminus/status')[1] or {}).get('cache') or {}).get('route') or {}).get('last') or {}).get('tail') or {}
+        print(f'NOTE side question tail (nothink chat): {tl}; flight lines with it: {len(fq)}; thinking chat (reasoning '
+              f'{len(k1["reasoning"])} chars sent back): {tk}', flush=True)
+        check(bool(tl) and len(fq) >= 1, f'side question tail measured: whole {tl.get("whole")}, matched {tl.get("matched")} of '
+              f'{tl.get("tail")}, gap {tl.get("gap")}; thinking chat whole {tk.get("whole")}, matched {tk.get("matched")} of {tk.get("tail")}')
     if a.block_imports:   # the own-code gate's device half: what the process loaded, by its own record
         from own_closure import audit
         objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []

@@ -622,7 +622,7 @@ class EngineStats:
         why = decision.get('reason') if decision.get('reason') in ROUTE_REASONS[r] else ROUTE_REASONS[r][-1]
         with self.lock:
             self.cache_route[r][why] += 1
-            self.cache_route_last = {k: decision.get(k) for k in ('route', 'reason', 'shared', 'root', 'need', 'main_n', 'side_rows')}
+            self.cache_route_last = {k: decision.get(k) for k in ('route', 'reason', 'shared', 'root', 'need', 'main_n', 'side_rows', 'tail')}
 
     def cache_update(self, counters=None, gauges=None):
         """counters: the prompt cache's own Counter (PromptCache.stats) - its CACHE_EVENTS keys are copied as totals;

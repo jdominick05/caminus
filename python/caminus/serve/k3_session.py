@@ -434,6 +434,10 @@ class K3Session(EngineSession):
     def _route_arg(self):
         return 'auto' if self.side_route else False
 
+    def side_question(self, ids, marks, max_new):
+        """PromptCache.side_question_ids: the side question asked against the stored conversation, or None (as sent)"""
+        return self.pc.side_question_ids([int(t) for t in ids], marks, int(max_new))
+
     def plan(self, ids, max_new=None, hint=None):
         ids = [int(t) for t in ids]
         n = int(self.pc.plan(ids, side=self._route_arg(), max_new=max_new, hint=hint)['cached'])
@@ -498,6 +502,7 @@ class K3Session(EngineSession):
         pfs.cached_n, pfs.source, pfs.restore = int(r['cached']), r['source'], RESTORE_OF.get(r['source'], 'cold')
         pfs.restore_ms = float(r['ms'].get('restore', 0.0) + r['ms'].get('park', 0.0))
         pfs.slot = 'side' if self._side else 'main'
+        pfs.tail = rt.get('tail')   # (a side question's history against the stored conversation: PromptCache.tail_match)
         last = getattr(self.pf, 'last', None)
         batched = last is not None and last is not last_before
         last = last or {}

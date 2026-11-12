@@ -50,6 +50,7 @@ class Job:
         self.profile, self.harness = profile, harness
         self.marks = marks              # the prompt cache's message boundaries (template marks) or None
         self.hint = hint                # 'side': a harness's side question (serve/side_question.py), else None
+        self.sent_n = None              # a side question asked against the stored conversation: the prompt as sent (tokens)
         self.params = params            # SamplingParams (resolved: the seed is fixed)
         self.max_new = int(max_new)
         self.stops = list(stops or ())
@@ -215,6 +216,10 @@ class EngineWorker:
             return
         self.stats['jobs'] += 1
         try:
+            if job.hint == 'side' and hasattr(self.sess, 'side_question'):   # (the session's stored conversation, when it ends with
+                rw = self.sess.side_question(job.prompt_ids, job.marks, job.max_new)   # the history sent: cache/prompt.py)
+                if rw is not None:
+                    job.sent_n, job.prompt_ids, job.marks = len(job.prompt_ids), list(rw['ids']), dict(rw['marks'])
             cached = self.sess.plan(job.prompt_ids, max_new=job.max_new, **({'hint': job.hint} if job.hint else {}))
             job.events.put(('start', {'queue_ms': (job.t_start - job.t_submit) * 1e3,
                                       'prompt_n': len(job.prompt_ids), 'cached_n': cached}))
