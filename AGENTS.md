@@ -37,6 +37,7 @@ CLAUDE.md imports this file.
 | Where each published number comes from | docs/dev/benchmarks.md |
 | The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
+| Agent skills: after a kernel edit (`kernel-change-evidence`), before calling a pull request ready (`pr-ready`) | .agents/skills/*/SKILL.md (linked from .claude/skills) |
 
 ## Layout (the parts that need a reason)
 
@@ -134,6 +135,9 @@ export HF_TOKENIZER_JSON=/path/to/tokenizer.json   # optional: two tokenizer cro
 python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI runs them (a FRESH DIR; skips with the reason what's missing; --jobs N suites at once)
 python -I tools/release/privacy_scan.py .           # no secrets, machine paths or session links in the tree (CI runs it)
 python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
+python -I tools/gates/objcheck.py snap build -o FILE   # the built objects' code / data digests and k3_run's registers, before an edit
+python -I tools/gates/objcheck.py check FILE build --expect 'MODULE*'   # after it: only the named objects changed; registers in budget (reads files, CPU)
+python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS)
 tools/release/release_build.sh                      # reproducible release files from a clean clone at a tag (docs/dev/releasing.md)
 tools/release/nightly.sh --dry-run                  # the nightly of `testing` up to its verified files; without the flag it PUBLISHES (a timer's job)
 
@@ -145,8 +149,9 @@ tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch D
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 ```
 
-After a kernel change: `llvm-readelf` on the module (k3_run <= 96 VGPRs, 0 spills; `.sgpr_spill_count` not up: spilled
-scalars slow every hop, a change in one op measured +13 % on all of them); rerun the gates at `K3_PER_WGP=3/6/7`
+After a kernel change: `objcheck.py check` (every other object's code unchanged; k3_run <= 96 VGPRs, 0 spills;
+`.sgpr_spill_count` not up: spilled scalars slow every hop, a change in one op measured +13 % on all of them; the
+counts are the ones `llvm-readelf --notes` prints); rerun the gates at `K3_PER_WGP=3/6/7`
 (`gates.sh OUT grids qsa`: still bitwise); first runs on a non-display card (`caminus ps` lists the cards).
 
 ## Invariants
