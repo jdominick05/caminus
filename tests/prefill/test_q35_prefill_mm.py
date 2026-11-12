@@ -11,6 +11,10 @@ from the host decoder (caminus.own_dequant). The error of each output is measure
 (the scale of the fp32 rounding); the test asserts the worst at most 1e-5 of it, prints the mean and the worst per
 format, and checks the Q4_K / Q5_K overflow branch: one token whose 32-value sums pass 65,504 (fp16's range).
 Every tensor's bytes are read into ordinary memory (Tensor.pread); every allocation is checked against the card's cap.
+--ref-module NAME: also run every launch on another build of the same object (e.g. the previous commit's q35_prefill.hsaco
+copied into the kernel dir as q35_prefill_base.hsaco) and require the outputs BITWISE equal: a change that keeps every
+sum's arithmetic (prefetching, staging, tiling) must keep every output's bits.
+  ... test_q35_prefill_mm.py GGUF [--ref-module q35_prefill_base]
 """
 import ctypes
 import os
@@ -39,6 +43,7 @@ def check(ok, what):
 
 def main():
     path = sys.argv[1]
+    refname = sys.argv[sys.argv.index('--ref-module') + 1] if '--ref-module' in sys.argv else None
     F = ggufio.GGUFFile(path)
     dev = torch.device('cuda', 0)
     print(f'NOTE device: {torch.cuda.get_device_name(dev)} (HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")})', flush=True)
@@ -55,6 +60,9 @@ def main():
     tc = any(f in picks for f in IQK)
     mod = hip.Module('q35_prefill_tcap' if tc else 'q35_prefill')
     print(f'NOTE object: {"q35_prefill_tcap" if tc else "q35_prefill"}', flush=True)
+    refmod = hip.Module(refname) if refname else None
+    if refmod: print(f'NOTE every launch also on {refname}: outputs bitwise', flush=True)
+    nbits = [0, 0]
     rng = np.random.default_rng(11)
     for fmt in FMTS:
         if fmt not in picks:
@@ -73,18 +81,14 @@ def main():
                 if big:   # (token 5: block 0's first 32 values at 4,000: their sum 128,000 passes fp16's 65,504)
                     x[5, :32] = 4000.0
                 xd = torch.from_numpy(x).to(dev)
-                y = torch.zeros(n, R, dtype=torch.float32, device=dev)
                 grid = (-(-n // 64), -(-R // 128))
-                if fmt == 'Q4_K':
-                    mod.q3p_mm_q4k(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
-                elif fmt == 'Q6_K':
-                    mod.q3p_mm_q6k(grid, (256,), wd, I(R), I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
-                elif fmt in IQK:
-                    getattr(mod, IQK[fmt])(grid, (256,), wd, I(R), I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
-                elif fmt == 'Q8_0':
-                    mod.q35p_mm_q8_0(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
-                else:
-                    mod.q35p_mm_q5k(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+                y = launch(mod, fmt, IQK, grid, wd, R, K, xd, n, dev)
+                if refmod is not None:
+                    yr = launch(refmod, fmt, IQK, grid, wd, R, K, xd, n, dev)
+                    torch.cuda.synchronize()
+                    same = torch.equal(y.view(torch.int32), yr.view(torch.int32))
+                    nbits[0] += 1; nbits[1] += int(same)
+                    if not same: check(False, f'{fmt} R={R} n={n}: bitwise {refname} ({int((y.view(torch.int32) != yr.view(torch.int32)).sum())} values differ)')
                 torch.cuda.synchronize()
                 yg = y.cpu().numpy().astype(np.float64)
                 x64 = x.astype(np.float64)
@@ -96,8 +100,25 @@ def main():
                       f'{fmt} R={R} n={n} K={K}{" (an overflowing token)" if big else ""}: error / sum|x||w| mean {rel.mean():.2e}, '
                       f'worst {rel.max():.2e} (bound {BOUND:.0e}), finite {fin}')
             del wd
+    if refmod is not None: check(nbits[0] > 0 and nbits[0] == nbits[1], f'{nbits[1]} of {nbits[0]} launches bitwise {refname}')
     print('RESULT', 'FAIL' if FAILS else 'PASS')
     return 1 if FAILS else 0
+
+
+def launch(mod, fmt, IQK, grid, wd, R, K, xd, n, dev):
+    """Y [n][R] fp32 = xd W^T through mod's kernel for fmt"""
+    y = torch.zeros(n, R, dtype=torch.float32, device=dev)
+    if fmt == 'Q4_K':
+        mod.q3p_mm_q4k(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+    elif fmt == 'Q6_K':
+        mod.q3p_mm_q6k(grid, (256,), wd, I(R), I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+    elif fmt in IQK:
+        getattr(mod, IQK[fmt])(grid, (256,), wd, I(R), I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+    elif fmt == 'Q8_0':
+        mod.q35p_mm_q8_0(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+    else:
+        mod.q35p_mm_q5k(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+    return y
 
 
 if __name__ == '__main__':

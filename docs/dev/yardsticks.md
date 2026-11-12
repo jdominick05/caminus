@@ -113,6 +113,27 @@ What it says:
 - FlyDSL's fp16 output matches torch's on the same operands to <= 3.6e-4 relative (every shape above, checked at M 2048).
 - The per-chunk totals assume blk.0's formats for all 48 GDN blocks and blk.3's for all 16 attention blocks.
 
+### Where the tile's time goes (ablation builds)
+
+`kernels/q35_prefill_abl{1,2,3}.hip` (measurement objects, not in the runtime set; wrong outputs by design) remove one
+part of the tiles each (kernels/q3m_prefill.hip `Q3P_ABL`): 1 the weight loads and decode (a constant B), 2 the X staging,
+3 the per-block / per-sub-block scale step. `benchmarks/q35_prefill_gemm.py --module q35_prefill_ablN`, Swift's shapes,
+M 2048, XT:
+
+| removed | chunk of 2048 | Q8_0 attn_qkv | Q6_K ffn_up | Q4_K ffn_gate |
+|---|---|---|---|---|
+| nothing | 2,268 ms | 37.5 TF | 44.5 TF | 50.1 TF |
+| weight loads + decode | 1,907 ms | 54.8 | 52.1 | 51.9 |
+| X staging | 2,024 ms | 42.3 | 49.2 | 56.6 |
+| scale step | 2,004 ms | 41.5 | 53.2 | 54.3 |
+
+Q8_0's weight path was its largest cost: its blocks' loads waited right before their WMMAs. Now prefetched a block pair
+ahead as 17 aligned dword loads (bitwise the previous kernel on every launch of tests/prefill/test_q35_prefill_mm.py
+--ref-module): attn_qkv 37.6 -> 49.1 TF, ssm_out / attn_output 38.3 -> 48.1, attn_k 30.6 -> 41.2; the chunk 2,266 ->
+2,116 ms (XT, interleaved twice). With every part removed in turn the tile still stops near 52-57 TF: four WMMAs per A
+load from LDS and one LDS buffer with two barriers per 256 values; FlyDSL's tile (16 WMMAs per 8 LDS loads, double
+buffered) is the bar there.
+
 ## Prefill attention at depth (dense qwen35 geometry)
 
 `benchmarks/q35_prefill_attn.py`, RX 7900 XT alone. One 2048-row chunk at positions P0 .. P0 + 2047 attends to the

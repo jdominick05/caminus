@@ -11,7 +11,7 @@ Timing: events around ITERS back-to-back launches, median of REPS such groups, t
 arms replay the ITERS launches from a captured HIP graph (its own tuner's method), the others launch eagerly.
 TFLOPS = 2 M N K / t. 'per chunk' = the shape's time x its count in the model (48 GDN blocks, 16 attention blocks).
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_gemm.py [GGUF] [--M 512,2048] [--arms own,torch,flydsl]
-      [--flydsl-src DIR] [--reps 7] [--iters 10]
+      [--flydsl-src DIR] [--reps 7] [--iters 10] [--module q35_prefill_abl1]
 Run it on the XT alone first."""
 import argparse, os, sys, types
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -24,6 +24,7 @@ from caminus.prefill import q35own
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf', nargs='?', default=os.path.expanduser(os.environ.get('SWIFT', '')))
 ap.add_argument('--M', default='512,2048'); ap.add_argument('--arms', default='own,torch')
+ap.add_argument('--module', default=None, help='the prefill object of the own arm (default the file\'s: q35_prefill / q35_prefill_tcap); a measurement build such as q35_prefill_abl1 times what is left of the tile without one of its parts (kernels/q3m_prefill.hip Q3P_ABL; its outputs are wrong by design)')
 ap.add_argument('--flydsl-src', default=None); ap.add_argument('--reps', type=int, default=7); ap.add_argument('--iters', type=int, default=10)
 A = ap.parse_args()
 if not A.gguf: sys.exit('q35_prefill_gemm: give the GGUF path (or export SWIFT)')
@@ -41,8 +42,8 @@ if 'flydsl' in ARMS:
     sys.path.insert(0, os.path.abspath(A.flydsl_src))
     from kernels.gemm.rdna3_f16_gemm_autotune import rdna3_gemm_autotuned as fly_f16
     from kernels.gemm.rdna3_int8_gemm_autotune import rdna3_int8_gemm_autotuned as fly_i8
-ops = q35own.Ops(dev)
-print(torch.cuda.get_device_name(dev), os.path.basename(A.gguf), f'| GDN block {gb}, attention block {ab} | arms {ARMS}', flush=True)
+ops = q35own.Ops(dev) if A.module is None else q35own.Ops(dev, module=A.module)
+print(torch.cuda.get_device_name(dev), os.path.basename(A.gguf), f'| GDN block {gb}, attention block {ab} | arms {ARMS} | own object {ops.module}', flush=True)
 
 
 def bench(fn):

@@ -21,6 +21,12 @@
 // matrices: items = nullptr, ntok tokens, blockIdx.x = tokens 64 x .. 64 x + 63, identity lists (xsrc / ydst unused).
 #include <hip/hip_runtime.h>
 #include <stdint.h>
+// Q3P_ABL (measurement builds only: kernels/q35_prefill_abl*.hip; never the runtime objects, whose text is unchanged):
+// 1 a constant B (no weight loads or decode), 2 no X staging (the stage's barriers kept), 3 the WMMAs accumulate into acc
+// directly (no per-block / per-sub-block scale step, no Q4_K min term). Each removes one part of a tile to time the rest.
+#ifndef Q3P_ABL
+#define Q3P_ABL 0
+#endif
 
 typedef _Float16 h2_t __attribute__((ext_vector_type(2)));
 typedef _Float16 h16_t __attribute__((ext_vector_type(16)));
@@ -163,13 +169,15 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q4k(
 #pragma unroll
         for (int i = 0; i < 8; i++) qs[i] = bp[1 + i];
         __syncthreads();
+#if Q3P_ABL != 2
         mm_stage<true>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+#endif
         __syncthreads();
         int sc[8], m[8];
         q4k_scales(hd, sc, m);
         f8_t P[4];
 #pragma unroll
-        for (int mt = 0; mt < 4; mt++) P[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+        for (int mt = 0; mt < 4; mt++) P[mt] = Q3P_ABL == 3 ? acc[mt] : (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
         // 16 k-steps: chunk j (sub-blocks 2 j low nibbles, 2 j + 1 high), half hf: quant bytes 32 j + 16 hf
 #pragma unroll
         for (int j = 0; j < 4; j++) {
@@ -178,7 +186,11 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q4k(
 #pragma unroll
                 for (int hi = 0; hi < 2; hi++) {
                     const int s = 2 * j + hi;
+#if Q3P_ABL == 1
+                    const h16_t B = (h16_t)(_Float16)1.0f; (void)qs; (void)sc;
+#else
                     const h16_t B = q4k_b(qs[2 * j + hf], 4 * hi, rok ? (_Float16)sc[s] : (_Float16)0.0f);
+#endif
 #pragma unroll
                     for (int mt = 0; mt < 4; mt++) P[mt] = wmma(mm_a(mt, s * 32 + hf * 16, lane), B, P[mt]);
                 }
@@ -200,8 +212,12 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q4k(
             const u32x4_t * sp = (const u32x4_t *)(MMS + (mt * 16 + (lane & 15)) * 16);
             const h16_t AS = h16of(sp[0], sp[1]);
             const f8_t MS = wmma(AS, BM, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#if Q3P_ABL == 3
+            acc[mt] = P[mt]; (void)MS; (void)d; (void)dmin;
+#else
 #pragma unroll
             for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[mt][v], __builtin_fmaf(-dmin, MS[v], acc[mt][v]));
+#endif
         }
         if (__builtin_amdgcn_readfirstlane(MMBIG) == b + 1) {   // rare: the other 63 / 64 of the scaled tokens' min term
             // (the block's header is read again rather than held: nothing of the ordinary path stays live for this)
@@ -276,7 +292,9 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q6k(
         const u32x4_t scw = *(const u32x4_t *)(pb + (size_t)b * 16);
         const float d = rok ? (float)__builtin_bit_cast(_Float16, pc[b]) : 0.0f;
         __syncthreads();
+#if Q3P_ABL != 2
         mm_stage<false>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+#endif
         __syncthreads();
         const int8_t * scp = (const int8_t *)&scw;
 #pragma unroll
@@ -291,14 +309,22 @@ extern "C" __global__ void __launch_bounds__(256) q3p_mm_q6k(
                     const int sb = n * 8 + gr * 2 + l0;               // the sub-block (v / 16)
                     const u32x4_t & ql = (gr & 1) ? (l0 ? ql3 : ql2) : (l0 ? ql1 : ql0);
                     const u32x4_t & qh = l0 ? qh1 : qh0;
+#if Q3P_ABL == 1
+                    const h16_t B = (h16_t)(_Float16)1.0f; (void)ql; (void)qh;
+#else
                     const h16_t B = q6k_b(ql, qh, gr >= 2 ? 4 : 0, 2 * gr);
+#endif
                     const int nn = sb >> 3, rem = sb & 7, p = nn * 8 + 4 * (rem & 1) + (rem >> 1);
                     const float ds = d * (float)scp[p];
 #pragma unroll
                     for (int mt = 0; mt < 4; mt++) {
+#if Q3P_ABL == 3
+                        acc[mt] = wmma(mm_a(mt, sb * 16, lane), B, acc[mt]); (void)ds;
+#else
                         const f8_t P = wmma(mm_a(mt, sb * 16, lane), B, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
 #pragma unroll
                         for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(ds, P[v], acc[mt][v]);
+#endif
                     }
                     // (one sub-block at a time: without the fence the scheduler hoisted the 16 sub-blocks' A loads and
                     //  decodes: 256 VGPRs, 25 spilled; with the half loop rolled 82)
