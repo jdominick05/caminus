@@ -6,6 +6,7 @@ caminus.prefill.q35own.Ops.attn_wm: WMMA tiles, head dim 256, wave pairs) on ran
     kv head (no idle columns)
   - the same bits at every launch split (attn_blocks with a small budget) and every chunk geometry (the chunk cut at an
     odd and an even position; chunks of 16): a row's sums depend only on absolute positions (the prompt cache's stops)
+  - a peaked softmax (two planted keys take nearly all the weight: the rescale path at depth) against float64
   - against the per-(row, head) kernel it replaces (q35p_attn16, fp32 q): within the float64 bounds
   - shapes it does not run are refused on the host (head dim 128, 12 query heads per kv head, a block range outside the chunk)
   - timing (--speed): a 2048-row chunk at P0 = 0 / 8192 / 30720 (the yardstick rows of docs/dev/yardsticks.md), ours new
@@ -90,6 +91,20 @@ for heads, nkv, pos0, n in cases:
         mo, no = rel(on, old.view(n, heads, D).cpu().double().numpy()[rows])
         check(mo < 2e-2 and no < 2e-3, f'against q35p_attn16 (the kernel it replaces) at {pos0}: max {mo:.2e}, mean {no:.2e} of rms')
     del cache
+
+# ---- a peaked softmax: q along a direction u, the keys at two planted positions (one early, one inside the chunk) 2 u,
+# every score at most ~0.5 elsewhere: those keys take nearly all the weight (the online softmax's rescales at depth)
+heads, nkv, pos0, n = 24, 4, 5000, 40
+cache = make(nkv, ROWS)
+u = torch.where(torch.rand(D, generator=g, device=dev) < 0.5, -1.0, 1.0)
+q = (u.repeat(n * heads) * 0.25 + torch.randn(n * heads * D, generator=g, device=dev) * 0.02).contiguous()
+kv4 = cache.view(-1, 2, nkv, D)
+for p_ in (7, pos0 + 20): kv4[p_, 0] = (2.0 * u).half()
+out = torch.zeros_like(q); wm(q, cache, pos0, n, heads, nkv, out); torch.cuda.synchronize()
+rows = list(range(n)); on = out.view(n, heads, D).cpu().double().numpy()
+mx, mn = rel(on, ref_rows(q, cache, nkv, heads, pos0, rows))
+check(np.isfinite(on).all() and mx < 2e-2 and mn < 2e-3, f'peaked softmax (planted keys at 7 and {pos0 + 20}, rows from {pos0}) vs float64: max {mx:.2e}, mean {mn:.2e} of rms')
+del cache
 
 # ---- the same bits at every launch split and chunk geometry -------------------------------------------------------------
 heads, nkv, pos0, n = 24, 4, 1000, 300
