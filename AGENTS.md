@@ -35,6 +35,7 @@ CLAUDE.md imports this file.
 | Building, testing, GPU rules | docs/dev/building.md, testing.md, gpu-safety.md |
 | Adding a model family | docs/dev/adding-a-model.md |
 | Where each published number comes from | docs/dev/benchmarks.md |
+| Outside RDNA3 kernels (FlyDSL, rocKE, CK, AITER) measured at our shapes: yardsticks and borrow sources, never dependencies | docs/dev/yardsticks.md |
 | The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
 | Agent skills: after a kernel edit (`kernel-change-evidence`), before calling a pull request ready (`pr-ready`) | .agents/skills/*/SKILL.md (linked from .claude/skills) |
