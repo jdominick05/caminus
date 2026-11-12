@@ -144,6 +144,28 @@ matvecs 2x a decode step's time for the same rows, the Q8_0 / Q5_K rows tiles 2.
   workgroups per WGP bitwise. On both cards. Forced bails in the verify tape: `tools/guard.sh LOG 1200 python -I tools/gates/forcebail.py 4 40 tiny
   --engine dense35ver --model GGUF --ctx 512 --tokens FILE`.
 
+#### The multi-token-prediction block's Q4_0 matvec (the drafter's weights; no drafter yet)
+
+Swift 1.5 keeps its prediction block (`blk.64`: eh_proj, attention, feed-forward) in Q4_0, which no other model here
+uses. `kernels/own_quant_q4_0.h` reads it in a plane layout made at load (`engine/own_layout.py q4_0_planes`); one
+launch takes 1 to 4 tokens. `tools/guard.sh LOG 1800 python -I benchmarks/q35_mtp_gacc.py GGUF` records 116 activation
+vectors at each of the block's op sites while it runs teacher-forced over two texts of this tree, then on 256 rows of
+each tensor (RX 7900 XT):
+
+| tensor | rows x K | error vs float64, mean / p99: own | llama.cpp | µs: read | llama.cpp | own | own, 4 tokens |
+|---|---|---|---|---|---|---|---|
+| eh_proj | 5,120 x 10,240 | 1.9e-4 / 7.3e-4 | 3.9e-2 / 1.9e-1 | 42.5 | 44.6 | 53.2 | 63.8 |
+| attn_q | 12,288 x 5,120 | 5.0e-5 / 2.3e-4 | 6.1e-3 / 2.8e-2 | 50.3 | 52.6 | 53.9 | 64.4 |
+| attn_k, attn_v | 1,024 x 5,120 | 0.9-1.2e-4 / 3.2-4.6e-4 | 1.3-1.4e-2 / 4.9-5.8e-2 | 10.1-11.0 | 11.3-11.4 | 12.1-13.0 | 13.2-14.8 |
+| attn_output | 5,120 x 6,144 | 2.0e-4 / 6.7e-4 | 2.7e-2 / 9.2e-2 | 26.6 | 27.9 | 35.8 | 43.5 |
+| ffn_gate, ffn_up | 17,408 x 5,120 | 0.8-1.0e-4 / 3.3-3.7e-4 | 1.0-1.5e-2 / 3.9-5.5e-2 | 73.7-74.1 | 75.5-75.9 | 77.0-77.9 | 87.6-88.2 |
+| ffn_down | 5,120 x 17,408 | 8.7e-5 / 3.9e-4 | 1.6e-2 / 6.8e-2 | 73.3 | 76.4 | 78.5 | 84.2 |
+| the block's 8 matvecs | | | | 362 | 376 | 401 | 460 |
+
+Own is 120 to 265 times closer to float64 than llama.cpp on every tensor (llama.cpp rounds the activations to 8 bits),
+and a 4-token launch gives each token the bits of its own one-token launch. Standalone, one launch per matvec, copies
+rotated past the Infinity Cache; the drafter module's own timing replaces these numbers.
+
 ### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)
 
 Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The grid and task sizes are untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized

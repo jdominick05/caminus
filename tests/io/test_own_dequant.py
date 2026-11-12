@@ -46,6 +46,19 @@ for name, (bs, rs, hs) in sorted(own_layout.IQ_REC.items()):   # the kernels' re
     ok = (rec.size == raw.size + own_layout.IQ_PAD and np.array_equal(own_layout.iq_from_records(rec, 6, 768, name), raw)
           and np.array_equal(np.sort(rec[:raw.size]), np.sort(raw))); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name}: the record layout holds the blocks\' bytes and inverts')
+for rows, K in ((6, 5120), (3, 96)):   # Q4_0 planes (kernels/own_quant_q4_0.h): codes | d, as the tile decodes them, and back
+    raw = rng.integers(0, 256, rows * (K // 32) * 18, dtype=np.uint8)
+    pl = own_layout.q4_0_planes(raw, rows, K)
+    u = pl[:rows * K // 32 * 16].reshape(rows, K // 32, 16); dd = pl[rows * K // 32 * 16:].view(np.float16).reshape(rows, K // 32)
+    q = np.concatenate([u & 15, u >> 4], -1).astype(np.float32) - 8    # unit: value k in byte k's low nibble, 16 + k high
+    want = own_dequant.DECODERS['Q4_0'][2](raw).reshape(rows, K)
+    got = (dd.astype(np.float32)[:, :, None] * q).reshape(rows, K)
+    ok = (pl.size == raw.size and np.array_equal(own_layout.q4_0_from_planes(pl, rows, K), raw)
+          and np.array_equal(np.isnan(got), np.isnan(want)) and np.array_equal(np.nan_to_num(got), np.nan_to_num(want)))
+    try: own_layout.q4_0_planes(raw[:-1], rows, K); ok = False
+    except ValueError: pass
+    bad += not ok
+    print(('PASS' if ok else 'FAIL') + f' Q4_0 [{rows} x {K}]: the planes decode to the blocks\' values, invert, and refuse a short tensor')
 for name, (bits, bv, bs) in sorted(own_layout.RS_CONT.items()):   # the row-scale planes: the codes as the kernel reads them
     for K in (2048, 768):
         rows = 10; raw = rng.integers(0, 256, (rows, K // bv, bs), dtype=np.uint8)
