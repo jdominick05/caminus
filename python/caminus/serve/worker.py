@@ -41,7 +41,7 @@ class QueueFull(RuntimeError):
 class Job:
     def __init__(self, prompt_ids, params, max_new, stops=(), force=None, drafter=None, tag='', n_predict=None,
                  slot_params=None, thinking=False, marks=None, request_id=None, tools=None, parse_tools=True, parallel=True,
-                 prefix_text='', profile='', harness='', loop_guard=False, think_open=True):
+                 prefix_text='', profile='', harness='', loop_guard=False, think_open=True, hint=None):
         self.prompt_ids = list(prompt_ids)
         # the flight recorder's (M7 ops): the request id, and what the engine thread needs to judge the reply (the loop flag,
         # tool-call parse failures) and to save a replay bundle
@@ -49,6 +49,7 @@ class Job:
         self.tools, self.parse_tools, self.parallel, self.prefix_text = tools, parse_tools, parallel, prefix_text
         self.profile, self.harness = profile, harness
         self.marks = marks              # the prompt cache's message boundaries (template marks) or None
+        self.hint = hint                # 'side': a harness's side question (serve/side_question.py), else None
         self.params = params            # SamplingParams (resolved: the seed is fixed)
         self.max_new = int(max_new)
         self.stops = list(stops or ())
@@ -214,7 +215,7 @@ class EngineWorker:
             return
         self.stats['jobs'] += 1
         try:
-            cached = self.sess.plan(job.prompt_ids, max_new=job.max_new)
+            cached = self.sess.plan(job.prompt_ids, max_new=job.max_new, **({'hint': job.hint} if job.hint else {}))
             job.events.put(('start', {'queue_ms': (job.t_start - job.t_submit) * 1e3,
                                       'prompt_n': len(job.prompt_ids), 'cached_n': cached}))
             guard = AnswerLoopGuard(job.thinking) if job.loop_guard else None
@@ -251,7 +252,7 @@ class EngineWorker:
 
             res = run_generation(self.sess, job.prompt_ids, Sampler(job.params), job.max_new, on_tokens,
                                  cancel=job.cancel, drafter=job.drafter, force=job.force,
-                                 tool_open_id=self.tool_open_id, stats=es, marks=job.marks)
+                                 tool_open_id=self.tool_open_id, stats=es, marks=job.marks, hint=job.hint)
             if res.finish != 'stop':
                 tail = tt.finish()
                 if tail:

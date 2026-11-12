@@ -92,7 +92,11 @@ Side-slot routing (M7, the lead's ruling of 11-05; prepare(side='auto') / plan(s
 side slot when it does not match the main line (it shares fewer tokens with it than the main line's root mark, or than
 SIDE_MATCH_MIN when no root is known, and the live state is not a prefix of it), fits (prompt + max_new + T <= side_rows), the
 main line holds more positions than its prompt (a conversation to protect) and no parked conversation continues into it (the
-main slot would unpark that); every other request goes to main. A failure
+main slot would unpark that); every other request goes to main. A request the server marks as a side question (hint 'side':
+a harness's question about the conversation that must not continue it, Qwen Code's /btw) goes to the side slot whenever it
+fits, matching the main line or not: it shares the conversation's opening, so the side call starts from the deepest main
+checkpoint inside the shared prefix and reads only the rest, and the conversation's next turn finds the main slot as it
+was. A failure
 inside a side call loses only the side call: drop_live() ends it with the main line intact, recover(at, ids) re-enters it.
 
 Everything touching the engine runs on the caller's thread (the server's engine worker); the background park is the only other
@@ -1056,17 +1060,17 @@ class PromptCache:
     def _usable(self, pos, commit, n):
         return pos <= n - 1 or (pos == n and commit >= 1)
 
-    def plan(self, ids, side=False, max_new=None):
+    def plan(self, ids, side=False, max_new=None, hint=None):
         """how many leading ids prepare() would reuse and from where, with no side effect (but reading disk entries' tokens):
         dict(cached, source). During a side call: what a main request's prepare() reuses after it ends the side call (the main
         line's log, state and checkpoints). side=True: what prepare(ids, side=True) reuses (the side log when it continues, else
         the main checkpoint the side call would start from, else cold); side='auto': as route(ids, max_new) decides. With side
-        True or 'auto' the dict also has side (bool) and route (route()'s decision with 'auto', else None)"""
+        True or 'auto' the dict also has side (bool) and route (route()'s decision with 'auto', else None). hint: route()'s"""
         self.fence()
         ids = [int(x) for x in ids]
         r = None
         if side == 'auto':
-            r = self.route(ids, max_new); side = r['route'] == 'side'
+            r = self.route(ids, max_new, hint=hint); side = r['route'] == 'side'
         if side:
             src, reuse = self._plan_side(ids)
             return dict(cached=reuse, source=src, side=True, route=r)
@@ -1079,7 +1083,7 @@ class PromptCache:
         sd = self.side
         return (sd['log'], sd['st'], sd['ckpts']) if sd is not None else (self.log, self.st, self.ckpts)
 
-    def route(self, ids, max_new=None, min_match=SIDE_MATCH_MIN):
+    def route(self, ids, max_new=None, min_match=SIDE_MATCH_MIN, hint=None):
         """M7 side-slot routing (the lead's ruling, 11-05): where prepare(ids, side='auto') sends a request of len(ids) prompt
         tokens that may generate max_new more. No side effect on the engine or the live line (like plan(), it may read disk entries'
         token lists and remove one that is refused). dict(route 'main' | 'side', reason, shared (tokens shared with the
@@ -1097,7 +1101,13 @@ class PromptCache:
           main 'parked'        a parked conversation on the disk tier continues into it (what prepare() would unpark: _best's
                                'disk'): the main slot unparks it, a side call would start cold (e.g. a conversation's next
                                turn after a long unrelated request displaced it)
-          side 'unrelated'     none of the above: a short unrelated request (a harness title / summary / next-speaker call)"""
+          side 'side_question' hint 'side' (the server's side question: Qwen Code's /btw) and it fits the side slot, checked
+                               before 'match': a question about the conversation that must leave it as it was (the side
+                               call starts from the deepest main checkpoint inside the shared prefix); one that does not
+                               fit takes the rules above
+          side 'unrelated'     none of the above: a short unrelated request (a harness title / summary / next-speaker call)
+        hint: None, or 'side' (the server's side question)"""
+        if hint not in (None, 'side'): raise ValueError(f'promptcache.route: hint {hint!r} (None or \'side\')')
         self.fence()
         n = len(ids)
         need = None if max_new is None else n + int(max_new) + self.T
@@ -1112,6 +1122,7 @@ class PromptCache:
         shared = lcp(log, ids)
         out.update(main_n=main_n, root=root, shared=shared)
         if main_n <= 0: out['reason'] = 'no_main'
+        elif hint == 'side' and need is not None and need <= self.side_rows: out.update(route='side', reason='side_question')
         elif shared >= (root if root is not None else int(min_match)) or (i0 > 0 and shared >= i0): out['reason'] = 'match'
         elif need is None or need > self.side_rows: out['reason'] = 'no_fit'
         elif main_n <= n: out['reason'] = 'main_shorter'
@@ -1158,7 +1169,7 @@ class PromptCache:
                 if pos > best[1] and cost < best_cost: best, best_cost = ('disk', pos, (nm, h, j)), cost
         return best
 
-    def prepare(self, ids, marks=None, side=False, cancel=None, max_new=None):
+    def prepare(self, ids, marks=None, side=False, cancel=None, max_new=None, hint=None):
         """make the live slot hold ids up to their prompt end (module notes). Returns dict(st: the state the caller's generation
         loop continues (positions < st['i0'] processed, ids[st['i0']:] given; i0 == len(ids) with commit >= 1 is an exact hit,
         which spec.loop / longctx rerun from n - 1), cached (positions reused), source ('live' | 'vram' | 'spill' | 'disk' |
@@ -1170,7 +1181,7 @@ class PromptCache:
         state the next request continues (plan() / prepare() source 'live').
         side: False (a main request), True (a side call), or 'auto' (M7 routing: route(ids, max_new) decides, after the
         request was validated and an engine reset outside the cache was taken in; route: its decision, else None). The caller's
-        generation must then stay within max_new tokens (a side pass past side_rows drops the main slot)"""
+        generation must then stay within max_new tokens (a side pass past side_rows drops the main slot). hint: route()'s"""
         self.fence(); self._check_engine()
         ids = [int(x) for x in ids]; n = len(ids)
         if n < 1: raise CacheError('promptcache: an empty request')
@@ -1181,8 +1192,9 @@ class PromptCache:
             raise CacheError(f'promptcache: the prefill numerics changed since the cache was built: {self._num} -> {numerics(self.pf)}')
         rt = None
         if side == 'auto':
-            rt = self.route(ids, max_new); side = rt['route'] == 'side'
+            rt = self.route(ids, max_new, hint=hint); side = rt['route'] == 'side'
             self.stats['route_side' if side else 'route_main'] += 1
+            if rt['reason'] == 'side_question': self.stats['route_side_question'] += 1
         if side:
             out = self._prepare_side(ids, cancel); out['route'] = rt
             return out
@@ -1422,7 +1434,7 @@ class PromptCache:
     # decides what the live state is. Before (11-07) K3Session did all of this with its own copy of the log and its own
     # epochs (tests/e2e/test_serve_k3.py abortx / bail / side hold the behaviour; tests/cache/test_prompt_cache.py cpu
     # cpu_session the same cases on the stand-in engine).
-    def prompt(self, ids, marks=None, side=False, cancel=None, max_new=None, max_recoveries=2, hooks=None):
+    def prompt(self, ids, marks=None, side=False, cancel=None, max_new=None, max_recoveries=2, hooks=None, hint=None):
         """the session's prompt phase: prepare() (a pass that fails after the engine's retries: the live state dropped
         (_drop_live: in a side call only the side call's) and prepared again, at most max_recoveries times in the request),
         then the prompt's last pass (longctx.first_logits: the first logits), a failed one recovered from the prompt-end
@@ -1442,7 +1454,7 @@ class PromptCache:
         self.phase = 'prepare'
         while True:
             try:
-                r = self.prepare(ids, marks, side=side, cancel=cancel, max_new=max_new)
+                r = self.prepare(ids, marks, side=side, cancel=cancel, max_new=max_new, hint=hint)
                 break
             except (ContextBoundsError, PrefillRefused):
                 if (known0 and int(self.m.token) == tok0 and self.m.seq == seq0 and dict(self.st) == st0

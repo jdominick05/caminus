@@ -21,6 +21,19 @@ Caminus sizes each model's context to your cards, so it isn't always 262K. Every
 or with `caminus qwen`, Caminus sets Qwen Code's context window to what the running server actually holds, so Qwen Code
 compacts the conversation before it runs out of room.
 
+### Side questions (`/btw`)
+
+`/btw <question>` asks about the conversation without adding to it. Caminus recognizes the request and answers it in its
+side slot, so your conversation's next turn picks up where it was instead of being read again. Two things to know:
+
+- It waits for the current answer to finish: the server answers one request at a time.
+- In a short conversation it's quick: only the question is new. In a long one Qwen Code sends just the opening and its
+  last 40 messages, so those are read fresh and the answer can take a while (minutes on the dense 27B models at tens of
+  thousands of tokens). The conversation itself is still untouched.
+
+A side question's answer is capped at 16,384 tokens. One whose prompt and answer won't fit the side slot (98,304
+positions) runs in the main slot as before.
+
 ### The context note
 
 The model can't see how full its context is. So after each batch of tool calls, Caminus adds one line to the last tool

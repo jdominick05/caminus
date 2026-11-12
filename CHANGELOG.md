@@ -7,6 +7,9 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### New
 
+- **Qwen Code's `/btw` no longer disturbs the conversation.** A side question now runs in the server's side slot, so the
+  conversation's next turn continues where it was instead of being read again. In a long conversation the question
+  itself still reads the messages Qwen Code sends with it. See [harnesses](docs/harnesses.md).
 - **Two dense 27B models on Caminus's own code.** `caminus pull swift-1.5` (Swift 1.5, Q4_K_M, a 24 GB card) and
   `caminus pull thinkingcap` (ThinkingCap, 4.2 bits per weight, either card) are served from the GGUF file to the output
   token with code written for Caminus. ThinkingCap decodes at 47 tok/s on an XTX and 39 on an XT (llama.cpp on the same

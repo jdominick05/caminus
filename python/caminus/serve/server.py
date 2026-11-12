@@ -87,6 +87,7 @@ from . import deltas as D
 from . import metrics as MX
 from .agentmon import LoopDetector, harness_of, tool_call_report
 from .normalize import RequestError, anthropic_to_template, openai_chat_to_template
+from .side_question import is_side_question, SIDE_QUESTION_MAX_NEW
 from .sampler import SamplingParams
 from .stats import ENGINE, STATUS_VERSION, EngineStats, build_info
 from .template import MODEL_PROFILES, PromptBuilder
@@ -247,6 +248,7 @@ class GenSpec:
     n_predict: int = -1         # the client's requested max tokens (-1: none), never clamped (/slots params)
     marks: dict = None          # the prompt cache's message boundaries (sessions with wants_marks)
     harness: str = ''           # the User-Agent's class (agentmon.harness_of; the flight recorder's line)
+    hint: str = None            # 'side': a harness's side question (serve/side_question.py): the side slot when it fits
 
 
 def _withhold_unclosed(msg, finish):
@@ -548,8 +550,11 @@ class K3Server:
         think_open = not thinking or self.tok.decode(ids[-4:]).endswith('<think>\n')
         if prefix_text:
             ids += self.tok.encode(prefix_text)
-        return GenSpec(api=api, model=model, stream=stream, prompt_ids=ids, params=params,
-                       max_new=self._max_new(len(ids), mt), stops=stops, force=force, prefix_text=prefix_text,
+        hint = 'side' if is_side_question(norm['messages']) else None
+        max_new = self._max_new(len(ids), mt)
+        if hint: max_new = min(max_new, SIDE_QUESTION_MAX_NEW)
+        return GenSpec(api=api, model=model, stream=stream, prompt_ids=ids, params=params, hint=hint,
+                       max_new=max_new, stops=stops, force=force, prefix_text=prefix_text,
                        tools=tools, thinking=thinking, think_open=think_open, parse_tools=parse_tools, parallel=parallel,
                        include_usage=include_usage, profile=prompt.profile, n_tools=len(names),
                        n_predict=-1 if mt is None else mt, marks=prompt.marks)
@@ -603,7 +608,7 @@ class K3Server:
                   n_predict=spec.n_predict, thinking=spec.thinking, think_open=spec.think_open, marks=spec.marks,
                   slot_params=MX.task_params(spec.params, spec.n_predict, spec.stream, self.spec_types),
                   request_id=new_request_id(), tools=spec.tools, parse_tools=spec.parse_tools, parallel=spec.parallel,
-                  prefix_text=spec.prefix_text, profile=spec.profile, harness=spec.harness,
+                  prefix_text=spec.prefix_text, profile=spec.profile, harness=spec.harness, hint=spec.hint,
                   loop_guard=self.loop_guard and spec.api != 'completions')
         try:
             return self.worker.submit(job)

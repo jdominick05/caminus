@@ -118,10 +118,10 @@ class EngineSession:
     def tokens(self):
         raise NotImplementedError
 
-    def plan(self, ids, max_new=None):
+    def plan(self, ids, max_new=None, hint=None):
         raise NotImplementedError
 
-    def prefill(self, ids, cancel=None, marks=None, max_new=None):
+    def prefill(self, ids, cancel=None, marks=None, max_new=None, hint=None):
         raise NotImplementedError
 
     def verify(self, feed):
@@ -327,7 +327,7 @@ class MockSession(EngineSession):
                 best, src = len(k), 'disk'
         return best, src
 
-    def plan(self, ids, max_new=None):
+    def plan(self, ids, max_new=None, hint=None):   # (hint: no side slot here)
         return self._best(ids)[0]
 
     def cache_gauges(self):
@@ -411,7 +411,7 @@ class MockSession(EngineSession):
                 st.evicted(sy.evicted_ms)
         return out
 
-    def prefill(self, ids, cancel=None, marks=None, max_new=None):
+    def prefill(self, ids, cancel=None, marks=None, max_new=None, hint=None):
         with self._lock:
             clock = self._clock()
             st_ = self.stats
