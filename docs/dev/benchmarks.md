@@ -215,14 +215,15 @@ Served: `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model G
 --max-ctx 12288` starts `caminus serve` once with `--draft off` and once with `--draft dflash`, interleaved over 3
 rounds, and reads the server's own decode timing (`timings.predicted_per_second`) for 128 greedy tokens. The prompts are
 the 48-token inputs llama.cpp's own drafter was measured on (the server puts 248044 first: one prompt token more).
+Measured 2026-11-12 with nothing else on the cards.
 The llama.cpp column is `llama-server --spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`; its
 plain decode in that setup is 35.4-36.0 tok/s.
 
 | prompt | RX 7900 XTX: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
 |---|---|---|---|
-| code | 42.7 | 95.9 (2.25x) | 74.7 (80 % accepted) |
-| prose | 42.8 | 94.7 (2.21x) | 74.8 (80 %) |
-| shell | 42.9 | 71.0 (1.66x) | 67.3 (67 %) |
+| code | 42.7 | 95.4 (2.24x) | 74.7 (80 % accepted) |
+| prose | 42.7 | 94.3 (2.21x) | 74.8 (80 %) |
+| shell | 42.7 | 70.7 (1.66x) | 67.3 (67 %) |
 
 - The replies are the plain server's token for token on all three prompts. llama.cpp's drafted output also equalled its
   plain output on Swift.
