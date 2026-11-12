@@ -57,7 +57,7 @@ def compare(dr, ref, feats, n0, last, what):
     M = dr.nkv * dr.hd; wk = wv = 0.0
     for il, d in enumerate(dr.L):   # (the last min(n, RING) positions: each in row p & (RING - 1))
         ps = np.arange(max(0, n - RING + 4), n)   # (the draft's block at n0 .. n0 + 3 rewrote the rows of n0 - RING ..: outside its window)
-        rr = d['ring'].view(RING, 2, M)[torch.from_numpy(ps & (RING - 1))].float().cpu().numpy()
+        rr = d['ring'].view(RING, 2, M).cpu()[torch.from_numpy(ps & (RING - 1))].float().numpy()   # (gathered on the host: no GPU scratch)
         wk = max(wk, rel(rr[:, 0].reshape(len(ps), dr.nkv, dr.hd), ref.K[il, ps])); wv = max(wv, rel(rr[:, 1].reshape(len(ps), dr.nkv, dr.hd), ref.V[il, ps]))
     check(wk < A.rel and wv < A.rel, f'{what}: inject of {n} rows x {dr.nl} layers, worst relative error K {wk:.2e}, V {wv:.2e} (bound {A.rel})')
     want, rlg, _ = ref.draft(last, n0, 3)
