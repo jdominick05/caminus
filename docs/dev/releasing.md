@@ -141,7 +141,10 @@ everywhere it is published (README, CHANGELOG, docs/models.md, benchmarks.md) in
 that could not run is listed there as skipped, with the reason. A published number always describes the released code.
 
 1. **The version:** set `__version__` in `python/caminus/__init__.py` (and the docs that name it). A version can be uploaded to
-   PyPI once; a fix is the next patch version.
+   PyPI once; a fix is the next patch version. Then redraw the README's picture of the control panel,
+   `python -I tools/release/panel_shot.py` (needs Go): the panel's real render of this tree's version, model catalog
+   and Qwen Code pin, in a GNOME terminal window, written to `docs/panel.svg`. tests/docs fails while the picture shows
+   another version.
 2. **The code-object hashes** (only when kernels/ or build.sh changed since the last release): in a fresh clone,
    `PY=<python with ROCm PyTorch> ROCM_PATH=<TheRock> IGNITE=<ignite-llama at e4e3f8eda> tools/release/release_build.sh --write-hashes`,
    review the change to `packaging/gfx1100-kernels.sha256` and commit it.

@@ -8,6 +8,8 @@
   (caminus.__main__.COMMANDS, read from the file, not imported);
 - every script AGENTS.md's command lines name (tools/..., tests/..., benchmarks/..., build.sh) exists (the public AGENTS.md:
   packaging/public/AGENTS.md in the development tree, AGENTS.md in the public one).
+- docs/panel.svg, the README's picture of the control panel, shows the version python/caminus/__init__.py holds (a
+  release sets the version and redraws it: python -I tools/release/panel_shot.py; a nightly's .dev version is skipped).
 Prints PASS / FAIL per check and RESULT PASS / RESULT FAIL (n)."""
 import ast, glob, os, re, sys
 
@@ -70,6 +72,16 @@ block = '\n'.join(re.findall(r'```\n(.*?)```', open(ag, encoding='utf-8').read()
 paths = sorted(set(re.findall(r'(?<![\w/$.-])((?:tools|tests|benchmarks|panel)/[\w./-]+\.(?:py|sh)|build\.sh)', block)))
 missing = [p for p in paths if not os.path.exists(os.path.join(ROOT, p.lstrip('./')))]
 check(paths and not missing, f'AGENTS.md: the {len(paths)} scripts its commands name exist' + (f'; missing: {missing}' if missing else ''))
+
+ver = re.search(r"^__version__ = '([^']+)'", open(os.path.join(ROOT, 'python', 'caminus', '__init__.py'), encoding='utf-8').read(), re.M).group(1)
+shot = os.path.join(ROOT, 'docs', 'panel.svg')
+drawn = re.search(r'>control</text><text[^>]*>panel</text><text[^>]*>([^<]+)</text>', open(shot, encoding='utf-8').read()) if os.path.exists(shot) else None
+drawn = drawn.group(1) if drawn else None
+if 'dev' in ver:
+    check(True, f'panel picture: version {ver} is a nightly\'s, not checked (the picture shows {drawn})')
+else:
+    check(drawn == ver, f'panel picture: docs/panel.svg shows caminus {drawn}, the tree is {ver}'
+          + ('' if drawn == ver else ': redraw it with python -I tools/release/panel_shot.py'))
 
 print(f'RESULT PASS' if not fails else f'RESULT FAIL ({len(fails)})')
 sys.exit(0 if not fails else 1)
