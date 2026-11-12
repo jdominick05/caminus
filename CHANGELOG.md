@@ -11,7 +11,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   in the same build image the maintainer uses, published only when both builds are byte for byte equal, and signed:
   `gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus --signer-workflow
   jdominick05/caminus/.github/workflows/build.yml --source-ref refs/tags/vX.Y.Z`. Files on PyPI carry PEP 740 attestations. See
-  [releasing](docs/dev/releasing.md#slsa).
+  [verify your download](docs/verifying.md).
 - **Qwen Code's `/btw` no longer disturbs the conversation.** A side question now runs in the server's side slot, so the
   conversation's next turn continues where it was instead of being read again. In a long conversation on Swift 1.5 or
   ThinkingCap, it's answered from the whole stored conversation, so only the question is read. See

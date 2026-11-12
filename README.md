@@ -6,7 +6,7 @@
   <a href="https://pypi.org/project/caminus/"><img src="https://img.shields.io/pypi/v/caminus?label=pypi&labelColor=3b4252&color=88c0d0" alt="PyPI version"></a>
   <a href="https://github.com/jdominick05/caminus/releases/latest"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?label=release&labelColor=3b4252&color=5e81ac" alt="newest release"></a>
   <a href="https://github.com/jdominick05/caminus/releases"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?include_prereleases&filter=*.dev*&label=nightly&labelColor=3b4252&color=a3be8c" alt="newest nightly build"></a>
-  <a href="docs/dev/releasing.md#slsa"><img src="https://img.shields.io/badge/SLSA-build%20level%203-d08770?labelColor=3b4252" alt="SLSA Build Level 3: signed provenance for every release"></a>
+  <a href="docs/verifying.md"><img src="https://img.shields.io/badge/SLSA-build%20level%203-d08770?labelColor=3b4252" alt="SLSA Build Level 3: signed provenance for every release"></a>
   <img src="https://img.shields.io/badge/status-early%20testing-ebcb8b?labelColor=3b4252" alt="status: early testing">
   <a href="docs/hardware.md"><img src="https://img.shields.io/badge/GPU-RX%207900%20XTX%20%2F%20XT-8fbcbb?labelColor=3b4252" alt="GPU: RX 7900 XTX / XT"></a>
   <img src="https://img.shields.io/badge/Linux-Python%203.12-81a1c1?labelColor=3b4252&logo=linux&logoColor=d8dee9" alt="Linux, Python 3.12">
@@ -95,7 +95,8 @@ llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-
 - **Use Caminus:** [quickstart](docs/quickstart.md) · [the panel](docs/panel.md) · [models](docs/models.md) ·
   [hardware](docs/hardware.md) · [harnesses](docs/harnesses.md) · [the advisor](docs/advisor.md) ·
   [troubleshooting](docs/troubleshooting.md) ·
-  [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [what changed](CHANGELOG.md)
+  [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [verify your download](docs/verifying.md) ·
+  [what changed](CHANGELOG.md)
 - **Contribute:** [CONTRIBUTING.md](CONTRIBUTING.md) · [how it works](docs/dev/architecture.md) ·
   [building from source](docs/dev/building.md) · [testing](docs/dev/testing.md)
 - **AI agents working on this code:** [AGENTS.md](AGENTS.md)

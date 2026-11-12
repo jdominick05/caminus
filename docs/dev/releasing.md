@@ -240,6 +240,8 @@ link torch's HIP runtime, so the image has no PyTorch. Changing the image means:
 
 ## SLSA
 
+For users: [verify your download](../verifying.md) has the checks and the rebuild as copy-paste commands.
+
 The release files reach **SLSA Build Level 3**: build.yml builds them on GitHub-hosted runners in a reusable workflow
 (isolated from the calling workflow's steps) and GitHub signs non-forgeable provenance naming the repository, the commit,
 the workflow file and the run. Check a file:
