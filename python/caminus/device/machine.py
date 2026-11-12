@@ -15,6 +15,8 @@ import re
 
 GFX_TARGET = 110000         # gfx1100
 DISPLAY_RESERVE_MIB = 512   # kept free below the line of a card that drives a display (the desktop's own VRAM grows)
+CAP_MARGIN_MIB = 256        # kept free below every card's guard line (caminus.device.capacity.MARGIN_MIB: allocator rounding,
+                            # HIP's own growth); here so that a process without torch applies the same cap
 NAMES = {(0x744c, 23): 'XTX', (0x744c, 24): 'XTX', (0x744c, 19): 'XT', (0x744c, 20): 'XT'}   # (PCI device, total GiB) -> label
 
 

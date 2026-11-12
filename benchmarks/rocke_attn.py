@@ -16,7 +16,7 @@ import argparse, os, statistics, sys
 from contextlib import ExitStack
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
-from caminus.device import host   # (sysfs only: no torch, no HIP)
+from caminus.device import host, machine   # (sysfs only: no torch, no HIP)
 from rocke.core.arch import generic_arch_from_target_id
 from rocke.runtime.hip_module import Runtime, get_device_target_id
 from benchmarks.gfx1151.attention import benchmark_sdpa as bs
@@ -71,17 +71,19 @@ MIB = 1 << 20
 
 
 def room(case):
-    """the capacity check without torch (caminus.device.capacity imports it, and this process holds only rocKE's HIP
+    """caminus.device.capacity.check's rule without torch (that module imports it, and this process holds only rocKE's HIP
     runtime): the case's device bytes (q, k, v, out in fp16, plus an allowance of 4 bytes per output value for rocKE's
-    split workspace, which it sizes itself) must fit under the guard's kill line on every gfx1100 card the guard
-    watches (caminus.device.host: sysfs, no HIP), keeping a display card's reserve, or the case is refused before it
-    allocates"""
+    split workspace, which it sizes itself) + the used VRAM (sysfs, every process) must stay under each watched gfx1100
+    card's cap, its guard line - the same margin (caminus.device.machine.CAP_MARGIN_MIB = capacity.MARGIN_MIB), or the case
+    is refused before it allocates"""
     need = (2 * (2 * case.seqlen_q * H * D + 2 * case.seqlen_k * NKV * D) + 4 * case.seqlen_q * H * D) / MIB
     for g in host.gpus():
         if not g.get('watched') or g.get('line_mib') is None: continue
         used = int(open(os.path.join(g['dev'], 'mem_info_vram_used')).read()) / MIB
-        if used + need + (g.get('reserve_mib') or 0) > g['line_mib']:
-            raise SystemExit(f"rocke_attn: {case.name} needs {need:.0f} MiB; {g['label']} has {used:.0f} MiB used of its {g['line_mib']} MiB line")
+        cap = g['line_mib'] - machine.CAP_MARGIN_MIB
+        if used + need > cap:
+            raise SystemExit(f"rocke_attn: {case.name} needs {need:.0f} MiB; {g['label']} uses {used:.0f} MiB of its cap {cap:.0f} MiB "
+                             f"(guard line - {machine.CAP_MARGIN_MIB} MiB margin)")
     return need
 
 
