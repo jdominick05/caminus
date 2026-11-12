@@ -115,30 +115,38 @@ What it says:
 
 ## Prefill attention at depth (dense qwen35 geometry)
 
-`benchmarks/q35_prefill_attn.py`, RX 7900 XT alone, testing 737df92. One 2048-row chunk at positions P0 .. P0 + 2047
-attends to the f16 cache rows up to its own (24 query heads over 4 kv heads, head dim 256). Ours: `q35p_attn16`, one
-workgroup per (row, query head) walking every position up to its own, in launches of at most 2^20 token-positions, as
-the prefill driver runs it. Yardstick: torch's `scaled_dot_product_attention` (fp16, GQA) on its tiled backends only
-(flash / memory-efficient). A causal-with-offset mask has no tiled kernel here (with the mask PyTorch falls back to
-the math path, which materializes the scores: 17.5 GB at 32K), so the chunk runs as its two tiled calls, the prefix
-(no mask) and the causal square, their times summed (the log-sum-exp merge not counted). TFLOPS count the causal half
-once. Median of 5.
+`benchmarks/q35_prefill_attn.py`, RX 7900 XT alone. One 2048-row chunk at positions P0 .. P0 + 2047 attends to the
+f16 cache rows up to its own (24 query heads over 4 kv heads, head dim 256). Ours, now: `q35p_attn_wm`, WMMA tiles (a
+workgroup = 8 positions x one kv head's 6 query heads, K / V staged once per 32 positions for its 8 waves, a wave pair
+per 16 query rows over the 256 dims, fp16 q / k / v / p, fp32 scores and sums), in launches of at most 2^25
+row-positions, as the prefill driver runs it. Before (testing 737df92): `q35p_attn16`, one workgroup per (row, query
+head) walking every position up to its own. Yardstick: torch's `scaled_dot_product_attention` (fp16, GQA) on its tiled
+backends only (flash / memory-efficient). A causal-with-offset mask has no tiled kernel here (with the mask PyTorch falls
+back to the math path, which materializes the scores: 17.5 GB at 32K), so the chunk runs as its two tiled calls, the
+prefix (no mask) and the causal square, their times summed (the log-sum-exp merge not counted). TFLOPS count the causal
+half once. Median of 5.
 
-| P0 | ours | torch SDPA, tiled | ours / SDPA |
-|---|---|---|---|
-| 0 | 25.7 ms (2.0 TF) | 2.31 ms (22.3 TF) | 11.1 (outputs agree to 4.8e-4) |
-| 8,192 | 243.2 ms (1.9 TF) | 12.6 ms (36.8 TF) | 19.3 |
-| 30,720 | 963.6 ms (1.7 TF) | 40.5 ms (39.4 TF) | 23.8 |
+| P0 | ours, tiles | ours before, per (row, head) | torch SDPA, tiled | tiles / SDPA |
+|---|---|---|---|---|
+| 0 | 2.85 ms (18.1 TF) | 25.8 ms (2.0 TF) | 2.36 ms (21.8 TF) | 1.21 (outputs agree to 6.8e-4) |
+| 8,192 | 23.2 ms (20.0 TF) | 243.0 ms (1.9 TF) | 12.6 ms (36.8 TF) | 1.84 |
+| 30,720 | 79.7 ms (20.0 TF) | 963.6 ms (1.7 TF) | 40.6 ms (39.4 TF) | 1.96 |
 
 What it says:
-- Our prefill attention is not tiled: each (row, head) workgroup re-reads K and V, so it runs at ~2 TF at every depth,
-  and its cost grows ~31 ms per 1K of depth per chunk: the chunk at 30K spends 0.96 s in attention against 2.26 s in all
-  its GEMMs. A tiled kernel does the same chunk in ~40 ms at ~39 TF.
+- The per-(row, head) kernel re-read K and V for every row and head: ~2 TF at every depth, ~31 ms per 1K of depth per
+  chunk (0.96 s at 30K against 2.26 s in all the chunk's GEMMs). The tiles run at ~20 TF from 8K up: 9-12x faster, the
+  chunk at 30K in 80 ms. Accuracy: within 9.4e-4 of rms of float64 at every depth tested; the same bits at every launch
+  split and chunk geometry (tests/prefill/test_q35_prefill_attn.py).
+- End to end (tests/prefill/test_q35_prefill.py --speed 16384, Swift 1.5 Q4_K_M, XT alone, chunk 2048, median of 3):
+  16,384 positions from empty in 44.3 s (370 tok/s) before (testing 352918c), 20.6 s (794 tok/s) with the tiles: 2.15x.
+  What remains is the GEMMs (~2.26 s a chunk) and the GDN; attention is now ~13 % of a 16K prefill.
 - rocKE's RDNA WMMA prefill (`wmma_fmha_fwd_v2`, d256 causal 64 x 32 tile; `benchmarks/rocke_attn.py`, graph replay,
   checked at P0 0) does the same chunk in 0.94 / 8.28 / 28.5 ms at P0 0 / 8K / 30K: 54.8-56.0 TF, 1.4x tiled SDPA and
-  34x ours at 30K.
-- The fix is our own WMMA flash-attention tile for prefill (K / V tiles in LDS shared by a block of rows, online
-  softmax), with rocKE's 56 TF as the bar. CK's gfx1100 FMHA is not measured (a heavy build; rocKE covers the case).
+  2.8x our tiles at 30K (34x the per-(row, head) kernel).
+- What the tiles leave on the table, against rocKE's design: one 16-column WMMA tile holds 2 positions x 6 heads (12 of
+  16 columns used: GQA packing by absolute position pairs, which keeps the chunk geometry bit-exact); V^T is staged by
+  scalar LDS writes; one LDS buffer (two barriers per 32 positions) where rocKE double-buffers and prefetches the next
+  tile into registers; scores exchanged through LDS between the pair. CK's gfx1100 FMHA is not measured.
 
 ## Summary: where the outside kernels say we stand (XT)
 
@@ -148,4 +156,4 @@ What it says:
 | Decode attention after the fix, split pair, 32K | 0.52 ms / layer | rocKE split-KV decode: 0.20 ms | 2.6x |
 | Verify attention (T 4), split pair, 32K | 1.76 ms / layer (3.4x T 1) | rocKE, GQA-packed: 0.22 ms | 7.8x |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
-| Prefill attention, chunk at 30K | 964 ms | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.5 ms) | 34x |
+| Prefill attention, chunk at 30K | 79.7 ms (964 ms before the tiles) | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.6 ms) | 2.8x (34x before) |

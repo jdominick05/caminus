@@ -51,7 +51,7 @@ def ref_rows(q, cache, nkv, heads, pos0, rows):
     """float64 attention of chunk rows `rows` (q rounded to fp16, as the kernel reads it): [len(rows), heads, D]"""
     G, last = heads // nkv, pos0 + max(rows) + 1
     kv = cache.view(-1, 2, nkv, D)[:last].cpu().double().numpy()   # (to the host first: no float64 copy on the card)
-    qq = q.view(-1, heads, D).half().cpu().double().numpy()
+    qq = q.view(-1, heads, D).cpu().half().double().numpy()   # (rounded on the host: no temporaries on the card)
     out = np.zeros((len(rows), heads, D))
     for i, r in enumerate(rows):
         P = pos0 + r + 1

@@ -126,10 +126,10 @@ def main():
         same(f'attention p0 {p0}: the f16 cache', cache2, cache1)
         # the decode's attention is the split pair (fp32 q), the prefill's WMMA tiles (fp16 q, k, v, p): both against
         # float64 in tests/engine/test_q35_split_attn.py / tests/prefill/test_q35_prefill_attn.py; here against each other
-        a2, a1 = att2.view(T, -1).double(), out1['att'].double()
+        a2, a1 = att2.view(T, -1).cpu().double(), out1['att'].cpu().double()   # (to the host first: no float64 copies on the card)
         rms = float(a1.pow(2).mean().sqrt()); dmax = float((a2 - a1).abs().max()) / rms; dmean = float((a2 - a1).abs().mean()) / rms
         check(dmax < 2e-2 and dmean < 2e-3, f'attention p0 {p0}: the attention (tiles vs the decode\'s split pair): max {dmax:.2e}, mean {dmean:.2e} of rms')
-        g2, g1 = gat2.view(T, -1).double(), out1['gat'].double()
+        g2, g1 = gat2.view(T, -1).cpu().double(), out1['gat'].cpu().double()
         gr = float(g1.pow(2).mean().sqrt()); gmax = float((g2 - g1).abs().max()) / gr
         check(gmax < 2e-2, f'attention p0 {p0}: the fp16 gate on it: max {gmax:.2e} of rms (bitwise when the attention is: the same op)')
     print(f'NOTE the slowest attention launch: {worst_ms:.2f} ms (rows x positions <= {T} x {600 + T})', flush=True)
