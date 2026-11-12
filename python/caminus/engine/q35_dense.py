@@ -141,6 +141,9 @@ class Dense35Own:
         torch.cuda.set_device(self.dev)
         if self.per_wgp == 'card': self.per_wgp = card_per_wgp()
         self.pos_host = 0
+        # spec_T > 1: the tokens of the last pass launched on these states (a decode step 1, a verify pass its T, 0 after a
+        # reset): the most the next pass may commit, since the records past it are an older pass's
+        self.last_T = 0
         # the server's engine contract (Qwen35One's / Q3MoEOne's names): one card, T = 1, dense attention at every depth
         self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
         self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
@@ -331,7 +334,7 @@ class Dense35Own:
         with torch.cuda.device(self.dev):
             for (_, _, kind), t in self.state.items():
                 if kind in RECURRENT: t.zero_()
-        self.pos_host = 0
+        self.pos_host = 0; self.last_T = 0
         self.seq += 1; self.fresh = True; self.poisoned = None
 
     def prefetch(self, tokens, positions):
@@ -345,9 +348,15 @@ class Dense35Own:
         self._run_tok(int(tok), i0, 0 if self.fresh else 1, False, trace)
         return self.buf['logits']
 
+    def commit_max(self):
+        """the most the next pass on these states may commit: 1 on the served engine (spec_T 1, as before verify tapes
+        existed); with spec_T > 1 the tokens of the last pass launched on them (0 after a reset or a prefill)"""
+        if self.spec_T == 1: return 1
+        return 0 if self.fresh else self.last_T
+
     def _check(self, tokens, i0, commit, what):
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
-        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.spec_T, what=what)   # (after a verify pass: up to its tokens)
+        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.commit_max(), what=what)
         if tokens is not None and len(tokens) < i0 + 1:
             raise k3.ContextBoundsError(f'{what}: position {i0} but {len(tokens)} tokens')
 
@@ -418,7 +427,7 @@ class Dense35Own:
         """the launch from the staged block (and the logits' argmax read back when self._tok)"""
         self._check(None, i0, commit, 'Dense35Own._pass')
         if int(self.hstage[17]) != i0: raise k3.ContextBoundsError(f'Dense35Own._pass: staged position {int(self.hstage[17])} != {i0}')
-        self.token += 1
+        self.token += 1; self.last_T = 1
         self.hstage[1] = int(commit)
         with torch.cuda.device(self.dev):
             self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)

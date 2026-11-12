@@ -21,6 +21,7 @@ A = ap.parse_args()
 from caminus import ggufio
 from caminus.bpe import BPE
 from caminus.device import capacity
+from caminus.engine import k3
 from caminus.engine.q35_dense import Dense35Own
 from caminus.engine.q35_dense_verify import Dense35Verify, MAX_T
 from caminus.prefill.q35own import Q35OwnPrefill, buffer_need_mib, shapes_of
@@ -88,6 +89,26 @@ for N in depths:
             p += 1; commit = 1
         check(not bad, f'depth {N} T {T}: {npass} passes ({rows} accepted rows) and {decs} decode steps bitwise the decode '
                        f'steps, wrong tokens in every rejected row{"" if not bad else ": " + ", ".join(bad[:6])}')
+    # passes of different T on one state: each commits what the last pass (of any T) accepted
+    start(N)
+    p, commit, bad, plan = N, 0, [], [(4, 3), (2, 2), (3, 1), (4, 4), (1, 1), (3, 2), (2, 1), (4, 2)]
+    for T, a in plan:
+        if p + T > N + G: break
+        wrong = [(full[p + r] + 7919 * (r + 1)) % eng.vocab for r in range(a, T)]
+        vers[T].run(full[p:p + a] + wrong, p, commit)
+        bad += [f'T {T} at {p} row {r}' for r in range(a) if not np.array_equal(bits(vers[T].logits(r)), ref[p + r - N])]
+        p += a; commit = a
+    if not np.array_equal(bits(eng.verify(full, p, commit)), ref[p - N]): bad.append(f'decode step at {p}')
+    check(not bad, f'depth {N}: passes of T 4, 2, 3, 4, 1, 3, 2, 4 on one state (a pass of 2 committing 3 of a pass of 4), '
+                   f'then a decode step: bitwise{"" if not bad else ": " + ", ".join(bad[:6])}')
+    # a commit past the last pass's tokens is refused before anything is written (its records are an older pass's)
+    start(N)
+    eng.verify(full, N, 0)
+    try: vers[MAX_T].run(full[N + 1:N + 1 + MAX_T], N + 1, 3); refused = False
+    except k3.ContextBoundsError: refused = True
+    vers[MAX_T].run(full[N + 1:N + 1 + MAX_T], N + 1, 1)
+    check(refused and eng.poisoned is None and all(np.array_equal(bits(vers[MAX_T].logits(r)), ref[1 + r]) for r in range(MAX_T)),
+          f'depth {N}: a pass committing 3 after a decode step is refused; the engine stays usable and the right pass is bitwise')
     # the grids: T = 4, every row accepted
     for w, ver in alt.items():
         start(N)

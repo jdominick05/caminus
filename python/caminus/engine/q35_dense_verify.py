@@ -83,6 +83,7 @@ class Dense35Verify:
         self.dstage = s['stage']; self.toks, self.pos = self.dstage[16:16 + T], self.dstage[16 + T:17 + T]
         E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=T, limit_us=eng.limit_us)
         E.params = self.dstage[0:16]
+        E.guard_T = eng.spec_T   # (the device bound on the commit, as the decode tape's: the host bounds it by the last pass)
         self.seg_names = {}
 
         def named(si, name):
@@ -143,19 +144,21 @@ class Dense35Verify:
     def run(self, tokens, pos0, commit, argmax=True):
         """T tokens at positions pos0 .. pos0 + T - 1 in one launch (waited for), after committing the previous pass's
         first `commit` tokens (0 .. the engine's spec_T; 0 after a reset or a prefill) into the recurrent states. Returns
-        the greedy next token after each row (argmax on the card, the first index on ties; argmax False: None). Refused
+        the greedy next token after each row (argmax on the card, the first index on ties; argmax False: None). commit
+        is at most the tokens of the last pass on the engine's states (eng.commit_max(): a decode step 1, a verify pass
+        its T; 0 after a reset or a prefill), since the saved records past them are an older pass's. Refused
         before anything is written: a poisoned engine, a span outside the KV cache, a commit out of range, a token
         outside the vocabulary. A wait that gave up runs the pass again (commit 0: the first launch committed already);
         the device bound guard poisons the engine until its reset()."""
         eng, T, E = self.eng, self.T, self.E
         if eng.poisoned: raise k3.ContextBoundsError(f'Dense35Verify pass: refused until reset(): {eng.poisoned}')
         if len(tokens) != T: raise ValueError(f'Dense35Verify pass: {len(tokens)} tokens for a T = {T} tape')
-        k3.check_span(pos0, T, eng.max_ctx, commit=commit, ntok=eng.spec_T, what='Dense35Verify pass')
+        k3.check_span(pos0, T, eng.max_ctx, commit=commit, ntok=eng.commit_max(), what='Dense35Verify pass')
         toks = [int(t) for t in tokens]
         if any(not 0 <= t < eng.vocab for t in toks): raise ValueError(f'Dense35Verify pass: a token of {toks} outside the vocabulary ({eng.vocab})')
         for t in range(T): self.hstage[16 + t] = toks[t]
         self.hstage[16 + T] = int(pos0)
-        eng.fresh = False
+        eng.fresh = False; eng.last_T = T   # (the next pass on these states commits at most T)
         with torch.cuda.device(eng.dev):
             for attempt in range(eng.max_retries + 1):
                 bad = self._pass(pos0, commit if attempt == 0 else 0, argmax)

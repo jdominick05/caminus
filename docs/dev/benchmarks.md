@@ -115,24 +115,27 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
 #### Verify passes (the base for speculative decoding; no drafter yet)
 
 `engine/q35_dense_verify.py` runs T tokens in one pass on the decode engine's weights and states (module
-`k3_q35_swift_ver`). Measured 2026-11-11 on the RX 7900 XT, after an own prefill of real text, ms per pass against one
-decode step at the same depth (medians of 9 interleaved rounds; `tools/guard.sh LOG 1500 python -I benchmarks/q35_verify.py
-GGUF --depths 512,4096 --per-wgp 6,7`):
+`k3_q35_swift_ver`). Measured 2026-11-11 after an own prefill of real text: ms per pass against one decode step at the
+same depth, with the pass committing its own accepted tokens as it would in use (the benchmark's walk: medians of 9
+interleaved rounds; `tools/guard.sh LOG 1800 python -I benchmarks/q35_verify.py GGUF --depths 512,4096 --per-wgp 5,6,7`):
 
-| depth | decode step | T = 2 | T = 3 | T = 4 |
-|---|---|---|---|---|
-| 512 | 28.3 ms | 33.7 (1.19x) | 44.2 (1.56x) | 56.0 (1.98x) |
-| 4,096 | 36.0 ms | 41.5 (1.15x) | 52.8 (1.47x) | 64.5 (1.79x) |
+| card | depth | decode step | T = 2 | T = 3 | T = 4 |
+|---|---|---|---|---|---|
+| RX 7900 XTX | 512 | 24.5 ms | 29.7 (1.21x) | 38.4 (1.57x) | 47.2 (1.92x) |
+| RX 7900 XTX | 4,096 | 31.7 ms | 36.4 (1.15x) | 44.0 (1.39x) | 53.9 (1.70x) |
+| RX 7900 XT | 512 | 28.6 ms | 34.2 (1.20x) | 45.0 (1.57x) | 56.7 (1.98x) |
+| RX 7900 XT | 4,096 | 36.3 ms | 42.0 (1.16x) | 53.6 (1.48x) | 65.1 (1.79x) |
 
 - A pass of T tokens pays for itself when the drafter's tokens are accepted often enough to average more than that ratio
-  in output tokens per pass (plus the drafter's own time). The grid makes no difference here: at T = 4, 6 and 7
-  workgroups per WGP are within 0.7 ms of the decode engine's 5.
-- In the matvecs alone (`OWN_MT` tiles, Swift's first 16 blocks, one chained tape per format) T = 4 costs 2.11x a
-  decode step's Q4_K matrices and 1.56x its Q6_K ones: the per-token unpack of the Q4_K tile is the larger part.
+  in output tokens per pass (plus the drafter's own time).
+- The commit's replay (the state taking the accepted tokens first) costs little: the same passes at commit 0 are at most
+  1.3 ms (2.4 %) faster. The grid makes little difference: at T = 4, 5 to 7 workgroups per WGP are within 2.1 ms of the decode
+  engine's grid (XTX at 4,096: 6 per WGP 51.9 ms against 53.9).
 - The gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_verify.py GGUF --depths 0,512`): for T = 1 .. 4 a
   walk of passes with rejected rows holding wrong tokens, decode steps between them, the lazily committed states handed
-  both ways: every accepted row and every decode step bitwise the decode steps; T = 4 at 3 / 6 / 7 workgroups per WGP
-  bitwise. Forced bails in the verify tape: `tools/guard.sh LOG 1200 python -I tools/gates/forcebail.py 4 40 tiny
+  both ways: every accepted row and every decode step bitwise the decode steps; passes of different T on one state (a pass
+  of 2 committing 3 of a pass of 4) bitwise; a commit past the last pass's tokens refused on the host; T = 4 at 3 / 6 / 7
+  workgroups per WGP bitwise. On both cards. Forced bails in the verify tape: `tools/guard.sh LOG 1200 python -I tools/gates/forcebail.py 4 40 tiny
   --engine dense35ver --model GGUF --ctx 512 --tokens FILE`.
 
 ### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)

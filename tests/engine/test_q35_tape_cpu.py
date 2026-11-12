@@ -179,6 +179,17 @@ check(q4 > q1 and abs(Dense35Own.projection_mib(P, 64, spec_T=4) - mv4.vram_mib)
 check(refused(lambda: Dense35Verify(m, 2, vram_check=False)) and refused(lambda: Dense35Verify(mv4, 5, vram_check=False)) and
       refused(lambda: Dense35Verify(mv4, 4, module='k3_q35_swift', vram_check=False)) and refused(lambda: Dense35Own(P, max_ctx=64, vram_check=False, spec_T=5)),
       'refused: a verify tape longer than the engine\'s spec_T, T 5, a decode module, spec_T 5')
+ok_c = mv4.commit_max() == 0 and refused(lambda: v4.run([1, 2, 3, 4], 0, 1), k3.ContextBoundsError)
+mv4.fresh, mv4.last_T = False, 1
+ok_c &= mv4.commit_max() == 1 and refused(lambda: v4.run([1, 2, 3, 4], 1, 2), k3.ContextBoundsError)
+ok_c &= refused(lambda: mv4.verify([1] * 8, 1, 2), k3.ContextBoundsError)
+mv4.last_T = 4
+ok_c &= mv4.commit_max() == 4 and m.commit_max() == 1 and Ev.guard_T == 4
+mv4.reset(); ok_c &= mv4.commit_max() == 0
+check(ok_c, 'the commit is bounded by the last pass on the states (0 after a reset, 1 after a decode step, T after a verify '
+            'pass: refused on the host past it); the served engine keeps 1; the verify tape\'s guard takes spec_T')
+check(('OWN_MV', 'Q4_K/a16_1rt_gu') not in k3.MODULE_CAPS['k3_q35_swift_ver'] and ('OWN_MV', 'Q4_K/a16_1rt_gu') in k3.MODULE_CAPS['k3_q35_swift'],
+      'the verify module\'s capabilities leave out the fused gate | up (no verify tape runs it)')
 e_v = k3.Engine(module='k3_q35_swift_ver', T=4)
 check(refused(lambda: e_q35.own_matvec16(w8, 'Q8_0', 8, 256, B(4 * 256, torch.float16), B(32), tokens=4)) and
       refused(lambda: e_v.own_matvec16(w8, 'Q8_0', 8, 256, B(4 * 256, torch.float16), B(32), tokens=2)) and
