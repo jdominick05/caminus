@@ -811,15 +811,15 @@ class PromptCache:
         self.spill_min_gap = int(every if spill_min_gap is None else spill_min_gap)
         self.df = getattr(draft, 'df', None)
         if draft is not None and (self.df is None or not hasattr(draft, 'window_state')
-                                  or getattr(self.df, 'kind', 'dflash') not in ('dflash', 'mtp')):
+                                  or getattr(self.df, 'kind', 'dflash') not in ('dflash', 'mtp', 'dflash35')):
             raise CacheError(f'promptcache: drafter {type(draft).__name__}: the DFlash K3 drafter (DFlashK3Drafter), '
-                             f'an MTP drafter (kind mtp), or none')
+                             f'a host-accept drafter (kind mtp / dflash35), or none')
         if pf.m is not m: raise CacheError('promptcache: the prefill belongs to another engine')
         if self.df is not None and getattr(self.df, 'tgt', None) is not m:
             raise CacheError('promptcache: the drafter belongs to another engine (extend() reads its target\'s launch epoch)')
         # (an MTP session's passes are the T = spec_T verify passes: the tail rows and the commit bounds cover that many)
         T = int(m.ntok)
-        if self.df is not None and getattr(self.df, 'kind', None) == 'mtp':
+        if self.df is not None and getattr(self.df, 'kind', None) in ('mtp', 'dflash35'):
             T = int(getattr(m, 'spec_T', 1))
         self.T, self.every, self.auto_park_min = T, int(every), auto_park_min
         self.layout = L = Layout(m, self.df, T=T)
@@ -1338,13 +1338,15 @@ class PromptCache:
             s = next((x for x in k3_stops if x > i0), None)
             f = T if s is None else min(T, s - i0)
             seq = ids[:i0 + f] + [ids[i0 + f - 1]] * (T - f)
-            if self.df is not None and getattr(self.df, 'kind', None) == 'mtp':
+            if self.df is not None and getattr(self.df, 'kind', None) in ('mtp', 'dflash35'):
                 # the prompt tail's passes are the T-wide verify passes (T = spec_T); the MTP drafter takes the pass's
-                # h rows (its ring and the block rows i0 + 1 .. i0 + T filled from them)
+                # h rows (its ring and the block rows i0 + 1 .. i0 + T filled from them), the DFlash 35 drafter its
+                # exported features
                 ver = getattr(m, 'ver', None)
-                if ver is None: raise CacheError('promptcache: the MTP drafter but the engine has no verify tape (m.ver)')
+                if ver is None: raise CacheError('promptcache: a host-accept drafter but the engine has no verify tape (m.ver)')
                 ver.run(list(seq[i0:i0 + T]), i0, commit, argmax=False)
-                self.draft.take_h(i0, ver.buf['h'][:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
+                if self.df.kind == 'dflash35': self.draft.take_pass(i0, f, None, ver)
+                else: self.draft.take_h(i0, ver.buf['h'][:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
             else:
                 m.verify_tokens(seq, i0, commit)
                 if self.draft is not None:

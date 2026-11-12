@@ -262,8 +262,11 @@ class Q35OwnPrefill(PrefillDriver):
 
     def check_drafter(self, draft):
         self._draft = draft
-        if draft is not None and getattr(draft, 'kind', None) != 'mtp':
-            raise PrefillRefused('Q35OwnPrefill: only the MTP drafter (kind mtp), or none')
+        k = getattr(draft, 'kind', None) if draft is not None else None
+        if draft is not None and k not in ('mtp', 'dflash35'):
+            raise PrefillRefused('Q35OwnPrefill: only the MTP drafter (kind mtp), the DFlash 35 drafter (kind dflash35), or none')
+        if k == 'dflash35' and [int(l) for l in draft.d.layers_tgt] != self.feature_layers:
+            raise PrefillRefused(f'Q35OwnPrefill: the drafter reads layers {draft.d.layers_tgt}, this prefill exports {self.feature_layers}')
 
     def inject(self, draft, p0, p1, g0=None):
         """the MTP block's rows were filled per chunk from the exported h (_run_chunk); nothing to inject at a segment end"""
@@ -356,6 +359,9 @@ class Q35OwnPrefill(PrefillDriver):
 
     def _run_chunk(self, toks, k, j, a, b, segs, bounds):
         self._chunk(toks, a, b)
+        dr = self._draft
+        if dr is not None and getattr(dr, 'kind', None) == 'dflash35':
+            dr.inject_chunk(self.features, a, b - a)   # (the chunk's feature rows into the drafter's ring, positions a .. b - 1)
         if self.export_h:
             dr = self._draft
             if dr is not None and getattr(dr, 'kind', None) == 'mtp':

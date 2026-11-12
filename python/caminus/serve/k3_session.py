@@ -243,8 +243,13 @@ class SessionDrafter:
         return self.s._drafts(toks, k)
 
 
+# the host-accept drafters: their draft passes are the engine's T-wide verify passes (m.ver), the host compares the greedy
+# rows with the drafts (decode/mtp35.py: the MTP block, fed the passes' h; decode/dflash35.py: DFlash 2, fed their features)
+HOST_VERIFY = ('mtp', 'dflash35')
+
+
 class K3Session(EngineSession):
-    _dk = None      # the drafter kind ('dflash' | 'mtp' | None); the test rigs build the session with __new__
+    _dk = None      # the drafter kind ('dflash' | 'mtp' | 'dflash35' | None); the test rigs build the session with __new__
     _ver = None     # the verify tape of an MTP session (m.ver)
 
     def __init__(self, m, pf, dr, pc, stats=None, eos_ids=(248046, 248044), policy=None, max_recoveries=2, idle_s=IDLE_PARK_S,
@@ -253,20 +258,20 @@ class K3Session(EngineSession):
         self.df = getattr(dr, 'df', None)
         if pc.draft is not dr: raise ValueError('K3Session: the prompt cache must own the same drafter')
         self._dk = getattr(dr, 'kind', None) if dr is not None else None
-        if dr is not None and not getattr(dr, 'device_accept', False) and self._dk != 'mtp':
+        if dr is not None and not getattr(dr, 'device_accept', False) and self._dk not in HOST_VERIFY:
             raise ValueError('K3Session: the drafter must be DFlashK3Drafter(df) with device_accept (the default), '
-                             f'or an MTP drafter (kind mtp); got {type(dr).__name__}')
+                             f'or a host-accept drafter (kind {HOST_VERIFY}); got {type(dr).__name__}')
         self._ver = None
-        if self._dk == 'mtp':
-            # an MTP session's draft passes are the T = 4 verify passes on the decode engine's states (bitwise its
+        if self._dk in HOST_VERIFY:
+            # an MTP / DFlash 35 session's draft passes are the T = 4 verify passes on the decode engine's states (bitwise its
             # decode steps, engine/q35_dense_verify.py); plain passes run the engine's own T = 1 tape
             self._ver = getattr(m, 'ver', None)
             if self._ver is None or int(getattr(m, 'spec_T', 1)) < 4:
-                raise ValueError('K3Session: kind mtp needs the engine built with spec_T 4 and its verify tape (m.ver)')
+                raise ValueError(f'K3Session: kind {self._dk} needs the engine built with spec_T 4 and its verify tape (m.ver)')
         self.request_params = None   # the worker sets it per request: sampled requests on an MTP session run plain
         if getattr(m, '_pass_police', None) is None:
             m._pass_police = NullPolice()
-        self.T = self.ntok = 4 if self._dk == 'mtp' else int(m.ntok)
+        self.T = self.ntok = 4 if self._dk in HOST_VERIFY else int(m.ntok)
         # a generation of n_new tokens after n prompt tokens needs n + n_new + T - 2 positions (spec.positions_needed): the server
         # keeps prompt + max_new <= max_ctx, so the session's limit is the engine's less T - 2 (never above the engine's rows: a
         # T = 1 engine, the one-card Qwen35One, keeps its max_ctx; arch.usable_ctx, which the loading server reports too)
@@ -569,7 +574,7 @@ class K3Session(EngineSession):
             return []
         pos = len(toks) - 1
         self._mode = self.policy.decide(self._cls(), pos)
-        if self._dk == 'mtp':
+        if self._dk in HOST_VERIFY:
             prm = self.request_params
             if prm is not None and not (prm.greedy and not prm.penalties_on):
                 self._mode = 'plain'       # (a sampled request runs the T = 1 tape: no draft round)
@@ -577,8 +582,8 @@ class K3Session(EngineSession):
             self._kind = 'plain'
             self.drafts_real = False
             return [int(toks[-1])] * k
-        if self._dk == 'mtp':
-            self._kind = 'mtp'
+        if self._dk in HOST_VERIFY:
+            self._kind = 'mtp'          # (a host-accept round: the verify pass on m.ver)
             self._dev = None
             while True:
                 try:
@@ -617,7 +622,10 @@ class K3Session(EngineSession):
     def _take_h(self, i0, n, toks):
         """the trunk's h rows of the pass just run into the MTP drafter (its ring, and the block rows i0 + 1 .. i0 + n
         filled from them): the verify tape's buf['h'] for a T-wide pass, the decode tape's buf['h'] for a T = 1 one"""
-        if self._dk != 'mtp' or self.dr is None: return
+        if self._dk not in HOST_VERIFY or self.dr is None: return
+        if self._dk == 'dflash35':   # (the verify pass's exported features; a one-token pass injected m.features already)
+            if self._ver is not None and n == self.T: self.dr.take_pass(i0, n, toks, self._ver)
+            return
         h = self._ver.buf['h'] if (self._ver is not None and n == self.T) else self.m.buf['h']
         self.dr.take_h(i0, h[:n * self.m.D], toks)
 
@@ -638,7 +646,7 @@ class K3Session(EngineSession):
             self._arm()
             try:
                 if self.df is not None: self.df.flush()
-                if self._dk == 'mtp':
+                if self._dk in HOST_VERIFY:
                     self._ver.run(list(seq[i0:i0 + self.T]), i0, int(self.st['commit']), argmax=False)
                     self._take_h(i0, self.T, [int(x) for x in seq[i0 + 1:i0 + self.T]] + [int(seq[i0 + self.T - 1])])
                 else:
@@ -678,7 +686,7 @@ class K3Session(EngineSession):
         kind = self._kind
         self._kind = None
         greedy_plain = prm.greedy and not prm.penalties_on
-        if self._dk == 'mtp' and not greedy_plain and k > 0:
+        if self._dk in HOST_VERIFY and not greedy_plain and k > 0:
             drafts, k = [], 0          # (a sampled pass on an MTP session runs the T = 1 tape, no drafts)
             if kind == 'mtp': kind = 'plain'
         t0 = clock()
@@ -706,7 +714,7 @@ class K3Session(EngineSession):
                 elif greedy_plain:
                     self._arm()
                     if self.df is not None: self.df.flush()
-                    if self._dk == 'mtp' and kind == 'mtp':
+                    if self._dk in HOST_VERIFY and kind == 'mtp':
                         # the T = 4 verify pass on the engine's states (any feed width: the pass runs the whole
                         # padded seq, and the accepted row is F - 1 + j); its h rows go to the drafter with the
                         # pass's tokens (the last row's bonus as the last token: a rejected one is rewritten by
