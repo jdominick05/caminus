@@ -15,12 +15,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'python'))
 import numpy as np
 import torch
+from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.tp_slots import Slots, _hip
 from caminus.engine.q3moe_one import card_per_wgp
 
 
+def need_mib(n, D):
+    """per card, MiB one build() allocates: the partial, the n result rows, the stage block, the n receive slots (16 header
+    words + D floats each, uncached) and an upper bound of the engine's tape and sync blocks (1 MiB)"""
+    n = max(n, 1)
+    return (4 * D + 4 * n * D + 4 * 32 + n * (16 + D) * 4) / 2 ** 20 + 1.0
+
+
 def build(devs, n, D, module, local_only):
+    mib = need_mib(n, D)
+    capacity.check(list(devs), [mib, mib], f'q35_tp_xchg tapes of {n} exchanges of {D} floats ({mib:.1f} MiB per card)')
     out = []
     for c in (0, 1):
         with torch.cuda.device(devs[c]):

@@ -63,8 +63,14 @@ def state_bytes():
     return out
 
 
-snap_mib = [3 * sum(t.numel() * t.element_size() for t in state_bytes()[:len(state_bytes()) // 2]) / 2 ** 20 + 2] * 2
-capacity.check(list(eng.devs), snap_mib, f'test_q35_prefill_tp: its state snapshots ({snap_mib[0]:.0f} MiB per card)')
+def snap_bytes(c):
+    """card c's bytes of one state_bytes() snapshot, from the tensors' shapes (nothing allocated)"""
+    NVSS = gdn_L[0][c]['NV'] * eng.S * eng.S
+    return (len(attn_L) * P * 2 * nkvc * eng.hd * 2 + sum(dd[c]['conv_st'].numel() * 4 for dd in gdn_L) + len(gdn_L) * NVSS * 4)
+
+
+snap_mib = [3 * snap_bytes(c) / 2 ** 20 + 2 for c in (0, 1)]   # (three snapshots are held at once: rows1, rows16, rowsst)
+capacity.check(list(eng.devs), snap_mib, f'test_q35_prefill_tp: its state snapshots ({snap_mib[0]:.0f} / {snap_mib[1]:.0f} MiB)')
 rep_bad = []
 
 
