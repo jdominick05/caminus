@@ -27,9 +27,12 @@ compacts the conversation before it runs out of room.
 side slot, so your conversation's next turn picks up where it was instead of being read again. Two things to know:
 
 - It waits for the current answer to finish: the server answers one request at a time.
-- In a short conversation it's quick: only the question is new. In a long one Qwen Code sends just the opening and its
-  last 40 messages, so those are read fresh and the answer can take a while (minutes on the dense 27B models at tens of
-  thousands of tokens). The conversation itself is still untouched.
+- In a short conversation it's quick: only the question is new.
+- In a long one Qwen Code sends just the opening and its last 40 messages. When those match the end of the conversation
+  the server holds, token for token, Caminus answers from the whole stored conversation instead: only the question is
+  read, and the model also sees the older turns. That's the case on Swift 1.5 and ThinkingCap. On Qwen3-30B-A3B its
+  template writes past replies differently from how they were generated, so they never match: the 40 messages are read
+  fresh, which takes longer. The conversation itself is untouched either way.
 
 A side question's answer is capped at 16,384 tokens. One whose prompt and answer won't fit the side slot (98,304
 positions) runs in the main slot as before.

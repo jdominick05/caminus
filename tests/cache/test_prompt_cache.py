@@ -985,9 +985,25 @@ def cpu_side_question(mk, base):
     # (the main line holds every token but the last one emitted: it is fed by the next pass, so the history ends one past it)
     ok_t &= (r9['route']['reason'] == 'side_question' and r9t.get('whole') and r9t.get('trim') == 1 and r9t.get('gap') == 0
              and r9t.get('matched') == len(t9) - 400 - 1 and r9t.get('main_n') == len(t9) - 1 and c9.stats['side_question_whole'] == 1)
+    # side_question_ids: a long chat's side question (the opening, then only its last turns) asked against the stored line
+    qt = base[:400] + t9[-300:] + Q
+    rw = c9.side_question_ids(qt, dict(root=400, user=700), 16)
+    none_cases = (c9.side_question_ids(base[:400] + other[100:400] + Q, dict(root=400, user=700), 16),   # (not in the line)
+                  c9.side_question_ids(q9, dict(root=400, user=len(t9)), 16),                           # (nothing older)
+                  c9.side_question_ids(qt, dict(root=400, user=700), 5000),                             # (does not fit)
+                  c9.side_question_ids(qt, None, 16))
+    rwq = c9.prepare(rw['ids'], rw['marks'], side='auto', max_new=16, hint='side') if rw else None
+    ok_t &= (rw is not None and rw['ids'] == t9 + Q and rw['marks'] == dict(root=400, user=len(t9)) and rw['sent'] == len(qt)
+             and all(x is None for x in none_cases) and rwq['side'] and rwq['source'] == 'vram' and rwq['cached'] >= 1000
+             and rwq['processed'] <= 64 and c9.stats['side_question_rewritten'] == 1)
+    nx9 = c9.prepare(t9 + other[2700:2710], side='auto', max_new=16)
+    ok_t &= nx9['source'] == 'live' and nx9['route']['reason'] == 'match'
     check(ok_t, f'tail_match: a history ending the stored line {t_whole}; one token past it (trim 1); a changed token inside '
                 f'(matched {t_mid["matched"]} back from the end); not there ({t_none["matched"]}); an older stretch (gap {t_old["gap"]}); '
-                f'no marks: None; a real side question through prepare: {r9t}')
+                f'no marks: None; a real side question through prepare: {r9t}; a long chat\'s side question ({len(qt)} tokens sent) '
+                f'asked against the stored conversation ({rw and len(rw["ids"])} tokens: {rwq and rwq["source"]} {rwq and rwq["cached"]} '
+                f'cached, {rwq and rwq["processed"]} read), none when not in the line / nothing older / no fit / no marks; the next '
+                f'main turn {nx9["source"]}')
     c.close(); c5.close(); c9.close()
 
 

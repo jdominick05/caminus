@@ -1164,6 +1164,26 @@ class PromptCache:
         else: out.update(route='side', reason='unrelated')
         return out
 
+    def side_question_ids(self, ids, marks, max_new):
+        """a side question asked against the stored conversation: when the history the harness sent (ids[root:user], its
+        recent turns only: Qwen Code's /btw sends the last 40) exactly ends the main line (tail_match: whole), the same request
+        with the whole stored conversation in place of that history, dict(ids, marks, tail, sent): the main line up to the
+        history's end, then ids from there (the question and the generation prompt). The side call then starts from the
+        deepest main checkpoint and reads only what is new, instead of reading the history again at other positions; the
+        model sees the conversation's older turns too. None (ask as sent) when the history does not end the main line
+        token for token (another conversation, or a turn the asker had not seen), when the stored line adds nothing older,
+        or when the result with max_new does not fit the side slot"""
+        self.fence()
+        mk = marks or {}
+        log = self._main_line()[0]
+        t = tail_match(log, ids, mk.get('root'), mk.get('user'))
+        if not t or not t['whole'] or not self.side_rows: return None
+        at, cut = int(t['at']), int(mk['user']) - int(t['trim'])
+        new = list(log[:at]) + [int(x) for x in ids[cut:]]
+        if len(new) <= len(ids) or len(new) + int(max_new) + self.T > self.side_rows: return None
+        self.stats['side_question_rewritten'] += 1
+        return dict(ids=new, marks=dict(root=mk['root'], user=at + int(t['trim'])), tail=t, sent=len(ids))
+
     def _root_after(self, old_root, old_log, ids, marks):
         """the main line's root mark after a main request: its own marks' root, else the previous one when the request keeps it
         (shares the old line up to it), else None (route() then falls back to the line's 'root' checkpoints)"""

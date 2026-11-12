@@ -217,6 +217,22 @@ def main():
         for fn in sorted(glob.glob(os.path.join(fl, '*.jsonl'))):
             with open(fn, encoding='utf-8') as f: rows += [json.loads(x) for x in f if x.strip()]
         fq = [r_.get('cache', {}).get('side_question') for r_ in rows if (r_.get('cache') or {}).get('side_question')]
+        # a long chat's side question as Qwen Code sends one (the opening, then only the last turns): asked against the stored
+        # conversation when its history ends it (tail whole above), else as sent
+        conv3 = conv + [{'role': 'user', 'content': 'And one in Faro?'}, {'role': 'assistant', 'content': n3['content']}]
+        cut = [conv[0]] + conv3[-2:] + [{'role': 'user', 'content': BTW}]
+        rc, qc = chat(port, f'{alias}-nothink', cut, temperature=0, max_tokens=64)
+        tc = qc.get('timings') or {}
+        time.sleep(0.5)
+        rows = []
+        for fn in sorted(glob.glob(os.path.join(fl, '*.jsonl'))):
+            with open(fn, encoding='utf-8') as f: rows += [json.loads(x) for x in f if x.strip()]
+        sent = [(r_.get('cache') or {}).get('side_question_sent') for r_ in rows if (r_.get('cache') or {}).get('side_question_sent')]
+        want = bool(tl.get('whole'))
+        check(rc['status'] == 200 and qc['content'].strip() and (len(sent) == 1) == want,
+              f'a long chat\'s side question (history: the last turn only): {"asked against the stored conversation" if sent else "asked as sent"} '
+              f'(expected {"stored" if want else "as sent"}: tail whole {want}; {sent[0] if sent else "-"} tokens sent), prompt '
+              f'{tc.get("prompt_n")} new of {tc.get("cache_n")} cached, answer {qc["content"][:60]!r}')
         convt = [{'role': 'system', 'content': S.guidelines(12, 60000, 'Assistant rules') + f' ({marker})'},
                  {'role': 'user', 'content': 'Name one river in Spain.'}]
         _, k1 = chat(port, alias, convt, temperature=0, max_tokens=400)

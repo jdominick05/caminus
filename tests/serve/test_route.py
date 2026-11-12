@@ -141,6 +141,39 @@ class TestSideQuestion(unittest.TestCase):
         self.assertEqual(sess.prefills[2], (SIDE_QUESTION_MAX_NEW, 'side'))   # (the Anthropic API too)
 
 
+class _RewriteSession(_HintSession):
+    """_HintSession whose side_question asks a side question against a 'stored conversation' of 300 more tokens"""
+    def side_question(self, ids, marks, max_new):
+        self.asked = getattr(self, 'asked', []) + [(len(ids), dict(marks or {}))]
+        return dict(ids=[248044] + list(range(5000, 5300)) + list(ids)[1:], marks=dict(root=1, user=(marks or {}).get('user', 1) + 300),
+                    tail={}, sent=len(ids))
+
+
+class TestSideQuestionStored(unittest.TestCase):
+    """a session with side_question: the worker asks a side question against the stored conversation before planning, so plan,
+    prefill and the reported prompt tokens all see the request that runs; plain requests never ask"""
+    def test_rewrite_reaches_plan_prefill_and_usage(self):
+        eng = U.ScriptedEngine(ntok=4)
+        sess = _RewriteSession(eng, max_ctx=65536, eos_ids=(248046, 248044))
+        sess.wants_marks = True
+        srv = _server(sess)
+        try:
+            hist = [{'role': 'user', 'content': 'Rename foo to bar.'}, {'role': 'assistant', 'content': 'Done.'}]
+            st, _, j = U.post_json(srv, '/v1/chat/completions', {'messages': hist + [{'role': 'user', 'content': TestSideQuestion.BTW}],
+                                                              'max_tokens': 64, 'temperature': 0})
+            self.assertEqual(st, 200)
+            st2, _, _ = U.post_json(srv, '/v1/chat/completions', {'messages': hist + [{'role': 'user', 'content': 'Thanks.'}],
+                                                               'max_tokens': 64, 'temperature': 0})
+            self.assertEqual(st2, 200)
+        finally:
+            srv.stop()
+        self.assertEqual(len(sess.asked), 1)                              # (only the side question asks)
+        n_sent = sess.asked[0][0]
+        self.assertIsNotNone(sess.asked[0][1].get('user'))               # (the template marks reach it)
+        self.assertEqual(j['usage']['prompt_tokens'], n_sent + 300)      # (the request that ran, 300 tokens longer)
+        self.assertEqual(sess.plans[0][1], 'side')
+
+
 class TestRouteMetrics(unittest.TestCase):
     def test_counters_status_and_flight_slot(self):
         import tempfile

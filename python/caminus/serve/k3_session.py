@@ -434,6 +434,10 @@ class K3Session(EngineSession):
     def _route_arg(self):
         return 'auto' if self.side_route else False
 
+    def side_question(self, ids, marks, max_new):
+        """PromptCache.side_question_ids: the side question asked against the stored conversation, or None (as sent)"""
+        return self.pc.side_question_ids([int(t) for t in ids], marks, int(max_new))
+
     def plan(self, ids, max_new=None, hint=None):
         ids = [int(t) for t in ids]
         n = int(self.pc.plan(ids, side=self._route_arg(), max_new=max_new, hint=hint)['cached'])
