@@ -73,12 +73,14 @@ def bench_graph(fn):
     return float(np.median(ts))
 
 
+CMP_ROWS = 256   # rows per block of the FlyDSL-vs-torch output comparison
 tot = {}
 for M in MS:
     for b, nm, cnt in NAMES:
         t = F.T[f'blk.{b}.{nm}.weight']; K = int(t.shape[0]); R, _ = t.rows()
         dense = R * K * 2 + M * R * 2 if set(ARMS) & {'torch', 'flydsl'} else 0          # (fp16 weights; torch's fp16 output)
-        fly = M * R * 4 + M * K + R * K + M * R * 4 if 'flydsl' in ARMS else 0           # (fp32 output; int8 operands, int32 output)
+        fly = (M * R * 4 + M * K + R * K + M * R * 4 + 3 * min(M, CMP_ROWS) * R * 4) if 'flydsl' in ARMS else 0   # (fp32 output; int8
+        # operands, int32 output; the output comparison's row-block temporaries)
         need = (t.n_bytes + M * K * 2 + M * R * 4 + dense + fly) / 2 ** 20 + 64
         capacity.check([0], [need], f'q35_prefill_gemm {nm} M {M} ({need:.0f} MiB)')
         W = Dense35Own._w(fake, f'blk.{b}.{nm}.weight')
@@ -100,7 +102,11 @@ for M in MS:
                 res['fly_f16'] = bench_graph(lambda: fly_f16(yf, x16, Wd, in_dtype='f16', out_dtype='f32'))
                 if 'torch' in res:   # (the output too: FlyDSL's fp16 GEMM against torch's on the same operands)
                     torch.matmul(x16, Wd.t(), out=yh); fly_f16(yf, x16, Wd, in_dtype='f16', out_dtype='f32'); torch.cuda.synchronize(dev)
-                    row += f' [fly_f16 vs torch: max rel {float((yf - yh.float()).abs().max() / yh.float().abs().max()):.1e}]'
+                    dmax = amax = 0.0
+                    for r0 in range(0, M, CMP_ROWS):   # (in row blocks: the comparison's temporaries stay CMP_ROWS x R x 4 B x 3)
+                        a_ = yh[r0:r0 + CMP_ROWS].float(); dmax = max(dmax, float((yf[r0:r0 + CMP_ROWS] - a_).abs().max())); amax = max(amax, float(a_.abs().max()))
+                        del a_
+                    row += f' [fly_f16 vs torch: max rel {dmax / amax:.1e}]'
                 a8 = torch.randint(-127, 128, (M, K), device=dev, dtype=torch.int8); w8 = torch.randint(-127, 128, (R, K), device=dev, dtype=torch.int8)
                 yi = torch.empty(M, R, device=dev, dtype=torch.int32)
                 res['fly_i8'] = bench_graph(lambda: fly_i8(yi, a8, w8))
