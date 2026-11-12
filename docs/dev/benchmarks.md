@@ -121,10 +121,16 @@ interleaved rounds; `tools/guard.sh LOG 1800 python -I benchmarks/q35_verify.py 
 
 | card | depth | decode step | T = 2 | T = 3 | T = 4 |
 |---|---|---|---|---|---|
-| RX 7900 XTX | 512 | 24.5 ms | 29.7 (1.21x) | 38.4 (1.57x) | 47.2 (1.92x) |
-| RX 7900 XTX | 4,096 | 31.7 ms | 36.4 (1.15x) | 44.0 (1.39x) | 53.9 (1.70x) |
-| RX 7900 XT | 512 | 28.6 ms | 34.2 (1.20x) | 45.0 (1.57x) | 56.7 (1.98x) |
-| RX 7900 XT | 4,096 | 36.3 ms | 42.0 (1.16x) | 53.6 (1.48x) | 65.1 (1.79x) |
+| RX 7900 XTX | 512 | 24.4 ms | 27.7 (1.14x) | 31.6 (1.30x) | 35.3 (1.45x) |
+| RX 7900 XTX | 4,096 | 30.9 ms | 34.3 (1.11x) | 38.1 (1.23x) | 42.2 (1.37x) |
+| RX 7900 XT | 512 | 28.6 ms | 31.7 (1.11x) | 36.2 (1.27x) | 40.8 (1.43x) |
+| RX 7900 XT | 4,096 | 36.1 ms | 39.5 (1.09x) | 44.3 (1.23x) | 49.1 (1.36x) |
+
+The T-token tiles unpack each weight word once per pass and run every token's sums on it (the same bits). Before
+(the tiles unpacking again per token, the rows tiles running whole per token), T = 4 cost 1.92x / 1.70x (XTX) and
+1.98x / 1.79x (XT). Where a T = 4 pass's time went, by op on the critical path (`K3_TRACE`, XTX, depth 512): the Q4_K
+matvecs 2x a decode step's time for the same rows, the Q8_0 / Q5_K rows tiles 2.3 .. 3.1x; after, the rows tiles
+~1.0x and the Q4_K matvecs ~1.5x, the gate and up still two segments.
 
 - A pass of T tokens pays for itself when the drafter's tokens are accepted often enough to average more than that ratio
   in output tokens per pass (plus the drafter's own time).

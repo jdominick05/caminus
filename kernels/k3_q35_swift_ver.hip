@@ -4,4 +4,5 @@
 // the pass's tokens already). A module of its own: k3_q35_swift's code object is unchanged. Each token's sums are the
 // decode's statements, so a pass of T tokens gives T decode steps' bits.
 #define K3_Q3M_VER
+#define K3_Q35_VER   // (its own T-token tiles: kernels/own_quant_mt.h's mt2 forms and the rows tiles' T forms)
 #include "k3_q35_swift.hip"

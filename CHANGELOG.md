@@ -21,7 +21,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
 - **Groundwork for drafting on Swift 1.5.** The engine can now check up to 4 drafted tokens in one pass, with the same
-  output bit for bit as decoding them one at a time; a pass of 4 costs 1.7 to 2.0 decode steps. No drafter
+  output bit for bit as decoding them one at a time; a pass of 4 costs 1.36 to 1.45 decode steps. No drafter
   is wired in yet, so serving is unchanged. See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
