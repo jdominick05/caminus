@@ -31,7 +31,7 @@ grids = [int(w) for w in A.per_wgp.split(',') if w]
 WALK = (A.rounds + 1) * 2 * (1 + sum(range(1, MAX_T + 1)) + MAX_T * len(grids))   # (the walk's positions past D)
 if len(ids) < max(depths) + WALK + MAX_T + 1: raise SystemExit(f'the docs are {len(ids)} tokens: lower --depths or --rounds')
 eng = Dense35Own(A.gguf, max_ctx=max(depths) + WALK + MAX_T + 8, spec_T=MAX_T,
-                 vram_extra_mib=(MAX_T + len(grids)) * Dense35Verify.need_mib(MAX_T) + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
+                 vram_extra_mib=(MAX_T + len(grids)) * Dense35Verify.need_mib(MAX_T, max_ctx=max(depths) + WALK + MAX_T + 8) + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
 print(torch.cuda.get_device_name(0), eng.module, f'{eng.per_wgp} workgroups per WGP', flush=True)
 pf = Q35OwnPrefill(eng, chunk=CH)
 arms = {f'T={T}': Dense35Verify(eng, T) for T in range(1, MAX_T + 1)}

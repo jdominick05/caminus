@@ -82,7 +82,10 @@ working engine; a wrong reading of a block would not land there. The reference i
 the matvec tiles of the Qwen3-30B-A3B line for Q4_K and Q6_K, a plain rows tile for Q8_0 and Q5_K (9 % of the bytes),
 the embedding row, the add-and-norm for a 5,120-wide residual, and the K3 engine's own Gated DeltaNet and
 gated-attention ops with fp16 outputs. `engine/q35_dense.py` (`Dense35Own`) builds the tape: one token per pass, an f16
-KV cache, the multi-token-prediction block left unread. A feed-forward whose gate and up matrices share Q4_K or Q6_K
+KV cache, the multi-token-prediction block left unread. Decode attention is the split pair of `kernels/k3_attn_split.h`
+(flash decoding, the AREX-2 module's settings: 32-cell splits, one read of a split's K / V rows for its kv head's 6 query
+heads); until that change it ran one workgroup per query head over every position, 26-31x the bandwidth floor at every
+depth (docs/dev/yardsticks.md). A feed-forward whose gate and up matrices share Q4_K or Q6_K
 runs them as one segment (47 of 64 blocks); the others run two matvecs and a SwiGLU segment.
 
 | Check | Result |

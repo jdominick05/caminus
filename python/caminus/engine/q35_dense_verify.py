@@ -11,7 +11,7 @@ The recurrent state is committed lazily, as in decode: a pass stores the state f
 their inputs; the next pass (verify or decode) first replays the `commit` tokens of the previous pass that were
 accepted. So the caller passes, with every pass, how many tokens of the previous pass to keep:
 
-    eng = Dense35Own(path, max_ctx=..., spec_T=4, vram_extra_mib=Dense35Verify.need_mib(4))
+    eng = Dense35Own(path, max_ctx=C, spec_T=4, vram_extra_mib=Dense35Verify.need_mib(4, max_ctx=C))
     ver = Dense35Verify(eng, 4)
     top = ver.run(tokens4, pos0, commit)     # the greedy token after each of the 4 (argmax on the card)
     # accept a of them (1 .. 4): the next pass, at pos0 + a, commits a
@@ -28,6 +28,7 @@ import numpy as np
 import torch
 
 from . import k3
+from .q35_dense import attn_part_elems
 from ..device import capacity
 
 MAX_T = 4                        # own_quant_mt.h's OWN_MT
@@ -46,13 +47,17 @@ class Dense35Verify:
         sp = {k: (T * v, f32) for k, v in n.items()}
         sp.update({k: (T * v, f16) for k, v in dict(h16=D, a16=ffn, fin16=VD, gat16=QH).items()})
         sp['stage'] = (32, i32)
+        sp['part'] = (attn_part_elems(T, nh, eng.max_ctx + eng.spec_T - 1), f32)   # (the split attention pair's records)
         return sp
 
     @staticmethod
-    def need_mib(T, eng=None):
+    def need_mib(T, eng=None, max_ctx=None):
         """MiB of device memory one verify tape adds (with eng: from its dimensions; without: an upper bound for the 27B
-        shapes at T <= 4, to pass as the decode engine's vram_extra_mib before it exists)"""
-        if eng is None: return 10.0 * T + 4.0
+        shapes at T <= 4, to pass as the decode engine's vram_extra_mib before it exists, max_ctx the engine's: the split
+        attention records grow with it, 24 query heads at most)"""
+        if eng is None:
+            if max_ctx is None: raise ValueError('Dense35Verify.need_mib: max_ctx (the records of the split attention pair) without eng')
+            return 10.0 * T + 4.0 + 4 * attn_part_elems(T, 24, int(max_ctx) + MAX_T - 1) / 2 ** 20
         sz = {torch.float32: 4, torch.float16: 2, torch.int32: 4}
         return sum(n * sz[dt] for n, dt in Dense35Verify._spec(eng, T).values()) / 2 ** 20 + 2.0   # (+ the tape and its sync words)
 
@@ -85,6 +90,9 @@ class Dense35Verify:
         E.params = self.dstage[0:16]
         E.guard_T = eng.spec_T   # (the device bound on the commit, as the decode tape's: the host bounds it by the last pass)
         self.seg_names = {}
+        # the attention segments' arguments: the split pair's records over the cache's rows (the verify modules are split
+        # modules, k3.Q35_SPLIT_MODULES; T rows, one buffer for every block), else the one-head op's batched loads
+        akw = (dict(max_cells=eng.max_ctx + eng.spec_T - 1, part=s['part']) if E.split_attn() else dict(batched=True))
 
         def named(si, name):
             self.seg_names[si] = name; return si
@@ -121,7 +129,7 @@ class Dense35Verify:
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nh, hd, d['qn'], self.pos, s['qo'], eng.nrot, eng.theta_scale, eng.eps, dep=q_)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
-                                       batched=True), qd)
+                                       **akw), qd)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], eng.eps, d=s['blk'], slots=1, dep=o_, tokens=T)

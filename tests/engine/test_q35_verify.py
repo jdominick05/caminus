@@ -36,7 +36,7 @@ print(torch.cuda.get_device_name(0), flush=True)
 max_ctx = max(depths) + G + 8
 CH = 64
 GRIDS = (3, 6, 7)
-extra = sum(Dense35Verify.need_mib(T) for T in range(1, MAX_T + 1)) + len(GRIDS) * Dense35Verify.need_mib(MAX_T)
+extra = sum(Dense35Verify.need_mib(T, max_ctx=max_ctx) for T in range(1, MAX_T + 1)) + len(GRIDS) * Dense35Verify.need_mib(MAX_T, max_ctx=max_ctx)
 eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=extra + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
 pf = Q35OwnPrefill(eng, chunk=CH, crossover=0)
 vers = {T: Dense35Verify(eng, T) for T in range(1, MAX_T + 1)}

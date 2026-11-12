@@ -53,6 +53,11 @@ CLAUDE.md imports this file.
   `k3_q35_swift.hip` is the dense qwen35 line's decode module on own code (`k3.Q35S_OPS`, `engine/q35_dense.py`; not
   yet served): its header `k3_q35_ops.h` takes `k3_q3m_ops.h`'s ops under `K3_OPS_NO_DISPATCH` and dispatches its own
   tape's, so an edit there must leave the qwen3moe modules' machine code unchanged (compare the `.text` sections).
+  Their decode attention is the split pair of `kernels/k3_attn_split.h` (`K3_Q35_ATTN_SPLIT`, defined by the Swift and
+  ThinkingCap module files, not by the MTP drafter's; `k3.Q35_SPLIT_MODULES`): the header's `K3_Q35_ATTN_SPLIT` branch
+  swaps only the ggml-typed lines (LDS scratch, q8_0 block size, half conversions), so the GGUF modules' code stays
+  unchanged and the pair is bitwise `k3_gguf_q35d`'s on the same cache (`tests/engine/test_q35_split_attn.py`); the
+  records (`q35_dense.attn_part_elems`) are counted in every projection.
   `k3_q35_tcap.hip` is the same line's module for ThinkingCap's formats (`k3.Q35T_MODULES`): `k3_q35t_ops.h` takes
   `k3_q35_ops.h`'s ops under `K3_Q35_NO_DISPATCH` and adds the IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K
   one-round-trip matvec, the IQ2_S embedding and a launch hook staging the IQ grids; an edit there must leave

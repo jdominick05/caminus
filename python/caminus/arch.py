@@ -507,7 +507,7 @@ class Dense35(OneCard):
         pf = q35own.buffer_need_mib(sh, self.PREFILL_CHUNK, export_h=il is not None) + PREFILL_MODULES_MIB
         def extra(c):
             if il is None: return 0.0
-            return (Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, c, k=self.MTP_K)   # (the verify tape + the drafter at this context)
+            return (Dense35Verify.need_mib(self.MTP_T, max_ctx=c) + Mtp35.projection_mib(path, c, k=self.MTP_K)   # (the verify tape + the drafter at this context)
                     + Mtp35Drafter.ring_mib(sh.D))                                # (the serve adapter's h ring + gather workspace)
         need = lambda c: [Dense35Own.projection_mib(path, c, spec_T) + pf + extra(c) + (slots + 2) * slot]   # (the side rows: host memory)
         return n_ctx, [0], slot, need
@@ -524,7 +524,7 @@ class Dense35(OneCard):
         sh = q35own.shapes_of(path)
         extra = q35own.buffer_need_mib(sh, self.PREFILL_CHUNK, export_h=il is not None) + PREFILL_MODULES_MIB
         if il is not None:
-            extra += (Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, int(opt['max_ctx']), k=self.MTP_K)
+            extra += (Dense35Verify.need_mib(self.MTP_T, max_ctx=int(opt['max_ctx'])) + Mtp35.projection_mib(path, int(opt['max_ctx']), k=self.MTP_K)
                       + Mtp35Drafter.ring_mib(sh.D))
         m = Dense35Own(path, device=0, max_ctx=int(opt['max_ctx']), vram_extra_mib=extra, spec_T=spec_T)
         if il is not None:
@@ -534,7 +534,7 @@ class Dense35(OneCard):
         dr = Mtp35Drafter(m.mtp35) if il is not None else None
         if dr is not None:
             log(f'caminus serve: MTP drafter blk.{il} (k {self.MTP_K}, verify T {self.MTP_T}, spec_T {spec_T}): '
-                f'+{Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, int(opt["max_ctx"]), k=self.MTP_K) + Mtp35Drafter.ring_mib(sh.D):.0f} MiB '
+                f'+{Dense35Verify.need_mib(self.MTP_T, max_ctx=int(opt["max_ctx"])) + Mtp35.projection_mib(path, int(opt["max_ctx"]), k=self.MTP_K) + Mtp35Drafter.ring_mib(sh.D):.0f} MiB '
                 f'(incl. the adapter\'s h ring {Mtp35Drafter.ring_mib(sh.D):.2f} MiB, checked at its allocation)', flush=True)
         return m, pf, m.mtp35 if dr is not None else None, dr
 
