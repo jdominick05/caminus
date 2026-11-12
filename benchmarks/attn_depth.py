@@ -48,6 +48,7 @@ def timed(E, reps):
 
 
 def empty_launch(mod, T):
+    capacity.check([0], [64], f'attn_depth empty tape on {mod} (the engine\'s sync words, params and tape: under 64 MiB)')
     E = k3.Engine(module=mod, grid=k3.resident_grid(mod, PW), T=T, limit_us=200_000)
     E.nop(1, 0)
     E.build()
