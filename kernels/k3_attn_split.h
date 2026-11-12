@@ -4,7 +4,8 @@
 // ran one workgroup per query head with a serial walk over every cell (2051 cells x 12 layers: ~15 ms per token at
 // depth); here a row's list is cut into splits of ATTN_SS list positions, each split one task for all ATTN_G query heads
 // of its kv head (one read of the split's K / V rows), and a second segment merges the splits in ascending order.
-// Included by kernels/k3_gguf_ops.h when K3_GSQ (not the MTP block's modules, not the drafter's): every code object with
+// Included by kernels/k3_gguf_ops.h when K3_GSQ (not the MTP block's modules, not the drafter's), and by kernels/k3_q35_ops.h
+// for the own dense qwen35 modules (K3_Q35_ATTN_SPLIT: Swift / ThinkingCap, decode, verify, two cards; f16 cache): every code object with
 // these ops runs the same source, so the dense tape (trunk module, identity list) and the QSA tape (QSA module, SEL list or
 // identity) give the same bits for the same list. Contraction is off and every fused multiply-add is written out, so the
 // T = 1 and multi-token modules do the same arithmetic; a row's slices depend only on its own list length (never on the
@@ -37,8 +38,23 @@
 #endif
 #define ATTN_D 256                    // head dim
 #define ATTN_RS 260                   // floats per partial record: m, l, 0, 0, acc[256]
+#ifdef K3_Q35_ATTN_SPLIT   // the own dense qwen35 modules (kernels/k3_q35_ops.h): no ggml header, an f16 cache only
+// (the host refuses q8_0 there), the scratch in its own LDS; every expression below is the GGUF modules' text, so the
+// same cells give the same bits as k3_gguf_q35d's pair (the GGUF modules' code is unchanged by this branch)
+__shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G + ATTN_SS + 1];
+#define ATTN_LDS ((__attribute__((address_space(3))) float *)ATTN_OWN_LDS)   // [ATTN_SS][ATTN_G] scores / p, then cells [ATTN_SS]
+#define ATTN_KV_TYPE(sg) 0
+#define ATTN_Q8_BYTES 34   // (the q8_0 block: half d + 32 int8; unreachable with ATTN_KV_TYPE 0)
+#define ATTN_H2F(p) ((float)*(const _Float16 *)(p))
+#define ATTN_H22F(u) make_float2((float)__builtin_bit_cast(_Float16, (uint16_t)((u) & 0xffffu)), (float)__builtin_bit_cast(_Float16, (uint16_t)((u) >> 16)))
+#else
 #define ATTN_LDS ((__attribute__((address_space(3))) float *)AQ)   // [ATTN_SS][ATTN_G] scores / p, then cells [ATTN_SS]
 static_assert(AQ_ALLOC * (int)sizeof(block_q8_1) >= (ATTN_SS * ATTN_G + ATTN_SS + 1) * 4, "OP_ATTN_PART's scratch lives in AQ's storage");
+#define ATTN_KV_TYPE(sg) (sg).work
+#define ATTN_Q8_BYTES sizeof(block_q8_0)
+#define ATTN_H2F(p) __half2float(*(const half *)(p))
+#define ATTN_H22F(u) __half22float2(__builtin_bit_cast(__half2, (u)))
+#endif
 static_assert(ATTN_G % ATTN_VH == 0 && (ATTN_CPR == 1 || ATTN_CPR == 2) && (ATTN_SS == 32 || ATTN_SS == 64 || ATTN_SS == 128), "OP_ATTN_PART's layout");
 static_assert(ATTN_D == 256, "one thread per dim of V (256 threads)");
 
@@ -111,12 +127,12 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
     }
     {   // scores
         const AttnTask a = attn_task(sg, t);
-        const int tt = a.tt, g = a.g, heads = a.heads, type = sg.work, tid = K3TID, lane = tid % 32, wave = K3WAVE;   // type 1: q8_0, 0: f16
+        const int tt = a.tt, g = a.g, heads = a.heads, type = ATTN_KV_TYPE(sg), tid = K3TID, lane = tid % 32, wave = K3WAVE;   // type 1: q8_0, 0: f16
         const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]);
         const size_t pb = kv_pos_bytes(a.nkv * ATTN_D, type);
         const float * qb = (const float *)sg.a + ((size_t)tt * heads + (size_t)g * ATTN_G) * ATTN_D + 8 * lane;
         // this lane's K bytes in a position's row (+ cell * pb): q8_0 its block and qs offset, f16 its 8 halves
-        const uint8_t * kb = sg.W + (type ? (size_t)(g * 8 + (lane >> 2)) * sizeof(block_q8_0) : (size_t)(g * ATTN_D + 8 * lane) * 2);
+        const uint8_t * kb = sg.W + (type ? (size_t)(g * 8 + (lane >> 2)) * ATTN_Q8_BYTES : (size_t)(g * ATTN_D + 8 * lane) * 2);
         const int ko = 2 + (lane & 3) * 8, ci = ATTN_CPR == 2 ? (lane >> 4) & 1 : 0;
 #if ATTN_SS == 32
 #pragma unroll 1
@@ -131,7 +147,7 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
             for (int i = 0; i < ATTN_CPR; i++) {
                 if (cb + i < nb && type) {
                     const uint8_t * kp = kb + (size_t)cl[cb + i] * pb;
-                    const float d = __half2float(*(const half *)kp);
+                    const float d = ATTN_H2F(kp);
                     const uint16_t * qs = (const uint16_t *)(kp + ko);
 #pragma unroll
                     for (int j = 0; j < 4; j++) {
@@ -143,7 +159,7 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
                     const uint32_t wv[4] = {w.x, w.y, w.z, w.w};
 #pragma unroll
                     for (int j = 0; j < 4; j++) {
-                        const float2 kk = __half22float2(__builtin_bit_cast(__half2, wv[j]));
+                        const float2 kk = ATTN_H22F(wv[j]);
                         kf[i][2 * j] = kk.x; kf[i][2 * j + 1] = kk.y;
                     }
                 } else {
@@ -214,9 +230,9 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
     {   // V: this thread's value of each cell (q8_0: its block and qs byte; f16: its half)
         const AttnTask a = attn_task(sg, t);
         float * rec = attn_rec(sg, a);
-        const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]), tid = K3TID, g = a.g, nkv = a.nkv, NS = a.NS, type = sg.work;
+        const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]), tid = K3TID, g = a.g, nkv = a.nkv, NS = a.NS, type = ATTN_KV_TYPE(sg);
         const size_t pb = kv_pos_bytes(nkv * ATTN_D, type);
-        const uint8_t * vb = sg.W + (type ? (size_t)(nkv * 8 + ((g * ATTN_D + tid) >> 5)) * sizeof(block_q8_0)
+        const uint8_t * vb = sg.W + (type ? (size_t)(nkv * 8 + ((g * ATTN_D + tid) >> 5)) * ATTN_Q8_BYTES
                                           : (size_t)(nkv * ATTN_D + g * ATTN_D + tid) * 2);
         const int vo = 2 + (tid & 31);
 #pragma unroll 1
@@ -227,7 +243,7 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
 #pragma unroll 1
             for (int c = 0; c < nb; c++) {
                 const uint8_t * vp = vb + (size_t)cl[c] * pb;
-                const float v = type ? (float)(int8_t)vp[vo] * __half2float(*(const half *)vp) : __half2float(*(const half *)vp);
+                const float v = type ? (float)(int8_t)vp[vo] * ATTN_H2F(vp) : ATTN_H2F(vp);
 #pragma unroll
                 for (int h = 0; h < ATTN_VH; h++) acc[h] = __builtin_fmaf(sp[c * ATTN_G + h0 + h], v, acc[h]);
             }

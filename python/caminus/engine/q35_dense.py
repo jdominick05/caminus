@@ -70,9 +70,17 @@ def _shapes(F):
                 d_conv=int(hp('ssm.conv_kernel')), d_inner=int(hp('ssm.inner_size')))
 
 
+def attn_part_elems(T, heads, cells):
+    """floats of the split attention pair's records (kernels/k3_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
+    for T pass rows of `heads` query heads over lists of up to `cells` cache rows: one record of k3.ATTN_RS floats per
+    (row, head, ATTN_SS-cell split); one buffer shared by a tape's attention blocks (they run one after another)"""
+    return int(T) * int(heads) * ((int(cells) + k3.ATTN_SS - 1) // k3.ATTN_SS) * k3.ATTN_RS
+
+
 def _projection_bytes(F, max_ctx, spec_T=1):
     """bytes the engine allocates on its card: every trunk tensor (the embedding and the head too), the f16 KV cache of
-    every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Dense35Own's spec_T)"""
+    every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Dense35Own's spec_T), the decode
+    tape's split attention records (attn_part_elems)"""
     c = _shapes(F); nl = c['nl']
     mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     w = sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp))
@@ -81,7 +89,8 @@ def _projection_bytes(F, max_ctx, spec_T=1):
     n_attn = sum(1 for g in block_kinds(F) if not g)
     CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
     gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
-    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) + gdn
+    part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1)
+    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) + gdn + part
 
 
 class Dense35Own:
@@ -180,7 +189,9 @@ class Dense35Own:
     def kv_pos_mib(path):
         """MiB of KV cache per position (every attention block)"""
         F = ggufio.GGUFFile(path)
-        try: return (_projection_bytes(F, 1) - _projection_bytes(F, 0)) / 2 ** 20
+        try:   # (the KV row itself: a projection difference would also count the split records' steps of ATTN_SS rows)
+            c = _shapes(F)
+            return sum(1 for g in block_kinds(F) if not g) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) / 2 ** 20
         finally: F.close()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
@@ -268,6 +279,16 @@ class Dense35Own:
             assert up is None
             return named(E.own_matvec16(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt16, dep=dep), W['name'])
 
+        rows = self.max_ctx + self.spec_T - 1   # (the cache rows: the split pair's longest list)
+
+        def akw():
+            """the attention segments' arguments: the split pair's records (one buffer for every block of the tape) on the
+            split modules, else the one-head op's batched loads"""
+            if not E.split_attn(): return dict(batched=True)
+            if self._attn_part is None: self._attn_part = B(attn_part_elems(1, nh, rows))
+            return dict(max_cells=rows, part=self._attn_part)
+
+        self._attn_part = None
         prev = E.own_emb(self.emb_dev, self.emb.type, self.vocab, D, self.tok, s['x'])
         for il, d in enumerate(self.L):
             self.layer_seg.append((il, len(E.segs)))
@@ -293,7 +314,7 @@ class Dense35Own:
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nh, hd, d['qn'], self.pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
-                                       batched=True), qd)
+                                       **akw()), qd)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], self.eps, d=s['blk'], slots=1, dep=o_)

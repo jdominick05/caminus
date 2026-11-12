@@ -93,7 +93,12 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
+#ifdef K3_Q35_ATTN_SPLIT   // (k3_q35_ops.h's split pair; this module always defines it)
+    if (sg.op == OP_ATTN_PART) { op_attn_part(sg, t); return true; }
+    if (sg.op == OP_ATTN_COMB) { op_attn_comb(sg, t); return true; }
+#else
     if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }
+#endif
     if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
     if (sg.op == OP_OWN_EMB) { q35t_op_emb(sg); return true; }

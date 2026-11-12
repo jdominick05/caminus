@@ -9,8 +9,8 @@
 //   Gated DeltaNet   OP_GDN_CONV / L2 / GATES / STEP / SAVE and OP_GDN_NORM16: the engine's own ops, lifted from
 //                    kernels/k3_gguf_ops.h (which includes ggml-cuda's headers) statement for statement, as
 //                    kernels/k3_q3m_ops.h lifted OP_F32_MV; value head h reads key head h % nk (tiled), the SiLU output gate
-//   attention        OP_QK_NR, OP_KV_APPEND (f16 cache) and OP_ATTN_DEC (k3_own_ops.h's batched form), then
-//                    OP_GATE_MUL16; head dim 256, 6 query heads per kv head, RoPE on the first 64 dims
+//   attention        OP_QK_NR, OP_KV_APPEND (f16 cache) and the split pair OP_ATTN_PART / COMB (k3_attn_split.h; the MTP
+//                    drafter's module: OP_ATTN_DEC, k3_own_ops.h's batched form), then OP_GATE_MUL16; head dim 256, 6 query heads per kv head, RoPE on the first 64 dims
 // The three ops whose output is fp16 here where the GGUF engine's writes fp32 (+ q8_1 codes) carry numbers of their own:
 // a tape built with the other engine's methods cannot run them by mistake. The wave reductions are own_quant.h's
 // wave_sum (the xor butterfly, partners 16 .. 1), as everywhere in the own modules.
@@ -24,6 +24,19 @@
 #endif
 
 enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
+#ifdef K3_Q35_ATTN_SPLIT   // (the Swift / ThinkingCap decode, verify and two-card modules; not the MTP drafter's module)
+// decode attention as the split pair (flash decoding) of kernels/k3_attn_split.h, with k3_gguf_q35d's settings (the same
+// geometry: 6 query heads per kv head, one V pass of 6, 32-cell splits, the parallel merge): one read of a split's K / V
+// rows for its kv head's 6 query heads, as many workgroups as the depth needs. OP_ATTN_DEC (one workgroup per query head
+// walking every position: 26-31x the bandwidth floor at every depth, 64 ms of a token at 32K on the XTX) is not in these
+// modules; caminus.k3.Engine.attn_dec emits the pair on them. Not bitwise OP_ATTN_DEC (another summation order);
+// bitwise k3_gguf_q35d's pair on the same cache, and the same bits at T = 1 and T = 4.
+#define ATTN_G 6
+#define ATTN_VH 6
+#define K3_ATTN_COMB_FAST
+enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
+#include "k3_attn_split.h"
+#endif
 enum { OWN_Q5_K = 5 };   // (the GG_* number of the format, as OWN_Q6_K / OWN_Q4_K / OWN_Q8_0)
 
 __device__ __forceinline__ float q35_silu(float x) { return x / (1.0f + expf(-x)); }
@@ -421,7 +434,12 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
+#ifdef K3_Q35_ATTN_SPLIT
+    if (sg.op == OP_ATTN_PART) { op_attn_part(sg, t); return true; }
+    if (sg.op == OP_ATTN_COMB) { op_attn_comb(sg, t); return true; }
+#else
     if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }
+#endif
     if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
     if (sg.op == OP_OWN_EMB) { own_op_emb(sg OWN_TK_ARG); return true; }

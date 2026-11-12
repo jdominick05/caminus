@@ -54,16 +54,17 @@ F.close()
 m = Dense35Own(P, max_ctx=64, vram_check=False)
 E = m.E; inv = E.inventory(); ops = [sg.op for sg in E.segs]
 want = ({('OWN_MV', f'{f}/a16_1rt{g}') for f in ('Q4_K', 'Q6_K') for g in ('', '_gu')} | {('OWN_MV16', 'Q8_0'), ('OWN_MV16', 'Q5_K')} |
-        {('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'), ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-')})
+        {('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'), ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-')} | {('ATTN', 'PART'), ('ATTN', 'COMB')})
 check(set(inv) == want, f'the tape holds every tile: {sorted(inv.items())}')
 check(not E.unsupported() and all(o in k3.Q35S_OPS for o in ops) and E.refuse is None, f'{len(ops)} segments, every op one the module dispatches')
 check(all(sg.dep < i and sg.dep2p1 - 1 < i for i, sg in enumerate(E.segs)), 'every dependency points back')
 n_gdn, n_att = sum(info['kinds']), len(info['kinds']) - sum(info['kinds'])
 cnt = lambda o: ops.count(o)
 check((cnt(k3.OP_GDN_CONV), cnt(k3.OP_GDN_L2), cnt(k3.OP_GDN_GATES), cnt(k3.OP_GDN_STEP), cnt(k3.OP_GDN_SAVE), cnt(k3.OP_GDN_NORM16)) == (n_gdn,) * 6
-      and (cnt(k3.OP_QK_NR), cnt(k3.OP_KV_APPEND), cnt(k3.OP_ATTN_DEC), cnt(k3.OP_GATE_MUL16)) == (2 * n_att, n_att, n_att, n_att)
+      and (cnt(k3.OP_QK_NR), cnt(k3.OP_KV_APPEND), cnt(k3.OP_ATTN_PART), cnt(k3.OP_ATTN_COMB), cnt(k3.OP_GATE_MUL16)) == (2 * n_att,) + (n_att,) * 4
+      and cnt(k3.OP_ATTN_DEC) == 0
       and cnt(k3.OP_OWN_ADD_RMS16) == 2 * len(info['kinds']) + 1 and cnt(k3.OP_OWN_EMB) == 1,
-      f'per block: the DeltaNet ops x {n_gdn}, the attention ops x {n_att}, two add-and-norms; one more before the head')
+      f'per block: the DeltaNet ops x {n_gdn}, the attention ops x {n_att} (the split pair, no OP_ATTN_DEC), two add-and-norms; one more before the head')
 names = {v: k for k, v in m.seg_names.items()}
 sv_ok = True
 for il, g in enumerate(info['kinds']):
@@ -82,15 +83,19 @@ check(all(bool(v) == (info['formats'][il]['ffn_gate'] == info['formats'][il]['ff
 src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_ops.h')).read()
 TPB = r'#ifdef K3_TP[^\n]*\n(.*?)#endif'   # (the two-card modules' exchange: k3.Q35_TP_MODULES only)
 MTPB = r'#ifdef K3_Q35_MTP[^\n]*\n(.*?)#endif'   # (the drafter module's argmax: k3.Q35M_MODULES only)
+SPB = r'#ifdef K3_Q35_ATTN_SPLIT[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (decode attention: the split pair; #else the drafter module's OP_ATTN_DEC)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
 tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
 mtp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, disp, re.S))))
-dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(MTPB, '', re.sub(TPB, '', disp, flags=re.S), flags=re.S)))
+sp_ops = [tuple(set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', g)) for g in m) for m in re.findall(SPB, disp, re.S)]
+dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(SPB, lambda mm: mm.group(1), re.sub(MTPB, '', re.sub(TPB, '', disp, flags=re.S), flags=re.S), flags=re.S)))
 host_ops = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35S_OPS and k != 'OP_NOP'}
 check(dev_ops == host_ops and tp_ops == {'OP_XCHG'}, f'kernels/k3_q35_ops.h dispatches k3.Q35S_OPS ({len(dev_ops)} ops beside the core\'s no-op), and OP_XCHG under K3_TP')
+check(sp_ops == [({'OP_ATTN_PART', 'OP_ATTN_COMB'}, {'OP_ATTN_DEC'})] and k3.OP_ATTN_DEC in k3.Q35M_OPS and k3.OP_ATTN_DEC not in k3.Q35S_OPS,
+      'decode attention: the split pair under K3_Q35_ATTN_SPLIT (k3.Q35S_OPS), OP_ATTN_DEC only in its #else (the drafter module, k3.Q35M_OPS)')
 enum = dict(re.findall(r'(OP_[A-Z0-9_]+) = (\d+)', src))
 check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16,
-                                               'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX},
+                                               'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX, 'OP_ATTN_PART': k3.OP_ATTN_PART, 'OP_ATTN_COMB': k3.OP_ATTN_COMB},
       f'the header\'s new op numbers are k3\'s ({enum})')
 
 # ---- options --------------------------------------------------------------------------------------------------------------
@@ -99,8 +104,9 @@ check(not any(k[1].endswith('_gu') for k in m2.E.inventory()) and len(m2.E.segs)
 m3 = Dense35Own(P, max_ctx=64, vram_check=False, debug_layers=2)
 check(len(m3.L) == 2 and m3.layer_seg[-1][0] == 'head' and len(m3.E.segs) < len(E.segs), 'debug_layers=2: two blocks, then the norm and the head')
 p0, p1 = Dense35Own.projection_mib(P, 64), Dense35Own.projection_mib(P, 65)
-check(abs((p1 - p0) - Dense35Own.kv_pos_mib(P)) < 1e-9 and abs(Dense35Own.kv_pos_mib(P) * 2 ** 20 - n_att * 4 * tiny_q35.HKV * tiny_q35.HD) < 1e-6
-      and abs(m.vram_mib - p0) < 1e-9, f'the projection: {p0:.1f} MiB at 64 positions, + {Dense35Own.kv_pos_mib(P) * 1024:.2f} KiB per position')
+rec = 4 * (q35_dense.attn_part_elems(1, tiny_q35.H, 65) - q35_dense.attn_part_elems(1, tiny_q35.H, 64)) / 2 ** 20   # (65 rows: one more split's records)
+check(rec > 0 and abs((p1 - p0) - Dense35Own.kv_pos_mib(P) - rec) < 1e-9 and abs(Dense35Own.kv_pos_mib(P) * 2 ** 20 - n_att * 4 * tiny_q35.HKV * tiny_q35.HD) < 1e-6
+      and abs(m.vram_mib - p0) < 1e-9, f'the projection: {p0:.1f} MiB at 64 positions, + {Dense35Own.kv_pos_mib(P) * 1024:.2f} KiB per position + the split records per 32 rows')
 n0 = len(E.segs); m.per_wgp = 3; m._build_tape()
 check(len(m.E.segs) == n0 and m.E is not E and m.S == tiny_q35.S, 'the tape builds again on the same engine (another grid): the same segments, the shapes untouched')
 m.reset(); st = (m.seq, m.fresh, m.pos_host, m.staged)
@@ -116,7 +122,7 @@ def refused(fn, exc=ValueError):
 B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt)
 # ---- the drafter module (k3_q35_swift_mtp: engine/q35_mtp.py) ---------------------------------------------------------
 mtp_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35M_OPS and k != 'OP_NOP'}
-check(mtp_ops == {'OP_OWN_ARGMAX'} and mtp_host <= dev_ops | mtp_ops and int(re.search(r'OWN_Q4_0 = (\d+)', open(os.path.join(HERE, '..', '..', 'kernels', 'k3_own_ops.h')).read()).group(1)) == k3.OWN_MTP_FMT['Q4_0'],
+check(mtp_ops == {'OP_OWN_ARGMAX'} and mtp_host <= dev_ops | mtp_ops | sp_ops[0][1] and int(re.search(r'OWN_Q4_0 = (\d+)', open(os.path.join(HERE, '..', '..', 'kernels', 'k3_own_ops.h')).read()).group(1)) == k3.OWN_MTP_FMT['Q4_0'],
       f'the drafter module: OP_OWN_ARGMAX under K3_Q35_MTP, k3.Q35M_OPS ({len(mtp_host)} ops) all dispatched, the Q4_0 format number k3\'s')
 e_m = k3.Engine(module='k3_q35_swift_mtp'); e_s = k3.Engine(module='k3_q35_swift')
 q4 = lambda r, kk: torch.zeros(r * kk // 256 * 144, dtype=torch.uint8)
@@ -156,7 +162,7 @@ check(lt.shape == (4, info['V']) and np.isfinite(lt).all() and np.abs(lt).max() 
 mt = Dense35Own(PT, max_ctx=64, vram_check=False); Et = mt.E; it = Et.inventory()
 check(mt.module == 'k3_q35_tcap' and m.module == 'k3_q35_swift', f'the module comes from the file\'s formats ({mt.module}; Swift\'s: {m.module})')
 want_t = ({('OWN_MV', f'{f}/a16_1rt') for f in k3.OWN_Q35T_1RT} | {('OWN_MV16', 'Q8_0'), ('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'),
-          ('OWN_EMB', 'IQ2_S'), ('OWN_ADD_RMS16', '-')})
+          ('OWN_EMB', 'IQ2_S'), ('OWN_ADD_RMS16', '-')} | {('ATTN', 'PART'), ('ATTN', 'COMB')})
 check(set(it) == want_t, f'the ThinkingCap tape holds every tile, no fused gate|up, BF16 alpha / beta as F32: {sorted(it.items())}')
 check(not Et.unsupported() and all(sg.op in k3.Q35S_OPS for sg in Et.segs) and Et.refuse is None,
       f'{len(Et.segs)} segments, every op one the ThinkingCap module dispatches')
@@ -165,7 +171,7 @@ check(Et.segs[0].op == k3.OP_OWN_EMB and Et.segs[0].out_f32 == 1 | 2 | 8,
 check(abs(Dense35Own.projection_mib(PT, 64) - mt.vram_mib) < 1e-9, 'the projection counts the widened BF16 and the record tails as the engine')
 srct = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35t_ops.h')).read()
 dt = srct.split('k3_extra_op(')[1]
-dev_t = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(TPB, '', dt, flags=re.S)))
+dev_t = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(SPB, lambda mm: mm.group(1), re.sub(TPB, '', dt, flags=re.S), flags=re.S)))
 check(dev_t == host_ops and set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, dt, re.S)))) == {'OP_XCHG'},
       f'kernels/k3_q35t_ops.h dispatches k3.Q35S_OPS too ({len(dev_t)} ops), and OP_XCHG under K3_TP')
 check(int(re.search(r'OWN_IQ2_S = (\d+)', srct).group(1)) == k3.OWN_Q35T_FMT['IQ2_S'], 'the IQ2_S format number is k3\'s')
@@ -182,8 +188,8 @@ from caminus.engine.q35_dense_verify import Dense35Verify
 mv4 = Dense35Own(P, max_ctx=64, vram_check=False, spec_T=4)
 v4 = Dense35Verify(mv4, 4, vram_check=False); Ev = v4.E; iv = Ev.inventory(); ov = [sg.op for sg in Ev.segs]
 check(set(iv) == {('OWN_MV', f'{f}/a16_1rt_mt') for f in ('Q4_K', 'Q6_K')} | {('OWN_MV16', 'Q8_0'), ('OWN_MV16', 'Q5_K')} |
-      {('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'), ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-')},
-      f'the verify tape: every matvec in its T-token form, no fused gate | up ({sorted(iv)})')
+      {('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'), ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-')} | {('ATTN', 'PART'), ('ATTN', 'COMB')},
+      f'the verify tape: every matvec in its T-token form, no fused gate | up, the split attention pair ({sorted(iv)})')
 check(not Ev.unsupported() and Ev.refuse is None and all(o in k3.Q35S_OPS for o in ov) and all(sg.dep < i and sg.dep2p1 - 1 < i for i, sg in enumerate(Ev.segs)),
       f'{len(ov)} segments, every op one the verify module dispatches, every dependency points back')
 m16 = [sg for sg in Ev.segs if sg.op == k3.OP_OWN_MV16]

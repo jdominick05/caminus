@@ -32,7 +32,7 @@ from .. import ggufio
 from ..device import capacity
 from . import k3
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD
-from .q35_dense import module_of, trunk_blocks, block_kinds, _shapes, RECURRENT
+from .q35_dense import module_of, trunk_blocks, block_kinds, _shapes, RECURRENT, attn_part_elems
 from .q3moe_one import card_per_wgp
 from .tp_slots import Slots, _hip
 
@@ -120,7 +120,8 @@ def _projection_bytes(F, max_ctx, ffn_share, vocab_share):
     gdn = (nl - n_attn) * (k3.gdn_block_size(NV // 2, S, NK // 2, 1) + CHl * 3 + CHl) * 4
     kv = n_attn * int(max_ctx) * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], False)
     slots = 2 * nl * (16 + D) * 4
-    return [o + gdn + kv + slots for o in out]
+    part = 4 * attn_part_elems(1, c['nh'] // 2, max_ctx)   # (the split attention pair's records, per card)
+    return [o + gdn + kv + slots + part for o in out]
 
 
 class Dense35TP:
@@ -351,6 +352,8 @@ class Dense35TP:
                          fin16=B(NVm * S, f16), qf=B(2 * QHc), kr=B(nkvc * hd), vr=B(nkvc * hd), qo=B(QHc), ko=B(nkvc * hd),
                          att=B(QHc), gat16=B(QHc, f16), logits=B(nlog))
                 assert sum(v.numel() * v.element_size() for v in s.values()) <= TAPE_MIB * 2 ** 20, 'TAPE_MIB'
+                if self.module in k3.ATTN_SPLIT_MODULES:   # (the split attention pair's records over this card's heads)
+                    s['part'] = B(attn_part_elems(1, QHc // hd, self.max_ctx))
                 self.buf.append(s)
                 ds = B(32, torch.int32); self.dstage.append(ds)
                 self.tok.append(ds[16:17]); self.pos.append(ds[17:18]); self.epoch.append(ds[18:19])
@@ -406,7 +409,8 @@ class Dense35TP:
                 ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nhc, hd, d['qn'], pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_)
-                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), dep=ap, batched=True), qd)
+                akw = dict(max_cells=self.max_ctx, part=s['part']) if E.split_attn() else dict(batched=True)
+                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), dep=ap, **akw), qd)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blkp'], g_)
             x1 = xchg(s['blkp'], s['blk'], 2 * il, o_)

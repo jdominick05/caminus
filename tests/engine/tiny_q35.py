@@ -1,5 +1,6 @@
 """A tiny synthetic dense qwen35 GGUF with quantized matrices, written here (no model file): the shapes the own-kernel
-engine reads (caminus.engine.q35_dense: residual 256, 128-wide DeltaNet heads, 128-wide attention heads), four trunk
+engine reads (caminus.engine.q35_dense: residual 256, 128-wide DeltaNet heads, the real attention geometry: 256-wide heads,
+6 query heads per kv head, as the split attention pair of the own modules takes it), four trunk
 blocks (three Gated DeltaNet, one attention) and a declared multi-token-prediction block whose tensors are not in the
 file. Between them the blocks hold every matrix format the engine has a tile for (Q4_K, Q6_K, Q8_0, Q5_K), the
 feed-forward's gate and up in one format (the fused segment) and in two (the three-segment form), and F32 alpha / beta.
@@ -11,7 +12,7 @@ import struct
 
 import numpy as np
 
-D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 256, 512, 64, 128, 1, 2, 2, 1, 128, 64, 4
+D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 256, 512, 64, 128, 1, 2, 6, 1, 256, 64, 4
 CH = 2 * NK * S + NV * S
 KINDS = [True, True, True, False]
 TYPE_ID = {'F32': 0, 'Q8_0': 8, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14, 'IQ3_XXS': 18, 'IQ3_S': 21, 'IQ2_S': 22, 'IQ4_XS': 23, 'BF16': 30}
@@ -83,9 +84,9 @@ def quant(rng, fmt, rows, K):
 def write(path, seed=5, variant='swift', tp=False):
     """variant 'swift': Swift's formats (Q4_K / Q6_K / Q8_0 / Q5_K, F32 alpha / beta); 'tcap': ThinkingCap's. tp: shapes the
     two-card split cuts on block boundaries (engine/q35_dense_tp.py): 4 key heads / 8 value heads (half a card's value
-    heads' columns = 512), 4 query heads / 2 kv heads, a 256-token vocabulary (128 head rows per card)"""
+    heads' columns = 512), 12 query heads / 2 kv heads, a 256-token vocabulary (128 head rows per card)"""
     rng = np.random.default_rng(seed)
-    NK, NV, H, HKV, V = (4, 8, 4, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
+    NK, NV, H, HKV, V = (4, 8, 12, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
     CH = 2 * NK * S + NV * S
     tc = variant == 'tcap'
     FMTS = FORMATS_TCAP if tc else FORMATS

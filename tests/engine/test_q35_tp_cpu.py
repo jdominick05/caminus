@@ -152,7 +152,8 @@ for path, info, want_mod in ((P_S, iS, 'k3_q35_swift_tp'), (P_T, iT, 'k3_q35_tca
                 sh &= (d['qkv']['rows'], d['z']['rows'], d['al']['rows'], d['so']['K']) == (d['CH'], info['NV'] // 2 * 128, info['NV'] // 2, info['NV'] // 2 * 128)
                 sh &= d['NK'] == info['NK'] // 2 and d['conv_w'].shape == (d['CH'], 4) and d['dt'].numel() == info['NV'] // 2
             else:
-                sh &= (d['q']['rows'], d['k']['rows'], d['o']['K']) == (info['H'] // 2 * 2 * 128, info['HKV'] // 2 * 128, info['H'] // 2 * 128)
+                HD = tiny_q35.HD   # (the attention head width: 256, the split pair's)
+                sh &= (d['q']['rows'], d['k']['rows'], d['o']['K']) == (info['H'] // 2 * 2 * HD, info['HKV'] // 2 * HD, info['H'] // 2 * HD)
     sh &= m.head[0]['rows'] == m.vh and m.head[1]['rows'] == m.vocab - m.vh
     check(sh, f'{os.path.basename(path)}: each card\'s matrices have its share\'s shapes (ffn {m.f0} / {m.ffn - m.f0}, head {m.vh} / {m.vocab - m.vh})')
     from caminus.prefill.q35own_tp import local_shapes, tp_shapes, buffer_need_tp_mib
@@ -187,8 +188,10 @@ check(refused and set(k3.Q35_TP_OF.values()) == set(k3.Q35_TP_MODULES) and all(m
 p0, p1 = Dense35TP.projection_mib(P_S, 64), Dense35TP.projection_mib(P_S, 65)
 F = ggufio.GGUFFile(P_S); tot = sum(t.n_bytes for t in F.tensors) / 2 ** 20; F.close()
 kvp = Dense35TP.kv_pos_mib(P_S)
-check(all(abs((b - a) - kvp) < 1e-9 for a, b in zip(p0, p1)) and abs(kvp * 2 ** 20 - 1 * 4 * (iS['HKV'] // 2) * 128) < 1e-6,
-      f'the projection grows by each card\'s KV row ({kvp * 1024:.2f} KiB: its kv heads of each attention block)')
+from caminus.engine.q35_dense import attn_part_elems
+rec = 4 * (attn_part_elems(1, iS['H'] // 2, 65) - attn_part_elems(1, iS['H'] // 2, 64)) / 2 ** 20   # (65 rows: one more split's records)
+check(rec > 0 and all(abs((b - a) - kvp - rec) < 1e-9 for a, b in zip(p0, p1)) and abs(kvp * 2 ** 20 - 1 * 4 * (iS['HKV'] // 2) * tiny_q35.HD) < 1e-6,
+      f'the projection grows by each card\'s KV row ({kvp * 1024:.2f} KiB: its kv heads of each attention block) and its split records per 32 rows')
 w = [v - 256 for v in p0]
 check(tot < w[0] + w[1] < 2 * tot + 1, f'the two cards\' parts add up to more than the file ({tot:.2f} MiB: replicated vectors and '
       f'embedding) and less than twice it ({w[0]:.2f} + {w[1]:.2f} MiB with states, slots, KV)')

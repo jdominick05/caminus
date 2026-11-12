@@ -34,7 +34,7 @@ P, N, K = A.prompt, A.n, A.k
 TEXTS = {'code': os.path.join(ROOT, 'python', 'caminus', 'arch.py'), 'prose': os.path.join(ROOT, 'docs', 'dev', 'architecture.md'),
          'shell': os.path.join(ROOT, 'build.sh')}
 eng = Dense35Own(A.gguf, max_ctx=P + N + 16, spec_T=4,
-                 vram_extra_mib=sum(Dense35Verify.need_mib(t) for t in (1, 2, 3, 4)) + 400)
+                 vram_extra_mib=sum(Dense35Verify.need_mib(t, max_ctx=P + N + 16) for t in (1, 2, 3, 4)) + 400)
 D = eng.D
 ver = {t: Dense35Verify(eng, t) for t in (1, 2, 3, 4)}
 mtp = Mtp35(eng, k=K)
