@@ -21,6 +21,7 @@ if __name__ == '__main__':
     ap.add_argument('--llama', default=None); ap.add_argument('--module', default=None); ap.add_argument('--ref-only', action='store_true')
     ap.add_argument('--confirm', type=float, default=0.01)
     ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--ffn-share', type=float, default=0.5)
+    ap.add_argument('--dump', default=None, help='save our logits rows (npy) for a bitwise comparison of two builds')
     ap.add_argument('--speed', type=int, default=0, help='then this many greedy passes (step_token) after the rows: median ms per token')
     A = ap.parse_args()
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']
@@ -54,6 +55,7 @@ if __name__ == '__main__':
         eng = Dense35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module)   # (its own VRAM check; this script keeps nothing else on the card)
         ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
     so = score(ref, ours); print(line('caminus', so), flush=True)
+    if A.dump: np.save(A.dump, ours)
     if A.speed:   # greedy passes after the rows (step_token: the argmax read back, as the served decode), each synchronized
         import time
         toks, ts = list(seq), []
