@@ -247,7 +247,7 @@ class Dflash35:
         E.run(check=True)
 
     def inject(self, pos0, feats):
-        """feats [n_target_layers, n, D] fp32 on the card (the target's export for positions pos0 .. pos0 + n - 1), in chunks
+        """feats [n_target_layers, n, D] fp32 on the card or in host memory (copied T rows a launch into feat16) (the target's export for positions pos0 .. pos0 + n - 1), in chunks
         of T rows (the last padded with copies of its last row at the following positions)"""
         nl, n, D = feats.shape
         if nl != len(self.layers_tgt) or D != self.D: raise ValueError(f'Dflash35.inject: feats {tuple(feats.shape)}')

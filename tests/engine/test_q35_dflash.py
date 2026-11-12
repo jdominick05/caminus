@@ -43,7 +43,7 @@ GRIDS = (3, 6, 7)
 def run(dr, feats, n0, last):
     """inject feats at 0 .., draft at n0: (ring rows [nl, n, 2, M] fp16 bits, logits rows bits, drafts)"""
     for d in dr.L: d['ring'].zero_()
-    dr.inject(0, torch.from_numpy(feats).cuda()); torch.cuda.synchronize()
+    dr.inject(0, torch.from_numpy(feats)); torch.cuda.synchronize()   # (host rows: inject copies T rows a launch into its own projected buffer, no other VRAM)
     got = dr.draft(last, n0)
     M = dr.nkv * dr.hd; n = feats.shape[1]
     ring = np.stack([d['ring'].view(RING, 2, M)[:min(n, RING)].cpu().numpy().view(np.uint16) for d in dr.L])
