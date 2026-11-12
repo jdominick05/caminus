@@ -158,8 +158,8 @@ commit to be released**: each row of [benchmarks.md](benchmarks.md) for every ca
 card and two, the verify passes and the llama.cpp yardstick rows, under `tools/guard.sh`. A number that moved is updated
 everywhere it is published (README, CHANGELOG, docs/models.md, benchmarks.md) in the merge's pull request; a benchmark
 that could not run is listed there as skipped, with the reason. A published number always describes the released code. A paused model
-(`caminus.models.PAUSED`) is not offered, so its rows are not rerun: they stay in benchmarks.md under its own heading, and
-the model comes back only with them rerun.
+(`caminus.models.PAUSED`) is not offered, so its rows are not rerun: they stay in benchmarks.md, marked paused, and the model
+comes back only with them rerun.
 
 1. **The version:** set `__version__` in `python/caminus/__init__.py` (and the docs that name it). A version can be uploaded to
    PyPI once; a fix is the next patch version. Then redraw the README's picture of the control panel,

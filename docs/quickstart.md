@@ -42,7 +42,8 @@ caminus panel
 ```
 
 1. In **MODELS**, move to `thinkingcap` with the arrow keys. It fits any supported card (on a 24 GB card,
-   `qwen3-30b-a3b` writes about five times as fast).
+   `qwen3-30b-a3b` writes about five times as fast). ThinkingCap's licence is PolyForm Small Business 1.0.0: read
+   [its terms](models.md#licences) before any commercial use; `qwen3-30b-a3b` is Apache-2.0.
 2. Press `p` to download it.
 3. Press `enter` to start it. The first start takes about a minute.
 4. Press `tab` until you reach **QWEN CODE**. Press `i` to install Qwen Code (only once), then `u` to set it up.

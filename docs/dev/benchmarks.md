@@ -76,6 +76,10 @@ cache directories; synthetic conversations):
 
 ## The other models
 
+> [!NOTE]
+> Qwen3.6-35B-A3B (both files) and Qwen3-Coder-Next are **paused** for the next release (`caminus.models.PAUSED`). Their
+> rows below and in the two-card yardstick are from 2026-11-07 / 11-11 and are not rerun until they come back.
+
 Measured 2026-11-07 on one card each (the RX 7900 XTX unless noted) or on both cards for Qwen3-Coder-Next; llama.cpp on
 the same card(s) with llama-bench (decode tg128, prompt pp2048). Speeds are decode (writing) or prefill (reading a
 prompt), in tok/s.
