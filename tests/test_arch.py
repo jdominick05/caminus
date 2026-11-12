@@ -262,6 +262,11 @@ def main():
                 check(got == want and (free not in mid or got in (16384, 40960)), f'max_ctx auto: {free:.1f} MiB free per card -> {got} (the largest fit: {want})')
         finally:
             capacity.caps_mib, capacity.cache_reserve_mib = keep
+    D35 = arch.ARCHS['qwen35-own']
+    check(D35.min_ctx(dict(draft='dflash')) == D35.DFLASH_MIN_CTX < arch.MIN_CTX and D35.min_ctx(dict(draft='mtp')) == arch.MIN_CTX
+          and D35.min_ctx({}) == arch.MIN_CTX and arch.ARCHS['qwen3moe'].min_ctx(dict(draft='dflash')) == arch.MIN_CTX
+          and 'dflash' in D35.drafters,
+          'the dense own line places a --draft dflash serve from its DFlash floor (the drafter\'s VRAM), every other serve from MIN_CTX')
     print('RESULT ' + ('PASS' if not FAILS else f'FAIL ({len(FAILS)})'), flush=True)
     return 1 if FAILS else 0
 

@@ -9,7 +9,9 @@ input) on the dense qwen35 line (Swift 1.5, kernels/k3_q35_swift_ver.hip), bit f
      entering block L), one cut engine at a time after the full engine is freed.
   4. the export on 3, 6 and 7 workgroups per WGP: the same rows, bitwise (the copy is ordered before the layer's later
      writes of x at every grid);
-  5. --time-ctx P (with --time-only: alone, in its own process): the verify pass's cost with the export on vs off at a P-position context (prefilled), interleaved,
+  5. the decode tape's own export (Dense35Own(feature_layers=): one-token passes feed a DFlash drafter too): each step's
+     logits bitwise the verify pass's row (as before the export) and its exported rows bitwise the verify export's;
+  6. --time-ctx P (with --time-only: alone, in its own process): the verify pass's cost with the export on vs off at a P-position context (prefilled), interleaved,
      the median of 7 each (a decode measurement; no check).
 Context: decode steps from position 0 (no prefill), then the pass. Prints PASS / FAIL lines and RESULT PASS | FAIL.
   tools/guard.sh LOG 1800 python -I tests/engine/test_q35_features.py GGUF [--layers 6,20,34,48,62] [--n 16]
@@ -58,7 +60,7 @@ nf = len(layers)
 if not A.time_only:
     CH = 64
     GRIDS = (3, 6, 7)
-    eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=T,
+    eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=T, feature_layers=layers,
                      vram_extra_mib=Dense35Verify.need_mib(T, max_ctx=max_ctx) + Dense35Verify.need_mib(T, max_ctx=max_ctx, nfeat=nf)
                      + buffer_need_mib(shapes_of(A.gguf), CH, nfeat=nf) + 16)
     plain = Dense35Verify(eng, T)
@@ -74,6 +76,12 @@ if not A.time_only:
     # a second pass on the same tape: the buffer is zeroed before each pass (the copies add into it), so the rows repeat
     context(eng); exp.run(full[N:N + T], N, 1, argmax=False)
     check(np.array_equal(exp.features.detach().cpu().numpy(), feats), 'a second identical pass exports the same rows (zeroed per pass)')
+    # the decode tape's export: steps at N .. N + T - 1 against the verify pass's rows (the verify pass is bitwise the steps)
+    context(eng); sb, sl = [], []
+    for r in range(T):
+        lg = eng.verify(full, N + r, 1); sl.append(bits(lg)); sb.append(eng.features[:, 0].detach().cpu().numpy().copy())
+    check(all(np.array_equal(sl[r], le[r]) for r in range(T)), f'the decode tape with its export on: each step\'s logits == the verify row (bitwise, {T} steps)')
+    check(all(np.array_equal(sb[r], feats[:, r]) for r in range(T)), f'the decode tape\'s exported rows == the verify export\'s (bitwise, {T} steps)')
     pf = Q35OwnPrefill(eng, chunk=CH, crossover=1, feature_layers=layers)
     eng.reset(); pf.run(full[:N + T], 0, 0, N + T); torch.cuda.synchronize()
     pfe = pf.features[:, N:N + T].detach().cpu().numpy().copy()

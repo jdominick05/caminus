@@ -414,6 +414,10 @@ __device__ __forceinline__ void q35_op_argmax(const Seg & sg, int t) {
 }
 #endif
 
+#ifdef K3_Q35_DF   // (the DFlash drafter module, kernels/k3_q35_dflash.hip: its fp32 ops on own code)
+#include "k3_df_own_ops.h"
+#endif
+
 #ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
@@ -422,6 +426,13 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     // them k3_run took 96 VGPRs and spilled 5 (the batched attention's loads), with them 89 and none. The host refuses
     // those ops on this module: k3.Q35M_OPS / MODULE_CAPS)
     if (sg.op == OP_OWN_ARGMAX) { q35_op_argmax(sg, t); return true; }
+#endif
+#ifdef K3_Q35_DF   // (the DFlash drafter module: its own ops, then the trunk's; the host refuses the rest: k3.MODULE_CAPS)
+    if (sg.op == OP_DF_CONV) { op_df_conv(sg, t); return true; }
+    if (sg.op == OP_DF_TOPK) { op_df_topk(sg, t); return true; }
+    if (sg.op == OP_DF_SELECT) { op_df_select(sg, t); return true; }
+    if (sg.op == OP_KV_APPEND && sg.aux) { df_op_kv_append_ring(sg, t); return true; }
+    if (sg.op == OP_ATTN_DEC && sg.pad2) { df_op_attn(sg, t); return true; }
 #endif
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }

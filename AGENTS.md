@@ -9,7 +9,8 @@ CLAUDE.md imports this file.
 - It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
   cards, with the DFlash2 drafter), AREX-2 27B (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 also takes
-  `--draft mtp` (its own multi-token-prediction block on one card; `decode/mtp35.py`). `python/caminus/models.py` is the catalog.
+  `--draft mtp` (its own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
+  model's DFlash2 drafter on one card; `decode/dflash35.py`). `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
 - Tested on one machine only: an RX 7900 XTX (drives the monitors) + an RX 7900 XT on a PCIe 4.0 x4 link, 29 GiB RAM, Linux.
@@ -76,6 +77,12 @@ CLAUDE.md imports this file.
   reads on the device. Its device dispatch keeps the trunk's ops (without them `k3_run` took 96 VGPRs and spilled 5);
   `k3.Q35M_OPS` and its `MODULE_CAPS` are what refuse them, and Q4_K is compiled out of its matvec op.
   `tests/engine/test_q35_mtp.py` is its gate (T-row rounds bitwise one-row rounds; drafts against the fp32 block).
+  `k3_q35_dflash.hip` (`k3.Q35DF_MODULES`, `engine/q35_dflash.py`) is Swift's DFlash2 drafter: the Swift module's T-token
+  matvecs (Q8_0 weights, the target's Q6_K head and Q4_K embedding read in place) plus `kernels/k3_df_own_ops.h`
+  (`K3_Q35_DF`: the drafter's conv, top-k, selector, ring KV append and non-causal windowed attention, fp32, no ggml types;
+  the Coder's `k3_draft_ops.h` stays untouched). Its ring is 4096 rows per drafter layer, position p in row p & 4095;
+  `decode/dflash35.py` keeps the injected interval on the host and drafts only where it covers the window.
+  `tests/engine/test_q35_dflash.py` is its gate (against `caminus/ref_dflash.py`'s float64 drafter; grids bitwise).
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's

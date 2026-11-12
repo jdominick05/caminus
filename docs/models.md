@@ -35,8 +35,10 @@ again.
   context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
   path). It writes at about `arex-2`'s speed. `caminus serve --model ... --draft mtp` (one card) drafts with the model's
-  own prediction block and verifies 4 tokens a pass; the output is identical to plain decoding. Its speed drops at
-  depth: about 15 tok/s with 28K tokens of context.
+  own prediction block and verifies 4 tokens a pass; `--draft dflash` drafts with its base model's DFlash2 drafter
+  instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~16K tokens of
+  context on a 24 GB card). Either way the output is identical to plain decoding. Its speed drops at depth: about
+  15 tok/s with 28K tokens of context.
 - **`thinkingcap`** is the other dense 27B model on Caminus's own code end to end: a finetune of the same base, quantized
   to 4.2 bits per weight. It is the smaller download and writes a little faster than `swift-1.5`. It fits a 20 GB card
   too: on an XT the server picks about 53K tokens of context by itself. Like `swift-1.5` it has no drafter yet and slows

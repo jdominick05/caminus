@@ -97,7 +97,8 @@ Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean
 Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
 Q35T_MODULES = ('k3_q35_tcap', 'k3_q35_tcap_trace', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_trace')   # (kernels/k3_q35_tcap.hip: ThinkingCap's formats on the same tape; kernels/k3_q35t_ops.h)
 Q35M_MODULES = ('k3_q35_swift_mtp',)   # (kernels/k3_q35_swift_mtp.hip: Swift's multi-token-prediction block, the drafter: engine/q35_mtp.py)
-Q35V_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace') + Q35M_MODULES   # (kernels/k3_q35_swift_ver.hip: the Swift module's ops with their T-token forms, for verify passes: engine/q35_dense_verify.py)
+Q35DF_MODULES = ('k3_q35_dflash',)   # (kernels/k3_q35_dflash.hip: the DFlash 2 drafter on Swift's ops + kernels/k3_df_own_ops.h: engine/q35_dflash.py)
+Q35V_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace') + Q35M_MODULES + Q35DF_MODULES   # (kernels/k3_q35_swift_ver.hip: the Swift module's ops with their T-token forms, for verify passes: engine/q35_dense_verify.py)
 Q35S_MODULES = ('k3_q35_swift', 'k3_q35_swift_trace', 'k3_q35_swift_tp', 'k3_q35_swift_tp_trace') + Q35V_MODULES   # (kernels/k3_q35_swift.hip: the dense qwen35 line's decode tape on own ops, no ggml headers; Q35S_OPS below)
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
 Q3M_IQ_MODULES = ('k3_q3m_iq', 'k3_q3m_iq_trace')
@@ -105,7 +106,7 @@ Q3M_RS_MODULES = {'k3_q3m_rs4': 'RS4', 'k3_q3m_rs2': 'RS2'}   # (the row-scale s
 Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES)   # (_trace: K3_TRACE timestamps, measurement only)
 # the own dense qwen35 modules (Swift / ThinkingCap: decode, verify, two cards; not the MTP drafter's module) run their decode
 # attention as the same split pair (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT: k3_gguf_q35d's settings, an f16 cache only)
-Q35_SPLIT_MODULES = tuple(m for m in Q35S_MODULES + Q35T_MODULES if m not in Q35M_MODULES)
+Q35_SPLIT_MODULES = tuple(m for m in Q35S_MODULES + Q35T_MODULES if m not in Q35M_MODULES + Q35DF_MODULES)
 ATTN_PACK_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace')   # (K3_Q35_ATTN_PACK: OP_ATTN_PART tasks = (split, kv head) for every pass row, up to ATTN_PACK_T rows; kernels/k3_attn_split.h op_attn_part_packed)
 ATTN_PACK_T = 4
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES
@@ -230,6 +231,15 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_MV', 'Q4_0/a
 OP_OWN_ARGMAX = 55   # = kernels/k3_q35_ops.h (the drafter module): the greedy token's key, atomicMax over the tasks
 Q35M_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC,
             OP_GATE_MUL16, OP_OWN_ARGMAX}
+# the DFlash drafter module (K3_Q35_DF): Swift's T-token matvecs for the drafter's Q8_0 matrices (OP_OWN_MV16) and the
+# target's Q6_K head (OP_OWN_MV), the Q4_K embedding, add + norm, SwiGLU, the q / k norm with RoPE, and its own fp32 ops
+# (kernels/k3_df_own_ops.h: OP_DF_CONV / TOPK / SELECT, OP_KV_APPEND into the ring and OP_ATTN_DEC non-causal + window)
+MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q6_K/a16_1rt'), ('OWN_MV', 'Q6_K/a16_1rt_mt'), ('OWN_MV16', 'Q8_0'),
+                                  ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'),
+                                  ('DF', 'CONV'), ('DF', 'TOPK'), ('DF', 'SELECT')})
+                    for m in Q35DF_MODULES})
+Q35DF_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_MV16, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC,
+             OP_DF_CONV, OP_DF_TOPK, OP_DF_SELECT}
 Q35_MODULES = Q35S_MODULES + Q35T_MODULES   # (the two dense qwen35 own modules: the same op set, Q35S_OPS; kernels/k3_q35t_ops.h dispatches it too)
 # their two-card builds (K3_TP: kernels/k3_xchg.h's OP_XCHG; engine/q35_dense_tp.py): one-card module -> two-card module
 Q35_TP_OF = {'k3_q35_swift': 'k3_q35_swift_tp', 'k3_q35_tcap': 'k3_q35_tcap_tp', 'k3_q35_swift_trace': 'k3_q35_swift_tp_trace',
@@ -1375,7 +1385,7 @@ class Engine:
             if self.segs and self.segs[0].op == OP_OWN_EMB: self.segs[0].out_f32 = bits
         if self.module in Q35_MODULES:   # (as the lean qwen3moe module: an op outside its dispatch would run as a no-op)
             for i, sg in enumerate(self.segs):
-                ops = Q35M_OPS if self.module in Q35M_MODULES else Q35S_OPS
+                ops = Q35M_OPS if self.module in Q35M_MODULES else Q35DF_OPS if self.module in Q35DF_MODULES else Q35S_OPS
                 if sg.op not in ops and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES):
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(ops)}')
                 if sg.op in (OP_ATTN_DEC, OP_ATTN_PART, OP_ATTN_COMB) and sg.work:   # (their device code reads f16 only)

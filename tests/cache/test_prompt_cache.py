@@ -2667,6 +2667,162 @@ def stage_mtp35(cache_dir, small):
     NUMBERS['mtp35'] = dict(draft_rounds=n_acc, gen=gen_acc, plain=gen_plain)
 
 
+
+# ---- stage: the dense own line's DFlash 2 drafter (caminus.decode.dflash35) on the stand-in -------------------------------
+def stage_dflash35(cache_dir, small):
+    """the 27B DFlash 2 drafter served: the adapter (caminus.decode.dflash35.Dflash35Drafter) over a stub Dflash35 on the
+    stand-in engine (its one-token passes and the T = 4 verify passes export features), through K3Session (kind dflash35)
+    and the prompt cache. Gates: the key's drafter kind; every pass feeds the drafter (the rounds run, no filler, once the
+    prompt is in); the window export / import roundtrip through a checkpoint; a served generation with accepting and with
+    rejecting drafts, both token-identical to a plain session"""
+    import torch
+    import collections
+    from caminus.cache import prompt as pc
+    from caminus.serve.k3_session import K3Session, SessionDrafter, _Hooks
+    from caminus.serve.engine import PrefillStats
+    from caminus.serve.draftpolicy import DraftPolicy
+    from caminus.engine import q35_dflash
+    from caminus.engine.q35_dflash import RING
+    from caminus.decode.dflash35 import Dflash35Drafter
+    rng = np.random.default_rng(23)
+    cd = os.path.join(cache_dir, 'dflash35'); os.makedirs(cd, exist_ok=True)
+    mpath = os.path.join(cd, 'fake-00001-of-00002.gguf')
+    open(mpath, 'wb').write(b'GGUF' + bytes([5]) * 9000)
+    open(os.path.join(cd, 'fake-00002-of-00002.gguf'), 'wb').write(b'GGUF' + bytes([6]) * 9000)
+    bdir = os.path.join(cd, 'build'); os.makedirs(bdir, exist_ok=True)
+    open(os.path.join(bdir, 'a.hsaco'), 'wb').write(b'x' * 100)
+    b0 = pc.build_hash(build=bdir)
+    D, NL = 16, 2
+    Dflash35Drafter._rows = lambda self, lo, hi: torch.arange(lo, hi) & (RING - 1)   # (the CPU stand-in's tensors)
+
+    class FakeVerF(FakeVer35):
+        def __init__(self, m, T, D):
+            super().__init__(m, T, D); self.features = torch.zeros(NL, T, D)
+
+        def run(self, tokens, pos0, commit, argmax=True):
+            out = super().run(tokens, pos0, commit, argmax)
+            for t in range(self.T): self.features[:, t] = float((int(pos0) + t) * 7 + int(tokens[t])) % 997
+            return out
+
+    class FakeDF(q35_dflash.Dflash35):
+        def __init__(self, eng, window=64):
+            self.eng, self.window, self.nl, self.nkv, self.hd, self.dx = eng, window, 1, 2, 8, 0
+            self.path, self.mib, self.max_pos, self.vocab = eng.path, 0, int(eng.max_ctx) + 4, eng.V
+            self.layers_tgt = list(range(1, NL + 1))
+            self.row_bytes = 2 * self.nkv * self.hd * 2
+            self.L = [dict(ring=torch.zeros(RING * self.row_bytes // 2, dtype=torch.float16))]
+            self.token, self.calls, self.draft_reply = 0, [], None
+
+        def inject(self, pos0, feats):
+            for r in range(feats.shape[1]):
+                self.L[0]['ring'].view(torch.uint8).view(RING, self.row_bytes)[(pos0 + r) & (RING - 1)] = (pos0 + r) % 251
+            self.token += 1; self.calls.append(('inject', int(pos0), int(feats.shape[1])))
+
+        def draft(self, last, n0):
+            self.token += 1; self.calls.append(('draft', int(n0), int(last)))
+            return list(self.draft_reply(n0)) if self.draft_reply else [7, 7, 7]
+
+    class FakePFD(FakePF):
+        def check_drafter(self, draft):
+            self._draft = draft
+
+        def inject(self, draft, p0, p1, g0=None):   # (the batched run's chunk rows: the own prefill's inject_chunk hook)
+            if draft is not None and p1 > p0: draft.inject_chunk(torch.zeros(NL, p1 - p0, D), int(p0), int(p1 - p0))
+            return 0
+
+    def mk(draft=True):
+        ctr = mk.n = getattr(mk, 'n', 0) + 1
+        e = FakeTP(T=1, cards=1, max_ctx=4096, path=mpath)
+        e.D = D; e.buf = {'h': torch.zeros(D)}
+        e.spec_T = 4; e.last_T = 0
+        e.commit_max = lambda: 1 if e.spec_T == 1 else (0 if e.fresh else int(e.last_T))
+        for c in e.cards: e.state[(c, 0, 'gdn')] = torch.zeros(1 + e.spec_T, dtype=torch.int64)
+        e.features = torch.zeros(NL, 1, D)              # (Dense35Own(feature_layers=): one-token passes export too)
+        e.ver = FakeVerF(e, 4, D)
+        p = FakePFD(e)
+        d = FakeDF(e)
+        dr = Dflash35Drafter(d) if draft else None
+        c = pc.PromptCache(e, p, dr, cache_dir=os.path.join(cd, f'c{ctr}'), n_slots=6, vram_check=False, side_rows=0, min_free_gb=0,
+                           key=dict(pc.engine_key(e, p, dr, build=b0)), spill_min_gap=0)
+        s = K3Session.__new__(K3Session)
+        s.m, s.pf, s.pc, s.stats = e, p, c, None
+        s.df, s.dr = (dr, dr) if draft else (None, None)
+        s._dk = 'dflash35' if draft else None
+        s._ver = e.ver if draft else None
+        s.T = s.ntok = 4 if draft else int(e.ntok)
+        s.max_ctx = e.max_ctx
+        s.max_recoveries, s.side_route, s._side = 2, False, False
+        s.counters = collections.Counter()
+        s._inflight = s._pass = s._dev = s._step_ep = s._planned = s._kind = None
+        s._bails_seen, s._bail_at, s._n_pass, s._armed = 0, None, 0, False
+        s._sync = lambda: None
+        s._hooks = _Hooks(s)
+        s.last_prefill, s.last_route, s.last_first_logits = PrefillStats(), None, None
+        s.policy = DraftPolicy(enabled=False)
+        s.drafts_real = True
+        s.request_params = None
+        s.drafter = SessionDrafter(s) if dr is not None else None
+        if s.drafter is not None: s.drafter.spec_type = dr.spec_type
+        return s, e, p, c, d, dr
+
+    SAMPLER = types.SimpleNamespace(params=types.SimpleNamespace(greedy=True, penalties_on=False))
+
+    def run_gen(s, prompt, n_new, kmax=3):
+        row = s.prefill(list(prompt))
+        hist = list(prompt)
+        out = [int(np.argmax(np.asarray(row, dtype=np.float64)))]
+        gen, feed_len, done = [], 0, False
+        while True:
+            out = out[:n_new - len(gen)]
+            if len(gen) + len(out) >= n_new: done = True
+            if feed_len: s.accept(feed_len - 1 + len(out))
+            gen += out; hist += out
+            if done: break
+            feed = [out[-1]]
+            k = min(kmax, s.ntok - len(feed), n_new - len(gen) - 1)
+            drafts = list(s.drafter(hist, k))[:k] if (s.drafter is not None and k > 0) else []
+            out = s.sample_pass(feed, drafts, SAMPLER, hist, ())
+            feed_len = len(feed)
+        s.end()
+        return gen, hist
+
+    base = [int(x) for x in rng.integers(0, 990, 400)]
+    P = base[:120]
+    s, e, p, c, d, dr = mk(draft=True)
+    k = pc.engine_key(e, p, dr, build=b0); k0 = pc.engine_key(e, p, None, build=b0)
+    check(k['drafter'] is not None and k['drafter'].get('kind') == 'dflash35' and pc.key_hash(k) != pc.key_hash(k0)
+          and c.T == 4 and c.layout.wrows == d.window + 4 and c.layout.drow == d.row_bytes and c.layout.dnl == 1,
+          f'dflash35: the key carries the drafter kind dflash35 (and differs from no-drafter); cache T 4, the win region '
+          f'{c.layout.dnl} x {c.layout.wrows} x {c.layout.drow}')
+    n_new = 24
+    sp, ep, pp, cp_, _, _ = mk(draft=False)
+    gen_plain, _ = run_gen(sp, P, n_new)
+    full = P + gen_plain
+    s2, e2, p2, c2, d2, dr2 = mk(draft=True)
+    d2.draft_reply = lambda n0: [full[q] for q in range(n0 + 1, n0 + 4)] if n0 + 4 <= len(full) else [7] * 3
+    gen_acc, _ = run_gen(s2, P, n_new)
+    rounds = [x for x in d2.calls if x[0] == 'draft']
+    s3, e3, p3, c3, d3, dr3 = mk(draft=True)
+    gen_rej, _ = run_gen(s3, P, n_new)
+    check(gen_acc == gen_plain and gen_rej == gen_plain,
+          f'dflash35: served generation token-identical to plain: {n_new} tokens, accepting drafts ({len(rounds)} rounds) and rejecting drafts')
+    check(len(rounds) >= 1 and dr2.stats['filler'] == 0 and dr3.stats['filler'] == 0,
+          f'dflash35: every pass fed the drafter: {len(rounds)} rounds, no filler (stats {dr2.stats} / {dr3.stats})')
+    # the window protocol through a checkpoint
+    c2.commit(list(s2.toks), dict(c2.st), checkpoint=True)
+    ck = [x for x in c2.ckpts if x.kind == 'end'][-1]
+    dm = ck.df
+    before = d2.L[0]['ring'].clone(); lohi = (dr2.lo, dr2.hi)
+    d2.L[0]['ring'].fill_(3); dr2.reset()
+    c2._restore(ck)
+    idx = torch.arange(dm['lo'], dm['hi']) & (RING - 1)
+    rv = lambda t: t.view(torch.uint8).view(RING, d2.row_bytes)[idx]
+    check(dm['hi'] > dm['lo'] and torch.equal(rv(d2.L[0]['ring']), rv(before)) and (dr2.lo, dr2.hi) == (dm['lo'], dm['hi']),
+          f'dflash35: the end checkpoint restored the ring rows [{dm["lo"]}, {dm["hi"]}) bitwise and the interval (was {lohi})')
+    for x in (c, c2, c3, cp_): x.close()
+    NUMBERS['dflash35'] = dict(rounds=len(rounds), gen=gen_acc, plain=gen_plain)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('args', nargs='+', help='[CODER] STAGE...')
@@ -2684,6 +2840,7 @@ def main():
     if 'cpu' in stages:
         stage_cpu(cache_dir)
         stage_mtp35(cache_dir, a.small)
+        stage_dflash35(cache_dir, a.small)
     gpu = [s_ for s_ in stages if s_ != 'cpu']
     if gpu:
         import torch

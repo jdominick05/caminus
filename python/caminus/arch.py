@@ -240,9 +240,9 @@ class Arch:
         except NotImplementedError:
             return True
         try:
-            want = int(opt.get('max_ctx'))              # an explicit --max-ctx: that context; auto: MIN_CTX
+            want = int(opt.get('max_ctx'))              # an explicit --max-ctx: that context; auto: the architecture's floor
         except (TypeError, ValueError):
-            want = MIN_CTX
+            want = self.min_ctx(opt)
         n = need(min(want, n_ctx))
         for c, v, ex in zip(cards, n, self.extras_mib(opt, devs, cards=cards)):
             used = _read_int(os.path.join(c['dev'], 'mem_info_vram_used'))
@@ -251,6 +251,11 @@ class Arch:
             if v > room:
                 return False
         return True
+
+    def min_ctx(self, opt):
+        """the smallest context this serve is placed on a card for (max_ctx auto): MIN_CTX unless the architecture trades
+        context for a drafter"""
+        return MIN_CTX
 
     def long_context(self, opt):
         """the long-context mode's settings into opt for an explicit max_ctx past the model's context_length (a note for the
@@ -478,10 +483,18 @@ class Dense35(OneCard):
     the drafter module runs the block's Q4_0 and the file's Q6_K head)"""
     engine = 'engine.q35_dense:Dense35Own'
     drafter = 'mtp'
+    drafters = ('mtp', 'dflash')   # (--draft dflash: the base model's DFlash 2 drafter, decode/dflash35.py; one card, Swift 1.5 first)
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
     PREFILL_CHUNK = 2048       # (XT, from empty, 2,048 positions: chunk 2048 771 tok/s, 1024 760; 538 MiB at 2048)
     MTP_K = 3                  # drafts per round of the served MTP drafter
     MTP_T = 4                  # the verify width an MTP session's passes run at (the engine's spec_T)
+    # --draft dflash: the drafter's 2 GB on the one card leaves Swift 1.5 ~12-16K of context on a 24 GB XTX with 4 cache
+    # slots (32K needs ~23.2 GB of ~22.3 GB room, projected), so a drafted serve is placed from 8K up and max_ctx auto
+    # takes the largest that fits; --draft mtp / off hold the 32K floor and more
+    DFLASH_MIN_CTX = 8192
+
+    def min_ctx(self, opt):
+        return self.DFLASH_MIN_CTX if (opt.get('draft') or 'off') == 'dflash' else MIN_CTX
 
     def _mtp(self, opt):
         """whether this serve loads the model's MTP drafter (--draft mtp), and its block index"""
@@ -492,6 +505,25 @@ class Dense35(OneCard):
         try: return block_of(F)
         finally: F.close()
 
+    def _dflash(self, opt):
+        """the DFlash 2 drafter's (GGUF path, target layers) when this serve loads it (--draft dflash), else None"""
+        if (opt.get('draft') or 'off') != 'dflash': return None
+        from . import ggufio
+        F = ggufio.GGUFFile(opt['drafter'])
+        try: return opt['drafter'], [int(v) for v in F.meta['dflash.target_layers']]
+        finally: F.close()
+
+    def _dflash_mib(self, opt, c):
+        """MiB the DFlash 2 drafter adds at context c: the drafter, the verify tape with the feature export"""
+        from .engine.q35_dense_verify import Dense35Verify
+        from .engine.q35_dflash import Dflash35
+        path, layers = self._dflash(opt)
+        from . import ggufio
+        F = ggufio.GGUFFile(opt['model'])
+        try: vocab = int(F.T['output.weight'].shape[1])
+        finally: F.close()
+        return Dflash35.need_mib(path, vocab) + Dense35Verify.need_mib(self.MTP_T, max_ctx=c, nfeat=len(layers))
+
     def auto_need(self, opt, slots, cards=None):
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
@@ -501,6 +533,15 @@ class Dense35(OneCard):
         path = opt['model']
         n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
         il = self._mtp(opt)
+        dfl = self._dflash(opt)
+        if dfl is not None:
+            spec_T, sh = self.MTP_T, q35own.shapes_of(path)
+            slot = (Dense35Own.recurrent_mib(path, spec_T) + Dense35Own.kv_pos_mib(path)) * 1.05 + 1.0
+            # (+ the checkpoint's drafter window: W + T ring rows of every drafter layer)
+            slot += self._dfl_win_mib(dfl[0])
+            pf = q35own.buffer_need_mib(sh, self.PREFILL_CHUNK, nfeat=len(dfl[1])) + PREFILL_MODULES_MIB
+            need = lambda c: [Dense35Own.projection_mib(path, c, spec_T) + pf + self._dflash_mib(opt, c) + (slots + 2) * slot]
+            return n_ctx, [0], slot, need
         spec_T = self.MTP_T if il is not None else 1
         sh = q35own.shapes_of(path)
         slot = (Dense35Own.recurrent_mib(path, spec_T) + Dense35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: the states + tail rows)
@@ -512,6 +553,15 @@ class Dense35(OneCard):
         need = lambda c: [Dense35Own.projection_mib(path, c, spec_T) + pf + extra(c) + (slots + 2) * slot]   # (the side rows: host memory)
         return n_ctx, [0], slot, need
 
+    @staticmethod
+    def _dfl_win_mib(path):
+        from . import ggufio
+        F = ggufio.GGUFFile(path)
+        try:
+            hp = lambda k: int(F.meta[f'dflash.{k}'])
+            return hp('block_count') * (hp('attention.sliding_window') + 4) * 2 * hp('attention.head_count_kv') * hp('attention.key_length') * 2 / 2 ** 20
+        finally: F.close()
+
     def build(self, opt, log=print, T=None):
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
@@ -519,6 +569,22 @@ class Dense35(OneCard):
         from .decode.mtp35 import Mtp35Drafter
         from .prefill import q35own
         path = opt['model']
+        dfl = self._dflash(opt)
+        if dfl is not None:
+            from .engine.q35_dflash import Dflash35
+            from .decode.dflash35 import Dflash35Drafter
+            dpath, layers = dfl
+            sh, mc = q35own.shapes_of(path), int(opt['max_ctx'])
+            extra = q35own.buffer_need_mib(sh, self.PREFILL_CHUNK, nfeat=len(layers)) + PREFILL_MODULES_MIB + self._dflash_mib(opt, mc)
+            m = Dense35Own(path, device=0, max_ctx=mc, vram_extra_mib=extra, spec_T=self.MTP_T, feature_layers=layers)
+            m.ver = Dense35Verify(m, self.MTP_T, feature_layers=layers)
+            d = Dflash35(dpath, m)
+            pf = q35own.Q35OwnPrefill(m, chunk=self.PREFILL_CHUNK, feature_layers=layers)
+            dr = Dflash35Drafter(d)
+            log(f'caminus serve: DFlash 2 drafter {os.path.basename(dpath)} (target layers {layers}, verify T {self.MTP_T}): '
+                f'+{self._dflash_mib(opt, mc):.0f} MiB' + (f'; context {mc} (the drafter\'s VRAM: --draft mtp or off serve more '
+                f'context on this card)' if mc < MIN_CTX else ''), flush=True)
+            return m, pf, d, dr
         il = self._mtp(opt)
         spec_T = self.MTP_T if il is not None else 1
         sh = q35own.shapes_of(path)
