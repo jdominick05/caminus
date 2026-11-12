@@ -48,38 +48,39 @@ __device__ __forceinline__ void own_rows_q4_0_1rt(const uint8_t * __restrict__ W
             qs[r] = *(const u32x4_t *)(A + ub * 16);
             d[r] = (float)__builtin_bit_cast(_Float16, B[ub]);
         }
-        h2_t wv[RW][16];                                     // [0 .. 7]: values 0 .. 15 as (n - 8), [8 .. 15]: 16 .. 31
+        // the low nibbles (values 0 .. 15) for every token, then the high (16 .. 31): one half's codes unpacked at a time
+        // (8 registers per row, not 16: the drafter module's k3_run spilled 18 VGPRs with both halves held); per token
+        // and row s0 and s1 are each one chain in k order and acc = fma(d, s0 + s1, acc), as with both halves at once
+        float s0[OWN_MT][RW];
 #pragma unroll
-        for (int r = 0; r < RW; r++) {
-            const uint32_t qw[4] = {qs[r].x, qs[r].y, qs[r].z, qs[r].w};
+        for (int half = 0; half < 2; half++) {
+            h2_t wv[RW][8];
 #pragma unroll
-            for (int half = 0; half < 2; half++)
+            for (int r = 0; r < RW; r++) {
+                const uint32_t qw[4] = {qs[r].x, qs[r].y, qs[r].z, qs[r].w};
 #pragma unroll
                 for (int w = 0; w < 4; w++) {
                     const uint32_t n = (qw[w] >> (4 * half)) & 0x0f0f0f0fu;
-                    wv[r][8 * half + 2 * w] = as_h2(__builtin_amdgcn_perm(0u, n, 0x0c010c00u) | 0x64006400u) - off;
-                    wv[r][8 * half + 2 * w + 1] = as_h2(__builtin_amdgcn_perm(0u, n, 0x0c030c02u) | 0x64006400u) - off;
+                    wv[r][2 * w] = as_h2(__builtin_amdgcn_perm(0u, n, 0x0c010c00u) | 0x64006400u) - off;
+                    wv[r][2 * w + 1] = as_h2(__builtin_amdgcn_perm(0u, n, 0x0c030c02u) | 0x64006400u) - off;
                 }
-        }
+            }
 #pragma unroll
-        for (int j = 0; j < OWN_MT; j++) {
-            if (j >= nt) break;
-            const _Float16 * xp = x16 + xo(j) + (size_t)uu * 32;
-            const u32x4_t x0 = *(const u32x4_t *)xp, x1 = *(const u32x4_t *)(xp + 8);
-            const u32x4_t x2 = *(const u32x4_t *)(xp + 16), x3 = *(const u32x4_t *)(xp + 24);
-            __builtin_amdgcn_sched_barrier(0);
-            if (u >= NUNITS) continue;
-            const uint32_t xw[16] = {x0.x, x0.y, x0.z, x0.w, x1.x, x1.y, x1.z, x1.w,
-                                     x2.x, x2.y, x2.z, x2.w, x3.x, x3.y, x3.z, x3.w};
+            for (int j = 0; j < OWN_MT; j++) {
+                if (j >= nt) break;
+                const _Float16 * xp = x16 + xo(j) + (size_t)uu * 32 + 16 * half;
+                const u32x4_t xa = *(const u32x4_t *)xp, xb = *(const u32x4_t *)(xp + 8);
+                __builtin_amdgcn_sched_barrier(0);
+                if (u >= NUNITS) continue;
+                const uint32_t xw[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
 #pragma unroll
-            for (int r = 0; r < RW; r++) {
-                float s0 = 0.0f, s1 = 0.0f;
+                for (int r = 0; r < RW; r++) {
+                    float sh = 0.0f;
 #pragma unroll
-                for (int k = 0; k < 8; k++) {
-                    s0 = __builtin_amdgcn_fdot2(wv[r][k], as_h2(xw[k]), s0, false);
-                    s1 = __builtin_amdgcn_fdot2(wv[r][8 + k], as_h2(xw[8 + k]), s1, false);
+                    for (int k = 0; k < 8; k++) sh = __builtin_amdgcn_fdot2(wv[r][k], as_h2(xw[k]), sh, false);
+                    if (half == 0) s0[j][r] = sh;
+                    else acc[j][r] = __builtin_fmaf(d[r], s0[j][r] + sh, acc[j][r]);
                 }
-                acc[j][r] = __builtin_fmaf(d[r], s0 + s1, acc[j][r]);
             }
         }
     }
