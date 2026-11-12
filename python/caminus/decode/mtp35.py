@@ -33,17 +33,17 @@ from ..engine.q35_mtp import MAX_T, Mtp35
 HR = 2 * MAX_T          # the h ring's rows: the last two passes' h (T rows each) cover any round's needs
 
 
-def ring_mib(D):
-    """MiB the adapter allocates on the trunk's card, projected and checked before the allocation (arch's extra):
-    the h ring [HR, D] fp32 plus the gather workspace [MAX_T, D] fp32 that _h reads the ring through"""
-    return (HR * int(D) + MAX_T * int(D)) * 4 / 2 ** 20
-
-
 class Mtp35Drafter:
     """Mtp35 with the serve session's and the prompt cache's drafter interface (branch on kind == 'mtp')"""
     kind = 'mtp'
     spec_type = 'draft-mtp'
     device_accept = False          # (the accept is the host's: the verify pass's argmax rows vs the drafts)
+
+    @staticmethod
+    def ring_mib(D):
+        """MiB the adapter allocates on the trunk's card, projected and checked before the allocation (arch's
+        extra): the h ring [HR, D] fp32 plus the gather workspace [MAX_T, D] fp32 that _h reads the ring through"""
+        return (HR * int(D) + MAX_T * int(D)) * 4 / 2 ** 20
 
     def __init__(self, mtp, vram_check=True):
         if not isinstance(mtp, Mtp35) and getattr(mtp, 'kind', None) != 'mtp':
@@ -57,8 +57,8 @@ class Mtp35Drafter:
         # the h ring [HR, D] fp32, row p % HR = h of position p, and the gather workspace: allocated now, not on the
         # first pass, projected in arch's extra and checked against the guard's line here (capacity.check)
         if vram_check and torch.cuda.is_available():
-            capacity.check([dx], [ring_mib(D)], f'Mtp35Drafter h ring (HR {HR} x D {D} + gather {MAX_T} x {D}: '
-                                                f'{ring_mib(D):.2f} MiB)')
+            capacity.check([dx], [self.ring_mib(D)], f'Mtp35Drafter h ring (HR {HR} x D {D} + gather {MAX_T} x {D}: '
+                                                      f'{self.ring_mib(D):.2f} MiB)')
         dev = torch.device('cuda', dx) if torch.cuda.is_available() else torch.device('cpu')
         self.H = torch.zeros(HR, D, dtype=torch.float32, device=dev)
         self.Hw = torch.empty(MAX_T, D, dtype=torch.float32, device=dev)

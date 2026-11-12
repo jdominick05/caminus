@@ -2458,7 +2458,7 @@ def stage_mtp35(cache_dir, small):
     from caminus.serve.k3_session import K3Session, SessionDrafter, _Hooks
     from caminus.serve.engine import PrefillStats
     from caminus.serve.draftpolicy import DraftPolicy
-    from caminus.decode.mtp35 import Mtp35Drafter, ring_mib
+    from caminus.decode.mtp35 import Mtp35Drafter
     from caminus.decode import longctx
     from caminus.prefill.driver import PrefillRefused
     rng = np.random.default_rng(21)
@@ -2583,10 +2583,10 @@ def stage_mtp35(cache_dir, small):
     # the adapter's buffers exist from construction (projected in arch's extra, checked at the allocation in serve),
     # and _h gathers through the preallocated workspace instead of allocating per round
     ad0 = Mtp35Drafter(FakeMtp35(e))
-    check(ad0.H is not None and tuple(ad0.H.shape) == (8, D) and tuple(ad0.Hw.shape) == (4, D) and ring_mib(D) > 0
+    check(ad0.H is not None and tuple(ad0.H.shape) == (8, D) and tuple(ad0.Hw.shape) == (4, D) and Mtp35Drafter.ring_mib(D) > 0
           and ad0._h(0, 4) is None,
           f'mtp35: the h ring and the gather workspace are allocated at construction (H {tuple(ad0.H.shape)}, '
-          f'Hw {tuple(ad0.Hw.shape)}, ring_mib {ring_mib(D):.4f} MiB), not on the first pass')
+          f'Hw {tuple(ad0.Hw.shape)}, ring_mib {Mtp35Drafter.ring_mib(D):.4f} MiB), not on the first pass')
     # (recompute from a fresh adapter what __call__ passes: drive it directly)
     toks = list(range(100, 100 + 160))
     def drive(ad, upto):
