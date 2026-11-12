@@ -31,13 +31,13 @@ import torch
 QSA_EXACT = 2051          # cells the QSA selection covers (top_k 2048 + 3-token tail): dense == QSA up to here
 QSA_BACKFILL = 2048       # positions per pool-backfill launch of the two-tape QSA engine (FlashNextTP._backfill)
 CAP_FRAC = 0.97           # a card guard.sh does not watch: 0.97 of its total (guard.sh's lines were set near 0.97: 23800 / 24560, 19850 / 20464)
-MARGIN_MIB = 256          # kept free below the cap (allocator rounding, HIP's own growth)
 # tools/guard.sh's kill lines: MiB of sysfs mem_info_vram_used per DRM card of every gfx1100 card it watches, computed from each
 # card's total by caminus.device.machine with the guard's own rule (floor(floor(total_MiB * 97 / 100) / 50) * 50): here card1 = the
 # XTX 23,800 (0.969 of its 24,560 MiB, 23 MiB below CAP_FRAC x total) and card2 = the XT 19,850 (tests/packaging/test_packaging.py and
 # tests/cache/test_prompt_cache.py cpu check these against `guard.sh --lines` and the script)
 from . import machine as _machine   # noqa: E402
 GUARD_LINE_MIB = _machine.guard_lines()
+MARGIN_MIB = _machine.CAP_MARGIN_MIB   # kept free below the cap (allocator rounding, HIP's own growth); torch-free in machine
 MIB = 1 << 20
 
 
