@@ -80,10 +80,12 @@ check(all(bool(v) == (info['formats'][il]['ffn_gate'] == info['formats'][il]['ff
 
 # ---- the host's op list is the device's ---------------------------------------------------------------------------------
 src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_ops.h')).read()
+TPB = r'#ifdef K3_TP[^\n]*\n(.*?)#endif'   # (the two-card modules' exchange: k3.Q35_TP_MODULES only)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
-dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', disp))
+tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
+dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(TPB, '', disp, flags=re.S)))
 host_ops = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35S_OPS and k != 'OP_NOP'}
-check(dev_ops == host_ops, f'kernels/k3_q35_ops.h dispatches k3.Q35S_OPS ({len(dev_ops)} ops beside the core\'s no-op)')
+check(dev_ops == host_ops and tp_ops == {'OP_XCHG'}, f'kernels/k3_q35_ops.h dispatches k3.Q35S_OPS ({len(dev_ops)} ops beside the core\'s no-op), and OP_XCHG under K3_TP')
 enum = dict(re.findall(r'(OP_[A-Z0-9_]+) = (\d+)', src))
 check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16},
       f'the header\'s new op numbers are k3\'s ({enum})')
@@ -141,8 +143,10 @@ check(Et.segs[0].op == k3.OP_OWN_EMB and Et.segs[0].out_f32 == 1 | 2 | 8,
       f'the embedding carries the grids to stage: IQ3_XXS | IQ3_S | IQ2_S = 11 (got {Et.segs[0].out_f32})')
 check(abs(Dense35Own.projection_mib(PT, 64) - mt.vram_mib) < 1e-9, 'the projection counts the widened BF16 and the record tails as the engine')
 srct = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35t_ops.h')).read()
-dev_t = {k for k in re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', srct.split('k3_extra_op(')[1])}
-check(dev_t == host_ops, f'kernels/k3_q35t_ops.h dispatches k3.Q35S_OPS too ({len(dev_t)} ops)')
+dt = srct.split('k3_extra_op(')[1]
+dev_t = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(TPB, '', dt, flags=re.S)))
+check(dev_t == host_ops and set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, dt, re.S)))) == {'OP_XCHG'},
+      f'kernels/k3_q35t_ops.h dispatches k3.Q35S_OPS too ({len(dev_t)} ops), and OP_XCHG under K3_TP')
 check(int(re.search(r'OWN_IQ2_S = (\d+)', srct).group(1)) == k3.OWN_Q35T_FMT['IQ2_S'], 'the IQ2_S format number is k3\'s')
 e_tc = k3.Engine(module='k3_q35_tcap')
 check(refused(lambda: e_tc.own_matvec_1rt(torch.zeros(8 * 144 + 16, dtype=torch.uint8), 'Q4_K', 8, 256, B(256, torch.float16), B(8))) and
@@ -151,4 +155,47 @@ check(refused(lambda: e_tc.own_matvec_1rt(torch.zeros(8 * 144 + 16, dtype=torch.
       refused(lambda: e_q35.own_matvec_1rt(torch.zeros(8 * 82 + 16, dtype=torch.uint8), 'IQ2_S', 8, 256, B(256, torch.float16), B(8))) and
       refused(lambda: e_q35.own_emb(torch.zeros(64 * 82, dtype=torch.uint8), 'IQ2_S', 64, 256, torch.zeros(1, dtype=torch.int32), B(256))),
       'the ThinkingCap module refuses Q4_K and a fused gate|up; the Swift module refuses IQ2_S matvecs and embeddings')
+
+# ---- the verify tape (engine/q35_dense_verify.py, module k3_q35_swift_ver) -----------------------------------------------
+from caminus.engine.q35_dense_verify import Dense35Verify
+mv4 = Dense35Own(P, max_ctx=64, vram_check=False, spec_T=4)
+v4 = Dense35Verify(mv4, 4, vram_check=False); Ev = v4.E; iv = Ev.inventory(); ov = [sg.op for sg in Ev.segs]
+check(set(iv) == {('OWN_MV', f'{f}/a16_1rt_mt') for f in ('Q4_K', 'Q6_K')} | {('OWN_MV16', 'Q8_0'), ('OWN_MV16', 'Q5_K')} |
+      {('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'), ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-')},
+      f'the verify tape: every matvec in its T-token form, no fused gate | up ({sorted(iv)})')
+check(not Ev.unsupported() and Ev.refuse is None and all(o in k3.Q35S_OPS for o in ov) and all(sg.dep < i and sg.dep2p1 - 1 < i for i, sg in enumerate(Ev.segs)),
+      f'{len(ov)} segments, every op one the verify module dispatches, every dependency points back')
+m16 = [sg for sg in Ev.segs if sg.op == k3.OP_OWN_MV16]
+check(m16 and all(sg.pad1 >> 8 == 4 and sg.gs == sg.K | (sg.N << 32) for sg in m16) and
+      all(sg.team == 4 for sg in Ev.segs) and all(sg.ntask == 4 for sg in Ev.segs if sg.op in (k3.OP_OWN_ADD_RMS16, k3.OP_OWN_EMB)),
+      'the rows tiles carry 4 tokens and their strides; the glue ops one task per token; every segment the pass\'s T')
+blk = mv4.L[[i for i, g in enumerate(info['kinds']) if g][0]]
+check(blk['gdn'].numel() == k3.gdn_block_size(tiny_q35.NV, tiny_q35.S, tiny_q35.NK, 4) and blk['convx'].numel() == 4 * blk['conv_st'].shape[0]
+      and mv4.E.guard_T == 4 and m.E.guard_T is None,
+      'spec_T 4: each DeltaNet block keeps 4 tokens\' inputs; the decode tape\'s guard takes commits up to 4 (spec_T 1: the tape\'s own T)')
+q1, q4 = Dense35Own.projection_mib(P, 64), Dense35Own.projection_mib(P, 64, spec_T=4)
+check(q4 > q1 and abs(Dense35Own.projection_mib(P, 64, spec_T=4) - mv4.vram_mib) < 1e-9
+      and Dense35Own.recurrent_mib(P, 4) > Dense35Own.recurrent_mib(P), f'the projection counts spec_T\'s records and rows ({q1:.3f} -> {q4:.3f} MiB)')
+check(refused(lambda: Dense35Verify(m, 2, vram_check=False)) and refused(lambda: Dense35Verify(mv4, 5, vram_check=False)) and
+      refused(lambda: Dense35Verify(mv4, 4, module='k3_q35_swift', vram_check=False)) and refused(lambda: Dense35Own(P, max_ctx=64, vram_check=False, spec_T=5)),
+      'refused: a verify tape longer than the engine\'s spec_T, T 5, a decode module, spec_T 5')
+ok_c = mv4.commit_max() == 0 and refused(lambda: v4.run([1, 2, 3, 4], 0, 1), k3.ContextBoundsError)
+mv4.fresh, mv4.last_T = False, 1
+ok_c &= mv4.commit_max() == 1 and refused(lambda: v4.run([1, 2, 3, 4], 1, 2), k3.ContextBoundsError)
+ok_c &= refused(lambda: mv4.verify([1] * 8, 1, 2), k3.ContextBoundsError)
+mv4.last_T = 4
+ok_c &= mv4.commit_max() == 4 and m.commit_max() == 1 and Ev.guard_T == 4
+mv4.reset(); ok_c &= mv4.commit_max() == 0
+check(ok_c, 'the commit is bounded by the last pass on the states (0 after a reset, 1 after a decode step, T after a verify '
+            'pass: refused on the host past it); the served engine keeps 1; the verify tape\'s guard takes spec_T')
+check(('OWN_MV', 'Q4_K/a16_1rt_gu') not in k3.MODULE_CAPS['k3_q35_swift_ver'] and ('OWN_MV', 'Q4_K/a16_1rt_gu') in k3.MODULE_CAPS['k3_q35_swift'],
+      'the verify module\'s capabilities leave out the fused gate | up (no verify tape runs it)')
+e_v = k3.Engine(module='k3_q35_swift_ver', T=4)
+check(refused(lambda: e_q35.own_matvec16(w8, 'Q8_0', 8, 256, B(4 * 256, torch.float16), B(32), tokens=4)) and
+      refused(lambda: e_v.own_matvec16(w8, 'Q8_0', 8, 256, B(4 * 256, torch.float16), B(32), tokens=2)) and
+      refused(lambda: e_v.own_add_rms16(B(4 * 256), B(256), B(4 * 256), B(4 * 256, torch.float16), 1e-6, tokens=2)) and
+      refused(lambda: e_q35.gdn_norm16(B(256), B(128), B(256), B(256, torch.float16), 2, 128, 1e-6) or k3.Engine(module='k3_q35_swift', T=2).gdn_norm16(B(512), B(128), B(512), B(512, torch.float16), 2, 128, 1e-6)),
+      'the T-token forms: refused on the decode module and for a token count other than the tape\'s T')
+
 print('RESULT', 'PASS' if ok else 'FAIL')
+sys.exit(0 if ok else 1)

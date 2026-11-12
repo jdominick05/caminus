@@ -31,15 +31,31 @@ __device__ __forceinline__ float q35_silu(float x) { return x / (1.0f + expf(-x)
 // OP_OWN_MV16: out[r] = W[r] . x for raw GGUF blocks W of N contiguous rows (Seg.work = OWN_Q8_0 / OWN_Q5_K) and an fp16
 // activation buffer x [K] (Seg.a); Seg.y = fp32 out [N]. own_quant.h's general rows tiles with Act16: a wave takes
 // OWN_R = 4 rows, a task = rows_per_task rows (a multiple of 4), wave w the row groups r0 + 4 w, r0 + 4 (w + 8), ...
-// A row's sum does not depend on the grid or the task size. T = 1.
+// A row's sum does not depend on the grid or the task size. T = 1; the verify module (K3_Q3M_VER) also takes the T-token
+// form of OP_OWN_MV: Seg.pad1 bits 8 .. 11 = tokens NT, token tk reads x at Seg.a + tk * xs (fp16 values) and writes its
+// rows at Seg.y + tk * ys (xs / ys: the low / high half of Seg.gs); each token's rows are the one-token tile's statements
+// (the same bits), the tokens in turn over the same rows (their weight bytes from the cache after the first).
 __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
     const int wave = K3WAVE, lane = K3TID % 32;
     const int r0 = t * sg.rows_per_task, r1 = min(sg.N, r0 + sg.rows_per_task);
     const uint8_t * W = sg.W; const void * x = sg.a; float * y = (float *)sg.y;
+#ifdef K3_Q3M_VER
+    const int NT = max(1, (int)__builtin_amdgcn_readfirstlane((sg.pad1 >> 8) & 15));
+    const uint64_t st = (uint64_t)sg.gs;
+    const size_t xs = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)st), ys = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)(st >> 32));
+    for (int tk = 0; tk < NT; tk++) {
+        const void * xt = (const _Float16 *)x + tk * xs; float * yt = y + tk * ys;
+        for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
+            if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, xt, nullptr, nullptr, yt, lane);
+            else own_rows_q8_0<Act16>(W, row, r1, sg.K, xt, nullptr, nullptr, yt, lane);
+        }
+    }
+#else
     for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
         if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
         else own_rows_q8_0<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
     }
+#endif
 }
 
 // OP_OWN_ADD_RMS16 for any row length N = 256 NI (one task, one workgroup; a thread owns elements tid + 256 j):
@@ -48,13 +64,22 @@ __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
 // Seg.a = d, Seg.y = x (in / out), Seg.W = nw, Seg.asum = h (fp32), Seg.aux = h16, Seg.rs = eps. Two walks of the
 // row, four elements per round trip: the add and the squares (a thread's fma chain in element order, the wave sum, the
 // eight waves in order), then the norm from x as stored. k3_own_ops.h's form holds a thread's whole row in registers
-// (8 elements); at N = 5120 that is 20.
+// (8 elements); at N = 5120 that is 20. The verify module (K3_Q3M_VER): task tk = token tk, its rows d / x / h / h16 at
+// tk * N (nw shared), each the one-token statements.
+#ifdef K3_Q3M_VER
+__device__ __forceinline__ void q35_op_add_rms16(const Seg & sg, int tk) {
+#else
 __device__ __forceinline__ void q35_op_add_rms16(const Seg & sg) {
+#endif
 #pragma clang fp contract(off)
+#ifndef K3_Q3M_VER
+    constexpr int tk = 0;
+#endif
     __shared__ float part[8];
     const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, NI = N >> 8;
-    const float * d = (const float *)sg.a; const float * nw = (const float *)sg.W;
-    float * x = (float *)sg.y; float * h = (float *)sg.asum; _Float16 * h16 = (_Float16 *)sg.aux;
+    const size_t o = (size_t)tk * N;
+    const float * d = (const float *)sg.a + o; const float * nw = (const float *)sg.W;
+    float * x = (float *)sg.y + o; float * h = (float *)sg.asum + o; _Float16 * h16 = (_Float16 *)sg.aux + o;
     const bool add = sg.pad1 > 0;
     float ss = 0.0f;
 #pragma unroll 1
@@ -344,7 +369,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
-    if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg); return true; }
+    if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_GDN_CONV) { q35_op_gdn_conv(sg, t); return true; }
     if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
@@ -357,7 +382,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }
     if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
-    if (sg.op == OP_OWN_EMB) { own_op_emb(sg); return true; }
+    if (sg.op == OP_OWN_EMB) { own_op_emb(sg OWN_TK_ARG); return true; }
 #ifdef K3_TP
     if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
 #endif
