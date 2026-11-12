@@ -77,7 +77,9 @@ tot = {}
 for M in MS:
     for b, nm, cnt in NAMES:
         t = F.T[f'blk.{b}.{nm}.weight']; K = int(t.shape[0]); R, _ = t.rows()
-        need = (t.n_bytes + M * K * 2 + M * R * 4 + (R * K * 3 + M * K + M * R * 4 if set(ARMS) & {'torch', 'flydsl'} else 0)) / 2 ** 20 + 64
+        dense = R * K * 2 + M * R * 2 if set(ARMS) & {'torch', 'flydsl'} else 0          # (fp16 weights; torch's fp16 output)
+        fly = M * R * 4 + M * K + R * K + M * R * 4 if 'flydsl' in ARMS else 0           # (fp32 output; int8 operands, int32 output)
+        need = (t.n_bytes + M * K * 2 + M * R * 4 + dense + fly) / 2 ** 20 + 64
         capacity.check([0], [need], f'q35_prefill_gemm {nm} M {M} ({need:.0f} MiB)')
         W = Dense35Own._w(fake, f'blk.{b}.{nm}.weight')
         x16 = torch.randn(M, K, device=dev).half() * 0.1; y = torch.zeros(M, R, device=dev)

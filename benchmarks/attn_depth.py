@@ -9,7 +9,7 @@ Arms (the same geometry, our own kernels only):
   split      the split pair OP_ATTN_PART + OP_ATTN_COMB (kernels/k3_attn_split.h, flash decoding: ATTN_SS-position
              slices, one task per (slice, row, kv head) reads its K/V rows once for the 6 query heads, then a merge per
              query head) in the AREX-2 modules (k3_gguf_q35d; k3_gguf_q35d_mt for T = 4), f16 and q8_0 caches.
-Each row prints the launch median over REPS runs (host events around E.run: one persistent launch, so it includes the
+Every arm runs on the same grid (--per-wgp; default the dense engine's own, ~200 workgroups). Each row prints the launch median over REPS runs (host events around E.run: one persistent launch, so it includes the
 launch; the 'empty' row is a tape of one no-op segment, the launch floor to subtract), the KV bytes one layer must read
 (T rows reading the cache once) and the time those bytes take at --bw GB/s (default 952: the XTX's measured read peak,
 docs/dev/benchmarks.md), and x floor. x16 = the 16 attention layers of a token.
@@ -21,18 +21,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import numpy as np, torch
 from caminus.engine import k3
 from caminus.device import capacity
+from caminus.engine.q3moe_one import card_per_wgp
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--ctx', default='1024,4096,16384,32768,49152'); ap.add_argument('--reps', type=int, default=30)
 ap.add_argument('--bw', type=float, default=952.0); ap.add_argument('--arms', default='own,split,split_q8')
 ap.add_argument('--T', default='1,4')
+ap.add_argument('--per-wgp', default='card', help="workgroups per WGP for every arm: 'card' = the dense engine's own grid (q3moe_one.card_per_wgp, ~200 workgroups), or a number")
 A = ap.parse_args()
 CTX = [int(v) for v in A.ctx.split(',')]; ARMS = A.arms.split(','); TS = [int(v) for v in A.T.split(',')]
 H, NKV, D = 24, 4, 256
 SCALE = 1.0 / 16.0
 MOD = {('own', 1): 'k3_q35_swift', ('own', 4): 'k3_q35_swift_ver',
        ('split', 1): 'k3_gguf_q35d', ('split', 4): 'k3_gguf_q35d_mt'}
-print(torch.cuda.get_device_name(0), f'| geometry {H} q heads / {NKV} kv heads x {D} | floor at {A.bw:.0f} GB/s', flush=True)
+PW = card_per_wgp() if A.per_wgp == 'card' else int(A.per_wgp)
+print(torch.cuda.get_device_name(0), f'| grid {PW} per WGP ({k3.resident_grid("k3_q35_swift", PW)} workgroups) for every arm | geometry {H} q heads / {NKV} kv heads x {D} | floor at {A.bw:.0f} GB/s', flush=True)
 
 
 def timed(E, reps):
@@ -45,7 +48,7 @@ def timed(E, reps):
 
 
 def empty_launch(mod, T):
-    E = k3.Engine(module=mod, grid=k3.resident_grid(mod), T=T, limit_us=200_000)
+    E = k3.Engine(module=mod, grid=k3.resident_grid(mod, PW), T=T, limit_us=200_000)
     E.nop(1, 0)
     E.build()
     return timed(E, A.reps)[0]
@@ -69,7 +72,7 @@ for T in TS:
             if not q8: cache = cache.view(torch.float16)
             q = torch.randn(T * H * D, device='cuda'); out = torch.zeros(T * H * D, device='cuda')
             pos = torch.full((1,), P - T, dtype=torch.int32, device='cuda')
-            E = k3.Engine(module=mod, grid=k3.resident_grid(mod), T=T, limit_us=500_000)
+            E = k3.Engine(module=mod, grid=k3.resident_grid(mod, PW), T=T, limit_us=500_000)
             try:
                 if base == 'own':
                     E.attn_dec(q, cache, pos, out, H, NKV, D, SCALE, q8=False, batched=True)

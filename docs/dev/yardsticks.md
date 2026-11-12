@@ -21,32 +21,41 @@ measured on the XT overstate the distance to that card's own floor by up to ~20 
 
 ## Decode and verify attention at depth (dense qwen35 geometry)
 
-`benchmarks/attn_depth.py`, RX 7900 XT alone, testing 737df92. One attention layer of Swift 1.5 / ThinkingCap /
-AREX-2 (24 query heads over 4 kv heads, head dim 256): a K3 tape of only the attention op(s) on a zeroed KV cache of P
-positions, median of 30 host-timed persistent launches (launch included; an empty tape is 12-21 us). x16 = the 16
-attention blocks of a token. Floor = the KV bytes read once for all T rows.
+`benchmarks/attn_depth.py`, testing 737df92. One attention layer of Swift 1.5 / ThinkingCap / AREX-2 (24 query heads
+over 4 kv heads, head dim 256): a K3 tape of only the attention op(s) on a zeroed KV cache of P positions, every arm on
+the dense engine's own grid (`card_per_wgp`: 5 per WGP, 210 workgroups on the XT; 4, 192 on the XTX), median of 30
+host-timed persistent launches (launch included; an empty tape is 11-13 us). x16 = the 16 attention blocks of a token.
+Floor = the KV bytes read once for all T rows at 952 GB/s.
+
+RX 7900 XT alone:
 
 | P | own (k3_q35_swift), T 1 | split f16 (k3_gguf_q35d), T 1 | split q8_0, T 1 | own, T 4 | split f16, T 4 | split q8_0, T 4 | floor f16 / q8_0 |
 |---|---|---|---|---|---|---|---|
-| 1,024 | 130.8 us | 33.6 | 34.8 | 145.2 | 55.9 | 58.2 | 4.4 / 2.3 |
-| 4,096 | 474.6 | 58.5 | 60.4 | 529.3 | 149.3 | 159.6 | 17.6 / 9.4 |
-| 16,384 | 1,864.2 | 193.6 | 176.9 | 2,087.6 | 628.6 | 615.2 | 70.5 / 37.4 |
-| 32,768 | 4,354.4 | 412.3 | 381.9 | 4,448.2 | 1,297.2 | 1,324.3 | 141.0 / 74.9 |
-| 49,152 | 6,517.2 | 624.7 | 579.0 | 6,655.2 | 1,930.8 | 1,975.2 | 211.5 / 112.3 |
-| x16 at 32K | **69.7 ms** | **6.6 ms** | 6.1 ms | 71.2 ms | 20.8 ms | 21.2 ms | 2.3 / 1.2 ms |
+| 1,024 | 130.9 us | 33.6 | 34.5 | 145.8 | 66.5 | 68.8 | 4.4 / 2.3 |
+| 4,096 | 474.6 | 69.5 | 70.9 | 530.0 | 199.3 | 204.9 | 17.6 / 9.4 |
+| 16,384 | 1,863.6 | 229.1 | 218.9 | 2,094.2 | 874.1 | 798.0 | 70.5 / 37.4 |
+| 32,768 | 4,353.4 | 517.3 | 496.8 | 4,454.2 | 1,762.0 | 1,786.9 | 141.0 / 74.9 |
+| 49,152 | 6,517.0 | 772.8 | 758.0 | 6,658.9 | 2,625.4 | 2,698.2 | 211.5 / 112.3 |
+| x16 at 32K | **69.7 ms** | **8.3 ms** | 7.9 ms | 71.3 ms | 28.2 ms | 28.6 ms | 2.3 / 1.2 ms |
+
+RX 7900 XTX (the card the Swift decode numbers come from), own op, T 1: 111.6 / 400.9 / 1,795 / 4,016 / 5,891 us at
+1K / 4K / 16K / 32K / 49K: **64.3 ms of a token at 32K**, 94.3 ms at 49K.
 
 What it says:
 - Swift's and ThinkingCap's own modules run decode attention as one workgroup per query head walking every position
-  (`own_op_attn_dec`): 26-31x the bandwidth floor at every depth. At 32K that is 69.7 ms of a token; the measured
-  Swift decode step there is 84.4 ms (24 ms at short context), so this one op is nearly all of the depth cost.
+  (`own_op_attn_dec`): 23-31x the bandwidth floor at every depth. On the XTX that is 64.3 ms of a token at 32K; Swift's
+  measured decode step there is 84.4 ms against 24 ms at short context, so this one op is nearly all of the depth
+  cost (same card).
 - Our own split pair (flash decoding, `kernels/k3_attn_split.h`, already in the AREX-2 / Coder / Qwen3.6 modules) runs
-  the same geometry at 2.7-3.3x the floor: 10.6x faster at 32K. Generalizing it into the Swift / ThinkingCap modules is
-  a step of the dense-27B plan that had not been built; it is the next change (its own pull request, accuracy-gated:
-  the split pair is not bitwise the one-head op).
-- A q8_0 cache halves the bytes but saves only 7-9 % here (the split pair is not at the floor yet); an int8 KV pays only
+  the same geometry on the same grid at 3.3-3.9x the floor from 4K up: 8.4x faster at 32K. Generalizing it into the Swift /
+  ThinkingCap modules is a step of the dense-27B plan that had not been built; it is the next change (its own pull
+  request, accuracy-gated: the split pair is not bitwise the one-head op).
+- A q8_0 cache halves the bytes but saves only 2-5 % here (the split pair is not at the floor); an int8 KV pays only
   once the kernel is near the bandwidth floor.
-- T = 4 on the split pair costs ~3.1x T = 1 at depth: each verify row reads the cache again. Packing the T rows into
-  one KV pass (int8-aiter's verify packing; rocKE's GQA-packed decode) is the lead for verify passes at depth.
+- T = 4 on the split pair costs 3.4x T = 1 at depth: each verify row reads the cache again. Packing the T rows into one
+  KV pass (int8-aiter's verify packing; rocKE's GQA-packed decode) is the lead for verify passes at depth.
+- At 8 workgroups per WGP (the GGUF modules' resident grid, 672 workgroups) the split pair was 412 us at 32K instead of
+  517: its slices want more workgroups than the dense engine's grid; worth a look in the fix.
 - Outside yardsticks for this table (rocKE split-KV decode, CK) are pending.
 
 ## Prefill GEMMs (dense qwen35, Swift 1.5 Q4_K_M shapes)
@@ -81,40 +90,43 @@ What it says:
 - Ours: Q4_K at rocBLAS's ~50 TF, Q6_K 12-14 % behind it, Q8_0 25-34 % behind, the 1024-row k / v projections 67 %
   behind. Its tile reads quantized blocks and dequantizes in the loop, which a dense GEMM does not; FlyDSL's numbers are
   the ceiling for a dense fp16 tile on this card at these shapes, not a drop-in.
-- The borrowable part is FlyDSL's tile design (4 waves, double-buffered LDS ping-pong, 128 x 128 x 32 default tile,
-  swizzled grid, shape-autotuned tile ladder; Apache-2.0): our GEMMs keep their in-tile dequantization and adopt the
-  pipeline. Upper bound if our tiles reached FlyDSL's fp16 rate: a chunk's GEMMs 2.26 -> ~1.4 s.
+- FlyDSL's tile (4 waves, double-buffered LDS ping-pong, 128 x 128 x 32 default tile, swizzled grid, shape-autotuned
+  tile ladder; Apache-2.0) is the bar. An earlier dense bf16 WMMA GEMM of ours (the training stack, not in this tree)
+  already reached 70-90 TF on the XTX with the same kind of pipeline, so the prefill tiles start from our own and keep
+  their in-tile dequantization. Upper bound if they reached FlyDSL's fp16 rate: a chunk's GEMMs 2.26 -> ~1.4 s.
 - GEMMs are most of a prefill chunk: 2.26 s of GEMMs per 2048 tokens on the XT.
-- FlyDSL's fp16 output matches torch's on the same operands to <= 3.6e-4 relative (every shape above).
+- FlyDSL's fp16 output matches torch's on the same operands to <= 3.6e-4 relative (every shape above, checked at M 2048).
+- The per-chunk totals assume blk.0's formats for all 48 GDN blocks and blk.3's for all 16 attention blocks.
 
 ## Prefill attention at depth (dense qwen35 geometry)
 
 `benchmarks/q35_prefill_attn.py`, RX 7900 XT alone, testing 737df92. One 2048-row chunk at positions P0 .. P0 + 2047
-attends to the f16 cache rows up to its own (24 query heads over 4 kv heads, head dim 256). Ours:
-`q35p_attn16`, one workgroup per (row, query head) walking every position up to its own, in launches of at most 2^20
-token-positions, as the prefill driver runs it. Yardstick: torch's `scaled_dot_product_attention` (fp16, GQA, an
-explicit causal-with-offset mask; PyTorch picks the backend). TFLOPS count the causal half once. Median of 5.
+attends to the f16 cache rows up to its own (24 query heads over 4 kv heads, head dim 256). Ours: `q35p_attn16`, one
+workgroup per (row, query head) walking every position up to its own, in launches of at most 2^20 token-positions, as
+the prefill driver runs it. Yardstick: torch's `scaled_dot_product_attention` (fp16, GQA) on its tiled backends only
+(flash / memory-efficient). A causal-with-offset mask has no tiled kernel here (with the mask PyTorch falls back to
+the math path, which materializes the scores: 17.5 GB at 32K), so the chunk runs as its two tiled calls, the prefix
+(no mask) and the causal square, their times summed (the log-sum-exp merge not counted). TFLOPS count the causal half
+once. Median of 5.
 
-| P0 | ours | torch SDPA | ours / SDPA | max abs difference |
-|---|---|---|---|---|
-| 0 | 25.7 ms (2.0 TF) | 11.8 ms (4.4 TF) | 2.18 | 5.2e-4 |
-| 8,192 | 242.9 ms (1.9 TF) | 59.2 ms (7.8 TF) | 4.10 | 1.0e-5 |
-| 30,720 | 963.4 ms (1.7 TF) | 182.2 ms (8.8 TF) | 5.29 | 5.0e-6 |
+| P0 | ours | torch SDPA, tiled | ours / SDPA |
+|---|---|---|---|
+| 0 | 25.7 ms (2.0 TF) | 2.31 ms (22.3 TF) | 11.1 (outputs agree to 4.8e-4) |
+| 8,192 | 243.2 ms (1.9 TF) | 12.6 ms (36.8 TF) | 19.3 |
+| 30,720 | 963.6 ms (1.7 TF) | 40.5 ms (39.4 TF) | 23.8 |
 
 What it says:
-- Our prefill attention is not tiled: each (row, head) workgroup re-reads K and V, so it runs at ~2 TF at every depth
-  and its cost grows ~31 ms per 1K of depth per chunk: the chunk at 30K spends 0.96 s in attention against 2.26 s in
-  all its GEMMs (43 %); at this rate attention would equal the GEMMs near 70K.
-- SDPA (a tiled kernel) is 2-5x faster and still far from the card's WMMA rate (8.8 TF); rocKE's RDNA WMMA prefill
-  (`wmma_fmha_fwd_v2`) and CK's gfx1100 FMHA policy are the yardsticks that would show the ceiling (pending).
+- Our prefill attention is not tiled: each (row, head) workgroup re-reads K and V, so it runs at ~2 TF at every depth,
+  and its cost grows ~31 ms per 1K of depth per chunk: the chunk at 30K spends 0.96 s in attention against 2.26 s in all
+  its GEMMs. A tiled kernel does the same chunk in ~40 ms at ~39 TF.
 - The fix is our own WMMA flash-attention tile for prefill (K / V tiles in LDS shared by a block of rows, online
-  softmax), with SDPA / rocKE as the bar.
+  softmax), with SDPA's tiled kernel as the bar until rocKE's RDNA WMMA prefill and CK's gfx1100 FMHA are measured.
 
 ## Summary: where the outside kernels say we stand (XT)
 
 | Op | ours | best yardstick measured | gap |
 |---|---|---|---|
-| Decode attention, Swift / ThinkingCap modules, 32K | 4.35 ms / layer | our own split pair: 0.41 ms | 10.6x (own fix, not outside code) |
-| Verify attention (T 4), split pair, 32K | 1.30 ms / layer (3.1x T 1) | - (rocKE GQA-packed decode pending) | rows re-read the cache |
+| Decode attention, Swift / ThinkingCap modules, 32K (XT, engine grid) | 4.35 ms / layer | our own split pair: 0.52 ms | 8.4x (own fix, not outside code) |
+| Verify attention (T 4), split pair, 32K | 1.76 ms / layer (3.4x T 1) | - (rocKE GQA-packed decode pending) | rows re-read the cache |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
-| Prefill attention, chunk at 30K | 963 ms | torch SDPA: 182 ms | 5.3x |
+| Prefill attention, chunk at 30K | 964 ms | torch SDPA (tiled): 40.5 ms | 23.8x |
