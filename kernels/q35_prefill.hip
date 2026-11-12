@@ -348,6 +348,179 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn16(const float * __re
     }
 }
 
+// ---- q35p_attn_wm: the chunk's causal attention as WMMA tiles (fp16 q / k / v / p, fp32 scores, softmax state and
+// sums), head dim 256, up to 8 query heads per kv head. q3m_prefill.hip's q3p_attn (head dim 128) widened to 256: its
+// absolute-position layout, its transposed products, its zero-product rules, unchanged; what 256 adds is the wave pair
+// (two waves per 16 query rows, each holding half of the head's dims: its half of Q in registers, its half of O; the two
+// halves' score partials summed through LDS as lo + hi in both waves) - rocKE's split of head widths above 128 across a
+// wave pair (ROCm/rocm-libraries, hip-kernel-provider/rocke, rdna_attention.py; MIT License, Copyright (C) Advanced Micro
+// Devices, Inc.: THIRD_PARTY.md), written here from that description; no rocKE code. A wave's registers: Q 64 VGPRs, O 64.
+// Work by ABSOLUTE position: workgroup i (8 waves) = positions 8 i .. 8 i + 7 x the G query heads of kv head blockIdx.y;
+// pair w (waves 2 w, 2 w + 1) = positions q0 = 8 i + 2 w, q1 = q0 + 1; its 16 columns n = lane & 15 -> position
+// q0 + (n >> 3), head G g + (n & 7) (columns with n & 7 >= G: head G g + G - 1 again, never written). Positions outside
+// the chunk [pos0, pos0 + n) are computed and never written. Chunks of 32 positions from 0: K [32][AW_KP] and V^T
+// [256][AW_VP] staged once for the 8 waves, the score partials [wave][tile][v][lane] (53.8 KB of LDS).
+// The same bits at every chunk geometry (the prompt cache's stops) and every launch split: a row's sums depend only on
+// absolute positions (q3p_attn's argument: rows past q0 in the pair's diagonal tile zeroed in V^T, q1's own row added
+// with fp32 fmas, tiles past the pair skipped, K's rows independent).
+// q: the chunk's [n][heads][256] fp32 (the q norm + RoPE output; rounded to fp16 here), out the same shape (fp32).
+// scale_log2 = scale * log2(e). Grid (8-position blocks blk0 .. blk0 + gridDim.x - 1, nkv), block 256.
+#define AW_C 32
+#define AW_D 256
+#define AW_KP (AW_D + 8)
+#define AW_VP (AW_C + 8)
+extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __restrict__ qin, const _Float16 * __restrict__ cache,
+                                                               int pos0, int n, int blk0, int heads, int nkv, float scale_log2,
+                                                               float * __restrict__ out) {
+    __shared__ _Float16 Ks[AW_C * AW_KP];
+    __shared__ _Float16 Vt[AW_D * AW_VP];
+    __shared__ float Sx[8][2][8][32];
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, hi = lane >> 4, half = wave & 1, dh = half * 128;
+    const int G = heads / nkv, g = blockIdx.y, b8 = (blk0 + (int)blockIdx.x) * 8;
+    const size_t M = (size_t)nkv * AW_D, RS = 2 * M;   // halves per cache row
+    const int nq = lane & 15, sec = nq >> 3, hh = nq & 7;
+    const int q0 = b8 + 2 * (wave >> 1), q1 = q0 + 1;
+    const int qpos = q0 + sec, tq = qpos - pos0, hq = g * G + min(hh, G - 1);
+    const bool qin_ok = tq >= 0 && tq < n, qok = qin_ok && hh < G;
+    h16_t Qb[8];                                        // this wave's half of the column's q, 16 dims per k-step
+    {
+        const float4 * qp = (const float4 *)(qin + ((size_t)(qin_ok ? tq : 0) * heads + hq) * AW_D + dh);
+#pragma unroll
+        for (int s = 0; s < 8; s++) {
+            h16_t v;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                const float4 f = qp[4 * s + j];
+                v[4 * j] = (_Float16)f.x; v[4 * j + 1] = (_Float16)f.y; v[4 * j + 2] = (_Float16)f.z; v[4 * j + 3] = (_Float16)f.w;
+            }
+            Qb[s] = v;
+        }
+    }
+    f8_t O[8];
+#pragma unroll
+    for (int d = 0; d < 8; d++) O[d] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    float m = -INFINITY, l = 0.0f;
+    const int npos = min(pos0 + n, b8 + 8);             // rows 0 .. npos - 1 exist for this workgroup (its last position's)
+    const int sp = tid >> 3, sq = tid & 7;              // staging: position sp of the chunk, dims 32 sq .. 32 sq + 31
+    for (int c0 = 0; c0 < npos; c0 += AW_C) {
+        const int prow = min(c0 + sp, npos - 1);       // (rows past the end: a valid row; never in a written column's sum)
+        const u32x4_t * kp = (const u32x4_t *)(cache + (size_t)prow * RS + (size_t)g * AW_D + sq * 32);
+        const u32x4_t * vp = (const u32x4_t *)(cache + (size_t)prow * RS + M + (size_t)g * AW_D + sq * 32);
+        u32x4_t kv[4], vv[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) { kv[j] = kp[j]; vv[j] = vp[j]; }
+        __syncthreads();
+        u32x4_t * kd = (u32x4_t *)(Ks + sp * AW_KP + sq * 32);
+#pragma unroll
+        for (int j = 0; j < 4; j++) kd[j] = kv[j];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const _Float16 * hv = (const _Float16 *)&vv[j];
+#pragma unroll
+            for (int e = 0; e < 8; e++) Vt[(sq * 32 + j * 8 + e) * AW_VP + sp] = hv[e];
+        }
+        __syncthreads();
+        const bool act = c0 <= q1;                      // (wave-uniform, the same in both waves of a pair; then c0 <= q0)
+        // the pair's tile: positions c0 + 16 std .. + 15 hold q0 and q1 (q0 even: never across a tile edge); 1 when the
+        // pair lies past this chunk. Tiles past it are all masked: skipped.
+        const int std_ = min(1, (q0 - c0) >> 4), kq0 = q0 - c0 - 16 * std_;   // kq0: q0's index in its tile (even; >= 16: none)
+        f8_t S[2];
+        if (act) {
+#pragma unroll
+            for (int st = 0; st < 2; st++) {
+                S[st] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+                if (st > std_) continue;
+                const u32x4_t * ap = (const u32x4_t *)(Ks + (st * 16 + (lane & 15)) * AW_KP + dh);
+#pragma unroll
+                for (int s = 0; s < 8; s++) S[st] = wmma(h16of(ap[2 * s], ap[2 * s + 1]), Qb[s], S[st]);
+#pragma unroll
+                for (int v = 0; v < 8; v++) Sx[wave][st][v][lane] = S[st][v];
+            }
+        }
+        __syncthreads();
+        if (!act) continue;
+        float cm = -INFINITY;
+#pragma unroll
+        for (int st = 0; st < 2; st++)
+#pragma unroll
+            for (int v = 0; v < 8; v++) {
+                const int pp = c0 + st * 16 + 2 * v + hi;
+                const float sv = Sx[wave & ~1][st][v][lane] + Sx[wave | 1][st][v][lane];   // (lo + hi: the same in both waves)
+                const float x = (st <= std_ && pp <= qpos) ? sv * scale_log2 : -INFINITY;
+                S[st][v] = x; cm = fmaxf(cm, x);
+            }
+        cm = fmaxf(cm, __shfl_xor(cm, 16, 32));
+        const float mn = fmaxf(m, cm);                  // (position 0 is every row's: mn is finite)
+        const float alpha = exp2f(m - mn);
+        float rsum = 0.0f;
+        uint32_t pw[2][4];                              // fp16 p, two positions per dword: [st][v pair]
+#pragma unroll
+        for (int st = 0; st < 2; st++)
+#pragma unroll
+            for (int v = 0; v < 8; v += 2) {
+                const _Float16 p0 = (_Float16)exp2f(S[st][v] - mn), p1 = (_Float16)exp2f(S[st][v + 1] - mn);
+                rsum += (float)p0 + (float)p1;
+                pw[st][v >> 1] = as_u((h2_t){p0, p1});
+            }
+        rsum += __shfl_xor(rsum, 16, 32);
+        l = l * alpha + rsum; m = mn;
+#pragma unroll
+        for (int d = 0; d < 8; d++)
+#pragma unroll
+            for (int v = 0; v < 8; v++) O[d][v] *= alpha;
+#pragma unroll
+        for (int st = 0; st < 2; st++) {
+            if (st > std_) continue;
+            // P^T operand: positions 16 st .. 16 st + 15 of the lane's row: own (2 v + hi) and lane ^ 16's (2 v + 1 - hi)
+            uint32_t o[8];
+#pragma unroll
+            for (int w = 0; w < 4; w++) {
+                const uint32_t mine = pw[st][w], other = (uint32_t)__shfl_xor((int)mine, 16, 32);
+                const uint32_t ev = hi ? other : mine, od = hi ? mine : other;   // even positions, odd positions
+                o[2 * w] = __builtin_amdgcn_perm(od, ev, 0x05040100u);       // positions 4w, 4w + 1
+                o[2 * w + 1] = __builtin_amdgcn_perm(od, ev, 0x07060302u);   // positions 4w + 2, 4w + 3
+            }
+            const bool diag = st == std_ && kq0 < 16;
+            float p_q1 = 0.0f;
+            if (diag) {                                 // q1's own entry (index kq0 + 1: dword kq0 / 2, high half) out of B
+                const int wq = kq0 >> 1;
+#pragma unroll
+                for (int w = 0; w < 8; w++)
+                    if (w == wq) { p_q1 = (float)as_h2(o[w]).y; if (sec) o[w] &= 0x0000ffffu; }
+            }
+            const h16_t PB = __builtin_bit_cast(h16_t, o);
+#pragma unroll
+            for (int d = 0; d < 8; d++) {
+                const u32x4_t * ap = (const u32x4_t *)(Vt + (dh + d * 16 + (lane & 15)) * AW_VP + st * 16);
+                u32x4_t a0 = ap[0], a1 = ap[1];
+                if (diag) {                             // V^T past q0 zeroed (kq0 even: dword kq0 / 2 keeps its low half)
+                    uint32_t aw[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+                    const int wq = kq0 >> 1;
+#pragma unroll
+                    for (int w = 0; w < 8; w++) aw[w] = w < wq ? aw[w] : w == wq ? (aw[w] & 0x0000ffffu) : 0u;
+                    a0 = (u32x4_t){aw[0], aw[1], aw[2], aw[3]}; a1 = (u32x4_t){aw[4], aw[5], aw[6], aw[7]};
+                }
+                O[d] = wmma(h16of(a0, a1), PB, O[d]);
+            }
+            if (diag && sec) {                          // q1's rows: + p(q1) v(q1), fp32 fmas over the lane's dims
+                const int kc = 16 * st + kq0 + 1;       // q1's row in the chunk
+#pragma unroll
+                for (int d = 0; d < 8; d++)
+#pragma unroll
+                    for (int v = 0; v < 8; v++)
+                        O[d][v] = __builtin_fmaf(p_q1, (float)Vt[(dh + d * 16 + 2 * v + hi) * AW_VP + kc], O[d][v]);
+            }
+        }
+    }
+    if (!qok) return;
+    const float il = 1.0f / l;
+    float * op = out + ((size_t)tq * heads + hq) * AW_D + dh;
+#pragma unroll
+    for (int d = 0; d < 8; d++)
+#pragma unroll
+        for (int v = 0; v < 8; v++) op[d * 16 + 2 * v + hi] = O[d][v] * il;
+}
+
 // q35p_gate_mul16: OP_GATE_MUL16 over values i < N: y16[i] = fp16(a[i] * sigmoid(gate[h * stride + off + d])), h = i / D,
 // d = i % D (the q GEMM's [q | gate] head pairs: stride 2 D, offset D; h counts heads across the chunk's rows).
 extern "C" __global__ void __launch_bounds__(256) q35p_gate_mul16(const float * __restrict__ a, const float * __restrict__ gt,

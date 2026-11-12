@@ -5,9 +5,10 @@ object) on the same inputs, one token per pass.
   tools/guard.sh LOG 900 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35_prefill_ops.py GGUF
 
 Real norm / conv / gate weights of the file (Tensor.pread: ordinary memory), random activations (fixed seeds):
-  attention  k norm + RoPE, the f16 KV append, q norm + RoPE, the attention over positions 0 .. pos, the fp16 output gate:
-             37 rows at p0 = 0 and at p0 = 600 (rows below p0: the same random f16 cache rows in both; positions cross
-             the attention's 512-position chunks), the prefill's attention in two launches (a row offset r0 > 0)
+  attention  k norm + RoPE, the f16 KV append, q norm + RoPE, the fp16 output gate: bitwise; the attention over positions
+             0 .. pos (the prefill's WMMA tiles, the decode's split pair: within 2e-2 / 2e-3 of rms of each other):
+             37 rows at p0 = 0 and at p0 = 600 (rows below p0: the same random f16 cache rows in both), the prefill's
+             attention in two launches
   GDN        gates (incl. the softplus branches), the conv + its state, l2, the recurrence, the fp16 output norm: 37 rows from
              random conv / recurrent states; the decode's lazy commit (one more pass commits the last token) against the
              prefill's states written once
@@ -113,16 +114,24 @@ def main():
         O.kv_append16(ko2, M, vr.view(-1), M, cache2, M, p0, T, ROWS, err)
         A.qk_nr(qf.view(-1), 2 * hd, nh, hd, qn, nrot, theta, eps, p0, qo2, T)
         torch.cuda.synchronize(dev)
-        for r0, r1 in ((0, 20), (20, T)):
+        B0, B1 = O._wm_span(p0, T)
+        for b0, b1 in ((B0, B0 + 2), (B0 + 2, B1)):     # (two launches)
             t0 = time.perf_counter()
-            O.attn16(qo2, cache2, p0, T, nh, nkv, hd, 1.0 / np.sqrt(hd), att2, ROWS, r0, r1)
+            O.attn_wm(qo2, cache2, p0, T, nh, nkv, hd, 1.0 / np.sqrt(hd), att2, ROWS, b0, b1)
             torch.cuda.synchronize(dev); worst_ms = max(worst_ms, 1e3 * (time.perf_counter() - t0))
         O.gate_mul16(att2, qf.view(-1), gat2, T * QH, hd, 2 * hd, hd)
         torch.cuda.synchronize(dev)
         check(int(err.item()) == 0, f'p0 {p0}: the KV append wrote every row (error word {int(err.item())})')
         same(f'attention p0 {p0}: k norm + RoPE', ko2, out1['ko']); same(f'attention p0 {p0}: q norm + RoPE', qo2, out1['qo'])
         same(f'attention p0 {p0}: the f16 cache', cache2, cache1)
-        same(f'attention p0 {p0}: the attention', att2, out1['att']); same(f'attention p0 {p0}: the fp16 gate', gat2, out1['gat'])
+        # the decode's attention is the split pair (fp32 q), the prefill's WMMA tiles (fp16 q, k, v, p): both against
+        # float64 in tests/engine/test_q35_split_attn.py / tests/prefill/test_q35_prefill_attn.py; here against each other
+        a2, a1 = att2.view(T, -1).cpu().double(), out1['att'].cpu().double()   # (to the host first: no float64 copies on the card)
+        rms = float(a1.pow(2).mean().sqrt()); dmax = float((a2 - a1).abs().max()) / rms; dmean = float((a2 - a1).abs().mean()) / rms
+        check(dmax < 2e-2 and dmean < 2e-3, f'attention p0 {p0}: the attention (tiles vs the decode\'s split pair): max {dmax:.2e}, mean {dmean:.2e} of rms')
+        g2, g1 = gat2.view(T, -1).cpu().double(), out1['gat'].cpu().double()
+        gr = float(g1.pow(2).mean().sqrt()); gmax = float((g2 - g1).abs().max()) / gr
+        check(gmax < 2e-2, f'attention p0 {p0}: the fp16 gate on it: max {gmax:.2e} of rms (bitwise when the attention is: the same op)')
     print(f'NOTE the slowest attention launch: {worst_ms:.2f} ms (rows x positions <= {T} x {600 + T})', flush=True)
     # a row past the cache is refused on the host before any launch
     try:

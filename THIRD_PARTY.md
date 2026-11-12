@@ -2,7 +2,7 @@
 
 Caminus is Copyright (C) 2026 jdominick05, licensed under the GNU Affero General Public License v3.0 or later
 ([LICENSE](LICENSE)). It includes, builds against or derives from the third-party code below: MIT-licensed (llama.cpp / ggml,
-Strata, flash-linear-attention) and Apache-2.0-licensed (Hugging Face transformers; the license text is in
+Strata, flash-linear-attention, rocKE) and Apache-2.0-licensed (Hugging Face transformers; the license text is in
 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)). Their terms require keeping these notices with the code. Model weights are
 not part of this repository and stay under their own licenses (the last section).
 
@@ -133,6 +133,39 @@ https://github.com/fla-org/flash-linear-attention (the installed `flash-linear-a
 MIT License
 
 Copyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## rocKE, ROCm hip-kernel-provider (MIT)
+
+https://github.com/ROCm/rocm-libraries (`dnn-providers/hip-kernel-provider/rocke`, at commit 9e91949). A design followed,
+no code copied; measured as a yardstick only (docs/dev/yardsticks.md, `benchmarks/rocke_attn.py`; not a dependency).
+
+| Where | What follows rocKE |
+|---|---|
+| `kernels/q35_prefill.hip` (`q35p_attn_wm`) | the split of a head width above 128 across a wave pair (two waves per 16 query rows, each holding half of Q's and O's dims), from rocKE's RDNA attention body (`platform/python/rocke/helpers/rdna_attention.py`); the kernel is written from that description on Caminus's own head-dim-128 kernel (`q3p_attn`). The notice is in the kernel's comment |
+
+```
+MIT License
+
+Copyright (C) Advanced Micro Devices, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

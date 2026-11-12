@@ -1,8 +1,9 @@
 """The dense qwen35 prefill's attention for one chunk at depth (Swift 1.5 / ThinkingCap / AREX-2 geometry: 24 query heads
 over 4 kv heads, head dim 256, f16 KV cache): a chunk of N rows at positions P0 .. P0 + N - 1 attends to the cache rows
-0 .. its own position. Ours: prefill/q35own.py Ops.attn16 (kernels/q35_prefill.hip q35p_attn16: one workgroup per (row,
-query head) walks every position up to its own; split into launches of at most ATTN_TP token-positions, as the driver
-runs it). Yardstick: torch.nn.functional.scaled_dot_product_attention (fp16, GQA) restricted to its tiled backends (flash /
+0 .. its own position. Ours: prefill/q35own.py Ops.attn_wm (kernels/q35_prefill.hip q35p_attn_wm: WMMA tiles, a
+workgroup = 8 positions x one kv head's 6 query heads, wave pairs over the 256 dims; launches of at most ATTN_WM_TP
+row-positions, as the driver runs it), and the kernel it replaced, Ops.attn16 (q35p_attn16: one workgroup per (row,
+query head) walks every position up to its own; launches of at most ATTN_TP token-positions). Yardstick: torch.nn.functional.scaled_dot_product_attention (fp16, GQA) restricted to its tiled backends (flash /
 memory-efficient; never the math path, which would materialize the N x L x heads scores: 17.5 GB at L 32K). An explicit
 causal-with-offset mask has no tiled kernel here, so the chunk runs as the two tiled calls it splits into: the prefix
 (every row sees cache rows 0 .. P0 - 1: no mask) and the chunk's own causal square (is_causal); their time is summed,
@@ -42,9 +43,12 @@ for P0 in [int(v) for v in A.p0.split(',')]:
     cache = torch.empty(L * 2 * NKV * D, dtype=torch.float16, device=dev).normal_(0.0, 0.5)   # (in place: no fp32 temporaries)
     q = torch.randn(N * H * D, device=dev); out = torch.zeros(N * H * D, device=dev)
     scale = 1.0 / np.sqrt(D)
-    runs = ops.attn_rows(P0, N)
+    runs, blocks = ops.attn_rows(P0, N), ops.attn_blocks(P0, N)
 
     def ours():
+        for b0, b1 in blocks: ops.attn_wm(q, cache, P0, N, H, NKV, D, scale, out, L, b0, b1)
+
+    def old():
         for r0, r1 in runs: ops.attn16(q, cache, P0, N, H, NKV, D, scale, out, L, r0, r1)
 
     kv = cache.view(L, 2, NKV, D)
@@ -62,8 +66,10 @@ for P0 in [int(v) for v in A.p0.split(',')]:
         return tiled(lambda: Fn.scaled_dot_product_attention(qh, kp, vp, scale=scale, enable_gqa=True))
 
     fl = 4.0 * N * (P0 + N / 2) * H * D
+    t_p = bench(old)
     t_o = bench(ours)
-    line = f'P0 {P0:6d} (rows to {L:6d}): ours {t_o / 1e3:8.2f} ms ({fl / t_o / 1e6:5.1f} TF, {len(runs)} launches)'
+    line = (f'P0 {P0:6d} (rows to {L:6d}): ours (tiles) {t_o / 1e3:8.2f} ms ({fl / t_o / 1e6:5.1f} TF, {len(blocks)} launches)'
+            f' | per-(row, head) {t_p / 1e3:8.2f} ms ({fl / t_p / 1e6:5.1f} TF) | {t_p / t_o:5.1f}x')
     torch.cuda.reset_peak_memory_stats(dev); base = torch.cuda.memory_allocated(dev)
     try:
         t_s = bench(sq) + (bench(pre) if P0 else 0.0)

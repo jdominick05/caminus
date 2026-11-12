@@ -10,14 +10,16 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
             recurrence (pf_gdn_step: the decode's state in place, read once, written once), the output norm with the SiLU
             gate as fp16 (q35p_gdn_norm16), ssm_out (GEMM)
   attention attn_q / k / v (GEMMs); k norm + RoPE (pf_qk_nr), the f16 KV append (q35p_kv_append16), q norm + RoPE,
-            the attention over positions 0 .. pos (q35p_attn16: own_op_attn_dec's batched form), the output gate as fp16
+            the attention over positions 0 .. pos (q35p_attn_wm: WMMA tiles, fp16 q / k / v / p; q35p_attn16 for
+            other head shapes), the output gate as fp16
             (q35p_gate_mul16), attn_output (GEMM)
   h, h16 = add_rms16(x += block, post_attention_norm)
   FFN       gate / up (GEMMs), fp16 silu(g) u (q3p_swiglu), down (GEMM) -> added at the next layer's norm
 The last layer stops after its recurrent state or its cache rows: its output feeds only the prompt's logits, which a
 prefill never returns (the last prompt token goes through a K3 pass: the first logits come from decode numerics).
-Every op but the GEMMs is bitwise its K3 decode op on the same inputs (gate G1, tests/prefill/test_q35_prefill_ops.py);
-the GEMMs sum in WMMA order, so the prefill is G-model gated (prefill-then-decode against the float64 reference, with
+Every op but the GEMMs and the attention is bitwise its K3 decode op on the same inputs (gate G1,
+tests/prefill/test_q35_prefill_ops.py; the decode's attention is the split pair, the prefill's WMMA tiles: G1 holds both
+against float64); the GEMMs and the attention sum in WMMA order, so the prefill is G-model gated (prefill-then-decode against the float64 reference, with
 llama.cpp's own prefill-then-decode as the bound). Chunk geometry changes no bit (a row's ops see only its own row and the
 rows before it, in the same order at every chunking).
 
@@ -51,6 +53,10 @@ IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p
 # token-positions per attention launch (rows x the deepest position they read: one workgroup per (row, query head) walks
 # every position below its own). Unmeasured; the G1 test times the largest launch it runs
 ATTN_TP = 1 << 20
+# row-positions per tiled attention launch (q35p_attn_wm: a workgroup = 8 positions x one kv head's query heads walks the
+# positions up to its last; a launch's cost ~ the sum of its blocks' depths x 8 rows). Set by the G1 test's timing.
+ATTN_WM_TP = 1 << 25
+ATTN_WM_D = 256      # (the tiled kernel's head dim; up to 8 query heads per kv head)
 # T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Not measured yet: Qwen3.6's 12 until the
 # speed test sets it
 CROSSOVER = 12
@@ -115,6 +121,43 @@ class Ops(q3m_ops.Ops):
         es = q.element_size()
         self.mod.q35p_attn16(((r1 - r0) * heads,), (256,), ctypes.c_void_p(q.data_ptr() + off * es), cache, I(pos0), I(r0),
                              I(heads), I(nkv), I(D), F(scale), ctypes.c_void_p(out.data_ptr() + off * es))
+
+    def attn_wm(self, q, cache, pos0, n, heads, nkv, D, scale, out, rows, b0=None, b1=None):
+        """the tiled attention (kernels/q35_prefill.hip q35p_attn_wm) of a chunk at positions pos0 .. pos0 + n - 1, the
+        8-position blocks b0 .. b1 - 1 of attn_blocks() (one launch): out[r, h] = the attention of q[r, h] over cache
+        positions 0 .. pos0 + r, for the chunk's rows in those blocks. q / out: the chunk's [n, heads, D] fp32 (whole
+        buffers: the kernel addresses rows by position). A row's bits do not depend on the chunking or the launch split"""
+        B0, B1 = self._wm_span(pos0, n)
+        b0 = B0 if b0 is None else int(b0); b1 = B1 if b1 is None else int(b1)
+        if not self.attn_wm_ok(heads, nkv, D) or not B0 <= b0 < b1 <= B1:
+            raise ValueError(f'q35 attn_wm: D {D} (only {ATTN_WM_D}), heads {heads} / nkv {nkv} (at most 8 per kv head), blocks [{b0}, {b1}) of [{B0}, {B1})')
+        alloc = cache.numel() // (2 * nkv * D)
+        if not 0 < int(rows) <= alloc: raise ValueError(f'q35 attn_wm: rows {rows} of a cache of {alloc}')
+        k3.check_span(pos0, n, int(rows), what='q35 attn_wm')
+        if q.numel() < n * heads * D or out.numel() < n * heads * D: raise ValueError('q35 attn_wm: q / out smaller than the chunk')
+        assert q.dtype == out.dtype and q.element_size() == 4 and q.data_ptr() % 16 == 0 and cache.data_ptr() % 16 == 0
+        self.mod.q35p_attn_wm((b1 - b0, int(nkv)), (256,), q, cache, I(pos0), I(n), I(b0), I(heads), I(nkv),
+                              F(float(scale) * 1.4426950408889634), out)
+
+    @staticmethod
+    def attn_wm_ok(heads, nkv, D):
+        """the shapes q35p_attn_wm runs: head dim 256, up to 8 query heads per kv head"""
+        return D == ATTN_WM_D and nkv > 0 and heads % nkv == 0 and heads // nkv <= 8
+
+    @staticmethod
+    def _wm_span(pos0, n):
+        return pos0 // 8, (pos0 + n - 1) // 8 + 1
+
+    def attn_blocks(self, pos0, n):
+        """[(b0, b1)]: the chunk's 8-position blocks in launches of at most ATTN_WM_TP row-positions"""
+        B0, B1 = self._wm_span(pos0, n)
+        out, b, acc = [], B0, 0
+        for e in range(B0, B1):
+            c = 8 * 8 * (e + 1)                         # (8 rows x the block's last position + 1)
+            if e > b and acc + c > ATTN_WM_TP: out.append((b, e)); b, acc = e, 0
+            acc += c
+        out.append((b, B1))
+        return out
 
     def attn_rows(self, pos0, n):
         """[(r0, r1)]: the chunk's rows in launches of at most ATTN_TP token-positions"""
@@ -287,8 +330,12 @@ class Q35OwnPrefill(PrefillDriver):
                 if il == last and not self.export_h: break  # (the last layer: only its cache rows are needed)
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
                 A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
-                for r0, r1 in O.attn_rows(p, n):
-                    O.attn16(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, r0, r1)
+                if O.attn_wm_ok(nh, nkv, hd):              # (the tiled WMMA attention; attn16 for other shapes)
+                    for b0, b1 in O.attn_blocks(p, n):
+                        O.attn_wm(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, b0, b1)
+                else:
+                    for r0, r1 in O.attn_rows(p, n):
+                        O.attn16(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, r0, r1)
                 O.gate_mul16(att, qf, x16, n * QH, hd, 2 * hd, hd)
                 O.mm(L['o'], x16, QH, blk, D, n=n)
             O.add_rms16(x, L['post_norm'], eps, h16, n, D, d=blk, h=h)
