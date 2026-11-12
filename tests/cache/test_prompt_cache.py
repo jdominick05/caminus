@@ -178,7 +178,8 @@ class FakeTP:
         T = self.ntok
         k3.check_span(i0, T, self.max_ctx, what='FakeTP pass')
         self.staged = i0                               # (the engine's staged position: the launch's i0)
-        if not 0 <= commit <= min(T, i0): raise k3.ContextBoundsError(f'commit {commit}')
+        cmax = max(T, int(getattr(self, 'spec_T', 0) or 0))   # (spec_T: the verify width of a spec_T > 1 engine, as Dense35Own's commit_max)
+        if not 0 <= commit <= min(cmax, i0): raise k3.ContextBoundsError(f'commit {commit}')
         self.token += 1; self.fresh = False
         self._pool_ok = min(self._pool_ok, i0 // 4)
         run, recs, out = [], [[] for _ in self.cards], []
@@ -196,6 +197,7 @@ class FakeTP:
         for c in self.cards: self.state[(c, 0, 'gdn')].numpy()[1:1 + T] = recs[c]
         self.feat = (i0, [int(self._kv(0, 3)[i0 + t]) for t in range(T)])   # the pass's exported features: its rows
         self.a = out
+        self.last_T = T                            # (the engine's commit_max bound after this pass)
         return out
 
     def verify(self, seq, i0, commit):
@@ -2329,15 +2331,25 @@ class FakeVer35:
         self.buf = {'h': torch.zeros(T * D, dtype=torch.float32)}
 
     def run(self, tokens, pos0, commit, argmax=True):
+        # the stand-in trunk is ntok = 1: the T-wide verify pass runs as ONE verify_tokens call with the width set
+        # to T (the stand-in's T-passes equal one-token steps, bitwise, and keep all T saved-input records pending,
+        # as Dense35Own(spec_T) does: a chain of one-token passes would keep only the last record, and a later
+        # commit up to T would mix stale rows)
         e, T, D = self.eng, self.T, self.D
         assert len(tokens) == T, (len(tokens), T)
+        assert e.ntok == 1, 'FakeVer35: the stand-in trunk is the T = 1 engine'
         seq = [0] * int(pos0) + [int(t) for t in tokens]
-        a = e.verify_tokens(seq, int(pos0), int(commit))
+        ntok = e.ntok
+        e.ntok = T
+        try:
+            outs = [int(x) for x in e.verify_tokens(seq, int(pos0), int(commit))]
+        finally:
+            e.ntok = ntok
         for t in range(T):
             for d in range(D):
                 self.buf['h'][t * D + d] = float((int(pos0) + t) * 7 + int(tokens[t]) + d) % 997
         e.last_T = T
-        return [int(x) for x in a]
+        return outs
 
 
 class FakeMtp35:
@@ -2461,9 +2473,13 @@ def stage_mtp35(cache_dir, small):
     def mk(draft=True, d=None):
         ctr = mk.n = getattr(mk, 'n', 0) + 1
         d = d or os.path.join(cd, f'c{ctr}')
-        e = FakeTP(T=4, cards=1, max_ctx=4096, path=mpath)
+        # (the dense own line's served shape: a T = 1 decode engine with spec_T 4 and its T = 4 verify tape)
+        e = FakeTP(T=1, cards=1, max_ctx=4096, path=mpath)
         e.D = D; e.buf = {'h': torch.zeros(D)}
-        e.spec_T = 4; e.ver = FakeVer35(e, 4, D)
+        e.spec_T = 4; e.last_T = 0
+        e.commit_max = lambda: 1 if e.spec_T == 1 else (0 if e.fresh else int(e.last_T))
+        for c in e.cards: e.state[(c, 0, 'gdn')] = torch.zeros(1 + e.spec_T, dtype=torch.int64)   # (the saved-input record, spec_T wide)
+        e.ver = FakeVer35(e, 4, D)
         p = FakePF35(e)
         mtp = FakeMtp35(e)
         dr = Mtp35Drafter(mtp) if draft else None
@@ -2474,7 +2490,7 @@ def stage_mtp35(cache_dir, small):
         s.df, s.dr = (mtp, dr) if draft else (None, None)
         s._dk = 'mtp' if draft else None
         s._ver = e.ver if draft else None
-        s.T = s.ntok = 4
+        s.T = s.ntok = 4 if draft else int(e.ntok)   # (an MTP session's passes are the T = 4 verify passes)
         s.max_ctx = e.max_ctx
         s.max_recoveries, s.side_route, s._side = 2, False, False
         s.counters = collections.Counter()
@@ -2525,6 +2541,14 @@ def stage_mtp35(cache_dir, small):
           and c.layout.wrows == mtp.window + 4 and c.layout.drow == mtp.row_bytes,
           f'mtp35: the key carries the drafter kind mtp and spec_T 4 (and differs from no-drafter); the cache T / Layout T = 4, '
           f'the win region dnl 1 x wrows {c.layout.wrows} x drow {c.layout.drow} on card 0')
+
+    # ---- a short cold prompt: the K3 tail leaves commit = 4 and first_logits accepts it with ntok 1
+    s0, e0, p0, c0, mtp0, dr0 = mk(draft=True)
+    row = s0.prefill(base[:9])
+    check(row is not None and len(row) == e0.V and c0.st['i0'] == 9,
+          f'mtp35: a 9-token cold prompt runs its tail as T = 4 verify passes and first_logits accepts the '
+          f'commit-4 state with ntok 1 (state now {c0.st}, {len(row)} logits)')
+    c0.close()
 
     # ---- the adapter's round offsets and the fill, on a prompt through the cache's K3-pass loop (short: no batched run)
     o = c.prepare(base[:60], dict(root=20))

@@ -263,6 +263,8 @@ def main(argv=None):
     elif opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter']:
         print(f'caminus serve: --drafter ignored: --draft {draft} (the DFlash file is the Coder\'s only)', flush=True)
     opt['draft'] = draft
+    if A.drafter == 'dflash':
+        opt['no_drafter'] = (draft == 'off')   # (the Coder loader reads no_drafter: --draft off must not load DFlash)
     # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host

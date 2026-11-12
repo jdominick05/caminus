@@ -706,10 +706,11 @@ class K3Session(EngineSession):
                 elif greedy_plain:
                     self._arm()
                     if self.df is not None: self.df.flush()
-                    if self._dk == 'mtp' and kind == 'mtp' and F + k == self.T:
-                        # the T = 4 verify pass on the engine's states; its h rows go to the drafter with the pass's
-                        # tokens (the last row's bonus as the last token: a rejected one is rewritten by the pass
-                        # that verifies that position again)
+                    if self._dk == 'mtp' and kind == 'mtp':
+                        # the T = 4 verify pass on the engine's states (any feed width: the pass runs the whole
+                        # padded seq, and the accepted row is F - 1 + j); its h rows go to the drafter with the
+                        # pass's tokens (the last row's bonus as the last token: a rejected one is rewritten by
+                        # the pass that verifies that position again)
                         a = self._ver.run(list(seq[i0:i0 + self.T]), i0, commit, argmax=True)
                         self._take_h(i0, self.T, [int(x) for x in seq[i0 + 1:i0 + self.T]] + [int(a[self.T - 1])])
                     else:
@@ -717,7 +718,7 @@ class K3Session(EngineSession):
                         if self.dr is not None: self.dr.inject(i0, self.m.features)
                         if self._dk == 'mtp': self._take_h(i0, 1, [int(a[0])])
                     tw = clock()
-                    if len(a) == self.T and k > 0:
+                    if len(a) == self.T:
                         j = 0
                         while j < k and drafts[j] == a[F - 1 + j]: j += 1
                         out = [int(x) for x in drafts[:j]] + [int(a[F - 1 + j])]
