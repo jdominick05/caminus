@@ -154,13 +154,13 @@ each tensor (RX 7900 XT):
 
 | tensor | rows x K | error vs float64, mean / p99: own | llama.cpp | µs: read | llama.cpp | own | own, 4 tokens |
 |---|---|---|---|---|---|---|---|
-| eh_proj | 5,120 x 10,240 | 1.9e-4 / 7.3e-4 | 3.9e-2 / 1.9e-1 | 42.5 | 44.6 | 53.2 | 63.8 |
-| attn_q | 12,288 x 5,120 | 5.0e-5 / 2.3e-4 | 6.1e-3 / 2.8e-2 | 50.3 | 52.6 | 53.9 | 64.4 |
-| attn_k, attn_v | 1,024 x 5,120 | 0.9-1.2e-4 / 3.2-4.6e-4 | 1.3-1.4e-2 / 4.9-5.8e-2 | 10.1-11.0 | 11.3-11.4 | 12.1-13.0 | 13.2-14.8 |
-| attn_output | 5,120 x 6,144 | 2.0e-4 / 6.7e-4 | 2.7e-2 / 9.2e-2 | 26.6 | 27.9 | 35.8 | 43.5 |
-| ffn_gate, ffn_up | 17,408 x 5,120 | 0.8-1.0e-4 / 3.3-3.7e-4 | 1.0-1.5e-2 / 3.9-5.5e-2 | 73.7-74.1 | 75.5-75.9 | 77.0-77.9 | 87.6-88.2 |
-| ffn_down | 5,120 x 17,408 | 8.7e-5 / 3.9e-4 | 1.6e-2 / 6.8e-2 | 73.3 | 76.4 | 78.5 | 84.2 |
-| the block's 8 matvecs | | | | 362 | 376 | 401 | 460 |
+| eh_proj | 5,120 x 10,240 | 1.9e-4 / 7.3e-4 | 3.9e-2 / 1.9e-1 | 41.8 | 44.2 | 52.6 | 69.4 |
+| attn_q | 12,288 x 5,120 | 5.0e-5 / 2.3e-4 | 6.1e-3 / 2.8e-2 | 49.8 | 52.2 | 54.2 | 73.2 |
+| attn_k, attn_v | 1,024 x 5,120 | 0.9-1.2e-4 / 3.2-4.6e-4 | 1.3-1.4e-2 / 4.9-5.8e-2 | 12.3-12.4 | 14.8-15.0 | 16.2 | 17.5-17.6 |
+| attn_output | 5,120 x 6,144 | 2.0e-4 / 6.7e-4 | 2.7e-2 / 9.2e-2 | 26.7 | 28.0 | 35.5 | 44.7 |
+| ffn_gate, ffn_up | 17,408 x 5,120 | 0.8-1.0e-4 / 3.3-3.7e-4 | 1.0-1.5e-2 / 3.9-5.5e-2 | 73.1-73.8 | 75.5-76.3 | 77.1 | 93.5-93.6 |
+| ffn_down | 5,120 x 17,408 | 8.7e-5 / 3.9e-4 | 1.6e-2 / 6.8e-2 | 73.4 | 76.4 | 77.6 | 91.5 |
+| the block's 8 matvecs | | | | 363 | 382 | 406 | 501 |
 
 Own is 120 to 265 times closer to float64 than llama.cpp on every tensor (llama.cpp rounds the activations to 8 bits),
 and a 4-token launch gives each token the bits of its own one-token launch. Standalone, one launch per matvec, copies
