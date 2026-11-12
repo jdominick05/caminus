@@ -189,8 +189,13 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
         };
         float rm[OWN_MT][OWN_K3_RW];
         const uint8_t * Wm = m ? (const uint8_t *)sg.aux : sg.W;
+#ifdef K3_Q35_VER   // (the dense qwen35 verify module: the weights unpacked once per pass for every token, the same bits)
+        if (sg.work == OWN_Q4_K) own_rows_q4k_1rt_mt2<OWN_K3_RW>(Wm, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+        if (sg.work == OWN_Q6_K) own_rows_q6k_planes_mt2<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+#else
         if (sg.work == OWN_Q4_K) own_rows_q4k_1rt_mt<OWN_K3_RW>(Wm, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
         if (sg.work == OWN_Q6_K) own_rows_q6k_planes_mt<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+#endif
         if (lane == 0) {
 #pragma unroll
             for (int j = 0; j < OWN_MT; j++) {

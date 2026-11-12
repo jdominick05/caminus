@@ -578,8 +578,9 @@ class Engine:
         """the general rows tiles on an fp16 activation buffer (OP_OWN_MV16, the dense qwen35 own module): raw GGUF blocks w
         of nrows contiguous rows (Q8_0 / Q5_K: the formats without a one-round-trip tile) times x16 [ncols] -> fp32 out
         [nrows]. T = 1; rows_per_task a multiple of 4 (a wave takes 4 rows). The verify module (Q35V_MODULES): tokens = the
-        engine's T (1 .. 15), x16 [tokens, ncols] -> out [tokens, nrows], each token's rows the one-token tile's bits"""
-        if self.module not in Q35_MODULES or (self.T != 1 or tokens != 1) and not (self.module in Q35V_MODULES and tokens == self.T and 1 <= tokens <= 15):
+        engine's T (1 .. 4: the tiles' OWN_MT), x16 [tokens, ncols] -> out [tokens, nrows], each token's rows the one-token
+        tile's bits"""
+        if self.module not in Q35_MODULES or (self.T != 1 or tokens != 1) and not (self.module in Q35V_MODULES and tokens == self.T and 1 <= tokens <= 4):
             raise ValueError(f'own_matvec16: T = 1 on {Q35_MODULES}; tokens = T on {Q35V_MODULES} (module {self.module}, T {self.T}, tokens {tokens})')
         if fmt not in OWN_MV16_FMT: raise ValueError(f'own_matvec16: {fmt} ({sorted(OWN_MV16_FMT)})')
         if rows_per_task % 4 or rows_per_task < 4: raise ValueError(f'own_matvec16: rows_per_task {rows_per_task} (a multiple of 4)')
