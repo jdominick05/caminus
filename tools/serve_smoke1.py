@@ -55,6 +55,7 @@ class Server1:
                '--max-ctx', str(a.max_ctx), '--cache-dir', os.path.join(a.scratch, 'kv'), '--flight-dir', os.path.join(a.scratch, 'flight')]
         if a.alias: cmd += ['--model-alias', a.alias]
         cmd += ['--cards', str(a.cards)]   # (2 with --card 0,1: a one-card model's two-card form, e.g. swift-1.5 / thinkingcap)
+        if a.draft: cmd += ['--draft', a.draft]   # (the drafter kind caminus serve runs: off|mtp|dflash)
         if a.block_imports:   # the server with an import hook that refuses these top-level packages (the own-code gate)
             cmd = cmd[:2] + ['-c', BLOCKER.format(block=tuple(a.block_imports.split(','))), cmd[2]] + cmd[3:]
         print(f'{tag}: HIP_VISIBLE_DEVICES={a.card} {" ".join(c for c in cmd[2:] if not c.startswith("import sys"))}', flush=True)
@@ -106,6 +107,9 @@ def main():
     ap.add_argument('--llm-top', default=None); ap.add_argument('--restart', action='store_true')
     ap.add_argument('--needle', type=int, default=0, help='also a needle at 37 %% of a prompt of about this many tokens')
     ap.add_argument('--block-imports', default='', help='comma list of packages the server must not import (e.g. gguf,tokenizers)')
+    ap.add_argument('--draft', choices=('off', 'mtp', 'dflash'), default=None,
+                    help='the drafter kind the server runs (caminus serve --draft); the greedy reply\'s sha256 is in NUMBERS, '
+                         'so two runs (off vs a drafter) with the same fixed prompts compare token for token')
     ap.add_argument('--side-question', action='store_true', help='also a side question (Qwen Code\'s /btw prompt) between two '
                     'turns of a chat: it runs in the side slot and the next turn continues the main slot')
     a = ap.parse_args()
@@ -135,6 +139,8 @@ def main():
     check(r['status'] == 200 and m['content'].strip() and m['finish'] in ('stop', 'length') and not m['error'],
           f'greedy: {len(m["content"])} chars, finish {m["finish"]}, decode {tg} tok/s')
     S.NUMBERS['greedy_decode_tps'] = tg
+    import hashlib
+    S.NUMBERS['greedy_sha256'] = hashlib.sha256(m['content'].encode()).hexdigest()   # (the fixed MARK: same prompt every run)
     # sampled with a tool, then the tool result as the next turn
     msgs = [{'role': 'system', 'content': f'You are a helpful assistant. Use tools when they help. ({marker})'},
             {'role': 'user', 'content': 'What is the weather in Lisbon right now? Use the tool.'}]
