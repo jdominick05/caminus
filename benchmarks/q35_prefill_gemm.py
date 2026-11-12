@@ -82,12 +82,12 @@ for M in MS:
         need = (t.n_bytes + M * K * 2 + M * R * 4 + dense + fly) / 2 ** 20 + 64
         capacity.check([0], [need], f'q35_prefill_gemm {nm} M {M} ({need:.0f} MiB)')
         W = Dense35Own._w(fake, f'blk.{b}.{nm}.weight')
-        x16 = torch.randn(M, K, device=dev).half() * 0.1; y = torch.zeros(M, R, device=dev)
+        x16 = torch.empty(M, K, dtype=torch.float16, device=dev).normal_(0.0, 0.1); y = torch.zeros(M, R, device=dev)   # (in place: no fp32 temporaries)
         fl = 2.0 * M * R * K; row = f'M {M:5d} blk.{b}.{nm:12s} {t.type:5s} [{R:6d} x {K:6d}]'
         res = {}
         Wd = None
         if set(ARMS) & {'torch', 'flydsl'}:
-            Wd = (torch.randn(R, K, device=dev) * 0.02).half()
+            Wd = torch.empty(R, K, dtype=torch.float16, device=dev).normal_(0.0, 0.02)   # (in place: no fp32 temporaries)
         for arm in ARMS:
           try:
             if arm == 'own':

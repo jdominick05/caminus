@@ -36,9 +36,10 @@ def bench(fn):
 
 for P0 in [int(v) for v in A.p0.split(',')]:
     L = P0 + N
-    need = (L * 2 * NKV * D * 2 * 3 + 2 * N * H * D * 4 * 2) / 2 ** 20 + 64   # (cache, its k / v copies + slices, q / out)
+    need = (L * 2 * NKV * D * 2 * 3 + 2 * N * H * D * 4 * 2 + 4 * N * H * D * 4) / 2 ** 20 + 64   # (cache and its k / v copies; q / out;
+    # the fp16 q copies, SDPA's output and the fp32 reference copy)
     capacity.check([0], [need], f'q35_prefill_attn P0 {P0} ({need:.0f} MiB)')
-    cache = (torch.randn(L * 2 * NKV * D, device=dev) * 0.5).half()
+    cache = torch.empty(L * 2 * NKV * D, dtype=torch.float16, device=dev).normal_(0.0, 0.5)   # (in place: no fp32 temporaries)
     q = torch.randn(N * H * D, device=dev); out = torch.zeros(N * H * D, device=dev)
     scale = 1.0 / np.sqrt(D)
     runs = ops.attn_rows(P0, N)
