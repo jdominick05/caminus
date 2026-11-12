@@ -30,6 +30,72 @@ __device__ __forceinline__ h16_t q8_b(const uint8_t * p, bool ok) {
     return __builtin_bit_cast(h16_t, o);
 }
 
+// The weights two blocks at a time: a block pair is 68 bytes at a 4-byte aligned offset (rows are 272-byte multiples:
+// K / 32 blocks of 34 B, K a multiple of 256), so it is 17 dword loads (one block alone was 33 two-byte loads), and the
+// next pair's loads are issued before this pair's WMMAs (one pair ahead, across the stage barriers too). The B operand
+// is q8_b's bytes and arithmetic from registers (q8_wb), so every sum keeps its bits (the per-block order, the WMMA
+// chain, the fma with d: unchanged). Before: the loads of each block waited right before its WMMAs (Q8_0 37.5 TF at the
+// Swift shapes, 54.8 with the weight path removed: benchmarks/q35_prefill_gemm.py --module q35_prefill_abl1).
+struct Q8Pair { uint32_t w[17]; };
+__device__ __forceinline__ void q8_pair_load(Q8Pair & P, const uint8_t * wrow, int pair) {
+    const uint32_t * src = (const uint32_t *)(wrow + (size_t)pair * 68);
+#pragma unroll
+    for (int i = 0; i < 17; i++) P.w[i] = src[i];
+}
+// 4 dwords of the pair's bytes starting at byte o (o % 2 == 0, a compile-time constant)
+template <int O>
+__device__ __forceinline__ void q8_pair_bytes(const Q8Pair & P, uint32_t (&q)[4]) {
+#pragma unroll
+    for (int i = 0; i < 4; i++)
+        q[i] = (O & 3) ? __builtin_amdgcn_alignbyte(P.w[O / 4 + i + 1], P.w[O / 4 + i], O & 3) : P.w[O / 4 + i];
+}
+// q8_b on 16 int8 held in 4 dwords (the same per-word statements)
+__device__ __forceinline__ h16_t q8_wb(const uint32_t (&q)[4], bool ok) {
+    const h2_t o2 = {(_Float16)(-1152.0f), (_Float16)(-1152.0f)};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t u = ok ? (q[w] ^ 0x80808080u) : 0x80808080u;
+        const uint32_t p01 = __builtin_amdgcn_perm(0u, u, 0x0c010c00u) | 0x64006400u;
+        const uint32_t p23 = __builtin_amdgcn_perm(0u, u, 0x0c030c02u) | 0x64006400u;
+        o[2 * w] = as_u(as_h2(p01) + o2); o[2 * w + 1] = as_u(as_h2(p23) + o2);
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+// block jb (0: the pair's first, 1: its second) of a pair: P = its two WMMA k-steps, then acc += d P (q35p_mm_q8_0's order)
+template <int JB>
+__device__ __forceinline__ void q8_pair_block(const Q8Pair & PR, int j, bool rok, int lane, f8_t (&acc)[4]) {
+    const float d = rok ? (float)__builtin_bit_cast(_Float16, (uint16_t)(JB ? (PR.w[8] >> 16) : (PR.w[0] & 0xffffu))) : 0.0f;
+    f8_t P[4];
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++) P[mt] = Q3P_ABL == 3 ? acc[mt] : (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+    for (int hf = 0; hf < 2; hf++) {
+        uint32_t q[4];
+        if (JB == 0 && hf == 0) q8_pair_bytes<2>(PR, q);
+        else if (JB == 0) q8_pair_bytes<18>(PR, q);
+        else if (hf == 0) q8_pair_bytes<36>(PR, q);
+        else q8_pair_bytes<52>(PR, q);
+#if Q3P_ABL == 1
+        const h16_t B = (h16_t)(_Float16)1.0f; (void)q;
+#else
+        const h16_t B = q8_wb(q, rok);
+#endif
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++) P[mt] = wmma(mm_a(mt, j * 32 + hf * 16, lane), B, P[mt]);
+    }
+#if Q3P_ABL == 3
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++) acc[mt] = P[mt];
+    (void)d;
+#else
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+        for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[mt][v], acc[mt][v]);
+#endif
+}
+
 extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
         const uint8_t * __restrict__ W, int R, int K, const _Float16 * __restrict__ X, int ldx, const int * __restrict__ xsrc,
         float * __restrict__ Y, int ldy, const int * __restrict__ ydst, const MMItem * __restrict__ items, const int * __restrict__ nitems,
@@ -40,34 +106,30 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
     const int r = blockIdx.y * MM_N + wave * 16 + (lane & 15);
     const bool rok = r < R;
-    const int NB = K / 256;                       // (staging steps of 256 values: 8 Q8_0 blocks each)
+    const int NB = K / 256;                       // (staging steps of 256 values: 8 Q8_0 blocks = 4 pairs each)
     const size_t RB = (size_t)(K / 32) * 34;
     const uint8_t * wrow = W + ((size_t)it.e * R + (rok ? r : 0)) * RB;
     f8_t acc[4];
 #pragma unroll
     for (int mt = 0; mt < 4; mt++) acc[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    const int NP = NB * 4;
+    Q8Pair cur, nxt;
+    q8_pair_load(cur, wrow, 0);
     for (int b = 0; b < NB; b++) {
         __syncthreads();
+#if Q3P_ABL != 2
         mm_stage<false>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+#endif
         __syncthreads();
 #pragma unroll 1
-        for (int j = 0; j < 8; j++) {          // (rolled: unrolled, the 8 blocks' loads were hoisted: 256 VGPRs, 171 spilled)
-            const uint8_t * bp = wrow + (size_t)(b * 8 + j) * 34;
-            const float d = rok ? (float)__builtin_bit_cast(_Float16, *(const uint16_t *)bp) : 0.0f;
-            f8_t P[4];
-#pragma unroll
-            for (int mt = 0; mt < 4; mt++) P[mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
-#pragma unroll
-            for (int hf = 0; hf < 2; hf++) {
-                const h16_t B = q8_b(bp + 2 + 16 * hf, rok);
-#pragma unroll
-                for (int mt = 0; mt < 4; mt++) P[mt] = wmma(mm_a(mt, j * 32 + hf * 16, lane), B, P[mt]);
-            }
-#pragma unroll
-            for (int mt = 0; mt < 4; mt++)
-#pragma unroll
-                for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[mt][v], acc[mt][v]);
-            __builtin_amdgcn_sched_barrier(0);    // (one block at a time: q3p_mm_q6k's register lesson)
+        for (int jp = 0; jp < 4; jp++) {
+            const int pr = b * 4 + jp;
+            if (pr + 1 < NP) q8_pair_load(nxt, wrow, pr + 1);     // (the next pair in flight during this pair's WMMAs)
+            q8_pair_block<0>(cur, 2 * jp, rok, lane, acc);
+            __builtin_amdgcn_sched_barrier(0);
+            q8_pair_block<1>(cur, 2 * jp + 1, rok, lane, acc);
+            __builtin_amdgcn_sched_barrier(0);
+            cur = nxt;
         }
     }
     if (!rok) return;
