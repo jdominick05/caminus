@@ -772,8 +772,8 @@ class Layout:
 class Ckpt:
     """a checkpoint record: pos / commit (the state (i0, commit)), the host state, its kind, where its bytes are (a VRAM slot,
     or disk = (entry name, [segment per card])), the token-prefix hash, the drafter's window meta"""
-    __slots__ = ('pos', 'commit', 'fresh', 'pool_ok', 'kind', 'slot', 'disk', 'tok_sha', 'df', 'created', 'used')
-    META = ('pos', 'commit', 'fresh', 'pool_ok', 'kind', 'tok_sha', 'df')
+    __slots__ = ('pos', 'commit', 'fresh', 'pool_ok', 'last_T', 'kind', 'slot', 'disk', 'tok_sha', 'df', 'created', 'used')
+    META = ('pos', 'commit', 'fresh', 'pool_ok', 'last_T', 'kind', 'tok_sha', 'df')
 
     def __init__(self, **kw):
         for k in self.__slots__: setattr(self, k, kw.get(k))
@@ -986,6 +986,10 @@ class PromptCache:
                 if win is not None: self.draft.import_window(win, ck.df)
         self._sync()
         m.fresh = bool(ck.fresh); m._during = None
+        # (the saved pass's width: a spec_T > 1 engine's commit_max after the restore; an entry written before the
+        # field existed falls back to the commit itself, the width the K3 loop's last pass ran)
+        if hasattr(m, 'last_T'):
+            m.last_T = int(ck.last_T) if ck.last_T is not None else int(ck.commit)
         if getattr(m, 'ple_layers', None) and m.ple._direct(): m.ple._drain()
         # the indexer's valid pools: those below the tail as the device has them, the tail's as the checkpoint saw them
         v = min(int(current_pool_ok), a // 4)
@@ -1014,7 +1018,8 @@ class PromptCache:
         s = self.free.pop(0)
         t0 = time.perf_counter()
         dm = self._save(self._slot_bufs(s), pos, commit); self._sync()
-        ck = Ckpt(pos=pos, commit=commit, fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)), kind=kind, slot=s,
+        ck = Ckpt(pos=pos, commit=commit, fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)),
+                  last_T=int(getattr(self.m, 'last_T', 0)), kind=kind, slot=s,
                   tok_sha=tok_sha(self.log[:pos]), df=dm)
         self.ckpts.append(ck); self.ckpts.sort(key=lambda x: (x.pos, x.commit))
         self.stats['checkpoints'] += 1; self.stats['checkpoint_ms'] += (time.perf_counter() - t0) * 1e3
@@ -1679,7 +1684,8 @@ class PromptCache:
         live = None
         if not any(ck.pos == i0 and ck.commit == commit for ck in srcs):
             dm = self._save(self._slot_bufs(self.io_slot), i0, commit); self._sync()
-            live = Ckpt(pos=i0, commit=commit, fresh=bool(m.fresh), pool_ok=int(getattr(m, '_pool_ok', 0)), kind='live',
+            live = Ckpt(pos=i0, commit=commit, fresh=bool(m.fresh), pool_ok=int(getattr(m, '_pool_ok', 0)),
+                        last_T=int(getattr(m, 'last_T', 0)), kind='live',
                         slot=self.io_slot, tok_sha=tok_sha(self.log), df=dm)
             srcs.append(live)
         cks, out = [], []
@@ -1987,6 +1993,7 @@ class PromptCache:
             if self.draft is not None: self.draft.flush()
             dm = self._save(self._slot_bufs(self.side_slot), mst['i0'], mst['commit'])
             main = Ckpt(pos=mst['i0'], commit=mst['commit'], fresh=bool(self.m.fresh), pool_ok=int(getattr(self.m, '_pool_ok', 0)),
+                        last_T=int(getattr(self.m, 'last_T', 0)),
                         kind='main', slot=self.side_slot, tok_sha=tok_sha(mlog), df=dm)
             for c in range(len(self.m.devs)):
                 with _ctx(self.side_buf[c]):

@@ -2459,6 +2459,7 @@ def stage_mtp35(cache_dir, small):
     from caminus.serve.engine import PrefillStats
     from caminus.serve.draftpolicy import DraftPolicy
     from caminus.decode.mtp35 import Mtp35Drafter
+    from caminus.decode import longctx
     from caminus.prefill.driver import PrefillRefused
     rng = np.random.default_rng(21)
     cd = os.path.join(cache_dir, 'mtp35'); os.makedirs(cd, exist_ok=True)
@@ -2548,6 +2549,25 @@ def stage_mtp35(cache_dir, small):
     check(row is not None and len(row) == e0.V and c0.st['i0'] == 9,
           f'mtp35: a 9-token cold prompt runs its tail as T = 4 verify passes and first_logits accepts the '
           f'commit-4 state with ntok 1 (state now {c0.st}, {len(row)} logits)')
+    # ---- the saved pass width rides the checkpoint: an intervening one-token pass must not lower the restored
+    # commit bound (a restored commit-4 state keeps commit_max 4, so first_logits accepts it)
+    s4, e4, p4, c4, mtp4, dr4 = mk(draft=True)
+    s4.prefill(base[:9])
+    ck4 = [x for x in c4.ckpts if int(x.commit) == 4]
+    check(len(ck4) == 1 and int(ck4[0].last_T) == 4,
+          f'mtp35: the 9-token prompt left a commit-4 checkpoint carrying its pass width (last_T) '
+          f'{[(x.pos, x.commit, x.last_T) for x in c4.ckpts]}')
+    if ck4:
+        ck4 = ck4[0]
+        e4.verify_tokens([0] * int(ck4.pos) + [1], int(ck4.pos), 1)   # (an intervening one-token pass: last_T 1)
+        check(int(e4.last_T) == 1, 'mtp35: the intervening T=1 pass lowered last_T to 1')
+        c4._restore(ck4)
+        lt4 = int(e4.last_T)                       # (read before first_logits runs its own one-token passes)
+        row4 = longctx.first_logits(e4, dict(c4.st), list(c4.log))
+        check(lt4 == 4 and row4 is not None,
+              f'mtp35: the restore brings the saved pass width back (last_T {lt4}, commit {c4.st["commit"]}) '
+              f'and first_logits accepts the restored state (logits {type(row4).__name__} len {len(row4)})')
+    c4.close()
     c0.close()
 
     # ---- the adapter's round offsets and the fill, on a prompt through the cache's K3-pass loop (short: no batched run)
