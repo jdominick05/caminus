@@ -2458,7 +2458,7 @@ def stage_mtp35(cache_dir, small):
     from caminus.serve.k3_session import K3Session, SessionDrafter, _Hooks
     from caminus.serve.engine import PrefillStats
     from caminus.serve.draftpolicy import DraftPolicy
-    from caminus.decode.mtp35 import Mtp35Drafter
+    from caminus.decode.mtp35 import Mtp35Drafter, ring_mib
     from caminus.decode import longctx
     from caminus.prefill.driver import PrefillRefused
     rng = np.random.default_rng(21)
@@ -2580,6 +2580,13 @@ def stage_mtp35(cache_dir, small):
     off_ok = all(x[1] == x[2][0] - 4 + 0 or True for x in dcalls)   # (p0 recorded; checked properly below)
     # the round offsets: p0 = len(toks) - T, toks = the last T tokens, h rows p0 - 1 .. p0 + T - 2
     ok_off = len(dcalls) > 0 and all(x[1] >= 1 for x in dcalls)
+    # the adapter's buffers exist from construction (projected in arch's extra, checked at the allocation in serve),
+    # and _h gathers through the preallocated workspace instead of allocating per round
+    ad0 = Mtp35Drafter(FakeMtp35(e))
+    check(ad0.H is not None and tuple(ad0.H.shape) == (8, D) and tuple(ad0.Hw.shape) == (4, D) and ring_mib(D) > 0
+          and ad0._h(0, 4) is None,
+          f'mtp35: the h ring and the gather workspace are allocated at construction (H {tuple(ad0.H.shape)}, '
+          f'Hw {tuple(ad0.Hw.shape)}, ring_mib {ring_mib(D):.4f} MiB), not on the first pass')
     # (recompute from a fresh adapter what __call__ passes: drive it directly)
     toks = list(range(100, 100 + 160))
     def drive(ad, upto):
@@ -2588,6 +2595,9 @@ def stage_mtp35(cache_dir, small):
     ad = Mtp35Drafter(FakeMtp35(e)); ad.m.reset()
     L = 60
     drive(ad, L - 2)          # the trunk's passes up to i0 = L - 4 (h_valid = L + 2, as in the session's flow)
+    hg = ad._h(L - 4, 4)
+    check(hg is not None and hg.data_ptr() == ad.Hw.data_ptr(),
+          'mtp35: _h gathers the ring through the preallocated workspace (no per-round allocation)')
     d = ad(toks[:L], 3)
     last = ad.m.calls[-1]
     check(last[0] == 'draft' and last[1] == L - 4 and last[2] == toks[L - 4:L],

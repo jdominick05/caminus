@@ -496,16 +496,19 @@ class Dense35(OneCard):
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
         from .engine.q35_mtp import Mtp35
+        from .decode.mtp35 import Mtp35Drafter
         from .prefill import q35own
         path = opt['model']
-        n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
+        hp = meta(path)['hp']
+        n_ctx = int(hp.get('context_length') or 262144)
         il = self._mtp(opt)
         spec_T = self.MTP_T if il is not None else 1
         slot = (Dense35Own.recurrent_mib(path, spec_T) + Dense35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: the states + tail rows)
         pf = q35own.buffer_need_mib(q35own.shapes_of(path), self.PREFILL_CHUNK, export_h=il is not None) + PREFILL_MODULES_MIB
         def extra(c):
             if il is None: return 0.0
-            return Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, c, k=self.MTP_K)   # (the verify tape + the drafter at this context)
+            return (Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, c, k=self.MTP_K)   # (the verify tape + the drafter at this context)
+                    + Mtp35Drafter.ring_mib(hp['embedding_length']))          # (the serve adapter's h ring + gather workspace)
         need = lambda c: [Dense35Own.projection_mib(path, c, spec_T) + pf + extra(c) + (slots + 2) * slot]   # (the side rows: host memory)
         return n_ctx, [0], slot, need
 
@@ -520,7 +523,8 @@ class Dense35(OneCard):
         spec_T = self.MTP_T if il is not None else 1
         extra = q35own.buffer_need_mib(q35own.shapes_of(path), self.PREFILL_CHUNK, export_h=il is not None) + PREFILL_MODULES_MIB
         if il is not None:
-            extra += Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, int(opt['max_ctx']), k=self.MTP_K)
+            extra += (Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, int(opt['max_ctx']), k=self.MTP_K)
+                      + Mtp35Drafter.ring_mib(meta(path)['hp']['embedding_length']))
         m = Dense35Own(path, device=0, max_ctx=int(opt['max_ctx']), vram_extra_mib=extra, spec_T=spec_T)
         if il is not None:
             m.ver = Dense35Verify(m, self.MTP_T)          # (checked before anything reads it: the session's draft passes)
@@ -529,7 +533,8 @@ class Dense35(OneCard):
         dr = Mtp35Drafter(m.mtp35) if il is not None else None
         if dr is not None:
             log(f'caminus serve: MTP drafter blk.{il} (k {self.MTP_K}, verify T {self.MTP_T}, spec_T {spec_T}): '
-                f'+{Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, int(opt["max_ctx"]), k=self.MTP_K):.0f} MiB', flush=True)
+                f'+{Dense35Verify.need_mib(self.MTP_T) + Mtp35.projection_mib(path, int(opt["max_ctx"]), k=self.MTP_K) + Mtp35Drafter.ring_mib(meta(path)["hp"]["embedding_length"]):.0f} MiB '
+                f'(incl. the adapter\'s h ring {Mtp35Drafter.ring_mib(meta(path)["hp"]["embedding_length"]):.2f} MiB, checked at its allocation)', flush=True)
         return m, pf, m.mtp35 if dr is not None else None, dr
 
 

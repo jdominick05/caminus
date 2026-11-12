@@ -26,10 +26,17 @@ export_window / import_window / set_window_state: the block KV window [lo, fille
 snapshot / restore carry the pointers (filled, h_valid), the KV rows themselves go through the window export."""
 import torch
 
+from ..device import capacity
 from ..engine import k3
 from ..engine.q35_mtp import MAX_T, Mtp35
 
 HR = 2 * MAX_T          # the h ring's rows: the last two passes' h (T rows each) cover any round's needs
+
+
+def ring_mib(D):
+    """MiB the adapter allocates on the trunk's card, projected and checked before the allocation (arch's extra):
+    the h ring [HR, D] fp32 plus the gather workspace [MAX_T, D] fp32 that _h reads the ring through"""
+    return (HR * int(D) + MAX_T * int(D)) * 4 / 2 ** 20
 
 
 class Mtp35Drafter:
@@ -38,14 +45,23 @@ class Mtp35Drafter:
     spec_type = 'draft-mtp'
     device_accept = False          # (the accept is the host's: the verify pass's argmax rows vs the drafts)
 
-    def __init__(self, mtp):
+    def __init__(self, mtp, vram_check=True):
         if not isinstance(mtp, Mtp35) and getattr(mtp, 'kind', None) != 'mtp':
             raise ValueError(f'Mtp35Drafter: {type(mtp).__name__} is not an Mtp35 drafter')
         self.m = mtp
         self.df = self              # the cache reads the drafter's df (Layout, engine_key, LiveState.counters, the
                                     # window protocol): the engine-level attributes come through __getattr__
         self.max_pos = int(mtp.eng.max_ctx)
-        self.H = None               # the h ring [HR, D] fp32 on the trunk's card, row p % HR = h of position p
+        D = int(mtp.eng.D)
+        dx = int(getattr(mtp, 'dx', 0))
+        # the h ring [HR, D] fp32, row p % HR = h of position p, and the gather workspace: allocated now, not on the
+        # first pass, projected in arch's extra and checked against the guard's line here (capacity.check)
+        if vram_check and torch.cuda.is_available():
+            capacity.check([dx], [ring_mib(D)], f'Mtp35Drafter h ring (HR {HR} x D {D} + gather {MAX_T} x {D}: '
+                                                f'{ring_mib(D):.2f} MiB)')
+        dev = torch.device('cuda', dx) if torch.cuda.is_available() else torch.device('cpu')
+        self.H = torch.zeros(HR, D, dtype=torch.float32, device=dev)
+        self.Hw = torch.empty(MAX_T, D, dtype=torch.float32, device=dev)
         self.h_valid = 0            # h of positions 0 .. h_valid - 1 are in the ring (when within HR of it)
         self.synced = 0             # the position the drafter is in step with (the last take_h's end)
         self.filler = False         # the last __call__ gave filler drafts (the session's drafts_real=False)
@@ -67,8 +83,6 @@ class Mtp35Drafter:
         D = self.m.eng.D
         if h.dtype != torch.float32 or h.numel() < n * D:
             raise ValueError(f'Mtp35Drafter.take_h: h must be fp32 [{n}, {D}] (got {h.dtype} {tuple(h.shape)})')
-        if self.H is None:
-            self.H = torch.zeros(HR, D, dtype=torch.float32, device=h.device)
         k3.check_span(i0, n, self.max_pos + 1, what='Mtp35Drafter take_h')
         hv = h.reshape(-1)[:n * D].view(n, D)
         for r in range(n):
@@ -80,11 +94,14 @@ class Mtp35Drafter:
             self.m.fill(self._h(i0, n), [int(t) for t in toks], p0)
 
     def _h(self, p0, n):
-        """the ring's h rows of positions p0 .. p0 + n - 1 as fp32 [n, D], or None when they left the ring"""
-        if self.H is None or p0 < 0 or p0 + n > self.h_valid or p0 < self.h_valid - HR:
+        """the ring's h rows of positions p0 .. p0 + n - 1 as fp32 [n, D] (gathered through the preallocated
+        workspace, so a round allocates nothing), or None when they left the ring"""
+        if p0 < 0 or p0 + n > self.h_valid or p0 < self.h_valid - HR:
             return None
         idx = torch.arange(p0, p0 + n, device=self.H.device) % HR
-        return self.H[idx]
+        out = self.Hw[:n]
+        torch.index_select(self.H, 0, idx, out=out)
+        return out
 
     def inject(self, i0, feats):
         """the cache's K3-pass loop calls this per pass; for the MTP drafter the h came with the pass (take_h), so
@@ -128,6 +145,7 @@ class Mtp35Drafter:
 
     def reset(self):
         self.m.reset()
+        self.H.zero_()
         self.h_valid = 0
         self.synced = 0
         self.filler = False
