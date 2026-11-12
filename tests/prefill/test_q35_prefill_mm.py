@@ -1,5 +1,7 @@
 """The dense qwen35 prefill's GEMMs (kernels/q35_prefill.hip) on a card against float64, on real rows of a model file: Q4_K
-and Q6_K (q3m_prefill.hip's kernels, included as they are) and the two formats this object adds, Q8_0 and Q5_K.
+and Q6_K (q3m_prefill.hip's kernels, included as they are) and the two formats this object adds, Q8_0 and Q5_K. A file
+with codebook formats (ThinkingCap) runs on kernels/q35_prefill_tcap.hip, which adds IQ4_XS / IQ3_XXS / IQ3_S (the IQ
+study's kernels) and IQ2_S, the grid formats read in the record layout.
 
   tools/guard.sh LOG 900 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35_prefill_mm.py GGUF
 
@@ -21,7 +23,7 @@ import torch  # noqa: E402
 
 from caminus import ggufio, own_dequant  # noqa: E402
 from caminus.device import capacity, hip  # noqa: E402
-from caminus.engine.own_layout import q6k_planes  # noqa: E402
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC  # noqa: E402
 
 FAILS = []
 NULL = ctypes.c_void_p(0)
@@ -41,16 +43,20 @@ def main():
     dev = torch.device('cuda', 0)
     print(f'NOTE device: {torch.cuda.get_device_name(dev)} (HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")})', flush=True)
     picks = {}
+    FMTS = ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K', 'IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S')
+    IQK = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_S': 'q35t_mm_iq2s'}
     for name, t in F.T.items():   # (the first trunk tensor of each format with a K the kernels take)
-        if t.type in ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K') and len(t.shape) == 2 and t.shape[0] % 256 == 0 and t.shape[1] >= 256 \
+        if t.type in FMTS and len(t.shape) == 2 and t.shape[0] % 256 == 0 and t.shape[1] >= 256 \
                 and t.type not in picks and 'token_embd' not in name and 'output' != name.split('.')[0]:
             picks[t.type] = name
     print('NOTE tensors: ' + ', '.join(f'{k} {v} {tuple(F.T[v].shape)}' for k, v in sorted(picks.items())), flush=True)
     Kmax = max(F.T[n].shape[0] for n in picks.values())
     capacity.check([dev.index], [(130 * Kmax * 2 + 130 * 256 * 4 * 2 + 256 * Kmax * 2) / capacity.MIB * 1.5], 'q35 prefill GEMM test')
-    mod = hip.Module('q35_prefill')
+    tc = any(f in picks for f in IQK)
+    mod = hip.Module('q35_prefill_tcap' if tc else 'q35_prefill')
+    print(f'NOTE object: {"q35_prefill_tcap" if tc else "q35_prefill"}', flush=True)
     rng = np.random.default_rng(11)
-    for fmt in ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K'):
+    for fmt in FMTS:
         if fmt not in picks:
             print(f'NOTE {fmt}: no tensor of this format in the file', flush=True)
             continue
@@ -59,7 +65,7 @@ def main():
         for R in (200, 256):
             raw = t.pread(0, R * rb)
             Wf = own_dequant.dequant(raw, fmt, R * K).reshape(R, K).astype(np.float64)
-            wb = q6k_planes(raw, R, K) if fmt == 'Q6_K' else raw
+            wb = q6k_planes(raw, R, K) if fmt == 'Q6_K' else iq_records(raw, R, K, fmt) if fmt in IQ_REC else raw
             wd = torch.from_numpy(np.ascontiguousarray(wb)).to(dev)
             for n in (1, 37, 64, 130):
                 x = (rng.standard_normal((n, K)) * 0.5).astype(np.float16)
@@ -73,6 +79,8 @@ def main():
                     mod.q3p_mm_q4k(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
                 elif fmt == 'Q6_K':
                     mod.q3p_mm_q6k(grid, (256,), wd, I(R), I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
+                elif fmt in IQK:
+                    getattr(mod, IQK[fmt])(grid, (256,), wd, I(R), I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
                 elif fmt == 'Q8_0':
                     mod.q35p_mm_q8_0(grid, (256,), wd, I(R), I(K), xd, I(K), NULL, y, I(R), NULL, NULL, NULL, I(n))
                 else:

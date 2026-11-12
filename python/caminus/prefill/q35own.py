@@ -41,8 +41,13 @@ from .glue import Glue
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MODULE = 'q35_prefill'
+MODULE_TCAP = 'q35_prefill_tcap'   # (ThinkingCap's formats: kernels/q35_prefill_tcap.hip, Swift's object + the IQ GEMMs)
 FORMATS = ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K')
+FORMATS_TCAP = FORMATS + ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S')
 MM_KERNEL = {'Q8_0': 'q35p_mm_q8_0', 'Q5_K': 'q35p_mm_q5k'}
+# the codebook formats (the tcap object only): the decode engine's copies in place (IQ4_XS raw blocks; the grid formats
+# in the record layout), one more argument: the buffer's rows (Rtot)
+IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_S': 'q35t_mm_iq2s'}
 # token-positions per attention launch (rows x the deepest position they read: one workgroup per (row, query head) walks
 # every position below its own). Unmeasured; the G1 test times the largest launch it runs
 ATTN_TP = 1 << 20
@@ -56,17 +61,29 @@ class Ops(q3m_ops.Ops):
 
     def __init__(self, dev, module=MODULE):
         super().__init__(dev, module)
+        self.module = module
 
     def mm(self, W, x16, ldx, y, ldy, n=None, work=None):
         """y[t] = W x16[t] for t < n (dense only here). W: Dense35Own's dict (fmt, rows, K, w)"""
         if isinstance(W, dict): W = (W['fmt'], W['rows'], W['K'], W['w'])
         fmt, R, K, wb = W[:4]
+        if fmt in IQ_KERNEL:
+            if self.module != MODULE_TCAP: raise ValueError(f'q35 mm: {fmt} needs the {MODULE_TCAP} object (this one: {self.module})')
+            if K % 256 or work is not None or n is None: raise ValueError(f'q35 mm: {fmt}: K {K} (a multiple of 256), dense rows (n) only')
+            n = int(n); grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
+            getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
+            return
         if fmt not in MM_KERNEL: return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
         if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
         if work is not None or n is None: raise ValueError(f'q35 mm: {fmt} takes dense rows (n) only')
         n = int(n)
         grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
         getattr(self.mod, MM_KERNEL[fmt])(grid, (256,), wb, I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
+
+    def emb_iq2s(self, W, rb, vocab, toks, x, n, N):
+        """x [n][N] = the IQ2_S embedding rows toks[i] (OP_OWN_EMB's IQ2_S statements: bitwise the host decoder)"""
+        if self.module != MODULE_TCAP: raise ValueError(f'q35 emb_iq2s: the {MODULE_TCAP} object only')
+        self.mod.q35t_emb_iq2s((int(n),), (256,), W, I(rb), I(vocab), toks, x, I(N))
 
     def add_rms16(self, x, nw, eps, h16, n, N, d=None, h=None):
         """per row: x += d (d None: no add); h = rms_norm(x) * nw (fp32, always written: the kernel's fp16 rounding
@@ -150,10 +167,13 @@ class Q35OwnPrefill(PrefillDriver):
         if m.nl_build != m.nl: raise ValueError('Q35OwnPrefill: a debug_layers engine is refused')
         self.dev = dev = torch.device(f'cuda:{m.dev}')
         self.crossover = CROSSOVER if crossover is None else int(crossover)
+        self.tcap = bool(getattr(m, 'tcap', False))
+        fm = FORMATS_TCAP if self.tcap else FORMATS
         bad = [f"blk.{il} {k}: {L[k]['fmt']}" for il, L in enumerate(m.L) for k in self.MM_KEYS[L['kind']] + ('fg', 'fu', 'fd')
-               if L[k]['fmt'] not in FORMATS]
+               if L[k]['fmt'] not in fm]
         bad += [f"blk.{il} {k}: {L[k]['fmt']}" for il, L in enumerate(m.L) if L['kind'] == 'gdn' for k in ('al', 'be')
-                if L[k]['fmt'] not in FORMATS + ('F32',)]
+                if L[k]['fmt'] not in fm + ('F32',)]
+        if m.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)): bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q35OwnPrefill: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
         if m.D != 5120: raise ValueError(f'Q35OwnPrefill: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
         attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
@@ -163,7 +183,7 @@ class Q35OwnPrefill(PrefillDriver):
         if check: capacity.check([dev.index], [self.need_mib], f'Q35OwnPrefill buffers (chunk {T})')
         f32, f16, i32 = layout(m, T)
         with torch.cuda.device(dev):
-            self.O = Ops(dev)
+            self.O = Ops(dev, module=MODULE_TCAP if self.tcap else MODULE)
             self.Gl = Glue(dev, module='prefill_glue_q35d')
             self.Gd = Gdn(dev, module='prefill_gdn_q35')
             self.A = Attn(dev, name=attn)
@@ -173,7 +193,7 @@ class Q35OwnPrefill(PrefillDriver):
         self.host_toks = torch.zeros(T, dtype=torch.int32, pin_memory=True)
         self.host_ev = None
         self.n_vocab = int(m.vocab)
-        self.emb_rb = m.D // 256 * 144
+        self.emb_rb = m.D // 256 * (82 if m.emb.type == 'IQ2_S' else 144)
         self.last = None
 
     MM_KEYS = dict(gdn=('qkv', 'z', 'so'), attn=('q', 'k', 'v', 'o'))
@@ -203,7 +223,7 @@ class Q35OwnPrefill(PrefillDriver):
             ev = torch.cuda.Event(); ev.record(); self.host_ev = ev
         x, h, blk, ffp, h16, x16 = self.x[:n * D], self.h[:n * D], self.blk[:n * D], self.ffp[:n * D], self.h16[:n * D], self.x16
         W = self.work
-        O.emb(m.emb_dev, self.emb_rb, self.n_vocab, self.toks, x, n, D)
+        (O.emb_iq2s if m.emb.type == 'IQ2_S' else O.emb)(m.emb_dev, self.emb_rb, self.n_vocab, self.toks, x, n, D)
         scale = 1.0 / float(np.sqrt(hd))
         last = m.nl - 1
         for il, L in enumerate(m.L):
