@@ -16,7 +16,10 @@ package main
 //	LLMTOP_GOLDEN=update go test -run TestGoldenFrames .
 
 import (
+	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -123,7 +126,7 @@ func svgFrames(frames []string, title string, frameDur float64) string {
 			cols = max(cols, len(r))
 		}
 	}
-	W, H := padX*2+float64(cols)*cw, padTop+float64(rows)*chH+14
+	W, H := gnomePadX*2+float64(cols)*cw, gnomeBodyTop+float64(rows)*chH+gnomeBodyEnd
 	var defs, body strings.Builder
 	ids := map[string]string{}
 	for fi, p := range parsed {
@@ -164,15 +167,56 @@ func svgFrames(frames []string, title string, frameDur float64) string {
 			init, vals, keys, total, g.String())
 	}
 	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="%.0f" height="%.0f" viewBox="0 0 %.0f %.0f" font-family="%s" font-size="14" xml:space="preserve">
-<rect width="100%%" height="100%%" rx="10" fill="%s"/>
-<circle cx="20" cy="18" r="6" fill="#bf616a"/><circle cx="40" cy="18" r="6" fill="#ebcb8b"/><circle cx="60" cy="18" r="6" fill="#a3be8c"/>
-<text x="%.0f" y="23" fill="#6b7489" text-anchor="middle" font-size="13">%s</text>
-<defs>
+%s<defs>
 %s</defs>
 <g transform="translate(%.0f %.0f)">
 %s</g>
 </svg>
-`, W, H, W, H, svgFont, bgColor, W/2, xmlEsc(title), defs.String(), padX, padTop, body.String())
+`, W, H, W, H, svgFont, gnomeWindow(W, H, title), defs.String(), gnomePadX, gnomeBodyTop, body.String())
+}
+
+// The window the shots are drawn in: Ptyxis 50 (GNOME's terminal; Ubuntu's since 25.10) in the dark style of
+// Ubuntu's libadwaita (Yaru), with the sizes and colours of those two programs' own resources: the header bar
+// (ptyxis-window.ui: the new-terminal split button at the start; the window title; the tab overview, the main menu
+// and the window controls at the end, minimize / maximize / close being Ubuntu's button layout) is 47 px of #393939
+// with a 1 px shade under it, padded 6 / 7 px, its buttons 34 px apart from 6 px gaps and the window controls 24 px
+// circles of 10 % white 37 px apart; the window has 15 px corners and a 1 px outline of 7 % white; the terminal is
+// padded 7 px above, 6 px aside and 4 px below, on the background of its VS Code palette (#1E1E1E). The icons are
+// drawn after Adwaita's symbolic ones on their 16 px grid.
+const (
+	gnomeHeader  = 47.0
+	gnomePadX    = 6.0
+	gnomeBodyTop = gnomeHeader + 7
+	gnomeBodyEnd = 4.0
+	gnomeTermBg  = "#1e1e1e"
+	gnomeUIFont  = `'Ubuntu Sans',Cantarell,'Adwaita Sans',Inter,'Segoe UI',system-ui,sans-serif`
+)
+
+func gnomeWindow(W, H float64, title string) string {
+	const fgc = "#f7f7f7"
+	icon := func(cx float64, shapes string) string { // a 16 px icon centred on (cx, 23)
+		return fmt.Sprintf(`<g transform="translate(%.1f 15)" fill="%s">%s</g>`, cx-8, fgc, shapes)
+	}
+	ctl := func(cx float64, shapes string) string {
+		return fmt.Sprintf(`<circle cx="%.1f" cy="23" r="12" fill="%s" fill-opacity="0.1"/>`, cx, fgc) + icon(cx, shapes)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `<defs><clipPath id="win"><rect width="%.0f" height="%.0f" rx="15"/></clipPath></defs>
+<g clip-path="url(#win)"><rect width="100%%" height="100%%" fill="%s"/><rect width="100%%" height="%.0f" fill="#393939"/><rect y="%.0f" width="100%%" height="1" fill="#000006" fill-opacity="0.36"/></g>
+<rect x="0.5" y="0.5" width="%.0f" height="%.0f" rx="14.5" fill="none" stroke="#ffffff" stroke-opacity="0.07"/>
+`, W, H, gnomeTermBg, gnomeHeader, gnomeHeader-1, W-1, H-1)
+	stroke := `fill="none" stroke="` + fgc + `" stroke-width="2"`
+	b.WriteString(icon(24, `<rect x="1" y="1" width="14" height="14" rx="2" `+stroke+`/><path d="M7 4h2v3h3v2h-3v3h-2v-3h-3v-2h3z"/>`)) // new terminal
+	b.WriteString(icon(52, `<path d="M4 7l4 4 4-4" `+stroke+` stroke-linecap="round" stroke-linejoin="round"/>`))                       // profiles
+	fmt.Fprintf(&b, "\n"+`<text x="%.1f" y="28" fill="%s" text-anchor="middle" font-family="%s" font-size="14.67" font-weight="bold">%s</text>`+"\n",
+		W/2, fgc, gnomeUIFont, xmlEsc(title))
+	b.WriteString(icon(W-178, `<rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/>`)) // tab overview
+	b.WriteString(icon(W-138, `<rect x="1" y="2" width="14" height="2"/><rect x="1" y="7" width="14" height="2"/><rect x="1" y="12" width="14" height="2"/>`))                                                                 // main menu
+	b.WriteString(ctl(W-98, `<rect x="4" y="10" width="8" height="2"/>`))
+	b.WriteString(ctl(W-61, `<rect x="5" y="5" width="6" height="6" `+stroke+`/>`))
+	b.WriteString(ctl(W-24, `<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="`+fgc+`" stroke-width="1.8" stroke-linecap="round"/>`))
+	b.WriteString("\n")
+	return b.String()
 }
 
 // ---------- banner ----------
@@ -379,43 +423,94 @@ func TestGoldenFrames(t *testing.T) {
 	}
 }
 
-// TestPanelShot writes panel.svg, the README's picture of the control panel (`caminus panel`): its real render() of a
-// made-up host (an XTX and an XT, three models on disk, one server running, Qwen Code set up). Skipped unless asked for:
+// TestPanelShot writes panel.svg, the README's picture of the control panel (`caminus panel`): its real render() in a
+// GNOME terminal window. What the tree knows comes from the tree: the version, the model catalog (names, titles,
+// cards, sizes, speeds) and the Qwen Code pin, handed over by tools/release/panel_shot.py, which every release runs
+// (docs/dev/releasing.md; tests/docs checks that the picture names the tree's version). The host is made up: an XTX
+// and an XT, every model on disk but two, one server running, Qwen Code set up.
 //
-//	CAMINUS_SHOTS=/abs/dir go test -run TestPanelShot .
+//	python -I tools/release/panel_shot.py
 func TestPanelShot(t *testing.T) {
-	dir := os.Getenv("CAMINUS_SHOTS")
-	if dir == "" {
-		t.Skip("set CAMINUS_SHOTS=/abs/dir to regenerate the README's panel picture")
+	dir, state := os.Getenv("CAMINUS_SHOTS"), os.Getenv("CAMINUS_SHOT_STATE")
+	if dir == "" || state == "" {
+		t.Skip("run tools/release/panel_shot.py to redraw the README's panel picture")
+	}
+	var tree struct {
+		Version string     `json:"version"`
+		QwenPin string     `json:"qwen_code_pin"`
+		Models  []camModel `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(state), &tree); err != nil || tree.Version == "" || len(tree.Models) == 0 {
+		t.Fatalf("CAMINUS_SHOT_STATE: %v (%d models, version %q)", err, len(tree.Models), tree.Version)
 	}
 	old := version
-	version = "0.2.0"
+	version = tree.Version
 	defer func() { version = old }()
+
+	// the made-up host: these two not downloaded (names the catalog no longer has are ignored), the server runs
+	// shotServer (else the first one-card model) on the XTX
+	notOnDisk := map[string]bool{"qwen3.6-hauhau": true, "qwen3-coder-next": true}
+	const shotServer = "qwen3-30b-a3b"
+	srv := -1
+	for i := range tree.Models {
+		mm := &tree.Models[i]
+		mm.Present, mm.Path = !notOnDisk[mm.Name], ""
+		if mm.Name == shotServer || (srv < 0 && mm.Cards == 1) {
+			srv = i
+		}
+	}
+	if srv < 0 {
+		t.Fatal("no one-card model in the catalog to show running")
+	}
+	sm := tree.Models[srv]
+	sm.Present = true
+	tree.Models[srv] = sm
+	// its catalog speed and context, or no picture: a redraw never makes up a number
+	f := regexp.MustCompile(`([\d,.]+) tok/s`).FindStringSubmatch(sm.Speed)
+	if f == nil {
+		t.Fatalf("%s: no tok/s figure in its catalog speed %q", sm.Name, sm.Speed)
+	}
+	tps, err := strconv.ParseFloat(strings.ReplaceAll(f[1], ",", ""), 64)
+	if err != nil || tps <= 0 {
+		t.Fatalf("%s: catalog speed %q: %v", sm.Name, sm.Speed, err)
+	}
+	f = regexp.MustCompile(`(\d[\d,]*)(K?) context`).FindStringSubmatch(sm.Notes)
+	if f == nil {
+		t.Fatalf("%s: no context length in its catalog notes %q", sm.Name, sm.Notes)
+	}
+	ctx, err := strconv.Atoi(strings.ReplaceAll(f[1], ",", ""))
+	if err != nil || ctx <= 0 {
+		t.Fatalf("%s: catalog notes %q: %v", sm.Name, sm.Notes, err)
+	}
+	if f[2] == "K" {
+		ctx *= 1024
+	}
+
 	m := newCtl(newCtlCLI("caminus"), false, "")
-	m.w, m.h = 112, 24
+	m.w = 112 // the basic layout's height is its content's (m.h sizes only the advanced options list)
 	for _, k := range []string{"models", "ps", "harness", "options"} {
 		m.loaded[k] = true
 	}
-	tps := 171.8
-	m.models = []camModel{
-		{Name: "coder", Title: "Qwen3.8 Flash-Next Coder (GSQ-RCO)", Cards: 2, SizeGB: 59.1, Present: true, Speed: "~104 tok/s decode, 123-203 with DFlash"},
-		{Name: "qwen3.6", Title: "Qwen3.6-35B-A3B (GSQ)", Cards: 1, SizeGB: 12.2, Present: true, Speed: "175 tok/s decode"},
-		{Name: "qwen3.6-hauhau", Title: "Qwen3.6-35B-A3B (HauhauCS Q3_K_P)", Cards: 1, SizeGB: 19.0, Present: false, Speed: "192 tok/s decode"},
-		{Name: "arex-2", Title: "AREX-2 (Qwen3.8-27B finetune)", Cards: 1, SizeGB: 17.2, Present: true, Speed: "41 tok/s decode"},
-		{Name: "qwen3-coder-next", Title: "Qwen3-Coder-Next (UD-IQ3_S)", Cards: 2, SizeGB: 29.7, Present: false, Speed: "136 tok/s decode"},
-	}
+	m.models = tree.Models
 	m.ps = psInfo{
-		Servers: []serverInfo{{Name: "qwen3.6", Model: "qwen3.6", State: "ready", URL: "http://127.0.0.1:8092", Port: 8092,
-			Cards: []string{"1"}, MaxCtx: 262144, UptimeS: 5400, DecodeTPS: &tps, Alias: "qwen3.6"}},
+		Servers: []serverInfo{{Name: sm.Name, Model: sm.Name, State: "ready", URL: "http://127.0.0.1:8092", Port: 8092,
+			Cards: []string{"0"}, MaxCtx: ctx, UptimeS: 5400, DecodeTPS: &tps, Alias: sm.Name}},
 		Cards: []cardInfo{
-			{Index: 0, Name: "XTX", Pci: "0000:03:00.0", UsedMiB: 1180, LineMiB: 23800, Link: "PCIe 4.0 x16", LinkOK: true, Display: true, Status: "supported"},
-			{Index: 1, Name: "XT", Pci: "0000:07:00.0", UsedMiB: 16950, LineMiB: 19850, Link: "PCIe 4.0 x8", LinkOK: true, Status: "supported"},
+			{Index: 0, Name: "XTX", Pci: "0000:03:00.0", UsedMiB: 21300, LineMiB: 23800, Link: "PCIe 4.0 x16", LinkOK: true, Display: true, Status: "supported"},
+			{Index: 1, Name: "XT", Pci: "0000:07:00.0", UsedMiB: 410, LineMiB: 19850, Link: "PCIe 4.0 x4", LinkOK: true, Status: "supported"},
 		},
 	}
-	m.hs = harnessInfo{Installed: true, Version: "0.26.9", Pinned: "0.26.9", Configured: true, Npm: true, Target: "qwen3.6"}
+	m.hs = harnessInfo{Installed: true, Version: tree.QwenPin, Pinned: tree.QwenPin, Configured: true, Npm: true, Target: sm.Name}
 	svg := svgFrames([]string{m.render()}, "caminus panel", 1)
+	for d := xml.NewDecoder(strings.NewReader(svg)); ; { // well-formed, or browsers show an error page instead
+		if _, err := d.Token(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("panel.svg is not well-formed XML: %v", err)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(dir, "panel.svg"), []byte(svg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("panel.svg: %d KB", len(svg)/1024)
+	t.Logf("panel.svg: %d KB, version %s, %d models", len(svg)/1024, tree.Version, len(tree.Models))
 }

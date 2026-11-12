@@ -68,6 +68,18 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   is 64 GB in this mode; `--cache-cap-gb` sets it.
 - **The guard stops on an unresponsive GPU scheduler** (`MES failed to respond`, `MES ring buffer is full`), seen with
   Linux kernel 7.0.0-42 on an RX 7900 XT. See [docs/troubleshooting.md](docs/troubleshooting.md).
+- **The panel's server list keeps a long server name apart from its model.** A name of 10 characters or more (a server
+  takes its model's name, e.g. `qwen3-30b-a3b`) was cut and ran into the model column; the column now fits the longest
+  name.
+
+### For contributors
+
+- **The README's picture of the control panel shows this release.** `python -I tools/release/panel_shot.py` draws the
+  panel's real render of the tree's version, model catalog and Qwen Code pin in a GNOME terminal window; every release
+  runs it (docs/dev/releasing.md), and tests/docs fails while the picture shows another version.
+  `python -I tools/release/make_banner.py --social` draws the repository's social preview (docs/social-preview.png),
+  and the README's banner now takes turns between CAMINUS and QWAMINUS (CAMINUS only for readers who ask for less
+  motion).
 
 ## 0.2.1 (2026-11-09)
 

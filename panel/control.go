@@ -757,6 +757,12 @@ func (m ctl) serverRows() []string {
 	if len(m.ps.Servers) == 0 {
 		return []string{fg(cMuted).Render("no server running: pick a model above and press enter")}
 	}
+	// the name column fits the longest name (servers take their model's name: up to 16 characters), 9 at least and
+	// 18 at most, and a space always follows it
+	nw := 9
+	for _, s := range m.ps.Servers {
+		nw = max(nw, min(lipgloss.Width(s.Name), 18))
+	}
 	var rows []string
 	for i, s := range m.ps.Servers {
 		st := fg(stateColor(s.State)).Render(s.State)
@@ -767,7 +773,7 @@ func (m ctl) serverRows() []string {
 		if s.DecodeTPS != nil {
 			extra += fmt.Sprintf(" · %.1f tok/s decode", *s.DecodeTPS)
 		}
-		rows = append(rows, m.cursor(paneServers, i, m.curS)+fg(stateColor(s.State)).Render("●")+" "+fit(bold(cText).Render(s.Name), 10)+
+		rows = append(rows, m.cursor(paneServers, i, m.curS)+fg(stateColor(s.State)).Render("●")+" "+fit(bold(cText).Render(s.Name), nw)+" "+
 			fit(fg(cText).Render(s.Model), 20)+fit(st, 9)+fg(cAccent).Render(s.URL)+fg(cMuted).Render(extra))
 		switch {
 		case s.State == "failed" && s.Error != "":
