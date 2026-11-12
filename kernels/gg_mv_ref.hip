@@ -1,7 +1,32 @@
 // llama.cpp's quantized matvec for formats no K3 module includes (the yardstick of docs/specs/spec-own-quant.md's G-acc
 // and of benchmarks/q35_mtp_gacc.py): ggml-cuda's vec_dot on q8_1 activations, one warp of 32 per row as in
 // kernels/k3_gguf.hip's gg_mv_* (the same loop), and its q8_1 quantizer. A test object of its own, so no shipped code
-// object changes when a format is added here; not shipped (caminus.device.kernels).
+// object changes when a format is added here; not shipped (caminus.device.kernels). It compiles in ggml-cuda's
+// common.cuh, vecdotq.cuh and quantize.cuh, and GG_REF_MV's loop is ggml-cuda's mul_mat_vec_q one-row loop (mmvq.cu)
+// (MIT, The ggml authors; notice below and in THIRD_PARTY.md).
+//
+// ---- ggml-cuda (llama.cpp) notice for the copied code ----------------------------------------------------------------
+// MIT License
+//
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 #include "common.cuh"
 #include "vecdotq.cuh"
 #include "quantize.cuh"
