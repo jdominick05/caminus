@@ -10,7 +10,7 @@ The projects, with the versions measured:
 | Project | Licence | What runs on gfx1100 | Measured at |
 |---|---|---|---|
 | FlyDSL (ROCm/FlyDSL) | Apache-2.0 | RDNA3 WMMA GEMMs: fp16 (`kernels/gemm/rdna3_f16_gemm.py`) and int8 -> int32 (`rdna3_int8_gemm.py`), autotuned tiles | wheel 0.5.0 + source tag v0.5.0 (226cde8) |
-| rocKE (ROCm/rocm-libraries, hip-kernel-provider) | MIT | RDNA WMMA attention: split-KV GQA decode (`wmma_fmha_decode`), prefill (`wmma_fmha_fwd_v2`), gfx11-generic | not yet measured |
+| rocKE (ROCm/rocm-libraries, hip-kernel-provider) | MIT | RDNA WMMA attention: split-KV GQA decode (`wmma_fmha_decode`), prefill (`wmma_fmha_fwd_v2`), gfx11-generic | rocm-libraries 9e91949 (editable install, its Python lowerer) |
 | Composable Kernel (ROCm/rocm-libraries) | MIT | ck_tile FMHA, a gfx1100 batch-prefill pipeline policy | not yet measured |
 | AITER (ROCm/aiter) | MIT | gfx1100 "Experimental": mostly Triton / FlyDSL kernels | not measured (Triton) |
 | int8-aiter (a downstream AITER fork) | MIT | none: gfx908 (MI100) MFMA kernels; design reference only (int8 KV decode attention with per-token-head scales, Hadamard KV rotation, verify positions packed per KV pass) | - |
@@ -56,7 +56,22 @@ What it says:
   KV pass (int8-aiter's verify packing; rocKE's GQA-packed decode) is the lead for verify passes at depth.
 - At 8 workgroups per WGP (the GGUF modules' resident grid, 672 workgroups) the split pair was 412 us at 32K instead of
   517: its slices want more workgroups than the dense engine's grid; worth a look in the fix.
-- Outside yardsticks for this table (rocKE split-KV decode, CK) are pending.
+- rocKE's split-KV, GQA-packed decode on the same geometry (`benchmarks/rocke_attn.py`, its own harness: HIP graph
+  replay, launch not counted; output checked against its float64 reference at every row):
+
+  | P | rocKE T 1 | rocKE T 4 (bottom-right causal) | ours split T 1 / T 4 | ours own op T 1 |
+  |---|---|---|---|---|
+  | 1,024 | 21.1 us | 21.0 | 33.6 / 66.5 | 130.9 |
+  | 4,096 | 26.7 | 36.7 | 69.5 / 199.3 | 474.6 |
+  | 16,384 | 62.2 | 114.5 | 229.1 / 874.1 | 1,863.6 |
+  | 32,768 | 199.1 | 224.8 | 517.3 / 1,762.0 | 4,353.4 |
+  | 49,152 | 291.4 | 327.4 | 772.8 / 2,625.4 | 6,517.0 |
+
+  At 32K and 49K (the cache is larger than the XT's 80 MB Infinity Cache) rocKE reads ~0.67 TB/s, about 84 % of the
+  XT's memory bandwidth; at 16K and below the whole cache stays in the Infinity Cache between repeated launches in both
+  harnesses, so those rows are cache-warm. rocKE's T 4 costs 1.1x its T 1: its rows share each K / V tile (GQA packing
+  of query heads and rows); our split pair's T 4 costs 3.4x. That is the design to take into our split pair after the
+  generalization: 2.6x at 32K for T 1, 7.8x for T 4.
 
 ## Prefill GEMMs (dense qwen35, Swift 1.5 Q4_K_M shapes)
 
@@ -119,14 +134,18 @@ What it says:
 - Our prefill attention is not tiled: each (row, head) workgroup re-reads K and V, so it runs at ~2 TF at every depth,
   and its cost grows ~31 ms per 1K of depth per chunk: the chunk at 30K spends 0.96 s in attention against 2.26 s in all
   its GEMMs. A tiled kernel does the same chunk in ~40 ms at ~39 TF.
+- rocKE's RDNA WMMA prefill (`wmma_fmha_fwd_v2`, d256 causal 64 x 32 tile; `benchmarks/rocke_attn.py`, graph replay,
+  checked at P0 0) does the same chunk in 0.94 / 8.28 / 28.5 ms at P0 0 / 8K / 30K: 54.8-56.0 TF, 1.4x tiled SDPA and
+  34x ours at 30K.
 - The fix is our own WMMA flash-attention tile for prefill (K / V tiles in LDS shared by a block of rows, online
-  softmax), with SDPA's tiled kernel as the bar until rocKE's RDNA WMMA prefill and CK's gfx1100 FMHA are measured.
+  softmax), with rocKE's 56 TF as the bar. CK's gfx1100 FMHA is not measured (a heavy build; rocKE covers the case).
 
 ## Summary: where the outside kernels say we stand (XT)
 
 | Op | ours | best yardstick measured | gap |
 |---|---|---|---|
 | Decode attention, Swift / ThinkingCap modules, 32K (XT, engine grid) | 4.35 ms / layer | our own split pair: 0.52 ms | 8.4x (own fix, not outside code) |
-| Verify attention (T 4), split pair, 32K | 1.76 ms / layer (3.4x T 1) | - (rocKE GQA-packed decode pending) | rows re-read the cache |
+| Decode attention after the fix, split pair, 32K | 0.52 ms / layer | rocKE split-KV decode: 0.20 ms | 2.6x |
+| Verify attention (T 4), split pair, 32K | 1.76 ms / layer (3.4x T 1) | rocKE, GQA-packed: 0.22 ms | 7.8x |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
-| Prefill attention, chunk at 30K | 964 ms | torch SDPA (tiled): 40.5 ms | 23.8x |
+| Prefill attention, chunk at 30K | 964 ms | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.5 ms) | 34x |
