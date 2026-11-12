@@ -1,0 +1,2 @@
+# the release build image, by digest (tools/release/build_image.sh, then docker push; docs/dev/releasing.md, "The build image")
+ghcr.io/jdominick05/caminus-build@sha256:6b7b6b588b5f883db8c85c7597f4f916a1576d48291647b59ddc1ffd9dfcf496

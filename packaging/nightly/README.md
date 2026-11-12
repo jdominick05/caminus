@@ -7,8 +7,8 @@ which verifies the files and uploads the wheel to PyPI. What the script does, st
 [docs/dev/releasing.md](../../docs/dev/releasing.md), "Nightly builds". Nothing in the repository installs or enables the
 timer; these are the steps to take by hand.
 
-It needs what a release build needs (docs/dev/releasing.md, "Making a release": the TheRock toolchain, the ignite-llama
-fork's headers, Go, a Python with ROCm PyTorch) plus `gh`, logged in to an account that may push tags, create
+It needs what a release build needs (docs/dev/releasing.md, "The build image": Docker, logged in to GHCR with read access
+to the build image) plus `gh`, logged in to an account that may push tags, create
 releases and start workflows (a `GH_TOKEN` in the env file needs the same rights). It is CPU only and never opens a GPU.
 
 ## Set it up

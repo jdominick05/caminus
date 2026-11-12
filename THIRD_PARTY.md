@@ -178,6 +178,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
+## TheRock ROCm, in the release build image (not in this repository)
+
+The public release build image (`ghcr.io/jdominick05/caminus-build`, packaging/build-image/) redistributes 191 files of
+AMD's TheRock ROCm 10.2.0a20261011 (packaging/build-image/therock-files.txt): the LLVM toolchain (clang, lld, libLLVM,
+libclang-cpp, the AMDGPU device-library bitcode; Apache-2.0 WITH LLVM-exception), the HIP headers and runtime library
+and the hipBLAS headers (MIT), and the zlib (Zlib) and zstd (BSD-3-Clause) libraries TheRock bundles. Nothing of it is
+in this repository or the wheel. The image carries TheRock's NOTICES.txt and component LICENSE files beside them, and
+the texts TheRock does not ship (packaging/build-image/licenses/README.md) under /usr/share/doc/caminus-build-image/.
+
 ## Model weights (not in this repository)
 
 Caminus serves model files the user downloads; none is redistributed here, so the repository itself owes no model licence.

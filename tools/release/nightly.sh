@@ -16,7 +16,7 @@
 #      is stateless (tools/release/nightly_plan.py built): a skipped or failed night repairs itself at the next run,
 #      up to the pre-release. The start of the PyPI workflow (step 7) is the one step no later run repeats
 #   3. needs a completed, successful ci.yml push run on that commit
-#   4. clone A at the head: release_build.sh --write-hashes (the kernels, built by the real toolchain), then ONE commit
+#   4. clone A at the head: release_build.sh --write-hashes in the build image (the kernels, built by the real toolchain), then ONE commit
 #      on top of the head holding the version X.Y.Z.devYYYYMMDD and that build's code-object hashes, tagged
 #      vX.Y.Z.devYYYYMMDD; the commit is on no branch
 #   5. clone B at the tag: release_build.sh (the kernels again: the second build must reproduce the committed hashes),
@@ -33,7 +33,8 @@
 #
 # Environment (the timer's env file: packaging/nightly/nightly.env.example):
 #   NIGHTLY_GIT_NAME, NIGHTLY_GIT_EMAIL   the identity of the nightly commit and tag (required; it becomes public)
-#   PY, ROCM_PATH, IGNITE, TORCHLIB, PATCHELF   as tools/release/release_build.sh reads them; PATH must find git, gh, go
+#   CAMINUS_BUILD_IMAGE                   the build image (default packaging/build-image/IMAGE: tools/release/in_image.sh);
+#                                         PATH must find git, gh, docker
 #   GH_TOKEN                              for gh and git when no login session holds gh's token (a timer after a reboot)
 #   NIGHTLY_HOME       state: mirror.git, builds/, HOLD, last (default $XDG_STATE_HOME/caminus-nightly)
 #   NIGHTLY_REPO       owner/name (default jdominick05/caminus); NIGHTLY_BRANCH (default testing); NIGHTLY_URL (default
@@ -66,7 +67,7 @@ export PY=${PY:-python3}
 PLAN=(env -u PYTHONPATH "$PY" -I "$ROOT/tools/release/nightly_plan.py")
 case "$NH" in /*) ;; *) die "NIGHTLY_HOME must be an absolute path, not '$NH'" ;; esac
 [[ "$KEEP" =~ ^[1-9][0-9]*$ ]] || die "NIGHTLY_KEEP_BUILDS must be a count of at least 1, not '$KEEP'"
-for t in git go flock tar "$PY"; do command -v "$t" > /dev/null || die "$t is missing (PATH=$PATH)"; done
+for t in git docker flock tar "$PY"; do command -v "$t" > /dev/null || die "$t is missing (PATH=$PATH)"; done
 [ -n "${NIGHTLY_GIT_NAME:-}" ] && [ -n "${NIGHTLY_GIT_EMAIL:-}" ] || die "NIGHTLY_GIT_NAME and NIGHTLY_GIT_EMAIL are not set (the nightly commit's identity)"
 ident=(-c "user.name=$NIGHTLY_GIT_NAME" -c "user.email=$NIGHTLY_GIT_EMAIL" -c commit.gpgsign=false -c tag.gpgsign=false)
 need_gh=1; [ "$dry" = 1 ] && [ "$noci" = 1 ] && need_gh=0
@@ -126,7 +127,7 @@ W=$NH/builds/$DATE-$short-$(date +%H%M%S)
 mkdir "$W"
 build() {   # build DIR LOG ARGS...: release_build.sh in a clone, its output in LOG
     local dir=$1 log=$2; shift 2
-    (cd "$dir" && tools/release/release_build.sh "$@") > "$log" 2>&1 || { tail -40 "$log" >&2; die "release_build.sh $* failed in $dir ($log)"; }
+    (cd "$dir" && tools/release/in_image.sh tools/release/release_build.sh "$@") > "$log" 2>&1 || { tail -40 "$log" >&2; die "release_build.sh $* failed in $dir ($log)"; }
     tail -3 "$log"
 }
 

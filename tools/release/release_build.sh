@@ -11,9 +11,9 @@
 #                                          provenance and stop: commit that file before tagging (it changes only when the
 #                                          code objects do)
 #
-# Environment: PY (a Python 3.12 with ROCm PyTorch, pip, setuptools >= 77; default python3), ROCM_PATH and IGNITE as build.sh
+# Environment: PY (a Python 3.12 with pip and setuptools 84.2.1, the release image's; default python3), ROCM_PATH and IGNITE as build.sh
 # reads them (TheRock, and a checkout of the ignite-llama fork at e4e3f8eda, github.com/jdominick05/ignite-llama, for its ggml
-# headers: provenance.json records its commit), TORCHLIB / PATCHELF (default: from PY). The objects that include ggml headers
+# headers: provenance.json records its commit). The objects that include ggml headers
 # carry clang's HIP compile-unit id (__hip_cuid_<hash of the options>), so their bytes depend on the IGNITE and ROCM_PATH
 # path strings too: build with the ones packaging/gfx1100-kernels.sha256 was made with (docs/dev/releasing.md).
 # SOURCE_DATE_EPOCH (default: HEAD's committer time, i.e. the tagged commit's): provenance.json's `built`, the wheel's entry
@@ -48,13 +48,7 @@ if [ "$mode" = tag ]; then
     TC=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}" || true)
     [ "$TC" = "$HEAD" ] || die "the tag $TAG does not name HEAD ($HEAD; the tag: ${TC:-none}): tag the release commit, or --untagged for a rehearsal"
 fi
-[ -n "${TORCHLIB:-}" ] || TORCHLIB=$("$PY" -I -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')
-if [ -z "${PATCHELF:-}" ]; then
-    if [ -x "$(dirname "$("$PY" -I -c 'import sys; print(sys.executable)')")/patchelf" ]; then
-        PATCHELF="$(dirname "$("$PY" -I -c 'import sys; print(sys.executable)')")/patchelf"
-    else PATCHELF=$(command -v patchelf || true); fi
-fi
-export TORCHLIB PATCHELF
+export BUILD_KERNELS_ONLY=1   # build.sh: the code objects only (the runtime tests are not shipped and need torch)
 CT=$(git log -1 --format=%ct "$HEAD")
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$CT}
 [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || die "SOURCE_DATE_EPOCH must be whole seconds since 1970, not '$SOURCE_DATE_EPOCH'"
