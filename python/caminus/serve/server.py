@@ -671,6 +671,7 @@ class K3Server:
             pf = getattr(r, 'prefill', None) or {}
             out['cache'] = dict(source=pf.get('source'), restore=r.restore, cached=r.cached_n, restore_ms=pf.get('restore_ms'),
                                 exact=pf.get('exact'), lcp=pf.get('lcp'), slot=pf.get('slot', 'main'))
+            if pf.get('tail'): out['cache']['side_question'] = dict(pf['tail'])   # (numbers only: tail_match)
             out['ttft_split_ms'] = dict(queue=out.get('queue_ms'), restore=pf.get('restore_ms'), batched=pf.get('batched_ms'),
                                         handoff=pf.get('handoff_ms'), passes=pf.get('passes_ms'), total=out.get('ttft_ms'))
             n = len(r.gen_ids)

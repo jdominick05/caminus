@@ -498,6 +498,7 @@ class K3Session(EngineSession):
         pfs.cached_n, pfs.source, pfs.restore = int(r['cached']), r['source'], RESTORE_OF.get(r['source'], 'cold')
         pfs.restore_ms = float(r['ms'].get('restore', 0.0) + r['ms'].get('park', 0.0))
         pfs.slot = 'side' if self._side else 'main'
+        pfs.tail = rt.get('tail')   # (a side question's history against the stored conversation: PromptCache.tail_match)
         last = getattr(self.pf, 'last', None)
         batched = last is not None and last is not last_before
         last = last or {}
