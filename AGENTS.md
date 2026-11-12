@@ -130,7 +130,7 @@ export HF_TOKENIZER_JSON=/path/to/tokenizer.json   # optional: two tokenizer cro
 ## Commands
 
 ```
-./build.sh                                          # kernels -> build/*.hsaco (+ C++ runtime tests); ROCM_PATH, IGNITE, TORCHLIB, PATCHELF; BUILD_JOBS compiles at once (same bytes at any count)
+./build.sh                                          # kernels -> build/*.hsaco (+ C++ runtime tests; BUILD_KERNELS_ONLY=1 skips them); ROCM_PATH, IGNITE, TORCHLIB, PATCHELF; BUILD_JOBS compiles at once (same bytes at any count)
 (cd panel && go build -o caminus-panel . && go test ./...)
 python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI runs them (a FRESH DIR; skips with the reason what's missing; --jobs N suites at once)
 python -I tools/release/privacy_scan.py .           # no secrets, machine paths or session links in the tree (CI runs it)
@@ -138,7 +138,7 @@ python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_m
 python -I tools/gates/objcheck.py snap build -o FILE   # the built objects' code / data digests and k3_run's registers, before an edit
 python -I tools/gates/objcheck.py check FILE build --expect 'MODULE*'   # after it: only the named objects changed; registers in budget (reads files, CPU)
 python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS)
-tools/release/release_build.sh                      # reproducible release files from a clean clone at a tag (docs/dev/releasing.md)
+tools/release/in_image.sh tools/release/release_build.sh   # reproducible release files from a clean clone at a tag, in the build image (docs/dev/releasing.md)
 tools/release/nightly.sh --dry-run                  # the nightly of `testing` up to its verified files; without the flag it PUBLISHES (a timer's job)
 
 # GPU: always under the guard

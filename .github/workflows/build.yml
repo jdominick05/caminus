@@ -1,0 +1,109 @@
+# The release build on GitHub's hosted runners, with SLSA Build Level 3 provenance (docs/dev/releasing.md, "SLSA").
+# A reusable workflow: release.yml and nightly.yml call it for a tag; a push to a `ci/*` branch runs it as a rehearsal
+# (--untagged; it needs that branch's packaging/gfx1100-kernels.sha256 to be current, which `testing`'s is not between
+# releases). It runs tools/release/release_build.sh inside the release build image
+# (packaging/build-image/Dockerfile, pulled by digest), the same command and image the maintainer and the nightly timer
+# use, so the files are byte for byte theirs; then it signs a provenance attestation for the wheel, the sdist and
+# SHA256SUMS (Sigstore's public-good instance, as for any public repository). The build steps run in this called workflow,
+# isolated from the caller's steps, and the provenance names this file as the signer and the caller's ref as the source:
+#   gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus \
+#      --signer-workflow jdominick05/caminus/.github/workflows/build.yml --source-ref refs/tags/vX.Y.Z
+# (a nightly's source ref is refs/heads/testing: nightly.yml runs there; a rehearsal's is its ci/* branch)
+# The image is public (anyone can rebuild a release with it); this workflow still never runs for a fork's pull request,
+# since it signs provenance in this repository's name.
+# Every action is pinned by its commit SHA, the release tag in the trailing comment.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'the tag (vX.Y.Z or vX.Y.Z.devYYYYMMDD) to build'
+        required: true
+        type: string
+    outputs:
+      sha256sums:
+        description: "the built dist/SHA256SUMS"
+        value: ${{ jobs.build.outputs.sha256sums }}
+  push:
+    branches: ['ci/**']
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: release_build.sh in the build image, then provenance
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read        # the build image (public; the login also covers a private copy)
+      id-token: write       # Sigstore signing identity for the attestation
+      attestations: write
+    outputs:
+      sha256sums: ${{ steps.sums.outputs.sha256sums }}
+    steps:
+      - name: What to build
+        id: what
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; echo "mode=--untagged" >> "$GITHUB_OUTPUT"
+          elif [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]{8})?$ ]]; then
+            echo "ref=refs/tags/$REF" >> "$GITHUB_OUTPUT"; echo "mode=" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::not a release or nightly tag: '$REF'"; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.what.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # the image the checked-out commit names (packaging/build-image/IMAGE), by digest; the provenance records the commit
+      - name: Pull the build image (by digest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IMAGE=$(sed -n '/^[^#]/{p;q}' packaging/build-image/IMAGE)
+          if [[ ! "$IMAGE" =~ ^ghcr\.io/jdominick05/caminus-build@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::packaging/build-image/IMAGE does not name the build image by digest: '$IMAGE'"; exit 1
+          fi
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$IMAGE"
+          docker logout ghcr.io
+
+      # in_image.sh: the runner's uid, the checkout at /src; the build writes only build/, python/caminus/hsaco/,
+      # python/caminus/share/caminus-panel, .pybuild/ and dist/
+      - name: tools/release/release_build.sh ${{ steps.what.outputs.mode }} (in the build image)
+        env:
+          MODE: ${{ steps.what.outputs.mode }}
+        run: tools/release/in_image.sh tools/release/release_build.sh $MODE
+
+      - name: SHA256SUMS
+        id: sums
+        run: |
+          cat dist/SHA256SUMS
+          { echo 'sha256sums<<EOF'; cat dist/SHA256SUMS; echo EOF; } >> "$GITHUB_OUTPUT"
+
+      - name: Provenance (SLSA, signed through Sigstore, stored on GitHub)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/caminus-*.whl
+            dist/caminus-*.tar.gz
+            dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-built
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

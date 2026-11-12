@@ -1,11 +1,13 @@
 # Releasing Caminus: CI, the PyPI release and the nightly builds
 
-Four GitHub Actions workflows (`.github/workflows/`) and a few tools carry a release and the nightly builds. One fact
-shapes all of it: **CI never builds the shipped code objects.** The gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
+Five GitHub Actions workflows (`.github/workflows/`) and a few tools carry a release and the nightly builds. One fact
+shapes all of it: the gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
 (10.2.0a20261011: amdclang++ and the offload driver's device LTO), and the gates that validated them hold their exact
-instructions and bitwise numerics (docs/dev/packaging.md, "Code objects"). That toolchain is not available at a public URL CI
-could install from, and a different compiler gives different code. So the maintainer builds the release files on the
-development machine, and CI checks them against hashes committed in the repository.
+instructions and bitwise numerics (docs/dev/packaging.md, "Code objects"). That toolchain has no public URL, and a
+different compiler gives different code. So every release build runs in **one public container image** that holds it
+(below, "The build image"): the maintainer's builds, the nightly timer's and CI's. The release files are built twice, by the
+maintainer and by CI (build.yml, with SLSA Build Level 3 provenance), and are published only when the two are byte
+for byte equal (below, "SLSA").
 
 Every action the workflows use is pinned by its commit SHA, with the release tag in a trailing comment
 (`actions/checkout@08c6903c... # v5.0.0`); to update one, replace both.
@@ -42,6 +44,16 @@ runtime objects happen to equal the shipped ones. It never produces release arti
 not expected to equal the shipped ones. build.sh compiles against the ignite-llama fork's ggml headers at e4e3f8eda (the K3
 modules use helpers the fork adds), which the job fetches from github.com/jdominick05/ignite-llama.
 
+## build.yml: the release build on GitHub's runners (SLSA)
+
+A reusable workflow: release.yml and nightly.yml call it with a tag, and a push to a `ci/*` branch runs it as a
+rehearsal (`--untagged`; it needs the branch's committed hashes to be current, which `testing`'s are not between releases). One job (`contents: read`, `packages: read`, `id-token: write`, `attestations: write`):
+checks out the commit, pulls the build image by the digest that commit's `packaging/build-image/IMAGE` names, runs
+`tools/release/in_image.sh tools/release/release_build.sh` (the maintainer's command), and signs a provenance attestation
+for the wheel, the sdist and SHA256SUMS (actions/attest-build-provenance; Sigstore's public-good instance, as for any public repository). The files go to the
+caller as the artifact `dist-built`, with SHA256SUMS as an output. It never runs for a fork's pull request (it has no
+`pull_request` trigger): it signs provenance in this repository's name.
+
 ## release.yml: a published GitHub Release (or by hand with its tag)
 
 1. **verify** (`contents: read` only): checks out the tag, downloads the Release's attached `caminus-X.Y.Z-py3-none-any.whl`,
@@ -49,10 +61,14 @@ modules use helpers the fork adds), which the job fetches from github.com/jdomin
    SHA256SUMS, the wheel's RECORD, the code objects exactly `caminus.device.kernels.RUNTIME_SET` with each sha256 equal to
    provenance.json and to the committed `packaging/gfx1100-kernels.sha256` at the tag, provenance naming the tag's commit and
    a clean tree, the kernel tree hash recomputed at the tag, the sdist's objects identical to the wheel's, and no private
-   or secret text in either archive. Then `twine check --strict`. The verified files go to the next job as an artifact.
-2. **publish** (environment `pypi`, no token permissions): waits for the environment's required reviewer, then uploads the
-   two files with twine 6.1.0 (`twine upload`; not pypa/gh-action-pypi-publish, whose Docker image cannot be pinned by commit SHA) and the environment secret `PYPI_API_TOKEN` (a PyPI token scoped to the
-   `caminus` project).
+   or secret text in either archive. Then `twine check --strict`. Its output is the Release's SHA256SUMS.
+2. **build** (build.yml, above): the same tag built again on GitHub's runners, with provenance.
+3. **match**: the two SHA256SUMS must be equal; nothing is published otherwise.
+4. **publish** (environment `pypi`, `id-token: write` only): waits for the environment's required reviewer, then signs
+   CI's wheel and sdist with PEP 740 attestations (pypi-attestations 0.0.31, the job's identity) and uploads them with their
+   attestations through PyPI Trusted Publishing (twine 6.1.0; not pypa/gh-action-pypi-publish, whose Docker image cannot be
+   pinned by commit SHA). The PyPI project's trusted publisher for it names workflow `release.yml` and environment `pypi`;
+   no PyPI secret is stored.
 
 Every job runs only in `jdominick05/caminus` (`if: github.repository == ...`), so a fork or a mirror never publishes.
 
@@ -71,7 +87,7 @@ pip install "caminus==0.2.2.dev20261112"     # one nightly
 Name a dev version in the request, as above, rather than passing `--pre`: pip then takes pre-releases of Caminus only,
 while `--pre` also takes pre-releases of every dependency, which nothing here is tested against.
 
-**The build runs on the maintainer's machine** for the reason at the top of this page: `tools/release/nightly.sh`, started at
+**The build runs on the maintainer's machine, in the build image** (and again in CI: nightly.yml), for the reason at the top of this page: `tools/release/nightly.sh`, started at
 midnight (local time) by a systemd user timer ([packaging/nightly/](../../packaging/nightly/README.md)). A run:
 
 1. does nothing when `HOLD` exists in its state directory, or while a guarded GPU job other than the server is running
@@ -81,7 +97,7 @@ midnight (local time) by a systemd user timer ([packaging/nightly/](../../packag
    (`tools/release/nightly_plan.py built`: a nightly tag whose commit's parent is the head), so a night that was skipped
    or failed is made up by the next run;
 3. needs a completed, successful `ci.yml` push run on that commit;
-4. in a fresh clone at the head: `release_build.sh --write-hashes` (the kernels, by the real toolchain), then **one
+4. in a fresh clone at the head: `release_build.sh --write-hashes` in the build image (`tools/release/in_image.sh`), then **one
    commit** on top of the head with the version and that build's `packaging/gfx1100-kernels.sha256`, tagged
    `vX.Y.Z.devYYYYMMDD`. The commit is on no branch; the tag is its only name. It exists because the files are verified
    the way a release's are: a clean checkout whose `__init__.py` holds the version, hashes committed at that commit,
@@ -119,8 +135,11 @@ No person approves a nightly, so the verify job is the gate between a published 
   the checkout's tracked file byte for byte. Only the code objects, their provenance and the panel come from the
   maintainer's build, as in a release.
 
-Its publish job (environment `pypi-nightly`, `id-token: write` and nothing else, no checkout) uploads **the wheel only**
-with twine 6.1.0 through PyPI Trusted Publishing: the job's OIDC identity is exchanged for a short-lived upload token
+Only then does build.yml (`testing`'s copy: a reusable workflow resolves at the run's commit) build the tag on GitHub's
+runners with provenance, and a match job requires its SHA256SUMS to equal the pre-release's, as in a release.
+
+Its publish job (environment `pypi-nightly`, `id-token: write` and nothing else, no checkout) uploads **CI's wheel only**,
+with its PEP 740 attestation, with twine 6.1.0 through PyPI Trusted Publishing: the job's OIDC identity is exchanged for a short-lived upload token
 (PyPI's documented manual exchange), so no PyPI secret is stored for it. It runs only when the repository variable
 `NIGHTLY_PYPI` is `true`. The PyPI project's trusted publisher names owner `jdominick05`, repository `caminus`, workflow
 `nightly.yml` and environment `pypi-nightly`. PyPI does not limit a publisher to dev versions, which is why the
@@ -146,10 +165,10 @@ that could not run is listed there as skipped, with the reason. A published numb
    and Qwen Code pin, in a GNOME terminal window, written to `docs/panel.svg`. tests/docs fails while the picture shows
    another version.
 2. **The code-object hashes** (only when kernels/ or build.sh changed since the last release): in a fresh clone,
-   `PY=<python with ROCm PyTorch> ROCM_PATH=<TheRock> IGNITE=<ignite-llama at e4e3f8eda> tools/release/release_build.sh --write-hashes`,
+   `tools/release/in_image.sh tools/release/release_build.sh --write-hashes`,
    review the change to `packaging/gfx1100-kernels.sha256` and commit it.
 3. **Tag** the release commit `vX.Y.Z` and push the commit and the tag.
-4. **Build** in a fresh clone at the tag: `PY=... ROCM_PATH=... IGNITE=... tools/release/release_build.sh`. It refuses a tree with
+4. **Build** in a fresh clone at the tag: `tools/release/in_image.sh tools/release/release_build.sh`. It refuses a tree with
    changes or earlier build output, runs ./build.sh and tools/release/stage_kernels.py, refuses staged objects that differ from the
    committed hashes, builds the wheel and the sdist into `dist/`, makes them reproducible (`tools/release/repro_dist.py`, below),
    writes `dist/SHA256SUMS` and runs tools/release/verify_release.py. (`--untagged` does the same at an untagged commit for a
@@ -160,7 +179,7 @@ that could not run is listed there as skipped, with the reason. A published numb
 6. **Create the GitHub Release** with the three files attached, e.g.
    `gh release create vX.Y.Z dist/caminus-X.Y.Z-py3-none-any.whl dist/caminus-X.Y.Z.tar.gz dist/SHA256SUMS --title "Caminus X.Y.Z" --notes-file NOTES.md`.
    Publishing it starts release.yml.
-7. **Approve** the `pypi` deployment once verify has passed (the run's page on GitHub). The upload follows.
+7. **Approve** the `pypi` deployment once verify, build and match have passed (the run's page on GitHub). The upload follows.
 
 ## Reproducible release files
 
@@ -177,18 +196,73 @@ themselves are checked against `packaging/gfx1100-kernels.sha256`). Nothing in t
 - `tools/release/verify_release.py` checks that form (one time, == provenance's `built`), so release.yml refuses files built another
   way.
 
-**The code objects also depend on two absolute paths.** clang's HIP compile gives every object a compile-unit id, a symbol
+**The code objects also depend on two absolute paths**, which is one reason the build image fixes them
+(`/opt/rocm-therock/10.2.0a20261011`, `/opt/ignite-llama`). clang's HIP compile gives every object a compile-unit id, a symbol
 `__hip_cuid_<hash>` whose hash covers the compile command's options, and those hold the absolute `-I<IGNITE>/ggml/...`
-include paths and the toolchain's (`ROCM_PATH`) paths. The 28 objects that include ggml headers (`k3_gguf*`,
-`prefill_mmq_*`, `prefill_moe_*`, `prefill_dense_*`) therefore differ when `IGNITE` or `ROCM_PATH` is another path string:
-the same instructions and read-only data (`.text` and `.rodata` identical), 36 to 841 bytes of symbol names and the symbol
-hash and string tables built from them; the 8 others do not. The repository's own path and the temporary directory
+include paths and the toolchain's (`ROCM_PATH`) paths. The objects therefore differ when `IGNITE` or `ROCM_PATH` is
+another path string, with the same instructions and read-only data: symbol names and the symbol hash and string tables
+built from them. (Only `IGNITE` changing touches the 28 objects that include ggml headers, `k3_gguf*`, `prefill_mmq_*`,
+`prefill_moe_*` and `prefill_dense_*`; `ROCM_PATH` changing touches every object.) The repository's own path and the temporary directory
 do not enter them. A byte-for-byte rebuild needs the same toolchain, the same fork commit at the same absolute `IGNITE` path and
 the same `ROCM_PATH` string as the release build; `packaging/gfx1100-kernels.sha256` holds the release build's hashes, and
 kernels.yml's "N of 36 equal" count is low for this reason as well as the compiler's.
 
-To check a published release on the maintainer's layout: clone the tag, run `tools/release/release_build.sh` with those paths, and
-compare `dist/SHA256SUMS` with the Release's.
+Moving the build into the image (from the maintainer's own paths) changed every object's bytes and none of its code:
+`tools/gates/objcheck.py check` of the image's build against a build of the same sources with the maintainer's toolchain
+paths finds all 103 objects with the same code and data sections and the same k3_run registers (RESULT PASS); the bytes
+that differ are symbol names, the tables built from them and `.dynamic`'s offsets into those. So the gates that validated
+the previous objects hold for these.
+
+To check a published release: clone the tag, run `tools/release/in_image.sh tools/release/release_build.sh` (with access to
+the image), and compare `dist/SHA256SUMS` with the Release's. Without the image, check its provenance (below).
+
+## The build image
+
+`packaging/build-image/Dockerfile`, built by `ROCM_PATH=<TheRock 10.2.0a20261011> tools/release/build_image.sh` and pushed
+to GHCR as a **public** package (`ghcr.io/jdominick05/caminus-build`, licences: packaging/build-image/licenses/README.md and
+THIRD_PARTY.md); `packaging/build-image/IMAGE` names it by digest,
+and every build (`tools/release/in_image.sh`: the maintainer's, the nightly's, build.yml's) uses that digest. It holds:
+
+- TheRock 10.2.0a20261011 at `/opt/rocm-therock/10.2.0a20261011`, **only the files the kernel build opens**
+  (`packaging/build-image/therock-files.txt`, about 250 MB of the 11 GB tree, plus the whole device-library directory,
+  which clang lists rather than opens). The list came from `strace -f -e trace=%file,execve` of `BUILD_KERNELS_ONLY=1
+  ./build.sh`; after a toolchain or build.sh change that opens new files, trace it again;
+- the ignite-llama fork at e4e3f8eda at `/opt/ignite-llama` (fetched from GitHub by commit);
+- Ubuntu 26.04 by digest, with libc6-dev, libstdc++-15-dev, libgcc-15-dev and linux-libc-dev **pinned**: the device code
+  includes the host's C and C++ headers (`<cmath>`, `<cstdlib>` through clang's HIP wrappers), so they are build inputs;
+- Go 1.26.8 (sha256-checked; `GOTOOLCHAIN=local`, and `panel/go.mod` names the same toolchain) and pip / setuptools /
+  wheel at hash-checked versions (`packaging/build-image/requirements.txt`; the wheel's `WHEEL` file names setuptools'
+  version).
+
+`BUILD_KERNELS_ONLY=1` (release_build.sh sets it) stops build.sh before the C++ runtime tests, which are not shipped and
+link torch's HIP runtime, so the image has no PyTorch. Changing the image means: build, push, write the new digest into
+`IMAGE`, `release_build.sh --write-hashes` in it, and compare the objects' code sections with the previous build's as above.
+
+## SLSA
+
+The release files reach **SLSA Build Level 3**: build.yml builds them on GitHub-hosted runners in a reusable workflow
+(isolated from the calling workflow's steps) and GitHub signs non-forgeable provenance naming the repository, the commit,
+the workflow file and the run. Check a file:
+
+```bash
+gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus \
+   --signer-workflow jdominick05/caminus/.github/workflows/build.yml --source-ref refs/tags/vX.Y.Z
+```
+
+`--source-ref` matters: a `ci/*` rehearsal's files are signed by the same workflow, with their branch as the source.
+A release's source is its tag (release.yml refuses a run by hand that is not started on the tag). A nightly's source is
+`refs/heads/testing` and the commit is the head of `testing` the nightly was made from, not the nightly's tag commit:
+nightly.yml runs on `testing` for the reason above. The tag commit is that head plus the version line and the hashes
+(`nightly_plan.py check-tag`), and the attested files' provenance.json names the tag commit.
+
+PyPI also shows each file's PEP 740 attestation (the publish job's identity), so `pip`-side tools can check that the
+file on PyPI came from this repository's release.yml or nightly.yml.
+
+What the provenance does **not** cover: the build image is an input that CI does not build. Its digest is in the
+provenance (the commit's `packaging/build-image/IMAGE`), and the image is public, so anyone can pull that digest, read
+its contents and rebuild a release bit for bit (`tools/release/in_image.sh tools/release/release_build.sh` in a clone of
+the tag, then compare SHA256SUMS). Rebuilding the image itself needs TheRock 10.2.0a20261011, so that step is the
+maintainer's. The maintainer's independent build of the same files (the match job) is the second check.
 
 ## The privacy scan's private names
 

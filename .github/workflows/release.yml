@@ -1,8 +1,9 @@
-# The PyPI release (docs/dev/releasing.md). The maintainer builds the wheel and sdist locally (tools/release/release_build.sh, the
-# toolchain CI does not have) and attaches them with SHA256SUMS to a GitHub Release; publishing that Release (or running this
-# workflow by hand with its tag) verifies the attached files against the tag and then waits for the `pypi` environment's
-# required reviewer before anything is uploaded. Nothing here builds code objects. Pre-releases are skipped (the nightlies:
-# nightly.yml).
+# The PyPI release (docs/dev/releasing.md). The maintainer builds the wheel and sdist in the release build image
+# (tools/release/release_build.sh) and attaches them with SHA256SUMS to a GitHub Release; publishing that Release (or running
+# this workflow by hand with its tag) verifies the attached files against the tag, builds the same tag again on GitHub's
+# runners in the same image with SLSA Build L3 provenance (build.yml), requires the two SHA256SUMS to be equal, and then
+# waits for the `pypi` environment's required reviewer. PyPI gets the files CI built, through Trusted Publishing, each
+# with a PEP 740 attestation. Pre-releases are skipped (the nightlies: nightly.yml).
 # Every action is pinned by its commit SHA, the release tag in the trailing comment.
 name: release
 
@@ -35,14 +36,20 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      sha256sums: ${{ steps.sums.outputs.sha256sums }}
     env:
       TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
-      - name: The tag has the form vX.Y.Z
+      # the provenance (build.yml) names this run's ref and commit as the source: a run by hand must be started on the tag
+      - name: The tag has the form vX.Y.Z, and the run is on it
         run: |
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::not a release tag: '$TAG' (vX.Y.Z)"; exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::this run is on $GITHUB_REF: start it on the tag (gh workflow run release.yml --ref $TAG -f tag=$TAG)"; exit 1
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,49 +80,85 @@ jobs:
       - name: twine check
         run: python -m twine check --strict "$RUNNER_TEMP"/dist/caminus-*
 
-      - name: Hand the verified files to the publish job
+      - name: The maintainer's SHA256SUMS (for the comparison with CI's build)
+        id: sums
         run: |
-          mkdir -p "$RUNNER_TEMP/publish"
-          cp "$RUNNER_TEMP"/dist/caminus-*.whl "$RUNNER_TEMP"/dist/caminus-*.tar.gz "$RUNNER_TEMP/publish/"
+          { echo 'sha256sums<<EOF'; cat "$RUNNER_TEMP/dist/SHA256SUMS"; echo EOF; } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dist
-          path: ${{ runner.temp }}/publish/
-          if-no-files-found: error
-          retention-days: 7
+  build:
+    name: build the tag on GitHub's runners (SLSA Build L3)
+    if: github.repository == 'jdominick05/caminus' && (github.event_name != 'release' || !github.event.release.prerelease)
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+
+  match:
+    name: CI's files == the maintainer's files
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: The two SHA256SUMS are equal
+        env:
+          MAINTAINER: ${{ needs.verify.outputs.sha256sums }}
+          CI: ${{ needs.build.outputs.sha256sums }}
+        run: |
+          echo "maintainer:"; echo "$MAINTAINER"; echo "CI:"; echo "$CI"
+          if [ -z "$CI" ] || [ "$MAINTAINER" != "$CI" ]; then
+            echo "::error::CI's build differs from the Release's files: not published (docs/dev/releasing.md, \"SLSA\")"; exit 1
+          fi
 
   publish:
     name: publish to PyPI (after the pypi environment's reviewer approves)
-    needs: verify
+    needs: match
     if: github.repository == 'jdominick05/caminus'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/project/caminus/
-    permissions: {}
+    permissions:
+      id-token: write   # the OIDC identity for PyPI's upload token and the PEP 740 attestations' Sigstore signatures
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: dist
-          path: dist/
+          name: dist-built
+          path: built/
+
+      - name: The files CI built (the wheel and the sdist; SHA256SUMS stays on the Release)
+        run: mkdir dist && cp built/caminus-*.whl built/caminus-*.tar.gz dist/
 
       - name: The files to upload
         run: ls -l dist/ && sha256sum dist/*
 
       # twine directly (pinned): pypa/gh-action-pypi-publish runs a Docker image tagged by release, so a commit-SHA pin finds no
-      # image ("manifest unknown", the first v0.1.0 run); this step uploads the same verified files with the same token
+      # image ("manifest unknown", the first v0.1.0 run)
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
-      - name: Upload to PyPI (twine 6.1.0, the token from the pypi environment)
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-          TWINE_NON_INTERACTIVE: '1'
+      # PyPI's documented manual exchange (docs.pypi.org/trusted-publishers/using-a-publisher), as nightly.yml: this job's OIDC
+      # token, audience pypi, for a short-lived upload token; no stored secret. pypi-attestations signs each file with
+      # this job's identity (PEP 740), the same signing the pypa publish action does, and twine uploads the attestations
+      - name: Sign (PEP 740) and upload to PyPI (twine 6.1.0, a token minted from this job's identity)
         run: |
-          python -m pip install --disable-pip-version-check 'twine==6.1.0'
+          python -m pip install --disable-pip-version-check 'twine==6.1.0' 'pypi-attestations==0.0.31'
           python -m twine check dist/*
-          python -m twine upload --verbose dist/*
+          python -m pypi_attestations sign dist/caminus-*.whl dist/caminus-*.tar.gz
+          ls -l dist/
+          resp=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=pypi")
+          oidc_token=$(jq -r '.value' <<< "$resp")
+          resp=$(curl -sS -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"${oidc_token}\"}")
+          api_token=$(jq -r '.token // empty' <<< "$resp")
+          if [ -z "$api_token" ]; then
+            jq -r '.message // empty, (.errors // [] | .[] | "\(.code): \(.description)")' <<< "$resp" || true
+            echo "::error::PyPI minted no token (is the trusted publisher set for release.yml and the environment pypi?)"; exit 1
+          fi
+          echo "::add-mask::$api_token"
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" TWINE_NON_INTERACTIVE=1 python -m twine upload --verbose --skip-existing --attestations dist/caminus-*.whl dist/caminus-*.tar.gz

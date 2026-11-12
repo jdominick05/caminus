@@ -124,6 +124,9 @@ for v in Q6_K; do
     pfbuild "$out" "$o" kernels/prefill_dense.hip -DK3_DENSE_TYPE=GGML_TYPE_$v
 done
 finish
+# BUILD_KERNELS_ONLY=1 stops here (tools/release/release_build.sh, the CI image): the runtime tests below are not shipped and
+# need torch's HIP runtime; no code object depends on them
+if [ "${BUILD_KERNELS_ONLY:-0}" = 1 ]; then exit 0; fi
 # the C++ runtime and its tests, linked to torch's bundled HIP runtime and rocBLAS (the binaries training runs)
 TORCHLIB=${TORCHLIB:-$HOME/miniforge3/envs/drafter/lib/python3.12/site-packages/torch/lib}
 PATCHELF=${PATCHELF:-$HOME/miniforge3/envs/drafter/bin/patchelf}
