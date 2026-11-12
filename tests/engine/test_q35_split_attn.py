@@ -32,7 +32,7 @@ need = (ROWS * k3.kv_pos_bytes(NKV * D, False) + 4 * H * ((ROWS + 31) // 32) * k
 capacity.check([0], [need], f'test_q35_split_attn ({need:.0f} MiB)')
 print(torch.cuda.get_device_name(0), f'| {H} q heads / {NKV} kv heads x {D}, cache rows {ROWS}', flush=True)
 g = torch.Generator(device='cuda').manual_seed(7)
-cache = (torch.randn(ROWS * 2 * NKV * D, generator=g, device='cuda') * 0.5).half()
+cache = torch.empty(ROWS * 2 * NKV * D, dtype=torch.float16, device='cuda').normal_(0.0, 0.5, generator=g)   # (in place: no fp32 temporaries)
 kv = cache.view(ROWS, 2, NKV, D).cpu().double().numpy()   # (to the host first: no float64 copy on the card)
 vmax = float(np.abs(kv[:, 1]).max())
 
