@@ -41,7 +41,12 @@
 #ifdef K3_Q35_ATTN_SPLIT   // the own dense qwen35 modules (kernels/k3_q35_ops.h): no ggml header, an f16 cache only
 // (the host refuses q8_0 there), the scratch in its own LDS; every expression below is the GGUF modules' text, so the
 // same cells give the same bits as k3_gguf_q35d's pair (the GGUF modules' code is unchanged by this branch)
+#ifdef K3_Q35_ATTN_PACK   // (the packed PART below: every pass row's scores of a split, and each row's cell count)
+#define ATTN_PT 4                     // pass rows per packed task (the verify modules' T <= OWN_MT = 4; host-checked)
+__shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G * ATTN_PT + ATTN_SS + 1 + ATTN_PT];
+#else
 __shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G + ATTN_SS + 1];
+#endif
 #define ATTN_LDS ((__attribute__((address_space(3))) float *)ATTN_OWN_LDS)   // [ATTN_SS][ATTN_G] scores / p, then cells [ATTN_SS]
 #define ATTN_KV_TYPE(sg) 0
 #define ATTN_Q8_BYTES 34   // (the q8_0 block: half d + 32 int8; unreachable with ATTN_KV_TYPE 0)
@@ -252,6 +257,144 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
         }
     }
 }
+
+#ifdef K3_Q35_ATTN_PACK
+// OP_ATTN_PART, packed (the dense qwen35 verify modules: K3_Q35_ATTN_PACK): task t = (split s, kv head g) = s * nkv + g
+//   for ALL the pass's T rows: the split's cells staged once, each cell's K loaded once for every row's scores, each
+//   cell's V value loaded once for every row's sums. Row tt's split s holds its list positions [s * ATTN_SS, + ATTN_SS)
+//   below its own list length (pos + tt + 1: the identity list only, host-checked: no SEL rows); a row whose list ends
+//   before the split takes no part in it and writes no record, as op_attn_part's task for it returns. Every row's score,
+//   softmax and V sum are op_attn_part's statements in its order on the same cells (scores: the same 8-term dot and
+//   butterfly per (cell, head); softmax: lanes = its own nb cells; V: its fmas over its own cells in ascending order), so
+//   each record holds op_attn_part's bits: T = 4 rows bitwise one-row passes, bitwise the unpacked pair. What it saves:
+//   T - 1 of every split's staging, barriers, claims and K / V loads. LDS: scores [ATTN_SS][T][ATTN_G], then the cells,
+//   the longest row's count, each row's count.
+__device__ __forceinline__ void op_attn_part_packed(const Seg & sg, int t) {
+#pragma clang fp contract(off)
+    static_assert(ATTN_SS == 32 && ATTN_VH == ATTN_G, "the packed PART: one stage of 32 cells, every head's V in one pass");
+    __attribute__((address_space(3))) float * sp = ATTN_LDS;                                       // [ATTN_SS][T][ATTN_G]
+    __attribute__((address_space(3))) int * cl = (__attribute__((address_space(3))) int *)(ATTN_LDS + ATTN_SS * ATTN_G * ATTN_PT);   // [ATTN_SS], nb, nbr[ATTN_PT]
+    {
+        asm volatile("" : "+s"(t));
+        const int T = seg_T(sg), nkv = sg.pad1, s = t / nkv, pos = ((const int *)sg.asum)[0];
+        const int k0 = s * ATTN_SS, nmax = min(pos + T, sg.pad2 * ATTN_SS);   // (the longest row's list: row T - 1's)
+        if (k0 >= nmax || sg.N != T * nkv * ATTN_G || sg.K != ATTN_D || T > ATTN_PT || sg.gs) return;   // (uniform)
+        const int nb = min(ATTN_SS, nmax - k0), tid = K3TID;
+        __syncthreads();
+        if (tid < nb) cl[tid] = k0 + tid;                                 // (the identity list: list position = cell)
+        if (tid == 0) cl[ATTN_SS] = nb;
+        if (tid < T) cl[ATTN_SS + 1 + tid] = min(ATTN_SS, max(0, min(pos + tid + 1, sg.pad2 * ATTN_SS) - k0));
+        __syncthreads();
+    }
+    {   // scores: op_attn_part's, the cell's K loaded once for every row
+        asm volatile("" : "+s"(t));
+        const int T = seg_T(sg), nkv = sg.pad1, g = t - (t / nkv) * nkv, heads = nkv * ATTN_G, TG = T * ATTN_G;
+        const int tid = K3TID, lane = tid % 32, wave = K3WAVE;
+        const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]);
+        const size_t pb = kv_pos_bytes(nkv * ATTN_D, 0);
+        const uint8_t * kb = sg.W + (size_t)(g * ATTN_D + 8 * lane) * 2;
+        const int ci = ATTN_CPR == 2 ? (lane >> 4) & 1 : 0;
+#pragma unroll 1
+        for (int cb = 4 * wave; cb < min(nb, 4 * wave + 4); cb += ATTN_CPR) {
+            float kf[ATTN_CPR][8];
+#pragma unroll
+            for (int i = 0; i < ATTN_CPR; i++) {
+                if (cb + i < nb) {
+                    const uint4 w = *(const uint4 *)(kb + (size_t)cl[cb + i] * pb);
+                    const uint32_t wv[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        const float2 kk = ATTN_H22F(wv[j]);
+                        kf[i][2 * j] = kk.x; kf[i][2 * j + 1] = kk.y;
+                    }
+                } else {
+#pragma unroll
+                    for (int j = 0; j < 8; j++) kf[i][j] = 0.0f;
+                }
+            }
+#pragma unroll 1
+            for (int tt = 0; tt < T; tt++) {
+                const int nbr = __builtin_amdgcn_readfirstlane(cl[ATTN_SS + 1 + tt]);
+                if (cb >= nbr) continue;                                     // (wave-uniform: no cell of this round is row tt's)
+                const float * qb = (const float *)sg.a + ((size_t)tt * heads + (size_t)g * ATTN_G) * ATTN_D + 8 * lane;
+#pragma unroll 1
+                for (int h = 0; h < ATTN_G; h++) {
+                    const float4 qa = *(const float4 *)(qb + h * ATTN_D), qc = *(const float4 *)(qb + h * ATTN_D + 4);
+                    const float qv[8] = {qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w};
+                    float a[ATTN_CPR];
+#pragma unroll
+                    for (int i = 0; i < ATTN_CPR; i++) {
+                        float x = qv[0] * kf[i][0];
+#pragma unroll
+                        for (int j = 1; j < 8; j++) x = __builtin_fmaf(qv[j], kf[i][j], x);
+                        a[i] = x;
+                    }
+#if ATTN_CPR == 2
+                    const bool h16 = lane & 16;
+                    float u = (h16 ? a[1] : a[0]) + attn_x16(h16 ? a[0] : a[1]);
+#else
+                    float u = a[0] + attn_x16(a[0]);
+#endif
+                    u = u + attn_xm<8>(u); u = u + attn_xm<4>(u); u = u + attn_xm<2>(u); u = u + attn_xm<1>(u);
+                    if ((lane & 15) == 0 && cb + ci < nbr) sp[(cb + ci) * TG + tt * ATTN_G + h] = u * sg.rs;
+                }
+            }
+        }
+    }
+    __syncthreads();
+    {   // softmax: (row, head) pairs w, w + 8, ...: lanes = the row's own cells; m and l into the row's records
+        asm volatile("" : "+s"(t));
+        const int T = seg_T(sg), nkv = sg.pad1, s = t / nkv, g = t - s * nkv, heads = nkv * ATTN_G, TG = T * ATTN_G, NS = sg.pad2;
+        const int lane = K3TID % 32, wave = K3WAVE;
+#pragma unroll 1
+        for (int ph = wave; ph < TG; ph += 8) {
+            const int tt = ph / ATTN_G, h = ph - tt * ATTN_G;
+            const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS + 1 + tt]);
+            if (nb <= 0) continue;
+            const float v = lane < nb ? sp[lane * TG + ph] : -INFINITY;
+            const float m = wred<true>(v);
+            const float p = lane < nb ? expf(v - m) : 0.0f;
+            if (lane < nb) sp[lane * TG + ph] = p;
+            const float l = wred<false>(p);
+            if (lane == 0) {
+                float * rh = (float *)sg.y + ((size_t)(tt * heads + g * ATTN_G + h) * NS + s) * ATTN_RS;
+                rh[0] = m; rh[1] = l;
+            }
+        }
+    }
+    __syncthreads();
+    {   // V: thread d, the cell's value loaded once; each row's heads summed over its own cells in ascending order
+        asm volatile("" : "+s"(t));
+        const int T = seg_T(sg), nkv = sg.pad1, s = t / nkv, g = t - s * nkv, heads = nkv * ATTN_G, TG = T * ATTN_G, NS = sg.pad2;
+        const int tid = K3TID;
+        const size_t pb = kv_pos_bytes(nkv * ATTN_D, 0);
+        const uint8_t * vb = sg.W + (size_t)(nkv * ATTN_D + g * ATTN_D + tid) * 2;
+#pragma unroll 1
+        for (int tt = 0; tt < T; tt++) {
+            const int nbr = __builtin_amdgcn_readfirstlane(cl[ATTN_SS + 1 + tt]);
+            if (nbr <= 0) continue;
+            float acc[ATTN_G];
+#pragma unroll
+            for (int h = 0; h < ATTN_G; h++) acc[h] = 0.0f;
+#pragma unroll 1
+            for (int c = 0; c < nbr; c++) {
+                const float v = ATTN_H2F(vb + (size_t)cl[c] * pb);
+#pragma unroll
+                for (int h = 0; h < ATTN_G; h++) acc[h] = __builtin_fmaf(sp[c * TG + tt * ATTN_G + h], v, acc[h]);
+            }
+            float * rec = (float *)sg.y + ((size_t)(tt * heads + g * ATTN_G) * NS + s) * ATTN_RS;
+#pragma unroll
+            for (int h = 0; h < ATTN_G; h++) rec[(size_t)h * NS * ATTN_RS + 4 + tid] = acc[h];
+        }
+    }
+}
+#endif
+
+#ifdef K3_Q35_ATTN_PACK
+#define ATTN_PART_FN op_attn_part_packed
+#else
+#define ATTN_PART_FN op_attn_part
+#endif
 
 // OP_ATTN_COMB: task q = (row tt, query head h) = tt * heads + h; thread d: over the row's splits u in ascending order
 //   (ns = ceil(n / ATTN_SS) of its list, as OP_ATTN_PART cut it): m = max m_u, f_u = expf(m_u - m), l = sum l_u f_u,

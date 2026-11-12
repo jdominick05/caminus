@@ -106,6 +106,8 @@ Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + 
 # the own dense qwen35 modules (Swift / ThinkingCap: decode, verify, two cards; not the MTP drafter's module) run their decode
 # attention as the same split pair (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT: k3_gguf_q35d's settings, an f16 cache only)
 Q35_SPLIT_MODULES = tuple(m for m in Q35S_MODULES + Q35T_MODULES if m not in Q35M_MODULES)
+ATTN_PACK_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace')   # (K3_Q35_ATTN_PACK: OP_ATTN_PART tasks = (split, kv head) for every pass row, up to ATTN_PACK_T rows; kernels/k3_attn_split.h op_attn_part_packed)
+ATTN_PACK_T = 4
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
@@ -1264,7 +1266,8 @@ class Engine:
     def _attn_split(self, q, cache, pos, sel, out, heads, kv_heads, dim, scale, q8, dep, max_cells, part):
         """the split attention pair (kernels/k3_attn_split.h): OP_ATTN_PART, tasks (split, row, kv head) over each pass
         row's list (sel None: the identity 0 .. pos; else the QSA selection rows) in slices of ATTN_SS cells, records
-        [T][heads][NS][ATTN_RS] floats in `part`; then OP_ATTN_COMB (task per row and query head, waits for PART). NS =
+        [T][heads][NS][ATTN_RS] floats in `part` (ATTN_PACK_MODULES: tasks (split, kv head), each for every pass row:
+        the same records, bitwise); then OP_ATTN_COMB (task per row and query head, waits for PART). NS =
         ceil(max_cells / ATTN_SS) splits per row: max_cells = the longest list a pass row can have (default: the cache's
         rows, or min(rows, 4 * QSA_TOPK + 3) with sel; a caller that bounds its positions lower may pass less); the device
         clamps every list to NS * ATTN_SS cells (a longer one would lose cells, never write outside `part`). part: a
@@ -1288,10 +1291,14 @@ class Engine:
         if part is None: part = torch.zeros(need, dtype=torch.float32, device=q.device)
         assert part.dtype == torch.float32 and part.is_contiguous() and part.numel() >= need, \
             f'attn split: the record buffer holds {part.numel()} floats < {need} (T {self.T} x {heads} heads x {NS} splits x {ATTN_RS})'
+        packed = self.module in ATTN_PACK_MODULES
+        if packed and (sel is not None or q8 or self.T > ATTN_PACK_T):
+            raise ValueError(f'attn split on {self.module} (the packed PART): the identity list, f16 cache, T <= {ATTN_PACK_T} '
+                             f'(sel {sel is not None}, q8 {bool(q8)}, T {self.T})')
         self._guard_pos(pos, rows)   # (the guard bounds the rows it reads: every list cell <= pos)
         self.keep += [q, cache, pos, out, part] + ([] if sel is None else [sel])
         sp = None if sel is None else sel.data_ptr()
-        self.segs.append(Seg(OP_ATTN_PART, NS * self.T * kv_heads, dep, 1, cache.data_ptr(), sp, q.data_ptr(), pos.data_ptr(),
+        self.segs.append(Seg(OP_ATTN_PART, NS * (1 if packed else self.T) * kv_heads, dep, 1, cache.data_ptr(), sp, q.data_ptr(), pos.data_ptr(),
                              part.data_ptr(), scale, self.T * heads, dim, 1, int(bool(q8)), -1, kv_heads, NS))
         pi = len(self.segs) - 1
         self.segs.append(Seg(OP_ATTN_COMB, self.T * heads, pi, 1, None, sp, part.data_ptr(), pos.data_ptr(), out.data_ptr(),
