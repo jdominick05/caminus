@@ -90,8 +90,9 @@ class Mtp35Drafter:
         self.h_valid = max(self.h_valid, i0 + n)
         self.synced = max(self.synced, i0 + n)
         p0 = i0 + 1
-        if p0 <= self.m.filled and len(toks) == n:
-            self.m.fill(self._h(i0, n), [int(t) for t in toks], p0)
+        h2 = self._h(i0, n)
+        if p0 <= self.m.filled and h2 is not None:
+            self.m.fill(h2, [int(t) for t in toks], p0)
 
     def _h(self, p0, n):
         """the ring's h rows of positions p0 .. p0 + n - 1 as fp32 [n, D] (gathered through the preallocated
@@ -194,4 +195,9 @@ class Mtp35Drafter:
     def set_window_state(self, dm):
         self.m.set_window_state(dm)
         if dm is not None:
-            self.synced = max(self.synced, int(dm['hi']))
+            hi = int(dm['hi'])
+            # (a restore rewinds the line to the checkpoint: a ring row p % HR may hold a later position's h from
+            # before the restore, so the high-water mark rebases to the restored window; take_h rebuilds the ring
+            # from there and until HR positions are back in it the rounds fall back to filler)
+            self.h_valid = min(self.h_valid, hi)
+            self.synced = max(self.synced, hi)

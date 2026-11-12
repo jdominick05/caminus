@@ -2619,6 +2619,17 @@ def stage_mtp35(cache_dir, small):
     d4 = ad4(toks[:L], 3)
     check(not ad4.filler and ad4.m.calls[-1][0] == 'draft' and ad4.m.calls[-1][1] == L - 4,
           f'mtp35: in-step round drafts at p0 {L - 4} (filled {ad4.m.filled}, h ring ok)')
+    # a restore rewinds the line past HR: the ring's high-water rebases to the restored window, and a pass right
+    # after it must not raise (the old code filled from a None h: AttributeError)
+    ad5 = Mtp35Drafter(FakeMtp35(e)); ad5.m.reset()
+    drive(ad5, 104)                                    # h_valid = 104
+    ad5.set_window_state(dict(lo=1, hi=21, k=3))       # (as after a checkpoint restore to position ~21)
+    check(int(ad5.h_valid) == 21,
+          f'mtp35: a restore rebases the ring high-water to the restored window (h_valid {ad5.h_valid}, was 104)')
+    ad5.take_h(20, torch.zeros(4 * D), toks[21:25])    # (the old code raised AttributeError here)
+    d5 = ad5(toks[:24], 3)
+    check(isinstance(d5, list) and len(d5) == 3,
+          f'mtp35: a pass right after the restore runs without raising (h_valid {ad5.h_valid}, drafts {d5})')
 
     # ---- the window protocol through a checkpoint: save, garbage the rows, restore the checkpoint
     c.commit(list(s.toks), dict(c.st), checkpoint=True)     # (end() already committed the state; this adds the 'end' slot)
