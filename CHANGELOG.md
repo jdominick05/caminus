@@ -15,17 +15,18 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   `caminus pull thinkingcap` (ThinkingCap, 4.2 bits per weight, either card) are served from the GGUF file to the output
   token with code written for Caminus. ThinkingCap decodes at 47 tok/s on an XTX and 39 on an XT (llama.cpp on the same
   cards: 40 and 34) and reads a 2K prompt at 942 tok/s; its output is about 1,000 times closer to an exact reference of
-  the model than llama.cpp's. Neither has a drafter yet. See [models](docs/models.md).
+  the model than llama.cpp's. Swift 1.5 takes an opt-in drafter (`--draft mtp`, below); ThinkingCap's prediction block
+  is Q6_K, which the drafter module does not run yet. See [models](docs/models.md).
 - **The two dense 27B models on two cards.** `caminus start swift-1.5 --cards 2` (or `thinkingcap`, or `caminus serve
   --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
-- **Speculative decoding for Swift 1.5 with its own prediction block (engine level).** The model's multi-token-prediction
-  layer drafts 3 tokens on the card, and a 4-token verify pass keeps the ones it agrees with. Output is identical to
-  plain decoding. Measured in the engine, not yet through the server: 84 to 91 tok/s on one XTX against 42 plain, a 2.0
-  to 2.15x speed-up. llama.cpp's server with its MTP gets the same speed-up on the same prompts (71 to 78 tok/s from 36
-  plain), so the difference is the faster plain decoding. The server doesn't use it yet. See
-  [benchmarks](docs/dev/benchmarks.md).
+- **Speculative decoding for Swift 1.5 with its own prediction block, served.** `caminus serve --model ... --draft mtp`
+  (one card) drafts 3 tokens with the model's multi-token-prediction layer on the card and verifies 4 tokens a pass on
+  the decode engine's own states; plain passes run the one-token tape. The output is identical to `--draft off` token
+  for token (greedy; sampled requests run plain). Measured in the engine: 84 to 91 tok/s on one XTX against 42 plain, a
+  2.0 to 2.15x speed-up. llama.cpp's server with its MTP gets the same speed-up on the same prompts (71 to 78 tok/s from
+  36 plain), so the difference is the faster plain decoding. See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the

@@ -39,6 +39,7 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--max-ctx N` | A smaller context than the largest that fits. |
 | `--kv-host` | `coder` only: keep the attention cache in system memory (the cards read it directly). Same results, less VRAM. |
 | `--no-drafter` | `coder` only: turn off the drafter. |
+| `--draft KIND` | Speculative decoding: `off` (plain), `dflash` (the Coder's sidecar, needs `--drafter`), or `mtp` (the model's own prediction block: `swift-1.5`, one card). Default: the model's drafter when it needs no extra file, else `off`. |
 | `--no-disk-cache` | Don't save conversations to disk. |
 | `--cache-cap-gb N` | The most the saved conversations may take on disk (default 30 GB; 64 GB in the long-context mode). |
 | `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |

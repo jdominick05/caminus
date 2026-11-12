@@ -47,7 +47,7 @@ from .. import config as _config
 # defaults: the files `caminus download` puts under the model directory, ~/.cache/caminus/{kv,flight})
 DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
-DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, host='127.0.0.1',
+DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, draft=None, host='127.0.0.1',
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
@@ -113,6 +113,9 @@ def parser():
                     'dense own-code models swift-1.5 / thinkingcap on two cards, tensor parallel)')
     ap.add_argument('--drafter', help='the Coder\'s DFlash GGUF (default: caminus.config dflash)')
     ap.add_argument('--no-drafter', action='store_true', default=None, help='no DFlash drafter (plain decode)')
+    ap.add_argument('--draft', choices=('off', 'mtp', 'dflash'), default=None, help='speculative decoding: off (plain '
+                    'decode), dflash (the Coder\'s DFlash2 sidecar, needs --drafter), mtp (the model\'s own MTP block, one '
+                    'card: swift-1.5; default: the architecture\'s drafter when its file is present, else off)')
     ap.add_argument('--host')
     ap.add_argument('--port', type=int, help='0: any free port (printed)')
     ap.add_argument('--max-ctx', type=ctx_arg, help='the engine\'s KV positions, or auto (the default): the largest context '
@@ -202,7 +205,8 @@ def build_engine(opt, stats, log=print):
     sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=(float(opt['idle_park_s']) or None), side_route=not opt['no_side_route'],
                      eos_ids=opt.get('eos_ids') or (248046, 248044))
     log(f'caminus serve: engine built in {time.time() - t0:.1f} s: max_ctx {m.max_ctx} (usable {sess.max_ctx}), qsa {m.qsa}, '
-        f'drafter {"DFlash (device accept)" if dr is not None else "none"}, prefill chunk {pf.chunk} (T* {pf.crossover}), '
+        f'drafter {"DFlash (device accept)" if dr is not None and getattr(dr, "kind", "dflash") == "dflash" else (f"{getattr(dr, "kind", "mtp")} (host accept)" if dr is not None else "none")}, '
+        f'prefill chunk {pf.chunk} (T* {pf.crossover}), '
         f'cache {pc.n_slots} VRAM slots ({" / ".join(f"{v:.0f}" for v in pc.tier_mib)} MiB), disk {"on: " + pc.store.root if pc.store else "off"}, '
         f'side slot {pc.side_rows} positions (routing {"on" if sess.side_route else "off"})',
         flush=True)
@@ -234,13 +238,31 @@ def main(argv=None):
         print(f'caminus serve: --cards {opt["cards"]}: {e}', file=sys.stderr)
         return 2
     opt['arch'] = A.name
-    # (only an architecture with a drafter needs its file: the Coder's DFlash)
-    if A.drafter and not opt['no_drafter'] and not (opt['drafter'] and os.path.isfile(opt['drafter'])):
-        print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
-              f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
+    # the drafter kind this serve runs (--draft; the default: the architecture's own when it needs no extra file, else off)
+    draft = opt.get('draft')
+    if opt.get('no_drafter'): draft = 'off'
+    if draft is None:
+        # (the Coder drafts by default - the missing DFlash file falls into the error below, as before; the other
+        # architectures default to off until their served A/B earns the default)
+        draft = 'dflash' if A.drafter == 'dflash' else 'off'
+    if draft == 'dflash' and A.drafter != 'dflash':
+        print(f'caminus serve: --draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})', file=sys.stderr)
         return 2
-    if not A.drafter and not opt['no_drafter'] and opt['drafter'] != DEFAULT_DRAFTER:
-        print(f'caminus serve: --drafter ignored: no drafter for {A.name} in K3 yet', flush=True)
+    if draft == 'mtp' and A.drafter != 'mtp':
+        print(f'caminus serve: --draft mtp: no MTP drafter for {A.name} in K3 yet (--draft off: plain decoding)', file=sys.stderr)
+        return 2
+    if draft == 'mtp' and A.cards != 1:
+        print(f'caminus serve: --draft mtp runs on one card only (the two-card drafter is not built yet): --cards 1, or --draft off',
+              file=sys.stderr)
+        return 2
+    if draft == 'dflash':
+        if not (opt['drafter'] and os.path.isfile(opt['drafter'])):
+            print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
+                  f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
+            return 2
+    elif opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter']:
+        print(f'caminus serve: --drafter ignored: --draft {draft} (the DFlash file is the Coder\'s only)', flush=True)
+    opt['draft'] = draft
     # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host

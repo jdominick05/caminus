@@ -114,6 +114,7 @@ class EngineSession:
     drafter = None          # a session-bound drafter(tokens, k) (the K3 session's), or None: the server's own
     drafts_real = True      # False: the coming pass's drafts are filler (run_generation counts no drafts for it)
     idle_s = None           # seconds without a request before the worker calls idle() (None: never)
+    request_params = None   # the in-flight request's sampler params (the worker sets it): K3Session reads greediness
 
     @property
     def tokens(self):

@@ -244,16 +244,29 @@ class SessionDrafter:
 
 
 class K3Session(EngineSession):
+    _dk = None      # the drafter kind ('dflash' | 'mtp' | None); the test rigs build the session with __new__
+    _ver = None     # the verify tape of an MTP session (m.ver)
+
     def __init__(self, m, pf, dr, pc, stats=None, eos_ids=(248046, 248044), policy=None, max_recoveries=2, idle_s=IDLE_PARK_S,
                  marks=True, side_route=True):
         self.m, self.pf, self.dr, self.pc = m, pf, dr, pc
         self.df = getattr(dr, 'df', None)
         if pc.draft is not dr: raise ValueError('K3Session: the prompt cache must own the same drafter')
-        if dr is not None and not getattr(dr, 'device_accept', False):
-            raise ValueError('K3Session: the drafter must be DFlashK3Drafter(df) with device_accept (the default)')
+        self._dk = getattr(dr, 'kind', None) if dr is not None else None
+        if dr is not None and not getattr(dr, 'device_accept', False) and self._dk != 'mtp':
+            raise ValueError('K3Session: the drafter must be DFlashK3Drafter(df) with device_accept (the default), '
+                             f'or an MTP drafter (kind mtp); got {type(dr).__name__}')
+        self._ver = None
+        if self._dk == 'mtp':
+            # an MTP session's draft passes are the T = 4 verify passes on the decode engine's states (bitwise its
+            # decode steps, engine/q35_dense_verify.py); plain passes run the engine's own T = 1 tape
+            self._ver = getattr(m, 'ver', None)
+            if self._ver is None or int(getattr(m, 'spec_T', 1)) < 4:
+                raise ValueError('K3Session: kind mtp needs the engine built with spec_T 4 and its verify tape (m.ver)')
+        self.request_params = None   # the worker sets it per request: sampled requests on an MTP session run plain
         if getattr(m, '_pass_police', None) is None:
             m._pass_police = NullPolice()
-        self.T = self.ntok = int(m.ntok)
+        self.T = self.ntok = 4 if self._dk == 'mtp' else int(m.ntok)
         # a generation of n_new tokens after n prompt tokens needs n + n_new + T - 2 positions (spec.positions_needed): the server
         # keeps prompt + max_new <= max_ctx, so the session's limit is the engine's less T - 2 (never above the engine's rows: a
         # T = 1 engine, the one-card Qwen35One, keeps its max_ctx; arch.usable_ctx, which the loading server reports too)
@@ -272,6 +285,8 @@ class K3Session(EngineSession):
         self.last_route = None      # the last request's routing decision (PromptCache.route's dict)
         self._side = False          # the request in flight runs in the side slot
         self.drafter = SessionDrafter(self) if dr is not None else None
+        if self.drafter is not None:
+            self.drafter.spec_type = getattr(dr, 'spec_type', 'draft-dflash')   # ('draft-mtp' for an MTP drafter)
         self.last_prefill = PrefillStats()
         self._planned = None
         self._pass = None           # the last pass awaiting accept: dict(i0, F, seq)
@@ -554,10 +569,29 @@ class K3Session(EngineSession):
             return []
         pos = len(toks) - 1
         self._mode = self.policy.decide(self._cls(), pos)
+        if self._dk == 'mtp':
+            prm = self.request_params
+            if prm is not None and not (prm.greedy and not prm.penalties_on):
+                self._mode = 'plain'       # (a sampled request runs the T = 1 tape: no draft round)
         if self._mode == 'plain':
             self._kind = 'plain'
             self.drafts_real = False
             return [int(toks[-1])] * k
+        if self._dk == 'mtp':
+            self._kind = 'mtp'
+            self._dev = None
+            while True:
+                try:
+                    out = list(self.dr(list(toks), k))
+                except RuntimeError as e:
+                    if not _bail(e):
+                        raise
+                    self._recover(e)
+                    continue
+                self.drafts_real = not getattr(self.dr, 'filler', False)
+                if not self.drafts_real:
+                    self.counters['filler_passes'] += 1
+                return out
         d = self._dev
         if d is not None and d[0] == pos and d[1] == int(toks[-1]) and k == self.T - 1:
             self._kind = 'device'
@@ -580,6 +614,13 @@ class K3Session(EngineSession):
             return out
 
     # ------------------------------------------------------------------------------------------------ passes
+    def _take_h(self, i0, n, toks):
+        """the trunk's h rows of the pass just run into the MTP drafter (its ring, and the block rows i0 + 1 .. i0 + n
+        filled from them): the verify tape's buf['h'] for a T-wide pass, the decode tape's buf['h'] for a T = 1 one"""
+        if self._dk != 'mtp' or self.dr is None: return
+        h = self._ver.buf['h'] if (self._ver is not None and n == self.T) else self.m.buf['h']
+        self.dr.take_h(i0, h[:n * self.m.D], toks)
+
     def _seq(self, feed, drafts):
         toks = self.toks
         i0 = len(toks)
@@ -597,8 +638,12 @@ class K3Session(EngineSession):
             self._arm()
             try:
                 if self.df is not None: self.df.flush()
-                self.m.verify_tokens(seq, i0, int(self.st['commit']))
-                if self.dr is not None: self.dr.inject(i0, self.m.features); self.df.flush()
+                if self._dk == 'mtp':
+                    self._ver.run(list(seq[i0:i0 + self.T]), i0, int(self.st['commit']), argmax=False)
+                    self._take_h(i0, self.T, [int(x) for x in seq[i0 + 1:i0 + self.T]] + [int(seq[i0 + self.T - 1])])
+                else:
+                    self.m.verify_tokens(seq, i0, int(self.st['commit']))
+                    if self.dr is not None: self.dr.inject(i0, self.m.features); self.df.flush()
                 break
             except Exception as e:
                 self._refused(e)
@@ -633,6 +678,9 @@ class K3Session(EngineSession):
         kind = self._kind
         self._kind = None
         greedy_plain = prm.greedy and not prm.penalties_on
+        if self._dk == 'mtp' and not greedy_plain and k > 0:
+            drafts, k = [], 0          # (a sampled pass on an MTP session runs the T = 1 tape, no drafts)
+            if kind == 'mtp': kind = 'plain'
         t0 = clock()
         tw = None
         step_ms = None
@@ -658,12 +706,23 @@ class K3Session(EngineSession):
                 elif greedy_plain:
                     self._arm()
                     if self.df is not None: self.df.flush()
-                    a = self.m.verify_tokens(seq, i0, commit)
-                    if self.dr is not None: self.dr.inject(i0, self.m.features)
+                    if self._dk == 'mtp' and kind == 'mtp' and F + k == self.T:
+                        # the T = 4 verify pass on the engine's states; its h rows go to the drafter with the pass's
+                        # tokens (the last row's bonus as the last token: a rejected one is rewritten by the pass
+                        # that verifies that position again)
+                        a = self._ver.run(list(seq[i0:i0 + self.T]), i0, commit, argmax=True)
+                        self._take_h(i0, self.T, [int(x) for x in seq[i0 + 1:i0 + self.T]] + [int(a[self.T - 1])])
+                    else:
+                        a = self.m.verify_tokens(seq, i0, commit)
+                        if self.dr is not None: self.dr.inject(i0, self.m.features)
+                        if self._dk == 'mtp': self._take_h(i0, 1, [int(a[0])])
                     tw = clock()
-                    j = 0
-                    while j < k and drafts[j] == a[F - 1 + j]: j += 1
-                    out = [int(x) for x in drafts[:j]] + [int(a[F - 1 + j])]
+                    if len(a) == self.T and k > 0:
+                        j = 0
+                        while j < k and drafts[j] == a[F - 1 + j]: j += 1
+                        out = [int(x) for x in drafts[:j]] + [int(a[F - 1 + j])]
+                    else:
+                        out = [int(a[0])]
                     self._dev = None
                     self.counters['host_greedy_passes'] += 1
                 else:
@@ -696,7 +755,7 @@ class K3Session(EngineSession):
             cm = getattr(self.m, 'card_ms', None) if self.card_timing else None
             st.pass_split(((tw or t1) - t0) * 1e3, (t1 - (tw or t1)) * 1e3,
                           (cm, None, self.link_bytes_per_pass) if (cm is not None or self.link_bytes_per_pass) else None)
-        if self.dr is not None and kind in ('device', 'dflash', 'plain'):
+        if self.dr is not None and kind in ('device', 'dflash', 'plain', 'mtp'):
             self.policy.record('plain' if kind == 'plain' else 'draft', self._cls(), i0, (t1 - t0) * 1e3, len(out), step_ms)
             if on:
                 st.plain_estimate(self.policy.bucket(self._cls(), i0).plain_cost())

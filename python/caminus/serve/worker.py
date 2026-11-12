@@ -255,6 +255,7 @@ class EngineWorker:
                         es.cls = cc.feed(text)
                 return n_keep
 
+            self.sess.request_params = job.params    # (the session reads greediness off it: MTP drafts greedy only)
             res = run_generation(self.sess, job.prompt_ids, Sampler(job.params), job.max_new, on_tokens,
                                  cancel=job.cancel, drafter=job.drafter, force=job.force,
                                  tool_open_id=self.tool_open_id, stats=es, marks=job.marks, hint=job.hint)
