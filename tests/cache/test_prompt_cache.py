@@ -925,6 +925,47 @@ def cpu_route(mk, base):
     for x in (c, c2, c3, c4, c5, c7): x.close()
 
 
+def cpu_side_question(mk, base):
+    """route(hint='side'): a side question (the server's: Qwen Code's /btw, serve/side_question.py) goes to the side slot
+    whenever it fits, though it matches the main line; one that does not fit takes the usual rules. A short-chat side
+    question (the whole conversation plus the question) and a long-chat one (the opening, then other turns) both start
+    from a main checkpoint inside the shared prefix, and the conversation's next turn continues the main slot ('live')
+    == the same main requests with no side question: state bitwise, tokens equal"""
+    other = [int(x) for x in np.random.default_rng(13).integers(0, 990, 3000)]
+    e, p, c, dr, dev = mk(draft=True, side=2048)
+    M = base[:1500]
+    o1 = c.prepare(M, dict(root=400), side='auto', max_new=20); t1, s1 = gen(e, o1['st'], M, 20, dr); c.commit(t1, s1)
+    m2 = t1 + other[500:540]
+    o2 = c.prepare(m2, side='auto', max_new=16); t2, s2 = gen(e, o2['st'], m2, 12, dr); c.commit(t2, s2)
+    R = lambda ids, n, h=None: (lambda r: (r['route'], r['reason']))(c.route(ids, n, hint=h))
+    short_q = t2 + other[1600:1630]
+    long_q = base[:400] + other[2000:2100]
+    rows = dict(short=R(short_q, 16, 'side'), short_plain=R(short_q, 16), long=R(long_q, 16, 'side'), long_plain=R(long_q, 16),
+                no_fit=R(short_q, 2048, 'side'))
+    ok = rows == dict(short=('side', 'side_question'), short_plain=('main', 'match'), long=('side', 'side_question'),
+                      long_plain=('main', 'match'), no_fit=('main', 'match'))
+    try: c.route(short_q, 16, hint='main'); bad_hint = False
+    except ValueError: bad_hint = True
+    pl = c.plan(short_q, side='auto', max_new=16, hint='side')
+    oq = c.prepare(short_q, side='auto', max_new=16, hint='side'); tq, sq = gen(e, oq['st'], short_q, 8, dr); c.commit(tq, sq)
+    ol = c.prepare(long_q, side='auto', max_new=16, hint='side'); tl, sl = gen(e, ol['st'], long_q, 8, dr); c.commit(tl, sl)
+    m3 = t2 + other[800:810]
+    o3 = c.prepare(m3, side='auto', max_new=16); d3 = digest(e, o3['st']['i0']); t3, s3 = gen(e, o3['st'], m3, 12, dr); c.commit(t3, s3)
+    # the reference: the same main requests, no side question
+    e5, p5, c5, dr5, dev5 = mk(draft=True, side=2048)
+    r1 = c5.prepare(M, dict(root=400)); u1, v1 = gen(e5, r1['st'], M, 20, dr5); c5.commit(u1, v1)
+    r2 = c5.prepare(u1 + other[500:540]); u2, v2 = gen(e5, r2['st'], u1 + other[500:540], 12, dr5); c5.commit(u2, v2)
+    r3 = c5.prepare(u2 + other[800:810]); d5 = digest(e5, r3['st']['i0']); u3, v3 = gen(e5, r3['st'], u2 + other[800:810], 12, dr5)
+    ok &= (bad_hint and pl['side'] and pl['route']['reason'] == 'side_question' and (pl['source'], pl['cached']) == (oq['source'], oq['cached'])
+           and oq['side'] and oq['source'] == 'vram' and oq['cached'] > 400 and ol['side'] and ol['source'] == 'vram' and ol['cached'] >= 400
+           and o3['source'] == 'live' and o3['cached'] == s2['i0'] and o3['st'] == r3['st'] and d3 == d5 and t3 == u3 and t2 == u2
+           and c.stats['route_side_question'] == 2 and c.stats['main_lost'] == 0 and not dev.viol)
+    check(ok, f'side question: routes {rows}, hint other than side refused {bad_hint}; the short-chat one in the side slot from '
+              f'{oq["source"]} {oq["cached"]}, the long-chat one from {ol["source"]} {ol["cached"]}; the next main turn continues the main '
+              f'slot ({o3["source"]} {o3["cached"]}) == no side question: state bitwise, {len(t3)} tokens equal')
+    c.close(); c5.close()
+
+
 def cpu_export(mk, base, fd):
     """fix:m7 (verify:m7's blocking item): export_checkpoint (a flight-recorder bundle's start state) must launch nothing. It
     flushed the drafter's pending inject (the generic loop leaves its last inject pending; the server's host-greedy passes at a
@@ -1087,6 +1128,7 @@ def cpu_fixups(cache_dir, base, b0, mpath):
     cpu_bypass_short(mk, base)
     cpu_m7(mk, base)
     cpu_route(mk, base)
+    cpu_side_question(mk, base)
     cpu_export(mk, base, fd)
     cpu_supersede(mk, base, fd)
     cpu_side_rows(mk, base)

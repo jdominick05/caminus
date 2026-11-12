@@ -139,13 +139,14 @@ class GenResult:
 
 
 def run_generation(sess, prompt, sampler, max_new, on_tokens, cancel=None, stop_ids=None, drafter=None,
-                   n_draft=None, force=None, tool_open_id=None, stats=None, marks=None):
+                   n_draft=None, force=None, tool_open_id=None, stats=None, marks=None, hint=None):
     """Generate on `sess` (EngineSession) after `prompt` (ids).
     on_tokens(ids) -> None | n_keep: called with each batch of emitted ids (forced ids included); returning n_keep
     stops the generation after the first n_keep ids of the batch (a stop string matched).
     drafter(tokens, k) -> k draft ids (deterministic); n_draft defaults to ntok - 1.
     force: (trigger_id, forced_ids) or None; tool_open_id: the <tool_call> id (a call before the trigger cancels the
-    forcing). marks: the prompt cache's message boundaries, passed to sess.prefill when given. Raises EngineError from the
+    forcing). marks: the prompt cache's message boundaries, passed to sess.prefill when given; hint ('side': a side question,
+    serve/side_question.py) too, only when given (a session without the parameter never sees it). Raises EngineError from the
     session. Returns GenResult."""
     st = stats if stats is not None else sess.stats
     if st is not None and not st.enabled:
@@ -153,7 +154,7 @@ def run_generation(sess, prompt, sampler, max_new, on_tokens, cancel=None, stop_
     clock = st.clock if st is not None else None
     stop_ids = frozenset(sess.eos_ids if stop_ids is None else stop_ids)
     res = GenResult(prompt_n=len(prompt))
-    row = sess.prefill(prompt, cancel, marks=marks, max_new=int(max_new))   # (max_new: the K3 session's side-slot routing)
+    row = sess.prefill(prompt, cancel, marks=marks, max_new=int(max_new), **({'hint': hint} if hint else {}))   # (max_new, hint: the K3 session's side-slot routing)
     pf = sess.last_prefill
     res.cached_n, res.prefill_ms, res.prefill_passes, res.restore = pf.cached_n, pf.ms, pf.passes, pf.restore
     res.prefill = dict(source=pf.source, restore_ms=round(pf.restore_ms, 3), batched_ms=round(pf.batched_ms, 3),

@@ -117,7 +117,7 @@ Returns:
 - `side`.
 - `route`: `route()`'s decision with `side='auto'`, else None.
 
-**`route(ids, max_new=None, min_match=SIDE_MATCH_MIN) -> dict`** (M7 finish). Where `prepare(ids, side='auto', max_new=)`
+**`route(ids, max_new=None, min_match=SIDE_MATCH_MIN, hint=None) -> dict`** (M7 finish; `hint`: the side question). Where `prepare(ids, side='auto', max_new=)`
 sends the request; no side effect (it may read disk entries' token lists). Returns `route` (`'main'` | `'side'`), `reason`,
 `shared` (tokens shared with the main line), `root` (the main line's root mark or None), `need` (prompt + max_new + T),
 `main_n` (the deepest state the main line holds) and `side_rows`. The rule is in The side slot.
@@ -272,6 +272,14 @@ without one.
   - and the main line exists (`no_main`: empty, reset outside the cache, or a poisoned engine) and the cache has a side slot
     (`off`).
   Counted in `stats['route_side']` / `['route_main']`.
+- **Side questions.** `hint='side'` (on `route`, `plan`, `prepare` and `prompt`) marks a harness's question about the
+  conversation that must leave it as it was: the server sets it for Qwen Code's `/btw` (`serve/side_question.py`, by the
+  harness's fixed prompt text). Such a request goes to the side slot whenever the main line exists and it fits (reason
+  `side_question`, counted in `stats['route_side_question']` too), though it matches the main line; one that does not fit
+  takes the rules above. It shares the conversation's opening, so the side call starts from the deepest main checkpoint
+  inside the shared prefix: a short conversation's question (the whole conversation, then the question) reads only the
+  rest, a long one's (the opening, then the last 40 entries) reads that tail. The next main request finds the main slot as
+  it was. The server caps a side question's reply at 16,384 tokens, so a longer prompt still fits with its reply.
 - **A failure inside a side call loses only the side call** (M7 finish). `_drop_live()` during a side call ends it with the
   main line back intact, its live state kept (a side pass writes below side_rows only, and the main rows it can overwrite are in
   the side area; the drafter's pending inject of the failed call is dropped, never launched): `stats['side_dropped']`.

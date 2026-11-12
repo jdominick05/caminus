@@ -88,6 +88,59 @@ class TestMaxNew(unittest.TestCase):
         self.assertEqual(calls, [{'max_new': 3}])
 
 
+class _HintSession(MockSession):
+    """MockSession that records the routing hint (and max_new) of each plan / prefill"""
+    def plan(self, ids, max_new=None, hint=None):
+        self.plans = getattr(self, 'plans', []) + [(max_new, hint)]
+        return super().plan(ids)
+
+    def prefill(self, ids, cancel=None, marks=None, max_new=None, hint=None):
+        self.prefills = getattr(self, 'prefills', []) + [(max_new, hint)]
+        return super().prefill(ids, cancel, marks=marks)
+
+
+class TestSideQuestion(unittest.TestCase):
+    """a harness's side question (Qwen Code's /btw: serve/side_question.py) reaches the session's plan and prefill with hint
+    'side' and its reply capped at SIDE_QUESTION_MAX_NEW; every other request carries no hint (a session without the
+    parameter never sees it)"""
+    BTW = ('<system-reminder>\nThis is a side question from the user. Answer directly in a single response.\n\n'
+           'CRITICAL CONSTRAINTS:\n- You have NO tools available.\n</system-reminder>\n\nwhat did we rename?')
+
+    def test_detection(self):
+        from caminus.serve.side_question import is_side_question
+        u = lambda t: {'role': 'user', 'content': t}
+        self.assertTrue(is_side_question([u('hi'), {'role': 'assistant', 'content': 'x'}, u(self.BTW)]))
+        self.assertTrue(is_side_question([u('  \n' + self.BTW)]))
+        self.assertFalse(is_side_question([u(self.BTW), {'role': 'assistant', 'content': 'ok'}]))   # (not the last message)
+        self.assertFalse(is_side_question([u('x' * 600 + self.BTW)]))                                # (past the head searched)
+        self.assertFalse(is_side_question([u('This is a side question from the user.')]))            # (not the whole sentence)
+        self.assertFalse(is_side_question([]))
+
+    def test_hint_reaches_the_session(self):
+        from caminus.serve.side_question import SIDE_QUESTION_MAX_NEW
+        eng = U.ScriptedEngine(ntok=4)
+        sess = _HintSession(eng, max_ctx=65536, eos_ids=(248046, 248044))
+        srv = _server(sess)
+        try:
+            hist = [{'role': 'user', 'content': 'Rename foo to bar.'}, {'role': 'assistant', 'content': 'Done.'}]
+            st, _, _ = U.post_json(srv, '/v1/chat/completions', {'messages': hist + [{'role': 'user', 'content': self.BTW}],
+                                                               'max_tokens': 32000, 'temperature': 0})
+            self.assertEqual(st, 200)
+            st2, _, _ = U.post_json(srv, '/v1/chat/completions', {'messages': hist + [{'role': 'user', 'content': 'Thanks.'}],
+                                                                'max_tokens': 32000, 'temperature': 0})
+            self.assertEqual(st2, 200)
+            st3, _, _ = U.post_json(srv, '/v1/messages', {'model': 'm', 'max_tokens': 20000, 'messages':
+                                                          [{'role': 'user', 'content': [{'type': 'text', 'text': self.BTW}]}]})
+            self.assertEqual(st3, 200)
+        finally:
+            srv.stop()
+        self.assertEqual(sess.plans[0], (SIDE_QUESTION_MAX_NEW, 'side'))
+        self.assertEqual(sess.prefills[0], (SIDE_QUESTION_MAX_NEW, 'side'))
+        self.assertEqual(sess.plans[1], (32000, None))
+        self.assertEqual(sess.prefills[1], (32000, None))
+        self.assertEqual(sess.prefills[2], (SIDE_QUESTION_MAX_NEW, 'side'))   # (the Anthropic API too)
+
+
 class TestRouteMetrics(unittest.TestCase):
     def test_counters_status_and_flight_slot(self):
         import tempfile

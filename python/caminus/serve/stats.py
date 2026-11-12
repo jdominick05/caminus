@@ -61,7 +61,7 @@ TTFT_PARTS = ('queue', 'restore', 'batched', 'handoff', 'passes', 'host', 'total
 CACHE_EVENTS = ('checkpoints', 'evicted', 'spilled', 'parked', 'unparked', 'park_failed', 'refused', 'side_requests',
                 'side_ends', 'main_lost', 'external_reset')
 # side-slot routing (PromptCache.route): the reasons of each route
-ROUTE_REASONS = {'main': ('match', 'no_main', 'no_fit', 'main_shorter', 'parked', 'off'), 'side': ('unrelated',)}
+ROUTE_REASONS = {'main': ('match', 'no_main', 'no_fit', 'main_shorter', 'parked', 'off'), 'side': ('side_question', 'unrelated')}   # (the last of each: the fallback)
 PHASES = ('idle', 'prefill', 'decode')
 
 # bucket edges: milliseconds (~x2, 0.05 ms .. 65 s) and small counts (tokens per pass)

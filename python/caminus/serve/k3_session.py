@@ -434,13 +434,13 @@ class K3Session(EngineSession):
     def _route_arg(self):
         return 'auto' if self.side_route else False
 
-    def plan(self, ids, max_new=None):
+    def plan(self, ids, max_new=None, hint=None):
         ids = [int(t) for t in ids]
-        n = int(self.pc.plan(ids, side=self._route_arg(), max_new=max_new)['cached'])
-        self._planned = (ids, n, max_new)   # (the worker plans the job first; prefill reuses it for cached_known)
+        n = int(self.pc.plan(ids, side=self._route_arg(), max_new=max_new, hint=hint)['cached'])
+        self._planned = (ids, n, max_new, hint)   # (the worker plans the job first; prefill reuses it for cached_known)
         return n
 
-    def prefill(self, ids, cancel=None, marks=None, max_new=None):
+    def prefill(self, ids, cancel=None, marks=None, max_new=None, hint=None):
         ids = [int(t) for t in ids]
         if not ids:
             raise ValueError('empty prompt')
@@ -453,7 +453,7 @@ class K3Session(EngineSession):
         n_plan = 0
         if self.stats is not None:
             pl = self._planned
-            n_plan = pl[1] if pl is not None and pl[0] == ids and pl[2] == max_new else self.plan(ids, max_new)
+            n_plan = pl[1] if pl is not None and pl[0] == ids and pl[2] == max_new and pl[3] == hint else self.plan(ids, max_new, hint)
             self.stats.cached_known(n_plan)
         self._planned = None
         last_before = getattr(self.pf, 'last', None)
@@ -467,7 +467,7 @@ class K3Session(EngineSession):
         prog = _Progress(cancel, self.stats, n_plan) if on else cancel
         pc = self.pc
         try:
-            r = pc.prompt(ids, mk or None, side=self._route_arg(), cancel=prog, max_new=max_new,
+            r = pc.prompt(ids, mk or None, side=self._route_arg(), cancel=prog, max_new=max_new, hint=hint,
                           max_recoveries=self.max_recoveries, hooks=self._hooks)
         except RecoveryFailed as f:
             raise EngineError(str(f)) from None

@@ -106,6 +106,8 @@ def main():
     ap.add_argument('--llm-top', default=None); ap.add_argument('--restart', action='store_true')
     ap.add_argument('--needle', type=int, default=0, help='also a needle at 37 %% of a prompt of about this many tokens')
     ap.add_argument('--block-imports', default='', help='comma list of packages the server must not import (e.g. gguf,tokenizers)')
+    ap.add_argument('--side-question', action='store_true', help='also a side question (Qwen Code\'s /btw prompt) between two '
+                    'turns of a chat: it runs in the side slot and the next turn continues the main slot')
     a = ap.parse_args()
     a.cards = a.cards or len(str(a.card).split(','))
     a.scratch = S.safe_dir(a.scratch); os.makedirs(a.scratch, mode=0o700, exist_ok=True)
@@ -182,6 +184,30 @@ def main():
               f'{tm.get("prompt_per_second")} tok/s, TTFT {tt * 1e3:.0f} ms, decode {tm.get("predicted_per_second")} tok/s; answer {ans[:40]!r}')
         S.NUMBERS['needle'] = dict(prompt_n=tm.get('prompt_n'), prompt_tps=tm.get('prompt_per_second'), ttft_ms=tt * 1e3,
                                    decode_tps=tm.get('predicted_per_second'), found=needle in ans, answer=ans[:60])
+    if a.side_question:   # a /btw between two turns: the side slot, then the next turn continues the main slot
+        BTW = ('<system-reminder>\nThis is a side question from the user. Answer directly in a single response.\n\nCRITICAL '
+               'CONSTRAINTS:\n- You have NO tools available.\n- You can ONLY use information already present in the conversation '
+               'context.\n</system-reminder>\n\nWhich city did I ask about first?')
+        # (a long system prompt, as a harness's: the chat outgrows every earlier request, so it is the main line)
+        conv = [{'role': 'system', 'content': S.guidelines(11, 40000, 'Assistant rules') + f' ({marker})'},
+                {'role': 'user', 'content': 'Name one landmark in Lisbon.'}]
+        _, c1 = chat(port, f'{alias}-nothink', conv, temperature=0, max_tokens=48)
+        conv += [{'role': 'assistant', 'content': c1['content']}, {'role': 'user', 'content': 'And one in Porto?'}]
+        _, c2 = chat(port, f'{alias}-nothink', conv, temperature=0, max_tokens=48)
+        conv += [{'role': 'assistant', 'content': c2['content']}]
+        rq, q = chat(port, f'{alias}-nothink', conv + [{'role': 'user', 'content': BTW}], temperature=0, max_tokens=32000)
+        rt_q = ((S.get(port, '/caminus/status')[1] or {}).get('cache') or {}).get('route') or {}
+        rn, n3 = chat(port, f'{alias}-nothink', conv + [{'role': 'user', 'content': 'And one in Faro?'}], temperature=0, max_tokens=48)
+        rt_n = ((S.get(port, '/caminus/status')[1] or {}).get('cache') or {}).get('route') or {}
+        tq, tn = q.get('timings') or {}, n3.get('timings') or {}
+        lq, ln = rt_q.get('last') or {}, rt_n.get('last') or {}
+        check(rq['status'] == 200 and q['content'].strip() and (lq.get('route'), lq.get('reason')) == ('side', 'side_question')
+              and (tq.get('cache_n') or 0) > 4000 and (tq.get('prompt_n') or 0) < 400
+              and rn['status'] == 200 and n3['content'].strip() and (ln.get('route'), ln.get('reason')) == ('main', 'match')
+              and (tn.get('prompt_n') or 0) < 200 and (tn.get('cache_n') or 0) > 4000,
+              f'side question: route {lq.get("route")} / {lq.get("reason")}, prompt {tq.get("prompt_n")} new of {tq.get("cache_n")} '
+              f'cached, answer {q["content"][:40]!r}; the next turn: route {ln.get("route")} / {ln.get("reason")}, prompt '
+              f'{tn.get("prompt_n")} new of {tn.get("cache_n")} cached (the main slot continued)')
     if a.block_imports:   # the own-code gate's device half: what the process loaded, by its own record
         from own_closure import audit
         objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []

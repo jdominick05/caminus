@@ -34,8 +34,10 @@ The project's own terms, as the code, the tests and the docs use them. Prefer th
 - **Tiers.** The VRAM tier (preallocated checkpoint slots), the disk tier (parked entries), the live slot itself.
 - **Park / unpark.** Write the live conversation to the disk tier (idle, shutdown, or before a switch that would lose it),
   and load it back when a request continues it and the load is cheaper than re-prefilling.
+- **Side question.** A harness's question about the conversation that must not continue it (Qwen Code's `/btw`). The server
+  recognizes it by the harness's prompt text and runs it in the side slot when it fits, though it shares the conversation.
 - **Side slot / side call.** A short request unrelated to the conversation (a harness's title / summary call) runs in the
-  side slot (at most 8192 positions). The main line's state is saved and comes back unchanged; a failure inside a side call
+  side slot (at most 98,304 positions: `cache.prompt.SIDE_ROWS`). The main line's state is saved and comes back unchanged; a failure inside a side call
   loses only the side call.
 - **Engine key.** What a cache entry must match to be used: the model, the prefill numerics, the TP layout, the drafter, the
   code objects and the engine-side Python sources (`build_hash`).
