@@ -111,16 +111,16 @@ if A.speed:
     # first the slowest attention launch: the deepest rows of the last chunk (one launch walks every position below its
     # rows; the cache's contents do not change its time). The full prefills only if it is well under the 200 ms bound
     O, L0 = pf.O, attn_L[0]
-    n = min(pf.chunk, L_); p = L_ - n; r = O.attn_rows(p, n)[-1]
+    n = min(pf.chunk, L_); p = L_ - n; r = O.attn_blocks(p, n)[-1]
     capacity.check([eng.dev], [2 * n * eng.nh * eng.hd * 4 / 2 ** 20 + 2], 'test_q35_prefill: the attention timing buffers')
     q = torch.randn(n * eng.nh * eng.hd, device=f'cuda:{eng.dev}'); out = torch.zeros_like(q)
     ts = []
     for _ in range(3):
         torch.cuda.synchronize(); t0 = time.perf_counter()
-        O.attn16(q, L0['cache'], p, n, eng.nh, eng.nkv, eng.hd, 1.0 / np.sqrt(eng.hd), out, eng.max_ctx, *r)
+        O.attn_wm(q, L0['cache'], p, n, eng.nh, eng.nkv, eng.hd, 1.0 / np.sqrt(eng.hd), out, eng.max_ctx, *r)
         torch.cuda.synchronize(); ts.append(1e3 * (time.perf_counter() - t0))
     dt = sorted(ts)[1]; del q, out
-    check(dt < 100.0, f'the slowest attention launch (rows {r[0]} .. {r[1] - 1} of a chunk at {p}, up to position {L_ - 1}): {dt:.1f} ms (< 100)')
+    check(dt < 100.0, f'the slowest attention launch (blocks {r[0]} .. {r[1] - 1} of a chunk at {p}, up to position {L_ - 1}): {dt:.1f} ms (< 100)')
     if dt < 100.0:
         for chunk in (2048, 1024):
             if chunk > pf.chunk: continue

@@ -158,8 +158,12 @@ class Q35OwnPrefillTP(PrefillDriver):
                 if last: return False
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
                 A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
-                for r0, r1 in O.attn_rows(p, n):
-                    O.attn16(qo, L['cache'], p, n, nh, nkv, hd, 1.0 / float(np.sqrt(hd)), att, m.max_ctx, r0, r1)
+                if O.attn_wm_ok(nh, nkv, hd):              # (the tiled WMMA attention on this card's heads; attn16 otherwise)
+                    for b0, b1 in O.attn_blocks(p, n):
+                        O.attn_wm(qo, L['cache'], p, n, nh, nkv, hd, 1.0 / float(np.sqrt(hd)), att, m.max_ctx, b0, b1)
+                else:
+                    for r0, r1 in O.attn_rows(p, n):
+                        O.attn16(qo, L['cache'], p, n, nh, nkv, hd, 1.0 / float(np.sqrt(hd)), att, m.max_ctx, r0, r1)
                 O.gate_mul16(att, qf, x16, n * QH, hd, 2 * hd, hd)
                 O.mm(L['o'], x16, QH, blk, D, n=n)
         return True
