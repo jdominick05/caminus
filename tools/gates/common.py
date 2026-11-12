@@ -57,5 +57,5 @@ def setup_torch():
     0.5 GB reserve for the monitors; XT 0.95)"""
     sys.path.insert(0, os.path.join(REPO, 'python'))
     import torch
-    for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
+    for d in range(min(2, torch.cuda.device_count())): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
     return torch

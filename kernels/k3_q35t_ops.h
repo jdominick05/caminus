@@ -89,7 +89,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
     if (sg.op == OP_GDN_GATES) { q35_op_gdn_gates(sg); return true; }
     if (sg.op == OP_GDN_STEP) { q35_op_gdn_step(sg, t); return true; }
-    if (sg.op == OP_GDN_SAVE) { q35_op_gdn_save(sg, t); return true; }
+    if (sg.op == OP_GDN_SAVE) { q35_gdn_save_guarded(sg, t, sy); return true; }
     if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }

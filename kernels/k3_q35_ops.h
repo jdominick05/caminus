@@ -320,6 +320,22 @@ __device__ __forceinline__ void q35_op_gate_mul16(const Seg & sg, int t) {
     }
 }
 
+// OP_GDN_SAVE as the dispatch runs it: a bailed launch (sy->err set) leaves the saved-input records alone, as
+// kernels/k3_gguf_ops.h's OP_GDN_SAVE. A bailed launch still runs every task once, its gdn_step tasks replaying the previous
+// pass's records into the state, and this task's dependency wait may have given up before they read them: a save then
+// overwrites records a replay has not read yet, and the retry (commit 0) cannot repair the state. err == 0 here means
+// every wait so far succeeded (a wait sets err before it gives up). Thread 0 decides for the workgroup, so a record is
+// written whole or not at all. (Seen with a launch whose bound expired early in the pass, so that every later task ran at
+// once: without this its retry differed from the uninterrupted pass, and every later pass with it; tools/gates/forcebail.py.)
+__device__ __forceinline__ void q35_gdn_save_guarded(const Seg & sg, int t, Sync * sy) {
+    __shared__ int save_ok;
+    if (thread0()) save_ok = __hip_atomic_load(&sy->err, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) == 0;
+    __syncthreads();
+    const bool ok = save_ok;
+    __syncthreads();
+    if (ok) q35_op_gdn_save(sg, t);
+}
+
 #ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
@@ -331,7 +347,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
     if (sg.op == OP_GDN_GATES) { q35_op_gdn_gates(sg); return true; }
     if (sg.op == OP_GDN_STEP) { q35_op_gdn_step(sg, t); return true; }
-    if (sg.op == OP_GDN_SAVE) { q35_op_gdn_save(sg, t); return true; }
+    if (sg.op == OP_GDN_SAVE) { q35_gdn_save_guarded(sg, t, sy); return true; }
     if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
