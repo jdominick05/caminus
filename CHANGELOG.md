@@ -20,9 +20,12 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
-- **Groundwork for drafting on Swift 1.5.** The engine can now check up to 4 drafted tokens in one pass, with the same
-  output bit for bit as decoding them one at a time; a pass of 4 costs 1.36 to 1.45 decode steps. No drafter
-  is wired in yet, so serving is unchanged. See [benchmarks](docs/dev/benchmarks.md).
+- **Speculative decoding for Swift 1.5 with its own prediction block (engine level).** The model's multi-token-prediction
+  layer drafts 3 tokens on the card, and a 4-token verify pass keeps the ones it agrees with. Output is identical to
+  plain decoding. Measured in the engine, not yet through the server: 84 to 91 tok/s on one XTX against 42 plain, a 2.0
+  to 2.15x speed-up. llama.cpp's server with its MTP gets the same speed-up on the same prompts (71 to 78 tok/s from 36
+  plain), so the difference is the faster plain decoding. The server doesn't use it yet. See
+  [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the

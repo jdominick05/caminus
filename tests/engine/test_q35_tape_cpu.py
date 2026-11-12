@@ -81,13 +81,16 @@ check(all(bool(v) == (info['formats'][il]['ffn_gate'] == info['formats'][il]['ff
 # ---- the host's op list is the device's ---------------------------------------------------------------------------------
 src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_ops.h')).read()
 TPB = r'#ifdef K3_TP[^\n]*\n(.*?)#endif'   # (the two-card modules' exchange: k3.Q35_TP_MODULES only)
+MTPB = r'#ifdef K3_Q35_MTP[^\n]*\n(.*?)#endif'   # (the drafter module's argmax: k3.Q35M_MODULES only)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
 tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
-dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(TPB, '', disp, flags=re.S)))
+mtp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, disp, re.S))))
+dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(MTPB, '', re.sub(TPB, '', disp, flags=re.S), flags=re.S)))
 host_ops = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35S_OPS and k != 'OP_NOP'}
 check(dev_ops == host_ops and tp_ops == {'OP_XCHG'}, f'kernels/k3_q35_ops.h dispatches k3.Q35S_OPS ({len(dev_ops)} ops beside the core\'s no-op), and OP_XCHG under K3_TP')
 enum = dict(re.findall(r'(OP_[A-Z0-9_]+) = (\d+)', src))
-check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16},
+check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16,
+                                               'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX},
       f'the header\'s new op numbers are k3\'s ({enum})')
 
 # ---- options --------------------------------------------------------------------------------------------------------------
@@ -111,6 +114,24 @@ def refused(fn, exc=ValueError):
 
 
 B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt)
+# ---- the drafter module (k3_q35_swift_mtp: engine/q35_mtp.py) ---------------------------------------------------------
+mtp_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35M_OPS and k != 'OP_NOP'}
+check(mtp_ops == {'OP_OWN_ARGMAX'} and mtp_host <= dev_ops | mtp_ops and int(re.search(r'OWN_Q4_0 = (\d+)', open(os.path.join(HERE, '..', '..', 'kernels', 'k3_own_ops.h')).read()).group(1)) == k3.OWN_MTP_FMT['Q4_0'],
+      f'the drafter module: OP_OWN_ARGMAX under K3_Q35_MTP, k3.Q35M_OPS ({len(mtp_host)} ops) all dispatched, the Q4_0 format number k3\'s')
+e_m = k3.Engine(module='k3_q35_swift_mtp'); e_s = k3.Engine(module='k3_q35_swift')
+q4 = lambda r, kk: torch.zeros(r * kk // 256 * 144, dtype=torch.uint8)
+check(refused(lambda: e_m.own_matvec_1rt(torch.zeros(8 * 144, dtype=torch.uint8), 'Q4_K', 8, 256, B(256, torch.float16), B(8))) and
+      refused(lambda: e_s.own_matvec_1rt(q4(8, 256), 'Q4_0', 8, 256, B(256, torch.float16), B(8))) and
+      refused(lambda: e_s.own_argmax(B(300), 300, torch.zeros(1, dtype=torch.int64))) and
+      refused(lambda: e_s.own_emb(torch.zeros(64 * 144, dtype=torch.uint8), 'Q4_K', 64, 256, torch.zeros(1, dtype=torch.int64), B(256), key=True)) and
+      refused(lambda: e_s.own_add_rms16(B(256), B(256), B(256), B(512, torch.float16), 1e-6, h16_stride=512)),
+      'the drafter module refuses Q4_K; the Swift module refuses Q4_0, the argmax, the key embedding and the h16 stride')
+e_m.own_matvec_1rt(q4(8, 256), 'Q4_0', 8, 256, B(256, torch.float16), B(8)); e_m.own_argmax(B(300), 300, torch.zeros(1, dtype=torch.int64))
+e_m.build()
+check(set(e_m.inventory()) == {('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_ARGMAX', '-')} and not e_m.unsupported(), 'the drafter module builds a Q4_0 matvec and the argmax')
+e_g = k3.Engine(module='k3_q35_swift_mtp'); e_g.gdn_l2(B(512), B(512), 2, 128, 1e-6)
+check(refused(lambda: e_g.build()), 'the drafter module refuses an op of the trunk its tape never runs (a Gated DeltaNet op)')
+check(k3.key_token(((0x80000000 | 1234) << 32) | (0xffffffff ^ 4321)) == 4321, 'key_token: the low half\'s complement')
 e_lean, e_q35 = k3.Engine(module='k3_q3m_lean'), k3.Engine(module='k3_q35_swift')
 w8 = torch.zeros(8 * 8 * 34, dtype=torch.uint8)
 check(refused(lambda: e_lean.own_matvec16(w8, 'Q8_0', 8, 256, B(256, torch.float16), B(8))) and

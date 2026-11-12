@@ -164,7 +164,40 @@ each tensor (RX 7900 XT):
 
 Own is 120 to 265 times closer to float64 than llama.cpp on every tensor (llama.cpp rounds the activations to 8 bits),
 and a 4-token launch gives each token the bits of its own one-token launch. Standalone, one launch per matvec, copies
-rotated past the Infinity Cache; the drafter module's own timing replaces these numbers.
+rotated past the Infinity Cache.
+
+#### Speculative decoding with the prediction block (engine level; not served yet)
+
+Measured in the engine: `benchmarks/q35_mtp_spec.py` drives it directly, with no server, HTTP or sampler in the loop.
+The llama.cpp column is `llama-server`'s own decode timing (`timings.predicted_per_second`), with `-ctk q8_0 -ctv q8_0
+-c 1024`, MTP drafting 3 tokens; its plain decode in that setup is 35.6 tok/s. Compare the speed-ups: llama.cpp gets
+2.19x / 2.18x / 2.00x from its MTP, Caminus 2.15x / 2.14x / 1.97x. The tok/s difference is the plain decode's. Both
+are measured again through each server once `caminus serve` drafts. llama.cpp's MTP output differed from its plain
+output on the code prompt from token 42; Caminus's is the plain loop's token for token.
+
+`engine/q35_mtp.py` runs the block on its own module (`kernels/k3_q35_swift_mtp.hip`). A round writes the block's rows
+for the last round's accepted drafts and the newest token from the verify pass's h rows, then chains 3 drafts on the
+card. The verify pass of 4 tokens keeps the drafts its own greedy tokens equal. `tools/guard.sh LOG 1800 python -I
+benchmarks/q35_mtp_spec.py GGUF --prompt 48 --n 128 --ids IDS.json` runs plain greedy decoding and the speculative loop
+on the same prompts. Every generated token is the plain loop's. Decode tok/s over the 127 tokens after the first:
+
+| prompt | RX 7900 XTX: plain | speculative | tokens per round | llama-server + its MTP (plain 35.6), same prompts |
+|---|---|---|---|---|
+| code | 42.5 | 91.3 (2.15x) | 3.63 | 78 |
+| prose | 42.6 | 91.1 (2.14x) | 3.63 | 78 |
+| shell | 42.7 | 84.0 (1.97x) | 3.34 | 71 |
+
+The prompts are the first 48 tokens of the e2e reference texts (code / prose / shell), the inputs llama.cpp's MTP was
+measured on. A round's parts on the XTX: the drafter 5.4 ms (its 3 heads are most of it: 1.4 ms each), the verify pass
+34.4 ms. On this tree's own texts (256-token prompts of `python/caminus/arch.py`, `docs/dev/architecture.md` and
+`build.sh`, no `--ids`): XTX 81.3 / 56.6 / 75.1 tok/s (plain 41.7), XT 70.8 / 49.3 / 65.7 (plain 35.8). The prose
+page is mostly tables, where the block's drafts are kept less often (2.27 tokens per round).
+- The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_mtp.py GGUF`), XT:
+  - Rows filled in tapes of 4, of 3 + 1 and of 1 give the same bits, and a round of 1 to 4 rows gives the KV rows, hn
+    and draft of one-row rounds.
+  - The device argmax is the first maximum, and a NaN loses.
+  - Drafts agree with the block in fp32 torch at 63 of 63 positions, including both chained drafts. The first draft's
+    logits are at mean KLD 3.0e-7.
 
 ### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)
 
