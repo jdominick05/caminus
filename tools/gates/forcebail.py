@@ -21,6 +21,9 @@ same hooks and schedule. Expected (MANIFEST.md): T=1 40 and T=4 40: 40/40 passes
   only, every pass a verify at the next position; no --ctx / --start) under the same schedule and injections.
   --engine dense35: the dense own line's one-card engine (caminus.engine.q35_dense.Dense35Own, --model its GGUF, the card in
   HIP_VISIBLE_DEVICES; T = 1 only, every pass a verify at the next position; modes 'tiny' only; no --ctx / --start).
+  --engine dense35ver: the dense own line's verify tape (caminus.engine.q35_dense_verify.Dense35Verify, T tokens per pass,
+  on a Dense35Own with spec_T = T; --model the Swift GGUF, the card in HIP_VISIBLE_DEVICES): every pass a T-token verify
+  pass (each row's logits compared) with the commit schedule above; modes 'tiny' only; no --ctx / --start.
   SAMERUN=1 (env): a second uninterrupted run against the reference instead (determinism without any injection)."""
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,8 +38,16 @@ T = int(a[0]); NP = int(a[1]); MODES = (a[2] if len(a) > 2 else 'tiny,tiny0,tiny
 torch = C.setup_torch()
 toks = C.tokens(TOK)
 print(f'model {PATH}; engine {ENGINE}; tokens {TOK}; T {T}; passes {NP}; modes {MODES}; compaction_proactiveness {C.proactiveness()}', flush=True)
-DENSE = ENGINE in ('dense35tp', 'dense35')
-if ENGINE == 'dense35':
+DENSE = ENGINE in ('dense35tp', 'dense35', 'dense35ver')
+VER = None
+if ENGINE == 'dense35ver':
+    from caminus.engine.q35_dense import Dense35Own
+    from caminus.engine.q35_dense_verify import Dense35Verify
+    if not 1 <= T <= 4 or START or MODES != ['tiny']: print('--engine dense35ver: T 1 .. 4, no --start, modes tiny'); sys.exit(2)
+    m = Dense35Own(PATH, max_ctx=CTX, spec_T=T, vram_extra_mib=Dense35Verify.need_mib(T))
+    VER = Dense35Verify(m, T)
+    m.engines = [VER.E]; m._tapes = {'one': m.engines}   # (the hooks below set the verify tape's bound)
+elif ENGINE == 'dense35':
     from caminus.engine.q35_dense import Dense35Own
     if T != 1 or START or MODES != ['tiny']: print('--engine dense35: T = 1, no --start, modes tiny'); sys.exit(2)
     m = Dense35Own(PATH, max_ctx=CTX)
@@ -69,7 +80,7 @@ def schedule():
 
 
 SCH = schedule(); assert SCH[-1][0] + T <= len(toks)
-orig_pass = m._pass
+orig_pass = VER._pass if VER else m._pass
 inj = {'pass': -1, 'mode': None, 'first': False}
 
 
@@ -90,7 +101,7 @@ last = {}
 
 
 def hooked_pass(*args):
-    if DENSE: i0, commit = args[0], args[1]                 # (Dense35Own / Dense35TP._pass(i0, commit, trace=None))
+    if DENSE: i0, commit = args[0], args[1]                 # (Dense35Own / Dense35TP._pass(i0, commit, trace=None); Dense35Verify._pass(i0, commit, argmax))
     else: xt, ple, i0, commit = args
     if NEG:
         if inj['first'] or (i0 not in last): last[i0] = commit
@@ -103,13 +114,14 @@ def hooked_pass(*args):
     elif mode == 'tiny1': lim = [LIM, 1]
     elif mode == 'delay1': lim = [2000, LIM]
     for c in range(NC): m.engines[c].limit_us = lim[c]
-    bad = orig_pass(i0, commit) if DENSE else orig_pass(xt, ple, i0, commit)
+    bad = orig_pass(*args) if VER else orig_pass(i0, commit) if DENSE else orig_pass(xt, ple, i0, commit)
     inj['first'] = False
     for c in range(NC): m.engines[c].limit_us = LIM
     return bad
 
 
-m._pass = hooked_pass
+if VER: VER._pass = hooked_pass
+else: m._pass = hooked_pass
 
 
 def run(inject):
@@ -121,7 +133,7 @@ def run(inject):
         injp = inject and not stress and p >= 2 and (p - 2) % 5 == 0
         inj['mode'] = MODES[((p - 2) // 5) % len(MODES)] if injp else None; inj['first'] = injp
         nb = len(m.bails)
-        lo = m.verify(toks, i0, commit) if DENSE else m.step(toks, i0) if T == 1 else m.verify(toks, i0, commit)
+        lo = (VER.run(toks[i0:i0 + T], i0, commit, argmax=False), VER.buf['logits'])[1] if VER else m.verify(toks, i0, commit) if DENSE else m.step(toks, i0) if T == 1 else m.verify(toks, i0, commit)
         out.append(lo.float().cpu().clone())
         if injp: got[p] = (inj['mode'], len(m.bails) - nb)
     return out, got, m.bails[nb0:]

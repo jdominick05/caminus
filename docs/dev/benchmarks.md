@@ -112,6 +112,29 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
   The attention reads every earlier position per query head, so both the prompt rate and decode fall with depth.
 - Swift 1.5 needs a 24 GB card. With its prompt cache it projects 19.1 GiB at 12K, past an XT's room.
 
+#### Verify passes (the base for speculative decoding; no drafter yet)
+
+`engine/q35_dense_verify.py` runs T tokens in one pass on the decode engine's weights and states (module
+`k3_q35_swift_ver`). Measured 2026-11-11 on the RX 7900 XT, after an own prefill of real text, ms per pass against one
+decode step at the same depth (medians of 9 interleaved rounds; `tools/guard.sh LOG 1500 python -I benchmarks/q35_verify.py
+GGUF --depths 512,4096 --per-wgp 6,7`):
+
+| depth | decode step | T = 2 | T = 3 | T = 4 |
+|---|---|---|---|---|
+| 512 | 28.3 ms | 33.7 (1.19x) | 44.2 (1.56x) | 56.0 (1.98x) |
+| 4,096 | 36.0 ms | 41.5 (1.15x) | 52.8 (1.47x) | 64.5 (1.79x) |
+
+- A pass of T tokens pays for itself when the drafter's tokens are accepted often enough to average more than that ratio
+  in output tokens per pass (plus the drafter's own time). The grid makes no difference here: at T = 4, 6 and 7
+  workgroups per WGP are within 0.7 ms of the decode engine's 5.
+- In the matvecs alone (`OWN_MT` tiles, Swift's first 16 blocks, one chained tape per format) T = 4 costs 2.11x a
+  decode step's Q4_K matrices and 1.56x its Q6_K ones: the per-token unpack of the Q4_K tile is the larger part.
+- The gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_verify.py GGUF --depths 0,512`): for T = 1 .. 4 a
+  walk of passes with rejected rows holding wrong tokens, decode steps between them, the lazily committed states handed
+  both ways: every accepted row and every decode step bitwise the decode steps; T = 4 at 3 / 6 / 7 workgroups per WGP
+  bitwise. Forced bails in the verify tape: `tools/guard.sh LOG 1200 python -I tools/gates/forcebail.py 4 40 tiny
+  --engine dense35ver --model GGUF --ctx 512 --tokens FILE`.
+
 ### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)
 
 Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The grid and task sizes are untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized

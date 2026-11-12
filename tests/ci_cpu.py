@@ -167,7 +167,17 @@ def main(argv=None):
             t0 = time.time()
             with open(log, 'w') as f:
                 rc = subprocess.run([sys.executable, '-I'] + argv_, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT).returncode
+            if rc == 0 and verdict(log) == 'FAIL': rc = 1   # (a suite that printed RESULT FAIL and still exited 0)
             return rc, time.time() - t0, log
+
+    def verdict(log):
+        """the last RESULT line of a suite's log ('PASS' / 'FAIL' / other), None without one: the plain-script suites print
+        their verdict and some exit 0 either way, so the exit code alone passed a suite that printed RESULT FAIL"""
+        last = None
+        with open(log, errors='replace') as f:
+            for line in f:
+                if line.startswith('RESULT '): last = line.split()[1] if len(line.split()) > 1 else ''
+        return last
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:

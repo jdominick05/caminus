@@ -70,9 +70,9 @@ def _shapes(F):
                 d_conv=int(hp('ssm.conv_kernel')), d_inner=int(hp('ssm.inner_size')))
 
 
-def _projection_bytes(F, max_ctx):
+def _projection_bytes(F, max_ctx, spec_T=1):
     """bytes the engine allocates on its card: every trunk tensor (the embedding and the head too), the f16 KV cache of
-    every attention block, the Gated DeltaNet states"""
+    every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Dense35Own's spec_T)"""
     c = _shapes(F); nl = c['nl']
     mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     w = sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp))
@@ -80,15 +80,15 @@ def _projection_bytes(F, max_ctx):
     w += IQ_PAD * sum(1 for t in F.tensors if not t.name.startswith(mtp) and t.type in IQ_REC)   # (the record layout's tail)
     n_attn = sum(1 for g in block_kinds(F) if not g)
     CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
-    gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], 1) + CH * 3 + CH) * 4
-    return w + n_attn * int(max_ctx) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) + gdn
+    gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
+    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) + gdn
 
 
 class Dense35Own:
     TAPE_MIB = 8   # an upper bound of one tape's buffers (S, the stage, the logits): what a further tape on the same engine adds
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
-                 rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None):
+                 rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
@@ -96,7 +96,9 @@ class Dense35Own:
         per-card grid; a number for the grid tests). gu: the feed-forward's gate, up and SwiGLU as one segment where the
         two matrices share a one-round-trip format (False: three segments everywhere). rpt / rpt16: rows per task of the
         one-round-trip / the general rows matvecs. debug_layers: TEST-ONLY, the first n blocks, then the output norm and
-        the head; after a pass buf['x'] is block n - 1's output residual."""
+        the head; after a pass buf['x'] is block n - 1's output residual. spec_T: the most tokens a verify pass on this
+        engine's state runs (engine/q35_dense_verify.py; 1 .. 4): each Gated DeltaNet block keeps that many tokens' saved
+        inputs, and a pass after a verify pass commits up to spec_T of them (1: the decode engine as served)."""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen35': raise ValueError(f'Dense35Own: {path} is a {F.arch!r} GGUF, not qwen35 (dense)')
         if any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError(f'Dense35Own: {path} has a router tensor: not the dense line')
@@ -118,7 +120,9 @@ class Dense35Own:
         n_ctx = int(hp('context_length'))
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or not 1 <= max_ctx <= n_ctx:
             raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
-        self.dev, self.max_ctx, self.limit_us = int(device), int(max_ctx), limit_us
+        if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
+            raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
+        self.dev, self.max_ctx, self.limit_us, self.spec_T = int(device), int(max_ctx), limit_us, int(spec_T)
         self.module = module or module_of(F)
         self.tcap = self.module in k3.Q35T_MODULES
         if self.module not in k3.Q35_MODULES: raise ValueError(f'Dense35Own: module {self.module} ({k3.Q35_MODULES})')
@@ -130,7 +134,7 @@ class Dense35Own:
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35Own: token_embd is {self.emb.type} on module {self.module}')
         # VRAM, checked against the card's cap before a byte is read (vram_extra_mib: what the caller adds right after)
-        self.vram_mib = _projection_bytes(F, self.max_ctx) / 2 ** 20 + 256
+        self.vram_mib = _projection_bytes(F, self.max_ctx, self.spec_T) / 2 ** 20 + 256
         if vram_check:
             capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
                            f'Dense35Own {os.path.basename(path)} (max_ctx {self.max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
@@ -151,22 +155,22 @@ class Dense35Own:
         with torch.cuda.device(self.dev): self._load(); self._build_tape()
 
     @staticmethod
-    def projection_mib(path, max_ctx):
+    def projection_mib(path, max_ctx, spec_T=1):
         """MiB the engine allocates on its card at max_ctx, from the file's header alone (nothing on a card): __init__'s
         own check counts the same terms"""
         F = ggufio.GGUFFile(path)
-        try: return _projection_bytes(F, max_ctx) / 2 ** 20 + 256
+        try: return _projection_bytes(F, max_ctx, spec_T) / 2 ** 20 + 256
         finally: F.close()
 
     @staticmethod
-    def recurrent_mib(path):
+    def recurrent_mib(path, spec_T=1):
         """MiB of every Gated DeltaNet block's state (the recurrent state with its saved-input record, the conv state and
         its previous inputs): what a prompt-cache checkpoint holds beside the KV rows"""
         F = ggufio.GGUFFile(path)
         try:
             c = _shapes(F); n_gdn = sum(1 for g in block_kinds(F) if g)
             CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
-            return n_gdn * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], 1) + CH * 3 + CH) * 4 / 2 ** 20
+            return n_gdn * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4 / 2 ** 20
         finally: F.close()
 
     @staticmethod
@@ -214,13 +218,13 @@ class Dense35Own:
                          al=self._w(p + 'ssm_alpha.weight', NV, D), be=self._w(p + 'ssm_beta.weight', NV, D),
                          so=self._w(p + 'ssm_out.weight', D, NV * S), conv_w=self._f32(p + 'ssm_conv1d.weight', CH * 4).view(CH, 4),
                          dt=self._f32(p + 'ssm_dt.bias', NV), a=self._f32(p + 'ssm_a', NV), nw=self._f32(p + 'ssm_norm.weight', S),
-                         conv_st=Z(CH * 3).view(CH, 3), convx=Z(CH), gdn=Z(k3.gdn_block_size(NV, S, NK, 1)))
+                         conv_st=Z(CH * 3).view(CH, 3), convx=Z(self.spec_T * CH), gdn=Z(k3.gdn_block_size(NV, S, NK, self.spec_T)))
                 self.state.update({(0, il, 'conv'): d['conv_st'], (0, il, 'convx'): d['convx'], (0, il, 'gdn'): d['gdn']})
             else:
                 d.update(kind='attn', q=self._w(p + 'attn_q.weight', nh * 2 * hd, D), k=self._w(p + 'attn_k.weight', nkv * hd, D),
                          v=self._w(p + 'attn_v.weight', nkv * hd, D), o=self._w(p + 'attn_output.weight', D, nh * hd),
                          qn=self._f32(p + 'attn_q_norm.weight', hd), kn=self._f32(p + 'attn_k_norm.weight', hd),
-                         cache=Z(self.max_ctx * 2 * nkv * hd, torch.float16))
+                         cache=Z((self.max_ctx + self.spec_T - 1) * 2 * nkv * hd, torch.float16))   # (spec_T: the guard's span, Engine.guard_T)
                 self.state[(0, il, 'kv')] = d['cache']
             self.L.append(d)
         self.out_norm = self._f32('output_norm.weight', D)
@@ -244,6 +248,7 @@ class Dense35Own:
         self.dstage = B(32, torch.int32); self.tok, self.pos = self.dstage[16:17], self.dstage[17:18]
         E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=1, limit_us=self.limit_us)
         E.params = self.dstage[0:16]
+        if self.spec_T > 1: E.guard_T = self.spec_T   # (the commit after a verify pass: up to spec_T tokens)
         self.seg_names, self.layer_seg = {}, []
 
         def named(si, name):
@@ -342,7 +347,7 @@ class Dense35Own:
 
     def _check(self, tokens, i0, commit, what):
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
-        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=1, what=what)
+        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.spec_T, what=what)   # (after a verify pass: up to its tokens)
         if tokens is not None and len(tokens) < i0 + 1:
             raise k3.ContextBoundsError(f'{what}: position {i0} but {len(tokens)} tokens')
 

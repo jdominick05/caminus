@@ -59,6 +59,11 @@ CLAUDE.md imports this file.
   Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
   modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
+  `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
+  T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
+  keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
+  spec_T 1). Its T-token statements sit under `#ifdef K3_Q3M_VER` in `k3_q35_ops.h`, so `k3_q35_swift`'s `.text`
+  stays unchanged; `tests/engine/test_q35_verify.py` is its bitwise gate.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
