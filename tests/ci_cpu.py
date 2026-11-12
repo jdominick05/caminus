@@ -54,6 +54,7 @@ SUITES = [
     ('kv_host', ['tests/device/test_kv_host_cpu.py'], {'torch'}),
     ('ple_aio', ['tests/engine/test_ple_aio.py'], {'torch'}),
     ('spec_policy', ['tests/decode/test_spec_policy.py', 'cpu'], {'torch'}),
+    ('dflash35_adapter', ['tests/decode/test_dflash35_adapter.py'], {'torch'}),
     ('prompt_cache', ['tests/cache/test_prompt_cache.py', 'cpu', '--cache-dir', '{scratch}'], {'torch'}),
     ('dflash_ring_fuzz', ['tests/decode/test_dflash_ring_fuzz.py'], {'torch'}),
     ('prefill_driver', ['tests/prefill/test_prefill_driver.py'], {'torch'}),

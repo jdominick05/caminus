@@ -203,6 +203,43 @@ page is mostly tables, where the block's drafts are kept less often (2.27 tokens
   - Drafts agree with the block in fp32 torch at 63 of 63 positions, including both chained drafts. The first draft's
     logits are at mean KLD 3.0e-7.
 
+#### Speculative decoding with DFlash 2 (served)
+
+The base model's DFlash 2 drafter (incoai's Qwen3.8-27B-DFlash2 Q8_0: 5 non-causal blocks reading 5 of the target's
+layers) on Caminus's own code: `kernels/k3_q35_dflash.hip` (the Swift module's T-token matvecs plus
+`kernels/k3_df_own_ops.h`: the drafter's conv, top-k, selector, windowed attention and ring), `engine/q35_dflash.py`,
+`decode/dflash35.py`. The verify pass of 4 tokens checks its 3 drafts on the host. Every pass on the target feeds the
+drafter its features: the verify passes, the one-token passes and the batched prefill's chunks.
+
+Served: `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 0
+--max-ctx 12288` starts `caminus serve` once with `--draft off` and once with `--draft dflash`, interleaved over 3
+rounds, and reads the server's own decode timing (`timings.predicted_per_second`) for 128 greedy tokens. The prompts are
+the 48-token inputs llama.cpp's own drafter was measured on (the server puts 248044 first: one prompt token more).
+The llama.cpp column is `llama-server --spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`; its
+plain decode in that setup is 35.4-36.0 tok/s.
+
+| prompt | RX 7900 XTX: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
+|---|---|---|---|
+| code | 42.7 | 95.9 (2.25x) | 74.7 (80 % accepted) |
+| prose | 42.8 | 94.7 (2.21x) | 74.8 (80 %) |
+| shell | 42.9 | 71.0 (1.66x) | 67.3 (67 %) |
+
+- The replies are the plain server's token for token on all three prompts. llama.cpp's drafted output also equalled its
+  plain output on Swift.
+- Context: the drafter's ~2 GB leaves Swift ~12-16K tokens of context on a 24 GB card with 4 cache slots (32K needs
+  ~23.2 GB of ~22.3 GB room, projected), so `--draft dflash` is placed from 8K and `max_ctx auto` takes the largest that
+  fits. `--draft mtp` and `--draft off` keep the 32K floor and more.
+- `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --draft dflash --max-ctx
+  12288 --block-imports gguf,tokenizers` passes: greedy 68.6 tok/s; a 6,760-token prompt at 678 tok/s, then decode
+  at 44 tok/s.
+- The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_dflash.py GGUF DFLASH_GGUF`), XT: against
+  the float64 reference (`caminus/ref_dflash.py`, itself equal to llama.cpp's drafts at 10 of 10 positions), the injected
+  K / V within 5e-4, the drafts' logits within 1.7e-3 and the drafts equal, at 20 positions and after 4,200 (past the
+  2,048-position window and the 4,096-row ring's wrap); ring rows, logits and drafts bitwise at 3, 6 and 7 workgroups per
+  WGP. `k3_q35_dflash`: 88 VGPRs, 0 spills; every other object unchanged.
+- The one-token passes' feature export (`Dense35Own(feature_layers=)`) changes no logit and exports the verify pass's rows
+  bit for bit (`tests/engine/test_q35_features.py`).
+
 ### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)
 
 Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The grid and task sizes are untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized

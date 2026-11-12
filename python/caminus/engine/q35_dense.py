@@ -97,7 +97,8 @@ class Dense35Own:
     TAPE_MIB = 8   # an upper bound of one tape's buffers (S, the stage, the logits): what a further tape on the same engine adds
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
-                 rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1):
+                 rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1,
+                 feature_layers=()):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
@@ -107,7 +108,10 @@ class Dense35Own:
         one-round-trip / the general rows matvecs. debug_layers: TEST-ONLY, the first n blocks, then the output norm and
         the head; after a pass buf['x'] is block n - 1's output residual. spec_T: the most tokens a verify pass on this
         engine's state runs (engine/q35_dense_verify.py; 1 .. 4): each Gated DeltaNet block keeps that many tokens' saved
-        inputs, and a pass after a verify pass commits up to spec_T of them (1: the decode engine as served)."""
+        inputs, and a pass after a verify pass commits up to spec_T of them (1: the decode engine as served).
+        feature_layers: layers whose entering residual each pass copies to self.features [len, 1, D] fp32 (a DFlash
+        drafter's target layers, as Dense35Verify(feature_layers=) exports them, so a one-token pass feeds the drafter
+        too); the copy changes no other bit."""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen35': raise ValueError(f'Dense35Own: {path} is a {F.arch!r} GGUF, not qwen35 (dense)')
         if any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError(f'Dense35Own: {path} has a router tensor: not the dense line')
@@ -160,7 +164,10 @@ class Dense35Own:
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual, self.local_only = False, None, False, False, True
         self.qsa_from = None
-        self.feature_layers, self.feature_card, self.features, self.ple_layers = [], 0, None, None
+        fl = [int(l) for l in feature_layers]
+        if any(not 1 <= l < self.nl_build for l in fl) or len(set(fl)) != len(fl):
+            raise ValueError(f'Dense35Own: feature_layers {fl} (distinct, 1 .. {self.nl_build - 1})')
+        self.feature_layers, self.feature_card, self.features, self.ple_layers = fl, 0, None, None
         self.gdn_keys = self.moe_blocks = 0; self.vocab_share = 1.0
         self._during = None
         self.model_tag = 'qwen35'
@@ -255,7 +262,11 @@ class Dense35Own:
                           al=B(NV), be=B(NV), gates=B(2 * NV), qkv=B(CH), conv=B(CH), qk=B(2 * KD), z=B(VD), o=B(VD),
                           fin16=B(VD, f16), qf=B(2 * QH), kr=B(nkv * hd), vr=B(nkv * hd), qo=B(QH), ko=B(nkv * hd),
                           att=B(QH), gat16=B(QH, f16), logits=B(self.vocab))
+        nfe = len(self.feature_layers)
+        if nfe: s.update(feat=B(nfe * D), fh=B(D), fh16=B(D, f16))   # (the export: feat [nfe, D]; fh / fh16 the copy's scratch norm)
         assert sum(v.numel() * v.element_size() for v in s.values()) <= self.TAPE_MIB * 2 ** 20, 'TAPE_MIB'
+        self.features = s['feat'].view(nfe, 1, D) if nfe else None
+        fslot = {l: k for k, l in enumerate(self.feature_layers)}
         # the per-pass inputs, one block of int32 (one copy from the pinned stage per token): [0 .. 15] the engine's pass
         # parameters ([1] = the previous pass's tokens to commit into the recurrent states), [16] the token, [17] its position
         self.hstage = torch.zeros(32, dtype=torch.int32, pin_memory=True)
@@ -295,6 +306,10 @@ class Dense35Own:
             # the block's norm, after the previous block's feed-forward is added to the residual (block 0: no add)
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], self.eps, d=s['ffp'] if il else None,
                                  slots=1 if il else 0, dep=prev)
+            fc = None
+            if il in fslot:   # (feat (zeroed per pass) += x: the residual entering block il, exactly; ordered before n2 rewrites x)
+                k = fslot[il]
+                fc = E.own_add_rms16(s['feat'][k * D:(k + 1) * D], d['attn_norm'], s['fh'], s['fh16'], self.eps, d=s['x'], slots=1, dep=n1)
             if d['kind'] == 'gdn':
                 a_ = mv(d['al'], s['h16'], s['al'], n1, x32=s['h']); b_ = mv(d['be'], s['h16'], s['be'], n1, x32=s['h'])
                 gt = E.also(E.gdn_gates(s['al'], s['be'], d['dt'], d['a'], s['gates'], dep=a_), b_)
@@ -318,6 +333,7 @@ class Dense35Own:
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], self.eps, d=s['blk'], slots=1, dep=o_)
+            if fc is not None: E.also(n2, fc)
             fg, fu = d['fg'], d['fu']
             if self.gu and fg['fmt'] == fu['fmt'] and fg['fmt'] in k3.OWN_1RT_FMT and self.rpt % 16 == 0 and self.rpt <= 64:
                 sw = mv(fg, s['h16'], s['a16'], n2, up=fu)
@@ -452,6 +468,7 @@ class Dense35Own:
         self.hstage[1] = int(commit)
         with torch.cuda.device(self.dev):
             self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)
+            if self.features is not None: self.features.zero_()   # (the copy segments add into it)
             self.E.run(check=False) if trace is None else self.E.run(check=False, trace=trace)
             if self._tok:
                 torch.max(self.logits, dim=1, out=self.d_max)

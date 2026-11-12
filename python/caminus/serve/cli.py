@@ -114,7 +114,8 @@ def parser():
     ap.add_argument('--drafter', help='the Coder\'s DFlash GGUF (default: caminus.config dflash)')
     ap.add_argument('--no-drafter', action='store_true', default=None, help='no DFlash drafter (plain decode)')
     ap.add_argument('--draft', choices=('off', 'mtp', 'dflash'), default=None, help='speculative decoding: off (plain '
-                    'decode), dflash (the Coder\'s DFlash2 sidecar, needs --drafter), mtp (the model\'s own MTP block, one '
+                    'decode), dflash (the DFlash2 drafter: the Coder\'s sidecar, needs --drafter; swift-1.5: the 27B base\'s '
+                    'DFlash2 file, one card), mtp (the model\'s own MTP block, one '
                     'card: swift-1.5; default: the architecture\'s drafter when its file is present, else off)')
     ap.add_argument('--host')
     ap.add_argument('--port', type=int, help='0: any free port (printed)')
@@ -249,7 +250,19 @@ def main(argv=None):
         # (the Coder drafts by default - the missing DFlash file falls into the error below, as before; the other
         # architectures default to off until their served A/B earns the default)
         draft = 'dflash' if A.drafter == 'dflash' else 'off'
-    if draft == 'dflash' and A.drafter != 'dflash':
+    own_dflash = draft == 'dflash' and A.drafter != 'dflash' and 'dflash' in getattr(A, 'drafters', ())
+    if own_dflash:
+        # (the dense 27B line's drafter: its own catalog file, not the Coder's; --drafter overrides it)
+        if opt['drafter'] == DEFAULT_DRAFTER:
+            from .. import models as _models
+            opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
+        if A.cards != 1:
+            print('caminus serve: --draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off', file=sys.stderr)
+            return 2
+        if not os.path.isfile(opt['drafter']):
+            print(f'caminus serve: the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)', file=sys.stderr)
+            return 2
+    elif draft == 'dflash' and A.drafter != 'dflash':
         print(f'caminus serve: --draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})', file=sys.stderr)
         return 2
     if draft == 'mtp' and A.drafter != 'mtp':
@@ -259,12 +272,12 @@ def main(argv=None):
         print(f'caminus serve: --draft mtp runs on one card only (the two-card drafter is not built yet): --cards 1, or --draft off',
               file=sys.stderr)
         return 2
-    if draft == 'dflash':
+    if draft == 'dflash' and not own_dflash:
         if not (opt['drafter'] and os.path.isfile(opt['drafter'])):
             print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
                   f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
             return 2
-    elif opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter']:
+    elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter']:
         print(f'caminus serve: --drafter ignored: --draft {draft} (the DFlash file is the Coder\'s only)', flush=True)
     opt['draft'] = draft
     if A.drafter == 'dflash':
