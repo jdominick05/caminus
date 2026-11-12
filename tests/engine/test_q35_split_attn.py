@@ -93,7 +93,8 @@ for what, kw in (('T 5', dict(T=5)), ('a QSA selection', dict(T=4, sel=True))):
         Ex._attn_split(torch.zeros(T_ * H * D, device='cuda'), cache, torch.zeros(1, dtype=torch.int32, device='cuda'), sel,
                        torch.zeros(T_ * H * D, device='cuda'), H, NKV, D, SCALE, False, -1, 64, None)
         refused = False
-    except ValueError:
-        refused = True
+    except ValueError as ex:
+        refused = 'the packed PART' in str(ex)   # (the packed PART's own refusal, not another ValueError on the way)
+        if not refused: print(f'  ({what}: a different ValueError: {ex})', flush=True)
     check(refused, f'the packed PART refuses {what}')
 print('RESULT', 'PASS' if ok else 'FAIL'); sys.exit(0 if ok else 1)
