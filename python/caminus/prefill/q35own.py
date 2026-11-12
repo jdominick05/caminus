@@ -128,10 +128,11 @@ class Ops(q3m_ops.Ops):
         self.mod.q35p_gate_mul16((min(-(-int(N) // 256), 8192),), (256,), a, gate, y16, ctypes.c_longlong(int(N)), I(D), I(stride), I(off))
 
 
-def layout(m, T, export_h=False):
+def layout(m, T, export_h=False, nfeat=0):
     """(f32 counts, f16 counts, i32 counts) of Q35OwnPrefill's buffers for engine m (Dense35Own, or shapes_of) at chunk T.
     `work` is shared by the layer kinds and the feed-forward (each is dead before the next one writes). export_h: the
-    per-row export of the trunk's final h (the MTP drafter's fill input; the output norm runs on every chunk then)"""
+    per-row export of the trunk's final h (the MTP drafter's fill input; the output norm runs on every chunk then). nfeat:
+    the exported feature layers (feat [nfeat, T, D]: a DFlash drafter's target layers, the residual entering each)"""
     D, nh, nkv, hd, ffn, S, NK, NV = m.D, m.nh, m.nkv, m.hd, m.ffn, m.S, m.NK, m.NV
     CH, KD, VD, QH = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd
     gdn = 2 * CH + 2 * KD + 2 * VD                       # qkv, conv, qk, z, o
@@ -142,12 +143,13 @@ def layout(m, T, export_h=False):
     if export_h:                                        # (the exported h: fp32 + its fp16 copy, one chunk wide)
         f32['hout'] = T * D
         f16['h16o'] = T * D
+    if nfeat: f32['feat'] = nfeat * T * D
     i32 = dict(toks=T, err=1)
     return f32, f16, i32
 
 
-def buffer_need_mib(m, T, export_h=False):
-    f32, f16, i32 = layout(m, T, export_h=export_h)
+def buffer_need_mib(m, T, export_h=False, nfeat=0):
+    f32, f16, i32 = layout(m, T, export_h=export_h, nfeat=nfeat)
     return (4 * sum(f32.values()) + 2 * sum(f16.values()) + 4 * sum(i32.values())) / capacity.MIB
 
 
@@ -165,11 +167,17 @@ class Q35OwnPrefill(PrefillDriver):
     """the batched prefill of a Dense35Own engine m, chunks of up to `chunk` tokens; buffers preallocated (checked against
     the card's guard line first: capacity.check)"""
 
-    def __init__(self, m, chunk=1024, crossover=None, check=True, export_h=None):
+    def __init__(self, m, chunk=1024, crossover=None, check=True, export_h=None, feature_layers=()):
         self.m, self.chunk = m, int(chunk)
         # export_h: export every chunk row's final h (the MTP drafter's fill input) and fill the block per chunk;
         # default on when the engine carries an MTP drafter (m.mtp35, set by the architecture's build)
         self.export_h = bool(getattr(m, 'mtp35', None) is not None) if export_h is None else bool(export_h)
+        # feature_layers: copy each chunk row's residual entering these layers to self.feat [len, chunk, D] (a DFlash
+        # drafter's target layers, as Dense35Verify(feature_layers=) exports them per pass; prefill numerics: the WMMA
+        # GEMMs, so the rows are close to the verify export's, not bitwise; the copy itself is exact)
+        self.feature_layers = [int(l) for l in feature_layers]
+        if any(not 1 <= l < m.nl for l in self.feature_layers) or len(set(self.feature_layers)) != len(self.feature_layers):
+            raise ValueError(f'Q35OwnPrefill: feature_layers {self.feature_layers} (distinct, 1 .. {m.nl - 1})')
         self._draft = None
         if not 16 <= self.chunk <= 4096: raise ValueError(f'Q35OwnPrefill: chunk {chunk} (16 .. 4096)')
         if m.nl_build != m.nl: raise ValueError('Q35OwnPrefill: a debug_layers engine is refused')
@@ -187,9 +195,10 @@ class Q35OwnPrefill(PrefillDriver):
         attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
         if attn is None: raise ValueError(f'Q35OwnPrefill: {m.nh // m.nkv} query heads per kv head')
         T = self.chunk
-        self.need_mib = buffer_need_mib(m, T, export_h=self.export_h)
+        nf = len(self.feature_layers)
+        self.need_mib = buffer_need_mib(m, T, export_h=self.export_h, nfeat=nf)
         if check: capacity.check([dev.index], [self.need_mib], f'Q35OwnPrefill buffers (chunk {T})')
-        f32, f16, i32 = layout(m, T, export_h=self.export_h)
+        f32, f16, i32 = layout(m, T, export_h=self.export_h, nfeat=nf)
         with torch.cuda.device(dev):
             self.O = Ops(dev, module=MODULE_TCAP if self.tcap else MODULE)
             self.Gl = Glue(dev, module='prefill_glue_q35d')
@@ -203,6 +212,8 @@ class Q35OwnPrefill(PrefillDriver):
         self.n_vocab = int(m.vocab)
         self.emb_rb = m.D // 256 * (82 if m.emb.type == 'IQ2_S' else 144)
         self.last = None
+        self.features = self.feat.view(nf, T, m.D) if nf else None   # (rows [0, n) of the last chunk run)
+        self._fslot = {l: k for k, l in enumerate(self.feature_layers)}
 
     MM_KEYS = dict(gdn=('qkv', 'z', 'so'), attn=('q', 'k', 'v', 'o'))
 
@@ -242,6 +253,8 @@ class Q35OwnPrefill(PrefillDriver):
         last = m.nl - 1
         for il, L in enumerate(m.L):
             O.add_rms16(x, L['attn_norm'], eps, h16, n, D, d=ffp if il else None, h=h)
+            if il in self._fslot:                # (the residual entering layer il: x after the previous feed-forward's add)
+                self.features[self._fslot[il], :n].view(-1).copy_(x)
             if L['kind'] == 'gdn':
                 al, be, gt = self.al[:n * NV], self.be[:n * NV], self.gates[:n * 2 * NV]
                 o0 = 0

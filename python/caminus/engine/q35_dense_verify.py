@@ -37,8 +37,9 @@ MODULE = 'k3_q35_swift_ver'
 
 class Dense35Verify:
     @staticmethod
-    def _spec(eng, T):
-        """every buffer of one verify tape: name -> (elements, dtype)"""
+    def _spec(eng, T, nfeat=0):
+        """every buffer of one verify tape: name -> (elements, dtype); nfeat: the exported feature layers (feat [nfeat, T, D]
+        and the copy segments' scratch norm outputs)"""
         D, hd, nh, nkv, S, NK, NV, ffn = eng.D, eng.hd, eng.nh, eng.nkv, eng.S, eng.NK, eng.NV, eng.ffn
         CH, KD, VD, QH = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd
         f32, f16, i32 = torch.float32, torch.float16, torch.int32
@@ -48,30 +49,38 @@ class Dense35Verify:
         sp.update({k: (T * v, f16) for k, v in dict(h16=D, a16=ffn, fin16=VD, gat16=QH).items()})
         sp['stage'] = (32, i32)
         sp['part'] = (attn_part_elems(T, nh, eng.max_ctx + eng.spec_T - 1), f32)   # (the split attention pair's records)
+        if nfeat:
+            sp['feat'] = (nfeat * T * D, f32); sp['fh'] = (T * D, f32); sp['fh16'] = (T * D, f16)
         return sp
 
     @staticmethod
-    def need_mib(T, eng=None, max_ctx=None):
+    def need_mib(T, eng=None, max_ctx=None, nfeat=0):
         """MiB of device memory one verify tape adds (with eng: from its dimensions; without: an upper bound for the 27B
         shapes at T <= 4, to pass as the decode engine's vram_extra_mib before it exists, max_ctx the engine's: the split
         attention records grow with it, 24 query heads at most)"""
         if eng is None:
             if max_ctx is None: raise ValueError('Dense35Verify.need_mib: max_ctx (the records of the split attention pair) without eng')
-            return 10.0 * T + 4.0 + 4 * attn_part_elems(T, 24, int(max_ctx) + MAX_T - 1) / 2 ** 20
+            return (10.0 * T + 4.0 + 4 * attn_part_elems(T, 24, int(max_ctx) + MAX_T - 1) / 2 ** 20
+                    + (nfeat + 2) * T * 5120 * 4 / 2 ** 20 * (nfeat > 0))
         sz = {torch.float32: 4, torch.float16: 2, torch.int32: 4}
-        return sum(n * sz[dt] for n, dt in Dense35Verify._spec(eng, T).values()) / 2 ** 20 + 2.0   # (+ the tape and its sync words)
+        return sum(n * sz[dt] for n, dt in Dense35Verify._spec(eng, T, nfeat).values()) / 2 ** 20 + 2.0   # (+ the tape and its sync words)
 
-    def __init__(self, eng, T, module=MODULE, per_wgp=None, vram_check=True):
+    def __init__(self, eng, T, module=MODULE, per_wgp=None, vram_check=True, feature_layers=()):
         """eng: a Dense35Own on the Swift module with spec_T >= T (its weights, caches, states and bounds); T: tokens per
         pass, 1 .. 4; module: k3_q35_swift_ver or its _trace build; per_wgp: workgroups per WGP of this tape's grid
-        (None: the decode engine's; the bits are the same at every grid)"""
+        (None: the decode engine's; the bits are the same at every grid); feature_layers: layers whose entering residual
+        each pass copies to self.features [len, T, D] fp32 (a DFlash drafter's target layers: the residual after the
+        previous layer's feed-forward is added, before the layer's norm; llama.cpp's layer input). The copy is the
+        module's own add-rms op on a zeroed buffer (0 + x, exact), so no device code changes and the logits stay bitwise"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
         if module not in k3.Q35V_MODULES or module in k3.Q35M_MODULES: raise ValueError(f'Dense35Verify: module {module!r} is not a verify module {k3.Q35V_MODULES} (the drafter module {k3.Q35M_MODULES} runs engine/q35_mtp.py)')
         if eng.tcap or eng.module not in k3.Q35S_MODULES: raise ValueError(f'Dense35Verify: the Swift module only (the engine runs {eng.module})')
         if eng.spec_T < T: raise ValueError(f'Dense35Verify: the engine keeps {eng.spec_T} tokens\' saved inputs (spec_T), the tape runs {T}')
         if eng.nl_build != eng.nl: raise ValueError('Dense35Verify: an engine built with debug_layers')
-        self.eng, self.T, self.module = eng, T, module
-        self.mib = self.need_mib(T, eng)
+        fl = [int(l) for l in feature_layers]
+        if any(not 1 <= l < eng.nl for l in fl) or len(set(fl)) != len(fl): raise ValueError(f'Dense35Verify: feature_layers {fl} (distinct, 1 .. {eng.nl - 1})')
+        self.eng, self.T, self.module, self.feature_layers = eng, T, module, fl
+        self.mib = self.need_mib(T, eng, nfeat=len(fl))
         if vram_check: capacity.check([eng.dev], [self.mib], f'Dense35Verify T {T}: its tape buffers ({self.mib:.1f} MiB)')
         self.per_wgp = int(per_wgp) if per_wgp else eng.per_wgp
         self.bails = []
@@ -81,7 +90,9 @@ class Dense35Verify:
         eng, T = self.eng, self.T
         D, hd, nh, nkv, S, NK, NV, ffn = eng.D, eng.hd, eng.nh, eng.nkv, eng.S, eng.NK, eng.NV, eng.ffn
         CH, KD = 2 * S * NK + S * NV, NK * S
-        s = self.buf = {k: torch.zeros(n, dtype=dt, device='cuda') for k, (n, dt) in self._spec(eng, T).items()}
+        s = self.buf = {k: torch.zeros(n, dtype=dt, device='cuda') for k, (n, dt) in self._spec(eng, T, len(self.feature_layers)).items()}
+        fslot = {l: k for k, l in enumerate(self.feature_layers)}
+        self.features = s['feat'].view(len(self.feature_layers), T, D) if self.feature_layers else None
         # the per-pass inputs, one block of int32: [0 .. 15] the pass parameters ([1] = the previous pass's tokens to commit),
         # [16 .. 16 + T) the tokens, [16 + T] the first position
         self.hstage = torch.zeros(32, dtype=torch.int32, pin_memory=True)
@@ -111,6 +122,11 @@ class Dense35Verify:
         for il, d in enumerate(eng.L):
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], eng.eps, d=s['ffp'] if il else None,
                                  slots=1 if il else 0, dep=prev, tokens=T)
+            fc = None
+            if il in fslot:                      # (feat[k] += x on a buffer zeroed before the pass; its norm goes to scratch)
+                k = fslot[il]
+                fc = E.own_add_rms16(s['feat'][k * T * D:(k + 1) * T * D], d['attn_norm'], s['fh'], s['fh16'], eng.eps, d=s['x'],
+                                     slots=1, dep=n1, tokens=T)
             if d['kind'] == 'gdn':
                 a_ = mv(d['al'], s['h16'], s['al'], n1, x32=s['h']); b_ = mv(d['be'], s['h16'], s['be'], n1, x32=s['h'])
                 gt = E.also(E.gdn_gates(s['al'], s['be'], d['dt'], d['a'], s['gates'], dep=a_), b_)
@@ -133,6 +149,7 @@ class Dense35Verify:
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], eng.eps, d=s['blk'], slots=1, dep=o_, tokens=T)
+            if fc is not None: E.also(n2, fc)    # (the copy runs beside the layer's matvecs; x's next writer, this add, waits for it)
             g_ = mv(d['fg'], s['h16'], s['g'], n2); u_ = mv(d['fu'], s['h16'], s['u'], n2)
             sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             prev = mv(d['fd'], s['a16'], s['ffp'], sw)
@@ -183,6 +200,7 @@ class Dense35Verify:
         eng, E = self.eng, self.E
         self.hstage[1] = int(commit)
         self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)
+        if self.features is not None: self.features.zero_()   # (the copy segments add into it)
         E.run(check=False)
         if argmax:
             torch.max(self.logits2, dim=1, out=self.d_max)
