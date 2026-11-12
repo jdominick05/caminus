@@ -21,7 +21,7 @@
 
 > [!WARNING]
 > **Caminus is early testing software, and things will break.** It has been tested on exactly one machine: an RX 7900 XTX
-> and an RX 7900 XT on Linux. If something goes wrong, please
+> and an RX 7900 XT on Linux. It runs Qwen models only, for now. If something goes wrong, please
 > [open an issue](https://github.com/jdominick05/caminus/issues/new/choose) and paste the output of `caminus doctor`.
 > Every report helps.
 
@@ -66,6 +66,11 @@ works. Reports decide which cards get supported next. [Feature requests](https:/
 are welcome too.
 
 ## Models
+
+> [!NOTE]
+> **Qwen models only, for now.** Every model below is a Qwen model or a finetune of one (the Qwen3, Qwen3.6, Qwen3.8 and
+> Qwen3-Coder families), and the server speaks Qwen's chat template and tool-call format. Other model families (Llama,
+> Gemma, Mistral, DeepSeek and others) won't load. This may change in the future.
 
 | Model | Cards | Decode | llama.cpp, same cards |
 |---|---|---|---|
