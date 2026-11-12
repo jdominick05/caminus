@@ -81,7 +81,7 @@ def _model(name, title, arch, items, alias, speed, notes):
     return Model(name, title, arch, _arch.lookup(arch).cards, items, alias, speed, notes)
 
 
-CATALOG = (
+ALL = (
     _model('coder', 'Qwen3.8-Flash-Next Coder IQ1_M + DFlash2', 'qwen4exp', ('coder-1', 'coder-2', 'dflash'), 'k3-coder',
            '~104 tok/s decode, 123-203 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
     _model('qwen3.6', 'Qwen3.6-35B-A3B GSQ-hybrid (2-bit)', 'qwen35moe', ('qwen3.6',), 'qwen3.6',
@@ -100,7 +100,28 @@ CATALOG = (
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )
+# Paused models: in the tree (their engines, kernels and files stay) but not offered: `caminus models`, `caminus pull`,
+# `caminus start` and the panel leave them out, and caminus serve refuses their architectures (caminus.arch.PAUSED), until
+# they are measured again on the current code. CAMINUS_ALLOW_PAUSED=1 offers them anyway (development and gates).
+PAUSED = {
+    'qwen3.6': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
+    'qwen3.6-hauhau': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
+    'qwen3-coder-next': 'Qwen3-Coder-Next is paused: not in this release (it is not measured on the current code)',
+}
+
+
+def allow_paused():
+    """CAMINUS_ALLOW_PAUSED=1: paused models and architectures are offered and served anyway"""
+    return os.environ.get('CAMINUS_ALLOW_PAUSED') == '1'
+
+
+CATALOG = tuple(m for m in ALL if allow_paused() or m.name not in PAUSED)
 BY_NAME = {m.name: m for m in CATALOG}
+
+
+def paused(name):
+    """the refusal for a paused model's name (None: not paused, or CAMINUS_ALLOW_PAUSED=1)"""
+    return None if allow_paused() else PAUSED.get(name)
 
 
 def model_of(path):
@@ -111,7 +132,7 @@ def model_of(path):
     except OSError:
         return None
     base = os.path.basename(path)
-    for m in CATALOG:
+    for m in ALL:
         it = BY_KEY[m.items[0]]
         if os.path.basename(it.path) == base and it.size == size:
             return m

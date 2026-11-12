@@ -41,13 +41,14 @@ Each line says PASS, WARN or FAIL. Fix every FAIL before you go on. [Troubleshoo
 caminus panel
 ```
 
-1. In **MODELS**, move to `qwen3.6` with the arrow keys. It fits any supported card.
+1. In **MODELS**, move to `thinkingcap` with the arrow keys. It fits any supported card (on a 24 GB card,
+   `qwen3-30b-a3b` writes about five times as fast).
 2. Press `p` to download it.
 3. Press `enter` to start it. The first start takes about a minute.
 4. Press `tab` until you reach **QWEN CODE**. Press `i` to install Qwen Code (only once), then `u` to set it up.
 5. Press `tab` to reach **SERVERS**, then `enter`. Qwen Code opens, talking to your model.
 
-Press `q` to leave the panel. The model keeps running until you stop it: `x` in **SERVERS**, or `caminus stop qwen3.6`.
+Press `q` to leave the panel. The model keeps running until you stop it: `x` in **SERVERS**, or `caminus stop thinkingcap`.
 
 ## Next steps
 

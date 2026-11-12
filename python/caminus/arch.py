@@ -603,6 +603,18 @@ TWO_CARD = {'qwen35-own': 'qwen35-own-tp'}   # (a one-card architecture's two-ca
 CODER = ARCHS['qwen4exp']
 
 
+# architectures caminus serve refuses while their models are paused (caminus.models.PAUSED; CAMINUS_ALLOW_PAUSED=1 serves them)
+PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next'}
+
+
+def paused(A):
+    """the refusal when A is a paused architecture's entry, else None"""
+    from . import models
+    if A.name not in PAUSED or models.allow_paused(): return None
+    return (f'{PAUSED[A.name]} ({A.name}) is paused: not in this release (it is not measured on the current code); '
+            'CAMINUS_ALLOW_PAUSED=1 serves it anyway')
+
+
 def lookup(name):
     """the entry for an architecture name (any other: the Coder's, whose engine refuses what it cannot load)"""
     return ARCHS.get(name, CODER)

@@ -81,7 +81,7 @@ kernel from the GRUB menu (Advanced options) and report it with the log lines.
 [getting full speed](hardware.md#getting-full-speed). The server's log says at startup whether the clocks are high.
 
 **Nothing arrives during a long prompt**: OpenAI-style streams send nothing until the first token; a 100K-token prompt
-takes about 40 s with `coder`. `qwen3-coder-next` reads prompts much more slowly for now.
+takes about 40 s with `coder`.
 
 **HTTP 503 or 529 after an error**: a step failed its retries. The server stays up and the next request starts fresh from
 the cache. It saved a replay file for a bug report: `caminus flight list` shows it.

@@ -232,6 +232,10 @@ def main(argv=None):
               f'CAMINUS_CODER (or coder in {_config.config_path()}), or pass --model', file=sys.stderr)
         return 2
     A = _arch.of(opt['model'])                   # (the GGUF's header, read once: every later question asks the registry)
+    why = _arch.paused(A)
+    if why:
+        print(f'caminus serve: {why}', file=sys.stderr)
+        return 2
     try:
         A = A.variant(opt.get('cards'))           # (--cards 2: a one-card model's two-card form, where it has one)
     except ValueError as e:

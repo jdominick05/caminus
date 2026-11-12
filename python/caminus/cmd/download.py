@@ -241,6 +241,9 @@ def main(argv=None):
         items = load_manifest(a.manifest)
     else:
         name = a.model or 'coder'
+        if models.paused(name):
+            print(f'download: {models.paused(name)}', file=sys.stderr)
+            return 2
         if name not in models.BY_NAME:
             print(f'download: unknown model {name!r} (caminus models: {", ".join(models.BY_NAME)})', file=sys.stderr)
             return 2
