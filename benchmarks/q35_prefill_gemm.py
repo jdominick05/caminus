@@ -74,6 +74,7 @@ def bench_graph(fn):
     return float(np.median(ts))
 
 
+AB_DIFF = []
 CMP_ROWS = 256   # rows per block of the FlyDSL-vs-torch output comparison
 tot = {}
 for M in MS:
@@ -95,6 +96,26 @@ for M in MS:
           try:
             if arm == 'own':
                 res['own'] = bench(lambda: ops.mm(W, x16, K, y, R, n=M))
+            elif arm == 'ab':   # Q4_K only: the wide tile vs q3p_mm_q4k, interleaved rep by rep in this process, outputs bitwise
+                if t.type != 'Q4_K': continue
+                y2 = torch.zeros(M, R, device=dev)
+                ops.q4k_narrow = False; ops.mm(W, x16, K, y, R, n=M)
+                ops.q4k_narrow = True; ops.mm(W, x16, K, y2, R, n=M); torch.cuda.synchronize(dev)
+                same = torch.equal(y.view(torch.int32), y2.view(torch.int32))
+                tw, tn = [], []
+                for rep in range(A.reps):
+                    for flag, ts in ((False, tw), (True, tn)) if rep % 2 == 0 else ((True, tn), (False, tw)):
+                        ops.q4k_narrow = flag
+                        for _ in range(3): ops.mm(W, x16, K, y, R, n=M)
+                        e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                        e0.record()
+                        for _ in range(A.iters): ops.mm(W, x16, K, y, R, n=M)
+                        e1.record(); e1.synchronize(); ts.append(e0.elapsed_time(e1) * 1e3 / A.iters)
+                ops.q4k_narrow = False
+                res['wide'] = float(np.median(tw)); res['narrow'] = float(np.median(tn))
+                print(f'  {"BITWISE" if same else "DIFFER"} wide vs narrow at [{R} x {K}] M {M}'
+                      + ('' if same else f' ({int((y.view(torch.int32) != y2.view(torch.int32)).sum())} values)'), flush=True)
+                if not same: AB_DIFF.append(row)
             elif arm == 'torch':
                 yh = torch.empty(M, R, device=dev, dtype=torch.float16)
                 res['torch'] = bench(lambda: torch.matmul(x16, Wd.t(), out=yh))
@@ -120,4 +141,4 @@ for M in MS:
         del W, x16, y, Wd; torch.cuda.empty_cache()
 for (M, k), v in sorted(tot.items()):
     print(f'per chunk M {M}: {k:8s} {v / 1e3:8.2f} ms of GEMMs ({M / (v / 1e6):8.0f} tok/s if GEMMs were all)', flush=True)
-print('RESULT PASS (ran to the end; a measurement, not a gate)')
+print('RESULT FAIL (wide vs narrow differ: ' + '; '.join(AB_DIFF) + ')' if AB_DIFF else 'RESULT PASS (ran to the end; a measurement, not a gate)')

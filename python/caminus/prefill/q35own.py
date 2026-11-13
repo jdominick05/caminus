@@ -48,6 +48,7 @@ FORMATS = ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K')
 FORMATS_TCAP = FORMATS + ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S')
 MM_KERNEL = {'Q8_0': 'q35p_mm_q8_0', 'Q5_K': 'q35p_mm_q5k'}
 MMW_N = 256   # (rows per workgroup of the wide Q4_K tile, kernels/q35_prefill.hip MMW_N)
+MMW_MIN_PER_CU = 4   # (the wide tile only when its grid has at least this many workgroups per compute unit)
 # the codebook formats (the tcap object only): the decode engine's copies in place (IQ4_XS raw blocks; the grid formats
 # in the record layout), one more argument: the buffer's rows (Rtot)
 IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_S': 'q35t_mm_iq2s'}
@@ -69,6 +70,8 @@ class Ops(q3m_ops.Ops):
     def __init__(self, dev, module=MODULE):
         super().__init__(dev, module)
         self.module = module
+        self.cus = torch.cuda.get_device_properties(dev).multi_processor_count
+        self.q4k_narrow = False   # (True: dense Q4_K GEMMs on q3p_mm_q4k instead of the wide tile; benchmarks only)
 
     def mm(self, W, x16, ldx, y, ldy, n=None, work=None):
         """y[t] = W x16[t] for t < n (dense only here). W: Dense35Own's dict (fmt, rows, K, w)"""
@@ -80,10 +83,15 @@ class Ops(q3m_ops.Ops):
             n = int(n); grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
             getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
             return
-        if fmt == 'Q4_K' and work is None and n is not None and self.module in (MODULE, MODULE_TCAP):
-            # the wide tile (kernels/q35_prefill.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows)
+        if fmt == 'Q4_K' and work is None and n is not None and (self.module == MODULE or self.module.startswith('q35_prefill_abl')) and not self.q4k_narrow:
+            # the wide tile (kernels/q35_prefill.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows; ThinkingCap has
+            # no Q4_K weights; q4k_narrow = True runs q3p_mm_q4k, for benchmarks/q35_prefill_gemm.py --arms ab)
             if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
             n = int(n)
+            wg = -(-n // q3m_ops.MM_M) * -(-R // MMW_N)
+            if wg < MMW_MIN_PER_CU * self.cus:   # (a small grid: q3p_mm_q4k's twice as many workgroups fill the card better;
+                # XTX ffn_down at 512 tokens, 160 workgroups: 1765 us wide vs 1692 us)
+                return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
             self.mod.q35p_mm_q4k_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
             return
         if fmt not in MM_KERNEL: return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)

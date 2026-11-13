@@ -142,11 +142,30 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
         }
 }
 
+// q4k_b with fp16's exponent byte (0x64: 1024 + q) taken by v_perm from its first source instead of OR-ed in after it:
+// the same bits, two VALU instructions fewer per four values (the wide tile's limit is this unpack: with B = 1 it runs at
+// ~104 TF on the XT, q35_prefill_abl1)
+__device__ __forceinline__ h16_t q4k_bw(const u32x4_t & qw, int sh, _Float16 sc) {
+    const h2_t s2 = {sc, sc}, o2 = {(_Float16)(-1024.0f) * sc, (_Float16)(-1024.0f) * sc};
+    const uint32_t w4[4] = {qw.x, qw.y, qw.z, qw.w};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t n = (w4[w] >> sh) & 0x0f0f0f0fu;
+        const uint32_t p01 = __builtin_amdgcn_perm(0x64646464u, n, 0x04010400u);   // bytes: q0, 0x64, q1, 0x64
+        const uint32_t p23 = __builtin_amdgcn_perm(0x64646464u, n, 0x04030402u);
+        o[2 * w] = as_u(__builtin_elementwise_fma(as_h2(p01), s2, o2));
+        o[2 * w + 1] = as_u(__builtin_elementwise_fma(as_h2(p23), s2, o2));
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+
 // ---- q35p_mm_q4k_w: Q4_K, the wide tile (dense rows only) ----------------------------------------------------------
 // q3p_mm_q4k with two 16-row tiles per wave: a workgroup is 64 tokens x 256 rows (8 waves x 32 rows), and each A operand
 // (a token tile's 16 values, from LDS) feeds the WMMAs of both row tiles. q3p_mm_q4k reads A once per WMMA; here once
-// per two, which is what its tile was waiting on (benchmarks/q35_prefill_gemm.py --module q35_prefill_abl1/2/3: with the
-// weight path, the staging or the scale step removed it still stopped near 52-57 TF). Every row's statements are
+// per two and stages each token tile's X once per 256 rows instead of per 128 (an experiment: q3p_mm_q4k stops near
+// 52-57 TF with its weight path, staging or scale step removed, benchmarks/q35_prefill_gemm.py --module q35_prefill_abl1/2/3;
+// halving the A reads is one candidate limit, measured by --arms ab). Every row's statements are
 // q3p_mm_q4k's in its order (the B operand from the row's own scale, P per block in the same k-step order, the min term
 // against the same sub-block sums, the same overflow branch), so each output keeps its bits: tests/prefill/
 // test_q35_prefill_mm.py runs both kernels and compares them bitwise. Rows past R read row 0 and are never written.
@@ -201,8 +220,12 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q4k_w(const uint8_t * 
 #pragma unroll
                 for (int hi = 0; hi < 2; hi++) {
                     const int s = 2 * j + hi;
-                    const h16_t B0 = q4k_b(qs[0][2 * j + hf], 4 * hi, rok[0] ? (_Float16)sc[0][s] : (_Float16)0.0f);
-                    const h16_t B1 = q4k_b(qs[1][2 * j + hf], 4 * hi, rok[1] ? (_Float16)sc[1][s] : (_Float16)0.0f);
+#if Q3P_ABL == 1
+                    const h16_t B0 = (h16_t)(_Float16)1.0f, B1 = B0; (void)qs; (void)sc;   // (measurement build: no weight unpack)
+#else
+                    const h16_t B0 = q4k_bw(qs[0][2 * j + hf], 4 * hi, rok[0] ? (_Float16)sc[0][s] : (_Float16)0.0f);
+                    const h16_t B1 = q4k_bw(qs[1][2 * j + hf], 4 * hi, rok[1] ? (_Float16)sc[1][s] : (_Float16)0.0f);
+#endif
 #pragma unroll
                     for (int mt = 0; mt < 4; mt++) {
                         const h16_t A = mm_a(mt, s * 32 + hf * 16, lane);
