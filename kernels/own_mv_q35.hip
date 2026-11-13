@@ -39,6 +39,16 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_q6_k_pl_k3(const uint8_
 }
 
 // the general rows tiles (runtime K, OWN_R rows per wave): Q5_K and Q8_0 as the decode module's OP_OWN_MV16 runs them
+// the Q8_0 rows tile with UP block steps' loads per pass (own_quant.h own_rows_q8_0_1rt: bitwise own_mv_q8_0_a16)
+#define Q35_Q8_1RT(UP) extern "C" __global__ void __launch_bounds__(256) own_mv_q8_0_1rt_u##UP(const uint8_t * W, int nrows,  \
+        int K, const void * x, float * out) {                                                                            \
+    const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * OWN_R;                                                    \
+    if (row0 < nrows) own_rows_q8_0_1rt<UP>(W, row0, nrows, K, x, out, threadIdx.x & 31);                                \
+}
+Q35_Q8_1RT(2)
+Q35_Q8_1RT(4)
+Q35_Q8_1RT(8)
+
 #define Q35_GEN(FMT) extern "C" __global__ void __launch_bounds__(256) own_mv_##FMT##_a16(const uint8_t * W, int nrows,    \
         int K, const void * x, float * out) {                                                                          \
     const int row0 = (blockIdx.x * OWN_WAVES + (threadIdx.x >> 5)) * OWN_R;                                             \

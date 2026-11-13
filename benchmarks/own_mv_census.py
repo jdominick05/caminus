@@ -34,6 +34,7 @@ ap.add_argument('--rounds', type=int, default=5)
 ap.add_argument('--layers', type=int, default=None, help='the first N layers (default: all)')
 ap.add_argument('--roles', default=None, help='comma-separated roles (default: all), e.g. ffn_gate_exps,ffn_down_exps')
 ap.add_argument('--q5k', choices=('1rt', 'general'), default='1rt', help='dense: the Q5_K tile (own_rows_q5k_1rt or the general rows tile)')
+ap.add_argument('--q8', choices=('gen', 'u2', 'u4', 'u8'), default='gen', help='dense: the Q8_0 tile (own_rows_q8_0, or own_rows_q8_0_1rt with UP 2 / 4 / 8 block steps per pass; the 1rt arms are checked bitwise against the general tile)')
 ap.add_argument('--formats', default=None, help='comma-separated formats to time (default: all)')
 ap.add_argument('--log', default=None, help='append the result lines to this file too')
 A = ap.parse_args()
@@ -48,6 +49,7 @@ if DENSE: NL = min(A.layers or 10 ** 6, int(F.hp('block_count')) - int(F.hp('nex
 OWNQ = Module('own_mv_q35') if DENSE else None
 GEN = ('Q8_0',) if A.q5k == '1rt' else ('Q5_K', 'Q8_0')   # (the general rows tiles: 4 rows per wave)
 OUT = []
+Q8_SAME = []
 
 
 def say(s):
@@ -75,7 +77,7 @@ def own_kernel(fmt, K):
     if DENSE:   # (K3's form: runtime K; Q5_K / Q8_0 the general rows tiles OP_OWN_MV16 runs, 4 rows per wave)
         nm = {'IQ4_XS': 'own_mv_iq4xs_k3', 'IQ3_XXS': 'own_mv_iq3xxs_k3', 'IQ3_S': 'own_mv_iq3s_k3', 'IQ2_S': 'own_mv_iq2s_k3',
               'Q6_K': 'own_mv_q6_k_pl_k3', 'Q5_K': 'own_mv_q5_k_k3' if A.q5k == '1rt' else 'own_mv_q5_k_a16',
-              'Q8_0': 'own_mv_q8_0_a16'}.get(fmt)
+              'Q8_0': 'own_mv_q8_0_a16' if A.q8 == 'gen' else f'own_mv_q8_0_1rt_{A.q8}'}.get(fmt)
         return getattr(OWNQ, nm) if nm else None
     nm = {'Q4_K': f'own_mv_q4_k_1rt_k{K}', 'Q6_K': f'own_mv_q6_k_pl_k{K}', 'IQ4_XS': f'own_mv_iq4xs_1rt_k{K}_r2',
           'IQ3_XXS': f'own_mv_iq3xxs_1rt_k{K}_r2', 'IQ3_S': f'own_mv_iq3s_1rt_k{K}_r2',
@@ -148,6 +150,14 @@ for role in ROLES:
                                            (256,), w, ctypes.c_int(rows), ctypes.c_int(K), x16, out)
             out.zero_(); run_own(Wo[0]); torch.cuda.synchronize()
             e = np.abs(out.double().cpu().numpy()[srows] - yref) / sc; acc['own'] = (e.mean(), np.percentile(e, 99))
+            if DENSE and fmt == 'Q8_0' and A.q8 != 'gen':   # (the 1rt tile against the general one: bitwise)
+                yo = out.clone(); out.zero_()
+                OWNQ.own_mv_q8_0_a16(((rows + 31) // 32,), (256,), Wo[0], ctypes.c_int(rows), ctypes.c_int(K), x16, out)
+                torch.cuda.synchronize()
+                same = torch.equal(yo.view(torch.int32), out.view(torch.int32))
+                Q8_SAME.append(same)
+                say(f'  Q8_0 {role} [{rows} x {K}]: own_mv_q8_0_1rt_{A.q8} {"BITWISE" if same else "DIFFERS FROM"} own_mv_q8_0_a16')
+                out.copy_(yo)
         arms = {'read': (Wl, lambda w: run_read(w, sink))}
         if has_llama: arms['llama'] = (Wl, run_llama)
         if kown: arms['own'] = (Wo, run_own)
@@ -175,4 +185,4 @@ say(f'token ({sum(PER_TOKEN.values()) if DENSE else 1393:,} matvecs, one launch 
 if missing: say('no own kernel yet for: ' + '; '.join(missing))
 if A.log:
     with open(A.log, 'a') as f: f.write('\n'.join(OUT) + '\n')
-print('RESULT DONE')
+print(('RESULT PASS (the Q8_0 1rt tile bitwise the general tile on every shape)' if all(Q8_SAME) else 'RESULT FAIL (the Q8_0 1rt tile differs from the general tile)') if Q8_SAME else 'RESULT DONE')

@@ -263,6 +263,48 @@ __device__ __forceinline__ void own_rows_q8_0(const uint8_t * __restrict__ W, in
 }
 
 
+// own_rows_q8_0 with UP of its block steps' loads issued before any of their arithmetic (a pass): the same lane work (sub
+// = lane / 8 takes blocks sub, sub + 4, ...; c4 = its 4 values of a block) and the same statements in the same order (per
+// block in increasing order, per row in turn: acc += d dot4s(q, a)), so every row's sum keeps its bits; the old tile
+// waited for each step's loads before the next (K 5120: 40 dependent round trips per row; ThinkingCap's 1024-row Q8_0
+// matvecs took 36-39 us against a 12-14 us read, benchmarks/own_mv_census.py). Act16 (fp16) activations only.
+template <int UP>
+__device__ __forceinline__ void own_rows_q8_0_1rt(const uint8_t * __restrict__ W, int row0, int nrows, int K,
+                                                  const void * __restrict__ x, float * __restrict__ out, int lane) {
+    const int nb = K / 32, rb = nb * 34, sub = lane >> 3, c4 = (lane & 7) * 4;
+    float acc[OWN_R] = {};
+    for (int b0 = sub; b0 < nb; b0 += 4 * UP) {
+        uint16_t dh[UP][OWN_R];
+        uint32_t qw[UP][OWN_R];
+        Act16 a[UP];
+#pragma unroll
+        for (int k = 0; k < UP; k++) {                       // every load of the pass (a step past the row: block sub)
+            const int b = b0 + 4 * k < nb ? b0 + 4 * k : sub;
+            load_act(a[k], x, nullptr, b * 32 + c4);
+#pragma unroll
+            for (int r = 0; r < OWN_R; r++) {
+                const uint8_t * blk = W + (size_t)min(row0 + r, nrows - 1) * rb + b * 34;
+                dh[k][r] = *(const uint16_t *)blk;
+                qw[k][r] = ld32h(blk + 2 + c4);
+            }
+        }
+#pragma unroll
+        for (int k = 0; k < UP; k++) {
+            if (b0 + 4 * k >= nb) break;
+#pragma unroll
+            for (int r = 0; r < OWN_R; r++) {
+                if (row0 + r >= nrows) continue;
+                acc[r] = __builtin_fmaf(f16f(dh[k][r]), dot4s(qw[k][r], a[k]), acc[r]);
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < OWN_R; r++) {
+        const float s = wave_sum(acc[r]);
+        if (lane == 0 && row0 + r < nrows) out[row0 + r] = s;
+    }
+}
+
 // ---- Q4_K, one dependent round trip per pass (the decode-floor tile's structure, from its measured lesson: loads that
 // wait on each other in series cost ~0.5 us each). A lane unit is 16 bytes of one block's quants: unit u = lane + 32 i,
 // block u / 8, part p = u % 8 -> chunk j = p / 2, half h = p % 2, quant bytes 16 + 32 j + 16 h of the block; its 16 low
