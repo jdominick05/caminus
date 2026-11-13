@@ -131,7 +131,11 @@ __device__ __forceinline__ void own_rows_iq4xs_1rt(const uint8_t * __restrict__ 
 // 16,384 B), and with 5 KB more k3_run was allowed, and took, 97 VGPRs.
 // IQ2_XXS entry e (8 weights) is words e (weights 0 .. 3) and 256 + e (4 .. 7): a lookup's address is then an index byte
 // plus one bit times 256 in every format (IQ3_S: its index's ninth bit), and the tile's eight lookups are one statement.
+#ifdef K3_Q35_GSQ   // (the Qwen3.8-27B GSQ-RCO module: its files use IQ3_XXS, IQ3_S AND IQ2_XXS, so IQ2_XXS gets its own words)
+enum { IQ_G3X = 0, IQ_G3S = 256, IQ_G2X = 768, IQ_GN = 1280 };
+#else
 enum { IQ_G3X = 0, IQ_G3S = 256, IQ_G2X = 0, IQ_GN = 768 };   // the grids' first words
+#endif
 __shared__ uint32_t IQ_G[IQ_GN];
 // which: bit 0 IQ3_XXS, bit 1 IQ3_S, or bit 2 alone IQ2_XXS; all 256 threads of the workgroup call it (one barrier)
 __device__ __forceinline__ void iq_stage(int tid, int which) {
@@ -226,7 +230,7 @@ __device__ __forceinline__ void own_rows_iqg_1rt(const uint8_t * __restrict__ Wm
                 //   index bytes: 8 (IQ3), or IQ2_XXS's 4, each twice (its entry's two words: bit 8 set for the second)
                 //   signs: 32 bits (IQ3_S), or four 7-bit codes, each with its parity as the eighth bit
                 const uint32_t sw = f2x ? rc[r][i].y : rc[r][i].z, scn = (hd[r][i].x >> 16) | (hd[r][i].y << 16);
-                uint32_t iw[2] = {rc[r][i].x, rc[r][i].y}, qh = 0u, gb = 0u, sg = sw, si = sw >> 28;
+                uint32_t iw[2] = {rc[r][i].x, rc[r][i].y}, qh = 0u, gb = f2x ? (uint32_t)IQ_G2X : 0u, sg = sw, si = sw >> 28;   // (IQ_G2X is 0 outside K3_Q35_GSQ: the same code)
                 if (f3s) { qh = rc[r][i].w; gb = IQ_G3S; si = (scn >> (4 * ib)) & 0xfu; }
                 else {     // (branches on the wave-uniform format: 0.02 to 0.05 ms per token under selects of both forms)
                     sg = iq_signs8(sw & 127u) | (iq_signs8((sw >> 7) & 127u) << 8) |

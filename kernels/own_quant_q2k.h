@@ -82,6 +82,7 @@ __device__ __forceinline__ void own_rows_q2k_1rt(const uint8_t * __restrict__ Wm
                 float sq[2] = {0.0f, 0.0f};                  // sum(q x) of values 0 .. 15, 16 .. 31
 #pragma unroll
                 for (int k = 0; k < 8; k++) {                // byte k: values 4 k .. 4 k + 3
+                    if (UNR == 1 && !(k & 1)) __builtin_amdgcn_sched_barrier(0);   // (K3 form: own_quant_iq.h's fence)
                     const uint32_t b = (cw[k >> 2] >> (8 * (k & 3))) & 0xffu;
                     sq[k >> 2] = __builtin_amdgcn_fdot2(as_h2(q2k_pair(b, 0)) - k1024, as_h2(xw[2 * k]), sq[k >> 2], false);
                     sq[k >> 2] = __builtin_amdgcn_fdot2(as_h2(q2k_pair(b, 4)) - k1024, as_h2(xw[2 * k + 1]), sq[k >> 2], false);
