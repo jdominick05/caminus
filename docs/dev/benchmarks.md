@@ -188,7 +188,7 @@ Measured in the engine: `benchmarks/q35_mtp_spec.py` drives it directly, with no
 The llama.cpp column is `llama-server`'s own decode timing (`timings.predicted_per_second`), with `-ctk q8_0 -ctv q8_0
 -c 1024`, MTP drafting 3 tokens; its plain decode in that setup is 35.6 tok/s. Compare the speed-ups: llama.cpp gets
 2.19x / 2.18x / 2.00x from its MTP, Caminus 2.15x / 2.14x / 1.97x. The tok/s difference is the plain decode's.
-Caminus's served numbers are below; llama-server's MTP has not been measured through its server on these prompts yet. llama.cpp's MTP output differed from its plain
+Both are measured through their servers below. llama.cpp's MTP output differed from its plain
 output on the code prompt from token 42; Caminus's is the plain loop's token for token.
 
 `engine/q35_mtp.py` runs the block on its own module (`kernels/k3_q35_swift_mtp.hip`). A round writes the block's rows
@@ -229,7 +229,7 @@ LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft
 | prose | 42.7 | 95.9 (2.24x) | 36.5 | 82.5 (2.26x, 91 %) |
 | shell | 42.8 | 73.5 (1.72x) | 36.2 | 74.2 (2.05x, 78 %) |
 
-- llama.cpp's drafted replies equalled its plain ones on all three prompts.
+- llama.cpp's drafted replies equalled its plain ones on all three prompts, in every run.
 - Shell: the engine-level run above keeps the same share of drafts (3.34 tokens a round, about 78 %) at 1.97x, but the
   served run gets 1.72x while code holds (2.15x engine, 2.13x served); the served path's cost per round on that prompt is
   not explained yet.
@@ -320,12 +320,14 @@ benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 -
 Stock llama.cpp's `llama-server` with its own MTP, the same card, prompts and settings as Swift's MTP table (f16 KV,
 `-c 12288`, `benchmarks/llamacpp_spec_ab.py`, measured 2026-11-13): plain 33.6 tok/s; MTP 65.7 / 73.7 / 64.7 (1.95x /
 2.19x / 1.92x; 72 / 87 / 72 % of its drafts accepted). Its drafted replies differed from its plain ones on prose (from
-token 27) and shell (from token 66).
+token 27) and shell (from token 66), in every run.
 
 In the engine (`tools/guard.sh LOG 1200 python -I benchmarks/q35_mtp_spec.py GGUF --prompt 48 --n 128 --ids IDS.json`,
-XT, 2026-11-13): 1.51x / 1.72x / 1.38x at 3.10 / 3.53 / 2.82 tokens a round. A round is the drafter 9.1 ms and the
-verify pass 43.0 ms, 1.69x a decode step (25.4 ms): the fixed cost per round is where llama.cpp's MTP pulls ahead on
-shell, at a similar acceptance.
+XT, 2026-11-13, testing with the two-step Q8_0 rows tile): 1.52x / 1.73x / 1.39x at 3.10 / 3.53 / 2.82 tokens a round.
+A round is the drafter 7.5 ms (9.1 before that tile: its three head passes) and the verify pass 43.0 ms, 1.74x a decode
+step (24.8 ms). On shell Caminus keeps 61 % of its drafts ((2.82 - 1) / 3)
+against llama.cpp's 72 %; at 72 % our round would give about 1.55x, so most of the shell gap is the round's fixed cost
+and the rest acceptance.
 
 - The replies are the plain server's token for token. The block needs no extra file and little VRAM, so it keeps the
   card's full context; `--draft dflash` is faster where the drafter fits (below).
@@ -353,8 +355,9 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
   and shell.
 - IQ2_S's matvec (18 a token) reads at about 60 % of the read ceiling. Its 10-byte unit records are read with one
   16-byte load each at a 10-byte stride; `benchmarks/iq2s_load_probe.hip` (the tile's lane mapping, the ffn's 17408 x
-  5120, passes rotating over 8 copies so they read memory, not the Infinity Cache) times that against aligned 8 + 2-byte
-  planes and aligned 16-byte loads on the XT: 48.2 / 48.0 / 49.0 us, the same. The load shape is not the gap; the grid
+  5120, every launch on another of 8 copies so it reads memory, not the Infinity Cache, the arms interleaved) times that
+  against aligned 8 + 2-byte planes and aligned 16-byte loads over exactly the same bytes on the XT: 48.4 / 48.2 /
+  49.2 us, the same. The load shape is not the gap; the grid
   lookups and the unpack are what is left.
 - The verify pass of 4 tokens: 43.0 ms against a 25.3 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`), 1.63x;
   Swift's is 1.45x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).

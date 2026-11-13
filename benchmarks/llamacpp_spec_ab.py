@@ -33,6 +33,11 @@ SPEC = shlex.split(A.spec)
 
 
 def serve(label, extra):
+    try:   # (a leftover server on the port would be timed instead of this one)
+        urllib.request.urlopen(f'http://127.0.0.1:{A.port}/health', timeout=2).read()
+        raise SystemExit(f'{label}: something already answers on port {A.port}; stop it or pass --port')
+    except OSError:
+        pass
     log = open(os.path.join(A.out, f'server-{label}.log'), 'w')
     cmd = [os.path.join(A.bin, 'llama-server'), '-m', A.model, '-dev', A.dev, '-ngl', '99', '-c', str(A.ctx), '-np', '1',
            '-fa', 'on', '-ctk', A.kv, '-ctv', A.kv, '-b', '512', '-ub', '256', '-t', '8', '--cache-ram', '0',
@@ -79,16 +84,20 @@ for i, arm in enumerate(order):
         except subprocess.TimeoutExpired: p.kill()
 
 print(f'\nllama-server {A.kv} KV, -c {A.ctx}, spec: {A.spec}; median of {A.rounds} runs per arm')
-print(f'{"prompt":<8}{"plain":>8}{"spec":>8}{"x":>7}  accepted   tokens == plain')
+print(f'{"prompt":<8}{"plain":>8}{"spec":>8}{"x":>7}  accepted   tokens == plain (every spec run vs the first plain run)')
 out = {}
 for name in PROMPTS:
     pl, sp = runs[('plain', name)], runs[('spec', name)]
     mp, ms = statistics.median(x['tps'] for x in pl), statistics.median(x['tps'] for x in sp)
     dn, da = sum(x['draft_n'] for x in sp), sum(x['draft_n_accepted'] for x in sp)
-    first = next((j for j, (a, b) in enumerate(zip(pl[0]['tokens'], sp[0]['tokens'])) if a != b), None)
-    same = pl[0]['tokens'] == sp[0]['tokens']
+    ref = pl[0]['tokens']
+    plain_stable = all(x['tokens'] == ref for x in pl)
+    firsts = [next((j for j, (a, b) in enumerate(zip(ref, x['tokens'])) if a != b), None if x['tokens'] == ref else min(len(ref), len(x['tokens'])))
+              for x in sp]
+    same = all(f is None for f in firsts); first = min((f for f in firsts if f is not None), default=None)
     print(f'{name:<8}{mp:8.1f}{ms:8.1f}{ms / mp:7.2f}  {100 * da / dn if dn else 0:5.0f} %   {same}'
-          + ('' if first is None else f' (first difference at {first})'))
+          + ('' if same else f' ({sum(f is not None for f in firsts)} of {len(sp)} runs differ, first at {first})')
+          + ('' if plain_stable else '; the plain runs differ among themselves'))
     out[name] = dict(plain=mp, spec=ms, accepted=(da / dn if dn else None), same=same, first_diff=first)
 json.dump(dict(args=vars(A), summary=out, runs={f'{a}/{n}': v for (a, n), v in runs.items()}),
           open(os.path.join(A.out, 'llamacpp_spec_ab.json'), 'w'))

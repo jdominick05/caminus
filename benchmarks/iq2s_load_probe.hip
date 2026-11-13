@@ -8,10 +8,11 @@
 //   planes4 the 8-byte plane, and the 2-byte plane read 4 units' at a time (an 8-byte load per lane group of 4, shuffled)
 //   flat16  aligned 16-byte loads over the same byte count (the read ceiling of the shape)
 // each arm also loads its block's d (2 bytes per 8 units), as the tile does. The passes rotate over --copies buffer sets
-// (default 6: ~164 MiB, past the 80 / 96 MB Infinity Cache; the docs run used 8), so each pass reads from memory as a decode token does. Prints us per pass and GB/s (bytes of the
-// matrix / time), median of --reps. Memory: --copies x ~28 MiB (default ~164 MiB, far below either card's free line).
+// (default 8: ~220 MiB, past the 80 / 96 MB Infinity Cache), every launch on a different copy, the arms interleaved, so each pass reads from memory as a decode token does. Prints us per pass and GB/s (bytes of the
+// matrix / time), median of --reps. Memory: --copies x ~28 MiB (default ~220 MiB, far below either card's free line).
 //   build: amdclang++ -x hip --offload-arch=gfx1100 -O3 -std=c++17 benchmarks/iq2s_load_probe.hip -o PROBE
-//   run:   tools/guard.sh LOG 120 PROBE [--reps 50] [--rows 17408] [--k 5120] [--copies 6]
+//   run:   HIP_VISIBLE_DEVICES=N tools/guard.sh LOG 120 PROBE --card 0 [--reps 50] [--rows 17408] [--k 5120] [--copies 8]
+//          (N: the non-display card, `caminus ps`; --card indexes the visible devices)
 #include <hip/hip_runtime.h>
 #include <algorithm>
 #include <cstdio>
@@ -49,11 +50,15 @@ __global__ void __launch_bounds__(256) probe(const unsigned char * __restrict__ 
                     const u32x2 q = *(const u32x2 *)(A2 + (g & ~(size_t)3) * 2);   // 4 units' qh | scale pairs
                     const unsigned sel = (g & 2) ? q.y : q.x;
                     w[i][0] = v.x; w[i][1] = v.y; w[i][2] = (g & 1) ? sel >> 16 : sel & 0xffffu; w[i][3] = 0;
-                } else {   // FLAT16: aligned 16-byte loads over 10 bytes per unit (the lanes 0 .. 0.625 of a wave's span)
-                    const size_t span = (size_t)nunits * 10 / 16;
-                    const size_t q = (size_t)row * span + min((size_t)(u0 / 64 * 40 + lane + 32 * i), span - 1);
-                    const u32x4 v = *(const u32x4 *)(A + q * 16);
-                    w[i][0] = v.x; w[i][1] = v.y; w[i][2] = v.z; w[i][3] = v.w;
+                } else {   // FLAT16: aligned 16-byte loads over exactly a pass's bytes (64 units x 10 B = 40 chunks: lanes
+                           // 0 .. 31 then 0 .. 7; no chunk read twice)
+                    const int j = lane + 32 * i;
+                    if (j < 40) {
+                        const size_t span = (size_t)nunits * 10 / 16;
+                        const size_t q = (size_t)row * span + min((size_t)(u0 / 64 * 40 + j), span - 1);
+                        const u32x4 v = *(const u32x4 *)(A + q * 16);
+                        w[i][0] = v.x; w[i][1] = v.y; w[i][2] = v.z; w[i][3] = v.w;
+                    } else { w[i][0] = w[i][1] = w[i][2] = w[i][3] = 0; }
                 }
                 w[i][4] = *(const unsigned short *)(B + ((size_t)row * NB + u / 8) * 2);
             }
@@ -65,16 +70,20 @@ __global__ void __launch_bounds__(256) probe(const unsigned char * __restrict__ 
 }
 
 int main(int argc, char ** argv) {
-    int reps = 50, rows = 17408, K = 5120, copies = 6;
+    int reps = 50, rows = 17408, K = 5120, copies = 8, card = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rows") && i + 1 < argc) rows = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--k") && i + 1 < argc) K = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--copies") && i + 1 < argc) copies = std::max(1, atoi(argv[++i]));
+        else if (!strcmp(argv[i], "--card") && i + 1 < argc) card = atoi(argv[++i]);
     }
+    if (card < 0) { printf("pass --card N (the HIP device index; run it on the non-display card first)\nRESULT FAIL\n"); return 2; }
+    if (K % 256 || rows < 8) { printf("--k must be a multiple of 256 (whole IQ2_S blocks) and --rows >= 8\nRESULT FAIL\n"); return 2; }
+    CK(hipSetDevice(card));
     const int nunits = K / 32;
     const size_t n = (size_t)rows * nunits, bytesA = n * 10 + 64, bytesB = n / 8 * 2 + 64;
-    hipDeviceProp_t pr; CK(hipGetDeviceProperties(&pr, 0));
+    hipDeviceProp_t pr; CK(hipGetDeviceProperties(&pr, card));
     printf("%s, IQ2_S %d x %d: %.1f MiB of records + %.2f MiB of d\n", pr.name, rows, K, n * 10 / 1048576.0, n / 4 / 1048576.0);
     std::vector<unsigned char *> As(copies), Bs(copies); unsigned * out;
     std::vector<unsigned char> h(bytesA);
@@ -87,10 +96,11 @@ int main(int argc, char ** argv) {
     const int grid = std::min(rows / 8, 96 * 2);   // ~2 workgroups per CU on either card, a row per wave pass
     const char * names[4] = {"rec16", "planes", "planes4", "flat16"};
     hipEvent_t t0, t1; CK(hipEventCreate(&t0)); CK(hipEventCreate(&t1));
-    for (int arm = 0; arm < 4; arm++) {
-        std::vector<float> ms;
-        for (int r = 0; r < reps + 3; r++) {
-            unsigned char * A = As[r % copies], * B = Bs[r % copies];
+    std::vector<float> ms[4];
+    for (int r = 0; r < reps + 3; r++) {                 // the arms interleaved: each rep runs all four in turn
+        for (int arm = 0; arm < 4; arm++) {
+            const int c = (r * 4 + arm) % copies;          // (every launch a different copy: cold memory each pass)
+            unsigned char * A = As[c], * B = Bs[c];
             const unsigned char * A2 = A + n * 8;   // (the planes arms: the 8-byte plane, then the 2-byte plane, same buffer)
             CK(hipEventRecord(t0));
             if (arm == REC16) probe<REC16><<<grid, 256>>>(A, A2, B, rows, nunits, out);
@@ -98,10 +108,12 @@ int main(int argc, char ** argv) {
             else if (arm == PLANES4) probe<PLANES4><<<grid, 256>>>(A, A2, B, rows, nunits, out);
             else probe<FLAT16><<<grid, 256>>>(A, A2, B, rows, nunits, out);
             CK(hipEventRecord(t1)); CK(hipEventSynchronize(t1));
-            float t; CK(hipEventElapsedTime(&t, t0, t1)); if (r >= 3) ms.push_back(t);
+            float t; CK(hipEventElapsedTime(&t, t0, t1)); if (r >= 3) ms[arm].push_back(t);
         }
-        std::sort(ms.begin(), ms.end());
-        const double us = ms[ms.size() / 2] * 1000.0;
+    }
+    for (int arm = 0; arm < 4; arm++) {
+        std::sort(ms[arm].begin(), ms[arm].end());
+        const double us = ms[arm][ms[arm].size() / 2] * 1000.0;
         printf("%-8s %8.1f us  %6.0f GB/s\n", names[arm], us, (n * 10.0 + n / 4.0) / (us * 1e3));
     }
     CK(hipGetLastError());
