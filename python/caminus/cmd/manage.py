@@ -92,7 +92,8 @@ def model_entry(m):
     paths = {k: locate_item(models.BY_KEY[k]) for k in m.items}
     need = [k for k in m.items if k != models.drafter_item(m)]     # a model serves without its drafter too (the Coder)
     size = sum(models.BY_KEY[k].size for k in m.items)
-    return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1),
+    need_b = sum(models.BY_KEY[k].size for k in need)   # (what a card must hold without the optional drafter: the fit rule's size)
+    return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1), need_gb=round(need_b / 1e9, 1),
                 present=all(paths[k] for k in need), path=paths[m.items[0]], paths=paths, alias=m.alias,
                 speed=m.speed, notes=m.notes)
 
@@ -324,7 +325,7 @@ def pick_port(want, taken):
 def fits_fn(entry, ctx=None):
     """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
     (caminus.arch.Arch.fits, sysfs only); without torch (no projection here) a size rule: the file + 4 GiB within the line"""
-    size_mib = entry['size_gb'] * 1e9 / 2 ** 20
+    size_mib = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20   # (the files it serves with: an optional drafter is not loaded by default)
     rule = lambda g: size_mib * 1.1 + 4096 <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
     try:
         from .. import arch

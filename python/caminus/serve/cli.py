@@ -277,7 +277,8 @@ def main(argv=None):
             print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
                   f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
             return 2
-    elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter']:
+    elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter'] and 'dflash' not in getattr(A, 'drafters', ()):
+        # (the dense 27B line: caminus start passes its optional drafter's file on every start; it loads with --draft dflash)
         print(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
     opt['draft'] = draft
     if A.drafter == 'dflash':

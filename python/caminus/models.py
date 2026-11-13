@@ -96,7 +96,7 @@ ALL = (
            '42 tok/s decode on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'the 24 GB card only; --draft mtp (its own MTP block, one card)'),
     _model('thinkingcap', 'ThinkingCap (Qwen3.8 27B dense) RCO 4.2 bpw (own code end to end)', 'qwen35-own', ('thinkingcap', 'dflash2-27b'),
            'thinkingcap', '47 tok/s decode on an XTX, 39 on an XT (short context); prefill 942 tok/s at 2K (XTX)',
-           'fits either card (an XT: ~53K context); no drafter yet (its MTP block is Q6_K: the drafter module runs Q4_0)'),
+           'fits either card (an XT: ~53K context); --draft dflash: its base model\'s DFlash2 drafter (one card)'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )
