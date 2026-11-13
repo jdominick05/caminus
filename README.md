@@ -32,11 +32,11 @@
 
 ## Get started
 
-You need Linux, Python 3.12, at least one RX 7900 XTX or XT, and Docker for the build.
+You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source).
 
 **Build it from source (recommended).** The build runs the release recipe inside the public build image: on the CPU, no
-GPU needed, nothing installed on your system besides Docker, and the wheel it makes is byte for byte the published one.
-Releases build this way from 0.2.2 on; until 0.2.2 is out, build the development branch (`testing`):
+GPU needed, nothing installed on your system besides Docker. Built from a release tag, the wheel is byte for byte the
+published one. Releases build this way from 0.2.2 on; until 0.2.2 is out, build the development branch (`testing`):
 
 ```bash
 git clone https://github.com/jdominick05/caminus.git && cd caminus

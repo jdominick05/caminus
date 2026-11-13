@@ -23,10 +23,11 @@ pip install caminus
 
 PyTorch goes first because its AMD build isn't on PyPI.
 
-**Building from source instead.** If you'd rather not install a prebuilt wheel, build it yourself (Docker, CPU only; the
-result is byte for byte the published wheel): clone the repository, check out `testing` (from 0.2.2 on: the latest
-release's tag), run `tools/release/in_image.sh tools/release/release_build.sh --untagged` (no `--untagged` on a release
-tag), then `pip install dist/caminus-*.whl` inside the venv above in place of `pip install caminus`. The
+**Building from source instead.** If you'd rather not install a prebuilt wheel, build it yourself (Docker, CPU only;
+built from a release tag, the result is byte for byte the published wheel): clone the repository and `cd` into it, check
+out `testing` (from 0.2.2 on: the latest release's tag), run
+`tools/release/in_image.sh tools/release/release_build.sh --untagged` (no `--untagged` on a release tag), then, in the
+clone with the venv above active, `pip install dist/caminus-*.whl` in place of `pip install caminus`. The
 [README](../README.md#get-started) has the commands.
 
 **Nightly builds.** To run what is on the development branch before it is released, install with
