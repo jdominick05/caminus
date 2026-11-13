@@ -83,7 +83,7 @@ for M in MS:
         dense = R * K * 2 + M * R * 2 if set(ARMS) & {'torch', 'flydsl'} else 0          # (fp16 weights; torch's fp16 output)
         fly = (M * R * 4 + M * K + R * K + M * R * 4 + 3 * min(M, CMP_ROWS) * R * 4) if 'flydsl' in ARMS else 0   # (fp32 output; int8
         # operands, int32 output; the output comparison's row-block temporaries)
-        need = (t.n_bytes + M * K * 2 + M * R * 4 + dense + fly) / 2 ** 20 + 64
+        need = (t.n_bytes + M * K * 2 + M * R * 4 * (2 if 'ab' in ARMS else 1) + dense + fly) / 2 ** 20 + 64   # (ab: a second output)
         capacity.check([0], [need], f'q35_prefill_gemm {nm} M {M} ({need:.0f} MiB)')
         W = Dense35Own._w(fake, f'blk.{b}.{nm}.weight')
         x16 = torch.empty(M, K, dtype=torch.float16, device=dev).normal_(0.0, 0.1); y = torch.zeros(M, R, device=dev)   # (in place: no fp32 temporaries)
@@ -98,23 +98,25 @@ for M in MS:
                 res['own'] = bench(lambda: ops.mm(W, x16, K, y, R, n=M))
             elif arm == 'ab':   # Q4_K / Q6_K: the wide tile vs the narrow one, interleaved rep by rep in this process, outputs bitwise
                 if t.type not in ('Q4_K', 'Q6_K'): continue
-                flag_attr = 'q4k_narrow' if t.type == 'Q4_K' else 'q6k_narrow'
+                pre = 'q4k' if t.type == 'Q4_K' else 'q6k'
                 y2 = torch.zeros(M, R, device=dev)
-                setattr(ops, flag_attr, False); ops.mm(W, x16, K, y, R, n=M)
-                setattr(ops, flag_attr, True); ops.mm(W, x16, K, y2, R, n=M); torch.cuda.synchronize(dev)
+                routed = 'wide' if -(-M // 64) * -(-R // q35own.MMW_N) >= q35own.MMW_MIN_PER_CU * ops.cus else 'narrow'
+                setattr(ops, pre + '_force_wide', True)   # (the A/B compares the two kernels on every shape; `routed` is what Ops.mm serves)
+                setattr(ops, pre + '_narrow', False); ops.mm(W, x16, K, y, R, n=M)
+                setattr(ops, pre + '_narrow', True); ops.mm(W, x16, K, y2, R, n=M); torch.cuda.synchronize(dev)
                 same = torch.equal(y.view(torch.int32), y2.view(torch.int32))
                 tw, tn = [], []
                 for rep in range(A.reps):
                     for flag, ts in ((False, tw), (True, tn)) if rep % 2 == 0 else ((True, tn), (False, tw)):
-                        setattr(ops, flag_attr, flag)
+                        setattr(ops, pre + '_narrow', flag)
                         for _ in range(3): ops.mm(W, x16, K, y, R, n=M)
                         e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                         e0.record()
                         for _ in range(A.iters): ops.mm(W, x16, K, y, R, n=M)
                         e1.record(); e1.synchronize(); ts.append(e0.elapsed_time(e1) * 1e3 / A.iters)
-                setattr(ops, flag_attr, False)
+                setattr(ops, pre + '_narrow', False); setattr(ops, pre + '_force_wide', False)
                 res['wide'] = float(np.median(tw)); res['narrow'] = float(np.median(tn))
-                print(f'  {"BITWISE" if same else "DIFFER"} wide vs narrow at [{R} x {K}] M {M}'
+                print(f'  {"BITWISE" if same else "DIFFER"} wide vs narrow at [{R} x {K}] M {M} (served: {routed})'
                       + ('' if same else f' ({int((y.view(torch.int32) != y2.view(torch.int32)).sum())} values)'), flush=True)
                 if not same: AB_DIFF.append(row)
             elif arm == 'torch':

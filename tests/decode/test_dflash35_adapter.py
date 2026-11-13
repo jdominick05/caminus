@@ -23,7 +23,7 @@ class Stub(q35_dflash.Dflash35):
         self.window, self.nl, self.nkv, self.hd, self.dx, self.max_pos, self.path, self.mib = W, nl, 1, 2, 0, 1 << 20, 'stub', 0
         self.row_bytes = 2 * self.nkv * self.hd * 2
         self.L = [dict(ring=torch.zeros(RING * self.row_bytes // 2, dtype=torch.float16)) for _ in range(nl)]
-        self.drafts, self.eng = [], None
+        self.drafts, self.eng, self.chunk = [], None, 0
 
     def inject(self, pos0, feats):
         for r in range(feats.shape[1]):
@@ -63,5 +63,20 @@ check(torch.equal(got[(torch.arange(RING - 4, RING + 6)) & (RING - 1), 0], want)
       'import_window + set_window_state: the rows back at their positions, the interval restored')
 big = a.window_state(0); a.inject(RING + 6, F(40)); big = a.window_state(0)
 check(big['hi'] - big['lo'] == a.wrows(), f'window_state caps at W + T rows ({big})')
+# the batched prefill hook (Q35OwnPrefill._run_chunk -> inject_chunk(prefill, a, n)): the drafter's inject_rows when it
+# was built for the chunk, else the 4-row inject of the prefill's feature rows; either way the interval moves
+import types
+calls = []
+d2 = Stub(); d2.chunk = 64
+d2.inject_rows = lambda pf, a, n: calls.append(('rows', a, n))
+a2 = Dflash35Drafter(d2)
+pfk = types.SimpleNamespace(features=torch.zeros(2, 64, 4))
+a2.inject_chunk(pfk, 0, 48); a2.inject_chunk(pfk, 48, 16)
+check(calls == [('rows', 0, 48), ('rows', 48, 16)] and (a2.lo, a2.hi) == (0, 64) and a2.stats['injected'] == 64,
+      f'inject_chunk(prefill): the batched inject per chunk, the interval [0, 64) ({calls}, {(a2.lo, a2.hi)})')
+d3 = Stub(); d3.chunk = 16; a3 = Dflash35Drafter(d3)
+a3.inject_chunk(pfk, 0, 32)
+check(a3.hi == 32 and d3.L[0]['ring'].view(torch.uint8).view(RING, d3.row_bytes)[31, 0] == 31,
+      'inject_chunk(prefill) past the drafter\'s chunk: the prefill\'s rows through the 4-row inject')
 print('RESULT ' + ('PASS' if ok else 'FAIL'), flush=True)
 sys.exit(0 if ok else 1)

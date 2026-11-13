@@ -6,7 +6,9 @@
           with the reference's margin at the first difference);
   long  : --long N positions injected (default 4200: past the 2,048-position window and the 4,096-row ring's wrap), then a
           draft there against the reference (the window clamp per query and the ring's wrap);
-  grids : the same inject + draft at 3, 6 and 7 workgroups per WGP: ring rows, logits and drafts bitwise the default grid's.
+  grids : the same inject + draft at 3, 6 and 7 workgroups per WGP: ring rows, logits and drafts bitwise the default grid's;
+  rows  : the batched prefill inject (Dflash35.inject_rows on the own prefill's launchers, passes of 512 rows) of the --long
+          features against the reference (WMMA sums: close, not bitwise), then the draft there.
 The target engine is cut after one block (Dense35Own(debug_layers=1)): the drafter reads only its head and embedding, so the
 module's first run fits the non-display card alone. Prints PASS / FAIL lines and RESULT PASS | FAIL.
   tools/guard.sh LOG 1800 python -I tests/engine/test_q35_dflash.py SWIFT_GGUF DFLASH_GGUF [--n 20] [--long 4200] [--rel 0.03]"""
@@ -35,7 +37,7 @@ def check(c, msg):
 rel = lambda a, b: float(np.abs(np.asarray(a, np.float64) - b).max() / max(np.abs(b).max(), 1e-30))
 vocab = int(ggufio.GGUFFile(A.gguf).T['output.weight'].shape[1])
 dmib = Dflash35.need_mib(A.drafter, vocab)
-eng = Dense35Own(A.gguf, max_ctx=A.long + 8, debug_layers=1, vram_extra_mib=dmib)
+eng = Dense35Own(A.gguf, max_ctx=A.long + 8, debug_layers=1, vram_extra_mib=Dflash35.need_mib(A.drafter, vocab, A.long) + 64)
 rng = np.random.default_rng(1)
 GRIDS = (3, 6, 7)
 
@@ -75,9 +77,11 @@ print(f'drafter: inject {len(dr.Ei.segs)} segments, draft {len(dr.Ed.segs)} segm
 nl = len(dr.layers_tgt)
 short = (rng.standard_normal((nl, A.n, dr.D)) * 0.6).astype(np.float32)
 base = compare(dr, RefDFlash(A.drafter, A.gguf, max_pos=A.n + 8), short, A.n, 220, 'short')
+ref_long = None
 if A.long:
     longf = (rng.standard_normal((nl, A.long, dr.D)) * 0.6).astype(np.float32)
-    compare(dr, RefDFlash(A.drafter, A.gguf, max_pos=A.long + 8), longf, A.long, 220, 'long (window + ring wrap)')
+    ref_long = RefDFlash(A.drafter, A.gguf, max_pos=A.long + 8)
+    compare(dr, ref_long, longf, A.long, 220, 'long (window + ring wrap)')
 del dr; gc.collect(); torch.cuda.empty_cache()
 for w in GRIDS:
     dw = Dflash35(A.drafter, eng, per_wgp=w)
@@ -85,5 +89,31 @@ for w in GRIDS:
     check(np.array_equal(r[0], base[0]) and np.array_equal(r[1].view(np.uint32), base[1].view(np.uint32)) and r[2] == base[2],
           f'{w} workgroups per WGP: ring rows, logits and drafts bitwise the default grid\'s')
     del dw; gc.collect(); torch.cuda.empty_cache()
+if A.long:   # the batched prefill inject: the prefill's launchers (a 64-chunk prefill object on the cut engine) and the features
+    import types
+    from caminus.prefill import q35own
+    from caminus.prefill.attn import Attn
+    # (the prefill's own launchers, as Q35OwnPrefill builds them: it refuses a debug_layers engine, and the cut engine is
+    #  what lets the module's first run fit the non-display card)
+    dv = torch.device('cuda', eng.dev)
+    pf = types.SimpleNamespace(O=q35own.Ops(dv, module=q35own.MODULE_TCAP if eng.tcap else q35own.MODULE),
+                               A=Attn(dv, name={6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}[eng.nh // eng.nkv]),
+                               err=torch.zeros(1, dtype=torch.int32, device='cuda'))
+    db = Dflash35(A.drafter, eng, chunk=A.long)
+    for d in db.L: d['ring'].zero_()
+    feats = torch.from_numpy(longf)   # (host rows: inject_rows copies each 512-row pass into its own projected buffer)
+    ns = types.SimpleNamespace(O=pf.O, A=pf.A, err=pf.err, feature_layers=list(db.layers_tgt), features=feats)
+    db.inject_rows(ns, 0, A.long); torch.cuda.synchronize()
+    e = int(pf.err.item())
+    M = db.nkv * db.hd; ps = np.arange(max(0, A.long - RING + 4), A.long); wk = wv = 0.0   # (rows the draft's block did not rewrite)
+    for il, d in enumerate(db.L):
+        rr = d['ring'].view(RING, 2, M).cpu()[torch.from_numpy(ps & (RING - 1))].float().numpy()
+        wk = max(wk, rel(rr[:, 0].reshape(len(ps), db.nkv, db.hd), ref_long.K[il, ps])); wv = max(wv, rel(rr[:, 1].reshape(len(ps), db.nkv, db.hd), ref_long.V[il, ps]))
+    check(e == 0 and wk < A.rel and wv < A.rel, f'rows: the batched inject of {A.long} rows (passes of 512), worst relative error K {wk:.2e}, V {wv:.2e} '
+                                                f'(bound {A.rel}; error word {e})')
+    got = db.draft(220, A.long); want, rlg, _ = ref_long.draft(220, A.long, 3)
+    wl = rel(db.buf['logits'].view(4, db.vocab).cpu().numpy()[1:], rlg[1:])
+    check(wl < A.rel and got == want, f'rows: then the draft at {A.long}: logits within {wl:.2e}, drafts {got} vs the reference\'s {want}')
+    del db, feats, pf; gc.collect(); torch.cuda.empty_cache()
 print('RESULT ' + ('PASS' if ok else 'FAIL'), flush=True)
 sys.exit(0 if ok else 1)

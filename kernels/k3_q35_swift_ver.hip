@@ -5,4 +5,5 @@
 // decode's statements, so a pass of T tokens gives T decode steps' bits.
 #define K3_Q3M_VER
 #define K3_Q35_VER   // (its own T-token tiles: kernels/own_quant_mt.h's mt2 forms and the rows tiles' T forms)
+#define K3_Q35_ATTN_PACK   // (the split pair's PART takes every pass row of a split in one task: kernels/k3_attn_split.h)
 #include "k3_q35_swift.hip"

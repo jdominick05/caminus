@@ -522,7 +522,7 @@ class Dense35(OneCard):
         F = ggufio.GGUFFile(opt['model'])
         try: vocab = int(F.T['output.weight'].shape[1])
         finally: F.close()
-        return Dflash35.need_mib(path, vocab) + Dense35Verify.need_mib(self.MTP_T, max_ctx=c, nfeat=len(layers))
+        return Dflash35.need_mib(path, vocab, self.PREFILL_CHUNK) + Dense35Verify.need_mib(self.MTP_T, max_ctx=c, nfeat=len(layers))
 
     def auto_need(self, opt, slots, cards=None):
         from .engine.q35_dense import Dense35Own
@@ -578,7 +578,7 @@ class Dense35(OneCard):
             extra = q35own.buffer_need_mib(sh, self.PREFILL_CHUNK, nfeat=len(layers)) + PREFILL_MODULES_MIB + self._dflash_mib(opt, mc)
             m = Dense35Own(path, device=0, max_ctx=mc, vram_extra_mib=extra, spec_T=self.MTP_T, feature_layers=layers)
             m.ver = Dense35Verify(m, self.MTP_T, feature_layers=layers)
-            d = Dflash35(dpath, m)
+            d = Dflash35(dpath, m, chunk=self.PREFILL_CHUNK)   # (+ the batched prefill inject's buffers for its chunk)
             pf = q35own.Q35OwnPrefill(m, chunk=self.PREFILL_CHUNK, feature_layers=layers)
             dr = Dflash35Drafter(d)
             log(f'caminus serve: DFlash 2 drafter {os.path.basename(dpath)} (target layers {layers}, verify T {self.MTP_T}): '

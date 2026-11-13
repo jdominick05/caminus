@@ -83,6 +83,13 @@ CLAUDE.md imports this file.
   the Coder's `k3_draft_ops.h` stays untouched). Its ring is 4096 rows per drafter layer, position p in row p & 4095;
   `decode/dflash35.py` keeps the injected interval on the host and drafts only where it covers the window.
   `tests/engine/test_q35_dflash.py` is its gate (against `caminus/ref_dflash.py`'s float64 drafter; grids bitwise).
+  `k3_q35_tcap_ver.hip` (`k3.Q35TV_MODULES`) is ThinkingCap's verify module: `k3_q35_tcap.hip` with `K3_Q3M_VER`, its
+  formats' T-token tiles in `kernels/own_quant_tcap_mt.h` (each token the one-token tile's statements in order; the IQ
+  tiles decode one row at a time to stay inside 96 VGPRs) behind `k3_q35t_ops.h`'s `q35t_op_mv` (one row loop per
+  format). `tests/engine/test_q35_verify.py GGUF` gates both lines; `benchmarks/q35_verify_trace.py` splits a pass's
+  time per segment kind. `k3_q35_tcap_dflash.hip` (`k3.Q35TDF_MODULES`) is the DFlash2 drafter on ThinkingCap's module
+  (IQ2_S embedding, Q8_0 head as a rows tile); `k3_q35_tcap.hip` defines `K3_Q35_ATTN_SPLIT` only outside the drafter
+  modules, as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's

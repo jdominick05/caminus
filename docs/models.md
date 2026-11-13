@@ -41,8 +41,9 @@ again.
   15 tok/s with 28K tokens of context.
 - **`thinkingcap`** is the other dense 27B model on Caminus's own code end to end: a finetune of the same base, quantized
   to 4.2 bits per weight. It is the smaller download and writes a little faster than `swift-1.5`. It fits a 20 GB card
-  too: on an XT the server picks about 53K tokens of context by itself. Like `swift-1.5` it has no drafter yet and slows
-  with depth (about 16 tok/s with 28K tokens of context). Its licence is PolyForm Small Business 1.0.0: read its terms
+  too: on an XT the server picks about 53K tokens of context by itself. `--draft dflash` (one card) drafts with the base
+  model's DFlash2 drafter (output identical to plain decoding; served on an XT about 1.9x on code and prose, 1.5x on
+  shell). It slows with depth (about 16 tok/s with 28K tokens of context). Its licence is PolyForm Small Business 1.0.0: read its terms
   before any commercial use.
 
 ## Download and start
