@@ -139,6 +139,9 @@ for N in depths:
         while p + MAX_T <= N + G:
             ver.run(full[p:p + MAX_T], p, commit)
             bad += [f'{p}+{r}' for r in range(MAX_T) if not np.array_equal(bits(ver.logits(r)), ref[p + r - N])]
+            if fl:
+                bad += [f'features {p}+{r}' for r in range(MAX_T)
+                        if not np.array_equal(bits(ver.features[:, r]), ref_feats[p + r - N])]
             p += MAX_T; commit = MAX_T
         if not np.array_equal(bits(eng.verify(full, p, commit)), ref[p - N]): bad.append(f'decode step at {p}')
         check(not bad, f'depth {N} T {MAX_T} on {w} workgroups per WGP per card: every row and the decode step after them bitwise'
