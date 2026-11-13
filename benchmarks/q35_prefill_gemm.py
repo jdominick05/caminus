@@ -96,9 +96,9 @@ for M in MS:
           try:
             if arm == 'own':
                 res['own'] = bench(lambda: ops.mm(W, x16, K, y, R, n=M))
-            elif arm == 'ab':   # Q4_K / Q6_K: the wide tile vs the narrow one, interleaved rep by rep in this process, outputs bitwise
-                if t.type not in ('Q4_K', 'Q6_K'): continue
-                pre = 'q4k' if t.type == 'Q4_K' else 'q6k'
+            elif arm == 'ab':   # Q4_K / Q6_K / Q8_0: the wide tile vs the narrow one, interleaved rep by rep in this process, outputs bitwise
+                if t.type not in ('Q4_K', 'Q6_K', 'Q8_0'): continue
+                pre = {'Q4_K': 'q4k', 'Q6_K': 'q6k', 'Q8_0': 'q8'}[t.type]
                 y2 = torch.zeros(M, R, device=dev)
                 routed = 'wide' if -(-M // 64) * -(-R // q35own.MMW_N) >= q35own.MMW_MIN_PER_CU * ops.cus else 'narrow'
                 setattr(ops, pre + '_force_wide', True)   # (the A/B compares the two kernels on every shape; `routed` is what Ops.mm serves)

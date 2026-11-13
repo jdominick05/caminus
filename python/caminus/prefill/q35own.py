@@ -71,6 +71,8 @@ class Ops(q3m_ops.Ops):
         super().__init__(dev, module)
         self.module = module
         self.cus = torch.cuda.get_device_properties(dev).multi_processor_count
+        self.q8_narrow = False   # (True: dense Q8_0 GEMMs on q35p_mm_q8_0; benchmarks only)
+        self.q8_force_wide = False   # (True: the wide Q8_0 tile below the grid-size rule too; benchmarks only)
         self.q6k_narrow = False   # (True: dense Q6_K GEMMs on q3p_mm_q6k; benchmarks only)
         self.q6k_force_wide = False   # (True: the wide Q6_K tile below the grid-size rule too; benchmarks only)
         self.q4k_force_wide = False   # (True: the wide tile below the grid-size rule too; benchmarks only)
@@ -111,6 +113,12 @@ class Ops(q3m_ops.Ops):
         if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
         if work is not None or n is None: raise ValueError(f'q35 mm: {fmt} takes dense rows (n) only')
         n = int(n)
+        if (fmt == 'Q8_0' and self.module in (MODULE, 'q35_prefill_abl1') and not self.q8_narrow
+                and (-(-n // q3m_ops.MM_M) * -(-R // MMW_N) >= MMW_MIN_PER_CU * self.cus or self.q8_force_wide)):
+            # the wide tile (kernels/q35_prefill.hip q35p_mm_q8_0_w, bitwise q35p_mm_q8_0's rows; the same grid-size rule; Swift
+            # only for now: ThinkingCap's Q8_0 tensors stay on q35p_mm_q8_0; q8_narrow / q8_force_wide for --arms ab)
+            self.mod.q35p_mm_q8_0_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
+            return
         grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
         getattr(self.mod, MM_KERNEL[fmt])(grid, (256,), wb, I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
 
