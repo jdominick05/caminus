@@ -5,13 +5,15 @@
 //          load bytes; the fp8 WMMA builtins in the headers are gfx12/gfx950-only, none for gfx11)
 //   pack   A stored as e4m3 bytes (half the bytes of bf16), each fp8 unpacked to bf16 in the fragment (v << 8, exact),
 //          bf16 B, then the bf16 WMMA - the software-emulation route with its unpack ALU cost
-// Timing only (C is stored, not checked). Compile:
+// --check additionally validates the 64x64 corner of C per arm against a fp64 CPU reference. Compile:
 //   ROCM_PATH/bin/hipcc -O3 --offload-arch=gfx1100 -o build/fp8_pack_probe benchmarks/fp8_pack_probe.hip
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include <cstring>
+#include <cmath>
 
 typedef uint16_t bf16_t;
 typedef short s16x16 __attribute__((ext_vector_type(16)));
@@ -183,12 +185,45 @@ static double run_arm(int arm, const void *A, const void *B, float *C, int M, in
     return ms / reps;
 }
 
+static float bf16_to_f32(uint16_t b) { uint32_t u = (uint32_t)b << 16; return __builtin_bit_cast(float, u); }
+
+// CPU reference for the 64x64 corner of C, with each arm's operand values, fp64 accumulation; prints max abs
+// error and any NaN/inf in the corner - catches OOB/garbage stores, not just wrong math.
+static void check_corner(int arm, const float *C, const bf16_t *Ab, const uint8_t *Ai, const uint8_t *Bi,
+                         const bf16_t *Bb, int M, int N, int K) {
+    double maxerr = 0; int bad = 0;
+    for (int m = 0; m < 64; m++)
+        for (int n = 0; n < 64; n++) {
+            double s = 0;
+            for (int k = 0; k < K; k++) {
+                double a, b = bf16_to_f32(Bb[(size_t)n * K + k]);
+                if (arm == 0) a = bf16_to_f32(Ab[(size_t)m * K + k]);
+                else if (arm == 1) { a = (int8_t)Ai[(size_t)m * K + k]; b = (int8_t)Bi[(size_t)n * K + k]; }
+                else a = bf16_to_f32((uint16_t)(Ai[(size_t)m * K + k] << 8));
+                s += a * b;
+            }
+            float c = C[(size_t)m * N + n];
+            if (!std::isfinite(c)) bad++;
+            double e = std::fabs((double)c - s);
+            if (e > maxerr) maxerr = e;
+        }
+    printf("CHECK {\"arm\": %d, \"corner\": \"64x64\", \"max_abs_err_vs_fp64\": %.6g, \"nan_inf\": %d}\n", arm, maxerr, bad);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv) {
-    int reps = argc > 1 ? atoi(argv[1]) : 20;
+    int reps = 20, check = 0;
+    std::vector<int> Ns;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--shapes") && i + 1 < argc) { char *s = strtok(argv[++i], ","); while (s) { Ns.push_back(atoi(s)); s = strtok(nullptr, ","); } }
+        else if (!strcmp(argv[i], "--check")) check = 1;
+        else reps = atoi(argv[i]);
+    }
+    if (Ns.empty()) Ns = {5120, 17408, 20480};
     hipDeviceProp_t prop; hipGetDeviceProperties(&prop, 0);
     printf("%s\n", prop.name);
     const int M = 2048, K = 5120;
-    const int Ns[3] = {5120, 17408, 20480};
     std::vector<bf16_t> Ab(M * K), Bb(20480 * K);
     for (auto &v : Ab) v = to_bf16((rand() / (float)RAND_MAX - 0.5f) * 0.2f);
     for (auto &v : Bb) v = to_bf16((rand() / (float)RAND_MAX - 0.5f) * 0.2f);
@@ -204,13 +239,20 @@ int main(int argc, char **argv) {
     hipMemcpy(dAi, Ai.data(), (size_t)M * K, hipMemcpyHostToDevice);
     hipMemcpy(dAp, Ai.data(), (size_t)M * K, hipMemcpyHostToDevice);   // e4m3 bits = bf16 bits >> 8
     hipMemcpy(dBi, Bi.data(), (size_t)20480 * K, hipMemcpyHostToDevice);
+    std::vector<float> hc((size_t)M * 20480);
     for (int N : Ns) {
-        double ms0 = run_arm(0, dA, dB, dC, M, N, K, reps);
-        double ms1 = run_arm(1, dAi, dBi, dC, M, N, K, reps);
-        double ms2 = run_arm(2, dAp, dB, dC, M, N, K, reps);
+        double ms[3];
+        const void *aa[3] = {dA, dAi, dAp}, *bb[3] = {dB, dBi, dB};
+        for (int arm = 0; arm < 3; arm++) {
+            ms[arm] = run_arm(arm, aa[arm], bb[arm], dC, M, N, K, reps);
+            if (check) {
+                hipMemcpy(hc.data(), dC, (size_t)M * N * 4, hipMemcpyDeviceToHost);
+                check_corner(arm, hc.data(), Ab.data(), Ai.data(), Bi.data(), Bb.data(), M, N, K);
+            }
+        }
         double tf = 2.0 * M * N * K / 1e12;
         printf("PROBE {\"shape\": \"%dx%dx%d\", \"bf16_TF\": %.1f, \"iu8_TF\": %.1f, \"pack_fp8_TF\": %.1f, \"ms\": [%.2f, %.2f, %.2f]}\n",
-               M, K, N, tf / (ms0 / 1e3), tf / (ms1 / 1e3), tf / (ms2 / 1e3), ms0, ms1, ms2);
+               M, K, N, tf / (ms[0] / 1e3), tf / (ms[1] / 1e3), tf / (ms[2] / 1e3), ms[0], ms[1], ms[2]);
         fflush(stdout);
     }
     printf("RESULT PASS (ran to the end; a measurement, not a gate)\n");
