@@ -86,12 +86,13 @@ try:
 except ValueError:
     refused = True
 check(refused, 'the q8_0 cache is refused on the own modules (f16 only)')
-for what, kw in (('T 5', dict(T=5)), ('a QSA selection', dict(T=4, sel=True))):
+for what, kw in (('T 5', dict(T=5)), ('a QSA selection', dict(T=4, sel=True)), ('a q8_0 cache', dict(T=4, q8=True))):
     try:
         Ex = k3.Engine(module='k3_q35_swift_ver', grid=k3.resident_grid('k3_q35_swift_ver'), T=kw['T'], limit_us=500_000)
         T_ = kw['T']; sel = torch.zeros(T_ * k3.QSA_SELW, dtype=torch.int32, device='cuda') if kw.get('sel') else None
-        Ex._attn_split(torch.zeros(T_ * H * D, device='cuda'), cache, torch.zeros(1, dtype=torch.int32, device='cuda'), sel,
-                       torch.zeros(T_ * H * D, device='cuda'), H, NKV, D, SCALE, False, -1, 64, None)
+        q8 = bool(kw.get('q8'))
+        Ex._attn_split(torch.zeros(T_ * H * D, device='cuda'), q8c if q8 else cache, torch.zeros(1, dtype=torch.int32, device='cuda'), sel,
+                       torch.zeros(T_ * H * D, device='cuda'), H, NKV, D, SCALE, q8, -1, 64, None)
         refused = False
     except ValueError as ex:
         refused = 'the packed PART' in str(ex)   # (the packed PART's own refusal, not another ValueError on the way)
