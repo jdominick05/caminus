@@ -287,6 +287,21 @@ check(mt_.module == 'k3_q35_tcap_mtp' and ivm <= k3.MODULE_CAPS['k3_q35_tcap_mtp
 check(refused(lambda: Mtp35(mm4, module='k3_q35_swift_mtp', vram_check=False)) and
       refused(lambda: k3.Engine(module='k3_q35_tcap_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
       'refused: the other line\'s drafter module, and a format other than Q6_K on ThinkingCap\'s MTP module')
+# the GSQ files' MTP drafter (k3_q35_gsq_mtp: their Q6_K block as ThinkingCap's, the Q4_K head, the IQ2_S embedding)
+PGM = os.path.join(A.scratch, 'tiny-q35-gsq-mtp.gguf'); tiny_q35.write(PGM, variant='gsq', mtp=True)
+mg4 = Dense35Own(PGM, max_ctx=64, vram_check=False, spec_T=4)
+mtg = Mtp35(mg4, k=3, vram_check=False)
+ivg = set().union(*(set(E_.inventory()) for E_ in mtg.E.values()))
+check(mtg.module == 'k3_q35_gsq_mtp' and ivg <= k3.MODULE_CAPS['k3_q35_gsq_mtp'] and ('OWN_MV', 'Q6_K/a16_1rt_mt') in ivg
+      and ('OWN_MV', 'Q4_K/a16_1rt') in ivg and ('OWN_MV16', 'Q8_0') not in ivg and ('OWN_EMB', 'IQ2_S') in ivg
+      and all(not E_.unsupported() for E_ in mtg.E.values()),
+      f'the GSQ files\' MTP tapes on k3_q35_gsq_mtp: the Q6_K block\'s T-token tiles, the Q4_K head on its one-round-trip tile ({sorted(ivg)})')
+check(refused(lambda: Mtp35(mg4, module='k3_q35_tcap_mtp', vram_check=False)) and refused(lambda: Mtp35(mm4, module='k3_q35_gsq_mtp', vram_check=False)) and
+      refused(lambda: k3.Engine(module='k3_q35_gsq_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'IQ2_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)) and
+      refused(lambda: k3.Engine(module='k3_q35_tcap_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'Q4_K', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
+      'refused: ThinkingCap\'s MTP module on the GSQ engine and back, IQ2_XS on the GSQ MTP module, Q4_K on ThinkingCap\'s')
+check(set(k3.MODULE_CAPS['k3_q35_gsq_dflash']) - set(k3.MODULE_CAPS['k3_q35_tcap_dflash']) == {('OWN_MV', 'Q4_K/a16_1rt'), ('OWN_MV', 'Q4_K/a16_1rt_mt')},
+      'the GSQ DFlash module: ThinkingCap\'s DFlash caps plus the Q4_K head\'s matvec, nothing else')
 check(('OWN_MV', 'Q4_K/a16_1rt_gu') not in k3.MODULE_CAPS['k3_q35_swift_ver'] and ('OWN_MV', 'Q4_K/a16_1rt_gu') in k3.MODULE_CAPS['k3_q35_swift'],
       'the verify module\'s capabilities leave out the fused gate | up (no verify tape runs it)')
 e_v = k3.Engine(module='k3_q35_swift_ver', T=4)

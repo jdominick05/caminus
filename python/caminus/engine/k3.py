@@ -101,8 +101,10 @@ Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip
 Q35RV_MODULES = ('k3_q35_gsq_ver',)
 Q35RVM_MODULES = ('k3_q35_gsq_ver_m',)
 Q35TV_MODULES = ('k3_q35_tcap_ver', 'k3_q35_tcap_ver_trace') + Q35RV_MODULES + Q35RVM_MODULES
-Q35TDF_MODULES = ('k3_q35_tcap_dflash',)
-Q35TM_MODULES = ('k3_q35_tcap_mtp',)   # (kernels/k3_q35_tcap_mtp.hip: ThinkingCap's MTP drafter: its Q6_K block, Q8_0 head, IQ2_S embedding)   # (kernels/k3_q35_tcap_dflash.hip: the DFlash 2 drafter on ThinkingCap's module: its IQ2_S embedding, Q8_0 head)   # (kernels/k3_q35_tcap_ver.hip: ThinkingCap's module with its T-token tiles, kernels/own_quant_tcap_mt.h)
+Q35RDF_MODULES = ('k3_q35_gsq_dflash',)   # (kernels/k3_q35_gsq_dflash.hip: the DFlash 2 drafter on the GSQ files' module: IQ2_S embedding, their Q4_K head)
+Q35TDF_MODULES = ('k3_q35_tcap_dflash',) + Q35RDF_MODULES
+Q35RM_MODULES = ('k3_q35_gsq_mtp',)   # (kernels/k3_q35_gsq_mtp.hip: the GSQ files' MTP drafter: ThinkingCap's Q6_K block form, their Q4_K head)
+Q35TM_MODULES = ('k3_q35_tcap_mtp',) + Q35RM_MODULES   # (kernels/k3_q35_tcap_mtp.hip: ThinkingCap's MTP drafter: its Q6_K block, Q8_0 head, IQ2_S embedding)   # (kernels/k3_q35_tcap_dflash.hip: the DFlash 2 drafter on ThinkingCap's module: its IQ2_S embedding, Q8_0 head)   # (kernels/k3_q35_tcap_ver.hip: ThinkingCap's module with its T-token tiles, kernels/own_quant_tcap_mt.h)
 Q35R_MODULES = ('k3_q35_gsq',)   # (kernels/k3_q35_gsq.hip: the Qwen3.8-27B GSQ-RCO files; ThinkingCap's module + K3_Q35_GSQ's formats)
 Q35T_MODULES = ('k3_q35_tcap', 'k3_q35_tcap_trace', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_trace') + Q35TV_MODULES + Q35TDF_MODULES + Q35TM_MODULES + Q35R_MODULES   # (kernels/k3_q35_tcap.hip: ThinkingCap's formats on the same tape; kernels/k3_q35t_ops.h)
 Q35M_MODULES = ('k3_q35_swift_mtp',)   # (kernels/k3_q35_swift_mtp.hip: Swift's multi-token-prediction block, the drafter: engine/q35_mtp.py)
@@ -258,6 +260,8 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_MV', 'Q4_0/a
 MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q6_K/a16_1rt'), ('OWN_MV', 'Q6_K/a16_1rt_mt'), ('OWN_MV16', 'Q8_0'),
                                   ('OWN_EMB', 'IQ2_S'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_ARGMAX', '-')})
                     for m in Q35TM_MODULES})   # (ThinkingCap's: the block's Q6_K T-token tiles only, kernels/k3_q35t_ops.h)
+MODULE_CAPS.update({m: (MODULE_CAPS[m] - {('OWN_MV16', 'Q8_0')}) | {('OWN_MV', 'Q4_K/a16_1rt'), ('OWN_MV', 'Q4_K/a16_1rt_mt')}
+                    for m in Q35RM_MODULES})   # (the GSQ files': their Q4_K head on Swift's T-token form; no Q8_0 rows tile)
 OP_OWN_ARGMAX = 55   # = kernels/k3_q35_ops.h (the drafter module): the greedy token's key, atomicMax over the tasks
 Q35M_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_PART,
             OP_ATTN_COMB, OP_GATE_MUL16, OP_OWN_ARGMAX}
@@ -272,6 +276,8 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q6_K/a16_1rt'), ('OWN_MV', 'Q6_K/a
 MODULE_CAPS.update({m: frozenset({('OWN_MV16', 'Q8_0'), ('OWN_EMB', 'IQ2_S'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'),
                                   ('DF', 'CONV'), ('DF', 'TOPK'), ('DF', 'SELECT')})
                     for m in Q35TDF_MODULES})   # (ThinkingCap's: the head is Q8_0, a rows tile; no one-round-trip matvec)
+MODULE_CAPS.update({m: MODULE_CAPS[m] | {('OWN_MV', 'Q4_K/a16_1rt'), ('OWN_MV', 'Q4_K/a16_1rt_mt')}
+                    for m in Q35RDF_MODULES})   # (the GSQ files': their Q4_K head, its T-token form the module's only OP_OWN_MV)
 Q35DF_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_MV16, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC,
              OP_DF_CONV, OP_DF_TOPK, OP_DF_SELECT}
 Q35_MODULES = Q35S_MODULES + Q35T_MODULES   # (the two dense qwen35 own modules: the same op set, Q35S_OPS; kernels/k3_q35t_ops.h dispatches it too)
@@ -723,9 +729,10 @@ class Engine:
         rs = fmt in OWN_RS_FMT
         q35t = self.module in Q35T_MODULES
         q35_fmts = (('IQ1_M',) if self.module in Q35RVM_MODULES else tuple(f for f in OWN_Q35R_1RT if f != 'IQ1_M')
-                    if self.module in Q35RV_MODULES else OWN_Q35R_1RT if self.module in Q35R_MODULES else OWN_Q35T_1RT)
-        if q35t and (fmt not in q35_fmts or up is not None or ids is not None or (tokens != 1 and self.module not in Q35TV_MODULES + Q35TM_MODULES)
-                     or (self.module in Q35TM_MODULES and fmt != 'Q6_K')):   # (the MTP module compiles the Q6_K T-token tile only)
+                    if self.module in Q35RV_MODULES else ('Q4_K',) if self.module in Q35RDF_MODULES
+                    else OWN_Q35R_1RT if self.module in Q35R_MODULES + Q35RM_MODULES else OWN_Q35T_1RT)
+        if q35t and (fmt not in q35_fmts or up is not None or ids is not None or (tokens != 1 and self.module not in Q35TV_MODULES + Q35TM_MODULES + Q35RDF_MODULES)
+                     or (self.module in Q35TM_MODULES and fmt not in (('Q6_K', 'Q4_K') if self.module in Q35RM_MODULES else ('Q6_K',)))):   # (the MTP modules compile the Q6_K T-token tile only, the GSQ one also its Q4_K head's)
             raise ValueError(f'own_matvec_1rt: module {self.module} runs {q35_fmts}, one matrix, no ids, one token '
                              f'(T tokens on {Q35TV_MODULES}; got {fmt}, tokens {tokens})')
         if not q35t and not mtp and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
