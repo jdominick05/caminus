@@ -116,7 +116,7 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
   The attention reads every earlier position per query head, so both the prompt rate and decode fall with depth.
 - Swift 1.5 needs a 24 GB card. With its prompt cache it projects 19.1 GiB at 12K, past an XT's room.
 
-#### Verify passes (the base for speculative decoding; no drafter yet)
+#### Verify passes (the base for speculative decoding)
 
 `engine/q35_dense_verify.py` runs T tokens in one pass on the decode engine's weights and states (module
 `k3_q35_swift_ver`). Measured 2026-11-11 after an own prefill of real text: ms per pass against one decode step at the
@@ -148,7 +148,7 @@ matvecs 2x a decode step's time for the same rows, the Q8_0 / Q5_K rows tiles 2.
   workgroups per WGP bitwise. On both cards. Forced bails in the verify tape: `tools/guard.sh LOG 1200 python -I tools/gates/forcebail.py 4 40 tiny
   --engine dense35ver --model GGUF --ctx 512 --tokens FILE`.
 
-#### The multi-token-prediction block's Q4_0 matvec (the drafter's weights; no drafter yet)
+#### The multi-token-prediction block's Q4_0 matvec (the MTP drafter's weights)
 
 Swift 1.5 keeps its prediction block (`blk.64`: eh_proj, attention, feed-forward) in Q4_0, which no other model here
 uses. `kernels/own_quant_q4_0.h` reads it in a plane layout made at load (`engine/own_layout.py q4_0_planes`); one
@@ -170,7 +170,7 @@ Own is 120 to 265 times closer to float64 than llama.cpp on every tensor (llama.
 and a 4-token launch gives each token the bits of its own one-token launch. Standalone, one launch per matvec, copies
 rotated past the Infinity Cache.
 
-#### Speculative decoding with the prediction block (engine level; not served yet)
+#### Speculative decoding with the prediction block (engine level)
 
 Measured in the engine: `benchmarks/q35_mtp_spec.py` drives it directly, with no server, HTTP or sampler in the loop.
 The llama.cpp column is `llama-server`'s own decode timing (`timings.predicted_per_second`), with `-ctk q8_0 -ctv q8_0
@@ -203,6 +203,17 @@ page is mostly tables, where the block's drafts are kept less often (2.27 tokens
   - Drafts agree with the block in fp32 torch at 63 of 63 positions, including both chained drafts. The first draft's
     logits are at mean KLD 3.0e-7.
 
+Served (`caminus serve --draft mtp`): `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids
+IDS.json --scratch DIR --card 0 --draft mtp --max-ctx 12288`, the server's own decode timing for 128 greedy tokens,
+interleaved over 3 rounds, the same prompts as the DFlash table below, measured 2026-11-12 on testing `db7b6d9` with
+nothing else on the cards. The replies are the plain server's token for token.
+
+| prompt | RX 7900 XTX: `--draft off` | `--draft mtp` |
+|---|---|---|
+| code | 42.8 | 91.3 (2.13x) |
+| prose | 42.7 | 95.9 (2.24x) |
+| shell | 42.8 | 73.5 (1.72x) |
+
 #### Speculative decoding with DFlash 2 (served)
 
 The base model's DFlash 2 drafter (incoai's Qwen3.8-27B-DFlash2 Q8_0: 5 non-causal blocks reading 5 of the target's
@@ -215,15 +226,15 @@ Served: `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model G
 --max-ctx 12288` starts `caminus serve` once with `--draft off` and once with `--draft dflash`, interleaved over 3
 rounds, and reads the server's own decode timing (`timings.predicted_per_second`) for 128 greedy tokens. The prompts are
 the 48-token inputs llama.cpp's own drafter was measured on (the server puts 248044 first: one prompt token more).
-Measured 2026-11-12 with nothing else on the cards.
+Measured 2026-11-12 with nothing else on the cards. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time).
 The llama.cpp column is `llama-server --spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`; its
 plain decode in that setup is 35.4-36.0 tok/s.
 
 | prompt | RX 7900 XTX: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
 |---|---|---|---|
-| code | 42.7 | 95.4 (2.24x) | 74.7 (80 % accepted) |
-| prose | 42.7 | 94.3 (2.21x) | 74.8 (80 %) |
-| shell | 42.7 | 70.7 (1.66x) | 67.3 (67 %) |
+| code | 42.6 | 95.8 (2.25x) | 74.7 (80 % accepted) |
+| prose | 42.7 | 94.6 (2.21x) | 74.8 (80 %) |
+| shell | 42.7 | 71.1 (1.67x) | 67.3 (67 %) |
 
 - The replies are the plain server's token for token on all three prompts. llama.cpp's drafted output also equalled its
   plain output on Swift.
@@ -278,13 +289,13 @@ ThinkingCap's multi-token-prediction block (`blk.64`, all Q6_K) on `kernels/k3_q
 tiles, its Q8_0 head as a rows tile, the IQ2_S embedding reading the argmax key on the card for the chained steps),
 `engine/q35_mtp.py`, 3 drafts a round, verified by the 4-token pass. `tools/guard.sh LOG 3600 python -I
 benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --draft mtp --max-ctx 12288`, measured
-2026-11-12 with nothing else on the cards, the same prompts as the DFlash table below:
+2026-11-12 with nothing else on the cards, the same prompts as the DFlash table below. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time).:
 
 | prompt | RX 7900 XT: `--draft off` | `--draft mtp` |
 |---|---|---|
-| code | 39.7 | 68.3 (1.72x) |
-| prose | 39.6 | 73.6 (1.86x) |
-| shell | 39.6 | 52.7 (1.33x) |
+| code | 39.8 | 68.3 (1.72x) |
+| prose | 39.7 | 73.6 (1.85x) |
+| shell | 39.7 | 52.7 (1.33x) |
 
 - The replies are the plain server's token for token. The block needs no extra file and little VRAM, so it keeps the
   card's full context; `--draft dflash` is faster where the drafter fits (below).
@@ -300,13 +311,13 @@ The same drafter on ThinkingCap's module (`kernels/k3_q35_tcap_dflash.hip`: its 
 verify module (`kernels/k3_q35_tcap_ver.hip`, the T-token tiles of `kernels/own_quant_tcap_mt.h`). `tools/guard.sh LOG
 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --max-ctx 12288`, measured
 2026-11-12 with nothing else on the cards; the prompts are the 48-token inputs llama.cpp's own drafter was measured on;
-llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s.
+llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time).
 
 | prompt | RX 7900 XT: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
 |---|---|---|---|
-| code | 39.6 | 76.1 (1.92x) | 70.9 (79 % accepted) |
-| prose | 39.6 | 77.3 (1.95x) | 74.8 (84 %) |
-| shell | 39.5 | 60.7 (1.54x) | 48.1 (63 %) |
+| code | 39.7 | 75.9 (1.91x) | 70.9 (79 % accepted) |
+| prose | 39.6 | 77.0 (1.95x) | 74.8 (84 %) |
+| shell | 39.5 | 60.5 (1.53x) | 48.1 (63 %) |
 
 - The replies are the plain server's token for token. llama.cpp's drafted output differed from its plain output on prose
   and shell.

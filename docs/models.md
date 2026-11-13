@@ -35,7 +35,8 @@ again.
   context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
   path). It writes at about `arex-2`'s speed. `caminus serve --model ... --draft mtp` (one card) drafts with the model's
-  own prediction block and verifies 4 tokens a pass; `--draft dflash` drafts with its base model's DFlash2 drafter
+  own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
+  XTX; no extra file); `--draft dflash` drafts with its base model's DFlash2 drafter
   instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~16K tokens of
   context on a 24 GB card). Either way the output is identical to plain decoding. `caminus pull swift-1.5` (or
   `thinkingcap`) fetches the 2 GB drafter file with the model, once for both. Its speed drops at depth: about
@@ -79,7 +80,7 @@ Caminus doesn't include any model weights. Each model has its own licence; read 
 | AREX-2, Qwen3-30B-A3B (and the paused Qwen3.6-35B-A3B and Qwen3-Coder-Next) | Apache-2.0 |
 | Swift 1.5 | the Swift Open License 1.0 |
 | ThinkingCap | PolyForm Small Business 1.0.0 (read its terms before any commercial use) |
-| The DFlash drafter | Apache-2.0 |
+| The DFlash2 drafters (the Coder's, and the 27B models' shared one) | Apache-2.0 |
 | Qwen3.8-Flash-Next Coder | treat it as `qwen-community-1.0`, the base model's licence (its card says Apache-2.0 in one place and the base licence in another) |
 
 ## Other model files
