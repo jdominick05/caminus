@@ -52,6 +52,8 @@ class Dense35Verify:
         sp['part'] = (attn_part_elems(T, nh, eng.max_ctx + eng.spec_T - 1), f32)   # (the split attention pair's records)
         if nfeat:
             sp['feat'] = (nfeat * T * D, f32); sp['fh'] = (T * D, f32); sp['fh16'] = (T * D, f16)
+        if getattr(eng, 'module', None) in k3.Q35R_MODULES:
+            sp['xemb'] = (T * D, f32)   # (the GSQ split's third launch starts with an embedding into it: its grids' staging bits)
         return sp
 
     @staticmethod
@@ -75,8 +77,10 @@ class Dense35Verify:
         previous layer's feed-forward is added, before the layer's norm; llama.cpp's layer input). The copy is the
         module's own add-rms op on a zeroed buffer (0 + x, exact), so no device code changes and the logits stay bitwise"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
-        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
-        line = k3.Q35TV_MODULES if eng.tcap else tuple(m for m in k3.Q35SV_MODULES if m not in k3.Q35M_MODULES + k3.Q35DF_MODULES)
+        gsq = self.gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: k3_q35_gsq_ver, and k3_q35_gsq_ver_m for IQ1_M)
+        if module is None: module = k3.Q35RV_MODULES[0] if gsq else MODULE_TCAP if eng.tcap else MODULE
+        line = (k3.Q35RV_MODULES if gsq else tuple(m for m in k3.Q35TV_MODULES if m not in k3.Q35RV_MODULES + k3.Q35RVM_MODULES)
+                if eng.tcap else tuple(m for m in k3.Q35SV_MODULES if m not in k3.Q35M_MODULES + k3.Q35DF_MODULES))
         if module not in line:
             raise ValueError(f'Dense35Verify: module {module!r} is not a verify module of the engine\'s line {line} (the engine runs {eng.module})')
         if eng.spec_T < T: raise ValueError(f'Dense35Verify: the engine keeps {eng.spec_T} tokens\' saved inputs (spec_T), the tape runs {T}')
@@ -101,20 +105,33 @@ class Dense35Verify:
         # [16 .. 16 + T) the tokens, [16 + T] the first position
         self.hstage = torch.zeros(32, dtype=torch.int32, pin_memory=True)
         self.dstage = s['stage']; self.toks, self.pos = self.dstage[16:16 + T], self.dstage[16 + T:17 + T]
-        E = self.E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=T, limit_us=eng.limit_us)
-        E.params = self.dstage[0:16]
-        E.guard_T = eng.spec_T   # (the device bound on the commit, as the decode tape's: the host bounds it by the last pass)
-        self.seg_names = {}
+        def engine(module):   # (every launch of a pass shares the pass parameters: the commit, the tokens' positions)
+            e = k3.Engine(module=module, grid=k3.resident_grid(module, self.per_wgp), T=T, limit_us=eng.limit_us)
+            e.params = self.dstage[0:16]
+            e.guard_T = eng.spec_T   # (the device bound on the commit, as the decode tape's: the host bounds it by the last pass)
+            return e
+        # A pass is one launch, or three on the GSQ files: their one IQ1_M matrix (a block's ffn_gate) runs alone on
+        # k3_q35_gsq_ver_m between the tape's two halves (its T-token loop and the other formats' did not fit one k3_run in
+        # 96 VGPRs). The launches run in stream order, so a segment's inputs from an earlier launch are complete; a
+        # dependency is only kept inside a launch. Each launch's segments are the single tape's, in its order.
+        E = self.E = engine(self.module)
+        self.Es = [E]
+        self.seg_names = {}   # (E's; the other launches' in self.names_of)
+        self.names_of = {}
         # the attention segments' arguments: the split pair's records over the cache's rows (the verify modules are split
         # modules, k3.Q35_SPLIT_MODULES; T rows, one buffer for every block), else the one-head op's batched loads
         akw = (dict(max_cells=eng.max_ctx + eng.spec_T - 1, part=s['part']) if E.split_attn() else dict(batched=True))
 
         def named(si, name):
-            self.seg_names[si] = name; return si
+            self.names_of.setdefault(id(E), {})[si] = name
+            if E is self.Es[0]: self.seg_names[si] = name
+            return si
 
         def mv(W, x16, out, dep, x32=None):
             """W's matvec on the T tokens' fp16 activations x16 [T, K] -> out [T, rows] (an F32 matrix: on x32)"""
             if W['fmt'] == 'F32': return named(E.f32_mv(W['w'], x32, out, rows_per_task=4, dep=dep), W['name'])
+            if W['fmt'] == 'IQ1_M' and E.module not in k3.Q35RVM_MODULES:
+                raise ValueError(f'Dense35Verify: {W["name"]} is IQ1_M: only a block\'s ffn_gate (its own launch) is supported')
             if W['fmt'] in eng.one_rt:
                 kw = dict(tokens=T, x_stride=W['K'], out_stride=W['rows']) if T > 1 else {}
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=eng.rpt, dep=dep, **kw),
@@ -154,17 +171,29 @@ class Dense35Verify:
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], eng.eps, d=s['blk'], slots=1, dep=o_, tokens=T)
             if fc is not None: E.also(n2, fc)    # (the copy runs beside the layer's matvecs; x's next writer, this add, waits for it)
-            g_ = mv(d['fg'], s['h16'], s['g'], n2); u_ = mv(d['fu'], s['h16'], s['u'], n2)
-            sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
+            if d['fg']['fmt'] == 'IQ1_M':
+                if not self.gsq: raise ValueError(f'Dense35Verify: blk.{il} ffn_gate is IQ1_M on module {self.module}')
+                u_ = mv(d['fu'], s['h16'], s['u'], n2)   # (this launch ends with the up matvec; the gate alone in the next)
+                E = engine(k3.Q35RVM_MODULES[0]); self.Es.append(E)
+                mv(d['fg'], s['h16'], s['g'], -1)
+                E = engine(self.module); self.Es.append(E)
+                # (a launch stages the grids its matvecs read from its first segment, an embedding's Seg.out_f32: this one's
+                #  embedding writes a scratch row only; k3.Engine.build refuses a grid tape without it)
+                E.own_emb(eng.emb_dev, eng.emb.type, eng.vocab, D, self.toks, s['xemb'], tokens=T)
+                sw = E.own_swiglu16(s['g'], s['u'], s['a16'], dep=-1)
+            else:
+                g_ = mv(d['fg'], s['h16'], s['g'], n2); u_ = mv(d['fu'], s['h16'], s['u'], n2)
+                sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             prev = mv(d['fd'], s['a16'], s['ffp'], sw)
         nf = E.own_add_rms16(s['x'], eng.out_norm, s['h'], s['h16'], eng.eps, d=s['ffp'], slots=1, dep=prev, tokens=T)
         mv(eng.head, s['h16'], s['logits'], nf)
-        E.build()
+        for e in self.Es: e.build()
         self.logits2 = s['logits'].view(T, eng.vocab)
         self.d_max = (torch.zeros(T, device='cuda'), torch.zeros(T, dtype=torch.int64, device='cuda'))
         self.h_max = torch.zeros(T, dtype=torch.int64, pin_memory=True)
         self.h_vmax = torch.zeros(T, pin_memory=True)   # (the rows' max values: a non-finite one breaks the engine)
-        self.h_st = torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True)
+        self.h_sts = [torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True) for _ in self.Es]
+        self.h_st = self.h_sts[0]
         self.ev_done = torch.cuda.Event()
 
     def logits(self, t):
@@ -211,24 +240,30 @@ class Dense35Verify:
         self.hstage[1] = int(commit)
         self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)
         if self.features is not None: self.features.zero_()   # (the copy segments add into it)
-        E.run(check=False)
+        for e in self.Es: e.run(check=False)
         if argmax:
             torch.max(self.logits2, dim=1, out=self.d_max)
             self.h_max.copy_(self.d_max[1], non_blocking=True)
             self.h_vmax.copy_(self.d_max[0], non_blocking=True)
-        self.h_st.copy_(E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
+        for e, h in zip(self.Es, self.h_sts): h.copy_(e.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
         self.ev_done.record()
         self.ev_done.synchronize()
-        st = self.h_st.tolist()
-        b = k3.bounds_status(st)
-        if b:
-            torch.cuda.synchronize(); E.sync.zero_()
-            eng.poisoned = f'the device bound guard caught an out-of-range value at verify position {pos0}: {b}'
-            raise k3.ContextBoundsError(f'k3 qwen35 verify: {eng.poisoned}')
-        if st[1]:
-            torch.cuda.synchronize()
-            names = {v: k for k, v in vars(k3).items() if k.startswith('OP_')}
-            rep = f'segment {st[2]} = {names.get(E.segs[st[2]].op)} {self.seg_names.get(st[2], "")} (seen {st[3]}); {E.stall_report()}'
-            E.sync.zero_()
-            return [rep]
-        return []
+        sts = [h.tolist() for h in self.h_sts]
+        for e, st in zip(self.Es, sts):
+            b = k3.bounds_status(st)
+            if b:
+                torch.cuda.synchronize()
+                for e2 in self.Es: e2.sync.zero_()
+                eng.poisoned = f'the device bound guard caught an out-of-range value at verify position {pos0}: {b}'
+                raise k3.ContextBoundsError(f'k3 qwen35 verify: {eng.poisoned}')
+        bad = []
+        for i, (e, st) in enumerate(zip(self.Es, sts)):
+            if st[1]:
+                torch.cuda.synchronize()
+                names = {v: k for k, v in vars(k3).items() if k.startswith('OP_')}
+                launch = f'launch {i + 1} of {len(self.Es)} ({e.module}): ' if len(self.Es) > 1 else ''
+                bad.append(f'{launch}segment {st[2]} = {names.get(e.segs[st[2]].op)} {self.names_of.get(id(e), {}).get(st[2], "")} '
+                           f'(seen {st[3]}); {e.stall_report()}')
+        if bad:
+            for e in self.Es: e.sync.zero_()
+        return bad

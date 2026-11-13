@@ -95,7 +95,12 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
 Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
-Q35TV_MODULES = ('k3_q35_tcap_ver', 'k3_q35_tcap_ver_trace')
+# the plain Qwen3.8-27B GSQ-RCO files' verify modules: k3_q35_gsq_ver (k3_q35_gsq.hip + K3_Q3M_VER: ThinkingCap's T-token
+# tiles + IQ2_XXS / IQ2_XS / Q2_K / Q4_K) and k3_q35_gsq_ver_m (K3_Q35_GSQ_M: the one IQ1_M matrix's T-token matvec alone, in
+# its own launch: with it, k3_q35_gsq_ver's k3_run passed 96 VGPRs). In Q35TV_MODULES: ThinkingCap's verify line's ops and attention
+Q35RV_MODULES = ('k3_q35_gsq_ver',)
+Q35RVM_MODULES = ('k3_q35_gsq_ver_m',)
+Q35TV_MODULES = ('k3_q35_tcap_ver', 'k3_q35_tcap_ver_trace') + Q35RV_MODULES + Q35RVM_MODULES
 Q35TDF_MODULES = ('k3_q35_tcap_dflash',)
 Q35TM_MODULES = ('k3_q35_tcap_mtp',)   # (kernels/k3_q35_tcap_mtp.hip: ThinkingCap's MTP drafter: its Q6_K block, Q8_0 head, IQ2_S embedding)   # (kernels/k3_q35_tcap_dflash.hip: the DFlash 2 drafter on ThinkingCap's module: its IQ2_S embedding, Q8_0 head)   # (kernels/k3_q35_tcap_ver.hip: ThinkingCap's module with its T-token tiles, kernels/own_quant_tcap_mt.h)
 Q35R_MODULES = ('k3_q35_gsq',)   # (kernels/k3_q35_gsq.hip: the Qwen3.8-27B GSQ-RCO files; ThinkingCap's module + K3_Q35_GSQ's formats)
@@ -238,6 +243,11 @@ MODULE_CAPS.update({m: (MODULE_CAPS[m] - {('OWN_MV', f'{f}/a16_1rt_gu') for f in
                     for m in Q35SV_MODULES})
 # ThinkingCap's verify module: its formats' T-token tiles (kernels/own_quant_tcap_mt.h; Q6_K: own_quant_mt.h's mt2)
 MODULE_CAPS.update({m: MODULE_CAPS[m] | {('OWN_MV', f'{f}/a16_1rt_mt') for f in OWN_Q35T_1RT} for m in Q35TV_MODULES})
+# the GSQ verify modules: k3_q35_gsq_ver adds the GSQ formats but IQ1_M (one and T tokens: kernels/own_quant_gsq_mt.h); the IQ1_M
+# module's dispatch is that format's loop alone (K3_Q35_GSQ_M), so its caps are that matvec only
+MODULE_CAPS.update({m: MODULE_CAPS[m] | {('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_Q35R_1RT if f != 'IQ1_M' for g in ('', '_mt')}
+                    for m in Q35RV_MODULES})
+MODULE_CAPS.update({m: frozenset({('OWN_MV', 'IQ1_M/a16_1rt'), ('OWN_MV', 'IQ1_M/a16_1rt_mt')}) for m in Q35RVM_MODULES})
 # the drafter module (K3_Q35_MTP): its tape's pairs only. Its device dispatch keeps the trunk's ops (kernels/k3_q35_ops.h:
 # the register allocation), so this set and Q35M_OPS are what refuse them; Q4_K is compiled out of its OP_OWN_MV
 OWN_MTP_FMT = {'Q4_0': 14}   # (= kernels/k3_own_ops.h OWN_Q4_0)
@@ -712,7 +722,8 @@ class Engine:
                 raise ValueError(f'own_matvec_1rt: x_stride {x_stride} (>= {ncols}), out_stride {out_stride} (>= {rows})')
         rs = fmt in OWN_RS_FMT
         q35t = self.module in Q35T_MODULES
-        q35_fmts = OWN_Q35R_1RT if self.module in Q35R_MODULES else OWN_Q35T_1RT
+        q35_fmts = (('IQ1_M',) if self.module in Q35RVM_MODULES else tuple(f for f in OWN_Q35R_1RT if f != 'IQ1_M')
+                    if self.module in Q35RV_MODULES else OWN_Q35R_1RT if self.module in Q35R_MODULES else OWN_Q35T_1RT)
         if q35t and (fmt not in q35_fmts or up is not None or ids is not None or (tokens != 1 and self.module not in Q35TV_MODULES + Q35TM_MODULES)
                      or (self.module in Q35TM_MODULES and fmt != 'Q6_K')):   # (the MTP module compiles the Q6_K T-token tile only)
             raise ValueError(f'own_matvec_1rt: module {self.module} runs {q35_fmts}, one matrix, no ids, one token '
