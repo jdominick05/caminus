@@ -31,6 +31,7 @@ from ..device import capacity
 from .q35_dense import attn_part_elems
 
 MODULE = 'k3_q35_swift_mtp'
+MODULE_TCAP = 'k3_q35_tcap_mtp'   # (ThinkingCap's: its block is all Q6_K, its head Q8_0, its embedding IQ2_S)
 MAX_T = 4
 NEXTN = ('nextn.eh_proj', 'attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate', 'ffn_up', 'ffn_down')
 
@@ -80,17 +81,22 @@ class Mtp35:
         finally:
             F.close()
 
-    def __init__(self, eng, k=3, module=MODULE, per_wgp=None, vram_check=True, window=2048):
-        """eng: a Dense35Own on the Swift module (its card, max_ctx, head and embedding); k: drafts per round (1 .. 4)"""
-        if module not in k3.Q35M_MODULES: raise ValueError(f'Mtp35: module {module!r} ({k3.Q35M_MODULES})')
-        if eng.tcap or eng.module not in k3.Q35S_MODULES: raise ValueError(f'Mtp35: the Swift module only (the engine runs {eng.module})')
+    def __init__(self, eng, k=3, module=None, per_wgp=None, vram_check=True, window=2048):
+        """eng: a Dense35Own (its card, max_ctx, head and embedding): Swift 1.5 (block Q4_0, head Q6_K, embedding Q4_K:
+        k3_q35_swift_mtp) or ThinkingCap (block Q6_K, head Q8_0, embedding IQ2_S: k3_q35_tcap_mtp); k: drafts per round
+        (1 .. 4)"""
+        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
+        line = k3.Q35TM_MODULES if eng.tcap else k3.Q35M_MODULES
+        if module not in line: raise ValueError(f'Mtp35: module {module!r} is not the engine\'s line\'s drafter module {line}')
         if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 4: raise ValueError(f'Mtp35: k {k!r}: 1 .. 4')
         self.il = block_of(eng.F)
         if self.il is None: raise ValueError(f'Mtp35: {os.path.basename(eng.path)} has no multi-token-prediction block')
         for n in NEXTN:
             t = eng.F.T[f'blk.{self.il}.{n}.weight']
-            if t.type != 'Q4_0': raise ValueError(f'Mtp35: blk.{self.il}.{n} is {t.type} (the drafter module runs Q4_0)')
-        if eng.head['fmt'] != 'Q6_K': raise ValueError(f"Mtp35: the head is {eng.head['fmt']} (the drafter module runs Q6_K)")
+            want = 'Q6_K' if eng.tcap else 'Q4_0'
+            if t.type != want: raise ValueError(f'Mtp35: blk.{self.il}.{n} is {t.type} (the drafter module {module} runs {want})')
+        want = 'Q8_0' if eng.tcap else 'Q6_K'
+        if eng.head['fmt'] != want: raise ValueError(f"Mtp35: the head is {eng.head['fmt']} (the drafter module {module} runs {want})")
         self.eng, self.k, self.module = eng, int(k), module
         self.mib = self.need_mib(eng, self.k)
         if vram_check: capacity.check([eng.dev], [self.mib], f'Mtp35 (k {self.k}, max_ctx {eng.max_ctx}: {self.mib:.0f} MiB)')
@@ -110,10 +116,11 @@ class Mtp35:
 
     # -- weights -----------------------------------------------------------------------------------------------------------
     def _q4(self, name, rows, cols):
+        """a block matrix in its tile's layout: Q4_0 (Swift) or Q6_K (ThinkingCap) planes"""
         t = self.eng.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         if (R, K) != (rows, cols): raise ValueError(f'Mtp35: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
-        b = q4_0_planes(t.pread(0, t.n_bytes), R, K)
-        return dict(name=name, fmt='Q4_0', rows=R, K=K, w=torch.from_numpy(np.ascontiguousarray(b)).to('cuda'))
+        b = (q6k_planes if t.type == 'Q6_K' else q4_0_planes)(t.pread(0, t.n_bytes), R, K)
+        return dict(name=name, fmt=t.type, rows=R, K=K, w=torch.from_numpy(np.ascontiguousarray(b)).to('cuda'))
 
     def _load(self):
         e, p = self.eng, f'blk.{self.il}.'
@@ -207,7 +214,11 @@ class Mtp35:
         dd = mv(W['fd'], V('a16', ffn), ffp, sw)
         nf = E.own_add_rms16(x, N['shn'], b['hn'][r0 * D:], b['hn16'][r0 * D:], e.eps, d=ffp, slots=1, dep=dd, tokens=T)
         if kind != 'fill':
-            hd_ = mv(e.head, b['hn16'][3 * D:], b['logits'], nf, tokens=1)
+            if e.head['fmt'] == 'Q8_0':   # (ThinkingCap's head: the rows tile, one token)
+                hd_ = E.own_matvec16(e.head['w'], 'Q8_0', e.vocab, D, b['hn16'][3 * D:], b['logits'], rows_per_task=e.rpt16, dep=nf)
+                names[hd_] = e.head['name']
+            else:
+                hd_ = mv(e.head, b['hn16'][3 * D:], b['logits'], nf, tokens=1)
             E.own_argmax(b['logits'], e.vocab, self.keys[0:1] if kind == 'catch' else self.keys[n:n + 1], dep=hd_)
         E.build()
         return E

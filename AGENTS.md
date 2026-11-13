@@ -8,8 +8,8 @@ CLAUDE.md imports this file.
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
 - It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
   cards, with the DFlash2 drafter), AREX-2 27B (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
-  Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 also takes
-  `--draft mtp` (its own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
+  Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
+  `--draft mtp` (their own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
   model's DFlash2 drafter on one card; `decode/dflash35.py`). `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
@@ -77,6 +77,9 @@ CLAUDE.md imports this file.
   reads on the device. Its device dispatch keeps the trunk's ops (without them `k3_run` took 96 VGPRs and spilled 5);
   `k3.Q35M_OPS` and its `MODULE_CAPS` are what refuse them, and Q4_K is compiled out of its matvec op.
   `tests/engine/test_q35_mtp.py` is its gate (T-row rounds bitwise one-row rounds; drafts against the fp32 block).
+  `k3_q35_tcap_mtp.hip` (`k3.Q35TM_MODULES`, `k3.Q35TM_OPS`) is ThinkingCap's: its Q6_K block on the planes' T-token
+  tiles (`k3_q35t_ops.h` compiles only that format's loop under `K3_Q35_MTP`), its Q8_0 head as a rows tile, the IQ2_S
+  embedding reading the argmax key; the same gate runs it.
   `k3_q35_dflash.hip` (`k3.Q35DF_MODULES`, `engine/q35_dflash.py`) is Swift's DFlash2 drafter: the Swift module's T-token
   matvecs (Q8_0 weights, the target's Q6_K head and Q4_K embedding read in place) plus `kernels/k3_df_own_ops.h`
   (`K3_Q35_DF`: the drafter's conv, top-k, selector, ring KV append and non-causal windowed attention, fp32, no ggml types;
