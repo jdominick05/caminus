@@ -363,8 +363,8 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
 - The tile was ALU-bound: its unit loop issued ~483 instructions (+113 `s_delay_alu`) per pass of 20 weight bytes, ~24
   per byte read (IQ4_XS: ~9), most of them selecting a packed grid entry's half and spreading its 2-bit codes to bytes.
   The grid now sits in LDS as its magnitude bytes (8 KB, one 8-byte read per 8 weights): 436 instructions a pass (333 +
-  103), the same bytes into the same sign and dot statements, so every sum keeps its bits. `benchmarks/own_mv_census.py
-  GGUF --formats IQ2_S` on the XT, interleaved (old, new, old, new), us per matvec:
+  103), the same bytes into the same sign and dot statements, so every sum keeps its bits. `tools/guard.sh LOG 1800
+  python -I benchmarks/own_mv_census.py GGUF --formats IQ2_S` on the XT, interleaved (old, new, old, new), us per matvec:
 
   | shape | old | new | llama.cpp |
   |---|---|---|---|
