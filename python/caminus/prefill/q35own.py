@@ -46,12 +46,16 @@ MODULE = 'q35_prefill'
 MODULE_TCAP = 'q35_prefill_tcap'   # (ThinkingCap's formats: kernels/q35_prefill_tcap.hip, Swift's object + the IQ GEMMs)
 FORMATS = ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K')
 FORMATS_TCAP = FORMATS + ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S')
+MODULE_GSQ = 'q35_prefill_gsq'   # (the plain Qwen3.8-27B GSQ-RCO files: kernels/q35_prefill_gsq.hip, ThinkingCap's object + 3 GEMMs)
+FORMATS_GSQ = FORMATS_TCAP + ('IQ2_XXS', 'IQ2_XS', 'Q2_K', 'IQ1_M')
 MM_KERNEL = {'Q8_0': 'q35p_mm_q8_0', 'Q5_K': 'q35p_mm_q5k'}
 MMW_N = 256   # (rows per workgroup of the wide Q4_K tile, kernels/q35_prefill.hip MMW_N)
 MMW_MIN_PER_CU = 4   # (the wide tile only when its grid has at least this many workgroups per compute unit)
 # the codebook formats (the tcap object only): the decode engine's copies in place (IQ4_XS raw blocks; the grid formats
 # in the record layout), one more argument: the buffer's rows (Rtot)
-IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_S': 'q35t_mm_iq2s'}
+IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_S': 'q35t_mm_iq2s',
+             'IQ2_XXS': 'q3p_mm_iq2xxs', 'IQ2_XS': 'q35g_mm_iq2xs', 'Q2_K': 'q35g_mm_q2k', 'IQ1_M': 'q35g_mm_iq1m'}
+IQ_KERNEL_GSQ = ('IQ2_XXS', 'IQ2_XS', 'Q2_K', 'IQ1_M')   # (the GSQ object only)
 # token-positions per attention launch (rows x the deepest position they read: one workgroup per (row, query head) walks
 # every position below its own). Unmeasured; the G1 test times the largest launch it runs
 ATTN_TP = 1 << 20
@@ -83,7 +87,8 @@ class Ops(q3m_ops.Ops):
         if isinstance(W, dict): W = (W['fmt'], W['rows'], W['K'], W['w'])
         fmt, R, K, wb = W[:4]
         if fmt in IQ_KERNEL:
-            if self.module != MODULE_TCAP: raise ValueError(f'q35 mm: {fmt} needs the {MODULE_TCAP} object (this one: {self.module})')
+            need = (MODULE_GSQ,) if fmt in IQ_KERNEL_GSQ else (MODULE_TCAP, MODULE_GSQ)
+            if self.module not in need: raise ValueError(f'q35 mm: {fmt} needs the {" or ".join(need)} object (this one: {self.module})')
             if K % 256 or work is not None or n is None: raise ValueError(f'q35 mm: {fmt}: K {K} (a multiple of 256), dense rows (n) only')
             n = int(n); grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
             getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
@@ -124,7 +129,7 @@ class Ops(q3m_ops.Ops):
 
     def emb_iq2s(self, W, rb, vocab, toks, x, n, N):
         """x [n][N] = the IQ2_S embedding rows toks[i] (OP_OWN_EMB's IQ2_S statements: bitwise the host decoder)"""
-        if self.module != MODULE_TCAP: raise ValueError(f'q35 emb_iq2s: the {MODULE_TCAP} object only')
+        if self.module not in (MODULE_TCAP, MODULE_GSQ): raise ValueError(f'q35 emb_iq2s: the {MODULE_TCAP} / {MODULE_GSQ} objects only')
         self.mod.q35t_emb_iq2s((int(n),), (256,), W, I(rb), I(vocab), toks, x, I(N))
 
     def add_rms16(self, x, nw, eps, h16, n, N, d=None, h=None):
@@ -263,7 +268,8 @@ class Q35OwnPrefill(PrefillDriver):
         self.dev = dev = torch.device(f'cuda:{m.dev}')
         self.crossover = CROSSOVER if crossover is None else int(crossover)
         self.tcap = bool(getattr(m, 'tcap', False))
-        fm = FORMATS_TCAP if self.tcap else FORMATS
+        self.gsq = getattr(m, 'module', None) in k3.Q35R_MODULES
+        fm = FORMATS_GSQ if self.gsq else FORMATS_TCAP if self.tcap else FORMATS
         bad = [f"blk.{il} {k}: {L[k]['fmt']}" for il, L in enumerate(m.L) for k in self.MM_KEYS[L['kind']] + ('fg', 'fu', 'fd')
                if L[k]['fmt'] not in fm]
         bad += [f"blk.{il} {k}: {L[k]['fmt']}" for il, L in enumerate(m.L) if L['kind'] == 'gdn' for k in ('al', 'be')
@@ -279,7 +285,7 @@ class Q35OwnPrefill(PrefillDriver):
         if check: capacity.check([dev.index], [self.need_mib], f'Q35OwnPrefill buffers (chunk {T})')
         f32, f16, i32 = layout(m, T, export_h=self.export_h, nfeat=nf)
         with torch.cuda.device(dev):
-            self.O = Ops(dev, module=MODULE_TCAP if self.tcap else MODULE)
+            self.O = Ops(dev, module=MODULE_GSQ if self.gsq else MODULE_TCAP if self.tcap else MODULE)
             self.Gl = Glue(dev, module='prefill_glue_q35d')
             self.Gd = Gdn(dev, module='prefill_gdn_q35')
             self.A = Attn(dev, name=attn)
