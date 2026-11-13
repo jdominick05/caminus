@@ -2,8 +2,8 @@
 (docs/specs/spec-own-quant.md); gguf-py's dequantize is the test oracle (tests/io/test_own_dequant.py: bitwise equal).
 The arithmetic follows the formats' definition in float32: Q4_K and Q5_K y = (d * sc) * q - (dmin * m); Q6_K
 y = (d * sc) * q; the codebook formats (their tables: caminus.iq_tables) IQ4_XS y = (d * (ls - 32)) * kv[q];
-IQ3_XXS y = ((d * (0.5 + s)) * 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS and IQ2_S
-y = ((d * (0.5 + s)) * 0.25) * grid * sign; the plain block formats Q8_0 y = d * q (int8), Q4_0 y = d * (q - 8),
+IQ3_XXS y = ((d * (0.5 + s)) * 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS, IQ2_XS and IQ2_S
+y = ((d * (0.5 + s)) * 0.25) * grid * sign; IQ1_M y = (d * (2 s + 1)) * (grid +- 0.125); Q2_K y = (d * sc) * q - (dmin * m); the plain block formats Q8_0 y = d * q (int8), Q4_0 y = d * (q - 8),
 Q4_1 y = d * q + m, Q2_0 (ggml type 42) y = d * (q - 1); BF16 y = the value's 16 bits as the high half of a float32 (exact).
 
   dequant(raw, type_name, n_values) -> float32 [n_values]   (raw: the blocks' bytes, uint8)
@@ -137,6 +137,47 @@ def iq2_s(raw):
     return (db * g * _pm(b[:, 34:66]).reshape(n, 16, 16)).reshape(-1)
 
 
+def iq2_xs(raw):
+    """IQ2_XS: 74-byte blocks of 256: d (fp16), qs[32] (u16 each: a 9-bit grid index | a 7-bit sign index << 9, per 8
+    values), scales[8] (a nibble per 16 values: a byte's low nibble, then its high one)"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 74); n = b.shape[0]
+    d = _f16(b[:, 0:2].copy()).reshape(n, 1)
+    q = b[:, 2:66].copy().view(np.uint16).reshape(n, 32)
+    db = ((d * (np.float32(0.5) + _nib(b[:, 66:74]).astype(np.float32))) * np.float32(0.25)).reshape(n, 16, 1)
+    g = iq_tables.GRID_IQ2_XS[q & 511].astype(np.float32).reshape(n, 16, 16)
+    return (db * g * _pm(_signs7(q >> 9)).reshape(n, 16, 16)).reshape(-1)
+
+
+def q2_k(raw):
+    """Q2_K: 84-byte blocks of 256: scales[16] (a scale nibble | a min nibble << 4, per 16 values), qs[64] (2-bit codes:
+    byte j of a 128-value half holds values j, j + 32, j + 64, j + 96 at bits 0, 2, 4, 6), d (fp16), dmin (fp16).
+    y = (d * sc) * q - (dmin * m)"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 84); n = b.shape[0]
+    sc = b[:, 0:16]
+    d = _f16(b[:, 80:82].copy()).reshape(n, 1); dm = _f16(b[:, 82:84].copy()).reshape(n, 1)
+    dl = (d * (sc & 0xF).astype(np.float32)).reshape(n, 16, 1)
+    ml = (dm * (sc >> 4).astype(np.float32)).reshape(n, 16, 1)
+    q = (b[:, 16:80].reshape(n, 2, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 3
+    return (dl * q.reshape(n, 16, 16).astype(np.float32) - ml).reshape(-1)
+
+
+def iq1_m(raw):
+    """IQ1_M: 56-byte blocks of 256: qs[32] (the low 8 bits of an 11-bit grid index per 8 values), qh[16] (a nibble per 8
+    values: the index's 3 high bits | the delta's sign << 3), scales[4] (u16 each: four 3-bit scales, one per 16 values, in
+    bits 0-11; the block's fp16 d split over the four top nibbles). y = (d * (2 s + 1)) * (grid +- 0.125)"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 56); n = b.shape[0]
+    s16 = b[:, 48:56].copy().view(np.uint16).reshape(n, 4)
+    dbits = ((s16[:, 0] >> 12) | ((s16[:, 1] >> 8) & 0x00F0) | ((s16[:, 2] >> 4) & 0x0F00) | (s16[:, 3] & 0xF000)).astype(np.uint16)
+    d = dbits.view(np.float16).astype(np.float32).reshape(n, 1)
+    sc = ((s16[:, :, None] >> np.array([0, 3, 6, 9], dtype=np.uint16)) & 7).reshape(n, 16)
+    dl = (d * (2 * sc + 1).astype(np.float32)).reshape(n, 16, 1)
+    qh = _nib(b[:, 32:48])                                            # [n, 32]: one nibble per 8 values
+    idx = b[:, 0:32].astype(np.uint16) | ((qh & 7).astype(np.uint16) << 8)
+    delta = np.where(qh & 8, -iq_tables.IQ1_DELTA, iq_tables.IQ1_DELTA).astype(np.float32).reshape(n, 32, 1)
+    g = iq_tables.GRID_IQ1_S[idx].astype(np.float32).reshape(n, 32, 8)
+    return (dl * (g + delta).reshape(n, 16, 16)).reshape(-1)
+
+
 def bf16(raw):
     """BF16: 2-byte values, the high half of a float32 (the widening is exact)"""
     return (np.asarray(raw, dtype=np.uint8).view(np.uint16).astype(np.uint32) << 16).view(np.float32)
@@ -193,7 +234,8 @@ def q2_0(raw):
 
 DECODERS = {'Q4_K': (256, 144, q4_k), 'Q6_K': (256, 210, q6_k), 'Q5_K': (256, 176, q5_k),
             'IQ4_XS': (256, 136, iq4_xs), 'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s),
-            'IQ2_XXS': (256, 66, iq2_xxs), 'IQ2_S': (256, 82, iq2_s), 'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q4_1': (32, 20, q4_1),
+            'IQ2_XXS': (256, 66, iq2_xxs), 'IQ2_XS': (256, 74, iq2_xs), 'IQ2_S': (256, 82, iq2_s), 'Q2_K': (256, 84, q2_k),
+            'IQ1_M': (256, 56, iq1_m), 'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q4_1': (32, 20, q4_1),
             'Q2_0': (64, 18, q2_0), 'BF16': (1, 2, bf16)}
 
 

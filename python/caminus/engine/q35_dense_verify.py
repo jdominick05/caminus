@@ -115,7 +115,7 @@ class Dense35Verify:
         def mv(W, x16, out, dep, x32=None):
             """W's matvec on the T tokens' fp16 activations x16 [T, K] -> out [T, rows] (an F32 matrix: on x32)"""
             if W['fmt'] == 'F32': return named(E.f32_mv(W['w'], x32, out, rows_per_task=4, dep=dep), W['name'])
-            if W['fmt'] in (k3.OWN_Q35T_1RT if eng.tcap else k3.OWN_1RT_FMT):
+            if W['fmt'] in eng.one_rt:
                 kw = dict(tokens=T, x_stride=W['K'], out_stride=W['rows']) if T > 1 else {}
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=eng.rpt, dep=dep, **kw),
                              W['name'])

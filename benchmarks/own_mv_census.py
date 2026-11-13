@@ -25,7 +25,7 @@ from caminus import ggufio
 from caminus.device import capacity
 from caminus.device.hip import Module
 from caminus.engine import gguf as G            # (llama.cpp's gg_mv_* launchers: the yardstick arm; puts gguf-py on the path)
-from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC, q2k_records, iq1m_records
 from caminus import own_dequant                 # (the float64 oracle: our decoders, bitwise gguf-py's: tests/io/test_own_dequant.py)
 
 ap = argparse.ArgumentParser()
@@ -75,7 +75,7 @@ def slice_bytes(t, e, rows, K):
 
 def own_kernel(fmt, K):
     if DENSE:   # (K3's form: runtime K; Q5_K / Q8_0 the general rows tiles OP_OWN_MV16 runs, 4 rows per wave)
-        nm = {'IQ4_XS': 'own_mv_iq4xs_k3', 'IQ3_XXS': 'own_mv_iq3xxs_k3', 'IQ3_S': 'own_mv_iq3s_k3', 'IQ2_S': 'own_mv_iq2s_k3',
+        nm = {'IQ4_XS': 'own_mv_iq4xs_k3', 'IQ3_XXS': 'own_mv_iq3xxs_k3', 'IQ3_S': 'own_mv_iq3s_k3', 'IQ2_S': 'own_mv_iq2s_k3', 'IQ2_XS': 'own_mv_iq2xs_k3', 'Q2_K': 'own_mv_q2_k_k3', 'IQ1_M': 'own_mv_iq1m_k3',
               'Q6_K': 'own_mv_q6_k_pl_k3', 'Q5_K': 'own_mv_q5_k_k3' if A.q5k == '1rt' else 'own_mv_q5_k_a16',
               'Q8_0': 'own_mv_q8_0_a16' if A.q8 == 'gen' else f'own_mv_q8_0_1rt_{A.q8}'}.get(fmt)
         return getattr(OWNQ, nm) if nm else None
@@ -94,6 +94,8 @@ def to_dev(raw, fmt, rows, K, own):
     b = np.ascontiguousarray(raw)
     if own and fmt == 'Q6_K': b = q6k_planes(b, rows, K)
     if own and fmt in IQ_REC: b = iq_records(b, rows, K, fmt)
+    if own and fmt == 'Q2_K': b = q2k_records(b, rows, K)
+    if own and fmt == 'IQ1_M': b = iq1m_records(b, rows, K)
     return torch.from_numpy(b.copy()).to(dev)
 
 

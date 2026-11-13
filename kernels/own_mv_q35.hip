@@ -7,6 +7,9 @@
 #include "own_quant.h"
 #include "own_quant_iq.h"
 #include "own_quant_iq2s.h"
+#include "own_quant_iq2xs.h"
+#include "own_quant_q2k.h"
+#include "own_quant_iq1m.h"
 #include "own_quant_q5k.h"
 
 // K3's form of each tile (kernels/k3_own_ops.h own_1rt_acc: runtime K, 2 rows per wave, one unit per lane per pass,
@@ -28,6 +31,22 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_iq2s_k3(const uint8_t *
         float * out) {
     iq2s_stage(threadIdx.x);
     Q35_ROW0; if (row0 < nrows) own_rows_iq2s_1rt<0, 2, 1, 1>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31, K);
+}
+// IQ2_XS (the Qwen3.8-27B GSQ-RCO files): its own grid array (kernels/own_quant_iq2xs.h), the decode module's form
+extern "C" __global__ void __launch_bounds__(256) own_mv_iq2xs_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
+        float * out) {
+    iq2xs_stage(threadIdx.x);
+    Q35_ROW0; if (row0 < nrows) own_rows_iq2xs_1rt<0, 2, 1, 1>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31, K);
+}
+// Q2_K (the Qwen3.8-27B GSQ-RCO files): its record layout (caminus.engine.own_layout.q2k_records)
+extern "C" __global__ void __launch_bounds__(256) own_mv_q2_k_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
+        float * out) {
+    Q35_ROW0; if (row0 < nrows) own_rows_q2k_1rt<0, 2, 1, 1>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31, K);
+}
+// IQ1_M (the Qwen3.8-27B GSQ-RCO files: one matrix): its record layout (caminus.engine.own_layout.iq1m_records)
+extern "C" __global__ void __launch_bounds__(256) own_mv_iq1m_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
+        float * out) {
+    Q35_ROW0; if (row0 < nrows) own_rows_iq1m_1rt<0, 2, 1, 1>(W, nrows, row0, nrows, x16, out, threadIdx.x & 31, K);
 }
 extern "C" __global__ void __launch_bounds__(256) own_mv_q5_k_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
         float * out) {

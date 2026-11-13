@@ -104,7 +104,7 @@ def main():
         check(out.returncode == 0 and names == [m.name for m in models.CATALOG] and
               {m['name']: m['present'] for m in doc['models']} == {'coder': False, 'qwen3.6': True, 'qwen3.6-hauhau': False,
                                                                    'arex-2': True, 'qwen3-coder-next': False, 'swift-1.5': False,
-                                                                   'thinkingcap': False, 'qwen3-30b-a3b': False},
+                                                                   'thinkingcap': False, 'qwen3.8-27b': False, 'qwen3-30b-a3b': False},
               f'caminus models --json: {names}')
     except ValueError:
         check(False, f'caminus models --json printed no JSON: {out.stdout[:200]} {out.stderr[-300:]}')
@@ -418,8 +418,8 @@ def paused_checks(S):
         o = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         check(False, f'paused: the child printed no JSON (rc {r.returncode}): {r.stderr[-400:]}'); return
-    check(o['catalog'] == ['coder', 'arex-2', 'swift-1.5', 'thinkingcap', 'qwen3-30b-a3b'] and len(o['all']) == 8,
-          f'paused: the catalog offers the five shipped models ({o["catalog"]}), the tree keeps all eight')
+    check(o['catalog'] == ['coder', 'arex-2', 'swift-1.5', 'thinkingcap', 'qwen3-30b-a3b'] and len(o['all']) == 9,
+          f'paused: the catalog offers the five shipped models ({o["catalog"]}), the tree keeps all nine')
     check(o['pull'] == 2 and o['download'] == 2 and 'paused' in r.stderr and 'Qwen3-Coder-Next is paused' in r.stderr,
           f'paused: caminus pull / caminus download refuse a paused model with the reason (pull {o["pull"]}, download {o["download"]})')
     check('paused' in o['start'], f'paused: caminus start refuses a paused model ({o["start"]})')

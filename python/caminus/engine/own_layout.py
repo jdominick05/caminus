@@ -68,7 +68,7 @@ def q4_0_from_planes(pl, rows, K):
 
 IQ_PAD = 16
 # format -> (block bytes, record bytes, header bytes)
-IQ_REC = {'IQ3_XXS': (98, 12, 2), 'IQ3_S': (110, 13, 6), 'IQ2_XXS': (66, 8, 2), 'IQ2_S': (82, 10, 2)}
+IQ_REC = {'IQ3_XXS': (98, 12, 2), 'IQ3_S': (110, 13, 6), 'IQ2_XXS': (66, 8, 2), 'IQ2_S': (82, 10, 2), 'IQ2_XS': (74, 9, 2)}
 
 
 def iq_records(raw, rows, K, fmt):
@@ -89,6 +89,8 @@ def iq_records(raw, rows, K, fmt):
     elif fmt == 'IQ2_S':   # a unit: its 4 index bytes | 4 sign bytes | qh byte | scale byte (kernels/own_quant_iq2s.h)
         A[:, :, :4] = b[:, 2:34].reshape(n, 8, 4); A[:, :, 4:8] = b[:, 34:66].reshape(n, 8, 4)
         A[:, :, 8] = b[:, 66:74]; A[:, :, 9] = b[:, 74:82]
+    elif fmt == 'IQ2_XS':  # a unit: its 4 u16 (9-bit grid index | 7-bit sign code << 9) | its scale byte (two nibbles)
+        A[:, :, :8] = b[:, 2:66].reshape(n, 8, 8); A[:, :, 8] = b[:, 66:74]
     else:
         A[:, :, :] = b[:, 2:66].reshape(n, 8, 8)
     return out
@@ -109,9 +111,70 @@ def iq_from_records(rec, rows, K, fmt):
     elif fmt == 'IQ2_S':
         out[:, 2:34] = A[:, :, :4].reshape(n, 32); out[:, 34:66] = A[:, :, 4:8].reshape(n, 32)
         out[:, 66:74] = A[:, :, 8]; out[:, 74:82] = A[:, :, 9]
+    elif fmt == 'IQ2_XS':
+        out[:, 2:66] = A[:, :, :8].reshape(n, 64); out[:, 66:74] = A[:, :, 8]
     else:
         out[:, 2:66] = A.reshape(n, 64)
     return out.reshape(-1)
+
+
+Q2K_RS, Q2K_HS = 10, 4   # Q2_K records: a unit's 8 code bytes + its 2 scale bytes; a block's header: d, dmin (fp16 each)
+
+
+def q2k_records(raw, rows, K):
+    """raw: uint8 [rows * K / 256 * 84] (GGUF Q2_K rows, contiguous) -> uint8, the record layout (kernels/own_quant_q2k.h):
+    plane A = a 10-byte record per unit of 32 values (its 32 2-bit codes packed four per byte, value 4 k + j at bits 2 j of
+    byte k, then the block's scale bytes 2 ib and 2 ib + 1: scale nibble | min nibble << 4, one per 16 values), plane B = a
+    4-byte header per block (d, dmin), then 16 bytes of padding. In the GGUF block a unit's codes are one bit pair of 32
+    bytes that three other units share: read in place, a unit loads 4x its bytes"""
+    if K % 256: raise ValueError(f'q2k_records: K {K} is not a multiple of 256')
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 84)
+    n = b.shape[0]
+    if n != rows * (K // 256): raise ValueError(f'q2k_records: {n} blocks, expected {rows} x {K // 256}')
+    out = np.zeros(n * 8 * Q2K_RS + n * Q2K_HS + IQ_PAD, dtype=np.uint8)
+    A = out[:n * 8 * Q2K_RS].reshape(n, 8, Q2K_RS); B = out[n * 8 * Q2K_RS:n * 8 * Q2K_RS + n * Q2K_HS].reshape(n, Q2K_HS)
+    qs = b[:, 16:80].reshape(n, 2, 32)                                    # [n, half, byte]
+    c = (qs[:, :, None, :] >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 3   # [n, half, shift, 32]
+    c = c.reshape(n, 8, 8, 4)                                             # unit ib = half * 4 + shift; byte k: values 4k .. 4k+3
+    A[:, :, :8] = c[..., 0] | (c[..., 1] << 2) | (c[..., 2] << 4) | (c[..., 3] << 6)
+    A[:, :, 8] = b[:, 0:16:2]; A[:, :, 9] = b[:, 1:16:2]
+    B[:, :] = b[:, 80:84]
+    return out
+
+
+def q2k_from_records(rec, rows, K):
+    n = rows * (K // 256)
+    a = np.asarray(rec, dtype=np.uint8)
+    A = a[:n * 8 * Q2K_RS].reshape(n, 8, Q2K_RS); B = a[n * 8 * Q2K_RS:n * 8 * Q2K_RS + n * Q2K_HS].reshape(n, Q2K_HS)
+    c = (A[:, :, :8, None] >> np.array([0, 2, 4, 6], dtype=np.uint8)) & 3     # [n, unit, byte, j]
+    c = c.reshape(n, 2, 4, 32)                                            # [n, half, shift, value]
+    qs = (c[:, :, 0] | (c[:, :, 1] << 2) | (c[:, :, 2] << 4) | (c[:, :, 3] << 6)).reshape(n, 64)
+    out = np.empty((n, 84), dtype=np.uint8)
+    out[:, 0:16:2] = A[:, :, 8]; out[:, 1:16:2] = A[:, :, 9]; out[:, 16:80] = qs; out[:, 80:84] = B
+    return out.reshape(-1)
+
+
+IQ1M_RS, IQ1M_HS = 8, 2   # IQ1_M records: a unit's 4 index bytes, 2 qh bytes, its 2 scales; a block's header: d (fp16)
+
+
+def iq1m_records(raw, rows, K):
+    """raw: uint8 [rows * K / 256 * 56] (GGUF IQ1_M rows) -> uint8, the record layout (kernels/own_quant_iq1m.h): plane A
+    = an 8-byte record per unit of 32 values (qs[4 ib .. 4 ib + 3], qh[2 ib], qh[2 ib + 1], the unit's two 3-bit scales
+    s0 | s1 << 3, a zero byte), plane B = the block's fp16 d (reassembled from the four scale words' top nibbles), then 16
+    bytes of padding"""
+    if K % 256: raise ValueError(f'iq1m_records: K {K} is not a multiple of 256')
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 56)
+    n = b.shape[0]
+    if n != rows * (K // 256): raise ValueError(f'iq1m_records: {n} blocks, expected {rows} x {K // 256}')
+    out = np.zeros(n * 8 * IQ1M_RS + n * IQ1M_HS + IQ_PAD, dtype=np.uint8)
+    A = out[:n * 8 * IQ1M_RS].reshape(n, 8, IQ1M_RS); B = out[n * 8 * IQ1M_RS:n * 8 * IQ1M_RS + n * IQ1M_HS].reshape(n, IQ1M_HS)
+    s16 = b[:, 48:56].copy().view(np.uint16).reshape(n, 4)
+    sc = ((s16[:, :, None] >> np.array([0, 3, 6, 9], dtype=np.uint16)) & 7).reshape(n, 16).astype(np.uint8)
+    A[:, :, 0:4] = b[:, 0:32].reshape(n, 8, 4); A[:, :, 4:6] = b[:, 32:48].reshape(n, 8, 2)
+    A[:, :, 6] = sc[:, 0::2] | (sc[:, 1::2] << 3)
+    d = ((s16[:, 0] >> 12) | ((s16[:, 1] >> 8) & 0x00F0) | ((s16[:, 2] >> 4) & 0x0F00) | (s16[:, 3] & 0xF000)).astype(np.uint16)
+    B[:, :] = d.view(np.uint8).reshape(n, 2)
+    return out
 
 
 # container type -> (bits per code, values per block, block bytes): d (fp16) then the codes

@@ -15,7 +15,8 @@ import numpy as np
 D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 256, 512, 64, 128, 1, 2, 6, 1, 256, 64, 4
 CH = 2 * NK * S + NV * S
 KINDS = [True, True, True, False]
-TYPE_ID = {'F32': 0, 'Q8_0': 8, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14, 'IQ3_XXS': 18, 'IQ3_S': 21, 'IQ2_S': 22, 'IQ4_XS': 23, 'BF16': 30}
+TYPE_ID = {'F32': 0, 'Q8_0': 8, 'Q2_K': 10, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14, 'IQ2_XXS': 16, 'IQ2_XS': 17, 'IQ3_XXS': 18, 'IQ3_S': 21,
+           'IQ2_S': 22, 'IQ4_XS': 23, 'IQ1_M': 29, 'BF16': 30}
 # per block: the format of each matrix (ffn gate, up, down; then the block's own)
 FORMATS = [
     dict(ffn_gate='Q4_K', ffn_up='Q4_K', ffn_down='Q4_K', attn_qkv='Q8_0', attn_gate='Q8_0', ssm_out='Q8_0'),
@@ -31,8 +32,18 @@ FORMATS_TCAP = [
     dict(ffn_gate='Q6_K', ffn_up='Q5_K', ffn_down='IQ2_S', attn_qkv='Q8_0', attn_gate='IQ4_XS', ssm_out='IQ3_XXS'),
     dict(ffn_gate='IQ3_S', ffn_up='IQ3_S', ffn_down='IQ4_XS', attn_q='IQ4_XS', attn_k='IQ2_S', attn_v='Q8_0', attn_output='IQ3_S'),
 ]
+# variant 'gsq': the Qwen3.8-27B GSQ-RCO files' formats (the GSQ module, kernels/k3_q35t_ops.h under K3_Q35_GSQ): its five
+# formats ThinkingCap's files do not use (IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K) beside IQ3_XXS / IQ3_S / IQ2_S / IQ4_XS, an IQ2_S
+# embedding, a Q4_K head, BF16 alpha / beta
+FORMATS_GSQ = (
+    dict(ffn_gate='IQ2_XS', ffn_up='IQ2_XXS', ffn_down='Q2_K', attn_qkv='IQ4_XS', attn_gate='Q2_K', ssm_out='IQ3_S'),
+    dict(ffn_gate='IQ1_M', ffn_up='IQ3_XXS', ffn_down='IQ2_XS', attn_qkv='Q2_K', attn_gate='IQ4_XS', ssm_out='Q4_K'),
+    dict(ffn_gate='Q4_K', ffn_up='IQ2_S', ffn_down='IQ2_XXS', attn_qkv='IQ2_XS', attn_gate='IQ3_S', ssm_out='IQ1_M'),
+    dict(ffn_gate='IQ3_S', ffn_up='Q2_K', ffn_down='IQ4_XS', attn_q='Q2_K', attn_k='IQ2_XS', attn_v='IQ2_XXS', attn_output='Q4_K'),
+)
 # the codebook formats: block bytes and a d giving typical |weight| 0.03 .. 0.1 (d times the largest scale x grid entry)
-IQ_BLOCK = {'IQ4_XS': (136, 1e-4), 'IQ3_XXS': (98, 1.5e-4), 'IQ3_S': (110, 1.5e-4), 'IQ2_S': (82, 4e-4)}
+IQ_BLOCK = {'IQ4_XS': (136, 1e-4), 'IQ3_XXS': (98, 1.5e-4), 'IQ3_S': (110, 1.5e-4), 'IQ2_S': (82, 4e-4), 'IQ2_XS': (74, 4e-4),
+            'IQ2_XXS': (66, 4e-4)}
 U32, I32, F32V, BOOL, STR, ARR = 4, 5, 6, 7, 8, 9
 
 
@@ -73,6 +84,16 @@ def quant(rng, fmt, rows, K):
     elif fmt == 'Q6_K':    # ql[128], qh[64], int8 scales[16], d: w = d * scale * (q - 32)
         b = rnd(rows, nb, 210)
         b[:, :, 208:210] = _f16(rng, (rows, nb), 1e-4).view(np.uint8).reshape(rows, nb, 2)
+    elif fmt == 'Q2_K':    # scales[16], qs[64], d, dmin: w = d * sc * q - dmin * m (sc, m <= 15, q <= 3)
+        b = rnd(rows, nb, 84)
+        b[:, :, 80:82] = _f16(rng, (rows, nb), 1.5e-3).view(np.uint8).reshape(rows, nb, 2)
+        b[:, :, 82:84] = _f16(rng, (rows, nb), 1.5e-3).view(np.uint8).reshape(rows, nb, 2)
+    elif fmt == 'IQ1_M':   # qs[32], qh[16], 4 scale words: d split over their top nibbles; w = d (2 s + 1) (g +- 1/8)
+        b = rnd(rows, nb, 56)
+        d = _f16(rng, (rows, nb), 4e-3)
+        w = b[:, :, 48:56].copy().view(np.uint16).reshape(rows, nb, 4) & np.uint16(0x0FFF)
+        for k in range(4): w[..., k] |= ((d >> np.uint16(4 * k)) & np.uint16(0xF)) << np.uint16(12)
+        b[:, :, 48:56] = w.view(np.uint8).reshape(rows, nb, 8)
     elif fmt in IQ_BLOCK:  # d first, then any bytes (every index, sign and scale pattern is a valid block)
         bs, sc = IQ_BLOCK[fmt]
         b = rnd(rows, nb, bs)
@@ -89,8 +110,8 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False):
     rng = np.random.default_rng(seed)
     NK, NV, H, HKV, V = (4, 8, 12, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
     CH = 2 * NK * S + NV * S
-    tc = variant == 'tcap'
-    FMTS = FORMATS_TCAP if tc else FORMATS
+    tc = variant in ('tcap', 'gsq')   # (the ThinkingCap module family: IQ2_S embedding, BF16 alpha / beta)
+    FMTS = FORMATS_GSQ if variant == 'gsq' else FORMATS_TCAP if tc else FORMATS
     f32 = lambda *shape, sc=0.3: (rng.standard_normal(shape) * sc).astype(np.float32)
     T = {}   # name -> (format, bytes, [rows, K] or [n])
 
@@ -102,7 +123,7 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False):
         T[name] = ('BF16', (np.ascontiguousarray(a, np.float32).view(np.uint32) >> 16).astype(np.uint16).view(np.uint8).reshape(-1), a.shape)
 
     mat('token_embd.weight', 'IQ2_S' if tc else 'Q4_K', V, D); vec('output_norm.weight', 1 + f32(D, sc=0.1))
-    mat('output.weight', 'Q8_0' if tc else 'Q6_K', V, D)
+    mat('output.weight', 'Q4_K' if variant == 'gsq' else 'Q8_0' if tc else 'Q6_K', V, D)
     for il, (gdn, fm) in enumerate(zip(KINDS, FMTS)):
         p = f'blk.{il}.'
         vec(p + 'attn_norm.weight', 1 + f32(D, sc=0.1)); vec(p + 'post_attention_norm.weight', 1 + f32(D, sc=0.1))

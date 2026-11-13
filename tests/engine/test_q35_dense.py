@@ -27,7 +27,8 @@ ap.add_argument('--scratch', required=True); ap.add_argument('--model'); ap.add_
 ap.add_argument('--positions', type=int, default=128); ap.add_argument('--depths', type=int, nargs='*', default=[1, 4])
 ap.add_argument('--depth-positions', type=int, default=12); ap.add_argument('--max-ctx', type=int, default=256)
 ap.add_argument('--module', default=None)
-ap.add_argument('--variant', choices=('swift', 'tcap'), default='swift', help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap)')
+ap.add_argument('--variant', choices=('swift', 'tcap', 'gsq'), default='swift',
+                help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap; gsq: the Qwen3.8-27B GSQ-RCO files\', k3_q35_gsq)')
 A = ap.parse_args()
 if bool(A.model) != bool(A.ref): ap.error('--model and --ref go together')
 os.makedirs(A.scratch, exist_ok=True)
@@ -36,9 +37,9 @@ import tiny_q35
 from caminus import ggufio, own_dequant, ref_q35
 from caminus.device import capacity
 from caminus.engine import k3
-from caminus.engine.q35_dense import MODULE, MODULE_TCAP, Dense35Own
-from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
-MOD = A.module or (MODULE_TCAP if A.variant == 'tcap' else MODULE)
+from caminus.engine.q35_dense import MODULE, MODULE_GSQ, MODULE_TCAP, Dense35Own
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC, q2k_records, iq1m_records
+MOD = A.module or {'tcap': MODULE_TCAP, 'gsq': MODULE_GSQ}.get(A.variant, MODULE)
 TC = MOD in k3.Q35T_MODULES
 ok = True
 
@@ -67,7 +68,8 @@ capacity.check([DEV], [(NB + 4) * Dense35Own.projection_mib(P, 64) + 16], 'test_
 # the matvec of every quantized matrix of the tiny file on fp16 activations, against float64
 F = ggufio.GGUFFile(P); rng = np.random.default_rng(2); worst = {}
 E = k3.Engine(module=MOD); outs = []
-ONE_RT = k3.OWN_Q35T_1RT if TC else k3.OWN_1RT_FMT
+GSQ = A.variant == 'gsq'
+ONE_RT = k3.OWN_Q35R_1RT if GSQ else k3.OWN_Q35T_1RT if TC else k3.OWN_1RT_FMT
 FMTS = set(ONE_RT) | ({'Q8_0'} if TC else {'Q8_0', 'Q5_K'})
 # the embedding first: on the ThinkingCap module its segment carries the grids the matvecs read (and its rows are checked)
 emb_t = F.T['token_embd.weight']; emb_w = torch.from_numpy(np.ascontiguousarray(emb_t.pread(0, emb_t.n_bytes))).cuda()
@@ -80,7 +82,8 @@ for t in F.tensors:
     x = (rng.standard_normal(K) * 2).astype(np.float16); x16 = torch.from_numpy(x).cuda(); out = torch.zeros(R, device='cuda')
     raw = t.pread(0, t.n_bytes)
     if t.type in ONE_RT:
-        lay = q6k_planes(raw, R, K) if t.type == 'Q6_K' else iq_records(raw, R, K, t.type) if t.type in IQ_REC else raw
+        lay = (q6k_planes(raw, R, K) if t.type == 'Q6_K' else iq_records(raw, R, K, t.type) if t.type in IQ_REC else
+               q2k_records(raw, R, K) if t.type == 'Q2_K' else iq1m_records(raw, R, K) if t.type == 'IQ1_M' else raw)
         w = torch.from_numpy(np.ascontiguousarray(lay)).cuda()
         E.own_matvec_1rt(w, t.type, R, K, x16, out, rows_per_task=16)
     else:
@@ -94,7 +97,8 @@ for t, x, out, _, _ in outs:
     R, _ = t.rows(); W = own_dequant.rows(t, 0, R).astype(np.float64); xd = x.astype(np.float64)
     rel = float((np.abs(out.double().cpu().numpy() - W @ xd) / (np.abs(W) @ np.abs(xd))).max())
     worst[t.type] = max(worst.get(t.type, 0.0), rel)
-check(set(worst) == FMTS - ({'Q4_K'} if TC else set()) and max(worst.values()) < 1e-5,
+want = {t.type for t in F.tensors if t.type in FMTS and t.name != 'token_embd.weight'} if GSQ else FMTS - ({'Q4_K'} if TC else set())
+check(set(worst) == want and max(worst.values()) < 1e-5,
       f'{len(outs)} matvecs on fp16 activations against float64, worst error / sum |w x| per format: ' +
       ', '.join(f'{k} {v:.1e}' for k, v in sorted(worst.items())) + ' (< 1e-5)')
 F.close(); del E, outs
@@ -144,7 +148,15 @@ def run_lf(e, seq):
 
 check(all(torch.equal(a.reshape(-1), b) for a, b in zip(base, run_lf(eng, SEQ))) and not eng.bails,
       f'launch_tokens + finish_pass (the device sampler\'s pass): bitwise the step() logits at every position')
-for pw in (3, 6, 7):
+# the grids the module's LDS lets be resident at once (k3.resident_grid refuses the others: the GSQ module's 20.5 KB a
+# workgroup fits 6 per WGP); one past the cap must be refused
+LDS = k3._m(MOD).k3_run.lds_bytes(); CAP = k3.WGP_LDS // LDS
+GRIDS = [pw for pw in (3, 6, 7) if pw <= CAP]
+if CAP < 7:
+    try: Dense35Own(P, max_ctx=64, module=MOD, per_wgp=CAP + 1); refused = False
+    except ValueError: refused = True
+    check(refused, f'{CAP + 1} workgroups per WGP refused ({LDS} B of LDS a workgroup: at most {CAP} per WGP)')
+for pw in GRIDS:
     e2 = Dense35Own(P, max_ctx=64, module=MOD, per_wgp=pw)
     check(all(torch.equal(a, b) for a, b in zip(base, run(e2, SEQ))), f'the tape at {pw} workgroups per WGP: bitwise the default grid ({eng.per_wgp})')
     check(all(torch.equal(a.reshape(-1), b) for a, b in zip(base, run_lf(e2, SEQ))),
@@ -198,7 +210,7 @@ if A.model:
           f'reported, not a speed claim: the grid and task sizes are not measured for this model); one token reads {bound / 1e9:.2f} GB of weights',
           flush=True)
     m = min(4, NP); pw0 = eng.per_wgp
-    for pw in (3, 6, 7):
+    for pw in [pw for pw in (3, 6, 7) if pw <= k3.WGP_LDS // k3._m(eng.module).k3_run.lds_bytes()]:
         eng.per_wgp = pw
         with torch.cuda.device(eng.dev): eng._build_tape()
         check(all(torch.equal(a, b) for a, b in zip(base[:m], run(eng, seq[:m]))), f'the tape at {pw} workgroups per WGP: bitwise the default grid ({pw0}) on {m} positions')

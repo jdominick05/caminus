@@ -20,8 +20,13 @@ bad = 0; nvals = 0
 rng = np.random.default_rng(20261110)
 for name, (qk, bs, _) in sorted(own_dequant.DECODERS.items()):
     raw = rng.integers(0, 256, (A.random, bs), dtype=np.uint8)
-    for o in {'Q4_K': (0, 2), 'Q5_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2)}.get(name, (0,)):          # (the fp16 block scales: finite and small)
+    for o in {'Q4_K': (0, 2), 'Q5_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2), 'Q2_K': (80, 82), 'IQ1_M': ()}.get(name, (0,)):   # (the fp16 block scales: finite and small)
         raw[:, o:o + 2] = (rng.standard_normal(A.random) * 0.01).astype(np.float16).view(np.uint8).reshape(-1, 2)
+    if name == 'IQ1_M':   # (its fp16 d is split over the top nibbles of the four scale words: a finite one, nibble by nibble)
+        d = (rng.standard_normal(A.random) * 0.01).astype(np.float16).view(np.uint16)
+        w = raw[:, 48:56].copy().view(np.uint16).reshape(-1, 4) & np.uint16(0x0FFF)
+        for k in range(4): w[:, k] |= ((d >> np.uint16(4 * k)) & np.uint16(0xF)) << np.uint16(12)
+        raw[:, 48:56] = w.view(np.uint8).reshape(-1, 8)
     ours = own_dequant.dequant(raw.reshape(-1), name, A.random * qk)
     ref = quants.dequantize(raw, GGMLQuantizationType[name]).astype(np.float32).reshape(-1)
     ok = np.array_equal(ours.view(np.uint32), ref.view(np.uint32)); bad += not ok
@@ -77,10 +82,13 @@ for name, (bits, bv, bs) in sorted(own_layout.RS_CONT.items()):   # the row-scal
         except ValueError: pass
         bad += not ok
         print(('PASS' if ok else 'FAIL') + f' {name} K {K}: the row-scale planes decode to the container\'s values, invert, and refuse a row with two scales')
-for cls in (quants.IQ2_XXS, quants.IQ2_S, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
+for cls in (quants.IQ2_XXS, quants.IQ2_XS, quants.IQ2_S, quants.IQ3_XXS, quants.IQ3_S, quants.IQ1_S): cls.init_grid()
 tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
         ('GRID_IQ2_XXS', iq_tables.GRID_IQ2_XXS, quants.IQ2_XXS.grid.reshape(256, 8)),
+        ('GRID_IQ2_XS', iq_tables.GRID_IQ2_XS, quants.IQ2_XS.grid.reshape(512, 8)),
         ('GRID_IQ2_S', iq_tables.GRID_IQ2_S, quants.IQ2_S.grid.reshape(1024, 8)),
+        ('GRID_IQ1_S', iq_tables.GRID_IQ1_S, quants.IQ1_S.grid.reshape(2048, 8)),
+        ('IQ1_DELTA', np.array([iq_tables.IQ1_DELTA]), np.array([quants.IQ1_S.delta])),
         ('GRID_IQ3_XXS', iq_tables.GRID_IQ3_XXS, quants.IQ3_XXS.grid.reshape(256, 4)),
         ('GRID_IQ3_S', iq_tables.GRID_IQ3_S, quants.IQ3_S.grid.reshape(512, 4)),
         ('the sign bytes', own_dequant._signs7(np.arange(128)), np.frombuffer(quants.IQ2_XXS.ksigns, np.uint8))]
@@ -90,6 +98,21 @@ for name, ours, ref in tabs:
 hdr = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'kernels', 'iq_grids.h')
 ok = open(hdr).read() == iq_tables.c_header(); bad += not ok
 print(('PASS' if ok else 'FAIL') + ' kernels/iq_grids.h is the tables\' own header (iq_tables.c_header)')
+for fn, gen in (('iq2xs_grid.h', iq_tables.c_header_iq2xs), ('iq1_grid.h', iq_tables.c_header_iq1)):
+    ok = open(os.path.join(os.path.dirname(hdr), fn)).read() == gen(); bad += not ok
+    print(('PASS' if ok else 'FAIL') + f' kernels/{fn} is the tables\' own header (iq_tables.{gen.__name__})')
+from caminus.engine.own_layout import iq_records, iq_from_records, q2k_records, q2k_from_records, iq1m_records
+for name, bs, rt in (('IQ2_XS', 74, lambda r, n, k: iq_from_records(iq_records(r, n, k, 'IQ2_XS'), n, k, 'IQ2_XS')),
+                     ('Q2_K', 84, lambda r, n, k: q2k_from_records(q2k_records(r, n, k), n, k))):
+    raw = rng.integers(0, 256, 3 * 2 * bs, dtype=np.uint8)
+    ok = np.array_equal(rt(raw, 3, 512), raw); bad += not ok
+    print(('PASS' if ok else 'FAIL') + f' {name}: the record layout round-trips')
+raw = rng.integers(0, 256, 2 * 56, dtype=np.uint8)   # (IQ1_M: no inverse; its header d is the decoder's reassembled d)
+rec = iq1m_records(raw, 1, 512)
+s16 = raw.reshape(2, 56)[:, 48:56].copy().view(np.uint16).reshape(2, 4)
+dref = ((s16[:, 0] >> 12) | ((s16[:, 1] >> 8) & 0xF0) | ((s16[:, 2] >> 4) & 0xF00) | (s16[:, 3] & 0xF000)).astype(np.uint16)
+ok = np.array_equal(rec[2 * 8 * 8:2 * 8 * 8 + 4].view(np.uint16), dref); bad += not ok
+print(('PASS' if ok else 'FAIL') + ' IQ1_M: the record header holds the reassembled d')
 ok = open(os.path.join(os.path.dirname(hdr), 'iq2s_grid.h')).read() == iq_tables.c_header_iq2s(); bad += not ok
 print(('PASS' if ok else 'FAIL') + ' kernels/iq2s_grid.h is the tables\' own packed IQ2_S header (iq_tables.c_header_iq2s)')
 if A.gguf is None:

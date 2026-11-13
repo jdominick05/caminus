@@ -18,12 +18,21 @@
 #include "own_quant_iq.h"
 #include "own_quant_iq2s.h"
 #include "own_quant_q5k.h"
+#ifdef K3_Q35_GSQ   // (the Qwen3.8-27B GSQ-RCO module, kernels/k3_q35_gsq.hip: its three formats ThinkingCap's files do not use)
+#include "own_quant_iq2xs.h"
+#include "own_quant_q2k.h"
+#include "own_quant_iq1m.h"
+#endif
 #ifdef K3_Q3M_VER   // (the verify module, kernels/k3_q35_tcap_ver.hip: the T-token tiles; the decode module never sees them)
 #include "own_quant_tcap_mt.h"
 #endif
 
 enum { OWN_IQ2_S = 7 };   // (Seg.work of an IQ2_S matrix or embedding: its GG number; engine/k3.py OWN_Q35T_FMT; the others: k3_own_ops.h / k3_q35_ops.h)
 enum { Q35T_STAGE_IQ3_XXS = 1, Q35T_STAGE_IQ3_S = 2, Q35T_STAGE_IQ2_S = 8 };
+#ifdef K3_Q35_GSQ
+enum { OWN_Q2_K = 10, OWN_IQ2_XS = 17, OWN_IQ1_M = 29 };   // (their GG numbers; engine/k3.py OWN_Q35R_FMT)
+enum { Q35T_STAGE_IQ2_XXS = 4, Q35T_STAGE_IQ2_XS = 16 };
+#endif
 
 __device__ __forceinline__ void q35t_stage(const Seg * tape) {
 #ifndef K3_Q35_DF   // (the DFlash drafter module runs no OWN_MV (its caps: none), so neither grid is staged nor held in its
@@ -31,6 +40,10 @@ __device__ __forceinline__ void q35t_stage(const Seg * tape) {
     const int f = tape[0].op == OP_OWN_EMB ? tape[0].out_f32 : 0;
     if (f & (Q35T_STAGE_IQ3_XXS | Q35T_STAGE_IQ3_S)) iq_stage((int)K3TID, f & (Q35T_STAGE_IQ3_XXS | Q35T_STAGE_IQ3_S));
     if (f & Q35T_STAGE_IQ2_S) iq2s_stage((int)K3TID);
+#ifdef K3_Q35_GSQ   // (IQ2_XXS in its own IQ_G words beside the IQ3 grids, own_quant_iq.h; IQ2_XS its own array)
+    if (f & Q35T_STAGE_IQ2_XXS) iq_stage((int)K3TID, 4);
+    if (f & Q35T_STAGE_IQ2_XS) iq2xs_stage((int)K3TID);
+#endif
 #endif
 }
 #define K3_LAUNCH_HOOK(tape) q35t_stage(tape)
@@ -90,6 +103,13 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
         else if (fmt == OWN_IQ3_S) own_rows_iqg_1rt<1, 0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
         else if (fmt == OWN_IQ2_S) own_rows_iq2s_1rt<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
         else if (fmt == OWN_Q5_K) own_rows_q5k_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);
+#ifdef K3_Q35_GSQ
+        else if (fmt == OWN_IQ2_XXS) own_rows_iqg_1rt<2, 0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
+        else if (fmt == OWN_IQ2_XS) own_rows_iq2xs_1rt<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
+        else if (fmt == OWN_Q2_K) own_rows_q2k_1rt<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
+        else if (fmt == OWN_IQ1_M) own_rows_iq1m_1rt<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
+        else if (fmt == OWN_Q4_K) own_rows_q4k_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);
+#endif
         else own_rows_q6k_planes<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);   // (OWN_Q6_K: host-checked)
         if (lane == 0) {
             ((float *)sg.y)[row] = res[0];
