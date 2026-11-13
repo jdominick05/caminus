@@ -88,27 +88,19 @@ for (M, K, N) in SHAPES:
     out['fp8_as_bf16'] = round(2 * M * N * K / (ms * 1e-3) / 1e12, 1)
     err = ((a_bf @ b8.to(torch.bfloat16)).float() - ref).abs().max().item()
     out['fp8_as_bf16_maxerr_vs_fp32'] = round(err, 4)
-    try:
-        ms = bench(lambda: triton_gemm(a_bf, b_bf, tl.bfloat16), A.iters)
-        out['triton_bf16'] = round(2 * M * N * K / (ms * 1e-3) / 1e12, 1)
-    except Exception as e:
-        out['triton_bf16'] = f'ERR {type(e).__name__}'
-    try:
-        ms = bench(lambda: triton_gemm(a8.to(torch.bfloat16), b8.to(torch.bfloat16), tl.bfloat16), A.iters)
-        out['triton_fp8_upcast'] = round(2 * M * N * K / (ms * 1e-3) / 1e12, 1)
-    except Exception as e:
-        out['triton_fp8_upcast'] = f'ERR {type(e).__name__}'
-    try:
-        ai, bi = a32.to(torch.int8), b32.to(torch.int8)
-        ms = bench(lambda: triton_gemm(ai, bi, tl.int8), A.iters)
-        out['triton_int8'] = round(2 * M * N * K / (ms * 1e-3) / 1e12, 1)
-    except Exception as e:
-        out['triton_int8'] = f'unsupported ({type(e).__name__})'
-    try:
-        ms = bench(lambda: a8 @ b8, 3)            # torch fp8 matmul on gfx1100?
-        out['torch_fp8_matmul'] = round(2 * M * N * K / (ms * 1e-3) / 1e12, 1)
-    except Exception as e:
-        out['torch_fp8_matmul'] = f'unsupported ({type(e).__name__})'
+    import traceback
+    def arm(name, fn, iters=None):
+        try:
+            ms = bench(fn, iters or A.iters)
+            out[name] = round(2 * M * N * K / (ms * 1e-3) / 1e12, 1)
+        except Exception as e:
+            out[name] = f'unsupported ({type(e).__name__})'
+            if not out.get('_tb'):
+                out['_tb'] = ''.join(traceback.format_exception_only(type(e), e))[:200]
+    arm('triton_bf16', lambda: triton_gemm(a_bf, b_bf, tl.bfloat16))
+    arm('triton_fp8_upcast', lambda: triton_gemm(a8.to(torch.bfloat16), b8.to(torch.bfloat16), tl.bfloat16))
+    arm('triton_int8', lambda: triton_gemm(a32.to(torch.int8), b32.to(torch.int8), tl.int8))
+    arm('torch_fp8_matmul', lambda: a8 @ b8, 3)
     rows.append(out)
     print('PROBE ' + json.dumps(out), flush=True)
 
