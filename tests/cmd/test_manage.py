@@ -56,6 +56,22 @@ def main():
         run = staticmethod(subprocess.run)
     manage.subprocess = NoLaunch
 
+    # ---- the 27B models' optional drafter: start passes its file when it is there and adds nothing when it is not (a
+    # --no-drafter would turn the server's --draft off, swift-1.5's MTP block with it); the Coder keeps --no-drafter
+    for nm in ('swift-1.5', 'thinkingcap'):
+        mm = models.BY_NAME[nm]; dk = models.drafter_item(mm)
+        base = dict(path='/m/model.gguf', paths={mm.items[0]: '/m/model.gguf', dk: None})
+        a0 = manage.serve_argv(mm, base, 'x', 1234)
+        a1 = manage.serve_argv(mm, dict(base, paths={mm.items[0]: '/m/model.gguf', dk: '/m/drafter.gguf'}), 'x', 1234)
+        en = manage.model_entry(mm)
+        check(dk == 'dflash2-27b' and '--no-drafter' not in a0 and '--drafter' not in a0 and a1[a1.index('--drafter') + 1] == '/m/drafter.gguf'
+              and en['need_gb'] < en['size_gb'],
+              f'{nm}: no drafter flag without its file, --drafter with it; the fit rule sizes the model without the drafter '
+              f'({en["need_gb"]} of {en["size_gb"]} GB)')
+    cm_ = models.BY_NAME['coder']; dkc = models.drafter_item(cm_)
+    check('--no-drafter' in manage.serve_argv(cm_, dict(path='/m/c.gguf', paths={cm_.items[0]: '/m/c.gguf', dkc: None}), 'x', 1234),
+          'the Coder without its DFlash file: --no-drafter (its own drafter is DFlash)')
+
     # ---- models: present only with the manifest's size; model_search finds files kept elsewhere
     it = models.BY_KEY['qwen3.6']
     e = manage.model_entry(models.BY_NAME['qwen3.6'])

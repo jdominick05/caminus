@@ -92,7 +92,8 @@ def model_entry(m):
     paths = {k: locate_item(models.BY_KEY[k]) for k in m.items}
     need = [k for k in m.items if k != models.drafter_item(m)]     # a model serves without its drafter too (the Coder)
     size = sum(models.BY_KEY[k].size for k in m.items)
-    return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1),
+    need_b = sum(models.BY_KEY[k].size for k in need)   # (what a card must hold without the optional drafter: the fit rule's size)
+    return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1), need_gb=round(need_b / 1e9, 1),
                 present=all(paths[k] for k in need), path=paths[m.items[0]], paths=paths, alias=m.alias,
                 speed=m.speed, notes=m.notes)
 
@@ -324,7 +325,7 @@ def pick_port(want, taken):
 def fits_fn(entry, ctx=None):
     """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
     (caminus.arch.Arch.fits, sysfs only); without torch (no projection here) a size rule: the file + 4 GiB within the line"""
-    size_mib = entry['size_gb'] * 1e9 / 2 ** 20
+    size_mib = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20   # (the files it serves with: an optional drafter is not loaded by default)
     rule = lambda g: size_mib * 1.1 + 4096 <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
     try:
         from .. import arch
@@ -412,6 +413,11 @@ def busy_elsewhere(devs):
     return [f"{c['name']} {c['used_mib']:,} MiB" for c in card_view() if c['index'] in devs and c['used_mib'] > 2048]
 
 
+def _arch_drafter(m):
+    from .. import arch as _arch
+    return _arch.lookup(m.arch).drafter
+
+
 def serve_argv(m, e, name, port, ctx=None, extra=()):
     """caminus serve's flags for catalog model m (model_entry e) as server `name`: the model's first file, the port, a cache
     and a flight directory of its own; its drafter's file when its architecture loads one (caminus.arch; --no-drafter when
@@ -420,7 +426,10 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
              '--cache-dir', os.path.join(config.kv_dir(), name), '--flight-dir', os.path.join(config.flight_dir(), name)]
     dk = models.drafter_item(m)
     if dk is not None:
-        serve += ['--drafter', e['paths'][dk]] if e['paths'].get(dk) else ['--no-drafter']
+        if e['paths'].get(dk): serve += ['--drafter', e['paths'][dk]]
+        elif _arch_drafter(m) == 'dflash': serve += ['--no-drafter']
+        # (an optional drafter's missing file adds nothing: --no-drafter would turn the server's --draft off, and a model
+        #  whose own drafter is another kind (swift-1.5's MTP block) must keep it)
     if ctx:
         serve += ['--max-ctx', str(ctx)]
     return serve + list(extra)

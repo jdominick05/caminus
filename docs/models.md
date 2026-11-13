@@ -10,8 +10,8 @@ from its Hugging Face repository and checks every file before using it.
 | `arex-2` | AREX-2 27B (a dense model) | 1, 24 GB | 17.2 GB | 41 tok/s | 928 tok/s |
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,432 tok/s |
-| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 17.4 GB | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
-| `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 14.3 GB | 47 tok/s; 68 on two cards | 942 tok/s |
+| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
+| `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 47 tok/s; 68 on two cards | 942 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
@@ -37,7 +37,8 @@ again.
   path). It writes at about `arex-2`'s speed. `caminus serve --model ... --draft mtp` (one card) drafts with the model's
   own prediction block and verifies 4 tokens a pass; `--draft dflash` drafts with its base model's DFlash2 drafter
   instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~16K tokens of
-  context on a 24 GB card). Either way the output is identical to plain decoding. Its speed drops at depth: about
+  context on a 24 GB card). Either way the output is identical to plain decoding. `caminus pull swift-1.5` (or
+  `thinkingcap`) fetches the 2 GB drafter file with the model, once for both. Its speed drops at depth: about
   15 tok/s with 28K tokens of context.
 - **`thinkingcap`** is the other dense 27B model on Caminus's own code end to end: a finetune of the same base, quantized
   to 4.2 bits per weight. It is the smaller download and writes a little faster than `swift-1.5`. It fits a 20 GB card

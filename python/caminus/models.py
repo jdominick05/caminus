@@ -54,8 +54,8 @@ ITEMS = ITEMS + (
 )
 # Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
 # Face's API on 2026-11-11 (each local file's sha256 computed and equal). CATALOG names Swift 1.5 and ThinkingCap (their
-# own-code engines serve: arch.Dense35, the module from the file's formats); the drafter joins it when its engine does, so
-# until then `caminus pull` / `caminus start` do not list it.
+# own-code engines serve: arch.Dense35, the module from the file's formats); the drafter is part of both models' files
+# (`caminus pull` fetches it once for both; `caminus start` passes it, and `--draft dflash` uses it: the default stays off).
 # Licences: Swift 1.5 the Swift Open License 1.0, ThinkingCap PolyForm Small Business 1.0.0, the drafter Apache-2.0.
 ITEMS = ITEMS + (
     Item('swift-1.5', 'swift-1.5', 'ukisai/Swift-1.5-Qwen3.8-27B-GGUF', '14bfe4b42be4a925d98816db830155f476c605e7',
@@ -92,11 +92,11 @@ ALL = (
            '41 tok/s decode, 928 tok/s prefill 2K (one XTX)', 'the 24 GB card only; ~119K context'),
     _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
            '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
-    _model('swift-1.5', 'Swift 1.5 (Qwen3.8 27B dense) Q4_K_M (own code end to end)', 'qwen35-own', ('swift-1.5',), 'swift-1.5',
+    _model('swift-1.5', 'Swift 1.5 (Qwen3.8 27B dense) Q4_K_M (own code end to end)', 'qwen35-own', ('swift-1.5', 'dflash2-27b'), 'swift-1.5',
            '42 tok/s decode on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'the 24 GB card only; --draft mtp (its own MTP block, one card)'),
-    _model('thinkingcap', 'ThinkingCap (Qwen3.8 27B dense) RCO 4.2 bpw (own code end to end)', 'qwen35-own', ('thinkingcap',),
+    _model('thinkingcap', 'ThinkingCap (Qwen3.8 27B dense) RCO 4.2 bpw (own code end to end)', 'qwen35-own', ('thinkingcap', 'dflash2-27b'),
            'thinkingcap', '47 tok/s decode on an XTX, 39 on an XT (short context); prefill 942 tok/s at 2K (XTX)',
-           'fits either card (an XT: ~53K context); no drafter yet (its MTP block is Q6_K: the drafter module runs Q4_0)'),
+           'fits either card (an XT: ~53K context); --draft dflash: its base model\'s DFlash2 drafter (one card)'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )
@@ -140,9 +140,11 @@ def model_of(path):
 
 
 def drafter_item(m):
-    """the ITEMS key of the drafter file m's architecture loads (its role is the drafter's name: 'dflash'), or None"""
-    d = _arch.lookup(m.arch).drafter
-    return next((k for k in m.items if d is not None and BY_KEY[k].role == d), None)
+    """the ITEMS key of the drafter file m's architecture loads (its role is a drafter's name: 'dflash'; the architecture's
+    own drafter or one of its optional ones, Arch.drafters: the dense 27B line's --draft dflash), or None"""
+    A = _arch.lookup(m.arch)
+    ds = {d for d in (A.drafter, *getattr(A, 'drafters', ())) if d}
+    return next((k for k in m.items if BY_KEY[k].role in ds), None)
 
 
 def local_rel(it):
