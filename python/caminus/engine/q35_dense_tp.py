@@ -524,14 +524,14 @@ class Dense35TP:
         """wait for launch_tokens' pass; a bailed pass runs again before returning. True when it was rerun"""
         bad = self._pass_wait(i0)
         if not bad:
-            self.pos_host = i0 + 1; return False
+            self.pos_host = i0 + 1; self.last_T = 1; return False
         for attempt in range(1, self.max_retries + 1):
             self.bails.append((i0, attempt - 1, bad))
             print(f'k3 qwen35 TP: a wait gave up at position {i0} (attempt {attempt}), running the pass again: ' + '; '.join(bad),
                   file=sys.stderr, flush=True)
             bad = self._pass(i0, 0)
             if not bad:
-                self.pos_host = i0 + 1; return True
+                self.pos_host = i0 + 1; self.last_T = 1; return True
         self.bails.append((i0, self.max_retries, bad))
         raise RuntimeError(f'k3 qwen35 TP: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
 
