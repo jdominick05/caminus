@@ -61,7 +61,7 @@ def _gemm(A, B, C, M, N, K, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr
         kk = k + offs_k
         a = tl.load(A + offs_m[:, None] * K + kk[None, :], mask=(offs_m[:, None] < M) & (kk[None, :] < K), other=0).to(DT)
         b = tl.load(B + kk[:, None] * N + offs_n[None, :], mask=(kk[:, None] < K) & (offs_n[None, :] < N), other=0).to(DT)
-        acc += tl.dot(a, b, acc)
+        acc = tl.dot(a, b, acc)
     tl.store(C + offs_m[:, None] * N + offs_n[None, :], acc.to(tl.bfloat16),
              mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
 
