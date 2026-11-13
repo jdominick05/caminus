@@ -268,7 +268,7 @@ class K3Session(EngineSession):
             self._ver = getattr(m, 'ver', None)
             if self._ver is None or int(getattr(m, 'spec_T', 1)) < 4:
                 raise ValueError(f'K3Session: kind {self._dk} needs the engine built with spec_T 4 and its verify tape (m.ver)')
-        self.request_params = None   # the worker sets it per request: sampled requests on an MTP session run plain
+        self.request_params = None   # the worker sets it per request (sampled requests on a host-verified drafter: sample_and_match over the verify rows)
         if getattr(m, '_pass_police', None) is None:
             m._pass_police = NullPolice()
         self.T = self.ntok = 4 if self._dk in HOST_VERIFY else int(m.ntok)
@@ -280,7 +280,8 @@ class K3Session(EngineSession):
         self.vh = int(m.vh)
         self.eos_ids = tuple(eos_ids)
         self.stats = stats
-        self.policy = policy if policy is not None else DraftPolicy()
+        # (a host-accept drafter's default policy measures a plain pass per bucket: DraftPolicy.probe_plain)
+        self.policy = policy if policy is not None else DraftPolicy(probe_plain=self._dk in HOST_VERIFY)
         self.max_recoveries = int(max_recoveries)
         self.idle_s = idle_s
         self.wants_marks = bool(marks)
@@ -302,7 +303,7 @@ class K3Session(EngineSession):
         self._inflight = None       # 'step': a device step under way (abort drains the drafter's step when it was launched)
         self._step_ep = None        # the drafter's launch epoch (DFlashK3.token) before that step
         self._bails_seen = len(getattr(m, 'bails', ()))
-        self.counters = dict(own_topk=0, device_passes=0, host_greedy_passes=0, sampled_passes=0, full_rows=0, wide_rows=0, plain_passes=0,
+        self.counters = dict(own_topk=0, device_passes=0, host_greedy_passes=0, sampled_passes=0, sampled_draft_passes=0, full_rows=0, wide_rows=0, plain_passes=0,
                              recoveries=0, recover_failed=0, prefill_recoveries=0, cancelled_prefills=0, aborts=0, aborts_commit0=0,
                              dropped_live=0, parks=0, filler_passes=0, idle_skipped=0, side_calls=0, side_recoveries=0,
                              side_ended=0, side_dropped=0)
@@ -574,10 +575,6 @@ class K3Session(EngineSession):
             return []
         pos = len(toks) - 1
         self._mode = self.policy.decide(self._cls(), pos)
-        if self._dk in HOST_VERIFY:
-            prm = self.request_params
-            if prm is not None and not (prm.greedy and not prm.penalties_on):
-                self._mode = 'plain'       # (a sampled request runs the T = 1 tape: no draft round)
         if self._mode == 'plain':
             self._kind = 'plain'
             self.drafts_real = False
@@ -686,9 +683,6 @@ class K3Session(EngineSession):
         kind = self._kind
         self._kind = None
         greedy_plain = prm.greedy and not prm.penalties_on
-        if self._dk in HOST_VERIFY and not greedy_plain and k > 0:
-            drafts, k = [], 0          # (a sampled pass on an MTP session runs the T = 1 tape, no drafts)
-            if kind == 'mtp': kind = 'plain'
         t0 = clock()
         tw = None
         step_ms = None
@@ -711,6 +705,25 @@ class K3Session(EngineSession):
                         except Exception: step_ms = None       # noqa: BLE001 - a timing read only
                     self.counters['device_passes'] += 1
                     tw = clock()
+                elif not greedy_plain and self._dk in HOST_VERIFY and kind == 'mtp' and k > 0:
+                    # a sampled request on a host-verified drafter (MTP, the 27B DFlash2): the T = 4 verify pass, then its
+                    # rows F - 1 .. F - 1 + k sampled in turn, each draft kept while it equals the draw (candsample's
+                    # sample_and_match: every emitted token is drawn from the target's distribution given the accepted
+                    # prefix, so the output is distributed exactly as plain sampling; before, sampled passes dropped the
+                    # drafts and ran the T = 1 tape)
+                    self._arm()
+                    if self.df is not None: self.df.flush()
+                    self._ver.run(list(seq[i0:i0 + self.T]), i0, commit, argmax=False)   # (returns after the pass's status read)
+                    tw = clock()
+                    L = self._ver.logits2
+                    src = (L[:, :self.vh], L[:, self.vh:])
+                    pid, kp = self._penalty_rows(sampler.params, history, drafts)
+                    self.queue_rows(F - 1, k + 1, pid, kp, src=src)
+                    out = self._sample_rows(F, k, drafts, sampler, history, stop, pid, kp, False, src=src)
+                    self._take_h(i0, self.T, [int(x) for x in seq[i0 + 1:i0 + self.T]] + [int(out[-1])])
+                    self._dev = None
+                    self.counters['sampled_passes'] += 1
+                    self.counters['sampled_draft_passes'] += 1
                 elif greedy_plain:
                     self._arm()
                     if self.df is not None: self.df.flush()
@@ -735,6 +748,9 @@ class K3Session(EngineSession):
                     self._dev = None
                     self.counters['host_greedy_passes'] += 1
                 else:
+                    if kind == 'plain' and self._dk in HOST_VERIFY and k > 0:
+                        drafts, k = [], 0          # (a plain host-verify pass runs the T = 1 tape: no drafts, one sampled row -
+                                                   #  filler drafts would sample stale candidate rows past row 0)
                     self._arm()
                     if self.df is not None and kind != 'dflash': self.df.flush()
                     tw, out = self._sampled_pass(seq, i0, commit, F, k, drafts, sampler, history, stop, clock,
@@ -776,7 +792,7 @@ class K3Session(EngineSession):
         if k is not None and self.stats is not None:
             self.stats.refusal(k)
 
-    def queue_rows(self, r0, R, pid, kp):
+    def queue_rows(self, r0, R, pid, kp, src=None):
         """the device sampler's device half for rows r0 .. r0 + R - 1 of the last verify (the logits shards each card holds):
         each card's top-kp raw logits with their ids and the raw logits of the penalty ids pid in its range, queued on each
         card's current stream behind the pass, copied into pinned host buffers (rows_wait() collects them)"""
@@ -788,7 +804,7 @@ class K3Session(EngineSession):
         for c in (0, 1):
             cand = self._cand[c]
             with torch.cuda.device(self._dev_t[c]):
-                L = m.logits_half[c][r0:r0 + R]
+                L = (src or m.logits_half)[c][r0:r0 + R]
                 lo, hi = (0, self.vh) if c == 0 else (self.vh, self.n_vocab)
                 sel = pid[(pid >= lo) & (pid < hi)]
                 cand.run(L, kp, sel - lo)          # (Caminus's own kernel: top-kp values and ids, the penalty ids' raw values)
@@ -825,34 +841,38 @@ class K3Session(EngineSession):
             rows.append(CS.Row(cards=[c0, c1], pid=pid, pvals=pv))
         return rows
 
-    def full_row(self, r):
-        """row r of the last verify, whole (float32 [V] on the host: both cards' shards)"""
+    def full_row(self, r, src=None):
+        """row r of the last verify, whole (float32 [V] on the host: both cards' shards; src: another pass's halves, the
+        host-verified drafters' verify engine)"""
         parts = []
         for c in (0, 1):
             with torch.cuda.device(self._dev_t[c]):
-                parts.append(self.m.logits_half[c][r].float().cpu().numpy())
+                parts.append((src or self.m.logits_half)[c][r].float().cpu().numpy())
         return np.concatenate(parts)
 
     def _sampled_pass(self, seq, i0, commit, F, k, drafts, sampler, history, stop, clock, plain=False):
         """the verify with the device sampler: each card's top-k' of rows F - 1 .. F - 1 + k and the penalty ids' raw logits
         (queued behind the pass on each card's stream, again after a retried pass), then candsample's sample and match"""
-        m, prm = self.m, sampler.params
+        m = self.m
         R = k + 1
-        pid = CS.penalty_ids(prm, history, drafts)
-        kp = CS.k_prime(prm, len(pid))
-        if kp is not None and kp > self.kmax:
-            kp = None               # (a penalty window wider than the pinned candidate buffers: every row whole, the reference)
-            self.counters['wide_rows'] += 1
+        pid, kp = self._penalty_rows(sampler.params, history, drafts)
         m.launch_tokens(seq, i0, commit)
         self.queue_rows(F - 1, R, pid, kp)
         if m.finish_pass(i0, commit):
             self.queue_rows(F - 1, R, pid, kp)
         tw = clock()
+        return tw, self._sample_rows(F, k, drafts, sampler, history, stop, pid, kp, plain)
+
+    def _sample_rows(self, F, k, drafts, sampler, history, stop, pid, kp, plain, src=None):
+        """the host half of a sampled pass: rows F - 1 .. F - 1 + k (queued by queue_rows from src) drawn and matched
+        against the drafts (candsample)"""
+        prm = sampler.params
+        R = k + 1
         ta = time.perf_counter()
 
         def fetch(j):
             self.counters['full_rows'] += 1
-            return self.full_row(F - 1 + j)
+            return self.full_row(F - 1 + j, src)
         if kp is not None and CS.batched_ok(prm) and plain is False:   # (penalties off, DFlash drafts: every row drawn at once)
             base = len(history)
             us = [sampler.uniform(base + j) for j in range(R)]          # (host work while the cards' top-k finishes)
@@ -864,7 +884,16 @@ class K3Session(EngineSession):
             tb = time.perf_counter()
             out = CS.sample_and_match(rows, sampler, list(drafts), list(history), stop, fetch=fetch)
         self.samp_t.append(((tb - ta) * 1e3, (time.perf_counter() - tb) * 1e3, len(out)))
-        return tw, out
+        return out
+
+    def _penalty_rows(self, prm, history, drafts):
+        """(pid, kp) of a sampled pass: the penalty ids and the candidate width (None: whole rows)"""
+        pid = CS.penalty_ids(prm, history, drafts)
+        kp = CS.k_prime(prm, len(pid))
+        if kp is not None and kp > self.kmax:
+            kp = None               # (a penalty window wider than the pinned candidate buffers: every row whole, the reference)
+            self.counters['wide_rows'] += 1
+        return pid, kp
 
     # ------------------------------------------------------------------------------------------------ end / abort / reset
     def end(self):
