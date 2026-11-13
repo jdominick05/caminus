@@ -364,6 +364,7 @@ def main():
     check(not os.path.exists(os.path.expanduser('~/.qwen/settings.json.bak-x')), 'qwen-code: nothing written under ~/.qwen')
 
     paused_checks(S)
+    reload_checks(S)
     print(f'RESULT {"PASS" if not FAILS else "FAIL (" + str(len(FAILS)) + ")"}')
     return 0 if not FAILS else 1
 
@@ -384,6 +385,27 @@ out['team'] = manage.cmd_start(['--team', 'brain-hands', '--json'])
 out['serve'] = {a: arch.paused(arch.ARCHS[a]) for a in ('qwen35moe', 'qwen3next', 'qwen35', 'qwen35-own', 'qwen3moe', 'qwen4exp')}
 print(json.dumps(out))
 '''
+
+
+def reload_checks(S):
+    """caminus start's launcher reloads a server that exited 75 (a broken engine) once, and passes any other exit through:
+    the real loop of guarded.command_reloading around a stub in the guard's place"""
+    from caminus.cmd import guarded
+    d = os.path.join(S, 'reload'); os.makedirs(d, exist_ok=True)
+    stub, cnt, log = os.path.join(d, 'stub.sh'), os.path.join(d, 'n'), os.path.join(d, 'serve.log')
+    with open(stub, 'w') as f:   # (exits with the codes in $CODES, one per run)
+        f.write('n=$(cat "$CNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$CNT"\n'
+                'set -- $CODES; shift "$n"; exit "${1:-0}"\n')
+    cmd = guarded.command_reloading('serve', ['--port', '1'], log, 0)
+    i = cmd.index('caminus-reload')
+    for codes, want_rc, want_runs in (('75 0', 0, 2), ('75 75', 75, 2), ('99', 99, 1), ('0', 0, 1)):
+        if os.path.exists(cnt): os.remove(cnt)
+        env = dict(os.environ, CNT=cnt, CODES=codes, CAMINUS_RELOAD_SLEEP='0')
+        r = subprocess.run(cmd[:i + 1] + [stub, log], env=env, capture_output=True, text=True, timeout=30)
+        runs = int(open(cnt).read().strip())
+        check(r.returncode == want_rc and runs == want_runs,
+              f'reload: exits {codes} -> launcher rc {r.returncode} after {runs} run(s) (want {want_rc} after {want_runs}: '
+              f'75 reloads once, a fault or a stop never)')
 
 
 def paused_checks(S):

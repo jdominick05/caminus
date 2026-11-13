@@ -473,7 +473,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
                 serve[i + 1] = str(port)
     else:
         serve = serve_argv(m, e, name, port, ctx, extra)
-    cmd = guarded.command('serve', serve, logp, 0)
+    cmd = guarded.command_reloading('serve', serve, logp, 0)   # (exit 75, a broken engine: reloaded once)
     view = {c['index']: c for c in card_view()}
     env = dict(os.environ, HIP_VISIBLE_DEVICES=','.join(str(view[i]['hip']) for i in devs))   # (HIP's indices, the iGPU counted)
     env.pop('CAMINUS_GUARD', None)

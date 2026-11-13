@@ -188,6 +188,9 @@ GPU safety (a fault on the display card can take the desktop down):
 - Every GPU process runs under `tools/guard.sh LOG SECS CMD...` (or `caminus guard`).
 - Guard exit 99 = a GPU fault: stop all GPU work, rerun nothing. Exit 98 = a fault on record
   (`~/.local/state/k3/GPU_FAULT_STOP`): a person inspects it before anything runs.
+- Exit 75 = `caminus serve`'s engine produced non-finite logits (`caminus.errors.NonFiniteLogits`: a weight or state corrupt
+  in that process; nothing parked). It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
+  the systemd unit's `RestartForceExitStatus=75`); faults are never retried.
 - New or changed kernel code runs first on a non-display card alone (`HIP_VISIBLE_DEVICES=<its index>`), small inputs.
 - Every device wait is time-bounded (`limit_us`; TP 200 ms + a bitwise retry); every launch well under 200 ms. Never a
   spin-forever or no-timeout variant.

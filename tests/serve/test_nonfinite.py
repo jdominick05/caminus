@@ -41,10 +41,14 @@ class TestNonFinite(unittest.TestCase):
 
     def test_server_stops_serving(self):
         srv = U.make_server(engine=NaNEngine(ntok=4))
+        hits = []
+        srv.worker.on_broken = hits.append            # (caminus serve: stop the loop, exit 75)
         try:
             st, _, body = U.post_json(srv, '/v1/completions', {'prompt': 'hello', 'max_tokens': 8, 'temperature': 0})
             self.assertNotEqual(st, 200)
             self.assertIn('broken', str(body))
+            self.assertEqual(len(hits), 1)                   # the broken callback ran once, with the reason
+            self.assertIn('non-finite', hits[0])
             st2, _, _ = U.request(srv, 'GET', '/health')
             self.assertEqual(st2, 503)                       # unhealthy with the reason, until a restart
             st3, _, body3 = U.post_json(srv, '/v1/completions', {'prompt': 'again', 'max_tokens': 8, 'temperature': 0})

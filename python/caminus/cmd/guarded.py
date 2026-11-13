@@ -25,6 +25,22 @@ def command(name, argv, log, secs):
     return ['bash', GUARD, log, str(int(secs)), sys.executable, '-I', '-X', 'faulthandler', '-c', boot, name, *argv]
 
 
+# caminus serve's exit code when its engine produced non-finite logits (serve/cli.py EXIT_BROKEN): the one exit a launcher
+# reloads on, once. GPU faults (the guard's 99 / 98) are never retried
+RELOAD_RC, RELOADS = 75, 1
+_RELOAD_SH = (
+    'n=0; while :; do bash "$@"; rc=$?; '
+    'if [ "$rc" = {rc} ] && [ "$n" -lt {k} ]; then n=$((n + 1)); '
+    'echo "caminus: the server exited {rc} (engine broken: non-finite logits): reloading ($n of {k}) in 10 s" | tee -a "$2"; '
+    'sleep "${{CAMINUS_RELOAD_SLEEP:-10}}"; continue; fi; exit "$rc"; done')
+
+
+def command_reloading(name, argv, log, secs):
+    """command() inside a loop that runs it again once when the server exits RELOAD_RC (a fresh load re-uploads the
+    weights); any other exit, a stop's included, ends the loop with that code"""
+    return ['bash', '-c', _RELOAD_SH.format(rc=RELOAD_RC, k=RELOADS), 'caminus-reload'] + command(name, argv, log, secs)[1:]
+
+
 def log_path(name):
     return os.path.join(config.state_dir(), f'{name}.log')
 

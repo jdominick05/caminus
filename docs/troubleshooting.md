@@ -50,6 +50,13 @@ the memory.
 start anything (exit 98) until you've looked at it: read `journalctl -k` around that time, then delete the stop file
 `~/.local/state/k3/GPU_FAULT_STOP`. Please report it with the doctor output and those kernel log lines.
 
+**Exit 75, or "ENGINE BROKEN" / "engine broken (restart the server)"**: the model produced NaN or infinite logits, which
+means a weight or state in that server process is corrupt (seen once: every reply was the token `!` repeated). The server
+stops answering (`/health` returns 503 with the reason), skips parking the conversation so the bad state never reaches the
+disk cache, and exits 75. `caminus start` and the systemd unit reload it once by themselves; a fresh load uploads the
+weights again. If it breaks again right away, the log line names the weight that changed (`changed on the card since load`
+or `differ from the file`): please report it with that line and `caminus doctor`.
+
 **"Segmentation fault" or "Fatal Python error"**: guarded Python commands enable fatal-error tracebacks. Save
 `caminus logs NAME` before restarting the server (a restart replaces its log), and include the traceback and kernel log
 lines from that time in your bug report. A native crash may leave no Python traceback if it happens on a runtime thread.

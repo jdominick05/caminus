@@ -133,6 +133,7 @@ class EngineWorker:
         self.current = None             # the job on the engine (cancel_all)
         self._stop = False
         self.broken = None          # a NonFiniteLogits reason: sticky until the process ends
+        self.on_broken = None       # called with the reason once broken (caminus serve: stop and exit 75)
         self.thread = threading.Thread(target=self._loop, name='k3-engine', daemon=True)
         self.thread.start()
 
@@ -313,6 +314,10 @@ class EngineWorker:
             print(f'caminus serve: ENGINE BROKEN, refusing every request until a restart: {e}', file=sys.stderr, flush=True)
             job.t_end = time.perf_counter()
             job.events.put(('error', 'engine', f'engine broken (restart the server): {e}'))
+            if self.on_broken is not None:
+                try: self.on_broken(self.broken)
+                except Exception:   # noqa: BLE001 - the callback must not hide the broken state
+                    traceback.print_exc()
         except EngineError as e:
             self.stats['engine_errors'] += 1
             self.stats['resets'] += 1

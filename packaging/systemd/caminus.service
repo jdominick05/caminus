@@ -8,6 +8,9 @@ Documentation=file://%h/src/caminus/packaging/systemd/README.md
 Conflicts=fn-server.service
 # a GPU fault recorded by tools/guard.sh blocks every start until it has been inspected (CLAUDE.md, GPU safety)
 ConditionPathExists=!%h/.local/state/k3/GPU_FAULT_STOP
+# exit 75 (the engine produced non-finite logits: corrupt weights or states) reloads the server, at most 2 restarts an hour
+StartLimitIntervalSec=3600
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -34,9 +37,13 @@ ExecStop=%h/src/caminus/packaging/systemd/caminus-stop 170 $MAINPID
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=180
-# never restarted automatically: after a GPU fault the guard kills the run and records STOP; a restart loop is what lost the
-# desktop on 11-01
+# never restarted after a fault: the guard kills the run and records STOP (exit 99 / 98); a restart loop is what lost the
+# desktop on 11-01. The one exception: exit 75 (caminus serve: the engine produced non-finite logits, a weight or state
+# corrupt in this process) reloads the server; RestartForceExitStatus applies even with Restart=no, and the start limit
+# above stops a model that breaks on every load
 Restart=no
+RestartForceExitStatus=75
+RestartSec=10
 
 [Install]
 WantedBy=default.target
