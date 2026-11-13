@@ -80,6 +80,12 @@ def main():
     cm_ = models.BY_NAME['coder']; dkc = models.drafter_item(cm_)
     check('--no-drafter' in manage.serve_argv(cm_, dict(path='/m/c.gguf', paths={cm_.items[0]: '/m/c.gguf', dkc: None}), 'x', 1234),
           'the Coder without its DFlash file: --no-drafter (its own drafter is DFlash)')
+    ce = dict(path='/m/c.gguf', paths={cm_.items[0]: '/m/c.gguf', dkc: None})
+    for opts in (['--draft', 'dflash', '--drafter', '/m/custom.gguf'], ['--draft=dflash', '--drafter=/m/custom.gguf'],
+                 ['--drafter', '/m/custom.gguf'], ['--draft', 'dflash']):
+        got = manage.serve_argv(cm_, ce, 'x', 1234, extra=opts)
+        check('--no-drafter' not in got and got[-len(opts):] == opts,
+              'the Coder preserves an explicit drafter file or DFlash choice instead of adding --no-drafter')
 
     # ---- models: present only with the manifest's size; model_search finds files kept elsewhere
     it = models.BY_KEY['qwen3.6']

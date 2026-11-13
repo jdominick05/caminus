@@ -440,6 +440,17 @@ def _arch_drafter(m):
     return _arch.lookup(m.arch).drafter
 
 
+def _serve_arg(extra, flag):
+    """The last exact flag's value, in either spelling. Malformed options remain serve's argparse error to report."""
+    value = None
+    for i, arg in enumerate(extra):
+        if arg.startswith(flag + '='):
+            value = arg[len(flag) + 1:]
+        elif arg == flag:
+            value = extra[i + 1] if i + 1 < len(extra) and not extra[i + 1].startswith('--') else None
+    return value.strip() if value else value
+
+
 def serve_argv(m, e, name, port, ctx=None, extra=()):
     """caminus serve's flags for catalog model m (model_entry e) as server `name`: the model's first file, the port, a cache
     and a flight directory of its own; its drafter's file when its architecture loads one (caminus.arch; --no-drafter when
@@ -448,10 +459,14 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
              '--cache-dir', os.path.join(config.kv_dir(), name), '--flight-dir', os.path.join(config.flight_dir(), name)]
     dk = models.drafter_item(m)
     if dk is not None:
-        if e['paths'].get(dk): serve += ['--drafter', e['paths'][dk]]
-        elif _arch_drafter(m) == 'dflash': serve += ['--no-drafter']
+        custom = _serve_arg(extra, '--drafter')
+        if custom:
+            pass                           # (the supplied file is validated by serve, not replaced by catalog fallback)
+        elif e['paths'].get(dk): serve += ['--drafter', e['paths'][dk]]
+        elif _arch_drafter(m) == 'dflash' and _serve_arg(extra, '--draft') != 'dflash': serve += ['--no-drafter']
         # (an optional drafter's missing file adds nothing: --no-drafter would turn the server's --draft off, and a model
-        #  whose own drafter is another kind (swift-1.5's MTP block) must keep it)
+        #  whose own drafter is another kind (swift-1.5's MTP block) must keep it; an explicit --draft dflash must either
+        #  load its file or report it missing, never silently become off)
     if ctx:
         serve += ['--max-ctx', str(ctx)]
     return serve + list(extra)

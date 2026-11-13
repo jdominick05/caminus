@@ -50,6 +50,7 @@ The card count and drafter are available in both layouts. Auto leaves the choice
 that model and card count; off explicitly disables drafting. Only the architecture's supported modes are offered.
 If a model is on disk but its optional DFlash file is missing, `p` offers to download the drafter. Selecting DFlash
 requires that file; off and the model's built-in MTP block can start without it.
+In the advanced layout, `--drafter` can point to a different file; the server validates that file when it starts.
 The panel remembers the choices for each model and card count, along with your layout and other option values, in
 `~/.config/caminus/panel.json`.
 

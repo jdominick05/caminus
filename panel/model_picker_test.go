@@ -159,3 +159,28 @@ func TestModelPickerMissingOptionalDrafter(t *testing.T) {
 		t.Fatalf("the missing optional file is visible: %s", rows)
 	}
 }
+
+func TestModelPickerCustomDrafter(t *testing.T) {
+	for _, advanced := range []bool{false, true} {
+		for _, path := range []string{"", "  ", "/fixture/custom.gguf"} {
+			m := newCtl(newCtlCLI("caminus"), advanced, "")
+			mi := pickerModel()
+			mi.MissingDrafter = "dflash"
+			m.models = []camModel{mi}
+			m.opts = []option{{Dest: "drafter", Flag: "--drafter", Type: "str"}}
+			m.vals["drafter"] = path
+			m.picks = map[string]modelPick{mi.Name: {Cards: 1, Drafts: map[int]string{1: "dflash"}}}
+			_, cmd := m.modelsKey("enter")
+			wantStart := advanced && strings.TrimSpace(path) != ""
+			if (cmd != nil) != wantStart {
+				t.Fatalf("advanced %v, custom %q: start=%v want %v", advanced, path, cmd != nil, wantStart)
+			}
+			if wantStart {
+				args := strings.Join(m.startArgs(mi), " ")
+				if !strings.Contains(args, "--draft dflash") || !strings.Contains(args, "--drafter "+path) || strings.Contains(args, "--no-drafter") {
+					t.Fatalf("custom drafter did not reach serve unchanged: %s", args)
+				}
+			}
+		}
+	}
+}

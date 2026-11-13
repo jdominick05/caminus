@@ -515,7 +515,8 @@ func (m ctl) modelsKey(s string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		_, draft := m.modelMode(*mi)
-		if mi.MissingDrafter != "" && draft == mi.MissingDrafter {
+		customDrafter := m.advanced && m.optByDest("drafter") != nil && strings.TrimSpace(m.vals["drafter"]) != ""
+		if mi.MissingDrafter != "" && draft == mi.MissingDrafter && !customDrafter {
 			m.setNote(mi.Name+"'s "+draft+" drafter is not downloaded: p to pull it", true)
 			return m, nil
 		}
