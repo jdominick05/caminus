@@ -33,6 +33,37 @@ class TestNonFinite(unittest.TestCase):
         with self.assertRaises(NonFiniteLogits):
             run_generation(sess, [1, 2, 3, 4], S.Sampler(prm), 16, lambda ids: None)
 
+    def test_queued_job_never_reaches_the_session(self):
+        """a job queued behind the one that broke the engine fails on the worker thread without a session call (its
+        prompt-cache prepare could park the corrupt live state to disk)"""
+        import queue as _q, threading
+        from caminus.serve.worker import EngineWorker, Job
+        from caminus.errors import NonFiniteLogits as NF
+        sess = MockSession(NaNEngine(ntok=4), max_ctx=4096)
+        calls = []
+        orig = sess.prefill
+        def prefill(*a, **k):
+            calls.append(1); return orig(*a, **k)
+        sess.prefill = prefill
+        gate = threading.Event()
+        w = EngineWorker(sess, U.common.tokenizer())
+        w.on_broken = lambda why: gate.set()
+        jobs = [Job([1, 2, 3, 4], S.SamplingParams(temperature=0.0), 8, [], None, None, tag='completions') for _ in range(3)]
+        for j in jobs: w.q.put(j)                        # (all three queued before the first runs)
+        gate.wait(10)
+        evs = []
+        for j in jobs:                                   # (each job's terminal event: 'error' or 'done')
+            e = None
+            try:
+                while True:
+                    e = j.events.get(timeout=10)
+                    if e[0] in ('error', 'done'): break
+            except _q.Empty: e = None
+            evs.append(e)
+        w.shutdown(); w.thread.join(5)
+        self.assertEqual(len(calls), 1)                  # only the first job reached the session
+        self.assertTrue(all(e is not None and e[0] == 'error' and 'broken' in str(e[2]) for e in evs), evs)
+
     def test_draw_empty(self):
         w = np.array([np.nan, np.nan], dtype=np.float32)
         c = S.Candidates(np.array([3, 5]), w, w, w)

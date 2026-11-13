@@ -180,7 +180,7 @@ class EngineWorker:
 
     def _loop(self):
         while True:
-            idle = self.sess.idle if self.idle_s else None
+            idle = self.sess.idle if self.idle_s and not self.broken else None   # (broken: no idle park of a corrupt state)
             if idle is not None and self._idle_due:
                 try:
                     job = self.q.get(timeout=self.idle_s)
@@ -201,6 +201,12 @@ class EngineWorker:
                     self._bundle_job(job)
                 finally:
                     self.busy = False
+                continue
+            if self.broken:
+                # (non-finite logits earlier in this process: a queued job never reaches the session - its prompt-cache
+                #  prepare could park the corrupt live state to disk - it fails here, on the worker thread)
+                job.t_start = job.t_end = time.perf_counter()
+                job.events.put(('error', 'engine', f'engine broken (restart the server): {self.broken}'))
                 continue
             if self._stop:
                 job.cancel.set()        # (shutting down: a job still queued ends 'cancel' without touching the engine)
