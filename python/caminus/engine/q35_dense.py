@@ -170,6 +170,8 @@ class Dense35Own:
         self.dev, self.max_ctx, self.limit_us, self.spec_T = int(device), int(max_ctx), limit_us, int(spec_T)
         self.module = module or module_of(F)
         self.tcap = self.module in k3.Q35T_MODULES
+        # the formats whose matvecs run on the one-round-trip tiles (own_matvec_1rt); the others on own_matvec16
+        self.one_rt = (k3.OWN_Q35R_1RT if self.module in k3.Q35R_MODULES else k3.OWN_Q35T_1RT) if self.tcap else k3.OWN_1RT_FMT
         if self.module not in k3.Q35_MODULES: raise ValueError(f'Dense35Own: module {self.module} ({k3.Q35_MODULES})')
         # (no gate | up fusion on the ThinkingCap module: its feed-forward's gate and up differ in format in most blocks)
         self.per_wgp, self.gu, self.rpt, self.rpt16 = per_wgp, bool(gu) and not self.tcap, int(rpt), int(rpt16)
@@ -252,7 +254,7 @@ class Dense35Own:
         if t.type in ('F32', 'BF16'):   # (BF16: widened to F32, exactly: the high half of a float32)
             f = b.view(np.float32) if t.type == 'F32' else (b.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
             return 'F32', f.reshape(R, K).copy()
-        ok = ((k3.OWN_Q35G_1RT if self.module in k3.Q35G_MODULES else k3.OWN_Q35T_1RT) + ('Q8_0',) if self.tcap
+        ok = (self.one_rt + ('Q8_0',) if self.tcap
               else ('Q4_K', 'Q8_0', 'Q5_K', 'Q6_K'))
         if t.type not in ok: raise ValueError(f'Dense35Own: {name} is {t.type} ({ok} on module {self.module}, or F32 / BF16 alpha / beta)')
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
@@ -326,7 +328,7 @@ class Dense35Own:
             """W's matvec on the fp16 activations x16 (an F32 matrix: on the fp32 x32)"""
             if W['fmt'] == 'F32':
                 return named(E.f32_mv(W['w'], x32, out, rows_per_task=4, dep=dep), W['name'])
-            if W['fmt'] in (k3.OWN_Q35T_1RT if self.tcap else k3.OWN_1RT_FMT):
+            if W['fmt'] in self.one_rt:
                 kw = {} if up is None else dict(up=up['w'])
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt, dep=dep, **kw),
                              W['name'])

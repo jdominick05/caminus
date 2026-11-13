@@ -38,7 +38,7 @@ from caminus import ggufio, own_dequant, ref_q35
 from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q35_dense import MODULE, MODULE_GSQ, MODULE_TCAP, Dense35Own
-from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
+from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC, q2k_records, iq1m_records
 MOD = A.module or {'tcap': MODULE_TCAP, 'gsq': MODULE_GSQ}.get(A.variant, MODULE)
 TC = MOD in k3.Q35T_MODULES
 ok = True
@@ -68,7 +68,8 @@ capacity.check([DEV], [(NB + 4) * Dense35Own.projection_mib(P, 64) + 16], 'test_
 # the matvec of every quantized matrix of the tiny file on fp16 activations, against float64
 F = ggufio.GGUFFile(P); rng = np.random.default_rng(2); worst = {}
 E = k3.Engine(module=MOD); outs = []
-ONE_RT = k3.OWN_Q35T_1RT if TC else k3.OWN_1RT_FMT
+GSQ = A.variant == 'gsq'
+ONE_RT = k3.OWN_Q35R_1RT if GSQ else k3.OWN_Q35T_1RT if TC else k3.OWN_1RT_FMT
 FMTS = set(ONE_RT) | ({'Q8_0'} if TC else {'Q8_0', 'Q5_K'})
 # the embedding first: on the ThinkingCap module its segment carries the grids the matvecs read (and its rows are checked)
 emb_t = F.T['token_embd.weight']; emb_w = torch.from_numpy(np.ascontiguousarray(emb_t.pread(0, emb_t.n_bytes))).cuda()
@@ -81,7 +82,8 @@ for t in F.tensors:
     x = (rng.standard_normal(K) * 2).astype(np.float16); x16 = torch.from_numpy(x).cuda(); out = torch.zeros(R, device='cuda')
     raw = t.pread(0, t.n_bytes)
     if t.type in ONE_RT:
-        lay = q6k_planes(raw, R, K) if t.type == 'Q6_K' else iq_records(raw, R, K, t.type) if t.type in IQ_REC else raw
+        lay = (q6k_planes(raw, R, K) if t.type == 'Q6_K' else iq_records(raw, R, K, t.type) if t.type in IQ_REC else
+               q2k_records(raw, R, K) if t.type == 'Q2_K' else iq1m_records(raw, R, K) if t.type == 'IQ1_M' else raw)
         w = torch.from_numpy(np.ascontiguousarray(lay)).cuda()
         E.own_matvec_1rt(w, t.type, R, K, x16, out, rows_per_task=16)
     else:
@@ -95,7 +97,8 @@ for t, x, out, _, _ in outs:
     R, _ = t.rows(); W = own_dequant.rows(t, 0, R).astype(np.float64); xd = x.astype(np.float64)
     rel = float((np.abs(out.double().cpu().numpy() - W @ xd) / (np.abs(W) @ np.abs(xd))).max())
     worst[t.type] = max(worst.get(t.type, 0.0), rel)
-check(set(worst) == FMTS - ({'Q4_K'} if TC else set()) and max(worst.values()) < 1e-5,
+want = {t.type for t in F.tensors if t.type in FMTS and t.name != 'token_embd.weight'} if GSQ else FMTS - ({'Q4_K'} if TC else set())
+check(set(worst) == want and max(worst.values()) < 1e-5,
       f'{len(outs)} matvecs on fp16 activations against float64, worst error / sum |w x| per format: ' +
       ', '.join(f'{k} {v:.1e}' for k, v in sorted(worst.items())) + ' (< 1e-5)')
 F.close(); del E, outs
