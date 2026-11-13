@@ -185,9 +185,12 @@ srct = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35t_ops.h')).read()
 dt = srct.split('k3_extra_op(')[1]
 dft_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(DFB, dt, re.S))))
 dt = re.sub(DFB, '', dt, flags=re.S)   # (ThinkingCap's DFlash drafter module's ops: k3.Q35TDF_MODULES only)
+mtt_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, dt, re.S))))
+dt = re.sub(MTPB, '', dt, flags=re.S)   # (ThinkingCap's MTP drafter module's argmax: k3.Q35TM_MODULES only)
 dev_t = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(SPB, lambda mm: mm.group(1), re.sub(TPB, '', dt, flags=re.S), flags=re.S)))
 check(dev_t == host_ops and set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, dt, re.S)))) == {'OP_XCHG'},
       f'kernels/k3_q35t_ops.h dispatches k3.Q35S_OPS too ({len(dev_t)} ops), and OP_XCHG under K3_TP')
+check(mtt_ops == {'OP_OWN_ARGMAX'}, 'under K3_Q35_MTP in k3_q35t_ops.h: the argmax (ThinkingCap\'s MTP drafter module)')
 check(dft_ops == {'OP_DF_CONV', 'OP_DF_TOPK', 'OP_DF_SELECT', 'OP_KV_APPEND', 'OP_ATTN_DEC'}, 'under K3_Q35_DF in k3_q35t_ops.h: the DFlash drafter\'s own ops (ThinkingCap\'s drafter module)')
 check(int(re.search(r'OWN_IQ2_S = (\d+)', srct).group(1)) == k3.OWN_Q35T_FMT['IQ2_S'], 'the IQ2_S format number is k3\'s')
 e_tc = k3.Engine(module='k3_q35_tcap')
@@ -243,6 +246,21 @@ check(refused(lambda: Dense35Verify(mt4, 4, module='k3_q35_swift_ver', vram_chec
       refused(lambda: Dense35Verify(mv4, 4, module='k3_q35_tcap_ver', vram_check=False)) and
       refused(lambda: k3.Engine(module='k3_q35_tcap', T=1).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
       'refused: a verify module of the other line, and T-token matvecs on ThinkingCap\'s decode module')
+# ThinkingCap's MTP drafter (k3_q35_tcap_mtp: engine/q35_mtp.py on its Q6_K block, Q8_0 head, IQ2_S embedding)
+from caminus.engine.q35_mtp import Mtp35
+PM = os.path.join(A.scratch, 'tiny-q35-tcap-mtp.gguf'); tiny_q35.write(PM, variant='tcap', mtp=True)
+mm4 = Dense35Own(PM, max_ctx=64, vram_check=False, spec_T=4)
+mt_ = Mtp35(mm4, k=3, vram_check=False)
+ivm = set().union(*(set(E_.inventory()) for E_ in mt_.E.values()))
+chain = mt_.E[('chain', 1)]
+check(mt_.module == 'k3_q35_tcap_mtp' and ivm <= k3.MODULE_CAPS['k3_q35_tcap_mtp'] and ('OWN_MV', 'Q6_K/a16_1rt_mt') in ivm
+      and ('OWN_MV16', 'Q8_0') in ivm and ('OWN_EMB', 'IQ2_S') in ivm and all(not E_.unsupported() for E_ in mt_.E.values())
+      and chain.segs[0].op == k3.OP_OWN_EMB and chain.segs[0].pad1 == 1 and any(sg.op == k3.OP_OWN_ARGMAX for sg in chain.segs),
+      f'ThinkingCap\'s MTP tapes on k3_q35_tcap_mtp: the block\'s Q6_K T-token tiles, the Q8_0 head, the IQ2_S embedding from '
+      f'the argmax key on a chained step ({len(mt_.E)} tapes; {sorted(ivm)})')
+check(refused(lambda: Mtp35(mm4, module='k3_q35_swift_mtp', vram_check=False)) and
+      refused(lambda: k3.Engine(module='k3_q35_tcap_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
+      'refused: the other line\'s drafter module, and a format other than Q6_K on ThinkingCap\'s MTP module')
 check(('OWN_MV', 'Q4_K/a16_1rt_gu') not in k3.MODULE_CAPS['k3_q35_swift_ver'] and ('OWN_MV', 'Q4_K/a16_1rt_gu') in k3.MODULE_CAPS['k3_q35_swift'],
       'the verify module\'s capabilities leave out the fused gate | up (no verify tape runs it)')
 e_v = k3.Engine(module='k3_q35_swift_ver', T=4)

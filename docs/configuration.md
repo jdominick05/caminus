@@ -39,7 +39,7 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--max-ctx N` | A smaller context than the largest that fits. |
 | `--kv-host` | `coder` only: keep the attention cache in system memory (the cards read it directly). Same results, less VRAM. |
 | `--no-drafter` | `coder` only: turn off the drafter. |
-| `--draft KIND` | Speculative decoding: `off` (plain), `dflash` (the DFlash2 drafter: the Coder's sidecar, needs `--drafter`; on `swift-1.5`, one card, its base model's drafter file from the model directory, `Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf`, or `--drafter`), or `mtp` (the model's own prediction block: `swift-1.5`, one card). Default: the model's drafter when it needs no extra file, else `off`. |
+| `--draft KIND` | Speculative decoding: `off` (plain), `dflash` (the DFlash2 drafter: the Coder's sidecar, needs `--drafter`; on `swift-1.5` and `thinkingcap`, one card, their base model's drafter file from the model directory, `Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf`, or `--drafter`), or `mtp` (the model's own prediction block: `swift-1.5` or `thinkingcap`, one card). Default: `dflash` for the Coder when its file is there; `off` for every other model (`mtp` and `dflash` on the 27B models are opt-in). |
 | `--no-disk-cache` | Don't save conversations to disk. |
 | `--cache-cap-gb N` | The most the saved conversations may take on disk (default 30 GB; 64 GB in the long-context mode). |
 | `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |

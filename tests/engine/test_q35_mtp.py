@@ -1,4 +1,5 @@
-"""GPU gate of the dense qwen35 drafter (engine/q35_mtp.py Mtp35 on kernels/k3_q35_swift_mtp.hip), Swift 1.5, one card.
+"""GPU gate of the dense qwen35 drafter (engine/q35_mtp.py Mtp35: Swift 1.5 on kernels/k3_q35_swift_mtp.hip, ThinkingCap on
+k3_q35_tcap_mtp.hip, from the file), one card.
 
 The trunk (Dense35Own) runs teacher-forced over a fixed text of this tree (docs/dev/architecture.md), one token per pass,
 keeping its h per position; the block runs on the drafter module and, as the reference, in fp32 torch from the host
@@ -87,7 +88,7 @@ lg = mtp.b['logits'].double().cpu().numpy()
 check(d[0] == int(np.argmax(lg)), f'argmax: the device key\'s token {d[0]} is the first maximum of its logits ({int(np.argmax(lg))})')
 # a synthetic tie: the first of the equal values wins
 with torch.cuda.device(eng.dev):
-    E = k3.Engine(module='k3_q35_swift_mtp', grid=k3.resident_grid('k3_q35_swift_mtp', eng.per_wgp), T=1, limit_us=eng.limit_us)
+    E = k3.Engine(module=mtp.module, grid=k3.resident_grid(mtp.module, eng.per_wgp), T=1, limit_us=eng.limit_us)
     z = torch.full((eng.vocab,), -3.0, device=dev); z[777] = 5.0; z[123456] = 5.0; z[5] = float('nan')
     key = torch.zeros(1, dtype=torch.int64, device=dev)
     E.own_argmax(z, eng.vocab, key); E.build(); E.run(check=True); torch.cuda.synchronize()
@@ -128,7 +129,9 @@ def rope(x, pos):
 x16 = torch.zeros(D, dtype=torch.float16, device=dev); hl = torch.zeros(eng.vocab, device=dev)
 with torch.cuda.device(eng.dev):
     He = k3.Engine(module=eng.module, grid=k3.resident_grid(eng.module, eng.per_wgp), T=1)
-    He.own_matvec_1rt(eng.head['w'], eng.head['fmt'], eng.head['rows'], eng.head['K'], x16, hl, rows_per_task=eng.rpt); He.build()
+    if eng.head['fmt'] == 'Q8_0': He.own_matvec16(eng.head['w'], 'Q8_0', eng.head['rows'], eng.head['K'], x16, hl, rows_per_task=eng.rpt16)   # (ThinkingCap's head)
+    else: He.own_matvec_1rt(eng.head['w'], eng.head['fmt'], eng.head['rows'], eng.head['K'], x16, hl, rows_per_task=eng.rpt)
+    He.build()
 
 
 def head(hn):
@@ -190,7 +193,7 @@ mtp.reset(); mtp.fill(Hs[0:8], ids[1:9], 1)
 for what, fn in (('a round past the filled rows', lambda: mtp.draft(Hs[10:11], ids[11:12], 11)),
                  ('a span past the cache', lambda: mtp.draft(Hs[8:9], ids[9:10], eng.max_ctx + 10)),
                  ('a token outside the vocabulary', lambda: mtp.draft(Hs[8:9], [eng.vocab], 9)),
-                 ('the drafter module in the verify engine', lambda: Dense35Verify(eng, 1, module='k3_q35_swift_mtp'))):
+                 ('the drafter module in the verify engine', lambda: Dense35Verify(eng, 1, module=mtp.module))):
     try: fn(); check(False, f'refused: {what}')
     except (ValueError, IndexError): check(True, f'refused: {what}')
 

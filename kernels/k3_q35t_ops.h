@@ -64,12 +64,14 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
             }                                                                                                          \
         }                                                                                                              \
     }
+#ifndef K3_Q35_MTP   // (ThinkingCap's MTP drafter module, kernels/k3_q35_tcap_mtp.hip: its block is all Q6_K, the head a rows tile:
+                     //  the other formats' T-token loops out of its register allocation; the host refuses them there)
     if (fmt == OWN_IQ4_XS) { Q35T_MT_LOOP(own_rows_iq4xs_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S) { const int f = fmt == OWN_IQ3_XXS ? 0 : 1; Q35T_MT_LOOP(own_rows_iq3_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm, f)) }
-    else
-    if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q5_K) { Q35T_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else
+#endif
     { Q35T_MT_LOOP(own_rows_q6k_planes_mt2<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q6_K: host-checked)
 #undef Q35T_MT_LOOP
     return;
@@ -98,7 +100,11 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
 #ifdef K3_Q3M_VER   // (task tk = token tk: its id at Seg.a[tk], its row at Seg.y + tk * N; own_op_emb's verify form)
 __device__ __forceinline__ void q35t_op_emb(const Seg & sg, int tk) {
     if (sg.work != OWN_IQ2_S) { own_op_emb(sg, tk); return; }
+#ifdef K3_Q35_MTP   // (Seg.pad1 = 1: the token is OP_OWN_ARGMAX's key at Seg.a, the low half ~index: a chained draft step)
+    const int tok = min(max(sg.pad1 ? (int)~(uint32_t)((const unsigned long long *)sg.a)[0] : ((const int *)sg.a)[tk], 0), sg.pad2 - 1);
+#else
     const int tok = min(max(((const int *)sg.a)[tk], 0), sg.pad2 - 1);
+#endif
     const uint8_t * row = sg.W + (size_t)tok * sg.K;
     float * x = (float *)sg.y + (size_t)tk * sg.N;
 #else
@@ -125,6 +131,9 @@ __device__ __forceinline__ void q35t_op_emb(const Seg & sg) {
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { q35t_op_mv(sg, t); return true; }
+#ifdef K3_Q35_MTP   // (ThinkingCap's MTP drafter module: the greedy key, k3_q35_ops.h's op; the host refuses the trunk's other ops)
+    if (sg.op == OP_OWN_ARGMAX) { q35_op_argmax(sg, t); return true; }
+#endif
 #ifdef K3_Q35_DF   // (ThinkingCap's DFlash drafter module, kernels/k3_q35_tcap_dflash.hip: k3_q35_ops.h's DF block; the host refuses the rest)
     if (sg.op == OP_DF_CONV) { op_df_conv(sg, t); return true; }
     if (sg.op == OP_DF_TOPK) { op_df_topk(sg, t); return true; }
