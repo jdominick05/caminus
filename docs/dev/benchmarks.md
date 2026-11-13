@@ -354,7 +354,8 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
 - The replies are the plain server's token for token. llama.cpp's drafted output differed from its plain output on prose
   and shell.
 - IQ2_S's matvec (18 a token) reads at about 60 % of the read ceiling. Its 10-byte unit records are read with one
-  16-byte load each at a 10-byte stride; `benchmarks/iq2s_load_probe.hip` (the tile's lane mapping, the ffn's 17408 x
+  16-byte load each at a 10-byte stride; `benchmarks/iq2s_load_probe.hip` (run through `tools/guard.sh LOG 180 python -I
+  benchmarks/iq2s_load_probe.py --probe PROBE --card N`, which checks its VRAM first; the tile's lane mapping, the ffn's 17408 x
   5120, every launch on another of 8 copies so it reads memory, not the Infinity Cache, the arms interleaved) times that
   against aligned 8 + 2-byte planes and aligned 16-byte loads over exactly the same bytes on the XT: 48.4 / 48.2 /
   49.2 us, the same. The load shape is not the gap; the grid

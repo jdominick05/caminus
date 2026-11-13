@@ -11,7 +11,8 @@
 // (default 8: ~220 MiB, past the 80 / 96 MB Infinity Cache), every launch on a different copy, the arms interleaved, so each pass reads from memory as a decode token does. Prints us per pass and GB/s (bytes of the
 // matrix / time), median of --reps. Memory: --copies x ~28 MiB (default ~220 MiB, far below either card's free line).
 //   build: amdclang++ -x hip --offload-arch=gfx1100 -O3 -std=c++17 benchmarks/iq2s_load_probe.hip -o PROBE
-//   run:   HIP_VISIBLE_DEVICES=N tools/guard.sh LOG 120 PROBE --card 0 [--reps 50] [--rows 17408] [--k 5120] [--copies 8]
+//   run:   tools/guard.sh LOG 180 python -I benchmarks/iq2s_load_probe.py --probe PROBE --card N (checks the VRAM
+//          through caminus.device.capacity first), or directly: HIP_VISIBLE_DEVICES=N tools/guard.sh LOG 120 PROBE --card 0 [--reps 50] [--rows 17408] [--k 5120] [--copies 8]
 //          (N: the non-display card, `caminus ps`; --card indexes the visible devices)
 #include <hip/hip_runtime.h>
 #include <algorithm>
@@ -85,6 +86,12 @@ int main(int argc, char ** argv) {
     const size_t n = (size_t)rows * nunits, bytesA = n * 10 + 64, bytesB = n / 8 * 2 + 64;
     hipDeviceProp_t pr; CK(hipGetDeviceProperties(&pr, card));
     printf("%s, IQ2_S %d x %d: %.1f MiB of records + %.2f MiB of d\n", pr.name, rows, K, n * 10 / 1048576.0, n / 4 / 1048576.0);
+    {   // (the launcher, benchmarks/iq2s_load_probe.py, checks this through caminus.device.capacity first; here the
+        //  card's own free memory too, keeping 1 GiB: a display card's 512 MiB and the guard's margin)
+        size_t fr = 0, tot = 0; CK(hipMemGetInfo(&fr, &tot));
+        const size_t need = (size_t)copies * (bytesA + bytesB) + 4;
+        if (need + ((size_t)1 << 30) > fr) { printf("needs %zu MiB, %zu MiB free (keeping 1 GiB)\nRESULT FAIL\n", need >> 20, fr >> 20); return 2; }
+    }
     std::vector<unsigned char *> As(copies), Bs(copies); unsigned * out;
     std::vector<unsigned char> h(bytesA);
     for (size_t i = 0; i < bytesA; i++) h[i] = (unsigned char)(i * 2654435761u >> 13);
