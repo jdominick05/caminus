@@ -10,6 +10,7 @@ minutes, plus the model download (12 GB for the first model below).
 - Python 3.12.
 - Your user in the `render` and `video` groups: `sudo usermod -aG render,video $USER`, then log out and back in.
 - For Qwen Code: Node.js 22 or newer.
+- To build from source instead of installing the prebuilt wheel: Docker your user can run.
 
 ## 1. Install Caminus
 
@@ -21,6 +22,13 @@ pip install caminus
 ```
 
 PyTorch goes first because its AMD build isn't on PyPI.
+
+**Building from source instead.** If you'd rather not install a prebuilt wheel, build it yourself (Docker, CPU only;
+built from a release tag, the result is byte for byte the published wheel): clone the repository and `cd` into it, check
+out `testing` (from 0.2.2 on: the latest release's tag), run
+`tools/release/in_image.sh tools/release/release_build.sh --untagged` (no `--untagged` on a release tag), then, in the
+clone with the venv above active, `pip install dist/caminus-*.whl` in place of `pip install caminus`. The
+[README](../README.md#get-started) has the commands.
 
 **Nightly builds.** To run what is on the development branch before it is released, install with
 `pip install "caminus>=0.2.2.dev0"` instead: that takes the newest build, nightly or release. A nightly is built
