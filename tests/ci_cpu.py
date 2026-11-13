@@ -5,6 +5,7 @@
 Each suite runs when what it needs is here and is SKIPPED with the reason otherwise (a missing model or library is never a
 failure); nothing touches a GPU (HIP_VISIBLE_DEVICES is emptied for every child). What a suite may need:
   torch   PyTorch importable (any build: CI installs the CPU wheel; nothing here launches a kernel)
+  cxx     C++ compiler command ($CXX, else c++) available for the standalone host KV codec gate
   vocab   $CODER names a GGUF with the Coder's metadata: the tokenizer and the chat template (tests/serve). The weights are not
           needed: CI writes a vocab-only GGUF from the first 11 MiB of shard 1 (tools/release/gguf_vocab_only.py)
   coder   $CODER names the Coder's real shard 1 (its tensors; shard 2 beside it): the prefill launchers' CPU refusals
@@ -20,6 +21,8 @@ import contextlib
 import importlib.util
 import os
 import re
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -43,6 +46,7 @@ SUITES = [
     ('own_dequant', ['tests/io/test_own_dequant.py'], set()),
     ('own_formats', ['tests/io/test_own_formats.py'], set()),
     ('ref_kv', ['tests/io/test_ref_kv.py'], set()),
+    ('own_kv_codec', ['tests/io/test_own_kv_codec.py', '--scratch', '{scratch}'], {'cxx'}),
     ('ref_q35', ['tests/test_ref_q35.py', '--scratch', '{scratch}'], set()),
     ('q35_tape', ['tests/engine/test_q35_tape_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q35_tp', ['tests/engine/test_q35_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
@@ -54,6 +58,7 @@ SUITES = [
     ('pr_ready', ['tests/tools/test_pr_ready.py', '--scratch', '{scratch}'], set()),
     ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),
     ('kv_host', ['tests/device/test_kv_host_cpu.py'], {'torch'}),
+    ('kv_codec', ['tests/device/test_kv_codec.py'], {'torch'}),
     ('ple_aio', ['tests/engine/test_ple_aio.py'], {'torch'}),
     ('spec_policy', ['tests/decode/test_spec_policy.py', 'cpu'], {'torch'}),
     ('dflash35_adapter', ['tests/decode/test_dflash35_adapter.py'], {'torch'}),
@@ -91,8 +96,14 @@ def available():
     coder = os.environ.get('CODER', '')
     n = gguf_tensor_count(coder) if coder else None
     torch_ok = importlib.util.find_spec('torch') is not None
+    try:
+        cxx = shlex.split(os.environ.get('CXX', 'c++'))
+        cxx_error = None if cxx and shutil.which(cxx[0]) else 'C++ compiler not found ($CXX, else c++)'
+    except ValueError as exc:
+        cxx_error = f'invalid CXX command: {exc}'
     return {
         'torch': None if torch_ok else 'PyTorch is not installed',
+        'cxx': cxx_error,
         'vocab': None if n is not None else ('$CODER is not set' if not coder else f'$CODER {coder} is not a readable GGUF'),
         'coder': None if n else ('$CODER is not set' if not coder else
                                  f'$CODER {coder} has no tensors (a vocab-only GGUF)' if n == 0 else f'$CODER {coder} is not a readable GGUF'),
