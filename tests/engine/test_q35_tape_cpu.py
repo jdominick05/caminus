@@ -100,6 +100,11 @@ check(df_ops == {'OP_DF_CONV', 'OP_DF_TOPK', 'OP_DF_SELECT', 'OP_KV_APPEND', 'OP
 check(sp_ops == [({'OP_ATTN_PART', 'OP_ATTN_COMB'}, {'OP_ATTN_DEC'})] and k3.OP_ATTN_DEC not in k3.Q35M_OPS
       and {k3.OP_ATTN_PART, k3.OP_ATTN_COMB} <= k3.Q35M_OPS and k3.OP_ATTN_DEC not in k3.Q35S_OPS and k3.OP_ATTN_DEC in k3.Q35DF_OPS,
       'decode attention: the split pair under K3_Q35_ATTN_SPLIT (k3.Q35S_OPS, the MTP drafter\'s k3.Q35M_OPS too), OP_ATTN_DEC only in its #else (the DFlash module, k3.Q35DF_OPS)')
+swift_src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_swift.hip')).read()
+guard = re.search(r'#if ([^\n]*)\n#define K3_Q35_ATTN_SPLIT', swift_src)
+check(guard is not None and guard.group(1).strip() == '!defined(K3_Q35_DF)',
+      f'kernels/k3_q35_swift.hip compiles the split pair into every module but the DFlash one (guard: {guard.group(1).strip() if guard else None}): '
+      'the MTP module (K3_Q35_MTP) has it, as k3.Q35M_OPS says')
 enum = dict(re.findall(r'(OP_[A-Z0-9_]+) = (\d+)', src))
 check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16,
                                                'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX, 'OP_ATTN_PART': k3.OP_ATTN_PART, 'OP_ATTN_COMB': k3.OP_ATTN_COMB},
