@@ -33,6 +33,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from ..errors import NonFiniteLogits
+
 # ---------------------------------------------------------------- Philox4x32-10
 
 _MASK = 0xFFFFFFFF
@@ -300,6 +302,8 @@ def filter_chain(logits, prm, history=(), ids=None):
 def draw(c, u):
     """inverse CDF over Candidates c (ascending id order) with the uniform u in [0, 1)"""
     cum = np.add.accumulate(c.weights.astype(np.float64))
+    if not len(cum) or not np.isfinite(cum[-1]) or cum[-1] <= 0:
+        raise NonFiniteLogits(f'sampler: no finite positive weight among {len(cum)} candidates (non-finite logits)')
     i = int(np.searchsorted(cum, u * cum[-1], side='right'))
     if i >= len(cum):                                    # u * sum rounded up to sum: the last positive weight
         i = int(np.nonzero(c.weights > 0)[0][-1])

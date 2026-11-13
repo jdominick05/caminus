@@ -72,6 +72,11 @@ def load_config(path):
     return out
 
 
+# the exit code of a server whose engine produced non-finite logits (corrupt weights or states), distinct from the guard's
+# 99 / 98 (GPU faults, never restarted): the systemd unit (RestartForceExitStatus) and caminus start reload once on it
+EXIT_BROKEN = 75
+
+
 def options_json():
     """every option caminus serve accepts, for caminus panel's advanced layout (and scripts): flag, dest, type (int / float /
     str / bool / ctx), the default caminus serve uses, the help text; read from the parser itself, so it never drifts"""
@@ -200,6 +205,14 @@ def build_engine(opt, stats, log=print):
     A = _arch.ARCHS[opt['arch']] if opt.get('arch') else _arch.of(opt['model']).variant(opt.get('cards'))
     m, pf, df, dr = A.build(opt, log)
     for d in m.devs: torch.cuda.synchronize(d)
+    if callable(getattr(m, 'selfcheck', None)):
+        # (a few fixed tokens on fresh states: a load that left corrupt weights must stop here, not serve token 0)
+        from ..errors import NonFiniteLogits
+        try:
+            m.selfcheck()
+        except NonFiniteLogits as e:
+            log(f'caminus serve: the startup self-check failed: {e}')
+            raise SystemExit(EXIT_BROKEN)
     disk = not opt['no_disk_cache']
     pc = PC.PromptCache(m, pf, dr, cache_dir=opt['cache_dir'] if disk else None, disk=disk,
                         cap_gb=float(opt['cache_cap_gb']) if opt.get('cache_cap_gb') else PC.DEFAULT_CAP_GB)
@@ -350,6 +363,7 @@ def main(argv=None):
     srv.set_loading(False)
     print(f'caminus serve: ready on http://{opt["host"]}:{srv.port}  max_ctx={sess.max_ctx}', flush=True)
     stop = threading.Event()
+    srv.worker.on_broken = lambda why: stop.set()   # (corrupt weights or states: exit EXIT_BROKEN; the launcher reloads once)
     try:
         import signal
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -363,6 +377,9 @@ def main(argv=None):
         pass
     finally:
         shutdown(srv, sess, parts['pc'], drain_s=float(opt['drain_s']), park_s=float(opt['park_s']))
+    if srv.worker.broken:
+        print(f'caminus serve: exiting {EXIT_BROKEN} (engine broken: {srv.worker.broken})', flush=True)
+        return EXIT_BROKEN
     return 0
 
 
@@ -382,6 +399,9 @@ def shutdown(srv, sess, pc, drain_s=60.0, park_s=90.0, log=print):
         log(f'caminus serve: shutdown: drain failed: {type(e).__name__}: {e}', flush=True)
     if not ok:
         log(f'caminus serve: shutdown: the engine thread did not stop within {drain_s:.0f} s: no park (the state is not known)', flush=True)
+    elif getattr(getattr(srv, 'worker', None), 'broken', None):
+        log('caminus serve: shutdown: the engine is broken (non-finite logits): no park (its state must not reach the disk cache)',
+            flush=True)
     elif park_s > 0:
         box = {}
 

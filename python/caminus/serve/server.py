@@ -93,7 +93,7 @@ from .stats import ENGINE, STATUS_VERSION, EngineStats, build_info
 from .template import MODEL_PROFILES, PromptBuilder
 from .toolparse import OutputParser, ToolSet
 from .flight import new_request_id
-from .worker import BundleJob, EngineWorker, Job, QueueFull
+from .worker import BundleJob, EngineBroken, EngineWorker, Job, QueueFull
 
 THINK_END = '</think>'
 TOOL_OPEN = '<tool_call>'
@@ -612,6 +612,8 @@ class K3Server:
                   loop_guard=self.loop_guard and spec.api != 'completions')
         try:
             return self.worker.submit(job)
+        except EngineBroken as e:
+            raise HttpError(503, f'engine broken (restart the server): {e}', etype='unavailable_error') from None
         except QueueFull as e:
             raise HttpError(503, f'overloaded: {e}', etype='overloaded_error') from None
 
@@ -973,7 +975,11 @@ class K3Handler(BaseHTTPRequestHandler):
                 srv.count(path, 503)
                 return
             if path in ('/health', '/v1/health'):
-                self._send(200, {'status': 'ok'})
+                if srv.worker.broken:
+                    self._send(503, {'status': 'error', 'error': {'message': f'engine broken (restart the server): {srv.worker.broken}',
+                                                                  'type': 'unavailable_error', 'code': 503}})
+                else:
+                    self._send(200, {'status': 'ok'})
             elif path in ('/v1/models', '/models'):
                 self._send(200, {'object': 'list', 'data': [
                     {'id': m, 'object': 'model', 'created': int(srv.t_start), 'owned_by': 'k3',

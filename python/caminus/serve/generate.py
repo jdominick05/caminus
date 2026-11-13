@@ -27,6 +27,9 @@ it accepted, the content class it started in), host timestamps only (docs/specs/
 import time
 from dataclasses import dataclass, field
 
+import numpy as np
+
+from ..errors import NonFiniteLogits
 from .tokenizer import StreamDecoder
 
 
@@ -167,6 +170,11 @@ def run_generation(sess, prompt, sampler, max_new, on_tokens, cancel=None, stop_
         res.finish = 'cancel'
         sess.end()
         return res
+    if not np.isfinite(np.asarray(row, dtype=np.float32)).all():
+        # (every engine's first token is drawn from this row: a load that left corrupt weights fails the first request
+        #  here, whatever the model, instead of streaming token 0 - see caminus.errors)
+        raise NonFiniteLogits(f'the prompt\'s last logits row has {int((~np.isfinite(np.asarray(row))).sum())} non-finite '
+                              'values: the engine\'s weights or states are corrupt; restart the server')
     hist = list(prompt)
     k_max = (sess.ntok - 1) if n_draft is None else min(n_draft, sess.ntok - 1)
     force_pending = force is not None
