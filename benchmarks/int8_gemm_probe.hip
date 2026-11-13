@@ -222,6 +222,30 @@ static double run_arm(int arm, const void *A, const void *B, const float *SCA, c
 
 static float bf16_to_f32(uint16_t b) { uint32_t u = (uint32_t)b << 16; return __builtin_bit_cast(float, u); }
 
+// the guard's own usage reading for this card: sysfs mem_info_vram_used (what caminus.device.capacity checks
+// against the guard's cap; HIP's hipMemGetInfo can underreport by 163-353 MiB, so take the larger of the two)
+static size_t guard_used_bytes(size_t hip_used, size_t total) {
+    size_t used = hip_used;
+    for (int c = 0; c < 16; c++) {
+        char p[128], buf[64];
+        snprintf(p, sizeof p, "/sys/class/drm/card%d/device/mem_info_vram_total", c);
+        FILE *f = fopen(p, "r");
+        if (!f) continue;
+        unsigned long long t = 0;
+        const bool ok = fscanf(f, "%llu", &t) == 1;
+        fclose(f);
+        if (!ok || (long long)t - (long long)total > (64ll << 20) || (long long)total - (long long)t > (64ll << 20)) continue;
+        snprintf(p, sizeof p, "/sys/class/drm/card%d/device/mem_info_vram_used", c);
+        f = fopen(p, "r");
+        if (!f) continue;
+        unsigned long long u = 0;
+        if (fscanf(f, "%llu", &u) == 1 && u > used) used = u;
+        fclose(f);
+        (void)buf;
+    }
+    return used;
+}
+
 // CPU reference for the 64x64 corner of C, with each arm's operand values, fp64 accumulation; prints max abs
 // error and any NaN/inf in the corner - catches OOB/garbage stores, not just wrong math.
 static void check_corner(int arm, const float *C, const bf16_t *Ab, const uint8_t *Ap, const uint8_t *Aq,
@@ -284,10 +308,11 @@ int main(int argc, char **argv) {
     const size_t projected = (size_t)M * K * 2 + (size_t)20480 * K * 2 + (size_t)M * K * 2 + (size_t)20480 * K
                            + (size_t)(M + 20480) * 4 + (size_t)M * 20480 * 4;   // dA dB dAp dAq dBq dSA dSB dC
     size_t freeB, totalB; hipMemGetInfo(&freeB, &totalB);
+    const size_t used = guard_used_bytes(totalB - freeB, totalB);   // the guard's reading, not just HIP's
     const size_t margin = (size_t)512 << 20;
-    printf("VRAM free %.0f MiB of %.0f; probe needs %.0f MiB (+ %.0f MiB kept free)\n",
-           freeB / 1048576.0, totalB / 1048576.0, projected / 1048576.0, margin / 1048576.0);
-    if (freeB < projected + margin) { fprintf(stderr, "refusing to allocate: would cross the 512 MiB-free line\n"); return 2; }
+    printf("VRAM used %.0f MiB of %.0f (guard reading); probe needs %.0f MiB (+ %.0f MiB kept free)\n",
+           used / 1048576.0, totalB / 1048576.0, projected / 1048576.0, margin / 1048576.0);
+    if (used + projected + margin > totalB) { fprintf(stderr, "refusing to allocate: would cross the guard's 512 MiB-free line\n"); return 2; }
     std::vector<float> Af(M * K), Bf(20480 * K);
     for (auto &v : Af) v = (rand() / (float)RAND_MAX - 0.5f) * 0.2f;
     for (auto &v : Bf) v = (rand() / (float)RAND_MAX - 0.5f) * 0.2f;
