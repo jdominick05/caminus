@@ -134,6 +134,9 @@ CLAUDE.md imports this file.
   interrupted. Brightness, frame rate and animation speed are bounded; tests use a fake clock and mock devices.
 - `cmd/manage.py:top_config` carries monitor preferences into each server's generated config. Preserve the source file,
   resolve its relative paths before merging, and let the selected server determine its address and agent sessions.
+- `cmd/qwen_code.py` publishes a Qwen context budget only after `/props` reports a positive integer window. Generated
+  providers bind `capabilities.reasoning.profile` to `qwen-chat-template`; effort stays pinned by the server's model id.
+  Setup migrates owned model endpoint pins and removed fast/compaction selectors, preserving external provider routes.
 - `share/guard.sh` (linked as `tools/guard.sh`): the GPU guard, shipped in the package.
 - `share/harness/qwen-code/advisor/`: the Qwen Code advisor add-on (`caminus advisor`, docs/advisor.md), shipped as
   package data and installed as a copy into `$XDG_DATA_HOME/qwen-advisor/app`. Its hook must always exit 0 and add text
