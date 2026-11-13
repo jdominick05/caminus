@@ -260,9 +260,12 @@ def main(argv=None):
     draft = opt.get('draft')
     if opt.get('no_drafter'): draft = 'off'
     if draft is None:
-        # (the Coder drafts by default - the missing DFlash file falls into the error below, as before; the other
-        # architectures default to off until their served A/B earns the default)
-        draft = 'dflash' if A.drafter == 'dflash' else 'off'
+        # (the architecture's measured default: the Coder drafts - the missing DFlash file falls into the error below, as
+        # before; the others by their served A/B, arch.Dense35.DRAFT_DEFAULT)
+        draft = A.default_draft(opt)
+        if draft != 'off':
+            print(f'caminus serve: --draft {draft} (the default for {A.name} on {A.cards} card(s); --draft off: plain decoding)',
+                  flush=True)
     own_dflash = draft == 'dflash' and A.drafter != 'dflash' and 'dflash' in getattr(A, 'drafters', ())
     if own_dflash:
         # (the dense 27B line's drafter: its own catalog file, not the Coder's; --drafter overrides it)

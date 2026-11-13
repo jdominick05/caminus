@@ -141,6 +141,15 @@ def main():
     S.NUMBERS['greedy_decode_tps'] = tg
     import hashlib
     S.NUMBERS['greedy_sha256'] = hashlib.sha256(m['content'].encode()).hexdigest()   # (the fixed MARK: same prompt every run)
+    # sampled with a fixed seed, no thinking: the draws are indexed by position, so the text is the same with any drafter
+    # (--draft mtp / dflash / off) - compare sampled_sha256 across serves, as greedy_sha256
+    r, m = chat(port, f'{alias}-nothink', [{'role': 'user', 'content': f'Write a short Python function that reverses a linked list. ({marker})'}],
+                temperature=0.7, top_p=0.9, seed=20261113, max_tokens=160)
+    ts = (m.get('timings') or {}).get('predicted_per_second')
+    check(r['status'] == 200 and m['content'].strip() and not m['error'],
+          f'sampled (seed, T 0.7): {len(m["content"])} chars, finish {m["finish"]}, decode {ts} tok/s')
+    S.NUMBERS['sampled_decode_tps'] = ts
+    S.NUMBERS['sampled_sha256'] = hashlib.sha256(m['content'].encode()).hexdigest()
     # sampled with a tool, then the tool result as the next turn
     msgs = [{'role': 'system', 'content': f'You are a helpful assistant. Use tools when they help. ({marker})'},
             {'role': 'user', 'content': 'What is the weather in Lisbon right now? Use the tool.'}]

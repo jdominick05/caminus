@@ -246,6 +246,26 @@ def main():
         check(nm == 4096 and need_m(4096)[0] > need_o(4096)[0] and ring > 0,
               f'qwen35-own auto_need --draft mtp on a synthetic nextn file: {need_m(4096)[0]:.1f} MiB vs off '
               f'{need_o(4096)[0]:.1f} (the adapter ring {ring:.4f} MiB included), no header-key error')
+        # the default drafter (no --draft): the table's kind on one card when the file has the MTP block, plain without it,
+        # off on two cards (no two-card drafter yet); the Coder keeps DFlash
+        # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's k3_q35_gsq)
+        from caminus import ggufio as _gio
+        from caminus.engine import q35_dense as _qd
+        _F = _gio.GGUFFile(q35); mod = _qd.module_of(_F); _F.close()
+        keep_d, keep_mo = arch.Dense35.DRAFT_DEFAULT, _qd.module_of
+        try:
+            arch.Dense35.DRAFT_DEFAULT = {(mod, 1): 'mtp', (mod, 2): 'off'}
+            q35n = os.path.join(S, 'tiny-q35own-nomtp.gguf')
+            write_gguf(q35n, 'qwen35', dict(hp35, **{'qwen35.nextn_predict_layers': 0}),
+                       [('token_embd.weight', 64, 997), ('output.weight', 64, 997)])
+            got = (own.default_draft(dict(model=q35)), own.default_draft(dict(model=q35n)),
+                   own.variant(2).default_draft(dict(model=q35)), arch.ARCHS['qwen4exp'].default_draft({}))
+            _qd.module_of = lambda F: 'k3_q35_gsq'      # (a file the GSQ module decodes: not in the table)
+            got_gsq = own.default_draft(dict(model=q35))
+        finally:
+            arch.Dense35.DRAFT_DEFAULT, _qd.module_of = keep_d, keep_mo
+        check(got == ('mtp', 'off', 'off', 'dflash') and got_gsq == 'off',
+              f'default_draft: mtp file / no block / two cards / the Coder: {got}; a k3_q35_gsq file (no drafter yet): {got_gsq}')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:
