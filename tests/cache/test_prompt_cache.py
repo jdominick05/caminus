@@ -2549,24 +2549,19 @@ def stage_mtp35(cache_dir, small):
     check(row is not None and len(row) == e0.V and c0.st['i0'] == 9,
           f'mtp35: a 9-token cold prompt runs its tail as T = 4 verify passes and first_logits accepts the '
           f'commit-4 state with ntok 1 (state now {c0.st}, {len(row)} logits)')
-    # ---- the saved pass width rides the checkpoint: an intervening one-token pass must not lower the restored
-    # commit bound (a restored commit-4 state keeps commit_max 4, so first_logits accepts it)
+    # ---- a host-accept drafter's prompt checkpoints as a plain server's (issue 78): the K3 passes run to n - 1 and the
+    # state settles to commit 1 (settle_commit: one decode-tape pass re-feeds the last row), so a later request reusing
+    # it re-runs the same rows from decode math and from the batched prefill as a plain server would
     s4, e4, p4, c4, mtp4, dr4 = mk(draft=True)
     s4.prefill(base[:9])
-    ck4 = [x for x in c4.ckpts if int(x.commit) == 4]
-    check(len(ck4) == 1 and int(ck4[0].last_T) == 4,
-          f'mtp35: the 9-token prompt left a commit-4 checkpoint carrying its pass width (last_T) '
-          f'{[(x.pos, x.commit, x.last_T) for x in c4.ckpts]}')
-    if ck4:
-        ck4 = ck4[0]
-        e4.verify_tokens([0] * int(ck4.pos) + [1], int(ck4.pos), 1)   # (an intervening one-token pass: last_T 1)
-        check(int(e4.last_T) == 1, 'mtp35: the intervening T=1 pass lowered last_T to 1')
-        c4._restore(ck4)
-        lt4 = int(e4.last_T)                       # (read before first_logits runs its own one-token passes)
-        row4 = longctx.first_logits(e4, dict(c4.st), list(c4.log))
-        check(lt4 == 4 and row4 is not None,
-              f'mtp35: the restore brings the saved pass width back (last_T {lt4}, commit {c4.st["commit"]}) '
-              f'and first_logits accepts the restored state (logits {type(row4).__name__} len {len(row4)})')
+    cks = sorted((int(x.pos), int(x.commit)) for x in c4.ckpts)
+    sp, ep, pp, cp, _, _ = mk(draft=False)
+    sp.prefill(base[:9])
+    ckp = sorted((int(x.pos), int(x.commit)) for x in cp.ckpts)
+    check(cks == ckp and all(cm == 1 for _, cm in cks) and c4.stats.get('settles', 0) >= 1,
+          f'mtp35: the 9-token prompt checkpoints at the plain server\'s (position, commit) {ckp}, every one at commit 1 '
+          f'(drafted {cks}, settles {c4.stats.get("settles", 0)})')
+    cp.close()
     c4.close()
     c0.close()
 
@@ -2576,6 +2571,8 @@ def stage_mtp35(cache_dir, small):
           f'mtp35: a 60-token prompt through the K3-pass loop (T = 4 verify passes) filled the block rows (filled {mtp.filled}, '
           f'calls {[(x[0], x[1]) for x in mtp.calls[:6]]}...)')
     gen, hist = run_gen(s, base[:60], 24)
+    check(int(c.st['commit']) == 1,
+          f'mtp35: a reply ends settled at commit 1 as a plain server ends (K3Session.end: settle_commit; state {c.st})')
     dcalls = [x for x in mtp.calls if x[0] == 'draft']
     off_ok = all(x[1] == x[2][0] - 4 + 0 or True for x in dcalls)   # (p0 recorded; checked properly below)
     # the round offsets: p0 = len(toks) - T, toks = the last T tokens, h rows p0 - 1 .. p0 + T - 2
