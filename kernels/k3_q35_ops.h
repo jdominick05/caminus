@@ -61,14 +61,14 @@ __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
     for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
         if (NT == 1) {
             if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
-            else own_rows_q8_0<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
+            else own_rows_q8_0_1rt<2>(W, row, r1, sg.K, x, y, lane);   // (own_rows_q8_0's bits, 2 block steps' loads per pass)
         } else if (sg.work == OWN_Q5_K) own_rows_q5_k_mt(W, row, r1, sg.K, (const _Float16 *)x, xs, NT, y, ys, lane);
         else own_rows_q8_0_mt(W, row, r1, sg.K, (const _Float16 *)x, xs, NT, y, ys, lane);
     }
 #else
     for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
         if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
-        else own_rows_q8_0<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
+        else own_rows_q8_0_1rt<2>(W, row, r1, sg.K, x, y, lane);   // (own_rows_q8_0's bits, 2 block steps' loads per pass)
     }
 #endif
 }
