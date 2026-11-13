@@ -44,6 +44,15 @@ def main():
     from caminus import models
     from caminus.cmd import manage, qwen_code
 
+    # The basic panel's model picker gets capabilities from the serving registry, without importing the GPU runtime.
+    swift_modes = manage.serving_modes(models.BY_NAME['swift-1.5'])
+    check([r['cards'] for r in swift_modes] == [1, 2]
+          and swift_modes[0]['drafts'] == ['off', 'mtp', 'dflash']
+          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off'])]
+          and manage.serving_modes(models.BY_NAME['coder']) == [dict(cards=2, drafts=['off', 'dflash'])]
+          and 'torch' not in sys.modules,
+          'model picker: supported card counts and drafters from the registry, no torch import; auto stays server-owned')
+
     # nothing here may ever start a process that could reach a GPU: manage's own Popen is replaced by one that refuses
     class NoLaunch:
         DEVNULL = subprocess.DEVNULL
@@ -65,7 +74,7 @@ def main():
         a1 = manage.serve_argv(mm, dict(base, paths={mm.items[0]: '/m/model.gguf', dk: '/m/drafter.gguf'}), 'x', 1234)
         en = manage.model_entry(mm)
         check(dk == 'dflash2-27b' and '--no-drafter' not in a0 and '--drafter' not in a0 and a1[a1.index('--drafter') + 1] == '/m/drafter.gguf'
-              and en['need_gb'] < en['size_gb'],
+              and en['need_gb'] < en['size_gb'] and en['missing_drafter'] == 'dflash' and en['missing_drafter_gb'] > 0,
               f'{nm}: no drafter flag without its file, --drafter with it; the fit rule sizes the model without the drafter '
               f'({en["need_gb"]} of {en["size_gb"]} GB)')
     cm_ = models.BY_NAME['coder']; dkc = models.drafter_item(cm_)

@@ -75,9 +75,10 @@ type ctl struct {
 	ps      psInfo
 	hs      harnessInfo
 	opts    []option
-	loaded  map[string]bool   // which reads answered at least once
-	vals    map[string]string // advanced: option values for the next start (dest -> text); absent = the default
-	card    string            // one-card models: "auto", "0", "1" (advanced; basic: auto)
+	loaded  map[string]bool      // which reads answered at least once
+	vals    map[string]string    // advanced: option values for the next start (dest -> text); absent = the default
+	card    string               // one-card models: "auto", "0", "1" (advanced; basic: auto)
+	picks   map[string]modelPick // model name -> card count and drafter choice at each count
 	curM    int
 	curS    int
 	curO    int
@@ -223,22 +224,118 @@ func (m ctl) selServer() *serverInfo {
 	return nil
 }
 
-// startArgs is `caminus start NAME ...` with the card and, in the advanced layout, every edited option after `--` (passed
-// to caminus serve as they are).
+type modelPick struct {
+	Cards  int            `json:"cards"`
+	Drafts map[int]string `json:"drafts"`
+}
+
+func (mi camModel) servingModes() []serveMode {
+	if len(mi.Modes) != 0 {
+		return mi.Modes
+	}
+	// An older CLI supplies no capabilities: retain its catalog card count and let serve choose its default.
+	return []serveMode{{Cards: mi.Cards}}
+}
+
+func hasDraft(mode serveMode, draft string) bool {
+	if draft == "auto" {
+		return true
+	}
+	for _, d := range mode.Drafts {
+		if d == draft {
+			return true
+		}
+	}
+	return false
+}
+
+func (m ctl) modelMode(mi camModel) (serveMode, string) {
+	p, saved := m.picks[mi.Name]
+	nc := p.Cards
+	if !saved && m.advanced {
+		nc, _ = strconv.Atoi(m.vals["cards"])
+	}
+	if nc == 0 {
+		nc = mi.Cards
+	}
+	modes := mi.servingModes()
+	mode := modes[0]
+	for _, v := range modes {
+		if v.Cards == nc {
+			mode = v
+			break
+		}
+	}
+	draft := p.Drafts[mode.Cards]
+	if draft == "" && !saved && m.advanced {
+		draft = m.vals["draft"]
+		if m.vals["no_drafter"] == "true" {
+			draft = "off"
+		}
+	}
+	if !hasDraft(mode, draft) {
+		draft = "auto"
+	}
+	return mode, draft
+}
+
+func (m *ctl) cycleModelMode(mi camModel, cards bool) {
+	mode, draft := m.modelMode(mi)
+	p := m.picks[mi.Name]
+	if p.Drafts == nil {
+		p.Drafts = make(map[int]string)
+	}
+	p.Drafts[mode.Cards] = draft
+	if cards {
+		modes := mi.servingModes()
+		for i, v := range modes {
+			if v.Cards == mode.Cards {
+				mode = modes[(i+1)%len(modes)]
+				break
+			}
+		}
+	} else {
+		choices := append([]string{"auto"}, mode.Drafts...)
+		for i, v := range choices {
+			if v == draft {
+				p.Drafts[mode.Cards] = choices[(i+1)%len(choices)]
+				break
+			}
+		}
+	}
+	p.Cards = mode.Cards
+	if m.picks == nil {
+		m.picks = make(map[string]modelPick)
+	}
+	m.picks[mi.Name] = p
+	m.savePrefs()
+}
+
+// startArgs is `caminus start NAME ...` with the MODELS choices in both layouts and the other edited options in advanced.
 func (m ctl) startArgs(mi camModel) []string {
 	a := []string{"start", mi.Name}
-	if !m.advanced {
-		return a
+	mode, draft := m.modelMode(mi)
+	if mode.Cards != mi.Cards {
+		a = append(a, "--cards", strconv.Itoa(mode.Cards))
 	}
-	if mi.Cards == 1 && m.card != "" && m.card != "auto" {
+	if m.advanced && mode.Cards == 1 && m.card != "" && m.card != "auto" {
 		a = append(a, "--card", m.card)
 	}
 	var keys []string
-	for k := range m.vals {
-		keys = append(keys, k)
+	if m.advanced {
+		for k := range m.vals {
+			switch k {
+			case "cards", "draft", "no_drafter":
+				continue
+			}
+			keys = append(keys, k)
+		}
 	}
 	sort.Strings(keys)
 	var extra []string
+	if draft != "auto" {
+		extra = append(extra, "--draft", draft)
+	}
 	for _, k := range keys {
 		o := m.optByDest(k)
 		if o == nil {
@@ -274,7 +371,7 @@ func (m ctl) visibleOpts() []option {
 	var out []option
 	for _, o := range m.opts {
 		switch o.Dest {
-		case "model", "config", "port":
+		case "model", "config", "port", "cards", "draft", "no_drafter":
 			continue
 		}
 		out = append(out, o)
@@ -417,20 +514,34 @@ func (m ctl) modelsKey(s string) (tea.Model, tea.Cmd) {
 			m.setNote(mi.Name+" is not downloaded: p to pull it", true)
 			return m, nil
 		}
+		_, draft := m.modelMode(*mi)
+		if mi.MissingDrafter != "" && draft == mi.MissingDrafter {
+			m.setNote(mi.Name+"'s "+draft+" drafter is not downloaded: p to pull it", true)
+			return m, nil
+		}
 		m.busy = "starting " + mi.Name
 		return m, m.action("start "+mi.Name, 15*time.Minute, m.startArgs(*mi)...)
 	case "p":
-		if mi.Present {
+		if mi.Present && mi.MissingDrafter == "" {
 			m.setNote(mi.Name+" is already on disk", false)
 			return m, nil
 		}
-		m.confirm = &pending{q: fmt.Sprintf("download %s (%.1f GB)? y / n", mi.Name, mi.SizeGB),
+		question := fmt.Sprintf("download %s (%.1f GB)? y / n", mi.Name, mi.SizeGB)
+		if mi.Present {
+			question = fmt.Sprintf("download %s's %s drafter (%.1f GB)? y / n", mi.Name, mi.MissingDrafter, mi.MissingDrafterGB)
+		}
+		m.confirm = &pending{q: question,
 			run: m.action("pull "+mi.Name, 12*time.Hour, "pull", mi.Name)}
 	case "c":
-		if m.advanced && mi.Cards == 1 {
+		mode, _ := m.modelMode(*mi)
+		if m.advanced && mode.Cards == 1 {
 			m.card = m.nextCard()
 			m.savePrefs()
 		}
+	case "n":
+		m.cycleModelMode(*mi, true)
+	case "d":
+		m.cycleModelMode(*mi, false)
 	case "b":
 		if m.advanced {
 			m.busy = "starting the brain / hands team"
@@ -616,9 +727,10 @@ func (m ctl) valueOf(o option) string {
 // ---------- remembered choices ----------
 
 type prefs struct {
-	Advanced bool              `json:"advanced"`
-	Card     string            `json:"card"`
-	Values   map[string]string `json:"values"`
+	Advanced bool                 `json:"advanced"`
+	Card     string               `json:"card"`
+	Values   map[string]string    `json:"values"`
+	Picks    map[string]modelPick `json:"models,omitempty"`
 }
 
 func prefsPath() string {
@@ -647,6 +759,7 @@ func (m *ctl) loadPrefs() {
 		for k, v := range p.Values {
 			m.vals[k] = v
 		}
+		m.picks = p.Picks
 	}
 }
 
@@ -654,7 +767,7 @@ func (m ctl) savePrefs() {
 	if m.prefs == "" {
 		return
 	}
-	b, _ := json.MarshalIndent(prefs{m.advanced, m.card, m.vals}, "", "  ")
+	b, _ := json.MarshalIndent(prefs{Advanced: m.advanced, Card: m.card, Values: m.vals, Picks: m.picks}, "", "  ")
 	_ = os.MkdirAll(filepath.Dir(m.prefs), 0o700)
 	_ = os.WriteFile(m.prefs, append(b, '\n'), 0o600)
 }
@@ -726,6 +839,8 @@ func (m ctl) modelRows() []string {
 		disk := fg(cGreen).Render("✓ on disk")
 		if !mi.Present {
 			disk = fg(cYellow).Render("not downloaded")
+		} else if mi.MissingDrafter != "" {
+			disk += fg(cYellow).Render(" · " + mi.MissingDrafter + " missing")
 		}
 		cards := "1 card"
 		if mi.Cards > 1 {
@@ -741,10 +856,20 @@ func (m ctl) modelRows() []string {
 			rows = append(rows, "    "+fg(cMuted).Render(mi.Speed))
 		}
 	}
+	if mi := m.selModel(); mi != nil {
+		mode, draft := m.modelMode(*mi)
+		if draft == "auto" {
+			draft = "auto (server default)"
+		}
+		rows = append(rows, "", fg(cMuted).Render("next start: ")+bold(cAccent).Render(fmt.Sprintf("%d card(s) · drafter %s", mode.Cards, draft)))
+	}
 	if m.advanced {
-		if mi := m.selModel(); mi != nil && mi.Cards == 1 {
-			rows = append(rows, "", fg(cMuted).Render("card for one-card models: ")+bold(cAccent).Render(m.card)+
-				fg(cMuted).Render("  (c to change; auto = a free card)"))
+		if mi := m.selModel(); mi != nil {
+			mode, _ := m.modelMode(*mi)
+			if mode.Cards == 1 {
+				rows = append(rows, "", fg(cMuted).Render("card for one-card models: ")+bold(cAccent).Render(m.card)+
+					fg(cMuted).Render("  (c to change; auto = a free card)"))
+			}
 		}
 	}
 	return rows
@@ -927,6 +1052,15 @@ func (m ctl) keysLine() string {
 	switch m.focus {
 	case paneModels:
 		p = []string{k("enter", "start"), k("p", "pull")}
+		if mi := m.selModel(); mi != nil {
+			mode, _ := m.modelMode(*mi)
+			if len(mi.servingModes()) > 1 {
+				p = append(p, k("n", "card count"))
+			}
+			if len(mode.Drafts) > 1 {
+				p = append(p, k("d", "drafter"))
+			}
+		}
 		if m.advanced {
 			p = append(p, k("c", "card"), k("b", "brain / hands team"))
 		}

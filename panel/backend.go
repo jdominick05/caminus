@@ -18,15 +18,25 @@ import (
 
 // camModel is one entry of `caminus models --json`.
 type camModel struct {
-	Name    string  `json:"name"`
-	Title   string  `json:"title"`
-	Arch    string  `json:"arch"`
-	Cards   int     `json:"cards"`
-	SizeGB  float64 `json:"size_gb"`
-	Present bool    `json:"present"`
-	Path    string  `json:"path"`
-	Speed   string  `json:"speed"`
-	Notes   string  `json:"notes"`
+	Name             string      `json:"name"`
+	Title            string      `json:"title"`
+	Arch             string      `json:"arch"`
+	Cards            int         `json:"cards"`
+	SizeGB           float64     `json:"size_gb"`
+	Present          bool        `json:"present"`
+	Path             string      `json:"path"`
+	Speed            string      `json:"speed"`
+	Notes            string      `json:"notes"`
+	Modes            []serveMode `json:"serve_modes"`
+	MissingDrafter   string      `json:"missing_drafter"`
+	MissingDrafterGB float64     `json:"missing_drafter_gb"`
+}
+
+// serveMode is the architecture registry's supported card count and explicit drafter choices. Auto is the absence of
+// --draft: the server then uses Arch.default_draft, including its measured defaults for this model and card count.
+type serveMode struct {
+	Cards  int      `json:"cards"`
+	Drafts []string `json:"drafts"`
 }
 
 // serverInfo is one server of `caminus ps --json`.

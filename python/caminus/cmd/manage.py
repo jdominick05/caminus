@@ -88,14 +88,36 @@ def locate_item(it):
     return None
 
 
+def serving_modes(m):
+    """The model picker's card counts and drafters, from the same registry serve uses (no model load or torch).
+
+    The picker also offers auto: it omits --draft, leaving Arch.default_draft to choose from the served measurements.
+    A two-card variant advertises drafting only once its registry entry supports it.
+    """
+    from .. import arch
+    A = arch.lookup(m.arch)
+    out = []
+    for nc in (1, 2):
+        try:
+            a = A.variant(nc)
+        except ValueError:
+            continue
+        ds = {d for d in (a.drafter, *getattr(a, 'drafters', ())) if d in ('mtp', 'dflash')}
+        out.append(dict(cards=nc, drafts=['off'] + [d for d in ('mtp', 'dflash') if d in ds]))
+    return out
+
+
 def model_entry(m):
     paths = {k: locate_item(models.BY_KEY[k]) for k in m.items}
-    need = [k for k in m.items if k != models.drafter_item(m)]     # a model serves without its drafter too (the Coder)
+    dk = models.drafter_item(m)
+    need = [k for k in m.items if k != dk]     # a model serves without its drafter too (the Coder)
     size = sum(models.BY_KEY[k].size for k in m.items)
     need_b = sum(models.BY_KEY[k].size for k in need)   # (what a card must hold without the optional drafter: the fit rule's size)
     return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1), need_gb=round(need_b / 1e9, 1),
                 present=all(paths[k] for k in need), path=paths[m.items[0]], paths=paths, alias=m.alias,
-                speed=m.speed, notes=m.notes)
+                speed=m.speed, notes=m.notes, serve_modes=serving_modes(m),
+                missing_drafter='dflash' if dk and not paths[dk] else None,
+                missing_drafter_gb=round(models.BY_KEY[dk].size / 1e9, 1) if dk and not paths[dk] else 0)
 
 
 def cmd_models(argv):
