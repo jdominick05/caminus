@@ -32,13 +32,26 @@
 
 ## Get started
 
-You need Linux, Python 3.12 and at least one RX 7900 XTX or XT.
+You need Linux, Python 3.12, at least one RX 7900 XTX or XT, and Docker for the build.
+
+**Build it from source (recommended).** The build runs the release recipe inside the public build image: on the CPU, no
+GPU needed, nothing installed on your system, and the wheel it makes is byte for byte the published one.
 
 ```bash
+git clone https://github.com/jdominick05/caminus.git && cd caminus
+git checkout vX.Y.Z                                          # the newest release (the top of the Releases page)
+tools/release/in_image.sh tools/release/release_build.sh     # builds the GPU code and the wheel into dist/
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards
-pip install caminus
+pip install dist/caminus-*.whl
 caminus panel
 ```
+
+To build the development branch instead, check out `testing` and add `--untagged` to the build command. Releases
+0.2.1 and older predate the build image: build those with [building from source](docs/dev/building.md).
+
+**Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
+release is built with the same recipe, and its provenance can be checked against the source
+([verifying a download](docs/verifying.md), SLSA Build Level 3).
 
 In the panel you download a model, start it, and open Qwen Code on it. The [quickstart](docs/quickstart.md) walks you
 through it in about ten minutes, plus the download.
