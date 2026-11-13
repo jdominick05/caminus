@@ -409,7 +409,7 @@ func (st *state) pollSessions(glob string) {
 	}
 }
 
-// scanSessions tails the newest 6 session logs modified in the last 6 h.
+// scanSessions tails the newest 6 matching session logs modified in the last 6 h.
 func (st *state) scanSessions(glob, home string, now time.Time) {
 	files, _ := filepath.Glob(glob)
 	type cand struct {
@@ -430,10 +430,10 @@ func (st *state) scanSessions(glob, home string, now time.Time) {
 	for _, c := range cs {
 		recent[c.path] = true
 	}
-	if len(cs) > 6 {
-		cs = cs[:6]
-	}
-	var list []*session
+	st.mu.Lock()
+	alias := st.srv.Props.Alias
+	st.mu.Unlock()
+	var list, scanned []*session
 	for _, c := range cs {
 		st.mu.Lock()
 		s := st.known[c.path]
@@ -451,10 +451,17 @@ func (st *state) scanSessions(glob, home string, now time.Time) {
 			ns.tail()
 			s = &ns
 		}
-		list = append(list, s)
+		scanned = append(scanned, s)
+		if s.talksTo(alias) {
+			list = append(list, s)
+			if len(list) == 6 {
+				break
+			}
+		}
 	}
 	st.mu.Lock()
-	for _, s := range list {
+	// Cache foreign logs too: ownership lives in the transcript, so finding six matches can require reading past them.
+	for _, s := range scanned {
 		st.known[s.Path] = s
 	}
 	for p := range st.known {
@@ -462,7 +469,7 @@ func (st *state) scanSessions(glob, home string, now time.Time) {
 			delete(st.known, p)
 		}
 	}
-	st.sessions = mineOnly(list, st.srv.Props.Alias)
+	st.sessions = list
 	st.mu.Unlock()
 }
 
@@ -475,11 +482,15 @@ func mineOnly(list []*session, alias string) []*session {
 	}
 	out := list[:0:0]
 	for _, s := range list {
-		if s.model == "" || s.model == alias || strings.HasPrefix(s.model, alias+"-") {
+		if s.talksTo(alias) {
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+func (s *session) talksTo(alias string) bool {
+	return alias == "" || s.model == "" || s.model == alias || strings.HasPrefix(s.model, alias+"-")
 }
 
 // projectName turns Qwen Code's project dir (the cwd, lowercased, non-alphanumerics as "-") into a short name by
