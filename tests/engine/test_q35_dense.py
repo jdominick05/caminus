@@ -27,7 +27,8 @@ ap.add_argument('--scratch', required=True); ap.add_argument('--model'); ap.add_
 ap.add_argument('--positions', type=int, default=128); ap.add_argument('--depths', type=int, nargs='*', default=[1, 4])
 ap.add_argument('--depth-positions', type=int, default=12); ap.add_argument('--max-ctx', type=int, default=256)
 ap.add_argument('--module', default=None)
-ap.add_argument('--variant', choices=('swift', 'tcap'), default='swift', help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap)')
+ap.add_argument('--variant', choices=('swift', 'tcap', 'gsq'), default='swift',
+                help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap; gsq: the Qwen3.8-27B GSQ-RCO files\', k3_q35_gsq)')
 A = ap.parse_args()
 if bool(A.model) != bool(A.ref): ap.error('--model and --ref go together')
 os.makedirs(A.scratch, exist_ok=True)
@@ -36,9 +37,9 @@ import tiny_q35
 from caminus import ggufio, own_dequant, ref_q35
 from caminus.device import capacity
 from caminus.engine import k3
-from caminus.engine.q35_dense import MODULE, MODULE_TCAP, Dense35Own
+from caminus.engine.q35_dense import MODULE, MODULE_GSQ, MODULE_TCAP, Dense35Own
 from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC
-MOD = A.module or (MODULE_TCAP if A.variant == 'tcap' else MODULE)
+MOD = A.module or {'tcap': MODULE_TCAP, 'gsq': MODULE_GSQ}.get(A.variant, MODULE)
 TC = MOD in k3.Q35T_MODULES
 ok = True
 
