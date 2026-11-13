@@ -277,9 +277,11 @@ class Arch:
 
     def set_ids(self, alias, tok):
         """the model ids the server lists (caminus.serve.template): alias (thinking on, unless the model's chat template never
-        opens a think block: Qwen3-Coder-Next has no thinking mode) and alias-nothink"""
+        opens a think block: Qwen3-Coder-Next has no thinking mode) and alias-nothink, plus alias-low / alias-xhigh when the
+        template also pins a reasoning_effort line (the dense Qwen3.8-27B line does)"""
         from .serve.template import set_model_alias
-        set_model_alias(alias, thinking='<think>' in (tok.vocab.chat_template or ''))
+        tpl = tok.vocab.chat_template or ''
+        set_model_alias(alias, thinking='<think>' in tpl, effort='reasoning_effort' in tpl)
 
 
 class Coder(Arch):

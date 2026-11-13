@@ -155,18 +155,23 @@ MODEL_PROFILES = {
 DEFAULT_MODEL = 'k3-coder'
 
 
-def set_model_alias(alias, thinking=True):
+def set_model_alias(alias, thinking=True, effort=False):
     """the model ids of a server whose model is not the Coder (caminus serve --model-alias, the one-card engines): alias
     (thinking on) and alias-nothink (off) replace the k3-coder profiles in place (the server lists MODEL_PROFILES, imported
     by name), and alias becomes the default for unknown ids. The k3-coder ids (and their reasoning_effort profiles: the
     Coder's template has the effort line, Qwen3.6's has none) stay only for the Coder. thinking=False: a model whose
     template has no think block (Qwen3-Coder-Next): both ids render and parse with thinking off (the reply is content; a
-    thinking parse would take all of it as reasoning, since no '</think>' ever comes)"""
+    thinking parse would take all of it as reasoning, since no '</think>' ever comes). effort=True: the template also has
+    a reasoning_effort line (the dense Qwen3.8-27B line: Swift 1.5, ThinkingCap), so alias-low / alias-xhigh are listed too,
+    the same effort ids the Coder has; a template without the effort line (Qwen3-30B-A3B) gets none of them"""
     global DEFAULT_MODEL
     if alias == 'k3-coder': return
     MODEL_PROFILES.clear()
     MODEL_PROFILES.update({alias: {'enable_thinking': bool(thinking), 'reasoning_effort': 'medium'},
                            f'{alias}-nothink': {'enable_thinking': False, 'reasoning_effort': 'medium'}})
+    if effort and thinking:
+        MODEL_PROFILES.update({f'{alias}-low': {'enable_thinking': True, 'reasoning_effort': 'low'},
+                               f'{alias}-xhigh': {'enable_thinking': True, 'reasoning_effort': 'xhigh'}})
     DEFAULT_MODEL = alias
 CLIENT_KWARGS = ('enable_thinking', 'reasoning_effort', 'preserve_thinking')
 
