@@ -91,7 +91,9 @@ CLAUDE.md imports this file.
   tiles decode one row at a time to stay inside 96 VGPRs) behind `k3_q35t_ops.h`'s `q35t_op_mv` (one row loop per
   format). `tests/engine/test_q35_verify.py GGUF` gates both lines; `benchmarks/q35_verify_trace.py` splits a pass's
   time per segment kind. `k3_q35_tcap_dflash.hip` (`k3.Q35TDF_MODULES`) is the DFlash2 drafter on ThinkingCap's module
-  (IQ2_S embedding, Q8_0 head as a rows tile); `k3_q35_tcap.hip` defines `K3_Q35_ATTN_SPLIT` for every module but the
+  (IQ2_S embedding, Q8_0 head as a rows tile; no OWN_MV and no IQ grids in its LDS: 11 KB a workgroup); the IQ2_S grid
+  sits in LDS as magnitude bytes (8 KB): the verify module takes 16.7 KB a workgroup, so 7 per WGP fit, not 8;
+  `k3_q35_tcap.hip` defines `K3_Q35_ATTN_SPLIT` for every module but the
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).

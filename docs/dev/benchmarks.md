@@ -360,6 +360,22 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
   against aligned 8 + 2-byte planes and aligned 16-byte loads over exactly the same bytes on the XT: 48.4 / 48.2 /
   49.2 us, the same. The load shape is not the gap; the grid
   lookups and the unpack are what is left.
+- The tile was ALU-bound: its unit loop issued ~483 instructions (+113 `s_delay_alu`) per pass of 20 weight bytes, ~24
+  per byte read (IQ4_XS: ~9), most of them selecting a packed grid entry's half and spreading its 2-bit codes to bytes.
+  The grid now sits in LDS as its magnitude bytes (8 KB, one 8-byte read per 8 weights): 436 instructions a pass (333 +
+  103), the same bytes into the same sign and dot statements, so every sum keeps its bits. `benchmarks/own_mv_census.py
+  GGUF --formats IQ2_S` on the XT, interleaved (old, new, old, new), us per matvec:
+
+  | shape | old | new | llama.cpp |
+  |---|---|---|---|
+  | ffn_gate / ffn_up [17408 x 5120] | 79.4 / 79.5 | 59.0 / 58.4 | 74.5 / 73.2 |
+  | ffn_down [5120 x 17408] | 85.1 | 61.7 | 75.8 |
+  | attn_qkv [10240 x 5120] | 50.9 | 40.1 | 43.9 |
+  | attn_gate [6144 x 5120] / ssm_out [5120 x 6144] | 34.2 / 34.8 | 27.3 / 27.6 | 29.8 / 31.5 |
+
+  Plain decode in the engine (`benchmarks/q35_mtp_spec.py`, XT, interleaved): 40.4 / 40.5 -> 40.9 / 41.2 tok/s (+1.6 %).
+  LDS per workgroup: 8.2 -> 14.4 KB (8 per WGP still fit in 128 KB); the verify module 10.6 -> 16.7 KB (7 per WGP: the
+  engines' 4 / 5 and the gates' 3 / 6 / 7 fit); the DFlash module drops its matvec op and both grids (16.1 -> 11.0 KB).
 - The verify pass of 4 tokens: 43.0 ms against a 25.3 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`), 1.63x;
   Swift's is 1.45x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
 

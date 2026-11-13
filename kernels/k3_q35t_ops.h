@@ -26,9 +26,12 @@ enum { OWN_IQ2_S = 7 };   // (Seg.work of an IQ2_S matrix or embedding: its GG n
 enum { Q35T_STAGE_IQ3_XXS = 1, Q35T_STAGE_IQ3_S = 2, Q35T_STAGE_IQ2_S = 8 };
 
 __device__ __forceinline__ void q35t_stage(const Seg * tape) {
+#ifndef K3_Q35_DF   // (the DFlash drafter module runs no OWN_MV (its caps: none), so neither grid is staged nor held in its
+                    //  LDS: with the IQ2_S grid as bytes (8 KB) it would need 22 KB a workgroup, 6 per WGP past the 128 KB)
     const int f = tape[0].op == OP_OWN_EMB ? tape[0].out_f32 : 0;
     if (f & (Q35T_STAGE_IQ3_XXS | Q35T_STAGE_IQ3_S)) iq_stage((int)K3TID, f & (Q35T_STAGE_IQ3_XXS | Q35T_STAGE_IQ3_S));
     if (f & Q35T_STAGE_IQ2_S) iq2s_stage((int)K3TID);
+#endif
 }
 #define K3_LAUNCH_HOOK(tape) q35t_stage(tape)
 
@@ -132,7 +135,9 @@ __device__ __forceinline__ void q35t_op_emb(const Seg & sg) {
 
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
+#ifndef K3_Q35_DF   // (the DFlash module: no OWN_MV, k3.MODULE_CAPS refuses it there; its Q8_0 matvecs are OP_OWN_MV16)
     if (sg.op == OP_OWN_MV) { q35t_op_mv(sg, t); return true; }
+#endif
 #ifdef K3_Q35_MTP   // (ThinkingCap's MTP drafter module: the greedy key, k3_q35_ops.h's op; the host refuses the trunk's other ops)
     if (sg.op == OP_OWN_ARGMAX) { q35_op_argmax(sg, t); return true; }
 #endif
