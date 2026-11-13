@@ -246,6 +246,8 @@ check(refused(lambda: Dense35Verify(mt4, 4, module='k3_q35_swift_ver', vram_chec
       refused(lambda: Dense35Verify(mv4, 4, module='k3_q35_tcap_ver', vram_check=False)) and
       refused(lambda: k3.Engine(module='k3_q35_tcap', T=1).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
       'refused: a verify module of the other line, and T-token matvecs on ThinkingCap\'s decode module')
+check(not any(c[0] == 'OWN_MV' for c in k3.MODULE_CAPS['k3_q35_tcap_dflash']),
+      'the ThinkingCap DFlash module lists no OWN_MV pair (its device code compiles OP_OWN_MV and the IQ grids out: kernels/k3_q35t_ops.h K3_Q35_DF)')
 # ThinkingCap's MTP drafter (k3_q35_tcap_mtp: engine/q35_mtp.py on its Q6_K block, Q8_0 head, IQ2_S embedding)
 from caminus.engine.q35_mtp import Mtp35
 PM = os.path.join(A.scratch, 'tiny-q35-tcap-mtp.gguf'); tiny_q35.write(PM, variant='tcap', mtp=True)

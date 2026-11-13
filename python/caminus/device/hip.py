@@ -78,6 +78,15 @@ class Kernel:
     def __init__(self, fn, name):
         self.fn, self.name = fn, name
 
+    def lds_bytes(self):
+        """the kernel's static LDS per workgroup (hipFuncGetAttribute HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES = 1): what bounds
+        how many of its workgroups a WGP holds at once"""
+        v = ctypes.c_int()
+        h = hip()
+        h.hipFuncGetAttribute.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_void_p]
+        check(h.hipFuncGetAttribute(ctypes.byref(v), 1, self.fn))
+        return int(v.value)
+
     def __call__(self, grid, block, *args, shmem=0, stream=None):
         """args: torch tensors (passed as device pointers) or ctypes scalars (c_int, c_float, ...)"""
         vals = [ctypes.c_void_p(a.data_ptr()) if isinstance(a, torch.Tensor) else a for a in args]
