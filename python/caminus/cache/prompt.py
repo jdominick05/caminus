@@ -1337,9 +1337,11 @@ class PromptCache:
         self._skip_gap((i0 - commit) if pl['batched'] is not None else i0)
         kinds, taken = dict(pl['stops']), []
         def at(pos, st):
+            # (returns the commit after settle_commit: the K3-pass loop below continues from it, not from its own)
             st = dict(st, commit=self.settle_commit(ids, pos, int(st['commit'])))
             self.log, self.st = ids[:pos], dict(i0=pos, commit=int(st['commit']))
             if take and self._checkpoint(kinds.get(pos, '?')) is not None: taken.append((pos, kinds.get(pos, '?')))
+            return int(st['commit'])
         if take and pl['pre'] and i0 > 0 and self._checkpoint('user') is not None: taken.append((i0, 'user'))
         k3_stops = [s for s, _ in pl['stops']]
         if pl['batched'] is not None:
@@ -1375,7 +1377,7 @@ class PromptCache:
             commit, i0 = f, i0 + f
             self.log, self.st = ids[:i0], dict(i0=i0, commit=commit)
             if prog is not None: prog(i0)                  # (M7 ops: the server's live prompt progress, host only)
-            if i0 == s: at(i0, self.st)
+            if i0 == s: commit = at(i0, self.st)
         commit = self.settle_commit(ids, i0, commit)
         self.log, self.st = ids[:i0], dict(i0=i0, commit=commit)
         if take and i0 > 0 and self._checkpoint('prompt') is not None: taken.append((i0, 'prompt'))

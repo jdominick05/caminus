@@ -77,7 +77,7 @@ for k in prompts:
     same = all(d is None for d in dp + dd)
     ok &= same
     print(('PASS' if same else 'FAIL'), f'{k}: every {A.draft} and plain round\'s reply == the first plain reply (token for token)'
-          + ('' if same else f'; first differing token per round: plain {dp}, {A.draft} {dd}'))
+          + ('' if same else f'; first differing character of the reply text per round: plain {dp}, {A.draft} {dd}'))
 json.dump(dict(prompts=list(prompts), draft=A.draft, tps=res, replies=out), open(os.path.join(A.scratch, 'served_ab.json'), 'w'))
 print('RESULT ' + ('PASS' if ok else 'FAIL'), flush=True)
 sys.exit(0 if ok else 1)

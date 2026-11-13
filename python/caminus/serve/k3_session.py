@@ -875,7 +875,14 @@ class K3Session(EngineSession):
             if self._dk in HOST_VERIFY and st and int(st.get('commit', 0)) > 1:
                 # (the reply's last pass committed up to 4: settle to 1 as a plain server ends, so the next turn's restart
                 #  re-runs the same rows: PromptCache.settle_commit)
-                st = dict(st, commit=self.pc.settle_commit(self.toks, int(st['i0']), int(st['commit'])))
+                while True:
+                    try:
+                        st = dict(st, commit=self.pc.settle_commit(self.toks, int(st['i0']), int(st['commit'])))
+                        break
+                    except RuntimeError as e:
+                        if not _bail(e):
+                            raise
+                        st = self._recover(e)   # (a bail on the settle pass: recovered as any pass, then settled again)
             self.pc.commit(self.toks, st)   # (the passes were appended as they ran: what end() adds is extend()'s whole-log check)
         self._report_cache()
 

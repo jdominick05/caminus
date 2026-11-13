@@ -2562,6 +2562,44 @@ def stage_mtp35(cache_dir, small):
           f'mtp35: the 9-token prompt checkpoints at the plain server\'s (position, commit) {ckp}, every one at commit 1 '
           f'(drafted {cks}, settles {c4.stats.get("settles", 0)})')
     cp.close()
+    # ---- a stop inside the K3-pass loop (a root mark in a short prompt): the pass after the settled stop continues from
+    # commit 1 (review of PR 91: the loop kept its own commit and the next pass committed rows of the 1-row settle pass)
+    sr, er, pr_, cr, _, _ = mk(draft=True)
+    sq, eq, pq, cq, _, _ = mk(draft=False)
+    errs = []
+    for c_ in (cr, cq):
+        try: c_.prepare(base[:40], dict(root=23))   # (passes of 4 to 20, then 3: the stop needs a settle)
+        except Exception as ex: errs.append(f'{type(ex).__name__}: {ex}')
+    ckr = sorted((int(x.pos), int(x.commit)) for x in cr.ckpts); ckq = sorted((int(x.pos), int(x.commit)) for x in cq.ckpts)
+    # (the stand-in's logits are a function of its state: equal rows <=> the drafted cache left the plain cache's state)
+    lr = longctx.first_logits(er, dict(cr.st), list(cr.log)) if not errs else None
+    lq = longctx.first_logits(eq, dict(cq.st), list(cq.log)) if not errs else None
+    row_ = lambda r: np.asarray(r[0] if isinstance(r, tuple) else r, dtype=np.float64).ravel().tolist()
+    same = lr is not None and lq is not None and row_(lr) == row_(lq)
+    check(not errs and same and ckr == ckq and any(pos == 23 for pos, _ in ckr) and all(cm == 1 for _, cm in ckr),
+          f'mtp35: a 40-token prompt with a root mark at 23 (K3 passes, no batched run) runs through, checkpoints as a '
+          f'plain cache does and leaves its state (first logits equal: {same}; drafted {ckr}, plain {ckq}{", errors " + str(errs) if errs else ""})')
+    cr.close(); cq.close()
+    # ---- the saved pass width rides the checkpoint (a commit-4 checkpoint: written before settle_commit existed, or
+    # restored from disk): an intervening one-token pass must not lower the restored commit bound
+    s5, e5, p5, c5, mtp5, dr5 = mk(draft=True)
+    c5.settle_commit = lambda ids, i0, commit: int(commit)     # (this check needs the old commit-4 state)
+    s5.prefill(base[:9])
+    ck5 = [x for x in c5.ckpts if int(x.commit) == 4]
+    check(len(ck5) == 1 and int(ck5[0].last_T) == 4,
+          f'mtp35: without settling, the 9-token prompt left a commit-4 checkpoint carrying its pass width (last_T) '
+          f'{[(x.pos, x.commit, x.last_T) for x in c5.ckpts]}')
+    if ck5:
+        ck5 = ck5[0]
+        e5.verify_tokens([0] * int(ck5.pos) + [1], int(ck5.pos), 1)   # (an intervening one-token pass: last_T 1)
+        check(int(e5.last_T) == 1, 'mtp35: the intervening T=1 pass lowered last_T to 1')
+        c5._restore(ck5)
+        lt5 = int(e5.last_T)
+        row5 = longctx.first_logits(e5, dict(c5.st), list(c5.log))
+        check(lt5 == 4 and row5 is not None,
+              f'mtp35: the restore brings the saved pass width back (last_T {lt5}, commit {c5.st["commit"]}) '
+              f'and first_logits accepts the restored state')
+    c5.close()
     c4.close()
     c0.close()
 
