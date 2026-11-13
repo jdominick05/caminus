@@ -179,9 +179,9 @@ __device__ __forceinline__ void own_rows_iq2s_mt(const uint8_t * __restrict__ Wm
 #pragma unroll
             for (int g = 0; g < 4; g++) {
                 const uint32_t idx = ((iw >> (8 * g)) & 0xffu) | (((qh >> (2 * g)) & 3u) << 8);
-                const uint32_t e = IQ2S_G[idx >> 1] >> (16 * (idx & 1u));
-                wv[2 * g] = iq_signed(iq2s_mag4(e & 0xffu), sg >> (8 * g));
-                wv[2 * g + 1] = iq_signed(iq2s_mag4((e >> 8) & 0xffu), sg >> (8 * g + 4));
+                const iq2s_u2_t e = IQ2S_G[idx];   // (the grid's magnitude bytes: kernels/own_quant_iq2s.h)
+                wv[2 * g] = iq_signed(e.x, sg >> (8 * g));
+                wv[2 * g + 1] = iq_signed(e.y, sg >> (8 * g + 4));
             }
             d0 = d * ((float)(1u + 2u * (scb & 15u)) * 0.125f);
             d1 = d * ((float)(1u + 2u * (scb >> 4)) * 0.125f);

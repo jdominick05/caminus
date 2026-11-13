@@ -7,24 +7,33 @@
 // values); weight = ((d * (0.5 + s)) * 0.25) * +-grid. Read in Caminus's record layout (caminus.engine.own_layout
 // iq_records): plane A = a 10-byte record per unit of 32 weights (4 index bytes | 4 sign bytes | qh | the scale byte),
 // plane B = d per block, then 16 bytes of padding: a unit is ONE 16-byte load, its block's d one 2-byte load.
-// The grid (1024 entries of 8 magnitudes, each 8, 25 or 43) sits in the workgroup's LDS packed to 2 bits a magnitude
-// (kernels/iq2s_grid.h: 2 KB); a lookup is one LDS word, then a 4-weight group's magnitude bytes from its 8 code bits
-// (spread to one per byte, then a byte permute out of the three magnitudes). Separate from own_quant_iq.h's grid body
-// and its LDS array, so no existing code object changes.
+// The grid (1024 entries of 8 magnitudes, each 8, 25 or 43) sits in the workgroup's LDS as its magnitude bytes (8 KB:
+// two words an entry, weights 0 .. 3 then 4 .. 7), expanded at staging from the packed constant (kernels/iq2s_grid.h,
+// 2 bits a magnitude); a lookup is one 8-byte LDS read with the 8 magnitude bytes ready. The packed form (2 KB) cost
+// the tile ~16 VALU ops per 8 weights to select the entry's half and spread its codes to bytes: the tile issued ~24
+// instructions per weight byte read (IQ4_XS: ~9) and ran ALU-bound at ~60 % of the read ceiling. The same bytes reach
+// the same sign and dot statements, so every sum keeps its bits. Separate from own_quant_iq.h's grid body and its LDS
+// array, so no other code object changes.
 #pragma once
 #include "own_quant_iq.h"     // iq_signed, iq_dot4, wave_sum, the vector types
 #include "iq2s_grid.h"        // IQ2S_GRID
 
-__shared__ uint32_t IQ2S_G[512];
-// all 256 threads of the workgroup call it (one barrier)
-__device__ __forceinline__ void iq2s_stage(int tid) {
-    IQ2S_G[tid] = IQ2S_GRID[tid]; IQ2S_G[256 + tid] = IQ2S_GRID[256 + tid];
-    __syncthreads();
-}
 // 4 weights' 2-bit codes (bits 2k .. 2k + 1 of c: weight k) -> their 4 magnitude bytes (code 0: 8, 1: 25, 2: 43)
 __device__ __forceinline__ uint32_t iq2s_mag4(uint32_t c) {
     const uint32_t t = (c | (c << 6) | (c << 12) | (c << 18)) & 0x03030303u;
     return __builtin_amdgcn_perm(0u, 0x002b1908u, t);
+}
+typedef uint32_t iq2s_u2_t __attribute__((ext_vector_type(2)));
+__shared__ iq2s_u2_t IQ2S_G[1024];   // entry e: its 8 magnitude bytes (.x weights 0 .. 3, .y weights 4 .. 7)
+// all 256 threads of the workgroup call it (one barrier): each expands 4 entries of the packed grid
+__device__ __forceinline__ void iq2s_stage(int tid) {
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const int e = 4 * tid + j;
+        const uint32_t c = (IQ2S_GRID[e >> 1] >> (16 * (e & 1))) & 0xffffu;
+        IQ2S_G[e] = iq2s_u2_t{iq2s_mag4(c & 0xffu), iq2s_mag4(c >> 8)};
+    }
+    __syncthreads();
 }
 
 // Wm = the record layout of nrows_total rows; rows row0 .. min(row0 + RW, nrows) - 1; K = 0: the runtime Kr; res: the
@@ -68,18 +77,18 @@ __device__ __forceinline__ void own_rows_iq2s_1rt(const uint8_t * __restrict__ W
                 if (UNR == 1) __builtin_amdgcn_sched_barrier(0);
                 const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd[r][i] & 0xffffu));
                 const uint32_t iw = rc[r][i].x, sg = rc[r][i].y, qh = rc[r][i].z & 0xffu, scb = (rc[r][i].z >> 8) & 0xffu;
-                uint32_t e[4];                               // the grid reads: one LDS word per 8 weights
+                iq2s_u2_t e[4];                              // the grid reads: one 8-byte LDS read per 8 weights
 #pragma unroll
                 for (int g = 0; g < 4; g++) {
                     const uint32_t idx = ((iw >> (8 * g)) & 0xffu) | (((qh >> (2 * g)) & 3u) << 8);
-                    e[g] = IQ2S_G[idx >> 1] >> (16 * (idx & 1u));
+                    e[g] = IQ2S_G[idx];
                 }
                 float s[2] = {0.0f, 0.0f};                   // the two 16-weight halves (a scale each)
 #pragma unroll
                 for (int g = 0; g < 4; g++) {
                     if (UNR == 1) __builtin_amdgcn_sched_barrier(0);
-                    s[g >> 1] = iq_dot4(iq_signed(iq2s_mag4(e[g] & 0xffu), sg >> (8 * g)), xw[4 * g], xw[4 * g + 1], s[g >> 1]);
-                    s[g >> 1] = iq_dot4(iq_signed(iq2s_mag4((e[g] >> 8) & 0xffu), sg >> (8 * g + 4)), xw[4 * g + 2], xw[4 * g + 3], s[g >> 1]);
+                    s[g >> 1] = iq_dot4(iq_signed(e[g].x, sg >> (8 * g)), xw[4 * g], xw[4 * g + 1], s[g >> 1]);
+                    s[g >> 1] = iq_dot4(iq_signed(e[g].y, sg >> (8 * g + 4)), xw[4 * g + 2], xw[4 * g + 3], s[g >> 1]);
                 }
                 // (0.5 + s) 0.25 = (1 + 2 s) 0.125, exactly
                 acc[r] = __builtin_fmaf(d * ((float)(1u + 2u * (scb & 15u)) * 0.125f), s[0], acc[r]);

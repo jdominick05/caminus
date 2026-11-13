@@ -91,7 +91,10 @@ CLAUDE.md imports this file.
   tiles decode one row at a time to stay inside 96 VGPRs) behind `k3_q35t_ops.h`'s `q35t_op_mv` (one row loop per
   format). `tests/engine/test_q35_verify.py GGUF` gates both lines; `benchmarks/q35_verify_trace.py` splits a pass's
   time per segment kind. `k3_q35_tcap_dflash.hip` (`k3.Q35TDF_MODULES`) is the DFlash2 drafter on ThinkingCap's module
-  (IQ2_S embedding, Q8_0 head as a rows tile); `k3_q35_tcap.hip` defines `K3_Q35_ATTN_SPLIT` for every module but the
+  (IQ2_S embedding, Q8_0 head as a rows tile; no OWN_MV and no IQ grids in its LDS: 11 KB a workgroup); the IQ2_S grid
+  sits in LDS as magnitude bytes (8 KB): the verify module takes 16.7 KB a workgroup, so 7 per WGP fit, not 8
+  (`k3.resident_grid` and every `Engine.run` refuse a grid whose workgroups' LDS passes a WGP's 128 KB: `k3.check_resident`);
+  `k3_q35_tcap.hip` defines `K3_Q35_ATTN_SPLIT` for every module but the
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
@@ -113,6 +116,10 @@ CLAUDE.md imports this file.
   WMMA attention tiles (`q3p_attn`, head dim 128; `q35p_attn_wm`, head dim 256) are G-model gated, not bitwise (q35own's other
   ops are bitwise their decode ops); chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see q3m_prefill's attention).
 - `cache/prompt.py` + `cache/livestate.py`: the prompt cache owns the only live state (token log, (i0, commit), counters).
+  With a host-accept drafter (MTP, DFlash 35) the prompt runs and checkpoints as on a plain server: K3 passes up to
+  n - 1, and every stop, prompt end and reply end at commit 1 (`PromptCache.settle_commit`: one decode-tape pass
+  re-feeds the last row). A batched restart re-runs the last `commit` rows with prefill math (not bitwise decode), so a
+  different commit would let drafting change a later reply at a near-tie.
 - `serve/`: HTTP + SSE, template, tool parser, sampler; `EngineSession` declares the session contract
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
 - `device/host.py`: the host's cards from sysfs + KFD topology, never torch; `caminus serve` places itself and sets
