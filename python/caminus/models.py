@@ -112,7 +112,7 @@ PAUSED = {
     'qwen3.6': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3.6-hauhau': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3-coder-next': 'Qwen3-Coder-Next is paused: not in this release (it is not measured on the current code)',
-    'qwen3.8-27b': 'Qwen3.8-27B GSQ-RCO is not ready yet: its decode module is built, its prefill and serve are not',
+    'qwen3.8-27b': 'Qwen3.8-27B GSQ-RCO is not offered yet: it serves on one card, its drafting (MTP, DFlash2) is not built',
 }
 
 
