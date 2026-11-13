@@ -41,10 +41,11 @@ __host__ __device__ __forceinline__ bf16_t to_bf16(float v) {
     return (bf16_t)((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
 }
 
-// ARM 0: bf16 A/B. ARM 1: int8 A/B (byte LDS). ARM 2: packed-e4m3 A (byte LDS) + bf16 B, bf16 wmma with frag_fp8 on A.
+// ARM 0: bf16 A/B. ARM 1: int8 A/B (both byte buffers, byte LDS). ARM 2: packed-e4m3 A (byte buffer) + bf16 B,
+// bf16 wmma with frag_fp8 on A. Byte buffers are chunked as 16-byte loads: chunk c -> row c/2, offset (c%2)*16.
 template <int ARM>
 __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N, int K) {
-    constexpr bool A_BYTES = (ARM == 2), B_BYTES = (ARM == 1);
+    constexpr bool A_BYTES = (ARM != 0), B_BYTES = (ARM == 1);
     constexpr int LA = A_BYTES ? LDBB : LDRB, LB = B_BYTES ? LDBB : LDRB;
     constexpr int CA = A_BYTES ? BM * SB / 16 / 128 : BM * BK / 8 / 128;
     constexpr int CB = B_BYTES ? BN * SB / 16 / 128 : BN * BK / 8 / 128;
@@ -55,11 +56,11 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
     const int m0 = blockIdx.y * BM, n0 = blockIdx.x * BN;
     u32x4 ra[CA], rb[CB];
     auto gload = [&](int k0) {
-        if constexpr (A_BYTES) {
+        if constexpr (A_BYTES) {   // byte buffer: 16B chunks, row = c/2, offset (c%2)*16 (SB = 32 bytes/stage)
             const uint8_t *Ak = (const uint8_t *)A + (size_t)m0 * K + k0;
 #pragma unroll
-            for (int j = 0; j < CA; j++) { const int c = tid + 128 * j; ra[j] = *(const u32x4 *)(Ak + (size_t)(c / 4) * K + (c % 4) * 4); }
-        } else {
+            for (int j = 0; j < CA; j++) { const int c = tid + 128 * j; ra[j] = *(const u32x4 *)(Ak + (size_t)(c / 2) * K + (c % 2) * 16); }
+        } else {                    // bf16 buffer: 16B chunks, row = c/4, offset (c%4)*8 elements
             const bf16_t *Ak = (const bf16_t *)A + (size_t)m0 * K + k0;
 #pragma unroll
             for (int j = 0; j < CA; j++) { const int c = tid + 128 * j; ra[j] = *(const u32x4 *)(Ak + (size_t)(c / 4) * K + (c % 4) * 8); }
@@ -67,7 +68,7 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
         if constexpr (B_BYTES) {
             const uint8_t *Bk = (const uint8_t *)B + (size_t)n0 * K + k0;
 #pragma unroll
-            for (int j = 0; j < CB; j++) { const int c = tid + 128 * j; rb[j] = *(const u32x4 *)(Bk + (size_t)(c / 4) * K + (c % 4) * 4); }
+            for (int j = 0; j < CB; j++) { const int c = tid + 128 * j; rb[j] = *(const u32x4 *)(Bk + (size_t)(c / 2) * K + (c % 2) * 16); }
         } else {
             const bf16_t *Bk = (const bf16_t *)B + (size_t)n0 * K + k0;
 #pragma unroll
@@ -78,13 +79,13 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
 #pragma unroll
         for (int j = 0; j < CA; j++) {
             const int c = tid + 128 * j;
-            if constexpr (A_BYTES) *(u32x4 *)&sA[buf * BM * LA + (c / 4) * LA + (c % 4) * 4] = ra[j];
+            if constexpr (A_BYTES) *(u32x4 *)&sA[buf * BM * LA + (c / 2) * LA + (c % 2) * 16] = ra[j];
             else *(u32x4 *)&sA[buf * BM * LA + (c / 4) * LA + (c % 4) * 8] = ra[j];
         }
 #pragma unroll
         for (int j = 0; j < CB; j++) {
             const int c = tid + 128 * j;
-            if constexpr (B_BYTES) *(u32x4 *)&sB[buf * BN * LB + (c / 4) * LB + (c % 4) * 4] = rb[j];
+            if constexpr (B_BYTES) *(u32x4 *)&sB[buf * BN * LB + (c / 2) * LB + (c % 2) * 16] = rb[j];
             else *(u32x4 *)&sB[buf * BN * LB + (c / 4) * LB + (c % 4) * 8] = rb[j];
         }
     };
@@ -132,7 +133,7 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
 #pragma unroll
             for (int j = 0; j < TN; j++) acc[i][j] = f32x8{0, 0, 0, 0, 0, 0, 0, 0};
         const uint8_t *pa = sA + (wm * WTM + lane % 16) * LA;
-        const bf16_t *pb = (const bf16_t *)(sB + (wn * WTN + lane % 16) * LB);
+        const uint8_t *pb = sB + (wn * WTN + lane % 16) * LB;
         for (int kt = 0; kt < KT; kt++) {
             const int buf = kt & 1;
             if (kt + 1 < KT) gload((kt + 1) * KST);
@@ -142,9 +143,9 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
 #pragma unroll
                 for (int i = 0; i < TM; i++)
                     af[i] = A_BYTES ? frag_fp8(pa + buf * BM * LA + i * 16 * LA + ks)
-                                    : frag16((const bf16_t *)(pa + buf * BM * LA + i * 16 * LA + ks));
+                                    : frag16((const bf16_t *)(pa + buf * BM * LA + i * 16 * LA + ks * 2));
 #pragma unroll
-                for (int j = 0; j < TN; j++) bfr[j] = frag16(pb + buf * BN * LB + j * 16 * LB + ks);
+                for (int j = 0; j < TN; j++) bfr[j] = frag16((const bf16_t *)(pb + buf * BN * LB + j * 16 * LB + ks * 2));
 #pragma unroll
                 for (int i = 0; i < TM; i++)
 #pragma unroll
