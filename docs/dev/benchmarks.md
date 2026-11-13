@@ -290,7 +290,8 @@ benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 -
   card's full context; `--draft dflash` is faster where the drafter fits (below).
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_mtp.py GGUF`, XT): rows in tapes of 4,
   3 + 1 and 1 give the same bits; a round of T rows gives T one-row rounds' KV rows, hn and draft; drafts agree with the
-  block in fp32 torch at 100 % (first and chained), mean KLD 2.3e-7. A round (k = 3, the catch rows and two chained steps) takes 8.9 ms on the XT; the split
+  block in fp32 torch at 100 % (first and chained), mean KLD 2.3e-7, the same at
+  `K3_PER_WGP=3/6/7` (every check passes at each grid). A round (k = 3, the catch rows and two chained steps) takes 8.9 ms on the XT; the split
   per segment is not measured yet (the three passes of the Q8_0 head on its rows tile are the likely part).
 
 #### Speculative decoding with DFlash 2 (served)
