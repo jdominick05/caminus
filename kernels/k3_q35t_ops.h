@@ -81,8 +81,10 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
         float res[2] = {0.0f, 0.0f};
         int l = lane; asm volatile("" : "+v"(l));
         if (fmt == OWN_IQ4_XS) own_rows_iq4xs_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);
-        else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S)
-            own_rows_iqg_1rt<3, 0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res, fmt == OWN_IQ3_XXS ? 0 : 1);
+        // (the format fixed at compile time, one body per format: own_quant_iq.h measured the runtime-format body slower
+        //  and gives the same bits in both forms)
+        else if (fmt == OWN_IQ3_XXS) own_rows_iqg_1rt<0, 0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
+        else if (fmt == OWN_IQ3_S) own_rows_iqg_1rt<1, 0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
         else if (fmt == OWN_IQ2_S) own_rows_iq2s_1rt<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);
         else if (fmt == OWN_Q5_K) own_rows_q5k_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);
         else own_rows_q6k_planes<0, 2, 1, 1>(sg.W, total, row, lim, x, nullptr, l, sg.K, res);   // (OWN_Q6_K: host-checked)
