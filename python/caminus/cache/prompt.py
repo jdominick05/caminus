@@ -1306,6 +1306,19 @@ class PromptCache:
             self.draft.skip_inject(int(first))
             self.stats['inject_gaps'] += 1; self.stats['inject_gap_positions'] += int(first) - have
 
+    def _host_accept(self):
+        return self.df is not None and getattr(self.df, 'kind', None) in ('mtp', 'dflash35')
+
+    def settle_commit(self, ids, i0, commit):
+        """a host-accept drafter's state (i0, commit) with commit > 1 -> (i0, 1), as a plain server has it: one decode-tape
+        pass re-feeds position i0 - 1 after committing the first commit - 1 rows of the last pass (the same math the row had:
+        verify passes are bitwise decode steps), so a batched restart from this state re-runs one row, not commit. The
+        drafter needs nothing: the row's h / features are the same bits. Returns the commit now (1, or the given one)"""
+        if not self._host_accept() or int(commit) <= 1: return int(commit)
+        self.m.verify_tokens(list(ids), int(i0) - 1, int(commit) - 1)
+        self.stats['settles'] = self.stats.get('settles', 0) + 1
+        return 1
+
     def _process(self, ids, marks, take=True, cancel=None):
         """from the live state to ids' prompt end (plan_request), with the policy's checkpoints when take; returns (state,
         checkpoints taken, cancelled): a cancel (prepare) stops at a chunk boundary of the batched run or between K3 passes"""
@@ -1314,13 +1327,21 @@ class PromptCache:
         prog = getattr(cancel, 'progress', None)       # (an optional progress(position) on the cancel object: K3Session's)
         n = len(ids); i0, commit = int(self.st['i0']), int(self.st['commit'])
         if self.draft is not None: self.draft.flush()
-        pl = plan_request(n, i0, commit, marks, crossover=pf.crossover, limit=pf.limit, T=T, every=self.every)
+        # a host-accept drafter (MTP, DFlash 35): the prompt runs and checkpoints as on a plain server (T = 1: passes up to
+        # n - 1, every stop and the end at commit 1, settle_commit()), so a later request that reuses this state has the same rows
+        # from decode math and from the batched prefill as a plain server's (prefill is not bitwise decode: a near-tie
+        # could flip, issue 78); its passes stay T wide where they fit
+        hv = self._host_accept()
+        pl = plan_request(n, i0, commit, marks, crossover=pf.crossover, limit=pf.limit, T=1 if hv else T, every=self.every)
         # the first position this request injects: i0 - commit (a batched restart) or i0 (K3 passes, and the caller's own pass)
         self._skip_gap((i0 - commit) if pl['batched'] is not None else i0)
         kinds, taken = dict(pl['stops']), []
         def at(pos, st):
+            # (returns the commit after settle_commit: the K3-pass loop below continues from it, not from its own)
+            st = dict(st, commit=self.settle_commit(ids, pos, int(st['commit'])))
             self.log, self.st = ids[:pos], dict(i0=pos, commit=int(st['commit']))
             if take and self._checkpoint(kinds.get(pos, '?')) is not None: taken.append((pos, kinds.get(pos, '?')))
+            return int(st['commit'])
         if take and pl['pre'] and i0 > 0 and self._checkpoint('user') is not None: taken.append((i0, 'user'))
         k3_stops = [s for s, _ in pl['stops']]
         if pl['batched'] is not None:
@@ -1331,12 +1352,14 @@ class PromptCache:
             if r.get('cancelled'):
                 self._mark()
                 return dict(self.st), taken, True
-        while n - i0 > T:
+        while n - i0 > (1 if hv else T):
             if is_set is not None and is_set():
+                commit = self.settle_commit(ids, i0, commit)
                 self.log, self.st = ids[:i0], dict(i0=i0, commit=commit); self._mark()
                 return dict(self.st), taken, True
             s = next((x for x in k3_stops if x > i0), None)
             f = T if s is None else min(T, s - i0)
+            if hv: f = min(f, n - 1 - i0)
             seq = ids[:i0 + f] + [ids[i0 + f - 1]] * (T - f)
             if self.df is not None and getattr(self.df, 'kind', None) in ('mtp', 'dflash35'):
                 # the prompt tail's passes are the T-wide verify passes (T = spec_T); the MTP drafter takes the pass's
@@ -1354,7 +1377,8 @@ class PromptCache:
             commit, i0 = f, i0 + f
             self.log, self.st = ids[:i0], dict(i0=i0, commit=commit)
             if prog is not None: prog(i0)                  # (M7 ops: the server's live prompt progress, host only)
-            if i0 == s: at(i0, self.st)
+            if i0 == s: commit = at(i0, self.st)
+        commit = self.settle_commit(ids, i0, commit)
         self.log, self.st = ids[:i0], dict(i0=i0, commit=commit)
         if take and i0 > 0 and self._checkpoint('prompt') is not None: taken.append((i0, 'prompt'))
         self._mark()
