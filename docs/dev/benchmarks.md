@@ -218,13 +218,21 @@ page is mostly tables, where the block's drafts are kept less often (2.27 tokens
 Served (`caminus serve --draft mtp`): `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids
 IDS.json --scratch DIR --card 0 --draft mtp --max-ctx 12288`, the server's own decode timing for 128 greedy tokens,
 interleaved over 3 rounds, the same prompts as the DFlash table below, measured 2026-11-12 on testing `db7b6d9` with
-nothing else on the cards. The replies are the plain server's token for token.
+nothing else on the cards. The replies are the plain server's token for token. The llama.cpp columns are stock llama.cpp's
+`llama-server` with its own MTP on the same card, prompts and settings (f16 KV, `-c 12288`, 128 greedy tokens, median of 3
+interleaved runs, measured 2026-11-13): `tools/guard.sh LOG 1800 python -I benchmarks/llamacpp_spec_ab.py --bin
+LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft-mtp --spec-draft-n-max 3`).
 
-| prompt | RX 7900 XTX: `--draft off` | `--draft mtp` |
-|---|---|---|
-| code | 42.8 | 91.3 (2.13x) |
-| prose | 42.7 | 95.9 (2.24x) |
-| shell | 42.8 | 73.5 (1.72x) |
+| prompt | RX 7900 XTX: `--draft off` | `--draft mtp` | llama-server: plain | + its MTP (accepted) |
+|---|---|---|---|---|
+| code | 42.8 | 91.3 (2.13x) | 36.4 | 71.4 (1.96x, 78 %) |
+| prose | 42.7 | 95.9 (2.24x) | 36.5 | 82.5 (2.26x, 91 %) |
+| shell | 42.8 | 73.5 (1.72x) | 36.2 | 74.2 (2.05x, 78 %) |
+
+- llama.cpp's drafted replies equalled its plain ones on all three prompts.
+- Shell: the engine-level run above keeps the same share of drafts (3.34 tokens a round, about 78 %) at 1.97x, but the
+  served run gets 1.72x while code holds (2.15x engine, 2.13x served); the served path's cost per round on that prompt is
+  not explained yet.
 
 #### Speculative decoding with DFlash 2 (served)
 
@@ -309,6 +317,16 @@ benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 -
 | prose | 39.7 | 73.6 (1.85x) |
 | shell | 39.7 | 52.7 (1.33x) |
 
+Stock llama.cpp's `llama-server` with its own MTP, the same card, prompts and settings as Swift's MTP table (f16 KV,
+`-c 12288`, `benchmarks/llamacpp_spec_ab.py`, measured 2026-11-13): plain 33.6 tok/s; MTP 65.7 / 73.7 / 64.7 (1.95x /
+2.19x / 1.92x; 72 / 87 / 72 % of its drafts accepted). Its drafted replies differed from its plain ones on prose (from
+token 27) and shell (from token 66).
+
+In the engine (`tools/guard.sh LOG 1200 python -I benchmarks/q35_mtp_spec.py GGUF --prompt 48 --n 128 --ids IDS.json`,
+XT, 2026-11-13): 1.51x / 1.72x / 1.38x at 3.10 / 3.53 / 2.82 tokens a round. A round is the drafter 9.1 ms and the
+verify pass 43.0 ms, 1.69x a decode step (25.4 ms): the fixed cost per round is where llama.cpp's MTP pulls ahead on
+shell, at a similar acceptance.
+
 - The replies are the plain server's token for token. The block needs no extra file and little VRAM, so it keeps the
   card's full context; `--draft dflash` is faster where the drafter fits (below).
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_mtp.py GGUF`, XT): rows in tapes of 4,
@@ -333,6 +351,11 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
 
 - The replies are the plain server's token for token. llama.cpp's drafted output differed from its plain output on prose
   and shell.
+- IQ2_S's matvec (18 a token) reads at about 60 % of the read ceiling. Its 10-byte unit records are read with one
+  16-byte load each at a 10-byte stride; `benchmarks/iq2s_load_probe.hip` (the tile's lane mapping, the ffn's 17408 x
+  5120, passes rotating over 8 copies so they read memory, not the Infinity Cache) times that against aligned 8 + 2-byte
+  planes and aligned 16-byte loads on the XT: 48.2 / 48.0 / 49.0 us, the same. The load shape is not the gap; the grid
+  lookups and the unpack are what is left.
 - The verify pass of 4 tokens: 43.0 ms against a 25.3 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`), 1.63x;
   Swift's is 1.45x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
 
