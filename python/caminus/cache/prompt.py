@@ -736,7 +736,7 @@ class Layout:
             self.state[k[0]].append((k, t.numel() * t.element_size()))
         self.idx = bool(getattr(m, 'idx_cache', False)) and (0, 'idxraw') in m.state
         self.pb = []
-        kv_rows = int(getattr(m, 'kv_rows', self.max_ctx))   # dense verify engines keep spec_T - 1 guarded tail rows
+        kv_rows = int(getattr(m, 'kv_rows', self.max_ctx))   # rows in state's KV view; dense verify includes guarded tail rows
         for c in range(len(self.devs)):
             if any(m.state[k].numel() * m.state[k].element_size() % kv_rows for k in self.kv[c]):
                 raise CacheError('promptcache: KV allocation is not a whole number of physical rows')

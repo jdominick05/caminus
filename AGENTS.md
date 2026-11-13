@@ -223,8 +223,9 @@ Correctness:
   divergence bound only.
 - Bounds: every position-indexed host entry calls `k3.check_span`; device accesses clamp and set `err`; contexts past the
   allocation are refused, never written.
-- Checkpoint KV strides use physical `kv_rows` when present: dense verify engines allocate `spec_T - 1` tail rows beyond
-  `max_ctx`; dividing their bytes by the legal context corrupts small-context checkpoint and park offsets.
+- Checkpoint KV strides use the exposed state view's `kv_rows` when present: dense verify views include `spec_T - 1`
+  tail rows beyond `max_ctx`; dividing their bytes by the legal context corrupts small-context checkpoint and park
+  offsets. Padding excluded from a state view (Qwen3's ATS rows) also stays excluded from its layout row count.
 - Routing ids are clamped on the device before every mm_ids_helper launch; a chunk with its routing flag set is refused.
 - Unsafe paths are shown unsafe by CPU emulation only (tests/prefill/test_prefill_safety.py), never by launching them.
 - The prefill's TP exchange uses hipMemcpyPeerAsync on copy streams ordered by HIP events only; card 0's partial is added
