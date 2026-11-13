@@ -34,8 +34,8 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
     against 40.
   - `--draft dflash` drafts with the base model's DFlash2 drafter (2 GB, shared by both models; `caminus pull` now
     fetches it with either model). Swift 1.5 on an XTX: 96 / 95 / 71 tok/s (llama.cpp with the same drafter: 75 / 75 /
-    67). ThinkingCap on an XT: 76 / 77 / 61 (llama.cpp: 71 / 75 / 48). The drafter's memory leaves Swift about 16K
-    tokens of context on a 24 GB card; `--draft mtp` keeps the full context.
+    67). ThinkingCap on an XT: 76 / 77 / 61 (llama.cpp: 71 / 75 / 48). The drafter's memory leaves Swift about 12-16K
+    tokens of context on a 24 GB card (it starts from 8K); `--draft mtp` keeps the full context.
   See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same

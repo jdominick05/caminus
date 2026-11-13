@@ -175,8 +175,8 @@ rotated past the Infinity Cache.
 Measured in the engine: `benchmarks/q35_mtp_spec.py` drives it directly, with no server, HTTP or sampler in the loop.
 The llama.cpp column is `llama-server`'s own decode timing (`timings.predicted_per_second`), with `-ctk q8_0 -ctv q8_0
 -c 1024`, MTP drafting 3 tokens; its plain decode in that setup is 35.6 tok/s. Compare the speed-ups: llama.cpp gets
-2.19x / 2.18x / 2.00x from its MTP, Caminus 2.15x / 2.14x / 1.97x. The tok/s difference is the plain decode's. Both
-are measured again through each server once `caminus serve` drafts. llama.cpp's MTP output differed from its plain
+2.19x / 2.18x / 2.00x from its MTP, Caminus 2.15x / 2.14x / 1.97x. The tok/s difference is the plain decode's.
+Caminus's served numbers are below; llama-server's MTP has not been measured through its server on these prompts yet. llama.cpp's MTP output differed from its plain
 output on the code prompt from token 42; Caminus's is the plain loop's token for token.
 
 `engine/q35_mtp.py` runs the block on its own module (`kernels/k3_q35_swift_mtp.hip`). A round writes the block's rows

@@ -37,8 +37,8 @@ again.
   path). It writes at about `arex-2`'s speed. `caminus serve --model ... --draft mtp` (one card) drafts with the model's
   own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
   XTX; no extra file); `--draft dflash` drafts with its base model's DFlash2 drafter
-  instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~16K tokens of
-  context on a 24 GB card). Either way the output is identical to plain decoding. `caminus pull swift-1.5` (or
+  instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~12-16K tokens of
+  context on a 24 GB card, so with it the server starts from 8K instead of 32K). Either way the output is identical to plain decoding. `caminus pull swift-1.5` (or
   `thinkingcap`) fetches the 2 GB drafter file with the model, once for both. Its speed drops at depth: about
   15 tok/s with 28K tokens of context.
 - **`thinkingcap`** is the other dense 27B model on Caminus's own code end to end: a finetune of the same base, quantized
@@ -59,7 +59,8 @@ caminus start thinkingcap      # picks the card and the largest context that fit
 ```
 
 Caminus sizes the context to your cards: up to 262,144 tokens (40,960 for `qwen3-30b-a3b`). It refuses to start a model
-that can't hold at least 32,768 tokens on your cards, rather than run out of memory later.
+that can't hold at least 32,768 tokens on your cards, rather than run out of memory later (8,192 with `--draft dflash` on
+the 27B models: the drafter's memory comes out of the context).
 
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
 --cards 2`). Each card holds half of every layer, so the model writes about 1.4 times as fast and the full 262,144-token
