@@ -21,6 +21,9 @@ failure reports (FAIL / ERROR lines and tracebacks) and the end of its log; the 
 
 `cd panel && go test ./...` tests the panel.
 
+The one-card server smoke's tool acceptance check has a small CPU regression suite, with synthetic SSE through the real
+collector and no sockets or model: `python -I tests/tools/test_serve_smoke1.py` (also the `serve_smoke1` CPU suite).
+
 ## GPU tests
 
 GPU tests always run under the guard (`tools/guard.sh LOG SECS CMD...`) and follow [GPU safety](gpu-safety.md). Each
@@ -31,7 +34,16 @@ script's header says what it needs and what it checks. The main kinds:
 | Per-operation | `tests/prefill/test_prefill_glue.py GGUF gpu` | Each kernel gives the same bits as the decode engine's operation, or as llama.cpp's |
 | End to end | `tests/engine/test_flashnext_e2e.py ... --tp` | The whole model against llama.cpp's own output |
 | Server | `tools/serve_smoke.py --scratch DIR` | The real `caminus serve`: tool loops on both APIs, the cache, restarts, cancel, a 100K prompt |
+| One-card server | `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR` | The selected model calls a weather tool, consumes every result and answers with their synthetic observation codes |
 | Speed | `benchmarks/fn_bench.py 96 GGUF --tp` | Time per token |
+
+The one-card smoke first lets the model choose a tool naturally. If it emits no call, the smoke reports one retry with
+`tool_choice: required`, using the same model and thinking policy. Every call must use the declared name, a JSON object
+with a nonempty city string and a unique nonempty ID. Every result is replayed, and the final `tool_choice: none` turn
+must finish with weather text containing every result's observation code and the supplied temperature, without more
+calls. Text alone, invalid arguments, truncated answers or ignoring the results fail. The greedy and seeded-sampling
+prompts used for drafter hash comparisons are independent of this tool check. CPU tests prove the acceptance logic;
+the real model's behavior still needs the guarded server smoke.
 
 ## The accuracy rules
 
