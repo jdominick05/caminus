@@ -20,8 +20,13 @@ bad = 0; nvals = 0
 rng = np.random.default_rng(20261110)
 for name, (qk, bs, _) in sorted(own_dequant.DECODERS.items()):
     raw = rng.integers(0, 256, (A.random, bs), dtype=np.uint8)
-    for o in {'Q4_K': (0, 2), 'Q5_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2)}.get(name, (0,)):          # (the fp16 block scales: finite and small)
+    for o in {'Q4_K': (0, 2), 'Q5_K': (0, 2), 'Q6_K': (208,), 'Q4_1': (0, 2), 'Q2_K': (80, 82), 'IQ1_M': ()}.get(name, (0,)):   # (the fp16 block scales: finite and small)
         raw[:, o:o + 2] = (rng.standard_normal(A.random) * 0.01).astype(np.float16).view(np.uint8).reshape(-1, 2)
+    if name == 'IQ1_M':   # (its fp16 d is split over the top nibbles of the four scale words: a finite one, nibble by nibble)
+        d = (rng.standard_normal(A.random) * 0.01).astype(np.float16).view(np.uint16)
+        w = raw[:, 48:56].copy().view(np.uint16).reshape(-1, 4) & np.uint16(0x0FFF)
+        for k in range(4): w[:, k] |= ((d >> np.uint16(4 * k)) & np.uint16(0xF)) << np.uint16(12)
+        raw[:, 48:56] = w.view(np.uint8).reshape(-1, 8)
     ours = own_dequant.dequant(raw.reshape(-1), name, A.random * qk)
     ref = quants.dequantize(raw, GGMLQuantizationType[name]).astype(np.float32).reshape(-1)
     ok = np.array_equal(ours.view(np.uint32), ref.view(np.uint32)); bad += not ok
@@ -77,10 +82,13 @@ for name, (bits, bv, bs) in sorted(own_layout.RS_CONT.items()):   # the row-scal
         except ValueError: pass
         bad += not ok
         print(('PASS' if ok else 'FAIL') + f' {name} K {K}: the row-scale planes decode to the container\'s values, invert, and refuse a row with two scales')
-for cls in (quants.IQ2_XXS, quants.IQ2_S, quants.IQ3_XXS, quants.IQ3_S): cls.init_grid()
+for cls in (quants.IQ2_XXS, quants.IQ2_XS, quants.IQ2_S, quants.IQ3_XXS, quants.IQ3_S, quants.IQ1_S): cls.init_grid()
 tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
         ('GRID_IQ2_XXS', iq_tables.GRID_IQ2_XXS, quants.IQ2_XXS.grid.reshape(256, 8)),
+        ('GRID_IQ2_XS', iq_tables.GRID_IQ2_XS, quants.IQ2_XS.grid.reshape(512, 8)),
         ('GRID_IQ2_S', iq_tables.GRID_IQ2_S, quants.IQ2_S.grid.reshape(1024, 8)),
+        ('GRID_IQ1_S', iq_tables.GRID_IQ1_S, quants.IQ1_S.grid.reshape(2048, 8)),
+        ('IQ1_DELTA', np.array([iq_tables.IQ1_DELTA]), np.array([quants.IQ1_S.delta])),
         ('GRID_IQ3_XXS', iq_tables.GRID_IQ3_XXS, quants.IQ3_XXS.grid.reshape(256, 4)),
         ('GRID_IQ3_S', iq_tables.GRID_IQ3_S, quants.IQ3_S.grid.reshape(512, 4)),
         ('the sign bytes', own_dequant._signs7(np.arange(128)), np.frombuffer(quants.IQ2_XXS.ksigns, np.uint8))]
