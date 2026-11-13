@@ -25,6 +25,9 @@
 #endif
 #ifdef K3_Q3M_VER   // (the verify module, kernels/k3_q35_tcap_ver.hip: the T-token tiles; the decode module never sees them)
 #include "own_quant_tcap_mt.h"
+#ifdef K3_Q35_GSQ
+#include "own_quant_gsq_mt.h"
+#endif
 #endif
 
 enum { OWN_IQ2_S = 7 };   // (Seg.work of an IQ2_S matrix or embedding: its GG number; engine/k3.py OWN_Q35T_FMT; the others: k3_own_ops.h / k3_q35_ops.h)
@@ -86,6 +89,13 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
     else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S) { const int f = fmt == OWN_IQ3_XXS ? 0 : 1; Q35T_MT_LOOP(own_rows_iq3_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm, f)) }
     else if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q5_K) { Q35T_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+#ifdef K3_Q35_GSQ   // (the GSQ verify module, kernels/k3_q35_gsq_ver.hip: kernels/own_quant_gsq_mt.h; Q4_K Swift's mt2 form)
+    else if (fmt == OWN_IQ2_XXS) { Q35T_MT_LOOP(own_rows_iq2xxs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_IQ2_XS) { Q35T_MT_LOOP(own_rows_iq2xs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_Q2_K) { Q35T_MT_LOOP(own_rows_q2k_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_IQ1_M) { Q35T_MT_LOOP(own_rows_iq1m_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_Q4_K) { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+#endif
     else
 #endif
     { Q35T_MT_LOOP(own_rows_q6k_planes_mt2<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q6_K: host-checked)
