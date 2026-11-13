@@ -276,8 +276,9 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The gr
 
 ThinkingCap's multi-token-prediction block (`blk.64`, all Q6_K) on `kernels/k3_q35_tcap_mtp.hip` (the planes' T-token
 tiles, its Q8_0 head as a rows tile, the IQ2_S embedding reading the argmax key on the card for the chained steps),
-`engine/q35_mtp.py`, 3 drafts a round, verified by the 4-token pass. `benchmarks/q35_served_ab.py --card 1 --draft mtp
---max-ctx 12288`, measured 2026-11-12 with nothing else on the cards, the same prompts as the DFlash table below:
+`engine/q35_mtp.py`, 3 drafts a round, verified by the 4-token pass. `tools/guard.sh LOG 3600 python -I
+benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --draft mtp --max-ctx 12288`, measured
+2026-11-12 with nothing else on the cards, the same prompts as the DFlash table below:
 
 | prompt | RX 7900 XT: `--draft off` | `--draft mtp` |
 |---|---|---|
@@ -289,8 +290,8 @@ tiles, its Q8_0 head as a rows tile, the IQ2_S embedding reading the argmax key 
   card's full context; `--draft dflash` is faster where the drafter fits (below).
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_mtp.py GGUF`, XT): rows in tapes of 4,
   3 + 1 and 1 give the same bits; a round of T rows gives T one-row rounds' KV rows, hn and draft; drafts agree with the
-  block in fp32 torch at 100 % (first and chained), mean KLD 2.3e-7. A round (k = 3) takes 8.9 ms (the head's three
-  passes on the Q8_0 rows tile; Swift's Q6_K head: 5.4 ms).
+  block in fp32 torch at 100 % (first and chained), mean KLD 2.3e-7. A round (k = 3, the catch rows and two chained steps) takes 8.9 ms on the XT; the split
+  per segment is not measured yet (the three passes of the Q8_0 head on its rows tile are the likely part).
 
 #### Speculative decoding with DFlash 2 (served)
 
