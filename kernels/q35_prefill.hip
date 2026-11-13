@@ -142,6 +142,123 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
         }
 }
 
+#define MMW_N 256   // (rows per workgroup of the wide tiles: 8 waves x 32 rows)
+
+// ---- q35p_mm_q8_0_w: Q8_0, the wide tile (dense rows only) ---------------------------------------------------------------
+// q35p_mm_q8_0 with two 16-row tiles per wave (64 tokens x 256 rows per workgroup): each A operand feeds both row tiles'
+// WMMAs, each row tile keeps its own block pair one pair ahead. Every row's statements are q35p_mm_q8_0's in its order
+// (per block: two WMMA k-steps from a zero accumulator, then acc += d P), so outputs keep their bits; q8_wbw takes fp16's
+// exponent byte from v_perm (the same bits as q8_wb). Rows past R read row 0 and are never written.
+// Grid (tokens / 64, rows / 256), block 256; X fp16 [ntok][ldx], Y fp32 [ntok][ldy].
+__device__ __forceinline__ h16_t q8_wbw(const uint32_t (&q)[4], bool ok) {
+    const h2_t o2 = {(_Float16)(-1152.0f), (_Float16)(-1152.0f)};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t u = ok ? (q[w] ^ 0x80808080u) : 0x80808080u;
+        const uint32_t p01 = __builtin_amdgcn_perm(0x64646464u, u, 0x04010400u);   // bytes: u0, 0x64, u1, 0x64
+        const uint32_t p23 = __builtin_amdgcn_perm(0x64646464u, u, 0x04030402u);
+        o[2 * w] = as_u(as_h2(p01) + o2); o[2 * w + 1] = as_u(as_h2(p23) + o2);
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+// block JB of both row tiles' current pairs: q8_pair_block's statements per row tile (for each token tile mt: P from a zero
+// accumulator, the k-steps hf 0 then 1, then acc += d P), one A load per k-step and token tile shared by both row tiles.
+// Token tiles outermost so only one P per row tile is live (each tile's sums are independent: the same bits).
+template <int JB>
+__device__ __forceinline__ void q8w_pair_block(const Q8Pair (&PR)[2], int j, const bool (&rok)[2], int lane, f8_t (&acc)[2][4]) {
+    float d[2];
+    h16_t B[2][2];   // [row tile][k-step]
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        d[rt] = rok[rt] ? (float)__builtin_bit_cast(_Float16, (uint16_t)(JB ? (PR[rt].w[8] >> 16) : (PR[rt].w[0] & 0xffffu))) : 0.0f;
+#pragma unroll
+        for (int hf = 0; hf < 2; hf++) {
+            uint32_t q[4];
+            if (JB == 0 && hf == 0) q8_pair_bytes<2>(PR[rt], q);
+            else if (JB == 0) q8_pair_bytes<18>(PR[rt], q);
+            else if (hf == 0) q8_pair_bytes<36>(PR[rt], q);
+            else q8_pair_bytes<52>(PR[rt], q);
+#if Q3P_ABL == 1
+            B[rt][hf] = (h16_t)(_Float16)1.0f; (void)q;
+#else
+            B[rt][hf] = q8_wbw(q, rok[rt]);
+#endif
+        }
+    }
+#pragma unroll
+    for (int mt = 0; mt < 4; mt++) {
+        f8_t P0 = (f8_t){0, 0, 0, 0, 0, 0, 0, 0}, P1 = P0;
+#pragma unroll
+        for (int hf = 0; hf < 2; hf++) {
+            const h16_t A = mm_a(mt, j * 32 + hf * 16, lane);
+            P0 = wmma(A, B[0][hf], P0);
+            P1 = wmma(A, B[1][hf], P1);
+        }
+#pragma unroll
+        for (int v = 0; v < 8; v++) {
+            acc[0][mt][v] = __builtin_fmaf(d[0], P0[v], acc[0][mt][v]);
+            acc[1][mt][v] = __builtin_fmaf(d[1], P1[v], acc[1][mt][v]);
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0_w(const uint8_t * __restrict__ W, int R, int K,
+                                                                 const _Float16 * __restrict__ X, int ldx,
+                                                                 float * __restrict__ Y, int ldy, int ntok) {
+    MMItem it; it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off);
+    const int * xsrc = nullptr;
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int NB = K / 256;
+    const size_t RB = (size_t)(K / 32) * 34;
+    int r[2]; bool rok[2]; const uint8_t * wrow[2];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        r[rt] = blockIdx.y * MMW_N + wave * 32 + rt * 16 + (lane & 15);
+        rok[rt] = r[rt] < R;
+        wrow[rt] = W + (size_t)(rok[rt] ? r[rt] : 0) * RB;
+    }
+    f8_t acc[2][4];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++)
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++) acc[rt][mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    const int NP = NB * 4;
+    Q8Pair cur[2], nxt[2];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) q8_pair_load(cur[rt], wrow[rt], 0);
+    for (int b = 0; b < NB; b++) {
+        __syncthreads();
+        mm_stage<false>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+        __syncthreads();
+#pragma unroll 1
+        for (int jp = 0; jp < 4; jp++) {
+            const int pr = b * 4 + jp;
+            if (pr + 1 < NP) {
+#pragma unroll
+                for (int rt = 0; rt < 2; rt++) q8_pair_load(nxt[rt], wrow[rt], pr + 1);
+            }
+            q8w_pair_block<0>(cur, 2 * jp, rok, lane, acc);
+            __builtin_amdgcn_sched_barrier(0);
+            q8w_pair_block<1>(cur, 2 * jp + 1, rok, lane, acc);
+            __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+            for (int rt = 0; rt < 2; rt++) cur[rt] = nxt[rt];
+        }
+    }
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        if (!rok[rt]) continue;
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+            for (int v = 0; v < 8; v++) {
+                const int t = mt * 16 + 2 * v + (lane >> 4);
+                if (t < it.cnt) Y[(size_t)(it.off + t) * ldy + r[rt]] = acc[rt][mt][v];
+            }
+    }
+}
+
 // q4k_b with fp16's exponent byte (0x64: 1024 + q) taken by v_perm from its first source instead of OR-ed in after it:
 // the same bits, two VALU instructions fewer per four values (the wide tile's limit is this unpack: with B = 1 it runs at
 // ~104 TF on the XT, q35_prefill_abl1)
@@ -170,7 +287,6 @@ __device__ __forceinline__ h16_t q4k_bw(const u32x4_t & qw, int sh, _Float16 sc)
 // against the same sub-block sums, the same overflow branch), so each output keeps its bits: tests/prefill/
 // test_q35_prefill_mm.py runs both kernels and compares them bitwise. Rows past R read row 0 and are never written.
 // Grid (tokens / 64, rows / 256), block 256; X fp16 [ntok][ldx], Y fp32 [ntok][ldy].
-#define MMW_N 256
 extern "C" __global__ void __launch_bounds__(256) q35p_mm_q4k_w(const uint8_t * __restrict__ W, int R, int K,
                                                                 const _Float16 * __restrict__ X, int ldx,
                                                                 float * __restrict__ Y, int ldy, int ntok) {

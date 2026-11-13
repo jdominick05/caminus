@@ -70,7 +70,7 @@ def main():
             continue
         t = F.T[picks[fmt]]
         K = int(t.shape[0]); _, rb = t.rows()
-        for R in ((200, 256, 300, 512) if fmt in ('Q4_K', 'Q6_K') else (200, 256)):
+        for R in ((200, 256, 300, 512) if fmt in ('Q4_K', 'Q6_K', 'Q8_0') else (200, 256)):
             if R > t.rows()[0]:
                 print(f'NOTE {fmt}: R={R} skipped ({picks[fmt]} has {t.rows()[0]} rows)', flush=True)
                 continue
@@ -90,6 +90,13 @@ def main():
                 xd = torch.from_numpy(x).to(dev)
                 grid = (-(-n // 64), -(-R // 128))
                 y = launch(mod, fmt, IQK, grid, wd, R, K, xd, n, dev)
+                if fmt == 'Q8_0':   # the wide tile (q35p_mm_q8_0_w) against q35p_mm_q8_0: bitwise
+                    yw = torch.zeros(n, R, dtype=torch.float32, device=dev)
+                    mod.q35p_mm_q8_0_w((-(-n // 64), -(-R // 256)), (256,), wd, I(R), I(K), xd, I(K), yw, I(R), I(n))
+                    torch.cuda.synchronize()
+                    wide_ok = torch.equal(y.view(torch.int32), yw.view(torch.int32))
+                    check(wide_ok, f'Q8_0 R={R} n={n}: the wide tile q35p_mm_q8_0_w bitwise q35p_mm_q8_0'
+                                   + ('' if wide_ok else f' ({int((y.view(torch.int32) != yw.view(torch.int32)).sum())} values differ)'))
                 if fmt == 'Q6_K':   # the wide tile (q35p_mm_q6k_w) against q3p_mm_q6k: bitwise
                     yw = torch.zeros(n, R, dtype=torch.float32, device=dev)
                     mod.q35p_mm_q6k_w((-(-n // 64), -(-R // 256)), (256,), wd, I(R), I(R), I(K), xd, I(K), yw, I(R), I(n))
