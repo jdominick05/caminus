@@ -412,6 +412,11 @@ def busy_elsewhere(devs):
     return [f"{c['name']} {c['used_mib']:,} MiB" for c in card_view() if c['index'] in devs and c['used_mib'] > 2048]
 
 
+def _arch_drafter(m):
+    from .. import arch as _arch
+    return _arch.lookup(m.arch).drafter
+
+
 def serve_argv(m, e, name, port, ctx=None, extra=()):
     """caminus serve's flags for catalog model m (model_entry e) as server `name`: the model's first file, the port, a cache
     and a flight directory of its own; its drafter's file when its architecture loads one (caminus.arch; --no-drafter when
@@ -420,7 +425,10 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
              '--cache-dir', os.path.join(config.kv_dir(), name), '--flight-dir', os.path.join(config.flight_dir(), name)]
     dk = models.drafter_item(m)
     if dk is not None:
-        serve += ['--drafter', e['paths'][dk]] if e['paths'].get(dk) else ['--no-drafter']
+        if e['paths'].get(dk): serve += ['--drafter', e['paths'][dk]]
+        elif _arch_drafter(m) == 'dflash': serve += ['--no-drafter']
+        # (an optional drafter's missing file adds nothing: --no-drafter would turn the server's --draft off, and a model
+        #  whose own drafter is another kind (swift-1.5's MTP block) must keep it)
     if ctx:
         serve += ['--max-ctx', str(ctx)]
     return serve + list(extra)

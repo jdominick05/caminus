@@ -278,7 +278,7 @@ def main(argv=None):
                   f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
             return 2
     elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter']:
-        print(f'caminus serve: --drafter ignored: --draft {draft} (the DFlash file is the Coder\'s only)', flush=True)
+        print(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
     opt['draft'] = draft
     if A.drafter == 'dflash':
         opt['no_drafter'] = (draft == 'off')   # (the Coder loader reads no_drafter: --draft off must not load DFlash)
