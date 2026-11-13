@@ -60,6 +60,18 @@ other.
 
 The prefill misses its own target of 3,000 tok/s at 8K (about 1 % under llama.cpp's best there).
 
+### Prefill-GEMM arms on one RX 7900 XT (WMMA yardsticks, not the engine's quant kernels)
+
+| 2048x5120xN | bf16 WMMA | W8A8 int8 WMMA | software fp8 | Date | Tool and conditions |
+|---|---|---|---|---|---|
+| 5120 | 55.8 TF | **62.0 TF** | 13.5 TF | 11-13 | `benchmarks/int8_gemm_probe.hip --shapes ... --reps 20 --check` under `tools/guard.sh` on the XT (device 1), gpu-window, no fault; fp64 check on the 64x64 C corner per arm: 7.97e-06 / 6.47e-08 / 8.74e-07, 0 nan |
+| 17408 | 39.3 TF | **64.7 TF** | 13.7 TF | 11-13 | same |
+| 20480 | 38.8 TF | **58.7 TF** | 13.8 TF | 11-13 | same |
+
+torch bf16 matmul (rocBLAS) on the same card at the same shapes: 76-80 TF (`benchmarks/fp8_gemm_probe.py`, 11-12); fp8-as-bf16 through torch: 63-67 TF, maxerr 0.10-0.18 vs fp32; triton fp8/int8 and torch fp8 matmul: unsupported on gfx1100.
+
+Reading: gfx1100 has no fp8 WMMA (the builtins are gfx12-only), and its one 8-bit WMMA (`i32_16x16x16_iu8_w32`) ties the engine's Q4_K wide tile at prefill (both ~59-64 TF) while costing 8 bpw vs Q4_K's ~4.5 - a ~1.8x byte loss at decode, where the card is read-bound. Software fp8 loses ~4x to the per-byte e4m3 decode. So the low-bit lever on these cards is the 4-bit formats already in use; the remaining prefill headroom over our tiles is unpack throughput (rocBLAS bf16's 76-80 TF is the tile-scheduling ceiling), not bit width.
+
 ## Serving
 
 All from `tools/serve_smoke.py` on 11-06 (the real server at its default 262,144-token configuration, started twice; scratch
