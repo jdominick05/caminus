@@ -18,6 +18,9 @@
 #include "own_quant_iq.h"
 #include "own_quant_iq2s.h"
 #include "own_quant_q5k.h"
+#ifdef K3_Q3M_VER   // (the verify module, kernels/k3_q35_tcap_ver.hip: the T-token tiles; the decode module never sees them)
+#include "own_quant_tcap_mt.h"
+#endif
 
 enum { OWN_IQ2_S = 7 };   // (Seg.work of an IQ2_S matrix or embedding: its GG number; engine/k3.py OWN_Q35T_FMT; the others: k3_own_ops.h / k3_q35_ops.h)
 enum { Q35T_STAGE_IQ3_XXS = 1, Q35T_STAGE_IQ3_S = 2, Q35T_STAGE_IQ2_S = 8 };
@@ -39,6 +42,38 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
     const int wave = (int)__builtin_amdgcn_readfirstlane(K3TID / 32), lane = K3TID % 32;
     const int rpt = sg.rows_per_task, r0 = t * rpt, r1 = min(sg.N, r0 + rpt), total = sg.out_f32, fmt = sg.work;
     const _Float16 * x = (const _Float16 *)sg.a;
+#ifdef K3_Q3M_VER
+    // the verify module: NT tokens a pass (Seg.pad1 bits 8 .. 11), token j's activations at x + j xs and its rows at
+    // y + j ys (xs / ys: Seg.gs's low / high half), each token's sums the one-token tile's bits (own_quant_tcap_mt.h)
+    const int NT = max(1, (int)__builtin_amdgcn_readfirstlane((sg.pad1 >> 8) & 15));
+    const uint64_t st = (uint64_t)sg.gs;
+    const size_t xs = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)st), ys = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)(st >> 32));
+    const auto xo = [&](int j) -> size_t { return (size_t)j * xs; };
+    // one row loop per format (the format chosen once, outside it: five tiles in one loop body spilled k3_run)
+#define Q35T_MT_LOOP(CALL)                                                                                             \
+    for (int row = r0 + 2 * wave; row < r1; row += 16) {                                                               \
+        const int lim = min(row + 2, r1);                                                                              \
+        float rm[OWN_MT][2];                                                                                           \
+        int l = lane; asm volatile("" : "+v"(l));                                                                      \
+        CALL;                                                                                                          \
+        if (lane == 0) {                                                                                               \
+            _Pragma("unroll") for (int j = 0; j < OWN_MT; j++) {                                                       \
+                if (j >= NT) break;                                                                                    \
+                ((float *)sg.y)[(size_t)j * ys + row] = rm[j][0];                                                      \
+                if (row + 1 < lim) ((float *)sg.y)[(size_t)j * ys + row + 1] = rm[j][1];                               \
+            }                                                                                                          \
+        }                                                                                                              \
+    }
+    if (fmt == OWN_IQ4_XS) { Q35T_MT_LOOP(own_rows_iq4xs_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S) { const int f = fmt == OWN_IQ3_XXS ? 0 : 1; Q35T_MT_LOOP(own_rows_iq3_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm, f)) }
+    else
+    if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_Q5_K) { Q35T_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else
+    { Q35T_MT_LOOP(own_rows_q6k_planes_mt2<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q6_K: host-checked)
+#undef Q35T_MT_LOOP
+    return;
+#endif
     for (int row = r0 + 2 * wave; row < r1; row += 16) {
         const int lim = min(row + 2, r1);
         float res[2] = {0.0f, 0.0f};
@@ -60,11 +95,19 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
 // the vocabulary; the id clamped to it): value j of a block = ((d * (0.5 + s)) * 0.25) * grid * sign, the host decoder's
 // float32 operations in its order (caminus.own_dequant iq2_s: bitwise). The grid read from the packed constant (one
 // embedding row per token: not worth the LDS staging). Q4_K: k3_own_ops.h's own_op_emb. One task.
+#ifdef K3_Q3M_VER   // (task tk = token tk: its id at Seg.a[tk], its row at Seg.y + tk * N; own_op_emb's verify form)
+__device__ __forceinline__ void q35t_op_emb(const Seg & sg, int tk) {
+    if (sg.work != OWN_IQ2_S) { own_op_emb(sg, tk); return; }
+    const int tok = min(max(((const int *)sg.a)[tk], 0), sg.pad2 - 1);
+    const uint8_t * row = sg.W + (size_t)tok * sg.K;
+    float * x = (float *)sg.y + (size_t)tk * sg.N;
+#else
 __device__ __forceinline__ void q35t_op_emb(const Seg & sg) {
     if (sg.work != OWN_IQ2_S) { own_op_emb(sg); return; }
     const int tok = min(max(((const int *)sg.a)[0], 0), sg.pad2 - 1);
     const uint8_t * row = sg.W + (size_t)tok * sg.K;
     float * x = (float *)sg.y;
+#endif
     for (int i = (int)K3TID; i < sg.N; i += blockDim.x) {
         const uint8_t * blk = row + (size_t)(i >> 8) * 82;
         const int j = i & 255, ib = j >> 5, g = (j >> 3) & 3, k = j & 7;
@@ -82,8 +125,15 @@ __device__ __forceinline__ void q35t_op_emb(const Seg & sg) {
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { q35t_op_mv(sg, t); return true; }
+#ifdef K3_Q35_DF   // (ThinkingCap's DFlash drafter module, kernels/k3_q35_tcap_dflash.hip: k3_q35_ops.h's DF block; the host refuses the rest)
+    if (sg.op == OP_DF_CONV) { op_df_conv(sg, t); return true; }
+    if (sg.op == OP_DF_TOPK) { op_df_topk(sg, t); return true; }
+    if (sg.op == OP_DF_SELECT) { op_df_select(sg, t); return true; }
+    if (sg.op == OP_KV_APPEND && sg.aux) { df_op_kv_append_ring(sg, t); return true; }
+    if (sg.op == OP_ATTN_DEC && sg.pad2) { df_op_attn(sg, t); return true; }
+#endif
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
-    if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg); return true; }
+    if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_GDN_CONV) { q35_op_gdn_conv(sg, t); return true; }
     if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
@@ -101,7 +151,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #endif
     if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
-    if (sg.op == OP_OWN_EMB) { q35t_op_emb(sg); return true; }
+    if (sg.op == OP_OWN_EMB) { q35t_op_emb(sg OWN_TK_ARG); return true; }
 #ifdef K3_TP   // (the two-card module k3_q35_tcap_tp; k3_xchg.h through k3_q35_ops.h)
     if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
 #endif

@@ -71,9 +71,18 @@ class Dflash35Drafter:
     def fill_chunk(self, h, toks, p0):
         """(the MTP drafter's prefill hook: this drafter takes the chunk's features through inject_chunk)"""
 
-    def inject_chunk(self, feats, a, n):
-        """the batched prefill's per-chunk hook: the chunk's feature rows (positions a .. a + n - 1)"""
-        self.inject(a, feats[:, :n])
+    def inject_chunk(self, src, a, n):
+        """the batched prefill's per-chunk hook (positions a .. a + n - 1): src the prefill itself (Q35OwnPrefill: its
+        features through the drafter's batched inject, Dflash35.inject_rows, when the drafter was built for its chunk), or
+        the chunk's feature rows [n_layers, n, D] (the 4-row inject tape)"""
+        a, n = int(a), int(n)
+        if n <= 0: return
+        if isinstance(src, torch.Tensor): self.inject(a, src[:, :n]); return
+        if self.d.chunk >= n: self.d.inject_rows(src, a, n)
+        else: self.d.inject(a, src.features[:, :n])
+        if a > self.hi or a < self.lo: self.lo = a
+        self.hi = a + n
+        self.stats['injected'] += n
 
     def prefill(self, toks, n_h):
         """every pass and prefill chunk injected its features already: nothing here"""
