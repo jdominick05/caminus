@@ -74,7 +74,7 @@ def main():
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
                     'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
-                    'qwen35-own-tp': ('tp', 2, 1, None)},
+                    'qwen35-own-tp': ('tp', 2, 1, 'mtp')},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
           'archs: the own-code qwen35 entry takes the own tokenizer, AREX-2\'s entry keeps its own')

@@ -45,3 +45,28 @@ script's header says what it needs and what it checks. The main kinds:
 
 The references the gates compare against (llama.cpp's tensors and logits) are large and not distributed. The tools that
 make them are in `tools/reference/` and `tools/gates/`, so you can build your own on the same hardware.
+
+## Dense two-card drafting
+
+The CPU tape check also covers feature-copy dependencies, the complete drafter head on either card, target identity,
+physical KV row strides and prefill hooks:
+
+```bash
+python -I tests/engine/test_q35_verify_tp_cpu.py --scratch SCRATCH
+```
+
+Before serving a new two-card drafter, run the existing non-display-card probe first, then the TP gate on both cards
+for Swift and ThinkingCap. Select each feature card in turn; the exported residuals must be bitwise the decode pass's
+at every accepted row, including rejected tails and grids 3/6/7:
+
+```bash
+tools/guard.sh LOG 600 python -I tests/engine/test_q35_tp_ver_probe.py --scratch SCRATCH
+tools/guard.sh LOG 600 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers 6,20,34,48,62 --feature-card 0
+tools/guard.sh LOG 600 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers 6,20,34,48,62 --feature-card 1
+```
+
+Run `serve_smoke1.py` on `--card 0,1 --cards 2` with `--draft off`, `--draft mtp` and `--draft dflash`, each under the
+guard, on each model. Compare both `greedy_sha256` and `sampled_sha256`; include `--restart` to exercise the park files
+and `--block-imports gguf,tokenizers` for the own-code check. Keep the server available between short GPU windows.
+`benchmarks/q35_served_ab.py --card 0,1 --cards 2` measures the served gain at depth, with `--draft mtp` or `dflash`,
+at least three interleaved rounds under the guard. Two-card defaults stay off until these measurements show a gain.

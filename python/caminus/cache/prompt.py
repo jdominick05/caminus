@@ -736,8 +736,11 @@ class Layout:
             self.state[k[0]].append((k, t.numel() * t.element_size()))
         self.idx = bool(getattr(m, 'idx_cache', False)) and (0, 'idxraw') in m.state
         self.pb = []
+        kv_rows = int(getattr(m, 'kv_rows', self.max_ctx))   # dense verify engines keep spec_T - 1 guarded tail rows
         for c in range(len(self.devs)):
-            pbs = {m.state[k].numel() * m.state[k].element_size() // self.max_ctx for k in self.kv[c]}
+            if any(m.state[k].numel() * m.state[k].element_size() % kv_rows for k in self.kv[c]):
+                raise CacheError('promptcache: KV allocation is not a whole number of physical rows')
+            pbs = {m.state[k].numel() * m.state[k].element_size() // kv_rows for k in self.kv[c]}
             assert len(pbs) == 1, pbs
             self.pb.append(pbs.pop())
         if self.idx:
@@ -1369,7 +1372,9 @@ class PromptCache:
                 if ver is None: raise CacheError('promptcache: a host-accept drafter but the engine has no verify tape (m.ver)')
                 ver.run(list(seq[i0:i0 + T]), i0, commit, argmax=False)
                 if self.df.kind == 'dflash35': self.draft.take_pass(i0, f, None, ver)
-                else: self.draft.take_h(i0, ver.buf['h'][:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
+                else:
+                    from ..engine.q35_draft_tp import pass_h
+                    self.draft.take_h(i0, pass_h(ver)[:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
             else:
                 m.verify_tokens(seq, i0, commit)
                 if self.draft is not None:

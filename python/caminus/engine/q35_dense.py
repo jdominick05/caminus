@@ -168,6 +168,7 @@ class Dense35Own:
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
             raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
         self.dev, self.max_ctx, self.limit_us, self.spec_T = int(device), int(max_ctx), limit_us, int(spec_T)
+        self.kv_rows = self.max_ctx + self.spec_T - 1
         self.module = module or module_of(F)
         self.tcap = self.module in k3.Q35T_MODULES
         # the formats whose matvecs run on the one-round-trip tiles (own_matvec_1rt); the others on own_matvec16

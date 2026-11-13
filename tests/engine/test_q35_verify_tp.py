@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.join(ROOT, 'python'))
 import numpy as np, torch
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf'); ap.add_argument('--depths', default='0,512')
+ap.add_argument('--feature-layers', default='', help='comma-separated residual layers to gate bitwise against decode')
+ap.add_argument('--feature-card', type=int, choices=(0, 1), default=0)
 A = ap.parse_args()
 from caminus import ggufio
 from caminus.bpe import BPE
@@ -28,6 +30,7 @@ from caminus.engine.q35_dense_verify_tp import Dense35VerifyTP
 from caminus.prefill.q35own_tp import Q35OwnPrefillTP, buffer_need_tp_mib, tp_shapes
 
 depths = [int(x) for x in A.depths.split(',')]
+fl = [int(x) for x in A.feature_layers.split(',') if x]
 G = 24                                                    # positions checked per depth
 tk = BPE(ggufio.GGUFFile(A.gguf).meta)
 text = ''.join(open(f).read() for f in sorted(glob.glob(os.path.join(ROOT, 'docs', '*.md'))) + [os.path.join(ROOT, 'AGENTS.md')])
@@ -39,11 +42,13 @@ CH = 64
 GRIDS = (3, 6, 7)
 per_card = sum(Dense35VerifyTP.need_mib(T, max_ctx=max_ctx) for T in range(1, MAX_T + 1)) \
     + len(GRIDS) * Dense35VerifyTP.need_mib(MAX_T, max_ctx=max_ctx)
+per_card += (sum(range(1, MAX_T + 1)) + len(GRIDS) * MAX_T) * (len(fl) + 2) * 5120 * 4 / 2 ** 20 if fl else 0
 bn = buffer_need_tp_mib(tp_shapes(A.gguf), CH)
-eng = Dense35TP(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=(per_card + bn[0] + 16, per_card + bn[1] + 16))
+eng = Dense35TP(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=(per_card + bn[0] + 16, per_card + bn[1] + 16),
+                feature_layers=fl, feature_card=A.feature_card)
 pf = Q35OwnPrefillTP(eng, chunk=CH)
-vers = {T: Dense35VerifyTP(eng, T) for T in range(1, MAX_T + 1)}
-alt = {w: Dense35VerifyTP(eng, MAX_T, per_wgp=(w, w)) for w in GRIDS}
+vers = {T: Dense35VerifyTP(eng, T, feature_layers=fl) for T in range(1, MAX_T + 1)}
+alt = {w: Dense35VerifyTP(eng, MAX_T, per_wgp=(w, w), feature_layers=fl) for w in GRIDS}
 print(f'engine {eng.module} {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB at max_ctx {max_ctx}, spec_T {eng.spec_T}; '
       f'verify tapes: ' + ', '.join(f'T {T}: {len(v.E[0].segs)} segments, {v.mib[0]:.1f} / {v.mib[1]:.1f} MiB' for T, v in vers.items()),
       flush=True)
@@ -75,8 +80,10 @@ for N in depths:
     toks = ids_all[N:N + G + 1]
     full = ids_all[:N + G + 1]
     start(N)
-    ref = []
-    for i in range(G + 1): ref.append(bits(eng.verify(full, N + i, 0 if i == 0 else 1)))
+    ref, ref_feats = [], []
+    for i in range(G + 1):
+        ref.append(bits(eng.verify(full, N + i, 0 if i == 0 else 1)))
+        if fl: ref_feats.append(bits(eng.features))
     check(replicas(), f'depth {N}: the replicated residual is the same bits on both cards after the decode steps')
     for T, ver in vers.items():
         start(N)
@@ -90,6 +97,8 @@ for N in depths:
             for r in range(a):
                 rows += 1
                 if not np.array_equal(bits(ver.logits(r)), ref[p + r - N]): bad.append(f'pass at {p} row {r}')
+                if fl and not np.array_equal(bits(ver.features[:, r]), ref_feats[p + r - N]):
+                    bad.append(f'features at {p} row {r} card {A.feature_card}')
             p += a; commit = a; npass += 1
             if npass % 3 == 0 and p < N + G:   # a decode step between passes: it commits the pass's accepted rows
                 decs += 1
@@ -101,7 +110,8 @@ for N in depths:
             if not np.array_equal(bits(eng.verify(full, p, commit)), ref[p - N]): bad.append(f'decode step at {p}')
             p += 1; commit = 1
         check(not bad, f'depth {N} T {T}: {npass} passes ({rows} accepted rows) and {decs} decode steps bitwise the decode '
-                       f'steps on two cards, wrong tokens in every rejected row{"" if not bad else ": " + ", ".join(bad[:6])}')
+                       f'steps on two cards, features {fl} on card {A.feature_card}, wrong tokens in every rejected row'
+                       f'{"" if not bad else ": " + ", ".join(bad[:6])}')
     # passes of different T on one state: each commits what the last pass (of any T) accepted
     start(N)
     p, commit, bad, plan = N, 0, [], [(4, 3), (2, 2), (3, 1), (4, 4), (1, 1), (3, 2), (2, 1), (4, 2)]
