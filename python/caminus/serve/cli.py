@@ -200,6 +200,14 @@ def build_engine(opt, stats, log=print):
     A = _arch.ARCHS[opt['arch']] if opt.get('arch') else _arch.of(opt['model']).variant(opt.get('cards'))
     m, pf, df, dr = A.build(opt, log)
     for d in m.devs: torch.cuda.synchronize(d)
+    if callable(getattr(m, 'selfcheck', None)):
+        # (a few fixed tokens on fresh states: a load that left corrupt weights must stop here, not serve token 0)
+        from ..errors import NonFiniteLogits
+        try:
+            m.selfcheck()
+        except NonFiniteLogits as e:
+            log(f'caminus serve: the startup self-check failed: {e}')
+            raise SystemExit(3)
     disk = not opt['no_disk_cache']
     pc = PC.PromptCache(m, pf, dr, cache_dir=opt['cache_dir'] if disk else None, disk=disk,
                         cap_gb=float(opt['cache_cap_gb']) if opt.get('cache_cap_gb') else PC.DEFAULT_CAP_GB)

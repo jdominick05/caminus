@@ -163,6 +163,7 @@ class Dense35Verify:
         self.logits2 = s['logits'].view(T, eng.vocab)
         self.d_max = (torch.zeros(T, device='cuda'), torch.zeros(T, dtype=torch.int64, device='cuda'))
         self.h_max = torch.zeros(T, dtype=torch.int64, pin_memory=True)
+        self.h_vmax = torch.zeros(T, pin_memory=True)   # (the rows' max values: a non-finite one breaks the engine)
         self.h_st = torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True)
         self.ev_done = torch.cuda.Event()
 
@@ -180,6 +181,7 @@ class Dense35Verify:
         outside the vocabulary. A wait that gave up runs the pass again (commit 0: the first launch committed already);
         the device bound guard poisons the engine until its reset()."""
         eng, T, E = self.eng, self.T, self.E
+        if getattr(eng, 'broken', None): raise k3.NonFiniteLogits(f'Dense35Verify pass: refused: {eng.broken}')
         if eng.poisoned: raise k3.ContextBoundsError(f'Dense35Verify pass: refused until reset(): {eng.poisoned}')
         if len(tokens) != T: raise ValueError(f'Dense35Verify pass: {len(tokens)} tokens for a T = {T} tape')
         k3.check_span(pos0, T, eng.max_ctx, commit=commit, ntok=eng.commit_max(), what='Dense35Verify pass')
@@ -198,6 +200,10 @@ class Dense35Verify:
             else:
                 raise RuntimeError(f'k3 qwen35 verify: a wait gave up at position {pos0} in {eng.max_retries + 1} attempts: ' + '; '.join(bad))
         eng.token += 1
+        if argmax and not bool(torch.isfinite(self.h_vmax).all()):
+            eng.mark_broken(f'non-finite logits in a verify pass at position {pos0} (row maxima {self.h_vmax.tolist()})')
+        if not argmax and not bool(torch.isfinite(self.logits2.amax(dim=1)).all()):   # (sampled passes: the rows' max on the card)
+            eng.mark_broken(f'non-finite logits in a verify pass at position {pos0}')
         return self.h_max.tolist() if argmax else None
 
     def _pass(self, pos0, commit, argmax):
@@ -209,6 +215,7 @@ class Dense35Verify:
         if argmax:
             torch.max(self.logits2, dim=1, out=self.d_max)
             self.h_max.copy_(self.d_max[1], non_blocking=True)
+            self.h_vmax.copy_(self.d_max[0], non_blocking=True)
         self.h_st.copy_(E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
         self.ev_done.record()
         self.ev_done.synchronize()
