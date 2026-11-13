@@ -101,11 +101,11 @@ if A.long:   # the batched prefill inject: the prefill's launchers (a 64-chunk p
                                err=torch.zeros(1, dtype=torch.int32, device='cuda'))
     db = Dflash35(A.drafter, eng, chunk=A.long)
     for d in db.L: d['ring'].zero_()
-    feats = torch.from_numpy(longf).cuda()
+    feats = torch.from_numpy(longf)   # (host rows: inject_rows copies each 512-row pass into its own projected buffer)
     ns = types.SimpleNamespace(O=pf.O, A=pf.A, err=pf.err, feature_layers=list(db.layers_tgt), features=feats)
     db.inject_rows(ns, 0, A.long); torch.cuda.synchronize()
     e = int(pf.err.item())
-    M = db.nkv * db.hd; ps = np.arange(A.long - RING + 4, A.long); wk = wv = 0.0
+    M = db.nkv * db.hd; ps = np.arange(max(0, A.long - RING + 4), A.long); wk = wv = 0.0   # (rows the draft's block did not rewrite)
     for il, d in enumerate(db.L):
         rr = d['ring'].view(RING, 2, M).cpu()[torch.from_numpy(ps & (RING - 1))].float().numpy()
         wk = max(wk, rel(rr[:, 0].reshape(len(ps), db.nkv, db.hd), ref_long.K[il, ps])); wv = max(wv, rel(rr[:, 1].reshape(len(ps), db.nkv, db.hd), ref_long.V[il, ps]))
