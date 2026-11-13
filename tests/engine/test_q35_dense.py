@@ -148,7 +148,15 @@ def run_lf(e, seq):
 
 check(all(torch.equal(a.reshape(-1), b) for a, b in zip(base, run_lf(eng, SEQ))) and not eng.bails,
       f'launch_tokens + finish_pass (the device sampler\'s pass): bitwise the step() logits at every position')
-for pw in (3, 6, 7):
+# the grids the module's LDS lets be resident at once (k3.resident_grid refuses the others: the GSQ module's 20.5 KB a
+# workgroup fits 6 per WGP); one past the cap must be refused
+LDS = k3._m(MOD).k3_run.lds_bytes(); CAP = k3.WGP_LDS // LDS
+GRIDS = [pw for pw in (3, 6, 7) if pw <= CAP]
+if CAP < 7:
+    try: Dense35Own(P, max_ctx=64, module=MOD, per_wgp=CAP + 1); refused = False
+    except ValueError: refused = True
+    check(refused, f'{CAP + 1} workgroups per WGP refused ({LDS} B of LDS a workgroup: at most {CAP} per WGP)')
+for pw in GRIDS:
     e2 = Dense35Own(P, max_ctx=64, module=MOD, per_wgp=pw)
     check(all(torch.equal(a, b) for a, b in zip(base, run(e2, SEQ))), f'the tape at {pw} workgroups per WGP: bitwise the default grid ({eng.per_wgp})')
     check(all(torch.equal(a.reshape(-1), b) for a, b in zip(base, run_lf(e2, SEQ))),
@@ -202,7 +210,7 @@ if A.model:
           f'reported, not a speed claim: the grid and task sizes are not measured for this model); one token reads {bound / 1e9:.2f} GB of weights',
           flush=True)
     m = min(4, NP); pw0 = eng.per_wgp
-    for pw in (3, 6, 7):
+    for pw in [pw for pw in (3, 6, 7) if pw <= k3.WGP_LDS // k3._m(eng.module).k3_run.lds_bytes()]:
         eng.per_wgp = pw
         with torch.cuda.device(eng.dev): eng._build_tape()
         check(all(torch.equal(a, b) for a, b in zip(base[:m], run(eng, seq[:m]))), f'the tape at {pw} workgroups per WGP: bitwise the default grid ({pw0}) on {m} positions')
