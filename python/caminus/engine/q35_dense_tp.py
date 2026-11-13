@@ -94,9 +94,10 @@ def cut(b, ranges_r, ranges_c, bs, ts):
     return x, x.shape[0], sum(c1 - c0 for c0, c1 in cc)
 
 
-def _projection_bytes(F, max_ctx, ffn_share, vocab_share):
+def _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T=1):
     """bytes per card: its slices of every trunk matrix (exact for the split above), the replicated vectors and embedding,
-    its kv heads' f16 KV cache, its Gated DeltaNet states; [card 0, card 1]"""
+    its kv heads' f16 KV cache (spec_T - 1 rows past max_ctx: the guard's span), its Gated DeltaNet states (with spec_T
+    tokens' saved inputs), the exchange slots (spec_T * D floats each); [card 0, card 1]"""
     c = _shapes(F); nl = c['nl']; kinds = block_kinds(F)
     mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     D, ffn, S, NK, NV = c['D'], c['ffn'], c['S'], c['NK'], c['NV']
@@ -117,10 +118,10 @@ def _projection_bytes(F, max_ctx, ffn_share, vocab_share):
         out[0] += sh[0]; out[1] += sh[1]
     n_attn = sum(1 for g in kinds if not g)
     CHl = 2 * S * (NK // 2) + S * (NV // 2)
-    gdn = (nl - n_attn) * (k3.gdn_block_size(NV // 2, S, NK // 2, 1) + CHl * 3 + CHl) * 4
-    kv = n_attn * int(max_ctx) * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], False)
-    slots = 2 * nl * (16 + D) * 4
-    part = 4 * attn_part_elems(1, c['nh'] // 2, max_ctx)   # (the split attention pair's records, per card)
+    gdn = (nl - n_attn) * (k3.gdn_block_size(NV // 2, S, NK // 2, spec_T) + CHl * 3 + spec_T * CHl) * 4
+    kv = n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], False)
+    slots = 2 * nl * (16 + spec_T * D) * 4
+    part = 4 * attn_part_elems(1, c['nh'] // 2, int(max_ctx) + spec_T - 1)   # (the split attention pair's records, per card)
     return [o + gdn + kv + slots + part for o in out]
 
 
@@ -129,13 +130,16 @@ class Dense35TP:
 
     def __init__(self, path, devices=(0, 1), max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=16, rpt16=32,
                  ffn_share=0.5, vocab_share=0.5, local_only=False, vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8,
-                 debug_layers=None):
+                 debug_layers=None, spec_T=1):
         """path: a dense qwen35 GGUF (engine/q35_dense.py Dense35Own's formats; module None: the two-card build of the module
         module_of picks). devices: the two torch / HIP device indices (card 0 first: its partials come first in every
         sum). ffn_share / vocab_share: card 0's part of the feed-forward rows / the head rows. local_only: TEST-ONLY, every
         exchange copies the card's own partial (no peer: timing and grids without the link; the logits are not the model's).
         vram_extra_mib: per card, what the caller allocates right after (checked with the engine's projection).
-        debug_layers: TEST-ONLY, the first n blocks, then the output norm and the head."""
+        debug_layers: TEST-ONLY, the first n blocks, then the output norm and the head. spec_T: the most tokens a two-card
+        verify pass on this engine's state runs (engine/q35_dense_verify_tp.py; 1 .. 4): each Gated DeltaNet block keeps
+        that many tokens' saved inputs, the KV caches grow spec_T - 1 rows past max_ctx, the exchange slots hold spec_T * D
+        floats, and a pass after a verify pass commits up to spec_T of them (1: the decode engine as served)."""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen35': raise ValueError(f'Dense35TP: {path} is a {F.arch!r} GGUF, not qwen35 (dense)')
         if any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError(f'Dense35TP: {path} has a router tensor: not the dense line')
@@ -160,7 +164,9 @@ class Dense35TP:
             raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
         devices = tuple(int(d) for d in devices)
         if len(devices) != 2 or devices[0] == devices[1]: raise ValueError(f'Dense35TP: two different devices, not {devices}')
-        self.devs, self.max_ctx, self.limit_us = list(devices), int(max_ctx), limit_us
+        if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
+            raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
+        self.devs, self.max_ctx, self.limit_us, self.spec_T = list(devices), int(max_ctx), limit_us, int(spec_T)
         one = module or module_of(F)
         one = {v: k for k, v in k3.Q35_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
         if one not in k3.Q35_TP_OF: raise ValueError(f'Dense35TP: module {one} has no two-card build ({sorted(k3.Q35_TP_OF)})')
@@ -176,7 +182,7 @@ class Dense35TP:
         self.emb = F.T['token_embd.weight']
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35TP: token_embd is {self.emb.type} on module {self.module}')
-        self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share)]
+        self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share, self.spec_T)]
         ex = [float(v) for v in vram_extra_mib]
         if vram_check:
             capacity.check(self.devs, [v + e for v, e in zip(self.vram_mib, ex)],
@@ -196,6 +202,10 @@ class Dense35TP:
         # the server's engine contract (FlashNextTP's names): two cards, T = 1, dense attention at every depth
         self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
         self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
+        self.broken = None          # (non-finite logits: sticky, reset() keeps it - corrupt weights outlive a reset)
+        # spec_T > 1: the tokens of the last pass launched on these states (a decode step 1, a verify pass its T, 0 after a
+        # reset or a prefill): the most the next pass may commit
+        self.last_T = 0
         self.pos_host = 0
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual = False, None, False, False
@@ -209,22 +219,22 @@ class Dense35TP:
         self._load(); self._build_tapes()
 
     @staticmethod
-    def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5):
+    def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5, spec_T=1):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
         check counts the same terms"""
         F = ggufio.GGUFFile(path)
-        try: return [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share)]
+        try: return [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T)]
         finally: F.close()
 
     @staticmethod
-    def recurrent_mib(path):
-        """per card, MiB of its Gated DeltaNet blocks' states (half the heads): a prompt-cache checkpoint's part beside the
-        KV rows"""
+    def recurrent_mib(path, spec_T=1):
+        """per card, MiB of its Gated DeltaNet blocks' states (half the heads, with spec_T tokens' saved inputs): a
+        prompt-cache checkpoint's part beside the KV rows"""
         F = ggufio.GGUFFile(path)
         try:
             c = _shapes(F); n_gdn = sum(1 for g in block_kinds(F) if g)
             CHl = 2 * c['S'] * (c['NK'] // 2) + c['S'] * (c['NV'] // 2)
-            return n_gdn * (k3.gdn_block_size(c['NV'] // 2, c['S'], c['NK'] // 2, 1) + CHl * 3 + CHl) * 4 / 2 ** 20
+            return n_gdn * (k3.gdn_block_size(c['NV'] // 2, c['S'], c['NK'] // 2, spec_T) + CHl * 3 + spec_T * CHl) * 4 / 2 ** 20
         finally: F.close()
 
     @staticmethod
@@ -305,8 +315,8 @@ class Dense35TP:
                     with torch.cuda.device(self.devs[c]):
                         cw = cw_all[c].view(CH, 4)[torch.from_numpy(ch_idx[c]).to('cuda')].contiguous()
                     dd[c].update(kind='gdn', qkv=qkv[c], z=z[c], al=al[c], be=be[c], so=so[c], conv_w=cw, dt=dt[c], a=a[c], nw=nw[c],
-                                 conv_st=Z(c, CHl * 3).view(CHl, 3), convx=Z(c, CHl), gdn=Z(c, k3.gdn_block_size(NVl, S, kc, 1)),
-                                 CH=CHl, NV=NVl, NK=kc)
+                                 conv_st=Z(c, CHl * 3).view(CHl, 3), convx=Z(c, self.spec_T * CHl),
+                                 gdn=Z(c, k3.gdn_block_size(NVl, S, kc, self.spec_T)), CH=CHl, NV=NVl, NK=kc)
                     self.state.update({(c, il, 'conv'): dd[c]['conv_st'], (c, il, 'convx'): dd[c]['convx'], (c, il, 'gdn'): dd[c]['gdn']})
                 del cw_all
             else:
@@ -317,7 +327,7 @@ class Dense35TP:
                 qn, kn = rep(p + 'attn_q_norm.weight', hd), rep(p + 'attn_k_norm.weight', hd)
                 for c in (0, 1):
                     dd[c].update(kind='attn', q=q[c], k=k[c], v=v[c], o=o[c], qn=qn[c], kn=kn[c],
-                                 cache=Z(c, self.max_ctx * 2 * nkvc * hd, torch.float16))
+                                 cache=Z(c, (self.max_ctx + self.spec_T - 1) * 2 * nkvc * hd, torch.float16))   # (spec_T: the guard's span)
                     self.state[(c, il, 'kv')] = dd[c]['cache']
             self.L.append(dd)
         self.out_norm = rep('output_norm.weight', D)
@@ -353,13 +363,15 @@ class Dense35TP:
                          att=B(QHc), gat16=B(QHc, f16), logits=B(nlog))
                 assert sum(v.numel() * v.element_size() for v in s.values()) <= TAPE_MIB * 2 ** 20, 'TAPE_MIB'
                 if self.module in k3.ATTN_SPLIT_MODULES:   # (the split attention pair's records over this card's heads)
-                    s['part'] = B(attn_part_elems(1, QHc // hd, self.max_ctx))
+                    s['part'] = B(attn_part_elems(1, QHc // hd, self.max_ctx + self.spec_T - 1))
                 self.buf.append(s)
                 ds = B(32, torch.int32); self.dstage.append(ds)
                 self.tok.append(ds[16:17]); self.pos.append(ds[17:18]); self.epoch.append(ds[18:19])
                 E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp_c[c]), T=1, limit_us=self.limit_us)
-                E.params = ds[0:16]; self.E.append(E)
-            self.slots.append(Slots(self.devs[c], self.n_ex, D))
+                E.params = ds[0:16]
+                if self.spec_T > 1: E.guard_T = self.spec_T   # (the commit after a verify pass: up to spec_T tokens)
+                self.E.append(E)
+            self.slots.append(Slots(self.devs[c], self.n_ex, max(D, self.spec_T * D)))   # (a verify pass exchanges T * D floats)
         self.seg_names, self.layer_seg = [{}, {}], [[], []]
         for c in (0, 1):
             with torch.cuda.device(self.devs[c]): self._tape(c)
@@ -409,7 +421,7 @@ class Dense35TP:
                 ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nhc, hd, d['qn'], pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_)
-                akw = dict(max_cells=self.max_ctx, part=s['part']) if E.split_attn() else dict(batched=True)
+                akw = dict(max_cells=self.max_ctx + self.spec_T - 1, part=s['part']) if E.split_attn() else dict(batched=True)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), dep=ap, **akw), qd)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blkp'], g_)
@@ -451,8 +463,19 @@ class Dense35TP:
         for (c, _, kind), t in self.state.items():
             if kind in RECURRENT:
                 with torch.cuda.device(self.devs[c]): t.zero_()
-        self.pos_host = 0
+        self.pos_host = 0; self.last_T = 0
         self.seq += 1; self.fresh = True; self.poisoned = None
+
+    def commit_max(self):
+        """the most the next pass on these states may commit: 1 on the served engine (spec_T 1, as before verify tapes
+        existed); with spec_T > 1 the tokens of the last pass launched on them (0 after a reset or a prefill)"""
+        if self.spec_T == 1: return 1
+        return 0 if self.fresh else self.last_T
+
+    def mark_broken(self, why):
+        """non-finite logits: sticky (reset() keeps it); the passes refuse"""
+        if self.broken is None: self.broken = why
+        print(f'k3 qwen35 TP: {why}', file=sys.stderr, flush=True)
 
     def prefetch(self, tokens, positions):
         """nothing to read ahead: the speculative loop's hook"""
@@ -468,8 +491,9 @@ class Dense35TP:
         return self.logits_full()[0]
 
     def _check(self, tokens, i0, commit, what):
+        if self.broken: raise k3.NonFiniteLogits(f'{what}: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
-        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=1, what=what)
+        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.commit_max(), what=what)
         if tokens is not None and len(tokens) < i0 + 1:
             raise k3.ContextBoundsError(f'{what}: position {i0} but {len(tokens)} tokens')
 
@@ -500,14 +524,14 @@ class Dense35TP:
         """wait for launch_tokens' pass; a bailed pass runs again before returning. True when it was rerun"""
         bad = self._pass_wait(i0)
         if not bad:
-            self.pos_host = i0 + 1; return False
+            self.pos_host = i0 + 1; self.last_T = 1; return False
         for attempt in range(1, self.max_retries + 1):
             self.bails.append((i0, attempt - 1, bad))
             print(f'k3 qwen35 TP: a wait gave up at position {i0} (attempt {attempt}), running the pass again: ' + '; '.join(bad),
                   file=sys.stderr, flush=True)
             bad = self._pass(i0, 0)
             if not bad:
-                self.pos_host = i0 + 1; return True
+                self.pos_host = i0 + 1; self.last_T = 1; return True
         self.bails.append((i0, self.max_retries, bad))
         raise RuntimeError(f'k3 qwen35 TP: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
 
@@ -526,7 +550,7 @@ class Dense35TP:
                   file=sys.stderr, flush=True)
         else:
             raise RuntimeError(f'k3 qwen35 TP: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
-        self.pos_host = i0 + 1
+        self.pos_host = i0 + 1; self.last_T = 1
         if not tok: return None
         (v0, x0), (v1, x1) = [(v.numpy(), x.numpy()) for v, x in self.h_max]
         # the first maximum over [card 0's rows | card 1's rows]: card 0's on a tie; a NaN counts as the maximum (argmax)
