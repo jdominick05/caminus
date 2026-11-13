@@ -71,6 +71,7 @@ class Ops(q3m_ops.Ops):
         super().__init__(dev, module)
         self.module = module
         self.cus = torch.cuda.get_device_properties(dev).multi_processor_count
+        self.q4k_force_wide = False   # (True: the wide tile below the grid-size rule too; benchmarks only)
         self.q4k_narrow = False   # (True: dense Q4_K GEMMs on q3p_mm_q4k instead of the wide tile; benchmarks only)
 
     def mm(self, W, x16, ldx, y, ldy, n=None, work=None):
@@ -83,13 +84,14 @@ class Ops(q3m_ops.Ops):
             n = int(n); grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
             getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
             return
-        if fmt == 'Q4_K' and work is None and n is not None and (self.module == MODULE or self.module.startswith('q35_prefill_abl')) and not self.q4k_narrow:
+        if fmt == 'Q4_K' and work is None and n is not None and self.module in (MODULE, 'q35_prefill_abl1') and not self.q4k_narrow:
             # the wide tile (kernels/q35_prefill.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows; ThinkingCap has
-            # no Q4_K weights; q4k_narrow = True runs q3p_mm_q4k, for benchmarks/q35_prefill_gemm.py --arms ab)
+            # no Q4_K weights; the measurement build q35_prefill_abl1 (B = 1) too; q4k_narrow = True runs q3p_mm_q4k and
+            # q4k_force_wide = True skips the grid-size rule, both for benchmarks/q35_prefill_gemm.py --arms ab)
             if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
             n = int(n)
             wg = -(-n // q3m_ops.MM_M) * -(-R // MMW_N)
-            if wg < MMW_MIN_PER_CU * self.cus:   # (a small grid: q3p_mm_q4k's twice as many workgroups fill the card better;
+            if wg < MMW_MIN_PER_CU * self.cus and not self.q4k_force_wide:   # (a small grid: q3p_mm_q4k's twice as many workgroups fill the card better;
                 # XTX ffn_down at 512 tokens, 160 workgroups: 1765 us wide vs 1692 us)
                 return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
             self.mod.q35p_mm_q4k_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))

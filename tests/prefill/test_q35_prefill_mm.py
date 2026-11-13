@@ -71,6 +71,9 @@ def main():
         t = F.T[picks[fmt]]
         K = int(t.shape[0]); _, rb = t.rows()
         for R in ((200, 256, 300, 512) if fmt == 'Q4_K' else (200, 256)):
+            if R > t.rows()[0]:
+                print(f'NOTE {fmt}: R={R} skipped ({picks[fmt]} has {t.rows()[0]} rows)', flush=True)
+                continue
             raw = t.pread(0, R * rb)
             Wf = own_dequant.dequant(raw, fmt, R * K).reshape(R, K).astype(np.float64)
             wb = q6k_planes(raw, R, K) if fmt == 'Q6_K' else iq_records(raw, R, K, fmt) if fmt in IQ_REC else raw
