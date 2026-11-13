@@ -6,4 +6,5 @@
 #define K3_Q3M_VER
 #define K3_Q35_VER
 #define K3_Q35_ATTN_PACK
+#define K3_Q35_GDN_LOCAL_BASE   // keep the replay-state base local to GDN instead of live through the dispatch
 #include "k3_q35_tcap.hip"

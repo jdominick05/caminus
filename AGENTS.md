@@ -98,6 +98,9 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
+  ThinkingCap's TP verify wrapper alone defines `K3_Q35_GDN_LOCAL_BASE`: empty asm operands keep GDN STEP/SAVE
+  geometry and replay pointers inside their dispatch branches. Preserve the addresses and floating-point statements;
+  check the whole build's object isolation and register budget before running its TP bitwise gates.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
