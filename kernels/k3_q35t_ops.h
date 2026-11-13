@@ -83,22 +83,26 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
             }                                                                                                          \
         }                                                                                                              \
     }
+#if defined(K3_Q35_GSQ_M)   // (the GSQ files' IQ1_M verify module, kernels/k3_q35_gsq_ver_m.hip: their one IQ1_M matrix's T-token
+                            //  matvec alone; with the other formats in k3_q35_gsq_ver, k3_run passed 96 VGPRs)
+    { Q35T_MT_LOOP(own_rows_iq1m_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_IQ1_M: host-checked)
+#else
 #ifndef K3_Q35_MTP   // (ThinkingCap's MTP drafter module, kernels/k3_q35_tcap_mtp.hip: its block is all Q6_K, the head a rows tile:
                      //  the other formats' T-token loops out of its register allocation; the host refuses them there)
     if (fmt == OWN_IQ4_XS) { Q35T_MT_LOOP(own_rows_iq4xs_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S) { const int f = fmt == OWN_IQ3_XXS ? 0 : 1; Q35T_MT_LOOP(own_rows_iq3_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm, f)) }
     else if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q5_K) { Q35T_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
-#ifdef K3_Q35_GSQ   // (the GSQ verify module, kernels/k3_q35_gsq_ver.hip: kernels/own_quant_gsq_mt.h; Q4_K Swift's mt2 form)
+#ifdef K3_Q35_GSQ   // (the GSQ verify module, kernels/k3_q35_gsq_ver.hip: kernels/own_quant_gsq_mt.h; Q4_K Swift's mt2 form; IQ1_M: k3_q35_gsq_ver_m)
     else if (fmt == OWN_IQ2_XXS) { Q35T_MT_LOOP(own_rows_iq2xxs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_IQ2_XS) { Q35T_MT_LOOP(own_rows_iq2xs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q2_K) { Q35T_MT_LOOP(own_rows_q2k_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
-    else if (fmt == OWN_IQ1_M) { Q35T_MT_LOOP(own_rows_iq1m_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q4_K) { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
 #endif
     else
 #endif
     { Q35T_MT_LOOP(own_rows_q6k_planes_mt2<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q6_K: host-checked)
+#endif
 #undef Q35T_MT_LOOP
     return;
 #endif

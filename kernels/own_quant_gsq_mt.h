@@ -191,22 +191,11 @@ __device__ __forceinline__ void own_rows_q2k_mt(const uint8_t * __restrict__ Wm,
     GSQ_MT_RESULT
 }
 
-// 8 grid bytes (each 0 .. 2: g + 1) -> 16 bits, 2 per byte; and back (the same bytes)
-__device__ __forceinline__ uint32_t iq1m_pack8(uint64_t g) {
-    uint32_t c = 0;
-#pragma unroll
-    for (int i = 0; i < 8; i++) c |= (uint32_t)((g >> (8 * i)) & 3u) << (2 * i);
-    return c;
-}
-__device__ __forceinline__ uint32_t iq1m_unpack4(uint32_t c) {   // 4 codes (8 bits) -> 4 bytes
-    return (c | (c << 6) | (c << 12) | (c << 18)) & 0x03030303u;
-}
-
-// IQ1_M (record 8: 4 index bytes | 2 qh bytes | the two scales; header d): the row's 4 grid entries read once and held
-// packed (2 bits a byte: 2 words), each token's group bytes unpacked from them (the same bytes the one-token tile reads);
-// each group's delta, d (2 s + 1) and activation sum recomputed per token, the one-token tile's operations in its order:
-// the same bits. Holding the 8 grid words and the 8 scale floats per row took k3_run to 120 VGPRs, the words alone 99,
-// reading the grid per token 97, the one-token tile run once per token 102
+// IQ1_M (record 8: 4 index bytes | 2 qh bytes | the two scales; header d), for the IQ1_M verify module
+// (kernels/k3_q35_gsq_ver_m.hip, alone in its dispatch): only the record is held across the pass; each group's grid entry,
+// delta, d (2 s + 1) and activation sum are read / recomputed per token, the one-token tile's own lookups and operations in
+// its order, so the same bits. k3_run: 92 VGPRs there (holding the row's grid words packed 99, the one-token tile run per
+// token 101); beside the other formats' loops in k3_q35_gsq_ver every form passed 96 (97 .. 120)
 template <int RW, class XO>
 __device__ __forceinline__ void own_rows_iq1m_mt(const uint8_t * __restrict__ Wm, int nrows_total, int row0, int nrows,
                                                  const _Float16 * __restrict__ x16, const XO & xo, int nt, int lane,
@@ -227,10 +216,6 @@ __device__ __forceinline__ void own_rows_iq1m_mt(const uint8_t * __restrict__ Wm
             const uint32_t hd = *(const uint32_t *)(B + (rw * NB + (uu >> 3)) * HS);
             const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(hd & 0xffffu));
             const uint32_t qs = rc.x, qh = rc.y & 0xffffu, sc = (rc.y >> 16) & 0xffu;
-            uint32_t pk[2] = {0u, 0u};
-#pragma unroll
-            for (int k = 0; k < 4; k++)
-                pk[k >> 1] |= iq1m_pack8(IQ1_GRID[((qs >> (8 * k)) & 0xffu) | (((qh >> (4 * k)) & 7u) << 8)]) << (16 * (k & 1));
 #pragma unroll
             for (int j = 0; j < OWN_MT; j++) {
                 if (j >= nt) break;
@@ -243,8 +228,8 @@ __device__ __forceinline__ void own_rows_iq1m_mt(const uint8_t * __restrict__ Wm
                     t = __builtin_amdgcn_fdot2(as_h2(xw[4 * k + 2]), one, t, false);
                     const float sxk = __builtin_amdgcn_fdot2(as_h2(xw[4 * k + 3]), one, t, false);
                     const uint32_t nib = (qh >> (4 * k)) & 0xfu;
-                    const uint32_t c16 = (pk[k >> 1] >> (16 * (k & 1))) & 0xffffu;
-                    const uint32_t g0 = iq1m_unpack4(c16 & 0xffu), g1 = iq1m_unpack4(c16 >> 8);
+                    const uint64_t gg = IQ1_GRID[((qs >> (8 * k)) & 0xffu) | ((nib & 7u) << 8)];
+                    const uint32_t g0 = (uint32_t)gg, g1 = (uint32_t)(gg >> 32);
                     const float delta = (nib & 8u) ? -0.125f : 0.125f;
                     const float dl = d * (float)(2u * ((sc >> (3 * (k >> 1))) & 7u) + 1u);
                     float sg = 0.0f;
