@@ -35,19 +35,23 @@
 You need Linux, Python 3.12, at least one RX 7900 XTX or XT, and Docker for the build.
 
 **Build it from source (recommended).** The build runs the release recipe inside the public build image: on the CPU, no
-GPU needed, nothing installed on your system, and the wheel it makes is byte for byte the published one.
+GPU needed, nothing installed on your system besides Docker, and the wheel it makes is byte for byte the published one.
+Releases build this way from 0.2.2 on; until 0.2.2 is out, build the development branch (`testing`):
 
 ```bash
 git clone https://github.com/jdominick05/caminus.git && cd caminus
-git checkout vX.Y.Z                                          # the newest release (the top of the Releases page)
-tools/release/in_image.sh tools/release/release_build.sh     # builds the GPU code and the wheel into dist/
+git checkout testing        # from 0.2.2 on: the tag of the "Latest" release instead (not a nightly pre-release)
+tools/release/in_image.sh tools/release/release_build.sh --untagged    # GPU code + wheel into dist/ (drop --untagged on a release tag)
+python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards
 pip install dist/caminus-*.whl
 caminus panel
 ```
 
-To build the development branch instead, check out `testing` and add `--untagged` to the build command. Releases
-0.2.1 and older predate the build image: build those with [building from source](docs/dev/building.md).
+The build needs Docker that your user can run (`docker run hello-world` works). It refuses a checkout with an old
+`dist/`: build from a fresh clone. The latest release is at
+[releases/latest](https://github.com/jdominick05/caminus/releases/latest); 0.2.1 and older predate the build image:
+build those with [their own building notes](https://github.com/jdominick05/caminus/blob/v0.2.1/docs/dev/building.md).
 
 **Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
 release is built with the same recipe, and its provenance can be checked against the source
