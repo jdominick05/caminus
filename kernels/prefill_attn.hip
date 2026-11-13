@@ -93,7 +93,12 @@ template <int M> __device__ __forceinline__ float attn_xm(float x) {
     const int xi = __builtin_bit_cast(int, x);
     return __builtin_bit_cast(float, __builtin_amdgcn_update_dpp(xi, xi, 0x160 | M, 0xf, 0xf, false));
 }
+#ifdef PREFILL_KV_F16
+// Target KV only: the QSA indexer's raw rows and pools retain their Q8 module.
+__device__ __forceinline__ size_t kv_pos_bytes(int M) { return (size_t)4 * M; }
+#else
 __device__ __forceinline__ size_t kv_pos_bytes(int M) { return (size_t)2 * (M / 32) * sizeof(block_q8_0); }
+#endif
 
 // ---- pf_qk_nr: OP_QK_NR over rows: block t = row * heads + head (the decode's task index) ---------------------------------
 //   x: [rows, heads] heads at head_stride floats (the q GEMM's [q | gate] head pairs: stride 2 D), w: the norm [D], out
@@ -154,6 +159,14 @@ extern "C" __global__ void __launch_bounds__(256) pf_kv_append(const float * k, 
     const int tt = blockIdx.x, pos = pos0 + tt;
     if (pos < 0 || pos >= rows) { if (threadIdx.x == 0) atomicOr(err, 1); return; }
     uint8_t * base = cache + (size_t)pos * kv_pos_bytes(M);
+#ifdef PREFILL_KV_F16
+    // OP_KV_APPEND's type-0 writes, before any attention reads the row.
+    half * c = (half *)base;
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        c[i] = __float2half(k[(size_t)tt * ldk + i]);
+        c[M + i] = __float2half(v[(size_t)tt * ldv + i]);
+    }
+#else
     const int nb = M / 32;
     for (int b = threadIdx.x; b < 2 * nb; b += blockDim.x) {     // one thread per block, as the reference loop
         const float * x = (b < nb ? k + (size_t)tt * ldk : v + (size_t)tt * ldv) + (size_t)(b % nb) * 32;
@@ -164,6 +177,7 @@ extern "C" __global__ void __launch_bounds__(256) pf_kv_append(const float * k, 
         y->d = d;
         for (int j = 0; j < 32; j++) y->qs[j] = roundf(x[j] * id);
     }
+#endif
 }
 
 // ---- pf_attn_part / pf_attn_comb: the split attention pair over the identity list, rows [0, R) of a block -----------------
@@ -220,14 +234,29 @@ __device__ __forceinline__ void attn_part_body(const float * q, const uint8_t * 
         const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]);
         const size_t pb = kv_pos_bytes(nkv * ATTN_D);
         const float * qb = q + ((size_t)tt * heads + (size_t)g * ATTN_G) * ATTN_D + 8 * lane;
+#ifdef PREFILL_KV_F16
+        // k3_attn_split.h type 0: this lane's eight contiguous halves.
+        const uint8_t * kb = cache + (size_t)(g * ATTN_D + 8 * lane) * 2;
+        const int ci = ATTN_CPR == 2 ? (lane >> 4) & 1 : 0;
+#else
         const uint8_t * kb = cache + (size_t)(g * 8 + (lane >> 2)) * sizeof(block_q8_0);
         const int ko = 2 + (lane & 3) * 8, ci = ATTN_CPR == 2 ? (lane >> 4) & 1 : 0;
+#endif
 #pragma unroll 1
         for (int cb = 4 * wave; cb < min(nb, 4 * wave + 4); cb += ATTN_CPR) {
             float kf[ATTN_CPR][8];
 #pragma unroll
             for (int i = 0; i < ATTN_CPR; i++) {
                 if (cb + i < nb) {
+#ifdef PREFILL_KV_F16
+                    const uint4 w = *(const uint4 *)(kb + (size_t)cl[cb + i] * pb);
+                    const uint32_t wv[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        const float2 kk = __half22float2(__builtin_bit_cast(__half2, wv[j]));
+                        kf[i][2 * j] = kk.x; kf[i][2 * j + 1] = kk.y;
+                    }
+#else
                     const uint8_t * kp = kb + (size_t)cl[cb + i] * pb;
                     const float d = __half2float(*(const half *)kp);
                     const uint16_t * qs = (const uint16_t *)(kp + ko);
@@ -236,6 +265,7 @@ __device__ __forceinline__ void attn_part_body(const float * q, const uint8_t * 
                         const uint16_t w = qs[j];
                         kf[i][2 * j] = (float)(int8_t)(w & 0xff) * d; kf[i][2 * j + 1] = (float)(int8_t)(w >> 8) * d;
                     }
+#endif
                 } else {
 #pragma unroll
                     for (int j = 0; j < 8; j++) kf[i][j] = 0.0f;
@@ -278,8 +308,12 @@ __device__ __forceinline__ void attn_part_body(const float * q, const uint8_t * 
     {   // V: this thread's value of each cell (its q8_0 block and qs byte)
         const int nb = __builtin_amdgcn_readfirstlane(cl[ATTN_SS]), tid = threadIdx.x;
         const size_t pb = kv_pos_bytes(nkv * ATTN_D);
+#ifdef PREFILL_KV_F16
+        const uint8_t * vb = cache + (size_t)(nkv * ATTN_D + g * ATTN_D + tid) * 2;
+#else
         const uint8_t * vb = cache + (size_t)(nkv * 8 + ((g * ATTN_D + tid) >> 5)) * sizeof(block_q8_0);
         const int vo = 2 + (tid & 31);
+#endif
 #pragma unroll 1
         for (int h0 = 0; h0 < ATTN_G; h0 += ATTN_VH) {
             float acc[ATTN_VH];
@@ -288,7 +322,11 @@ __device__ __forceinline__ void attn_part_body(const float * q, const uint8_t * 
 #pragma unroll 1
             for (int c = 0; c < nb; c++) {
                 const uint8_t * vp = vb + (size_t)cl[c] * pb;
+#ifdef PREFILL_KV_F16
+                const float v = __half2float(*(const half *)vp);
+#else
                 const float v = (float)(int8_t)vp[vo] * __half2float(*(const half *)vp);
+#endif
 #pragma unroll
                 for (int h = 0; h < ATTN_VH; h++) acc[h] = __builtin_fmaf(sp[c * ATTN_G + h0 + h], v, acc[h]);
             }

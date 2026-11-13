@@ -2,7 +2,11 @@
 tokens; caminus.prefill.coder, the ChunkStack with the attention core, the entry points longctx.fill / spec.generate /
 DFlashK3Drafter.generate).
 
-  python -I tests/prefill/test_prefill_s6.py CODER STAGE... [--out DIR] [--json F] [--small] [--reps 3]
+  tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_s6.py CODER STAGE... [--kv q8|f16] [--json F] [--small] [--reps 3]
+
+--kv is TEST-ONLY, default q8. F16 supports the smoke / chunk / resume / DFlash / exact-hit / allocation stages below.
+Stages using recorded Q8 llama.cpp numerical floors or performance baselines refuse F16; matching F16 baselines are
+still required for the model and speed gates. State hashes cover the full selected target KV row in either mode.
 
 One process, one engine for the GPU stages: FlashNextTP T = 4 at max_ctx 4096 (the Coder's QSA engine, dual tape: the dense
 trunk below 2051, the QSA tape past it), the DFlash drafter (DFlashK3, features on the XTX), the prefill at chunk 2048.
@@ -122,6 +126,12 @@ def sha_rows(t, lo, hi):
 
 # ---- stage: cpu ---------------------------------------------------------------------------------------------------------
 SPLIT = {}                       # FlashNextTP's TP split (--tp-split); empty: the engine's default 10 / 12
+F16_STAGES = frozenset(('cpu', 'smoke', 'g2b', 'g3', 'dflash', 'exact', 'g2b7', 'g3q', 'alloc'))
+
+
+def check_kv_stages(kv, stages):
+    if kv == 'f16' and set(stages) - F16_STAGES:
+        raise ValueError('F16 stages with recorded Q8 baselines are unavailable; matching F16 baselines are required')
 
 class FakeEngine:
     def __init__(self): self.poisoned, self.max_ctx, self.ntok, self.seq, self.token = None, 4096, 4, 0, 0
@@ -242,7 +252,7 @@ def stage_cpu_exact():
 # ---- the engine ---------------------------------------------------------------------------------------------------------
 class Rig:
     def __init__(self, torch, coder, max_ctx=4096, chunk=2048, router=None, wmma_out=None, moe=None, q6k=None, q6k_buffers=None,
-                 plan_bf16=None):
+                 plan_bf16=None, q8=True):
         from gguf import GGUFReader
         from caminus.decode import dflash as dk
         from caminus.prefill import coder as P
@@ -255,12 +265,12 @@ class Rig:
         t0 = time.time()
         # (the prefill as it is built below, counted before the target loads; plan_bf16: the 'wmma' buffers counted now and
         # allocated later, by stage_speed's dense-path A/B: caminus.prefill.plan.check_counted)
-        self.m = FlashNextTP(coder, ntok=4, max_ctx=max_ctx, feature_layers=layers, feature_card=0, vram_drafters=(('dflash', dg, None),), **SPLIT,
+        self.m = FlashNextTP(coder, ntok=4, max_ctx=max_ctx, q8=q8, feature_layers=layers, feature_card=0, vram_drafters=(('dflash', dg, None),), **SPLIT,
                              vram_prefill=dict(chunk=chunk, q6k=q6k, q6k_buffers=q6k_buffers if plan_bf16 is None else plan_bf16))
         self.df = dk.DFlashK3(self.m, dk.DRAFTER); self.dr = dk.DFlashK3Drafter(self.df)
         self.pf = P.Prefill(self.m, chunk=chunk, router_logits=router, wmma_out=wmma_out, moe=moe, q6k=q6k, q6k_buffers=q6k_buffers)
         for d in (0, 1): torch.cuda.synchronize(d)
-        print(f'rig: loaded in {time.time() - t0:.1f} s; qsa {self.m.qsa} dual {self.m.dual}; feature layers {layers}; vram plan prefill '
+        print(f'rig: loaded in {time.time() - t0:.1f} s; target KV {"q8" if q8 else "f16"}; qsa {self.m.qsa} dual {self.m.dual}; feature layers {layers}; vram plan prefill '
               f'{[round(x) for x in self.m.vram_plan["prefill_mib"]]} MiB; crossover T* {self.pf.crossover}; torch free cache released at construction {[round(x, 1) for x in self.pf.released_mib]} MiB (tape addresses checked first: {__import__('caminus.device.capacity', fromlist=['x']).LAST_RELEASE}); router logits {self.pf.S.Gl[0].router_mode}; WMMA out {self.pf.S.Gl[0].wmma_out}; routed experts {self.pf.S.moe}; dense Q6_K {self.pf.S.q6k}', flush=True)
 
     def sync(self):
@@ -288,8 +298,10 @@ class Rig:
         """hashes of every state: the recurrent ones whole, the KV / IDXRAW rows < n, the IDXPOOL rows < n / 4 (the prefill
         pools from token 0, S7), the features of [max(feat_from, n - feat_rows, 0), n) within the export's window (the last run's)"""
         m = self.m; out = {}
+        from caminus.engine import k3
+        pb = k3.kv_pos_bytes(m.hd, m.q8)   # one KV head per TP card; state storage is raw bytes in either mode
         for k, t in m.state.items():
-            if k[-1] == 'kv': out[k] = sha(t[:n * 544])
+            if k[-1] == 'kv': out[k] = sha(t[:n * pb])
             elif k[-1] == 'idxraw': out[k] = sha_rows(t, 0, n)
             elif k[-1] == 'idxpool': out[k] = sha_rows(t, 0, n // 4)
             else: out[k] = sha(t)
@@ -917,6 +929,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('coder'); ap.add_argument('stages', nargs='+')
     ap.add_argument('--small', action='store_true'); ap.add_argument('--json', default=None); ap.add_argument('--reps', type=int, default=3)
+    ap.add_argument('--kv', choices=('q8', 'f16'), default='q8', help='test-only target KV format; F16 numerical/speed baselines are pending')
     ap.add_argument('--tp-split', default=None, help='GK,MB: the TP split (FlashNextTP gdn_keys / moe_blocks; default the engine\'s 10,12; 8,10: the even split)')
     ap.add_argument('--max-ctx', type=int, default=4096); ap.add_argument('--router', default=None, help='wmma | exact (the prefill router logits; default: prefill_ops)')
     ap.add_argument('--wmma-out', default=None, help='fp32 | bf16 (the WMMA GEMMs\' output, router logits included; default: prefill_ops.WMMA_OUT)')
@@ -926,6 +939,9 @@ def main():
     ap.add_argument('--q6k', default=None, help='own | wmma | mmq | ab (the dense Q6_K GEMMs\' path, ChunkStack.q6k; default prefill_tp.Q6K_PATH; '
                                                 'ab: the default, and speed times the other two interleaved)')
     a = ap.parse_args()
+    try: check_kv_stages(a.kv, a.stages)
+    except ValueError as e: ap.error(str(e))
+    NUMBERS['kv'] = a.kv
     if a.tp_split:
         SPLIT.update(zip(('gdn_keys', 'moe_blocks'), (int(v) for v in a.tp_split.split(','))))
         print(f'split: {SPLIT}', flush=True)
@@ -937,7 +953,7 @@ def main():
         assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'
         print('compaction_proactiveness', comp(), flush=True)
         R = Rig(torch, a.coder, max_ctx=a.max_ctx, router=a.router, wmma_out=a.wmma_out, moe=None if a.moe in (None, 'ab') else a.moe,
-                q6k=None if a.q6k in (None, 'ab') else a.q6k, plan_bf16=True if a.q6k == 'ab' else None)
+                q6k=None if a.q6k in (None, 'ab') else a.q6k, plan_bf16=True if a.q6k == 'ab' else None, q8=a.kv == 'q8')
         if a.graphs:
             from caminus.prefill.graph import Graphs
             R.pf.graphs = Graphs(R.pf.S, max_graphs=16); print('graphs: HIP-graph chunks on (Prefill.graphs, max 16 structures)', flush=True)

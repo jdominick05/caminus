@@ -1,7 +1,10 @@
 """Gates of the batched prefill's attention core (docs/specs/spec-prefill-cache.md M5 S6; caminus.prefill.attn,
 kernels/prefill_attn.hip).
 
-  python -I tests/prefill/test_prefill_attn.py CODER STAGE... [--small] [--json OUT]
+  tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_attn.py CODER STAGE... [--kv q8|f16] [--small] [--json OUT]
+
+--kv selects the TEST-ONLY GPU target cache format (default q8). F16 skips the target Q/K/V/output Hadamards on both
+chains; the same bitwise gates apply. The CPU stage retains its existing Q8 launcher cases.
 
 Stages:
   cpu    CPU only, nothing launched (launch recorders stand in for the kernels): the launchers' refusals (dense attention
@@ -156,24 +159,27 @@ def stage_cpu(coder):
 # ---- stage: g1 (one card) -------------------------------------------------------------------------------------------------
 class K3Chain:
     """FlashNextTP's attention-layer core on one card's shapes as a K3 tape (module k3_gguf_gsq, T = 1), one token per pass"""
-    def __init__(self, torch, dev, P, rows):
+    def __init__(self, torch, dev, P, rows, q8=True):
         from caminus.engine import k3
-        self.torch, self.k3, self.P = torch, k3, P
+        self.torch, self.k3, self.P, self.q8 = torch, k3, P, q8
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=dev)
         self.qf, self.kr, self.vr = z(NH * 2 * HD), z(HD), z(HD)
         self.qo, self.ko, self.att, self.gat = z(NH * HD), z(HD), z(NH * HD), z(NH * HD)
         self.pos = z(1, dt=torch.int32); self.rows = rows
-        self.cache = z(rows * 2 * (HD // 32) * 34, dt=torch.uint8)
+        self.cache_row_elems = 2 * (HD // 32) * 34 if q8 else 2 * HD
+        self.cache = z(rows * self.cache_row_elems, dt=torch.uint8 if q8 else torch.float16)
         self.qn, self.kn = torch.tensor(P['qn'], device=dev), torch.tensor(P['kn'], device=dev)
         e = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1)
         kd = e.qk_nr(self.kr, HD, 1, HD, self.kn, self.pos, self.ko, P['nrot'], P['theta'], EPS)
-        kd = e.hadamard(self.ko, HD, dep=kd); vd = e.hadamard(self.vr, 64)
-        ap = e.also(e.kv_append(self.ko, self.vr, self.cache, self.pos, q8=True, dep=kd), vd)
+        if q8:
+            kd = e.hadamard(self.ko, HD, dep=kd); vd = e.hadamard(self.vr, 64)
+        ap = e.kv_append(self.ko, self.vr, self.cache, self.pos, q8=q8, dep=kd)
+        if q8: ap = e.also(ap, vd)
         qd = e.qk_nr(self.qf, 2 * HD, NH, HD, self.qn, self.pos, self.qo, P['nrot'], P['theta'], EPS)
-        qd = e.hadamard(self.qo, HD, dep=qd)
-        a_ = e.also(e.attn_dec(self.qo, self.cache, self.pos, self.att, NH, 1, HD, 1.0 / np.sqrt(HD), q8=True, dep=ap,
+        if q8: qd = e.hadamard(self.qo, HD, dep=qd)
+        a_ = e.also(e.attn_dec(self.qo, self.cache, self.pos, self.att, NH, 1, HD, 1.0 / np.sqrt(HD), q8=q8, dep=ap,
                                max_cells=min(rows, 2051)), qd)
-        a_ = e.hadamard(self.att, 64, rows_per_task=4, dep=a_)
+        if q8: a_ = e.hadamard(self.att, 64, rows_per_task=4, dep=a_)
         e.gate_mul(self.att, self.qf, 2 * HD, HD, self.gat, HD, dep=a_)
         self.e = e.build()
         self.hres, self.havg = z(4, 2560), z(2560)
@@ -198,12 +204,13 @@ class K3Chain:
 
 class PfChain:
     """the same chain on the prefill's kernels over a chunk of rows"""
-    def __init__(self, torch, dev, P, rows, rpb=None):
+    def __init__(self, torch, dev, P, rows, rpb=None, q8=True):
         from caminus.prefill import attn as pa
-        self.torch, self.pa, self.P, self.dev = torch, pa, P, dev
+        self.torch, self.pa, self.P, self.dev, self.q8 = torch, pa, P, dev, q8
         self.A = pa.Attn(dev); self.rows = rows
         self.qn, self.kn = torch.tensor(P['qn'], device=dev), torch.tensor(P['kn'], device=dev)
-        self.cache = torch.zeros(rows * 2 * (HD // 32) * 34, dtype=torch.uint8, device=dev)
+        self.cache_row_elems = 2 * (HD // 32) * 34 if q8 else 2 * HD
+        self.cache = torch.zeros(rows * self.cache_row_elems, dtype=torch.uint8 if q8 else torch.float16, device=dev)
         self.err = torch.zeros(1, dtype=torch.int32, device=dev)
         self.rec = torch.zeros(pa.ROWS_PER_BLOCK * 2 * NH * pa.max_splits() * pa.ATTN_RS, device=dev)   # (room for 128-row blocks)
 
@@ -211,19 +218,22 @@ class PfChain:
         torch, A, P = self.torch, self.A, self.P; T = qf.shape[0]; rpb = rpb or self.pa.ROWS_PER_BLOCK
         ko, qo, att = torch.zeros(T, HD, device=self.dev), torch.zeros(T, NH * HD, device=self.dev), torch.zeros(T, NH * HD, device=self.dev)
         vv = v.clone()
-        A.qk_nr(k, HD, 1, HD, self.kn, P['nrot'], P['theta'], EPS, p0, ko, T); A.hadamard(ko, HD, T)
-        A.hadamard(vv, 64, T * HD // 64)
-        A.kv_append(ko, HD, vv, HD, HD, self.cache, p0, T, self.err)
-        A.qk_nr(qf, 2 * HD, NH, HD, self.qn, P['nrot'], P['theta'], EPS, p0, qo, T); A.hadamard(qo, HD, T * NH)
-        A.attend(qo, self.cache, p0, T, 1, 1.0 / np.sqrt(HD), att, self.rec, self.err, rows_per_block=rpb)
-        A.hadamard(att, 64, T * NH * HD // 64, 4)
+        A.qk_nr(k, HD, 1, HD, self.kn, P['nrot'], P['theta'], EPS, p0, ko, T)
+        if self.q8:
+            A.hadamard(ko, HD, T); A.hadamard(vv, 64, T * HD // 64)
+        A.kv_append(ko, HD, vv, HD, HD, self.cache, p0, T, self.err, q8=self.q8)
+        A.qk_nr(qf, 2 * HD, NH, HD, self.qn, P['nrot'], P['theta'], EPS, p0, qo, T)
+        if self.q8: A.hadamard(qo, HD, T * NH)
+        A.attend(qo, self.cache, p0, T, 1, 1.0 / np.sqrt(HD), att, self.rec, self.err, rows_per_block=rpb, q8=self.q8)
+        if self.q8: A.hadamard(att, 64, T * NH * HD // 64, 4)
         gat = att.clone(); A.gate_mul(gat, qf, 2 * HD, HD, gat, T * NH * HD, HD)
         return [ko, qo, att, gat]
 
 
-def stage_g1(torch, dev, coder, small):
+def stage_g1(torch, dev, coder, small, q8=True):
     P = model_params(coder)
-    print(f'RoPE n_rot {P["nrot"]}, theta_scale {P["theta"]!r}; device {torch.cuda.get_device_name(dev)}; compaction_proactiveness {comp()}', flush=True)
+    print(f'RoPE n_rot {P["nrot"]}, theta_scale {P["theta"]!r}; target KV {"q8" if q8 else "f16"}; '
+          f'device {torch.cuda.get_device_name(dev)}; compaction_proactiveness {comp()}', flush=True)
     rows = 2052
     rng = np.random.default_rng(5)
     TMAX = 37 if small else 2051
@@ -233,30 +243,31 @@ def stage_g1(torch, dev, coder, small):
     # a few rows with one large component (a peaked softmax) and a few all-equal keys (ties in the scores)
     for t in range(3, TMAX, 97): k[t, 7] = 40.0
     for t in range(5, TMAX, 211): k[t] = 0.5
-    K = K3Chain(torch, dev, P, rows)
+    K = K3Chain(torch, dev, P, rows, q8=q8)
     t0 = time.time(); ref = K.run(qf, k, v); ref_cache = K.cache.clone()
     print(f'  K3 reference: {TMAX} positions one token per pass, {time.time() - t0:.1f} s', flush=True)
-    names = ('rotated k', 'rotated q', 'attention output (after its Hadamard)', 'gated output')
-    pb = 2 * (HD // 32) * 34
+    names = ('rotated k', 'rotated q', 'attention output (after its Hadamard)' if q8 else 'attention output (no Hadamard)', 'gated output')
+    pe = K.cache_row_elems   # tensor elements per row: bytes for Q8, half values for F16
     for T in ((4, 37) if small else (1, 4, 512, 777, 2048, 2051)):
-        F = PfChain(torch, dev, P, rows)
+        F = PfChain(torch, dev, P, rows, q8=q8)
         out = F.run(qf[:T], k[:T], v[:T]); torch.cuda.synchronize(dev)
         ok = [same(o, r[:T]) for o, r in zip(out, ref)]
-        okc = same(F.cache[:T * pb], ref_cache[:T * pb]); oke = int(F.err.item()) == 0
+        okc = same(F.cache[:T * pe], ref_cache[:T * pe]); oke = int(F.err.item()) == 0
         nd = [int((bits(o.view(T, -1)).reshape(T, -1) != bits(r[:T].view(T, -1)).reshape(T, -1)).any(1).sum()) for o, r in zip(out, ref)]
         check(all(ok) and okc and oke, f'g1 T={T}: positions 0 .. {T - 1} == K3 one token per pass, bitwise: ' +
               ', '.join(f'{n} {"==" if o else f"!= at {d} rows"}' for n, o, d in zip(names, ok, nd)) + f', KV cache rows {"==" if okc else "!="}, err {int(F.err.item())}')
     # G2b: chunk splits and record blocks
-    T = 37 if small else 2048
-    base = PfChain(torch, dev, P, rows); ob = base.run(qf[:T], k[:T], v[:T])
-    splits = [[(0, 4), (4, 37)]] if small else [[(0, 1), (1, 5), (5, 512), (512, 2048)], [(0, 777), (777, 2048)], [(0, 512), (512, 1024), (1024, 1536), (1536, 2048)], [(0, 1000), (1000, 2048)]]
+    T = 37 if small else 2048 if q8 else 2051   # F16 chunk checks include the last dense position, 2050
+    base = PfChain(torch, dev, P, rows, q8=q8); ob = base.run(qf[:T], k[:T], v[:T])
+    splits = [[(0, 4), (4, 37)]] if small else [[(0, 1), (1, 5), (5, 512), (512, T)], [(0, 777), (777, T)], [(0, 512), (512, 1024), (1024, 1536), (1536, T)], [(0, 1000), (1000, T)]]
+    if not small and not q8: splits.append([(0, 2048), (2048, T)])
     for sp in splits:
-        F = PfChain(torch, dev, P, rows); parts = [F.run(qf[a:b], k[a:b], v[a:b], p0=a) for a, b in sp]
+        F = PfChain(torch, dev, P, rows, q8=q8); parts = [F.run(qf[a:b], k[a:b], v[a:b], p0=a) for a, b in sp]
         cat = [torch.cat([p[i] for p in parts]) for i in range(4)]
         ok = all(same(c, o) for c, o in zip(cat, ob)) and same(F.cache, base.cache)
         check(ok, f'g2b: chunks {" + ".join(str(b - a) for a, b in sp)} == one chunk of {T}, bitwise (every output, the KV cache)')
     for rpb in ((5, 17) if small else (17, 64, 128)):
-        F = PfChain(torch, dev, P, rows); o = F.run(qf[:T], k[:T], v[:T], rpb=rpb)
+        F = PfChain(torch, dev, P, rows, q8=q8); o = F.run(qf[:T], k[:T], v[:T], rpb=rpb)
         check(all(same(a, b) for a, b in zip(o, ob)), f'g2b: record blocks of {rpb} rows == {base.pa.ROWS_PER_BLOCK}, bitwise ({T} rows)')
     # OP_HC_AVG
     res = torch.tensor(rng.standard_normal((64, 4, 2560)).astype(np.float32), device=dev)
@@ -264,7 +275,7 @@ def stage_g1(torch, dev, coder, small):
     check(same(pf[:, :2560], ra), 'g1 hc_avg (the DFlash features): 64 tokens == K3 OP_HC_AVG per token, bitwise (row stride 3000)')
     if small: return
     # speed: one attention layer's core at T = 2048 from position 0 (and at 1024 .. 2047, a second chunk)
-    F = PfChain(torch, dev, P, rows)
+    F = PfChain(torch, dev, P, rows, q8=q8)
     def timed(fn, reps=5):
         ts = []
         for _ in range(reps):
@@ -276,16 +287,17 @@ def stage_g1(torch, dev, coder, small):
     vv = v[:T].clone()
     ms = dict(k_nr=timed(lambda: A.qk_nr(k[:T], HD, 1, HD, F.kn, P['nrot'], P['theta'], EPS, 0, ko, T)),
               q_nr=timed(lambda: A.qk_nr(qf[:T], 2 * HD, NH, HD, F.qn, P['nrot'], P['theta'], EPS, 0, qo, T)),
-              had=timed(lambda: (A.hadamard(ko, HD, T), A.hadamard(qo, HD, T * NH), A.hadamard(vv, 64, T * HD // 64))),
-              kv_append=timed(lambda: A.kv_append(ko, HD, vv, HD, HD, F.cache, 0, T, F.err)),
-              attend=timed(lambda: A.attend(qo, F.cache, 0, T, 1, 0.0625, att, F.rec, F.err)),
-              attend_128=timed(lambda: A.attend(qo, F.cache, 0, T, 1, 0.0625, att, F.rec, F.err, rows_per_block=128)),
-              out_had_gate=timed(lambda: (A.hadamard(att, 64, T * NH * HD // 64, 4), A.gate_mul(att, qf[:T], 2 * HD, HD, att, T * NH * HD, HD))))
+              had=timed(lambda: (A.hadamard(ko, HD, T), A.hadamard(qo, HD, T * NH), A.hadamard(vv, 64, T * HD // 64))) if q8 else 0.0,
+              kv_append=timed(lambda: A.kv_append(ko, HD, vv, HD, HD, F.cache, 0, T, F.err, q8=q8)),
+              attend=timed(lambda: A.attend(qo, F.cache, 0, T, 1, 0.0625, att, F.rec, F.err, q8=q8)),
+              attend_128=timed(lambda: A.attend(qo, F.cache, 0, T, 1, 0.0625, att, F.rec, F.err, rows_per_block=128, q8=q8)),
+              out_had_gate=timed(lambda: (A.hadamard(att, 64, T * NH * HD // 64, 4) if q8 else None,
+                                        A.gate_mul(att, qf[:T], 2 * HD, HD, att, T * NH * HD, HD))))
     # the longest single launch: the last record block's part (65 splits x 64 rows)
     e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     longest = []
     for _ in range(5):
-        e0.record(); A.attend(qo[-64:], F.cache, T - 64, 64, 1, 0.0625, att[-64:], F.rec, F.err); e1.record(); torch.cuda.synchronize(dev)
+        e0.record(); A.attend(qo[-64:], F.cache, T - 64, 64, 1, 0.0625, att[-64:], F.rec, F.err, q8=q8); e1.record(); torch.cuda.synchronize(dev)
         longest.append(e0.elapsed_time(e1))
     core = ms['k_nr'] + ms['q_nr'] + ms['had'] + ms['kv_append'] + ms['attend'] + ms['out_had_gate']
     print(f'  speed T=2048 (ms, median of 5): ' + ', '.join(f'{n} {v:.3f}' for n, v in ms.items()) + f'; core per layer {core:.2f}, '
@@ -298,12 +310,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('coder'); ap.add_argument('stages', nargs='+')
     ap.add_argument('--small', action='store_true'); ap.add_argument('--json', default=None)
+    ap.add_argument('--kv', choices=('q8', 'f16'), default='q8', help='test-only GPU target cache format (default: q8)')
     a = ap.parse_args()
+    NUMBERS['kv'] = a.kv
     if 'cpu' in a.stages: stage_cpu(a.coder)
     if 'g1' in a.stages:
         import torch
         dev = torch.device('cuda:0'); torch.cuda.set_device(dev)
-        stage_g1(torch, dev, a.coder, a.small)
+        stage_g1(torch, dev, a.coder, a.small, q8=a.kv == 'q8')
     if a.json: json.dump(dict(fails=FAILS, numbers=NUMBERS), open(a.json, 'w'), indent=1, default=str)
     print('RESULT ' + ('PASS' if not FAILS else f'FAIL ({len(FAILS)})'))
     sys.exit(0 if not FAILS else 1)

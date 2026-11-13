@@ -43,6 +43,7 @@ SUITES = [
     ('own_dequant', ['tests/io/test_own_dequant.py'], set()),
     ('own_formats', ['tests/io/test_own_formats.py'], set()),
     ('ref_kv', ['tests/io/test_ref_kv.py'], set()),
+    ('coder_kv_formats', ['tests/prefill/test_coder_kv_formats_cpu.py'], {'torch'}),
     ('ref_q35', ['tests/test_ref_q35.py', '--scratch', '{scratch}'], set()),
     ('q35_tape', ['tests/engine/test_q35_tape_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q35_tp', ['tests/engine/test_q35_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),

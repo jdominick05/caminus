@@ -2,7 +2,11 @@
 idx_pool / qsa_score / qsa_select / attend(sel=), kernels/prefill_attn.hip pf_idx_pool / pf_qsa_score / pf_qsa_select /
 pf_attn_part_sel / pf_attn_comb_sel).
 
-  python -I tests/prefill/test_prefill_qsa.py CODER STAGE... [--small] [--tmax N] [--json OUT]
+  tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_qsa.py CODER STAGE... [--kv q8|f16] [--small] [--tmax N] [--json OUT]
+
+--kv selects the TEST-ONLY GPU target cache format (default q8). F16 omits target Q/K/V/output Hadamards on both chains;
+the indexer raw/pool rows remain Q8. Dense/SEL boundary, bitwise and canary gates are unchanged. The CPU stage retains
+its existing Q8 launcher cases.
 
 Stages:
   cpu    CPU only, nothing launched (launch recorders stand in for the kernels): the new launchers' refusals (pools past
@@ -202,31 +206,34 @@ class Guarded:
 
 class K3Qsa:
     """the QSA tape's attention-layer core on one card's shapes as a K3 tape (k3_gguf_gsq_qsa, T = 1), one token per pass"""
-    def __init__(self, torch, dev, P, rows):
+    def __init__(self, torch, dev, P, rows, q8=True):
         from caminus.engine import k3
-        self.torch, self.k3, self.P, self.rows = torch, k3, P, rows
+        self.torch, self.k3, self.P, self.rows, self.q8 = torch, k3, P, rows, q8
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=dev)
         self.qf, self.kr, self.vr, self.kraw, self.iq = z(NH * 2 * HD), z(HD), z(HD), z(QD), z(QH * QD)
         self.qo, self.ko, self.att, self.iqo = z(NH * HD), z(HD), z(NH * HD), z(QH * QD)
         self.pos = z(1, dt=torch.int32); self.prow = (rows + 3) // 4
-        self.cache = z(rows * 2 * (HD // 32) * 34, dt=torch.uint8)
+        self.cache_row_elems = 2 * (HD // 32) * 34 if q8 else 2 * HD
+        self.cache = z(rows * self.cache_row_elems, dt=torch.uint8 if q8 else torch.float16)
         self.raw, self.pool = z(rows * ROWB, dt=torch.uint8), z(self.prow * ROWB, dt=torch.uint8)
         self.score, self.sel = z(1, self.prow), z(SELW, dt=torch.int32)
         t = lambda a: torch.tensor(a, device=dev)
         self.qn, self.kn, self.iqn, self.ikn = t(P['qn']), t(P['kn']), t(P['iqn']), t(P['ikn'])
         e = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1)
         kd = e.qk_nr(self.kr, HD, 1, HD, self.kn, self.pos, self.ko, P['nrot'], P['theta'], EPS)
-        kd = e.hadamard(self.ko, HD, dep=kd); vd = e.hadamard(self.vr, 64)
-        ap = e.also(e.kv_append(self.ko, self.vr, self.cache, self.pos, q8=True, dep=kd), vd)
+        if q8:
+            kd = e.hadamard(self.ko, HD, dep=kd); vd = e.hadamard(self.vr, 64)
+        ap = e.kv_append(self.ko, self.vr, self.cache, self.pos, q8=q8, dep=kd)
+        if q8: ap = e.also(ap, vd)
         ia = e.idx_append(self.kraw, self.raw.view(rows, ROWB), self.pool.view(self.prow, ROWB), self.pos, self.ikn, P['theta'], EPS, n_rot=P['nrot'])
         iqd = e.qk_nr(self.iq, QD, QH, QD, self.iqn, self.pos, self.iqo, P['nrot'], P['theta'], EPS)
         qd = e.qk_nr(self.qf, 2 * HD, NH, HD, self.qn, self.pos, self.qo, P['nrot'], P['theta'], EPS)
-        qd = e.hadamard(self.qo, HD, dep=qd)
+        if q8: qd = e.hadamard(self.qo, HD, dep=qd)
         sc = e.also(e.qsa_score(self.iqo, self.pool.view(self.prow, ROWB), self.pos, self.score, dep=iqd), ia)
         sl = e.also(e.qsa_select(self.score, self.pos, self.sel, self.prow, dep=sc), qd)
-        a_ = e.also(e.attn_sel(self.qo, self.cache, self.pos, self.sel, self.att, NH, 1, HD, 1.0 / np.sqrt(HD), q8=True, dep=sl,
+        a_ = e.also(e.attn_sel(self.qo, self.cache, self.pos, self.sel, self.att, NH, 1, HD, 1.0 / np.sqrt(HD), q8=q8, dep=sl,
                                max_cells=min(rows, QSA_EXACT)), ap)
-        e.hadamard(self.att, 64, rows_per_task=4, dep=a_)
+        if q8: e.hadamard(self.att, 64, rows_per_task=4, dep=a_)
         self.e = e.build()
         self.module = e.module
 
@@ -246,16 +253,20 @@ class K3Qsa:
 
 class PfQsa:
     """the same chain on the prefill's kernels, chunk by chunk, every buffer the new kernels write guarded"""
-    def __init__(self, torch, dev, P, rows, srows=None, rpb=None, score_kernel=None):
+    def __init__(self, torch, dev, P, rows, srows=None, rpb=None, score_kernel=None, q8=True):
         from caminus.prefill import attn as pa
-        self.torch, self.pa, self.P, self.dev, self.rows = torch, pa, P, dev, rows
+        self.torch, self.pa, self.P, self.dev, self.rows, self.q8 = torch, pa, P, dev, rows, q8
         self.A = pa.Attn(dev); self.prow = (rows + 3) // 4
         self.srows = srows or pa.score_rows(2048, self.prow); self.rpb = rpb or pa.ROWS_PER_BLOCK
         t = lambda a: torch.tensor(a, device=dev)
         self.qn, self.kn, self.iqn, self.ikn = t(P['qn']), t(P['kn']), t(P['iqn']), t(P['ikn'])
-        self.cache = torch.zeros(rows * 2 * (HD // 32) * 34, dtype=torch.uint8, device=dev)
         self.raw = torch.zeros(rows * ROWB, dtype=torch.uint8, device=dev)
         G = lambda n, nm: Guarded(torch, dev, n, nm)
+        self.cache_row_elems = 2 * (HD // 32) * 34 if q8 else 2 * HD
+        self.cache_row_bytes = self.cache_row_elems * (1 if q8 else 2)
+        self.gcache = G(rows * self.cache_row_bytes, 'target KV')
+        self.cache = self.gcache.body[:rows * self.cache_row_bytes].view(torch.uint8 if q8 else torch.float16)
+        self.cache.zero_()
         self.gpool, self.gscore, self.gsel = G(self.prow * ROWB, 'IDXPOOL'), G(4 * self.srows * self.prow, 'score'), G(4 * rows * SELW, 'SEL')
         self.grec = G(4 * 128 * NH * pa.max_splits() * pa.ATTN_RS, 'records'); self.gout = G(4 * rows * NH * HD, 'attention out')
         self.gerr = G(4, 'err')
@@ -289,22 +300,26 @@ class PfQsa:
         torch, A, P, pa = self.torch, self.A, self.P, self.pa
         sl = slice(p, p + n)
         ko = torch.zeros(n, HD, device=self.dev); qo = torch.zeros(n, NH * HD, device=self.dev); vv = v[sl].clone()
-        A.qk_nr(k[sl].contiguous(), HD, 1, HD, self.kn, P['nrot'], P['theta'], EPS, p, ko, n); A.hadamard(ko, HD, n)
-        A.hadamard(vv, 64, n * HD // 64)
-        A.kv_append(ko, HD, vv, HD, HD, self.cache, p, n, self.err)
+        A.qk_nr(k[sl].contiguous(), HD, 1, HD, self.kn, P['nrot'], P['theta'], EPS, p, ko, n)
+        if self.q8:
+            A.hadamard(ko, HD, n); A.hadamard(vv, 64, n * HD // 64)
+        self._guarded('kv_append', lambda: A.kv_append(ko, HD, vv, HD, HD, self.cache, p, n, self.err, q8=self.q8),
+                      [(self.gcache, [(p * self.cache_row_bytes, (p + n) * self.cache_row_bytes)]), (self.gerr, [])], [ko, vv])
         ik = kraw[sl].contiguous()
-        A.kv_append(ik, QD, ik.view(-1)[64:], QD, 64, self.raw, p, n, self.err)     # IDXRAW as ChunkStack writes it
+        A.kv_append(ik, QD, ik.view(-1)[64:], QD, 64, self.raw, p, n, self.err, q8=True)     # IDXRAW stays Q8
         j0, j1 = p // 4, (p + n) // 4
         if j1 > j0:
             self._guarded('idx_pool', lambda: A.idx_pool(self.raw, self.pool, j0, j1, self.ikn, P['theta'], EPS, self.err),
                           [(self.gpool, [(j0 * ROWB, j1 * ROWB)]), (self.gerr, [])], [self.raw])
         qfs = qf[sl].contiguous()
-        A.qk_nr(qfs, 2 * HD, NH, HD, self.qn, P['nrot'], P['theta'], EPS, p, qo, n); A.hadamard(qo, HD, n * NH)
+        A.qk_nr(qfs, 2 * HD, NH, HD, self.qn, P['nrot'], P['theta'], EPS, p, qo, n)
+        if self.q8: A.hadamard(qo, HD, n * NH)
         b = max(p, min(p + n, QSA_EXACT))
         att = self.att.view(self.rows, NH * HD)
         if b > p:   # dense rows
             o = att[p:b]
-            self._guarded('attend dense', lambda: A.attend(qo[:b - p], self.cache, p, b - p, 1, 1.0 / np.sqrt(HD), o, self.rec, self.err, rows_per_block=self.rpb),
+            self._guarded('attend dense', lambda: A.attend(qo[:b - p], self.cache, p, b - p, 1, 1.0 / np.sqrt(HD), o, self.rec, self.err,
+                                                         rows_per_block=self.rpb, q8=self.q8),
                           [(self.gout, [(4 * p * NH * HD, 4 * b * NH * HD)]), (self.grec, [(0, self.grec.nb)]), (self.gerr, [])], [qo, self.cache])
         if p + n > b:   # QSA rows
             m = p + n - b
@@ -327,10 +342,10 @@ class PfQsa:
                               [(self.gsel, sallow)], [self.score])
             o = att[b:p + n]
             self._guarded('attend sel', lambda: A.attend(qo[b - p:], self.cache, b, m, 1, 1.0 / np.sqrt(HD), o, self.rec, self.err, rows_per_block=self.rpb,
-                                                         sel=sel[b:p + n].reshape(-1)),
+                                                         sel=sel[b:p + n].reshape(-1), q8=self.q8),
                           [(self.gout, [(4 * b * NH * HD, 4 * (p + n) * NH * HD)]), (self.grec, [(0, self.grec.nb)]), (self.gerr, [])],
                           [qo, self.cache, sel[b:p + n]])
-        A.hadamard(att[p:p + n].reshape(-1), 64, n * NH * HD // 64, 4)
+        if self.q8: A.hadamard(att[p:p + n].reshape(-1), 64, n * NH * HD // 64, 4)
 
     def run(self, qf, k, v, kraw, iq, bounds):
         for a, b in bounds: self.chunk(qf, k, v, kraw, iq, a, b - a)
@@ -350,17 +365,19 @@ def inputs(torch, dev, n, seed=7):
     return qf, k, v, kraw, iq
 
 
-def stage_g1(torch, dev, coder, small, tmax):
+def stage_g1(torch, dev, coder, small, tmax, q8=True):
     from caminus.prefill import attn as pa
     P = model_params(coder)
     name = torch.cuda.get_device_name(dev)
-    print(f'g1: device {name}; RoPE n_rot {P["nrot"]}, theta_scale {P["theta"]!r}; compaction_proactiveness {comp()}; MemAvailable {meminfo()}', flush=True)
+    print(f'g1: device {name}; target KV {"q8" if q8 else "f16"}, indexer Q8; RoPE n_rot {P["nrot"]}, theta_scale {P["theta"]!r}; '
+          f'compaction_proactiveness {comp()}; MemAvailable {meminfo()}', flush=True)
     N = 2120 if small else tmax
+    if N <= QSA_EXACT: raise ValueError(f'g1 requires tmax > {QSA_EXACT} to cross the dense/SEL boundary')
     rows = (N + 63) // 64 * 64 + 64
     qf, k, v, kraw, iq = inputs(torch, dev, N)
-    K = K3Qsa(torch, dev, P, rows)
+    K = K3Qsa(torch, dev, P, rows, q8=q8)
     t0 = time.time(); att_r, iqo_r, sc_r, sel_r = K.run(qf, k, v, kraw, iq, N); torch.cuda.synchronize(dev)
-    raw_r, pool_r = K.raw.clone(), K.pool.clone()
+    raw_r, pool_r, cache_r = K.raw.clone(), K.pool.clone(), K.cache.clone()
     print(f'  K3 reference ({K.module}): {N} positions one token per pass, {time.time() - t0:.1f} s', flush=True)
     nq = sum(1 for t in range(N) if (t + 1) // 4 > 512)
     def compare(F, label):
@@ -373,42 +390,44 @@ def stage_g1(torch, dev, coder, small, tmax):
         nd = int((bits(attF).reshape(N, -1) != bits(att_r).reshape(N, -1)).any(1).sum())
         okq = all(same(F.iqo_rows[b], iqo_r[b:b + F.iqo_rows[b].shape[0]]) for b in F.iqo_rows)
         oke = int(F.err.item()) == 0
-        return check(okr and okp and not bad_sc and not bad_sel and nd == 0 and okq and oke,
+        okc = same(F.cache[:N * F.cache_row_elems], cache_r[:N * K.cache_row_elems])
+        return check(okr and okp and not bad_sc and not bad_sel and nd == 0 and okq and oke and okc,
                      f'g1 {label}: positions 0 .. {N - 1} == K3 one token per pass ({K.module}), bitwise: IDXRAW {"==" if okr else "!="}, '
                      f'IDXPOOL ({np_} pools) {"==" if okp else "!="}, indexer q {"==" if okq else "!="}, scores of {len(sc_r)} rows '
                      f'{"==" if not bad_sc else f"!= at {bad_sc[:4]}"}, SEL of {nq} QSA rows {"==" if not bad_sel else f"!= at {bad_sel[:4]}"}, '
-                     f'attention output {"==" if nd == 0 else f"!= at {nd} rows"}, err {int(F.err.item())}')
+                     f'attention output {"==" if nd == 0 else f"!= at {nd} rows"}, target KV {"==" if okc else "!="}, err {int(F.err.item())}')
     def chunks(step, start=0, first=None):
         b = [] ; a = start
         if first: b.append((0, first)); a = first
         while a < N: b.append((a, min(N, a + step))); a = min(N, a + step)
         return b
-    t0 = time.time(); F0 = PfQsa(torch, dev, P, rows).run(qf, k, v, kraw, iq, chunks(2048)); t1 = time.time()
+    t0 = time.time(); F0 = PfQsa(torch, dev, P, rows, q8=q8).run(qf, k, v, kraw, iq, chunks(2048)); t1 = time.time()
     compare(F0, f'chunks of 2048 ({t1 - t0:.1f} s with the per-launch canaries)')
     check(not F0.canary_fail, f'canaries (chunks of 2048): every new kernel launch left its guards and every byte outside its range unchanged, '
           f'inputs unchanged' + (f'; {F0.canary_fail[:3]}' if F0.canary_fail else ''))
     base = dict(raw=F0.raw[:N * ROWB].clone(), pool=F0.pool[:(N // 4) * ROWB].clone(), sel=F0.sel.view(rows, SELW)[:N].clone(),
-                att=F0.att.view(rows, NH * HD)[:N].clone())
+                att=F0.att.view(rows, NH * HD)[:N].clone(), cache=F0.cache[:N * F0.cache_row_elems].clone())
     variants = ([('chunks 2051 + rest', chunks(2048, first=QSA_EXACT), {})] if small else
                 [('chunks 2051 + 2048 ...', chunks(2048, first=QSA_EXACT), {}), ('chunks 1000 + 3000 ...', chunks(3000, first=1000), {}),
                  ('chunks of 777', chunks(777), {}), ('score sub-blocks of 64 rows', chunks(2048), dict(srows=64)),
                  ('the score kernel v0 (op_qsa_score\'s butterflies)', chunks(2048), dict(score_kernel='v0')),
                  ('record blocks of 17 rows', chunks(2048), dict(rpb=17))])
     for label, bnd, kw in variants:
-        F = PfQsa(torch, dev, P, rows, **kw).run(qf, k, v, kraw, iq, bnd)
+        F = PfQsa(torch, dev, P, rows, q8=q8, **kw).run(qf, k, v, kraw, iq, bnd)
         selF = F.sel.view(rows, SELW)[:N]
         hdr = selF[:, 0].cpu().numpy()
         ok_sel = all(np.array_equal(selF[t, :4 + hdr[t]].cpu().numpy(), base['sel'][t, :4 + hdr[t]].cpu().numpy()) for t in range(QSA_EXACT, N))
-        ok = same(F.raw[:N * ROWB], base['raw']) and same(F.pool[:(N // 4) * ROWB], base['pool']) and ok_sel and same(F.att.view(rows, NH * HD)[:N], base['att'])
-        check(ok and not F.canary_fail and int(F.err.item()) == 0, f'g2b: {label} == chunks of 2048, bitwise (IDXRAW, IDXPOOL, SEL, attention); canaries '
+        ok = (same(F.raw[:N * ROWB], base['raw']) and same(F.pool[:(N // 4) * ROWB], base['pool']) and ok_sel
+              and same(F.att.view(rows, NH * HD)[:N], base['att']) and same(F.cache[:N * F.cache_row_elems], base['cache']))
+        check(ok and not F.canary_fail and int(F.err.item()) == 0, f'g2b: {label} == chunks of 2048, bitwise (IDXRAW, IDXPOOL, SEL, attention, target KV); canaries '
               f'{"clean" if not F.canary_fail else F.canary_fail[:2]}')
         for kk, vv in F.longest.items(): F0.longest[kk] = max(F0.longest.get(kk, 0.0), vv)
     lg = {kk: round(vv, 3) for kk, vv in F0.longest.items()}
     check(all(v < 50.0 for v in F0.longest.values()), f'launch time: the longest launch per new kernel (ms, events): {lg} < 50 ms')
-    NUMBERS['g1'] = dict(N=N, longest_ms=lg, device=name)
+    NUMBERS['g1'] = dict(N=N, longest_ms=lg, device=name, kv='q8' if q8 else 'f16')
 
 
-def stage_speed(torch, dev, coder):
+def stage_speed(torch, dev, coder, q8=True):
     """the new kernels at a 32K-depth chunk on synthetic pools"""
     from caminus.prefill import attn as pa
     P = model_params(coder); A = pa.Attn(dev)
@@ -420,8 +439,11 @@ def stage_speed(torch, dev, coder):
     ikn = torch.tensor(P['ikn'], device=dev); A.idx_pool(raw.view(-1), pool, 0, prow, ikn, P['theta'], EPS, err)
     q = torch.tensor(rng.standard_normal((T, QH, QD)).astype(np.float32), device=dev)
     score = torch.zeros(srows * prow, device=dev); sel = torch.zeros(T * SELW, dtype=torch.int32, device=dev)
-    pb = 2 * (HD // 32) * 34; cache = torch.tensor(rng.integers(0, 256, ctx * pb, dtype=np.uint8), device=dev)
-    cache.view(ctx, 16, 34)[:, :, :2].copy_(torch.tensor(np.full((ctx, 16), 0.02, np.float16).view(np.uint8).reshape(ctx, 16, 2), device=dev))
+    if q8:
+        pb = 2 * (HD // 32) * 34; cache = torch.tensor(rng.integers(0, 256, ctx * pb, dtype=np.uint8), device=dev)
+        cache.view(ctx, 16, 34)[:, :, :2].copy_(torch.tensor(np.full((ctx, 16), 0.02, np.float16).view(np.uint8).reshape(ctx, 16, 2), device=dev))
+    else:
+        cache = torch.tensor(rng.standard_normal(ctx * 2 * HD).astype(np.float16), device=dev)
     qa = torch.tensor(rng.standard_normal((T, NH * HD)).astype(np.float32), device=dev); out = torch.zeros(T, NH * HD, device=dev)
     rec = torch.zeros(pa.ROWS_PER_BLOCK * NH * pa.max_splits() * pa.ATTN_RS, device=dev)
     def timed(fn, reps=5):
@@ -447,10 +469,11 @@ def stage_speed(torch, dev, coder):
     ms[f'qsa_select {srows} rows'] = timed(lambda: A.qsa_select(score, prow, p0, srows, prow, sel))
     ms[f'score + select, {T} rows ({nsb} sub-blocks)'] = timed(scores_and_select)
     scores_and_select(); torch.cuda.synchronize(dev)
-    ms[f'attend(sel=) {T} rows'] = timed(lambda: A.attend(qa, cache, p0, T, 1, 0.0625, out, rec, err, sel=sel))
-    ms['attend(sel=) one 64-row block'] = timed(lambda: A.attend(qa[:64], cache, p0, 64, 1, 0.0625, out[:64], rec, err, sel=sel[:64 * SELW]))
+    ms[f'attend(sel=) {T} rows'] = timed(lambda: A.attend(qa, cache, p0, T, 1, 0.0625, out, rec, err, sel=sel, q8=q8))
+    ms['attend(sel=) one 64-row block'] = timed(lambda: A.attend(qa[:64], cache, p0, 64, 1, 0.0625, out[:64], rec, err, sel=sel[:64 * SELW], q8=q8))
     core = ms['idx_pool 512 pools'] + ms[f'score + select, {T} rows ({nsb} sub-blocks)'] + ms[f'attend(sel=) {T} rows']
-    print(f'  speed ({torch.cuda.get_device_name(dev)}, positions {p0} .. {p0 + T - 1}, {prow} pool rows, compaction {comp()}): ' +
+    print(f'  speed ({torch.cuda.get_device_name(dev)}, target KV {"q8" if q8 else "f16"}, indexer Q8, positions {p0} .. {p0 + T - 1}, '
+          f'{prow} pool rows, compaction {comp()}): ' +
           ', '.join(f'{n} {v:.3f}' for n, v in ms.items()) + f'; the QSA-specific core per layer {core:.2f} ms, x 12 layers {12 * core:.1f} ms per chunk', flush=True)
     check(int(err.item()) == 0 and max(ms[f'qsa_score sub-block {srows} rows'], ms[f'qsa_select {srows} rows'], ms['attend(sel=) one 64-row block']) < 50.0,
           f'speed: err 0; the longest single launches (score {ms[f"qsa_score sub-block {srows} rows"]:.2f}, select {ms[f"qsa_select {srows} rows"]:.2f}, '
@@ -463,7 +486,9 @@ def main():
     ap.add_argument('coder'); ap.add_argument('stages', nargs='+')
     ap.add_argument('--small', action='store_true'); ap.add_argument('--tmax', type=int, default=6200)
     ap.add_argument('--allow-xtx', action='store_true'); ap.add_argument('--json', default=None)
+    ap.add_argument('--kv', choices=('q8', 'f16'), default='q8', help='test-only GPU target cache format (indexer remains Q8)')
     a = ap.parse_args()
+    NUMBERS['kv'] = a.kv
     if 'cpu' in a.stages: stage_cpu(a.coder)
     gpu = [s for s in a.stages if s != 'cpu']
     if gpu:
@@ -475,7 +500,8 @@ def main():
         else:
             torch.cuda.set_per_process_memory_fraction(0.9, dev)
             for s in gpu:
-                {'g1': lambda: stage_g1(torch, dev, a.coder, a.small, a.tmax), 'speed': lambda: stage_speed(torch, dev, a.coder)}[s]()
+                {'g1': lambda: stage_g1(torch, dev, a.coder, a.small, a.tmax, q8=a.kv == 'q8'),
+                 'speed': lambda: stage_speed(torch, dev, a.coder, q8=a.kv == 'q8')}[s]()
     if a.json: json.dump(dict(fails=FAILS, numbers=NUMBERS), open(a.json, 'w'), indent=1, default=str)
     print('RESULT ' + ('PASS' if not FAILS else f'FAIL ({len(FAILS)})'))
     sys.exit(0 if not FAILS else 1)
