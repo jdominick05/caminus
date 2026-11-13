@@ -183,9 +183,12 @@ check(Et.segs[0].op == k3.OP_OWN_EMB and Et.segs[0].out_f32 == 1 | 2 | 8,
 check(abs(Dense35Own.projection_mib(PT, 64) - mt.vram_mib) < 1e-9, 'the projection counts the widened BF16 and the record tails as the engine')
 srct = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35t_ops.h')).read()
 dt = srct.split('k3_extra_op(')[1]
+dft_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(DFB, dt, re.S))))
+dt = re.sub(DFB, '', dt, flags=re.S)   # (ThinkingCap's DFlash drafter module's ops: k3.Q35TDF_MODULES only)
 dev_t = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(SPB, lambda mm: mm.group(1), re.sub(TPB, '', dt, flags=re.S), flags=re.S)))
 check(dev_t == host_ops and set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, dt, re.S)))) == {'OP_XCHG'},
       f'kernels/k3_q35t_ops.h dispatches k3.Q35S_OPS too ({len(dev_t)} ops), and OP_XCHG under K3_TP')
+check(dft_ops == {'OP_DF_CONV', 'OP_DF_TOPK', 'OP_DF_SELECT', 'OP_KV_APPEND', 'OP_ATTN_DEC'}, 'under K3_Q35_DF in k3_q35t_ops.h: the DFlash drafter\'s own ops (ThinkingCap\'s drafter module)')
 check(int(re.search(r'OWN_IQ2_S = (\d+)', srct).group(1)) == k3.OWN_Q35T_FMT['IQ2_S'], 'the IQ2_S format number is k3\'s')
 e_tc = k3.Engine(module='k3_q35_tcap')
 check(refused(lambda: e_tc.own_matvec_1rt(torch.zeros(8 * 144 + 16, dtype=torch.uint8), 'Q4_K', 8, 256, B(256, torch.float16), B(8))) and
@@ -227,6 +230,19 @@ ok_c &= mv4.commit_max() == 4 and m.commit_max() == 1 and Ev.guard_T == 4
 mv4.reset(); ok_c &= mv4.commit_max() == 0
 check(ok_c, 'the commit is bounded by the last pass on the states (0 after a reset, 1 after a decode step, T after a verify '
             'pass: refused on the host past it); the served engine keeps 1; the verify tape\'s guard takes spec_T')
+# ThinkingCap's verify tape (k3_q35_tcap_ver: kernels/own_quant_tcap_mt.h's T-token tiles)
+mt4 = Dense35Own(PT, max_ctx=64, vram_check=False, spec_T=4)
+vt = Dense35Verify(mt4, 4, vram_check=False); Evt = vt.E; ivt = Evt.inventory()
+check(vt.module == 'k3_q35_tcap_ver' and set(ivt) == {('OWN_MV', f'{f}/a16_1rt_mt') for f in k3.OWN_Q35T_1RT} |
+      {('OWN_MV16', 'Q8_0'), ('F32_MV', 'F32'), ('OWN_SWIGLU16', '-'), ('OWN_EMB', 'IQ2_S'), ('OWN_ADD_RMS16', '-')} | {('ATTN', 'PART'), ('ATTN', 'COMB')},
+      f'ThinkingCap\'s verify tape on k3_q35_tcap_ver: every format\'s matvec in its T-token form ({sorted(ivt)})')
+check(not Evt.unsupported() and Evt.refuse is None and Evt.segs[0].op == k3.OP_OWN_EMB and Evt.segs[0].out_f32 == 1 | 2 | 8
+      and all(sg.team == 4 for sg in Evt.segs) and all(sg.pad1 >> 8 == 4 for sg in Evt.segs if sg.op == k3.OP_OWN_MV),
+      f'{len(Evt.segs)} segments; the embedding stages the grids (11); every matvec carries 4 tokens')
+check(refused(lambda: Dense35Verify(mt4, 4, module='k3_q35_swift_ver', vram_check=False)) and
+      refused(lambda: Dense35Verify(mv4, 4, module='k3_q35_tcap_ver', vram_check=False)) and
+      refused(lambda: k3.Engine(module='k3_q35_tcap', T=1).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
+      'refused: a verify module of the other line, and T-token matvecs on ThinkingCap\'s decode module')
 check(('OWN_MV', 'Q4_K/a16_1rt_gu') not in k3.MODULE_CAPS['k3_q35_swift_ver'] and ('OWN_MV', 'Q4_K/a16_1rt_gu') in k3.MODULE_CAPS['k3_q35_swift'],
       'the verify module\'s capabilities leave out the fused gate | up (no verify tape runs it)')
 e_v = k3.Engine(module='k3_q35_swift_ver', T=4)

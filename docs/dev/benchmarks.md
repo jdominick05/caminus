@@ -233,6 +233,10 @@ plain decode in that setup is 35.4-36.0 tok/s.
 - `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --draft dflash --max-ctx
   12288 --block-imports gguf,tokenizers` passes: greedy 68.6 tok/s; a 6,760-token prompt at 678 tok/s, then decode
   at 44 tok/s.
+- Prompt reading with the drafter: every prefill chunk's features go through the drafter's batched inject
+  (`Dflash35.inject_rows`: fc and k / v as the prefill's own WMMA GEMMs, passes of 512 rows). The same smoke's 6,760-token
+  prompt: 1,068 tok/s with `--draft dflash` (TTFT 6.35 s) against 1,081 with `--draft off` (6.28 s); the first build's
+  4-row inject tape read it at 678.
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_dflash.py GGUF DFLASH_GGUF`), XT: against
   the float64 reference (`caminus/ref_dflash.py`, itself equal to llama.cpp's drafts at 10 of 10 positions), the injected
   K / V within 5e-4, the drafts' logits within 1.7e-3 and the drafts equal, at 20 positions and after 4,200 (past the
@@ -267,6 +271,25 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The gr
   - XTX: greedy decode 49.5 tok/s; a 6,760-token prompt at 707 tok/s, then decode at 30 tok/s; a 27,712-token prompt at
     326 tok/s (the needle found), then decode at 16 tok/s;
   - XT: the server picks 53,248 tokens of context by itself; greedy decode 40.9 tok/s; a 6,760-token prompt at 532 tok/s.
+
+#### Speculative decoding with DFlash 2 (served)
+
+The same drafter on ThinkingCap's module (`kernels/k3_q35_tcap_dflash.hip`: its IQ2_S embedding, its Q8_0 head) and its
+verify module (`kernels/k3_q35_tcap_ver.hip`, the T-token tiles of `kernels/own_quant_tcap_mt.h`). `tools/guard.sh LOG
+3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --max-ctx 12288`, measured
+2026-11-12 with nothing else on the cards; the prompts are the 48-token inputs llama.cpp's own drafter was measured on;
+llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s.
+
+| prompt | RX 7900 XT: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
+|---|---|---|---|
+| code | 39.6 | 76.1 (1.92x) | 70.9 (79 % accepted) |
+| prose | 39.6 | 77.3 (1.95x) | 74.8 (84 %) |
+| shell | 39.5 | 60.7 (1.54x) | 48.1 (63 %) |
+
+- The replies are the plain server's token for token. llama.cpp's drafted output differed from its plain output on prose
+  and shell.
+- The verify pass of 4 tokens: 43.0 ms against a 25.3 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`), 1.63x;
+  Swift's is 1.45x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
 
 ### Swift 1.5 and ThinkingCap on two cards (tensor parallel, own code end to end)
 

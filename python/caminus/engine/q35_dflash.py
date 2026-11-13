@@ -22,8 +22,11 @@ from ..device import capacity
 from . import k3
 
 MODULE = 'k3_q35_dflash'
+MODULE_TCAP = 'k3_q35_tcap_dflash'   # (ThinkingCap's: its IQ2_S embedding and Q8_0 head, kernels/k3_q35_tcap_dflash.hip)
 T = 4                 # rows per tape: the drafter's block (1 anchor + 3 drafts) and the inject chunk (OWN_MT)
 RING = 4096           # f16 ring rows per drafter layer (>= window 2048 + T)
+ROWS = 512            # the batched prefill inject's rows per pass (inject_rows: a chunk in passes of this many; ~56 MiB of
+                      # buffers, against ~224 MiB for a whole 2,048-position chunk on a card the drafter already crowds)
 CHUNK = 4096          # = DF_CHUNK in kernels/k3_df_own_ops.h (OP_DF_TOPK's scan)
 MERGE_MAX = 640       # OP_DF_TOPK merge: pairs per row held in LDS
 
@@ -84,8 +87,9 @@ def attn_df(E, q, cache, pos, out, out16, heads, kv_heads, dim, scale, window, d
 
 class Dflash35:
     @staticmethod
-    def need_mib(path, vocab):
-        """MiB the drafter adds on the target's card: its weights (the file's tensors), the rings and the tapes' buffers"""
+    def need_mib(path, vocab, chunk=0):
+        """MiB the drafter adds on the target's card: its weights (the file's tensors), the rings and the tapes' buffers;
+        chunk > 0: the batched prefill inject's buffers for chunks of that many positions (inject_rows)"""
         F = ggufio.GGUFFile(path)
         try:
             m = F.meta; hp = lambda k: m[f'dflash.{k}']
@@ -100,13 +104,19 @@ class Dflash35:
             nch = (vocab // 2 + CHUNK - 1) // CHUNK
             buf = (T * (6 * D + 3 * QH + 3 * M + 2 * ffn + CP + rank + 3 * nl * M) * 4 + T * (2 * D + QH + ffn + nt * D) * 2
                    + T * vocab * 4 + 32 * 4 + (2 * (T - 1) * nch * kc * 2 + 2 * (T - 1) * kc * 2 + (T - 1) * (1 + 3 * kc)) * 4)
-            return (wb + ring + buf) / 2 ** 20 + 8
+            # inject_rows: the chunk's features as fp16 [chunk, nt D], fc's output and its norm (fp32 + fp16), k / v / k-roped
+            # (fp32) shared by the layers in turn
+            ib = min(int(chunk), ROWS) * (nt * D * 2 + D * 4 * 2 + D * 2 + 3 * M * 4) if chunk else 0
+            return (wb + ring + buf + ib) / 2 ** 20 + 8
         finally: F.close()
 
-    def __init__(self, path, eng, vram_check=True, per_wgp=None):
-        """eng: the target Dense35Own (Swift 1.5 on the Swift module: its Q6_K head and Q4_K embedding are read in place)"""
-        if eng.tcap or eng.head['fmt'] != 'Q6_K' or eng.emb.type != 'Q4_K':
-            raise ValueError(f'Dflash35: the Swift line (Q6_K head, Q4_K embedding) only for now (the engine runs {eng.module})')
+    def __init__(self, path, eng, vram_check=True, per_wgp=None, chunk=0):
+        """eng: the target Dense35Own, whose head and embedding the drafter reads in place: Swift 1.5 (Q6_K head, Q4_K
+        embedding: kernels/k3_q35_dflash.hip) or ThinkingCap (Q8_0 head, IQ2_S embedding: kernels/k3_q35_tcap_dflash.hip)"""
+        want = ('Q8_0', 'IQ2_S') if eng.tcap else ('Q6_K', 'Q4_K')
+        if (eng.head['fmt'], eng.emb.type) != want:
+            raise ValueError(f'Dflash35: head {eng.head["fmt"]}, embedding {eng.emb.type} (the {"ThinkingCap" if eng.tcap else "Swift"} line runs {want})')
+        self.module = MODULE_TCAP if eng.tcap else MODULE
         self.F = F = ggufio.GGUFFile(path); self.eng = eng
         m = F.meta; hp = lambda k: m[f'dflash.{k}']
         self.nl, self.D, self.ffn = int(hp('block_count')), int(hp('embedding_length')), int(hp('feed_forward_length'))
@@ -125,12 +135,14 @@ class Dflash35:
         self.max_pos = int(eng.max_ctx) + T   # (a draft block reaches T - 1 past the target's last position)
         self.row_bytes = 2 * self.nkv * self.hd * 2   # (one layer's ring row: K | V f16)
         self.dev = eng.dev
-        self.mib = self.need_mib(path, eng.vocab)
+        self.chunk = int(chunk)   # (the batched prefill inject's chunks: inject_rows, in passes of min(chunk, ROWS) rows; 0: none)
+        self.mib = self.need_mib(path, eng.vocab, self.chunk)
         if vram_check: capacity.check([eng.dev], [self.mib], f'Dflash35 drafter ({self.mib:.0f} MiB)')
         self.per_wgp = int(per_wgp) if per_wgp else eng.per_wgp
         self.theta_scale = float(np.float32(self.base) ** np.float32(-2.0 / self.hd))
         with torch.cuda.device(self.dev):
             self._load(); self._build()
+            if self.chunk: self._rows_buffers()
 
     # -- weights -------------------------------------------------------------------------------------------------------
     def _w(self, name, rows, cols):
@@ -168,7 +180,7 @@ class Dflash35:
 
     # -- tapes ---------------------------------------------------------------------------------------------------------
     def _engine(self):
-        E = k3.Engine(module=MODULE, grid=k3.resident_grid(MODULE, self.per_wgp), T=T, limit_us=self.eng.limit_us)
+        E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp), T=T, limit_us=self.eng.limit_us)
         return E
 
     def _mv(self, E, W, x16, out, dep):
@@ -223,8 +235,11 @@ class Dflash35:
             f_ = self._mv(E, d['fd'], s['a16'], s['blk'], sw)
             prev = df_conv(E, s['blk'], s['dyn'], d['cf_base'], s['x'], D, 1, self.ks, self.gs, res=s['x'], dep=f_)
         nf = E.own_add_rms16(s['x'], self.out_norm, s['h'], s['h16'], self.eps, dep=prev, tokens=T)
-        hd_ = E.own_matvec_1rt(eng.head['w'], 'Q6_K', V, D, s['h16'], s['logits'], rows_per_task=eng.rpt, dep=nf, tokens=T,
-                               x_stride=D, out_stride=V)
+        if eng.head['fmt'] == 'Q6_K':   # (Swift: the planes' one-round-trip tile; ThinkingCap's Q8_0: the rows tile)
+            hd_ = E.own_matvec_1rt(eng.head['w'], 'Q6_K', V, D, s['h16'], s['logits'], rows_per_task=eng.rpt, dep=nf, tokens=T,
+                                   x_stride=D, out_stride=V)
+        else:
+            hd_ = E.own_matvec16(eng.head['w'], 'Q8_0', V, D, s['h16'], s['logits'], rows_per_task=eng.rpt16, dep=nf, tokens=T)
         ga = self._mv(E, self.sel_hidden, s['h16'], s['gate'], nf)
         half = V // 2; kc = self.topk; k = T - 1
         nch = (half + CHUNK - 1) // CHUNK
@@ -245,6 +260,45 @@ class Dflash35:
         self.token += 1   # (the launch epoch: the prompt cache's live state reads it through the adapter)
         self.buf['stage'].copy_(self.hstage, non_blocking=True)
         E.run(check=True)
+
+    def _rows_buffers(self):
+        n, nt, D, M = min(self.chunk, ROWS), len(self.layers_tgt), self.D, self.nkv * self.hd
+        Z = lambda k, dt=torch.float32: torch.zeros(k, dtype=dt, device='cuda')
+        self.rb = dict(x16=Z(n * nt * D, torch.float16), y=Z(n * D), h=Z(n * D), h16=Z(n * D, torch.float16),
+                       k=Z(n * M), v=Z(n * M), ko=Z(n * M))
+
+    def inject_rows(self, pf, pos0, n):
+        """the batched inject of a prefill chunk: pf (Q35OwnPrefill(feature_layers=) of the target) just ran positions
+        pos0 .. pos0 + n - 1 and holds their features (pf.features [n_layers, chunk, D]); the drafter's inject over all n
+        rows at once on the prefill's own launchers: fc and each layer's k / v as WMMA GEMMs (Q8_0), the norms, the k norm
+        with RoPE, the f16 ring append (split where the ring wraps). Prefill numerics (WMMA sums, not the K3 inject tape's
+        bits): the served gates are acceptance and token identity"""
+        n, pos0 = int(n), int(pos0)
+        if not 1 <= n <= self.chunk: raise ValueError(f'Dflash35.inject_rows: {n} rows (1 .. the projected chunk {self.chunk})')
+        k3.check_span(pos0, n, self.max_pos, what='Dflash35.inject_rows')
+        step = min(self.chunk, ROWS)
+        for t0 in range(0, n, step): self._rows(pf, pos0 + t0, t0, min(step, n - t0))
+        self.token += 1
+
+    def _rows(self, pf, pos0, f0, n):
+        """one pass of inject_rows: n <= ROWS rows, positions pos0 .., the prefill's feature rows f0 .."""
+        if [int(l) for l in pf.feature_layers] != [int(l) for l in self.layers_tgt]:
+            raise ValueError(f'Dflash35.inject_rows: the prefill exports {pf.feature_layers}, the drafter reads {self.layers_tgt}')
+        O, A, b = pf.O, pf.A, self.rb
+        nt, D, M, hd = len(self.layers_tgt), self.D, self.nkv * self.hd, self.hd
+        with torch.cuda.device(self.dev):
+            x16 = b['x16'][:n * nt * D]
+            x16.view(n, nt, D).copy_(pf.features[:, f0:f0 + n].permute(1, 0, 2))   # (row t = the n_layers features of position t)
+            O.mm(self.fc, x16, nt * D, b['y'], D, n=n)
+            O.add_rms16(b['y'], self.enc_norm, self.eps, b['h16'], n, D, h=b['h'])
+            for d in self.L:
+                O.mm(d['k'], b['h16'], D, b['k'], M, n=n); O.mm(d['v'], b['h16'], D, b['v'], M, n=n)
+                A.qk_nr(b['k'], hd, self.nkv, hd, d['kn'], hd, self.theta_scale, self.eps, pos0, b['ko'], n)
+                t = 0
+                while t < n:                                    # (ring rows (pos0 + t) & (RING - 1) .. up to the wrap)
+                    r0 = (pos0 + t) & (RING - 1); c = min(n - t, RING - r0)
+                    O.kv_append16(b['ko'][t * M:], M, b['v'][t * M:], M, d['ring'], M, r0, c, RING, pf.err)
+                    t += c
 
     def inject(self, pos0, feats):
         """feats [n_target_layers, n, D] fp32 on the card or in host memory (copied T rows a launch into feat16) (the target's export for positions pos0 .. pos0 + n - 1), in chunks

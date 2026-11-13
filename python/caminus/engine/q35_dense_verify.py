@@ -33,6 +33,7 @@ from ..device import capacity
 
 MAX_T = 4                        # own_quant_mt.h's OWN_MT
 MODULE = 'k3_q35_swift_ver'
+MODULE_TCAP = 'k3_q35_tcap_ver'   # (ThinkingCap's: its formats' T-token tiles, kernels/own_quant_tcap_mt.h)
 
 
 class Dense35Verify:
@@ -65,16 +66,19 @@ class Dense35Verify:
         sz = {torch.float32: 4, torch.float16: 2, torch.int32: 4}
         return sum(n * sz[dt] for n, dt in Dense35Verify._spec(eng, T, nfeat).values()) / 2 ** 20 + 2.0   # (+ the tape and its sync words)
 
-    def __init__(self, eng, T, module=MODULE, per_wgp=None, vram_check=True, feature_layers=()):
-        """eng: a Dense35Own on the Swift module with spec_T >= T (its weights, caches, states and bounds); T: tokens per
-        pass, 1 .. 4; module: k3_q35_swift_ver or its _trace build; per_wgp: workgroups per WGP of this tape's grid
+    def __init__(self, eng, T, module=None, per_wgp=None, vram_check=True, feature_layers=()):
+        """eng: a Dense35Own (Swift's or ThinkingCap's module) with spec_T >= T (its weights, caches, states and bounds); T:
+        tokens per pass, 1 .. 4; module: None (the engine's line: k3_q35_swift_ver, or k3_q35_tcap_ver on ThinkingCap's
+        module) or one of those modules' _trace builds; per_wgp: workgroups per WGP of this tape's grid
         (None: the decode engine's; the bits are the same at every grid); feature_layers: layers whose entering residual
         each pass copies to self.features [len, T, D] fp32 (a DFlash drafter's target layers: the residual after the
         previous layer's feed-forward is added, before the layer's norm; llama.cpp's layer input). The copy is the
         module's own add-rms op on a zeroed buffer (0 + x, exact), so no device code changes and the logits stay bitwise"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
-        if module not in k3.Q35V_MODULES or module in k3.Q35M_MODULES: raise ValueError(f'Dense35Verify: module {module!r} is not a verify module {k3.Q35V_MODULES} (the drafter module {k3.Q35M_MODULES} runs engine/q35_mtp.py)')
-        if eng.tcap or eng.module not in k3.Q35S_MODULES: raise ValueError(f'Dense35Verify: the Swift module only (the engine runs {eng.module})')
+        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
+        line = k3.Q35TV_MODULES if eng.tcap else tuple(m for m in k3.Q35SV_MODULES if m not in k3.Q35M_MODULES + k3.Q35DF_MODULES)
+        if module not in line:
+            raise ValueError(f'Dense35Verify: module {module!r} is not a verify module of the engine\'s line {line} (the engine runs {eng.module})')
         if eng.spec_T < T: raise ValueError(f'Dense35Verify: the engine keeps {eng.spec_T} tokens\' saved inputs (spec_T), the tape runs {T}')
         if eng.nl_build != eng.nl: raise ValueError('Dense35Verify: an engine built with debug_layers')
         fl = [int(l) for l in feature_layers]
@@ -111,7 +115,7 @@ class Dense35Verify:
         def mv(W, x16, out, dep, x32=None):
             """W's matvec on the T tokens' fp16 activations x16 [T, K] -> out [T, rows] (an F32 matrix: on x32)"""
             if W['fmt'] == 'F32': return named(E.f32_mv(W['w'], x32, out, rows_per_task=4, dep=dep), W['name'])
-            if W['fmt'] in k3.OWN_1RT_FMT:
+            if W['fmt'] in (k3.OWN_Q35T_1RT if eng.tcap else k3.OWN_1RT_FMT):
                 kw = dict(tokens=T, x_stride=W['K'], out_stride=W['rows']) if T > 1 else {}
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=eng.rpt, dep=dep, **kw),
                              W['name'])

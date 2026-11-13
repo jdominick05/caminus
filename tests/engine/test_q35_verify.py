@@ -1,4 +1,4 @@
-"""Dense35Verify (the dense qwen35 line, Swift 1.5: T-token verify passes on kernels/k3_q35_swift_ver.hip) against
+"""Dense35Verify (the dense qwen35 line: Swift 1.5 on kernels/k3_q35_swift_ver.hip, ThinkingCap on k3_q35_tcap_ver.hip: T-token verify passes) against
 Dense35Own's decode steps on the same tokens and positions, bit for bit, over a prefilled context of real text (this
 repository's docs) and from an empty one:
   for T = 1 .. 4, a walk of passes with rejections: each pass accepts a of its T rows (the schedule cycles T, 1, T - 1,
