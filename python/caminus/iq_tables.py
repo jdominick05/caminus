@@ -706,6 +706,44 @@ def c_header():
     return '\n'.join(out) + '\n'
 
 
+def c_header_iq2xs():
+    """kernels/iq2xs_grid.h: IQ2_XS's grid for the kernels (kernels/own_quant_iq2xs.h): entry e's 8 magnitudes as two
+    little-endian words, weights 0 .. 3 then 4 .. 7. Regenerate: python -I python/caminus/iq_tables.py iq2xs >
+    kernels/iq2xs_grid.h (tests/io/test_own_dequant.py compares)."""
+    notice = __doc__[__doc__.index('MIT License'):]
+    out = ['// The grid of GGUF\'s IQ2_XS block format for the kernels (kernels/own_quant_iq2xs.h): a format constant, ggml\'s',
+           '// data (llama.cpp, ggml/src/ggml-common.h: iq2xs_grid). An entry is 8 magnitudes, byte k = magnitude k. Generated',
+           '// from python/caminus/iq_tables.py (c_header_iq2xs); do not edit. Listed in THIRD_PARTY.md.', '//'] + \
+          ['// ' + l if l else '//' for l in notice.split('\n')]
+    out += ['#pragma once', '#include <stdint.h>']
+    g = GRID_IQ2_XS
+    assert g.min() >= 1 and g.max() <= 127
+    w = [int.from_bytes(bytes(e.tolist()), 'little') for e in g]
+    out.append(f'static const __device__ uint64_t IQ2XS_GRID[{len(w)}] = {{')
+    out += ['    ' + ', '.join(f'0x{v:016x}ull' for v in w[i:i + 4]) + ',' for i in range(0, len(w), 4)]
+    out.append('};')
+    return '\n'.join(out) + '\n'
+
+
+def c_header_iq1():
+    """kernels/iq1_grid.h: IQ1_S / IQ1_M's grid for the kernels (kernels/own_quant_iq1m.h): entry e's 8 values g in -1 /
+    0 / +1 stored as g + 1 (bytes 0 .. 2, byte k = value k), so fp16 1024 + byte - 1025 is g exactly. Read from global
+    memory (16 KB: too big for the local memory a decode module shares). Regenerate: python -I python/caminus/iq_tables.py
+    iq1 > kernels/iq1_grid.h (tests/io/test_own_dequant.py compares)."""
+    notice = __doc__[__doc__.index('MIT License'):]
+    out = ['// The grid of GGUF\'s IQ1_S / IQ1_M block formats for the kernels (kernels/own_quant_iq1m.h): a format constant,',
+           '// ggml\'s data (llama.cpp, ggml/src/ggml-common.h: iq1s_grid). An entry is 8 values in -1 / 0 / +1, stored as',
+           '// value + 1 (byte k = value k + 1). Generated from python/caminus/iq_tables.py (c_header_iq1); do not edit. Listed in',
+           '// THIRD_PARTY.md.', '//'] + ['// ' + l if l else '//' for l in notice.split('\n')]
+    out += ['#pragma once', '#include <stdint.h>']
+    g = (GRID_IQ1_S.astype(np.int16) + 1).astype(np.uint8)
+    w = [int.from_bytes(bytes(e.tolist()), 'little') for e in g]
+    out.append(f'static const __device__ uint64_t IQ1_GRID[{len(w)}] = {{')
+    out += ['    ' + ', '.join(f'0x{v:016x}ull' for v in w[i:i + 4]) + ',' for i in range(0, len(w), 4)]
+    out.append('};')
+    return '\n'.join(out) + '\n'
+
+
 def c_header_iq2s():
     """kernels/iq2s_grid.h: IQ2_S's grid packed for the kernels (kernels/own_quant_iq2s.h): an entry's 8 magnitudes take
     only 8, 25 and 43, so each is a 2-bit code (0, 1, 2; weight k at bits 2k), an entry 16 bits, two entries per word
@@ -728,4 +766,4 @@ def c_header_iq2s():
 
 if __name__ == '__main__':
     import sys
-    sys.stdout.write(c_header())
+    sys.stdout.write({'iq2xs': c_header_iq2xs, 'iq2s': c_header_iq2s, 'iq1': c_header_iq1}.get(sys.argv[1] if len(sys.argv) > 1 else '', c_header)())

@@ -30,6 +30,7 @@ files below name 842653396 in their headers.
 | `python/caminus/ref_dflash.py` | a float64 NumPy port of the same drafter forward and draft-dflash selector walk (by way of `dflash_torch.py`), for the dense qwen35 line: the reference the own drafter module is gated against; the MIT notice is in the file's header |
 | `python/caminus/iq_tables.py` | the codebooks of the IQ block formats as data (`kvalues_iq4nl`, `iq2xxs_grid`, `iq2xs_grid`, `iq2s_grid`, `iq3xxs_grid`, `iq3s_grid`, `iq1s_grid` of ggml-common.h, taken through gguf-py's `quants.py`): format constants read by Caminus's own decoders; the notice is in the file |
 | `kernels/iq_grids.h` | the same three grids as C arrays for the kernels (`kernels/own_quant_iq.h`), generated from `python/caminus/iq_tables.py`; the notice is in the file |
+| `kernels/iq2xs_grid.h`, `kernels/iq1_grid.h` | IQ2_XS's grid (`iq2xs_grid`) and IQ1_S / IQ1_M's (`iq1s_grid`, stored as value + 1) for the kernels (`kernels/own_quant_iq2xs.h`, `kernels/own_quant_iq1m.h`), generated from `python/caminus/iq_tables.py`; the notice is in each file |
 | `kernels/iq2s_grid.h` | IQ2_S's grid (`iq2s_grid`) packed to 2 bits per magnitude for the kernels (`kernels/own_quant_iq2s.h`), generated from `python/caminus/iq_tables.py`; the notice is in the file |
 
 ```

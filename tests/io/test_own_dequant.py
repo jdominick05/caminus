@@ -98,6 +98,21 @@ for name, ours, ref in tabs:
 hdr = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'kernels', 'iq_grids.h')
 ok = open(hdr).read() == iq_tables.c_header(); bad += not ok
 print(('PASS' if ok else 'FAIL') + ' kernels/iq_grids.h is the tables\' own header (iq_tables.c_header)')
+for fn, gen in (('iq2xs_grid.h', iq_tables.c_header_iq2xs), ('iq1_grid.h', iq_tables.c_header_iq1)):
+    ok = open(os.path.join(os.path.dirname(hdr), fn)).read() == gen(); bad += not ok
+    print(('PASS' if ok else 'FAIL') + f' kernels/{fn} is the tables\' own header (iq_tables.{gen.__name__})')
+from caminus.engine.own_layout import iq_records, iq_from_records, q2k_records, q2k_from_records, iq1m_records
+for name, bs, rt in (('IQ2_XS', 74, lambda r, n, k: iq_from_records(iq_records(r, n, k, 'IQ2_XS'), n, k, 'IQ2_XS')),
+                     ('Q2_K', 84, lambda r, n, k: q2k_from_records(q2k_records(r, n, k), n, k))):
+    raw = rng.integers(0, 256, 3 * 2 * bs, dtype=np.uint8)
+    ok = np.array_equal(rt(raw, 3, 512), raw); bad += not ok
+    print(('PASS' if ok else 'FAIL') + f' {name}: the record layout round-trips')
+raw = rng.integers(0, 256, 2 * 56, dtype=np.uint8)   # (IQ1_M: no inverse; its header d is the decoder's reassembled d)
+rec = iq1m_records(raw, 1, 512)
+s16 = raw.reshape(2, 56)[:, 48:56].copy().view(np.uint16).reshape(2, 4)
+dref = ((s16[:, 0] >> 12) | ((s16[:, 1] >> 8) & 0xF0) | ((s16[:, 2] >> 4) & 0xF00) | (s16[:, 3] & 0xF000)).astype(np.uint16)
+ok = np.array_equal(rec[2 * 8 * 8:2 * 8 * 8 + 4].view(np.uint16), dref); bad += not ok
+print(('PASS' if ok else 'FAIL') + ' IQ1_M: the record header holds the reassembled d')
 ok = open(os.path.join(os.path.dirname(hdr), 'iq2s_grid.h')).read() == iq_tables.c_header_iq2s(); bad += not ok
 print(('PASS' if ok else 'FAIL') + ' kernels/iq2s_grid.h is the tables\' own packed IQ2_S header (iq_tables.c_header_iq2s)')
 if A.gguf is None:
