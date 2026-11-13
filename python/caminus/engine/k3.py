@@ -106,7 +106,7 @@ Q3M_RS_MODULES = {'k3_q3m_rs4': 'RS4', 'k3_q3m_rs2': 'RS2'}   # (the row-scale s
 Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES)   # (_trace: K3_TRACE timestamps, measurement only)
 # the own dense qwen35 modules (Swift / ThinkingCap: decode, verify, two cards; not the MTP drafter's module) run their decode
 # attention as the same split pair (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT: k3_gguf_q35d's settings, an f16 cache only)
-Q35_SPLIT_MODULES = tuple(m for m in Q35S_MODULES + Q35T_MODULES if m not in Q35M_MODULES + Q35DF_MODULES)
+Q35_SPLIT_MODULES = tuple(m for m in Q35S_MODULES + Q35T_MODULES if m not in Q35DF_MODULES)   # (the MTP drafter's module too)
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
@@ -227,8 +227,8 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_MV', 'Q4_0/a
                                   ('OWN_EMB', 'Q4_K'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'), ('OWN_ARGMAX', '-')})
                     for m in Q35M_MODULES})
 OP_OWN_ARGMAX = 55   # = kernels/k3_q35_ops.h (the drafter module): the greedy token's key, atomicMax over the tasks
-Q35M_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC,
-            OP_GATE_MUL16, OP_OWN_ARGMAX}
+Q35M_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_QK_NR, OP_KV_APPEND, OP_ATTN_PART,
+            OP_ATTN_COMB, OP_GATE_MUL16, OP_OWN_ARGMAX}
 # the DFlash drafter module (K3_Q35_DF): Swift's T-token matvecs for the drafter's Q8_0 matrices (OP_OWN_MV16) and the
 # target's Q6_K head (OP_OWN_MV), the Q4_K embedding, add + norm, SwiGLU, the q / k norm with RoPE, and its own fp32 ops
 # (kernels/k3_df_own_ops.h: OP_DF_CONV / TOPK / SELECT, OP_KV_APPEND into the ring and OP_ATTN_DEC non-causal + window)

@@ -84,7 +84,7 @@ src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_ops.h')).read()
 TPB = r'#ifdef K3_TP[^\n]*\n(.*?)#endif'   # (the two-card modules' exchange: k3.Q35_TP_MODULES only)
 MTPB = r'#ifdef K3_Q35_MTP[^\n]*\n(.*?)#endif'   # (the drafter module's argmax: k3.Q35M_MODULES only)
 DFB = r'#ifdef K3_Q35_DF[^\n]*\n(.*?)#endif'   # (the DFlash drafter module's ops: k3.Q35DF_MODULES only)
-SPB = r'#ifdef K3_Q35_ATTN_SPLIT[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (decode attention: the split pair; #else the drafter module's OP_ATTN_DEC)
+SPB = r'#ifdef K3_Q35_ATTN_SPLIT[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (decode attention: the split pair; #else the DFlash module's OP_ATTN_DEC)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
 tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
 mtp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, disp, re.S))))
@@ -97,8 +97,9 @@ check(dev_ops == host_ops and tp_ops == {'OP_XCHG'}, f'kernels/k3_q35_ops.h disp
 df_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35DF_OPS} - {'OP_NOP'}
 check(df_ops == {'OP_DF_CONV', 'OP_DF_TOPK', 'OP_DF_SELECT', 'OP_KV_APPEND', 'OP_ATTN_DEC'} and df_ops <= df_host,
       f'under K3_Q35_DF: the DFlash drafter\'s own ops (conv / top-k / select, the ring append, its attention), all in k3.Q35DF_OPS')
-check(sp_ops == [({'OP_ATTN_PART', 'OP_ATTN_COMB'}, {'OP_ATTN_DEC'})] and k3.OP_ATTN_DEC in k3.Q35M_OPS and k3.OP_ATTN_DEC not in k3.Q35S_OPS,
-      'decode attention: the split pair under K3_Q35_ATTN_SPLIT (k3.Q35S_OPS), OP_ATTN_DEC only in its #else (the drafter module, k3.Q35M_OPS)')
+check(sp_ops == [({'OP_ATTN_PART', 'OP_ATTN_COMB'}, {'OP_ATTN_DEC'})] and k3.OP_ATTN_DEC not in k3.Q35M_OPS
+      and {k3.OP_ATTN_PART, k3.OP_ATTN_COMB} <= k3.Q35M_OPS and k3.OP_ATTN_DEC not in k3.Q35S_OPS and k3.OP_ATTN_DEC in k3.Q35DF_OPS,
+      'decode attention: the split pair under K3_Q35_ATTN_SPLIT (k3.Q35S_OPS, the MTP drafter\'s k3.Q35M_OPS too), OP_ATTN_DEC only in its #else (the DFlash module, k3.Q35DF_OPS)')
 enum = dict(re.findall(r'(OP_[A-Z0-9_]+) = (\d+)', src))
 check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16,
                                                'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX, 'OP_ATTN_PART': k3.OP_ATTN_PART, 'OP_ATTN_COMB': k3.OP_ATTN_COMB},

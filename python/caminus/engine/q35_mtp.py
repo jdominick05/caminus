@@ -28,6 +28,7 @@ import torch
 from . import k3
 from .own_layout import q4_0_planes, q6k_planes
 from ..device import capacity
+from .q35_dense import attn_part_elems
 
 MODULE = 'k3_q35_swift_mtp'
 MAX_T = 4
@@ -54,7 +55,8 @@ class Mtp35:
         kv = (eng.max_ctx + MAX_T + k) * 2 * eng.nkv * eng.hd * 2
         D, QH, ffn = eng.D, eng.nh * eng.hd, eng.ffn
         buf = 4 * MAX_T * (6 * D + 2 * D + 3 * QH + 2 * QH + 4 * eng.nkv * eng.hd + 2 * ffn) + 2 * MAX_T * (2 * D + 2 * D + QH + ffn)
-        return (w + kv + buf + 4 * eng.vocab) / 2 ** 20 + 4 * (k + 2 * MAX_T) + 8.0
+        part = 4 * attn_part_elems(MAX_T, eng.nh, eng.max_ctx + MAX_T + k)   # (the split attention's records, MAX_T rows)
+        return (w + kv + buf + part + 4 * eng.vocab) / 2 ** 20 + 4 * (k + 2 * MAX_T) + 8.0
 
     @staticmethod
     def projection_mib(path, max_ctx, k=3):
@@ -73,6 +75,7 @@ class Mtp35:
             kv = (int(max_ctx) + MAX_T + k) * 2 * nkv * hd * 2
             QH = nh * hd
             buf = 4 * MAX_T * (6 * D + 2 * D + 3 * QH + 2 * QH + 4 * nkv * hd + 2 * ffn) + 2 * MAX_T * (2 * D + 2 * D + QH + ffn)
+            buf += 4 * attn_part_elems(MAX_T, nh, int(max_ctx) + MAX_T + k)   # (the split attention's records)
             return (w + kv + buf + 4 * vocab) / 2 ** 20 + 4 * (k + 2 * MAX_T) + 8.0
         finally:
             F.close()
@@ -125,6 +128,7 @@ class Mtp35:
                       pn=f(p + 'post_attention_norm.weight', D), qn=f(p + 'attn_q_norm.weight', hd), kn=f(p + 'attn_k_norm.weight', hd))
         self.rows = e.max_ctx + MAX_T + self.k          # (the guard's span: a round's catch rows and chained rows)
         self.cache = torch.zeros(self.rows * 2 * nkv * hd, dtype=torch.float16, device='cuda')
+        self.part = torch.zeros(attn_part_elems(MAX_T, nh, self.rows), dtype=torch.float32, device='cuda')   # (in need_mib)
 
     # -- tapes -------------------------------------------------------------------------------------------------------------
     def _build(self):
@@ -193,7 +197,8 @@ class Mtp35:
         ap = E.also(E.kv_append(ko, vr, self.cache, pos, dep=kd), v_)
         q_ = mv(W['q'], h16, qf, n1)
         qd = E.qk_nr(qf, 2 * hd, nh, hd, N['qn'], pos, qo, e.nrot, e.theta_scale, e.eps, dep=q_)
-        a_ = E.also(E.attn_dec(qo, self.cache, pos, att, nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap, batched=True), qd)
+        a_ = E.also(E.attn_dec(qo, self.cache, pos, att, nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap, max_cells=self.rows,
+                               part=self.part), qd)   # (the split pair: kernels/k3_attn_split.h; one record buffer for every tape)
         g_ = E.gate_mul16(att, qf, 2 * hd, hd, gat16, hd, dep=a_)
         o_ = mv(W['o'], gat16, blk, g_)
         n2 = E.own_add_rms16(x, N['pn'], h, h16, e.eps, d=blk, slots=1, dep=o_, tokens=T)
