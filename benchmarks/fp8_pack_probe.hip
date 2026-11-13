@@ -82,13 +82,13 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
         for (int j = 0; j < CA; j++) {
             const int c = tid + 128 * j;
             if constexpr (A_BYTES) *(u32x4 *)&sA[buf * BM * LA + (c / 2) * LA + (c % 2) * 16] = ra[j];
-            else *(u32x4 *)&sA[buf * BM * LA + (c / 4) * LA + (c % 4) * 8] = ra[j];
+            else *(u32x4 *)&sA[buf * BM * LA + (c / 4) * LA + (c % 4) * 16] = ra[j];   // 8 bf16 = 16 bytes
         }
 #pragma unroll
         for (int j = 0; j < CB; j++) {
             const int c = tid + 128 * j;
             if constexpr (B_BYTES) *(u32x4 *)&sB[buf * BN * LB + (c / 2) * LB + (c % 2) * 16] = rb[j];
-            else *(u32x4 *)&sB[buf * BN * LB + (c / 4) * LB + (c % 4) * 8] = rb[j];
+            else *(u32x4 *)&sB[buf * BN * LB + (c / 4) * LB + (c % 4) * 16] = rb[j];   // 8 bf16 = 16 bytes
         }
     };
     const int KT = K / KST;
@@ -125,7 +125,7 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
             for (int j = 0; j < TN; j++)
 #pragma unroll
                 for (int r = 0; r < 8; r++) {
-                    const int row = m0 + wm * WTM + 2 * r + lane / 16, col = n0 + wn * WTN + j * 16 + lane % 16;
+                    const int row = m0 + wm * WTM + i * 16 + 2 * r + lane / 16, col = n0 + wn * WTN + j * 16 + lane % 16;
                     if (row < M && col < N) C[(size_t)row * N + col] = (float)acc[i][j][r];
                 }
     } else {
@@ -162,7 +162,7 @@ __global__ void gemm_probe(const void *A, const void *B, float *C, int M, int N,
             for (int j = 0; j < TN; j++)
 #pragma unroll
                 for (int r = 0; r < 8; r++) {
-                    const int row = m0 + wm * WTM + 2 * r + lane / 16, col = n0 + wn * WTN + j * 16 + lane % 16;
+                    const int row = m0 + wm * WTM + i * 16 + 2 * r + lane / 16, col = n0 + wn * WTN + j * 16 + lane % 16;
                     if (row < M && col < N) C[(size_t)row * N + col] = acc[i][j][r];
                 }
     }
