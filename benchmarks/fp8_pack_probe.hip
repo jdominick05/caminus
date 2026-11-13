@@ -3,8 +3,8 @@
 //   bf16   f32_16x16x16_bf16_w32 with bf16 A/B - the rate reference
 //   iu8    i32_16x16x16_iu8_w32 with int8 A/B - gfx1100's only 8-bit WMMA (same K=16 per instruction as bf16, half the
 //          load bytes; the fp8 WMMA builtins in the headers are gfx12/gfx950-only, none for gfx11)
-//   pack   A stored as e4m3 bytes (half the bytes of bf16), each fp8 unpacked to bf16 in the fragment (v << 8, exact),
-//          bf16 B, then the bf16 WMMA - the software-emulation route with its unpack ALU cost
+//   pack   A stored as e4m3 bytes (half the bytes of bf16), each fp8 decoded to a real E4M3 value and rounded to bf16
+//          in the fragment, bf16 B, then the bf16 WMMA - the software-emulation route with its unpack ALU cost
 // --check additionally validates the 64x64 corner of C per arm against a fp64 CPU reference. Compile:
 //   ROCM_PATH/bin/hipcc -O3 --offload-arch=gfx1100 -o build/fp8_pack_probe benchmarks/fp8_pack_probe.hip
 #include <hip/hip_runtime.h>
@@ -27,22 +27,54 @@ constexpr int LDRB = BK * 2 + 16;             // padded bf16 LDS row, bytes (80)
 constexpr int LDBB = SB + 16;                 // padded byte LDS row, bytes (48)
 constexpr int WTM = BM / 2, WTN = BN / 2, TM = WTM / 16, TN = WTN / 16;
 
-__device__ __forceinline__ s16x16 frag16(const bf16_t *p) {   // 16 consecutive bf16 from LDS
-    const u32x4 lo = *(const u32x4 *)p, hi = *(const u32x4 *)(p + 8);
-    return __builtin_bit_cast(s16x16, __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7));
-}
-__device__ __forceinline__ s16x16 frag_fp8(const uint8_t *p) { // 16 e4m3 bytes -> 16 bf16 (v << 8, exact)
-    const u32x4 w = *(const u32x4 *)p;
-    s16x16 r;
-#pragma unroll
-    for (int i = 0; i < 16; i++) r[i] = (short)(((w[i / 4] >> (8 * (i % 4))) & 0xFFu) << 8);
-    return r;
-}
 __host__ __device__ __forceinline__ bf16_t to_bf16(float v) {
     const uint32_t u = __builtin_bit_cast(uint32_t, v);
     return (bf16_t)((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
 }
 
+__device__ __forceinline__ s16x16 frag16(const bf16_t *p) {   // 16 consecutive bf16 from LDS
+    const u32x4 lo = *(const u32x4 *)p, hi = *(const u32x4 *)(p + 8);
+    return __builtin_bit_cast(s16x16, __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7));
+}
+// E4M3 (OCP e4m3fn: no inf, 0x7F/0xFF = NaN), bias 7, 3 mantissa bits. Decode is exact; encode rounds to nearest even.
+__host__ __device__ __forceinline__ float e4m3_to_f32(uint8_t b) {
+    const int s = b >> 7, e = (b >> 3) & 0xF, m = b & 7;
+    float v;
+    if (e == 0) v = ldexpf((float)m, -9);                 // subnormal: m * 2^-9
+    else if (e == 15 && m == 7) v = __builtin_nanf("");   // NaN
+    else v = ldexpf((float)(8 + m), e - 10);              // (1 + m/8) * 2^(e-7)
+    return s ? -v : v;
+}
+__host__ __device__ __forceinline__ uint8_t f32_to_e4m3(float v) {
+    const uint8_t sign = (uint8_t)(__builtin_bit_cast(uint32_t, v) >> 31) << 7;
+    const float a = fabsf(v);
+    if (a != a) return 0x7F;                              // NaN in, NaN out
+    if (a == 0.f) return sign;
+    int ee; const float frac = frexpf(a, &ee);            // a = frac * 2^ee, frac in [0.5, 1)
+    const int E = ee + 6;                                 // e4m3 exponent field of the normal encoding
+    if (E >= 1) {                                         // normal: a = (1 + m/8) * 2^(E-7)
+        const float mf = (frac * 2.f - 1.f) * 8.f;
+        int m = (int)mf; const float r = mf - m;
+        if (r > 0.5f || (r == 0.5f && (m & 1))) m++;
+        if (m == 8) {                                     // mantissa carry: bump the exponent
+            if (E + 1 > 15) return sign | 0x7F;           // past max finite 448 -> NaN (e4m3fn has no inf)
+            return sign | (uint8_t)((E + 1) << 3);
+        }
+        return sign | (uint8_t)((E << 3) | m);
+    }
+    const float mf = a * 512.f;                           // subnormal: a = m * 2^-9
+    int m = (int)mf; const float r = mf - m;
+    if (r > 0.5f || (r == 0.5f && (m & 1))) m++;
+    if (m >= 8) return sign | 0x08;                       // rounded up to the smallest normal 2^-6
+    return sign | (uint8_t)m;
+}
+__device__ __forceinline__ s16x16 frag_fp8(const uint8_t *p) { // 16 e4m3 bytes -> 16 bf16 (real E4M3 decode + bf16 round)
+    const u32x4 w = *(const u32x4 *)p;
+    s16x16 r;
+#pragma unroll
+    for (int i = 0; i < 16; i++) r[i] = (short)to_bf16(e4m3_to_f32((uint8_t)(w[i / 4] >> (8 * (i % 4)))));
+    return r;
+}
 // ARM 0: bf16 A/B. ARM 1: int8 A/B (both byte buffers, byte LDS). ARM 2: packed-e4m3 A (byte buffer) + bf16 B,
 // bf16 wmma with frag_fp8 on A. Byte buffers are chunked as 16-byte loads: chunk c -> row c/2, offset (c%2)*16.
 template <int ARM>
@@ -199,7 +231,7 @@ static void check_corner(int arm, const float *C, const bf16_t *Ab, const uint8_
                 double a, b = bf16_to_f32(Bb[(size_t)n * K + k]);
                 if (arm == 0) a = bf16_to_f32(Ab[(size_t)m * K + k]);
                 else if (arm == 1) { a = (int8_t)Ai[(size_t)m * K + k]; b = (int8_t)Bi[(size_t)n * K + k]; }
-                else a = bf16_to_f32((uint16_t)(Ai[(size_t)m * K + k] << 8));
+                else a = (double)e4m3_to_f32(Ai[(size_t)m * K + k]);
                 s += a * b;
             }
             float c = C[(size_t)m * N + n];
@@ -221,12 +253,28 @@ int main(int argc, char **argv) {
         else reps = atoi(argv[i]);
     }
     if (Ns.empty()) Ns = {5120, 17408, 20480};
+    for (int N : Ns)
+        if (N <= 0 || N % BN != 0 || N > 20480) {
+            fprintf(stderr, "bad --shapes N=%d: the fixed buffers hold 0 < N <= 20480 with N %% %d == 0\n", N, BN);
+            return 2;
+        }
     hipDeviceProp_t prop; hipGetDeviceProperties(&prop, 0);
     printf("%s\n", prop.name);
     const int M = 2048, K = 5120;
+    // project the probe's peak device allocation and check it against free VRAM (keeping 512 MiB free) before allocating
+    const size_t projected = (size_t)M * K * 2 + (size_t)20480 * K * 2 + 2 * (size_t)M * K + (size_t)20480 * K
+                           + (size_t)M * 20480 * 4;   // dA dB dAi dAp dBi dC
+    size_t freeB, totalB; hipMemGetInfo(&freeB, &totalB);
+    const size_t margin = (size_t)512 << 20;
+    printf("VRAM free %.0f MiB of %.0f; probe needs %.0f MiB (+ %.0f MiB kept free)\n",
+           freeB / 1048576.0, totalB / 1048576.0, projected / 1048576.0, margin / 1048576.0);
+    if (freeB < projected + margin) { fprintf(stderr, "refusing to allocate: would cross the 512 MiB-free line\n"); return 2; }
+    std::vector<float> Af(M * K), Bf(20480 * K);
+    for (auto &v : Af) v = (rand() / (float)RAND_MAX - 0.5f) * 0.2f;
+    for (auto &v : Bf) v = (rand() / (float)RAND_MAX - 0.5f) * 0.2f;
     std::vector<bf16_t> Ab(M * K), Bb(20480 * K);
-    for (auto &v : Ab) v = to_bf16((rand() / (float)RAND_MAX - 0.5f) * 0.2f);
-    for (auto &v : Bb) v = to_bf16((rand() / (float)RAND_MAX - 0.5f) * 0.2f);
+    for (int i = 0; i < M * K; i++) Ab[i] = to_bf16(Af[i]);
+    for (int i = 0; i < 20480 * K; i++) Bb[i] = to_bf16(Bf[i]);
     bf16_t *dA, *dB; uint8_t *dAi, *dAp, *dBi; float *dC;
     hipMalloc(&dA, (size_t)M * K * 2); hipMalloc(&dB, (size_t)20480 * K * 2);
     hipMalloc(&dAi, (size_t)M * K); hipMalloc(&dAp, (size_t)M * K); hipMalloc(&dBi, (size_t)20480 * K);
@@ -234,10 +282,10 @@ int main(int argc, char **argv) {
     hipMemcpy(dA, Ab.data(), (size_t)M * K * 2, hipMemcpyHostToDevice);
     hipMemcpy(dB, Bb.data(), (size_t)20480 * K * 2, hipMemcpyHostToDevice);
     std::vector<uint8_t> Ai(M * K), Bi(20480 * K);
-    for (int i = 0; i < M * K; i++) Ai[i] = (uint8_t)(Ab[i] >> 8);
-    for (int i = 0; i < 20480 * K; i++) Bi[i] = (uint8_t)(Bb[i] >> 8);
+    for (int i = 0; i < M * K; i++) Ai[i] = f32_to_e4m3(Af[i]);       // int8 arm: the fp32 truncated to 8 bits
+    for (int i = 0; i < 20480 * K; i++) Bi[i] = f32_to_e4m3(Bf[i]);
     hipMemcpy(dAi, Ai.data(), (size_t)M * K, hipMemcpyHostToDevice);
-    hipMemcpy(dAp, Ai.data(), (size_t)M * K, hipMemcpyHostToDevice);   // e4m3 bits = bf16 bits >> 8
+    hipMemcpy(dAp, Ai.data(), (size_t)M * K, hipMemcpyHostToDevice);   // same e4m3 bytes for the pack arm
     hipMemcpy(dBi, Bi.data(), (size_t)20480 * K, hipMemcpyHostToDevice);
     std::vector<float> hc((size_t)M * 20480);
     for (int N : Ns) {

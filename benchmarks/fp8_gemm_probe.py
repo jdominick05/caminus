@@ -19,6 +19,7 @@ Run it on the XT alone first (a peer window may hold a card; check first).
 import argparse, json, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import torch
+from caminus.device import capacity
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--iters', type=int, default=20)
@@ -27,6 +28,10 @@ A = ap.parse_args()
 SHAPES = [tuple(int(v) for v in s.split('x')) for s in A.shapes.split(',')]
 
 print(torch.cuda.get_device_name(0), flush=True)
+# project the peak live bytes of one shape (fp32 operands + fp32 ref + fp16/bf16/fp8 copies + one output) and check
+# through capacity before any of them are allocated
+peak = max((M * K + K * N) * 4 + M * N * 4 + (M * K + K * N) * 4 + (M * K + K * N) + M * N * 2 for (M, K, N) in SHAPES)
+capacity.check([0], [peak / 2**20], f'fp8_gemm_probe, {len(SHAPES)} shapes, peak {peak >> 20} MiB')
 torch.manual_seed(0)
 
 
