@@ -144,7 +144,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
 #ifdef K3_Q35_ATTN_SPLIT   // (k3_q35_ops.h's split pair; this module always defines it)
-    if (sg.op == OP_ATTN_PART) { op_attn_part(sg, t); return true; }
+    if (sg.op == OP_ATTN_PART) { ATTN_PART_FN(sg, t); return true; }   // (k3_attn_split.h: the packed PART in the verify modules)
     if (sg.op == OP_ATTN_COMB) { op_attn_comb(sg, t); return true; }
 #else
     if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }

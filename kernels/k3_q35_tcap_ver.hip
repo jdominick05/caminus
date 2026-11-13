@@ -3,4 +3,5 @@
 // module's .text is unchanged: every T-token statement sits under K3_Q3M_VER.
 #define K3_Q3M_VER
 #define K3_Q35_VER
+#define K3_Q35_ATTN_PACK   // (the split pair's PART takes every pass row of a split in one task: kernels/k3_attn_split.h)
 #include "k3_q35_tcap.hip"
