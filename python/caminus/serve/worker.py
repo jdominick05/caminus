@@ -22,16 +22,22 @@ import collections
 import dataclasses
 import itertools
 import queue
+import sys
 import threading
 import time
 import traceback
 
+from ..errors import NonFiniteLogits
 from .agentmon import AnswerLoopGuard, ContentClass, LoopDetector, tool_call_report
 from .engine import EngineError
 from .generate import GenResult, TokenText, run_generation
 from .sampler import Sampler
 
 _TASK_IDS = itertools.count()
+
+
+class EngineBroken(RuntimeError):
+    """the engine produced non-finite logits earlier in this process: nothing more is served (restart the server)"""
 
 
 class QueueFull(RuntimeError):
@@ -126,6 +132,8 @@ class EngineWorker:
         self.history = []               # (tag, t_submit, t_start, t_end) of the jobs run (tests read it)
         self.current = None             # the job on the engine (cancel_all)
         self._stop = False
+        self.broken = None          # a NonFiniteLogits reason: sticky until the process ends
+        self.on_broken = None       # called with the reason once broken (caminus serve: stop and exit 75)
         self.thread = threading.Thread(target=self._loop, name='k3-engine', daemon=True)
         self.thread.start()
 
@@ -139,6 +147,8 @@ class EngineWorker:
         return self.q.qsize()
 
     def submit(self, job):
+        if self.broken:
+            raise EngineBroken(self.broken)
         if self.q.qsize() >= self.max_queue:
             raise QueueFull(f'{self.q.qsize()} requests queued')
         if self.stats_obj is not None:
@@ -170,7 +180,7 @@ class EngineWorker:
 
     def _loop(self):
         while True:
-            idle = self.sess.idle if self.idle_s else None
+            idle = self.sess.idle if self.idle_s and not self.broken else None   # (broken: no idle park of a corrupt state)
             if idle is not None and self._idle_due:
                 try:
                     job = self.q.get(timeout=self.idle_s)
@@ -191,6 +201,12 @@ class EngineWorker:
                     self._bundle_job(job)
                 finally:
                     self.busy = False
+                continue
+            if self.broken:
+                # (non-finite logits earlier in this process: a queued job never reaches the session - its prompt-cache
+                #  prepare could park the corrupt live state to disk - it fails here, on the worker thread)
+                job.t_start = job.t_end = time.perf_counter()
+                job.events.put(('error', 'engine', f'engine broken (restart the server): {self.broken}'))
                 continue
             if self._stop:
                 job.cancel.set()        # (shutting down: a job still queued ends 'cancel' without touching the engine)
@@ -293,6 +309,20 @@ class EngineWorker:
                 try:
                     self._bundle(rec, rec['verdict'])
                 except Exception:   # noqa: BLE001 - a bundle never fails the request (already answered)
+                    traceback.print_exc()
+        except NonFiniteLogits as e:
+            # (corrupt weights or states: every later request would get the same garbage. Stop serving: refuse new
+            #  requests, /health 503 with the reason; the process must be restarted)
+            self.stats['engine_errors'] += 1
+            self.broken = f'{e}'
+            if so is not None:
+                so.error(job, 'engine')
+            print(f'caminus serve: ENGINE BROKEN, refusing every request until a restart: {e}', file=sys.stderr, flush=True)
+            job.t_end = time.perf_counter()
+            job.events.put(('error', 'engine', f'engine broken (restart the server): {e}'))
+            if self.on_broken is not None:
+                try: self.on_broken(self.broken)
+                except Exception:   # noqa: BLE001 - the callback must not hide the broken state
                     traceback.print_exc()
         except EngineError as e:
             self.stats['engine_errors'] += 1

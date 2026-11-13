@@ -42,8 +42,11 @@ XTX's VRAM for as long as it runs). `systemctl --user disable caminus` / `system
     MiB`): `journalctl --user -u caminus`.
 - **`ConditionPathExists=!.../GPU_FAULT_STOP`:** after a recorded fault the unit does not start (systemd reports the condition
   as failed) until the fault has been inspected and the file removed by hand.
-- **`Restart=no`:** never restarted automatically. On 11-01 repeated runs after faults reset both GPUs 9 times and lost the
-  desktop session.
+- **`Restart=no`:** never restarted after a fault. On 11-01 repeated runs after faults reset both GPUs 9 times and lost the
+  desktop session. The one exception is **exit 75** (`RestartForceExitStatus=75`, `RestartSec=10`): `caminus serve` exits 75
+  when its engine produced non-finite logits (a weight or state corrupt in this process; the startup self-check, or a request:
+  `/health` answered 503 with the reason until the drain ended). A fresh load re-uploads the weights. `StartLimitBurst=3` in
+  `StartLimitIntervalSec=3600` allows 2 such restarts an hour; a model that breaks on every load then stays down.
 - **Stop: the server alone gets SIGTERM** (`ExecStop=caminus-stop 170 $MAINPID`, `KillMode=mixed`). `caminus-stop` (beside the
   unit) finds the server among the guard's processes (it names itself `caminus`), sends it SIGTERM by its PID, and waits for
   the unit's main process, the guard, to exit (at most 170 s). The server stops accepting, cancels the running request at its

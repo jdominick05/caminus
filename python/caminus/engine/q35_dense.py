@@ -25,6 +25,8 @@ import ctypes
 import os
 import sys
 
+import math
+
 import numpy as np
 import torch
 
@@ -47,6 +49,31 @@ def module_of(F):
     fm = {t.type for t in F.tensors if not t.name.startswith(mtp) and len(t.shape) == 2 and t.name != 'token_embd.weight'}
     return MODULE if fm <= SWIFT_FMT and F.T['token_embd.weight'].type == 'Q4_K' else MODULE_TCAP
 RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV rows are written before any pass reads them)
+
+
+WSUM_WORDS = 1 << 20   # int32 words per checksum chunk: its int64 cast is the only scratch (8 MiB, inside the 256 MiB working allowance)
+
+
+def _wsum(t):
+    """int64 sum of a device tensor's bytes as int32 words (the tail bytes zero-padded, summed on the host): a weight
+    fingerprint, computed in WSUM_WORDS chunks so the card never holds more than one chunk's int64 cast (no whole-tensor
+    copy: a 1 GB embedding would need 2 GB of unprojected scratch)"""
+    b = t.reshape(-1).view(torch.uint8)
+    nw = b.numel() // 4
+    tot = 0
+    if nw:
+        w = b[:nw * 4].view(torch.int32)
+        for i in range(0, nw, WSUM_WORDS):
+            tot += int(w[i:i + WSUM_WORDS].to(torch.int64).sum())
+    if b.numel() > nw * 4:
+        tot += _wsum_np(b[nw * 4:].cpu().numpy())
+    return tot
+
+
+def _wsum_np(b):
+    pad = (-b.size) % 4
+    if pad: b = np.concatenate([b, np.zeros(pad, np.uint8)])
+    return int(b.view(np.int32).astype(np.int64).sum())
 
 
 def trunk_blocks(F):
@@ -160,6 +187,7 @@ class Dense35Own:
         # the server's engine contract (Qwen35One's / Q3MoEOne's names): one card, T = 1, dense attention at every depth
         self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
         self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
+        self.broken = None          # (non-finite logits: sticky, reset() keeps it - corrupt weights outlive a reset)
         self.devs = [self.dev]
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual, self.local_only = False, None, False, False, True
@@ -209,15 +237,21 @@ class Dense35Own:
         t = self.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         if (rows is not None and R != rows) or (cols is not None and K != cols):
             raise ValueError(f'Dense35Own: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
+        fmt, b = self._w_host(name)
+        return dict(name=name, fmt=fmt, rows=R, K=K, w=torch.from_numpy(b).to('cuda'))
+
+    def _w_host(self, name):
+        """(format the tile reads, the bytes _w uploads: a host array in that layout)"""
+        t = self.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         b = t.pread(0, t.n_bytes)
         if t.type in ('F32', 'BF16'):   # (BF16: widened to F32, exactly: the high half of a float32)
             f = b.view(np.float32) if t.type == 'F32' else (b.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
-            return dict(name=name, fmt='F32', rows=R, K=K, w=torch.from_numpy(f.reshape(R, K).copy()).to('cuda'))
+            return 'F32', f.reshape(R, K).copy()
         ok = k3.OWN_Q35T_1RT + ('Q8_0',) if self.tcap else ('Q4_K', 'Q8_0', 'Q5_K', 'Q6_K')
         if t.type not in ok: raise ValueError(f'Dense35Own: {name} is {t.type} ({ok} on module {self.module}, or F32 / BF16 alpha / beta)')
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
         elif t.type in IQ_REC: b = iq_records(b, R, K, t.type)
-        return dict(name=name, fmt=t.type, rows=R, K=K, w=torch.from_numpy(np.ascontiguousarray(b)).to('cuda'))
+        return t.type, np.ascontiguousarray(b)
 
     def _f32(self, name, n):
         t = self.F.T[name]
@@ -251,6 +285,7 @@ class Dense35Own:
         self.out_norm = self._f32('output_norm.weight', D)
         self.head = self._w('output.weight', self.vocab, D)
         self.emb_dev = torch.from_numpy(self.emb.pread(0, self.emb.n_bytes)).to('cuda')
+        self.wsum0 = self.weight_sums()   # (the weights as uploaded: mark_broken compares against these)
 
     # -- the tape ----------------------------------------------------------------------------------------------------------
     def _build_tape(self):
@@ -392,6 +427,7 @@ class Dense35Own:
         return 0 if self.fresh else self.last_T
 
     def _check(self, tokens, i0, commit, what):
+        if self.broken: raise k3.NonFiniteLogits(f'{what}: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
         k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.commit_max(), what=what)
         if tokens is not None and len(tokens) < i0 + 1:
@@ -486,6 +522,8 @@ class Dense35Own:
             with torch.cuda.device(self.dev): torch.cuda.synchronize(); self.E.sync.zero_()
             self.poisoned = f'the device bound guard caught an out-of-range value at pass position {i0}: {b}'
             raise k3.ContextBoundsError(f'k3 qwen35: {self.poisoned}')
+        if self._tok and not math.isfinite(float(self.h_max[0][0])):
+            self.mark_broken(f'non-finite logits (max {float(self.h_max[0][0])}) at pass position {i0}')
         if st[1]:
             with torch.cuda.device(self.dev):
                 torch.cuda.synchronize()
@@ -495,6 +533,59 @@ class Dense35Own:
                 self.E.sync.zero_()
             return [rep]
         return []
+
+    # -- weight integrity -------------------------------------------------------------------------------------------------
+    def weight_sums(self):
+        """{tensor name: int64 sum of its device bytes as int32 words (byte-padded)}: a cheap fingerprint of every weight
+        on the card (~16 GB at the card's read rate: tens of ms), taken at load and again when the engine breaks, so a
+        change says the weights were corrupted after the upload"""
+        out = {}
+        with torch.cuda.device(self.dev):
+            for d in self.L:
+                for v in d.values():
+                    if isinstance(v, dict) and 'w' in v: out[v['name']] = _wsum(v['w'])
+            out['output.weight'] = _wsum(self.head['w']); out['token_embd.weight'] = _wsum(self.emb_dev)
+        return out
+
+    def host_sums(self, names):
+        """the same fingerprint computed from the file's bytes as _w lays them out (the upload's source), for names"""
+        out = {}
+        for nm in names:
+            b = self.emb.pread(0, self.emb.n_bytes) if nm == 'token_embd.weight' else self._w_host(nm)[1]
+            out[nm] = _wsum_np(np.ascontiguousarray(b).view(np.uint8).reshape(-1))
+        return out
+
+    def mark_broken(self, why):
+        """the engine produced non-finite logits: refuse every later pass (reset() keeps this), report which weights changed
+        since load (corrupted on the card) or, when none did, which differ from the file (corrupted by the upload)"""
+        rep = why
+        try:
+            now = self.weight_sums()
+            changed = [n for n, v in now.items() if self.wsum0.get(n) != v]
+            if changed:
+                rep += f'; weights changed on the card since load: {changed[:8]}{" ..." if len(changed) > 8 else ""}'
+            else:
+                hs = self.host_sums(list(now))
+                bad = [n for n, v in hs.items() if v != now[n]]
+                rep += (f'; device weights differ from the file (corrupted by the upload): {bad[:8]}' if bad else
+                        '; the weights match the load and the file (not a weight corruption)')
+        except Exception as e:                       # noqa: BLE001 - the report must not hide the failure
+            rep += f'; the weight check failed ({type(e).__name__}: {e})'
+        self.broken = rep
+        raise k3.NonFiniteLogits(f'Dense35Own: {rep}')
+
+    def selfcheck(self, toks=(248044, 9707, 11, 1879, 374)):
+        """at startup: a few fixed tokens through the decode tape on fresh states (finite logits), then reset(); raises
+        NonFiniteLogits (and marks the engine broken) when the load left poisoned weights"""
+        self.reset()
+        try:
+            for t in toks:
+                lg = self.step(int(t))
+                with torch.cuda.device(self.dev):
+                    if not bool(torch.isfinite(lg).all()):
+                        self.mark_broken(f'startup self-check: non-finite logits after token {t}')
+        finally:
+            if not self.broken: self.reset()
 
     def physics_bytes(self):
         """per card (one): the weight bytes one decode pass reads (every trunk matrix and norm once; the embedding is one

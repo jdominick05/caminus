@@ -316,6 +316,9 @@ SYNC_WORDS = MAXSEG * 2 + 8
 STATUS_WORDS = 8
 
 
+from ..errors import NonFiniteLogits   # noqa: E402 (re-exported: engines raise k3.NonFiniteLogits)
+
+
 class ContextBoundsError(IndexError):
     """a position (or the lazy-commit count) outside what the engine's buffers hold: refused on the host before any
     launch, or (defense in depth) caught on the device by the bound guard: k3_run's prologue (kernels/k3.hip) skips the
