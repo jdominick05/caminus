@@ -70,7 +70,7 @@ def main():
             continue
         t = F.T[picks[fmt]]
         K = int(t.shape[0]); _, rb = t.rows()
-        for R in ((200, 256, 300, 512) if fmt == 'Q4_K' else (200, 256)):
+        for R in ((200, 256, 300, 512) if fmt in ('Q4_K', 'Q6_K') else (200, 256)):
             raw = t.pread(0, R * rb)
             Wf = own_dequant.dequant(raw, fmt, R * K).reshape(R, K).astype(np.float64)
             wb = q6k_planes(raw, R, K) if fmt == 'Q6_K' else iq_records(raw, R, K, fmt) if fmt in IQ_REC else raw
@@ -87,6 +87,13 @@ def main():
                 xd = torch.from_numpy(x).to(dev)
                 grid = (-(-n // 64), -(-R // 128))
                 y = launch(mod, fmt, IQK, grid, wd, R, K, xd, n, dev)
+                if fmt == 'Q6_K':   # the wide tile (q35p_mm_q6k_w) against q3p_mm_q6k: bitwise
+                    yw = torch.zeros(n, R, dtype=torch.float32, device=dev)
+                    mod.q35p_mm_q6k_w((-(-n // 64), -(-R // 256)), (256,), wd, I(R), I(R), I(K), xd, I(K), yw, I(R), I(n))
+                    torch.cuda.synchronize()
+                    wide_ok = torch.equal(y.view(torch.int32), yw.view(torch.int32))
+                    check(wide_ok, f'Q6_K R={R} n={n}: the wide tile q35p_mm_q6k_w bitwise q3p_mm_q6k'
+                                   + ('' if wide_ok else f' ({int((y.view(torch.int32) != yw.view(torch.int32)).sum())} values differ)'))
                 if fmt == 'Q4_K':   # the wide tile (q35p_mm_q4k_w, what Ops.mm runs for dense Q4_K) against q3p_mm_q4k: bitwise
                     yw = torch.zeros(n, R, dtype=torch.float32, device=dev)
                     mod.q35p_mm_q4k_w((-(-n // 64), -(-R // 256)), (256,), wd, I(R), I(K), xd, I(K), yw, I(R), I(n))

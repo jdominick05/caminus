@@ -71,6 +71,7 @@ class Ops(q3m_ops.Ops):
         super().__init__(dev, module)
         self.module = module
         self.cus = torch.cuda.get_device_properties(dev).multi_processor_count
+        self.q6k_narrow = False   # (True: dense Q6_K GEMMs on q3p_mm_q6k; benchmarks only)
         self.q4k_narrow = False   # (True: dense Q4_K GEMMs on q3p_mm_q4k instead of the wide tile; benchmarks only)
 
     def mm(self, W, x16, ldx, y, ldy, n=None, work=None):
@@ -94,6 +95,14 @@ class Ops(q3m_ops.Ops):
                 return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
             self.mod.q35p_mm_q4k_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
             return
+        if fmt == 'Q6_K' and work is None and n is not None and (self.module == MODULE or self.module.startswith('q35_prefill_abl')) and not self.q6k_narrow:
+            # the wide tile (kernels/q35_prefill.hip q35p_mm_q6k_w, bitwise q3p_mm_q6k's rows; the same grid-size rule)
+            if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
+            n = int(n)
+            if -(-n // q3m_ops.MM_M) * -(-R // MMW_N) >= MMW_MIN_PER_CU * self.cus:
+                rtot = wb.numel() // (K // 256 * 210)
+                self.mod.q35p_mm_q6k_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(rtot), I(K), x16, I(ldx), y, I(ldy), I(n))
+                return
         if fmt not in MM_KERNEL: return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
         if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
         if work is not None or n is None: raise ValueError(f'q35 mm: {fmt} takes dense rows (n) only')
