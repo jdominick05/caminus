@@ -293,6 +293,111 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q4k_w(const uint8_t * 
     }
 }
 
+// ---- q35p_mm_q6k_w: Q6_K (the decode's plane layout), the wide tile (dense rows only) ------------------------------------
+// q3p_mm_q6k with two 16-row tiles per wave (64 tokens x 256 rows per workgroup): each A operand feeds both row tiles'
+// WMMAs. Every row's statements are q3p_mm_q6k's in its order (the B operand of each sub-block, P from a zero
+// accumulator, acc += d scale P), so outputs keep their bits; the unpack takes fp16's exponent byte from v_perm (q6k_bw).
+// tests/prefill/test_q35_prefill_mm.py compares both kernels bitwise. Rows past R read row 0 and are never written.
+// Grid (tokens / 64, rows / 256), block 256; W a plane-layout buffer of Rtot rows (its first R used), X fp16 [ntok][ldx].
+__device__ __forceinline__ h16_t q6k_bw(const u32x4_t & ql, const u32x4_t & qh, int shl, int shh) {
+    const h2_t o2 = {(_Float16)(-1056.0f), (_Float16)(-1056.0f)};                  // 1024 + 32
+    const uint32_t l4[4] = {ql.x, ql.y, ql.z, ql.w}, h4[4] = {qh.x, qh.y, qh.z, qh.w};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t q = ((l4[w] >> shl) & 0x0f0f0f0fu) | (((h4[w] >> shh) & 0x03030303u) << 4);
+        const uint32_t p01 = __builtin_amdgcn_perm(0x64646464u, q, 0x04010400u);   // bytes: q0, 0x64, q1, 0x64
+        const uint32_t p23 = __builtin_amdgcn_perm(0x64646464u, q, 0x04030402u);
+        o[2 * w] = as_u(as_h2(p01) + o2); o[2 * w + 1] = as_u(as_h2(p23) + o2);
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+
+extern "C" __global__ void __launch_bounds__(256) q35p_mm_q6k_w(const uint8_t * __restrict__ W, int R, int Rtot, int K,
+                                                                const _Float16 * __restrict__ X, int ldx,
+                                                                float * __restrict__ Y, int ldy, int ntok) {
+    MMItem it; it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off);
+    const int * xsrc = nullptr;
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int NB = K / 256;
+    int r[2]; bool rok[2]; const uint8_t * pa[2], * pb[2]; const uint16_t * pc[2];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        r[rt] = blockIdx.y * MMW_N + wave * 32 + rt * 16 + (lane & 15);
+        rok[rt] = r[rt] < R;
+        const size_t g = rok[rt] ? r[rt] : 0;
+        pa[rt] = W + g * NB * 192; pb[rt] = W + (size_t)Rtot * NB * 192 + g * NB * 16;
+        pc[rt] = (const uint16_t *)(W + (size_t)Rtot * NB * 208) + g * NB;
+    }
+    f8_t acc[2][4];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++)
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++) acc[rt][mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    for (int b = 0; b < NB; b++) {
+        u32x4_t scw[2]; float d[2];
+#pragma unroll
+        for (int rt = 0; rt < 2; rt++) {
+            scw[rt] = *(const u32x4_t *)(pb[rt] + (size_t)b * 16);
+            d[rt] = rok[rt] ? (float)__builtin_bit_cast(_Float16, pc[rt][b]) : 0.0f;
+        }
+        __syncthreads();
+        mm_stage<false>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+        __syncthreads();
+#pragma unroll
+        for (int n = 0; n < 2; n++) {
+            u32x4_t ql[2][4], qh[2][2];
+#pragma unroll
+            for (int rt = 0; rt < 2; rt++) {
+                const u32x4_t * q = (const u32x4_t *)(pa[rt] + (size_t)b * 192);
+#pragma unroll
+                for (int i = 0; i < 4; i++) ql[rt][i] = q[4 * n + i];
+                qh[rt][0] = q[8 + 2 * n]; qh[rt][1] = q[8 + 2 * n + 1];
+            }
+#pragma unroll
+            for (int gr = 0; gr < 4; gr++) {
+#pragma unroll
+                for (int l0 = 0; l0 < 2; l0++) {
+                    const int sb = n * 8 + gr * 2 + l0;
+                    const int qi = (gr & 1) ? (l0 ? 3 : 2) : (l0 ? 1 : 0);
+                    const int nn = sb >> 3, rem = sb & 7, p = nn * 8 + 4 * (rem & 1) + (rem >> 1);
+#if Q3P_ABL == 1
+                    const h16_t B0 = (h16_t)(_Float16)1.0f, B1 = B0; (void)ql; (void)qh;
+#else
+                    const h16_t B0 = q6k_bw(ql[0][qi], qh[0][l0], gr >= 2 ? 4 : 0, 2 * gr);
+                    const h16_t B1 = q6k_bw(ql[1][qi], qh[1][l0], gr >= 2 ? 4 : 0, 2 * gr);
+#endif
+                    const float ds0 = d[0] * (float)((const int8_t *)&scw[0])[p];
+                    const float ds1 = d[1] * (float)((const int8_t *)&scw[1])[p];
+#pragma unroll
+                    for (int mt = 0; mt < 4; mt++) {
+                        const h16_t A = mm_a(mt, sb * 16, lane);
+                        const f8_t P0 = wmma(A, B0, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+                        const f8_t P1 = wmma(A, B1, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#pragma unroll
+                        for (int v = 0; v < 8; v++) {
+                            acc[0][mt][v] = __builtin_fmaf(ds0, P0[v], acc[0][mt][v]);
+                            acc[1][mt][v] = __builtin_fmaf(ds1, P1[v], acc[1][mt][v]);
+                        }
+                    }
+                    __builtin_amdgcn_sched_barrier(0);   // (one sub-block at a time, as q3p_mm_q6k)
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        if (!rok[rt]) continue;
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+            for (int v = 0; v < 8; v++) {
+                const int t = mt * 16 + 2 * v + (lane >> 4);
+                if (t < it.cnt) Y[(size_t)(it.off + t) * ldy + r[rt]] = acc[rt][mt][v];
+            }
+    }
+}
+
 // ---- Q5_K ------------------------------------------------------------------------------------------------------------
 // 16 values: nibbles (4 dwords, shift sh) | bit s of the qh bytes (4 dwords) << 4 -> fp16 sc * q (exact)
 __device__ __forceinline__ h16_t q5k_b(const u32x4_t & qw, int sh, const u32x4_t & hw, int s, _Float16 sc) {

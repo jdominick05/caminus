@@ -96,24 +96,25 @@ for M in MS:
           try:
             if arm == 'own':
                 res['own'] = bench(lambda: ops.mm(W, x16, K, y, R, n=M))
-            elif arm == 'ab':   # Q4_K only: the wide tile vs q3p_mm_q4k, interleaved rep by rep in this process, outputs bitwise
-                if t.type != 'Q4_K': continue
+            elif arm == 'ab':   # Q4_K / Q6_K: the wide tile vs the narrow one, interleaved rep by rep in this process, outputs bitwise
+                if t.type not in ('Q4_K', 'Q6_K'): continue
+                pre = 'q4k' if t.type == 'Q4_K' else 'q6k'
                 y2 = torch.zeros(M, R, device=dev)
                 routed = 'wide' if -(-M // 64) * -(-R // q35own.MMW_N) >= q35own.MMW_MIN_PER_CU * ops.cus else 'narrow'
-                ops.q4k_force_wide = True   # (the A/B compares the two kernels on every shape; `routed` is what Ops.mm serves)
-                ops.q4k_narrow = False; ops.mm(W, x16, K, y, R, n=M)
-                ops.q4k_narrow = True; ops.mm(W, x16, K, y2, R, n=M); torch.cuda.synchronize(dev)
+                setattr(ops, pre + '_force_wide', True)   # (the A/B compares the two kernels on every shape; `routed` is what Ops.mm serves)
+                setattr(ops, pre + '_narrow', False); ops.mm(W, x16, K, y, R, n=M)
+                setattr(ops, pre + '_narrow', True); ops.mm(W, x16, K, y2, R, n=M); torch.cuda.synchronize(dev)
                 same = torch.equal(y.view(torch.int32), y2.view(torch.int32))
                 tw, tn = [], []
                 for rep in range(A.reps):
                     for flag, ts in ((False, tw), (True, tn)) if rep % 2 == 0 else ((True, tn), (False, tw)):
-                        ops.q4k_narrow = flag
+                        setattr(ops, pre + '_narrow', flag)
                         for _ in range(3): ops.mm(W, x16, K, y, R, n=M)
                         e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                         e0.record()
                         for _ in range(A.iters): ops.mm(W, x16, K, y, R, n=M)
                         e1.record(); e1.synchronize(); ts.append(e0.elapsed_time(e1) * 1e3 / A.iters)
-                ops.q4k_narrow = False; ops.q4k_force_wide = False
+                setattr(ops, pre + '_narrow', False); setattr(ops, pre + '_force_wide', False)
                 res['wide'] = float(np.median(tw)); res['narrow'] = float(np.median(tn))
                 print(f'  {"BITWISE" if same else "DIFFER"} wide vs narrow at [{R} x {K}] M {M} (served: {routed})'
                       + ('' if same else f' ({int((y.view(torch.int32) != y2.view(torch.int32)).sum())} values)'), flush=True)
