@@ -233,6 +233,10 @@ plain decode in that setup is 35.4-36.0 tok/s.
 - `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --draft dflash --max-ctx
   12288 --block-imports gguf,tokenizers` passes: greedy 68.6 tok/s; a 6,760-token prompt at 678 tok/s, then decode
   at 44 tok/s.
+- Prompt reading with the drafter: every prefill chunk's features go through the drafter's batched inject
+  (`Dflash35.inject_rows`: fc and k / v as the prefill's own WMMA GEMMs, passes of 512 rows). The same smoke's 6,760-token
+  prompt: 1,068 tok/s with `--draft dflash` (TTFT 6.35 s) against 1,081 with `--draft off` (6.28 s); the first build's
+  4-row inject tape read it at 678.
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_dflash.py GGUF DFLASH_GGUF`), XT: against
   the float64 reference (`caminus/ref_dflash.py`, itself equal to llama.cpp's drafts at 10 of 10 positions), the injected
   K / V within 5e-4, the drafts' logits within 1.7e-3 and the drafts equal, at 20 positions and after 4,200 (past the

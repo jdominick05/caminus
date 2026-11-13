@@ -361,7 +361,7 @@ class Q35OwnPrefill(PrefillDriver):
         self._chunk(toks, a, b)
         dr = self._draft
         if dr is not None and getattr(dr, 'kind', None) == 'dflash35':
-            dr.inject_chunk(self.features, a, b - a)   # (the chunk's feature rows into the drafter's ring, positions a .. b - 1)
+            dr.inject_chunk(self, a, b - a)   # (the chunk's features into the drafter's ring, positions a .. b - 1: batched)
         if self.export_h:
             dr = self._draft
             if dr is not None and getattr(dr, 'kind', None) == 'mtp':
