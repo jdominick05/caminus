@@ -361,7 +361,30 @@ def resident_grid(module, per_wgp=None):
     overrides)"""
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     per_wgp = per_wgp or int(os.environ.get('K3_PER_WGP', 0)) or (8 if module.startswith('k3_gguf') else 4)
+    lds_cap = WGP_LDS // max(1, _m(module).k3_run.lds_bytes()) if torch.cuda.is_available() else per_wgp   # (CPU stand-ins: nothing launches)
+    if per_wgp > lds_cap:   # (a persistent grid must be resident at once: the rest would wait out limit_us and bail)
+        raise ValueError(f'resident_grid: {per_wgp} workgroups per WGP of {module} need {per_wgp} x '
+                         f'{_m(module).k3_run.lds_bytes()} B of LDS > the WGP\'s {WGP_LDS} B: at most {lds_cap}')
     return per_wgp * props.multi_processor_count
+
+
+WGP_LDS = 128 * 1024   # (RDNA3: a WGP's LDS, shared by the workgroups it holds; the default WGP mode)
+_RESIDENT_OK = set()
+
+
+def check_resident(module, grid, fn='k3_run'):
+    """refuse a persistent grid whose workgroups cannot all be resident at once by LDS (ceil(grid / WGPs) per WGP x the
+    kernel's static LDS > WGP_LDS): the resident ones would wait out limit_us for the rest and bail. Checked once per
+    (device, module, grid)"""
+    if not torch.cuda.is_available(): return   # (a CPU stand-in: nothing launches)
+    dev = torch.cuda.current_device(); key = (dev, module, int(grid), fn)
+    if key in _RESIDENT_OK: return
+    wgps = torch.cuda.get_device_properties(dev).multi_processor_count
+    per = -(-int(grid) // wgps); lds = getattr(_m(module), fn).lds_bytes()
+    if per * lds > WGP_LDS:
+        raise ValueError(f'k3 {module}: a grid of {grid} on {wgps} WGPs puts {per} workgroups on a WGP: {per} x {lds} B of '
+                         f'LDS > {WGP_LDS} B, so not all are resident at once (at most {WGP_LDS // max(1, lds)} per WGP)')
+    _RESIDENT_OK.add(key)
 
 
 def module_for(module, T):
@@ -1436,6 +1459,7 @@ class Engine:
 
     def run(self, check=True, trace=None):
         if self.refuse: raise RuntimeError(self.refuse + ' (refusing to launch)')
+        check_resident(self.module, self.grid, 'k3_run2' if self.teams is not None else 'k3_run')
         gk = (self.guard_commit, tuple((k, c) for k, (_, c) in self.guard_caps.items()))   # the guard's bounds now
         if self.teams is not None or len(self.guard_caps) > 1 or self.guard_launch:
             self._guard(torch.cuda.current_stream().cuda_stream)   # the separate guard launch first, on the launch's stream
