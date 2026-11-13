@@ -47,6 +47,7 @@ MODULE_TCAP = 'q35_prefill_tcap'   # (ThinkingCap's formats: kernels/q35_prefill
 FORMATS = ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K')
 FORMATS_TCAP = FORMATS + ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S')
 MM_KERNEL = {'Q8_0': 'q35p_mm_q8_0', 'Q5_K': 'q35p_mm_q5k'}
+MMW_N = 256   # (rows per workgroup of the wide Q4_K tile, kernels/q35_prefill.hip MMW_N)
 # the codebook formats (the tcap object only): the decode engine's copies in place (IQ4_XS raw blocks; the grid formats
 # in the record layout), one more argument: the buffer's rows (Rtot)
 IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_S': 'q35t_mm_iq2s'}
@@ -78,6 +79,12 @@ class Ops(q3m_ops.Ops):
             if K % 256 or work is not None or n is None: raise ValueError(f'q35 mm: {fmt}: K {K} (a multiple of 256), dense rows (n) only')
             n = int(n); grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
             getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
+            return
+        if fmt == 'Q4_K' and work is None and n is not None and self.module in (MODULE, MODULE_TCAP):
+            # the wide tile (kernels/q35_prefill.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows)
+            if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
+            n = int(n)
+            self.mod.q35p_mm_q4k_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
             return
         if fmt not in MM_KERNEL: return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
         if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')

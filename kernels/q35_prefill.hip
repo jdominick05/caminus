@@ -142,6 +142,134 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
         }
 }
 
+// ---- q35p_mm_q4k_w: Q4_K, the wide tile (dense rows only) ----------------------------------------------------------
+// q3p_mm_q4k with two 16-row tiles per wave: a workgroup is 64 tokens x 256 rows (8 waves x 32 rows), and each A operand
+// (a token tile's 16 values, from LDS) feeds the WMMAs of both row tiles. q3p_mm_q4k reads A once per WMMA; here once
+// per two, which is what its tile was waiting on (benchmarks/q35_prefill_gemm.py --module q35_prefill_abl1/2/3: with the
+// weight path, the staging or the scale step removed it still stopped near 52-57 TF). Every row's statements are
+// q3p_mm_q4k's in its order (the B operand from the row's own scale, P per block in the same k-step order, the min term
+// against the same sub-block sums, the same overflow branch), so each output keeps its bits: tests/prefill/
+// test_q35_prefill_mm.py runs both kernels and compares them bitwise. Rows past R read row 0 and are never written.
+// Grid (tokens / 64, rows / 256), block 256; X fp16 [ntok][ldx], Y fp32 [ntok][ldy].
+#define MMW_N 256
+extern "C" __global__ void __launch_bounds__(256) q35p_mm_q4k_w(const uint8_t * __restrict__ W, int R, int K,
+                                                                const _Float16 * __restrict__ X, int ldx,
+                                                                float * __restrict__ Y, int ldy, int ntok) {
+    MMItem it; it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off);
+    const int * xsrc = nullptr;
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int NB = K / 256;
+    const size_t RB = (size_t)NB * 144;
+    int r[2]; bool rok[2]; const uint8_t * wrow[2];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        r[rt] = blockIdx.y * MMW_N + wave * 32 + rt * 16 + (lane & 15);
+        rok[rt] = r[rt] < R;
+        wrow[rt] = W + (size_t)(rok[rt] ? r[rt] : 0) * RB;
+    }
+    f8_t acc[2][4];
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++)
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++) acc[rt][mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+    if (tid < MM_M) MMF[tid] = 0;
+    if (tid == 0) MMBIG = 0;
+    for (int b = 0; b < NB; b++) {
+        u32x4_t hd[2], qs[2][8];
+#pragma unroll
+        for (int rt = 0; rt < 2; rt++) {
+            const u32x4_t * bp = (const u32x4_t *)(wrow[rt] + (size_t)b * 144);
+            hd[rt] = bp[0];
+#pragma unroll
+            for (int i = 0; i < 8; i++) qs[rt][i] = bp[1 + i];
+        }
+        __syncthreads();
+        mm_stage<true>(X, ldx, xsrc, it.off, it.cnt, b, tid);
+        __syncthreads();
+        int sc[2][8], m[2][8];
+#pragma unroll
+        for (int rt = 0; rt < 2; rt++) q4k_scales(hd[rt], sc[rt], m[rt]);
+        f8_t P[2][4];
+#pragma unroll
+        for (int rt = 0; rt < 2; rt++)
+#pragma unroll
+            for (int mt = 0; mt < 4; mt++) P[rt][mt] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+#pragma unroll
+            for (int hf = 0; hf < 2; hf++) {
+#pragma unroll
+                for (int hi = 0; hi < 2; hi++) {
+                    const int s = 2 * j + hi;
+                    const h16_t B0 = q4k_b(qs[0][2 * j + hf], 4 * hi, rok[0] ? (_Float16)sc[0][s] : (_Float16)0.0f);
+                    const h16_t B1 = q4k_b(qs[1][2 * j + hf], 4 * hi, rok[1] ? (_Float16)sc[1][s] : (_Float16)0.0f);
+#pragma unroll
+                    for (int mt = 0; mt < 4; mt++) {
+                        const h16_t A = mm_a(mt, s * 32 + hf * 16, lane);
+                        P[0][mt] = wmma(A, B0, P[0][mt]);
+                        P[1][mt] = wmma(A, B1, P[1][mt]);
+                    }
+                }
+            }
+        }
+#pragma unroll
+        for (int rt = 0; rt < 2; rt++) {
+            uint32_t bm[8];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const h2_t pm = {(_Float16)m[rt][2 * i], (_Float16)m[rt][2 * i + 1]};
+                bm[i] = as_u(pm); bm[4 + i] = as_u(pm);
+            }
+            const h16_t BM = __builtin_bit_cast(h16_t, bm);
+            const uint16_t * hp = (const uint16_t *)&hd[rt];
+            const float d = rok[rt] ? (float)__builtin_bit_cast(_Float16, hp[0]) : 0.0f;
+            const float dmin = rok[rt] ? (float)__builtin_bit_cast(_Float16, hp[1]) : 0.0f;
+#pragma unroll
+            for (int mt = 0; mt < 4; mt++) {
+                const u32x4_t * sp = (const u32x4_t *)(MMS + (mt * 16 + (lane & 15)) * 16);
+                const h16_t AS = h16of(sp[0], sp[1]);
+                const f8_t MS = wmma(AS, BM, (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#pragma unroll
+                for (int v = 0; v < 8; v++) acc[rt][mt][v] = __builtin_fmaf(d, P[rt][mt][v], __builtin_fmaf(-dmin, MS[v], acc[rt][mt][v]));
+            }
+        }
+        if (__builtin_amdgcn_readfirstlane(MMBIG) == b + 1) {   // rare: q3p_mm_q4k's other 63 / 64 of the scaled tokens' min term
+#pragma unroll
+            for (int rt = 0; rt < 2; rt++) {
+                const u32x4_t hd2 = *(const u32x4_t *)(wrow[rt] + (size_t)b * 144);
+                int sc2[8], m2[8];
+                q4k_scales(hd2, sc2, m2);
+                uint32_t bm2[8];
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    const h2_t p2 = {(_Float16)m2[2 * i], (_Float16)m2[2 * i + 1]};
+                    bm2[i] = as_u(p2); bm2[4 + i] = as_u(p2);
+                }
+                const float dm63 = rok[rt] ? -63.0f * (float)__builtin_bit_cast(_Float16, ((const uint16_t *)&hd2)[1]) : 0.0f;
+#pragma unroll
+                for (int mt = 0; mt < 4; mt++) {
+                    const u32x4_t * sp = (const u32x4_t *)(MMS + (mt * 16 + (lane & 15)) * 16);
+                    const f8_t MS = wmma(h16of(sp[0], sp[1]), __builtin_bit_cast(h16_t, bm2), (f8_t){0, 0, 0, 0, 0, 0, 0, 0});
+#pragma unroll
+                    for (int v = 0; v < 8; v++)
+                        if (MMF[mt * 16 + 2 * v + (lane >> 4)] == b + 1) acc[rt][mt][v] = __builtin_fmaf(dm63, MS[v], acc[rt][mt][v]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int rt = 0; rt < 2; rt++) {
+        if (!rok[rt]) continue;
+#pragma unroll
+        for (int mt = 0; mt < 4; mt++)
+#pragma unroll
+            for (int v = 0; v < 8; v++) {
+                const int t = mt * 16 + 2 * v + (lane >> 4);
+                if (t < it.cnt) Y[(size_t)(it.off + t) * ldy + r[rt]] = acc[rt][mt][v];
+            }
+    }
+}
+
 // ---- Q5_K ------------------------------------------------------------------------------------------------------------
 // 16 values: nibbles (4 dwords, shift sh) | bit s of the qh bytes (4 dwords) << 4 -> fp16 sc * q (exact)
 __device__ __forceinline__ h16_t q5k_b(const u32x4_t & qw, int sh, const u32x4_t & hw, int s, _Float16 sc) {

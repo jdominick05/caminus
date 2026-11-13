@@ -70,19 +70,30 @@ def main():
             continue
         t = F.T[picks[fmt]]
         K = int(t.shape[0]); _, rb = t.rows()
-        for R in (200, 256):
+        for R in ((200, 256, 300, 512) if fmt == 'Q4_K' else (200, 256)):
             raw = t.pread(0, R * rb)
             Wf = own_dequant.dequant(raw, fmt, R * K).reshape(R, K).astype(np.float64)
             wb = q6k_planes(raw, R, K) if fmt == 'Q6_K' else iq_records(raw, R, K, fmt) if fmt in IQ_REC else raw
             wd = torch.from_numpy(np.ascontiguousarray(wb)).to(dev)
+            # (R 300 / 512: the wide tile's partial and full 256-row workgroups, drawn from their own generator so the
+            # other cases keep their inputs; at K 17,408 the Q5_K overflow case is close to BOUND, worst 1.05e-05 on one
+            # other draw)
+            g = rng if R in (200, 256) else np.random.default_rng(1000 + R)
             for n in (1, 37, 64, 130):
-                x = (rng.standard_normal((n, K)) * 0.5).astype(np.float16)
+                x = (g.standard_normal((n, K)) * 0.5).astype(np.float16)
                 big = fmt in ('Q4_K', 'Q5_K') and n == 37
                 if big:   # (token 5: block 0's first 32 values at 4,000: their sum 128,000 passes fp16's 65,504)
                     x[5, :32] = 4000.0
                 xd = torch.from_numpy(x).to(dev)
                 grid = (-(-n // 64), -(-R // 128))
                 y = launch(mod, fmt, IQK, grid, wd, R, K, xd, n, dev)
+                if fmt == 'Q4_K':   # the wide tile (q35p_mm_q4k_w, what Ops.mm runs for dense Q4_K) against q3p_mm_q4k: bitwise
+                    yw = torch.zeros(n, R, dtype=torch.float32, device=dev)
+                    mod.q35p_mm_q4k_w((-(-n // 64), -(-R // 256)), (256,), wd, I(R), I(K), xd, I(K), yw, I(R), I(n))
+                    torch.cuda.synchronize()
+                    wide_ok = torch.equal(y.view(torch.int32), yw.view(torch.int32))
+                    check(wide_ok, f'Q4_K R={R} n={n}: the wide tile q35p_mm_q4k_w bitwise q3p_mm_q4k'
+                                   + ('' if wide_ok else f' ({int((y.view(torch.int32) != yw.view(torch.int32)).sum())} values differ)'))
                 if refmod is not None:
                     yr = launch(refmod, fmt, IQK, grid, wd, R, K, xd, n, dev)
                     torch.cuda.synchronize()
