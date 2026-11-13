@@ -85,8 +85,9 @@ def main():
     for m in models.CATALOG:
         check(m.arch in arch.ARCHS and m.cards == arch.ARCHS[m.arch].cards, f'catalog: {m.name} is a served architecture, cards {m.cards}')
     check(models.drafter_item(models.BY_NAME['coder']) == 'dflash', 'catalog: the Coder\'s drafter file is dflash')
-    check(models.drafter_item(models.BY_NAME['swift-1.5']) == models.drafter_item(models.BY_NAME['thinkingcap']) == 'dflash2-27b'
-          and all(models.drafter_item(m) is None for m in models.CATALOG if m.name not in ('coder', 'swift-1.5', 'thinkingcap')),
+    q27 = ('swift-1.5', 'thinkingcap', 'qwen3.8-27b')   # (the dense 27B line; qwen3.8-27b only while paused models are offered)
+    check(all(models.drafter_item(m) == 'dflash2-27b' for m in models.ALL if m.name in q27)
+          and all(models.drafter_item(m) is None for m in models.CATALOG if m.name not in ('coder',) + q27),
           'catalog: the 27B models share the base model\'s DFlash2 file (--draft dflash); no other model loads a drafter')
 
     # ---- meta: the header read once per file; tp_shape from it (arch.meta reads it with caminus.ggufio, gguf-py only for

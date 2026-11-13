@@ -78,7 +78,7 @@ Caminus doesn't include any model weights. Each model has its own licence; read 
 
 | Model | Licence |
 |---|---|
-| AREX-2, Qwen3-30B-A3B (and the paused Qwen3.6-35B-A3B and Qwen3-Coder-Next) | Apache-2.0 |
+| AREX-2, Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO (not served yet), and the paused Qwen3.6-35B-A3B and Qwen3-Coder-Next | Apache-2.0 |
 | Swift 1.5 | the Swift Open License 1.0 |
 | ThinkingCap | PolyForm Small Business 1.0.0 (read its terms before any commercial use) |
 | The DFlash2 drafters (the Coder's, and the 27B models' shared one) | Apache-2.0 |

@@ -64,6 +64,9 @@ ITEMS = ITEMS + (
     Item('thinkingcap', 'thinkingcap', 'bottlecapai/ThinkingCap-Qwen3.8-27B-GGUF-RCO-4.2bpw',
          '67c3324641f39f169e1cbc8280f9748e890f3046', 'ThinkingCap-Qwen3.8-27B-RCO-4.2bpw.gguf', 14309041504,
          'bfb7712f21ad131d64321c4f9ce42417be0fe7a52bd2ff69d263012ddf631654', 'hf-lfs'),
+    Item('qwen3.8-27b', 'qwen3.8-27b', 'ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF', 'd562806dbafae37109975e970aae91b43e73b440',
+         'Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf', 12120016960,
+         '58fd826723939933dc86f45b7fe04545cbc2de1c70f6fe2cdd3858c87a98c12f', 'hf-lfs'),
     Item('dflash2-27b', 'dflash', 'incoai/Qwen3.8-27B-DFlash2-GGUF', '144eb06583b4fb0b6e54bc814b16a206a240f4d2',
          'Qwen3.8-27B-DFlash2-Q8_0.gguf', 2056414816,
          '651a1b2930c9825080480f79cf38057e681c9b175d580a357c14f67cf77ccf49', 'hf-lfs'),
@@ -97,6 +100,8 @@ ALL = (
     _model('thinkingcap', 'ThinkingCap (Qwen3.8 27B dense) RCO 4.2 bpw (own code end to end)', 'qwen35-own', ('thinkingcap', 'dflash2-27b'),
            'thinkingcap', '47 tok/s decode on an XTX, 39 on an XT (short context); prefill 942 tok/s at 2K (XTX)',
            'fits either card (an XT: ~53K context); --draft dflash: its base model\'s DFlash2 drafter (one card)'),
+    _model('qwen3.8-27b', 'Qwen3.8 27B dense GSQ-RCO IQ3_S (own code end to end)', 'qwen35-own', ('qwen3.8-27b', 'dflash2-27b'),
+           'qwen3.8-27b', 'not measured yet', 'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )
@@ -107,6 +112,7 @@ PAUSED = {
     'qwen3.6': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3.6-hauhau': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3-coder-next': 'Qwen3-Coder-Next is paused: not in this release (it is not measured on the current code)',
+    'qwen3.8-27b': 'Qwen3.8-27B GSQ-RCO is not ready yet: its decode module is built, its prefill and serve are not',
 }
 
 
