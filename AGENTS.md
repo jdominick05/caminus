@@ -67,6 +67,13 @@ CLAUDE.md imports this file.
   Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
   modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
+  Two-card drafting uses `engine/q35_dense_verify_tp.py` and `engine/q35_draft_tp.py`: MTP stays on card 0, DFlash on
+  the card with more projected headroom. The drafter shares that card's embedding and keeps a full head copy to avoid
+  a peer launch for every chained draft; count the copy, exported residuals, verify buffers and drafter windows before
+  allocation. Its cache-facing target is the TP trunk, while its compute view holds the full head. Run the two-card
+  feature gate and served off/MTP/DFlash identity checks in `docs/dev/testing.md` before offering or defaulting a drafter.
+  Ship both TP verify objects in `device/kernels.py`'s explicit runtime set: a development checkout can hide a missing
+  installed object. `tests/packaging/test_runtime_kernels.py` gates the real verify constructor's module selections.
   `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
@@ -98,8 +105,17 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
+  ThinkingCap's TP verify wrapper alone defines `K3_Q35_GDN_LOCAL_BASE`: empty asm operands keep GDN STEP/SAVE
+  geometry and replay pointers inside their dispatch branches. Preserve the addresses and floating-point statements;
+  check the whole build's object isolation and register budget before running its TP bitwise gates.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
+- Dense Q8 KV is staged under separate `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
+  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename.
+  Its shared prefill object falls back to FP32 for causal rows whose Q/K/V cannot be staged in half; preserve the
+  codec domain and check numerical flags before drafter exports, handoff or ordinary failure recovery.
+  The staged two-card target uses byte KV rows on both cards and unpacked `*_tp_ver_kvq8` verify objects. Wait for
+  both cards and check every numerical flag before handling either card's bounds/timeout status or exporting features.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS) and Qwen3-Coder-Next. Their engines and kernels stay; `models.PAUSED` keeps them
@@ -193,6 +209,9 @@ tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch D
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 ```
 
+Complete a whole build before running CPU packaging suites in that checkout: those tests read its actual build
+provenance. Do not overlap `build.sh` with `tests/ci_cpu.py` in the same checkout.
+
 After a kernel change: `objcheck.py check` (every other object's code unchanged; k3_run <= 96 VGPRs, 0 spills;
 `.sgpr_spill_count` not up: spilled scalars slow every hop, a change in one op measured +13 % on all of them; the
 counts are the ones `llvm-readelf --notes` prints); rerun the gates at `K3_PER_WGP=3/6/7`
@@ -204,8 +223,9 @@ GPU safety (a fault on the display card can take the desktop down):
 - Every GPU process runs under `tools/guard.sh LOG SECS CMD...` (or `caminus guard`).
 - Guard exit 99 = a GPU fault: stop all GPU work, rerun nothing. Exit 98 = a fault on record
   (`~/.local/state/k3/GPU_FAULT_STOP`): a person inspects it before anything runs.
-- Exit 75 = `caminus serve`'s engine produced non-finite logits (`caminus.errors.NonFiniteLogits`: a weight or state corrupt
-  in that process; nothing parked). It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
+- Exit 75 = `caminus serve`'s engine had a terminal `caminus.errors.NumericalFailure` (non-finite logits or a refused
+  Q8 KV encoding). Check the dedicated sticky KV error word after the device wait, before timeout recovery: other
+  blocks may already be written. Mark the engine broken; retry, reset and parking cannot repair it. It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
   the systemd unit's `RestartForceExitStatus=75`); faults are never retried.
 - New or changed kernel code runs first on a non-display card alone (`HIP_VISIBLE_DEVICES=<its index>`), small inputs.
 - Every device wait is time-bounded (`limit_us`; TP 200 ms + a bitwise retry); every launch well under 200 ms. Never a
@@ -227,6 +247,9 @@ Correctness:
   divergence bound only.
 - Bounds: every position-indexed host entry calls `k3.check_span`; device accesses clamp and set `err`; contexts past the
   allocation are refused, never written.
+- Checkpoint KV strides use the exposed state view's `kv_rows` when present: dense verify views include `spec_T - 1`
+  tail rows beyond `max_ctx`; dividing their bytes by the legal context corrupts small-context checkpoint and park
+  offsets. Padding excluded from a state view (Qwen3's ATS rows) also stays excluded from its layout row count.
 - Routing ids are clamped on the device before every mm_ids_helper launch; a chunk with its routing flag set is refused.
 - Unsafe paths are shown unsafe by CPU emulation only (tests/prefill/test_prefill_safety.py), never by launching them.
 - The prefill's TP exchange uses hipMemcpyPeerAsync on copy streams ordered by HIP events only; card 0's partial is added

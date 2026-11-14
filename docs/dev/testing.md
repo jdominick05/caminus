@@ -27,6 +27,28 @@ Installed-mode command and preflight refusals have a separate CPU suite,
 `python -I tests/tools/test_serve_smoke_installed.py --scratch DIR`. Its package/provenance fixtures never execute
 GPU code; the CLI is replaced by a recorder.
 
+### Staged own Q8 KV codec
+
+The internal `device.kv_codec.Q8KVCodec` writer is a foundation for new cache paths; it does not enable a model's
+Q8 mode. It stores K then V in 34-byte blocks of 32 values, without rotating inputs. The caller owns allocation,
+capacity checks and transforms. Every nonzero error word invalidates the whole append, including blocks that were
+written before another block failed. Discard or reinitialize that result before attention. The launcher leaves error
+bits sticky; initialize the error word before a new sequence and call `check` before consuming the cache.
+
+`tests/io/test_own_kv_codec.py --scratch DIR` compiles the actual own header as host C++ and compares its bytes with
+the independent NumPy reference. It checks roundf boundaries, stored-scale rounding, half underflow/subnormals,
+seeded finite inputs and numerical refusals. `tests/device/test_kv_codec.py` checks launch spans, view extents,
+alignment, aliasing and dispatch using CPU recorders. CI runs both; the host compilation needs a C++ compiler.
+These tests establish source and host behavior, not GPU byte parity or model quality.
+
+The next gate is `tools/guard.sh LOG 180 python -I tests/device/test_kv_codec_gpu.py --json OUT`, on the non-display
+card first. It compares
+valid device output bytes with the independent reference over head widths 32/128/256, different head counts,
+padded input strides, last valid rows, chunk cuts and cache canaries. Invalid span/layout tests stay on the CPU.
+Device division, reciprocal, half conversion and subnormal behavior must match before integrating this writer.
+Attention, rotation, verify, prefill, drafting, persistence, capacity and per-model numerical/performance gates
+remain separate requirements; codec success alone does not establish Q8 model support.
+
 ## GPU tests
 
 GPU tests always run under the guard (`tools/guard.sh LOG SECS CMD...`) and follow [GPU safety](gpu-safety.md). Each
@@ -79,3 +101,28 @@ the GPU. Without the environment switch the existing checkout server path is use
 
 The references the gates compare against (llama.cpp's tensors and logits) are large and not distributed. The tools that
 make them are in `tools/reference/` and `tools/gates/`, so you can build your own on the same hardware.
+
+## Dense two-card drafting
+
+The CPU tape check also covers feature-copy dependencies, the complete drafter head on either card, target identity,
+physical KV row strides and prefill hooks:
+
+```bash
+python -I tests/engine/test_q35_verify_tp_cpu.py --scratch SCRATCH
+```
+
+Before serving a new two-card drafter, run the existing non-display-card probe first, then the TP gate on both cards
+for Swift and ThinkingCap. Select each feature card in turn; the exported residuals must be bitwise the decode pass's
+at every accepted row, including rejected tails and grids 3/6/7:
+
+```bash
+tools/guard.sh LOG 600 python -I tests/engine/test_q35_tp_ver_probe.py --scratch SCRATCH
+tools/guard.sh LOG 600 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers 6,20,34,48,62 --feature-card 0
+tools/guard.sh LOG 600 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers 6,20,34,48,62 --feature-card 1
+```
+
+Run `serve_smoke1.py` on `--card 0,1 --cards 2` with `--draft off`, `--draft mtp` and `--draft dflash`, each under the
+guard, on each model. Compare both `greedy_sha256` and `sampled_sha256`; include `--restart` to exercise the park files
+and `--block-imports gguf,tokenizers` for the own-code check. Keep the server available between short GPU windows.
+`benchmarks/q35_served_ab.py --card 0,1 --cards 2` measures the served gain at depth, with `--draft mtp` or `dflash`,
+at least three interleaved rounds under the guard. Two-card defaults stay off until these measurements show a gain.

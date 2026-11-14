@@ -32,7 +32,7 @@ from .. import ggufio
 from ..device import capacity
 from . import k3
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD
-from .q35_dense import module_of, trunk_blocks, block_kinds, _shapes, RECURRENT, attn_part_elems
+from .q35_dense import module_of, kv_module, trunk_blocks, block_kinds, _shapes, RECURRENT, attn_part_elems
 from .q3moe_one import card_per_wgp
 from .tp_slots import Slots, _hip
 
@@ -94,11 +94,13 @@ def cut(b, ranges_r, ranges_c, bs, ts):
     return x, x.shape[0], sum(c1 - c0 for c0, c1 in cc)
 
 
-def _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T=1):
+def _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T=1, q8=False):
     """bytes per card: its slices of every trunk matrix (exact for the split above), the replicated vectors and embedding,
     its kv heads' f16 KV cache (spec_T - 1 rows past max_ctx: the guard's span), its Gated DeltaNet states (with spec_T
     tokens' saved inputs), the exchange slots (spec_T * D floats each); [card 0, card 1]"""
     c = _shapes(F); nl = c['nl']; kinds = block_kinds(F)
+    if q8 and (c['hd'] != 256 or c['nh'] != 6 * c['nkv']):
+        raise ValueError('Dense35TP: Q8 requires head_dim 256 and six query heads per KV head')
     mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     D, ffn, S, NK, NV = c['D'], c['ffn'], c['S'], c['NK'], c['NV']
     f0 = ffn_cut(ffn, ffn_share); vocab = int(F.T['output.weight'].shape[1]); v0 = vocab_cut(vocab, vocab_share)
@@ -119,10 +121,10 @@ def _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T=1):
     n_attn = sum(1 for g in kinds if not g)
     CHl = 2 * S * (NK // 2) + S * (NV // 2)
     gdn = (nl - n_attn) * (k3.gdn_block_size(NV // 2, S, NK // 2, spec_T) + CHl * 3 + spec_T * CHl) * 4
-    kv = n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], False)
+    kv = n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], q8)
     slots = 2 * nl * (16 + spec_T * D) * 4
     part = 4 * attn_part_elems(1, c['nh'] // 2, int(max_ctx) + spec_T - 1)   # (the split attention pair's records, per card)
-    return [o + gdn + kv + slots + part for o in out]
+    return [o + gdn + kv + slots + part + (4 if q8 else 0) for o in out]
 
 
 class Dense35TP:
@@ -130,7 +132,7 @@ class Dense35TP:
 
     def __init__(self, path, devices=(0, 1), max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=16, rpt16=32,
                  ffn_share=0.5, vocab_share=0.5, local_only=False, vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8,
-                 debug_layers=None, spec_T=1):
+                 debug_layers=None, spec_T=1, feature_layers=(), feature_card=0, q8=False):
         """path: a dense qwen35 GGUF (engine/q35_dense.py Dense35Own's formats; module None: the two-card build of the module
         module_of picks). devices: the two torch / HIP device indices (card 0 first: its partials come first in every
         sum). ffn_share / vocab_share: card 0's part of the feed-forward rows / the head rows. local_only: TEST-ONLY, every
@@ -167,11 +169,17 @@ class Dense35TP:
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
             raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
         self.devs, self.max_ctx, self.limit_us, self.spec_T = list(devices), int(max_ctx), limit_us, int(spec_T)
+        self.kv_rows = self.max_ctx + self.spec_T - 1
         one = module or module_of(F)
         one = {v: k for k, v in k3.Q35_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
+        one = kv_module(F, one, q8)
         if one not in k3.Q35_TP_OF: raise ValueError(f'Dense35TP: module {one} has no two-card build ({sorted(k3.Q35_TP_OF)})')
         self.module = k3.Q35_TP_OF[one]
         self.tcap = self.module in k3.Q35T_MODULES
+        self.q8 = bool(q8)
+        if self.q8 and (self.hd != 256 or self.nh != 6 * self.nkv):
+            raise ValueError('Dense35TP: Q8 requires head_dim 256 and six query heads per KV head')
+        if self.q8: self.kv_format_id = k3.Q35_KV_Q8_FORMAT_ID
         self.per_wgp, self.rpt, self.rpt16 = per_wgp, int(rpt), int(rpt16)
         self.ffn_share, self.vocab_share, self.local_only = float(ffn_share), float(vocab_share), bool(local_only)
         assert 0.0 < self.ffn_share < 1.0 and 0.0 < self.vocab_share < 1.0, (ffn_share, vocab_share)
@@ -179,10 +187,16 @@ class Dense35TP:
         self.tp_key = dict(ffn_rows=self.f0, vocab_rows=self.vh)   # (the prompt cache's key: the split changes the partial sums' bits)
         self.nl_build = self.nl if debug_layers is None else int(debug_layers)
         assert 1 <= self.nl_build <= self.nl, debug_layers
+        fl = [int(l) for l in feature_layers]
+        if any(not 1 <= l < self.nl_build for l in fl) or len(set(fl)) != len(fl):
+            raise ValueError(f'Dense35TP: feature_layers {fl} (distinct, 1 .. {self.nl_build - 1})')
+        if feature_card not in (0, 1): raise ValueError(f'Dense35TP: feature_card {feature_card}: 0 or 1')
+        self.feature_layers, self.feature_card, self.features, self.ple_layers = fl, int(feature_card), None, None
         self.emb = F.T['token_embd.weight']
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35TP: token_embd is {self.emb.type} on module {self.module}')
-        self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share, self.spec_T)]
+        self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share, self.spec_T, self.q8)]
+        self.vram_mib[self.feature_card] += self.feature_mib(self.D, 1, len(fl))
         ex = [float(v) for v in vram_extra_mib]
         if vram_check:
             capacity.check(self.devs, [v + e for v, e in zip(self.vram_mib, ex)],
@@ -210,7 +224,6 @@ class Dense35TP:
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual = False, None, False, False
         self.qsa_from = None
-        self.feature_layers, self.feature_card, self.features, self.ple_layers = [], 0, None, None
         self.gdn_keys = self.NK // 2; self.moe_blocks = 0
         self._during, self._tok = None, False
         self.model_tag = 'qwen35'
@@ -219,11 +232,19 @@ class Dense35TP:
         self._load(); self._build_tapes()
 
     @staticmethod
-    def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5, spec_T=1):
+    def feature_mib(D, T, nfeat):
+        """The selected card's exported residuals and the copy segments' fp32 / fp16 norm scratch."""
+        return (int(nfeat) * T * D * 4 + T * D * 6) / 2 ** 20 if nfeat else 0.0
+
+    @staticmethod
+    def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5, spec_T=1, nfeat=0, feature_card=0, q8=False):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
         check counts the same terms"""
         F = ggufio.GGUFFile(path)
-        try: return [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T)]
+        try:
+            out = [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T, q8)]
+            out[feature_card] += Dense35TP.feature_mib(_shapes(F)['D'], 1, nfeat)
+            return out
         finally: F.close()
 
     @staticmethod
@@ -238,12 +259,12 @@ class Dense35TP:
         finally: F.close()
 
     @staticmethod
-    def kv_pos_mib(path):
+    def kv_pos_mib(path, q8=False):
         """per card, MiB of KV cache per position (its kv heads of every attention block)"""
         F = ggufio.GGUFFile(path)
         try:
             c = _shapes(F); n_attn = sum(1 for g in block_kinds(F) if not g)
-            return n_attn * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], False) / 2 ** 20
+            return n_attn * k3.kv_pos_bytes((c['nkv'] // 2) * c['hd'], q8) / 2 ** 20
         finally: F.close()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
@@ -327,7 +348,8 @@ class Dense35TP:
                 qn, kn = rep(p + 'attn_q_norm.weight', hd), rep(p + 'attn_k_norm.weight', hd)
                 for c in (0, 1):
                     dd[c].update(kind='attn', q=q[c], k=k[c], v=v[c], o=o[c], qn=qn[c], kn=kn[c],
-                                 cache=Z(c, (self.max_ctx + self.spec_T - 1) * 2 * nkvc * hd, torch.float16))   # (spec_T: the guard's span)
+                                 cache=Z(c, self.kv_rows * k3.kv_pos_bytes(nkvc * hd, self.q8) // (1 if self.q8 else 2),
+                                         torch.uint8 if self.q8 else torch.float16))
                     self.state[(c, il, 'kv')] = dd[c]['cache']
             self.L.append(dd)
         self.out_norm = rep('output_norm.weight', D)
@@ -365,6 +387,9 @@ class Dense35TP:
                 if self.module in k3.ATTN_SPLIT_MODULES:   # (the split attention pair's records over this card's heads)
                     s['part'] = B(attn_part_elems(1, QHc // hd, self.max_ctx + self.spec_T - 1))
                 self.buf.append(s)
+                if self.feature_layers and c == self.feature_card:
+                    s.update(feat=B(len(self.feature_layers) * D), fh=B(D), fh16=B(D, torch.float16))
+                    self.features = s['feat'].view(len(self.feature_layers), 1, D)
                 ds = B(32, torch.int32); self.dstage.append(ds)
                 self.tok.append(ds[16:17]); self.pos.append(ds[17:18]); self.epoch.append(ds[18:19])
                 E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp_c[c]), T=1, limit_us=self.limit_us)
@@ -381,7 +406,9 @@ class Dense35TP:
         D, hd, S = self.D, self.hd, self.S
         nhc, nkvc = self.nh // 2, self.nkv // 2
         E, s, pos = self.E[c], self.buf[c], self.pos[c]
+        q8 = self.q8
         names = self.seg_names[c]
+        fslot = {l: k for k, l in enumerate(self.feature_layers)} if c == self.feature_card else {}
 
         def named(si, name):
             names[si] = name; return si
@@ -403,6 +430,11 @@ class Dense35TP:
             self.layer_seg[c].append((il, len(E.segs)))
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], self.eps, d=s['ffp'] if il else None,
                                  slots=1 if il else 0, dep=prev)
+            fc = None
+            if il in fslot:
+                k = fslot[il]
+                fc = E.own_add_rms16(s['feat'][k * D:(k + 1) * D], d['attn_norm'], s['fh'], s['fh16'], self.eps,
+                                     d=s['x'], slots=1, dep=n1)
             if d['kind'] == 'gdn':
                 NV, NK, CH = d['NV'], d['NK'], d['CH']; KD = NK * S
                 a_ = mv(d['al'], s['h16'], s['al'], n1, x32=s['h']); b_ = mv(d['be'], s['h16'], s['be'], n1, x32=s['h'])
@@ -418,15 +450,21 @@ class Dense35TP:
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
                 kd = E.qk_nr(s['kr'], hd, nkvc, hd, d['kn'], pos, s['ko'], self.nrot, self.theta_scale, self.eps, dep=k_)
-                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, dep=kd), v_)
+                if q8:
+                    kd = E.hadamard(s['ko'], 256, dep=kd)
+                    v_ = E.hadamard(s['vr'], 64, dep=v_)
+                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, q8=q8, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nhc, hd, d['qn'], pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_)
+                if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 akw = dict(max_cells=self.max_ctx + self.spec_T - 1, part=s['part']) if E.split_attn() else dict(batched=True)
-                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), dep=ap, **akw), qd)
+                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), q8=q8, dep=ap, **akw), qd)
+                if q8: a_ = E.hadamard(s['att'], 64, dep=a_)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blkp'], g_)
             x1 = xchg(s['blkp'], s['blk'], 2 * il, o_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], self.eps, d=s['blk'], slots=1, dep=x1)
+            if fc is not None: E.also(n2, fc)   # the feature copy must finish before the next writer of x
             g_ = mv(d['fg'], s['h16'], s['g'], n2); u_ = mv(d['fu'], s['h16'], s['u'], n2)
             sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             f_ = mv(d['fd'], s['a16'], s['ffpp'], sw)
@@ -472,9 +510,12 @@ class Dense35TP:
         if self.spec_T == 1: return 1
         return 0 if self.fresh else self.last_T
 
-    def mark_broken(self, why):
+    def mark_broken(self, why, error_cls=None):
         """non-finite logits: sticky (reset() keeps it); the passes refuse"""
         if self.broken is None: self.broken = why
+        if error_cls is not None:
+            self._broken_error = error_cls
+            raise error_cls(f'Dense35TP: {self.broken}')
         print(f'k3 qwen35 TP: {why}', file=sys.stderr, flush=True)
 
     def prefetch(self, tokens, positions):
@@ -491,7 +532,7 @@ class Dense35TP:
         return self.logits_full()[0]
 
     def _check(self, tokens, i0, commit, what):
-        if self.broken: raise k3.NonFiniteLogits(f'{what}: refused: {self.broken}')
+        if self.broken: raise getattr(self, '_broken_error', k3.NonFiniteLogits)(f'{what}: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
         k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.commit_max(), what=what)
         if tokens is not None and len(tokens) < i0 + 1:
@@ -572,6 +613,7 @@ class Dense35TP:
             with torch.cuda.device(self.devs[c]):
                 if ct is not None: ct[c].record()
                 self.dstage[c].copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the waits)
+                if self.features is not None and c == self.feature_card: self.features.zero_()
                 if trace is None: self.E[c].run(check=False)
                 else: self.E[c].run(check=False, trace=trace[c])
         for c in (0, 1):
@@ -598,6 +640,12 @@ class Dense35TP:
     def _pass_wait(self, i0):
         """wait for both cards, read their status; the bounds guard poisons and raises, a wait that gave up is returned"""
         for c in (0, 1): self.ev_done[c].synchronize()
+        if getattr(self, 'q8', False):
+            for c in (0, 1):
+                try:
+                    self.E[c].check_kv_error()
+                except k3.InvalidKVEncoding as exc:
+                    self.mark_broken(f'card {c}: {exc}', error_cls=k3.InvalidKVEncoding)
         if self._card_ev is not None:
             self.card_ms = tuple(self._card_ev[c].elapsed_time(self.ev_done[c]) for c in (0, 1))
         oob = []

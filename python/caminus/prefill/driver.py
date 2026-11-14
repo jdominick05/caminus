@@ -26,6 +26,7 @@ a ChunkStack's attributes that the other drivers faked."""
 import time
 
 import numpy as np
+from ..errors import NumericalFailure, NonFiniteLogits
 
 from ..engine import k3
 
@@ -73,6 +74,11 @@ class PrefillDriver:
         return batched_span(p0, end, self.crossover, self.limit)
 
     # -- refusals ------------------------------------------------------------------------------------------------------
+    def _check_terminal(self):
+        if getattr(self.m, 'broken', None):
+            cls = getattr(self.m, '_broken_error', NonFiniteLogits)
+            raise cls(f'prefill: terminal engine state: {self.m.broken}')
+
     def check_drafter(self, draft):
         """refuse (PrefillRefused) a drafter this prefill cannot feed (the default: any drafter is fine)"""
 
@@ -97,6 +103,7 @@ class PrefillDriver:
         """refuse (PrefillRefused) before anything runs: the batched positions [p0, p1), every token of toks[:n_total]
         (default: all of toks) in range, the engine's state, the drafter"""
         m = self.m
+        self._check_terminal()
         if m.poisoned: raise PrefillRefused(f'prefill: the engine is poisoned ({m.poisoned}): reset it first')
         n_total = len(toks) if n_total is None else int(n_total)
         p0, p1 = int(p0), int(p1)
@@ -127,6 +134,9 @@ class PrefillDriver:
     def _sync_devices(self):
         """a failure: every card synchronized before the engine is poisoned"""
 
+    def _run_failure_check(self):
+        """After a failure drain, report terminal device flags before ordinary recovery."""
+
     def _handoff(self):
         """a run's end (or a stop): committed state; the next K3 pass commits nothing"""
         self.m.fresh = True
@@ -156,6 +166,7 @@ class PrefillDriver:
         are given up (skip_inject: never wrong, the drafter drafts filler while a window reads them). A cancel object's
         progress(position), when it has one, is called after each chunk (the server's live prompt progress)"""
         m, name = self.m, type(self).__name__
+        self._check_terminal()   # validated=True also refuses an engine that failed since validation
         p0, p1 = int(i0) - int(commit), int(p1)
         C = self.chunk if chunk is None else int(chunk)
         if not 1 <= C <= self.chunk: raise ValueError(f'{name}.run: chunk {chunk} (1 .. {self.chunk})')
@@ -191,6 +202,10 @@ class PrefillDriver:
             self._run_settle()
         except BaseException as e:
             self._sync_devices()
+            if isinstance(e, NumericalFailure):
+                raise
+            self._run_failure_check()
+            self._check_terminal()
             if not m.poisoned: m.poisoned = f'the batched prefill of positions {p0} .. {p1 - 1} failed after writing state: {type(e).__name__}: {e}'
             raise
         t1 = time.perf_counter()

@@ -75,7 +75,15 @@ class Dense35Verify:
         previous layer's feed-forward is added, before the layer's norm; llama.cpp's layer input). The copy is the
         module's own add-rms op on a zeroed buffer (0 + x, exact), so no device code changes and the logits stay bitwise"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
-        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
+        q8 = bool(getattr(eng, 'q8', False))
+        if module is None:
+            module = MODULE_TCAP if eng.tcap else MODULE
+            if q8:
+                if eng.module in k3.Q35R_MODULES:
+                    raise ValueError('Dense35Verify: GSQ Q8 verify requires the GSQ verify implementation')
+                module = k3.Q35_KV_Q8_OF[module]
+        if (module in k3.Q35_KV_Q8_MODULES) != q8:
+            raise ValueError('Dense35Verify: target and verify KV formats must match')
         line = k3.Q35TV_MODULES if eng.tcap else tuple(m for m in k3.Q35SV_MODULES if m not in k3.Q35M_MODULES + k3.Q35DF_MODULES)
         if module not in line:
             raise ValueError(f'Dense35Verify: module {module!r} is not a verify module of the engine\'s line {line} (the engine runs {eng.module})')
@@ -92,6 +100,7 @@ class Dense35Verify:
 
     def _build(self):
         eng, T = self.eng, self.T
+        q8 = bool(getattr(eng, 'q8', False))
         D, hd, nh, nkv, S, NK, NV, ffn = eng.D, eng.hd, eng.nh, eng.nkv, eng.S, eng.NK, eng.NV, eng.ffn
         CH, KD = 2 * S * NK + S * NV, NK * S
         s = self.buf = {k: torch.zeros(n, dtype=dt, device='cuda') for k, (n, dt) in self._spec(eng, T, len(self.feature_layers)).items()}
@@ -145,11 +154,16 @@ class Dense35Verify:
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
                 kd = E.qk_nr(s['kr'], hd, nkv, hd, d['kn'], self.pos, s['ko'], eng.nrot, eng.theta_scale, eng.eps, dep=k_)
-                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], self.pos, dep=kd), v_)
+                if q8:
+                    kd = E.hadamard(s['ko'], 256, dep=kd)
+                    v_ = E.hadamard(s['vr'], 64, dep=v_)
+                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], self.pos, q8=q8, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nh, hd, d['qn'], self.pos, s['qo'], eng.nrot, eng.theta_scale, eng.eps, dep=q_)
+                if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
-                                       **akw), qd)
+                                       q8=q8, **akw), qd)
+                if q8: a_ = E.hadamard(s['att'], 64, dep=a_)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], eng.eps, d=s['blk'], slots=1, dep=o_, tokens=T)
@@ -181,7 +195,7 @@ class Dense35Verify:
         outside the vocabulary. A wait that gave up runs the pass again (commit 0: the first launch committed already);
         the device bound guard poisons the engine until its reset()."""
         eng, T, E = self.eng, self.T, self.E
-        if getattr(eng, 'broken', None): raise k3.NonFiniteLogits(f'Dense35Verify pass: refused: {eng.broken}')
+        if getattr(eng, 'broken', None): raise getattr(eng, '_broken_error', k3.NonFiniteLogits)(f'Dense35Verify pass: refused: {eng.broken}')
         if eng.poisoned: raise k3.ContextBoundsError(f'Dense35Verify pass: refused until reset(): {eng.poisoned}')
         if len(tokens) != T: raise ValueError(f'Dense35Verify pass: {len(tokens)} tokens for a T = {T} tape')
         k3.check_span(pos0, T, eng.max_ctx, commit=commit, ntok=eng.commit_max(), what='Dense35Verify pass')
@@ -219,6 +233,11 @@ class Dense35Verify:
         self.h_st.copy_(E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
         self.ev_done.record()
         self.ev_done.synchronize()
+        if getattr(eng, 'q8', False):
+            try:
+                E.check_kv_error()
+            except k3.InvalidKVEncoding as exc:
+                eng.mark_broken(str(exc), error_cls=k3.InvalidKVEncoding)
         st = self.h_st.tolist()
         b = k3.bounds_status(st)
         if b:

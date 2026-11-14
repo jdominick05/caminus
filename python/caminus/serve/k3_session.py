@@ -86,6 +86,7 @@ import numpy as np
 import torch
 
 from .. import arch as _arch
+from ..errors import NumericalFailure
 from ..device import capacity, topk
 from ..decode import longctx
 from ..engine import passpolice
@@ -494,6 +495,11 @@ class K3Session(EngineSession):
         try:
             r = pc.prompt(ids, mk or None, side=self._route_arg(), cancel=prog, max_new=max_new, hint=hint,
                           max_recoveries=self.max_recoveries, hooks=self._hooks)
+        except NumericalFailure:
+            # A partially written KV cache or non-finite state is terminal in every prompt phase.
+            # Keep the original type for the worker instead of wrapping it as a recoverable EngineError below.
+            pc.live.known = False
+            raise
         except RecoveryFailed as f:
             raise EngineError(str(f)) from None
         except (ContextBoundsError, PrefillRefused) as e:
@@ -623,7 +629,8 @@ class K3Session(EngineSession):
         if self._dk == 'dflash35':   # (the verify pass's exported features; a one-token pass injected m.features already)
             if self._ver is not None and n == self.T: self.dr.take_pass(i0, n, toks, self._ver)
             return
-        h = self._ver.buf['h'] if (self._ver is not None and n == self.T) else self.m.buf['h']
+        from ..engine.q35_draft_tp import pass_h
+        h = pass_h(self._ver if (self._ver is not None and n == self.T) else self.m)
         self.dr.take_h(i0, h[:n * self.m.D], toks)
 
     def _seq(self, feed, drafts):
@@ -715,8 +722,8 @@ class K3Session(EngineSession):
                     if self.df is not None: self.df.flush()
                     self._ver.run(list(seq[i0:i0 + self.T]), i0, commit, argmax=False)   # (returns after the pass's status read)
                     tw = clock()
-                    L = self._ver.logits2
-                    src = (L[:, :self.vh], L[:, self.vh:])
+                    from ..engine.q35_draft_tp import verify_shards
+                    src = verify_shards(self._ver, self.vh)
                     pid, kp = self._penalty_rows(sampler.params, history, drafts)
                     self.queue_rows(F - 1, k + 1, pid, kp, src=src)
                     out = self._sample_rows(F, k, drafts, sampler, history, stop, pid, kp, False, src=src)
@@ -938,14 +945,27 @@ class K3Session(EngineSession):
         drained = True
         if launched:
             try: m.finish_pass(int(self.st['i0']), int(self.st['commit']))   # (a pass already waited for: its status re-read)
+            except NumericalFailure:
+                pc.live.known = False
+                raise
             except BaseException: drained = False      # noqa: BLE001
         if inf == 'step' and df is not None and int(df.token) != self._step_ep:
             try: drained &= not df.step_wait()          # (the drafter's step behind it: its result taken, or its bail reported)
+            except NumericalFailure:
+                pc.live.known = False
+                raise
             except BaseException: drained = False      # noqa: BLE001
-        self._sync()
+        try:
+            self._sync()
+        except NumericalFailure:
+            pc.live.known = False
+            raise
         p, self._pass, self._dev = self._pass, None, None
         try:
             out = pc.settle(returned=p is not None, drained=drained)
+        except NumericalFailure:
+            pc.live.known = False
+            raise
         except Exception:                               # noqa: BLE001 - the cache refused the state and reset: so does the session
             self._forget()
             raise
@@ -1019,6 +1039,9 @@ class K3Session(EngineSession):
                 return
             self._park(True)
             self.counters['parks'] += 1
+        except NumericalFailure:
+            self.pc.live.known = False
+            raise
         except Exception:                               # noqa: BLE001 - a park that cannot run is skipped
             pass
 

@@ -19,7 +19,13 @@ typedef __attribute__((address_space(1))) float4 XG4;   // global (not flat) flo
 // with the same bits as the lane that owns it
 __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us, int seg, uint64_t * tr) {
     __shared__ int ok;
+#ifdef K3_XCHG_PUSH_ONLY
+    int N = sg.N;
+    asm volatile("" : "+s"(N));   // keep exchange geometry inside its dispatch branch
+    const int tid = K3TID, B = blockDim.x, N4 = N / 4;
+#else
     const int tid = K3TID, B = blockDim.x, N4 = sg.N / 4;
+#endif
     const XG4 * __restrict__ a = (const XG4 *)sg.a;
     XG4 * __restrict__ out = (XG4 *)sg.y;
     if (sg.pad1) {
@@ -32,11 +38,22 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
         }
         __syncthreads(); return;
     }
+#ifdef K3_XCHG_PUSH_ONLY
+    int index = sg.K;
+    asm volatile("" : "+s"(index));   // keep the exchange epoch offset branch-local
+    const uint32_t want = (uint32_t)((const int *)sg.asum)[0] + (uint32_t)index + 1u;
+    uintptr_t peer_addr = (uintptr_t)sg.W;
+    asm volatile("" : "+v"(peer_addr));   // keep the remote payload address inside the exchange
+    float * peer = (float *)peer_addr;
+#else
     const uint32_t want = (uint32_t)((const int *)sg.asum)[0] + (uint32_t)sg.K + 1u;
-    float * peer = (float *)sg.W; const float * mine = (const float *)sg.gs;
+    float * peer = (float *)sg.W;
+#endif
+    const float * mine = (const float *)sg.gs;
     // pad2 = 1 (pull, the producing card): the payload goes to aux (this card's own uncached slot), only the flag to the
     // peer; pad2 = 2 (pull, the reading card): the peer's partial is read from aux (the peer's uncached slot)
-#ifdef K3_MT   // (the multi-token module has no pull: its payload is T x larger and the selects cost it 4 VGPR spills)
+#if defined(K3_MT) || defined(K3_XCHG_PUSH_ONLY)
+    // Multi-token and Q8 TP verify modules only push; unused pull selects spill vectors.
     XG4 * __restrict__ px = (XG4 *)(peer + 16);
 #else
     XG4 * __restrict__ px = (XG4 *)(sg.pad2 == 1 ? (float *)sg.aux : peer + 16);
@@ -68,7 +85,7 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
     }
     __syncthreads();
     __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "");
-#ifdef K3_MT
+#if defined(K3_MT) || defined(K3_XCHG_PUSH_ONLY)
     const XG4 * __restrict__ rx = (const XG4 *)(mine + 16);
 #else
     const XG4 * __restrict__ rx = (const XG4 *)(sg.pad2 == 2 ? (const float *)sg.aux : mine + 16);

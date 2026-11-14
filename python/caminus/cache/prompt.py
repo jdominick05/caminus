@@ -106,6 +106,7 @@ import collections, concurrent.futures as cf, contextlib, fcntl, glob, hashlib, 
 import numpy as np
 import torch
 from ..device import capacity
+from ..errors import NumericalFailure, NonFiniteLogits
 from .livestate import LiveState, is_bail
 
 FORMAT = 1
@@ -325,7 +326,8 @@ def engine_key(m, pf, draft=None, build=None):
         format=FORMAT,
         model=dict(shards=[(os.path.basename(p), _fp(p)) for p in gguf_shards(m.path)], tensors=tensors),
         module=m.module, tag=getattr(m, 'model_tag', None),
-        numerics=numerics(pf), routing=dict(crossover=None if pf.crossover is None else int(pf.crossover)),
+        numerics=dict(numerics(pf), **({'target_kv': str(m.kv_format_id)} if hasattr(m, 'kv_format_id') else {})),
+        routing=dict(crossover=None if pf.crossover is None else int(pf.crossover)),
         tp=dict(devices=[int(d) for d in m.devs], names=[torch.cuda.get_device_name(d) for d in m.devs] if cuda else [],
                 gdn_keys=int(m.gdn_keys), moe_blocks=int(m.moe_blocks), vocab_share=float(m.vocab_share), ntok=int(m.ntok),
                 local_only=bool(getattr(m, 'local_only', False)), **dict(getattr(m, 'tp_key', None) or {}),
@@ -736,8 +738,17 @@ class Layout:
             self.state[k[0]].append((k, t.numel() * t.element_size()))
         self.idx = bool(getattr(m, 'idx_cache', False)) and (0, 'idxraw') in m.state
         self.pb = []
+        # Count rows in the exposed state view: dense verify includes a tail;
+        # allocation-only padding excluded by another engine is not a view row.
+        rows = getattr(m, 'kv_rows', self.max_ctx)
+        if isinstance(rows, bool) or not isinstance(rows, (int, np.integer)) or rows < self.max_ctx:
+            raise ValueError('checkpoint KV view rows must be an integer at least max_ctx')
+        self.kv_rows = int(rows)
         for c in range(len(self.devs)):
-            pbs = {m.state[k].numel() * m.state[k].element_size() // self.max_ctx for k in self.kv[c]}
+            sizes = [m.state[k].numel() * m.state[k].element_size() for k in self.kv[c]]
+            if any(n % self.kv_rows for n in sizes):
+                raise ValueError('checkpoint KV state view does not hold whole physical rows')
+            pbs = {n // self.kv_rows for n in sizes}
             assert len(pbs) == 1, pbs
             self.pb.append(pbs.pop())
         if self.idx:
@@ -905,7 +916,14 @@ class PromptCache:
     def _mark(self):
         self.live.mark(self.m, self.df)
 
+    def _check_terminal(self):
+        if getattr(self.m, 'broken', None):
+            self.live.known = False
+            cls = getattr(self.m, '_broken_error', NonFiniteLogits)
+            raise cls(f'promptcache: terminal engine state: {self.m.broken}')
+
     def _check_engine(self):
+        self._check_terminal()
         if self.m.poisoned:
             self._cold(); raise CacheStateError(f'promptcache: the engine was poisoned ({self.m.poisoned}): the slot was reset')
         d = self.live.drift(self.m, self.df)
@@ -1369,7 +1387,9 @@ class PromptCache:
                 if ver is None: raise CacheError('promptcache: a host-accept drafter but the engine has no verify tape (m.ver)')
                 ver.run(list(seq[i0:i0 + T]), i0, commit, argmax=False)
                 if self.df.kind == 'dflash35': self.draft.take_pass(i0, f, None, ver)
-                else: self.draft.take_h(i0, ver.buf['h'][:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
+                else:
+                    from ..engine.q35_draft_tp import pass_h
+                    self.draft.take_h(i0, pass_h(ver)[:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
             else:
                 m.verify_tokens(seq, i0, commit)
                 if self.draft is not None:
@@ -1388,7 +1408,7 @@ class PromptCache:
         """the caller ran passes from the state prepare() / a previous extend() left (its generation loop): toks = every token
         of the sequence, st = the engine state after them (longctx.generate's). The processed tokens must keep the live log
         as a prefix (else the live slot is dropped: CacheStateError). Nothing launched"""
-        self.fence()
+        self.fence(); self._check_terminal()
         toks = [int(x) for x in toks]; i0, commit = int(st['i0']), int(st['commit'])
         p0 = int(self.st['i0'])
         if i0 < p0 - 1 or lcp(self.log, toks) < min(p0, i0) or not 0 <= commit <= min(self.T, i0) or len(toks) < i0:
@@ -1408,7 +1428,7 @@ class PromptCache:
         continuation (the state continues the live log, commit in range, a side pass within side_rows, the drafter's
         bookkeeping), host only and O(len(toks)), without extend()'s LCP over the whole log; the counters re-marked. Nothing
         launched"""
-        self.fence()
+        self.fence(); self._check_terminal()
         toks = [int(x) for x in toks]; i0, commit = int(st['i0']), int(st['commit'])
         p0 = int(self.st['i0'])
         if i0 != p0 + len(toks) or not 0 <= commit <= min(self.T, i0):
@@ -1660,6 +1680,7 @@ class PromptCache:
           'kept'     nothing launched since the mark: the state as it was (a refusal before the launch keeps its commit).
         The kept state is committed (commit(): the VRAM tier and the live state kept); a commit the cache refuses resets
         it and raises"""
+        self._check_terminal()
         m = self.m
         if m.poisoned:
             self.reset()
@@ -1680,6 +1701,9 @@ class PromptCache:
         try:
             if toks:
                 self.commit(list(toks), st)
+        except NumericalFailure:
+            self.live.known = False
+            raise
         except Exception:                               # noqa: BLE001 - the state cannot be kept: drop it
             self.reset()
             raise
@@ -1812,8 +1836,8 @@ class PromptCache:
         needed: the drafter's window is in the checkpoint's slot, saved when it was taken, and the export reads only that slot and
         the rows below it.) Works after a pass failed its retries (the rows below the failed pass's first position are intact, as
         recover() relies on). Returns dict(name, bytes, ms), or None with self.export_error set (no such checkpoint in the
-        line, a side call, a poisoned engine, no room)"""
-        self.fence()
+        line, a side call, a poisoned engine, no room). Terminal numerical failures refuse export."""
+        self.fence(); self._check_terminal()
         self.export_error = None
         pos, cm = int(at[0]), int(at[1])
         ck = next((c for c in self.ckpts if c.pos == pos and c.commit == cm), None)

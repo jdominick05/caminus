@@ -23,7 +23,7 @@ from ..device import capacity
 
 class Dense35VerifyTP:
     @staticmethod
-    def _spec(eng, T):
+    def _spec(eng, T, nfeat=0):
         """every buffer of one card's verify tape: name -> (elements, dtype); per card [card 0, card 1]"""
         D, hd, nh, nkv, S = eng.D, eng.hd, eng.nh, eng.nkv, eng.S
         nhc, nkvc = nh // 2, nkv // 2
@@ -43,22 +43,25 @@ class Dense35VerifyTP:
             sp.update({k: (T * v, f16) for k, v in dict(h16=D, a16=fc, fin16=NVl * S, gat16=QHc).items()})
             sp['stage'] = (32, i32)
             sp['part'] = (attn_part_elems(T, nhc, eng.max_ctx + eng.spec_T - 1), f32)   # (the split attention pair's records)
+            if nfeat and c == eng.feature_card:
+                sp.update(feat=(nfeat * T * D, f32), fh=(T * D, f32), fh16=(T * D, f16))
             out.append(sp)
         return out
 
     @staticmethod
-    def need_mib(T, eng=None, max_ctx=None):
+    def need_mib(T, eng=None, max_ctx=None, nfeat=0):
         """MiB of device memory one verify tape adds per card (with eng: from its dimensions and shares; without: an upper
         bound for the 27B shapes at T <= 4, to pass as the engine's vram_extra_mib before it exists, max_ctx the engine's:
         the split attention records grow with it, 12 query heads per card at most)"""
         if eng is None:
             if max_ctx is None: raise ValueError('Dense35VerifyTP.need_mib: max_ctx (the records of the split attention pair) without eng')
             return (10.0 * T + 4.0 + 4 * attn_part_elems(T, 12, int(max_ctx) + MAX_T - 1) / 2 ** 20
-                    + 2 * T * 5120 * 4 / 2 ** 20)   # (+ blkp / ffpp: the partials the exchanges read, one-card has none)
+                    + 2 * T * 5120 * 4 / 2 ** 20    # (+ blkp / ffpp: the partials the exchanges read)
+                    + ((4 * nfeat + 6) * T * 5120 / 2 ** 20 if nfeat else 0.0))
         sz = {torch.float32: 4, torch.float16: 2, torch.int32: 4}
-        return [sum(n * sz[dt] for n, dt in sp.values()) / 2 ** 20 + 2.0 for sp in Dense35VerifyTP._spec(eng, T)]
+        return [sum(n * sz[dt] for n, dt in sp.values()) / 2 ** 20 + 2.0 for sp in Dense35VerifyTP._spec(eng, T, nfeat)]
 
-    def __init__(self, eng, T, module=None, per_wgp=None, vram_check=True):
+    def __init__(self, eng, T, module=None, per_wgp=None, vram_check=True, feature_layers=()):
         """eng: a Dense35TP with spec_T >= T (its weights, caches, states, bounds and exchange slots). T: tokens per pass,
         1 .. 4. module: None (the engine's line: k3.Q35_TPV_OF[eng.module]) or that module. per_wgp: workgroups per WGP of
         each card's tape grid ([card 0, card 1]; None: the engine's per card)"""
@@ -68,10 +71,17 @@ class Dense35VerifyTP:
         if module != k3.Q35_TPV_OF.get(eng.module):
             raise ValueError(f'Dense35VerifyTP: module {module!r} is not the verify module of the engine\'s module '
                              f'{eng.module} ({k3.Q35_TPV_OF})')
+        self.q8 = bool(getattr(eng, 'q8', False))
+        if (module in k3.Q35_KV_Q8_MODULES) != self.q8:
+            raise ValueError('Dense35VerifyTP: target and verify KV formats must match')
         if eng.spec_T < T: raise ValueError(f'Dense35VerifyTP: the engine keeps {eng.spec_T} tokens\' saved inputs (spec_T), the tape runs {T}')
         if eng.nl_build != eng.nl: raise ValueError('Dense35VerifyTP: an engine built with debug_layers')
-        self.eng, self.T, self.module = eng, T, module
-        self.mib = self.need_mib(T, eng)
+        fl = [int(l) for l in feature_layers]
+        if any(not 1 <= l < eng.nl for l in fl) or len(set(fl)) != len(fl):
+            raise ValueError(f'Dense35VerifyTP: feature_layers {fl} (distinct, 1 .. {eng.nl - 1})')
+        self.eng, self.T, self.module, self.feature_layers = eng, T, module, fl
+        self.features = None
+        self.mib = self.need_mib(T, eng, nfeat=len(fl))
         if vram_check: capacity.check(eng.devs, self.mib, f'Dense35VerifyTP T {T}: its tape buffers ({self.mib[0]:.1f} / {self.mib[1]:.1f} MiB)')
         pw = per_wgp if per_wgp is not None else eng.per_wgp_c
         self.per_wgp_c = [int(pw[0]), int(pw[1])]
@@ -97,7 +107,8 @@ class Dense35VerifyTP:
         D, hd, S = eng.D, eng.hd, eng.S
         nhc, nkvc = eng.nh // 2, eng.nkv // 2
         with torch.cuda.device(eng.devs[c]):
-            s = {k: torch.zeros(n, dtype=dt, device='cuda') for k, (n, dt) in self._spec(eng, T)[c].items()}
+            s = {k: torch.zeros(n, dtype=dt, device='cuda') for k, (n, dt) in self._spec(eng, T, len(self.feature_layers))[c].items()}
+            if 'feat' in s: self.features = s['feat'].view(len(self.feature_layers), T, D)
             self.buf.append(s)
             ds = s['stage']
             self.dstage.append(ds)
@@ -112,9 +123,11 @@ class Dense35VerifyTP:
 
     def _tape(self, c, E, s, toks, pos, epoch):
         eng, T = self.eng, self.T
+        q8 = self.q8
         D, hd, S = eng.D, eng.hd, eng.S
         nhc, nkvc = eng.nh // 2, eng.nkv // 2
         names = self.seg_names[c]
+        fslot = {l: k for k, l in enumerate(self.feature_layers)} if c == eng.feature_card else {}
 
         def named(si, name):
             names[si] = name; return si
@@ -138,6 +151,11 @@ class Dense35VerifyTP:
             d = dd[c]
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], eng.eps, d=s['ffp'] if il else None,
                                  slots=1 if il else 0, dep=prev, tokens=T)
+            fc = None
+            if il in fslot:
+                k = fslot[il]
+                fc = E.own_add_rms16(s['feat'][k * T * D:(k + 1) * T * D], d['attn_norm'], s['fh'], s['fh16'], eng.eps,
+                                     d=s['x'], slots=1, dep=n1, tokens=T)
             if d['kind'] == 'gdn':
                 NV, NK, CH = d['NV'], d['NK'], d['CH']; KD = NK * S
                 a_ = mv(d['al'], s['h16'], s['al'][:T * NV], n1, x32=s['h']); b_ = mv(d['be'], s['h16'], s['be'][:T * NV], n1, x32=s['h'])
@@ -153,15 +171,21 @@ class Dense35VerifyTP:
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
                 kd = E.qk_nr(s['kr'], hd, nkvc, hd, d['kn'], pos, s['ko'], eng.nrot, eng.theta_scale, eng.eps, dep=k_)
-                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, dep=kd), v_)
+                if q8:
+                    kd = E.hadamard(s['ko'], 256, dep=kd)
+                    v_ = E.hadamard(s['vr'], 64, dep=v_)
+                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, q8=q8, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nhc, hd, d['qn'], pos, s['qo'], eng.nrot, eng.theta_scale, eng.eps, dep=q_)
+                if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 akw = dict(max_cells=eng.max_ctx + eng.spec_T - 1, part=s['part']) if E.split_attn() else dict(batched=True)
-                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), dep=ap, **akw), qd)
+                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), q8=q8, dep=ap, **akw), qd)
+                if q8: a_ = E.hadamard(s['att'], 64, dep=a_)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blkp'], g_)
             x1 = xchg(s['blkp'], s['blk'], 2 * il, o_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], eng.eps, d=s['blk'], slots=1, dep=x1, tokens=T)
+            if fc is not None: E.also(n2, fc)
             g_ = mv(d['fg'], s['h16'], s['g'], n2); u_ = mv(d['fu'], s['h16'], s['u'], n2)
             sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             f_ = mv(d['fd'], s['a16'], s['ffpp'], sw)
@@ -190,7 +214,7 @@ class Dense35VerifyTP:
         runs the pass again (commit 0: the first launch committed already); the device bound guard poisons the engine until
         its reset()."""
         eng, T = self.eng, self.T
-        if eng.broken: raise k3.NonFiniteLogits(f'Dense35VerifyTP pass: refused: {eng.broken}')
+        if eng.broken: raise getattr(eng, '_broken_error', k3.NonFiniteLogits)(f'Dense35VerifyTP pass: refused: {eng.broken}')
         if eng.poisoned: raise k3.ContextBoundsError(f'Dense35VerifyTP pass: refused until reset(): {eng.poisoned}')
         if len(tokens) != T: raise ValueError(f'Dense35VerifyTP pass: {len(tokens)} tokens for a T = {T} tape')
         k3.check_span(pos0, T, eng.max_ctx, commit=commit, ntok=eng.commit_max(), what='Dense35VerifyTP pass')
@@ -223,6 +247,7 @@ class Dense35VerifyTP:
         for c in (0, 1):
             with torch.cuda.device(eng.devs[c]):
                 self.dstage[c].copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the waits)
+                if self.features is not None and c == eng.feature_card: self.features.zero_()
                 self.E[c].run(check=False)
                 if argmax:
                     torch.max(self.logits2[c], dim=1, out=self.d_max[c])
@@ -231,6 +256,12 @@ class Dense35VerifyTP:
                 self.h_st[c].copy_(self.E[c].sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
                 self.ev_done[c].record()
         for c in (0, 1): self.ev_done[c].synchronize()
+        if self.q8:
+            for c in (0, 1):
+                try:
+                    self.E[c].check_kv_error()
+                except k3.InvalidKVEncoding as exc:
+                    eng.mark_broken(f'card {c}: {exc}', error_cls=k3.InvalidKVEncoding)
         oob = []
         for c in (0, 1):
             b = k3.bounds_status(self.h_st[c].tolist())

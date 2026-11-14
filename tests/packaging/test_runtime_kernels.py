@@ -17,7 +17,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'python'))
 from caminus.device import hip, kernels, topk
-from caminus.engine import k3, q3moe_one, q35_dense, q35_dense_verify, q35_mtp, q35_dflash
+from caminus.engine import k3, q3moe_one, q35_dense, q35_dense_verify, q35_dense_verify_tp, q35_mtp, q35_dflash
 from caminus.prefill import attn, gdn, glue, q3m, q3m_ops, q35own, q35own_tp, xchg
 
 
@@ -69,6 +69,9 @@ class RuntimeKernels(unittest.TestCase):
         self.stack.enter_context(patch.object(hip, 'hip', side_effect=AssertionError('HIP access forbidden')))
         self.stack.enter_context(patch.object(torch.cuda, 'device', side_effect=lambda d: contextlib.nullcontext()))
         self.stack.enter_context(patch.object(torch.cuda, 'get_device_properties', return_value=NS(multi_processor_count=42)))
+        self.stack.enter_context(patch.object(torch.cuda, 'current_device', return_value=0))
+        self.stack.enter_context(patch.object(torch.cuda, 'is_available', return_value=False))
+        self.stack.enter_context(patch.object(torch.cuda, 'Event', return_value=NS()))
         self.stack.enter_context(patch.object(torch.cuda, 'current_stream', side_effect=self.stream))
         self.stack.enter_context(patch.object(torch.cuda, 'Stream', side_effect=lambda device: self.stream(device)))
         self.stack.enter_context(patch.object(xchg, '_peer_copy'))
@@ -97,14 +100,14 @@ class RuntimeKernels(unittest.TestCase):
         missing = set(names) - set(kernels.RUNTIME_SET)
         self.assertFalse(missing, f'selected runtime objects missing from package: {sorted(missing)}')
 
-    def dense_prefill(self, module, ratio=6, tp=False):
+    def dense_prefill(self, module, ratio=6, tp=False, feature_card=0):
         tcap = module in k3.Q35T_MODULES
         fmt = 'IQ2_XS' if module in k3.Q35R_MODULES else 'IQ3_S' if tcap else 'Q4_K'
         layer = dict(kind='attn', **{key: dict(fmt=fmt) for key in ('q', 'k', 'v', 'o', 'fg', 'fu', 'fd')})
         m = NS(module=module, tcap=tcap, dev=0, devs=[0, 1], nl=1, nl_build=1, local_only=False,
                D=5120, nh=ratio * (2 if tp else 1), nkv=2 if tp else 1, hd=256, ffn=256, f0=128,
                S=128, NK=1, NV=1, gsplit=[(None, 1, [0]), (None, 1, [0])],
-               vocab=64, emb=NS(type='IQ2_S' if tcap else 'Q4_K'))
+               vocab=64, emb=NS(type='IQ2_S' if tcap else 'Q4_K'), feature_card=feature_card)
         m.L = [[layer, layer]] if tp else [layer]
         start = len(self.loads)
         if tp:
@@ -143,6 +146,30 @@ class RuntimeKernels(unittest.TestCase):
                               q35_mtp.MODULE, q35_mtp.MODULE_TCAP, q35_dflash.MODULE, q35_dflash.MODULE_TCAP])
         self.assertNotIn(q35_dense.MODULE_GSQ, k3.Q35_TP_OF)
 
+    def test_real_tp_verify_constructor_selects_shipped_objects_on_both_cards(self):
+        # Build actual verify buffers/Engine objects, with only the tensor tape
+        # omitted: its full operation/weight coverage lives in q35_tp_ver.
+        # CUDA/HIP access is forbidden by setUp; every allocation stays on CPU.
+        cases = [('k3_q35_swift_tp', 'k3_q35_swift_tp_ver'),
+                 ('k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver')]
+        old_runtime = tuple(n for n in kernels.RUNTIME_SET if n not in {want for _, want in cases})
+        for module, want in cases:
+            for T in (1, 4):
+                with self.subTest(module=module, T=T):
+                    eng = NS(module=module, spec_T=4, nl=1, nl_build=1, D=5120, hd=256, nh=12, nkv=2,
+                             S=128, f0=128, ffn=256, vh=32, vocab=64, max_ctx=64, devs=[0, 1],
+                             per_wgp_c=[4, 4], limit_us=200000,
+                             L=[[dict(kind='attn'), dict(kind='attn')]])
+                    with patch.object(q35_dense_verify_tp.Dense35VerifyTP, '_tape'):
+                        ver = q35_dense_verify_tp.Dense35VerifyTP(eng, T, vram_check=False)
+                    selected = [ver.module] + [e.module for e in ver.E]
+                    self.assertEqual(selected, [want] * 3)
+                    self.assertEqual([e.T for e in ver.E], [T, T])
+                    self.require_runtime(selected)
+                    with patch.object(kernels, 'RUNTIME_SET', old_runtime), \
+                            self.assertRaisesRegex(AssertionError, want):
+                        self.require_runtime(selected)
+
     def test_real_dense_prefill_constructors_select_shipped_helpers(self):
         for module in (q35_dense.MODULE, q35_dense.MODULE_TCAP, q35_dense.MODULE_GSQ):
             for ratio in (6, 8):
@@ -153,10 +180,11 @@ class RuntimeKernels(unittest.TestCase):
                                   q35own.MODULE_TCAP if module == q35_dense.MODULE_TCAP else q35own.MODULE, names)
                     self.require_runtime(names)
         for one in (q35_dense.MODULE, q35_dense.MODULE_TCAP):
-            with self.subTest(tp=one):
-                names = self.dense_prefill(k3.Q35_TP_OF[one], tp=True)
-                self.assertEqual(names.count('prefill_tp'), 2)
-                self.require_runtime(names)
+            for feature_card in (0, 1):
+                with self.subTest(tp=one, feature_card=feature_card):
+                    names = self.dense_prefill(k3.Q35_TP_OF[one], tp=True, feature_card=feature_card)
+                    self.assertEqual(names.count('prefill_tp'), 2)
+                    self.require_runtime(names)
 
     def test_real_q3_module_property_selects_lean_iq_and_row_scale(self):
         self.require_runtime([q3_engine().module])
@@ -232,7 +260,6 @@ class RuntimeKernels(unittest.TestCase):
         names = kernels.RUNTIME_SET
         self.assertEqual(len(names), len(set(names)))
         self.assertFalse(any(n.endswith(('_trace', '_swiglu')) or '_abl' in n for n in names))
-        self.assertTrue(set(k3.Q35TPV_MODULES).isdisjoint(names))
         self.assertTrue(set(k3.Q3M_VER_MODULES).isdisjoint(names))
         self.assertNotIn('kv_codec', names)
         self.assertNotIn('gg_mv_ref', names)
