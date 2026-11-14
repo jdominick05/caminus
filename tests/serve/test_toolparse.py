@@ -389,6 +389,44 @@ class Malformed(unittest.TestCase):
             print('\n[parser malformed] ours pinned; llama.cpp for the record:\n' + '\n'.join(rows), file=sys.stderr)
 
 
+class JsonFinalization(unittest.TestCase):
+    """A JSON call rejected at EOF must not index or modify a preceding call."""
+    TOOLS = [{'type': 'function', 'function': {'name': 'f', 'parameters': {'type': 'object'}}}]
+    PREFIX = '<tool_call>{"name":"f","arguments":{"x":1}}</tool_call>'
+
+    def test_rejected_name_at_eof(self):
+        for name in ('', ' ', '\t\n'):
+            rejected = '<tool_call>' + json.dumps({'name': name, 'arguments': {}})
+            for prefix in ('', self.PREFIX):
+                for closing in ('', '</tool_call>'):
+                    text = prefix + rejected + closing
+                    for width in (1, 3, 11, len(text)):
+                        p = OutputParser(self.TOOLS, thinking=False)
+                        events = []
+                        for start in range(0, len(text), width):
+                            events += p.feed(text[start:start + width])
+                        events += p.finish()
+                        self.assertEqual(p.msg.content, rejected + closing)
+                        self.assertEqual(len(p.msg.tool_calls), int(bool(prefix)))
+                        self.assertEqual([c.complete for c in p.msg.tool_calls], [True] if prefix else [])
+                        self.assertEqual([c.cut for c in p.msg.tool_calls], [False] if prefix else [])
+                        self.assertEqual(sum(e[0] == 'tool_start' for e in events), int(bool(prefix)))
+                        self.assertEqual(_concat(events, len(p.msg.tool_calls))[:2], ('', p.msg.content))
+                    case = dict(tools=self.TOOLS, enable_thinking=False, tool_choice='auto', parallel=True)
+                    _check_adapters(self, case, text, random.Random(88))
+
+    def test_valid_json_missing_only_closing_tag(self):
+        text = '<tool_call>{"name":"f","arguments":{"x":1}}'
+        for prefix in ('', self.PREFIX):
+            p = OutputParser(self.TOOLS, thinking=False)
+            for ch in prefix + text:
+                p.feed(ch)
+            p.finish()
+            self.assertEqual([c.complete for c in p.msg.tool_calls], [True, False] if prefix else [False])
+            self.assertFalse(any(c.cut for c in p.msg.tool_calls))
+            self.assertEqual(json.loads(p.msg.tool_calls[-1].arguments), {'x': 1})
+
+
 class StopReasons(unittest.TestCase):
     def test_cut_call_is_not_a_call(self):
         head = 'r</think><tool_call>\n<function=run_shell>\n<parameter=command>\nrm -rf build'

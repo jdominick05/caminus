@@ -21,6 +21,14 @@ Caminus sizes each model's context to your cards, so it isn't always 262K. Every
 or with `caminus qwen`, Caminus sets Qwen Code's context window to what the running server actually holds, so Qwen Code
 compacts the conversation before it runs out of room.
 
+Setup waits for the server to report its context. If the model is still loading after that wait, setup asks you to try
+again when it is ready; it keeps your existing settings. It does not guess a context size.
+
+Qwen Code's thinking switch works on the main model entry. The `-low` and `-xhigh` entries keep their named effort
+while allowing thinking to be turned off. A `-nothink` entry always stays off; select the main entry to turn thinking
+on again. When you switch servers, Caminus updates its own selected model and removed fast/compaction model routes,
+while keeping your external provider choices, MCP servers and hooks.
+
 ### Side questions (`/btw`)
 
 `/btw <question>` asks about the conversation without adding to it. Caminus recognizes the request and answers it in its
@@ -56,8 +64,8 @@ once and restart Qwen Code.
 
 ### The advisor (optional)
 
-When the model gets stuck, a second model (local or hosted) can send it a hint. `caminus advisor setup --local-only`
-sets it up with a model on your other card; see [the advisor](advisor.md).
+When the model gets stuck, an API advisor can send it a hint. `caminus advisor setup` sets up Anthropic or Mistral
+with your own API key; see [the advisor](advisor.md).
 
 ## Any OpenAI- or Anthropic-compatible tool
 

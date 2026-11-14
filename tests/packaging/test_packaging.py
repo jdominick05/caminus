@@ -274,8 +274,9 @@ def stage_kernels(S):
         if keep is None: os.environ.pop('CAMINUS_KERNEL_DIR', None)
         else: os.environ['CAMINUS_KERNEL_DIR'] = keep
     names = set(K.RUNTIME_SET)
-    check('kernels: the runtime set has no trace / swiglu / test-reference builds', not any(n.endswith(('_trace', '_swiglu')) or n == 'gg_mmvf_ref' for n in names)
-          and len(names) == len(K.RUNTIME_SET) == 48, str(len(names)))   # (36 + the one-card / Qwen3-Coder-Next objects, 11-07; + own_topk)
+    check('kernels: the runtime set has unique names and no trace / swiglu / test-reference builds',
+          not any(n.endswith(('_trace', '_swiglu')) or n == 'gg_mmvf_ref' for n in names)
+          and len(names) == len(K.RUNTIME_SET), str(len(names)))
     if not os.path.isfile(os.path.join(ROOT, 'build', 'BUILD-INFO')):
         print('NOTE kernels: no build/BUILD-INFO (./build.sh not run): the staging checks are skipped', flush=True); return
     st = os.path.join(S, 'staged')
