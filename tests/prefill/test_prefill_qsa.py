@@ -498,7 +498,7 @@ def main():
         if 'XTX' in nm and not a.allow_xtx:
             check(False, f'the GPU stages run on the XT alone first (HIP_VISIBLE_DEVICES=1); cuda:0 is {nm} (--allow-xtx after the XT passed)')
         else:
-            torch.cuda.set_per_process_memory_fraction(0.9, dev)
+            torch.cuda.set_per_process_memory_fraction(0.85, dev)
             for s in gpu:
                 {'g1': lambda: stage_g1(torch, dev, a.coder, a.small, a.tmax, q8=a.kv == 'q8'),
                  'speed': lambda: stage_speed(torch, dev, a.coder, q8=a.kv == 'q8')}[s]()

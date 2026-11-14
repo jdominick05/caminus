@@ -317,6 +317,7 @@ def main():
     if 'g1' in a.stages:
         import torch
         dev = torch.device('cuda:0'); torch.cuda.set_device(dev)
+        torch.cuda.set_per_process_memory_fraction(0.85, dev)
         stage_g1(torch, dev, a.coder, a.small, q8=a.kv == 'q8')
     if a.json: json.dump(dict(fails=FAILS, numbers=NUMBERS), open(a.json, 'w'), indent=1, default=str)
     print('RESULT ' + ('PASS' if not FAILS else f'FAIL ({len(FAILS)})'))

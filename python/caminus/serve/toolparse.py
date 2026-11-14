@@ -876,11 +876,13 @@ class OutputParser:
             args = {'arguments': args}
         self.notes.append('Hermes JSON tool call')
         self._start_call(name)
+        call = self._call
         self._emit_args(json.dumps(args, ensure_ascii=False)[1:])  # '{' already emitted
         self._call.complete = True
         self._out.append(('tool_end', len(self.msg.tool_calls) - 1))
         self._call = None
         self.state = T_AFTER
+        return call
 
     def _close(self, final):
         st = self.state
@@ -892,8 +894,9 @@ class OutputParser:
             except ValueError:
                 obj = None
             if isinstance(obj, dict) and isinstance(obj.get('name'), str):
-                self._json_call(body, body)
-                self.msg.tool_calls[-1].complete = False   # the JSON parsed whole: only '</tool_call>' is missing
+                call = self._json_call(body, body)
+                if call is not None:
+                    call.complete = False   # the JSON parsed whole: only '</tool_call>' is missing
             return
         if st == P_VALUE:
             name, types = self._param
