@@ -88,14 +88,36 @@ def locate_item(it):
     return None
 
 
+def serving_modes(m):
+    """The model picker's card counts and drafters, from the same registry serve uses (no model load or torch).
+
+    The picker also offers auto: it omits --draft, leaving Arch.default_draft to choose from the served measurements.
+    A two-card variant advertises drafting only once its registry entry supports it.
+    """
+    from .. import arch
+    A = arch.lookup(m.arch)
+    out = []
+    for nc in (1, 2):
+        try:
+            a = A.variant(nc)
+        except ValueError:
+            continue
+        ds = {d for d in (a.drafter, *getattr(a, 'drafters', ())) if d in ('mtp', 'dflash')}
+        out.append(dict(cards=nc, drafts=['off'] + [d for d in ('mtp', 'dflash') if d in ds]))
+    return out
+
+
 def model_entry(m):
     paths = {k: locate_item(models.BY_KEY[k]) for k in m.items}
-    need = [k for k in m.items if k != models.drafter_item(m)]     # a model serves without its drafter too (the Coder)
+    dk = models.drafter_item(m)
+    need = [k for k in m.items if k != dk]     # a model serves without its drafter too (the Coder)
     size = sum(models.BY_KEY[k].size for k in m.items)
     need_b = sum(models.BY_KEY[k].size for k in need)   # (what a card must hold without the optional drafter: the fit rule's size)
     return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1), need_gb=round(need_b / 1e9, 1),
                 present=all(paths[k] for k in need), path=paths[m.items[0]], paths=paths, alias=m.alias,
-                speed=m.speed, notes=m.notes)
+                speed=m.speed, notes=m.notes, serve_modes=serving_modes(m),
+                missing_drafter='dflash' if dk and not paths[dk] else None,
+                missing_drafter_gb=round(models.BY_KEY[dk].size / 1e9, 1) if dk and not paths[dk] else 0)
 
 
 def cmd_models(argv):
@@ -418,6 +440,17 @@ def _arch_drafter(m):
     return _arch.lookup(m.arch).drafter
 
 
+def _serve_arg(extra, flag):
+    """The last exact flag's value, in either spelling. Malformed options remain serve's argparse error to report."""
+    value = None
+    for i, arg in enumerate(extra):
+        if arg.startswith(flag + '='):
+            value = arg[len(flag) + 1:]
+        elif arg == flag:
+            value = extra[i + 1] if i + 1 < len(extra) and not extra[i + 1].startswith('--') else None
+    return value.strip() if value else value
+
+
 def serve_argv(m, e, name, port, ctx=None, extra=()):
     """caminus serve's flags for catalog model m (model_entry e) as server `name`: the model's first file, the port, a cache
     and a flight directory of its own; its drafter's file when its architecture loads one (caminus.arch; --no-drafter when
@@ -426,10 +459,14 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
              '--cache-dir', os.path.join(config.kv_dir(), name), '--flight-dir', os.path.join(config.flight_dir(), name)]
     dk = models.drafter_item(m)
     if dk is not None:
-        if e['paths'].get(dk): serve += ['--drafter', e['paths'][dk]]
-        elif _arch_drafter(m) == 'dflash': serve += ['--no-drafter']
+        custom = _serve_arg(extra, '--drafter')
+        if custom:
+            pass                           # (the supplied file is validated by serve, not replaced by catalog fallback)
+        elif e['paths'].get(dk): serve += ['--drafter', e['paths'][dk]]
+        elif _arch_drafter(m) == 'dflash' and _serve_arg(extra, '--draft') != 'dflash': serve += ['--no-drafter']
         # (an optional drafter's missing file adds nothing: --no-drafter would turn the server's --draft off, and a model
-        #  whose own drafter is another kind (swift-1.5's MTP block) must keep it)
+        #  whose own drafter is another kind (swift-1.5's MTP block) must keep it; an explicit --draft dflash must either
+        #  load its file or report it missing, never silently become off)
     if ctx:
         serve += ['--max-ctx', str(ctx)]
     return serve + list(extra)
