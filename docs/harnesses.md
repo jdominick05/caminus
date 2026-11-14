@@ -64,8 +64,8 @@ once and restart Qwen Code.
 
 ### The advisor (optional)
 
-When the model gets stuck, a second model (local or hosted) can send it a hint. `caminus advisor setup --local-only`
-sets it up with a model on your other card; see [the advisor](advisor.md).
+When the model gets stuck, an API advisor can send it a hint. `caminus advisor setup` sets up Anthropic or Mistral
+with your own API key; see [the advisor](advisor.md).
 
 ## Any OpenAI- or Anthropic-compatible tool
 

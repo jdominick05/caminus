@@ -141,6 +141,8 @@ CLAUDE.md imports this file.
 - `share/harness/qwen-code/advisor/`: the Qwen Code advisor add-on (`caminus advisor`, docs/advisor.md), shipped as
   package data and installed as a copy into `$XDG_DATA_HOME/qwen-advisor/app`. Its hook must always exit 0 and add text
   to the newest message only (cache-safe); the local provider is standard library only. Tests: tests/harness/test_advisor.py.
+  Default Caminus setup offers API advisors only, including extra chain entries; existing configs and explicit
+  `--local-only` setup keep compatibility. Agents test setup only in scratch homes with credentials/discovery stubbed.
 - `share/harness/qwen-code/context_note.py`: the context note, a PostToolBatch hook `caminus qwen-code setup` copies into
   each Caminus Qwen home (on by default, `--context-note off`): after each tool batch, the tokens used and left before
   Qwen Code's automatic compaction, from the transcript's usage record for that batch. Its thresholds mirror Qwen Code's
@@ -231,6 +233,8 @@ Correctness:
 
 Process:
 - Speed claims: interleaved A/B, median of >= 3 runs, a difference above 0.05 ms; label every speed decode or prefill.
+- The one-card server smoke's tool check must produce parsed calls, replay all results and answer with their observation
+  codes. Text alone cannot pass; at most one explicitly reported required-tool retry uses the same model and policy.
 - Unattended agents never run commands that need a permission prompt (deletes, writes to /tmp, sudo, installs, network).
 - When an invariant or command here changes, update this file in the same commit.
 
