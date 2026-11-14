@@ -4,16 +4,15 @@ A local model sometimes gets stuck: the same failing command again and again, or
 is an optional add-on for Qwen Code. When the model looks stuck, a second model reads the task and the recent steps and
 sends back a short hint, and Qwen Code adds it to the conversation. You can also ask it yourself with `/advise`.
 
-The second model can be **local** (another model on your other card, or any OpenAI-compatible server) or **hosted**
-(Anthropic or Mistral, with your own API key).
+The default setup uses an API advisor from Anthropic or Mistral, with your own API key. You can use one provider or
+try several in order when an advisor refuses or fails.
 
 ## Set it up
 
 Set up Qwen Code first (`caminus qwen-code setup`, see [harnesses](harnesses.md)). Then:
 
 ```bash
-caminus advisor setup --local-only   # a local advisor: nothing to install, no API key
-caminus advisor setup                # local, Anthropic or Mistral (installs their Python SDKs once)
+caminus advisor setup                # Anthropic or Mistral (installs their Python SDKs once)
 caminus advisor status               # what's set up, and where
 ```
 
@@ -23,23 +22,20 @@ afterwards.
 
 ## Choosing an advisor
 
-**Local.** Give setup the server's URL (up to `/v1`); it lists the server's models to pick from. Point it at a different
-server from the one Qwen Code is using: the model on your other card, for example. A thinking model can take a minute to
-answer on one card, and a hint that arrives after the limit (120 seconds by default) is dropped. A model id without
-thinking (on Caminus, the `-nothink` ids) skips that and answers much sooner. Setup's test request shows how long a
-reply takes; to change the limit, run setup again (it also updates the hooks' own time limits).
+Setup asks for your API key (or uses `ANTHROPIC_API_KEY` / `MISTRAL_API_KEY`) and lists the models your key can use.
+Choose its model, effort and fallback providers. Extra chain entries use `anthropic:<model>` or `mistral:<model>`;
+append `@<effort>` when needed. Setup offers a live test request so you can check its response time before using it.
 
-**Hosted.** Setup asks for your API key (or uses `ANTHROPIC_API_KEY` / `MISTRAL_API_KEY`) and lists the models your key
-can use. Measured: Claude Opus 5.5 at medium effort about 5 seconds and $0.01 a hint, Claude Haiku 5.5 about 2 seconds and
-$0.0003, Mistral Large 4 2 to 4 seconds. You can chain several: if one refuses or fails, the next one is asked, and a
-local server can be the last in line (`local:<model>`).
+Existing local-advisor configurations continue to run. The explicit `caminus advisor setup --local-only` option keeps
+the earlier local setup for compatibility.
+If an existing extra chain contains local entries, API setup asks you to replace that list or enter `none` before
+writing the new configuration. Updating or uninstalling the hook leaves provider configuration intact.
 
 ## When it speaks
 
 - Three failed commands in a row, the same call three times, the same file edited four times with a failure after it,
   or 40 rounds of tool calls since your last message.
-- Automatic hints come at most once every 10 minutes (`min_interval_s`), so the model mostly works on its own. A local
-  advisor costs nothing per hint, so you can make that much shorter.
+- Automatic hints come at most once every 10 minutes (`min_interval_s`), so the model mostly works on its own.
 - Optionally, once per message, it checks whether the task is really done before the model stops.
 - `/advise` asks right away, any time.
 

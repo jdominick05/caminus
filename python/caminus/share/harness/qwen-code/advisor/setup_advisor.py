@@ -8,7 +8,7 @@ advisors' SDKs first; --local-only needs none):
   4. shows the hook entries and, when you agree, merges them into the Qwen Code settings file you choose (a timestamped
      backup first; earlier qwen-advisor entries are replaced, nothing else changes), and adds the /advise command
 
-  setup_advisor.py [--uninstall | --update] [--settings FILE ...] [--local-only] [--non-interactive] [--no-live-test] [--dry-run]"""
+  setup_advisor.py [--uninstall | --update] [--settings FILE ...] [--local-only | --hosted-only] [--non-interactive] [--no-live-test] [--dry-run]"""
 import argparse
 import datetime
 import getpass
@@ -235,6 +235,8 @@ def configure():
     if A.local_only:
         plans = [p for p in plans if p[1] == ('local', '')]
         cfg['chain'] = [c for c in (cfg.get('chain') or []) if str(c).startswith('local:')]
+    elif A.hosted_only:
+        plans = [p for p in plans if 'local' not in p[1]]
     now = (cfg['provider'], cfg.get('fallback_provider') or '')
     cur = next((i for i, (_, o) in enumerate(plans) if o == now), 0)
     plan = choose('advisors', [n for n, _ in plans], cur)
@@ -268,10 +270,19 @@ def configure():
     if A.local_only:
         return finish(cfg)
     print('\nWhen the advisors above refuse (hard or soft) or fail, more can be tried in order until one helps.')
-    print('  Entries: provider:model[@effort], comma-separated (e.g. mistral:mistral-medium-latest, anthropic:claude-opus-4-8@high,')
-    print('  local:<model> for the local server).')
-    chain = ask('  extra advisors (Enter keeps the current list; "none" clears it)', ', '.join(cfg.get('chain') or []))
-    cfg['chain'] = [] if chain.strip().lower() == 'none' else [x.strip() for x in chain.split(',') if ':' in x]
+    print('  Entries: provider:model[@effort], comma-separated (Anthropic or Mistral).')
+    if not A.hosted_only: print('  local:<model> is also accepted for the local server.')
+    while True:
+        chain = ask('  extra advisors (Enter keeps the current list; "none" clears it)', ', '.join(cfg.get('chain') or []))
+        entries = [] if chain.strip().lower() == 'none' else [x.strip() for x in chain.split(',') if x.strip()]
+        if A.hosted_only and any(x.partition(':')[0] not in ('anthropic', 'mistral')
+                                 or not x.partition(':')[2].partition('@')[0].strip() for x in entries):
+            message = 'API advisor setup accepts only anthropic:model or mistral:model entries; enter a new list or "none".'
+            if A.non_interactive: raise SystemExit(message + ' Existing config and Qwen settings were not changed.')
+            print('  ' + message)
+            continue
+        cfg['chain'] = [x for x in entries if ':' in x]
+        break
     return finish(cfg)
 
 
@@ -431,7 +442,9 @@ def main():
     ap.add_argument('--no-live-test', action='store_true')
     ap.add_argument('--dry-run', action='store_true', help='show the settings change, write nothing there')
     ap.add_argument('--skip-install', action='store_true', help='(accepted for compatibility; does nothing)')
-    ap.add_argument('--local-only', action='store_true', help='offer only the local advisor (no hosted SDKs installed)')
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument('--local-only', action='store_true', help='offer only the local advisor (no hosted SDKs installed)')
+    mode.add_argument('--hosted-only', action='store_true', help='offer only API advisors and API fallback-chain entries')
     ap.add_argument('--update', action='store_true', help='only refresh the installed hook copy (no questions, config and settings untouched)')
     A = ap.parse_args()
     if A.update:

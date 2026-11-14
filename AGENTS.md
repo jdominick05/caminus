@@ -122,6 +122,8 @@ CLAUDE.md imports this file.
   different commit would let drafting change a later reply at a near-tie.
 - `serve/`: HTTP + SSE, template, tool parser, sampler; `EngineSession` declares the session contract
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
+  Response guards follow the parser's `think_open` policy: an optional opening tag cannot hide an untagged answer.
+  Content classification keeps bounded marker prefixes across chunks; rejected JSON calls cannot alter earlier calls.
 - `device/host.py`: the host's cards from sysfs + KFD topology, never torch; `caminus serve` places itself and sets
   `HIP_VISIBLE_DEVICES` before HIP starts. `device/capacity.py`: every VRAM projection and check.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
@@ -136,10 +138,15 @@ CLAUDE.md imports this file.
   interrupted. Brightness, frame rate and animation speed are bounded; tests use a fake clock and mock devices.
 - `cmd/manage.py:top_config` carries monitor preferences into each server's generated config. Preserve the source file,
   resolve its relative paths before merging, and let the selected server determine its address and agent sessions.
+- `cmd/qwen_code.py` publishes a Qwen context budget only after `/props` reports a positive integer window. Generated
+  providers bind `capabilities.reasoning.profile` to `qwen-chat-template`; effort stays pinned by the server's model id.
+  Setup migrates owned model endpoint pins and removed fast/compaction selectors, preserving external provider routes.
 - `share/guard.sh` (linked as `tools/guard.sh`): the GPU guard, shipped in the package.
 - `share/harness/qwen-code/advisor/`: the Qwen Code advisor add-on (`caminus advisor`, docs/advisor.md), shipped as
   package data and installed as a copy into `$XDG_DATA_HOME/qwen-advisor/app`. Its hook must always exit 0 and add text
   to the newest message only (cache-safe); the local provider is standard library only. Tests: tests/harness/test_advisor.py.
+  Default Caminus setup offers API advisors only, including extra chain entries; existing configs and explicit
+  `--local-only` setup keep compatibility. Agents test setup only in scratch homes with credentials/discovery stubbed.
 - `share/harness/qwen-code/context_note.py`: the context note, a PostToolBatch hook `caminus qwen-code setup` copies into
   each Caminus Qwen home (on by default, `--context-note off`): after each tool batch, the tokens used and left before
   Qwen Code's automatic compaction, from the transcript's usage record for that batch. Its thresholds mirror Qwen Code's
@@ -230,6 +237,8 @@ Correctness:
 
 Process:
 - Speed claims: interleaved A/B, median of >= 3 runs, a difference above 0.05 ms; label every speed decode or prefill.
+- The one-card server smoke's tool check must produce parsed calls, replay all results and answer with their observation
+  codes. Text alone cannot pass; at most one explicitly reported required-tool retry uses the same model and policy.
 - Unattended agents never run commands that need a permission prompt (deletes, writes to /tmp, sudo, installs, network).
 - When an invariant or command here changes, update this file in the same commit.
 
