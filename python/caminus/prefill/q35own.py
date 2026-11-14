@@ -252,9 +252,12 @@ class Q35OwnPrefill(PrefillDriver):
     the card's guard line first: capacity.check)"""
 
     def __init__(self, m, chunk=1024, crossover=None, check=True, export_h=None, feature_layers=()):
-        if getattr(m, 'q8', False):
-            raise ValueError('Q35OwnPrefill: matching Q8 prefill is not implemented; staged decode/verify gates only')
+        self.q8 = bool(getattr(m, 'q8', False))
+        if self.q8 and (getattr(m, 'hd', None) != 256 or not getattr(m, 'nkv', 0)
+                        or getattr(m, 'nh', None) != 6 * m.nkv):
+            raise ValueError('Q35OwnPrefill: Q8 requires head dimension 256 and six query heads per KV head')
         self.m, self.chunk = m, int(chunk)
+        self._check_terminal()
         # export_h: export every chunk row's final h (the MTP drafter's fill input) and fill the block per chunk;
         # default on when the engine carries an MTP drafter (m.mtp35, set by the architecture's build)
         self.export_h = bool(getattr(m, 'mtp35', None) is not None) if export_h is None else bool(export_h)
@@ -288,6 +291,10 @@ class Q35OwnPrefill(PrefillDriver):
         f32, f16, i32 = layout(m, T, export_h=self.export_h, nfeat=nf)
         with torch.cuda.device(dev):
             self.O = Ops(dev, module=MODULE_GSQ if self.gsq else MODULE_TCAP if self.tcap else MODULE)
+            self.KV = None
+            if self.q8:
+                from .q35_kvq8 import Ops as Q8Ops
+                self.KV = Q8Ops(dev)
             self.Gl = Glue(dev, module='prefill_glue_q35d')
             self.Gd = Gdn(dev, module='prefill_gdn_q35')
             self.A = Attn(dev, name=attn)
@@ -318,7 +325,10 @@ class Q35OwnPrefill(PrefillDriver):
 
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums)"""
-        return dict(wmma_out='f32', router_logits='none', moe='none', q6k='own-wmma', dense='own-wmma')
+        out = dict(wmma_out='f32', router_logits='none', moe='none', q6k='own-wmma', dense='own-wmma')
+        if getattr(self, 'q8', False):
+            out['dense_kv'] = 'q8_0-v1:hadamard256-64:wmma-f16-or-row-fp32-v1'
+        return out
 
     def _ab(self, W, h, h16, out, n):
         """an ssm alpha / beta row block: F32 (OP_F32_MV's order on the fp32 h) or a quantized matrix (the own GEMM on h16)"""
@@ -373,11 +383,21 @@ class Q35OwnPrefill(PrefillDriver):
                 att = W[o0:o0 + n * QH]
                 O.mm(L['k'], h16, D, kr, M, n=n); O.mm(L['v'], h16, D, vr, M, n=n)
                 A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n)
-                O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
+                if getattr(self, 'q8', False):
+                    A.hadamard(ko, 256, n * M // 256)
+                    A.hadamard(vr, 64, n * M // 64)
+                    self.KV.append(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
+                else:
+                    O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
                 if il == last and not self.export_h: break  # (the last layer: only its cache rows are needed)
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
                 A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
-                if O.attn_wm_ok(nh, nkv, hd):              # (the tiled WMMA attention; attn16 for other shapes)
+                if getattr(self, 'q8', False):
+                    A.hadamard(qo, 256, n * QH // 256)
+                    for b0, b1 in O.attn_blocks(p, n):
+                        self.KV.attn_wm(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, b0, b1)
+                    A.hadamard(att, 64, n * QH // 64)
+                elif O.attn_wm_ok(nh, nkv, hd):              # (the tiled WMMA attention; attn16 for other shapes)
                     for b0, b1 in O.attn_blocks(p, n):
                         O.attn_wm(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, b0, b1)
                 else:
@@ -396,13 +416,19 @@ class Q35OwnPrefill(PrefillDriver):
             O.add_rms16(x, m.out_norm, eps, self.h16o[:n * D], n, D, d=ffp, h=self.hout[:n * D])
 
     def check_flags(self, what='prefill'):
+        self._check_terminal()
         e = int(self.err.item())
+        if getattr(self, 'q8', False) and e & ~1:
+            self.m.mark_broken(f'{what}: invalid Q8 KV encoding (error word {e:#x}); cache result is unusable',
+                               error_cls=k3.InvalidKVEncoding)
         if e:
             self.err.zero_()
             raise k3.ContextBoundsError(f'{what}: the KV append refused rows (error word {e:#x})')
 
     def _run_chunk(self, toks, k, j, a, b, segs, bounds):
         self._chunk(toks, a, b)
+        if getattr(self, 'q8', False):
+            self._run_settle()   # no features or MTP h escape an append whose encoding failed
         dr = self._draft
         if dr is not None and getattr(dr, 'kind', None) == 'dflash35':
             dr.inject_chunk(self, a, b - a)   # (the chunk's features into the drafter's ring, positions a .. b - 1: batched)
@@ -420,3 +446,7 @@ class Q35OwnPrefill(PrefillDriver):
 
     def _sync_devices(self):
         torch.cuda.synchronize(self.dev)
+
+    def _run_failure_check(self):
+        if getattr(self, 'q8', False):
+            self.check_flags('prefill failure drain')

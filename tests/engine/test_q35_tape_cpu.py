@@ -319,7 +319,7 @@ check(abs((Dense35Own.projection_mib(P, 64, 4) - qm.vram_mib) * 2 ** 20 - delta)
       'Q8 memory reduction is exact row packing minus the new four-byte error word')
 check(refused(lambda: Q35OwnPrefill(types.SimpleNamespace(q8=True)))
       and refused(lambda: Q35OwnPrefillTP(types.SimpleNamespace(q8=True))),
-      'unimplemented matching batched prefill refuses before looking up buffers or loading a module')
+      'Q8 prefill requires supported geometry; high-level TP prefill remains refused before module load')
 
 pf_key = types.SimpleNamespace(numerics=lambda: {'attention': 'synthetic'}, crossover=None)
 f16_key = engine_key(mv4, pf_key, build={'synthetic': True})

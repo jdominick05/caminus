@@ -160,7 +160,7 @@ class Dense35Own:
         feature_layers: layers whose entering residual each pass copies to self.features [len, 1, D] fp32 (a DFlash
         drafter's target layers, as Dense35Verify(feature_layers=) exports them, so a one-token pass feeds the drafter
         too); the copy changes no other bit. q8: staged internal Q8 target-cache path, with Q/K Hadamard256 and
-        V/output Hadamard64; no served option or matching batched prefill yet (docs/dev/q8-kv.md)."""
+        V/output Hadamard64 and matching staged batched prefill; no served option yet (docs/dev/q8-kv.md)."""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen35': raise ValueError(f'Dense35Own: {path} is a {F.arch!r} GGUF, not qwen35 (dense)')
         if any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError(f'Dense35Own: {path} has a router tensor: not the dense line')

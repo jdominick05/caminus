@@ -102,6 +102,8 @@ CLAUDE.md imports this file.
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
   count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename.
+  Its shared prefill object falls back to FP32 for causal rows whose Q/K/V cannot be staged in half; preserve the
+  codec domain and check numerical flags before drafter exports, handoff or ordinary failure recovery.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS) and Qwen3-Coder-Next. Their engines and kernels stay; `models.PAUSED` keeps them
