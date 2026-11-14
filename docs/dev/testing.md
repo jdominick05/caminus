@@ -23,6 +23,9 @@ failure reports (FAIL / ERROR lines and tracebacks) and the end of its log; the 
 
 The one-card server smoke's tool acceptance check has a small CPU regression suite, with synthetic SSE through the real
 collector and no sockets or model: `python -I tests/tools/test_serve_smoke1.py` (also the `serve_smoke1` CPU suite).
+Installed-mode command and preflight refusals have a separate CPU suite,
+`python -I tests/tools/test_serve_smoke_installed.py --scratch DIR`. Its package/provenance fixtures never execute
+GPU code; the CLI is replaced by a recorder.
 
 ## GPU tests
 
@@ -44,6 +47,25 @@ must finish with weather text containing every result's observation code and the
 calls. Text alone, invalid arguments, truncated answers or ignoring the results fail. The greedy and seeded-sampling
 prompts used for drafter hash comparisons are independent of this tool check. CPU tests prove the acceptance logic;
 the real model's behavior still needs the guarded server smoke.
+
+For a fresh wheel installed in a separate environment, select that interpreter and set `CAMINUS_SMOKE_INSTALLED=1`:
+
+```bash
+CAMINUS_SMOKE_INSTALLED=1 tools/guard.sh LOG 2400 "$WHEEL_PY" -I tools/serve_smoke1.py \
+  --model GGUF --scratch DIR --draft off --block-imports gguf,tokenizers --restart
+```
+
+`WHEEL_PY` is the installed environment's Python executable. The child uses `-I`, verifies that the imported package
+matches its installed distribution, refuses editable/source imports and kernel_dir overrides, and checks the exact
+packaged object set against provenance before starting the server. The outer guard is required so an automatic
+guard re-exec cannot discard the import-blocking hook. Already imported forbidden packages are refused because
+Python's module cache would bypass that hook. Every restart repeats these checks.
+
+With `--block-imports`, the installed kernel-tree digest must also match this checkout: its own-code include audit
+then describes the same kernel sources as the installed objects. Use a checkout matching the wheel, and clear any
+kernel_dir setting in the test environment/config. The harness prints the installed version, origin and verified
+object count. CPU preflight success proves package admission only; the full model/tool/restore tests still run on
+the GPU. Without the environment switch the existing checkout server path is used.
 
 ## The accuracy rules
 

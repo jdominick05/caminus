@@ -54,6 +54,7 @@ SUITES = [
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
     ('serve_smoke1', ['tests/tools/test_serve_smoke1.py'], set()),
+    ('serve_smoke_installed', ['tests/tools/test_serve_smoke_installed.py', '--scratch', '{scratch}'], set()),
     ('nightly_plan', ['tests/tools/test_nightly_plan.py', '--scratch', '{scratch}'], set()),
     ('objcheck', ['tests/tools/test_objcheck.py', '--scratch', '{scratch}'], set()),
     ('pr_ready', ['tests/tools/test_pr_ready.py', '--scratch', '{scratch}'], set()),
