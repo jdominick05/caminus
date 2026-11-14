@@ -3,8 +3,9 @@ the dense qwen35 line, AREX-2): tools/caminus_serve.py as a child on one card (H
 flight directories only, then from outside, with a stdlib client (tools/serve_smoke.py's helpers):
   ids       /health 200, /props (the caminus engine marker, the model alias), /v1/models (alias and alias-nothink), /slots
   greedy    an OpenAI chat stream at temperature 0 (no thinking): content, finish, timings (decode tok/s)
-  sampled   an OpenAI chat stream at temperature 0.7 with a tool (the device sampler's path: the two vocabulary shards on one
-            card), then the tool's result back as the next turn (the prompt cache: the live line continued)
+  sampled   an OpenAI chat stream at temperature 0.7, then a separate weather tool round trip: a natural call first (one
+            same-model tool_choice required retry if absent, reported), all calls / results replayed, then an answer using
+            the synthetic observations with tool_choice none (the prompt cache: the live line continued)
   anthropic an Anthropic /v1/messages stream: a text block
   long      a ~8K-token prompt (the batched prefill): TTFT and prompt tok/s from the timings
   needle    (--needle N) a passphrase at 37 % of a ~N-token prompt of synthetic records: the answer holds it; TTFT, prompt tok/s
@@ -96,6 +97,89 @@ TOOLS = [{'type': 'function', 'function': {'name': 'get_weather', 'description':
                                             'parameters': {'type': 'object', 'properties': {'city': {'type': 'string'}}, 'required': ['city']}}}]
 
 
+def _stream_ok(r, m):
+    """Require a successful, complete chat stream before inspecting or replaying its contents."""
+    return (r.get('status') == 200 and not r.get('closed') and isinstance(m, dict)
+            and m.get('role') is True and m.get('done') is True and m.get('error') is None
+            and m.get('finish') in ('stop', 'length', 'tool_calls')
+            and isinstance(m.get('content'), str) and isinstance(m.get('reasoning'), str)
+            and isinstance(m.get('calls'), list))
+
+
+def _weather_args(calls):
+    """Validate the whole call batch before replaying any of it; malformed output is a failed check."""
+    def non_json_constant(value):
+        raise ValueError(value)
+
+    args, ids = [], set()
+    for c in calls:
+        if (not isinstance(c, dict) or c.get('name') != TOOLS[0]['function']['name']
+                or not isinstance(c.get('id'), str) or not c['id'].strip() or c['id'] in ids
+                or not isinstance(c.get('arguments'), str)):
+            return None
+        try:
+            a = json.loads(c['arguments'], parse_constant=non_json_constant)
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(a, dict) or not isinstance(a.get('city'), str) or not a['city'].strip():
+            return None
+        ids.add(c['id']); args.append(a)
+    return args
+
+
+def weather_round_trip(port, model, marker, *, chat_fn=chat, check_fn=S.check):
+    """A bounded tool acceptance check, also driven by fake chat / request functions in CPU tests.
+
+    Keep the model and thinking policy fixed. Text alone is not a pass: at most one forced retry must produce valid
+    calls, and every result's observation code must appear in a completed final answer without further calls.
+    """
+    stats = dict(forced=0, calls=0, answered=False)
+    msgs = [{'role': 'system', 'content': f'You are a helpful assistant. Use tools when they help. ({marker}) '
+             'Give a short weather answer and include each tool result\'s observation_code verbatim.'},
+            {'role': 'user', 'content': 'What is the weather in Lisbon right now? Use the tool.'}]
+    kw = dict(tools=TOOLS, temperature=0.7, top_p=0.9, max_tokens=512)
+    r, m = chat_fn(port, model, msgs, **kw)
+    ok = _stream_ok(r, m)
+    check_fn(ok, f'weather natural tool turn: HTTP {r.get("status")}, complete stream {ok}')
+    if not ok:
+        return stats
+    if not m['calls']:
+        stats['forced'] = 1
+        print(f'weather: no natural tool call (finish {m["finish"]}); retrying the same model with tool_choice required', flush=True)
+        r, m = chat_fn(port, model, msgs, tool_choice='required', **kw)
+        ok = _stream_ok(r, m)
+        check_fn(ok, f'weather required tool turn: HTTP {r.get("status")}, complete stream {ok}')
+        if not ok:
+            return stats
+    calls = m['calls']
+    args = _weather_args(calls)
+    ok = bool(calls) and m['finish'] == 'tool_calls' and args is not None
+    check_fn(ok, f'weather calls: {len(calls)} call(s), finish {m["finish"]}; '
+             'declared name, JSON object with nonempty city string, nonempty unique IDs')
+    if not ok:
+        return stats
+    stats['calls'] = len(calls)
+    msgs = msgs + [{'role': 'assistant', 'content': m['content'] or None, 'reasoning_content': m['reasoning'] or None,
+                   'tool_calls': [{'id': c['id'], 'type': 'function',
+                                   'function': {'name': c['name'], 'arguments': c['arguments']}} for c in calls]}]
+    codes = []
+    for i, (c, a) in enumerate(zip(calls, args)):
+        code = f'weather-observation-{i + 1:04d}'
+        codes.append(code)
+        msgs.append({'role': 'tool', 'tool_call_id': c['id'],
+                     'content': json.dumps(dict(city=a['city'], temp_c=19, sky='clear', observation_code=code))})
+    r, m = chat_fn(port, model, msgs, tool_choice='none', **kw)
+    ok = (_stream_ok(r, m) and m['finish'] == 'stop' and not m['calls'] and bool(m['content'].strip())
+          and bool(re.search(r'(?<!\d)19(?!\d)', m['content']))
+          and all(re.search(r'(?<![\w-])' + re.escape(code) + r'(?![\w-])', m['content']) for code in codes))
+    stats['answered'] = ok
+    tm = m.get('timings') if isinstance(m, dict) else None
+    tm = tm if isinstance(tm, dict) else {}
+    check_fn(ok, f'weather result turn: HTTP {r.get("status")}, usable answer with all {len(codes)} observation code(s), '
+             f'no further calls; prompt {tm.get("prompt_n")} new of {tm.get("cache_n", "?")} cached (the live line continued)')
+    return stats
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--model', required=True); ap.add_argument('--scratch', required=True)
@@ -150,26 +234,7 @@ def main():
           f'sampled (seed, T 0.7): {len(m["content"])} chars, finish {m["finish"]}, decode {ts} tok/s')
     S.NUMBERS['sampled_decode_tps'] = ts
     S.NUMBERS['sampled_sha256'] = hashlib.sha256(m['content'].encode()).hexdigest()
-    # sampled with a tool, then the tool result as the next turn
-    msgs = [{'role': 'system', 'content': f'You are a helpful assistant. Use tools when they help. ({marker})'},
-            {'role': 'user', 'content': 'What is the weather in Lisbon right now? Use the tool.'}]
-    r, m = chat(port, alias, msgs, tools=TOOLS, temperature=0.7, top_p=0.9, max_tokens=512)
-    calls = m['calls']
-    check(r['status'] == 200 and not m['error'] and (calls or m['content'].strip()),
-          f'sampled (T 0.7, a tool): finish {m["finish"]}, {len(calls)} tool call(s) {[c["name"] for c in calls]}, '
-          f'{len(m["content"])} chars, reasoning {len(m["reasoning"])} chars')
-    if calls:
-        c = calls[0]
-        try: args = json.loads(c['arguments'] or '{}')
-        except ValueError: args = None
-        check(c['name'] == 'get_weather' and isinstance(args, dict) and 'city' in args, f'the tool call parsed: {c["name"]}({c["arguments"]})')
-        msgs += [{'role': 'assistant', 'content': m['content'] or None, 'reasoning_content': m['reasoning'] or None,
-                  'tool_calls': [{'id': c['id'] or 'call_0', 'type': 'function', 'function': {'name': c['name'], 'arguments': c['arguments']}}]},
-                 {'role': 'tool', 'tool_call_id': c['id'] or 'call_0', 'content': json.dumps({'city': args.get('city') if args else 'Lisbon', 'temp_c': 19, 'sky': 'clear'})}]
-        r2, m2 = chat(port, alias, msgs, tools=TOOLS, temperature=0.7, top_p=0.9, max_tokens=512)
-        tm = m2.get('timings') or {}
-        check(r2['status'] == 200 and not m2['error'] and (m2['content'].strip() or m2['calls']),
-              f'the tool result turn: {len(m2["content"])} chars; prompt {tm.get("prompt_n")} new of {tm.get("cache_n", "?")} cached (the live line continued)')
+    S.NUMBERS['tool_round_trip'] = weather_round_trip(port, alias, marker)
     # anthropic
     r = S.request(port, 'POST', '/v1/messages', dict(model=f'{alias}-nothink', max_tokens=64, stream=True,
                                                      messages=[{'role': 'user', 'content': f'Name three prime numbers. ({marker})'}]),
