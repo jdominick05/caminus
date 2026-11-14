@@ -33,7 +33,7 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 caminus qwen-code status            # installed? set up for which server?
 caminus qwen-code setup --install   # install it and point it at the running server
 caminus qwen                        # run it (add Qwen Code's own arguments after it)
-caminus advisor setup --local-only  # optional: a second model steers Qwen Code when it gets stuck (docs/advisor.md)
+caminus advisor setup               # optional: an API advisor steers Qwen Code when it gets stuck (docs/advisor.md)
 caminus advisor status              # which advisor, hooked into which Qwen home
 ```
 

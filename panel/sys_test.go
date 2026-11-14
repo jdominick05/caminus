@@ -315,19 +315,19 @@ func TestFindProcByPort(t *testing.T) {
 // each monitor of a brain / hands pair lists only its own server's agent sessions
 func TestMineOnly(t *testing.T) {
 	ss := []*session{{Path: "a", model: "arex-2"}, {Path: "b", model: "qwen3.6"}, {Path: "c", model: "qwen3.6-nothink"}, {Path: "d"},
-		{Path: "e", model: "k3-coder-xhigh"}}
+		{Path: "e", model: "k3-coder-xhigh"}, {Path: "f", model: "qwen3.60"}, {Path: "g", model: "other-qwen3.6"}}
 	names := func(l []*session) (o []string) {
 		for _, s := range l {
 			o = append(o, s.Path)
 		}
 		return
 	}
-	for _, c := range []struct{ alias, want string }{{"qwen3.6", "b c d"}, {"arex-2", "a d"}, {"k3-coder", "d e"}, {"", "a b c d e"}} {
+	for _, c := range []struct{ alias, want string }{{"qwen3.6", "b c d"}, {"arex-2", "a d"}, {"k3-coder", "d e"}, {"", "a b c d e f g"}} {
 		if got := strings.Join(names(mineOnly(ss, c.alias)), " "); got != c.want {
 			t.Errorf("alias %q: %q, want %q", c.alias, got, c.want)
 		}
 	}
-	if len(ss) != 5 {
+	if len(ss) != 7 {
 		t.Errorf("mineOnly changed its input")
 	}
 }

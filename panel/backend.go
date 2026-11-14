@@ -18,15 +18,25 @@ import (
 
 // camModel is one entry of `caminus models --json`.
 type camModel struct {
-	Name    string  `json:"name"`
-	Title   string  `json:"title"`
-	Arch    string  `json:"arch"`
-	Cards   int     `json:"cards"`
-	SizeGB  float64 `json:"size_gb"`
-	Present bool    `json:"present"`
-	Path    string  `json:"path"`
-	Speed   string  `json:"speed"`
-	Notes   string  `json:"notes"`
+	Name             string      `json:"name"`
+	Title            string      `json:"title"`
+	Arch             string      `json:"arch"`
+	Cards            int         `json:"cards"`
+	SizeGB           float64     `json:"size_gb"`
+	Present          bool        `json:"present"`
+	Path             string      `json:"path"`
+	Speed            string      `json:"speed"`
+	Notes            string      `json:"notes"`
+	Modes            []serveMode `json:"serve_modes"`
+	MissingDrafter   string      `json:"missing_drafter"`
+	MissingDrafterGB float64     `json:"missing_drafter_gb"`
+}
+
+// serveMode is the architecture registry's supported card count and explicit drafter choices. Auto is the absence of
+// --draft: the server then uses Arch.default_draft, including its measured defaults for this model and card count.
+type serveMode struct {
+	Cards  int      `json:"cards"`
+	Drafts []string `json:"drafts"`
 }
 
 // serverInfo is one server of `caminus ps --json`.
@@ -89,12 +99,42 @@ type harnessInfo struct {
 
 // option is one flag of `caminus serve --options-json` (the advanced layout's list: every option the server accepts).
 type option struct {
-	Flag    string   `json:"flag"`
-	Dest    string   `json:"dest"`
-	Type    string   `json:"type"` // int | float | str | bool | ctx
-	Default any      `json:"default"`
-	Help    string   `json:"help"`
-	Choices []string `json:"choices"`
+	Flag    string        `json:"flag"`
+	Dest    string        `json:"dest"`
+	Type    string        `json:"type"` // int | float | str | bool | ctx
+	Default any           `json:"default"`
+	Help    string        `json:"help"`
+	Choices optionChoices `json:"choices"`
+}
+
+// argparse preserves numeric choices in --options-json. The editor holds command-line arguments as text; decode
+// both numeric and string choices without rounding numbers or letting an unrelated option hide the whole form.
+type optionChoices []string
+
+func (c *optionChoices) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var choices optionChoices
+	for _, value := range raw {
+		value = bytes.TrimSpace(value)
+		var text string
+		if len(value) > 0 && value[0] == '"' {
+			if err := json.Unmarshal(value, &text); err != nil {
+				return err
+			}
+		} else {
+			var number json.Number
+			if err := json.Unmarshal(value, &number); err != nil || number == "" {
+				return fmt.Errorf("option choice must be a string or number: %s", value)
+			}
+			text = number.String()
+		}
+		choices = append(choices, text)
+	}
+	*c = choices
+	return nil
 }
 
 // actionResult is what every action command prints: {"ok": true, ...} or {"ok": false, "error": "..."}.

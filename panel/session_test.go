@@ -138,6 +138,43 @@ func TestScanSessionsAndSavings(t *testing.T) {
 	}
 }
 
+func TestScanSessionsOwnershipBeforeLimit(t *testing.T) {
+	d := t.TempDir()
+	now := time.Now()
+	put := func(name, model string, age time.Duration) string {
+		p := filepath.Join(d, "proj", "chats", name+".jsonl")
+		write(t, p, strings.ReplaceAll(sessionLog, "qwen3.8", model))
+		mt := now.Add(-age)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// Six newer foreign sessions must not hide the first session belonging to this server.
+	for i, model := range []string{"arex-2", "k3-coder", "qwen3.80", "other-qwen3.8", "swift-1.5", "thinkingcap"} {
+		put("foreign-"+model, model, time.Duration(i)*time.Minute)
+	}
+	var own []string
+	for i, name := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		own = append(own, put("own-"+name, "qwen3.8-nothink", time.Duration(i+6)*time.Minute))
+	}
+	old := put("old-own", "qwen3.8", 7*time.Hour)
+	st := &state{known: map[string]*session{}}
+	st.srv.Props.Alias = "qwen3.8"
+	st.scanSessions(filepath.Join(d, "*", "chats", "*.jsonl"), "/nowhere", now)
+	if len(st.sessions) != 6 {
+		t.Fatalf("%d own sessions, want 6", len(st.sessions))
+	}
+	for i, s := range st.sessions {
+		if s.Path != own[i] {
+			t.Errorf("session %d: %s, want %s", i, s.Path, own[i])
+		}
+	}
+	if len(st.known) != 12 || st.known[own[6]] != nil || st.known[old] != nil {
+		t.Errorf("cached %d sessions: want six foreign and six matching, stopping before older logs", len(st.known))
+	}
+}
+
 func TestCost(t *testing.T) {
 	p := defaultPrices
 	api, pow, net := p.cost(tokTotals{Prompt: 2_000_000, Cached: 1_000_000, Out: 100_000}, 1000, 25)
