@@ -55,6 +55,22 @@ def module_of(F):
 RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV rows are written before any pass reads them)
 
 
+def kv_module(F, module=None, q8=False):
+    """Resolve staged cache-specialized objects separately from weight-format selection."""
+    if type(q8) is not bool:
+        raise ValueError('Dense35Own: q8 must be a bool')
+    selected = module or module_of(F)
+    if q8:
+        if selected in k3.Q35_KV_Q8_MODULES:
+            return selected
+        if selected not in k3.Q35_KV_Q8_OF:
+            raise ValueError(f'Dense35Own: no Q8 KV specialization for {selected}')
+        return k3.Q35_KV_Q8_OF[selected]
+    if selected in k3.Q35_KV_Q8_MODULES:
+        raise ValueError(f'Dense35Own: {selected} requires q8=True')
+    return selected
+
+
 WSUM_WORDS = 1 << 20   # int32 words per checksum chunk: its int64 cast is the only scratch (8 MiB, inside the 256 MiB working allowance)
 
 
@@ -108,8 +124,8 @@ def attn_part_elems(T, heads, cells):
     return int(T) * int(heads) * ((int(cells) + k3.ATTN_SS - 1) // k3.ATTN_SS) * k3.ATTN_RS
 
 
-def _projection_bytes(F, max_ctx, spec_T=1):
-    """bytes the engine allocates on its card: every trunk tensor (the embedding and the head too), the f16 KV cache of
+def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
+    """bytes the engine allocates on its card: every trunk tensor (the embedding and the head too), the selected KV cache of
     every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Dense35Own's spec_T), the decode
     tape's split attention records (attn_part_elems)"""
     c = _shapes(F); nl = c['nl']
@@ -122,7 +138,7 @@ def _projection_bytes(F, max_ctx, spec_T=1):
     CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
     gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
     part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1)
-    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) + gdn + part
+    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
 
 
 class Dense35Own:
@@ -130,7 +146,7 @@ class Dense35Own:
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
                  rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1,
-                 feature_layers=()):
+                 feature_layers=(), q8=False):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
@@ -143,7 +159,8 @@ class Dense35Own:
         inputs, and a pass after a verify pass commits up to spec_T of them (1: the decode engine as served).
         feature_layers: layers whose entering residual each pass copies to self.features [len, 1, D] fp32 (a DFlash
         drafter's target layers, as Dense35Verify(feature_layers=) exports them, so a one-token pass feeds the drafter
-        too); the copy changes no other bit."""
+        too); the copy changes no other bit. q8: staged internal Q8 target-cache path, with Q/K Hadamard256 and
+        V/output Hadamard64 and matching staged batched prefill; no served option yet (docs/dev/q8-kv.md)."""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen35': raise ValueError(f'Dense35Own: {path} is a {F.arch!r} GGUF, not qwen35 (dense)')
         if any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError(f'Dense35Own: {path} has a router tensor: not the dense line')
@@ -168,7 +185,13 @@ class Dense35Own:
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
             raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
         self.dev, self.max_ctx, self.limit_us, self.spec_T = int(device), int(max_ctx), limit_us, int(spec_T)
-        self.module = module or module_of(F)
+        self.module = kv_module(F, module, q8)
+        self.q8 = q8
+        if q8 and (self.hd != 256 or self.nh != 6 * self.nkv):
+            raise ValueError('Dense35Own: staged Q8 kernels require head_dim 256 and six query heads per KV head')
+        self.kv_rows = self.max_ctx + self.spec_T - 1   # rows exposed by state views, including the verify tail
+        if q8:
+            self.kv_format_id = 'q8_0-v1:qk-hadamard256:v-hadamard64-v1'
         self.tcap = self.module in k3.Q35T_MODULES
         # the formats whose matvecs run on the one-round-trip tiles (own_matvec_1rt); the others on own_matvec16
         self.one_rt = (k3.OWN_Q35R_1RT if self.module in k3.Q35R_MODULES else k3.OWN_Q35T_1RT) if self.tcap else k3.OWN_1RT_FMT
@@ -181,7 +204,7 @@ class Dense35Own:
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35Own: token_embd is {self.emb.type} on module {self.module}')
         # VRAM, checked against the card's cap before a byte is read (vram_extra_mib: what the caller adds right after)
-        self.vram_mib = _projection_bytes(F, self.max_ctx, self.spec_T) / 2 ** 20 + 256
+        self.vram_mib = _projection_bytes(F, self.max_ctx, self.spec_T, q8) / 2 ** 20 + 256
         if vram_check:
             capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
                            f'Dense35Own {os.path.basename(path)} (max_ctx {self.max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
@@ -194,7 +217,7 @@ class Dense35Own:
         # the server's engine contract (Qwen35One's / Q3MoEOne's names): one card, T = 1, dense attention at every depth
         self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
         self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
-        self.broken = None          # (non-finite logits: sticky, reset() keeps it - corrupt weights outlive a reset)
+        self.broken = None          # terminal numerical failure; reset keeps it
         self.devs = [self.dev]
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual, self.local_only = False, None, False, False, True
@@ -209,11 +232,11 @@ class Dense35Own:
         with torch.cuda.device(self.dev): self._load(); self._build_tape()
 
     @staticmethod
-    def projection_mib(path, max_ctx, spec_T=1):
+    def projection_mib(path, max_ctx, spec_T=1, q8=False):
         """MiB the engine allocates on its card at max_ctx, from the file's header alone (nothing on a card): __init__'s
         own check counts the same terms"""
         F = ggufio.GGUFFile(path)
-        try: return _projection_bytes(F, max_ctx, spec_T) / 2 ** 20 + 256
+        try: return _projection_bytes(F, max_ctx, spec_T, q8) / 2 ** 20 + 256
         finally: F.close()
 
     @staticmethod
@@ -228,12 +251,12 @@ class Dense35Own:
         finally: F.close()
 
     @staticmethod
-    def kv_pos_mib(path):
+    def kv_pos_mib(path, q8=False):
         """MiB of KV cache per position (every attention block)"""
         F = ggufio.GGUFFile(path)
         try:   # (the KV row itself: a projection difference would also count the split records' steps of ATTN_SS rows)
             c = _shapes(F)
-            return sum(1 for g in block_kinds(F) if not g) * k3.kv_pos_bytes(c['nkv'] * c['hd'], False) / 2 ** 20
+            return sum(1 for g in block_kinds(F) if not g) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) / 2 ** 20
         finally: F.close()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
@@ -289,7 +312,8 @@ class Dense35Own:
                 d.update(kind='attn', q=self._w(p + 'attn_q.weight', nh * 2 * hd, D), k=self._w(p + 'attn_k.weight', nkv * hd, D),
                          v=self._w(p + 'attn_v.weight', nkv * hd, D), o=self._w(p + 'attn_output.weight', D, nh * hd),
                          qn=self._f32(p + 'attn_q_norm.weight', hd), kn=self._f32(p + 'attn_k_norm.weight', hd),
-                         cache=Z((self.max_ctx + self.spec_T - 1) * 2 * nkv * hd, torch.float16))   # (spec_T: the guard's span, Engine.guard_T)
+                         cache=(Z(self.kv_rows * k3.kv_pos_bytes(nkv * hd, True), torch.uint8) if self.q8 else
+                                Z(self.kv_rows * 2 * nkv * hd, torch.float16)))
                 self.state[(0, il, 'kv')] = d['cache']
             self.L.append(d)
         self.out_norm = self._f32('output_norm.weight', D)
@@ -299,6 +323,7 @@ class Dense35Own:
 
     # -- the tape ----------------------------------------------------------------------------------------------------------
     def _build_tape(self):
+        q8 = bool(getattr(self, 'q8', False))
         D, hd, nh, nkv, S, NK, NV, ffn = self.D, self.hd, self.nh, self.nkv, self.S, self.NK, self.NV, self.ffn
         CH, KD, VD, QH = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd
         B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
@@ -370,11 +395,16 @@ class Dense35Own:
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
                 kd = E.qk_nr(s['kr'], hd, nkv, hd, d['kn'], self.pos, s['ko'], self.nrot, self.theta_scale, self.eps, dep=k_)
-                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], self.pos, dep=kd), v_)
+                if q8:
+                    kd = E.hadamard(s['ko'], 256, dep=kd)
+                    v_ = E.hadamard(s['vr'], 64, dep=v_)
+                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], self.pos, q8=q8, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nh, hd, d['qn'], self.pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_)
+                if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
-                                       **akw()), qd)
+                                       q8=q8, **akw()), qd)
+                if q8: a_ = E.hadamard(s['att'], 64, dep=a_)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], self.eps, d=s['blk'], slots=1, dep=o_)
@@ -437,7 +467,7 @@ class Dense35Own:
         return 0 if self.fresh else self.last_T
 
     def _check(self, tokens, i0, commit, what):
-        if self.broken: raise k3.NonFiniteLogits(f'{what}: refused: {self.broken}')
+        if self.broken: raise getattr(self, '_broken_error', k3.NonFiniteLogits)(f'{what}: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
         k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.commit_max(), what=what)
         if tokens is not None and len(tokens) < i0 + 1:
@@ -526,6 +556,11 @@ class Dense35Own:
         """wait for the launch, read its status; the bounds guard poisons and raises, a wait that gave up is returned as
         its report"""
         self.ev_done.synchronize()
+        if getattr(self, 'q8', False):
+            try:
+                self.E.check_kv_error()
+            except k3.InvalidKVEncoding as exc:
+                self.mark_broken(str(exc), error_cls=k3.InvalidKVEncoding)
         st = self.h_st.tolist()
         b = k3.bounds_status(st)
         if b:
@@ -565,9 +600,10 @@ class Dense35Own:
             out[nm] = _wsum_np(np.ascontiguousarray(b).view(np.uint8).reshape(-1))
         return out
 
-    def mark_broken(self, why):
-        """the engine produced non-finite logits: refuse every later pass (reset() keeps this), report which weights changed
+    def mark_broken(self, why, error_cls=k3.NonFiniteLogits):
+        """terminal numerical failure: refuse every later pass (reset() keeps this), report which weights changed
         since load (corrupted on the card) or, when none did, which differ from the file (corrupted by the upload)"""
+        self.broken, self._broken_error = why, error_cls   # sticky even if diagnostics fail
         rep = why
         try:
             now = self.weight_sums()
@@ -582,7 +618,7 @@ class Dense35Own:
         except Exception as e:                       # noqa: BLE001 - the report must not hide the failure
             rep += f'; the weight check failed ({type(e).__name__}: {e})'
         self.broken = rep
-        raise k3.NonFiniteLogits(f'Dense35Own: {rep}')
+        raise error_cls(f'Dense35Own: {rep}')
 
     def selfcheck(self, toks=(248044, 9707, 11, 1879, 374)):
         """at startup: a few fixed tokens through the decode tape on fresh states (finite logits), then reset(); raises

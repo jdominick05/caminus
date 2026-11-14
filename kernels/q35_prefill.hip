@@ -694,6 +694,22 @@ extern "C" __global__ void __launch_bounds__(256) q35p_gdn_norm16(const float * 
 // q35p_kv_append16: OP_KV_APPEND's f16 rows: cache[pos0 + t] = (k[t], v[t]) as fp16 ([K | V] per position, 2 M halves).
 // k / v: [T, M] fp32 at row strides ldk / ldv. A row at or past `rows` is not written and sets *err |= 1 (the host refuses
 // such chunks first: k3.check_span). Grid T.
+#ifdef Q35P_KV_Q8
+// A numerical refusal leaves the block untouched; other blocks may have been
+// written already. The host treats bit 2 as terminal before any hand-off.
+extern "C" __global__ void __launch_bounds__(256) q35p_kv_append_q8(const float * __restrict__ k, int ldk, const float * __restrict__ v,
+                                                                  int ldv, uint8_t * __restrict__ cache, int M, int pos0, int rows,
+                                                                  int * __restrict__ err) {
+    const int tt = blockIdx.x, pos = pos0 + tt;
+    if (pos < 0 || pos >= rows) { if (threadIdx.x == 0) atomicOr(err, 1); return; }
+    auto * dst = (OwnKvQ8Block *)(cache + (size_t)pos * own_kv_q8_row_bytes(M));
+    const int nb = M / 32;
+    for (int b = threadIdx.x; b < 2 * nb; b += blockDim.x) {
+        const float * x = (b < nb ? k + (size_t)tt * ldk : v + (size_t)tt * ldv) + (size_t)(b % nb) * 32;
+        if (!own_kv_q8_encode(x, dst + b)) atomicOr(err, 2);
+    }
+}
+#else
 extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float * __restrict__ k, int ldk, const float * __restrict__ v,
                                                                    int ldv, _Float16 * __restrict__ cache, int M, int pos0, int rows,
                                                                    int * __restrict__ err) {
@@ -705,6 +721,7 @@ extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float *
         c[M + i] = (_Float16)v[(size_t)tt * ldv + i];
     }
 }
+#endif
 
 // q35p_attn16: OP_ATTN_DEC over a chunk's rows (own_op_attn_dec's batched form on the f16 cache, k3_own_ops.h): one
 // workgroup per (row, query head), the decode's task index h = row * heads + head; row r sees cache positions 0 .. pos0 + r.
@@ -803,15 +820,32 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn16(const float * __re
 #define AW_D 256
 #define AW_KP (AW_D + 8)
 #define AW_VP (AW_C + 8)
+#ifdef Q35P_KV_Q8
+#include "own_q35_prefill_q8.h"
+extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm_q8(const float * __restrict__ qin, const uint8_t * __restrict__ cache,
+                                                                  int pos0, int n, int blk0, int heads, int nkv, float scale_log2,
+                                                                  float * __restrict__ out, int force_fp32) {
+#else
 extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __restrict__ qin, const _Float16 * __restrict__ cache,
                                                                int pos0, int n, int blk0, int heads, int nkv, float scale_log2,
                                                                float * __restrict__ out) {
+#endif
     __shared__ _Float16 Ks[AW_C * AW_KP];
     __shared__ _Float16 Vt[AW_D * AW_VP];
     __shared__ float Sx[8][2][8][32];
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, hi = lane >> 4, half = wave & 1, dh = half * 128;
     const int G = heads / nkv, g = blockIdx.y, b8 = (blk0 + (int)blockIdx.x) * 8;
     const size_t M = (size_t)nkv * AW_D, RS = 2 * M;   // halves per cache row
+#ifdef Q35P_KV_Q8
+    __shared__ int first_unsafe;
+    __shared__ unsigned q_unsafe;
+    if (tid == 0) { first_unsafe = 0x7fffffff; q_unsafe = 0; }
+    __syncthreads();
+    if (force_fp32) {
+        q35p_attn_q8_fp32(qin, cache, pos0, n, b8, heads, nkv, scale_log2, out, 0, 0);
+        return;
+    }
+#endif
     const int nq = lane & 15, sec = nq >> 3, hh = nq & 7;
     const int q0 = b8 + 2 * (wave >> 1), q1 = q0 + 1;
     const int qpos = q0 + sec, tq = qpos - pos0, hq = g * G + min(hh, G - 1);
@@ -826,10 +860,21 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __r
             for (int j = 0; j < 4; j++) {
                 const float4 f = qp[4 * s + j];
                 v[4 * j] = (_Float16)f.x; v[4 * j + 1] = (_Float16)f.y; v[4 * j + 2] = (_Float16)f.z; v[4 * j + 3] = (_Float16)f.w;
+#ifdef Q35P_KV_Q8
+                bool unsafe = false;
+#pragma unroll
+                for (int e = 0; e < 4; e++) {
+                    if (!isfinite((float)v[4 * j + e])) { v[4 * j + e] = (_Float16)0; unsafe = true; }
+                }
+                if (qok && unsafe) atomicOr(&q_unsafe, 1u << (qpos - b8));
+#endif
             }
             Qb[s] = v;
         }
     }
+#ifdef Q35P_KV_Q8
+    __syncthreads();
+#endif
     f8_t O[8];
 #pragma unroll
     for (int d = 0; d < 8; d++) O[d] = (f8_t){0, 0, 0, 0, 0, 0, 0, 0};
@@ -838,6 +883,27 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __r
     const int sp = tid >> 3, sq = tid & 7;              // staging: position sp of the chunk, dims 32 sq .. 32 sq + 31
     for (int c0 = 0; c0 < npos; c0 += AW_C) {
         const int prow = min(c0 + sp, npos - 1);       // (rows past the end: a valid row; never in a written column's sum)
+#ifdef Q35P_KV_Q8
+        const size_t rb = own_kv_q8_row_bytes((int)M);
+        const auto * row = (const OwnKvQ8Block *)(cache + (size_t)prow * rb);
+        const auto & kb = row[g * 8 + sq], & vb = row[nkv * 8 + g * 8 + sq];
+        const float kd = (float)kb.d, vd = (float)vb.d;
+        __syncthreads();
+        bool unsafe = false;
+#pragma unroll
+        for (int j = 0; j < 32; j++) {
+            _Float16 k = (_Float16)((float)kb.qs[j] * kd), v = (_Float16)((float)vb.qs[j] * vd);
+            // Zero only temporary half operands. Every row which can see an
+            // unsafe value is computed from original fp32 Q/decoded Q8 below;
+            // the codec domain is not narrowed or saturated. Earlier causal
+            // rows keep exactly their normal WMMA math, even across chunk cuts.
+            if (!isfinite((float)k)) { k = (_Float16)0; unsafe = true; }
+            if (!isfinite((float)v)) { v = (_Float16)0; unsafe = true; }
+            Ks[sp * AW_KP + sq * 32 + j] = k;
+            Vt[(sq * 32 + j) * AW_VP + sp] = v;
+        }
+        if (unsafe) atomicMin(&first_unsafe, prow);
+#else
         const u32x4_t * kp = (const u32x4_t *)(cache + (size_t)prow * RS + (size_t)g * AW_D + sq * 32);
         const u32x4_t * vp = (const u32x4_t *)(cache + (size_t)prow * RS + M + (size_t)g * AW_D + sq * 32);
         u32x4_t kv[4], vv[4];
@@ -853,6 +919,7 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __r
 #pragma unroll
             for (int e = 0; e < 8; e++) Vt[(sq * 32 + j * 8 + e) * AW_VP + sp] = hv[e];
         }
+#endif
         __syncthreads();
         const bool act = c0 <= q1;                      // (wave-uniform, the same in both waves of a pair; then c0 <= q0)
         // the pair's tile: positions c0 + 16 std .. + 15 hold q0 and q1 (q0 even: never across a tile edge); 1 when the
@@ -946,13 +1013,21 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __r
             }
         }
     }
+#ifdef Q35P_KV_Q8
+    if (qok && qpos < first_unsafe && !(q_unsafe & (1u << (qpos - b8)))) {
+#else
     if (!qok) return;
+#endif
     const float il = 1.0f / l;
     float * op = out + ((size_t)tq * heads + hq) * AW_D + dh;
 #pragma unroll
     for (int d = 0; d < 8; d++)
 #pragma unroll
         for (int v = 0; v < 8; v++) op[d * 16 + 2 * v + hi] = O[d][v] * il;
+#ifdef Q35P_KV_Q8
+    }
+    q35p_attn_q8_fp32(qin, cache, pos0, n, b8, heads, nkv, scale_log2, out, first_unsafe, q_unsafe);
+#endif
 }
 
 // q35p_gate_mul16: OP_GATE_MUL16 over values i < N: y16[i] = fp16(a[i] * sigmoid(gate[h * stride + off + d])), h = i / D,

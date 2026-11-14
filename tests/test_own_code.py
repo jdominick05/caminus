@@ -29,7 +29,11 @@ for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3
             'own_mv_q35.hip',                                 # (its standalone own tiles: ThinkingCap's formats, IQ2_S included)
             'k3_q35_tcap.hip', 'k3_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
             'q35_prefill_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
-            'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip'):   # (its prefill's objects)
+            'q35_prefill.hip', 'q35_prefill_kvq8.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip',
+            'kv_codec.hip',    # (staged own Q8 KV codec and cache-specialized dense modules)
+            'k3_q35_gsq_kvq8.hip', 'k3_q35_swift_kvq8.hip', 'k3_q35_swift_ver_kvq8.hip',
+            'k3_q35_swift_tp_kvq8.hip', 'k3_q35_tcap_kvq8.hip', 'k3_q35_tcap_ver_kvq8.hip',
+            'k3_q35_tcap_tp_kvq8.hip'):
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
 ref = audit('k3_gguf_q3m_own.hip')[2]
@@ -43,7 +47,8 @@ check(re.search(r'kernels/k3_q3m\*\.hip\|kernels/k3_q35_\*\.hip\)\s*extra=\(-mll
 # the serve path under an import hook refusing gguf and tokenizers
 MODS = ('caminus.serve.cli', 'caminus.serve.server', 'caminus.serve.k3_session', 'caminus.serve.worker', 'caminus.serve.generate',
         'caminus.cache.prompt', 'caminus.decode.longctx', 'caminus.engine.q3moe_one', 'caminus.prefill.q3m', 'caminus.serve.tokenizer',
-        'caminus.engine.q35_dense', 'caminus.prefill.q35own')   # (+ the dense qwen35 line on own code: Swift 1.5)
+        'caminus.engine.q35_dense', 'caminus.prefill.q35own',
+        'caminus.device.kv_codec', 'caminus.prefill.q35_kvq8')   # (+ the dense qwen35 line and staged own KV codec)
 code = f'''import sys, importlib.abc
 class B(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path, target=None):

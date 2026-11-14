@@ -100,6 +100,10 @@ CLAUDE.md imports this file.
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
+- Dense Q8 KV is staged under separate `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
+  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename.
+  Its shared prefill object falls back to FP32 for causal rows whose Q/K/V cannot be staged in half; preserve the
+  codec domain and check numerical flags before drafter exports, handoff or ordinary failure recovery.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS) and Qwen3-Coder-Next. Their engines and kernels stay; `models.PAUSED` keeps them
@@ -204,8 +208,9 @@ GPU safety (a fault on the display card can take the desktop down):
 - Every GPU process runs under `tools/guard.sh LOG SECS CMD...` (or `caminus guard`).
 - Guard exit 99 = a GPU fault: stop all GPU work, rerun nothing. Exit 98 = a fault on record
   (`~/.local/state/k3/GPU_FAULT_STOP`): a person inspects it before anything runs.
-- Exit 75 = `caminus serve`'s engine produced non-finite logits (`caminus.errors.NonFiniteLogits`: a weight or state corrupt
-  in that process; nothing parked). It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
+- Exit 75 = `caminus serve`'s engine had a terminal `caminus.errors.NumericalFailure` (non-finite logits or a refused
+  Q8 KV encoding). Check the dedicated sticky KV error word after the device wait, before timeout recovery: other
+  blocks may already be written. Mark the engine broken; retry, reset and parking cannot repair it. It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
   the systemd unit's `RestartForceExitStatus=75`); faults are never retried.
 - New or changed kernel code runs first on a non-display card alone (`HIP_VISIBLE_DEVICES=<its index>`), small inputs.
 - Every device wait is time-bounded (`limit_us`; TP 200 ms + a bitwise retry); every launch well under 200 ms. Never a
