@@ -177,11 +177,19 @@ class TestSideQuestionStored(unittest.TestCase):
 class TestRouteMetrics(unittest.TestCase):
     def test_counters_status_and_flight_slot(self):
         import tempfile
+        import threading
         from caminus.serve.flight import FlightRecorder
         eng = U.ScriptedEngine(ntok=4)
         sess = _RouteSession(eng, max_ctx=4096, eos_ids=(248046, 248044))
         sess.side_below = 20
-        fl = FlightRecorder(tempfile.mkdtemp(prefix='k3-route-flight-'))
+        recorded = threading.Semaphore(0)
+
+        class RecordedFlight(FlightRecorder):
+            def record(self, row):
+                super().record(row)
+                recorded.release()
+
+        fl = RecordedFlight(tempfile.mkdtemp(prefix='k3-route-flight-'))
         srv = _server(sess, flight=fl)
         try:
             long_ = [248044] + list(range(2000, 2040))
@@ -189,9 +197,11 @@ class TestRouteMetrics(unittest.TestCase):
             for ids in (long_, short, long_, short, short):
                 st, _, _ = U.post_json(srv, '/v1/completions', {'prompt': ids, 'max_tokens': 4, 'temperature': 0})
                 self.assertEqual(st, 200)
+                # The response can arrive before the handler's finally block appends its flight row. Serialize
+                # these fixture records explicitly so their order reflects the requests asserted below.
+                self.assertTrue(recorded.acquire(timeout=5), 'request flight row was not recorded')
             text = U.request(srv, 'GET', '/metrics')[2].decode()
             s = json.loads(U.request(srv, 'GET', '/caminus/status')[2])
-            time.sleep(0.2)
             with open(fl.day_path(), encoding='utf-8') as f:
                 rows = [json.loads(x) for x in f if x.strip()]
         finally:

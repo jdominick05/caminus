@@ -14,7 +14,7 @@ caminus panel -advanced  # every server option, the card choice, the brain / han
 
 | Part | What it shows |
 |---|---|
-| **MODELS** | Every model Caminus knows, how many cards it needs, its size, and whether it's on disk. |
+| **MODELS** | Every model Caminus knows, its size, whether it's on disk, and the card count and drafter for its next start. |
 | **SERVERS** | The models you started: their address, context size and current speed. |
 | **QWEN CODE** | Whether Qwen Code is installed and set up for your server. Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched. |
 | **OPTIONS** | Advanced layout only: every option of the server, for the next start. |
@@ -28,6 +28,8 @@ caminus panel -advanced  # every server option, the card choice, the brain / han
 |---|---|---|
 | MODELS | `enter` | Start the model. |
 | | `p` | Download it. |
+| | `n` | Choose one or two cards where the model supports both. |
+| | `d` | Choose its drafter: auto (the server's measured default), off, MTP or DFlash where supported at that card count. |
 | | `c` | Advanced: choose the card (auto, or a card number). |
 | | `b` | Advanced: start the brain / hands team (below). |
 | SERVERS | `enter` | Open Qwen Code on this server. |
@@ -44,7 +46,13 @@ caminus panel -advanced  # every server option, the card choice, the brain / han
 | | `R` | Refresh. |
 | | `q` | Quit. Running models keep running. |
 
-The panel remembers your layout and option values in `~/.config/caminus/panel.json`.
+The card count and drafter are available in both layouts. Auto leaves the choice to the server's measured default for
+that model and card count; off explicitly disables drafting. Only the architecture's supported modes are offered.
+If a model is on disk but its optional DFlash file is missing, `p` offers to download the drafter. Selecting DFlash
+requires that file; off and the model's built-in MTP block can start without it.
+In the advanced layout, `--drafter` can point to a different file; the server validates that file when it starts.
+The panel remembers the choices for each model and card count, along with your layout and other option values, in
+`~/.config/caminus/panel.json`.
 
 ## The live monitor
 
