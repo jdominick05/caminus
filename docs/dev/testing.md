@@ -26,6 +26,7 @@ collector and no sockets or model: `python -I tests/tools/test_serve_smoke1.py` 
 Installed-mode command and preflight refusals have a separate CPU suite,
 `python -I tests/tools/test_serve_smoke_installed.py --scratch DIR`. Its package/provenance fixtures never execute
 GPU code; the CLI is replaced by a recorder.
+
 ### Staged own Q8 KV codec
 
 The internal `device.kv_codec.Q8KVCodec` writer is a foundation for new cache paths; it does not enable a model's
@@ -40,7 +41,8 @@ seeded finite inputs and numerical refusals. `tests/device/test_kv_codec.py` che
 alignment, aliasing and dispatch using CPU recorders. CI runs both; the host compilation needs a C++ compiler.
 These tests establish source and host behavior, not GPU byte parity or model quality.
 
-The next gate is `tests/device/test_kv_codec_gpu.py --json OUT`, under the guard and non-display-first. It compares
+The next gate is `tools/guard.sh LOG 180 python -I tests/device/test_kv_codec_gpu.py --json OUT`, on the non-display
+card first. It compares
 valid device output bytes with the independent reference over head widths 32/128/256, different head counts,
 padded input strides, last valid rows, chunk cuts and cache canaries. Invalid span/layout tests stay on the CPU.
 Device division, reciprocal, half conversion and subnormal behavior must match before integrating this writer.
