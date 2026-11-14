@@ -1,6 +1,8 @@
 """The end-to-end smoke of the REAL caminus serve with a ONE-CARD model (qwen35moe: Qwen3.6-35B-A3B GSQ / HauhauCS; qwen35:
 the dense qwen35 line, AREX-2): tools/caminus_serve.py as a child on one card (HIP_VISIBLE_DEVICES=--card), scratch cache /
-flight directories only, then from outside, with a stdlib client (tools/serve_smoke.py's helpers):
+flight directories only, then from outside, with a stdlib client (tools/serve_smoke.py's helpers). With
+CAMINUS_SMOKE_INSTALLED=1 it uses this interpreter's installed caminus CLI and packaged kernels (no editable install,
+checkout fallback or kernel_dir override); the own-code gate requires matching checkout kernel sources:
   ids       /health 200, /props (the caminus engine marker, the model alias), /v1/models (alias and alias-nothink), /slots
   greedy    an OpenAI chat stream at temperature 0 (no thinking): content, finish, timings (decode tok/s)
   sampled   an OpenAI chat stream at temperature 0.7, then a separate weather tool round trip: a natural call first (one
@@ -49,17 +51,12 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 
 
 class Server1:
-    """tools/caminus_serve.py on one card, its output followed (the port, the pid, 'ready on')"""
+    """Checkout or installed caminus on the selected cards, output followed through shutdown/restart."""
     def __init__(self, tag, a):
         self.tag, self.lines, self.port, self.ready = tag, [], None, threading.Event()
-        cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'caminus_serve.py'), '--port', '0', '--model', a.model,
-               '--max-ctx', str(a.max_ctx), '--cache-dir', os.path.join(a.scratch, 'kv'), '--flight-dir', os.path.join(a.scratch, 'flight')]
-        if a.alias: cmd += ['--model-alias', a.alias]
-        cmd += ['--cards', str(a.cards)]   # (2 with --card 0,1: a one-card model's two-card form, e.g. swift-1.5 / thinkingcap)
-        if a.draft: cmd += ['--draft', a.draft]   # (the drafter kind caminus serve runs: off|mtp|dflash)
-        if a.block_imports:   # the server with an import hook that refuses these top-level packages (the own-code gate)
-            cmd = cmd[:2] + ['-c', BLOCKER.format(block=tuple(a.block_imports.split(','))), cmd[2]] + cmd[3:]
-        print(f'{tag}: HIP_VISIBLE_DEVICES={a.card} {" ".join(c for c in cmd[2:] if not c.startswith("import sys"))}', flush=True)
+        cmd = server_command(a)
+        print(f'{tag}: {"installed" if S.INSTALLED else "checkout"} HIP_VISIBLE_DEVICES={a.card} '
+              f'{" ".join(c for c in cmd[2:] if not c.startswith("import sys"))}', flush=True)
         self.t0 = time.time()
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                   env=dict(os.environ, PYTHONUNBUFFERED='1', HIP_VISIBLE_DEVICES=str(a.card)))
@@ -84,6 +81,30 @@ class Server1:
         try: self.p.wait(timeout)
         except subprocess.TimeoutExpired: self.p.kill(); self.p.wait(60)
         return self.p.returncode
+
+
+def server_command(a):
+    """Same serve arguments in both modes; installed helper never adds the checkout to sys.path."""
+    argv = ['--port', '0', '--model', a.model, '--max-ctx', str(a.max_ctx),
+            '--cache-dir', os.path.join(a.scratch, 'kv'), '--flight-dir', os.path.join(a.scratch, 'flight')]
+    if a.alias: argv += ['--model-alias', a.alias]
+    argv += ['--cards', str(a.cards)]
+    if a.draft: argv += ['--draft', a.draft]
+    if S.INSTALLED:
+        cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'serve_smoke_installed.py')]
+        if a.block_imports:
+            # Parent only: this helper imports checkout code to hash its sources.
+            # The isolated child receives just the digest, never that import path.
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('smoke_kernel_sources', os.path.join(ROOT, 'tools', 'release', 'stage_kernels.py'))
+            sources = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(sources)
+            cmd += ['--block-imports', a.block_imports, '--kernel-tree-sha256', sources.kernel_tree_sha256(ROOT)]
+        return cmd + ['--'] + argv
+    cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'caminus_serve.py')] + argv
+    if a.block_imports:
+        cmd = cmd[:2] + ['-c', BLOCKER.format(block=tuple(a.block_imports.split(','))), cmd[2]] + cmd[3:]
+    return cmd
 
 
 def chat(port, model, messages, stream=True, tools=None, **kw):
@@ -199,6 +220,7 @@ def main():
     a = ap.parse_args()
     a.cards = a.cards or len(str(a.card).split(','))
     a.scratch = S.safe_dir(a.scratch); os.makedirs(a.scratch, mode=0o700, exist_ok=True)
+    S.NUMBERS['installed_package'] = S.INSTALLED
     check = S.check
     srv = Server1('server', a)
     ok = srv.wait_ready()
