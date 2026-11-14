@@ -10,7 +10,11 @@
 // status, so a timeout cannot overwrite a numerical failure. Host checks this
 // word before any retry, logits consumption or parking.
 __device__ __forceinline__ void q35_op_kv_append_q8(const Seg & sg, int tt) {
-    const int pos = ((const int *)sg.asum)[0] + tt, M = sg.N;
+    const int pos = ((const int *)sg.asum)[0] + tt;
+    int M = sg.N;
+#ifdef K3_XCHG_PUSH_ONLY
+    asm volatile("" : "+s"(M));   // keep Q8 row geometry inside the append branch
+#endif
     auto * dst = (OwnKvQ8Block *)((uint8_t *)sg.y + (size_t)pos * own_kv_q8_row_bytes(M));
     const int nb = M / 32;
     for (int b = K3TID; b < 2 * nb; b += blockDim.x) {
@@ -25,7 +29,11 @@ __device__ __forceinline__ void q35_op_kv_append_q8(const Seg & sg, int tt) {
 __device__ __forceinline__ void q35_op_hadamard(const Seg & sg, int t) {
 #pragma clang fp contract(off)
     __shared__ float hb[256];
-    const int n = sg.K, tid = K3TID;
+    int n = sg.K;
+#ifdef K3_XCHG_PUSH_ONLY
+    asm volatile("" : "+s"(n));   // keep transform geometry inside its dispatch branch
+#endif
+    const int tid = K3TID;
     const float scale = 1.0f / sqrtf((float)n);
     const int c0 = t * sg.rows_per_task, c1 = min(sg.N, c0 + sg.rows_per_task);
     for (int c = c0; c < c1; c++) {

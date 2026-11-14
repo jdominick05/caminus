@@ -176,6 +176,30 @@ class Target(unittest.TestCase):
             self.assertTrue(torch.equal(value.view(torch.uint8).reshape(-1), expected[key]), key)
         self.assertEqual(m.last_T, 4)
 
+    def test_q8_verify_refuses_pull_before_tape_changes_and_rechecks_raw_segments(self):
+        partial, out, epoch = torch.zeros(4), torch.zeros(4), torch.zeros(1, dtype=torch.int32)
+        for line in PATHS:
+            m = self.engine(line, q8=True)
+            v = Dense35VerifyTP(m, 4, vram_check=False)
+            for E in v.E:
+                counts = (len(E.segs), len(E.keep))
+                for mode in (1, 2):
+                    with self.subTest(line=line, mode=mode), self.assertRaisesRegex(ValueError, 'push-only'):
+                        E.xchg(partial, out, 4096, 8192, epoch, 0, 0, pull=12288, pull_mode=mode)
+                    self.assertEqual((len(E.segs), len(E.keep)), counts)
+                sg = next(s for s in E.segs if s.op == k3.OP_XCHG)
+                for mode in (1, 2):
+                    sg.pad2 = mode
+                    with self.assertRaisesRegex(ValueError, 'push-only'): E.build()
+                sg.pad2 = 0
+                E.build()
+            # Existing F16 verify modules retain their pull-capable exchange.
+            f = self.engine(line)
+            F = Dense35VerifyTP(f, 4, vram_check=False).E[0]
+            F.xchg(partial, out, 4096, 8192, epoch, 0, 0, pull=12288, pull_mode=1)
+            self.assertEqual(F.segs[-1].pad2, 1)
+            self.assertEqual(F.segs[-1].aux, 12288)
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True); args = ap.parse_args()

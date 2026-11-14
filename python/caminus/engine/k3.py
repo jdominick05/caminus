@@ -122,7 +122,8 @@ Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MO
 Q35R_MODULES += (Q35_KV_Q8_OF['k3_q35_gsq'],)
 Q35SV_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'],)
 Q35TV_MODULES += (Q35_KV_Q8_OF['k3_q35_tcap_ver'],)
-Q35TPV_MODULES += tuple(Q35_KV_Q8_OF[m] for m in Q35TPV_MODULES)
+Q35_Q8_TPV_MODULES = tuple(Q35_KV_Q8_OF[m] for m in Q35TPV_MODULES)
+Q35TPV_MODULES += Q35_Q8_TPV_MODULES
 Q35V_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'], Q35_KV_Q8_OF['k3_q35_tcap_ver']) + tuple(
     m for m in Q35TPV_MODULES if m in Q35_KV_Q8_MODULES)
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
@@ -1194,6 +1195,8 @@ class Engine:
         """two-card all-reduce: out = card 0's partial + card 1's (same bits on both cards). peer_slot / my_slot: device
         addresses (int) of the receive slots (uncached VRAM, 16 header words + N floats) on the peer / this card;
         epoch_base: int32 [1] on this card (token * exchanges per token); index: this exchange's number in the token"""
+        if self.module in Q35_Q8_TPV_MODULES and pull_mode != 0:
+            raise ValueError(f'k3: module {self.module} has push-only exchange (pull_mode {pull_mode})')
         N = partial.numel(); assert N % 4 == 0; self.keep += [partial, out, epoch_base]
         self.segs.append(Seg(OP_XCHG, 1, dep, 1, peer_slot, my_slot, partial.data_ptr(), epoch_base.data_ptr(), out.data_ptr(),
                              0.0, N, index, 1, card, -1, int(local_only), int(pull_mode)))
@@ -1531,6 +1534,8 @@ class Engine:
                 if self.module in Q35_KV_Q8_MODULES: ops = ops | {OP_HADAMARD}
                 if sg.op not in ops and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES + Q35TPV_MODULES):
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(ops)}')
+                if sg.op == OP_XCHG and self.module in Q35_Q8_TPV_MODULES and sg.pad2 != 0:
+                    raise ValueError(f'k3: module {self.module} has push-only exchange (segment {i})')
                 if sg.op in (OP_KV_APPEND, OP_ATTN_DEC, OP_ATTN_PART, OP_ATTN_COMB):
                     want = self.module in Q35_KV_Q8_MODULES
                     if sg.work != int(want):

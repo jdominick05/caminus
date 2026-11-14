@@ -48,6 +48,9 @@ remain refused when the served path is integrated.
 
 On two cards, each cache holds that card's KV heads and each decode tape has its own four-byte error word. Projection
 and checkpoint stride use the same local row size; exchanges retain the original FP32 partials and sum order.
+The two Q8 TP verify modules compile push-only exchange, matching their target host. Tape construction and build
+both refuse pull mode there. Their exchange/Q8 geometry and remote address stay inside the relevant dispatch
+branches to meet register budgets. Existing F16 modules retain their pull-mode implementation.
 
 ## Matching batched prefill
 
