@@ -15,10 +15,13 @@ Before 2026-11-07 the session kept its own copy of the log and state, synced wit
 request, and worked out from its own epochs what the device held; four fixes (668dd7a, 03c0d93, facbdac, 500ff36) were
 drift between those copies.
 """
+from ..errors import NumericalFailure
 
 
 def is_bail(e):
     """True for a pass that failed after the engine's bitwise retries (FlashNextTP / DFlashK3 'a wait gave up ...')"""
+    if isinstance(e, NumericalFailure):
+        return False   # terminal state corruption is never retryable, even when its diagnostic mentions a timeout
     return isinstance(e, RuntimeError) and 'a wait gave up' in str(e)
 
 

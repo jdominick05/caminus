@@ -108,14 +108,29 @@ Q35TPV_MODULES = ('k3_q35_swift_tp_ver', 'k3_q35_tcap_tp_ver')   # (kernels/k3_q
 Q35V_MODULES = Q35SV_MODULES + Q35TV_MODULES + Q35TDF_MODULES + Q35TM_MODULES + Q35TPV_MODULES   # (every module with the T-token forms: Swift's and ThinkingCap's verify modules, the drafters)
 Q35DF_ALL = Q35DF_MODULES + Q35TDF_MODULES   # (the DFlash drafter modules of both lines)
 Q35S_MODULES = ('k3_q35_swift', 'k3_q35_swift_trace', 'k3_q35_swift_tp', 'k3_q35_swift_tp_trace', 'k3_q35_swift_tp_ver') + Q35SV_MODULES   # (kernels/k3_q35_swift.hip: the dense qwen35 line's decode tape on own ops, no ggml headers; Q35S_OPS below)
+# Separate Q8-only objects; the baseline objects retain their F16 cache arithmetic.
+# Verify starts with the unpacked PART, independent of the F16 packed reader.
+Q35_KV_Q8_BASE = {name + '_kvq8': name for name in (
+    'k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_swift_tp',
+    'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_tcap_tp', 'k3_q35_gsq')}
+Q35_KV_Q8_OF = {base: name for name, base in Q35_KV_Q8_BASE.items()}
+Q35_KV_Q8_MODULES = tuple(Q35_KV_Q8_BASE)
+Q35S_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35S_MODULES)
+Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MODULES)
+Q35R_MODULES += (Q35_KV_Q8_OF['k3_q35_gsq'],)
+Q35SV_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'],)
+Q35TV_MODULES += (Q35_KV_Q8_OF['k3_q35_tcap_ver'],)
+Q35V_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'], Q35_KV_Q8_OF['k3_q35_tcap_ver'])
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
 Q3M_IQ_MODULES = ('k3_q3m_iq', 'k3_q3m_iq_trace')
 Q3M_RS_MODULES = {'k3_q3m_rs4': 'RS4', 'k3_q3m_rs2': 'RS2'}   # (the row-scale study's: module -> its one format; OWN_RS_FMT below)
 Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES)   # (_trace: K3_TRACE timestamps, measurement only)
 # the own dense qwen35 modules (Swift / ThinkingCap: decode, verify, two cards; not the MTP drafter's module) run their decode
-# attention as the same split pair (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT: k3_gguf_q35d's settings, an f16 cache only)
+# attention as the same split pair (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT: k3_gguf_q35d's settings;
+# baseline F16 objects and the separate Q8-only objects)
 Q35_SPLIT_MODULES = tuple(m for m in Q35S_MODULES + Q35T_MODULES if m not in Q35DF_MODULES + Q35TDF_MODULES)   # (the MTP drafter's module too)
-ATTN_PACK_MODULES = ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace') + Q35TV_MODULES + Q35TPV_MODULES   # (K3_Q35_ATTN_PACK: OP_ATTN_PART tasks = (split, kv head) for every pass row, up to ATTN_PACK_T rows; kernels/k3_attn_split.h op_attn_part_packed)
+ATTN_PACK_MODULES = tuple(m for m in ('k3_q35_swift_ver', 'k3_q35_swift_ver_trace') + Q35TV_MODULES + Q35TPV_MODULES
+                          if m not in Q35_KV_Q8_MODULES)   # Q8 verify uses the unpacked PART
 ATTN_PACK_T = 4
 ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace') + QSA_MODULES + Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
@@ -272,6 +287,8 @@ Q35_MODULES = Q35S_MODULES + Q35T_MODULES   # (the two dense qwen35 own modules:
 # their two-card builds (K3_TP: kernels/k3_xchg.h's OP_XCHG; engine/q35_dense_tp.py): one-card module -> two-card module
 Q35_TP_OF = {'k3_q35_swift': 'k3_q35_swift_tp', 'k3_q35_tcap': 'k3_q35_tcap_tp', 'k3_q35_swift_trace': 'k3_q35_swift_tp_trace',
              'k3_q35_tcap_trace': 'k3_q35_tcap_tp_trace'}
+Q35_TP_OF.update({Q35_KV_Q8_OF[m]: Q35_KV_Q8_OF[tp] for m, tp in tuple(Q35_TP_OF.items())
+                  if m in Q35_KV_Q8_OF and tp in Q35_KV_Q8_OF})
 Q35_TP_MODULES = tuple(Q35_TP_OF.values())
 # the two-card modules' verify builds (K3_TP + K3_Q3M_VER): two-card module -> its verify module
 Q35_TPV_OF = {'k3_q35_swift_tp': 'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp': 'k3_q35_tcap_tp_ver'}
@@ -331,7 +348,7 @@ SYNC_WORDS = MAXSEG * 2 + 8
 STATUS_WORDS = 8
 
 
-from ..errors import NonFiniteLogits   # noqa: E402 (re-exported: engines raise k3.NonFiniteLogits)
+from ..errors import NonFiniteLogits, InvalidKVEncoding   # noqa: E402 (shared terminal engine failures)
 
 
 class ContextBoundsError(IndexError):
@@ -506,7 +523,13 @@ class Engine:
         self.grid = grid or 4 * props.multi_processor_count   # multiProcessorCount = WGPs on gfx11
         self.limit_us = limit_us   # a stuck wait gives up after this (keeps the XTX's desktop compositor alive)
         self.module = module_for(module, T); self.mv_u = 16 if module == 'k3_u16' else 8; self.teams = teams
-        self.sync = torch.zeros(SYNC_WORDS, dtype=torch.int32, device='cuda')
+        q8 = self.module in Q35_KV_Q8_MODULES
+        if q8 and (isinstance(T, (bool, np.bool_)) or not isinstance(T, (int, np.integer)) or not 1 <= T <= 4
+                   or (T != 1 and self.module not in Q35V_MODULES) or teams is not None):
+            raise ValueError('k3 Q8 KV: decode T = 1, verify T = 1 .. 4, k3_run tapes only')
+        self.sync = torch.zeros(SYNC_WORDS + int(q8), dtype=torch.int32, device='cuda')
+        # Outside Sync's ABI: a sticky numerical failure, never the timeout word.
+        self.kv_error = self.sync[SYNC_WORDS:SYNC_WORDS + 1] if q8 else None
         self.segs, self.keep = [], []
         self.T = T            # tokens per pass (speculative verification); every segment's team field carries it
         self.params = torch.zeros(16, dtype=torch.int32, device='cuda')   # per pass: [1] = previous pass's tokens to commit
@@ -970,12 +993,43 @@ class Engine:
     def kv_append(self, k, v, cache, pos, q8=False, dep=-1, team=-1):
         """cache[pos] = (k, v) in f16 or q8_0 (block_q8_0, as llama.cpp -ctk/-ctv q8_0); per position [K | V]. The cache's
         rows (from its allocation) bound pos .. pos + T - 1 in the device guard of every launch (k3_run's prologue)"""
-        if q8 and getattr(self, 'module', None) in Q35_MODULES: raise ValueError(f'kv_append: module {self.module} writes the f16 cache only')
-        M = k.numel() // self.T; self._guard_pos(pos, kv_rows(cache, M, q8))
+        self._dense_kv_format(q8)
+        if getattr(self, 'module', None) in Q35_KV_Q8_MODULES:
+            if not isinstance(k, torch.Tensor) or k.numel() % self.T:
+                raise ValueError('kv_append: K must contain a whole row per pass token')
+            M = k.numel() // self.T
+            rows = self._dense_q8_rows(cache, M)
+            from ..device.bufcheck import LaunchCheck
+            LaunchCheck('k3 Q8 KV', align=4)(self.sync.device, 'append',
+                dict(k=(k, torch.float32, self.T * M), v=(v, torch.float32, self.T * M),
+                     cache=(cache, torch.uint8, rows * kv_pos_bytes(M, True), 2),
+                     pos=(pos, torch.int32, 1), err=(self.kv_error, torch.int32, 1)), ('cache', 'err'))
+            if rows < self.T: raise ValueError('kv_append: fewer physical cache rows than pass tokens')
+        else:
+            M = k.numel() // self.T
+            rows = kv_rows(cache, M, q8)
+        self._guard_pos(pos, rows)
         self.keep += [k, v, cache, pos]
-        self.segs.append(Seg(OP_KV_APPEND, self.T, dep, 1, v.data_ptr(), None, k.data_ptr(), pos.data_ptr(), cache.data_ptr(),
+        err = getattr(self, 'kv_error', None)
+        if err is not None: self.keep.append(err)
+        self.segs.append(Seg(OP_KV_APPEND, self.T, dep, 1, v.data_ptr(), None if err is None else err.data_ptr(), k.data_ptr(), pos.data_ptr(), cache.data_ptr(),
                              0.0, M, 0, 1, int(q8), team, 0, 0))
         return len(self.segs) - 1
+
+    def _dense_kv_format(self, q8):
+        if getattr(self, 'module', None) in Q35_MODULES:
+            want = self.module in Q35_KV_Q8_MODULES
+            if not isinstance(q8, (bool, np.bool_)) or bool(q8) != want:
+                raise ValueError(f'k3: module {self.module}: {"Q8" if want else "F16"} KV cache only')
+
+    @staticmethod
+    def _dense_q8_rows(cache, M):
+        if not 32 <= M < 2 ** 31 or M % 32:
+            raise ValueError('k3 Q8 KV: M must be positive int32 whole 32-value blocks')
+        if (not isinstance(cache, torch.Tensor) or cache.dtype != torch.uint8 or not cache.is_contiguous()
+                or cache.data_ptr() % 2):
+            raise ValueError('k3 Q8 KV: cache must be contiguous, two-byte-aligned uint8 rows')
+        return kv_rows(cache, M, True)
 
     def split_attn(self):
         """True on the modules whose attention is the split pair (ATTN_SPLIT_MODULES)"""
@@ -985,6 +1039,7 @@ class Engine:
                  batched=False):
         """decode attention over positions 0..pos (f16 or q8_0 cache), grouped kv heads. On the split modules
         (split_attn()): the OP_ATTN_PART / OP_ATTN_COMB pair (_attn_split; max_cells / part there), the COMB's index returned"""
+        self._dense_kv_format(q8)
         if self.split_attn():
             assert team == -1, 'the split attention pair: k3_run segments only'
             return self._attn_split(q, cache, pos, None, out, heads, kv_heads, dim, scale, q8, dep, max_cells, part)
@@ -1104,6 +1159,13 @@ class Engine:
     def hadamard(self, x, n, rows_per_task=1, dep=-1, team=-1):
         """in place: the orthonormal Walsh-Hadamard transform of each contiguous chunk of n values (64 <= n <= 256)"""
         assert n in (64, 128, 256) and x.numel() % n == 0
+        if self.module in Q35_KV_Q8_MODULES:
+            if (isinstance(rows_per_task, (bool, np.bool_)) or not isinstance(rows_per_task, (int, np.integer))
+                    or not 1 <= rows_per_task < 2 ** 31 or not 0 < x.numel() // n < 2 ** 31):
+                raise ValueError('k3 Q8 Hadamard: positive int32 chunk/task counts required')
+            from ..device.bufcheck import LaunchCheck
+            LaunchCheck('k3 Q8 Hadamard', align=4)(self.sync.device, 'hadamard',
+                                                dict(x=(x, torch.float32, x.numel())), ('x',))
         C = x.numel() // n; self.keep.append(x)
         self.segs.append(Seg(OP_HADAMARD, (C + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None, None, None, None,
                              x.data_ptr(), 0.0, C, n, 1, 0, team, 0, 0))
@@ -1349,7 +1411,10 @@ class Engine:
         if dim != ATTN_D or kv_heads < 1 or heads != G * kv_heads:
             raise ValueError(f'k3 {self.module}: attention runs only as the split pair here (head dim {ATTN_D}, {G} '
                              f'query heads per kv head); got dim {dim}, heads {heads}, kv_heads {kv_heads}')
-        rows = kv_rows(cache, kv_heads * dim, q8)
+        self._dense_kv_format(q8)
+        rows = self._dense_q8_rows(cache, kv_heads * dim) if self.module in Q35_KV_Q8_MODULES else kv_rows(cache, kv_heads * dim, q8)
+        if self.module in Q35_KV_Q8_MODULES and rows < self.T:
+            raise ValueError('k3 Q8 attention: fewer physical cache rows than pass tokens')
         longest = min(rows, 4 * QSA_TOPK + 3) if sel is not None else rows
         mc = longest if max_cells is None else max_cells
         if isinstance(mc, bool) or not isinstance(mc, (int, np.integer)) or not 1 <= int(mc) <= rows:
@@ -1366,6 +1431,14 @@ class Engine:
         if packed and (sel is not None or q8 or self.T > ATTN_PACK_T):
             raise ValueError(f'attn split on {self.module} (the packed PART): the identity list, f16 cache, T <= {ATTN_PACK_T} '
                              f'(sel {sel is not None}, q8 {bool(q8)}, T {self.T})')
+        if self.module in Q35_KV_Q8_MODULES:
+            if sel is not None: raise ValueError('k3 Q8 dense attention: identity list only')
+            from ..device.bufcheck import LaunchCheck
+            LaunchCheck('k3 Q8 KV', align=4)(self.sync.device, 'attention',
+                dict(q=(q, torch.float32, self.T * heads * dim, 16),
+                     cache=(cache, torch.uint8, rows * kv_pos_bytes(kv_heads * dim, True), 2),
+                     pos=(pos, torch.int32, 1), out=(out, torch.float32, self.T * heads * dim),
+                     part=(part, torch.float32, need)), ('out', 'part'))
         self._guard_pos(pos, rows)   # (the guard bounds the rows it reads: every list cell <= pos)
         self.keep += [q, cache, pos, out, part] + ([] if sel is None else [sel])
         sp = None if sel is None else sel.data_ptr()
@@ -1447,10 +1520,15 @@ class Engine:
         if self.module in Q35_MODULES:   # (as the lean qwen3moe module: an op outside its dispatch would run as a no-op)
             for i, sg in enumerate(self.segs):
                 ops = Q35TM_OPS if self.module in Q35TM_MODULES else Q35M_OPS if self.module in Q35M_MODULES else Q35DF_OPS if self.module in Q35DF_ALL else Q35S_OPS
+                if self.module in Q35_KV_Q8_MODULES: ops = ops | {OP_HADAMARD}
                 if sg.op not in ops and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES + Q35TPV_MODULES):
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(ops)}')
-                if sg.op in (OP_ATTN_DEC, OP_ATTN_PART, OP_ATTN_COMB) and sg.work:   # (their device code reads f16 only)
-                    raise ValueError(f'k3: module {self.module}: the f16 KV cache only (segment {i})')
+                if sg.op in (OP_KV_APPEND, OP_ATTN_DEC, OP_ATTN_PART, OP_ATTN_COMB):
+                    want = self.module in Q35_KV_Q8_MODULES
+                    if sg.work != int(want):
+                        raise ValueError(f'k3: module {self.module}: {"Q8" if want else "F16"} KV cache only (segment {i})')
+                    if want and sg.op == OP_KV_APPEND and sg.gs != self.kv_error.data_ptr():
+                        raise ValueError('k3 Q8 KV: append must retain its dedicated numerical error pointer')
         q = [i for i, sg in enumerate(self.segs) if sg.op in QSA_OPS]
         if q and (self.module not in QSA_MODULES or self.teams is not None):   # (k3_run elsewhere runs them as nops)
             raise ValueError(f'k3: module {self.module} has no QSA ops (segments {q[:8]}; k3_run in {QSA_MODULES} only)')
@@ -1472,6 +1550,18 @@ class Engine:
         raw = bytes(b''.join(bytes(s) for s in self.segs))
         self.tape = torch.frombuffer(bytearray(raw), dtype=torch.uint8).cuda()
         return self
+
+    def check_kv_error(self):
+        """After waiting for this engine's launch, reject every numerical-error bit.
+
+        Does not wait itself or clear the sticky word. Call before timeout retry,
+        status clearing or consuming logits; a failed append may be partial.
+        """
+        if self.kv_error is not None:
+            code = int(self.kv_error[0].item())
+            if code:
+                from ..errors import InvalidKVEncoding
+                raise InvalidKVEncoding(f'k3 {self.module}: invalid KV encoding (error {code:#x}); cache result is unusable')
 
     def run(self, check=True, trace=None):
         if self.refuse: raise RuntimeError(self.refuse + ' (refusing to launch)')
@@ -1508,7 +1598,8 @@ class Engine:
                                     *(ctypes.c_int(v) for v in tb))
         if check:
             torch.cuda.synchronize()
-            st = self.sync[2 * MAXSEG:].tolist()      # exit, err, err_seg, err_seen, bnd, bnd_what, bnd_val, bnd_cap
+            self.check_kv_error()
+            st = self.sync[2 * MAXSEG:2 * MAXSEG + STATUS_WORDS].tolist()      # exit, err, err_seg, err_seen, bnd, bnd_what, bnd_val, bnd_cap
             b = bounds_status(st)
             if b:   # the bound guard refused a position / commit: never retried (the host checks should have caught it)
                 self.sync.zero_()

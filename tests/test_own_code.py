@@ -30,7 +30,10 @@ for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3
             'k3_q35_tcap.hip', 'k3_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
             'q35_prefill_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
             'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip',
-            'kv_codec.hip'):   # (its prefill's objects; staged own Q8 KV codec)
+            'kv_codec.hip',    # (staged own Q8 KV codec and cache-specialized dense modules)
+            'k3_q35_gsq_kvq8.hip', 'k3_q35_swift_kvq8.hip', 'k3_q35_swift_ver_kvq8.hip',
+            'k3_q35_swift_tp_kvq8.hip', 'k3_q35_tcap_kvq8.hip', 'k3_q35_tcap_ver_kvq8.hip',
+            'k3_q35_tcap_tp_kvq8.hip'):
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
 ref = audit('k3_gguf_q3m_own.hip')[2]

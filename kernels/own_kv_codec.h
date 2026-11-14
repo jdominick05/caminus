@@ -30,10 +30,14 @@ OWN_KV_FN size_t own_kv_q8_row_bytes(int M) {
 // succeeded; this helper does not promise a transactional multi-block row write.
 OWN_KV_FN bool own_kv_q8_encode(const float * x, OwnKvQ8Block * y) {
     float amax = 0.0f;
+    bool finite = true;
     for (int j = 0; j < 32; j++) {
-        if (!isfinite(x[j])) return false;
+        // Scan before branching: per-element early returns enlarge execution-mask
+        // live ranges in persistent callers and increase spilled scalar registers.
+        finite &= isfinite(x[j]);
         amax = fmaxf(amax, fabsf(x[j]));
     }
+    if (!finite) return false;
     const float d = amax / 127.0f;
     const float inv = d ? 1.0f / d : 0.0f;
     const _Float16 stored = (_Float16)d;

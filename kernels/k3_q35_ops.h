@@ -19,6 +19,9 @@
 
 #define K3_OPS_NO_DISPATCH   // k3_q3m_ops.h's helpers and ops (seg_T, OP_F32_MV, the KV helpers, k3_own_ops.h) without its dispatch
 #include "k3_q3m_ops.h"
+#ifdef K3_Q35_KV_Q8
+#include "k3_q35_kvq8_ops.h"
+#endif
 #ifdef K3_TP   // (the two-card modules k3_q35_*_tp: OP_XCHG, its warm word and claim-time store)
 #include "k3_xchg.h"
 #endif
@@ -229,10 +232,21 @@ __device__ __forceinline__ float q35_gdn_dot(const float4 m, const float4 k4) {
 }
 __device__ __forceinline__ void q35_op_gdn_step(const Seg & sg, int t) {
     constexpr int S = 128, CPT = 32, CPW = CPT / 8;
-    const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, nk = sg.pad1, kh = h % nk, H = sg.N, T = seg_T(sg);
+    int nk = sg.pad1, H = sg.N;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    asm volatile("" : "+s"(nk), "+s"(H));
+#endif
+    const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, kh = h % nk, T = seg_T(sg);
     const int lane = K3TID % 32, wave = K3WAVE, mprev = ((const int *)sg.asum)[1];
     const int RS = nk * S + H * S + 2 * H;                         // a saved input record per token
-    float * base = (float *)sg.aux; const float * rec = base + (size_t)H * S * S;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    uintptr_t addr = (uintptr_t)sg.aux;
+    asm volatile("" : "+v"(addr));
+    float * base = (float *)addr;
+#else
+    float * base = (float *)sg.aux;
+#endif
+    const float * rec = base + (size_t)H * S * S;
     float4 * M = (float4 *)(base + (size_t)h * S * S);
     const float scale = 1.0f / sqrtf((float)S);
     float4 m[CPW];
@@ -279,8 +293,17 @@ __device__ __forceinline__ void q35_op_gdn_step(const Seg & sg, int t) {
 //   saved-input records (read by the next pass's commit replay). Same Seg fields as OP_GDN_STEP; tasks = tokens.
 __device__ __forceinline__ void q35_op_gdn_save(const Seg & sg, int tt) {
     constexpr int S = 128;
-    const int nk = sg.pad1, H = sg.N, RS = nk * S + H * S + 2 * H;
-    float * rr = (float *)sg.aux + (size_t)H * S * S + (size_t)tt * RS;
+    int nk = sg.pad1, H = sg.N;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    asm volatile("" : "+s"(nk), "+s"(H));
+    uintptr_t addr = (uintptr_t)sg.aux;
+    asm volatile("" : "+v"(addr));
+    float * base = (float *)addr;
+#else
+    float * base = (float *)sg.aux;
+#endif
+    const int RS = nk * S + H * S + 2 * H;
+    float * rr = base + (size_t)H * S * S + (size_t)tt * RS;
     const float * qk = (const float *)sg.a + (size_t)tt * 2 * nk * S, * v = (const float *)sg.W + (size_t)tt * sg.pad2;
     const float * gt = sg.gs + (size_t)tt * 2 * H;
     for (int i = K3TID; i < nk * S; i += blockDim.x) rr[i] = qk[nk * S + i];
@@ -444,7 +467,12 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_GDN_SAVE) { q35_gdn_save_guarded(sg, t, sy); return true; }
     if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
     if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
+#ifdef K3_Q35_KV_Q8
+    if (sg.op == OP_KV_APPEND) { q35_op_kv_append_q8(sg, t); return true; }
+    if (sg.op == OP_HADAMARD) { q35_op_hadamard(sg, t); return true; }
+#else
     if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
+#endif
 #ifdef K3_Q35_ATTN_SPLIT
     if (sg.op == OP_ATTN_PART) { ATTN_PART_FN(sg, t); return true; }   // (k3_attn_split.h: the packed PART in the verify modules)
     if (sg.op == OP_ATTN_COMB) { op_attn_comb(sg, t); return true; }
