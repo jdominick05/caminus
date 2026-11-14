@@ -1,20 +1,19 @@
 """caminus advisor setup | status | update | uninstall: the Qwen Code advisor add-on (docs/advisor.md).
 
-  caminus advisor setup [--local-only] [--settings FILE ...] [--no-live-test] [--dry-run]
+  caminus advisor setup [--settings FILE ...] [--no-live-test] [--dry-run]
   caminus advisor status [--json]
   caminus advisor update
   caminus advisor uninstall [--settings FILE ...]
 
 When the local model looks lost in Qwen Code (failing commands in a row, the same call repeated, long runs), another model
 reads the task and the recent steps and sends back a short hint, added to the newest message so the server's prompt cache
-keeps its prefix. The advisor is hosted (Anthropic, Mistral) or local: any OpenAI-compatible server, such as a second
-model on your other card. `/advise` in Qwen Code asks on demand.
+keeps its prefix. The default setup offers API advisors (Anthropic, Mistral). `/advise` in Qwen Code asks on demand.
 
 The add-on lives in the package (share/harness/qwen-code/advisor) and installs a copy of its hook into
 $XDG_DATA_HOME/qwen-advisor/app; its settings are $XDG_CONFIG_HOME/qwen-advisor/config.toml. setup puts the hooks and the
 /advise command into Caminus's own Qwen homes (caminus qwen-code setup makes them); ~/.qwen only when named with
 --settings. Hosted advisors need their SDKs: setup installs anthropic and mistralai into $XDG_DATA_HOME/qwen-advisor/venv
-(network); --local-only skips that and offers the local advisor alone (standard library only)."""
+(network). The explicit --local-only compatibility option keeps the earlier local setup (standard library only)."""
 import argparse
 import json
 import os
@@ -83,9 +82,9 @@ def cmd_setup(a, say):
         return run_setup(sys.executable, ['--local-only', *extra])
     py = ensure_venv(say)
     if not py:
-        say('advisor: the SDKs could not be installed (no network?). `caminus advisor setup --local-only` needs none.')
+        say('advisor: the API SDKs could not be installed: check the Python environment and network, then retry setup.')
         return 1
-    return run_setup(py, extra)
+    return run_setup(py, ['--hosted-only', *extra])
 
 
 def hooked(home):
@@ -139,8 +138,8 @@ def main(argv, say=print):
     ap = argparse.ArgumentParser(prog='caminus advisor', description=__doc__.split('\n\n')[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd')
-    p = sub.add_parser('setup', help='configure the advisors and put the hooks into Caminus\'s Qwen homes')
-    p.add_argument('--local-only', action='store_true', help='the local advisor only: no hosted SDKs, no network')
+    p = sub.add_parser('setup', help='configure API advisors and put the hooks into Caminus\'s Qwen homes')
+    p.add_argument('--local-only', action='store_true', help='compatibility: use the earlier local-advisor setup instead')
     p.add_argument('--settings', action='append', help='a Qwen Code settings.json to edit (default: Caminus\'s Qwen homes)')
     p.add_argument('--no-live-test', action='store_true')
     p.add_argument('--dry-run', action='store_true', help='show the settings change, write nothing there')

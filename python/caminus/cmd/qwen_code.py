@@ -12,8 +12,11 @@ setup writes the provider entries of the running Caminus server(s) into the home
 (from its /v1/models; the Coder's k3-coder / -nothink / -low / -xhigh, the others' alias / alias-nothink), its URL, the
 context window from its /props (n_ctx rounded down to a thousand: 262,144 -> 262,000, the shipped config's value), no
 max_tokens (the side calls send their own). An existing settings.json is merged, not replaced: only the provider entries
-that point at Caminus (envKey CAMINUS_API_KEY) are swapped, model.name / fastModel only when they named a Caminus id or are
-unset; everything else stays, and the old file is kept as settings.json.bak-<time> first. The team setup also writes the
+that point at Caminus (envKey CAMINUS_API_KEY) are swapped. Owned main selections follow the server with a matching endpoint
+pin; removed owned fast/compaction selectors follow its defaults, while still-valid and external routes stay. An unknown
+context refuses setup before writing settings. Native thinking controls use the explicit Qwen chat-template profile;
+-nothink entries start with reasoning disabled and their server profile cannot be re-enabled. The old file is kept as
+settings.json.bak-<time> first. The team setup also writes the
 `hands` subagent (agents/hands.md) and the brain's policy (BRAIN.md) when they are missing.
 
 setup also registers the context note (share/harness/qwen-code/context_note.py, a PostToolBatch hook copied into the
@@ -80,7 +83,6 @@ def running():
 
 
 WAIT_CTX_S = 120          # how long setup waits for a loading server's /props to give its context
-FLOOR_CTX = 32000         # the window when the server never says: below every context Caminus starts a model with (arch.MIN_CTX)
 
 
 def server_ids(s, wait_s=WAIT_CTX_S):
@@ -104,30 +106,72 @@ def server_ids(s, wait_s=WAIT_CTX_S):
 
 def providers(s):
     ids, n_ctx = server_ids(s)
-    window = (int(n_ctx) // 1000) * 1000 if n_ctx else FLOOR_CTX     # (Qwen Code compacts against this: never above the server's)
+    if isinstance(n_ctx, bool) or not isinstance(n_ctx, int) or n_ctx <= 0:
+        raise manage.ManageError('the server has not reported its context: wait until it is ready, then retry qwen-code setup')
+    window = (n_ctx // 1000) * 1000 if n_ctx >= 1000 else n_ctx     # never above the verified server window
     url = f"http://127.0.0.1:{s['port']}/v1"
     out = []
     for i in ids:
         kind = 'no thinking' if i.endswith('-nothink') else ('thinking, low effort' if i.endswith('-low') else
                                                             'thinking, extra-high effort' if i.endswith('-xhigh') else 'thinking')
+        generation = {'timeout': 900000, 'contextWindowSize': window}
+        if i.endswith('-nothink'): generation['reasoning'] = False
         out.append({'id': i, 'name': f'Caminus {i} ({kind})', 'envKey': 'CAMINUS_API_KEY', 'baseUrl': url,
-                    'generationConfig': {'timeout': 900000, 'contextWindowSize': window}})
+                    'capabilities': {'reasoning': {'profile': 'qwen-chat-template'}}, 'generationConfig': generation})
     return out, ids
+
+
+def _owned_selector(value, entries, auth='openai', base_url=None):
+    """Whether a pinned or bare Qwen selector resolves to one of our old OpenAI provider entries.
+
+    Endpoint pins are routing identity: a same-name external provider must survive setup. Qwen's registry prefers a
+    plain entry with no endpoint for unpinned selectors, then the first matching explicit route. Other auth prefixes
+    and non-string settings are left to the user.
+    """
+    if not isinstance(value, str): return False
+    name, sep, endpoint = value.strip().partition('\0')
+    if name.startswith('openai:'):
+        name, auth = name[len('openai:'):].strip(), 'openai'
+    elif auth != 'openai' or ':' in name:
+        return False
+    pin = endpoint if sep and endpoint else base_url or None
+    matches = [p for p in entries if p.get('id') == name and (pin is None or p.get('baseUrl') == pin)]
+    if not matches: return False
+    selected = next((p for p in matches if not p.get('baseUrl')), matches[0]) if pin is None else matches[0]
+    return selected.get('envKey') == 'CAMINUS_API_KEY'
+
+
+def _openai_entries(settings):
+    """The pinned client's registry also merges custom provider groups mapped to the OpenAI protocol."""
+    protocols = settings.get('providerProtocol', {})
+    return [p for name, entries in settings.get('modelProviders', {}).items()
+            if protocols.get(name, name) == 'openai' and isinstance(entries, list) for p in entries if isinstance(p, dict)]
 
 
 def merged(old, provs, main_id, fast_id, team=None):
     """old settings with Caminus's provider entries replaced (see the module doc)"""
     new = json.loads(json.dumps(old or {}))
+    old_routes = _openai_entries(new)
     mp = new.setdefault('modelProviders', {})
-    keep = [p for p in mp.get('openai', []) if p.get('envKey') != 'CAMINUS_API_KEY']
-    gone = {p.get('id') for p in mp.get('openai', []) if p.get('envKey') == 'CAMINUS_API_KEY'}
+    before = mp.get('openai', [])
+    keep = [p for p in before if p.get('envKey') != 'CAMINUS_API_KEY']
     mp['openai'] = keep + provs
-    new.setdefault('security', {}).setdefault('auth', {}).setdefault('selectedType', 'openai')
+    routes = _openai_entries(new)
+    auth = new.setdefault('security', {}).setdefault('auth', {})
+    auth.setdefault('selectedType', 'openai')
+    previous_auth = auth['selectedType']
     model = new.setdefault('model', {})
-    if not model.get('name') or model.get('name') in gone:
+    if not model.get('name') or _owned_selector(model.get('name'), old_routes, previous_auth, model.get('baseUrl')):
+        # The native picker persists this endpoint beside model.name. Changing the model must change its pin too.
         model['name'] = main_id
-    if not new.get('fastModel') or new.get('fastModel') in gone:
+        model['baseUrl'] = next((p.get('baseUrl', '') for p in provs if p.get('id') == main_id), '')
+        auth['selectedType'] = 'openai'
+    if not new.get('fastModel') or (_owned_selector(new['fastModel'], old_routes, previous_auth)
+                                  and not _owned_selector(new['fastModel'], routes, auth['selectedType'])):
         new['fastModel'] = fast_id
+    if (_owned_selector(new.get('compactionModel'), old_routes, previous_auth)
+            and not _owned_selector(new['compactionModel'], routes, auth['selectedType'])):
+        new['compactionModel'] = main_id
     if team:
         new.setdefault('context', {}).setdefault('fileName', ['QWEN.md', 'BRAIN.md'])
     return new
