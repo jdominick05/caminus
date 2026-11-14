@@ -15,7 +15,7 @@ import numpy as np
 D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 256, 512, 64, 128, 1, 2, 6, 1, 256, 64, 4
 CH = 2 * NK * S + NV * S
 KINDS = [True, True, True, False]
-TYPE_ID = {'F32': 0, 'Q8_0': 8, 'Q2_K': 10, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14, 'IQ2_XXS': 16, 'IQ2_XS': 17, 'IQ3_XXS': 18, 'IQ3_S': 21,
+TYPE_ID = {'F32': 0, 'F16': 1, 'Q8_0': 8, 'Q2_K': 10, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14, 'IQ2_XXS': 16, 'IQ2_XS': 17, 'IQ3_XXS': 18, 'IQ3_S': 21,
            'IQ2_S': 22, 'IQ4_XS': 23, 'IQ1_M': 29, 'BF16': 30}
 # per block: the format of each matrix (ffn gate, up, down; then the block's own)
 FORMATS = [
@@ -68,6 +68,7 @@ def _f16(rng, shape, base):
 def quant(rng, fmt, rows, K):
     """random valid blocks of a [rows, K] matrix in format fmt: uint8 [rows * row bytes] (typical |weight| 0.03 .. 0.1)"""
     rnd = lambda *s: rng.integers(0, 256, s, dtype=np.uint8)
+    if fmt == 'F16': return np.full((rows, K), 0.001, dtype=np.float16).view(np.uint8).reshape(-1)
     if fmt == 'Q8_0':
         nb = K // 32; b = np.zeros((rows, nb, 34), np.uint8)
         b[:, :, 0:2] = _f16(rng, (rows, nb), 1e-3).view(np.uint8).reshape(rows, nb, 2); b[:, :, 2:] = rnd(rows, nb, 32)
@@ -109,6 +110,8 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False):
     variant): its multi-token-prediction block blk.<blocks> in Q6_K (ThinkingCap's: engine/q35_mtp.py, k3_q35_tcap_mtp)"""
     rng = np.random.default_rng(seed)
     NK, NV, H, HKV, V = (4, 8, 12, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
+    D, FF = (4096, 512) if variant == 'nine' else (globals()['D'], globals()['FF'])
+    if variant == 'nine': NK, NV, H, HKV = 16, 32, 16, 4
     CH = 2 * NK * S + NV * S
     tc = variant in ('tcap', 'gsq')   # (the ThinkingCap module family: IQ2_S embedding, BF16 alpha / beta)
     FMTS = FORMATS_GSQ if variant == 'gsq' else FORMATS_TCAP if tc else FORMATS
@@ -133,22 +136,29 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False):
             mat(p + 'attn_qkv.weight', fm['attn_qkv'], CH, D); mat(p + 'attn_gate.weight', fm['attn_gate'], NV * S, D)
             mat(p + 'ssm_out.weight', fm['ssm_out'], D, NV * S)
             vec(p + 'ssm_conv1d.weight', f32(CH, DC, sc=0.5)); vec(p + 'ssm_dt.bias', f32(NV)); vec(p + 'ssm_a', -np.abs(f32(NV)))
-            (bvec if tc else vec)(p + 'ssm_alpha.weight', f32(NV, D, sc=0.05)); (bvec if tc else vec)(p + 'ssm_beta.weight', f32(NV, D, sc=0.05))
+            if variant == 'nine':
+                mat(p + 'ssm_alpha.weight', 'Q4_K', NV, D); mat(p + 'ssm_beta.weight', 'Q4_K', NV, D)
+            else:
+                (bvec if tc else vec)(p + 'ssm_alpha.weight', f32(NV, D, sc=0.05)); (bvec if tc else vec)(p + 'ssm_beta.weight', f32(NV, D, sc=0.05))
             vec(p + 'ssm_norm.weight', 1 + f32(S, sc=0.1))
         else:
             mat(p + 'attn_q.weight', fm['attn_q'], H * 2 * HD, D); mat(p + 'attn_k.weight', fm['attn_k'], HKV * HD, D)
             mat(p + 'attn_v.weight', fm['attn_v'], HKV * HD, D); mat(p + 'attn_output.weight', fm['attn_output'], D, H * HD)
             vec(p + 'attn_q_norm.weight', 1 + f32(HD, sc=0.1)); vec(p + 'attn_k_norm.weight', 1 + f32(HD, sc=0.1))
     if mtp:
-        if not tc: raise ValueError('tiny_q35.write: mtp=True writes ThinkingCap\'s Q6_K block (variant tcap)')
+        if not tc and variant != 'nine': raise ValueError('tiny_q35.write: MTP variant tcap, gsq or nine')
+        mf = 'F16' if variant == 'nine' else 'Q6_K'
+        def mvnorm(name, value):
+            if mf == 'F16': T[name] = ('F16', value.astype(np.float16).view(np.uint8).reshape(-1), value.shape)
+            else: vec(name, value)
         p = f'blk.{len(KINDS)}.'
-        mat(p + 'nextn.eh_proj.weight', 'Q6_K', D, 2 * D)
-        mat(p + 'attn_q.weight', 'Q6_K', H * 2 * HD, D); mat(p + 'attn_k.weight', 'Q6_K', HKV * HD, D)
-        mat(p + 'attn_v.weight', 'Q6_K', HKV * HD, D); mat(p + 'attn_output.weight', 'Q6_K', D, H * HD)
-        mat(p + 'ffn_gate.weight', 'Q6_K', FF, D); mat(p + 'ffn_up.weight', 'Q6_K', FF, D); mat(p + 'ffn_down.weight', 'Q6_K', D, FF)
+        mat(p + 'nextn.eh_proj.weight', mf, D, 2 * D)
+        mat(p + 'attn_q.weight', mf, H * 2 * HD, D); mat(p + 'attn_k.weight', mf, HKV * HD, D)
+        mat(p + 'attn_v.weight', mf, HKV * HD, D); mat(p + 'attn_output.weight', mf, D, H * HD)
+        mat(p + 'ffn_gate.weight', mf, FF, D); mat(p + 'ffn_up.weight', mf, FF, D); mat(p + 'ffn_down.weight', mf, D, FF)
         for n_ in ('nextn.enorm', 'nextn.hnorm', 'nextn.shared_head_norm', 'attn_norm', 'post_attention_norm'):
-            vec(p + n_ + '.weight', 1 + f32(D, sc=0.1))
-        vec(p + 'attn_q_norm.weight', 1 + f32(HD, sc=0.1)); vec(p + 'attn_k_norm.weight', 1 + f32(HD, sc=0.1))
+            mvnorm(p + n_ + '.weight', 1 + f32(D, sc=0.1))
+        mvnorm(p + 'attn_q_norm.weight', 1 + f32(HD, sc=0.1)); mvnorm(p + 'attn_k_norm.weight', 1 + f32(HD, sc=0.1))
     meta = {'general.architecture': 'qwen35', 'qwen35.block_count': len(KINDS) + 1, 'qwen35.nextn_predict_layers': 1,
             'qwen35.context_length': 4096, 'qwen35.embedding_length': D, 'qwen35.feed_forward_length': FF,
             'qwen35.attention.head_count': H, 'qwen35.attention.head_count_kv': HKV, 'qwen35.attention.key_length': HD,

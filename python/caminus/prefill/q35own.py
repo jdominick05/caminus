@@ -276,9 +276,15 @@ class Q35OwnPrefill(PrefillDriver):
                 if L[k]['fmt'] not in fm + ('F32',)]
         if m.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)): bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q35OwnPrefill: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
-        if m.D != 5120: raise ValueError(f'Q35OwnPrefill: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
-        attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
+        f32_ab = any(L[k]['fmt'] == 'F32' for L in m.L if L['kind'] == 'gdn' for k in ('al', 'be'))
+        if m.D != 5120 and f32_ab:
+            raise ValueError(f'Q35OwnPrefill: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
+        # Group4 uses only this object's geometry-independent norm/RoPE and KV
+        # helpers; its attention runs through Ops' runtime-shaped WMMA kernel.
+        attn = {4: 'prefill_attn_q35d', 6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
         if attn is None: raise ValueError(f'Q35OwnPrefill: {m.nh // m.nkv} query heads per kv head')
+        if m.nh // m.nkv == 4 and not Ops.attn_wm_ok(m.nh, m.nkv, m.hd):
+            raise ValueError('Q35OwnPrefill: group4 requires the runtime-shaped WMMA attention')
         T = self.chunk
         nf = len(self.feature_layers)
         self.need_mib = buffer_need_mib(m, T, export_h=self.export_h, nfeat=nf)

@@ -75,7 +75,7 @@ class Dense35Verify:
         previous layer's feed-forward is added, before the layer's norm; llama.cpp's layer input). The copy is the
         module's own add-rms op on a zeroed buffer (0 + x, exact), so no device code changes and the logits stay bitwise"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
-        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
+        if module is None: module = 'k3_q35_9b_ver' if eng.module == 'k3_q35_9b' else MODULE_TCAP if eng.tcap else MODULE
         line = k3.Q35TV_MODULES if eng.tcap else tuple(m for m in k3.Q35SV_MODULES if m not in k3.Q35M_MODULES + k3.Q35DF_MODULES)
         if module not in line:
             raise ValueError(f'Dense35Verify: module {module!r} is not a verify module of the engine\'s line {line} (the engine runs {eng.module})')

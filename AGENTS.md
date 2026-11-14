@@ -98,6 +98,12 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
+- Qwen3.5-9B uses separate `k3_q35_9b`, `_ver` and `_mtp` objects (four query heads per KV head). Its F16 MTP
+  matrices stay F16 on the device; only their norms widen to F32. Count those widened bytes. OP_OWN_MVF16 is
+  restricted to the F16 MTP module, T=1..4, with independent per-token accumulation and bounded dimensions.
+  Keep the 27B code/data objects unchanged and gate group4 attention, F16 math and verify/served identity before use.
+  Its `_tp` object adds the existing dense exchange for two-card plain decoding only. Gate its split geometry,
+  replicas, decode/prefill quality and actual two-card serving; the one-card objects must remain unchanged.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the

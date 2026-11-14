@@ -66,9 +66,15 @@ class Q35OwnPrefillTP(PrefillDriver):
             if L['kind'] == 'gdn': bad += [f"blk.{il} {k}: {L[k]['fmt']}" for k in ('al', 'be') if L[k]['fmt'] not in fm + ('F32',)]
         if m.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)): bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q35OwnPrefillTP: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
-        if m.D != 5120: raise ValueError(f'Q35OwnPrefillTP: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
-        attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
+        f32_ab = any(L[k]['fmt'] == 'F32' for dd in m.L for L in dd if L['kind'] == 'gdn' for k in ('al', 'be'))
+        if m.D != 5120 and f32_ab:
+            raise ValueError(f'Q35OwnPrefillTP: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
+        # Only geometry-independent norm/RoPE and KV helpers from this object;
+        # group4 attention uses Ops' runtime-shaped WMMA tile on each card.
+        attn = {4: 'prefill_attn_q35d', 6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
         if attn is None: raise ValueError(f'Q35OwnPrefillTP: {m.nh // m.nkv} query heads per kv head')
+        if m.nh // m.nkv == 4 and not Ops.attn_wm_ok(m.nh // 2, m.nkv // 2, m.hd):
+            raise ValueError('Q35OwnPrefillTP: group4 requires the runtime-shaped WMMA attention')
         T = self.chunk
         self.sh = [local_shapes(m, c) for c in (0, 1)]
         self.need_mib = buffer_need_tp_mib(self.sh, T)

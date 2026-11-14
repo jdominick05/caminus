@@ -79,6 +79,7 @@ def partition(ranges, n):
 
 # ---- the split plan on the real models' shapes and the tiny ones --------------------------------------------------------
 for tag, (NK, NV, S, nh, nkv, hd, ffn, vocab) in {'Qwen3.8-27B': (16, 48, 128, 24, 4, 256, 17408, 248320),
+                                                    'Qwen3.5-9B': (16, 32, 128, 16, 4, 256, 12288, 248320),
                                                     'tiny': (4, 8, 128, 4, 2, 128, 512, 256)}.items():
     f0, vh = q35_dense_tp.ffn_cut(ffn, 0.53), q35_dense_tp.vocab_cut(vocab, 0.5)
     P = split_plan(NK, NV, S, nh, nkv, hd, ffn, f0, vocab, vh)
@@ -129,7 +130,8 @@ except ValueError:
 check(refused, 'a column cut inside a block is refused')
 
 # ---- the two tapes ----------------------------------------------------------------------------------------------------
-for path, info, want_mod in ((P_S, iS, 'k3_q35_swift_tp'), (P_T, iT, 'k3_q35_tcap_tp')):
+P_N = os.path.join(A.scratch, 'tiny-tp-nine.gguf'); iN = tiny_q35.write(P_N, variant='nine', tp=True)
+for path, info, want_mod in ((P_S, iS, 'k3_q35_swift_tp'), (P_T, iT, 'k3_q35_tcap_tp'), (P_N, iN, 'k3_q35_9b_tp')):
     m = Dense35TP(path, devices=(0, 1), max_ctx=64, vram_check=False, ffn_share=0.5)
     nl = info['blocks']
     check(m.module == want_mod, f'{os.path.basename(path)}: the two-card module of its formats ({m.module})')

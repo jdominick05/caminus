@@ -45,7 +45,7 @@ LONG_CACHE_CAP_GB = 64.0     # its disk tier's default cap: a full 1M park is ab
 
 # the header keys meta() keeps, under the architecture's prefix: what the projections below read
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
-           'ssm.state_size')
+           'ssm.state_size', 'embedding_length', 'attention.head_count', 'attention.head_count_kv')
 _META = {}
 
 
@@ -660,6 +660,11 @@ class Dense35(OneCard):
         return m, pf, m.mtp35 if dr is not None else None, dr
 
 
+class Dense35Nine(Dense35):
+    """Qwen3.5-9B: four query heads per KV head, optionally the file's F16 MTP block."""
+    drafters = ('mtp',)
+
+
 class Dense35TP(Arch):
     """the dense qwen35 line on Caminus's own code on TWO cards (caminus serve --cards 2 for swift-1.5 / thinkingcap): Dense35TP
     (engine/q35_dense_tp.py: tensor parallelism, the two-card build of the file's module), T = 1, its own two-card prefill
@@ -719,8 +724,10 @@ class TwoCardTP(Arch):
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
                              Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
-                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'))}
-TWO_CARD = {'qwen35-own': 'qwen35-own-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
+                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'),
+                             Dense35Nine('qwen35-own-9b', 'deepseek-qwen3.5-9b'),
+                             Dense35TP('qwen35-own-9b-tp', 'deepseek-qwen3.5-9b'))}
+TWO_CARD = {'qwen35-own': 'qwen35-own-tp', 'qwen35-own-9b': 'qwen35-own-9b-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
 CODER = ARCHS['qwen4exp']
 
 
@@ -748,7 +755,10 @@ def of(path):
     from . import models
     m = models.model_of(path)
     if m is not None and m.arch in ARCHS: return ARCHS[m.arch]
-    return lookup(meta(path)['arch'])
+    info = meta(path); hp = info['hp']
+    if info['arch'] == 'qwen35' and tuple(hp.get(k) for k in ('embedding_length', 'attention.head_count', 'attention.head_count_kv')) == (4096, 16, 4):
+        return ARCHS['qwen35-own-9b']
+    return lookup(info['arch'])
 
 
 def default_alias(path):

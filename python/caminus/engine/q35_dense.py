@@ -50,7 +50,10 @@ def module_of(F):
     IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0, BF16 alpha / beta, an IQ2_S or Q4_K embedding)"""
     nl = trunk_blocks(F); mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     fm = {t.type for t in F.tensors if not t.name.startswith(mtp) and len(t.shape) == 2 and t.name != 'token_embd.weight'}
-    if fm <= SWIFT_FMT and F.T['token_embd.weight'].type == 'Q4_K': return MODULE
+    if fm <= SWIFT_FMT and F.T['token_embd.weight'].type == 'Q4_K':
+        if (int(F.hp('embedding_length')), int(F.hp('attention.head_count')), int(F.hp('attention.head_count_kv'))) == (4096, 16, 4):
+            return 'k3_q35_9b'
+        return MODULE
     return MODULE_GSQ if fm & GSQ_ONLY_FMT else MODULE_TCAP
 RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV rows are written before any pass reads them)
 

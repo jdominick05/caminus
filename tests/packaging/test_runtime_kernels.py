@@ -46,7 +46,8 @@ class Metadata:
         self.T = {t.name: t for t in self.tensors}
 
     def hp(self, key):
-        return {'block_count': 2, 'nextn_predict_layers': 1}[key]
+        return {'block_count': 2, 'nextn_predict_layers': 1, 'embedding_length': 5120,
+                'attention.head_count': 24, 'attention.head_count_kv': 4}[key]
 
 
 def q3_engine(iq=(), rs=(), **flags):
@@ -102,7 +103,7 @@ class RuntimeKernels(unittest.TestCase):
         fmt = 'IQ2_XS' if module in k3.Q35R_MODULES else 'IQ3_S' if tcap else 'Q4_K'
         layer = dict(kind='attn', **{key: dict(fmt=fmt) for key in ('q', 'k', 'v', 'o', 'fg', 'fu', 'fd')})
         m = NS(module=module, tcap=tcap, dev=0, devs=[0, 1], nl=1, nl_build=1, local_only=False,
-               D=5120, nh=ratio * (2 if tp else 1), nkv=2 if tp else 1, hd=256, ffn=256, f0=128,
+               D=4096 if module in k3.Q35_9B_MODULES else 5120, nh=ratio * (2 if tp else 1), nkv=2 if tp else 1, hd=256, ffn=256, f0=128,
                S=128, NK=1, NV=1, gsplit=[(None, 1, [0]), (None, 1, [0])],
                vocab=64, emb=NS(type='IQ2_S' if tcap else 'Q4_K'))
         m.L = [[layer, layer]] if tp else [layer]
@@ -144,6 +145,12 @@ class RuntimeKernels(unittest.TestCase):
         self.assertNotIn(q35_dense.MODULE_GSQ, k3.Q35_TP_OF)
 
     def test_real_dense_prefill_constructors_select_shipped_helpers(self):
+        names = self.dense_prefill('k3_q35_9b', ratio=4)
+        self.assertIn('prefill_attn_q35d', names)
+        self.require_runtime(names + list(k3.Q35_9B_MODULES))
+        names = self.dense_prefill('k3_q35_9b_tp', ratio=4, tp=True)
+        self.assertEqual(names.count('prefill_tp'), 2)
+        self.require_runtime(names)
         for module in (q35_dense.MODULE, q35_dense.MODULE_TCAP, q35_dense.MODULE_GSQ):
             for ratio in (6, 8):
                 with self.subTest(module=module, ratio=ratio):

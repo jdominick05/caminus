@@ -27,7 +27,7 @@ ap.add_argument('--scratch', required=True); ap.add_argument('--model'); ap.add_
 ap.add_argument('--positions', type=int, default=128); ap.add_argument('--depths', type=int, nargs='*', default=[1, 4])
 ap.add_argument('--depth-positions', type=int, default=12); ap.add_argument('--max-ctx', type=int, default=256)
 ap.add_argument('--module', default=None)
-ap.add_argument('--variant', choices=('swift', 'tcap', 'gsq'), default='swift',
+ap.add_argument('--variant', choices=('swift', 'tcap', 'gsq', 'nine'), default='swift',
                 help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap; gsq: the Qwen3.8-27B GSQ-RCO files\', k3_q35_gsq)')
 A = ap.parse_args()
 if bool(A.model) != bool(A.ref): ap.error('--model and --ref go together')
@@ -39,7 +39,7 @@ from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q35_dense import MODULE, MODULE_GSQ, MODULE_TCAP, Dense35Own
 from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC, q2k_records, iq1m_records
-MOD = A.module or {'tcap': MODULE_TCAP, 'gsq': MODULE_GSQ}.get(A.variant, MODULE)
+MOD = A.module or {'tcap': MODULE_TCAP, 'gsq': MODULE_GSQ, 'nine': 'k3_q35_9b'}.get(A.variant, MODULE)
 TC = MOD in k3.Q35T_MODULES
 ok = True
 
