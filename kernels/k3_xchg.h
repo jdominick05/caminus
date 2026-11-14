@@ -22,11 +22,10 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
 #ifdef K3_XCHG_PUSH_ONLY
     int N = sg.N;
     asm volatile("" : "+s"(N));   // keep exchange geometry inside its dispatch branch
-    const int N4 = N / 4;
+    const int tid = K3TID, B = blockDim.x, N4 = N / 4;
 #else
-    const int N4 = sg.N / 4;
+    const int tid = K3TID, B = blockDim.x, N4 = sg.N / 4;
 #endif
-    const int tid = K3TID, B = blockDim.x;
     const XG4 * __restrict__ a = (const XG4 *)sg.a;
     XG4 * __restrict__ out = (XG4 *)sg.y;
     if (sg.pad1) {
@@ -39,16 +38,15 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
         }
         __syncthreads(); return;
     }
+#ifdef K3_XCHG_PUSH_ONLY
     int index = sg.K;
-#ifdef K3_XCHG_PUSH_ONLY
     asm volatile("" : "+s"(index));   // keep the exchange epoch offset branch-local
-#endif
     const uint32_t want = (uint32_t)((const int *)sg.asum)[0] + (uint32_t)index + 1u;
-#ifdef K3_XCHG_PUSH_ONLY
     uintptr_t peer_addr = (uintptr_t)sg.W;
     asm volatile("" : "+v"(peer_addr));   // keep the remote payload address inside the exchange
     float * peer = (float *)peer_addr;
 #else
+    const uint32_t want = (uint32_t)((const int *)sg.asum)[0] + (uint32_t)sg.K + 1u;
     float * peer = (float *)sg.W;
 #endif
     const float * mine = (const float *)sg.gs;
