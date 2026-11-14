@@ -172,6 +172,8 @@ class Dense35TP:
         if one not in k3.Q35_TP_OF: raise ValueError(f'Dense35TP: module {one} has no two-card build ({sorted(k3.Q35_TP_OF)})')
         self.module = k3.Q35_TP_OF[one]
         self.tcap = self.module in k3.Q35T_MODULES
+        if self.module in k3.Q35_KV_Q8_MODULES:
+            raise ValueError('Dense35TP: Q8 kernel primitives are staged; target allocation/prefill/verify integration is pending')
         self.per_wgp, self.rpt, self.rpt16 = per_wgp, int(rpt), int(rpt16)
         self.ffn_share, self.vocab_share, self.local_only = float(ffn_share), float(vocab_share), bool(local_only)
         assert 0.0 < self.ffn_share < 1.0 and 0.0 < self.vocab_share < 1.0, (ffn_share, vocab_share)

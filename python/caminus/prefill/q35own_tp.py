@@ -51,6 +51,8 @@ class Q35OwnPrefillTP(PrefillDriver):
     MM_KEYS = dict(gdn=('qkv', 'z', 'so'), attn=('q', 'k', 'v', 'o'))
 
     def __init__(self, m, chunk=1024, crossover=None, check=True):
+        if getattr(m, 'q8', False):
+            raise ValueError('Q35OwnPrefillTP: matching Q8 prefill is not implemented; staged kernel gates only')
         self.m, self.chunk = m, int(chunk)
         if not 16 <= self.chunk <= 4096: raise ValueError(f'Q35OwnPrefillTP: chunk {chunk} (16 .. 4096)')
         if m.nl_build != m.nl: raise ValueError('Q35OwnPrefillTP: a debug_layers engine is refused')
