@@ -239,7 +239,7 @@ class EngineWorker:
             cached = self.sess.plan(job.prompt_ids, max_new=job.max_new, **({'hint': job.hint} if job.hint else {}))
             job.events.put(('start', {'queue_ms': (job.t_start - job.t_submit) * 1e3,
                                       'prompt_n': len(job.prompt_ids), 'cached_n': cached}))
-            guard = AnswerLoopGuard(job.thinking) if job.loop_guard else None
+            guard = AnswerLoopGuard(job.thinking, think_open=job.think_open) if job.loop_guard else None
             tt = TokenText(self.tok, job.stops, self.sess.eos_ids, loop_guard=guard)
             es = so if so is not None and so.enabled else None
             if es is not None:
