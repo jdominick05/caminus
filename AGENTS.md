@@ -103,6 +103,8 @@ CLAUDE.md imports this file.
   ffn_gate on `k3_q35_gsq_ver_m`, then suffix on `k3_q35_gsq_ver` with a scratch embedding to stage the IQ grids.
   Isolating IQ1_M keeps the persistent allocation within 96 VGPRs; other IQ1_M placements are refused on the host.
   Its MTP module uses the Q6_K block and Q4_K head; its DFlash module includes that head without staging IQ grids.
+  All four verify/drafter objects belong to the explicit installed runtime. CPU tape/selector and staging tests
+  check their inclusion; finding them in a checkout's build directory does not prove that a wheel ships them.
   The catalog remains paused until served drafting identity and throughput gates pass; compiled modules alone do
   not authorize a default or catalog change.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's

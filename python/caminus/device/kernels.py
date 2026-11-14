@@ -37,7 +37,8 @@ PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'pref
 Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq')
 DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
                'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
-               'k3_q35_gsq', 'q35_prefill_gsq')   # paused plain 27B: packaging does not unpause the catalog
+               'k3_q35_gsq', 'q35_prefill_gsq', 'k3_q35_gsq_ver', 'k3_q35_gsq_ver_m',
+               'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash')   # paused plain 27B: packaging does not unpause the catalog
 # TP verify remains a phase-one test path until TP drafting is served. Trace,
 # ablation and standalone probes are also deliberately outside the runtime set.
 RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + ('own_topk', 'smoke')

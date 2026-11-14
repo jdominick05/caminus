@@ -103,6 +103,30 @@ class Staging(unittest.TestCase):
         self.write_metadata()
         self.refused_before_output('k3_q35_tcap_mtp.hsaco')
 
+    def test_each_missing_gsq_draft_object_is_refused_before_staging(self):
+        for name in ('k3_q35_gsq_ver', 'k3_q35_gsq_ver_m', 'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash'):
+            with self.subTest(module=name):
+                path = self.build / (name + '.hsaco')
+                saved = path.read_bytes()
+                path.unlink()
+                try:
+                    self.refused_before_output(name + '.hsaco')
+                finally:
+                    path.write_bytes(saved)
+
+    def test_otherwise_complete_pre_gsq_manifest_is_refused(self):
+        prov = self.staged()
+        missing = {'k3_q35_gsq_ver.hsaco', 'k3_q35_gsq_ver_m.hsaco',
+                   'k3_q35_gsq_mtp.hsaco', 'k3_q35_gsq_dflash.hsaco'}
+        for file in missing:
+            (self.out / file).unlink()
+            del prov['objects'][file]
+        (self.out / K.PROVENANCE).write_text(json.dumps(prov))
+        _, checks = K.verify(str(self.out))
+        self.assertEqual({file for file, ok, _ in checks if not ok}, missing)
+        with self.assertRaisesRegex(SystemExit, 'staged code object .* missing'):
+            setup_guard(self.out)
+
     def test_wrong_kernel_source_hash_is_refused_before_staging(self):
         self.info['kernel_tree_sha256'] = 'f' * 64
         self.write_metadata()

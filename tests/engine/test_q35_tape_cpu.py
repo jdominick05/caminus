@@ -40,6 +40,7 @@ torch.cuda.Event = lambda: types.SimpleNamespace()
 
 import tiny_q35
 from caminus import ggufio, ref_q35
+from caminus.device import kernels
 from caminus.engine import k3, q35_dense
 from caminus.engine.q35_dense import Dense35Own
 
@@ -255,6 +256,7 @@ check(mg.module == 'k3_q35_gsq' and {f for (o, f) in ig if o == 'OWN_MV'} == {f'
       f'the GSQ file on k3_q35_gsq: every format on its one-round-trip tile; the embedding stages five grids (31; got {Eg.segs[0].out_f32})')
 vg = Dense35Verify(mg, 4, vram_check=False)
 lm = [e.module for e in vg.Es]; inv = [e.inventory() for e in vg.Es]
+check(set(lm) <= set(kernels.RUNTIME_SET), 'the real GSQ verify tapes select shipped runtime objects, including the IQ1_M launch')
 check(vg.module == 'k3_q35_gsq_ver' and lm == ['k3_q35_gsq_ver', 'k3_q35_gsq_ver_m', 'k3_q35_gsq_ver']
       and set(inv[1]) == {('OWN_MV', 'IQ1_M/a16_1rt_mt')} and len(vg.Es[1].segs) == 1,
       f'the GSQ verify pass: three launches ({lm}); the IQ1_M gate alone on k3_q35_gsq_ver_m')
@@ -291,6 +293,7 @@ check(refused(lambda: Mtp35(mm4, module='k3_q35_swift_mtp', vram_check=False)) a
 PGM = os.path.join(A.scratch, 'tiny-q35-gsq-mtp.gguf'); tiny_q35.write(PGM, variant='gsq', mtp=True)
 mg4 = Dense35Own(PGM, max_ctx=64, vram_check=False, spec_T=4)
 mtg = Mtp35(mg4, k=3, vram_check=False)
+check({e.module for e in mtg.E.values()} <= set(kernels.RUNTIME_SET), 'the real GSQ MTP tapes select shipped runtime objects')
 ivg = set().union(*(set(E_.inventory()) for E_ in mtg.E.values()))
 check(mtg.module == 'k3_q35_gsq_mtp' and ivg <= k3.MODULE_CAPS['k3_q35_gsq_mtp'] and ('OWN_MV', 'Q6_K/a16_1rt_mt') in ivg
       and ('OWN_MV', 'Q4_K/a16_1rt') in ivg and ('OWN_MV16', 'Q8_0') not in ivg and ('OWN_EMB', 'IQ2_S') in ivg
