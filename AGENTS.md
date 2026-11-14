@@ -122,6 +122,8 @@ CLAUDE.md imports this file.
   different commit would let drafting change a later reply at a near-tie.
 - `serve/`: HTTP + SSE, template, tool parser, sampler; `EngineSession` declares the session contract
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
+  Response guards follow the parser's `think_open` policy: an optional opening tag cannot hide an untagged answer.
+  Content classification keeps bounded marker prefixes across chunks; rejected JSON calls cannot alter earlier calls.
 - `device/host.py`: the host's cards from sysfs + KFD topology, never torch; `caminus serve` places itself and sets
   `HIP_VISIBLE_DEVICES` before HIP starts. `device/capacity.py`: every VRAM projection and check.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
