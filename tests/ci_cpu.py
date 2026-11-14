@@ -36,6 +36,7 @@ SUITES = [
     ('kernel_staging', ['tests/packaging/test_kernel_staging.py', '--scratch', '{scratch}'], set()),
     ('runtime_kernels', ['tests/packaging/test_runtime_kernels.py'], {'torch'}),
     ('arch', ['tests/test_arch.py', '--scratch', '{scratch}'], set()),
+    ('context_fit', ['tests/test_context_fit.py', '--scratch', '{scratch}'], {'torch'}),
     ('host', ['tests/device/test_host.py', '--scratch', '{scratch}'], set()),
     ('manage', ['tests/cmd/test_manage.py', '--scratch', '{scratch}'], set()),
     ('qwen_settings', ['tests/cmd/test_qwen_settings.py'], set()),

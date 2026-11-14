@@ -163,8 +163,13 @@ def parser():
     return ap
 
 
-def parse(argv):
-    a = parser().parse_args(argv)
+def parse(argv, *, fit=False):
+    p = parser()
+    if fit:
+        p.prog = 'caminus fit'
+        p.description = 'Report the largest context that fits using serving projections; CPU/sysfs only.'
+        p.add_argument('--json', action='store_true', help='print the context and per-card memory projection as JSON')
+    a = p.parse_args(argv)
     opt = dict(DEFAULTS)
     if a.config:
         opt.update(load_config(a.config))
@@ -227,6 +232,80 @@ def build_engine(opt, stats, log=print):
     return sess, dict(m=m, df=df, dr=dr, pf=pf, pc=pc)
 
 
+def recipe(opt, log=print):
+    """Resolve model/card/drafter options identically for serving and a CPU fit query."""
+    if not opt['model'] or not os.path.isfile(opt['model']):
+        raise ValueError(f'the model GGUF {opt["model"]} does not exist: run `caminus download` (or caminus pull NAME), '
+                         f'set CAMINUS_CODER (or coder in {_config.config_path()}), or pass --model')
+    A = _arch.of(opt['model'])
+    why = _arch.paused(A)
+    if why: raise ValueError(why)
+    try:
+        A = A.variant(opt.get('cards'))
+    except ValueError as exc:
+        raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
+    opt['arch'] = A.name
+    draft = 'off' if opt.get('no_drafter') else opt.get('draft')
+    if draft is None:
+        draft = A.default_draft(opt)
+        if draft != 'off':
+            log(f'caminus serve: --draft {draft} (the default for {A.name} on {A.cards} card(s); --draft off: plain decoding)',
+                flush=True)
+    own_dflash = draft == 'dflash' and A.drafter != 'dflash' and 'dflash' in getattr(A, 'drafters', ())
+    if own_dflash:
+        if opt['drafter'] == DEFAULT_DRAFTER:
+            from .. import models as _models
+            opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
+        if A.cards != 1:
+            raise ValueError('--draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off')
+        if not os.path.isfile(opt['drafter']):
+            raise ValueError(f'the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)')
+    elif draft == 'dflash' and A.drafter != 'dflash':
+        raise ValueError(f'--draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})')
+    if draft == 'mtp' and A.drafter != 'mtp':
+        raise ValueError(f'--draft mtp: no MTP drafter for {A.name} in K3 yet (--draft off: plain decoding)')
+    if draft == 'mtp' and A.cards != 1:
+        raise ValueError('--draft mtp runs on one card only (the two-card drafter is not built yet): --cards 1, or --draft off')
+    if draft == 'dflash' and not own_dflash:
+        if not (opt['drafter'] and os.path.isfile(opt['drafter'])):
+            raise ValueError(f'the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
+                             f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)')
+    elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter'] and 'dflash' not in getattr(A, 'drafters', ()):
+        log(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
+    opt['draft'] = draft
+    if A.drafter == 'dflash': opt['no_drafter'] = draft == 'off'
+    return A
+
+
+def fit_report(argv):
+    """Read-only companion to serve: same recipe and placement, no device initialization."""
+    as_json = '--json' in argv
+    opt = parse(argv, fit=True)
+    from ..device import host
+    try:
+        A = recipe(opt, log=lambda *a, **kw: None)
+        opt['max_ctx'] = ctx_arg(opt['max_ctx'])
+        if opt.get('kv_host'):
+            raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
+        placement = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
+        plan = A.context_fit(opt, placement['cards'])
+        if opt['max_ctx'] != 'auto' and opt['max_ctx'] > plan.native_ctx:
+            raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
+        report = plan.report()
+        report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']])
+    except (ValueError, OSError, ImportError, KeyError, TypeError, NotImplementedError, argparse.ArgumentTypeError, host.PlacementError) as exc:
+        if as_json: print(json.dumps(dict(ok=False, max_ctx=None, error=str(exc))))
+        else: print(f'caminus fit: {exc}', file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(report))
+    else:
+        maximum = report['max_ctx']
+        print(f'caminus fit: {maximum if maximum is not None else "no"} positions fit '
+              f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s))')
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if '--options-json' in argv:                 # (caminus panel's advanced layout: nothing is loaded, no GPU)
@@ -241,64 +320,11 @@ def main(argv=None):
     if msg:
         print(msg, file=sys.stderr)
         return 2
-    if not opt['model'] or not os.path.isfile(opt['model']):
-        print(f'caminus serve: the model GGUF {opt["model"]} does not exist: run `caminus download` (or caminus pull NAME), set '
-              f'CAMINUS_CODER (or coder in {_config.config_path()}), or pass --model', file=sys.stderr)
-        return 2
-    A = _arch.of(opt['model'])                   # (the GGUF's header, read once: every later question asks the registry)
-    why = _arch.paused(A)
-    if why:
-        print(f'caminus serve: {why}', file=sys.stderr)
-        return 2
     try:
-        A = A.variant(opt.get('cards'))           # (--cards 2: a one-card model's two-card form, where it has one)
-    except ValueError as e:
-        print(f'caminus serve: --cards {opt["cards"]}: {e}', file=sys.stderr)
+        A = recipe(opt)
+    except ValueError as exc:
+        print(f'caminus serve: {exc}', file=sys.stderr)
         return 2
-    opt['arch'] = A.name
-    # the drafter kind this serve runs (--draft; the default: the architecture's own when it needs no extra file, else off)
-    draft = opt.get('draft')
-    if opt.get('no_drafter'): draft = 'off'
-    if draft is None:
-        # (the architecture's measured default: the Coder drafts - the missing DFlash file falls into the error below, as
-        # before; the others by their served A/B, arch.Dense35.DRAFT_DEFAULT)
-        draft = A.default_draft(opt)
-        if draft != 'off':
-            print(f'caminus serve: --draft {draft} (the default for {A.name} on {A.cards} card(s); --draft off: plain decoding)',
-                  flush=True)
-    own_dflash = draft == 'dflash' and A.drafter != 'dflash' and 'dflash' in getattr(A, 'drafters', ())
-    if own_dflash:
-        # (the dense 27B line's drafter: its own catalog file, not the Coder's; --drafter overrides it)
-        if opt['drafter'] == DEFAULT_DRAFTER:
-            from .. import models as _models
-            opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
-        if A.cards != 1:
-            print('caminus serve: --draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off', file=sys.stderr)
-            return 2
-        if not os.path.isfile(opt['drafter']):
-            print(f'caminus serve: the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)', file=sys.stderr)
-            return 2
-    elif draft == 'dflash' and A.drafter != 'dflash':
-        print(f'caminus serve: --draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})', file=sys.stderr)
-        return 2
-    if draft == 'mtp' and A.drafter != 'mtp':
-        print(f'caminus serve: --draft mtp: no MTP drafter for {A.name} in K3 yet (--draft off: plain decoding)', file=sys.stderr)
-        return 2
-    if draft == 'mtp' and A.cards != 1:
-        print(f'caminus serve: --draft mtp runs on one card only (the two-card drafter is not built yet): --cards 1, or --draft off',
-              file=sys.stderr)
-        return 2
-    if draft == 'dflash' and not own_dflash:
-        if not (opt['drafter'] and os.path.isfile(opt['drafter'])):
-            print(f'caminus serve: the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
-                  f'(or dflash in {_config.config_path()}), or pass --drafter (--no-drafter: plain decoding)', file=sys.stderr)
-            return 2
-    elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter'] and 'dflash' not in getattr(A, 'drafters', ()):
-        # (the dense 27B line: caminus start passes its optional drafter's file on every start; it loads with --draft dflash)
-        print(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
-    opt['draft'] = draft
-    if A.drafter == 'dflash':
-        opt['no_drafter'] = (draft == 'off')   # (the Coder loader reads no_drafter: --draft off must not load DFlash)
     # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host

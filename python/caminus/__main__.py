@@ -1,6 +1,7 @@
 """caminus COMMAND [ARGS...]   (`caminus COMMAND --help` for a command's options; python -I -m caminus works the same)
 
   models    the named models: on disk or not, the cards each needs, measured speeds    (pull NAME downloads one)
+  fit       report the context that fits: same options as serve plus --json (CPU/sysfs only)
   start     start a server in the background: caminus start NAME [--card N] [--ctx auto|N] (--team brain-hands)
   ps        the running servers and the cards; stop NAME | --all, restart NAME, logs NAME [-f], top [NAME]
   panel     the control panel (a terminal UI: basic and advanced layouts)
@@ -22,7 +23,7 @@ Paths come from the environment, ~/.config/caminus/config.toml, then the XDG def
 them). PyTorch is not a declared dependency: install the ROCm build (caminus.device.torchcheck)."""
 import sys
 
-COMMANDS = ('serve', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard', 'version',
+COMMANDS = ('serve', 'fit', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard', 'version',
             'models', 'pull', 'start', 'stop', 'restart', 'ps', 'logs', 'top', 'panel', 'qwen-code', 'qwen', 'advisor')
 MANAGE = {'models': 'cmd_models', 'pull': 'cmd_pull', 'start': 'cmd_start', 'stop': 'cmd_stop', 'restart': 'cmd_restart',
           'ps': 'cmd_ps', 'logs': 'cmd_logs', 'top': 'cmd_top', 'panel': 'cmd_panel'}
@@ -60,6 +61,9 @@ def dispatch(cmd, rest):
     if cmd == 'qwen-code':
         from .cmd import qwen_code
         return qwen_code.main(rest)
+    if cmd == 'fit':
+        from .serve.cli import fit_report
+        return fit_report(rest)
     if cmd == 'qwen':
         from .cmd import qwen_code
         return qwen_code.launch(rest)

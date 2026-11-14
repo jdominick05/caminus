@@ -207,6 +207,31 @@ class Arch:
         engine's own check counts (the Coder: FlashNextTP(vram_drafters=...)), and its gate includes max_ctx auto with it."""
         return [0.0 for _ in devs]
 
+    def context_fit(self, opt, cards=None):
+        """One allocation recipe and room calculation for placement, auto and picker reports.
+
+        Explicit host cards use metadata/sysfs only, before HIP starts. Runtime
+        callers omit cards and read capacity's actual guard caps and usage.
+        """
+        from .device import capacity
+        from .device.context_fit import ContextFit
+        n_ctx, devs, slot, need = self.auto_need(opt, int(opt.get('auto_cache_slots', 4)), cards=cards)
+        extra = self.extras_mib(opt, devs, cards=cards)
+        if cards is None:
+            caps, reserve = capacity.caps_mib(devs), capacity.cache_reserve_mib(devs)
+        else:
+            # caps_mib already subtracts the allocator margin from the guard
+            # line. Placement must do the same before its cache/display reserve.
+            caps = [(c['line_mib'] - capacity.MARGIN_MIB,
+                     (_read_int(os.path.join(c['dev'], 'mem_info_vram_used')) or 0) / 2 ** 20) for c in cards]
+            reserve = [capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB for c in cards]
+        if not (len(devs) == len(caps) == len(reserve) == len(extra)):
+            raise ValueError('context fit: card, projection and reserve counts differ')
+        slack = self.slack_mib(opt, cards)
+        room = [cap - used - res - capacity.CACHE_WORK_MIB[0] - slack - ex
+                for (cap, used), res, ex in zip(caps, reserve, extra)]
+        return ContextFit(n_ctx, devs, slot, room, need, AUTO_STEP)
+
     def auto_max_ctx(self, opt, log=print):
         """--max-ctx auto (the default): the largest context the cards hold now, under the guard's line, together with a
         working prompt cache: its reserve (capacity.cache_reserve_mib + CACHE_WORK_MIB), its side slot's rows, its io / side
@@ -215,19 +240,16 @@ class Arch:
         the model's context_length; extras_mib (a drafter's VRAM) comes off the room first"""
         from .device import capacity
         slots = int(opt.get('auto_cache_slots', 4))
-        n_ctx, devs, slot, need = self.auto_need(opt, slots)
-        sl = self.slack_mib(opt)
-        room = [cap - used - res - capacity.CACHE_WORK_MIB[0] - sl - ex
-                for (cap, used), res, ex in zip(capacity.caps_mib(devs), capacity.cache_reserve_mib(devs), self.extras_mib(opt, devs))]
-        cands = sorted({min(c, n_ctx) for c in range(AUTO_STEP, n_ctx + AUTO_STEP, AUTO_STEP)}, reverse=True)
-        for c in cands:
-            n = need(c)
-            if all(n[i] <= room[i] for i in range(len(devs))):
-                log(f'caminus serve: max_ctx auto -> {c} (the model\'s {n_ctx}; room {" / ".join(f"{r:.0f}" for r in room)} MiB, '
-                    f'need {" / ".join(f"{v:.0f}" for v in n)} MiB with {slots} cache slots of ~{slot:.0f} MiB)', flush=True)
-                return c
-        raise capacity.CapacityError(f'max_ctx auto: not even {AUTO_STEP} positions fit (room {" / ".join(f"{r:.0f}" for r in room)} '
-                                     f'MiB, need {" / ".join(f"{v:.0f}" for v in need(AUTO_STEP))} MiB)')
+        plan = self.context_fit(opt)
+        c, room = plan.maximum(), plan.room_mib
+        if c is not None:
+            n = plan.need_mib(c)
+            log(f'caminus serve: max_ctx auto -> {c} (the model\'s {plan.native_ctx}; room {" / ".join(f"{r:.0f}" for r in room)} MiB, '
+                f'need {" / ".join(f"{v:.0f}" for v in n)} MiB with {slots} cache slots of ~{plan.slot_mib:.0f} MiB)', flush=True)
+            return c
+        lowest = min(AUTO_STEP, plan.native_ctx)
+        raise capacity.CapacityError(f'max_ctx auto: not even {lowest} positions fit (room {" / ".join(f"{r:.0f}" for r in room)} '
+                                     f'MiB, need {" / ".join(f"{v:.0f}" for v in plan.need_mib(lowest))} MiB)')
 
     def fits(self, opt, cards):
         """whether the model holds MIN_CTX positions (or its context_length, if smaller) with a working prompt cache on these
@@ -236,21 +258,14 @@ class Arch:
         host projection here (the Coder: its engine's own check decides)"""
         from .device import capacity
         try:
-            n_ctx, devs, slot, need = self.auto_need(opt, int(opt.get('auto_cache_slots', 4)), cards=cards)
+            plan = self.context_fit(opt, cards)
         except NotImplementedError:
             return True
         try:
             want = int(opt.get('max_ctx'))              # an explicit --max-ctx: that context; auto: the architecture's floor
         except (TypeError, ValueError):
             want = self.min_ctx(opt)
-        n = need(min(want, n_ctx))
-        for c, v, ex in zip(cards, n, self.extras_mib(opt, devs, cards=cards)):
-            used = _read_int(os.path.join(c['dev'], 'mem_info_vram_used'))
-            res = capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB
-            room = c['line_mib'] - (used >> 20 if used else 0) - res - capacity.CACHE_WORK_MIB[0] - self.slack_mib(opt, cards) - ex
-            if v > room:
-                return False
-        return True
+        return plan.fits(min(want, plan.native_ctx))
 
     def default_draft(self, opt):
         """the drafter kind a serve runs without --draft: the architecture's own when it needs no extra file choice (the
