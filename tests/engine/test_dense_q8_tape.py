@@ -51,9 +51,10 @@ class DenseQ8Tape(unittest.TestCase):
     def append(self, E, b):
         return E.kv_append(**b, q8=True)
 
-    def test_seven_specializations_keep_their_weight_and_execution_families(self):
+    def test_specializations_keep_their_weight_and_execution_families(self):
         bases = ('k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_swift_tp',
-                 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_tcap_tp', 'k3_q35_gsq')
+                 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_tcap_tp', 'k3_q35_gsq',
+                 'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp_ver')
         self.assertEqual(k3.Q35_KV_Q8_BASE, {base + '_kvq8': base for base in bases})
         for new, base in k3.Q35_KV_Q8_BASE.items():
             with self.subTest(module=new):
@@ -72,7 +73,7 @@ class DenseQ8Tape(unittest.TestCase):
             tp = f'k3_q35_{line}_tp_kvq8'
             self.assertEqual(k3.Q35_TP_OF[one], tp)
             self.assertIn(tp, k3.Q35_TP_MODULES)
-            self.assertNotIn(tp, k3.Q35_TPV_OF)  # no Q8 TP verify specialization yet
+            self.assertEqual(k3.Q35_TPV_OF[tp], f'k3_q35_{line}_tp_ver_kvq8')
         self.assertNotIn('k3_q35_gsq_kvq8', k3.Q35_TP_OF)
 
     def test_unsupported_token_width_and_teams_are_refused_before_allocation(self):

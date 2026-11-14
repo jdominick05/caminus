@@ -57,6 +57,8 @@ SUITES = [
     ('numerical_failure', ['tests/serve/test_numerical_failure.py'], {'torch'}),
     ('numerical_state', ['tests/cache/test_numerical_state.py'], {'torch'}),
     ('q35_tp', ['tests/engine/test_q35_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
+    ('dense_q8_tp', ['tests/engine/test_dense_q8_tp.py', '--scratch', '{scratch}'], {'torch'}),
+    ('dense_q8_tp_prefill', ['tests/prefill/test_q35_q8_tp_cpu.py'], {'torch'}),
     ('q35_tp_ver', ['tests/engine/test_q35_verify_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),

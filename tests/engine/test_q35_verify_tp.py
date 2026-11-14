@@ -20,6 +20,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('gguf'); ap.add_argument('--depths', default='0,512')
 ap.add_argument('--feature-layers', default='', help='comma-separated residual layers to gate bitwise against decode')
 ap.add_argument('--feature-card', type=int, choices=(0, 1), default=0)
+ap.add_argument('--kv', choices=('f16', 'q8'), default='f16', help='matching target decode/verify/prefill cache format')
 A = ap.parse_args()
 from caminus import ggufio
 from caminus.bpe import BPE
@@ -45,11 +46,11 @@ per_card = sum(Dense35VerifyTP.need_mib(T, max_ctx=max_ctx) for T in range(1, MA
 per_card += (sum(range(1, MAX_T + 1)) + len(GRIDS) * MAX_T) * (len(fl) + 2) * 5120 * 4 / 2 ** 20 if fl else 0
 bn = buffer_need_tp_mib(tp_shapes(A.gguf), CH)
 eng = Dense35TP(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=(per_card + bn[0] + 16, per_card + bn[1] + 16),
-                feature_layers=fl, feature_card=A.feature_card)
+                feature_layers=fl, feature_card=A.feature_card, q8=A.kv == 'q8')
 pf = Q35OwnPrefillTP(eng, chunk=CH)
 vers = {T: Dense35VerifyTP(eng, T, feature_layers=fl) for T in range(1, MAX_T + 1)}
 alt = {w: Dense35VerifyTP(eng, MAX_T, per_wgp=(w, w), feature_layers=fl) for w in GRIDS}
-print(f'engine {eng.module} {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB at max_ctx {max_ctx}, spec_T {eng.spec_T}; '
+print(f'engine {eng.module} KV {A.kv} {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB at max_ctx {max_ctx}, spec_T {eng.spec_T}; '
       f'verify tapes: ' + ', '.join(f'T {T}: {len(v.E[0].segs)} segments, {v.mib[0]:.1f} / {v.mib[1]:.1f} MiB' for T, v in vers.items()),
       flush=True)
 ok = True

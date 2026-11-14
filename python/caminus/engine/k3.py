@@ -112,7 +112,9 @@ Q35S_MODULES = ('k3_q35_swift', 'k3_q35_swift_trace', 'k3_q35_swift_tp', 'k3_q35
 # Verify starts with the unpacked PART, independent of the F16 packed reader.
 Q35_KV_Q8_BASE = {name + '_kvq8': name for name in (
     'k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_swift_tp',
-    'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_tcap_tp', 'k3_q35_gsq')}
+    'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_tcap_tp', 'k3_q35_gsq',
+    'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp_ver')}
+Q35_KV_Q8_FORMAT_ID = 'q8_0-v1:qk-hadamard256:v-hadamard64-v1'
 Q35_KV_Q8_OF = {base: name for name, base in Q35_KV_Q8_BASE.items()}
 Q35_KV_Q8_MODULES = tuple(Q35_KV_Q8_BASE)
 Q35S_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35S_MODULES)
@@ -120,7 +122,9 @@ Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MO
 Q35R_MODULES += (Q35_KV_Q8_OF['k3_q35_gsq'],)
 Q35SV_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'],)
 Q35TV_MODULES += (Q35_KV_Q8_OF['k3_q35_tcap_ver'],)
-Q35V_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'], Q35_KV_Q8_OF['k3_q35_tcap_ver'])
+Q35TPV_MODULES += tuple(Q35_KV_Q8_OF[m] for m in Q35TPV_MODULES)
+Q35V_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'], Q35_KV_Q8_OF['k3_q35_tcap_ver']) + tuple(
+    m for m in Q35TPV_MODULES if m in Q35_KV_Q8_MODULES)
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
 Q3M_IQ_MODULES = ('k3_q3m_iq', 'k3_q3m_iq_trace')
 Q3M_RS_MODULES = {'k3_q3m_rs4': 'RS4', 'k3_q3m_rs2': 'RS2'}   # (the row-scale study's: module -> its one format; OWN_RS_FMT below)
@@ -257,6 +261,9 @@ MODULE_CAPS['k3_q35_swift_tp_ver'] = (MODULE_CAPS['k3_q35_swift_tp'] - {('OWN_MV
 # ThinkingCap's verify module: its formats' T-token tiles (kernels/own_quant_tcap_mt.h; Q6_K: own_quant_mt.h's mt2)
 MODULE_CAPS.update({m: MODULE_CAPS[m] | {('OWN_MV', f'{f}/a16_1rt_mt') for f in OWN_Q35T_1RT} for m in Q35TV_MODULES})
 MODULE_CAPS['k3_q35_tcap_tp_ver'] = MODULE_CAPS['k3_q35_tcap_tp'] | {('OWN_MV', f'{f}/a16_1rt_mt') for f in OWN_Q35T_1RT}
+# Q8 TP verify inherits the completed verify whitelist, not its decode-only
+# family defaults. The packed-reader choice is separate from supported weights.
+MODULE_CAPS.update({m: MODULE_CAPS[Q35_KV_Q8_BASE[m]] for m in Q35TPV_MODULES if m in Q35_KV_Q8_BASE})
 # the drafter module (K3_Q35_MTP): its tape's pairs only. Its device dispatch keeps the trunk's ops (kernels/k3_q35_ops.h:
 # the register allocation), so this set and Q35M_OPS are what refuse them; Q4_K is compiled out of its OP_OWN_MV
 OWN_MTP_FMT = {'Q4_0': 14}   # (= kernels/k3_own_ops.h OWN_Q4_0)
@@ -292,6 +299,7 @@ Q35_TP_OF.update({Q35_KV_Q8_OF[m]: Q35_KV_Q8_OF[tp] for m, tp in tuple(Q35_TP_OF
 Q35_TP_MODULES = tuple(Q35_TP_OF.values())
 # the two-card modules' verify builds (K3_TP + K3_Q3M_VER): two-card module -> its verify module
 Q35_TPV_OF = {'k3_q35_swift_tp': 'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp': 'k3_q35_tcap_tp_ver'}
+Q35_TPV_OF.update({Q35_KV_Q8_OF[m]: Q35_KV_Q8_OF[v] for m, v in tuple(Q35_TPV_OF.items())})
 # the verify module: the same ops, and the matvec's T-token forms (_mt: one segment for every token of the pass; _gu_xt:
 # the experts' gate | up with each token's own input)
 MODULE_CAPS.update({m: MODULE_CAPS['k3_q3m_lean'] | {('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT_FMT for g in ('_mt', '_gu_xt')}

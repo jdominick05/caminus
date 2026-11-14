@@ -191,7 +191,7 @@ class Dense35Own:
             raise ValueError('Dense35Own: staged Q8 kernels require head_dim 256 and six query heads per KV head')
         self.kv_rows = self.max_ctx + self.spec_T - 1   # rows exposed by state views, including the verify tail
         if q8:
-            self.kv_format_id = 'q8_0-v1:qk-hadamard256:v-hadamard64-v1'
+            self.kv_format_id = k3.Q35_KV_Q8_FORMAT_ID
         self.tcap = self.module in k3.Q35T_MODULES
         # the formats whose matvecs run on the one-round-trip tiles (own_matvec_1rt); the others on own_matvec16
         self.one_rt = (k3.OWN_Q35R_1RT if self.module in k3.Q35R_MODULES else k3.OWN_Q35T_1RT) if self.tcap else k3.OWN_1RT_FMT

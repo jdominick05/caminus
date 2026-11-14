@@ -71,6 +71,9 @@ class Dense35VerifyTP:
         if module != k3.Q35_TPV_OF.get(eng.module):
             raise ValueError(f'Dense35VerifyTP: module {module!r} is not the verify module of the engine\'s module '
                              f'{eng.module} ({k3.Q35_TPV_OF})')
+        self.q8 = bool(getattr(eng, 'q8', False))
+        if (module in k3.Q35_KV_Q8_MODULES) != self.q8:
+            raise ValueError('Dense35VerifyTP: target and verify KV formats must match')
         if eng.spec_T < T: raise ValueError(f'Dense35VerifyTP: the engine keeps {eng.spec_T} tokens\' saved inputs (spec_T), the tape runs {T}')
         if eng.nl_build != eng.nl: raise ValueError('Dense35VerifyTP: an engine built with debug_layers')
         fl = [int(l) for l in feature_layers]
@@ -120,6 +123,7 @@ class Dense35VerifyTP:
 
     def _tape(self, c, E, s, toks, pos, epoch):
         eng, T = self.eng, self.T
+        q8 = self.q8
         D, hd, S = eng.D, eng.hd, eng.S
         nhc, nkvc = eng.nh // 2, eng.nkv // 2
         names = self.seg_names[c]
@@ -167,11 +171,16 @@ class Dense35VerifyTP:
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
                 kd = E.qk_nr(s['kr'], hd, nkvc, hd, d['kn'], pos, s['ko'], eng.nrot, eng.theta_scale, eng.eps, dep=k_)
-                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, dep=kd), v_)
+                if q8:
+                    kd = E.hadamard(s['ko'], 256, dep=kd)
+                    v_ = E.hadamard(s['vr'], 64, dep=v_)
+                ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], pos, q8=q8, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
                 qd = E.qk_nr(s['qf'], 2 * hd, nhc, hd, d['qn'], pos, s['qo'], eng.nrot, eng.theta_scale, eng.eps, dep=q_)
+                if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 akw = dict(max_cells=eng.max_ctx + eng.spec_T - 1, part=s['part']) if E.split_attn() else dict(batched=True)
-                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), dep=ap, **akw), qd)
+                a_ = E.also(E.attn_dec(s['qo'], d['cache'], pos, s['att'], nhc, nkvc, hd, 1.0 / np.sqrt(hd), q8=q8, dep=ap, **akw), qd)
+                if q8: a_ = E.hadamard(s['att'], 64, dep=a_)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blkp'], g_)
             x1 = xchg(s['blkp'], s['blk'], 2 * il, o_)
@@ -205,7 +214,7 @@ class Dense35VerifyTP:
         runs the pass again (commit 0: the first launch committed already); the device bound guard poisons the engine until
         its reset()."""
         eng, T = self.eng, self.T
-        if eng.broken: raise k3.NonFiniteLogits(f'Dense35VerifyTP pass: refused: {eng.broken}')
+        if eng.broken: raise getattr(eng, '_broken_error', k3.NonFiniteLogits)(f'Dense35VerifyTP pass: refused: {eng.broken}')
         if eng.poisoned: raise k3.ContextBoundsError(f'Dense35VerifyTP pass: refused until reset(): {eng.poisoned}')
         if len(tokens) != T: raise ValueError(f'Dense35VerifyTP pass: {len(tokens)} tokens for a T = {T} tape')
         k3.check_span(pos0, T, eng.max_ctx, commit=commit, ntok=eng.commit_max(), what='Dense35VerifyTP pass')
@@ -247,6 +256,12 @@ class Dense35VerifyTP:
                 self.h_st[c].copy_(self.E[c].sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
                 self.ev_done[c].record()
         for c in (0, 1): self.ev_done[c].synchronize()
+        if self.q8:
+            for c in (0, 1):
+                try:
+                    self.E[c].check_kv_error()
+                except k3.InvalidKVEncoding as exc:
+                    eng.mark_broken(f'card {c}: {exc}', error_cls=k3.InvalidKVEncoding)
         oob = []
         for c in (0, 1):
             b = k3.bounds_status(self.h_st[c].tolist())

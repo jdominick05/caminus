@@ -114,6 +114,8 @@ CLAUDE.md imports this file.
   count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename.
   Its shared prefill object falls back to FP32 for causal rows whose Q/K/V cannot be staged in half; preserve the
   codec domain and check numerical flags before drafter exports, handoff or ordinary failure recovery.
+  The staged two-card target uses byte KV rows on both cards and unpacked `*_tp_ver_kvq8` verify objects. Wait for
+  both cards and check every numerical flag before handling either card's bounds/timeout status or exporting features.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS) and Qwen3-Coder-Next. Their engines and kernels stay; `models.PAUSED` keeps them
@@ -206,6 +208,9 @@ tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the 
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 ```
+
+Complete a whole build before running CPU packaging suites in that checkout: those tests read its actual build
+provenance. Do not overlap `build.sh` with `tests/ci_cpu.py` in the same checkout.
 
 After a kernel change: `objcheck.py check` (every other object's code unchanged; k3_run <= 96 VGPRs, 0 spills;
 `.sgpr_spill_count` not up: spilled scalars slow every hop, a change in one op measured +13 % on all of them; the

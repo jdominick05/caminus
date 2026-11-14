@@ -71,10 +71,13 @@ P_S = os.path.join(A.scratch, 'tiny-tp-swift.gguf'); iS = tiny_q35.write(P_S, tp
 P_T = os.path.join(A.scratch, 'tiny-tp-tcap.gguf'); iT = tiny_q35.write(P_T, variant='tcap', tp=True)
 
 # ---- the module mapping and the refusals --------------------------------------------------------------------------------
-good = k3.Q35_TPV_OF == {'k3_q35_swift_tp': 'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp': 'k3_q35_tcap_tp_ver'}
-good &= all(m in k3.Q35V_MODULES and m in k3.ATTN_PACK_MODULES and m in k3.Q35_SPLIT_MODULES for m in k3.Q35TPV_MODULES)
+expected = {'k3_q35_swift_tp': 'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp': 'k3_q35_tcap_tp_ver'}
+expected.update({k3.Q35_KV_Q8_OF[m]: k3.Q35_KV_Q8_OF[v] for m, v in tuple(expected.items())})
+good = k3.Q35_TPV_OF == expected
+good &= all(m in k3.Q35V_MODULES and m in k3.Q35_SPLIT_MODULES
+            and (m in k3.ATTN_PACK_MODULES) == (m not in k3.Q35_KV_Q8_MODULES) for m in k3.Q35TPV_MODULES)
 good &= all(k3.MODULE_CAPS[m] for m in k3.Q35TPV_MODULES)
-check(good, 'k3.Q35_TPV_OF maps each two-card module to its verify build; the verify builds are T-token, packed-split modules with caps')
+check(good, 'k3.Q35_TPV_OF maps each cache format to its T-token verify build; packed F16 and unpacked Q8 have matching caps')
 eng = Dense35TP(P_S, devices=(0, 1), max_ctx=64, vram_check=False, spec_T=MAX_T)
 try: Dense35VerifyTP(eng, MAX_T, module='k3_q35_swift_ver'); refused = False
 except ValueError: refused = True

@@ -20,6 +20,10 @@ with patch('torch.cuda.init', side_effect=AssertionError('GPU initialization for
                                                  Path(__file__).with_name('test_q35_prefill.py'))
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
+    spec = importlib.util.spec_from_file_location('q35_prefill_tp_model_gate',
+                                                 Path(__file__).with_name('test_q35_prefill_tp.py'))
+    tp_gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tp_gate)
 
 
 def engine(q8):
@@ -117,6 +121,78 @@ class FullModelState(unittest.TestCase):
         for flag, value in [('--from', '0'), ('--from', '-1'), ('--speed', '-1')]:
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
                 gate.parse_args(['model.gguf', '--ref', 'ref.npz', flag, value])
+            self.assertEqual(raised.exception.code, 2)
+
+
+class TwoCardState(unittest.TestCase):
+    @staticmethod
+    def engine(q8):
+        a, rb = engine(q8)
+        b, _ = engine(q8)
+        state = {}
+        for c, part in enumerate((a, b)):
+            state[c, 0, 'kv'] = part.L[0]['cache']
+            state[c, 1, 'conv'] = part.L[1]['conv_st']
+            state[c, 1, 'gdn'] = part.L[1]['gdn']
+            state[c, 1, 'convx'] = torch.arange(5, dtype=torch.float32)
+        return NS(q8=q8, nkv=4, hd=256, max_ctx=4, state=state), rb
+
+    def test_both_cards_snapshot_all_scale_and_v_bytes_with_exact_budget(self):
+        for q8 in (False, True):
+            m, rb = self.engine(q8)
+            views = tp_gate.state_views(m, 3)
+            before = tp_gate.snapshot_state(m, 3)
+            self.assertTrue(all(v.dtype == torch.uint8 for v in before))
+            for c in (0, 1):
+                self.assertEqual(tp_gate.snapshot_nbytes(m, 3, c), 3 * rb + (12 + 11 + 5) * 4)
+                raw = m.state[c, 0, 'kv'].view(torch.uint8)
+                self.assertTrue(torch.equal(dict(views)[c, 0, 'kv'], raw[:3 * rb]))
+                raw[3 * rb - 1] ^= 1
+                self.assertFalse(tp_gate.same_state(before, tp_gate.snapshot_state(m, 3)))
+                raw[3 * rb - 1] ^= 1
+            self.assertFalse(tp_gate.same_state(before, before[:-1]))
+
+    def test_unwritten_rows_excluded_and_snapshots_own_storage(self):
+        for q8 in (False, True):
+            m, rb = self.engine(q8)
+            before = tp_gate.snapshot_state(m, 3)
+            for c in (0, 1): m.state[c, 0, 'kv'].view(torch.uint8)[3 * rb:] ^= 1
+            self.assertTrue(tp_gate.same_state(before, tp_gate.snapshot_state(m, 3)))
+            m.state[1, 0, 'kv'].view(torch.uint8)[0] ^= 1
+            self.assertFalse(tp_gate.same_state(before, tp_gate.snapshot_state(m, 3)))
+
+    def test_every_recurrent_byte_and_nan_payload_are_preserved(self):
+        m, _ = self.engine(True)
+        values = m.state[1, 1, 'gdn'].view(torch.int32)
+        values[0], values[1] = 0x7fc00001, -2147483648
+        before = tp_gate.snapshot_state(m, 2)
+        self.assertTrue(tp_gate.same_state(before, tp_gate.snapshot_state(m, 2)))
+        values[0] = 0x7fc00002
+        self.assertFalse(tp_gate.same_state(before, tp_gate.snapshot_state(m, 2)))
+        values[0], values[1] = 0x7fc00001, 0
+        self.assertFalse(tp_gate.same_state(before, tp_gate.snapshot_state(m, 2)))
+        values[1] = -2147483648
+        m.state[1, 1, 'gdn'][-1] += 1
+        self.assertFalse(tp_gate.same_state(before, tp_gate.snapshot_state(m, 2)))
+
+    def test_invalid_prefix_partial_rows_and_wrong_dtype_are_refused(self):
+        for q8 in (False, True):
+            for prefix in (-1, 5, True, 1.5):
+                m, _ = self.engine(q8)
+                with self.assertRaises(ValueError): tp_gate.state_views(m, prefix)
+            m, _ = self.engine(q8)
+            m.state[0, 0, 'kv'] = m.state[0, 0, 'kv'][:-1]
+            with self.assertRaisesRegex(ValueError, 'whole physical rows'): tp_gate.state_views(m, 3)
+            m, _ = self.engine(q8)
+            m.state[1, 0, 'kv'] = m.state[1, 0, 'kv'].to(torch.int32)
+            with self.assertRaisesRegex(ValueError, 'dtype'): tp_gate.state_views(m, 3)
+
+    def test_matching_reference_format_is_required_before_model_loading(self):
+        for kv in ('f16', 'q8'):
+            args = ['model.gguf', '--ref', 'ref.npz', '--kv', kv, '--llama', 'll.bin', '--llama-kv', kv]
+            self.assertEqual(tp_gate.parse_args(args).kv, kv)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                tp_gate.parse_args(args[:-1] + [('q8' if kv == 'f16' else 'f16')])
             self.assertEqual(raised.exception.code, 2)
 
 

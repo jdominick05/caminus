@@ -1,8 +1,8 @@
 # Own Q8 KV cache path (staged)
 
 The own-code dense line has separate `*_kvq8` persistent objects. They preserve the F16 objects and weight-format
-selection. `Dense35Own(..., q8=True)` is an internal bring-up path; the server and panel expose no Q8 selector.
-Matching one-card batched prefill is also staged. The high-level two-card engine still refuses Q8.
+selection. `Dense35Own(..., q8=True)` and `Dense35TP(..., q8=True)` are internal bring-up paths; the server and panel
+expose no Q8 selector. Matching one- and two-card batched prefill and T=1..4 target verify are staged.
 Device correctness, model accuracy and speed remain unverified for these objects.
 
 ## Wire format and rotations
@@ -17,9 +17,9 @@ before encoding. Attention dequantizes the same blocks. Its output receives Hada
 The staged host path requires head dimension 256 and six query heads per KV head. Verify uses the unpacked attention
 reader: the packed reader is F16-only and compilation rejects that combination for Q8.
 
-Swift and ThinkingCap have one-token decode, T-token verify and low-level TP decode objects. GSQ has a decode object;
-its verify and TP implementation are separate work. Drafter caches, complete two-card
-integration, and Coder/Qwen3 format selection are still required for an end-to-end selectable cache format.
+Swift and ThinkingCap have one-token decode and T-token verify objects for one and two cards. GSQ has a decode
+object; its Q8 verify and TP implementation are separate work. Drafter caches, served format selection, and
+Coder/Qwen3 integration are still required for an end-to-end selectable cache format.
 
 ## Terminal append failures
 
@@ -34,6 +34,10 @@ consumption. A refusal marks the target engine permanently broken and raises `In
 startup and shutdown use exit 75 and skip parking. The prompt cache also rejects direct park, restore, append and
 commit calls once its engine is broken. The existing `NonFiniteLogits` error shares this terminal policy.
 
+Two-card decode and verify first wait for both cards, then check each dedicated error word before handling any
+bounds or timeout status. A numerical failure on card 1 therefore cannot be hidden by a timeout on card 0. Both-card
+prefill likewise checks all numerical flags before clearing any bounds flag, including after a host-exception drain.
+
 ## Memory and checkpoints
 
 The target cache is a byte tensor with `max_ctx + spec_T - 1` physical rows per attention layer. Projections count
@@ -41,6 +45,9 @@ that exact storage, split-attention scratch and the additional four-byte error w
 physical state-view rows to calculate byte stride, including the verify tail. The checkpoint key adds
 `target_kv=q8_0-v1:qk-hadamard256:v-hadamard64-v1`; F16 keys retain their existing fields. Cross-format reuse must
 remain refused when the served path is integrated.
+
+On two cards, each cache holds that card's KV heads and each decode tape has its own four-byte error word. Projection
+and checkpoint stride use the same local row size; exchanges retain the original FP32 partials and sum order.
 
 ## Matching batched prefill
 
@@ -73,7 +80,7 @@ They verify decode and verify do not retry even when a timeout is also set. Work
 startup exit 75 and shutdown without parking. No CPU check proves device arithmetic.
 
 ```bash
-python -I tests/ci_cpu.py --only q35_tape,dense_q8_tape,q35_kvq8_host,q35_q8_prefill,q35_q8_fixtures,numerical_failure,numerical_state,ref_kv,own_kv_codec,kv_codec,own_code,docs --jobs 1 --scratch build/q8-cpu
+python -I tests/ci_cpu.py --only q35_tape,dense_q8_tape,dense_q8_tp,dense_q8_tp_prefill,q35_tp_ver,q35_prefill_state,q35_kvq8_host,q35_q8_prefill,q35_q8_fixtures,numerical_failure,numerical_state,ref_kv,own_kv_codec,kv_codec,own_code,docs --jobs 1 --scratch build/q8-cpu
 ```
 
 After a whole-tree build, compare sections against the F16 branch point with `tools/gates/objcheck.py`. Every new
