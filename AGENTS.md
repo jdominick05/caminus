@@ -107,6 +107,9 @@ CLAUDE.md imports this file.
   `caminus serve` refuse their architectures (qwen35moe, qwen3next). `CAMINUS_ALLOW_PAUSED=1` lifts both (development
   and gates). Re-enabling one: remove it from both, then rerun its benchmarks.md rows.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
+  Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin
+  below the guard distinct from the cache/display reserve; `tests/test_context_fit.py` checks parity at the fit limit
+  and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path).

@@ -353,7 +353,7 @@ def fits_fn(entry, ctx=None):
         from .. import arch
         A = arch.of(entry['path'])
         opt = dict(model=entry['path'], chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4)
-        A.fits(opt, [])                          # (the projection loads here: a failure takes the size rule)
+        A.auto_need(opt, 4)                      # (probe the projection without inventing a zero-card fit)
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
         return rule
     return lambda g: A.fits(opt, [g])

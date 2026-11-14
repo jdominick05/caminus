@@ -508,12 +508,12 @@ def stage_cli(S):
     env = dict(os.environ, HIP_VISIBLE_DEVICES='')
     run = lambda *a: subprocess.run(cam(*a), capture_output=True, text=True, env=env, timeout=120)
     r = run('--help')
-    check('cli: --help lists every command', r.returncode == 0 and all(c in r.stdout for c in ('serve', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard')))
+    check('cli: --help lists every command', r.returncode == 0 and all(c in r.stdout for c in ('serve', 'fit', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard')))
     r = run('nonsense')
     check('cli: an unknown command is refused (exit 2)', r.returncode == 2 and 'unknown command' in r.stderr)
     r = run('version')
     check('cli: version', r.returncode == 0 and r.stdout.startswith('caminus ' + __import__('caminus').__version__), r.stdout)
-    for c in ('serve', 'replay', 'download', 'doctor', 'purge', 'flight', 'kv-cache'):
+    for c in ('serve', 'fit', 'replay', 'download', 'doctor', 'purge', 'flight', 'kv-cache'):
         r = run(c, '--help')
         check(f'cli: {c} --help (no guard, nothing started)', r.returncode == 0 and 'usage:' in r.stdout, (r.stdout + r.stderr)[-200:])
     from caminus.device import machine, torchcheck
@@ -599,6 +599,13 @@ def stage_torch(S):
           (r.stdout + r.stderr)[-300:])
     r = run(['serve', '--help'])
     check('torch: caminus serve --help without torch', r.returncode == 0 and 'usage:' in r.stdout, (r.stdout + r.stderr)[-200:])
+    r = run(['fit', '--help'])
+    check('torch: fit help needs no torch or guard', r.returncode == 0 and 'caminus fit' in r.stdout and '--json' in r.stdout and nolog('fit'))
+    r = run(['fit', '--model', gguf, '--json'])
+    try: fit_result = json.loads(r.stdout)
+    except ValueError: fit_result = {}
+    check('torch: failed fit query returns no invented maximum and starts no guard',
+          r.returncode == 1 and fit_result.get('ok') is False and fit_result.get('max_ctx') is None and clean(r) and nolog('fit'))
     r = run(['replay', os.path.join(S, 'no-bundle')])
     check('torch: caminus replay without torch: the install line, exit 2, no guard',
           r.returncode == 2 and torchcheck.INSTALL in r.stderr and clean(r) and nolog('replay'), (r.stdout + r.stderr)[-300:])

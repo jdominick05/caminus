@@ -27,6 +27,22 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 
 `caminus restart NAME` restarts a server with the same settings.
 
+## Check context capacity
+
+`caminus fit` uses the same model options, drafter selection, card placement and memory projection as `caminus serve`.
+It reads model metadata and current card usage without starting a server or initializing a GPU:
+
+```bash
+caminus fit --model MODEL.gguf --draft off --json
+caminus fit --model MODEL.gguf --drafter DRAFTER.gguf --draft dflash --json
+```
+
+The report gives the largest native context that fits, the chosen cards, and projected and available memory per card.
+It includes checkpoint slots and drafter buffers. An unavailable projection returns an error and no maximum.
+Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
+the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
+F16/Q8 comparison and context choices in the panel remain separate integration work.
+
 ## Qwen Code
 
 ```bash
