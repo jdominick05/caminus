@@ -143,6 +143,23 @@ class RuntimeKernels(unittest.TestCase):
                               q35_mtp.MODULE, q35_mtp.MODULE_TCAP, q35_dflash.MODULE, q35_dflash.MODULE_TCAP])
         self.assertNotIn(q35_dense.MODULE_GSQ, k3.Q35_TP_OF)
 
+    def test_real_gsq_dflash_selector_is_shipped(self):
+        # Exercise the constructor's actual selector, stopping at file opening.
+        # Complete verify/MTP tapes are exercised by test_q35_tape_cpu.py.
+        class SelectionOnly(Exception):
+            pass
+
+        eng = NS(module=q35_dense.MODULE_GSQ, tcap=True,
+                 head=dict(fmt='Q4_K'), emb=NS(type='IQ2_S'))
+        drafter = q35_dflash.Dflash35.__new__(q35_dflash.Dflash35)
+        with patch.object(q35_dflash.ggufio, 'GGUFFile', side_effect=SelectionOnly), self.assertRaises(SelectionOnly):
+            q35_dflash.Dflash35.__init__(drafter, 'unused-selector-fixture.gguf', eng, vram_check=False)
+        self.assertEqual(drafter.module, 'k3_q35_gsq_dflash')
+        self.require_runtime([drafter.module])
+        without = tuple(n for n in kernels.RUNTIME_SET if n != drafter.module)
+        with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+            self.require_runtime([drafter.module])
+
     def test_real_dense_prefill_constructors_select_shipped_helpers(self):
         for module in (q35_dense.MODULE, q35_dense.MODULE_TCAP, q35_dense.MODULE_GSQ):
             for ratio in (6, 8):
