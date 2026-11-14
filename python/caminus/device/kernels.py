@@ -30,7 +30,17 @@ MOE_FORMATS = ('iq2_s', 'iq3_s', 'iq3_xxs', 'iq4_xs', 'iq4_nl', 'q2_0', 'glue')
 PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'prefill_tp', 'prefill_dense_q6_k', 'gemm',
             'prefill_glue_q35', 'prefill_glue_q35d', 'prefill_gdn_q35', 'prefill_attn_q35', 'prefill_attn_q35d')   # (caminus.prefill.q35)
            + tuple(f'prefill_mmq_{f}' for f in MMQ_FORMATS) + tuple(f'prefill_moe_{f}' for f in MOE_FORMATS))
-RUNTIME_SET = K3 + PREFILL + ('own_topk', 'smoke')   # (own_topk: the device sampler's candidates, serve/k3_session.py)
+# The own engines select these from the file's formats, including custom GGUFs.
+# Keep them explicit: doctor and wheel staging must not import torch or engines.
+# tests/packaging/test_runtime_kernels.py checks the real host selections against
+# this list without a GPU. Adding a serving module requires extending both.
+Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq')
+DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
+               'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
+               'k3_q35_gsq', 'q35_prefill_gsq')   # paused plain 27B: packaging does not unpause the catalog
+# TP verify remains a phase-one test path until TP drafting is served. Trace,
+# ablation and standalone probes are also deliberately outside the runtime set.
+RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + ('own_topk', 'smoke')
 
 
 def checkout_build():
