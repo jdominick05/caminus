@@ -99,12 +99,42 @@ type harnessInfo struct {
 
 // option is one flag of `caminus serve --options-json` (the advanced layout's list: every option the server accepts).
 type option struct {
-	Flag    string   `json:"flag"`
-	Dest    string   `json:"dest"`
-	Type    string   `json:"type"` // int | float | str | bool | ctx
-	Default any      `json:"default"`
-	Help    string   `json:"help"`
-	Choices []string `json:"choices"`
+	Flag    string        `json:"flag"`
+	Dest    string        `json:"dest"`
+	Type    string        `json:"type"` // int | float | str | bool | ctx
+	Default any           `json:"default"`
+	Help    string        `json:"help"`
+	Choices optionChoices `json:"choices"`
+}
+
+// argparse preserves numeric choices in --options-json. The editor holds command-line arguments as text; decode
+// both numeric and string choices without rounding numbers or letting an unrelated option hide the whole form.
+type optionChoices []string
+
+func (c *optionChoices) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var choices optionChoices
+	for _, value := range raw {
+		value = bytes.TrimSpace(value)
+		var text string
+		if len(value) > 0 && value[0] == '"' {
+			if err := json.Unmarshal(value, &text); err != nil {
+				return err
+			}
+		} else {
+			var number json.Number
+			if err := json.Unmarshal(value, &number); err != nil || number == "" {
+				return fmt.Errorf("option choice must be a string or number: %s", value)
+			}
+			text = number.String()
+		}
+		choices = append(choices, text)
+	}
+	*c = choices
+	return nil
 }
 
 // actionResult is what every action command prints: {"ok": true, ...} or {"ok": false, "error": "..."}.
