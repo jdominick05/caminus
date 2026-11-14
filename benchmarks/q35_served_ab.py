@@ -19,6 +19,7 @@ from serve_smoke1 import Server1  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument('--model', required=True); ap.add_argument('--ids', required=True); ap.add_argument('--scratch', required=True)
 ap.add_argument('--card', default='0'); ap.add_argument('--draft', default='dflash')
+ap.add_argument('--cards', type=int, choices=(1, 2), default=1, help='number of trunk cards (two: --card 0,1)')
 ap.add_argument('--no-warmup', action='store_true', help='skip the 8-token warm-up request before each prompt (its prefix stays in the prompt cache)'); ap.add_argument('--n', type=int, default=128); ap.add_argument('--rounds', type=int, default=3); ap.add_argument('--max-ctx', default='4096')
 A = ap.parse_args()
 prompts = json.load(open(A.ids))['prompts']
@@ -30,7 +31,7 @@ class Arm(argparse.Namespace):
 
 
 def server(draft):
-    a = Arm(model=A.model, max_ctx=A.max_ctx, scratch=os.path.join(A.scratch, draft), alias=None, cards=1, draft=draft,
+    a = Arm(model=A.model, max_ctx=A.max_ctx, scratch=os.path.join(A.scratch, draft), alias=None, cards=A.cards, draft=draft,
             block_imports='gguf,tokenizers', card=A.card)
     os.makedirs(a.scratch, exist_ok=True)
     s = Server1(f'serve[{draft}]', a)

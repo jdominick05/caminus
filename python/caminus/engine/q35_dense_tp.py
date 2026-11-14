@@ -130,7 +130,7 @@ class Dense35TP:
 
     def __init__(self, path, devices=(0, 1), max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=16, rpt16=32,
                  ffn_share=0.5, vocab_share=0.5, local_only=False, vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8,
-                 debug_layers=None, spec_T=1):
+                 debug_layers=None, spec_T=1, feature_layers=(), feature_card=0):
         """path: a dense qwen35 GGUF (engine/q35_dense.py Dense35Own's formats; module None: the two-card build of the module
         module_of picks). devices: the two torch / HIP device indices (card 0 first: its partials come first in every
         sum). ffn_share / vocab_share: card 0's part of the feed-forward rows / the head rows. local_only: TEST-ONLY, every
@@ -167,6 +167,7 @@ class Dense35TP:
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
             raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
         self.devs, self.max_ctx, self.limit_us, self.spec_T = list(devices), int(max_ctx), limit_us, int(spec_T)
+        self.kv_rows = self.max_ctx + self.spec_T - 1
         one = module or module_of(F)
         one = {v: k for k, v in k3.Q35_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
         if one not in k3.Q35_TP_OF: raise ValueError(f'Dense35TP: module {one} has no two-card build ({sorted(k3.Q35_TP_OF)})')
@@ -179,10 +180,16 @@ class Dense35TP:
         self.tp_key = dict(ffn_rows=self.f0, vocab_rows=self.vh)   # (the prompt cache's key: the split changes the partial sums' bits)
         self.nl_build = self.nl if debug_layers is None else int(debug_layers)
         assert 1 <= self.nl_build <= self.nl, debug_layers
+        fl = [int(l) for l in feature_layers]
+        if any(not 1 <= l < self.nl_build for l in fl) or len(set(fl)) != len(fl):
+            raise ValueError(f'Dense35TP: feature_layers {fl} (distinct, 1 .. {self.nl_build - 1})')
+        if feature_card not in (0, 1): raise ValueError(f'Dense35TP: feature_card {feature_card}: 0 or 1')
+        self.feature_layers, self.feature_card, self.features, self.ple_layers = fl, int(feature_card), None, None
         self.emb = F.T['token_embd.weight']
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35TP: token_embd is {self.emb.type} on module {self.module}')
         self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share, self.spec_T)]
+        self.vram_mib[self.feature_card] += self.feature_mib(self.D, 1, len(fl))
         ex = [float(v) for v in vram_extra_mib]
         if vram_check:
             capacity.check(self.devs, [v + e for v, e in zip(self.vram_mib, ex)],
@@ -210,7 +217,6 @@ class Dense35TP:
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual = False, None, False, False
         self.qsa_from = None
-        self.feature_layers, self.feature_card, self.features, self.ple_layers = [], 0, None, None
         self.gdn_keys = self.NK // 2; self.moe_blocks = 0
         self._during, self._tok = None, False
         self.model_tag = 'qwen35'
@@ -219,11 +225,19 @@ class Dense35TP:
         self._load(); self._build_tapes()
 
     @staticmethod
-    def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5, spec_T=1):
+    def feature_mib(D, T, nfeat):
+        """The selected card's exported residuals and the copy segments' fp32 / fp16 norm scratch."""
+        return (int(nfeat) * T * D * 4 + T * D * 6) / 2 ** 20 if nfeat else 0.0
+
+    @staticmethod
+    def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5, spec_T=1, nfeat=0, feature_card=0):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
         check counts the same terms"""
         F = ggufio.GGUFFile(path)
-        try: return [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T)]
+        try:
+            out = [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T)]
+            out[feature_card] += Dense35TP.feature_mib(_shapes(F)['D'], 1, nfeat)
+            return out
         finally: F.close()
 
     @staticmethod
@@ -365,6 +379,9 @@ class Dense35TP:
                 if self.module in k3.ATTN_SPLIT_MODULES:   # (the split attention pair's records over this card's heads)
                     s['part'] = B(attn_part_elems(1, QHc // hd, self.max_ctx + self.spec_T - 1))
                 self.buf.append(s)
+                if self.feature_layers and c == self.feature_card:
+                    s.update(feat=B(len(self.feature_layers) * D), fh=B(D), fh16=B(D, torch.float16))
+                    self.features = s['feat'].view(len(self.feature_layers), 1, D)
                 ds = B(32, torch.int32); self.dstage.append(ds)
                 self.tok.append(ds[16:17]); self.pos.append(ds[17:18]); self.epoch.append(ds[18:19])
                 E = k3.Engine(module=self.module, grid=k3.resident_grid(self.module, self.per_wgp_c[c]), T=1, limit_us=self.limit_us)
@@ -382,6 +399,7 @@ class Dense35TP:
         nhc, nkvc = self.nh // 2, self.nkv // 2
         E, s, pos = self.E[c], self.buf[c], self.pos[c]
         names = self.seg_names[c]
+        fslot = {l: k for k, l in enumerate(self.feature_layers)} if c == self.feature_card else {}
 
         def named(si, name):
             names[si] = name; return si
@@ -403,6 +421,11 @@ class Dense35TP:
             self.layer_seg[c].append((il, len(E.segs)))
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], self.eps, d=s['ffp'] if il else None,
                                  slots=1 if il else 0, dep=prev)
+            fc = None
+            if il in fslot:
+                k = fslot[il]
+                fc = E.own_add_rms16(s['feat'][k * D:(k + 1) * D], d['attn_norm'], s['fh'], s['fh16'], self.eps,
+                                     d=s['x'], slots=1, dep=n1)
             if d['kind'] == 'gdn':
                 NV, NK, CH = d['NV'], d['NK'], d['CH']; KD = NK * S
                 a_ = mv(d['al'], s['h16'], s['al'], n1, x32=s['h']); b_ = mv(d['be'], s['h16'], s['be'], n1, x32=s['h'])
@@ -427,6 +450,7 @@ class Dense35TP:
                 o_ = mv(d['o'], s['gat16'], s['blkp'], g_)
             x1 = xchg(s['blkp'], s['blk'], 2 * il, o_)
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], self.eps, d=s['blk'], slots=1, dep=x1)
+            if fc is not None: E.also(n2, fc)   # the feature copy must finish before the next writer of x
             g_ = mv(d['fg'], s['h16'], s['g'], n2); u_ = mv(d['fu'], s['h16'], s['u'], n2)
             sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
             f_ = mv(d['fd'], s['a16'], s['ffpp'], sw)
@@ -572,6 +596,7 @@ class Dense35TP:
             with torch.cuda.device(self.devs[c]):
                 if ct is not None: ct[c].record()
                 self.dstage[c].copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the waits)
+                if self.features is not None and c == self.feature_card: self.features.zero_()
                 if trace is None: self.E[c].run(check=False)
                 else: self.E[c].run(check=False, trace=trace[c])
         for c in (0, 1):

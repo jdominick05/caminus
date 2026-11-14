@@ -49,15 +49,14 @@ possible: `./build.sh` in a checkout, then `CAMINUS_KERNEL_DIR=<dir>`.
 | Retained legacy decode | `k3_gguf_q35h`, `k3_gguf_q35g`, `k3_gguf_q35d`, `k3_gguf_q3n` |
 | Batched prefill | `prefill_attn`, `prefill_feed`, `prefill_gdn`, `prefill_glue`, `prefill_tp`, `prefill_dense_q6_k`, `prefill_mmq_*` (13 including glue/glue8), `prefill_moe_*` (7), `gemm` (the WMMA BF16 GEMMs); `prefill_glue_q35`, `prefill_glue_q35d`, `prefill_gdn_q35`, `prefill_attn_q35`, `prefill_attn_q35d` |
 | Own Qwen3 | `k3_q3m_lean`, `k3_q3m_iq`, `k3_q3m_rs4`, `k3_q3m_rs2`, `q3m_prefill`, `q3m_prefill_iq` (the file's formats select decode and prefill; a row-scale head can use the regular prefill) |
-| Own dense 27B | `k3_q35_swift`, `k3_q35_tcap`, their `_tp`, `_ver` and `_mtp` objects; `k3_q35_dflash`, `k3_q35_tcap_dflash`; `q35_prefill`, `q35_prefill_tcap`. The paused plain file also needs `k3_q35_gsq`, `q35_prefill_gsq`; shipping them does not unpause it |
+| Own dense 27B | `k3_q35_swift`, `k3_q35_tcap`, their `_tp`, `_ver`, `_tp_ver` and `_mtp` objects; `k3_q35_dflash`, `k3_q35_tcap_dflash`; `q35_prefill`, `q35_prefill_tcap`. TP drafting needs both `_tp_ver` objects in installed builds. The paused plain file also needs `k3_q35_gsq`, `q35_prefill_gsq`; shipping them does not unpause it |
 | Sampler | `own_topk` (device candidate selection) |
 | Toolchain check | `smoke` (`caminus doctor --gpu` launches its saxpy once per card) |
 
 **Not shipped:** the `*_trace` profiling builds, the `*_swiglu` test builds, `gg_mmvf_ref` (a test reference), the
 dormant S1 engine (`k3`, `k3_trace`, `k3_u16`, `k3_mv`), the dormant training kernels (`actq`, `attn`, `core`, `fuse`, `gdn`,
 `headloss`, `wquant`) and the probes (`bw_bench`, `sync_bench`, `wmma_probe`). A missing object raises with the way to build it.
-The dense `_tp_ver` objects remain a test path until TP drafting reaches serving; staged unused Q8 experiments and
-prefill ablation objects are excluded too. The registry in `device/kernels.py` is the complete list, including the
+Staged unused Q8 experiments and prefill ablation objects remain excluded. The registry in `device/kernels.py` is the complete list, including the
 retained legacy objects. The CPU runtime-selection gate checks real engine/prefill/drafter choices against it;
 staging and provenance checks alone cannot detect a required object omitted from that registry.
 

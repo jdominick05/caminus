@@ -7,6 +7,9 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### New
 
+- **Two-card drafting for Swift and ThinkingCap.** `--cards 2 --draft mtp` or `--draft dflash` uses the two-card verify
+  path, with the drafter and a complete output head on one card. Context sizing counts the added memory. Two-card
+  drafting remains opt-in while served measurements determine its defaults.
 - **Signed build provenance (SLSA Build Level 3).** Every release and nightly is now built again on GitHub's runners
   in the same build image the maintainer uses, published only when both builds are byte for byte equal, and signed:
   `gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus --signer-workflow

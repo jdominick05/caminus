@@ -106,7 +106,7 @@ class Mtp35:
         self.token = 0       # the launch-epoch counter the prompt cache's live state reads (one per round)
         # the cache-facing identity (caminus.cache.prompt Layout / engine_key read these off the drafter's df, as of DFlashK3)
         self.kind = 'mtp'
-        self.path, self.dx, self.tgt = eng.path, int(eng.dev), eng
+        self.path, self.dx, self.tgt = eng.path, int(eng.dev), getattr(eng, 'trunk', eng)
         self.nl, self.nkv, self.hd = 1, eng.nkv, eng.hd
         self.T, self.window = MAX_T, int(window)
         self.ring = int(eng.max_ctx) + MAX_T + self.k   # the block KV's rows (the 'ring' of a by-position cache)
