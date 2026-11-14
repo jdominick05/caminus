@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common  # noqa: E402
@@ -1048,28 +1049,59 @@ class TestQueueFaultsPings(unittest.TestCase):
             want_cached = len(p) + len(r) - 1
             for via_sdk in (False, True):
                 res = {}
+                entered, release, expired = threading.Event(), threading.Event(), threading.Event()
+                pings = [0]
+                run = srv.worker._run
+                handler = srv.httpd.RequestHandlerClass
+                send_sse = handler._sse
+
+                def held_run(job):
+                    entered.set()
+                    if not release.wait(10):
+                        expired.set()
+                    return run(job)
+
+                def observed_sse(h, data, event=None):
+                    out = send_sse(h, data, event)
+                    if event == 'ping':
+                        pings[0] += 1
+                        if pings[0] >= 2:
+                            release.set()
+                    return out
+
+                # A started client thread is not necessarily admitted, and a
+                # finite job can finish while the next client is setting up.
+                # Hold the actual worker until two real ping frames are written;
+                # the raw client below still verifies those bytes and ordering.
                 blocker = threading.Thread(target=lambda: res.setdefault('a', U.post_json(
-                    srv, '/v1/completions', {'prompt': [tok.bos_id, 3, 4, 5], 'max_tokens': 200})))
-                blocker.start()
-                time.sleep(0.05)
-                if not via_sdk:
-                    st, h, data = U.request(srv, 'POST', '/v1/messages', {**kw2, 'stream': True})
-                    evs, _ = U.parse_sse(data)
-                    names = [e for e, _ in evs]
-                    self.assertEqual(names[0], 'message_start', names[:8])
-                    self.assertGreater(names[:names.index('content_block_start')].count('ping'), 1, names[:8])
-                    ms = json.loads(evs[0][1])['message']['usage']
-                    md = json.loads([d for e, d in evs if e == 'message_delta'][-1])['usage']
-                    self.assertEqual((ms['input_tokens'], ms['cache_read_input_tokens']), (len(p2), 0))
-                    self.assertEqual((md['input_tokens'], md['cache_read_input_tokens']),
-                                     (len(p2) - want_cached, want_cached))
-                else:
-                    with sdk(srv).messages.stream(**kw2) as s:
-                        m2 = s.get_final_message()
-                    U.same_reply(self, anthropic_got([b.model_dump(exclude_none=True) for b in m2.content]), reply2)
-                    self.assertEqual((m2.usage.input_tokens, m2.usage.cache_read_input_tokens),
-                                     (len(p2) - want_cached, want_cached))
-                blocker.join()
+                    srv, '/v1/completions', {'prompt': [tok.bos_id, 3, 4, 5], 'max_tokens': 200}, timeout=10)))
+                with patch.object(srv.worker, '_run', held_run), patch.object(handler, '_sse', observed_sse):
+                    blocker.start()
+                    try:
+                        self.assertTrue(entered.wait(10), 'blocker never reached the worker')
+                        if not via_sdk:
+                            st, h, data = U.request(srv, 'POST', '/v1/messages', {**kw2, 'stream': True})
+                            evs, _ = U.parse_sse(data)
+                            names = [e for e, _ in evs]
+                            self.assertEqual(names[0], 'message_start', names[:8])
+                            self.assertGreater(names[:names.index('content_block_start')].count('ping'), 1, names[:8])
+                            ms = json.loads(evs[0][1])['message']['usage']
+                            md = json.loads([d for e, d in evs if e == 'message_delta'][-1])['usage']
+                            self.assertEqual((ms['input_tokens'], ms['cache_read_input_tokens']), (len(p2), 0))
+                            self.assertEqual((md['input_tokens'], md['cache_read_input_tokens']),
+                                             (len(p2) - want_cached, want_cached))
+                        else:
+                            with sdk(srv).messages.stream(**kw2) as s:
+                                m2 = s.get_final_message()
+                            U.same_reply(self, anthropic_got([b.model_dump(exclude_none=True) for b in m2.content]), reply2)
+                            self.assertEqual((m2.usage.input_tokens, m2.usage.cache_read_input_tokens),
+                                             (len(p2) - want_cached, want_cached))
+                        self.assertFalse(expired.is_set(), 'no two ping frames while the worker was held')
+                        self.assertGreaterEqual(pings[0], 2)
+                    finally:
+                        release.set()
+                        blocker.join(timeout=10)
+                self.assertFalse(blocker.is_alive(), 'blocking client did not finish')
                 self.assertEqual(res['a'][0], 200)
             print(f'[ping] queued: message_start first with provisional usage (input {ms["input_tokens"]}, '
                   f'cache_read 0), pings, then message_delta with the real usage (input {md["input_tokens"]}, '

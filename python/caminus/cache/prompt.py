@@ -1387,7 +1387,9 @@ class PromptCache:
                 if ver is None: raise CacheError('promptcache: a host-accept drafter but the engine has no verify tape (m.ver)')
                 ver.run(list(seq[i0:i0 + T]), i0, commit, argmax=False)
                 if self.df.kind == 'dflash35': self.draft.take_pass(i0, f, None, ver)
-                else: self.draft.take_h(i0, ver.buf['h'][:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
+                else:
+                    from ..engine.q35_draft_tp import pass_h
+                    self.draft.take_h(i0, pass_h(ver)[:T * m.D], [int(x) for x in seq[i0 + 1:i0 + T]] + [int(seq[i0 + T - 1])])
             else:
                 m.verify_tokens(seq, i0, commit)
                 if self.draft is not None:

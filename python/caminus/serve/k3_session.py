@@ -629,7 +629,8 @@ class K3Session(EngineSession):
         if self._dk == 'dflash35':   # (the verify pass's exported features; a one-token pass injected m.features already)
             if self._ver is not None and n == self.T: self.dr.take_pass(i0, n, toks, self._ver)
             return
-        h = self._ver.buf['h'] if (self._ver is not None and n == self.T) else self.m.buf['h']
+        from ..engine.q35_draft_tp import pass_h
+        h = pass_h(self._ver if (self._ver is not None and n == self.T) else self.m)
         self.dr.take_h(i0, h[:n * self.m.D], toks)
 
     def _seq(self, feed, drafts):
@@ -721,8 +722,8 @@ class K3Session(EngineSession):
                     if self.df is not None: self.df.flush()
                     self._ver.run(list(seq[i0:i0 + self.T]), i0, commit, argmax=False)   # (returns after the pass's status read)
                     tw = clock()
-                    L = self._ver.logits2
-                    src = (L[:, :self.vh], L[:, self.vh:])
+                    from ..engine.q35_draft_tp import verify_shards
+                    src = verify_shards(self._ver, self.vh)
                     pid, kp = self._penalty_rows(sampler.params, history, drafts)
                     self.queue_rows(F - 1, k + 1, pid, kp, src=src)
                     out = self._sample_rows(F, k, drafts, sampler, history, stop, pid, kp, False, src=src)

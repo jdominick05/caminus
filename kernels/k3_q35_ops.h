@@ -241,7 +241,7 @@ __device__ __forceinline__ void q35_op_gdn_step(const Seg & sg, int t) {
     const int RS = nk * S + H * S + 2 * H;                         // a saved input record per token
 #ifdef K3_Q35_GDN_LOCAL_BASE
     uintptr_t addr = (uintptr_t)sg.aux;
-    asm volatile("" : "+v"(addr));
+    asm volatile("" : "+v"(addr));   // preserve the address, prevent its derived replay pointer hoisting across dispatch
     float * base = (float *)addr;
 #else
     float * base = (float *)sg.aux;

@@ -65,6 +65,9 @@ the 27B models: the drafter's memory comes out of the context).
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
 --cards 2`). Each card holds half of every layer, so the model writes about 1.4 times as fast and the full 262,144-token
 context fits. Reading a prompt is about as fast as on one XTX for now.
+On two cards, `--draft mtp` keeps the prediction block on card 0; `--draft dflash` places the drafter on the card with
+more projected headroom. Each keeps a full output head on that card, in addition to the trunk's vocabulary shards;
+automatic context sizing counts it. Two-card drafting is opt-in; its default stays off pending served measurements.
 
 ## The names your tools use
 

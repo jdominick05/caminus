@@ -40,9 +40,10 @@ def tp_shapes(path, ffn_share=0.5):
                             NV=s.NV // 2) for c in (0, 1)]
 
 
-def buffer_need_tp_mib(shapes, T):
+def buffer_need_tp_mib(shapes, T, export_h=False, nfeat=0, feature_card=0):
     """per card: Q35OwnPrefillTP's buffers at chunk T (its layout at its local shapes + the exchange's receive rows)"""
-    return [buffer_need_mib(s, T) + xchg_bytes(T, s.D) / capacity.MIB for s in shapes]
+    return [buffer_need_mib(s, T, export_h=export_h and c == 0, nfeat=nfeat if c == feature_card else 0)
+            + xchg_bytes(T, s.D) / capacity.MIB for c, s in enumerate(shapes)]
 
 
 class Q35OwnPrefillTP(PrefillDriver):
@@ -50,10 +51,17 @@ class Q35OwnPrefillTP(PrefillDriver):
     (checked against each card's guard line first)"""
     MM_KEYS = dict(gdn=('qkv', 'z', 'so'), attn=('q', 'k', 'v', 'o'))
 
-    def __init__(self, m, chunk=1024, crossover=None, check=True):
+    def __init__(self, m, chunk=1024, crossover=None, check=True, export_h=None, feature_layers=()):
         if getattr(m, 'q8', False):
             raise ValueError('Q35OwnPrefillTP: matching Q8 prefill is not implemented; staged kernel gates only')
         self.m, self.chunk = m, int(chunk)
+        self.export_h = bool(getattr(m, 'mtp35', None) is not None) if export_h is None else bool(export_h)
+        self.feature_layers = [int(l) for l in feature_layers]
+        if any(not 1 <= l < m.nl for l in self.feature_layers) or len(set(self.feature_layers)) != len(self.feature_layers):
+            raise ValueError(f'Q35OwnPrefillTP: feature_layers {self.feature_layers} (distinct, 1 .. {m.nl - 1})')
+        self.feature_card = int(m.feature_card)
+        self._fslot = {l: k for k, l in enumerate(self.feature_layers)}
+        self._draft = None
         if not 16 <= self.chunk <= 4096: raise ValueError(f'Q35OwnPrefillTP: chunk {chunk} (16 .. 4096)')
         if m.nl_build != m.nl: raise ValueError('Q35OwnPrefillTP: a debug_layers engine is refused')
         if m.local_only: raise ValueError('Q35OwnPrefillTP: a local_only engine is refused (its numbers are not the model\'s)')
@@ -73,11 +81,13 @@ class Q35OwnPrefillTP(PrefillDriver):
         if attn is None: raise ValueError(f'Q35OwnPrefillTP: {m.nh // m.nkv} query heads per kv head')
         T = self.chunk
         self.sh = [local_shapes(m, c) for c in (0, 1)]
-        self.need_mib = buffer_need_tp_mib(self.sh, T)
+        nf = len(self.feature_layers)
+        self.need_mib = buffer_need_tp_mib(self.sh, T, self.export_h, nf, self.feature_card)
         if check: capacity.check(list(m.devs), self.need_mib[:], f'Q35OwnPrefillTP buffers (chunk {T}, both cards)')
         self.O, self.Gl, self.Gd, self.A, self.B = [], [], [], [], []
         for c in (0, 1):
-            dev = self.devs[c]; f32, f16, i32 = layout(self.sh[c], T)
+            dev = self.devs[c]
+            f32, f16, i32 = layout(self.sh[c], T, export_h=self.export_h and c == 0, nfeat=nf if c == self.feature_card else 0)
             with torch.cuda.device(dev):
                 self.O.append(Ops(dev, module=MODULE_TCAP if self.tcap else MODULE))
                 self.Gl.append(Glue(dev, module='prefill_glue_q35d')); self.Gd.append(Gdn(dev, module='prefill_gdn_q35'))
@@ -94,9 +104,25 @@ class Q35OwnPrefillTP(PrefillDriver):
         self.n_vocab = int(m.vocab)
         self.emb_rb = m.D // 256 * (82 if m.emb.type == 'IQ2_S' else 144)
         self.last = None
+        self.features = self.B[self.feature_card]['feat'].view(nf, T, m.D) if nf else None
+        # Dflash35.inject_rows consumes the chosen card's existing launchers and error word.
+        self.draft_ops = SimpleNamespace(O=self.O[self.feature_card], A=self.A[self.feature_card],
+                                         err=self.B[self.feature_card]['err'], feature_layers=self.feature_layers,
+                                         features=self.features)
 
     def check_drafter(self, draft):
-        if draft is not None: raise PrefillRefused('Q35OwnPrefillTP: no drafter yet')
+        k = getattr(draft, 'kind', None)
+        if draft is not None and k not in ('mtp', 'dflash35'):
+            raise PrefillRefused('Q35OwnPrefillTP: only MTP, DFlash 35, or no drafter')
+        if k == 'mtp' and not self.export_h:
+            raise PrefillRefused('Q35OwnPrefillTP: MTP needs export_h')
+        if k == 'dflash35' and ([int(l) for l in draft.d.layers_tgt] != self.feature_layers
+                               or int(draft.dx) != self.m.devs[self.feature_card]):
+            raise PrefillRefused('Q35OwnPrefillTP: DFlash layers and card must match the feature export')
+        self._draft = draft
+
+    def inject(self, draft, p0, p1, g0=None):
+        return 0   # the per-chunk hook filled the drafter already
 
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the two cards' partials summed in
@@ -128,6 +154,8 @@ class Q35OwnPrefillTP(PrefillDriver):
         last = il == m.nl - 1
         with torch.cuda.device(self.devs[c]):
             O.add_rms16(x, L['attn_norm'], eps, h16, n, D, d=ffp if il else None, h=h)
+            if c == self.feature_card and il in self._fslot:
+                self.features[self._fslot[il], :n].view(-1).copy_(x)
             if L['kind'] == 'gdn':
                 al, be, gt = B['al'][:n * NV], B['be'][:n * NV], B['gates'][:n * 2 * NV]
                 o0 = 0
@@ -142,7 +170,7 @@ class Q35OwnPrefillTP(PrefillDriver):
                 Gl.gdn_conv(qkv, L['conv_w'], L['conv_st'], conv, CH, n)
                 Gd.l2(conv, qk, n, 2 * NK, eps, ldx=CH)
                 Gd.step(qk, conv[2 * KD:], gt, L['gdn'], att, n, NV, NK, CH)
-                if last: return False
+                if last and not self.export_h: return False
                 O.mm(L['z'], h16, D, z, VD, n=n)
                 O.gdn_norm16(att, L['nw'], z, x16, n, NV, S, eps)
                 O.mm(L['so'], x16, VD, blk, D, n=n)
@@ -157,7 +185,7 @@ class Q35OwnPrefillTP(PrefillDriver):
                 O.mm(L['k'], h16, D, kr, M, n=n); O.mm(L['v'], h16, D, vr, M, n=n)
                 A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n)
                 O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, B['err'])
-                if last: return False
+                if last and not self.export_h: return False
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
                 A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
                 if O.attn_wm_ok(nh, nkv, hd):              # (the tiled WMMA attention on this card's heads; attn16 otherwise)
@@ -201,6 +229,11 @@ class Q35OwnPrefillTP(PrefillDriver):
             self._xchg('blk', n)
             for c in (0, 1): self._ffn(c, il, n)
             self._xchg('ffp', n)
+        if self.export_h:
+            m, B = self.m, self.B[0]
+            with torch.cuda.device(self.devs[0]):
+                self.O[0].add_rms16(B['x'][:n * m.D], m.out_norm[0], m.eps, B['h16o'][:n * m.D], n, m.D,
+                                   d=B['ffp'][:n * m.D], h=B['hout'][:n * m.D])
 
     def check_flags(self, what='prefill'):
         for c in (0, 1):
@@ -211,6 +244,12 @@ class Q35OwnPrefillTP(PrefillDriver):
 
     def _run_chunk(self, toks, k, j, a, b, segs, bounds):
         self._chunk(toks, a, b)
+        dr, n = self._draft, b - a
+        if dr is not None and getattr(dr, 'kind', None) == 'dflash35':
+            dr.inject_chunk(self.draft_ops, a, n)
+        if self.export_h and dr is not None and getattr(dr, 'kind', None) == 'mtp':
+            ts = [int(toks[min(p, len(toks) - 1)]) for p in range(a + 1, b + 1)]
+            dr.fill_chunk(self.B[0]['hout'][:n * self.m.D], ts, a + 1)
 
     def _run_settle(self):
         self._sync_devices(); self.X.settle(); self.check_flags('prefill')

@@ -272,9 +272,6 @@ def main(argv=None):
         if opt['drafter'] == DEFAULT_DRAFTER:
             from .. import models as _models
             opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
-        if A.cards != 1:
-            print('caminus serve: --draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off', file=sys.stderr)
-            return 2
         if not os.path.isfile(opt['drafter']):
             print(f'caminus serve: the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)', file=sys.stderr)
             return 2
@@ -283,10 +280,6 @@ def main(argv=None):
         return 2
     if draft == 'mtp' and A.drafter != 'mtp':
         print(f'caminus serve: --draft mtp: no MTP drafter for {A.name} in K3 yet (--draft off: plain decoding)', file=sys.stderr)
-        return 2
-    if draft == 'mtp' and A.cards != 1:
-        print(f'caminus serve: --draft mtp runs on one card only (the two-card drafter is not built yet): --cards 1, or --draft off',
-              file=sys.stderr)
         return 2
     if draft == 'dflash' and not own_dflash:
         if not (opt['drafter'] and os.path.isfile(opt['drafter'])):
