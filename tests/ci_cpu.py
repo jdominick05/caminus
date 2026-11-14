@@ -49,6 +49,7 @@ SUITES = [
     ('q35_tp_ver', ['tests/engine/test_q35_verify_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
+    ('serve_smoke1', ['tests/tools/test_serve_smoke1.py'], set()),
     ('nightly_plan', ['tests/tools/test_nightly_plan.py', '--scratch', '{scratch}'], set()),
     ('objcheck', ['tests/tools/test_objcheck.py', '--scratch', '{scratch}'], set()),
     ('pr_ready', ['tests/tools/test_pr_ready.py', '--scratch', '{scratch}'], set()),
