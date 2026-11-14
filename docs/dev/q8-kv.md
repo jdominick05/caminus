@@ -84,7 +84,10 @@ check keep the additional operations within that budget; they do not establish a
 `tests/prefill/test_q35_kvq8_ops.py --cpu-fixtures` checks the device gate's fixtures without importing torch. The
 actual GPU form requires the outer guard and a single non-display card; it checks bytes, rotations, decoded-Q8
 attention, wide-value fallback, chunk/split identity and canaries. Its accuracy bounds match the existing F16
-prefill attention gate. CPU fixture success is recorded separately from device execution.
+prefill attention gate, applied separately to each token and query head so wide valid fallback outputs cannot hide
+an omitted or incorrect normal WMMA vector. Reports contain the worst normalized max and mean across those
+vectors. CPU fixtures exercise mixed output magnitudes, missing normal vectors and zero-RMS references; their
+success is recorded separately from device execution.
 
 The full-model `tests/prefill/test_q35_prefill.py` gate accepts test-only `--kv q8` (default F16). It compares every
 byte of each committed cache row, including Q8 scales and final V blocks, and the live recurrent state across chunk

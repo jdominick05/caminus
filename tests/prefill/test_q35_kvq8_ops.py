@@ -11,7 +11,9 @@ torch import, HIP initialization or device work. --help is also CPU-only.
 Append bytes use caminus.ref_kv's independent codec. Attention is compared to
 float64 over those same decoded bytes, with full fp32 queries. The acceptance
 limits are the existing test_q35_prefill_attn.py limits: max <2e-2 and mean <2e-3
-of reference RMS. No tolerance or reference is generated from device output.
+of reference RMS, applied separately to each token and query head. A wide-value
+row cannot hide an error in another row. No tolerance or reference is generated
+from device output.
 Only valid spans, buffers and numerical codec inputs are launched. Refusals and
 unsafe address cases belong to CPU launcher tests.
 """
@@ -111,12 +113,22 @@ def relative(a, b):
 
 
 def attention_verdict(actual, reference):
-    """The GPU verdict checks every row and refuses an unwritten/nonfinite row."""
-    if actual.shape != reference.shape:
+    """Check every query vector against its own reference RMS, across all rows.
+
+    A valid wide-value fallback can be orders of magnitude larger than earlier
+    normal WMMA outputs. A single RMS over the fixture would allow those later
+    values to hide a missing or incorrect normal row/head. Report the worst
+    normalized max and mean across token/head vectors, using unchanged bounds.
+    """
+    if (actual.shape != reference.shape or actual.ndim != 3 or actual.shape[-1] != D
+            or not actual.size):
         return False, float('inf'), float('inf')
     if not np.isfinite(actual).all() or not np.isfinite(reference).all():
         return False, float('inf'), float('inf')
-    mx, mn = relative(actual, reference)
+    mx = mn = 0.
+    for a, b in zip(actual.reshape(-1, D), reference.reshape(-1, D)):
+        row_max, row_mean = relative(a, b)
+        mx, mn = max(mx, row_max), max(mn, row_mean)
     return mx < MAX_REL and mn < MEAN_REL, mx, mn
 
 
@@ -166,6 +178,23 @@ def cpu_fixtures(evidence):
         damaged[1] = value
         check(evidence, f'complete output verdict rejects {label} in formerly unsampled row1',
               not attention_verdict(damaged, reference)[0])
+    for label in ('later wide rows', 'another wide head'):
+        mixed = reference.copy()
+        if label == 'later wide rows':
+            mixed[7:] = 131072.
+        else:
+            mixed[:, -1] = 131072.
+        damaged = mixed.copy()
+        damaged[1, 0] = 0.
+        check(evidence, f'per-query verdict accepts exact output with {label}',
+              attention_verdict(mixed.copy(), mixed)[0])
+        check(evidence, f'per-query verdict rejects a missing normal vector beside {label}',
+              not attention_verdict(damaged, mixed)[0])
+    mixed[1, 0] = 0.
+    damaged = mixed.copy()
+    damaged[1, 0] = 1e-6
+    check(evidence, 'per-query verdict refuses a nonzero output for a zero-RMS reference vector',
+          not attention_verdict(damaged, mixed)[0])
 
 
 def selected_card(allow_display):
@@ -355,6 +384,7 @@ def main():
     evidence = dict(kind='Q8 dense prefill CPU fixtures' if args.cpu_fixtures else 'Q8 dense prefill op gate',
                     checks=[], failures=[], gpu_executed=False, completed=False, device_verified=False,
                     acceptance=dict(max_relative=MAX_REL, mean_relative=MEAN_REL,
+                                    normalization='RMS per token and query head; worst vector reported',
                                     source='tests/prefill/test_q35_prefill_attn.py'))
     try:
         if args.cpu_fixtures:
