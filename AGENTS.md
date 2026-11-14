@@ -111,6 +111,9 @@ CLAUDE.md imports this file.
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
+  Coder target KV follows the engine's `q8` policy: Q8 uses rotated blocks, F16 unrotated half rows. The QSA indexer
+  stays Q8 in either mode. F16 target append and split attention use `prefill_attn_f16`; keep the default Q8 object
+  unchanged. F16 GPU parity and served gates are pending; CPU dispatch checks do not establish numerical parity.
   `q3m.py` (qwen3moe) and `q35own.py` (the dense qwen35 line on own code) are the exceptions: their own WMMA GEMMs
   (`kernels/q3m_prefill.hip`, `kernels/q35_prefill.hip`; ThinkingCap's `kernels/q35_prefill_tcap.hip` adds the IQ GEMMs) and
   WMMA attention tiles (`q3p_attn`, head dim 128; `q35p_attn_wm`, head dim 256) are G-model gated, not bitwise (q35own's other

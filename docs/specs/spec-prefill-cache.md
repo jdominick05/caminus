@@ -398,6 +398,15 @@ SPEC: PREFILL + PROMPT/CONVERSATION CACHE for the GSQ-RCO Coder on K3 (XTX + XT,
     - the exchange sum fused into the next hc_post_rms (two block inputs, the same bits: ~27 ms on the XTX);
     - bf16 partials (half the copy traffic and its interference; gated fallback).
 - **S6 (1.5 d):** chunk loop, hand-off, tail through K3, DFlash window features.
+  - **F16 target-cache implementation (GPU gates pending):** the attention core now follows `FlashNextTP.q8`.
+    Q8 keeps the measured rotation and byte layout below. F16 omits target K/Q/output Hadamards and stores unrotated
+    half K then V, using the separate `prefill_attn_f16` append and split-attention kernels. The indexer remains Q8.
+    The F16 module is loaded at stack construction, before graph capture. F16 park numerical keys include the new
+    prefill version so caches made by the former Q8-only prefill path cannot be restored into it. Focused CPU tests
+    cover dispatch, views, bounds and keys; they do not prove device parity. On the non-display card first, run
+    `tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_attn.py CODER g1 --kv f16 --small` and
+    `tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_qsa.py CODER g1 --kv f16 --small`, then full gates
+    and the Q8 regression arms, before claiming support or exposing a user switch.
   - **Milestone A:** usable at ≤2,051 tokens. Measure G5 early.
   - **Done 11-04** (224008d, c1c4068, 166ec51: kernels/prefill_attn.hip, python/caminus/prefill/attn.py, python/caminus/prefill/coder.py, `ChunkStack(attn='core')`; tests/prefill/test_prefill_attn.py, tests/prefill/test_prefill_s6.py). Both cards, FlashNextTP T = 4 at max_ctx 4096 (QSA dual) + DFlashK3 + `Prefill(chunk=2048)`, compaction_proactiveness 0; logs in $ARTIFACTS/impl-prefill-s6/logs.
     - **The attention core:** q / k norm + RoPE, the Hadamard rotations, the q8_0 KV append into K3's own cache, dense attention as the Coder's split pair over the identity list, the output rotation and gate, and OP_HC_AVG for the DFlash features. Each is bitwise its K3 decode op, one token per pass, at T = 1 / 4 / 512 / 777 / 2048 / 2051 on the XT and on the XTX; G2b holds over chunk splits and record blocks. K3's record layout would take ~1.7 GB per card at 2048 rows, so rows run in 64-row blocks (49.5 MiB of records). attend at T = 2048: 4.74 / 6.60 ms per layer (XTX / XT), the core 67 / 93 ms per 12-layer chunk; the largest launch pair is 0.30 / 0.41 ms.

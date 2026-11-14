@@ -28,7 +28,8 @@ the recurrences carry their state from piece to piece in order: S4 G2b), so the 
 bit (tests/prefill/test_prefill_tp.py stack: G2b).
 
 The attention (ChunkStack(attn=)): 'core' (default, M5 S6): the model's attention core on caminus.prefill.attn's kernels,
-each bitwise its K3 decode op: q / k norm + RoPE at the row's absolute position, the Hadamard rotations, the q8_0 rows
+each matching its K3 decode op: q / k norm + RoPE at the row's absolute position, the target's cache format (Q8 uses
+Hadamard rotations and q8_0 rows; F16 uses unrotated half rows),
 written into K3's own KV cache (FlashNextTP.state[(card, layer, 'kv')]) and, on a QSA engine, the indexer's raw key rows
 (IDXRAW: k_proj through Glue.bf16_mv, bitwise OP_BF16_MV, then q8_0 as the dense tape writes them) and its pooled keys
 (IDXPOOL from token 0: prefill_attn.idx_pool, OP_IDX_APPEND's pooling; the pools a QSA-tape pass would backfill are
@@ -207,6 +208,7 @@ class ChunkStack:
                 self.AW[c] = pa.AttnWorkspace(self.devs[c], a['T'], a['nh'], a['hd'], a['idx_dim'], rows_per_block=a['rows_per_block'],
                                               n_feat=a['n_feat'], D=a['D'], T_pass=a['T_pass'], qsa_ctx=a['qsa_ctx'])
                 self.A[c] = pa.Attn(self.devs[c])
+                if not m.q8: self.A[c].prepare_f16()   # module loading stays outside the first graph capture
         self.p0 = 0
         self.feat_base, self.feat_rows = 0, pa.feat_rows(plan.T_pass)   # the feature export's positions [feat_base, + feat_rows)
         self._pool_from = 0
@@ -391,10 +393,16 @@ class ChunkStack:
         bitwise its ops (caminus.prefill.attn); the output (after its rotation and gate) into xa"""
         A, AW, m = self.A[c], self.AW[c], self.m; nh, hd, p = self.nh, self.hd, self.p0 + r0
         self._mk(c, 'attn_core')
+        q8 = bool(m.q8)
+        # The engine and host-mapped KV keep raw uint8 storage in either mode. The launcher takes a typed F16 view
+        # so its dtype, extent and vector-load alignment checks describe the selected representation explicitly.
+        cache = L['kv'] if q8 else L['kv'].view(torch.float16)
         ko = AW.ko[:n * hd]
-        A.qk_nr(ok_, hd, 1, hd, L['kn'], m.nrot, m.theta_scale, EPS, p, ko, n); A.hadamard(ko, hd, n)
-        A.hadamard(ov, 64, n * hd // 64)
-        A.kv_append(ko, hd, ov, hd, hd, L['kv'], p, n, AW.err)
+        A.qk_nr(ok_, hd, 1, hd, L['kn'], m.nrot, m.theta_scale, EPS, p, ko, n)
+        if q8:
+            A.hadamard(ko, hd, n)
+            A.hadamard(ov, 64, n * hd // 64)
+        A.kv_append(ko, hd, ov, hd, hd, cache, p, n, AW.err, q8=q8)
         if self.qsa:
             ik = AW.ikr[:n * 128]
             self._mk(c, 'bf16_mv'); self.Gl[c].bf16_mv(L['ikw']['w'], 128, self.D, mixed, ik, n); self._mk(c, 'attn_core')
@@ -403,12 +411,13 @@ class ChunkStack:
             j0, j1 = (self._pool_from if r0 == 0 else p // 4), (p + n) // 4
             if j1 > j0: A.idx_pool(L['raw'], L['pool'], j0, j1, L['ikn'], m.theta_scale, EPS, AW.err)
         qo = AW.qo[:n * nh * hd]
-        A.qk_nr(oq, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, EPS, p, qo, n); A.hadamard(qo, hd, n * nh)
+        A.qk_nr(oq, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, EPS, p, qo, n)
+        if q8: A.hadamard(qo, hd, n * nh)
         self._mk(c, 'attn')
         sc = 1.0 / (hd ** 0.5)
         b = max(p, min(p + n, pa.qsa_exact()))                 # rows [p, b) dense, [b, p + n) the model's QSA
         if b > p:
-            A.attend(qo[:(b - p) * nh * hd], L['kv'], p, b - p, 1, sc, xa[:(b - p) * nh * hd], AW.rec, AW.err, rows_per_block=self.rpb)
+            A.attend(qo[:(b - p) * nh * hd], cache, p, b - p, 1, sc, xa[:(b - p) * nh * hd], AW.rec, AW.err, rows_per_block=self.rpb, q8=q8)
         if p + n > b:
             o, q_ = b - p, p + n - b; Q = pa.QSA_H * pa.QSA_D
             iq, iqo = AW.iq[:q_ * Q], AW.iqo[:q_ * Q]
@@ -419,10 +428,11 @@ class ChunkStack:
                 A.qsa_score(iqo[(s0 - b) * Q:], L['pool'], s0, R, AW.score, AW.prow)
                 A.qsa_select(AW.score, AW.prow, s0, R, AW.prow, AW.sel[(s0 - b) * pa.QSA_SELW:])
             self._mk(c, 'attn')
-            A.attend(qo[o * nh * hd:], L['kv'], b, q_, 1, sc, xa[o * nh * hd:], AW.rec, AW.err, rows_per_block=self.rpb,
-                     sel=AW.sel[:q_ * pa.QSA_SELW])
+            A.attend(qo[o * nh * hd:], cache, b, q_, 1, sc, xa[o * nh * hd:], AW.rec, AW.err, rows_per_block=self.rpb,
+                     sel=AW.sel[:q_ * pa.QSA_SELW], q8=q8)
         self._mk(c, 'attn_core')
-        A.hadamard(xa, 64, n * nh * hd // 64, 4); A.gate_mul(xa, oq, 2 * hd, hd, xa, n * nh * hd, hd)
+        if q8: A.hadamard(xa, 64, n * nh * hd // 64, 4)
+        A.gate_mul(xa, oq, 2 * hd, hd, xa, n * nh * hd, hd)
 
     def _ffn(self, c, L, r0, n, hist):
         G, W, Gl, M, P = self.GW[c], self.W[c], self.Gl[c], self.M[c], self.P[c]
