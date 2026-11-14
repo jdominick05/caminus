@@ -1,7 +1,7 @@
 """Guarded GPU byte gate for the staged own Q8 KV writer (no model support claim).
 
 Run non-display-first under tools/guard.sh in an authorized GPU window:
-  python -I tests/device/test_kv_codec_gpu.py --json OUT
+  tools/guard.sh LOG 180 python -I tests/device/test_kv_codec_gpu.py --json OUT
 
 Only valid input/address spans are launched. Unsafe negative span/layout cases
 belong to test_kv_codec.py's CPU launch recorder. Numerical refusal is host-tested
