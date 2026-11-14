@@ -33,6 +33,8 @@ ROOT = os.path.dirname(HERE)
 SUITES = [
     ('serve', ['tests/serve/run_all.py'], {'vocab'}),
     ('packaging', ['tests/packaging/test_packaging.py', '--scratch', '{scratch}'], set()),
+    ('kernel_staging', ['tests/packaging/test_kernel_staging.py', '--scratch', '{scratch}'], set()),
+    ('runtime_kernels', ['tests/packaging/test_runtime_kernels.py'], {'torch'}),
     ('arch', ['tests/test_arch.py', '--scratch', '{scratch}'], set()),
     ('host', ['tests/device/test_host.py', '--scratch', '{scratch}'], set()),
     ('manage', ['tests/cmd/test_manage.py', '--scratch', '{scratch}'], set()),
