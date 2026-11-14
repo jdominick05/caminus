@@ -222,8 +222,13 @@ class Arch:
         else:
             # caps_mib already subtracts the allocator margin from the guard
             # line. Placement must do the same before its cache/display reserve.
-            caps = [(c['line_mib'] - capacity.MARGIN_MIB,
-                     (_read_int(os.path.join(c['dev'], 'mem_info_vram_used')) or 0) / 2 ** 20) for c in cards]
+            caps = []
+            for c in cards:
+                used = _read_int(os.path.join(c['dev'], 'mem_info_vram_used'))
+                if used is None or used < 0:
+                    from .device.host import PlacementError
+                    raise PlacementError(f'cannot read valid current VRAM usage for {c.get("pci") or c["dev"]}')
+                caps.append((c['line_mib'] - capacity.MARGIN_MIB, used / 2 ** 20))
             reserve = [capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB for c in cards]
         if not (len(devs) == len(caps) == len(reserve) == len(extra)):
             raise ValueError('context fit: card, projection and reserve counts differ')

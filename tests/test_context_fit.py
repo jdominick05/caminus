@@ -175,6 +175,33 @@ class ContextFit(unittest.TestCase):
                     cli.recipe(cli.parse(['--model', str(model), '--cards', '2', '--draft', draft]))
                 place.assert_not_called()
 
+    def test_unknown_current_usage_cannot_produce_a_numeric_fit(self):
+        model = SCRATCH / 'usage-model.gguf'
+        model.write_bytes(b'fixture')
+        dev = SCRATCH / 'usage-card'
+        dev.mkdir()
+        usage = dev / 'mem_info_vram_used'
+        card = dict(dev=str(dev), line_mib=24000, display=True, pci='0000:01:00.0', hip=0,
+                    status='supported', total_mib=24576, label='XTX', card='card0')
+        A = Recipe('test', 'test')
+        for value in (None, '', 'invalid', '-1'):
+            with self.subTest(usage=value):
+                if value is not None: usage.write_text(value)
+                stdout = io.StringIO()
+                with patch.object(arch, 'of', return_value=A), \
+                     patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
+                    code = cli.fit_report(['--model', str(model), '--draft', 'off', '--json'])
+                report = json.loads(stdout.getvalue())
+                self.assertEqual(code, 1)
+                self.assertFalse(report['ok'])
+                self.assertIsNone(report['max_ctx'])
+        usage.write_text('0')
+        stdout = io.StringIO()
+        with patch.object(arch, 'of', return_value=A), \
+             patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report(['--model', str(model), '--draft', 'off', '--json']), 0)
+        self.assertEqual(json.loads(stdout.getvalue())['max_ctx'], 4096)
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
