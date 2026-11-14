@@ -98,6 +98,13 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
+  Plain Qwen3.8-27B GSQ-RCO uses `k3_q35_gsq` / `q35_prefill_gsq` and `Q35R_*` host names; `Q35G_*` belongs to
+  Qwen3.6, so reusing it changes another model's dispatch. Its verify pass is three launches: prefix, the one IQ1_M
+  ffn_gate on `k3_q35_gsq_ver_m`, then suffix on `k3_q35_gsq_ver` with a scratch embedding to stage the IQ grids.
+  Isolating IQ1_M keeps the persistent allocation within 96 VGPRs; other IQ1_M placements are refused on the host.
+  Its MTP module uses the Q6_K block and Q4_K head; its DFlash module includes that head without staging IQ grids.
+  The catalog remains paused until served drafting identity and throughput gates pass; compiled modules alone do
+  not authorize a default or catalog change.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the

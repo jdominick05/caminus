@@ -58,13 +58,18 @@ class Bucket:
 
 class DraftPolicy:
     """decide(cls, pos) -> 'draft' | 'plain'; record(mode, cls, pos, ms, emitted, step_ms=None) after each decode pass.
-    enabled=False: always 'draft'. force: a callable(pass_no) -> 'draft' | 'plain' | None (tests: forced schedules)."""
+    enabled=False: always 'draft'. force: a callable(pass_no) -> 'draft' | 'plain' | None (tests: forced schedules).
+    probe_plain: a bucket with min_samples drafted passes and no plain cost yet runs one plain pass to measure it (the
+    host-accept drafters, MTP and the 27B DFlash2: their drafted passes carry no drafter step time, so no estimate ever
+    formed and a bucket where drafting loses never switched: ThinkingCap MTP at 40K served 0.84x of plain)."""
 
-    def __init__(self, enabled=True, min_samples=MIN_SAMPLES, hysteresis=HYSTERESIS, probe_every=PROBE_EVERY, force=None):
+    def __init__(self, enabled=True, min_samples=MIN_SAMPLES, hysteresis=HYSTERESIS, probe_every=PROBE_EVERY, force=None,
+                 probe_plain=False):
         self.enabled, self.min_samples, self.hysteresis, self.probe_every, self.force = enabled, min_samples, hysteresis, probe_every, force
+        self.probe_plain = bool(probe_plain)
         self.b = {}
         self.n = 0
-        self.counts = {'draft': 0, 'plain': 0, 'probe': 0}
+        self.counts = {'draft': 0, 'plain': 0, 'probe': 0, 'plain_probe': 0}
 
     @staticmethod
     def depth(pos):
@@ -94,6 +99,9 @@ class DraftPolicy:
                 self.counts['probe'] += 1
                 return 'draft'
             self.counts['plain'] += 1
+            return 'plain'
+        if self.probe_plain and b.ms_d.n >= self.min_samples and b.plain_cost() is None:
+            self.counts['plain_probe'] += 1   # (one plain pass: the bucket's plain cost, for record()'s comparison)
             return 'plain'
         self.counts['draft'] += 1
         return 'draft'

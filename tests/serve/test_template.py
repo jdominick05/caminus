@@ -11,7 +11,7 @@ import synth  # noqa: E402
 from common import hf_render  # noqa: E402
 
 from caminus.serve.template import (ChatTemplate, LiteralMarker, TemplateRequestError, literal_tags,
-                                   resolve_template_kwargs)
+                                   MODEL_PROFILES, DEFAULT_MODEL, resolve_template_kwargs, set_model_alias)
 from caminus.serve.tokenizer import unmark
 
 T = synth.TOOLS
@@ -181,6 +181,32 @@ class TestTemplate(unittest.TestCase):
                          ['reasoning_effort'], 'low')
         self.assertEqual(resolve_template_kwargs('k3-coder', {'preserve_thinking': False})[1]['preserve_thinking'],
                          False)
+
+    def test_set_model_alias_effort_ids(self):
+        """a non-Coder model whose template has think + reasoning_effort (the dense Qwen3.8-27B line) gets the same
+        effort ids as the Coder: alias, -nothink, -low, -xhigh; without the effort line (Qwen3-30B-A3B) or without
+        thinking, just alias + -nothink; k3-coder keeps its own profiles"""
+        saved = (dict(MODEL_PROFILES), DEFAULT_MODEL)
+        try:
+            set_model_alias('swift-1.5', thinking=True, effort=True)
+            self.assertEqual(sorted(MODEL_PROFILES), ['swift-1.5', 'swift-1.5-low', 'swift-1.5-nothink',
+                                                       'swift-1.5-xhigh'])
+            self.assertEqual(resolve_template_kwargs('swift-1.5-low', {})[1]['reasoning_effort'], 'low')
+            self.assertEqual(resolve_template_kwargs('swift-1.5-xhigh', {})[1]['reasoning_effort'], 'xhigh')
+            self.assertEqual(resolve_template_kwargs('swift-1.5-nothink', {})[1]['enable_thinking'], False)
+            self.assertEqual(resolve_template_kwargs('whatever', {})[0], 'swift-1.5')
+            set_model_alias('qwen3-30b-a3b', thinking=True, effort=False)
+            self.assertEqual(sorted(MODEL_PROFILES), ['qwen3-30b-a3b', 'qwen3-30b-a3b-nothink'])
+            set_model_alias('qwen3-coder-next', thinking=False, effort=False)
+            self.assertEqual(sorted(MODEL_PROFILES), ['qwen3-coder-next', 'qwen3-coder-next-nothink'])
+            self.assertEqual(resolve_template_kwargs('qwen3-coder-next', {})[1]['enable_thinking'], False)
+            before = dict(MODEL_PROFILES)
+            set_model_alias('k3-coder')          # the Coder's own ids are never replaced: a no-op
+            self.assertEqual(MODEL_PROFILES, before)
+        finally:
+            MODEL_PROFILES.clear(); MODEL_PROFILES.update(saved[0])
+            import caminus.serve.template as T
+            T.DEFAULT_MODEL = saved[1]
 
     def test_medium_system_same_with_thinking_on_or_off(self):
         """k3-coder (medium) writes no effort line: the system message (tools included) is identical with thinking

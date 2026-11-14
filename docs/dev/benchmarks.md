@@ -234,6 +234,21 @@ LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft
   served run gets 1.72x while code holds (2.15x engine, 2.13x served); the served path's cost per round on that prompt is
   not explained yet.
 
+Served at depth on rendered real sessions (a 40,885-token agent session and a 22,700-token code session, rendered to
+ChatML ids from saved Qwen Code chats, 11-13; `benchmarks/q35_served_ab.py`, median of 3 rounds, 128 greedy tokens,
+one card, testing's objects):
+
+| model, card | prompt | max-ctx | off | mtp | x |
+|---|---|---|---|---|---|
+| ThinkingCap, XT | agent 40K | 40960 | 29.9 | 41.3 | 1.38 |
+| ThinkingCap, XT | code 22K | 32768 | 34.1 | 42.6 | 1.25 |
+| Swift 1.5, XTX | agent 40K | 40960 | 32.7 | 47.4 | 1.45 |
+| Swift 1.5, XTX | code 22K | 32768 | 36.9 | 47.4 | 1.29 |
+
+code 22K: every mtp round's reply equalled the first plain round's, token for token. agent 40K: the replies agree for the
+first 73 tokens, then the mtp arm stops (EOS) while plain continues 2 tokens - the same on testing without the
+draft-policy change, so it is a stop-boundary tie on this prompt, not a mid-stream divergence.
+
 #### Speculative decoding with DFlash 2 (served)
 
 The base model's DFlash 2 drafter (incoai's Qwen3.8-27B-DFlash2 Q8_0: 5 non-causal blocks reading 5 of the target's
