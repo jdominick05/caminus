@@ -86,6 +86,10 @@ MTPB = r'#ifdef K3_Q35_MTP[^\n]*\n(.*?)#endif'   # (the drafter module's argmax:
 DFB = r'#ifdef K3_Q35_DF[^\n]*\n(.*?)#endif'   # (the DFlash drafter module's ops: k3.Q35DF_MODULES only)
 SPB = r'#ifdef K3_Q35_ATTN_SPLIT[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (decode attention: the split pair; #else the DFlash module's OP_ATTN_DEC)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
+f16b = r'#ifdef K3_Q35_F16_MTP[^\n]*\n(.*?)#endif'
+f16ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(f16b, disp, re.S))))
+check(f16ops == {'OP_OWN_MVF16'}, 'the raw F16 matvec is dispatched only by its MTP specialization')
+disp = re.sub(f16b, '', disp, flags=re.S)
 tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
 mtp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, disp, re.S))))
 df_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(DFB, disp, re.S))))

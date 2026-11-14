@@ -44,6 +44,14 @@ def block_of(F):
     return il if f'blk.{il}.nextn.eh_proj.weight' in F.T else None
 
 
+def block_bytes(F, il):
+    """Stored matrices plus widened FP32 device norms for an F16 MTP block."""
+    prefix = f'blk.{il}.'
+    matrices = {prefix + n + '.weight' for n in NEXTN}
+    return sum(t.n_bytes * (2 if t.type == 'F16' and name not in matrices else 1)
+               for name, t in F.T.items() if name.startswith(prefix))
+
+
 class Mtp35:
     @staticmethod
     def need_mib(eng, k=3):
@@ -52,7 +60,7 @@ class Mtp35:
         F = eng.F; il = block_of(F)
         if il is None: raise ValueError(f'Mtp35: {os.path.basename(eng.path)} has no multi-token-prediction block')
         p = f'blk.{il}.'
-        w = sum(t.n_bytes for n, t in F.T.items() if n.startswith(p))
+        w = block_bytes(F, il)
         kv = (eng.max_ctx + MAX_T + k) * 2 * eng.nkv * eng.hd * 2
         D, QH, ffn = eng.D, eng.nh * eng.hd, eng.ffn
         buf = 4 * MAX_T * (6 * D + 2 * D + 3 * QH + 2 * QH + 4 * eng.nkv * eng.hd + 2 * ffn) + 2 * MAX_T * (2 * D + 2 * D + QH + ffn)
@@ -69,7 +77,7 @@ class Mtp35:
             il = block_of(F)
             if il is None: raise ValueError(f'Mtp35: {os.path.basename(path)} has no multi-token-prediction block')
             p = f'blk.{il}.'
-            w = sum(t.n_bytes for n, t in F.T.items() if n.startswith(p))
+            w = block_bytes(F, il)
             hp = F.hp
             D = int(hp('embedding_length')); nh = int(hp('attention.head_count')); nkv = int(hp('attention.head_count_kv'))
             hd = int(hp('attention.key_length')); ffn = int(hp('feed_forward_length')); vocab = int(F.T['output.weight'].shape[1])
@@ -85,15 +93,16 @@ class Mtp35:
         """eng: a Dense35Own (its card, max_ctx, head and embedding): Swift 1.5 (block Q4_0, head Q6_K, embedding Q4_K:
         k3_q35_swift_mtp) or ThinkingCap (block Q6_K, head Q8_0, embedding IQ2_S: k3_q35_tcap_mtp); k: drafts per round
         (1 .. 4)"""
-        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
-        line = k3.Q35TM_MODULES if eng.tcap else k3.Q35M_MODULES
+        self.f16 = eng.module == 'k3_q35_9b'
+        if module is None: module = 'k3_q35_9b_mtp' if self.f16 else MODULE_TCAP if eng.tcap else MODULE
+        line = k3.Q35MF_MODULES if self.f16 else k3.Q35TM_MODULES if eng.tcap else tuple(m for m in k3.Q35M_MODULES if m not in k3.Q35MF_MODULES)
         if module not in line: raise ValueError(f'Mtp35: module {module!r} is not the engine\'s line\'s drafter module {line}')
         if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 4: raise ValueError(f'Mtp35: k {k!r}: 1 .. 4')
         self.il = block_of(eng.F)
         if self.il is None: raise ValueError(f'Mtp35: {os.path.basename(eng.path)} has no multi-token-prediction block')
         for n in NEXTN:
             t = eng.F.T[f'blk.{self.il}.{n}.weight']
-            want = 'Q6_K' if eng.tcap else 'Q4_0'
+            want = 'F16' if self.f16 else 'Q6_K' if eng.tcap else 'Q4_0'
             if t.type != want: raise ValueError(f'Mtp35: blk.{self.il}.{n} is {t.type} (the drafter module {module} runs {want})')
         want = 'Q8_0' if eng.tcap else 'Q6_K'
         if eng.head['fmt'] != want: raise ValueError(f"Mtp35: the head is {eng.head['fmt']} (the drafter module {module} runs {want})")
@@ -119,8 +128,15 @@ class Mtp35:
         """a block matrix in its tile's layout: Q4_0 (Swift) or Q6_K (ThinkingCap) planes"""
         t = self.eng.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         if (R, K) != (rows, cols): raise ValueError(f'Mtp35: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
-        b = (q6k_planes if t.type == 'Q6_K' else q4_0_planes)(t.pread(0, t.n_bytes), R, K)
+        raw = t.pread(0, t.n_bytes)
+        b = raw.view(np.float16).copy() if t.type == 'F16' else (q6k_planes if t.type == 'Q6_K' else q4_0_planes)(raw, R, K)
         return dict(name=name, fmt=t.type, rows=R, K=K, w=torch.from_numpy(np.ascontiguousarray(b)).to('cuda'))
+
+    def _norm(self, name, n):
+        t = self.eng.F.T[name]
+        if t.type != 'F16' or t.n_values != n:
+            raise ValueError(f'Mtp35: {name}: expected F16 norm of {n} values')
+        return torch.from_numpy(t.pread(0, t.n_bytes).view(np.float16).astype(np.float32)).to('cuda')
 
     def _load(self):
         e, p = self.eng, f'blk.{self.il}.'
@@ -129,7 +145,7 @@ class Mtp35:
                       k=self._q4(p + 'attn_k.weight', nkv * hd, D), v=self._q4(p + 'attn_v.weight', nkv * hd, D),
                       o=self._q4(p + 'attn_output.weight', D, nh * hd), fg=self._q4(p + 'ffn_gate.weight', ffn, D),
                       fu=self._q4(p + 'ffn_up.weight', ffn, D), fd=self._q4(p + 'ffn_down.weight', D, ffn))
-        f = e._f32
+        f = self._norm if self.f16 else e._f32
         self.N = dict(enorm=f(p + 'nextn.enorm.weight', D), hnorm=f(p + 'nextn.hnorm.weight', D),
                       shn=f(p + 'nextn.shared_head_norm.weight', D), an=f(p + 'attn_norm.weight', D),
                       pn=f(p + 'post_attention_norm.weight', D), qn=f(p + 'attn_q_norm.weight', hd), kn=f(p + 'attn_k_norm.weight', hd))
@@ -180,7 +196,9 @@ class Mtp35:
 
         def mv(w, x16, out, dep, tokens=T, xs=None, os_=None):
             kw = dict(tokens=tokens, x_stride=xs or w['K'], out_stride=os_ or w['rows']) if tokens > 1 else {}
-            si = E.own_matvec_1rt(w['w'], w['fmt'], w['rows'], w['K'], x16, out, rows_per_task=e.rpt, dep=dep, **kw)
+            si = (E.own_matvec_f16(w['w'], w['rows'], w['K'], x16, out, rows_per_task=e.rpt, dep=dep, tokens=tokens, x_stride=xs, out_stride=os_)
+                  if w['fmt'] == 'F16' else
+                  E.own_matvec_1rt(w['w'], w['fmt'], w['rows'], w['K'], x16, out, rows_per_task=e.rpt, dep=dep, **kw))
             names[si] = w['name']; return si
 
         r0 = 4 - T   # (this tape's rows of hn / hn16: the last is always row 3, the chained step's input)

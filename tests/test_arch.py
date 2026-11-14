@@ -59,7 +59,7 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'],
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-9b', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'],
           f'archs: the six served and the dense own line\'s two-card form ({sorted(arch.ARCHS)})')
     check(arch.ARCHS['qwen35-own'].variant(2) is arch.ARCHS['qwen35-own-tp'] and arch.ARCHS['qwen35-own'].variant(1) is arch.ARCHS['qwen35-own']
           and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own'] and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp'},
@@ -74,7 +74,7 @@ def main():
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
                     'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
-                    'qwen35-own-tp': ('tp', 2, 1, None)},
+                    'qwen35-own-tp': ('tp', 2, 1, None), 'qwen35-own-9b': ('one-card', 1, 1, 'mtp')},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
           'archs: the own-code qwen35 entry takes the own tokenizer, AREX-2\'s entry keeps its own')
@@ -124,7 +124,7 @@ def main():
                   and abs(sh['need_mib'](4096) - ((0.55 * 64 * 32 * 4 + kv_pos * 4096) / 2 ** 20 + 768.0)) < 1e-9,
                   f'tp_shape: the engine\'s per-card projection from the registry\'s header facts (kv_pos {sh["kv_pos"]})')
             from caminus.engine import qwen3next_tp
-            check(qwen3next_tp.PROJECTION_KEYS == arch.HP_KEYS, 'tp_shape: the registry keeps every header key the engine\'s projection reads')
+            check(set(qwen3next_tp.PROJECTION_KEYS) <= set(arch.HP_KEYS), 'tp_shape: the registry keeps every header key the engine\'s projection reads')
         check(arch.default_alias(q3n) == 'qwen3-coder-next', 'default_alias: a file outside the catalog answers to its architecture\'s id')
         check(len(opens) == 1, f'meta: one header read for of, tp_shape, default_alias ({len(opens)})')
         st = os.stat(q3n); os.utime(q3n, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
@@ -221,7 +221,7 @@ def main():
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
-                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP'},
+                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen35-own-9b': 'Dense35Own'},
               f'engine_class: every entry\'s engine imports ({names})')
         # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
         # engine served greedy requests without them and failed its first sampled one on the card)

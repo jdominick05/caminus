@@ -31,13 +31,21 @@ enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
 // walking every position: 26-31x the bandwidth floor at every depth, 64 ms of a token at 32K on the XTX) is not in these
 // modules; caminus.k3.Engine.attn_dec emits the pair on them. Not bitwise OP_ATTN_DEC (another summation order);
 // bitwise k3_gguf_q35d's pair on the same cache, and the same bits at T = 1 and T = 4.
+#ifdef K3_Q35_9B
+#define ATTN_G 4
+#define ATTN_VH 4
+#else
 #define ATTN_G 6
 #define ATTN_VH 6
+#endif
 #define K3_ATTN_COMB_FAST
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #include "k3_attn_split.h"
 #endif
 enum { OWN_Q5_K = 5 };   // (the GG_* number of the format, as OWN_Q6_K / OWN_Q4_K / OWN_Q8_0)
+#ifdef K3_Q35_F16_MTP
+#include "k3_q35_mtp_f16.h"
+#endif
 
 __device__ __forceinline__ float q35_silu(float x) { return x / (1.0f + expf(-x)); }
 
@@ -433,6 +441,9 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_DF_SELECT) { op_df_select(sg, t); return true; }
     if (sg.op == OP_KV_APPEND && sg.aux) { df_op_kv_append_ring(sg, t); return true; }
     if (sg.op == OP_ATTN_DEC && sg.pad2) { df_op_attn(sg, t); return true; }
+#endif
+#ifdef K3_Q35_F16_MTP
+    if (sg.op == OP_OWN_MVF16) { q35_op_mvf16(sg, t); return true; }
 #endif
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
