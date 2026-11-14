@@ -72,6 +72,8 @@ CLAUDE.md imports this file.
   a peer launch for every chained draft; count the copy, exported residuals, verify buffers and drafter windows before
   allocation. Its cache-facing target is the TP trunk, while its compute view holds the full head. Run the two-card
   feature gate and served off/MTP/DFlash identity checks in `docs/dev/testing.md` before offering or defaulting a drafter.
+  Ship both TP verify objects in `device/kernels.py`'s explicit runtime set: a development checkout can hide a missing
+  installed object. `tests/packaging/test_runtime_kernels.py` gates the real verify constructor's module selections.
   `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
