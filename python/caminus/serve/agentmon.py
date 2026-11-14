@@ -22,20 +22,28 @@ FENCE = '```'
 TOOL_OPEN, TOOL_CLOSE = '<tool_call>', '</tool_call>'
 FN_OPEN = '<function='
 THINK_END = '</think>'
+THINK_OPEN = '<think>'
+_MARKERS = (TOOL_OPEN, TOOL_CLOSE, FN_OPEN, FENCE)
+_MARKER_RE = re.compile('|'.join(re.escape(m) for m in _MARKERS))
+_MARKER_PREFIXES = frozenset(m[:n] for m in _MARKERS for n in range(1, len(m)))
 
 
 class ContentClass:
     """the class of the text being generated (see the module docstring); feed(text) after each pass"""
-    __slots__ = ('in_call', 'shell_call', 'fn_pending', 'in_fence', 'fence_lang', 'lang_pending', 'tail')
+    __slots__ = ('in_call', 'shell_call', 'fn_pending', 'fn_long', 'in_fence', 'fence_lang', 'lang_pending', 'lang_long', 'tail')
+    MAX_FN, MAX_LANG = 128, 64
+    MAX_TAIL = max(map(len, _MARKERS)) - 1
 
     def __init__(self):
         self.in_call = False
         self.shell_call = False
         self.fn_pending = None      # the text after '<function=' while its '>' has not arrived
+        self.fn_long = False
         self.in_fence = False
         self.fence_lang = ''
         self.lang_pending = None    # the text after an opening fence while its newline has not arrived
-        self.tail = ''              # the last characters of the previous piece (a fence split across pieces)
+        self.lang_long = False
+        self.tail = ''              # only a proper marker prefix, at most MAX_TAIL characters
 
     @property
     def cls(self):
@@ -49,74 +57,57 @@ class ContentClass:
         if not text:
             return self.cls
         s = self.tail + text
-        start = len(self.tail)
-        if self.fn_pending is not None:
-            buf = self.fn_pending + text
-            j = buf.find('>')
-            if j >= 0:
-                self.shell_call = buf[:j].strip().lower() in SHELL_TOOLS
-                self.fn_pending = None
-            elif len(buf) > 128:
-                self.fn_pending = None
-            else:
-                self.fn_pending = buf
-        if self.lang_pending is not None:
-            buf = self.lang_pending + text
-            j = buf.find('\n')
-            if j >= 0:
-                self.fence_lang = buf[:j].strip().lower()
-                self.lang_pending = None
-            elif len(buf) > 64:
-                self.fence_lang, self.lang_pending = buf.strip().lower()[:32], None
-            else:
-                self.lang_pending = buf
-        if '<' in text or '`' in s:
-            self._scan(s, start)
-        self.tail = s[-2:]
+        self.tail = ''
+        # Hold only a marker prefix, never re-scan a completed marker. This
+        # handles tool/function tags split anywhere, as well as split fences.
+        start = 0
+        for hit in _MARKER_RE.finditer(s):
+            self._plain(s[start:hit.start()])
+            self._marker(hit.group())
+            start = hit.end()
+        rest = s[start:]
+        for n in range(min(len(rest), self.MAX_TAIL), 0, -1):
+            if rest[-n:] in _MARKER_PREFIXES:
+                self.tail, rest = rest[-n:], rest[:-n]
+                break
+        self._plain(rest)
         return self.cls
 
-    def _scan(self, s, start):
-        """markers whose last character lies in the new text (s[start:])"""
-        i = 0
-        while True:
-            hits = []
-            for m in (TOOL_OPEN, TOOL_CLOSE, FN_OPEN, FENCE):
-                p = s.find(m, i)
-                while p != -1 and p + len(m) <= start:   # wholly in the carried tail: seen before
-                    p = s.find(m, p + 1)
-                if p != -1:
-                    hits.append((p, m))
-            if not hits:
-                return
-            p, m = min(hits)
-            i = p + len(m)
-            if m == TOOL_OPEN:
-                self.in_call, self.shell_call = True, False
-            elif m == TOOL_CLOSE:
-                self.in_call = self.shell_call = False
+    def _plain(self, text):
+        """Finish a bounded function name or fence language between markers."""
+        if self.fn_pending is not None:
+            j = text.find('>')
+            part = text if j < 0 else text[:j]
+            self.fn_long |= len(self.fn_pending) + len(part) > self.MAX_FN
+            self.fn_pending = (self.fn_pending + part[:self.MAX_FN])[:self.MAX_FN]
+            if j >= 0:
+                self.shell_call = not self.fn_long and self.fn_pending.strip().lower() in SHELL_TOOLS
                 self.fn_pending = None
-            elif m == FN_OPEN:
-                if self.in_call:
-                    rest = s[i:]
-                    j = rest.find('>')
-                    if j >= 0:
-                        self.shell_call = rest[:j].strip().lower() in SHELL_TOOLS
-                        self.fn_pending = None
-                    else:
-                        self.fn_pending = rest
-                        return
-            elif not self.in_call:      # a fence outside a tool call
-                if self.in_fence:
-                    self.in_fence, self.fence_lang, self.lang_pending = False, '', None
-                else:
-                    self.in_fence = True
-                    rest = s[i:]
-                    j = rest.find('\n')
-                    if j >= 0:
-                        self.fence_lang, self.lang_pending = rest[:j].strip().lower(), None
-                    else:
-                        self.fence_lang, self.lang_pending = '', rest
-                        return
+        if self.lang_pending is not None:
+            j = text.find('\n')
+            part = text if j < 0 else text[:j]
+            self.lang_long |= len(self.lang_pending) + len(part) > self.MAX_LANG
+            self.lang_pending = (self.lang_pending + part[:self.MAX_LANG])[:self.MAX_LANG]
+            if j >= 0:
+                self.fence_lang = '' if self.lang_long else self.lang_pending.strip().lower()
+                self.lang_pending = None
+
+    def _marker(self, marker):
+        if marker == TOOL_OPEN:
+            self.in_call, self.shell_call = True, False
+            self.fn_pending = None
+        elif marker == TOOL_CLOSE:
+            self.in_call = self.shell_call = False
+            self.fn_pending = None
+        elif marker == FN_OPEN:
+            if self.in_call:
+                self.fn_pending, self.fn_long = '', False
+        elif not self.in_call:      # a fence outside a tool call
+            if self.in_fence:
+                self.in_fence, self.fence_lang, self.lang_pending = False, '', None
+            else:
+                self.in_fence = True
+                self.fence_lang, self.lang_pending, self.lang_long = '', '', False
 
 
 # ------------------------------------------------------------------------------------------------ harnesses
@@ -249,8 +240,9 @@ class AnswerLoopGuard:
     MIN_LINE = 24
     MAX_LINE = 4096
 
-    def __init__(self, thinking):
+    def __init__(self, thinking, think_open=True):
         self.thinking = bool(thinking)
+        self.open_pending = '' if thinking and not think_open else None
         self.tail = ''
         self.buf = ''
         self.discard = False
@@ -287,14 +279,25 @@ class AnswerLoopGuard:
         self.max_repeat = max(self.max_repeat, self.run)
 
     def feed(self, text):
+        if self.open_pending is not None:
+            s = (self.open_pending + text).lstrip(' \t\n\v\f\r')
+            if THINK_OPEN.startswith(s) and len(s) < len(THINK_OPEN):
+                self.open_pending = s
+                return False
+            self.open_pending = None
+            if s.startswith(THINK_OPEN):
+                text = s[len(THINK_OPEN):]
+            else:
+                self.thinking, text = False, s
         if self.thinking:
             s = self.tail + text
-            end = s.find(THINK_END)
-            if end < 0:
-                self.tail = s[-(len(THINK_END) - 1):]
+            ends = [(p, marker) for marker in (THINK_END, TOOL_OPEN) if (p := s.find(marker)) >= 0]
+            if not ends:
+                self.tail = s[-(max(len(THINK_END), len(TOOL_OPEN)) - 1):]
                 return False
+            end, marker = min(ends)
             self.thinking, self.tail = False, ''
-            text = s[end + len(THINK_END):]
+            text = s[end + len(marker):] if marker == THINK_END else s[end:]
         for part in text.splitlines(keepends=True):
             complete = part.endswith('\n')
             if self.discard:
@@ -315,6 +318,10 @@ class AnswerLoopGuard:
         return self.flagged
 
     def finish(self):
+        if self.open_pending is not None:
+            self.thinking = False
+            pending, self.open_pending = self.open_pending, None
+            self.feed(pending)
         if not self.thinking and not self.discard and self.buf:
             self._line(self.buf)
         self.buf, self.tail = '', ''
