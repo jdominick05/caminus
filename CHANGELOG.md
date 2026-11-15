@@ -26,9 +26,8 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
-- **Speculative decoding for both dense 27B models, served.** Two opt-in drafters on one card, both on Caminus's own
-  code; the output is identical to `--draft off` token for token (greedy; sampled requests run plain). The default stays
-  off. Served decode, `caminus serve`, short prompts (code / prose / shell):
+- **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
+  code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
   - `--draft mtp` drafts 3 tokens with the model's own multi-token-prediction layer and verifies 4 tokens a pass; it
     needs no extra file. Swift 1.5 on an XTX: 91 / 96 / 74 tok/s against 43 plain. ThinkingCap on an XT: 68 / 74 / 53
     against 40.
@@ -37,6 +36,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
     67). ThinkingCap on an XT: 76 / 77 / 61 (llama.cpp: 71 / 75 / 48). The drafter's memory leaves Swift about 12-16K
     tokens of context on a 24 GB card (it starts from 8K); `--draft mtp` keeps the full context.
   See [benchmarks](docs/dev/benchmarks.md).
+- **The plain Qwen3.8 27B on Caminus's own code.** `caminus pull qwen3.8-27b` serves ISTA-DASLab's GSQ-RCO IQ3_S file
+  (Apache-2.0) on one card of either size: 55 tok/s decode on an XTX at short context, about 800 tok/s reading a 2K
+  prompt on an XT. `--draft dflash` and `--draft mtp` give the same output as plain decoding, at about 1.2-1.4x and
+  1.1-1.3x served on an XTX. Five new matrix formats (IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K) have their own decode
+  tiles, prefill GEMMs and T-token verify tiles. See [models](docs/models.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the
@@ -63,10 +67,17 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Changed
 
-- **Qwen3.6 and Qwen3-Coder-Next are paused for this release.** They aren't measured on the current code, so the panel
-  and `caminus models` no longer list them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the
-  reason. The brain / hands team (AREX-2 + Qwen3.6) is paused with them. This release ships the Qwen3.8 Coder, AREX-2,
-  Swift 1.5, ThinkingCap and Qwen3-30B-A3B. `CAMINUS_ALLOW_PAUSED=1` still serves the paused models, unmeasured.
+- **DFlash2 drafting is on by default for the three dense 27B models on one card.** `swift-1.5`, `thinkingcap` and
+  `qwen3.8-27b` serve with `--draft dflash` when the shared 2 GB drafter file is there (`caminus pull` fetches it)
+  and 32,768 tokens of context still fit with it, with the same output as plain decoding: about 1.1-1.4x on 10K and
+  34K-token prompts and up to 2.2x on short ones. Swift 1.5 on a 24 GB card keeps plain decoding by default (the
+  drafter would leave it about 12-16K tokens, too few for a coding harness); `--draft dflash` runs it anyway. Two
+  cards serve plain until two-card drafting is built.
+- **Qwen3.6, Qwen3-Coder-Next and AREX-2 are paused for this release.** The panel and `caminus models` no longer list
+  them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the reason. Qwen3.6 and Qwen3-Coder-Next
+  aren't measured on the current code; AREX-2 is outside this release's model set. The brain / hands team (AREX-2 +
+  Qwen3.6) is paused with them. This release ships the Qwen3.8 Coder, Swift 1.5, ThinkingCap and Qwen3-30B-A3B, and the
+  plain Qwen3.8-27B once its drafting is built. `CAMINUS_ALLOW_PAUSED=1` still serves the paused models, unmeasured.
 
 ### Fixed
 

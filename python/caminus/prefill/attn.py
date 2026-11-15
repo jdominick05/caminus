@@ -34,7 +34,7 @@ import torch
 from ..device.hip import Module
 from ..device.bufcheck import ALIGN, LaunchCheck, aligned, view_bytes   # noqa: F401  (ALIGN: attn.ALIGN, the layout's block)
 
-F32, I32, U8 = torch.float32, torch.int32, torch.uint8
+F32, F16, I32, U8 = torch.float32, torch.float16, torch.int32, torch.uint8
 _check = LaunchCheck('prefill_attn', align=4)   # every launch: each buffer stated once (fp32 / int32 pointers 4-byte aligned by default)
 ATTN_SS, ATTN_G, ATTN_D, ATTN_RS = 32, 12, 256, 260        # = kernels/prefill_attn.hip / k3_attn_split.h
 ATTN_G_OF = {'prefill_attn': 12, 'prefill_attn_q35': 8, 'prefill_attn_q35d': 6}    # query heads per kv head of each code object (prefill_attn_q35.hip)
@@ -127,11 +127,12 @@ class AttnWorkspace:
 
 class Attn:
     """the prefill_attn kernels on one device (every launch with that device current, on its current stream)"""
-    def __init__(self, device, module=None, name='prefill_attn'):
+    def __init__(self, device, module=None, name='prefill_attn', module16=None):
         """module: an already loaded prefill_attn Module (the Coder's callers), else the code object `name`: prefill_attn
         (12 query heads per kv head, the Coder) or prefill_attn_q35 (8: qwen35moe, caminus.prefill.q35; attend_full only)"""
         if name not in ATTN_G_OF: raise ValueError(f'Attn: name {name!r} ({sorted(ATTN_G_OF)})')
         self.dev = torch.device(device); self.name, self.G = name, ATTN_G_OF[name]
+        self.m16 = module16   # loaded only for an F16 target cache; the QSA indexer keeps the original Q8 module
         if module is not None: self.m = module
         else:
             with torch.cuda.device(self.dev): self.m = Module(name)
@@ -146,10 +147,28 @@ class Attn:
             raise k3.ContextBoundsError(f'{what}: positions {pos0} .. {pos0 + T - 1} reach {qsa_exact()}: dense attention equals the '
                                         f"model's QSA only below {qsa_exact()} positions (the QSA prompt path, S7)")
 
-    def _go(self, fn, grid, *args):
+    def prepare_f16(self):
+        """Load the target-cache variant before graph capture; keep QSA indexer kernels on self.m."""
+        if self.G != ATTN_G: raise ValueError('F16 prefill split attention requires the Coder GQA geometry')
+        if self.m16 is None:
+            with torch.cuda.device(self.dev): self.m16 = Module('prefill_attn_f16')
+        return self.m16
+
+    def _go(self, fn, grid, *args, cache_f16=False):
         g = tuple(int(x) for x in grid) if isinstance(grid, tuple) else (int(grid),)
         with torch.cuda.device(self.dev):
-            getattr(self.m, fn)(g, (256,), *args)
+            m = self.prepare_f16() if cache_f16 else self.m
+            getattr(m, fn)(g, (256,), *args)
+
+    def _cache(self, cache, M, q8, what):
+        """The cache's explicit wire format, before any module load or launch; indexer callers default to Q8."""
+        from ..engine import k3
+        if not isinstance(q8, bool): raise ValueError(f'{what}: q8 must be a bool')
+        if not q8 and self.G != ATTN_G: raise ValueError(f'{what}: F16 cache requires the Coder GQA geometry')
+        pb, dt = k3.kv_pos_bytes(M, q8), U8 if q8 else F16
+        if cache.dtype != dt or view_bytes(cache) % pb:
+            raise ValueError(f'{what}: the cache must be {dt} rows of {pb} B')
+        return view_bytes(cache) // pb, pb, dt
 
     def qk_nr(self, x, head_stride, heads, D, w, n_rot, theta_scale, eps, pos0, out, T):
         """out [T, heads, D] = RoPE(rms_norm(x head) * w) per (row, head) at position pos0 + row (OP_QK_NR); x [T, heads]
@@ -169,39 +188,36 @@ class Attn:
         _check(self.dev, 'hadamard', dict(x=(x, F32, C * n)), ('x',))
         self._go('pf_hadamard', (C + rpb - 1) // rpb, x, ctypes.c_int(C), ctypes.c_int(n), ctypes.c_int(rpb))
 
-    def kv_append(self, k, ldk, v, ldv, M, cache, pos0, T, err):
-        """cache rows pos0 .. pos0 + T - 1 = q8_0 [K | V] of the T rows of k / v (M values each, row strides ldk / ldv); any
-        rows inside the cache (the KV and IDXRAW rows of QSA positions too: S7)"""
+    def kv_append(self, k, ldk, v, ldv, M, cache, pos0, T, err, q8=True):
+        """cache rows = Q8_0 (default) or F16 [K | V] of k/v. Indexer rows always use the default Q8 format."""
         from ..engine import k3
         M, T, ldk, ldv = int(M), int(T), int(ldk), int(ldv)
         if M < 32 or M % 32 or T < 1 or ldk < M or ldv < M: raise ValueError(f'kv_append: M {M}, T {T}, ldk {ldk}, ldv {ldv}')
-        pb = 2 * (M // 32) * 34
-        if cache.dtype != torch.uint8 or (view_bytes(cache) % pb): raise ValueError(f'kv_append: the cache must be uint8 rows of {pb} B')
-        rows = view_bytes(cache) // pb
+        rows, pb, dt = self._cache(cache, M, q8, 'kv_append')
         k3.check_span(int(pos0), T, rows, what='prefill kv_append')
         nk, nv = (T - 1) * ldk + M, (T - 1) * ldv + M
-        _check(self.dev, 'kv_append', dict(k=(k, F32, nk), v=(v, F32, nv), cache=(cache, U8, rows * pb, 1), err=(err, I32, 1)), ('cache', 'err'))
+        _check(self.dev, 'kv_append', dict(k=(k, F32, nk), v=(v, F32, nv), cache=(cache, dt, rows * pb // (1 if q8 else 2), 1 if q8 else 2),
+                                         err=(err, I32, 1)), ('cache', 'err'))
         self._go('pf_kv_append', T, k, ctypes.c_int(ldk), v, ctypes.c_int(ldv), ctypes.c_int(M), cache, ctypes.c_int(int(pos0)),
-                 ctypes.c_int(rows), err)
+                 ctypes.c_int(rows), err, cache_f16=not q8)
 
-    def attend(self, q, cache, pos0, T, nkv, scale, out, rec, err, rows_per_block=ROWS_PER_BLOCK, sel=None):
-        """out [T, nkv * 12, 256] = attention of rows pos0 .. pos0 + T - 1 over the q8_0 cache: sel None, dense over the cells
+    def attend(self, q, cache, pos0, T, nkv, scale, out, rec, err, rows_per_block=ROWS_PER_BLOCK, sel=None, q8=True):
+        """out [T, nkv * 12, 256] = attention of rows pos0 .. pos0 + T - 1 over the selected Q8/F16 cache: sel None, dense over the cells
         0 .. pos (the split pair over the identity list, OP_ATTN_PART / OP_ATTN_COMB; positions below QSA_EXACT only); sel
         int32 [T, QSA_SELW] (qsa_select's rows), each row over its selected pools' cells then its tail (the split pair with
         Seg.gs = SEL; any position inside the cache: a list is at most QSA_EXACT cells). rows_per_block rows per launch pair
         (rec: one block's records [rows_per_block, heads, max_splits(), 260])"""
         T, nkv, R = int(T), int(nkv), int(rows_per_block)
-        heads = nkv * ATTN_G; pb = 2 * (nkv * ATTN_D // 32) * 34
+        heads = nkv * ATTN_G
         if T < 1 or nkv < 1 or R < 1: raise ValueError(f'attend: T {T}, nkv {nkv}, rows_per_block {R}')
-        if cache.dtype != torch.uint8 or view_bytes(cache) % pb: raise ValueError(f'attend: the cache must be uint8 rows of {pb} B')
-        rows = view_bytes(cache) // pb
+        rows, pb, dt = self._cache(cache, nkv * ATTN_D, q8, 'attend')
         if sel is None: self._pos(pos0, T, rows, 'prefill attention')
         else:
             from ..engine import k3
             k3.check_span(int(pos0), T, rows, what='prefill attention (QSA rows)')
         NSM = max_splits(); nrec = R * heads * NSM * ATTN_RS
         _check(self.dev, 'attend', dict(sel=(sel, I32, T * QSA_SELW), q=(q, F32, T * heads * ATTN_D, 16), out=(out, F32, T * heads * ATTN_D),
-                                        rec=(rec, F32, nrec), cache=(cache, U8, rows * pb, 1), err=(err, I32, 1)),
+                                        rec=(rec, F32, nrec), cache=(cache, dt, rows * pb // (1 if q8 else 2), 1 if q8 else 16), err=(err, I32, 1)),
                ('rec', 'out', 'err'), opt=('sel',))
         for b0 in range(0, T, R):
             Rb = min(R, T - b0); p_first = int(pos0) + b0
@@ -211,14 +227,15 @@ class Attn:
             qb = q.view(-1)[b0 * heads * ATTN_D:]; ob = out.view(-1)[b0 * heads * ATTN_D:]
             if sel is None:
                 self._go('pf_attn_part', NS * Rb * nkv, qb, cache, ctypes.c_int(p_first), ctypes.c_int(Rb), ctypes.c_int(nkv), ctypes.c_int(NS),
-                         ctypes.c_float(scale), ctypes.c_int(rows), rec, err)
-                self._go('pf_attn_comb', Rb * heads, rec, ctypes.c_int(p_first), ctypes.c_int(heads), ctypes.c_int(NS), ctypes.c_int(rows), ob)
+                         ctypes.c_float(scale), ctypes.c_int(rows), rec, err, cache_f16=not q8)
+                self._go('pf_attn_comb', Rb * heads, rec, ctypes.c_int(p_first), ctypes.c_int(heads), ctypes.c_int(NS), ctypes.c_int(rows), ob,
+                         cache_f16=not q8)
             else:
                 sb = sel.view(-1)[b0 * QSA_SELW:]
                 self._go('pf_attn_part_sel', NS * Rb * nkv, qb, cache, ctypes.c_int(p_first), ctypes.c_int(Rb), ctypes.c_int(nkv),
-                         ctypes.c_int(NS), ctypes.c_float(scale), ctypes.c_int(rows), rec, err, sb)
+                         ctypes.c_int(NS), ctypes.c_float(scale), ctypes.c_int(rows), rec, err, sb, cache_f16=not q8)
                 self._go('pf_attn_comb_sel', Rb * heads, rec, ctypes.c_int(p_first), ctypes.c_int(heads), ctypes.c_int(NS), ctypes.c_int(rows),
-                         ob, sb)
+                         ob, sb, cache_f16=not q8)
 
     def attend_full(self, q, cache, pos0, T, nkv, scale, out, rec, err, max_rows=ROWS_PER_BLOCK):
         """out [T, nkv * G, 256] = dense attention of rows pos0 .. pos0 + T - 1 over the cells 0 .. pos of the q8_0 cache, at

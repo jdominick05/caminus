@@ -49,7 +49,7 @@ possible: `./build.sh` in a checkout, then `CAMINUS_KERNEL_DIR=<dir>`.
 | Retained legacy decode | `k3_gguf_q35h`, `k3_gguf_q35g`, `k3_gguf_q35d`, `k3_gguf_q3n` |
 | Batched prefill | `prefill_attn`, `prefill_feed`, `prefill_gdn`, `prefill_glue`, `prefill_tp`, `prefill_dense_q6_k`, `prefill_mmq_*` (13 including glue/glue8), `prefill_moe_*` (7), `gemm` (the WMMA BF16 GEMMs); `prefill_glue_q35`, `prefill_glue_q35d`, `prefill_gdn_q35`, `prefill_attn_q35`, `prefill_attn_q35d` |
 | Own Qwen3 | `k3_q3m_lean`, `k3_q3m_iq`, `k3_q3m_rs4`, `k3_q3m_rs2`, `q3m_prefill`, `q3m_prefill_iq` (the file's formats select decode and prefill; a row-scale head can use the regular prefill) |
-| Own dense 27B | `k3_q35_swift`, `k3_q35_tcap`, their `_tp`, `_ver` and `_mtp` objects; `k3_q35_dflash`, `k3_q35_tcap_dflash`; `q35_prefill`, `q35_prefill_tcap`. The paused plain file also needs `k3_q35_gsq`, `q35_prefill_gsq`; shipping them does not unpause it |
+| Own dense 27B | `k3_q35_swift`, `k3_q35_tcap`, their `_tp`, `_ver` and `_mtp` objects; `k3_q35_dflash`, `k3_q35_tcap_dflash`; `q35_prefill`, `q35_prefill_tcap`. The paused plain file also needs `k3_q35_gsq`, `q35_prefill_gsq`, `k3_q35_gsq_ver`, `k3_q35_gsq_ver_m`, `k3_q35_gsq_mtp` and `k3_q35_gsq_dflash`; shipping them does not unpause it |
 | Sampler | `own_topk` (device candidate selection) |
 | Toolchain check | `smoke` (`caminus doctor --gpu` launches its saxpy once per card) |
 

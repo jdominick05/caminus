@@ -38,6 +38,12 @@ CH = 64
 GRIDS = (3, 6, 7)
 extra = sum(Dense35Verify.need_mib(T, max_ctx=max_ctx) for T in range(1, MAX_T + 1)) + len(GRIDS) * Dense35Verify.need_mib(MAX_T, max_ctx=max_ctx)
 eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=extra + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
+# the grids the verify module's LDS keeps resident (k3.resident_grid refuses the others: the GSQ verify module's 22.8 KB a
+# workgroup fits 5 per WGP); the GSQ files' passes are three launches (their IQ1_M matrix on k3_q35_gsq_ver_m)
+VMOD = k3.Q35RV_MODULES[0] if eng.module in k3.Q35R_MODULES else 'k3_q35_tcap_ver' if eng.tcap else 'k3_q35_swift_ver'
+LDS_CAP = k3.WGP_LDS // max(k3._m(m).k3_run.lds_bytes() for m in (VMOD,) + (k3.Q35RVM_MODULES if eng.module in k3.Q35R_MODULES else ()))
+GRIDS = tuple(g for g in GRIDS if g <= LDS_CAP)
+print(f'verify module {VMOD}: grids {GRIDS} (LDS: at most {LDS_CAP} per WGP)', flush=True)
 pf = Q35OwnPrefill(eng, chunk=CH, crossover=0)
 vers = {T: Dense35Verify(eng, T) for T in range(1, MAX_T + 1)}
 alt = {w: Dense35Verify(eng, MAX_T, per_wgp=w) for w in GRIDS}

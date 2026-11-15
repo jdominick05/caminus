@@ -85,8 +85,9 @@ class Mtp35:
         """eng: a Dense35Own (its card, max_ctx, head and embedding): Swift 1.5 (block Q4_0, head Q6_K, embedding Q4_K:
         k3_q35_swift_mtp) or ThinkingCap (block Q6_K, head Q8_0, embedding IQ2_S: k3_q35_tcap_mtp); k: drafts per round
         (1 .. 4)"""
-        if module is None: module = MODULE_TCAP if eng.tcap else MODULE
-        line = k3.Q35TM_MODULES if eng.tcap else k3.Q35M_MODULES
+        gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: block Q6_K, head Q4_K, embedding IQ2_S)
+        if module is None: module = k3.Q35RM_MODULES[0] if gsq else MODULE_TCAP if eng.tcap else MODULE
+        line = (k3.Q35RM_MODULES if gsq else tuple(m for m in k3.Q35TM_MODULES if m not in k3.Q35RM_MODULES)) if eng.tcap else k3.Q35M_MODULES
         if module not in line: raise ValueError(f'Mtp35: module {module!r} is not the engine\'s line\'s drafter module {line}')
         if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 4: raise ValueError(f'Mtp35: k {k!r}: 1 .. 4')
         self.il = block_of(eng.F)
@@ -95,7 +96,7 @@ class Mtp35:
             t = eng.F.T[f'blk.{self.il}.{n}.weight']
             want = 'Q6_K' if eng.tcap else 'Q4_0'
             if t.type != want: raise ValueError(f'Mtp35: blk.{self.il}.{n} is {t.type} (the drafter module {module} runs {want})')
-        want = 'Q8_0' if eng.tcap else 'Q6_K'
+        want = 'Q4_K' if gsq else 'Q8_0' if eng.tcap else 'Q6_K'
         if eng.head['fmt'] != want: raise ValueError(f"Mtp35: the head is {eng.head['fmt']} (the drafter module {module} runs {want})")
         self.eng, self.k, self.module = eng, int(k), module
         self.mib = self.need_mib(eng, self.k)

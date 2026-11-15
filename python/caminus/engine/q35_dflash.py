@@ -113,10 +113,12 @@ class Dflash35:
     def __init__(self, path, eng, vram_check=True, per_wgp=None, chunk=0):
         """eng: the target Dense35Own, whose head and embedding the drafter reads in place: Swift 1.5 (Q6_K head, Q4_K
         embedding: kernels/k3_q35_dflash.hip) or ThinkingCap (Q8_0 head, IQ2_S embedding: kernels/k3_q35_tcap_dflash.hip)"""
-        want = ('Q8_0', 'IQ2_S') if eng.tcap else ('Q6_K', 'Q4_K')
+        gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: Q4_K head, IQ2_S embedding)
+        want = ('Q4_K', 'IQ2_S') if gsq else ('Q8_0', 'IQ2_S') if eng.tcap else ('Q6_K', 'Q4_K')
         if (eng.head['fmt'], eng.emb.type) != want:
-            raise ValueError(f'Dflash35: head {eng.head["fmt"]}, embedding {eng.emb.type} (the {"ThinkingCap" if eng.tcap else "Swift"} line runs {want})')
-        self.module = MODULE_TCAP if eng.tcap else MODULE
+            line = 'GSQ' if gsq else 'ThinkingCap' if eng.tcap else 'Swift'
+            raise ValueError(f'Dflash35: head {eng.head["fmt"]}, embedding {eng.emb.type} (the {line} line runs {want})')
+        self.module = k3.Q35RDF_MODULES[0] if gsq else MODULE_TCAP if eng.tcap else MODULE
         self.F = F = ggufio.GGUFFile(path); self.eng = eng
         m = F.meta; hp = lambda k: m[f'dflash.{k}']
         self.nl, self.D, self.ffn = int(hp('block_count')), int(hp('embedding_length')), int(hp('feed_forward_length'))
@@ -235,8 +237,8 @@ class Dflash35:
             f_ = self._mv(E, d['fd'], s['a16'], s['blk'], sw)
             prev = df_conv(E, s['blk'], s['dyn'], d['cf_base'], s['x'], D, 1, self.ks, self.gs, res=s['x'], dep=f_)
         nf = E.own_add_rms16(s['x'], self.out_norm, s['h'], s['h16'], self.eps, dep=prev, tokens=T)
-        if eng.head['fmt'] == 'Q6_K':   # (Swift: the planes' one-round-trip tile; ThinkingCap's Q8_0: the rows tile)
-            hd_ = E.own_matvec_1rt(eng.head['w'], 'Q6_K', V, D, s['h16'], s['logits'], rows_per_task=eng.rpt, dep=nf, tokens=T,
+        if eng.head['fmt'] in ('Q6_K', 'Q4_K'):   # (Swift's Q6_K / the GSQ files' Q4_K: one-round-trip T-token tiles; ThinkingCap's Q8_0: the rows tile)
+            hd_ = E.own_matvec_1rt(eng.head['w'], eng.head['fmt'], V, D, s['h16'], s['logits'], rows_per_task=eng.rpt, dep=nf, tokens=T,
                                    x_stride=D, out_stride=V)
         else:
             hd_ = E.own_matvec16(eng.head['w'], 'Q8_0', V, D, s['h16'], s['logits'], rows_per_task=eng.rpt16, dep=nf, tokens=T)

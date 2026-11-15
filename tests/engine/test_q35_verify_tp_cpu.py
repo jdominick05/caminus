@@ -14,6 +14,8 @@ and HIP calls (every tensor in host memory; nothing is launched):
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q35_verify_tp_cpu.py --scratch DIR"""
 import argparse, contextlib, os, sys, types
+os.environ.setdefault('CAMINUS_H2D', 'pageable')   # (CPU stand-ins: the tapes are under test here, not the uploads; the
+                                                 #  pinned default needs a GPU: tests/engine/test_q35_upload_cpu.py covers it)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
 import numpy as np

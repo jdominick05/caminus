@@ -207,6 +207,36 @@ class Arch:
         engine's own check counts (the Coder: FlashNextTP(vram_drafters=...)), and its gate includes max_ctx auto with it."""
         return [0.0 for _ in devs]
 
+    def context_fit(self, opt, cards=None):
+        """One allocation recipe and room calculation for placement, auto and picker reports.
+
+        Explicit host cards use metadata/sysfs only, before HIP starts. Runtime
+        callers omit cards and read capacity's actual guard caps and usage.
+        """
+        from .device import capacity
+        from .device.context_fit import ContextFit
+        n_ctx, devs, slot, need = self.auto_need(opt, int(opt.get('auto_cache_slots', 4)), cards=cards)
+        extra = self.extras_mib(opt, devs, cards=cards)
+        if cards is None:
+            caps, reserve = capacity.caps_mib(devs), capacity.cache_reserve_mib(devs)
+        else:
+            # caps_mib already subtracts the allocator margin from the guard
+            # line. Placement must do the same before its cache/display reserve.
+            caps = []
+            for c in cards:
+                used = _read_int(os.path.join(c['dev'], 'mem_info_vram_used'))
+                if used is None or used < 0:
+                    from .device.host import PlacementError
+                    raise PlacementError(f'cannot read valid current VRAM usage for {c.get("pci") or c["dev"]}')
+                caps.append((c['line_mib'] - capacity.MARGIN_MIB, used / 2 ** 20))
+            reserve = [capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB for c in cards]
+        if not (len(devs) == len(caps) == len(reserve) == len(extra)):
+            raise ValueError('context fit: card, projection and reserve counts differ')
+        slack = self.slack_mib(opt, cards)
+        room = [cap - used - res - capacity.CACHE_WORK_MIB[0] - slack - ex
+                for (cap, used), res, ex in zip(caps, reserve, extra)]
+        return ContextFit(n_ctx, devs, slot, room, need, AUTO_STEP)
+
     def auto_max_ctx(self, opt, log=print):
         """--max-ctx auto (the default): the largest context the cards hold now, under the guard's line, together with a
         working prompt cache: its reserve (capacity.cache_reserve_mib + CACHE_WORK_MIB), its side slot's rows, its io / side
@@ -215,19 +245,16 @@ class Arch:
         the model's context_length; extras_mib (a drafter's VRAM) comes off the room first"""
         from .device import capacity
         slots = int(opt.get('auto_cache_slots', 4))
-        n_ctx, devs, slot, need = self.auto_need(opt, slots)
-        sl = self.slack_mib(opt)
-        room = [cap - used - res - capacity.CACHE_WORK_MIB[0] - sl - ex
-                for (cap, used), res, ex in zip(capacity.caps_mib(devs), capacity.cache_reserve_mib(devs), self.extras_mib(opt, devs))]
-        cands = sorted({min(c, n_ctx) for c in range(AUTO_STEP, n_ctx + AUTO_STEP, AUTO_STEP)}, reverse=True)
-        for c in cands:
-            n = need(c)
-            if all(n[i] <= room[i] for i in range(len(devs))):
-                log(f'caminus serve: max_ctx auto -> {c} (the model\'s {n_ctx}; room {" / ".join(f"{r:.0f}" for r in room)} MiB, '
-                    f'need {" / ".join(f"{v:.0f}" for v in n)} MiB with {slots} cache slots of ~{slot:.0f} MiB)', flush=True)
-                return c
-        raise capacity.CapacityError(f'max_ctx auto: not even {AUTO_STEP} positions fit (room {" / ".join(f"{r:.0f}" for r in room)} '
-                                     f'MiB, need {" / ".join(f"{v:.0f}" for v in need(AUTO_STEP))} MiB)')
+        plan = self.context_fit(opt)
+        c, room = plan.maximum(), plan.room_mib
+        if c is not None:
+            n = plan.need_mib(c)
+            log(f'caminus serve: max_ctx auto -> {c} (the model\'s {plan.native_ctx}; room {" / ".join(f"{r:.0f}" for r in room)} MiB, '
+                f'need {" / ".join(f"{v:.0f}" for v in n)} MiB with {slots} cache slots of ~{plan.slot_mib:.0f} MiB)', flush=True)
+            return c
+        lowest = min(AUTO_STEP, plan.native_ctx)
+        raise capacity.CapacityError(f'max_ctx auto: not even {lowest} positions fit (room {" / ".join(f"{r:.0f}" for r in room)} '
+                                     f'MiB, need {" / ".join(f"{v:.0f}" for v in plan.need_mib(lowest))} MiB)')
 
     def fits(self, opt, cards):
         """whether the model holds MIN_CTX positions (or its context_length, if smaller) with a working prompt cache on these
@@ -236,21 +263,14 @@ class Arch:
         host projection here (the Coder: its engine's own check decides)"""
         from .device import capacity
         try:
-            n_ctx, devs, slot, need = self.auto_need(opt, int(opt.get('auto_cache_slots', 4)), cards=cards)
+            plan = self.context_fit(opt, cards)
         except NotImplementedError:
             return True
         try:
             want = int(opt.get('max_ctx'))              # an explicit --max-ctx: that context; auto: the architecture's floor
         except (TypeError, ValueError):
             want = self.min_ctx(opt)
-        n = need(min(want, n_ctx))
-        for c, v, ex in zip(cards, n, self.extras_mib(opt, devs, cards=cards)):
-            used = _read_int(os.path.join(c['dev'], 'mem_info_vram_used'))
-            res = capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB
-            room = c['line_mib'] - (used >> 20 if used else 0) - res - capacity.CACHE_WORK_MIB[0] - self.slack_mib(opt, cards) - ex
-            if v > room:
-                return False
-        return True
+        return plan.fits(min(want, plan.native_ctx))
 
     def default_draft(self, opt):
         """the drafter kind a serve runs without --draft: the architecture's own when it needs no extra file choice (the
@@ -501,17 +521,18 @@ class Dense35(OneCard):
     DFLASH_MIN_CTX = 8192
 
     def min_ctx(self, opt):
-        return self.DFLASH_MIN_CTX if (opt.get('draft') or 'off') == 'dflash' else MIN_CTX
+        # (a default drafter kept by serve.cli.keep_default_draft carries its floor: placement keeps it too)
+        if (opt.get('draft') or 'off') == 'dflash': return opt.get('draft_floor') or self.DFLASH_MIN_CTX
+        return MIN_CTX
 
-    # the drafter a serve runs when --draft is not given, by cards (plan P7: the default follows the measured served tok/s
-    # per model x mode x depth; benchmarks.md has the table). Two cards: off until the two-card drafter is built
-    # the served default per (decode module, cards), from the served depth A/B (docs/dev/benchmarks.md); a module not listed
-    # (the plain Qwen3.8-27B's k3_q35_gsq: no drafter of its own yet) serves plain
-    # served A/B, one card, greedy, token-identical (benchmarks.md, #79; agent40k = a 40,885-token rendered agent
-    # session, code32k = 22,700 tokens): Swift on the XTX 47.4 vs 32.7 (1.45x) and 47.4 vs 36.9 (1.29x) tok/s,
-    # ThinkingCap on the XT 41.3 vs 29.9 (1.38x) and 42.6 vs 34.1 (1.25x) -> mtp by default on one card.
+    # the drafter a serve runs when --draft is not given, per (decode module, cards); a module not listed serves plain.
+    # One card: the DFlash2 drafter for all three files. Served A/B (docs/dev/benchmarks.md), greedy, every reply the
+    # plain reply token for token: short prompts Swift ~2.2x (XTX), ThinkingCap 1.5-1.9x (XT), the plain 27B 1.17-1.37x
+    # (XTX); public 10K / 34K prompts ThinkingCap 1.18x / 1.23x (XTX), the plain 27B 1.11x / 1.17x (XT), Swift 1.34x at
+    # 10K (XTX). The drafter's 2 GB comes out of the context (min_ctx: 8K floor). Without the drafter file, plain.
     # Two cards: off until two-card drafting exists (#80).
-    DRAFT_DEFAULT = {('k3_q35_swift', 1): 'mtp', ('k3_q35_tcap', 1): 'mtp', ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
+    DRAFT_DEFAULT = {('k3_q35_swift', 1): 'dflash', ('k3_q35_tcap', 1): 'dflash', ('k3_q35_gsq', 1): 'dflash',
+                     ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
 
     def default_draft(self, opt):
         from . import ggufio
@@ -705,7 +726,7 @@ CODER = ARCHS['qwen4exp']
 
 
 # architectures caminus serve refuses while their models are paused (caminus.models.PAUSED; CAMINUS_ALLOW_PAUSED=1 serves them)
-PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next'}
+PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next', 'qwen35': 'AREX-2'}
 
 
 def paused(A):

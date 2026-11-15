@@ -101,7 +101,8 @@ ALL = (
            'thinkingcap', '47 tok/s decode on an XTX, 39 on an XT (short context); prefill 942 tok/s at 2K (XTX)',
            'fits either card (an XT: ~53K context); --draft dflash: its base model\'s DFlash2 drafter (one card)'),
     _model('qwen3.8-27b', 'Qwen3.8 27B dense GSQ-RCO IQ3_S (own code end to end)', 'qwen35-own', ('qwen3.8-27b', 'dflash2-27b'),
-           'qwen3.8-27b', 'not measured yet', 'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
+           'qwen3.8-27b', '55 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
+           'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,493 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only'),
 )
@@ -112,7 +113,7 @@ PAUSED = {
     'qwen3.6': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3.6-hauhau': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3-coder-next': 'Qwen3-Coder-Next is paused: not in this release (it is not measured on the current code)',
-    'qwen3.8-27b': 'Qwen3.8-27B GSQ-RCO is not offered yet: it serves on one card, its drafting (MTP, DFlash2) is not built',
+    'arex-2': 'AREX-2 is paused: not in this release (the 0.3.0 set is the Coder, Qwen3-30B-A3B and the three Qwen3.8 27B models)',
 }
 
 

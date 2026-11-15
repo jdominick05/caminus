@@ -32,7 +32,7 @@ import torch
 
 from .. import ggufio
 from ..device import capacity
-from . import k3
+from . import k3, upload
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1m_records
 from .q3moe_one import card_per_wgp
 
@@ -168,6 +168,9 @@ class Dense35Own:
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
             raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
         self.dev, self.max_ctx, self.limit_us, self.spec_T = int(device), int(max_ctx), limit_us, int(spec_T)
+        # Rows in each KV cache: max_ctx plus the verify tail of spec_T - 1 rows.
+        # The prompt cache's checkpoint layout divides by this, not by max_ctx.
+        self.kv_rows = self.max_ctx + self.spec_T - 1
         self.module = module or module_of(F)
         self.tcap = self.module in k3.Q35T_MODULES
         # the formats whose matvecs run on the one-round-trip tiles (own_matvec_1rt); the others on own_matvec16
@@ -182,6 +185,8 @@ class Dense35Own:
             raise ValueError(f'Dense35Own: token_embd is {self.emb.type} on module {self.module}')
         # VRAM, checked against the card's cap before a byte is read (vram_extra_mib: what the caller adds right after)
         self.vram_mib = _projection_bytes(F, self.max_ctx, self.spec_T) / 2 ** 20 + 256
+        # (CAMINUS_H2D: how the weights reach the card, engine/upload.py; peer is refused on one card)
+        self.h2d = upload.Uploader([self.dev], upload.mode_of(), upload.UploadLog.from_env(), what=f'Dense35Own {os.path.basename(path)}')
         if vram_check:
             capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
                            f'Dense35Own {os.path.basename(path)} (max_ctx {self.max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
@@ -206,7 +211,7 @@ class Dense35Own:
         self.gdn_keys = self.moe_blocks = 0; self.vocab_share = 1.0
         self._during = None
         self.model_tag = 'qwen35'
-        with torch.cuda.device(self.dev): self._load(); self._build_tape()
+        with torch.cuda.device(self.dev): self._load_logged(); self._build_tape()
 
     @staticmethod
     def projection_mib(path, max_ctx, spec_T=1):
@@ -245,7 +250,7 @@ class Dense35Own:
         if (rows is not None and R != rows) or (cols is not None and K != cols):
             raise ValueError(f'Dense35Own: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
         fmt, b = self._w_host(name)
-        return dict(name=name, fmt=fmt, rows=R, K=K, w=torch.from_numpy(b).to('cuda'))
+        return dict(name=name, fmt=fmt, rows=R, K=K, w=self.h2d.up(b, name, 0, 'mat'))
 
     def _w_host(self, name):
         """(format the tile reads, the bytes _w uploads: a host array in that layout)"""
@@ -266,7 +271,7 @@ class Dense35Own:
     def _f32(self, name, n):
         t = self.F.T[name]
         if t.type != 'F32' or t.n_values != n: raise ValueError(f'Dense35Own: {name} is {t.type} {list(t.shape)}, the tape needs F32 [{n}]')
-        return torch.from_numpy(t.pread(0, t.n_bytes).view(np.float32)).to('cuda')
+        return self.h2d.up(t.pread(0, t.n_bytes).view(np.float32), name, 0, 'vec')
 
     def _load(self):
         D, hd, nh, nkv, S, NK, NV, ffn = self.D, self.hd, self.nh, self.nkv, self.S, self.NK, self.NV, self.ffn
@@ -294,8 +299,16 @@ class Dense35Own:
             self.L.append(d)
         self.out_norm = self._f32('output_norm.weight', D)
         self.head = self._w('output.weight', self.vocab, D)
-        self.emb_dev = torch.from_numpy(self.emb.pread(0, self.emb.n_bytes)).to('cuda')
+        self.emb_dev = self.h2d.up(self.emb.pread(0, self.emb.n_bytes), 'token_embd.weight', 0, 'emb')
         self.wsum0 = self.weight_sums()   # (the weights as uploaded: mark_broken compares against these)
+
+    def _load_logged(self):
+        """_load in the upload log's frame (engine/upload.py; Dense35TP._load_logged)"""
+        self.h2d.begin('Dense35Own', self.path)
+        try: self._load()
+        except BaseException as e:
+            self.h2d.failed(e); raise
+        self.h2d.finish()
 
     # -- the tape ----------------------------------------------------------------------------------------------------------
     def _build_tape(self):

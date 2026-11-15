@@ -247,7 +247,8 @@ one card, testing's objects):
 
 code 22K: every mtp round's reply equalled the first plain round's, token for token. agent 40K: the replies agree for the
 first 73 tokens, then the mtp arm stops (EOS) while plain continues 2 tokens - the same on testing without the
-draft-policy change, so it is a stop-boundary tie on this prompt, not a mid-stream divergence.
+draft-policy change. Whether that is a near-tie at the end token or a verify difference is not measured yet (no margin
+was recorded), so the served default stays `--draft off` on every model until it is explained.
 
 #### Speculative decoding with DFlash 2 (served)
 
@@ -393,6 +394,27 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
   engines' 4 / 5 and the gates' 3 / 6 / 7 fit); the DFlash module drops its matvec op and both grids (16.1 -> 11.0 KB).
 - The verify pass of 4 tokens: 43.0 ms against a 25.3 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`), 1.63x;
   Swift's is 1.45x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
+
+### Qwen3.8-27B GSQ-RCO IQ3_S (dense 27B, own code end to end)
+
+ISTA-DASLab's plain Qwen3.8-27B in GSQ-RCO IQ3_S (12.1 GB; formats IQ3_S, IQ2_S, IQ2_XS, IQ2_XXS, Q2_K, one IQ1_M
+matrix, Q4_K head, Q6_K MTP block). Decode module `k3_q35_gsq`, verify modules `k3_q35_gsq_ver` + `k3_q35_gsq_ver_m`
+(the IQ1_M matrix in its own launch), drafters `k3_q35_gsq_mtp` and `k3_q35_gsq_dflash`.
+
+Served: `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 0
+--draft mtp --max-ctx 12288` (and `--draft dflash`), one RX 7900 XTX, 128 greedy tokens, median of 3 interleaved
+rounds, three short chat prompts of 35-39 tokens (code: an ISO 8601 parser with tests; prose: how a refrigerator moves
+heat; shell: the ten largest files under /var/log), measured 2026-11-15 on the commit that added the drafter modules.
+Every drafted reply equals the plain reply token for token.
+
+| prompt | `--draft off` | `--draft mtp` | `--draft dflash` |
+|---|---:|---:|---:|
+| code | 55.6 | 70.0 (1.26x) | 74.7 (1.37x) |
+| prose | 55.4 | 59.8 (1.08x) | 66.2 (1.23x) |
+| shell | 55.3 | 61.0 (1.10x) | 64.8 (1.17x) |
+
+The DFlash run's own plain arm measured 54.6 / 54.0 / 55.5. llama.cpp on this file, the served A/B at depth and two
+cards are not measured yet.
 
 ### Swift 1.5 and ThinkingCap on two cards (tensor parallel, own code end to end)
 

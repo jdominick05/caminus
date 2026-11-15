@@ -40,6 +40,7 @@ torch.cuda.Event = lambda: types.SimpleNamespace()
 
 import tiny_q35
 from caminus import ggufio, ref_q35
+from caminus.device import kernels
 from caminus.engine import k3, q35_dense
 from caminus.engine.q35_dense import Dense35Own
 
@@ -246,6 +247,31 @@ check(refused(lambda: Dense35Verify(mt4, 4, module='k3_q35_swift_ver', vram_chec
       refused(lambda: Dense35Verify(mv4, 4, module='k3_q35_tcap_ver', vram_check=False)) and
       refused(lambda: k3.Engine(module='k3_q35_tcap', T=1).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
       'refused: a verify module of the other line, and T-token matvecs on ThinkingCap\'s decode module')
+# ---- the GSQ module (k3_q35_gsq) and its verify modules (k3_q35_gsq_ver + k3_q35_gsq_ver_m: three launches a pass) --------
+PG = os.path.join(A.scratch, 'tiny-q35-gsq.gguf'); tiny_q35.write(PG, variant='gsq')
+mg = Dense35Own(PG, max_ctx=64, vram_check=False, spec_T=4); Eg = mg.E; ig = Eg.inventory()
+gfm = sorted({f for fm in tiny_q35.FORMATS_GSQ for f in fm.values()} | {'Q4_K'})   # (the blocks' formats + the Q4_K head)
+check(mg.module == 'k3_q35_gsq' and {f for (o, f) in ig if o == 'OWN_MV'} == {f'{f}/a16_1rt' for f in gfm}
+      and not Eg.unsupported() and Eg.segs[0].op == k3.OP_OWN_EMB and Eg.segs[0].out_f32 == 1 | 2 | 4 | 8 | 16,
+      f'the GSQ file on k3_q35_gsq: every format on its one-round-trip tile; the embedding stages five grids (31; got {Eg.segs[0].out_f32})')
+vg = Dense35Verify(mg, 4, vram_check=False)
+lm = [e.module for e in vg.Es]; inv = [e.inventory() for e in vg.Es]
+check(set(lm) <= set(kernels.RUNTIME_SET), 'the real GSQ verify tapes select shipped runtime objects, including the IQ1_M launch')
+check(vg.module == 'k3_q35_gsq_ver' and lm == ['k3_q35_gsq_ver', 'k3_q35_gsq_ver_m', 'k3_q35_gsq_ver']
+      and set(inv[1]) == {('OWN_MV', 'IQ1_M/a16_1rt_mt')} and len(vg.Es[1].segs) == 1,
+      f'the GSQ verify pass: three launches ({lm}); the IQ1_M gate alone on k3_q35_gsq_ver_m')
+mvf = set().union(*[{f for (o, f) in iv if o == 'OWN_MV'} for iv in inv])
+check(mvf == {f'{f}/a16_1rt_mt' for f in gfm}, f'every format\'s matvec in its T-token form across the launches ({sorted(mvf)})')
+check(all(not e.unsupported() and e.refuse is None and all(sg.dep < i and sg.dep2p1 - 1 < i for i, sg in enumerate(e.segs)) for e in vg.Es)
+      and all(e.segs[0].op == k3.OP_OWN_EMB and e.segs[0].out_f32 for e in (vg.Es[0], vg.Es[2]))
+      and all(e.params.data_ptr() == vg.Es[0].params.data_ptr() and e.params.numel() == 16 and e.guard_T == 4 for e in vg.Es),
+      'each launch: ops its module dispatches, dependencies inside it pointing back; the grid launches start with an embedding '
+      'that stages them; one pass-parameter block and guard for all three')
+check(refused(lambda: Dense35Verify(mg, 4, module='k3_q35_tcap_ver', vram_check=False)) and
+      refused(lambda: Dense35Verify(mt4, 4, module='k3_q35_gsq_ver', vram_check=False)) and
+      refused(lambda: k3.Engine(module='k3_q35_gsq_ver', T=4).own_matvec_1rt(B(4096, torch.uint8), 'IQ1_M', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)) and
+      refused(lambda: k3.Engine(module='k3_q35_gsq_ver_m', T=4).own_matvec_1rt(B(4096, torch.uint8), 'Q4_K', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
+      'refused: another line\'s verify module on either engine, IQ1_M on k3_q35_gsq_ver, any other format on k3_q35_gsq_ver_m')
 check(not any(c[0] == 'OWN_MV' for c in k3.MODULE_CAPS['k3_q35_tcap_dflash']),
       'the ThinkingCap DFlash module lists no OWN_MV pair (its device code compiles OP_OWN_MV and the IQ grids out: kernels/k3_q35t_ops.h K3_Q35_DF)')
 # ThinkingCap's MTP drafter (k3_q35_tcap_mtp: engine/q35_mtp.py on its Q6_K block, Q8_0 head, IQ2_S embedding)
@@ -263,6 +289,22 @@ check(mt_.module == 'k3_q35_tcap_mtp' and ivm <= k3.MODULE_CAPS['k3_q35_tcap_mtp
 check(refused(lambda: Mtp35(mm4, module='k3_q35_swift_mtp', vram_check=False)) and
       refused(lambda: k3.Engine(module='k3_q35_tcap_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'IQ4_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
       'refused: the other line\'s drafter module, and a format other than Q6_K on ThinkingCap\'s MTP module')
+# the GSQ files' MTP drafter (k3_q35_gsq_mtp: their Q6_K block as ThinkingCap's, the Q4_K head, the IQ2_S embedding)
+PGM = os.path.join(A.scratch, 'tiny-q35-gsq-mtp.gguf'); tiny_q35.write(PGM, variant='gsq', mtp=True)
+mg4 = Dense35Own(PGM, max_ctx=64, vram_check=False, spec_T=4)
+mtg = Mtp35(mg4, k=3, vram_check=False)
+check({e.module for e in mtg.E.values()} <= set(kernels.RUNTIME_SET), 'the real GSQ MTP tapes select shipped runtime objects')
+ivg = set().union(*(set(E_.inventory()) for E_ in mtg.E.values()))
+check(mtg.module == 'k3_q35_gsq_mtp' and ivg <= k3.MODULE_CAPS['k3_q35_gsq_mtp'] and ('OWN_MV', 'Q6_K/a16_1rt_mt') in ivg
+      and ('OWN_MV', 'Q4_K/a16_1rt') in ivg and ('OWN_MV16', 'Q8_0') not in ivg and ('OWN_EMB', 'IQ2_S') in ivg
+      and all(not E_.unsupported() for E_ in mtg.E.values()),
+      f'the GSQ files\' MTP tapes on k3_q35_gsq_mtp: the Q6_K block\'s T-token tiles, the Q4_K head on its one-round-trip tile ({sorted(ivg)})')
+check(refused(lambda: Mtp35(mg4, module='k3_q35_tcap_mtp', vram_check=False)) and refused(lambda: Mtp35(mm4, module='k3_q35_gsq_mtp', vram_check=False)) and
+      refused(lambda: k3.Engine(module='k3_q35_gsq_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'IQ2_XS', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)) and
+      refused(lambda: k3.Engine(module='k3_q35_tcap_mtp', T=4).own_matvec_1rt(B(4096, torch.uint8), 'Q4_K', 2, 256, B(4 * 256, torch.float16), B(8), tokens=4, x_stride=256, out_stride=2)),
+      'refused: ThinkingCap\'s MTP module on the GSQ engine and back, IQ2_XS on the GSQ MTP module, Q4_K on ThinkingCap\'s')
+check(set(k3.MODULE_CAPS['k3_q35_gsq_dflash']) - set(k3.MODULE_CAPS['k3_q35_tcap_dflash']) == {('OWN_MV', 'Q4_K/a16_1rt'), ('OWN_MV', 'Q4_K/a16_1rt_mt')},
+      'the GSQ DFlash module: ThinkingCap\'s DFlash caps plus the Q4_K head\'s matvec, nothing else')
 check(('OWN_MV', 'Q4_K/a16_1rt_gu') not in k3.MODULE_CAPS['k3_q35_swift_ver'] and ('OWN_MV', 'Q4_K/a16_1rt_gu') in k3.MODULE_CAPS['k3_q35_swift'],
       'the verify module\'s capabilities leave out the fused gate | up (no verify tape runs it)')
 e_v = k3.Engine(module='k3_q35_swift_ver', T=4)
