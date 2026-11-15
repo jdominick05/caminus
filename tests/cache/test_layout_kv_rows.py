@@ -8,6 +8,8 @@ kv_rows, and caminus.cache.prompt.Layout divides each KV view by it.
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/cache/test_layout_kv_rows.py --scratch DIR"""
 import argparse, contextlib, os, sys, types
+os.environ.setdefault('CAMINUS_H2D', 'pageable')   # (CPU stand-ins: the layout is under test, not the uploads; the
+                                                 #  two-card pinned default needs a GPU: tests/engine/test_q35_upload_cpu.py covers it)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, os.path.join(HERE, '..', 'engine'))
 import torch
