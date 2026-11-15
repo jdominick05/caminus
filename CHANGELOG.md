@@ -37,6 +37,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
     67). ThinkingCap on an XT: 76 / 77 / 61 (llama.cpp: 71 / 75 / 48). The drafter's memory leaves Swift about 12-16K
     tokens of context on a 24 GB card (it starts from 8K); `--draft mtp` keeps the full context.
   See [benchmarks](docs/dev/benchmarks.md).
+- **The plain Qwen3.8 27B on Caminus's own code.** `caminus pull qwen3.8-27b` serves ISTA-DASLab's GSQ-RCO IQ3_S file
+  (Apache-2.0) on one card of either size: 55 tok/s decode on an XTX at short context, about 800 tok/s reading a 2K
+  prompt on an XT. `--draft dflash` and `--draft mtp` give the same output as plain decoding, at about 1.2-1.4x and
+  1.1-1.3x served on an XTX. Five new matrix formats (IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K) have their own decode
+  tiles, prefill GEMMs and T-token verify tiles. See [models](docs/models.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the

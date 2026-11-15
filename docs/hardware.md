@@ -19,7 +19,7 @@ even when everything works. That's how cards move from untested to supported.
 
 | Cards | What you can run |
 |---|---|
-| One | The one-card models. `thinkingcap` fits any supported card; `qwen3-30b-a3b` and `swift-1.5` need a 24 GB card. |
+| One | The one-card models. `thinkingcap` and `qwen3.8-27b` fit any supported card; `qwen3-30b-a3b` and `swift-1.5` need a 24 GB card. |
 | Two | `coder` on an XTX + XT or two XTX; `swift-1.5` or `thinkingcap` across both (`--cards 2`); or two one-card models side by side. |
 | Three or more | Two cards for a two-card model; one-card models on the rest. |
 
