@@ -9,7 +9,11 @@ repository's docs) and from an empty one:
   T = 4 with every row accepted on 3, 6 and 7 workgroups per WGP: the same logits.
 The verify tape's feed-forward runs as three segments and the decode tape's as the fused gate | up segment: equal logits
 are also that check. Prints PASS / FAIL lines and RESULT PASS | FAIL.
-  tools/guard.sh LOG 1200 python -I tests/engine/test_q35_verify.py GGUF [--depths 0,512]
+--kv q8 runs the same walks on the separate Q8 objects (Dense35Own(q8=True): k3_q35_swift_kvq8 / k3_q35_tcap_kvq8 and
+their verify objects k3_q35_{swift,tcap}_ver_kvq8): verify passes on a Q8 cache bitwise the Q8 one-token decode steps.
+There is no Q8 batched prefill yet, so a depth is reached by one-token decode steps on the Q8 decode tape (the first
+pass after them commits 1, not 0); each depth re-walks its context about ten times.
+  tools/guard.sh LOG 1200 python -I tests/engine/test_q35_verify.py GGUF [--depths 0,512] [--kv q8]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, glob, os, sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
@@ -17,7 +21,9 @@ sys.path.insert(0, os.path.join(ROOT, 'python'))
 import numpy as np, torch
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf'); ap.add_argument('--depths', default='0,512')
+ap.add_argument('--kv', choices=('f16', 'q8'), default='f16', help='q8: the separate Q8 objects, depths filled by decode steps')
 A = ap.parse_args()
+Q8 = A.kv == 'q8'
 from caminus import ggufio
 from caminus.bpe import BPE
 from caminus.device import capacity
@@ -37,14 +43,19 @@ max_ctx = max(depths) + G + 8
 CH = 64
 GRIDS = (3, 6, 7)
 extra = sum(Dense35Verify.need_mib(T, max_ctx=max_ctx) for T in range(1, MAX_T + 1)) + len(GRIDS) * Dense35Verify.need_mib(MAX_T, max_ctx=max_ctx)
-eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=extra + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
+if Q8:   # (Q35OwnPrefill refuses a Q8 engine: no prefill buffers; Dense35Verify refuses the GSQ line's Q8: no objects)
+    eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=extra + 16, q8=True)
+else:
+    eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=extra + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
 # the grids the verify module's LDS keeps resident (k3.resident_grid refuses the others: the GSQ verify module's 22.8 KB a
 # workgroup fits 5 per WGP); the GSQ files' passes are three launches (their IQ1_M matrix on k3_q35_gsq_ver_m)
 VMOD = k3.Q35RV_MODULES[0] if eng.module in k3.Q35R_MODULES else 'k3_q35_tcap_ver' if eng.tcap else 'k3_q35_swift_ver'
+if Q8 and VMOD not in k3.Q35_KV_Q8_OF: raise SystemExit(f"--kv q8: no Q8 verify object for {VMOD} (the GSQ line has none yet)")
+if Q8: VMOD = k3.Q35_KV_Q8_OF[VMOD]
 LDS_CAP = k3.WGP_LDS // max(k3._m(m).k3_run.lds_bytes() for m in (VMOD,) + (k3.Q35RVM_MODULES if eng.module in k3.Q35R_MODULES else ()))
 GRIDS = tuple(g for g in GRIDS if g <= LDS_CAP)
 print(f'verify module {VMOD}: grids {GRIDS} (LDS: at most {LDS_CAP} per WGP)', flush=True)
-pf = Q35OwnPrefill(eng, chunk=CH, crossover=0)
+pf = None if Q8 else Q35OwnPrefill(eng, chunk=CH, crossover=0)
 vers = {T: Dense35Verify(eng, T) for T in range(1, MAX_T + 1)}
 alt = {w: Dense35Verify(eng, MAX_T, per_wgp=w) for w in GRIDS}
 print(f'engine {eng.module} {eng.vram_mib:.0f} MiB at max_ctx {max_ctx}, {eng.per_wgp} workgroups per WGP; verify tapes: ' +
@@ -57,25 +68,35 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
+if Q8:
+    check(eng.module in k3.Q35_KV_Q8_MODULES and all(v.module in k3.Q35_KV_Q8_MODULES and v.module not in k3.ATTN_PACK_MODULES
+                                                     for v in list(vers.values()) + list(alt.values())),
+          f'the Q8 objects run: {eng.module}, verify {sorted({v.module for v in vers.values()})} (unpacked PART)')
+
+
 bits = lambda t: t.detach().reshape(-1).cpu().numpy().view(np.uint32).copy()
 
 
 def start(N):
-    """an empty engine at position N: a prefill of real text (N > 0)"""
+    """an empty engine at position N: a prefill of real text (N > 0), or with --kv q8 N one-token decode steps. Returns
+    the commit of the first pass at N: 0 after a prefill or at N = 0, 1 after decode steps (their last row is pending)"""
     eng.reset()
-    if N: pf.run(ids_all[:N], 0, 0, N)
+    if N and pf is not None: pf.run(ids_all[:N], 0, 0, N)
+    elif N:
+        for i in range(N): eng.verify(ids_all, i, 0 if i == 0 else 1)
     eng.pos_host = N
+    return 1 if N and pf is None else 0
 
 
 for N in depths:
     toks = ids_all[N:N + G + 1]
     full = ids_all[:N + G + 1]
-    start(N)
+    c0 = start(N)
     ref = []
-    for i in range(G + 1): ref.append(bits(eng.verify(full, N + i, 0 if i == 0 else 1)))
+    for i in range(G + 1): ref.append(bits(eng.verify(full, N + i, c0 if i == 0 else 1)))
     for T, ver in vers.items():
-        start(N)
-        p, commit, npass, bad, rows, decs = N, 0, 0, [], 0, 0
+        c0 = start(N)
+        p, commit, npass, bad, rows, decs = N, c0, 0, [], 0, 0
         sched = [T, 1, max(1, T - 1), min(2, T)]
         while p + T <= N + G:
             a = sched[npass % len(sched)]
@@ -96,8 +117,8 @@ for N in depths:
         check(not bad, f'depth {N} T {T}: {npass} passes ({rows} accepted rows) and {decs} decode steps bitwise the decode '
                        f'steps, wrong tokens in every rejected row{"" if not bad else ": " + ", ".join(bad[:6])}')
     # passes of different T on one state: each commits what the last pass (of any T) accepted
-    start(N)
-    p, commit, bad, plan = N, 0, [], [(4, 3), (2, 2), (3, 1), (4, 4), (1, 1), (3, 2), (2, 1), (4, 2)]
+    c0 = start(N)
+    p, commit, bad, plan = N, c0, [], [(4, 3), (2, 2), (3, 1), (4, 4), (1, 1), (3, 2), (2, 1), (4, 2)]
     for T, a in plan:
         if p + T > N + G: break
         wrong = [(full[p + r] + 7919 * (r + 1)) % eng.vocab for r in range(a, T)]
@@ -108,8 +129,8 @@ for N in depths:
     check(not bad, f'depth {N}: passes of T 4, 2, 3, 4, 1, 3, 2, 4 on one state (a pass of 2 committing 3 of a pass of 4), '
                    f'then a decode step: bitwise{"" if not bad else ": " + ", ".join(bad[:6])}')
     # a commit past the last pass's tokens is refused before anything is written (its records are an older pass's)
-    start(N)
-    eng.verify(full, N, 0)
+    c0 = start(N)
+    eng.verify(full, N, c0)
     try: vers[MAX_T].run(full[N + 1:N + 1 + MAX_T], N + 1, 3); refused = False
     except k3.ContextBoundsError: refused = True
     vers[MAX_T].run(full[N + 1:N + 1 + MAX_T], N + 1, 1)
@@ -117,8 +138,8 @@ for N in depths:
           f'depth {N}: a pass committing 3 after a decode step is refused; the engine stays usable and the right pass is bitwise')
     # the grids: T = 4, every row accepted
     for w, ver in alt.items():
-        start(N)
-        p, commit, bad = N, 0, []
+        c0 = start(N)
+        p, commit, bad = N, c0, []
         while p + MAX_T <= N + G:
             ver.run(full[p:p + MAX_T], p, commit)
             bad += [f'{p}+{r}' for r in range(MAX_T) if not np.array_equal(bits(ver.logits(r)), ref[p + r - N])]

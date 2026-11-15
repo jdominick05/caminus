@@ -37,6 +37,10 @@ torch.cuda.device = lambda d: contextlib.nullcontext()
 torch.cuda.current_device = lambda: 0
 torch.cuda.get_device_properties = lambda d: types.SimpleNamespace(multi_processor_count=42, total_memory=20464 << 20)
 torch.cuda.Event = lambda: types.SimpleNamespace()
+torch.cuda.is_available = lambda: False
+def no_gpu(*args, **kwargs):
+    raise AssertionError('GPU initialization forbidden in the CPU tape suite')
+torch.cuda.init = torch.cuda._lazy_init = no_gpu
 
 import tiny_q35
 from caminus import ggufio, ref_q35
@@ -85,8 +89,10 @@ src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_ops.h')).read()
 TPB = r'#ifdef K3_TP[^\n]*\n(.*?)#endif'   # (the two-card modules' exchange: k3.Q35_TP_MODULES only)
 MTPB = r'#ifdef K3_Q35_MTP[^\n]*\n(.*?)#endif'   # (the drafter module's argmax: k3.Q35M_MODULES only)
 DFB = r'#ifdef K3_Q35_DF[^\n]*\n(.*?)#endif'   # (the DFlash drafter module's ops: k3.Q35DF_MODULES only)
+Q8B = r'#ifdef K3_Q35_KV_Q8[^\n]*\n.*?#else[^\n]*\n(.*?)#endif'   # retain the F16 dispatch in this suite
 SPB = r'#ifdef K3_Q35_ATTN_SPLIT[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (decode attention: the split pair; #else the DFlash module's OP_ATTN_DEC)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
+disp = re.sub(Q8B, lambda mm: mm.group(1), disp, flags=re.S)
 tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
 mtp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, disp, re.S))))
 df_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(DFB, disp, re.S))))
@@ -184,6 +190,7 @@ check(Et.segs[0].op == k3.OP_OWN_EMB and Et.segs[0].out_f32 == 1 | 2 | 8,
 check(abs(Dense35Own.projection_mib(PT, 64) - mt.vram_mib) < 1e-9, 'the projection counts the widened BF16 and the record tails as the engine')
 srct = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35t_ops.h')).read()
 dt = srct.split('k3_extra_op(')[1]
+dt = re.sub(Q8B, lambda mm: mm.group(1), dt, flags=re.S)
 dft_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(DFB, dt, re.S))))
 dt = re.sub(DFB, '', dt, flags=re.S)   # (ThinkingCap's DFlash drafter module's ops: k3.Q35TDF_MODULES only)
 mtt_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, dt, re.S))))
@@ -313,6 +320,125 @@ check(refused(lambda: e_q35.own_matvec16(w8, 'Q8_0', 8, 256, B(4 * 256, torch.fl
       refused(lambda: e_v.own_add_rms16(B(4 * 256), B(256), B(4 * 256), B(4 * 256, torch.float16), 1e-6, tokens=2)) and
       refused(lambda: e_q35.gdn_norm16(B(256), B(128), B(256), B(256, torch.float16), 2, 128, 1e-6) or k3.Engine(module='k3_q35_swift', T=2).gdn_norm16(B(512), B(128), B(512), B(512, torch.float16), 2, 128, 1e-6)),
       'the T-token forms: refused on the decode module and for a token count other than the tape\'s T')
+
+# ---- staged Q8 target: allocation, tape order, verify and terminal failures -------------------------------------------
+from caminus.prefill.q35own import Q35OwnPrefill
+from caminus.errors import InvalidKVEncoding
+qm = Dense35Own(P, max_ctx=64, spec_T=4, q8=True, vram_check=False)
+qt = Dense35Own(PT, max_ctx=64, spec_T=4, q8=True, vram_check=False)
+for target in (qm, qt):
+    kv = next(v for k, v in target.state.items() if k[-1] == 'kv')
+    pb = k3.kv_pos_bytes(target.nkv * target.hd, True)
+    check(kv.dtype == torch.uint8 and kv.numel() == target.kv_rows * pb and target.kv_rows == 67,
+          f'{target.module}: exact byte cache allocation includes verify tail')
+    check(abs(Dense35Own.projection_mib(target.path, 64, 4, q8=True) - target.vram_mib) < 1e-9,
+          f'{target.module}: Q8 allocation and projection agree')
+    check(sum(sg.op == k3.OP_HADAMARD for sg in target.E.segs) == 4 * n_att,
+          f'{target.module}: Q/K256, V/output64 transforms on every attention layer')
+    app = next(i for i, sg in enumerate(target.E.segs) if sg.op == k3.OP_KV_APPEND)
+    gates = next(i for i, sg in enumerate(target.E.segs) if sg.op == k3.OP_GATE_MUL16)
+    sg = target.E.segs[app]
+    check(target.E.segs[sg.dep].op == k3.OP_HADAMARD and target.E.segs[sg.dep2p1 - 1].op == k3.OP_HADAMARD
+          and target.E.segs[target.E.segs[gates].dep].op == k3.OP_HADAMARD,
+          f'{target.module}: append waits for both rotations, output rotation precedes gating')
+    vv = Dense35Verify(target, 4, vram_check=False)
+    check(vv.module == k3.Q35_KV_Q8_OF['k3_q35_tcap_ver' if target.tcap else 'k3_q35_swift_ver']
+          and vv.module not in k3.ATTN_PACK_MODULES and not vv.E.unsupported(),
+          f'{target.module}: matching unpacked verify tape constructs for T4')
+    check(sum(sg.op == k3.OP_HADAMARD for sg in vv.E.segs) == 4 * n_att,
+          f'{target.module}: verify carries every transform')
+    check(refused(lambda: Dense35Verify(target, 4, module='k3_q35_tcap_ver' if target.tcap else 'k3_q35_swift_ver', vram_check=False)),
+          f'{target.module}: F16 verify cannot reinterpret the Q8 state')
+check(refused(lambda: Dense35Own(P, module='k3_q35_swift_kvq8', vram_check=False))
+      and refused(lambda: q35_dense.kv_module(None, 'k3_q35_swift', q8='q8')),
+      'Q8-only module and strict cache-format flag fail closed before allocation')
+delta = n_att * 67 * (k3.kv_pos_bytes(qm.nkv * qm.hd, False) - k3.kv_pos_bytes(qm.nkv * qm.hd, True)) - 4
+check(abs((Dense35Own.projection_mib(P, 64, 4) - qm.vram_mib) * 2 ** 20 - delta) < 1e-6,
+      'Q8 memory reduction is exact row packing minus the new four-byte error word')
+check(refused(lambda: Q35OwnPrefill(types.SimpleNamespace(q8=True))),
+      'unimplemented matching batched prefill refuses before looking up buffers or loading a module')
+check(not any(m in k3.Q35_KV_Q8_MODULES for m in k3.Q35_TP_MODULES + k3.Q35TPV_MODULES),
+      'no two-card Q8 object is registered on this branch')
+
+# The actual verify pass runs with launch/event CPU stand-ins. A simultaneous
+# numerical error and timeout must leave no opportunity to retry or clear it.
+qv = Dense35Verify(qt, 4, vram_check=False)
+qv.E.run = lambda **kwargs: None
+qv.ev_done = types.SimpleNamespace(record=lambda: None,
+    synchronize=lambda: (qv.E.kv_error.fill_(2), qv.h_st[1].fill_(1)))
+verify_passes = []
+original_verify_pass = qv._pass
+def fail_verify_pass(*args):
+    verify_passes.append(args)
+    return original_verify_pass(*args)
+qv._pass = fail_verify_pass
+qt.weight_sums = lambda: (_ for _ in ()).throw(AssertionError('a refused KV encoding must not read the weights'))
+try:
+    qv.run([1, 2, 3, 4], 0, 0, argmax=False)
+    verify_failed = False
+except InvalidKVEncoding:
+    verify_failed = True
+check(verify_failed and len(verify_passes) == 1 and not qv.bails and not qt.bails
+      and qt.broken and int(qv.E.kv_error[0]) == 2,
+      'verify waits, reports the refused encoding before timeout recovery and marks its target terminal')
+check(refused(lambda: qt.step(1), InvalidKVEncoding)
+      and refused(lambda: qv.run([1, 2, 3, 4], 0, 0), InvalidKVEncoding),
+      'verify failure prevents both a target decode and another verify pass')
+
+# Error becomes visible only at the event wait; both it and a timeout are set.
+# The numerical error must throw once, survive reset and never enter the retry.
+qm.ev_done = types.SimpleNamespace(synchronize=lambda: (qm.E.kv_error.fill_(2), qm.h_st[1].fill_(1)))
+calls = []
+def fail_pass(*args):
+    calls.append(args)
+    return qm._pass_wait(0)
+qm._pass = fail_pass
+qm.weight_sums = qt.weight_sums
+try:
+    qm._run_tok(1, 0, 0, False)
+    failed = False
+except InvalidKVEncoding:
+    failed = True
+check(failed and len(calls) == 1 and not qm.bails and int(qm.E.kv_error[0]) == 2 and qm.broken,
+      'numerical cache refusal wins over timeout without clearing or retrying, marks engine terminal')
+qm.reset()
+try:
+    qm.step(1)
+    refused_after_reset = False
+except InvalidKVEncoding:
+    refused_after_reset = True
+check(refused_after_reset, 'reset cannot make a refused Q8 cache reusable')
+
+def refused_with(fn, want):
+    try: fn(); return False
+    except ValueError as e: return want in str(e)
+
+
+# The GSQ line: a Q8 decode object exists, its two verify objects have no Q8 build, so verify refuses the engine.
+mgq = Dense35Own(PG, max_ctx=64, spec_T=4, q8=True, vram_check=False)
+check(mgq.module == 'k3_q35_gsq_kvq8' and mgq.module in k3.Q35R_MODULES and not mgq.E.unsupported()
+      and any(sg.op == k3.OP_HADAMARD for sg in mgq.E.segs)
+      and refused_with(lambda: Dense35Verify(mgq, 4, vram_check=False), 'no Q8 KV verify objects for the GSQ line'),
+      'GSQ: the Q8 decode tape builds on k3_q35_gsq_kvq8; Dense35Verify refuses it (no Q8 verify objects)')
+
+# A pass of several launches (the GSQ shape): a refused encoding in a LATER launch wins over a bound report and a
+# timeout in the first, before any status is cleared or the pass is run again.
+qb = Dense35Own(P, max_ctx=64, spec_T=4, q8=True, vram_check=False)
+qb.weight_sums = qt.weight_sums
+qv2 = Dense35Verify(qb, 4, vram_check=False)
+e2 = k3.Engine(module=qv2.module, T=4)
+qv2.E.run = e2.run = lambda **kwargs: None
+qv2.Es.append(e2); qv2.h_sts.append(torch.zeros(k3.STATUS_WORDS, dtype=torch.int32))
+def sync_two():
+    qv2.h_sts[0][4] = 1; qv2.h_sts[0][5] = -1; qv2.h_sts[0][1] = 1   # (launch 1: a bound report and a timeout)
+    e2.kv_error.fill_(2)                                                # (launch 2: a refused block)
+qv2.ev_done = types.SimpleNamespace(record=lambda: None, synchronize=sync_two)
+try:
+    qv2.run([1, 2, 3, 4], 0, 0, argmax=False); multi = 'none'
+except InvalidKVEncoding: multi = 'kv'
+except k3.ContextBoundsError: multi = 'bounds'
+check(multi == 'kv' and not qv2.bails and qb.broken and not qb.poisoned and int(e2.kv_error[0]) == 2,
+      f'a later launch\'s refused encoding is reported before the first launch\'s bound and timeout (got {multi})')
 
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)

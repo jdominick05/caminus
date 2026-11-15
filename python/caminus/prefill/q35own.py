@@ -252,6 +252,8 @@ class Q35OwnPrefill(PrefillDriver):
     the card's guard line first: capacity.check)"""
 
     def __init__(self, m, chunk=1024, crossover=None, check=True, export_h=None, feature_layers=()):
+        if getattr(m, 'q8', False):
+            raise ValueError('Q35OwnPrefill: matching Q8 prefill is not implemented; staged decode/verify gates only')
         self.m, self.chunk = m, int(chunk)
         # export_h: export every chunk row's final h (the MTP drafter's fill input) and fill the block per chunk;
         # default on when the engine carries an MTP drafter (m.mtp35, set by the architecture's build)

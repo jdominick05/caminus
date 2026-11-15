@@ -48,7 +48,14 @@ __shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G * ATTN_PT + ATTN_SS + 1 + ATTN_PT
 __shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G + ATTN_SS + 1];
 #endif
 #define ATTN_LDS ((__attribute__((address_space(3))) float *)ATTN_OWN_LDS)   // [ATTN_SS][ATTN_G] scores / p, then cells [ATTN_SS]
+#ifdef K3_Q35_KV_Q8
+#ifdef K3_Q35_ATTN_PACK
+#error "Q8 verify uses the unpacked PART until its packed loads are implemented and gated"
+#endif
+#define ATTN_KV_TYPE(sg) 1
+#else
 #define ATTN_KV_TYPE(sg) 0
+#endif
 #define ATTN_Q8_BYTES 34   // (the q8_0 block: half d + 32 int8; unreachable with ATTN_KV_TYPE 0)
 #define ATTN_H2F(p) ((float)*(const _Float16 *)(p))
 #define ATTN_H22F(u) make_float2((float)__builtin_bit_cast(_Float16, (uint16_t)((u) & 0xffffu)), (float)__builtin_bit_cast(_Float16, (uint16_t)((u) >> 16)))
