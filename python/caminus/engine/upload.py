@@ -34,6 +34,7 @@ lines of several processes interleave whole):
   phase load      what=start|done|failed (+ engine, path base name, mode)
   phase exception type: an exception in the load or one that reached sys.excepthook / threading.excepthook
 tools/gates/sdma_classify.py reads it: a fault address -> live / freed / neither / ambiguous and the tensor."""
+import contextlib
 import os
 import sys
 import threading
@@ -293,6 +294,16 @@ class Uploader:
         if self.log.on:
             self.log.line('exception', type=type(exc).__name__, where='load')
             self.log.line('load', what='failed'); self.log.maps('load-failed')
+
+    @contextlib.contextmanager
+    def loading(self, engine, path):
+        """begin / failed / finish around a later load through this uploader (a drafter's weights after the engine's own
+        load): the log frames it, and finish() drops the staging buffers the uploads allocated again"""
+        self.begin(engine, path)
+        try: yield self
+        except BaseException as e:
+            self.failed(e); raise
+        self.finish()
 
     def finish(self):
         """after the last upload: the arms' buffers released (their syncs already ran); the log's end-of-load lines"""

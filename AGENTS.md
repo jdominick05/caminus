@@ -67,6 +67,14 @@ CLAUDE.md imports this file.
   Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
   modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
+  Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is in development: `arch.Dense35TP.draft_refusal`
+  refuses it in serve, `caminus fit`, the model picker and build unless `CAMINUS_ALLOW_TP_DRAFT=1` (development and its GPU
+  gates, docs/dev/testing.md "Dense two-card drafting"), and it is never a default. It runs the verify tape
+  (`engine/q35_dense_verify_tp.py`) on both cards and the one-card drafter beside it (`engine/q35_draft_tp.py`
+  `DraftTarget35TP`: that card's device and embedding, a full head copy, named attributes only); MTP on card 0, DFlash on
+  the card `Dense35TP.draft_card` picks once at placement from `context_fit` (stored in `opt['placement']`, read back by
+  build). Its head copy and the drafter weights load through the trunk's uploader (`Uploader.loading` frames them in
+  `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects stay outside the installed runtime set until the refusal is lifted.
   `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps

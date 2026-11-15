@@ -14,6 +14,8 @@ Two tapes of T = 4 rows on the drafter module:
 The ring holds 4096 rows (a power of two >= window + block): position p in row p & 4095, so any position addresses inside it.
 An inject of fewer than 4 rows pads with copies of its last row at the next positions; the next draft (at the position after
 the last real row) rewrites those rows before it reads them."""
+import contextlib
+
 import numpy as np
 import torch
 
@@ -142,20 +144,28 @@ class Dflash35:
         if vram_check: capacity.check([eng.dev], [self.mib], f'Dflash35 drafter ({self.mib:.0f} MiB)')
         self.per_wgp = int(per_wgp) if per_wgp else eng.per_wgp
         self.theta_scale = float(np.float32(self.base) ** np.float32(-2.0 / self.hd))
+        h2d = getattr(eng, 'h2d', None)   # (the target's uploader: engine/upload.py; on two cards the trunk's, its card's view)
         with torch.cuda.device(self.dev):
-            self._load(); self._build()
+            with (h2d.loading('Dflash35', path) if h2d is not None else contextlib.nullcontext()):
+                self._load()
+            self._build()
             if self.chunk: self._rows_buffers()
 
     # -- weights -------------------------------------------------------------------------------------------------------
     def _w(self, name, rows, cols):
         t = self.TT[name]; R, _ = t.rows()
         if t.type != 'Q8_0' or R != rows or int(t.shape[0]) != cols: raise ValueError(f'Dflash35: {name} is {t.type} [{R}, {t.shape[0]}], expect Q8_0 [{rows}, {cols}]')
-        return dict(name=name, fmt='Q8_0', rows=R, K=cols, w=torch.from_numpy(np.ascontiguousarray(t.pread(0, t.n_bytes))).to('cuda'))
+        return dict(name=name, fmt='Q8_0', rows=R, K=cols, w=self._up(np.ascontiguousarray(t.pread(0, t.n_bytes)), name, 'mat'))
+
+    def _up(self, a, name, role):
+        """a host array onto the drafter's card through the target's uploader (the plain copy for a target without one)"""
+        h2d = getattr(self.eng, 'h2d', None)
+        return torch.from_numpy(a).to('cuda') if h2d is None else h2d.up(a, name, 0, role)
 
     def _f32(self, name, n):
         t = self.TT[name]
         if t.type != 'F32' or t.n_values != n: raise ValueError(f'Dflash35: {name} is {t.type} {list(t.shape)}, expect F32 [{n}]')
-        return torch.from_numpy(t.pread(0, t.n_bytes).view(np.float32).copy()).to('cuda')
+        return self._up(t.pread(0, t.n_bytes).view(np.float32).copy(), name, 'vec')
 
     def _load(self):
         D, ffn, QH, M, nl = self.D, self.ffn, self.nh * self.hd, self.nkv * self.hd, len(self.layers_tgt)
@@ -165,8 +175,8 @@ class Dflash35:
         self.sel_hidden = self._w('selector_hidden.weight', self.rank, D)
         sp, sn = self.TT['selector_predecessor.weight'], self.TT['selector_successor.weight']
         self.sel_rb = self.rank // 32 * 34
-        self.sel_prev = torch.from_numpy(np.ascontiguousarray(sp.pread(0, sp.n_bytes))).to('cuda')
-        self.sel_next = torch.from_numpy(np.ascontiguousarray(sn.pread(0, sn.n_bytes))).to('cuda')
+        self.sel_prev = self._up(np.ascontiguousarray(sp.pread(0, sp.n_bytes)), sp.name, 'mat')
+        self.sel_next = self._up(np.ascontiguousarray(sn.pread(0, sn.n_bytes)), sn.name, 'mat')
         self.L = []
         for il in range(self.nl):
             b = f'blk.{il}.'

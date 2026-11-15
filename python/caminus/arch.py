@@ -54,6 +54,12 @@ def _file_key(path):
     return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
 
 
+def allow_tp_draft():
+    """CAMINUS_ALLOW_TP_DRAFT=1: the two-card dense entry (Dense35TP) builds --draft mtp / dflash. Development and its GPU
+    gates only: without it two-card drafting is refused (Arch.draft_refusal), because those gates have not passed"""
+    return os.environ.get('CAMINUS_ALLOW_TP_DRAFT') == '1'
+
+
 _CODER = {}
 
 
@@ -271,6 +277,15 @@ class Arch:
         except (TypeError, ValueError):
             want = self.min_ctx(opt)
         return plan.fits(min(want, plan.native_ctx))
+
+    def draft_refusal(self, draft):
+        """why this entry must not serve --draft `draft` now (a sentence for the error), or None"""
+        return None
+
+    def placement_extra(self, opt, cards):
+        """what the entry decides once on the placed cards (caminus.device.host dicts, engine order) and reads back from
+        opt['placement'] at build: nothing unless an entry needs it (Dense35TP: the drafter's card)"""
+        return {}
 
     def default_draft(self, opt):
         """the drafter kind a serve runs without --draft: the architecture's own when it needs no extra file choice (the
@@ -666,10 +681,32 @@ class Dense35TP(Arch):
     (engine/q35_dense_tp.py: tensor parallelism, the two-card build of the file's module), T = 1, its own two-card prefill
     (caminus.prefill.q35own_tp.Q35OwnPrefillTP). Never picked from a header or the catalog: Dense35.variant(2) names it. The
     feed-forward rows split by the cards' streaming bandwidth (ffn_share: card 0's part; the attention and DeltaNet heads
-    split evenly)."""
+    split evenly).
+
+    Drafting (--draft mtp / dflash) runs the one-card drafters beside the trunk: the two-card verify tape
+    (engine/q35_dense_verify_tp.py) on both cards, the drafter and a complete output head on one card
+    (engine/q35_draft_tp.py). It is in development: refused unless CAMINUS_ALLOW_TP_DRAFT=1 (draft_refusal) until its
+    GPU gates pass, and never a default (default_draft)."""
     kind, cards, T, engine = 'tp', 2, 1, 'engine.q35_dense_tp:Dense35TP'
     tokenizer = 'own'
+    drafter = 'mtp'
+    drafters = ('mtp', 'dflash')
     PREFILL_CHUNK = 2048
+    MTP_K, MTP_T = Dense35.MTP_K, Dense35.MTP_T
+    _mtp, _dflash = Dense35._mtp, Dense35._dflash
+
+    def draft_refusal(self, draft):
+        if (draft or 'off') == 'off' or allow_tp_draft(): return None
+        return (f'--draft {draft} on two cards is in development and refused until its GPU gates pass (docs/dev/testing.md, '
+                f'"Dense two-card drafting"; CAMINUS_ALLOW_TP_DRAFT=1 runs it for those gates): --cards 1, or --draft off')
+
+    @property
+    def DRAFT_DEFAULT(self):
+        return Dense35.DRAFT_DEFAULT          # (one table, keyed by (module, cards): two cards are off there)
+
+    def default_draft(self, opt):
+        # never a drafter by default while two-card drafting is refused; the table decides after its served A/Bs
+        return Dense35.default_draft(self, opt) if allow_tp_draft() else 'off'
 
     def split(self, cards):
         """{'ffn_share': card 0's part of the feed-forward rows}: the cards' measured streaming bandwidth (CARD_BW) by label"""
@@ -681,24 +718,128 @@ class Dense35TP(Arch):
         sp = self.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or {})
         return float(sp.get('ffn_share', 0.5))
 
-    def auto_need(self, opt, slots, cards=None):
+    def draft_card(self, opt, cards):
+        """the card the drafter runs on, from the placed cards (sysfs only, before HIP starts), or None without a drafter.
+        MTP: card 0 (its input is the trunk's final h, replicated; card 0's is read). DFlash: the card with more room left
+        after the plain two-card projection at this serve's floor context, from the same context_fit as placement and max_ctx
+        auto (draft='off', so no drafter term enters). The KV and states split evenly, so the difference between the cards'
+        rooms is the same at every context: the choice does not depend on the context picked later"""
+        d = opt.get('draft') or 'off'
+        if d == 'off': return None
+        if d == 'mtp': return 0
+        plan = self.context_fit(dict(opt, draft='off'), cards)
+        need = plan.need_mib(min(self.min_ctx(opt), plan.native_ctx))
+        left = [r - n for r, n in zip(plan.room_mib, need)]
+        return 0 if left[0] >= left[1] else 1
+
+    def placement_extra(self, opt, cards):
+        dc = self.draft_card(opt, cards)
+        return {} if dc is None else {'draft_card': dc}
+
+    def _resources(self, opt, cards=None):
+        """the drafter's part of the projection, one recipe for placement, max_ctx auto and build: (spec_T, the drafter's
+        card or None, the DFlash target layers, the DFlash (path, layers) or None, extra(c) -> per card MiB beside the
+        engine at context c). extra: the prefill's buffers; with a drafter also the verify tape on both cards and, on the
+        drafter's card, the full head copy, the verify pass's exported residuals and the drafter (MTP: its block, KV and
+        tapes, the adapter's ring; DFlash: Dflash35.need_mib). cards given (placement, caminus fit): the drafter's card from
+        them; else the one the placement stored (opt['placement']['draft_card'], computed once by placement_extra)"""
         from .engine.q35_dense_tp import Dense35TP as E
+        from .engine.q35_dense_verify_tp import Dense35VerifyTP
         from .prefill.q35own_tp import buffer_need_tp_mib, tp_shapes
         path, share = opt['model'], self._share(opt, cards)
+        mtp, dfl = self._mtp(opt), self._dflash(opt)
+        if (opt.get('draft') or 'off') == 'mtp' and mtp is None: raise ValueError('Dense35TP: --draft mtp, but the file has no MTP block')
+        drafting = mtp is not None or dfl is not None
+        spec_T = self.MTP_T if drafting else 1
+        layers = [] if dfl is None else list(dfl[1])
+        dc = None
+        if drafting:
+            dc = self.draft_card(opt, cards) if cards is not None else (opt.get('placement') or {}).get('draft_card')
+            if dc not in (0, 1):
+                raise ValueError('Dense35TP: no drafter card in the placement (caminus serve stores it: Arch.placement_extra)')
+        sh = tp_shapes(path, share)
+        pf = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(sh, self.PREFILL_CHUNK, mtp is not None, len(layers), dc or 0)]
+        if not drafting:
+            return spec_T, dc, layers, dfl, lambda c: pf[:]
+        from .engine.q35_draft_tp import head_mib
+        head, D = head_mib(path), sh[0].D
+        if dfl is not None:
+            from . import ggufio
+            from .engine.q35_dflash import Dflash35
+            F = ggufio.GGUFFile(path)
+            try: vocab = int(F.T['output.weight'].shape[1])
+            finally: F.close()
+            drafter_mib = lambda c: Dflash35.need_mib(dfl[0], vocab, self.PREFILL_CHUNK)
+        else:
+            from .engine.q35_mtp import Mtp35
+            from .decode.mtp35 import Mtp35Drafter
+            drafter_mib = lambda c: Mtp35.projection_mib(path, c, k=self.MTP_K) + Mtp35Drafter.ring_mib(D)
+        def extra(c):
+            out = [v + Dense35VerifyTP.need_mib(spec_T, max_ctx=c) for v in pf]
+            out[dc] += head + E.feature_mib(D, spec_T, len(layers)) + drafter_mib(c)
+            return out
+        return spec_T, dc, layers, dfl, extra
+
+    def ckpt_mib(self, opt, spec_T, dc, dfl):
+        """per card, MiB of one prompt-cache checkpoint slot before its margin, as cache/prompt.py Layout lays it out: the
+        recurrent states (spec_T tokens' saved inputs), T = spec_T KV tail rows of every attention layer (a drafted
+        session's passes are T wide: PromptCache passes T = spec_T to Layout), and on the drafter's card its window
+        (W + T rows of each drafter layer: Dflash's sliding window, Mtp35.WINDOW for MTP)"""
+        from .engine.q35_dense_tp import Dense35TP as E
+        path = opt['model']
+        base = E.recurrent_mib(path, spec_T) + spec_T * E.kv_pos_mib(path)
+        out = [base, base]
+        if dc is not None:
+            if dfl is not None: out[dc] += Dense35._dfl_win_mib(dfl[0])
+            else:
+                from .engine.q35_mtp import Mtp35
+                from .prefill.q35own import shapes_of
+                g = shapes_of(path)
+                out[dc] += Mtp35.window_mib(g.nkv, g.hd)
+        return out
+
+    def auto_need(self, opt, slots, cards=None):
+        from .engine.q35_dense_tp import Dense35TP as E
+        path, share = opt['model'], self._share(opt, cards)
+        spec_T, dc, layers, dfl, extra = self._resources(opt, cards)
         n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
-        slot = (E.recurrent_mib(path) + E.kv_pos_mib(path)) * 1.05 + 1.0     # (a checkpoint, per card: its states + one tail row)
-        pf = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(tp_shapes(path, share), self.PREFILL_CHUNK)]
-        need = lambda c: [v + p + (slots + 2) * slot for v, p in zip(E.projection_mib(path, c, share), pf)]
-        return n_ctx, [0, 1], slot, need
+        per_slot = [v * 1.05 + 1.0 for v in self.ckpt_mib(opt, spec_T, dc, dfl)]   # (a checkpoint per card, with its margin)
+        need = lambda c: [v + p + (slots + 2) * s for v, p, s in
+                          zip(E.projection_mib(path, c, share, spec_T=spec_T, nfeat=len(layers), feature_card=dc or 0),
+                              extra(c), per_slot)]
+        return n_ctx, [0, 1], max(per_slot), need
 
     def build(self, opt, log=print, T=None):
         from .engine.q35_dense_tp import Dense35TP as E
-        from .prefill.q35own_tp import Q35OwnPrefillTP, buffer_need_tp_mib, tp_shapes
+        from .prefill.q35own_tp import Q35OwnPrefillTP
+        why = self.draft_refusal(opt.get('draft'))
+        if why: raise ValueError(why)
         path, share = opt['model'], self._share(opt)
-        extra = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(tp_shapes(path, share), self.PREFILL_CHUNK)]
-        m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), ffn_share=share, vram_extra_mib=extra)
+        mc = int(opt['max_ctx'])
+        spec_T, dc, layers, dfl, extra = self._resources(opt)
+        m = E(path, devices=(0, 1), max_ctx=mc, ffn_share=share, vram_extra_mib=extra(mc), spec_T=spec_T,
+              feature_layers=layers, feature_card=dc or 0)
         log(f'caminus serve: two cards: feed-forward rows {m.f0} / {m.ffn - m.f0} (ffn_share {share})', flush=True)
-        return m, Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None
+        d = dr = None
+        if spec_T > 1:
+            from .engine.q35_dense_verify_tp import Dense35VerifyTP
+            from .engine.q35_draft_tp import DraftTarget35TP
+            m.ver = Dense35VerifyTP(m, spec_T, feature_layers=layers)
+            target = DraftTarget35TP(m, dc)
+            if dfl is not None:
+                from .engine.q35_dflash import Dflash35
+                from .decode.dflash35 import Dflash35Drafter
+                d = Dflash35(dfl[0], target, chunk=self.PREFILL_CHUNK)
+                dr = Dflash35Drafter(d)
+            else:
+                from .engine.q35_mtp import Mtp35
+                from .decode.mtp35 import Mtp35Drafter
+                m.mtp35 = d = Mtp35(target, k=self.MTP_K)
+                dr = Mtp35Drafter(d)
+            log(f'caminus serve: two-card --draft {opt["draft"]} (in development: CAMINUS_ALLOW_TP_DRAFT) on card {dc}: full head '
+                f'{target.mib:.0f} MiB, verify T {spec_T}', flush=True)
+        pf = Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK, feature_layers=layers)
+        return m, pf, d, dr
 
 
 class TwoCardTP(Arch):

@@ -19,6 +19,7 @@ fill() writes rows from the trunk's h without drafting (the prompt), 4 rows per 
 
 The T-row tapes run the trunk's T-token forms (the verify module's), so a row's bits are the same in a tape of any T.
 Each launch is waited for in run order at the end of the round; a wait that gave up reruns the whole round."""
+import contextlib
 import os
 import sys
 
@@ -33,6 +34,7 @@ from .q35_dense import attn_part_elems
 MODULE = 'k3_q35_swift_mtp'
 MODULE_TCAP = 'k3_q35_tcap_mtp'   # (ThinkingCap's: its block is all Q6_K, its head Q8_0, its embedding IQ2_S)
 MAX_T = 4
+WINDOW = 2048        # the block KV rows below the newest a checkpoint keeps (window_state; the layout's W)
 NEXTN = ('nextn.eh_proj', 'attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate', 'ffn_up', 'ffn_down')
 
 
@@ -81,7 +83,13 @@ class Mtp35:
         finally:
             F.close()
 
-    def __init__(self, eng, k=3, module=None, per_wgp=None, vram_check=True, window=2048):
+    @staticmethod
+    def window_mib(nkv, hd, window=None):
+        """MiB of the block KV rows a prompt-cache checkpoint saves (the layout's win region: W + T rows of row_bytes; W the
+        drafter's window, WINDOW by default): what a checkpoint slot adds on the drafter's card"""
+        return ((WINDOW if window is None else int(window)) + MAX_T) * 2 * int(nkv) * int(hd) * 2 / 2 ** 20
+
+    def __init__(self, eng, k=3, module=None, per_wgp=None, vram_check=True, window=None):
         """eng: a Dense35Own (its card, max_ctx, head and embedding): Swift 1.5 (block Q4_0, head Q6_K, embedding Q4_K:
         k3_q35_swift_mtp) or ThinkingCap (block Q6_K, head Q8_0, embedding IQ2_S: k3_q35_tcap_mtp); k: drafts per round
         (1 .. 4)"""
@@ -107,13 +115,16 @@ class Mtp35:
         self.token = 0       # the launch-epoch counter the prompt cache's live state reads (one per round)
         # the cache-facing identity (caminus.cache.prompt Layout / engine_key read these off the drafter's df, as of DFlashK3)
         self.kind = 'mtp'
-        self.path, self.dx, self.tgt = eng.path, int(eng.dev), eng
+        self.path, self.dx, self.tgt = eng.path, int(eng.dev), getattr(eng, 'trunk', eng)
         self.nl, self.nkv, self.hd = 1, eng.nkv, eng.hd
-        self.T, self.window = MAX_T, int(window)
+        self.T, self.window = MAX_T, WINDOW if window is None else int(window)
         self.ring = int(eng.max_ctx) + MAX_T + self.k   # the block KV's rows (the 'ring' of a by-position cache)
         self.row_bytes = 2 * eng.nkv * eng.hd * 2
         self.queued = None   # (DFlash's pending inject: none here; the cache checks it before a checkpoint)
-        with torch.cuda.device(eng.dev): self._load(); self._build()
+        h2d = getattr(eng, 'h2d', None)   # (the target's uploader: engine/upload.py; on two cards the trunk's, its card's view)
+        with torch.cuda.device(eng.dev), (h2d.loading('Mtp35', eng.path) if h2d is not None else contextlib.nullcontext()):
+            self._load()
+        with torch.cuda.device(eng.dev): self._build()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
     def _q4(self, name, rows, cols):
@@ -121,7 +132,12 @@ class Mtp35:
         t = self.eng.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         if (R, K) != (rows, cols): raise ValueError(f'Mtp35: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
         b = (q6k_planes if t.type == 'Q6_K' else q4_0_planes)(t.pread(0, t.n_bytes), R, K)
-        return dict(name=name, fmt=t.type, rows=R, K=K, w=torch.from_numpy(np.ascontiguousarray(b)).to('cuda'))
+        return dict(name=name, fmt=t.type, rows=R, K=K, w=self._up(np.ascontiguousarray(b), name, 'mat'))
+
+    def _up(self, a, name, role):
+        """a host array onto the drafter's card through the target's uploader (the plain copy for a target without one)"""
+        h2d = getattr(self.eng, 'h2d', None)
+        return torch.from_numpy(a).to('cuda') if h2d is None else h2d.up(a, name, 0, role)
 
     def _load(self):
         e, p = self.eng, f'blk.{self.il}.'

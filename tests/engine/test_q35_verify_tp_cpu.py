@@ -140,5 +140,244 @@ m1 = Dense35TP(P_S, devices=(0, 1), max_ctx=64, vram_check=False)
 check(m1.spec_T == 1 and m1.commit_max() == 1 and m1.slots[0].N == m1.D and m1.E[0].guard_T is None,
       'a spec_T 1 engine: commit_max 1, D-float slots, no verify guard_T on the decode tape (as served)')
 
+# ---- the drafted session's two-card seams ------------------------------------------------------------------------------
+from caminus.cache.prompt import Layout, PromptCache
+from caminus.engine.q35_draft_tp import DraftTarget35TP, head_mib, pass_h, verify_shards
+from caminus.engine.q35_mtp import Mtp35
+from caminus.decode.mtp35 import Mtp35Drafter
+from caminus.decode.dflash35 import Dflash35Drafter
+from caminus.engine.q35_dflash import Dflash35
+from caminus.prefill.q35own_tp import Q35OwnPrefillTP, buffer_need_tp_mib, tp_shapes
+from caminus import arch
+
+for card in (0, 1):
+    m = Dense35TP(P_T, max_ctx=64, vram_check=False, spec_T=4, feature_layers=(1, 3), feature_card=card)
+    ver = Dense35VerifyTP(m, 4, vram_check=False, feature_layers=(1, 3))
+    good = tuple(m.features.shape) == (2, 1, m.D) and tuple(ver.features.shape) == (2, 4, m.D)
+    for src in (m, ver):
+        for c in (0, 1):
+            copies = [i for i, sg in enumerate(src.E[c].segs)
+                      if sg.op == k3.OP_OWN_ADD_RMS16 and 'feat' in src.buf[c]
+                      and src.buf[c]['feat'].data_ptr() <= (sg.y or 0) < src.buf[c]['feat'].data_ptr() + src.buf[c]['feat'].numel() * 4]
+            good &= len(copies) == (2 if c == card else 0)
+            # The next writer of the residual must depend on the copy, which reads that residual as its addend.
+            for i in copies:
+                sg = src.E[c].segs[i]
+                writer = next(s for s in src.E[c].segs[i + 1:] if s.op == k3.OP_OWN_ADD_RMS16 and s.y == sg.a)
+                good &= writer.dep2p1 == i + 1
+    base = Dense35VerifyTP.need_mib(4, m)
+    diff = [a - b for a, b in zip(ver.mib, base)]
+    good &= abs(diff[card] - Dense35TP.feature_mib(m.D, 4, 2)) < 1e-9 and diff[1 - card] == 0
+    check(good, f'feature card {card}: decode and verify export the requested residuals only there, before the next x writer; bytes projected')
+    # The KV tail allocation is longer than the legal context. Its physical row stride is used by checkpoint/park files.
+    L = Layout(m, T=4)
+    pb = 2 * (m.nkv // 2) * m.hd * 2
+    check(L.pb == [pb, pb] and m.kv_rows == 67,
+          f'feature card {card}: checkpoint KV rows use physical stride {pb} bytes at max_ctx 64, spec_T 4 (not bytes / 64)')
+    # Exercise the actual checkpoint save/load offsets rather than only comparing the computed stride.
+    pc = PromptCache.__new__(PromptCache)
+    pc.m, pc.layout, pc.T, pc.df, pc.draft = m, L, 4, None, None
+    pc._sync = lambda: None
+    for k, t in m.state.items():
+        if k[-1] == 'kv':
+            raw = t.view(torch.uint8).view(m.kv_rows, pb)
+            raw[:] = torch.arange(m.kv_rows, dtype=torch.uint8)[:, None]
+        else: t.fill_(7)
+    bufs = [torch.zeros(nb, dtype=torch.uint8) for nb in L.nbytes]
+    pc._save(bufs, 32, 4)
+    for t in m.state.values(): t.zero_()
+    pc._load(bufs, types.SimpleNamespace(pos=32, commit=4, fresh=False, last_T=4, pool_ok=0, df=None), 0)
+    good = m.last_T == 4
+    for k, t in m.state.items():
+        if k[-1] == 'kv':
+            raw = t.view(torch.uint8).view(m.kv_rows, pb)
+            good &= torch.equal(raw[28:32, 0], torch.tensor([28, 29, 30, 31], dtype=torch.uint8))
+            good &= bool((raw[:28] == 0).all()) and bool((raw[32:] == 0).all())
+        else: good &= bool((t == 7).all())
+    check(good, f'feature card {card}: actual checkpoint save/load restores precisely the four KV tail rows and recurrent states')
+    shards = verify_shards(ver, m.vh)
+    check(len(shards) == 2 and shards[0] is ver.logits2[0] and shards[1] is ver.logits2[1]
+          and pass_h(ver) is ver.buf[0]['h'] and pass_h(m) is m.buf[0]['h'],
+          f'feature card {card}: sampled acceptance keeps the two device shards; MTP reads the replicated h on card 0')
+
+
+# the torch.cuda.device stand-in keeps the entered devices: an upload's device is the innermost one (the pageable arm
+# copies to the current device)
+_cur = []
+
+
+@contextlib.contextmanager
+def _device(d):
+    _cur.append(int(d))
+    try: yield
+    finally: _cur.pop()
+
+
+torch.cuda.device = _device
+
+
+def recording(m):
+    """m's uploader records (tensor, card index, current device) per upload from here on"""
+    seen, up = [], m.h2d.up
+    def rec(a, name, card, role):
+        seen.append((name, card, _cur[-1] if _cur else None)); return up(a, name, card, role)
+    m.h2d.up = rec
+    return seen
+
+
+for path in (P_S, P_T):
+    m = Dense35TP(path, max_ctx=64, vram_check=False, spec_T=4)
+    for card in (0, 1):
+        seen = recording(m)
+        target = DraftTarget35TP(m, card, check=False)
+        m.h2d.up = type(m.h2d).up.__get__(m.h2d)
+        check(target.head['rows'] == m.vocab and target.head['K'] == m.D and target.emb_dev is m.emb_dev[card]
+              and target.head['w'].numel() == m.F.T['output.weight'].n_bytes and target.mib == head_mib(path)
+              and target.dev == m.devs[card] and target.per_wgp == m.per_wgp_c[card]
+              and seen == [('output.weight', card, m.devs[card])],
+              f'{os.path.basename(path)}: drafter card {card} has the complete head (through the trunk\'s uploader, card {card}), '
+              f'shares its embedding, and projects every head byte')
+        check(not hasattr(DraftTarget35TP, '__getattr__') and not hasattr(target, 'buf') and not hasattr(target, 'E')
+              and target.module == m.module and (target.D, target.nh, target.nkv, target.max_ctx) == (m.D, m.nh, m.nkv, m.max_ctx),
+              f'{os.path.basename(path)}: the drafter view names its attributes (no fall-through to the trunk\'s buffers or tapes)')
+
+P_M = os.path.join(A.scratch, 'tiny-tp-mtp.gguf'); tiny_q35.write(P_M, variant='tcap', tp=True, mtp=True)
+m = Dense35TP(P_M, max_ctx=64, vram_check=False, spec_T=4)
+target = DraftTarget35TP(m, 0, check=False)
+seen = recording(m)
+mtp = Mtp35(target, vram_check=False)
+dr = Mtp35Drafter(mtp, vram_check=False)
+check(dr.df.tgt is m and mtp.eng is target and mtp.eng.head is target.head,
+      'MTP cache identity is the TP trunk while its tapes use the one-card full-head view')
+check(len(seen) >= 8 and {(c, d) for _, c, d in seen} == {(0, m.devs[0])} and all(n.startswith(f'blk.{mtp.il}.') for n, _, _ in seen),
+      f'MTP block weights load through the trunk\'s uploader onto card 0 ({len(seen)} uploads)')
+d = Dflash35.__new__(Dflash35); d.eng = target
+check(Dflash35Drafter(d).df.tgt is m, 'DFlash cache identity is the TP trunk, not the drafter compute view')
+# Every attribute the drafters read off their target exists on the view (DFlash is not built on CPU: read its source).
+import re, inspect
+from caminus.engine import q35_dflash as _qdf, q35_mtp as _qm
+want = set()
+for mod in (_qdf, _qm):
+    want |= set(re.findall(r'\b(?:self\.eng|eng|e)\.([A-Za-z_]\w*)', inspect.getsource(mod)))
+want -= {'trunk'}   # (read with a default: the cache identity)
+t1 = DraftTarget35TP(m, 1, check=False)
+lack = sorted(a for a in want if not hasattr(t1, a))
+check(not lack, f'the drafter view has every attribute Dflash35 and Mtp35 read off their target ({len(want)} names; missing: {lack})')
+
+# Development gate: two-card drafting is refused (serve, fit, the picker, build) unless CAMINUS_ALLOW_TP_DRAFT=1.
+tp = arch.ARCHS['qwen35-own-tp']
+os.environ.pop('CAMINUS_ALLOW_TP_DRAFT', None)
+why = [tp.draft_refusal(d) for d in ('mtp', 'dflash')]
+try:
+    tp.build(dict(model=P_M, draft='mtp', max_ctx=64)); built = True
+except ValueError as e:
+    built = 'CAMINUS_ALLOW_TP_DRAFT' not in str(e)
+from caminus.serve import cli as _cli
+keep_of = _cli._arch.of
+_cli._arch.of = lambda path: arch.ARCHS['qwen35-own']
+def recipe(**o):
+    o = dict(dict(model=P_M, cards=2, no_drafter=False, drafter=_cli.DEFAULT_DRAFTER), **o)
+    try: _cli.recipe(o, log=lambda *a, **k: None); return o['draft']
+    except ValueError as e: return 'refused' if 'CAMINUS_ALLOW_TP_DRAFT' in str(e) else f'other: {e}'
+try:
+    off = (recipe(draft='mtp'), recipe(draft=None), recipe(draft='off'))
+    os.environ['CAMINUS_ALLOW_TP_DRAFT'] = '1'
+    on = (recipe(draft='mtp'), recipe(draft=None))
+finally:
+    os.environ.pop('CAMINUS_ALLOW_TP_DRAFT', None); _cli._arch.of = keep_of
+check(all(w and 'CAMINUS_ALLOW_TP_DRAFT' in w for w in why) and tp.draft_refusal('off') is None and not built
+      and tp.default_draft(dict(model=P_M)) == 'off' and off == ('refused', 'off', 'off') and on == ('mtp', 'off'),
+      f'two-card drafting refused without CAMINUS_ALLOW_TP_DRAFT (serve recipe {off}, build refused, default off), '
+      f'served with it {on} (still never the default)')
+
+# Plain two-card serving keeps its projection: the drafter terms are zero with --draft off.
+from caminus.engine.q35_dense_tp import Dense35TP as E
+sh = tp_shapes(P_M)
+pf_old = [v + arch.PREFILL_MODULES_MIB for v in buffer_need_tp_mib(sh, tp.PREFILL_CHUNK)]
+slot_old = (E.recurrent_mib(P_M) + E.kv_pos_mib(P_M)) * 1.05 + 1.0
+nm, devs, slot_off, need_off = tp.auto_need(dict(model=P_M, draft='off'), 4)
+want = [v + p + 6 * slot_old for v, p in zip(E.projection_mib(P_M, 64, 0.5), pf_old)]
+m_off = Dense35TP(P_M, max_ctx=64, vram_check=False)
+check(abs(slot_off - slot_old) < 1e-12 and all(abs(a - b) < 1e-9 for a, b in zip(need_off(64), want))
+      and m_off.features is None and all('feat' not in b for b in m_off.buf),
+      '--draft off on two cards: the same slot, projection and tapes as before (no feature buffers)')
+
+opt_m = dict(model=P_M, draft='mtp', placement=dict(draft_card=0))
+_, _, slot_m, need_mtp = tp.auto_need(opt_m, 4)
+dm = [a - b for a, b in zip(need_mtp(64), need_off(64))]
+check(all(v > 0 for v in dm) and dm[0] > dm[1],
+      'two-card MTP projection adds the verify tape on both cards and the head, block, ring and window on card 0')
+try:
+    tp.auto_need(dict(model=P_M, draft='mtp'), 4); unplaced = False
+except ValueError:
+    unplaced = True
+check(unplaced, 'a drafted two-card projection without cards refuses a placement that stored no drafter card')
+
+# A checkpoint slot's projection covers what cache/prompt.py Layout lays out for the drafted session (T = 4 tail rows,
+# the MTP window on its card).
+m4 = Dense35TP(P_M, max_ctx=64, vram_check=False, spec_T=4)
+t4 = DraftTarget35TP(m4, 0, check=False)
+dr4 = Mtp35Drafter(Mtp35(t4, vram_check=False), vram_check=False)
+L4 = Layout(m4, dr4.df, T=4)
+raw = tp.ckpt_mib(opt_m, 4, 0, None)
+slack = [256 * (len(L4.state[c]) + 3) + 4096 for c in (0, 1)]        # (Layout's 256-byte and O_DIRECT alignment)
+from caminus.engine.q35_mtp import WINDOW, MAX_T as MTP_T
+check(all(raw[c] * 2 ** 20 + slack[c] >= L4.nbytes[c] for c in (0, 1)) and slot_m * 2 ** 20 >= max(L4.nbytes)
+      and L4.wrows == WINDOW + MTP_T and L4.df_card == 0,
+      f'checkpoint slot projection {[round(v * 2 ** 20) for v in raw]} B covers the layout {L4.nbytes} B '
+      f'(spec_T tail rows, the MTP window of {L4.wrows} rows on card 0)')
+
+# The prefill hooks shift h's token by one across chunks and send DFlash the selected card's launchers.
+pf = Q35OwnPrefillTP.__new__(Q35OwnPrefillTP)
+pf.m = types.SimpleNamespace(D=2); pf.export_h = True
+pf.B = [dict(hout=torch.arange(8, dtype=torch.float32)), {}]
+pf._chunk = lambda *args: None
+calls = []
+pf._draft = types.SimpleNamespace(kind='mtp', fill_chunk=lambda h, ts, p: calls.append((h.tolist(), ts, p)))
+pf._run_chunk([10, 11, 12, 13, 14], None, None, 1, 5, None, None)
+check(calls == [([0., 1., 2., 3., 4., 5., 6., 7.], [12, 13, 14, 14], 2)],
+      'TP prefill feeds MTP h rows with the next-position tokens, including the clamped prompt-end row')
+pf.export_h = False; pf.draft_ops = object(); calls = []
+pf._draft = types.SimpleNamespace(kind='dflash35', inject_chunk=lambda src, a, n: calls.append((src, a, n)))
+pf._run_chunk([10, 11, 12, 13, 14], None, None, 1, 5, None, None)
+check(calls == [(pf.draft_ops, 1, 4)], 'TP prefill sends DFlash the selected card launchers and exact chunk interval')
+
+base = buffer_need_tp_mib(sh, 16)
+mh = buffer_need_tp_mib(sh, 16, export_h=True)
+df = buffer_need_tp_mib(sh, 16, nfeat=2, feature_card=1)
+check(abs(mh[0] - base[0] - 16 * m.D * 6 / 2 ** 20) < 1e-9 and mh[1] == base[1]
+      and df[0] == base[0] and abs(df[1] - base[1] - 2 * 16 * m.D * 4 / 2 ** 20) < 1e-9,
+      'TP prefill projects MTP h on card 0 only and DFlash feature rows on its chosen card only')
+
+# A header-only DFlash fixture exercises placement and window projections without reading a real drafter's weights.
+import struct
+P_D = os.path.join(A.scratch, 'dflash-header.gguf')
+dm = {'general.architecture': 'dflash'}
+dm.update({f'dflash.{k}': v for k, v in dict(embedding_length=256, feed_forward_length=512, block_count=2,
+    selector_rank=32, selector_top_k=4, conv_kernel_size=4, conv_group_size=32, target_layers=[1, 3]).items()})
+dm.update({f'dflash.attention.{k}': v for k, v in dict(head_count=6, head_count_kv=1, key_length=256, sliding_window=2048).items()})
+with open(P_D, 'wb') as f:
+    f.write(struct.pack('<4sIQQ', b'GGUF', 3, 0, len(dm)) + b''.join(tiny_q35._s(k) + tiny_q35._val(v) for k, v in dm.items()))
+cards = []
+for i, (line, label, display) in enumerate(((10000, 'XT', False), (14000, 'XTX', True))):
+    dev = os.path.join(A.scratch, f'card{i}'); os.makedirs(dev, exist_ok=True)
+    with open(os.path.join(dev, 'mem_info_vram_used'), 'w') as f: f.write('0')
+    cards.append(dict(dev=dev, line_mib=line, label=label, display=display, pci=f'0000:0{i + 1}:00.0', hip=i))
+opt = dict(model=P_T, drafter=P_D, draft='dflash')
+dc, dc_rev = tp.draft_card(opt, cards), tp.draft_card(opt, cards[::-1])
+plain = tp.context_fit(dict(opt, draft='off'), cards)
+left = [r - n for r, n in zip(plain.room_mib, plain.need_mib(arch.MIN_CTX))]
+spec, dcr, layers, dfl, extra = tp._resources(opt, cards)
+placed = dict(opt, placement=dict(tp.placement_extra(opt, cards), split=tp.split(cards)))
+_, dcp, _, _, extra_p = tp._resources(placed)
+_, _, slot_df, need_df = tp.auto_need(opt, 4, cards)
+check(dc == 1 and dc_rev == 0 and dc == (0 if left[0] >= left[1] else 1) and dcr == dc and dcp == dc
+      and placed['placement']['draft_card'] == dc and extra_p(64) == extra(64)
+      and spec == 4 and layers == [1, 3] and extra(64)[dc] > extra(64)[1 - dc] and slot_df > 0 and all(v > 0 for v in need_df(64)),
+      f'DFlash card from the plain context_fit room on these cards ({[round(v) for v in left]} MiB left: card {dc}), in either order; '
+      f'placement stores it once and build reads the same; head, features, verify and windows counted')
+check(tp.placement_extra(dict(opt, draft='mtp'), cards) == {'draft_card': 0} and tp.placement_extra(dict(opt, draft='off'), cards) == {},
+      'placement stores MTP on card 0 and nothing without a drafter')
+
 print('RESULT', 'PASS' if ok else 'FAIL', flush=True)
 sys.exit(0 if ok else 1)
