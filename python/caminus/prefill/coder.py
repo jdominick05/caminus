@@ -147,7 +147,11 @@ class Prefill(PrefillDriver):
         S = self.S
         g = sorted({(gl.wmma_out, gl.router_mode) for gl in S.Gl})
         if len(g) != 1: raise ValueError(f'Prefill: the cards\' glue modes differ: {g}')
-        return dict(wmma_out=g[0][0], router_logits=g[0][1], moe=S.moe, q6k=S.q6k)
+        out = dict(wmma_out=g[0][0], router_logits=g[0][1], moe=S.moe, q6k=S.q6k)
+        if not getattr(self.m, 'q8', True):
+            # Earlier F16 engines still ran a Q8 prefill. Their parks cannot be reused after the matching F16 path.
+            out.update(target_kv='f16', kv_prefill=1)
+        return out
 
     # -- the prefill -----------------------------------------------------------------------------------------------------------
     # (run(): caminus.prefill.driver.PrefillDriver.run; these are its two-card parts)
