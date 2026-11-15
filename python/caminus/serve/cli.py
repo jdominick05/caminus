@@ -279,8 +279,27 @@ def recipe(opt, log=print):
     elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter'] and 'dflash' not in getattr(A, 'drafters', ()):
         log(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
     opt['draft'] = draft
+    opt['draft_defaulted'] = defaulted
     if A.drafter == 'dflash': opt['no_drafter'] = draft == 'off'
     return A
+
+
+def keep_default_draft(A, opt, place, log=print):
+    """a default (not asked for) one-card drafter stays only when the cards still hold the context with it: the
+    explicit --max-ctx, or MIN_CTX for auto (a smaller context would not take a harness's long requests). Otherwise
+    the serve is plain, with the full context; --draft dflash asks for the drafter anyway. place(fits) raises
+    host.PlacementError when no cards fit"""
+    if not opt.get('draft_defaulted') or opt.get('draft') != 'dflash' or A.drafter == 'dflash':
+        return
+    c = ctx_arg(opt.get('max_ctx'))
+    want = _arch.MIN_CTX if c == 'auto' else c
+    from ..device import host as _host
+    try:
+        place(lambda cs: A.fits(dict(opt, max_ctx=want), cs))
+    except _host.PlacementError:
+        log(f'caminus serve: --draft off (with the default drafter fewer than {want} positions fit these cards; '
+            f'--draft dflash runs it anyway, with less context)', flush=True)
+        opt['draft'] = 'off'
 
 
 def fit_report(argv):
@@ -293,6 +312,7 @@ def fit_report(argv):
         opt['max_ctx'] = ctx_arg(opt['max_ctx'])
         if opt.get('kv_host'):
             raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
+        keep_default_draft(A, opt, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
         placement = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
         plan = A.context_fit(opt, placement['cards'])
         if opt['max_ctx'] != 'auto' and opt['max_ctx'] > plan.native_ctx:
@@ -334,6 +354,7 @@ def main(argv=None):
     # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host
+    keep_default_draft(A, opt, lambda fits: _host.place(A.cards, fits=fits, split_of=A.split))
     try:
         pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
     except _host.PlacementError as e:

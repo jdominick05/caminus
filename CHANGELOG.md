@@ -63,10 +63,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 ### Changed
 
 - **DFlash2 drafting is on by default for the three dense 27B models on one card.** `swift-1.5`, `thinkingcap` and
-  `qwen3.8-27b` serve with `--draft dflash` when the shared 2 GB drafter file is there (`caminus pull` fetches it),
-  with the same output as plain decoding: about 1.1-1.4x on 10K and 34K-token prompts and up to 2.2x on short ones.
-  The drafter's memory comes out of the context (Swift 1.5: about 12-16K tokens on a 24 GB card); `--draft off`
-  serves plain with the full context. Two cards serve plain until two-card drafting is built.
+  `qwen3.8-27b` serve with `--draft dflash` when the shared 2 GB drafter file is there (`caminus pull` fetches it)
+  and 32,768 tokens of context still fit with it, with the same output as plain decoding: about 1.1-1.4x on 10K and
+  34K-token prompts and up to 2.2x on short ones. Swift 1.5 on a 24 GB card keeps plain decoding by default (the
+  drafter would leave it about 12-16K tokens, too few for a coding harness); `--draft dflash` runs it anyway. Two
+  cards serve plain until two-card drafting is built.
 - **Qwen3.6, Qwen3-Coder-Next and AREX-2 are paused for this release.** The panel and `caminus models` no longer list
   them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the reason. Qwen3.6 and Qwen3-Coder-Next
   aren't measured on the current code; AREX-2 is outside this release's model set. The brain / hands team (AREX-2 +

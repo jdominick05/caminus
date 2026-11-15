@@ -289,6 +289,18 @@ def main():
                 _cli.DEFAULT_DRAFTER, _cli._config.model_dir = keep_dd, keep_md
         finally:
             arch.Dense35.DRAFT_DEFAULT, _cli._arch.of = keep_d, keep_of
+        # a default drafter stays only where MIN_CTX (or the asked max_ctx) still fits with it
+        from caminus.device import host as _host
+        def _never(fits): raise _host.PlacementError('no cards fit')
+        o3 = dict(model=q35, draft='dflash', draft_defaulted=True, max_ctx='auto')
+        _cli.keep_default_draft(own, o3, _never, log=lambda *a, **k: None)
+        o4 = dict(model=q35, draft='dflash', draft_defaulted=True, max_ctx='auto'); seen = []
+        _cli.keep_default_draft(own, o4, lambda fits: seen.append(fits), log=lambda *a, **k: None)
+        o5 = dict(model=q35, draft='dflash', draft_defaulted=False, max_ctx='auto')
+        _cli.keep_default_draft(own, o5, _never, log=lambda *a, **k: None)
+        check(o3['draft'] == 'off' and o4['draft'] == 'dflash' and len(seen) == 1 and o5['draft'] == 'dflash',
+              f'serve: the default drafter is dropped when {arch.MIN_CTX} positions do not fit with it ({o3["draft"]}), kept when '
+              f'they do ({o4["draft"]}); an explicit --draft dflash is kept ({o5["draft"]})')
         check(got_default == 'off' and refused,
               f'serve: a default --draft dflash without the drafter file serves plain ({got_default}); an explicit one refuses ({refused})')
         dd = arch.Dense35.DRAFT_DEFAULT
