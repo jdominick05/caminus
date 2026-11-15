@@ -246,6 +246,7 @@ def recipe(opt, log=print):
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
+    defaulted = draft is None
     if draft is None:
         draft = A.default_draft(opt)
         if draft != 'off':
@@ -258,7 +259,12 @@ def recipe(opt, log=print):
             opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
         if A.cards != 1:
             raise ValueError('--draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off')
-        if not os.path.isfile(opt['drafter']):
+        if not os.path.isfile(opt['drafter']) and defaulted:
+            # (the default drafter's file is optional: without it the default is plain decoding, not a refusal)
+            log(f'caminus serve: --draft off (the default drafter file {opt["drafter"]} is not here: caminus pull fetches it)',
+                flush=True)
+            draft, own_dflash = 'off', False
+        elif not os.path.isfile(opt['drafter']):
             raise ValueError(f'the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)')
     elif draft == 'dflash' and A.drafter != 'dflash':
         raise ValueError(f'--draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})')

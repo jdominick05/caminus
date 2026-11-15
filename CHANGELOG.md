@@ -26,9 +26,8 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
-- **Speculative decoding for both dense 27B models, served.** Two opt-in drafters on one card, both on Caminus's own
-  code; the output is identical to `--draft off` token for token (greedy; sampled requests run plain). The default stays
-  off. Served decode, `caminus serve`, short prompts (code / prose / shell):
+- **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
+  code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
   - `--draft mtp` drafts 3 tokens with the model's own multi-token-prediction layer and verifies 4 tokens a pass; it
     needs no extra file. Swift 1.5 on an XTX: 91 / 96 / 74 tok/s against 43 plain. ThinkingCap on an XT: 68 / 74 / 53
     against 40.
@@ -63,6 +62,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Changed
 
+- **DFlash2 drafting is on by default for the three dense 27B models on one card.** `swift-1.5`, `thinkingcap` and
+  `qwen3.8-27b` serve with `--draft dflash` when the shared 2 GB drafter file is there (`caminus pull` fetches it),
+  with the same output as plain decoding: about 1.1-1.4x on 10K and 34K-token prompts and up to 2.2x on short ones.
+  The drafter's memory comes out of the context (Swift 1.5: about 12-16K tokens on a 24 GB card); `--draft off`
+  serves plain with the full context. Two cards serve plain until two-card drafting is built.
 - **Qwen3.6, Qwen3-Coder-Next and AREX-2 are paused for this release.** The panel and `caminus models` no longer list
   them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the reason. Qwen3.6 and Qwen3-Coder-Next
   aren't measured on the current code; AREX-2 is outside this release's model set. The brain / hands team (AREX-2 +

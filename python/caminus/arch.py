@@ -524,11 +524,13 @@ class Dense35(OneCard):
         return self.DFLASH_MIN_CTX if (opt.get('draft') or 'off') == 'dflash' else MIN_CTX
 
     # the drafter a serve runs when --draft is not given, per (decode module, cards); a module not listed serves plain.
-    # Every entry is off: drafting must give the plain server's reply token for token, and on a 40,885-token agent
-    # prompt the one-card MTP arm ended its reply 2 tokens before plain on both Swift and ThinkingCap
-    # (docs/dev/benchmarks.md, the served depth A/B). It returns per entry once that is explained and a served A/B at
-    # depth shows a speed-up; --draft mtp / dflash stay available.
-    DRAFT_DEFAULT = {('k3_q35_swift', 1): 'off', ('k3_q35_tcap', 1): 'off', ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
+    # One card: the DFlash2 drafter for all three files. Served A/B (docs/dev/benchmarks.md), greedy, every reply the
+    # plain reply token for token: short prompts Swift ~2.2x (XTX), ThinkingCap 1.5-1.9x (XT), the plain 27B 1.17-1.37x
+    # (XTX); public 10K / 34K prompts ThinkingCap 1.18x / 1.23x (XTX), the plain 27B 1.11x / 1.17x (XT), Swift 1.34x at
+    # 10K (XTX). The drafter's 2 GB comes out of the context (min_ctx: 8K floor). Without the drafter file, plain.
+    # Two cards: off until two-card drafting exists (#80).
+    DRAFT_DEFAULT = {('k3_q35_swift', 1): 'dflash', ('k3_q35_tcap', 1): 'dflash', ('k3_q35_gsq', 1): 'dflash',
+                     ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
 
     def default_draft(self, opt):
         from . import ggufio
