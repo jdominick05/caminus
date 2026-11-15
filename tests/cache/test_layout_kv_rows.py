@@ -93,5 +93,16 @@ for name, m, ncard in engines:
         check(refused(lambda: Layout(types.SimpleNamespace(devs=m.devs, ntok=m.ntok, max_ctx=m.max_ctx, kv_rows=bad, state=m.state))),
               f'{name}: kv_rows {bad!r} is refused')
 
+# a small context, where the old stride (the view's bytes // max_ctx) is wrong: 3 tail rows of 1024 bytes over 2048
+# positions add 1 byte per row; kv_rows gives the exact stride
+SMALL = 2048
+P3 = os.path.join(A.scratch, 'tiny-q35-2k.gguf'); tiny_q35.write(P3, n_ctx=SMALL)
+m = Dense35Own(P3, max_ctx=SMALL, vram_check=False, spec_T=SPEC_T)
+row = 2 * tiny_q35.HKV * tiny_q35.HD * 2
+nbytes = (SMALL + SPEC_T - 1) * row
+L = Layout(m)
+check(L.pb == [row] and nbytes // SMALL != row,
+      f'Dense35Own at max_ctx {SMALL}: the layout stride is {L.pb[0]} bytes (exact); the old bytes // max_ctx gives {nbytes // SMALL}')
+
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
