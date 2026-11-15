@@ -75,6 +75,8 @@ def main(argv=None):
     import torch
     model = a.model or B.get('model_path') or cli.DEFAULT_GGUF
     A = _arch.of(model)
+    why = A.rope_refusal(model)                 # (as caminus serve's recipe: a file asking for RoPE scaling is refused)
+    if why: raise SystemExit(f'replay: {why}')
     if A.cards == 2:                            # (the two-card engines: the Coder, Qwen3-Coder-Next)
         for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
         assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'

@@ -31,13 +31,17 @@ G = 12
 
 for variant in ('swift', 'tcap'):
     P = os.path.join(A.scratch, f'tiny-probe-{variant}.gguf'); tiny_q35.write(P, variant=variant)
-    eng = Dense35Own(P, max_ctx=64, spec_T=MAX_T)
+    fl = (1, 2, 3)
+    eng = Dense35Own(P, max_ctx=64, spec_T=MAX_T, feature_layers=fl, vram_extra_mib=64)
     ids = [(i * 7 + 3) % eng.vocab for i in range(G + MAX_T + 1)]
-    ref = [bits(eng.verify(ids, i, 0 if i == 0 else 1)) for i in range(G + 1)]
+    ref, feats = [], []
+    for i in range(G + 1):
+        ref.append(bits(eng.verify(ids, i, 0 if i == 0 else 1)))
+        feats.append(bits(eng.features))
     want_mod = k3.Q35_TPV_OF[k3.Q35_TP_OF[eng.module]]   # the engine's line: one-card module -> two-card -> its verify build
     for T in range(1, MAX_T + 1):
         eng.reset(); eng.pos_host = 0
-        ver = Dense35Verify(eng, T)
+        ver = Dense35Verify(eng, T, feature_layers=fl)
         ver.E.module = want_mod            # the two-card verify build of the engine's line (one-card tape, one card)
         ver.E.caps = k3.MODULE_CAPS[want_mod]
         slots = Slots(eng.dev, 1, T * eng.D)
@@ -50,11 +54,12 @@ for variant in ('swift', 'tcap'):
         while p + T <= G:
             ver.run(ids[p:p + T], p, commit)
             bad += [f'{p}+{r}' for r in range(T) if not np.array_equal(bits(ver.logits(r)), ref[p + r])]
+            bad += [f'features {p}+{r}' for r in range(T) if not np.array_equal(bits(ver.features[:, r]), feats[p + r])]
             p += T; commit = T
         if p <= G and not np.array_equal(bits(eng.verify(ids, p, commit)), ref[p]): bad.append(f'decode step at {p}')
         xeq = bool(torch.equal(xout.cpu(), partial.cpu()))
         check(not bad and xeq and not ver.bails,
-              f'{variant} T {T} on module {want_mod}: {G // T + 1} passes and a decode step bitwise the decode, the local-only '
+              f'{variant} T {T} on module {want_mod}: {G // T + 1} passes, residual features and a decode step bitwise the decode, the local-only '
               f'exchange of T * D = {T * eng.D} floats copies its partial{"" if not bad and xeq else ": " + ", ".join(bad[:6])}')
     del eng
 print('RESULT', 'PASS' if ok else 'FAIL', flush=True)

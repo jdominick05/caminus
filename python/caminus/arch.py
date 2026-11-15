@@ -20,7 +20,8 @@ An entry (Arch) answers: kind ('coder' | 'one-card' | 'tp'), cards, T (its token
 it loads: 'dflash', the catalog role of its file, or None), alias (the architecture's default model id), engine (its engine
 class); build(opt) -> (engine, prompt path, DFlash engine or None, drafter or None) in the serving order; auto_max_ctx(opt)
 (--max-ctx auto); physics() (the stats hook's card model; None: the Coder's two-card default); set_ids(alias, tok) (the
-template's model ids). Module functions: of(path) (the entry for a file), default_alias(path) (the id a server answers to:
+template's model ids); rope_refusal(path) (why a file's rope.scaling.* keys refuse it: no entry applies them yet);
+rope_facts (the model card's native context and long-context recipe, data only). Module functions: of(path) (the entry for a file), default_alias(path) (the id a server answers to:
 the catalog's for a catalog file, else the architecture's), usable_ctx(max_ctx, T), meta(path) (the header facts, read once
 per file).
 
@@ -30,6 +31,8 @@ caminus serve and arex-2 under caminus start), caminus.cmd.manage (the Coder's d
 a start read the GGUF's header up to 4 times.
 """
 import os
+import struct
+from dataclasses import dataclass
 
 from . import config as _config
 
@@ -43,15 +46,28 @@ CODER_CTX = 262144           # the Coder's max_ctx auto: its context_length, the
 LONG_NTK = 4.0               # the Coder's long-context mode (Coder.long_context): NTK RoPE scaling factor
 LONG_CACHE_CAP_GB = 64.0     # its disk tier's default cap: a full 1M park is about 16 GB with its checkpoints
 
-# the header keys meta() keeps, under the architecture's prefix: what the projections below read
+# the RoPE scaling keys a GGUF can carry, under the architecture's prefix (gguf-py's Keys.Rope.SCALING_*), and
+# rope.scale_linear, llama.cpp's older name for a linear factor, which it still reads when rope.scaling.factor is absent.
+# No engine applies them yet: Arch.rope_refusal refuses a file that sets them rather than serve it unscaled
+ROPE_KEYS = ('rope.scaling.type', 'rope.scaling.factor', 'rope.scaling.alpha', 'rope.scaling.attn_factor',
+             'rope.scaling.original_context_length', 'rope.scaling.finetuned', 'rope.scaling.yarn_truncate',
+             'rope.scaling.yarn_log_multiplier', 'rope.scaling.yarn_ext_factor', 'rope.scaling.yarn_attn_factor',
+             'rope.scaling.yarn_beta_fast', 'rope.scaling.yarn_beta_slow', 'rope.scale_linear')
+# the header keys meta() keeps, under the architecture's prefix: what the projections below read, and the RoPE scaling keys
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
-           'ssm.state_size')
+           'ssm.state_size') + ROPE_KEYS
 _META = {}
 
 
 def _file_key(path):
     st = os.stat(path)
     return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+
+
+def allow_tp_draft():
+    """CAMINUS_ALLOW_TP_DRAFT=1: the two-card dense entry (Dense35TP) builds --draft mtp / dflash. Development and its GPU
+    gates only: without it two-card drafting is refused (Arch.draft_refusal), because those gates have not passed"""
+    return os.environ.get('CAMINUS_ALLOW_TP_DRAFT') == '1'
 
 
 _CODER = {}
@@ -111,6 +127,51 @@ def meta(path):
     return _META[k]
 
 
+def rope_scaling(hp):
+    """the RoPE scaling a file's header asks for: {key: value} of the ROPE_KEYS present, or None when it asks for none.
+    None: no scaling key; rope.scaling.type 'none' (llama.cpp never scales then); or an effective factor of 1 (the
+    factor, else rope.scale_linear; llama.cpp reads 0 as 1) with no attention factor other than 1 and no alpha other
+    than 1. The other yarn_* / original_context_length / finetuned keys do nothing at factor 1, so alone they ask for
+    nothing. Any other combination counts, typed or not: llama.cpp's default type is linear"""
+    got = {k: hp[k] for k in ROPE_KEYS if k in hp}
+    if not got or got.get('rope.scaling.type') == 'none': return None
+    def one(k):
+        v = got.get(k)
+        try: return v is None or float(v) in (0.0, 1.0)
+        except (TypeError, ValueError): return False
+    f = 'rope.scaling.factor' if 'rope.scaling.factor' in got else 'rope.scale_linear'
+    if one(f) and one('rope.scaling.attn_factor') and one('rope.scaling.yarn_attn_factor') and one('rope.scaling.alpha'):
+        return None
+    return got
+
+
+@dataclass(frozen=True)
+class RopeFacts:
+    """a model line's context facts from its model card, as data: nothing serves from them yet (no engine applies YaRN;
+    the Coder's NTK long mode is LONG_NTK, a serve option)"""
+    native_ctx: int                # the context the model was trained for (the card's original_max_position_embeddings)
+    gguf_ctx: int                  # the GGUF's context_length: how far Caminus serves it unscaled today
+    card_kind: str                 # the card's long-context recipe ('yarn')
+    card_factors: tuple            # the factors the card names: x2 for twice the native context, x4 the most it recommends
+    shipped: 'str | None' = None   # the scaling Caminus applies past gguf_ctx today: None (a longer max_ctx is refused)
+    shipped_factor: 'float | None' = None
+    source: str = ''               # the model card the recipe is from
+
+
+# Qwen3-30B-A3B: "32,768 natively and 131,072 tokens with YaRN" (factor 4, original_max_position_embeddings 32768; the card
+# advises factor 2 for about 65,536 and no YaRN while contexts stay under 32,768). Its GGUF's context_length, 40,960, is
+# 32,768 for the output plus 8,192 for the prompt: served unscaled up to there, as the card allows
+QWEN3MOE_ROPE = RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), source='https://huggingface.co/Qwen/Qwen3-30B-A3B')
+# the dense Qwen3.8-27B line: 262,144 native, YaRN factor 4 from original 262,144 ("up to 1,000,000"; factor 2 for about
+# 524,288). Swift 1.5 and ThinkingCap keep the base's RoPE; their own cards make no RoPE-scaling statement, so the recipe
+# is the base card's, not one their authors claim
+QWEN35_ROPE = RopeFacts(262144, 262144, 'yarn', (2.0, 4.0), source='https://huggingface.co/Qwen/Qwen3.8-27B')
+# the Coder: its base card (Qwen3.8-Flash-Next) recommends YaRN factor 4 from 262,144; Caminus ships NTK base scaling by
+# LONG_NTK instead (Coder.long_context, an explicit max_ctx past 262,144)
+CODER_ROPE = RopeFacts(262144, 262144, 'yarn', (4.0,), shipped='ntk', shipped_factor=LONG_NTK,
+                       source='https://huggingface.co/Qwen/Qwen3.8-Flash-Next')
+
+
 def _plain(v):
     """a header value as gguf-py's contents() gives it (a numeric array as a list)"""
     return v.tolist() if hasattr(v, 'tolist') else v
@@ -154,6 +215,7 @@ def tp_shape(path):
 
 class Arch:
     """one architecture's serving recipe; the kinds below fill it in"""
+    rope_facts = None        # RopeFacts: the model card's context facts (data only), None where the registry has none
     kind = None
     cards = None
     T = 1
@@ -272,6 +334,15 @@ class Arch:
             want = self.min_ctx(opt)
         return plan.fits(min(want, plan.native_ctx))
 
+    def draft_refusal(self, draft):
+        """why this entry must not serve --draft `draft` now (a sentence for the error), or None"""
+        return None
+
+    def placement_extra(self, opt, cards):
+        """what the entry decides once on the placed cards (caminus.device.host dicts, engine order) and reads back from
+        opt['placement'] at build: nothing unless an entry needs it (Dense35TP: the drafter's card)"""
+        return {}
+
     def default_draft(self, opt):
         """the drafter kind a serve runs without --draft: the architecture's own when it needs no extra file choice (the
         Coder's DFlash), else off"""
@@ -286,6 +357,22 @@ class Arch:
         """the long-context mode's settings into opt for an explicit max_ctx past the model's context_length (a note for the
         log), or None: only the Coder has one (its KV in host memory); every other model refuses such a max_ctx in its engine"""
         return None
+
+    def rope_refusal(self, path):
+        """why this entry must not serve this file's RoPE scaling, or None (the file asks for none: rope_scaling). No engine
+        applies a file's rope.scaling.* keys yet, so every entry refuses such a file rather than serve it unscaled (its
+        attention would not be the model's). A header neither reader can read is left to the engine's own reader, which
+        refuses the file. The Coder's NTK long mode is a serve option (an explicit max_ctx past 262,144), not a file key"""
+        try:
+            md = meta(path)
+        except (OSError, ValueError, KeyError, IndexError, struct.error):
+            return None
+        rs = rope_scaling(md['hp'])
+        if rs is None: return None
+        keys = ', '.join(f'{md["arch"]}.{k} = {v}' for k, v in rs.items())
+        return (f'{os.path.basename(path)} asks for RoPE scaling ({keys}): {self.alias} ({self.name}) does not apply a '
+                f'file\'s RoPE scaling yet, and serving it unscaled would not be the model\'s attention; use a file without '
+                f'these keys (or rope.scaling.type none)')
 
     def physics(self, d=0):
         """the stats hook's card model (caminus.serve.stats.PhysicsConfig), or None: EngineStats' default, the Coder's cards"""
@@ -311,6 +398,7 @@ class Arch:
 
 class Coder(Arch):
     kind, cards, T, drafter, engine = 'coder', 2, 4, 'dflash', 'engine.flashnext_tp:FlashNextTP'
+    rope_facts = CODER_ROPE
 
     def long_context(self, opt):
         """an explicit max_ctx past the Coder's context_length (262,144): the KV cache in pinned host memory (kv_host: 13 GB at
@@ -481,6 +569,7 @@ class Q3MoE(OneCard):
     the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
     (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
     engine = 'engine.q3moe_one:Q3MoEOne'
+    rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
     PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
@@ -509,6 +598,7 @@ class Dense35(OneCard):
     file too and keeps OneCard's engine. Drafter: the model's own MTP block (--draft mtp, one card; Swift 1.5 first:
     the drafter module runs the block's Q4_0 and the file's Q6_K head)"""
     engine = 'engine.q35_dense:Dense35Own'
+    rope_facts = QWEN35_ROPE
     drafter = 'mtp'
     drafters = ('mtp', 'dflash')   # (--draft dflash: the base model's DFlash 2 drafter, decode/dflash35.py; one card, Swift 1.5 first)
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
@@ -666,10 +756,33 @@ class Dense35TP(Arch):
     (engine/q35_dense_tp.py: tensor parallelism, the two-card build of the file's module), T = 1, its own two-card prefill
     (caminus.prefill.q35own_tp.Q35OwnPrefillTP). Never picked from a header or the catalog: Dense35.variant(2) names it. The
     feed-forward rows split by the cards' streaming bandwidth (ffn_share: card 0's part; the attention and DeltaNet heads
-    split evenly)."""
+    split evenly).
+
+    Drafting (--draft mtp / dflash) runs the one-card drafters beside the trunk: the two-card verify tape
+    (engine/q35_dense_verify_tp.py) on both cards, the drafter and a complete output head on one card
+    (engine/q35_draft_tp.py). It is in development: refused unless CAMINUS_ALLOW_TP_DRAFT=1 (draft_refusal) until its
+    GPU gates pass, and never a default (default_draft)."""
     kind, cards, T, engine = 'tp', 2, 1, 'engine.q35_dense_tp:Dense35TP'
+    rope_facts = QWEN35_ROPE
     tokenizer = 'own'
+    drafter = 'mtp'
+    drafters = ('mtp', 'dflash')
     PREFILL_CHUNK = 2048
+    MTP_K, MTP_T = Dense35.MTP_K, Dense35.MTP_T
+    _mtp, _dflash = Dense35._mtp, Dense35._dflash
+
+    def draft_refusal(self, draft):
+        if (draft or 'off') == 'off' or allow_tp_draft(): return None
+        return (f'--draft {draft} on two cards is in development and refused until its GPU gates pass (docs/dev/testing.md, '
+                f'"Dense two-card drafting"; CAMINUS_ALLOW_TP_DRAFT=1 runs it for those gates): --cards 1, or --draft off')
+
+    @property
+    def DRAFT_DEFAULT(self):
+        return Dense35.DRAFT_DEFAULT          # (one table, keyed by (module, cards): two cards are off there)
+
+    def default_draft(self, opt):
+        # never a drafter by default while two-card drafting is refused; the table decides after its served A/Bs
+        return Dense35.default_draft(self, opt) if allow_tp_draft() else 'off'
 
     def split(self, cards):
         """{'ffn_share': card 0's part of the feed-forward rows}: the cards' measured streaming bandwidth (CARD_BW) by label"""
@@ -681,24 +794,128 @@ class Dense35TP(Arch):
         sp = self.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or {})
         return float(sp.get('ffn_share', 0.5))
 
-    def auto_need(self, opt, slots, cards=None):
+    def draft_card(self, opt, cards):
+        """the card the drafter runs on, from the placed cards (sysfs only, before HIP starts), or None without a drafter.
+        MTP: card 0 (its input is the trunk's final h, replicated; card 0's is read). DFlash: the card with more room left
+        after the plain two-card projection at this serve's floor context, from the same context_fit as placement and max_ctx
+        auto (draft='off', so no drafter term enters). The KV and states split evenly, so the difference between the cards'
+        rooms is the same at every context: the choice does not depend on the context picked later"""
+        d = opt.get('draft') or 'off'
+        if d == 'off': return None
+        if d == 'mtp': return 0
+        plan = self.context_fit(dict(opt, draft='off'), cards)
+        need = plan.need_mib(min(self.min_ctx(opt), plan.native_ctx))
+        left = [r - n for r, n in zip(plan.room_mib, need)]
+        return 0 if left[0] >= left[1] else 1
+
+    def placement_extra(self, opt, cards):
+        dc = self.draft_card(opt, cards)
+        return {} if dc is None else {'draft_card': dc}
+
+    def _resources(self, opt, cards=None):
+        """the drafter's part of the projection, one recipe for placement, max_ctx auto and build: (spec_T, the drafter's
+        card or None, the DFlash target layers, the DFlash (path, layers) or None, extra(c) -> per card MiB beside the
+        engine at context c). extra: the prefill's buffers; with a drafter also the verify tape on both cards and, on the
+        drafter's card, the full head copy, the verify pass's exported residuals and the drafter (MTP: its block, KV and
+        tapes, the adapter's ring; DFlash: Dflash35.need_mib). cards given (placement, caminus fit): the drafter's card from
+        them; else the one the placement stored (opt['placement']['draft_card'], computed once by placement_extra)"""
         from .engine.q35_dense_tp import Dense35TP as E
+        from .engine.q35_dense_verify_tp import Dense35VerifyTP
         from .prefill.q35own_tp import buffer_need_tp_mib, tp_shapes
         path, share = opt['model'], self._share(opt, cards)
+        mtp, dfl = self._mtp(opt), self._dflash(opt)
+        if (opt.get('draft') or 'off') == 'mtp' and mtp is None: raise ValueError('Dense35TP: --draft mtp, but the file has no MTP block')
+        drafting = mtp is not None or dfl is not None
+        spec_T = self.MTP_T if drafting else 1
+        layers = [] if dfl is None else list(dfl[1])
+        dc = None
+        if drafting:
+            dc = self.draft_card(opt, cards) if cards is not None else (opt.get('placement') or {}).get('draft_card')
+            if dc not in (0, 1):
+                raise ValueError('Dense35TP: no drafter card in the placement (caminus serve stores it: Arch.placement_extra)')
+        sh = tp_shapes(path, share)
+        pf = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(sh, self.PREFILL_CHUNK, mtp is not None, len(layers), dc or 0)]
+        if not drafting:
+            return spec_T, dc, layers, dfl, lambda c: pf[:]
+        from .engine.q35_draft_tp import head_mib
+        head, D = head_mib(path), sh[0].D
+        if dfl is not None:
+            from . import ggufio
+            from .engine.q35_dflash import Dflash35
+            F = ggufio.GGUFFile(path)
+            try: vocab = int(F.T['output.weight'].shape[1])
+            finally: F.close()
+            drafter_mib = lambda c: Dflash35.need_mib(dfl[0], vocab, self.PREFILL_CHUNK)
+        else:
+            from .engine.q35_mtp import Mtp35
+            from .decode.mtp35 import Mtp35Drafter
+            drafter_mib = lambda c: Mtp35.projection_mib(path, c, k=self.MTP_K) + Mtp35Drafter.ring_mib(D)
+        def extra(c):
+            out = [v + Dense35VerifyTP.need_mib(spec_T, max_ctx=c) for v in pf]
+            out[dc] += head + E.feature_mib(D, spec_T, len(layers)) + drafter_mib(c)
+            return out
+        return spec_T, dc, layers, dfl, extra
+
+    def ckpt_mib(self, opt, spec_T, dc, dfl):
+        """per card, MiB of one prompt-cache checkpoint slot before its margin, as cache/prompt.py Layout lays it out: the
+        recurrent states (spec_T tokens' saved inputs), T = spec_T KV tail rows of every attention layer (a drafted
+        session's passes are T wide: PromptCache passes T = spec_T to Layout), and on the drafter's card its window
+        (W + T rows of each drafter layer: Dflash's sliding window, Mtp35.WINDOW for MTP)"""
+        from .engine.q35_dense_tp import Dense35TP as E
+        path = opt['model']
+        base = E.recurrent_mib(path, spec_T) + spec_T * E.kv_pos_mib(path)
+        out = [base, base]
+        if dc is not None:
+            if dfl is not None: out[dc] += Dense35._dfl_win_mib(dfl[0])
+            else:
+                from .engine.q35_mtp import Mtp35
+                from .prefill.q35own import shapes_of
+                g = shapes_of(path)
+                out[dc] += Mtp35.window_mib(g.nkv, g.hd)
+        return out
+
+    def auto_need(self, opt, slots, cards=None):
+        from .engine.q35_dense_tp import Dense35TP as E
+        path, share = opt['model'], self._share(opt, cards)
+        spec_T, dc, layers, dfl, extra = self._resources(opt, cards)
         n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
-        slot = (E.recurrent_mib(path) + E.kv_pos_mib(path)) * 1.05 + 1.0     # (a checkpoint, per card: its states + one tail row)
-        pf = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(tp_shapes(path, share), self.PREFILL_CHUNK)]
-        need = lambda c: [v + p + (slots + 2) * slot for v, p in zip(E.projection_mib(path, c, share), pf)]
-        return n_ctx, [0, 1], slot, need
+        per_slot = [v * 1.05 + 1.0 for v in self.ckpt_mib(opt, spec_T, dc, dfl)]   # (a checkpoint per card, with its margin)
+        need = lambda c: [v + p + (slots + 2) * s for v, p, s in
+                          zip(E.projection_mib(path, c, share, spec_T=spec_T, nfeat=len(layers), feature_card=dc or 0),
+                              extra(c), per_slot)]
+        return n_ctx, [0, 1], max(per_slot), need
 
     def build(self, opt, log=print, T=None):
         from .engine.q35_dense_tp import Dense35TP as E
-        from .prefill.q35own_tp import Q35OwnPrefillTP, buffer_need_tp_mib, tp_shapes
+        from .prefill.q35own_tp import Q35OwnPrefillTP
+        why = self.draft_refusal(opt.get('draft'))
+        if why: raise ValueError(why)
         path, share = opt['model'], self._share(opt)
-        extra = [v + PREFILL_MODULES_MIB for v in buffer_need_tp_mib(tp_shapes(path, share), self.PREFILL_CHUNK)]
-        m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), ffn_share=share, vram_extra_mib=extra)
+        mc = int(opt['max_ctx'])
+        spec_T, dc, layers, dfl, extra = self._resources(opt)
+        m = E(path, devices=(0, 1), max_ctx=mc, ffn_share=share, vram_extra_mib=extra(mc), spec_T=spec_T,
+              feature_layers=layers, feature_card=dc or 0)
         log(f'caminus serve: two cards: feed-forward rows {m.f0} / {m.ffn - m.f0} (ffn_share {share})', flush=True)
-        return m, Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None
+        d = dr = None
+        if spec_T > 1:
+            from .engine.q35_dense_verify_tp import Dense35VerifyTP
+            from .engine.q35_draft_tp import DraftTarget35TP
+            m.ver = Dense35VerifyTP(m, spec_T, feature_layers=layers)
+            target = DraftTarget35TP(m, dc)
+            if dfl is not None:
+                from .engine.q35_dflash import Dflash35
+                from .decode.dflash35 import Dflash35Drafter
+                d = Dflash35(dfl[0], target, chunk=self.PREFILL_CHUNK)
+                dr = Dflash35Drafter(d)
+            else:
+                from .engine.q35_mtp import Mtp35
+                from .decode.mtp35 import Mtp35Drafter
+                m.mtp35 = d = Mtp35(target, k=self.MTP_K)
+                dr = Mtp35Drafter(d)
+            log(f'caminus serve: two-card --draft {opt["draft"]} (in development: CAMINUS_ALLOW_TP_DRAFT) on card {dc}: full head '
+                f'{target.mib:.0f} MiB, verify T {spec_T}', flush=True)
+        pf = Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK, feature_layers=layers)
+        return m, pf, d, dr
 
 
 class TwoCardTP(Arch):

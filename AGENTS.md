@@ -67,6 +67,14 @@ CLAUDE.md imports this file.
   Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
   modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
+  Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is in development: `arch.Dense35TP.draft_refusal`
+  refuses it in serve, `caminus fit`, the model picker and build unless `CAMINUS_ALLOW_TP_DRAFT=1` (development and its GPU
+  gates, docs/dev/testing.md "Dense two-card drafting"), and it is never a default. It runs the verify tape
+  (`engine/q35_dense_verify_tp.py`) on both cards and the one-card drafter beside it (`engine/q35_draft_tp.py`
+  `DraftTarget35TP`: that card's device and embedding, a full head copy, named attributes only); MTP on card 0, DFlash on
+  the card `Dense35TP.draft_card` picks once at placement from `context_fit` (stored in `opt['placement']`, read back by
+  build). Its head copy and the drafter weights load through the trunk's uploader (`Uploader.loading` frames them in
+  `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects stay outside the installed runtime set until the refusal is lifted.
   `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
@@ -98,6 +106,9 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
+  ThinkingCap's TP verify wrapper alone defines `K3_Q35_GDN_LOCAL_BASE`: empty asm operands keep GDN STEP/SAVE
+  geometry and replay pointers inside their dispatch branches. Preserve the addresses and floating-point statements;
+  check the whole build's object isolation and register budget before running its TP bitwise gates.
   Plain Qwen3.8-27B GSQ-RCO uses `k3_q35_gsq` / `q35_prefill_gsq` and `Q35R_*` host names; `Q35G_*` belongs to
   Qwen3.6, so reusing it changes another model's dispatch. Its verify pass is three launches: prefix, the one IQ1_M
   ffn_gate on `k3_q35_gsq_ver_m`, then suffix on `k3_q35_gsq_ver` with a scratch embedding to stage the IQ grids.
@@ -105,8 +116,6 @@ CLAUDE.md imports this file.
   Its MTP module uses the Q6_K block and Q4_K head; its DFlash module includes that head without staging IQ grids.
   All four verify/drafter objects belong to the explicit installed runtime. CPU tape/selector and staging tests
   check their inclusion; finding them in a checkout's build directory does not prove that a wheel ships them.
-  The catalog remains paused until served drafting identity and throughput gates pass; compiled modules alone do
-  not authorize a default or catalog change.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
@@ -121,6 +130,9 @@ CLAUDE.md imports this file.
   Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin
   below the guard distinct from the cache/display reserve; `tests/test_context_fit.py` checks parity at the fit limit
   and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum.
+  `meta()` keeps the header's `rope.scaling.*` keys; every entry refuses a file that sets them (`Arch.rope_refusal`, from
+  serve's `recipe` and replay): no engine applies a file's RoPE scaling yet, and such a file is never served unscaled.
+  `rope_facts` holds each model card's native context and long-context recipe as data only.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path).

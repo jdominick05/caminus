@@ -32,7 +32,7 @@ class Dflash35Drafter:
         if not isinstance(d, Dflash35): raise ValueError(f'Dflash35Drafter: {type(d).__name__} is not a Dflash35 drafter')
         self.d = d
         self.df = self               # (the cache reads the drafter's df: Layout, engine_key, the window protocol)
-        self.tgt = d.eng
+        self.tgt = getattr(d.eng, 'trunk', d.eng)
         self.queued = None           # (nothing is ever queued: every inject runs at once)
         self.lo = self.hi = 0
         self.filler = False

@@ -244,6 +244,8 @@ def recipe(opt, log=print):
         A = A.variant(opt.get('cards'))
     except ValueError as exc:
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
+    why = A.rope_refusal(opt['model'])          # (a file whose rope.scaling.* keys no engine applies: never served unscaled)
+    if why: raise ValueError(why)
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
     defaulted = draft is None
@@ -252,13 +254,13 @@ def recipe(opt, log=print):
         if draft != 'off':
             log(f'caminus serve: --draft {draft} (the default for {A.name} on {A.cards} card(s); --draft off: plain decoding)',
                 flush=True)
+    why = A.draft_refusal(draft)       # (two-card drafting: in development, refused unless CAMINUS_ALLOW_TP_DRAFT=1)
+    if why: raise ValueError(why)
     own_dflash = draft == 'dflash' and A.drafter != 'dflash' and 'dflash' in getattr(A, 'drafters', ())
     if own_dflash:
         if opt['drafter'] == DEFAULT_DRAFTER:
             from .. import models as _models
             opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
-        if A.cards != 1:
-            raise ValueError('--draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off')
         if not os.path.isfile(opt['drafter']) and defaulted:
             # (the default drafter's file is optional: without it the default is plain decoding, not a refusal)
             log(f'caminus serve: --draft off (the default drafter file {opt["drafter"]} is not here: caminus pull fetches it)',
@@ -270,8 +272,6 @@ def recipe(opt, log=print):
         raise ValueError(f'--draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})')
     if draft == 'mtp' and A.drafter != 'mtp':
         raise ValueError(f'--draft mtp: no MTP drafter for {A.name} in K3 yet (--draft off: plain decoding)')
-    if draft == 'mtp' and A.cards != 1:
-        raise ValueError('--draft mtp runs on one card only (the two-card drafter is not built yet): --cards 1, or --draft off')
     if draft == 'dflash' and not own_dflash:
         if not (opt['drafter'] and os.path.isfile(opt['drafter'])):
             raise ValueError(f'the DFlash GGUF {opt["drafter"]} does not exist: run `caminus download`, set CAMINUS_DFLASH '
@@ -359,12 +359,15 @@ def main(argv=None):
     keep_default_draft(A, opt, lambda fits: _host.place(A.cards, fits=fits, split_of=A.split))
     try:
         pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
-    except _host.PlacementError as e:
+        pl_extra = A.placement_extra(opt, pl['cards'])   # (decided once here; build reads it back: the drafter's card)
+    except (_host.PlacementError, ValueError) as e:     # (ValueError: a refusal raised while fitting, e.g. no MTP block)
         print(f'caminus serve: {e}', file=sys.stderr)
         return 2
     os.environ['HIP_VISIBLE_DEVICES'] = pl['hip_visible']
-    opt['placement'] = dict(cards=[c['pci'] for c in pl['cards']], names=[c['label'] for c in pl['cards']], split=pl['split'])
-    print(f"caminus serve: cards {pl['note']} (HIP_VISIBLE_DEVICES={pl['hip_visible']})", flush=True)
+    opt['placement'] = dict(cards=[c['pci'] for c in pl['cards']], names=[c['label'] for c in pl['cards']], split=pl['split'],
+                            **pl_extra)
+    print(f"caminus serve: cards {pl['note']} (HIP_VISIBLE_DEVICES={pl['hip_visible']})"
+          + (f", drafter on card {opt['placement']['draft_card']}" if 'draft_card' in opt['placement'] else ''), flush=True)
     from .server import K3Server, set_process_name
     set_process_name('caminus')                  # on the main thread, before any thread starts
     from .hw import HwReader

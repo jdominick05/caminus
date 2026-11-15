@@ -92,7 +92,8 @@ def serving_modes(m):
     """The model picker's card counts and drafters, from the same registry serve uses (no model load or torch).
 
     The picker also offers auto: it omits --draft, leaving Arch.default_draft to choose from the served measurements.
-    A two-card variant advertises drafting only once its registry entry supports it.
+    A two-card variant advertises drafting only once its registry entry supports it and does not refuse it
+    (Arch.draft_refusal: two-card drafting is refused until its GPU gates pass).
     """
     from .. import arch
     A = arch.lookup(m.arch)
@@ -102,7 +103,7 @@ def serving_modes(m):
             a = A.variant(nc)
         except ValueError:
             continue
-        ds = {d for d in (a.drafter, *getattr(a, 'drafters', ())) if d in ('mtp', 'dflash')}
+        ds = {d for d in (a.drafter, *getattr(a, 'drafters', ())) if d in ('mtp', 'dflash') and a.draft_refusal(d) is None}
         out.append(dict(cards=nc, drafts=['off'] + [d for d in ('mtp', 'dflash') if d in ds]))
     return out
 

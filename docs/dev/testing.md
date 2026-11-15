@@ -88,6 +88,42 @@ kernel_dir setting in the test environment/config. The harness prints the instal
 object count. CPU preflight success proves package admission only; the full model/tool/restore tests still run on
 the GPU. Without the environment switch the existing checkout server path is used.
 
+## Dense two-card drafting
+
+ThinkingCap's gates need its two-card verify register fix (#107) merged first; Swift's can run now.
+
+`--cards 2 --draft mtp|dflash` for Swift 1.5 and ThinkingCap is refused unless `CAMINUS_ALLOW_TP_DRAFT=1`, until the
+gates below pass on both models. The CPU check covers the feature-copy dependencies on either card, the drafter's full
+head and its uploads, the cache identity, the checkpoint layout against its projection, the prefill hooks, the drafter
+card's choice and the refusal itself:
+
+```bash
+python -I tests/engine/test_q35_verify_tp_cpu.py --scratch SCRATCH
+```
+
+GPU gates, in order, each under the guard and with the upload log on (`CAMINUS_UPLOAD_LOG=ULOG`; a fault address goes
+to `tools/gates/sdma_classify.py`). `L` is the DFlash2 file's `dflash.target_layers`, comma-separated; `KIND` is
+`off`, `mtp` and `dflash` in turn (gate 4: `mtp` and `dflash`):
+
+```bash
+# 1. the TP verify module alone on the non-display card (one-card tape, the module's ops; features bitwise)
+CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 600 python -I tests/engine/test_q35_tp_ver_probe.py --scratch SCRATCH
+# 2. per model: two-card load with read-back, then verify bitwise the decode steps, features on each card in turn
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers L --feature-card 0
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers L --feature-card 1
+# 3. per model and KIND: the served end to end (greedy and sampled identity against --draft off, own imports, restart)
+CAMINUS_ALLOW_TP_DRAFT=1 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF \
+  --scratch DIR --card 0,1 --cards 2 --draft KIND --block-imports gguf,tokenizers --restart
+# 4. per model and drafter: the served gain at depth, at least three interleaved rounds
+CAMINUS_ALLOW_TP_DRAFT=1 tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS \
+  --scratch DIR --card 0,1 --cards 2 --draft KIND
+```
+
+Gate 2 must hold at every accepted row, the rejected tails and grids 3/6/7 (the test runs them); gate 3 compares
+`greedy_sha256` and `sampled_sha256` with the `--draft off` run. Lifting the refusal also adds the two `_tp_ver` objects
+to `device/kernels.py`'s runtime set; a default needs gate 4's measured gain.
+
 ## The accuracy rules
 
 - **Bitwise:** a change to the engine must leave logits and routing bitwise equal to the stored references, across grid
