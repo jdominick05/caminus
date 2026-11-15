@@ -229,10 +229,21 @@ __device__ __forceinline__ float q35_gdn_dot(const float4 m, const float4 k4) {
 }
 __device__ __forceinline__ void q35_op_gdn_step(const Seg & sg, int t) {
     constexpr int S = 128, CPT = 32, CPW = CPT / 8;
-    const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, nk = sg.pad1, kh = h % nk, H = sg.N, T = seg_T(sg);
+    int nk = sg.pad1, H = sg.N;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    asm volatile("" : "+s"(nk), "+s"(H));
+#endif
+    const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, kh = h % nk, T = seg_T(sg);
     const int lane = K3TID % 32, wave = K3WAVE, mprev = ((const int *)sg.asum)[1];
     const int RS = nk * S + H * S + 2 * H;                         // a saved input record per token
-    float * base = (float *)sg.aux; const float * rec = base + (size_t)H * S * S;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    uintptr_t addr = (uintptr_t)sg.aux;
+    asm volatile("" : "+v"(addr));   // preserve the address, prevent its derived replay pointer hoisting across dispatch
+    float * base = (float *)addr;
+#else
+    float * base = (float *)sg.aux;
+#endif
+    const float * rec = base + (size_t)H * S * S;
     float4 * M = (float4 *)(base + (size_t)h * S * S);
     const float scale = 1.0f / sqrtf((float)S);
     float4 m[CPW];
@@ -279,8 +290,17 @@ __device__ __forceinline__ void q35_op_gdn_step(const Seg & sg, int t) {
 //   saved-input records (read by the next pass's commit replay). Same Seg fields as OP_GDN_STEP; tasks = tokens.
 __device__ __forceinline__ void q35_op_gdn_save(const Seg & sg, int tt) {
     constexpr int S = 128;
-    const int nk = sg.pad1, H = sg.N, RS = nk * S + H * S + 2 * H;
-    float * rr = (float *)sg.aux + (size_t)H * S * S + (size_t)tt * RS;
+    int nk = sg.pad1, H = sg.N;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    asm volatile("" : "+s"(nk), "+s"(H));
+    uintptr_t addr = (uintptr_t)sg.aux;
+    asm volatile("" : "+v"(addr));
+    float * base = (float *)addr;
+#else
+    float * base = (float *)sg.aux;
+#endif
+    const int RS = nk * S + H * S + 2 * H;
+    float * rr = base + (size_t)H * S * S + (size_t)tt * RS;
     const float * qk = (const float *)sg.a + (size_t)tt * 2 * nk * S, * v = (const float *)sg.W + (size_t)tt * sg.pad2;
     const float * gt = sg.gs + (size_t)tt * 2 * H;
     for (int i = K3TID; i < nk * S; i += blockDim.x) rr[i] = qk[nk * S + i];
