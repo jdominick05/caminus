@@ -9,8 +9,8 @@ CLAUDE.md imports this file.
 - It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
   cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
-  `--draft mtp` (their own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
-  model's DFlash2 drafter on one card; `decode/dflash35.py`). `python/caminus/models.py` is the catalog.
+  `--draft mtp` (their own multi-token-prediction block; `decode/mtp35.py`) and `--draft dflash` (its base
+  model's DFlash2 drafter; `decode/dflash35.py`), on one card or two. `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
 - Tested on one machine only: an RX 7900 XTX (drives the monitors) + an RX 7900 XT on a PCIe 4.0 x4 link, 29 GiB RAM, Linux.
@@ -67,14 +67,16 @@ CLAUDE.md imports this file.
   Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
   modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
-  Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is in development: `arch.Dense35TP.draft_refusal`
-  refuses it in serve, `caminus fit`, the model picker and build unless `CAMINUS_ALLOW_TP_DRAFT=1` (development and its GPU
-  gates, docs/dev/testing.md "Dense two-card drafting"), and it is never a default. It runs the verify tape
+  Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is served for Swift 1.5 and ThinkingCap, DFlash2 by
+  default (`Dense35.DRAFT_DEFAULT` keyed by (module, 2), under serve's 32K rule; docs/dev/testing.md "Dense two-card
+  drafting" holds its gates). `arch.Dense35TP.draft_refusal` refuses it for a file whose decode module has no two-card
+  verify object (`k3.Q35_TPV_OF`; the plain 27B's `k3_q35_gsq` has no two-card form), and the model picker offers two
+  cards only for `Dense35TP.two_card_models`. It runs the verify tape
   (`engine/q35_dense_verify_tp.py`) on both cards and the one-card drafter beside it (`engine/q35_draft_tp.py`
   `DraftTarget35TP`: that card's device and embedding, a full head copy, named attributes only); MTP on card 0, DFlash on
   the card `Dense35TP.draft_card` picks once at placement from `context_fit` (stored in `opt['placement']`, read back by
   build). Its head copy and the drafter weights load through the trunk's uploader (`Uploader.loading` frames them in
-  `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects stay outside the installed runtime set until the refusal is lifted.
+  `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects are in the installed runtime set; the drafters are the one-card objects.
   `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps

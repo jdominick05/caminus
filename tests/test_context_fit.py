@@ -157,7 +157,7 @@ class ContextFit(unittest.TestCase):
             self.assertEqual(cli.fit_report([*argv, '--kv-host', '--json']), 1)
         self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
 
-    def test_query_errors_have_no_invented_maximum_and_tp_drafting_stays_refused(self):
+    def test_query_errors_have_no_invented_maximum_and_tp_drafting_needs_a_two_card_verify_object(self):
         for argv in (['--model', str(SCRATCH / 'missing.gguf')],):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout), patch.object(host, 'place') as place:
@@ -166,12 +166,16 @@ class ContextFit(unittest.TestCase):
             self.assertFalse(report['ok'])
             self.assertIsNone(report['max_ctx'])
             place.assert_not_called()
-        model = SCRATCH / 'refused.gguf'
-        model.write_bytes(b'fixture')
+        # (two-card drafting is served for Swift 1.5 and ThinkingCap; a file whose decode module has no two-card verify
+        # object, the plain 27B's GSQ formats, is refused it before any placement)
+        sys.path.insert(0, str(Path(__file__).resolve().parent / 'engine'))
+        import tiny_q35
+        model = SCRATCH / 'refused-gsq.gguf'
+        tiny_q35.write(str(model), variant='gsq', tp=True)
         for draft in ('mtp', 'dflash'):
             with patch.object(arch, 'of', return_value=arch.ARCHS['qwen35-own']), \
                  patch.object(host, 'place') as place:
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, 'two-card verify object'):
                     cli.recipe(cli.parse(['--model', str(model), '--cards', '2', '--draft', draft]))
                 place.assert_not_called()
 

@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 # the paused models (caminus.models.PAUSED) stay in these fixtures; paused_checks() runs a child without the variable
 PAUSED_ENV = {k: v for k, v in os.environ.items() if k != 'CAMINUS_ALLOW_PAUSED'}
 os.environ['CAMINUS_ALLOW_PAUSED'] = '1'
-os.environ.pop('CAMINUS_ALLOW_TP_DRAFT', None)   # (two-card drafting stays refused here: the picker must not offer it)
 
 FAILS = []
 
@@ -47,9 +46,10 @@ def main():
 
     # The basic panel's model picker gets capabilities from the serving registry, without importing the GPU runtime.
     swift_modes = manage.serving_modes(models.BY_NAME['swift-1.5'])
-    check([r['cards'] for r in swift_modes] == [1, 2]
-          and swift_modes[0]['drafts'] == ['off', 'mtp', 'dflash']
-          and swift_modes[1]['drafts'] == ['off']          # (two-card drafting: refused until its GPU gates pass)
+    both = [dict(cards=1, drafts=['off', 'mtp', 'dflash']), dict(cards=2, drafts=['off', 'mtp', 'dflash'])]
+    check(swift_modes == both and manage.serving_modes(models.BY_NAME['thinkingcap']) == both
+          # (the plain 27B has no two-card form: one card only, so no two-card drafting is offered)
+          and manage.serving_modes(models.BY_NAME['qwen3.8-27b']) == [dict(cards=1, drafts=['off', 'mtp', 'dflash'])]
           and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off'])]
           and manage.serving_modes(models.BY_NAME['coder']) == [dict(cards=2, drafts=['off', 'dflash'])]
           and 'torch' not in sys.modules,

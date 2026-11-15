@@ -32,7 +32,7 @@ again.
   path). Its context is 40,960 tokens, the model's own limit, so it suits shorter work: 213 tok/s with 4K tokens of
   context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
-  path). `caminus serve --model ... --draft mtp` (one card) drafts with the model's
+  path). `caminus serve --model ... --draft mtp` drafts with the model's
   own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
   XTX; no extra file); `--draft dflash` drafts with its base model's DFlash2 drafter
   instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~12-16K tokens of
@@ -41,8 +41,8 @@ again.
   15 tok/s with 28K tokens of context.
 - **`thinkingcap`** is the other dense 27B model on Caminus's own code end to end: a finetune of the same base, quantized
   to 4.2 bits per weight. It is the smaller download and writes a little faster than `swift-1.5`. It fits a 20 GB card
-  too: on an XT the server picks about 53K tokens of context by itself. `--draft mtp` (one card) drafts with its own
-  prediction block (about 1.8x on code and prose, served on an XT; no extra file); `--draft dflash` (one card) drafts with the base
+  too: on an XT the server picks about 53K tokens of context by itself. `--draft mtp` drafts with its own
+  prediction block (about 1.8x on code and prose, served on an XT; no extra file); `--draft dflash` drafts with the base
   model's DFlash2 drafter (output identical to plain decoding; served on an XT about 1.9x on code and prose, 1.5x on
   shell). It slows with depth (about 16 tok/s with 28K tokens of context). Its licence is PolyForm Small Business 1.0.0: read its terms
   before any commercial use.
@@ -66,7 +66,12 @@ the 27B models: the drafter's memory comes out of the context).
 
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
 --cards 2`). Each card holds half of every layer, so the model writes about 1.4 times as fast and the full 262,144-token
-context fits. Reading a prompt is about as fast as on one XTX for now.
+context fits with `--draft off` (with the default drafter it is projected to fit too on an XTX + XT with free memory, a
+little less when the desktop holds memory on the XTX). Reading a prompt is about as fast as on one XTX for now. Both
+drafters work on two cards too, with the same output as plain decoding, and `--draft dflash` is the default there when
+the drafter file is present and 32,768 tokens of context still fit with it. On an XTX + XT with 10K-34K-token prompts, Swift 1.5 drafts at 1.36-1.44x and
+ThinkingCap at 1.13-1.18x; on 11K-29K-token agent prompts the range is 1.20-1.45x
+([benchmarks](dev/benchmarks.md#speculative-decoding-on-two-cards-served)). `--draft off` turns it off.
 
 ## The names your tools use
 

@@ -64,12 +64,6 @@ def _file_key(path):
     return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
 
 
-def allow_tp_draft():
-    """CAMINUS_ALLOW_TP_DRAFT=1: the two-card dense entry (Dense35TP) builds --draft mtp / dflash. Development and its GPU
-    gates only: without it two-card drafting is refused (Arch.draft_refusal), because those gates have not passed"""
-    return os.environ.get('CAMINUS_ALLOW_TP_DRAFT') == '1'
-
-
 _CODER = {}
 
 
@@ -334,8 +328,9 @@ class Arch:
             want = self.min_ctx(opt)
         return plan.fits(min(want, plan.native_ctx))
 
-    def draft_refusal(self, draft):
-        """why this entry must not serve --draft `draft` now (a sentence for the error), or None"""
+    def draft_refusal(self, draft, path=None):
+        """why this entry must not serve --draft `draft` for the GGUF at path (a sentence for the error), or None. Without a
+        path (the model picker: no file is read) only what the entry knows without a file"""
         return None
 
     def placement_extra(self, opt, cards):
@@ -620,9 +615,11 @@ class Dense35(OneCard):
     # plain reply token for token: short prompts Swift ~2.2x (XTX), ThinkingCap 1.5-1.9x (XT), the plain 27B 1.17-1.37x
     # (XTX); public 10K / 34K prompts ThinkingCap 1.18x / 1.23x (XTX), the plain 27B 1.11x / 1.17x (XT), Swift 1.34x at
     # 10K (XTX). The drafter's 2 GB comes out of the context (min_ctx: 8K floor). Without the drafter file, plain.
-    # Two cards: off until two-card drafting exists (#80).
+    # Two cards (XTX + XT, served A/B with every drafted reply token for token the plain one): DFlash2 for Swift 1.5 and
+    # ThinkingCap, 1.13-1.44x on public 10K / 34K prompts and 1.20-1.45x on 11K / 29K agent prompts; the drafter's VRAM
+    # comes out of the two-card context. The plain 27B has no two-card form (no k3_q35_gsq entry: plain).
     DRAFT_DEFAULT = {('k3_q35_swift', 1): 'dflash', ('k3_q35_tcap', 1): 'dflash', ('k3_q35_gsq', 1): 'dflash',
-                     ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
+                     ('k3_q35_swift', 2): 'dflash', ('k3_q35_tcap', 2): 'dflash'}
 
     def default_draft(self, opt):
         from . import ggufio
@@ -760,8 +757,10 @@ class Dense35TP(Arch):
 
     Drafting (--draft mtp / dflash) runs the one-card drafters beside the trunk: the two-card verify tape
     (engine/q35_dense_verify_tp.py) on both cards, the drafter and a complete output head on one card
-    (engine/q35_draft_tp.py). It is in development: refused unless CAMINUS_ALLOW_TP_DRAFT=1 (draft_refusal) until its
-    GPU gates pass, and never a default (default_draft)."""
+    (engine/q35_draft_tp.py). The default is DFlash2 for both models (Dense35.DRAFT_DEFAULT, keyed by (module, 2)). A file
+    whose decode module has no two-card verify object (k3.Q35_TPV_OF; the plain 27B's k3_q35_gsq has no two-card form at
+    all) is refused two-card drafting (draft_refusal); two_card_models names the catalog models that have one, for the
+    model picker (it reads no file)."""
     kind, cards, T, engine = 'tp', 2, 1, 'engine.q35_dense_tp:Dense35TP'
     rope_facts = QWEN35_ROPE
     tokenizer = 'own'
@@ -771,18 +770,37 @@ class Dense35TP(Arch):
     MTP_K, MTP_T = Dense35.MTP_K, Dense35.MTP_T
     _mtp, _dflash = Dense35._mtp, Dense35._dflash
 
-    def draft_refusal(self, draft):
-        if (draft or 'off') == 'off' or allow_tp_draft(): return None
-        return (f'--draft {draft} on two cards is in development and refused until its GPU gates pass (docs/dev/testing.md, '
-                f'"Dense two-card drafting"; CAMINUS_ALLOW_TP_DRAFT=1 runs it for those gates): --cards 1, or --draft off')
+    # the catalog models (caminus.models) whose files' decode modules have a two-card build and its verify object
+    # (k3.Q35_TP_OF, k3.Q35_TPV_OF: Swift's and ThinkingCap's). A fact about the catalog's files: the picker reads no file,
+    # so nothing derives it; a new two-card module adds its model here
+    two_card_models = ('swift-1.5', 'thinkingcap')
+
+    def draft_refusal(self, draft, path=None):
+        if (draft or 'off') == 'off' or path is None: return None
+        from . import ggufio
+        from .engine import k3
+        from .engine.q35_dense import module_of
+        try:
+            F = ggufio.GGUFFile(path)
+        except Exception:                       # noqa: BLE001 - a file this reader refuses: the engine's own checks say why
+            return None
+        try:
+            one = module_of(F)
+        except Exception:                       # noqa: BLE001 - formats module_of cannot place: the engine refuses them
+            return None
+        finally:
+            F.close()
+        if k3.Q35_TPV_OF.get(k3.Q35_TP_OF.get(one)) is None:
+            return (f'--draft {draft} on two cards: the decode module {one} has no two-card verify object (two-card drafting '
+                    f'serves Swift 1.5 and ThinkingCap): --cards 1, or --draft off')
+        return None
 
     @property
     def DRAFT_DEFAULT(self):
-        return Dense35.DRAFT_DEFAULT          # (one table, keyed by (module, cards): two cards are off there)
+        return Dense35.DRAFT_DEFAULT          # (one table, keyed by (module, cards))
 
     def default_draft(self, opt):
-        # never a drafter by default while two-card drafting is refused; the table decides after its served A/Bs
-        return Dense35.default_draft(self, opt) if allow_tp_draft() else 'off'
+        return Dense35.default_draft(self, opt)
 
     def split(self, cards):
         """{'ffn_share': card 0's part of the feed-forward rows}: the cards' measured streaming bandwidth (CARD_BW) by label"""
@@ -888,7 +906,7 @@ class Dense35TP(Arch):
     def build(self, opt, log=print, T=None):
         from .engine.q35_dense_tp import Dense35TP as E
         from .prefill.q35own_tp import Q35OwnPrefillTP
-        why = self.draft_refusal(opt.get('draft'))
+        why = self.draft_refusal(opt.get('draft'), opt['model'])
         if why: raise ValueError(why)
         path, share = opt['model'], self._share(opt)
         mc = int(opt['max_ctx'])
@@ -912,7 +930,7 @@ class Dense35TP(Arch):
                 from .decode.mtp35 import Mtp35Drafter
                 m.mtp35 = d = Mtp35(target, k=self.MTP_K)
                 dr = Mtp35Drafter(d)
-            log(f'caminus serve: two-card --draft {opt["draft"]} (in development: CAMINUS_ALLOW_TP_DRAFT) on card {dc}: full head '
+            log(f'caminus serve: two-card --draft {opt["draft"]} on card {dc}: full head '
                 f'{target.mib:.0f} MiB, verify T {spec_T}', flush=True)
         pf = Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK, feature_layers=layers)
         return m, pf, d, dr

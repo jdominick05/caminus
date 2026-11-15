@@ -67,12 +67,18 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Changed
 
+- **Drafting on two cards for Swift 1.5 and ThinkingCap, DFlash2 by default.** `caminus start swift-1.5 --cards 2` (or
+  `thinkingcap`) now drafts with `--draft dflash` when the shared drafter file is there and 32,768 tokens of context
+  still fit with it; `--draft mtp` works on two cards too, and `--draft off` serves plain. The output is identical to
+  plain decoding. On an XTX + XT, served: 1.36-1.44x (Swift 1.5) and 1.13-1.18x (ThinkingCap) on 10K-34K-token prompts,
+  1.20-1.45x on 11K-29K-token agent prompts. The panel offers auto / off / MTP / DFlash for both on two cards. See
+  [benchmarks](docs/dev/benchmarks.md#speculative-decoding-on-two-cards-served).
 - **DFlash2 drafting is on by default for the three dense 27B models on one card.** `swift-1.5`, `thinkingcap` and
   `qwen3.8-27b` serve with `--draft dflash` when the shared 2 GB drafter file is there (`caminus pull` fetches it)
   and 32,768 tokens of context still fit with it, with the same output as plain decoding: about 1.1-1.4x on 10K and
   34K-token prompts and up to 2.2x on short ones. Swift 1.5 on a 24 GB card keeps plain decoding by default (the
   drafter would leave it about 12-16K tokens, too few for a coding harness); `--draft dflash` runs it anyway. Two
-  cards serve plain until two-card drafting is built.
+  cards: above.
 - **Qwen3.6, Qwen3-Coder-Next and AREX-2 are paused for this release.** The panel and `caminus models` no longer list
   them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the reason. Qwen3.6 and Qwen3-Coder-Next
   aren't measured on the current code; AREX-2 is outside this release's model set. The brain / hands team (AREX-2 +

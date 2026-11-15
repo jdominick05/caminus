@@ -254,7 +254,7 @@ def recipe(opt, log=print):
         if draft != 'off':
             log(f'caminus serve: --draft {draft} (the default for {A.name} on {A.cards} card(s); --draft off: plain decoding)',
                 flush=True)
-    why = A.draft_refusal(draft)       # (two-card drafting: in development, refused unless CAMINUS_ALLOW_TP_DRAFT=1)
+    why = A.draft_refusal(draft, opt['model'])   # (two-card drafting: only a decode module with a two-card verify object)
     if why: raise ValueError(why)
     own_dflash = draft == 'dflash' and A.drafter != 'dflash' and 'dflash' in getattr(A, 'drafters', ())
     if own_dflash:
@@ -285,9 +285,9 @@ def recipe(opt, log=print):
 
 
 def keep_default_draft(A, opt, place, log=print):
-    """a default (not asked for) one-card drafter stays only when the cards still hold the context with it: the
-    explicit --max-ctx, or MIN_CTX for auto (a smaller context would not take a harness's long requests). Otherwise
-    the serve is plain, with the full context; --draft dflash asks for the drafter anyway. place(fits) raises
+    """a default (not asked for) DFlash2 drafter of a dense 27B model, on one card or two, stays only when the cards still
+    hold the context with it: the explicit --max-ctx, or MIN_CTX for auto (a smaller context would not take a harness's
+    long requests). Otherwise the serve is plain, with the full context; --draft dflash asks for the drafter anyway. place(fits) raises
     host.PlacementError when no cards fit"""
     if not opt.get('draft_defaulted') or opt.get('draft') != 'dflash' or A.drafter == 'dflash':
         return
@@ -298,7 +298,7 @@ def keep_default_draft(A, opt, place, log=print):
         place(lambda cs: A.fits(dict(opt, max_ctx=want), cs))
     except _host.PlacementError:
         log(f'caminus serve: --draft off (with the default drafter fewer than {want} positions fit these cards; '
-            f'--draft dflash runs it anyway, with less context)', flush=True)
+            f'--draft dflash runs it anyway' + (', with less context)' if getattr(A, 'cards', None) != 2 else ' if a --max-ctx below that fits)'), flush=True)
         opt['draft'] = 'off'
         return
     opt['draft_floor'] = want    # (the real placement and max_ctx auto keep this floor: Dense35.min_ctx)

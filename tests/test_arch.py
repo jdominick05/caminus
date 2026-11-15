@@ -347,8 +347,8 @@ def main():
         check(nm == 4096 and need_m(4096)[0] > need_o(4096)[0] and ring > 0,
               f'qwen35-own auto_need --draft mtp on a synthetic nextn file: {need_m(4096)[0]:.1f} MiB vs off '
               f'{need_o(4096)[0]:.1f} (the adapter ring {ring:.4f} MiB included), no header-key error')
-        # the default drafter (no --draft): the table's kind on one card when the file has the MTP block, plain without it,
-        # off on two cards (no two-card drafter yet); the Coder keeps DFlash
+        # the default drafter (no --draft): the table's kind when the file has the MTP block, plain without it, on one card
+        # and two (the table here: off on two cards); the Coder keeps DFlash
         # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's k3_q35_gsq)
         from caminus import ggufio as _gio
         from caminus.engine import q35_dense as _qd
@@ -408,9 +408,17 @@ def main():
         check(got_default == 'off' and refused,
               f'serve: a default --draft dflash without the drafter file serves plain ({got_default}); an explicit one refuses ({refused})')
         dd = arch.Dense35.DRAFT_DEFAULT
+        from caminus.engine import k3 as _k3
+        tpv = {one for one, tpm in _k3.Q35_TP_OF.items() if tpm in _k3.Q35_TPV_OF}
         check(all(dd[(m, 1)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap', 'k3_q35_gsq'))
-              and all(dd[(m, 2)] == 'off' for m in ('k3_q35_swift', 'k3_q35_tcap')),
-              f'default_draft: one card DFlash2 for the three dense 27B files, two cards plain ({dd})')
+              and all(dd[(m, 2)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap'))
+              and {m for (m, c) in dd if c == 2} == tpv == {'k3_q35_swift', 'k3_q35_tcap'} and ('k3_q35_gsq', 2) not in dd,
+              f'default_draft: DFlash2 for the three dense 27B files on one card and for the two with a two-card verify '
+              f'object on two cards ({dd}; two-card verify for {sorted(tpv)})')
+        tpa = arch.ARCHS['qwen35-own-tp']
+        check(tpa.two_card_models == ('swift-1.5', 'thinkingcap') and all(models.BY_NAME[n].arch == 'qwen35-own' for n in tpa.two_card_models)
+              and 'qwen3.8-27b' not in tpa.two_card_models and tpa.draft_refusal('mtp') is None and tpa.draft_refusal('dflash') is None,
+              f'two cards: the picker\'s catalog models with a two-card form ({tpa.two_card_models}, not the plain 27B); no refusal without a file')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:
