@@ -260,10 +260,18 @@ class PfQsa:
         self.srows = srows or pa.score_rows(2048, self.prow); self.rpb = rpb or pa.ROWS_PER_BLOCK
         t = lambda a: torch.tensor(a, device=dev)
         self.qn, self.kn, self.iqn, self.ikn = t(P['qn']), t(P['kn']), t(P['iqn']), t(P['ikn'])
-        self.raw = torch.zeros(rows * ROWB, dtype=torch.uint8, device=dev)
-        G = lambda n, nm: Guarded(torch, dev, n, nm)
         self.cache_row_elems = 2 * (HD // 32) * 34 if q8 else 2 * HD
         self.cache_row_bytes = self.cache_row_elems * (1 if q8 else 2)
+        # every buffer below, projected and checked before the first allocation: each Guarded holds its body and two
+        # guards, a snapshot of the same size and one bool per int32 word (2.25x), plus the raw rows and 64 MiB of slack
+        sizes = (rows * self.cache_row_bytes, self.prow * ROWB, 4 * self.srows * self.prow, 4 * rows * SELW,
+                 4 * 128 * NH * pa.max_splits() * pa.ATTN_RS, 4 * rows * NH * HD, 4)
+        need = sum(2.25 * (n + 2 * GUARD) for n in sizes) + rows * ROWB
+        from caminus.device import capacity
+        capacity.check([torch.device(dev).index or 0], [need / capacity.MIB + 64],
+                       f'test_prefill_qsa: the guarded prefill buffers ({rows} rows, {"q8" if q8 else "f16"} target cache)')
+        self.raw = torch.zeros(rows * ROWB, dtype=torch.uint8, device=dev)
+        G = lambda n, nm: Guarded(torch, dev, n, nm)
         self.gcache = G(rows * self.cache_row_bytes, 'target KV')
         self.cache = self.gcache.body[:rows * self.cache_row_bytes].view(torch.uint8 if q8 else torch.float16)
         self.cache.zero_()
