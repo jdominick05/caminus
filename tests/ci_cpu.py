@@ -54,6 +54,7 @@ SUITES = [
     ('own_kv_codec', ['tests/io/test_own_kv_codec.py', '--scratch', '{scratch}'], {'cxx'}),
     ('ref_q35', ['tests/test_ref_q35.py', '--scratch', '{scratch}'], set()),
     ('q35_tape', ['tests/engine/test_q35_tape_cpu.py', '--scratch', '{scratch}'], {'torch'}),
+    ('numerical_state', ['tests/cache/test_numerical_state.py'], {'torch'}),
     ('q35_tp', ['tests/engine/test_q35_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q35_tp_ver', ['tests/engine/test_q35_verify_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),

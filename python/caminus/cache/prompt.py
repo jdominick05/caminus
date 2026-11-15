@@ -106,6 +106,7 @@ import collections, concurrent.futures as cf, contextlib, fcntl, glob, hashlib, 
 import numpy as np
 import torch
 from ..device import capacity
+from ..errors import NumericalFailure, NonFiniteLogits
 from .livestate import LiveState, is_bail
 
 FORMAT = 1
@@ -905,7 +906,14 @@ class PromptCache:
     def _mark(self):
         self.live.mark(self.m, self.df)
 
+    def _check_terminal(self):
+        if getattr(self.m, 'broken', None):
+            self.live.known = False
+            cls = getattr(self.m, '_broken_error', NonFiniteLogits)
+            raise cls(f'promptcache: terminal engine state: {self.m.broken}')
+
     def _check_engine(self):
+        self._check_terminal()
         if self.m.poisoned:
             self._cold(); raise CacheStateError(f'promptcache: the engine was poisoned ({self.m.poisoned}): the slot was reset')
         d = self.live.drift(self.m, self.df)
@@ -1388,7 +1396,7 @@ class PromptCache:
         """the caller ran passes from the state prepare() / a previous extend() left (its generation loop): toks = every token
         of the sequence, st = the engine state after them (longctx.generate's). The processed tokens must keep the live log
         as a prefix (else the live slot is dropped: CacheStateError). Nothing launched"""
-        self.fence()
+        self.fence(); self._check_terminal()
         toks = [int(x) for x in toks]; i0, commit = int(st['i0']), int(st['commit'])
         p0 = int(self.st['i0'])
         if i0 < p0 - 1 or lcp(self.log, toks) < min(p0, i0) or not 0 <= commit <= min(self.T, i0) or len(toks) < i0:
@@ -1408,7 +1416,7 @@ class PromptCache:
         continuation (the state continues the live log, commit in range, a side pass within side_rows, the drafter's
         bookkeeping), host only and O(len(toks)), without extend()'s LCP over the whole log; the counters re-marked. Nothing
         launched"""
-        self.fence()
+        self.fence(); self._check_terminal()
         toks = [int(x) for x in toks]; i0, commit = int(st['i0']), int(st['commit'])
         p0 = int(self.st['i0'])
         if i0 != p0 + len(toks) or not 0 <= commit <= min(self.T, i0):
@@ -1660,6 +1668,7 @@ class PromptCache:
           'kept'     nothing launched since the mark: the state as it was (a refusal before the launch keeps its commit).
         The kept state is committed (commit(): the VRAM tier and the live state kept); a commit the cache refuses resets
         it and raises"""
+        self._check_terminal()
         m = self.m
         if m.poisoned:
             self.reset()
@@ -1680,6 +1689,9 @@ class PromptCache:
         try:
             if toks:
                 self.commit(list(toks), st)
+        except NumericalFailure:
+            self.live.known = False
+            raise
         except Exception:                               # noqa: BLE001 - the state cannot be kept: drop it
             self.reset()
             raise
@@ -1812,8 +1824,8 @@ class PromptCache:
         needed: the drafter's window is in the checkpoint's slot, saved when it was taken, and the export reads only that slot and
         the rows below it.) Works after a pass failed its retries (the rows below the failed pass's first position are intact, as
         recover() relies on). Returns dict(name, bytes, ms), or None with self.export_error set (no such checkpoint in the
-        line, a side call, a poisoned engine, no room)"""
-        self.fence()
+        line, a side call, a poisoned engine, no room). Terminal numerical failures refuse export."""
+        self.fence(); self._check_terminal()
         self.export_error = None
         pos, cm = int(at[0]), int(at[1])
         ck = next((c for c in self.ckpts if c.pos == pos and c.commit == cm), None)
