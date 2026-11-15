@@ -298,6 +298,9 @@ def main():
         _cli.keep_default_draft(own, o4, lambda fits: seen.append(fits), log=lambda *a, **k: None)
         o5 = dict(model=q35, draft='dflash', draft_defaulted=False, max_ctx='auto')
         _cli.keep_default_draft(own, o5, _never, log=lambda *a, **k: None)
+        check(own.min_ctx(o4) == arch.MIN_CTX and own.min_ctx(o5) == own.DFLASH_MIN_CTX and 'draft_floor' not in o3,
+              f'serve: a kept default drafter carries the {arch.MIN_CTX} floor into placement ({own.min_ctx(o4)}); an explicit '
+              f'--draft dflash keeps the drafter floor ({own.min_ctx(o5)})')
         check(o3['draft'] == 'off' and o4['draft'] == 'dflash' and len(seen) == 1 and o5['draft'] == 'dflash',
               f'serve: the default drafter is dropped when {arch.MIN_CTX} positions do not fit with it ({o3["draft"]}), kept when '
               f'they do ({o4["draft"]}); an explicit --draft dflash is kept ({o5["draft"]})')

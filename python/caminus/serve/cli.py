@@ -300,6 +300,8 @@ def keep_default_draft(A, opt, place, log=print):
         log(f'caminus serve: --draft off (with the default drafter fewer than {want} positions fit these cards; '
             f'--draft dflash runs it anyway, with less context)', flush=True)
         opt['draft'] = 'off'
+        return
+    opt['draft_floor'] = want    # (the real placement and max_ctx auto keep this floor: Dense35.min_ctx)
 
 
 def fit_report(argv):

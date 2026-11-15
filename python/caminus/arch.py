@@ -521,7 +521,9 @@ class Dense35(OneCard):
     DFLASH_MIN_CTX = 8192
 
     def min_ctx(self, opt):
-        return self.DFLASH_MIN_CTX if (opt.get('draft') or 'off') == 'dflash' else MIN_CTX
+        # (a default drafter kept by serve.cli.keep_default_draft carries its floor: placement keeps it too)
+        if (opt.get('draft') or 'off') == 'dflash': return opt.get('draft_floor') or self.DFLASH_MIN_CTX
+        return MIN_CTX
 
     # the drafter a serve runs when --draft is not given, per (decode module, cards); a module not listed serves plain.
     # One card: the DFlash2 drafter for all three files. Served A/B (docs/dev/benchmarks.md), greedy, every reply the
