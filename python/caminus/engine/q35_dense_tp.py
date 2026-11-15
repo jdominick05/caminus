@@ -183,7 +183,7 @@ class Dense35TP:
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35TP: token_embd is {self.emb.type} on module {self.module}')
         self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share, self.spec_T)]
-        h2d = upload.mode_of()                     # (CAMINUS_H2D: how the weights reach the cards; engine/upload.py)
+        h2d = upload.mode_of(default=upload.TWO_CARD_DEFAULT)                     # (CAMINUS_H2D: how the weights reach the cards; engine/upload.py)
         self.vram_mib = [v + e for v, e in zip(self.vram_mib, upload.extra_mib(h2d, 2))]
         ex = [float(v) for v in vram_extra_mib]
         if vram_check:
@@ -228,7 +228,7 @@ class Dense35TP:
         F = ggufio.GGUFFile(path)
         try:
             return [b / 2 ** 20 + 256 + e for b, e in zip(_projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T),
-                                                          upload.extra_mib(upload.mode_of(), 2))]
+                                                          upload.extra_mib(upload.mode_of(default=upload.TWO_CARD_DEFAULT), 2))]
         finally: F.close()
 
     @staticmethod

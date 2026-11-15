@@ -371,7 +371,10 @@ try:
     refused.append(False)
 except ValueError:
     refused.append(True)
-with env(CAMINUS_H2D=None): dflt = upload.mode_of()
+with env(CAMINUS_H2D=None):
+    dflt = upload.mode_of()
+    tp_dflt = Dense35TP(P_S, devices=(0, 1), max_ctx=64, vram_check=False).h2d.mode
+check(tp_dflt == 'pinned', f'two cards: with CAMINUS_H2D unset the Dense35TP load stages through pinned memory ({tp_dflt})')
 check(got['pageable'] == got['pinned'] and len(got['pageable']) > 0 and ord1 and all(refused) and dflt == 'pageable',
       f'one card: pageable and pinned give the same card tensors ({len(got["pageable"])}), pinned syncs before each refill; '
       f'peer refused on one card, an unknown arm refused on both engines; the default is pageable')

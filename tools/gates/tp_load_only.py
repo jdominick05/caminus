@@ -92,7 +92,7 @@ def main(argv):
     max_ctx, share = opt('--max-ctx', int, 64), opt('--ffn-share', float, None)
     if len(a) != 1: print(__doc__); return 2
     if not os.environ.get('CAMINUS_GUARD'): print('tp_load_only: run it under tools/guard.sh'); return 2
-    path = a[0]; mode = upload.mode_of()
+    path = a[0]; mode = upload.mode_of(default=upload.TWO_CARD_DEFAULT)
     if share is None:
         try: share, pair = served_share()
         except ValueError as e: print(f'tp_load_only: {e}'); return 2

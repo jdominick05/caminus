@@ -63,9 +63,15 @@ _CGROUP_FILES = ('memory.max', 'memory.high', 'memory.current', 'memory.peak', '
                  'memory.events')
 
 
-def mode_of(env=None):
-    """CAMINUS_H2D (pageable when unset or empty); anything else is refused"""
-    m = ((os.environ if env is None else env).get('CAMINUS_H2D') or 'pageable').strip()
+# the default per engine: two cards stage through pinned memory (a pageable two-card load once faulted on the second
+# card's SDMA engine, cause unknown; the pinned path reads no pageable memory and passed every read-back), one card keeps
+# the plain pageable copy it has always used
+TWO_CARD_DEFAULT = 'pinned'
+
+
+def mode_of(env=None, default='pageable'):
+    """CAMINUS_H2D, or the engine's default when unset or empty; anything else is refused"""
+    m = ((os.environ if env is None else env).get('CAMINUS_H2D') or default).strip()
     if m not in MODES: raise ValueError(f'CAMINUS_H2D={m!r}: one of {MODES}')
     return m
 

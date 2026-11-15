@@ -137,8 +137,9 @@ CLAUDE.md imports this file.
   Response guards follow the parser's `think_open` policy: an optional opening tag cannot hide an untagged answer.
   Content classification keeps bounded marker prefixes across chunks; rejected JSON calls cannot alter earlier calls.
 - `engine/upload.py`: how the dense qwen35 engines (Dense35Own, Dense35TP) copy weights to the cards. `CAMINUS_H2D=pageable`
-  (the default: the old blocking copy from ordinary memory, no added sync), `pinned` (one 64 MiB pinned staging buffer per
-  card, synced before each refill) or `peer` (two cards: only card 0 reads host memory, through its pinned staging buffer;
+  (Dense35Own's default: the old blocking copy from ordinary memory, no added sync), `pinned` (Dense35TP's default: one
+  64 MiB pinned staging buffer per card, synced before each refill; a pageable two-card load once faulted on the second
+  card's SDMA engine, cause unknown) or `peer` (two cards: only card 0 reads host memory, through its pinned staging buffer;
   the second card's weights go on through a 64 MiB transit buffer on card 0, added to card 0's projection; no pageable copy).
   `CAMINUS_UPLOAD_LOG=PATH` (off by default) logs every copy (tensor, card, the card that reads host memory, host address,
   bytes, start / done / dropped), the environment and /proc/self/maps; `tools/gates/sdma_classify.py` reads it to place a
