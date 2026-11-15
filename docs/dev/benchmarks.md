@@ -247,7 +247,8 @@ one card, testing's objects):
 
 code 22K: every mtp round's reply equalled the first plain round's, token for token. agent 40K: the replies agree for the
 first 73 tokens, then the mtp arm stops (EOS) while plain continues 2 tokens - the same on testing without the
-draft-policy change, so it is a stop-boundary tie on this prompt, not a mid-stream divergence.
+draft-policy change. Whether that is a near-tie at the end token or a verify difference is not measured yet (no margin
+was recorded), so the served default stays `--draft off` on every model until it is explained.
 
 #### Speculative decoding with DFlash 2 (served)
 
