@@ -22,7 +22,8 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
-for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
+for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_tp.hip', 'k3_q3m_lean_tp_trace.hip',   # (+ its two-card build)
+            'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
             'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
             'k3_q3m_rs4.hip', 'k3_q3m_rs2.hip', 'own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
             'k3_q35_swift.hip', 'k3_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)

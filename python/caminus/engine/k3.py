@@ -94,6 +94,10 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
+# their two-card builds (kernels/k3_q3m_lean_tp.hip: K3_Q3M_TP adds OP_XCHG, push-only, and OP_OWN_SLOT_SUM; issue #86):
+# one-card module -> two-card module. Not served yet: no engine builds a tape on them outside the GPU probe
+Q3M_TP_OF = {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace'}
+Q3M_TP_MODULES = tuple(Q3M_TP_OF.values())
 Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
 # the plain Qwen3.8-27B GSQ-RCO files' verify modules: k3_q35_gsq_ver (k3_q35_gsq.hip + K3_Q3M_VER: ThinkingCap's T-token
 # tiles + IQ2_XXS / IQ2_XS / Q2_K / Q4_K) and k3_q35_gsq_ver_m (K3_Q35_GSQ_M: the one IQ1_M matrix's T-token matvec alone, in
@@ -131,7 +135,7 @@ Q35V_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'], Q35_KV_Q8_OF['k3_q35_tcap_ver
 # kernels/k3_q3m_iq.hip: the lean module's ops plus the codebook formats' tiles (docs/dev/iq-quant-study.md; a study module)
 Q3M_IQ_MODULES = ('k3_q3m_iq', 'k3_q3m_iq_trace')
 Q3M_RS_MODULES = {'k3_q3m_rs4': 'RS4', 'k3_q3m_rs2': 'RS2'}   # (the row-scale study's: module -> its one format; OWN_RS_FMT below)
-Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES)   # (_trace: K3_TRACE timestamps, measurement only)
+Q3M_MODULES = ('k3_gguf_q3m_own', 'k3_gguf_q3m_own_trace') + Q3M_LEAN_MODULES + Q3M_TP_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES)   # (_trace: K3_TRACE timestamps, measurement only)
 # the own dense qwen35 modules (Swift / ThinkingCap: decode, verify, two cards; not the MTP drafter's module) run their decode
 # attention as the same split pair (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT: k3_gguf_q35d's settings;
 # baseline F16 objects and the separate Q8-only objects)
@@ -242,6 +246,11 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT
 # (the attention: OP_OWN_ATTS, split over positions; OP_OWN_ATTN, one task per query head, stays in the full module as its
 #  oracle and for A/Bs)
 Q3M_LEAN_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_ATTS, OP_OWN_ADD_RMS16, OP_F32_MV, OP_ROUTER, OP_OWN_EMB}
+# the two-card builds: the lean module's ops and pairs, plus the exchange and the slot sum (the FFN partial weighted over
+# its slots on the card before the exchange: kernels/k3_q3m_ops.h under K3_Q3M_TP)
+OP_OWN_SLOT_SUM = 56   # = kernels/k3_q3m_ops.h (the k3_q3m_lean_tp modules only)
+MODULE_CAPS.update({m: MODULE_CAPS['k3_q3m_lean'] | {('OWN_SLOT_SUM', '-')} for m in Q3M_TP_MODULES})
+Q3M_TP_OPS = Q3M_LEAN_OPS | {OP_XCHG, OP_OWN_SLOT_SUM}
 # the dense qwen35 own module (engine/q35_dense.py): the one-round-trip tiles (the feed-forward's gate | up fused when the
 # two share a format), the general rows tiles on fp16 activations for the formats without one, and the tape's glue.
 # As the lean qwen3moe module, its k3_run holds its tape's ops and nothing else
@@ -328,6 +337,7 @@ def seg_kind(sg):
     if sg.op == OP_OWN_F16: return ('OWN_F16', '-')
     if sg.op == OP_OWN_SWIGLU16: return ('OWN_SWIGLU16', '-')
     if sg.op == OP_OWN_MOE_SUM: return ('OWN_MOE_SUM', '-')
+    if sg.op == OP_OWN_SLOT_SUM: return ('OWN_SLOT_SUM', '-')
     if sg.op == OP_OWN_EMB: return ('OWN_EMB', GG_FMT_NAME.get(sg.work, f'?{sg.work}'))
     if sg.op == OP_OWN_ADD_RMS16: return ('OWN_ADD_RMS16', '-')
     if sg.op == 55: return ('OWN_ARGMAX', '-')   # (OP_OWN_ARGMAX: the drafter module only)
@@ -820,6 +830,17 @@ class Engine:
         self.keep += [d, x] + ([w] if w is not None else [])
         self.segs.append(Seg(OP_OWN_MOE_SUM, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None,
                              None if w is None else w.data_ptr(), d.data_ptr(), None, x.data_ptr(), 0.0, n, 0, 0, 0, team, slots, 0))
+        return len(self.segs) - 1
+
+    def own_slot_sum(self, d, out, slots, w, rows_per_task=1024, dep=-1, team=-1):
+        """out [n] = sum over slots s of w[s] * d[s * n:(s + 1) * n] (OP_OWN_MOE_SUM's fma chain in slot order, stored, not
+        added): the FFN partial a two-card module exchanges (Q3M_TP_MODULES only)"""
+        if self.module not in Q3M_TP_MODULES: raise ValueError(f'own_slot_sum: module {self.module} ({Q3M_TP_MODULES} only)')
+        n = out.numel(); assert d.numel() >= slots * n and w is not None and w.numel() >= slots and 1 <= slots <= 64
+        assert d.dtype == out.dtype == w.dtype == torch.float32
+        self.keep += [d, out, w]
+        self.segs.append(Seg(OP_OWN_SLOT_SUM, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, None, w.data_ptr(),
+                             d.data_ptr(), None, out.data_ptr(), 0.0, n, 0, 0, 0, team, slots, 0))
         return len(self.segs) - 1
 
     def own_add_rms16(self, x, nw, h, h16, eps, d=None, slots=0, w=None, dep=-1, team=-1, tokens=1, h16_stride=None):
@@ -1506,11 +1527,14 @@ class Engine:
                 flagged = {OP_RMS_MUL: sg.aux, OP_QK_NR: sg.aux, OP_KV_APPEND: sg.aux, OP_ATTN_DEC: sg.pad2}.get(sg.op, 1)
                 if sg.op not in DRAFT_OPS or not flagged:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}{"" if flagged else ", unflagged"})')
-        if self.module in Q3M_LEAN_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES):   # (only the decode tape's ops are compiled into its k3_run)
+        if self.module in Q3M_LEAN_MODULES + Q3M_TP_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES):   # (only the decode tape's ops are compiled into its k3_run)
+            ops = Q3M_TP_OPS if self.module in Q3M_TP_MODULES else Q3M_LEAN_OPS   # (the two-card builds: + OP_XCHG, OP_OWN_SLOT_SUM)
             for i, sg in enumerate(self.segs):
-                if sg.op not in Q3M_LEAN_OPS:
+                if sg.op not in ops:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): the lean decode module runs '
-                                     f'only {sorted(Q3M_LEAN_OPS)}; use k3_gguf_q3m_own for the other tape forms')
+                                     f'only {sorted(ops)}; use k3_gguf_q3m_own for the other tape forms')
+                if sg.op == OP_XCHG and sg.pad2:   # (K3_XCHG_PUSH_ONLY: the device would push and read its own slot)
+                    raise ValueError(f'k3: module {self.module}: the exchange is push-only (segment {i} has pull_mode {sg.pad2})')
         if self.module in Q3M_IQ_MODULES:
             # the grids this tape's matvecs read, into the launch hook's word (kernels/k3_own_ops.h own_iq_stage). A grid
             # tile on a tape that did not stage its grid would read whatever the local memory holds: wrong sums, no

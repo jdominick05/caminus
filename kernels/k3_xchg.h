@@ -36,7 +36,9 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
     float * peer = (float *)sg.W; const float * mine = (const float *)sg.gs;
     // pad2 = 1 (pull, the producing card): the payload goes to aux (this card's own uncached slot), only the flag to the
     // peer; pad2 = 2 (pull, the reading card): the peer's partial is read from aux (the peer's uncached slot)
-#ifdef K3_MT   // (the multi-token module has no pull: its payload is T x larger and the selects cost it 4 VGPR spills)
+// K3_XCHG_PUSH_ONLY: the same push-only form for a module whose register budget has no room for the selects (the
+// qwen3moe two-card module, kernels/k3_q3m_lean_tp.hip: with them k3_run spilled 1 VGPR and 63 SGPRs, lean's 53)
+#if defined(K3_MT) || defined(K3_XCHG_PUSH_ONLY)   // (the multi-token module has no pull: its payload is T x larger and the selects cost it 4 VGPR spills)
     XG4 * __restrict__ px = (XG4 *)(peer + 16);
 #else
     XG4 * __restrict__ px = (XG4 *)(sg.pad2 == 1 ? (float *)sg.aux : peer + 16);
@@ -68,7 +70,7 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
     }
     __syncthreads();
     __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "");
-#ifdef K3_MT
+#if defined(K3_MT) || defined(K3_XCHG_PUSH_ONLY)
     const XG4 * __restrict__ rx = (const XG4 *)(mine + 16);
 #else
     const XG4 * __restrict__ rx = (const XG4 *)(sg.pad2 == 2 ? (const float *)sg.aux : mine + 16);
