@@ -244,6 +244,8 @@ def recipe(opt, log=print):
         A = A.variant(opt.get('cards'))
     except ValueError as exc:
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
+    why = A.rope_refusal(opt['model'])          # (a file whose rope.scaling.* keys no engine applies: never served unscaled)
+    if why: raise ValueError(why)
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
     defaulted = draft is None

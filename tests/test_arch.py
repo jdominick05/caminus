@@ -31,12 +31,19 @@ def gguf_str(s):
     return struct.pack('<Q', len(b)) + b
 
 
+def gguf_value(v):
+    if isinstance(v, str): return struct.pack('<I', 8) + gguf_str(v)
+    if isinstance(v, float): return struct.pack('<If', 6, v)
+    return struct.pack('<II', 4, int(v))
+
+
 def write_gguf(path, arch, kv, tensors):
-    """a GGUF v3 file: general.architecture = arch, kv {key: int (u32) | str}, tensors [(name, ne0, ne1)] in F32 (zeros)"""
+    """a GGUF v3 file: general.architecture = arch, kv {key: int (u32) | float (f32) | str}, tensors [(name, ne0, ne1)] in
+    F32 (zeros)"""
     kvs = [('general.architecture', arch)] + list(kv.items())
     out = b'GGUF' + struct.pack('<IQQ', 3, len(tensors), len(kvs))
     for k, v in kvs:
-        out += gguf_str(k) + (struct.pack('<I', 8) + gguf_str(v) if isinstance(v, str) else struct.pack('<II', 4, int(v)))
+        out += gguf_str(k) + gguf_value(v)
     off = 0
     for name, ne0, ne1 in tensors:
         out += gguf_str(name) + struct.pack('<IQQIQ', 2, ne0, ne1, 0, off)
@@ -124,7 +131,7 @@ def main():
                   and abs(sh['need_mib'](4096) - ((0.55 * 64 * 32 * 4 + kv_pos * 4096) / 2 ** 20 + 768.0)) < 1e-9,
                   f'tp_shape: the engine\'s per-card projection from the registry\'s header facts (kv_pos {sh["kv_pos"]})')
             from caminus.engine import qwen3next_tp
-            check(qwen3next_tp.PROJECTION_KEYS == arch.HP_KEYS, 'tp_shape: the registry keeps every header key the engine\'s projection reads')
+            check(set(qwen3next_tp.PROJECTION_KEYS) <= set(arch.HP_KEYS), 'tp_shape: the registry keeps every header key the engine\'s projection reads')
         check(arch.default_alias(q3n) == 'qwen3-coder-next', 'default_alias: a file outside the catalog answers to its architecture\'s id')
         check(len(opens) == 1, f'meta: one header read for of, tp_shape, default_alias ({len(opens)})')
         st = os.stat(q3n); os.utime(q3n, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
@@ -166,6 +173,100 @@ def main():
         check(arch.of(llama) is arch.CODER, 'of: an unknown architecture is given the Coder\'s entry')
     finally:
         gguf.GGUFReader = real; ggufio.GGUFFile = real_own
+
+    # ---- RoPE scaling keys (gguf-py's Keys.Rope.SCALING_*): meta keeps them; every entry refuses a file that asks for
+    # scaling (no engine applies it yet: never served unscaled); a file without them, or with type 'none', is served
+    check(set(arch.ROPE_KEYS) <= set(arch.HP_KEYS) and all(
+        k.format(arch='a') == 'a.' + r for k, r in ((gguf.Keys.Rope.SCALING_TYPE, 'rope.scaling.type'),
+                                                    (gguf.Keys.Rope.SCALING_FACTOR, 'rope.scaling.factor'),
+                                                    (gguf.Keys.Rope.SCALING_ORIG_CTX_LEN, 'rope.scaling.original_context_length'),
+                                                    (gguf.Keys.Rope.SCALING_ATTN_FACTOR, 'rope.scaling.attn_factor'),
+                                                    (gguf.Keys.Rope.SCALING_YARN_BETA_FAST, 'rope.scaling.yarn_beta_fast')))
+          and all(v.format(arch='a')[2:] in arch.ROPE_KEYS for n, v in vars(gguf.Keys.Rope).items() if n.startswith('SCALING_')),
+          'rope keys: meta keeps every rope.scaling.* key the vendored gguf-py names')
+    yarn = {'rope.scaling.type': 'yarn', 'rope.scaling.factor': 4.0, 'rope.scaling.original_context_length': 32768}
+    by_header = {'qwen4exp': 'qwen4exp', 'qwen35moe': 'qwen35moe', 'qwen35': 'qwen35', 'qwen3moe': 'qwen3moe',
+                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35'}
+    check(sorted(by_header) == sorted(arch.ARCHS), 'rope keys: every entry has a header architecture below')
+
+    def rope_file(a, kv, tag):
+        p = os.path.join(S, f'rope-{tag}-{a}.gguf')
+        write_gguf(p, a, dict({f'{a}.context_length': 4096}, **{f'{a}.{k}': v for k, v in kv.items()}),
+                   [('blk.0.ffn_up.weight', 32, 32)])
+        return p
+    for name, ent in arch.ARCHS.items():
+        h = by_header[name]
+        why = ent.rope_refusal(rope_file(h, yarn, 'yarn'))
+        plain = ent.rope_refusal(rope_file(h, {}, 'none'))
+        off = ent.rope_refusal(rope_file(h, {'rope.scaling.type': 'none', 'rope.scaling.factor': 4.0}, 'off'))
+        check(bool(why) and f'{h}.rope.scaling.type = yarn' in why and f'{h}.rope.scaling.factor = 4.0' in why
+              and f'{h}.rope.scaling.original_context_length = 32768' in why and 'unscaled' in why and ent.name in why
+              and plain is None and off is None,
+              f'rope keys: {name} refuses a {h} file asking for YaRN x4 ({why}); serves one without the keys or with type none')
+    unk = rope_file('llama', yarn, 'yarn')
+    check(arch.of(unk) is arch.CODER and bool(arch.of(unk).rope_refusal(unk)),
+          'rope keys: an unknown architecture (the Coder\'s entry) refuses the keys too')
+    bare = rope_file('qwen3moe', {'rope.scaling.factor': 4.0}, 'bare')
+    legacy = rope_file('qwen3moe', {'rope.scale_linear': 2.0}, 'legacy')
+    q3m = arch.ARCHS['qwen3moe']
+    check(bool(q3m.rope_refusal(bare)) and 'qwen3moe.rope.scaling.factor = 4.0' in q3m.rope_refusal(bare)
+          and bool(q3m.rope_refusal(legacy)) and 'qwen3moe.rope.scale_linear = 2.0' in q3m.rope_refusal(legacy),
+          'rope keys: a bare factor (llama.cpp\'s default type is linear) and the older rope.scale_linear are refused')
+    unit = [rope_file('qwen3moe', d, f'unit{i}') for i, d in enumerate((
+        {'rope.scaling.factor': 1.0}, {'rope.scale_linear': 1.0}, {'rope.scaling.type': 'yarn'},
+        {'rope.scaling.type': 'linear', 'rope.scaling.factor': 1.0}, {'rope.scaling.original_context_length': 32768},
+        {'rope.scaling.factor': 0.0, 'rope.scaling.yarn_beta_fast': 32.0}))]
+    attn = rope_file('qwen3moe', {'rope.scaling.type': 'yarn', 'rope.scaling.factor': 1.0,
+                                  'rope.scaling.attn_factor': 0.9}, 'unit-attn')
+    check(all(q3m.rope_refusal(u) is None for u in unit) and bool(q3m.rope_refusal(attn)),
+          'rope keys: an effective factor of 1 (factor or scale_linear 1 or 0, a type or yarn key alone) asks for no '
+          'scaling and is served; factor 1 with an attention factor other than 1 is refused')
+    junk = os.path.join(S, 'rope-junk.gguf')
+    with open(junk, 'wb') as f:
+        f.write(b'fixture')
+    check(q3m.rope_refusal(junk) is None, 'rope keys: a header no reader reads is left to the engine\'s reader')
+    # both meta() readers keep the same keys: caminus.ggufio, and gguf-py for a file ggufio refuses
+    yq = rope_file('qwen3moe', dict(yarn, **{'rope.scaling.yarn_beta_fast': 32.0}), 'beta')
+    own_hp = arch.meta(yq)['hp']
+
+    class Refusing(real_own):
+        def __init__(self, *x, **k): raise ggufio.GGUFError('refused here')
+    arch._META.clear(); ggufio.GGUFFile = Refusing
+    try:
+        py_hp = arch.meta(yq)['hp']
+    finally:
+        ggufio.GGUFFile = real_own; arch._META.clear()
+    check(own_hp == py_hp and py_hp.get('rope.scaling.type') == 'yarn' and py_hp.get('rope.scaling.factor') == 4.0
+          and py_hp.get('rope.scaling.yarn_beta_fast') == 32.0 and py_hp.get('context_length') == 4096,
+          f'rope keys: meta through caminus.ggufio == through gguf-py ({py_hp})')
+    # caminus serve's recipe (and caminus fit, which shares it) refuses with the message; the same file without the keys passes
+    from caminus.serve import cli as _cli0
+    try:
+        _cli0.recipe(_cli0.parse(['--model', rope_file('qwen3moe', yarn, 'yarn'), '--draft', 'off']), log=lambda *a, **k: None)
+        msg = None
+    except ValueError as exc:
+        msg = str(exc)
+    ok = _cli0.recipe(_cli0.parse(['--model', rope_file('qwen3moe', {}, 'none'), '--draft', 'off']), log=lambda *a, **k: None)
+    check(bool(msg) and 'RoPE scaling' in msg and 'qwen3moe.rope.scaling.type = yarn' in msg and ok is q3m,
+          f'rope keys: caminus serve refuses the YaRN file before anything loads ({msg}); the plain file is served')
+    import contextlib, io, json
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = _cli0.fit_report(['--model', rope_file('qwen3moe', yarn, 'yarn'), '--draft', 'off', '--json'])
+    rep = json.loads(out.getvalue())
+    check(rc == 1 and rep['ok'] is False and rep['max_ctx'] is None and 'RoPE scaling' in rep['error'],
+          f'rope keys: caminus fit reports the refusal with no maximum ({rep})')
+
+    # ---- the model cards' context facts in the registry (data only: nothing serves from them yet)
+    F = {n: ent.rope_facts for n, ent in arch.ARCHS.items()}
+    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), None, None, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
+          and F['qwen35-own'] is F['qwen35-own-tp'] is arch.QWEN35_ROPE
+          and (F['qwen35-own'].native_ctx, F['qwen35-own'].card_factors, F['qwen35-own'].shipped) == (262144, (2.0, 4.0), None)
+          and (F['qwen4exp'].native_ctx, F['qwen4exp'].card_kind, F['qwen4exp'].shipped, F['qwen4exp'].shipped_factor)
+          == (262144, 'yarn', 'ntk', arch.LONG_NTK)
+          and all(F[n] is None for n in ('qwen35moe', 'qwen35', 'qwen3next')),
+          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card, not applied), the dense 27B line 262,144, the Coder '
+          'ships NTK x4 where its card names YaRN x4; the paused entries have none')
 
     # ---- caminus serve's options: --model-alias '' = the model's own id
     from caminus.serve import cli

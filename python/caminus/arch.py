@@ -20,7 +20,8 @@ An entry (Arch) answers: kind ('coder' | 'one-card' | 'tp'), cards, T (its token
 it loads: 'dflash', the catalog role of its file, or None), alias (the architecture's default model id), engine (its engine
 class); build(opt) -> (engine, prompt path, DFlash engine or None, drafter or None) in the serving order; auto_max_ctx(opt)
 (--max-ctx auto); physics() (the stats hook's card model; None: the Coder's two-card default); set_ids(alias, tok) (the
-template's model ids). Module functions: of(path) (the entry for a file), default_alias(path) (the id a server answers to:
+template's model ids); rope_refusal(path) (why a file's rope.scaling.* keys refuse it: no entry applies them yet);
+rope_facts (the model card's native context and long-context recipe, data only). Module functions: of(path) (the entry for a file), default_alias(path) (the id a server answers to:
 the catalog's for a catalog file, else the architecture's), usable_ctx(max_ctx, T), meta(path) (the header facts, read once
 per file).
 
@@ -30,6 +31,8 @@ caminus serve and arex-2 under caminus start), caminus.cmd.manage (the Coder's d
 a start read the GGUF's header up to 4 times.
 """
 import os
+import struct
+from dataclasses import dataclass
 
 from . import config as _config
 
@@ -43,9 +46,16 @@ CODER_CTX = 262144           # the Coder's max_ctx auto: its context_length, the
 LONG_NTK = 4.0               # the Coder's long-context mode (Coder.long_context): NTK RoPE scaling factor
 LONG_CACHE_CAP_GB = 64.0     # its disk tier's default cap: a full 1M park is about 16 GB with its checkpoints
 
-# the header keys meta() keeps, under the architecture's prefix: what the projections below read
+# the RoPE scaling keys a GGUF can carry, under the architecture's prefix (gguf-py's Keys.Rope.SCALING_*), and
+# rope.scale_linear, llama.cpp's older name for a linear factor, which it still reads when rope.scaling.factor is absent.
+# No engine applies them yet: Arch.rope_refusal refuses a file that sets them rather than serve it unscaled
+ROPE_KEYS = ('rope.scaling.type', 'rope.scaling.factor', 'rope.scaling.alpha', 'rope.scaling.attn_factor',
+             'rope.scaling.original_context_length', 'rope.scaling.finetuned', 'rope.scaling.yarn_truncate',
+             'rope.scaling.yarn_log_multiplier', 'rope.scaling.yarn_ext_factor', 'rope.scaling.yarn_attn_factor',
+             'rope.scaling.yarn_beta_fast', 'rope.scaling.yarn_beta_slow', 'rope.scale_linear')
+# the header keys meta() keeps, under the architecture's prefix: what the projections below read, and the RoPE scaling keys
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
-           'ssm.state_size')
+           'ssm.state_size') + ROPE_KEYS
 _META = {}
 
 
@@ -111,6 +121,51 @@ def meta(path):
     return _META[k]
 
 
+def rope_scaling(hp):
+    """the RoPE scaling a file's header asks for: {key: value} of the ROPE_KEYS present, or None when it asks for none.
+    None: no scaling key; rope.scaling.type 'none' (llama.cpp never scales then); or an effective factor of 1 (the
+    factor, else rope.scale_linear; llama.cpp reads 0 as 1) with no attention factor other than 1 and no alpha other
+    than 1. The other yarn_* / original_context_length / finetuned keys do nothing at factor 1, so alone they ask for
+    nothing. Any other combination counts, typed or not: llama.cpp's default type is linear"""
+    got = {k: hp[k] for k in ROPE_KEYS if k in hp}
+    if not got or got.get('rope.scaling.type') == 'none': return None
+    def one(k):
+        v = got.get(k)
+        try: return v is None or float(v) in (0.0, 1.0)
+        except (TypeError, ValueError): return False
+    f = 'rope.scaling.factor' if 'rope.scaling.factor' in got else 'rope.scale_linear'
+    if one(f) and one('rope.scaling.attn_factor') and one('rope.scaling.yarn_attn_factor') and one('rope.scaling.alpha'):
+        return None
+    return got
+
+
+@dataclass(frozen=True)
+class RopeFacts:
+    """a model line's context facts from its model card, as data: nothing serves from them yet (no engine applies YaRN;
+    the Coder's NTK long mode is LONG_NTK, a serve option)"""
+    native_ctx: int                # the context the model was trained for (the card's original_max_position_embeddings)
+    gguf_ctx: int                  # the GGUF's context_length: how far Caminus serves it unscaled today
+    card_kind: str                 # the card's long-context recipe ('yarn')
+    card_factors: tuple            # the factors the card names: x2 for twice the native context, x4 the most it recommends
+    shipped: 'str | None' = None   # the scaling Caminus applies past gguf_ctx today: None (a longer max_ctx is refused)
+    shipped_factor: 'float | None' = None
+    source: str = ''               # the model card the recipe is from
+
+
+# Qwen3-30B-A3B: "32,768 natively and 131,072 tokens with YaRN" (factor 4, original_max_position_embeddings 32768; the card
+# advises factor 2 for about 65,536 and no YaRN while contexts stay under 32,768). Its GGUF's context_length, 40,960, is
+# 32,768 for the output plus 8,192 for the prompt: served unscaled up to there, as the card allows
+QWEN3MOE_ROPE = RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), source='https://huggingface.co/Qwen/Qwen3-30B-A3B')
+# the dense Qwen3.8-27B line: 262,144 native, YaRN factor 4 from original 262,144 ("up to 1,000,000"; factor 2 for about
+# 524,288). Swift 1.5 and ThinkingCap keep the base's RoPE; their own cards make no RoPE-scaling statement, so the recipe
+# is the base card's, not one their authors claim
+QWEN35_ROPE = RopeFacts(262144, 262144, 'yarn', (2.0, 4.0), source='https://huggingface.co/Qwen/Qwen3.8-27B')
+# the Coder: its base card (Qwen3.8-Flash-Next) recommends YaRN factor 4 from 262,144; Caminus ships NTK base scaling by
+# LONG_NTK instead (Coder.long_context, an explicit max_ctx past 262,144)
+CODER_ROPE = RopeFacts(262144, 262144, 'yarn', (4.0,), shipped='ntk', shipped_factor=LONG_NTK,
+                       source='https://huggingface.co/Qwen/Qwen3.8-Flash-Next')
+
+
 def _plain(v):
     """a header value as gguf-py's contents() gives it (a numeric array as a list)"""
     return v.tolist() if hasattr(v, 'tolist') else v
@@ -154,6 +209,7 @@ def tp_shape(path):
 
 class Arch:
     """one architecture's serving recipe; the kinds below fill it in"""
+    rope_facts = None        # RopeFacts: the model card's context facts (data only), None where the registry has none
     kind = None
     cards = None
     T = 1
@@ -287,6 +343,22 @@ class Arch:
         log), or None: only the Coder has one (its KV in host memory); every other model refuses such a max_ctx in its engine"""
         return None
 
+    def rope_refusal(self, path):
+        """why this entry must not serve this file's RoPE scaling, or None (the file asks for none: rope_scaling). No engine
+        applies a file's rope.scaling.* keys yet, so every entry refuses such a file rather than serve it unscaled (its
+        attention would not be the model's). A header neither reader can read is left to the engine's own reader, which
+        refuses the file. The Coder's NTK long mode is a serve option (an explicit max_ctx past 262,144), not a file key"""
+        try:
+            md = meta(path)
+        except (OSError, ValueError, KeyError, IndexError, struct.error):
+            return None
+        rs = rope_scaling(md['hp'])
+        if rs is None: return None
+        keys = ', '.join(f'{md["arch"]}.{k} = {v}' for k, v in rs.items())
+        return (f'{os.path.basename(path)} asks for RoPE scaling ({keys}): {self.alias} ({self.name}) does not apply a '
+                f'file\'s RoPE scaling yet, and serving it unscaled would not be the model\'s attention; use a file without '
+                f'these keys (or rope.scaling.type none)')
+
     def physics(self, d=0):
         """the stats hook's card model (caminus.serve.stats.PhysicsConfig), or None: EngineStats' default, the Coder's cards"""
         return None
@@ -311,6 +383,7 @@ class Arch:
 
 class Coder(Arch):
     kind, cards, T, drafter, engine = 'coder', 2, 4, 'dflash', 'engine.flashnext_tp:FlashNextTP'
+    rope_facts = CODER_ROPE
 
     def long_context(self, opt):
         """an explicit max_ctx past the Coder's context_length (262,144): the KV cache in pinned host memory (kv_host: 13 GB at
@@ -481,6 +554,7 @@ class Q3MoE(OneCard):
     the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
     (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
     engine = 'engine.q3moe_one:Q3MoEOne'
+    rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
     PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
@@ -509,6 +583,7 @@ class Dense35(OneCard):
     file too and keeps OneCard's engine. Drafter: the model's own MTP block (--draft mtp, one card; Swift 1.5 first:
     the drafter module runs the block's Q4_0 and the file's Q6_K head)"""
     engine = 'engine.q35_dense:Dense35Own'
+    rope_facts = QWEN35_ROPE
     drafter = 'mtp'
     drafters = ('mtp', 'dflash')   # (--draft dflash: the base model's DFlash 2 drafter, decode/dflash35.py; one card, Swift 1.5 first)
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
@@ -668,6 +743,7 @@ class Dense35TP(Arch):
     feed-forward rows split by the cards' streaming bandwidth (ffn_share: card 0's part; the attention and DeltaNet heads
     split evenly)."""
     kind, cards, T, engine = 'tp', 2, 1, 'engine.q35_dense_tp:Dense35TP'
+    rope_facts = QWEN35_ROPE
     tokenizer = 'own'
     PREFILL_CHUNK = 2048
 

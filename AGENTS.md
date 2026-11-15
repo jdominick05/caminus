@@ -119,6 +119,9 @@ CLAUDE.md imports this file.
   Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin
   below the guard distinct from the cache/display reserve; `tests/test_context_fit.py` checks parity at the fit limit
   and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum.
+  `meta()` keeps the header's `rope.scaling.*` keys; every entry refuses a file that sets them (`Arch.rope_refusal`, from
+  serve's `recipe` and replay): no engine applies a file's RoPE scaling yet, and such a file is never served unscaled.
+  `rope_facts` holds each model card's native context and long-context recipe as data only.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path).
