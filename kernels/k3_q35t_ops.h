@@ -25,6 +25,9 @@
 #endif
 #ifdef K3_Q3M_VER   // (the verify module, kernels/k3_q35_tcap_ver.hip: the T-token tiles; the decode module never sees them)
 #include "own_quant_tcap_mt.h"
+#ifdef K3_Q35_GSQ
+#include "own_quant_gsq_mt.h"
+#endif
 #endif
 
 enum { OWN_IQ2_S = 7 };   // (Seg.work of an IQ2_S matrix or embedding: its GG number; engine/k3.py OWN_Q35T_FMT; the others: k3_own_ops.h / k3_q35_ops.h)
@@ -80,15 +83,33 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
             }                                                                                                          \
         }                                                                                                              \
     }
+#if defined(K3_Q35_DF) && defined(K3_Q35_GSQ)   // (the GSQ files' DFlash drafter module, kernels/k3_q35_gsq_dflash.hip: the target's Q4_K
+                                               //  head's T-token matvec alone; no grid is staged there)
+    { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q4_K: host-checked)
+#elif defined(K3_Q35_GSQ_M)   // (the GSQ files' IQ1_M verify module, kernels/k3_q35_gsq_ver_m.hip: their one IQ1_M matrix's T-token
+                            //  matvec alone; with the other formats in k3_q35_gsq_ver, k3_run passed 96 VGPRs)
+    { Q35T_MT_LOOP(own_rows_iq1m_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_IQ1_M: host-checked)
+#else
 #ifndef K3_Q35_MTP   // (ThinkingCap's MTP drafter module, kernels/k3_q35_tcap_mtp.hip: its block is all Q6_K, the head a rows tile:
                      //  the other formats' T-token loops out of its register allocation; the host refuses them there)
     if (fmt == OWN_IQ4_XS) { Q35T_MT_LOOP(own_rows_iq4xs_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S) { const int f = fmt == OWN_IQ3_XXS ? 0 : 1; Q35T_MT_LOOP(own_rows_iq3_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm, f)) }
     else if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q5_K) { Q35T_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+#ifdef K3_Q35_GSQ   // (the GSQ verify module, kernels/k3_q35_gsq_ver.hip: kernels/own_quant_gsq_mt.h; Q4_K Swift's mt2 form; IQ1_M: k3_q35_gsq_ver_m)
+    else if (fmt == OWN_IQ2_XXS) { Q35T_MT_LOOP(own_rows_iq2xxs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_IQ2_XS) { Q35T_MT_LOOP(own_rows_iq2xs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_Q2_K) { Q35T_MT_LOOP(own_rows_q2k_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_Q4_K) { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+#endif
+    else
+#endif
+#if defined(K3_Q35_MTP) && defined(K3_Q35_GSQ)   // (the GSQ files' MTP drafter module, kernels/k3_q35_gsq_mtp.hip: their Q4_K head)
+    if (fmt == OWN_Q4_K) { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else
 #endif
     { Q35T_MT_LOOP(own_rows_q6k_planes_mt2<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q6_K: host-checked)
+#endif
 #undef Q35T_MT_LOOP
     return;
 #endif
@@ -155,7 +176,8 @@ __device__ __forceinline__ void q35t_op_emb(const Seg & sg) {
 
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
-#ifndef K3_Q35_DF   // (the DFlash module: no OWN_MV, k3.MODULE_CAPS refuses it there; its Q8_0 matvecs are OP_OWN_MV16)
+#if !defined(K3_Q35_DF) || defined(K3_Q35_GSQ)   // (ThinkingCap's DFlash module: no OWN_MV, k3.MODULE_CAPS refuses it there, its Q8_0
+                                                 //  matvecs are OP_OWN_MV16; the GSQ files' keeps it for their Q4_K head alone)
     if (sg.op == OP_OWN_MV) { q35t_op_mv(sg, t); return true; }
 #endif
 #ifdef K3_Q35_MTP   // (ThinkingCap's MTP drafter module: the greedy key, k3_q35_ops.h's op; the host refuses the trunk's other ops)

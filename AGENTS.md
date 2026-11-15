@@ -7,7 +7,7 @@ CLAUDE.md imports this file.
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
 - It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
-  cards, with the DFlash2 drafter), AREX-2 27B (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
+  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
   `--draft mtp` (their own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
   model's DFlash2 drafter on one card; `decode/dflash35.py`). `python/caminus/models.py` is the catalog.
@@ -98,13 +98,22 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `k3_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
+  Plain Qwen3.8-27B GSQ-RCO uses `k3_q35_gsq` / `q35_prefill_gsq` and `Q35R_*` host names; `Q35G_*` belongs to
+  Qwen3.6, so reusing it changes another model's dispatch. Its verify pass is three launches: prefix, the one IQ1_M
+  ffn_gate on `k3_q35_gsq_ver_m`, then suffix on `k3_q35_gsq_ver` with a scratch embedding to stage the IQ grids.
+  Isolating IQ1_M keeps the persistent allocation within 96 VGPRs; other IQ1_M placements are refused on the host.
+  Its MTP module uses the Q6_K block and Q4_K head; its DFlash module includes that head without staging IQ grids.
+  All four verify/drafter objects belong to the explicit installed runtime. CPU tape/selector and staging tests
+  check their inclusion; finding them in a checkout's build directory does not prove that a wheel ships them.
+  The catalog remains paused until served drafting identity and throughput gates pass; compiled modules alone do
+  not authorize a default or catalog change.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
-- Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS) and Qwen3-Coder-Next. Their engines and kernels stay; `models.PAUSED` keeps them
+- Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them
   out of the catalog, the panel and `caminus pull` / `start` (and the brain / hands team), and `arch.PAUSED` makes
-  `caminus serve` refuse their architectures (qwen35moe, qwen3next). `CAMINUS_ALLOW_PAUSED=1` lifts both (development
+  `caminus serve` refuse their architectures (qwen35moe, qwen3next, qwen35). `CAMINUS_ALLOW_PAUSED=1` lifts both (development
   and gates). Re-enabling one: remove it from both, then rerun its benchmarks.md rows.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
   Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin

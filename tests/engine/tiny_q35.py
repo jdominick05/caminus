@@ -34,11 +34,12 @@ FORMATS_TCAP = [
 ]
 # variant 'gsq': the Qwen3.8-27B GSQ-RCO files' formats (the GSQ module, kernels/k3_q35t_ops.h under K3_Q35_GSQ): its five
 # formats ThinkingCap's files do not use (IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K) beside IQ3_XXS / IQ3_S / IQ2_S / IQ4_XS, an IQ2_S
-# embedding, a Q4_K head, BF16 alpha / beta
+# embedding, a Q4_K head, BF16 alpha / beta; IQ1_M only as an ffn_gate, as in the files (the verify pass runs that matrix in its
+# own launch: engine/q35_dense_verify.py)
 FORMATS_GSQ = (
     dict(ffn_gate='IQ2_XS', ffn_up='IQ2_XXS', ffn_down='Q2_K', attn_qkv='IQ4_XS', attn_gate='Q2_K', ssm_out='IQ3_S'),
     dict(ffn_gate='IQ1_M', ffn_up='IQ3_XXS', ffn_down='IQ2_XS', attn_qkv='Q2_K', attn_gate='IQ4_XS', ssm_out='Q4_K'),
-    dict(ffn_gate='Q4_K', ffn_up='IQ2_S', ffn_down='IQ2_XXS', attn_qkv='IQ2_XS', attn_gate='IQ3_S', ssm_out='IQ1_M'),
+    dict(ffn_gate='Q4_K', ffn_up='IQ2_S', ffn_down='IQ2_XXS', attn_qkv='IQ2_XS', attn_gate='IQ3_S', ssm_out='Q2_K'),
     dict(ffn_gate='IQ3_S', ffn_up='Q2_K', ffn_down='IQ4_XS', attn_q='Q2_K', attn_k='IQ2_XS', attn_v='IQ2_XXS', attn_output='Q4_K'),
 )
 # the codebook formats: block bytes and a d giving typical |weight| 0.03 .. 0.1 (d times the largest scale x grid entry)

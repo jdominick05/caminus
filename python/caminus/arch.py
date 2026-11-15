@@ -523,15 +523,12 @@ class Dense35(OneCard):
     def min_ctx(self, opt):
         return self.DFLASH_MIN_CTX if (opt.get('draft') or 'off') == 'dflash' else MIN_CTX
 
-    # the drafter a serve runs when --draft is not given, by cards (plan P7: the default follows the measured served tok/s
-    # per model x mode x depth; benchmarks.md has the table). Two cards: off until the two-card drafter is built
-    # the served default per (decode module, cards), from the served depth A/B (docs/dev/benchmarks.md); a module not listed
-    # (the plain Qwen3.8-27B's k3_q35_gsq: no drafter of its own yet) serves plain
-    # served A/B, one card, greedy, token-identical (benchmarks.md, #79; agent40k = a 40,885-token rendered agent
-    # session, code32k = 22,700 tokens): Swift on the XTX 47.4 vs 32.7 (1.45x) and 47.4 vs 36.9 (1.29x) tok/s,
-    # ThinkingCap on the XT 41.3 vs 29.9 (1.38x) and 42.6 vs 34.1 (1.25x) -> mtp by default on one card.
-    # Two cards: off until two-card drafting exists (#80).
-    DRAFT_DEFAULT = {('k3_q35_swift', 1): 'mtp', ('k3_q35_tcap', 1): 'mtp', ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
+    # the drafter a serve runs when --draft is not given, per (decode module, cards); a module not listed serves plain.
+    # Every entry is off: drafting must give the plain server's reply token for token, and on a 40,885-token agent
+    # prompt the one-card MTP arm ended its reply 2 tokens before plain on both Swift and ThinkingCap
+    # (docs/dev/benchmarks.md, the served depth A/B). It returns per entry once that is explained and a served A/B at
+    # depth shows a speed-up; --draft mtp / dflash stay available.
+    DRAFT_DEFAULT = {('k3_q35_swift', 1): 'off', ('k3_q35_tcap', 1): 'off', ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
 
     def default_draft(self, opt):
         from . import ggufio
@@ -725,7 +722,7 @@ CODER = ARCHS['qwen4exp']
 
 
 # architectures caminus serve refuses while their models are paused (caminus.models.PAUSED; CAMINUS_ALLOW_PAUSED=1 serves them)
-PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next'}
+PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next', 'qwen35': 'AREX-2'}
 
 
 def paused(A):

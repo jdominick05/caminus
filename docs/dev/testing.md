@@ -27,6 +27,27 @@ Installed-mode command and preflight refusals have a separate CPU suite,
 `python -I tests/tools/test_serve_smoke_installed.py --scratch DIR`. Its package/provenance fixtures never execute
 GPU code; the CLI is replaced by a recorder.
 
+### Staged own Q8 KV codec
+
+The internal `device.kv_codec.Q8KVCodec` writer is a foundation for new cache paths; it does not enable a model's
+Q8 mode. It stores K then V in 34-byte blocks of 32 values, without rotating inputs. The caller owns allocation,
+capacity checks and transforms. Every nonzero error word invalidates the whole append, including blocks that were
+written before another block failed. Discard or reinitialize that result before attention. The launcher leaves error
+bits sticky; initialize the error word before a new sequence and call `check` before consuming the cache.
+
+`tests/io/test_own_kv_codec.py --scratch DIR` compiles the actual own header as host C++ and compares its bytes with
+the independent NumPy reference. It checks roundf boundaries, stored-scale rounding, half underflow/subnormals,
+seeded finite inputs and numerical refusals. `tests/device/test_kv_codec.py` checks launch spans, view extents,
+alignment, aliasing and dispatch using CPU recorders. CI runs both; the host compilation needs a C++ compiler.
+These tests establish source and host behavior, not GPU byte parity or model quality.
+
+The GPU gate is `HIP_VISIBLE_DEVICES=N tools/guard.sh LOG 180 python -I tests/device/test_kv_codec_gpu.py --json OUT`,
+on the non-display card first (the script uses the first visible card). It compares the device's bytes with the
+independent reference over head widths 32 / 128 / 256, several head counts, padded input strides, last valid rows,
+chunk cuts and cache canaries; invalid spans and layouts stay on the CPU tests. The writer alone is not Q8 model
+support: attention, rotation, verify, prefill, drafting, persistence, capacity and each model's accuracy and speed gates
+are separate.
+
 ## GPU tests
 
 GPU tests always run under the guard (`tools/guard.sh LOG SECS CMD...`) and follow [GPU safety](gpu-safety.md). Each

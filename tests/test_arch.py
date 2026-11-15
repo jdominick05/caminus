@@ -266,6 +266,8 @@ def main():
             arch.Dense35.DRAFT_DEFAULT, _qd.module_of = keep_d, keep_mo
         check(got == ('mtp', 'off', 'off', 'dflash') and got_gsq == 'off',
               f'default_draft: mtp file / no block / two cards / the Coder: {got}; a k3_q35_gsq file (no drafter yet): {got_gsq}')
+        check(set(arch.Dense35.DRAFT_DEFAULT.values()) == {'off'},
+              f'default_draft: the shipped dense-line table serves plain until the agent-40K stop is explained ({arch.Dense35.DRAFT_DEFAULT})')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:

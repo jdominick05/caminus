@@ -37,6 +37,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
     67). ThinkingCap on an XT: 76 / 77 / 61 (llama.cpp: 71 / 75 / 48). The drafter's memory leaves Swift about 12-16K
     tokens of context on a 24 GB card (it starts from 8K); `--draft mtp` keeps the full context.
   See [benchmarks](docs/dev/benchmarks.md).
+- **The plain Qwen3.8 27B on Caminus's own code.** `caminus pull qwen3.8-27b` serves ISTA-DASLab's GSQ-RCO IQ3_S file
+  (Apache-2.0) on one card of either size: 55 tok/s decode on an XTX at short context, about 800 tok/s reading a 2K
+  prompt on an XT. `--draft dflash` and `--draft mtp` give the same output as plain decoding, at about 1.2-1.4x and
+  1.1-1.3x served on an XTX. Five new matrix formats (IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K) have their own decode
+  tiles, prefill GEMMs and T-token verify tiles. See [models](docs/models.md).
 - **Qwen3-30B-A3B on Caminus's own code.** `caminus pull qwen3-30b-a3b` serves the official Q4_K_M file on one 24 GB
   card: 248 tok/s at short context, 213 with 4K tokens of context, 111 at its full 40,960 (llama.cpp on the same
   card: 148 at short context, 134 at 4K). It reads a 4K prompt at 6,432 tok/s (llama.cpp: 3,853). Every step from the
@@ -63,10 +68,11 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Changed
 
-- **Qwen3.6 and Qwen3-Coder-Next are paused for this release.** They aren't measured on the current code, so the panel
-  and `caminus models` no longer list them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the
-  reason. The brain / hands team (AREX-2 + Qwen3.6) is paused with them. This release ships the Qwen3.8 Coder, AREX-2,
-  Swift 1.5, ThinkingCap and Qwen3-30B-A3B. `CAMINUS_ALLOW_PAUSED=1` still serves the paused models, unmeasured.
+- **Qwen3.6, Qwen3-Coder-Next and AREX-2 are paused for this release.** The panel and `caminus models` no longer list
+  them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the reason. Qwen3.6 and Qwen3-Coder-Next
+  aren't measured on the current code; AREX-2 is outside this release's model set. The brain / hands team (AREX-2 +
+  Qwen3.6) is paused with them. This release ships the Qwen3.8 Coder, Swift 1.5, ThinkingCap and Qwen3-30B-A3B, and the
+  plain Qwen3.8-27B once its drafting is built. `CAMINUS_ALLOW_PAUSED=1` still serves the paused models, unmeasured.
 
 ### Fixed
 
