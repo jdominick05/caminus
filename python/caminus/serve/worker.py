@@ -5,7 +5,8 @@ A Job carries the prompt ids and the generation settings in, and an event queue 
     ('start', info)        the job reached the engine: info = {'queue_ms', 'prompt_n', 'cached_n'}
     ('text', str)          released text (EOS skipped, UTF-8 complete, stop strings held back / cut)
     ('done', GenResult)    finished; GenResult.finish is 'eos' | 'length' | 'stop' | 'cancel'
-    ('error', kind, msg)   kind 'engine' (EngineError: the session was reset; answer 503 / 529) or 'internal'
+    ('error', kind, msg)   kind 'engine' (EngineError: the session was reset; NumericalFailure: permanently broken,
+                           no reset or park; answer 503 / 529) or 'internal'
                            (any other exception, a bug: the session is aborted, not reset, so the committed state
                            and the checkpoints survive; reset only if abort() fails; answer 500)
                           or 'loop' (sustained answer repetition stopped through the normal stop callback; answer 422,
@@ -27,7 +28,7 @@ import threading
 import time
 import traceback
 
-from ..errors import NonFiniteLogits
+from ..errors import NumericalFailure
 from .agentmon import AnswerLoopGuard, ContentClass, LoopDetector, tool_call_report
 from .engine import EngineError
 from .generate import GenResult, TokenText, run_generation
@@ -37,7 +38,7 @@ _TASK_IDS = itertools.count()
 
 
 class EngineBroken(RuntimeError):
-    """the engine produced non-finite logits earlier in this process: nothing more is served (restart the server)"""
+    """a terminal numerical failure happened earlier: nothing more is served (restart the server)"""
 
 
 class QueueFull(RuntimeError):
@@ -132,7 +133,7 @@ class EngineWorker:
         self.history = []               # (tag, t_submit, t_start, t_end) of the jobs run (tests read it)
         self.current = None             # the job on the engine (cancel_all)
         self._stop = False
-        self.broken = None          # a NonFiniteLogits reason: sticky until the process ends
+        self.broken = None          # a NumericalFailure reason: sticky until the process ends
         self.on_broken = None       # called with the reason once broken (caminus serve: stop and exit 75)
         self.thread = threading.Thread(target=self._loop, name='k3-engine', daemon=True)
         self.thread.start()
@@ -188,6 +189,8 @@ class EngineWorker:
                     self._idle_due = False
                     try:
                         idle()
+                    except NumericalFailure as e:
+                        self._break(e)
                     except Exception:   # noqa: BLE001 - an idle park that fails is skipped
                         traceback.print_exc()
                     continue
@@ -195,18 +198,18 @@ class EngineWorker:
                 job = self.q.get()
             if job is None:
                 return
+            if self.broken:
+                # (terminal numerical failure earlier: a queued job never reaches the session - its prompt-cache
+                #  prepare or bundle export could write corrupt state to disk - it fails here, on the worker thread)
+                job.t_start = job.t_end = time.perf_counter()
+                job.events.put(('error', 'engine', f'engine broken (restart the server): {self.broken}'))
+                continue
             if isinstance(job, BundleJob):
                 self.busy = True
                 try:
                     self._bundle_job(job)
                 finally:
                     self.busy = False
-                continue
-            if self.broken:
-                # (non-finite logits earlier in this process: a queued job never reaches the session - its prompt-cache
-                #  prepare could park the corrupt live state to disk - it fails here, on the worker thread)
-                job.t_start = job.t_end = time.perf_counter()
-                job.events.put(('error', 'engine', f'engine broken (restart the server): {self.broken}'))
                 continue
             if self._stop:
                 job.cancel.set()        # (shutting down: a job still queued ends 'cancel' without touching the engine)
@@ -218,6 +221,25 @@ class EngineWorker:
             finally:
                 self.busy = False
                 self.current = None
+
+    def _break(self, error, job=None):
+        """One sticky terminal transition, including failures found while draining or saving state."""
+        if not self.broken:
+            self.broken = str(error) or type(error).__name__
+            live = getattr(getattr(self.sess, 'pc', None), 'live', None)
+            if live is not None:
+                live.known = False
+            self.stats['engine_errors'] += 1
+            print(f'caminus serve: ENGINE BROKEN, refusing every request until a restart: {self.broken}', file=sys.stderr, flush=True)
+            if self.on_broken is not None:
+                try: self.on_broken(self.broken)
+                except Exception:   # noqa: BLE001 - the callback must not hide the broken state
+                    traceback.print_exc()
+        if job is not None:
+            if self.stats_obj is not None and isinstance(job, Job):
+                self.stats_obj.error(job, 'engine')
+            job.t_end = time.perf_counter()
+            job.events.put(('error', 'engine', f'engine broken (restart the server): {self.broken}'))
 
     def _run(self, job):
         job.t_start = time.perf_counter()
@@ -308,53 +330,58 @@ class EngineWorker:
             if rec is not None and rec['verdict'] is not None and self._auto_ok():
                 try:
                     self._bundle(rec, rec['verdict'])
+                except NumericalFailure as e:
+                    self._break(e)   # the request was already answered; later work is refused
                 except Exception:   # noqa: BLE001 - a bundle never fails the request (already answered)
                     traceback.print_exc()
-        except NonFiniteLogits as e:
-            # (corrupt weights or states: every later request would get the same garbage. Stop serving: refuse new
-            #  requests, /health 503 with the reason; the process must be restarted)
-            self.stats['engine_errors'] += 1
-            self.broken = f'{e}'
-            if so is not None:
-                so.error(job, 'engine')
-            print(f'caminus serve: ENGINE BROKEN, refusing every request until a restart: {e}', file=sys.stderr, flush=True)
-            job.t_end = time.perf_counter()
-            job.events.put(('error', 'engine', f'engine broken (restart the server): {e}'))
-            if self.on_broken is not None:
-                try: self.on_broken(self.broken)
-                except Exception:   # noqa: BLE001 - the callback must not hide the broken state
-                    traceback.print_exc()
+        except NumericalFailure as e:
+            # (non-finite logits or a refused, partly written KV cache: state cannot be reset, retried or parked.
+            #  Stop serving: refuse new requests, /health 503 with the reason; the process must be restarted)
+            self._break(e, job)
         except EngineError as e:
-            self.stats['engine_errors'] += 1
-            self.stats['resets'] += 1
-            if so is not None:
-                so.error(job, 'engine')
-                so.bail(False)
             if self.flight is not None:             # (before the reset drops the VRAM tier: the prompt-end state is still there)
                 try:
                     rec = self._record(job, None)
                     if self._auto_ok():
                         self._bundle(rec, 'retry_exhausted')
+                except NumericalFailure as terminal:
+                    self._break(terminal, job)
+                    return
                 except Exception:   # noqa: BLE001 - a bundle never changes the error path
                     traceback.print_exc()
-            self.sess.reset()
+            try:
+                self.stats['resets'] += 1
+                self.sess.reset()
+            except NumericalFailure as terminal:
+                self._break(terminal, job)
+                return
+            self.stats['engine_errors'] += 1
+            if so is not None:
+                so.error(job, 'engine')
+                so.bail(False)
             job.t_end = time.perf_counter()
             job.events.put(('error', 'engine', str(e)))
         except Exception as e:      # noqa: BLE001 - the worker must survive anything a request triggers
             self.stats['internal_errors'] += 1
-            if so is not None:
-                so.error(job, 'internal')
             traceback.print_exc()
             try:
                 self.sess.abort()
                 self.stats['aborts'] += 1
+            except NumericalFailure as terminal:
+                self._break(terminal, job)
+                return
             except Exception:       # noqa: BLE001 - the state is not consistent: drop it
                 traceback.print_exc()
                 self.stats['resets'] += 1
                 try:
                     self.sess.reset()
+                except NumericalFailure as terminal:
+                    self._break(terminal, job)
+                    return
                 except Exception:   # noqa: BLE001
                     pass
+            if so is not None:
+                so.error(job, 'internal')
             job.t_end = time.perf_counter()
             job.events.put(('error', 'internal', f'{type(e).__name__}: {e}'))
 
@@ -459,6 +486,8 @@ class EngineWorker:
             path, meta = self._bundle(rec, job.reason)
             job.result = dict(path=path, request_id=rid, reason=job.reason, cache_ref=meta.get('cache_ref'))
             job.events.put(('done', job.result))
+        except NumericalFailure as e:
+            self._break(e, job)
         except LookupError as e:
             job.events.put(('error', 'not_found', str(e)))
         except Exception as e:  # noqa: BLE001

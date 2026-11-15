@@ -6,8 +6,8 @@ CLAUDE.md imports this file.
 ## What this is
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
-- It serves four models through an OpenAI / Anthropic API (`caminus serve`), and a fifth once its drafting is built (the
-  plain Qwen3.8-27B GSQ-RCO, paused): the Qwen3.8-Flash-Next GSQ-RCO Coder (two cards, with the DFlash2 drafter), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
+- It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
+  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
   `--draft mtp` (their own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
   model's DFlash2 drafter on one card; `decode/dflash35.py`). `python/caminus/models.py` is the catalog.
@@ -227,8 +227,10 @@ GPU safety (a fault on the display card can take the desktop down):
 - Every GPU process runs under `tools/guard.sh LOG SECS CMD...` (or `caminus guard`).
 - Guard exit 99 = a GPU fault: stop all GPU work, rerun nothing. Exit 98 = a fault on record
   (`~/.local/state/k3/GPU_FAULT_STOP`): a person inspects it before anything runs.
-- Exit 75 = `caminus serve`'s engine produced non-finite logits (`caminus.errors.NonFiniteLogits`: a weight or state corrupt
-  in that process; nothing parked). It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
+- Exit 75 = `caminus serve`'s engine had a terminal `caminus.errors.NumericalFailure`: non-finite logits
+  (`NonFiniteLogits`: a weight or state corrupt in that process) or a refused KV encoding (`InvalidKVEncoding`, kept for
+  the Q8 KV path: other blocks may already be written). The worker marks itself broken; retry, reset, abort recovery and
+  parking never run on that state. It is the only exit a launcher reloads, once (`cmd/guarded.py command_reloading`,
   the systemd unit's `RestartForceExitStatus=75`); faults are never retried.
 - New or changed kernel code runs first on a non-display card alone (`HIP_VISIBLE_DEVICES=<its index>`), small inputs.
 - Every device wait is time-bounded (`limit_us`; TP 200 ms + a bitwise retry); every launch well under 200 ms. Never a

@@ -72,7 +72,7 @@ def load_config(path):
     return out
 
 
-# the exit code of a server whose engine produced non-finite logits (corrupt weights or states), distinct from the guard's
+# the exit code after a terminal numerical failure (non-finite logits or a refused KV encoding), distinct from the guard's
 # 99 / 98 (GPU faults, never restarted): the systemd unit (RestartForceExitStatus) and caminus start reload once on it
 EXIT_BROKEN = 75
 
@@ -208,16 +208,16 @@ def build_engine(opt, stats, log=print):
                            f'({", ".join(pl["names"])}): HIP started before the cards were chosen')   # would not be the ones chosen)
     t0 = time.time()
     A = _arch.ARCHS[opt['arch']] if opt.get('arch') else _arch.of(opt['model']).variant(opt.get('cards'))
-    m, pf, df, dr = A.build(opt, log)
-    for d in m.devs: torch.cuda.synchronize(d)
-    if callable(getattr(m, 'selfcheck', None)):
-        # (a few fixed tokens on fresh states: a load that left corrupt weights must stop here, not serve token 0)
-        from ..errors import NonFiniteLogits
-        try:
+    from ..errors import NumericalFailure
+    try:
+        m, pf, df, dr = A.build(opt, log)
+        for d in m.devs: torch.cuda.synchronize(d)
+        if callable(getattr(m, 'selfcheck', None)):
+            # (fresh-state fixed tokens: non-finite logits or an invalid KV encoding must stop before a cache exists)
             m.selfcheck()
-        except NonFiniteLogits as e:
-            log(f'caminus serve: the startup self-check failed: {e}')
-            raise SystemExit(EXIT_BROKEN)
+    except NumericalFailure as e:
+        log(f'caminus serve: the startup self-check failed: {e}')
+        raise SystemExit(EXIT_BROKEN)
     disk = not opt['no_disk_cache']
     pc = PC.PromptCache(m, pf, dr, cache_dir=opt['cache_dir'] if disk else None, disk=disk,
                         cap_gb=float(opt['cache_cap_gb']) if opt.get('cache_cap_gb') else PC.DEFAULT_CAP_GB)
@@ -246,6 +246,7 @@ def recipe(opt, log=print):
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
+    defaulted = draft is None
     if draft is None:
         draft = A.default_draft(opt)
         if draft != 'off':
@@ -258,7 +259,12 @@ def recipe(opt, log=print):
             opt['drafter'] = os.path.join(_config.model_dir(), _models.local_rel(_models.BY_KEY['dflash2-27b']))
         if A.cards != 1:
             raise ValueError('--draft dflash on swift-1.5 runs on one card only: --cards 1, or --draft off')
-        if not os.path.isfile(opt['drafter']):
+        if not os.path.isfile(opt['drafter']) and defaulted:
+            # (the default drafter's file is optional: without it the default is plain decoding, not a refusal)
+            log(f'caminus serve: --draft off (the default drafter file {opt["drafter"]} is not here: caminus pull fetches it)',
+                flush=True)
+            draft, own_dflash = 'off', False
+        elif not os.path.isfile(opt['drafter']):
             raise ValueError(f'the DFlash2 GGUF {opt["drafter"]} does not exist (pass --drafter)')
     elif draft == 'dflash' and A.drafter != 'dflash':
         raise ValueError(f'--draft dflash: no DFlash drafter for {A.name} (its drafter: {A.drafter or "none"})')
@@ -273,8 +279,29 @@ def recipe(opt, log=print):
     elif draft != 'dflash' and opt['drafter'] != DEFAULT_DRAFTER and not opt['no_drafter'] and 'dflash' not in getattr(A, 'drafters', ()):
         log(f'caminus serve: --drafter not used: --draft {draft} (the DFlash file loads with --draft dflash)', flush=True)
     opt['draft'] = draft
+    opt['draft_defaulted'] = defaulted
     if A.drafter == 'dflash': opt['no_drafter'] = draft == 'off'
     return A
+
+
+def keep_default_draft(A, opt, place, log=print):
+    """a default (not asked for) one-card drafter stays only when the cards still hold the context with it: the
+    explicit --max-ctx, or MIN_CTX for auto (a smaller context would not take a harness's long requests). Otherwise
+    the serve is plain, with the full context; --draft dflash asks for the drafter anyway. place(fits) raises
+    host.PlacementError when no cards fit"""
+    if not opt.get('draft_defaulted') or opt.get('draft') != 'dflash' or A.drafter == 'dflash':
+        return
+    c = ctx_arg(opt.get('max_ctx'))
+    want = _arch.MIN_CTX if c == 'auto' else c
+    from ..device import host as _host
+    try:
+        place(lambda cs: A.fits(dict(opt, max_ctx=want), cs))
+    except _host.PlacementError:
+        log(f'caminus serve: --draft off (with the default drafter fewer than {want} positions fit these cards; '
+            f'--draft dflash runs it anyway, with less context)', flush=True)
+        opt['draft'] = 'off'
+        return
+    opt['draft_floor'] = want    # (the real placement and max_ctx auto keep this floor: Dense35.min_ctx)
 
 
 def fit_report(argv):
@@ -287,6 +314,7 @@ def fit_report(argv):
         opt['max_ctx'] = ctx_arg(opt['max_ctx'])
         if opt.get('kv_host'):
             raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
+        keep_default_draft(A, opt, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
         placement = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
         plan = A.context_fit(opt, placement['cards'])
         if opt['max_ctx'] != 'auto' and opt['max_ctx'] > plan.native_ctx:
@@ -328,6 +356,7 @@ def main(argv=None):
     # the cards, chosen before the GPU runtime starts (D-292; caminus.device.host): by PCI address, the bigger card first for a
     # two-card model; HIP_VISIBLE_DEVICES, when given, limits the choice and is rewritten into the engine's order
     from ..device import host as _host
+    keep_default_draft(A, opt, lambda fits: _host.place(A.cards, fits=fits, split_of=A.split))
     try:
         pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
     except _host.PlacementError as e:
@@ -392,7 +421,7 @@ def main(argv=None):
     srv.set_loading(False)
     print(f'caminus serve: ready on http://{opt["host"]}:{srv.port}  max_ctx={sess.max_ctx}', flush=True)
     stop = threading.Event()
-    srv.worker.on_broken = lambda why: stop.set()   # (corrupt weights or states: exit EXIT_BROKEN; the launcher reloads once)
+    srv.worker.on_broken = lambda why: stop.set()   # (terminal numerical state: exit EXIT_BROKEN; the launcher reloads once)
     try:
         import signal
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -429,7 +458,7 @@ def shutdown(srv, sess, pc, drain_s=60.0, park_s=90.0, log=print):
     if not ok:
         log(f'caminus serve: shutdown: the engine thread did not stop within {drain_s:.0f} s: no park (the state is not known)', flush=True)
     elif getattr(getattr(srv, 'worker', None), 'broken', None):
-        log('caminus serve: shutdown: the engine is broken (non-finite logits): no park (its state must not reach the disk cache)',
+        log('caminus serve: shutdown: the engine is broken (terminal numerical failure): no park (its state must not reach the disk cache)',
             flush=True)
     elif park_s > 0:
         box = {}

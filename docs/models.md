@@ -10,6 +10,7 @@ from its Hugging Face repository and checks every file before using it.
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,432 tok/s |
 | `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
+| `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 55 tok/s | 800 tok/s (measured on an XT) |
 | `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 47 tok/s; 68 on two cards | 942 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
@@ -45,6 +46,10 @@ again.
   model's DFlash2 drafter (output identical to plain decoding; served on an XT about 1.9x on code and prose, 1.5x on
   shell). It slows with depth (about 16 tok/s with 28K tokens of context). Its licence is PolyForm Small Business 1.0.0: read its terms
   before any commercial use.
+- **`qwen3.8-27b`** is the plain Qwen3.8 27B, not a finetune, quantized to about 3.6 bits per weight by ISTA-DASLab
+  (GSQ-RCO, Apache-2.0). It is the smallest 27B download, fits either card and writes fastest of the three at short
+  context (55 tok/s on an XTX). `--draft dflash` (about 1.2-1.4x, served on an XTX) and `--draft mtp` (about
+  1.1-1.3x) give the same output as plain decoding; on this file the drafters gain less than on the other two.
 
 ## Download and start
 
@@ -75,7 +80,7 @@ Caminus doesn't include any model weights. Each model has its own licence; read 
 
 | Model | Licence |
 |---|---|
-| AREX-2, Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO (not offered yet), and the paused Qwen3.6-35B-A3B and Qwen3-Coder-Next | Apache-2.0 |
+| AREX-2, Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO, and the paused Qwen3.6-35B-A3B and Qwen3-Coder-Next | Apache-2.0 |
 | Swift 1.5 | the Swift Open License 1.0 |
 | ThinkingCap | PolyForm Small Business 1.0.0 (read its terms before any commercial use) |
 | The DFlash2 drafters (the Coder's, and the 27B models' shared one) | Apache-2.0 |
