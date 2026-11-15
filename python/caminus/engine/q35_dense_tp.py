@@ -30,7 +30,7 @@ import torch
 
 from .. import ggufio
 from ..device import capacity
-from . import k3
+from . import k3, upload
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD
 from .q35_dense import module_of, trunk_blocks, block_kinds, _shapes, RECURRENT, attn_part_elems
 from .q3moe_one import card_per_wgp
@@ -183,11 +183,14 @@ class Dense35TP:
         if self.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)):
             raise ValueError(f'Dense35TP: token_embd is {self.emb.type} on module {self.module}')
         self.vram_mib = [b / 2 ** 20 + 256 for b in _projection_bytes(F, self.max_ctx, self.ffn_share, self.vocab_share, self.spec_T)]
+        h2d = upload.mode_of()                     # (CAMINUS_H2D: how the weights reach the cards; engine/upload.py)
+        self.vram_mib = [v + e for v, e in zip(self.vram_mib, upload.extra_mib(h2d, 2))]
         ex = [float(v) for v in vram_extra_mib]
         if vram_check:
             capacity.check(self.devs, [v + e for v, e in zip(self.vram_mib, ex)],
                            f'Dense35TP {os.path.basename(path)} (max_ctx {self.max_ctx}: '
                            f'{self.vram_mib[0]:.0f} / {self.vram_mib[1]:.0f} MiB + {ex[0]:.0f} / {ex[1]:.0f} MiB after it)')
+        self.h2d = upload.Uploader(self.devs, h2d, upload.UploadLog.from_env(), what=f'Dense35TP {os.path.basename(path)}')
         hip = _hip()
         for a, b in ((0, 1), (1, 0)):
             hip.hipSetDevice(self.devs[a]); hip.hipDeviceEnablePeerAccess(self.devs[b], 0)
@@ -216,14 +219,16 @@ class Dense35TP:
         self.model_tag = 'qwen35'
         self.n_ex = 2 * self.nl_build
         self._card_ev, self.card_ms = None, None
-        self._load(); self._build_tapes()
+        self._load_logged(); self._build_tapes()
 
     @staticmethod
     def projection_mib(path, max_ctx, ffn_share=0.5, vocab_share=0.5, spec_T=1):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
-        check counts the same terms"""
+        check counts the same terms (with the CAMINUS_H2D arm's buffer: upload.extra_mib, 0 unless peer)"""
         F = ggufio.GGUFFile(path)
-        try: return [b / 2 ** 20 + 256 for b in _projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T)]
+        try:
+            return [b / 2 ** 20 + 256 + e for b, e in zip(_projection_bytes(F, max_ctx, ffn_share, vocab_share, spec_T),
+                                                          upload.extra_mib(upload.mode_of(), 2))]
         finally: F.close()
 
     @staticmethod
@@ -262,25 +267,29 @@ class Dense35TP:
             with torch.cuda.device(self.devs[c]):
                 if t.type in ('F32', 'BF16'):   # (BF16: widened to F32, exactly)
                     f = x.view(np.float32) if t.type == 'F32' else (x.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
-                    out.append(dict(name=name, fmt='F32', rows=Rl, K=Kl, w=torch.from_numpy(np.ascontiguousarray(f).reshape(Rl, Kl)).to('cuda')))
+                    out.append(dict(name=name, fmt='F32', rows=Rl, K=Kl, w=self.h2d.up(np.ascontiguousarray(f).reshape(Rl, Kl), name, c, 'cut')))
+                    self._kept(name, c, 'cut', out[-1]['w'], (rows, cols))
                     continue
                 ok = k3.OWN_Q35T_1RT + ('Q8_0',) if self.tcap else ('Q4_K', 'Q8_0', 'Q5_K', 'Q6_K')
                 if t.type not in ok: raise ValueError(f'Dense35TP: {name} is {t.type} ({ok} on module {self.module}, or F32 / BF16 alpha / beta)')
                 y = x.reshape(-1)
                 if t.type == 'Q6_K': y = q6k_planes(y, Rl, Kl)
                 elif t.type in IQ_REC: y = iq_records(y, Rl, Kl, t.type)
-                out.append(dict(name=name, fmt=t.type, rows=Rl, K=Kl, w=torch.from_numpy(np.ascontiguousarray(y)).to('cuda')))
+                out.append(dict(name=name, fmt=t.type, rows=Rl, K=Kl, w=self.h2d.up(np.ascontiguousarray(y), name, c, 'cut')))
+                self._kept(name, c, 'cut', out[-1]['w'], (rows, cols))
         return out
 
-    def _vec(self, name, n, idx=None):
-        """an F32 vector on both cards (idx: the entries each card takes, [c] lists; None: replicated)"""
+    def _vec(self, name, n, idx=None, keep=True):
+        """an F32 vector on both cards (idx: the entries each card takes, [c] lists; None: replicated). keep: the engine keeps
+        the result (False: a temporary, not in the read-back list)"""
         t = self.F.T[name]
         if t.type != 'F32' or t.n_values != n: raise ValueError(f'Dense35TP: {name} is {t.type} {list(t.shape)}, the tape needs F32 [{n}]')
         v = t.pread(0, t.n_bytes).view(np.float32)
         out = []
         for c in (0, 1):
             x = v if idx is None else v[np.asarray(idx[c])]
-            with torch.cuda.device(self.devs[c]): out.append(torch.from_numpy(np.ascontiguousarray(x)).to('cuda'))
+            with torch.cuda.device(self.devs[c]): out.append(self.h2d.up(np.ascontiguousarray(x), name, c, 'vec'))
+            if keep: self._kept(name, c, 'vec', out[-1], (idx,))
         return out
 
     def _load(self):
@@ -306,14 +315,15 @@ class Dense35TP:
                 al = self._split(p + 'ssm_alpha.weight', vh_one, [None, None], NV, D)
                 be = self._split(p + 'ssm_beta.weight', vh_one, [None, None], NV, D)
                 so = self._split(p + 'ssm_out.weight', [None, None], so_cols, D, NV * S)
-                cw_all = self._vec(p + 'ssm_conv1d.weight', CH * 4)
+                cw_all = self._vec(p + 'ssm_conv1d.weight', CH * 4, keep=False)
                 dt = self._vec(p + 'ssm_dt.bias', NV, [G[c][2] for c in (0, 1)])
                 a = self._vec(p + 'ssm_a', NV, [G[c][2] for c in (0, 1)])
                 nw = rep(p + 'ssm_norm.weight', S)
                 for c in (0, 1):
                     ks, kc, VH = G[c]; CHl = len(ch_idx[c]); NVl = len(VH)
                     with torch.cuda.device(self.devs[c]):
-                        cw = cw_all[c].view(CH, 4)[torch.from_numpy(ch_idx[c]).to('cuda')].contiguous()
+                        cw = cw_all[c].view(CH, 4)[self.h2d.up(ch_idx[c], p + 'ssm_conv1d.index', c, 'idx')].contiguous()
+                    self._kept(p + 'ssm_conv1d.weight', c, 'conv', cw, (CH,))
                     dd[c].update(kind='gdn', qkv=qkv[c], z=z[c], al=al[c], be=be[c], so=so[c], conv_w=cw, dt=dt[c], a=a[c], nw=nw[c],
                                  conv_st=Z(c, CHl * 3).view(CHl, 3), convx=Z(c, self.spec_T * CHl),
                                  gdn=Z(c, k3.gdn_block_size(NVl, S, kc, self.spec_T)), CH=CHl, NV=NVl, NK=kc)
@@ -335,8 +345,44 @@ class Dense35TP:
         eb = self.emb.pread(0, self.emb.n_bytes)
         self.emb_dev = []
         for c in (0, 1):
-            with torch.cuda.device(self.devs[c]): self.emb_dev.append(torch.from_numpy(eb).to('cuda'))
+            with torch.cuda.device(self.devs[c]): self.emb_dev.append(self.h2d.up(eb, 'token_embd.weight', c, 'emb'))
+            self._kept('token_embd.weight', c, 'emb', self.emb_dev[-1], ())
         del eb
+
+    def _load_logged(self):
+        """_load in the upload log's frame (engine/upload.py): its start, environment and maps; on an exception its type and
+        the maps, then the exception; at the end the arms' buffers released and the maps again"""
+        self.uploads = []
+        self.h2d.begin('Dense35TP', self.path)
+        try: self._load()
+        except BaseException as e:
+            self.h2d.failed(e); raise
+        self.h2d.finish()
+
+    def _kept(self, name, c, kind, w, args):
+        """records a card tensor the engine keeps, with what host_bytes needs to rebuild its bytes from the file
+        (tools/gates/tp_load_only.py reads every one back after the load)"""
+        self.uploads.append((name, c, kind, w, args))
+
+    def host_bytes(self, name, c, kind, args):
+        """card c's tensor `name` (a _kept record) rebuilt on the host from the file, the same steps as the load: the bytes
+        it must hold on the card"""
+        t = self.F.T[name]
+        if kind == 'emb': return t.pread(0, t.n_bytes)
+        if kind == 'vec':
+            v = t.pread(0, t.n_bytes).view(np.float32); idx = args[0]
+            return np.ascontiguousarray(v if idx is None else v[np.asarray(idx[c])])
+        if kind == 'conv':
+            return np.ascontiguousarray(t.pread(0, t.n_bytes).view(np.float32).reshape(args[0], 4)[self.plan['ch'][c]])
+        rows, cols = args
+        R, rb = t.rows(); _, bs, ts = ggufio.TYPES[t.type_id]
+        x, Rl, Kl = cut(t.pread(0, t.n_bytes).reshape(R, rb), rows[c], cols[c], bs, ts)
+        if t.type in ('F32', 'BF16'):
+            return np.ascontiguousarray(x.view(np.float32) if t.type == 'F32' else (x.view(np.uint16).astype(np.uint32) << 16).view(np.float32)).reshape(Rl, Kl)
+        y = x.reshape(-1)
+        if t.type == 'Q6_K': y = q6k_planes(y, Rl, Kl)
+        elif t.type in IQ_REC: y = iq_records(y, Rl, Kl, t.type)
+        return np.ascontiguousarray(y)
 
     # -- the tapes ---------------------------------------------------------------------------------------------------------
     def _build_tapes(self):

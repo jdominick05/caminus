@@ -56,6 +56,7 @@ SUITES = [
     ('q35_tape', ['tests/engine/test_q35_tape_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q35_tp', ['tests/engine/test_q35_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q35_tp_ver', ['tests/engine/test_q35_verify_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
+    ('q35_upload', ['tests/engine/test_q35_upload_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
     ('serve_smoke1', ['tests/tools/test_serve_smoke1.py'], set()),

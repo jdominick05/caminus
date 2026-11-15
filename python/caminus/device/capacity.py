@@ -109,11 +109,17 @@ def host_kv_room():
 def check_host_kv(nbytes):
     """kv_host: refuse (CapacityError) a host KV cache that would leave less than HOST_KV_MARGIN_MIB of MemAvailable or pass
     the GTT page limit, before anything is allocated"""
+    return check_host_pinned(nbytes, 'host KV cache')
+
+
+def check_host_pinned(nbytes, what):
+    """refuse (CapacityError) nbytes of pinned host memory that would leave less than HOST_KV_MARGIN_MIB of MemAvailable or
+    pass the GTT page limit, before anything is allocated (the host KV cache, the weight uploads' pinned staging)"""
     need = nbytes / MIB; ma, lim = host_kv_room()
     if ma is not None and need + HOST_KV_MARGIN_MIB > ma:
-        raise CapacityError(f'host KV cache {need:.0f} MiB + {HOST_KV_MARGIN_MIB} MiB margin > MemAvailable {ma:.0f} MiB')
+        raise CapacityError(f'{what} {need:.0f} MiB + {HOST_KV_MARGIN_MIB} MiB margin > MemAvailable {ma:.0f} MiB')
     if lim is not None and need > 0.95 * lim:
-        raise CapacityError(f'host KV cache {need:.0f} MiB > 95 % of the GTT page limit {lim:.0f} MiB (ttm pages_limit)')
+        raise CapacityError(f'{what} {need:.0f} MiB > 95 % of the GTT page limit {lim:.0f} MiB (ttm pages_limit)')
     return need
 
 

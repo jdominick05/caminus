@@ -136,6 +136,13 @@ CLAUDE.md imports this file.
   (`contract_problems(sess)`); `k3_session.py` wires it to the engine through the cache.
   Response guards follow the parser's `think_open` policy: an optional opening tag cannot hide an untagged answer.
   Content classification keeps bounded marker prefixes across chunks; rejected JSON calls cannot alter earlier calls.
+- `engine/upload.py`: how the dense qwen35 engines (Dense35Own, Dense35TP) copy weights to the cards. `CAMINUS_H2D=pageable`
+  (the default: the old blocking copy from ordinary memory, no added sync), `pinned` (one 64 MiB pinned staging buffer per
+  card, synced before each refill) or `peer` (two cards: only card 0 reads host memory, through its pinned staging buffer;
+  the second card's weights go on through a 64 MiB transit buffer on card 0, added to card 0's projection; no pageable copy).
+  `CAMINUS_UPLOAD_LOG=PATH` (off by default) logs every copy (tensor, card, the card that reads host memory, host address,
+  bytes, start / done / dropped), the environment and /proc/self/maps; `tools/gates/sdma_classify.py` reads it to place a
+  fault address in a live, freed or both (ambiguous) source. `tests/engine/test_q35_upload_cpu.py` is its CPU test.
 - `device/host.py`: the host's cards from sysfs + KFD topology, never torch; `caminus serve` places itself and sets
   `HIP_VISIBLE_DEVICES` before HIP starts. `device/capacity.py`: every VRAM projection and check.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
@@ -203,6 +210,9 @@ tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # deco
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load, read back bit for bit
+CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 300 python -I tools/gates/h2d_pattern.py --seconds 180
+python -I tools/gates/sdma_classify.py ULOG ADDR --pid PID                # (CPU) a fault address: live / freed / neither upload source
 ```
 
 After a kernel change: `objcheck.py check` (every other object's code unchanged; k3_run <= 96 VGPRs, 0 spills;
