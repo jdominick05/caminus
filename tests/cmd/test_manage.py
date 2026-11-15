@@ -425,7 +425,7 @@ def reload_checks(S):
 
 def paused_checks(S):
     """without CAMINUS_ALLOW_PAUSED: the paused models are left out of the catalog and refused by pull, download, start and
-    caminus serve's architecture check, each with the reason; the five shipped models stay"""
+    caminus serve's architecture check, each with the reason; the shipped models stay"""
     env = dict(PAUSED_ENV, CAMINUS_CONFIG=os.path.join(S, 'paused-none.toml'), CAMINUS_MODEL_DIR=os.path.join(S, 'paused-models'))
     r = subprocess.run([sys.executable, '-I', '-c', PAUSED_CHILD, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python')],
                        capture_output=True, text=True, env=env)
@@ -433,17 +433,17 @@ def paused_checks(S):
         o = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         check(False, f'paused: the child printed no JSON (rc {r.returncode}): {r.stderr[-400:]}'); return
-    check(o['catalog'] == ['coder', 'arex-2', 'swift-1.5', 'thinkingcap', 'qwen3-30b-a3b'] and len(o['all']) == 9,
-          f'paused: the catalog offers the five shipped models ({o["catalog"]}), the tree keeps all nine')
+    check(o['catalog'] == ['coder', 'swift-1.5', 'thinkingcap', 'qwen3-30b-a3b'] and len(o['all']) == 9,
+          f'paused: the catalog offers the four shipped models ({o["catalog"]}), the tree keeps all nine')
     check(o['pull'] == 2 and o['download'] == 2 and 'paused' in r.stderr and 'Qwen3-Coder-Next is paused' in r.stderr,
           f'paused: caminus pull / caminus download refuse a paused model with the reason (pull {o["pull"]}, download {o["download"]})')
     check('paused' in o['start'], f'paused: caminus start refuses a paused model ({o["start"]})')
     check(o['team'] not in (0, None) and 'brain-hands team is paused' in r.stdout + r.stderr,
           f'paused: caminus start --team brain-hands is refused before any server starts (rc {o["team"]})')
     sv = o['serve']
-    check(all(sv[a] and 'CAMINUS_ALLOW_PAUSED=1' in sv[a] for a in ('qwen35moe', 'qwen3next'))
-          and not any(sv[a] for a in ('qwen35', 'qwen35-own', 'qwen3moe', 'qwen4exp')),
-          'paused: caminus serve refuses the qwen35moe and qwen3next architectures only (AREX-2\'s qwen35 is served)')
+    check(all(sv[a] and 'CAMINUS_ALLOW_PAUSED=1' in sv[a] for a in ('qwen35moe', 'qwen3next', 'qwen35'))
+          and not any(sv[a] for a in ('qwen35-own', 'qwen3moe', 'qwen4exp')),
+          'paused: caminus serve refuses the qwen35moe, qwen3next and qwen35 (AREX-2) architectures only')
 
 
 if __name__ == '__main__':

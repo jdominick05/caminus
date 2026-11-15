@@ -7,7 +7,6 @@ from its Hugging Face repository and checks every file before using it.
 
 | Name | Model | Cards | Download | Decode | Prompt reading |
 |---|---|---|---|---|---|
-| `arex-2` | AREX-2 27B (a dense model) | 1, 24 GB | 17.2 GB | 41 tok/s | 928 tok/s |
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,432 tok/s |
 | `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
@@ -17,7 +16,7 @@ from its Hugging Face repository and checks every file before using it.
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
 where each number comes from and how llama.cpp does on the same cards.
 
-**Paused for this release:** Qwen3.6-35B-A3B (both files) and Qwen3-Coder-Next. They aren't measured on the current
+**Paused for this release:** Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
 code, so `caminus pull`, `caminus start` and `caminus serve` refuse them for now; `CAMINUS_ALLOW_PAUSED=1` still serves them, unmeasured. They come back once they are measured
 again.
 
@@ -28,13 +27,11 @@ again.
 - **An XTX + XT or two XTX:** `coder` handles the longest work: 262K tokens of context, a prompt cache that keeps whole
   conversations, and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from
   disk. Two XT cards are too small for it.
-- **Planning:** `arex-2` is a dense 27B model, so it's slower. It plans in the
-  [brain / hands team](panel.md#the-brain--hands-team), which is paused with Qwen3.6, its other half.
 - **`qwen3-30b-a3b`** is the fastest writer on one 24 GB card and the most exact (4-bit weights, no llama.cpp code on its
   path). Its context is 40,960 tokens, the model's own limit, so it suits shorter work: 213 tok/s with 4K tokens of
   context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
-  path). It writes at about `arex-2`'s speed. `caminus serve --model ... --draft mtp` (one card) drafts with the model's
+  path). `caminus serve --model ... --draft mtp` (one card) drafts with the model's
   own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
   XTX; no extra file); `--draft dflash` drafts with its base model's DFlash2 drafter
   instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~12-16K tokens of
@@ -68,8 +65,8 @@ context fits. Reading a prompt is about as fast as on one XTX for now.
 
 ## The names your tools use
 
-Each server answers to its model id and to the same id with `-nothink` (no thinking before answering): `arex-2`,
-`qwen3-30b-a3b`, `swift-1.5`, `thinkingcap` (and, while paused, `qwen3.6` and `qwen3-coder-next`). The Coder answers to `k3-coder`, `k3-coder-nothink`, `k3-coder-low` and `k3-coder-xhigh`
+Each server answers to its model id and to the same id with `-nothink` (no thinking before answering):
+`qwen3-30b-a3b`, `swift-1.5`, `thinkingcap` (and, while paused, `arex-2`, `qwen3.6` and `qwen3-coder-next`). The Coder answers to `k3-coder`, `k3-coder-nothink`, `k3-coder-low` and `k3-coder-xhigh`
 (the last two set how long it thinks).
 
 ## Licences

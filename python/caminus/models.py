@@ -112,6 +112,7 @@ PAUSED = {
     'qwen3.6': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3.6-hauhau': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
     'qwen3-coder-next': 'Qwen3-Coder-Next is paused: not in this release (it is not measured on the current code)',
+    'arex-2': 'AREX-2 is paused: not in this release (the 0.3.0 set is the Coder, Qwen3-30B-A3B and the three Qwen3.8 27B models)',
     'qwen3.8-27b': 'Qwen3.8-27B GSQ-RCO is not offered yet: it serves on one card, its drafting (MTP, DFlash2) is not built',
 }
 

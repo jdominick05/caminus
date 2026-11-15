@@ -725,7 +725,7 @@ CODER = ARCHS['qwen4exp']
 
 
 # architectures caminus serve refuses while their models are paused (caminus.models.PAUSED; CAMINUS_ALLOW_PAUSED=1 serves them)
-PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next'}
+PAUSED = {'qwen35moe': 'Qwen3.6-35B-A3B', 'qwen3next': 'Qwen3-Coder-Next', 'qwen35': 'AREX-2'}
 
 
 def paused(A):
