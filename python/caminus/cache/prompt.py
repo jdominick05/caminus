@@ -736,8 +736,17 @@ class Layout:
             self.state[k[0]].append((k, t.numel() * t.element_size()))
         self.idx = bool(getattr(m, 'idx_cache', False)) and (0, 'idxraw') in m.state
         self.pb = []
+        # Rows in each exposed KV view. The dense qwen35 engines add a verify tail
+        # (kv_rows); an engine that pads its allocation exposes only max_ctx rows.
+        rows = getattr(m, 'kv_rows', self.max_ctx)
+        if isinstance(rows, bool) or not isinstance(rows, (int, np.integer)) or rows < self.max_ctx:
+            raise ValueError(f'checkpoint layout: kv_rows {rows!r} must be an integer of at least max_ctx {self.max_ctx}')
+        self.kv_rows = int(rows)
         for c in range(len(self.devs)):
-            pbs = {m.state[k].numel() * m.state[k].element_size() // self.max_ctx for k in self.kv[c]}
+            sizes = [m.state[k].numel() * m.state[k].element_size() for k in self.kv[c]]
+            if any(n % self.kv_rows for n in sizes):
+                raise ValueError(f'checkpoint layout: a KV view on card {c} does not hold whole rows of {self.kv_rows}')
+            pbs = {n // self.kv_rows for n in sizes}
             assert len(pbs) == 1, pbs
             self.pb.append(pbs.pop())
         if self.idx:

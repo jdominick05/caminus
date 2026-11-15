@@ -70,6 +70,7 @@ SUITES = [
     ('spec_policy', ['tests/decode/test_spec_policy.py', 'cpu'], {'torch'}),
     ('dflash35_adapter', ['tests/decode/test_dflash35_adapter.py'], {'torch'}),
     ('prompt_cache', ['tests/cache/test_prompt_cache.py', 'cpu', '--cache-dir', '{scratch}'], {'torch'}),
+    ('layout_kv_rows', ['tests/cache/test_layout_kv_rows.py', '--scratch', '{scratch}'], {'torch'}),
     ('dflash_ring_fuzz', ['tests/decode/test_dflash_ring_fuzz.py'], {'torch'}),
     ('prefill_driver', ['tests/prefill/test_prefill_driver.py'], {'torch'}),
     ('prefill_feed', ['tests/prefill/test_prefill_feed.py', '{coder}', '--cpu'], {'torch', 'coder'}),

@@ -167,6 +167,9 @@ class Dense35TP:
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
             raise ValueError(f'spec_T {spec_T!r}: 1 .. 4')
         self.devs, self.max_ctx, self.limit_us, self.spec_T = list(devices), int(max_ctx), limit_us, int(spec_T)
+        # Rows in each card's KV cache: max_ctx plus the verify tail of spec_T - 1 rows.
+        # The prompt cache's checkpoint layout divides by this, not by max_ctx.
+        self.kv_rows = self.max_ctx + self.spec_T - 1
         one = module or module_of(F)
         one = {v: k for k, v in k3.Q35_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
         if one not in k3.Q35_TP_OF: raise ValueError(f'Dense35TP: module {one} has no two-card build ({sorted(k3.Q35_TP_OF)})')

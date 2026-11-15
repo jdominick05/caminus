@@ -103,11 +103,12 @@ def quant(rng, fmt, rows, K):
     return b.reshape(-1)
 
 
-def write(path, seed=5, variant='swift', tp=False, mtp=False):
+def write(path, seed=5, variant='swift', tp=False, mtp=False, n_ctx=4096):
     """variant 'swift': Swift's formats (Q4_K / Q6_K / Q8_0 / Q5_K, F32 alpha / beta); 'tcap': ThinkingCap's. tp: shapes the
     two-card split cuts on block boundaries (engine/q35_dense_tp.py): 4 key heads / 8 value heads (half a card's value
     heads' columns = 512), 12 query heads / 2 kv heads, a 256-token vocabulary (128 head rows per card). mtp (the 'tcap'
-    variant): its multi-token-prediction block blk.<blocks> in Q6_K (ThinkingCap's: engine/q35_mtp.py, k3_q35_tcap_mtp)"""
+    variant): its multi-token-prediction block blk.<blocks> in Q6_K (ThinkingCap's: engine/q35_mtp.py, k3_q35_tcap_mtp).
+    n_ctx: the file's context_length (the most max_ctx an engine on it takes)"""
     rng = np.random.default_rng(seed)
     NK, NV, H, HKV, V = (4, 8, 12, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
     CH = 2 * NK * S + NV * S
@@ -151,7 +152,7 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False):
             vec(p + n_ + '.weight', 1 + f32(D, sc=0.1))
         vec(p + 'attn_q_norm.weight', 1 + f32(HD, sc=0.1)); vec(p + 'attn_k_norm.weight', 1 + f32(HD, sc=0.1))
     meta = {'general.architecture': 'qwen35', 'qwen35.block_count': len(KINDS) + 1, 'qwen35.nextn_predict_layers': 1,
-            'qwen35.context_length': 4096, 'qwen35.embedding_length': D, 'qwen35.feed_forward_length': FF,
+            'qwen35.context_length': int(n_ctx), 'qwen35.embedding_length': D, 'qwen35.feed_forward_length': FF,
             'qwen35.attention.head_count': H, 'qwen35.attention.head_count_kv': HKV, 'qwen35.attention.key_length': HD,
             'qwen35.attention.value_length': HD, 'qwen35.attention.layer_norm_rms_epsilon': 1e-6, 'qwen35.rope.freq_base': 1e7,
             'qwen35.rope.dimension_count': NROT, 'qwen35.rope.dimension_sections': [16, 16, 0, 0],
