@@ -16,7 +16,7 @@ caminus panel -advanced  # every server option, the card choice, the brain / han
 |---|---|
 | **MODELS** | Every model Caminus knows, its size, whether it's on disk, and the card count and drafter for its next start. |
 | **SERVERS** | The models you started: their address, context size and current speed. |
-| **QWEN CODE** | Whether Qwen Code is installed and set up for your server. Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched. |
+| **QWEN CODE** | Whether Qwen Code is installed and set up for your server. Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched. Its last row says whether Ember is set up. |
 | **OPTIONS** | Advanced layout only: every option of the server, for the next start. |
 | **HARDWARE** | Shows up only when something is wrong with your cards, for example a card in a slot that's too slow. |
 
@@ -40,6 +40,7 @@ caminus panel -advanced  # every server option, the card choice, the brain / han
 | QWEN CODE | `enter` | Launch Qwen Code. |
 | | `u` | Set it up for the running server. |
 | | `i` | Install it (needs Node.js and npm). |
+| | `e` | Open Ember, the agent environment (`caminus ember ui`); before it is set up, the row says to run `caminus ember setup` ([Ember](ember.md)). |
 | OPTIONS | `enter` | Edit or toggle an option. |
 | | `d` | Reset it to its default. |
 | Anywhere | `a` | Switch between the basic and advanced layouts. |
