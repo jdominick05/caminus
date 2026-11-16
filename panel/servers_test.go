@@ -54,3 +54,42 @@ func TestServerRowNames(t *testing.T) {
 		}
 	}
 }
+
+func TestThePanelHasAWayIntoEmber(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), false, "")
+	m.loaded["harness"] = true
+	m.ember = emberMsg{known: true}
+	if v := ansi.Strip(strings.Join(m.harnessRows(), "\n")); !strings.Contains(v, "Ember not set up") || !strings.Contains(v, "caminus ember setup") {
+		t.Fatalf("not set up, the row says how:\n%s", v)
+	}
+	next, _ := m.harnessKey("e")
+	if n := next.(ctl); !strings.Contains(n.note, "caminus ember setup") {
+		t.Fatalf("e without Ember names the setup: %q", n.note)
+	}
+	m.ember = emberMsg{ok: true, known: true}
+	if v := ansi.Strip(strings.Join(m.harnessRows(), "\n")); !strings.Contains(v, "e opens the agent chat") {
+		t.Fatalf("set up, the row offers it:\n%s", v)
+	}
+	if _, cmd := m.harnessKey("e"); cmd == nil {
+		t.Fatal("e opens caminus ember ui")
+	}
+}
+
+func TestABackgroundThemeStaysInEmber(t *testing.T) {
+	saved := themeCurrent
+	defer func() { themeCurrent = saved; applyThemeStyles() }()
+	themeCurrent = map[string]string{}
+	for k, v := range defaultTheme() {
+		themeCurrent[k] = v
+	}
+	themeCurrent["bg"], themeCurrent["text"] = "#f5f1e8", "#202020"
+	plainScreenTheme()
+	if themeCurrent["bg"] != "" || themeCurrent["text"] != defaultTheme()["text"] {
+		t.Fatal("panel and top do not paint a background: a light theme's dark text is not used there")
+	}
+	themeCurrent["accent"] = "#ff00ff" // a colours-only theme stays shared
+	plainScreenTheme()
+	if themeCurrent["accent"] != "#ff00ff" {
+		t.Fatal("a theme without a background is shared as before")
+	}
+}
