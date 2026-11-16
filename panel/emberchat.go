@@ -1849,6 +1849,7 @@ func (m emberModel) renderChat() string {
 		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
 	view := m.highlightSelection(m.chat.transcript.View())
+	view = m.withJumpPill(view, m.transcriptWidth(w))
 	if sw := m.sideWidth(); sw > 0 {
 		tw := w - sw - 1
 		view = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(tw).Render(view), " ",
@@ -1873,20 +1874,19 @@ func (m emberModel) renderChat() string {
 func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.onJumpPill(click.X, click.Y) {
+		m.chat.transcript.GotoBottom()
+		m.chat.live.hold = false
+		return m, nil
+	}
 	if next, c, ok := m.selectMouse(msg); ok {
 		return next, c
 	} else {
 		m = next
 	}
-	if wheel, ok := msg.(tea.MouseWheelMsg); ok {
-		if m.chat.live.active {
-			if wheel.Button == tea.MouseWheelUp {
-				m.scrollLive(-3)
-			} else {
-				m.scrollLive(3)
-			}
-			return m, nil
-		}
+	if _, ok := msg.(tea.MouseWheelMsg); ok {
+		// the wheel always scrolls the history (the user's choice: the live thinking window took it mid-scroll);
+		// PgUp / PgDn scroll the thinking window while a reply streams
 		m.chat.transcript, cmd = m.chat.transcript.Update(msg)
 	} else if m.chat.question != nil && m.chat.questionArmed {
 		if m.chat.questionCustom {
@@ -2007,7 +2007,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
-	case "ctrl+l":
+	case "ctrl+l", "ctrl+end":
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
@@ -2924,4 +2924,51 @@ func (m emberModel) toggleLayout() emberModel {
 	m.chat.content, m.chat.rendered = "", 0
 	m.syncChat()
 	return m
+}
+
+// The jump pill: scrolled up through the history, its last row carries " Jump to bottom (Ctrl+End) ↓ " in the
+// middle; a click on it or Ctrl+End goes back to the newest message.
+const jumpPillText = " Jump to bottom (Ctrl+End) ↓ "
+
+func (m emberModel) jumpPillShown() bool {
+	t := m.chat.transcript
+	return t.TotalLineCount() > t.Height() && !t.AtBottom()
+}
+
+// transcriptWidth is the history's width inside a w-wide chat (the side panel takes the rest).
+func (m emberModel) transcriptWidth(w int) int {
+	if sw := m.sideWidth(); sw > 0 {
+		return w - sw - 1
+	}
+	return w
+}
+
+func (m emberModel) jumpPillX(tw int) int {
+	return max(0, (tw-ansi.StringWidth(jumpPillText))/2)
+}
+
+func (m emberModel) withJumpPill(view string, tw int) string {
+	if !m.jumpPillShown() {
+		return view
+	}
+	rows := strings.Split(view, "\n")
+	last := rows[len(rows)-1]
+	x0, pw := m.jumpPillX(tw), ansi.StringWidth(jumpPillText)
+	left := ansi.Truncate(last, x0, "")
+	if pad := x0 - ansi.StringWidth(left); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+	rows[len(rows)-1] = left + "\x1b[0m" + emberSel.Render(jumpPillText) + ansi.TruncateLeft(last, x0+pw, "")
+	return strings.Join(rows, "\n")
+}
+
+// onJumpPill: a click at (x, y) lands on the pill.
+func (m emberModel) onJumpPill(x, y int) bool {
+	if !m.jumpPillShown() {
+		return false
+	}
+	w := max(20, m.width)
+	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
+	x0 := m.jumpPillX(m.transcriptWidth(w))
+	return y == row && x >= x0 && x < x0+ansi.StringWidth(jumpPillText)
 }

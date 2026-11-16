@@ -2349,3 +2349,32 @@ func TestAnEditsPlateIsOneRowPerLineWithTabsExpanded(t *testing.T) {
 		t.Fatalf("added lines' plates are one width: %d vs %d", w0, w1)
 	}
 }
+
+func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	for i := 0; i < 80; i++ {
+		m.residentEvents = append(m.residentEvents, residentEvent{Seq: 1000 + i, Goal: "original", Kind: "assistant",
+			Data: map[string]any{"content": fmt.Sprintf("reply %d", i)}})
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	m.chat.transcript.GotoBottom()
+	m.chat.live.active = true
+	m.chat.live.text = strings.Repeat("thinking line\n", 50)
+	next, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	m = next.(emberModel)
+	if m.chat.transcript.AtBottom() {
+		t.Fatal("the wheel scrolls the history even while a reply streams")
+	}
+	if v := ansi.Strip(m.View().Content); !strings.Contains(v, strings.TrimSpace(jumpPillText)) {
+		t.Fatal("scrolled up: the jump pill shows")
+	}
+	w := max(20, m.width)
+	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
+	next, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.jumpPillX(m.transcriptWidth(w)) + 2, Y: row})
+	m = next.(emberModel)
+	if !m.chat.transcript.AtBottom() || strings.Contains(ansi.Strip(m.View().Content), strings.TrimSpace(jumpPillText)) {
+		t.Fatal("a click on the pill goes to the newest message and the pill goes away")
+	}
+}
