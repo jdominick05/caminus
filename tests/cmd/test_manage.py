@@ -287,6 +287,24 @@ def main():
                 refused.append((mm.name, kv, extra, str(err)))
     check(not refused, f'start --kv: q8 refused for swift-1.5 (one card or two) and the Coder, naming the model that takes it; '
                        f'--kv and the serve flag disagreeing, or another format, refused ({refused or "all refused"})')
+    real_start_one, team_starts = manage.start_one, []
+    manage.start_one = lambda *x, **k: team_starts.append((x, k)) or {}
+    team_out = []
+    try:
+        for argv in (['--team', 'brain-hands', '--kv', 'q8'], ['--team', 'brain-hands', '--kv', 'f16'],
+                     ['--team', 'brain-hands', '--', '--kv', 'q8']):
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = manage.cmd_start(argv)
+            except SystemExit as e:
+                rc = e.code
+            team_out.append((rc, err.getvalue()))
+    finally:
+        manage.start_one = real_start_one
+    check(not team_starts and all(rc == 2 and '--kv applies to one model, not to --team brain-hands' in e for rc, e in team_out),
+          f'start --team with --kv (or `-- --kv`) is refused before any server starts, not dropped '
+          f'({[(rc, e.strip().splitlines()[-1:]) for rc, e in team_out]}, starts {len(team_starts)})')
     from caminus import arch as _ar
     seen = []
 
