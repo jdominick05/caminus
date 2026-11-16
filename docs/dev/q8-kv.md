@@ -337,9 +337,7 @@ CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefil
 
 CPU: `tests/engine/test_q3moe_tp_kvq8_cpu.py`. It covers the module tables, the engine's caches, tapes and projection,
 the refusals, a refused block on one card with a stalled wait on the other, the prefill's launches and its per-card
-words, the engine key and checkpoint layout, and the registry. No device gate has run on the two-card Q8 objects yet.
-
-Device results, 2026-11-16 (XTX + XT, upload log on):
+words, the engine key and checkpoint layout, and the registry.Device results, 2026-11-16 (XTX + XT, upload log on):
 - **The new object on the XT alone.** The two-card op test passes: more than 64 splits, 16/2 heads, positions to 8,000. The whole k3_run on one card is bitwise identical to `k3_q3m_lean_kvq8`.
 - **Both cards, tiny model and real file.**
   - Logits are bitwise identical at K3_PER_WGP 3, 6 and 7 over 4,200 passes.

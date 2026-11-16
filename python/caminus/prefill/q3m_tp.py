@@ -99,7 +99,7 @@ def buffer_need_tp_mib(shapes, T):
 
 def need_tp_mib(shapes, T):
     """per card: everything Q3MPrefillTP takes at construction (checked before its first allocation): the buffers and receive
-    rows (buffer_need_tp_mib), its code objects (capacity.PREFILL_CODE_MIB; a Q8 engine's q3m_prefill_kvq8 is inside it) and
+    rows (buffer_need_tp_mib), its code objects (capacity.PREFILL_CODE_MIB; q3m_prefill and a Q8 engine's q3m_prefill_kvq8 together are about 0.2 MiB of code, well inside it) and
     the exchange's streams (capacity.PREFILL_STREAMS_MIB: a stream takes device memory at its first use)"""
     return [b + capacity.PREFILL_CODE_MIB[c] + capacity.PREFILL_STREAMS_MIB[c] for c, b in enumerate(buffer_need_tp_mib(shapes, T))]
 

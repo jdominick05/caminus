@@ -95,7 +95,7 @@ MODN = 'k3_q3m_lean_tp_kvq8' if Q8 else 'k3_q3m_lean_tp'
 check(eng.module == MODN and eng.E[0].module == eng.E[1].module == MODN
       and all(d[c]['cache'].dtype == (torch.uint8 if Q8 else torch.float16) for d in eng.L for c in (0, 1)), f'both cards decode on {MODN}')
 oracle = None
-DIAG = bool(os.environ.get('Q3M_ROWS_DIAG'))
+DIAG = bool(os.environ.get('Q3M_ROWS_DIAG'))   # (diagnostic, not a gate: Q3M_ROWS_DIAG=1 runs the row oracle against the F16 engine and prints the rows that differ)
 if Q8 or DIAG:   # the row oracle: on each card the F16 row kernel on that card's last-layer q | k | v, its halves encoded by caminus.ref_kv
     from caminus import ref_kv
     from caminus.prefill import q3m_ops
@@ -158,9 +158,10 @@ check(not rep and nb == 0 and all(finite(r) for r in ref),
       f'{npos} greedy passes at the default grid {eng.per_wgp_c}: finite logits, the replicas equal after every pass, 0 bails'
       + (f' (replicas differ at {rep[:8]})' if rep else '') + (f' ({nb} bails)' if nb else ''))
 if Q8:
-    check(not rows_bad and all(int(e.kv_error[0]) == 0 for e in eng.E),
+    rope_cap = max(2, (2 * npos) // 100)   # at most 1 % of card rows (measured: 0.3 % on the F16 engine, 0.08 % on Q8); more is a defect
+    check(not rows_bad and len(rows_rope) <= rope_cap and all(int(e.kv_error[0]) == 0 for e in eng.E),
           f'Q8 rows: each card\'s last-layer row at each of {npos} positions against encode_q8_kv(hadamard128(K), V) of the F16 row '
-          f'kernel\'s halves for that card\'s q | k | v (V exact; K within one code or one scale LSB where the oracle\'s RoPE differs by an ulp: {len(rows_rope)} rows); both error words 0' + (f' (differ at (card, position) {rows_bad[:8]})' if rows_bad else ''))
+          f'kernel\'s halves for that card\'s q | k | v (V exact; K within one code or one scale LSB where the oracle\'s RoPE differs by an ulp: {len(rows_rope)} rows, at most {rope_cap}); both error words 0' + (f' (differ at (card, position) {rows_bad[:8]})' if rows_bad else ''))
 if A.tiny:
     from caminus.ref_q3moe import Q3MoERef
     rm, n_cmp, agree, klds = Q3MoERef(P), min(6, npos), 0, []
