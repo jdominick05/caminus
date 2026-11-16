@@ -107,13 +107,15 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
 // 1.87e-3 against 2.09e-3 for K and Q alone, inside the draws' spread, and K's encode was most of the error: 4.49e-3 for K
 // alone, 2.15e-3 for V alone). Every other statement of the op is the F16 one; the position's own k / v in LDS are the
 // decoded codes (what every later pass reads).
-// Decode only: the verify and two-card builds keep the F16 cache. k3_run beside k3_q3m_lean's (96 VGPRs, 0 spilled, 53
+// Decode only: the verify build keeps the F16 cache. The two-card module's Q8 build (kernels/k3_q3m_lean_tp_kvq8.hip) runs
+// this text at ATS_MAXS 128 (the V scales below sit in sc[512 .. 768) while the chunks run; the 128 merge reuses q + scores
+// only after the last chunk), 33 spilled scalars against k3_q3m_lean_tp's 66. k3_run beside k3_q3m_lean's (96 VGPRs, 0 spilled, 53
 // spilled scalars): before the rotation 96, 0, 54 with this op alone, 31 with the module's K3_Q3M_ADD_RMS_PIN
 // (kernels/k3_q3m_lean_kvq8.hip; the F16 object with the same pin: 33); with the rotation 31, and 19 with this op's own
 // pin of its counts (below). Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the
 // K / V half selects as 64-bit shifts spilled 1; the error word's address kept live across k3_run, 2 more spilled scalars.
-#if defined(K3_Q3M_VER) || defined(K3_Q3M_TP)
-#error "the Q8 KV cache is built for the one-card decode module only"
+#ifdef K3_Q3M_VER
+#error "the Q8 KV cache is built for the decode modules only (one card, two cards), not the verify module"
 #endif
 #include "own_kv_codec.h"
 #include "own_kv_rot128.h"

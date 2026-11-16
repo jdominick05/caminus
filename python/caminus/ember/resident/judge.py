@@ -58,11 +58,25 @@ Answer with one JSON object and nothing else:
 
 
 def run_gate(home, gate, timeout=GATE_TIMEOUT):
+    # its own process group: on a timeout the whole group is killed, so a gate that started something in the
+    # background (a server, `cmd &`) cannot keep the pipes open and hold the finish past the timeout
+    import os
+    import signal
+    p = subprocess.Popen(['bash', '-lc', gate], cwd=home, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
     try:
-        p = subprocess.run(['bash', '-lc', gate], cwd=home, capture_output=True, text=True, timeout=timeout)
+        out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         return False, f'the gate did not finish in {timeout} s'
-    out = (p.stdout + p.stderr)[-4000:]
+    out = (out + err)[-4000:]
     return p.returncode == 0, f'exit {p.returncode}\n{out}'.strip()
 
 

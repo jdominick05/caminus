@@ -102,8 +102,8 @@ class Rec:
 
 
 class FakeOps(q3m_ops.Ops):
-    def __init__(self, dev, module='q3m_prefill'):
-        self.dev, self.module = dev, module
+    def __init__(self, dev, module='q3m_prefill', q8=False):
+        self.dev, self.module, self.q8 = dev, module, bool(q8)
         self.mod = Rec(int(str(dev).split(':')[1]))
         if EVENTS is not None: EVENTS.append(('ops', module))
 

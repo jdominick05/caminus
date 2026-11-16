@@ -171,10 +171,12 @@ class Q3MoEOne:
         """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
         lean = self.fused and self.gu and self.attn_one and self.attn_split
         if getattr(self, 'q8', False):   # (the Q8 cache: k3_q3m_lean's Q8 build only; set explicitly or picked here)
-            if self._module not in (None,) + k3.Q3M_KV_Q8_MODULES or not lean or self.iq or self.rs:
-                raise ValueError(f'Q3MoEOne: the Q8 KV cache runs on {k3.Q3M_KV_Q8_MODULES} only (the default tape form, a file '
+            one = k3.Q3M_KV_Q8_OF[MODULE_LEAN]   # (the one-card Q8 module; its two-card build only when set by name: the
+            #  one-card probe of that object, tests/engine/test_q3m_tp_probe.py --kv q8, as the F16 two-card module)
+            if self._module not in (None, one, k3.Q3M_TP_OF[one]) or not lean or self.iq or self.rs:
+                raise ValueError(f'Q3MoEOne: the Q8 KV cache runs on {one} only (the default tape form, a file '
                                  f'without codebook or row-scale tensors; module {self._module}, IQ {sorted(self.iq)}, RS {sorted(self.rs)})')
-            return self._module or k3.Q3M_KV_Q8_OF[MODULE_LEAN]
+            return self._module or one
         if self._module in k3.Q3M_KV_Q8_MODULES: raise ValueError(f'Q3MoEOne: {self._module} needs q8=True')
         if self._module is not None: return self._module
         if self.rs:
