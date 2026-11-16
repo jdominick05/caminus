@@ -91,6 +91,12 @@ func validThemeValue(key, v string) bool {
 	if key == "bg_pattern" {
 		return bgPatterns[v]
 	}
+	if key == "bg" || key == "bg2" || key == "pattern" {
+		// painted into every cell as 24-bit colour: only #rrggbb paints (a #rgb, #rrggbbaa or term_N loaded without an
+		// error and then painted nothing, leaving a light theme's dark text on the terminal's dark background)
+		_, _, _, ok := hexRGB(v)
+		return ok
+	}
 	if strings.HasPrefix(v, "#") {
 		switch len(v) {
 		case 4, 7, 9:
@@ -402,4 +408,15 @@ func emberMarkdownStyle() ansi.StyleConfig {
 	st.Table.ColumnSeparator = color("│")
 	st.Table.RowSeparator = color("─")
 	return st
+}
+
+// plainScreenTheme: caminus panel and caminus top paint no background, so a theme made for one (a light theme's dark
+// text, chosen in Ember) would draw dark on the terminal's own dark background there. Those screens keep the default
+// look under a background theme; a theme without one (only colours) is shared as before.
+func plainScreenTheme() {
+	if themeCurrent["bg"] == "" {
+		return
+	}
+	themeCurrent = defaultTheme()
+	applyThemeStyles()
 }
