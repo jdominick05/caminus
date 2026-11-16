@@ -225,6 +225,25 @@ tp_ok = (tY.module == 'k3_q3m_lean_tp_yarn' and tQ.module == 'k3_q3m_lean_tp_kvq
          and np.array_equal(tY._qk_par(0)[nat:], tY.rope_table) and tY.rope_key == Y.key() and not hasattr(tN, 'rope_key')
          and all(E_.module == 'k3_q3m_lean_tp_yarn' for E_ in getattr(tY, 'E', []) if hasattr(E_, 'module')))
 tp_note = 'built on stand-ins, F16 and Q8'
+class FakeX:   # (the prefill's peer exchange: as tests/engine/test_q3moe_tp_kvq8_cpu.py)
+    def __init__(self, devices, T, D, streams, check=True): self.calls = []
+
+    def post(self, parts, r0, r1): self.calls.append(('post', r0, r1)); return ('t', len(self.calls))
+
+    def sum(self, t, mark=None): self.calls.append(('sum', t))
+
+    def settle(self): pass
+
+
+q3m_tp.Exchange = FakeX
+ptp = q3m_tp.Q3MPrefillTP(tY, chunk=64, check=False)
+LOG.clear(); ptp._chunk(list(range(1, 41)), 0, 40)
+tr = [e for e in LOG if e[1].startswith('q3p_qk_rope')]
+check(ptp.yarn and len(tr) == 2 * tY.nl and all(e[0] == 'q3m_prefill_yarn' and e[1] == 'q3p_qk_rope' for e in tr)
+      and all(e[3][4].numel() == nat + 65 for e in tr) and ptp.numerics().get('rope') == Y.key()
+      and not any(e[1] == 'q3p_qk_rope' and e[0] != 'q3m_prefill_yarn' for e in LOG),
+      f'Q3MPrefillTP on a YaRN engine: {len(tr)} q3p_qk_rope launches (both cards, every layer) from q3m_prefill_yarn on the '
+      f'{nat + 65}-float block; numerics carry the rope')
 F = __import__('caminus.ggufio', fromlist=['GGUFFile']).GGUFFile(PT)
 tn, ty = q3moe_tp.projection_terms(F, MC), q3moe_tp.projection_terms(F, MC, yarn=True)
 nl = int(F.hp('block_count'))

@@ -5,7 +5,7 @@ theta = (float)pos * freq[j] and cos(theta) * mscale, sin(theta) * mscale with t
 decode and prefill agree bit for bit; the table is made once on the host, in float64, rounded to fp32.
 
 The recipe is llama.cpp's (ggml rope_yarn, ggml_rope_yarn_corr_dims; transformers' _compute_yarn_parameters computes the
-same frequencies), the yardstick's convention:
+same frequencies and puts the factor on cos and sin too: checked against its 5.20 source), the yardstick's convention:
   pair j (dims j and j + 64 for NEOX), inv_j = base^(-2 j / n_rot)
   the correction range [lo, hi] = [floor(dim(beta_fast)), ceil(dim(beta_slow))] clamped to [0, n_rot - 1], with
     dim(beta) = n_rot ln(n_ctx_orig / (2 pi beta)) / (2 ln base)          (n_rot 128, base 1e6, 32,768: [23, 40])
