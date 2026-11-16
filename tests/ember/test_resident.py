@@ -898,6 +898,40 @@ class Resident(unittest.TestCase):
         ok,msg=judge.run_gate(str(self.home),'sleep 30 & echo up',timeout=20)
         self.assertTrue(ok,msg);self.assertLess(time.time()-t0,5,msg);self.assertIn('up',msg)
 
+    def test_web_fetch_retries_caches_and_reads_pdfs(self):
+        import urllib.error, shutil
+        from caminus.ember.resident import web
+        class Resp:
+            def __init__(s,body,ctype):s.body,s.headers=body,{'Content-Type':ctype};s.status=200
+            def read(s,n):return s.body[:n]
+            def geturl(s):return 'https://example.org/x'
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        calls=[]
+        def opener(req,timeout):
+            calls.append(req.full_url)
+            if len(calls)==1:raise urllib.error.HTTPError(req.full_url,429,'Too Many Requests',{'Retry-After':'0'},None)
+            return Resp(b'<html><title>T</title><p>after a retry</p></html>','text/html')
+        rt=Runtime(self.home)
+        try:
+            rt.web_opener=opener
+            with unittest.mock.patch('time.sleep'):out=web.fetch(rt,'https://example.org/x')
+            self.assertIn('after a retry',out['text']);self.assertEqual(len(calls),2,'a 429 is tried again')
+            again=web.fetch(rt,'https://example.org/x')
+            self.assertEqual(len(calls),2,'the second fetch comes from the cache');self.assertIn('cached',again)
+            rt.web_opener=lambda req,timeout:(_ for _ in ()).throw(urllib.error.HTTPError(req.full_url,429,'x',{},None))
+            with unittest.mock.patch('time.sleep'),self.assertRaises(ValueError) as e:web.fetch(rt,'https://example.org/other')
+            self.assertIn('still rate-limited',str(e.exception))
+            if shutil.which('pdftotext'):
+                pdf=(b'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+                     b'3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 100]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n'
+                     b'4 0 obj<</Length 44>>stream\nBT /F1 18 Tf 20 40 Td (Hello PDF) Tj ET\nendstream endobj\n'
+                     b'5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n')
+                rt.web_opener=lambda req,timeout:Resp(pdf,'application/pdf')
+                out=web.fetch(rt,'https://arxiv.org/pdf/0000.00000')
+                self.assertIn('Hello PDF',out['text']);self.assertEqual(out['content_type'],'application/pdf')
+        finally:rt.mail.close();rt.store.close()
+
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
