@@ -547,6 +547,11 @@ class Model:
                         usage.update((ev.get('message') or {}).get('usage') or {})
                         served = (ev.get('message') or {}).get('model') or served
                     elif kind == 'content_block_start':
+                        # the decode window opens with the first block, not its first delta: a thinking block whose
+                        # text is not shown streams only its signature at the end, yet its tokens are in output_tokens
+                        # (Haiku 5.5 with adaptive thinking read 1281 tok/s: all its thinking over the answer's time)
+                        if t_first is None:
+                            t_first = now
                         block = ev['content_block']
                         if block.get('type') == 'fallback':
                             # a switch point: the model named in 'from' declined and the one in 'to' continued

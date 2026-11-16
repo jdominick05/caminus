@@ -3804,6 +3804,24 @@ class AnthropicTransport(unittest.TestCase):
         self.assertEqual(short['thinking'],dict(type='disabled'),'a short call runs without thinking')
         self.assertNotIn('thinking',main,'a main turn keeps adaptive thinking')
 
+    def test_unshown_thinking_counts_in_the_speed_window(self):
+        # a thinking block streams only its signature, after the thinking: the window opens at the block's start
+        ev=sse('ok');ev[1:1]=[dict(type='content_block_start',index=9,content_block=dict(type='thinking',thinking='')),
+                              dict(type='content_block_delta',index=9,delta=dict(type='signature_delta',signature='s')),
+                              dict(type='content_block_stop',index=9)]
+        ev[-2]['usage']=dict(output_tokens=400)
+        m=self.model(ev)
+        import types
+        from caminus.ember.resident import model as M
+        seen=[]
+        def clock():                       # 100 until the thinking block has started, then 10 s on
+            seen.append(1);return 100.0 if len(seen)<=2 else 110.0
+        fake=types.SimpleNamespace(**{k:getattr(M.time,k) for k in dir(M.time) if not k.startswith('__')})
+        fake.monotonic=clock               # (model.py's clock only: the opener keeps the real one)
+        with unittest.mock.patch.object(M,'time',fake):
+            m.complete(self.history(),TOOLS[:1],max_tokens=16000)
+        self.assertEqual(m.last_speed['tps'],40.0,'400 tokens over the 10 s from the thinking block, not over the answer')
+
     def test_a_burst_reply_reports_no_speed(self):
         # the whole reply in one read: tokens over microseconds read 31,746,037 tok/s on the status line
         m=self.model(sse('ok'))
