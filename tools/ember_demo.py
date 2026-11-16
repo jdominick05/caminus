@@ -283,10 +283,17 @@ def main(argv=None):
     if a.fast:
         PACE[0] = 0.008
     scratch = a.scratch.expanduser().resolve()
+    marker = scratch / '.ember-demo'
+    if scratch.exists() and any(scratch.iterdir()) and not marker.exists():
+        # only a folder this demo made is ever deleted: --scratch ~/projects would have removed the whole tree
+        print(f'ember_demo: {scratch} is not empty and not a demo folder (no .ember-demo); pass an empty or new '
+              'folder', file=sys.stderr)
+        return 2
     if scratch.exists():
         shutil.rmtree(scratch)
     home, bridge = scratch / 'home', scratch / 'bridge'
     home.mkdir(parents=True)
+    marker.write_text('made by tools/ember_demo.py; it may delete this folder\n')
     bridge.mkdir()
     for sub in ('req', 'res'):
         (bridge / sub).mkdir()
