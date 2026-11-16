@@ -196,6 +196,23 @@ class Resident(unittest.TestCase):
         self.assertIn('FILES CHANGED IN THIS GOAL',text);self.assertIn('- f.txt',text)
         self.assertIn('REFUSED OR FAILED CHANGES',text);self.assertIn('edit f.txt: no done check yet',text)
 
+    def test_a_failed_edit_on_a_wrong_path_is_cleared_by_reading_that_path_even_when_the_read_fails(self):
+        self.gates_on()
+        (self.home/'real.txt').write_text('a\n')
+        self.replies(call('define_done',dict(check='real.txt holds b')),
+                     call('edit',dict(path='rael.txt',old='a',new='b')),            # a typo: fails, not found
+                     call('edit',dict(path='real.txt',old='a',new='b')),
+                     call('read',dict(path='real.txt')),
+                     call('verify',dict(evidence='read shows b')),
+                     call('finish',dict(summary='real.txt holds b.')),               # blocked: rael.txt
+                     call('read',dict(path='rael.txt')),                             # fails too, and that is enough
+                     call('finish',dict(summary='real.txt holds b; rael.txt was a typo.')))
+        goal=self.cmd('once',['--goal','Put b in real.txt.'])
+        results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
+        fins=[r['result'] for r in results if r['name']=='finish']
+        self.assertIn('rael.txt',fins[0].get('error',''))
+        self.assertNotIn('error',fins[-1]);self.assertEqual(goal['state'],'completed')
+
     def test_finish_needs_the_check_exercised_since_the_last_steer(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),

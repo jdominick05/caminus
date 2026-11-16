@@ -911,15 +911,16 @@ class Runtime:
 
     def _refused_changes(self, gid):
         """Files whose latest edit / write in this goal was refused or failed, with nothing done to them since: no
-        later successful change and no later read. ('path (edit: why)' each.)"""
+        later successful change and no later read of that path (whether the read worked or not: a mistyped path or a
+        binary file must not block the finish forever). ('path (edit: why)' each.)"""
         last = {}
         for seq, name, path, ok, err in self._change_record(gid):
             if path is None:
                 continue
             if name in self.CHANGE_TOOLS:
                 last[path] = None if ok else f'{os.path.relpath(path, str(self.home))} ({name}: {err[:120]})'
-            elif name == 'read' and ok:
-                last[path] = None
+            elif name == 'read':
+                last[path] = None             # (a failed read counts too: "not found" or "not text" is what is there)
         return [v for v in last.values() if v]
 
     def _finish(self, gid, summary, open_work=''):
