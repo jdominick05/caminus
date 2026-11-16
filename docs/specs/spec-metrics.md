@@ -588,7 +588,8 @@ crc checks), then the turn through the server's own session code (`K3Session` + 
 seed; it diffs the generated tokens and the first logits row, bitwise expected (`RESULT BITWISE`, else `RESULT DIFF` with the
 first difference). The engine key must match (a bundle saved by another build or another tree is `RESULT KEY MISMATCH`, exit
 2: the key holds every build/*.hsaco and the package sources, so a code update makes old bundles refuse; `--force` replays it
-anyway, not bitwise expected). Logits: the device-accept passes keep no later logits on the host, so every later position is
+anyway, not bitwise expected). A bundle from a `--cards 2` server of a one-card model (the dense own line, Qwen3-30B-A3B)
+is refused before the build: replay does not rebuild the two-card split and placement yet. Logits: the device-accept passes keep no later logits on the host, so every later position is
 compared by its token.
 
 ## 12. Measured (impl:m7-ops, 11-05; guarded, both cards, max_ctx 33024, everything on: the hardware sampler, the flight recorder, card timing)

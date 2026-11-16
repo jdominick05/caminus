@@ -397,8 +397,9 @@ set exactly when `--kv q8`) and reports what it holds in `/props` (`caminus.kv_c
 
 Parks: the engine key carries the format (`tp.kv`) and the module, so the prompt cache's disk store lists a park under
 one format's key only: a server with the other format on the same cache directory is never offered it (the prompt is read
-again) and leaves it on disk for a server of its own format. `caminus replay` builds a Q8 engine for a bundle whose key
-names the format.
+again) and leaves it on disk for a server of its own format. `caminus replay` builds a Q8 engine for a one-card bundle
+whose key names the format. A bundle from a `--cards 2` server (Q8 or F16) is refused with a message: replay does not
+rebuild the two-card entry's split and placement yet, so it would build the one-card engine and fail the key check.
 
 Capacity: `max_ctx auto` and the placement read the Q8 projection with `--kv q8`. `caminus fit` reports both formats
 every time (`max_ctx = {f16, q8}`): each through its own drafter keep, placement and room (`serve.cli.fit_report`), `q8`

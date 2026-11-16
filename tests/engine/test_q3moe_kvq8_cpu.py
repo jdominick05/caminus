@@ -316,9 +316,12 @@ check(q3moe_one.KV_FORMAT_Q8 != OLD_ID and 'hadamard128' in q3moe_one.KV_FORMAT_
       f'the format id names the rotation ({q3moe_one.KV_FORMAT_Q8!r}); a key with the earlier unrotated id hashes differently: its rows never restore here')
 from caminus.cmd import replay
 check(replay.kv_of_key(kq) == 'q8' and replay.kv_of_key(kf_) == 'f16' and replay.kv_of_key(None) == 'f16'
+      and replay.kv_of_key(dict(tp=dict(kv='f16-v1:x'))) == 'f16'     # (an F16 engine's own format id: not a Q8 one)
       and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kq))) is True
-      and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kf_))) is False,
-      'caminus replay: a bundle whose engine key is the Q8 engine\'s builds the entry with kv q8, an F16 key (no kv entry) with f16')
+      and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kf_))) is False
+      and replay.cards_refusal(arch.ARCHS['qwen3moe'], kq, 'q3.gguf') is None,
+      'caminus replay: a bundle whose engine key is the Q8 engine\'s builds the entry with kv q8, an F16 key (no kv entry, or an id outside '
+      'arch.KV_Q8_FORMATS) with f16; a one-card key is not refused (cards_refusal)')
 
 # ---- the park round trip on the Q8 engine (caminus serve --kv q8: its byte rows through a checkpoint slot, a park and an unpark
 # after a restart), negative controls, and the format mismatch both ways (tests/engine/kv_park_rt.py) ---------------------------

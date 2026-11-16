@@ -282,7 +282,15 @@ from caminus.cmd import replay
 tpa = arch.ARCHS[arch.TWO_CARD['qwen3moe']]
 check(replay.kv_of_key(kq) == 'q8' and replay.kv_of_key(kf_) == 'f16'
       and tpa.kv_check(dict(kv=replay.kv_of_key(kq))) is True and tpa.kv_check(dict(kv=replay.kv_of_key(kf_))) is False,
-      'caminus replay: a two-card Q8 bundle\'s engine key builds the entry with kv q8, the F16 two-card key with f16')
+      'caminus replay: a two-card Q8 bundle\'s engine key reads as kv q8, the F16 two-card key as f16')
+one = arch.ARCHS['qwen3moe']        # (what replay's arch.of(model) returns for the file: the one-card entry)
+rq8, rf16 = replay.cards_refusal(one, kq, '/m/q3.gguf'), replay.cards_refusal(one, kf_, '/m/q3.gguf')
+check(rq8 and rf16 and all('--cards 2 bundle is not supported' in r and 'q3.gguf' in r and '/m/' not in r for r in (rq8, rf16))
+      and replay.cards_refusal(one, dict(tp=dict(devices=[0])), '/m/q3.gguf') is None
+      and replay.cards_refusal(one, None, '/m/q3.gguf') is None
+      and replay.cards_refusal(arch.CODER, dict(tp=dict(devices=[0, 1])), '/m/coder.gguf') is None,
+      f'caminus replay: a two-card bundle (Q8 or F16) of the one-card model is refused before any build, not rebuilt on one '
+      f'card; a one-card key and the two-card-only Coder are not ({rq8!r})')
 
 # ---- the park round trip on the two-card Q8 engine (caminus serve --cards 2 --kv q8: each card's byte rows through a checkpoint
 # slot, a park and an unpark after a restart), negative controls, and the format mismatch both ways (tests/engine/kv_park_rt.py) --
