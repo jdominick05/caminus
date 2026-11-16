@@ -363,10 +363,11 @@ ok1, l1 = yarn_bound.gate(g_score, 'short', ours_, s_o, good, s_g, rn)
 ok2, l2 = yarn_bound.gate(g_score, 'short', ours_, s_o, rn, s_n, rn)            # (llama.cpp run without YaRN: its rows ~ native)
 ok3, _ = yarn_bound.gate(g_score, 'short', ours_, s_o, good, s_g, None, bar=s_g['mean'] / 2)
 ok4, l4 = yarn_bound.gate(g_score, 'depth', ours_, s_o, None, None, None)
-check(ok1 and len(l1) == 3 and not ok2 and sum(x.startswith('FAIL') for x in l2) == 2 and not ok3 and ok4 and l4 == []
+check(ok1 and len(l1) == 3 and not ok2 and sum(x.startswith('FAIL') for x in l2) == 2 and not ok3 and ok4 and len(l4) == 1 and l4[0].startswith('PASS caminus against')
       and yarn_bound.LLAMA_MAX_KLD == {'short': 5.7e-03, 'depth': 1.15e-02},
       'yarn_bound: a YaRN llama.cpp run inside the absolute bar and both engines closer to the YaRN reference pass; llama.cpp '
-      'rows that are the native model fail both the bar and the closer check; a bar under its KLD fails; nothing scored: no line')
+      'rows that are the native model fail both the bar and the closer check; a bar under its KLD fails; at depth with no llama.cpp '
+      'rows only the ceiling on our own error is checked')
 # --llama-log: a log naming the mode's YaRN confirms it; at depth the fallback bar is then printed, not gated; a log without
 # the line (or no log) keeps the bar gating, and a missing line fails on its own
 LG = os.path.join(A.scratch, 'yarn-logs'); os.makedirs(LG, exist_ok=True)
@@ -380,7 +381,7 @@ okd2, ld2 = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=ba
 okd3, _ = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None)
 oks1, ls1 = yarn_bound.gate(g_score, 'short', ours_, s_o, far, s_f, None, log=good_log)
 check(s_f['mean'] > yarn_bound.LLAMA_MAX_KLD['depth'] and okd1 and any(x.startswith('INFO') for x in ld1)
-      and not okd2 and ld2[0].startswith('FAIL') and not okd3 and not okd4 and not oks1 and yarn_bound.log_has_yarn(good_log)
+      and not okd2 and any(x.startswith('FAIL llama.cpp ran with') for x in ld2) and not okd3 and not okd4 and not oks1 and yarn_bound.log_has_yarn(good_log)
       and not yarn_bound.log_has_yarn(bad_log) and not yarn_bound.log_has_yarn(os.path.join(LG, 'missing.log')),
       'yarn_bound --llama-log: the depth bar is a fallback once the log names the mode\'s YaRN (printed, not gated); a log '
       'without the line, or another depth\'s log, fails; no log keeps the depth bar gating; the short bar always gates')
@@ -395,6 +396,16 @@ gfreq = ext * 0.25 * (1 - gr) + ext * gr
 check((glo, ghi) == (23, 40) and np.max(np.abs(rope.yarn_freqs(128, 1e6, 4.0, 32768) - gfreq) / gfreq) < 1e-12
       and np.float32(rope.mscale(4.0)) == np.float32(1 + 0.1 * math.log(1 / 0.25)),
       'yarn recipe = ggml\'s formula (written from its source): correction dims [23, 40], every pair\'s frequency to 1e-12, mscale in fp32')
+bad_ours = ry + rng.standard_normal((16, 64)) * 0.5; s_b = g_score(ry, bad_ours)              # (our error past the depth ceiling)
+okc, lc = yarn_bound.gate(g_score, 'depth', bad_ours, s_b, far, s_f, None, log=good_log, job='d65536')
+check(s_b['mean'] > yarn_bound.CAMINUS_MAX_KLD_DEPTH and not okc and lc[0].startswith('FAIL caminus against'),
+      'yarn_bound: at depth our own mean KLD past the fixed ceiling fails even when llama.cpp\'s is larger and its log confirms YaRN')
+# caminus serve's parse leaves kv unset when --kv is not given, so the long-context mode chooses the format (F16 where the
+# asked context fits, else Q8_0 rows): a default 'f16' would pin F16 and the mode's choice would never run
+from caminus.serve import cli as _scli
+check(_scli.parse(['--long-context']).get('kv') is None and _scli.parse(['--kv', 'f16']).get('kv') == 'f16'
+      and _scli.parse(['--kv', 'q8']).get('kv') == 'q8',
+      'serve parse: no --kv leaves kv unset (the long-context mode picks the format); --kv f16 / q8 set it')
 import q3moe_ref32 as R32
 RD = os.path.join(A.scratch, 'ref32-resume'); os.makedirs(RD, exist_ok=True)
 for fn in os.listdir(RD): os.remove(os.path.join(RD, fn))

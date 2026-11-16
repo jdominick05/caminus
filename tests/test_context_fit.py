@@ -338,7 +338,8 @@ class ContextFit(unittest.TestCase):
         # the Q8 rows, so a card whose room holds the Q8 cache at the file's 40,960 but not the F16 one gets the full
         # context with q8 and less without; the cap stays the file's context_length. Every other model is refused in the
         # recipe, before any placement, naming the model that takes q8
-        self.assertEqual(cli.parse([])['kv'], 'f16')
+        self.assertIsNone(cli.parse([])['kv'])                         # (unset: F16, or the long-context mode's choice)
+        self.assertEqual(cli.parse(['--kv', 'f16'])['kv'], 'f16')
         self.assertEqual(cli.parse(['--kv', 'q8'])['kv'], 'q8')
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.parse(['--kv', 'q4'])

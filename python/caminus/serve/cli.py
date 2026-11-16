@@ -49,7 +49,7 @@ DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, draft=None, host='127.0.0.1',
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
-                kv='f16',
+                kv=None,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
                 flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None, long_context=False)
@@ -78,6 +78,11 @@ def load_config(path):
 EXIT_BROKEN = 75
 
 
+# defaults whose DEFAULTS value is None only so a mode can tell "not given" (kv: the long-context mode picks F16 or Q8_0
+# rows itself when no --kv is given); the options surface shows what serve then uses outside such a mode
+SHOWN_DEFAULTS = {'kv': 'f16'}
+
+
 def options_json():
     """every option caminus serve accepts, for caminus panel's advanced layout (and scripts): flag, dest, type (int / float /
     str / bool / ctx), the default caminus serve uses, the help text; read from the parser itself, so it never drifts"""
@@ -94,7 +99,8 @@ def options_json():
             typ = act.type.__name__
         else:
             typ = 'str'
-        out.append(dict(flag=flag, dest=act.dest, type=typ, default=DEFAULTS.get(act.dest), help=act.help or '',
+        default = SHOWN_DEFAULTS.get(act.dest, DEFAULTS.get(act.dest))
+        out.append(dict(flag=flag, dest=act.dest, type=typ, default=default, help=act.help or '',
                         choices=list(act.choices) if act.choices else None))
     return out
 

@@ -18,7 +18,11 @@ Pure numpy: tests/engine/test_q3moe_yarn_cpu.py runs it on synthetic rows."""
 import numpy as np
 
 LLAMA_MAX_KLD = {'short': 5.7e-03, 'depth': 1.15e-02}   # twice llama.cpp's native mean KLD (128 tokens; 40,896 deep)
-YARN_LOAD = 'RoPE yarn (freq_scale 0.25, orig ctx 32768)'  # gg_golden's LOAD line for this mode (yarn 4 32768)
+YARN_LOAD = 'RoPE yarn (freq_scale 0.25, orig ctx 32768)'
+# a ceiling on caminus's own mean KLD at depth (against the fp32 YaRN reference), gated in every depth run: the relative
+# rule loosens as llama.cpp's error grows with depth, so this pins ours. Measured 2026-11-16: 1.64e-03 (65,536, two cards),
+# 3.64e-03 (81,920, one XTX, Q8), 3.46e-03 (131,000, two cards); the ceiling leaves about 3x room for run-to-run noise
+CAMINUS_MAX_KLD_DEPTH = 1.0e-02  # gg_golden's LOAD line for this mode (yarn 4 32768)
 
 
 def add_args(ap, kind):
@@ -34,6 +38,8 @@ def add_args(ap, kind):
 def check_args(ap, A):
     if not A.yarn and (A.llama_max_kld is not None or A.native_ref or A.llama_log):
         ap.error('--llama-max-kld, --llama-log and --native-ref check the long-context mode: they need --yarn')
+    if A.llama_log and not A.llama:
+        ap.error('--llama-log checks the log of the --llama rows: it needs --llama')
 
 
 def log_has_yarn(path, job=None):
@@ -60,6 +66,11 @@ def gate(score, kind, ours, so, ll=None, sl=None, native=None, bar=None, log=Non
     (gated, except at depth once the log confirmed YaRN: printed only), and, with the native reference's logits, the
     closer-to-YaRN check for caminus (ours, so) and llama.cpp (ll, sl)"""
     ok, out = True, []
+    if kind == 'depth':
+        c = so['mean'] <= CAMINUS_MAX_KLD_DEPTH
+        out.append(('PASS' if c else 'FAIL') + f' caminus against the YaRN reference: mean KLD {so["mean"]:.3e} <= '
+                   f'{CAMINUS_MAX_KLD_DEPTH:.1e} (a fixed ceiling on our own error at depth)')
+        ok &= c
     if sl is not None:
         confirmed = False
         if log is not None:
