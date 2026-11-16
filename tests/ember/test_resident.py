@@ -428,6 +428,7 @@ class Resident(unittest.TestCase):
             rt=Runtime(self.home)
             try:
                 g1=rt.store.enqueue('First goal.')
+                (self.home/'.state-goal').write_text(g1)   # (the goal's own state: an unowned file is set aside)
                 first=rt.context_message(g1)['content']
                 self.assertTrue(first.split('\n\n',1)[1].startswith('STATE.md'),'STATE.md must load first, after the header')
                 self.assertIn('use ./build.sh',first)
@@ -714,6 +715,18 @@ class Resident(unittest.TestCase):
             rt.store.event('verified',dict(evidence='x exists'),gid)
             rt.store.event('steers_applied',dict(ids=[3]),gid)
             self.assertFalse(rt.store.verified_since_steer(gid),'an older record without the field counts as a steer')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_state_md_belongs_to_one_goal_at_a_time(self):
+        rt=Runtime(self.home)
+        try:
+            free=rt.store.enqueue('Free time: a sound project.');work=rt.store.enqueue('Fix #128.')
+            rt.context_message(free);(self.home/'STATE.md').write_text('doing: the sound project\n')
+            c=rt.context_message(work)['content']
+            self.assertNotIn('sound project',c,'another goal\'s state stays out of this goal\'s block')
+            (self.home/'STATE.md').write_text('doing: #128 review fixes\n')
+            self.assertIn('sound project',rt.context_message(free)['content'],'the free-time goal gets its own back')
+            self.assertIn('#128 review fixes',rt.context_message(work)['content'])
         finally:rt.mail.close();rt.store.close()
 
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):

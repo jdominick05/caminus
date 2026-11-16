@@ -328,7 +328,7 @@ class Runtime:
         The files are re-read every turn: the agent writes MEMORY.md as it learns things, and it must see its
         own notes. Position is what keeps that affordable."""
         # STATE.md first: after a compaction or a restart it is the agent's own account of where it stands.
-        parts = [self.memory.state()]
+        parts = [self.memory.state(gid)]
         # (not the account's ROBOTS.md: it is the shell agents' guide, with ~/bin/env-ask and ~/bin/ask-root where the
         # resident has its ask_user and ask_root tools; carried here, it read as a second, conflicting set of
         # instructions, and a model took it for an injection. The resident's own instructions are its system prompt.)

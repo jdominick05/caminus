@@ -58,7 +58,31 @@ class Memory:
         self.home = Path(rt.home)
 
     # --- what is loaded into every turn ---------------------------------------------------------------------
-    def state(self):
+    def switch_state(self, gid):
+        """Make STATE.md this goal's. One file was shared by every goal and by free time: a free-time project's
+        state loaded into the next goal's runtime block, and the agent spent turns setting it aside. STATE.md now
+        belongs to the goal named in .state-goal; when another goal runs, the file moves to states/<goal>.md and the
+        running goal's own (from an earlier turn of it) comes back, or none. The path the agent writes stays STATE.md."""
+        if not gid:
+            return
+        p, owner_f, keep = self.home / 'STATE.md', self.home / '.state-goal', self.home / 'states'
+        try:
+            owner = owner_f.read_text().strip()
+        except OSError:
+            owner = ''
+        if owner == gid:
+            return
+        keep.mkdir(exist_ok=True)
+        if p.is_file():
+            # (a file from before this rule has no owner: it is kept under 'unowned', not handed to this goal)
+            p.replace(keep / ((owner or 'unowned') + '.md'))
+        mine = keep / (gid + '.md')
+        if mine.is_file():
+            mine.replace(p)
+        owner_f.write_text(gid)
+
+    def state(self, gid=None):
+        self.switch_state(gid)
         p = self.home / 'STATE.md'
         if not p.is_file():
             return ''
