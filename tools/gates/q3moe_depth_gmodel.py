@@ -126,7 +126,7 @@ if __name__ == '__main__':
     if A.yarn:   # (the relative rule above loosens with a wrong reference or llama.cpp run: an absolute bar, the native check)
         nat = yarn_bound.load_native(A.native_ref, seq, M) if A.native_ref else None
         ll_, sl_ = (ll, sl) if A.llama else (None, None)
-        c4, lines = yarn_bound.gate(score, 'depth', ours, so, ll_, sl_, nat, A.llama_max_kld)
+        c4, lines = yarn_bound.gate(score, 'depth', ours, so, ll_, sl_, nat, A.llama_max_kld, A.llama_log)
         for l in lines: print(l, flush=True)
         ok = ok and c4
     if A.against:   # (this run against another run of the same rows: the Q8 cache against the F16 cache, gated)

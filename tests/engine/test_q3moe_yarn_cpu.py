@@ -366,6 +366,22 @@ check(ok1 and len(l1) == 3 and not ok2 and sum(x.startswith('FAIL') for x in l2)
       and yarn_bound.LLAMA_MAX_KLD == {'short': 5.7e-03, 'depth': 1.15e-02},
       'yarn_bound: a YaRN llama.cpp run inside the absolute bar and both engines closer to the YaRN reference pass; llama.cpp '
       'rows that are the native model fail both the bar and the closer check; a bar under its KLD fails; nothing scored: no line')
+# --llama-log: a log naming the mode's YaRN confirms it; at depth the fallback bar is then printed, not gated; a log without
+# the line (or no log) keeps the bar gating, and a missing line fails on its own
+LG = os.path.join(A.scratch, 'yarn-logs'); os.makedirs(LG, exist_ok=True)
+good_log, bad_log = os.path.join(LG, 'yarn.log'), os.path.join(LG, 'native.log')
+open(good_log, 'w').write('LOAD 6.6 s; n_ctx 65792, KV f16, ' + yarn_bound.YARN_LOAD + '\n')
+open(bad_log, 'w').write('LOAD 6.6 s; n_ctx 65792, KV f16, n_vocab 151936\n')
+far = ry + rng.standard_normal((16, 64)) * 0.5; s_f = g_score(ry, far)                     # (a llama.cpp error past the depth bar)
+okd1, ld1 = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=good_log)
+okd2, ld2 = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=bad_log)
+okd3, _ = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None)
+oks1, ls1 = yarn_bound.gate(g_score, 'short', ours_, s_o, far, s_f, None, log=good_log)
+check(s_f['mean'] > yarn_bound.LLAMA_MAX_KLD['depth'] and okd1 and any(x.startswith('INFO') for x in ld1)
+      and not okd2 and ld2[0].startswith('FAIL') and not okd3 and not oks1 and yarn_bound.log_has_yarn(good_log)
+      and not yarn_bound.log_has_yarn(bad_log) and not yarn_bound.log_has_yarn(os.path.join(LG, 'missing.log')),
+      'yarn_bound --llama-log: the depth bar is a fallback once the log names the mode\'s YaRN (printed, not gated); a log '
+      'without the line fails; no log keeps the depth bar gating; the short bar always gates')
 import q3moe_ref32 as R32
 RD = os.path.join(A.scratch, 'ref32-resume'); os.makedirs(RD, exist_ok=True)
 for fn in os.listdir(RD): os.remove(os.path.join(RD, fn))

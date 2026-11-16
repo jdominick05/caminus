@@ -5,7 +5,12 @@ misconfigured llama.cpp run (no 'yarn' job line, or the wrong original context) 
 instead of failing. Under --yarn two checks pin it:
   - an absolute bar on llama.cpp's mean KLD against the YaRN reference (--llama-max-kld; the default is twice llama.cpp's
     native figure at that length: 2.83e-03 at 128 tokens, 5.73e-03 for the last 64 of 40,896, docs/dev/qwen3-30b-a3b.md).
-    The defaults are not measured in the mode yet: a failure on the first run is a finding to read, not proof of a bug.
+    Measured in the mode (2026-11-16, llama.cpp YaRN against the fp32 YaRN references): 2.77e-03 at 128 tokens (the bar
+    holds), but 1.08e-02 / 1.62e-02 / 2.57e-02 for the last 64 of 65,536 / 81,920 / 131,000: llama.cpp's own error grows
+    with depth past any fixed bar. So at depth the bar is only a fallback:
+  - --llama-log LOG (the gg_golden log that made the --llama rows): the log must name YaRN with this mode's scaling and
+    original context ('RoPE yarn (freq_scale 0.25, orig ctx 32768)'). That is the direct evidence the bar stood in for; with
+    it, the depth bar is printed for information and not gated (the short bar still gates).
   - --native-ref NATIVE.npz (the native reference of the same tokens: q3moe_ref.py / q3moe_ref32.py without --yarn): both
     engines must sit closer to the YaRN reference than to the native one. At 128 tokens the two references differ by a
     mean KLD of 3.7e-02, so a run without YaRN shows here at once.
@@ -13,19 +18,30 @@ Pure numpy: tests/engine/test_q3moe_yarn_cpu.py runs it on synthetic rows."""
 import numpy as np
 
 LLAMA_MAX_KLD = {'short': 5.7e-03, 'depth': 1.15e-02}   # twice llama.cpp's native mean KLD (128 tokens; 40,896 deep)
+YARN_LOAD = 'RoPE yarn (freq_scale 0.25, orig ctx 32768)'  # gg_golden's LOAD line for this mode (yarn 4 32768)
 
 
 def add_args(ap, kind):
     ap.add_argument('--llama-max-kld', type=float, default=None,
                     help=f'with --yarn and --llama: the most llama.cpp\'s mean KLD against the YaRN reference may be (default '
                          f'{LLAMA_MAX_KLD[kind]:.2e}, twice its native figure; not yet measured in the mode)')
+    ap.add_argument('--llama-log', default=None,
+                    help=f'with --yarn and --llama: the gg_golden log that made the rows; it must contain "{YARN_LOAD}"')
     ap.add_argument('--native-ref', default=None,
                     help='with --yarn: the native reference of the same tokens; both engines must be closer to the YaRN one')
 
 
 def check_args(ap, A):
-    if not A.yarn and (A.llama_max_kld is not None or A.native_ref):
-        ap.error('--llama-max-kld and --native-ref check the long-context mode: they need --yarn')
+    if not A.yarn and (A.llama_max_kld is not None or A.native_ref or A.llama_log):
+        ap.error('--llama-max-kld, --llama-log and --native-ref check the long-context mode: they need --yarn')
+
+
+def log_has_yarn(path):
+    """True when the gg_golden log names this mode's YaRN (a missing or unreadable log is False)"""
+    try:
+        with open(path, errors='replace') as f: return any(YARN_LOAD in line for line in f)
+    except OSError:
+        return False
 
 
 def load_native(path, seq, n_rows):
@@ -37,16 +53,26 @@ def load_native(path, seq, n_rows):
     return z['logits']
 
 
-def gate(score, kind, ours, so, ll=None, sl=None, native=None, bar=None):
-    """(ok, lines): the absolute bar on llama.cpp (when its rows sl were scored) and, with the native reference's logits,
-    the closer-to-YaRN check for caminus (ours, so) and llama.cpp (ll, sl)"""
+def gate(score, kind, ours, so, ll=None, sl=None, native=None, bar=None, log=None):
+    """(ok, lines): with llama.cpp's rows scored (sl), its log's YaRN line when a log is given, then the absolute bar
+    (gated, except at depth once the log confirmed YaRN: printed only), and, with the native reference's logits, the
+    closer-to-YaRN check for caminus (ours, so) and llama.cpp (ll, sl)"""
     ok, out = True, []
     if sl is not None:
+        confirmed = False
+        if log is not None:
+            confirmed = log_has_yarn(log)
+            out.append(('PASS' if confirmed else 'FAIL') + f' llama.cpp ran with this mode\'s YaRN: its log names "{YARN_LOAD}"')
+            ok &= confirmed
         b = LLAMA_MAX_KLD[kind] if bar is None else float(bar)
         c = sl['mean'] <= b
-        out.append(('PASS' if c else 'FAIL') + f' llama.cpp against the YaRN reference: mean KLD {sl["mean"]:.3e} <= {b:.2e} '
-                   f'(an absolute bar{"" if bar is not None else ", twice its native figure, not yet measured in the mode"})')
-        ok &= c
+        if kind == 'depth' and confirmed and bar is None:
+            out.append(f'INFO llama.cpp against the YaRN reference: mean KLD {sl["mean"]:.3e} (the {b:.2e} fallback bar is not '
+                       f'gated once the log confirms YaRN: its error grows with depth)')
+        else:
+            out.append(('PASS' if c else 'FAIL') + f' llama.cpp against the YaRN reference: mean KLD {sl["mean"]:.3e} <= {b:.2e} '
+                       f'(an absolute bar)')
+            ok &= c
     if native is not None:
         for name, rows, s in (('caminus', ours, so), ('llama.cpp', ll, sl)):
             if rows is None: continue
