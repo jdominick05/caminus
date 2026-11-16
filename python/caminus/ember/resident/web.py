@@ -142,7 +142,10 @@ def fetch(rt, url, max_chars=40_000):
         raise ValueError(f'could not fetch {url}: {type(e).__name__}: {str(e)[:200]}')
     truncated = len(raw) > FETCH_MAX_BYTES
     charset = (re.search(r'charset=([\w-]+)', ctype) or [None, 'utf-8'])[1]
-    body = raw[:FETCH_MAX_BYTES].decode(charset, errors='replace')
+    try:
+        body = raw[:FETCH_MAX_BYTES].decode(charset, errors='replace')
+    except LookupError:                 # a charset Python does not know (charset=foo) ended the whole goal
+        body = raw[:FETCH_MAX_BYTES].decode('utf-8', errors='replace')
     title = ''
     if 'html' in ctype or body.lstrip()[:15].lower().startswith(('<!doctype html', '<html')):
         p = _Text()
