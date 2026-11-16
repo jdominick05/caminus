@@ -1632,38 +1632,52 @@ func TestTheBoundedHistoryTrimKeepsTheDrawnPosition(t *testing.T) {
 	}
 }
 
-func TestCompactTranscriptFoldsToolWorkIntoOneLine(t *testing.T) {
+func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 	m := chatFixture(t)
 	m.chat.cards, m.chat.content, m.chat.rendered = false, "", 0
-	call := func(name, args string) map[string]any {
-		return map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+	call := func(id, name, args string) map[string]any {
+		return map[string]any{"id": id, "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+	}
+	res := func(seq int, id, name string, r map[string]any) residentEvent {
+		return residentEvent{Seq: seq, Kind: "tool_result", Data: map[string]any{"name": name, "call_id": id, "result": r}}
 	}
 	m.residentEvents = append(m.residentEvents,
 		residentEvent{Seq: 500, Kind: "assistant", Data: map[string]any{"content": "Checking the CVEs now.", "reasoning": "long thoughts",
-			"tool_calls": []any{call("terminal", `{"command":"ls cve/"}`), call("read", `{"path":"a.md"}`)}}},
-		residentEvent{Seq: 501, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"running": false, "output": "x"}}},
-		residentEvent{Seq: 502, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
-		residentEvent{Seq: 503, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("terminal", `{"command":"jq . n.json"}`), call("terminal", `{"session":"abc"}`)}}},
-		residentEvent{Seq: 504, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"error": "boom"}}},
-		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md", "passed": false}},
+			"tool_calls": []any{call("c1", "terminal", `{"command":"ls cve/"}`), call("c2", "read", `{"path":"a.md"}`),
+				call("c3", "web_search", `{"query":"CVE-2026-1 patch"}`), call("c4", "remember", `{"name":"cve-list","summary":"two CVEs open","text":"x"}`)}}},
+		res(501, "c1", "terminal", map[string]any{"running": false, "exit_code": float64(0), "output": "a\nb\nc\nd"}),
+		res(502, "c2", "read", map[string]any{"path": "a.md", "shown": "1-40"}),
+		res(503, "c3", "web_search", map[string]any{"engine": "bing", "results": []any{
+			map[string]any{"title": "Fix for CVE-2026-1", "href": "https://www.example.org/a"}}}),
+		res(504, "c4", "remember", map[string]any{"ok": true}),
+		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
+		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`)}}},
+		res(507, "c5", "terminal", map[string]any{"error": "boom"}),
 	)
 	m.syncChat()
-	v := ansi.Strip(m.chat.transcript.View())
+	v := ansi.Strip(m.chat.content)
 	if !strings.Contains(v, "● Checking the CVEs now.") || strings.Contains(v, "agent\n") {
 		t.Fatalf("the agent's words stay whole:\n%s", v)
 	}
-	if !strings.Contains(v, "Ran 2 commands, read 1 file · 1 failed · gate fails") {
-		t.Fatalf("the tool work is one line (a poll is not a command):\n%s", v)
-	}
-	for _, clutter := range []string{"PRIVILEGED-STAGE1", "output  terminal", "thinking ·", "jq . n.json"} {
-		if strings.Contains(v, clutter) {
-			t.Fatalf("compact hides %q:\n%s", clutter, v)
+	for _, want := range []string{"terminal  $ ls cve/  ·  exit 0 · 4 lines", "d", "read  a.md  ·  lines 1-40",
+		"web_search  “CVE-2026-1 patch”  ·  1 results · bing", "Fix for CVE-2026-1  example.org",
+		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("every action is a card (missing %q):\n%s", want, v)
 		}
 	}
-	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"content": "Two CVEs are patched."}})
-	m.syncChat()
-	if v = ansi.Strip(m.chat.transcript.View()); !strings.Contains(v, "Two CVEs are patched.") || !strings.Contains(v, "gate fails") {
-		t.Fatalf("the next reply fixes the line above it:\n%s", v)
+	if n := strings.Count(v, g.working+" "); n < 5 {
+		t.Fatalf("five calls, five cards: %d\n%s", n, v)
+	}
+	if strings.Contains(v, "PRIVILEGED-STAGE1") || strings.Contains(v, "thinking ·") {
+		t.Fatalf("compact still hides gate commands and the thinking:\n%s", v)
+	}
+	if !strings.Contains(ansi.Strip(m.chat.transcript.View()), "gate fails") {
+		t.Fatal("the latest gate run shows under the cards")
+	}
+	m = m.toggleLayout()
+	if v := ansi.Strip(m.chat.content); !strings.Contains(v, "PRIVILEGED-STAGE1") || !strings.Contains(v, "long thoughts") {
+		t.Fatalf("Ctrl+O shows everything:\n%s", v)
 	}
 }
 
@@ -2240,5 +2254,160 @@ func TestAFencedCodeBlockIsAVisiblePlate(t *testing.T) {
 	segs := splitFences("a\n~~~\nx\n~~~\nb\n```go\nunclosed")
 	if len(segs) != 4 || !segs[1].code || segs[1].text != "x" || !segs[3].code || segs[3].lang != "go" {
 		t.Fatalf("fences: %+v", segs)
+	}
+}
+
+func TestTheCompactViewShowsTheCodeAnEditWrote(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	var diff strings.Builder
+	diff.WriteString("@@ -0,0 +1,20 @@")
+	for i := 1; i <= 20; i++ {
+		diff.WriteString(fmt.Sprintf("\n+line_%02d = %d", i, i))
+	}
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"content": "Writing it.", "tool_calls": []any{map[string]any{"function": map[string]any{
+			"name": "write", "arguments": `{"path":"gen.py","content":"..."}`}}}}},
+		{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "write", "result": map[string]any{
+			"path": "gen.py", "added": float64(20), "removed": float64(0), "diff": diff.String()}}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	if !strings.Contains(v, "line_01 = 1") || !strings.Contains(v, "line_08 = 8") || strings.Contains(v, "line_09 = 9") ||
+		!strings.Contains(v, "12 more lines · Ctrl+O shows everything") {
+		t.Fatalf("the compact view shows a long write's first 8 lines and a count:\n%s", v)
+	}
+}
+
+func TestCtrlOUnfoldsAndFoldsEveryEdit(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	var diff strings.Builder
+	diff.WriteString("@@ -0,0 +1,20 @@")
+	for i := 1; i <= 20; i++ {
+		diff.WriteString(fmt.Sprintf("\n+line_%02d = %d", i, i))
+	}
+	m.residentEvents = []residentEvent{{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "write", "result": map[string]any{
+		"path": "gen.py", "added": float64(20), "removed": float64(0), "diff": diff.String()}}}}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	if strings.Contains(ansi.Strip(m.chat.content), "line_20 = 20") {
+		t.Fatal("folded by default: the first lines only")
+	}
+	next, _, _ := m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	m = next
+	if v := ansi.Strip(m.chat.content); !strings.Contains(v, "line_20 = 20") || strings.Contains(v, "more lines") {
+		t.Fatalf("Ctrl+O shows every edit in full:\n%s", v)
+	}
+	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if strings.Contains(ansi.Strip(next.chat.content), "line_20 = 20") {
+		t.Fatal("Ctrl+O again folds them back")
+	}
+}
+
+func TestAGithubCardShowsTheTextItWillPost(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	var body strings.Builder
+	for i := 1; i <= 14; i++ {
+		body.WriteString(fmt.Sprintf("body line %d\n", i))
+	}
+	h := map[string]any{"action": "comment", "repo": "a/b", "number": float64(5), "body": body.String()}
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "g1", Kind: "approval_requested", Data: map[string]any{
+		"kind": "github", "summary": "comment on a/b#5 (168 characters)", "reason": "read-only token", "github": h}}}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	if !strings.Contains(v, "body line 1") || !strings.Contains(v, "body line 10") || strings.Contains(v, "body line 11") ||
+		!strings.Contains(v, "4 more lines") {
+		t.Fatalf("the card shows the body's first lines and how much more:\n%s", v)
+	}
+	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Summary: "comment on a/b#5", Github: h}}
+	m.chat.approvalDetail = true
+	detail := ansi.Strip(strings.Join(m.approvalDetail([]int{0}, 0, 80), "\n"))
+	if !strings.Contains(detail, "body (posted as you):") || !strings.Contains(detail, "body line 14") || !strings.Contains(detail, "number: #5") {
+		t.Fatalf("the detail view shows every field and the whole body:\n%s", detail)
+	}
+}
+
+func TestAnEditsPlateIsOneRowPerLineWithTabsExpanded(t *testing.T) {
+	diff := "@@ -455,1 +456,3 @@\n+// Update runs the message (cached per choice).\n func (m ctl) Update() {\n+\tnm, cmd := m.update(msg)"
+	rows := diffLines("panel/control.go", diff, 120)
+	if len(rows) != 3 {
+		t.Fatalf("three diff lines, three rows (a comment's newline broke the plate): %d %q", len(rows), rows)
+	}
+	for _, r := range rows {
+		if strings.Contains(r, "\n") || ansi.StringWidth(r) > 120 {
+			t.Fatalf("one row each, within the width: %q", r)
+		}
+	}
+	if v := ansi.Strip(rows[2]); strings.Contains(v, `\t`) || !strings.Contains(v, "+     nm, cmd") {
+		t.Fatalf("a tab is spaces, not an escape: %q", v)
+	}
+	if w0, w1 := ansi.StringWidth(rows[0]), ansi.StringWidth(rows[2]); w0 != w1 {
+		t.Fatalf("added lines' plates are one width: %d vs %d", w0, w1)
+	}
+}
+
+func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	for i := 0; i < 80; i++ {
+		m.residentEvents = append(m.residentEvents, residentEvent{Seq: 1000 + i, Goal: "original", Kind: "assistant",
+			Data: map[string]any{"content": fmt.Sprintf("reply %d", i)}})
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	m.chat.transcript.GotoBottom()
+	m.chat.live.active = true
+	m.chat.live.text = strings.Repeat("thinking line\n", 50)
+	next, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	m = next.(emberModel)
+	if m.chat.transcript.AtBottom() {
+		t.Fatal("the wheel scrolls the history even while a reply streams")
+	}
+	if v := ansi.Strip(m.View().Content); !strings.Contains(v, strings.TrimSpace(jumpPillText)) {
+		t.Fatal("scrolled up: the jump pill shows")
+	}
+	w := max(20, m.width)
+	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
+	next, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.jumpPillX(m.transcriptWidth(w)) + 2, Y: row})
+	m = next.(emberModel)
+	if !m.chat.transcript.AtBottom() || strings.Contains(ansi.Strip(m.View().Content), strings.TrimSpace(jumpPillText)) {
+		t.Fatal("a click on the pill goes to the newest message and the pill goes away")
+	}
+}
+
+func TestTheActivityLineShowsWhatTheAgentDoesWithItsNumbers(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.resident.Goals = []residentGoal{{ID: "g1", State: "working", Prompt: "x"}}
+	m.resident.SpendGoals = map[string]float64{"g1": 0.084}
+	now := float64(time.Now().Add(-134 * time.Second).Unix())
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Ts: now, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "x"}},
+		{Seq: 2, Ts: now + 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"content": strings.Repeat("w", 4000)}},
+		{Seq: 3, Ts: now + 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{}}},
+	}
+	m.chat.group.running = "pytest -q"
+	v := ansi.Strip(m.activityLine(120))
+	for _, want := range []string{"… $ pytest -q", "2m 1", "↓ 1.0k tokens", "1 action", "$0.08"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q in %q", want, v)
+		}
+	}
+	if !strings.Contains(ansi.Strip(m.chatBottom()), "$ pytest -q") {
+		t.Fatal("it sits above the composer")
+	}
+	if next, cmd := m.spinStart(); cmd == nil || !next.spinning {
+		t.Fatal("work starts the spinner's tick")
+	}
+	m.resident.Goals[0].State = "waiting_user"
+	if m.activityLine(120) != "" {
+		t.Fatal("waiting on you: no activity line")
+	}
+	if next, cmd := m.spinStep(); cmd != nil || next.spinning {
+		t.Fatal("idle: the spinner's tick stops")
 	}
 }

@@ -20,6 +20,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+const editPreview = 8 // the lines a folded edit card still shows
+
 var hunkRe = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
 // diffPlates are the added / removed backgrounds: the theme's ok and hot colours blended into its background (or into
@@ -63,13 +65,22 @@ func bgSeq(hex string) string {
 func editCard(path, meta string, expanded bool, diff string, w int) string {
 	body := diffLines(path, diff, max(10, w-5))
 	head := toolCard("edit", path, meta, true, false, nil, w)
-	if !expanded || len(body) == 0 {
-		return head // folded (Ctrl+E opens every card), or nothing changed
+	if len(body) == 0 {
+		return head
 	}
 	rule := "   " + emberDim.Render("│ ")
+	shown := body
+	if !expanded && len(body) > editPreview {
+		// a long change shows its first lines, as a code review does, instead of only its header: the code the
+		// agent writes was invisible until Ctrl+E
+		shown = body[:editPreview]
+	}
 	out := []string{strings.Replace(head, g.collapsed, g.expanded, 1)}
-	for _, b := range body {
+	for _, b := range shown {
 		out = append(out, rule+b)
+	}
+	if len(shown) < len(body) {
+		out = append(out, rule+emberDim.Render(fmt.Sprintf("… %d more lines · Ctrl+O shows everything", len(body)-len(shown))))
 	}
 	return strings.Join(out, "\n")
 }
@@ -96,7 +107,9 @@ func highlightLine(lexer chroma.Lexer, style *chroma.Style, code string) string 
 	if formatters.TTY16m.Format(&b, style, it) != nil {
 		return code
 	}
-	return strings.TrimRight(b.String(), "\n")
+	// (a lexer's comment token carries the line's newline inside its colour span, before the reset: a trim at the end
+	// missed it and the plate broke onto a second row)
+	return strings.ReplaceAll(b.String(), "\n", "")
 }
 
 // diffLines renders a unified diff body (without its ---/+++ header) for the file at path, w columns wide.
@@ -142,7 +155,7 @@ func diffLines(path, diff string, w int) []string {
 			oldN++
 			newN++
 		}
-		body := fmt.Sprintf("%4d %s ", num, mark) + highlightLine(lexer, style, terminalText(code, false))
+		body := fmt.Sprintf("%4d %s ", num, mark) + highlightLine(lexer, style, terminalText(strings.ReplaceAll(code, "\t", "    "), false))
 		if bg != "" {
 			// the plate runs the full width: re-applied after every reset inside the highlighted code
 			seq := bgSeq(bg)

@@ -34,6 +34,7 @@ type residentChat struct {
 	seq, rendered, renderWidth              int
 	content                                 string
 	markdown                                *glamour.TermRenderer
+	calls                                   map[string]callInfo // each tool call's arguments by id: its result's card names what it acted on
 	question                                *emberReq
 	questionChoice                          int
 	questionCustom                          bool
@@ -356,7 +357,7 @@ func (m *emberModel) syncChat() {
 		m.chat.sel = chatSelection{} // and the lines a selection pointed at are gone
 	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
-		// Compact (the default): tool work folds into one line between the agent's words; Ctrl+E draws every card.
+		// Compact (the default): a card per action between the agent's words; Ctrl+O draws everything.
 		if !m.chat.cards && !m.chat.expanded {
 			if e.Kind == "assistant" {
 				// its words first (they close the line above them), then its calls start the next line
@@ -366,6 +367,15 @@ func (m *emberModel) syncChat() {
 				}
 				m.chat.fold(e)
 				continue
+			}
+			if e.Kind == "tool_result" {
+				// every action is its own card (60 calls, 60 cards: emberactions.go)
+				if block := m.chat.actionBlock(e, w); block != "" {
+					m.chat.flushGroup(w)
+					m.chat.content += block + "\n\n"
+					m.chat.fold(e) // (the running line still clears)
+					continue
+				}
 			}
 			if m.chat.fold(e) {
 				continue
@@ -1106,7 +1116,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			// line numbers, tinted added / removed plates, the code highlighted for its language (emberdiff.go)
-			return editCard(residentText(path), meta, c.expanded || changed <= 12, diff, w)
+			return editCard(residentText(path), meta, c.expanded || c.full || changed <= 12, diff, w)
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
@@ -1149,7 +1159,20 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
 		if str("kind") == "github" {
-			return approvalCard("github", residentText(str("summary")), residentText(str("reason")), w)
+			// the card shows what will be posted under your name: the summary, then the body's first lines (all of it
+			// in the approvals screen, Ctrl+A then Enter)
+			text := residentText(str("summary"))
+			if h, ok := e.Data["github"].(map[string]any); ok {
+				if _, body := handoffText(h); strings.TrimSpace(body) != "" {
+					lines := strings.Split(strings.TrimRight(residentText(body), "\n"), "\n")
+					shown := lines[:min(len(lines), 10)]
+					text += "\n\n" + strings.Join(shown, "\n")
+					if len(lines) > len(shown) {
+						text += fmt.Sprintf("\n… %d more lines · Ctrl+A, Enter shows all of it", len(lines)-len(shown))
+					}
+				}
+			}
+			return approvalCard("github", text, residentText(str("reason")), w)
 		}
 		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
 	case "question":
@@ -1328,6 +1351,9 @@ func (m emberModel) chatBottom() string {
 	if line := m.todoPinned(); line != "" {
 		out = line + "\n" + out
 	}
+	if act := m.activityLine(max(18, m.width-2)); act != "" && m.height >= 20 { // (a small terminal keeps its rows)
+		out = act + "\n" + out // above the todo list, where the work is described
+	}
 	if side := m.btwSection(max(18, m.width-2)); side != "" {
 		out = side + "\n" + out
 	}
@@ -1465,8 +1491,7 @@ func helpLines() []string {
 		{"Ctrl+G", "goals"},
 		{"Ctrl+A", "approvals"},
 		{"Ctrl+R", "search what you sent"},
-		{"Ctrl+E", "cards: compact, folded, open"},
-		{"Ctrl+O", "cards show every line"},
+		{"Ctrl+O", "layout: compact (a card per action) or everything"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
 	} {
@@ -1827,6 +1852,7 @@ func (m emberModel) renderChat() string {
 		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
 	view := m.highlightSelection(m.chat.transcript.View())
+	view = m.withJumpPill(view, m.transcriptWidth(w))
 	if sw := m.sideWidth(); sw > 0 {
 		tw := w - sw - 1
 		view = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(tw).Render(view), " ",
@@ -1851,20 +1877,19 @@ func (m emberModel) renderChat() string {
 func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.onJumpPill(click.X, click.Y) {
+		m.chat.transcript.GotoBottom()
+		m.chat.live.hold = false
+		return m, nil
+	}
 	if next, c, ok := m.selectMouse(msg); ok {
 		return next, c
 	} else {
 		m = next
 	}
-	if wheel, ok := msg.(tea.MouseWheelMsg); ok {
-		if m.chat.live.active {
-			if wheel.Button == tea.MouseWheelUp {
-				m.scrollLive(-3)
-			} else {
-				m.scrollLive(3)
-			}
-			return m, nil
-		}
+	if _, ok := msg.(tea.MouseWheelMsg); ok {
+		// the wheel always scrolls the history (the user's choice: the live thinking window took it mid-scroll);
+		// PgUp / PgDn scroll the thinking window while a reply streams
 		m.chat.transcript, cmd = m.chat.transcript.Update(msg)
 	} else if m.chat.question != nil && m.chat.questionArmed {
 		if m.chat.questionCustom {
@@ -1985,27 +2010,13 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
-	case "ctrl+l":
+	case "ctrl+l", "ctrl+end":
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
 	case "ctrl+e":
-		// three views, in turn: compact (tool work folded into one line between the agent's words), every card
-		// folded, every card open. Drawn blocks are final, so the transcript is drawn again once.
-		switch {
-		case !m.chat.cards:
-			m.chat.cards, m.chat.expanded = true, false
-			m.msg = "every tool card, folded · Ctrl+E opens them"
-		case !m.chat.expanded:
-			m.chat.expanded = true
-			m.msg = "every tool card, open · Ctrl+E back to compact"
-		default:
-			m.chat.cards, m.chat.expanded = false, false
-			m.msg = "compact: tool work in one line · Ctrl+E shows every card"
-		}
-		m.chat.content, m.chat.rendered = "", 0
-		m.syncChat()
-		return m, nil
+		// (Ctrl+O's layout switch; Ctrl+E kept for the hands that learned it)
+		return m.toggleLayout(), nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.
 		m.chat.live.hold = !m.chat.live.hold
@@ -2904,4 +2915,63 @@ func (m emberModel) rootsCard(w int) string {
 		title = g.root + " ROOT REQUEST WAITING"
 	}
 	return borderTitle(box, title, emberWarn.Bold(true))
+}
+
+// toggleLayout switches the two layouts: compact (a card per action with short previews, replies in full) and
+// everything (every call, result and gate as a card, in full, with the thinking).
+func (m emberModel) toggleLayout() emberModel {
+	all := !(m.chat.cards && m.chat.expanded)
+	m.chat.cards, m.chat.expanded, m.chat.full = all, all, all
+	m.msg = map[bool]string{true: "everything: every card in full, the thinking, every gate · Ctrl+O back to compact",
+		false: "compact: a card per action, short previews · Ctrl+O shows everything"}[all]
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	return m
+}
+
+// The jump pill: scrolled up through the history, its last row carries " Jump to bottom (Ctrl+End) ↓ " in the
+// middle; a click on it or Ctrl+End goes back to the newest message.
+const jumpPillText = " Jump to bottom (Ctrl+End) ↓ "
+
+func (m emberModel) jumpPillShown() bool {
+	t := m.chat.transcript
+	return t.TotalLineCount() > t.Height() && !t.AtBottom()
+}
+
+// transcriptWidth is the history's width inside a w-wide chat (the side panel takes the rest).
+func (m emberModel) transcriptWidth(w int) int {
+	if sw := m.sideWidth(); sw > 0 {
+		return w - sw - 1
+	}
+	return w
+}
+
+func (m emberModel) jumpPillX(tw int) int {
+	return max(0, (tw-ansi.StringWidth(jumpPillText))/2)
+}
+
+func (m emberModel) withJumpPill(view string, tw int) string {
+	if !m.jumpPillShown() {
+		return view
+	}
+	rows := strings.Split(view, "\n")
+	last := rows[len(rows)-1]
+	x0, pw := m.jumpPillX(tw), ansi.StringWidth(jumpPillText)
+	left := ansi.Truncate(last, x0, "")
+	if pad := x0 - ansi.StringWidth(left); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+	rows[len(rows)-1] = left + "\x1b[0m" + emberSel.Render(jumpPillText) + ansi.TruncateLeft(last, x0+pw, "")
+	return strings.Join(rows, "\n")
+}
+
+// onJumpPill: a click at (x, y) lands on the pill.
+func (m emberModel) onJumpPill(x, y int) bool {
+	if !m.jumpPillShown() {
+		return false
+	}
+	w := max(20, m.width)
+	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
+	x0 := m.jumpPillX(m.transcriptWidth(w))
+	return y == row && x >= x0 && x < x0+ansi.StringWidth(jumpPillText)
 }
