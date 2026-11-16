@@ -14,6 +14,10 @@
 #pragma once
 #define OWN_KV_ROT128_SCALE 0x1.6a09e6p-4f   // (float)(1 / sqrt(128)), caminus.ref_kv.HADAMARD128_SCALE
 
+// x (an fp32 result, e.g. RoPE's fma) rounded to fp16 and back, as the F16 objects store it: the opaque copy keeps the
+// backend from fusing the fma into v_fma_mix*_f16, which rounds the exact value to fp16 once instead of fp32 then fp16
+__device__ __forceinline__ float own_kv_f16r(float x) { asm volatile("" : "+v"(x)); return (float)(_Float16)x; }
+
 __device__ __forceinline__ float own_kv_rot128(float u0, float u1, float u2, float u3, int qw, int lane) {
 #pragma clang fp contract(off)
 #pragma unroll

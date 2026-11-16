@@ -6,8 +6,8 @@ Gate (spec-own-quant.md, first form): top-1 equal at every position, mean KLD < 
   tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache FILE.npz [--prompt TEXT] [--new 3]
       [--module k3_q3m_iq] [--same-as k3_q3m_iq] [--kv q8]
 --kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True), k3_q3m_lean_kvq8), the same checks, the top-1 gate
-(the mean KLD is printed, not gated: 1e-3 is the F16 cache's bar, and the unrotated draft's Q8 rows measured 2.08e-3 here;
-the Q8 cache's accuracy bar is the G-model gates' --against, tools/gates/kv_against.py), plus at every reference position the last layer's new row byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the
+(the mean KLD gated below 2.08e-3, the unrotated draft's Q8 rows here, not the F16 cache's 1e-3: the rotation must not be
+worse than no rotation; the Q8 cache's accuracy bar is the G-model gates' --against, tools/gates/kv_against.py), plus at every reference position the last layer's new row byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the
 halves the F16 row kernel (the prefill's q3p_qk_rope: OP_OWN_ATTS's norm + RoPE statements) stores for that layer's q | k | v.
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys, time
@@ -85,7 +85,8 @@ if eng.q8:
     print(('PASS' if not rows_bad else 'FAIL') + f' Q8 rows: the last layer\'s row at each of {len(ref)} positions byte for byte '
           f'encode_q8_kv(hadamard128(K), V) of the F16 row kernel\'s halves' + (f' (differ at {rows_bad[:8]})' if rows_bad else '')); ok &= not rows_bad
 print(('PASS' if top_ok else 'FAIL') + ' top-1 equal at every position'); ok &= top_ok
-if eng.q8: print(f'INFO mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}): not gated on a Q8 cache (its bar: the G-model gates\' --against)')
+if eng.q8:   # (the F16 cache's 1e-3 is not a Q8 bar: the G-model gates' --against is; this bound is the unrotated rows' 2.08e-3 here)
+    print(('PASS' if np.mean(klds) < 2.08e-3 else 'FAIL') + f' mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}) < 2.08e-3 (the unrotated Q8 rows\' on this test)'); ok &= np.mean(klds) < 2.08e-3
 else: print(('PASS' if np.mean(klds) < 1e-3 else 'FAIL') + f' mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}) < 1e-3'); ok &= np.mean(klds) < 1e-3
 # G-self across grids: the tape at 3 / 7 / 8 workgroups per WGP gives the card's own grid's (q3moe_one.card_per_wgp) logits bitwise (same weights,
 # same KV caches rewritten position by position)

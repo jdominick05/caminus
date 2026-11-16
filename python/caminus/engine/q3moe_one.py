@@ -31,7 +31,7 @@ MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # .
 # through the head's Walsh-Hadamard transform first (kernels/own_kv_rot128.h): a Q8 row is
 # caminus.ref_kv.encode_q8_kv(ref_kv.hadamard128(K), V) of the F16 row's K and V; the lean decode form only, one card.
 # The engine key carries this id, so rows of another layout (the unrotated rows of an earlier draft) never restore here
-KV_FORMAT_Q8 = 'q8_0-v2:k-hadamard128:f16-rounded-v1'
+KV_FORMAT_Q8 = 'q8_0-v1:qk-hadamard128:f16-rounded-v1'
 ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the engine takes as many as its card's grid
                                 # holds at once: splits_for), fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /

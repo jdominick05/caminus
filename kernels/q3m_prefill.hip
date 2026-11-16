@@ -569,8 +569,8 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
     // rounded to fp16 as the F16 form stores it (q16 and the K halves), then the head's transform; dim i's result kept
     const float c0 = rc[lane], s0 = rs[lane], c1 = rc[lane + 32], s1 = rs[lane + 32];
     const float a0 = y1[lane], a1 = y1[lane + 32], a2 = y1[lane + 64], a3 = y1[lane + 96];
-    float yr = own_kv_rot128((float)(_Float16)__builtin_fmaf(a0, c0, -(a2 * s0)), (float)(_Float16)__builtin_fmaf(a1, c1, -(a3 * s1)),
-                             (float)(_Float16)__builtin_fmaf(a2, c0, a0 * s0), (float)(_Float16)__builtin_fmaf(a3, c1, a1 * s1), wave, lane);
+    float yr = own_kv_rot128(own_kv_f16r(__builtin_fmaf(a0, c0, -(a2 * s0))), own_kv_f16r(__builtin_fmaf(a1, c1, -(a3 * s1))),
+                             own_kv_f16r(__builtin_fmaf(a2, c0, a0 * s0)), own_kv_f16r(__builtin_fmaf(a3, c1, a1 * s1)), wave, lane);
     if (isq) {
         asm volatile("" : "+v"(yr));   // (the scale's product rounded to fp32 first, then to fp16: never one v_fma_mix rounding)
         q16[((size_t)t * nh + hy) * 128 + i] = (_Float16)yr;

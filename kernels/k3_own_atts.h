@@ -249,8 +249,8 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
             float xr;
             if (hw == 0) {
                 const float a0 = tk[lane], a1 = tk[lane + 32], a2 = tk[lane + 64], a3 = tk[lane + 96];
-                xr = own_kv_rot128((float)(_Float16)__builtin_fmaf(a0, c0, -(a2 * s0)), (float)(_Float16)__builtin_fmaf(a1, c1, -(a3 * s1)),
-                                   (float)(_Float16)__builtin_fmaf(a2, c0, a0 * s0), (float)(_Float16)__builtin_fmaf(a3, c1, a1 * s1), qw, lane);
+                xr = own_kv_rot128(own_kv_f16r(__builtin_fmaf(a0, c0, -(a2 * s0))), own_kv_f16r(__builtin_fmaf(a1, c1, -(a3 * s1))),
+                                   own_kv_f16r(__builtin_fmaf(a2, c0, a0 * s0)), own_kv_f16r(__builtin_fmaf(a3, c1, a1 * s1)), qw, lane);
             } else xr = (float)(_Float16)xk;
             uint8_t * blk = (uint8_t *)sg.W + (size_t)pos * pb + (size_t)(hw * (M / 32) + g * (ATS_D / 32) + (i >> 5)) * 34;
             Sync * se = sy; asm volatile("" : "+s"(se));   // (the error word's address made here, not kept live across k3_run)

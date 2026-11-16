@@ -18,7 +18,8 @@ shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. On
   refusals  a NaN in v, and a v that overflows fp16 (1e5): InvalidKVEncoding from the error word after Sync; the refused
             block's bytes untouched, the other blocks of the row written. A NaN in k: its head's k norm makes the whole
             head NaN (as without the rotation), so all four K blocks of that kv head are refused (untouched), the other
-            heads' blocks written
+            heads' blocks written. One RoPE'd k value past fp16 (dims 5 / 69, blocks 0 / 2, from a large k norm weight):
+            the transform spreads it, so all four K blocks of each kv head are refused, blocks 1 / 3 included
   prefill   q3p_qk_rope_q8 (75 tokens at position 1,000, with the edge blocks) writes encode_q8_kv(hadamard128(K), V) of
             q3p_qk_rope's halves, byte for byte, and its q16 is fp16(hadamard128(q3p_qk_rope's q16)), bit for bit; it refuses
             a NaN block into its error word; q3p_attn_q8 over Q8 rows equals q3p_attn over an F16 cache holding
@@ -173,6 +174,25 @@ blk = lambda part, g, b: row[(part * (M // 32) + 4 * g + b) * 34:(part * (M // 3
 check(raised and int(E.kv_error[0]) == 2 and all((blk(0, 1, b) == 0xA5).all() for b in range(4))
       and not any((blk(0, g, 0) == 0xA5).all() for g in (0, 2, 3)) and not any((blk(1, g, b) == 0xA5).all() for g in range(NKV) for b in range(4)),
       'a NaN in k: InvalidKVEncoding (error word 2), its kv head\'s four K blocks untouched, the other heads\' K and every V block written')
+E.sync.zero_(); scratch[:k3.Engine.ATS_CNT].zero_()
+# one RoPE'd k value past fp16 (a k norm weight of 1e9 at dim 5, the input 3.0 there): finite through the norm and the
+# RoPE in fp32, inf once rounded to fp16. Dims 5 and 69 (RoPE's pair) sit in blocks 0 and 2; without the transform blocks 1
+# and 3 would be written. The transform spreads the inf over every dim of the head, so all four K blocks of every kv
+# head (the weight is shared) are refused; every V block is written
+p = 2060
+x = (rng.standard_normal(NH * HD + 2 * M)).astype(np.float32)
+for g in range(NKV): x[NH * HD + g * HD + 5] = 3.0
+kn5 = float(par[HD + 5]); par[HD + 5] = 1e9
+cache[p * RB:(p + 1) * RB] = 0xA5
+qkv.copy_(torch.from_numpy(x)); pos_d.fill_(p)
+try: E.run(); raised = False
+except errors.InvalidKVEncoding: raised = True
+torch.cuda.synchronize(); par[HD + 5] = kn5
+row = cache[p * RB:(p + 1) * RB].cpu().numpy()
+check(raised and int(E.kv_error[0]) == 2 and all((blk(0, g, b) == 0xA5).all() for g in range(NKV) for b in range(4))
+      and not any((blk(1, g, b) == 0xA5).all() for g in range(NKV) for b in range(4)),
+      'a RoPE\'d k value past fp16 (dims 5 / 69 only, blocks 0 / 2): InvalidKVEncoding (error word 2), all four K blocks of '
+      'each kv head untouched (the transform spreads it), every V block written')
 E.sync.zero_(); scratch[:k3.Engine.ATS_CNT].zero_()
 # edges: fixed fp16 V blocks of kv head 0 (blocks 0 .. 3)
 EDGE = np.zeros(128, np.float32)

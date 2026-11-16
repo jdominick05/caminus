@@ -128,7 +128,7 @@ speed, matching prefill, cache park/restore, the GSQ verify objects and two card
 projection takes `opt['kv'] = 'q8'` (`arch.kv_q8`) so the later `--kv q8` switch only has to set it.
 
 Format: the same wire codec and row layout as the dense line (`kernels/own_kv_codec.h`, `caminus.ref_kv`), with K
-rotated (`Q3MoEOne.kv_format_id` = `q8_0-v2:k-hadamard128:f16-rounded-v1`). Each block encodes the fp16-rounded values
+rotated (`Q3MoEOne.kv_format_id` = `q8_0-v1:qk-hadamard128:f16-rounded-v1`). Each block encodes the fp16-rounded values
 the F16 object stores, K after the head's orthonormal Walsh-Hadamard transform: a Q8 row is
 `encode_q8_kv(hadamard128(K), V)` of the F16 row's K and V (`caminus.ref_kv.hadamard128`); the gates below check exactly
 that. q gets the same transform after its RoPE, so the scores are q . k in exact arithmetic ((H q) . (H k) = q . k for
@@ -157,7 +157,8 @@ values to fp16 for its WMMA operands, one rounding more than the decode reader; 
 
 Refusals: a non-finite value (an fp16 overflow included) refuses its block. In K, a non-finite input was already the
 whole head's (the k norm), and the transform also spreads one RoPE'd value that overflows fp16 over its head: all four K
-blocks of that kv head are refused. Decode sets bit 2 in the int32 word after
+blocks of that kv head are refused (`tests/engine/test_q3m_kvq8_atts.py` checks it in decode: one value past fp16 in
+blocks 0 / 2 refuses blocks 1 / 3 too). Decode sets bit 2 in the int32 word after
 Sync (`Engine.kv_error`, the dense line's word; `own_op_atts` takes `sy` for it), the prefill in its own `kverr` word.
 The word sits right after the status words, so a pass's one asynchronous status copy (`Engine.status_words`, 9 words
 on a Q8 engine) brings it: no extra read back per token. `_pass_wait` checks it before the bound and timeout paths (they
@@ -242,11 +243,14 @@ for like bound. `--save-logits` on the F16 run and `--against` on the Q8 run gat
 the two caches (`tools/gates/kv_against.py`). The bar is the floor rule's shape: our F16 to Q8 mean KLD at most
 llama.cpp's own F16-KV to q8_0-KV mean KLD on the same tokens (`--against-llama` names its F16-KV rows), and top-1
 agreement at most one point below its own. Explicit `--against-kld` / `--against-top1` bars exist for rows without
-llama.cpp references. An `--against` with no bound is refused. `test_q3moe_one.py --kv q8` prints its mean KLD against the fp32 reference
-without gating it (1e-3 is the F16 cache's bar). CPU: `tests/engine/test_q3moe_kvq8_cpu.py`, which also checks the
+llama.cpp references. An `--against` with no bound is refused. `test_q3moe_one.py --kv q8` gates its mean KLD against the fp32 reference
+below 2.08e-3, the unrotated draft's on that test (1e-3 is the F16 cache's bar). CPU: `tests/engine/test_q3moe_kvq8_cpu.py`, which also checks the
 rotation: H128 / sqrt(128) orthonormal, (H q) . (H k) = q . k on float64 vectors, `hadamard128` within fp32 rounding of
-it with the kernel header's scale literal, a lane-by-lane emulation of the kernel's statements bit for bit
-`hadamard128`, and the format id's key apart from the unrotated draft's. The rotated objects have not run on a device
+it with the kernel header's scale literal, a Python lane-by-lane transcription of the kernel's statements bit for bit
+`hadamard128` (it checks the reference, not the compiled code: the device rows checks do that), and the format id's key apart from the unrotated draft's.
+Both RoPE sites round each fma to fp32 and then to fp16 through an opaque copy (`own_kv_f16r`), as the F16 objects do:
+a plain `(_Float16)fmaf(...)` let the backend fuse it into one `v_fma_mix*_f16` (one rounding of the exact value), which
+disagrees with the two-step rounding on about 6e-5 of values, and the transform spreads each such ulp over the head. The rotated objects have not run on a device
 yet. The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
 40,896 positions), and failed the 128-token G-model gate: mean KLD 5.40e-3 against float64 (llama.cpp's q8_0 KV
 3.68e-3) and 5.53e-3 against our F16 cache (llama.cpp's own F16 to q8_0 cost 4.17e-3); the rotation is the answer to
