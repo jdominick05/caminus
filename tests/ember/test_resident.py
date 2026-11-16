@@ -1100,6 +1100,19 @@ for line in sys.stdin:
             self.assertIn('notes/old-0.md',(self.home/'notes'/'index-archive.md').read_text(),'the moved line is kept')
             line=[l for l in idx.splitlines() if 'new-fact' in l][0]
             self.assertLessEqual(len(line.encode()),160,'one index line stays short')
+            # oldest-first moved a real agent's notes on the machine itself: now a pinned line never moves, and the least
+            # recently used (saved or read) leave first
+            (self.home/'MEMORY.md').write_text('# My notes\n- [Machine](notes/machine.md) — the cards, the disks · pinned\n'
+                                              +''.join(f'- [n {i}](notes/n-{i}.md) — {"w"*120}\n' for i in range(27)))
+            rt.memory.touch('notes/n-0.md')         # n 0 was just read; n 1 is now the least recently used
+            out=rt.memory.remember('Another','fact','x')
+            idx=(self.home/'MEMORY.md').read_text()
+            self.assertIn('notes/machine.md',idx,'pinned stays');self.assertIn('notes/n-0.md',idx,'a note just read stays')
+            self.assertNotIn('Machine',out['moved_to_archive']);self.assertIn('pin true',out['note_text'])
+            out=rt.memory.remember('Core','the human prefers short updates','how my human likes updates',pin=True)
+            self.assertTrue([l for l in (self.home/'MEMORY.md').read_text().splitlines() if 'core.md' in l][0].endswith(' · pinned'))
+            rt.memory.remember('Core','the human prefers short updates.','how my human likes updates')
+            self.assertTrue([l for l in (self.home/'MEMORY.md').read_text().splitlines() if 'core.md' in l][0].endswith(' · pinned'),'re-saving keeps the pin')
         finally:rt.mail.close();rt.store.close()
 
     def test_define_done_refuses_a_gate_that_cannot_fail(self):

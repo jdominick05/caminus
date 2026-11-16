@@ -6,14 +6,17 @@ The agent lives in its account across goals, so what it learns must outlive one 
   (the first turn of a goal takes a snapshot; a write during the goal shows from the next goal), so a mid-goal edit
   cannot shift the agent's picture of itself halfway through a task.
 - notes/<name>.md hold one fact each, read on demand. The remember tool writes a note and its index line together.
-  When the index would pass its cap, its oldest lines move to notes/index-archive.md (still read on demand and found
-  by history_search) and the tool says which: a full index refused every remember for four goals of a real resident,
-  which never tidied it by hand.
+  When the index would pass its cap, the least recently used unpinned lines move to notes/index-archive.md (still read
+  on demand and found by history_search) and the tool says which, so a wrong choice is put back pinned at once. A
+  note is used when it is saved or read (notes/.used.json); a pinned line (remember pin) never moves. A full index
+  refused every remember for four goals of a real resident, which never tidied it by hand; then oldest-first moved
+  its notes on the machine itself before a week of free-time notes.
 - STATE.md is the agent's live working state (doing / verified / assumed / next). It is re-read every turn and loaded
   first, so after a compaction or a daemon restart it is the first thing the agent sees.
 - history_search is a full-text search over its own past goals, replies, tool results, summaries, journal and notes.
   No model call.
 """
+import json
 import re
 import time
 from pathlib import Path
@@ -23,6 +26,8 @@ STATE_CAP = 8192          # bytes of STATE.md loaded into every turn
 NOTE_CAP = 8192           # bytes of one note written by remember
 LINE_CAP = 160            # bytes of one index line: a long summary is cut (the note holds the detail)
 ARCHIVE = 'notes/index-archive.md'
+USED = 'notes/.used.json'
+PINNED = ' · pinned'
 HISTORY_KINDS = {'goal_queued': ('prompt',), 'user_message': ('text',), 'peer_message': ('text',),
                  'assistant': ('content',), 'finished': ('summary',), 'tool_result': ('result',)}
 
@@ -135,7 +140,36 @@ class Memory:
         return p.read_text(errors='replace') if p.is_file() else ''
 
     # --- the remember tool ------------------------------------------------------------------------------------
-    def remember(self, name, text, summary):
+    def touch(self, rel):
+        """Mark a note used (saved or read): the least recently used leave a full index first."""
+        p = self.home / USED
+        try:
+            used = json.loads(p.read_text()) if p.is_file() else {}
+        except (OSError, ValueError):
+            used = {}
+        used[rel] = time.time()
+        try:
+            p.parent.mkdir(exist_ok=True)
+            p.write_text(json.dumps(used))
+        except OSError:
+            pass
+
+    def _last_used(self, line):
+        m = re.search(r'\]\((notes/[^)]+)\)', line)
+        if not m:
+            return 0.0
+        try:
+            used = json.loads((self.home / USED).read_text())
+        except (OSError, ValueError):
+            used = {}
+        if m.group(1) in used:
+            return float(used[m.group(1)])
+        try:
+            return (self.home / m.group(1)).stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def remember(self, name, text, summary, pin=False):
         """Write notes/<name>.md (one fact) and add or replace its line in MEMORY.md, within the index cap."""
         if not text.strip() or not summary.strip():
             raise ValueError('remember needs the fact (text) and a one-line summary for the index')
@@ -145,21 +179,27 @@ class Memory:
         notes = self.home / 'notes'
         notes.mkdir(exist_ok=True)
         rel = f'notes/{s}.md'
-        line = f'- [{name.strip()}]({rel}) — ' + ' '.join(summary.split())
-        if len(line.encode()) > LINE_CAP:
-            line = line.encode()[:LINE_CAP - 3].decode(errors='ignore').rstrip() + '…'
         current = self._read_index()
+        pin = pin or any(f']({rel})' in ln and ln.endswith(PINNED) for ln in current.splitlines())   # pinned stays pinned
+        tail = PINNED if pin else ''
+        line = f'- [{name.strip()}]({rel}) — ' + ' '.join(summary.split())
+        if len((line + tail).encode()) > LINE_CAP:
+            line = line.encode()[:LINE_CAP - 3 - len(tail.encode())].decode(errors='ignore').rstrip() + '…'
+        line += tail
         kept = [ln for ln in current.splitlines() if f']({rel})' not in ln]
         moved = []
-        # the oldest note lines leave first (a heading or a plain line the agent wrote stays: it is its own text)
+        # the least recently used unpinned note line leaves first (a heading or a plain line the agent wrote stays: it
+        # is its own text; a pinned line stays)
         while len(('\n'.join([*kept, line]).strip('\n') + '\n').encode()) > INDEX_CAP:
-            i = next((i for i, ln in enumerate(kept) if ln.startswith('- [')), None)
-            if i is None:
-                raise ValueError(f'MEMORY.md is over its {INDEX_CAP}-byte cap with no note lines to move: shorten '
-                                 'it (edit MEMORY.md), then remember again')
+            movable = [i for i, ln in enumerate(kept) if ln.startswith('- [') and not ln.endswith(PINNED)]
+            if not movable:
+                raise ValueError(f'MEMORY.md is over its {INDEX_CAP}-byte cap and every note line in it is pinned: '
+                                 'merge lines or unpin one (edit MEMORY.md), then remember again')
+            i = min(movable, key=lambda i: self._last_used(kept[i]))
             moved.append(kept.pop(i))
         updated = '\n'.join([*kept, line]).strip('\n') + '\n'
         (notes / f'{s}.md').write_text(text.rstrip('\n') + '\n')
+        self.touch(rel)
         if moved:
             arch = self.home / ARCHIVE
             head = '' if arch.is_file() else '# Index lines moved out of MEMORY.md (oldest first)\n\n'
@@ -170,8 +210,9 @@ class Memory:
                    note_text='saved; the index line shows from your next goal (this goal keeps its snapshot)')
         if moved:
             out['moved_to_archive'] = [re.sub(r'^- \[([^\]]*)\].*', r'\1', m) for m in moved]
-            out['note_text'] += (f'; the index was full, so its {len(moved)} oldest line(s) moved to {ARCHIVE} '
-                                 '(read it or history_search finds them)')
+            out['note_text'] += (f'; the index was full, so its {len(moved)} least recently used line(s) moved to '
+                                 f'{ARCHIVE} (read it or history_search finds them). If one of them still matters on '
+                                 'every goal, remember it again with pin true')
         return out
 
     # --- history_search ---------------------------------------------------------------------------------------
