@@ -55,7 +55,8 @@ def check(ok, what):
     if not ok: FAILS.append(what)
 
 
-def commit(oid, head, body=''): return {'oid': oid, 'messageHeadline': head, 'messageBody': body}
+TRAILER = 'Assisted-by: a test model'
+def commit(oid, head, body=TRAILER): return {'oid': oid, 'messageHeadline': head, 'messageBody': body}
 def receipt(oid, clean=True, at=1):
     return {'author': {'login': BOT}, 'submittedAt': f'2026-01-01T00:00:{at:02d}Z',
             'body': f'**Reviewed commit:** `{oid[:10]}`\n' + ("Didn't find any major issues." if clean else 'Found one issue.')}
@@ -90,7 +91,7 @@ def line(out, key): return next((l for l in out.splitlines() if l[5:].startswith
 
 # ---- the passing forms
 rc, out, _, _ = run(view())
-check(rc == 0 and out.strip().endswith('RESULT PASS') and out.count('PASS ') == 6, f'a clean pull request passes its six checks ({out.strip().splitlines()[-1]})')
+check(rc == 0 and out.strip().endswith('RESULT PASS') and out.count('PASS ') == 8, f'a clean pull request passes its eight checks ({out.strip().splitlines()[-1]})')
 rc, out, _, _ = run(view(), repo=False)
 check(rc == 0, 'without -R the repository comes from `gh repo view`')
 rc, out, _, _ = run(view(reviews=[], comments=[state(C1)]))
@@ -147,6 +148,49 @@ rc, out, _, _ = run(view(commits=[commit(C1, 'docs : a line', f'Measured in {hom
 check(rc == 1 and f'machine path in {C1[:10]}' in line(out, 'text'), 'a machine path in a commit message fails, naming the commit')
 rc, out, _, _ = run(view(title=f'docs : {link}'))
 check(rc == 1 and 'session link in title' in line(out, 'text'), 'a session link in the title fails')
+
+# ---- title, trailers (the commit message's own rules)
+rc, out, _, _ = run(view(title='Docs: a line'))
+check(rc == 1 and 'pull request title' in line(out, 'title'), 'a title not in <area> : <what> form fails')
+rc, out, _, _ = run(view(title='docs: a line'))
+check(rc == 1 and line(out, 'title').startswith('FAIL'), 'a title with no space before the colon fails')
+rc, out, _, _ = run(view(commits=[commit(C1, 'fix the thing')]))
+check(rc == 1 and f'commit {C1[:10]}' in line(out, 'title'), 'a commit headline not in <area> : <what> form fails, naming it')
+rc, out, _, _ = run(view(commits=[commit(C1, 'docs : a line', '')]))
+check(rc == 1 and 'has no Assisted-by trailer' in line(out, 'trailers'), 'a commit with no Assisted-by trailer fails')
+rc, out, _, _ = run(view(body='AI assistance: none\n', commits=[commit(C1, 'docs : a line', '')]))
+check(rc == 0 and line(out, 'trailers').startswith('PASS'), 'a commit with no trailer passes when the body says AI assistance: none')
+rc, out, _, _ = run(view(body='AI assistance: none\n', commits=[commit(C1, 'docs : a line', TRAILER)]))
+check(rc == 1 and 'but the body says AI assistance: none' in line(out, 'trailers'), 'a trailer on a commit the body calls unassisted fails')
+rc, out, _, _ = run(view(body='AI assistance: none', commits=[commit(C1, 'docs : a line', '')]), '--metadata')
+check(rc == 0, 'AI assistance: none without a newline at the end of the body still counts')
+rc, out, _, _ = run(view(body='Mentions AI assistance: none inside a sentence.', commits=[commit(C1, 'docs : a line', '')]), '--metadata')
+check(rc == 1 and 'has no Assisted-by trailer' in line(out, 'trailers'), 'the declaration must be a line of its own in the body')
+dep = dict(author={'login': 'app/dependabot'}, title='build(deps): bump lipgloss from 2.0.6 to 2.1.0 in /panel', commits=[commit(C1, 'build(deps): bump lipgloss from 2.0.6 to 2.1.0', '')])
+rc, out, _, _ = run(view(**dep), '--metadata')
+check(rc == 0 and line(out, 'title').startswith('PASS') and line(out, 'trailers').startswith('PASS'), 'a Dependabot pull request is exempt from the title and trailer rules')
+rc, out, _, _ = run(view(**dict(dep, author={'login': 'dependabot[bot]'})), '--metadata')
+check(rc == 0, 'the REST spelling dependabot[bot] is exempt too')
+rc, out, _, _ = run(view(**dict(dep, author={'login': 'someone'})), '--metadata')
+check(rc == 1 and line(out, 'title').startswith('FAIL'), 'a pull request by someone else with a bump-like title still fails')
+rc, out, _, _ = run(view(commits=[commit(C1, 'docs : a line', TRAILER + '\n' + TRAILER)]))
+check(rc == 1 and 'has 2 Assisted-by' in line(out, 'trailers'), 'a commit with two Assisted-by trailers fails')
+rc, out, _, _ = run(view(commits=[commit(C1, 'docs : a line', TRAILER + '\nCo-Authored-By: Someone <s@example.com>')]))
+check(rc == 1 and 'has Co-Authored-By' in line(out, 'trailers'), 'a Co-Authored-By trailer fails, even beside Assisted-by')
+rc, out, _, _ = run(view(commits=[commit(C1, 'docs : a line', 'Assisted-by-note: no\n' + TRAILER)]))
+check(rc == 0 and line(out, 'trailers').startswith('PASS'), 'a line that only starts like the trailer does not count against it')
+rc, out, _, _ = run(view(commits=[commit(C1, 'docs : a line'), commit(C2, "Merge remote-tracking branch 'origin/testing' into docs/x", '')]), '--metadata')
+check(rc == 0 and line(out, 'title').startswith('PASS') and line(out, 'trailers').startswith('PASS'), 'a merge of testing needs no title and no trailer')
+rc, out, _, _ = run(view(title='fix a thing', commits=[commit(C1, 'docs : a line')]))
+check(rc == 1 and line(out, 'title').startswith('FAIL') and line(out, 'trailers').startswith('PASS'), 'a title that is not the form fails on its own')
+
+# ---- --metadata: the text checks only, for CI (no review, no threads, no CI wait)
+rc, out, calls, _ = run(view(title='Docs: a line'), '--metadata')
+check(rc == 1 and 'pull request title' in line(out, 'title') and 'ci:' not in out and 'review:' not in out and 'threads:' not in out, '--metadata checks the text and nothing else')
+rc, out, calls, _ = run(view(statusCheckRollup=[ci('CLA', 'FAILURE')], reviews=[]), '--metadata')
+check(rc == 0 and calls == 1, '--metadata does not need a passing CI or a review')
+rc, out, calls, _ = run(view(baseRefName='main'), '--metadata')
+check(rc == 1 and 'base is main' in line(out, 'base'), '--metadata still checks the base')
 
 # ---- base
 rc, out, _, _ = run(view(baseRefName='main'))

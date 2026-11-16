@@ -236,7 +236,7 @@ python -I tools/release/privacy_scan.py .           # no secrets, machine paths 
 python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
 python -I tools/gates/objcheck.py snap build -o FILE   # the built objects' code / data digests and k3_run's registers, before an edit
 python -I tools/gates/objcheck.py check FILE build --expect 'MODULE*'   # after it: only the named objects changed; registers in budget (reads files, CPU)
-python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS)
+python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS; --metadata: the text only, run by CI)
 tools/release/in_image.sh tools/release/release_build.sh   # reproducible release files from a clean clone at a tag, in the build image (docs/dev/releasing.md)
 tools/release/nightly.sh --dry-run                  # the nightly of `testing` up to its verified files; without the flag it PUBLISHES (a timer's job)
 

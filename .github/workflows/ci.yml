@@ -83,3 +83,49 @@ jobs:
           python -I tools/release/vendor_gguf.py --check --src "$src"
           git -C "$src" fetch -q --depth 1 https://github.com/jdominick05/ignite-llama.git e4e3f8edac36544e7c06139eb03e35288797e73e
           python -I tools/release/vendor_mmq.py --check --src "$src" --commit e4e3f8edac36544e7c06139eb03e35288797e73e --label 842653396
+
+  # The panel (panel/, Go): vet and tests at the toolchain panel/go.mod pins (setup-go reads that line).
+  panel:
+    name: Panel Go vet and tests
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: panel/go.mod
+          cache-dependency-path: panel/go.sum
+
+      - name: go vet
+        working-directory: panel
+        run: go vet ./...
+
+      - name: go test
+        working-directory: panel
+        run: go test -count=1 ./...
+
+  # The pull request's own text (AGENTS.md, Conventions): title, trailers, the GPU-gate block, private text. The review
+  # bot's verdict is checked by hand with tools/pr_ready.py N, not here.
+  pr-metadata:
+    name: Pull request title, trailers, gate block and private text
+    if: github.event_name == 'pull_request' && github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: tools/pr_ready.py N --metadata
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: python3 -I tools/pr_ready.py "$PR" -R "$GITHUB_REPOSITORY" --metadata

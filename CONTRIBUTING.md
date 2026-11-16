@@ -43,6 +43,10 @@ with. One signature covers all your later pull requests.
 You're welcome to use AI coding tools. Add an `Assisted-by: <tool or model>` line to the commits it helped with, review
 everything it wrote, and make sure the CPU tests pass. You're responsible for the change either way.
 
+A commit written without AI help has no `Assisted-by:` line. Put `AI assistance: none` on a line of its own in the pull
+request body, and the metadata check (`tools/pr_ready.py`, the `pr-metadata` job) accepts commits with no trailer. Without
+that line, each commit needs exactly one `Assisted-by:` line.
+
 ## Where to start reading
 
 - [How it works](docs/dev/architecture.md): the engine, the prompt path, the cache and the server in one page.
