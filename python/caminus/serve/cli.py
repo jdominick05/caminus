@@ -119,9 +119,10 @@ def parser():
     ap.add_argument('--drafter', help='the Coder\'s DFlash GGUF (default: caminus.config dflash)')
     ap.add_argument('--no-drafter', action='store_true', default=None, help='no DFlash drafter (plain decode)')
     ap.add_argument('--draft', choices=('off', 'mtp', 'dflash'), default=None, help='speculative decoding: off (plain '
-                    'decode), dflash (the DFlash2 drafter: the Coder\'s sidecar, needs --drafter; swift-1.5: the 27B base\'s '
-                    'DFlash2 file, one card), mtp (the model\'s own MTP block, one '
-                    'card: swift-1.5; default: the architecture\'s drafter when its file is present, else off)')
+                    'decode), dflash (the DFlash2 drafter: the Coder\'s sidecar, needs --drafter; swift-1.5 / thinkingcap / the '
+                    'plain 27B: the 27B base\'s DFlash2 file, one card or two for swift-1.5 / thinkingcap), mtp (the model\'s '
+                    'own MTP block, one or two cards; default: the model and card count\'s measured default when its file '
+                    'is present and 32K still fits, else off)')
     ap.add_argument('--host')
     ap.add_argument('--port', type=int, help='0: any free port (printed)')
     ap.add_argument('--max-ctx', type=ctx_arg, help='the engine\'s KV positions, or auto (the default): the largest context '
