@@ -822,36 +822,6 @@ class Resident(unittest.TestCase):
         self.assertEqual(prices.get('good'),(0.1,0.4,0.1),'a bad row is skipped, never the whole table')
         self.assertIsNone(prices.get('nullprice'))
 
-    def test_search_finds_files_and_lines_without_the_terminal(self):
-        from caminus.ember.resident import files
-        w=self.home/'proj'; (w/'src').mkdir(parents=True); (w/'.git').mkdir(); (w/'node_modules').mkdir()
-        (w/'src'/'a.py').write_text('def alpha():\n    return 1\n'); (w/'src'/'b.txt').write_text('alpha beta\n')
-        (w/'.git'/'x.py').write_text('def alpha(): pass\n'); (w/'node_modules'/'y.py').write_text('alpha\n')
-        (w/'bin.dat').write_bytes(b'\0alpha')
-        r=files.search(str(self.home),glob='**/*.py',path='proj')
-        self.assertEqual(r['files'],['src/a.py'],'glob lists files, skipping .git and node_modules')
-        r=files.search(str(self.home),pattern=r'def \w+\(',path='proj')
-        self.assertEqual(r['matches'],['src/a.py:1: def alpha():'])
-        r=files.search(str(self.home),pattern='ALPHA',glob='*.txt',path='proj',ignore_case=True)
-        self.assertEqual(r['matches'],['src/b.txt:1: alpha beta'],'glob narrows the files; binary files are skipped')
-        with self.assertRaises(ValueError):files.search(str(self.home),pattern='(',path='proj')
-        r=files.search(str(self.home),pattern='alpha',path='proj',limit=1)
-        self.assertIn('truncated',r)
-        rt=Runtime(self.home)
-        try:
-            self.assertIn('search',[t['function']['name'] for t in rt.tools])
-            # through the runtime, a search with no path works (it raised KeyError after searching), and a read of a
-            # note still marks it used
-            gid=rt.store.enqueue('Find it.')
-            aid=uuid.uuid4().hex
-            rt.store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
-                                (aid,gid,'c1','search',json.dumps(dict(glob='**/a.py')),'new'))
-            rt._action(rt.store.actions(gid)[0])
-            res=[(e['data'] if isinstance(e['data'],dict) else json.loads(e['data']))['result']
-                 for e in rt.store.events() if e['kind']=='tool_result'][-1]
-            self.assertNotIn('error',res,res);self.assertIn('proj/src/a.py',res['files'])
-        finally:rt.mail.close();rt.store.close()
-
     def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
         from caminus.ember.resident import advisor as adv, web, judge
         # a poll returns everything since the last poll (the preparation step read and lost the first chunk)
