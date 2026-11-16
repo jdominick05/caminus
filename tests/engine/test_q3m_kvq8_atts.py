@@ -1,9 +1,11 @@
 """The Q8 KV decode attention (OP_OWN_ATTS on k3_q3m_lean_kvq8, kernels/k3_own_atts.h under K3_Q3M_KV_Q8) alone, at Qwen3-30B-A3B's
 shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. One segment per launch, on a cache whose rows
-0 .. p - 1 hold caminus.ref_kv.encode_q8_kv of known fp16 values:
-  row       the position's row the op writes is byte for byte encode_q8_kv of the K / V halves the F16 path stores for the
-            same q | k | v (the F16 prefill kernel q3p_qk_rope, OP_OWN_ATTS's norm + RoPE statements, on the same inputs)
-  read      the fp16 output against float64 attention over the decoded rows 0 .. p (the own row decoded too), per element
+0 .. p - 1 hold caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of known fp16 values (K rotated, as the op writes them):
+  row       the position's row the op writes is byte for byte encode_q8_kv(hadamard128(K), V) of the K / V halves the F16
+            path stores for the same q | k | v (the F16 prefill kernel q3p_qk_rope, OP_OWN_ATTS's norm + RoPE statements, on
+            the same inputs; caminus.ref_kv.hadamard128 is kernels/own_kv_rot128.h's fp32 transform in its order)
+  read      the fp16 output against float64 attention of the float64-rotated q (H q, H the orthonormal Sylvester
+            Hadamard128) over the decoded rows 0 .. p (the own row decoded too), per element
             |out - ref| <= 2 fp16 ulps of ref + 1e-5 x max |V|, at positions across one / many splits and chunk edges (0, 1,
             63, 64, 65, 127, 1000, 3071, 4000). The decoded values are exact in fp32, so the bound is the F16 arm's
             1e-5 x max |V| plus the output's fp16 rounding. A CPU fp32 emulation of the op's order (splits, 64-position chunks,
@@ -14,10 +16,13 @@ shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. On
   edges     fixed fp16 V blocks through the op: +-65,504, exact ties (x / d = k + 0.5: roundf away from zero), a block whose
             stored half scale rounds to zero (+-2^-20), a zero block: the row byte for byte the reference
   refusals  a NaN in v, and a v that overflows fp16 (1e5): InvalidKVEncoding from the error word after Sync; the refused
-            block's bytes untouched, the other blocks of the row written
-  prefill   q3p_qk_rope_q8 (75 tokens at position 1,000, with the edge blocks) writes encode_q8_kv of q3p_qk_rope's halves,
-            byte for byte, and refuses a NaN block into its error word; q3p_attn_q8 over Q8 rows equals q3p_attn over an
-            F16 cache holding fp16(decoded rows), bit for bit (the Q8 staging's values are exactly those halves)
+            block's bytes untouched, the other blocks of the row written. A NaN in k: its head's k norm makes the whole
+            head NaN (as without the rotation), so all four K blocks of that kv head are refused (untouched), the other
+            heads' blocks written
+  prefill   q3p_qk_rope_q8 (75 tokens at position 1,000, with the edge blocks) writes encode_q8_kv(hadamard128(K), V) of
+            q3p_qk_rope's halves, byte for byte, and its q16 is fp16(hadamard128(q3p_qk_rope's q16)), bit for bit; it refuses
+            a NaN block into its error word; q3p_attn_q8 over Q8 rows equals q3p_attn over an F16 cache holding
+            fp16(decoded rows), bit for bit (the Q8 staging's values are exactly those halves)
   tools/guard.sh LOG 600 python -I tests/engine/test_q3m_kvq8_atts.py
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>). Prints PASS / FAIL and RESULT."""
 import os, sys
@@ -55,7 +60,7 @@ par = torch.tensor(np.concatenate([qn, kn, np.array([theta_scale, eps], np.float
 # the prior rows: fp16-valued K (unit-ish, as after k_norm) and V
 Kh = (rng.standard_normal((ROWS, NKV, HD)) * 0.8).astype(np.float16).astype(np.float32)
 Vh = (rng.standard_normal((ROWS, NKV, HD)) * 0.5).astype(np.float16).astype(np.float32)
-prior = ref_kv.encode_q8_kv(Kh, Vh, LAY)
+prior = ref_kv.encode_q8_kv(ref_kv.hadamard128(Kh), Vh, LAY)
 cache = torch.from_numpy(prior.reshape(-1).copy()).to(dev)
 f16c = torch.zeros(ROWS * 2 * M, dtype=torch.float16, device=dev)
 qkv = torch.zeros(NH * HD + 2 * M, device=dev)
@@ -66,6 +71,15 @@ S = q3moe_one.splits_for(NKV)
 scratch = torch.zeros(k3.Engine.atts_scratch_floats(NKV, S), device=dev)
 ops = q3m_ops.Ops(dev, 'q3m_prefill')   # (the F16 kernels: the row oracle)
 scale = 1.0 / np.sqrt(HD)
+H128 = np.array([[1.0]])
+for _ in range(7): H128 = np.block([[H128, H128], [H128, -H128]])
+H128 /= np.sqrt(HD)   # (the orthonormal Sylvester Hadamard128, float64; symmetric)
+
+
+def oracle(h, n=1):
+    """the Q8 rows for n positions of F16 halves h ([n][2 M] or flat): encode_q8_kv(hadamard128(K), V)"""
+    h = np.asarray(h, np.float32).reshape(n, 2, NKV, HD)
+    return ref_kv.encode_q8_kv(ref_kv.hadamard128(np.ascontiguousarray(h[:, 0])), np.ascontiguousarray(h[:, 1]), LAY)
 
 
 def tape(per_wgp):
@@ -104,11 +118,11 @@ for p in POS:
     ops.qk_rope(qkv, NH * HD + 2 * M, NH, NKV, par, p, q16, f16c, 1)
     torch.cuda.synchronize()
     h = f16c[p * 2 * M:(p + 1) * 2 * M].float().cpu().numpy()
-    want = ref_kv.encode_q8_kv(h[:M].reshape(1, NKV, HD), h[M:].reshape(1, NKV, HD), LAY)[0]
+    want = oracle(h)[0]
     got = cache[p * RB:(p + 1) * RB].cpu().numpy()
     rows_ok &= np.array_equal(got, want)
     dk, dv = ref_kv.decode_q8_kv(cache[:(p + 1) * RB].cpu().numpy().reshape(p + 1, RB), LAY)
-    r = ref_attn(host_q(x[:NH * HD], p), dk.astype(np.float64), dv.astype(np.float64))
+    r = ref_attn(host_q(x[:NH * HD], p) @ H128, dk.astype(np.float64), dv.astype(np.float64))   # (rotated q against rotated K)
     o = out16.float().cpu().numpy().reshape(NH, HD)
     vmax = float(np.abs(dv).max()); d = np.abs(o - r)
     ulp = np.abs(np.spacing(np.abs(r).astype(np.float16))).astype(np.float64)   # (fp16 ulp at each reference value)
@@ -117,7 +131,7 @@ for p in POS:
     outs[p] = (o.copy(), got.copy(), x)
     print(f'  pos {p}: row {"=" if np.array_equal(got, want) else "!="} encode(F16 row); max |out - float64| / max|V| {float(d.max()) / vmax:.2e}, '
           f'past 2 fp16 ulps {e:.2e} (bound 1e-5)', flush=True)
-check(rows_ok, f'the row written at each of {len(POS)} positions is byte for byte encode_q8_kv of the F16 kernel\'s halves')
+check(rows_ok, f'the row written at each of {len(POS)} positions is byte for byte encode_q8_kv(hadamard128(K), V) of the F16 kernel\'s halves')
 check(read_ok, f'outputs within 2 fp16 ulps + 1e-5 x max |V| of float64 attention over the decoded rows, every element '
                f'(worst past 2 ulps {worst:.2e} x max |V|; splits {S})')
 # grids: the same bits
@@ -145,6 +159,21 @@ for what, val in (('NaN', np.nan), ('1e5 (fp16 inf)', 1e5)):
     check(raised and int(E.kv_error[0]) == 2 and untouched and written,
           f'a {what} in v: InvalidKVEncoding (error word 2), the refused block untouched, the K blocks written')
     E.sync.zero_(); scratch[:k3.Engine.ATS_CNT].zero_()
+# a NaN in k (kv head 1): the head's k norm makes all its 128 values NaN, so its four K blocks are refused
+p = 2050
+x = (rng.standard_normal(NH * HD + 2 * M)).astype(np.float32)
+x[NH * HD + HD + 7] = np.nan
+cache[p * RB:(p + 1) * RB] = 0xA5
+qkv.copy_(torch.from_numpy(x)); pos_d.fill_(p)
+try: E.run(); raised = False
+except errors.InvalidKVEncoding: raised = True
+torch.cuda.synchronize()
+row = cache[p * RB:(p + 1) * RB].cpu().numpy()
+blk = lambda part, g, b: row[(part * (M // 32) + 4 * g + b) * 34:(part * (M // 32) + 4 * g + b + 1) * 34]
+check(raised and int(E.kv_error[0]) == 2 and all((blk(0, 1, b) == 0xA5).all() for b in range(4))
+      and not any((blk(0, g, 0) == 0xA5).all() for g in (0, 2, 3)) and not any((blk(1, g, b) == 0xA5).all() for g in range(NKV) for b in range(4)),
+      'a NaN in k: InvalidKVEncoding (error word 2), its kv head\'s four K blocks untouched, the other heads\' K and every V block written')
+E.sync.zero_(); scratch[:k3.Engine.ATS_CNT].zero_()
 # edges: fixed fp16 V blocks of kv head 0 (blocks 0 .. 3)
 EDGE = np.zeros(128, np.float32)
 EDGE[0:32] = np.where(np.arange(32) % 2, 65504.0, -65504.0)
@@ -156,7 +185,7 @@ x = (rng.standard_normal(NH * HD + 2 * M)).astype(np.float32); x[NH * HD + M:NH 
 qkv.copy_(torch.from_numpy(x)); pos_d.fill_(p); E.run()
 ops.qk_rope(qkv, NH * HD + 2 * M, NH, NKV, par, p, q16, f16c, 1); torch.cuda.synchronize()
 h = f16c[p * 2 * M:(p + 1) * 2 * M].float().cpu().numpy()
-want = ref_kv.encode_q8_kv(h[:M].reshape(1, NKV, HD), h[M:].reshape(1, NKV, HD), LAY)[0]
+want = oracle(h)[0]
 vb = (M // 32) * 34
 tie_codes = want[vb + 34 + 3:vb + 68].view(np.int8)
 check(np.array_equal(cache[p * RB:(p + 1) * RB].cpu().numpy(), want) and int(E.kv_error[0]) == 0
@@ -174,10 +203,12 @@ qd = torch.from_numpy(xs).to(dev)
 q16a = torch.zeros(n * NH * HD, dtype=torch.float16, device=dev); q16b = torch.zeros_like(q16a)
 oq8.qk_rope(qd, NH * HD + 2 * M, NH, NKV, par, pos0, q16a, cache, n, err=kverr)
 ops.qk_rope(qd, NH * HD + 2 * M, NH, NKV, par, pos0, q16b, f16c, n); torch.cuda.synchronize()
-hh = f16c[pos0 * 2 * M:(pos0 + n) * 2 * M].float().cpu().numpy().reshape(n, 2, NKV, HD)
-want = ref_kv.encode_q8_kv(np.ascontiguousarray(hh[:, 0]), np.ascontiguousarray(hh[:, 1]), LAY)
-check(np.array_equal(cache[pos0 * RB:(pos0 + n) * RB].cpu().numpy().reshape(n, RB), want) and torch.equal(q16a, q16b) and int(kverr[0]) == 0,
-      f'q3p_qk_rope_q8: {n} rows at position {pos0} byte for byte encode_q8_kv of q3p_qk_rope\'s halves (edge blocks included); q the same bits')
+want = oracle(f16c[pos0 * 2 * M:(pos0 + n) * 2 * M].float().cpu().numpy(), n)
+qwant = ref_kv.hadamard128(q16b.float().cpu().numpy().reshape(-1, HD)).astype(np.float16).reshape(-1)
+check(np.array_equal(cache[pos0 * RB:(pos0 + n) * RB].cpu().numpy().reshape(n, RB), want) and int(kverr[0]) == 0
+      and np.array_equal(q16a.cpu().numpy().view(np.uint16), qwant.view(np.uint16)),
+      f'q3p_qk_rope_q8: {n} rows at position {pos0} byte for byte encode_q8_kv(hadamard128(K), V) of q3p_qk_rope\'s halves (edge blocks '
+      f'included); its q16 bit for bit fp16(hadamard128(q3p_qk_rope\'s q16))')
 # the attention: Q8 rows against an F16 cache of fp16(decoded rows)
 rows = cache[:(pos0 + n) * RB].cpu().numpy().reshape(pos0 + n, RB)
 dk, dv = ref_kv.decode_q8_kv(rows, LAY)

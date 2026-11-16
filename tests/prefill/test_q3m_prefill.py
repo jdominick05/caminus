@@ -8,8 +8,8 @@
   geometry   the prefill in chunks of 16 and in one chunk, and with the prompt cache's stops: the same cache rows, bit for
              bit (every GEMM row and attention query is computed from its own inputs only), so the same logits after
   bounds     a span past max_ctx is refused before any write; the engine's poisoned flag refuses a prefill
-  rows       (--kv q8) the prefill's Q8 rows of the last layer byte for byte caminus.ref_kv.encode_q8_kv of the halves the F16
-             row kernel stores for the same q | k | v (the chunk's own last-layer buffer)
+  rows       (--kv q8) the prefill's Q8 rows of the last layer byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of
+             the halves the F16 row kernel stores for the same q | k | v (the chunk's own last-layer buffer)
   tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz [--llama LL.bin] [--from P] [--kv q8]
 --kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True): q3p_qk_rope_q8 / q3p_attn_q8 and
 k3_q3m_lean_kvq8); the same G-model, geometry and bounds checks.
@@ -57,8 +57,8 @@ cache_bytes = lambda: [L['cache'][:P * RB].clone() for L in eng.L]   # (the pref
 
 
 def q8_rows_check(last):
-    """the last layer's Q8 rows of the one chunk [0, P): encode_q8_kv of the F16 row kernel's halves for the chunk's own
-    last-layer q | k | v (pf.qkv: the last layer stops after its rows)"""
+    """the last layer's Q8 rows of the one chunk [0, P): encode_q8_kv(hadamard128(K), V) of the F16 row kernel's halves for the
+    chunk's own last-layer q | k | v (pf.qkv: the last layer stops after its rows)"""
     from caminus import ref_kv
     from caminus.prefill import q3m_ops
     Mk = eng.nkv * eng.hd; ldq = eng.nh * eng.hd + 2 * Mk; lay = ref_kv.Q8KVLayout(eng.nkv, eng.hd)
@@ -66,9 +66,9 @@ def q8_rows_check(last):
     oc = torch.zeros(P * 2 * Mk, dtype=torch.float16, device='cuda'); oq = torch.zeros(P * eng.nh * eng.hd, dtype=torch.float16, device='cuda')
     oops.qk_rope(pf.qkv, ldq, eng.nh, eng.nkv, eng.L[-1]['qk_par'], 0, oq, oc, P); torch.cuda.synchronize()
     hh = oc.float().cpu().numpy().reshape(P, 2, eng.nkv, eng.hd)
-    want = ref_kv.encode_q8_kv(np.ascontiguousarray(hh[:, 0]), np.ascontiguousarray(hh[:, 1]), lay)
+    want = ref_kv.encode_q8_kv(ref_kv.hadamard128(np.ascontiguousarray(hh[:, 0])), np.ascontiguousarray(hh[:, 1]), lay)
     check(np.array_equal(last.cpu().numpy().reshape(P, -1), want),
-          f'Q8 rows: the last layer\'s {P} prefilled rows byte for byte encode_q8_kv of the F16 row kernel\'s halves')
+          f'Q8 rows: the last layer\'s {P} prefilled rows byte for byte encode_q8_kv(hadamard128(K), V) of the F16 row kernel\'s halves')
 
 
 def decode_only():

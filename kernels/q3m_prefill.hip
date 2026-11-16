@@ -23,6 +23,7 @@
 #include <stdint.h>
 #ifdef Q3P_KV_Q8
 #include "own_kv_codec.h"
+#include "own_kv_rot128.h"
 #endif
 // Q3P_ABL (measurement builds only: kernels/q35_prefill_abl*.hip; never the runtime objects, whose text is unchanged):
 // 1 a constant B (no weight loads or decode), 2 no X staging (the stage's barriers kept), 3 the WMMAs accumulate into acc
@@ -524,9 +525,12 @@ extern "C" __global__ void __launch_bounds__(256) q3p_swiglu(const float * __res
 // against the cache's rows.
 #ifdef Q3P_KV_Q8
 // q3p_qk_rope_q8 (the Q8 KV object, kernels/q3m_prefill_kvq8.hip): the same statements; the kv heads' K and V go to the
-// cache row as Q8_0 blocks (kernels/own_kv_codec.h's wave encode of the fp16-rounded values this kernel's F16 form stores:
-// wave w of a kv head's workgroup = block w of its K and of its V), the decode Q8 module's row. A refused block ORs 2 into
-// *err (the prefill's own word: the host marks the engine broken) and keeps its bytes.
+// cache row as Q8_0 blocks (kernels/own_kv_codec.h's wave encode: wave w of a kv head's workgroup = block w of its K and
+// of its V), the decode Q8 module's row. K is the fp16-rounded values this kernel's F16 form stores, rotated by the head's
+// Walsh-Hadamard transform (kernels/own_kv_rot128.h); V the fp16-rounded values, unrotated. q16 is fp16 of the same
+// transform of the F16 form's q16 values, so q3p_attn_q8 scores rotated q against rotated K: q16 has no other reader, and
+// rotating it here keeps the attention kernel's code (and its 226 VGPRs) as it was. A refused block ORs 2 into *err (the
+// prefill's own word: the host marks the engine broken) and keeps its bytes.
 extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope_q8(const float * __restrict__ qkv, int ldq, int nh, int nkv, const float * __restrict__ par,
                                                                  int pos0, _Float16 * __restrict__ q16, uint8_t * __restrict__ cache, int * __restrict__ err) {
 #else
@@ -560,13 +564,22 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
     const float scale = rsqrtf(tot / 128 + eps);
     y1[i] = (scale * x) * wn;
     __syncthreads();
+#ifdef Q3P_KV_Q8
+    // lane l: RoPE's statements for dims l, l + 32, l + 64, l + 96 (the same expressions as one dim per thread), each
+    // rounded to fp16 as the F16 form stores it (q16 and the K halves), then the head's transform; dim i's result kept
+    const float c0 = rc[lane], s0 = rs[lane], c1 = rc[lane + 32], s1 = rs[lane + 32];
+    const float a0 = y1[lane], a1 = y1[lane + 32], a2 = y1[lane + 64], a3 = y1[lane + 96];
+    float yr = own_kv_rot128((float)(_Float16)__builtin_fmaf(a0, c0, -(a2 * s0)), (float)(_Float16)__builtin_fmaf(a1, c1, -(a3 * s1)),
+                             (float)(_Float16)__builtin_fmaf(a2, c0, a0 * s0), (float)(_Float16)__builtin_fmaf(a3, c1, a1 * s1), wave, lane);
+    if (isq) {
+        asm volatile("" : "+v"(yr));   // (the scale's product rounded to fp32 first, then to fp16: never one v_fma_mix rounding)
+        q16[((size_t)t * nh + hy) * 128 + i] = (_Float16)yr;
+    } else own_kv_q8_encode_wave(yr, cw + ((size_t)g * 4 + wave) * 34, lane, true, err);
+#else
     const int j = i < 64 ? i : i - 64;
     const float c = rc[j], sn = rs[j], x0 = y1[j], x1 = y1[j + 64];
     const float y = i < 64 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
     if (isq) q16[((size_t)t * nh + hy) * 128 + i] = (_Float16)y;
-#ifdef Q3P_KV_Q8
-    else own_kv_q8_encode_wave((float)(_Float16)y, cw + ((size_t)g * 4 + wave) * 34, lane, true, err);
-#else
     else cw[(size_t)g * 128 + i] = (_Float16)y;
 #endif
 }
@@ -592,8 +605,8 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
 #define AT_KP 136
 #define AT_VP 72
 #ifdef Q3P_KV_Q8
-// q3p_attn_q8: the same kernel over Q8_0 rows: thread (pr, qd) stages block qd of its position's K and of its V, each value
-// decoded (float code * float scale, kv_get's value, exact) and rounded to fp16 for the WMMA operands. That rounding is
+// q3p_attn_q8: the same kernel over Q8_0 rows (K rotated, and q16 rotated the same way by q3p_qk_rope_q8: the kernel itself
+// is rotation-blind): thread (pr, qd) stages block qd of its position's K and of its V, each value decoded (float code * float scale, kv_get's value, exact) and rounded to fp16 for the WMMA operands. That rounding is
 // one more than the decode's reader (it uses the fp32 values): gated by the model gate at depth, not bitwise
 __device__ __forceinline__ void q3p_q8_stage(const uint8_t * blk, _Float16 (&h)[32]) {
     // the block's 34 bytes as 9 dwords from the one at or before it (rows and kv heads are whole dwords: a block starts

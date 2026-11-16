@@ -4,7 +4,14 @@ in host memory; nothing is launched), with the tiny synthetic file (tests/engine
   - the module tables: k3_q3m_lean_kvq8 is k3_q3m_lean's Q8 build (same ops, pairs and lean dispatch check), no two-card or
     verify form, outside the installed runtime set and the dense line's Q8 table; its Engine has the error word after Sync
   - the wire layout the kernels index ([K blocks | V blocks], block (part, kv head g, block b) at (part M / 32 + 4 g + b)
-    x 34 bytes): caminus.ref_kv.encode_q8_kv puts each block there, and a Q8 row is the encode of the F16 row's values
+    x 34 bytes): caminus.ref_kv.encode_q8_kv puts each block there, and a Q8 row is encode_q8_kv(hadamard128(K), V) of the
+    F16 row's values (K decoded and rotated back within the blocks' rounding)
+  - the rotation (kernels/own_kv_rot128.h, its reference caminus.ref_kv.hadamard128): the float64 Sylvester Hadamard128
+    over sqrt(128) is orthonormal, and on float64 vectors (H q) . (H k) = q . k to rounding; hadamard128 is within fp32
+    rounding of it, its scale is the kernel header's literal; a lane-by-lane emulation of the kernel's statements (each
+    wave's lanes holding dims l, l + 32, l + 64, l + 96, the shuffle stages h = 1 .. 16, then h = 32 and 64 in registers,
+    the quarter select and the scale) gives hadamard128's bits; the scores of rotated decoded rows against rotated q
+    match the unrotated float64 scores within the codec's error
   - the engine: k3_q3m_lean_kvq8, the cache a uint8 tensor of (max_ctx + ATS_PAD) Q8 rows, the prompt cache's state views
     max_ctx rows of bytes, every OP_OWN_ATTS segment on its layer's cache; the projection counts Q8 rows (equal to the
     engine's own check, and the F16 projection less exactly the row bytes saved); kv_format_id names the format
@@ -18,7 +25,8 @@ in host memory; nothing is launched), with the tiny synthetic file (tests/engine
     error word passed, its rows checked on the byte cache; the error word set: the settle raises InvalidKVEncoding and the
     engine is broken; numerics() names the cache
   - the prompt cache: the checkpoint layout's row is the Q8 row; the engine key carries the KV format (F16 keys unchanged:
-    no 'kv' entry), so a Q8 park never matches an F16 engine
+    no 'kv' entry), so a Q8 park never matches an F16 engine; the format id names the rotation, and a key with the
+    earlier draft's unrotated id hashes differently (its rows never restore into this engine)
   - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows; every
     other entry refuses opt['kv'] = 'q8' in build and auto_need before reading anything (never an F16 engine instead)
   - tools/gates/kv_against.py (the G-model gates' --against): llama.cpp's floor and explicit bars pass / fail as stated on
@@ -123,12 +131,72 @@ for part, x in ((0, kf[0]), (1, vf[0])):
             good &= bytes(row[o:o + 34]) == bytes(one)
             good &= o % 4 == 2 * (b & 1)                     # (the dword parity the kernels' loads assume)
 check(good, 'every block of a row sits at (part M / 32 + 4 g + b) x 34 bytes, 2 (b & 1) past a dword (the kernels\' indexing)')
-f16row = np.concatenate([kf.reshape(-1), vf.reshape(-1)]).astype(np.float16)
-dk, dv = ref_kv.decode_q8_kv(row.reshape(1, -1), lay)
-amax = np.abs(np.concatenate([kf, vf]).reshape(-1, 32)).max(1)
-err = np.abs(np.concatenate([dk, dv]).reshape(-1, 32) - f16row.astype(np.float32).reshape(-1, 32)).max(1)
-check(bool((err <= amax / 127 * (0.5 + 127 * 2 ** -11) + 1e-12).all()),
-      f'a Q8 row is the F16 row\'s values encoded: decoded within half a step (+ the half scale\'s rounding) of each block (max {float((err / (amax / 127)).max()):.3f} steps)')
+kr = ref_kv.hadamard128(kf)
+rrow = ref_kv.encode_q8_kv(kr, vf, lay)[0]
+dk, dv = ref_kv.decode_q8_kv(rrow.reshape(1, -1), lay)
+amax = np.abs(np.concatenate([kr, vf]).reshape(-1, 32)).max(1)
+err = np.abs(np.concatenate([dk, dv]).reshape(-1, 32) - np.concatenate([kr, vf]).reshape(-1, 32)).max(1)
+back = ref_kv.hadamard128(dk)   # (H is its own inverse: Sylvester, symmetric, orthonormal)
+check(bool((err <= amax / 127 * (0.5 + 127 * 2 ** -11) + 1e-12).all()) and float(np.abs(back - kf).max()) < 0.02 * float(np.abs(kf).max())
+      and rrow[(M_ := nkv * hd) // 32 * 34:].tobytes() == row[M_ // 32 * 34:].tobytes(),
+      f'a Q8 row is encode_q8_kv(hadamard128(K), V) of the F16 row\'s values: decoded within half a step (+ the half scale\'s rounding) of '
+      f'each block (max {float((err / (amax / 127)).max()):.3f} steps); K rotated back within {float(np.abs(back - kf).max()):.4f}; V blocks unrotated')
+
+# ---- the rotation: kernels/own_kv_rot128.h against caminus.ref_kv.hadamard128 and the float64 transform ----------------------
+H = np.array([[1.0]])
+for _ in range(7): H = np.block([[H, H], [H, -H]])
+H /= np.sqrt(128)
+rq = np.random.default_rng(8)
+qa, ka = rq.standard_normal((64, 128)) * 3, rq.standard_normal((64, 128)) * 2
+s0, s1 = (qa * ka).sum(1), ((qa @ H.T) * (ka @ H.T)).sum(1)
+check(float(np.abs(H @ H.T - np.eye(128)).max()) < 1e-14 and np.allclose(H, H.T) and float(np.abs(s1 - s0).max()) < 1e-12 * float(np.abs(s0).max() + 1),
+      f'H128 / sqrt(128) (float64 Sylvester) is orthonormal (|H H^T - I| {float(np.abs(H @ H.T - np.eye(128)).max()):.1e}) and symmetric; on float64 '
+      f'vectors (H q) . (H k) = q . k (max diff {float(np.abs(s1 - s0).max()):.1e} for scores up to {float(np.abs(s0).max()):.0f})')
+hdr = open(os.path.join(HERE, '..', '..', 'kernels', 'own_kv_rot128.h')).read()
+lit = [ln.split()[2] for ln in hdr.splitlines() if ln.startswith('#define OWN_KV_ROT128_SCALE')]
+xs = np.concatenate([rq.standard_normal((40, 128)), rq.standard_normal((8, 128)) * 1e3, np.eye(128)[:8] * 65504,
+                     rq.standard_normal((8, 128)) * np.where(np.arange(128) % 17 == 0, 60.0, 0.1)]).astype(np.float32)
+hx = ref_kv.hadamard128(xs)
+d64 = np.abs(hx - xs.astype(np.float64) @ H.T).max(1) / np.abs(xs).max(1)
+check(len(lit) == 1 and np.float32(float.fromhex(lit[0].rstrip('f'))) == ref_kv.HADAMARD128_SCALE == np.float32(1 / np.sqrt(128))
+      and hx.dtype == np.float32 and float(d64.max()) < 2e-6 and raises(lambda: ref_kv.hadamard128(xs.astype(np.float64)))
+      and raises(lambda: ref_kv.hadamard128(np.zeros((2, 64), np.float32))),
+      f'ref_kv.hadamard128: within fp32 rounding of the float64 transform (worst {float(d64.max()):.1e} x max |x|, outliers, 65504 spikes); '
+      f'its scale is the kernel header\'s literal {lit[0] if lit else None} = float32(1 / sqrt(128)); float64 or 64-value input refused')
+
+
+def emu_kernel(x):
+    """kernels/own_kv_rot128.h lane by lane in float32: wave qw (0 .. 3) of a head, lane l holds u_m = x[l + 32 m]; the
+    shuffle stages (partner = lane ^ h: own + partner, or partner - own when lane has bit h), then h = 32 and 64 in
+    registers, the select of quarter qw, the scale; dim 32 qw + l gets that wave's lane l result"""
+    f = np.float32
+    out = np.empty(128, f)
+    for qw in range(4):
+        u = [np.array([f(x[l + 32 * m]) for l in range(32)], f) for m in range(4)]
+        h = 1
+        while h < 32:
+            lanes = np.arange(32); hi = (lanes & h) != 0
+            u = [np.where(hi, um[lanes ^ h] - um, um + um[lanes ^ h]).astype(f) for um in u]
+            h *= 2
+        a0, a1, a2, a3 = u[0] + u[1], u[0] - u[1], u[2] + u[3], u[2] - u[3]
+        sel = (a0 + a2, a1 + a3, a0 - a2, a1 - a3)[qw]
+        out[32 * qw:32 * qw + 32] = (sel * ref_kv.HADAMARD128_SCALE).astype(f)
+    return out
+
+
+emu = np.stack([emu_kernel(x) for x in xs])
+check(np.array_equal(emu.view(np.uint32), hx.view(np.uint32)) and float((np.abs(emu - xs.astype(np.float64) @ H.T).max(1) / np.abs(xs).max(1)).max()) < 2e-6,
+      f'the kernel\'s butterflies emulated lane by lane ({len(xs)} heads) give ref_kv.hadamard128 bit for bit, and match numpy\'s float64 H128 '
+      f'within fp32 rounding')
+kh16 = (rq.standard_normal((32, 4, 128)) * 0.8 * np.where(np.isin(np.arange(128), (3, 77)), 20.0, 1.0)).astype(np.float16).astype(np.float32)
+qh = rq.standard_normal((32, 128))   # (K with two outlier dims, as real K heads have)
+dkr, _ = ref_kv.decode_q8_kv(ref_kv.encode_q8_kv(ref_kv.hadamard128(kh16), kh16, lay), lay)
+dku, _ = ref_kv.decode_q8_kv(ref_kv.encode_q8_kv(kh16, kh16, lay), lay)
+sr, su, sx = (dkr[:, 0].astype(np.float64) @ (H @ qh.T)), (dku[:, 0].astype(np.float64) @ qh.T), (kh16[:, 0].astype(np.float64) @ qh.T)
+er, eu = float(np.abs(sr - sx).mean()), float(np.abs(su - sx).mean())
+check(er < 0.6 * eu and float(np.abs(sr - sx).max()) < 0.01 * float(np.abs(sx).max()),
+      f'scores of rotated decoded K against rotated q: the exact scores within the codec\'s error, and on K with two outlier dims (x 20) '
+      f'a mean error of {er:.3f} against {eu:.3f} unrotated (scores up to {float(np.abs(sx).max()):.0f})')
 check(raises(lambda: ref_kv.encode_q8_kv(np.full((1, nkv, hd), np.float32(np.float16(np.inf))), vf, lay)),
       'an fp16-overflowed (inf) K value is refused by the reference (the kernels refuse the block and set the error word)')
 
@@ -233,6 +301,11 @@ kq, kf_ = prompt.engine_key(m, pfk, build='fixture'), prompt.engine_key(f, pfk, 
 check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and 'kv' not in kf_['tp'] and kq['module'] == Q8M and kf_['module'] == 'k3_q3m_lean'
       and prompt.key_hash(kq) != prompt.key_hash(kf_),
       'engine key: the Q8 engine\'s carries its KV format and module (an F16 key has no kv entry: unchanged), so neither restores into the other')
+OLD_ID = 'q8_0-v1:unrotated:f16-rounded-v1'   # (the earlier draft's rows: K unrotated)
+m.kv_format_id = OLD_ID; ko = prompt.engine_key(m, pfk, build='fixture'); m.kv_format_id = q3moe_one.KV_FORMAT_Q8
+check(q3moe_one.KV_FORMAT_Q8 != OLD_ID and 'hadamard128' in q3moe_one.KV_FORMAT_Q8 and ko['tp'].get('kv') == OLD_ID
+      and prompt.key_hash(ko) != prompt.key_hash(kq),
+      f'the format id names the rotation ({q3moe_one.KV_FORMAT_Q8!r}); a key with the earlier unrotated id hashes differently: its rows never restore here')
 
 # ---- the registry ------------------------------------------------------------------------------------------------------------------
 check(arch.kv_q8({}) is False and arch.kv_q8({'kv': 'f16'}) is False and arch.kv_q8({'kv': 'q8'}) is True

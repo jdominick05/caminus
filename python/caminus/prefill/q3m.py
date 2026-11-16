@@ -20,8 +20,10 @@ The hand-off is the shared driver's (caminus.prefill.driver.PrefillDriver): run(
 [i0 - commit, p1) (the KV rows written in place; no recurrent state), sets m.fresh and returns (i0 = p1, commit = 0).
 No drafter yet (draft must be None).
 A Q8 KV engine (Q3MoEOne(q8=True)): the same chunk with the rows written as Q8_0 blocks and the attention reading them
-(q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: each row the encode of the fp16 values the F16 kernels store, the decode
-Q8 module's rows; the attention rounds the decoded values to fp16 for its WMMA operands). A refused block (a non-finite
+(q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: each row the encode of the fp16 values the F16 kernels store, K after
+the head's Walsh-Hadamard transform (caminus.ref_kv.hadamard128), the decode Q8 module's rows; q16 is the same transform
+of the F16 kernel's q16, rounded to fp16, so the attention scores rotated q against rotated K; it rounds the decoded
+values to fp16 for its WMMA operands). A refused block (a non-finite
 K / V value) sets the prefill's KV error word: the chunk's settle raises caminus.errors.InvalidKVEncoding and the engine is
 marked broken."""
 import numpy as np

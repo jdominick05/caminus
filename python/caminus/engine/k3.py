@@ -94,8 +94,8 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
-# its Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip: OP_OWN_ATTS writes and reads Q8_0 rows, own_kv_codec.h's format with no
-# rotation; a refused block sets the sticky word after Sync, Engine.kv_error). The same ops, pairs and dispatch as its F16
+# its Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip: OP_OWN_ATTS writes and reads Q8_0 rows, own_kv_codec.h's format with K
+# and q through the head's Hadamard128, own_kv_rot128.h; a refused block sets the sticky word after Sync, Engine.kv_error). The same ops, pairs and dispatch as its F16
 # object (a separate object, so that one keeps its code); one card, decode only (no verify or two-card build), not served
 Q3M_KV_Q8_BASE = {'k3_q3m_lean_kvq8': 'k3_q3m_lean'}
 Q3M_KV_Q8_OF = {base: name for name, base in Q3M_KV_Q8_BASE.items()}

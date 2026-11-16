@@ -100,17 +100,23 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
 
 #ifdef K3_Q3M_KV_Q8
 // The Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip): the cache rows are kernels/own_kv_codec.h's wire format ([K blocks |
-// V blocks], 32 values per block: a half scale and 32 signed codes, 34 bytes), no rotation, so a row is the F16 object's
-// row encoded: each block is caminus.ref_kv.encode_q8_kv of the fp16-rounded values the F16 object stores. Every other
-// statement of the op is the F16 one; the position's own k / v in LDS are the decoded codes (what every later pass reads).
+// V blocks], 32 values per block: a half scale and 32 signed codes, 34 bytes). K is rotated: a row is
+// caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the fp16-rounded K / V the F16 object stores (kernels/own_kv_rot128.h),
+// and q gets the same transform after its RoPE, so the scores are q . k in exact arithmetic. V is not rotated (llama.cpp
+// also rotates V in 64s, which then needs the output rotated back; a CPU float64 model of this model put that at mean KLD
+// 1.87e-3 against 2.09e-3 for K and Q alone, inside the draws' spread, and K's encode was most of the error: 4.49e-3 for K
+// alone, 2.15e-3 for V alone). Every other statement of the op is the F16 one; the position's own k / v in LDS are the
+// decoded codes (what every later pass reads).
 // Decode only: the verify and two-card builds keep the F16 cache. k3_run beside k3_q3m_lean's (96 VGPRs, 0 spilled, 53
-// spilled scalars): 96, 0, 54 with this op alone, 31 with the module's K3_Q3M_ADD_RMS_PIN (kernels/k3_q3m_lean_kvq8.hip;
-// the F16 object with the same pin: 33). Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the
+// spilled scalars): before the rotation 96, 0, 54 with this op alone, 31 with the module's K3_Q3M_ADD_RMS_PIN
+// (kernels/k3_q3m_lean_kvq8.hip; the F16 object with the same pin: 33); with the rotation 31, and 19 with this op's own
+// pin of its counts (below). Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the
 // K / V half selects as 64-bit shifts spilled 1; the error word's address kept live across k3_run, 2 more spilled scalars.
 #if defined(K3_Q3M_VER) || defined(K3_Q3M_TP)
 #error "the Q8 KV cache is built for the one-card decode module only"
 #endif
 #include "own_kv_codec.h"
+#include "own_kv_rot128.h"
 __device__ __forceinline__ float ats_h2f(uint32_t u16) { return (float)__builtin_bit_cast(_Float16, (uint16_t)u16); }
 __device__ __forceinline__ void own_op_atts(const Seg & sg, int t, Sync * sy) {
 #else
@@ -144,7 +150,15 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
     const int hs = t % HS, sgi = t / HS, s = (vf & 1) ? nact - 1 : sgi / nkv, g = (vf & 1) ? sgi : sgi - s * nkv, h0 = g * ATS_G + hs * GH;
     if (s >= nact || g >= nkv) return;
 #else
+#ifdef K3_Q3M_KV_Q8
+    // (the kv heads, splits and heads through an opaque scalar copy, as OP_OWN_ADD_RMS16's pin: the op derives its values
+    //  itself instead of k3_run keeping them live across the segment loop; same statements, same bits. k3_run's spilled
+    //  scalars with the rotation below: 31 without this pin (as before the rotation), 19 with it; 96 VGPRs, 0 spilled)
+    int nkv = sg.pad1, S = sg.work, heads = sg.N; asm volatile("" : "+s"(nkv), "+s"(S), "+s"(heads));
+    const int M = nkv * ATS_D, HS = ATS_G / GH;
+#else
     const int nkv = sg.pad1, S = sg.work, heads = sg.N, M = nkv * ATS_D, HS = ATS_G / GH;
+#endif
     asm volatile("" : "+s"(t));
     const int hs = t % HS, sgi = t / HS, s = sgi / nkv, g = sgi - s * nkv, h0 = g * ATS_G + hs * GH;   // h0: the first head
     const int pos = (int)__builtin_amdgcn_readfirstlane(((const int *)sg.asum)[0]), npos = pos + 1;
@@ -197,6 +211,24 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
     }
     ats_bar();
     {
+#ifdef K3_Q3M_KV_Q8
+        // q and k rotated (kernels/own_kv_rot128.h): lane l of wave w computes RoPE's statements for its dims l, l + 32,
+        // l + 64, l + 96 (pairs (l, l + 64) and (l + 32, l + 96): the same expressions as one dim per thread, so the same
+        // bits), then the head's Walsh-Hadamard transform, and keeps dim i = 32 (w & 3) + l of the result. No new LDS
+        // and no barrier (the op's 15,748 bytes are what 8 workgroups per WGP leave room for)
+        const int qw = wave & 3;   // (= i >> 5, as the wave's scalar; written i >> 5, k3_run spilled one scalar more: 32)
+        const float c0 = rc[lane], s0 = rsn[lane], c1 = rc[lane + 32], s1 = rsn[lane + 32];
+#pragma unroll
+        for (int r = 0; r < ATS_G / 2; r++) {
+            if (r >= NR) break;
+            if (2 * r + hw >= GH) continue;
+            const AtsL * xs = sc + r * 2 * ATS_D + hw * ATS_D;
+            const float a0 = xs[lane], a1 = xs[lane + 32], a2 = xs[lane + 64], a3 = xs[lane + 96];
+            const float y = own_kv_rot128(__builtin_fmaf(a0, c0, -(a2 * s0)), __builtin_fmaf(a1, c1, -(a3 * s1)),
+                                          __builtin_fmaf(a2, c0, a0 * s0), __builtin_fmaf(a3, c1, a1 * s1), qw, lane);
+            qs[(2 * r + hw) * 4 * ATS_QP + qw * ATS_QP + lane] = y;
+        }
+#else
         const int j = i < ATS_D / 2 ? i : i - ATS_D / 2;
         const float c = rc[j], sn = rsn[j];
 #pragma unroll
@@ -208,16 +240,17 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
             const float y = i < ATS_D / 2 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
             qs[(2 * r + hw) * 4 * ATS_QP + (i >> 5) * ATS_QP + (i & 31)] = y;
         }
+#endif
         if (last) {
 #ifdef K3_Q3M_KV_Q8
-            // wave w: block w & 3 of kv head g, K (waves 0 .. 3) or V (4 .. 7); lane l = value 32 (w & 3) + l. The input is
-            // the F16 object's stored half, so the row is that row encoded; the hs == 0 task stores it, every task of the
-            // split keeps the decoded values for its own position
+            // wave w: block w & 3 of kv head g, K (waves 0 .. 3) or V (4 .. 7); lane l = value 32 (w & 3) + l. K: the F16
+            // object's stored halves (fp16 of RoPE's values), rotated as q is; V: its stored half, unrotated. The hs == 0
+            // task stores the row, every task of the split keeps the decoded values for its own position
             float xr;
             if (hw == 0) {
-                const float x0 = tk[j], x1 = tk[j + ATS_D / 2];
-                const float y = i < ATS_D / 2 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
-                xr = (float)(_Float16)y;
+                const float a0 = tk[lane], a1 = tk[lane + 32], a2 = tk[lane + 64], a3 = tk[lane + 96];
+                xr = own_kv_rot128((float)(_Float16)__builtin_fmaf(a0, c0, -(a2 * s0)), (float)(_Float16)__builtin_fmaf(a1, c1, -(a3 * s1)),
+                                   (float)(_Float16)__builtin_fmaf(a2, c0, a0 * s0), (float)(_Float16)__builtin_fmaf(a3, c1, a1 * s1), qw, lane);
             } else xr = (float)(_Float16)xk;
             uint8_t * blk = (uint8_t *)sg.W + (size_t)pos * pb + (size_t)(hw * (M / 32) + g * (ATS_D / 32) + (i >> 5)) * 34;
             Sync * se = sy; asm volatile("" : "+s"(se));   // (the error word's address made here, not kept live across k3_run)
