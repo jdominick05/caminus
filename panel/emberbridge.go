@@ -16,6 +16,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Matches resident/approval.py: persistent lock inode, withdrawn tombstone,
@@ -74,6 +76,45 @@ func withBridgeLock(bridge, id string, fn func() error) error {
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return fn()
+}
+
+// handoffText is a hand-off's fields as text, the body last and whole: what the owner's account will post.
+func handoffText(h map[string]any) (head []string, body string) {
+	s := func(k string) string { v, _ := h[k].(string); return v }
+	add := func(label, v string) {
+		if v != "" {
+			head = append(head, label+": "+v)
+		}
+	}
+	add("action", s("action"))
+	add("repo", s("repo"))
+	if s("head") != "" {
+		add("branches", s("head")+" -> "+s("base"))
+	}
+	if n, ok := h["number"].(float64); ok {
+		add("number", fmt.Sprintf("#%d", int(n)))
+	}
+	if n, ok := h["run_id"].(float64); ok {
+		add("run", fmt.Sprintf("%d", int64(n)))
+	}
+	add("title", s("title"))
+	return head, s("body")
+}
+
+// handoffLines is handoffText for the approvals detail: the fields, then the body in full, wrapped.
+func handoffLines(h map[string]any, width int) []string {
+	head, body := handoffText(h)
+	var out []string
+	for _, l := range head {
+		out = append(out, lipgloss.NewStyle().Foreground(cText).Render(ansi.Truncate(terminalText(l, false), max(8, width), "…")))
+	}
+	if strings.TrimSpace(body) != "" {
+		out = append(out, emberWarn.Render("body (posted as you):"))
+		for _, piece := range strings.Split(ansi.Hardwrap(terminalText(body, false), max(8, width-2), true), "\n") {
+			out = append(out, "  "+lipgloss.NewStyle().Foreground(cText).Render(piece))
+		}
+	}
+	return out
 }
 
 // approveHandoff runs an approved GitHub hand-off through `caminus ember answer ID approved --digest D`: the CLI

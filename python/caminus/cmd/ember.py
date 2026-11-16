@@ -703,6 +703,18 @@ def _answer_pending(a, tr):
         if a.decision != 'approved':
             print('caminus ember answer: a GitHub hand-off is approved as filed or denied', file=sys.stderr)
             return 2
+        from ..ember.resident import github as _gh
+        hits = _gh.private_text(req['github'])
+        if hits:
+            # never posted: the agent hears why and can file it again without that text
+            why = ('refused before posting: the title or body contains ' + ', '.join(hits) + '. Rewrite it without '
+                   'that (no machine paths, private ids, session links or tokens) and file the hand-off again.')
+            bridge.answer(settings.bridge_dir(), a.id, 'denied', me, answer_text=why, request=req)
+            audit.log(ap, {'event': 'github_refused', 'id': a.id, 'by': me, 'why': hits})
+            print('caminus ember answer: ' + why, file=sys.stderr)
+            if a.json:
+                print(json.dumps({'id': a.id, 'decision': 'denied', 'refused': hits}))
+            return 2
         r, argv = _github_result(req, me)
         audit.log(ap, {'event': 'github_result', 'id': a.id, 'by': me, 'action': req['github'].get('action'),
                        'repo': req['github'].get('repo'), 'rc': r.returncode, 'goal': req.get('goal')})

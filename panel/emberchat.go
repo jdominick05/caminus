@@ -1149,7 +1149,20 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
 		if str("kind") == "github" {
-			return approvalCard("github", residentText(str("summary")), residentText(str("reason")), w)
+			// the card shows what will be posted under your name: the summary, then the body's first lines (all of it
+			// in the approvals screen, Ctrl+A then Enter)
+			text := residentText(str("summary"))
+			if h, ok := e.Data["github"].(map[string]any); ok {
+				if _, body := handoffText(h); strings.TrimSpace(body) != "" {
+					lines := strings.Split(strings.TrimRight(residentText(body), "\n"), "\n")
+					shown := lines[:min(len(lines), 10)]
+					text += "\n\n" + strings.Join(shown, "\n")
+					if len(lines) > len(shown) {
+						text += fmt.Sprintf("\n… %d more lines · Ctrl+A, Enter shows all of it", len(lines)-len(shown))
+					}
+				}
+			}
+			return approvalCard("github", text, residentText(str("reason")), w)
 		}
 		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
 	case "question":

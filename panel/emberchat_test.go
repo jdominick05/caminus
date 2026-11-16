@@ -2291,3 +2291,28 @@ func TestCtrlOUnfoldsAndFoldsEveryEdit(t *testing.T) {
 		t.Fatal("Ctrl+O again folds them back")
 	}
 }
+
+func TestAGithubCardShowsTheTextItWillPost(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	var body strings.Builder
+	for i := 1; i <= 14; i++ {
+		body.WriteString(fmt.Sprintf("body line %d\n", i))
+	}
+	h := map[string]any{"action": "comment", "repo": "a/b", "number": float64(5), "body": body.String()}
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "g1", Kind: "approval_requested", Data: map[string]any{
+		"kind": "github", "summary": "comment on a/b#5 (168 characters)", "reason": "read-only token", "github": h}}}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	if !strings.Contains(v, "body line 1") || !strings.Contains(v, "body line 10") || strings.Contains(v, "body line 11") ||
+		!strings.Contains(v, "4 more lines") {
+		t.Fatalf("the card shows the body's first lines and how much more:\n%s", v)
+	}
+	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Summary: "comment on a/b#5", Github: h}}
+	m.chat.approvalDetail = true
+	detail := ansi.Strip(strings.Join(m.approvalDetail([]int{0}, 0, 80), "\n"))
+	if !strings.Contains(detail, "body (posted as you):") || !strings.Contains(detail, "body line 14") || !strings.Contains(detail, "number: #5") {
+		t.Fatalf("the detail view shows every field and the whole body:\n%s", detail)
+	}
+}

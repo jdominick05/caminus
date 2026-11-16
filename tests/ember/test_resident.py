@@ -796,6 +796,14 @@ class Resident(unittest.TestCase):
                 rt._bridge(dict(act,id=uuid.uuid4().hex),dict(args,repo='not a repo'),park=False)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_handoff_with_private_text_is_never_posted(self):
+        from caminus.ember.resident import github
+        base=dict(action='comment',repo='jdominick05/caminus',number=5)
+        self.assertEqual(github.private_text(dict(base,body='Fixed in the latest push; CI is green.')),[])
+        for body,why in (('see /'+'home/someone/notes.md','a home-directory path'),('per D-'+'281','a decision id'),
+                         ('https://claude.ai/'+'code/session_x','a session link'),('ghp_'+'a'*30,'a token')):
+            self.assertEqual(github.private_text(dict(base,body=body)),[why],body)
+
     def test_the_owner_runs_an_approved_handoff_with_their_own_gh(self):
         from caminus.cmd import ember as E
         from caminus.ember.resident import approval
