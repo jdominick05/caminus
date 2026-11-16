@@ -324,8 +324,9 @@ reads), with their predictions written down before the first timed run, and meas
   the default. See [models](../models.md).
 - One model file is tested: `Qwen/Qwen3-30B-A3B-GGUF`, `Qwen3-30B-A3B-Q4_K_M.gguf`. The kernels cover Q4_K and Q6_K.
 - Speculative decoding is measured, not enabled (see above): `caminus serve` decodes this model one token per pass.
-- An 8-bit (Q8_0) KV cache is built for one card (`Q3MoEOne(q8=True)`, decode and the batched prefill), not served yet:
-  [q8-kv.md](q8-kv.md). It halves the cache (0.0498 MiB per position instead of 0.0938).
+- An 8-bit (Q8_0) KV cache is built for one card (`Q3MoEOne(q8=True)`, decode and the batched prefill) and for two
+  (`Q3MoETP(q8=True)`, the same format over each card's kv heads), not served yet: [q8-kv.md](q8-kv.md). It halves the
+  cache (0.0498 MiB per position instead of 0.0938; on two cards 0.0249 per card instead of 0.0469).
 - One machine. Numbers from other cards are welcome.
 
 ## Reproduce

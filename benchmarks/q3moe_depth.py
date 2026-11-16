@@ -15,9 +15,9 @@ own span is printed beside it. --local-only (with --cards 2): every exchange cop
 runs alone (its ceiling; the logits are not the model's): the two-card time minus the slower card's alone is the coupling.
 The one-card engine does not fit card 0 beside the two-card one, so compare with a one-card run of this script in the
 same window, runs alternated.
---kv q8 (one card): the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True); the default arm k3_q3m_lean_kvq8). The
-F16 and Q8 caches do not both fit one card at depth, so the decode A/B of the two is runs of this script alternated in one
-window (F16, Q8, F16, Q8, ...), the same depths, tokens and rounds."""
+--kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True); the default arm k3_q3m_lean_kvq8; with --cards 2
+Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8). The F16 and Q8 caches do not both fit at depth, so the decode A/B of the two is
+runs of this script alternated in one window (F16, Q8, F16, Q8, ...), the same depths, tokens and rounds."""
 import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -32,7 +32,6 @@ ap.add_argument('--arms', nargs='+', default=None)
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--local-only', action='store_true')
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 A = ap.parse_args()
-if A.kv == 'q8' and A.cards != 1: raise SystemExit('q3moe_depth: --kv q8 is one card only')
 depths = [int(x) for x in A.depths.split(',')]
 if A.local_only and A.cards != 2: raise SystemExit('q3moe_depth: --local-only is a two-card option (--cards 2)')
 if A.cards == 2:
@@ -44,8 +43,8 @@ if A.cards == 2:
     if not all(1 <= c <= max(caps) <= 128 for c in caps) or min(caps) < 1:
         raise SystemExit(f'q3moe_depth: arm caps {caps}: each must be 1 .. 128 (the two-card modules\' attention merge)')
     eng = Q3MoETP(A.gguf, max_ctx=max_ctx, local_only=A.local_only, vram_extra_mib=[len(arms) * Q3MoETP.TAPE_MIB] * 2,   # (+ a tape set per arm,
-                  splits_cap=max(caps))                                                                                  #  the projection at the largest cap)
-    print(f'max_ctx {max_ctx}: {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB; expert rows {eng.exp_rows}, kv heads {eng.kvc}, '
+                  splits_cap=max(caps), q8=A.kv == 'q8')                                                                 #  the projection at the largest cap)
+    print(f'max_ctx {max_ctx}: {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB, KV {A.kv}; expert rows {eng.exp_rows}, kv heads {eng.kvc}, '
           f'head rows {eng.vh} / {eng.vocab - eng.vh}{"; LOCAL ONLY (each card alone, not the model)" if A.local_only else ""}', flush=True)
     eng.enable_card_timing(True)
     keys = ('E', 'buf', 'dstage', 'hstage', 'tok', 'pos', 'epoch', 'splits', 'per_wgp_c', 'seg_names', 'layer_seg', 'logits_half',

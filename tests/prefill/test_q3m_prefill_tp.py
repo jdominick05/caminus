@@ -18,10 +18,16 @@ Two cards (--tiny first: tests/engine/tiny_q3m.py's file with two-card shapes; t
              and the cache's stops give the same KV rows on both cards, bit for bit
   bounds     a span past max_ctx is refused before any write (the caches unchanged); the poisoned flag refuses a prefill
   speed      (--speed L) prompt tok/s from empty at chunk 2048, overlap and serial (medians of 3; prefill, two cards)
+  --kv q8    the engine and prefill with Q8_0 KV rows (Q3MoETP(q8=True), Q3MPrefillTP's Q8 path: q3m_prefill_kvq8's row and
+             attention kernels at each card's local shapes): every check above on the byte caches (the caches start as
+             0xFF bytes, a NaN half scale, and "written" means every block decodes finite), plus the rows: each card's
+             last-layer rows of the prefill [0, P) byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the halves
+             the F16 row kernel (q3p_qk_rope) stores for that card's q | k | v (the chunk's own last-layer buffer), the
+             one-card Q8 rows' encoding of the same values; both cards' KV error words 0
   HIP_VISIBLE_DEVICES=<XT> tools/guard.sh LOG 300 python -I tests/prefill/test_q3m_prefill_tp.py --probe
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill_tp.py --tiny --scratch DIR
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tests/prefill/test_q3m_prefill_tp.py GGUF --ref REF.npz [--llama LL.bin]
-      [--from P] [--geom 600] [--speed L]
+      [--from P] [--geom 600] [--speed L] [--kv q8]
 Prints PASS / FAIL lines and RESULT PASS | FAIL."""
 import argparse, os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +39,7 @@ ap.add_argument('gguf', nargs='?'); ap.add_argument('--probe', action='store_tru
 ap.add_argument('--scratch', default=None); ap.add_argument('--ref', default=None); ap.add_argument('--llama', default=None)
 ap.add_argument('--from', dest='P', type=int, default=64); ap.add_argument('--geom', type=int, default=600)
 ap.add_argument('--speed', type=int, default=0)
+ap.add_argument('--kv', default='f16', choices=('f16', 'q8'), help='the KV cache format (q8: Q3MoETP(q8=True), its Q8 prefill)')
 A = ap.parse_args()
 if sum([bool(A.probe), bool(A.tiny), bool(A.gguf)]) != 1: raise SystemExit('test_q3m_prefill_tp: --probe, --tiny or a GGUF (one of them)')
 if not os.environ.get('CAMINUS_GUARD'): raise SystemExit('test_q3m_prefill_tp: run it under tools/guard.sh')
@@ -130,13 +137,18 @@ GEOM = A.geom
 max_ctx = max(N, GEOM, A.speed) + 64
 CHUNK = 2048
 sh = tp_shapes(path)
-eng = Q3MoETP(path, max_ctx=max_ctx, vram_extra_mib=need_tp_mib(sh, CHUNK))
+Q8 = A.kv == 'q8'
+eng = Q3MoETP(path, max_ctx=max_ctx, vram_extra_mib=need_tp_mib(sh, CHUNK), q8=Q8)
 pf = Q3MPrefillTP(eng, chunk=CHUNK)
-print(f'expert rows {eng.exp_rows}, kv heads {eng.kvc}; prefill chunk {CHUNK}, micro {pf.micro}, mode {pf.mode}; '
+print(f'module {eng.module}, KV {A.kv}, expert rows {eng.exp_rows}, kv heads {eng.kvc}; prefill chunk {CHUNK}, micro {pf.micro}, mode {pf.mode}; '
       f'prefill {pf.need_mib[0]:.0f} / {pf.need_mib[1]:.0f} MiB', flush=True)
-row = [2 * k * eng.hd for k in eng.kvc]
-# beside the engine and the prefill: the geometry's snapshots of the prefilled cache rows (5 held at once) and the bounds check's
-snap_mib = [6 * eng.nl * GEOM * row[c] * 2 / 2 ** 20 + 2 for c in (0, 1)]
+from caminus.engine import k3
+rb = [k3.kv_pos_bytes(k * eng.hd, Q8) for k in eng.kvc]                     # (bytes per position on each card)
+row = [b // eng.L[0][c]['cache'].element_size() for c, b in enumerate(rb)]  # (cache elements per position: halves or bytes)
+# beside the engine and the prefill: the geometry's snapshots of the prefilled cache rows (5 held at once) and the bounds check's;
+# q8: the F16 row oracle's buffers (P rows of halves, the q16 rows)
+snap_mib = [6 * eng.nl * GEOM * rb[c] / 2 ** 20 + 2 + ((P * 2 * eng.kvc[c] * eng.hd + P * eng.kvc[c] * 8 * eng.hd) * 2 / 2 ** 20 if Q8 else 0)
+            for c in (0, 1)]
 capacity.check(list(eng.devs), snap_mib, f'test_q3m_prefill_tp: its cache snapshots ({snap_mib[0]:.0f} / {snap_mib[1]:.0f} MiB)')
 rep_bad = []
 
@@ -147,7 +159,7 @@ def kv(n):
 
 
 def same(a, b):
-    return all(torch.equal(x.view(torch.int16), y.view(torch.int16)) for x, y in zip(a, b))
+    return all(torch.equal(x.view(torch.uint8), y.view(torch.uint8)) for x, y in zip(a, b))
 
 
 def run_rows(toks):
@@ -159,15 +171,52 @@ def run_rows(toks):
 
 
 def poison_kv():
-    """NaN in every cache row of both cards: a prefill that skips or misplaces a row leaves NaN for the decode to read"""
+    """NaN in every cache row of both cards: a prefill that skips or misplaces a row leaves NaN for the decode to read (q8:
+    every byte 0xFF, so every block's half scale is a NaN)"""
     for il in range(len(eng.L)):
-        for c in (0, 1): eng.L[il][c]['cache'].fill_(float('nan'))
+        for c in (0, 1): eng.L[il][c]['cache'].fill_(255 if Q8 else float('nan'))
     torch.cuda.synchronize(eng.devs[0]); torch.cuda.synchronize(eng.devs[1])
+
+
+def written(rows_list):
+    """every row of the snapshot holds finite values: the halves (F16) or each block's decoded values (Q8)"""
+    if not Q8: return all(bool(torch.isfinite(x.float()).all()) for x in rows_list)
+    from caminus import ref_kv
+    for k, x in enumerate(rows_list):
+        c = k // eng.nl   # (kv(): card 0's layers, then card 1's)
+        dk, dv = ref_kv.decode_q8_kv(x.cpu().numpy().reshape(-1, rb[c]), ref_kv.Q8KVLayout(eng.kvc[c], eng.hd))
+        if not (np.isfinite(dk).all() and np.isfinite(dv).all()): return False
+    return True
+
+
+def q8_rows_check():
+    """after the default prefill of [0, P) (one chunk): each card's last-layer rows against encode_q8_kv(hadamard128(K), V)
+    of the F16 row kernel's halves for that card's last-layer q | k | v (pf.B[c]['qkv']: the last layer stops after its rows)"""
+    from caminus import ref_kv
+    from caminus.prefill import q3m_ops
+    good = True
+    for c in (0, 1):
+        s_ = pf.sh[c]; Mk = s_.nkv * s_.hd; ldq = s_.nh * s_.hd + 2 * Mk; lay = ref_kv.Q8KVLayout(s_.nkv, s_.hd)
+        dev = pf.devs[c]
+        with torch.cuda.device(dev):
+            oops = q3m_ops.Ops(dev, 'q3m_prefill')
+            oc = torch.zeros(P * 2 * Mk, dtype=torch.float16, device=dev); oq = torch.zeros(P * s_.nh * s_.hd, dtype=torch.float16, device=dev)
+            oops.qk_rope(pf.B[c]['qkv'], ldq, s_.nh, s_.nkv, eng.L[-1][c]['qk_par'], 0, oq, oc, P); torch.cuda.synchronize(dev)
+        hh = oc.float().cpu().numpy().reshape(P, 2, s_.nkv, s_.hd)
+        want = ref_kv.encode_q8_kv(ref_kv.hadamard128(np.ascontiguousarray(hh[:, 0])), np.ascontiguousarray(hh[:, 1]), lay)
+        good &= np.array_equal(eng.L[-1][c]['cache'][:P * rb[c]].cpu().numpy().reshape(P, -1), want)
+        good &= int(pf.B[c]['kverr'].item()) == 0
+        del oc, oq
+    check(good, f'Q8 rows: each card\'s last-layer {P} prefilled rows byte for byte encode_q8_kv(hadamard128(K), V) of the F16 row '
+                f'kernel\'s halves for that card\'s q | k | v (the one-card Q8 rows\' encoding); both KV error words 0')
 
 
 eng.reset(); dec = run_rows(seq)
 eng.reset(); poison_kv(); pf.run(seq, 0, 0, P); torch.cuda.synchronize(eng.devs[0]); torch.cuda.synchronize(eng.devs[1])
 prep = pf.check_replicas()
+if Q8:
+    check(P <= CHUNK and pf.q8 and pf.numerics().get('kv') == 'q8_0' and all(o.q8 for o in pf.O), 'the prefill runs the Q8 row and attention kernels')
+    q8_rows_check()
 eng.pos_host = P
 ours = run_rows(seq[P:])
 check(all(prep), f'after the prefill: the residual rows and the routing ids the same bits on both cards ({prep})')
@@ -178,7 +227,10 @@ fmt = lambda s: f'mean KLD {s[0]:.3e} (p90 {s[1]:.3e}, max {s[2]:.3e}), top-1 {s
 print(f'  two cards: prefill [0, {P}) then decode: {fmt(so)}', flush=True)
 print(f'  two cards: decode only, the same positions: {fmt(sd)}', flush=True)
 check(so[0] <= 2.0 * sd[0] + 1e-4, f'prefill-then-decode KLD within 2x the decode-only engine\'s + 1e-4 ({so[0]:.3e} vs {sd[0]:.3e})')
-if A.tiny:
+if A.tiny and Q8:   # (both runs on the Q8 cache: the top-1 comparison stands; 1e-3 is the F16 bar, reported only here)
+    check(so[3] >= sd[3], f'tiny, Q8 KV: against the float64 forward top-1 at least the decode-only engine\'s ({so[3]} vs {sd[3]}); '
+          f'mean KLD {so[0]:.3e} (reported only: the F16 bar is < 1e-3)')
+elif A.tiny:
     check(so[3] >= sd[3] and so[0] < 1e-3, f'tiny: against the float64 forward top-1 at least the decode-only engine\'s ({so[3]} vs {sd[3]}) '
           f'and mean KLD < 1e-3 ({so[0]:.3e})')
 if A.llama:
@@ -215,8 +267,8 @@ pieces = micro_bounds(GEOM, 4, min_piece=GRID)
 r_ov, _ = geom_rows(micro=4, min_piece=GRID)
 check(len(pieces) >= 2 and all(pf.check_replicas()), f'geometry: {GEOM} positions in one chunk of {len(pieces)} pieces {pieces} (overlap); replicas equal')
 r_one, _ = geom_rows(micro=1)
-check(all(bool(torch.isfinite(x.float()).all()) for x in r_ov),
-      f'the {GEOM} positions\' KV rows are all written: finite on both cards in every layer (the caches start as NaN)')
+check(written(r_ov),
+      f'the {GEOM} positions\' KV rows are all written: finite on both cards in every layer (the caches start as NaN' + (' half scales)' if Q8 else ')'))
 check(same(r_ov, r_one), 'one piece: the same KV rows on both cards, bit for bit')
 r_ser, _ = geom_rows(micro=4, min_piece=GRID, mode='serial')
 check(same(r_ov, r_ser), 'serial exchange: the same KV rows on both cards, bit for bit')

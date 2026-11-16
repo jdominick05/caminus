@@ -164,8 +164,8 @@ The word sits right after the status words, so a pass's one asynchronous status 
 on a Q8 engine) brings it: no extra read back per token. `_pass_wait` checks it before the bound and timeout paths (they
 zero Sync), `Engine.run(check=True)` likewise from its one status read, `step` marks the engine too, and the prefill's
 settle checks its word before the routing flags. The engine stays broken across `reset()` and raises
-`InvalidKVEncoding`. `Q3MoEVerify` and two cards refuse a Q8 engine, and every registry entry but the one-card
-qwen3moe one refuses `opt['kv'] = 'q8'` (`Arch.kv_check`) instead of building its F16 cache.
+`InvalidKVEncoding`. `Q3MoEVerify` refuses a Q8 engine, the two-card engine has its own Q8 build (below), and every
+registry entry but the two qwen3moe ones refuses `opt['kv'] = 'q8'` (`Arch.kv_check`) instead of building its F16 cache.
 
 Memory: 1,088 bytes per position and layer instead of 2,048 (`kv_pos_mib(q8=True)`: 0.0498 MiB per position over the
 48 layers, F16 0.0938), counted by `projection_mib(q8=True)` and the registry's checkpoint slots. The engine key carries
@@ -258,3 +258,104 @@ against our own F16 cache 1.19e-3 / 3.57e-3 / 1.87e-3, each below llama.cpp's ow
 40,896 positions), and failed the 128-token G-model gate: mean KLD 5.40e-3 against float64 (llama.cpp's q8_0 KV
 3.68e-3) and 5.53e-3 against our F16 cache (llama.cpp's own F16 to q8_0 cost 4.17e-3); the rotation is the answer to
 that row.
+
+## Qwen3-30B-A3B (two cards)
+
+`Q3MoETP(..., q8=True)` stores each card's KV cache (its 2 of the 4 kv heads) as Q8_0 rows on `k3_q3m_lean_tp_kvq8`:
+`kernels/k3_q3m_lean_tp.hip` (the push-only `OP_XCHG`, `OP_OWN_SLOT_SUM`) with `K3_Q3M_KV_Q8` and `K3_Q3M_ADD_RMS_PIN`,
+the one-card Q8 module's two defines. `k3.Q3M_KV_Q8_BASE` maps it to `k3_q3m_lean_tp`, `k3.Q3M_TP_OF` maps
+`k3_q3m_lean_kvq8` to it, so it takes the two-card modules' ops, pairs, push-only check and 128 attention splits, and
+the Q8 modules' error word and byte cache. Its batched prefill `Q3MPrefillTP` runs the one-card Q8 kernels
+(`q3m_prefill_kvq8`'s `q3p_qk_rope_q8` and `q3p_attn_q8`, both of which take the kv head count) at each card's local
+shapes; there is no new prefill object. Not served: no option selects it, and neither the module nor
+`q3m_prefill_kvq8` is in the installed runtime set. The registry's `qwen3moe-tp` entry takes `opt['kv'] = 'q8'`
+(`kv_formats`), so its projection, checkpoint slots and build follow the later `--kv q8` switch.
+
+Format: the one-card engine's (`q8_0-v1:qk-hadamard128:f16-rounded-v1`, the engine key's `kv`), over each card's own
+kv heads: a card's row is `encode_q8_kv(hadamard128(K), V)` of the halves the F16 two-card engine stores for its heads,
+544 bytes per position and layer instead of 1,024. The attention is the one-card Q8 op's text at the two-card cap of
+128 splits per kv head (`ATS_MAXS` 128 under `K3_Q3M_TP`). The chunk's V scales sit in the scores' spare LDS
+(`sc[512 .. 768)`) only while the chunks run; the 128-split merge's m | l rows reuse q + scores (`qs[0 .. 2048)`) only
+after the last chunk's barrier, so they never overlap in time. LDS stays at the F16 two-card object's 15,752 bytes.
+
+Refusals: each card has its error word after Sync and the prefill its `kverr` word per card. Both cards' words come back
+in each card's one status copy (`Engine.status_words`, 9 words per card on a Q8 engine), and `_pass_wait` reads them
+before the bound and bail paths (those zero Sync). A set word raises `InvalidKVEncoding` naming the card, and the
+engine stays broken across `reset()` (`_broken_error`; non-finite logits still mark it `NonFiniteLogits`). The prefill's
+settle reads both cards' `kverr` words before the routing flags. On a bailed pass the segments after the expired wait
+still run, on the partial a previous exchange left in the slot (finite values), and the retry rewrites the position's
+rows. A refused block during a bail is still terminal, as on one card; the forced-bail run of `test_q3moe_tp.py --kv q8`
+checks that bails alone never set the word.
+
+Memory, and `max_ctx auto` for an RX 7900 XTX (display) + RX 7900 XT pair, nothing else on either card (the one-card
+table's inputs; it reproduces that table). The engine refuses more than the file's 40,960 positions, so the uncapped
+column is the projection only; it is what YaRN to 131,072 positions would need:
+
+| Usage | F16 | Q8 | Without the file's 40,960 cap (F16 / Q8) |
+|---|---|---|---|
+| both idle | 40,960 | 40,960 | 212,992 / 405,504 |
+| 1 GiB in use on the XTX | 40,960 | 40,960 | 192,512 / 364,544 |
+
+Card 0 limits both. It holds 512 of each expert's 768 rows and the larger share of the head. On two cards, F16 already
+covers 131,072 positions in this projection, and Q8 leaves about twice that.
+
+`k3_run` of `k3_q3m_lean_tp_kvq8`: 96 VGPRs, 0 spilled, 33 spilled scalars, private segment 64 bytes, 15,752 bytes of LDS;
+`k3_q3m_lean_tp`: 96, 0, 66, 64, 15,752. The pins are the one-card Q8 object's, and no others were added.
+
+Gates (the op on the XT alone first, then both cards; `F16-TP.bin` is a two-card F16 run's saved logits, so the
+`--against` comparison is two cards against two cards):
+
+```bash
+HIP_VISIBLE_DEVICES=<XT> tools/guard.sh LOG 900 python -I tests/engine/test_q3m_kvq8_atts.py --tp   # the op on the two-card module
+HIP_VISIBLE_DEVICES=<XT> tools/guard.sh LOG 300 python -I tests/engine/test_q3m_tp_probe.py --tiny --scratch DIR --kv q8
+HIP_VISIBLE_DEVICES=<XT> tools/guard.sh LOG 900 python -I tests/engine/test_q3m_tp_probe.py GGUF --scratch DIR --kv q8   # its whole k3_run, one card
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_tp.py GGUF --npos 96 --scratch DIR --kv q8
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tests/prefill/test_q3m_prefill_tp.py GGUF --ref REF.npz --kv q8
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --cards 2 --save-logits F16-TP.bin
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --cards 2 --kv q8 \
+    --llama LLQ8_128.bin --llama-kv q8_0 --against F16-TP.bin --against-llama LL128.bin
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tools/gates/q3moe_depth_gmodel.py GGUF --ref REF32.npz --cards 2 --kv q8 \
+    --llama LLQ8.bin --llama-kv q8_0 --against F16-TP-DEPTH.bin --against-llama LL.bin
+```
+
+`test_q3m_tp_probe.py --kv q8` replays the one-card Q8 engine's tape on the two-card Q8 module, on one card. Each step's
+logits must be bitwise `k3_q3m_lean_kvq8`'s, and the local-only exchange and the slot sum run alone. That is the first
+launch of its whole `k3_run`. `test_q3m_kvq8_atts.py --tp` is the one-card op test at one card's shapes of the two-card engine (16 query and 2 kv
+heads, the card's own `splits_for(2, 128)`), with positions up to 8,000 on an 8,192-row cache. It also requires that more
+than 64 splits were active (4,096 .. 6,100), which exercises the merge's second round of m | l loads beside the V
+scales. `test_q3moe_tp.py --kv q8` adds, in its reference run, each card's last-layer row at every position compared byte
+for byte with `encode_q8_kv(hadamard128(K), V)` of the F16 row kernel's halves for that card's q | k | v: the one-card
+Q8 rows' encoding of the same values. Its grid, served-form and forced-bail checks run on the Q8 module unchanged.
+`test_q3m_prefill_tp.py --kv q8` checks the same thing for each card's last-layer prefilled rows. Its geometry checks
+(one piece, serial, chunks of 16, stops) compare the byte caches. Those caches start as 0xFF bytes, a NaN half scale,
+so "every row written" means every block decodes finite. Speed (alternate runs, F16 then Q8, twice):
+
+```bash
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I benchmarks/q3moe_depth.py GGUF --cards 2 --depths 8,4096,16384,40900 [--kv q8]
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 --lengths 4096,32768 --chunk 2048 [--kv q8]
+```
+
+CPU: `tests/engine/test_q3moe_tp_kvq8_cpu.py`. It covers the module tables, the engine's caches, tapes and projection,
+the refusals, a refused block on one card with a stalled wait on the other, the prefill's launches and its per-card
+words, the engine key and checkpoint layout, and the registry.Device results, 2026-11-16 (XTX + XT, upload log on):
+- **The new object on the XT alone.** The two-card op test passes: more than 64 splits, 16/2 heads, positions to 8,000. The whole k3_run on one card is bitwise identical to `k3_q3m_lean_kvq8`.
+- **Both cards, tiny model and real file.**
+  - Logits are bitwise identical at K3_PER_WGP 3, 6 and 7 over 4,200 passes.
+  - Replicas are equal after every pass.
+  - Forced bails give the reference's bytes.
+  - Prefill chunk geometry is bitwise identical on the byte caches.
+- **Q8 rows against the oracle.** Each card's last-layer rows are checked against `encode_q8_kv(hadamard128(K), V)`. V matches exactly. K is within one code or one scale LSB at the few positions where the oracle's RoPE differs by an ulp:
+  - the oracle runs the prefill row kernel;
+  - on the F16 engine, 27 of 8,400 card rows at 4,200 positions differ from it, all in K, by at most 2 ulp.
+
+| Mean KLD against the reference (top-1) | 128 decoded | last 64 of 16,384 | last 64 of 40,896 |
+|---|---|---|---|
+| two cards, Q8 | 1.29e-3 (128) | 2.48e-3 (62) | 1.42e-3 (63) |
+| two cards, Q8 against two-card F16 | 1.37e-3 (100 %) | 2.55e-3 (95.3 %) | 1.56e-3 (100 %) |
+| llama.cpp q8_0: against the reference / its own F16 to q8_0 cost | 3.68e-3 / 4.17e-3 | 5.68e-3 / 6.63e-3 | 3.86e-3 / 4.24e-3 |
+
+Speed on two cards, three interleaved rounds, medians:
+- Decode, F16 then Q8: 215.4 / 214.8 tok/s at 8, 189.5 / 191.8 at 4,096, 161.1 / 160.0 at 16,384, and 124.6 / 122.4 at 40,900.
+- Prefill: 7,072 / 7,098 at 4,096 and 3,558 / 3,543 at 32,768.
+
+On two cards, Q8 buys memory, not speed. Each card already reads only its own two kv heads' cache, so the cache is a smaller share of each pass than on one card.
