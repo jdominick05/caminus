@@ -838,7 +838,18 @@ class Resident(unittest.TestCase):
         r=files.search(str(self.home),pattern='alpha',path='proj',limit=1)
         self.assertIn('truncated',r)
         rt=Runtime(self.home)
-        try:self.assertIn('search',[t['function']['name'] for t in rt.tools])
+        try:
+            self.assertIn('search',[t['function']['name'] for t in rt.tools])
+            # through the runtime, a search with no path works (it raised KeyError after searching), and a read of a
+            # note still marks it used
+            gid=rt.store.enqueue('Find it.')
+            aid=uuid.uuid4().hex
+            rt.store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
+                                (aid,gid,'c1','search',json.dumps(dict(glob='**/a.py')),'new'))
+            rt._action(rt.store.actions(gid)[0])
+            res=[(e['data'] if isinstance(e['data'],dict) else json.loads(e['data']))['result']
+                 for e in rt.store.events() if e['kind']=='tool_result'][-1]
+            self.assertNotIn('error',res,res);self.assertIn('proj/src/a.py',res['files'])
         finally:rt.mail.close();rt.store.close()
 
     def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
@@ -885,7 +896,7 @@ class Resident(unittest.TestCase):
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
-        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in',
+        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort -S1ofile in','sort -k2,2o in',
                     'sort --compress-program=sh in','sort in | uniq - out.txt',
                     'xxd - out.bin','xxd -rp dump bin'):
             self.assertFalse(R.read_only_command(cmd),cmd)

@@ -110,9 +110,10 @@ def read_only_command(cmd):
         elif words[0] not in READ_ONLY:
             return False
         elif words[0] == 'sort' and any(w.startswith(('--output', '--compress-program')) or
-                                        (not w.startswith('--') and 'o' in (re.match(r'-([A-Za-z]*)', w) or [0, ''])[1])
+                                        (w.startswith('-') and not w.startswith('--') and 'o' in w)
                                         for w in words[1:]):
-            return False                  # sort -o FILE (also in a cluster: -ro, -uo) writes it; --compress-program runs one
+            return False                  # sort -o FILE writes it, in any short form (-ro, -oout, -S1ofile; an 'o' in an
+                                          # attached value like -T/opt is refused too: harmless); --compress-program runs one
         elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
             return False                  # xxd -r rebuilds a binary
         elif words[0] in VALUE_FLAGS and len(_operands(words[1:], VALUE_FLAGS[words[0]])) > 1:
@@ -996,14 +997,14 @@ class Runtime:
                     result['note'] = 'ledger is now todo: send items with a state next time'
                 elif name == 'read':
                     result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
+                    rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
+                    if rel.startswith('notes/') and rel.endswith('.md'):
+                        self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer
                 elif name == 'search':
                     if not args.get('pattern') and not args.get('glob'):
                         raise ValueError('give a glob (files by name), a pattern (text in them), or both')
                     result = files.search(self.home, args.get('pattern'), args.get('glob'), args.get('path') or '.',
                                           bool(args.get('ignore_case')), args.get('limit'))
-                    rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
-                    if rel.startswith('notes/') and rel.endswith('.md'):
-                        self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer
                 elif name == 'edit':
                     self._snapshot_file(action['goal'], name, args['path'])
                     result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
