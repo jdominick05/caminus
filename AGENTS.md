@@ -139,7 +139,11 @@ CLAUDE.md imports this file.
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `k3_q3m_lean_tp`: kv heads and each
   expert's rows split, router replicated; `check_replicas` compares the residual and every layer's router ids; not served
-  yet, no architecture entry; `tests/engine/test_q3moe_tp_cpu.py`, GPU gate `tests/engine/test_q3moe_tp.py`).
+  yet, no architecture entry; `tests/engine/test_q3moe_tp_cpu.py`, GPU gate `tests/engine/test_q3moe_tp.py`). Its batched
+  prefill is `prefill/q3m_tp.py` (`Q3MPrefillTP`: the one-card chunk per card on its slices and KV rows, 2 exchanges per
+  layer through `prefill/xchg.py` in micro-chunks so an exchange overlaps the next piece's compute; the FFN partial
+  weighted over its slots first by `kernels/q3m_prefill_tp.hip`, its own object so `q3m_prefill.hsaco` stays unchanged;
+  `tests/prefill/test_q3m_prefill_tp_cpu.py`, GPU gate `tests/prefill/test_q3m_prefill_tp.py`, `--probe` on one card first).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
   Coder target KV follows the engine's `q8` policy: Q8 uses rotated blocks, F16 unrotated half rows. The QSA indexer
   stays Q8 in either mode. F16 target append and split attention use `prefill_attn_f16`; keep the default Q8 object

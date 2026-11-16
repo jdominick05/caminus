@@ -1,5 +1,6 @@
 """The own-code gate of the qwen3moe line (Qwen3-30B-A3B), CPU only:
-  - the decode module (kernels/k3_q3m_lean.hip, + _trace) and the prefill object (kernels/q3m_prefill.hip): no ggml /
+  - the decode module (kernels/k3_q3m_lean.hip, + _trace) and the prefill objects (kernels/q3m_prefill.hip; the two-card
+    prefill's q3m_prefill_tp.hip and the exchange's prefill_tp.hip): no ggml /
     llama.cpp header in their include closure (every #include "..." followed inside kernels/), and build.sh gives them no
     ggml include path (their compile lines are the generic loop's or the k3_q3m case, not the k3_gguf one)
   - the serve path for the architecture imports neither gguf (gguf-py) nor tokenizers: the modules caminus serve loads
@@ -24,6 +25,7 @@ def check(c, msg):
 
 for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_tp.hip', 'k3_q3m_lean_tp_trace.hip',   # (+ its two-card build)
             'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
+            'q3m_prefill_tp.hip', 'prefill_tp.hip',          # (its two-card prefill: the slot sum, and the exchange's add)
             'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
             'k3_q3m_rs4.hip', 'k3_q3m_rs2.hip', 'own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
             'k3_q35_swift.hip', 'k3_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)

@@ -7,10 +7,11 @@ llama.cpp's own prefill-then-decode of the same tokens (build/gg_golden --lc 'tf
 --decode-only: no prefill; all N positions as one-token K3 passes (a file whose expert formats the prefill has no
 kernels for; about 6 ms per position on a 24 GB card).
 --cards 2: the two-card engine (engine/q3moe_tp.py Q3MoETP on torch devices 0 and 1, its default split; CAMINUS_UPLOAD_LOG on
-every two-card run). It has no batched prefill yet (a later change brings the two-card prefill), so it runs as
---decode-only: all N positions as one-token two-card passes, the last M scored. That is decode-then-decode, not the
-one-card row's prefill-then-decode, against the same bound (llama.cpp's prefill-then-decode). The replicas (the residual
-and every layer's router ids) are checked after every token; any difference, or a bailed pass, fails."""
+every two-card run) with its batched prefill (prefill/q3m_tp.py Q3MPrefillTP, chunk 2048, its default micro-chunks and
+overlap): positions [0, N - M) prefilled on both cards, then the M scored one-token two-card passes, as the one-card row.
+With --decode-only: all N positions as one-token two-card passes (decode-then-decode, against the same bound). The replicas
+are checked after the prefill (its residual rows and routing ids) and after every token (the residual and every layer's
+router ids); any difference, or a bailed pass, fails."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
@@ -43,20 +44,34 @@ if __name__ == '__main__':
     ok = True
     if A.cards == 2:
         from caminus.engine.q3moe_tp import Q3MoETP
+        from caminus.prefill import q3m_tp
         print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), f'N {N}, the last {M} positions', flush=True)
-        eng = Q3MoETP(A.gguf, max_ctx=N + 8, module=A.module)
-        print(f'two cards: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}; decode only '
-              f'(no two-card prefill yet): {N - M} one-token passes, then the {M} scored ones', flush=True)
+        extra = (0.0, 0.0) if A.decode_only else q3m_tp.need_tp_mib(q3m_tp.tp_shapes(A.gguf), 2048)
+        eng = Q3MoETP(A.gguf, max_ctx=N + 8, module=A.module, vram_extra_mib=extra)
         rep_bad, rows = [], []
-        for i, t in enumerate(seq):
-            if i < N - M: eng._run_tok(t, i, 0 if i == 0 else 1, True)   # (the argmax read-back only: no full logits copy)
-            else: rows.append(eng.step(t).float().cpu().numpy())
+        if A.decode_only:
+            print(f'two cards: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}; decode only: '
+                  f'{N - M} one-token passes, then the {M} scored ones', flush=True)
+            for i, t in enumerate(seq[:N - M]):
+                eng._run_tok(t, i, 0 if i == 0 else 1, True)   # (the argmax read-back only: no full logits copy)
+                r = eng.check_replicas()
+                if not all(r): rep_bad.append((i, r))
+        else:
+            pf = q3m_tp.Q3MPrefillTP(eng, chunk=2048)
+            print(f'two cards: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}; the two-card '
+                  f'prefill of [0, {N - M}) (chunk 2048, micro {pf.micro}, {pf.mode}), then the {M} scored passes', flush=True)
+            pf.run(seq, 0, 0, N - M)
+            r = pf.check_replicas()
+            if not all(r): rep_bad.append(('prefill', r))
+            eng.pos_host = N - M
+        for i, t in enumerate(seq[N - M:], N - M):
+            rows.append(eng.step(t).float().cpu().numpy())
             r = eng.check_replicas()
             if not all(r): rep_bad.append((i, r))
         ours = np.stack(rows)
         c0 = not rep_bad and not eng.bails
-        print(('PASS' if c0 else 'FAIL') + f' replicas after each of {N} tokens (residual, every layer\'s router ids): '
-              f'{N - len(rep_bad)} equal; bails {len(eng.bails)}' + (f'; first differences {rep_bad[:4]}' if rep_bad else ''), flush=True)
+        print(('PASS' if c0 else 'FAIL') + f' replicas after the prefill or each prompt token, and each scored token (residual, router ids): '
+              f'{"none differ" if not rep_bad else "differ"}; bails {len(eng.bails)}' + (f'; first differences {rep_bad[:4]}' if rep_bad else ''), flush=True)
         ok = c0
     else:
         from caminus.engine.q3moe_one import Q3MoEOne
