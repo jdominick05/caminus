@@ -167,7 +167,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -307,6 +307,9 @@ def parser():
             p.add_argument('goal_id',help='the goal the side question is about')
             p.add_argument('text',nargs='?',help='the question (or --stdin)')
             p.add_argument('--stdin',action='store_true',help='read the question from stdin')
+        if op=='advise':
+            p.add_argument('goal_id',help='the goal the advisor reviews now')
+            p.add_argument('text',nargs='?',help='optional: what you want it to look at')
         if op=='github':
             p.add_argument('action',choices=('link','status','unlink'))
             p.add_argument('--token-file',help='link: a file in the agent\'s own account holding one GitHub token')
@@ -713,6 +716,26 @@ def main(argv=None,stdin=None):
             try:answer=btw.ask(rt,gid,question.strip())
             finally:rt.mail.close();rt.store.close()
             emit(dict(goal=gid,answer=answer),a.json);return 0
+        if a.op=='advise':
+            # /advisor: the owner asks for a review now. The advisor reads the goal (its brief: the goal, the plan, the
+            # recent steps) and its advice goes to the agent as a message, with the reply being generated dropped
+            # (the interrupt), so the agent reads it before its next step instead of finishing what it was doing.
+            gid=store.resolve(a.goal_id)
+            store.close()
+            rt=Runtime(home)
+            try:
+                focus=(' Your human asks you to look at: '+a.text.strip()) if (a.text or '').strip() else ''
+                out=rt.advisor.ask(gid,'Your human asked for a review of this goal now. Where does it stand, what is '
+                                       'going wrong or being missed, and what should the agent do next? Be concrete.'+focus)
+                note=('[advisor review, asked for by your human] %s read your goal and says:\n%s\n'
+                      'Weigh this before your next step; say what you change, or why not.' % (out.get('model'),out['advice']))
+                with rt.store.transaction():
+                    rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,note,'nudge'))
+                    rt.store.request(gid,'interrupt')
+                    rt.store.event('advisor_review',dict(model=out.get('model'),usd=out.get('usd'),
+                                                         focus=(a.text or '')[:300]),gid)
+            finally:rt.mail.close();rt.store.close()
+            emit(dict(goal=gid,model=out.get('model'),usd=out.get('usd'),advice=out['advice']),a.json);return 0
         if a.op=='github':
             # the agent's GitHub account (resident/github.py): config.json keeps the token file's path and the
             # account, never the token

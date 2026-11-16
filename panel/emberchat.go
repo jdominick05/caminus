@@ -50,6 +50,7 @@ type residentChat struct {
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
 	identity                                identityState // the Identity screen (/identity): the agent's GitHub account
+	advisor                                 advisorState  // the Advisor screen (/advisor)
 	studio                                  studioState   // the Studio overlay (/studio)
 	recap                                   string        // the "while you were away" card, until Esc
 	chordAt                                 time.Time     // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
@@ -1182,6 +1183,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "scheduled":
 		at, _ := e.Data["wake_at"].(float64)
 		return toolCard("note", "parked until "+time.Unix(int64(at), 0).Format("15:04"), firstLine(str("note")), true, false, nil, w)
+	case "advice":
+		return toolCard("note", "asked its advisor", residentText(str("model"))+" · "+firstLine(str("question")), true, false, nil, w)
+	case "advisor_review":
+		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · the agent reads it before its next step", true, false, nil, w)
+	case "watchdog_advised":
+		return toolCard("note", "the advisor stepped in", "the goal was about to pause ("+residentText(str("reason"))+"); its advice went to the agent", true, false, nil, w)
 	case "woke":
 		return toolCard("note", "woke up", firstLine(str("note")), true, false, nil, w)
 	case "brain":
@@ -1774,6 +1781,10 @@ func (m emberModel) renderChat() string {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.identityOverlay(w, h) + "\n" + foot
 	}
+	if m.chat.advisor.open {
+		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
+		return head + "\n" + m.advisorOverlay(w, h) + "\n" + foot
+	}
 	if m.chat.themes.open && len(m.chat.themes.names) > 0 {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.themesOverlay(w, h) + "\n" + foot
@@ -1843,7 +1854,7 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.identity.open && !m.chat.themes.open && !m.chat.studio.open &&
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.identity.open && !m.chat.advisor.open && !m.chat.themes.open && !m.chat.studio.open &&
 		!m.chat.view.open && !m.chat.rewind.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
@@ -1864,6 +1875,9 @@ func (m emberModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.chat.identity.open {
 		return m.identityKey(msg)
+	}
+	if m.chat.advisor.open {
+		return m.advisorKey(msg)
 	}
 	if m.chat.themes.open {
 		return m.themesKey(msg)
@@ -2350,7 +2364,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.msg = "emergency stop…"
 		return m, emergencyStop(m, strings.TrimSpace(arg))
-	case "/btw", "/diff", "/export", "/rewind", "/plan":
+	case "/btw", "/diff", "/export", "/rewind", "/plan", "/advisor":
 		clear()
 		next, cmd, _ := m.steerSlash(command, arg)
 		return next, cmd
@@ -2462,6 +2476,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
 	{"/identity", "the agent's GitHub account: link, unlink, what its commits carry"},
+	{"/advisor", "the advisor reviews the goal now and the agent reads it before its next step; /advisor setup: model, budget"},
 	{"/pause", "pause the selected goal at its next step; /resume continues it"},
 	{"/halt", "emergency stop: every resident pauses after its step (/halt clear lifts it)"},
 	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},

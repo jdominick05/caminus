@@ -114,6 +114,30 @@ func unsendLast(m emberModel, goal string) tea.Cmd {
 	}
 }
 
+// adviseNow runs `agent advise NAME GOAL [FOCUS]`: the advisor's review of the goal, delivered to the agent with the
+// reply it is writing dropped. The outcome lands in the status line; the review shows in the conversation.
+func adviseNow(m emberModel, goal, focus string) tea.Cmd {
+	return func() tea.Msg {
+		args := []string{"advise", m.agentName, goal}
+		if focus != "" {
+			args = append(args, focus)
+		}
+		var out struct {
+			Model string  `json:"model"`
+			USD   float64 `json:"usd"`
+		}
+		if err := residentJSON(m, append(args, "--json"), &out); err != nil {
+			text := err.Error()
+			if strings.Contains(text, "no advisor") {
+				text = "no advisor set up: /advisor setup picks one"
+			}
+			return residentActionMsg{"advisor: " + terminalText(text, false)}
+		}
+		return residentActionMsg{fmt.Sprintf("advisor (%s) reviewed the goal; the agent reads it before its next step ($%.2f)",
+			terminalText(out.Model, false), out.USD)}
+	}
+}
+
 func askBtw(m emberModel, goal, question string) tea.Cmd {
 	return func() tea.Msg {
 		var out struct {
@@ -421,6 +445,18 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		return true
 	}
 	switch command {
+	case "/advisor":
+		// a review now: the advisor reads the goal and its advice reaches the agent with its current reply dropped, so
+		// it reads the advice before its next step. /advisor setup is the settings screen (model, budget, off).
+		if strings.TrimSpace(arg) == "setup" {
+			next, cmd := m.openAdvisor()
+			return next, cmd, true
+		}
+		if !need() {
+			return m, nil, true
+		}
+		m.msg = "the advisor is reviewing goal " + shortGoal(goal) + "…"
+		return m, adviseNow(m, goal, strings.TrimSpace(arg)), true
 	case "/btw":
 		if strings.TrimSpace(arg) == "" || !need() {
 			if strings.TrimSpace(arg) == "" {

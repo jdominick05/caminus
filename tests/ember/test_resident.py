@@ -818,6 +818,49 @@ class Resident(unittest.TestCase):
         with self.assertRaises(ValueError):
             approval.claim(str(bridge),snap,'approved','owner','{"action": "approve_ci"}')
 
+    def test_advisor_review_now_reaches_the_agent_and_interrupts(self):
+        # /advisor: the owner asks for a review; the advice goes in as a message and the reply being written is dropped
+        import io,contextlib
+        from caminus.ember.resident import cli, advisor
+        rt=Runtime(self.home)
+        try:gid=rt.store.enqueue('Make x.')
+        finally:rt.mail.close();rt.store.close()
+        seen=[]
+        fake=lambda self_,g,q,c='':(seen.append(q),dict(advice='Stop retrying the build; read its first error.',model='claude-opus-5-5',usd=0.03))[1]
+        out=io.StringIO()
+        with unittest.mock.patch.object(advisor.Advisor,'ask',fake),contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(['advise','resident','--home',str(self.home),gid,'the failing gate','--json']),0)
+        self.assertIn('the failing gate',seen[0]);self.assertEqual(json.loads(out.getvalue())['model'],'claude-opus-5-5')
+        rt=Runtime(self.home)
+        try:
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertTrue(any('read its first error' in t and 'asked for by your human' in t for t in inbox))
+            self.assertTrue(rt.store.pending_request(gid,'interrupt'),'the reply being written is dropped')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_advisor_steps_in_before_a_watchdog_pause(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            self.assertTrue(rt._watchdog(gid,'the same call failed 3 times'),'without an advisor the goal pauses')
+            gid=rt.store.enqueue('Make y.')
+            rt.config['advisor']=dict(model='claude-opus-5-5',endpoint='http://127.0.0.1:8765/v1')
+            asked=[]
+            rt.advisor.ask=lambda g,q,c='':(asked.append(q),dict(advice='Read the error: the path is wrong.',model='claude-opus-5-5',usd=0.02))[1]
+            self.assertFalse(rt._watchdog(gid,'the same call failed 3 times',dict(call='terminal ls x')))
+            self.assertNotEqual(rt.store.goal(gid)['state'],'paused');self.assertIn('about to pause',asked[0])
+            inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
+            self.assertTrue(any('the path is wrong' in t for t in inbox),'the advice reaches the agent as a nudge')
+            self.assertTrue(rt._watchdog(gid,'the same call failed 3 times'),'caught again right after: it pauses')
+            gid=rt.store.enqueue('Make z.')
+            def broke(*a,**k):raise ValueError("today's advisor budget is spent")
+            rt.advisor.ask=broke
+            self.assertTrue(rt._watchdog(gid,'the same call failed 3 times'),'a spent budget pauses at once')
+            gid=rt.store.enqueue('Make w.')
+            rt.advisor.ask=lambda *a,**k:self.fail('a token budget pause is never advised')
+            self.assertTrue(rt._watchdog(gid,'token budget 900 over 800'))
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):
         from caminus.ember.resident.runtime import TODO_STALE
         rt=Runtime(self.home)

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"os"
@@ -353,7 +354,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /identity /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /identity /advisor /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -2177,5 +2178,34 @@ func TestTheIdentityScreenShowsTheLinkAndUnlinksOnTwoPresses(t *testing.T) {
 	next, _ = m.identityKey(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	if m = next.(emberModel); m.chat.identity.editing != 1 || m.chat.identity.token.Value() != "~/homes/x/.config/github-token" {
 		t.Fatal("l starts a link with the current token file filled in")
+	}
+}
+
+func TestTheAdvisorScreenShowsItAndTurnsOffOnTwoPresses(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 110, 34
+	m, cmd := m.openAdvisor()
+	if !m.chat.advisor.open || cmd == nil || !m.overlayOpen() {
+		t.Fatal("/advisor opens the screen and reads the advisor")
+	}
+	var info advisorInfo
+	_ = json.Unmarshal([]byte(`{"advisor":{"model":"claude-opus-5-5","endpoint":"http://127.0.0.1:8765/v1","budget_usd":3,"calls_per_goal":5},"today":{"usd":0.12,"calls":2}}`), &info)
+	m = m.advisorLoaded(advisorLoadedMsg{info: info})
+	view := ansi.Strip(m.advisorOverlay(100, 30))
+	for _, want := range []string{"claude-opus-5-5", "$3.00 a day", "$0.12 spent today in 2 calls", "before the watchdog pauses"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("the screen shows %q: %s", want, view)
+		}
+	}
+	next, cmd := m.advisorKey(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if m = next.(emberModel); cmd != nil || !strings.Contains(m.msg, "press o again") {
+		t.Fatalf("the first o only asks: %q", m.msg)
+	}
+	if _, cmd = m.advisorKey(tea.KeyPressMsg{Code: 'o', Text: "o"}); cmd == nil {
+		t.Fatal("the second o turns it off")
+	}
+	next, _ = m.advisorKey(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	if m = next.(emberModel); m.chat.advisor.field != "budget-usd" || m.chat.advisor.input.Value() != "3.00" {
+		t.Fatal("b edits the budget, starting from the current one")
 	}
 }

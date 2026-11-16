@@ -108,6 +108,7 @@ def weak_gate(gate):
 
 RUNTIME_HEADER = ('EMBER RUNTIME (from your harness, rebuilt this turn; not part of any tool result: '
                   'see "The runtime block" in your instructions)')
+ADVISE_RETRIP = 10      # steps after a watchdog's advisor consult within which a new trip pauses the goal
 BUSY_WAIT_S = 3600      # how long a goal waits out a provider's capacity errors (429 / 503 / 529) before it stops
 TODO_STALE = 8          # steps without a todo update, with items open, before the loop state mentions it
 COMPACT_KEEP = 8         # the newest messages a compaction leaves whole (both tiers)
@@ -1438,13 +1439,43 @@ class Runtime:
         self.store.event('loop_collapsed', dict(calls=pairs, kept=1), gid)
 
     def _watchdog(self, gid, reason=None, detail=None):
-        """Pause a goal the watchdog caught, recording why. Returns True when it did."""
+        """Pause a goal the watchdog caught, recording why. Returns True when it did.
+
+        With an advisor set up, a goal caught looping is first given the advisor's take as a nudge and keeps going
+        (the owner's choice: the agent rarely asks on its own when it is lost); caught again within ADVISE_RETRIP
+        steps of that advice, it pauses. A spent advisor budget, its per-goal calls or a failed consult pause at once."""
+        if self._advise_before_pause(gid, reason, detail):
+            return False
         with self.store.transaction():
             if self.store.goal(gid)['state'] in ('completed', 'cancelled', 'paused', 'error'):
                 return False
             message = 'watchdog: ' + (reason or 'stopped')
             self.store.update(gid, state='paused', error=message)
             self.store.event('watchdog', dict(reason=reason or 'stopped', **(detail or {})), gid)
+        return True
+
+    def _advise_before_pause(self, gid, reason, detail):
+        if not reason or reason.startswith('token budget') or not self.config.get('advisor') \
+                or not self.config.get('advise_before_pause', True):
+            return False
+        g = self.store.goal(gid)
+        if g['state'] in ('completed', 'cancelled', 'paused', 'error') or g.get('kind', 'work') in FREE_KINDS:
+            return False
+        last = self.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='watchdog_advised' ORDER BY seq DESC "
+                                     "LIMIT 1", (gid,)).fetchone()
+        if last and g['steps'] - json.loads(last['data']).get('step', 0) < ADVISE_RETRIP:
+            return False                  # advised moments ago and caught again: the pause stands
+        question = ('The runtime is about to pause my goal because: %s. What am I doing wrong, and what should I try '
+                    'instead? Be concrete.' % reason)
+        try:
+            out = self.advisor.ask(gid, question, json.dumps(detail or {}, ensure_ascii=False)[:2000])
+        except ValueError:
+            return False                  # no budget, no calls left, or it did not answer: pause as before
+        note = ('[advisor] The watchdog was about to pause this goal (%s). Your advisor (%s) looked at it:\n%s\n'
+                'Change approach; the same loop again pauses the goal.' % (reason, out.get('model'), out['advice']))
+        with self.store.transaction():
+            self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+            self.store.event('watchdog_advised', dict(reason=reason, step=g['steps'], usd=out.get('usd')), gid)
         return True
 
     def _meter(self, gid):

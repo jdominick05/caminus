@@ -639,6 +639,8 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.modelsLoaded(msg), nil
 	case identityLoadedMsg:
 		return m.identityLoaded(msg), nil
+	case advisorLoadedMsg:
+		return m.advisorLoaded(msg), nil
 	case editorDoneMsg:
 		if msg.err != "" {
 			m.msg = msg.err
