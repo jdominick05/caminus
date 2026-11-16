@@ -24,6 +24,7 @@ import (
 // append events; they never replace the transcript or steal an unfinished draft.
 type residentChat struct {
 	ready, sending, newGoal, help, forceNew bool
+	shell                                   bool      // shell mode: "!" on an empty draft; Enter runs the line as the agent
 	expanded                                bool      // Ctrl+E: every card open (tool calls, output, thinking)
 	armed                                   string    // the root request a first "a" armed; a second approves
 	armedAt                                 time.Time // when it was armed (10 s to confirm)
@@ -201,11 +202,34 @@ func promptMark(info textarea.PromptInfo) string {
 	return ""
 }
 
+// shellMark is the prompt in shell mode.
+func shellMark(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
+		return "! "
+	}
+	return ""
+}
+
+// setShell switches shell mode: the prompt, its colour and the placeholder say which mode the draft is in.
+func (m *emberModel) setShell(on bool) {
+	m.chat.shell = on
+	if on {
+		m.chat.compose.SetPromptFunc(2, shellMark)
+	} else {
+		m.chat.compose.SetPromptFunc(2, promptMark)
+	}
+	m.chatStyles()
+	m.chat.compose.Placeholder = m.composerHint()
+}
+
 // chatStyles gives the composer the palette's prompt and placeholder styles. A style keeps the colour it was built
 // with, so a theme switch calls this again.
 func (m *emberModel) chatStyles() {
 	s := m.chat.compose.Styles()
 	s.Focused.Prompt, s.Blurred.Prompt = emberBusy, emberBusy
+	if m.chat.shell {
+		s.Focused.Prompt, s.Blurred.Prompt = emberShell, emberShell
+	}
 	s.Focused.Placeholder, s.Blurred.Placeholder = emberDim, emberDim
 	// the editor's default cursor line has a grey background: the placeholder sat under a highlight bar
 	s.Focused.CursorLine, s.Blurred.CursorLine = lipgloss.NewStyle(), lipgloss.NewStyle()
@@ -1212,6 +1236,10 @@ func (m emberModel) chatComposer() string {
 		}
 	}
 	box := composerBox(input, m.composerTitle(), max(18, m.width-2))
+	if m.chat.shell {
+		box = borderTitle(emberBorder.BorderForeground(cPurple).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
+			m.composerTitle(), emberShell)
+	}
 	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
 	// the status line, which appeared and went with every message
 	return borderNote(box, terminalText(m.msg, false), emberDim)
@@ -1222,6 +1250,8 @@ func (m emberModel) chatComposer() string {
 func (m emberModel) composerTitle() string {
 	title := "new goal"
 	switch {
+	case m.chat.shell:
+		title = "shell · runs as the agent"
 	case m.chat.sending:
 		title = "sending…"
 	case m.chat.question != nil:
@@ -1240,13 +1270,16 @@ func (m emberModel) composerTitle() string {
 
 // composerHint is the composer's placeholder: what Enter does with the draft now.
 func (m emberModel) composerHint() string {
+	if m.chat.shell {
+		return "a command, run in the agent's account · Enter runs it · Backspace leaves"
+	}
 	if !m.chat.compose.Focused() {
 		return "browsing history · Enter returns to typing"
 	}
 	if m.chat.newGoal {
-		return "type a goal · Enter starts it · /help"
+		return "type a goal · Enter starts it · ! for shell mode · /help"
 	}
-	return "message the agent · Enter nudges at the next step · /steer redirects"
+	return "message the agent · Enter nudges · /steer redirects · ! for shell mode"
 }
 
 // chatBottom renders whatever occupies the composer slot: the steering draft,
@@ -2044,6 +2077,26 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.chat.sending {
 		return m, nil
+	}
+	// Shell mode, as in Claude Code: "!" on an empty draft switches the composer to commands run in the agent's
+	// account (its files, its rights: what it sees), shown by a "!" prompt; Backspace on an empty line or Esc leaves.
+	if k == "!" && m.chat.compose.Value() == "" && !m.chat.shell {
+		m.setShell(true)
+		return m, nil
+	}
+	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
+		m.setShell(false)
+		return m, nil
+	}
+	if m.chat.shell && k == "enter" {
+		cmd := strings.TrimSpace(m.chat.compose.Value())
+		if cmd == "" {
+			return m, nil
+		}
+		m.chat.compose.Reset()
+		m.setShell(false)
+		m.msg = "running in the agent's account…"
+		return m, runBang(m, cmd)
 	}
 	switch k {
 	case "enter":

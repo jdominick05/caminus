@@ -2094,3 +2094,39 @@ func TestTheBadgeKeepsThePillWhole(t *testing.T) {
 		t.Fatalf("after the badge's reset the pill's colours come back before the name: %q", before)
 	}
 }
+
+func TestShellModeLikeClaudeCode(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	press := func(k string) {
+		var code rune
+		if len(k) == 1 {
+			code = rune(k[0])
+		}
+		msg := tea.KeyPressMsg{Code: code, Text: k}
+		switch k {
+		case "backspace":
+			msg = tea.KeyPressMsg{Code: tea.KeyBackspace}
+		case "enter":
+			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
+		}
+		next, _ := m.chatKey(msg)
+		m = next.(emberModel)
+	}
+	press("!")
+	if !m.chat.shell || m.chat.compose.Value() != "" {
+		t.Fatalf("! on an empty draft enters shell mode, not the text: shell=%v %q", m.chat.shell, m.chat.compose.Value())
+	}
+	if box := ansi.Strip(m.chatComposer()); !strings.Contains(box, "! ") || !strings.Contains(box, "shell · runs as the agent") {
+		t.Fatalf("the prompt and the border say shell mode: %q", box)
+	}
+	press("backspace")
+	if m.chat.shell {
+		t.Fatal("Backspace on an empty line leaves shell mode")
+	}
+	press("a")
+	press("!")
+	if m.chat.shell || !strings.HasSuffix(m.chat.compose.Value(), "!") {
+		t.Fatalf("a ! inside a draft is text: %q", m.chat.compose.Value())
+	}
+}

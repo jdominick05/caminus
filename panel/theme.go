@@ -175,6 +175,7 @@ var (
 	emberCtxHot lipgloss.Style
 	emberCtxOK  lipgloss.Style
 	emberBusy   lipgloss.Style
+	emberShell  lipgloss.Style // shell mode's "!" prompt and border title
 	emberTabOn  lipgloss.Style
 	emberBorder lipgloss.Style
 )
@@ -214,6 +215,7 @@ func applyThemeStyles() {
 	emberCtxHot = lipgloss.NewStyle().Foreground(cRed)
 	emberCtxOK = lipgloss.NewStyle().Foreground(cGreen)
 	emberBusy = lipgloss.NewStyle().Bold(true).Foreground(cBlue)
+	emberShell = lipgloss.NewStyle().Bold(true).Foreground(cPurple)
 	emberTabOn = lipgloss.NewStyle().Bold(true).Background(cGray).Foreground(cText)
 	emberBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cGray)
 }
