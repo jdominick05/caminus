@@ -530,11 +530,12 @@ read from empty (0 cached tokens on every request), then 128 greedy tokens. Medi
 | Prefill, one XTX | 235 | 6,307 | 4,181 | 2,796 | 2,326 |
 | Prefill, two / one | 0.80x | 1.09x | 1.22x | 1.26x | 1.29x |
 
-- Every round's range sits within 3 % of its median. The 8-token prefill is one short pass, not a throughput figure.
+- Every range sits within 5 % of its median. The 8-token prefill is one short pass, not a throughput figure.
 - Two cards read every prompt from 4K tokens on faster, and decode faster from about 32K tokens on. Short turns decode
   faster on one card, which is why one card stays the default.
 - The two-card engine is not bitwise to the one-card engine by design (the summation order differs). Its accuracy is
-  gated against an fp32 reference at depth instead: mean KLD 1.02e-03 over the last 64 of 16,384 positions and 8.0e-04
+  gated against an fp32 reference at depth instead (`tools/gates/q3moe_depth_gmodel.py --cards 2`, the two-card
+  prefill then decode, 2026-11-16): mean KLD 1.02e-03 over the last 64 of 16,384 positions and 8.0e-04
   over the last 64 of 40,896, both below llama.cpp's on the same file (5.06e-03 and 5.73e-03).
 - Engine level (no server), for reference: decode 218 / 195 / 163 / 133 / 125 tok/s at 8 / 4,096 / 16,384 / 32,768 /
   40,900 against one XTX's 246 / 210 / 159 / 120 / 105 (2026-11-15, `benchmarks/q3moe_depth.py --cards 2`); prefill
@@ -557,7 +558,7 @@ each card whole layers.
 | Qwen3-30B-A3B Q4_K_M | 206 served (218 engine level) / no 2,048-token row (4,096: 6,860 served) | 112.4 / 2,909 | 126.2 / 5,780 |
 
 - Qwen3-30B-A3B's row was measured later, 2026-11-15, with the same build (7bcbc04) and command (`-ts 53/47 -fa 1`);
-  its Caminus column is the engine-level section above (not yet served). Both two-card modes decode below llama.cpp's
+  its Caminus column is the served two-card section above (engine level in brackets). Both two-card modes decode below llama.cpp's
   one-card row above (148 tok/s, measured on the ignite-llama fork).
 - Files larger than the host's page cache (Qwen3-Coder-Next, the Coder on a 29 GiB host) need `-lm dio`: with the
   default memory-mapped loading llama-bench stalls after loading the weights, both cards idle.
