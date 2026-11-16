@@ -31,7 +31,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   expert (two thirds on the bigger card, card 0). Still Caminus's own code end to end. One card stays the default: served, two cards decode more slowly on short
   turns (206 against 240 tok/s) and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every
   prompt from 4K tokens on faster (1.09x at 4K, 1.29x at 40,768). The context stays 40,960
-  tokens, the model's own limit. Served numbers are still to come. See [benchmarks](docs/dev/benchmarks.md).
+  tokens, the model's own limit. See [benchmarks](docs/dev/benchmarks.md).
 - **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
   code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
   - `--draft mtp` drafts 3 tokens with the model's own multi-token-prediction layer and verifies 4 tokens a pass; it
