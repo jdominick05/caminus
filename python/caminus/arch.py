@@ -219,8 +219,19 @@ class Arch:
     engine = None            # 'module:Class' under caminus
     tokenizer = 'hf'         # caminus.serve.tokenizer.QwenTokenizer's BPE engine: 'hf' (the tokenizers library) or 'own'
 
+    kv_formats = ('f16',)    # the KV cache formats opt['kv'] selects for this entry (kv_check); only Q3MoE builds 'q8'
+
     def __init__(self, name, alias):
         self.name, self.alias = name, alias
+
+    def kv_check(self, opt):
+        """opt['kv'] for this entry: True for 'q8', False for 'f16' (the default). A format the entry has no build for is
+        refused with a ValueError before anything is read or allocated, so a Q8 request never runs an F16 engine"""
+        q8 = kv_q8(opt)
+        if q8 and 'q8' not in self.kv_formats:
+            raise ValueError(f"{self.name}: kv 'q8': this entry builds no Q8 KV cache from opt['kv'] (only the one-card "
+                             f"qwen3moe entry does); refused rather than built with its F16 cache")
+        return q8
 
     def __repr__(self):
         return f'<arch {self.name}: {self.kind}, {self.cards} card{"s" if self.cards > 1 else ""}, T {self.T}>'
@@ -424,6 +435,7 @@ class Coder(Arch):
         return kw
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         T = self.T if T is None else int(T)
         from .engine.flashnext_tp import FlashNextTP
         from .prefill import coder as P
@@ -476,6 +488,7 @@ class Coder(Arch):
         """the Coder's projection per card at its pair's split (D-292): FlashNextTP's own check (capacity.fixed_mib with the
         split's moved tensors, the context-sized buffers, the QSA tapes, the batched prefill's plan) + the prompt cache's
         slots + 2 checkpoint slots (its side rows are host memory); the DFlash drafter in extras_mib"""
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .device import capacity as C
         from .prefill.plan import PrefillPlan
         fa = coder_facts(opt['model']); g, st = fa['geom'], fa['tensors']
@@ -541,12 +554,14 @@ class OneCard(Arch):
         return self._shapes[k]
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         sh = self.shape(opt['model']); p = sh.projection_parts(); chunk = int(opt['chunk'])
         slot = (p['gdn'] + p['kv_pos']) / 2 ** 20 * 1.05 + 1.0          # a checkpoint: the recurrent state + T = 1 tail rows
         need = lambda c: [sh.projection_mib(c) + one_card_extra_mib(sh, chunk, c) + (slots + 2) * slot]   # (the side rows: host memory)
         return sh.n_ctx_train or 262144, [0], slot, need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.qwen35_one import Qwen35One
         from .prefill.q35 import Prefill35
         chunk, max_ctx = int(opt['chunk']), int(opt['max_ctx'])
@@ -577,6 +592,7 @@ class Q3MoE(OneCard):
     engine = 'engine.q3moe_one:Q3MoEOne'
     rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
+    kv_formats = ('f16', 'q8')   # (opt['kv'] = 'q8': Q3MoEOne(q8=True), docs/dev/q8-kv.md)
     PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
     def auto_need(self, opt, slots, cards=None):
@@ -584,7 +600,7 @@ class Q3MoE(OneCard):
         from .prefill import q3m
         path = opt['model']
         n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
-        q8 = kv_q8(opt)                                     # (opt['kv']: no serve flag sets it yet; 'f16' by default)
+        q8 = self.kv_check(opt)                             # (opt['kv']: no serve flag sets it yet; 'f16' by default)
         slot = Q3MoEOne.kv_pos_mib(path, q8) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
         pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
         need = lambda c: [Q3MoEOne.projection_mib(path, c, q8=q8) + pf + (slots + 2) * slot]   # (the side rows: host memory)
@@ -593,7 +609,7 @@ class Q3MoE(OneCard):
     def build(self, opt, log=print, T=None):
         from .engine.q3moe_one import Q3MoEOne
         from .prefill.q3m import Q3MPrefill
-        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']), q8=kv_q8(opt))
+        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']), q8=self.kv_check(opt))
         return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 
@@ -680,6 +696,7 @@ class Dense35(OneCard):
         return Dflash35.need_mib(path, vocab, self.PREFILL_CHUNK) + Dense35Verify.need_mib(self.MTP_T, max_ctx=c, nfeat=len(layers))
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
         from .engine.q35_mtp import Mtp35
@@ -718,6 +735,7 @@ class Dense35(OneCard):
         finally: F.close()
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
         from .engine.q35_mtp import Mtp35
@@ -905,6 +923,7 @@ class Dense35TP(Arch):
         return out
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense_tp import Dense35TP as E
         path, share = opt['model'], self._share(opt, cards)
         spec_T, dc, layers, dfl, extra = self._resources(opt, cards)
@@ -916,6 +935,7 @@ class Dense35TP(Arch):
         return n_ctx, [0, 1], max(per_slot), need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense_tp import Dense35TP as E
         from .prefill.q35own_tp import Q35OwnPrefillTP
         why = self.draft_refusal(opt.get('draft'), opt['model'])
@@ -1011,6 +1031,7 @@ class Q3MoETP(Arch):
         """per card: the engine's own projection (Q3MoETP.projection_mib, the terms its check counts) + the two-card prefill's
         construction check + the prompt cache's slots + 2 checkpoint slots, each one T = 1 tail row of that card's kv heads in
         every layer (cache/prompt.py Layout: no recurrent state); the side rows are host memory"""
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q3moe_tp import Q3MoETP as E
         path = opt['model']
         er, vs = self._split(opt, cards)
@@ -1021,6 +1042,7 @@ class Q3MoETP(Arch):
         return n_ctx, [0, 1], max(slot), need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q3moe_tp import Q3MoETP as E
         from .prefill.q3m_tp import Q3MPrefillTP
         path = opt['model']
@@ -1037,12 +1059,14 @@ class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         sh = tp_shape(opt['model'])
         slot = (sh['state'] + sh['kv_pos']) / 2 ** 20 * 1.05 + 1.0
         need = lambda c: [sh['need_mib'](c) + (slots + 2) * slot] * 2   # (the side rows: host memory)
         return sh['n_ctx'], [0, 1], slot, need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.qwen3next_tp import Qwen3NextTP
         from .prefill.kpass import KPassOnly
         # (its own check, before anything is read: qwen3next_tp.projection, the one auto_need reads)

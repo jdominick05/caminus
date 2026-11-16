@@ -137,9 +137,12 @@ operands, one rounding more than the decode reader; the model gate at depth judg
 
 Refusals: a non-finite value (an fp16 overflow included) refuses its block. Decode sets bit 2 in the int32 word after
 Sync (`Engine.kv_error`, the dense line's word; `own_op_atts` takes `sy` for it), the prefill in its own `kverr` word.
-`_pass_wait` checks the word before the bound and timeout paths (they zero Sync), `step` marks the engine too, and the
-prefill's settle checks it before the routing flags. The engine stays broken across `reset()` and raises
-`InvalidKVEncoding`. `Q3MoEVerify` and two cards refuse a Q8 engine.
+The word sits right after the status words, so a pass's one asynchronous status copy (`Engine.status_words`, 9 words
+on a Q8 engine) brings it: no extra read back per token. `_pass_wait` checks it before the bound and timeout paths (they
+zero Sync), `Engine.run(check=True)` likewise from its one status read, `step` marks the engine too, and the prefill's
+settle checks its word before the routing flags. The engine stays broken across `reset()` and raises
+`InvalidKVEncoding`. `Q3MoEVerify` and two cards refuse a Q8 engine, and every registry entry but the one-card
+qwen3moe one refuses `opt['kv'] = 'q8'` (`Arch.kv_check`) instead of building its F16 cache.
 
 Memory: 1,088 bytes per position and layer instead of 2,048 (`kv_pos_mib(q8=True)`: 0.0498 MiB per position over the
 48 layers, F16 0.0938), counted by `projection_mib(q8=True)` and the registry's checkpoint slots. The engine key carries
@@ -153,9 +156,30 @@ counts them, nothing else on the card):
 | RX 7900 XTX, display, 1 GiB in use | 32,768 | 40,960 | 32,768 / 61,440 |
 | RX 7900 XT, idle | 4,096 | 8,192 | 4,096 / 8,192 |
 
-`k3_run` of `k3_q3m_lean_kvq8`: 96 VGPRs, 0 spilled, 54 spilled scalars, private segment 0, 15,748 bytes of LDS;
-`k3_q3m_lean`: 96, 0, 53, 15,748 (the chunk's V scales use the scores' spare LDS). Over the scalar budget by one: it was not removed (variants measured: the error word's address made in the op, 32-bit row offsets,
-DPP or shuffle reductions, selects or shifts for the half-dword parity). The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs,
+`k3_run` of `k3_q3m_lean_kvq8`: 96 VGPRs, 0 spilled, 31 spilled scalars, private segment 0, 15,748 bytes of LDS;
+`k3_q3m_lean`: 96, 0, 53, 15,748 (the chunk's V scales use the scores' spare LDS). The Q8 attention alone made it 54.
+Changes to the attention op did not remove that one scalar: the error word's address made in the op, 32-bit row offsets,
+DPP or shuffle reductions, and selects or shifts for the half-dword parity were all measured.
+The module therefore defines `K3_Q3M_ADD_RMS_PIN`, the dense Q8 objects' pinning applied to another op.
+`OP_OWN_ADD_RMS16` takes its row length and slot count through an empty `asm volatile` scalar operand, so the op
+rebuilds them instead of keeping derived values live across the segment loop. No arithmetic changes.
+
+Other pins measured on the Q8 object, k3_run's spilled scalars:
+
+| Pin | Spilled scalars |
+|---|---|
+| none | 54 |
+| `OP_OWN_ADD_RMS16`'s N and slot count (shipped) | 31 |
+| `OP_OWN_ATTS`'s kv heads, splits and heads | 45 |
+| `OP_OWN_MV`'s rows, row bound and expert rows | 51 |
+| `OP_ROUTER`'s experts and k | 53 |
+| add_rms16 + atts | 19 |
+| add_rms16 + atts + router + `OP_F32_MV`'s rows | 12 |
+
+VGPRs stayed at 96, with 0 VGPR spills, in every row.
+The same add_rms16 pin on the F16 object gives 33, measured but not applied: `k3_q3m_lean` keeps its code. So, like for
+like, the Q8 attention adds no spilled scalar. The speed A/B below compares the shipped F16 object (53) with the Q8
+object (31), so the pin is part of the difference it measures. The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs,
 `q3p_attn_q8` 226 (F16: 25 and 223), no spills.
 
 Gates (a non-display card first):
@@ -164,8 +188,11 @@ Gates (a non-display card first):
 tools/guard.sh LOG 600 python -I tests/engine/test_q3m_kvq8_atts.py                    # the op alone: rows, reads, grids, refusals
 tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache R.npz --kv q8
 tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz --kv q8
-tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --llama LL128.bin --kv q8 --against F16.bin
-tools/guard.sh LOG 1800 python -I tools/gates/q3moe_depth_gmodel.py GGUF --ref REF32.npz --llama LL.bin --kv q8 --against F16.bin
+tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --save-logits F16.bin       # the F16 run
+tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --kv q8 --llama LLQ8_128.bin --llama-kv q8_0 \
+    --against F16.bin --against-llama LL128.bin
+tools/guard.sh LOG 1800 python -I tools/gates/q3moe_depth_gmodel.py GGUF --ref REF32.npz --kv q8 --llama LLQ8.bin --llama-kv q8_0 \
+    --against F16.bin --against-llama LL.bin
 ```
 
 Speed (decode and prefill; the two caches do not both fit one card at depth, so alternate runs, F16 then Q8, twice):
@@ -177,8 +204,15 @@ tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefill.py GGUF --lengths 4096
 
 The row checks compare against the F16 row kernel (`q3p_qk_rope`: OP_OWN_ATTS's norm + RoPE statements) on the same
 q | k | v. `test_q3m_kvq8_atts.py` also compares the output with float64 attention over the decoded rows at positions
-across one and many splits, runs fixed fp16 edge blocks (+-65,504, exact ties, a scale that rounds to zero, zeros),
+across one and many splits. The bound is per element: 2 fp16 ulps of the reference plus 1e-5 x max |V|, the dense line's
+bound plus the output's fp16 rounding. A CPU fp32 emulation of the op's summation order on the test's inputs stays
+within one ulp + 1e-7 x max |V|. Faults injected into it (a neighbouring block's V scale, chunk 1 shifted by a row, one
+V row from its neighbour) fail the bound; a 4e-3 x max |V| bound passed all three. It also runs fixed fp16 edge blocks (+-65,504, exact ties, a scale that rounds to zero, zeros),
 checks `q3p_qk_rope_q8`'s rows and refusal, and `q3p_attn_q8` bit for bit against `q3p_attn` over fp16(decoded rows). The G-model gates score the Q8 run against the fp32 reference with the usual rule against
-the `--llama` rows given (`--llama-kv q8_0` labels rows made with `kv q8_0`). `--save-logits` on the F16 run and
-`--against` on the Q8 run give the KLD between the two caches. CPU: `tests/engine/test_q3moe_kvq8_cpu.py`. None of the
+the `--llama` rows given: llama.cpp's q8_0-KV rows (`kv q8_0` in gg_golden's job file, `--llama-kv q8_0`) are the like
+for like bound. `--save-logits` on the F16 run and `--against` on the Q8 run gate the KLD and top-1 agreement between
+the two caches (`tools/gates/kv_against.py`). The bar is the floor rule's shape: our F16 to Q8 mean KLD at most
+llama.cpp's own F16-KV to q8_0-KV mean KLD on the same tokens (`--against-llama` names its F16-KV rows), and top-1
+agreement at most one point below its own. Explicit `--against-kld` / `--against-top1` bars exist for rows without
+llama.cpp references. An `--against` with no bound is refused. CPU: `tests/engine/test_q3moe_kvq8_cpu.py`. None of the
 device gates has run yet.

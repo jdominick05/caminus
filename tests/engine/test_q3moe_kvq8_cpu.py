@@ -10,15 +10,19 @@ in host memory; nothing is launched), with the tiny synthetic file (tests/engine
     engine's own check, and the F16 projection less exactly the row bytes saved); kv_format_id names the format
   - refusals: q8 not a bool; a Q8 cache on any other object or tape form; the Q8 object without q8; a float16 cache on the
     Q8 module (and a uint8 one on the F16 module); the verify engine on a Q8 engine; an IQ prefill object with a Q8 engine
-  - a refused encoding: the error word set with a stalled wait as well: _pass_wait raises InvalidKVEncoding before the
-    timeout path (no bail recorded, the word not cleared), the engine stays broken across reset() and refuses every pass;
-    step() marks it too
+  - a refused encoding: the error word set with a stalled wait as well, read back by _pass_launch's one status copy (no
+    second read): _pass_wait raises InvalidKVEncoding before the timeout path (no bail recorded, the word not cleared), the
+    engine stays broken across reset() and refuses every pass; step() marks it too; Engine.status_words is the F16 module's
+    8 words and the Q8 module's 8 + the error word, contiguous
   - the prefill on a Q8 engine: the Q8 kernels' module beside the F16 object, qk_rope / attn with the Q8 kernels, its KV
     error word passed, its rows checked on the byte cache; the error word set: the settle raises InvalidKVEncoding and the
     engine is broken; numerics() names the cache
   - the prompt cache: the checkpoint layout's row is the Q8 row; the engine key carries the KV format (F16 keys unchanged:
     no 'kv' entry), so a Q8 park never matches an F16 engine
-  - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows
+  - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows; every
+    other entry refuses opt['kv'] = 'q8' in build and auto_need before reading anything (never an F16 engine instead)
+  - tools/gates/kv_against.py (the G-model gates' --against): llama.cpp's floor and explicit bars pass / fail as stated on
+    synthetic logits; a saved file that is not whole rows is refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q3moe_kvq8_cpu.py --scratch DIR"""
 import argparse, contextlib, os, sys, types
@@ -170,11 +174,24 @@ check(raises(lambda: Q3MoEVerify(m, 2, vram_check=False)), 'the verify engine re
 check(raises(lambda: q3m.Q3MPrefill(m, chunk=64, check=False, module=q3m_ops.IQ_MODULE)), 'an IQ prefill object with a Q8 engine is refused')
 
 # ---- a refused encoding --------------------------------------------------------------------------------------------------------
+check(E.status_words().numel() == k3.STATUS_WORDS + 1 and E.status_words()[k3.STATUS_WORDS:].data_ptr() == E.kv_error.data_ptr()
+      and k3.Engine(module='k3_q3m_lean', grid=8).status_words().numel() == k3.STATUS_WORDS,
+      'Engine.status_words: the 8 status words, + the error word right after them on the Q8 module (one copy brings both)')
 mm = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
-mm.E.kv_error.fill_(2); mm.h_st[1] = 1; mm.h_st[2] = 0   # (and a wait that gave up: the timeout path would zero Sync)
+check(mm.h_st.numel() == k3.STATUS_WORDS + 1 and f.h_st.numel() == k3.STATUS_WORDS,
+      'the pinned status block: 9 words on the Q8 engine (the error word), 8 on the F16 one (unchanged)')
+mm.E.run = lambda check=True, trace=None: None            # (no launch: the copies below run on the host tensors)
+mm._stage([1] * 8, 5); mm._tok = False
+mm.E.kv_error.fill_(2); mm.E.sync[2 * k3.MAXSEG + 1] = 1; mm.E.sync[2 * k3.MAXSEG + 2] = 0   # (and a wait that gave up)
+mm._pass_launch(5, 0)
+ITEM = torch.Tensor.item; reads = []
+torch.Tensor.item = lambda self: reads.append(1) or ITEM(self)
 r = raises(lambda: mm._pass_wait(5), errors.InvalidKVEncoding)
-check(r and mm.broken and not mm.bails and int(mm.E.kv_error[0]) == 2 and issubclass(errors.InvalidKVEncoding, errors.NumericalFailure),
-      'a refused block with a stalled wait: InvalidKVEncoding (a NumericalFailure) before the timeout path; no bail, the word kept')
+torch.Tensor.item = ITEM
+check(r and mm.broken and not mm.bails and int(mm.E.kv_error[0]) == 2 and int(mm.h_st[k3.STATUS_WORDS]) == 2 and not reads
+      and issubclass(errors.InvalidKVEncoding, errors.NumericalFailure),
+      'a refused block with a stalled wait: InvalidKVEncoding (a NumericalFailure) from the launch\'s one status copy, before the '
+      'timeout path; no .item() read back, no bail, the word kept')
 mm.reset()
 check(mm.broken and raises(lambda: mm.step_token([1] * 8, 0), errors.InvalidKVEncoding)
       and raises(lambda: mm.step(1), errors.InvalidKVEncoding) and raises(lambda: mm.verify([1] * 8, 0, 0), errors.InvalidKVEncoding),
@@ -226,6 +243,36 @@ nf, _, sf, needf = q.auto_need({'model': P}, 4)
 check(abs(sq - (Q3MoEOne.kv_pos_mib(P, True) * 1.05 + 1.0)) < 1e-12 and needq(MC)[0] < needf(MC)[0]
       and abs((needf(MC)[0] - needq(MC)[0]) - (saved + 6 * (sf - sq))) < 1e-9 and nq == nf,
       'Q3MoE.auto_need with kv q8: Q8 checkpoint slots and the Q8 projection (less than F16 by the rows and slots saved)')
+
+bad = []
+for name, a in arch.ARCHS.items():
+    if name == 'qwen3moe': continue
+    for what, fn in (('build', lambda: a.build({'kv': 'q8'})), ('auto_need', lambda: a.auto_need({'kv': 'q8'}, 4))):
+        try: fn(); bad.append((name, what, 'no error'))
+        except ValueError as e:
+            if "kv 'q8'" not in str(e): bad.append((name, what, str(e)[:80]))
+        except Exception as e: bad.append((name, what, type(e).__name__ + ' ' + str(e)[:80]))
+check(not bad and all(a.kv_check({}) is False and a.kv_check({'kv': 'f16'}) is False for a in arch.ARCHS.values())
+      and arch.ARCHS['qwen3moe'].kv_check({'kv': 'q8'}) is True,
+      f"every other registry entry ({len(arch.ARCHS) - 1}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything; "
+      f"'f16' and no kv pass everywhere" + (f' (wrong: {bad})' if bad else ''))
+
+# ---- the gates' --against (tools/gates/kv_against.py) ---------------------------------------------------------------------------
+sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gates'))
+import kv_against, q3moe_gmodel
+rs = np.random.default_rng(5); V = 64; n = 50
+base = rs.standard_normal((n, V)).astype(np.float32) * 3
+near = base + rs.standard_normal((n, V)).astype(np.float32) * 0.01      # (a small change: tiny KLD, argmax kept)
+far = base + rs.standard_normal((n, V)).astype(np.float32) * 1.0        # (a large one)
+okf, lf = kv_against.gate(q3moe_gmodel.score, near, base, llama_f16=base, llama_q8=base + rs.standard_normal((n, V)).astype(np.float32) * 0.05)
+okb, lb = kv_against.gate(q3moe_gmodel.score, far, base, llama_f16=base, llama_q8=near)
+oke, _ = kv_against.gate(q3moe_gmodel.score, near, base, max_kld=1e-2, min_top1=98.0)
+okx, _ = kv_against.gate(q3moe_gmodel.score, far, base, max_kld=1e-2, min_top1=98.0)
+bf, gf = os.path.join(A.scratch, 'short.bin'), os.path.join(A.scratch, 'rows.bin')
+base.reshape(-1)[:-1].tofile(bf); base.tofile(gf)                       # (one float short of n rows; n whole rows)
+check(okf and not okb and oke and not okx and any(l.startswith('FAIL') for l in lb) and raises(lambda: kv_against.load_rows(bf, n, 'x'), SystemExit)
+      and np.array_equal(kv_against.load_rows(gf, n, 'x'), base),
+      '--against: a small change passes llama.cpp\'s floor and the explicit bars, a large one fails both; rows that are not whole rows are refused')
 
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)

@@ -325,7 +325,15 @@ __device__ __forceinline__ void own_op_add_rms16(const Seg & sg, int tk) {
 #else
 __device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
     __shared__ float part[8];
+#ifdef K3_Q3M_ADD_RMS_PIN
+    // (the row length and slot count through an opaque scalar copy: the op derives them itself instead of k3_run keeping
+    //  values made from them live across the segment loop. Same statements, same bits. k3_run's spilled scalars, measured:
+    //  k3_q3m_lean_kvq8 54 -> 31; k3_q3m_lean 53 -> 33 if it took it too (it does not: its code stays as it was))
+    int N = sg.N, S = sg.pad1; asm volatile("" : "+s"(N), "+s"(S));
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, NI = N >> 8;
+#else
     const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, S = sg.pad1, NI = N >> 8;
+#endif
     const float * d = (const float *)sg.a; const float * w = (const float *)sg.gs; const float * nw = (const float *)sg.W;
     float * x = (float *)sg.y; float * h = (float *)sg.asum; _Float16 * h16 = (_Float16 *)sg.aux;
 #endif

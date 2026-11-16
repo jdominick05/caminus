@@ -3,8 +3,13 @@ shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. On
 0 .. p - 1 hold caminus.ref_kv.encode_q8_kv of known fp16 values:
   row       the position's row the op writes is byte for byte encode_q8_kv of the K / V halves the F16 path stores for the
             same q | k | v (the F16 prefill kernel q3p_qk_rope, OP_OWN_ATTS's norm + RoPE statements, on the same inputs)
-  read      the fp16 output against float64 attention over the decoded rows 0 .. p (the own row decoded too), within
-            4e-3 x max |V|, at positions across one / many splits and chunk edges (0, 1, 63, 64, 65, 127, 1000, 3071, 4000)
+  read      the fp16 output against float64 attention over the decoded rows 0 .. p (the own row decoded too), per element
+            |out - ref| <= 2 fp16 ulps of ref + 1e-5 x max |V|, at positions across one / many splits and chunk edges (0, 1,
+            63, 64, 65, 127, 1000, 3071, 4000). The decoded values are exact in fp32, so the bound is the F16 arm's
+            1e-5 x max |V| plus the output's fp16 rounding. A CPU fp32 emulation of the op's order (splits, 64-position chunks,
+            online softmax, split merge) on these inputs stayed within one ulp + 1e-7 x max |V|. Faults injected into it at
+            depth (one chunk's V on the neighbouring block's scale, chunk 1 rows shifted by one, one V row from its
+            neighbour: 6e-4 .. 4e-3 x max |V|) all fail this bound. The earlier bound (4e-3 x max |V|) passed every one
   grids     the outputs and rows the same bits at 3 / 6 / 7 workgroups per WGP
   edges     fixed fp16 V blocks through the op: +-65,504, exact ties (x / d = k + 0.5: roundf away from zero), a block whose
             stored half scale rounds to zero (+-2^-20), a zero block: the row byte for byte the reference
@@ -89,7 +94,7 @@ def ref_attn(q, rows_k, rows_v):
 
 
 E = tape(None)
-rows_ok, read_ok, worst = True, True, 0.0
+rows_ok, read_ok, worst = True, True, -np.inf
 outs = {}
 for p in POS:
     x = (rng.standard_normal(NH * HD + 2 * M) * 1.3).astype(np.float32)
@@ -105,12 +110,16 @@ for p in POS:
     dk, dv = ref_kv.decode_q8_kv(cache[:(p + 1) * RB].cpu().numpy().reshape(p + 1, RB), LAY)
     r = ref_attn(host_q(x[:NH * HD], p), dk.astype(np.float64), dv.astype(np.float64))
     o = out16.float().cpu().numpy().reshape(NH, HD)
-    e = float(np.abs(o - r).max() / np.abs(dv).max()); worst = max(worst, e)
-    read_ok &= e <= 4e-3
+    vmax = float(np.abs(dv).max()); d = np.abs(o - r)
+    ulp = np.abs(np.spacing(np.abs(r).astype(np.float16))).astype(np.float64)   # (fp16 ulp at each reference value)
+    e = float(((d - 2 * ulp) / vmax).max()); worst = max(worst, e)             # (<= 1e-5: inside the bound)
+    read_ok &= bool((d <= 2 * ulp + 1e-5 * vmax).all())
     outs[p] = (o.copy(), got.copy(), x)
-    print(f'  pos {p}: row {"=" if np.array_equal(got, want) else "!="} encode(F16 row); |out - float64| / max|V| {e:.2e}', flush=True)
+    print(f'  pos {p}: row {"=" if np.array_equal(got, want) else "!="} encode(F16 row); max |out - float64| / max|V| {float(d.max()) / vmax:.2e}, '
+          f'past 2 fp16 ulps {e:.2e} (bound 1e-5)', flush=True)
 check(rows_ok, f'the row written at each of {len(POS)} positions is byte for byte encode_q8_kv of the F16 kernel\'s halves')
-check(read_ok, f'outputs within 4e-3 x max |V| of float64 attention over the decoded rows (worst {worst:.2e}; splits {S})')
+check(read_ok, f'outputs within 2 fp16 ulps + 1e-5 x max |V| of float64 attention over the decoded rows, every element '
+               f'(worst past 2 ulps {worst:.2e} x max |V|; splits {S})')
 # grids: the same bits
 gr_ok = True
 for pw in (3, 6, 7):

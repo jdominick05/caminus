@@ -1626,11 +1626,19 @@ class Engine:
         Does not wait itself or clear the sticky word. Call before timeout retry,
         status clearing or consuming logits; a failed append may be partial.
         """
-        if self.kv_error is not None:
-            code = int(self.kv_error[0].item())
-            if code:
-                from ..errors import InvalidKVEncoding
-                raise InvalidKVEncoding(f'k3 {self.module}: invalid KV encoding (error {code:#x}); cache result is unusable')
+        if self.kv_error is not None: self.check_kv_code(int(self.kv_error[0].item()))
+
+    def check_kv_code(self, code):
+        """the error word's value already read back (with the status words, in one copy: Engine.status_words): raise
+        InvalidKVEncoding when it is set"""
+        if code:
+            from ..errors import InvalidKVEncoding
+            raise InvalidKVEncoding(f'k3 {self.module}: invalid KV encoding (error {code:#x}); cache result is unusable')
+
+    def status_words(self):
+        """the Sync slice a pass's status is read from: the STATUS_WORDS words, and on a Q8 KV engine the error word right
+        after them (sync[SYNC_WORDS], contiguous), so one copy brings both"""
+        return self.sync[2 * MAXSEG:2 * MAXSEG + STATUS_WORDS + (self.kv_error is not None)]
 
     def run(self, check=True, trace=None):
         if self.refuse: raise RuntimeError(self.refuse + ' (refusing to launch)')
@@ -1667,8 +1675,8 @@ class Engine:
                                     *(ctypes.c_int(v) for v in tb))
         if check:
             torch.cuda.synchronize()
-            self.check_kv_error()
-            st = self.sync[2 * MAXSEG:2 * MAXSEG + STATUS_WORDS].tolist()      # exit, err, err_seg, err_seen, bnd, bnd_what, bnd_val, bnd_cap
+            st = self.status_words().tolist()      # exit, err, err_seg, err_seen, bnd, bnd_what, bnd_val, bnd_cap (+ the KV error word)
+            if self.kv_error is not None: self.check_kv_code(st[STATUS_WORDS])   # (first: the paths below zero Sync)
             b = bounds_status(st)
             if b:   # the bound guard refused a position / commit: never retried (the host checks should have caught it)
                 self.sync.zero_()

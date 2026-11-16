@@ -11,10 +11,14 @@ engine's numbers are printed. Prints PASS / FAIL and RESULT; exit 0 only on PASS
 --kv q8 (one card): the engine's KV cache as Q8_0 rows (Q3MoEOne(q8=True)); the same scores and the
 same rule against the --llama rows given (llama.cpp's F16-KV rows are the stricter bound; rows made with 'kv q8_0' in the job
 file the like-for-like one: --llama-kv names which, for the printout). --save-logits PATH writes this run's scored logits
-(f32 [rows, vocab]); --against PATH (another run's saved logits: the F16 cache's) adds KLD(that || this) and top-1 agreement
-between the two runs (printed, not gated)."""
+(f32 [rows, vocab]); --against PATH (another run's saved logits: the F16 cache's) gates KLD(that || this) and top-1 agreement
+between the two runs (tools/gates/kv_against.py): against llama.cpp's own F16-KV -> q8_0-KV cost on the same tokens
+(--against-llama ITS_F16KV.bin with --llama ITS_Q8_0KV.bin --llama-kv q8_0; then the --llama rule above is the
+like-for-like one) or explicit bars (--against-kld MEAN --against-top1 PERCENT); --against without a bound is refused."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kv_against
 import numpy as np
 
 
@@ -43,8 +47,8 @@ if __name__ == '__main__':
     ap.add_argument('--llama', default=None); ap.add_argument('--module', default=None)
     ap.add_argument('--cards', type=int, default=1, choices=(1, 2))
     ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('--llama-kv', default='f16', choices=('f16', 'q8_0'))
-    ap.add_argument('--save-logits', default=None); ap.add_argument('--against', default=None)
-    A = ap.parse_args()
+    kv_against.add_args(ap)
+    A = ap.parse_args(); kv_against.check_args(ap, A)
     if A.kv == 'q8' and A.cards != 1: ap.error('--kv q8: one card only (the two-card Q8 objects are later work)')
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']
     import torch
@@ -74,9 +78,6 @@ if __name__ == '__main__':
     so = score(ref, ours); print(line('caminus' if A.kv == 'f16' else 'caminus q8', so), flush=True)
     if A.save_logits:
         np.ascontiguousarray(ours, dtype=np.float32).tofile(A.save_logits); print(f'logits -> {A.save_logits} ({ours.shape[0]} rows)', flush=True)
-    if A.against:   # (this run against another run of the same rows: Q8 cache vs F16 cache)
-        other = np.fromfile(A.against, dtype=np.float32).reshape(ours.shape[0], -1)
-        print(line('vs saved', score(other, ours)) + f'  ({A.against}: the saved run as the reference)', flush=True)
     if A.llama:
         ll = np.fromfile(A.llama, dtype=np.float32).reshape(len(seq), -1)
         sl = score(ref, ll); print(line('llama.cpp' if A.llama_kv == 'f16' else 'llama q8_0', sl) + f'  (its KV {A.llama_kv})', flush=True)
@@ -84,5 +85,13 @@ if __name__ == '__main__':
         print(('PASS' if c1 else 'FAIL') + f' mean KLD vs float64: caminus {so["mean"]:.3e} <= llama.cpp {sl["mean"]:.3e}')
         print(('PASS' if c2 else 'FAIL') + f' top-1 agreement: caminus {so["top1"]} >= llama.cpp {sl["top1"]}')
         ok = ok and c1 and c2
+    if A.against:   # (this run against another run of the same rows: the Q8 cache against the F16 cache, gated)
+        n = ours.shape[0]
+        lf = kv_against.load_rows(A.against_llama, n, '--against-llama') if A.against_llama else None
+        lq = kv_against.load_rows(A.llama, n, '--llama') if A.against_llama else None
+        c3, lines = kv_against.gate(score, ours, kv_against.load_rows(A.against, n, '--against'), lf, lq, A.against_kld, A.against_top1)
+        if lf is not None: print(line('llama F16', score(ref, lf)) + '  (llama.cpp F16-KV against the reference: the stricter bound, printed)', flush=True)
+        for l in lines: print(l, flush=True)
+        ok = ok and c3
     print('RESULT', 'PASS' if ok else 'FAIL')
     sys.exit(0 if ok else 1)

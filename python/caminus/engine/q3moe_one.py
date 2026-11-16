@@ -26,10 +26,10 @@ from .own_layout import q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
 MODULE_IQ = 'k3_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
-MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}
+MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
 # the KV cache as Q8_0 rows (q8=True): kernels/own_kv_codec.h's blocks, no rotation, each block the encode of the fp16 values
 # the F16 cache holds (a Q8 row is caminus.ref_kv.encode_q8_kv of the F16 row); the lean decode form only, one card
-KV_FORMAT_Q8 = 'q8_0-v1:unrotated:f16-rounded-v1'   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
+KV_FORMAT_Q8 = 'q8_0-v1:unrotated:f16-rounded-v1'
 ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the engine takes as many as its card's grid
                                 # holds at once: splits_for), fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
@@ -365,7 +365,7 @@ class Q3MoEOne:
         self.shard_devs = [self.dev, self.dev]
         self.d_max = (torch.zeros(1, device='cuda'), torch.zeros(1, dtype=torch.int64, device='cuda'))
         self.h_max = (torch.zeros(1, pin_memory=True), torch.zeros(1, dtype=torch.int64, pin_memory=True))
-        self.h_st = torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True)
+        self.h_st = torch.zeros(k3.STATUS_WORDS + int(self.q8), dtype=torch.int32, pin_memory=True)   # (+ the Q8 KV error word: one copy)
         self.ev_done = torch.cuda.Event()
         self.engines = [self.E]
         row = k3.kv_pos_bytes(self.nkv * self.hd, True) if self.q8 else 2 * self.nkv * self.hd   # (elements per position: bytes / halves)
@@ -465,7 +465,7 @@ class Q3MoEOne:
             if self._tok:
                 torch.max(self.logits, dim=1, out=self.d_max)
                 self.h_max[0].copy_(self.d_max[0], non_blocking=True); self.h_max[1].copy_(self.d_max[1], non_blocking=True)
-            self.h_st.copy_(self.E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
+            self.h_st.copy_(self.E.status_words(), non_blocking=True)   # (a Q8 engine: the error word in the same copy)
             self.ev_done.record()
 
     def _pass_wait(self, i0):
@@ -473,10 +473,11 @@ class Q3MoEOne:
         report. A bailed pass leaves OP_OWN_ATTS's merge counters wherever its tasks got: every task still ran once, so
         they are back at zero, but they are cleared here too before the retry"""
         self.ev_done.synchronize()
-        if self.q8:   # (first: the bound and timeout paths below zero the Sync storage, the error word with it)
-            try: self.E.check_kv_error()
-            except k3.InvalidKVEncoding as e: self.mark_broken(str(e))
         st = self.h_st.tolist()
+        if self.q8:   # (first: the bound and timeout paths below zero the Sync storage, the error word with it; read with the
+                      #  status words in _pass_launch's copy, no second read back)
+            try: self.E.check_kv_code(st[k3.STATUS_WORDS])
+            except k3.InvalidKVEncoding as e: self.mark_broken(str(e))
         b = k3.bounds_status(st)
         if b:
             with torch.cuda.device(self.dev): torch.cuda.synchronize(); self.E.sync.zero_(); self.S['ats'][:k3.Engine.ATS_CNT].zero_()

@@ -104,8 +104,9 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
 // row encoded: each block is caminus.ref_kv.encode_q8_kv of the fp16-rounded values the F16 object stores. Every other
 // statement of the op is the F16 one; the position's own k / v in LDS are the decoded codes (what every later pass reads).
 // Decode only: the verify and two-card builds keep the F16 cache. k3_run beside k3_q3m_lean's (96 VGPRs, 0 spilled, 53
-// spilled scalars): 96, 0, 54. Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the K / V
-// half selects as 64-bit shifts spilled 1; the error word's address kept live across k3_run, 2 more spilled scalars.
+// spilled scalars): 96, 0, 54 with this op alone, 31 with the module's K3_Q3M_ADD_RMS_PIN (kernels/k3_q3m_lean_kvq8.hip;
+// the F16 object with the same pin: 33). Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the
+// K / V half selects as 64-bit shifts spilled 1; the error word's address kept live across k3_run, 2 more spilled scalars.
 #if defined(K3_Q3M_VER) || defined(K3_Q3M_TP)
 #error "the Q8 KV cache is built for the one-card decode module only"
 #endif
