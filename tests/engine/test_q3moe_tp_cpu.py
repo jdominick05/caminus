@@ -189,7 +189,7 @@ for il, dd in enumerate(m.L):
         sh &= d['cache'].numel() == (64 + k3.Engine.ATS_PAD) * 2 * kvc * 128 and m.state[(c, il, 'kv')].numel() == 64 * 2 * kvc * 128
 sh &= m.head[0]['rows'] == m.vh and m.head[1]['rows'] == m.vocab - m.vh and m.exp_rows == [512, 256] and m.kvc == [2, 2]
 seg_ats = [[sg for sg in m.E[c].segs if sg.op == k3.OP_OWN_ATTS] for c in (0, 1)]
-sh &= all(sg.ntask == m.splits[c] * m.kvc[c] for c in (0, 1) for sg in seg_ats[c]) and m.splits == [q3moe_tp.splits_for(2)] * 2
+sh &= all(sg.ntask == m.splits[c] * m.kvc[c] for c in (0, 1) for sg in seg_ats[c]) and m.splits == [q3moe_tp.splits_for(2, q3moe_tp.SPLITS_CAP)] * 2
 check(sh, f'each card\'s matrices have its share\'s shapes (expert rows {m.exp_rows}, kv heads {m.kvc}, head {m.vh} / {m.vocab - m.vh}); '
       f'its KV cache holds its kv heads at max_ctx + {k3.Engine.ATS_PAD} rows; the attention takes splits_for(its kv heads) = {m.splits}')
 grids = []
@@ -209,9 +209,9 @@ c128 = (m.splits == [q3moe_tp.splits_for(2, 128)] * 2 == [105, 105] and q3moe_on
         and all(sg.work == 105 and sg.ntask == 105 * 2 for c in (0, 1) for sg in seg128[c])
         and all(m.buf[c]['ats'].numel() == k3.Engine.atts_scratch_floats(2, 105) for c in (0, 1)))
 m.splits_cap = q3moe_tp.SPLITS_CAP; m._build_tapes()
-check(c128 and m.splits == [64, 64] and q3moe_tp.SPLITS_CAP == 64,
+check(c128 and m.splits == [105, 105] and q3moe_tp.SPLITS_CAP == 128,
       f'splits_cap 128: each card takes splits_for(2, 128) = 105 splits (the 210-workgroup grid over 2 kv heads), its scratch for them; '
-      f'the default cap stays 64 ({m.splits})')
+      f'the default cap is 128 ({m.splits})')
 refused = []
 for cap in (0, 129):
     try: Q3MoETP(P_T, devices=(0, 1), max_ctx=64, vram_check=False, splits_cap=cap); refused.append(False)
@@ -250,7 +250,7 @@ up_split = [sum(w.numel() * w.element_size() for n, c_, k, w, a in m.uploads if 
 up_rep = [sum(w.numel() * w.element_size() for n, c_, k, w, a in m.uploads if c_ == c and q3moe_tp._role(n) == 'rep') - 8 * nl for c in (0, 1)]
 good = all(t['rep'] == rep == ur for t, ur in zip(T, up_rep)) and all(abs(t['split'] - us) < 1e-6 for t, us in zip(T, up_split))
 good &= all(t['slots'] == 2 * nl * (16 + info['D']) * 4 for t in T) and all(t['kv'] == nl * (64 + k3.Engine.ATS_PAD) * 4 * 2 * 128 for t in T)
-good &= all(t['ats'] == 4 * k3.Engine.atts_scratch_floats(2, q3moe_tp.ATS_SPLITS) for t in T)
+good &= all(t['ats'] == 4 * k3.Engine.atts_scratch_floats(2, q3moe_tp.SPLITS_CAP) for t in T)
 check(good, f'the projection\'s terms per card: its slices ({up_split[0]} / {up_split[1]} B, the bytes the engine uploads), the replicated '
       f'tensors ({rep} B on each), its kv heads\' KV at max_ctx + {k3.Engine.ATS_PAD} rows, the ATS scratch, {2 * nl} receive slots of 16 words + D floats')
 w = [t['split'] / 2 ** 20 + t['rep'] / 2 ** 20 for t in T]
@@ -262,7 +262,7 @@ except ValueError:
     r = True
 check(r and T2[0]['kv'] > T[0]['kv'], 'past the file\'s context_length the projection is computed (arithmetic), and the engine refuses it')
 F = ggufio.GGUFFile(P_T); T128 = projection_terms(F, 64, splits_cap=128); F.close()
-p128 = Q3MoETP.projection_mib(P_T, 64, splits_cap=128)
+p128 = Q3MoETP.projection_mib(P_T, 64, splits_cap=128); p0 = Q3MoETP.projection_mib(P_T, 64, splits_cap=64)
 d_ats = 4 * (k3.Engine.atts_scratch_floats(2, 128) - k3.Engine.atts_scratch_floats(2, 64)) / 2 ** 20
 check(all(t['ats'] == 4 * k3.Engine.atts_scratch_floats(2, 128) for t in T128) and all(abs((b - a) - d_ats) < 1e-9 for a, b in zip(p0, p128)),
       f'the projection at splits_cap 128 counts its ATS scratch: {d_ats * 1024:.0f} KiB more per card than at 64')

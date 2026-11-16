@@ -42,10 +42,10 @@ from .own_layout import q6k_planes
 from .q35_dense_tp import cut, vocab_cut
 from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN
 
-SPLITS_CAP = ATS_SPLITS   # the most attention splits per kv head on a card (splits_cap): one card's cap (64). A card holds half
+SPLITS_CAP = 128         # the most attention splits per kv head on a card (splits_cap): one card's cap (64). A card holds half
                           # the kv heads, so 64 splits fill 128 of the XTX's 192 / the XT's 210 workgroups; the two-card
                           # modules' merge takes up to k3.ATS_MAXS_TP (128: XTX 96, XT 105 splits of 2 kv heads), the
-                          # depth benchmark's arm option ':cap=128' (benchmarks/q3moe_depth.py). The default stays 64 until measured
+                          # depth benchmark's arm option ':cap=128' (benchmarks/q3moe_depth.py). Measured 2026-11-15, XTX + XT: 128 gives 1.10 / 1.12 / 1.12x cap 64's decode at 16K / 32K / 40.9K, the same at 8 and 4K
 from .tp_slots import Slots, _hip
 
 TAPE_MIB = 4      # an upper bound of one card's tape buffers (checked in _build_tapes), counted in the projection
