@@ -7,7 +7,7 @@ CLAUDE.md imports this file.
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
 - It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
-  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, Swift 1.5 and ThinkingCap also on two; on
+  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, Swift 1.5, ThinkingCap and Qwen3-30B-A3B also on two; on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
   `--draft mtp` (their own multi-token-prediction block; `decode/mtp35.py`) and `--draft dflash` (its base
   model's DFlash2 drafter; `decode/dflash35.py`), on one card or two. `python/caminus/models.py` is the catalog.
@@ -138,8 +138,12 @@ CLAUDE.md imports this file.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `k3_q3m_lean_tp`: kv heads and each
-  expert's rows split, router replicated; `check_replicas` compares the residual and every layer's router ids; not served
-  yet, no architecture entry; `tests/engine/test_q3moe_tp_cpu.py`, GPU gate `tests/engine/test_q3moe_tp.py`). Its batched
+  expert's rows split, router replicated; `check_replicas` compares the residual and every layer's router ids; served by
+  `caminus serve --cards 2` through `arch.Q3MoETP` (`TWO_CARD['qwen3moe']`; one card stays the default, the picker offers
+  two for `Q3MoETP.two_card_models`): card 0 is the bigger card (placement's order) and takes 512 of each expert's 768
+  rows, a smaller card 0 is refused (`pair_refusal`), max_ctx auto capped at the file's 40,960; both objects
+  (`k3_q3m_lean_tp`, `q3m_prefill_tp`) are in the installed runtime set; `tests/engine/test_q3moe_tp_cpu.py`, GPU gate
+  `tests/engine/test_q3moe_tp.py`). Its batched
   prefill is `prefill/q3m_tp.py` (`Q3MPrefillTP`: the one-card chunk per card on its slices and KV rows, 2 exchanges per
   layer through `prefill/xchg.py` in micro-chunks so an exchange overlaps the next piece's compute; the FFN partial
   weighted over its slots first by `kernels/q3m_prefill_tp.hip`, its own object so `q3m_prefill.hsaco` stays unchanged;
@@ -235,6 +239,7 @@ tools/guard.sh LOG 600 python -I tools/k3_smoke.py --model coder          # ends
 tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # decode ms/token
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1 --cards 2   # its two-card form (swift-1.5, thinkingcap, qwen3-30b-a3b)
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load (qwen35 or qwen3moe), read back bit for bit
 CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 300 python -I tools/gates/h2d_pattern.py --seconds 180

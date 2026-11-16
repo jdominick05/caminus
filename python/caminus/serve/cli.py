@@ -115,7 +115,8 @@ def parser():
                                     "The cards are picked from the host (caminus.device.host: the bigger card first for a "
                                     "two-card model, the smallest that fits for a one-card one); HIP_VISIBLE_DEVICES limits the choice")
     ap.add_argument('--cards', type=int, choices=(1, 2), help='the cards the model runs on (default: its own count; 2: the '
-                    'dense own-code models swift-1.5 / thinkingcap on two cards, tensor parallel)')
+                    'dense own-code models swift-1.5 / thinkingcap and qwen3-30b-a3b on two cards, tensor parallel; one card stays '
+                    'qwen3-30b-a3b\'s default)')
     ap.add_argument('--drafter', help='the Coder\'s DFlash GGUF (default: caminus.config dflash)')
     ap.add_argument('--no-drafter', action='store_true', default=None, help='no DFlash drafter (plain decode)')
     ap.add_argument('--draft', choices=('off', 'mtp', 'dflash'), default=None, help='speculative decoding: off (plain '

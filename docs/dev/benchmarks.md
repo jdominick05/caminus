@@ -510,6 +510,28 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 | Mean KLD against the reference, 128 tokens | **4.66e-04**, top-1 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
 | The same for the last 64 of 16,384 / 40,896 tokens | **8.80e-04**, 62 / 64; **6.64e-04**, 64 / 64 | 5.06e-03, 60 / 64; 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
 
+### Qwen3-30B-A3B on two cards (engine level)
+
+A placeholder until the served rows are measured. `caminus serve --cards 2` (the `qwen3moe-tp` entry) runs the same file on
+an RX 7900 XTX + RX 7900 XT; one card stays the model's default. Each card holds 2 of the 4 kv heads with their query
+heads, and 512 (XTX) or 256 (XT) of each expert's 768 rows; the two cards add their partial results 96 times per token.
+Every number below is engine level (no server), measured 2026-11-15:
+
+| Decode at depth (tok/s) | 8 | 4,096 | 16,384 | 32,768 | 40,900 |
+|---|---|---|---|---|---|
+| Two cards (XTX + XT) | 218 | 195 | 163 | 133 | 125 |
+| One XTX | 246 | 210 | 159 | 120 | 105 |
+
+- Decode: `benchmarks/q3moe_depth.py --cards 2` (under `tools/guard.sh`), one token per pass, medians of three runs, at
+  128 attention splits per kv head (the two-card default), interleaved with 64-split runs. The one-XTX row is the same
+  script without `--cards 2`, from an earlier run that day alternated with two-card runs at 64 splits.
+- Prefill from empty (`benchmarks/q3moe_prefill.py --cards 2` and the same script on one XTX, under `tools/guard.sh`,
+  separate processes interleaved, medians of three; the exchange overlapped with the next piece's compute): 512 tokens
+  3,735 tok/s against 5,054 (0.74x: one piece, nothing overlaps), 4,096 tokens 7,041 against 6,503 (1.08x), 32,768
+  tokens 3,556 against 2,788 (1.28x).
+- Served numbers (`tools/serve_smoke1.py --card 0,1 --cards 2`, decode and prompt reading through the server, against
+  the one-card served row above) are still to come.
+
 ## Two-card yardstick: stock llama.cpp, tensor and layer split
 
 Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT with stock llama.cpp (ggml-org master 7bcbc04, built for gfx1100):

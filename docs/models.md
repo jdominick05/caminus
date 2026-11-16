@@ -8,7 +8,7 @@ from its Hugging Face repository and checks every file before using it.
 | Name | Model | Cards | Download | Decode | Prompt reading |
 |---|---|---|---|---|---|
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
-| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB | 18.6 GB | 248 tok/s | 6,432 tok/s |
+| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB; or 2 | 18.6 GB | 248 tok/s | 6,432 tok/s |
 | `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
 | `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 55 tok/s | 800 tok/s (measured on an XT) |
 | `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 47 tok/s; 68 on two cards | 942 tok/s |
@@ -72,6 +72,14 @@ drafters work on two cards too, with the same output as plain decoding, and `--d
 the drafter file is present and 32,768 tokens of context still fit with it. On an XTX + XT with 10K-34K-token prompts, Swift 1.5 drafts at 1.36-1.44x and
 ThinkingCap at 1.13-1.18x; on 11K-29K-token agent prompts the range is 1.20-1.45x
 ([benchmarks](dev/benchmarks.md#speculative-decoding-on-two-cards-served)). `--draft off` turns it off.
+
+`qwen3-30b-a3b` runs on two cards too (`caminus start qwen3-30b-a3b --cards 2`, or `caminus serve --cards 2`), but one
+card stays its default. Each card holds half of every layer's attention and part of every expert (two thirds on the
+bigger card, which is card 0). Measured in the engine so far, not yet through the server: two cards write more slowly
+than one XTX at short context (218 against 246 tok/s) and faster from about 16K tokens on (125 against 105 tok/s at
+40,900), and read a 4K prompt faster (7,041 against 6,503 tok/s; a short prompt more slowly). The context stays 40,960 tokens, the model's own
+limit, so the second card buys speed with a long context, not more context
+([benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards-engine-level)). No drafter on one card or two.
 
 ## The names your tools use
 

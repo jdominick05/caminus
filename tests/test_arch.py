@@ -66,22 +66,43 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'],
-          f'archs: the six served and the dense own line\'s two-card form ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3moe-tp', 'qwen3next', 'qwen4exp'],
+          f'archs: the six served, the dense own line\'s and Qwen3-30B-A3B\'s two-card forms ({sorted(arch.ARCHS)})')
     check(arch.ARCHS['qwen35-own'].variant(2) is arch.ARCHS['qwen35-own-tp'] and arch.ARCHS['qwen35-own'].variant(1) is arch.ARCHS['qwen35-own']
-          and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own'] and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp'},
+          and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own']
+          and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp', 'qwen3moe': 'qwen3moe-tp'},
           'variant: --cards 2 names the dense own line\'s two-card entry; 1 / None its own')
+    q3, q3tp = arch.ARCHS['qwen3moe'], arch.ARCHS['qwen3moe-tp']
+    check(q3.variant(2) is q3tp and q3.variant(1) is q3 and q3.variant(None) is q3 and q3.cards == 1
+          and models.BY_NAME['qwen3-30b-a3b'].cards == 1 and models.BY_NAME['qwen3-30b-a3b'].arch == 'qwen3moe',
+          'variant: Qwen3-30B-A3B --cards 2 builds the two-card recipe (qwen3moe-tp); one card stays its default (no --cards, '
+          'the catalog\'s card count)')
     try:
-        arch.ARCHS['qwen3moe'].variant(2); refused = False
+        arch.ARCHS['qwen35'].variant(2); refused = False
     except ValueError:
         refused = True
     check(refused and arch.ARCHS['qwen35-own-tp'].split([{'label': 'XTX'}, {'label': 'XT'}]) == {'ffn_share': 0.532}
           and arch.ARCHS['qwen35-own-tp'].split([{'label': 'XT'}, {'label': 'XT'}]) == {'ffn_share': 0.5},
           'variant: a model without a two-card form refuses --cards 2; the two-card split weighs the feed-forward rows by bandwidth')
+    xtx, xt = dict(label='XTX', total_mib=24560, card='card1', pci='0000:03:00.0'), dict(label='XT', total_mib=20464, card='card2', pci='0000:08:00.0')
+    check(q3tp.split([xtx, xt]) == {'exp_rows': 512, 'vocab_share': 0.532} and q3tp.split([xt, dict(xt, pci='x')]) == {'exp_rows': 512, 'vocab_share': 0.5}
+          and q3tp.split([xtx, dict(xtx, pci='x')]) == {'exp_rows': 512, 'vocab_share': 0.5} and q3tp.split(None)['exp_rows'] == 512
+          and q3tp._split({'placement': {'split': {'exp_rows': 512, 'vocab_share': 0.532}}}) == (512, 0.532),
+          'qwen3moe-tp split: card 0 (the bigger card first) takes 512 of 768 expert rows on every pair; the head by bandwidth; '
+          'build and max_ctx auto read the placement\'s stored split')
+    why = q3tp.pair_refusal([xt, xtx])
+    from caminus.device import host as _h
+    try:
+        q3tp.fits(dict(model='unused'), [xt, xtx]); raised = None
+    except _h.PlacementError as exc:
+        raised = str(exc)
+    check(q3tp.pair_refusal([xtx, xt]) is None and q3tp.pair_refusal([xt, dict(xt, pci='x')]) is None and bool(why)
+          and 'bigger card' in why and raised == why,
+          f'qwen3moe-tp pair: XTX + XT and equal cards pass; a smaller card 0 is refused, by placement too ({why})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
                     'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
-                    'qwen35-own-tp': ('tp', 2, 1, 'mtp')},
+                    'qwen35-own-tp': ('tp', 2, 1, 'mtp'), 'qwen3moe-tp': ('tp', 2, 1, None)},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
           'archs: the own-code qwen35 entry takes the own tokenizer, AREX-2\'s entry keeps its own')
@@ -186,7 +207,7 @@ def main():
           'rope keys: meta keeps every rope.scaling.* key the vendored gguf-py names')
     yarn = {'rope.scaling.type': 'yarn', 'rope.scaling.factor': 4.0, 'rope.scaling.original_context_length': 32768}
     by_header = {'qwen4exp': 'qwen4exp', 'qwen35moe': 'qwen35moe', 'qwen35': 'qwen35', 'qwen3moe': 'qwen3moe',
-                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35'}
+                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35', 'qwen3moe-tp': 'qwen3moe'}
     check(sorted(by_header) == sorted(arch.ARCHS), 'rope keys: every entry has a header architecture below')
 
     def rope_file(a, kv, tag):
@@ -260,6 +281,7 @@ def main():
     # ---- the model cards' context facts in the registry (data only: nothing serves from them yet)
     F = {n: ent.rope_facts for n, ent in arch.ARCHS.items()}
     check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), None, None, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
+          and F['qwen3moe'] is F['qwen3moe-tp'] is arch.QWEN3MOE_ROPE
           and F['qwen35-own'] is F['qwen35-own-tp'] is arch.QWEN35_ROPE
           and (F['qwen35-own'].native_ctx, F['qwen35-own'].card_factors, F['qwen35-own'].shipped) == (262144, (2.0, 4.0), None)
           and (F['qwen4exp'].native_ctx, F['qwen4exp'].card_kind, F['qwen4exp'].shipped, F['qwen4exp'].shipped_factor)
@@ -322,7 +344,7 @@ def main():
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
-                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP'},
+                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen3moe-tp': 'Q3MoETP'},
               f'engine_class: every entry\'s engine imports ({names})')
         # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
         # engine served greedy requests without them and failed its first sampled one on the card)
@@ -419,6 +441,27 @@ def main():
         check(tpa.two_card_models == ('swift-1.5', 'thinkingcap') and all(models.BY_NAME[n].arch == 'qwen35-own' for n in tpa.two_card_models)
               and 'qwen3.8-27b' not in tpa.two_card_models and tpa.draft_refusal('mtp') is None and tpa.draft_refusal('dflash') is None,
               f'two cards: the picker\'s catalog models with a two-card form ({tpa.two_card_models}, not the plain 27B); no refusal without a file')
+        # Qwen3-30B-A3B on two cards: the registry's projection is the engine's own check (Q3MoETP.projection_mib at the
+        # placed split) + the two-card prefill's construction check + the cache's checkpoint slots (a T = 1 tail row of each
+        # card's kv heads), capped at the file's context_length; no drafter
+        sys.path.insert(0, os.path.join(ROOT, 'tests', 'engine'))
+        import tiny_q3m
+        from caminus.engine import q3moe_tp as _q3tp
+        from caminus.prefill import q3m_tp as _q3pf
+        q3f = os.path.join(S, 'tiny-q3m-tp-40k.gguf'); tiny_q3m.write(q3f, tp=True, n_ctx=40960)
+        q3tp = arch.ARCHS['qwen3moe-tp']
+        pair = [dict(label='XTX', total_mib=24560), dict(label='XT', total_mib=20464)]
+        n_ctx, devs, slot, need = q3tp.auto_need(dict(model=q3f), 4, cards=pair)
+        pj = _q3tp.Q3MoETP.projection_mib(q3f, 32768, exp_rows=512, vocab_share=0.532)
+        pf = _q3pf.need_tp_mib(_q3pf.tp_shapes(q3f, 512), q3tp.PREFILL_CHUNK)
+        sl = [v * 1.05 + 1.0 for v in _q3tp.Q3MoETP.kv_pos_mib(q3f)]
+        want = [a + b + 6 * c for a, b, c in zip(pj, pf, sl)]
+        check(q3tp.EXP_ROWS == _q3tp.EXP_ROWS and n_ctx == 40960 and devs == [0, 1] and slot == max(sl)
+              and all(abs(x - y) < 1e-9 for x, y in zip(need(32768), want)) and need(40960)[0] > need(32768)[0]
+              and q3tp.two_card_models == ('qwen3-30b-a3b',) and q3tp.default_draft({}) == 'off' and q3tp.drafter is None
+              and q3tp.tokenizer == 'own' and q3tp.min_ctx({}) == arch.MIN_CTX,
+              f'qwen3moe-tp auto_need: the engine projection + the prefill check + 6 checkpoint slots per card '
+              f'({" / ".join(f"{v:.1f}" for v in need(32768))} MiB at 32768), capped at the file\'s 40,960; no drafter')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:

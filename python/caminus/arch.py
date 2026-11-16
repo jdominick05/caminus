@@ -12,7 +12,9 @@ what a model needs; nothing else branches on a GGUF's general.architecture to bu
              layer)
   qwen3next  Qwen3-Coder-Next: Qwen3NextTP on both cards, T = 1, no drafter yet, no batched prefill yet (KPassOnly: every
              prompt runs as K3 passes)
-  qwen3moe   Qwen3-30B-A3B: Q3MoEOne on one card (own code from the GGUF to the logits), T = 1, no drafter yet, KPassOnly
+  qwen3moe   Qwen3-30B-A3B: Q3MoEOne on one card (own code from the GGUF to the logits), T = 1, no drafter, its own batched
+             prefill (caminus.prefill.q3m.Q3MPrefill); its two-card form qwen3moe-tp (TWO_CARD: --cards 2) is Q3MoETP with
+             Q3MPrefillTP, offered beside the one-card default
 
 Any other architecture takes the Coder's path, as before the registry: FlashNextTP refuses a GGUF it cannot load.
 
@@ -375,7 +377,8 @@ class Arch:
 
     def variant(self, cards):
         """the entry that serves this model on `cards` cards (None: its own count). An architecture with a two-card form names
-        it in TWO_CARD (the dense own line: Dense35 -> Dense35TP); any other count than its own is refused (ValueError)"""
+        it in TWO_CARD (the dense own line: Dense35 -> Dense35TP; Qwen3-30B-A3B: Q3MoE -> Q3MoETP); any other count than its
+        own is refused (ValueError)"""
         if cards is None or int(cards) == self.cards: return self
         alt = TWO_CARD.get(self.name) if int(cards) == 2 else None
         if alt is None:
@@ -936,6 +939,91 @@ class Dense35TP(Arch):
         return m, pf, d, dr
 
 
+class Q3MoETP(Arch):
+    """qwen3moe (Qwen3-30B-A3B) on TWO cards (caminus serve --cards 2 / caminus start qwen3-30b-a3b --cards 2; one card stays
+    the model's default): engine/q3moe_tp.py's Q3MoETP (tensor parallel on the two-card build of the lean decode module), T = 1,
+    no drafter, its own two-card batched prefill (caminus.prefill.q3m_tp.Q3MPrefillTP). Never picked from a header or the
+    catalog: Q3MoE.variant(2) names it. The split: card 0 takes 2 of the 4 kv heads and rows 0 .. 511 of every expert's 768
+    (the down projection's K cut must fall on a whole 256-value block, so the only cuts are 512 / 256 and 256 / 512), the head
+    rows by the cards' streaming bandwidth (CARD_BW); the router, norms and embedding are on both cards.
+
+    Why 512 on card 0: placement (caminus.device.host.pair) puts the bigger card first, and the bigger card takes the bigger
+    expert share, as the Coder's split does; on an XTX + XT that is also the faster card (its 512 rows balance the XT's higher
+    fixed cost per segment). On two equal cards (XT + XT, XTX + XTX) the cut is still 512 / 256: no 50 / 50 cut exists on
+    256-value blocks, and the memory projection decides whether card 0 holds it. A pair whose card 0 is the smaller card (only
+    reachable by bypassing the placement's order) is refused (pair_refusal), not given the 256 / 512 cut: that cut is not
+    gated or measured.
+
+    max_ctx auto is capped at the file's context_length (40,960) as on one card: the engine refuses more, and nothing applies
+    the model card's YaRN scaling yet (Arch.rope_refusal). Two cards are slower than one at short context and faster past
+    about 16K positions (engine level, docs/dev/benchmarks.md), which is why one card stays the default."""
+    kind, cards, T, engine = 'tp', 2, 1, 'engine.q3moe_tp:Q3MoETP'
+    rope_facts = QWEN3MOE_ROPE
+    tokenizer = 'own'          # (caminus.bpe, as the one-card entry: no gguf-py, no tokenizers on the two-card path either)
+    PREFILL_CHUNK = Q3MoE.PREFILL_CHUNK
+    EXP_ROWS = 512             # card 0's rows of every expert (= caminus.engine.q3moe_tp.EXP_ROWS; tests/test_arch.py checks it)
+    # the catalog models this entry serves on two cards (the model picker reads no file: a fact about the catalog)
+    two_card_models = ('qwen3-30b-a3b',)
+
+    def split(self, cards):
+        """{'exp_rows': card 0's rows of every expert, 'vocab_share': card 0's part of the head rows} for the pair in engine
+        order (the bigger card first): EXP_ROWS, and the cards' measured streaming bandwidth (CARD_BW) by label"""
+        if not cards: return {'exp_rows': self.EXP_ROWS, 'vocab_share': 0.5}
+        bw = [CARD_BW.get(c.get('label'), CARD_BW['XT']) for c in cards]
+        return {'exp_rows': self.EXP_ROWS, 'vocab_share': round(bw[0] / (bw[0] + bw[1]), 3)}
+
+    def _split(self, opt, cards=None):
+        """(exp_rows, vocab_share): from these cards (placement, caminus fit), else the placement's stored split (build, max_ctx
+        auto), else the default"""
+        sp = self.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or self.split(None))
+        return int(sp.get('exp_rows', self.EXP_ROWS)), float(sp.get('vocab_share', 0.5))
+
+    def pair_refusal(self, cards):
+        if cards and len(cards) >= 2 and int(cards[0].get('total_mib') or 0) < int(cards[1].get('total_mib') or 0):
+            from .device import host
+            return (f'Qwen3-30B-A3B on two cards puts {self.EXP_ROWS} of each expert\'s 768 rows on card 0, so card 0 must be the '
+                    f'bigger card: {" + ".join(host.describe(c) for c in cards)} is in the other order (let caminus pick the '
+                    f'cards, or list the bigger card first in HIP_VISIBLE_DEVICES)')
+        return None
+
+    def fits(self, opt, cards):
+        why = self.pair_refusal(cards)
+        if why:
+            from .device import host
+            raise host.PlacementError(why)
+        return super().fits(opt, cards)
+
+    def _prefill_mib(self, path, exp_rows):
+        """per card, everything Q3MPrefillTP checks at construction (its buffers, receive rows, code objects and streams)"""
+        from .prefill.q3m_tp import need_tp_mib, tp_shapes
+        return need_tp_mib(tp_shapes(path, exp_rows), self.PREFILL_CHUNK)
+
+    def auto_need(self, opt, slots, cards=None):
+        """per card: the engine's own projection (Q3MoETP.projection_mib, the terms its check counts) + the two-card prefill's
+        construction check + the prompt cache's slots + 2 checkpoint slots, each one T = 1 tail row of that card's kv heads in
+        every layer (cache/prompt.py Layout: no recurrent state); the side rows are host memory"""
+        from .engine.q3moe_tp import Q3MoETP as E
+        path = opt['model']
+        er, vs = self._split(opt, cards)
+        n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
+        pf = self._prefill_mib(path, er)
+        slot = [v * 1.05 + 1.0 for v in E.kv_pos_mib(path)]
+        need = lambda c: [p + f + (slots + 2) * s for p, f, s in zip(E.projection_mib(path, c, exp_rows=er, vocab_share=vs), pf, slot)]
+        return n_ctx, [0, 1], max(slot), need
+
+    def build(self, opt, log=print, T=None):
+        from .engine.q3moe_tp import Q3MoETP as E
+        from .prefill.q3m_tp import Q3MPrefillTP
+        path = opt['model']
+        er, vs = self._split(opt)
+        # (the prefill's construction check counted in the engine's own, before anything is read)
+        m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), exp_rows=er, vocab_share=vs,
+              vram_extra_mib=self._prefill_mib(path, er))
+        log(f'caminus serve: two cards: expert rows {m.exp_rows[0]} / {m.exp_rows[1]}, kv heads {m.kvc[0]} / {m.kvc[1]}, '
+            f'head rows {m.vh} / {m.vocab - m.vh} (vocab_share {vs})', flush=True)
+        return m, Q3MPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None
+
+
 class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
 
@@ -955,8 +1043,11 @@ class TwoCardTP(Arch):
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
                              Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
-                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'))}
-TWO_CARD = {'qwen35-own': 'qwen35-own-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
+                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'),
+                             Q3MoETP('qwen3moe-tp', 'qwen3-30b-a3b'))}
+# a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2. Offered, never the default: a model's own
+# card count (its catalog entry, Arch.cards) is what a serve without --cards runs
+TWO_CARD = {'qwen35-own': 'qwen35-own-tp', 'qwen3moe': 'qwen3moe-tp'}
 CODER = ARCHS['qwen4exp']
 
 

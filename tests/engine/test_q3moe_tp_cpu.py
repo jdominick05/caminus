@@ -21,6 +21,9 @@ calls (every tensor in host memory; nothing is launched).
   - the load: capacity.check runs (both cards, the projection) before the first allocation or upload; with CAMINUS_H2D
     unset the uploader is built with 'pinned' (upload.TWO_CARD_DEFAULT) and the upload log from the environment; every kept
     tensor's host_bytes equals its upload
+  - the prompt cache on it (caminus serve --cards 2): the checkpoint layout holds each card's own KV rows (its kv heads),
+    no recurrent state, a slot within the registry's per-card slot projection; the cache key carries the two-card module,
+    both devices and the split, so a one-card entry on the same cache directory never matches
   - the imports: the engine imports with gguf-py and tokenizers refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q3moe_tp_cpu.py --scratch DIR"""
@@ -333,6 +336,28 @@ check(isinstance(lo, Q3MoETP) and type(lo).__name__ == 'Q3MLoadOnly' and not has
       f'tp_load_only on a qwen3moe file: Q3MoETP without tapes or receive slots; {n} tensors ({nb} B) read back equal, a planted '
       f'one-byte mismatch found')
 del lo
+
+# ---- the prompt cache on the served engine (caminus serve --cards 2): per-card KV rows, slot size, key ----------------------
+from types import SimpleNamespace as _NS
+from caminus.cache import prompt as _prompt
+m3 = Q3MoETP(P_T, devices=(0, 1), max_ctx=64, vram_check=False)
+L = _prompt.Layout(m3)
+row = [k3.kv_pos_bytes(m3.kvc[c] * m3.hd, False) for c in (0, 1)]
+slot_mib = [v * 1.05 + 1.0 for v in Q3MoETP.kv_pos_mib(P_T)]          # (arch.Q3MoETP.auto_need's checkpoint slot per card)
+check(L.devs == [0, 1] and L.T == 1 and L.kv_rows == 64 and L.pb == row and all(len(L.kv[c]) == m3.nl for c in (0, 1))
+      and all(not L.state[c] for c in (0, 1)) and L.df_card is None and not L.idx
+      and L.rows_bytes(40) == [m3.nl * 40 * row[c] for c in (0, 1)]
+      and all(L.nbytes[c] >= m3.nl * row[c] and L.nbytes[c] / 2 ** 20 <= slot_mib[c] for c in (0, 1)),
+      f'cache layout: each card\'s own KV rows ({row} B per position per layer: its kv heads), {m3.nl} layers, no recurrent '
+      f'state; a checkpoint slot ({L.nbytes} B) within the registry\'s slot projection ({[round(v, 3) for v in slot_mib]} MiB); '
+      f'park / restore rows per card (rows_bytes)')
+key = _prompt.engine_key(m3, _NS(numerics=lambda: dict(q='x'), crossover=8), build='fixture')
+check(key['module'] == 'k3_q3m_lean_tp' and key['tp']['devices'] == [0, 1] and key['tp']['exp_rows'] == m3.exp_rows0 == 512
+      and key['tp']['kv_heads'] == 2 and key['tp']['vocab_rows'] == m3.vh and key['tp']['ntok'] == 1
+      and key['module'] != q3moe_one.MODULE_LEAN,
+      'cache key: the two-card module, both devices and the split (exp_rows, kv_heads, vocab rows): a one-card park on the '
+      'same cache directory (caminus start --cards 1 / 2 share it) is never matched')
+del m3
 
 # ---- the own-code path imports no gguf-py ---------------------------------------------------------------------------------
 BLOCK = ("import sys\nclass B:\n    def find_spec(self, name, path=None, target=None):\n"

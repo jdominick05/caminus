@@ -27,8 +27,8 @@ pieces, modes and the chunk split change no bit.
 
 Not bitwise to the one-card prefill by design (the K-split down, the attn_output column split, the slot sum before the
 exchange each change a summation order); G-model gated as the one-card prefill (tests/prefill/test_q3m_prefill_tp.py):
-prefill then two-card decode against the float64 / fp32 references, llama.cpp as the bound. Not served (no architecture
-entry names it). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here)."""
+prefill then two-card decode against the float64 / fp32 references, llama.cpp as the bound. Served as
+the prompt path of `caminus serve --cards 2` for Qwen3-30B-A3B (caminus.arch.Q3MoETP). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here)."""
 from types import SimpleNamespace
 import ctypes
 

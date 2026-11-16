@@ -595,7 +595,7 @@ def cmd_start(argv):
     ap.add_argument('--name')
     ap.add_argument('--card', help='auto (default), or a card index')
     ap.add_argument('--cards', type=int, choices=(1, 2), help='how many cards (default: the model\'s own; 2: swift-1.5 / '
-                    'thinkingcap on two cards, tensor parallel)')
+                    'thinkingcap / qwen3-30b-a3b on two cards, tensor parallel)')
     ap.add_argument('--port', type=int)
     ap.add_argument('--ctx', help='auto (default: the largest context that fits) or a number of positions')
     ap.add_argument('--team', choices=sorted(TEAMS))

@@ -15,6 +15,8 @@ only the code object is a recorder, so every kernel launch's grid and arguments 
     piece's compute and before its own next half on both cards; 'serial': each sum right after its post; 'local': no
     exchange, and the engine is poisoned after it; the three modes run the same compute launches
   - refusals before any launch: a span past max_ctx, a drafter, a local_only engine, an unknown mode
+  - the served build (caminus.arch.Q3MoETP.build, caminus serve --cards 2): the engine at the placement's stored split,
+    its capacity check counting the prefill's construction need, then the prefill at chunk 2048 checking that need
   - the imports: caminus.prefill.q3m_tp with gguf-py and tokenizers refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/prefill/test_q3m_prefill_tp_cpu.py --scratch DIR"""
@@ -294,6 +296,28 @@ except ValueError: res.append(True)
 check(all(res), 'a local_only engine and an unknown mode are refused at construction')
 check(pf.numerics()['tp'] == 'xchg-fp32-c0-first-slot-sum' and pf.limit == MAXC and pf.crossover == q3m_tp.CROSSOVER,
       'the numerics key names the exchange; the limit is max_ctx; the crossover is the one-card prefill\'s')
+
+# ---- the served build: arch.Q3MoETP (caminus serve --cards 2) on the placement's split -------------------------------------
+from caminus import arch
+TPA = arch.ARCHS['qwen3moe-tp']
+seen = []
+capacity.check = lambda devs, need, what: seen.append((list(devs), [float(v) for v in need], what))
+lines = []
+try:
+    bm, bpf, bdf, bdr = TPA.build(dict(model=P_T, max_ctx=MAXC, placement=dict(split={'exp_rows': 512, 'vocab_share': 0.532})),
+                                  log=lambda *a, **k: lines.append(' '.join(map(str, a))))
+finally:
+    capacity.check = real_check
+pfn = need_tp_mib(tp_shapes(P_T, 512), TPA.PREFILL_CHUNK)
+check(type(bm) is Q3MoETP and type(bpf) is Q3MPrefillTP and bdf is None and bdr is None and bpf.m is bm
+      and bm.exp_rows0 == 512 and bm.vocab_share == 0.532 and bm.max_ctx == MAXC and bpf.chunk == TPA.PREFILL_CHUNK == 2048
+      and len(seen) == 2 and seen[0][0] == [0, 1] and seen[1][0] == [0, 1]
+      and all(abs(a - (v + e)) < 1e-9 for a, v, e in zip(seen[0][1], bm.vram_mib, pfn))
+      and all(abs(a - b) < 1e-9 for a, b in zip(seen[1][1], pfn)) and any('expert rows 512 / 256' in l for l in lines),
+      f'arch.Q3MoETP.build: the engine at the placed split (512 / 256, vocab_share 0.532) with the prefill\'s own check '
+      f'counted in its check ({" / ".join(f"{v:.0f}" for v in seen[0][1])} MiB), then Q3MPrefillTP at chunk 2048 checking the '
+      f'same need_tp_mib; no drafter')
+del bm, bpf
 
 # ---- the kernel source ---------------------------------------------------------------------------------------------------------
 src = open(os.path.join(HERE, '..', '..', 'kernels', 'q3m_prefill_tp.hip')).read()

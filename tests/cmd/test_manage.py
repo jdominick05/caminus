@@ -50,7 +50,9 @@ def main():
     check(swift_modes == both and manage.serving_modes(models.BY_NAME['thinkingcap']) == both
           # (the plain 27B has no two-card form: one card only, so no two-card drafting is offered)
           and manage.serving_modes(models.BY_NAME['qwen3.8-27b']) == [dict(cards=1, drafts=['off', 'mtp', 'dflash'])]
-          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off'])]
+          # (Qwen3-30B-A3B: two cards offered, one card first: the catalog's card count, the picker's default)
+          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off']), dict(cards=2, drafts=['off'])]
+          and models.BY_NAME['qwen3-30b-a3b'].cards == 1
           and manage.serving_modes(models.BY_NAME['coder']) == [dict(cards=2, drafts=['off', 'dflash'])]
           and 'torch' not in sys.modules,
           'model picker: supported card counts and drafters from the registry, no torch import; auto stays server-owned')
@@ -163,6 +165,9 @@ def main():
                                                              TH.card('card2', '0000:06:00.0', TH.XTX, 129, display=True)])
     check(pick('coder') == [1, 0] and pick('arex-2') == [1], 'cards: swapped DRM order: the Coder\'s pair in engine order (the XTX, '
           'position 1, first); AREX-2 on the XTX')
+    q3m, q3e = models.BY_NAME['qwen3-30b-a3b'], manage.model_entry(models.BY_NAME['qwen3-30b-a3b'])
+    check(manage.pick_cards(q3m, q3e, None, set(), cards=2) == [1, 0],
+          'cards: Qwen3-30B-A3B --cards 2 takes the pair in engine order (the bigger XTX first: its 512-row expert share)')
     manage.ROOT = TH.tree(os.path.join(S, 'sysfs-xtx2'), [TH.card('card1', '0000:03:00.0', TH.XTX, 128, display=True),
                                                           TH.card('card2', '0000:06:00.0', TH.XTX, 129)])
     check(pick('coder') == [0, 1] and pick('qwen3-coder-next') == [0, 1], 'cards: XTX + XTX: the Coder and Qwen3-Coder-Next placed')

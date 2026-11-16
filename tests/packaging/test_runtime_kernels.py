@@ -17,8 +17,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'python'))
 from caminus.device import hip, kernels, topk
-from caminus.engine import k3, q3moe_one, q35_dense, q35_dense_verify, q35_dense_verify_tp, q35_mtp, q35_dflash
-from caminus.prefill import attn, gdn, glue, q3m, q3m_ops, q35own, q35own_tp, xchg
+from caminus.engine import k3, q3moe_one, q3moe_tp, q35_dense, q35_dense_verify, q35_dense_verify_tp, q35_mtp, q35_dflash
+from caminus.prefill import attn, gdn, glue, q3m, q3m_ops, q3m_tp, q35own, q35own_tp, xchg
 
 
 # Frozen pre-fix registry: a negative control independent of the current registry.
@@ -83,7 +83,7 @@ class RuntimeKernels(unittest.TestCase):
             return zeros(*args, **kw)
 
         self.stack.enter_context(patch.object(torch, 'zeros', side_effect=cpu_zeros))
-        for module in (hip, k3, attn, gdn, glue, xchg):
+        for module in (hip, k3, attn, gdn, glue, xchg, q3m_tp):
             self.stack.enter_context(patch.object(module, 'Module', side_effect=self.load))
 
     @staticmethod
@@ -260,6 +260,36 @@ class RuntimeKernels(unittest.TestCase):
         for fmt in q3moe_one.MODULE_RS:
             with self.subTest(fmt=fmt), self.assertRaises(ValueError):
                 self.q3_prefill(fmt)
+
+    def q3_prefill_tp(self):
+        # a stand-in Q3MoETP with two-card shapes (2 kv heads and their 16 query heads per card, expert rows 512 / 256):
+        # the real Q3MPrefillTP constructor, its code objects recorded at load
+        mat = lambda rows, K: dict(fmt='Q4_K', rows=rows, K=K, w=None)
+        def card(r): return dict(q=mat(2048, 256), k=mat(256, 256), v=mat(256, 256), o=mat(256, 2048), gate=mat(8 * r, 256),
+                                 up=mat(8 * r, 256), down=dict(mat(8 * 256, r), fmt='Q6_K'), attn_norm=None, ffn_norm=None,
+                                 qk_par=None, router=dict(w=None), cache=None)
+        m = NS(devs=[0, 1], nl=1, D=256, nh=32, nkv=4, hd=128, k_used=2, n_exp=8, ffn=768, kvc=[2, 2], exp_rows=[512, 256],
+               local_only=False, broken=None, L=[[card(512), card(256)]],
+               emb=NS(type='Q4_K', shape=(256, 64), rows=lambda: (64, 144)))
+        start = len(self.loads)
+        q3m_tp.Q3MPrefillTP(m, chunk=16, check=False)
+        return self.loads[start:]
+
+    def test_q3_two_card_serve_selects_shipped_objects(self):
+        # caminus serve --cards 2 for Qwen3-30B-A3B (arch.Q3MoETP): the engine's decode module is the lean module's
+        # two-card build, the prefill loads its GEMM object, the slot sum's object (on both cards) and the exchange's add
+        tp = k3.Q3M_TP_OF[q3moe_one.MODULE_LEAN]
+        self.assertEqual(tp, 'k3_q3m_lean_tp')
+        self.assertEqual(q3moe_tp.MODULE, tp)
+        names = self.q3_prefill_tp()
+        self.assertEqual(sorted(set(names)), ['prefill_tp', 'q3m_prefill', 'q3m_prefill_tp'])
+        self.assertEqual(names.count('q3m_prefill_tp'), 2)
+        self.require_runtime([tp] + names)
+        self.assertNotIn(k3.Q3M_TP_OF['k3_q3m_lean_trace'], kernels.RUNTIME_SET)
+        for name in (tp, 'q3m_prefill_tp'):
+            without = tuple(n for n in kernels.RUNTIME_SET if n != name)
+            with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                self.require_runtime([tp] + names)
 
     def test_lazy_sampler_and_guard_are_included(self):
         # Exercise the lazy sampler module selection, without allocating candidates.

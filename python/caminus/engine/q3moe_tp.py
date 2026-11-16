@@ -3,7 +3,8 @@ logits: engine/q3moe_one.py's reader, weight layouts and fused tape (Q3MoEOne._t
 running the two-card build of the lean decode module (k3_q3m_lean_tp: the lean ops plus a push-only OP_XCHG and
 OP_OWN_SLOT_SUM, kernels/k3_q3m_ops.h under K3_Q3M_TP). The host shell is engine/q35_dense_tp.py's (the uploader, the
 capacity check before any allocation, the exchange slots of engine/tp_slots.py, the server contract). No gguf-py, no
-tokenizers. Not served yet: no architecture entry names it.
+tokenizers. Served by `caminus serve --cards 2` (caminus.arch.Q3MoETP, the 'qwen3moe-tp' entry; one card stays the model's
+default).
 
 The split (card c of 2; card 0 first in every sum; every cut on a whole quantization block of the matrix it cuts):
 - Attention: card 0 takes kv heads 0 .. kv0 - 1 and their query heads (8 per kv head: OP_OWN_ATTS's ratio), card 1 the

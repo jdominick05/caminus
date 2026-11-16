@@ -157,6 +157,61 @@ class ContextFit(unittest.TestCase):
             self.assertEqual(cli.fit_report([*argv, '--kv-host', '--json']), 1)
         self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
 
+    def test_qwen3moe_two_card_fit_uses_serve_recipe_and_caps_at_the_file_context(self):
+        # caminus fit --cards 2 for a qwen3moe file: the two-card entry (Q3MoETP + Q3MPrefillTP), the pair placed bigger
+        # card first, its per-card projection at the placed split, max_ctx capped at the file's context_length (40,960);
+        # sysfs only (no GPU runtime), and the same plan as max_ctx auto's runtime route
+        sys.path.insert(0, str(Path(__file__).resolve().parent / 'engine'))
+        import tiny_q3m
+        path = SCRATCH / 'fit-q3moe-tp.gguf'
+        tiny_q3m.write(str(path), tp=True, n_ctx=40960)
+        argv = ['--model', str(path), '--cards', '2', '--draft', 'off']
+        opt = cli.parse(argv)
+        A = cli.recipe(opt, log=lambda *a, **kw: None)
+        self.assertIs(A, arch.ARCHS['qwen3moe-tp'])
+        self.assertIs(cli.recipe(cli.parse(['--model', str(path), '--draft', 'off']), log=lambda *a, **kw: None), arch.ARCHS['qwen3moe'])
+        link = dict(gbps=7.9, gts=16.0, width=4)
+        cards, caps, reserves = [], [], []
+        for i, (label, total) in enumerate((('XT', 20464), ('XTX', 24560))):   # (sysfs order: the XT first)
+            dev = SCRATCH / f'q3tp-card{i}'
+            dev.mkdir()
+            (dev / 'mem_info_vram_used').write_text(str(1 << 20))
+            cards.append(dict(dev=str(dev), line_mib=0, display=label == 'XTX', pci=f'0000:0{3 + 3 * i}:00.0', hip=i,
+                              status='supported', total_mib=total, label=label, card=f'card{i + 1}', link=link, link_ok=True))
+        pair = [cards[1], cards[0]]                                             # (engine order: the bigger card first)
+        _, _, _, need = A.auto_need(opt, int(opt['auto_cache_slots']), cards=pair)
+        for c in pair:
+            reserve = capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB
+            c['line_mib'] = need(40960)[pair.index(c)] + 1 + capacity.MARGIN_MIB + reserve + capacity.CACHE_WORK_MIB[0] + A.slack_mib(opt) + 64
+            caps.append((c['line_mib'] - capacity.MARGIN_MIB, 1.0)); reserves.append(reserve)
+        import torch
+        stdout = io.StringIO()
+        with patch.object(host, 'gpus', return_value=cards), \
+             patch.object(torch.cuda, 'init', side_effect=AssertionError('GPU init forbidden')), \
+             patch.object(torch.cuda, '_lazy_init', side_effect=AssertionError('GPU init forbidden')), \
+             patch.object(capacity, 'caps_mib', side_effect=AssertionError('GPU query forbidden')), \
+             patch.object(A, 'build', side_effect=AssertionError('engine build forbidden')), \
+             contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report([*argv, '--json']), 0)
+            placed = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['arch'], 'qwen3moe-tp')
+        self.assertEqual(report['max_ctx'], 40960)
+        self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
+        self.assertEqual(placed['split'], {'exp_rows': 512, 'vocab_share': 0.532})
+        self.assertEqual(report['need_mib'], need(40960))
+        # the runtime route (max_ctx auto in serve, the placement's split stored) reads the same plan
+        ropt = dict(opt, placement=dict(split=placed['split']))
+        with patch.object(capacity, 'caps_mib', return_value=caps), patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
+            self.assertEqual(A.context_fit(ropt).report(), A.context_fit(opt, pair).report())
+            self.assertEqual(A.auto_max_ctx(ropt, log=lambda *a, **kw: None), 40960)
+        # past the file's context_length: no native fit reported
+        stdout = io.StringIO()
+        with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 1)
+        self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
+
     def test_query_errors_have_no_invented_maximum_and_tp_drafting_needs_a_two_card_verify_object(self):
         for argv in (['--model', str(SCRATCH / 'missing.gguf')],):
             stdout = io.StringIO()
