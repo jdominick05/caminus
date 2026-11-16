@@ -161,3 +161,84 @@ def write(home, path, content):
         out['diff'] = ''                               # a new file's diff is the file itself: say its size instead
         out['note'] = f'created, {content.count(chr(10)) + (0 if content.endswith(chr(10)) or not content else 1)} lines'
     return out
+
+
+SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache', '.cache', 'build',
+             'dist', '.tox'}
+SEARCH_FILES = 20000      # files one search walks at most
+SEARCH_BYTES = 2_000_000  # a file larger than this is skipped (logs, data)
+SEARCH_HITS = 200         # matches returned at most
+
+
+def search(home, pattern=None, glob=None, path='.', ignore_case=False, limit=None):
+    """Find files (glob, e.g. '**/*.py' or '*test*') and lines in them (pattern, a regular expression), under path.
+    A real agent ran ~20 grep / find commands through the terminal per goal for this; here the walk skips .git,
+    node_modules, caches and binary or huge files, and every hit carries its line number for read's offset."""
+    import fnmatch
+    import re
+    root = _path(home, path or '.')
+    if not root.exists():
+        raise ValueError(f'{root} does not exist')
+    rx = None
+    if pattern:
+        try:
+            rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+        except re.error as e:
+            raise ValueError(f'pattern is not a valid regular expression: {e}') from None
+    limit = max(1, min(int(limit or SEARCH_HITS), 1000))
+    want = None
+    if glob:
+        g = glob[3:] if glob.startswith('**/') else glob
+        want = lambda rel: fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(rel.rsplit('/', 1)[-1], g) or fnmatch.fnmatch(rel, g)
+    files, hits, walked, more = [], [], 0, False
+    paths = [root] if root.is_file() else None
+    if paths is None:
+        paths = []
+        for d, dirs, names in os.walk(root):
+            dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith('.git'))
+            for n in sorted(names):
+                paths.append(Path(d) / n)
+                if len(paths) >= SEARCH_FILES:
+                    break
+            if len(paths) >= SEARCH_FILES:
+                more = True
+                break
+    for p in paths:
+        rel = str(p.relative_to(root)) if p != root else p.name
+        if want and not want(rel):
+            continue
+        walked += 1
+        if rx is None:
+            files.append(rel)
+            if len(files) >= limit:
+                more = True
+                break
+            continue
+        try:
+            if p.stat().st_size > SEARCH_BYTES:
+                continue
+            data = p.read_bytes()
+        except OSError:
+            continue
+        if b'\0' in data[:4096]:
+            continue
+        found = False
+        for i, ln in enumerate(data.decode('utf-8', errors='replace').split('\n'), 1):
+            if rx.search(ln):
+                found = True
+                ln = ln.rstrip('\r')
+                hits.append(f'{rel}:{i}: {ln[:300]}' + (' …' if len(ln) > 300 else ''))
+                if len(hits) >= limit:
+                    more = True
+                    break
+        if found:
+            files.append(rel)
+        if more:
+            break
+    out = dict(root=str(root), files=len(files) if rx else files, searched=walked)
+    if rx is not None:
+        out['matches'] = hits
+        out['note'] = 'read PATH with offset near a line number to see it in context'
+    if more:
+        out['truncated'] = f'stopped at {limit} results: narrow the glob, the path or the pattern'
+    return out
