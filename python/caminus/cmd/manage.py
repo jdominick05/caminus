@@ -634,10 +634,10 @@ def cmd_start(argv):
     if bool(a.team) == bool(a.model):
         ap.error('a model name or --team')
     if a.team and (a.kv or _serve_arg(extra, '--kv') is not None):
-        # (a team starts each model with its own default cache; neither team model takes q8, so a --kv here would be
-        # dropped without a word: refuse it instead)
-        ap.error(f'--kv applies to one model, not to --team {a.team}: start the team without it (its models run the '
-                 f'default F16 cache)')
+        # (a team starts each model with its own cache: AREX-2 and Qwen3.6 keep their own q8_0 rows, with no --kv choice,
+        # so a --kv here would be dropped without a word: refuse it instead)
+        ap.error(f'--kv applies to one model, not to --team {a.team}: start the team without it (each team model keeps '
+                 f'its own cache)')
 
     def go(say):
         if a.team:
