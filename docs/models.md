@@ -29,8 +29,9 @@ again.
   conversations, and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from
   disk. Two XT cards are too small for it.
 - **`qwen3-30b-a3b`** is the fastest writer on one 24 GB card and the most exact (4-bit weights, no llama.cpp code on its
-  path). Its context is 40,960 tokens, the model's own limit, so it suits shorter work: 213 tok/s with 4K tokens of
-  context, 111 tok/s when full. [The details](dev/qwen3-30b-a3b.md).
+  path). Its context is 40,960 tokens by default, so it suits shorter work: 213 tok/s with 4K tokens of context, 111
+  tok/s when full. For longer work, its opt-in long-context mode (`--long-context`, below) reaches about 80K tokens on
+  one XTX and 131,072 on two cards. [The details](dev/qwen3-30b-a3b.md).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
   path). `caminus serve --model ... --draft mtp` drafts with the model's
   own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
@@ -60,7 +61,8 @@ caminus pull thinkingcap       # downloads into ~/.local/share/caminus/models; r
 caminus start thinkingcap      # picks the card and the largest context that fits
 ```
 
-Caminus sizes the context to your cards: up to 262,144 tokens (40,960 for `qwen3-30b-a3b`). It refuses to start a model
+Caminus sizes the context to your cards: up to 262,144 tokens (40,960 for `qwen3-30b-a3b`, up to 131,072 in its
+long-context mode). It refuses to start a model
 that can't hold at least 32,768 tokens on your cards, rather than run out of memory later (8,192 with `--draft dflash` on
 the 27B models: the drafter's memory comes out of the context).
 
@@ -77,9 +79,23 @@ ThinkingCap at 1.13-1.18x; on 11K-29K-token agent prompts the range is 1.20-1.45
 card stays its default. Each card holds half of every layer's attention and part of every expert (two thirds on the
 bigger card, which is card 0). Served, two cards decode more slowly than one XTX on short turns (206 against 240 tok/s)
 and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every prompt from 4K tokens on faster
-(1.09x at 4K, 1.29x at 40,768); see [benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards). The context stays
-40,960 tokens, the model's own limit, so the second card buys speed with a long context, not more context.
-No drafter on one card or two.
+(1.09x at 4K, 1.29x at 40,768); see [benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards). By default the context
+stays 40,960 tokens, so the second card buys speed with a long context; in the long-context mode two cards hold the
+full 131,072. No drafter on one card or two.
+
+### Long context for `qwen3-30b-a3b` (opt-in)
+
+`caminus start qwen3-30b-a3b --long-context` (or `caminus serve --long-context`, or a `--max-ctx` above 40,960) turns on
+the model card's recipe for long texts: YaRN RoPE scaling, factor 4 from its native 32,768 tokens, up to 131,072 tokens.
+
+- One XTX: as much as the card holds, about 80K tokens. Where the context only fits that way, the server stores the
+  attention cache as 8-bit rows (Q8_0) and says so in its log.
+- Two cards (`--cards 2 --long-context`): the full 131,072 tokens with the normal 16-bit cache.
+- The trade-off: YaRN changes every position, not only the far ones, so short conversations can read slightly
+  differently than in the default mode. The model card advises it only for texts past 32,768 tokens; the default stays
+  the native 40,960 without YaRN.
+- Saved conversations are kept per mode: a conversation saved in one mode is never restored into the other.
+- Other models refuse `--long-context` (the Coder has its own long-context mode: a `--max-ctx` above 262,144).
 
 ## The names your tools use
 

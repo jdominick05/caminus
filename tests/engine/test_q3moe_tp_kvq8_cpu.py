@@ -113,10 +113,11 @@ class Rec:
 
 class FakeOps(q3m_ops.Ops):
     """q3m_ops.Ops with its code objects recorders (its launch wrappers' host checks run)"""
-    def __init__(self, dev, module='q3m_prefill', q8=False):
-        self.dev, self.module, self.q8 = torch.device(dev), module, bool(q8)
+    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False):
+        self.dev, self.module, self.q8, self.yarn = torch.device(dev), module, bool(q8), bool(yarn)
         card = int(str(dev).split(':')[1])
         self.mod = Rec(card, module); self.kvmod = Rec(card, q3m_ops.KVQ8_MODULE) if self.q8 else None
+        self.ropemod = Rec(card, q3m_ops.YARN_MODULE[self.q8]) if self.yarn else (self.kvmod if self.q8 else self.mod)
 
 
 class FakeSlotSum(q3m_tp.SlotSum):
@@ -138,15 +139,17 @@ capacity.check = lambda *a, **k: None
 
 # ---- the module tables -------------------------------------------------------------------------------------------------------
 TPQ = 'k3_q3m_lean_tp_kvq8'
-check(k3.Q3M_KV_Q8_BASE == {'k3_q3m_lean_kvq8': 'k3_q3m_lean', TPQ: 'k3_q3m_lean_tp'}
+check(k3.Q3M_KV_Q8_BASE == {'k3_q3m_lean_kvq8': 'k3_q3m_lean', TPQ: 'k3_q3m_lean_tp',     # (+ their YaRN builds: test_q3moe_yarn_cpu.py)
+                           'k3_q3m_lean_kvq8_yarn': 'k3_q3m_lean_yarn', TPQ + '_yarn': 'k3_q3m_lean_tp_yarn'}
       and k3.Q3M_KV_Q8_OF['k3_q3m_lean_tp'] == TPQ and k3.Q3M_TP_OF['k3_q3m_lean_kvq8'] == TPQ
       and TPQ in k3.Q3M_TP_MODULES and TPQ in k3.Q3M_KV_Q8_MODULES and TPQ in k3.Q3M_MODULES and TPQ not in k3.Q3M_LEAN_MODULES
       and k3.MODULE_CAPS[TPQ] == k3.MODULE_CAPS['k3_q3m_lean_tp'] and k3.atts_max_splits(TPQ) == 128,
       f'{TPQ}: k3_q3m_lean_tp\'s Q8 build and k3_q3m_lean_kvq8\'s two-card form: the two-card ops and pairs, 128 attention splits, '
       f'not a one-card lean module')
-check(TPQ not in kernels.RUNTIME_SET and 'k3_q3m_lean_kvq8' not in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' not in kernels.RUNTIME_SET
+check(TPQ not in kernels.RUNTIME_SET and 'k3_q3m_lean_kvq8' not in kernels.RUNTIME_SET
       and 'k3_q3m_lean_tp' in kernels.RUNTIME_SET,
-      'not in the installed runtime set (not served); the F16 two-card module stays in it')
+      'not in the installed runtime set (no option selects the native Q8 modules; the long-context mode ships their YaRN '
+      'builds); the F16 two-card module stays in it')
 src = [ln.strip() for ln in open(os.path.join(ROOT, 'kernels', TPQ + '.hip')) if ln.strip() and not ln.strip().startswith('//')]
 check(src == ['#define K3_Q3M_KV_Q8', '#define K3_Q3M_ADD_RMS_PIN', '#include "k3_q3m_lean_tp.hip"'],
       f'kernels/{TPQ}.hip: the Q8 switch and the add_rms16 pin over the two-card module, nothing else')

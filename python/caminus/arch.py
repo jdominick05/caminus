@@ -143,8 +143,9 @@ def rope_scaling(hp):
 
 @dataclass(frozen=True)
 class RopeFacts:
-    """a model line's context facts from its model card, as data: nothing serves from them yet (no engine applies YaRN;
-    the Coder's NTK long mode is LONG_NTK, a serve option)"""
+    """a model line's context facts from its model card: the native context, the GGUF's, the card's recipe, and the scaling
+    Caminus ships past gguf_ctx (shipped: None refuses a longer max_ctx; 'yarn' is Qwen3-30B-A3B's opt-in long-context mode,
+    caminus serve --long-context, at shipped_factor from native_ctx; 'ntk' is the Coder's LONG_NTK mode)"""
     native_ctx: int                # the context the model was trained for (the card's original_max_position_embeddings)
     gguf_ctx: int                  # the GGUF's context_length: how far Caminus serves it unscaled today
     card_kind: str                 # the card's long-context recipe ('yarn')
@@ -156,8 +157,11 @@ class RopeFacts:
 
 # Qwen3-30B-A3B: "32,768 natively and 131,072 tokens with YaRN" (factor 4, original_max_position_embeddings 32768; the card
 # advises factor 2 for about 65,536 and no YaRN while contexts stay under 32,768). Its GGUF's context_length, 40,960, is
-# 32,768 for the output plus 8,192 for the prompt: served unscaled up to there, as the card allows
-QWEN3MOE_ROPE = RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), source='https://huggingface.co/Qwen/Qwen3-30B-A3B')
+# 32,768 for the output plus 8,192 for the prompt: served unscaled up to there, as the card allows (the default). The
+# long-context mode (--long-context, or an explicit --max-ctx past 40,960) serves YaRN x4 up to 131,072 at every position:
+# the card's note that static YaRN can cost short texts some quality is the mode's trade-off, so it is never the default
+QWEN3MOE_ROPE = RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), shipped='yarn', shipped_factor=4.0,
+                          source='https://huggingface.co/Qwen/Qwen3-30B-A3B')
 # the dense Qwen3.8-27B line: 262,144 native, YaRN factor 4 from original 262,144 ("up to 1,000,000"; factor 2 for about
 # 524,288). Swift 1.5 and ThinkingCap keep the base's RoPE; their own cards make no RoPE-scaling statement, so the recipe
 # is the base card's, not one their authors claim
@@ -361,9 +365,25 @@ class Arch:
         context for a drafter"""
         return MIN_CTX
 
+    def long_mode(self, opt):
+        """the long-context mode, resolved before placement (caminus serve's recipe, caminus fit, caminus start): sets what the
+        projections, placement and build read into opt and returns a short description, or None when the serve is not in
+        the mode. --long-context (opt['long_context']) on an entry without a mode is refused here, before anything is read
+        on a card; an explicit max_ctx past the context_length stays the engine's refusal (as before). The Coder and the
+        qwen3moe entries override it"""
+        if opt.get('long_context'):
+            raise ValueError(f'--long-context: {self.alias} ({self.name}) has no long-context mode (Qwen3-30B-A3B has YaRN x4, '
+                             f'the Coder its NTK mode); serve it without the flag, at most at its own context_length')
+        return None
+
+    def rope_mode(self, opt):
+        """the engine's rope argument for this serve: None (the trained RoPE) unless a long_mode set opt['rope']"""
+        return None
+
     def long_context(self, opt):
         """the long-context mode's settings into opt for an explicit max_ctx past the model's context_length (a note for the
-        log), or None: only the Coder has one (its KV in host memory); every other model refuses such a max_ctx in its engine"""
+        log), or None: the Coder (its KV in host memory, NTK) and the qwen3moe entries (YaRN, resolved by long_mode before
+        placement: this only words the note) have one; every other model refuses such a max_ctx in its engine"""
         return None
 
     def rope_refusal(self, path):
@@ -427,6 +447,16 @@ class Coder(Arch):
                 f'{LONG_NTK:g}^(n_rot / (n_rot - 2)), '
                 f'{"the disk tier capped at " + format(float(opt["cache_cap_gb"]), "g") + " GB (a park writes about 12.4 KB per token)" if disk else "no disk tier"}'
                 f'{", plain decoding at T = 1" if opt.get("no_drafter") else ""}')
+
+    def long_mode(self, opt):
+        """the Coder's mode is chosen by an explicit --max-ctx past its context_length (long_context below, unchanged);
+        --long-context with it is accepted, without it refused: the mode's context lives in host memory and has no auto size"""
+        if not opt.get('long_context'): return None
+        n = _explicit_ctx(opt)
+        if n is None or n <= CODER_CTX:
+            raise ValueError(f'--long-context: the Coder\'s long-context mode takes an explicit --max-ctx past {CODER_CTX:,} '
+                             f'(its KV cache in host memory, NTK RoPE x {LONG_NTK:g}; 1,048,576 at most measured)')
+        return 'NTK long-context mode'
 
     def _engine_kw(self, opt):
         """FlashNextTP's placement / long-context arguments from opt (kv_host, the long mode's ctx_extend + rope_ntk)"""
@@ -537,6 +567,87 @@ def kv_q8(opt):
     return v == 'q8'
 
 
+def _explicit_ctx(opt):
+    """opt['max_ctx'] as an int when it is an explicit number, else None ('auto', unset)"""
+    v = opt.get('max_ctx')
+    if v is None or isinstance(v, bool) or str(v).strip().lower() == 'auto': return None
+    try: return int(v)
+    except (TypeError, ValueError): return None
+
+
+class _Q3MLong:
+    """the qwen3moe entries' long-context mode (Q3MoE one card, Q3MoETP two): YaRN at the model card's factor (x4 from
+    32,768: RopeFacts.shipped) on the YaRN builds of the decode modules and the prefill's qk_rope (caminus.rope).
+
+    In the mode: max_ctx auto and explicit up to the mode's 131,072 positions (the projection counts them; native_ctx of
+    the context fit is the mode's cap), the engine key carries the RoPE (a YaRN park never restores into a native server:
+    the module names differ too). The KV format: what opt['kv'] says when set; otherwise F16 where the asked context (an
+    explicit max_ctx, or the cap for auto) fits in F16, else Q8_0 rows where they give more positions (one XTX: about 80K
+    instead of about 45K), and the note says so. Native (no mode) stays the default: the card advises no YaRN under 32,768
+    and static YaRN at every position can cost short texts some quality"""
+
+    def long_mode(self, opt):
+        n, gguf_ctx = _explicit_ctx(opt), int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
+        if not (opt.get('long_context') or (n is not None and n > gguf_ctx)):
+            opt.pop('rope', None)
+            return None
+        mode = self._yarn()
+        if n is not None and n > mode.max_ctx:
+            raise ValueError(f'--max-ctx {n:,}: Qwen3-30B-A3B serves at most {mode.max_ctx:,} positions (its long-context mode, '
+                             f'YaRN x{mode.factor:g} from {mode.n_ctx_orig:,}; the model card names no longer context)')
+        opt['long_context'], opt['rope'] = True, 'yarn'
+        return f'YaRN x{mode.factor:g}'
+
+    def _yarn(self):
+        from .rope import YarnMode
+        rf = self.rope_facts
+        return YarnMode(rf.shipped_factor, rf.native_ctx)
+
+    def rope_mode(self, opt):
+        return self._yarn() if opt.get('rope') == 'yarn' else None
+
+    def _ctx_cap(self, opt):
+        """the context fit's native_ctx: the file's context_length, or the long-context mode's positions"""
+        if opt.get('rope') == 'yarn': return self._yarn().max_ctx
+        return int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
+
+    def context_fit(self, opt, cards=None):
+        """Arch.context_fit, and in the long-context mode with no opt['kv'] the format the mode would choose (F16 where the
+        asked context fits, else Q8 where it holds more): the plan carries it as .kv"""
+        if opt.get('rope') != 'yarn' or opt.get('kv') is not None:
+            plan = super().context_fit(opt, cards); plan.kv = 'q8' if kv_q8(opt) else 'f16'
+            return plan
+        f16 = super().context_fit(dict(opt, kv='f16'), cards); f16.kv = 'f16'
+        n = _explicit_ctx(opt)
+        want = min(n if n is not None else f16.native_ctx, f16.native_ctx)
+        if f16.fits(want): return f16
+        q8 = super().context_fit(dict(opt, kv='q8'), cards); q8.kv = 'q8'
+        if (q8.fits(want) if n is not None else (q8.maximum() or 0) > (f16.maximum() or 0)):
+            q8.kv_why = (f'F16 rows hold {f16.maximum() or 0:,} positions here, Q8_0 rows ' +
+                         (f'hold the asked {want:,}' if n is not None else f'{q8.maximum() or 0:,}'))
+            return q8
+        return f16
+
+    def placement_extra(self, opt, cards):
+        """the long-context mode's KV format, decided once on the placed cards (context_fit) and written to opt['kv'] (auto,
+        build and the engine key read it); recorded in the placement"""
+        if opt.get('rope') != 'yarn' or opt.get('kv') is not None: return {}
+        plan = self.context_fit(opt, cards)
+        opt['kv'] = plan.kv
+        if plan.kv == 'q8': opt['kv_auto_why'] = getattr(plan, 'kv_why', '')
+        return {'kv': plan.kv}
+
+    def long_context(self, opt):
+        if opt.get('rope') != 'yarn': return None
+        mode = self._yarn()
+        kv = 'q8' if kv_q8(opt) else 'f16'
+        why = opt.get('kv_auto_why')
+        return (f'long-context mode: YaRN x{mode.factor:g} from {mode.n_ctx_orig:,} (up to {mode.max_ctx:,} positions), max_ctx '
+                f'{int(opt["max_ctx"]):,}, KV {"Q8_0 rows" if kv == "q8" else "F16"}'
+                f'{" (chosen by the mode: " + why + ")" if why else ""}; YaRN applies at every position, so short texts can '
+                f'read slightly differently than in the default mode (the model card advises it only past 32,768)')
+
+
 class OneCard(Arch):
     kind, cards, T, engine = 'one-card', 1, 1, 'engine.qwen35_one:Qwen35One'
 
@@ -585,10 +696,11 @@ class OneCard(Arch):
                              reserve_mib=(capacity.DISPLAY_RESERVE_MIB if c and c['display'] else 0,), card_names=(name,))
 
 
-class Q3MoE(OneCard):
+class Q3MoE(_Q3MLong, OneCard):
     """qwen3moe (Qwen3-30B-A3B): Q3MoEOne on one card, T = 1, Caminus's own code from the GGUF to the logits; no drafter yet;
     the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
-    (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
+    (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960).
+    The long-context mode (_Q3MLong: YaRN x4) on one XTX: about 80K positions with Q8_0 rows (the mode picks them)."""
     engine = 'engine.q3moe_one:Q3MoEOne'
     rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
@@ -599,7 +711,7 @@ class Q3MoE(OneCard):
         from .engine.q3moe_one import Q3MoEOne
         from .prefill import q3m
         path = opt['model']
-        n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
+        n_ctx = self._ctx_cap(opt)                          # (the file's 40,960, or the long-context mode's 131,072)
         q8 = self.kv_check(opt)                             # (opt['kv']: no serve flag sets it yet; 'f16' by default)
         slot = Q3MoEOne.kv_pos_mib(path, q8) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
         pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
@@ -609,7 +721,7 @@ class Q3MoE(OneCard):
     def build(self, opt, log=print, T=None):
         from .engine.q3moe_one import Q3MoEOne
         from .prefill.q3m import Q3MPrefill
-        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']), q8=self.kv_check(opt))
+        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']), q8=self.kv_check(opt), rope=self.rope_mode(opt))
         return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 
@@ -968,7 +1080,7 @@ class Dense35TP(Arch):
         return m, pf, d, dr
 
 
-class Q3MoETP(Arch):
+class Q3MoETP(_Q3MLong, Arch):
     """qwen3moe (Qwen3-30B-A3B) on TWO cards (caminus serve --cards 2 / caminus start qwen3-30b-a3b --cards 2; one card stays
     the model's default): engine/q3moe_tp.py's Q3MoETP (tensor parallel on the two-card build of the lean decode module), T = 1,
     no drafter, its own two-card batched prefill (caminus.prefill.q3m_tp.Q3MPrefillTP). Never picked from a header or the
@@ -983,9 +1095,10 @@ class Q3MoETP(Arch):
     reachable by bypassing the placement's order) is refused (pair_refusal), not given the 256 / 512 cut: that cut is not
     gated or measured.
 
-    max_ctx auto is capped at the file's context_length (40,960) as on one card: the engine refuses more, and nothing applies
-    the model card's YaRN scaling yet (Arch.rope_refusal). Two cards are slower than one at short context and faster past
-    about 16K positions (engine level, docs/dev/benchmarks.md), which is why one card stays the default."""
+    max_ctx auto is capped at the file's context_length (40,960) as on one card, unless the serve is in the long-context
+    mode (_Q3MLong: YaRN x4, up to 131,072 positions; F16 holds them on two cards by the projection: about 213K would fit at
+    F16 on an XTX + XT). Two cards are slower than one at short context and faster past about 16K positions (engine level,
+    docs/dev/benchmarks.md), which is why one card stays the default."""
     kind, cards, T, engine = 'tp', 2, 1, 'engine.q3moe_tp:Q3MoETP'
     rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe, as the one-card entry: no gguf-py, no tokenizers on the two-card path either)
@@ -1036,10 +1149,11 @@ class Q3MoETP(Arch):
         from .engine.q3moe_tp import Q3MoETP as E
         path = opt['model']
         er, vs = self._split(opt, cards)
-        n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
+        n_ctx = self._ctx_cap(opt)                          # (the file's 40,960, or the long-context mode's 131,072)
+        yarn = opt.get('rope') == 'yarn'
         pf = self._prefill_mib(path, er)
         slot = [v * 1.05 + 1.0 for v in E.kv_pos_mib(path, q8=q8)]
-        need = lambda c: [p + f + (slots + 2) * s for p, f, s in zip(E.projection_mib(path, c, exp_rows=er, vocab_share=vs, q8=q8), pf, slot)]
+        need = lambda c: [p + f + (slots + 2) * s for p, f, s in zip(E.projection_mib(path, c, exp_rows=er, vocab_share=vs, q8=q8, yarn=yarn), pf, slot)]
         return n_ctx, [0, 1], max(slot), need
 
     def build(self, opt, log=print, T=None):
@@ -1050,7 +1164,7 @@ class Q3MoETP(Arch):
         er, vs = self._split(opt)
         # (the prefill's construction check counted in the engine's own, before anything is read)
         m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), exp_rows=er, vocab_share=vs,
-              vram_extra_mib=self._prefill_mib(path, er), q8=q8)
+              vram_extra_mib=self._prefill_mib(path, er), q8=q8, rope=self.rope_mode(opt))
         log(f'caminus serve: two cards: expert rows {m.exp_rows[0]} / {m.exp_rows[1]}, kv heads {m.kvc[0]} / {m.kvc[1]}, '
             f'head rows {m.vh} / {m.vocab - m.vh} (vocab_share {vs})', flush=True)
         return m, Q3MPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None

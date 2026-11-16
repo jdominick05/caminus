@@ -37,7 +37,12 @@ PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'pref
 Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq',
           # its two-card serve (caminus serve --cards 2: engine/q3moe_tp.py's decode module, prefill/q3m_tp.py's slot sum;
           # the exchange's add is prefill_tp, in PREFILL)
-          'k3_q3m_lean_tp', 'q3m_prefill_tp')
+          'k3_q3m_lean_tp', 'q3m_prefill_tp',
+          # its long-context mode (caminus serve --long-context: YaRN x4): the YaRN builds of the decode modules and the
+          # prefill's qk_rope, F16 and Q8_0 rows (the mode picks Q8 where only it holds the context: one card), and the Q8
+          # attention q3p_attn_q8 it then runs from q3m_prefill_kvq8. The native Q8 objects stay out (no option selects them)
+          'k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn', 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn',
+          'q3m_prefill_yarn', 'q3m_prefill_kvq8_yarn', 'q3m_prefill_kvq8')
 DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
                'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
                'k3_q35_gsq', 'q35_prefill_gsq', 'k3_q35_gsq_ver', 'k3_q35_gsq_ver_m',

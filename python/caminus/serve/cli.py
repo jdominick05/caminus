@@ -51,7 +51,7 @@ DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, d
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
-                flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None)
+                flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None, long_context=False)
 
 
 def load_config(path):
@@ -129,6 +129,12 @@ def parser():
     ap.add_argument('--max-ctx', type=ctx_arg, help='the engine\'s KV positions, or auto (the default): the largest context '
                                                    'that fits the card(s) now with a working prompt cache (Arch.auto_max_ctx; the '
                                                    'Coder: 262,144)')
+    ap.add_argument('--long-context', action='store_true', default=None,
+                    help='the model\'s long-context mode. qwen3-30b-a3b: YaRN x4 (the model card\'s recipe), up to 131,072 '
+                         'positions (one card: as far as the card holds, with Q8_0 KV rows where only they fit; two cards: '
+                         '131,072 at F16); an explicit --max-ctx past 40,960 implies it. YaRN applies at every position, so '
+                         'short texts can read slightly differently: the default stays the native 40,960. The Coder: an '
+                         'explicit --max-ctx past 262,144 (its NTK mode). Other models refuse it')
     ap.add_argument('--auto-cache-slots', type=int, help='max_ctx auto: VRAM checkpoint slots the context must leave room for '
                                                          '(default 4; more: a smaller context, more cached restore points)')
     ap.add_argument('--chunk', type=int, help='the batched prefill\'s chunk (tokens)')
@@ -248,6 +254,8 @@ def recipe(opt, log=print):
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
     why = A.rope_refusal(opt['model'])          # (a file whose rope.scaling.* keys no engine applies: never served unscaled)
     if why: raise ValueError(why)
+    mode = A.long_mode(opt)                     # (the long-context mode, before placement: the projections read it)
+    if mode: log(f'caminus serve: long-context mode ({mode})', flush=True)
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
     defaulted = draft is None

@@ -206,10 +206,18 @@ class ContextFit(unittest.TestCase):
         with patch.object(capacity, 'caps_mib', return_value=caps), patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
             self.assertEqual(A.context_fit(ropt).report(), A.context_fit(opt, pair).report())
             self.assertEqual(A.auto_max_ctx(ropt, log=lambda *a, **kw: None), 40960)
-        # past the file's context_length: no native fit reported
+        # past the file's context_length: the long-context mode (YaRN x4, as an explicit --max-ctx past the Coder's own
+        # context_length is its NTK mode): the same report shape, its cap 131,072; past the cap: refused, no maximum
         stdout = io.StringIO()
         with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):
-            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 1)
+            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 0)
+        long_report = json.loads(stdout.getvalue())
+        self.assertEqual(set(long_report), set(report))
+        self.assertEqual(long_report['native_ctx'], 131072)
+        self.assertGreaterEqual(long_report['max_ctx'], 40960)
+        stdout = io.StringIO()
+        with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '131073', '--json']), 1)
         self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
 
     def test_qwen3moe_two_card_fit_below_the_file_context_takes_the_largest_step_that_fits(self):

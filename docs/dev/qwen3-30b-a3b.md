@@ -317,15 +317,54 @@ reads), with their predictions written down before the first timed run, and meas
   is about half its distance to a reference with Q8_0 experts (the official file may also come from other source
   weights; that split is not measured).
 
+## The long-context mode (YaRN x4, opt-in)
+
+The model card gives 32,768 tokens natively and 131,072 with YaRN (factor 4, original_max_position_embeddings 32,768),
+and advises factor 2 for about 65,536 tokens and no YaRN below 32,768. The GGUF's context_length is 40,960 and the
+default serve stops there, unscaled. `caminus serve --long-context` (or an explicit `--max-ctx` past 40,960, the same
+shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passes it) serves factor 4 up to 131,072.
+
+- **The math is llama.cpp's** (`ggml` `rope_yarn` and `ggml_rope_yarn_corr_dims`, beta_fast 32, beta_slow 1, the
+  yardstick's convention; transformers' `_compute_yarn_parameters` gives the same frequencies). For the 64 NEOX pairs of
+  this model's 128 dims, base 1e6, the correction range is pairs [23, 40]: pairs up to 23 keep their trained frequency,
+  pairs from 40 on take a quarter of it, the ones between blend linearly. cos and sin are multiplied by
+  1 + 0.1 ln 4 = 1.1386294 (fp32), so q and the stored K both carry it and the scores carry its square. llama.cpp gets
+  the same value through `get_mscale`, its cancel and `rope_yarn`'s own multiply.
+- **One table, two kernels.** The host makes each pair's frequency and the factor once, in float64 rounded to fp32
+  (`caminus.rope.yarn_table`), and appends them to the per-layer block the decode op and the prefill already read
+  (q_norm | k_norm | theta_scale, eps | freq [64] | mscale). OP_OWN_ATTS under `K3_Q3M_YARN` and `q3p_qk_rope` under
+  `Q3P_YARN` compute theta = fp32(pos) x freq and cos(theta) x mscale, sin(theta) x mscale with the same statements, so
+  decode and prefill write the same rows. The defaults' code is unchanged: the YaRN statements sit behind defines that
+  only new objects set (`k3_q3m_lean_yarn`, `k3_q3m_lean_kvq8_yarn`, `k3_q3m_lean_tp_yarn`, `k3_q3m_lean_tp_kvq8_yarn`,
+  `q3m_prefill_yarn`, `q3m_prefill_kvq8_yarn`). A runtime table pointer in the shared op would have changed the default
+  module's machine code, and no value of the old block turns theta_scale^j into YaRN's per-pair blend. The YaRN builds
+  read no `powf`; their `k3_run` registers equal their native peers' (96 VGPRs, 0 spilled; spilled scalars 53 / 19 /
+  66 / 33 for one card F16 / Q8 and two cards F16 / Q8).
+- **Context.** Two cards hold 131,072 positions with the F16 cache (by the projection about 213K would fit on an XTX +
+  XT). One XTX holds about 80K with Q8_0 rows (about 45K with F16): with no `kv` asked for, the mode takes F16 where the
+  asked context fits, else Q8 where it holds more, and the serve log names the choice. max_ctx auto runs up to 131,072
+  in the mode; past it is refused.
+- **Keys.** The engine key carries the RoPE (and the module name differs), so a conversation parked in one mode never
+  restores into the other.
+- **The trade-off.** YaRN scales every position, so short texts read slightly differently than unscaled; the card's own
+  note is why native stays the default.
+- **Gates** (all GPU, in [testing](testing.md) form): `tests/engine/test_q3m_yarn_rope.py` (the decode row bit for bit the
+  prefill's on the same table, both within fp16 rounding of float64 RoPE on the kernel's fp32 angle, `--kv q8`, `--tp`);
+  `tools/gates/q3moe_gmodel.py --yarn` at 128 tokens against `tools/reference/q3moe_ref.py --yarn 4:32768` (float64, CPU)
+  with llama.cpp's YaRN run (`gg_golden` job line `yarn 4 32768`) as the bound; `tools/gates/q3moe_depth_gmodel.py --yarn`
+  at 65,536 and about 131K (two cards) and about 80K (one XTX, `--kv q8`) against `q3moe_ref32.py --yarn 4:32768`
+  (resumable per layer: `--resume DIR --budget-s S`); the served smoke with `--long-context`. Numbers land here when run.
+
 ## Limits
 
-- One card with 24 GB: the full 40,960-token context needs 22.4 GB. A 20 GB card can't hold 32,768 tokens of it, which
+- One card with 24 GB: the full 40,960-token context needs 22.4 GB (past it: the long-context mode above). A 20 GB card can't hold 32,768 tokens of it, which
   is the server's minimum. Two cards are offered too (`--cards 2`, an XTX + XT: the bigger card first); one card stays
   the default. See [models](../models.md).
 - One model file is tested: `Qwen/Qwen3-30B-A3B-GGUF`, `Qwen3-30B-A3B-Q4_K_M.gguf`. The kernels cover Q4_K and Q6_K.
 - Speculative decoding is measured, not enabled (see above): `caminus serve` decodes this model one token per pass.
 - An 8-bit (Q8_0) KV cache is built for one card (`Q3MoEOne(q8=True)`, decode and the batched prefill) and for two
-  (`Q3MoETP(q8=True)`, the same format over each card's kv heads), not served yet: [q8-kv.md](q8-kv.md). It halves the
+  (`Q3MoETP(q8=True)`, the same format over each card's kv heads); no option selects it in the native mode yet, and the
+  long-context mode picks it on one card where only it holds the context: [q8-kv.md](q8-kv.md). It halves the
   cache (0.0498 MiB per position instead of 0.0938; on two cards 0.0249 per card instead of 0.0469).
 - One machine. Numbers from other cards are welcome.
 

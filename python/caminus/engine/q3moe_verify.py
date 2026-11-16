@@ -77,6 +77,7 @@ class Q3MoEVerify:
         if module not in k3.Q3M_VER_MODULES: raise ValueError(f'Q3MoEVerify: module {module!r} is not a verify module {k3.Q3M_VER_MODULES}')
         if eng.k_used != 8: raise ValueError(f'Q3MoEVerify: {eng.k_used} experts per token (the grouped segments take 8 slots per token)')
         if getattr(eng, 'q8', False): raise ValueError('Q3MoEVerify: the verify module reads the F16 cache only (a Q8 KV engine has no verify build)')
+        if getattr(eng, 'rope', None) is not None: raise ValueError('Q3MoEVerify: the long-context mode (YaRN) has no verify build (its RoPE runs on the decode modules only)')
         taps = tuple(int(t) for t in taps)
         if any(not 0 <= t < len(eng.L) for t in taps) or len(set(taps)) != len(taps): raise ValueError(f'Q3MoEVerify: taps {taps}')
         self.eng, self.T, self.taps, self.module = eng, T, taps, module

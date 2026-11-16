@@ -98,6 +98,11 @@ def main(argv=None):
     T = int(eng.get('T', 4))
     opt = dict(model=model, max_ctx=int(eng['max_ctx']), chunk=2048, no_drafter=not eng.get('drafter', True),
                drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER)
+    ktp = (eng.get('key') or {}).get('tp') or {}
+    if ktp.get('rope'): opt['long_context'] = True          # (a long-context server's bundle: its YaRN engine, as serve built it)
+    if ktp.get('kv'): opt['kv'] = 'q8'                      # (its Q8_0 KV rows)
+    try: A.long_mode(opt)
+    except ValueError as e: raise SystemExit(f'replay: {e}') from None
     m, pf, df, dr = A.build(opt, log=print, T=T)
     for d in m.devs: torch.cuda.synchronize(d)
     pc = PC.PromptCache(m, pf, dr, cache_dir=cdir, retention_days=1e6)

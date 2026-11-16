@@ -98,6 +98,9 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
     nact = (npos + L - 1) / L;
 }
 
+#if defined(K3_Q3M_YARN) && defined(K3_Q3M_VER)
+#error "YaRN is built for the decode modules only (one card, two cards, F16 and Q8), not the verify module"
+#endif
 #ifdef K3_Q3M_KV_Q8
 // The Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip): the cache rows are kernels/own_kv_codec.h's wire format ([K blocks |
 // V blocks], 32 values per block: a half scale and 32 signed codes, 34 bytes). K is rotated: a row is
@@ -188,10 +191,21 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
     const float wq = par[i], eps = par[2 * ATS_D + 1];
     const float xk = last ? (hw ? vin[(size_t)g * ATS_D + i] : kin[(size_t)g * ATS_D + i]) : 0.0f;
     const float wk = par[ATS_D + i];
+#ifdef K3_Q3M_YARN
+    // YaRN (the long-context mode's modules, kernels/k3_q3m_lean*_yarn.hip): par[2 D + 2 + j] = pair j's frequency, par[2 D
+    // + 2 + D / 2] = the attention factor llama.cpp's rope_yarn multiplies cos and sin by (so the stored K rows carry it,
+    // as llama.cpp's do). The host fills both (caminus.rope.yarn_table), the prefill's q3p_qk_rope reads the same block:
+    // decode and prefill take the same angle and factor with the same statements
+    if (tid < ATS_D / 2) {
+        const float theta = (float)pos * par[2 * ATS_D + 2 + tid], ms = par[2 * ATS_D + 2 + ATS_D / 2];
+        rc[tid] = cosf(theta) * ms; rsn[tid] = sinf(theta) * ms;
+    }
+#else
     if (tid < ATS_D / 2) {
         const float theta = (float)pos * powf(par[2 * ATS_D], (float)tid);
         rc[tid] = cosf(theta); rsn[tid] = sinf(theta);
     }
+#endif
 #pragma unroll
     for (int r = 0; r < ATS_G / 2; r++) {
         if (r >= NR) break;

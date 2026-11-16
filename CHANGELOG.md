@@ -7,6 +7,12 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### New
 
+- **Qwen3-30B-A3B reads longer texts, opt-in.** `caminus start qwen3-30b-a3b --long-context` (or `caminus serve
+  --long-context`) uses the model card's recipe for long texts, YaRN x4, for up to 131,072 tokens: about 80K on one
+  RX 7900 XTX by the memory projection (the server stores the cache as 8-bit rows there and says so) and the full 131,072 on two cards. The default
+  stays 40,960 tokens without scaling: YaRN changes every position, so short texts can read slightly differently. Other
+  models refuse the flag. See [models](docs/models.md).
+
 - **Signed build provenance (SLSA Build Level 3).** Every release and nightly is now built again on GitHub's runners
   in the same build image the maintainer uses, published only when both builds are byte for byte equal, and signed:
   `gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus --signer-workflow

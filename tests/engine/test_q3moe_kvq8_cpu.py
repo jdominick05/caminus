@@ -107,9 +107,10 @@ check(k3.Q3M_KV_Q8_BASE[Q8M] == 'k3_q3m_lean' and k3.Q3M_KV_Q8_OF['k3_q3m_lean']
       and Q8M in k3.Q3M_MODULES and k3.MODULE_CAPS[Q8M] == k3.MODULE_CAPS['k3_q3m_lean'],
       'k3_q3m_lean_kvq8: k3_q3m_lean\'s Q8 build, in the lean modules (the same ops whitelist and (op, format) pairs)')
 check(k3.Q3M_TP_OF.get(Q8M) == 'k3_q3m_lean_tp_kvq8' and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
-      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M not in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' not in kernels.RUNTIME_SET,
+      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M not in kernels.RUNTIME_SET,
       'its two-card form is k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py); no verify form, not in the dense Q8 '
-      'table, not in the installed runtime set (not served)')
+      'table, not in the installed runtime set (no option selects the native Q8 module; the long-context mode ships its '
+      'YaRN build and q3m_prefill_kvq8\'s attention: tests/engine/test_q3moe_yarn_cpu.py)')
 E = k3.Engine(module=Q8M, grid=8, T=1)
 check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
       and k3.Engine(module='k3_q3m_lean', grid=8).kv_error is None,

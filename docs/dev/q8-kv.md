@@ -124,7 +124,9 @@ speed, matching prefill, cache park/restore, the GSQ verify objects and two card
 `Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to
 `k3_q3m_lean`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
 `q3p_qk_rope_q8` and `q3p_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
-`q3m_prefill`. Not served: no option selects it and neither object is in the installed runtime set. The registry's
+`q3m_prefill`. No option selects it in the native mode and the native module is not in the installed runtime set; the
+long-context mode (YaRN) picks the Q8 rows on one card where only they hold its context, on `k3_q3m_lean_kvq8_yarn` and
+`q3m_prefill_kvq8_yarn` (whose attention is `q3m_prefill_kvq8`'s, shipped for it). The registry's
 projection takes `opt['kv'] = 'q8'` (`arch.kv_q8`) so the later `--kv q8` switch only has to set it.
 
 Format: the same wire codec and row layout as the dense line (`kernels/own_kv_codec.h`, `caminus.ref_kv`), with K

@@ -36,8 +36,9 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 
 | Option | What it does |
 |---|---|
-| `--max-ctx N` | A smaller context than the largest that fits. |
-| `--cards 2` | Run a one-card model across two cards (tensor parallel): `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b`. Without it each model runs on its own card count. For `qwen3-30b-a3b` one card stays the default: two cards write more slowly below about 16K tokens of context and faster past it, and the context stays 40,960 tokens either way (the model's own limit). The bigger card is card 0: it holds two thirds of every expert. `caminus fit --cards 2` reports the context two cards hold. |
+| `--max-ctx N` | A smaller context than the largest that fits. Above the model's own context it turns on the long-context mode where the model has one (below). |
+| `--long-context` | `qwen3-30b-a3b`: YaRN x4, up to 131,072 tokens (about 80K on one XTX, with 8-bit cache rows where only they fit; 131,072 on two cards). Short texts can read slightly differently, so it is off by default. `coder`: needs a `--max-ctx` above 262,144. Other models refuse it. |
+| `--cards 2` | Run a one-card model across two cards (tensor parallel): `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b`. Without it each model runs on its own card count. For `qwen3-30b-a3b` one card stays the default: two cards write more slowly below about 16K tokens of context and faster past it, and the context stays 40,960 tokens either way unless `--long-context` is on. The bigger card is card 0: it holds two thirds of every expert. `caminus fit --cards 2` reports the context two cards hold. |
 | `--kv-host` | `coder` only: keep the attention cache in system memory (the cards read it directly). Same results, less VRAM. |
 | `--no-drafter` | `coder` only: turn off the drafter. |
 | `--draft KIND` | Speculative decoding: `off` (plain), `dflash` (the DFlash2 drafter: the Coder's sidecar, needs `--drafter`; on `swift-1.5` and `thinkingcap`, on one card or two, their base model's drafter file from the model directory, `Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf`, or `--drafter`), or `mtp` (the model's own prediction block: `swift-1.5` or `thinkingcap`, on one card or two). Default: `dflash` for the Coder when its file is there, and for `swift-1.5`, `thinkingcap` and `qwen3.8-27b` on one card when the shared DFlash2 file is there and 32,768 tokens of context (or your `--max-ctx`) still fit with it; otherwise `off`, with the full context. On a 24 GB card that means `qwen3.8-27b` and `thinkingcap` draft by default and `swift-1.5` does not (the drafter would leave it about 12-16K tokens); `--draft dflash` runs it anyway. On two cards: `dflash` for `swift-1.5` and `thinkingcap` under the same rule (the drafter's memory comes out of the two-card context). `off` for every other model. |
@@ -46,6 +47,19 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |
 | `--idle-park-s N` | Save an idle conversation to disk after N seconds (default 8 hours). |
 | `--config FILE` | Read options from a JSON or TOML file (the same names with underscores). |
+
+### Long context (`qwen3-30b-a3b`, up to 131,072 tokens)
+
+`--long-context` (or `--max-ctx` above 40,960) serves the model card's YaRN recipe: positions scaled by 4 from the
+native 32,768 tokens, up to 131,072. It is opt-in: without it the server is unchanged (40,960 tokens, no scaling).
+
+- The context: one XTX holds about 80K tokens, with the attention cache as 8-bit rows (the server picks them only where
+  the 16-bit cache would hold less, and logs it); two cards hold 131,072 with the 16-bit cache. `caminus fit
+  --long-context` reports what your cards hold.
+- YaRN applies at every position, so short texts can read slightly differently than in the default mode (the model card
+  advises it only past 32,768 tokens).
+- A conversation saved in one mode is never restored into the other.
+- `caminus start qwen3-30b-a3b --long-context` passes it to the server.
 
 ### Long context (`coder`, up to 1M tokens)
 

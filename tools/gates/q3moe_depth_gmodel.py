@@ -19,7 +19,9 @@ file the like-for-like one: --llama-kv names which, for the printout). --save-lo
 (f32 [rows, vocab]); --against PATH (another run's saved logits: the F16 cache's) gates KLD(that || this) and top-1 agreement
 between the two runs (tools/gates/kv_against.py): against llama.cpp's own F16-KV -> q8_0-KV cost on the same tokens
 (--against-llama ITS_F16KV.bin with --llama ITS_Q8_0KV.bin --llama-kv q8_0; then the --llama rule above is the
-like-for-like one) or explicit bars (--against-kld MEAN --against-top1 PERCENT); --against without a bound is refused."""
+like-for-like one) or explicit bars (--against-kld MEAN --against-top1 PERCENT); --against without a bound is refused.
+--yarn: the long-context mode (YaRN x4) at depth: REF made by tools/reference/q3moe_ref32.py --yarn 4:32768 (with --resume /
+--budget-s past one window), the engine and its prefill on the YaRN builds, LLAMA.bin from gg_golden with 'yarn 4 32768'."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -47,9 +49,16 @@ if __name__ == '__main__':
     ap.add_argument('--llama', default=None); ap.add_argument('--tokens-out', default=None); ap.add_argument('--module', default=None)
     ap.add_argument('--decode-only', action='store_true'); ap.add_argument('--cards', type=int, default=1, choices=(1, 2))
     ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('--llama-kv', default='f16', choices=('f16', 'q8_0'))
+    ap.add_argument('--yarn', action='store_true', help='the long-context mode (YaRN): the reference must be a YaRN one (its yarn '
+                    'entry: tools/reference/q3moe_ref*.py --yarn), the engine runs its YaRN modules (rope=YarnMode)')
     kv_against.add_args(ap)
     A = ap.parse_args(); kv_against.check_args(ap, A)
-    z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']; N, M = len(seq), len(ref)
+    z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']
+    zy = tuple(float(v) for v in z['yarn']) if 'yarn' in z.files else None
+    if bool(zy) != A.yarn:   # (a YaRN reference against a native engine, or the reverse, measures the RoPE change, not the engine)
+        raise SystemExit(f'--ref {A.ref}: ' + (f'a YaRN reference ({zy}): pass --yarn' if zy else 'a native reference: --yarn needs one made with --yarn'))
+    from caminus.rope import YarnMode
+    rope = YarnMode(zy[0], int(zy[1])) if zy else None; N, M = len(seq), len(ref)
     if A.tokens_out:
         open(A.tokens_out, 'w').write(' '.join(map(str, seq)) + '\n'); print(f'tokens -> {A.tokens_out}'); sys.exit(0)
     import torch
@@ -59,7 +68,7 @@ if __name__ == '__main__':
         from caminus.prefill import q3m_tp
         print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), f'N {N}, the last {M} positions', flush=True)
         extra = (0.0, 0.0) if A.decode_only else q3m_tp.need_tp_mib(q3m_tp.tp_shapes(A.gguf), 2048)
-        eng = Q3MoETP(A.gguf, max_ctx=N + 8, module=A.module, vram_extra_mib=extra, q8=A.kv == 'q8')
+        eng = Q3MoETP(A.gguf, max_ctx=N + 8, module=A.module, vram_extra_mib=extra, q8=A.kv == 'q8', rope=rope)
         print(f'two cards: module {eng.module}, KV {getattr(eng, "kv_format_id", "f16")}', flush=True)
         rep_bad, rows = [], []
         if A.decode_only:
@@ -90,7 +99,7 @@ if __name__ == '__main__':
         from caminus.engine.q3moe_one import Q3MoEOne
         from caminus.prefill.q3m import Q3MPrefill
         print(torch.cuda.get_device_name(0), f'N {N}, the last {M} positions', flush=True)
-        eng = Q3MoEOne(A.gguf, max_ctx=N + 8, module=A.module, q8=A.kv == 'q8')
+        eng = Q3MoEOne(A.gguf, max_ctx=N + 8, module=A.module, q8=A.kv == 'q8', rope=rope)
         print(f'one card: module {eng.module}, KV {getattr(eng, "kv_format_id", "f16")}', flush=True)
         if A.decode_only:
             for t in seq[:N - M]: eng.step(t)

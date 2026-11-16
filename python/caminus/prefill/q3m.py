@@ -93,12 +93,14 @@ class Q3MPrefill(PrefillDriver):
                 if L[key][0] not in q3m_ops.formats(module): raise ValueError(f'Q3MPrefill: blk.{il} {key} is {L[key][0]} ({module})')
         self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache format: the Q8 kernels for its rows, never F16 ones)
         if self.q8 and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the Q8 KV cache runs with q3m_prefill only (not {module})')
+        self.yarn = getattr(m, 'rope', None) is not None   # (the long-context mode: q3p_qk_rope from its YaRN build, on the same par block)
+        if self.yarn and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the long-context mode runs with q3m_prefill only (not {module})')
         T = self.chunk
         self.need_mib = buffer_need_mib(m, T)
         if check: capacity.check([dev.index], [self.need_mib], f'Q3MPrefill buffers (chunk {T})')
         f32, f16, i32 = layout(m, T)
         with torch.cuda.device(dev):
-            self.ops = q3m_ops.Ops(dev, module, q8=self.q8)
+            self.ops = q3m_ops.Ops(dev, module, q8=self.q8, yarn=self.yarn)
             for n, c in f32.items(): setattr(self, n, torch.zeros(c, dtype=torch.float32, device=dev))
             for n, c in f16.items(): setattr(self, n, torch.zeros(c, dtype=torch.float16, device=dev))
             for n, c in i32.items(): setattr(self, n, torch.zeros(c, dtype=torch.int32, device=dev))
@@ -115,7 +117,8 @@ class Q3MPrefill(PrefillDriver):
 
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the fp32 router"""
-        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='own-wmma', **({'kv': 'q8_0'} if self.q8 else {}))
+        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='own-wmma', **({'kv': 'q8_0'} if self.q8 else {}),
+                    **({'rope': self.m.rope_key} if self.yarn else {}))
 
     # -- one chunk ---------------------------------------------------------------------------------------------------------
     def _chunk(self, toks, a, b):

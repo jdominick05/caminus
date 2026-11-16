@@ -280,14 +280,14 @@ def main():
 
     # ---- the model cards' context facts in the registry (data only: nothing serves from them yet)
     F = {n: ent.rope_facts for n, ent in arch.ARCHS.items()}
-    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), None, None, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
+    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), 'yarn', 4.0, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
           and F['qwen3moe'] is F['qwen3moe-tp'] is arch.QWEN3MOE_ROPE
           and F['qwen35-own'] is F['qwen35-own-tp'] is arch.QWEN35_ROPE
           and (F['qwen35-own'].native_ctx, F['qwen35-own'].card_factors, F['qwen35-own'].shipped) == (262144, (2.0, 4.0), None)
           and (F['qwen4exp'].native_ctx, F['qwen4exp'].card_kind, F['qwen4exp'].shipped, F['qwen4exp'].shipped_factor)
           == (262144, 'yarn', 'ntk', arch.LONG_NTK)
           and all(F[n] is None for n in ('qwen35moe', 'qwen35', 'qwen3next')),
-          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card, not applied), the dense 27B line 262,144, the Coder '
+          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card; x4 shipped as the opt-in long-context mode), the dense 27B line 262,144, the Coder '
           'ships NTK x4 where its card names YaRN x4; the paused entries have none')
 
     # ---- caminus serve's options: --model-alias '' = the model's own id

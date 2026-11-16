@@ -21,6 +21,7 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 |---|---|
 | `--card N` | Use card N (as `caminus ps` numbers them) instead of choosing. |
 | `--ctx N` | A context of N tokens instead of the largest that fits. |
+| `--long-context` | The model's long-context mode: `qwen3-30b-a3b` with YaRN x4, up to 131,072 tokens ([models](models.md#long-context-for-qwen3-30b-a3b-opt-in)). Other models refuse it. |
 | `--name NAME` | Call the server NAME (default: the model's name). |
 | `--port N` | Listen on port N (default: the first free port from 8092). |
 | `--team brain-hands` | Start AREX-2 and Qwen3.6 together on two cards ([the team](panel.md#the-brain--hands-team)); paused with Qwen3.6 for this release. |

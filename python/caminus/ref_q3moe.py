@@ -11,9 +11,14 @@ The math (per layer; x the residual stream, float64):
   h = rms(x) * ffn_norm;  p = softmax(Wr h) over 128 experts;  top 8 by p, weights p / sum(p of the 8)
   x += sum_e w_e Wdown_e (silu(Wgate_e h) * Wup_e h)
   logits = Whead (rms(x) * output_norm)        rms(y) = y / sqrt(mean(y^2) + eps)
+yarn=(factor, n_ctx_orig): the long-context mode's RoPE, written from llama.cpp's statements (ggml rope_yarn and
+ggml_rope_yarn_corr_dims, beta_fast 32, beta_slow 1) in float64, on purpose not through caminus.rope (the engine's table
+builder), so the gate can catch a wrong table: theta_extrap = pos base^(-2 j / 128), theta_interp = theta_extrap / factor,
+theta = theta_interp (1 - ramp_j) + theta_extrap ramp_j, cos and sin times 1 + 0.1 ln(factor).
 
-  python -I -m caminus.ref_q3moe GGUF "prompt" [--new 4]"""
+  python -I -m caminus.ref_q3moe GGUF "prompt" [--new 4] [--yarn 4:32768]"""
 import argparse
+import math
 import sys
 import time
 
@@ -24,7 +29,8 @@ from caminus.bpe import BPE
 
 
 class Q3MoERef:
-    def __init__(self, path):
+    def __init__(self, path, yarn=None):
+        self.yarn = None if yarn is None else (float(yarn[0]), int(yarn[1]))
         self.F = F = ggufio.GGUFFile(path)
         if F.arch != 'qwen3moe': raise ValueError(f'ref_q3moe: architecture {F.arch!r} (qwen3moe only)')
         self.L, self.D = int(F.hp('block_count')), int(F.hp('embedding_length'))
@@ -45,11 +51,28 @@ class Q3MoERef:
     def rms(self, x, w):
         return x / np.sqrt((x * x).mean(axis=-1, keepdims=True) + self.eps) * w
 
+    def yarn_angles(self, pos):
+        """(theta [64], mscale) of llama.cpp's rope_yarn at position pos (float64; the statement form, see the module doc)"""
+        factor, n_orig = self.yarn; n_dims, base = self.HD, self.base
+        corr_dim = lambda n_rot: n_dims * math.log(n_orig / (n_rot * 2 * math.pi)) / (2 * math.log(base))
+        lo, hi = max(0.0, math.floor(corr_dim(32.0))), min(n_dims - 1.0, math.ceil(corr_dim(1.0)))
+        i0 = np.arange(0, n_dims, 2)                                   # (llama.cpp's i0; i0 / 2 is the pair)
+        theta_extrap = pos * base ** (-i0 / n_dims)
+        freq_scale = 1.0 / factor
+        theta_interp = freq_scale * theta_extrap
+        ramp_mix = 1.0 - np.minimum(1.0, np.maximum(0.0, (i0 // 2 - lo) / max(0.001, hi - lo)))
+        theta = theta_interp * (1.0 - ramp_mix) + theta_extrap * ramp_mix
+        return theta, 1.0 + 0.1 * math.log(1.0 / freq_scale)
+
     def rope(self, x, pos):
-        """x [..., heads, 128] at position pos: NEOX pairs (i, i + 64)"""
+        """x [..., heads, 128] at position pos: NEOX pairs (i, i + 64); YaRN's angles and factor in the long-context mode"""
         half = self.HD // 2
-        th = pos * self.base ** (-2.0 * np.arange(half) / self.HD)
-        c, s = np.cos(th), np.sin(th)
+        if self.yarn is None:
+            th = pos * self.base ** (-2.0 * np.arange(half) / self.HD)
+            c, s = np.cos(th), np.sin(th)
+        else:
+            th, ms = self.yarn_angles(pos)
+            c, s = np.cos(th) * ms, np.sin(th) * ms
         a, b = x[..., :half], x[..., half:]
         return np.concatenate([a * c - b * s, b * c + a * s], axis=-1)
 
@@ -96,11 +119,19 @@ class Q3MoERef:
         return np.concatenate([self.W('output.weight', r0, min(R, r0 + 16384)) @ hN for r0 in range(0, R, 16384)])
 
 
+def parse_yarn(v):
+    """'FACTOR:ORIG_CTX' -> (factor, orig) or None"""
+    if not v: return None
+    f, o = v.split(':')
+    return float(f), int(o)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='float64 host forward of qwen3moe on Caminus\'s own reader, decoders and tokenizer')
     ap.add_argument('gguf'); ap.add_argument('prompt'); ap.add_argument('--new', type=int, default=4)
+    ap.add_argument('--yarn', default=None, help='FACTOR:ORIG_CTX (the long-context mode: 4:32768)')
     A = ap.parse_args(argv)
-    m = Q3MoERef(A.gguf); tk = BPE(m.F.meta)
+    m = Q3MoERef(A.gguf, yarn=parse_yarn(A.yarn)); tk = BPE(m.F.meta)
     ids = tk.encode(A.prompt)
     print(f'prompt {A.prompt!r} -> {len(ids)} tokens {ids}', flush=True)
     t0 = time.time()

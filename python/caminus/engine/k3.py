@@ -108,10 +108,25 @@ Q3M_LEAN_MODULES += ('k3_q3m_lean_kvq8',)
 # one-card module -> two-card module. engine/q3moe_tp.py builds its tapes on them (caminus serve --cards 2; the _trace build
 # is measurement only, outside the installed runtime set; the Q8 KV build, Q3MoETP(q8=True), is not served)
 Q3M_TP_OF = {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
+# the long-context mode's builds (YaRN, caminus serve --long-context: kernels/k3_q3m_lean*_yarn.hip, K3_Q3M_YARN): each decode
+# module -> its YaRN build, OP_OWN_ATTS's RoPE from the host's table at the end of its par block (caminus.rope.yarn_table;
+# own_atts refuses a shorter block on these modules). The same ops, pairs, dispatch, cache format and error word as its base:
+# every family below takes the YaRN builds through these lines (a Q8 YaRN build missing from Q3M_KV_Q8_MODULES would read
+# its cache as F16 with no error word; tests/engine/test_q3moe_yarn_cpu.py checks each membership). Decode only: no verify build
+Q3M_YARN_OF = {'k3_q3m_lean': 'k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_kvq8_yarn',
+               'k3_q3m_lean_tp': 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8': 'k3_q3m_lean_tp_kvq8_yarn'}
+Q3M_YARN_BASE = {y: b for b, y in Q3M_YARN_OF.items()}
+Q3M_YARN_MODULES = tuple(Q3M_YARN_OF.values())
+Q3M_KV_Q8_BASE.update({Q3M_YARN_OF[q]: Q3M_YARN_OF[b] for q, b in list(Q3M_KV_Q8_BASE.items())})
+Q3M_KV_Q8_OF = {base: name for name, base in Q3M_KV_Q8_BASE.items()}
+Q3M_KV_Q8_MODULES = tuple(Q3M_KV_Q8_BASE)
+Q3M_LEAN_MODULES += (Q3M_YARN_OF['k3_q3m_lean'], Q3M_YARN_OF['k3_q3m_lean_kvq8'])
+Q3M_TP_OF.update({Q3M_YARN_OF[one]: Q3M_YARN_OF[tp] for one, tp in list(Q3M_TP_OF.items()) if one in Q3M_YARN_OF})
 Q3M_TP_MODULES = tuple(Q3M_TP_OF.values())
 # OP_OWN_ATTS's most splits per kv head (= kernels/k3_own_atts.h ATS_MAXS: the merge holds every split's m, l in LDS):
 # 128 in the two-card builds (half the kv heads per card: one attention task per workgroup of the grid), 64 elsewhere
 ATS_MAXS, ATS_MAXS_TP = 64, 128
+YARN_TABLE_FLOATS = 65   # = caminus.rope.TABLE_FLOATS: freq [64] | mscale after the decode block's eps (Q3M_YARN_MODULES)
 
 
 def atts_max_splits(module):
@@ -1138,7 +1153,8 @@ class Engine:
         RoPE, the cache row, flash-decoding splits of the positions (one task = a split of one kv head, all its query heads),
         the merge by the last task of each kv head, fp16 out. qkv fp32 = q [heads * dim] | k [kv_heads * dim] | v (the
         matvecs' outputs, one buffer); scratch fp32 [atts_scratch_floats(kv_heads, splits)], ZEROED before the first run
-        (its counters return to zero after every launch); par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache
+        (its counters return to zero after every launch); par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps (the YaRN
+        builds, Q3M_YARN_MODULES: + freq [64] | mscale, caminus.rope.yarn_table); cache
         f16 (the Q8 KV modules, Q3M_KV_Q8_MODULES: uint8 Q8_0 rows, with the engine's kv_error word) with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
         rows before them); out16 fp16 [heads * dim]. splits: tasks per kv head (a fixed number: the split layout depends only on the
         position, never on the grid; at most atts_max_splits(module): 128 on the two-card modules, 64 elsewhere); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
@@ -1167,6 +1183,9 @@ class Engine:
             if not cache.is_contiguous() or cache.data_ptr() % 4: raise ValueError('own_atts: the Q8 cache must be contiguous and 4-byte aligned')
             self.keep.append(self.kv_error)
         assert qkv.numel() >= heads * dim + 2 * M and par.numel() >= 2 * dim + 2 and out16.numel() >= heads * dim
+        if self.module in Q3M_YARN_MODULES and par.numel() < 2 * dim + 2 + YARN_TABLE_FLOATS:   # (the device reads the table past eps)
+            raise ValueError(f'own_atts: module {self.module} reads the YaRN table after eps: par needs {2 * dim + 2 + YARN_TABLE_FLOATS} '
+                             f'floats (q_norm | k_norm | theta_scale, eps | freq [64] | mscale), not {par.numel()}')
         assert scratch.numel() >= self.atts_scratch_floats(kv_heads, splits, heads_per_task) and qkv.data_ptr() % 16 == 0 and scratch.data_ptr() % 16 == 0
         rows = kv_rows(cache, M, q8) - self.ATS_PAD
         if rows < 1: raise ValueError(f'own_atts: the cache needs {self.ATS_PAD} padding rows past its last position')
