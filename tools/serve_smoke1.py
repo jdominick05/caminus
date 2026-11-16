@@ -105,6 +105,7 @@ def server_command(a, kv=None):
     if a.draft: argv += ['--draft', a.draft]
     kv = kv or getattr(a, 'kv', None)
     if kv: argv += ['--kv', kv]
+    if getattr(a, 'long_context', False): argv += ['--long-context']   # (the long-context mode; max_ctx auto: its cap or what fits)
     argv += list(getattr(a, 'extra', None) or ())   # (more serve flags from a caller, e.g. a benchmark's --no-disk-cache)
     if S.INSTALLED:
         cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'serve_smoke_installed.py')]
@@ -238,6 +239,7 @@ def main():
     ap.add_argument('--card', default='1', help='HIP_VISIBLE_DEVICES of the server (1: the XT, 0: the XTX; 0,1: a two-card engine)')
     ap.add_argument('--cards', type=int, default=None, help='the cards the server runs the model on (caminus serve --cards) and '
                     '/caminus/status must list (default: the --card count)')
+    ap.add_argument('--long-context', action='store_true', help='caminus serve --long-context (Qwen3-30B-A3B: YaRN x4)')
     ap.add_argument('--max-ctx', default='auto');   # (auto: the server's default, the largest context that fits)
     ap.add_argument('--alias', default=None)
     ap.add_argument('--llm-top', default=None); ap.add_argument('--restart', action='store_true')
