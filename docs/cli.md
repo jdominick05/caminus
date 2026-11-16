@@ -39,7 +39,9 @@ caminus fit --model MODEL.gguf --drafter DRAFTER.gguf --draft dflash --json
 ```
 
 The report gives the largest native context that fits, the chosen cards, and projected and available memory per card.
-It includes checkpoint slots and drafter buffers. An unavailable projection returns an error and no maximum.
+It includes checkpoint slots and drafter buffers. For a model with more than one KV cache format (Qwen3-30B-A3B), the
+JSON's `kv` names the format the maximum assumes (`f16` or `q8`): in the long-context mode the mode picks it. An
+unavailable projection returns an error and no maximum.
 Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
 the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
 F16/Q8 comparison and context choices in the panel remain separate integration work.

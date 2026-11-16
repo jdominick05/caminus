@@ -145,7 +145,9 @@ CLAUDE.md imports this file.
   serve's `recipe` and replay): no engine applies a file's RoPE scaling keys, and such a file is never served unscaled.
   `rope_facts` holds each model card's native context and long-context recipe; `shipped` names what Caminus serves past
   the GGUF's context: the Coder's NTK mode, and Qwen3-30B-A3B's opt-in YaRN x4 (`_Q3MLong`, `--long-context` or an explicit
-  `--max-ctx` past 40,960; `Arch.long_mode` resolves it in `recipe` before placement, every other entry refuses the flag).
+  `--max-ctx` past 40,960; `Arch.long_mode` resolves it in `recipe` before placement, every other entry refuses the flag;
+  `_Q3MLong.long_refusal` refuses a qwen3moe file whose header is not that model's, context_length 40,960 and
+  rope.freq_base 1e6, or that has codebook / row-scale tensors).
   YaRN runs on separate objects (`k3.Q3M_YARN_OF`: `k3_q3m_lean*_yarn` under `K3_Q3M_YARN`, `q3m_prefill*_yarn` under
   `Q3P_YARN`): the table `caminus.rope.yarn_table` (llama.cpp's rope_yarn: freq per pair, mscale on cos / sin) is appended
   to each layer's qk_par and read by decode and prefill with the same statements; the default objects keep their code.

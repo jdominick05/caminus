@@ -331,6 +331,7 @@ def fit_report(argv):
             raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
         report = plan.report()
         report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']])
+        if getattr(plan, 'kv', None): report['kv'] = plan.kv   # (the KV format the maximum assumes: an entry with formats says)
     except (ValueError, OSError, ImportError, KeyError, TypeError, NotImplementedError, argparse.ArgumentTypeError, host.PlacementError) as exc:
         if as_json: print(json.dumps(dict(ok=False, max_ctx=None, error=str(exc))))
         else: print(f'caminus fit: {exc}', file=sys.stderr)
@@ -340,7 +341,8 @@ def fit_report(argv):
     else:
         maximum = report['max_ctx']
         print(f'caminus fit: {maximum if maximum is not None else "no"} positions fit '
-              f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s))')
+              f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s)'
+              + (f'; KV {report["kv"]}' if report.get('kv') else '') + ')')
     return 0
 
 

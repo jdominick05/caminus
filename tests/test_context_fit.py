@@ -201,6 +201,7 @@ class ContextFit(unittest.TestCase):
         self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
         self.assertEqual(placed['split'], {'exp_rows': 512, 'vocab_share': 0.532})
         self.assertEqual(report['need_mib'], need(40960))
+        self.assertEqual(report['kv'], 'f16')                                  # (the KV format the maximum assumes)
         # the runtime route (max_ctx auto in serve, the placement's split stored) reads the same plan
         ropt = dict(opt, placement=dict(split=placed['split']))
         with patch.object(capacity, 'caps_mib', return_value=caps), patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
@@ -214,6 +215,7 @@ class ContextFit(unittest.TestCase):
         long_report = json.loads(stdout.getvalue())
         self.assertEqual(set(long_report), set(report))
         self.assertEqual(long_report['native_ctx'], 131072)
+        self.assertIn(long_report['kv'], ('f16', 'q8'))                        # (the mode's choice, named)
         self.assertGreaterEqual(long_report['max_ctx'], 40960)
         stdout = io.StringIO()
         with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):

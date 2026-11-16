@@ -344,6 +344,10 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
   XT). One XTX holds about 80K with Q8_0 rows (about 45K with F16): with no `kv` asked for, the mode takes F16 where the
   asked context fits, else Q8 where it holds more, and the serve log names the choice. max_ctx auto runs up to 131,072
   in the mode; past it is refused.
+- **Which files.** `_Q3MLong.long_refusal` refuses the mode, before placement, for a qwen3moe file whose header is not
+  this model's (context_length 40,960 and rope.freq_base 1e6: the 2507 releases and Qwen3-Coder-30B-A3B say 262,144 and
+  another base, and the recipe's numbers do not fit their RoPE) and for a file with codebook or row-scale tensors (their
+  decode modules have no YaRN build). Without the mode such files serve as before.
 - **Keys.** The engine key carries the RoPE (and the module name differs), so a conversation parked in one mode never
   restores into the other.
 - **The trade-off.** YaRN scales every position, so short texts read differently than unscaled; the card's own note is
@@ -356,7 +360,12 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
   `tools/gates/q3moe_gmodel.py --yarn` at 128 tokens against `tools/reference/q3moe_ref.py --yarn 4:32768` (float64, CPU)
   with llama.cpp's YaRN run (`gg_golden` job line `yarn 4 32768`) as the bound; `tools/gates/q3moe_depth_gmodel.py --yarn`
   at 65,536 and about 131K (two cards) and about 80K (one XTX, `--kv q8`) against `q3moe_ref32.py --yarn 4:32768`
-  (resumable per layer: `--resume DIR --budget-s S`); the served smoke with `--long-context`. Numbers land here when run.
+  (resumable per layer: `--resume DIR --budget-s S`, the residual and its layer index in one atomically replaced file);
+  the served smoke with `--long-context`. Under `--yarn` both G-model gates add an absolute bar on llama.cpp's mean KLD
+  against the YaRN reference (twice its native figure: 5.7e-03 at 128 tokens, 1.15e-02 at depth; not yet measured in the
+  mode) and, with `--native-ref`, check that both engines sit closer to the YaRN reference than to the native one
+  (`tools/gates/yarn_bound.py`): the relative rule alone would loosen with a wrong reference or llama.cpp run. Numbers
+  land here when run.
 
 ## Limits
 

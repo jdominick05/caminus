@@ -15,7 +15,8 @@ OUT.npz: seq (int64 [N]), logits (float32 [M, vocab]) for positions N - M .. N -
 --yarn FACTOR:ORIG (the long-context mode's reference: 4:32768): YaRN's angles from llama.cpp's statements (caminus.ref_q3moe's
 yarn_angles: float64, then cos and sin times 1 + 0.1 ln FACTOR, in fp32); OUT.npz then carries yarn = [FACTOR, ORIG].
 --resume DIR --budget-s S (depth references past one GPU window): after each layer the residual (N x D fp32: 1 GB at 131K)
-and the layer index go to DIR; a run stops after the first layer that ends past S seconds (RESULT PARTIAL: rerun the same
+and the layer index go to DIR as one file (state.npz, written under a temporary name and renamed: a run killed mid-write
+leaves the previous layer's state whole, never a residual of one layer with the index of another); a run stops after the first layer that ends past S seconds (RESULT PARTIAL: rerun the same
 command) and a rerun starts at the next layer. The attention is about quadratic in N: estimated (not measured) 7 / 30
 minutes of layers at 65,536 / 131,000 on one card, so 131K takes 3 or 4 windows of about 10 minutes."""
 import argparse, glob, math, os, sys
@@ -209,6 +210,35 @@ def peak_mib(F, N, qchunk, nl, D, nh, nkv, hd, E, ff, a8=False):
     return (max(attn, moe, head) + emb) / 2 ** 20 + SLACK_MIB
 
 
+STATE = 'state.npz'
+
+
+def save_state(d, x, seq, next_layer, yarn, act8):
+    """--resume: the residual after layer next_layer - 1 and that index, in ONE file, replaced atomically (os.replace of a
+    finished temporary file): a kill at any point leaves either the old state or the new one, both consistent"""
+    tmp = os.path.join(d, STATE + '.tmp.npz')
+    with open(tmp, 'wb') as f:
+        np.savez(f, x=x, seq=np.array(seq, dtype=np.int64), next_layer=int(next_layer), yarn=str(yarn or ''), act8=bool(act8))
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, os.path.join(d, STATE))
+
+
+def load_state(d, seq, yarn, act8):
+    """--resume: (next layer, residual as numpy) from DIR's state, or (0, None) when it has none; another run's state (tokens,
+    --yarn or --act8 differ) or the older two-file layout (x.npy beside the index, not written together) is refused"""
+    st = os.path.join(d, STATE)
+    if not os.path.exists(st):
+        if os.path.exists(os.path.join(d, 'x.npy')):
+            raise SystemExit(f'--resume {d}: an older two-file state (x.npy): its residual and layer index may disagree; start a new directory')
+        return 0, None
+    with np.load(st) as z:
+        if 'x' not in z.files:
+            raise SystemExit(f'--resume {d}: an older two-file state (no residual in {STATE}); start a new directory')
+        if [int(v) for v in z['seq']] != list(seq) or str(z['yarn']) != str(yarn or '') or bool(z['act8']) != bool(act8):
+            raise SystemExit(f'--resume {d}: its state is another run\'s (tokens, --yarn or --act8 differ)')
+        return int(z['next_layer']), z['x']
+
+
 def tree_text():
     fs = sorted(glob.glob(os.path.join(ROOT, 'docs', '**', '*.md'), recursive=True)) + sorted(glob.glob(os.path.join(ROOT, 'python', 'caminus', '**', '*.py'), recursive=True))
     return ''.join(f'\n# file: {os.path.relpath(f, ROOT)}\n' + open(f, encoding='utf-8').read() for f in fs)
@@ -245,13 +275,9 @@ def main():
     il0 = 0
     if A.resume:
         os.makedirs(A.resume, exist_ok=True)
-        st = os.path.join(A.resume, 'state.npz')
-        if os.path.exists(st):
-            z = np.load(st)
-            if [int(v) for v in z['seq']] != seq or str(z['yarn']) != str(A.yarn or '') or bool(z['act8']) != A.act8:
-                raise SystemExit(f'--resume {A.resume}: its state is another run\'s (tokens, --yarn or --act8 differ)')
-            il0 = int(z['next_layer'])
-            x = torch.from_numpy(np.load(os.path.join(A.resume, 'x.npy'))).to(dev)
+        il0, xs = load_state(A.resume, seq, A.yarn, A.act8)
+        if il0:
+            x = torch.from_numpy(xs).to(dev); del xs
             print(f'  resumed at layer {il0}', flush=True)
     if il0 == 0:
         raw = torch.from_numpy(np.ascontiguousarray(np.asarray(te.data()).reshape(-1, rb)[np.array(seq)])).to(dev)
@@ -322,10 +348,7 @@ def main():
         torch.cuda.empty_cache()
         if il % 8 == 0 or il == nl - 1: print(f'  layer {il} done', flush=True)
         if A.resume and il < nl - 1:
-            np.save(os.path.join(A.resume, 'x.npy.tmp.npy'), x.cpu().numpy())
-            os.replace(os.path.join(A.resume, 'x.npy.tmp.npy'), os.path.join(A.resume, 'x.npy'))
-            np.savez(os.path.join(A.resume, 'state.npz'), seq=np.array(seq, dtype=np.int64), next_layer=il + 1,
-                     yarn=str(A.yarn or ''), act8=A.act8)
+            save_state(A.resume, x.cpu().numpy(), seq, il + 1, A.yarn, A.act8)
             if A.budget_s is not None and time.time() - t_start > A.budget_s:
                 print(f'RESULT PARTIAL: layers through {il} done in {time.time() - t_start:.0f} s; rerun the same command', flush=True)
                 return

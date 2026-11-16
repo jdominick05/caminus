@@ -17,6 +17,9 @@ synthetic files (tests/engine/tiny_q3m.py), the registry's mode, caps, KV choice
   - the registry: the mode is opt-in (--long-context, or an explicit max_ctx past 40,960), its cap 131,072 (more refused),
     auto_need's native_ctx the cap; the KV choice (F16 where the asked context fits, else Q8 where it holds more) and the
     note naming it; every other entry refuses --long-context; the Coder's needs an explicit max_ctx past 262,144
+  - the mode's file check: a qwen3moe file that is not the recipe's model (context_length / rope.freq_base) or has codebook
+    or row-scale tensors is refused by long_mode (flag and explicit max_ctx), and stays native within its own context
+  - the gates' YaRN bounds (tools/gates/yarn_bound.py, synthetic rows) and q3moe_ref32's atomic resume state
   - the CLI: caminus serve --long-context (and in options_json), caminus start passes it and refuses a model without a mode
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q3moe_yarn_cpu.py --scratch DIR"""
@@ -254,6 +257,9 @@ check(tp_ok and all(b['small'] - a['small'] == nl * 65 * 4 for a, b in zip(tn, t
 
 # ---- the registry -------------------------------------------------------------------------------------------------------------------
 q, qt = arch.ARCHS['qwen3moe'], arch.ARCHS['qwen3moe-tp']
+# the mode is for Qwen3-30B-A3B's own file (context_length 40,960, rope.freq_base 1e6): the registry checks run on a tiny
+# file with that header (P, at 4,096 positions, stays the engines' file above)
+P = os.path.join(A.scratch, 'tiny-q3m-40k.gguf'); tiny_q3m.write(P, n_ctx=40960)
 o0, o1, o2 = dict(model=P), dict(model=P, long_context=True), dict(model=P, max_ctx=50000)
 check(q.long_mode(o0) is None and 'rope' not in o0 and q.rope_mode(o0) is None
       and q.long_mode(o1) and o1['rope'] == 'yarn' and isinstance(q.rope_mode(o1), rope.YarnMode)
@@ -263,7 +269,7 @@ check(q.long_mode(o0) is None and 'rope' not in o0 and q.rope_mode(o0) is None
       'mode: off by default; --long-context or an explicit max_ctx past the file\'s context_length turns it on (rope yarn); past '
       '131,072 refused; an explicit max_ctx within the file\'s context stays native')
 n0 = q.auto_need(dict(model=P), 4)[0]; n1 = q.auto_need(dict(o1), 4)[0]
-check(n0 == 4096 and n1 == 131072 and qt.auto_need(dict(model=PT, long_context=True, rope='yarn'), 4)[0] == 131072,
+check(n0 == 40960 and n1 == 131072 and qt.auto_need(dict(model=PT, long_context=True, rope='yarn'), 4)[0] == 131072,
       'auto_need: native_ctx the file\'s context_length natively, the mode\'s 131,072 in the mode (one card and two)')
 # the KV choice, on a stand-in room (F16 ~0.094 MiB per position, Q8 ~0.05: an XTX-like room of 4.25 GiB for the context)
 _ARCH_FIT = arch.Arch.context_fit
@@ -272,7 +278,7 @@ arch.Arch.context_fit = lambda self, opt, cards=None: ContextFit(self._ctx_cap(o
 pa = q.context_fit(dict(o1)); pe = q.context_fit(dict(o1, max_ctx=40000)); pg = q.context_fit(dict(o1, max_ctx=70000))
 pk = q.context_fit(dict(o1, kv='f16')); pn_ = q.context_fit(dict(model=P))
 check(pa.kv == 'q8' and pa.maximum() == 86016 and pe.kv == 'f16' and pg.kv == 'q8' and pk.kv == 'f16' and pn_.kv == 'f16'
-      and pn_.native_ctx == 4096,
+      and pn_.native_ctx == 40960,
       f'KV choice: auto picks Q8 where it holds more ({pa.maximum()} against F16\'s {pk.maximum()}); an explicit 40,000 stays F16, '
       f'70,000 takes Q8; an explicit kv is kept; native serves never switch')
 ox = dict(o1); extra = q.placement_extra(ox, None); ox['max_ctx'] = 86016
@@ -293,6 +299,90 @@ check(not bad and raises(lambda: co.long_mode(dict(long_context=True, max_ctx='a
       and co.long_mode(dict(max_ctx=1048576)) is None and arch.ARCHS['qwen35-own'].long_mode(dict(model=P)) is None,
       'refusals: every other entry refuses --long-context; the Coder takes it only with an explicit --max-ctx past 262,144 (its '
       'NTK mode, chosen by that max_ctx as before)' + (f' (wrong: {bad})' if bad else ''))
+
+# another qwen3moe file reaches this entry by its header: the mode refuses a file that is not the recipe's model (another
+# context_length or rope.freq_base: the 2507 releases and Qwen3-Coder-30B-A3B say 262,144 and another base) and formats the
+# YaRN builds do not run (codebook, row-scale), before placement; its native serve is unchanged
+from tiny_q35 import TYPE_ID as _TID, _s as _gs, _val as _gv
+from caminus.engine.own_layout import RS_CONT
+_BLK = {'F32': (1, 4), 'Q4_K': (256, 144), 'Q6_K': (256, 210), 'Q4_0': (32, 18), 'IQ4_XS': (256, 136), 'IQ3_S': (256, 110)}
+
+
+def head_file(name, ctx, base, fmts=('Q4_K',)):
+    """a header-only qwen3moe file (zero tensors of the given formats; long_mode reads the header and the formats only)"""
+    _TID.setdefault('Q4_0', 2)
+    meta = {'general.architecture': 'qwen3moe', 'qwen3moe.block_count': 1, 'qwen3moe.context_length': int(ctx)}
+    if base is not None: meta['qwen3moe.rope.freq_base'] = float(base)
+    ts = [('token_embd.weight', 'IQ4_XS', 256)] + [(f'blk.0.t{i}.weight', f, 256) for i, f in enumerate(fmts)]
+    head = struct.pack('<4sIQQ', b'GGUF', 3, len(ts), len(meta)) + b''.join(_gs(k) + _gv(v) for k, v in meta.items())
+    info, off = b'', 0
+    for n, f, ne in ts:
+        info += _gs(n) + struct.pack('<IQIQ', 1, ne, _TID[f], off); off += -(-(ne // _BLK[f][0] * _BLK[f][1]) // 32) * 32
+    blob = head + info; blob += b'\0' * (-len(blob) % 32)
+    path = os.path.join(A.scratch, name)
+    with open(path, 'wb') as f: f.write(blob + b'\0' * off)
+    return path
+
+
+import struct
+h_ok = head_file('h-ok.gguf', 40960, 1e6, ('Q4_K', 'Q6_K', 'F32'))
+h_2507 = head_file('h-2507.gguf', 262144, 1e7)
+h_base = head_file('h-base.gguf', 40960, 1e7)
+h_nob = head_file('h-nobase.gguf', 40960, None)
+h_ctx = head_file('h-ctx.gguf', 32768, 1e6)
+h_iq = head_file('h-iq.gguf', 40960, 1e6, ('Q4_K', 'IQ4_XS'))
+h_rs = head_file('h-rs.gguf', 40960, 1e6, ('Q4_K', 'Q4_0'))
+errs = {}
+for nm, path_ in (('2507', h_2507), ('base', h_base), ('nobase', h_nob), ('ctx', h_ctx), ('iq', h_iq), ('rs', h_rs)):
+    for how, o in (('flag', dict(model=path_, long_context=True)), ('ctx', dict(model=path_, max_ctx=300000 if nm == '2507' else 50000))):
+        try: q.long_mode(o); errs[(nm, how)] = None
+        except ValueError as e: errs[(nm, how)] = str(e)
+check(q.long_mode(dict(model=h_ok, long_context=True)) == 'YaRN x4' and all(errs.values())
+      and q.long_mode(dict(model=h_2507, max_ctx=200000)) is None and q.long_mode(dict(model=h_2507)) is None
+      and 'context_length 262,144' in errs[('2507', 'flag')] and 'rope.freq_base 1e+07' in errs[('2507', 'flag')]
+      and 'IQ4_XS' in errs[('iq', 'flag')] and 'Q4_0' in errs[('rs', 'ctx')] and 'IQ4_XS' not in (errs[('rs', 'flag')] or '')
+      and qt.long_refusal(h_2507) and qt.long_refusal(h_ok) is None,
+      'mode: refused for a qwen3moe file that is not the recipe\'s model (context_length 262,144 or 32,768, another or no '
+      'rope.freq_base; flag and explicit max_ctx) or with codebook / row-scale tensors (the token embedding\'s format not '
+      'counted); such a file within its own context_length stays native; the recipe\'s file takes it'
+      + ('' if all(errs.values()) else f' (not refused: {[k for k, v in errs.items() if not v]})'))
+check(q.LONG_OFF_FORMATS == frozenset(k3.OWN_IQ_FMT) | frozenset(RS_CONT),
+      f'mode: the refused formats are the engine\'s codebook (k3.OWN_IQ_FMT) and row-scale (own_layout.RS_CONT) tables '
+      f'({sorted(q.LONG_OFF_FORMATS)})')
+
+# ---- the gates' YaRN bounds (tools/gates/yarn_bound.py) and the resumable depth reference (q3moe_ref32 state) --------------------
+sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gates')); sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'reference'))
+import yarn_bound
+from q3moe_gmodel import score as g_score
+rng = np.random.default_rng(3)
+ry = rng.standard_normal((16, 64)) * 3; rn = ry + rng.standard_normal((16, 64)) * 1.0      # the YaRN and native references
+ours_ = ry + rng.standard_normal((16, 64)) * 0.02; good = ry + rng.standard_normal((16, 64)) * 0.05
+s_o, s_g, s_n = g_score(ry, ours_), g_score(ry, good), g_score(ry, rn)
+ok1, l1 = yarn_bound.gate(g_score, 'short', ours_, s_o, good, s_g, rn)
+ok2, l2 = yarn_bound.gate(g_score, 'short', ours_, s_o, rn, s_n, rn)            # (llama.cpp run without YaRN: its rows ~ native)
+ok3, _ = yarn_bound.gate(g_score, 'short', ours_, s_o, good, s_g, None, bar=s_g['mean'] / 2)
+ok4, l4 = yarn_bound.gate(g_score, 'depth', ours_, s_o, None, None, None)
+check(ok1 and len(l1) == 3 and not ok2 and sum(x.startswith('FAIL') for x in l2) == 2 and not ok3 and ok4 and l4 == []
+      and yarn_bound.LLAMA_MAX_KLD == {'short': 5.7e-03, 'depth': 1.15e-02},
+      'yarn_bound: a YaRN llama.cpp run inside the absolute bar and both engines closer to the YaRN reference pass; llama.cpp '
+      'rows that are the native model fail both the bar and the closer check; a bar under its KLD fails; nothing scored: no line')
+import q3moe_ref32 as R32
+RD = os.path.join(A.scratch, 'ref32-resume'); os.makedirs(RD, exist_ok=True)
+for fn in os.listdir(RD): os.remove(os.path.join(RD, fn))
+seq_ = list(range(10)); x3, x4 = np.full((10, 4), 3.0, np.float32), np.full((10, 4), 4.0, np.float32)
+fresh = R32.load_state(RD, seq_, '4:32768', False)
+R32.save_state(RD, x3, seq_, 3, '4:32768', False)
+with open(os.path.join(RD, R32.STATE + '.tmp.npz'), 'wb') as f: f.write(b'PK\x03\x04 killed mid-write')   # (a kill while saving layer 3's successor)
+il_a, x_a = R32.load_state(RD, seq_, '4:32768', False)
+R32.save_state(RD, x4, seq_, 4, '4:32768', False)
+il_b, x_b = R32.load_state(RD, seq_, '4:32768', False)
+other = raises(lambda: R32.load_state(RD, seq_, '', False), SystemExit)
+RO = os.path.join(A.scratch, 'ref32-old'); os.makedirs(RO, exist_ok=True); np.save(os.path.join(RO, 'x.npy'), x3)
+old_ = raises(lambda: R32.load_state(RO, seq_, '', False), SystemExit)
+check(fresh == (0, None) and il_a == 3 and np.array_equal(x_a, x3) and il_b == 4 and np.array_equal(x_b, x4) and other and old_
+      and not os.path.exists(os.path.join(RD, R32.STATE + '.tmp.npz')),
+      'q3moe_ref32 --resume: the residual and its layer index are one file replaced atomically (a write killed midway leaves '
+      'the previous layer\'s state whole); another run\'s state and the older two-file layout are refused')
 
 # ---- the CLI ------------------------------------------------------------------------------------------------------------------------
 from caminus.serve import cli

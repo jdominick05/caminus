@@ -60,6 +60,9 @@ native 32,768 tokens, up to 131,072. It is opt-in: without it the server is unch
   advises it only past 32,768 tokens).
 - A conversation saved in one mode is never restored into the other.
 - `caminus start qwen3-30b-a3b --long-context` passes it to the server.
+- The recipe is for Qwen3-30B-A3B's own file (its header says 40,960 tokens and RoPE base 1,000,000). Another file of the
+  same architecture, such as the 2507 releases or Qwen3-Coder-30B-A3B (262,144 tokens natively, another base), is refused
+  in this mode, as is a file with codebook (IQ) or row-scaled tensors; without the flag those files serve as before.
 
 ### Long context (`coder`, up to 1M tokens)
 

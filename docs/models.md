@@ -96,7 +96,9 @@ the model card's recipe for long texts: YaRN RoPE scaling, factor 4 from its nat
   128 positions). The model card advises it only for texts past 32,768 tokens; the default stays
   the native 40,960 without YaRN.
 - Saved conversations are kept per mode: a conversation saved in one mode is never restored into the other.
-- Other models refuse `--long-context` (the Coder has its own long-context mode: a `--max-ctx` above 262,144).
+- Other models refuse `--long-context` (the Coder has its own long-context mode: a `--max-ctx` above 262,144). So does
+  another file of the same architecture whose header is not Qwen3-30B-A3B's (another context length or RoPE base, such as
+  the 2507 releases), and a file with codebook (IQ) or row-scaled tensors.
 
 ## The names your tools use
 

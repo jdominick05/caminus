@@ -57,8 +57,9 @@ ROPE_KEYS = ('rope.scaling.type', 'rope.scaling.factor', 'rope.scaling.alpha', '
              'rope.scaling.yarn_beta_fast', 'rope.scaling.yarn_beta_slow', 'rope.scale_linear')
 # the header keys meta() keeps, under the architecture's prefix: what the projections below read, and the RoPE scaling keys
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
-           'ssm.state_size') + ROPE_KEYS
+           'ssm.state_size', 'rope.freq_base') + ROPE_KEYS
 _META = {}
+_TYPES = {}
 
 
 def _file_key(path):
@@ -121,6 +122,23 @@ def meta(path):
             del rd, f
         _META[k] = dict(arch=a, hp=hp, weights=w)
     return _META[k]
+
+
+def tensor_types(path):
+    """the weight formats of a file's tensors but token_embd (which the engines keep on the host), read once per file by
+    Caminus's own reader; None when that reader refuses the file (the engines read it with the same reader, so they refuse
+    it then too)"""
+    k = _file_key(path)
+    if k not in _TYPES:
+        from . import ggufio
+        try:
+            F = ggufio.GGUFFile(path)
+        except ggufio.GGUFError:
+            _TYPES[k] = None
+        else:
+            try: _TYPES[k] = frozenset(t.type for t in F.tensors if t.name != 'token_embd.weight')
+            finally: F.close()
+    return _TYPES[k]
 
 
 def rope_scaling(hp):
@@ -586,11 +604,38 @@ class _Q3MLong:
     instead of about 45K), and the note says so. Native (no mode) stays the default: the card advises no YaRN under 32,768
     and static YaRN at every position can cost short texts some quality"""
 
+    # the file the mode's recipe is for: the model card's YaRN numbers (x4 from 32,768) hold for Qwen3-30B-A3B's own weights,
+    # whose GGUF says context_length 40,960 and rope.freq_base 1e6. Another qwen3moe file (the 2507 Instruct / Thinking
+    # releases, Qwen3-Coder-30B-A3B: 262,144 positions natively, another base) reaches this entry by its header too; the
+    # mode would give it a scaling it was not trained with, so the mode refuses it (its native serve is unchanged)
+    LONG_FREQ_BASE = 1e6
+    # the weight formats the mode's builds run (the lean decode modules, q3m_prefill): the codebook (k3.OWN_IQ_FMT) and
+    # row-scale (own_layout.RS_CONT) formats run on their own modules, which have no YaRN build; refused here, before a card
+    # is placed, rather than at engine build (tests/engine/test_q3moe_yarn_cpu.py checks these names against those tables)
+    LONG_OFF_FORMATS = frozenset(('IQ3_XXS', 'IQ4_XS', 'IQ3_S', 'IQ2_XXS', 'Q4_0', 'Q2_0'))
+
+    def long_refusal(self, path):
+        """why the long-context mode refuses this file (None: it is the model the recipe is for, in formats the YaRN builds run)"""
+        hp, rf = meta(path)['hp'], self.rope_facts
+        ctx, base = hp.get('context_length'), hp.get('rope.freq_base')
+        if ctx is None or int(ctx) != rf.gguf_ctx or base is None or float(base) != self.LONG_FREQ_BASE:
+            return (f'the long-context mode (YaRN x{rf.shipped_factor:g} from {rf.native_ctx:,}) is Qwen3-30B-A3B\'s recipe '
+                    f'(context_length {rf.gguf_ctx:,}, rope.freq_base {self.LONG_FREQ_BASE:g}); this file says context_length '
+                    f'{ctx if ctx is None else f"{int(ctx):,}"}, rope.freq_base {base if base is None else f"{float(base):g}"}: '
+                    f'another model, whose RoPE the recipe does not fit (serve it natively, up to its own context_length)')
+        off = sorted((tensor_types(path) or frozenset()) & self.LONG_OFF_FORMATS)
+        if off:
+            return (f'the long-context mode runs on the default formats\' modules only; this file has {", ".join(off)} tensors '
+                    f'(codebook or row-scale formats: their modules have no YaRN build)')
+        return None
+
     def long_mode(self, opt):
         n, gguf_ctx = _explicit_ctx(opt), int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
         if not (opt.get('long_context') or (n is not None and n > gguf_ctx)):
             opt.pop('rope', None)
             return None
+        why = self.long_refusal(opt['model'])
+        if why: raise ValueError(why)
         mode = self._yarn()
         if n is not None and n > mode.max_ctx:
             raise ValueError(f'--max-ctx {n:,}: Qwen3-30B-A3B serves at most {mode.max_ctx:,} positions (its long-context mode, '
