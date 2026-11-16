@@ -155,6 +155,10 @@ TOOLS = [
               recommended={'type':'string'}, approval={'type':'boolean'}), ('question',)),
     tool('ask_root', 'Request that your human review and execute an exact root command. You have no root privileges. The human may approve, edit or deny; execution output returns here. With no answer in time (question_timeout) the request is withdrawn and the command is not run: carry on without it.',
          dict(command={'type':'string'}, reason={'type':'string'}), ('command','reason')),
+    tool('github_handoff', 'Ask your human to do on GitHub what your token may not: open a pull request from your fork (open_pr: repo, head FORK_OWNER:BRANCH, base, title, body), comment on an issue or pull request (comment: repo, number, body), or approve a CI run waiting on your fork (approve_ci: repo, run_id). They see exactly these fields and run it with their own account; the result (the pull request URL, or why not) returns here. Push your branch first. With no answer in time it is withdrawn and nothing is done.',
+         dict(action={'type':'string','enum':['open_pr','comment','approve_ci']}, repo={'type':'string'}, head={'type':'string'},
+              base={'type':'string'}, title={'type':'string'}, body={'type':'string'}, number={'type':'integer'},
+              run_id={'type':'integer'}, reason={'type':'string'}), ('action','repo','reason')),
     tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run in your home) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
@@ -488,7 +492,7 @@ class Runtime:
                 result = dict(error=str(e))
             if result is None:
                 continue
-            what = 'root request' if d['name'] == 'ask_root' else 'question'
+            what = {'ask_root': 'root request', 'github_handoff': 'GitHub hand-off'}.get(d['name'], 'question')
             text = f"[answer to your {what} {d['rid']}] " + json.dumps(result, ensure_ascii=False)[:6000]
             with self.store.transaction():
                 self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, text, 'nudge'))
@@ -501,10 +505,13 @@ class Runtime:
 
     def _bridge(self, action, args, park=True):
         root = Path(self.config['bridge']).expanduser()
-        kind = 'root' if action['name'] == 'ask_root' else 'question'
+        kind = {'ask_root': 'root', 'github_handoff': 'github'}.get(action['name'], 'question')
+        if kind == 'github':
+            from . import github
+            args = dict(args, **github.handoff(args))      # refused here, before anything is filed, when a field is wrong
         if self.free.is_free(action['goal']):
-            if kind == 'root':
-                raise ValueError('free time has no root requests; note what you wanted in your journal instead')
+            if kind in ('root', 'github'):
+                raise ValueError('free time has no root requests or GitHub hand-offs; note what you wanted in your journal instead')
             if not action['bridge_id'] and not self.free.ask_allowed(action['goal']):
                 raise ValueError("today's free-time questions are used up; write it in your journal for your human")
         rid = action['bridge_id'] or action['id'][:16]
@@ -515,7 +522,10 @@ class Runtime:
         if not req.exists() and not res.exists():
             value = dict(id=rid, pid=os.getpid(), user=getpass.getuser(), cwd=str(self.home), kind=kind,
                          ts=time.time(), agent=self.config['name'], goal=action['goal'])
-            if kind == 'root':
+            if kind == 'github':
+                from . import github
+                value.update(github=github.handoff(args), reason=args.get('reason', ''), summary=github.describe(args))
+            elif kind == 'root':
                 value.update(cmd=args['command'], reason=args['reason'])
                 # A grant approves this exact command text for this goal (answer --grant recorded it): the req
                 # carries it, so the owner's watch answers without asking again. It never lets the agent run root;
@@ -527,7 +537,7 @@ class Runtime:
             parent = req.parent
             parent.mkdir(parents=True, exist_ok=True)
             atomic_json(req, value, mode=0o660, group=parent.stat().st_gid)
-            self.store.event('approval_requested' if kind == 'root' else 'question', value, action['goal'])
+            self.store.event('approval_requested' if kind in ('root', 'github') else 'question', value, action['goal'])
         if res.exists():
             result = json.loads(res.read_text())
             if result.get('id')==rid and result.get('decision')=='executing':
@@ -540,8 +550,8 @@ class Runtime:
                 return result
             if result.get('id') != rid or result.get('decision') not in ('approved','edited','denied','answered'):
                 raise ValueError('invalid human response')
-            if kind == 'root' and result['decision'] == 'answered':
-                raise ValueError('root requests require a root decision')
+            if kind in ('root', 'github') and result['decision'] == 'answered':
+                raise ValueError('root requests and GitHub hand-offs require an approve or deny decision')
             # A grant rides in the answer the owner wrote (`answer ID approved --grant`): record this exact
             # command as granted for the goal. A later byte-identical ask_root then needs no re-approval.
             if kind == 'root' and result['decision'] == 'approved' and result.get('grant'):
@@ -574,11 +584,17 @@ class Runtime:
                 pass
             return self._unanswered(action, args, kind, rid, timeout, free)
         if park:
-            self.store.update(action['goal'], state='waiting_root' if kind == 'root' else 'waiting_user')
+            self.store.update(action['goal'], state='waiting_root' if kind in ('root', 'github') else 'waiting_user')
         return None
 
     def _unanswered(self, action, args, kind, rid, timeout, free):
         gid, mins = action['goal'], max(1, round(timeout / 60))
+        if kind == 'github':
+            self.store.event('root_unanswered', dict(id=rid, github=args.get('action'), after_s=int(timeout)), gid)
+            return dict(id=rid, decision='denied', by='timeout',
+                        reason=f'no answer from your human in {mins} min, so the hand-off was withdrawn and nothing was '
+                               'done on GitHub. Report what is ready (the branch, and the title and body you wanted) in '
+                               'your finish, as waiting for your human.')
         if kind == 'root':
             self.store.event('root_unanswered', dict(id=rid, command=args.get('command', ''), after_s=int(timeout)), gid)
             return dict(id=rid, decision='denied', by='timeout',
@@ -983,7 +999,7 @@ class Runtime:
                     result = planning.propose(gid_now, plan)
                 elif name == 'send_message':
                     result = self.mail.send(sender_goal=action['goal'], message_id=action['id'], **args)
-                elif name in ('ask_user', 'ask_root'):
+                elif name in ('ask_user', 'ask_root', 'github_handoff'):
                     blocking = not self.config.get('nonblocking_approvals', True) or self.free.is_free(action['goal'])
                     result = self._bridge(action, args, park=blocking)
                     if result is None:
@@ -1086,6 +1102,10 @@ class Runtime:
             result['note'] = (result.get('note', '') + ' · ' if result.get('note') else '') + ignored
         # A result past about 8K tokens has its large text moved to ~/outputs: the model gets a preview and the path.
         result = outputs.spill(self.home, action['name'], action['id'], result)
+        if self.config.get('github'):
+            # a linked agent's token never comes back in a result (an `env` or a verbose gh would print it)
+            from . import github
+            result = json.loads(github.redact(json.dumps(result, ensure_ascii=False), self.config))
         self.store.action_result(action, result)
         if looped:
             self._collapse_loop(action['goal'], signature, looped)

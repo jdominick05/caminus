@@ -138,6 +138,12 @@ def worker_env(home):
         name = 'CAMINUS_AGENT_API_KEY'
     for var in {name, 'CAMINUS_AGENT_API_KEY', 'ANTHROPIC_API_KEY'}:
         env.pop(var, None)
+    # a linked GitHub account: its token, git identity and gh as git's credential helper (resident/github.py)
+    try:
+        from . import github
+        env.update(github.env(json.loads((Path(home) / 'config.json').read_text())))
+    except (OSError, ValueError, AttributeError):
+        pass
     # Commands here must never block on a pager: nothing waits for a keypress.
     env.update(PAGER='cat', GIT_PAGER='cat', MANPAGER='cat')
     return env

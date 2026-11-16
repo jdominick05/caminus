@@ -58,6 +58,10 @@ type emberReq struct {
 	Reason  string   `json:"reason"`
 	Ts      float64  `json:"ts"`
 	Granted bool     `json:"granted"` // the resident says this exact command was granted for its goal (checked, not trusted)
+	// a GitHub hand-off (kind "github"): what the agent's token may not do upstream, as checked fields; the owner's
+	// side builds the gh command from them (caminus ember answer) and runs it as the owner
+	Summary string         `json:"summary"`
+	Github  map[string]any `json:"github"`
 }
 
 func (r emberReq) kind() string {
@@ -1071,6 +1075,14 @@ func (m emberModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 				m.editRequest = &r
 				return m, nil
 			}
+			if r.kind() == "github" {
+				if k == "g" {
+					return m, nil // a hand-off is one action, never granted for the goal
+				}
+				m.seen[r.ID] = true
+				m.msg = "running on GitHub as you: " + terminalText(r.Summary, false)
+				return m, approveHandoff(m, r)
+			}
 			c, tmp, err := execRoot(r.Cmd)
 			if err != nil {
 				m.msg = err.Error()
@@ -1097,7 +1109,7 @@ func (m emberModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 			})
 		}
 	case "e":
-		if m.sel < len(m.reqs) && m.reqs[m.sel].kind() == "root" {
+		if m.sel < len(m.reqs) && m.reqs[m.sel].kind() == "root" { // (a GitHub hand-off is approved as filed)
 			m.mode, m.edit = "edit", m.reqs[m.sel].Cmd
 			r := m.reqs[m.sel]
 			m.editRequest = &r

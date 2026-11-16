@@ -1130,6 +1130,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "finished":
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
+		if str("kind") == "github" {
+			return approvalCard("github", residentText(str("summary")), residentText(str("reason")), w)
+		}
 		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
 	case "question":
 		return turn("?", "question", cYellow, c.renderMarkdown(str("text")))
@@ -2031,7 +2034,18 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					what = "approve and grant for this goal (the same command then needs one a): "
 				}
 				m.msg = what + terminalText(r.Cmd, false) + " ? press " + k + " again (any other key cancels)"
+				if r.kind() == "github" {
+					m.chat.armed = ""
+					m.msg = "a hand-off runs once, as filed: a a runs it as you, d denies"
+					if k == "a" {
+						m.chat.armed = k + ":" + r.ID
+						m.msg = "run on GitHub as you: " + terminalText(r.Summary, false) + " ? press a again (any other key cancels)"
+					}
+				}
 				return m, nil
+			}
+			if r.kind() == "github" && (k == "g" || k == "e") {
+				return m, nil // a hand-off runs once, as filed
 			}
 			m.sel = i
 			return m.reqKeys(k) // e opens the edit prompt in the composer's slot
@@ -2790,7 +2804,7 @@ func (m emberModel) chatFoot(w int) string {
 func (m emberModel) pendingRoots() []int {
 	var out []int
 	for i, r := range m.reqs {
-		if r.kind() == "root" && (r.Agent == "" || r.Agent == m.agentName) {
+		if r.kind() != "question" && (r.Agent == "" || r.Agent == m.agentName) { // root requests and GitHub hand-offs
 			out = append(out, i)
 		}
 	}

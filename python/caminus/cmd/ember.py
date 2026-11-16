@@ -250,7 +250,8 @@ def main(rest, transport=None):
             print(json.dumps(reqs))
         else:
             for r in reqs:
-                body = r.get('cmd') if r.get('kind', 'root') == 'root' else r.get('text', '')
+                kind = r.get('kind', 'root')
+                body = r.get('cmd') if kind == 'root' else (r.get('summary', '') if kind == 'github' else r.get('text', ''))
                 print(terminal_text(f"{r['id']} [{r.get('kind', 'root')}] from {r.get('user')}: {body}"))
         return 0
     if a.sub == 'answer':
@@ -698,6 +699,17 @@ def _answer_pending(a, tr):
         audit.log(ap, {'event': 'decision', 'id': a.id, 'decision': 'answered', 'by': me, 'answer': a.text})
         _remember_qa(req.get('text', ''), a.text, tr)
         res = {'id': a.id, 'decision': 'answered', 'answer': a.text}
+    elif req.get('kind') == 'github':
+        if a.decision != 'approved':
+            print('caminus ember answer: a GitHub hand-off is approved as filed or denied', file=sys.stderr)
+            return 2
+        r, argv = _github_result(req, me)
+        audit.log(ap, {'event': 'github_result', 'id': a.id, 'by': me, 'action': req['github'].get('action'),
+                       'repo': req['github'].get('repo'), 'rc': r.returncode, 'goal': req.get('goal')})
+        sys.stdout.write(r.stdout or '')
+        sys.stderr.write(r.stderr or '')
+        res = {'id': a.id, 'decision': 'approved', 'github': req['github'].get('action'), 'rc': r.returncode,
+               'out': (r.stdout or '').strip()[-500:]}
     else:
         cmd = a.text if a.decision == 'edited' else req.get('cmd', '')
         if not cmd:
@@ -714,6 +726,22 @@ def _answer_pending(a, tr):
     if a.json:
         print(json.dumps(res))
     return 0
+
+
+def _github_result(req, me, run=subprocess.run):
+    """An approved GitHub hand-off, run as the owner with their own gh: the argv is built from the request's checked
+    fields (resident/github.py), never a shell string; claimed first and finished with its output, as a root
+    request is."""
+    from ..ember.resident import approval, github
+    argv, stdin = github.command(req['github'])
+    b = settings.bridge_dir()
+    token = approval.claim(b, req, 'approved', me, json.dumps(req['github'], sort_keys=True))
+    try:
+        r = run(argv, input=stdin, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        r = subprocess.CompletedProcess(argv, 1, '', str(e))
+    approval.finish(b, req['id'], token, r.returncode, (r.stdout or '')[-8000:], (r.stderr or '')[-4000:])
+    return r, argv
 
 
 def _remember_qa(question, answer, tr):

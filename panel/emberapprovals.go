@@ -24,7 +24,7 @@ import (
 func (m emberModel) approvalOrder() []int {
 	var roots, asks []int
 	for i, r := range m.reqs {
-		if r.kind() == "root" {
+		if r.kind() != "question" { // root requests and GitHub hand-offs, which block the agent's step
 			roots = append(roots, i)
 		} else {
 			asks = append(asks, i)
@@ -200,9 +200,12 @@ func (m emberModel) approvalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		r := m.reqs[order[sel]]
 		// Approving runs a root command, so it takes two presses, exactly as the inline card does.
-		if k == "a" && r.kind() == "root" && (armed != r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
+		if k == "a" && r.kind() != "question" && (armed != r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
 			m.chat.armed, m.chat.armedAt = r.ID, time.Now()
 			m.msg = "approve as root: " + terminalText(r.Cmd, false) + " ? press a again (any other key cancels)"
+			if r.kind() == "github" {
+				m.msg = "run on GitHub as you: " + terminalText(r.Summary, false) + " ? press a again (any other key cancels)"
+			}
 			return m, nil
 		}
 		m.sel = order[sel]

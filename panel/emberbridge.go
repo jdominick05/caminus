@@ -9,10 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // Matches resident/approval.py: persistent lock inode, withdrawn tombstone,
@@ -71,6 +74,34 @@ func withBridgeLock(bridge, id string, fn func() error) error {
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return fn()
+}
+
+// approveHandoff runs an approved GitHub hand-off through `caminus ember answer ID approved --digest D`: the CLI
+// re-checks the request against the digest the owner reviewed, builds the gh command from its checked fields and runs
+// it as the owner (no sudo, no shell). The outcome lands in the status line and reaches the agent as the answer.
+func approveHandoff(m emberModel, r emberReq) tea.Cmd {
+	return func() tea.Msg {
+		if len(m.cli) == 0 {
+			return residentActionMsg{"GitHub hand-offs need the caminus CLI (--cli)"}
+		}
+		argv := append(append([]string{}, m.cli[1:]...), "ember", "answer", r.ID, "approved", "--digest", r.Digest, "--json")
+		out, err := exec.Command(m.cli[0], argv...).CombinedOutput()
+		text := strings.TrimSpace(string(out))
+		if i := strings.LastIndex(text, "\n"); i >= 0 {
+			text = text[i+1:]
+		}
+		var res struct {
+			RC  int    `json:"rc"`
+			Out string `json:"out"`
+		}
+		if err != nil || json.Unmarshal([]byte(text), &res) != nil {
+			return residentActionMsg{"GitHub hand-off failed: " + terminalText(cliError(out), false)}
+		}
+		if res.RC != 0 {
+			return residentActionMsg{"GitHub refused the hand-off (the agent hears why)"}
+		}
+		return residentActionMsg{"done on GitHub: " + terminalText(res.Out, false)}
+	}
 }
 
 func requestDigest(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }

@@ -167,7 +167,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -307,6 +307,10 @@ def parser():
             p.add_argument('goal_id',help='the goal the side question is about')
             p.add_argument('text',nargs='?',help='the question (or --stdin)')
             p.add_argument('--stdin',action='store_true',help='read the question from stdin')
+        if op=='github':
+            p.add_argument('action',choices=('link','status','unlink'))
+            p.add_argument('--token-file',help='link: a file in the agent\'s own account holding one GitHub token')
+            p.add_argument('--repo',action='append',default=[],help='link: OWNER/NAME to report the token\'s rights on (repeatable)')
         if op=='theme':
             p.add_argument('text',nargs='?',help='what the theme should look like (or --stdin)')
             p.add_argument('--stdin',action='store_true',help='read the description from stdin')
@@ -709,6 +713,22 @@ def main(argv=None,stdin=None):
             try:answer=btw.ask(rt,gid,question.strip())
             finally:rt.mail.close();rt.store.close()
             emit(dict(goal=gid,answer=answer),a.json);return 0
+        if a.op=='github':
+            # the agent's GitHub account (resident/github.py): config.json keeps the token file's path and the
+            # account, never the token
+            store.close()
+            from . import github
+            cfg=json.loads((home/'config.json').read_text())
+            if a.action=='link':
+                if not a.token_file:raise ValueError('link needs --token-file PATH (a file in the agent\'s account)')
+                cfg['github']=github.link(cfg,a.token_file,a.repo)
+                atomic_json(home/'config.json',cfg)
+            elif a.action=='unlink':
+                cfg.pop('github',None);atomic_json(home/'config.json',cfg)
+            gh=cfg.get('github')
+            emit(dict(linked=bool(gh),**({k:gh[k] for k in ('login','email','repos','token_file')} if gh else {}),
+                      note='the agent\'s terminals use this account from their next command' if a.action=='link' else ''),a.json)
+            return 0
         if a.op=='theme':
             # the panel's theme screen: the brain writes a colour theme from a description (one call, no tools, no
             # goal context); the panel validates every line before it keeps any of it

@@ -2130,3 +2130,22 @@ func TestShellModeLikeClaudeCode(t *testing.T) {
 		t.Fatalf("a ! inside a draft is text: %q", m.chat.compose.Value())
 	}
 }
+
+func TestAGithubHandoffIsACardAndTakesTwoPresses(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	if card := ansi.Strip(approvalCard("github", "open a pull request on a/b: me:x -> testing: t", "token is read-only", 90)); !strings.Contains(card, "GITHUB") ||
+		!strings.Contains(card, "run it as you") || strings.Contains(card, "grant") {
+		t.Fatalf("a hand-off card offers run and deny, never a grant: %q", card)
+	}
+	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Agent: m.agentName, Summary: "open a pull request on a/b"}}
+	m.chat.compose.Blur() // (the card's keys work while browsing: "esc, then a a")
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	m = next.(emberModel)
+	if cmd != nil || !strings.Contains(m.msg, "run on GitHub as you") {
+		t.Fatalf("the first a only arms it: %q", m.msg)
+	}
+	if next, _ = m.chatKey(tea.KeyPressMsg{Code: 'g', Text: "g"}); strings.Contains(next.(emberModel).msg, "grant") {
+		t.Fatal("g never grants a hand-off")
+	}
+}

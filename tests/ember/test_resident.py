@@ -749,6 +749,75 @@ class Resident(unittest.TestCase):
         self.assertTrue(E.agent_extras(types.SimpleNamespace(git_name=None,git_email=None,test_venv=False),transport,say=said.append))
         self.assertEqual(ran,[],'nothing asked, nothing run')
 
+    def test_github_link_env_redaction_and_handoff_fields(self):
+        from caminus.ember.resident import github
+        tok=self.home/'gh-token';tok.write_text('ghp_fixture_token_value\n')
+        class R:
+            def __init__(s,body):s.b=json.dumps(body).encode()
+            def read(s):return s.b
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        seen=[]
+        def opener(req,timeout=None):
+            seen.append((req.full_url,req.get_header('Authorization')))
+            if req.full_url.endswith('/user'):return R(dict(login='agent-login',id=42,name='Agent'))
+            return R(dict(private=False,permissions=dict(pull=True,push=False)))
+        gh=github.link({},str(tok),['jdominick05/caminus'],opener=opener)
+        self.assertEqual((gh['login'],gh['email'],gh['repos']),('agent-login','42+agent-login@users.noreply.github.com',{'jdominick05/caminus':'read'}))
+        self.assertNotIn('ghp_fixture',json.dumps(gh),'config keeps the path, never the token')
+        self.assertEqual(seen[0][1],'Bearer ghp_fixture_token_value')
+        env=github.env(dict(github=gh))
+        self.assertEqual(env['GH_TOKEN'],'ghp_fixture_token_value');self.assertEqual(env['GIT_AUTHOR_EMAIL'],gh['email'])
+        self.assertEqual(env['GIT_CONFIG_VALUE_0'],'!gh auth git-credential')
+        self.assertEqual(github.env({}),{},'an unlinked agent gets nothing')
+        self.assertEqual(github.redact('token=ghp_fixture_token_value done',dict(github=gh)),'token=[github token] done')
+        h=github.handoff(dict(action='open_pr',repo='jdominick05/caminus',head='agent-login:feat/x',base='testing',title='panel : x',body='b'))
+        argv,stdin=github.command(h)
+        self.assertEqual(argv[:4],['gh','pr','create','-R']);self.assertIn('--no-maintainer-edit',argv);self.assertEqual(stdin,'b')
+        self.assertEqual(github.command(dict(action='approve_ci',repo='a/b',run_id=7))[0][-1],'repos/a/b/actions/runs/7/approve')
+        for bad in (dict(action='merge',repo='a/b'),dict(action='open_pr',repo='a/b; rm -rf ~',head='x',base='y',title='t'),
+                    dict(action='open_pr',repo='a/b',head='--exec=x',base='testing',title='t'),
+                    dict(action='open_pr',repo='a/b',head='x',base='testing',title='two\nlines'),
+                    dict(action='comment',repo='a/b',number='5',body='x'),dict(action='approve_ci',repo='a/b',run_id=-1)):
+            with self.assertRaises(ValueError,msg=str(bad)):github.handoff(bad)
+
+    def test_a_github_handoff_is_a_bridge_request_with_checked_fields(self):
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the PR.')
+            act=dict(name='github_handoff',goal=gid,id=uuid.uuid4().hex,bridge_id=None)
+            args=dict(action='open_pr',repo='jdominick05/caminus',head='agent-login:feat/x',base='testing',title='panel : x',body='b',reason='my token is read-only upstream')
+            self.assertIsNone(rt._bridge(act,args,park=False))
+            req=json.loads(next((Path(rt.config['bridge']).expanduser()/'req').glob('*.json')).read_text())
+            self.assertEqual(req['kind'],'github');self.assertEqual(req['github']['head'],'agent-login:feat/x')
+            self.assertIn('open a pull request on jdominick05/caminus',req['summary'])
+            self.assertNotIn('cmd',req,'a hand-off carries no command')
+            with self.assertRaises(ValueError):
+                rt._bridge(dict(act,id=uuid.uuid4().hex),dict(args,repo='not a repo'),park=False)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_owner_runs_an_approved_handoff_with_their_own_gh(self):
+        from caminus.cmd import ember as E
+        from caminus.ember.resident import approval
+        bridge=self.home/'bridge-gh';(bridge/'req').mkdir(parents=True);(bridge/'res').mkdir()
+        req=dict(id='abcdef0123456789',kind='github',user='agent',agent='resident',goal='g1',ts=time.time(),
+                 github=dict(action='comment',repo='jdominick05/caminus',number=185,body='done'),summary='comment on ...')
+        (bridge/'req'/'abcdef0123456789.json').write_text(json.dumps(req))
+        ran=[]
+        def run(argv,**kw):
+            ran.append((argv,kw.get('input')));return subprocess.CompletedProcess(argv,0,'https://github.com/x/1\n','')
+        with unittest.mock.patch.dict(os.environ,CAMINUS_ENV_BRIDGE=str(bridge)):
+            snap=approval.snapshot(str(bridge),'abcdef0123456789')
+            r,argv=E._github_result(snap,'owner',run=run)
+        self.assertEqual(ran[0][0],['gh','api','-X','POST','repos/jdominick05/caminus/issues/185/comments','-F','body=@-'])
+        self.assertEqual(ran[0][1],'done','the body goes on stdin, never the command line')
+        res=json.loads((bridge/'res'/'abcdef0123456789.json').read_text())
+        self.assertEqual((res['decision'],res['rc']),('approved',0));self.assertIn('github.com/x/1',res['out'])
+        # a changed request is refused at the claim: the command is the filed fields, exactly
+        (bridge/'res'/'abcdef0123456789.json').unlink()
+        with self.assertRaises(ValueError):
+            approval.claim(str(bridge),snap,'approved','owner','{"action": "approve_ci"}')
+
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):
         from caminus.ember.resident.runtime import TODO_STALE
         rt=Runtime(self.home)

@@ -101,8 +101,13 @@ def claim(bridge,request,decision,actor,command,grant=False):
         raise ValueError('invalid root decision or command')
     with locked(bridge,request['id']):
         current=pending_snapshot(bridge,request)
-        if current.get('kind','root')!='root':raise ValueError('only root requests can execute commands')
-        if decision=='approved' and command!=current.get('cmd'):raise ValueError('approved command changed')
+        kind=current.get('kind','root')
+        if kind not in ('root','github'):raise ValueError('only root requests and GitHub hand-offs can execute')
+        if kind=='github':
+            # a hand-off runs as the owner from its checked fields only; the command is their canonical form
+            if decision!='approved' or command!=json.dumps(current.get('github'),sort_keys=True):
+                raise ValueError('a GitHub hand-off is approved exactly as filed')
+        elif decision=='approved' and command!=current.get('cmd'):raise ValueError('approved command changed')
         token=uuid.uuid4().hex
         value=dict(id=request['id'],decision='executing',claim=token,final_decision=decision,
                    approved_by=actor,cmd=command,ts=time.time())

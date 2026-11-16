@@ -241,6 +241,13 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 		emberDim.Render(" grant for the goal  ") + emberWarn.Render("e") +
 		emberDim.Render(" edit  ") + emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
 		emberDim.Render(" says what to do instead")
+	if kind == "github" {
+		// a hand-off runs once, as filed, with the owner's gh: no grant, no edit
+		title = "⇡ GITHUB"
+		keys = emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" run it as you  ") +
+			emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
+			emberDim.Render(" says what to do instead")
+	}
 	if !inline {
 		keys = emberDim.Render("decide in ") + emberWarn.Render("/requests")
 	}
