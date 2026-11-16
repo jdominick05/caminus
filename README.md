@@ -76,7 +76,8 @@ and please report what breaks.
 | Every other GPU | Not supported yet |
 
 One card runs the one-card models. Two cards run two models side by side, or a two-card model: the Qwen3.8 Coder on an
-XTX + XT or two XTX, or Swift 1.5 and ThinkingCap across both cards. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
+XTX + XT or two XTX, or Swift 1.5, ThinkingCap and (when you ask for it, one card being its default) Qwen3-30B-A3B
+across both cards. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
 
 **Got other AMD hardware?** Please try Caminus on it and
 [send a hardware report](https://github.com/jdominick05/caminus/issues/new?template=hardware_report.yml), even when it
