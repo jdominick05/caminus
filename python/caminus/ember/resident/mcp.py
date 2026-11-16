@@ -46,8 +46,14 @@ class Server:
         logs = self.home / 'mcp-logs'
         logs.mkdir(exist_ok=True)
         env = dict(os.environ, **{k: str(v) for k, v in (self.spec.get('env') or {}).items()})
-        for k in [k for k in env if k.startswith(('CAMINUS_API_KEY', 'ANTHROPIC_API_KEY', 'CAMINUS_ADVISOR_API_KEY'))]:
-            env.pop(k)                                   # the agent's model keys never reach an MCP server
+        try:
+            named = json.loads((self.home / 'config.json').read_text()).get('api_key_env') or ''
+        except (OSError, ValueError):
+            named = ''
+        secret = ('CAMINUS_API_KEY', 'ANTHROPIC_API_KEY', 'CAMINUS_ADVISOR_API_KEY', 'CAMINUS_AGENT_API_KEY',
+                  'OPENAI_API_KEY', 'GH_TOKEN', 'GITHUB_TOKEN') + ((named,) if named else ())
+        for k in [k for k in env if k.startswith(secret)]:
+            env.pop(k)              # the agent's model key (whatever config.json names) and its GitHub token never reach an MCP server
         self.proc = subprocess.Popen([self.spec['command'], *self.spec.get('args', [])], cwd=self.home, env=env,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=(logs / f'{self.name}.log').open('ab'), bufsize=0)
