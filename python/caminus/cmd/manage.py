@@ -337,7 +337,10 @@ def unmanaged_servers():
             continue
         base = os.path.basename(model.rstrip('/'))
         label = os.path.basename(os.path.dirname(model.rstrip('/'))) if '-of-' in base and 'gguf' in base.lower() else base
-        name = 'observed-' + (os.path.basename(flag('--cache-dir')) if '--cache-dir' in argv else str(port))
+        # (an argv ending in --cache-dir has no value after it: the port names the server then, never an IndexError
+        # that took down caminus ps and caminus top)
+        i = argv.index('--cache-dir') if '--cache-dir' in argv else -1
+        name = 'observed-' + (os.path.basename(argv[i + 1]) if 0 <= i < len(argv) - 1 else str(port))
         cand.setdefault(port, []).append((name, label, pid, argv[0]))
     for port, group in sorted(cand.items()):
         # the same server is usually seen several times (guard.sh's command line, a timeout/env wrapper and the
