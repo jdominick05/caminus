@@ -209,8 +209,27 @@ func patternGlyph(pat string, x, y int) string {
 	return ""
 }
 
+// sgrAttrs is an SGR parameter string's attribute codes, without the colour arguments that follow 38 / 48 / 58
+// (5;n or 2;r;g;b): read field by field, \x1b[38;2;39;200;100m looked like "default foreground" (39).
+func sgrAttrs(p string) []string {
+	f := strings.Split(p, ";")
+	var out []string
+	for i := 0; i < len(f); i++ {
+		out = append(out, f[i])
+		if (f[i] == "38" || f[i] == "48" || f[i] == "58") && i+1 < len(f) {
+			switch f[i+1] {
+			case "5":
+				i += 2
+			case "2":
+				i += 4
+			}
+		}
+	}
+	return out
+}
+
 func sgrSetsBg(p string) bool {
-	for _, f := range strings.Split(p, ";") {
+	for _, f := range sgrAttrs(p) {
 		if f == "48" || (len(f) == 2 && f[0] == '4' && f[1] >= '0' && f[1] <= '7') || (len(f) == 3 && f[:2] == "10") {
 			return true
 		}
@@ -219,7 +238,7 @@ func sgrSetsBg(p string) bool {
 }
 
 func sgrClearsFg(p string) bool {
-	for _, f := range strings.Split(p, ";") {
+	for _, f := range sgrAttrs(p) {
 		if f == "39" {
 			return true
 		}
@@ -228,7 +247,7 @@ func sgrClearsFg(p string) bool {
 }
 
 func sgrClearsBg(p string) bool {
-	for _, f := range strings.Split(p, ";") {
+	for _, f := range sgrAttrs(p) {
 		if f == "49" {
 			return true
 		}

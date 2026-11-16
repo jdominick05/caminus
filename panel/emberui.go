@@ -123,14 +123,16 @@ type emberModel struct {
 	editRequest *emberReq
 	newJob      string
 
-	msg    string
-	msgOf  string // the message msgAt dates: a message shows for a few seconds, then clears
-	msgAt  time.Time
-	sshOK  bool
-	sshN   int
-	tickN  int
-	width  int
-	height int
+	msg      string
+	msgOf    string // the message msgAt dates: a message shows for a few seconds, then clears
+	msgAt    time.Time
+	sshOK    bool
+	sshN     int
+	tickN    int
+	spinN    int // the activity spinner's frame (its own fast tick while the agent works: emberactivity.go)
+	spinning bool
+	width    int
+	height   int
 }
 
 type emberTickMsg time.Time
@@ -534,6 +536,8 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.syncChat()
 		return m, nil
+	case spinTickMsg:
+		return m.spinStep()
 	case emberTickMsg:
 		m.tickN++
 		if m.msg != m.msgOf {
@@ -543,6 +547,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshLocal()
 		cmds := []tea.Cmd{tickCmd()}
+		if next, c := m.spinStart(); c != nil {
+			m, cmds = next, append(cmds, c)
+		}
 		// The SSH probe is a liveness check, not data: every 10 s is enough (it ran every second).
 		if m.tickN%20 == 0 {
 			cmds = append(cmds, probeCmd(m))
@@ -1145,11 +1152,10 @@ func (m emberModel) jobKeys(k string) (tea.Model, tea.Cmd) {
 	case "n":
 		m.mode, m.edit = "newjob1", ""
 	case "S":
-		if len(m.cli) == 0 {
-			m.msg = "no --cli passed: start servers with `caminus ember serve`"
-		} else {
-			m.mode, m.edit = "serve1", ""
-		}
+		// (an agent-owned server ran outside the GPU guard, unregistered and blind to GPU-window leases: off for
+		// this release; the guarded, registered way is caminus start)
+		m.msg = "agent-owned servers are off in this release: start the model with `caminus start MODEL`, then /model"
+
 	}
 	return m, nil
 }
@@ -1278,7 +1284,7 @@ func (m emberModel) reqPane() string {
 }
 
 func (m emberModel) jobsPane() string {
-	lines := []string{emberHead.Render("JOBS in the agent user (K kill, l tail log, n new job, S new model server)")}
+	lines := []string{emberHead.Render("JOBS in the agent user (K kill, l tail log, n new job)")}
 	if len(m.jobs) == 0 {
 		lines = append(lines, emberDim.Render("  none"))
 	}

@@ -113,18 +113,25 @@ def remap_paths(serve_args, model_dir, models_mount):
     return out
 
 
+def _q(v):
+    """shlex.quote, except a leading ~/ stays the agent's home: quoted, '~/homes/N/state' reached the server as a
+    literal relative path"""
+    v = str(v)
+    return '"$HOME"/' + shlex.quote(v[2:]) if v.startswith('~/') else shlex.quote(v)
+
+
 def launcher(name, serve_args, devs, runtime=None, pkg=None, guard=None):
     """the run.sh written into the agent user's home: per-name env, HIP placement, the guard, then serve"""
     runtime = runtime or os.environ.get('CAMINUS_ENV_PYTHON', 'python3 -I')
     pkg = pkg if pkg is not None else os.environ.get('CAMINUS_ENV_PKG', '')
     guard = guard or os.environ.get('CAMINUS_ENV_GUARD', '')
-    env_lines = ' '.join(f'{k}={shlex.quote(v)}' for k, v in home_env(name).items())
+    env_lines = ' '.join(f'{k}={_q(v)}' for k, v in home_env(name).items())
     lines = ['#!/bin/bash', 'set -e', f'cd ~/homes/{shlex.quote(name)}',
              f'export {env_lines}',
              f'export HIP_VISIBLE_DEVICES={hip_visible(devs)}']
     if pkg:
         lines.append(f'export PYTHONPATH={shlex.quote(pkg)}${{PYTHONPATH:+:$PYTHONPATH}}')
-    cmd = ' '.join(shlex.quote(a) for a in serve_args)
+    cmd = ' '.join(_q(a) for a in serve_args)
     # -I ignores PYTHONPATH, so a shared package is put on sys.path explicitly rather than through the
     # environment: otherwise `python3 -I -m caminus` cannot import the package the operator configured.
     if pkg:

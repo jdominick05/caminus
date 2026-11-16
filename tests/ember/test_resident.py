@@ -796,6 +796,40 @@ class Resident(unittest.TestCase):
                 rt._bridge(dict(act,id=uuid.uuid4().hex),dict(args,repo='not a repo'),park=False)
         finally:rt.mail.close();rt.store.close()
 
+    def test_review_fixes_read_only_plan_mode_files_leases_prices(self):
+        # from the reviews of the Ember stack: each case below was a way past a check
+        from caminus.ember.resident import runtime as R, planning, files, leases
+        for cmd in ('cat <(rm -f x)','sort -o out.txt in.txt','sort --output=out in','xxd -r dump bin','uniq in.txt out.txt'):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        for cmd in ('sort in.txt','uniq -c in.txt','xxd bin | head','cat a 2>/dev/null'):
+            self.assertTrue(R.read_only_command(cmd),cmd)
+        for name in ('send_message','github_handoff','remember','schedule','lease'):
+            self.assertIn(name,planning.PLAN_REFUSED)
+        latin=self.home/'latin.c'; latin.write_bytes(b'/* caf\xe9 */\nint x = 1;\n')
+        with self.assertRaises(ValueError) as e:
+            files.edit(str(self.home),'latin.c','int x = 1;','int x = 2;')
+        self.assertIn('not UTF-8',str(e.exception))
+        self.assertEqual(latin.read_bytes(),b'/* caf\xe9 */\nint x = 1;\n','the file is untouched')
+        d=self.home/'lease-dir'; d.mkdir()
+        for n in ('agent-ember-ab12cd34.json','agent-ember-2-ab12cd34.json','agent-ember-zz.json'):(d/n).write_text('{}')
+        rt=type('RT',(),{'config':{'name':'ember'}})()
+        self.assertEqual([f.name for f in leases._own(d,rt)],['agent-ember-ab12cd34.json'],'ember-2 is not ember')
+        from caminus.ember import relay
+        prices=relay.DeepInfraPrices('k',lambda *a:None,fetch=lambda:{'data':[
+            {'id':'good','metadata':{'pricing':{'input_tokens':0.1,'output_tokens':0.4,'cache_read_tokens':None}}},
+            {'id':'nullprice','metadata':{'pricing':{'input_tokens':None,'output_tokens':0.4}}},
+            {'metadata':{'pricing':{'input_tokens':0.1,'output_tokens':0.4}}}]})
+        self.assertEqual(prices.get('good'),(0.1,0.4,0.1),'a bad row is skipped, never the whole table')
+        self.assertIsNone(prices.get('nullprice'))
+
+    def test_a_handoff_with_private_text_is_never_posted(self):
+        from caminus.ember.resident import github
+        base=dict(action='comment',repo='jdominick05/caminus',number=5)
+        self.assertEqual(github.private_text(dict(base,body='Fixed in the latest push; CI is green.')),[])
+        for body,why in (('see /'+'home/someone/notes.md','a home-directory path'),('per D-'+'281','a decision id'),
+                         ('https://claude.ai/'+'code/session_x','a session link'),('ghp_'+'a'*30,'a token')):
+            self.assertEqual(github.private_text(dict(base,body=body)),[why],body)
+
     def test_the_owner_runs_an_approved_handoff_with_their_own_gh(self):
         from caminus.cmd import ember as E
         from caminus.ember.resident import approval
@@ -2228,9 +2262,11 @@ for line in sys.stdin:
         # The agent runs a zipapp of caminus/ember/resident only: an import of anything else in the package (the
         # leases refusal imported caminus.ember.settings) works in a checkout and fails on a real install.
         import ast
-        pkg=ROOT/'python'/'caminus'/'env'/'resident'
+        pkg=ROOT/'python'/'caminus'/'ember'/'resident'
+        files=sorted(pkg.glob('*.py'))
+        self.assertGreater(len(files),10,'the glob reads the resident package (it named a folder that no longer exists, read nothing and passed)')
         bad=[]
-        for f in pkg.glob('*.py'):
+        for f in files:
             for node in ast.walk(ast.parse(f.read_text())):
                 if isinstance(node,ast.ImportFrom) and node.level>=2:
                     bad.append(f'{f.name}: from {"."*node.level}{node.module or ""}')
@@ -2751,10 +2787,15 @@ for line in sys.stdin:
         # with the first poll, depending on the machine's speed, but exactly once)
         cmd='printf first-burst; sleep 4; printf second-burst; read x'
         start=t.call(sid,dict(command=cmd,yield_ms=50))
-        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
-        both=start['output']+out['output']
+        both=start['output']
+        # poll until the first burst has arrived (a loaded CI runner took longer than 350 ms to start the command), well
+        # inside the 4 s pause; each poll returns only what is new, so the burst must appear exactly once in total
+        for _ in range(30):
+            if 'first-burst' in both:break
+            both+=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
         self.assertEqual(both.count('first-burst'),1,both);self.assertNotIn('second-burst',both)
-        self.assertTrue(out['no_new_output'] if start['output'] else not out['no_new_output'])
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
+        self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output'],'nothing new: the poll says so')
         # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
         self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])

@@ -76,8 +76,11 @@ func padRight(s string, w int) string {
 func (m emberModel) approvalRow(i int, selected bool, width int) string {
 	r := m.reqs[i]
 	kind, text := g.root+" root", residentText(r.Cmd)
-	if r.kind() == "question" {
+	switch r.kind() {
+	case "question":
 		kind, text = "? ask", residentText(r.Text)
+	case "github":
+		kind, text = "⇡ github", residentText(r.Summary)
 	}
 	text = strings.Join(strings.Fields(text), " ")
 	age := requestAge(r.Ts, time.Now())
@@ -113,7 +116,12 @@ func (m emberModel) approvalDetail(order []int, sel, width int) []string {
 		room := max(8, width-len(label)-2)
 		out = append(out, emberDim.Render(label+": ")+lipgloss.NewStyle().Foreground(cText).Render(ansi.Truncate(value, room, "…")))
 	}
-	if r.kind() == "question" {
+	if r.kind() == "github" {
+		// what goes public under your name, in full: every field, and the body line by line (the summary alone hid it)
+		for _, line := range handoffLines(r.Github, width) {
+			out = append(out, line)
+		}
+	} else if r.kind() == "question" {
 		add("question", r.Text)
 	} else {
 		// The row cuts a long command; the detail never does: what you approve must be visible in full.

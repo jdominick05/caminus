@@ -183,7 +183,9 @@ func (m emberModel) receiveThemeGen(msg themeGenMsg) emberModel {
 		return m
 	}
 	dir = filepath.Join(dir, "caminus", "themes")
-	if err := os.MkdirAll(dir, 0o755); err == nil {
+	// (one err for both steps: the old `if err := ...` shadowed it, so a failed write was reported as saved)
+	err = os.MkdirAll(dir, 0o755)
+	if err == nil {
 		err = os.WriteFile(filepath.Join(dir, name+".theme"), []byte(file), 0o644)
 	}
 	if err != nil {

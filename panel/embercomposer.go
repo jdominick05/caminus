@@ -54,11 +54,7 @@ func (m emberModel) composerKey(msg tea.KeyPressMsg) (emberModel, tea.Cmd, bool)
 	case k == "ctrl+r":
 		return m.historyBack(), nil, true
 	case k == "ctrl+o":
-		m.chat.full = !m.chat.full
-		m.chat.content, m.chat.rendered = "", 0
-		m.msg = map[bool]string{true: "cards show every line · Ctrl+O shortens them", false: "cards show their last 40 lines · Ctrl+O shows all"}[m.chat.full]
-		m.syncChat()
-		return m, nil, true
+		return m.toggleLayout(), nil, true
 	}
 	if k != "ctrl+r" {
 		m.chat.histQuery, m.chat.histIdx = "", 0
