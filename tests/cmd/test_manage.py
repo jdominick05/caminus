@@ -386,6 +386,7 @@ def main():
     check(not os.path.exists(os.path.expanduser('~/.qwen/settings.json.bak-x')), 'qwen-code: nothing written under ~/.qwen')
 
     paused_checks(S)
+    unmanaged_checks(S)
     reload_checks(S)
     print(f'RESULT {"PASS" if not FAILS else "FAIL (" + str(len(FAILS)) + ")"}')
     return 0 if not FAILS else 1
@@ -451,6 +452,25 @@ def paused_checks(S):
     check(all(sv[a] and 'CAMINUS_ALLOW_PAUSED=1' in sv[a] for a in ('qwen35moe', 'qwen3next', 'qwen35'))
           and not any(sv[a] for a in ('qwen35-own', 'qwen3moe', 'qwen4exp')),
           'paused: caminus serve refuses the qwen35moe, qwen3next and qwen35 (AREX-2) architectures only')
+
+
+def unmanaged_checks(S):
+    """unmanaged_servers() scans /proc for caminus_serve.py processes outside the registry and never raises, even on a
+    machine with none running (CI): every entry is a dict with the keys cmd_ps and cmd_top read"""
+    from caminus.cmd import manage
+    try:
+        found = manage.unmanaged_servers()
+    except Exception as e:
+        check(False, f'unmanaged: unmanaged_servers() raised {type(e).__name__}: {e}')
+        return
+    check(isinstance(found, list)
+          and all(isinstance(s, dict) and isinstance(s.get('port'), int) and s.get('name') and 'model' in s
+                  and 'url' in s and 'state' in s for s in found),
+          f'unmanaged: read-only scan of /proc for live servers outside the registry -> {len(found)} entry(ies), each '
+          f'with port, name, model, url and state ({found})')
+    ports = [s['port'] for s in found]
+    check(ports == sorted(ports) and len(ports) == len(set(ports)),
+          f'unmanaged: one entry per server, sorted by port ({ports})')
 
 
 if __name__ == '__main__':

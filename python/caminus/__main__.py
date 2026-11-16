@@ -17,13 +17,15 @@
   flight    the flight recorder: list / purge / bundle
   kv-cache  the prompt cache's disk tier: list / purge
   guard     run any command under the guard: caminus guard LOG SECS CMD... (--lines: the cards and their kill lines)
+  ember     Ember, the agent environment (experimental; `env` is an alias): work as a second user on this machine over SSH, root only with your
+            approval (caminus ember setup | status | run | shell | prompt | ui | spawn | jobs | stop | reqs | answer | ask | say | notes | ctx | memory | remember | serve | new | sessions | send | attach | watch | audit)
   version   the package version and its code objects' provenance
 
 Paths come from the environment, ~/.config/caminus/config.toml, then the XDG defaults (caminus.config; caminus doctor prints
 them). PyTorch is not a declared dependency: install the ROCm build (caminus.device.torchcheck)."""
 import sys
 
-COMMANDS = ('serve', 'fit', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard', 'version',
+COMMANDS = ('serve', 'fit', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard', 'ember', 'env', 'version',
             'models', 'pull', 'start', 'stop', 'restart', 'ps', 'logs', 'top', 'panel', 'qwen-code', 'qwen', 'advisor')
 MANAGE = {'models': 'cmd_models', 'pull': 'cmd_pull', 'start': 'cmd_start', 'stop': 'cmd_stop', 'restart': 'cmd_restart',
           'ps': 'cmd_ps', 'logs': 'cmd_logs', 'top': 'cmd_top', 'panel': 'cmd_panel'}
@@ -70,6 +72,9 @@ def dispatch(cmd, rest):
     if cmd == 'advisor':
         from .cmd import advisor
         return advisor.main(rest)
+    if cmd in ('ember', 'env'):          # (env: the old name, kept for installed services and habits)
+        from .cmd import ember as cmd_env
+        return cmd_env.main(rest)
     help_only = any(a in ('-h', '--help', '--options-json') for a in rest)   # (no torch, no guard: nothing is loaded)
     if cmd in ('serve', 'replay') and not help_only:
         from .device.torchcheck import prepare_runtime

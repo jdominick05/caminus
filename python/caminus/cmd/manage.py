@@ -303,6 +303,76 @@ def problem_view(gs):
     return [dict(level=lv, card=c, text=x) for lv, c, x in host.problems(gs)]
 
 
+def unmanaged_servers():
+    """Live caminus_serve.py processes no slot in the registry owns: watched read-only, never
+    controlled (no start/stop/restart, no qwen attach). Observation only — a slot's server is
+    skipped even here so the registry stays the one source of control."""
+    managed_ports = set()
+    for s in all_servers():
+        try:
+            if alive(s.get('guard_pid')):
+                managed_ports.add(int(s['port']))
+        except (KeyError, TypeError, ValueError):
+            pass
+    out = []
+    cand = {}
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
+        except OSError:
+            continue
+        if not any(a.endswith('caminus_serve.py') for a in argv) or '--port' not in argv or '--model' not in argv:
+            continue
+        try:
+            flag = lambda k: argv[argv.index(k) + 1]
+            port = int(flag('--port'))
+            model = flag('--model')
+        except (ValueError, IndexError):
+            continue
+        if port in managed_ports:
+            continue
+        base = os.path.basename(model.rstrip('/'))
+        label = os.path.basename(os.path.dirname(model.rstrip('/'))) if '-of-' in base and 'gguf' in base.lower() else base
+        name = 'observed-' + (os.path.basename(flag('--cache-dir')) if '--cache-dir' in argv else str(port))
+        cand.setdefault(port, []).append((name, label, pid, argv[0]))
+    for port, group in sorted(cand.items()):
+        # the same server is usually seen several times (guard.sh's command line, a timeout/env wrapper and the
+        # python process itself): keep the python process, else the first candidate listed for that port
+        _, _, pid, _ = next((c for c in group if 'python' in os.path.basename(c[3])), group[0])
+        name, model = group[0][0], group[0][1]
+        view = dict(name=name, model=model, url=f'http://127.0.0.1:{port}',
+                    port=port, cards=[], pid=pid, log=None, max_ctx=None, decode_tps=None,
+                    alias=None, busy=False, error='')
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                start_ticks = int(f.read().split(') ', 1)[1].split()[19])
+            with open('/proc/uptime') as f:
+                view['uptime_s'] = max(0.0, float(f.read().split()[0]) - start_ticks / os.sysconf('SC_CLK_TCK'))
+        except (OSError, ValueError, IndexError):
+            view['uptime_s'] = None
+        code, _ = http_json(view['url'] + '/health')
+        if code not in (200, 503):
+            continue  # not answering: nothing to watch
+        view['state'] = 'ready' if code == 200 else 'loading'
+        if code == 200:
+            _, props = http_json(view['url'] + '/props')
+            if isinstance(props, dict):
+                view['max_ctx'] = find_key(props, 'n_ctx')
+                view['alias'] = props.get('model_alias')
+            _, st = http_json(view['url'] + '/caminus/status', timeout=2.0)
+            mpt = find_key(st, 'ms_per_token')
+            if isinstance(mpt, (int, float)) and mpt > 0:
+                view['decode_tps'] = round(1000.0 / mpt, 1)
+            ph = find_key(st, 'phase')
+            view['busy'] = ph in ('prefill', 'decode')
+        out.append(view)
+    return out
+
+
 def cmd_ps(argv):
     ap = argparse.ArgumentParser(prog='caminus ps')
     ap.add_argument('--json', action='store_true')
@@ -321,6 +391,12 @@ def cmd_ps(argv):
         print(f"{v['name']:<12} {v['model']:<18} {v['state']:<8} {v['url']:<24} cards {'+'.join(v['cards'])}{extra}")
         if v['error']:
             print(f"{'':<12} {v['error']}")
+    obs = unmanaged_servers()
+    if obs:
+        print('unmanaged (read-only: started outside caminus; watch with caminus top):')
+        for v in obs:
+            extra = (f"  {v['max_ctx']:,} ctx" if v['max_ctx'] else '') + (f"  {v['decode_tps']} tok/s decode" if v['decode_tps'] else '')
+            print(f"{v['name']:<12} {v['model']:<18} {v['state']:<8} {v['url']:<24}{extra}")
     for c in cards:
         print(f"card {c['index']} {c['name']} ({c['pci']}, {c['link']}): {c['used_mib']:,} / {c['line_mib']:,} MiB (the guard's line)")
     for x in probs:
@@ -754,11 +830,23 @@ def cmd_top(argv):
     ss = [s for s in all_servers() if alive(s.get('guard_pid'))]
     if a.name:
         ss = [s for s in ss if s['name'] == a.name]
+    observed = None
     if not ss:
+        # No slot-registered server runs; watch an unmanaged caminus_serve listening on this
+        # machine instead — the monitor never controls it (no stop/restart by construction).
+        obs = unmanaged_servers()
+        if obs:
+            observed = obs[0]
+            if a.name and observed['name'] != a.name:
+                observed = None
+    if not ss and not observed:
         print('caminus top: no running server' + (f' named {a.name!r}' if a.name else '') + ' (caminus ps)', file=sys.stderr)
         return 1
     try:
-        p = os.path.expanduser(a.monitor_config) if a.monitor_config else top_config(ss[0])
+        if observed:
+            p = os.path.expanduser(a.monitor_config) if a.monitor_config else top_config(observed)
+        else:
+            p = os.path.expanduser(a.monitor_config) if a.monitor_config else top_config(ss[0])
     except (ManageError, OSError) as err:
         print(f'caminus top: {err}', file=sys.stderr)
         return 1
