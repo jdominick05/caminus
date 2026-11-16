@@ -7,7 +7,7 @@
     the other own decode modules (max-ilp, no ggml include path); their capabilities are lean's plus OWN_SLOT_SUM;
     Engine.build accepts OP_XCHG / OP_OWN_SLOT_SUM on them only (the lean, verify, IQ and row-scale modules refuse both),
     refuses every other op outside the lean tape's set there, and refuses a pull-mode exchange (the module is push-only);
-    own_slot_sum refuses another module; the two-card objects stay out of the installed runtime set (not served)
+    own_slot_sum refuses another module; the served two-card object ships in the installed runtime set, its trace build does not
   - OP_OWN_ATTS's split cap: kernels/k3_own_atts.h sizes its merge from ATS_MAXS (128 under K3_Q3M_TP, else 64: the
     one-card text in the #else branch, the 128 form writing each weight over its m inside q + scores); Engine.own_atts
     takes up to k3.atts_max_splits(module) (128 on the two-card modules, 64 on lean, verify, IQ and row-scale) and refuses more
@@ -95,7 +95,8 @@ check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS['k3_q3m_le
       'capabilities: the lean module\'s plus OWN_SLOT_SUM; ops: the lean set plus OP_XCHG and OP_OWN_SLOT_SUM')
 from caminus.device import kernels as dk
 shipped = set(dk.K3) | set(getattr(dk, 'DENSE35_OWN', ())) | {n for g in getattr(dk, 'PREFILL', ()) for n in (g if isinstance(g, tuple) else (g,))}
-check(not set(k3.Q3M_TP_MODULES) & (shipped | set(dk.RUNTIME_SET)), 'the two-card objects are not in the installed runtime set (not served yet)')
+check('k3_q3m_lean_tp' in dk.RUNTIME_SET and 'k3_q3m_lean_tp_trace' not in (shipped | set(dk.RUNTIME_SET)),
+      'the served two-card module ships in the installed runtime set; its trace build does not')
 
 # stand-ins: the engine's torch.cuda calls on host memory (no device is opened, nothing launches)
 _zeros, _to, _tensor = torch.zeros, torch.Tensor.to, torch.tensor
