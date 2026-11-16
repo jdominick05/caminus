@@ -1351,6 +1351,9 @@ func (m emberModel) chatBottom() string {
 	if line := m.todoPinned(); line != "" {
 		out = line + "\n" + out
 	}
+	if act := m.activityLine(max(18, m.width-2)); act != "" && m.height >= 20 { // (a small terminal keeps its rows)
+		out = act + "\n" + out // above the todo list, where the work is described
+	}
 	if side := m.btwSection(max(18, m.width-2)); side != "" {
 		out = side + "\n" + out
 	}

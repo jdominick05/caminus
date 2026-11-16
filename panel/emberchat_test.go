@@ -2378,3 +2378,36 @@ func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
 		t.Fatal("a click on the pill goes to the newest message and the pill goes away")
 	}
 }
+
+func TestTheActivityLineShowsWhatTheAgentDoesWithItsNumbers(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.resident.Goals = []residentGoal{{ID: "g1", State: "working", Prompt: "x"}}
+	m.resident.SpendGoals = map[string]float64{"g1": 0.084}
+	now := float64(time.Now().Add(-134 * time.Second).Unix())
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Ts: now, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "x"}},
+		{Seq: 2, Ts: now + 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"content": strings.Repeat("w", 4000)}},
+		{Seq: 3, Ts: now + 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{}}},
+	}
+	m.chat.group.running = "pytest -q"
+	v := ansi.Strip(m.activityLine(120))
+	for _, want := range []string{"… $ pytest -q", "2m 1", "↓ 1.0k tokens", "1 action", "$0.08"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q in %q", want, v)
+		}
+	}
+	if !strings.Contains(ansi.Strip(m.chatBottom()), "$ pytest -q") {
+		t.Fatal("it sits above the composer")
+	}
+	if next, cmd := m.spinStart(); cmd == nil || !next.spinning {
+		t.Fatal("work starts the spinner's tick")
+	}
+	m.resident.Goals[0].State = "waiting_user"
+	if m.activityLine(120) != "" {
+		t.Fatal("waiting on you: no activity line")
+	}
+	if next, cmd := m.spinStep(); cmd != nil || next.spinning {
+		t.Fatal("idle: the spinner's tick stops")
+	}
+}
