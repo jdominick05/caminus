@@ -521,8 +521,9 @@ def _ask_root(a):
     except TimeoutError as e:
         print(f'caminus ember ask-root: {e}', file=sys.stderr)
         return 124
-    if res['decision'] == 'denied':
-        print(f"caminus ember ask-root: denied by {res.get('approved_by', '?')}: {cmd}", file=sys.stderr)
+    if res['decision'] in ('denied', 'withdrawn'):
+        # (a withdrawn request is a refusal too: it returned 0 with no output, so a `&&` chain went on)
+        print(f"caminus ember ask-root: {res['decision']} by {res.get('approved_by', '?')}: {cmd}", file=sys.stderr)
         return 126
     sys.stdout.write(res.get('out') or '')
     sys.stderr.write(res.get('err') or '')
@@ -542,8 +543,8 @@ def _ask(a):
     except TimeoutError as e:
         print(f'caminus ember ask: {e}', file=sys.stderr)
         return 124
-    if res['decision'] == 'denied':
-        print(f"caminus ember ask: denied by {res.get('approved_by', '?')}", file=sys.stderr)
+    if res['decision'] in ('denied', 'withdrawn'):
+        print(f"caminus ember ask: {res['decision']} by {res.get('approved_by', '?')}", file=sys.stderr)
         return 126
     print(res.get('answer') or '')
     return 0
@@ -609,6 +610,12 @@ def _watch(a, tr):
                         bridge.answer(settings.bridge_dir(), req['id'], 'answered', me, answer_text=ans,request=req)
                         audit.log(ap, {'event': 'decision', 'id': req['id'], 'decision': 'answered', 'by': me, 'answer': ans})
                         _remember_qa(req.get('text', ''), ans, tr)
+                    continue
+                if req.get('kind') == 'github':
+                    # a hand-off carries its fields, not a command: watch shows it and leaves the answer to the panel
+                    # or `caminus ember answer` (it raised KeyError here and ended watch)
+                    print('  github: ' + terminal_text(req.get('summary') or ''))
+                    print('  answer it in the panel (Ctrl+A) or with caminus ember answer ID approved --digest D')
                     continue
                 print('  '+terminal_text(req['cmd']))
                 if req.get('reason'):
@@ -723,6 +730,11 @@ def _answer_pending(a, tr):
         res = {'id': a.id, 'decision': 'approved', 'github': req['github'].get('action'), 'rc': r.returncode,
                'out': (r.stdout or '').strip()[-500:]}
     else:
+        if req.get('kind', 'root') != 'root':
+            # only a root request runs a command: a mis-addressed id must not run text under sudo
+            print(f"caminus ember answer: {a.id} is a {req.get('kind')} request; it takes "
+                  f"{'answered' if req.get('kind') == 'question' else 'approved / denied'}", file=sys.stderr)
+            return 2
         cmd = a.text if a.decision == 'edited' else req.get('cmd', '')
         if not cmd:
             print('caminus ember answer: no command to run', file=sys.stderr)
