@@ -729,6 +729,26 @@ class Resident(unittest.TestCase):
             self.assertIn('#128 review fixes',rt.context_message(work)['content'])
         finally:rt.mail.close();rt.store.close()
 
+    def test_setup_sets_the_agent_git_identity_and_test_interpreter_when_asked(self):
+        # a real agent built its own interpreter (no python, no torch) and committed as user@localhost (a CLA failed)
+        import types
+        from caminus.cmd import ember as E
+        ran=[]
+        def transport(argv,**kw):
+            ran.append((kw.get('input',''),kw.get('timeout')));return subprocess.CompletedProcess(argv,0,'made\n','')
+        said=[]
+        a=types.SimpleNamespace(git_name='agent-login',git_email='agent-login@users.noreply.github.com',test_venv=True)
+        self.assertTrue(E.agent_extras(a,transport,say=said.append))
+        self.assertIn("git config --global user.name agent-login",ran[0][0])
+        self.assertIn("user.email agent-login@users.noreply.github.com",ran[0][0])
+        self.assertIn('download.pytorch.org/whl/cpu torch',ran[1][0]);self.assertEqual(ran[1][1],1800)
+        self.assertIn('test -x ~/.venvs/caminus-cpu/bin/python',ran[1][0],'an existing interpreter is kept')
+        ran.clear()
+        self.assertFalse(E.agent_extras(types.SimpleNamespace(git_name='x',git_email=None,test_venv=False),transport,say=said.append))
+        self.assertEqual(ran,[],'a name without an email changes nothing')
+        self.assertTrue(E.agent_extras(types.SimpleNamespace(git_name=None,git_email=None,test_venv=False),transport,say=said.append))
+        self.assertEqual(ran,[],'nothing asked, nothing run')
+
     def test_a_stale_todo_list_gets_a_gentle_reminder(self):
         from caminus.ember.resident.runtime import TODO_STALE
         rt=Runtime(self.home)

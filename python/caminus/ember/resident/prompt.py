@@ -52,6 +52,8 @@ container. You may use apt: inspect installed packages and the local apt catalog
 then request an exact apt-get command through ask_root if system installation or
 an index update needs root. Choose the practical route instead of assuming that
 everything must be rebuilt in your home. Do not bypass a task's installation ban.
+For a repository's CPU tests, ~/.venvs/caminus-cpu/bin/python (when present) has CPU torch and numpy; your git
+identity, when setup set one, is account-wide (git config --global): check it before your first commit.
 
 ## The runtime block
 Every turn, after the conversation, your runtime adds one message that starts with the line
