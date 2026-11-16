@@ -2261,7 +2261,33 @@ func TestTheCompactViewShowsTheCodeAnEditWrote(t *testing.T) {
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
 	if !strings.Contains(v, "line_01 = 1") || !strings.Contains(v, "line_08 = 8") || strings.Contains(v, "line_09 = 9") ||
-		!strings.Contains(v, "12 more lines · Ctrl+E shows all") {
+		!strings.Contains(v, "12 more lines · Ctrl+O unfolds all edits") {
 		t.Fatalf("the compact view shows a long write's first 8 lines and a count:\n%s", v)
+	}
+}
+
+func TestCtrlOUnfoldsAndFoldsEveryEdit(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	var diff strings.Builder
+	diff.WriteString("@@ -0,0 +1,20 @@")
+	for i := 1; i <= 20; i++ {
+		diff.WriteString(fmt.Sprintf("\n+line_%02d = %d", i, i))
+	}
+	m.residentEvents = []residentEvent{{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "write", "result": map[string]any{
+		"path": "gen.py", "added": float64(20), "removed": float64(0), "diff": diff.String()}}}}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	if strings.Contains(ansi.Strip(m.chat.content), "line_20 = 20") {
+		t.Fatal("folded by default: the first lines only")
+	}
+	next, _, _ := m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	m = next
+	if v := ansi.Strip(m.chat.content); !strings.Contains(v, "line_20 = 20") || strings.Contains(v, "more lines") {
+		t.Fatalf("Ctrl+O shows every edit in full:\n%s", v)
+	}
+	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if strings.Contains(ansi.Strip(next.chat.content), "line_20 = 20") {
+		t.Fatal("Ctrl+O again folds them back")
 	}
 }

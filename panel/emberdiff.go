@@ -80,7 +80,7 @@ func editCard(path, meta string, expanded bool, diff string, w int) string {
 		out = append(out, rule+b)
 	}
 	if len(shown) < len(body) {
-		out = append(out, rule+emberDim.Render(fmt.Sprintf("… %d more lines · Ctrl+E shows all", len(body)-len(shown))))
+		out = append(out, rule+emberDim.Render(fmt.Sprintf("… %d more lines · Ctrl+O unfolds all edits", len(body)-len(shown))))
 	}
 	return strings.Join(out, "\n")
 }

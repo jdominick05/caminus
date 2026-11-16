@@ -1106,7 +1106,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			// line numbers, tinted added / removed plates, the code highlighted for its language (emberdiff.go)
-			return editCard(residentText(path), meta, c.expanded || changed <= 12, diff, w)
+			return editCard(residentText(path), meta, c.expanded || c.full || changed <= 12, diff, w)
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)

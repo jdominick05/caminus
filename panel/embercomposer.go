@@ -56,7 +56,8 @@ func (m emberModel) composerKey(msg tea.KeyPressMsg) (emberModel, tea.Cmd, bool)
 	case k == "ctrl+o":
 		m.chat.full = !m.chat.full
 		m.chat.content, m.chat.rendered = "", 0
-		m.msg = map[bool]string{true: "cards show every line · Ctrl+O shortens them", false: "cards show their last 40 lines · Ctrl+O shows all"}[m.chat.full]
+		// (one key for both: edits open in full with every card's lines, and fold back to their first lines with them)
+		m.msg = map[bool]string{true: "every edit and card in full · Ctrl+O folds them", false: "edits show their first lines, cards their last 40 · Ctrl+O unfolds all"}[m.chat.full]
 		m.syncChat()
 		return m, nil, true
 	}
