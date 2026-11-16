@@ -15,7 +15,9 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   queue; long commands keep running between turns; an interrupted step is reported, not replayed blind.
 - **You steer, it decides how.** A message reaches it at its next step; `/steer` redirects. It defines what done
   looks like before it changes anything, verifies against that, and a separate judge (a fresh model call that sees the
-  evidence, not the agent's reasoning) checks the finish.
+  evidence, not the agent's reasoning) checks the finish. The harness keeps its own record too: a verify needs
+  something that looked after the last change, a refused edit blocks the finish until the change is made or the file
+  is read, and the judge sees which files were actually changed.
 - **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
   takes the agent's recommended option after 15 minutes; an unanswered permission or root request is a no.
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,

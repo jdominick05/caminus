@@ -152,6 +152,50 @@ class Resident(unittest.TestCase):
         self.assertIn('define_done',terminals[1]['error'],'a change waits for the done check')
         self.assertFalse((self.home/'made.txt').exists())
 
+    def test_a_refused_edit_cannot_be_verified_or_finished_as_if_it_had_happened(self):
+        # a Qwen3-30B-A3B run, event for event: read, the edit refused (no done check yet), a prose done check, a verify
+        # quoting the line it never wrote, finish. The file was unchanged and the goal finished as done.
+        self.gates_on()
+        (self.home/'inventory.py').write_text('def low_stock(items, t):\n    return [n for n, q in items if q < t]\n')
+        self.replies(call('read',dict(path='inventory.py')),
+                     call('edit',dict(path='inventory.py',old='q < t',new='q <= t')),
+                     call('define_done',dict(check='low_stock uses <= on line 2')),
+                     call('verify',dict(evidence='line 2 now reads q <= t')),          # A: nothing looked since the edit
+                     call('terminal',dict(command='ls')),
+                     call('verify',dict(evidence='ls listed inventory.py')),
+                     call('finish',dict(summary='low_stock now uses <=.')),            # B: the edit was refused, never redone
+                     call('read',dict(path='inventory.py')),
+                     call('finish',dict(summary='Not changed: my edit was refused.',open='the change itself')))
+        goal=self.cmd('once',['--goal','Make low_stock count exactly t as low.'])
+        results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
+        by=lambda n:[r['result'] for r in results if r['name']==n]
+        self.assertIn('define_done',by('edit')[0]['error'])
+        self.assertIn('nothing has looked since your last change',by('verify')[0].get('error',''),'A: a verify after a refused edit with no look')
+        self.assertNotIn('error',by('verify')[1],'a look after the change lets verify through')
+        self.assertIn('inventory.py (edit:',by('finish')[0].get('error',''),'B: the refused edit blocks the finish')
+        self.assertNotIn('error',by('finish')[-1],'once the file was read, the finish is the judge\'s to weigh')
+        self.assertEqual(goal['state'],'completed')
+        self.assertIn('q < t',(self.home/'inventory.py').read_text())
+
+    def test_a_redone_change_finishes_and_the_judge_sees_what_changed(self):
+        from caminus.ember.resident import judge
+        self.gates_on()
+        (self.home/'f.txt').write_text('a\n')
+        self.replies(call('edit',dict(path='f.txt',old='a',new='b')),            # refused: no done check yet
+                     call('define_done',dict(check='f.txt holds b')),
+                     call('edit',dict(path='f.txt',old='a',new='b')),
+                     call('terminal',dict(command='cat f.txt')),
+                     call('verify',dict(evidence='cat printed b')),
+                     call('finish',dict(summary='f.txt holds b.')))
+        goal=self.cmd('once',['--goal','Put b in f.txt.'])
+        self.assertEqual(goal['state'],'completed','a refusal followed by the change itself does not block the finish')
+        rt=Runtime(self.home)
+        try:
+            text=judge.evidence(rt,goal['id'],'f.txt holds b.','')
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('FILES CHANGED IN THIS GOAL',text);self.assertIn('- f.txt',text)
+        self.assertIn('REFUSED OR FAILED CHANGES',text);self.assertIn('edit f.txt: no done check yet',text)
+
     def test_finish_needs_the_check_exercised_since_the_last_steer(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
@@ -648,7 +692,8 @@ class Resident(unittest.TestCase):
         self.verdicts(dict(verdict='met',reason='x exists'))
         self.replies(call('terminal',dict(command='python3 -c "print(1)"')),call('terminal',dict(command='python3 -c "print(1)"')),
                      call('define_done',dict(check='x exists')),call('terminal',dict(command='python3 -c "print(1)"')),
-                     call('write',dict(path='x',content='1')),call('verify',dict(evidence='x written')),call('finish',dict(summary='Done.')))
+                     call('write',dict(path='x',content='1')),call('read',dict(path='x')),
+                     call('verify',dict(evidence='read shows 1')),call('finish',dict(summary='Done.')))
         out=self.cmd('once',['--goal','Make x.'])
         self.assertEqual(out['state'],'completed','the same call runs once the done check exists')
 

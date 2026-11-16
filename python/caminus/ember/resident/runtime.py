@@ -177,7 +177,7 @@ TOOLS = [
     tool('peers', 'List named resident agents on your local mail bus.', {}),
     tool('send_message', 'Send durable peer mail. Omit recipient_goal to give the peer a new goal; set it to steer an existing goal. Delivery survives offline peers and restarts. Use peers to find names, and reply_to to link replies. A peer cannot approve root or answer for your human.',
          dict(to={'type':'string'}, text={'type':'string'}, recipient_goal={'type':'string'}, reply_to={'type':'string'}), ('to','text')),
-    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal. Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. Paths and programs are those of your Unix account.',
+    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal (read-only commands work any time; one that changes something needs define_done first). Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. Paths and programs are those of your Unix account.',
          dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, offset={'type':'integer'}, max_output={'type':'integer'})),
     tool('ask_user', 'Ask your human a question; the answer returns as this tool result. Your human may be away: if '
@@ -202,9 +202,9 @@ TOOLS = [
          dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
     tool('search', 'Find files and text without the terminal: glob matches file paths (e.g. "**/*.py", "*test*"), pattern is a regular expression searched in their lines (with glob, only in those files). Skips .git, node_modules, caches, binary and huge files. Every match is path:line: text, so read can open it at that line. path is where to search (your home by default).',
          dict(pattern={'type':'string'}, glob={'type':'string'}, path={'type':'string'}, ignore_case={'type':'boolean'}, limit={'type':'integer'})),
-    tool('edit', 'Replace exact text in a file. old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
+    tool('edit', 'Replace exact text in a file (a goal\'s first change needs define_done first). old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
-    tool('write', 'Create a file, or replace a whole file, with content. Returns the diff against what was there.',
+    tool('write', 'Create a file, or replace a whole file, with content (a goal\'s first change needs define_done first). Returns the diff against what was there.',
          dict(path={'type':'string'}, content={'type':'string'}), ('path','content')),
     tool('wait', 'Block without spending tokens until something happens: until=time (target: seconds, or a Unix time), file (a path appears or changes), port (host:port or a port number opens), process (a pid exits), session (one of your terminal sessions ends), or message. A message for this goal, cancellation or newly queued work always ends the wait early. timeout in seconds (default 300, at most 1800).',
          dict(until={'type':'string','enum':['time','file','port','process','session','message']}, target={'type':'string'}, timeout={'type':'integer'}), ('until',)),
@@ -867,12 +867,60 @@ class Runtime:
                 self.store.settle_request(req['id'], 'failed', str(e))
                 self.store.event('rewind_failed', dict(error=str(e)), gid)
 
+    CHANGE_TOOLS = ('edit', 'write')
+    LOOK_TOOLS = ('read', 'terminal', 'web_fetch', 'web_search', 'discover', 'machine', 'history_search', 'browser')
+
+    def _change_record(self, gid):
+        """This goal's tool results in order, as the harness recorded them: (seq, name, path, ok, error). path is the
+        resolved file for edit / write / read (None otherwise). The rules on verify and finish, and the judge's list of
+        changed files, read this rather than the agent's account (a 30B model verified an edit that had been refused)."""
+        rows = self.store.db.execute(
+            "SELECT e.seq, e.data, a.args FROM events e LEFT JOIN actions a ON a.goal=e.goal AND "
+            "a.call_id=json_extract(e.data,'$.call_id') WHERE e.goal=? AND e.kind='tool_result' ORDER BY e.seq",
+            (gid,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                d = json.loads(r['data'])
+                args = json.loads(r['args']) if r['args'] else {}
+            except ValueError:
+                continue
+            name = d.get('name') or ''
+            res = d.get('result') if isinstance(d.get('result'), dict) else {}
+            path = None
+            if name in self.CHANGE_TOOLS + ('read',) and isinstance(args, dict) and args.get('path'):
+                path = os.path.normpath(os.path.join(str(self.home), os.path.expanduser(str(args['path']))))
+            err = res.get('error')
+            out.append((r['seq'], name, path, not err, str(err or '')))
+        return out
+
     def _verify(self, gid, evidence):
         evidence = (evidence or '').strip()
         if not evidence:
             raise ValueError('say what the check showed, not that it passed')
+        # evidence comes from something that ran after the last change attempt: a 30B model's edit was refused, and it
+        # verified "line 25 now reads <=" without looking again
+        rec = self._change_record(gid)
+        last_change = max((seq for seq, name, *_ in rec if name in self.CHANGE_TOOLS), default=0)
+        if last_change and not any(seq > last_change and ok and (name in self.LOOK_TOOLS or name.startswith('mcp__'))
+                                   for seq, name, _p, ok, _e in rec):
+            raise ValueError('nothing has looked since your last change: read the file, or run the check, and verify '
+                             'with what that showed (an edit\'s own result is not the check)')
         self.store.event('verified', dict(evidence=evidence), gid)
         return dict(verified=evidence)
+
+    def _refused_changes(self, gid):
+        """Files whose latest edit / write in this goal was refused or failed, with nothing done to them since: no
+        later successful change and no later read. ('path (edit: why)' each.)"""
+        last = {}
+        for seq, name, path, ok, err in self._change_record(gid):
+            if path is None:
+                continue
+            if name in self.CHANGE_TOOLS:
+                last[path] = None if ok else f'{os.path.relpath(path, str(self.home))} ({name}: {err[:120]})'
+            elif name == 'read' and ok:
+                last[path] = None
+        return [v for v in last.values() if v]
 
     def _finish(self, gid, summary, open_work=''):
         # Serialize completion with send --goal-id. Steering accepted while the
@@ -1084,6 +1132,10 @@ class Runtime:
                     if graded and not self.store.verified_since_steer(action['goal']):
                         raise ValueError('the done check has not been exercised since the last steer: run it '
                                          'and call verify with what it showed before finishing')
+                    if graded and (stale := self._refused_changes(action['goal'])):
+                        raise ValueError('a change you made was refused or failed, and that file was neither changed '
+                                         'nor read since: %s. Make the change, or read the file to see what it holds, '
+                                         'before finishing' % '; '.join(stale[:3]))
                     left = [it['text'] for it in self.store.todo(action['goal'])['items'] if it['state'] != 'done']
                     if graded and left and not str(args.get('open', '')).strip():
                         raise ValueError('your todo list still has unfinished items (%s): mark them done with todo, '
