@@ -36,12 +36,14 @@ def check_args(ap, A):
         ap.error('--llama-max-kld, --llama-log and --native-ref check the long-context mode: they need --yarn')
 
 
-def log_has_yarn(path):
-    """True when the gg_golden log names this mode's YaRN (a missing or unreadable log is False)"""
+def log_has_yarn(path, job=None):
+    """True when the gg_golden log names this mode's YaRN and, with job (the depth gate's 'd<N>'), holds that job's
+    'JOB tfx d<N>:' line, so the log is the one that made these rows (a missing or unreadable log is False)"""
     try:
-        with open(path, errors='replace') as f: return any(YARN_LOAD in line for line in f)
+        with open(path, errors='replace') as f: lines = f.read().splitlines()
     except OSError:
         return False
+    return any(YARN_LOAD in l for l in lines) and (job is None or any(l.startswith(f'JOB tfx {job}:') for l in lines))
 
 
 def load_native(path, seq, n_rows):
@@ -53,7 +55,7 @@ def load_native(path, seq, n_rows):
     return z['logits']
 
 
-def gate(score, kind, ours, so, ll=None, sl=None, native=None, bar=None, log=None):
+def gate(score, kind, ours, so, ll=None, sl=None, native=None, bar=None, log=None, job=None):
     """(ok, lines): with llama.cpp's rows scored (sl), its log's YaRN line when a log is given, then the absolute bar
     (gated, except at depth once the log confirmed YaRN: printed only), and, with the native reference's logits, the
     closer-to-YaRN check for caminus (ours, so) and llama.cpp (ll, sl)"""
@@ -61,8 +63,9 @@ def gate(score, kind, ours, so, ll=None, sl=None, native=None, bar=None, log=Non
     if sl is not None:
         confirmed = False
         if log is not None:
-            confirmed = log_has_yarn(log)
-            out.append(('PASS' if confirmed else 'FAIL') + f' llama.cpp ran with this mode\'s YaRN: its log names "{YARN_LOAD}"')
+            confirmed = log_has_yarn(log, job)
+            out.append(('PASS' if confirmed else 'FAIL') + f' llama.cpp ran with this mode\'s YaRN: its log names "{YARN_LOAD}"'
+                       + (f' and holds job {job}' if job else ''))
             ok &= confirmed
         b = LLAMA_MAX_KLD[kind] if bar is None else float(bar)
         c = sl['mean'] <= b

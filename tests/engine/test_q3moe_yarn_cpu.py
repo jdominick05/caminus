@@ -27,6 +27,7 @@ import argparse, contextlib, math, os, sys, types
 os.environ['CAMINUS_H2D'] = 'pageable'   # (CPU stand-ins: the two-card uploads are tests/engine/test_q3moe_tp_cpu.py's)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
+import math
 import numpy as np
 import torch
 
@@ -370,18 +371,30 @@ check(ok1 and len(l1) == 3 and not ok2 and sum(x.startswith('FAIL') for x in l2)
 # the line (or no log) keeps the bar gating, and a missing line fails on its own
 LG = os.path.join(A.scratch, 'yarn-logs'); os.makedirs(LG, exist_ok=True)
 good_log, bad_log = os.path.join(LG, 'yarn.log'), os.path.join(LG, 'native.log')
-open(good_log, 'w').write('LOAD 6.6 s; n_ctx 65792, KV f16, ' + yarn_bound.YARN_LOAD + '\n')
+open(good_log, 'w').write('LOAD 6.6 s; n_ctx 65792, KV f16, ' + yarn_bound.YARN_LOAD + '\nJOB tfx d65536: 64 row(s), fills 33.95 s\n')
 open(bad_log, 'w').write('LOAD 6.6 s; n_ctx 65792, KV f16, n_vocab 151936\n')
 far = ry + rng.standard_normal((16, 64)) * 0.5; s_f = g_score(ry, far)                     # (a llama.cpp error past the depth bar)
-okd1, ld1 = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=good_log)
+okd1, ld1 = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=good_log, job='d65536')
+okd4, _ = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=good_log, job='d131000')   # (another depth's log)
 okd2, ld2 = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None, log=bad_log)
 okd3, _ = yarn_bound.gate(g_score, 'depth', ours_, s_o, far, s_f, None)
 oks1, ls1 = yarn_bound.gate(g_score, 'short', ours_, s_o, far, s_f, None, log=good_log)
 check(s_f['mean'] > yarn_bound.LLAMA_MAX_KLD['depth'] and okd1 and any(x.startswith('INFO') for x in ld1)
-      and not okd2 and ld2[0].startswith('FAIL') and not okd3 and not oks1 and yarn_bound.log_has_yarn(good_log)
+      and not okd2 and ld2[0].startswith('FAIL') and not okd3 and not okd4 and not oks1 and yarn_bound.log_has_yarn(good_log)
       and not yarn_bound.log_has_yarn(bad_log) and not yarn_bound.log_has_yarn(os.path.join(LG, 'missing.log')),
       'yarn_bound --llama-log: the depth bar is a fallback once the log names the mode\'s YaRN (printed, not gated); a log '
-      'without the line fails; no log keeps the depth bar gating; the short bar always gates')
+      'without the line, or another depth\'s log, fails; no log keeps the depth bar gating; the short bar always gates')
+# the recipe against ggml's own formula, written here from its source (ggml.c ggml_rope_yarn_corr_dim(s), ggml-cpu ops.cpp
+# rope_yarn_ramp / rope_yarn: theta = theta_interp (1 - ramp) + theta_extrap ramp, mscale *= 1 + 0.1 ln(1 / freq_scale)),
+# not through caminus.rope's helpers: a wrong table would sit in both the kernels and the YaRN reference
+cd_ = lambda beta: 128 * math.log(32768 / (beta * 2 * math.pi)) / (2 * math.log(1e6))
+glo, ghi = max(0.0, math.floor(cd_(32.0))), min(127.0, math.ceil(cd_(1.0)))
+jj = np.arange(64, dtype=np.float64); ext = 1e6 ** (-2.0 * jj / 128)
+gr = 1 - np.minimum(1, np.maximum(0, (jj - glo) / max(0.001, ghi - glo)))
+gfreq = ext * 0.25 * (1 - gr) + ext * gr
+check((glo, ghi) == (23, 40) and np.max(np.abs(rope.yarn_freqs(128, 1e6, 4.0, 32768) - gfreq) / gfreq) < 1e-12
+      and np.float32(rope.mscale(4.0)) == np.float32(1 + 0.1 * math.log(1 / 0.25)),
+      'yarn recipe = ggml\'s formula (written from its source): correction dims [23, 40], every pair\'s frequency to 1e-12, mscale in fp32')
 import q3moe_ref32 as R32
 RD = os.path.join(A.scratch, 'ref32-resume'); os.makedirs(RD, exist_ok=True)
 for fn in os.listdir(RD): os.remove(os.path.join(RD, fn))
