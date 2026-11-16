@@ -152,9 +152,16 @@ def review(rt, gid, result):
     if v['verdict'] == 'met':
         return dict(result, judge='met: ' + v['reason'])
     if v['verdict'] == 'wait':
-        waits = rt.store.db.execute(
-            "SELECT count(*) FROM events WHERE goal=? AND kind='judged' AND data LIKE '%\"verdict\": \"wait\"%'",
-            (gid,)).fetchone()[0]               # this verdict is already recorded above
+        # the waits in a row since the judge last said anything else (read from the stored JSON, not its spacing)
+        waits = 0
+        for row in rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='judged' ORDER BY rowid DESC", (gid,)):
+            try:
+                said = json.loads(row[0]).get('verdict')
+            except (TypeError, ValueError, AttributeError):
+                said = None
+            if said != 'wait':
+                break
+            waits += 1                          # this verdict is already recorded above
         if waits >= WAIT_LIMIT:
             return dict(error=f'the judge has said wait {waits} times (latest: {v["reason"]}). The goal is paused for '
                         'your human.', pause='judge said wait %d times: %s' % (waits, v['reason']))

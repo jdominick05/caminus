@@ -104,6 +104,12 @@ def wait(rt, gid, until, target='', timeout=300):
             return dict(happened='a message arrived for this goal', waited_s=round(time.monotonic() - start, 1))
         if _cancelled(rt, gid):
             return dict(happened='the goal was cancelled', waited_s=round(time.monotonic() - start, 1))
+        # the wait runs inside the daemon's loop: an emergency stop, a pause or an interrupt must not sit behind it
+        # for up to WAIT_MAX (they did; schedule is the tool that frees the loop)
+        if hasattr(rt, 'stop_reason') and rt.stop_reason():
+            return dict(happened='the emergency stop is on', waited_s=round(time.monotonic() - start, 1))
+        if _stopping(rt, gid):
+            return dict(happened='your human paused or interrupted this goal', waited_s=round(time.monotonic() - start, 1))
         if _queued(rt, gid) > queued:
             return dict(happened='new work was queued', waited_s=round(time.monotonic() - start, 1))
         if time.monotonic() - start >= timeout:
@@ -118,6 +124,16 @@ def _inbox_count(rt, gid):
 
 def _queued(rt, gid):
     return rt.store.db.execute("SELECT count(*) FROM goals WHERE state='queued' AND id<>?", (gid,)).fetchone()[0]
+
+
+def _stopping(rt, gid):
+    try:
+        if any(rt.store.pending_request(gid, k) for k in ('pause', 'interrupt', 'rewind')):
+            return True
+    except Exception:
+        pass
+    row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (gid,)).fetchone()
+    return row is not None and row[0] == 'paused'
 
 
 def _cancelled(rt, gid):

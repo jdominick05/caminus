@@ -132,6 +132,21 @@ def handoff(args):
     return out
 
 
+# what must never go public from a hand-off: a machine path, a private decision id, a session link, a token
+PRIVATE = (('a home-directory path', re.compile(r'(/home/|/Users/|/root/)[\w.-]')),
+           ('a decision id', re.compile(r'\bD-\d{2,}\b')),
+           ('a session link', re.compile(r'claude\.ai/(code|chat|share)/|chatgpt\.com/(c|share)/')),
+           ('a token', re.compile(r'\b(ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|\bsk-[A-Za-z0-9-]{20,}|\bAKIA[0-9A-Z]{16}\b')))
+
+
+def private_text(req):
+    """What in a hand-off's title or body looks private, as reasons; [] when it reads clean. The owner's side refuses
+    a hand-off with any: approving posts the agent's text under the owner's name, and it cannot be unposted."""
+    h = handoff(req)
+    text = (h.get('title') or '') + '\n' + (h.get('body') or '')
+    return [why for why, rx in PRIVATE if rx.search(text)]
+
+
 def command(req):
     """(argv, stdin) for the owner to run with their own gh, from a checked hand-off only."""
     h = handoff(req)
