@@ -2510,7 +2510,12 @@ for line in sys.stdin:
                 n=int(_re.search(r'(\d+) streamed characters',line).group(1))
                 est=min(n*2//7+1,4096)                    # the charge comes from the streamed count, capped
                 from caminus.ember import relay as _r0
-                want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=1000,output_tokens=max(1,est)))
+                if provider=='anthropic':
+                    # the input is message_start's count, or, when the hang-up came before message_start was read (a
+                    # loaded runner), the relay's estimate from the forwarded body
+                    seen_in=int(_re.search(r' in=(\d+)',line).group(1))
+                    self.assertIn(seen_in,(1000,len(json.dumps(calls[-1]['body']).encode())//4),line)
+                want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=seen_in,output_tokens=max(1,est)))
                       if provider=='anthropic' else None)
                 if want is not None:
                     for _ in range(100):          # (the log line can land before the ledger write on a loaded runner)
