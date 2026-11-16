@@ -2538,7 +2538,12 @@ for line in sys.stdin:
                 want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=1000,output_tokens=max(1,est)))
                       if provider=='anthropic' else None)
                 if want is not None:self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
-                else:self.assertIn('estimated: prompt + %d streamed characters'%n,line)
+                else:
+                    # the output part is the streamed estimate at the output price; the prompt part (its bytes / 4 at the
+                    # input price) is a few hundred tokens at most. A max_tokens charge (4096) would be far above this.
+                    out_part=est*2.2/1e6
+                    self.assertGreaterEqual(spent,out_part-1e-6,line)
+                    self.assertLessEqual(spent,out_part+2000*0.6/1e6,line)
                 # never above the prompt plus the request's own allowance (how much streamed before the hang-up is
                 # noticed depends on the machine's load, so the estimate may reach that cap)
                 from caminus.ember import relay as _r
