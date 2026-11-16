@@ -110,7 +110,8 @@ def read_only_command(cmd):
         elif words[0] not in READ_ONLY:
             return False
         elif words[0] == 'sort' and any(w.startswith(('--output', '--compress-program')) or
-                                        (re.fullmatch(r'-[A-Za-z]+', w) and 'o' in w) for w in words[1:]):
+                                        (not w.startswith('--') and 'o' in (re.match(r'-([A-Za-z]*)', w) or [0, ''])[1])
+                                        for w in words[1:]):
             return False                  # sort -o FILE (also in a cluster: -ro, -uo) writes it; --compress-program runs one
         elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
             return False                  # xxd -r rebuilds a binary
