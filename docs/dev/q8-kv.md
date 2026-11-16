@@ -405,7 +405,8 @@ null for an entry whose `kv_formats` lacks it or when no cards hold that format,
 starts with; when no cards hold it the query fails (`ok: false`) and keeps the other format's figure (a refusal before
 placement, such as `--kv q8` on a model without it, gives none). Refusing `--kv` in fit would break the panel, which
 passes its advanced options to fit unchanged. The panel's model picker shows both figures (`panel/control.go` `fitRow`:
-the Q8 figure, "none fits", or "not offered", also next to a refusal). One RX 7900 XTX
+the Q8 figure, "none fits", or "not offered", also next to a refusal; for an entry with `kv_fixed`, the Coder, the
+one figure of its own 8-bit cache, with no Q8 part). One RX 7900 XTX
 (display), nothing else on it: 40,960 positions with either cache (the file's context_length caps both; the room holds
 45,056 at F16 and 81,920 at Q8); with 1 GiB in use, F16 32,768 and Q8 40,960 (the table above; the same projection,
 recomputed on this branch). The cap stays until YaRN is applied.

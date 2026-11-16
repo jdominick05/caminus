@@ -43,7 +43,8 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   saved in one format is never restored by a server running the other. `/props` reports the cache
   (`caminus.kv_cache`) and `caminus ps` shows it. `caminus fit --json` reports the context that fits with each cache
   (`max_ctx.q8` next to `max_ctx.f16`, `null` for models without the 8-bit cache) and the panel's model picker shows
-  both. Every other model refuses `--kv q8`. See [models](docs/models.md#the-8-bit-kv-cache-qwen3-30b-a3b).
+  both; for the Coder, which keeps its own 8-bit cache (`kv_fixed`), it shows that cache's one figure. Every other
+  model refuses `--kv q8`. See [models](docs/models.md#the-8-bit-kv-cache-qwen3-30b-a3b).
 - **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
   code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
   - `--draft mtp` drafts 3 tokens with the model's own multi-token-prediction layer and verifies 4 tokens a pass; it

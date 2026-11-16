@@ -329,7 +329,8 @@ def fit_report(argv):
     figures: it selects the format serve would start with, so placement (cards), need_mib, room_mib and draft describe
     that one, and when no cards hold it the query fails (ok false, exit 1) with the other format's figure kept. A model
     with no Q8 build is refused --kv q8 here as serve refuses it (no figures). For an entry without the choice (the
-    Coder, kv_fixed) f16 is the projection of the cache it always builds."""
+    Coder, kv_fixed) f16 is the projection of the cache it always builds, and the report names that cache (kv_fixed:
+    its label, null for every other entry), so a reader shows one figure for it, not an F16 one."""
     as_json = '--json' in argv
     opt = parse(argv, fit=True)
     from ..device import host
@@ -346,10 +347,11 @@ def fit_report(argv):
     failed = dict(ok=False, max_ctx=max_ctx)
     try:
         A = recipe(opt, log=lambda *a, **kw: None)
+        kv = 'q8' if _arch.kv_q8(opt) else 'f16'
+        failed.update(kv=kv, kv_formats=list(A.kv_formats), kv_fixed=A.kv_fixed)   # (every refusal past the recipe names them)
         opt['max_ctx'] = ctx_arg(opt['max_ctx'])
         if opt.get('kv_host'):
             raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
-        kv = 'q8' if _arch.kv_q8(opt) else 'f16'
         base = dict(opt)                         # (before the selected pass's drafter keep changes draft)
         got = {}
         for f in sorted(A.kv_formats, key=lambda f: f != kv):    # (the selected format first: its errors come first)
@@ -359,12 +361,11 @@ def fit_report(argv):
                 got[f] = exc                     # (no cards for this format: its figure stays null)
         for f, r in got.items():
             if not isinstance(r, Exception): max_ctx[f] = r[0].maximum()
-        failed.update(kv=kv, kv_formats=list(A.kv_formats))
         if isinstance(got[kv], Exception): raise got[kv]
         plan, placement = got[kv]
         report = plan.report()
         report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']],
-                      kv=kv, kv_formats=list(A.kv_formats), max_ctx=max_ctx)
+                      kv=kv, kv_formats=list(A.kv_formats), kv_fixed=A.kv_fixed, max_ctx=max_ctx)
     except (ValueError, OSError, ImportError, KeyError, TypeError, NotImplementedError, argparse.ArgumentTypeError, host.PlacementError) as exc:
         if not isinstance(exc, host.PlacementError): max_ctx.update(f16=None, q8=None)   # (only a placement refusal keeps the other format's figure)
         if as_json: print(json.dumps(dict(failed, error=str(exc))))
@@ -376,7 +377,7 @@ def fit_report(argv):
         print(json.dumps(report))
     else:
         maximum, q8 = max_ctx[kv], max_ctx['q8']
-        cache = '' if A.kv_fixed else f' with the {kv.upper()} cache'   # (an entry without the choice: its own cache)
+        cache = f' with its own {A.kv_fixed} cache' if A.kv_fixed else f' with the {kv.upper()} cache'   # (an entry without the choice)
         print(f'caminus fit: {maximum if maximum is not None else "no"} positions fit{cache} '
               f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s))'
               + (f'; Q8: {q8 if q8 is not None else "none fits"}' if kv == 'f16' and 'q8' in A.kv_formats else ''))

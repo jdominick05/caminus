@@ -45,11 +45,12 @@ the configured serving recipe's native device-memory context; host KV and contex
 `max_ctx` has one entry per KV cache format, `{"f16": N, "q8": N}`, each the largest context that fits with that cache.
 `q8` is `null` for a model without the 8-bit cache (`kv_formats` lists the formats a model has: only `qwen3-30b-a3b`,
 on one card or two, has `q8`) and when no cards hold it. For a model that always keeps its own cache (the Coder's
-8-bit rows), `f16` is that cache's figure. `--kv` never changes these figures: it picks the format a `caminus serve`
-with the same options would start with, and the cards, `need_mib` and `room_mib` describe that one (`kv` names it).
-When no cards hold that format the query fails (exit 1, `ok: false`) but still gives the other format's figure. A
-model without the 8-bit cache refuses `--kv q8` here as `caminus serve` does. The panel's model picker shows both
-figures.
+8-bit rows), `f16` is that cache's figure and `kv_fixed` names the cache (`"q8_0"`; `null` for every other model).
+`--kv` never changes these figures: it picks the format a `caminus serve` with the same options would start with, and
+the cards, `need_mib` and `room_mib` describe that one (`kv` names it). When no cards hold that format the query fails
+(exit 1, `ok: false`) but still gives the other format's figure. A model without the 8-bit cache refuses `--kv q8`
+here as `caminus serve` does. The panel's model picker shows both figures, or the one figure of a model that keeps
+its own cache.
 
 ## Qwen Code
 

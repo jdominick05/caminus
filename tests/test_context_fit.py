@@ -275,6 +275,54 @@ class ContextFit(unittest.TestCase):
                      patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
                     self.assertEqual(A.auto_max_ctx(ropt, log=lambda *a, **kw: None), want)
 
+    def test_qwen3moe_two_card_kv_q8_reaches_past_the_f16_step(self):
+        # each card's room between need16(36864) and need16(40960), above the Q8 cache at 40,960: F16 stops at 36,864 on
+        # the pair while Q8 reaches the file's cap, so the report's q8 slot is the Q8 projection (Q3MoETP(q8=True)'s rows),
+        # not a copy of the F16 one; --kv q8 places the pair and reports the Q8 need, the default --kv f16 the F16 one
+        sys.path.insert(0, str(Path(__file__).resolve().parent / 'engine'))
+        import tiny_q3m
+        path = SCRATCH / 'fit-q3moe-tp-kv.gguf'
+        tiny_q3m.write(str(path), tp=True, n_ctx=40960)
+        argv = ['--model', str(path), '--cards', '2', '--draft', 'off']
+        opt16, opt8 = cli.parse(argv), cli.parse([*argv, '--kv', 'q8'])
+        A = cli.recipe(opt8, log=lambda *a, **kw: None)
+        self.assertIs(A, arch.ARCHS['qwen3moe-tp'])
+        self.assertIs(cli.recipe(opt16, log=lambda *a, **kw: None), A)
+        link = dict(gbps=7.9, gts=16.0, width=4)
+        cards = []
+        for i, (label, total) in enumerate((('XT', 20464), ('XTX', 24560))):   # (sysfs order: the XT first)
+            dev = SCRATCH / f'q3tp-kv-card{i}'
+            dev.mkdir()
+            (dev / 'mem_info_vram_used').write_text(str(1 << 20))
+            cards.append(dict(dev=str(dev), line_mib=0, display=label == 'XTX', pci=f'0000:0{3 + 3 * i}:00.0', hip=i,
+                              status='supported', total_mib=total, label=label, card=f'card{i + 1}', link=link, link_ok=True))
+        pair = [cards[1], cards[0]]                                             # (engine order: the bigger card first)
+        slots = int(opt8['auto_cache_slots'])
+        need16 = A.auto_need(opt16, slots, cards=pair)[3]
+        need8 = A.auto_need(opt8, slots, cards=pair)[3]
+        for k, c in enumerate(pair):
+            room = (need16(36864)[k] + need16(40960)[k]) / 2
+            self.assertLess(need8(40960)[k], room)                              # (Q8 at the cap fits where F16 does not)
+            reserve = capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB
+            c['line_mib'] = room + 1 + capacity.MARGIN_MIB + reserve + capacity.CACHE_WORK_MIB[0] + A.slack_mib(opt8)
+        got = {}
+        for kv in ('f16', 'q8'):
+            stdout = io.StringIO()
+            with patch.object(host, 'gpus', return_value=cards), \
+                 patch.object(capacity, 'caps_mib', side_effect=AssertionError('GPU query forbidden')), \
+                 patch.object(A, 'build', side_effect=AssertionError('engine build forbidden')), \
+                 contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.fit_report([*argv, '--kv', kv, '--json']), 0)
+            got[kv] = json.loads(stdout.getvalue())
+        for kv, rep in got.items():
+            self.assertTrue(rep['ok'])
+            self.assertEqual(rep['max_ctx'], {'f16': 36864, 'q8': 40960})
+            self.assertEqual((rep['kv'], rep['kv_formats'], rep['kv_fixed']), (kv, ['f16', 'q8'], None))
+            self.assertEqual(rep['cards'], [cards[1]['pci'], cards[0]['pci']])
+        self.assertEqual(got['q8']['need_mib'], list(need8(40960)))
+        self.assertEqual(got['f16']['need_mib'], list(need16(36864)))
+        self.assertNotEqual(got['q8']['need_mib'], list(need16(40960)))
+
     def test_kv_q8_projects_q8_rows_and_other_models_refuse_it(self):
         # caminus serve / fit --kv: f16 by default; q8 for qwen3moe (one card here: the same recipe and placement) projects
         # the Q8 rows, so a card whose room holds the Q8 cache at the file's 40,960 but not the F16 one gets the full
@@ -334,6 +382,7 @@ class ContextFit(unittest.TestCase):
         self.assertEqual(got['q8']['max_ctx'], {'f16': 36864, 'q8': 40960})
         self.assertEqual(got['f16']['max_ctx'], got['q8']['max_ctx'])
         self.assertEqual((got['f16']['kv'], got['q8']['kv']), ('f16', 'q8'))
+        self.assertIsNone(got['q8']['kv_fixed'])
         self.assertEqual(got['q8']['need_mib'], need8(40960))
         self.assertEqual(got['f16']['need_mib'], need16(36864))
         # a card that holds the Q8 cache at the file's context but not the F16 one at MIN_CTX: F16's slot is null (never the
@@ -381,6 +430,15 @@ class ContextFit(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertEqual(report['max_ctx'], {'f16': None, 'q8': None})
         self.assertIn("kv 'q8'", report['error'])
+        # the Coder past the recipe (one card here, it needs two): the refusal names its own cache, which a reader shows as
+        # the one figure (kv_fixed), with no F16 / Q8 choice
+        stdout = io.StringIO()
+        linked = dict(card, link=dict(gbps=7.9, gts=16.0, width=4), link_ok=True)
+        with patch.object(host, 'gpus', return_value=[linked]), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report(['--model', str(coder), '--draft', 'off', '--json']), 1)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual((report['kv_fixed'], report['kv_formats'], report['max_ctx']), ('q8_0', ['f16'], {'f16': None, 'q8': None}))
+        self.assertIn('two supported cards', report['error'])
 
     def test_query_errors_have_no_invented_maximum_and_tp_drafting_needs_a_two_card_verify_object(self):
         for argv in (['--model', str(SCRATCH / 'missing.gguf')],):
