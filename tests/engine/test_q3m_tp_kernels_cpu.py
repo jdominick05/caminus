@@ -8,6 +8,9 @@
     Engine.build accepts OP_XCHG / OP_OWN_SLOT_SUM on them only (the lean, verify, IQ and row-scale modules refuse both),
     refuses every other op outside the lean tape's set there, and refuses a pull-mode exchange (the module is push-only);
     own_slot_sum refuses another module; the two-card objects stay out of the installed runtime set (not served)
+  - OP_OWN_ATTS's split cap: kernels/k3_own_atts.h sizes its merge from ATS_MAXS (128 under K3_Q3M_TP, else 64: the
+    one-card text in the #else branch, the 128 form writing each weight over its m inside q + scores); Engine.own_atts
+    takes up to k3.atts_max_splits(module) (128 on the two-card modules, 64 on lean, verify, IQ and row-scale) and refuses more
   - tests/engine/tiny_q3m.py: the synthetic qwen3moe file decodes on the float64 reference (caminus.ref_q3moe), and
     Q3MoEOne builds its decode tape for it on stand-ins (nothing launched): the same segments on k3_q3m_lean and on
     k3_q3m_lean_tp, every op in the lean set
@@ -144,6 +147,40 @@ check(not any(builds(m, f) for m in k3.Q3M_TP_MODULES for f in other_ops),
       'the two-card modules refuse ops outside the lean set (OP_OWN_MOE_SUM, OP_OWN_F16, OP_OWN_SWIGLU16)')
 check(all(builds(m, add_xchg) for m in k3.Q35_TP_MODULES) and not builds('k3_q35_swift', add_slot),
       'the dense two-card modules still take OP_XCHG; a dense module refuses OP_OWN_SLOT_SUM')
+
+# ---- OP_OWN_ATTS's split cap --------------------------------------------------------------------------------------------
+at = src('k3_own_atts.h')
+mx = re.search(r'#ifndef ATS_MAXS\n#ifdef K3_Q3M_TP\n#define ATS_MAXS (\d+)\n#else\n#define ATS_MAXS (\d+)\n#endif\n#endif', at)
+mg = at[at.index('#if ATS_MAXS > 64'):]; mg = mg[:mg.index('#endif')]
+two, one = mg.split('#else')
+check(mx and (int(mx.group(1)), int(mx.group(2))) == (k3.ATS_MAXS_TP, k3.ATS_MAXS) == (128, 64) and at.count('#if ATS_MAXS > 64') == 1
+      and 'static_assert(16 * ATS_MAXS <= ATS_RC' in two and '#define ATS_WV(s2, h) ml[(s2) * 16 + (h)]' in two and 'j += 256' in two
+      and '* wv = qs + 16 * 64;' in one and '#define ATS_WV(s2, h) wv[(s2) * 8 + (h)]' in one and 'if (tid < 4 * nact) {' in one
+      and 'ATS_WV(s2, h) = w;' in at and 'ATS_WV(s0 + e, h);' in at,
+      'kernels/k3_own_atts.h: ATS_MAXS 128 under K3_Q3M_TP, 64 else; the 128 merge loads m | l in rounds of 256 threads and writes '
+      'each weight over its m (inside q + scores); the 64 merge keeps its weights row and one load round')
+
+
+def atts(module, splits):
+    """one OP_OWN_ATTS segment on module (2 kv heads, one cache row past the padding): None, or the refusal"""
+    nkv, hd = 2, 128; nh, M = 8 * nkv, nkv * hd
+    e = k3.Engine(module=module)
+    try:
+        e.own_atts(B(nh * hd + 2 * M), B(k3.Engine.atts_scratch_floats(nkv, splits)), B(2 * hd + 2),
+                   torch.zeros((1 + k3.Engine.ATS_PAD) * 2 * M, dtype=torch.float16), torch.zeros(1, dtype=torch.int32),
+                   torch.zeros(nh * hd, dtype=torch.float16), nh, nkv, hd, 0.088, splits=splits, lmin=64)
+        return None if e.segs[-1].work == splits else 'work'
+    except ValueError as x:
+        return str(x)
+
+
+one_mods = k3.Q3M_LEAN_MODULES + k3.Q3M_VER_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES)
+r65 = {m: atts(m, 65) for m in one_mods}
+check(all(r65.values()) and all(atts(m, 64) is None for m in one_mods) and all(k3.atts_max_splits(m) == 64 for m in one_mods),
+      f'own_atts refuses 65 splits and takes 64 on the one-card modules ({len(one_mods)}: lean, verify, IQ, row-scale): {r65["k3_q3m_lean"]}')
+check(all(atts(m, n) is None for m in k3.Q3M_TP_MODULES for n in (1, 64, 65, 105, 128)) and all(atts(m, 129) for m in k3.Q3M_TP_MODULES)
+      and all(k3.atts_max_splits(m) == 128 for m in k3.Q3M_TP_MODULES),
+      'own_atts takes 1 .. 128 splits on k3_q3m_lean_tp and its trace form (64, 65, 105, 128 tried) and refuses 129')
 
 # ---- tests/engine/tiny_q3m.py: the reference decodes it; the engine's tape on the stand-ins ----------------------------------
 import tiny_q3m

@@ -7,7 +7,9 @@ and arm, then RESULT DONE.
       [--arms new=k3_q3m_lean old=k3_gguf_q3m_own:attn_split=0 ...]
 An arm is name=module[@workgroups per WGP][:option=int ...] (engine options: attn_split, splits, lmin, gh, ...).
 --cards 2: the two-card engine (engine/q3moe_tp.py Q3MoETP, torch devices 0 and 1, its default split; CAMINUS_UPLOAD_LOG on
-every two-card run); --arms then names grids only (name=@workgroups per WGP, default: each card's own). A pass is timed
+every two-card run); --arms then names grids only (name=@workgroups per WGP, default: each card's own; :cap=N after it: at most
+N attention splits per kv head, 1 .. 128, default 64, e.g. c128=@card:cap=128; past 64 splits * 64 positions the arms'
+logits differ in their last bits, the attention's summation order). A pass is timed
 from card 0's launch to the host's return with both cards' argmax read back (the served pass's shape), and each card's
 own span is printed beside it. --local-only (with --cards 2): every exchange copies the card's own partial, so each card
 runs alone (its ceiling; the logits are not the model's): the two-card time minus the slower card's alone is the coupling.
@@ -29,11 +31,13 @@ A = ap.parse_args()
 depths = [int(x) for x in A.depths.split(',')]
 if A.local_only and A.cards != 2: raise SystemExit('q3moe_depth: --local-only is a two-card option (--cards 2)')
 if A.cards == 2:
-    from caminus.engine.q3moe_tp import Q3MoETP
+    from caminus.engine.q3moe_tp import Q3MoETP, SPLITS_CAP
     arms = A.arms or ['default=@card']
     print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
     max_ctx = A.max_ctx or max(depths) + A.tokens + 1
-    eng = Q3MoETP(A.gguf, max_ctx=max_ctx, local_only=A.local_only, vram_extra_mib=[len(arms) * Q3MoETP.TAPE_MIB] * 2)   # (+ a tape set per arm)
+    caps = [int(a.split('=', 1)[1].partition(':cap=')[2] or SPLITS_CAP) for a in arms]
+    eng = Q3MoETP(A.gguf, max_ctx=max_ctx, local_only=A.local_only, vram_extra_mib=[len(arms) * Q3MoETP.TAPE_MIB] * 2,   # (+ a tape set per arm,
+                  splits_cap=max(caps))                                                                                  #  the projection at the largest cap)
     print(f'max_ctx {max_ctx}: {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB; expert rows {eng.exp_rows}, kv heads {eng.kvc}, '
           f'head rows {eng.vh} / {eng.vocab - eng.vh}{"; LOCAL ONLY (each card alone, not the model)" if A.local_only else ""}', flush=True)
     eng.enable_card_timing(True)
@@ -42,7 +46,9 @@ if A.cards == 2:
     forms = {}
     for a in arms:
         name, spec = a.split('=', 1)
+        spec, _, cap = spec.partition(':cap=')   # (name=@card:cap=N: at most N attention splits per kv head)
         eng.per_wgp = 'card' if spec in ('', '@card') else int(spec.lstrip('@'))
+        eng.splits_cap = int(cap) if cap else SPLITS_CAP   # (within the constructor's cap: max(caps), checked and projected there)
         eng._build_tapes(); forms[name] = tuple(getattr(eng, k) for k in keys)
         print(f'  arm {name}: {eng.module}, {eng.per_wgp_c} workgroups per WGP, attention splits {eng.splits}', flush=True)
     names = list(forms)

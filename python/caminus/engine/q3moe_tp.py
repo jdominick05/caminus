@@ -41,6 +41,11 @@ from . import k3, upload
 from .own_layout import q6k_planes
 from .q35_dense_tp import cut, vocab_cut
 from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN
+
+SPLITS_CAP = ATS_SPLITS   # the most attention splits per kv head on a card (splits_cap): one card's cap (64). A card holds half
+                          # the kv heads, so 64 splits fill 128 of the XTX's 192 / the XT's 210 workgroups; the two-card
+                          # modules' merge takes up to k3.ATS_MAXS_TP (128: XTX 96, XT 105 splits of 2 kv heads), the
+                          # depth benchmark's arm option ':cap=128' (benchmarks/q3moe_depth.py). The default stays 64 until measured
 from .tp_slots import Slots, _hip
 
 TAPE_MIB = 4      # an upper bound of one card's tape buffers (checked in _build_tapes), counted in the projection
@@ -91,11 +96,11 @@ def _role(name):
     return 'rep'   # (the embedding, every norm, the q / k norms, the router)
 
 
-def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE):
+def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP):
     """bytes per card by term, from the header alone: [dict(split, rep, kv, ats, slots, small, tape) for card 0, card 1].
     split: its slices of the split matrices (exact: the cuts are whole blocks); rep: the replicated tensors (the embedding,
-    the norms, the router); kv: its kv heads' f16 KV cache, max_ctx + ATS_PAD rows; ats: OP_OWN_ATTS's scratch at the most
-    splits a card takes; slots: the exchanges' receive slots (16 words + D floats, 2 nl of them, uncached VRAM outside
+    the norms, the router); kv: its kv heads' f16 KV cache, max_ctx + ATS_PAD rows; ats: OP_OWN_ATTS's scratch at splits_cap
+    splits (the most a card takes); slots: the exchanges' receive slots (16 words + D floats, 2 nl of them, uncached VRAM outside
     torch); small: the per-layer q / k norm blocks and the router choices; tape: TAPE_MIB. max_ctx is not bounded by the
     file's context_length here (a projection for a longer context is arithmetic only)"""
     c = shapes(F); kv0 = c['nkv'] // 2 if kv_heads is None else int(kv_heads)
@@ -112,7 +117,7 @@ def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=V
             else: out[k]['split'] += t.n_bytes * frac[r][k]
     for k in (0, 1):
         out[k].update(kv=c['nl'] * (int(max_ctx) + k3.Engine.ATS_PAD) * k3.kv_pos_bytes(kvs[k] * c['hd'], False),
-                      ats=4 * k3.Engine.atts_scratch_floats(kvs[k], ATS_SPLITS),
+                      ats=4 * k3.Engine.atts_scratch_floats(kvs[k], splits_cap),   # (a card's splits are at most the cap)
                       slots=2 * c['nl'] * (16 + c['D']) * 4,
                       small=c['nl'] * ((2 * c['hd'] + 2) * 4 + c['k_used'] * 8),
                       tape=TAPE_MIB * 2 ** 20)
@@ -124,7 +129,7 @@ class Q3MoETP:
 
     def __init__(self, path, devices=(0, 1), max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=16, rpt_down=None,
                  rpt_head=64, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, lmin=ATS_LMIN, local_only=False,
-                 vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8):
+                 vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8, splits_cap=SPLITS_CAP):
         """path: a qwen3moe GGUF with Q4_K / Q6_K matrices (the lean module's formats). devices: the two torch / HIP device
         indices (card 0 first: its partials come first in every sum). exp_rows: card 0's rows of every expert's
         intermediate (a multiple of 256); kv_heads: card 0's kv heads (None: half); vocab_share: card 0's part of the
@@ -134,7 +139,9 @@ class Q3MoETP:
         the second card's down is K = ffn - exp_rows wide, so larger tasks there are a measured option); rpt_head: the
         head's. local_only: TEST-ONLY, every exchange copies the card's own partial (no peer: each card's time alone; the
         logits are not the model's). vram_extra_mib: per card, what the caller allocates right after (checked with the
-        engine's projection: another tape set is TAPE_MIB)"""
+        engine's projection: another tape set is TAPE_MIB). splits_cap: the most attention splits per kv head on a card
+        (1 .. k3.atts_max_splits of the module: 128 on the two-card modules; default SPLITS_CAP = 64); each card takes
+        q3moe_one.splits_for(its kv heads, splits_cap), and the projection counts the cap's scratch"""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoETP: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -168,6 +175,9 @@ class Q3MoETP:
         pair = lambda v: [int(v[0]), int(v[1])] if isinstance(v, (tuple, list)) else [int(v), int(v)]
         self.rpt_c = pair(rpt); self.rpt_down_c = pair(rpt if rpt_down is None else rpt_down); self.rpt_head = int(rpt_head)
         self.lmin = int(lmin)
+        self.splits_cap = int(splits_cap)   # (splits per kv head: the card's grid / its kv heads, at most this)
+        if not 1 <= self.splits_cap <= k3.atts_max_splits(self.module):   # (before any allocation: the projection counts the cap's scratch)
+            raise ValueError(f'Q3MoETP: splits_cap {splits_cap}: 1 .. {k3.atts_max_splits(self.module)} on {self.module}')
         self.vocab_share, self.local_only = float(vocab_share), bool(local_only)
         assert 0.0 < self.vocab_share < 1.0, vocab_share
         self.vh = vocab_cut(self.vocab, self.vocab_share)
@@ -176,7 +186,7 @@ class Q3MoETP:
         # (the prompt cache's key: the split changes the partial sums' bits)
         self.tp_key = dict(exp_rows=self.exp_rows0, kv_heads=self.kv0, vocab_rows=self.vh)
         # VRAM, every term before the first allocation (the uploader's pinned staging is host memory, checked by it)
-        terms = projection_terms(F, self.max_ctx, self.exp_rows0, self.kv0, self.vocab_share)
+        terms = projection_terms(F, self.max_ctx, self.exp_rows0, self.kv0, self.vocab_share, self.splits_cap)
         h2d = upload.mode_of(default=upload.TWO_CARD_DEFAULT)                     # (CAMINUS_H2D: how the weights reach the cards; engine/upload.py)
         self.vram_mib = [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(terms, upload.extra_mib(h2d, 2))]
         ex = [float(v) for v in vram_extra_mib]
@@ -209,13 +219,13 @@ class Q3MoETP:
         self._load_logged(); self._build_tapes()
 
     @staticmethod
-    def projection_mib(path, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE):
+    def projection_mib(path, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
         check counts the same terms (with the CAMINUS_H2D arm's buffer: upload.extra_mib, 0 unless peer). max_ctx past the
         file's context_length is computed, not refused (the engine refuses it)"""
         F = ggufio.GGUFFile(path)
         try:
-            return [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(projection_terms(F, max_ctx, exp_rows, kv_heads, vocab_share),
+            return [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(projection_terms(F, max_ctx, exp_rows, kv_heads, vocab_share, splits_cap),
                                                                        upload.extra_mib(upload.mode_of(default=upload.TWO_CARD_DEFAULT), 2))]
         finally: F.close()
 
@@ -361,7 +371,7 @@ class Q3MoETP:
             with torch.cuda.device(self.devs[c]):
                 pw = card_per_wgp() if self.per_wgp == 'card' else int(self.per_wgp)
                 self.per_wgp_c.append(pw)
-                self.splits.append(splits_for(self.kvc[c]))   # (the card's, never the grid's: the same bits at every grid)
+                self.splits.append(splits_for(self.kvc[c], self.splits_cap))   # (the card's, never the grid's: the same bits at every grid)
                 B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
                 QH, M, rc = self.kvc[c] * 8 * hd, self.kvc[c] * hd, self.exp_rows[c]
                 nlog = self.vh if c == 0 else self.vocab - self.vh

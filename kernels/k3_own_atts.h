@@ -19,7 +19,7 @@
 //   Seg.gs = scratch: uint32 counters [64] (one per (kv head, head group); zero between launches: the merging task resets
 //            its own), then records [kv heads * 8 / GH][splits][ATS_RS] (m [8], l [8], acc [8][128]; the first GH used)
 //   Seg.aux = fp32 [2 D + 2]: q_norm, k_norm, theta_scale, eps;  Seg.W = the cache;  Seg.asum = int32 pos [1]
-//   Seg.y = fp16 out [heads][128];  N = heads, K = 128, out_f32 = n_rot, work = splits S, pad1 = kv heads,
+//   Seg.y = fp16 out [heads][128];  N = heads, K = 128, out_f32 = n_rot, work = splits S (1 .. ATS_MAXS), pad1 = kv heads,
 //   pad2 = Lmin (the fewest positions per split), rows_per_task = GH (1, 2, 4, 8), rs = the score scale.
 //   Tasks: t = (s * kv_heads + g) * (8 / GH) + hs; heads g * 8 + hs * GH .. + GH - 1.
 // The split layout of npos = pos + 1 positions: L = max(Lmin, ceil(npos / S) rounded up to whole chunks of ATS_CH = 64)
@@ -45,6 +45,17 @@ enum { OP_OWN_ATTS = 51 };
 #define ATS_RS (16 + ATS_G * ATS_D) // floats per record: m [8], l [8], acc [8][128]
 #define ATS_CNT 64                  // counter words before the records
 #define ATS_PAD 64                  // cache rows past the last usable position (= ATS_CH: a chunk's loads run to row c0 + 63)
+// ATS_MAXS: the most splits per kv head the end-of-task merge takes (it holds every split's m, l in LDS). The two-card
+// modules (K3_Q3M_TP: half the kv heads per card) take 128, so each card's grid runs one attention task per workgroup
+// (XTX 192 / XT 210 workgroups over 2 kv heads); their merge writes each split's weight over its m ([128][16] floats =
+// 8 KB, inside the 8.5 KB of q + scores: the workgroup's LDS is unchanged). Every other module: 64, its merge text as before.
+#ifndef ATS_MAXS
+#ifdef K3_Q3M_TP
+#define ATS_MAXS 128
+#else
+#define ATS_MAXS 64
+#endif
+#endif
 // LDS (floats): q [8][4][ATS_QP], scores / p [ATS_CH][8] (1024 reserved: q's norms use 4 x 256 of it first), cos / sin
 // [64] each, own k / v / unrotated k [128] each, misc [80]. The end-of-task merges reuse q + scores (2176 floats).
 enum { ATS_QS = 0, ATS_SC = ATS_G * 4 * ATS_QP, ATS_RC = ATS_SC + 1024, ATS_RSN = ATS_RC + 64, ATS_KK = ATS_RSN + 64,
@@ -363,11 +374,22 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
     // the merge, in split order: every split's m, l into LDS (one round trip), wave h its weights w_s = exp(m_s - M) and
     // the sum l = sum w_s l_s, then thread (h, 4 dims) the weighted sum of the splits' acc, 8 splits per round trip
     const float * r0 = (const float *)sg.gs + ATS_CNT + (size_t)ci * S * ATS_RS;
+#if ATS_MAXS > 64
+    static_assert(16 * ATS_MAXS <= ATS_RC, "the merge's m | l rows fit q + scores");
+    AtsL * ml = qs;                              // [nact][16] m | l; split s's weight for head h over its m, ml[s * 16 + h]
+#define ATS_WV(s2, h) ml[(s2) * 16 + (h)]       //   (nact <= ATS_MAXS: host-checked; only wave h, lane s2 % 32 reads and writes it)
+    for (int j = tid; j < 4 * nact; j += 256) {  // (256 threads: one float4 each per round, 64 splits a round)
+        const float4 v = *(const float4 *)(r0 + (size_t)(j >> 2) * ATS_RS + (j & 3) * 4);
+        *(__attribute__((address_space(3))) float4 *)(ml + (j >> 2) * 16 + (j & 3) * 4) = v;
+    }
+#else
     AtsL * ml = qs, * wv = qs + 16 * 64;         // [nact][16] m | l, then [nact][8] weights (nact <= 64: host-checked)
+#define ATS_WV(s2, h) wv[(s2) * 8 + (h)]
     if (tid < 4 * nact) {
         const float4 v = *(const float4 *)(r0 + (size_t)(tid >> 2) * ATS_RS + (tid & 3) * 4);
         *(__attribute__((address_space(3))) float4 *)(ml + (tid >> 2) * 16 + (tid & 3) * 4) = v;
     }
+#endif
     ats_bar();
     if (wave < GH) {
         const int h = wave;
@@ -375,7 +397,7 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
         for (int s2 = lane; s2 < nact; s2 += 32) mx = fmaxf(mx, ml[s2 * 16 + h]);
         mx = ats_wmax(mx);
         float l = 0.0f;
-        for (int s2 = lane; s2 < nact; s2 += 32) { const float w = expf(ml[s2 * 16 + h] - mx); wv[s2 * 8 + h] = w; l = __builtin_fmaf(ml[s2 * 16 + 8 + h], w, l); }
+        for (int s2 = lane; s2 < nact; s2 += 32) { const float w = expf(ml[s2 * 16 + h] - mx); ATS_WV(s2, h) = w; l = __builtin_fmaf(ml[s2 * 16 + 8 + h], w, l); }
         l = ats_wsum(l);
         if (lane == 0) misc[64 + h] = l;
     }
@@ -392,7 +414,7 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
 #pragma unroll
                 for (int e = 0; e < 8; e++) {
                     if (s0 + e < nact) {
-                        const float w = wv[(s0 + e) * 8 + h];
+                        const float w = ATS_WV(s0 + e, h);
                         o[0] = __builtin_fmaf(v[e].x, w, o[0]); o[1] = __builtin_fmaf(v[e].y, w, o[1]);
                         o[2] = __builtin_fmaf(v[e].z, w, o[2]); o[3] = __builtin_fmaf(v[e].w, w, o[3]);
                     }
@@ -405,4 +427,5 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
         }
     }
     if (tid == 0) __hip_atomic_store(cnt, 0u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+#undef ATS_WV
 }

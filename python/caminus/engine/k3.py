@@ -98,6 +98,14 @@ Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean
 # one-card module -> two-card module. Not served yet: no engine builds a tape on them outside the GPU probe
 Q3M_TP_OF = {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace'}
 Q3M_TP_MODULES = tuple(Q3M_TP_OF.values())
+# OP_OWN_ATTS's most splits per kv head (= kernels/k3_own_atts.h ATS_MAXS: the merge holds every split's m, l in LDS):
+# 128 in the two-card builds (half the kv heads per card: one attention task per workgroup of the grid), 64 elsewhere
+ATS_MAXS, ATS_MAXS_TP = 64, 128
+
+
+def atts_max_splits(module):
+    """the most OP_OWN_ATTS splits per kv head the module's merge takes (Engine.own_atts refuses more)"""
+    return ATS_MAXS_TP if module in Q3M_TP_MODULES else ATS_MAXS
 Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
 # the plain Qwen3.8-27B GSQ-RCO files' verify modules: k3_q35_gsq_ver (k3_q35_gsq.hip + K3_Q3M_VER: ThinkingCap's T-token
 # tiles + IQ2_XXS / IQ2_XS / Q2_K / Q4_K) and k3_q35_gsq_ver_m (K3_Q35_GSQ_M: the one IQ1_M matrix's T-token matvec alone, in
@@ -1122,7 +1130,7 @@ class Engine:
         (its counters return to zero after every launch); par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache
         f16 with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
         rows before them); out16 fp16 [heads * dim]. splits: tasks per kv head (a fixed number: the split layout depends only on the
-        position, never on the grid); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
+        position, never on the grid; at most atts_max_splits(module): 128 on the two-card modules, 64 elsewhere); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
         kv head one task takes (8: the modules' build; the same bits at any value). n_rot = dim = 128, 8 query heads per kv head, T = 1.
         The verify module (Q3M_VER_MODULES) only: tok: the segment's position is pos[0] + tok (one position word for a
         pass's block of tokens); row_only: norm + RoPE and the store of the position's cache row, nothing else (one task per
@@ -1132,7 +1140,9 @@ class Engine:
             if self.module not in Q3M_VER_MODULES: raise ValueError(f'own_atts: module {self.module} has no block forms ({Q3M_VER_MODULES})')
             if not 0 <= tok <= 255 or (row_only and no_store) or kv_heads > 255: raise ValueError(f'own_atts: tok {tok}, row_only {row_only}, no_store {no_store}')
         if self.T != 1 or dim != 128 or heads != 8 * kv_heads: raise ValueError('own_atts: T = 1, head dim 128, 8 query heads per kv head')
-        if not 1 <= splits <= 64 or lmin < 32 or lmin % 32: raise ValueError(f"own_atts: splits {splits} (1 .. 64: the merge holds every split's m, l in LDS), lmin {lmin} (a multiple of 32)")
+        mx = atts_max_splits(self.module)
+        if not 1 <= splits <= mx or lmin < 32 or lmin % 32:
+            raise ValueError(f"own_atts: splits {splits} (1 .. {mx} on {self.module}: the merge holds every split's m, l in LDS), lmin {lmin} (a multiple of 32)")
         if heads_per_task != 8:   # (the device code takes 1 / 2 / 4 only when built with ATS_GH_RUNTIME: measured slower)
             raise ValueError(f'own_atts: heads_per_task {heads_per_task}: the qwen3moe modules are built for 8')
         hs = 8 // heads_per_task

@@ -54,14 +54,14 @@ def card_per_wgp():
     return max(1, min(8, int(GRID_WGS / wgps + 0.5)))
 
 
-def splits_for(nkv):
+def splits_for(nkv, cap=ATS_SPLITS):
     """OP_OWN_ATTS splits per kv head on the current card: as many as the card's own grid (card_per_wgp) runs at once
-    (one workgroup per (split, kv head) task), at most ATS_SPLITS. A second round of attention tasks costs a whole
+    (one workgroup per (split, kv head) task), at most cap (ATS_SPLITS; a two-card module takes up to k3.ATS_MAXS_TP). A second round of attention tasks costs a whole
     task. The count follows the card, never the grid a caller sets on one engine: the logits are the same bits at
     every grid on a card. Past splits * ATS_LMIN positions two cards with different counts sum the attention in
     different orders (each is gated against the reference on its own)"""
     wgps = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-    return max(1, min(ATS_SPLITS, card_per_wgp() * wgps // int(nkv)))
+    return max(1, min(int(cap), card_per_wgp() * wgps // int(nkv)))
 
 
 class Q3MoEOne:

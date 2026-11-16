@@ -11,12 +11,13 @@ calls (every tensor in host memory; nothing is launched).
     layer with indices 0 .. 2 nl - 1 once each and the card's own number, the FFN exchange after an OP_OWN_SLOT_SUM over the
     top-k slots, every residual add after an exchange one row (slots 1, no weights), every dependency pointing back; each
     card's matrices have its share's shapes; the attention's splits follow the card; the tapes build again (a grid test's
-    rebuild) without new receive slots
+    rebuild) without new receive slots; at splits_cap 128 each card takes splits_for(its kv heads, 128), and caps 0 / 129
+    are refused
   - host refusals before any launch: a span past max_ctx, a token outside the vocabulary
   - projection: per card, the KV row is its kv heads' share; the terms are its kv heads' KV, the receive slots, the ATS
     scratch and the replicated tensors; the split term equals the bytes the engine uploads per card; the two cards'
     weights add up to more than the file's and less than twice it; past the file's context_length it is computed, not
-    refused (and the engine refuses it)
+    refused (and the engine refuses it); at splits_cap 128 the ATS term is that cap's scratch
   - the load: capacity.check runs (both cards, the projection) before the first allocation or upload; with CAMINUS_H2D
     unset the uploader is built with 'pinned' (upload.TWO_CARD_DEFAULT) and the upload log from the environment; every kept
     tensor's host_bytes equals its upload
@@ -65,7 +66,7 @@ torch.cuda.Event = lambda *a, **k: types.SimpleNamespace()
 import tiny_q3m
 from caminus import ggufio, own_dequant
 from caminus.device import capacity
-from caminus.engine import k3, upload, q3moe_tp
+from caminus.engine import k3, upload, q3moe_tp, q3moe_one
 from caminus.engine.q3moe_tp import Q3MoETP, split_plan, projection_terms
 from caminus.engine.q35_dense_tp import cut, vocab_cut
 
@@ -201,6 +202,21 @@ base = [[(sg.op, sg.ntask, sg.dep, sg.K, sg.N) for sg in e.segs] for e in m.E]
 check(FakeSlots.n_made == n_slots and [s.base for s in m.slots] == slots0 and all(g[1] == m.splits and g[2] == base for g in grids)
       and [g[0][0] for g in grids] == [3 * 42, 6 * 42, 7 * 42],
       'the tapes build again at 3 / 6 / 7 per WGP on the same receive slots, with the same segments and attention splits (the grid alone changes)')
+# the splits cap: 128 lets each card's 2 kv heads take its whole grid (the stand-in's 42 WGPs at 5 per WGP: 105 splits)
+m.splits_cap = 128; m._build_tapes()
+seg128 = [[sg for sg in e.segs if sg.op == k3.OP_OWN_ATTS] for e in m.E]
+c128 = (m.splits == [q3moe_tp.splits_for(2, 128)] * 2 == [105, 105] and q3moe_one.card_per_wgp() == 5
+        and all(sg.work == 105 and sg.ntask == 105 * 2 for c in (0, 1) for sg in seg128[c])
+        and all(m.buf[c]['ats'].numel() == k3.Engine.atts_scratch_floats(2, 105) for c in (0, 1)))
+m.splits_cap = q3moe_tp.SPLITS_CAP; m._build_tapes()
+check(c128 and m.splits == [64, 64] and q3moe_tp.SPLITS_CAP == 64,
+      f'splits_cap 128: each card takes splits_for(2, 128) = 105 splits (the 210-workgroup grid over 2 kv heads), its scratch for them; '
+      f'the default cap stays 64 ({m.splits})')
+refused = []
+for cap in (0, 129):
+    try: Q3MoETP(P_T, devices=(0, 1), max_ctx=64, vram_check=False, splits_cap=cap); refused.append(False)
+    except ValueError: refused.append(True)
+check(all(refused) and k3.atts_max_splits('k3_q3m_lean_tp') == 128, 'Q3MoETP refuses splits_cap 0 and 129 (1 .. 128 on k3_q3m_lean_tp)')
 m.reset()
 check((m.seq, m.fresh, m.pos_host) == (1, True, 0) and {k[0] for k in m.state} == {0, 1} and {k[2] for k in m.state} == {'kv'}
       and m.tp_key == dict(exp_rows=512, kv_heads=2, vocab_rows=m.vh) and m.commit_max() == 1 and m.shard_devs == [0, 1],
@@ -245,6 +261,11 @@ try:
 except ValueError:
     r = True
 check(r and T2[0]['kv'] > T[0]['kv'], 'past the file\'s context_length the projection is computed (arithmetic), and the engine refuses it')
+F = ggufio.GGUFFile(P_T); T128 = projection_terms(F, 64, splits_cap=128); F.close()
+p128 = Q3MoETP.projection_mib(P_T, 64, splits_cap=128)
+d_ats = 4 * (k3.Engine.atts_scratch_floats(2, 128) - k3.Engine.atts_scratch_floats(2, 64)) / 2 ** 20
+check(all(t['ats'] == 4 * k3.Engine.atts_scratch_floats(2, 128) for t in T128) and all(abs((b - a) - d_ats) < 1e-9 for a, b in zip(p0, p128)),
+      f'the projection at splits_cap 128 counts its ATS scratch: {d_ats * 1024:.0f} KiB more per card than at 64')
 
 # ---- the load: the capacity check first, the pinned uploader by default ---------------------------------------------------
 calls = {}
