@@ -1,7 +1,10 @@
 """The G-model gate for Qwen3-30B-A3B (docs/specs/spec-own-quant.md): the engine's logits and llama.cpp's against the float64
 reference (tools/reference/q3moe_ref.py), teacher-forced over the reference's tokens. Per position KLD(ref || candidate),
 top-1 agreement and |logit difference|; the gate: mean KLD <= llama.cpp's and top-1 >= llama.cpp's.
-  tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF.npz [--llama LLAMA.bin] [--module M]
+  tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF.npz [--llama LLAMA.bin] [--module M] [--cards 2]
+--cards 2: the two-card engine (engine/q3moe_tp.py Q3MoETP on torch devices 0 and 1, its default split; CAMINUS_UPLOAD_LOG on
+every two-card run), the same scores against the same bound (llama.cpp's ONE-card decode), and the replicas checked after
+every token: the residual and every layer's router ids the same bits on both cards; any difference, or a bailed pass, fails.
 LLAMA.bin: llama.cpp's one-token-decode logits rows of the same tokens, f32 [N, vocab] (build/gg_golden MODEL --lc JOBS with
 the lines 'nctx N+64', 'kv f16', 'onecard', 'tfx ref TOKENS.txt 0 N 1 1 OUT': its default KV type, one card). Without it only the
 engine's numbers are printed. Prints PASS / FAIL and RESULT; exit 0 only on PASS (or with no llama.cpp numbers)."""
@@ -33,21 +36,39 @@ def line(name, s):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--ref', required=True)
     ap.add_argument('--llama', default=None); ap.add_argument('--module', default=None)
+    ap.add_argument('--cards', type=int, default=1, choices=(1, 2))
     A = ap.parse_args()
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']
     import torch
-    from caminus.engine.q3moe_one import Q3MoEOne
-    print(torch.cuda.get_device_name(0), flush=True)
-    eng = Q3MoEOne(A.gguf, max_ctx=len(seq) + 8, module=A.module)
-    ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
-    so = score(ref, ours); print(line('caminus', so), flush=True)
     ok = True
+    if A.cards == 2:
+        from caminus.engine.q3moe_tp import Q3MoETP
+        print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
+        eng = Q3MoETP(A.gguf, max_ctx=len(seq) + 8, module=A.module)
+        print(f'two cards: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}, '
+              f'grids {eng.per_wgp_c}, splits {eng.splits}', flush=True)
+        rows, rep_bad = [], []
+        for i, t in enumerate(seq):
+            rows.append(eng.step(t).float().cpu().numpy())
+            r = eng.check_replicas()
+            if not all(r): rep_bad.append((i, r))
+        ours = np.stack(rows)
+        c0 = not rep_bad and not eng.bails
+        print(('PASS' if c0 else 'FAIL') + f' replicas after each of {len(seq)} tokens (residual, every layer\'s router ids): '
+              f'{len(seq) - len(rep_bad)} equal; bails {len(eng.bails)}' + (f'; first differences {rep_bad[:4]}' if rep_bad else ''), flush=True)
+        ok = c0
+    else:
+        from caminus.engine.q3moe_one import Q3MoEOne
+        print(torch.cuda.get_device_name(0), flush=True)
+        eng = Q3MoEOne(A.gguf, max_ctx=len(seq) + 8, module=A.module)
+        ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
+    so = score(ref, ours); print(line('caminus', so), flush=True)
     if A.llama:
         ll = np.fromfile(A.llama, dtype=np.float32).reshape(len(seq), -1)
         sl = score(ref, ll); print(line('llama.cpp', sl), flush=True)
         c1 = so['mean'] <= sl['mean']; c2 = so['top1'] >= sl['top1']
         print(('PASS' if c1 else 'FAIL') + f' mean KLD vs float64: caminus {so["mean"]:.3e} <= llama.cpp {sl["mean"]:.3e}')
         print(('PASS' if c2 else 'FAIL') + f' top-1 agreement: caminus {so["top1"]} >= llama.cpp {sl["top1"]}')
-        ok = c1 and c2
+        ok = ok and c1 and c2
     print('RESULT', 'PASS' if ok else 'FAIL')
     sys.exit(0 if ok else 1)

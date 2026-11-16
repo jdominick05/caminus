@@ -135,7 +135,9 @@ CLAUDE.md imports this file.
   `rope_facts` holds each model card's native context and long-context recipe as data only.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
-  tokenizers library off its path).
+  tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `k3_q3m_lean_tp`: kv heads and each
+  expert's rows split, router replicated; `check_replicas` compares the residual and every layer's router ids; not served
+  yet, no architecture entry; `tests/engine/test_q3moe_tp_cpu.py`, GPU gate `tests/engine/test_q3moe_tp.py`).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
   Coder target KV follows the engine's `q8` policy: Q8 uses rotated blocks, F16 unrotated half rows. The QSA indexer
   stays Q8 in either mode. F16 target append and split attention use `prefill_attn_f16`; keep the default Q8 object
@@ -228,7 +230,7 @@ tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # deco
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
-CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load, read back bit for bit
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load (qwen35 or qwen3moe), read back bit for bit
 CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 300 python -I tools/gates/h2d_pattern.py --seconds 180
 python -I tools/gates/sdma_classify.py ULOG ADDR --pid PID                # (CPU) a fault address: live / freed / neither upload source
 ```

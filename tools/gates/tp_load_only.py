@@ -1,10 +1,13 @@
-"""The two-card weight load alone, with a read-back: Dense35TP's _load on both cards (no tapes, no K3 launch), then every card
-tensor the engine keeps read back ONCE after the whole load, into pinned host memory, and compared bit for bit with the same
-bytes rebuilt from the file (Dense35TP.host_bytes). The read-back never runs between uploads: a sync per upload would change
+"""The two-card weight load alone, with a read-back: the two-card engine's _load on both cards (no tapes, no K3 launch), then
+every card tensor the engine keeps read back ONCE after the whole load, into pinned host memory, and compared bit for bit
+with the same bytes rebuilt from the file (the engine's host_bytes). The engine follows the file's architecture: qwen35
+(the dense line) -> Dense35TP, qwen3moe (Qwen3-30B-A3B) -> Q3MoETP (engine/q3moe_tp.py). The read-back never runs between uploads: a sync per upload would change
 the timing of the path under test.
   CAMINUS_UPLOAD_LOG=ULOG [CAMINUS_H2D=pageable|pinned|peer] \\
       tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF [--repeat K] [--settle S] [--max-ctx N] [--ffn-share F]
-GGUF: a dense qwen35 file (Swift 1.5, ThinkingCap). Both cards visible; card 0 is torch device 0. --ffn-share F: card 0's
+GGUF: a dense qwen35 file (Swift 1.5, ThinkingCap) or a qwen3moe file. Both cards visible; card 0 is torch device 0.
+qwen3moe: the split is Q3MoETP's defaults (each expert's rows 512 / 256, kv heads halved, the head at 0.532: not served yet,
+so no served split to read), --exp-rows N sets card 0's expert rows; --ffn-share is refused for it. qwen35: --ffn-share F: card 0's
 part of the feed-forward rows; default: the split caminus serve runs these two cards at (caminus.arch's Dense35TP.split of
 the first two visible cards, named through caminus.device.host from sysfs; 0.532 for XTX + XT); a pair it cannot name is
 refused (give --ffn-share). --repeat K loads K times in this process (the engine dropped and the allocator emptied
@@ -25,9 +28,11 @@ sys.path.insert(0, os.path.join(REPO, 'python'))
 import numpy as np
 import torch
 
+from caminus import ggufio
 from caminus.device import capacity
 from caminus.engine import upload
 from caminus.engine.q35_dense_tp import Dense35TP
+from caminus.engine.q3moe_tp import Q3MoETP
 
 
 class LoadOnly(Dense35TP):
@@ -37,7 +42,26 @@ class LoadOnly(Dense35TP):
         pass
 
 
+class Q3MLoadOnly(Q3MoETP):
+    """Q3MoETP without its tapes (and so without its receive slots): the weights, the KV caches and the upload log only"""
+
+    def _build_tapes(self):
+        pass
+
+
+def arch_of(path):
+    """the file's architecture ('qwen35' or 'qwen3moe'; anything else refused)"""
+    F = ggufio.GGUFFile(path)
+    try: a = F.arch
+    finally: F.close()
+    if a not in ('qwen35', 'qwen3moe'): raise ValueError(f'tp_load_only: {path} is a {a!r} GGUF (qwen35 or qwen3moe)')
+    return a
+
+
 def load_only(path, devices=(0, 1), max_ctx=64, ffn_share=0.5, **kw):
+    """the file's two-card engine without tapes: Dense35TP (qwen35, at ffn_share) or Q3MoETP (qwen3moe; kw: its split)"""
+    if arch_of(path) == 'qwen3moe':
+        return Q3MLoadOnly(path, devices=devices, max_ctx=max_ctx, per_wgp=3, **kw)
     return LoadOnly(path, devices=devices, max_ctx=max_ctx, per_wgp=3, ffn_share=ffn_share, **kw)
 
 
@@ -90,20 +114,30 @@ def main(argv):
         return d
     K, settle = opt('--repeat', int, 1), opt('--settle', float, 0.0)
     max_ctx, share = opt('--max-ctx', int, 64), opt('--ffn-share', float, None)
+    exp_rows = opt('--exp-rows', int, None)
     if len(a) != 1: print(__doc__); return 2
     if not os.environ.get('CAMINUS_GUARD'): print('tp_load_only: run it under tools/guard.sh'); return 2
     path = a[0]; mode = upload.mode_of(default=upload.TWO_CARD_DEFAULT)
-    if share is None:
-        try: share, pair = served_share()
-        except ValueError as e: print(f'tp_load_only: {e}'); return 2
-        how = f'(the served split of {pair})'
+    try: arch = arch_of(path)
+    except ValueError as e: print(e); return 2
+    if arch == 'qwen3moe':
+        if share is not None: print('tp_load_only: --ffn-share is the dense line\'s split; a qwen3moe file takes --exp-rows'); return 2
+        kw = {} if exp_rows is None else dict(exp_rows=exp_rows)
+        split = f'Q3MoETP exp_rows {exp_rows or "512 (default)"}, kv heads halved, head share 0.532 (not served yet: the engine\'s defaults)'
     else:
-        how = '(given)'
-    print(f'tp_load_only: {os.path.basename(path)} mode {mode} repeat {K} settle {settle} s max_ctx {max_ctx} ffn_share {share} '
-          f'{how} log {"on" if os.environ.get("CAMINUS_UPLOAD_LOG") else "off"}', flush=True)
+        if exp_rows is not None: print('tp_load_only: --exp-rows is the qwen3moe split; a qwen35 file takes --ffn-share'); return 2
+        if share is None:
+            try: share, pair = served_share()
+            except ValueError as e: print(f'tp_load_only: {e}'); return 2
+            how = f'(the served split of {pair})'
+        else:
+            how = '(given)'
+        kw, split = dict(ffn_share=share), f'ffn_share {share} {how}'
+    print(f'tp_load_only: {os.path.basename(path)}{" (qwen3moe)" if arch == "qwen3moe" else ""} mode {mode} repeat {K} settle {settle} s max_ctx {max_ctx} {split} '
+          f'log {"on" if os.environ.get("CAMINUS_UPLOAD_LOG") else "off"}', flush=True)
     loads = uploads = 0; bad = []
     for k in range(K):
-        t0 = time.perf_counter(); m = load_only(path, max_ctx=max_ctx, ffn_share=share); t1 = time.perf_counter()
+        t0 = time.perf_counter(); m = load_only(path, max_ctx=max_ctx, **kw); t1 = time.perf_counter()
         n, nb, b = readback(m); t2 = time.perf_counter()
         loads += 1; uploads += m.h2d.n_up; bad += b
         print(f'load {k + 1}/{K}: {m.h2d.n_up} uploads, {m.h2d.n_bytes / 2 ** 30:.2f} GiB in {t1 - t0:.1f} s; read back {n} tensors, '

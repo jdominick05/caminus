@@ -5,8 +5,11 @@ the two-card split falls on whole blocks), top-2, two layers. The formats are th
 for attn_v and ffn_down in layer 0 (Q4_K in layer 1), a Q4_K embedding and a Q6_K head, F32 router and norms. The
 quantized blocks are random valid blocks with small scales (tiny_q35.quant): caminus.ref_q3moe decodes the same bytes,
 so the reference and the engine see one model. A few MiB.
+tp=True: the two-card engine's shapes (caminus.engine.q3moe_tp, the served split's per card): 32 query / 4 kv heads (2 kv
+heads and their 16 query heads per card, as the served file's 4 kv heads split), and a vocabulary of 384 rows (the head's
+cut at the bandwidth share falls at 256 / 128 rows: unequal halves).
 
-  write(path, seed=7) -> dict(path, D, V, layers, H, HKV, HD, E, KU, FF)"""
+  write(path, seed=7, n_ctx=4096, tp=False) -> dict(path, D, V, layers, H, HKV, HD, E, KU, FF)"""
 import os
 import struct
 import sys
@@ -17,12 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tiny_q35 import TYPE_ID, _s, _val, quant   # noqa: E402 (the block writers and the GGUF header helpers)
 
 D, V, H, HKV, HD, E, KU, FF, NL = 256, 256, 16, 2, 128, 8, 2, 768, 2
+TP_SHAPES = dict(H=32, HKV=4, V=384)   # (tp=True: two kv heads per card)
 # per layer: attn_v's and ffn_down's format (the served file alternates them between Q6_K and Q4_K)
 FORMATS = [dict(attn_v='Q6_K', ffn_down='Q6_K'), dict(attn_v='Q4_K', ffn_down='Q4_K')]
 
 
-def write(path, seed=7, n_ctx=4096):
-    """the file at path; n_ctx: its context_length (the most max_ctx an engine on it takes)"""
+def write(path, seed=7, n_ctx=4096, tp=False):
+    """the file at path; n_ctx: its context_length (the most max_ctx an engine on it takes); tp: the two-card shapes"""
+    H, HKV, V = (TP_SHAPES['H'], TP_SHAPES['HKV'], TP_SHAPES['V']) if tp else (globals()['H'], globals()['HKV'], globals()['V'])
     rng = np.random.default_rng(seed)
     f32 = lambda *shape, sc=0.3: (rng.standard_normal(shape) * sc).astype(np.float32)
     T = {}   # name -> (format, bytes, dims innermost first)
