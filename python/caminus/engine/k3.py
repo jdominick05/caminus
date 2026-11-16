@@ -94,17 +94,20 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
-# its Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip: OP_OWN_ATTS writes and reads Q8_0 rows, own_kv_codec.h's format with K
-# and q through the head's Hadamard128, own_kv_rot128.h; a refused block sets the sticky word after Sync, Engine.kv_error). The same ops, pairs and dispatch as its F16
-# object (a separate object, so that one keeps its code); one card, decode only (no verify or two-card build), not served
-Q3M_KV_Q8_BASE = {'k3_q3m_lean_kvq8': 'k3_q3m_lean'}
+# its Q8_0 KV builds (kernels/k3_q3m_lean_kvq8.hip, and the two-card kernels/k3_q3m_lean_tp_kvq8.hip: OP_OWN_ATTS writes and
+# reads Q8_0 rows, own_kv_codec.h's format with K and q through the head's Hadamard128, own_kv_rot128.h; a refused block sets
+# the sticky word after Sync, Engine.kv_error). Q8 module -> its F16 module: the same ops, pairs and dispatch (separate
+# objects, so the F16 ones keep their code); decode only (no verify build), not served. Q3M_KV_Q8_MODULES (every Q8 module)
+# decides the Engine's error word and own_atts' cache format; the one-card one is a lean module, the two-card one a
+# two-card module (Q3M_TP_OF below)
+Q3M_KV_Q8_BASE = {'k3_q3m_lean_kvq8': 'k3_q3m_lean', 'k3_q3m_lean_tp_kvq8': 'k3_q3m_lean_tp'}
 Q3M_KV_Q8_OF = {base: name for name, base in Q3M_KV_Q8_BASE.items()}
 Q3M_KV_Q8_MODULES = tuple(Q3M_KV_Q8_BASE)
-Q3M_LEAN_MODULES += Q3M_KV_Q8_MODULES
+Q3M_LEAN_MODULES += ('k3_q3m_lean_kvq8',)
 # their two-card builds (kernels/k3_q3m_lean_tp.hip: K3_Q3M_TP adds OP_XCHG, push-only, and OP_OWN_SLOT_SUM; issue #86):
 # one-card module -> two-card module. engine/q3moe_tp.py builds its tapes on them (caminus serve --cards 2; the _trace build
-# is measurement only, outside the installed runtime set)
-Q3M_TP_OF = {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace'}
+# is measurement only, outside the installed runtime set; the Q8 KV build, Q3MoETP(q8=True), is not served)
+Q3M_TP_OF = {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
 Q3M_TP_MODULES = tuple(Q3M_TP_OF.values())
 # OP_OWN_ATTS's most splits per kv head (= kernels/k3_own_atts.h ATS_MAXS: the merge holds every split's m, l in LDS):
 # 128 in the two-card builds (half the kv heads per card: one attention task per workgroup of the grid), 64 elsewhere

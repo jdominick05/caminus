@@ -151,6 +151,7 @@ func screenHeader(what, state string, st lipgloss.Style, detail, right string, w
 
 // shellMessage: a turn of the conversation, with a thin rule instead of a box.
 func shellMessage(who, text string, w int) string {
+	text = terminalText(text, true)
 	var mark, name string
 	var st lipgloss.Style
 	if who == "you" {
@@ -171,6 +172,14 @@ func shellMessage(who, text string, w int) string {
 
 // toolCard: one line per tool call (kind, what, result, time); expanded, its body under a dim rule.
 func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w int) string {
+	what, meta = terminalText(what, false), terminalText(meta, false)
+	if len(body) > 0 {
+		safe := make([]string, len(body))
+		for i, b := range body {
+			safe[i] = terminalText(b, true)
+		}
+		body = safe
+	}
 	icon, st := g.tool, emberTool
 	switch kind {
 	case "edit":
@@ -233,6 +242,9 @@ func approvalCard(kind, cmd, why string, w int) string {
 // approvalCardKeys draws the card; inline false says where to decide instead of offering keys the view does not
 // handle yet (the chat decides root requests in /requests until its own keys are wired).
 func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
+	// the card shows exactly what runs: control characters and escapes in the agent's text are shown as escapes, so a
+	// \r or a cursor move cannot draw a different command over the one that will run (idempotent on safe text)
+	cmd, why = terminalText(cmd, true), terminalText(why, true)
 	title := g.root + " ROOT"
 	if kind == "question" {
 		title = "? QUESTION"
@@ -605,7 +617,7 @@ func newStreamView(width int, render func(string, int) []string) *streamView {
 }
 
 // Append adds a delta to the live block (cheap: no rendering here).
-func (v *streamView) Append(delta string) { v.live.WriteString(delta) }
+func (v *streamView) Append(delta string) { v.live.WriteString(terminalText(delta, true)) }
 
 // Finish renders the live block once and moves it to the cache.
 func (v *streamView) Finish() {

@@ -125,7 +125,7 @@ func paintLine(line string, y int, rowBg, inkSeq, pat string, glyphs bool) strin
 				for _, k := range run[1 : len(run)-1] {
 					if g := patternGlyph(pat, cells[k].x, y); g != "" {
 						// the pattern's ink, the glyph, then the state as it was (a reset, the gradient, the active SGRs)
-						cells[k].text = inkSeq + g + "\x1b[0m" + rowBg + strings.Join(activeAt(cells, k), "")
+						cells[k].text = inkSeq + g + "\x1b[0m" + rowBg + replayActive(activeAt(cells, k), rowBg)
 					}
 				}
 			}
@@ -148,6 +148,19 @@ func paintLine(line string, y int, rowBg, inkSeq, pat string, glyphs bool) strin
 		b.WriteString(c.text)
 	}
 	return b.String()
+}
+
+// replayActive is the active SGRs again, with the row's colours put back after any 39 / 49 among them (as paintLine
+// does): replayed bare, a default-colour sequence cancelled the painted background after a pattern glyph.
+func replayActive(active []string, rowBg string) string {
+	out := strings.Join(active, "")
+	for _, seq := range active {
+		params := strings.TrimSuffix(strings.TrimPrefix(seq, "\x1b["), "m")
+		if sgrClearsBg(params) || sgrClearsFg(params) {
+			return out + rowBg
+		}
+	}
+	return out
 }
 
 // activeAt replays the SGR sequences active at cell k (since the last reset before it).

@@ -66,6 +66,7 @@ type residentLiveMsg struct {
 	reset, done                  bool
 	err                          string
 	epoch                        uint64
+	sc                           *bufio.Scanner // the reader it came from: a stale reader's end never stops the current one
 }
 
 // residentStreamStartMsg hands the started reader process to the model.
@@ -144,7 +145,7 @@ func startStream(m emberModel) tea.Cmd {
 func streamLine(agent string, epoch uint64, sc *bufio.Scanner) tea.Cmd {
 	return func() tea.Msg {
 		if sc == nil || !sc.Scan() {
-			return residentLiveMsg{agent: agent, epoch: epoch, done: true}
+			return residentLiveMsg{agent: agent, epoch: epoch, sc: sc, done: true}
 		}
 		var line struct {
 			Turn      string   `json:"turn"`
@@ -155,9 +156,9 @@ func streamLine(agent string, epoch uint64, sc *bufio.Scanner) tea.Cmd {
 			Done      bool     `json:"done"`
 		}
 		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
-			return residentLiveMsg{agent: agent, epoch: epoch, err: err.Error(), done: true}
+			return residentLiveMsg{agent: agent, epoch: epoch, sc: sc, err: err.Error(), done: true}
 		}
-		return residentLiveMsg{agent: agent, epoch: epoch, turn: line.Turn, text: line.Content,
+		return residentLiveMsg{agent: agent, epoch: epoch, sc: sc, turn: line.Turn, text: line.Content,
 			reasoning: line.Reasoning, tools: line.Tools, reset: line.Reset, done: line.Done}
 	}
 }
