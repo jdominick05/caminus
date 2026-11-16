@@ -8,6 +8,7 @@ cannot signal another account's process and would take it for stale).
 A lease is a claim both sides check before starting work; it cannot stop a command from touching a card. It expires
 on its own (at most LEASE_MAX_MIN minutes), is released when the goal ends, and machine() lists it.
 """
+import re
 import json
 import os
 import time
@@ -16,6 +17,12 @@ from pathlib import Path
 
 LEASE_MAX_MIN = 120
 RAM_RESERVE_MIB = 8192    # memory left for the human's desktop and server when a RAM lease is granted
+
+
+def _own(d, rt):
+    """This agent's lease files only: agent-<name>-<8 hex>.json (a glob on agent-<name>-* also took ember-2's for ember)."""
+    name = re.escape(rt.config.get('name', 'agent'))
+    return [f for f in d.glob('agent-*.json') if re.fullmatch(f'agent-{name}-[0-9a-f]{{8}}\\.json', f.name)]
 
 
 def folder(rt):
@@ -110,7 +117,7 @@ def release(rt, gid, lid=None):
     d, done = folder(rt), []
     if d is None or not d.is_dir():
         return done
-    for f in d.glob(f"agent-{rt.config.get('name', 'agent')}-*.json"):
+    for f in _own(d, rt):
         try:
             lease = json.loads(f.read_text())
         except (OSError, ValueError):
@@ -132,7 +139,7 @@ def sweep(rt):
     d = folder(rt)
     if d is None or not d.is_dir():
         return
-    for f in d.glob(f"agent-{rt.config.get('name', 'agent')}-*.json"):
+    for f in _own(d, rt):
         try:
             lease = json.loads(f.read_text())
             row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (lease.get('goal'),)).fetchone()

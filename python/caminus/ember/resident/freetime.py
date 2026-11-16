@@ -130,10 +130,17 @@ class FreeTime:
         store = self.rt.store
         # A stretch that used up its steps or time is paused by the loop's budget checks; for free time that is
         # simply the end of the stretch.
-        for r in list(store.db.execute("SELECT id FROM goals WHERE kind IN ('free','dream') AND state='paused'")):
+        # Paused for anything else, it keeps its reason: a person's pause or the emergency stop stays paused (theirs to
+        # resume), and any other stop (a watchdog, the judge) ends the stretch with that reason, not as "used its time".
+        for r in list(store.db.execute("SELECT id, error FROM goals WHERE kind IN ('free','dream') AND state='paused'")):
+            why = r['error'] or ''
+            if why == 'paused by your human' or why.startswith('emergency stop'):
+                continue
+            budget = why in ('oneshot time budget reached', 'oneshot model-step budget reached')
             with store.transaction():
-                store.update(r['id'], state='completed', summary='the stretch used its time')
-                store.event('free_time_end', dict(reason='stretch budget'), r['id'])
+                store.update(r['id'], state='completed',
+                             summary='the stretch used its time' if budget else 'the stretch stopped: ' + why[:300])
+                store.event('free_time_end', dict(reason='stretch budget' if budget else why[:300]), r['id'])
             self.ended(r['id'])
         active = [store.goal(g) for g in store.next_goal()]
         work = [g for g in active if g.get('kind', 'work') not in KINDS]

@@ -184,6 +184,13 @@ def own_processes(proc='/proc', uid=None, keep=()):
     return out
 
 
+def _runs(pid, path, proc='/proc'):
+    try:
+        return path.encode() in Path(proc, str(pid), 'cmdline').read_bytes()
+    except OSError:
+        return False
+
+
 def sweep_user(sig, account=None):
     """The emergency stop's second reach: processes the agent detached from its terminals (setsid, nohup, a daemon,
     a user service) are outside their process groups. Only in the dedicated agent account; a runtime under any other
@@ -193,7 +200,11 @@ def sweep_user(sig, account=None):
     if not account.startswith(AGENT_USER_PREFIX):
         return []
     hit = []
-    for pid in own_processes(keep=_ancestors(os.getpid())):
+    keep = set(_ancestors(os.getpid()))
+    me = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] and os.path.isfile(sys.argv[0]) else ''
+    for pid in own_processes(keep=keep):
+        if me and _runs(pid, me):
+            continue          # another resident's runtime (residents share the account): the stop pauses it, never kills it
         try:
             os.kill(pid, sig)
             hit.append(pid)

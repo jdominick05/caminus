@@ -6,7 +6,10 @@ shell command actually touched, so that limit is advisory there. `propose_plan` 
 parks the goal (state waiting_plan, which never times out) until the human answers: approve sets
 goals.plan = 2 and lifts plan mode, reject keeps plan mode with the note in the inbox.
 """
-PLAN_REFUSED = ('write', 'edit', 'checkpoint', 'rollback', 'ask_root')
+# (everything that acts outside reading: a message gives a peer work, a hand-off posts upstream, remember writes the
+# notes, schedule and lease commit future time and cards; MCP tools are refused by their mcp__ prefix in the runtime)
+PLAN_REFUSED = ('write', 'edit', 'checkpoint', 'rollback', 'ask_root', 'send_message', 'github_handoff', 'remember',
+                'schedule', 'lease')
 
 
 def propose(gid, plan):

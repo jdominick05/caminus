@@ -136,10 +136,17 @@ class DeepInfraPrices:
                 try:
                     table = {}
                     for m in self.fetch().get('data') or []:
-                        p = (m.get('metadata') or {}).get('pricing') or {}
-                        if 'input_tokens' in p and 'output_tokens' in p:
-                            table[m['id']] = (float(p['input_tokens']), float(p['output_tokens']),
-                                              float(p.get('cache_read_tokens', p['input_tokens'])))
+                        # an entry with a null price or no id is skipped, never the whole table (a TypeError there
+                        # dropped the client's connection and left every model unpriced)
+                        try:
+                            p = (m.get('metadata') or {}).get('pricing') or {}
+                            cin, cout = p.get('input_tokens'), p.get('output_tokens')
+                            if cin is None or cout is None or not m.get('id'):
+                                continue
+                            cread = p.get('cache_read_tokens')
+                            table[m['id']] = (float(cin), float(cout), float(cin if cread is None else cread))
+                        except (TypeError, ValueError, AttributeError):
+                            continue
                     self.table, self.at = table, time.time()
                     self.log('prices: %d priced models' % len(table))
                 except (OSError, ValueError) as e:
@@ -328,13 +335,20 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 self.end_headers()
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
                 rid = up.getheader('request-id') or up.getheader('x-request-id')
+                client_gone, streamed, final = False, 0, False   # streamed: output characters sent; final: the count came
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
                     while True:
                         line = up.readline()
                         if not line:
                             break
-                        self.wfile.write(line)
-                        self.wfile.flush()
+                        try:
+                            self.wfile.write(line)
+                            self.wfile.flush()
+                        except OSError:
+                            # the client hung up mid-stream: stop (closing upstream ends the generation), but still
+                            # record the spend below; it skipped the ledger before
+                            client_gone = True
+                            break
                         if not line.startswith(b'data:') or line[5:].strip() == b'[DONE]':
                             continue
                         try:
@@ -354,10 +368,14 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                             served = ((ev['content_block'].get('to') or {}).get('model')) or served
                         elif t == 'message_delta':
                             usage.update(ev.get('usage') or {})
+                            final = True
                             stop = (ev.get('delta') or {}).get('stop_reason') or stop
                             category = ((ev.get('delta') or {}).get('stop_details') or {}).get('category') or category
                         elif t == 'error':
                             errtext = json.dumps(ev.get('error'))[:500]
+                        elif t == 'content_block_delta':
+                            d = ev.get('delta') or {}
+                            streamed += sum(len(d.get(k) or '') for k in ('text', 'thinking', 'partial_json'))
                 else:
                     data = up.read()
                     self.wfile.write(data)
@@ -373,6 +391,15 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     ' stop=%s' % stop if stop and stop not in ('end_turn', 'tool_use') else '',
                     ' category=%s' % category if category else '',
                     ' rid=%s' % rid if (rid and (errtext or stop == 'refusal' or fallback)) else ''))
+                if client_gone:
+                    extra += ' CLIENT-GONE'
+                    if provider == 'anthropic' and usage and not final:
+                        # the final count never came (a hang-up: an interrupt, a steer, /advisor end a reply this way):
+                        # charge what was streamed, about 3.5 characters a token rounded up, never the whole allowance
+                        # (that put phantom spend on every interrupt and could hit the daily cap early)
+                        # (message_start's usage says output_tokens 1: the estimate replaces it unless larger)
+                        usage['output_tokens'] = max(int(usage.get('output_tokens') or 0), streamed * 2 // 7 + 1)
+                        extra += ' (output estimated from %d streamed characters)' % streamed
                 if not counting and provider == 'anthropic' and usage:
                     usd = anthropic_cost(model, usage, served)
                     total = ledger.add(usd, usage.get('input_tokens') or 0, usage.get('output_tokens') or 0,
