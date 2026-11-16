@@ -1137,6 +1137,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
 		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
+	case "model_back":
+		down, _ := e.Data["down_s"].(float64)
+		tries, _ := e.Data["attempts"].(float64)
+		return toolCard("note", "the model is back",
+			fmt.Sprintf("after %s down (%d tries)", (time.Duration(down)*time.Second).String(), int(tries)), true, false, nil, w)
 	case "model_unavailable", "model_truncated", "context_refused", "model_refused", "model_gave_up":
 		if boost, _ := e.Data["boost"].(float64); boost > 0 && e.Kind == "model_truncated" {
 			limit, _ := e.Data["limit"].(float64)

@@ -604,10 +604,10 @@ class Resident(unittest.TestCase):
         self.gates_on()
         (self.home/'ok.flag').unlink(missing_ok=True)
         self.verdicts(dict(verdict='not_yet',reason='no test output shows the fix'))
-        self.replies(call('define_done',dict(check='ok.flag exists',gate='test -f ok.flag')),
+        self.replies(call('define_done',dict(check='ok.flag says ok',gate='grep -q ok ok.flag')),
                      call('verify',dict(evidence='I checked')),
                      call('finish',dict(summary='Done.')),                     # the gate fails: no ok.flag
-                     call('terminal',dict(command='touch ok.flag')),
+                     call('terminal',dict(command='echo ok > ok.flag')),
                      call('verify',dict(evidence='ok.flag is there')),
                      call('finish',dict(summary='Done.')),                     # the judge says not yet
                      call('verify',dict(evidence='ls shows ok.flag')),
@@ -991,6 +991,46 @@ for line in sys.stdin:
             self.assertIn('over its 4096-byte cap',str(c.exception))
             self.assertFalse((self.home/'notes'/'another.md').exists(),'a refused remember writes nothing')
         finally:rt.mail.close();rt.store.close()
+
+    def test_a_full_index_moves_its_oldest_lines_to_the_archive(self):
+        # a real resident's index sat at its cap and every remember failed for four goals
+        rt=Runtime(self.home)
+        try:
+            (self.home/'MEMORY.md').write_text('# My notes\n'+''.join(f'- [old {i}](notes/old-{i}.md) — {"w"*120}\n' for i in range(28)))
+            out=rt.memory.remember('New fact','A new fact.','s'*400)
+            idx=(self.home/'MEMORY.md').read_text()
+            self.assertLessEqual(len(idx.encode()),4096);self.assertIn('notes/new-fact.md',idx);self.assertIn('# My notes',idx)
+            self.assertIn('old 0',out['moved_to_archive']);self.assertNotIn('notes/old-0.md',idx)
+            self.assertIn('notes/old-0.md',(self.home/'notes'/'index-archive.md').read_text(),'the moved line is kept')
+            line=[l for l in idx.splitlines() if 'new-fact' in l][0]
+            self.assertLessEqual(len(line.encode()),160,'one index line stays short')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_define_done_refuses_a_gate_that_cannot_fail(self):
+        from caminus.ember.resident.runtime import weak_gate
+        for g in ('true',':','exit 0','echo done','test -f ~/caminus/.gate-ok','[ -e out.txt ]','false'):
+            self.assertTrue(weak_gate(g),g)
+        for g in ('sh gate-128.sh','python3 -I tests/x.py','test -s out.txt && grep -q ok out.txt','go test ./...'):
+            self.assertFalse(weak_gate(g),g)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            with self.assertRaises(ValueError):rt._define_done(gid,'x is made','true')
+            self.assertIsNone(rt.store.goal(gid).get('done_check'))
+            rt._define_done(gid,'x is made','grep -q made x.txt')
+            self.assertEqual(rt.store.goal(gid)['gate'],'grep -q made x.txt')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_edit_miss_says_why(self):
+        from caminus.ember.resident import files
+        (self.home/'m.py').write_text('def f():\n    return {"a": 1}\n\nx = f()\n')
+        def miss(old,new):
+            with self.assertRaises(ValueError) as c:files.edit(self.home,'m.py',old,new)
+            return str(c.exception)
+        self.assertIn('unescaped',miss('return {\\"a\\": 1}','return {"a": 2}'))
+        self.assertIn('closest text, from line 2',miss('    return {"a": 9}\n','    return {"a": 2}\n'))
+        self.assertIn('already has this text',miss('x = f()','x = f()'))
+        self.assertIn('already there',miss('x = g()','x = f()'))
 
     def test_history_search_finds_past_goals_journal_and_notes(self):
         rt=Runtime(self.home)
@@ -2484,6 +2524,22 @@ for line in sys.stdin:
             self.assertEqual(brain_events,['fallback','primary'])
         finally:rt.mail.close();rt.store.close()
         self.assertIsNone(self.cmd('fallback',['--off'])['fallback'])
+
+    def test_a_model_outage_is_one_event_and_its_return_another(self):
+        # a local server down for GPU work wrote 367 identical model_unavailable events over five hours
+        Fake=self.brains()
+        primary=Fake('k3-coder',[call('terminal',dict(command='printf hi'))],up=False)
+        rt=Runtime(self.home,model=primary)
+        try:
+            gid=rt.store.enqueue('Say hi.')
+            for _ in range(6):
+                rt.retry.pop(gid,None);rt.tick(gid)
+            kinds=[e['kind'] for e in rt.store.events() if e['kind'] in ('model_unavailable','model_back')]
+            self.assertEqual(kinds,['model_unavailable'],'one event while it stays down')
+            primary.up=True;rt.retry.pop(gid,None);rt.tick(gid)
+            back=[e['data'] for e in rt.store.events() if e['kind']=='model_back']
+            self.assertEqual(len(back),1);self.assertEqual(back[0]['attempts'],6)
+        finally:rt.mail.close();rt.store.close()
 
     def test_fallback_respects_its_allowance_and_free_time_budget(self):
         Fake=self.brains()

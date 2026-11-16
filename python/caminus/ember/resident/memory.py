@@ -5,8 +5,10 @@ The agent lives in its account across goals, so what it learns must outlive one 
 - MEMORY.md is the notes index: one line per note, always loaded, capped at INDEX_CAP bytes. It is frozen per goal
   (the first turn of a goal takes a snapshot; a write during the goal shows from the next goal), so a mid-goal edit
   cannot shift the agent's picture of itself halfway through a task.
-- notes/<name>.md hold one fact each, read on demand. The remember tool writes a note and its index line together,
-  and refuses when the index is full, so the cap is a decision the agent makes, not a silent cut.
+- notes/<name>.md hold one fact each, read on demand. The remember tool writes a note and its index line together.
+  When the index would pass its cap, its oldest lines move to notes/index-archive.md (still read on demand and found
+  by history_search) and the tool says which: a full index refused every remember for four goals of a real resident,
+  which never tidied it by hand.
 - STATE.md is the agent's live working state (doing / verified / assumed / next). It is re-read every turn and loaded
   first, so after a compaction or a daemon restart it is the first thing the agent sees.
 - history_search is a full-text search over its own past goals, replies, tool results, summaries, journal and notes.
@@ -19,6 +21,8 @@ from pathlib import Path
 INDEX_CAP = 4096          # bytes of MEMORY.md loaded into every turn
 STATE_CAP = 8192          # bytes of STATE.md loaded into every turn
 NOTE_CAP = 8192           # bytes of one note written by remember
+LINE_CAP = 160            # bytes of one index line: a long summary is cut (the note holds the detail)
+ARCHIVE = 'notes/index-archive.md'
 HISTORY_KINDS = {'goal_queued': ('prompt',), 'user_message': ('text',), 'peer_message': ('text',),
                  'assistant': ('content',), 'finished': ('summary',), 'tool_result': ('result',)}
 
@@ -142,16 +146,33 @@ class Memory:
         notes.mkdir(exist_ok=True)
         rel = f'notes/{s}.md'
         line = f'- [{name.strip()}]({rel}) — ' + ' '.join(summary.split())
+        if len(line.encode()) > LINE_CAP:
+            line = line.encode()[:LINE_CAP - 3].decode(errors='ignore').rstrip() + '…'
         current = self._read_index()
         kept = [ln for ln in current.splitlines() if f']({rel})' not in ln]
+        moved = []
+        # the oldest note lines leave first (a heading or a plain line the agent wrote stays: it is its own text)
+        while len(('\n'.join([*kept, line]).strip('\n') + '\n').encode()) > INDEX_CAP:
+            i = next((i for i, ln in enumerate(kept) if ln.startswith('- [')), None)
+            if i is None:
+                raise ValueError(f'MEMORY.md is over its {INDEX_CAP}-byte cap with no note lines to move: shorten '
+                                 'it (edit MEMORY.md), then remember again')
+            moved.append(kept.pop(i))
         updated = '\n'.join([*kept, line]).strip('\n') + '\n'
-        if len(updated.encode()) > INDEX_CAP:
-            raise ValueError(f'MEMORY.md would be {len(updated.encode())} bytes, over its {INDEX_CAP}-byte cap: '
-                             'merge or drop index lines you no longer need (edit MEMORY.md), then remember again')
         (notes / f'{s}.md').write_text(text.rstrip('\n') + '\n')
+        if moved:
+            arch = self.home / ARCHIVE
+            head = '' if arch.is_file() else '# Index lines moved out of MEMORY.md (oldest first)\n\n'
+            with arch.open('a') as f:
+                f.write(head + '\n'.join(moved) + '\n')
         (self.home / 'MEMORY.md').write_text(updated)
-        return dict(note=rel, index_bytes=len(updated.encode()), index_cap=INDEX_CAP,
-                    note_text='saved; the index line shows from your next goal (this goal keeps its snapshot)')
+        out = dict(note=rel, index_bytes=len(updated.encode()), index_cap=INDEX_CAP,
+                   note_text='saved; the index line shows from your next goal (this goal keeps its snapshot)')
+        if moved:
+            out['moved_to_archive'] = [re.sub(r'^- \[([^\]]*)\].*', r'\1', m) for m in moved]
+            out['note_text'] += (f'; the index was full, so its {len(moved)} oldest line(s) moved to {ARCHIVE} '
+                                 '(read it or history_search finds them)')
+        return out
 
     # --- history_search ---------------------------------------------------------------------------------------
     def search(self, query, limit=8):

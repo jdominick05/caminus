@@ -94,23 +94,44 @@ def read(home, path, offset=None, limit=None):
     return out
 
 
+def _miss_hint(before, old, new):
+    """Why old is not in the file, as far as can be told: three misses in one real goal came back with no hint, one of
+    them with quotes escaped as \\" that the file does not have."""
+    if new and new != old and new in before:
+        return ' (but new is already there: the edit seems applied; read the file to check)'
+    if old.strip() and old.strip() in before:
+        return ' (it occurs with different leading or trailing whitespace: copy it exactly from read)'
+    unescaped = old.replace('\\"', '"').replace("\\'", "'").replace('\\n', '\n').replace('\\t', '\t')
+    if unescaped != old and unescaped in before:
+        return ' (it matches once its backslash escapes are removed: send the text as it is in the file, unescaped)'
+    import difflib
+    lines = before.splitlines()
+    want = next((ln for ln in old.splitlines() if ln.strip()), '')
+    close = difflib.get_close_matches(want, lines, n=1, cutoff=0.6)
+    if not close:
+        return ' (no line looks like its first line: read the file again, it may have changed)'
+    i = lines.index(close[0])
+    span = lines[i:i + max(1, min(6, len(old.splitlines())))]
+    return (f' (closest text, from line {i + 1}; copy from here exactly):\n' + '\n'.join(span))
+
+
 def edit(home, path, old, new, replace_all=False):
     p = _path(home, path)
     if not isinstance(old, str) or old == '':
         raise ValueError('old must be the exact text to replace (to create a file, use write)')
-    if old == new:
-        raise ValueError('old and new are the same; nothing to change')
     before = _text(p)
+    if old == new:
+        if old in before:
+            raise ValueError('old and new are the same, and the file already has this text: no edit is needed (an '
+                             'earlier edit may have made it already)')
+        raise ValueError('old and new are the same; nothing to change')
     crlf = '\r\n' in before
     if crlf and '\r\n' not in old:
         # The model writes \n; a CRLF file keeps its endings.
         old, new = old.replace('\n', '\r\n'), new.replace('\n', '\r\n')
     count = before.count(old)
     if count == 0:
-        hint = ''
-        if old.strip() and old.strip() in before:
-            hint = ' (it occurs with different leading or trailing whitespace: copy it exactly from read)'
-        raise ValueError(f'old was not found in {p}{hint}')
+        raise ValueError(f'old was not found in {p}' + _miss_hint(before, old, new))
     if count > 1 and not replace_all:
         raise ValueError(f'old occurs {count} times in {p}: add surrounding lines so it is unique, or set replace_all')
     after = before.replace(old, new) if replace_all else before.replace(old, new, 1)

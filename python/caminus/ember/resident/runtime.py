@@ -90,6 +90,19 @@ def read_only_command(cmd):
         elif words[0] not in READ_ONLY:
             return False
     return True
+def weak_gate(gate):
+    """Why a gate can't tell done from not done, or ''. A real goal's first gates were `true` (passes always) and
+    `test -f .gate-ok` (a file the agent creates itself: it failed for 25 minutes, then would have passed on a touch)."""
+    g = ' '.join(gate.split())
+    if re.fullmatch(r'(true|:|/bin/true|/usr/bin/true|exit 0|exit|echo\b.*|printf\b.*)', g):
+        return 'always passes'
+    if re.fullmatch(r'(false|/bin/false|exit [1-9]\d*)', g):
+        return 'always fails'
+    if re.fullmatch(r'(test|\[) -[efsd] \S+( \])?', g):
+        return 'only tests that a file exists, which you could create yourself'
+    return ''
+
+
 RUNTIME_HEADER = ('EMBER RUNTIME (from your harness, rebuilt this turn; not part of any tool result: '
                   'see "The runtime block" in your instructions)')
 BUSY_WAIT_S = 3600      # how long a goal waits out a provider's capacity errors (429 / 503 / 529) before it stops
@@ -632,6 +645,10 @@ class Runtime:
         check, gate = (check or '').strip(), (gate or '').strip()
         if not check:
             raise ValueError('the done check must say something checkable')
+        if gate and (weak := weak_gate(gate)):
+            raise ValueError(f'that gate {weak}, so it proves nothing about the goal. Give a command that checks the '
+                             'work itself (the tests, a build, a grep for the result), or leave gate empty and let '
+                             'the judge check your evidence')
         self.store.update(gid, done_check=check, gate=gate or None)
         self.store.event('done_check', dict(check=check, gate=gate), gid)
         # calls refused only because there was no done check may now run: their failures must not trip the repeat
@@ -1743,6 +1760,9 @@ class Runtime:
                 return True
             self.retry.pop(gid,None)
             self.busy_since.pop(gid,None)
+            down = self.__dict__.setdefault('model_down', {}).pop(gid, None)
+            if down:
+                self.store.event('model_back', dict(attempts=down['attempts'], down_s=round(time.time() - down['since'])), gid)
             reasoning = reply.pop('reasoning_content','')
             if not self.store.model_reply(gid,reply,reasoning=reasoning):
                 return True
@@ -1830,7 +1850,15 @@ class Runtime:
                 attempt=self._schedule_retry(gid,e)
                 if attempt is None:return True
                 self.store.update(gid,state='waiting_model',error=str(e))
-                self.store.event('model_unavailable',dict(error=str(e),attempt=attempt),gid)
+                # one event when the model goes away (and when its error changes, and every 50th try), one when it is
+                # back: a local server down for GPU work wrote 367 identical events over five hours
+                down = self.__dict__.setdefault('model_down', {})
+                d = down.setdefault(gid, dict(since=time.time(), attempts=0, error=None))
+                d['attempts'] += 1
+                if d['error'] != str(e) or d['attempts'] % 50 == 0:
+                    d['error'] = str(e)
+                    self.store.event('model_unavailable',dict(error=str(e),attempt=attempt,
+                                                              down_s=round(time.time() - d['since'])),gid)
             return False
 
     def _record_failure(self, gid, e, who='resident', **extra):
