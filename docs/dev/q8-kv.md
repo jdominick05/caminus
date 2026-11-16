@@ -391,9 +391,10 @@ the same values) sets `opt['kv']`. `serve.cli.recipe` calls `Arch.kv_check` befo
 entries list `q8` in `kv_formats` (one card: `Q3MoEOne(q8=True)`, two: `Q3MoETP(q8=True)` with `Q3MPrefillTP`'s Q8 path),
 and every other model is refused with a message naming the model that takes it. `f16` selects nothing on an entry without
 the choice: the dense own-code line keeps its F16 cache, the GGUF engines (the Coder, the paused ones) their own 8-bit
-q8_0 cache (`Arch.kv_fixed`). After the build, the server checks that the engine holds what was asked (`kv_format_id`
-set exactly when `--kv q8`) and reports what it holds in `/props` (`caminus.kv_cache = {type, format}`) and
-`/caminus/status` (`server.kv_cache`), from `arch.kv_cache_of`; `caminus ps` shows the type.
+q8_0 cache (`Arch.kv_fixed`). After the build, the server checks that the engine holds what was asked (a `kv_format_id`
+in `arch.KV_Q8_FORMATS` exactly when `--kv q8`: `arch.kv_q8_built`) and reports what it holds in `/props`
+(`caminus.kv_cache = {type, format}`) and `/caminus/status` (`server.kv_cache`), from `arch.kv_cache_of`; `caminus ps`
+shows the type.
 
 Parks: the engine key carries the format (`tp.kv`) and the module, so the prompt cache's disk store lists a park under
 one format's key only: a server with the other format on the same cache directory is never offered it (the prompt is read
@@ -441,5 +442,10 @@ decode module and not its F16 base, and `q3m_prefill_kvq8` beside `q3m_prefill`;
 from the Q8 park, and the restarted server's objects are checked the same way. The third run starts F16, parks, and
 restarts with `--kv q8` on the same directories: the F16 parks must be on disk before the restart and still there after
 it, the long prompt must come back from cold (the F16 park is not offered), and the second server's objects must be the
-Q8 ones. These served gates have not run yet: the device results above come from the engines' and the prefill's own
-gates, not from a server.
+Q8 ones.
+
+All three passed on 2026-11-16 (on this branch before its last rebase, which changed only the fit JSON, the panel row
+and tests): one XTX with `--kv q8 --restart`, 20 / 20 (decode 228 tok/s short, 197 after a 6,587-token prompt read at
+5,353 tok/s; the restart served the prompt from the Q8 park); XTX + XT with `--kv q8 --restart`, 20 / 20 (197 tok/s
+short, 177 after the prompt read at 5,882 tok/s; the restart served it from the park); one XTX, F16 then `--restart-kv
+q8`, 19 / 19 (the Q8 server read the long prompt cold, cache 0, and the F16 park was still on disk after it).
