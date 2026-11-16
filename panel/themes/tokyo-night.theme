@@ -1,0 +1,21 @@
+# tokyo-night — a clean dark in navy and cyan. https://github.com/tokyo-night
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #c0caf5
+muted = #9aa5ce
+think = #a9b1d6
+dim = #565f89
+accent = #7aa2f7
+ok = #9ece6a
+warn = #e0af68
+action = #ff9e64
+hot = #f7768e
+purple = #bb9af7
+user = #7dcfff
+teal = #73daca
+chrome = #414868
+
+code_bg = #2f334d
+codeblock_bg = #1a1b26
+code_theme = native

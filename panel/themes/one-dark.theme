@@ -1,0 +1,21 @@
+# one-dark: Atom One Dark, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #abb2bf
+muted = #8b929e
+think = #9da5b4
+dim = #5c6370
+accent = #56b6c2
+ok = #98c379
+warn = #e5c07b
+action = #d19a66
+hot = #e06c75
+purple = #c678dd
+user = #61afef
+teal = #89ddff
+chrome = #3e4451
+
+code_bg = #2c313a
+codeblock_bg = #21252b
+code_theme = onedark

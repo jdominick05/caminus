@@ -1,0 +1,25 @@
+# blueprint: Blueprint (a faint grid on blue).
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #0d2a4a
+bg_pattern = grid
+pattern = #24507e
+
+text = #e6f0ff
+muted = #9fb8d6
+think = #c6d8ee
+dim = #4a6a90
+accent = #7fd4ff
+ok = #7ee0a8
+warn = #ffd27a
+action = #ffad6b
+hot = #ff7a85
+purple = #c3a6ff
+user = #9ec9ff
+teal = #8af0e0
+chrome = #24476e
+
+code_bg = #183a60
+codeblock_bg = #0f2f52
+code_theme = nord

@@ -1,0 +1,23 @@
+# catppuccin-latte: Catppuccin Latte (light).
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #eff1f5
+
+text = #4c4f69
+muted = #6c6f85
+think = #5c5f77
+dim = #9ca0b0
+accent = #1e66f5
+ok = #40a02b
+warn = #df8e1d
+action = #fe640b
+hot = #d20f39
+purple = #8839ef
+user = #7287fd
+teal = #179299
+chrome = #ccd0da
+
+code_bg = #e6e9ef
+codeblock_bg = #e6e9ef
+code_theme = catppuccin-latte

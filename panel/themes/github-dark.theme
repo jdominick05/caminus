@@ -1,0 +1,21 @@
+# github-dark: GitHub Dark, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #e6edf3
+muted = #9198a1
+think = #c9d1d9
+dim = #6e7681
+accent = #79c0ff
+ok = #56d364
+warn = #e3b341
+action = #ffa657
+hot = #ff7b72
+purple = #d2a8ff
+user = #58a6ff
+teal = #a5d6ff
+chrome = #30363d
+
+code_bg = #343942
+codeblock_bg = #161b22
+code_theme = github-dark

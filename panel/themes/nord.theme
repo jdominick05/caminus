@@ -1,0 +1,21 @@
+# nord — the polar-blue palette. https://www.nordtheme.com
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #e5e9f0
+muted = #9aa4b6
+think = #d8dee9
+dim = #4c566a
+accent = #88c0d0
+ok = #a3be8c
+warn = #ebcb8b
+action = #d08770
+hot = #bf616a
+purple = #b48ead
+user = #81a1c1
+teal = #8fbcbb
+chrome = #434c5e
+
+code_bg = #2e3440
+codeblock_bg = #242933
+code_theme = native

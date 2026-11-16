@@ -1,0 +1,21 @@
+# nightfox: Nightfox, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #cdcecf
+muted = #aeafb0
+think = #c0c1c2
+dim = #71839b
+accent = #63cdcf
+ok = #81b29a
+warn = #dbc074
+action = #f4a261
+hot = #c94f6d
+purple = #9d79d6
+user = #719cd6
+teal = #63cdcf
+chrome = #39506d
+
+code_bg = #29394f
+codeblock_bg = #192330
+code_theme = nord

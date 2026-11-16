@@ -1,0 +1,23 @@
+# solarized-light: Solarized Light.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #fdf6e3
+
+text = #073642
+muted = #586e75
+think = #475b62
+dim = #93a1a1
+accent = #d33682
+ok = #859900
+warn = #b58900
+action = #cb4b16
+hot = #dc322f
+purple = #6c71c4
+user = #268bd2
+teal = #2aa198
+chrome = #eee8d5
+
+code_bg = #eee8d5
+codeblock_bg = #f5efdc
+code_theme = solarized-light

@@ -1,0 +1,21 @@
+# oxocarbon: Oxocarbon, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #f2f4f8
+muted = #b6b8bb
+think = #dde1e6
+dim = #6f6f6f
+accent = #33b1ff
+ok = #42be65
+warn = #ffe97b
+action = #ff7eb6
+hot = #ee5396
+purple = #be95ff
+user = #78a9ff
+teal = #3ddbd9
+chrome = #393939
+
+code_bg = #262626
+codeblock_bg = #161616
+code_theme = github-dark

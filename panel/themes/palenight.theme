@@ -1,0 +1,21 @@
+# palenight: Material Palenight, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #eeffff
+muted = #a6accd
+think = #c3cee3
+dim = #676e95
+accent = #89ddff
+ok = #c3e88d
+warn = #ffcb6b
+action = #f78c6c
+hot = #ff5370
+purple = #c792ea
+user = #82aaff
+teal = #80cbc4
+chrome = #3a3f58
+
+code_bg = #34324a
+codeblock_bg = #292d3e
+code_theme = dracula
