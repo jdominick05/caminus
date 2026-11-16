@@ -282,6 +282,10 @@ class Terminal:
         if state.get('phase') in ('starting', 'running') and not alive(state.get('worker')):
             state.update(phase='interrupted', error='worker disappeared; inspect effects before repeating the command')
         log = job / 'output.log'
+        if args.get('_prepare'):
+            # the runtime's preparation step (inside its write transaction): launched or queued, nothing read
+            return dict(session=session, **state, output='', next_offset=read_cursor(job), no_new_output=True,
+                        running=state.get('phase') not in ('finished', 'interrupted'))
         # Without an explicit offset, a poll returns only what this session has not yet returned (the persisted
         # read cursor). An explicit offset reads from there. Either way the cursor moves to the end of what was returned.
         cursor = job / 'cursor'
