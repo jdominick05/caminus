@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"image/color"
@@ -2409,5 +2410,41 @@ func TestTheActivityLineShowsWhatTheAgentDoesWithItsNumbers(t *testing.T) {
 	}
 	if next, cmd := m.spinStep(); cmd != nil || next.spinning {
 		t.Fatal("idle: the spinner's tick stops")
+	}
+}
+
+func TestRereviewFixesInThePanel(t *testing.T) {
+	// an approval card shows control characters as escapes: \r and a line erase cannot draw another command
+	card := approvalCard("root", "rm -rf /tmp/x\r\x1b[2Kls -la", "tidy", 100)
+	if v := ansi.Strip(card); strings.Contains(card, "\x1b[2K") || !strings.Contains(v, "rm -rf /tmp/x") {
+		t.Fatalf("the card shows the real command with its escapes visible:\n%q", v)
+	}
+	// only #rrggbb paints a background role
+	for _, bad := range []string{"#fff", "#ffffffff", "term_0"} {
+		if validThemeValue("bg", bad) {
+			t.Fatalf("bg %q would paint nothing", bad)
+		}
+	}
+	if !validThemeValue("bg", "#f5f1e8") || !validThemeValue("text", "#fff") {
+		t.Fatal("#rrggbb paints; other roles keep their short forms")
+	}
+	// a replayed default-background sequence is followed by the row's colour again
+	if got := replayActive([]string{"\x1b[1m", "\x1b[49m"}, "<row>"); !strings.HasSuffix(got, "<row>") {
+		t.Fatalf("after a 49 the row colour comes back: %q", got)
+	}
+	// a hand-off that never reached the bridge comes back to the card
+	m := chatFixture(t)
+	m.seen = map[string]bool{"r1": true}
+	next, _ := m.Update(handoffDoneMsg{id: "r1", answered: false, text: "GitHub hand-offs need the caminus CLI (--cli)"})
+	if next.(emberModel).seen["r1"] {
+		t.Fatal("a failed hand-off is still pending: its card comes back")
+	}
+	// a line from a reader that is no longer current neither stops nor feeds the current one
+	m = chatFixture(t)
+	cur := &streamState{cancel: func() {}, sc: bufio.NewScanner(strings.NewReader(""))}
+	m.chat.stream = cur
+	next, _ = m.Update(residentLiveMsg{agent: m.agentName, epoch: m.residentEpoch, done: true, sc: bufio.NewScanner(strings.NewReader(""))})
+	if next.(emberModel).chat.stream != cur {
+		t.Fatal("a stale reader's end stopped the current reader")
 	}
 }

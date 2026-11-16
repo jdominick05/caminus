@@ -79,6 +79,8 @@ type residentChat struct {
 	pathPrefix, pathPick                    string
 	live                                    residentLive
 	stream                                  *streamState
+	streamStarting                          bool      // a reader is being started: the tick starts no second one
+	streamRetry                             time.Time // a reader that ended is restarted no sooner than this
 }
 
 // residentLive is the reply being generated: shown under the durable transcript and replaced by it when the
@@ -652,7 +654,9 @@ func (m *emberModel) scrollLive(delta int) {
 	if !l.active {
 		return
 	}
-	body := len(l.body(liveTextWidth(max(10, m.width-4))))
+	// the same lines the box shows (the thoughts at its width), so the first scroll does not jump: it measured the
+	// live reply alone at the full terminal width
+	body := len(m.thoughts(m.thoughtsWidth()))
 	window := m.liveWindow()
 	top := max(0, min(m.liveTop(body)+delta, max(0, body-window)))
 	l.top = top
@@ -668,6 +672,16 @@ const liveEmberMin = 50
 // liveTextWidth is the live reply's text column. Ember is drawn only on the welcome screen of a new goal now (the
 // user's call): the thoughts take the whole width.
 func liveTextWidth(inner int) int { return inner }
+
+// thoughtsWidth is the text width emberBox draws the thoughts at: the side panel's on a wide terminal, the chat's
+// otherwise.
+func (m emberModel) thoughtsWidth() int {
+	w := max(20, m.width)
+	if sw := m.sideWidth(); sw > 0 {
+		w = sw
+	}
+	return min(liveTextWidth(max(10, w-4)), readingWidth)
+}
 
 func (m emberModel) liveBlock(w int) string {
 	if m.sideWidth() > 0 {
@@ -915,6 +929,7 @@ func (c *residentChat) stopStream() {
 		c.stream = nil
 	}
 	c.live = residentLive{}
+	c.streamRetry = time.Now().Add(2 * time.Second) // a CLI that exits at once is not respawned every tick
 }
 
 func (c *residentChat) renderMarkdown(text string) string {

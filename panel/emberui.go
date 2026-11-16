@@ -568,8 +568,11 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The conversation page keeps one live reader open; it is started here so a page that was
 		// entered without a key press (a reopened session) streams too.
-		if m.tab == 6 && m.chat.stream == nil {
-			cmds = append(cmds, startStream(m))
+		if m.tab == 6 && m.chat.stream == nil && !m.chat.streamStarting && time.Now().After(m.chat.streamRetry) {
+			if c := startStream(m); c != nil {
+				m.chat.streamStarting = true
+				cmds = append(cmds, c)
+			}
 		}
 		return m, tea.Batch(cmds...)
 	case probeMsg:
@@ -728,14 +731,28 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case residentActionMsg:
 		m.msg = msg.text
 		return m, residentRefresh(m)
+	case handoffDoneMsg:
+		m.msg = msg.text
+		if !msg.answered {
+			delete(m.seen, msg.id) // still pending in the bridge: its card and count come back
+		}
+		return m, residentRefresh(m)
 	case residentStreamStartMsg:
+		m.chat.streamStarting = false
 		if msg.err != "" || msg.epoch != m.residentEpoch || msg.agent != m.agentName {
+			if msg.state != nil {
+				msg.state.cancel()
+			}
+			m.chat.streamRetry = time.Now().Add(2 * time.Second)
 			return m, nil
 		}
 		m.chat.stopStream()
 		m.chat.stream = msg.state
 		return m, streamLine(msg.agent, msg.epoch, msg.state.sc)
 	case residentLiveMsg:
+		if msg.sc != nil && (m.chat.stream == nil || msg.sc != m.chat.stream.sc) {
+			return m, nil // from a reader that is no longer the current one: it must not stop or feed the current one
+		}
 		if msg.epoch != m.residentEpoch || (msg.agent != "" && msg.agent != m.agentName) {
 			m.chat.stopStream()
 			return m, nil

@@ -120,10 +120,18 @@ func handoffLines(h map[string]any, width int) []string {
 // approveHandoff runs an approved GitHub hand-off through `caminus ember answer ID approved --digest D`: the CLI
 // re-checks the request against the digest the owner reviewed, builds the gh command from its checked fields and runs
 // it as the owner (no sudo, no shell). The outcome lands in the status line and reaches the agent as the answer.
+// handoffDoneMsg: a hand-off's run came back; answered is false when it never reached the bridge (no CLI, the CLI
+// failed), so the card comes back instead of vanishing while the request is still pending.
+type handoffDoneMsg struct {
+	id       string
+	answered bool
+	text     string
+}
+
 func approveHandoff(m emberModel, r emberReq) tea.Cmd {
 	return func() tea.Msg {
 		if len(m.cli) == 0 {
-			return residentActionMsg{"GitHub hand-offs need the caminus CLI (--cli)"}
+			return handoffDoneMsg{r.ID, false, "GitHub hand-offs need the caminus CLI (--cli)"}
 		}
 		argv := append(append([]string{}, m.cli[1:]...), "ember", "answer", r.ID, "approved", "--digest", r.Digest, "--json")
 		out, err := exec.Command(m.cli[0], argv...).CombinedOutput()
@@ -136,12 +144,12 @@ func approveHandoff(m emberModel, r emberReq) tea.Cmd {
 			Out string `json:"out"`
 		}
 		if err != nil || json.Unmarshal([]byte(text), &res) != nil {
-			return residentActionMsg{"GitHub hand-off failed: " + terminalText(cliError(out), false)}
+			return handoffDoneMsg{r.ID, false, "GitHub hand-off failed: " + terminalText(cliError(out), false)}
 		}
 		if res.RC != 0 {
-			return residentActionMsg{"GitHub refused the hand-off (the agent hears why)"}
+			return handoffDoneMsg{r.ID, true, "GitHub refused the hand-off (the agent hears why)"}
 		}
-		return residentActionMsg{"done on GitHub: " + terminalText(res.Out, false)}
+		return handoffDoneMsg{r.ID, true, "done on GitHub: " + terminalText(res.Out, false)}
 	}
 }
 
