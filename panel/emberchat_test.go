@@ -2429,9 +2429,19 @@ func TestRereviewFixesInThePanel(t *testing.T) {
 		t.Fatal("#rrggbb paints; other roles keep their short forms")
 	}
 	// a replayed default-background sequence is followed by the row's colour again
-	if got := replayActive([]string{"\x1b[1m", "\x1b[49m"}, "<row>"); !strings.HasSuffix(got, "<row>") {
-		t.Fatalf("after a 49 the row colour comes back: %q", got)
+	if got := replayActive([]string{"\x1b[39m", "\x1b[31m"}, "<row>"); got != "\x1b[39m<row>\x1b[31m" {
+		t.Fatalf("the row colour comes right after the 39, so the red set after it still wins: %q", got)
 	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	_ = os.MkdirAll(dir+"/caminus/themes", 0o755)
+	_ = os.WriteFile(dir+"/caminus/themes/badbg.theme", []byte("text = #202020\nbg = #fff\n"), 0o644)
+	saved := themeCurrent
+	if err := themeLoad("badbg"); err == nil || !strings.Contains(err.Error(), "#rrggbb") {
+		t.Fatalf("a theme with a refused background fails to load, saying why: %v", err)
+	}
+	themeCurrent = saved
+	applyThemeStyles()
 	// a hand-off that never reached the bridge comes back to the card
 	m := chatFixture(t)
 	m.seen = map[string]bool{"r1": true}
