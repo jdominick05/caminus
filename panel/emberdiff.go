@@ -107,7 +107,9 @@ func highlightLine(lexer chroma.Lexer, style *chroma.Style, code string) string 
 	if formatters.TTY16m.Format(&b, style, it) != nil {
 		return code
 	}
-	return strings.TrimRight(b.String(), "\n")
+	// (a lexer's comment token carries the line's newline inside its colour span, before the reset: a trim at the end
+	// missed it and the plate broke onto a second row)
+	return strings.ReplaceAll(b.String(), "\n", "")
 }
 
 // diffLines renders a unified diff body (without its ---/+++ header) for the file at path, w columns wide.
@@ -153,7 +155,7 @@ func diffLines(path, diff string, w int) []string {
 			oldN++
 			newN++
 		}
-		body := fmt.Sprintf("%4d %s ", num, mark) + highlightLine(lexer, style, terminalText(code, false))
+		body := fmt.Sprintf("%4d %s ", num, mark) + highlightLine(lexer, style, terminalText(strings.ReplaceAll(code, "\t", "    "), false))
 		if bg != "" {
 			// the plate runs the full width: re-applied after every reset inside the highlighted code
 			seq := bgSeq(bg)

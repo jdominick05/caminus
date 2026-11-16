@@ -2330,3 +2330,22 @@ func TestAGithubCardShowsTheTextItWillPost(t *testing.T) {
 		t.Fatalf("the detail view shows every field and the whole body:\n%s", detail)
 	}
 }
+
+func TestAnEditsPlateIsOneRowPerLineWithTabsExpanded(t *testing.T) {
+	diff := "@@ -455,1 +456,3 @@\n+// Update runs the message (cached per choice).\n func (m ctl) Update() {\n+\tnm, cmd := m.update(msg)"
+	rows := diffLines("panel/control.go", diff, 120)
+	if len(rows) != 3 {
+		t.Fatalf("three diff lines, three rows (a comment's newline broke the plate): %d %q", len(rows), rows)
+	}
+	for _, r := range rows {
+		if strings.Contains(r, "\n") || ansi.StringWidth(r) > 120 {
+			t.Fatalf("one row each, within the width: %q", r)
+		}
+	}
+	if v := ansi.Strip(rows[2]); strings.Contains(v, `\t`) || !strings.Contains(v, "+     nm, cmd") {
+		t.Fatalf("a tab is spaces, not an escape: %q", v)
+	}
+	if w0, w1 := ansi.StringWidth(rows[0]), ansi.StringWidth(rows[2]); w0 != w1 {
+		t.Fatalf("added lines' plates are one width: %d vs %d", w0, w1)
+	}
+}
