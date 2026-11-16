@@ -65,7 +65,9 @@ you can read, then run a relay: a small service on your account that holds the k
 stops at a daily cap.
 
 ```sh
-install -m 600 /dev/null ~/.config/caminus/deepinfra-key && $EDITOR ~/.config/caminus/deepinfra-key
+mkdir -p ~/.config/caminus
+[ -e ~/.config/caminus/deepinfra-key ] || install -m 600 /dev/null ~/.config/caminus/deepinfra-key
+$EDITOR ~/.config/caminus/deepinfra-key
 caminus ember relay install --provider deepinfra --cap-usd 3            # serves http://127.0.0.1:8766/v1/openai
 caminus ember agent install
 caminus ember agent init resident --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --endpoint http://127.0.0.1:8766/v1/openai
