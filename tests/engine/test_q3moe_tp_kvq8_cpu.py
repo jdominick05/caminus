@@ -216,14 +216,15 @@ for e in mm.E: e.run = lambda check=True, trace=None: None   # (no launch: the c
 mm._stage(1, 5); mm._tok = False
 mm.E[1].kv_error.fill_(2); mm.E[0].sync[2 * k3.MAXSEG + 1] = 1; mm.E[0].sync[2 * k3.MAXSEG + 2] = 0   # (and card 0's wait gave up)
 mm._pass_launch(5, 0)
+mm.E[1].kv_error.zero_()   # (the live word cleared after the launch's copy: only the pinned copy still holds 2, so a live read misses it)
 ITEM = torch.Tensor.item; reads = []
 torch.Tensor.item = lambda self: reads.append(1) or ITEM(self)
 r = raises(lambda: mm._pass_wait(5), errors.InvalidKVEncoding)
 torch.Tensor.item = ITEM
-check(r and mm.broken and mm._broken_error is errors.InvalidKVEncoding and not mm.bails and int(mm.E[1].kv_error[0]) == 2
+check(r and mm.broken and mm._broken_error is errors.InvalidKVEncoding and not mm.bails and int(mm.E[1].kv_error[0]) == 0
       and int(mm.h_st[1][k3.STATUS_WORDS]) == 2 and int(mm.h_st[0][k3.STATUS_WORDS]) == 0 and not reads and 'card 1' in mm.broken,
-      'card 1\'s refused block with card 0\'s wait given up: InvalidKVEncoding from the launch\'s one status copy per card, before the '
-      'bail path; no .item() read back, no bail, the word kept; the broken note names the card')
+      'card 1\'s refused block with card 0\'s wait given up: InvalidKVEncoding from the launch\'s one status copy per card (the live word '
+      'zeroed after the copy), before the bail path; no .item() read back, no bail; the broken note names the card')
 mm.reset()
 toks = [1] * 8
 check(mm.broken and raises(lambda: mm.step_token(toks, 0), errors.InvalidKVEncoding) and raises(lambda: mm.step(1), errors.InvalidKVEncoding)
