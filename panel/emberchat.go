@@ -559,18 +559,7 @@ func (m emberModel) sidePanel(sw, height int) string {
 		rows = append(rows, "")
 	}
 	rows = rows[:height]
-	// Ember sits in the panel's bottom-right corner, right above the composer, in rows nothing else needs (it gives
-	// way to tasks and a long command); it flickers while a reply is written
-	// (not while the /btw answer or the / menu sits between the panel and the composer: Ember would float over it)
-	if art := mascot(m.tickN % 2); height-used > len(art) && !m.chat.btw.open && !m.slashMenuOpen() {
-		if !m.chat.live.active {
-			art = mascot(0)
-		}
-		aw := lipgloss.Width(art[0])
-		for i, a := range art {
-			rows[height-len(art)+i] = strings.Repeat(" ", max(0, sw-aw-4)) + a // (a few columns in from the edge)
-		}
-	}
+	_ = used // (no Ember over the composer: the model's lab badge in the status line says who is answering)
 	for i, r := range rows {
 		rows[i] = ansi.Truncate(r, sw, "…")
 	}
@@ -1340,11 +1329,8 @@ func (m emberModel) btwSection(w int) string {
 	if !b.open {
 		return ""
 	}
-	art := mascotSmall(m.tickN % 2) // the answer's own small Ember (it blinks while it thinks)
-	if !b.loading {
-		art = mascotSmall(0)
-	}
-	artW := lipgloss.Width(art[0]) + 2
+	var art []string // (no Ember beside the answer; the section heading says what it is)
+	artW := 0
 	textW := max(10, min(readingWidth, w-1-artW))
 	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-4))
 	body := []string{emberBusy.Render("you ") + q}

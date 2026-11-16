@@ -2059,3 +2059,12 @@ func TestAMessageSitsOnTheComposerFrameAndNothingUnderTheStatusLine(t *testing.T
 		t.Fatalf("the border keeps its width: %d", w)
 	}
 }
+
+func TestTheModelPillCarriesItsLabsBadge(t *testing.T) {
+	for model, want := range map[string]string{"claude-haiku-5-5": "✳", "zai-glm-5-3-flash": "Z", "mistral-large-latest": "▞",
+		"codestral-latest": "▞", "deepseek-ai/DeepSeek-V4.1-Flash-1017": "◆", "k3-coder": "◈", "some-other-model": ansi.Strip(g.model)} {
+		if got := ansi.Strip(labBadge(model)); got != want {
+			t.Fatalf("%s: badge %q, want %q", model, got, want)
+		}
+	}
+}

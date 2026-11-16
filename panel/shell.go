@@ -324,6 +324,35 @@ func composerBox(input, title string, w int) string {
 	return borderTitle(emberBorder.Padding(0, 1).Width(w).Render(input), title, emberDim)
 }
 
+// labBadge is a small mark for the lab that made the model, in that lab's colour (a symbol, not the lab's logo: the
+// logos are trademarks and do not survive a terminal cell); an unknown model gets the plain model glyph.
+func labBadge(model string) string {
+	id := strings.ToLower(model)
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	if g.name == "ascii" {
+		return g.model
+	}
+	mark := func(sym, hex string) string {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Bold(true).Render(sym)
+	}
+	switch {
+	case strings.HasPrefix(id, "claude"):
+		return mark("✳", "#d97757") // Anthropic
+	case strings.Contains(id, "mistral") || strings.Contains(id, "stral") || strings.HasPrefix(id, "ministral"):
+		return mark("▞", "#fa520f") // Mistral (Codestral, Devstral, Magistral, Ministral)
+	case strings.Contains(id, "glm"):
+		return mark("Z", "#3b6cff") // Z.ai
+	case strings.Contains(id, "deepseek"):
+		return mark("◆", "#4d6bfe") // DeepSeek
+	case strings.Contains(id, "qwen") || strings.HasPrefix(id, "k3-") || strings.Contains(id, "swift") ||
+		strings.Contains(id, "thinkingcap") || strings.Contains(id, "arex"):
+		return mark("◈", "#615ced") // Qwen (and the local Caminus models, Qwen-based)
+	}
+	return g.model
+}
+
 // statusLine: brain, context, money and speed, then the keys that matter now. In the nerd tier the segments are
 // powerline pills; elsewhere they are joined by a dot.
 type status struct {
@@ -360,7 +389,7 @@ func statusLine(s status, w int) string {
 	}
 	bar := barSt.Render(strings.Repeat(g.bar, full)) + emberDim.Render(strings.Repeat(g.barEmpty, cells-full))
 	segs := []string{
-		strings.TrimSpace(g.model + " " + s.brain),
+		strings.TrimSpace(labBadge(s.brain) + " " + s.brain),
 		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
 	}
 	if s.usd >= 0 {
