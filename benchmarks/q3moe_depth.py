@@ -8,7 +8,7 @@ and arm, then RESULT DONE.
 An arm is name=module[@workgroups per WGP][:option=int ...] (engine options: attn_split, splits, lmin, gh, ...).
 --cards 2: the two-card engine (engine/q3moe_tp.py Q3MoETP, torch devices 0 and 1, its default split; CAMINUS_UPLOAD_LOG on
 every two-card run); --arms then names grids only (name=@workgroups per WGP, default: each card's own; :cap=N after it: at most
-N attention splits per kv head, 1 .. 128, default 64, e.g. c128=@card:cap=128; past 64 splits * 64 positions the arms'
+N attention splits per kv head, 1 .. 128, default 128 (q3moe_tp.SPLITS_CAP), e.g. c64=@card:cap=64; past 64 splits * 64 positions the arms'
 logits differ in their last bits, the attention's summation order). A pass is timed
 from card 0's launch to the host's return with both cards' argmax read back (the served pass's shape), and each card's
 own span is printed beside it. --local-only (with --cards 2): every exchange copies the card's own partial, so each card
@@ -36,6 +36,8 @@ if A.cards == 2:
     print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
     max_ctx = A.max_ctx or max(depths) + A.tokens + 1
     caps = [int(a.split('=', 1)[1].partition(':cap=')[2] or SPLITS_CAP) for a in arms]
+    if not all(1 <= c <= max(caps) <= 128 for c in caps) or min(caps) < 1:
+        raise SystemExit(f'q3moe_depth: arm caps {caps}: each must be 1 .. 128 (the two-card modules\' attention merge)')
     eng = Q3MoETP(A.gguf, max_ctx=max_ctx, local_only=A.local_only, vram_extra_mib=[len(arms) * Q3MoETP.TAPE_MIB] * 2,   # (+ a tape set per arm,
                   splits_cap=max(caps))                                                                                  #  the projection at the largest cap)
     print(f'max_ctx {max_ctx}: {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB; expert rows {eng.exp_rows}, kv heads {eng.kvc}, '

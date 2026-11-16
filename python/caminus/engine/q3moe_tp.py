@@ -42,7 +42,7 @@ from .own_layout import q6k_planes
 from .q35_dense_tp import cut, vocab_cut
 from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN
 
-SPLITS_CAP = 128         # the most attention splits per kv head on a card (splits_cap): one card's cap (64). A card holds half
+SPLITS_CAP = 128         # the most attention splits per kv head on a card (splits_cap); one card's engine caps at 64. A card holds half
                           # the kv heads, so 64 splits fill 128 of the XTX's 192 / the XT's 210 workgroups; the two-card
                           # modules' merge takes up to k3.ATS_MAXS_TP (128: XTX 96, XT 105 splits of 2 kv heads), the
                           # depth benchmark's arm option ':cap=128' (benchmarks/q3moe_depth.py). Measured 2026-11-15, XTX + XT: 128 gives 1.10 / 1.12 / 1.12x cap 64's decode at 16K / 32K / 40.9K, the same at 8 and 4K
@@ -140,7 +140,7 @@ class Q3MoETP:
         head's. local_only: TEST-ONLY, every exchange copies the card's own partial (no peer: each card's time alone; the
         logits are not the model's). vram_extra_mib: per card, what the caller allocates right after (checked with the
         engine's projection: another tape set is TAPE_MIB). splits_cap: the most attention splits per kv head on a card
-        (1 .. k3.atts_max_splits of the module: 128 on the two-card modules; default SPLITS_CAP = 64); each card takes
+        (1 .. k3.atts_max_splits of the module: 128 on the two-card modules; default SPLITS_CAP = 128); each card takes
         q3moe_one.splits_for(its kv heads, splits_cap), and the projection counts the cap's scratch"""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoETP: {path} is a {F.arch!r} GGUF, not qwen3moe')
