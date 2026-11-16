@@ -841,6 +841,47 @@ class Resident(unittest.TestCase):
         try:self.assertIn('search',[t['function']['name'] for t in rt.tools])
         finally:rt.mail.close();rt.store.close()
 
+    def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
+        from caminus.ember.resident import advisor as adv, web, judge
+        # a poll returns everything since the last poll (the preparation step read and lost the first chunk)
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        t.call(sid,dict(command='printf one; sleep 0.6; printf two; sleep 0.6',yield_ms=50))
+        time.sleep(0.9)
+        t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0,_prepare=True))
+        got=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
+        self.assertIn('two',got,'the preparation step reads nothing, so the poll still gets it')
+        # the advisor's per-goal calls are counted past the first 200 events
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            for i in range(250):rt.store.event('note',dict(i=i),gid)
+            rt.store.event('advice',dict(model='m'),gid)
+            self.assertEqual(adv.Advisor(rt).calls(gid),1)
+            # STATE.md follows the goal whose action runs
+            other=rt.store.enqueue('Other.')
+            rt.memory.switch_state(gid);(self.home/'STATE.md').write_text('mine')
+            rt.memory.switch_state(other)
+            self.assertFalse((self.home/'STATE.md').exists(),'the other goal starts with no state')
+            rt._action(dict(id=uuid.uuid4().hex,goal=gid,name='todo',args=json.dumps(dict(items=[]))))
+            self.assertEqual((self.home/'STATE.md').read_text(),'mine','an action of goal A brings back A\'s STATE.md')
+        finally:rt.mail.close();rt.store.close()
+        # an unknown charset falls back instead of ending the goal
+        class R:
+            status=200;headers={'Content-Type':'text/html; charset=foo'};url='http://x/'
+            def read(s,n=-1):return b'<html><title>T</title><p>hello</p></html>'
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+            def geturl(s):return s.url
+            def getheader(s,k,d=None):return s.headers.get(k,d)
+        with unittest.mock.patch('urllib.request.urlopen',lambda *a,**k:R()):
+            try:out=web.fetch(None,'http://x/')
+            except LookupError:self.fail('an unknown charset ended the call')
+            except Exception:out=None
+        # a gate that leaves a background process still times out
+        t0=time.time()
+        ok,msg=judge.run_gate(str(self.home),'sleep 30 & sleep 30',timeout=1)
+        self.assertFalse(ok);self.assertLess(time.time()-t0,10,'the timeout bounds the gate: '+msg)
+
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
@@ -2007,6 +2048,13 @@ for line in sys.stdin:
             self.assertEqual(stop.stat().st_mode&0o777,0o640,'group-readable, not group-writable: the agent cannot rewrite it')
             with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--clear'])
             self.assertFalse(stop.exists())
+            # a STOP the agent planted as a symlink to one of the owner's files: replaced, the target untouched
+            victim=self.home/'authorized_keys';victim.write_text('ssh-ed25519 KEEP\n')
+            stop.symlink_to(victim)
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--reason','x'])
+            self.assertEqual(victim.read_text(),'ssh-ed25519 KEEP\n','the link target is never written')
+            self.assertFalse(stop.is_symlink());self.assertEqual(stop.read_text(),'x\n')
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--clear'])
         finally:
             if old is None:os.environ.pop('CAMINUS_ENV_BRIDGE',None)
             else:os.environ['CAMINUS_ENV_BRIDGE']=old
@@ -3592,6 +3640,16 @@ for line in sys.stdin:
         with self.assertRaises(ValueError):human_bridge.answer(str(self.bridge),rid,'approved','human',rc=0)
         self.assertFalse((self.home/'root-proof').exists())
 
+    def test_cancel_withdraws_a_github_handoff_too(self):
+        cfg=json.loads((self.home/'config.json').read_text())
+        cfg['github']=dict(login='agent',id=1,token_file=str(self.home/'nope'),repos={'a/b':'read'})
+        (self.home/'config.json').write_text(json.dumps(cfg))
+        self.replies(call('github_handoff',dict(action='comment',repo='a/b',number=3,body='Fixed in the latest push.',reason='read-only token')))
+        first=self.cmd('once',['--goal','Ask for the comment.'],code=21)
+        rid=first['pending'][0]['request_id']
+        self.cmd('cancel',[first['id']])
+        self.assertEqual(approval.response(self.bridge,rid)['decision'],'withdrawn','a hand-off is withdrawn like a root request')
+
     def test_approval_claim_wins_once_and_cancel_does_not_erase_it(self):
         self.replies(call('ask_root',dict(command='id -u',reason='fixture')))
         first=self.cmd('once',['--goal','Request approval.'],code=21)
@@ -3840,9 +3898,9 @@ for line in sys.stdin:
         # only a queued goal moves; out-of-range positions are refused (exit 1)
         self.cmd('cancel',[a])
         self.cmd('queue',['move',a,'--to','1'],code=1)
+        self.cmd('queue',['move',c,'--to','5'],code=1)   # c is still queued (alone): position 5 is out of range
         self.cmd('queue',['remove',c],code=0)
-        self.cmd('queue',['move',c,'--to','5'],code=1)
-        self.cmd('queue',['remove',c],code=1)
+        self.cmd('queue',['remove',c],code=1)             # no longer queued
 
     def test_export_writes_the_goal_transcript_as_markdown(self):
         from caminus.ember.resident import export as export_mod
@@ -4099,7 +4157,7 @@ for line in sys.stdin:
         with self.assertRaises(ValueError) as erm:
             leases.take(rt,'goalx',cards=[1],reason='bench')
         msg=str(erm.exception)
-        self.assertIn('mkdir -p',msg) and self.assertIn('chmod 2770',msg)
+        self.assertIn('mkdir -p',msg);self.assertIn('chmod 2770',msg)
         self.assertIn('sudo',msg)
 
 class Wire:

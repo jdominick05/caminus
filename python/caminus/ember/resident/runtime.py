@@ -892,6 +892,13 @@ class Runtime:
         refused = False
         ignored = ''          # the note naming unknown arguments that were dropped
         signature = None
+        # STATE.md is the goal's whose action runs now: it moved only when a model turn started, so when two goals
+        # interleaved, A's 'write STATE.md' landed in B's file and was filed as B's state at A's next turn
+        if getattr(self, 'memory', None) is not None:
+            try:
+                self.memory.switch_state(action['goal'])
+            except OSError:
+                pass
         try:
             args = json.loads(action['args'])
             if not isinstance(args, dict):
@@ -1020,7 +1027,9 @@ class Runtime:
                 elif name == 'rollback':
                     result = self._rollback(action['goal'], args['id'])
                 elif name == 'terminal':
-                    result = self.terminal.call(action['id'],{**args,'yield_ms':0})
+                    # (launch or queue input only: reading here advanced the cursor, and the poll below then lost the
+                    # output since the last poll)
+                    result = self.terminal.call(action['id'],{**args,'yield_ms':0,'_prepare':True})
                 elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch') or name.startswith('mcp__'):
                     result = None         # catalog queries, network calls and waits stay outside the write transaction
                 elif name == 'peers':

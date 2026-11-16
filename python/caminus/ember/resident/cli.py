@@ -904,7 +904,9 @@ def main(argv=None,stdin=None):
             with store.transaction():
                 store.goal(gid)
                 bridge=Path(json.loads((home/'config.json').read_text())['bridge']).expanduser()
-                for act in store.db.execute("SELECT id,bridge_id FROM actions WHERE goal=? AND name IN ('ask_root','ask_user') AND state!='done'",(gid,)):
+                # every request this goal filed, whatever its action's state: with non-blocking approvals the action
+                # is already done once 'pending' is stored, and GitHub hand-offs were never withdrawn at all
+                for act in store.db.execute("SELECT id,bridge_id FROM actions WHERE goal=? AND name IN ('ask_root','ask_user','github_handoff')",(gid,)):
                     rid=act['bridge_id'] or act['id'][:16]
                     if (bridge/'req'/(rid+'.json')).exists():
                         result=approval.withdraw(bridge,rid,gid)
