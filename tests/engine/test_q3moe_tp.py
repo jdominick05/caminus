@@ -95,7 +95,8 @@ MODN = 'k3_q3m_lean_tp_kvq8' if Q8 else 'k3_q3m_lean_tp'
 check(eng.module == MODN and eng.E[0].module == eng.E[1].module == MODN
       and all(d[c]['cache'].dtype == (torch.uint8 if Q8 else torch.float16) for d in eng.L for c in (0, 1)), f'both cards decode on {MODN}')
 oracle = None
-if Q8:   # the row oracle: on each card the F16 row kernel on that card's last-layer q | k | v, its halves encoded by caminus.ref_kv
+DIAG = bool(os.environ.get('Q3M_ROWS_DIAG'))
+if Q8 or DIAG:   # the row oracle: on each card the F16 row kernel on that card's last-layer q | k | v, its halves encoded by caminus.ref_kv
     from caminus import ref_kv
     from caminus.prefill import q3m_ops
     oracle = []
@@ -105,7 +106,7 @@ if Q8:   # the row oracle: on each card the F16 row kernel on that card's last-l
             oracle.append(dict(ops=q3m_ops.Ops(torch.device(f'cuda:{eng.devs[c]}'), 'q3m_prefill'), lay=ref_kv.Q8KVLayout(nkv_c, eng.hd),
                                nkv=nkv_c, nh=nh_c, Mk=Mk, oc=torch.zeros((max_ctx + 1) * 2 * Mk, dtype=torch.float16, device=f'cuda:{eng.devs[c]}'),
                                oq=torch.zeros(nh_c * eng.hd, dtype=torch.float16, device=f'cuda:{eng.devs[c]}')))
-rows_bad = []
+rows_bad, rows_rope = [], []
 
 
 def rows_check(i):
@@ -117,7 +118,24 @@ def rows_check(i):
             torch.cuda.synchronize()
         hh = o['oc'][i * 2 * Mk:(i + 1) * 2 * Mk].float().cpu().numpy()
         want = ref_kv.encode_q8_kv(ref_kv.hadamard128(hh[:Mk].reshape(1, o['nkv'], eng.hd)), hh[Mk:].reshape(1, o['nkv'], eng.hd), o['lay'])[0]
-        if not np.array_equal(eng.L[-1][c]['cache'][i * rb:(i + 1) * rb].cpu().numpy(), want): rows_bad.append((c, i))
+        if not Q8:   # (diagnostic: the F16 engine's own K | V halves against the same oracle)
+            g16 = eng.L[-1][c]['cache'][i * 2 * Mk:(i + 1) * 2 * Mk].view(torch.int16).cpu().numpy(); w16 = o['oc'][i * 2 * Mk:(i + 1) * 2 * Mk].view(torch.int16).cpu().numpy()
+            if not np.array_equal(g16, w16):
+                rows_bad.append((c, i)); d = np.nonzero(g16 != w16)[0]
+                print(f'  f16 row diff card {c} pos {i}: {len(d)} halves, K {int((d < Mk).sum())}, V {int((d >= Mk).sum())}, max ulp {int(np.abs(g16[d].astype(np.int32) - w16[d]).max())}', flush=True)
+            continue
+        got = eng.L[-1][c]['cache'][i * rb:(i + 1) * rb].cpu().numpy()
+        if np.array_equal(got, want): continue
+        # The oracle's halves come from the prefill row kernel, whose RoPE differs from the decode op's by 1-2 fp16 ulp
+        # in one K value at about 0.3 % of positions (measured on the F16 engine: 27 of 8,400 card rows at 4,200
+        # positions, V never). Such a K input moves at most one int8 code or one scale LSB in its block. So: V bytes
+        # exact; K bytes within one code / one scale LSB; anything else is a defect.
+        kb = o['nkv'] * eng.hd // 32 * 34; d = np.nonzero(got != want)[0]
+        dk = d[d < kb]; dv = d[d >= kb]
+        codes = [abs(int(np.int8(got[j])) - int(np.int8(want[j]))) for j in dk if (j % 34) >= 2]
+        sc = [abs(int(got[j - j % 34: j - j % 34 + 2].view(np.uint16)[0]) - int(want[j - j % 34: j - j % 34 + 2].view(np.uint16)[0])) for j in dk if (j % 34) < 2]
+        if len(dv) or any(x > 1 for x in codes) or any(x > 1 for x in sc): rows_bad.append((c, i))
+        else: rows_rope.append((c, i))
 
 
 def run(seq_in, extend, rows=False):
@@ -134,14 +152,15 @@ def run(seq_in, extend, rows=False):
 
 
 # ---- the reference at each card's default grid ---------------------------------------------------------------------------
-seq, ref, rep, nb = run(first, True, rows=Q8)
+seq, ref, rep, nb = run(first, True, rows=Q8 or DIAG)
+if DIAG and not Q8: print(f'F16 ROWS DIAG: {len(rows_bad)} of {2 * npos} card rows differ from the prefill-kernel oracle: {rows_bad[:12]}', flush=True)
 check(not rep and nb == 0 and all(finite(r) for r in ref),
       f'{npos} greedy passes at the default grid {eng.per_wgp_c}: finite logits, the replicas equal after every pass, 0 bails'
       + (f' (replicas differ at {rep[:8]})' if rep else '') + (f' ({nb} bails)' if nb else ''))
 if Q8:
     check(not rows_bad and all(int(e.kv_error[0]) == 0 for e in eng.E),
-          f'Q8 rows: each card\'s last-layer row at each of {npos} positions byte for byte encode_q8_kv(hadamard128(K), V) of the F16 row '
-          f'kernel\'s halves for that card\'s q | k | v; both error words 0' + (f' (differ at (card, position) {rows_bad[:8]})' if rows_bad else ''))
+          f'Q8 rows: each card\'s last-layer row at each of {npos} positions against encode_q8_kv(hadamard128(K), V) of the F16 row '
+          f'kernel\'s halves for that card\'s q | k | v (V exact; K within one code or one scale LSB where the oracle\'s RoPE differs by an ulp: {len(rows_rope)} rows); both error words 0' + (f' (differ at (card, position) {rows_bad[:8]})' if rows_bad else ''))
 if A.tiny:
     from caminus.ref_q3moe import Q3MoERef
     rm, n_cmp, agree, klds = Q3MoERef(P), min(6, npos), 0, []
