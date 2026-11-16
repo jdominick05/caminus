@@ -280,6 +280,13 @@ class ContextFit(unittest.TestCase):
             cli.parse(['--kv', 'q4'])
         kvo = next(o for o in cli.options_json() if o['dest'] == 'kv')
         self.assertEqual((kvo['flag'], kvo['default'], kvo['choices']), ('--kv', 'f16', ['f16', 'q8']))
+        # a config file's kv key (load_config takes DEFAULTS' names): it reaches opt, and the command line wins over it
+        cfg8, cfg4 = SCRATCH / 'kv-q8.toml', SCRATCH / 'kv-q4.json'
+        cfg8.write_text('kv = "q8"\n')
+        cfg4.write_text('{"kv": "q4"}')
+        self.assertEqual(cli.parse(['--config', str(cfg8)])['kv'], 'q8')
+        self.assertEqual(cli.parse(['--config', str(cfg8), '--kv', 'f16'])['kv'], 'f16')
+        self.assertEqual(cli.parse(['--config', str(cfg4)])['kv'], 'q4')            # (argparse's choices never see a file's value)
         sys.path.insert(0, str(Path(__file__).resolve().parent / 'engine'))
         import tiny_q3m
         path = SCRATCH / 'fit-q3moe-kv.gguf'
@@ -289,6 +296,13 @@ class ContextFit(unittest.TestCase):
         A = cli.recipe(opt16, log=lambda *a, **kw: None)
         self.assertIs(cli.recipe(opt8, log=lambda *a, **kw: None), A)
         self.assertIs(A, arch.ARCHS['qwen3moe'])
+        self.assertIs(cli.recipe(cli.parse(['--config', str(cfg8), *argv]), log=lambda *a, **kw: None), A)
+        self.assertTrue(A.kv_check(cli.parse(['--config', str(cfg8), *argv])))       # (the file's q8 is what the entry builds)
+        with patch.object(host, 'place') as place:
+            # (a file's value outside f16 / q8: the recipe refuses it before any placement, so a typo never serves F16)
+            with self.assertRaisesRegex(ValueError, r"kv 'q4': 'f16' or 'q8'"):
+                cli.recipe(cli.parse(['--config', str(cfg4), *argv]), log=lambda *a, **kw: None)
+            place.assert_not_called()
         need16, need8 = A.auto_need(opt16, 4)[3], A.auto_need(opt8, 4)[3]
         # (the room halfway between F16's 36,864 and 40,960 positions; the tiny file's Q8 cache at 40,960 is below both)
         room = (need16(36864)[0] + need16(40960)[0]) / 2

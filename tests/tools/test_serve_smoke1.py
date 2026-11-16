@@ -1,5 +1,5 @@
-"""The one-card smoke's strict tool acceptance check (CPU, synthetic SSE, no sockets or model), and its server command's
---kv / --restart-kv flags.
+"""The one-card smoke's strict tool acceptance check (CPU, synthetic SSE, no sockets or model), its server command's
+--kv / --restart-kv flags, and its --kv check on the loaded code objects (kv_objects).
 
   python -I tests/tools/test_serve_smoke1.py
 
@@ -188,6 +188,41 @@ class ToolRoundTrip(unittest.TestCase):
         for reply in bad_replies:
             with self.subTest(reply=reply):
                 self.assert_failed(self.run_round_trip(stream([call()]), reply), 2)
+
+
+class KvObjects(unittest.TestCase):
+    """kv_objects: the --kv check on /props caminus.code_objects (the F16 lists are the ones served Qwen3-30B-A3B
+    smokes recorded; the Q8 lists swap in the Q8 decode module and add q3m_prefill_kvq8, which the prefill loads beside
+    q3m_prefill)"""
+    F16_1 = ['k3_q3m_lean', 'q3m_prefill', 'own_topk']
+    F16_2 = ['k3_q3m_lean_tp', 'q3m_prefill', 'q3m_prefill_tp', 'prefill_tp', 'own_topk']
+    Q8_1 = ['k3_q3m_lean_kvq8', 'q3m_prefill', 'q3m_prefill_kvq8', 'own_topk']
+    Q8_2 = ['k3_q3m_lean_tp_kvq8', 'q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_tp', 'prefill_tp', 'own_topk']
+
+    def ok(self, objs, kv):
+        return smoke.kv_objects(objs, kv)[0]
+
+    def test_each_format_passes_its_own_objects_only(self):
+        for objs in (self.F16_1, self.F16_2):
+            self.assertTrue(self.ok(objs, 'f16'), objs)
+            self.assertFalse(self.ok(objs, 'q8'), objs)
+        for objs in (self.Q8_1, self.Q8_2):
+            self.assertTrue(self.ok(objs, 'q8'), objs)
+            self.assertFalse(self.ok(objs, 'f16'), objs)
+
+    def test_q8_refuses_its_f16_base_or_a_missing_q8_prefill(self):
+        self.assertFalse(self.ok(['k3_q3m_lean'] + self.Q8_1, 'q8'))                     # (the F16 decode module beside it)
+        self.assertFalse(self.ok(['k3_q3m_lean_tp'] + self.Q8_2, 'q8'))
+        self.assertFalse(self.ok([o for o in self.Q8_1 if o != 'q3m_prefill_kvq8'], 'q8'))   # (the prefill on F16 rows)
+        self.assertFalse(self.ok([o for o in self.Q8_2 if o != 'q3m_prefill_kvq8'], 'q8'))
+        self.assertFalse(self.ok(self.F16_1 + ['q3m_prefill_kvq8'], 'q8'))               # (no Q8 decode module)
+        self.assertFalse(self.ok(self.F16_1 + ['q3m_prefill_kvq8'], 'f16'))              # (f16: no *_kvq8 object at all)
+
+    def test_an_empty_or_missing_list_passes_neither(self):
+        for objs in ([], None):
+            self.assertFalse(self.ok(objs, 'q8'))
+            self.assertFalse(self.ok(objs, 'f16'))
+        self.assertIn("'q3m_prefill_kvq8'", smoke.kv_objects(self.Q8_1, 'q8')[1])
 
 
 class ServerCommand(unittest.TestCase):

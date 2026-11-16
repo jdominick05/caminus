@@ -36,9 +36,10 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   card or two, stores the attention cache in 8-bit rows (the keys rotated first) at about half the memory per token of
   context: 0.050 MiB instead of 0.094. F16 stays the default. The context stays the model's 40,960 tokens, but the
   full context fits with more of the card in use: on an XTX with the desktop holding 1 GiB, 40,960 tokens with the
-  8-bit cache, 32,768 with F16. Decode is about as fast (engine-level: on one XTX 0.97x on short turns, 1.06x with a
-  full context; on two cards within 2 %), and it changes the output less than llama.cpp's 8-bit cache changes
-  llama.cpp's. A conversation
+  8-bit cache, 32,768 with F16 (projected). Decode is about as fast (engine-level: on one XTX 0.97x on short turns,
+  1.06x with a full context; on two cards within 2 %). By mean KL divergence it changes the output less than
+  llama.cpp's 8-bit cache changes llama.cpp's; top-1 agreement with the F16 cache is within one row of llama.cpp's
+  (one card at 16,384 tokens: 60 of 64 rows against its 61). A conversation
   saved in one format is never restored by a server running the other. `/props` reports the cache
   (`caminus.kv_cache`) and `caminus ps` shows it. Every other model refuses `--kv q8`. See
   [models](docs/models.md#the-8-bit-kv-cache-qwen3-30b-a3b).

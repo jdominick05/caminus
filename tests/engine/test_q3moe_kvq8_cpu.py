@@ -29,7 +29,8 @@ in host memory; nothing is launched), with the tiny synthetic file (tests/engine
     earlier draft's unrotated id hashes differently (its rows never restore into this engine)
   - the park round trip (caminus serve --kv q8; tests/engine/kv_park_rt.py): each layer's Q8 byte rows back from a
     checkpoint slot, from a park in the same process and after a restart (a new engine and cache on the directory), byte for
-    byte; negative controls (two layers' reads swapped, one layer read a row late) differ in exactly those layers. An F16
+    byte, rows past the restored positions still zero; negative controls (two layers' reads swapped, one layer read a row
+    late) differ in exactly those layers (the late one also past the positions). An F16
     server's park is not offered to a Q8 server and a Q8 park not to an F16 one (cold, rows untouched); the park's own
     format restores it (the positive control)
   - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows; every
@@ -313,6 +314,11 @@ m.kv_format_id = OLD_ID; ko = prompt.engine_key(m, pfk, build='fixture'); m.kv_f
 check(q3moe_one.KV_FORMAT_Q8 != OLD_ID and 'hadamard128' in q3moe_one.KV_FORMAT_Q8 and ko['tp'].get('kv') == OLD_ID
       and prompt.key_hash(ko) != prompt.key_hash(kq),
       f'the format id names the rotation ({q3moe_one.KV_FORMAT_Q8!r}); a key with the earlier unrotated id hashes differently: its rows never restore here')
+from caminus.cmd import replay
+check(replay.kv_of_key(kq) == 'q8' and replay.kv_of_key(kf_) == 'f16' and replay.kv_of_key(None) == 'f16'
+      and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kq))) is True
+      and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kf_))) is False,
+      'caminus replay: a bundle whose engine key is the Q8 engine\'s builds the entry with kv q8, an F16 key (no kv entry) with f16')
 
 # ---- the park round trip on the Q8 engine (caminus serve --kv q8: its byte rows through a checkpoint slot, a park and an unpark
 # after a restart), negative controls, and the format mismatch both ways (tests/engine/kv_park_rt.py) ---------------------------
@@ -335,7 +341,7 @@ def rt_late(w, eng):            # (layer 1 read one row late)
 
 check(prompt.Layout(mk1(True)()).pb == [rb], f'round trip engine: Q3MoEOne(q8=True) at max_ctx {RT_CTX}, a {rb}-byte Q8 row per layer')
 RT.round_trip(mk1(True), check, os.path.join(A.scratch, 'cache-q8'), info['V'], 'Q8 one card',
-              [('layers 0 and 1 swapped', rt_swap, [(0, 0), (0, 1)]), ('layer 1 one row late', rt_late, [(0, 1)])])
+              [('layers 0 and 1 swapped', rt_swap, [(0, 0), (0, 1)], []), ('layer 1 one row late', rt_late, [(0, 1)], [(0, 1)])])
 RT.mismatch(mk1(False), mk1(True), check, os.path.join(A.scratch, 'cache-f16-then-q8'), info['V'], 'an F16 park, a Q8 server (one card)')
 RT.mismatch(mk1(True), mk1(False), check, os.path.join(A.scratch, 'cache-q8-then-f16'), info['V'], 'a Q8 park, an F16 server (one card)')
 

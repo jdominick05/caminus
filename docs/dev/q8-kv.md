@@ -2,9 +2,11 @@
 
 Qwen3-30B-A3B's Q8 KV cache is served (`caminus serve --kv q8`, one card or two: [below](#serving-qwen3-30b-a3b-with---kv-q8)).
 The dense line's is staged: the own-code dense line has separate `*_kvq8` persistent objects. They keep the F16 objects
-and the weight-format selection unchanged. `Dense35Own(..., q8=True)` is an internal bring-up path; `caminus serve --kv
-q8` refuses the dense models and the panel offers no Q8 choice for them. Batched prefill refuses a Q8 engine until its
-matching implementation lands. Device correctness, model accuracy and speed are not yet verified for these objects.
+and the weight-format selection unchanged. `Dense35Own(..., q8=True)` is an internal bring-up path: `caminus serve --kv
+q8` refuses the dense models at startup, before any card is picked. The panel's advanced layout lists `--kv` for every
+model, as it lists every serve option, and its values are saved: a `q8` set there goes to every later start from that
+layout, and a dense model or the Coder started with it refuses to start (nothing is ignored silently). Batched prefill refuses a Q8 engine until its matching implementation
+lands. Device correctness, model accuracy and speed are not yet verified for these objects.
 
 ## Objects
 
@@ -271,7 +273,8 @@ a plain `(_Float16)fmaf(...)` let the backend fuse it into one `v_fma_mix*_f16` 
 disagrees with the two-step rounding on about 6e-5 of values, and the transform spreads each such ulp over the head. The rotated objects passed on a device on 2026-11-16: the op test, the one-card decode and the prefill on the XT, and on
 the XTX the G-model gates: mean KLD against the reference 1.15e-3 (128 rows), 3.66e-3 (16,384), 2.35e-3 (40,896), and
 against our own F16 cache 1.19e-3 / 3.57e-3 / 1.87e-3, each below llama.cpp's own F16 to q8_0 cost (4.17e-3 / 6.63e-3 /
-4.24e-3). The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
+4.24e-3); top-1 agreement with our F16 cache 100 % / 93.8 % (60 of 64 rows) / 100 %, llama.cpp's with its own F16 cache
+97.4 % / 95.3 % / 95.3 % (at 16,384 one row behind it: within the one-row bar). The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
 40,896 positions), and failed the 128-token G-model gate: mean KLD 5.40e-3 against float64 (llama.cpp's q8_0 KV
 3.68e-3) and 5.53e-3 against our F16 cache (llama.cpp's own F16 to q8_0 cost 4.17e-3); the rotation is the answer to
 that row.
@@ -422,7 +425,10 @@ CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py 
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR3 --card 0 --restart --restart-kv q8
 ```
 
-`--kv q8` checks `/props`' cache and that the decode objects the server loaded are the Q8 ones (not their F16 bases);
-`--restart` restores the long prompt from the Q8 park. The third run starts F16, parks, and restarts with `--kv q8` on the
-same directories: the F16 parks must be on disk before the restart and still there after it, and the long prompt must
-come back from cold (the F16 park is not offered).
+`--kv q8` checks `/props`' cache and the code objects the server loaded (`tools/serve_smoke1.py kv_objects`): a Q8
+decode module and not its F16 base, and `q3m_prefill_kvq8` beside `q3m_prefill`; `--restart` restores the long prompt
+from the Q8 park, and the restarted server's objects are checked the same way. The third run starts F16, parks, and
+restarts with `--kv q8` on the same directories: the F16 parks must be on disk before the restart and still there after
+it, the long prompt must come back from cold (the F16 park is not offered), and the second server's objects must be the
+Q8 ones. These served gates have not run yet: the device results above come from the engines' and the prefill's own
+gates, not from a server.

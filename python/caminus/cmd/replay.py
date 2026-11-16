@@ -41,6 +41,13 @@ def key_diff(a, b, path=''):
     return [] if a == b else [path]
 
 
+def kv_of_key(key):
+    """the --kv a bundle's server ran, from its engine key: 'q8' when the key names an own Q8 KV format (tp.kv, set from
+    the engine's kv_format_id: caminus serve --kv q8), else 'f16' (an F16 engine, or one whose own cache is not selectable:
+    the Coder's q8_0 rows carry no tp.kv)"""
+    return 'q8' if ((key or {}).get('tp') or {}).get('kv') else 'f16'
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='caminus replay', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('bundle')
@@ -99,7 +106,7 @@ def main(argv=None):
     opt = dict(model=model, max_ctx=int(eng['max_ctx']), chunk=2048, no_drafter=not eng.get('drafter', True),
                drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER,
                # (a Q8 KV server's bundle: its key names the format (caminus serve --kv q8), so the engine is built with it)
-               kv='q8' if ((eng.get('key') or {}).get('tp') or {}).get('kv') else 'f16')
+               kv=kv_of_key(eng.get('key')))
     m, pf, df, dr = A.build(opt, log=print, T=T)
     for d in m.devs: torch.cuda.synchronize(d)
     pc = PC.PromptCache(m, pf, dr, cache_dir=cdir, retention_days=1e6)

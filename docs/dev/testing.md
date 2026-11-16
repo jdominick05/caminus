@@ -143,14 +143,15 @@ Served, each under the guard (the one-card runs on the XTX), each with a fresh s
 an earlier run's park would be restored):
 
 ```bash
-# 1. one card: /props names q8, the Q8 decode objects loaded (not their F16 bases), own imports, the park restored
+# 1. one card: /props names q8, the Q8 decode object loaded (not its F16 base) with q3m_prefill_kvq8, own imports, the
+#    park restored, the restarted server's objects the Q8 ones again
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR1 --card 0 --kv q8 \
   --block-imports gguf,tokenizers --restart
 # 2. two cards: the same
 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR2 --card 0,1 \
   --cards 2 --kv q8 --block-imports gguf,tokenizers --restart
-# 3. the mismatch: an F16 server parks (its parks must be on disk), a Q8 server on the same directories reads the long
-#    prompt from cold and leaves those parks on disk
+# 3. the mismatch: an F16 server parks (its parks must be on disk), a Q8 server on the same directories (its objects
+#    the Q8 ones) reads the long prompt from cold and leaves those parks on disk
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR3 --card 0 --restart --restart-kv q8
 ```
 

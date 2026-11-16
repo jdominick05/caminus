@@ -25,8 +25,9 @@ tp=True: 4 kv heads, 2 per card).
   - the prompt cache: the checkpoint layout's row on each card is that card's Q8 row; the engine key carries the KV format
     and the Q8 module (the F16 two-card key's tp entries unchanged: no 'kv'), so neither restores into the other
   - the park round trip (caminus serve --cards 2 --kv q8; tests/engine/kv_park_rt.py): each card's and layer's Q8 byte rows
-    back from a checkpoint slot, from a park in the same process and after a restart, byte for byte; negative controls (card
-    0's and card 1's layer 0 swapped, card 1's layer 1 read a row late) differ in exactly those views. An F16 two-card
+    back from a checkpoint slot, from a park in the same process and after a restart, byte for byte, rows past the restored
+    positions still zero; negative controls (card 0's and card 1's layer 0 swapped, card 1's layer 1 read a row late)
+    differ in exactly those views (the late one also past the positions). An F16 two-card
     park is not offered to a Q8 two-card server and a Q8 one not to an F16 one (cold, rows untouched); the park's own
     format restores it (the positive control)
   - the registry: 'qwen3moe-tp' takes opt['kv'] = 'q8' (kv_formats); auto_need counts the Q8 projection and checkpoint
@@ -277,6 +278,11 @@ check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and kq['module'] == TPQ and k
       and prompt.key_hash(kq) != prompt.key_hash(kf_),
       'engine key: the Q8 engine\'s carries its KV format and module; the F16 two-card key\'s tp entries are the ones it had (no kv), '
       'so neither restores into the other')
+from caminus.cmd import replay
+tpa = arch.ARCHS[arch.TWO_CARD['qwen3moe']]
+check(replay.kv_of_key(kq) == 'q8' and replay.kv_of_key(kf_) == 'f16'
+      and tpa.kv_check(dict(kv=replay.kv_of_key(kq))) is True and tpa.kv_check(dict(kv=replay.kv_of_key(kf_))) is False,
+      'caminus replay: a two-card Q8 bundle\'s engine key builds the entry with kv q8, the F16 two-card key with f16')
 
 # ---- the park round trip on the two-card Q8 engine (caminus serve --cards 2 --kv q8: each card's byte rows through a checkpoint
 # slot, a park and an unpark after a restart), negative controls, and the format mismatch both ways (tests/engine/kv_park_rt.py) --
@@ -298,7 +304,8 @@ def rt_late(w, eng):            # (card 1's layer 1 read one row late)
 
 
 RT.round_trip(mk2(True), check, os.path.join(A.scratch, 'cache-tp-q8'), info['V'], 'Q8 two cards',
-              [('card 0 and card 1 swapped on layer 0', rt_swap, [(0, 0), (1, 0)]), ('card 1\'s layer 1 one row late', rt_late, [(1, 1)])])
+              [('card 0 and card 1 swapped on layer 0', rt_swap, [(0, 0), (1, 0)], []),
+               ('card 1\'s layer 1 one row late', rt_late, [(1, 1)], [(1, 1)])])
 RT.mismatch(mk2(False), mk2(True), check, os.path.join(A.scratch, 'cache-tp-f16-then-q8'), info['V'], 'an F16 park, a Q8 server (two cards)')
 RT.mismatch(mk2(True), mk2(False), check, os.path.join(A.scratch, 'cache-tp-q8-then-f16'), info['V'], 'a Q8 park, an F16 server (two cards)')
 

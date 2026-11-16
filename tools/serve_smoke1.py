@@ -17,8 +17,9 @@ checkout fallback or kernel_dir override); the own-code gate requires matching c
   surface   /metrics (llamacpp: names and caminus: series), /caminus/status (one card, its name and guard line), no request
             text in the metrics / status / slots / flight files (a marker string), llm-top -once (--llm-top BIN)
   abort     a stream closed by the client after a few events, then a request: HTTP 200
-  kv        (--kv f16 | q8: caminus serve --kv) /props caminus.kv_cache names that type, and the decode objects the server
-            loaded are that cache's (q8: a k3_*_kvq8 object and not its F16 base; f16: no *_kvq8 object)
+  kv        (--kv f16 | q8: caminus serve --kv) /props caminus.kv_cache names that type, and the objects the server loaded
+            are that cache's (kv_objects; q8: a k3_*_kvq8 decode object and not its F16 base, and a *_prefill_kvq8 object;
+            f16: no *_kvq8 object); the --restart server's are checked the same way against its own --kv
   shutdown  SIGTERM: exit 0 and the shutdown park line; --restart: a second server on the same directories, the long prompt
             again: served from the disk tier (cached tokens > 0); with --restart-kv another format than --kv (the park's),
             the first server's parks must be on disk, the second server's /props names its own format, the long prompt is
@@ -115,6 +116,21 @@ def server_command(a, kv=None):
     if a.block_imports:
         cmd = cmd[:2] + ['-c', BLOCKER.format(block=tuple(a.block_imports.split(','))), cmd[2]] + cmd[3:]
     return cmd
+
+
+def kv_objects(objs, kv):
+    """(ok, detail): whether the code objects a server loaded (/props caminus.code_objects) are the asked KV cache's.
+    q8: a k3_*_kvq8 decode module none of whose F16 bases (the name without _kvq8) was loaded, and a *_prefill_kvq8 object
+    (the prefill's Q8 rows and attention; the F16 prefill object beside it is expected: its other kernels stay there).
+    f16: a k3_* decode module and no *_kvq8 object at all (an empty list passes neither)"""
+    objs = list(objs or ())
+    q8 = [o for o in objs if o.endswith('_kvq8')]
+    dec = [o for o in q8 if o.startswith('k3_')]
+    pre = [o for o in q8 if '_prefill_' in o]
+    base = [o for o in dec if o[:-len('_kvq8')] in objs]
+    ok = bool(dec and pre and not base) if kv == 'q8' else bool(any(o.startswith('k3_') for o in objs) and not q8)
+    return ok, (f'loaded objects {objs} (Q8 decode {dec or "none"}, with their F16 base {base or "none"}; Q8 prefill '
+                f'{pre or "none"})')
 
 
 def chat(port, model, messages, stream=True, tools=None, **kw):
@@ -373,12 +389,9 @@ def main():
         refused = [l for l in srv.lines if 'import refused' in l]
         check(objs and not bad and not refused, f'own code: the server loaded {objs}: no ggml / llama.cpp header in their include '
               f'closures ({bad or "none"}); imports refused by the hook: {len(refused)} ({a.block_imports} never asked for)')
-    if a.kv:   # the decode objects the process loaded are the asked cache's (q8: a k3_*_kvq8 module, never its F16 base)
-        objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []
-        q8d = [o for o in objs if o.startswith('k3_') and o.endswith('_kvq8')]
-        both = [o for o in q8d if o[:-len('_kvq8')] in objs]
-        okk = (bool(q8d) and not both) if a.kv == 'q8' else not any(o.endswith('_kvq8') for o in objs)
-        check(okk, f'kv {a.kv}: loaded objects {objs} (Q8 decode {q8d or "none"}; with their F16 base {both or "none"})')
+    if a.kv:   # the objects the process loaded are the asked cache's (q8: a k3_*_kvq8 module, never its F16 base, + the Q8 prefill)
+        okk, det = kv_objects(((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects'), a.kv)
+        check(okk, f'kv {a.kv}: {det}')
     # the monitoring surface
     st, met = S.get(port, '/metrics'); st2, status = S.get(port, '/caminus/status'); st3, slots = S.get(port, '/slots')
     cards = (status or {}).get('cards') if isinstance(status, dict) else None
@@ -430,6 +443,10 @@ def main():
             r, m = chat(srv2.port, f'{alias}-nothink', lm, temperature=0, max_tokens=64)
             tm = m.get('timings') or {}
             disk = [l for l in srv2.lines if 'disk' in l][-1:]
+            kv2 = a.restart_kv or a.kv
+            if kv2:   # (the restarted server's own objects: its --kv's, whatever the first server ran)
+                okk, det = kv_objects(((S.get(srv2.port, '/props')[1] or {}).get('caminus') or {}).get('code_objects'), kv2)
+                check(okk, f'restart: kv {kv2}: {det}')
             if other:
                 # (the park holds the other format's rows: its key differs (tp.kv, the module), so it is never offered and
                 # the prompt is read from cold)

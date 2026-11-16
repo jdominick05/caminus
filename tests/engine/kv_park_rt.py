@@ -5,9 +5,10 @@ as tests/engine/test_q3moe_tp_cpu.py runs it for the two-card F16 engine.
 
 round_trip: every (card, layer) KV view gets its own random bytes; the tail row comes back from a checkpoint slot
 (restore() picks 'vram'), every row from a park after the rows are cleared (restore() picks 'disk'), and again into a new
-engine and cache on the same directory (a restart); each compared byte for byte per card and layer. Negative controls: the
-same unpark with misdirected disk reads (the caller's: two views' segments swapped, one view read a row late) differs in
-exactly those views.
+engine and cache on the same directory (a restart); each compared byte for byte per card and layer, and after each unpark
+into cleared rows every row past n is still zero (a restore of n positions writes nothing beyond them). Negative controls:
+the same unpark with misdirected disk reads (the caller's: two views' segments swapped, one view read a row late) differs
+in exactly those views, and the late read also writes row n of its view (the tail check sees exactly that view).
 
 mismatch: a park written by an engine of one KV format, then an engine of the other format (same file, same cards) and a
 new cache on that directory: the entry is on disk but never offered (store.entries by the key's hash is empty, restore()
@@ -75,9 +76,16 @@ def diff(eng, ref, a, b):
     return [(c, il) for c, il in views(eng) if not torch.equal(rows(eng, c, il, a, b), ref[c, il][a * pb[c]:b * pb[c]])]
 
 
+def tail(eng, n):
+    """the (card, layer) views with a nonzero byte in rows [n, max_ctx): after a restore of n positions into cleared rows,
+    none (a restore that wrote past its positions, e.g. an off-by-one segment, shows up here and not in diff)"""
+    return [(c, il) for c, il in views(eng) if rows(eng, c, il, n, eng.max_ctx).any()]
+
+
 def round_trip(make, check, d, vocab, tag, controls, n=240, more=12):
     """make(): a new engine of the format under test (its KV rows zeros: also the engine after a restart); d: the cache
-    directory; controls: [(name, misread(wanted, eng) -> the wanted map the read uses, [views it must differ in])]. n
+    directory; controls: [(name, misread(wanted, eng) -> the wanted map the read uses, [views it must differ in in rows
+    [0, n)], [views it must leave nonzero past row n])]. n
     positions (n / PREFILL_TOK_S above a disk load's fixed cost: restore() picks the disk). Returns the reference rows"""
     ids = [int(x) for x in np.random.default_rng(5).integers(0, vocab, n + more)]
     with host_copies() as build:
@@ -102,29 +110,31 @@ def round_trip(make, check, d, vocab, tag, controls, n=240, more=12):
         check(nm is not None and pc5.park_error is None, f'{tag}: park: the live state ({n}, 1) written ({nm})')
         clear(m5); pc5.reset()
         r = pc5.restore(ids[:n])
-        dd = diff(m5, ref, 0, n)
-        check(r['source'] == 'disk' and r['cached'] == n and not dd,
+        dd, dt = diff(m5, ref, 0, n), tail(m5, n)
+        check(r['source'] == 'disk' and r['cached'] == n and not dd and not dt,
               f'{tag}: unpark in the same process: every row cleared and the slots dropped, restore() reads the entry '
-              f'({r["source"]}, {r["cached"]} positions); rows [0, {n}) equal per view (differ: {dd})')
+              f'({r["source"]}, {r["cached"]} positions); rows [0, {n}) equal per view (differ: {dd}), rows past {n} zero '
+              f'(nonzero: {dt})')
         pc5.close(); del pc5, m5
         m6 = build(make)                                       # (a restart: a new engine, its KV zeros, and a new cache)
         zero = all(not rows(m6, c, il, 0, m6.max_ctx).any() for c, il in views(m6))
         pc6 = cache(m6, d)
         r = pc6.restore(ids[:n])
-        dd = diff(m6, ref, 0, n)
+        dd, dt = diff(m6, ref, 0, n), tail(m6, n)
         check(zero and r['source'] == 'disk' and r['cached'] == n and r['st'] == dict(i0=n, commit=1)
-              and pc6.live_tokens() == ids[:n] and not dd,
+              and pc6.live_tokens() == ids[:n] and not dd and not dt,
               f'{tag}: unpark after a restart: a new engine (rows zeros) and cache on the same directory read the entry '
-              f'({r["source"]}, {r["cached"]} positions, state {r["st"]}); rows [0, {n}) equal per view (differ: {dd})')
+              f'({r["source"]}, {r["cached"]} positions, state {r["st"]}); rows [0, {n}) equal per view (differ: {dd}), rows '
+              f'past {n} zero (nonzero: {dt})')
         real = pc6.store.read
-        for name, misread, want in controls:
+        for name, misread, want, want_tail in controls:
             clear(m6); pc6.reset()
             pc6.store.read = lambda nm_, h, wanted, f=misread: real(nm_, h, f(dict(wanted), m6))
             try: r = pc6.restore(ids[:n])
             finally: pc6.store.read = real
-            got = (r['source'], diff(m6, ref, 0, n))
-            check(got == ('disk', want), f'{tag}: negative control ({name}): the unpark with misdirected reads differs in '
-                                         f'{got[1]} (want {want})')
+            got = (r['source'], diff(m6, ref, 0, n), tail(m6, n))
+            check(got == ('disk', want, want_tail), f'{tag}: negative control ({name}): the unpark with misdirected reads differs '
+                                                    f'in {got[1]} (want {want}), nonzero past row {n} in {got[2]} (want {want_tail})')
         pc6.close(); del pc6, m6
     return ref
 
@@ -152,8 +162,8 @@ def mismatch(make_a, make_b, check, d, vocab, tag, n=240):
         pcb.close(); del pcb, eb
         ea2 = build(make_a); pa2 = cache(ea2, d)
         r = pa2.restore(ids)
-        dd = diff(ea2, ref, 0, n)
-        check(r['source'] == 'disk' and r['cached'] == n and not dd,
+        dd, dt = diff(ea2, ref, 0, n), tail(ea2, n)
+        check(r['source'] == 'disk' and r['cached'] == n and not dd and not dt,
               f'{tag}: positive control: an engine of the park\'s own format on the same directory restores it ({r["source"]}, '
-              f'{r["cached"]} positions; differ: {dd})')
+              f'{r["cached"]} positions; differ: {dd}; nonzero past row {n}: {dt})')
         pa2.close(); del pa2, ea2
