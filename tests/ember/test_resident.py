@@ -2523,12 +2523,13 @@ for line in sys.stdin:
                                                 ('deepinfra','/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[],stream=True),oai,'zai-org/GLM-5.2')):
             base,calls,ledger,log,stop=self._relay(provider,lambda c,st=stream:(200,st,'text/event-stream'),cap=50.0)
             try:
+                before=ledger.spent()             # (both relays here share one ledger file)
                 hang_up(base,path,body)
                 for _ in range(100):
                     if any('CLIENT-GONE' in l for l in log):break
                     time.sleep(0.05)
                 self.assertTrue(any('CLIENT-GONE' in l for l in log),(provider,log[-3:]))
-                spent=ledger.spent()
+                spent=ledger.spent()-before
                 self.assertGreater(spent,0,provider+': the hang-up is metered')
                 line=next(l for l in log if 'streamed characters' in l)
                 import re as _re
@@ -2539,11 +2540,12 @@ for line in sys.stdin:
                       if provider=='anthropic' else None)
                 if want is not None:self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
                 else:
-                    # the output part is the streamed estimate at the output price; the prompt part (its bytes / 4 at the
-                    # input price) is a few hundred tokens at most. A max_tokens charge (4096) would be far above this.
-                    out_part=est*2.2/1e6
-                    self.assertGreaterEqual(spent,out_part-1e-6,line)
-                    self.assertLessEqual(spent,out_part+2000*0.6/1e6,line)
+                    # exactly the relay's estimate: the forwarded body's bytes / 4 at the input price plus the streamed
+                    # characters' tokens at the output price (the body is re-serialised as the relay sent it)
+                    self.assertIn('estimated: prompt + %d streamed characters'%n,line)
+                    raw=json.dumps(calls[-1]['body']).encode()
+                    want=(len(raw)/4*0.6+est*2.2)/1e6
+                    self.assertAlmostEqual(spent,want,places=5,msg=line)
                 # never above the prompt plus the request's own allowance (how much streamed before the hang-up is
                 # noticed depends on the machine's load, so the estimate may reach that cap)
                 from caminus.ember import relay as _r
