@@ -882,6 +882,13 @@ class Resident(unittest.TestCase):
             out=web.search(rt,'rdna3 wmma',max_results=5)
             self.assertEqual(out['results'][0],dict(title='RDNA3 ISA',url='https://example.org/isa',snippet='the guide for rdna3 wmma'))
             with self.assertRaises(ValueError):web.search(rt,'x',timelimit='z')
+            # the first engine refuses, the next answers (9 of 21 real searches failed on the first engine alone)
+            (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        if k.get("backend")=="auto":raise RuntimeError("No results found.")\n        return [dict(title="t",href="https://example.org/b",body=k["backend"])]\n')
+            out=web.search(rt,'rdna3 wmma')
+            self.assertEqual(out['engine'],'bing');self.assertEqual(out['results'][0]['snippet'],'bing')
+            (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return []\n')
+            with self.assertRaises(ValueError) as c:web.search(rt,'nothing at all')
+            self.assertIn('no engine found results',str(c.exception))
             class Resp:
                 status=200;headers={'Content-Type':'text/html; charset=utf-8'}
                 def __init__(self,body):self.body=body
