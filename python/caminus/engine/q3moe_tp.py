@@ -8,8 +8,9 @@ default).
 
 The split (card c of 2; card 0 first in every sum; every cut on a whole quantization block of the matrix it cuts):
 - Attention: card 0 takes kv heads 0 .. kv0 - 1 and their query heads (8 per kv head: OP_OWN_ATTS's ratio), card 1 the
-  rest: rows of attn_q, attn_k, attn_v, and attn_output's columns of its query heads; its kv heads' f16 KV cache. The
-  attention splits over positions follow the card (q3moe_one.splits_for of its kv heads), never the grid.
+  rest: rows of attn_q, attn_k, attn_v, and attn_output's columns of its query heads; its kv heads' f16 KV cache (q8=True:
+  Q8_0 rows, below). The attention splits over positions follow the card (q3moe_one.splits_for of its kv heads), never the
+  grid.
 - Experts: every expert's intermediate rows 0 .. exp_rows - 1 on card 0, exp_rows .. ffn - 1 on card 1 (ffn 768 = 3 x
   256, so the cuts are 512 / 256 or 256 / 512): ffn_gate_exps / ffn_up_exps rows, ffn_down_exps columns (a K split). The
   grouped tiles take the cut tensors as whole expert tensors of rows_c rows each (total_rows = experts x rows_c).
@@ -27,6 +28,16 @@ No link keep-alive segment (Q3MoEOne's): the exchanges keep both links busy (an 
 Not bitwise to the one-card engine by design (the K-split down, the attn_output column split and the split count each
 change a summation order); bitwise to itself across grids, and its replicas equal after every pass.
 
+q8=True: each card's KV cache as Q8_0 rows on k3_q3m_lean_tp_kvq8 (the two-card module with the one-card Q8 module's
+OP_OWN_ATTS: kernels/k3_own_atts.h under K3_Q3M_KV_Q8), the one-card engine's format (q3moe_one.KV_FORMAT_Q8: each block
+the encode of the fp16 values the F16 cache holds, K and q through the head's Walsh-Hadamard transform) over that card's
+2 kv heads: 544 bytes per position and layer on each card instead of 1,024. A refused block (a non-finite K / V value)
+sets that card's error word after Sync; both words come back in each card's one status copy and are read before the
+bound and bail paths (which zero Sync): the engine is then broken (InvalidKVEncoding, reset() keeps it). On a bailed pass
+the segments after the expired wait still run, on the earlier pass's partial in the slot (finite values), and the retry
+rewrites the position's rows; a refused block there is as terminal as anywhere else. Not served (no option selects it);
+its two-card prefill is Q3MPrefillTP's Q8 path.
+
 The server contract is Dense35TP's (the device sampler's two logits shards on two cards: logits_half, shard_devs, vh;
 step / step_token / verify / launch_tokens / finish_pass; reset; state {(card, layer, 'kv')}; tp_key)."""
 import ctypes
@@ -41,7 +52,7 @@ from ..device import capacity
 from . import k3, upload
 from .own_layout import q6k_planes
 from .q35_dense_tp import cut, vocab_cut
-from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN
+from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN, KV_FORMAT_Q8
 
 SPLITS_CAP = 128         # the most attention splits per kv head on a card (splits_cap); one card's engine caps at 64. A card holds half
                           # the kv heads, so 64 splits fill 128 of the XTX's 192 / the XT's 210 workgroups; the two-card
@@ -97,10 +108,10 @@ def _role(name):
     return 'rep'   # (the embedding, every norm, the q / k norms, the router)
 
 
-def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP):
+def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP, q8=False):
     """bytes per card by term, from the header alone: [dict(split, rep, kv, ats, slots, small, tape) for card 0, card 1].
     split: its slices of the split matrices (exact: the cuts are whole blocks); rep: the replicated tensors (the embedding,
-    the norms, the router); kv: its kv heads' f16 KV cache, max_ctx + ATS_PAD rows; ats: OP_OWN_ATTS's scratch at splits_cap
+    the norms, the router); kv: its kv heads' KV cache (f16, or q8: Q8_0 rows), max_ctx + ATS_PAD rows; ats: OP_OWN_ATTS's scratch at splits_cap
     splits (the most a card takes); slots: the exchanges' receive slots (16 words + D floats, 2 nl of them, uncached VRAM outside
     torch); small: the per-layer q / k norm blocks and the router choices; tape: TAPE_MIB. max_ctx is not bounded by the
     file's context_length here (a projection for a longer context is arithmetic only)"""
@@ -117,7 +128,7 @@ def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=V
             if r == 'rep': out[k]['rep'] += t.n_bytes
             else: out[k]['split'] += t.n_bytes * frac[r][k]
     for k in (0, 1):
-        out[k].update(kv=c['nl'] * (int(max_ctx) + k3.Engine.ATS_PAD) * k3.kv_pos_bytes(kvs[k] * c['hd'], False),
+        out[k].update(kv=c['nl'] * (int(max_ctx) + k3.Engine.ATS_PAD) * k3.kv_pos_bytes(kvs[k] * c['hd'], bool(q8)),
                       ats=4 * k3.Engine.atts_scratch_floats(kvs[k], splits_cap),   # (a card's splits are at most the cap)
                       slots=2 * c['nl'] * (16 + c['D']) * 4,
                       small=c['nl'] * ((2 * c['hd'] + 2) * 4 + c['k_used'] * 8),
@@ -130,7 +141,7 @@ class Q3MoETP:
 
     def __init__(self, path, devices=(0, 1), max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=16, rpt_down=None,
                  rpt_head=64, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, lmin=ATS_LMIN, local_only=False,
-                 vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8, splits_cap=SPLITS_CAP):
+                 vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8, splits_cap=SPLITS_CAP, q8=False):
         """path: a qwen3moe GGUF with Q4_K / Q6_K matrices (the lean module's formats). devices: the two torch / HIP device
         indices (card 0 first: its partials come first in every sum). exp_rows: card 0's rows of every expert's
         intermediate (a multiple of 256); kv_heads: card 0's kv heads (None: half); vocab_share: card 0's part of the
@@ -142,7 +153,11 @@ class Q3MoETP:
         logits are not the model's). vram_extra_mib: per card, what the caller allocates right after (checked with the
         engine's projection: another tape set is TAPE_MIB). splits_cap: the most attention splits per kv head on a card
         (1 .. k3.atts_max_splits of the module: 128 on the two-card modules; default SPLITS_CAP = 128); each card takes
-        q3moe_one.splits_for(its kv heads, splits_cap), and the projection counts the cap's scratch"""
+        q3moe_one.splits_for(its kv heads, splits_cap), and the projection counts the cap's scratch. q8: the KV caches as Q8_0
+        rows on k3_q3m_lean_tp_kvq8 (KV_FORMAT_Q8; module None or that module only; not with the _trace build); a refused
+        encoding raises caminus.errors.InvalidKVEncoding and leaves the engine broken (reset() keeps it)"""
+        if type(q8) is not bool: raise ValueError(f'Q3MoETP: q8 must be a bool, not {q8!r}')
+        self.q8 = q8
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoETP: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -163,10 +178,14 @@ class Q3MoETP:
         if len(devices) != 2 or devices[0] == devices[1]: raise ValueError(f'Q3MoETP: two different devices, not {devices}')
         self.devs, self.max_ctx, self.limit_us = list(devices), int(max_ctx), limit_us
         self.cache_rows = self.max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
-        one = module or 'k3_q3m_lean'
+        one = module or ('k3_q3m_lean_kvq8' if q8 else 'k3_q3m_lean')
         one = {v: k for k, v in k3.Q3M_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
         if one not in k3.Q3M_TP_OF: raise ValueError(f'Q3MoETP: module {one} has no two-card build ({sorted(k3.Q3M_TP_OF)})')
+        if (k3.Q3M_TP_OF[one] in k3.Q3M_KV_Q8_MODULES) != q8:   # (before anything is read: the module decides the cache format)
+            raise ValueError(f'Q3MoETP: module {k3.Q3M_TP_OF[one]} ' + ('needs q8=True' if not q8 else
+                             f'reads F16 rows (the Q8 KV cache runs on {k3.Q3M_TP_OF[k3.Q3M_KV_Q8_OF["k3_q3m_lean"]]} only)'))
         self.module = k3.Q3M_TP_OF[one]
+        if q8: self.kv_format_id = KV_FORMAT_Q8   # (the engine key carries it: Q8 rows never restore into F16 ones)
         self.emb = F.T['token_embd.weight']
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoETP: token_embd is {self.emb.type} (Q4_K only)')
         for t in F.tensors:
@@ -187,7 +206,7 @@ class Q3MoETP:
         # (the prompt cache's key: the split changes the partial sums' bits)
         self.tp_key = dict(exp_rows=self.exp_rows0, kv_heads=self.kv0, vocab_rows=self.vh)
         # VRAM, every term before the first allocation (the uploader's pinned staging is host memory, checked by it)
-        terms = projection_terms(F, self.max_ctx, self.exp_rows0, self.kv0, self.vocab_share, self.splits_cap)
+        terms = projection_terms(F, self.max_ctx, self.exp_rows0, self.kv0, self.vocab_share, self.splits_cap, q8=q8)
         h2d = upload.mode_of(default=upload.TWO_CARD_DEFAULT)                     # (CAMINUS_H2D: how the weights reach the cards; engine/upload.py)
         self.vram_mib = [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(terms, upload.extra_mib(h2d, 2))]
         ex = [float(v) for v in vram_extra_mib]
@@ -205,7 +224,8 @@ class Q3MoETP:
         # only), dense attention at every depth, no drafter
         self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
         self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
-        self.broken = None          # (non-finite logits: sticky, reset() keeps it - corrupt weights outlive a reset)
+        self.broken = None          # (non-finite logits or a refused Q8 KV block: sticky, reset() keeps it - corrupt weights
+                                    #  or rows outlive a reset; _broken_error names which)
         self.pos_host = 0
         self.T = F.T
         self.qsa, self.qsa_limit, self.idx_cache, self.dual = False, None, False, False
@@ -220,23 +240,23 @@ class Q3MoETP:
         self._load_logged(); self._build_tapes()
 
     @staticmethod
-    def projection_mib(path, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP):
+    def projection_mib(path, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP, q8=False):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
         check counts the same terms (with the CAMINUS_H2D arm's buffer: upload.extra_mib, 0 unless peer). max_ctx past the
-        file's context_length is computed, not refused (the engine refuses it)"""
+        file's context_length is computed, not refused (the engine refuses it). q8: the Q8_0 rows"""
         F = ggufio.GGUFFile(path)
         try:
-            return [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(projection_terms(F, max_ctx, exp_rows, kv_heads, vocab_share, splits_cap),
+            return [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(projection_terms(F, max_ctx, exp_rows, kv_heads, vocab_share, splits_cap, q8),
                                                                        upload.extra_mib(upload.mode_of(default=upload.TWO_CARD_DEFAULT), 2))]
         finally: F.close()
 
     @staticmethod
-    def kv_pos_mib(path, kv_heads=None):
-        """per card, MiB of KV cache per position (its kv heads of every layer)"""
+    def kv_pos_mib(path, kv_heads=None, q8=False):
+        """per card, MiB of KV cache per position (its kv heads of every layer; q8: Q8_0 rows)"""
         F = ggufio.GGUFFile(path)
         try:
             c = shapes(F); kv0 = c['nkv'] // 2 if kv_heads is None else int(kv_heads)
-            return [c['nl'] * k3.kv_pos_bytes(k * c['hd'], False) / 2 ** 20 for k in (kv0, c['nkv'] - kv0)]
+            return [c['nl'] * k3.kv_pos_bytes(k * c['hd'], bool(q8)) / 2 ** 20 for k in (kv0, c['nkv'] - kv0)]
         finally: F.close()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
@@ -309,9 +329,10 @@ class Q3MoETP:
                 if (g[c]['fmt'], g[c]['rows'], g[c]['K']) != (u[c]['fmt'], u[c]['rows'], u[c]['K']):
                     raise ValueError(f'Q3MoETP: {p}ffn_gate_exps and ffn_up_exps differ in format or shape (the fused gate | up tile takes one)')
                 if ro[c]['fmt'] != 'F32': raise ValueError(f'Q3MoETP: {p}ffn_gate_inp is {ro[c]["fmt"]} (F32: the router\'s matvec)')
+                # (q8: uint8 Q8_0 rows of that card's kv heads, kv_pos_bytes; else f16 halves)
+                row = k3.kv_pos_bytes(self.kvc[c] * hd, True) if self.q8 else 2 * self.kvc[c] * hd   # (elements per position)
                 with torch.cuda.device(self.devs[c]):
-                    cache = torch.zeros(self.cache_rows * 2 * self.kvc[c] * hd, dtype=torch.float16, device=f'cuda:{self.devs[c]}')
-                row = 2 * self.kvc[c] * hd
+                    cache = torch.zeros(self.cache_rows * row, dtype=torch.uint8 if self.q8 else torch.float16, device=f'cuda:{self.devs[c]}')
                 self.state[(c, il, 'kv')] = cache[:self.max_ctx * row]   # (the first max_ctx rows: the padding rows are never a position)
                 dd.append(dict(attn_norm=an[c], ffn_norm=fn[c], qk_par=qkp[c], q=q[c], k=k[c], v=v[c], o=o[c], router=ro[c],
                                gate=g[c], up=u[c], down=dn[c], cache=cache))
@@ -449,7 +470,7 @@ class Q3MoETP:
             with torch.cuda.device(self.devs[c]):
                 self.d_max.append((torch.zeros(1, device='cuda'), torch.zeros(1, dtype=torch.int64, device='cuda')))
                 self.h_max.append((torch.zeros(1, pin_memory=True), torch.zeros(1, dtype=torch.int64, pin_memory=True)))
-                self.h_st.append(torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True))
+                self.h_st.append(torch.zeros(k3.STATUS_WORDS + int(self.q8), dtype=torch.int32, pin_memory=True))   # (+ the Q8 KV error word: one copy)
                 self.ev_done.append(torch.cuda.Event(enable_timing=self._card_ev is not None))
         self.engines = list(self.E)
         self.res = [self.buf[c]['x'] for c in (0, 1)]
@@ -469,10 +490,12 @@ class Q3MoETP:
         """the most the next pass may commit: 1 (T = 1, no recurrent state to replay)"""
         return 1
 
-    def mark_broken(self, why):
-        """non-finite logits: sticky (reset() keeps it); the passes refuse"""
-        if self.broken is None: self.broken = why
+    def mark_broken(self, why, error_cls=k3.NonFiniteLogits):
+        """a terminal numerical failure: sticky (reset() keeps it); the passes refuse with error_cls. Non-finite logits (the
+        default) are reported; a refused Q8 KV encoding (error_cls InvalidKVEncoding) raises it, as Q3MoEOne's does"""
+        if self.broken is None: self.broken, self._broken_error = why, error_cls   # (the cache's terminal check names the class)
         print(f'k3 qwen3moe TP: {why}', file=sys.stderr, flush=True)
+        if issubclass(error_cls, k3.InvalidKVEncoding): raise error_cls(f'Q3MoETP: {why}')
 
     def prefetch(self, tokens, positions):
         """nothing to read ahead: the speculative loop's hook"""
@@ -488,7 +511,7 @@ class Q3MoETP:
         return self.logits_full()[0]
 
     def _check(self, tokens, i0, commit, what):
-        if self.broken: raise k3.NonFiniteLogits(f'{what}: refused: {self.broken}')
+        if self.broken: raise getattr(self, '_broken_error', k3.NonFiniteLogits)(f'{what}: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
         k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=1, what=what)
         if tokens is not None and len(tokens) < i0 + 1:
@@ -576,7 +599,7 @@ class Q3MoETP:
                 if self._tok:
                     torch.max(self.logits_half[c], dim=1, out=self.d_max[c])
                     self.h_max[c][0].copy_(self.d_max[c][0], non_blocking=True); self.h_max[c][1].copy_(self.d_max[c][1], non_blocking=True)
-                self.h_st[c].copy_(self.E[c].sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
+                self.h_st[c].copy_(self.E[c].status_words(), non_blocking=True)   # (a Q8 engine: the error word in the same copy)
                 self.ev_done[c].record()
 
     def enable_card_timing(self, on=True):
@@ -604,6 +627,12 @@ class Q3MoETP:
         for c in (0, 1): self.ev_done[c].synchronize()
         if self._card_ev is not None:
             self.card_ms = tuple(self._card_ev[c].elapsed_time(self.ev_done[c]) for c in (0, 1))
+        if self.q8:   # (first: the bound and bail paths below zero Sync, the error words with it; read with the status words)
+            bad_kv = []
+            for c in (0, 1):
+                try: self.E[c].check_kv_code(int(self.h_st[c][k3.STATUS_WORDS]))
+                except k3.InvalidKVEncoding as e: bad_kv.append(f'card {c} (device {self.devs[c]}): {e}')
+            if bad_kv: self.mark_broken(f'a refused KV block at pass position {i0}: ' + '; '.join(bad_kv), error_cls=k3.InvalidKVEncoding)
         oob = []
         for c in (0, 1):
             b = k3.bounds_status(self.h_st[c].tolist())

@@ -3,7 +3,7 @@
     K3_OPS_NO_DISPATCH block (so the dense modules that take its ops, k3_q35_ops.h, never see them), with the exchange's
     warm word and claim-time store under the same macro; only the two wrappers define K3_Q3M_TP / K3_XCHG_PUSH_ONLY; the
     slot sum is OP_OWN_MOE_SUM's fma chain with the sum stored; the op number is the host's
-  - the host: k3.Q3M_TP_OF maps the lean modules to the two-card ones, their .hip files exist and build.sh compiles them as
+  - the host: k3.Q3M_TP_OF maps the lean modules (and the one-card Q8 KV module) to the two-card ones, their .hip files exist and build.sh compiles them as
     the other own decode modules (max-ilp, no ggml include path); their capabilities are lean's plus OWN_SLOT_SUM;
     Engine.build accepts OP_XCHG / OP_OWN_SLOT_SUM on them only (the lean, verify, IQ and row-scale modules refuse both),
     refuses every other op outside the lean tape's set there, and refuses a pull-mode exchange (the module is push-only);
@@ -85,7 +85,7 @@ check(all(re.search(r'#define ' + mac + r'\b', tp) for mac in ('K3_TP', 'K3_Q3M_
 
 # ---- the host: names, build.sh, capabilities, the build check ---------------------------------------------------------------
 bs = open(os.path.join(ROOT, 'build.sh')).read()
-check(k3.Q3M_TP_OF == {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace'}
+check(k3.Q3M_TP_OF == {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
       and k3.Q3M_TP_MODULES == tuple(k3.Q3M_TP_OF.values())
       and all(os.path.exists(os.path.join(ROOT, 'kernels', m + '.hip')) for m in k3.Q3M_TP_MODULES)
       and 'for src in kernels/*.hip; do' in bs and re.search(r'kernels/k3_q3m\*\.hip\|[^)]*\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs),
@@ -95,8 +95,8 @@ check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS['k3_q3m_le
       'capabilities: the lean module\'s plus OWN_SLOT_SUM; ops: the lean set plus OP_XCHG and OP_OWN_SLOT_SUM')
 from caminus.device import kernels as dk
 shipped = set(dk.K3) | set(getattr(dk, 'DENSE35_OWN', ())) | {n for g in getattr(dk, 'PREFILL', ()) for n in (g if isinstance(g, tuple) else (g,))}
-check('k3_q3m_lean_tp' in dk.RUNTIME_SET and 'k3_q3m_lean_tp_trace' not in (shipped | set(dk.RUNTIME_SET)),
-      'the served two-card module ships in the installed runtime set; its trace build does not')
+check('k3_q3m_lean_tp' in dk.RUNTIME_SET and not {'k3_q3m_lean_tp_trace', 'k3_q3m_lean_tp_kvq8'} & (shipped | set(dk.RUNTIME_SET)),
+      'the served two-card module ships in the installed runtime set; its trace build and its Q8 KV build (not served) do not')
 
 # stand-ins: the engine's torch.cuda calls on host memory (no device is opened, nothing launches)
 _zeros, _to, _tensor = torch.zeros, torch.Tensor.to, torch.tensor

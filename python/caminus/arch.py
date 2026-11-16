@@ -219,7 +219,7 @@ class Arch:
     engine = None            # 'module:Class' under caminus
     tokenizer = 'hf'         # caminus.serve.tokenizer.QwenTokenizer's BPE engine: 'hf' (the tokenizers library) or 'own'
 
-    kv_formats = ('f16',)    # the KV cache formats opt['kv'] selects for this entry (kv_check); only Q3MoE builds 'q8'
+    kv_formats = ('f16',)    # the KV cache formats opt['kv'] selects for this entry (kv_check); only the qwen3moe entries (Q3MoE, Q3MoETP) build 'q8'
 
     def __init__(self, name, alias):
         self.name, self.alias = name, alias
@@ -229,8 +229,8 @@ class Arch:
         refused with a ValueError before anything is read or allocated, so a Q8 request never runs an F16 engine"""
         q8 = kv_q8(opt)
         if q8 and 'q8' not in self.kv_formats:
-            raise ValueError(f"{self.name}: kv 'q8': this entry builds no Q8 KV cache from opt['kv'] (only the one-card "
-                             f"qwen3moe entry does); refused rather than built with its F16 cache")
+            raise ValueError(f"{self.name}: kv 'q8': this entry builds no Q8 KV cache from opt['kv'] (only the qwen3moe "
+                             f"entries do, one card and two); refused rather than built with its F16 cache")
         return q8
 
     def __repr__(self):
@@ -993,6 +993,7 @@ class Q3MoETP(Arch):
     EXP_ROWS = 512             # card 0's rows of every expert (= caminus.engine.q3moe_tp.EXP_ROWS; tests/test_arch.py checks it)
     # the catalog models this entry serves on two cards (the model picker reads no file: a fact about the catalog)
     two_card_models = ('qwen3-30b-a3b',)
+    kv_formats = ('f16', 'q8')   # (opt['kv'] = 'q8': Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8 + Q3MPrefillTP's Q8 path; not served)
 
     def split(self, cards):
         """{'exp_rows': card 0's rows of every expert, 'vocab_share': card 0's part of the head rows} for the pair in engine
@@ -1031,25 +1032,25 @@ class Q3MoETP(Arch):
         """per card: the engine's own projection (Q3MoETP.projection_mib, the terms its check counts) + the two-card prefill's
         construction check + the prompt cache's slots + 2 checkpoint slots, each one T = 1 tail row of that card's kv heads in
         every layer (cache/prompt.py Layout: no recurrent state); the side rows are host memory"""
-        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
+        q8 = self.kv_check(opt)                             # (opt['kv']: no serve flag sets it yet; 'f16' by default)
         from .engine.q3moe_tp import Q3MoETP as E
         path = opt['model']
         er, vs = self._split(opt, cards)
         n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
         pf = self._prefill_mib(path, er)
-        slot = [v * 1.05 + 1.0 for v in E.kv_pos_mib(path)]
-        need = lambda c: [p + f + (slots + 2) * s for p, f, s in zip(E.projection_mib(path, c, exp_rows=er, vocab_share=vs), pf, slot)]
+        slot = [v * 1.05 + 1.0 for v in E.kv_pos_mib(path, q8=q8)]
+        need = lambda c: [p + f + (slots + 2) * s for p, f, s in zip(E.projection_mib(path, c, exp_rows=er, vocab_share=vs, q8=q8), pf, slot)]
         return n_ctx, [0, 1], max(slot), need
 
     def build(self, opt, log=print, T=None):
-        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
+        q8 = self.kv_check(opt)
         from .engine.q3moe_tp import Q3MoETP as E
         from .prefill.q3m_tp import Q3MPrefillTP
         path = opt['model']
         er, vs = self._split(opt)
         # (the prefill's construction check counted in the engine's own, before anything is read)
         m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), exp_rows=er, vocab_share=vs,
-              vram_extra_mib=self._prefill_mib(path, er))
+              vram_extra_mib=self._prefill_mib(path, er), q8=q8)
         log(f'caminus serve: two cards: expert rows {m.exp_rows[0]} / {m.exp_rows[1]}, kv heads {m.kvc[0]} / {m.kvc[1]}, '
             f'head rows {m.vh} / {m.vocab - m.vh} (vocab_share {vs})', flush=True)
         return m, Q3MPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None

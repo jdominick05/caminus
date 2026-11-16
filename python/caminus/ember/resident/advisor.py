@@ -64,8 +64,10 @@ class Advisor:
 
     def calls(self, gid):
         # refused and failed calls count too: each may be billed, and a refusal must not invite endless retries
-        return sum(1 for e in self.rt.store.events()
-                   if e['goal'] == gid and e['kind'] in ('advice', 'advice_refused', 'advice_failed'))
+        # (counted in the database: events() pages from the first 200, so past them no call was counted)
+        return self.rt.store.db.execute(
+            "SELECT count(*) FROM events WHERE goal=? AND kind IN ('advice','advice_refused','advice_failed')",
+            (gid,)).fetchone()[0]
 
     def status_line(self, gid):
         """the line the per-turn context carries, so the resident knows what it can still ask"""

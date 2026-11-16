@@ -7,8 +7,8 @@ local (local: no exchange, each card's own partials: the compute floor, not the 
 per length in turn (interleaved), so the exchange's exposed cost is overlap or serial minus local in the same process.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops] [--prefill-module M]
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 [--modes overlap,serial,local] [--micro 2]
---kv q8 (one card): the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True)); runs alternated with an F16
-run for the A/B (both caches do not fit one card at depth)."""
+--kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True); with --cards 2 Q3MoETP(q8=True) and
+Q3MPrefillTP's Q8 path); runs alternated with an F16 run for the A/B (both caches do not fit at depth)."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -23,7 +23,6 @@ ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument
 ap.add_argument('--micro', type=int, default=None); ap.add_argument('--min-piece', type=int, default=None)
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 A = ap.parse_args()
-if A.kv == 'q8' and A.cards != 1: raise SystemExit('q3moe_prefill: --kv q8 is one card only')
 Ls = [int(x) for x in A.lengths.split(',')]
 if A.cards == 2:
     from caminus.engine.q3moe_tp import Q3MoETP
@@ -31,9 +30,10 @@ if A.cards == 2:
     if A.ops or A.prefill_module: raise SystemExit('--cards 2: no --ops / --prefill-module (the one-card prefill\'s)')
     modes = A.modes.split(',')
     print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
-    eng = Q3MoETP(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, vram_extra_mib=q3m_tp.need_tp_mib(q3m_tp.tp_shapes(A.gguf), A.chunk))
+    eng = Q3MoETP(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, vram_extra_mib=q3m_tp.need_tp_mib(q3m_tp.tp_shapes(A.gguf), A.chunk),
+                  q8=A.kv == 'q8')
     pf = q3m_tp.Q3MPrefillTP(eng, chunk=A.chunk, micro=A.micro or q3m_tp.MICRO, min_piece=A.min_piece or q3m_tp.MIN_PIECE)
-    print(f'two cards: max_ctx {eng.max_ctx}, chunk {A.chunk}, micro {pf.micro} (pieces of a full chunk '
+    print(f'two cards: max_ctx {eng.max_ctx}, KV {A.kv}, decode module {eng.module}, chunk {A.chunk}, micro {pf.micro} (pieces of a full chunk '
           f'{q3m_tp.micro_bounds(A.chunk, pf.micro, min_piece=pf.min_piece)}), expert rows {eng.exp_rows}, kv heads {eng.kvc}: '
           f'engine {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB + prefill {pf.need_mib[0]:.0f} / {pf.need_mib[1]:.0f} MiB', flush=True)
     g = np.random.default_rng(0)

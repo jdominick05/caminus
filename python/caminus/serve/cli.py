@@ -322,15 +322,17 @@ def fit_report(argv):
         if opt['max_ctx'] != 'auto' and opt['max_ctx'] > plan.native_ctx:
             raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
         report = plan.report()
-        report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']])
+        # max_ctx is per KV format (#82, #81): F16 is serve's projection; Q8 is not projected yet, so it stays null
+        report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']],
+                      max_ctx=dict(f16=report['max_ctx'], q8=None))
     except (ValueError, OSError, ImportError, KeyError, TypeError, NotImplementedError, argparse.ArgumentTypeError, host.PlacementError) as exc:
-        if as_json: print(json.dumps(dict(ok=False, max_ctx=None, error=str(exc))))
+        if as_json: print(json.dumps(dict(ok=False, max_ctx=dict(f16=None, q8=None), error=str(exc))))
         else: print(f'caminus fit: {exc}', file=sys.stderr)
         return 1
     if as_json:
         print(json.dumps(report))
     else:
-        maximum = report['max_ctx']
+        maximum = report['max_ctx']['f16']
         print(f'caminus fit: {maximum if maximum is not None else "no"} positions fit '
               f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s))')
     return 0
