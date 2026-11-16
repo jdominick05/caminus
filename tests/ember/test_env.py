@@ -362,7 +362,8 @@ def main():
     _manage.card_view = lambda: [{'index': 0, 'hip': 1, 'name': 'XTX', 'pci': 'p0'}, {'index': 1, 'hip': 2, 'name': 'XT', 'pci': 'p1'}]
     lc = serve.launcher('coder', ['--model', '/m.gguf', '--port', '8092'], [0, 1], runtime='python3 -I',
                         pkg='/opt/pkg', guard='/opt/guard.sh')
-    check('HIP_VISIBLE_DEVICES=1,2' in lc and 'PYTHONPATH=/opt/pkg' in lc and "CAMINUS_QWEN_HOME='~/homes/coder/qwen-home'" in lc
+    check('HIP_VISIBLE_DEVICES=1,2' in lc and 'PYTHONPATH=/opt/pkg' in lc and 'CAMINUS_QWEN_HOME="$HOME"/homes/coder/qwen-home' in lc
+          and "'~/" not in lc
           and lc.rstrip().endswith('serve --model /m.gguf --port 8092') and 'bash /opt/guard.sh' in lc,
           'serve: launcher has placement, per-name env, guard and serve argv')
     check('sys.path.insert(0,' in lc and '-m caminus' not in lc,
