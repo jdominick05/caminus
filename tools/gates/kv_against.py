@@ -2,10 +2,10 @@
 q3moe_depth_gmodel.py): this run's logits (the Q8 cache) against another run's on the same rows (the F16 cache, saved with
 --save-logits), KLD(that || this) and top-1 agreement, gated.
 
-The bound, in the floor rule's shape (mean KLD within a floor llama.cpp sets for itself, top-1 within one point):
+The bound, in the floor rule's shape (mean KLD within a floor llama.cpp sets for itself, top-1 within one point or one row, whichever is more):
   - llama.cpp's own cost of the same change: KLD(its F16-KV rows || its q8_0-KV rows) for the same tokens and its top-1
     agreement between the two. Our Q8-vs-F16 mean KLD must be at most llama.cpp's, our top-1 agreement at least
-    llama.cpp's less one point. Needs --llama with q8_0-KV rows (--llama-kv q8_0) and --against-llama with its F16-KV rows.
+    llama.cpp's less one point or one row (whichever is more). Needs --llama with q8_0-KV rows (--llama-kv q8_0) and --against-llama with its F16-KV rows.
   - or explicit bars (--against-kld MEAN --against-top1 PERCENT), for rows without llama.cpp references: say so when used.
 No bound given: the gate refuses to run (a comparison printed and never gated cannot fail)."""
 import os
@@ -54,7 +54,7 @@ def gate(score, ours, saved, llama_f16=None, llama_q8=None, max_kld=None, min_to
              f'top-1 {s["top1"]}/{s["n"]} ({pct:.1f} %)  (the saved run as the reference)']
     if llama_f16 is not None:
         f = score(llama_f16, llama_q8)
-        bar_kld, bar_top1 = f['mean'], 100.0 * f['top1'] / f['n'] - 1.0
+        bar_kld, bar_top1 = f['mean'], 100.0 * f['top1'] / f['n'] - max(1.0, 100.0 / f['n'])   # (one point or one row, whichever is more: a bar finer than one row is below the measurement's resolution)
         lines.append(f'  llama.cpp F16-KV vs q8_0-KV mean KLD {f["mean"]:.3e}; top-1 {f["top1"]}/{f["n"]} (the floor: its own cost of 8-bit KV)')
         how = 'llama.cpp\'s'
     else:
