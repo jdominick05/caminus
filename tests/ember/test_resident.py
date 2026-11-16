@@ -822,6 +822,24 @@ class Resident(unittest.TestCase):
         self.assertEqual(prices.get('good'),(0.1,0.4,0.1),'a bad row is skipped, never the whole table')
         self.assertIsNone(prices.get('nullprice'))
 
+    def test_post_merge_review_fixes(self):
+        # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
+        from caminus.ember.resident import runtime as R
+        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort --compress-program=sh in','sort in | uniq - out.txt',
+                    'xxd - out.bin','xxd -rp dump bin'):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in'):
+            self.assertTrue(R.read_only_command(cmd),cmd)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt.config['advisor']={'model':'m'}
+            rt.progress[gid]=time.time()-10_000
+            with unittest.mock.patch.object(rt.advisor,'ask',lambda *a,**k:dict(advice='try y',model='m',usd=0.01)):
+                self.assertTrue(rt._advise_before_pause(gid,'no progress',{}))
+            self.assertLess(time.time()-rt.progress[gid],5,'the idle clock starts over so the nudge can land')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_handoff_with_private_text_is_never_posted(self):
         from caminus.ember.resident import github
         base=dict(action='comment',repo='jdominick05/caminus',number=5)
@@ -2387,6 +2405,42 @@ for line in sys.stdin:
             code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[]))
             self.assertEqual(code,402);self.assertEqual(calls,[])
         finally:stop()
+
+    def test_a_client_that_hangs_up_is_still_metered_from_what_was_streamed(self):
+        # an interrupt, a steer and /advisor end a reply by hanging up: the spend is recorded, estimated from the
+        # characters streamed (never the whole allowance), on the Anthropic and the OpenAI-style paths
+        import socket
+        def hang_up(base, path, body):
+            host,port=base.split('//')[1].split(':')
+            data=json.dumps(body).encode()
+            s=socket.create_connection((host,int(port)),timeout=10)
+            s.sendall(b'POST %s HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % (path.encode(),len(data))+data)
+            s.recv(4096)
+            s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,b'\x01\x00\x00\x00\x00\x00\x00\x00')
+            s.close()
+        delta=lambda d:b'data: '+json.dumps(d).encode()+b'\n\n'
+        anth=(b'event: message_start\n'+delta(dict(type='message_start',message=dict(model='claude-haiku-5-5',usage=dict(input_tokens=1000,output_tokens=1))))
+              +b''.join(delta(dict(type='content_block_delta',delta=dict(type='text_delta',text='x'*70))) for _ in range(150_000)))
+        oai=b''.join(delta(dict(choices=[dict(delta=dict(content='y'*70))])) for _ in range(150_000))
+        for provider,path,body,stream,model in (('anthropic','/v1/messages',dict(model='claude-haiku-5-5',max_tokens=4096,messages=[],stream=True),anth,'claude-haiku-5-5'),
+                                                ('deepinfra','/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[],stream=True),oai,'zai-org/GLM-5.2')):
+            base,calls,ledger,log,stop=self._relay(provider,lambda c,st=stream:(200,st,'text/event-stream'),cap=50.0)
+            try:
+                hang_up(base,path,body)
+                for _ in range(100):
+                    if any('CLIENT-GONE' in l for l in log):break
+                    time.sleep(0.05)
+                self.assertTrue(any('CLIENT-GONE' in l for l in log),(provider,log[-3:]))
+                spent=ledger.spent()
+                self.assertGreater(spent,0,provider+': the hang-up is metered')
+                self.assertTrue(any('streamed characters' in l for l in log),provider+': estimated from what streamed')
+                # never above the prompt plus the request's own allowance (how much streamed before the hang-up is
+                # noticed depends on the machine's load, so the estimate may reach that cap)
+                from caminus.ember import relay as _r
+                full=(_r.anthropic_cost('claude-haiku-5-5',dict(input_tokens=1000,output_tokens=4096)) if provider=='anthropic'
+                      else (2000*0.6+4096*2.2)/1e6)     # (the prompt estimate is a few hundred bytes / 4: 2000 bounds it)
+                self.assertLessEqual(spent,full*1.01,provider)
+            finally:stop()
 
     def test_the_mistral_relay_meters_from_the_owners_prices_and_sends_no_stream_options(self):
         from caminus.ember import relay

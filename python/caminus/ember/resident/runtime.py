@@ -62,6 +62,23 @@ NULL_REDIRECT = re.compile(r'(?<![\w>])(?:\d|&)?>>?\s*/dev/null\b|(?<![\w>])\d?>
 CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b|--pre\b')
 
 
+# The flags of xxd and uniq that take a value: that value is not a file (xxd -l 64 f reads one file).
+VALUE_FLAGS = {'xxd': ('-l', '-s', '-c', '-g', '-o', '-n', '-len', '-seek', '-cols', '-groupsize', '-offset', '-name'),
+               'uniq': ('-f', '-s', '-w')}
+
+
+def _operands(args, takes_value):
+    out, skip = [], False
+    for w in args:
+        if skip:
+            skip = False
+        elif w in takes_value:
+            skip = True
+        elif w == '-' or not w.startswith('-'):
+            out.append(w)
+    return out
+
+
 def read_only_command(cmd):
     """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a read-only program
     with no changing argument (CHANGING). Anything unclear counts as a change (the per-turn gate runs; plan mode
@@ -92,12 +109,13 @@ def read_only_command(cmd):
                 return False
         elif words[0] not in READ_ONLY:
             return False
-        elif words[0] == 'sort' and any(w == '-o' or w.startswith(('-o', '--output')) for w in words[1:]):
-            return False                  # sort -o FILE writes it
-        elif words[0] == 'xxd' and any(w.startswith('-r') for w in words[1:]):
+        elif words[0] == 'sort' and any(w.startswith(('--output', '--compress-program')) or
+                                        (re.fullmatch(r'-[A-Za-z]+', w) and 'o' in w) for w in words[1:]):
+            return False                  # sort -o FILE (also in a cluster: -ro, -uo) writes it; --compress-program runs one
+        elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
             return False                  # xxd -r rebuilds a binary
-        elif words[0] in ('xxd', 'uniq') and len([w for w in words[1:] if not w.startswith('-')]) > 1:
-            return False                  # a second file argument is the output it writes
+        elif words[0] in VALUE_FLAGS and len(_operands(words[1:], VALUE_FLAGS[words[0]])) > 1:
+            return False                  # a second file argument is the output it writes ('-' counts: it is stdin)
     return True
 def weak_gate(gate):
     """Why a gate can't tell done from not done, or ''. A real goal's first gates were `true` (passes always) and
@@ -1482,6 +1500,10 @@ class Runtime:
         with self.store.transaction():
             self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
             self.store.event('watchdog_advised', dict(reason=reason, step=g['steps'], usd=out.get('usd')), gid)
+        # the advice gets a full window to land: the idle clock starts over (without this a 'no progress' trip paused
+        # the goal on the very next tick, before the model had read the nudge it was just sent)
+        if hasattr(self, 'progress'):
+            self.progress[gid] = time.time()
         return True
 
     def _meter(self, gid):
