@@ -200,8 +200,6 @@ TOOLS = [
          dict(evidence={'type':'string'}), ('evidence',)),
     tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
          dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
-    tool('search', 'Find files and text without the terminal: glob matches file paths (e.g. "**/*.py", "*test*"), pattern is a regular expression searched in their lines (with glob, only in those files). Skips .git, node_modules, caches, binary and huge files. Every match is path:line: text, so read can open it at that line. path is where to search (your home by default).',
-         dict(pattern={'type':'string'}, glob={'type':'string'}, path={'type':'string'}, ignore_case={'type':'boolean'}, limit={'type':'integer'})),
     tool('edit', 'Replace exact text in a file (a goal\'s first change needs define_done first). old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
     tool('write', 'Create a file, or replace a whole file, with content (a goal\'s first change needs define_done first). Returns the diff against what was there.',
@@ -1057,11 +1055,6 @@ class Runtime:
                     rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
                     if rel.startswith('notes/') and rel.endswith('.md'):
                         self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer
-                elif name == 'search':
-                    if not args.get('pattern') and not args.get('glob'):
-                        raise ValueError('give a glob (files by name), a pattern (text in them), or both')
-                    result = files.search(self.home, args.get('pattern'), args.get('glob'), args.get('path') or '.',
-                                          bool(args.get('ignore_case')), args.get('limit'))
                 elif name == 'edit':
                     self._snapshot_file(action['goal'], name, args['path'])
                     result = files.edit(self.home, args['path'], args['old'], args['new'], bool(args.get('replace_all')))
