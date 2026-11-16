@@ -215,6 +215,8 @@ pieces = micro_bounds(GEOM, 4, min_piece=GRID)
 r_ov, _ = geom_rows(micro=4, min_piece=GRID)
 check(len(pieces) >= 2 and all(pf.check_replicas()), f'geometry: {GEOM} positions in one chunk of {len(pieces)} pieces {pieces} (overlap); replicas equal')
 r_one, _ = geom_rows(micro=1)
+check(all(bool(torch.isfinite(x.float()).all()) for x in r_ov),
+      f'the {GEOM} positions\' KV rows are all written: finite on both cards in every layer (the caches start as NaN)')
 check(same(r_ov, r_one), 'one piece: the same KV rows on both cards, bit for bit')
 r_ser, _ = geom_rows(micro=4, min_piece=GRID, mode='serial')
 check(same(r_ov, r_ser), 'serial exchange: the same KV rows on both cards, bit for bit')
