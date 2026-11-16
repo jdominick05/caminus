@@ -1,0 +1,193 @@
+"""The model catalog: every model the agent's providers serve, with what each can do, found by asking them.
+
+A provider is one endpoint the resident can reach (directly, or through the owner's key relay, which adds the key):
+
+- local      the Caminus server (OpenAI-compatible): GET /v1/models, the window from GET /props (n_ctx)
+- anthropic  the Messages API: GET /v1/models gives max_input_tokens (the window), max_tokens (the output cap) and a
+             capabilities tree (thinking types, effort levels). Prices are not in it: the transport's price table.
+- deepinfra  OpenAI-compatible at https://api.deepinfra.com/v1/openai: GET {base}/models gives metadata.context_length,
+             max_tokens, pricing ($ per 1M input / output / cache-read tokens) and tags (chat, vision, reasoning,
+             reasoning_effort, prompt_cache). Reasoning is set with reasoning_effort (none, low, medium, high).
+- mistral    Mistral AI Studio, OpenAI-compatible at https://api.mistral.ai/v1 (through the owner's relay): GET
+             {base}/models gives capabilities (completion_chat, function_calling, vision), max_context_length and
+             aliases, and no prices: the owner's relay adds each priced model's `pricing` from its price file (the
+             agent's spend meter needs them). No output cap.
+- openai     any other OpenAI-compatible server: GET {base}/models, ids only.
+
+Every model is normalized to one entry: id, provider, context, max_output, efforts (the levels /effort offers, empty
+when there is no control), thinking ('adaptive', 'toggle' or ''), vision, prices ($/1M: input, output, cache_read) or
+None. The catalog is cached in the agent home (models.json) and refreshed on demand; a provider that cannot be reached
+keeps its last entries, marked stale. What a provider does not say stays unknown (None), never guessed.
+"""
+import json
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'openai')
+TIMEOUT = 20
+ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
+# DeepInfra's metadata.max_tokens repeats the context length (checked 11-15: 1048576 on 1M models); its docs give a hard
+# output cap of 16384 tokens for most models, so that is the cap where the metadata says more.
+DEEPINFRA_OUTPUT_CAP = 16384
+
+
+def _get(url, headers, opener):
+    req = urllib.request.Request(url, None, {'Accept': 'application/json', **headers})
+    with opener(req, timeout=TIMEOUT) as r:
+        raw = r.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError('model list larger than 8 MiB')
+    return json.loads(raw)
+
+
+def _root(endpoint):
+    e = endpoint.rstrip('/')
+    return e[:-3] if e.endswith('/v1') else e
+
+
+def anthropic_entries(data, provider):
+    out = []
+    for m in data.get('data') or []:
+        caps = m.get('capabilities') or {}
+        effort = caps.get('effort') or {}
+        efforts = [lv for lv in ANTHROPIC_EFFORTS if (effort.get(lv) or {}).get('supported')] \
+            if effort.get('supported') else []
+        types = (caps.get('thinking') or {}).get('types') or {}
+        thinking = 'adaptive' if (types.get('adaptive') or {}).get('supported') else \
+            'toggle' if (types.get('enabled') or {}).get('supported') else ''
+        out.append(dict(id=m['id'], name=m.get('display_name') or m['id'], provider=provider,
+                        context=m.get('max_input_tokens'), max_output=m.get('max_tokens'), efforts=efforts,
+                        thinking=thinking, vision=bool((caps.get('image_input') or {}).get('supported')),
+                        prices=None))
+    return out
+
+
+def deepinfra_entries(data, provider):
+    out = []
+    for m in data.get('data') or []:
+        meta = m.get('metadata') or {}
+        tags = set(meta.get('tags') or [])
+        if meta and 'chat' not in tags and 'vlm' not in tags:
+            continue                                     # embeddings, images, speech: not a brain
+        p = meta.get('pricing') or {}
+        r = lambda v: None if v is None else round(float(v), 6)
+        prices = dict(input=r(p['input_tokens']), output=r(p['output_tokens']),
+                      cache_read=r(p.get('cache_read_tokens'))) if 'input_tokens' in p and 'output_tokens' in p else None
+        cap = meta.get('max_tokens')
+        cap = min(cap, DEEPINFRA_OUTPUT_CAP) if isinstance(cap, int) else DEEPINFRA_OUTPUT_CAP
+        out.append(dict(id=m['id'], name=m['id'], provider=provider, context=meta.get('context_length'),
+                        max_output=cap,
+                        efforts=list(DEEPINFRA_EFFORTS) if 'reasoning_effort' in tags else [],
+                        thinking='toggle' if 'reasoning' in tags or 'reasoning_effort' in tags else '',
+                        vision='vision' in tags, prices=prices))
+    return out
+
+
+def mistral_entries(data, provider):
+    """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out."""
+    out, seen = [], set()
+    for m in data.get('data') or []:
+        caps = m.get('capabilities') or {}
+        if not (caps.get('completion_chat') and caps.get('function_calling')) or m.get('deprecation'):
+            continue
+        if m['id'] in seen:
+            continue
+        seen.update([m['id'], *(m.get('aliases') or [])])
+        p = m.get('pricing') or {}          # (added by the owner's relay from its price file; Mistral lists none)
+        prices = dict(input=float(p['input']), output=float(p['output']),
+                      cache_read=float(p.get('cache_read', p['input']))) if 'input' in p and 'output' in p else None
+        out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
+                        max_output=None, efforts=[], thinking='', vision=bool(caps.get('vision')), prices=prices))
+    return out
+
+
+def openai_entries(data, provider, context=None):
+    return [dict(id=m['id'], name=m['id'], provider=provider, context=context, max_output=None, efforts=[],
+                 thinking='', vision=False, prices=None) for m in data.get('data') or []]
+
+
+def discover(name, spec, opener=urllib.request.urlopen, key=None):
+    """One provider's entries. spec: {kind, endpoint}. key: an API key to send (none through a relay)."""
+    kind, base = spec.get('kind', 'openai'), spec['endpoint'].rstrip('/')
+    if kind not in KINDS:
+        raise ValueError(f'unknown provider kind {kind!r}')
+    if kind == 'anthropic':
+        headers = {'anthropic-version': '2023-06-01', **({'x-api-key': key} if key else {})}
+        data = _get(_root(base) + '/v1/models?limit=1000', headers, opener)
+        return anthropic_entries(data, name)
+    headers = {'Authorization': 'Bearer ' + key} if key else {}
+    data = _get(base + '/models', headers, opener)
+    if kind == 'deepinfra':
+        return deepinfra_entries(data, name)
+    if kind == 'mistral':
+        return mistral_entries(data, name)
+    context = None
+    if kind == 'local':
+        try:
+            context = _get(_root(base) + '/props', headers, opener).get('n_ctx')
+        except (OSError, ValueError, urllib.error.HTTPError):
+            pass
+    return openai_entries(data, name, context)
+
+
+def providers(config):
+    """The configured providers: config `providers` {name: {kind, endpoint}}, plus the agent's own endpoint."""
+    out = dict(config.get('providers') or {})
+    own = config.get('provider')
+    if own and own not in out and config.get('endpoint'):
+        out[own] = dict(kind=config.get('provider_kind') or ('anthropic' if config.get('api') == 'anthropic'
+                                                             else 'openai'), endpoint=config['endpoint'])
+    return out
+
+
+def path(home):
+    return Path(home) / 'models.json'
+
+
+def load(home):
+    try:
+        return json.loads(path(home).read_text())
+    except (OSError, ValueError):
+        return dict(updated=None, providers={}, models=[])
+
+
+def refresh(home, config, opener=urllib.request.urlopen, only=None):
+    """Ask every provider (or `only` one) for its models; keep a failed provider's last entries, marked stale."""
+    cat = load(home)
+    old = {}
+    for m in cat.get('models', []):
+        old.setdefault(m['provider'], []).append(m)
+    status, models = dict(cat.get('providers') or {}), []
+    for name, spec in providers(config).items():
+        if only and name != only:
+            models += old.get(name, [])
+            continue
+        try:
+            got = discover(name, spec, opener)
+            models += got
+            status[name] = dict(kind=spec.get('kind'), ok=True, models=len(got), at=time.time())
+        except (OSError, ValueError, KeyError, urllib.error.HTTPError) as e:
+            models += [dict(m, stale=True) for m in old.get(name, [])]
+            status[name] = dict(kind=spec.get('kind'), ok=False, error=f'{type(e).__name__}: {str(e)[:200]}',
+                                at=time.time())
+    cat = dict(updated=time.time(), providers=status, models=models)
+    p = path(home)
+    tmp = p.with_suffix('.tmp')
+    tmp.write_text(json.dumps(cat, indent=1))
+    tmp.replace(p)
+    return cat
+
+
+def find(cat, model, provider=None):
+    """The entry for a model id (a provider/id form picks the provider), or None."""
+    if provider is None and '/' in model:
+        head, rest = model.split('/', 1)
+        if head in (cat.get('providers') or {}):
+            provider, model = head, rest
+    hits = [m for m in cat.get('models', []) if m['id'] == model and (provider is None or m['provider'] == provider)]
+    return hits[0] if len(hits) == 1 else None if not hits else \
+        (_ for _ in ()).throw(ValueError(f'{model} is served by {", ".join(h["provider"] for h in hits)}: '
+                                         'name the provider (provider/model)'))
