@@ -856,11 +856,15 @@ class Resident(unittest.TestCase):
         from caminus.ember.resident import advisor as adv, web, judge
         # a poll returns everything since the last poll (the preparation step read and lost the first chunk)
         t=Terminal(self.home);sid=uuid.uuid4().hex
-        t.call(sid,dict(command='printf one; sleep 0.6; printf two; sleep 0.6',yield_ms=50))
-        time.sleep(0.9)
+        got=t.call(sid,dict(command='printf one; sleep 0.3; printf two; sleep 5',yield_ms=50))['output']
+        log=self.home/'jobs'/sid/'output.log'
+        for _ in range(200):                      # (a loaded CI runner starts the command late: wait for its output)
+            if log.exists() and b'two' in log.read_bytes():break
+            time.sleep(0.05)
         t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0,_prepare=True))
-        got=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
-        self.assertIn('two',got,'the preparation step reads nothing, so the poll still gets it')
+        got+=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
+        self.assertEqual((got.count('one'),got.count('two')),(1,1),'the preparation step reads nothing: nothing lost, nothing twice')
+        t.call(uuid.uuid4().hex,dict(session=sid,signal='KILL',yield_ms=0))
         # the advisor's per-goal calls are counted past the first 200 events
         rt=Runtime(self.home)
         try:
