@@ -6,6 +6,7 @@ import (
 	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"embed"
+	"fmt"
 	"image/color"
 	"io/fs"
 	"os"
@@ -290,9 +291,16 @@ func themeLoad(name string) error {
 			return err
 		}
 	}
-	overrides, _ := parseTheme(data)
+	overrides, bad := parseTheme(data)
 	if len(overrides) == 0 {
 		return fs.ErrInvalid
+	}
+	// a background role that was refused fails the load (with the reason): loaded without it, a light theme drew its
+	// dark text on the terminal's own dark background
+	for _, line := range bad {
+		if k, _, ok := strings.Cut(line, " = "); ok && (k == "bg" || k == "bg2" || k == "pattern") {
+			return fmt.Errorf("theme %s: %s must be #rrggbb (it paints every cell)", name, line)
+		}
 	}
 	merged := defaultTheme()
 	for k, v := range overrides {

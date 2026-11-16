@@ -58,26 +58,30 @@ Answer with one JSON object and nothing else:
 
 
 def run_gate(home, gate, timeout=GATE_TIMEOUT):
-    # its own process group: on a timeout the whole group is killed, so a gate that started something in the
-    # background (a server, `cmd &`) cannot keep the pipes open and hold the finish past the timeout
+    """Run the done check. Its output goes to a file, not a pipe: a gate that starts something in the background (a
+    server, `cmd &`) left the pipe open, so waiting for the pipe took the whole timeout and failed a gate that had
+    passed. The gate is waited for as a process, in its own process group; whatever it left running is ended after it
+    exits (and the whole group on a timeout)."""
     import os
     import signal
-    p = subprocess.Popen(['bash', '-lc', gate], cwd=home, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         start_new_session=True)
-    try:
-        out, err = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    import tempfile
+    with tempfile.TemporaryFile() as out:
+        p = subprocess.Popen(['bash', '-lc', gate], cwd=home, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
         try:
-            os.killpg(p.pid, signal.SIGKILL)
+            code = p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+        try:
+            os.killpg(p.pid, signal.SIGKILL)    # the gate's leftovers (or the gate itself, timed out)
         except OSError:
             pass
-        try:
-            p.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-        return False, f'the gate did not finish in {timeout} s'
-    out = (out + err)[-4000:]
-    return p.returncode == 0, f'exit {p.returncode}\n{out}'.strip()
+        if code is None:
+            p.wait()
+            return False, f'the gate did not finish in {timeout} s'
+        out.seek(0)
+        text = out.read().decode('utf-8', errors='replace')[-4000:]
+    return code == 0, f'exit {code}\n{text}'.strip()
 
 
 def evidence(rt, gid, summary, open_work):
