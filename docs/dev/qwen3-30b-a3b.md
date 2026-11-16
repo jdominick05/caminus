@@ -346,8 +346,11 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
   in the mode; past it is refused.
 - **Keys.** The engine key carries the RoPE (and the module name differs), so a conversation parked in one mode never
   restores into the other.
-- **The trade-off.** YaRN scales every position, so short texts read slightly differently than unscaled; the card's own
-  note is why native stays the default.
+- **The trade-off.** YaRN scales every position, so short texts read differently than unscaled; the card's own note is
+  why native stays the default. Measured on the float64 references of the G-model gate's 128-token text (CPU, exact
+  weights; native `q3moe_ref.py` against `q3moe_ref.py --yarn 4:32768`): mean KLD(native || YaRN) 3.7e-02 (median
+  1.8e-02, p90 8.6e-02, max 0.68), the same top token at 122 of 128 positions. That is the model's own change from the
+  scaling, about 80 times the engine's error against the float64 reference (4.66e-04), not an engine error.
 - **Gates** (all GPU, in [testing](testing.md) form): `tests/engine/test_q3m_yarn_rope.py` (the decode row bit for bit the
   prefill's on the same table, both within fp16 rounding of float64 RoPE on the kernel's fp32 angle, `--kv q8`, `--tp`);
   `tools/gates/q3moe_gmodel.py --yarn` at 128 tokens against `tools/reference/q3moe_ref.py --yarn 4:32768` (float64, CPU)

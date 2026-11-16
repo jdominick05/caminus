@@ -91,8 +91,9 @@ the model card's recipe for long texts: YaRN RoPE scaling, factor 4 from its nat
 - One XTX: as much as the card holds, about 80K tokens. Where the context only fits that way, the server stores the
   attention cache as 8-bit rows (Q8_0) and says so in its log.
 - Two cards (`--cards 2 --long-context`): the full 131,072 tokens with the normal 16-bit cache.
-- The trade-off: YaRN changes every position, not only the far ones, so short conversations can read slightly
-  differently than in the default mode. The model card advises it only for texts past 32,768 tokens; the default stays
+- The trade-off: YaRN changes every position, not only the far ones, so short conversations read differently than in
+  the default mode (in an exact reference of the model on a 128-token text, the most likely next token changed at 6 of
+  128 positions). The model card advises it only for texts past 32,768 tokens; the default stays
   the native 40,960 without YaRN.
 - Saved conversations are kept per mode: a conversation saved in one mode is never restored into the other.
 - Other models refuse `--long-context` (the Coder has its own long-context mode: a `--max-ctx` above 262,144).
