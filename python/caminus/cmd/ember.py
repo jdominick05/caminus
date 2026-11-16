@@ -773,10 +773,19 @@ def _remember(a, tr):
     return 0
 
 
+SERVE_OFF = ('an agent-owned model server is off in this release: it would run outside the GPU guard, unregistered '
+             '(caminus ps and the panel would not see it) and blind to GPU-window leases. Start the model with '
+             '`caminus start MODEL` (guarded and registered) and point the agent at it with '
+             '`caminus ember agent model NAME MODEL`. --dry-run still prints the launcher it would write.')
+
+
 def _serve(a, tr):
     """caminus ember serve: resolve placement, build the launcher, start the tmux session (or just print with --dry-run)"""
     import base64 as _b64
     from ..cmd import manage
+    if not getattr(a, 'dry_run', False):
+        print('caminus ember serve: ' + SERVE_OFF, file=sys.stderr)
+        return 2
     extra = list(getattr(a, 'extra', []) or [])
     try:
         m, e, devs, nc = serve.resolve(a.model, a.placement, ctx=a.ctx)

@@ -1145,11 +1145,10 @@ func (m emberModel) jobKeys(k string) (tea.Model, tea.Cmd) {
 	case "n":
 		m.mode, m.edit = "newjob1", ""
 	case "S":
-		if len(m.cli) == 0 {
-			m.msg = "no --cli passed: start servers with `caminus ember serve`"
-		} else {
-			m.mode, m.edit = "serve1", ""
-		}
+		// (an agent-owned server ran outside the GPU guard, unregistered and blind to GPU-window leases: off for
+		// this release; the guarded, registered way is caminus start)
+		m.msg = "agent-owned servers are off in this release: start the model with `caminus start MODEL`, then /model"
+
 	}
 	return m, nil
 }
@@ -1278,7 +1277,7 @@ func (m emberModel) reqPane() string {
 }
 
 func (m emberModel) jobsPane() string {
-	lines := []string{emberHead.Render("JOBS in the agent user (K kill, l tail log, n new job, S new model server)")}
+	lines := []string{emberHead.Render("JOBS in the agent user (K kill, l tail log, n new job)")}
 	if len(m.jobs) == 0 {
 		lines = append(lines, emberDim.Render("  none"))
 	}

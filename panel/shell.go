@@ -468,7 +468,13 @@ func footBar(segs, keyList []string, w int) string {
 		return footBar(segs[:len(segs)-1], keyList, w)
 	}
 	if gap < 2 {
-		return ansi.Truncate(left, w, "…")
+		if len(keyList) == 0 {
+			return ansi.Truncate(left, w, "…")
+		}
+		// the keys never vanish: past the room they take a line of their own under the segments (at 80-100 columns a
+		// model's segments left no keys at all, and the Servers pane lost x / t / l)
+		k := ansi.Truncate(keys, w, "…")
+		return ansi.Truncate(left, w, "…") + "\n" + strings.Repeat(" ", max(0, w-lipgloss.Width(k))) + k
 	}
 	return left + strings.Repeat(" ", gap) + keys
 }
