@@ -190,7 +190,7 @@ def search(home, pattern=None, glob=None, path='.', ignore_case=False, limit=Non
     if glob:
         g = glob[3:] if glob.startswith('**/') else glob
         want = lambda rel: fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(rel.rsplit('/', 1)[-1], g) or fnmatch.fnmatch(rel, g)
-    files, hits, walked, more = [], [], 0, False
+    files, hits, walked, more, capped = [], [], 0, False, False
     paths = [root] if root.is_file() else None
     if paths is None:
         paths = []
@@ -201,7 +201,7 @@ def search(home, pattern=None, glob=None, path='.', ignore_case=False, limit=Non
                 if len(paths) >= SEARCH_FILES:
                     break
             if len(paths) >= SEARCH_FILES:
-                more = True
+                capped = True     # the walk stopped; the files it has are still all searched
                 break
     for p in paths:
         rel = str(p.relative_to(root)) if p != root else p.name
@@ -241,4 +241,6 @@ def search(home, pattern=None, glob=None, path='.', ignore_case=False, limit=Non
         out['note'] = 'read PATH with offset near a line number to see it in context'
     if more:
         out['truncated'] = f'stopped at {limit} results: narrow the glob, the path or the pattern'
+    if capped:
+        out['walk_capped'] = f'only the first {SEARCH_FILES} files under {root} were looked at: narrow the path'
     return out
