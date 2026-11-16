@@ -425,7 +425,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 elif not counting and provider != 'anthropic' and up.status == 200:
                     if usage:
                         usd = openai_cost(rates, usage)
-                    elif client_gone:
+                    elif client_gone and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         # a hang-up before the usage chunk: the prompt plus what was streamed, not the whole allowance
                         usd = (len(raw) / 4 * rates[0] + min(streamed * 2 // 7 + 1, body['max_tokens']) * rates[1]) / 1e6
                         extra += ' (estimated: prompt + %d streamed characters)' % streamed

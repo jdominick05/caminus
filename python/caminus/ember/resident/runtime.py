@@ -67,6 +67,16 @@ VALUE_FLAGS = {'xxd': ('-l', '-s', '-c', '-g', '-o', '-n', '-len', '-seek', '-co
                'uniq': ('-f', '-s', '-w')}
 
 
+def _sort_writes(w):
+    """A sort argument that writes a file or runs a program: -o in any short form (-ro, -oout, -S1ofile; an o in an
+    attached value like -T/opt is refused too, harmlessly), and --output / --compress-program or any unambiguous
+    abbreviation GNU accepts (--out=F, --compress-p=P)."""
+    if w.startswith('--'):
+        name = w[2:].split('=', 1)[0]
+        return bool(name) and ('output'.startswith(name) or ('compress-program'.startswith(name) and len(name) >= 2))
+    return w.startswith('-') and 'o' in w
+
+
 def _operands(args, takes_value):
     out, skip = [], False
     for w in args:
@@ -109,9 +119,7 @@ def read_only_command(cmd):
                 return False
         elif words[0] not in READ_ONLY:
             return False
-        elif words[0] == 'sort' and any(w.startswith(('--output', '--compress-program')) or
-                                        (w.startswith('-') and not w.startswith('--') and 'o' in w)
-                                        for w in words[1:]):
+        elif words[0] == 'sort' and any(_sort_writes(w) for w in words[1:]):
             return False                  # sort -o FILE writes it, in any short form (-ro, -oout, -S1ofile; an 'o' in an
                                           # attached value like -T/opt is refused too: harmless); --compress-program runs one
         elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
