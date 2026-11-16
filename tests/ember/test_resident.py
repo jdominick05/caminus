@@ -1791,10 +1791,25 @@ for line in sys.stdin:
             (self.home/'check.txt').write_text('ok')
             rt._gate_dirty.add(gid);rt._gate_check(gid,g())
             self.assertIn('passes again',inbox()[-1])
-            self.assertEqual(sum(1 for e in rt.store.events() if e['kind']=='gate' and e['data'].get('when')=='turn'),3)
+            self.assertEqual(sum(1 for e in rt.store.events() if e['kind']=='gate' and e['data'].get('when')=='turn'),2,
+                             'an unchanged result is not logged again (70 identical gate lines filled one transcript)')
             rt.config['gate_each_turn']=False
             rt._gate_dirty.add(gid);rt._gate_check(gid,g())
             self.assertEqual(len(inbox()),2,'gate_each_turn false turns it off')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_polling_a_session_and_null_redirects_do_not_count_as_changes(self):
+        from caminus.ember.resident.runtime import read_only_command
+        self.assertTrue(read_only_command('find / -maxdepth 4 -name caminus 2>/dev/null | head; cat f >/dev/null 2>&1'))
+        self.assertFalse(read_only_command('echo x > f'));self.assertFalse(read_only_command('cat a 2>&1 > out'))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.');rt.store.update(gid,gate='true')
+            rt._gate_dirty.discard(gid)
+            rt._action(dict(goal=gid,name='terminal',args=json.dumps(dict(session='s1',yield_ms=5000)),id=0,call_id='c1'))
+            self.assertNotIn(gid,rt._gate_dirty,'a poll of a running session changes nothing')
+            rt._action(dict(goal=gid,name='terminal',args=json.dumps(dict(command='touch x')),id=0,call_id='c2'))
+            self.assertIn(gid,rt._gate_dirty,'a changing command still does')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_pending_request_parks_only_its_step(self):

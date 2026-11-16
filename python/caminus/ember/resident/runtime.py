@@ -57,6 +57,7 @@ LISTING = {'unzip': ('-l', '-v', '-Z', '-Z1'), '7z': ('l',), 'tar': ('-t', '-tf'
 READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files'))
 # Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
 # git's --output, rg's --pre (it runs a command on each file), and any redirection, substitution or tee.
+NULL_REDIRECT = re.compile(r'(?<![\w>])(?:\d|&)?>>?\s*/dev/null\b|(?<![\w>])\d?>&\d\b')
 CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)\b|--output\b|--pre\b')
 
 
@@ -64,7 +65,12 @@ def read_only_command(cmd):
     """A terminal command that changes nothing: every part of a pipeline or && / || / ; chain is a read-only program
     with no changing argument (CHANGING). Anything unclear counts as a change (the per-turn gate runs; plan mode
     refuses it)."""
-    if not isinstance(cmd, str) or not cmd.strip() or CHANGING.search(cmd):
+    if not isinstance(cmd, str) or not cmd.strip():
+        return False
+    # a redirection to /dev/null or between streams writes nothing: 'find / ... 2>/dev/null' was refused as a change
+    # (the '>' in it) before the done check, twice in one real goal's first look
+    cmd = NULL_REDIRECT.sub(' ', cmd)
+    if CHANGING.search(cmd):
         return False
     for part in re.split(r'\|\||&&|[|;&\n]', cmd):
         words = part.split()
@@ -828,7 +834,10 @@ class Runtime:
             if not isinstance(args, dict):
                 raise ValueError('tool arguments must be an object')
             name = action['name']
-            if name in GATE_TRIGGERS and not (name == 'terminal' and read_only_command(args.get('command'))):
+            # (a poll of a running session, no command and no input, changes nothing: 27 polls of one long command
+            # re-ran the gate 27 times in a real goal)
+            polls = name == 'terminal' and not args.get('command') and 'stdin' not in args and not args.get('signal')
+            if name in GATE_TRIGGERS and not polls and not (name == 'terminal' and read_only_command(args.get('command'))):
                 self._gate_dirty.add(action['goal'])
             schemas = {t['function']['name']:t['function']['parameters'] for t in TOOLS} | LEGACY_TOOLS
             schema = schemas.get(name)
@@ -1462,9 +1471,10 @@ class Runtime:
             self._gate_slow[gid] = time.time()
         last = self._gate_last.get(gid)
         self._gate_last[gid] = (ok, out if not ok else '')
-        self.store.event('gate', dict(command=gate, passed=ok, output=out[-2000:], when='turn'), gid)
         if last is not None and last[0] == ok and (ok or last[1] == out):
-            return                            # unchanged: no new message
+            return                            # unchanged: no new message, and no event (70 identical 'gate fails' lines
+            #                                   filled one goal's transcript)
+        self.store.event('gate', dict(command=gate, passed=ok, output=out[-2000:], when='turn'), gid)
         if last is None and ok:
             note = '[gate] the done check\'s gate passes. If the goal is done, verify it and finish.'
         elif ok:
