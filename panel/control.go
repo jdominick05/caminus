@@ -148,16 +148,24 @@ type fitCtx struct {
 	Q8  *int `json:"q8"`
 }
 
+// hasQ8 is whether fit projected the 8-bit cache for this model (kv_formats lists "q8").
+func (v fitInfo) hasQ8() bool {
+	for _, f := range v.KVFormats {
+		if f == "q8" {
+			return true
+		}
+	}
+	return false
+}
+
 // q8Text is the fit row's Q8 part: the figure, "none fits" for a model that has the 8-bit cache but no room for it, or
 // "not offered" for a model without one.
 func (v fitInfo) q8Text() string {
 	if v.MaxCtx.Q8 != nil {
 		return strconv.Itoa(*v.MaxCtx.Q8)
 	}
-	for _, f := range v.KVFormats {
-		if f == "q8" {
-			return "none fits"
-		}
+	if v.hasQ8() {
+		return "none fits"
 	}
 	return "not offered"
 }
@@ -300,6 +308,9 @@ func (m ctl) fitRow(mi camModel) string {
 		return line
 	case fixed != "" && e.info.MaxCtx.F16 == nil:
 		return fg(cYellow).Render("context that fits (" + fixed + "): none with this card count")
+	case e.info.MaxCtx.F16 == nil && e.info.MaxCtx.Q8 == nil && e.info.hasQ8():
+		// (both caches were projected: say Q8 fails too, so switching to --kv q8 is not the way out)
+		return fg(cYellow).Render("context that fits: no context fits at F16 or Q8 with this card count")
 	case e.info.MaxCtx.F16 == nil && e.info.MaxCtx.Q8 == nil:
 		return fg(cYellow).Render("context that fits: no context fits at F16 with this card count")
 	}

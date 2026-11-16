@@ -51,6 +51,9 @@ const fitFixed = `{"native_ctx": 262144, "max_ctx": {"f16": 131072, "q8": null},
 const fitFixedNone = `{"native_ctx": 262144, "max_ctx": {"f16": null, "q8": null}, "step": 4096, "room_mib": [1000.0, 1000.0], "slot_mib": 4.0, "need_mib": null, "ok": true, "arch": "qwen4exp", "draft": "off", "cards": ["0000:03:00.0", "0000:06:00.0"], "kv": "f16", "kv_formats": ["f16"], "kv_fixed": "q8_0"}`
 const fitFixedFail = `{"ok": false, "max_ctx": {"f16": null, "q8": null}, "kv": "f16", "kv_formats": ["f16"], "kv_fixed": "q8_0", "error": "no two supported cards"}`
 
+// fitNeitherQ8 is the reply for a model with the 8-bit cache when neither cache fits: both null, kv_formats f16 and q8.
+const fitNeitherQ8 = `{"native_ctx": 40960, "max_ctx": {"f16": null, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": null, "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"], "kv": "f16", "kv_formats": ["f16", "q8"]}`
+
 // fitNone is serve's reply when no context fits: ok true, f16 null.
 const fitNone = `{"native_ctx": 40960, "max_ctx": {"f16": null, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": null, "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"]}`
 
@@ -80,13 +83,16 @@ func TestFitRowRealPathOK(t *testing.T) {
 }
 
 // The Q8 part of the row for each reply shape: a figure, "none fits" (the model has the 8-bit cache, no room for it),
-// "not offered" (no 8-bit cache), a row that still shows Q8 when nothing fits at F16, and a refusal that keeps it.
+// "not offered" (no 8-bit cache), a row that still shows Q8 when nothing fits at F16, one that says neither fits when
+// both were projected (and F16 only for a model without the 8-bit cache), and a refusal that keeps it.
 func TestFitRowQ8Shapes(t *testing.T) {
 	mi := presentPicker("/models/m.gguf")
 	for _, c := range []struct{ reply, want, not string }{
 		{fitF16Only, "at F16: 65536 positions · Q8: not offered", "none fits"},
 		{fitQ8NoRoom, "at F16: 32768 positions · Q8: none fits", "not offered"},
 		{fitQ8Only, "none at F16 · Q8: 40960 positions", "no context fits"},
+		{fitNeitherQ8, "no context fits at F16 or Q8 with this card count", "not offered"},
+		{fitNone, "no context fits at F16 with this card count", "or Q8"},
 		{fitRefusedQ8, "no card holds qwen3-30b-a3b · Q8: 40960 positions", "reading"},
 		{fitFail, "the DFlash GGUF does not exist", "Q8"},
 	} {
