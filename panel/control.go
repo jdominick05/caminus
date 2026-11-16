@@ -74,6 +74,7 @@ type ctl struct {
 	models  []camModel
 	ps      psInfo
 	hs      harnessInfo
+	ember   emberMsg // the harness pane's Ember row: set up or not
 	opts    []option
 	loaded  map[string]bool      // which reads answered at least once
 	vals    map[string]string    // advanced: option values for the next start (dest -> text); absent = the default
@@ -110,7 +111,9 @@ type (
 		v   harnessInfo
 		err error
 	}
-	optsMsg struct {
+	// emberMsg: whether Ember, the agent environment, is set up (caminus ember status --json)
+	emberMsg struct{ ok, known bool }
+	optsMsg  struct {
 		v   []option
 		err error
 	}
@@ -155,6 +158,17 @@ func (m ctl) loadHarness() tea.Cmd {
 	}
 }
 
+// loadEmber reads whether Ember is set up; any failure reads as not set up (the row then says how).
+func (m ctl) loadEmber() tea.Cmd {
+	return func() tea.Msg {
+		var v struct {
+			OK bool `json:"ok"`
+		}
+		err := m.be.call(&v, 20*time.Second, "ember", "status", "--json")
+		return emberMsg{ok: err == nil && v.OK, known: true}
+	}
+}
+
 func (m ctl) loadOpts() tea.Cmd {
 	return func() tea.Msg {
 		var v []option
@@ -187,7 +201,7 @@ func (m ctl) interactive(what string, args ...string) tea.Cmd {
 }
 
 func (m ctl) Init() tea.Cmd {
-	return tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts(), ctlTickCmd(), ctlPollCmd())
+	return tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadEmber(), m.loadOpts(), ctlTickCmd(), ctlPollCmd())
 }
 
 func (m *ctl) panes() []int {
@@ -404,6 +418,8 @@ func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.busy == "" {
 			m.setNote(msg.err.Error(), true)
 		}
+	case emberMsg:
+		m.ember = msg
 	case harnessMsg:
 		m.loaded["harness"] = true
 		if msg.err == nil {
@@ -604,6 +620,12 @@ func (m ctl) harnessKey(s string) (tea.Model, tea.Cmd) {
 		}
 		m.confirm = &pending{q: fmt.Sprintf("install Qwen Code %s into Caminus's own npm prefix (your own installs stay as they are)? y / n", v),
 			run: m.action("Qwen Code install", 20*time.Minute, "qwen-code", "setup", "--install")}
+	case "e":
+		if !m.ember.ok {
+			m.setNote("Ember is not set up: run caminus ember setup (docs/ember-quickstart.md walks through it)", true)
+			return m, m.loadEmber()
+		}
+		return m, m.interactive("Ember", "ember", "ui")
 	}
 	return m, nil
 }
@@ -1006,6 +1028,15 @@ func (m ctl) harnessRows() []string {
 	} else {
 		rows = append(rows, fg(cMuted).Render("not set up yet: u writes Caminus's tested config into its own home"))
 	}
+	// Ember, the agent environment: an agent in its own account working toward goals you set (e opens its chat)
+	switch {
+	case !m.ember.known:
+		rows = append(rows, fg(cMuted).Render("Ember: checking…"))
+	case m.ember.ok:
+		rows = append(rows, fg(cGreen).Render("✓ Ember")+fg(cMuted).Render(" set up · e opens the agent chat (caminus ember ui)"))
+	default:
+		rows = append(rows, fg(cYellow).Render("Ember not set up")+fg(cMuted).Render(" · run caminus ember setup (docs/ember-quickstart.md)"))
+	}
 	return rows
 }
 
@@ -1067,7 +1098,7 @@ func (m ctl) keysLine() string {
 	case paneServers:
 		p = []string{k("enter", "Qwen Code on it"), k("x", "stop"), k("t", "restart"), k("l", "log"), k("m", "monitor")}
 	case paneHarness:
-		p = []string{k("enter", "launch"), k("u", "set up"), k("i", "install")}
+		p = []string{k("enter", "launch"), k("u", "set up"), k("i", "install"), k("e", "Ember")}
 	case paneOptions:
 		p = []string{k("enter", "edit / toggle"), k("d", "default")}
 		if m.editing {
