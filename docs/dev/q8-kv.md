@@ -338,3 +338,26 @@ CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefil
 CPU: `tests/engine/test_q3moe_tp_kvq8_cpu.py`. It covers the module tables, the engine's caches, tapes and projection,
 the refusals, a refused block on one card with a stalled wait on the other, the prefill's launches and its per-card
 words, the engine key and checkpoint layout, and the registry. No device gate has run on the two-card Q8 objects yet.
+
+Device results, 2026-11-16 (XTX + XT, upload log on):
+- **The new object on the XT alone.** The two-card op test passes: more than 64 splits, 16/2 heads, positions to 8,000. The whole k3_run on one card is bitwise identical to `k3_q3m_lean_kvq8`.
+- **Both cards, tiny model and real file.**
+  - Logits are bitwise identical at K3_PER_WGP 3, 6 and 7 over 4,200 passes.
+  - Replicas are equal after every pass.
+  - Forced bails give the reference's bytes.
+  - Prefill chunk geometry is bitwise identical on the byte caches.
+- **Q8 rows against the oracle.** Each card's last-layer rows are checked against `encode_q8_kv(hadamard128(K), V)`. V matches exactly. K is within one code or one scale LSB at the few positions where the oracle's RoPE differs by an ulp:
+  - the oracle runs the prefill row kernel;
+  - on the F16 engine, 27 of 8,400 card rows at 4,200 positions differ from it, all in K, by at most 2 ulp.
+
+| Mean KLD against the reference (top-1) | 128 decoded | last 64 of 16,384 | last 64 of 40,896 |
+|---|---|---|---|
+| two cards, Q8 | 1.29e-3 (128) | 2.48e-3 (62) | 1.42e-3 (63) |
+| two cards, Q8 against two-card F16 | 1.37e-3 (100 %) | 2.55e-3 (95.3 %) | 1.56e-3 (100 %) |
+| llama.cpp q8_0: against the reference / its own F16 to q8_0 cost | 3.68e-3 / 4.17e-3 | 5.68e-3 / 6.63e-3 | 3.86e-3 / 4.24e-3 |
+
+Speed on two cards, three interleaved rounds, medians:
+- Decode, F16 then Q8: 215.4 / 214.8 tok/s at 8, 189.5 / 191.8 at 4,096, 161.1 / 160.0 at 16,384, and 124.6 / 122.4 at 40,900.
+- Prefill: 7,072 / 7,098 at 4,096 and 3,558 / 3,543 at 32,768.
+
+On two cards, Q8 buys memory, not speed. Each card already reads only its own two kv heads' cache, so the cache is a smaller share of each pass than on one card.
