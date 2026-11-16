@@ -61,7 +61,7 @@ const (
 	paneOptions
 )
 
-var paneNames = []string{"MODELS", "SERVERS", "QWEN CODE", "OPTIONS"}
+var paneNames = []string{"models", "servers", "qwen code", "options"}
 
 // ctl is the control panel's Bubble Tea model.
 type ctl struct {
@@ -795,28 +795,26 @@ func stateColor(s string) color.Color {
 }
 
 func (m ctl) header(W int) string {
-	title := bold(cAccent).Render("◆ caminus") + fg(cMuted).Render(" control panel "+version)
-	mode := pill(cTeal, "BASIC")
-	if m.advanced {
-		mode = pill(cPurple, "ADVANCED")
-	}
-	state, c := "NO SERVER", cGray
-	for _, s := range m.ps.Servers {
+	state, st := g.idle+" no server", lipgloss.NewStyle().Foreground(cMuted)
+	for _, sv := range m.ps.Servers {
 		switch {
-		case s.State == "ready":
-			state, c = "READY", cGreen
-		case s.State == "loading" && state != "READY":
-			state, c = "LOADING", cYellow
-		case s.State == "failed" && state == "NO SERVER":
-			state, c = "FAILED", cRed
+		case sv.State == "ready":
+			state, st = g.done+" ready", lipgloss.NewStyle().Foreground(cGreen)
+		case sv.State == "loading" && !strings.HasSuffix(state, "ready"):
+			state, st = g.waiting+" loading", lipgloss.NewStyle().Foreground(cYellow)
+		case sv.State == "failed" && strings.HasSuffix(state, "no server"):
+			state, st = g.failed+" failed", lipgloss.NewStyle().Foreground(cRed)
 		}
 	}
-	right := ""
-	if m.busy != "" {
-		right = fg(cYellow).Render(spin[m.frame%len(spin)] + " " + m.busy)
+	mode := fg(cTeal).Render("basic")
+	if m.advanced {
+		mode = fg(cPurple).Render("advanced")
 	}
-	l := title + "  " + mode + " " + pill(c, state)
-	return l + strings.Repeat(" ", max(1, W-lipgloss.Width(l)-lipgloss.Width(right))) + right
+	right := emberDim.Render(version)
+	if m.busy != "" {
+		right = fg(cYellow).Render(spin[m.frame%len(spin)]+" "+m.busy) + "  " + right
+	}
+	return screenHeader("panel", state, st, mode, right, W)
 }
 
 func (m ctl) cursor(pane, i, cur int) string {
@@ -1048,7 +1046,8 @@ func (m ctl) optionRows(height int) []string {
 }
 
 func (m ctl) keysLine() string {
-	k := func(key, what string) string { return bold(cAccent).Render(key) + fg(cMuted).Render(" "+what) }
+	// the env chat's status line (footBar): what the next start will run as pills, the keys dim on the right
+	k := func(key, what string) string { return key + " " + what }
 	var p []string
 	switch m.focus {
 	case paneModels:
@@ -1080,7 +1079,16 @@ func (m ctl) keysLine() string {
 		other = "basic"
 	}
 	p = append(p, k("tab", "next panel"), k("a", other), k("R", "refresh"), k("q", "quit"))
-	return strings.Join(p, fg(cDim).Render(" · "))
+	var segs []string
+	if mi := m.selModel(); mi != nil {
+		mode, _ := m.modelMode(*mi)
+		segs = append(segs, g.model+" "+mi.Name, fmt.Sprintf("%d card(s)", mode.Cards))
+	}
+	w := m.w
+	if w <= 0 {
+		w = 120
+	}
+	return footBar(segs, p, min(max(w, 60), 220))
 }
 
 func (m ctl) render() string {
@@ -1105,13 +1113,13 @@ func (m ctl) render() string {
 		}
 		return c
 	}
-	out := []string{m.header(W), ""}
+	out := []string{m.header(W)}
 	if hw := m.hwRows(); len(hw) > 0 && (m.advanced || m.hwError() != "" || m.hwWarn()) {
 		c := cYellow
 		if m.hwError() != "" {
 			c = cRed
 		}
-		out = append(out, panel("HARDWARE", c, W, hw), "")
+		out = append(out, panel("hardware", c, W, hw), "")
 	}
 	two := m.advanced && W >= 150
 	left := W
@@ -1123,7 +1131,7 @@ func (m ctl) render() string {
 		panel(title(paneServers), acc(paneServers, cGreen), left, m.serverRows()),
 	}
 	if m.advanced {
-		col = append(col, panel("CARDS", cOrange, left, m.cardRows()))
+		col = append(col, panel("cards", cOrange, left, m.cardRows()))
 	}
 	col = append(col, panel(title(paneHarness), acc(paneHarness, cPurple), left, m.harnessRows()))
 	body := strings.Join(col, "\n")

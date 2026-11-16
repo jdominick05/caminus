@@ -6,6 +6,7 @@
 //	caminus-panel [-advanced] [-caminus CMD]   the control panel (control.go)
 //	caminus-panel top [llm-top's flags]        the monitor: llm-top, baked into Caminus on 11-07 (top_main.go and the
 //	                                           files beside it; its own -config / -once / -web flags)
+//	caminus-panel env --user U --bridge D --audit F --key K   the agent environment's TUI (envui.go; `caminus ember ui`)
 //	caminus-panel -version
 package main
 
@@ -20,6 +21,9 @@ func main() {
 		switch args[0] {
 		case "top", "monitor":
 			topMain(args[1:])
+			return
+		case "ember", "env": // (env: the old name)
+			emberMain(args[1:])
 			return
 		case "-version", "--version", "version":
 			fmt.Println("caminus-panel", version)
