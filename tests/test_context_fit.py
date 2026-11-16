@@ -423,7 +423,7 @@ class ContextFit(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"kv 'q8': .*qwen3-30b-a3b \(one card or two\)"):
                 cli.recipe(cli.parse(['--model', str(coder), '--kv', 'q8']), log=lambda *a, **kw: None)
             place.assert_not_called()
-        self.assertIs(cli.recipe(cli.parse(['--model', str(coder)]), log=lambda *a, **kw: None), arch.CODER)   # (f16, the default: no refusal)
+        self.assertIs(cli.recipe(cli.parse(['--model', str(coder), '--draft', 'off']), log=lambda *a, **kw: None), arch.CODER)   # (f16, the default: no refusal; --draft off: no DFlash file needed on a CI runner)
         stdout = io.StringIO()
         with patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.fit_report(['--model', str(coder), '--kv', 'q8', '--json']), 1)
