@@ -1961,6 +1961,23 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_install_queues_an_update_for_every_running_daemon_on_an_older_runtime(self):
+        # an upgrade left a days-old daemon running: install alone restarted nothing
+        from caminus.ember import agent_host
+        fake=self.home/'fakehome';(fake/'homes'/'old').mkdir(parents=True);(fake/'homes'/'gone').mkdir();(fake/'homes'/'fresh').mkdir()
+        (fake/'homes'/'old'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
+        (fake/'homes'/'gone'/'heartbeat.json').write_text(json.dumps(dict(pid=2**22+12345,runtime='aaaa.pyz')))
+        def transport(argv,input=None,**kw):
+            return subprocess.run(['bash','-s'],input=input,capture_output=True,text=True,env=dict(os.environ,HOME=str(fake)))
+        import contextlib,io as _io
+        out=_io.StringIO()
+        with contextlib.redirect_stdout(out):agent_host.main(['install'],transport)
+        res=json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(res['updates_queued'],['old'],'only a live daemon on another runtime')
+        u=json.loads((fake/'homes'/'old'/'update.json').read_text())
+        self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
+        self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
+
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
         name=json.loads((self.home/'config.json').read_text())['name']
