@@ -147,6 +147,7 @@ check(not any(builds(m, f) for m in k3.Q3M_TP_MODULES for f in other_ops),
       'the two-card modules refuse ops outside the lean set (OP_OWN_MOE_SUM, OP_OWN_F16, OP_OWN_SWIGLU16)')
 check(all(builds(m, add_xchg) for m in k3.Q35_TP_MODULES) and not builds('k3_q35_swift', add_slot),
       'the dense two-card modules still take OP_XCHG; a dense module refuses OP_OWN_SLOT_SUM')
+check(not builds('k3', add_slot), 'the generic k3 module (no op list, no capability set) refuses a raw OP_OWN_SLOT_SUM segment')
 
 # ---- OP_OWN_ATTS's split cap --------------------------------------------------------------------------------------------
 at = src('k3_own_atts.h')
