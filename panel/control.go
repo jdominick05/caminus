@@ -80,6 +80,8 @@ type ctl struct {
 	vals    map[string]string    // advanced: option values for the next start (dest -> text); absent = the default
 	card    string               // one-card models: "auto", "0", "1" (advanced; basic: auto)
 	picks   map[string]modelPick // model name -> card count and drafter choice at each count
+	fits    map[string]fitEntry  // caminus fit --json per model, card count, drafter and advanced options (display only)
+	fitGen  int                  // bumped by R and by every action: a reply from an older generation is dropped
 	curM    int
 	curS    int
 	curO    int
@@ -121,9 +123,153 @@ type (
 		what, note string
 		err        error
 	}
+	fitMsg struct {
+		key string
+		gen int
+		v   fitInfo
+		err error
+	}
 	ctlTick time.Time
 	ctlPoll time.Time
 )
+
+// fitInfo is `caminus fit --json` (serve's own projection; the panel shows it and does no memory math). max_ctx is per KV
+// format: f16 is the largest context that fits, q8 is null until the Q8 projection exists (#81).
+type fitInfo struct {
+	OK     bool   `json:"ok"`
+	Error  string `json:"error"`
+	MaxCtx struct {
+		F16 *int `json:"f16"`
+		Q8  *int `json:"q8"`
+	} `json:"max_ctx"`
+}
+
+// fitEntry is one fit read: done once its answer (or error) has arrived.
+type fitEntry struct {
+	done     bool
+	info     fitInfo
+	err      error
+	failedAt time.Time // a failed read (error or ok:false) is retried after fitRetry, not kept
+}
+
+// fitRetry is how long a failed fit read waits before the picker asks again (the picker redraws every 150 ms).
+const fitRetry = 10 * time.Second
+
+// fitArgs is the fit query for the model's next start: its file, card count, drafter and the advanced options that
+// `caminus fit` takes (fit uses serve's parser, so these are the flags start would pass). The key is the whole query.
+func (m ctl) fitArgs(mi camModel) (string, []string) {
+	mode, draft := m.modelMode(mi)
+	a := []string{"fit", "--model", mi.Path, "--cards", strconv.Itoa(mode.Cards)}
+	if draft != "auto" {
+		a = append(a, "--draft", draft)
+	}
+	if m.advanced {
+		var keys []string
+		for k := range m.vals {
+			switch k {
+			case "cards", "draft", "no_drafter", "model", "config", "port":
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			o := m.optByDest(k)
+			if o == nil {
+				continue
+			}
+			v := m.vals[k]
+			if o.Type == "bool" {
+				if v == "true" {
+					a = append(a, o.Flag)
+				}
+				continue
+			}
+			if v != "" {
+				a = append(a, o.Flag, v)
+			}
+		}
+	}
+	return strings.Join(a, " "), append(a, "--json")
+}
+
+// fitKey is the cache key of the selected model's fit query (fitArgs' key).
+func (m ctl) fitKey(mi camModel) string {
+	k, _ := m.fitArgs(mi)
+	return k
+}
+
+// fitCmd reads the selected model's fit once per query; nil while that read is in flight, when a failed read is still
+// inside its retry wait, or when the model is not on disk (nothing to project).
+func (m ctl) fitCmd() tea.Cmd {
+	mi := m.selModel()
+	if mi == nil || !mi.Present || m.fits == nil {
+		return nil
+	}
+	key, args := m.fitArgs(*mi)
+	if e, seen := m.fits[key]; seen {
+		if !e.done || e.failedAt.IsZero() || time.Since(e.failedAt) < fitRetry {
+			return nil
+		}
+	}
+	m.fits[key] = fitEntry{}
+	gen, be := m.fitGen, m.be
+	return func() tea.Msg {
+		var v fitInfo
+		err := be.call(&v, 60*time.Second, args...)
+		return fitMsg{key: key, gen: gen, v: v, err: err}
+	}
+}
+
+// refreshFits forgets every fit read: fit depends on the cards' memory now, so R and every start, stop or restart
+// (actMsg) make the picker ask again. A reply still in flight from before is dropped by its generation.
+func (m *ctl) refreshFits() {
+	m.fitGen++
+	m.fits = map[string]fitEntry{}
+}
+
+// settle runs c and every command its messages return, feeding each message back into the model before the next:
+// the -once frame renders only after its reads have been answered, never with one still in flight.
+func settle(m ctl, c tea.Cmd, depth int) ctl {
+	if c == nil || depth > 32 {
+		return m
+	}
+	msg := c()
+	if b, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range b {
+			m = settle(m, sub, depth+1)
+		}
+		return m
+	}
+	nm, next := m.Update(msg)
+	return settle(nm.(ctl), next, depth+1)
+}
+
+// fitRow is the picker's line for the context that fits at F16 (empty when there is no read for the selection).
+func (m ctl) fitRow(mi camModel) string {
+	key, _ := m.fitArgs(mi)
+	e, seen := m.fits[key]
+	if !seen {
+		return ""
+	}
+	switch {
+	case !e.done:
+		return fg(cMuted).Render("context that fits: reading caminus fit")
+	case e.err != nil:
+		return fg(cYellow).Render("context that fits: " + e.err.Error())
+	case !e.info.OK:
+		return fg(cYellow).Render("context that fits: " + e.info.Error)
+	case e.info.MaxCtx.F16 == nil:
+		return fg(cYellow).Render("context that fits: no context fits at F16 with this card count")
+	}
+	line := fg(cMuted).Render("context that fits at F16: ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
+		fg(cMuted).Render(" positions · Q8: pending")
+	if mode, _ := m.modelMode(mi); m.advanced && mode.Cards == 1 && m.card != "" && m.card != "auto" {
+		// caminus fit has no --card: it places the model itself, so a pinned card does not change this figure
+		line += fg(cYellow).Render(" · card " + m.card + " pinned: not in this figure")
+	}
+	return line
+}
 
 func ctlTickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg { return ctlTick(t) })
@@ -393,8 +539,27 @@ func (m ctl) visibleOpts() []option {
 	return out
 }
 
+// Update runs the message and then reads caminus fit for the selection when it is not yet known (cached per choice).
 func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nm, cmd := m.update(msg)
+	mm := nm.(ctl)
+	if mm.loaded["models"] {
+		return mm, tea.Batch(cmd, mm.fitCmd())
+	}
+	return mm, cmd
+}
+
+func (m ctl) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case fitMsg:
+		if msg.gen != m.fitGen {
+			return m, nil // a read from before R or a start, stop or restart: its cards' memory is no longer the current one
+		}
+		e := fitEntry{done: true, info: msg.v, err: msg.err}
+		if msg.err != nil || !msg.v.OK {
+			e.failedAt = time.Now() // not kept: asked again after fitRetry
+		}
+		m.fits[msg.key] = e
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 	case ctlTick:
@@ -432,6 +597,7 @@ func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case actMsg:
 		m.busy = ""
+		m.refreshFits() // a start, stop or restart changes the cards' memory: fit is read again
 		if msg.err != nil {
 			m.setNote(msg.what+": "+msg.err.Error(), true)
 		} else if msg.note != "" {
@@ -479,6 +645,7 @@ func (m ctl) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "R":
 		m.setNote("refreshing", false)
+		m.refreshFits()
 		return m, tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts())
 	case "up", "k":
 		m.move(-1)
@@ -883,6 +1050,9 @@ func (m ctl) modelRows() []string {
 			draft = "auto (server default)"
 		}
 		rows = append(rows, "", fg(cMuted).Render("next start: ")+bold(cAccent).Render(fmt.Sprintf("%d card(s) · drafter %s", mode.Cards, draft)))
+		if fr := m.fitRow(*mi); fr != "" {
+			rows = append(rows, fr)
+		}
 	}
 	if m.advanced {
 		if mi := m.selModel(); mi != nil {
@@ -1214,7 +1384,8 @@ func upFor(s float64) string {
 }
 
 func newCtl(be *ctlCLI, advanced bool, prefsFile string) ctl {
-	m := ctl{be: be, advanced: advanced, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile}
+	m := ctl{be: be, advanced: advanced, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile,
+		fits: map[string]fitEntry{}}
 	m.loadPrefs()
 	return m
 }
@@ -1248,10 +1419,8 @@ func ctlMain(args []string) {
 	if once {
 		m := newCtl(newCtlCLI(cli), adv, "") // (no prefs file: a one-off frame changes nothing)
 		m.w, m.h = w, h
-		for _, c := range []tea.Cmd{m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts()} {
-			nm, _ := m.Update(c())
-			m = nm.(ctl)
-		}
+		m = settle(m, tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts()), 0)
+		m = settle(m, m.fitCmd(), 0) // the selected model's fit is answered before the frame is drawn
 		fmt.Println(m.render())
 		return
 	}

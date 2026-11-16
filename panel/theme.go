@@ -91,6 +91,12 @@ func validThemeValue(key, v string) bool {
 	if key == "bg_pattern" {
 		return bgPatterns[v]
 	}
+	if key == "bg" || key == "bg2" || key == "pattern" {
+		// painted into every cell as 24-bit colour: only #rrggbb paints (a #rgb, #rrggbbaa or term_N loaded without an
+		// error and then painted nothing, leaving a light theme's dark text on the terminal's dark background)
+		_, _, _, ok := hexRGB(v)
+		return ok
+	}
 	if strings.HasPrefix(v, "#") {
 		switch len(v) {
 		case 4, 7, 9:

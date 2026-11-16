@@ -175,7 +175,18 @@ def stop_all(argv):
     text = (a.reason.strip() or 'emergency stop by the owner') + '\n'
     # The folder is sticky (1770, root:<bridge group>): only the file's owner or root can delete or rename it, and the
     # file is group-readable but not group-writable, so an agent can see the stop and cannot lift or rewrite it.
-    fd = os.open(stop, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    # An agent in the group can create files here: a STOP it planted (a symlink to an owner's file, or its own file
+    # the owner would then chmod) is removed first, and the stop is created fresh, never through a link.
+    try:
+        st = os.lstat(stop)
+        if os.path.islink(stop) or st.st_uid != os.getuid():
+            os.unlink(stop)
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+    if not os.path.lexists(stop):
+        flags |= os.O_EXCL
+    fd = os.open(stop, flags, 0o640)
     os.fchmod(fd, 0o640)
     with os.fdopen(fd, 'w') as f:
         f.write(text)

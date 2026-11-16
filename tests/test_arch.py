@@ -275,7 +275,7 @@ def main():
     with contextlib.redirect_stdout(out):
         rc = _cli0.fit_report(['--model', rope_file('qwen3moe', yarn, 'yarn'), '--draft', 'off', '--json'])
     rep = json.loads(out.getvalue())
-    check(rc == 1 and rep['ok'] is False and rep['max_ctx'] is None and 'RoPE scaling' in rep['error'],
+    check(rc == 1 and rep['ok'] is False and rep['max_ctx'] == {'f16': None, 'q8': None} and 'RoPE scaling' in rep['error'],
           f'rope keys: caminus fit reports the refusal with no maximum ({rep})')
 
     # ---- the model cards' context facts in the registry (data only: nothing serves from them yet)
