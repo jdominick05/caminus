@@ -70,6 +70,7 @@ SUITES = [
     ('nightly_plan', ['tests/tools/test_nightly_plan.py', '--scratch', '{scratch}'], set()),
     ('objcheck', ['tests/tools/test_objcheck.py', '--scratch', '{scratch}'], set()),
     ('pr_ready', ['tests/tools/test_pr_ready.py', '--scratch', '{scratch}'], set()),
+    ('served_cards_ab', ['tests/benchmarks/test_served_cards_ab.py', '--scratch', '{scratch}'], set()),
     ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),
     ('kv_host', ['tests/device/test_kv_host_cpu.py'], {'torch'}),
     ('kv_codec', ['tests/device/test_kv_codec.py'], {'torch'}),
