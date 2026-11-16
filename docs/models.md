@@ -75,12 +75,11 @@ ThinkingCap at 1.13-1.18x; on 11K-29K-token agent prompts the range is 1.20-1.45
 
 `qwen3-30b-a3b` runs on two cards too (`caminus start qwen3-30b-a3b --cards 2`, or `caminus serve --cards 2`), but one
 card stays its default. Each card holds half of every layer's attention and part of every expert (two thirds on the
-bigger card, which is card 0). Measured in the engine so far, not yet through the server: two cards write more slowly
-than one XTX at short context (218 against 246 tok/s) and faster from about 16K tokens on (125 against 105 tok/s at
-40,900), and read a 4K prompt faster (7,041 against 6,503 tok/s, the one-card side of the same interleaved A/B; the
-table's 6,432 is the published one-card row, measured separately; a short prompt more slowly). The context stays
-40,960 tokens, the model's own limit, so the second card buys speed with a long context, not more context
-([benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards-engine-level)). No drafter on one card or two.
+bigger card, which is card 0). Served, two cards decode more slowly than one XTX on short turns (206 against 240 tok/s)
+and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every prompt from 4K tokens on faster
+(1.09x at 4K, 1.29x at 40,768); see [benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards). The context stays
+40,960 tokens, the model's own limit, so the second card buys speed with a long context, not more context.
+No drafter on one card or two.
 
 ## The names your tools use
 

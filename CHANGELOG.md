@@ -28,10 +28,9 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   yet. See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on two cards, offered.** `caminus start qwen3-30b-a3b --cards 2` (or `caminus serve --cards 2`, or the
   panel's two-card mode) splits every layer across an XTX + XT: each card holds half the attention heads and part of every
-  expert (two thirds on the bigger card, card 0). Still Caminus's own code end to end. One card stays the default: in the
-  engine, two cards decode more slowly at short context (218 against 246 tok/s) and faster from about 16K tokens on (125
-  against 105 tok/s at 40,900), and read a 4K prompt at 7,041 tok/s against 6,503 (the one-card side of the same
-  interleaved A/B; the published one-card row is 6,432; a 512-token prompt more slowly). The context stays 40,960
+  expert (two thirds on the bigger card, card 0). Still Caminus's own code end to end. One card stays the default: served, two cards decode more slowly on short
+  turns (206 against 240 tok/s) and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every
+  prompt from 4K tokens on faster (1.09x at 4K, 1.29x at 40,768). The context stays 40,960
   tokens, the model's own limit. Served numbers are still to come. See [benchmarks](docs/dev/benchmarks.md).
 - **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
   code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
