@@ -896,11 +896,11 @@ class Resident(unittest.TestCase):
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
-        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort -S1ofile in','sort -k2,2o in',
+        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort -S1ofile in','sort -k2,2o in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
                     'sort --compress-program=sh in','sort in | uniq - out.txt',
                     'xxd - out.bin','xxd -rp dump bin'):
             self.assertFalse(R.read_only_command(cmd),cmd)
-        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in'):
+        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in','sort --numeric-sort in'):
             self.assertTrue(R.read_only_command(cmd),cmd)
         rt=Runtime(self.home)
         try:
