@@ -21,6 +21,9 @@
 // matrices: items = nullptr, ntok tokens, blockIdx.x = tokens 64 x .. 64 x + 63, identity lists (xsrc / ydst unused).
 #include <hip/hip_runtime.h>
 #include <stdint.h>
+#ifdef Q3P_KV_Q8
+#include "own_kv_codec.h"
+#endif
 // Q3P_ABL (measurement builds only: kernels/q35_prefill_abl*.hip; never the runtime objects, whose text is unchanged):
 // 1 a constant B (no weight loads or decode), 2 no X staging (the stage's barriers kept), 3 the WMMAs accumulate into acc
 // directly (no per-block / per-sub-block scale step, no Q4_K min term). Each removes one part of a tile to time the rest.
@@ -519,18 +522,35 @@ extern "C" __global__ void __launch_bounds__(256) q3p_swiglu(const float * __res
 // pos powf(theta_scale, j), fma(x0, c, -(x1 s)) / fma(x1, c, x0 s)). qkv: fp32 [n][ldq] = q | k | v. Grid (n, nh + nkv),
 // block 128. par: q_norm [128] | k_norm [128] | theta_scale | eps (the decode's block). The host checks the positions
 // against the cache's rows.
+#ifdef Q3P_KV_Q8
+// q3p_qk_rope_q8 (the Q8 KV object, kernels/q3m_prefill_kvq8.hip): the same statements; the kv heads' K and V go to the
+// cache row as Q8_0 blocks (kernels/own_kv_codec.h's wave encode of the fp16-rounded values this kernel's F16 form stores:
+// wave w of a kv head's workgroup = block w of its K and of its V), the decode Q8 module's row. A refused block ORs 2 into
+// *err (the prefill's own word: the host marks the engine broken) and keeps its bytes.
+extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope_q8(const float * __restrict__ qkv, int ldq, int nh, int nkv, const float * __restrict__ par,
+                                                                 int pos0, _Float16 * __restrict__ q16, uint8_t * __restrict__ cache, int * __restrict__ err) {
+#else
 extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __restrict__ qkv, int ldq, int nh, int nkv, const float * __restrict__ par,
                                                               int pos0, _Float16 * __restrict__ q16, _Float16 * __restrict__ cache) {
+#endif
     __shared__ float part[4], y1[128], rc[64], rs[64];
     const int i = threadIdx.x, lane = i & 31, wave = i >> 5, t = blockIdx.x, hy = blockIdx.y, pos = pos0 + t;
     const bool isq = hy < nh;
     const int g = hy - nh;
     const float * row = qkv + (size_t)t * ldq;
     const size_t M = (size_t)nkv * 128;
+#ifdef Q3P_KV_Q8
+    uint8_t * cw = cache + (size_t)pos * (2 * (M / 32) * 34);   // (own_kv_q8_row_bytes)
+    if (!isq) {   // v: its block (wave) of the row's V part
+        const float xv = (float)(_Float16)row[nh * 128 + M + (size_t)g * 128 + i];
+        own_kv_q8_encode_wave(xv, cw + (M / 32 + (size_t)g * 4 + wave) * 34, lane, true, err);
+    }
+#else
     _Float16 * cw = cache + (size_t)pos * 2 * M;
     if (!isq) {   // v: copied as is
         cw[M + (size_t)g * 128 + i] = (_Float16)row[nh * 128 + M + (size_t)g * 128 + i];
     }
+#endif
     const float x = isq ? row[(size_t)hy * 128 + i] : row[nh * 128 + (size_t)g * 128 + i];
     const float wn = isq ? par[i] : par[128 + i], eps = par[257];
     if (i < 64) { const float theta = (float)pos * powf(par[256], (float)i); rc[i] = cosf(theta); rs[i] = sinf(theta); }
@@ -544,7 +564,11 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
     const float c = rc[j], sn = rs[j], x0 = y1[j], x1 = y1[j + 64];
     const float y = i < 64 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
     if (isq) q16[((size_t)t * nh + hy) * 128 + i] = (_Float16)y;
+#ifdef Q3P_KV_Q8
+    else own_kv_q8_encode_wave((float)(_Float16)y, cw + ((size_t)g * 4 + wave) * 34, lane, true, err);
+#else
     else cw[(size_t)g * 128 + i] = (_Float16)y;
+#endif
 }
 
 // ---- q3p_attn: causal attention of a chunk's queries over the cache (rows 0 .. p for the token at position p), WMMA, fp16
@@ -567,8 +591,32 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
 #define AT_C 64
 #define AT_KP 136
 #define AT_VP 72
+#ifdef Q3P_KV_Q8
+// q3p_attn_q8: the same kernel over Q8_0 rows: thread (pr, qd) stages block qd of its position's K and of its V, each value
+// decoded (float code * float scale, kv_get's value, exact) and rounded to fp16 for the WMMA operands. That rounding is
+// one more than the decode's reader (it uses the fp32 values): gated by the model gate at depth, not bitwise
+__device__ __forceinline__ void q3p_q8_stage(const uint8_t * blk, _Float16 (&h)[32]) {
+    // the block's 34 bytes as 9 dwords from the one at or before it (rows and kv heads are whole dwords: a block starts
+    // 0 or 2 bytes past one)
+    const int od = (int)((uintptr_t)blk & 3);
+    const uint32_t * p = (const uint32_t *)(blk - od);
+    uint32_t w[9];
+#pragma unroll
+    for (int j = 0; j < 9; j++) w[j] = p[j];
+    const float d = (float)__builtin_bit_cast(_Float16, (uint16_t)(od ? w[0] >> 16 : w[0] & 0xffffu));
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+        const uint32_t c = od ? w[j + 1] : __builtin_amdgcn_alignbyte(w[j + 1], w[j], 2);
+#pragma unroll
+        for (int e = 0; e < 4; e++) h[4 * j + e] = (_Float16)((float)(int8_t)(c >> (8 * e)) * d);
+    }
+}
+extern "C" __global__ void __launch_bounds__(256) q3p_attn_q8(const _Float16 * __restrict__ q16, const uint8_t * __restrict__ cache, int pos0, int n,
+                                                              int blk0, int nkv, float scale_log2, _Float16 * __restrict__ out16) {
+#else
 extern "C" __global__ void __launch_bounds__(256) q3p_attn(const _Float16 * __restrict__ q16, const _Float16 * __restrict__ cache, int pos0, int n,
                                                            int blk0, int nkv, float scale_log2, _Float16 * __restrict__ out16) {
+#endif
     __shared__ _Float16 Ks[AT_C * AT_KP];
     __shared__ _Float16 Vt[128 * AT_VP];
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, hi = lane >> 4;
@@ -591,11 +639,28 @@ extern "C" __global__ void __launch_bounds__(256) q3p_attn(const _Float16 * __re
     const int pr = tid >> 2, qd = tid & 3;              // staging: position pr of the chunk, dims 32 qd .. 32 qd + 31
     for (int c0 = 0; c0 < npos; c0 += AT_C) {
         const int prow = min(c0 + pr, npos - 1);       // (rows past the end: a valid row; never in a written column's sum)
+#ifdef Q3P_KV_Q8
+        u32x4_t kv[4], vv[4];
+        {
+            const uint8_t * rw = cache + (size_t)prow * (2 * (M / 32) * 34);
+            _Float16 hk[32], hv[32];
+            q3p_q8_stage(rw + ((size_t)g * 4 + qd) * 34, hk);
+            q3p_q8_stage(rw + (M / 32 + (size_t)g * 4 + qd) * 34, hv);
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                kv[j] = (u32x4_t){as_u((h2_t){hk[8 * j], hk[8 * j + 1]}), as_u((h2_t){hk[8 * j + 2], hk[8 * j + 3]}),
+                                  as_u((h2_t){hk[8 * j + 4], hk[8 * j + 5]}), as_u((h2_t){hk[8 * j + 6], hk[8 * j + 7]})};
+                vv[j] = (u32x4_t){as_u((h2_t){hv[8 * j], hv[8 * j + 1]}), as_u((h2_t){hv[8 * j + 2], hv[8 * j + 3]}),
+                                  as_u((h2_t){hv[8 * j + 4], hv[8 * j + 5]}), as_u((h2_t){hv[8 * j + 6], hv[8 * j + 7]})};
+            }
+        }
+#else
         const u32x4_t * kp = (const u32x4_t *)(cache + (size_t)prow * RS + (size_t)g * 128 + qd * 32);
         const u32x4_t * vp = (const u32x4_t *)(cache + (size_t)prow * RS + M + (size_t)g * 128 + qd * 32);
         u32x4_t kv[4], vv[4];
 #pragma unroll
         for (int j = 0; j < 4; j++) { kv[j] = kp[j]; vv[j] = vp[j]; }
+#endif
         __syncthreads();
         u32x4_t * kd = (u32x4_t *)(Ks + pr * AT_KP + qd * 32);
 #pragma unroll

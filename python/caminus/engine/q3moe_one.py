@@ -26,7 +26,10 @@ from .own_layout import q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
 MODULE_IQ = 'k3_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
-MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
+MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}
+# the KV cache as Q8_0 rows (q8=True): kernels/own_kv_codec.h's blocks, no rotation, each block the encode of the fp16 values
+# the F16 cache holds (a Q8 row is caminus.ref_kv.encode_q8_kv of the F16 row); the lean decode form only, one card
+KV_FORMAT_Q8 = 'q8_0-v1:unrotated:f16-rounded-v1'   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
 ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the engine takes as many as its card's grid
                                 # holds at once: splits_for), fewest positions per split. XT, a chain of 48 attention
                                 # segments (us per layer at positions 8 / 1K / 4K / 8K): one task per query head 10.4 / 86 /
@@ -67,7 +70,12 @@ def splits_for(nkv, cap=ATS_SPLITS):
 class Q3MoEOne:
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp='card', gu=True, attn_batched=True, attn_one=True,
                  attn_split=True, splits=None, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8,
-                 link_keepalive=True):
+                 link_keepalive=True, q8=False):
+        """q8: the KV cache as Q8_0 rows on k3_q3m_lean_kvq8 (KV_FORMAT_Q8; the lean tape form and a file without codebook
+        or row-scale tensors only; its batched prefill is Q3MPrefill's Q8 path). A refused encoding (a non-finite K / V
+        value) raises caminus.errors.InvalidKVEncoding and leaves the engine broken: reset() keeps it"""
+        if type(q8) is not bool: raise ValueError(f'Q3MoEOne: q8 must be a bool, not {q8!r}')
+        self.q8 = q8
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -107,9 +115,11 @@ class Q3MoEOne:
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoEOne: token_embd is {self.emb.type} (Q4_K only)')
+        if q8: self.kv_format_id = KV_FORMAT_Q8
+        _ = self.module   # (refuses a Q8 cache on any object but the lean module's Q8 build, and that build without q8, before anything loads)
         wbytes = sum(t.n_bytes for t in F.tensors)
         self.cache_rows = max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
-        kv = self.nl * self.cache_rows * k3.kv_pos_bytes(self.nkv * self.hd, False)
+        kv = self.nl * self.cache_rows * k3.kv_pos_bytes(self.nkv * self.hd, q8)
         self.vram_mib = (wbytes + kv + 4 * k3.Engine.atts_scratch_floats(self.nkv, splits or ATS_SPLITS)) / 2 ** 20 + 256   # (the most splits a card takes)
         if vram_check:   # (vram_extra_mib: what the caller adds right after: a prefill's buffers, a drafter)
             capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
@@ -122,6 +132,7 @@ class Q3MoEOne:
         # dense attention at every depth, no drafter features yet
         self.ntok, self.max_retries, self.bails = 1, int(max_retries), []
         self.fresh, self.poisoned, self.seq, self.token = True, None, 0, 0
+        self.broken = None   # a terminal numerical failure (a refused Q8 KV encoding): sticky, reset() keeps it
         self.devs = [self.dev]
         self.T = F.T                                          # (the GGUF's tensors by name: K3Session reads output.weight's shape)
         self.qsa, self.qsa_limit, self.idx_cache, self.dual, self.local_only = False, None, False, False, True
@@ -133,31 +144,37 @@ class Q3MoEOne:
         with torch.cuda.device(self.dev): self._load(); self._build_tape()
 
     @staticmethod
-    def projection_mib(path, max_ctx, splits=ATS_SPLITS):
+    def projection_mib(path, max_ctx, splits=ATS_SPLITS, q8=False):
         """MiB the engine allocates on its card at max_ctx, from the file's header alone (nothing on a card): __init__'s own
-        check counts the same terms"""
+        check counts the same terms (q8: the Q8_0 rows, 1,088 bytes per position and layer instead of 2,048)"""
         F = ggufio.GGUFFile(path)
         try:
             nl, nkv, hd = int(F.hp('block_count')), int(F.hp('attention.head_count_kv')), int(F.hp('attention.key_length'))
             w = sum(t.n_bytes for t in F.tensors)
         finally:
             F.close()
-        kv = nl * (int(max_ctx) + k3.Engine.ATS_PAD) * 4 * nkv * hd
+        kv = nl * (int(max_ctx) + k3.Engine.ATS_PAD) * k3.kv_pos_bytes(nkv * hd, bool(q8))
         return (w + kv + 4 * k3.Engine.atts_scratch_floats(nkv, splits)) / 2 ** 20 + 256
 
     @staticmethod
-    def kv_pos_mib(path):
-        """MiB of KV cache per position (every layer)"""
+    def kv_pos_mib(path, q8=False):
+        """MiB of KV cache per position (every layer; q8: Q8_0 rows)"""
         F = ggufio.GGUFFile(path)
-        try: return int(F.hp('block_count')) * 4 * int(F.hp('attention.head_count_kv')) * int(F.hp('attention.key_length')) / 2 ** 20
+        try: return int(F.hp('block_count')) * k3.kv_pos_bytes(int(F.hp('attention.head_count_kv')) * int(F.hp('attention.key_length')), bool(q8)) / 2 ** 20
         finally: F.close()
 
     # -- weights -----------------------------------------------------------------------------------------------------------
     @property
     def module(self):
         """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
-        if self._module is not None: return self._module
         lean = self.fused and self.gu and self.attn_one and self.attn_split
+        if getattr(self, 'q8', False):   # (the Q8 cache: k3_q3m_lean's Q8 build only; set explicitly or picked here)
+            if self._module not in (None,) + k3.Q3M_KV_Q8_MODULES or not lean or self.iq or self.rs:
+                raise ValueError(f'Q3MoEOne: the Q8 KV cache runs on {k3.Q3M_KV_Q8_MODULES} only (the default tape form, a file '
+                                 f'without codebook or row-scale tensors; module {self._module}, IQ {sorted(self.iq)}, RS {sorted(self.rs)})')
+            return self._module or k3.Q3M_KV_Q8_OF[MODULE_LEAN]
+        if self._module in k3.Q3M_KV_Q8_MODULES: raise ValueError(f'Q3MoEOne: {self._module} needs q8=True')
+        if self._module is not None: return self._module
         if self.rs:
             if not lean or self.iq or len(self.rs) > 1:
                 raise ValueError(f'Q3MoEOne: {sorted(self.rs)} tensors run on their own module (one width, no codebook format, the default tape form)')
@@ -198,7 +215,8 @@ class Q3MoEOne:
                                q_norm=self._f32(p + 'attn_q_norm.weight'), k_norm=self._f32(p + 'attn_k_norm.weight'),
                                qk_par=None,   # (OP_OWN_ATTN's block: q_norm | k_norm | theta_scale, eps; built below)
                                router=self._f32(p + 'ffn_gate_inp.weight', (self.n_exp, self.D)),
-                               cache=torch.zeros(self.cache_rows * 2 * self.nkv * self.hd, dtype=torch.float16, device='cuda')))
+                               cache=(torch.zeros(self.cache_rows * k3.kv_pos_bytes(self.nkv * self.hd, True), dtype=torch.uint8, device='cuda')
+                                      if self.q8 else torch.zeros(self.cache_rows * 2 * self.nkv * self.hd, dtype=torch.float16, device='cuda'))))
         for d in self.L:
             if len(d['ffn_gate_exps']) > 4:   # (the row-scale tile's fused gate | up: the gate's scales, then the up's)
                 d['gu_rs'] = torch.cat([d['ffn_gate_exps'][4], d['ffn_up_exps'][4]]).contiguous()
@@ -350,20 +368,24 @@ class Q3MoEOne:
         self.h_st = torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True)
         self.ev_done = torch.cuda.Event()
         self.engines = [self.E]
-        row = 2 * self.nkv * self.hd
+        row = k3.kv_pos_bytes(self.nkv * self.hd, True) if self.q8 else 2 * self.nkv * self.hd   # (elements per position: bytes / halves)
         self.state = {(0, il, 'kv'): d['cache'][:self.max_ctx * row] for il, d in enumerate(self.L)}
 
     # -- decode ------------------------------------------------------------------------------------------------------------
     def step(self, tok, trace=None):
         """one token at the next position: its logits (fp32 [vocab], on the device; valid until the next step); trace: an
         int64 buffer [grid * segments * 8] for the _trace module's timestamps"""
+        if self.broken: raise k3.InvalidKVEncoding(f'Q3MoEOne step: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'Q3MoEOne step: refused until reset(): {self.poisoned}')
         k3.check_span(self.pos_host, 1, self.max_ctx, what='Q3MoEOne step')   # (before the staging block is written)
         if not 0 <= int(tok) < self.vocab: raise ValueError(f'Q3MoEOne: token {tok} outside the vocabulary ({self.vocab})')
         with torch.cuda.device(self.dev):
             self.hstage[0] = int(tok); self.hstage[1] = self.pos_host
             self.dstage.copy_(self.hstage, non_blocking=True)    # (the stage is rewritten only after the sync below)
-            self.E.run() if trace is None else self.E.run(trace=trace)
+            try:   # (run(check=True) checks the KV error word before its bound and timeout handling)
+                self.E.run() if trace is None else self.E.run(trace=trace)
+            except k3.InvalidKVEncoding as e:
+                self.mark_broken(str(e))
             torch.cuda.synchronize()
         self.pos_host += 1
         return self.S['logits']
@@ -382,7 +404,14 @@ class Q3MoEOne:
     def prefetch(self, tokens, positions):
         """nothing to read ahead: the speculative loop's hook"""
 
+    def mark_broken(self, why):
+        """a refused Q8 KV encoding: refuse every later pass (reset() keeps this; the server's terminal policy: no retry,
+        reset, recovery or park) and raise InvalidKVEncoding"""
+        self.broken = why
+        raise k3.InvalidKVEncoding(f'Q3MoEOne: {why}')
+
     def _check(self, tokens, i0, commit, what):
+        if self.broken: raise k3.InvalidKVEncoding(f'{what}: refused: {self.broken}')
         if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
         k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=1, what=what)
         if tokens is not None and len(tokens) < i0 + 1:
@@ -444,6 +473,9 @@ class Q3MoEOne:
         report. A bailed pass leaves OP_OWN_ATTS's merge counters wherever its tasks got: every task still ran once, so
         they are back at zero, but they are cleared here too before the retry"""
         self.ev_done.synchronize()
+        if self.q8:   # (first: the bound and timeout paths below zero the Sync storage, the error word with it)
+            try: self.E.check_kv_error()
+            except k3.InvalidKVEncoding as e: self.mark_broken(str(e))
         st = self.h_st.tolist()
         b = k3.bounds_status(st)
         if b:

@@ -1,0 +1,231 @@
+"""The qwen3moe one-card engine's Q8 KV option without a card (caminus.engine.q3moe_one.Q3MoEOne(q8=True), its batched
+prefill caminus.prefill.q3m.Q3MPrefill and the registry entry), on stand-ins for the torch.cuda and HIP calls (every tensor
+in host memory; nothing is launched), with the tiny synthetic file (tests/engine/tiny_q3m.py).
+  - the module tables: k3_q3m_lean_kvq8 is k3_q3m_lean's Q8 build (same ops, pairs and lean dispatch check), no two-card or
+    verify form, outside the installed runtime set and the dense line's Q8 table; its Engine has the error word after Sync
+  - the wire layout the kernels index ([K blocks | V blocks], block (part, kv head g, block b) at (part M / 32 + 4 g + b)
+    x 34 bytes): caminus.ref_kv.encode_q8_kv puts each block there, and a Q8 row is the encode of the F16 row's values
+  - the engine: k3_q3m_lean_kvq8, the cache a uint8 tensor of (max_ctx + ATS_PAD) Q8 rows, the prompt cache's state views
+    max_ctx rows of bytes, every OP_OWN_ATTS segment on its layer's cache; the projection counts Q8 rows (equal to the
+    engine's own check, and the F16 projection less exactly the row bytes saved); kv_format_id names the format
+  - refusals: q8 not a bool; a Q8 cache on any other object or tape form; the Q8 object without q8; a float16 cache on the
+    Q8 module (and a uint8 one on the F16 module); the verify engine on a Q8 engine; an IQ prefill object with a Q8 engine
+  - a refused encoding: the error word set with a stalled wait as well: _pass_wait raises InvalidKVEncoding before the
+    timeout path (no bail recorded, the word not cleared), the engine stays broken across reset() and refuses every pass;
+    step() marks it too
+  - the prefill on a Q8 engine: the Q8 kernels' module beside the F16 object, qk_rope / attn with the Q8 kernels, its KV
+    error word passed, its rows checked on the byte cache; the error word set: the settle raises InvalidKVEncoding and the
+    engine is broken; numerics() names the cache
+  - the prompt cache: the checkpoint layout's row is the Q8 row; the engine key carries the KV format (F16 keys unchanged:
+    no 'kv' entry), so a Q8 park never matches an F16 engine
+  - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows
+Prints PASS / FAIL lines and RESULT PASS | FAIL.
+  python -I tests/engine/test_q3moe_kvq8_cpu.py --scratch DIR"""
+import argparse, contextlib, os, sys, types
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
+import numpy as np
+import torch
+
+ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True); A = ap.parse_args()
+os.makedirs(A.scratch, exist_ok=True)
+ok = True
+
+
+def check(c, msg):
+    global ok
+    ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
+
+
+def raises(fn, exc=ValueError):
+    try: fn()
+    except exc: return True
+    except Exception as e: print('   (raised', type(e).__name__, e, ')'); return False
+    return False
+
+
+# ---- stand-ins: torch.cuda / HIP on host memory (no device is opened) ------------------------------------------------------
+_zeros, _to, _tensor = torch.zeros, torch.Tensor.to, torch.tensor
+torch.zeros = lambda *a, **k: _zeros(*a, **{x: v for x, v in k.items() if x not in ('device', 'pin_memory')})
+torch.tensor = lambda *a, **k: _tensor(*a, **{x: v for x, v in k.items() if x != 'device'})
+torch.Tensor.to = lambda self, *a, **k: self if a and str(a[0]).startswith('cuda') else _to(self, *a, **k)
+torch.Tensor.cuda = lambda self, *a, **k: self
+torch.Tensor.is_cuda = property(lambda self: True)
+torch.cuda.set_device = lambda d: None
+torch.cuda.device = lambda d: contextlib.nullcontext()
+torch.cuda.current_device = lambda: 0
+torch.cuda.get_device_properties = lambda d: types.SimpleNamespace(multi_processor_count=48, total_memory=24560 << 20)
+torch.cuda.get_device_name = lambda d=None: 'stand-in'
+
+
+class FakeEv:
+    def record(self, *a): pass
+
+    def synchronize(self): pass
+
+
+torch.cuda.Event = lambda *a, **k: FakeEv()
+torch.cuda.synchronize = lambda d=None: None
+
+import tiny_q3m
+from caminus import arch, errors, ref_kv
+from caminus.cache import prompt
+from caminus.device import capacity, hip, kernels
+from caminus.engine import k3, q3moe_one
+from caminus.engine.q3moe_one import Q3MoEOne
+from caminus.engine.q3moe_verify import Q3MoEVerify
+from caminus.prefill import q3m, q3m_ops
+
+capacity.check = lambda *a, **k: None
+LOG = []
+
+
+class Rec:
+    def __init__(self, name): self.name = name
+
+    def __getattr__(self, kern): return lambda grid, block, *args: LOG.append((self.name, kern, tuple(grid), args))
+
+
+hip.Module = lambda name: Rec(name)
+
+# ---- the module tables -------------------------------------------------------------------------------------------------------
+Q8M = 'k3_q3m_lean_kvq8'
+check(k3.Q3M_KV_Q8_BASE == {Q8M: 'k3_q3m_lean'} and k3.Q3M_KV_Q8_OF == {'k3_q3m_lean': Q8M} and Q8M in k3.Q3M_LEAN_MODULES
+      and Q8M in k3.Q3M_MODULES and k3.MODULE_CAPS[Q8M] == k3.MODULE_CAPS['k3_q3m_lean'],
+      'k3_q3m_lean_kvq8: k3_q3m_lean\'s Q8 build, in the lean modules (the same ops whitelist and (op, format) pairs)')
+check(Q8M not in k3.Q3M_TP_OF and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
+      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M not in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' not in kernels.RUNTIME_SET,
+      'no two-card or verify form, not in the dense Q8 table, not in the installed runtime set (not served)')
+E = k3.Engine(module=Q8M, grid=8, T=1)
+check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
+      and k3.Engine(module='k3_q3m_lean', grid=8).kv_error is None,
+      'its Engine: one int32 error word after Sync (the F16 module\'s Engine has none)')
+check(raises(lambda: k3.Engine(module=Q8M, grid=8, T=2)), 'its Engine refuses T = 2 (decode only)')
+
+# ---- the wire layout the kernels index ----------------------------------------------------------------------------------------
+nkv, hd = 4, 128
+lay = ref_kv.Q8KVLayout(nkv, hd)
+check(lay.row_bytes == 1088 == k3.kv_pos_bytes(nkv * hd, True), 'Qwen3-30B-A3B\'s Q8 row: 1,088 bytes (2,048 as F16)')
+rng = np.random.default_rng(3)
+kf = (rng.standard_normal((1, nkv, hd)) * 0.7).astype(np.float16).astype(np.float32)
+vf = (rng.standard_normal((1, nkv, hd)) * 0.7).astype(np.float16).astype(np.float32)
+row = ref_kv.encode_q8_kv(kf, vf, lay)[0]
+good = True
+for part, x in ((0, kf[0]), (1, vf[0])):
+    for g in range(nkv):
+        for b in range(hd // 32):
+            o = (part * (nkv * hd // 32) + g * 4 + b) * 34   # (kernels/k3_own_atts.h, q3m_prefill.hip: the block's offset)
+            one = ref_kv.encode_q8_kv(x[g, 32 * b:32 * b + 32].reshape(1, 1, 32), np.zeros((1, 1, 32), np.float32), ref_kv.Q8KVLayout(1, 32))[0][:34]
+            good &= bytes(row[o:o + 34]) == bytes(one)
+            good &= o % 4 == 2 * (b & 1)                     # (the dword parity the kernels' loads assume)
+check(good, 'every block of a row sits at (part M / 32 + 4 g + b) x 34 bytes, 2 (b & 1) past a dword (the kernels\' indexing)')
+f16row = np.concatenate([kf.reshape(-1), vf.reshape(-1)]).astype(np.float16)
+dk, dv = ref_kv.decode_q8_kv(row.reshape(1, -1), lay)
+amax = np.abs(np.concatenate([kf, vf]).reshape(-1, 32)).max(1)
+err = np.abs(np.concatenate([dk, dv]).reshape(-1, 32) - f16row.astype(np.float32).reshape(-1, 32)).max(1)
+check(bool((err <= amax / 127 * (0.5 + 127 * 2 ** -11) + 1e-12).all()),
+      f'a Q8 row is the F16 row\'s values encoded: decoded within half a step (+ the half scale\'s rounding) of each block (max {float((err / (amax / 127)).max()):.3f} steps)')
+check(raises(lambda: ref_kv.encode_q8_kv(np.full((1, nkv, hd), np.float32(np.float16(np.inf))), vf, lay)),
+      'an fp16-overflowed (inf) K value is refused by the reference (the kernels refuse the block and set the error word)')
+
+# ---- the engine on the tiny file ------------------------------------------------------------------------------------------------
+P = os.path.join(A.scratch, 'tiny-q3m.gguf'); info = tiny_q3m.write(P)
+MC = 64
+m = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
+f = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False)
+M = m.nkv * m.hd; rb = k3.kv_pos_bytes(M, True)
+check(m.module == Q8M and m.E.module == Q8M and f.module == 'k3_q3m_lean' and m.kv_format_id == q3moe_one.KV_FORMAT_Q8
+      and not hasattr(f, 'kv_format_id'),
+      f'Q3MoEOne(q8=True) decodes on {Q8M} with kv_format_id {m.kv_format_id!r}; the F16 engine keeps k3_q3m_lean and has none')
+ats = [sg for sg in m.E.segs if sg.op == k3.OP_OWN_ATTS]
+check(all(d['cache'].dtype == torch.uint8 and d['cache'].numel() == (MC + k3.Engine.ATS_PAD) * rb for d in m.L)
+      and all(m.state[(0, il, 'kv')].numel() == MC * rb and m.state[(0, il, 'kv')].dtype == torch.uint8 for il in range(m.nl))
+      and len(ats) == m.nl and [sg.W for sg in ats] == [d['cache'].data_ptr() for d in m.L]
+      and [sg.op for sg in m.E.segs] == [sg.op for sg in f.E.segs] and m.E.refuse is None,
+      f'its caches: uint8, (max_ctx + {k3.Engine.ATS_PAD}) rows of {rb} B; the state views max_ctx rows of bytes; each OP_OWN_ATTS '
+      f'on its layer\'s cache; the tape the F16 one\'s ops in order')
+pq, pf_ = Q3MoEOne.projection_mib(P, MC, q8=True), Q3MoEOne.projection_mib(P, MC)
+saved = m.nl * (MC + k3.Engine.ATS_PAD) * (4 * M - rb) / 2 ** 20
+check(abs(m.vram_mib - Q3MoEOne.projection_mib(P, MC, splits=m.splits, q8=True)) < 1e-9 and abs(pf_ - pq - saved) < 1e-9
+      and abs(Q3MoEOne.kv_pos_mib(P, True) - m.nl * rb / 2 ** 20) < 1e-12 and abs(Q3MoEOne.kv_pos_mib(P) - m.nl * 4 * M / 2 ** 20) < 1e-12,
+      f'projection: the engine\'s own check = projection_mib(q8=True); F16 - Q8 = the row bytes saved ({saved:.4f} MiB here); '
+      f'kv_pos_mib counts Q8 rows')
+
+# ---- refusals ---------------------------------------------------------------------------------------------------------------------
+check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=1)), 'q8=1 (not a bool) is refused')
+check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, module='k3_q3m_lean')),
+      'a Q8 cache on the F16 module is refused')
+check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, attn_split=False)),
+      'a Q8 cache on another tape form is refused (the lean form only)')
+check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, module=Q8M)), 'the Q8 object without q8 is refused')
+E2 = k3.Engine(module=Q8M, grid=8)
+B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt)
+args = lambda cache: (B(m.nh * 128 + 2 * M), B(k3.Engine.atts_scratch_floats(m.nkv, 8)), B(258), cache, B(1, torch.int32),
+                      B(m.nh * 128, torch.float16), m.nh, m.nkv, 128, 0.1)
+check(raises(lambda: E2.own_atts(*args(B((MC + 64) * 2 * M, torch.float16)), splits=8))
+      and raises(lambda: k3.Engine(module='k3_q3m_lean', grid=8).own_atts(*args(B((MC + 64) * rb, torch.uint8)), splits=8))
+      and not raises(lambda: E2.own_atts(*args(B((MC + 64) * rb, torch.uint8)), splits=8)),
+      'own_atts: a float16 cache on the Q8 module and a uint8 cache on the F16 module are refused; a Q8 cache on the Q8 module builds')
+check(raises(lambda: Q3MoEVerify(m, 2, vram_check=False)), 'the verify engine refuses a Q8 engine (its module reads F16 rows)')
+check(raises(lambda: q3m.Q3MPrefill(m, chunk=64, check=False, module=q3m_ops.IQ_MODULE)), 'an IQ prefill object with a Q8 engine is refused')
+
+# ---- a refused encoding --------------------------------------------------------------------------------------------------------
+mm = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
+mm.E.kv_error.fill_(2); mm.h_st[1] = 1; mm.h_st[2] = 0   # (and a wait that gave up: the timeout path would zero Sync)
+r = raises(lambda: mm._pass_wait(5), errors.InvalidKVEncoding)
+check(r and mm.broken and not mm.bails and int(mm.E.kv_error[0]) == 2 and issubclass(errors.InvalidKVEncoding, errors.NumericalFailure),
+      'a refused block with a stalled wait: InvalidKVEncoding (a NumericalFailure) before the timeout path; no bail, the word kept')
+mm.reset()
+check(mm.broken and raises(lambda: mm.step_token([1] * 8, 0), errors.InvalidKVEncoding)
+      and raises(lambda: mm.step(1), errors.InvalidKVEncoding) and raises(lambda: mm.verify([1] * 8, 0, 0), errors.InvalidKVEncoding),
+      'reset() keeps the engine broken; step, step_token and verify are refused')
+ms = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
+def run_fail(check=True, trace=None): ms.E.kv_error.fill_(2); ms.E.check_kv_error()
+ms.E.run = run_fail
+check(raises(lambda: ms.step(3), errors.InvalidKVEncoding) and ms.broken and ms.pos_host == 0,
+      'step(): the run\'s refused encoding marks the engine broken (the position does not advance)')
+
+# ---- the prefill on a Q8 engine -------------------------------------------------------------------------------------------------
+mp = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
+pf = q3m.Q3MPrefill(mp, chunk=64, check=False)
+check(pf.q8 and pf.ops.q8 and pf.ops.module == 'q3m_prefill' and pf.ops.kvmod.name == 'q3m_prefill_kvq8'
+      and pf.numerics().get('kv') == 'q8_0' and 'kv' not in q3m.Q3MPrefill(f, chunk=64, check=False).numerics(),
+      'Q3MPrefill on a Q8 engine: q3m_prefill for the GEMMs and glue, q3m_prefill_kvq8 for the rows and attention; numerics name the cache')
+LOG.clear()
+toks = list(range(1, 41))
+pf._chunk(toks, 0, 40)
+rope = [e for e in LOG if e[1].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[1].startswith('q3p_attn')]
+check(rope and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3p_qk_rope_q8' and e[3][-1] is pf.kverr for e in rope)
+      and att and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3p_attn_q8' for e in att)
+      and len(rope) == mp.nl and not any(e[1] in ('q3p_qk_rope', 'q3p_attn') for e in LOG),
+      f'a chunk: {len(rope)} q3p_qk_rope_q8 (with the KV error word) and {len(att)} q3p_attn_q8 launches; no F16 row kernel')
+check(raises(lambda: pf.ops.qk_rope(pf.qkv, 512, mp.nh, mp.nkv, mp.L[0]['qk_par'], 0, pf.q16, mp.L[0]['cache'], 4))
+      and raises(lambda: pf.ops.qk_rope(pf.qkv, 512, mp.nh, mp.nkv, mp.L[0]['qk_par'], MC - 2, pf.q16, mp.L[0]['cache'], 4, rows=MC, err=pf.kverr), k3.ContextBoundsError)
+      and raises(lambda: pf.ops.attn(pf.q16, f.L[0]['cache'], 0, 4, mp.nkv, 0.1, pf.att16)),
+      'the Q8 ops refuse a missing error word, positions past the byte cache\'s rows, and an F16 cache')
+pf.kverr.fill_(2)
+check(raises(pf._run_settle, errors.InvalidKVEncoding) and mp.broken and raises(lambda: pf._chunk(toks, 0, 40), errors.InvalidKVEncoding),
+      'the prefill\'s error word set: its settle raises InvalidKVEncoding, the engine is broken, the next chunk is refused')
+
+# ---- the prompt cache --------------------------------------------------------------------------------------------------------------
+from types import SimpleNamespace as NS
+Lq, Lf = prompt.Layout(m), prompt.Layout(f)
+check(Lq.pb == [rb] and Lf.pb == [4 * M] and Lq.kv_rows == MC, f'checkpoint layout: a Q8 row of {rb} B per layer (F16 {4 * M} B)')
+pfk = NS(numerics=lambda: dict(q='x'), crossover=8)
+kq, kf_ = prompt.engine_key(m, pfk, build='fixture'), prompt.engine_key(f, pfk, build='fixture')
+check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and 'kv' not in kf_['tp'] and kq['module'] == Q8M and kf_['module'] == 'k3_q3m_lean'
+      and prompt.key_hash(kq) != prompt.key_hash(kf_),
+      'engine key: the Q8 engine\'s carries its KV format and module (an F16 key has no kv entry: unchanged), so neither restores into the other')
+
+# ---- the registry ------------------------------------------------------------------------------------------------------------------
+check(arch.kv_q8({}) is False and arch.kv_q8({'kv': 'f16'}) is False and arch.kv_q8({'kv': 'q8'}) is True
+      and raises(lambda: arch.kv_q8({'kv': 'q4'})), "arch.kv_q8: 'f16' by default, 'q8', anything else refused")
+q = arch.ARCHS['qwen3moe']
+nq, _, sq, needq = q.auto_need({'model': P, 'kv': 'q8'}, 4)
+nf, _, sf, needf = q.auto_need({'model': P}, 4)
+check(abs(sq - (Q3MoEOne.kv_pos_mib(P, True) * 1.05 + 1.0)) < 1e-12 and needq(MC)[0] < needf(MC)[0]
+      and abs((needf(MC)[0] - needq(MC)[0]) - (saved + 6 * (sf - sq))) < 1e-9 and nq == nf,
+      'Q3MoE.auto_need with kv q8: Q8 checkpoint slots and the Q8 projection (less than F16 by the rows and slots saved)')
+
+print('RESULT', 'PASS' if ok else 'FAIL')
+sys.exit(0 if ok else 1)

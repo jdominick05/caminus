@@ -217,7 +217,12 @@ __device__ __forceinline__ void own_op_slot_sum(const Seg & sg, int t) {
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
+#ifdef K3_Q3M_KV_Q8   // (the Q8 KV build: a refused block's sticky word is the int32 after Sync, k3.Engine.kv_error)
+    static_assert(sizeof(Sync) == 4 * (2 * K3_MAXSEG + 8), "the KV error word follows Sync");
+    if (sg.op == OP_OWN_ATTS) { own_op_atts(sg, t, sy); return true; }
+#else
     if (sg.op == OP_OWN_ATTS) { own_op_atts(sg, t); return true; }
+#endif
 #ifdef K3_Q3M_LEAN_ATTN   // (measurement builds only: the per-head attention too, for A/Bs inside one code object)
     if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
 #endif

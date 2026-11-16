@@ -14,7 +14,10 @@ from card 0's launch to the host's return with both cards' argmax read back (the
 own span is printed beside it. --local-only (with --cards 2): every exchange copies the card's own partial, so each card
 runs alone (its ceiling; the logits are not the model's): the two-card time minus the slower card's alone is the coupling.
 The one-card engine does not fit card 0 beside the two-card one, so compare with a one-card run of this script in the
-same window, runs alternated."""
+same window, runs alternated.
+--kv q8 (one card): the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True); the default arm k3_q3m_lean_kvq8). The
+F16 and Q8 caches do not both fit one card at depth, so the decode A/B of the two is runs of this script alternated in one
+window (F16, Q8, F16, Q8, ...), the same depths, tokens and rounds."""
 import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -27,7 +30,9 @@ ap.add_argument('--max-ctx', type=int, default=None, help='default: the deepest 
 ap.add_argument('--tokens', type=int, default=24); ap.add_argument('--rounds', type=int, default=3)
 ap.add_argument('--arms', nargs='+', default=None)
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--local-only', action='store_true')
+ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 A = ap.parse_args()
+if A.kv == 'q8' and A.cards != 1: raise SystemExit('q3moe_depth: --kv q8 is one card only')
 depths = [int(x) for x in A.depths.split(',')]
 if A.local_only and A.cards != 2: raise SystemExit('q3moe_depth: --local-only is a two-card option (--cards 2)')
 if A.cards == 2:
@@ -81,7 +86,7 @@ if A.cards == 2:
             print(f'  {n:10s} fit (depths past the first): {ic:.3f} ms + {sl * 1e3:.4f} us per position per token')
     print('RESULT DONE')
     sys.exit(0)
-A.arms = A.arms or ['default=k3_q3m_lean']
+A.arms = A.arms or ['default=' + ('k3_q3m_lean_kvq8' if A.kv == 'q8' else 'k3_q3m_lean')]
 ARMS = []
 for a in A.arms:
     name, spec = a.split('=', 1); spec, *kv = spec.split(':'); mod, _, g = spec.partition('@')
@@ -97,8 +102,8 @@ for a in A.arms:
     ARMS.append((name, o))
 print(torch.cuda.get_device_name(0), flush=True)
 max_ctx = A.max_ctx or max(depths) + A.tokens + 1
-eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, **ARMS[0][1])   # (+ a tape per arm, built below)
-print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB', flush=True)
+eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, q8=A.kv == 'q8', **ARMS[0][1])   # (+ a tape per arm, built below)
+print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}', flush=True)
 keys = ('E', 'S', 'dstage', 'hstage', 'tok', 'pos')
 forms = {}
 for name, opt in ARMS:

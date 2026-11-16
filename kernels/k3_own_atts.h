@@ -98,7 +98,23 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
     nact = (npos + L - 1) / L;
 }
 
+#ifdef K3_Q3M_KV_Q8
+// The Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip): the cache rows are kernels/own_kv_codec.h's wire format ([K blocks |
+// V blocks], 32 values per block: a half scale and 32 signed codes, 34 bytes), no rotation, so a row is the F16 object's
+// row encoded: each block is caminus.ref_kv.encode_q8_kv of the fp16-rounded values the F16 object stores. Every other
+// statement of the op is the F16 one; the position's own k / v in LDS are the decoded codes (what every later pass reads).
+// Decode only: the verify and two-card builds keep the F16 cache. k3_run beside k3_q3m_lean's (96 VGPRs, 0 spilled, 53
+// spilled scalars): 96, 0, 54. Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the K / V
+// half selects as 64-bit shifts spilled 1; the error word's address kept live across k3_run, 2 more spilled scalars.
+#if defined(K3_Q3M_VER) || defined(K3_Q3M_TP)
+#error "the Q8 KV cache is built for the one-card decode module only"
+#endif
+#include "own_kv_codec.h"
+__device__ __forceinline__ float ats_h2f(uint32_t u16) { return (float)__builtin_bit_cast(_Float16, (uint16_t)u16); }
+__device__ __forceinline__ void own_op_atts(const Seg & sg, int t, Sync * sy) {
+#else
 __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
+#endif
 #pragma clang fp contract(off)
     AtsL * L_ = (AtsL *)ATS;
     AtsL * qs = L_ + ATS_QS, * sc = L_ + ATS_SC, * rc = L_ + ATS_RC, * rsn = L_ + ATS_RSN, * kk = L_ + ATS_KK, * vv = L_ + ATS_VV;
@@ -138,7 +154,12 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
     const bool last = s == nact - 1;
     const float * par = (const float *)sg.aux;
     const float * qin = (const float *)sg.a, * kin = qin + (size_t)heads * ATS_D, * vin = kin + M;
+#ifdef K3_Q3M_KV_Q8
+    const size_t pb = (size_t)(uint32_t)(M / 32 * 68);    // bytes per position: [K | V] Q8_0 blocks (2 M / 32 x 34, a multiple
+                                                          // of 4; a 32-bit product: as size_t, 55 spilled scalars, 54 so)
+#else
     const size_t pb = (size_t)4 * M;             // bytes per position: [K | V] f16
+#endif
     // -- q's norm + RoPE for the GH heads (thread i of each 128-thread half: local heads 2 r + half) and, in the last
     //    split, the position's k (threads 0 .. 127) and v (128 .. 255): every input in one round trip, the rounds' sums
     //    with one barrier. op_qk_nr's statements: each head's sum is its four waves' sums in order, the same bits as
@@ -187,6 +208,21 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
             qs[(2 * r + hw) * 4 * ATS_QP + (i >> 5) * ATS_QP + (i & 31)] = y;
         }
         if (last) {
+#ifdef K3_Q3M_KV_Q8
+            // wave w: block w & 3 of kv head g, K (waves 0 .. 3) or V (4 .. 7); lane l = value 32 (w & 3) + l. The input is
+            // the F16 object's stored half, so the row is that row encoded; the hs == 0 task stores it, every task of the
+            // split keeps the decoded values for its own position
+            float xr;
+            if (hw == 0) {
+                const float x0 = tk[j], x1 = tk[j + ATS_D / 2];
+                const float y = i < ATS_D / 2 ? __builtin_fmaf(x0, c, -(x1 * sn)) : __builtin_fmaf(x1, c, x0 * sn);
+                xr = (float)(_Float16)y;
+            } else xr = (float)(_Float16)xk;
+            uint8_t * blk = (uint8_t *)sg.W + (size_t)pos * pb + (size_t)(hw * (M / 32) + g * (ATS_D / 32) + (i >> 5)) * 34;
+            Sync * se = sy; asm volatile("" : "+s"(se));   // (the error word's address made here, not kept live across k3_run)
+            const float dq = own_kv_q8_encode_wave(xr, blk, lane, hs == 0, (int *)(se + 1));
+            if (hw == 0) kk[i] = dq; else vv[i] = dq;
+#else
             _Float16 * cw = (_Float16 *)((uint8_t *)sg.W + (size_t)pos * pb);
             if (hw == 0) {
                 const float x0 = tk[j], x1 = tk[j + ATS_D / 2];
@@ -198,6 +234,7 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
                 const _Float16 kh = (_Float16)y; kk[i] = (float)kh; if (hs == 0) cw[g * ATS_D + i] = kh;
             } else { const _Float16 vh = (_Float16)xk; vv[i] = (float)vh; if (hs == 0) cw[M + g * ATS_D + i] = vh; }
 #endif
+#endif
         }
     }
     ats_bar();
@@ -207,7 +244,15 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
     // -- the chunks of ATS_CH = 64 positions
     AtsG * cache = (AtsG *)sg.W;
     const int qd = lane >> 2, qq = lane & 3, tp = wave * 8 + qd, dp = tid & 63, pq = tid >> 6;   // (tp: this quad's position)
+#ifdef K3_Q3M_KV_Q8
+    // Q8 rows: a row (pb) and a kv head's 4 blocks (g x 136) are whole dwords, so block b starts 2 (b & 1) bytes past a
+    // dword. Quad lane qq reads its K block (dims 32 qq .. 32 qq + 31) as the 9 dwords from the one at or before it; thread
+    // (dp, pq) reads the dword holding its V code pair (dims 2 dp, 2 dp + 1 of block dp / 16) per position, the half it sits
+    // in fixed per thread; the chunk's V scales (64 positions x 4 blocks) go to LDS once, thread s: position s / 4, block s % 4
+    const uint32_t KB = (uint32_t)(M / 32 * 34);  // bytes of a row's K blocks (a multiple of 4)
+#else
     const uint32_t koff = (uint32_t)((g * ATS_D + qq * 32) * 2), voff = (uint32_t)((M + g * ATS_D + 2 * dp) * 2);
+#endif
     float run_m = -INFINITY, run_s = 0.0f;       // (wave h: head h's, the same in every lane)
     float acc[ATS_G][2];
 #pragma unroll
@@ -217,12 +262,26 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
         const int n = min(ATS_CH, b0 - c0), nc = (last && c0 + n == npos) ? n - 1 : n;   // nc: positions from the cache
         // loads past nc (up to row c0 + 63 <= pos + 63) read the cache's ATS_PAD padding rows or stale rows; their scores
         // are never stored and their V values are selected away (the host bounds pos to the cache's rows - ATS_PAD)
+#ifdef K3_Q3M_KV_Q8
+        AtsG * cb = cache + (uint32_t)(c0 * (int)pb);   // (a row offset: < 4 GB at any max_ctx a card holds)
+#else
         AtsG * cb = cache + (size_t)c0 * pb;     // (scalar: the chunk's first row)
+#endif
+#ifdef K3_Q3M_KV_Q8
+        int t2 = tid; asm volatile("" : "+v"(t2));   // (the per-thread offsets derived in the chunk, as kl / vl below)
+        const uint32_t kl = (uint32_t)(tp * (int)pb) + ((uint32_t)((g * 4 + (t2 & 3)) * 34) & ~3u);
+        const uint32_t sl = (uint32_t)((t2 >> 2) * (int)pb) + ((KB + (uint32_t)((g * 4 + (t2 & 3)) * 34)) & ~3u);
+        uint32_t kw[9];
+#pragma unroll
+        for (int j = 0; j < 9; j++) kw[j] = *(const __attribute__((address_space(1))) uint32_t *)(cb + (kl + 4u * j));
+        const uint32_t sw = *(const __attribute__((address_space(1))) uint32_t *)(cb + sl);
+#else
         uint32_t kl = (uint32_t)(tp * (int)pb) + koff, vl = (uint32_t)(pq * (int)pb) + voff;
         asm volatile("" : "+v"(kl), "+v"(vl));   // (per chunk: the 16 V offsets below hoisted out of the loop were 16 live VGPRs)
         uint4 kr[4];
 #pragma unroll
         for (int j = 0; j < 4; j++) kr[j] = *(const __attribute__((address_space(1))) uint4 *)(cb + (kl + 16u * j));
+#endif
         // (loading the first chunk's K before the prologue, or the next chunk's at the end of this one, spilled k3_run:
         //  13 / 395 VGPRs: the loads stay at the chunk's start)
         __builtin_amdgcn_sched_barrier(0);
@@ -231,10 +290,23 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
 #pragma unroll
             for (int h = 0; h < ATS_G; h++) a[h] = 0.0f;
             // dims in groups of 8 (one 16-byte load): the group's K converted once, then each head's q slice from LDS
+#ifdef K3_Q3M_KV_Q8
+            const uint32_t ko = (uint32_t)(qq & 1) * 16u;   // (block qq starts in kw[0]'s high half when qq is odd)
+            const float kd = ats_h2f((kw[0] >> ko) & 0xffffu);
+#endif
 #pragma unroll
             for (int j = 0; j < 4; j++) {
+#ifdef K3_Q3M_KV_Q8
+                // codes 8 j .. 8 j + 7: kw[2 j + 1 ..] (odd block) or two bytes later; k = float code x float scale (kv_get)
+                const uint32_t c0 = ko ? kw[2 * j + 1] : __builtin_amdgcn_alignbyte(kw[2 * j + 1], kw[2 * j], 2);
+                const uint32_t c1 = ko ? kw[2 * j + 2] : __builtin_amdgcn_alignbyte(kw[2 * j + 2], kw[2 * j + 1], 2);
+                float kf[8];
+#pragma unroll
+                for (int e = 0; e < 4; e++) { kf[e] = (float)(int8_t)(c0 >> (8 * e)) * kd; kf[4 + e] = (float)(int8_t)(c1 >> (8 * e)) * kd; }
+#else
                 const h2_t k0 = as_h2(kr[j].x), k1 = as_h2(kr[j].y), k2 = as_h2(kr[j].z), k3 = as_h2(kr[j].w);
                 const float kf[8] = {(float)k0[0], (float)k0[1], (float)k1[0], (float)k1[1], (float)k2[0], (float)k2[1], (float)k3[0], (float)k3[1]};
+#endif
 #pragma unroll
                 for (int h = 0; h < ATS_G; h++) {
                     if (h >= GH) break;
@@ -266,6 +338,14 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
                 }
             }
         }
+#ifdef K3_Q3M_KV_Q8
+        {   // the chunk's V scales into LDS past the scores (sc holds [ATS_CH][8] scores of its 1024 floats)
+            int t3 = tid; asm volatile("" : "+v"(t3));
+            sc[ATS_CH * ATS_G + t3] = ats_h2f((sw >> ((t3 & 1) * 16)) & 0xffffu);
+        }
+        uint32_t vl = (uint32_t)(pq * (int)pb) + ((KB + (uint32_t)((g * 4 + (dp >> 4)) * 34 + 2 + 2 * (dp & 15))) & ~3u);
+        asm volatile("" : "+v"(vl));             // (as the F16 build's kl / vl: its 16 offsets must not leave the loop)
+#endif
         // V loads now, in flight across the barrier and the softmax (issued with K's they spilled k3_run: 16 more VGPRs
         // live through the scores)
         uint32_t vr[ATS_CH / 4];                 // this thread's positions pq + 4 e (V)
@@ -303,10 +383,21 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
 #pragma unroll
             for (int e = 0; e < ATS_CH / 4; e++) {
                 const int tq = pq + 4 * e;
+#ifdef K3_Q3M_KV_Q8
+                // the code pair sits in the dword's high half when block (dp / 16) + 1 + dp is odd (2 + 2 (dp % 16) bytes
+                // into a block that starts 2 (dp / 16 & 1) past a dword); its scale from LDS
+                const uint32_t pr = ((((dp >> 4) + 1 + dp) & 1) ? vr[e] >> 16 : vr[e]);
+                const float vs = sc[ATS_CH * ATS_G + tq * 4 + (dp >> 4)];
+                const float w0 = (float)(int8_t)pr * vs, w1 = (float)(int8_t)(pr >> 8) * vs;
+                const int lim = nc - 4 * e;      // (scalar: tq < nc <=> pq < lim)
+                const bool own = pq == lim && nc < n, in = pq < lim;   // (vv is unset outside the last split)
+                const float v0 = own ? vo0 : in ? w0 : 0.0f, v1 = own ? vo1 : in ? w1 : 0.0f;
+#else
                 const h2_t v2 = as_h2(vr[e]);
                 const int lim = nc - 4 * e;      // (scalar: tq < nc <=> pq < lim)
                 const bool own = pq == lim && nc < n, in = pq < lim;   // (vv is unset outside the last split)
                 const float v0 = own ? vo0 : in ? (float)v2[0] : 0.0f, v1 = own ? vo1 : in ? (float)v2[1] : 0.0f;
+#endif
                 if (GH > 4) {
                     const float4 p0 = *(const __attribute__((address_space(3))) float4 *)(sc + tq * ATS_G);
                     const float4 p1 = *(const __attribute__((address_space(3))) float4 *)(sc + tq * ATS_G + 4);

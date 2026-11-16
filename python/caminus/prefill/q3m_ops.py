@@ -21,6 +21,7 @@ NULL = ctypes.c_void_p(0)
 MM_M, MM_N = 64, 128        # a GEMM workgroup: tokens x rows
 AT_T = 16                   # q3p_attn: tokens per workgroup
 BLOCK_BYTES = {'Q4_K': 144, 'Q6_K': 210}
+KVQ8_MODULE = 'q3m_prefill_kvq8'                                  # the Q8 KV cache's qk_rope / attn (kernels/q3m_prefill_kvq8.hip)
 IQ_MODULE = 'q3m_prefill_iq'                                      # the study object: the shipped kernels + the four below
 IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_XXS': 'q3p_mm_iq2xxs'}
 
@@ -36,11 +37,14 @@ def items_bound(npairs, n_exp):
 
 
 class Ops:
-    def __init__(self, dev, module='q3m_prefill'):
+    def __init__(self, dev, module='q3m_prefill', q8=False):
+        """q8: the KV cache is Q8_0 rows (uint8, kernels/own_kv_codec.h's format): qk_rope / attn run q3m_prefill_kvq8's
+        Q8 kernels (every other kernel stays on `module`)"""
         self.dev = torch.device(dev) if not isinstance(dev, torch.device) else dev
-        self.module = module
+        self.module, self.q8 = module, bool(q8)
         with torch.cuda.device(self.dev):
             self.mod = hip.Module(module)
+            self.kvmod = hip.Module(KVQ8_MODULE) if self.q8 else None
 
     # -- GEMMs -------------------------------------------------------------------------------------------------------------
     def mm(self, W, x16, ldx, y, ldy, n=None, work=None):
@@ -101,14 +105,25 @@ class Ops:
         engine's cache has padding rows past its max_ctx, so its prefill passes max_ctx), else k3.ContextBoundsError
         and nothing is launched"""
         if n < 1 or nkv < 1: raise ValueError(f'q3m {what}: n {n}, nkv {nkv}')
-        alloc = cache.numel() // (2 * nkv * 128)
+        q8 = getattr(self, 'q8', False)   # (a subclass that sets no q8: the F16 cache)
+        want = torch.uint8 if q8 else torch.float16
+        if cache.dtype != want: raise ValueError(f'q3m {what}: a {"Q8" if q8 else "F16"} prefill needs a {want} cache, not {cache.dtype}')
+        alloc = k3.kv_rows(cache, nkv * 128, q8)   # (the allocation's rows: Q8 rows are 2 nkv * 136 bytes)
         if rows is not None and not 0 <= int(rows) <= alloc: raise ValueError(f'q3m {what}: rows {rows} of a cache of {alloc}')
         k3.check_span(pos0, n, alloc if rows is None else int(rows), what=f'q3m {what}')
 
-    def qk_rope(self, qkv, ldq, nh, nkv, par, pos0, q16, cache, n, rows=None):
+    def qk_rope(self, qkv, ldq, nh, nkv, par, pos0, q16, cache, n, rows=None, err=None):
+        """err (the Q8 cache only, required there): an int32 word a refused block ORs 2 into (the caller reads it after
+        the chunk: caminus.errors.InvalidKVEncoding)"""
         self._span('qk_rope', cache, pos0, n, nkv, rows)
         if ldq < (nh + 2 * nkv) * 128 or qkv.numel() < (n - 1) * ldq + (nh + 2 * nkv) * 128 or q16.numel() < n * nh * 128:
             raise ValueError(f'q3m qk_rope: {n} tokens need qkv rows of {(nh + 2 * nkv) * 128} (stride {ldq}) and {n * nh * 128} q16')
+        if getattr(self, 'q8', False):
+            if err is None or err.dtype != torch.int32 or err.numel() < 1: raise ValueError('q3m qk_rope: a Q8 cache needs its int32 error word')
+            if not cache.is_contiguous() or cache.data_ptr() % 4: raise ValueError('q3m qk_rope: the Q8 cache must be contiguous and 4-byte aligned')
+            self.kvmod.q3p_qk_rope_q8((n, nh + nkv), (128,), qkv, I(ldq), I(nh), I(nkv), par, I(pos0), q16, cache, err)
+            return
+        if err is not None: raise ValueError('q3m qk_rope: err is the Q8 cache\'s word')
         self.mod.q3p_qk_rope((n, nh + nkv), (128,), qkv, I(ldq), I(nh), I(nkv), par, I(pos0), q16, cache)
 
     def attn_blocks(self, pos0, n):
@@ -125,5 +140,10 @@ class Ops:
         if min(q16.numel(), out16.numel()) < n * nkv * 8 * 128:
             raise ValueError(f'q3m attn: {n} tokens need {n * nkv * 8 * 128} values of q16 and out16')
         import math
+        if getattr(self, 'q8', False):
+            if not cache.is_contiguous() or cache.data_ptr() % 4: raise ValueError('q3m attn: the Q8 cache must be contiguous and 4-byte aligned')
+            self.kvmod.q3p_attn_q8((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(nkv),
+                                   F(scale * math.log2(math.e)), out16)
+            return
         self.mod.q3p_attn((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(nkv),
                           F(scale * math.log2(math.e)), out16)

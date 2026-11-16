@@ -169,7 +169,8 @@ def atts(module, splits):
     e = k3.Engine(module=module)
     try:
         e.own_atts(B(nh * hd + 2 * M), B(k3.Engine.atts_scratch_floats(nkv, splits)), B(2 * hd + 2),
-                   torch.zeros((1 + k3.Engine.ATS_PAD) * 2 * M, dtype=torch.float16), torch.zeros(1, dtype=torch.int32),
+                   (torch.zeros((1 + k3.Engine.ATS_PAD) * k3.kv_pos_bytes(M, True), dtype=torch.uint8) if module in k3.Q3M_KV_Q8_MODULES
+                    else torch.zeros((1 + k3.Engine.ATS_PAD) * 2 * M, dtype=torch.float16)), torch.zeros(1, dtype=torch.int32),   # (the Q8 KV build: its byte cache)
                    torch.zeros(nh * hd, dtype=torch.float16), nh, nkv, hd, 0.088, splits=splits, lmin=64)
         return None if e.segs[-1].work == splits else 'work'
     except ValueError as x:

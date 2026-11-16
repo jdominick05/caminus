@@ -18,7 +18,12 @@ float64 reference with llama.cpp's own prefill-then-decode as the bound (tests/p
 
 The hand-off is the shared driver's (caminus.prefill.driver.PrefillDriver): run(toks, i0, commit, p1) prefills
 [i0 - commit, p1) (the KV rows written in place; no recurrent state), sets m.fresh and returns (i0 = p1, commit = 0).
-No drafter yet (draft must be None)."""
+No drafter yet (draft must be None).
+A Q8 KV engine (Q3MoEOne(q8=True)): the same chunk with the rows written as Q8_0 blocks and the attention reading them
+(q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: each row the encode of the fp16 values the F16 kernels store, the decode
+Q8 module's rows; the attention rounds the decoded values to fp16 for its WMMA operands). A refused block (a non-finite
+K / V value) sets the prefill's KV error word: the chunk's settle raises caminus.errors.InvalidKVEncoding and the engine is
+marked broken."""
 import numpy as np
 import torch
 
@@ -42,7 +47,7 @@ def layout(m, T):
     f32 = dict(x=T * D, h=T * D, qkv=T * (nh * hd + 2 * nkv * hd), o=T * D, logits=T * E, wts=P,
                big=max(2 * P * ff, P * D))                   # (g | u, then the down rows over them: g, u are dead by then)
     f16 = dict(h16=T * D, q16=T * nh * hd, att16=T * nh * hd, a16=P * ff)
-    i32 = dict(toks=T, ids=P, xs=P, yd=P, items=4 * q3m_ops.items_bound(P, E), nitems=1, err=1)
+    i32 = dict(toks=T, ids=P, xs=P, yd=P, items=4 * q3m_ops.items_bound(P, E), nitems=1, err=1, kverr=1)
     return f32, f16, i32
 
 
@@ -84,12 +89,14 @@ class Q3MPrefill(PrefillDriver):
         for il, L in enumerate(m.L):
             for key in MM_KEYS:
                 if L[key][0] not in q3m_ops.formats(module): raise ValueError(f'Q3MPrefill: blk.{il} {key} is {L[key][0]} ({module})')
+        self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache format: the Q8 kernels for its rows, never F16 ones)
+        if self.q8 and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the Q8 KV cache runs with q3m_prefill only (not {module})')
         T = self.chunk
         self.need_mib = buffer_need_mib(m, T)
         if check: capacity.check([dev.index], [self.need_mib], f'Q3MPrefill buffers (chunk {T})')
         f32, f16, i32 = layout(m, T)
         with torch.cuda.device(dev):
-            self.ops = q3m_ops.Ops(dev, module)
+            self.ops = q3m_ops.Ops(dev, module, q8=self.q8)
             for n, c in f32.items(): setattr(self, n, torch.zeros(c, dtype=torch.float32, device=dev))
             for n, c in f16.items(): setattr(self, n, torch.zeros(c, dtype=torch.float16, device=dev))
             for n, c in i32.items(): setattr(self, n, torch.zeros(c, dtype=torch.int32, device=dev))
@@ -106,11 +113,12 @@ class Q3MPrefill(PrefillDriver):
 
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the fp32 router"""
-        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='own-wmma')
+        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='own-wmma', **({'kv': 'q8_0'} if self.q8 else {}))
 
     # -- one chunk ---------------------------------------------------------------------------------------------------------
     def _chunk(self, toks, a, b):
         m, O = self.m, self.ops
+        if getattr(m, 'broken', None): raise k3.InvalidKVEncoding(f'Q3MPrefill: refused: {m.broken}')
         n, p = b - a, a
         D, nh, nkv, hd, k, E, ff, nl = m.D, m.nh, m.nkv, m.hd, m.k_used, m.n_exp, m.ffn, m.nl
         Q, M = nh * hd, nkv * hd
@@ -135,7 +143,7 @@ class Q3MPrefill(PrefillDriver):
             O.mm(L['attn_q'], h16, D, qkv, ldq, n=n)
             O.mm(L['attn_k'], h16, D, qkv[Q:], ldq, n=n)
             O.mm(L['attn_v'], h16, D, qkv[Q + M:], ldq, n=n)
-            O.qk_rope(qkv, ldq, nh, nkv, L['qk_par'], p, q16, L['cache'], n, rows=m.max_ctx)
+            O.qk_rope(qkv, ldq, nh, nkv, L['qk_par'], p, q16, L['cache'], n, rows=m.max_ctx, err=self.kverr if self.q8 else None)
             if il == nl - 1: break                         # (the last layer: only its cache rows are needed)
             _, nb = O.attn_blocks(p, n)
             step = max(1, ATTN_TP // (p + n) // q3m_ops.AT_T)           # (16-position blocks per launch)
@@ -163,8 +171,17 @@ class Q3MPrefill(PrefillDriver):
     def _run_chunk(self, toks, k, j, a, b, segs, bounds):
         self._chunk(toks, a, b)
 
+    def check_kv(self, what='prefill'):
+        """a Q8 engine: raise InvalidKVEncoding (and mark the engine broken) if a chunk refused a block; first, before the
+        routing flags: rows may already be written"""
+        if self.q8 and int(self.kverr.item()):
+            mark = getattr(self.m, 'mark_broken', None)
+            why = f'{what}: a KV block was refused (error word {int(self.kverr.item()):#x}); the cache rows are unusable'
+            if mark is not None: mark(why)
+            raise k3.InvalidKVEncoding(why)
+
     def _run_settle(self):
-        torch.cuda.synchronize(self.dev); self.check_flags('prefill')
+        torch.cuda.synchronize(self.dev); self.check_kv('prefill'); self.check_flags('prefill')
 
     def _sync_devices(self):
         torch.cuda.synchronize(self.dev)

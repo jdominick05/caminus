@@ -118,3 +118,67 @@ float64 attention over the same decoded rows (1e-5 x max |V|, the F16 bound: the
 The second checks verify passes on a Q8 cache bitwise against Q8 one-token decode, depths 0 and 512, grids 3 / 6 / 7.
 None of these has run on a GPU. Still missing after them: model accuracy at depth (KLD against the F16 cache),
 speed, matching prefill, cache park/restore, the GSQ verify objects and two cards.
+
+## Qwen3-30B-A3B (one card)
+
+`Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to
+`k3_q3m_lean`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
+`q3p_qk_rope_q8` and `q3p_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
+`q3m_prefill`. Not served: no option selects it and neither object is in the installed runtime set. The registry's
+projection takes `opt['kv'] = 'q8'` (`arch.kv_q8`) so the later `--kv q8` switch only has to set it.
+
+Format: the same wire codec and row layout as the dense line (`kernels/own_kv_codec.h`, `caminus.ref_kv`), with no
+rotation (`Q3MoEOne.kv_format_id` = `q8_0-v1:unrotated:f16-rounded-v1`). Each block encodes the fp16-rounded values the
+F16 object stores, so a Q8 row is `encode_q8_kv` of the F16 row; the gates below check exactly that. The writers are
+`own_kv_q8_encode_wave` (the codec's statements with one block per wave and the amax as a wave reduction, exact for the
+finite blocks that are stored). The position's own K / V that the attention keeps in LDS are the decoded values, so the
+current token reads what every later token reads. The prefill's attention rounds the decoded values to fp16 for its WMMA
+operands, one rounding more than the decode reader; the model gate at depth judges it.
+
+Refusals: a non-finite value (an fp16 overflow included) refuses its block. Decode sets bit 2 in the int32 word after
+Sync (`Engine.kv_error`, the dense line's word; `own_op_atts` takes `sy` for it), the prefill in its own `kverr` word.
+`_pass_wait` checks the word before the bound and timeout paths (they zero Sync), `step` marks the engine too, and the
+prefill's settle checks it before the routing flags. The engine stays broken across `reset()` and raises
+`InvalidKVEncoding`. `Q3MoEVerify` and two cards refuse a Q8 engine.
+
+Memory: 1,088 bytes per position and layer instead of 2,048 (`kv_pos_mib(q8=True)`: 0.0498 MiB per position over the
+48 layers, F16 0.0938), counted by `projection_mib(q8=True)` and the registry's checkpoint slots. The engine key carries
+`kv` (only when set: F16 keys are unchanged) and the module, so a Q8 park never restores into F16 rows. One-card
+`max_ctx auto` from the projection (guard line, margin, display reserve, cache work and slack as `context_fit`
+counts them, nothing else on the card):
+
+| Card | F16 | Q8 | Room-limited, without the file's 40,960 cap (F16 / Q8) |
+|---|---|---|---|
+| RX 7900 XTX, display, idle | 40,960 | 40,960 | 45,056 / 81,920 |
+| RX 7900 XTX, display, 1 GiB in use | 32,768 | 40,960 | 32,768 / 61,440 |
+| RX 7900 XT, idle | 4,096 | 8,192 | 4,096 / 8,192 |
+
+`k3_run` of `k3_q3m_lean_kvq8`: 96 VGPRs, 0 spilled, 54 spilled scalars, private segment 0, 15,748 bytes of LDS;
+`k3_q3m_lean`: 96, 0, 53, 15,748 (the chunk's V scales use the scores' spare LDS). Over the scalar budget by one: it was not removed (variants measured: the error word's address made in the op, 32-bit row offsets,
+DPP or shuffle reductions, selects or shifts for the half-dword parity). The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs,
+`q3p_attn_q8` 226 (F16: 25 and 223), no spills.
+
+Gates (a non-display card first):
+
+```bash
+tools/guard.sh LOG 600 python -I tests/engine/test_q3m_kvq8_atts.py                    # the op alone: rows, reads, grids, refusals
+tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache R.npz --kv q8
+tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz --kv q8
+tools/guard.sh LOG 900 python -I tools/gates/q3moe_gmodel.py GGUF --ref REF128.npz --llama LL128.bin --kv q8 --against F16.bin
+tools/guard.sh LOG 1800 python -I tools/gates/q3moe_depth_gmodel.py GGUF --ref REF32.npz --llama LL.bin --kv q8 --against F16.bin
+```
+
+Speed (decode and prefill; the two caches do not both fit one card at depth, so alternate runs, F16 then Q8, twice):
+
+```bash
+tools/guard.sh LOG 900 python -I benchmarks/q3moe_depth.py GGUF --depths 8,4096,16384,40900 [--kv q8]
+tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefill.py GGUF --lengths 4096,32768 --chunk 2048 [--kv q8]
+```
+
+The row checks compare against the F16 row kernel (`q3p_qk_rope`: OP_OWN_ATTS's norm + RoPE statements) on the same
+q | k | v. `test_q3m_kvq8_atts.py` also compares the output with float64 attention over the decoded rows at positions
+across one and many splits, runs fixed fp16 edge blocks (+-65,504, exact ties, a scale that rounds to zero, zeros),
+checks `q3p_qk_rope_q8`'s rows and refusal, and `q3p_attn_q8` bit for bit against `q3p_attn` over fp16(decoded rows). The G-model gates score the Q8 run against the fp32 reference with the usual rule against
+the `--llama` rows given (`--llama-kv q8_0` labels rows made with `kv q8_0`). `--save-logits` on the F16 run and
+`--against` on the Q8 run give the KLD between the two caches. CPU: `tests/engine/test_q3moe_kvq8_cpu.py`. None of the
+device gates has run yet.

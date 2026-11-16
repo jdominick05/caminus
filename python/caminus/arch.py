@@ -516,6 +516,14 @@ class Coder(Arch):
         effort line); a --model-alias renames only /props' default id"""
 
 
+def kv_q8(opt):
+    """the KV cache format an entry builds from opt['kv'] ('f16', the default, or 'q8': the Q8_0 rows of the entries that
+    have them; caminus serve sets no 'kv' yet, the --kv switch is later work): True for q8; anything else is refused"""
+    v = opt.get('kv') or 'f16'
+    if v not in ('f16', 'q8'): raise ValueError(f"kv {v!r}: 'f16' or 'q8'")
+    return v == 'q8'
+
+
 class OneCard(Arch):
     kind, cards, T, engine = 'one-card', 1, 1, 'engine.qwen35_one:Qwen35One'
 
@@ -576,15 +584,16 @@ class Q3MoE(OneCard):
         from .prefill import q3m
         path = opt['model']
         n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
-        slot = Q3MoEOne.kv_pos_mib(path) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
+        q8 = kv_q8(opt)                                     # (opt['kv']: no serve flag sets it yet; 'f16' by default)
+        slot = Q3MoEOne.kv_pos_mib(path, q8) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
         pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
-        need = lambda c: [Q3MoEOne.projection_mib(path, c) + pf + (slots + 2) * slot]   # (the side rows: host memory)
+        need = lambda c: [Q3MoEOne.projection_mib(path, c, q8=q8) + pf + (slots + 2) * slot]   # (the side rows: host memory)
         return n_ctx, [0], slot, need
 
     def build(self, opt, log=print, T=None):
         from .engine.q3moe_one import Q3MoEOne
         from .prefill.q3m import Q3MPrefill
-        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
+        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']), q8=kv_q8(opt))
         return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 

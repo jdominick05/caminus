@@ -94,6 +94,13 @@ OWN_MODULES = ('k3_gguf_q35d_own',)   # experimental: k3_gguf_q35d + OP_OWN_MV (
 # qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/k3_gguf_q3m_own.hip; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
+# its Q8_0 KV build (kernels/k3_q3m_lean_kvq8.hip: OP_OWN_ATTS writes and reads Q8_0 rows, own_kv_codec.h's format with no
+# rotation; a refused block sets the sticky word after Sync, Engine.kv_error). The same ops, pairs and dispatch as its F16
+# object (a separate object, so that one keeps its code); one card, decode only (no verify or two-card build), not served
+Q3M_KV_Q8_BASE = {'k3_q3m_lean_kvq8': 'k3_q3m_lean'}
+Q3M_KV_Q8_OF = {base: name for name, base in Q3M_KV_Q8_BASE.items()}
+Q3M_KV_Q8_MODULES = tuple(Q3M_KV_Q8_BASE)
+Q3M_LEAN_MODULES += Q3M_KV_Q8_MODULES
 # their two-card builds (kernels/k3_q3m_lean_tp.hip: K3_Q3M_TP adds OP_XCHG, push-only, and OP_OWN_SLOT_SUM; issue #86):
 # one-card module -> two-card module. engine/q3moe_tp.py builds its tapes on them (caminus serve --cards 2; the _trace build
 # is measurement only, outside the installed runtime set)
@@ -556,7 +563,7 @@ class Engine:
         self.grid = grid or 4 * props.multi_processor_count   # multiProcessorCount = WGPs on gfx11
         self.limit_us = limit_us   # a stuck wait gives up after this (keeps the XTX's desktop compositor alive)
         self.module = module_for(module, T); self.mv_u = 16 if module == 'k3_u16' else 8; self.teams = teams
-        q8 = self.module in Q35_KV_Q8_MODULES
+        q8 = self.module in Q35_KV_Q8_MODULES + Q3M_KV_Q8_MODULES
         if q8 and (isinstance(T, (bool, np.bool_)) or not isinstance(T, (int, np.integer)) or not 1 <= T <= 4
                    or (T != 1 and self.module not in Q35V_MODULES) or teams is not None):
             raise ValueError('k3 Q8 KV: decode T = 1, verify T = 1 .. 4, k3_run tapes only')
@@ -1129,7 +1136,7 @@ class Engine:
         the merge by the last task of each kv head, fp16 out. qkv fp32 = q [heads * dim] | k [kv_heads * dim] | v (the
         matvecs' outputs, one buffer); scratch fp32 [atts_scratch_floats(kv_heads, splits)], ZEROED before the first run
         (its counters return to zero after every launch); par fp32 [2 dim + 2] = q_norm | k_norm | theta_scale, eps; cache
-        f16 with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
+        f16 (the Q8 KV modules, Q3M_KV_Q8_MODULES: uint8 Q8_0 rows, with the engine's kv_error word) with ATS_PAD rows past the last position (a chunk's loads read up to 63 rows past it; the guard bounds pos to the
         rows before them); out16 fp16 [heads * dim]. splits: tasks per kv head (a fixed number: the split layout depends only on the
         position, never on the grid; at most atts_max_splits(module): 128 on the two-card modules, 64 elsewhere); lmin: the fewest positions per split; heads_per_task (1, 2, 4, 8): the query heads of a
         kv head one task takes (8: the modules' build; the same bits at any value). n_rot = dim = 128, 8 query heads per kv head, T = 1.
@@ -1148,10 +1155,17 @@ class Engine:
             raise ValueError(f'own_atts: heads_per_task {heads_per_task}: the qwen3moe modules are built for 8')
         hs = 8 // heads_per_task
         assert kv_heads * hs <= self.ATS_CNT
-        assert qkv.dtype == par.dtype == scratch.dtype == torch.float32 and cache.dtype == out16.dtype == torch.float16
+        q8 = self.module in Q3M_KV_Q8_MODULES   # (the module decides the cache format: the device reads it as built)
+        assert qkv.dtype == par.dtype == scratch.dtype == torch.float32 and out16.dtype == torch.float16
+        if cache.dtype != (torch.uint8 if q8 else torch.float16):
+            raise ValueError(f'own_atts: module {self.module} reads a {"Q8_0 (uint8)" if q8 else "float16"} cache, not {cache.dtype}')
+        if q8:
+            if self.kv_error is None: raise ValueError('own_atts: a Q8 module needs the engine\'s KV error word')
+            if not cache.is_contiguous() or cache.data_ptr() % 4: raise ValueError('own_atts: the Q8 cache must be contiguous and 4-byte aligned')
+            self.keep.append(self.kv_error)
         assert qkv.numel() >= heads * dim + 2 * M and par.numel() >= 2 * dim + 2 and out16.numel() >= heads * dim
         assert scratch.numel() >= self.atts_scratch_floats(kv_heads, splits, heads_per_task) and qkv.data_ptr() % 16 == 0 and scratch.data_ptr() % 16 == 0
-        rows = kv_rows(cache, M, False) - self.ATS_PAD
+        rows = kv_rows(cache, M, q8) - self.ATS_PAD
         if rows < 1: raise ValueError(f'own_atts: the cache needs {self.ATS_PAD} padding rows past its last position')
         if rows - tok < 1: raise ValueError(f'own_atts: tok {tok} leaves no usable cache row')
         self._guard_pos(pos, rows - tok)   # (the guard bounds the row it writes; a chunk's loads run up to ATS_PAD - 1 rows past it)

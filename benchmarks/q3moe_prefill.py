@@ -6,7 +6,9 @@ CAMINUS_UPLOAD_LOG on every two-card run): --micro pieces a chunk (default its M
 local (local: no exchange, each card's own partials: the compute floor, not the model's numbers). Each arm in --modes is run
 per length in turn (interleaved), so the exchange's exposed cost is overlap or serial minus local in the same process.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops] [--prefill-module M]
-  CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 [--modes overlap,serial,local] [--micro 2]"""
+  CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 [--modes overlap,serial,local] [--micro 2]
+--kv q8 (one card): the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True)); runs alternated with an F16
+run for the A/B (both caches do not fit one card at depth)."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -19,7 +21,9 @@ ap.add_argument('--max-ctx', type=int, default=None); ap.add_argument('--rounds'
 ap.add_argument('--prefill-module', default=None, help='the prefill code object (default: by the file\'s formats; q3m_prefill_iq times a Q4_K_M file on the IQ study\'s object)')
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--modes', default='overlap')
 ap.add_argument('--micro', type=int, default=None); ap.add_argument('--min-piece', type=int, default=None)
+ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 A = ap.parse_args()
+if A.kv == 'q8' and A.cards != 1: raise SystemExit('q3moe_prefill: --kv q8 is one card only')
 Ls = [int(x) for x in A.lengths.split(',')]
 if A.cards == 2:
     from caminus.engine.q3moe_tp import Q3MoETP
@@ -49,7 +53,7 @@ if A.cards == 2:
     print('RESULT DONE')
     sys.exit(0)
 print(torch.cuda.get_device_name(0), flush=True)
-eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8)
+eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8')
 pf = Q3MPrefill(eng, chunk=A.chunk, module=A.prefill_module)
 print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
 g = np.random.default_rng(0)

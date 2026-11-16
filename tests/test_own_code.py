@@ -23,7 +23,7 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
-for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_tp.hip', 'k3_q3m_lean_tp_trace.hip',   # (+ its two-card build)
+for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_kvq8.hip', 'q3m_prefill_kvq8.hip', 'k3_q3m_lean_tp.hip', 'k3_q3m_lean_tp_trace.hip',   # (+ its two-card build)
             'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
             'q3m_prefill_tp.hip', 'prefill_tp.hip',          # (its two-card prefill: the slot sum, and the exchange's add)
             'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)

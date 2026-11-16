@@ -11,7 +11,12 @@ every two-card run) with its batched prefill (prefill/q3m_tp.py Q3MPrefillTP, ch
 overlap): positions [0, N - M) prefilled on both cards, then the M scored one-token two-card passes, as the one-card row.
 With --decode-only: all N positions as one-token two-card passes (decode-then-decode, against the same bound). The replicas
 are checked after the prefill (its residual rows and routing ids) and after every token (the residual and every layer's
-router ids); any difference, or a bailed pass, fails."""
+router ids); any difference, or a bailed pass, fails.
+--kv q8 (one card): the engine's KV cache as Q8_0 rows (Q3MoEOne(q8=True), its prefill Q3MPrefill's Q8 path); the same scores and the
+same rule against the --llama rows given (llama.cpp's F16-KV rows are the stricter bound; rows made with 'kv q8_0' in the job
+file the like-for-like one: --llama-kv names which, for the printout). --save-logits PATH writes this run's scored logits
+(f32 [rows, vocab]); --against PATH (another run's saved logits: the F16 cache's) adds KLD(that || this) and top-1 agreement
+between the two runs (printed, not gated)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
@@ -36,7 +41,10 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--ref', required=True)
     ap.add_argument('--llama', default=None); ap.add_argument('--tokens-out', default=None); ap.add_argument('--module', default=None)
     ap.add_argument('--decode-only', action='store_true'); ap.add_argument('--cards', type=int, default=1, choices=(1, 2))
+    ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('--llama-kv', default='f16', choices=('f16', 'q8_0'))
+    ap.add_argument('--save-logits', default=None); ap.add_argument('--against', default=None)
     A = ap.parse_args()
+    if A.kv == 'q8' and A.cards != 1: ap.error('--kv q8: one card only (the two-card Q8 objects are later work)')
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']; N, M = len(seq), len(ref)
     if A.tokens_out:
         open(A.tokens_out, 'w').write(' '.join(map(str, seq)) + '\n'); print(f'tokens -> {A.tokens_out}'); sys.exit(0)
@@ -77,7 +85,8 @@ if __name__ == '__main__':
         from caminus.engine.q3moe_one import Q3MoEOne
         from caminus.prefill.q3m import Q3MPrefill
         print(torch.cuda.get_device_name(0), f'N {N}, the last {M} positions', flush=True)
-        eng = Q3MoEOne(A.gguf, max_ctx=N + 8, module=A.module)
+        eng = Q3MoEOne(A.gguf, max_ctx=N + 8, module=A.module, q8=A.kv == 'q8')
+        print(f'one card: module {eng.module}, KV {getattr(eng, "kv_format_id", "f16")}', flush=True)
         if A.decode_only:
             for t in seq[:N - M]: eng.step(t)
             print(f'decode only: {N - M} one-token passes, then the {M} scored ones', flush=True)
@@ -86,10 +95,15 @@ if __name__ == '__main__':
             pf.run(seq, 0, 0, N - M)
             eng.pos_host = N - M
         ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq[N - M:]])
-    so = score(ref, ours); print(line('caminus', so), flush=True)
+    so = score(ref, ours); print(line('caminus' if A.kv == 'f16' else 'caminus q8', so), flush=True)
+    if A.save_logits:
+        np.ascontiguousarray(ours, dtype=np.float32).tofile(A.save_logits); print(f'logits -> {A.save_logits} ({ours.shape[0]} rows)', flush=True)
+    if A.against:   # (this run against another run of the same rows: Q8 cache vs F16 cache)
+        other = np.fromfile(A.against, dtype=np.float32).reshape(ours.shape[0], -1)
+        print(line('vs saved', score(other, ours)) + f'  ({A.against}: the saved run as the reference)', flush=True)
     if A.llama:
         ll = np.fromfile(A.llama, dtype=np.float32).reshape(M, -1)
-        sl = score(ref, ll); print(line('llama.cpp', sl), flush=True)
+        sl = score(ref, ll); print(line('llama.cpp' if A.llama_kv == 'f16' else 'llama q8_0', sl) + f'  (its KV {A.llama_kv})', flush=True)
         c1, c2 = so['mean'] <= sl['mean'], so['top1'] >= sl['top1']
         print(('PASS' if c1 else 'FAIL') + f' depth {N}: mean KLD vs fp32 {so["mean"]:.3e} <= llama.cpp {sl["mean"]:.3e}')
         print(('PASS' if c2 else 'FAIL') + f' depth {N}: top-1 {so["top1"]} >= llama.cpp {sl["top1"]}')

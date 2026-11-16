@@ -121,7 +121,9 @@ CLAUDE.md imports this file.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
-  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename.
+  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename. Qwen3-30B-A3B's is
+  `k3_q3m_lean_kvq8` (+ `q3m_prefill_kvq8` for the prefill's rows and attention; `Q3MoEOne(q8=True)`, not served): unrotated
+  rows that encode the F16 object's halves, its statements under `K3_Q3M_KV_Q8` / `Q3P_KV_Q8` with the F16 text in `#else`.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them

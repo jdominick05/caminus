@@ -4,7 +4,10 @@ greedy continuation) through both; per position top-1 agreement, KLD(ref || gpu)
 engine's own greedy text and its decode speed; the standalone step's host refusals. Prints PASS / FAIL lines and RESULT PASS | FAIL.
 Gate (spec-own-quant.md, first form): top-1 equal at every position, mean KLD < 1e-3.
   tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache FILE.npz [--prompt TEXT] [--new 3]
-      [--module k3_q3m_iq] [--same-as k3_q3m_iq]
+      [--module k3_q3m_iq] [--same-as k3_q3m_iq] [--kv q8]
+--kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True), k3_q3m_lean_kvq8), the same checks and gate, plus
+at every reference position the last layer's new row byte for byte caminus.ref_kv.encode_q8_kv of the halves the F16
+row kernel (the prefill's q3p_qk_rope: OP_OWN_ATTS's norm + RoPE statements) stores for that layer's q | k | v.
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -16,6 +19,7 @@ ap.add_argument('--ref-only', action='store_true', help='compute / check the ref
 ap.add_argument('--speed', type=int, default=64, help='decode steps timed after the check')
 ap.add_argument('--same-as', default=None, help='also run the tape on this module: its logits must be the same bits')
 ap.add_argument('--module', default=None, help='the code object (default: the engine\'s choice for the file)')
+ap.add_argument('--kv', default='f16', choices=('f16', 'q8'), help='the KV cache format (q8: Q3MoEOne(q8=True))')
 A = ap.parse_args()
 from caminus import ggufio
 from caminus.bpe import BPE
@@ -38,14 +42,14 @@ if A.ref_only: sys.exit(0)
 import torch
 from caminus.engine.q3moe_one import Q3MoEOne
 print(torch.cuda.get_device_name(0), flush=True)
-t0 = time.time(); eng = Q3MoEOne(A.gguf, max_ctx=512, module=A.module); print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB), module {eng.module}', flush=True)
+t0 = time.time(); eng = Q3MoEOne(A.gguf, max_ctx=512, module=A.module, q8=A.kv == 'q8'); print(f'loaded in {time.time() - t0:.0f} s ({eng.vram_mib:.0f} MiB), module {eng.module}', flush=True)
 ok = True
 from caminus import own_dequant
 from caminus.device import capacity
 from caminus.engine import k3
 # beside the engine's own projection, this test's buffers: the logits of every reference position kept on the card twice
 # (the default grid's, and the grid being compared), a tape per compared grid, the embedding check's rows
-own_mib = 2 * len(ref) * eng.vocab * 4 / 2 ** 20 + 3 * Q3MoEOne.TAPE_MIB + 2
+own_mib = 2 * len(ref) * eng.vocab * 4 / 2 ** 20 + 3 * Q3MoEOne.TAPE_MIB + 2 + (4 if eng.q8 else 0)   # (q8: the F16 row oracle's buffers)
 capacity.check([eng.dev], [own_mib], f'test_q3moe_one: its own buffers ({len(ref)} positions of logits x 2: {own_mib:.0f} MiB)')
 # the device embedding row (OP_OWN_EMB) bitwise our host decoder, on a spread of token ids
 ids_chk = [0, 1, 785, 6722, 9625, 151642, 151935]
@@ -58,12 +62,27 @@ same = all(np.array_equal(xs[j].cpu().numpy().view(np.uint32), own_dequant.rows(
 print(('PASS' if same else 'FAIL') + f' device embedding rows bitwise the host decoder ({len(ids_chk)} tokens)'); ok &= same
 def lsm(v): v = v - v.max(); return v - np.log(np.exp(v).sum())
 klds, top_ok = [], True
+if eng.q8:   # the row oracle: the F16 row kernel on the last layer's q | k | v, its halves encoded by caminus.ref_kv
+    from caminus import ref_kv
+    from caminus.prefill import q3m_ops
+    oops = q3m_ops.Ops(torch.device(f'cuda:{eng.dev}'), 'q3m_prefill'); lay = ref_kv.Q8KVLayout(eng.nkv, eng.hd)
+    Mk = eng.nkv * eng.hd; rb = lay.row_bytes
+    oc = torch.zeros((len(ref) + 1) * 2 * Mk, dtype=torch.float16, device='cuda'); oq = torch.zeros(eng.nh * eng.hd, dtype=torch.float16, device='cuda')
+    rows_bad = []
 for i in range(len(ref)):
     g = eng.step(seq[i]).double().cpu().numpy(); r = ref[i]
+    if eng.q8:
+        oops.qk_rope(eng.S['qkv'], eng.nh * eng.hd + 2 * Mk, eng.nh, eng.nkv, eng.L[-1]['qk_par'], i, oq, oc, 1); torch.cuda.synchronize()
+        hh = oc[i * 2 * Mk:(i + 1) * 2 * Mk].float().cpu().numpy()
+        want = ref_kv.encode_q8_kv(hh[:Mk].reshape(1, eng.nkv, eng.hd), hh[Mk:].reshape(1, eng.nkv, eng.hd), lay)[0]
+        if not np.array_equal(eng.L[-1]['cache'][i * rb:(i + 1) * rb].cpu().numpy(), want): rows_bad.append(i)
     lr, lgp = lsm(r), lsm(g); kld = float(np.sum(np.exp(lr) * (lr - lgp)))
     t1r, t1g = int(np.argmax(r)), int(np.argmax(g)); top_ok &= t1r == t1g; klds.append(kld)
     print(f'  pos {i}: in {tk.decode([seq[i]])!r:12s} top-1 ref {tk.decode([t1r])!r} gpu {tk.decode([t1g])!r}  '
           f'KLD {kld:.2e}  max |dlogit| {np.abs(r - g).max():.3e}', flush=True)
+if eng.q8:
+    print(('PASS' if not rows_bad else 'FAIL') + f' Q8 rows: the last layer\'s row at each of {len(ref)} positions byte for byte '
+          f'encode_q8_kv of the F16 row kernel\'s halves' + (f' (differ at {rows_bad[:8]})' if rows_bad else '')); ok &= not rows_bad
 print(('PASS' if top_ok else 'FAIL') + ' top-1 equal at every position'); ok &= top_ok
 print(('PASS' if np.mean(klds) < 1e-3 else 'FAIL') + f' mean KLD {np.mean(klds):.2e} (max {np.max(klds):.2e}) < 1e-3'); ok &= np.mean(klds) < 1e-3
 # G-self across grids: the tape at 3 / 7 / 8 workgroups per WGP gives the card's own grid's (q3moe_one.card_per_wgp) logits bitwise (same weights,

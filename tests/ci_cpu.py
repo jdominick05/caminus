@@ -62,6 +62,7 @@ SUITES = [
     ('q35_upload', ['tests/engine/test_q35_upload_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q3m_tp_kernels', ['tests/engine/test_q3m_tp_kernels_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q3moe_tp', ['tests/engine/test_q3moe_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
+    ('q3moe_kvq8', ['tests/engine/test_q3moe_kvq8_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('q3m_prefill_tp', ['tests/prefill/test_q3m_prefill_tp_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('pass_police', ['tests/engine/test_pass_police.py'], set()),
     ('sweep_cmp', ['tests/tools/test_sweep_cmp.py', '--scratch', '{scratch}'], set()),
