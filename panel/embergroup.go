@@ -125,6 +125,10 @@ func (c *residentChat) fold(e residentEvent) bool {
 		result, _ := e.Data["result"].(map[string]any)
 		if _, bad := result["error"]; bad {
 			g.failed++
+		} else if name == "edit" || name == "write" {
+			// the code the agent writes is shown even here: its diff card (the first lines of a long one) follows the
+			// line, instead of the change existing only as "edited 1 file" until Ctrl+E
+			return false
 		}
 		if name == "terminal" {
 			if running, _ := result["running"].(bool); !running {

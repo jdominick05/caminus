@@ -20,6 +20,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+const editPreview = 8 // the lines a folded edit card still shows
+
 var hunkRe = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
 // diffPlates are the added / removed backgrounds: the theme's ok and hot colours blended into its background (or into
@@ -63,13 +65,22 @@ func bgSeq(hex string) string {
 func editCard(path, meta string, expanded bool, diff string, w int) string {
 	body := diffLines(path, diff, max(10, w-5))
 	head := toolCard("edit", path, meta, true, false, nil, w)
-	if !expanded || len(body) == 0 {
-		return head // folded (Ctrl+E opens every card), or nothing changed
+	if len(body) == 0 {
+		return head
 	}
 	rule := "   " + emberDim.Render("│ ")
+	shown := body
+	if !expanded && len(body) > editPreview {
+		// a long change shows its first lines, as a code review does, instead of only its header: the code the
+		// agent writes was invisible until Ctrl+E
+		shown = body[:editPreview]
+	}
 	out := []string{strings.Replace(head, g.collapsed, g.expanded, 1)}
-	for _, b := range body {
+	for _, b := range shown {
 		out = append(out, rule+b)
+	}
+	if len(shown) < len(body) {
+		out = append(out, rule+emberDim.Render(fmt.Sprintf("… %d more lines · Ctrl+E shows all", len(body)-len(shown))))
 	}
 	return strings.Join(out, "\n")
 }

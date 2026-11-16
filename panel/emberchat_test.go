@@ -2242,3 +2242,26 @@ func TestAFencedCodeBlockIsAVisiblePlate(t *testing.T) {
 		t.Fatalf("fences: %+v", segs)
 	}
 }
+
+func TestTheCompactViewShowsTheCodeAnEditWrote(t *testing.T) {
+	m := chatFixture(t)
+	m.height = 40
+	var diff strings.Builder
+	diff.WriteString("@@ -0,0 +1,20 @@")
+	for i := 1; i <= 20; i++ {
+		diff.WriteString(fmt.Sprintf("\n+line_%02d = %d", i, i))
+	}
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g1", Kind: "assistant", Data: map[string]any{"content": "Writing it.", "tool_calls": []any{map[string]any{"function": map[string]any{
+			"name": "write", "arguments": `{"path":"gen.py","content":"..."}`}}}}},
+		{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "write", "result": map[string]any{
+			"path": "gen.py", "added": float64(20), "removed": float64(0), "diff": diff.String()}}},
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	if !strings.Contains(v, "line_01 = 1") || !strings.Contains(v, "line_08 = 8") || strings.Contains(v, "line_09 = 9") ||
+		!strings.Contains(v, "12 more lines · Ctrl+E shows all") {
+		t.Fatalf("the compact view shows a long write's first 8 lines and a count:\n%s", v)
+	}
+}
