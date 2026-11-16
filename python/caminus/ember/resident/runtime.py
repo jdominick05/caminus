@@ -54,7 +54,8 @@ READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd',
                        'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath'))
 # Archive tools in their listing-only forms (any other form extracts or writes)
 LISTING = {'unzip': ('-l', '-v', '-Z', '-Z1'), '7z': ('l',), 'tar': ('-t', '-tf', '-tvf', '-tzf', '-tjf', '-tJf', 't', 'tf', 'tvf')}
-READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files'))
+READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files', 'shortlog', 'describe',
+                           'ls-remote', 'grep', 'cat-file', 'show-ref'))
 # Arguments that make a read-only program act: find's -exec / -execdir / -ok / -okdir / -delete / -fprint* / -fls,
 # git's --output, rg's --pre (it runs a command on each file), and any redirection, substitution or tee.
 NULL_REDIRECT = re.compile(r'(?<![\w>])(?:\d|&)?>>?\s*/dev/null\b|(?<![\w>])\d?>&\d\b')
@@ -80,6 +81,8 @@ def read_only_command(cmd):
             sub = words[1:2]
             if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
                 continue                  # listing branches; with any other argument it creates or deletes one
+            if sub == ['remote'] and (words[2:] in ([], ['-v'], ['--verbose']) or words[2:3] in (['show'], ['get-url'])):
+                continue                  # listing remotes ('git remote -v' was refused three times before a done check)
             if not sub or sub[0] not in READ_ONLY_GIT:
                 return False
         elif words[0] in LISTING:

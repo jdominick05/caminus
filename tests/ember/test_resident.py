@@ -1849,6 +1849,8 @@ for line in sys.stdin:
         from caminus.ember.resident.runtime import read_only_command
         self.assertTrue(read_only_command('find / -maxdepth 4 -name caminus 2>/dev/null | head; cat f >/dev/null 2>&1'))
         self.assertFalse(read_only_command('echo x > f'));self.assertFalse(read_only_command('cat a 2>&1 > out'))
+        self.assertTrue(read_only_command('cd ~/work/caminus && git status | head -20; git remote -v; git log --oneline -5'))
+        for c in ('git remote add x y','git remote set-url origin z','git reflog expire --all'):self.assertFalse(read_only_command(c),c)
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Make x.');rt.store.update(gid,gate='true')
