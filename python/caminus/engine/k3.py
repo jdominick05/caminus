@@ -1527,6 +1527,10 @@ class Engine:
                 flagged = {OP_RMS_MUL: sg.aux, OP_QK_NR: sg.aux, OP_KV_APPEND: sg.aux, OP_ATTN_DEC: sg.pad2}.get(sg.op, 1)
                 if sg.op not in DRAFT_OPS or not flagged:
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}{"" if flagged else ", unflagged"})')
+        if self.module not in Q3M_TP_MODULES:   # (op 56 is compiled into the two-card qwen3moe builds only: elsewhere a no-op)
+            for i, sg in enumerate(self.segs):
+                if sg.op == OP_OWN_SLOT_SUM:
+                    raise ValueError(f'k3: module {self.module} has no op {sg.op} (OP_OWN_SLOT_SUM, segment {i}): the two-card qwen3moe modules only')
         if self.module in Q3M_LEAN_MODULES + Q3M_TP_MODULES + Q3M_VER_MODULES + Q3M_IQ_MODULES + tuple(Q3M_RS_MODULES):   # (only the decode tape's ops are compiled into its k3_run)
             ops = Q3M_TP_OPS if self.module in Q3M_TP_MODULES else Q3M_LEAN_OPS   # (the two-card builds: + OP_XCHG, OP_OWN_SLOT_SUM)
             for i, sg in enumerate(self.segs):
