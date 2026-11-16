@@ -2080,3 +2080,17 @@ func TestAStoppedDaemonShowsStoppedNotItsGoalsLastState(t *testing.T) {
 		t.Fatalf("the tab title says stopped too: %q", m.windowTitle())
 	}
 }
+
+func TestTheBadgeKeepsThePillWhole(t *testing.T) {
+	saved := g
+	defer func() { g = saved }()
+	g = glyphTiers["nerd"]
+	bar := footBar([]string{strings.TrimSpace(labBadge("claude-haiku-5-5") + " claude-haiku-5-5")}, nil, 80)
+	bg := strings.TrimSuffix(strings.TrimPrefix(strings.SplitN(lipgloss.NewStyle().Background(cGray).Render("\x00"), "\x00", 2)[0], "\x1b["), "m")
+	i := strings.Index(bar, "claude-haiku")
+	before := bar[:i]
+	last := max(strings.LastIndex(before, "\x1b[m"), strings.LastIndex(before, "\x1b[0m"))
+	if last >= 0 && !strings.Contains(before[last:], bg) {
+		t.Fatalf("after the badge's reset the pill's colours come back before the name: %q", before)
+	}
+}

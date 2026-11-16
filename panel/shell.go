@@ -335,7 +335,11 @@ func labBadge(model string) string {
 		return g.model
 	}
 	mark := func(sym, hex string) string {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Bold(true).Render(sym)
+		st := lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Bold(true)
+		if g.name == "nerd" {
+			st = st.Background(cGray) // (inside the model's pill: without it the badge's cell broke the pill)
+		}
+		return st.Render(sym)
 	}
 	switch {
 	case strings.HasPrefix(id, "claude"):
@@ -431,7 +435,11 @@ func footBar(segs, keyList []string, w int) string {
 	if g.name == "nerd" {
 		pill := lipgloss.NewStyle().Background(cGray).Foreground(cText)
 		edge := lipgloss.NewStyle().Foreground(cGray)
+		open := strings.SplitN(pill.Render("\x00"), "\x00", 2)[0] // the pill's colours, to put back after a reset
 		for _, sg := range segs {
+			// a styled piece inside a segment (the lab badge) ends in a full reset, which dropped the pill's background
+			// for the rest of the segment: the colours are restored after each one
+			sg = strings.ReplaceAll(strings.ReplaceAll(sg, "\x1b[0m", "\x1b[m"), "\x1b[m", "\x1b[m"+open)
 			left += edge.Render(g.segL) + pill.Render(sg) + edge.Render(g.segR) + " "
 		}
 	} else {
