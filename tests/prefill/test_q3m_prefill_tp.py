@@ -158,8 +158,15 @@ def run_rows(toks):
     return np.stack(rows)
 
 
+def poison_kv():
+    """NaN in every cache row of both cards: a prefill that skips or misplaces a row leaves NaN for the decode to read"""
+    for il in range(len(eng.L)):
+        for c in (0, 1): eng.L[il][c]['cache'].fill_(float('nan'))
+    torch.cuda.synchronize(eng.devs[0]); torch.cuda.synchronize(eng.devs[1])
+
+
 eng.reset(); dec = run_rows(seq)
-eng.reset(); pf.run(seq, 0, 0, P); torch.cuda.synchronize(eng.devs[0]); torch.cuda.synchronize(eng.devs[1])
+eng.reset(); poison_kv(); pf.run(seq, 0, 0, P); torch.cuda.synchronize(eng.devs[0]); torch.cuda.synchronize(eng.devs[1])
 prep = pf.check_replicas()
 eng.pos_host = P
 ours = run_rows(seq[P:])
@@ -194,7 +201,7 @@ def geom_rows(chunk=None, stops=(), micro=None, mode=None, min_piece=None):
     m0 = (pf.micro, pf.mode, pf.min_piece)
     pf.micro = m0[0] if micro is None else micro; pf.mode = m0[1] if mode is None else mode
     pf.min_piece = m0[2] if min_piece is None else min_piece
-    eng.reset(); st = []
+    eng.reset(); poison_kv(); st = []
     try:
         pf.run(gtoks, 0, 0, GEOM, chunk=chunk, stops=stops, at_stop=(lambda b, s: st.append(b)) if stops else None)
         torch.cuda.synchronize(eng.devs[0]); torch.cuda.synchronize(eng.devs[1])
