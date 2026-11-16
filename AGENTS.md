@@ -127,7 +127,10 @@ CLAUDE.md imports this file.
   `caminus.ref_kv.hadamard128`; V unrotated), its statements under `K3_Q3M_KV_Q8` / `Q3P_KV_Q8` with the F16 text in
   `#else`; its module file also defines `K3_Q3M_ADD_RMS_PIN` (OP_OWN_ADD_RMS16's counts pinned as scalars) and
   OP_OWN_ATTS pins its own counts under `K3_Q3M_KV_Q8`: 19 spilled scalars against the F16 object's 53, which keeps its
-  code. Every other registry entry refuses `opt['kv'] = 'q8'` (`Arch.kv_check`).
+  code. Its two-card form is `k3_q3m_lean_tp_kvq8` (the same two defines over `k3_q3m_lean_tp.hip`; `k3.Q3M_TP_OF` and
+  `Q3M_KV_Q8_BASE` both list it; `Q3MoETP(q8=True)`, its prefill `Q3MPrefillTP` on `q3m_prefill_kvq8`'s kernels at each
+  card's local shapes; not served): 33 spilled scalars against `k3_q3m_lean_tp`'s 66. Every registry entry but the two
+  qwen3moe ones refuses `opt['kv'] = 'q8'` (`Arch.kv_check`).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them

@@ -28,7 +28,12 @@ pieces, modes and the chunk split change no bit.
 Not bitwise to the one-card prefill by design (the K-split down, the attn_output column split, the slot sum before the
 exchange each change a summation order); G-model gated as the one-card prefill (tests/prefill/test_q3m_prefill_tp.py):
 prefill then two-card decode against the float64 / fp32 references, llama.cpp as the bound. Served as
-the prompt path of `caminus serve --cards 2` for Qwen3-30B-A3B (caminus.arch.Q3MoETP). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here)."""
+the prompt path of `caminus serve --cards 2` for Qwen3-30B-A3B (caminus.arch.Q3MoETP). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here).
+A Q8 KV engine (Q3MoETP(q8=True), not served): the same chunk, each card's rows written and read as Q8_0 blocks by the
+one-card Q8 kernels at that card's local shapes (q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: both take the kv head
+count, so its 2 kv heads and their 16 query heads; the one-card engine's format, q3moe_one.KV_FORMAT_Q8). Each card has
+its own KV error word (the layout's kverr): the settle reads both before the routing flags, and a refused block raises
+caminus.errors.InvalidKVEncoding with the engine marked broken."""
 from types import SimpleNamespace
 import ctypes
 
@@ -87,14 +92,15 @@ def layout_tp(s, T):
 
 
 def buffer_need_tp_mib(shapes, T):
-    """per card: Q3MPrefillTP's buffers at chunk T (its layout at its local shapes + the exchange's receive rows)"""
+    """per card: Q3MPrefillTP's buffers at chunk T (its layout at its local shapes, the KV error word included, + the exchange's
+    receive rows); the same at either KV format (the rows are the engine's)"""
     return [buffer_need_mib(s, T) + 4 * s.D * T / capacity.MIB + xchg_bytes(T, s.D) / capacity.MIB for s in shapes]
 
 
 def need_tp_mib(shapes, T):
     """per card: everything Q3MPrefillTP takes at construction (checked before its first allocation): the buffers and receive
-    rows (buffer_need_tp_mib), its code objects (capacity.PREFILL_CODE_MIB) and the exchange's streams
-    (capacity.PREFILL_STREAMS_MIB: a stream takes device memory at its first use)"""
+    rows (buffer_need_tp_mib), its code objects (capacity.PREFILL_CODE_MIB; a Q8 engine's q3m_prefill_kvq8 is inside it) and
+    the exchange's streams (capacity.PREFILL_STREAMS_MIB: a stream takes device memory at its first use)"""
     return [b + capacity.PREFILL_CODE_MIB[c] + capacity.PREFILL_STREAMS_MIB[c] for c, b in enumerate(buffer_need_tp_mib(shapes, T))]
 
 
@@ -139,6 +145,7 @@ class Q3MPrefillTP(PrefillDriver):
         if int(micro) < 1: raise ValueError(f'Q3MPrefillTP: micro {micro} (>= 1)')
         if getattr(m, 'local_only', False): raise ValueError('Q3MPrefillTP: a local_only engine is refused (its numbers are not the model\'s)')
         if getattr(m, 'broken', None): raise ValueError(f'Q3MPrefillTP: the engine is broken ({m.broken})')
+        self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache format: the Q8 row and attention kernels, never F16 ones)
         if m.nh != 8 * m.nkv or m.hd != 128: raise ValueError(f'Q3MPrefillTP: {m.nh} / {m.nkv} heads of {m.hd} (8 query heads per kv head of 128: q3p_attn)')
         self.mode, self.micro, self.min_piece = mode, int(micro), int(min_piece)
         self.devs = [torch.device(f'cuda:{d}') for d in m.devs]
@@ -157,7 +164,7 @@ class Q3MPrefillTP(PrefillDriver):
             dev = self.devs[c]
             f32, f16, i32 = layout_tp(self.sh[c], T)
             with torch.cuda.device(dev):
-                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill')); self.S.append(SlotSum(dev))
+                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8)); self.S.append(SlotSum(dev))
                 b = {}
                 for n, k in f32.items(): b[n] = torch.zeros(k, dtype=torch.float32, device=dev)
                 for n, k in f16.items(): b[n] = torch.zeros(k, dtype=torch.float16, device=dev)
@@ -181,7 +188,8 @@ class Q3MPrefillTP(PrefillDriver):
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the fp32 router, the two cards'
         partials (the FFN's weighted over its slots on each card first) summed in fp32, card 0's first"""
-        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='own-wmma', tp='xchg-fp32-c0-first-slot-sum')
+        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='own-wmma', tp='xchg-fp32-c0-first-slot-sum',
+                    **({'kv': 'q8_0'} if self.q8 else {}))
 
     # -- the halves of a layer, one piece ---------------------------------------------------------------------------------
     def _tr(self, *ev):
@@ -203,7 +211,7 @@ class Q3MPrefillTP(PrefillDriver):
             O.mm(W['attn_q'], h16, D, qkv, ldq, n=n)
             O.mm(W['attn_k'], h16, D, qkv[Q:], ldq, n=n)
             O.mm(W['attn_v'], h16, D, qkv[Q + M:], ldq, n=n)
-            O.qk_rope(qkv, ldq, nh, nkv, W['qk_par'], p + r0, q16, W['cache'], n, rows=m.max_ctx)
+            O.qk_rope(qkv, ldq, nh, nkv, W['qk_par'], p + r0, q16, W['cache'], n, rows=m.max_ctx, err=B['kverr'] if self.q8 else None)
             if il == m.nl - 1: return False
             att16 = B['att16'][r0 * Q:(r0 + n) * Q]
             _, nb = O.attn_blocks(p + r0, n)
@@ -244,6 +252,8 @@ class Q3MPrefillTP(PrefillDriver):
     # -- one chunk ----------------------------------------------------------------------------------------------------------
     def _chunk(self, toks, a, b, mode=None):
         m = self.m; n, p = b - a, a
+        if self.q8 and getattr(m, 'broken', None):   # (a Q8 engine's refused block: its rows are unusable; the F16 path is as it was)
+            raise getattr(m, '_broken_error', k3.InvalidKVEncoding)(f'Q3MPrefillTP: refused: {m.broken}')
         mode = self.mode if mode is None else mode
         if mode not in MODES: raise ValueError(f'Q3MPrefillTP: mode {mode!r} (one of {MODES})')
         k3.check_span(p, n, m.max_ctx, what='Q3MPrefillTP chunk (the KV rows)')
@@ -287,6 +297,18 @@ class Q3MPrefillTP(PrefillDriver):
                 self.B[c]['err'].zero_()
                 raise k3.ContextBoundsError(f'{what}: card {c}\'s routing flag word is {e:#x} (1: a router logit not finite, 2: an id out of range)')
 
+    def check_kv(self, what='prefill'):
+        """a Q8 engine: raise InvalidKVEncoding (and mark the engine broken) if a chunk refused a block on either card; first,
+        before the routing flags: rows may already be written"""
+        if not self.q8: return
+        bad = [(c, int(self.B[c]['kverr'].item())) for c in (0, 1)]
+        bad = [f'card {c}: {e:#x}' for c, e in bad if e]
+        if bad:
+            why = f'{what}: a KV block was refused (error words {", ".join(bad)}); the cache rows are unusable'
+            mark = getattr(self.m, 'mark_broken', None)
+            if mark is not None: mark(why, error_cls=k3.InvalidKVEncoding)   # (raises InvalidKVEncoding)
+            raise k3.InvalidKVEncoding(why)
+
     def check_replicas(self):
         """after a run (both cards synchronized): the replicated state the same bits on both cards: (the residual rows of the
         last chunk entering the last layer, the last piece's routing ids of the last FFN layer)"""
@@ -300,7 +322,7 @@ class Q3MPrefillTP(PrefillDriver):
         self._chunk(toks, a, b)
 
     def _run_settle(self):
-        self._sync_devices(); self.X.settle(); self.check_flags('prefill')
+        self._sync_devices(); self.X.settle(); self.check_kv('prefill'); self.check_flags('prefill')
 
     def _sync_devices(self):
         for d in self.devs: torch.cuda.synchronize(d)

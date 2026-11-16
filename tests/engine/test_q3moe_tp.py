@@ -19,8 +19,14 @@ the GGUF given (the catalog Qwen3-30B-A3B file: about 11,900 / 6,300 MiB on the 
 Both cards visible, card 0 first (the display card: run the tiny form first; every two-card run with CAMINUS_UPLOAD_LOG):
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/engine/test_q3moe_tp.py --tiny --scratch DIR
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_tp.py GGUF --npos 96 --scratch DIR
+--kv q8: the engine with its KV caches as Q8_0 rows (Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8), every check above, plus in
+the reference run each card's last-layer row at every position byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V)
+of the halves the F16 row kernel (q3m_prefill's q3p_qk_rope at that card's local shapes: OP_OWN_ATTS's norm + RoPE
+statements) stores for that card's q | k | v of the last layer: the one-card Q8 rows' encoding of the same values.
+Run the op alone on the module first: HIP_VISIBLE_DEVICES=<XT> tests/engine/test_q3m_kvq8_atts.py --tp.
 --splits-cap N: the engine's attention splits cap (1 .. 128 on the two-card module; past 64 the merge's second load round
 runs from position 4096 on: --npos 4200 --max-ctx 4300, logits then kept as digests past 512 passes).
+  CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_tp.py GGUF --npos 96 --scratch DIR --kv q8
 Prints PASS / FAIL lines and RESULT PASS | FAIL."""
 import argparse, hashlib, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +37,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('gguf', nargs='?'); ap.add_argument('--tiny', action='store_true'); ap.add_argument('--scratch', default=None)
 ap.add_argument('--npos', type=int, default=None); ap.add_argument('--max-ctx', type=int, default=None)
 ap.add_argument('--splits-cap', type=int, default=None, help='the engine\'s splits_cap (default: q3moe_tp.SPLITS_CAP); its new\n               merge rounds run past 64 splits, i.e. past position 64 * 64: --npos 4200 --max-ctx 4300')
+ap.add_argument('--kv', default='f16', choices=('f16', 'q8'), help='the KV cache format (q8: Q3MoETP(q8=True))')
 A = ap.parse_args()
 if bool(A.tiny) == bool(A.gguf): raise SystemExit('test_q3moe_tp: give a GGUF or --tiny (one of them)')
 if A.tiny and not A.scratch: raise SystemExit('test_q3moe_tp: --tiny writes its file under --scratch DIR')
@@ -75,29 +82,66 @@ top = lambda r: int(np.argmax(r.view(np.float32))) if FULL else r[1]
 finite = lambda r: bool(np.isfinite(r.view(np.float32)).all()) if FULL else r[2]
 print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
 # beside the projection (checked by the constructor with this): one more tape set per grid and one for the default again
-eng = Q3MoETP(P, devices=(0, 1), max_ctx=max_ctx, vram_extra_mib=[(len(GRIDS) + 1) * Q3MoETP.TAPE_MIB] * 2,
-              splits_cap=SPLITS_CAP if A.splits_cap is None else A.splits_cap)
+Q8 = A.kv == 'q8'
+# beside the projection (checked by the constructor with this): one more tape set per grid and one for the default again;
+# q8: the F16 row oracle's buffers on each card (max_ctx + 1 rows of f16 halves of its kv heads, a q16 row; 2 kv heads per
+# card at the default split, counted for all of them)
+oracle_mib = ((max_ctx + 1) * 2 * 4 * 128 * 2 + 32 * 128 * 2) / 2 ** 20 + 1 if Q8 else 0.0
+eng = Q3MoETP(P, devices=(0, 1), max_ctx=max_ctx, vram_extra_mib=[(len(GRIDS) + 1) * Q3MoETP.TAPE_MIB + oracle_mib] * 2,
+              splits_cap=SPLITS_CAP if A.splits_cap is None else A.splits_cap, q8=Q8)
 print(f'{os.path.basename(P)}: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}, '
       f'module {eng.module}, grids {eng.per_wgp_c}, splits {eng.splits}, {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB', flush=True)
-check(eng.module == 'k3_q3m_lean_tp' and eng.E[0].module == eng.E[1].module == 'k3_q3m_lean_tp', 'both cards decode on k3_q3m_lean_tp')
+MODN = 'k3_q3m_lean_tp_kvq8' if Q8 else 'k3_q3m_lean_tp'
+check(eng.module == MODN and eng.E[0].module == eng.E[1].module == MODN
+      and all(d[c]['cache'].dtype == (torch.uint8 if Q8 else torch.float16) for d in eng.L for c in (0, 1)), f'both cards decode on {MODN}')
+oracle = None
+if Q8:   # the row oracle: on each card the F16 row kernel on that card's last-layer q | k | v, its halves encoded by caminus.ref_kv
+    from caminus import ref_kv
+    from caminus.prefill import q3m_ops
+    oracle = []
+    for c in (0, 1):
+        nkv_c, nh_c = eng.kvc[c], eng.kvc[c] * 8; Mk = nkv_c * eng.hd
+        with torch.cuda.device(eng.devs[c]):
+            oracle.append(dict(ops=q3m_ops.Ops(torch.device(f'cuda:{eng.devs[c]}'), 'q3m_prefill'), lay=ref_kv.Q8KVLayout(nkv_c, eng.hd),
+                               nkv=nkv_c, nh=nh_c, Mk=Mk, oc=torch.zeros((max_ctx + 1) * 2 * Mk, dtype=torch.float16, device=f'cuda:{eng.devs[c]}'),
+                               oq=torch.zeros(nh_c * eng.hd, dtype=torch.float16, device=f'cuda:{eng.devs[c]}')))
+rows_bad = []
 
 
-def run(seq_in, extend):
-    """npos one-token passes from position 0: (the logits' bytes per pass, passes whose replicas differed, bails)"""
+def rows_check(i):
+    """each card's last-layer row at position i against encode_q8_kv(hadamard128(K), V) of the F16 row kernel's halves"""
+    for c in (0, 1):
+        o = oracle[c]; Mk = o['Mk']; rb = o['lay'].row_bytes
+        with torch.cuda.device(eng.devs[c]):
+            o['ops'].qk_rope(eng.buf[c]['qkv'], o['nh'] * eng.hd + 2 * Mk, o['nh'], o['nkv'], eng.L[-1][c]['qk_par'], i, o['oq'], o['oc'], 1)
+            torch.cuda.synchronize()
+        hh = o['oc'][i * 2 * Mk:(i + 1) * 2 * Mk].float().cpu().numpy()
+        want = ref_kv.encode_q8_kv(ref_kv.hadamard128(hh[:Mk].reshape(1, o['nkv'], eng.hd)), hh[Mk:].reshape(1, o['nkv'], eng.hd), o['lay'])[0]
+        if not np.array_equal(eng.L[-1][c]['cache'][i * rb:(i + 1) * rb].cpu().numpy(), want): rows_bad.append((c, i))
+
+
+def run(seq_in, extend, rows=False):
+    """npos one-token passes from position 0: (the logits' bytes per pass, passes whose replicas differed, bails); rows:
+    the Q8 row oracle after every pass"""
     eng.reset(); nb = len(eng.bails); out, rep = [], []
     seq = list(seq_in)
     for i in range(npos):
         lg = eng.step(seq[i]); out.append(keep(lg))
+        if rows: rows_check(i)
         if not all(eng.check_replicas()): rep.append(i)
         if extend and i + 1 == len(seq): seq.append(int(torch.argmax(lg)))
     return seq, out, rep, len(eng.bails) - nb
 
 
 # ---- the reference at each card's default grid ---------------------------------------------------------------------------
-seq, ref, rep, nb = run(first, True)
+seq, ref, rep, nb = run(first, True, rows=Q8)
 check(not rep and nb == 0 and all(finite(r) for r in ref),
       f'{npos} greedy passes at the default grid {eng.per_wgp_c}: finite logits, the replicas equal after every pass, 0 bails'
       + (f' (replicas differ at {rep[:8]})' if rep else '') + (f' ({nb} bails)' if nb else ''))
+if Q8:
+    check(not rows_bad and all(int(e.kv_error[0]) == 0 for e in eng.E),
+          f'Q8 rows: each card\'s last-layer row at each of {npos} positions byte for byte encode_q8_kv(hadamard128(K), V) of the F16 row '
+          f'kernel\'s halves for that card\'s q | k | v; both error words 0' + (f' (differ at (card, position) {rows_bad[:8]})' if rows_bad else ''))
 if A.tiny:
     from caminus.ref_q3moe import Q3MoERef
     rm, n_cmp, agree, klds = Q3MoERef(P), min(6, npos), 0, []
@@ -105,9 +149,13 @@ if A.tiny:
         r, gl = rm.step(seq[i]), ref[i].view(np.float32).astype(np.float64)
         lr, lg_ = r - r.max(), gl - gl.max(); lr, lg_ = lr - np.log(np.exp(lr).sum()), lg_ - np.log(np.exp(lg_).sum())
         klds.append(float(np.sum(np.exp(lr) * (lr - lg_)))); agree += int(np.argmax(r)) == int(np.argmax(gl))
-    check(agree == n_cmp and float(np.mean(klds)) < 1e-3,
-          f'tiny: two cards against the float64 reference, first {n_cmp} passes: top-1 {agree} / {n_cmp}, mean KLD {np.mean(klds):.2e} '
-          f'(bounds: every top-1, mean KLD < 1e-3 as test_q3moe_one; one card on this file: 6 / 6, 2.4e-07)')
+    if Q8:   # (the F16 bars are not Q8 bars: the Q8 cache's accuracy bar is the G-model gates' --against on the real file)
+        print(f'NOTE tiny: two cards, Q8 KV, against the float64 reference, first {n_cmp} passes: top-1 {agree} / {n_cmp}, mean KLD '
+              f'{np.mean(klds):.2e} (reported only; the F16 bar is every top-1 and mean KLD < 1e-3)', flush=True)
+    else:
+        check(agree == n_cmp and float(np.mean(klds)) < 1e-3,
+              f'tiny: two cards against the float64 reference, first {n_cmp} passes: top-1 {agree} / {n_cmp}, mean KLD {np.mean(klds):.2e} '
+              f'(bounds: every top-1, mean KLD < 1e-3 as test_q3moe_one; one card on this file: 6 / 6, 2.4e-07)')
     check(all(float(r.view(np.float32).std()) > 0.1 for r in ref), 'tiny: the logits are not degenerate (std > 0.1 at every pass)')
 
 # ---- the grids ------------------------------------------------------------------------------------------------------------
