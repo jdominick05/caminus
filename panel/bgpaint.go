@@ -153,14 +153,17 @@ func paintLine(line string, y int, rowBg, inkSeq, pat string, glyphs bool) strin
 // replayActive is the active SGRs again, with the row's colours put back after any 39 / 49 among them (as paintLine
 // does): replayed bare, a default-colour sequence cancelled the painted background after a pattern glyph.
 func replayActive(active []string, rowBg string) string {
-	out := strings.Join(active, "")
+	// the row's colours right after each 39 / 49, so a colour set after the reset still wins (appended at the end,
+	// they overrode \x1b[39m\x1b[31m's red)
+	var out strings.Builder
 	for _, seq := range active {
+		out.WriteString(seq)
 		params := strings.TrimSuffix(strings.TrimPrefix(seq, "\x1b["), "m")
 		if sgrClearsBg(params) || sgrClearsFg(params) {
-			return out + rowBg
+			out.WriteString(rowBg)
 		}
 	}
-	return out
+	return out.String()
 }
 
 // activeAt replays the SGR sequences active at cell k (since the last reset before it).

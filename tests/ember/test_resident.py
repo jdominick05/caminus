@@ -876,22 +876,27 @@ class Resident(unittest.TestCase):
             rt._action(dict(id=uuid.uuid4().hex,goal=gid,name='todo',args=json.dumps(dict(items=[]))))
             self.assertEqual((self.home/'STATE.md').read_text(),'mine','an action of goal A brings back A\'s STATE.md')
         finally:rt.mail.close();rt.store.close()
-        # an unknown charset falls back instead of ending the goal
-        class R:
-            status=200;headers={'Content-Type':'text/html; charset=foo'};url='http://x/'
-            def read(s,n=-1):return b'<html><title>T</title><p>hello</p></html>'
+        # an unknown charset falls back to UTF-8 instead of ending the goal
+        class Resp:
+            status=200;headers={'Content-Type':'text/html; charset=foo'}
+            def read(s,n):return '<html><title>T</title><p>caf\u00e9 ok</p></html>'.encode()[:n]
+            def geturl(s):return 'https://example.org/p'
             def __enter__(s):return s
             def __exit__(s,*a):return False
-            def geturl(s):return s.url
-            def getheader(s,k,d=None):return s.headers.get(k,d)
-        with unittest.mock.patch('urllib.request.urlopen',lambda *a,**k:R()):
-            try:out=web.fetch(None,'http://x/')
-            except LookupError:self.fail('an unknown charset ended the call')
-            except Exception:out=None
+        rt=Runtime(self.home)
+        try:
+            rt.web_opener=lambda req,timeout:Resp()
+            out=web.fetch(rt,'https://example.org/p')
+            self.assertIn('caf\u00e9 ok',out['text'],'decoded as UTF-8')
+        finally:rt.mail.close();rt.store.close()
         # a gate that leaves a background process still times out
         t0=time.time()
         ok,msg=judge.run_gate(str(self.home),'sleep 30 & sleep 30',timeout=1)
         self.assertFalse(ok);self.assertLess(time.time()-t0,10,'the timeout bounds the gate: '+msg)
+        # a gate that starts a background process and passes returns at once, passed (its pipe no longer holds it)
+        t0=time.time()
+        ok,msg=judge.run_gate(str(self.home),'sleep 30 & echo up',timeout=20)
+        self.assertTrue(ok,msg);self.assertLess(time.time()-t0,5,msg);self.assertIn('up',msg)
 
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
@@ -2067,6 +2072,19 @@ for line in sys.stdin:
             self.assertEqual(victim.read_text(),'ssh-ed25519 KEEP\n','the link target is never written')
             self.assertFalse(stop.is_symlink());self.assertEqual(stop.read_text(),'x\n')
             with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--clear'])
+            # a hard link to an owner's file is not written through either
+            victim2=self.home/'bashrc';victim2.write_text('KEEP\n');os.link(victim2,stop)
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--reason','y'])
+            self.assertEqual(victim2.read_text(),'KEEP\n');self.assertEqual(stop.read_text(),'y\n')
+            with contextlib.redirect_stdout(_io.StringIO()):envcmd.main(['stop-all','--clear'])
+            # in the real (root-owned, sticky) folder the owner cannot remove the agent's file: refused, not written
+            stop.symlink_to(victim)
+            err=_io.StringIO()
+            with unittest.mock.patch('os.unlink',side_effect=PermissionError('sticky')),contextlib.redirect_stderr(err),\
+                    contextlib.redirect_stdout(_io.StringIO()):
+                self.assertEqual(envcmd.main(['stop-all','--reason','z']),1)
+            self.assertIn('sudo rm -f',err.getvalue());self.assertEqual(victim.read_text(),'ssh-ed25519 KEEP\n')
+            stop.unlink()
         finally:
             if old is None:os.environ.pop('CAMINUS_ENV_BRIDGE',None)
             else:os.environ['CAMINUS_ENV_BRIDGE']=old
@@ -2512,7 +2530,15 @@ for line in sys.stdin:
                 self.assertTrue(any('CLIENT-GONE' in l for l in log),(provider,log[-3:]))
                 spent=ledger.spent()
                 self.assertGreater(spent,0,provider+': the hang-up is metered')
-                self.assertTrue(any('streamed characters' in l for l in log),provider+': estimated from what streamed')
+                line=next(l for l in log if 'streamed characters' in l)
+                import re as _re
+                n=int(_re.search(r'(\d+) streamed characters',line).group(1))
+                est=min(n*2//7+1,4096)                    # the charge comes from the streamed count, capped
+                from caminus.ember import relay as _r0
+                want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=1000,output_tokens=max(1,est)))
+                      if provider=='anthropic' else None)
+                if want is not None:self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
+                else:self.assertIn('estimated: prompt + %d streamed characters'%n,line)
                 # never above the prompt plus the request's own allowance (how much streamed before the hang-up is
                 # noticed depends on the machine's load, so the estimate may reach that cap)
                 from caminus.ember import relay as _r
