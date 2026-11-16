@@ -2214,3 +2214,31 @@ func TestTheAdvisorScreenShowsItAndTurnsOffOnTwoPresses(t *testing.T) {
 		t.Fatal("b edits the budget, starting from the current one")
 	}
 }
+
+func TestAFencedCodeBlockIsAVisiblePlate(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 40
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 9, Goal: "original", Kind: "assistant",
+		Data: map[string]any{"content": "Here is the fix:\n\n```python\ndef f(n):\n    return n + 1\n```\n\nDone."}})
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{"Here is the fix:", "python", "def f(n):", "    return n + 1", "Done."} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("missing %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "```") {
+		t.Fatal("the fences themselves are not shown")
+	}
+	plate := bgSeq(themeRole("codeblock_bg"))
+	for _, ln := range strings.Split(m.chat.content, "\n") {
+		if strings.Contains(ansi.Strip(ln), "def f(n):") && !strings.Contains(ln, plate) {
+			t.Fatalf("a code line sits on the code block's plate: %q", ln)
+		}
+	}
+	segs := splitFences("a\n~~~\nx\n~~~\nb\n```go\nunclosed")
+	if len(segs) != 4 || !segs[1].code || segs[1].text != "x" || !segs[3].code || segs[3].lang != "go" {
+		t.Fatalf("fences: %+v", segs)
+	}
+}

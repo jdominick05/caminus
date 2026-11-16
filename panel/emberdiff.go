@@ -44,6 +44,12 @@ func blendHex(a, b string, t float64) string {
 	return fmt.Sprintf("#%02x%02x%02x", out[0], out[1], out[2])
 }
 
+// replate puts a background back after every full reset in s (chroma ends tokens with ESC[0m, lipgloss with ESC[m),
+// so a plate drawn behind styled text has no holes.
+func replate(s, seq string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\x1b[0m", "\x1b[m"), "\x1b[m", "\x1b[m"+seq)
+}
+
 // bgSeq is the 24-bit background SGR for a #rrggbb colour (empty when it is not one).
 func bgSeq(hex string) string {
 	c := diffHex(hex)
@@ -140,7 +146,7 @@ func diffLines(path, diff string, w int) []string {
 		if bg != "" {
 			// the plate runs the full width: re-applied after every reset inside the highlighted code
 			seq := bgSeq(bg)
-			body = seq + strings.ReplaceAll(body, "\x1b[0m", "\x1b[0m"+seq)
+			body = seq + replate(body, seq)
 			if pad := w - ansi.StringWidth(body); pad > 0 {
 				body += strings.Repeat(" ", pad)
 			}
@@ -151,4 +157,76 @@ func diffLines(path, diff string, w int) []string {
 		out = append(out, ansi.Truncate(body, w, "…"))
 	}
 	return out
+}
+
+type mdSegment struct {
+	code       bool
+	lang, text string
+}
+
+var fenceRe = regexp.MustCompile("^(\\s*)(```+|~~~+)\\s*([\\w+#.-]*)")
+
+// splitFences cuts markdown into prose and fenced code blocks (``` or ~~~, with an optional language); an unclosed
+// fence runs to the end, as markdown reads it.
+func splitFences(text string) []mdSegment {
+	var out []mdSegment
+	var buf []string
+	inCode, fence, lang := false, "", ""
+	flush := func(code bool) {
+		out = append(out, mdSegment{code: code, lang: lang, text: strings.Join(buf, "\n")})
+		buf = nil
+	}
+	for _, ln := range strings.Split(text, "\n") {
+		m := fenceRe.FindStringSubmatch(ln)
+		switch {
+		case !inCode && m != nil:
+			flush(false)
+			inCode, fence, lang = true, m[2], m[3]
+		case inCode && m != nil && strings.HasPrefix(strings.TrimSpace(ln), fence) && strings.TrimSpace(ln) == strings.Repeat(fence[:1], len(strings.TrimSpace(ln))):
+			flush(true)
+			inCode, lang = false, ""
+		default:
+			buf = append(buf, ln)
+		}
+	}
+	flush(inCode)
+	return out
+}
+
+// codePlate draws a fenced block: the language in dim on the plate's first line, then the code highlighted for it
+// (the theme's code_theme) on the theme's codeblock_bg, every line the block's full width; long lines wrap inside.
+func codePlate(lang, code string, w int) string {
+	lexer := lexers.Get(lang)
+	if lexer == nil {
+		lexer = lexers.Analyse(code)
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	lexer = chroma.Coalesce(lexer)
+	style := styles.Get(themeRole("code_theme"))
+	if style == nil {
+		style = styles.Fallback
+	}
+	seq := bgSeq(themeRole("codeblock_bg"))
+	inner := max(4, w-2)
+	plate := func(s string) string {
+		s = seq + " " + replate(s, seq)
+		if pad := w - ansi.StringWidth(s); pad > 0 {
+			s += strings.Repeat(" ", pad)
+		}
+		return "  " + s + "\x1b[0m"
+	}
+	label := lang
+	if label == "" {
+		label = "code"
+	}
+	out := []string{plate(emberDim.Render(label))}
+	for _, ln := range strings.Split(strings.TrimRight(code, "\n"), "\n") {
+		hl := highlightLine(lexer, style, strings.ReplaceAll(ln, "\t", "    "))
+		for _, piece := range strings.Split(ansi.Hardwrap(hl, inner, true), "\n") {
+			out = append(out, plate(piece))
+		}
+	}
+	return strings.Join(out, "\n")
 }

@@ -909,12 +909,27 @@ func (c *residentChat) stopStream() {
 
 func (c *residentChat) renderMarkdown(text string) string {
 	text = residentText(text)
-	if c.markdown != nil {
-		if rendered, err := c.markdown.Render(text); err == nil {
-			return strings.Trim(rendered, "\n")
+	if c.markdown == nil {
+		return text
+	}
+	// fenced code goes to codePlate (a visible block: plate, language, highlighting); glamour left it as indented
+	// text with no background, so a code block could not be told from prose. The prose around it is glamour's.
+	var parts []string
+	for _, seg := range splitFences(text) {
+		if seg.code {
+			parts = append(parts, codePlate(seg.lang, seg.text, max(10, min(c.renderWidth-4, readingWidth))))
+			continue
+		}
+		if strings.TrimSpace(seg.text) == "" {
+			continue
+		}
+		if rendered, err := c.markdown.Render(seg.text); err == nil {
+			parts = append(parts, strings.Trim(rendered, "\n"))
+		} else {
+			parts = append(parts, seg.text)
 		}
 	}
-	return text
+	return strings.Join(parts, "\n\n")
 }
 
 // eventCard frames one event: its label, then its body behind a dim left rule, so the conversation reads as a
