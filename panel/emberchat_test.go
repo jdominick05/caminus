@@ -353,7 +353,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /identity /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -2147,5 +2147,35 @@ func TestAGithubHandoffIsACardAndTakesTwoPresses(t *testing.T) {
 	}
 	if next, _ = m.chatKey(tea.KeyPressMsg{Code: 'g', Text: "g"}); strings.Contains(next.(emberModel).msg, "grant") {
 		t.Fatal("g never grants a hand-off")
+	}
+}
+
+func TestTheIdentityScreenShowsTheLinkAndUnlinksOnTwoPresses(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 110, 34
+	m, cmd := m.openIdentity()
+	if !m.chat.identity.open || cmd == nil || !m.overlayOpen() {
+		t.Fatal("/identity opens the screen and reads the link")
+	}
+	m = m.identityLoaded(identityLoadedMsg{link: githubLink{Linked: true, Login: "agent-login",
+		Email: "1+agent-login@users.noreply.github.com", TokenFile: "~/homes/x/.config/github-token",
+		Repos: map[string]string{"jdominick05/caminus": "read"}}})
+	view := ansi.Strip(m.identityOverlay(100, 30))
+	for _, want := range []string{"agent-login", "1+agent-login@users.noreply.github.com", "github-token", "on jdominick05/caminus", "GITHUB cards"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("the screen shows %q: %s", want, view)
+		}
+	}
+	next, cmd := m.identityKey(tea.KeyPressMsg{Code: 'u', Text: "u"})
+	m = next.(emberModel)
+	if cmd != nil || !strings.Contains(m.msg, "press u again") {
+		t.Fatalf("the first u only asks: %q", m.msg)
+	}
+	if _, cmd = m.identityKey(tea.KeyPressMsg{Code: 'u', Text: "u"}); cmd == nil {
+		t.Fatal("the second u unlinks")
+	}
+	next, _ = m.identityKey(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	if m = next.(emberModel); m.chat.identity.editing != 1 || m.chat.identity.token.Value() != "~/homes/x/.config/github-token" {
+		t.Fatal("l starts a link with the current token file filled in")
 	}
 }

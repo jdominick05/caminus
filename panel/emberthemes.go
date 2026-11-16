@@ -407,6 +407,6 @@ func themePreview(name string, w int) string {
 // overlayOpen: an overlay or the session picker covers the conversation (the background pattern is not drawn then).
 func (m emberModel) overlayOpen() bool {
 	c := m.chat
-	return c.approvals || c.goals || c.models.open || c.themes.open || c.studio.open || c.view.open || c.rewind.open ||
+	return c.approvals || c.goals || c.models.open || c.identity.open || c.themes.open || c.studio.open || c.view.open || c.rewind.open ||
 		c.page >= 0 || c.picker
 }
