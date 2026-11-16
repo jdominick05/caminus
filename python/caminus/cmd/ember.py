@@ -175,18 +175,35 @@ def stop_all(argv):
     text = (a.reason.strip() or 'emergency stop by the owner') + '\n'
     # The folder is sticky (1770, root:<bridge group>): only the file's owner or root can delete or rename it, and the
     # file is group-readable but not group-writable, so an agent can see the stop and cannot lift or rewrite it.
-    # An agent in the group can create files here: a STOP it planted (a symlink to an owner's file, or its own file
-    # the owner would then chmod) is removed first, and the stop is created fresh, never through a link.
+    # An agent in the group can create files here. A STOP it planted (its own file, a symlink, a hard link to one of
+    # the owner's files) is never written through: it is removed when the owner may (a folder the owner owns), and
+    # otherwise the stop is refused with the command that removes it. The file is created with O_EXCL and O_NOFOLLOW;
+    # one that reappears in between is checked by its open descriptor (the owner's, one link) before it is truncated.
+    if os.path.lexists(stop):
+        try:
+            st = os.lstat(stop)
+            if os.path.islink(stop) or st.st_uid != os.getuid() or st.st_nlink > 1:
+                os.unlink(stop)
+        except PermissionError:
+            print(f'caminus ember stop-all: {stop} was not made by you (the agent may have planted it) and this folder '
+                  f'will not let you remove it. Remove it, then run stop-all again:\n  sudo rm -f {stop}', file=sys.stderr)
+            return 1
+    nofollow = getattr(os, 'O_NOFOLLOW', 0)
     try:
-        st = os.lstat(stop)
-        if os.path.islink(stop) or st.st_uid != os.getuid():
-            os.unlink(stop)
-    except FileNotFoundError:
-        pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
-    if not os.path.lexists(stop):
-        flags |= os.O_EXCL
-    fd = os.open(stop, flags, 0o640)
+        fd = os.open(stop, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o640)
+    except FileExistsError:
+        try:
+            fd = os.open(stop, os.O_WRONLY | nofollow)
+        except OSError as e:
+            print(f'caminus ember stop-all: {stop} changed while it was written ({e}); run stop-all again', file=sys.stderr)
+            return 1
+        st = os.fstat(fd)
+        if st.st_uid != os.getuid() or st.st_nlink > 1:
+            os.close(fd)
+            print(f'caminus ember stop-all: {stop} reappeared as a file that is not yours; remove it (sudo rm -f {stop}) '
+                  'and run stop-all again', file=sys.stderr)
+            return 1
+        os.ftruncate(fd, 0)
     os.fchmod(fd, 0o640)
     with os.fdopen(fd, 'w') as f:
         f.write(text)
