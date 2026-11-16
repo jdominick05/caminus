@@ -147,7 +147,12 @@ class ContextFit(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
         self.assertTrue(report['ok'])
-        self.assertEqual(report['max_ctx'], {'f16': 32768, 'q8': None})   # (#82: the per-format shape; Q8 is #81's)
+        # max_ctx per KV format: F16 (the default --kv, what need_mib and cards describe) and the Q8 projection on the
+        # same card, which holds the file's whole context in the room F16 fills at 32,768
+        q8 = A.context_fit(dict(opt, kv='q8'), [card]).maximum()
+        self.assertEqual(q8, 40960)
+        self.assertEqual(report['max_ctx'], {'f16': 32768, 'q8': q8})
+        self.assertEqual((report['kv'], report['kv_formats']), ('f16', ['f16', 'q8']))
         self.assertEqual(report['cards'], [card['pci']])
         self.assertEqual(report['draft'], opt['draft'])
         self.assertEqual(report['need_mib'], need(32768))
@@ -197,7 +202,8 @@ class ContextFit(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertTrue(report['ok'])
         self.assertEqual(report['arch'], 'qwen3moe-tp')
-        self.assertEqual(report['max_ctx']['f16'], 40960)
+        self.assertEqual(report['max_ctx'], {'f16': 40960, 'q8': 40960})      # (the two-card entry builds Q8 too)
+        self.assertEqual(report['kv_formats'], ['f16', 'q8'])
         self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
         self.assertEqual(placed['split'], {'exp_rows': 512, 'vocab_share': 0.532})
         self.assertEqual(report['need_mib'], need(40960))
@@ -323,14 +329,41 @@ class ContextFit(unittest.TestCase):
                  contextlib.redirect_stdout(stdout):
                 self.assertEqual(cli.fit_report([*argv, '--kv', kv, '--json']), 0)
             got[kv] = json.loads(stdout.getvalue())
-        self.assertEqual(got['q8']['max_ctx'], 40960)
-        self.assertEqual(got['f16']['max_ctx'], 36864)
+        # --kv never changes the keys: both runs report both formats' maxima, the same; it selects the format whose
+        # placement, need_mib and room the report describes (serve's start with that --kv)
+        self.assertEqual(got['q8']['max_ctx'], {'f16': 36864, 'q8': 40960})
+        self.assertEqual(got['f16']['max_ctx'], got['q8']['max_ctx'])
+        self.assertEqual((got['f16']['kv'], got['q8']['kv']), ('f16', 'q8'))
         self.assertEqual(got['q8']['need_mib'], need8(40960))
-        self.assertEqual(got['f16']['need_mib'], need16(got['f16']['max_ctx']))
+        self.assertEqual(got['f16']['need_mib'], need16(36864))
+        # a card that holds the Q8 cache at the file's context but not the F16 one at MIN_CTX: F16's slot is null (never the
+        # Q8 figure) and Q8's is 40,960 whatever --kv says; --kv q8 places and reports that card, the default --kv f16 query
+        # fails (no cards for the format serve would start with) and still carries the Q8 figure
+        room8 = (need8(40960)[0] + need16(arch.MIN_CTX)[0]) / 2
+        self.assertLess(need8(40960)[0], room8)
+        card8 = dict(card, line_mib=room8 + 1 + capacity.MARGIN_MIB + reserve + capacity.CACHE_WORK_MIB[0] + A.slack_mib(opt8))
+        for kv, code in (('q8', 0), ('f16', 1)):
+            stdout = io.StringIO()
+            with patch.object(host, 'gpus', return_value=[card8]), contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.fit_report([*argv, '--kv', kv, '--json']), code)
+            rep8 = json.loads(stdout.getvalue())
+            self.assertEqual(rep8['max_ctx'], {'f16': None, 'q8': 40960})
+            self.assertEqual((rep8['ok'], rep8['kv'], rep8['kv_formats']), (kv == 'q8', kv, ['f16', 'q8']))
+        self.assertTrue(rep8['error'])
+        stderr = io.StringIO()
+        with patch.object(host, 'gpus', return_value=[card8]), contextlib.redirect_stderr(stderr):
+            self.assertEqual(cli.fit_report(argv), 1)
+        self.assertIn('Q8: 40960 positions fit (--kv q8)', stderr.getvalue())
+        # the plain report names the selected cache and, with F16 selected, the Q8 figure next to it
+        stdout = io.StringIO()
+        with patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report(argv), 0)
+        self.assertIn('36864 positions fit with the F16 cache', stdout.getvalue())
+        self.assertIn('Q8: 40960', stdout.getvalue())
         caps, reserves = [(line - capacity.MARGIN_MIB, 1.0)], [reserve]
         with patch.object(capacity, 'caps_mib', return_value=caps), patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
             self.assertEqual(A.auto_max_ctx(opt8, log=lambda *a, **kw: None), 40960)          # (serve's runtime route: the same)
-            self.assertEqual(A.auto_max_ctx(opt16, log=lambda *a, **kw: None), got['f16']['max_ctx'])
+            self.assertEqual(A.auto_max_ctx(opt16, log=lambda *a, **kw: None), got['f16']['max_ctx']['f16'])
         # another model: refused in the recipe (fit reports no maximum), the message names what takes q8
         coder = SCRATCH / 'kv-coder.gguf'
         spec = importlib.util.spec_from_file_location('fit_gguf_fixture_kv', Path(__file__).with_name('test_arch.py'))
@@ -346,7 +379,7 @@ class ContextFit(unittest.TestCase):
         with patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.fit_report(['--model', str(coder), '--kv', 'q8', '--json']), 1)
         report = json.loads(stdout.getvalue())
-        self.assertIsNone(report['max_ctx'])
+        self.assertEqual(report['max_ctx'], {'f16': None, 'q8': None})
         self.assertIn("kv 'q8'", report['error'])
 
     def test_query_errors_have_no_invented_maximum_and_tp_drafting_needs_a_two_card_verify_object(self):
@@ -396,7 +429,9 @@ class ContextFit(unittest.TestCase):
         with patch.object(arch, 'of', return_value=A), \
              patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.fit_report(['--model', str(model), '--draft', 'off', '--json']), 0)
-        self.assertEqual(json.loads(stdout.getvalue())['max_ctx']['f16'], 4096)
+        report = json.loads(stdout.getvalue())
+        # an entry with no Q8 build: q8 is null and kv_formats says why (not "no cards hold it")
+        self.assertEqual((report['max_ctx'], report['kv'], report['kv_formats']), ({'f16': 4096, 'q8': None}, 'f16', ['f16']))
 
 
 if __name__ == '__main__':

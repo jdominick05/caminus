@@ -398,7 +398,14 @@ one format's key only: a server with the other format on the same cache director
 again) and leaves it on disk for a server of its own format. `caminus replay` builds a Q8 engine for a bundle whose key
 names the format.
 
-Capacity: `max_ctx auto`, the placement and `caminus fit` read the Q8 projection with `--kv q8`. One RX 7900 XTX
+Capacity: `max_ctx auto` and the placement read the Q8 projection with `--kv q8`. `caminus fit` reports both formats
+every time (`max_ctx = {f16, q8}`): each through its own drafter keep, placement and room (`serve.cli.fit_report`), `q8`
+null for an entry whose `kv_formats` lacks it or when no cards hold that format, so `--kv` never changes a figure.
+`--kv` picks the format whose cards, `need_mib` and `room_mib` the report gives, the one a serve with those options
+starts with; when no cards hold it the query fails (`ok: false`) and keeps the other format's figure (a refusal before
+placement, such as `--kv q8` on a model without it, gives none). Refusing `--kv` in fit would break the panel, which
+passes its advanced options to fit unchanged. The panel's model picker shows both figures (`panel/control.go` `fitRow`:
+the Q8 figure, "none fits", or "not offered", also next to a refusal). One RX 7900 XTX
 (display), nothing else on it: 40,960 positions with either cache (the file's context_length caps both; the room holds
 45,056 at F16 and 81,920 at Q8); with 1 GiB in use, F16 32,768 and Q8 40,960 (the table above; the same projection,
 recomputed on this branch). The cap stays until YaRN is applied.

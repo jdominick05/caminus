@@ -146,7 +146,9 @@ CLAUDE.md imports this file.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
   Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin
   below the guard distinct from the cache/display reserve; `tests/test_context_fit.py` checks parity at the fit limit
-  and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum.
+  and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum. `caminus fit`
+  reports `max_ctx` per KV format (`{f16, q8}`, each projected on its own, q8 null without a Q8 build); `--kv` selects
+  only which format's placement the report describes.
   `meta()` keeps the header's `rope.scaling.*` keys; every entry refuses a file that sets them (`Arch.rope_refusal`, from
   serve's `recipe` and replay): no engine applies a file's RoPE scaling yet, and such a file is never served unscaled.
   `rope_facts` holds each model card's native context and long-context recipe as data only.

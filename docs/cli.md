@@ -42,8 +42,14 @@ The report gives the largest native context that fits, the chosen cards, and pro
 It includes checkpoint slots and drafter buffers. An unavailable projection returns an error and no maximum.
 Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
 the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
-`--kv q8` reports the 8-bit cache's context for `qwen3-30b-a3b` (the same option as `caminus serve`); a side-by-side
-F16 / Q8 report and the panel's choices are separate work.
+`max_ctx` has one entry per KV cache format, `{"f16": N, "q8": N}`, each the largest context that fits with that cache.
+`q8` is `null` for a model without the 8-bit cache (`kv_formats` lists the formats a model has: only `qwen3-30b-a3b`,
+on one card or two, has `q8`) and when no cards hold it. For a model that always keeps its own cache (the Coder's
+8-bit rows), `f16` is that cache's figure. `--kv` never changes these figures: it picks the format a `caminus serve`
+with the same options would start with, and the cards, `need_mib` and `room_mib` describe that one (`kv` names it).
+When no cards hold that format the query fails (exit 1, `ok: false`) but still gives the other format's figure. A
+model without the 8-bit cache refuses `--kv q8` here as `caminus serve` does. The panel's model picker shows both
+figures.
 
 ## Qwen Code
 

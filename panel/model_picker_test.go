@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func pickerModel() camModel {
@@ -185,8 +187,8 @@ func TestModelPickerCustomDrafter(t *testing.T) {
 	}
 }
 
-// The picker shows serve's F16 maximum from `caminus fit --json` for the selected model, card count and drafter; the
-// Q8 slot stays pending until its projection exists (#82, #81). The panel does no memory math of its own.
+// The picker shows serve's F16 and Q8 maxima from `caminus fit --json` for the selected model, card count and drafter
+// (q8 null: "not offered" for a model without the 8-bit cache). The panel does no memory math of its own.
 func TestModelPickerFitRowFromServeProjection(t *testing.T) {
 	m := newCtl(newCtlCLI("caminus"), false, "")
 	mi := pickerModel()
@@ -208,13 +210,10 @@ func TestModelPickerFitRowFromServeProjection(t *testing.T) {
 		t.Fatal("the same choice is not read twice")
 	}
 	f16 := 40960
-	next, _ := m.update(fitMsg{key: key, v: fitInfo{OK: true, MaxCtx: struct {
-		F16 *int `json:"f16"`
-		Q8  *int `json:"q8"`
-	}{F16: &f16}}})
-	row := next.(ctl).fitRow(mi)
-	if !strings.Contains(row, "40960") || !strings.Contains(row, "Q8: pending") {
-		t.Fatalf("F16 maximum shown from fit: %q", row)
+	next, _ := m.update(fitMsg{key: key, v: fitInfo{OK: true, MaxCtx: fitCtx{F16: &f16}, KVFormats: []string{"f16"}}})
+	row := ansi.Strip(next.(ctl).fitRow(mi))
+	if !strings.Contains(row, "40960") || !strings.Contains(row, "Q8: not offered") {
+		t.Fatalf("F16 maximum shown from fit, Q8 not offered: %q", row)
 	}
 	// a drafter change is another choice with its own read
 	m2 := next.(ctl)
