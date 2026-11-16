@@ -218,9 +218,10 @@ def build_engine(opt, stats, log=print):
     try:
         m, pf, df, dr = A.build(opt, log)
         kv = _arch.kv_cache_of(A, m)
-        if bool(getattr(m, 'kv_format_id', None)) != _arch.kv_q8(opt):
-            # (what this compares: an own Q8 build (kv_format_id) exactly when --kv q8, so a q8 request never serves an F16
-            # engine and f16 never an own-Q8 one. An entry without the choice (Arch.kv_fixed: the Coder and the paused GGUF
+        if _arch.kv_q8_built(m) != _arch.kv_q8(opt):
+            # (what this compares: an own Q8 build (kv_format_id in KV_Q8_FORMATS; an F16 engine that names its own
+            # format is still F16) exactly when --kv q8, so a q8 request never serves an F16 engine and f16 never an
+            # own-Q8 one. An entry without the choice (Arch.kv_fixed: the Coder and the paused GGUF
             # engines, their own q8_0 cache) passes with --kv f16, explicit or default, and is served with that cache; kv,
             # read from the engine, is what /props and the log line report)
             raise RuntimeError(f'caminus serve: --kv {opt.get("kv") or "f16"} built an engine with a {kv["format"]} KV cache')

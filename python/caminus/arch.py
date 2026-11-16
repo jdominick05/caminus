@@ -545,6 +545,18 @@ def kv_q8(opt):
     return v == 'q8'
 
 
+# The own Q8_0 KV rows' format ids: an engine built with q8 names its rows by one (kv_format_id; the prompt cache keys
+# parks by it). A built engine holds a Q8 cache exactly when its id is one of these, so an F16 engine that names its own
+# format never reads as Q8 (tests/test_arch.py checks every kv_format_id an engine assigns is listed here).
+KV_Q8_FORMATS = ('q8_0-v1:qk-hadamard128:f16-rounded-v1',   # Qwen3-30B-A3B, one card and two (engine.q3moe_one)
+                 'q8_0-v1:qk-hadamard256:v-hadamard64-v1')  # the dense own-code line's staged Q8 (engine.q35_dense)
+
+
+def kv_q8_built(m):
+    """True when a built engine holds the own Q8_0 rows: its kv_format_id is one of KV_Q8_FORMATS"""
+    return getattr(m, 'kv_format_id', None) in KV_Q8_FORMATS
+
+
 def kv_q8_models():
     """the models --kv q8 serves, for the refusals: each alias whose entries list 'q8' in kv_formats, with its card counts
     ('qwen3-30b-a3b (one card or two)')"""
@@ -558,11 +570,12 @@ def kv_q8_models():
 
 def kv_cache_of(A, m):
     """the KV cache a built engine holds, for /props and /caminus/status: {'type': 'f16' | 'q8', 'format': the engine's
-    format id (kv_format_id: the own Q8_0 rows), 'q8_0' (the GGUF engines' own 8-bit cache, A.kv_fixed) or 'f16'}"""
+    format id (kv_format_id, one of KV_Q8_FORMATS: the own Q8_0 rows), 'q8_0' (the GGUF engines' own 8-bit cache,
+    A.kv_fixed) or 'f16' (an F16 engine's own kv_format_id when it names one)}"""
     fid = getattr(m, 'kv_format_id', None)
-    if fid: return {'type': 'q8', 'format': str(fid)}
+    if kv_q8_built(m): return {'type': 'q8', 'format': str(fid)}
     if A is not None and A.kv_fixed: return {'type': 'q8', 'format': str(A.kv_fixed)}
-    return {'type': 'f16', 'format': 'f16'}
+    return {'type': 'f16', 'format': str(fid) if fid else 'f16'}   # (an F16 engine may name its own format)
 
 
 class OneCard(Arch):

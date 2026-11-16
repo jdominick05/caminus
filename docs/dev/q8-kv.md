@@ -54,8 +54,10 @@ recovery or park; exit 75). No served option selects the dense line's Q8 objects
 
 The target cache is a byte tensor with `max_ctx + spec_T - 1` physical rows per attention layer (`Dense35Own.kv_rows`).
 Projections count that exact storage, the split-attention scratch and the four-byte error word.
-`Dense35Own.kv_format_id` names the format (`q8_0-v1:qk-hadamard256:v-hadamard64-v1`); the prompt cache's engine key
-carries any engine's `kv_format_id` (as for Qwen3-30B-A3B below). The checkpoint layout already divides by `kv_rows`.
+With `q8=True` only, `Dense35Own.kv_format_id` names the format (`q8_0-v1:qk-hadamard256:v-hadamard64-v1`); the prompt
+cache's engine key carries any engine's `kv_format_id` (as for Qwen3-30B-A3B below). An engine holds a Q8 cache when its
+id is one of `caminus.arch.KV_Q8_FORMATS` (`arch.kv_q8_built`: serve's startup check and `/props` read it), so an F16
+engine that names its own format still reads as F16. The checkpoint layout already divides by `kv_rows`.
 
 `k3_run` of each Q8 object beside its F16 object, from one build of this tree (`llvm-readelf --notes` fields;
 VGPR spills 0 and private segment 0 on all ten):

@@ -318,9 +318,41 @@ def main():
           and q8_default('q3moe_one.py', 'Q3MoEOne') is False and q8_default('q3moe_tp.py', 'Q3MoETP') is False
           and arch.kv_cache_of(arch.CODER, object()) == {'type': 'q8', 'format': 'q8_0'}
           and arch.kv_cache_of(arch.ARCHS['qwen3moe'], object()) == {'type': 'f16', 'format': 'f16'}
-          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id='q8_0-v1:x')) == {'type': 'q8', 'format': 'q8_0-v1:x'}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[0])) == {'type': 'q8', 'format': arch.KV_Q8_FORMATS[0]}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id='f16-v1:x')) == {'type': 'f16', 'format': 'f16-v1:x'}
+          and arch.kv_q8_built(types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[1])) and not arch.kv_q8_built(object())
+          and not arch.kv_q8_built(types.SimpleNamespace(kv_format_id='f16-v1:x'))
           and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two)',
           f'cli: --kv f16 (default) / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
+
+    # every kv_format_id an engine assigns is a Q8 id listed in arch.KV_Q8_FORMATS, under `if q8` (serve's startup check
+    # and /props read a built engine's cache from that list, so an id outside it would read as F16)
+    edir = os.path.join(ROOT, 'python', 'caminus', 'engine')
+    consts = {}
+    for fn in sorted(os.listdir(edir)):
+        if fn.endswith('.py'):
+            for n in ast.parse(open(os.path.join(edir, fn)).read()).body:
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant):
+                    for t in n.targets:
+                        if isinstance(t, ast.Name): consts[(fn, t.id)] = n.value.value
+    sites, bad = [], []
+    for fn in sorted(os.listdir(edir)):
+        if not fn.endswith('.py'): continue
+        tree = ast.parse(open(os.path.join(edir, fn)).read())
+        imported = {a_.asname or a_.name: n.module.split('.')[-1] + '.py' for n in ast.walk(tree)
+                    if isinstance(n, ast.ImportFrom) and n.module and n.level == 1 for a_ in n.names}
+        parent = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == 'kv_format_id' for t in node.targets):
+                v = node.value
+                val = (v.value if isinstance(v, ast.Constant) else consts.get((fn, v.id)) or consts.get((imported.get(v.id), v.id))
+                       if isinstance(v, ast.Name) else None)
+                up = parent.get(node)
+                gated = isinstance(up, ast.If) and isinstance(up.test, ast.Name) and up.test.id == 'q8' and node in up.body
+                sites.append((fn, node.lineno))
+                if val not in arch.KV_Q8_FORMATS or not gated: bad.append((fn, node.lineno, val, gated))
+    check(len(sites) >= 3 and not bad and len(set(arch.KV_Q8_FORMATS)) == len(arch.KV_Q8_FORMATS),
+          f'kv: every engine kv_format_id is a listed Q8 id set under `if q8` ({len(sites)} sites; outside: {bad})')
 
     # ---- the Coder's long-context mode (an explicit --max-ctx past its context_length) and --kv-host
     check(cli.parse([])['kv_host'] is False and cli.parse(['--kv-host'])['kv_host'] is True, 'cli: --kv-host (default off)')
