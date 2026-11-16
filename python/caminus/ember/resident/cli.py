@@ -25,6 +25,9 @@ from . import export as export_mod
 
 
 
+SPEED_FRESH_S = 120   # seconds a measured decode speed stays on the status line while a goal works
+
+
 def _online_s(pid):
     """how long the daemon has been running, in seconds (from /proc: its start against the boot clock); None when it
     is not running or not readable. A runtime update restarts the daemon, and the clock with it."""
@@ -637,6 +640,10 @@ def main(argv=None,stdin=None):
             measured=json.loads((home/'context.json').read_text()) if (home/'context.json').exists() else {}
             # Measured decode speed of the last streamed reply; absent until a reply reports usage.
             speed=json.loads((home/'throughput.json').read_text()) if (home/'throughput.json').exists() else {}
+            # a speed is shown while it is current: the last reply's figure stayed on the status line for hours of idle
+            busy=any(g['state'] in ('working','waiting_model') for g in store.status().get('goals',[]))
+            if not isinstance(speed,dict) or not busy or time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
+                speed={}
             # the thresholds in force: a paid brain (remote, or through the key relay) compacts early
             from .runtime import PAID_COMPACT
             from .model import LOOPBACK

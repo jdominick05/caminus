@@ -838,6 +838,19 @@ class Resident(unittest.TestCase):
             self.assertTrue(rt.store.pending_request(gid,'interrupt'),'the reply being written is dropped')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_status_line_shows_a_speed_only_while_it_is_current(self):
+        # the last reply's tok/s stayed on the status line for hours of idle
+        rt=Runtime(self.home)
+        try:gid=rt.store.enqueue('Make x.')
+        finally:rt.mail.close();rt.store.close()
+        (self.home/'throughput.json').write_text(json.dumps(dict(goal=gid,ts=time.time(),tokens=500,seconds=5,tps=100.0)))
+        self.assertIsNone(self.cmd('status')['tok_per_s'],'a queued goal is not working: no speed')
+        import sqlite3
+        db=sqlite3.connect(self.home/'agent.sqlite3');db.execute("UPDATE goals SET state='working' WHERE id=?",(gid,));db.commit();db.close()
+        self.assertEqual(self.cmd('status')['tok_per_s'],100.0,'working, and measured just now')
+        (self.home/'throughput.json').write_text(json.dumps(dict(goal=gid,ts=time.time()-600,tokens=500,seconds=5,tps=100.0)))
+        self.assertIsNone(self.cmd('status')['tok_per_s'],'ten minutes old: gone')
+
     def test_the_advisor_steps_in_before_a_watchdog_pause(self):
         rt=Runtime(self.home)
         try:
@@ -3572,6 +3585,7 @@ for line in sys.stdin:
             rt.run(target=gid)
             note=json.loads((self.home/'throughput.json').read_text())
             self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
+            rt.store.update(gid,state='working')         # (the status line shows a speed only while a goal works)
             self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
         finally:rt.mail.close();rt.store.close()
     def test_a_plan_first_goal_files_its_plan_and_waits_for_approval(self):
