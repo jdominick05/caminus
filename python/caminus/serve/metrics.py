@@ -410,7 +410,7 @@ def status(st, srv, cards, energy, hist=True):
         'server': {'model_alias': srv['model_alias'], 'model_path': srv['model_path'], 'n_ctx': srv['n_ctx'],
                    'requests_processing': srv['requests_processing'], 'requests_deferred': srv['requests_deferred'],
                    'queue_depth': srv['queue_depth'], 'loading': srv['loading'], 'speculative_types': srv['spec_types'],
-                   'requests': st.requests},
+                   'requests': st.requests, 'kv_cache': dict(srv.get('kv_cache') or {})},
         'llamacpp': {'prompt_tokens_total': st.prompt_tokens, 'prompt_tokens_cached_total': st.prompt_cached,
                      'prompt_seconds_total': round(st.prompt_us / 1e6, 6), 'tokens_predicted_total': st.predicted_tokens,
                      'tokens_predicted_seconds_total': round(st.predicted_us / 1e6, 6), 'n_decode_total': st.n_decode,

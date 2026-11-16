@@ -2,7 +2,7 @@
 prefill caminus.prefill.q3m.Q3MPrefill and the registry entry), on stand-ins for the torch.cuda and HIP calls (every tensor
 in host memory; nothing is launched), with the tiny synthetic file (tests/engine/tiny_q3m.py).
   - the module tables: k3_q3m_lean_kvq8 is k3_q3m_lean's Q8 build (same ops, pairs and lean dispatch check), its two-card
-    form k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py), no verify form, outside the installed runtime set and the dense line's Q8 table; its Engine has the error word after Sync
+    form k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py), no verify form, outside the dense line's Q8 table; in the installed runtime set with q3m_prefill_kvq8 (served: caminus serve --kv q8); its Engine has the error word after Sync
   - the wire layout the kernels index ([K blocks | V blocks], block (part, kv head g, block b) at (part M / 32 + 4 g + b)
     x 34 bytes): caminus.ref_kv.encode_q8_kv puts each block there, and a Q8 row is encode_q8_kv(hadamard128(K), V) of the
     F16 row's values (K decoded and rotated back within the blocks' rounding)
@@ -27,6 +27,12 @@ in host memory; nothing is launched), with the tiny synthetic file (tests/engine
   - the prompt cache: the checkpoint layout's row is the Q8 row; the engine key carries the KV format (F16 keys unchanged:
     no 'kv' entry), so a Q8 park never matches an F16 engine; the format id names the rotation, and a key with the
     earlier draft's unrotated id hashes differently (its rows never restore into this engine)
+  - the park round trip (caminus serve --kv q8; tests/engine/kv_park_rt.py): each layer's Q8 byte rows back from a
+    checkpoint slot, from a park in the same process and after a restart (a new engine and cache on the directory), byte for
+    byte, rows past the restored positions still zero; negative controls (two layers' reads swapped, one layer read a row
+    late) differ in exactly those layers (the late one also past the positions). An F16
+    server's park is not offered to a Q8 server and a Q8 park not to an F16 one (cold, rows untouched); the park's own
+    format restores it (the positive control)
   - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows; every
     other entry but the two-card qwen3moe one refuses opt['kv'] = 'q8' in build and auto_need before reading anything (never
     an F16 engine instead)
@@ -107,9 +113,9 @@ check(k3.Q3M_KV_Q8_BASE[Q8M] == 'k3_q3m_lean' and k3.Q3M_KV_Q8_OF['k3_q3m_lean']
       and Q8M in k3.Q3M_MODULES and k3.MODULE_CAPS[Q8M] == k3.MODULE_CAPS['k3_q3m_lean'],
       'k3_q3m_lean_kvq8: k3_q3m_lean\'s Q8 build, in the lean modules (the same ops whitelist and (op, format) pairs)')
 check(k3.Q3M_TP_OF.get(Q8M) == 'k3_q3m_lean_tp_kvq8' and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
-      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M not in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' not in kernels.RUNTIME_SET,
+      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' in kernels.RUNTIME_SET,
       'its two-card form is k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py); no verify form, not in the dense Q8 '
-      'table, not in the installed runtime set (not served)')
+      'table; it and q3m_prefill_kvq8 in the installed runtime set (served: caminus serve --kv q8)')
 E = k3.Engine(module=Q8M, grid=8, T=1)
 check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
       and k3.Engine(module='k3_q3m_lean', grid=8).kv_error is None,
@@ -308,6 +314,39 @@ m.kv_format_id = OLD_ID; ko = prompt.engine_key(m, pfk, build='fixture'); m.kv_f
 check(q3moe_one.KV_FORMAT_Q8 != OLD_ID and 'hadamard128' in q3moe_one.KV_FORMAT_Q8 and ko['tp'].get('kv') == OLD_ID
       and prompt.key_hash(ko) != prompt.key_hash(kq),
       f'the format id names the rotation ({q3moe_one.KV_FORMAT_Q8!r}); a key with the earlier unrotated id hashes differently: its rows never restore here')
+from caminus.cmd import replay
+check(replay.kv_of_key(kq) == 'q8' and replay.kv_of_key(kf_) == 'f16' and replay.kv_of_key(None) == 'f16'
+      and replay.kv_of_key(dict(tp=dict(kv='f16-v1:x'))) == 'f16'     # (an F16 engine's own format id: not a Q8 one)
+      and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kq))) is True
+      and arch.ARCHS['qwen3moe'].kv_check(dict(kv=replay.kv_of_key(kf_))) is False
+      and replay.cards_refusal(arch.ARCHS['qwen3moe'], kq, 'q3.gguf') is None,
+      'caminus replay: a bundle whose engine key is the Q8 engine\'s builds the entry with kv q8, an F16 key (no kv entry, or an id outside '
+      'arch.KV_Q8_FORMATS) with f16; a one-card key is not refused (cards_refusal)')
+
+# ---- the park round trip on the Q8 engine (caminus serve --kv q8: its byte rows through a checkpoint slot, a park and an unpark
+# after a restart), negative controls, and the format mismatch both ways (tests/engine/kv_park_rt.py) ---------------------------
+import kv_park_rt as RT
+RT_CTX = 256
+mk1 = lambda q8: (lambda: Q3MoEOne(P, max_ctx=RT_CTX, vram_check=False, link_keepalive=False, q8=q8))
+
+
+def rt_swap(w, eng):            # (layer 0's and layer 1's segments read into each other's rows)
+    if 'kv0.c0' in w and 'kv1.c0' in w: w['kv0.c0'], w['kv1.c0'] = w['kv1.c0'], w['kv0.c0']
+    return w
+
+
+def rt_late(w, eng):            # (layer 1 read one row late)
+    if 'kv1.c0' in w:
+        pb = prompt.Layout(eng).pb[0]; n = w['kv1.c0'][0].numel()
+        w['kv1.c0'] = [prompt._u8(eng.state[(0, 1, 'kv')])[pb:pb + n]]
+    return w
+
+
+check(prompt.Layout(mk1(True)()).pb == [rb], f'round trip engine: Q3MoEOne(q8=True) at max_ctx {RT_CTX}, a {rb}-byte Q8 row per layer')
+RT.round_trip(mk1(True), check, os.path.join(A.scratch, 'cache-q8'), info['V'], 'Q8 one card',
+              [('layers 0 and 1 swapped', rt_swap, [(0, 0), (0, 1)], []), ('layer 1 one row late', rt_late, [(0, 1)], [(0, 1)])])
+RT.mismatch(mk1(False), mk1(True), check, os.path.join(A.scratch, 'cache-f16-then-q8'), info['V'], 'an F16 park, a Q8 server (one card)')
+RT.mismatch(mk1(True), mk1(False), check, os.path.join(A.scratch, 'cache-q8-then-f16'), info['V'], 'a Q8 park, an F16 server (one card)')
 
 # ---- the registry ------------------------------------------------------------------------------------------------------------------
 check(arch.kv_q8({}) is False and arch.kv_q8({'kv': 'f16'}) is False and arch.kv_q8({'kv': 'q8'}) is True

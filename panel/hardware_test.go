@@ -13,14 +13,14 @@ func TestHardwareLines(t *testing.T) {
 	m.models = []camModel{{Name: "qwen3.6", Cards: 1, Present: true}}
 	m.ps = psInfo{Problems: []problemInfo{{Level: "error", Text: "no supported GPU: Caminus runs on AMD RX 7900 XTX / XT (gfx1100) cards"}}}
 	out := m.render()
-	if !strings.Contains(out, "HARDWARE") || !strings.Contains(out, "no supported GPU") {
+	if !strings.Contains(out, "hardware") || !strings.Contains(out, "no supported GPU") {
 		t.Fatalf("an error is shown in the basic layout:\n%s", out)
 	}
 	if m.hwError() == "" {
 		t.Fatal("hwError reports the error")
 	}
 	m.ps = psInfo{Problems: []problemInfo{{Level: "info", Text: "one supported card: the one-card models run; the two-card models need two"}}}
-	if strings.Contains(m.render(), "HARDWARE") {
+	if strings.Contains(m.render(), "hardware") {
 		t.Fatal("a note alone is not shown in the basic layout")
 	}
 	m.advanced = true

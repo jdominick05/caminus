@@ -75,7 +75,9 @@ check(paths and not missing, f'AGENTS.md: the {len(paths)} scripts its commands 
 
 ver = re.search(r"^__version__ = '([^']+)'", open(os.path.join(ROOT, 'python', 'caminus', '__init__.py'), encoding='utf-8').read(), re.M).group(1)
 shot = os.path.join(ROOT, 'docs', 'panel.svg')
-drawn = re.search(r'>control</text><text[^>]*>panel</text><text[^>]*>([^<]+)</text>', open(shot, encoding='utf-8').read()) if os.path.exists(shot) else None
+# the version is the header row's (y 13) version-shaped word: the old header put it after "control panel", the new one
+# ("CAMINUS · panel") draws it at the right edge
+drawn = re.search(r'<text x="[\d.]+" y="13"[^>]*>(\d+\.\d+\.\d+[^<]*)</text>', open(shot, encoding='utf-8').read()) if os.path.exists(shot) else None
 drawn = drawn.group(1) if drawn else None
 if 'dev' in ver:
     check(True, f'panel picture: version {ver} is a nightly\'s, not checked (the picture shows {drawn})')

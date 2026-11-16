@@ -32,6 +32,19 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   turns (206 against 240 tok/s) and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every
   prompt from 4K tokens on faster (1.09x at 4K, 1.29x at 40,768). The context stays 40,960
   tokens, the model's own limit. See [benchmarks](docs/dev/benchmarks.md).
+- **An 8-bit KV cache for Qwen3-30B-A3B.** `caminus start qwen3-30b-a3b --kv q8` (or `caminus serve --kv q8`), on one
+  card or two, stores the attention cache in 8-bit rows (the keys rotated first) at about half the memory per token of
+  context: 0.050 MiB instead of 0.094. F16 stays the default. The context stays the model's 40,960 tokens, but the
+  full context fits with more of the card in use: on an XTX with the desktop holding 1 GiB, 40,960 tokens with the
+  8-bit cache, 32,768 with F16 (projected). Decode is about as fast (engine-level: on one XTX 0.97x on short turns,
+  1.06x with a full context; on two cards within 2 %). By mean KL divergence it changes the output less than
+  llama.cpp's 8-bit cache changes llama.cpp's; top-1 agreement with the F16 cache is within one row of llama.cpp's
+  (one card at 16,384 tokens: 60 of 64 rows against its 61). A conversation
+  saved in one format is never restored by a server running the other. `/props` reports the cache
+  (`caminus.kv_cache`) and `caminus ps` shows it. `caminus fit --json` reports the context that fits with each cache
+  (`max_ctx.q8` next to `max_ctx.f16`, `null` for models without the 8-bit cache) and the panel's model picker shows
+  both; for the Coder, which keeps its own 8-bit cache (`kv_fixed`), it shows that cache's one figure. Every other
+  model refuses `--kv q8`. See [models](docs/models.md#the-8-bit-kv-cache-qwen3-30b-a3b).
 - **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
   code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
   - `--draft mtp` drafts 3 tokens with the model's own multi-token-prediction layer and verifies 4 tokens a pass; it

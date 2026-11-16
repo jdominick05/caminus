@@ -26,8 +26,33 @@ func fakeFitCLI(t *testing.T, stdout string, exit int) *ctlCLI {
 	return &ctlCLI{argv: []string{"sh", script}, timeout: 10 * time.Second}
 }
 
-// fitOK is serve's reply for a model that fits at 32768 positions at F16 (q8 is not projected yet).
-const fitOK = `{"native_ctx": 40960, "max_ctx": {"f16": 32768, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": [900.0], "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"]}`
+// fitOK is serve's reply for a model with the 8-bit cache that fits 32768 positions at F16 and its whole 40960 at Q8.
+const fitOK = `{"native_ctx": 40960, "max_ctx": {"f16": 32768, "q8": 40960}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": [900.0], "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"], "kv": "f16", "kv_formats": ["f16", "q8"]}`
+
+// fitF16Only is serve's reply for a model without the 8-bit cache: q8 null, kv_formats only f16.
+const fitF16Only = `{"native_ctx": 131072, "max_ctx": {"f16": 65536, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": [900.0], "ok": true, "arch": "qwen35-own", "draft": "off", "cards": ["0000:03:00.0"], "kv": "f16", "kv_formats": ["f16"]}`
+
+// fitQ8Only is serve's reply (with --kv q8) when only the 8-bit cache fits: f16 null, q8 a number.
+const fitQ8Only = `{"native_ctx": 40960, "max_ctx": {"f16": null, "q8": 40960}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": [900.0], "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"], "kv": "q8", "kv_formats": ["f16", "q8"]}`
+
+// fitRefusedQ8 is serve's reply (exit 1) when no cards hold the F16 cache but the 8-bit one fits: ok false, the Q8
+// figure kept.
+const fitRefusedQ8 = `{"ok": false, "max_ctx": {"f16": null, "q8": 40960}, "kv": "f16", "kv_formats": ["f16", "q8"], "error": "no card holds qwen3-30b-a3b"}`
+
+// fitQ8NoRoom is serve's reply when the model has the 8-bit cache but no cards hold it (q8 null, "q8" listed).
+const fitQ8NoRoom = `{"native_ctx": 40960, "max_ctx": {"f16": 32768, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": [900.0], "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"], "kv": "f16", "kv_formats": ["f16", "q8"]}`
+
+// fitFixed is serve's reply for the Coder, which always keeps its own q8_0 cache: kv_fixed names it, f16 is its figure,
+// q8 null and kv_formats only f16 (no --kv choice).
+const fitFixed = `{"native_ctx": 262144, "max_ctx": {"f16": 131072, "q8": null}, "step": 4096, "room_mib": [1000.0, 1000.0], "slot_mib": 4.0, "need_mib": [900.0, 900.0], "ok": true, "arch": "qwen4exp", "draft": "dflash", "cards": ["0000:03:00.0", "0000:06:00.0"], "kv": "f16", "kv_formats": ["f16"], "kv_fixed": "q8_0"}`
+
+// fitFixedNone is the Coder's reply when no context fits its cards, and fitFixedFail its refusal (exit 1) after the
+// recipe (kv_fixed is in it).
+const fitFixedNone = `{"native_ctx": 262144, "max_ctx": {"f16": null, "q8": null}, "step": 4096, "room_mib": [1000.0, 1000.0], "slot_mib": 4.0, "need_mib": null, "ok": true, "arch": "qwen4exp", "draft": "off", "cards": ["0000:03:00.0", "0000:06:00.0"], "kv": "f16", "kv_formats": ["f16"], "kv_fixed": "q8_0"}`
+const fitFixedFail = `{"ok": false, "max_ctx": {"f16": null, "q8": null}, "kv": "f16", "kv_formats": ["f16"], "kv_fixed": "q8_0", "error": "no two supported cards"}`
+
+// fitNeitherQ8 is the reply for a model with the 8-bit cache when neither cache fits: both null, kv_formats f16 and q8.
+const fitNeitherQ8 = `{"native_ctx": 40960, "max_ctx": {"f16": null, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": null, "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"], "kv": "f16", "kv_formats": ["f16", "q8"]}`
 
 // fitNone is serve's reply when no context fits: ok true, f16 null.
 const fitNone = `{"native_ctx": 40960, "max_ctx": {"f16": null, "q8": null}, "step": 4096, "room_mib": [1000.0], "slot_mib": 4.0, "need_mib": null, "ok": true, "arch": "qwen3moe", "draft": "off", "cards": ["0000:03:00.0"]}`
@@ -49,11 +74,67 @@ func TestFitRowRealPathOK(t *testing.T) {
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	m = settle(m, m.fitCmd(), 0)
 	row := ansi.Strip(m.fitRow(mi))
-	if !strings.Contains(row, "32768") || !strings.Contains(row, "Q8: pending") {
-		t.Fatalf("F16 maximum from the real reply: %q", row)
+	if !strings.Contains(row, "at F16: 32768 positions") || !strings.Contains(row, "Q8: 40960") {
+		t.Fatalf("F16 and Q8 maxima from the real reply: %q", row)
 	}
 	if strings.Contains(row, "reading") {
 		t.Fatalf("the row is stuck reading: %q", row)
+	}
+}
+
+// The Q8 part of the row for each reply shape: a figure, "none fits" (the model has the 8-bit cache, no room for it),
+// "not offered" (no 8-bit cache), a row that still shows Q8 when nothing fits at F16, one that says neither fits when
+// both were projected (and F16 only for a model without the 8-bit cache), and a refusal that keeps it.
+func TestFitRowQ8Shapes(t *testing.T) {
+	mi := presentPicker("/models/m.gguf")
+	for _, c := range []struct{ reply, want, not string }{
+		{fitF16Only, "at F16: 65536 positions · Q8: not offered", "none fits"},
+		{fitQ8NoRoom, "at F16: 32768 positions · Q8: none fits", "not offered"},
+		{fitQ8Only, "none at F16 · Q8: 40960 positions", "no context fits"},
+		{fitNeitherQ8, "no context fits at F16 or Q8 with this card count", "not offered"},
+		{fitNone, "no context fits at F16 with this card count", "or Q8"},
+		{fitRefusedQ8, "no card holds qwen3-30b-a3b · Q8: 40960 positions", "reading"},
+		{fitFail, "the DFlash GGUF does not exist", "Q8"},
+	} {
+		exit := 0
+		if c.reply == fitRefusedQ8 || c.reply == fitFail {
+			exit = 1
+		}
+		m := newCtl(fakeFitCLI(t, c.reply, exit), false, "")
+		m.models, m.loaded["models"] = []camModel{mi}, true
+		m = settle(m, m.fitCmd(), 0)
+		row := ansi.Strip(m.fitRow(mi))
+		if !strings.Contains(row, c.want) || strings.Contains(row, c.not) {
+			t.Fatalf("want %q (not %q) in %q", c.want, c.not, row)
+		}
+	}
+}
+
+// A model that keeps its own cache (kv_fixed: the Coder's q8_0) gets one figure, named as its own 8-bit cache: never
+// "at F16" and no Q8 part ("not offered" would be wrong: its cache is the 8-bit one).
+func TestFitRowOwnCache(t *testing.T) {
+	mi := presentPicker("/models/coder.gguf")
+	for _, c := range []struct {
+		reply string
+		exit  int
+		want  string
+	}{
+		{fitFixed, 0, "context that fits (its own 8-bit cache): 131072 positions"},
+		{fitFixedNone, 0, "context that fits (its own 8-bit cache): none with this card count"},
+		{fitFixedFail, 1, "context that fits (its own 8-bit cache): no two supported cards"},
+	} {
+		m := newCtl(fakeFitCLI(t, c.reply, c.exit), false, "")
+		m.models, m.loaded["models"] = []camModel{mi}, true
+		m = settle(m, m.fitCmd(), 0)
+		row := ansi.Strip(m.fitRow(mi))
+		if !strings.Contains(row, c.want) {
+			t.Fatalf("want %q in %q", c.want, row)
+		}
+		for _, not := range []string{"F16", "Q8", "not offered", "none fits", "reading"} {
+			if strings.Contains(row, not) {
+				t.Fatalf("%q in the own-cache row %q", not, row)
+			}
+		}
 	}
 }
 

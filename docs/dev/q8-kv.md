@@ -1,9 +1,12 @@
-# Own Q8 KV cache path (staged)
+# Own Q8 KV cache path
 
-The own-code dense line has separate `*_kvq8` persistent objects. They keep the F16 objects and the weight-format
-selection unchanged. `Dense35Own(..., q8=True)` is an internal bring-up path; the server and panel expose no Q8
-selector. Batched prefill refuses a Q8 engine until its matching implementation lands.
-Device correctness, model accuracy and speed are not yet verified for these objects.
+Qwen3-30B-A3B's Q8 KV cache is served (`caminus serve --kv q8`, one card or two: [below](#serving-qwen3-30b-a3b-with---kv-q8)).
+The dense line's is staged: the own-code dense line has separate `*_kvq8` persistent objects. They keep the F16 objects
+and the weight-format selection unchanged. `Dense35Own(..., q8=True)` is an internal bring-up path: `caminus serve --kv
+q8` refuses the dense models at startup, before any card is picked. The panel's advanced layout lists `--kv` for every
+model, as it lists every serve option, and its values are saved: a `q8` set there goes to every later start from that
+layout, and a dense model or the Coder started with it refuses to start (nothing is ignored silently). Batched prefill refuses a Q8 engine until its matching implementation
+lands. Device correctness, model accuracy and speed are not yet verified for these objects.
 
 ## Objects
 
@@ -45,14 +48,16 @@ callers must wait and call `check_kv_error()` themselves. Dense decode and verif
 logits use. A refusal marks the engine permanently broken and raises `caminus.errors.InvalidKVEncoding`; reset keeps
 that state. `mark_broken` skips the weight checksum for it: the refusal names the cache, and the check reads every
 weight. `InvalidKVEncoding` is a `NumericalFailure`, so the server's terminal policy applies (no retry, reset,
-recovery or park; exit 75). No served option selects Q8 yet.
+recovery or park; exit 75). No served option selects the dense line's Q8 objects.
 
 ## Memory
 
 The target cache is a byte tensor with `max_ctx + spec_T - 1` physical rows per attention layer (`Dense35Own.kv_rows`).
 Projections count that exact storage, the split-attention scratch and the four-byte error word.
-`Dense35Own.kv_format_id` names the format (`q8_0-v1:qk-hadamard256:v-hadamard64-v1`) for a checkpoint key; the
-prompt cache does not read it yet. The checkpoint layout already divides by `kv_rows`.
+With `q8=True` only, `Dense35Own.kv_format_id` names the format (`q8_0-v1:qk-hadamard256:v-hadamard64-v1`); the prompt
+cache's engine key carries any engine's `kv_format_id` (as for Qwen3-30B-A3B below). An engine holds a Q8 cache when its
+id is one of `caminus.arch.KV_Q8_FORMATS` (`arch.kv_q8_built`: serve's startup check and `/props` read it), so an F16
+engine that names its own format still reads as F16. The checkpoint layout already divides by `kv_rows`.
 
 `k3_run` of each Q8 object beside its F16 object, from one build of this tree (`llvm-readelf --notes` fields;
 VGPR spills 0 and private segment 0 on all ten):
@@ -124,8 +129,8 @@ speed, matching prefill, cache park/restore, the GSQ verify objects and two card
 `Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to
 `k3_q3m_lean`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
 `q3p_qk_rope_q8` and `q3p_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
-`q3m_prefill`. Not served: no option selects it and neither object is in the installed runtime set. The registry's
-projection takes `opt['kv'] = 'q8'` (`arch.kv_q8`) so the later `--kv q8` switch only has to set it.
+`q3m_prefill`. Served: `caminus serve --kv q8` (or `caminus start --kv q8`) sets `opt['kv']`, which the registry's
+projection and build read (`Arch.kv_check`, `arch.kv_q8`); both objects are in the installed runtime set.
 
 Format: the same wire codec and row layout as the dense line (`kernels/own_kv_codec.h`, `caminus.ref_kv`), with K
 rotated (`Q3MoEOne.kv_format_id` = `q8_0-v1:qk-hadamard128:f16-rounded-v1`). Each block encodes the fp16-rounded values
@@ -206,8 +211,24 @@ VGPRs stayed at 96, with 0 VGPR spills, in every row (measured before the rotati
 atts 19, the shipped pair).
 The same add_rms16 pin on the F16 object gives 33, measured but not applied: `k3_q3m_lean` keeps its code. So, like for
 like, the Q8 attention adds no spilled scalar. The speed A/B below compares the shipped F16 object (53) with the Q8
-object (19), so the pins are part of the difference it measures. The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs,
-`q3p_attn_q8` 226 (F16: 25 and 223), no spills; the rotation left both counts as they were.
+object (19), so the pins could be part of the difference it measures; the control below shows they are not.
+
+Speed (decode, engine level, `benchmarks/q3moe_depth.py` on one RX 7900 XTX, tok/s at positions 8 / 4,096 / 16,384 /
+40,900, three interleaved rounds, 2026-11-16):
+
+| Object | 8 | 4,096 | 16,384 | 40,900 |
+|---|---|---|---|---|
+| `k3_q3m_lean` (F16, shipped) | 246.4 | 210.5 | 159.3 | 110.0 |
+| the F16 object with the same scalar pins (a measurement build) | 247.2 | 211.7 | 159.4 | 109.9 |
+| `k3_q3m_lean_kvq8` (Q8) | 239.2 | 210.5 | 164.1 | 117.0 |
+
+Q8 against the shipped F16 object: 0.97x at 8, 1.00x at 4,096, 1.03x at 16,384, 1.06x at 40,900. The pinned F16 build
+gave logits bit for bit the shipped object's and the same speed (at most 1.2 tok/s apart, at 4,096 positions), so the
+gain at depth is the format's (half the KV bytes read per position), not the pins'; at 8 positions Q8 pays its encode,
+rotation and decode with nothing to save yet. The pins were not shipped on the F16 object: it keeps its code.
+
+The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs, `q3p_attn_q8` 226 (F16: 25 and 223), no spills; the rotation left both
+counts as they were.
 
 Gates (a non-display card first):
 
@@ -254,7 +275,8 @@ a plain `(_Float16)fmaf(...)` let the backend fuse it into one `v_fma_mix*_f16` 
 disagrees with the two-step rounding on about 6e-5 of values, and the transform spreads each such ulp over the head. The rotated objects passed on a device on 2026-11-16: the op test, the one-card decode and the prefill on the XT, and on
 the XTX the G-model gates: mean KLD against the reference 1.15e-3 (128 rows), 3.66e-3 (16,384), 2.35e-3 (40,896), and
 against our own F16 cache 1.19e-3 / 3.57e-3 / 1.87e-3, each below llama.cpp's own F16 to q8_0 cost (4.17e-3 / 6.63e-3 /
-4.24e-3). The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
+4.24e-3); top-1 agreement with our F16 cache 100 % / 93.8 % (60 of 64 rows) / 100 %, llama.cpp's with its own F16 cache
+97.4 % / 95.3 % / 95.3 % (at 16,384 one row behind it: within the one-row bar). The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
 40,896 positions), and failed the 128-token G-model gate: mean KLD 5.40e-3 against float64 (llama.cpp's q8_0 KV
 3.68e-3) and 5.53e-3 against our F16 cache (llama.cpp's own F16 to q8_0 cost 4.17e-3); the rotation is the answer to
 that row.
@@ -267,9 +289,9 @@ the one-card Q8 module's two defines. `k3.Q3M_KV_Q8_BASE` maps it to `k3_q3m_lea
 `k3_q3m_lean_kvq8` to it, so it takes the two-card modules' ops, pairs, push-only check and 128 attention splits, and
 the Q8 modules' error word and byte cache. Its batched prefill `Q3MPrefillTP` runs the one-card Q8 kernels
 (`q3m_prefill_kvq8`'s `q3p_qk_rope_q8` and `q3p_attn_q8`, both of which take the kv head count) at each card's local
-shapes; there is no new prefill object. Not served: no option selects it, and neither the module nor
-`q3m_prefill_kvq8` is in the installed runtime set. The registry's `qwen3moe-tp` entry takes `opt['kv'] = 'q8'`
-(`kv_formats`), so its projection, checkpoint slots and build follow the later `--kv q8` switch.
+shapes; there is no new prefill object. Served: `caminus serve --cards 2 --kv q8`; the registry's `qwen3moe-tp` entry
+takes `opt['kv'] = 'q8'` (`kv_formats`), so its projection, checkpoint slots and build follow it, and the module (with
+`q3m_prefill_kvq8`) is in the installed runtime set.
 
 Format: the one-card engine's (`q8_0-v1:qk-hadamard128:f16-rounded-v1`, the engine key's `kv`), over each card's own
 kv heads: a card's row is `encode_q8_kv(hadamard128(K), V)` of the halves the F16 two-card engine stores for its heads,
@@ -337,7 +359,9 @@ CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I benchmarks/q3moe_prefil
 
 CPU: `tests/engine/test_q3moe_tp_kvq8_cpu.py`. It covers the module tables, the engine's caches, tapes and projection,
 the refusals, a refused block on one card with a stalled wait on the other, the prefill's launches and its per-card
-words, the engine key and checkpoint layout, and the registry.Device results, 2026-11-16 (XTX + XT, upload log on):
+words, the engine key and checkpoint layout, and the registry.
+
+Device results, 2026-11-16 (XTX + XT, upload log on):
 - **The new object on the XT alone.** The two-card op test passes: more than 64 splits, 16/2 heads, positions to 8,000. The whole k3_run on one card is bitwise identical to `k3_q3m_lean_kvq8`.
 - **Both cards, tiny model and real file.**
   - Logits are bitwise identical at K3_PER_WGP 3, 6 and 7 over 4,200 passes.
@@ -359,3 +383,69 @@ Speed on two cards, three interleaved rounds, medians:
 - Prefill: 7,072 / 7,098 at 4,096 and 3,558 / 3,543 at 32,768.
 
 On two cards, Q8 buys memory, not speed. Each card already reads only its own two kv heads' cache, so the cache is a smaller share of each pass than on one card.
+
+## Serving Qwen3-30B-A3B with `--kv q8`
+
+`caminus serve --kv {f16,q8}` (default `f16`; `caminus start --kv`, `caminus fit --kv` and a config file's `kv` key take
+the same values) sets `opt['kv']`. `serve.cli.recipe` calls `Arch.kv_check` before any placement: only the two qwen3moe
+entries list `q8` in `kv_formats` (one card: `Q3MoEOne(q8=True)`, two: `Q3MoETP(q8=True)` with `Q3MPrefillTP`'s Q8 path),
+and every other model is refused with a message naming the model that takes it. `f16` selects nothing on an entry without
+the choice: the dense own-code line keeps its F16 cache, the GGUF engines (the Coder, the paused ones) their own 8-bit
+q8_0 cache (`Arch.kv_fixed`). After the build, the server checks that the engine holds what was asked (a `kv_format_id`
+in `arch.KV_Q8_FORMATS` exactly when `--kv q8`: `arch.kv_q8_built`) and reports what it holds in `/props`
+(`caminus.kv_cache = {type, format}`) and `/caminus/status` (`server.kv_cache`), from `arch.kv_cache_of`; `caminus ps`
+shows the type.
+
+Parks: the engine key carries the format (`tp.kv`) and the module, so the prompt cache's disk store lists a park under
+one format's key only: a server with the other format on the same cache directory is never offered it (the prompt is read
+again) and leaves it on disk for a server of its own format. `caminus replay` builds a Q8 engine for a one-card bundle
+whose key names the format. A bundle from a `--cards 2` server (Q8 or F16) is refused with a message: replay does not
+rebuild the two-card entry's split and placement yet, so it would build the one-card engine and fail the key check.
+
+Capacity: `max_ctx auto` and the placement read the Q8 projection with `--kv q8`. `caminus fit` reports both formats
+every time (`max_ctx = {f16, q8}`): each through its own drafter keep, placement and room (`serve.cli.fit_report`), `q8`
+null for an entry whose `kv_formats` lacks it or when no cards hold that format, so `--kv` never changes a figure.
+`--kv` picks the format whose cards, `need_mib` and `room_mib` the report gives, the one a serve with those options
+starts with; when no cards hold it the query fails (`ok: false`) and keeps the other format's figure (a refusal before
+placement, such as `--kv q8` on a model without it, gives none). Refusing `--kv` in fit would break the panel, which
+passes its advanced options to fit unchanged. The panel's model picker shows both figures (`panel/control.go` `fitRow`:
+the Q8 figure, "none fits", or "not offered", also next to a refusal; for an entry with `kv_fixed`, the Coder, the
+one figure of its own 8-bit cache, with no Q8 part). One RX 7900 XTX
+(display), nothing else on it: 40,960 positions with either cache (the file's context_length caps both; the room holds
+45,056 at F16 and 81,920 at Q8); with 1 GiB in use, F16 32,768 and Q8 40,960 (the table above; the same projection,
+recomputed on this branch). The cap stays until YaRN is applied.
+
+The three Q8 objects (`k3_q3m_lean_kvq8`, `k3_q3m_lean_tp_kvq8`, `q3m_prefill_kvq8`) are in the installed runtime set
+(`caminus.device.kernels.Q3_OWN`; `tests/packaging/test_runtime_kernels.py` selects them through the real module
+property and prefill constructors).
+
+CPU: `tests/engine/test_q3moe_kvq8_cpu.py` and `tests/engine/test_q3moe_tp_kvq8_cpu.py` run the server's park path on
+the Q8 engines' byte rows (`tests/engine/kv_park_rt.py`: a checkpoint slot, a park, an unpark after a restart, byte for
+byte per card and layer; misdirected reads as negative controls) and the mismatch both ways (an F16 park not offered to a
+Q8 server and the reverse, with the park's own format restoring it as the positive control);
+`tests/test_context_fit.py`, `tests/test_arch.py` and `tests/cmd/test_manage.py` cover the switch, the refusals and the
+projection.
+
+Served gates (one card on the XTX, then both cards; each under the guard, each with a fresh scratch directory: the
+prompts are fixed, so a park left by an earlier run would be restored and mask the result):
+
+```bash
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR1 --card 0 --kv q8 \
+    --block-imports gguf,tokenizers --restart
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR2 --card 0,1 \
+    --cards 2 --kv q8 --block-imports gguf,tokenizers --restart
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR3 --card 0 --restart --restart-kv q8
+```
+
+`--kv q8` checks `/props`' cache and the code objects the server loaded (`tools/serve_smoke1.py kv_objects`): a Q8
+decode module and not its F16 base, and `q3m_prefill_kvq8` beside `q3m_prefill`; `--restart` restores the long prompt
+from the Q8 park, and the restarted server's objects are checked the same way. The third run starts F16, parks, and
+restarts with `--kv q8` on the same directories: the F16 parks must be on disk before the restart and still there after
+it, the long prompt must come back from cold (the F16 park is not offered), and the second server's objects must be the
+Q8 ones.
+
+All three passed on 2026-11-16 (on this branch before its last rebase, which changed only the fit JSON, the panel row
+and tests): one XTX with `--kv q8 --restart`, 20 / 20 (decode 228 tok/s short, 197 after a 6,587-token prompt read at
+5,353 tok/s; the restart served the prompt from the Q8 park); XTX + XT with `--kv q8 --restart`, 20 / 20 (197 tok/s
+short, 177 after the prompt read at 5,882 tok/s; the restart served it from the park); one XTX, F16 then `--restart-kv
+q8`, 19 / 19 (the Q8 server read the long prompt cold, cache 0, and the F16 park was still on disk after it).

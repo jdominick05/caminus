@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 jdominick05
+
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestResidentGoalCommandUsesStdin(t *testing.T) {
+	m := emberModel{cli: []string{"caminus"}, agentName: "resident"}
+	c := residentCommand(m, []string{"send", "resident", "--stdin", "--json"}, "goal with $(shell) and secrets")
+	if strings.Contains(strings.Join(c.Args, " "), "secrets") || c.Stdin == nil {
+		t.Fatalf("goal leaked into argv: %v", c.Args)
+	}
+	if strings.Join(c.Args, " ") != "caminus ember agent send resident --stdin --json" {
+		t.Fatal(c.Args)
+	}
+}
+
+// The chat's /steer is the one steering path: it redirects the targeted goal, and the text travels on stdin so
+// shell syntax in it stays literal. (This replaces the tests of the removed agent page's steering editor.)
+func TestChatSteerTargetsGoalAndUsesStdin(t *testing.T) {
+	dir := t.TempDir()
+	argsPath, inputPath := filepath.Join(dir, "args"), filepath.Join(dir, "input")
+	cli := filepath.Join(dir, "fake-cli")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$STEER_ARGS\"\ncat > \"$STEER_INPUT\"\nprintf '{\"queued\":true}\\n'\n"
+	if err := os.WriteFile(cli, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEER_ARGS", argsPath)
+	t.Setenv("STEER_INPUT", inputPath)
+	m := emberModel{cli: []string{cli}, agentName: "resident", resident: residentStatus{Goals: []residentGoal{{ID: "original", State: "working"}}}}
+	m.initChat()
+	m.chat.target = "original"
+	message := "Try another approach; literal $(text) stays in stdin."
+	_, cmd := m.chatSlash("/steer " + message)
+	if cmd == nil {
+		t.Fatal("/steer sent nothing")
+	}
+	if result := cmd().(residentActionMsg); strings.Contains(result.text, "error") {
+		t.Fatal(result.text)
+	}
+	args, _ := os.ReadFile(argsPath)
+	input, _ := os.ReadFile(inputPath)
+	if string(args) != "ember\nagent\nsend\nresident\n--goal-id\noriginal\n--steer\n--stdin\n--json\n" || string(input) != message {
+		t.Fatalf("wrong steering destination or input: %q / %q", args, input)
+	}
+	m.chat.target = ""
+	if _, cmd := m.chatSlash("/steer something"); cmd != nil {
+		t.Fatal("/steer without a target goal must not send")
+	}
+	if strings.ContainsRune(residentText("observed\x1b[2Joutput"), '\x1b') {
+		t.Fatal("agent terminal escape retained")
+	}
+}
+
+func TestBridgeRejectsPathIDsAndIgnoresPredictableTempSymlink(t *testing.T) {
+	root := t.TempDir()
+	bridge := filepath.Join(root, "bridge")
+	os.MkdirAll(filepath.Join(bridge, "res"), 0o770)
+	target := filepath.Join(root, "protected")
+	os.WriteFile(target, []byte("unchanged"), 0o600)
+	writeReq(t, bridge, "ok", "id -u", 1)
+	os.Symlink(target, filepath.Join(bridge, "res", "ok.json.tmp"))
+	if err := writeAnswer(bridge, "human", emberReq{ID: "../protected"}, "denied", "", nil, "", "", ""); err == nil {
+		t.Fatal("path ID accepted")
+	}
+	if err := writeAnswer(bridge, "human", emberReq{ID: "ok"}, "denied", "", nil, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	value, _ := os.ReadFile(target)
+	if string(value) != "unchanged" {
+		t.Fatal("symlink target overwritten")
+	}
+	info, _ := os.Stat(filepath.Join(bridge, "res", "ok.json"))
+	if info.Mode().Perm() != 0o660 {
+		t.Fatalf("bridge mode: %o", info.Mode().Perm())
+	}
+}
+
+func TestSSHWarningDoesNotBecomeProtocolOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf 'ControlSocket already exists; disabling multiplexing\\n' >&2\nprintf 'agent\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m := emberModel{user: "agent", key: "fixture"}
+	msg := probeCmd(m)().(probeMsg)
+	if !msg.ok || msg.err != "" {
+		t.Fatalf("warning broke successful probe: %+v", msg)
+	}
+	output, err := sshOutput(sshCmd(m, "jobs", "fixture"))
+	if err != nil || output != "agent\n" {
+		t.Fatalf("diagnostic entered protocol output: %q %v", output, err)
+	}
+}
+
+func TestPanelCallsAreBoundedSoAStallCannotHangTheComposer(t *testing.T) {
+	m := chatFixture(t)
+	m.cli = []string{"/bin/true"}
+	if cmd := residentCommand(m, []string{"status", "resident", "--json"}, ""); cmd == nil || cmd.Cancel == nil {
+		t.Fatal("a resident CLI call must carry a deadline")
+	}
+	m.user, m.key = "resident", "/nonexistent-key"
+	if cmd := sshCmd(m, "jobs", "true"); cmd.Cancel == nil {
+		t.Fatal("an SSH poll must carry a deadline")
+	}
+}
+
+func TestACrashShowsItsExceptionNotTheTracebackHeader(t *testing.T) {
+	out := []byte("Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n    import y\nModuleNotFoundError: No module named 'y'\n")
+	if got := cliError(out); got != "agent runtime error: ModuleNotFoundError: No module named 'y'" {
+		t.Fatalf("the exception, not the header: %q", got)
+	}
+	if got := cliError([]byte("error: no agent named x\n")); got != "error: no agent named x" {
+		t.Fatalf("plain errors pass as they are: %q", got)
+	}
+}

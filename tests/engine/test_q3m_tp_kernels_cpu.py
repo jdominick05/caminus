@@ -95,8 +95,10 @@ check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS['k3_q3m_le
       'capabilities: the lean module\'s plus OWN_SLOT_SUM; ops: the lean set plus OP_XCHG and OP_OWN_SLOT_SUM')
 from caminus.device import kernels as dk
 shipped = set(dk.K3) | set(getattr(dk, 'DENSE35_OWN', ())) | {n for g in getattr(dk, 'PREFILL', ()) for n in (g if isinstance(g, tuple) else (g,))}
-check('k3_q3m_lean_tp' in dk.RUNTIME_SET and not {'k3_q3m_lean_tp_trace', 'k3_q3m_lean_tp_kvq8'} & (shipped | set(dk.RUNTIME_SET)),
-      'the served two-card module ships in the installed runtime set; its trace build and its Q8 KV build (not served) do not')
+check('k3_q3m_lean_tp' in dk.RUNTIME_SET and 'k3_q3m_lean_tp_kvq8' in dk.RUNTIME_SET
+      and not {'k3_q3m_lean_tp_trace'} & (shipped | set(dk.RUNTIME_SET)),
+      'the served two-card modules (F16, and the Q8 KV build: caminus serve --cards 2 --kv q8) ship in the installed runtime set; '
+      'its trace build does not')
 
 # stand-ins: the engine's torch.cuda calls on host memory (no device is opened, nothing launches)
 _zeros, _to, _tensor = torch.zeros, torch.Tensor.to, torch.tensor

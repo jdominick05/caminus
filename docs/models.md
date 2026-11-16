@@ -81,6 +81,23 @@ and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read 
 40,960 tokens, the model's own limit, so the second card buys speed with a long context, not more context.
 No drafter on one card or two.
 
+### The 8-bit KV cache (`qwen3-30b-a3b`)
+
+`qwen3-30b-a3b` also runs with an 8-bit attention cache: `caminus start qwen3-30b-a3b --kv q8` (or `caminus serve --kv
+q8`), on one card or two (`--cards 2 --kv q8`). F16 stays the default. The cache holds Q8_0 rows (the keys rotated
+first, which makes them easier to quantize) and takes 0.050 MiB per token of context instead of 0.094 (on two cards
+half of that on each card). The context stays 40,960 tokens, the model's own limit, but the full context fits with
+more of the card in use: on an XTX with the desktop holding 1 GiB, F16 fits 32,768 tokens and the 8-bit cache 40,960
+(projected). Decode runs at about the same speed: on one XTX 0.97x on short turns and 1.06x with a full context,
+where reading half the bytes pays off; on two cards within 2 % at every depth (each card already reads only its half
+of the cache). Both engine-level; served numbers come with the release benchmarks. By mean KL divergence it changes
+the output less than llama.cpp's own 8-bit cache changes llama.cpp's: measured on one XTX and on an XTX + XT at 128,
+16,384 and 40,896 tokens, the mean KL divergence from the F16 cache is 1.2e-3 to 3.6e-3, llama.cpp's from its F16
+cache 4.2e-3 to 6.6e-3 ([details](dev/q8-kv.md)). Top-1 agreement with the F16 cache is within one row of
+llama.cpp's: on one card at 16,384 tokens 60 of 64 rows against its 61. A conversation the server saved in one format is never restored by a server running
+the other; switching reads it again. The other models refuse `--kv q8`: the dense 27B models keep their F16 cache and
+the Coder its own 8-bit one.
+
 ## The names your tools use
 
 Each server answers to its model id and to the same id with `-nothink` (no thinking before answering):
