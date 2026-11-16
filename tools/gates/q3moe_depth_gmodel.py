@@ -12,7 +12,8 @@ overlap): positions [0, N - M) prefilled on both cards, then the M scored one-to
 With --decode-only: all N positions as one-token two-card passes (decode-then-decode, against the same bound). The replicas
 are checked after the prefill (its residual rows and routing ids) and after every token (the residual and every layer's
 router ids); any difference, or a bailed pass, fails.
---kv q8 (one card): the engine's KV cache as Q8_0 rows (Q3MoEOne(q8=True), its prefill Q3MPrefill's Q8 path); the same scores and the
+--kv q8: the engine's KV cache as Q8_0 rows (Q3MoEOne(q8=True), its prefill Q3MPrefill's Q8 path; with --cards 2 Q3MoETP(q8=True)
+and Q3MPrefillTP's Q8 path, the --against reference a --cards 2 F16 run's saved logits); the same scores and the
 same rule against the --llama rows given (llama.cpp's F16-KV rows are the stricter bound; rows made with 'kv q8_0' in the job
 file the like-for-like one: --llama-kv names which, for the printout). --save-logits PATH writes this run's scored logits
 (f32 [rows, vocab]); --against PATH (another run's saved logits: the F16 cache's) gates KLD(that || this) and top-1 agreement
@@ -48,7 +49,6 @@ if __name__ == '__main__':
     ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('--llama-kv', default='f16', choices=('f16', 'q8_0'))
     kv_against.add_args(ap)
     A = ap.parse_args(); kv_against.check_args(ap, A)
-    if A.kv == 'q8' and A.cards != 1: ap.error('--kv q8: one card only (the two-card Q8 objects are later work)')
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']; N, M = len(seq), len(ref)
     if A.tokens_out:
         open(A.tokens_out, 'w').write(' '.join(map(str, seq)) + '\n'); print(f'tokens -> {A.tokens_out}'); sys.exit(0)
@@ -59,7 +59,8 @@ if __name__ == '__main__':
         from caminus.prefill import q3m_tp
         print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), f'N {N}, the last {M} positions', flush=True)
         extra = (0.0, 0.0) if A.decode_only else q3m_tp.need_tp_mib(q3m_tp.tp_shapes(A.gguf), 2048)
-        eng = Q3MoETP(A.gguf, max_ctx=N + 8, module=A.module, vram_extra_mib=extra)
+        eng = Q3MoETP(A.gguf, max_ctx=N + 8, module=A.module, vram_extra_mib=extra, q8=A.kv == 'q8')
+        print(f'two cards: module {eng.module}, KV {getattr(eng, "kv_format_id", "f16")}', flush=True)
         rep_bad, rows = [], []
         if A.decode_only:
             print(f'two cards: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}; decode only: '

@@ -327,17 +327,22 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         headers['anthropic-beta'] = beta
                 conn.request('POST', path, raw, headers)
                 up = conn.getresponse()
-                self.send_response(up.status)
-                for name in ('Content-Type', 'retry-after', 'request-id', 'x-request-id'):
-                    if up.getheader(name):
-                        self.send_header(name, up.getheader(name))
-                self.send_header('Connection', 'close')
-                self.end_headers()
+                # A client that hangs up (an interrupt, a steer and /advisor end a reply this way) never skips the
+                # ledger, on any path: before the headers, mid-stream or on a whole reply. Upstream already billed it.
+                client_gone, streamed, final = False, 0, False   # streamed: output characters sent; final: the count came
+                try:
+                    self.send_response(up.status)
+                    for name in ('Content-Type', 'retry-after', 'request-id', 'x-request-id'):
+                        if up.getheader(name):
+                            self.send_header(name, up.getheader(name))
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                except OSError:
+                    client_gone = True
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
                 rid = up.getheader('request-id') or up.getheader('x-request-id')
-                client_gone, streamed, final = False, 0, False   # streamed: output characters sent; final: the count came
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
-                    while True:
+                    while not client_gone:
                         line = up.readline()
                         if not line:
                             break
@@ -345,10 +350,9 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                             self.wfile.write(line)
                             self.wfile.flush()
                         except OSError:
-                            # the client hung up mid-stream: stop (closing upstream ends the generation), but still
-                            # record the spend below; it skipped the ledger before
+                            # stop after this line (closing upstream ends the generation); the line is still read
+                            # below, so a final usage event that failed to send is not lost
                             client_gone = True
-                            break
                         if not line.startswith(b'data:') or line[5:].strip() == b'[DONE]':
                             continue
                         try:
@@ -358,6 +362,11 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         if provider != 'anthropic':
                             if ev.get('usage'):
                                 usage = ev['usage']
+                            for ch in ev.get('choices') or []:
+                                d = (ch or {}).get('delta') or {}
+                                streamed += len(d.get('content') or '') + len(d.get('reasoning_content') or '')
+                                for tc in d.get('tool_calls') or []:
+                                    streamed += len(((tc or {}).get('function') or {}).get('arguments') or '')
                             continue
                         t = ev.get('type')
                         if t == 'message_start':
@@ -378,7 +387,10 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                             streamed += sum(len(d.get(k) or '') for k in ('text', 'thinking', 'partial_json'))
                 else:
                     data = up.read()
-                    self.wfile.write(data)
+                    try:
+                        self.wfile.write(data)
+                    except OSError:
+                        client_gone = True      # the whole reply was billed: its usage below is exact
                     if up.status != 200:
                         errtext = data[:500].decode('utf-8', 'replace')
                     if not counting and up.status == 200:
@@ -393,12 +405,15 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     ' rid=%s' % rid if (rid and (errtext or stop == 'refusal' or fallback)) else ''))
                 if client_gone:
                     extra += ' CLIENT-GONE'
-                    if provider == 'anthropic' and usage and not final:
+                    if provider == 'anthropic' and not final and 'text/event-stream' in (up.getheader('Content-Type') or ''):
+                        if not usage:          # gone before message_start: the prompt was still read
+                            usage = {'input_tokens': len(raw) // 4}
                         # the final count never came (a hang-up: an interrupt, a steer, /advisor end a reply this way):
                         # charge what was streamed, about 3.5 characters a token rounded up, never the whole allowance
                         # (that put phantom spend on every interrupt and could hit the daily cap early)
                         # (message_start's usage says output_tokens 1: the estimate replaces it unless larger)
-                        usage['output_tokens'] = max(int(usage.get('output_tokens') or 0), streamed * 2 // 7 + 1)
+                        usage['output_tokens'] = max(int(usage.get('output_tokens') or 0),
+                                                     min(streamed * 2 // 7 + 1, int(body.get('max_tokens') or 0) or 10**9))
                         extra += ' (output estimated from %d streamed characters)' % streamed
                 if not counting and provider == 'anthropic' and usage:
                     usd = anthropic_cost(model, usage, served)
@@ -410,6 +425,10 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 elif not counting and provider != 'anthropic' and up.status == 200:
                     if usage:
                         usd = openai_cost(rates, usage)
+                    elif client_gone and 'text/event-stream' in (up.getheader('Content-Type') or ''):
+                        # a hang-up before the usage chunk: the prompt plus what was streamed, not the whole allowance
+                        usd = (len(raw) / 4 * rates[0] + min(streamed * 2 // 7 + 1, body['max_tokens']) * rates[1]) / 1e6
+                        extra += ' (estimated: prompt + %d streamed characters)' % streamed
                     else:
                         # no usage reported (a cut stream): charge the request as if every output token was spent
                         usd = (len(raw) / 4 * rates[0] + body['max_tokens'] * rates[1]) / 1e6

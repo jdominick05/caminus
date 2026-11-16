@@ -147,7 +147,7 @@ class ContextFit(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
         self.assertTrue(report['ok'])
-        self.assertEqual(report['max_ctx'], 32768)
+        self.assertEqual(report['max_ctx'], {'f16': 32768, 'q8': None})   # (#82: the per-format shape; Q8 is #81's)
         self.assertEqual(report['cards'], [card['pci']])
         self.assertEqual(report['draft'], opt['draft'])
         self.assertEqual(report['need_mib'], need(32768))
@@ -155,7 +155,7 @@ class ContextFit(unittest.TestCase):
         stdout = io.StringIO()
         with patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.fit_report([*argv, '--kv-host', '--json']), 1)
-        self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
+        self.assertIsNone(json.loads(stdout.getvalue())['max_ctx']['f16'])
 
     def test_qwen3moe_two_card_fit_uses_serve_recipe_and_caps_at_the_file_context(self):
         # caminus fit --cards 2 for a qwen3moe file: the two-card entry (Q3MoETP + Q3MPrefillTP), the pair placed bigger
@@ -197,7 +197,7 @@ class ContextFit(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertTrue(report['ok'])
         self.assertEqual(report['arch'], 'qwen3moe-tp')
-        self.assertEqual(report['max_ctx'], 40960)
+        self.assertEqual(report['max_ctx']['f16'], 40960)
         self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
         self.assertEqual(placed['split'], {'exp_rows': 512, 'vocab_share': 0.532})
         self.assertEqual(report['need_mib'], need(40960))
@@ -210,7 +210,7 @@ class ContextFit(unittest.TestCase):
         stdout = io.StringIO()
         with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 1)
-        self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
+        self.assertIsNone(json.loads(stdout.getvalue())['max_ctx']['f16'])
 
     def test_qwen3moe_two_card_fit_below_the_file_context_takes_the_largest_step_that_fits(self):
         # each card's room between need(32768) and need(40960): caminus fit --cards 2 and max_ctx auto report the largest
@@ -260,8 +260,8 @@ class ContextFit(unittest.TestCase):
                 report = json.loads(stdout.getvalue())
                 self.assertTrue(report['ok'])
                 self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
-                self.assertEqual(report['max_ctx'], want)
-                self.assertLess(report['max_ctx'], 40960)
+                self.assertEqual(report['max_ctx']['f16'], want)
+                self.assertLess(report['max_ctx']['f16'], 40960)
                 self.assertEqual(report['need_mib'], list(need(want)))
                 # the runtime route (max_ctx auto in serve, the placement's split stored) takes the same step
                 ropt = dict(opt, placement=dict(split=placed['split']))
@@ -276,7 +276,7 @@ class ContextFit(unittest.TestCase):
                 self.assertEqual(cli.fit_report([*argv, '--json']), 1)
             report = json.loads(stdout.getvalue())
             self.assertFalse(report['ok'])
-            self.assertIsNone(report['max_ctx'])
+            self.assertIsNone(report['max_ctx']['f16'])
             place.assert_not_called()
         # (two-card drafting is served for Swift 1.5 and ThinkingCap; a file whose decode module has no two-card verify
         # object, the plain 27B's GSQ formats, is refused it before any placement)
@@ -310,13 +310,13 @@ class ContextFit(unittest.TestCase):
                 report = json.loads(stdout.getvalue())
                 self.assertEqual(code, 1)
                 self.assertFalse(report['ok'])
-                self.assertIsNone(report['max_ctx'])
+                self.assertIsNone(report['max_ctx']['f16'])
         usage.write_text('0')
         stdout = io.StringIO()
         with patch.object(arch, 'of', return_value=A), \
              patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.fit_report(['--model', str(model), '--draft', 'off', '--json']), 0)
-        self.assertEqual(json.loads(stdout.getvalue())['max_ctx'], 4096)
+        self.assertEqual(json.loads(stdout.getvalue())['max_ctx']['f16'], 4096)
 
 
 if __name__ == '__main__':

@@ -605,7 +605,7 @@ def stage_torch(S):
     try: fit_result = json.loads(r.stdout)
     except ValueError: fit_result = {}
     check('torch: failed fit query returns no invented maximum and starts no guard',
-          r.returncode == 1 and fit_result.get('ok') is False and fit_result.get('max_ctx') is None and clean(r) and nolog('fit'))
+          r.returncode == 1 and fit_result.get('ok') is False and fit_result.get('max_ctx') == {'f16': None, 'q8': None} and clean(r) and nolog('fit'))
     r = run(['replay', os.path.join(S, 'no-bundle')])
     check('torch: caminus replay without torch: the install line, exit 2, no guard',
           r.returncode == 2 and torchcheck.INSTALL in r.stderr and clean(r) and nolog('replay'), (r.stdout + r.stderr)[-300:])

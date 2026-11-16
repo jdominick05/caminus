@@ -1,8 +1,8 @@
 """The qwen3moe one-card engine's Q8 KV option without a card (caminus.engine.q3moe_one.Q3MoEOne(q8=True), its batched
 prefill caminus.prefill.q3m.Q3MPrefill and the registry entry), on stand-ins for the torch.cuda and HIP calls (every tensor
 in host memory; nothing is launched), with the tiny synthetic file (tests/engine/tiny_q3m.py).
-  - the module tables: k3_q3m_lean_kvq8 is k3_q3m_lean's Q8 build (same ops, pairs and lean dispatch check), no two-card or
-    verify form, outside the installed runtime set and the dense line's Q8 table; its Engine has the error word after Sync
+  - the module tables: k3_q3m_lean_kvq8 is k3_q3m_lean's Q8 build (same ops, pairs and lean dispatch check), its two-card
+    form k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py), no verify form, outside the installed runtime set and the dense line's Q8 table; its Engine has the error word after Sync
   - the wire layout the kernels index ([K blocks | V blocks], block (part, kv head g, block b) at (part M / 32 + 4 g + b)
     x 34 bytes): caminus.ref_kv.encode_q8_kv puts each block there, and a Q8 row is encode_q8_kv(hadamard128(K), V) of the
     F16 row's values (K decoded and rotated back within the blocks' rounding)
@@ -28,7 +28,8 @@ in host memory; nothing is launched), with the tiny synthetic file (tests/engine
     no 'kv' entry), so a Q8 park never matches an F16 engine; the format id names the rotation, and a key with the
     earlier draft's unrotated id hashes differently (its rows never restore into this engine)
   - the registry: arch.kv_q8 ('f16' default, 'q8', anything else refused) and Q3MoE.auto_need counting Q8 rows; every
-    other entry refuses opt['kv'] = 'q8' in build and auto_need before reading anything (never an F16 engine instead)
+    other entry but the two-card qwen3moe one refuses opt['kv'] = 'q8' in build and auto_need before reading anything (never
+    an F16 engine instead)
   - tools/gates/kv_against.py (the G-model gates' --against): llama.cpp's floor and explicit bars pass / fail as stated on
     synthetic logits; a saved file that is not whole rows is refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
@@ -102,12 +103,13 @@ hip.Module = lambda name: Rec(name)
 
 # ---- the module tables -------------------------------------------------------------------------------------------------------
 Q8M = 'k3_q3m_lean_kvq8'
-check(k3.Q3M_KV_Q8_BASE == {Q8M: 'k3_q3m_lean'} and k3.Q3M_KV_Q8_OF == {'k3_q3m_lean': Q8M} and Q8M in k3.Q3M_LEAN_MODULES
+check(k3.Q3M_KV_Q8_BASE[Q8M] == 'k3_q3m_lean' and k3.Q3M_KV_Q8_OF['k3_q3m_lean'] == Q8M and Q8M in k3.Q3M_LEAN_MODULES
       and Q8M in k3.Q3M_MODULES and k3.MODULE_CAPS[Q8M] == k3.MODULE_CAPS['k3_q3m_lean'],
       'k3_q3m_lean_kvq8: k3_q3m_lean\'s Q8 build, in the lean modules (the same ops whitelist and (op, format) pairs)')
-check(Q8M not in k3.Q3M_TP_OF and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
+check(k3.Q3M_TP_OF.get(Q8M) == 'k3_q3m_lean_tp_kvq8' and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
       and Q8M not in k3.Q35_KV_Q8_BASE and Q8M not in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' not in kernels.RUNTIME_SET,
-      'no two-card or verify form, not in the dense Q8 table, not in the installed runtime set (not served)')
+      'its two-card form is k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py); no verify form, not in the dense Q8 '
+      'table, not in the installed runtime set (not served)')
 E = k3.Engine(module=Q8M, grid=8, T=1)
 check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
       and k3.Engine(module='k3_q3m_lean', grid=8).kv_error is None,
@@ -319,15 +321,15 @@ check(abs(sq - (Q3MoEOne.kv_pos_mib(P, True) * 1.05 + 1.0)) < 1e-12 and needq(MC
 
 bad = []
 for name, a in arch.ARCHS.items():
-    if name == 'qwen3moe': continue
+    if name in ('qwen3moe', 'qwen3moe-tp'): continue   # (the two-card entry builds Q8 too: tests/engine/test_q3moe_tp_kvq8_cpu.py)
     for what, fn in (('build', lambda: a.build({'kv': 'q8'})), ('auto_need', lambda: a.auto_need({'kv': 'q8'}, 4))):
         try: fn(); bad.append((name, what, 'no error'))
         except ValueError as e:
             if "kv 'q8'" not in str(e): bad.append((name, what, str(e)[:80]))
         except Exception as e: bad.append((name, what, type(e).__name__ + ' ' + str(e)[:80]))
 check(not bad and all(a.kv_check({}) is False and a.kv_check({'kv': 'f16'}) is False for a in arch.ARCHS.values())
-      and arch.ARCHS['qwen3moe'].kv_check({'kv': 'q8'}) is True,
-      f"every other registry entry ({len(arch.ARCHS) - 1}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything; "
+      and arch.ARCHS['qwen3moe'].kv_check({'kv': 'q8'}) is True and arch.ARCHS['qwen3moe-tp'].kv_check({'kv': 'q8'}) is True,
+      f"every other registry entry ({len(arch.ARCHS) - 2}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything; "
       f"'f16' and no kv pass everywhere" + (f' (wrong: {bad})' if bad else ''))
 
 # ---- the gates' --against (tools/gates/kv_against.py) ---------------------------------------------------------------------------
