@@ -163,10 +163,9 @@ class RuntimeKernels(unittest.TestCase):
         with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
             self.require_runtime([drafter.module])
 
-    def test_real_tp_verify_constructor_selects_the_unshipped_tp_verify_objects(self):
-        # Two-card drafting is refused in serving until its GPU gates pass, so its verify objects stay out of the
-        # installed runtime (a checkout's build/ has them). The real constructor's selection is pinned here so that
-        # lifting the refusal is also the change that adds exactly these two names to RUNTIME_SET.
+    def test_real_tp_verify_constructor_selects_shipped_tp_verify_objects(self):
+        # Two-card drafting is served (Swift 1.5, ThinkingCap), so the real constructor's two verify objects are in the
+        # installed runtime; without them a wheel would refuse the default two-card serve.
         # CUDA/HIP access is forbidden by setUp; only the tensor tape is omitted (test_q35_verify_tp_cpu.py covers it).
         cases = [('k3_q35_swift_tp', 'k3_q35_swift_tp_ver'), ('k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver')]
         for module, want in cases:
@@ -180,7 +179,36 @@ class RuntimeKernels(unittest.TestCase):
                         ver = q35_dense_verify_tp.Dense35VerifyTP(eng, T, vram_check=False)
                     self.assertEqual([ver.module] + [e.module for e in ver.E], [want] * 3)
                     self.assertEqual([e.T for e in ver.E], [T, T])
-                    self.assertNotIn(want, kernels.RUNTIME_SET)
+                    self.require_runtime([ver.module])
+                    without = tuple(n for n in kernels.RUNTIME_SET if n != want)
+                    with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                        self.require_runtime([ver.module])
+
+    def test_two_card_drafters_select_the_shipped_one_card_objects(self):
+        # The two-card drafted serve runs the one-card MTP / DFlash2 drafters on a TP trunk's view (DraftTarget35TP:
+        # module k3_q35_*_tp, tcap as the trunk's). Exercise the real constructors' selectors, stopping at file opening.
+        class SelectionOnly(Exception):
+            pass
+
+        for tp_module, tcap, mtp_want, df_want in (('k3_q35_swift_tp', False, q35_mtp.MODULE, q35_dflash.MODULE),
+                                                   ('k3_q35_tcap_tp', True, q35_mtp.MODULE_TCAP, q35_dflash.MODULE_TCAP)):
+            with self.subTest(module=tp_module):
+                eng = NS(module=tp_module, tcap=tcap, head=dict(fmt='Q8_0' if tcap else 'Q6_K'),
+                         emb=NS(type='IQ2_S' if tcap else 'Q4_K'))
+                drafter = q35_dflash.Dflash35.__new__(q35_dflash.Dflash35)
+                with patch.object(q35_dflash.ggufio, 'GGUFFile', side_effect=SelectionOnly), self.assertRaises(SelectionOnly):
+                    q35_dflash.Dflash35.__init__(drafter, 'unused-selector-fixture.gguf', eng, vram_check=False)
+                self.assertEqual(drafter.module, df_want)
+                # (the MTP block's tensors in the line's format; selection ends where the projection starts)
+                block = 'Q6_K' if tcap else 'Q4_0'
+                eng.F = NS(T={f'blk.1.{n}.weight': NS(type=block) for n in q35_mtp.NEXTN})
+                eng.path = 'unused-selector-fixture.gguf'
+                mtp = q35_mtp.Mtp35.__new__(q35_mtp.Mtp35)
+                with patch.object(q35_mtp, 'block_of', return_value=1), \
+                        patch.object(q35_mtp.Mtp35, 'need_mib', side_effect=SelectionOnly), self.assertRaises(SelectionOnly):
+                    q35_mtp.Mtp35.__init__(mtp, eng)
+                self.assertEqual(mtp.module, mtp_want)
+                self.require_runtime([drafter.module, mtp.module])
 
     def test_real_dense_prefill_constructors_select_shipped_helpers(self):
         for module in (q35_dense.MODULE, q35_dense.MODULE_TCAP, q35_dense.MODULE_GSQ):
@@ -272,7 +300,7 @@ class RuntimeKernels(unittest.TestCase):
         names = kernels.RUNTIME_SET
         self.assertEqual(len(names), len(set(names)))
         self.assertFalse(any(n.endswith(('_trace', '_swiglu')) or '_abl' in n for n in names))
-        self.assertTrue(set(k3.Q35TPV_MODULES).isdisjoint(names))
+        self.assertTrue(set(k3.Q35TPV_MODULES) <= set(names))
         self.assertTrue(set(k3.Q3M_VER_MODULES).isdisjoint(names))
         self.assertNotIn('kv_codec', names)
         self.assertNotIn('gg_mv_ref', names)

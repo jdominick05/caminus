@@ -264,33 +264,8 @@ t1 = DraftTarget35TP(m, 1, check=False)
 lack = sorted(a for a in want if not hasattr(t1, a))
 check(not lack, f'the drafter view has every attribute Dflash35 and Mtp35 read off their target ({len(want)} names; missing: {lack})')
 
-# Development gate: two-card drafting is refused (serve, fit, the picker, build) unless CAMINUS_ALLOW_TP_DRAFT=1.
-tp = arch.ARCHS['qwen35-own-tp']
-os.environ.pop('CAMINUS_ALLOW_TP_DRAFT', None)
-why = [tp.draft_refusal(d) for d in ('mtp', 'dflash')]
-try:
-    tp.build(dict(model=P_M, draft='mtp', max_ctx=64)); built = True
-except ValueError as e:
-    built = 'CAMINUS_ALLOW_TP_DRAFT' not in str(e)
-from caminus.serve import cli as _cli
-keep_of = _cli._arch.of
-_cli._arch.of = lambda path: arch.ARCHS['qwen35-own']
-def recipe(**o):
-    o = dict(dict(model=P_M, cards=2, no_drafter=False, drafter=_cli.DEFAULT_DRAFTER), **o)
-    try: _cli.recipe(o, log=lambda *a, **k: None); return o['draft']
-    except ValueError as e: return 'refused' if 'CAMINUS_ALLOW_TP_DRAFT' in str(e) else f'other: {e}'
-try:
-    off = (recipe(draft='mtp'), recipe(draft=None), recipe(draft='off'))
-    os.environ['CAMINUS_ALLOW_TP_DRAFT'] = '1'
-    on = (recipe(draft='mtp'), recipe(draft=None))
-finally:
-    os.environ.pop('CAMINUS_ALLOW_TP_DRAFT', None); _cli._arch.of = keep_of
-check(all(w and 'CAMINUS_ALLOW_TP_DRAFT' in w for w in why) and tp.draft_refusal('off') is None and not built
-      and tp.default_draft(dict(model=P_M)) == 'off' and off == ('refused', 'off', 'off') and on == ('mtp', 'off'),
-      f'two-card drafting refused without CAMINUS_ALLOW_TP_DRAFT (serve recipe {off}, build refused, default off), '
-      f'served with it {on} (still never the default)')
-
 # Plain two-card serving keeps its projection: the drafter terms are zero with --draft off.
+tp = arch.ARCHS['qwen35-own-tp']
 from caminus.engine.q35_dense_tp import Dense35TP as E
 sh = tp_shapes(P_M)
 pf_old = [v + arch.PREFILL_MODULES_MIB for v in buffer_need_tp_mib(sh, tp.PREFILL_CHUNK)]
@@ -378,6 +353,53 @@ check(dc == 1 and dc_rev == 0 and dc == (0 if left[0] >= left[1] else 1) and dcr
       f'placement stores it once and build reads the same; head, features, verify and windows counted')
 check(tp.placement_extra(dict(opt, draft='mtp'), cards) == {'draft_card': 0} and tp.placement_extra(dict(opt, draft='off'), cards) == {},
       'placement stores MTP on card 0 and nothing without a drafter')
+
+# Two-card drafting is served for Swift 1.5 and ThinkingCap (no environment switch), DFlash2 by default; a file whose
+# decode module has no two-card verify object (the plain 27B's k3_q35_gsq) is refused it in serve and build.
+tp = arch.ARCHS['qwen35-own-tp']
+P_G = os.path.join(A.scratch, 'tiny-tp-gsq.gguf'); tiny_q35.write(P_G, variant='gsq', tp=True)
+why = [tp.draft_refusal(d, p) for d in ('mtp', 'dflash') for p in (P_S, P_T, P_M, None)]
+why_g = [tp.draft_refusal(d, P_G) for d in ('mtp', 'dflash')]
+try:
+    tp.build(dict(model=P_G, draft='mtp', max_ctx=64)); built_g = 'built'
+except ValueError as e:
+    built_g = 'refused' if 'two-card verify object' in str(e) else f'other: {e}'
+from caminus.serve import cli as _cli
+keep_of = _cli._arch.of
+_cli._arch.of = lambda path: arch.ARCHS['qwen35-own']
+def recipe(**o):
+    o = dict(dict(model=P_M, cards=2, no_drafter=False, drafter=_cli.DEFAULT_DRAFTER), **o)
+    try: _cli.recipe(o, log=lambda *a, **k: None); return o['draft']
+    except ValueError as e: return 'refused' if 'two-card verify object' in str(e) else f'other: {e}'
+try:
+    served = (recipe(draft='mtp'), recipe(draft='dflash', drafter=P_D), recipe(draft='off'))
+    # (no --draft: the table's DFlash2; without the shared drafter file plain, as on one card)
+    dflt = (recipe(draft=None, drafter=P_D), recipe(draft=None, drafter=os.path.join(A.scratch, 'no-such-drafter.gguf')))
+    gsq = (recipe(model=P_G, draft='mtp'), recipe(model=P_G, draft='dflash', drafter=P_D), recipe(model=P_G, draft=None, drafter=P_D))
+finally:
+    _cli._arch.of = keep_of
+check(all(w is None for w in why) and all(w and 'k3_q35_gsq' in w for w in why_g) and tp.draft_refusal('off', P_G) is None
+      and built_g == 'refused' and served == ('mtp', 'dflash', 'off') and dflt == ('dflash', 'off') and gsq == ('refused', 'refused', 'off')
+      and tp.default_draft(dict(model=P_T)) == 'dflash' and tp.default_draft(dict(model=P_S)) == 'dflash'
+      and tp.default_draft(dict(model=P_G)) == 'off',
+      f'two-card drafting served without any environment switch (serve recipe {served}; no --draft: {dflt}); '
+      f'a k3_q35_gsq file refused it (recipe {gsq}, build {built_g}) and defaults plain')
+# The default drafter keeps serve.cli.keep_default_draft's rule on two cards: kept when MIN_CTX (or --max-ctx) fits with
+# it on the cards, else plain with the full context; an explicit --draft dflash is kept either way.
+from caminus.device import host as _host
+def _place(cs):
+    def place(fits):
+        if not fits(cs): raise _host.PlacementError('no cards fit')
+    return place
+tiny_cards = [dict(c, line_mib=1) for c in cards]
+kd = {}
+for name, cs, defaulted in (('fit', cards, True), ('small', tiny_cards, True), ('explicit', tiny_cards, False)):
+    o = dict(model=P_T, drafter=P_D, draft='dflash', draft_defaulted=defaulted, max_ctx='auto', auto_cache_slots=4, chunk=2048)
+    _cli.keep_default_draft(tp, o, _place(cs), log=lambda *a, **k: None)
+    kd[name] = (o['draft'], o.get('draft_floor'))
+check(kd == {'fit': ('dflash', arch.MIN_CTX), 'small': ('off', None), 'explicit': ('dflash', None)} and tp.min_ctx(dict(draft='dflash')) == arch.MIN_CTX,
+      f'two cards: the default DFlash2 drafter stays when {arch.MIN_CTX} positions fit with it, plain when not; '
+      f'an explicit --draft dflash stays ({kd})')
 
 print('RESULT', 'PASS' if ok else 'FAIL', flush=True)
 sys.exit(0 if ok else 1)

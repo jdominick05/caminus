@@ -92,8 +92,9 @@ def serving_modes(m):
     """The model picker's card counts and drafters, from the same registry serve uses (no model load or torch).
 
     The picker also offers auto: it omits --draft, leaving Arch.default_draft to choose from the served measurements.
-    A two-card variant advertises drafting only once its registry entry supports it and does not refuse it
-    (Arch.draft_refusal: two-card drafting is refused until its GPU gates pass).
+    A two-card variant of a one-card model is offered only for the catalog models it names (two_card_models: the dense
+    line's two-card form exists for Swift 1.5 and ThinkingCap, not the plain 27B), and a drafter only where its entry does
+    not refuse it (Arch.draft_refusal, here without a file).
     """
     from .. import arch
     A = arch.lookup(m.arch)
@@ -102,6 +103,8 @@ def serving_modes(m):
         try:
             a = A.variant(nc)
         except ValueError:
+            continue
+        if a is not A and m.name not in getattr(a, 'two_card_models', (m.name,)):
             continue
         ds = {d for d in (a.drafter, *getattr(a, 'drafters', ())) if d in ('mtp', 'dflash') and a.draft_refusal(d) is None}
         out.append(dict(cards=nc, drafts=['off'] + [d for d in ('mtp', 'dflash') if d in ds]))
