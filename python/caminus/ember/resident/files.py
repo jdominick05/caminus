@@ -244,3 +244,22 @@ def search(home, pattern=None, glob=None, path='.', ignore_case=False, limit=Non
     if capped:
         out['walk_capped'] = f'only the first {SEARCH_FILES} files under {root} were looked at: narrow the path'
     return out
+
+
+IMAGE_TYPES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp'}
+IMAGE_MAX = 5_000_000     # bytes of one image the model is shown
+
+
+def image(home, path):
+    """An image file for the model to look at: the result names the file; the transport attaches the picture when it
+    sends the turn (the journal keeps the path, never the bytes). A real agent: 'a screenshot saved to disk isn't seen
+    unless I have a tool that returns it'."""
+    p = _path(home, path)
+    kind = IMAGE_TYPES.get(p.suffix.lower())
+    if kind is None:
+        raise ValueError(f'{p.name} is not a PNG, JPEG, GIF or WebP image')
+    n = p.stat().st_size
+    if n > IMAGE_MAX:
+        raise ValueError(f'{p} is {n:,} bytes; the limit is {IMAGE_MAX:,}: scale it down first (convert -resize, or a smaller screenshot)')
+    return dict(path=str(p), image=dict(media_type=kind, file=str(p), bytes=n),
+                note='the image is attached to this result: describe what you see before acting on it')

@@ -118,8 +118,19 @@ class Memory:
         if len(text.encode()) > INDEX_CAP and (archive := self._archive(text)):
             hint = (f'the whole file is kept in {archive} (read it, or history_search finds it); move what matters '
                     'into notes with remember and shorten MEMORY.md to one line per note')
-        return 'MEMORY.md (your notes index, as of this goal\'s start; notes/ holds the details):\n' + _clip(
+        out = 'MEMORY.md (your notes index, as of this goal\'s start; notes/ holds the details):\n' + _clip(
             text, INDEX_CAP, 'MEMORY.md', hint)
+        # how full it is, and where older lines went: an agent said archived lines were 'harder to recall' because
+        # nothing pointed at them
+        used = len(text.encode())
+        tail = f'(index {used / 1024:.1f} of {INDEX_CAP / 1024:.0f} KB'
+        try:
+            moved = [ln for ln in (self.home / ARCHIVE).read_text(errors='replace').splitlines() if ln.startswith('- ')]
+        except OSError:
+            moved = []
+        if moved:
+            tail += f'; {len(moved)} older line{"s" if len(moved) != 1 else ""} moved to {ARCHIVE}: history_search finds them'
+        return out.rstrip('\n') + '\n' + tail + ')'
 
     def _archive(self, text):
         """An index past its cap (a memory from before the cap, written as one long file) is copied whole into a

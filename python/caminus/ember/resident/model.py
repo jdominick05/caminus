@@ -38,6 +38,29 @@ def split_content(content):
     return ''.join(text), ''.join(thinking)
 
 
+
+def tool_content(text):
+    """A tool result for the Anthropic Messages API: its text, and when the result names an image file (files.image), the
+    picture as an image block read now (the journal keeps only the path). Anything unreadable stays text."""
+    try:
+        d = json.loads(text) if text and text.lstrip().startswith('{') else None
+    except ValueError:
+        d = None
+    img = d.get('image') if isinstance(d, dict) else None
+    if not isinstance(img, dict) or not img.get('file'):
+        return text
+    import base64
+    try:
+        with open(img['file'], 'rb') as f:
+            data = base64.b64encode(f.read(5_000_001)).decode()
+    except OSError:
+        return text
+    meta = {k: v for k, v in d.items() if k != 'image'}
+    meta['image'] = {k: v for k, v in img.items() if k != 'file'}
+    return [dict(type='text', text=json.dumps(meta, ensure_ascii=False)),
+            dict(type='image', source=dict(type='base64', media_type=img.get('media_type') or 'image/png', data=data))]
+
+
 class ModelError(Exception):
     pass
 
@@ -405,7 +428,7 @@ class Model:
                         system.append(m['content'])
                         continue
                     if m['role'] == 'tool':
-                        converted.append(dict(role='user', content=[dict(type='tool_result', tool_use_id=m['tool_call_id'], content=m['content'])]))
+                        converted.append(dict(role='user', content=[dict(type='tool_result', tool_use_id=m['tool_call_id'], content=tool_content(m['content']))]))
                         continue
                     blocks = [dict(type='text', text=m['content'])] if m.get('content') else []
                     for call in m.get('tool_calls') or []:
@@ -456,7 +479,7 @@ class Model:
             if role == 'system':                     # a mid-history system message: kept as an operator note
                 add('user', [dict(type='text', text='[system] ' + m['content'])])
             elif role == 'tool':
-                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=m['content'] or '')])
+                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=tool_content(m['content'] or ''))])
             elif role == 'assistant':
                 blocks = [dict(type='text', text=m['content'])] if m.get('content') else []
                 for call in m.get('tool_calls') or []:

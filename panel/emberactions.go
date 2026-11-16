@@ -29,7 +29,7 @@ func toolFamily(name string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(cOrange).Bold(true)
 	case "read", "edit", "write", "checkpoint", "rollback":
 		return lipgloss.NewStyle().Foreground(cPurple).Bold(true)
-	case "web_search", "web_fetch":
+	case "web_search", "web_fetch", "browser", "search":
 		return lipgloss.NewStyle().Foreground(cTeal).Bold(true)
 	case "remember", "history_search", "todo":
 		return lipgloss.NewStyle().Foreground(cBlue).Bold(true)
@@ -139,6 +139,27 @@ func actionCard(name string, args, result map[string]any, w int) string {
 			meta = strings.TrimSpace(residentText(firstLine(rs("title"))))
 			if t := rs("text"); t != "" {
 				meta = strings.TrimPrefix(meta+fmt.Sprintf(" · %d chars", len(t)), " · ")
+			}
+		}
+	case "browser":
+		subject = residentText(argStr(args, "url"))
+		if state == "ok" {
+			meta = map[bool]string{true: "screenshot", false: "rendered text"}[argStr(args, "action") != "text"]
+			if t := rs("title"); t != "" {
+				meta += " · " + residentText(firstLine(t))
+			}
+		}
+	case "search":
+		subject = strings.TrimSpace(argStr(args, "glob") + " " + argStr(args, "pattern"))
+		if state == "ok" {
+			if m, ok := result["matches"].([]any); ok {
+				meta = plural(len(m), "match", "matches")
+				for _, h := range m[:min(3, len(m))] {
+					hs, _ := h.(string)
+					preview = append(preview, residentText(hs))
+				}
+			} else if f, ok := result["files"].([]any); ok {
+				meta = plural(len(f), "file", "files")
 			}
 		}
 	case "remember":

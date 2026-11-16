@@ -47,7 +47,21 @@ if not p.exists():
 b=Path.home()/'bin';b.mkdir(exist_ok=True)
 link=b/'caminus-agent';tmp=b/('caminus-agent.'+str(os.getpid())+'.tmp')
 tmp.symlink_to(p);os.replace(tmp,link)
-print(json.dumps(dict(installed=str(link),artifact=str(p),sha256=digest)))
+# every running daemon on an older runtime takes this one between goals (an upgrade left a days-old daemon running:
+# install alone restarts nothing); the same request `caminus ember agent update NAME` makes
+queued=[]
+for home in sorted((Path.home()/'homes').glob('*')):
+    try:
+        hb=json.loads((home/'heartbeat.json').read_text())
+        os.kill(int(hb.get('pid') or 0),0)
+    except (OSError,ValueError,TypeError):
+        continue
+    if hb.get('runtime')==p.name or (home/'update.json').exists():
+        continue
+    u=home/'update.json';t=home/'update.json.tmp'
+    t.write_text(json.dumps(dict(program=str(p),now=False,ts=__import__('time').time())));os.replace(t,u)
+    queued.append(home.name)
+print(json.dumps(dict(installed=str(link),artifact=str(p),sha256=digest,updates_queued=queued)))
 CAMINUS_INSTALL
 '''.replace('PAYLOAD',repr(data))
         result=runner.run_shell(script,transport=transport)

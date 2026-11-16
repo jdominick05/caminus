@@ -856,11 +856,15 @@ class Resident(unittest.TestCase):
         from caminus.ember.resident import advisor as adv, web, judge
         # a poll returns everything since the last poll (the preparation step read and lost the first chunk)
         t=Terminal(self.home);sid=uuid.uuid4().hex
-        t.call(sid,dict(command='printf one; sleep 0.6; printf two; sleep 0.6',yield_ms=50))
-        time.sleep(0.9)
+        got=t.call(sid,dict(command='printf one; sleep 0.3; printf two; sleep 5',yield_ms=50))['output']
+        log=self.home/'jobs'/sid/'output.log'
+        for _ in range(200):                      # (a loaded CI runner starts the command late: wait for its output)
+            if log.exists() and b'two' in log.read_bytes():break
+            time.sleep(0.05)
         t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0,_prepare=True))
-        got=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
-        self.assertIn('two',got,'the preparation step reads nothing, so the poll still gets it')
+        got+=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
+        self.assertEqual((got.count('one'),got.count('two')),(1,1),'the preparation step reads nothing: nothing lost, nothing twice')
+        t.call(uuid.uuid4().hex,dict(session=sid,signal='KILL',yield_ms=0))
         # the advisor's per-goal calls are counted past the first 200 events
         rt=Runtime(self.home)
         try:
@@ -897,6 +901,64 @@ class Resident(unittest.TestCase):
         t0=time.time()
         ok,msg=judge.run_gate(str(self.home),'sleep 30 & echo up',timeout=20)
         self.assertTrue(ok,msg);self.assertLess(time.time()-t0,5,msg);self.assertIn('up',msg)
+
+    def test_read_shows_an_image_to_a_model_that_can_see(self):
+        import base64
+        from caminus.ember.resident import model as model_mod
+        png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+        (self.home/'shot.png').write_bytes(png)
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Look.')
+            def run(cid):
+                rt.store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
+                                    (uuid.uuid4().hex,gid,cid,'read',json.dumps(dict(path='shot.png')),'new'))
+                rt._action(rt.store.actions(gid)[0])
+                return [(e['data'] if isinstance(e['data'],dict) else json.loads(e['data']))['result']
+                        for e in rt.store.events() if e['kind']=='tool_result'][-1]
+            rt.config['api']='openai';rt.config.pop('vision',None)
+            res=run('c1')
+            self.assertIn('cannot see images',res.get('error',''),'a text-only model is told so')
+            rt.config['api']='anthropic'
+            res=run('c2')
+            self.assertNotIn('error',res);self.assertEqual(res['image']['media_type'],'image/png')
+            self.assertNotIn('data',json.dumps(res),'the journal keeps the path, not the bytes')
+            blocks=model_mod.tool_content(json.dumps(res))
+            self.assertEqual([b['type'] for b in blocks],['text','image'])
+            self.assertEqual(base64.b64decode(blocks[1]['source']['data']),png)
+            self.assertEqual(model_mod.tool_content('{"output": "x"}'),'{"output": "x"}','other results stay text')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_browser_renders_scripts_and_screenshots(self):
+        import shutil
+        from caminus.ember.resident import browser
+        if not browser._chrome():
+            print('SKIP browser: no Chrome here');return
+        page=self.home/'page.html'
+        page.write_text('<html><head><title>Board</title></head><body><div id=x></div>'
+                        '<script>document.getElementById("x").textContent="drawn by a script: 42"</script></body></html>')
+        rt=Runtime(self.home)
+        try:
+            out=browser.look(rt,'file://'+str(page),'text')
+            self.assertIn('drawn by a script: 42',out['text'],'the rendered page, after its scripts');self.assertEqual(out['title'],'Board')
+            rt.config['api']='anthropic'
+            shot=browser.look(rt,'file://'+str(page),'screenshot',640,400)
+            self.assertEqual(shot['image']['media_type'],'image/png');self.assertTrue(Path(shot['path']).exists())
+            rt.config['api']='openai'
+            plain=browser.look(rt,'file://'+str(page),'screenshot',640,400)
+            self.assertNotIn('image',plain);self.assertIn('cannot see images',plain['note'])
+            with self.assertRaises(ValueError):browser.look(rt,'ftp://x','text')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_index_says_how_full_it_is_and_points_at_the_archive(self):
+        rt=Runtime(self.home)
+        try:
+            (self.home/'MEMORY.md').write_text('- [A](notes/a.md) — a\n')
+            (self.home/'notes').mkdir(exist_ok=True)
+            (self.home/'notes'/'index-archive.md').write_text('# archived\n- [B](notes/b.md) — b\n- [C](notes/c.md) — c\n')
+            text=rt.memory.index()
+            self.assertIn('of 4 KB',text);self.assertIn('2 older lines moved to notes/index-archive.md',text)
+        finally:rt.mail.close();rt.store.close()
 
     def test_web_fetch_retries_caches_and_reads_pdfs(self):
         import urllib.error, shutil
@@ -1990,6 +2052,23 @@ for line in sys.stdin:
             (self.home/'context.json').write_text(note)
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
+
+    def test_install_queues_an_update_for_every_running_daemon_on_an_older_runtime(self):
+        # an upgrade left a days-old daemon running: install alone restarted nothing
+        from caminus.ember import agent_host
+        fake=self.home/'fakehome';(fake/'homes'/'old').mkdir(parents=True);(fake/'homes'/'gone').mkdir();(fake/'homes'/'fresh').mkdir()
+        (fake/'homes'/'old'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
+        (fake/'homes'/'gone'/'heartbeat.json').write_text(json.dumps(dict(pid=2**22+12345,runtime='aaaa.pyz')))
+        def transport(argv,input=None,**kw):
+            return subprocess.run(['bash','-s'],input=input,capture_output=True,text=True,env=dict(os.environ,HOME=str(fake)))
+        import contextlib,io as _io
+        out=_io.StringIO()
+        with contextlib.redirect_stdout(out):agent_host.main(['install'],transport)
+        res=json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(res['updates_queued'],['old'],'only a live daemon on another runtime')
+        u=json.loads((fake/'homes'/'old'/'update.json').read_text())
+        self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
+        self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
 
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
