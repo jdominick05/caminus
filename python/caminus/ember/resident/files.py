@@ -31,10 +31,18 @@ def _path(home, path):
     return p if p.is_absolute() else Path(home) / p
 
 
-def _text(p):
+def _text(p, strict=False):
     data = p.read_bytes()
     if b'\0' in data[:8192]:
         raise ValueError(f'{p} looks binary; read it with the terminal (xxd, file) instead')
+    if strict:
+        # edit and write put the text back: a lossy decode would turn every non-UTF-8 byte into U+FFFD without a
+        # line in the diff showing it
+        try:
+            return data.decode('utf-8')
+        except UnicodeDecodeError as e:
+            raise ValueError(f'{p} is not UTF-8 (byte {e.start}); edit it with the terminal (sed, python) so its '
+                             'other bytes stay as they are') from None
     return data.decode('utf-8', errors='replace')
 
 
@@ -119,7 +127,7 @@ def edit(home, path, old, new, replace_all=False):
     p = _path(home, path)
     if not isinstance(old, str) or old == '':
         raise ValueError('old must be the exact text to replace (to create a file, use write)')
-    before = _text(p)
+    before = _text(p, strict=True)
     if old == new:
         if old in before:
             raise ValueError('old and new are the same, and the file already has this text: no edit is needed (an '
@@ -146,7 +154,7 @@ def write(home, path, content):
     if p.is_dir():
         raise ValueError(f'{p} is a directory')
     existed = p.exists()
-    before = _text(p) if existed else ''
+    before = _text(p, strict=True) if existed else ''
     _atomic_write(p, content)
     out = dict(path=str(p), created=not existed, **_diff(p, before, content))
     if not existed:
