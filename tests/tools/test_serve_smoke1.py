@@ -1,9 +1,11 @@
-"""The one-card smoke's strict tool acceptance check (CPU, synthetic SSE, no sockets or model).
+"""The one-card smoke's strict tool acceptance check (CPU, synthetic SSE, no sockets or model), and its server command's
+--kv / --restart-kv flags.
 
   python -I tests/tools/test_serve_smoke1.py
 
 Only request() is replaced: the smoke's chat() and existing OpenAI SSE collector still assemble every reply.
 """
+import argparse
 import contextlib
 import copy
 import io
@@ -186,6 +188,29 @@ class ToolRoundTrip(unittest.TestCase):
         for reply in bad_replies:
             with self.subTest(reply=reply):
                 self.assert_failed(self.run_round_trip(stream([call()]), reply), 2)
+
+
+class ServerCommand(unittest.TestCase):
+    """server_command: --kv reaches caminus serve once; --restart-kv's server gets its own value (the mismatch restart)"""
+    @staticmethod
+    def ns(**kw):
+        a = dict(model='/m/model.gguf', max_ctx='auto', scratch='/s', alias=None, cards=1, draft=None, block_imports='', kv=None)
+        a.update(kw)
+        return argparse.Namespace(**a)
+
+    @staticmethod
+    def kv_of(cmd):
+        return [cmd[i + 1] for i, x in enumerate(cmd) if x == '--kv']
+
+    def test_kv_reaches_serve_and_restart_kv_overrides(self):
+        with patch.object(smoke.S, 'INSTALLED', False):
+            self.assertEqual(self.kv_of(smoke.server_command(self.ns())), [])            # (no --kv: the server's default)
+            self.assertEqual(self.kv_of(smoke.server_command(self.ns(kv='q8'))), ['q8'])
+            self.assertEqual(self.kv_of(smoke.server_command(self.ns(kv='q8'), kv='f16')), ['f16'])
+            self.assertEqual(self.kv_of(smoke.server_command(self.ns(), kv='q8')), ['q8'])
+            cmd = smoke.server_command(self.ns(kv='q8', cards=2))
+            self.assertEqual(cmd[cmd.index('--cards') + 1], '2')
+            self.assertIn(os.path.join('/s', 'kv'), cmd)                                 # (both servers: the same cache directory)
 
 
 if __name__ == '__main__':

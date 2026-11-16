@@ -2,7 +2,7 @@
 
   caminus models [--json]                       the named models (caminus.models.CATALOG): on disk or not, cards, speeds
   caminus pull NAME [--json]                    download a named model's files (caminus download --model NAME)
-  caminus start NAME [--name N] [--card auto|0|1] [--port P] [--ctx auto|N] [--no-wait] [--json] [-- serve flags...]
+  caminus start NAME [--name N] [--card auto|0|1] [--cards 1|2] [--port P] [--ctx auto|N] [--kv f16|q8] [--no-wait] [--json] [-- serve flags...]
   caminus start --team brain-hands [--json]     AREX-2 on the 24 GB card (brain, :8092) + Qwen3.6 on the other (hands, :8093)
   caminus stop NAME | --all [--json]            SIGTERM: the server drains, parks its conversation and exits
   caminus restart NAME [--json]                 stop, then start again with the same command line
@@ -253,7 +253,7 @@ def server_view(s):
     exited without the clean-stop line), stopped"""
     v = dict(name=s['name'], model=s['model'], url=f"http://127.0.0.1:{s['port']}", port=s['port'], cards=s.get('card_names', []),
              pid=s.get('guard_pid'), log=s['log'], uptime_s=max(0.0, time.time() - s.get('started', time.time())),
-             max_ctx=None, decode_tps=None, alias=s.get('alias'), busy=False, error='')
+             max_ctx=None, decode_tps=None, alias=s.get('alias'), busy=False, error='', kv=None)
     if alive(s.get('guard_pid')):
         code, _ = http_json(v['url'] + '/health')
         v['state'] = 'ready' if code == 200 else 'loading'
@@ -262,6 +262,8 @@ def server_view(s):
             if isinstance(props, dict):
                 v['max_ctx'] = find_key(props, 'n_ctx')
                 v['alias'] = props.get('model_alias') or v['alias']
+                kc = (props.get('caminus') or {}).get('kv_cache')   # (the KV cache the engine holds: caminus serve --kv)
+                v['kv'] = kc.get('type') if isinstance(kc, dict) else None
             _, st = http_json(v['url'] + '/caminus/status', timeout=2.0)
             mpt = find_key(st, 'ms_per_token')
             if isinstance(mpt, (int, float)) and mpt > 0:
@@ -317,7 +319,8 @@ def cmd_ps(argv):
     if not views:
         print('no servers (caminus start NAME; caminus models lists the names)')
     for v in views:
-        extra = (f"  {v['max_ctx']:,} ctx" if v['max_ctx'] else '') + (f"  {v['decode_tps']} tok/s decode" if v['decode_tps'] else '')
+        extra = ((f"  {v['max_ctx']:,} ctx" if v['max_ctx'] else '') + (f"  kv {v['kv']}" if v.get('kv') else '')
+                 + (f"  {v['decode_tps']} tok/s decode" if v['decode_tps'] else ''))
         print(f"{v['name']:<12} {v['model']:<18} {v['state']:<8} {v['url']:<24} cards {'+'.join(v['cards'])}{extra}")
         if v['error']:
             print(f"{'':<12} {v['error']}")
@@ -348,22 +351,23 @@ def pick_port(want, taken):
     raise ManageError(f'no free port in {PORT0}..{PORT0 + 99}')
 
 
-def fits_fn(entry, ctx=None):
+def fits_fn(entry, ctx=None, kv=None):
     """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
-    (caminus.arch.Arch.fits, sysfs only); without torch (no projection here) a size rule: the file + 4 GiB within the line"""
+    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects); without torch (no projection here) a size rule:
+    the file + 4 GiB within the line"""
     size_mib = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20   # (the files it serves with: an optional drafter is not loaded by default)
     rule = lambda g: size_mib * 1.1 + 4096 <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
     try:
         from .. import arch
         A = arch.of(entry['path'])
-        opt = dict(model=entry['path'], chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4)
+        opt = dict(model=entry['path'], chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4, kv=kv or 'f16')
         A.auto_need(opt, 4)                      # (probe the projection without inventing a zero-card fit)
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
         return rule
     return lambda g: A.fits(opt, [g])
 
 
-def pair_fits(m, entry, ctx=None, cards=None):
+def pair_fits(m, entry, ctx=None, cards=None, kv=None):
     """why(cards) for a two-card catalog model: None when the registry's projection at 32K positions (or --ctx) fits those
     cards now, with its drafter when that file is here (caminus.arch.Arch.fits, sysfs only; the projection caminus serve
     places itself with), else the reason. None when it can't run here (the model file missing, no torch, a header it can't
@@ -375,7 +379,8 @@ def pair_fits(m, entry, ctx=None, cards=None):
         return None
     dk = models.drafter_item(m)
     dpath = (entry.get('paths') or {}).get(dk) if dk else None
-    opt = dict(model=entry['path'], drafter=dpath, no_drafter=not dpath, chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4)
+    opt = dict(model=entry['path'], drafter=dpath, no_drafter=not dpath, chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4,
+               kv=kv or 'f16')
 
     def fit(cards):
         try:
@@ -392,9 +397,10 @@ def pair_fits(m, entry, ctx=None, cards=None):
     return fit
 
 
-def pick_cards(m, entry, card, held, ctx=None, cards=None):
+def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None):
     """the card positions (caminus ps's index) a model runs on, in engine order. held: the positions other servers hold.
-    cards: how many (default: the model's own; 2 for a one-card model with a two-card form: caminus start --cards 2)"""
+    cards: how many (default: the model's own; 2 for a one-card model with a two-card form: caminus start --cards 2). kv:
+    --kv, the KV cache the fit projects (q8: the Q8_0 rows)"""
     gs = host.gpus(ROOT)
     cs = card_view(gs)
     if not cs:
@@ -414,7 +420,7 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None):
             why = None
         if why:
             raise ManageError(f'{m.name}: {why}')
-        fit = pair_fits(m, entry, ctx, cards=cards)
+        fit = pair_fits(m, entry, ctx, cards=cards, kv=kv)
         why = fit(pr) if fit is not None else None
         if why:
             raise ManageError(f'{m.name}: {why}')
@@ -429,7 +435,7 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None):
     if not free:
         raise ManageError('every card is held by a Caminus server (caminus ps; caminus stop NAME)')
     try:
-        return [by_pci[host.one(gs, fits_fn(entry, ctx), held=held_pci)['pci']]]
+        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv), held=held_pci)['pci']]]
     except host.PlacementError as e:
         raise ManageError(f'{m.name}: {e}') from None
 
@@ -455,6 +461,24 @@ def _serve_arg(extra, flag):
     return value.strip() if value else value
 
 
+def start_kv(m, nc, kv, extra):
+    """the KV cache a start asks for: --kv, or `-- --kv` among the serve flags (the two must agree), checked against the
+    model's entry on nc cards (caminus.arch.Arch.kv_check: only qwen3-30b-a3b takes q8) before any card is picked; None when
+    neither is given (the server's default, f16)"""
+    given = _serve_arg(extra, '--kv')
+    if kv and given and kv != given:
+        raise ManageError(f'{m.name}: --kv {kv} and the serve flag --kv {given} disagree')
+    kv = kv or given
+    if kv is None:
+        return None
+    try:
+        from .. import arch
+        arch.lookup(m.arch).variant(nc).kv_check({'kv': kv}, who=m.name)
+    except ValueError as ex:
+        raise ManageError(str(ex)) from None
+    return kv
+
+
 def serve_argv(m, e, name, port, ctx=None, extra=()):
     """caminus serve's flags for catalog model m (model_entry e) as server `name`: the model's first file, the port, a cache
     and a flight directory of its own; its drafter's file when its architecture loads one (caminus.arch; --no-drafter when
@@ -477,7 +501,7 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
 
 
 def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None,
-              cards=None):
+              cards=None, kv=None):
     if models.paused(model_name):
         raise ManageError(models.paused(model_name))
     if model_name not in models.BY_NAME:
@@ -499,7 +523,10 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
         except ValueError as ex:
             raise ManageError(f'{m.name}: {ex}') from None
         extra = list(extra) + ['--cards', str(nc)]
-    devs = devs_override or pick_cards(m, e, card, held, ctx=ctx, cards=nc)
+    kv = start_kv(m, nc, kv, extra if argv_override is None else argv_override)
+    if kv is not None and argv_override is None and _serve_arg(extra, '--kv') is None:
+        extra = list(extra) + ['--kv', kv]
+    devs = devs_override or pick_cards(m, e, card, held, ctx=ctx, cards=nc, kv=kv)
     busy = busy_elsewhere(devs)
     if busy:
         raise ManageError(f'VRAM in use on {", ".join(busy)} by a process Caminus did not start: stop it first')
@@ -525,7 +552,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
         p = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=g, stderr=subprocess.STDOUT, start_new_session=True)
     s = dict(name=name, model=m.name, path=e['path'], port=port, devices=devs, card_names=[cs.get(i, str(i)) for i in devs],
              pcis=[view[i]['pci'] for i in devs],
-             argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias)
+             argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias, **({'kv': kv} if kv else {}))
     with open(os.path.join(d, 'server.json'), 'w') as f:
         json.dump(s, f, indent=1)
     log(f"{name}: starting {m.name} on {'+'.join(s['card_names'])} at http://127.0.0.1:{port} (log: caminus logs {name})")
@@ -598,6 +625,8 @@ def cmd_start(argv):
                     'thinkingcap / qwen3-30b-a3b on two cards, tensor parallel)')
     ap.add_argument('--port', type=int)
     ap.add_argument('--ctx', help='auto (default: the largest context that fits) or a number of positions')
+    ap.add_argument('--kv', choices=('f16', 'q8'), help='the KV cache: f16 (the default) or q8 (8-bit rows, about half the memory '
+                    'per position: qwen3-30b-a3b on one card or two; caminus serve --kv)')
     ap.add_argument('--team', choices=sorted(TEAMS))
     ap.add_argument('--no-wait', action='store_true', help='return once the server is launched (caminus ps shows it loading)')
     ap.add_argument('--json', action='store_true')
@@ -620,7 +649,7 @@ def cmd_start(argv):
                 notes.append(f"{role}: {model_name} on {'+'.join(s['card_names'])} :{s['port']}")
             return '; '.join(notes)
         s = start_one(a.model, name=a.name, card=a.card, port=a.port, ctx=a.ctx, extra=extra, wait=not a.no_wait, log=say,
-                      cards=a.cards)
+                      cards=a.cards, kv=a.kv)
         return f"{s['name']}: {s['model']} on {'+'.join(s['card_names'])} at http://127.0.0.1:{s['port']}"
     return run_action(a, go)
 

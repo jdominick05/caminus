@@ -129,6 +129,31 @@ Gate 2 must hold at every accepted row, the rejected tails and grids 3/6/7 (the 
 `greedy_sha256` and `sampled_sha256` with the `--draft off` run. The two `_tp_ver` objects are in `device/kernels.py`'s
 runtime set (`tests/packaging/test_runtime_kernels.py`). A plain two-card measurement passes `--draft off`.
 
+## Qwen3-30B-A3B's 8-bit KV cache, served
+
+`caminus serve --kv q8` ([q8-kv.md](q8-kv.md#serving-qwen3-30b-a3b-with---kv-q8)). CPU: the two Q8 engine suites run
+the park path on the byte rows and the format mismatch both ways (`tests/engine/kv_park_rt.py`):
+
+```bash
+python -I tests/engine/test_q3moe_kvq8_cpu.py --scratch SCRATCH
+python -I tests/engine/test_q3moe_tp_kvq8_cpu.py --scratch SCRATCH
+```
+
+Served, each under the guard (the one-card runs on the XTX), each with a fresh scratch directory (the prompts are fixed:
+an earlier run's park would be restored):
+
+```bash
+# 1. one card: /props names q8, the Q8 decode objects loaded (not their F16 bases), own imports, the park restored
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR1 --card 0 --kv q8 \
+  --block-imports gguf,tokenizers --restart
+# 2. two cards: the same
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR2 --card 0,1 \
+  --cards 2 --kv q8 --block-imports gguf,tokenizers --restart
+# 3. the mismatch: an F16 server parks (its parks must be on disk), a Q8 server on the same directories reads the long
+#    prompt from cold and leaves those parks on disk
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR3 --card 0 --restart --restart-kv q8
+```
+
 ## The accuracy rules
 
 - **Bitwise:** a change to the engine must leave logits and routing bitwise equal to the stored references, across grid

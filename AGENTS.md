@@ -122,15 +122,21 @@ CLAUDE.md imports this file.
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
   count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename. Qwen3-30B-A3B's is
-  `k3_q3m_lean_kvq8` (+ `q3m_prefill_kvq8` for the prefill's rows and attention; `Q3MoEOne(q8=True)`, not served): rows
+  `k3_q3m_lean_kvq8` (+ `q3m_prefill_kvq8` for the prefill's rows and attention; `Q3MoEOne(q8=True)`, served by
+  `caminus serve --kv q8`): rows
   that encode the F16 object's halves with K (and q) through the head's Hadamard128 (`kernels/own_kv_rot128.h`, reference
   `caminus.ref_kv.hadamard128`; V unrotated), its statements under `K3_Q3M_KV_Q8` / `Q3P_KV_Q8` with the F16 text in
   `#else`; its module file also defines `K3_Q3M_ADD_RMS_PIN` (OP_OWN_ADD_RMS16's counts pinned as scalars) and
   OP_OWN_ATTS pins its own counts under `K3_Q3M_KV_Q8`: 19 spilled scalars against the F16 object's 53, which keeps its
   code. Its two-card form is `k3_q3m_lean_tp_kvq8` (the same two defines over `k3_q3m_lean_tp.hip`; `k3.Q3M_TP_OF` and
   `Q3M_KV_Q8_BASE` both list it; `Q3MoETP(q8=True)`, its prefill `Q3MPrefillTP` on `q3m_prefill_kvq8`'s kernels at each
-  card's local shapes; not served): 33 spilled scalars against `k3_q3m_lean_tp`'s 66. Every registry entry but the two
-  qwen3moe ones refuses `opt['kv'] = 'q8'` (`Arch.kv_check`).
+  card's local shapes; `--cards 2 --kv q8`): 33 spilled scalars against `k3_q3m_lean_tp`'s 66. All three Q8 objects are in
+  the installed runtime set. `caminus serve --kv {f16,q8}` (default f16; `caminus start --kv`, `caminus fit --kv`) sets
+  `opt['kv']`; `serve.cli.recipe` calls `Arch.kv_check`, so every registry entry but the two qwen3moe ones refuses
+  `q8` before placement, naming the model that takes it. `f16` selects nothing on an entry without the choice: the
+  GGUF engines keep their own q8_0 cache (`Arch.kv_fixed`), the dense line F16. `/props` (`caminus.kv_cache`) and
+  `/caminus/status` report the built engine's cache (`arch.kv_cache_of`); the engine key's `tp.kv` and module keep a
+  park of one format from ever being offered to the other (`tests/engine/kv_park_rt.py`).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them
@@ -151,7 +157,8 @@ CLAUDE.md imports this file.
   `caminus serve --cards 2` through `arch.Q3MoETP` (`TWO_CARD['qwen3moe']`; one card stays the default, the picker offers
   two for `Q3MoETP.two_card_models`): card 0 is the bigger card (placement's order) and takes 512 of each expert's 768
   rows, a smaller card 0 is refused (`pair_refusal`), max_ctx auto capped at the file's 40,960; both objects
-  (`k3_q3m_lean_tp`, `q3m_prefill_tp`) are in the installed runtime set; `tests/engine/test_q3moe_tp_cpu.py`, GPU gate
+  (`k3_q3m_lean_tp`, `q3m_prefill_tp`) are in the installed runtime set, with its Q8 KV build (`--kv q8`);
+  `tests/engine/test_q3moe_tp_cpu.py`, GPU gate
   `tests/engine/test_q3moe_tp.py`). Its batched
   prefill is `prefill/q3m_tp.py` (`Q3MPrefillTP`: the one-card chunk per card on its slices and KV rows, 2 exchanges per
   layer through `prefill/xchg.py` in micro-chunks so an exchange overlaps the next piece's compute; the FFN partial
@@ -249,6 +256,7 @@ tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # deco
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1 --cards 2   # its two-card form (swift-1.5, thinkingcap, qwen3-30b-a3b)
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --kv q8 --restart   # qwen3-30b-a3b's 8-bit KV cache (a fresh DIR; --restart-kv: a park of the other format is not offered)
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load (qwen35 or qwen3moe), read back bit for bit
 CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 300 python -I tools/gates/h2d_pattern.py --seconds 180

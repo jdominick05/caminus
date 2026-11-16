@@ -97,7 +97,9 @@ def main(argv=None):
     # picks the engine, its prompt path and drafter), the cache in the scratch directory (no retention eviction)
     T = int(eng.get('T', 4))
     opt = dict(model=model, max_ctx=int(eng['max_ctx']), chunk=2048, no_drafter=not eng.get('drafter', True),
-               drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER)
+               drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER,
+               # (a Q8 KV server's bundle: its key names the format (caminus serve --kv q8), so the engine is built with it)
+               kv='q8' if ((eng.get('key') or {}).get('tp') or {}).get('kv') else 'f16')
     m, pf, df, dr = A.build(opt, log=print, T=T)
     for d in m.devs: torch.cuda.synchronize(d)
     pc = PC.PromptCache(m, pf, dr, cache_dir=cdir, retention_days=1e6)

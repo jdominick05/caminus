@@ -269,6 +269,72 @@ class ContextFit(unittest.TestCase):
                      patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
                     self.assertEqual(A.auto_max_ctx(ropt, log=lambda *a, **kw: None), want)
 
+    def test_kv_q8_projects_q8_rows_and_other_models_refuse_it(self):
+        # caminus serve / fit --kv: f16 by default; q8 for qwen3moe (one card here: the same recipe and placement) projects
+        # the Q8 rows, so a card whose room holds the Q8 cache at the file's 40,960 but not the F16 one gets the full
+        # context with q8 and less without; the cap stays the file's context_length. Every other model is refused in the
+        # recipe, before any placement, naming the model that takes q8
+        self.assertEqual(cli.parse([])['kv'], 'f16')
+        self.assertEqual(cli.parse(['--kv', 'q8'])['kv'], 'q8')
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.parse(['--kv', 'q4'])
+        kvo = next(o for o in cli.options_json() if o['dest'] == 'kv')
+        self.assertEqual((kvo['flag'], kvo['default'], kvo['choices']), ('--kv', 'f16', ['f16', 'q8']))
+        sys.path.insert(0, str(Path(__file__).resolve().parent / 'engine'))
+        import tiny_q3m
+        path = SCRATCH / 'fit-q3moe-kv.gguf'
+        tiny_q3m.write(str(path), n_ctx=40960)
+        argv = ['--model', str(path), '--draft', 'off']
+        opt16, opt8 = cli.parse(argv), cli.parse([*argv, '--kv', 'q8'])
+        A = cli.recipe(opt16, log=lambda *a, **kw: None)
+        self.assertIs(cli.recipe(opt8, log=lambda *a, **kw: None), A)
+        self.assertIs(A, arch.ARCHS['qwen3moe'])
+        need16, need8 = A.auto_need(opt16, 4)[3], A.auto_need(opt8, 4)[3]
+        # (the room halfway between F16's 36,864 and 40,960 positions; the tiny file's Q8 cache at 40,960 is below both)
+        room = (need16(36864)[0] + need16(40960)[0]) / 2
+        self.assertLess(need8(40960)[0], room)
+        dev = SCRATCH / 'kv-card'
+        dev.mkdir()
+        (dev / 'mem_info_vram_used').write_text(str(1 << 20))
+        reserve = capacity.DISPLAY_RESERVE_MIB
+        line = room + 1 + capacity.MARGIN_MIB + reserve + capacity.CACHE_WORK_MIB[0] + A.slack_mib(opt8)
+        card = dict(dev=str(dev), line_mib=line, display=True, pci='0000:01:00.0', hip=0,
+                    status='supported', total_mib=24576, label='XTX', card='card0')
+        got = {}
+        for kv in ('f16', 'q8'):
+            stdout = io.StringIO()
+            with patch.object(host, 'gpus', return_value=[card]), \
+                 patch.object(capacity, 'caps_mib', side_effect=AssertionError('GPU query forbidden')), \
+                 patch.object(A, 'build', side_effect=AssertionError('engine build forbidden')), \
+                 contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.fit_report([*argv, '--kv', kv, '--json']), 0)
+            got[kv] = json.loads(stdout.getvalue())
+        self.assertEqual(got['q8']['max_ctx'], 40960)
+        self.assertEqual(got['f16']['max_ctx'], 36864)
+        self.assertEqual(got['q8']['need_mib'], need8(40960))
+        self.assertEqual(got['f16']['need_mib'], need16(got['f16']['max_ctx']))
+        caps, reserves = [(line - capacity.MARGIN_MIB, 1.0)], [reserve]
+        with patch.object(capacity, 'caps_mib', return_value=caps), patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
+            self.assertEqual(A.auto_max_ctx(opt8, log=lambda *a, **kw: None), 40960)          # (serve's runtime route: the same)
+            self.assertEqual(A.auto_max_ctx(opt16, log=lambda *a, **kw: None), got['f16']['max_ctx'])
+        # another model: refused in the recipe (fit reports no maximum), the message names what takes q8
+        coder = SCRATCH / 'kv-coder.gguf'
+        spec = importlib.util.spec_from_file_location('fit_gguf_fixture_kv', Path(__file__).with_name('test_arch.py'))
+        fixture = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ): spec.loader.exec_module(fixture)
+        fixture.write_gguf(str(coder), 'qwen4exp', {'qwen4exp.context_length': 262144}, [('token_embd.weight', 512, 16)])
+        with patch.object(host, 'place') as place:
+            with self.assertRaisesRegex(ValueError, r"kv 'q8': .*qwen3-30b-a3b \(one card or two\)"):
+                cli.recipe(cli.parse(['--model', str(coder), '--kv', 'q8']), log=lambda *a, **kw: None)
+            place.assert_not_called()
+        self.assertIs(cli.recipe(cli.parse(['--model', str(coder)]), log=lambda *a, **kw: None), arch.CODER)   # (f16, the default: no refusal)
+        stdout = io.StringIO()
+        with patch.object(host, 'gpus', return_value=[card]), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report(['--model', str(coder), '--kv', 'q8', '--json']), 1)
+        report = json.loads(stdout.getvalue())
+        self.assertIsNone(report['max_ctx'])
+        self.assertIn("kv 'q8'", report['error'])
+
     def test_query_errors_have_no_invented_maximum_and_tp_drafting_needs_a_two_card_verify_object(self):
         for argv in (['--model', str(SCRATCH / 'missing.gguf')],):
             stdout = io.StringIO()

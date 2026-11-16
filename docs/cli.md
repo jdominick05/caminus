@@ -21,6 +21,7 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 |---|---|
 | `--card N` | Use card N (as `caminus ps` numbers them) instead of choosing. |
 | `--ctx N` | A context of N tokens instead of the largest that fits. |
+| `--kv q8` | `qwen3-30b-a3b` only: the 8-bit KV cache instead of F16, the default ([models](models.md#the-8-bit-kv-cache-qwen3-30b-a3b)). Other models refuse it before a card is picked. |
 | `--name NAME` | Call the server NAME (default: the model's name). |
 | `--port N` | Listen on port N (default: the first free port from 8092). |
 | `--team brain-hands` | Start AREX-2 and Qwen3.6 together on two cards ([the team](panel.md#the-brain--hands-team)); paused with Qwen3.6 for this release. |
@@ -41,7 +42,8 @@ The report gives the largest native context that fits, the chosen cards, and pro
 It includes checkpoint slots and drafter buffers. An unavailable projection returns an error and no maximum.
 Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
 the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
-F16/Q8 comparison and context choices in the panel remain separate integration work.
+`--kv q8` reports the 8-bit cache's context for `qwen3-30b-a3b` (the same option as `caminus serve`); a side-by-side
+F16 / Q8 report and the panel's choices are separate work.
 
 ## Qwen Code
 

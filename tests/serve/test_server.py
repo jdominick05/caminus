@@ -651,6 +651,17 @@ class TestCompletionsAndRoutes(unittest.TestCase):
         self.assertIn('k3-coder-nothink', ids)
         st, h, data = U.request(srv, 'GET', '/props')
         self.assertEqual(json.loads(data)['n_ctx'], srv.max_ctx)
+        # (the KV cache the engine holds: F16 unless caminus serve sets the built engine's, arch.kv_cache_of)
+        self.assertEqual(json.loads(data)['caminus']['kv_cache'], {'type': 'f16', 'format': 'f16'})
+        keep = srv.kv_cache
+        srv.kv_cache = {'type': 'q8', 'format': 'q8_0-v1:fixture'}
+        try:
+            st, h, data = U.request(srv, 'GET', '/props')
+            self.assertEqual(json.loads(data)['caminus']['kv_cache'], srv.kv_cache)
+            st, h, data = U.request(srv, 'GET', '/caminus/status')
+            self.assertEqual(json.loads(data)['server']['kv_cache'], srv.kv_cache)
+        finally:
+            srv.kv_cache = keep
         st, h, data = U.request(srv, 'GET', '/metrics')
         self.assertIn(b'caminus:worker_total{counter="jobs"}', data)
         self.assertIn(b'llamacpp:prompt_tokens_total', data)

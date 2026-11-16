@@ -17,10 +17,15 @@ checkout fallback or kernel_dir override); the own-code gate requires matching c
   surface   /metrics (llamacpp: names and caminus: series), /caminus/status (one card, its name and guard line), no request
             text in the metrics / status / slots / flight files (a marker string), llm-top -once (--llm-top BIN)
   abort     a stream closed by the client after a few events, then a request: HTTP 200
+  kv        (--kv f16 | q8: caminus serve --kv) /props caminus.kv_cache names that type, and the decode objects the server
+            loaded are that cache's (q8: a k3_*_kvq8 object and not its F16 base; f16: no *_kvq8 object)
   shutdown  SIGTERM: exit 0 and the shutdown park line; --restart: a second server on the same directories, the long prompt
-            again: served from the disk tier (cached tokens > 0)
+            again: served from the disk tier (cached tokens > 0); with --restart-kv another format than --kv (the park's),
+            the first server's parks must be on disk, the second server's /props names its own format, the long prompt is
+            read again from cold and those parks stay on disk (the other format's park is never offered: the engine key
+            carries the format)
 usage: tools/guard.sh LOG SECS python -I tools/serve_smoke1.py --model GGUF --scratch DIR [--card 1] [--max-ctx 32768]
-           [--alias qwen3.6] [--llm-top BIN] [--restart]
+           [--alias qwen3.6] [--llm-top BIN] [--restart] [--kv f16|q8] [--restart-kv f16|q8]
 Prints PASS / FAIL lines and RESULT; exit 0 only if every check passed. The scratch directory is refused under
 ~/.cache/caminus, $ARTIFACTS or /tmp (serve_smoke.safe_dir)."""
 import argparse, glob
@@ -51,10 +56,11 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 
 
 class Server1:
-    """Checkout or installed caminus on the selected cards, output followed through shutdown/restart."""
-    def __init__(self, tag, a):
+    """Checkout or installed caminus on the selected cards, output followed through shutdown/restart. kv: this server's
+    --kv when it differs from a.kv (the --restart-kv server)"""
+    def __init__(self, tag, a, kv=None):
         self.tag, self.lines, self.port, self.ready = tag, [], None, threading.Event()
-        cmd = server_command(a)
+        cmd = server_command(a, kv=kv)
         print(f'{tag}: {"installed" if S.INSTALLED else "checkout"} HIP_VISIBLE_DEVICES={a.card} '
               f'{" ".join(c for c in cmd[2:] if not c.startswith("import sys"))}', flush=True)
         self.t0 = time.time()
@@ -83,13 +89,16 @@ class Server1:
         return self.p.returncode
 
 
-def server_command(a):
-    """Same serve arguments in both modes; installed helper never adds the checkout to sys.path."""
+def server_command(a, kv=None):
+    """Same serve arguments in both modes; installed helper never adds the checkout to sys.path. kv: --kv for this server
+    (default a.kv; none given: the server's default)"""
     argv = ['--port', '0', '--model', a.model, '--max-ctx', str(a.max_ctx),
             '--cache-dir', os.path.join(a.scratch, 'kv'), '--flight-dir', os.path.join(a.scratch, 'flight')]
     if a.alias: argv += ['--model-alias', a.alias]
     argv += ['--cards', str(a.cards)]
     if a.draft: argv += ['--draft', a.draft]
+    kv = kv or getattr(a, 'kv', None)
+    if kv: argv += ['--kv', kv]
     argv += list(getattr(a, 'extra', None) or ())   # (more serve flags from a caller, e.g. a benchmark's --no-disk-cache)
     if S.INSTALLED:
         cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'serve_smoke_installed.py')]
@@ -218,7 +227,12 @@ def main():
                          'so two runs (off vs a drafter) with the same fixed prompts compare token for token')
     ap.add_argument('--side-question', action='store_true', help='also a side question (Qwen Code\'s /btw prompt) between two '
                     'turns of a chat: it runs in the side slot and the next turn continues the main slot')
+    ap.add_argument('--kv', choices=('f16', 'q8'), default=None, help='the KV cache the server runs (caminus serve --kv); '
+                    '/props must name it and the loaded decode objects must be its')
+    ap.add_argument('--restart-kv', choices=('f16', 'q8'), default=None, help='with --restart: the second server\'s --kv. '
+                    'Another format than the first server\'s: the long prompt must come back cold (the park is not offered)')
     a = ap.parse_args()
+    if a.restart_kv and not a.restart: ap.error('--restart-kv needs --restart')
     a.cards = a.cards or len(str(a.card).split(','))
     a.scratch = S.safe_dir(a.scratch); os.makedirs(a.scratch, mode=0o700, exist_ok=True)
     S.NUMBERS['installed_package'] = S.INSTALLED
@@ -238,6 +252,11 @@ def main():
     check(st == 200 and st2 == 200 and st4 == 200 and isinstance(props, dict) and props.get('engine') == 'caminus' and alias in ids
           and f'{alias}-nothink' in ids, f'ids: /health {st}, /props {st2} (engine {props.get("engine") if isinstance(props, dict) else None}, '
                                          f'alias {alias}), /v1/models {ids}, /slots {st4}')
+    kc = ((props or {}).get('caminus') or {}).get('kv_cache') if isinstance(props, dict) else None
+    S.NUMBERS['kv_cache'] = kc
+    if a.kv:
+        check(isinstance(kc, dict) and kc.get('type') == a.kv and kc.get('format'),
+              f'kv: /props caminus.kv_cache {kc} (--kv {a.kv})')
     marker = S.MARK
     # greedy, no thinking
     r, m = chat(port, f'{alias}-nothink', [{'role': 'user', 'content': f'In one sentence, what does a mutex do? ({marker})'}],
@@ -354,6 +373,12 @@ def main():
         refused = [l for l in srv.lines if 'import refused' in l]
         check(objs and not bad and not refused, f'own code: the server loaded {objs}: no ggml / llama.cpp header in their include '
               f'closures ({bad or "none"}); imports refused by the hook: {len(refused)} ({a.block_imports} never asked for)')
+    if a.kv:   # the decode objects the process loaded are the asked cache's (q8: a k3_*_kvq8 module, never its F16 base)
+        objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []
+        q8d = [o for o in objs if o.startswith('k3_') and o.endswith('_kvq8')]
+        both = [o for o in q8d if o[:-len('_kvq8')] in objs]
+        okk = (bool(q8d) and not both) if a.kv == 'q8' else not any(o.endswith('_kvq8') for o in objs)
+        check(okk, f'kv {a.kv}: loaded objects {objs} (Q8 decode {q8d or "none"}; with their F16 base {both or "none"})')
     # the monitoring surface
     st, met = S.get(port, '/metrics'); st2, status = S.get(port, '/caminus/status'); st3, slots = S.get(port, '/slots')
     cards = (status or {}).get('cards') if isinstance(status, dict) else None
@@ -389,17 +414,37 @@ def main():
     park = [l for l in srv.lines if 'shutdown: park' in l]
     check(rc == 0 and park, f'SIGTERM: exit {rc}; {park[-1].split("caminus serve: ")[-1] if park else "no park line"}')
     if a.restart:
-        srv2 = Server1('restart', a)
+        other = bool(a.restart_kv) and a.restart_kv != (a.kv or 'f16')   # (another KV format than the park's)
+        parks = sorted(glob.glob(os.path.join(a.scratch, 'kv', '*-park.ckv')))
+        if other:   # (a cold restart proves nothing unless the first server parked: its entries must be on disk)
+            check(bool(parks), f'the first server\'s parks on disk before the restart: {len(parks)}')
+        srv2 = Server1('restart', a, kv=a.restart_kv)
         ok = srv2.wait_ready()
-        check(ok, f'restart on the same directories: ready in {getattr(srv2, "load_s", 0):.0f} s')
+        check(ok, f'restart on the same directories{" with --kv " + a.restart_kv if a.restart_kv else ""}: ready in '
+                  f'{getattr(srv2, "load_s", 0):.0f} s')
         if ok:
+            if a.restart_kv:
+                kc2 = ((S.get(srv2.port, '/props')[1] or {}).get('caminus') or {}).get('kv_cache')
+                check(isinstance(kc2, dict) and kc2.get('type') == a.restart_kv, f'restart: /props caminus.kv_cache {kc2} '
+                      f'(--kv {a.restart_kv})')
             r, m = chat(srv2.port, f'{alias}-nothink', lm, temperature=0, max_tokens=64)
             tm = m.get('timings') or {}
-            # (from the disk tier: almost every position cached. A cold rerun means the entry was refused, e.g. the engine key
-            # changed: it hashes the package sources and build/*.hsaco, so editing them during a run makes this fail)
-            check(r['status'] == 200 and m['content'].strip() and (tm.get('cache_n') or 0) >= (tm.get('prompt_n') or 0),
-                  f'restart: the long prompt again: prompt {tm.get("prompt_n")} new, '
-                                                               f'cache {tm.get("cache_n")} (the disk tier: {[l for l in srv2.lines if "disk" in l][-1:]})')
+            disk = [l for l in srv2.lines if 'disk' in l][-1:]
+            if other:
+                # (the park holds the other format's rows: its key differs (tp.kv, the module), so it is never offered and
+                # the prompt is read from cold)
+                kept = [x for x in parks if os.path.exists(x)]
+                check(r['status'] == 200 and m['content'].strip() and not (tm.get('cache_n') or 0) and (tm.get('prompt_n') or 0) > 4000
+                      and parks and kept == parks,
+                      f'restart with another KV format: the long prompt again from cold: prompt {tm.get("prompt_n")} new, cache '
+                      f'{tm.get("cache_n")} (the {a.kv or "f16"} park not offered to a {a.restart_kv} server, its {len(kept)} of '
+                      f'{len(parks)} entries still on disk; {disk})')
+            else:
+                # (from the disk tier: almost every position cached. A cold rerun means the entry was refused, e.g. the engine
+                # key changed: it hashes the package sources and build/*.hsaco, so editing them during a run makes this fail)
+                check(r['status'] == 200 and m['content'].strip() and (tm.get('cache_n') or 0) >= (tm.get('prompt_n') or 0),
+                      f'restart: the long prompt again: prompt {tm.get("prompt_n")} new, '
+                      f'cache {tm.get("cache_n")} (the disk tier: {disk})')
             srv2.stop()
     return finish()
 

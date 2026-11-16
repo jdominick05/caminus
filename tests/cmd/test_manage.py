@@ -271,6 +271,65 @@ def main():
     finally:
         live.kill(); live.wait()
 
+    # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
+    # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props
+    q3 = models.BY_NAME['qwen3-30b-a3b']; sw = models.BY_NAME['swift-1.5']
+    check(manage.start_kv(q3, 1, 'q8', []) == 'q8' and manage.start_kv(q3, 2, None, ['--kv', 'q8']) == 'q8'
+          and manage.start_kv(q3, 1, None, ['--kv=f16']) == 'f16' and manage.start_kv(q3, 1, None, []) is None,
+          'start --kv: qwen3-30b-a3b takes q8 on one card and two (--kv or the serve flag); none given: the server\'s default')
+    refused = []
+    for mm, nc, kv, extra in ((sw, 1, 'q8', []), (sw, 2, None, ['--kv', 'q8']), (models.BY_NAME['coder'], 2, 'q8', []),
+                              (q3, 1, 'q8', ['--kv', 'f16']), (q3, 1, None, ['--kv', 'q4'])):
+        try:
+            manage.start_kv(mm, nc, kv, extra); refused.append((mm.name, kv, extra, 'accepted'))
+        except manage.ManageError as err:
+            if not ("kv 'q8'" in str(err) and 'qwen3-30b-a3b' in str(err) or 'disagree' in str(err) or "'f16' or 'q8'" in str(err)):
+                refused.append((mm.name, kv, extra, str(err)))
+    check(not refused, f'start --kv: q8 refused for swift-1.5 (one card or two) and the Coder, naming the model that takes it; '
+                       f'--kv and the serve flag disagreeing, or another format, refused ({refused or "all refused"})')
+    from caminus import arch as _ar
+    seen = []
+
+    class Rec(_ar.Arch):
+        cards = 1
+        def auto_need(self, opt, slots, cards=None): seen.append(opt.get('kv')); return 40960, [0], 1.0, lambda c: [1.0]
+        def fits(self, opt, cards): seen.append(opt.get('kv')); return True
+        def variant(self, cards): return self
+    real_of = _ar.of
+    _ar.of = lambda path: Rec('rec', 'rec')
+    try:
+        ent = dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={})
+        manage.fits_fn(ent, kv='q8')(dict(line_mib=24000, display=False)); manage.pair_fits(q3, ent, cards=2, kv='q8')([{}, {}])
+        manage.fits_fn(ent)(dict(line_mib=24000, display=False))
+    finally:
+        _ar.of = real_of
+    check(seen == ['q8', 'q8', 'q8', 'f16', 'f16'], f'start --kv: the one-card and two-card fits project the asked cache (opt kv {seen})')
+    sv = dict(name='kvq8', model='qwen3-30b-a3b', path='/m/q3.gguf', port=18099, devices=[0], card_names=['XTX'], argv=[],
+              guard_pid=1, log=os.path.join(S, 'none.log'), started=time.time(), alias='qwen3-30b-a3b', kv='q8')
+    props = {'n_ctx': 40960, 'model_alias': 'qwen3-30b-a3b', 'caminus': {'kv_cache': {'type': 'q8', 'format': 'q8_0-v1:x'}}}
+    real_alive, real_http = manage.alive, manage.http_json
+    manage.alive = lambda pid: True
+    manage.http_json = lambda url, timeout=1.0: (200, props if url.endswith('/props') else {'status': 'ok'})
+    try:
+        v = manage.server_view(sv)
+        props_f16 = dict(props, caminus={})                     # (an older server: no kv_cache key -> nothing shown)
+        manage.http_json = lambda url, timeout=1.0: (200, props_f16 if url.endswith('/props') else {'status': 'ok'})
+        v_old = manage.server_view(sv)
+        buf = io.StringIO()
+        real_all = manage.all_servers
+        manage.all_servers = lambda: [sv]
+        manage.http_json = lambda url, timeout=1.0: (200, props if url.endswith('/props') else {'status': 'ok'})
+        try:
+            with contextlib.redirect_stdout(buf):
+                manage.ROOT = TH.tree(os.path.join(S, 'sysfs-kv'), [TH.card('card1', '0000:03:00.0', TH.XTX, 128, display=True)])
+                manage.cmd_ps([])
+        finally:
+            manage.all_servers = real_all; manage.ROOT = keep
+    finally:
+        manage.alive, manage.http_json = real_alive, real_http
+    check(v['state'] == 'ready' and v['kv'] == 'q8' and v_old['kv'] is None and 'kv q8' in buf.getvalue() and '40,960 ctx' in buf.getvalue(),
+          f'ps: the KV cache from /props (q8; an older server without the key: none shown): {buf.getvalue().splitlines()[:1]}')
+
     # ---- monitor: preserve global RGB/display preferences while routing each server to its own sessions and port
     prefs_dir = os.path.join(S, 'config', 'caminus')
     os.makedirs(prefs_dir, exist_ok=True)

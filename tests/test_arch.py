@@ -12,6 +12,7 @@ import os
 import struct
 import sys
 import time
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'python'))
@@ -297,6 +298,29 @@ def main():
           'cli: --model-alias defaults to the model\'s own id (\'\')')
     check(not any(hasattr(cli, n) for n in ('ONE_CARD_ARCHS', 'TP_ARCHS', 'model_arch', 'build_model', 'auto_max_ctx')),
           'cli: no architecture table or builder of its own')
+    # --kv: f16 by default; q8 only where an entry builds it (the qwen3moe pair); the entries without the choice say what
+    # their engine always holds: the GGUF engines' own 8-bit q8_0 cache (each engine's q8 default is True and the build
+    # passes none), the dense own-code line F16. /props reports the built engine's (arch.kv_cache_of)
+    import ast
+    def q8_default(rel, cls):
+        tree = ast.parse(open(os.path.join(ROOT, 'python', 'caminus', 'engine', rel)).read())
+        fn = next(n for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls for n in c.body
+                  if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+        args = fn.args.args[-len(fn.args.defaults):]
+        return next(ast.literal_eval(d) for a_, d in zip(args, fn.args.defaults) if a_.arg == 'q8')
+    q8s = {n: (a.kv_formats, a.kv_fixed) for n, a in arch.ARCHS.items()}
+    check(cli.parse([])['kv'] == 'f16' and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
+          and q8s == {'qwen4exp': (('f16',), 'q8_0'), 'qwen35moe': (('f16',), 'q8_0'), 'qwen35': (('f16',), 'q8_0'),
+                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen3next': (('f16',), 'q8_0'),
+                      'qwen35-own-tp': (('f16',), None), 'qwen3moe-tp': (('f16', 'q8'), None)}
+          and q8_default('flashnext_tp.py', 'FlashNextTP') is True and q8_default('qwen35_one.py', 'Qwen35One') is True
+          and q8_default('qwen3next_tp.py', 'Qwen3NextTP') is True
+          and q8_default('q3moe_one.py', 'Q3MoEOne') is False and q8_default('q3moe_tp.py', 'Q3MoETP') is False
+          and arch.kv_cache_of(arch.CODER, object()) == {'type': 'q8', 'format': 'q8_0'}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], object()) == {'type': 'f16', 'format': 'f16'}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id='q8_0-v1:x')) == {'type': 'q8', 'format': 'q8_0-v1:x'}
+          and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two)',
+          f'cli: --kv f16 (default) / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
 
     # ---- the Coder's long-context mode (an explicit --max-ctx past its context_length) and --kv-host
     check(cli.parse([])['kv_host'] is False and cli.parse(['--kv-host'])['kv_host'] is True, 'cli: --kv-host (default off)')
