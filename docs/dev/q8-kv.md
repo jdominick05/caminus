@@ -242,7 +242,8 @@ the `--llama` rows given: llama.cpp's q8_0-KV rows (`kv q8_0` in gg_golden's job
 for like bound. `--save-logits` on the F16 run and `--against` on the Q8 run gate the KLD and top-1 agreement between
 the two caches (`tools/gates/kv_against.py`). The bar is the floor rule's shape: our F16 to Q8 mean KLD at most
 llama.cpp's own F16-KV to q8_0-KV mean KLD on the same tokens (`--against-llama` names its F16-KV rows), and top-1
-agreement at most one point below its own. Explicit `--against-kld` / `--against-top1` bars exist for rows without
+agreement at most one point or one row (whichever is more) below its own: on 64 rows one row is 1.56 points, and a bar
+finer than one row is below the measurement's resolution. Explicit `--against-kld` / `--against-top1` bars exist for rows without
 llama.cpp references. An `--against` with no bound is refused. `test_q3moe_one.py --kv q8` gates its mean KLD against the fp32 reference
 below 2.08e-3, the unrotated draft's on that test (1e-3 is the F16 cache's bar). CPU: `tests/engine/test_q3moe_kvq8_cpu.py`, which also checks the
 rotation: H128 / sqrt(128) orthonormal, (H q) . (H k) = q . k on float64 vectors, `hadamard128` within fp32 rounding of
@@ -250,8 +251,10 @@ it with the kernel header's scale literal, a Python lane-by-lane transcription o
 `hadamard128` (it checks the reference, not the compiled code: the device rows checks do that), and the format id's key apart from the unrotated draft's.
 Both RoPE sites round each fma to fp32 and then to fp16 through an opaque copy (`own_kv_f16r`), as the F16 objects do:
 a plain `(_Float16)fmaf(...)` let the backend fuse it into one `v_fma_mix*_f16` (one rounding of the exact value), which
-disagrees with the two-step rounding on about 6e-5 of values, and the transform spreads each such ulp over the head. The rotated objects have not run on a device
-yet. The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
+disagrees with the two-step rounding on about 6e-5 of values, and the transform spreads each such ulp over the head. The rotated objects passed on a device on 2026-11-16: the op test, the one-card decode and the prefill on the XT, and on
+the XTX the G-model gates: mean KLD against the reference 1.15e-3 (128 rows), 3.66e-3 (16,384), 2.35e-3 (40,896), and
+against our own F16 cache 1.19e-3 / 3.57e-3 / 1.87e-3, each below llama.cpp's own F16 to q8_0 cost (4.17e-3 / 6.63e-3 /
+4.24e-3). The unrotated draft passed the op test and the rows checks on the XT and both depth gates on the XTX (16,384 and
 40,896 positions), and failed the 128-token G-model gate: mean KLD 5.40e-3 against float64 (llama.cpp's q8_0 KV
 3.68e-3) and 5.53e-3 against our F16 cache (llama.cpp's own F16 to q8_0 cost 4.17e-3); the rotation is the answer to
 that row.

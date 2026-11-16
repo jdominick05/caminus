@@ -409,7 +409,7 @@ class Q3MoEOne:
     def mark_broken(self, why):
         """a refused Q8 KV encoding: refuse every later pass (reset() keeps this; the server's terminal policy: no retry,
         reset, recovery or park) and raise InvalidKVEncoding"""
-        self.broken = why
+        self.broken, self._broken_error = why, k3.InvalidKVEncoding   # (the cache's terminal check names this class)
         raise k3.InvalidKVEncoding(f'Q3MoEOne: {why}')
 
     def _check(self, tokens, i0, commit, what):
