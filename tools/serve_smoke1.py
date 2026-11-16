@@ -90,6 +90,7 @@ def server_command(a):
     if a.alias: argv += ['--model-alias', a.alias]
     argv += ['--cards', str(a.cards)]
     if a.draft: argv += ['--draft', a.draft]
+    argv += list(getattr(a, 'extra', None) or ())   # (more serve flags from a caller, e.g. a benchmark's --no-disk-cache)
     if S.INSTALLED:
         cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'serve_smoke_installed.py')]
         if a.block_imports:
