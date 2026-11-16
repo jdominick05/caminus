@@ -212,6 +212,63 @@ class ContextFit(unittest.TestCase):
             self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 1)
         self.assertIsNone(json.loads(stdout.getvalue())['max_ctx'])
 
+    def test_qwen3moe_two_card_fit_below_the_file_context_takes_the_largest_step_that_fits(self):
+        # each card's room between need(32768) and need(40960): caminus fit --cards 2 and max_ctx auto report the largest
+        # AUTO_STEP multiple whose projection fits on both cards (below the file's 40,960), not the cap
+        sys.path.insert(0, str(Path(__file__).resolve().parent / 'engine'))
+        import tiny_q3m
+        path = SCRATCH / 'fit-q3moe-tp-step.gguf'
+        tiny_q3m.write(str(path), tp=True, n_ctx=40960)
+        argv = ['--model', str(path), '--cards', '2', '--draft', 'off']
+        opt = cli.parse(argv)
+        A = cli.recipe(opt, log=lambda *a, **kw: None)
+        self.assertIs(A, arch.ARCHS['qwen3moe-tp'])
+        link = dict(gbps=7.9, gts=16.0, width=4)
+        for want in (32768, 36864):
+            with self.subTest(max_ctx=want):
+                self.assertEqual(want % arch.AUTO_STEP, 0)
+                cards = []
+                for i, (label, total) in enumerate((('XT', 20464), ('XTX', 24560))):   # (sysfs order: the XT first)
+                    dev = SCRATCH / f'q3tp-step{want}-card{i}'
+                    dev.mkdir()
+                    (dev / 'mem_info_vram_used').write_text(str(1 << 20))
+                    cards.append(dict(dev=str(dev), line_mib=0, display=label == 'XTX', pci=f'0000:0{3 + 3 * i}:00.0', hip=i,
+                                      status='supported', total_mib=total, label=label, card=f'card{i + 1}', link=link, link_ok=True))
+                pair = [cards[1], cards[0]]                                             # (engine order: the bigger card first)
+                _, _, _, need = A.auto_need(opt, int(opt['auto_cache_slots']), cards=pair)
+                caps, reserves = [], []
+                for k, c in enumerate(pair):
+                    # room halfway between need(want) and need(want + AUTO_STEP) on this card (the per-step gap of the tiny
+                    # file's projection is what the room is placed inside; no fixed pad)
+                    room = (need(want)[k] + need(want + arch.AUTO_STEP)[k]) / 2
+                    reserve = capacity.DISPLAY_RESERVE_MIB if c['display'] else capacity.MARGIN_MIB
+                    c['line_mib'] = room + 1 + capacity.MARGIN_MIB + reserve + capacity.CACHE_WORK_MIB[0] + A.slack_mib(opt)
+                    caps.append((c['line_mib'] - capacity.MARGIN_MIB, 1.0)); reserves.append(reserve)
+                plan = A.context_fit(opt, pair)
+                for k in range(2):
+                    self.assertLess(need(32768)[k], plan.room_mib[k])
+                    self.assertLess(plan.room_mib[k], need(40960)[k])
+                    self.assertLessEqual(need(want)[k], plan.room_mib[k])
+                    self.assertLess(plan.room_mib[k], need(want + arch.AUTO_STEP)[k])
+                stdout = io.StringIO()
+                with patch.object(host, 'gpus', return_value=cards), \
+                     patch.object(capacity, 'caps_mib', side_effect=AssertionError('GPU query forbidden')), \
+                     patch.object(A, 'build', side_effect=AssertionError('engine build forbidden')), \
+                     contextlib.redirect_stdout(stdout):
+                    self.assertEqual(cli.fit_report([*argv, '--json']), 0)
+                    placed = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
+                report = json.loads(stdout.getvalue())
+                self.assertTrue(report['ok'])
+                self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
+                self.assertEqual(report['max_ctx'], want)
+                self.assertLess(report['max_ctx'], 40960)
+                self.assertEqual(report['need_mib'], list(need(want)))
+                # the runtime route (max_ctx auto in serve, the placement's split stored) takes the same step
+                ropt = dict(opt, placement=dict(split=placed['split']))
+                with patch.object(capacity, 'caps_mib', return_value=caps), \
+                     patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
+                    self.assertEqual(A.auto_max_ctx(ropt, log=lambda *a, **kw: None), want)
+
     def test_query_errors_have_no_invented_maximum_and_tp_drafting_needs_a_two_card_verify_object(self):
         for argv in (['--model', str(SCRATCH / 'missing.gguf')],):
             stdout = io.StringIO()

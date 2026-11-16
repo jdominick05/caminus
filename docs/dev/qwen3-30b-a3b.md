@@ -320,7 +320,8 @@ reads), with their predictions written down before the first timed run, and meas
 ## Limits
 
 - One card with 24 GB: the full 40,960-token context needs 22.4 GB. A 20 GB card can't hold 32,768 tokens of it, which
-  is the server's minimum.
+  is the server's minimum. Two cards are offered too (`--cards 2`, an XTX + XT: the bigger card first); one card stays
+  the default. See [models](../models.md).
 - One model file is tested: `Qwen/Qwen3-30B-A3B-GGUF`, `Qwen3-30B-A3B-Q4_K_M.gguf`. The kernels cover Q4_K and Q6_K.
 - Speculative decoding is measured, not enabled (see above): `caminus serve` decodes this model one token per pass.
 - One machine. Numbers from other cards are welcome.

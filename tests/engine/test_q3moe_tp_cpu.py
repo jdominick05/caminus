@@ -24,6 +24,11 @@ calls (every tensor in host memory; nothing is launched).
   - the prompt cache on it (caminus serve --cards 2): the checkpoint layout holds each card's own KV rows (its kv heads),
     no recurrent state, a slot within the registry's per-card slot projection; the cache key carries the two-card module,
     both devices and the split, so a one-card entry on the same cache directory never matches
+  - the cache round trip on it (PromptCache on the engine's own KV views, host memory): each (card, layer) filled with its
+    own bytes; the tail row back from a checkpoint slot (restore() picks 'vram'), every row back from a park after the
+    rows are cleared (restore() picks 'disk'), and again into a new engine and cache on the same directory (a restart),
+    compared byte for byte per card and layer; negative controls: the unpark with card 0's and card 1's reads swapped on
+    one layer, or one card's layer read one row late, differs in exactly those views
   - the imports: the engine imports with gguf-py and tokenizers refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q3moe_tp_cpu.py --scratch DIR"""
@@ -358,6 +363,103 @@ check(key['module'] == 'k3_q3m_lean_tp' and key['tp']['devices'] == [0, 1] and k
       'cache key: the two-card module, both devices and the split (exp_rows, kv_heads, vocab rows): a one-card park on the '
       'same cache directory (caminus start --cards 1 / 2 share it) is never matched')
 del m3
+
+# ---- the cache round trip on it: each card's KV rows through a checkpoint slot, a park and an unpark after a restart ---------
+# (the server's own path: PromptCache.commit / extend / restore / park on the real engine's KV views. Every (card, layer)
+# gets its own random bytes, and both cards' rows have the same size, so only the bytes catch a swap or a one-row offset)
+RT_CTX, RT_N, RT_MORE = 256, 240, 12               # (n / PREFILL_TOK_S > a disk load's fixed 0.05 s: restore() picks the disk)
+m5 = Q3MoETP(P_T, devices=(0, 1), max_ctx=RT_CTX, vram_check=False)
+m6 = Q3MoETP(P_T, devices=(0, 1), max_ctx=RT_CTX, vram_check=False)   # (the engine after a restart: built now, its KV zeros)
+_is_cuda = torch.Tensor.is_cuda
+torch.Tensor.is_cuda = property(lambda self: False)   # (the segment copies: host tensors, no device stream or event)
+try:
+    rt_dir = os.path.join(A.scratch, 'cache-tp')
+    rt_ids = [int(x) for x in np.random.default_rng(5).integers(0, info['V'], RT_N + RT_MORE)]
+
+    def rt_cache(eng):
+        pf = _NS(m=eng, numerics=lambda: dict(q='x'), crossover=8)
+        return _prompt.PromptCache(eng, pf, None, cache_dir=rt_dir, n_slots=2, vram_check=False, side_rows=0, min_free_gb=0,
+                                   key=_prompt.engine_key(eng, pf, build='fixture'))
+
+    def rt_rows(eng, c, il, a, b):
+        pb = _prompt.Layout(eng).pb[c]
+        return _prompt._u8(eng.state[(c, il, 'kv')])[a * pb:b * pb]
+
+    def rt_fill(eng, a, b, salt):
+        for c in (0, 1):
+            for il in range(eng.nl):
+                v = rt_rows(eng, c, il, a, b)
+                v.copy_(torch.from_numpy(np.random.default_rng((salt, c, il)).integers(0, 256, v.numel(), dtype=np.uint8)))
+
+    def rt_diff(eng, ref, a, b):
+        """the (card, layer) pairs whose rows [a, b) differ from ref"""
+        pb = _prompt.Layout(eng).pb
+        return [(c, il) for c in (0, 1) for il in range(eng.nl)
+                if not torch.equal(rt_rows(eng, c, il, a, b), ref[c, il][a * pb[c]:b * pb[c]])]
+
+    L5 = _prompt.Layout(m5)
+    pc5 = rt_cache(m5)
+    rt_fill(m5, 0, RT_N, 1)                                   # (as a prefill of RT_N tokens would leave the rows)
+    ref = {(c, il): rt_rows(m5, c, il, 0, RT_N).clone() for c in (0, 1) for il in range(m5.nl)}
+    check(L5.pb[0] == L5.pb[1] and not L5.state[0] and not L5.state[1] and len({bytes(t.numpy()) for t in ref.values()}) == len(ref),
+          f'round trip: {RT_N} positions, each of the {len(ref)} (card, layer) KV views its own bytes, the same row size on both cards '
+          f'({L5.pb} B), no recurrent state')
+    pc5.commit(rt_ids[:RT_N], dict(i0=RT_N, commit=1), checkpoint=True)     # (a checkpoint slot: the T = 1 tail row RT_N - 1)
+    rt_fill(m5, RT_N, RT_N + RT_MORE, 2)
+    pc5.extend(rt_ids, dict(i0=RT_N + RT_MORE, commit=1))
+    for c in (0, 1):
+        for il in range(m5.nl): rt_rows(m5, c, il, RT_N - 1, RT_N).zero_()
+    r = pc5.restore(rt_ids[:RT_N])
+    d_slot = rt_diff(m5, ref, 0, RT_N)
+    check(r['source'] == 'vram' and r['cached'] == RT_N and r['st'] == dict(i0=RT_N, commit=1) and not d_slot,
+          f'checkpoint slot: the tail row {RT_N - 1} of every card and layer, cleared, comes back from the slot ({r["source"]}, '
+          f'{r["cached"]} positions); rows [0, {RT_N}) equal per card and layer (differ: {d_slot})')
+    nm = pc5.park()
+    check(nm is not None and pc5.park_error is None, f'park: the live state ({RT_N}, 1) written ({nm})')
+    for c in (0, 1):
+        for il in range(m5.nl): rt_rows(m5, c, il, 0, RT_CTX).zero_()
+    pc5.reset()
+    r = pc5.restore(rt_ids[:RT_N])
+    d_disk = rt_diff(m5, ref, 0, RT_N)
+    check(r['source'] == 'disk' and r['cached'] == RT_N and not d_disk,
+          f'unpark in the same process: every KV row cleared and the slots dropped, restore() reads the entry ({r["source"]}, '
+          f'{r["cached"]} positions); rows [0, {RT_N}) equal per card and layer (differ: {d_disk})')
+    pc5.close(); del pc5, m5
+    # a restart: a new engine (its KV zeros) and a new cache on the same directory, as caminus serve --cards 2 starts again
+    check(all(not rt_rows(m6, c, il, 0, RT_CTX).any() for c in (0, 1) for il in range(m6.nl)), 'the new engine\'s KV rows are zeros')
+    pc6 = rt_cache(m6)
+    r = pc6.restore(rt_ids[:RT_N])
+    d_restart = rt_diff(m6, ref, 0, RT_N)
+    check(r['source'] == 'disk' and r['cached'] == RT_N and r['st'] == dict(i0=RT_N, commit=1) and pc6.live_tokens() == rt_ids[:RT_N]
+          and not d_restart,
+          f'unpark after a restart: a new engine and cache on the same directory read the entry ({r["source"]}, {r["cached"]} '
+          f'positions, state {r["st"]}); rows [0, {RT_N}) equal per card and layer (differ: {d_restart})')
+    # negative controls: the same unpark with the disk reads misdirected (card 0 and card 1 swapped on layer 0; card 1's layer
+    # 1 one row late): the comparison names exactly those views
+    real_read = pc6.store.read
+
+    def misread(how):
+        def read(name, h, wanted):
+            w = dict(wanted)
+            if 'kv0.c0' in w and how == 'swap': w['kv0.c0'], w['kv0.c1'] = wanted['kv0.c1'], wanted['kv0.c0']
+            if 'kv1.c1' in w and how == 'offset':
+                pb = L5.pb[1]; n = wanted['kv1.c1'][0].numel()
+                w['kv1.c1'] = [_prompt._u8(m6.state[(1, 1, 'kv')])[pb:pb + n]]
+            return real_read(name, h, w)
+        return read
+
+    seen = {}
+    for how, want in (('swap', [(0, 0), (1, 0)]), ('offset', [(1, 1)])):
+        for c in (0, 1):
+            for il in range(m6.nl): rt_rows(m6, c, il, 0, RT_CTX).zero_()
+        pc6.reset(); pc6.store.read = misread(how)
+        try: r = pc6.restore(rt_ids[:RT_N])
+        finally: pc6.store.read = real_read
+        seen[how] = (r['source'], rt_diff(m6, ref, 0, RT_N))
+        check(seen[how] == ('disk', want), f'negative control ({how}): the unpark with misdirected reads differs in {seen[how][1]} (want {want})')
+    pc6.close(); del pc6, m6
+finally:
+    torch.Tensor.is_cuda = _is_cuda
 
 # ---- the own-code path imports no gguf-py ---------------------------------------------------------------------------------
 BLOCK = ("import sys\nclass B:\n    def find_spec(self, name, path=None, target=None):\n"
