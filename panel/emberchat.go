@@ -34,6 +34,7 @@ type residentChat struct {
 	seq, rendered, renderWidth              int
 	content                                 string
 	markdown                                *glamour.TermRenderer
+	calls                                   map[string]callInfo // each tool call's arguments by id: its result's card names what it acted on
 	question                                *emberReq
 	questionChoice                          int
 	questionCustom                          bool
@@ -356,7 +357,7 @@ func (m *emberModel) syncChat() {
 		m.chat.sel = chatSelection{} // and the lines a selection pointed at are gone
 	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
-		// Compact (the default): tool work folds into one line between the agent's words; Ctrl+E draws every card.
+		// Compact (the default): a card per action between the agent's words; Ctrl+O draws everything.
 		if !m.chat.cards && !m.chat.expanded {
 			if e.Kind == "assistant" {
 				// its words first (they close the line above them), then its calls start the next line
@@ -366,6 +367,15 @@ func (m *emberModel) syncChat() {
 				}
 				m.chat.fold(e)
 				continue
+			}
+			if e.Kind == "tool_result" {
+				// every action is its own card (60 calls, 60 cards: emberactions.go)
+				if block := m.chat.actionBlock(e, w); block != "" {
+					m.chat.flushGroup(w)
+					m.chat.content += block + "\n\n"
+					m.chat.fold(e) // (the running line still clears)
+					continue
+				}
 			}
 			if m.chat.fold(e) {
 				continue
@@ -1478,8 +1488,7 @@ func helpLines() []string {
 		{"Ctrl+G", "goals"},
 		{"Ctrl+A", "approvals"},
 		{"Ctrl+R", "search what you sent"},
-		{"Ctrl+E", "cards: compact, folded, open"},
-		{"Ctrl+O", "cards show every line"},
+		{"Ctrl+O", "layout: compact (a card per action) or everything"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
 	} {
@@ -2003,22 +2012,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
 	case "ctrl+e":
-		// three views, in turn: compact (tool work folded into one line between the agent's words), every card
-		// folded, every card open. Drawn blocks are final, so the transcript is drawn again once.
-		switch {
-		case !m.chat.cards:
-			m.chat.cards, m.chat.expanded = true, false
-			m.msg = "every tool card, folded · Ctrl+E opens them"
-		case !m.chat.expanded:
-			m.chat.expanded = true
-			m.msg = "every tool card, open · Ctrl+E back to compact"
-		default:
-			m.chat.cards, m.chat.expanded = false, false
-			m.msg = "compact: tool work in one line · Ctrl+E shows every card"
-		}
-		m.chat.content, m.chat.rendered = "", 0
-		m.syncChat()
-		return m, nil
+		// (Ctrl+O's layout switch; Ctrl+E kept for the hands that learned it)
+		return m.toggleLayout(), nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.
 		m.chat.live.hold = !m.chat.live.hold
@@ -2917,4 +2912,16 @@ func (m emberModel) rootsCard(w int) string {
 		title = g.root + " ROOT REQUEST WAITING"
 	}
 	return borderTitle(box, title, emberWarn.Bold(true))
+}
+
+// toggleLayout switches the two layouts: compact (a card per action with short previews, replies in full) and
+// everything (every call, result and gate as a card, in full, with the thinking).
+func (m emberModel) toggleLayout() emberModel {
+	all := !(m.chat.cards && m.chat.expanded)
+	m.chat.cards, m.chat.expanded, m.chat.full = all, all, all
+	m.msg = map[bool]string{true: "everything: every card in full, the thinking, every gate · Ctrl+O back to compact",
+		false: "compact: a card per action, short previews · Ctrl+O shows everything"}[all]
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	return m
 }

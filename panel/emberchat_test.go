@@ -1632,38 +1632,52 @@ func TestTheBoundedHistoryTrimKeepsTheDrawnPosition(t *testing.T) {
 	}
 }
 
-func TestCompactTranscriptFoldsToolWorkIntoOneLine(t *testing.T) {
+func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 	m := chatFixture(t)
 	m.chat.cards, m.chat.content, m.chat.rendered = false, "", 0
-	call := func(name, args string) map[string]any {
-		return map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+	call := func(id, name, args string) map[string]any {
+		return map[string]any{"id": id, "type": "function", "function": map[string]any{"name": name, "arguments": args}}
+	}
+	res := func(seq int, id, name string, r map[string]any) residentEvent {
+		return residentEvent{Seq: seq, Kind: "tool_result", Data: map[string]any{"name": name, "call_id": id, "result": r}}
 	}
 	m.residentEvents = append(m.residentEvents,
 		residentEvent{Seq: 500, Kind: "assistant", Data: map[string]any{"content": "Checking the CVEs now.", "reasoning": "long thoughts",
-			"tool_calls": []any{call("terminal", `{"command":"ls cve/"}`), call("read", `{"path":"a.md"}`)}}},
-		residentEvent{Seq: 501, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"running": false, "output": "x"}}},
-		residentEvent{Seq: 502, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
-		residentEvent{Seq: 503, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("terminal", `{"command":"jq . n.json"}`), call("terminal", `{"session":"abc"}`)}}},
-		residentEvent{Seq: 504, Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"error": "boom"}}},
-		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md", "passed": false}},
+			"tool_calls": []any{call("c1", "terminal", `{"command":"ls cve/"}`), call("c2", "read", `{"path":"a.md"}`),
+				call("c3", "web_search", `{"query":"CVE-2026-1 patch"}`), call("c4", "remember", `{"name":"cve-list","summary":"two CVEs open","text":"x"}`)}}},
+		res(501, "c1", "terminal", map[string]any{"running": false, "exit_code": float64(0), "output": "a\nb\nc\nd"}),
+		res(502, "c2", "read", map[string]any{"path": "a.md", "shown": "1-40"}),
+		res(503, "c3", "web_search", map[string]any{"engine": "bing", "results": []any{
+			map[string]any{"title": "Fix for CVE-2026-1", "href": "https://www.example.org/a"}}}),
+		res(504, "c4", "remember", map[string]any{"ok": true}),
+		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
+		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`)}}},
+		res(507, "c5", "terminal", map[string]any{"error": "boom"}),
 	)
 	m.syncChat()
-	v := ansi.Strip(m.chat.transcript.View())
+	v := ansi.Strip(m.chat.content)
 	if !strings.Contains(v, "● Checking the CVEs now.") || strings.Contains(v, "agent\n") {
 		t.Fatalf("the agent's words stay whole:\n%s", v)
 	}
-	if !strings.Contains(v, "Ran 2 commands, read 1 file · 1 failed · gate fails") {
-		t.Fatalf("the tool work is one line (a poll is not a command):\n%s", v)
-	}
-	for _, clutter := range []string{"PRIVILEGED-STAGE1", "output  terminal", "thinking ·", "jq . n.json"} {
-		if strings.Contains(v, clutter) {
-			t.Fatalf("compact hides %q:\n%s", clutter, v)
+	for _, want := range []string{"terminal  $ ls cve/  ·  exit 0 · 4 lines", "d", "read  a.md  ·  lines 1-40",
+		"web_search  “CVE-2026-1 patch”  ·  1 results · bing", "Fix for CVE-2026-1  example.org",
+		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("every action is a card (missing %q):\n%s", want, v)
 		}
 	}
-	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"content": "Two CVEs are patched."}})
-	m.syncChat()
-	if v = ansi.Strip(m.chat.transcript.View()); !strings.Contains(v, "Two CVEs are patched.") || !strings.Contains(v, "gate fails") {
-		t.Fatalf("the next reply fixes the line above it:\n%s", v)
+	if n := strings.Count(v, g.working+" "); n < 5 {
+		t.Fatalf("five calls, five cards: %d\n%s", n, v)
+	}
+	if strings.Contains(v, "PRIVILEGED-STAGE1") || strings.Contains(v, "thinking ·") {
+		t.Fatalf("compact still hides gate commands and the thinking:\n%s", v)
+	}
+	if !strings.Contains(ansi.Strip(m.chat.transcript.View()), "gate fails") {
+		t.Fatal("the latest gate run shows under the cards")
+	}
+	m = m.toggleLayout()
+	if v := ansi.Strip(m.chat.content); !strings.Contains(v, "PRIVILEGED-STAGE1") || !strings.Contains(v, "long thoughts") {
+		t.Fatalf("Ctrl+O shows everything:\n%s", v)
 	}
 }
 
@@ -2261,7 +2275,7 @@ func TestTheCompactViewShowsTheCodeAnEditWrote(t *testing.T) {
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
 	if !strings.Contains(v, "line_01 = 1") || !strings.Contains(v, "line_08 = 8") || strings.Contains(v, "line_09 = 9") ||
-		!strings.Contains(v, "12 more lines · Ctrl+O unfolds all edits") {
+		!strings.Contains(v, "12 more lines · Ctrl+O shows everything") {
 		t.Fatalf("the compact view shows a long write's first 8 lines and a count:\n%s", v)
 	}
 }
