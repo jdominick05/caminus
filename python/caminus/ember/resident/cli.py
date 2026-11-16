@@ -837,7 +837,13 @@ def main(argv=None,stdin=None):
                 gid=store.enqueue(text or '',getattr(a,'max_steps',None),getattr(a,'max_seconds',None),
                                   plan=1 if a.plan else 0)
             if a.op=='send':
-                emit(dict(id=gid,state='queued'),a.json);store.close();return 0
+                out=dict(id=gid,state='queued')
+                try:running=alive(json.loads((home/'heartbeat.json').read_text()).get('pid'))
+                except (OSError,ValueError,AttributeError):running=False
+                if not running:
+                    # (a goal queued on a stopped agent waited an hour unnoticed after /stop)
+                    out['note']='the agent is stopped: this goal starts when you /start it'
+                emit(out,a.json);store.close();return 0
         elif a.op=='resume':
             gid=a.goal_id
             resume_goal(store,gid,a.max_steps,a.max_seconds)

@@ -165,6 +165,7 @@ func (l residentLive) body(width int) []string {
 
 type residentComposeResult struct {
 	agent, id, err string
+	note           string // the resident's remark on delivery (a stopped agent: it starts the goal at /start)
 	epoch          uint64
 }
 
@@ -389,6 +390,11 @@ func (m emberModel) chatHead(w int) string {
 		state, steps = sel.State, sel.Steps
 		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
 	}
+	if !m.resident.DaemonAlive {
+		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
+		// after /stop while a newly queued goal waited
+		state = "stopped · /start"
+	}
 	agent := residentText(m.agentName)
 	head := shellHeader(agent, state, goalText, steps, w)
 	if first := strings.SplitN(head, "\n", 2)[0]; !strings.Contains(ansi.Strip(first), "…") || goalText == "" {
@@ -415,6 +421,9 @@ func (m emberModel) windowTitle() string {
 		state = "idle"
 	}
 	for _, gl := range m.resident.Goals {
+		if !m.resident.DaemonAlive {
+			break // (stopped: its goals' last states run nothing)
+		}
 		switch gl.State {
 		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan":
 			state = gl.State
@@ -2086,12 +2095,13 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
 		var reply struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Note string `json:"note"`
 		}
 		if err = json.Unmarshal(out, &reply); err != nil || reply.ID == "" {
 			return residentComposeResult{agent: name, epoch: epoch, err: "Unrecognized delivery response; draft retained. Inspect /goals before retrying."}
 		}
-		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID}
+		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID, note: reply.Note}
 	}
 }
 
@@ -2108,6 +2118,9 @@ func (m emberModel) finishCompose(msg residentComposeResult) (tea.Model, tea.Cmd
 	m.chat.forceNew = false
 	m.chat.target, m.chat.selectID, m.chat.newGoal = msg.id, msg.id, false
 	m.msg = "Delivered to goal " + shortGoal(msg.id)
+	if msg.note != "" {
+		m.msg += " · " + residentText(msg.note)
+	}
 	m.chat.transcript.GotoBottom()
 	return m, residentRefresh(m)
 }

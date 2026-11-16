@@ -2068,3 +2068,15 @@ func TestTheModelPillCarriesItsLabsBadge(t *testing.T) {
 		}
 	}
 }
+
+func TestAStoppedDaemonShowsStoppedNotItsGoalsLastState(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 30
+	m.resident.DaemonAlive = false
+	if h := ansi.Strip(m.chatHead(100)); !strings.Contains(h, "stopped · /start") || strings.Contains(h, "working") {
+		t.Fatalf("the header says stopped: %q", h)
+	}
+	if strings.Contains(m.windowTitle(), "working") {
+		t.Fatalf("the tab title says stopped too: %q", m.windowTitle())
+	}
+}
