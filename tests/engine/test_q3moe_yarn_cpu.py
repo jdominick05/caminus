@@ -125,10 +125,10 @@ check(set(YO) == {'k3_q3m_lean', 'k3_q3m_lean_kvq8', 'k3_q3m_lean_tp', 'k3_q3m_l
       'maps between YaRN builds, no verify build')
 ship = ('k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn', 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn', 'q3m_prefill_yarn',
         'q3m_prefill_kvq8_yarn', 'q3m_prefill_kvq8')
-check(all(n in kernels.RUNTIME_SET for n in ship) and 'k3_q3m_lean_kvq8' not in kernels.RUNTIME_SET
+check(all(n in kernels.RUNTIME_SET for n in ship) and 'k3_q3m_lean_kvq8' in kernels.RUNTIME_SET
       and q3m_ops.YARN_MODULE == {False: 'q3m_prefill_yarn', True: 'q3m_prefill_kvq8_yarn'},
       'runtime set: the four YaRN decode objects, the two YaRN prefill objects and q3m_prefill_kvq8 (the Q8 attention the mode '
-      'runs); the native Q8 decode module stays out')
+      'runs); the native Q8 decode module ships too (caminus serve --kv q8)')
 src_ok = True
 for name, (define, inc) in {'k3_q3m_lean_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean.hip'), 'k3_q3m_lean_kvq8_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean_kvq8.hip'),
                             'k3_q3m_lean_tp_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean_tp.hip'), 'k3_q3m_lean_tp_kvq8_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean_tp_kvq8.hip'),

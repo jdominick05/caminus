@@ -1,0 +1,21 @@
+# high-contrast: High contrast (for low vision or bright rooms), mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #ffffff
+muted = #d0d0d0
+think = #e8e8e8
+dim = #8a8a8a
+accent = #00ffff
+ok = #00ff00
+warn = #ffff00
+action = #ff9900
+hot = #ff3333
+purple = #ff66ff
+user = #66b3ff
+teal = #00ffcc
+chrome = #808080
+
+code_bg = #303030
+codeblock_bg = #000000
+code_theme = hrdark

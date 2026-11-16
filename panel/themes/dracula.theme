@@ -1,0 +1,21 @@
+# dracula — the classic purple night. https://draculatheme.com
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #f8f8f2
+muted = #a5a8bd
+think = #e2e2dc
+dim = #6272a4
+accent = #8be9fd
+ok = #50fa7b
+warn = #f1fa8c
+action = #ffb86c
+hot = #ff5555
+purple = #bd93f9
+user = #ff79c6
+teal = #69ff94
+chrome = #44475a
+
+code_bg = #3a3d47
+codeblock_bg = #21222c
+code_theme = dracula

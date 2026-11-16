@@ -1,0 +1,23 @@
+# sakura: Sakura (a pink background).
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #fbe4ec
+
+text = #3b1f2b
+muted = #7a5463
+think = #5c3a48
+dim = #c9a3b2
+accent = #d6336c
+ok = #2f8f5b
+warn = #a8650a
+action = #c4532a
+hot = #c0182f
+purple = #8e44ad
+user = #9c2f6a
+teal = #1f8a85
+chrome = #f3c9d7
+
+code_bg = #f6d3df
+codeblock_bg = #f8dce6
+code_theme = rose-pine-dawn

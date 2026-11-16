@@ -22,6 +22,7 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 | `--card N` | Use card N (as `caminus ps` numbers them) instead of choosing. |
 | `--ctx N` | A context of N tokens instead of the largest that fits. |
 | `--long-context` | The model's long-context mode: `qwen3-30b-a3b` with YaRN x4, up to 131,072 tokens ([models](models.md#long-context-for-qwen3-30b-a3b-opt-in)). Other models refuse it. |
+| `--kv q8` | `qwen3-30b-a3b` only: the 8-bit KV cache instead of F16, the default ([models](models.md#the-8-bit-kv-cache-qwen3-30b-a3b)). Other models refuse it before a card is picked, and `--team` refuses it (each team model keeps its own cache). |
 | `--name NAME` | Call the server NAME (default: the model's name). |
 | `--port N` | Listen on port N (default: the first free port from 8092). |
 | `--team brain-hands` | Start AREX-2 and Qwen3.6 together on two cards ([the team](panel.md#the-brain--hands-team)); paused with Qwen3.6 for this release. |
@@ -44,7 +45,15 @@ JSON's `kv` names the format the maximum assumes (`f16` or `q8`): in the long-co
 unavailable projection returns an error and no maximum.
 Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
 the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
-F16/Q8 comparison and context choices in the panel remain separate integration work.
+`max_ctx` has one entry per KV cache format, `{"f16": N, "q8": N}`, each the largest context that fits with that cache.
+`q8` is `null` for a model without the 8-bit cache (`kv_formats` lists the formats a model has: only `qwen3-30b-a3b`,
+on one card or two, has `q8`) and when no cards hold it. For a model that always keeps its own cache (the Coder's
+8-bit rows), `f16` is that cache's figure and `kv_fixed` names the cache (`"q8_0"`; `null` for every other model).
+`--kv` never changes these figures: it picks the format a `caminus serve` with the same options would start with, and
+the cards, `need_mib` and `room_mib` describe that one (`kv` names it). When no cards hold that format the query fails
+(exit 1, `ok: false`) but still gives the other format's figure. A model without the 8-bit cache refuses `--kv q8`
+here as `caminus serve` does. The panel's model picker shows both figures, or the one figure of a model that keeps
+its own cache.
 
 ## Qwen Code
 
@@ -80,3 +89,4 @@ conversation to disk, then exits. Ctrl-C ends only the guard and leaves the serv
 | `caminus replay BUNDLE` | Reruns a saved request exactly, for a bug report. |
 | `caminus guard LOG SECS CMD...` | Runs any command under the guard. `caminus guard --lines` prints each card's memory limit. |
 | `caminus version` | The version and where its GPU code came from. |
+| `caminus ember ...` | The agent environment (experimental): work as a second user over SSH, root only with your approval. See [harnesses.md](harnesses.md#an-agent-with-its-own-user-experimental). |

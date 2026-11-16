@@ -1,0 +1,21 @@
+# catppuccin-mocha — soft pastels. https://github.com/catppuccin/catppuccin
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #cdd6f4
+muted = #a6adc8
+think = #bac2de
+dim = #585b70
+accent = #89b4fa
+ok = #a6e3a1
+warn = #f9e2af
+action = #fab387
+hot = #f38ba8
+purple = #cba6f7
+user = #89dceb
+teal = #94e2d5
+chrome = #45475a
+
+code_bg = #313244
+codeblock_bg = #1e1e2e
+code_theme = catppuccin-mocha

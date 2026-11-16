@@ -1,4 +1,4 @@
-◆ caminus top 0.1.0  k3-coder · caminus-mock · :8092                                                     IDLE  hh:mm:ss
+CAMINUS · top idle · k3-coder · caminus-mock · :8092                                                     0.1.0  hh:mm:ss
  waiting for a request                                                                                                 
 ╭─ CONTEXT ───────────────────────────────────────────────────────╮ ╭─ THROUGHPUT ─────────────────────────────────────╮
 │ ██████████████████████████████████████························· │ │ read                                    0 tok/s  │

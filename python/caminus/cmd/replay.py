@@ -7,7 +7,8 @@ expected; anything else is a finding.
         (installed: runs itself under the package's guard, its output in ~/.local/state/caminus/replay.log, printed at the end)
   tools/guard.sh LOG 1800 python -I tools/replay.py BUNDLE ...      (from a checkout)
 
-BUNDLE: a directory under the flight recorder's bundles/ (bundle.json, first_logits.npy, state/). The start state:
+BUNDLE: a directory under the flight recorder's bundles/ (bundle.json, first_logits.npy, state/); a bundle saved by a
+`--cards 2` server of a one-card model is refused (cards_refusal: its two-card split is not rebuilt). The start state:
   * a request that started from a cached state (live / VRAM / spill / disk): the bundle's state file (the request's prompt-end
     checkpoint with the KV + indexer rows below it, written by the prompt cache's own writer) is linked into a scratch cache
     directory and loaded explicitly (PromptCache.load_entry; the key, layout, token-hash and crc checks of an unpark);
@@ -39,6 +40,27 @@ def key_diff(a, b, path=''):
             out += key_diff(a.get(k), b.get(k), f'{path}.{k}' if path else str(k))
         return out
     return [] if a == b else [path]
+
+
+def kv_of_key(key):
+    """the --kv a bundle's server ran, from its engine key: 'q8' when the key names an own Q8 KV format (tp.kv, set from
+    the engine's kv_format_id: caminus serve --kv q8), else 'f16' (an F16 engine, or one whose own cache is not selectable:
+    the Coder's q8_0 rows carry no tp.kv; a tp.kv outside caminus.arch.KV_Q8_FORMATS names an F16 engine's own format)"""
+    from .. import arch as _arch
+    return 'q8' if ((key or {}).get('tp') or {}).get('kv') in _arch.KV_Q8_FORMATS else 'f16'
+
+
+def cards_refusal(A, key, model):
+    """why a bundle cannot be replayed on A (the model file's own entry, caminus.arch.of), else None: a bundle saved by a
+    `--cards 2` server of a one-card model (the key's tp.devices lists two cards: Dense35TP, Q3MoETP) needs that entry's
+    two-card variant and the server's split and placement, which replay does not rebuild yet; building the one-card engine
+    would only end in a key mismatch, so it is refused up front. The two-card-only entries (the Coder) replay as before."""
+    n = len(((key or {}).get('tp') or {}).get('devices') or [])
+    if n > A.cards:
+        return (f'replay: {os.path.basename(model)}: the bundle was saved by a server on {n} cards (caminus serve --cards {n}); '
+                f'caminus replay rebuilds {A.alias} on {A.cards} card{"s" if A.cards > 1 else ""} only, not the two-card '
+                f'split: replaying a --cards {n} bundle is not supported yet')
+    return None
 
 
 def main(argv=None):
@@ -77,6 +99,8 @@ def main(argv=None):
     A = _arch.of(model)
     why = A.rope_refusal(model)                 # (as caminus serve's recipe: a file asking for RoPE scaling is refused)
     if why: raise SystemExit(f'replay: {why}')
+    why = cards_refusal(A, eng.get('key'), model)
+    if why: raise SystemExit(why)
     if A.cards == 2:                            # (the two-card engines: the Coder, Qwen3-Coder-Next)
         for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
         assert 'XTX' in torch.cuda.get_device_name(0) and 'XTX' not in torch.cuda.get_device_name(1), 'cuda:0 must be the XTX, cuda:1 the XT'
@@ -97,10 +121,11 @@ def main(argv=None):
     # picks the engine, its prompt path and drafter), the cache in the scratch directory (no retention eviction)
     T = int(eng.get('T', 4))
     opt = dict(model=model, max_ctx=int(eng['max_ctx']), chunk=2048, no_drafter=not eng.get('drafter', True),
-               drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER)
+               drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER,
+               # (a Q8 KV server's bundle: its key names the format (caminus serve --kv q8), so the engine is built with it)
+               kv=kv_of_key(eng.get('key')))
     ktp = (eng.get('key') or {}).get('tp') or {}
     if ktp.get('rope'): opt['long_context'] = True          # (a long-context server's bundle: its YaRN engine, as serve built it)
-    if ktp.get('kv'): opt['kv'] = 'q8'                      # (its Q8_0 KV rows)
     try: A.long_mode(opt)
     except ValueError as e: raise SystemExit(f'replay: {e}') from None
     m, pf, df, dr = A.build(opt, log=print, T=T)

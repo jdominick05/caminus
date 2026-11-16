@@ -46,6 +46,14 @@ SUITES = [
     ('advisor', ['tests/harness/test_advisor.py', '--scratch', '{scratch}'], set()),
     ('advisor_setup', ['tests/harness/test_advisor_setup.py'], set()),
     ('context_note', ['tests/harness/test_context_note.py', '--scratch', '{scratch}'], set()),
+    ('env', ['tests/ember/test_env.py', '--scratch', '{scratch}'], set()),
+    ('resident', ['tests/ember/test_resident.py', '--scratch', '{scratch}'], set()),
+    ('resident_discovery', ['tests/ember/test_discovery.py'], set()),
+    # creates a Unix account with sudo: runs only with passwordless sudo and CAMINUS_E2E_ROOT=1 (CI), else SKIP in-suite
+    ('env_setup_e2e', ['tests/ember/test_setup_e2e.py', '--scratch', '{scratch}'], set()),
+    # caminus ember from an installed wheel (synthetic code objects; no checkout on the path): needs setuptools, else SKIP
+    ('env_installed', ['tests/ember/test_installed_wheel.py', '--scratch', '{scratch}'], set()),
+    ('resident_compare', ['tests/tools/test_resident_compare.py', '--scratch', '{scratch}'], set()),
     ('docs', ['tests/docs/test_docs.py'], set()),
     ('own_code', ['tests/test_own_code.py'], set()),
     ('own_dequant', ['tests/io/test_own_dequant.py'], set()),

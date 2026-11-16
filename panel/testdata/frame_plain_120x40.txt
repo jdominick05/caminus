@@ -1,4 +1,4 @@
-◆ caminus top 0.1.0  qwen3-coder · Qwen3-Coder-30B-A3B-Q4_K_M · :8092                                    IDLE  hh:mm:ss
+CAMINUS · top idle · qwen3-coder · Qwen3-Coder-30B-A3B-Q4_K_M · :8092                                    0.1.0  hh:mm:ss
  waiting for a request                                                                                                 
 ╭─ CONTEXT ───────────────────────────────────────────────────────╮ ╭─ THROUGHPUT ─────────────────────────────────────╮
 │ ······························································· │ │ read   ▂▄▅▇█                            0 tok/s  │

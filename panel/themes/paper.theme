@@ -1,0 +1,23 @@
+# paper: Paper (a light theme).
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #f7f5ef
+
+text = #1f2328
+muted = #57606a
+think = #3d444d
+dim = #a8adb3
+accent = #0969da
+ok = #1a7f37
+warn = #9a6700
+action = #bc4c00
+hot = #cf222e
+purple = #8250df
+user = #0550ae
+teal = #0a7a6f
+chrome = #d0d7de
+
+code_bg = #eaeef2
+codeblock_bg = #efede6
+code_theme = github

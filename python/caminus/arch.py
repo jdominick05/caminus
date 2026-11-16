@@ -241,18 +241,25 @@ class Arch:
     engine = None            # 'module:Class' under caminus
     tokenizer = 'hf'         # caminus.serve.tokenizer.QwenTokenizer's BPE engine: 'hf' (the tokenizers library) or 'own'
 
-    kv_formats = ('f16',)    # the KV cache formats opt['kv'] selects for this entry (kv_check); only the qwen3moe entries (Q3MoE, Q3MoETP) build 'q8'
+    # the KV cache formats opt['kv'] (caminus serve --kv) selects for this entry (kv_check); only the qwen3moe entries
+    # (Q3MoE, Q3MoETP) build 'q8'. 'f16' is the switch's default and selects nothing on an entry without the choice: the
+    # dense own-code line keeps its F16 cache, and the GGUF engines (the Coder, the paused one-card / Qwen3-Coder-Next
+    # entries) keep their own 8-bit q8_0 cache (kv_fixed), which /props reports from the built engine
+    kv_formats = ('f16',)
+    kv_fixed = None          # the cache an entry without the choice always builds, when it is not F16 (the GGUF engines: 'q8_0')
 
     def __init__(self, name, alias):
         self.name, self.alias = name, alias
 
-    def kv_check(self, opt):
+    def kv_check(self, opt, who=None):
         """opt['kv'] for this entry: True for 'q8', False for 'f16' (the default). A format the entry has no build for is
-        refused with a ValueError before anything is read or allocated, so a Q8 request never runs an F16 engine"""
+        refused with a ValueError before anything is read or allocated, so a Q8 request never runs an F16 engine. who: the
+        model's name for the message (caminus serve: the catalog's id), default the entry's alias"""
         q8 = kv_q8(opt)
         if q8 and 'q8' not in self.kv_formats:
-            raise ValueError(f"{self.name}: kv 'q8': this entry builds no Q8 KV cache from opt['kv'] (only the qwen3moe "
-                             f"entries do, one card and two); refused rather than built with its F16 cache")
+            raise ValueError(f"kv 'q8': {who or self.alias} keeps its own KV cache ("
+                             + ("its 8-bit q8_0 rows" if self.kv_fixed else "F16") + f"; no --kv choice in this release): "
+                             f"--kv q8 serves {kv_q8_models()} only")
         return q8
 
     def __repr__(self):
@@ -446,6 +453,7 @@ class Arch:
 class Coder(Arch):
     kind, cards, T, drafter, engine = 'coder', 2, 4, 'dflash', 'engine.flashnext_tp:FlashNextTP'
     rope_facts = CODER_ROPE
+    kv_fixed = 'q8_0'        # (FlashNextTP's own cache: q8=True, its default; build passes none)
 
     def long_context(self, opt):
         """an explicit max_ctx past the Coder's context_length (262,144): the KV cache in pinned host memory (kv_host: 13 GB at
@@ -579,10 +587,43 @@ class Coder(Arch):
 
 def kv_q8(opt):
     """the KV cache format an entry builds from opt['kv'] ('f16', the default, or 'q8': the Q8_0 rows of the entries that
-    have them; caminus serve sets no 'kv' yet, the --kv switch is later work): True for q8; anything else is refused"""
+    have them; caminus serve --kv / caminus start --kv set it): True for q8; anything else is refused"""
     v = opt.get('kv') or 'f16'
     if v not in ('f16', 'q8'): raise ValueError(f"kv {v!r}: 'f16' or 'q8'")
     return v == 'q8'
+
+
+# The own Q8_0 KV rows' format ids: an engine built with q8 names its rows by one (kv_format_id; the prompt cache keys
+# parks by it). A built engine holds a Q8 cache exactly when its id is one of these, so an F16 engine that names its own
+# format never reads as Q8 (tests/test_arch.py checks every kv_format_id an engine assigns is listed here).
+KV_Q8_FORMATS = ('q8_0-v1:qk-hadamard128:f16-rounded-v1',   # Qwen3-30B-A3B, one card and two (engine.q3moe_one)
+                 'q8_0-v1:qk-hadamard256:v-hadamard64-v1')  # the dense own-code line's staged Q8 (engine.q35_dense)
+
+
+def kv_q8_built(m):
+    """True when a built engine holds the own Q8_0 rows: its kv_format_id is one of KV_Q8_FORMATS"""
+    return getattr(m, 'kv_format_id', None) in KV_Q8_FORMATS
+
+
+def kv_q8_models():
+    """the models --kv q8 serves, for the refusals: each alias whose entries list 'q8' in kv_formats, with its card counts
+    ('qwen3-30b-a3b (one card or two)')"""
+    by = {}
+    for a in ARCHS.values():
+        if 'q8' in a.kv_formats: by.setdefault(a.alias, set()).add(a.cards)
+    words = {(1,): 'one card', (2,): 'two cards', (1, 2): 'one card or two'}
+    return ', '.join(f'{al} ({words.get(tuple(sorted(cs)), "cards " + "/".join(map(str, sorted(cs))))})'
+                     for al, cs in sorted(by.items())) or 'no model'
+
+
+def kv_cache_of(A, m):
+    """the KV cache a built engine holds, for /props and /caminus/status: {'type': 'f16' | 'q8', 'format': the engine's
+    format id (kv_format_id, one of KV_Q8_FORMATS: the own Q8_0 rows), 'q8_0' (the GGUF engines' own 8-bit cache,
+    A.kv_fixed) or 'f16' (an F16 engine's own kv_format_id when it names one)}"""
+    fid = getattr(m, 'kv_format_id', None)
+    if kv_q8_built(m): return {'type': 'q8', 'format': str(fid)}
+    if A is not None and A.kv_fixed: return {'type': 'q8', 'format': str(A.kv_fixed)}
+    return {'type': 'f16', 'format': str(fid) if fid else 'f16'}   # (an F16 engine may name its own format)
 
 
 def _explicit_ctx(opt):
@@ -695,6 +736,7 @@ class _Q3MLong:
 
 class OneCard(Arch):
     kind, cards, T, engine = 'one-card', 1, 1, 'engine.qwen35_one:Qwen35One'
+    kv_fixed = 'q8_0'        # (Qwen35One's q8_0 cache: q8=True, its default; the own-code subclasses below set None)
 
     def __init__(self, name, alias):
         super().__init__(name, alias)
@@ -749,7 +791,8 @@ class Q3MoE(_Q3MLong, OneCard):
     engine = 'engine.q3moe_one:Q3MoEOne'
     rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
-    kv_formats = ('f16', 'q8')   # (opt['kv'] = 'q8': Q3MoEOne(q8=True), docs/dev/q8-kv.md)
+    kv_formats = ('f16', 'q8')   # (caminus serve --kv q8: Q3MoEOne(q8=True), docs/dev/q8-kv.md; F16 the default)
+    kv_fixed = None
     PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
     def auto_need(self, opt, slots, cards=None):
@@ -757,7 +800,7 @@ class Q3MoE(_Q3MLong, OneCard):
         from .prefill import q3m
         path = opt['model']
         n_ctx = self._ctx_cap(opt)                          # (the file's 40,960, or the long-context mode's 131,072)
-        q8 = self.kv_check(opt)                             # (opt['kv']: no serve flag sets it yet; 'f16' by default)
+        q8 = self.kv_check(opt)                             # (opt['kv']: caminus serve --kv; 'f16' by default)
         slot = Q3MoEOne.kv_pos_mib(path, q8) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
         pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
         need = lambda c: [Q3MoEOne.projection_mib(path, c, q8=q8) + pf + (slots + 2) * slot]   # (the side rows: host memory)
@@ -779,6 +822,7 @@ class Dense35(OneCard):
     the drafter module runs the block's Q4_0 and the file's Q6_K head)"""
     engine = 'engine.q35_dense:Dense35Own'
     rope_facts = QWEN35_ROPE
+    kv_fixed = None            # (F16: its Q8 objects are not served, kv_check refuses 'q8')
     drafter = 'mtp'
     drafters = ('mtp', 'dflash')   # (--draft dflash: the base model's DFlash 2 drafter, decode/dflash35.py; one card, Swift 1.5 first)
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
@@ -1151,7 +1195,7 @@ class Q3MoETP(_Q3MLong, Arch):
     EXP_ROWS = 512             # card 0's rows of every expert (= caminus.engine.q3moe_tp.EXP_ROWS; tests/test_arch.py checks it)
     # the catalog models this entry serves on two cards (the model picker reads no file: a fact about the catalog)
     two_card_models = ('qwen3-30b-a3b',)
-    kv_formats = ('f16', 'q8')   # (opt['kv'] = 'q8': Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8 + Q3MPrefillTP's Q8 path; not served)
+    kv_formats = ('f16', 'q8')   # (caminus serve --cards 2 --kv q8: Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8 + Q3MPrefillTP's Q8 path)
 
     def split(self, cards):
         """{'exp_rows': card 0's rows of every expert, 'vocab_share': card 0's part of the head rows} for the pair in engine
@@ -1190,7 +1234,7 @@ class Q3MoETP(_Q3MLong, Arch):
         """per card: the engine's own projection (Q3MoETP.projection_mib, the terms its check counts) + the two-card prefill's
         construction check + the prompt cache's slots + 2 checkpoint slots, each one T = 1 tail row of that card's kv heads in
         every layer (cache/prompt.py Layout: no recurrent state); the side rows are host memory"""
-        q8 = self.kv_check(opt)                             # (opt['kv']: no serve flag sets it yet; 'f16' by default)
+        q8 = self.kv_check(opt)                             # (opt['kv']: caminus serve --kv; 'f16' by default)
         from .engine.q3moe_tp import Q3MoETP as E
         path = opt['model']
         er, vs = self._split(opt, cards)
@@ -1217,6 +1261,7 @@ class Q3MoETP(_Q3MLong, Arch):
 
 class TwoCardTP(Arch):
     kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
+    kv_fixed = 'q8_0'          # (Qwen3NextTP's q8_0 cache: q8=True, its default)
 
     def auto_need(self, opt, slots, cards=None):
         self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)

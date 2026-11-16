@@ -116,8 +116,8 @@ class RuntimeKernels(unittest.TestCase):
             q35own.Q35OwnPrefill(m, chunk=16, check=False)
         return self.loads[start:]
 
-    def q3_prefill(self, fmt):
-        m = NS(dev=0, D=256, nh=8, nkv=1, hd=128, k_used=1, n_exp=2, ffn=256,
+    def q3_prefill(self, fmt, q8=False):
+        m = NS(dev=0, D=256, nh=8, nkv=1, hd=128, k_used=1, n_exp=2, ffn=256, q8=q8,
                L=[{key: (fmt,) for key in q3m.MM_KEYS}], emb=NS(shape=(256, 64), rows=lambda: (64, 144)))
         start = len(self.loads)
         q3m.Q3MPrefill(m, chunk=16, check=False)
@@ -261,7 +261,7 @@ class RuntimeKernels(unittest.TestCase):
             with self.subTest(fmt=fmt), self.assertRaises(ValueError):
                 self.q3_prefill(fmt)
 
-    def q3_prefill_tp(self):
+    def q3_prefill_tp(self, q8=False):
         # a stand-in Q3MoETP with two-card shapes (2 kv heads and their 16 query heads per card, expert rows 512 / 256):
         # the real Q3MPrefillTP constructor, its code objects recorded at load
         mat = lambda rows, K: dict(fmt='Q4_K', rows=rows, K=K, w=None)
@@ -269,7 +269,7 @@ class RuntimeKernels(unittest.TestCase):
                                  up=mat(8 * r, 256), down=dict(mat(8 * 256, r), fmt='Q6_K'), attn_norm=None, ffn_norm=None,
                                  qk_par=None, router=dict(w=None), cache=None)
         m = NS(devs=[0, 1], nl=1, D=256, nh=32, nkv=4, hd=128, k_used=2, n_exp=8, ffn=768, kvc=[2, 2], exp_rows=[512, 256],
-               local_only=False, broken=None, L=[[card(512), card(256)]],
+               local_only=False, broken=None, L=[[card(512), card(256)]], q8=q8,
                emb=NS(type='Q4_K', shape=(256, 64), rows=lambda: (64, 144)))
         start = len(self.loads)
         q3m_tp.Q3MPrefillTP(m, chunk=16, check=False)
@@ -290,6 +290,29 @@ class RuntimeKernels(unittest.TestCase):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime([tp] + names)
+
+    def test_q3_q8_kv_serve_selects_shipped_objects(self):
+        # caminus serve --kv q8 for Qwen3-30B-A3B (arch.Q3MoE / Q3MoETP with opt['kv'] = 'q8'): one card decodes on the real
+        # module property's Q8 module, two cards on its Q3M_TP_OF build (as Q3MoETP(q8=True) picks it); both prefills'
+        # constructors load q3m_prefill_kvq8 beside their F16 objects (the rows and attention). All are in the runtime set,
+        # and each one's removal is caught (a wheel without it would refuse the served --kv q8)
+        one = q3_engine(q8=True).module
+        self.assertEqual(one, 'k3_q3m_lean_kvq8')
+        tp = k3.Q3M_TP_OF[one]
+        self.assertEqual(tp, 'k3_q3m_lean_tp_kvq8')
+        self.assertEqual(q3_engine().module, q3moe_one.MODULE_LEAN)   # (the F16 default unchanged)
+        names1 = self.q3_prefill('Q4_K', q8=True)
+        self.assertEqual(sorted(set(names1)), ['q3m_prefill', 'q3m_prefill_kvq8'])
+        names2 = self.q3_prefill_tp(q8=True)
+        self.assertEqual(sorted(set(names2)), ['prefill_tp', 'q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_tp'])
+        self.assertEqual(names2.count('q3m_prefill_kvq8'), 2)   # (one per card)
+        self.assertNotIn('q3m_prefill_kvq8', self.q3_prefill('Q4_K') + self.q3_prefill_tp())   # (F16 prefills load no Q8 object)
+        want = [one, tp] + names1 + names2
+        self.require_runtime(want)
+        for name in (one, tp, 'q3m_prefill_kvq8'):
+            without = tuple(n for n in kernels.RUNTIME_SET if n != name)
+            with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                self.require_runtime(want)
 
     def test_q3_long_context_mode_selects_shipped_objects(self):
         # caminus serve --long-context for Qwen3-30B-A3B (YaRN): the real module property picks each decode module's YaRN

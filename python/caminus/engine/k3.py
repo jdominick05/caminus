@@ -97,7 +97,8 @@ Q3M_LEAN_MODULES = ('k3_q3m_lean', 'k3_q3m_lean_trace')   # (kernels/k3_q3m_lean
 # its Q8_0 KV builds (kernels/k3_q3m_lean_kvq8.hip, and the two-card kernels/k3_q3m_lean_tp_kvq8.hip: OP_OWN_ATTS writes and
 # reads Q8_0 rows, own_kv_codec.h's format with K and q through the head's Hadamard128, own_kv_rot128.h; a refused block sets
 # the sticky word after Sync, Engine.kv_error). Q8 module -> its F16 module: the same ops, pairs and dispatch (separate
-# objects, so the F16 ones keep their code); decode only (no verify build), not served. Q3M_KV_Q8_MODULES (every Q8 module)
+# objects, so the F16 ones keep their code); decode only (no verify build); served by caminus serve --kv q8 (one card or
+# two; both in the installed runtime set). Q3M_KV_Q8_MODULES (every Q8 module)
 # decides the Engine's error word and own_atts' cache format; the one-card one is a lean module, the two-card one a
 # two-card module (Q3M_TP_OF below)
 Q3M_KV_Q8_BASE = {'k3_q3m_lean_kvq8': 'k3_q3m_lean', 'k3_q3m_lean_tp_kvq8': 'k3_q3m_lean_tp'}
@@ -106,7 +107,7 @@ Q3M_KV_Q8_MODULES = tuple(Q3M_KV_Q8_BASE)
 Q3M_LEAN_MODULES += ('k3_q3m_lean_kvq8',)
 # their two-card builds (kernels/k3_q3m_lean_tp.hip: K3_Q3M_TP adds OP_XCHG, push-only, and OP_OWN_SLOT_SUM; issue #86):
 # one-card module -> two-card module. engine/q3moe_tp.py builds its tapes on them (caminus serve --cards 2; the _trace build
-# is measurement only, outside the installed runtime set; the Q8 KV build, Q3MoETP(q8=True), is not served)
+# is measurement only, outside the installed runtime set; the Q8 KV build, Q3MoETP(q8=True), serves --cards 2 --kv q8)
 Q3M_TP_OF = {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
 # the long-context mode's builds (YaRN, caminus serve --long-context: kernels/k3_q3m_lean*_yarn.hip, K3_Q3M_YARN): each decode
 # module -> its YaRN build, OP_OWN_ATTS's RoPE from the host's table at the end of its par block (caminus.rope.yarn_table;

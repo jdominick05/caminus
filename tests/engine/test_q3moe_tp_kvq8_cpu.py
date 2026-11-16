@@ -4,7 +4,7 @@ caminus.prefill.q3m_tp.Q3MPrefillTP and the 'qwen3moe-tp' registry entry), on st
 tp=True: 4 kv heads, 2 per card).
   - the module tables: k3_q3m_lean_tp_kvq8 is k3_q3m_lean_tp's Q8 build (Q3M_KV_Q8_BASE) and k3_q3m_lean_kvq8's two-card
     form (Q3M_TP_OF): the two-card modules' ops whitelist and (op, format) pairs, 128 attention splits, an error word after
-    Sync on its Engine; not a lean (one-card) module, not in the installed runtime set; its kernels/*.hip file defines the
+    Sync on its Engine; not a lean (one-card) module; in the installed runtime set (served: caminus serve --cards 2 --kv q8); its kernels/*.hip file defines the
     Q8 switch and the add_rms16 pin over the two-card module and nothing else
   - the engine: k3_q3m_lean_tp_kvq8 on both cards, each card's caches uint8 (max_ctx + ATS_PAD) rows of its 2 kv heads'
     Q8 row (544 bytes), the prompt cache's state views max_ctx rows of bytes, every OP_OWN_ATTS segment on its layer's cache
@@ -24,6 +24,12 @@ tp=True: 4 kv heads, 2 per card).
     settle raises InvalidKVEncoding before the routing flags, the engine is broken, the next chunk is refused
   - the prompt cache: the checkpoint layout's row on each card is that card's Q8 row; the engine key carries the KV format
     and the Q8 module (the F16 two-card key's tp entries unchanged: no 'kv'), so neither restores into the other
+  - the park round trip (caminus serve --cards 2 --kv q8; tests/engine/kv_park_rt.py): each card's and layer's Q8 byte rows
+    back from a checkpoint slot, from a park in the same process and after a restart, byte for byte, rows past the restored
+    positions still zero; negative controls (card 0's and card 1's layer 0 swapped, card 1's layer 1 read a row late)
+    differ in exactly those views (the late one also past the positions). An F16 two-card
+    park is not offered to a Q8 two-card server and a Q8 one not to an F16 one (cold, rows untouched); the park's own
+    format restores it (the positive control)
   - the registry: 'qwen3moe-tp' takes opt['kv'] = 'q8' (kv_formats); auto_need counts the Q8 projection and checkpoint
     slots per card (less than F16 by exactly the rows and slots saved); build passes q8 to the engine; every entry but the
     two qwen3moe ones refuses 'q8'
@@ -146,10 +152,10 @@ check(k3.Q3M_KV_Q8_BASE == {'k3_q3m_lean_kvq8': 'k3_q3m_lean', TPQ: 'k3_q3m_lean
       and k3.MODULE_CAPS[TPQ] == k3.MODULE_CAPS['k3_q3m_lean_tp'] and k3.atts_max_splits(TPQ) == 128,
       f'{TPQ}: k3_q3m_lean_tp\'s Q8 build and k3_q3m_lean_kvq8\'s two-card form: the two-card ops and pairs, 128 attention splits, '
       f'not a one-card lean module')
-check(TPQ not in kernels.RUNTIME_SET and 'k3_q3m_lean_kvq8' not in kernels.RUNTIME_SET
+check(TPQ in kernels.RUNTIME_SET and 'k3_q3m_lean_kvq8' in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' in kernels.RUNTIME_SET
       and 'k3_q3m_lean_tp' in kernels.RUNTIME_SET,
-      'not in the installed runtime set (no option selects the native Q8 modules; the long-context mode ships their YaRN '
-      'builds); the F16 two-card module stays in it')
+      'in the installed runtime set with the one-card Q8 module and q3m_prefill_kvq8 (served: --cards 2 --kv q8); the F16 two-card '
+      'module stays in it')
 src = [ln.strip() for ln in open(os.path.join(ROOT, 'kernels', TPQ + '.hip')) if ln.strip() and not ln.strip().startswith('//')]
 check(src == ['#define K3_Q3M_KV_Q8', '#define K3_Q3M_ADD_RMS_PIN', '#include "k3_q3m_lean_tp.hip"'],
       f'kernels/{TPQ}.hip: the Q8 switch and the add_rms16 pin over the two-card module, nothing else')
@@ -274,6 +280,44 @@ check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and kq['module'] == TPQ and k
       and prompt.key_hash(kq) != prompt.key_hash(kf_),
       'engine key: the Q8 engine\'s carries its KV format and module; the F16 two-card key\'s tp entries are the ones it had (no kv), '
       'so neither restores into the other')
+from caminus.cmd import replay
+tpa = arch.ARCHS[arch.TWO_CARD['qwen3moe']]
+check(replay.kv_of_key(kq) == 'q8' and replay.kv_of_key(kf_) == 'f16'
+      and tpa.kv_check(dict(kv=replay.kv_of_key(kq))) is True and tpa.kv_check(dict(kv=replay.kv_of_key(kf_))) is False,
+      'caminus replay: a two-card Q8 bundle\'s engine key reads as kv q8, the F16 two-card key as f16')
+one = arch.ARCHS['qwen3moe']        # (what replay's arch.of(model) returns for the file: the one-card entry)
+rq8, rf16 = replay.cards_refusal(one, kq, '/m/q3.gguf'), replay.cards_refusal(one, kf_, '/m/q3.gguf')
+check(rq8 and rf16 and all('--cards 2 bundle is not supported' in r and 'q3.gguf' in r and '/m/' not in r for r in (rq8, rf16))
+      and replay.cards_refusal(one, dict(tp=dict(devices=[0])), '/m/q3.gguf') is None
+      and replay.cards_refusal(one, None, '/m/q3.gguf') is None
+      and replay.cards_refusal(arch.CODER, dict(tp=dict(devices=[0, 1])), '/m/coder.gguf') is None,
+      f'caminus replay: a two-card bundle (Q8 or F16) of the one-card model is refused before any build, not rebuilt on one '
+      f'card; a one-card key and the two-card-only Coder are not ({rq8!r})')
+
+# ---- the park round trip on the two-card Q8 engine (caminus serve --cards 2 --kv q8: each card's byte rows through a checkpoint
+# slot, a park and an unpark after a restart), negative controls, and the format mismatch both ways (tests/engine/kv_park_rt.py) --
+import kv_park_rt as RT
+RT_CTX = 256
+mk2 = lambda q8: (lambda: Q3MoETP(P, devices=(0, 1), max_ctx=RT_CTX, vram_check=False, q8=q8))
+
+
+def rt_swap(w, eng):            # (card 0's and card 1's layer 0 read into each other's rows: the same row size)
+    if 'kv0.c0' in w and 'kv0.c1' in w: w['kv0.c0'], w['kv0.c1'] = w['kv0.c1'], w['kv0.c0']
+    return w
+
+
+def rt_late(w, eng):            # (card 1's layer 1 read one row late)
+    if 'kv1.c1' in w:
+        pb = prompt.Layout(eng).pb[1]; n = w['kv1.c1'][0].numel()
+        w['kv1.c1'] = [prompt._u8(eng.state[(1, 1, 'kv')])[pb:pb + n]]
+    return w
+
+
+RT.round_trip(mk2(True), check, os.path.join(A.scratch, 'cache-tp-q8'), info['V'], 'Q8 two cards',
+              [('card 0 and card 1 swapped on layer 0', rt_swap, [(0, 0), (1, 0)], []),
+               ('card 1\'s layer 1 one row late', rt_late, [(1, 1)], [(1, 1)])])
+RT.mismatch(mk2(False), mk2(True), check, os.path.join(A.scratch, 'cache-tp-f16-then-q8'), info['V'], 'an F16 park, a Q8 server (two cards)')
+RT.mismatch(mk2(True), mk2(False), check, os.path.join(A.scratch, 'cache-tp-q8-then-f16'), info['V'], 'a Q8 park, an F16 server (two cards)')
 
 # ---- the registry -------------------------------------------------------------------------------------------------------------------
 tp = arch.ARCHS[arch.TWO_CARD['qwen3moe']]

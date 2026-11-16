@@ -115,6 +115,8 @@ llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-
   [troubleshooting](docs/troubleshooting.md) ·
   [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [verify your download](docs/verifying.md) ·
   [what changed](CHANGELOG.md)
+- **The agent environment (`caminus ember`):** [quickstart](docs/ember-quickstart.md) · [the guide](docs/ember.md) ·
+  [every command and view](docs/resident-agent.md)
 - **Contribute:** [CONTRIBUTING.md](CONTRIBUTING.md) · [how it works](docs/dev/architecture.md) ·
   [building from source](docs/dev/building.md) · [testing](docs/dev/testing.md)
 - **AI agents working on this code:** [AGENTS.md](AGENTS.md)

@@ -1,0 +1,21 @@
+# synthwave: Synthwave '84, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #f0eff1
+muted = #b6b1b1
+think = #d4d0d0
+dim = #848bbd
+accent = #36f9f6
+ok = #72f1b8
+warn = #fede5d
+action = #ff8b39
+hot = #fe4450
+purple = #ff7edb
+user = #b893ce
+teal = #72f1b8
+chrome = #495495
+
+code_bg = #34294f
+codeblock_bg = #241b2f
+code_theme = dracula

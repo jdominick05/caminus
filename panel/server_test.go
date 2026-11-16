@@ -151,7 +151,7 @@ func TestLiveFixture(t *testing.T) {
 	defer srv.Close()
 	st := run(t, srv.URL, 6, nil)
 	h := header(t, st)
-	if !strings.Contains(h, "WRITING") || !strings.Contains(h, "k3-coder") || !strings.Contains(h, "caminus-mock") {
+	if !strings.Contains(h, "writing") || !strings.Contains(h, "k3-coder") || !strings.Contains(h, "caminus-mock") {
 		t.Errorf("header:\n%s", h)
 	}
 	if st.srv.Props.Gen.NCtx != 2051 || st.srv.Metrics["n_tokens_max"] != 1586 || st.srv.Decoded != 41 || st.srv.Remain != 359 {
@@ -175,7 +175,7 @@ func TestPollingPace(t *testing.T) {
 			m.mu.Unlock()
 		}
 	})
-	if h := header(t, st); !strings.Contains(h, "IDLE") {
+	if h := header(t, st); !strings.Contains(h, "idle") {
 		t.Errorf("header:\n%s", h)
 	}
 	if s, mt, p := m.count("/slots"), m.count("/metrics"), m.count("/props"); s != 20 || mt != 20 || p != 5 {
@@ -195,7 +195,7 @@ func TestBusyMeasuresRates(t *testing.T) {
 		m.slots = slotsJSON(slot(0, true, 9, 20000, 1000*(i+1), 0, 0)) // 1000 tokens per 0.5 s
 		m.mu.Unlock()
 	})
-	if h := header(t, st); !strings.Contains(h, "READING") {
+	if h := header(t, st); !strings.Contains(h, "reading") {
 		t.Errorf("header:\n%s", h)
 	}
 	if r := st.srv.curRead; r < 1900 || r > 2100 {
@@ -212,7 +212,7 @@ func TestWritingRate(t *testing.T) {
 		m.slots = slotsJSON(slot(0, true, 3, 5000, 5000, 4000, 10*(i+1)))
 		m.mu.Unlock()
 	})
-	if h := header(t, st); !strings.Contains(h, "WRITING") {
+	if h := header(t, st); !strings.Contains(h, "writing") {
 		t.Errorf("header:\n%s", h)
 	}
 	if g := st.srv.curGen; g < 19 || g > 21 {
@@ -224,7 +224,7 @@ func TestLoadingAndDown(t *testing.T) {
 	m := &mock{health: 503}
 	srv := httptest.NewServer(m)
 	st := run(t, srv.URL, 3, nil)
-	if h := header(t, st); !strings.Contains(h, "LOADING") {
+	if h := header(t, st); !strings.Contains(h, "loading") {
 		t.Errorf("header:\n%s", h)
 	}
 	if m.count("/slots")+m.count("/props") != 0 {
@@ -232,7 +232,7 @@ func TestLoadingAndDown(t *testing.T) {
 	}
 	srv.Close()
 	st = run(t, srv.URL, 3, nil)
-	if h := header(t, st); !strings.Contains(h, "DOWN") {
+	if h := header(t, st); !strings.Contains(h, "down") {
 		t.Errorf("header:\n%s", h)
 	}
 }
@@ -252,7 +252,7 @@ func TestMultiSlot(t *testing.T) {
 		m.mu.Unlock()
 	})
 	h := header(t, st)
-	if !strings.Contains(h, "WRITING") || !strings.Contains(h, "slot id 2 · 4 slots, 2 busy") {
+	if !strings.Contains(h, "writing") || !strings.Contains(h, "slot id 2 · 4 slots, 2 busy") {
 		t.Errorf("header:\n%s", h)
 	}
 	// both busy slots count towards throughput: slot 3 reads 1000/s, slot 2 writes 20/s
@@ -295,11 +295,11 @@ func TestCompacting(t *testing.T) {
 		want     string
 		agentNow bool
 	}{
-		{"normal turn", slotP(65536, slot(0, true, 4, 30000, 9000, 20000, 0)), "READING", false},
-		{"compaction reading", slotP(20000, slot(0, true, 5, 30000, 9000, 0, 0)), "COMPACTING", true},
+		{"normal turn", slotP(65536, slot(0, true, 4, 30000, 9000, 20000, 0)), "reading", false},
+		{"compaction reading", slotP(20000, slot(0, true, 5, 30000, 9000, 0, 0)), "compacting", true},
 		{"compaction writing", slotP(20000, slot(0, true, 5, 30000, 30000, 0, 800)), "writing the summary", true},
-		{"clamped near a full window", slotP(1500, slot(0, true, 6, 31000, 100, 0, 0)), "COMPACTING", true},
-		{"small max_tokens, small prompt", slotP(1500, slot(0, true, 7, 2000, 100, 0, 0)), "READING", false},
+		{"clamped near a full window", slotP(1500, slot(0, true, 6, 31000, 100, 0, 0)), "compacting", true},
+		{"small max_tokens, small prompt", slotP(1500, slot(0, true, 7, 2000, 100, 0, 0)), "reading", false},
 	}
 	for _, c := range cases {
 		m := &mock{metrics: metricsText(1), slots: slotsJSON(c.slot)}
@@ -311,7 +311,7 @@ func TestCompacting(t *testing.T) {
 		if !strings.Contains(h, c.want) {
 			t.Errorf("%s: want %q in\n%s", c.name, c.want, h)
 		}
-		if c.want == "READING" && strings.Contains(h, "COMPACTING") {
+		if c.want == "reading" && strings.Contains(h, "compacting") {
 			t.Errorf("%s: shown as compaction", c.name)
 		}
 		if got := strings.Contains(frame(t, st, 120, 40), "compacting: the model summarizes"); got != c.agentNow {
@@ -355,12 +355,12 @@ func TestDownClearsBusy(t *testing.T) {
 	s := newStepper(t, srv.URL)
 	s.st.sessions = []*session{newSession("x", "proj")}
 	s.st.sessions[0].Mod = time.Now() // Qwen Code writes the session log as it sends the request
-	if h := s.step(4); !strings.Contains(h, "COMPACTING") {
+	if h := s.step(4); !strings.Contains(h, "compacting") {
 		t.Fatalf("not busy first:\n%s", h)
 	}
 	srv.Close()
 	h := s.step(rotateAfter + 1)
-	if !strings.Contains(h, "DOWN") || s.st.srv.busy() || s.st.srv.compacting() || s.st.srv.Metrics != nil {
+	if !strings.Contains(h, "down") || s.st.srv.busy() || s.st.srv.compacting() || s.st.srv.Metrics != nil {
 		t.Errorf("down but busy=%v compacting=%v metrics=%v\n%s", s.st.srv.busy(), s.st.srv.compacting(), s.st.srv.Metrics != nil, h)
 	}
 	if f := frame(t, s.st, 120, 40); strings.Contains(f, "compacting") {
@@ -385,15 +385,15 @@ func TestSlowAnswerNoFlash(t *testing.T) {
 	s.step(4)
 	since := s.st.srv.busySince
 	slow.Store("on", true)
-	if h := s.step(1); !strings.Contains(h, "READING") || s.st.srv.busySince != since || s.c.base != srv.URL {
+	if h := s.step(1); !strings.Contains(h, "reading") || s.st.srv.busySince != since || s.c.base != srv.URL {
 		t.Errorf("one slow answer: base %s\n%s", s.c.base, h)
 	}
 	slow.Delete("on")
-	if h := s.step(1); !strings.Contains(h, "READING") || s.st.srv.busySince != since {
+	if h := s.step(1); !strings.Contains(h, "reading") || s.st.srv.busySince != since {
 		t.Errorf("after the slow answer:\n%s", h)
 	}
 	slow.Store("on", true)
-	if h := s.step(rotateAfter); !strings.Contains(h, "DOWN") {
+	if h := s.step(rotateAfter); !strings.Contains(h, "down") {
 		t.Errorf("silent server not DOWN:\n%s", h)
 	}
 }
@@ -423,7 +423,7 @@ func TestCompactingServerDefault(t *testing.T) {
 	srv := httptest.NewServer(m)
 	defer srv.Close()
 	st := run(t, srv.URL, 4, nil)
-	if h := header(t, st); strings.Contains(h, "COMPACTING") || !strings.Contains(h, "READING") {
+	if h := header(t, st); strings.Contains(h, "compacting") || !strings.Contains(h, "reading") {
 		t.Errorf("header:\n%s", h)
 	}
 }
@@ -463,7 +463,7 @@ func TestDiscoveredPort(t *testing.T) {
 	s := newStepper(t, "http://127.0.0.1:1")
 	s.c.addBases([]string{"http://127.0.0.1:2"})
 	s.c.more = func() []string { return []string{srv.URL} }
-	if h := s.step(8); !strings.Contains(h, "IDLE") || s.c.base != srv.URL {
+	if h := s.step(8); !strings.Contains(h, "idle") || s.c.base != srv.URL {
 		t.Errorf("discovered address not used (base %s):\n%s", s.c.base, h)
 	}
 	st := &state{sys: sysState{Pid: 7, Listen: []string{"0.0.0.0:8091", "[::]:8092", "192.168.1.5:9000"}}}

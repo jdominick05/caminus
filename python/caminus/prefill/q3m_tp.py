@@ -29,7 +29,7 @@ Not bitwise to the one-card prefill by design (the K-split down, the attn_output
 exchange each change a summation order); G-model gated as the one-card prefill (tests/prefill/test_q3m_prefill_tp.py):
 prefill then two-card decode against the float64 / fp32 references, llama.cpp as the bound. Served as
 the prompt path of `caminus serve --cards 2` for Qwen3-30B-A3B (caminus.arch.Q3MoETP). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here).
-A Q8 KV engine (Q3MoETP(q8=True), not served): the same chunk, each card's rows written and read as Q8_0 blocks by the
+A Q8 KV engine (Q3MoETP(q8=True), caminus serve --cards 2 --kv q8): the same chunk, each card's rows written and read as Q8_0 blocks by the
 one-card Q8 kernels at that card's local shapes (q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: both take the kv head
 count, so its 2 kv heads and their 16 query heads; the one-card engine's format, q3moe_one.KV_FORMAT_Q8). Each card has
 its own KV error word (the layout's kverr): the settle reads both before the routing flags, and a refused block raises

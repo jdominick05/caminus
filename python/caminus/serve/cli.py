@@ -1,6 +1,6 @@
 """`caminus serve`: the OpenAI / Anthropic server on the K3 engine (M7).
 
-    caminus serve [--config FILE] [--model GGUF] [--drafter GGUF | --no-drafter]
+    caminus serve [--config FILE] [--model GGUF] [--drafter GGUF | --no-drafter] [--kv f16|q8]
         [--host 127.0.0.1] [--port 8092] [--max-ctx auto|N] [--chunk 2048] [--cache-dir ~/.cache/caminus/kv] [--no-disk-cache] [--cache-cap-gb N]
         [--log-dir DIR] [--no-stats] [--hw-root /] [--idle-park-s 28800] [--max-queue 16] [--model-alias k3-coder]
         [--drain-s 60] [--park-s 90] [--no-side-route]
@@ -49,6 +49,7 @@ DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, draft=None, host='127.0.0.1',
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
+                kv='f16',
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
                 flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None, long_context=False)
@@ -141,6 +142,9 @@ def parser():
     ap.add_argument('--cache-dir', help='the prompt cache\'s disk tier (default ~/.cache/caminus/kv)')
     ap.add_argument('--no-disk-cache', action='store_true', default=None, help='no disk tier (VRAM checkpoints only)')
     ap.add_argument('--cache-cap-gb', type=float, help='the disk tier\'s size cap in GB (default 30; 64 in the long-context mode)')
+    ap.add_argument('--kv', choices=('f16', 'q8'), default=None, help='the KV cache format: f16 (the default) or q8 (8-bit '
+                    'Q8_0 rows: about half the memory per position; qwen3-30b-a3b on one card or two). Every other model keeps '
+                    'its own cache (the dense 27B models F16, the Coder its own 8-bit rows) and refuses q8')
     ap.add_argument('--kv-host', action='store_true', default=None, help='the Coder: its attention KV cache in pinned host memory '
                                                                       '(both cards read it directly; frees VRAM; same results). A '
                                                                       '--max-ctx past the model\'s context_length implies it (the '
@@ -219,6 +223,14 @@ def build_engine(opt, stats, log=print):
     from ..errors import NumericalFailure
     try:
         m, pf, df, dr = A.build(opt, log)
+        kv = _arch.kv_cache_of(A, m)
+        if _arch.kv_q8_built(m) != _arch.kv_q8(opt):
+            # (what this compares: an own Q8 build (kv_format_id in KV_Q8_FORMATS; an F16 engine that names its own
+            # format is still F16) exactly when --kv q8, so a q8 request never serves an F16 engine and f16 never an
+            # own-Q8 one. An entry without the choice (Arch.kv_fixed: the Coder and the paused GGUF
+            # engines, their own q8_0 cache) passes with --kv f16, explicit or default, and is served with that cache; kv,
+            # read from the engine, is what /props and the log line report)
+            raise RuntimeError(f'caminus serve: --kv {opt.get("kv") or "f16"} built an engine with a {kv["format"]} KV cache')
         for d in m.devs: torch.cuda.synchronize(d)
         if callable(getattr(m, 'selfcheck', None)):
             # (fresh-state fixed tokens: non-finite logits or an invalid KV encoding must stop before a cache exists)
@@ -231,13 +243,13 @@ def build_engine(opt, stats, log=print):
                         cap_gb=float(opt['cache_cap_gb']) if opt.get('cache_cap_gb') else PC.DEFAULT_CAP_GB)
     sess = K3Session(m, pf, dr, pc, stats=stats, idle_s=(float(opt['idle_park_s']) or None), side_route=not opt['no_side_route'],
                      eos_ids=opt.get('eos_ids') or (248046, 248044))
-    log(f'caminus serve: engine built in {time.time() - t0:.1f} s: max_ctx {m.max_ctx} (usable {sess.max_ctx}), qsa {m.qsa}, '
+    log(f'caminus serve: engine built in {time.time() - t0:.1f} s: max_ctx {m.max_ctx} (usable {sess.max_ctx}), kv {kv["format"]}, qsa {m.qsa}, '
         f'drafter {"DFlash (device accept)" if dr is not None and getattr(dr, "kind", "dflash") == "dflash" else (f"{getattr(dr, "kind", "mtp")} (host accept)" if dr is not None else "none")}, '
         f'prefill chunk {pf.chunk} (T* {pf.crossover}), '
         f'cache {pc.n_slots} VRAM slots ({" / ".join(f"{v:.0f}" for v in pc.tier_mib)} MiB), disk {"on: " + pc.store.root if pc.store else "off"}, '
         f'side slot {pc.side_rows} positions (routing {"on" if sess.side_route else "off"})',
         flush=True)
-    return sess, dict(m=m, df=df, dr=dr, pf=pf, pc=pc)
+    return sess, dict(m=m, df=df, dr=dr, pf=pf, pc=pc, kv=kv)
 
 
 def recipe(opt, log=print):
@@ -254,6 +266,9 @@ def recipe(opt, log=print):
         raise ValueError(f'--cards {opt["cards"]}: {exc}') from None
     why = A.rope_refusal(opt['model'])          # (a file whose rope.scaling.* keys no engine applies: never served unscaled)
     if why: raise ValueError(why)
+    # --kv (or a config file's kv): a format this model has no build for is refused here, before any placement (the
+    # message names the model that takes it)
+    A.kv_check(opt, who=_arch.default_alias(opt['model']))
     mode = A.long_mode(opt)                     # (the long-context mode, before placement: the projections read it)
     if mode: log(f'caminus serve: long-context mode ({mode})', flush=True)
     opt['arch'] = A.name
@@ -315,34 +330,72 @@ def keep_default_draft(A, opt, place, log=print):
 
 
 def fit_report(argv):
-    """Read-only companion to serve: same recipe and placement, no device initialization."""
+    """Read-only companion to serve: same recipe and placement, no device initialization.
+
+    max_ctx is per KV format, {'f16': N, 'q8': N}: each the largest context that fits with that cache, projected on its
+    own through the whole route serve takes (the default drafter's keep, the placement, the room). An entry with no
+    Q8 build (kv_formats; the report lists them) has q8 null; so does a format no cards hold. --kv never changes these
+    figures: it selects the format serve would start with, so placement (cards), need_mib, room_mib and draft describe
+    that one, and when no cards hold it the query fails (ok false, exit 1) with the other format's figure kept. A model
+    with no Q8 build is refused --kv q8 here as serve refuses it (no figures). For an entry without the choice (the
+    Coder, kv_fixed) f16 is the projection of the cache it always builds, and the report names that cache (kv_fixed:
+    its label, null for every other entry), so a reader shows one figure for it, not an F16 one."""
     as_json = '--json' in argv
     opt = parse(argv, fit=True)
     from ..device import host
+
+    def project(o):
+        keep_default_draft(A, o, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
+        placement = host.place(A.cards, fits=lambda cs: A.fits(o, cs), split_of=A.split)
+        plan = A.context_fit(o, placement['cards'])
+        if o['max_ctx'] != 'auto' and o['max_ctx'] > plan.native_ctx:
+            raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
+        return plan, placement
+
+    max_ctx = dict(f16=None, q8=None)
+    failed = dict(ok=False, max_ctx=max_ctx)
     try:
         A = recipe(opt, log=lambda *a, **kw: None)
+        kv = 'q8' if _arch.kv_q8(opt) else 'f16'
+        failed.update(kv=kv, kv_formats=list(A.kv_formats), kv_fixed=A.kv_fixed)   # (every refusal past the recipe names them)
         opt['max_ctx'] = ctx_arg(opt['max_ctx'])
+        if opt.get('rope') == 'yarn' and opt.get('kv') is None:   # (the long-context mode picks the format itself: serve's)
+            try:
+                kv = getattr(project(dict(opt))[0], 'kv', kv)
+            except host.PlacementError:
+                pass
+            opt['kv'] = kv; failed['kv'] = kv
         if opt.get('kv_host'):
             raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
-        keep_default_draft(A, opt, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
-        placement = host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split)
-        plan = A.context_fit(opt, placement['cards'])
-        if opt['max_ctx'] != 'auto' and opt['max_ctx'] > plan.native_ctx:
-            raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
+        base = dict(opt)                         # (before the selected pass's drafter keep changes draft)
+        got = {}
+        for f in sorted(A.kv_formats, key=lambda f: f != kv):    # (the selected format first: its errors come first)
+            try:
+                got[f] = project(opt if f == kv else dict(base, kv=f))
+            except host.PlacementError as exc:
+                got[f] = exc                     # (no cards for this format: its figure stays null)
+        for f, r in got.items():
+            if not isinstance(r, Exception): max_ctx[f] = r[0].maximum()
+        if isinstance(got[kv], Exception): raise got[kv]
+        plan, placement = got[kv]
         report = plan.report()
-        report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']])
-        if getattr(plan, 'kv', None): report['kv'] = plan.kv   # (the KV format the maximum assumes: an entry with formats says)
+        report.update(ok=True, arch=A.name, draft=opt['draft'], cards=[c['pci'] for c in placement['cards']],
+                      kv=kv, kv_formats=list(A.kv_formats), kv_fixed=A.kv_fixed, max_ctx=max_ctx)
     except (ValueError, OSError, ImportError, KeyError, TypeError, NotImplementedError, argparse.ArgumentTypeError, host.PlacementError) as exc:
-        if as_json: print(json.dumps(dict(ok=False, max_ctx=None, error=str(exc))))
-        else: print(f'caminus fit: {exc}', file=sys.stderr)
+        if not isinstance(exc, host.PlacementError): max_ctx.update(f16=None, q8=None)   # (only a placement refusal keeps the other format's figure)
+        if as_json: print(json.dumps(dict(failed, error=str(exc))))
+        else:
+            other = [f'{f.upper()}: {n} positions fit (--kv {f})' for f, n in max_ctx.items() if n is not None]
+            print(f'caminus fit: {exc}' + ''.join(f'; {o}' for o in other), file=sys.stderr)
         return 1
     if as_json:
         print(json.dumps(report))
     else:
-        maximum = report['max_ctx']
-        print(f'caminus fit: {maximum if maximum is not None else "no"} positions fit '
-              f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s)'
-              + (f'; KV {report["kv"]}' if report.get('kv') else '') + ')')
+        maximum, q8 = max_ctx[kv], max_ctx['q8']
+        cache = f' with its own {A.kv_fixed} cache' if A.kv_fixed else f' with the {kv.upper()} cache'   # (an entry without the choice)
+        print(f'caminus fit: {maximum if maximum is not None else "no"} positions fit{cache} '
+              f'(native {report["native_ctx"]}; drafter {report["draft"]}; {len(report["cards"])} card(s))'
+              + (f'; Q8: {q8 if q8 is not None else "none fits"}' if kv == 'f16' and 'q8' in A.kv_formats else ''))
     return 0
 
 
@@ -405,7 +458,8 @@ def main(argv=None):
     srv = K3Server(LoadingSession(_arch.usable_ctx(opt['max_ctx'], A.T), eos_ids=opt['eos_ids']), tok, host=opt['host'], port=int(opt['port']),
                    log_dir=opt['log_dir'] or None, ping_interval=float(opt['ping']), max_queue=int(opt['max_queue']),
                    incremental_tool_args=bool(opt['incremental_tool_args']), model_path=opt['model'], hw=hw, stats=stats,
-                   loading=True, model_alias=opt['model_alias'], flight=flight, loop_guard=not opt['no_loop_guard'])
+                   loading=True, model_alias=opt['model_alias'], flight=flight, loop_guard=not opt['no_loop_guard'],
+                   kv_cache={'type': opt.get('kv') or 'f16', 'format': None})   # (the built engine's below: kv_cache_of)
     srv.start(background=True)
     print(f'caminus serve: http://{opt["host"]}:{srv.port} (loading)  pid={os.getpid()}', flush=True)
     from ..device import kernels
@@ -416,6 +470,7 @@ def main(argv=None):
         srv.stop()
         raise
     srv.set_session(sess, sess.drafter)
+    srv.kv_cache = parts['kv']                   # (/props caminus.kv_cache, /caminus/status server.kv_cache: what the engine holds)
     if opt['hw_root']:
         # the hardware reader on the engine's own cards (by PCI slot, engine order), its 1 Hz sampler thread (VRAM, power,
         # clocks, energy by phase, KFD evictions, page migrations); then the clock check (read only)

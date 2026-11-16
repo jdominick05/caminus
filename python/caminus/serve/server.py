@@ -332,12 +332,14 @@ class K3Server:
     (stats.PhysicsConfig for a new one), hw (hw.HwReader or None: no hardware readings; hw_interval > 0 runs its
     sampler thread from start()), proc_name (the process name start() sets; None: unchanged), loading (True: every
     route answers 503 'Loading model', as llama-server does until its model is loaded; set_loading() changes it),
-    model_alias (/props' model_alias: the default model id)."""
+    model_alias (/props' model_alias: the default model id), kv_cache (/props caminus.kv_cache and /caminus/status
+    server.kv_cache: {'type': 'f16' | 'q8', 'format': the cache's format id}; caminus serve sets the built engine's,
+    caminus.arch.kv_cache_of)."""
 
     def __init__(self, session, tokenizer, host='127.0.0.1', port=8092, log_dir=None, ping_interval=10.0,
                  max_queue=16, incremental_tool_args=False, drafter=None, sampling=None, model_path=None,
                  builder=None, stats=None, physics=None, hw=None, hw_interval=1.0, proc_name='caminus',
-                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True):
+                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True, kv_cache=None):
         self.sess = session
         self.flight = flight        # serve.flight.FlightRecorder or None (the per-request JSONL line, replay bundles)
         self.loop_guard = bool(loop_guard)
@@ -354,6 +356,7 @@ class K3Server:
         self.proc_name = proc_name
         self.loading = bool(loading)
         self.model_alias = model_alias
+        self.kv_cache = dict(kv_cache or {'type': 'f16', 'format': 'f16'})
         self.build_info = build_info()
         self.spec_types = getattr(drafter, 'spec_type', 'draft-dflash') if drafter is not None else 'none'
         self.builder = builder or PromptBuilder.from_tokenizer(tokenizer)
@@ -730,7 +733,7 @@ class K3Server:
         return {'requests_processing': 1 if w.busy else 0, 'requests_deferred': w.deferred, 'queue_depth': w.depth,
                 'build_info': self.build_info, 'model_alias': self.model_alias, 'model_path': self.model_path or '',
                 'n_ctx': self.max_ctx, 'loading': self.loading, 'spec_types': self.spec_types, 'http': http,
-                'worker': dict(w.stats), 'clock_check': self.clock_check}
+                'worker': dict(w.stats), 'clock_check': self.clock_check, 'kv_cache': dict(self.kv_cache)}
 
     def hw_view(self):
         if self.hw is None:
@@ -782,6 +785,7 @@ class K3Server:
             'caminus': {'build_info': self.build_info, 'status': '/caminus/status', 'status_version': STATUS_VERSION,
                         'metrics_prefix': 'caminus:', 'speculative_types': self.spec_types,
                         'stats_enabled': self.stats.enabled,
+                        'kv_cache': dict(self.kv_cache),   # (the KV cache's type and format: caminus serve --kv)
                         # (the code objects loaded so far, from caminus.device.hip when the process has it: a mock server has none)
                         'code_objects': list(getattr(sys.modules.get('caminus.device.hip'), 'LOADED', ()))},
             'n_ctx': self.max_ctx,

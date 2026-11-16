@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func pickerModel() camModel {
@@ -182,5 +184,50 @@ func TestModelPickerCustomDrafter(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The picker shows serve's F16 and Q8 maxima from `caminus fit --json` for the selected model, card count and drafter
+// (q8 null: "not offered" for a model without the 8-bit cache). The panel does no memory math of its own.
+func TestModelPickerFitRowFromServeProjection(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), false, "")
+	mi := pickerModel()
+	m.models, m.loaded["models"] = []camModel{mi}, true
+	key, args := m.fitArgs(mi)
+	if key != "fit --model  --cards 1" {
+		t.Fatalf("fit key is the whole query: %q", key)
+	}
+	if got := strings.Join(args, " "); got != "fit --model  --cards 1 --json" {
+		t.Fatalf("fit args (auto drafter: serve's default): %q", got)
+	}
+	if m.fitRow(mi) != "" {
+		t.Fatal("no row before the fit read")
+	}
+	if cmd := m.fitCmd(); cmd == nil {
+		t.Fatal("a present model's fit is read once")
+	}
+	if cmd := m.fitCmd(); cmd != nil {
+		t.Fatal("the same choice is not read twice")
+	}
+	f16 := 40960
+	next, _ := m.update(fitMsg{key: key, v: fitInfo{OK: true, MaxCtx: fitCtx{F16: &f16}, KVFormats: []string{"f16"}}})
+	row := ansi.Strip(next.(ctl).fitRow(mi))
+	if !strings.Contains(row, "40960") || !strings.Contains(row, "Q8: not offered") {
+		t.Fatalf("F16 maximum shown from fit, Q8 not offered: %q", row)
+	}
+	// a drafter change is another choice with its own read
+	m2 := next.(ctl)
+	m2.picks = map[string]modelPick{"dense": {Cards: 1, Drafts: map[int]string{1: "mtp"}}}
+	if k2, a2 := m2.fitArgs(mi); k2 == key || !strings.Contains(strings.Join(a2, " "), "--draft mtp") {
+		t.Fatalf("drafter choice: key %s args %v", k2, a2)
+	}
+	// serve says nothing fits at F16: shown as no context, not as a number
+	none := ctl{}
+	none = newCtl(newCtlCLI("caminus"), false, "")
+	none.models, none.loaded["models"] = []camModel{mi}, true
+	nk, _ := none.fitArgs(mi)
+	nn, _ := none.update(fitMsg{key: nk, v: fitInfo{OK: true}})
+	if r := nn.(ctl).fitRow(mi); !strings.Contains(r, "no context fits") {
+		t.Fatalf("no F16 maximum row: %q", r)
 	}
 }

@@ -1,0 +1,21 @@
+# monokai-pro: Monokai Pro, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #fcfcfa
+muted = #939293
+think = #c1c0c0
+dim = #727072
+accent = #78dce8
+ok = #a9dc76
+warn = #ffd866
+action = #fc9867
+hot = #ff6188
+purple = #ab9df2
+user = #a1efe4
+teal = #78dce8
+chrome = #5b595c
+
+code_bg = #403e41
+codeblock_bg = #221f22
+code_theme = monokai

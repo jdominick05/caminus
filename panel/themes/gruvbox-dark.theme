@@ -1,0 +1,21 @@
+# gruvbox-dark — warm earth tones. https://github.com/morhetz/gruvbox
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #fbf1c7
+muted = #bdae93
+think = #ebdbb2
+dim = #665c54
+accent = #83a598
+ok = #b8bb26
+warn = #fabd2f
+action = #fe8019
+hot = #fb4934
+purple = #d3869b
+user = #8ec07c
+teal = #83c07c
+chrome = #3c3836
+
+code_bg = #3c3836
+codeblock_bg = #282828
+code_theme = gruvbox

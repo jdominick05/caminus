@@ -35,8 +35,8 @@ the encode of the fp16 values the F16 cache holds, K and q through the head's Wa
 sets that card's error word after Sync; both words come back in each card's one status copy and are read before the
 bound and bail paths (which zero Sync): the engine is then broken (InvalidKVEncoding, reset() keeps it). On a bailed pass
 the segments after the expired wait still run, on the earlier pass's partial in the slot (finite values), and the retry
-rewrites the position's rows; a refused block there is as terminal as anywhere else. Not served (no option selects it);
-its two-card prefill is Q3MPrefillTP's Q8 path.
+rewrites the position's rows; a refused block there is as terminal as anywhere else. Served by caminus serve --cards 2
+--kv q8 (arch.Q3MoETP); its two-card prefill is Q3MPrefillTP's Q8 path.
 
 The server contract is Dense35TP's (the device sampler's two logits shards on two cards: logits_half, shard_devs, vh;
 step / step_token / verify / launch_tokens / finish_pass; reset; state {(card, layer, 'kv')}; tp_key)."""

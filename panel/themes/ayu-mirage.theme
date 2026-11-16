@@ -1,0 +1,21 @@
+# ayu-mirage: Ayu Mirage, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #cccac2
+muted = #8a9199
+think = #b8b4a8
+dim = #707a8c
+accent = #73d0ff
+ok = #d5ff80
+warn = #ffd173
+action = #ffad66
+hot = #f28779
+purple = #dfbfff
+user = #5ccfe6
+teal = #95e6cb
+chrome = #3a4152
+
+code_bg = #2a3040
+codeblock_bg = #1f2430
+code_theme = monokai
