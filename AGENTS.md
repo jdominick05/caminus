@@ -39,6 +39,7 @@ CLAUDE.md imports this file.
 | Outside RDNA3 kernels (FlyDSL, rocKE, CK, AITER) measured at our shapes: yardsticks and borrow sources, never dependencies | docs/dev/yardsticks.md |
 | The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
+| The agent environment (`caminus ember`): its module map, rules and tests | docs/dev/ember.md (users: docs/ember.md, docs/ember-quickstart.md) |
 | Agent skills: after a kernel edit (`kernel-change-evidence`), before calling a pull request ready (`pr-ready`) | .agents/skills/*/SKILL.md (linked from .claude/skills) |
 
 ## Layout (the parts that need a reason)
@@ -184,6 +185,7 @@ CLAUDE.md imports this file.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
   Session monitoring filters by the selected server's alias before applying its six-session limit; shared Qwen homes
   must not let another model's newer logs hide this server's sessions.
+- `ember/`: Ember, the agent environment (`caminus ember`; `caminus env` is kept as an alias; docs/specs/spec-ember.md): agent work as a second user on this machine over SSH, root only through a human-approved bridge; its system prompt is share/harness/ember/ROBOTS.md; stdlib only, no GPU, CPU tests only.
 - `panel/openrgb.go`: optional agent-state lighting over backwards-compatible SDK v3. Active per-LED modes need no
   mode change; `openrgb.switch_modes` opts into temporary Direct/Custom/Static mode changes. Restore the first-seen
   colors and complete mode payload on exit, using freshly discovered identities and matching layouts after reconnects.

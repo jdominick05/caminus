@@ -77,3 +77,4 @@ conversation to disk, then exits. Ctrl-C ends only the guard and leaves the serv
 | `caminus replay BUNDLE` | Reruns a saved request exactly, for a bug report. |
 | `caminus guard LOG SECS CMD...` | Runs any command under the guard. `caminus guard --lines` prints each card's memory limit. |
 | `caminus version` | The version and where its GPU code came from. |
+| `caminus ember ...` | The agent environment (experimental): work as a second user over SSH, root only with your approval. See [harnesses.md](harnesses.md#an-agent-with-its-own-user-experimental). |
