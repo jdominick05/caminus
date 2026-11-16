@@ -71,8 +71,8 @@ def read_only_command(cmd):
     # a redirection to /dev/null or between streams writes nothing: 'find / ... 2>/dev/null' was refused as a change
     # (the '>' in it) before the done check, twice in one real goal's first look
     cmd = NULL_REDIRECT.sub(' ', cmd)
-    if CHANGING.search(cmd):
-        return False
+    if CHANGING.search(cmd) or '<(' in cmd:
+        return False                      # (a process substitution runs a command: `cat <(rm -f x)`)
     for part in re.split(r'\|\||&&|[|;&\n]', cmd):
         words = part.split()
         if not words:
@@ -92,6 +92,12 @@ def read_only_command(cmd):
                 return False
         elif words[0] not in READ_ONLY:
             return False
+        elif words[0] == 'sort' and any(w == '-o' or w.startswith(('-o', '--output')) for w in words[1:]):
+            return False                  # sort -o FILE writes it
+        elif words[0] == 'xxd' and any(w.startswith('-r') for w in words[1:]):
+            return False                  # xxd -r rebuilds a binary
+        elif words[0] in ('xxd', 'uniq') and len([w for w in words[1:] if not w.startswith('-')]) > 1:
+            return False                  # a second file argument is the output it writes
     return True
 def weak_gate(gate):
     """Why a gate can't tell done from not done, or ''. A real goal's first gates were `true` (passes always) and
@@ -912,7 +918,7 @@ class Runtime:
             # Plan mode (planning.py): a plan-first goal with no approved plan only explores; these refusals
             # count as failures like any other refusal: an agent that keeps trying to change things is paused.
             plan_mode = self.store.goal(gid_now).get('plan') == 1
-            if name in planning.PLAN_REFUSED and plan_mode:
+            if plan_mode and (name in planning.PLAN_REFUSED or name.startswith('mcp__')):
                 raise ValueError(planning.refused_text(name))
             if name == 'terminal' and plan_mode and (args.get('stdin') is not None or
                                                      (args.get('command') and not read_only_command(args['command']))):
