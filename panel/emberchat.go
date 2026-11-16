@@ -1084,13 +1084,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				meta = note
 			}
 			diff, _ := result["diff"].(string)
-			var body []string
-			for _, ln := range strings.Split(residentText(diff), "\n") {
+			changed := 0
+			for _, ln := range strings.Split(diff, "\n") {
 				if ln != "" && !strings.HasPrefix(ln, "@@") {
-					body = append(body, ln)
+					changed++
 				}
 			}
-			return toolCard("edit", residentText(path), meta, true, c.expanded || len(body) <= 12, body, w)
+			// line numbers, tinted added / removed plates, the code highlighted for its language (emberdiff.go)
+			return editCard(residentText(path), meta, c.expanded || changed <= 12, diff, w)
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)

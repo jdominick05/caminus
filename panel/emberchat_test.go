@@ -1207,10 +1207,15 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
-	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "-    if (n > len) return -1;", "+    if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
+	// the file's line numbers from the hunk header, the marker, then the code (highlighted, so compare it stripped)
+	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "   1   int f(void) {", "   2 -     if (n > len) return -1;",
+		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
+	}
+	if !strings.Contains(m.chat.content, bgSeq(func() string { a, _ := diffPlates(); return a }())) {
+		t.Fatal("an added line sits on the tinted plate")
 	}
 	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 {
 		t.Fatalf("hunk headers, read bodies or a repeated call card leaked:\n%s", v)
