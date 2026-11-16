@@ -2512,13 +2512,20 @@ for line in sys.stdin:
                 from caminus.ember import relay as _r0
                 want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=1000,output_tokens=max(1,est)))
                       if provider=='anthropic' else None)
-                if want is not None:self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
+                if want is not None:
+                    for _ in range(100):          # (the log line can land before the ledger write on a loaded runner)
+                        if abs(spent-want)<1e-5:break
+                        time.sleep(0.05);spent=ledger.spent()-before
+                    self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
                 else:
                     # exactly the relay's estimate: the forwarded body's bytes / 4 at the input price plus the streamed
                     # characters' tokens at the output price (the body is re-serialised as the relay sent it)
                     self.assertIn('estimated: prompt + %d streamed characters'%n,line)
                     raw=json.dumps(calls[-1]['body']).encode()
                     want=(len(raw)/4*0.6+est*2.2)/1e6
+                    for _ in range(100):
+                        if abs(spent-want)<1e-5:break
+                        time.sleep(0.05);spent=ledger.spent()-before
                     self.assertAlmostEqual(spent,want,places=5,msg=line)
                 # never above the prompt plus the request's own allowance (how much streamed before the hang-up is
                 # noticed depends on the machine's load, so the estimate may reach that cap)
