@@ -110,7 +110,8 @@ def read_only_command(cmd):
         elif words[0] not in READ_ONLY:
             return False
         elif words[0] == 'sort' and any(w.startswith(('--output', '--compress-program')) or
-                                        (re.fullmatch(r'-[A-Za-z]+', w) and 'o' in w) for w in words[1:]):
+                                        (not w.startswith('--') and 'o' in (re.match(r'-([A-Za-z]*)', w) or [0, ''])[1])
+                                        for w in words[1:]):
             return False                  # sort -o FILE (also in a cluster: -ro, -uo) writes it; --compress-program runs one
         elif words[0] == 'xxd' and any(re.fullmatch(r'-[A-Za-z]*r[A-Za-z]*', w) or w == '-revert' for w in words[1:]):
             return False                  # xxd -r rebuilds a binary
@@ -190,6 +191,8 @@ TOOLS = [
          dict(evidence={'type':'string'}), ('evidence',)),
     tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
          dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
+    tool('search', 'Find files and text without the terminal: glob matches file paths (e.g. "**/*.py", "*test*"), pattern is a regular expression searched in their lines (with glob, only in those files). Skips .git, node_modules, caches, binary and huge files. Every match is path:line: text, so read can open it at that line. path is where to search (your home by default).',
+         dict(pattern={'type':'string'}, glob={'type':'string'}, path={'type':'string'}, ignore_case={'type':'boolean'}, limit={'type':'integer'})),
     tool('edit', 'Replace exact text in a file. old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
     tool('write', 'Create a file, or replace a whole file, with content. Returns the diff against what was there.',
@@ -890,6 +893,13 @@ class Runtime:
         refused = False
         ignored = ''          # the note naming unknown arguments that were dropped
         signature = None
+        # STATE.md is the goal's whose action runs now: it moved only when a model turn started, so when two goals
+        # interleaved, A's 'write STATE.md' landed in B's file and was filed as B's state at A's next turn
+        if getattr(self, 'memory', None) is not None:
+            try:
+                self.memory.switch_state(action['goal'])
+            except OSError:
+                pass
         try:
             args = json.loads(action['args'])
             if not isinstance(args, dict):
@@ -986,6 +996,11 @@ class Runtime:
                     result['note'] = 'ledger is now todo: send items with a state next time'
                 elif name == 'read':
                     result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
+                elif name == 'search':
+                    if not args.get('pattern') and not args.get('glob'):
+                        raise ValueError('give a glob (files by name), a pattern (text in them), or both')
+                    result = files.search(self.home, args.get('pattern'), args.get('glob'), args.get('path') or '.',
+                                          bool(args.get('ignore_case')), args.get('limit'))
                     rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
                     if rel.startswith('notes/') and rel.endswith('.md'):
                         self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer
@@ -1013,7 +1028,9 @@ class Runtime:
                 elif name == 'rollback':
                     result = self._rollback(action['goal'], args['id'])
                 elif name == 'terminal':
-                    result = self.terminal.call(action['id'],{**args,'yield_ms':0})
+                    # (launch or queue input only: reading here advanced the cursor, and the poll below then lost the
+                    # output since the last poll)
+                    result = self.terminal.call(action['id'],{**args,'yield_ms':0,'_prepare':True})
                 elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch') or name.startswith('mcp__'):
                     result = None         # catalog queries, network calls and waits stay outside the write transaction
                 elif name == 'peers':
