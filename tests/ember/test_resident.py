@@ -2751,10 +2751,15 @@ for line in sys.stdin:
         # with the first poll, depending on the machine's speed, but exactly once)
         cmd='printf first-burst; sleep 4; printf second-burst; read x'
         start=t.call(sid,dict(command=cmd,yield_ms=50))
-        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=300))
-        both=start['output']+out['output']
+        both=start['output']
+        # poll until the first burst has arrived (a loaded CI runner took longer than 350 ms to start the command), well
+        # inside the 4 s pause; each poll returns only what is new, so the burst must appear exactly once in total
+        for _ in range(30):
+            if 'first-burst' in both:break
+            both+=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))['output']
         self.assertEqual(both.count('first-burst'),1,both);self.assertNotIn('second-burst',both)
-        self.assertTrue(out['no_new_output'] if start['output'] else not out['no_new_output'])
+        out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
+        self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output'],'nothing new: the poll says so')
         # Quiet poll: nothing new arrives within the wait, so the result says so and still runs.
         out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=100))
         self.assertEqual(out['output'],'');self.assertTrue(out['no_new_output']);self.assertTrue(out['running'])
