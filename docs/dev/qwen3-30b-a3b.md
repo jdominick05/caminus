@@ -361,11 +361,34 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
   with llama.cpp's YaRN run (`gg_golden` job line `yarn 4 32768`) as the bound; `tools/gates/q3moe_depth_gmodel.py --yarn`
   at 65,536 and about 131K (two cards) and about 80K (one XTX, `--kv q8`) against `q3moe_ref32.py --yarn 4:32768`
   (resumable per layer: `--resume DIR --budget-s S`, the residual and its layer index in one atomically replaced file);
-  the served smoke with `--long-context`. Under `--yarn` both G-model gates add an absolute bar on llama.cpp's mean KLD
-  against the YaRN reference (twice its native figure: 5.7e-03 at 128 tokens, 1.15e-02 at depth; not yet measured in the
-  mode) and, with `--native-ref`, check that both engines sit closer to the YaRN reference than to the native one
-  (`tools/gates/yarn_bound.py`): the relative rule alone would loosen with a wrong reference or llama.cpp run. Numbers
-  land here when run.
+  the served smoke with `--long-context`. Under `--yarn` both G-model gates check llama.cpp's own run: at 128 tokens an
+  absolute bar on its mean KLD against the YaRN reference (5.7e-03, twice its native figure); at depth its log must name
+  this mode's YaRN (`RoPE yarn (freq_scale 0.25, orig ctx 32768)`) and the depth's own job (`--llama-log`), and the
+  1.15e-02 bar is then printed, not gated (it still gates without a log). With `--native-ref` both engines must sit closer
+  to the YaRN reference than to the native one (`tools/gates/yarn_bound.py`). The bar became a fallback after the first
+  depth runs: llama.cpp's YaRN error grows with depth (below) while the recipe is the same as ours. An fp32 emulation of
+  ggml's angle (its CPU form, theta *= theta_scale per pair, and its HIP form, pos x powf(theta_scale, i)) against the
+  float64 angle gives a mean error of 1.7e-03 rad at position 131,000 against our 3.3e-04 (one fp32 product on a table
+  made in float64); `tests/engine/test_q3moe_yarn_cpu.py` checks the recipe against ggml's formula, written from its
+  source (every pair's frequency to 1e-12, the correction dims, mscale), since the kernels and the YaRN reference share
+  `caminus.rope`.
+- **Results** (2026-11-16, Q4_K_M; mean KLD against the float64 / fp32 YaRN references, last 64 rows at depth):
+
+  | Gate | Cards, KV | caminus | llama.cpp (YaRN, F16 KV) | top-1 caminus / llama.cpp |
+  |---|---|---|---|---|
+  | 128 tokens | XT, F16 | 2.12e-04 | 2.77e-03 | 128 / 127 of 128 |
+  | 128 tokens | XT, Q8 | 1.38e-03 | 2.77e-03 (q8_0 KV: 3.96e-03) | 127 / 127 |
+  | 128 tokens | XTX + XT, F16 | 7.87e-04 | 2.77e-03 | 128 / 127 |
+  | 65,536 | XTX + XT, F16 | 1.64e-03 | 1.08e-02 | 64 / 60 of 64 |
+  | 81,920 | XTX, Q8 | 3.64e-03 | 1.62e-02 | 64 / 63 |
+  | 131,000 | XTX + XT, F16 | 3.46e-03 | 2.57e-02 | 61 / 61 |
+
+  Both engines sit closer to the YaRN reference than to the native one at 128 tokens (caminus 7.9e-04 against 3.5e-02).
+  `test_q3m_yarn_rope.py`: the decode row bit for bit the prefill's at positions 0 to 131,071 for all four YaRN decode
+  builds (one card and two, F16 and Q8), XT. Served smoke (`tools/serve_smoke1.py`, own code only, restart included):
+  two cards at `--max-ctx 131072`, a needle at about 44K of a 119,343-token prompt found (prefill 1,082 tok/s, decode
+  76 tok/s at that depth, 180 tok/s short); one XTX at `--max-ctx 77824` (the mode picked Q8_0 rows: F16 rows hold
+  40,960 there), a needle in a 69,548-token prompt found (prefill 1,399 tok/s, decode 91 tok/s, 198 short).
 
 ## Limits
 
