@@ -403,3 +403,14 @@ func emberMarkdownStyle() ansi.StyleConfig {
 	st.Table.RowSeparator = color("─")
 	return st
 }
+
+// plainScreenTheme: caminus panel and caminus top paint no background, so a theme made for one (a light theme's dark
+// text, chosen in Ember) would draw dark on the terminal's own dark background there. Those screens keep the default
+// look under a background theme; a theme without one (only colours) is shared as before.
+func plainScreenTheme() {
+	if themeCurrent["bg"] == "" {
+		return
+	}
+	themeCurrent = defaultTheme()
+	applyThemeStyles()
+}
