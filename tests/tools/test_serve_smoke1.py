@@ -248,5 +248,28 @@ class ServerCommand(unittest.TestCase):
             self.assertIn(os.path.join('/s', 'kv'), cmd)                                 # (both servers: the same cache directory)
 
 
+class ParkGlob(unittest.TestCase):
+    """--restart-kv's park glob matches the names the prompt cache gives its park files (read from its source: the
+    smoke stays free of torch), and not its spill files"""
+    def test_park_glob_matches_the_store_names(self):
+        import ast
+        import fnmatch
+        tree = ast.parse(open(os.path.join(ROOT, 'python', 'caminus', 'cache', 'prompt.py')).read())
+        names = []
+        for n in ast.walk(tree):
+            if isinstance(n, ast.JoinedStr) and n.values and isinstance(n.values[-1], ast.Constant) \
+                    and str(n.values[-1].value).endswith('.ckv'):
+                # (a sample name: each formatted part stands in as 'x', the literal parts kept)
+                names.append(''.join(str(v.value) if isinstance(v, ast.Constant) else 'x' for v in n.values))
+        parks = [nm for nm in names if 'park' in nm]
+        spills = [nm for nm in names if '-spill-' in nm]
+        self.assertGreaterEqual(len(parks), 2, names)     # (PromptCache.park and the export)
+        self.assertTrue(spills, names)
+        for nm in parks:
+            self.assertTrue(fnmatch.fnmatch(nm, smoke.PARK_GLOB), (nm, smoke.PARK_GLOB))
+        for nm in spills:
+            self.assertFalse(fnmatch.fnmatch(nm, smoke.PARK_GLOB), (nm, smoke.PARK_GLOB))
+
+
 if __name__ == '__main__':
     unittest.main()

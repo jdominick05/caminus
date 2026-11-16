@@ -43,6 +43,11 @@ sys.path.insert(0, HERE)
 import serve_smoke as S   # noqa: E402  (its request / SSE helpers, check, safe_dir, llm_top_check, the guard lines)
 
 
+# the prompt cache's park files in the server's --cache-dir: caminus.cache.prompt names each
+# {key}-{tokens}-{pos}-{commit}-park.ckv (PromptCache.park and the export; tests/tools/test_serve_smoke1.py checks the names
+# it builds match this). A spill is -spill-, never matched here.
+PARK_GLOB = '*-park.ckv'
+
 # --block-imports: run tools/caminus_serve.py under a meta-path hook that raises ImportError for the named packages (and
 # prints the refusal), so a server that serves at all is proof none of them is needed on its path
 BLOCKER = '''import sys, importlib.abc, runpy
@@ -428,7 +433,7 @@ def main():
     check(rc == 0 and park, f'SIGTERM: exit {rc}; {park[-1].split("caminus serve: ")[-1] if park else "no park line"}')
     if a.restart:
         other = bool(a.restart_kv) and a.restart_kv != (a.kv or 'f16')   # (another KV format than the park's)
-        parks = sorted(glob.glob(os.path.join(a.scratch, 'kv', '*-park.ckv')))
+        parks = sorted(glob.glob(os.path.join(a.scratch, 'kv', PARK_GLOB)))
         if other:   # (a cold restart proves nothing unless the first server parked: its entries must be on disk)
             check(bool(parks), f'the first server\'s parks on disk before the restart: {len(parks)}')
         srv2 = Server1('restart', a, kv=a.restart_kv)
