@@ -42,12 +42,17 @@ func toolFamily(name string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(cText).Bold(true)
 }
 
-// readMeta is a read card's note: the lines shown, "directory", or "image WxH" for an image file (files.py image_info).
+// readMeta is a read card's note: the lines shown, "directory", or "image WxH" for an image file (files.py image_info),
+// with "· described by MODEL" where the eyes model described it for a brain without vision (advisor.py Eyes).
 func readMeta(result map[string]any) string {
 	if img, ok := result["image"].(map[string]any); ok {
 		w, _ := img["width"].(float64)
 		h, _ := img["height"].(float64)
-		return fmt.Sprintf("image %dx%d", int(w), int(h))
+		meta := fmt.Sprintf("image %dx%d", int(w), int(h))
+		if by, _ := img["described_by"].(string); by != "" {
+			meta += " · described by " + by
+		}
+		return meta
 	}
 	if d, _ := result["directory"].(bool); d {
 		return "directory"

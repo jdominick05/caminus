@@ -107,7 +107,8 @@ def mistral_efforts(model_id, caps):
 
 
 def mistral_entries(data, provider):
-    """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out."""
+    """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out, kept in
+    its entry's aliases (find takes it: ministral-8b-latest is listed as ministral-8b-2512)."""
     out, seen = [], set()
     for m in data.get('data') or []:
         caps = m.get('capabilities') or {}
@@ -121,7 +122,7 @@ def mistral_entries(data, provider):
                       cache_read=float(p.get('cache_read', p['input']))) if 'input' in p and 'output' in p else None
         out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
                         max_output=None, efforts=mistral_efforts(m['id'], caps), thinking='', vision=bool(caps.get('vision')),
-                        prices=prices))
+                        prices=prices, aliases=[a for a in m.get('aliases') or [] if a != m['id']]))
     return out
 
 
@@ -218,12 +219,14 @@ def refresh(home, config, opener=urllib.request.urlopen, only=None):
 
 
 def find(cat, model, provider=None):
-    """The entry for a model id (a provider/id form picks the provider), or None."""
+    """The entry for a model id, or for one of its aliases when no id matches (a provider/id form picks the provider),
+    or None."""
     if provider is None and '/' in model:
         head, rest = model.split('/', 1)
         if head in (cat.get('providers') or {}):
             provider, model = head, rest
-    hits = [m for m in cat.get('models', []) if m['id'] == model and (provider is None or m['provider'] == provider)]
+    ours = [m for m in cat.get('models', []) if provider is None or m['provider'] == provider]
+    hits = [m for m in ours if m['id'] == model] or [m for m in ours if model in (m.get('aliases') or ())]
     return hits[0] if len(hits) == 1 else None if not hits else \
         (_ for _ in ()).throw(ValueError(f'{model} is served by {", ".join(h["provider"] for h in hits)}: '
                                          'name the provider (provider/model)'))

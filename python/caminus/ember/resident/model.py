@@ -122,7 +122,8 @@ LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
 # Images (files.read): a tool message names its image (store.action_result), and each request sends the file itself, so
 # the store keeps no bytes and a brain switched mid-goal gets what it can take: the image where its config says vision
-# (the catalog's flag, copied at /model), a line saying it can't see where not.
+# (the catalog's flag, copied at /model), a line saying it can't see where not, nothing more where the eyes model
+# already described it in the result (advisor.Eyes). A user message names an image the same way: the eyes' request.
 IMAGES_PER_REQUEST = 20    # newest image results sent as images; 20 x 5 MB stays inside the API's 128 MB request
 IMAGE_CACHE = 32           # encoded files kept per brain: compaction counts the same request many times
 NO_VISION = ("this model can't see images; {name} is a {w}x{h} {fmt}; describe-by-tool options: discover topic images "
@@ -523,15 +524,15 @@ class Model:
             return None
 
     def _image_plan(self, messages):
-        """{index: (base64 data or None, a line for the text or None)} for each tool message that names an image"""
-        found = [i for i, m in enumerate(messages) if m.get('role') == 'tool' and isinstance(m.get('image'), dict)]
+        """{index: (base64 data or None, a line for the text or None)} for each tool or user message naming an image"""
+        found = [i for i, m in enumerate(messages) if m.get('role') in ('tool', 'user') and isinstance(m.get('image'), dict)]
         recent, plan = set(found[-IMAGES_PER_REQUEST:]), {}
         for i in found:
             img = messages[i]['image']
             name = os.path.basename(str(img.get('path') or '')) or 'the file'
             if not self.config.get('vision'):
-                plan[i] = (None, NO_VISION.format(name=name, w=img.get('width'), h=img.get('height'),
-                                                  fmt=str(img.get('format') or '').upper()))
+                plan[i] = (None, None if img.get('described_by') else NO_VISION.format(
+                    name=name, w=img.get('width'), h=img.get('height'), fmt=str(img.get('format') or '').upper()))
             elif 'sha256' not in img:
                 plan[i] = (None, None)                       # past read's caps: the result's note says so
             elif i not in recent:
@@ -550,7 +551,8 @@ class Model:
     def _wire(self, messages):
         """The messages as an OpenAI-compatible request sends them. A Chat Completions tool message carries text only
         (OpenAI's spec: ChatCompletionToolMessageParam takes a string or text parts), so an image goes in a user message
-        after its turn's last tool result, never between parallel results; a message without an image is sent as stored."""
+        after its turn's last tool result, never between parallel results; a user message's image goes in its own content
+        (the eyes' request); a message without an image is sent as stored."""
         plan = self._image_plan(messages)
         if not plan:
             return messages
@@ -562,7 +564,10 @@ class Model:
             if i in plan:
                 img, (data, line) = m['image'], plan[i]
                 m = {k: v for k, v in m.items() if k != 'image'}
-                if data:
+                if data and m['role'] == 'user':
+                    m['content'] = [dict(type='text', text=m.get('content') or ' '),
+                                    dict(type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif data:
                     parts += [dict(type='text', text=f"{img['path']} (the read in call {m.get('tool_call_id')}):"),
                               dict(type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
                 elif line:
@@ -621,7 +626,9 @@ class Model:
                     blocks.append(dict(type='tool_use', id=call['id'], name=f['name'], input=args))
                 add('assistant', blocks)
             else:
-                add('user', [dict(type='text', text=m['content'] or ' ')])
+                data, _ = images.get(i, (None, None))
+                add('user', [dict(type='text', text=m['content'] or ' ')] + ([dict(type='image', source=dict(
+                    type='base64', media_type='image/' + m['image']['format'], data=data))] if data else []))
         if out and out[0]['role'] != 'user':
             out.insert(0, dict(role='user', content=[dict(type='text', text='(conversation resumed)')]))
         if out:

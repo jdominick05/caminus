@@ -18,7 +18,7 @@ from .mail import Mail
 from . import approval, discovery
 from .prompt import render as render_prompt
 from .freetime import FreeTime, KINDS as FREE_KINDS
-from .advisor import Advisor
+from .advisor import Advisor, Eyes
 from .memory import Memory
 from . import files
 from . import outputs
@@ -198,8 +198,9 @@ TOOLS = [
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
-    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. A PNG, JPEG, GIF or WebP file comes back as an image if your model can see (up to 3000 px a side and 3.75 MB), else as its size and format. Paths are relative to your home unless absolute.',
-         dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
+    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. A PNG, JPEG, GIF or WebP file comes back as an image if your model can see (up to 3000 px a side and 3.75 MB); if it can\'t, as a description from the eyes model your human set up (ask what you need to know in question), else as its size and format. Paths are relative to your home unless absolute.',
+         dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'},
+              question={'type':'string', 'description':'for an image your model can\'t see: what the eyes model should tell you about it'}), ('path',)),
     tool('edit', 'Replace exact text in a file (a goal\'s first change needs define_done first). old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
     tool('write', 'Create a file, or replace a whole file, with content (a goal\'s first change needs define_done first). Returns the diff against what was there.',
@@ -367,6 +368,7 @@ class Runtime:
         self._held = {}          # goal -> when an Esc interrupted its turn: it waits for the human's message     # goal -> when a slow per-turn gate last ran, or 'off' after a timeout
         self.free = FreeTime(self)
         self.advisor = Advisor(self)
+        self.eyes = Eyes(self)        # describes an image a brain without vision reads
         self.brains = Brains(self, self.primary)
         self.memory = Memory(self)
         self.mcp = MCP(self)          # per-agent MCP servers; their tools join the list on first use
@@ -1210,6 +1212,11 @@ class Runtime:
                 # Preparation already launched or queued input. Polling must not
                 # relaunch a worker if cancellation raced after preparation.
                 result = self.terminal.call(action['id'], {k:v for k,v in args.items() if k not in ('command','stdin','signal','cwd')} | {'session':result['session']})
+            elif name == 'read' and 'sha256' in (result.get('image') or {}) \
+                    and not (getattr(self.model, 'config', None) or {}).get('vision'):
+                # an image the brain can't see: the eyes model describes it, once, outside the write transaction (past
+                # read's caps there is no sha256 and nothing to send)
+                result = self.eyes.see(action['goal'], result, args.get('question'))
             elif name == 'discover':
                 result = discovery.discover(self.home, **args)
             elif name == 'advisor':
@@ -1873,6 +1880,11 @@ class Runtime:
         for k in ('question_timeout', 'judge_model'):
             if k in fresh:
                 self.config[k] = fresh[k]
+        for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
+            if k in fresh:
+                self.config[k] = fresh[k]
+            else:
+                self.config.pop(k, None)
         if not changed or not self._own_model:
             return
         if self.config.get('prices'):

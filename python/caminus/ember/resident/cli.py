@@ -221,7 +221,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -317,6 +317,12 @@ def parser():
             p.add_argument('--calls-per-goal',type=int,help='advice calls one goal may make (default 5)')
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
             p.add_argument('--off',action='store_true',help='remove the advisor')
+        if op=='eyes':
+            p.add_argument('--provider',help='a configured provider (agent provider), normally your key relay: mistral, anthropic, ...')
+            p.add_argument('--model',help='a vision model it serves, e.g. ministral-8b-latest or claude-haiku-5-5')
+            p.add_argument('--budget-usd',type=float,help='dollars per day the eyes may spend (default 0.25)')
+            p.add_argument('--auto',action='store_true',help='the default pick: the first relay provider of the recommended kinds')
+            p.add_argument('--off',action='store_true',help='no eyes: a brain without vision gets the image\'s size and format')
         if op=='heartbeat':
             p.add_argument('state',nargs='?',choices=('on','off','status','recap','now'),default='status',
                            help='free time: the resident lives in its account when no work is queued')
@@ -680,6 +686,38 @@ def main(argv=None,stdin=None):
             import datetime
             emit(dict(advisor={**DEFAULTS,**adv} if adv else None,
                       today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,calls=0))),a.json)
+            return 0
+        if a.op=='eyes':
+            # the vision model that describes images for a brain without vision (advisor.Eyes)
+            import types
+            from .advisor import Eyes
+            from . import catalog
+            cfg=json.loads((home/'config.json').read_text())
+            eyes=cfg.get('eyes')
+            if a.off:eyes=False
+            elif a.auto:eyes=None
+            elif a.provider or a.model or a.budget_usd is not None:
+                eyes=dict(eyes) if isinstance(eyes,dict) else {}
+                now=Eyes(types.SimpleNamespace(config=cfg,home=home)).cfg
+                if now and not (a.provider or a.model):   # (a budget alone: on the model in use, the auto pick included)
+                    eyes.setdefault('provider',now['provider']);eyes.setdefault('model',now['model'])
+                for flag in ('provider','model','budget_usd'):
+                    v=getattr(a,flag)
+                    if v is not None:
+                        if isinstance(v,float) and v<0:raise ValueError('--budget-usd must be 0 or more')
+                        eyes[flag]=v
+                if not (eyes.get('provider') and eyes.get('model')):
+                    raise ValueError('eyes need --provider and --model (or --auto, or --off)')
+                if eyes['provider'] not in catalog.providers(cfg):
+                    raise ValueError('no provider named %s: add it first (caminus ember agent provider NAME add %s '
+                                     '--kind KIND --endpoint RELAY-URL --relay)' % (eyes['provider'],eyes['provider']))
+            if eyes!=cfg.get('eyes') or (eyes is None)!=('eyes' not in cfg):
+                if eyes is None:cfg.pop('eyes',None)
+                else:cfg['eyes']=eyes
+                atomic_json(home/'config.json',cfg)
+            shown=Eyes(types.SimpleNamespace(config=cfg,home=home))
+            emit(dict(eyes=shown.cfg,today=shown._state().get(__import__('datetime').date.today().isoformat(),
+                                                              dict(usd=0.0,calls=0))),a.json)
             return 0
         if a.op=='heartbeat':
             from .freetime import settings

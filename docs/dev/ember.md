@@ -45,6 +45,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `store.py` | SQLite: goals, the conversation, actions, the inbox, the event stream the panel reads |
 | `prompt.py` | the system prompt (what the agent is told; keep it true to what `runtime.py` enforces) |
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
+| `advisor.py` | the advisor (a stronger model the agent consults) and the eyes (`Eyes`: one vision call per image a brain without vision reads, its description returned as the read's result); each its own daily ledger |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read (text, and images by their headers: `model.py` sends them) / edit / write, the web tools, MCP servers |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |

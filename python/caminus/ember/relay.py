@@ -31,6 +31,8 @@ restarts on failure, no expiry: the daily cap guards spend):
   caminus ember relay uninstall --provider deepinfra
 """
 import argparse
+import base64
+import math
 import subprocess
 import datetime
 import http.client
@@ -43,7 +45,8 @@ import sys
 import threading
 import time
 
-from .resident.model import FALLBACK_BETA, FALLBACK_MODELS, PRICES
+from .resident.files import IMAGE_HEAD, IMAGE_MAX_SIDE, image_info
+from .resident.model import FALLBACK_BETA, FALLBACK_MODELS, PRICES, image_tokens
 
 PROVIDERS = {
     'anthropic': dict(host='api.anthropic.com', post=('/v1/messages', '/v1/messages/count_tokens'),
@@ -67,6 +70,50 @@ def anthropic_cost(model, usage, served=None):
     out = usage.get('output_tokens') or 0
     p = high if inp + read + wrote > line else low
     return (inp * p[0] + out * p[1] + read * p[2] + wrote * p[3]) / 1e6
+
+
+def provider_image_tokens(provider, width, height):
+    """An image's input tokens where the provider's count never came. Anthropic: Claude's rule (model.image_tokens, 28 px
+    patches after its downscale: about w*h/750). Others: 28 px patches with no downscale. Mistral's docs give no rule;
+    Ministral 3B / 8B / 14B billed four screenshots (640-860 px wide) at exactly that count plus the request's text
+    (measured 2026-11), and assuming no downscale errs high for a large image."""
+    if provider == 'anthropic':
+        return image_tokens(width, height)
+    return math.ceil(width / 28) * math.ceil(height / 28)
+
+
+def prompt_tokens(body, provider):
+    """A request's input tokens, estimated for a reply cut before its usage arrived: the JSON text at 4 bytes a token,
+    each base64 image at its image-token count (by its bytes, one 1 MB screenshot booked about 350K phantom tokens). An
+    image whose header can't be read counts as the largest read sends (files.IMAGE_MAX_SIDE a side)."""
+    images = []
+
+    def strip(x):
+        if isinstance(x, list):
+            return [strip(v) for v in x]
+        if not isinstance(x, dict):
+            return x
+        src = x.get('source')
+        if x.get('type') == 'image' and isinstance(src, dict) and isinstance(src.get('data'), str):
+            images.append(src['data'])                          # (Messages API image block)
+            return dict(x, source=dict(src, data=''))
+        url = x.get('image_url')
+        url = url.get('url') if isinstance(url, dict) else url
+        if x.get('type') == 'image_url' and isinstance(url, str) and url.startswith('data:'):
+            images.append(url.split(',', 1)[-1])                # (Chat Completions data URI)
+            return dict(x, image_url='')
+        return {k: strip(v) for k, v in x.items()}
+
+    total = len(json.dumps(strip(body)).encode()) // 4
+    for data in images:
+        size = None
+        try:
+            found = image_info(base64.b64decode(data[:(IMAGE_HEAD // 3) * 4]))
+            size = found[1:] if found else None
+        except ValueError:                                      # (binascii.Error is a ValueError)
+            pass
+        total += provider_image_tokens(provider, *(size or (IMAGE_MAX_SIDE, IMAGE_MAX_SIDE)))
+    return total
 
 
 def openai_cost(prices, usage):
@@ -216,8 +263,17 @@ class OwnerPrices:
             return None
 
 
-def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None):
+def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None, install=None):
+    """install: this relay's own `relay install` flags without --model (main), so a refused model's error names the
+    exact command that allows it (install replaces the model list: the command keeps every model allowed now)."""
     spec = PROVIDERS[provider]
+    install = install or ['--cap-usd', '%g' % ledger.cap]
+
+    def allow(model):
+        cmd = ['caminus', 'ember', 'relay', 'install', '--provider', provider, *install]
+        for m in sorted(models) + [model]:
+            cmd += ['--model', m]
+        return 'this relay allows %s; to allow it: %s' % (', '.join(sorted(models)), ' '.join(cmd))
     connect = connect or (lambda: http.client.HTTPSConnection(spec['host'], timeout=900,
                                                               context=ssl.create_default_context()))
 
@@ -290,13 +346,18 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             model = body.get('model')
             if provider == 'anthropic':
                 if model not in models:
-                    return self.refuse(403, 'permission_error', 'model not allowed: %r' % model)
+                    return self.refuse(403, 'permission_error', 'model not allowed: %r (%s)' % (
+                        model, allow(model) if isinstance(model, str) and model in PRICES else
+                        'this relay allows %s; a model without a price in PRICES cannot be allowed'
+                        % ', '.join(sorted(models))))
                 rates = None
             else:
                 rates = prices.get(model) if isinstance(model, str) else None
                 if rates is None:
                     return self.refuse(403, 'permission_error', 'no price for %r: it cannot be metered%s' % (
-                        model, ' (add it to the relay\'s --prices file)' if provider == 'mistral' else ''))
+                        model, ' (add it to the relay\'s price file %s as "%s": [input, output] USD per million tokens; '
+                               're-read on change)' % (getattr(prices, 'path', '--prices'), model)
+                        if provider == 'mistral' else ''))
             spent = ledger.spent()
             if spent >= ledger.cap:
                 return self.refuse(402, 'billing_error', 'daily cap $%.2f reached ($%.4f spent today)' % (ledger.cap, spent))
@@ -407,7 +468,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     extra += ' CLIENT-GONE'
                     if provider == 'anthropic' and not final and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         if not usage:          # gone before message_start: the prompt was still read
-                            usage = {'input_tokens': len(raw) // 4}
+                            usage = {'input_tokens': prompt_tokens(body, provider)}
                         # the final count never came (a hang-up: an interrupt, a steer, /advisor end a reply this way):
                         # charge what was streamed, about 3.5 characters a token rounded up, never the whole allowance
                         # (that put phantom spend on every interrupt and could hit the daily cap early)
@@ -427,11 +488,12 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         usd = openai_cost(rates, usage)
                     elif client_gone and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         # a hang-up before the usage chunk: the prompt plus what was streamed, not the whole allowance
-                        usd = (len(raw) / 4 * rates[0] + min(streamed * 2 // 7 + 1, body['max_tokens']) * rates[1]) / 1e6
+                        usd = (prompt_tokens(body, provider) * rates[0]
+                               + min(streamed * 2 // 7 + 1, body['max_tokens']) * rates[1]) / 1e6
                         extra += ' (estimated: prompt + %d streamed characters)' % streamed
                     else:
                         # no usage reported (a cut stream): charge the request as if every output token was spent
-                        usd = (len(raw) / 4 * rates[0] + body['max_tokens'] * rates[1]) / 1e6
+                        usd = (prompt_tokens(body, provider) * rates[0] + body['max_tokens'] * rates[1]) / 1e6
                         extra += ' NO-USAGE (charged the estimate)'
                     total = ledger.add(usd, usage.get('prompt_tokens') or 0, usage.get('completion_tokens') or 0,
                                        (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
@@ -606,8 +668,13 @@ def main(argv=None):
               OwnerPrices(a.prices or spec['prices'], log, fetch=lambda: _list_models(spec, key))
               if a.provider == 'mistral' else None)
     port = a.port or spec['port']
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', port),
-                                          make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices))
+    install = ['--cap-usd', '%g' % a.cap_usd]       # (the flags `relay install` would need to recreate this relay)
+    for flag, val, default in (('--port', a.port, None), ('--max-tokens', a.max_tokens, ap.get_default('max_tokens')),
+                               ('--key-file', a.key_file, None), ('--prices', a.prices, None)):
+        if val is not None and val != default:
+            install += [flag, str(val)]
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), make_handler(a.provider, key, ledger, models, a.max_tokens,
+                                                                            log, prices, install=install))
     if a.ttl > 0:
         threading.Timer(a.ttl, srv.shutdown).start()
     root = '/v1/openai' if a.provider == 'deepinfra' else '/v1'
