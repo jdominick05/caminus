@@ -19,11 +19,11 @@ on with [the Ember quickstart](ember-quickstart.md) once a model runs.
 python3.12 -m venv ~/caminus-venv
 source ~/caminus-venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
-pip install caminus
+pip install "caminus>=0.3.0rc1"       # once 0.3.0 is out: pip install caminus
 ```
 
-PyTorch goes first because its AMD build isn't on PyPI. Ember and the models on this page arrive on PyPI with 0.3.0;
-until then, build from source (below) or install a nightly.
+PyTorch goes first because its AMD build isn't on PyPI. The version pin matters while 0.3.0 is a release candidate: a
+plain `pip install caminus` skips release candidates and installs 0.2.1, without Ember or the models on this page.
 
 **Building from source instead.** If you'd rather not install a prebuilt wheel, build it yourself (Docker, CPU only;
 built from a release tag, the result is byte for byte the published wheel): clone the repository and `cd` into it, check

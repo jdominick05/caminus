@@ -56,8 +56,9 @@ The build needs Docker that your user can run (`docker run hello-world` works). 
 
 **Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
 release is built with the same recipe and signed, and its provenance can be checked against the source
-([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember arrives on PyPI with 0.3.0;
-until then the package there is 0.2.1, without it.
+([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember arrives on PyPI with 0.3.0; while
+0.3.0 is a release candidate, install it with `pip install "caminus>=0.3.0rc1"` (a plain `pip install caminus` skips
+release candidates and gets 0.2.1, without Ember).
 
 ### 2. Open the panel
 
