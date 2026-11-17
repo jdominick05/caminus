@@ -5,9 +5,11 @@ twice. These tools work on the file itself:
 
 - read(path, start, lines): numbered lines, a window at a time, never a binary file.
 - search(path, glob, pattern, context): file names by glob, text by regex with context lines; .gitignore honoured in a
-  git repository, binary files skipped, results capped with a count of the rest. ripgrep, when it is installed, only
-  narrows the files to look in; the matching, the context and the caps are this module's, so the result is the same
-  either way.
+  git repository (outside one, hidden folders, build/ and node_modules/ are skipped), binary files skipped, results
+  capped with a count of the rest, and the whole search stopped after SEARCH_SECONDS. ripgrep, when it is installed,
+  only narrows the files to look in, and only for a plain literal (`rg -F` on the raw bytes finds it in exactly the
+  files Python's re does; a regex is not, as their syntax and their reading of invalid UTF-8 differ); the matching,
+  the context and the caps are this module's, so the result is the same either way.
 - edit(path, old, new, replace_all): an exact string replacement. old must occur exactly once (or replace_all), so an
   edit never lands somewhere the agent did not mean. A file with CRLF endings keeps them.
 - write(path, content): the whole file, created or replaced.
@@ -21,6 +23,7 @@ from fnmatch import fnmatchcase
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -40,8 +43,10 @@ SEARCH_CHARS = 16_000     # characters of matches and context one search shows (
 SEARCH_LINE = 300         # characters of one line shown (minified code is one huge line)
 SEARCH_SCAN = 20_000      # matches counted before a search stops counting
 SEARCH_FILE_MAX = 10_000_000   # bytes: a bigger file is skipped (the stdlib path reads each file whole)
-SEARCH_SECONDS = 60       # a search stops looking after this long and says so
-SKIP_DIRS = frozenset(('.git', 'node_modules', 'build'))   # skipped by the walk outside a git repository
+SEARCH_SECONDS = 60       # a search (listing, stats and reading) stops looking after this long and says so
+SKIP_DIRS = frozenset(('node_modules', 'build'))   # skipped by the walk outside a git repository, with hidden folders
+PSEUDO_DIRS = frozenset(('/proc', '/sys', '/dev'))   # never walked into: files there report size 0 and may not end
+NOT_LITERAL = frozenset('.^$*+?{}[]\\|()\n\r\0\ufffd')   # a pattern with none of these goes to rg -F
 
 
 def _path(home, path):
@@ -143,32 +148,58 @@ def _size(p):
         return -1                         # (gone since it was listed)
 
 
-def _listing(root):
-    """The files a search looks in, sorted: what git lists (tracked and untracked, not ignored) inside a repository,
-    else a walk that skips SKIP_DIRS. A file git lists but that is gone, or a submodule, is left out. A folder git
-    lists nothing in (one it ignores, asked for by name) is walked."""
+def _literal(pattern):
+    """Is pattern plain text that `rg -F` finds in exactly the files Python's re finds it in? No regex syntax (so no
+    POSIX class, which ripgrep reads in [[:alpha:]] and Python does not), no line break or NUL, and no U+FFFD (Python
+    decodes an invalid UTF-8 byte to one; ripgrep sees the byte). Every other character is the same UTF-8 bytes in
+    both, so a line holds it for one exactly when it does for the other."""
+    return not NOT_LITERAL.intersection(pattern)
+
+
+def _listing(root, deadline):
+    """([(file, size)], late): the regular files a search looks in, sorted, with their sizes. Inside a repository,
+    what git lists (tracked and untracked, not ignored; a name that is not UTF-8 kept as the bytes it is); else a walk
+    that skips hidden folders below root, SKIP_DIRS and PSEUDO_DIRS. A file git lists but that is gone, or a submodule,
+    is left out. A folder git lists nothing in (one it ignores, asked for by name) is walked. late: the deadline came
+    first, and the list is what was found by then."""
     if root.is_file():
-        return [root]
-    r = _run(['git', '-C', str(root), 'ls-files', '-co', '--exclude-standard', '-z'], 30)
-    files = [root / n for n in r.stdout.split('\0') if n] if r is not None and r.returncode == 0 else []
+        return [(root, _size(root))], False
+    r = _run(['git', '-C', str(root), 'ls-files', '-co', '--exclude-standard', '-z'], 30, text=False)
+    files = [root / os.fsdecode(n) for n in r.stdout.split(b'\0') if n] if r is not None and r.returncode == 0 else []
+    late = False
     if not files:
         for d, dirs, names in os.walk(root):
-            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+            if time.monotonic() > deadline:
+                late = True
+                break
+            dirs[:] = [x for x in dirs if not (x in SKIP_DIRS or x.startswith('.') or os.path.join(d, x) in PSEUDO_DIRS)]
             files += [Path(d) / n for n in names]
-    return sorted((p for p in files if p.is_file()), key=lambda p: str(p.relative_to(root)))
+    out = []
+    for p in files:
+        if time.monotonic() > deadline:
+            late = True
+            break
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue                      # (gone since it was listed, or a link to nothing)
+        if stat.S_ISREG(st.st_mode):
+            out.append((p, st.st_size))
+    return sorted(out, key=lambda e: str(e[0].relative_to(root))), late
 
 
 def _rg_candidates(rg, pattern, files, deadline):
-    """The files ripgrep finds a match in, or None when it cannot answer for this pattern (a lookaround or a
-    backreference: its regex syntax is not Python's) and the stdlib reads every file instead."""
+    """The files ripgrep finds the literal pattern in (-F on the raw bytes: no encoding or BOM handling), or None
+    when ripgrep could not answer and the stdlib reads every file instead."""
     found = set()
     for i in range(0, len(files), 500):
         left = deadline - time.monotonic()
         if left <= 0:
             break
         try:
-            r = subprocess.run([rg, '--no-config', '--text', '--crlf', '--files-with-matches', '--null', '-e', pattern,
-                                '--', *map(str, files[i:i + 500])], capture_output=True, timeout=left)
+            r = subprocess.run([rg, '--no-config', '--text', '--encoding', 'none', '--fixed-strings',
+                                '--files-with-matches', '--null', '-e', pattern, '--', *map(str, files[i:i + 500])],
+                               capture_output=True, timeout=left)
         except subprocess.TimeoutExpired:
             break
         except OSError:
@@ -196,39 +227,48 @@ def search(home, path='.', glob=None, pattern=None, context=2):
         os.scandir(root).close()
     else:
         open(root, 'rb').close()
+    if pattern:
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f'pattern is not a valid regex ({e}); escape special characters such as ( [ . * with \\')
+    deadline = time.monotonic() + SEARCH_SECONDS
     base = Path(home)
-    show = lambda p: os.path.relpath(p, base) if p == base or base in p.parents else str(p)
-    files = _listing(root)
+    # A name that is not UTF-8 comes back escaped (caf\xe9.txt): the result is stored and sent as UTF-8 text.
+    show = lambda p: (os.path.relpath(p, base) if p == base or base in p.parents else str(p)).encode(
+        'utf-8', 'surrogateescape').decode('utf-8', 'backslashreplace')
+    files, late = _listing(root, deadline)
     if glob:
-        files = [p for p in files if _glob_match(p, root, glob.removeprefix('./'))]
+        files = [(p, n) for p, n in files if _glob_match(p, root, glob.removeprefix('./'))]
     out = dict(path=show(root))
     if not pattern:
-        out.update(files=len(files), text='\n'.join(show(p) for p in files[:SEARCH_NAMES]))
+        out.update(files=len(files), text='\n'.join(show(p) for p, _ in files[:SEARCH_NAMES]))
         if len(files) > SEARCH_NAMES:
             out['more'] = f'{len(files) - SEARCH_NAMES} more files not listed: narrow glob or path'
+        if late:
+            out['stopped'] = f'stopped looking after {SEARCH_SECONDS} s: the list is partial; narrow path or glob'
         return out
-    try:
-        rx = re.compile(pattern)
-    except re.error as e:
-        raise ValueError(f'pattern is not a valid regex ({e}); escape special characters such as ( [ . * with \\')
-    big = [p for p in files if _size(p) > SEARCH_FILE_MAX]
-    files = [p for p in files if 0 <= _size(p) <= SEARCH_FILE_MAX]
-    deadline = time.monotonic() + SEARCH_SECONDS
+    big = [p for p, n in files if n > SEARCH_FILE_MAX]
+    files = [p for p, n in files if n <= SEARCH_FILE_MAX]
     rg = _rg()
-    look = (_rg_candidates(rg, pattern, files, deadline) if rg and files else None)
+    look = (_rg_candidates(rg, pattern, files, deadline) if rg and files and _literal(pattern) else None)
     if look is None:
         look = files
     context = max(0, min(int(context if context is not None else 2), 10))
     total = nfiles = shown_m = shown_f = chars = 0
-    text, late = [], False
+    text = []
     for p in look:
         if total >= SEARCH_SCAN or time.monotonic() > deadline:
-            late = total < SEARCH_SCAN
+            late = late or total < SEARCH_SCAN
             break
         try:
-            data = p.read_bytes()
+            with open(p, 'rb') as f:      # (bounded: a file under /proc reports size 0 and can read gigabytes)
+                data = f.read(SEARCH_FILE_MAX + 1)
         except OSError:
             continue                      # (unreadable: the account may not read it)
+        if len(data) > SEARCH_FILE_MAX:
+            big.append(p)                 # (it grew since its size was read)
+            continue
         if _binary(data):
             continue
         rows = _lines(data.decode('utf-8', errors='replace'))

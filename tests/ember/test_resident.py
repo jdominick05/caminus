@@ -560,6 +560,9 @@ class Resident(unittest.TestCase):
         finally:store.close()
 
     def test_search_finds_names_and_text_the_same_with_and_without_ripgrep(self):
+        """ripgrep narrows only for a plain literal (rg -F on raw bytes). The cases where its regex is not Python's:
+        [[:alpha:]] (a POSIX class to ripgrep, a set to Python), . on an invalid UTF-8 byte (U+FFFD to Python's
+        decode), and a UTF-16 BOM (ripgrep transcodes by default; Python reads the bytes)."""
         import shutil,stat
         from caminus.ember.resident import files
         home=self.home;proj=home/'proj'
@@ -574,15 +577,23 @@ class Resident(unittest.TestCase):
         for i in range(25):put(f'spread/f{i:02}.txt','spread hit\n')
         put('wide/long.txt',('x'*400+'\n')*80)
         subprocess.run(['git','init','-q',str(proj)],check=True)
-        plain=home/'plain'                                   # no repository: the walk, which skips build/ and node_modules/
-        for rel in ('a.txt','build/b.txt','node_modules/m/c.txt','deep/d.txt'):
+        plain=home/'plain'                       # no repository: the walk, which skips build/, node_modules/ and hidden folders
+        for rel in ('a.txt','build/b.txt','node_modules/m/c.txt','deep/d.txt','.cache/e.txt'):
             (plain/rel).parent.mkdir(parents=True,exist_ok=True);(plain/rel).write_text('total\n')
+        def own(rel,data):(home/rel).parent.mkdir(parents=True,exist_ok=True);(home/rel).write_bytes(data)
+        own('posix/f.txt',b':]\n');own('latin/l1.txt',b'caf\xe9 ok\n');own('latin/u8.txt','café ok\n'.encode())
+        own('bom/w.txt',b'\xff\xfe'+'\u4141\u4141'.encode('utf-16-le')+b'\n')   # bytes AAAA after the BOM, no NUL
+        names=home/'names';own('names/'+os.fsdecode(b'caf\xe9.txt'),b'hello\n');own('names/plain.txt',b'hello\n')
+        subprocess.run(['git','init','-q',str(names)],check=True)
         queries=[dict(path='proj',pattern='total'),dict(path='proj',glob='*.py'),dict(path='proj',glob='src/*.py'),
                  dict(path='proj',glob='*.py',pattern='def ',context=0),dict(path='proj',pattern='total$'),
                  dict(path='proj',pattern='(?<=grand )total'),dict(path='proj',pattern='(?i)TOTAL'),
                  dict(path='proj',pattern='hit'),dict(path='proj/many.txt',pattern='hit'),dict(path='plain',pattern='total'),
                  dict(path='proj/ignored',pattern='total'),dict(path='proj',pattern='nothing here'),
-                 dict(path='proj/wide',pattern='x+')]
+                 dict(path='proj/wide',pattern='x+'),dict(path='posix',pattern='[[:alpha:]]'),
+                 dict(path='latin',pattern='caf. ok'),dict(path='latin',pattern=' ok'),dict(path='latin',pattern='é'),
+                 dict(path='bom',pattern='AA'),dict(path='names',pattern='hello'),dict(path='names',glob='*.txt'),
+                 dict(path='plain/.cache',pattern='total')]
         log=S/('rg-'+uuid.uuid4().hex);wrapper=S/('rg-wrap-'+uuid.uuid4().hex)
         if shutil.which('rg'):
             wrapper.write_text(f'#!/bin/sh\necho run >> {log}\nexec {shutil.which("rg")} "$@"\n');wrapper.chmod(0o755)
@@ -591,10 +602,15 @@ class Resident(unittest.TestCase):
             with unittest.mock.patch.object(files,'_rg',return_value=None):
                 runs['stdlib']=[files.search(home,**q) for q in queries]
             if shutil.which('rg'):
+                ran=lambda:log.read_text().count('run') if log.exists() else 0
+                runs['rg'],used=[],[]
                 with unittest.mock.patch.object(files,'_rg',return_value=str(wrapper)):
-                    runs['rg']=[files.search(home,**q) for q in queries]
-                self.assertTrue(log.exists(),'ripgrep ran')
-                self.assertEqual(runs['rg'],runs['stdlib'],'ripgrep only narrows the files: the result is the same')
+                    for q in queries:
+                        n=ran();runs['rg'].append(files.search(home,**q));used.append(ran()>n)
+                self.assertEqual([used[i] for i in (0,4,13,14,15,16,17)],[True,False,False,False,True,True,True],
+                                 'ripgrep narrows plain literals only: never a regex such as [[:alpha:]] or caf. ok')
+                for i in range(len(queries)):
+                    self.assertEqual(runs['rg'][i],runs['stdlib'][i],f'ripgrep only narrows the files: {queries[i]}')
             else:print('SKIP the ripgrep leg: rg is not on PATH')
         r=runs['stdlib']
         self.assertEqual((r[0]['matches'],r[0]['files']),(5,3),r[0])          # .gitignore'd, .log and binary files skipped
@@ -617,6 +633,14 @@ class Resident(unittest.TestCase):
         shown=r[12]['text'].count(':  x')                    # long lines: the text cap stops it before the match cap
         self.assertTrue(10<shown<60,shown);self.assertLess(len(r[12]['text']),files.SEARCH_CHARS+1000)
         self.assertEqual(r[12]['more'],f'{80-shown} more matches not shown: narrow pattern, glob or path')
+        self.assertEqual([r[i]['matches'] for i in (13,14,15,16,17)],[1,2,2,1,1],'the cases where rg and re differ')
+        self.assertEqual((r[18]['matches'],r[19]['files']),(2,2),'a name that is not UTF-8 fails nothing')
+        self.assertIn('names/caf\\xe9.txt',r[18]['text']);self.assertIn('names/caf\\xe9.txt',r[19]['text'])
+        json.dumps(r[18],ensure_ascii=False).encode()                   # (as the store writes it)
+        self.assertEqual(r[20]['matches'],1,'a hidden folder named as path is searched')
+        with unittest.mock.patch.dict(os.environ,GIT_CEILING_DIRECTORIES=str(home)),             unittest.mock.patch.object(files,'SEARCH_SECONDS',-1):
+            late=files.search(home,'plain',glob='*.txt')
+        self.assertEqual(late['files'],0);self.assertIn('the list is partial',late['stopped'])
         self.assertLess(len(json.dumps(r[12])),outputs.LIMIT_CHARS,'a capped search is never spilled to a file')
         first=r[3]['text'].split('\n')[0]
         self.assertIn('def total',files.read(home,first,start=4,lines=1)['text'],'paths go to read as they are')
