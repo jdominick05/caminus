@@ -49,7 +49,7 @@ class Tmux:
         # the program sees a true-colour xterm (tmux would say screen, and colour libraries then drop to 256 colours)
         envs = ' '.join(f'{k}={shlex.quote(v)}' for k, v in (env or {}).items())
         self.tm('-f', '/dev/null', 'new-session', '-d', '-s', 'lab', '-x', str(self.w), '-y', str(self.h),
-                f'env {envs} {cmd}' if envs else cmd)
+                f'env {envs} sh -c {shlex.quote(cmd)}' if envs else cmd)
         self.tm('set-option', '-t', 'lab', 'remain-on-exit', 'on', check=False)
 
     def keys(self, *k):
