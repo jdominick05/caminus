@@ -57,7 +57,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
 | Ctrl+R | earlier prompts containing the draft, newest first |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
-| Ctrl+E | open or fold every tool card; Ctrl+O shows every line of an open card (40 otherwise) |
+| Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
 | Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell") |

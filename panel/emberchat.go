@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image/color"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,7 +25,8 @@ import (
 type residentChat struct {
 	ready, sending, newGoal, help, forceNew bool
 	shell                                   bool      // shell mode: "!" on an empty draft; Enter runs the line as the agent
-	expanded                                bool      // Ctrl+E: every card open (tool calls, output, thinking)
+	expanded                                bool      // Ctrl+O: every card open (tool calls, output, thinking)
+	home, cwd                               string    // the agent's home and working folder: cards show paths short
 	armed                                   string    // the root request a first "a" armed; a second approves
 	armedAt                                 time.Time // when it was armed (10 s to confirm)
 	compose                                 textarea.Model
@@ -61,7 +63,7 @@ type residentChat struct {
 	full                                    bool          // Ctrl+O: cards show every line
 	rootSel                                 string        // the root request the decision keys act on (shared card)
 	group                                   toolGroup     // compact view: the tool work since the last drawn block
-	cards                                   bool          // Ctrl+E: every tool card instead of the compact line
+	cards                                   bool          // Ctrl+O: every tool card instead of the compact line
 	sel                                     chatSelection // select to copy (envselect.go)
 	view                                    textView      // /btw's answer, /diff
 	rewind                                  rewindState   // the /rewind step picker
@@ -420,9 +422,13 @@ func (m *emberModel) syncChat() {
 		m.chat.reqOutcome = out
 		m.chat.content, m.chat.rendered = "", 0
 	}
+	if m.chat.home != m.resident.Home || m.chat.cwd != m.agentCwdAbs() {
+		m.chat.home, m.chat.cwd = m.resident.Home, m.agentCwdAbs()
+		m.chat.content, m.chat.rendered = "", 0 // (the paths on the cards are drawn short against them)
+	}
 	changed := m.chat.rendered != len(m.residentEvents)
 	if m.chat.rendered == 0 {
-		m.chat.group = toolGroup{}   // drawing from the start (a resize, Ctrl+E): the group starts over too
+		m.chat.group = toolGroup{}   // drawing from the start (a resize, Ctrl+O): the group starts over too
 		m.chat.sel = chatSelection{} // and the lines a selection pointed at are gone
 	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
@@ -440,9 +446,9 @@ func (m *emberModel) syncChat() {
 			if e.Kind == "tool_result" {
 				// every action is its own card (60 calls, 60 cards: emberactions.go)
 				if block := m.chat.actionBlock(e, w); block != "" {
+					m.chat.fold(e) // first: a finished command's "running:" line must not be fixed above its card
 					m.chat.flushGroup(w)
 					m.chat.content += block + "\n\n"
-					m.chat.fold(e) // (the running line still clears)
 					continue
 				}
 			}
@@ -1115,7 +1121,7 @@ func fenced(text, language string) string {
 }
 
 // eventBlock draws one durable event in the shell's style (shell.go): the human's words and the agent's replies as
-// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+E expands them all), root
+// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+O expands them all), root
 // requests as the inline approval card. The result is final: syncChat caches it and never draws it again.
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
@@ -1207,14 +1213,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 					break
 				}
 			}
-			var pretty any
-			text := rawArgs
-			if json.Unmarshal([]byte(rawArgs), &pretty) == nil {
-				if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
-					text = string(b)
-				}
+			body := lines(rawArgs, 40)
+			if len(args) > 0 {
+				body = keyLines(args, 40) // key: value lines, not a JSON dump
 			}
-			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, lines(text, 40), w))
+			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, body, w))
 		}
 		return strings.Join(parts, "\n")
 	case "tool_result":
@@ -1227,14 +1230,13 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			return ""
 		}
 		if name := str("name"); (name == "edit" || name == "write") && result["error"] == nil {
-			// an edit is a diff card: open when it is short, folded (Ctrl+E) when it is long
+			// an edit is a diff card: open when it is short, folded (Ctrl+O) when it is long
 			path, _ := result["path"].(string)
 			added, _ := result["added"].(float64)
 			removed, _ := result["removed"].(float64)
 			meta := fmt.Sprintf("+%d −%d", int(added), int(removed))
 			if created, _ := result["created"].(bool); created {
-				note, _ := result["note"].(string)
-				meta = note
+				meta = "created"
 			}
 			diff, _ := result["diff"].(string)
 			changed := 0
@@ -1244,7 +1246,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			// line numbers, tinted added / removed plates, the code highlighted for its language (emberdiff.go)
-			return editCard(residentText(path), meta, c.expanded || c.full || changed <= 12, diff, w)
+			return editCard(name, residentText(shortPath(path, c.home, c.cwd)), meta, c.expanded || c.full || changed <= 12, diff, w)
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
@@ -1256,10 +1258,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			return toolCard("read", residentText(path), meta, true, false, nil, w)
 		}
 		if err, ok := result["error"].(string); ok {
-			// a failed call stays open: the reason is what the reader needs
-			return toolCard("error", residentText(str("name")), firstLine(err), false, true, lines(err, 12), w)
+			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
+			var rest []string
+			if i := strings.IndexByte(strings.TrimSpace(err), '\n'); i >= 0 {
+				rest = lines(strings.TrimSpace(err)[i+1:], 12)
+			}
+			return toolCard("error", residentText(str("name")), firstLine(err), false, true, rest, w)
 		}
 		if output, ok := result["output"].(string); ok {
+			output = ansi.Strip(output) // (a program's colour codes are not text)
 			meta := fmt.Sprintf("%d lines", strings.Count(strings.TrimRight(output, "\n"), "\n")+1)
 			if code, ok := result["exit_code"].(float64); ok {
 				meta = fmt.Sprintf("exit %d · ", int(code)) + meta
@@ -1293,9 +1300,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 			return toolCard("finish", "judge: "+verdict, "", true, c.expanded, more, w)
 		}
-		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
-			return toolCard("result", residentText(str("name")), "", true, c.expanded, lines(string(b), 30), w)
-		}
+		return toolCard("result", residentText(str("name")), "", true, c.expanded, keyLines(result, 30), w)
 	case "finished":
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
@@ -1455,6 +1460,9 @@ func (m emberModel) chatComposer() string {
 	}
 	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
 	// the status line, which appeared and went with every message
+	if m.msg == m.msgOf && !m.msgAt.IsZero() && time.Since(m.msgAt) > 6*time.Second {
+		return box // expired (the tick clears it; a stalled tick must not keep it on the frame)
+	}
 	return borderNote(box, terminalText(m.msg, false), emberDim)
 }
 
@@ -2214,9 +2222,6 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
-	case "ctrl+e":
-		// (Ctrl+O's layout switch; Ctrl+E kept for the hands that learned it)
-		return m.toggleLayout(), nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.
 		m.chat.live.hold = !m.chat.live.hold
@@ -2845,10 +2850,17 @@ func (m emberModel) chatFoot(w int) string {
 func (m emberModel) toggleLayout() emberModel {
 	all := !(m.chat.cards && m.chat.expanded)
 	m.chat.cards, m.chat.expanded, m.chat.full = all, all, all
-	m.msg = map[bool]string{true: "everything: every card in full, the thinking, every gate · Ctrl+O back to compact",
-		false: "compact: a card per action, short previews · Ctrl+O shows everything"}[all]
+	m.msg = map[bool]string{true: "everything · Ctrl+O back to compact", false: "compact · Ctrl+O shows everything"}[all]
+	// keep the place: at the bottom stays at the bottom; scrolled up keeps the same share of the history
+	atBottom := m.chat.transcript.AtBottom()
+	frac := m.chat.transcript.ScrollPercent()
 	m.chat.content, m.chat.rendered = "", 0
 	m.syncChat()
+	if atBottom {
+		m.chat.transcript.GotoBottom()
+	} else {
+		m.chat.transcript.SetYOffset(int(frac * float64(max(0, m.chat.transcript.TotalLineCount()-m.chat.transcript.Height()))))
+	}
 	return m
 }
 
@@ -2897,4 +2909,64 @@ func (m emberModel) onJumpPill(x, y int) bool {
 	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
 	x0 := m.jumpPillX(m.transcriptWidth(w))
 	return y == row && x >= x0 && x < x0+ansi.StringWidth(jumpPillText)
+}
+
+// keyLines is a tool's arguments or result as "key: value" lines (nested maps indented, lists joined when short), at
+// most limit lines: the expanded view read as a raw JSON dump.
+func keyLines(v map[string]any, limit int) []string {
+	var out []string
+	var walk func(m map[string]any, indent string)
+	walk = func(m map[string]any, indent string) {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			switch x := m[k].(type) {
+			case map[string]any:
+				out = append(out, indent+k+":")
+				walk(x, indent+"  ")
+			case []any:
+				var parts []string
+				simple := true
+				for _, e := range x {
+					switch e.(type) {
+					case map[string]any, []any:
+						simple = false
+					}
+					parts = append(parts, fmt.Sprint(e))
+				}
+				if simple && len(strings.Join(parts, ", ")) <= 100 {
+					out = append(out, indent+k+": "+strings.Join(parts, ", "))
+					continue
+				}
+				out = append(out, indent+k+":")
+				for _, e := range x {
+					if em, ok := e.(map[string]any); ok {
+						out = append(out, indent+"  -")
+						walk(em, indent+"    ")
+					} else {
+						out = append(out, indent+"  - "+fmt.Sprint(e))
+					}
+				}
+			case string:
+				ls := strings.Split(strings.TrimRight(x, "\n"), "\n")
+				out = append(out, indent+k+": "+ls[0])
+				for _, l := range ls[1:] {
+					out = append(out, indent+"  "+l)
+				}
+			case float64:
+				if x == float64(int64(x)) {
+					out = append(out, fmt.Sprintf("%s%s: %d", indent, k, int64(x)))
+				} else {
+					out = append(out, fmt.Sprintf("%s%s: %g", indent, k, x))
+				}
+			default:
+				out = append(out, fmt.Sprintf("%s%s: %v", indent, k, x))
+			}
+		}
+	}
+	walk(v, "")
+	return lines(strings.Join(out, "\n"), limit)
 }

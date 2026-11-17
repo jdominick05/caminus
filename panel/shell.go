@@ -182,7 +182,7 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 	}
 	icon, st := g.tool, emberTool
 	switch kind {
-	case "edit":
+	case "edit", "write":
 		icon, st = g.edit, lipgloss.NewStyle().Foreground(cPurple)
 	case "gate":
 		icon, st = g.gate, emberCtxOK

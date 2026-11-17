@@ -1164,14 +1164,18 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 		t.Fatalf("a folded card showed its body:\n%s", folded)
 	}
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if next.(emberModel).chat.expanded {
+		t.Fatal("Ctrl+O is the only expand key: Ctrl+E alone does nothing")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	m = next.(emberModel)
 	open := ansi.Strip(m.chat.content)
 	if !m.chat.expanded || !strings.Contains(open, "all green") || !strings.Contains(open, "make lint") {
-		t.Fatalf("Ctrl+E did not open the cards:\n%s", open)
+		t.Fatalf("Ctrl+O did not open the cards:\n%s", open)
 	}
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	if next.(emberModel).chat.expanded {
-		t.Fatal("a second Ctrl+E must fold them again")
+		t.Fatal("a second Ctrl+O must fold them again")
 	}
 }
 
