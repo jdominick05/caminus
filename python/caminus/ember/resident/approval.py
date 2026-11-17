@@ -2,6 +2,11 @@
 
 An executing claim commits a human decision before sudo starts. Interrupted
 claims stay visible for inspection; they are never automatically executed again.
+
+How long a question waits depends on whether its human is at the screen. The panel
+stamps presence.json in the bridge folder on their keys and mouse ({"seen": the last
+input, "back": the first input after a gap longer than AWAY_AFTER}); wait_left is the
+rule, mirrored by the panel's countdown (questionLeft in panel/emberquestion.go).
 """
 from contextlib import contextmanager
 import fcntl
@@ -127,3 +132,31 @@ def finish(bridge,rid,token,rc,out='',err=''):
         value.update(decision=value.pop('final_decision'),rc=rc,out=out,err=err,ts=time.time())
         write(bridge,rid,value)
         return value
+
+
+PRESENCE='presence.json'
+AWAY_AFTER=300   # seconds without a key or the mouse in the panel before its human counts as away
+
+
+def presence(bridge):
+    """(seen, back) from the panel's presence stamp, or None when no panel has written one (unknown: a question
+    then waits its plain question_timeout, as before the stamp existed)."""
+    try:
+        value=json.loads((Path(bridge)/PRESENCE).read_text())
+        seen=float(value['seen']);back=float(value.get('back') or 0)
+    except (OSError,ValueError,TypeError,KeyError):
+        return None
+    return seen,back
+
+
+def wait_left(ts,now,wait,away_max,seen_back,away_after=AWAY_AFTER):
+    """(seconds left, away) for a question asked at ts. While its human is present it waits `wait` from when it was
+    asked or from when they came back, whichever is later; while they are away nothing runs out but the cap,
+    `away_max` from ts. Unknown presence (None) waits `wait` from ts."""
+    cap=ts+away_max
+    if seen_back is None:
+        return min(ts+wait,cap)-now,False
+    seen,back=seen_back
+    if now-seen>away_after:
+        return cap-now,True
+    return min(max(ts,back)+wait,cap)-now,False

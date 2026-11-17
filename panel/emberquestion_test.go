@@ -325,3 +325,87 @@ func TestARequestNeverTakesTheKeyboardMidSentence(t *testing.T) {
 		t.Fatal("a key already on its way decided a request nobody had read")
 	}
 }
+
+// The countdown follows the resident's away rule (approval.wait_left; test_the_away_rule_matches_the_panels_countdown
+// holds the same cases): question_timeout while the human is at the screen, and while away only the cap runs.
+func TestQuestionCountdownFollowsPresence(t *testing.T) {
+	r := emberReq{Kind: "question", Ts: 1000, Expires: 1900, AwayMax: 28800, AwayAfter: 300}
+	at := func(s float64) time.Time { return time.UnixMilli(int64(s * 1000)) }
+	for _, c := range []struct {
+		now  float64
+		p    presence
+		left float64
+		away bool
+		text string
+	}{
+		{1899, presence{}, 1, false, "0:01 left"},
+		{1900, presence{}, 0, false, "timing out"},
+		{1500, presence{Seen: 1490}, 400, false, "6:40 left"},                // at the screen since before it was asked
+		{1500, presence{Seen: 1199}, 28300, true, "waits while you're away"}, // no input for 301 s
+		{5200, presence{Seen: 5100, Back: 5000}, 700, false, "11:40 left"},   // back at 5000: question_timeout from there
+		{29750, presence{Seen: 29700, Back: 29500}, 50, false, "0:50 left"},  // the cap still holds
+		{29900, presence{Seen: 20000, Back: 20000}, -100, true, "timing out"},
+	} {
+		left, away := questionLeft(r, c.p, at(c.now))
+		if left != time.Duration(c.left*float64(time.Second)) || away != c.away {
+			t.Errorf("at %v with %+v: %v away=%v, want %vs away=%v", c.now, c.p, left, away, c.left, c.away)
+		}
+		if got := timeLeft(r, c.p, at(c.now)); got != c.text {
+			t.Errorf("at %v with %+v: %q, want %q", c.now, c.p, got, c.text)
+		}
+	}
+	long := r
+	long.Expires = 1000 + 7200
+	if got := timeLeft(long, presence{Seen: 1000}, at(1000)); got != "2:00:00 left" {
+		t.Errorf("hours: %q", got)
+	}
+	root := emberReq{Kind: "root", Ts: 1000, Expires: 1900}
+	if got := timeLeft(root, presence{Seen: 1}, at(1300)); got != "10:00 left" {
+		t.Errorf("a root request keeps its plain 15 minutes whether or not you are there: %q", got)
+	}
+}
+
+// A key in the chat stamps the bridge for the resident, and the prompt says the question waits while you are away.
+func TestPresenceStampReachesTheBridgeAndThePrompt(t *testing.T) {
+	m, bridge := promptFixture(t)
+	now := float64(time.Now().Unix())
+	writeQuestion(t, bridge, "q1", "Delete or archive?", []string{"delete", "archive"}, "archive", now)
+	path := filepath.Join(bridge, "req", "q1.json")
+	var r map[string]any
+	data, _ := os.ReadFile(path)
+	_ = json.Unmarshal(data, &r)
+	r["expires"], r["away_max"], r["away_after"] = now+900, 28800, 300
+	data, _ = json.Marshal(r)
+	if err := os.WriteFile(path, data, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := json.Marshal(presence{Seen: now - 3600, Back: now - 7200})
+	if err := os.WriteFile(filepath.Join(bridge, "presence.json"), stale, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	m.refreshLocal()
+	m.syncQuestion()
+	if v := ansi.Strip(m.questionBox()); !strings.Contains(v, "waits while you're away") {
+		t.Fatalf("away an hour: the prompt says it waits:\n%s", v)
+	}
+	next, _ := m.Update(kDown) // (Update: the stamp is taken there, before any page handles the key)
+	m = next.(emberModel)
+	m.refreshLocal()
+	var p presence
+	data, _ = os.ReadFile(filepath.Join(bridge, "presence.json"))
+	if json.Unmarshal(data, &p) != nil || p.Seen < now || p.Back != p.Seen {
+		t.Fatalf("a key after an hour away stamps the return at once: %s", data)
+	}
+	if v := ansi.Strip(m.questionBox()); !regexp.MustCompile(`1[45]:\d\d left`).MatchString(v) {
+		t.Fatalf("back: the full question_timeout from now:\n%s", v)
+	}
+	written := p.Seen
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	m = next.(emberModel)
+	m.refreshLocal()
+	data, _ = os.ReadFile(filepath.Join(bridge, "presence.json"))
+	_ = json.Unmarshal(data, &p)
+	if p.Seen != written {
+		t.Fatal("while you keep typing the stamp is rewritten at most every 30 s")
+	}
+}

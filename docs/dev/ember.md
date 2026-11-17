@@ -31,6 +31,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 |---|---|
 | `cmd/ember.py` | every `caminus ember` subcommand: setup, status, run / shell, the bridge (reqs, answer, watch), jobs, sessions, stop-all |
 | `env/provision.py` | the root setup script (safe to rerun, checks itself) |
+| `agent_side.py` | what setup puts in the agent's account without root: ask-root, env-ask, its venv (the package set is `resident/discovery.py` `AGENT_PACKAGES`, which the prompt names too) |
 | `env/runner.py` | the SSH transport: one ControlMaster connection to `caminus-agent@127.0.0.1` |
 | `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
 | `env/audit.py` | the owner's audit log (one JSON object per line) |
@@ -56,8 +57,8 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | Panel (`panel/`) | |
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
-| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), Ember's box and the side panel, the task / now line |
-| `envcomposer.go`, `envsteer.go`, `envselect.go` | the composer, steering (interrupt, pullback, rewind), select to copy |
+| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, else the thoughts box under it), the side panel (tasks, now), the task / now line |
+| `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
 | `envgoals.go`, `envmodels.go`, `envsessions.go`, `envstudio.go`, `envpages.go` | the overlays |
@@ -67,12 +68,20 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - The resident package stays standard library only and self-contained (the zipapp holds nothing else).
 - The agent never holds root or a key: root goes through the bridge and runs under the owner's sudo; paid brains go
   through the owner's relay.
-- Nothing waits on the human: a question times out to the recommended option, a permission or root request to no.
+- Nothing waits on the human: a question times out to the advisor's pick or the recommended option, a permission or
+  root request to no. A question waits longer while the human is away (the panel's `presence.json` stamp,
+  `approval.wait_left`, mirrored by `questionLeft` in `panel/emberquestion.go`), never past `question_away_max`; a
+  root request never does.
 - The prompt says what the runtime does. When you change a refusal, a limit or a guard, change `resident/prompt.py`
   (and the docs) in the same commit.
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is
   never graded and never paused by a loop guard.
 - No GPU in any env test; the env suites are CPU only.
+- A speed shown for a local Caminus brain is the engine's own: the reply's `timings` (`model.engine_speed`; the brain is
+  Caminus when its `/props` names the engine, `catalog.caminus_props`) and, while a reply streams, `/caminus/status`
+  (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
+  (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
+  `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
 
 ## Memory
 
@@ -116,7 +125,7 @@ inside the harness with an agent while you design it.
 |---|---|
 | `lab.py` | the command line: `run`, `report`, `compare`; `open`, `say`, `turn`, `reply`, `events`, `status`, `close` |
 | `runner.py` | suites, arms, the run matrix, one run (fresh home, `once`, events, the check) |
-| `brains.py` | `scripted:NAME`, `driven` (you answer each model call), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
+| `brains.py` | `scripted:NAME`, `driven` (you answer each model call; `driven:caminus` plays a `caminus serve` whose answers carry `reply --timings`), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
 | `hosts.py` | `local` (scratch folders as you) and `agent` (the agent account over Ember's SSH, under `~/lab/`) |
 | `report.py` | tables per brain, arm and task; the A/B verdict |
 | `sessions.py` | long-lived lab agents to talk with or drive |

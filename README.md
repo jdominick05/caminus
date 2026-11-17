@@ -43,7 +43,7 @@ published one. Build the tag of the latest release:
 
 ```bash
 git clone https://github.com/jdominick05/caminus.git && cd caminus
-git checkout v0.3.0         # the tag of the "Latest" release (not a nightly pre-release)
+git checkout "$(git tag -l 'v*' --sort=-v:refname | grep -v dev | head -n1)"   # the latest release's tag (not a nightly's)
 tools/release/in_image.sh tools/release/release_build.sh    # GPU code + wheel into dist/ (--untagged at any other commit)
 python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards
@@ -57,7 +57,7 @@ The build needs Docker that your user can run (`docker run hello-world` works). 
 **Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
 release is built with the same recipe and signed, and its provenance can be checked against the source
 ([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember is in the package
-from 0.3.0 on.
+from 0.3.0 on (on PyPI from 0.3.1: 0.3.0's upload failed).
 
 ### 2. Open the panel
 
@@ -101,15 +101,18 @@ caminus ember ui
 `caminus ember setup` names the default model for your cards at the end; `MODEL_ID` is what the running server reports.
 Ember works the same on a paid API, through a key relay that holds your key and caps the day's spend. The
 [Ember quickstart](docs/ember-quickstart.md) walks through all of it, and [the guide](docs/ember.md) explains how it works.
+After you upgrade Caminus (`pip install -U caminus`), run `caminus ember agent install` again: a running agent takes the
+new runtime between goals ([every command](docs/resident-agent.md)).
 
 Prefer another harness? The panel sets up [Qwen Code](docs/harnesses.md) on the same server, and any OpenAI- or
 Anthropic-compatible client can use it. The [quickstart](docs/quickstart.md) covers the panel and Qwen Code.
 
 **Nightly builds.** When the `testing` branch changes, it is built overnight and published as a
 [pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
-release will have, tested less. To try one, install the wheel attached to it, for example
-`pip install https://github.com/jdominick05/caminus/releases/download/v0.2.2.dev20261111/caminus-0.2.2.dev20261111-py3-none-any.whl`,
-and please report what breaks.
+release will have, tested less. Nightlies are on GitHub only for now, not on PyPI. To try one, copy the link of the `.whl`
+file attached to the newest pre-release and install it:
+`pip install https://github.com/jdominick05/caminus/releases/download/vX.Y.Z.devYYYYMMDD/caminus-X.Y.Z.devYYYYMMDD-py3-none-any.whl`.
+Please report what breaks.
 
 ## Supported hardware
 
