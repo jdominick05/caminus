@@ -129,7 +129,8 @@ func shotEmber(t *testing.T, w, h int) emberModel {
 		evs = append(evs, residentEvent{Seq: i + 1, Ts: float64(time.Now().Unix()-240) + float64(i*15), Goal: goal, Kind: e["kind"].(string), Data: e["data"].(map[string]any)})
 	}
 	hit := 0.91
-	st := residentStatus{Name: "resident", Model: "swift-1.5", Context: 32768, ContextUsed: 9400, TokPerS: 42.3, DaemonAlive: true,
+	st := residentStatus{Name: "resident", Model: "swift-1.5", Context: 32768, ContextUsed: 9400, DaemonAlive: true,
+		TokPerS: 42.3, PromptTokPerS: 771, SpeedSource: "engine", // (a local Caminus brain: the engine's own speeds)
 		OnlineS: 5400, CacheHit: &hit, Compactions: map[string]int{goal: 0}, LastEvent: len(evs),
 		Goals: []residentGoal{{ID: goal, Prompt: prompt, State: "working", Steps: 5}}}
 	m.receiveResident(residentMsg{agent: "resident", status: st, events: evs})

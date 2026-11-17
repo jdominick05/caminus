@@ -263,3 +263,46 @@ func grantRecorded(auditPath string, r emberReq, now time.Time) bool {
 	}
 	return false
 }
+
+// presence is the human's last key or mouse event in this chat, stamped in the bridge (presence.json) so the resident
+// knows whether they are at the screen: a work question waits question_timeout while they are, and while they are
+// away it waits until question_timeout after they come back (resident approval.wait_left; questionLeft mirrors it).
+type presence struct {
+	Seen    float64 `json:"seen"` // the last input (Unix seconds)
+	Back    float64 `json:"back"` // the first input after a gap longer than the away threshold
+	written float64
+}
+
+// presenceAwayAfter is the away threshold when a request does not carry one (resident approval.AWAY_AFTER).
+const presenceAwayAfter = 300.0
+
+// presenceEvery is how often the stamp is rewritten while the human keeps typing (the threshold is minutes).
+const presenceEvery = 30.0
+
+func (p *presence) input(now time.Time) {
+	t := float64(now.UnixMilli()) / 1000
+	if p.Seen == 0 || t-p.Seen > presenceAwayAfter {
+		p.Back = t
+	}
+	p.Seen = t
+}
+
+// sync takes a newer stamp from the bridge (another panel's) and writes this one's when it changed: at once when the
+// human came back, else at most every presenceEvery seconds. A write that fails is not retried until the next input
+// (each tries an fsync, and the bridge's sticky folder refuses a stamp another account made).
+func (p *presence) sync(bridge string) {
+	if bridge == "" {
+		return
+	}
+	path := filepath.Join(bridge, "presence.json")
+	var file presence
+	if data, err := os.ReadFile(path); err == nil && json.Unmarshal(data, &file) == nil && file.Seen > p.Seen {
+		p.Seen, p.Back, p.written = file.Seen, file.Back, file.Seen
+	}
+	if p.Seen <= p.written || (p.Back <= p.written && p.Seen-p.written < presenceEvery) {
+		return
+	}
+	data, _ := json.Marshal(p)
+	_ = writeBridgeJSON(path, data)
+	p.written = p.Seen
+}

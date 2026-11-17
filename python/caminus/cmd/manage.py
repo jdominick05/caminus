@@ -41,6 +41,7 @@ import urllib.request
 from .. import config, models
 from ..device import host, machine
 from . import guarded
+from ..ember.resident.catalog import decode_tps   # (the one reading of /caminus/status's decode speed)
 
 PORT0 = 8092
 ROOT = '/'                # the sysfs root the cards are read from (tests: a fixture tree)
@@ -272,9 +273,7 @@ def server_view(s):
                 kc = (props.get('caminus') or {}).get('kv_cache')   # (the KV cache the engine holds: caminus serve --kv)
                 v['kv'] = kc.get('type') if isinstance(kc, dict) else None
             _, st = http_json(v['url'] + '/caminus/status', timeout=2.0)
-            mpt = find_key(st, 'ms_per_token')
-            if isinstance(mpt, (int, float)) and mpt > 0:
-                v['decode_tps'] = round(1000.0 / mpt, 1)
+            v['decode_tps'] = decode_tps(st)
             ph = find_key(st, 'phase')
             v['busy'] = ph in ('prefill', 'decode')
     else:
@@ -437,9 +436,7 @@ def unmanaged_servers(proc='/proc'):
             view['alias'] = props.get('model_alias')
             model = props.get('model_path') or model
             _, st = http_json(view['url'] + '/caminus/status', timeout=2.0)
-            mpt = find_key(st, 'ms_per_token')
-            if isinstance(mpt, (int, float)) and mpt > 0:
-                view['decode_tps'] = round(1000.0 / mpt, 1)
+            view['decode_tps'] = decode_tps(st)
             ph = find_key(st, 'phase')
             view['busy'] = ph in ('prefill', 'decode')
         m = models.model_of(model) if model else None

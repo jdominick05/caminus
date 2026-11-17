@@ -410,7 +410,7 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	m.sessionNames = []string{"research", "resident"}
 	m.sessionCards = []sessionCard{
 		{name: "research", status: "working", goal: "survey the harness papers", model: "claude-haiku-5-5", github: "ember-bot",
-			workingS: 720, spendGoal: 0.42, spendToday: 4.12, tokPerS: 61, ctxUsed: 52000, ctx: 1000000},
+			workingS: 720, spendGoal: 0.42, spendToday: 4.12, speed: replySpeed{write: 61}, ctxUsed: 52000, ctx: 1000000},
 		{name: "resident", status: "listening", goal: "review the design", model: "swift-1.5"}}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
@@ -420,7 +420,7 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	}
 	frame := ansi.Strip(m.render())
 	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 on this goal",
-		"$4.12 today in this session", "claude-haiku-5-5 · 61 tok/s · 52K/1M", "GitHub ember-bot", "resident", "○ listening",
+		"$4.12 today in this session", "claude-haiku-5-5 · ~61 tok/s est. · 52K/1M", "GitHub ember-bot", "resident", "○ listening",
 		"no GitHub account", "worked ", "+ new session"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("a card shows %q:\n%s", want, frame)
@@ -624,39 +624,8 @@ func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
 	}
 }
 
-// The context bar shows what the daemon measured, graded against the
-// compaction trigger, and never invents a percentage of its own. The accent
-// piece (label, bar, share) takes the level's color; the counts stay dim.
-func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
-	accent, rest := contextBar(0, 1048574, .85, 0)
-	if accent != "" || rest != "ctx 1.0M window" || strings.Contains(rest, "%") {
-		t.Fatalf("unmeasured context showed usage: %q / %q", accent, rest)
-	}
-	if accent, rest := contextBar(0, 0, .85, 0); accent != "" || rest != "" {
-		t.Fatalf("no capacity, no bar: %q / %q", accent, rest)
-	}
-	accent, rest = contextBar(314573, 1048574, .85, 0) // 30%
-	if filled := strings.Count(accent, "█"); filled != 3 || !strings.Contains(accent, "░") {
-		t.Fatalf("30%% carved the bar wrong: %q", accent)
-	}
-	if !strings.Contains(accent, "ctx") || !strings.Contains(accent, "30%") || strings.Count(accent, "%") != 1 {
-		t.Fatalf("accent lost its bar and share: %q", accent)
-	}
-	if !strings.Contains(rest, "of 1.0M · compact 85%") {
-		t.Fatalf("dim piece lost counts and trigger: %q", rest)
-	}
-	if _, rest := contextBar(314573, 1048574, .85, 87.3); !strings.Contains(rest, "87 tok/s") || !strings.Contains(rest, "compact 85%") {
-		t.Fatalf("measured tok/s did not annotate the dim piece: %q", rest)
-	}
-	if _, rest := contextBar(314573, 1048574, .85, 0); strings.Contains(rest, "tok/s") {
-		t.Fatalf("no speed reported, none may show: %q", rest)
-	}
-	if _, rest := contextBar(0, 1048574, .85, 87.3); strings.Contains(rest, "tok/s") {
-		t.Fatalf("tok/s without a measured context bar: %q", rest)
-	}
-	if accent, _ := contextBar(1048575, 1048574, .85, 0); !strings.HasPrefix(accent, "ctx ██████████ 100%") {
-		t.Fatalf("usage past the window did not clamp: %q", accent)
-	}
+// The context level is graded against the compaction trigger, and token counts read at footer density.
+func TestContextLevelAndTokenCounts(t *testing.T) {
 	if got := humanTokens(999); got != "999" || humanTokens(482000) != "482k" || humanTokens(1048574) != "1.0M" {
 		t.Fatalf("token formatting drifted: %s %s %s", humanTokens(999), humanTokens(482000), humanTokens(1048574))
 	}
@@ -705,6 +674,50 @@ func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
 		if ansi.StringWidth(row) > m.width {
 			t.Fatalf("footer line too wide: %q", row)
 		}
+	}
+}
+
+// A Caminus brain's speeds are the engine's own, read and write apart; a brain that reports none keeps Ember's
+// estimate, which says so. The footer drops the read speed first when narrow, the session card shows the write
+// speed, and the info page says where the numbers come from.
+func TestFooterShowsTheEnginesOwnSpeeds(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 160
+	m.resident.ContextUsed = 52000
+	m.resident.TokPerS, m.resident.PromptTokPerS, m.resident.SpeedSource = 62.4, 1240.2, "engine"
+	if foot := ansi.Strip(m.chatFoot(160)); !strings.Contains(foot, "read 1,240 · write 62 tok/s") || strings.Contains(foot, "est.") {
+		t.Fatalf("the footer shows the engine's read and write speeds:\n%s", foot)
+	}
+	if foot := ansi.Strip(m.chatFoot(100)); !strings.Contains(foot, "write 62 tok/s") || strings.Contains(foot, "read 1,240") {
+		t.Fatalf("a narrow footer keeps the write speed and drops the read speed:\n%s", foot)
+	}
+	for _, w := range []int{100, 160} {
+		for _, row := range strings.Split(ansi.Strip(m.chatFoot(w)), "\n") {
+			if ansi.StringWidth(row) > w {
+				t.Fatalf("footer line too wide at %d: %q", w, row)
+			}
+		}
+	}
+	if got := m.resident.speed().long(); got != "read 1,240 · write 62 tok/s (the Caminus engine's own; last reply)" {
+		t.Fatalf("info page speed row: %q", got)
+	}
+	m.resident.SpeedLive = true
+	if got := m.resident.speed().long(); !strings.Contains(got, "write live, read last reply") {
+		t.Fatalf("a live write speed says so: %q", got)
+	}
+	if got := (replySpeed{write: 62, read: 1240, source: "engine"}).short(true); got != "write 62 tok/s" {
+		t.Fatalf("the session card's speed: %q", got)
+	}
+	if got := (replySpeed{read: 980, source: "engine"}).short(true); got != "read 980 tok/s" {
+		t.Fatalf("a reply that only read keeps its read speed even when narrow: %q", got)
+	}
+	m.resident.SpeedSource, m.resident.PromptTokPerS, m.resident.SpeedLive = "estimate", 0, false
+	if foot := ansi.Strip(m.chatFoot(160)); !strings.Contains(foot, "~62 tok/s est.") || strings.Contains(foot, "write") {
+		t.Fatalf("an estimate is labelled as one:\n%s", foot)
+	}
+	m.resident.SpeedSource = "" // a resident from before sources were kept: its figure is an estimate
+	if got := m.resident.speed().long(); got != "~62 tok/s est. (estimated by Ember: tokens over the time they streamed; last reply)" {
+		t.Fatalf("an older resident's speed reads as an estimate: %q", got)
 	}
 }
 
@@ -1573,8 +1586,12 @@ func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 			map[string]any{"title": "Fix for CVE-2026-1", "href": "https://www.example.org/a"}}}),
 		res(504, "c4", "remember", map[string]any{"ok": true}),
 		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
-		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`)}}},
+		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`),
+			call("c6", "remember", `{"action":"tidy","index":"- [a](notes/a.md) — x"}`),
+			call("c7", "remember", `{"action":"tidy","index":"- [b](notes/b.md) — y"}`)}}},
 		res(507, "c5", "terminal", map[string]any{"error": "boom"}),
+		res(508, "c6", "remember", map[string]any{"index_bytes": float64(2100), "was_bytes": float64(3500)}),
+		res(509, "c7", "remember", map[string]any{"error": "tidy refused, MEMORY.md is unchanged: notes/a.md would be reachable from nowhere"}),
 	)
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
@@ -1583,7 +1600,8 @@ func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 	}
 	for _, want := range []string{"terminal  $ ls cve/  ·  exit 0 · 4 lines", "d", "read  a.md  ·  lines 1-40",
 		"web_search  “CVE-2026-1 patch”  ·  1 results · bing", "Fix for CVE-2026-1  example.org",
-		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom"} {
+		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom", "remember  tidy MEMORY.md  ·  3500 → 2100 bytes",
+		"remember  tidy MEMORY…  ·  tidy refused, MEMORY.md is unchanged"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("every action is a card (missing %q):\n%s", want, v)
 		}
