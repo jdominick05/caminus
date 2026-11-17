@@ -132,6 +132,60 @@ CAMINUS_INSTALL
                 out=json.dumps(value)+'\n'
         except ValueError:
             pass
+    if args[:1] in (['advise'],['advisor']):
+        out=advisor_setup(args,out)
     sys.stdout.write(out)
     sys.stderr.write(result.stderr or '')
     return result.returncode
+
+
+def advisor_setup(args,out):
+    """The advisor's relay, checked on this side: the agent account cannot read the owner's relay services, so the fix
+    an unavailable advisor names (`agent advise`) is made exact here from the installed unit (its cap, port and every
+    model it serves now: `relay install` replaces the list), and `agent advisor NAME --model M --endpoint RELAY` warns
+    when that relay would refuse M. The resident prints one JSON object: its last line with --json, indented without."""
+    from . import relay
+    lines=out.rstrip('\n').split('\n')
+    whole=False
+    try:
+        value=json.loads(lines[-1])
+    except ValueError:
+        try:
+            value,whole=json.loads(out),True           # (without --json: one indented object)
+        except ValueError:
+            return out
+    if not isinstance(value,dict):
+        return out
+    un=value.get('unavailable')
+    if isinstance(un,dict):
+        # every word of the resident's fix comes from the agent's account (its endpoint, config and output): only a
+        # command built here from the owner's own relay unit is shown as one to run
+        kind,model,endpoint=un.get('kind'),str(un.get('model') or ''),str(un.get('endpoint') or '')
+        unit=relay.unit_at(endpoint)
+        fix=None
+        if kind=='relay_model':
+            fix=relay.allow_command(endpoint,model)
+        elif kind=='relay_down' and unit and model in relay.PRICES:
+            # installed but not answering: reinstalling restarts it, with the advisor's model allowed as well
+            fix=relay.install_command('anthropic',unit['args'],sorted(set(unit['models'])|{model}))
+        elif kind=='no_key' and len(args)>1:
+            fix='caminus ember agent advisor %s --endpoint http://127.0.0.1:%d/v1'%(
+                shlex.quote(args[1]),(relay.installed('anthropic') or {}).get('port') or relay.PROVIDERS['anthropic']['port'])
+        # the reason is the agent's text too: one line, no control characters, capped, and that form is what the panel
+        # shows (left as sent, a modified runtime could put a "Run this on your side" block of its own above the real one)
+        reason=''.join(c for c in ' '.join(str(un.get('reason') or '').split()) if c.isprintable())[:300]
+        un['reason']=reason
+        un['fix']=fix or ''
+        value['error']='the advisor cannot be called: %s. %s'%(reason,('Run: '+fix) if fix else
+                        'caminus ember relay status shows each relay and the models it allows')
+    adv=value.get('advisor')
+    if args[:1]==['advisor'] and isinstance(adv,dict) and adv.get('model') and adv.get('endpoint'):
+        fix=relay.allow_command(adv['endpoint'],adv['model'])
+        if fix:
+            value['warning']=('the key relay at %s does not allow %s, so every advisor call will be refused until you '
+                              'run: %s'%(adv['endpoint'],adv['model'],fix))
+            print('warning: '+value['warning'],file=sys.stderr)
+    if whole:
+        return json.dumps(value,ensure_ascii=False,indent=2)+'\n'
+    lines[-1]=json.dumps(value,ensure_ascii=False)
+    return '\n'.join(lines)+'\n'

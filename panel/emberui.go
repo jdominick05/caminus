@@ -8,8 +8,8 @@
 //
 // Tabs (tab / shift-tab or 1-6), all live:
 //
-//	1 requests  the bridge queue: ROOT (a approve — sudo runs attached to the terminal via
-//	            tea.ExecProcess so the password prompt works, output teed to a temp file;
+//	1 requests  the bridge queue: ROOT (a approve — sudo runs on the released terminal via
+//	            tea.Exec so the password prompt works, output to a temp file shown as it grows;
 //	            e edit, d deny, s skip) and ASK (a answer; a number picks a choice)
 //	2 jobs      detached processes in the agent user (k kill, l tail the log, n new job)
 //	3 procs     the agent user's busiest processes (ps over ssh)
@@ -475,22 +475,6 @@ func shQuote(s string) string {
 // demoMode is set by `env -demo`: nothing reaches SSH or sudo.
 var demoMode bool
 
-// execRoot builds the command that runs cmd under sudo attached to the terminal, teeing the
-// output to a temp file (the sudo password prompt goes to the tty, not the pipe).
-func execRoot(cmd string) (*exec.Cmd, string, error) {
-	f, err := os.CreateTemp("", "caminus-env-root-*.out")
-	if err != nil {
-		return nil, "", err
-	}
-	tmp := f.Name()
-	f.Close()
-	script := "set -o pipefail; sudo sh -c " + shQuote(cmd) + " 2>&1 | tee " + shQuote(tmp)
-	if demoMode { // the demo records the approval and runs nothing as root
-		script = "echo " + shQuote("demo: approved, not run as root: "+cmd) + " | tee " + shQuote(tmp)
-	}
-	return exec.Command("bash", "-c", script), tmp, nil
-}
-
 func parseJobs(out string) []job {
 	var js []job
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -798,6 +782,13 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncChat()
 			return m, nil
 		}
+		if msg.turn != "" && msg.turn == m.chat.deadTurn {
+			// a late line of the turn an Esc dropped: its tail must not come back
+			if m.chat.stream != nil {
+				return m, streamLine(msg.agent, msg.epoch, m.chat.stream.sc)
+			}
+			return m, nil
+		}
 		if msg.reset || msg.turn != m.chat.live.turn {
 			m.chat.live = residentLive{turn: msg.turn, text: msg.text, reasoning: msg.reasoning,
 				tools: msg.tools, active: true, wrapText: &wrapCache{}, wrapThink: &wrapCache{}}
@@ -1041,7 +1032,7 @@ func (m emberModel) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.msg = "running under sudo (approve with your password)..."
-		return m, tea.ExecProcess(c, execCallback(r.ID, "edited", cmd, tmp, token))
+		return m, execRootCmd(c, execCallback(r.ID, "edited", cmd, tmp, token))
 	case "newjob1":
 		name := strings.TrimSpace(m.edit)
 		m.mode, m.edit = "newjob2", ""
@@ -1085,14 +1076,12 @@ func (m emberModel) submitInput() (tea.Model, tea.Cmd) {
 
 func execCallback(id, decision, cmd, tmp, claim string) func(error) tea.Msg {
 	return func(err error) tea.Msg {
-		rc := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			rc = ee.ExitCode()
-		} else if err != nil {
-			rc = 1
-		}
+		rc := rootExitCode(err)
 		out, _ := os.ReadFile(tmp)
 		os.Remove(tmp)
+		if _, exited := err.(*exec.ExitError); err != nil && !exited && rc != rootRC {
+			out = append(out, []byte("\ncaminus: "+err.Error()+"\n")...) // never started (no sudo, no temp file)
+		}
 		return execDoneMsg{id: id, decision: decision, cmd: cmd, rc: rc, out: string(out), claim: claim}
 	}
 }
@@ -1171,7 +1160,7 @@ func (m emberModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 			}
 			done := execCallback(r.ID, "approved", r.Cmd, tmp, token)
 			goal := r.Goal
-			return m, tea.ExecProcess(c, func(err error) tea.Msg {
+			return m, execRootCmd(c, func(err error) tea.Msg {
 				msg := done(err).(execDoneMsg)
 				msg.goal, msg.granted = goal, grant
 				return msg

@@ -238,6 +238,9 @@ func (m ctl) runningRows(w int) []string {
 	if sv == nil && m.psDown() { // (a failed read is not "no server": nothing is offered a start until ps answers)
 		return []string{m.psDownLine(), ansi.Truncate(fg(cMuted).Render("  "+oneLine(m.readErr["ps"].Error())), w, "…")}
 	}
+	if sv == nil && m.swap != nil { // (between the stop and the start of a swap: the header says which step)
+		return []string{fg(cYellow).Render(m.swap.model+" starts next") + fg(cMuted).Render(" · "+strings.Join(m.swap.stop, ", ")+" stopped")}
+	}
 	if sv == nil {
 		return []string{fg(cMuted).Render("no server running · enter starts the selected model")}
 	}
@@ -548,7 +551,8 @@ func (m ctl) detailRows(w int) []string {
 
 	switch sv, rec := m.liveOf(mi.Name), m.recordOf(mi.Name); {
 	case sv != nil && sv.External:
-		rows = append(rows, fg(cGreen).Render("running on :"+strconv.Itoa(sv.Port))+fg(cMuted).Render(" · started outside the panel"))
+		rows = append(rows, wrapped(fg(cGreen).Render("running on :"+strconv.Itoa(sv.Port))+
+			fg(cMuted).Render(" · started outside the panel · s says what stops it"), w, 2)...)
 	case sv != nil:
 		rows = append(rows, fg(cGreen).Render("running on :"+strconv.Itoa(sv.Port))+fg(cMuted).Render(" · s stops it"))
 	case rec != nil && rec.State == "failed" && rec.Error != "":
@@ -569,9 +573,26 @@ func (m ctl) detailRows(w int) []string {
 		rows = append(rows, wrapped(bold(cAccent).Render("enter")+fg(cMuted).Render(" starts it · ")+
 			fg(cYellow).Render(mi.MissingDrafter+" missing")+fg(cMuted).Render(fmt.Sprintf(": p downloads it (%.1f GB)", mi.MissingDrafterGB)), w, 2)...)
 	case m.liveOf(mi.Name) == nil:
-		rows = append(rows, bold(cAccent).Render("enter")+fg(cMuted).Render(" starts it"))
+		rows = append(rows, wrapped(bold(cAccent).Render("enter")+fg(cMuted).Render(m.startsText()), w, 2)...)
 	}
 	return rows
+}
+
+// startsText is what enter does to a model that is not running: start it, or first stop what runs (one question), or,
+// for a server started outside the panel, nothing until it is stopped (enter's note says what stops it).
+func (m ctl) startsText() string {
+	live := m.liveServers()
+	if len(live) == 0 {
+		return " starts it"
+	}
+	var names []string
+	for _, s := range live {
+		if s.External {
+			return " starts it once " + shownName(s) + " (started outside the panel) is stopped"
+		}
+		names = append(names, s.Name)
+	}
+	return " stops " + strings.Join(names, ", ") + " and starts it (asks first)"
 }
 
 // editedText is the edited serve options and the card pin as they go to the next start ("" when none): nothing passed
@@ -783,6 +804,8 @@ func (m ctl) keysLine() string {
 	var p []hint
 	k := func(key, what string) hint { return hint{key, what, what} }
 	switch {
+	case m.confirm != nil && m.confirm.enter:
+		p = []hint{k("enter", "yes"), k("esc", "no")}
 	case m.confirm != nil:
 		p = []hint{k("y", "yes"), k("any other key", "no")}
 	case m.view == viewHelp:
@@ -806,14 +829,14 @@ func (m ctl) keysLine() string {
 			} else if n == 1 {
 				p = append(p, k("←→", "choice"))
 			}
-			if mi.Present && m.liveOf(mi.Name) == nil && !m.psDown() { // (no start while what runs is unknown)
+			if mi.Present && m.liveOf(mi.Name) == nil && !m.psDown() && m.busy == "" { // (no start while what runs is unknown, or while an action runs)
 				p = append(p, k("enter", "start"))
 			}
 			if !mi.Present || mi.MissingDrafter != "" {
 				p = append(p, k("p", "pull"))
 			}
 		}
-		if sv := m.primary(); sv != nil && !sv.External {
+		if sv := m.primary(); sv != nil { // (an outside server's s says what stops it)
 			p = append(p, k("s", "stop"))
 		}
 		if m.hosted {

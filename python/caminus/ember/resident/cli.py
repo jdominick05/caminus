@@ -893,9 +893,13 @@ def main(argv=None,stdin=None):
             finally:rt.mail.close();rt.store.close()
             emit(dict(text=text),a.json);return 0
         if a.op=='interrupt':
+            # Only a model call in flight is interrupted: its live snapshot exists from the moment the call goes out
+            # (before the first token too). Anything else (a tool running, the gap between turns) has nothing to stop,
+            # and the caller says so instead of claiming an interrupt.
             gid=store.resolve(a.goal_id)
-            store.request(gid,'interrupt')
-            emit(dict(goal=gid,queued=True),a.json);store.close();return 0
+            generating=(home/'live'/(gid+'.json')).exists()
+            if generating:store.request(gid,'interrupt')
+            emit(dict(goal=gid,queued=generating,generating=generating),a.json);store.close();return 0
         if a.op=='unsend':
             gid,text=store.unsend(a.goal_id)
             emit(dict(goal=gid,text=text),a.json);store.close();return 0
@@ -1091,7 +1095,11 @@ def main(argv=None,stdin=None):
         emit(dict(type='result',**result) if a.jsonl else result,a.json or a.jsonl)
         return EXIT.get(result['state'],1)
     except (OSError,ValueError,KeyError,subprocess.SubprocessError) as e:
-        if getattr(a,'json',False):emit(dict(error=str(e)),True)
+        # an advisor that cannot be called (advisor.AdvisorUnavailable): its reason and the owner's fix apart, so the
+        # panel shows the command to run and the owner's side can make it exact (agent_host)
+        extra=dict(unavailable=dict(reason=e.reason,fix=e.fix,kind=e.kind,model=e.model,endpoint=e.endpoint)) \
+            if getattr(e,'fix',None) is not None and hasattr(e,'reason') else {}
+        if getattr(a,'json',False):emit(dict(error=str(e),**extra),True)
         else:print('caminus ember agent: '+str(e),file=sys.stderr)
         return 1
 

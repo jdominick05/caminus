@@ -6,8 +6,7 @@
   and a link's #anchor to a heading of that file (GitHub's slug rule);
 - every `caminus COMMAND` the user docs (README.md, docs/*.md) show is a command `caminus` has
   (caminus.__main__.COMMANDS, read from the file, not imported);
-- every script AGENTS.md's command lines name (tools/..., tests/..., benchmarks/..., build.sh) exists (the public AGENTS.md:
-  packaging/public/AGENTS.md in the development tree, AGENTS.md in the public one).
+- (the paths a doc names, AGENTS.md's command lines among them, are checked by tools/entropy.py, `refs`);
 - docs/panel.svg, the README's picture of the control panel, shows the version python/caminus/__init__.py holds (a
   release sets the version and redraws it: python -I tools/release/panel_shot.py; a nightly's .dev version is skipped).
 Prints PASS / FAIL per check and RESULT PASS / RESULT FAIL (n)."""
@@ -65,13 +64,6 @@ for d in user:
         seen.add(cmd)
         if cmd not in commands: unknown.append(f'{d}: caminus {cmd}')
 check(not unknown, f'commands: the user docs show {len(seen)} caminus commands, all real' + (f'; unknown: {sorted(set(unknown))}' if unknown else ''))
-
-ag = os.path.join(ROOT, 'packaging', 'public', 'AGENTS.md')
-ag = ag if os.path.exists(ag) else os.path.join(ROOT, 'AGENTS.md')
-block = '\n'.join(re.findall(r'```\n(.*?)```', open(ag, encoding='utf-8').read(), re.S))
-paths = sorted(set(re.findall(r'(?<![\w/$.-])((?:tools|tests|benchmarks|panel)/[\w./-]+\.(?:py|sh)|build\.sh)', block)))
-missing = [p for p in paths if not os.path.exists(os.path.join(ROOT, p.lstrip('./')))]
-check(paths and not missing, f'AGENTS.md: the {len(paths)} scripts its commands name exist' + (f'; missing: {missing}' if missing else ''))
 
 ver = re.search(r"^__version__ = '([^']+)'", open(os.path.join(ROOT, 'python', 'caminus', '__init__.py'), encoding='utf-8').read(), re.M).group(1)
 shot = os.path.join(ROOT, 'docs', 'panel.svg')

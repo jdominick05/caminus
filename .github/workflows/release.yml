@@ -146,6 +146,8 @@ jobs:
       # PyPI's documented manual exchange (docs.pypi.org/trusted-publishers/using-a-publisher), as nightly.yml: this job's OIDC
       # token, audience pypi, for a short-lived upload token; no stored secret. pypi-attestations signs each file with
       # this job's identity (PEP 740), the same signing the pypa publish action does, and twine uploads the attestations
+      # (twine attaches only the .attestation files named on its command line, so they are passed beside the files; with
+      # the distributions alone, 0.3.0's first upload stopped at "has no associated attestations")
       - name: Sign (PEP 740) and upload to PyPI (twine 6.1.0, a token minted from this job's identity)
         run: |
           python -m pip install --disable-pip-version-check 'twine==6.1.0' 'pypi-attestations==0.0.31'
@@ -161,4 +163,4 @@ jobs:
             echo "::error::PyPI minted no token (is the trusted publisher set for release.yml and the environment pypi?)"; exit 1
           fi
           echo "::add-mask::$api_token"
-          TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" TWINE_NON_INTERACTIVE=1 python -m twine upload --verbose --skip-existing --attestations dist/caminus-*.whl dist/caminus-*.tar.gz
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" TWINE_NON_INTERACTIVE=1 python -m twine upload --verbose --skip-existing --attestations dist/caminus-*.whl dist/caminus-*.tar.gz dist/caminus-*.attestation
