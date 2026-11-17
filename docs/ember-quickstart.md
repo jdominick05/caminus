@@ -43,12 +43,13 @@ You joined the `caminus-env` group: log out and back in (or run `newgrp caminus-
 caminus ember setup          # installs the agent's side; every line should say PASS
 ```
 
-If the agent will commit to a repository or run its CPU tests, give it a git identity and a test interpreter (both
-optional, both safe to rerun):
+Setup also fills the agent's own Python with a standard package set ([the list](ember.md#where-things-live)). If the
+agent will commit to a repository or run its CPU tests, give it a git identity and CPU torch (both optional, both safe
+to rerun):
 
 ```sh
 caminus ember setup --git-name LOGIN --git-email LOGIN@users.noreply.github.com   # its GitHub account, for commits a CLA check can link
-caminus ember setup --test-venv                                                    # ~/.venvs/caminus-cpu: CPU torch and numpy (about 200 MB)
+caminus ember setup --test-venv                                                    # CPU torch and numpy in ~/.venvs/caminus-cpu (about 200 MB more)
 ```
 
 ## 3. Give it a brain
@@ -108,7 +109,7 @@ current task and what runs now in two lines above where you type.
   waiting; Tab brings it back. Nothing waits on you: an
   unanswered question times out to the agent's recommended option, a permission question to no.
 - **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).
-- **Copy**: drag over the history; the release copies it.
+- **Copy**: drag over any text on the screen; the release copies it ([the mouse](ember.md#the-mouse-clicks-and-copying)).
 - **Leave**: `/quit` closes the panel; the agent keeps working. `caminus ember ui` brings you back to the same
   conversation.
 

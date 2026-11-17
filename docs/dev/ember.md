@@ -31,6 +31,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 |---|---|
 | `cmd/ember.py` | every `caminus ember` subcommand: setup, status, run / shell, the bridge (reqs, answer, watch), jobs, sessions, stop-all |
 | `env/provision.py` | the root setup script (safe to rerun, checks itself) |
+| `agent_side.py` | what setup puts in the agent's account without root: ask-root, env-ask, its venv (the package set is `resident/discovery.py` `AGENT_PACKAGES`, which the prompt names too) |
 | `env/runner.py` | the SSH transport: one ControlMaster connection to `caminus-agent@127.0.0.1` |
 | `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
 | `env/audit.py` | the owner's audit log (one JSON object per line) |
@@ -56,7 +57,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
 | `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, else the thoughts box under it), the side panel (tasks, now), the task / now line |
-| `envcomposer.go`, `envsteer.go`, `envselect.go` | the composer, steering (interrupt, pullback, rewind), select to copy |
+| `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
 | `envgoals.go`, `envmodels.go`, `envsessions.go`, `envstudio.go`, `envpages.go` | the overlays |

@@ -847,25 +847,111 @@ class Resident(unittest.TestCase):
             self.assertIn('#128 review fixes',rt.context_message(work)['content'])
         finally:rt.mail.close();rt.store.close()
 
-    def test_setup_sets_the_agent_git_identity_and_test_interpreter_when_asked(self):
-        # a real agent built its own interpreter (no python, no torch) and committed as user@localhost (a CLA failed)
+    def test_setup_fills_the_agent_venv_and_sets_the_git_identity_when_asked(self):
+        # a real agent built its own interpreter (no python, no torch; system pip refuses installs) and committed as
+        # user@localhost (a CLA failed)
         import types
         from caminus.cmd import ember as E
         ran=[]
+        res=dict(made=False,present=['pillow'],installed=[],failed={},skipped=[],offline=None,torch='present',weasyprint='ok')
         def transport(argv,**kw):
-            ran.append((kw.get('input',''),kw.get('timeout')));return subprocess.CompletedProcess(argv,0,'made\n','')
+            ran.append((kw.get('input',''),kw.get('timeout')));return subprocess.CompletedProcess(argv,0,json.dumps(res)+'\n','')
         said=[]
         a=types.SimpleNamespace(git_name='agent-login',git_email='agent-login@users.noreply.github.com',test_venv=True)
         self.assertTrue(E.agent_extras(a,transport,say=said.append))
         self.assertIn("git config --global user.name agent-login",ran[0][0])
         self.assertIn("user.email agent-login@users.noreply.github.com",ran[0][0])
-        self.assertIn('download.pytorch.org/whl/cpu torch',ran[1][0]);self.assertEqual(ran[1][1],1800)
-        self.assertIn('test -x ~/.venvs/caminus-cpu/bin/python',ran[1][0],'an existing interpreter is kept')
+        self.assertIn('download.pytorch.org/whl/cpu',ran[1][0]);self.assertEqual(ran[1][1],3600)
+        self.assertIn("'venv': '~/.venvs/caminus-cpu'",ran[1][0])
+        self.assertIn('CPU torch and numpy present',said[-2])
         ran.clear()
         self.assertFalse(E.agent_extras(types.SimpleNamespace(git_name='x',git_email=None,test_venv=False),transport,say=said.append))
         self.assertEqual(ran,[],'a name without an email changes nothing')
         self.assertTrue(E.agent_extras(types.SimpleNamespace(git_name=None,git_email=None,test_venv=False),transport,say=said.append))
-        self.assertEqual(ran,[],'nothing asked, nothing run')
+        self.assertEqual(len(ran),1,'the package set is always checked')
+        self.assertIn("'torch': False",ran[0][0],'torch only when asked')
+        res['torch']='failed: no index';self.assertFalse(E.agent_extras(a,transport,say=said.append),'torch asked for and failed')
+        res.clear();res['error']='python3 -m venv failed: ensurepip is not available (Debian / Ubuntu: sudo apt install python3-venv)'
+        plain=types.SimpleNamespace(git_name=None,git_email=None,test_venv=False)
+        self.assertFalse(E.agent_extras(plain,transport,say=said.append),'no venv with a working pip: setup fails, saying what to install')
+        self.assertIn('sudo apt install python3-venv',said[-1])
+        def slow(argv,**kw):raise subprocess.TimeoutExpired(argv,kw.get('timeout'))
+        self.assertFalse(E.agent_extras(plain,slow,say=said.append));self.assertIn('no answer in 3600 s',said[-1])
+
+    def test_agent_venv_fill_is_idempotent_and_reports_failures_offline_and_missing_libs(self):
+        # the agent's venv, filled by the real script against a fake pip (no network): one call per missing package
+        from caminus.ember import agent_side
+        from caminus.ember.resident.discovery import AGENT_PACKAGES
+        def fake_home(name):
+            home=self.home/name;venv=home/'.venvs'/'caminus-cpu'
+            subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+            (venv/'bin'/'pip').write_text(f'#!{venv}/bin/python\n'+'''import os, pathlib, sys, sysconfig
+args = sys.argv[1:]
+with open(os.environ['FAKE_PIP_LOG'], 'a') as f: f.write(' '.join(args) + '\\n')
+if args[:2] == ['config', 'list']: sys.exit(0)
+if args == ['--version']: sys.exit(print('pip 99.0 (fake)') or 0)
+spec = args[-1]; name = spec.split('>=')[0]
+if os.environ['FAKE_PIP'] == 'offline':
+    sys.exit(print("WARNING: Retrying after connection broken by 'NewConnectionError(Failed to establish a new "
+                   "connection: [Errno -3] Temporary failure in name resolution)'", file=sys.stderr) or 1)
+if name in os.environ['FAKE_PIP'].split(','):
+    sys.exit(print('ERROR: Could not find a version that satisfies the requirement %s (from versions: none)\\n'
+                   'ERROR: No matching distribution found for %s' % (spec, spec), file=sys.stderr) or 1)
+site = pathlib.Path(sysconfig.get_paths()['purelib']); d = site / (name + '-99.0.dist-info'); d.mkdir()
+(d / 'METADATA').write_text('Metadata-Version: 2.1\\nName: %s\\nVersion: 99.0\\n' % name)
+if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WEASY'])
+''');(venv/'bin'/'pip').chmod(0o755)
+            return home
+        pybin=self.home/'pybin';pybin.mkdir(exist_ok=True)
+        if not (pybin/'python3').exists():(pybin/'python3').symlink_to(sys.executable)   # (the script's python3 made the venvs)
+        def fill(home,mode,weasy='',**extra):
+            log=home/'pip.log';log.write_text('')
+            env=dict(os.environ,HOME=str(home),FAKE_PIP=mode,FAKE_PIP_LOG=str(log),FAKE_WEASY=weasy,
+                     PATH=f'{pybin}:{os.environ["PATH"]}')
+            env.pop('PIP_NO_INDEX',None);env.update(extra)
+            r=subprocess.run(['bash','-s'],input=agent_side.venv_command(),capture_output=True,text=True,env=env,timeout=300)
+            installs=[l.split()[-1] for l in log.read_text().splitlines() if l.startswith('install')]
+            return (*agent_side.venv_report(r),installs)
+        names=[spec.split('>=')[0] for spec,_ in AGENT_PACKAGES]
+        home=fake_home('h1')
+        lines,ok,installs=fill(home,'scipy',weasy="raise OSError(\"cannot load library 'libpango-1.0-0': error 0x7e\")")
+        self.assertTrue(ok,'one optional package failing does not fail setup')
+        self.assertEqual([i.split('>=')[0] for i in installs],names,'one pip call per missing package')
+        self.assertTrue(any('scipy did not install' in l and 'No matching distribution' in l for l in lines),lines)
+        self.assertTrue(any('libharfbuzz-subset0' in l and 'sudo apt install' in l for l in lines),'the apt line for the owner')
+        lines,ok,installs=fill(home,'')
+        self.assertEqual(installs,['scipy>=1.11'],'a rerun installs only what is missing');self.assertTrue(ok)
+        lines,ok,installs=fill(home,'')
+        self.assertEqual(installs,[],'nothing missing, nothing installed')
+        self.assertTrue(any(l.endswith('installed nothing; already there: '+', '.join(names)) for l in lines),lines)
+        home=fake_home('h2')
+        lines,ok,installs=fill(home,'offline')
+        self.assertTrue(ok);self.assertEqual(len(installs),1,'offline: the first network failure stops the rest')
+        self.assertTrue(any('no package index reachable' in l and 'when online' in l and 'pypdf' in l for l in lines),lines)
+        self.assertIn("'torch': False",agent_side.venv_command(),'torch only with --test-venv')
+        # an installed 5 meets a floor of 5.0 (it was reinstalled on every run)
+        home=fake_home('h3');venv=home/'.venvs'/'caminus-cpu';site=next(venv.glob('lib/python*/site-packages'))
+        (site/'lxml-5.dist-info').mkdir();(site/'lxml-5.dist-info'/'METADATA').write_text('Metadata-Version: 2.1\nName: lxml\nVersion: 5\n')
+        lines,ok,installs=fill(home,'')
+        self.assertNotIn('lxml>=5.0',installs);self.assertEqual(len(installs),len(names)-1)
+        # every package failing: no line says the rest are fine
+        lines,ok,installs=fill(fake_home('h4'),','.join(names))
+        self.assertEqual(len(installs),len(names));self.assertFalse(any('the rest are fine' in l for l in lines),lines)
+        # python3 -m venv without python3-venv leaves bin/python and no pip (a --without-pip venv is the same state):
+        # it is not taken as made. While the venv cannot be given a pip, setup fails and says what to install, every
+        # run; once it can, the venv is repaired in place
+        home=self.home/'h5';venv=home/'.venvs'/'caminus-cpu'
+        subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+        (venv/'pyvenv.cfg').rename(home/'cfg');(venv/'pyvenv.cfg').mkdir()   # (what stops venv from finishing here)
+        for _ in range(2):
+            lines,ok,installs=fill(home,'')
+            self.assertFalse(ok);self.assertEqual(installs,[])
+            self.assertTrue(any('without a working pip' in l and 'sudo apt install python3-venv' in l for l in lines),lines)
+        (venv/'pyvenv.cfg').rmdir()
+        lines,ok,installs=fill(home,'',PIP_NO_INDEX='1')     # (a real pip now: no index, so no network)
+        self.assertTrue(ok,lines);self.assertTrue(os.access(venv/'bin'/'pip',os.X_OK))
+        self.assertTrue(any('repaired (it had no working pip)' in l for l in lines),lines)
+        self.assertTrue(any('pip is set to --no-index' in l for l in lines),lines)
 
     def test_github_link_env_redaction_and_handoff_fields(self):
         from caminus.ember.resident import github
@@ -2658,11 +2744,18 @@ for line in sys.stdin:
         (fake/'homes'/'odd').mkdir();(fake/'homes'/'odd'/'heartbeat.json').write_text('[1,2]')
         (fake/'homes'/'older').mkdir();(fake/'homes'/'older'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
         (fake/'homes'/'older'/'update.json').write_text(json.dumps(dict(program='/x/older.pyz',now=False)))
+        venv_calls=[]
         def transport(argv,input=None,**kw):
+            if 'CAMINUS_VENV' in input:          # the venv top-up (its own test runs the script against a fake pip)
+                venv_calls.append(input)
+                return subprocess.CompletedProcess(argv,0,json.dumps(dict(made=False,present=['ddgs'],installed=[],failed={},
+                                                   skipped=[],offline=None,torch=None,weasyprint=None))+'\n','')
             return subprocess.run(['bash','-s'],input=input,capture_output=True,text=True,env=dict(os.environ,HOME=str(fake)))
         import contextlib,io as _io
-        out=_io.StringIO()
-        with contextlib.redirect_stdout(out):agent_host.main(['install'],transport)
+        out=_io.StringIO();err=_io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):agent_host.main(['install'],transport)
+        self.assertEqual(len(venv_calls),1,'an upgrade tops up the agent venv too');self.assertIn("'torch': False",venv_calls[0])
+        self.assertIn('already there: ddgs',err.getvalue(),'its report goes to stderr: stdout stays the JSON')
         res=json.loads(out.getvalue().strip().splitlines()[-1])
         self.assertEqual(res['updates_queued'],['old','older'],'live daemons on another runtime; a pending older update is replaced')
         self.assertEqual(res['updates_skipped'],[])
@@ -2671,6 +2764,14 @@ for line in sys.stdin:
         u=json.loads((fake/'homes'/'old'/'update.json').read_text())
         self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
         self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
+        # a top-up past its hour (a very slow link) is a line on stderr: the install's JSON and exit code stay
+        def slow(argv,input=None,**kw):
+            if 'CAMINUS_VENV' in input:raise subprocess.TimeoutExpired(argv,kw.get('timeout'))
+            return transport(argv,input,**kw)
+        out=_io.StringIO();err=_io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):code=agent_host.main(['install'],slow)
+        self.assertEqual(code,0);self.assertIn('installed',json.loads(out.getvalue().strip().splitlines()[-1]))
+        self.assertIn('no answer in 3600 s',err.getvalue())
 
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)

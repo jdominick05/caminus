@@ -73,7 +73,7 @@ type residentChat struct {
 	rootSel                                 string        // the root request the decision keys act on (shared card)
 	group                                   toolGroup     // compact view: the tool work since the last drawn block
 	cards                                   bool          // Ctrl+O: every tool card instead of the compact line
-	sel                                     chatSelection // select to copy (envselect.go)
+	sel                                     chatSelection // select to copy (emberselect.go)
 	view                                    textView      // /btw's answer, /diff
 	rewind                                  rewindState   // the /rewind step picker
 	recapNow                                float64       // when the recap was taken: saved as seen on dismiss
@@ -2201,8 +2201,7 @@ func (m emberModel) renderChat() string {
 		}
 		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
-	view := m.highlightSelection(m.chat.transcript.View())
-	view = m.withJumpPill(view, m.transcriptWidth(w))
+	view := m.withJumpPill(m.highlightSelection(m.chat.transcript.View(), false), m.transcriptWidth(w))
 	if sw := m.sideWidth(); sw > 0 {
 		tw := w - sw - 1
 		view = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(tw).Render(view), " ",
@@ -2224,22 +2223,7 @@ func (m emberModel) renderChat() string {
 func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
-	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.chat.picker {
-		if i := m.cardAt(click.X, click.Y); i >= 0 {
-			if i == len(m.switcherCards()) {
-				m.chat.pickerSel, m.chat.pickerNew, m.chat.pickerName = i, true, ""
-				return m, nil
-			}
-			return m.switchToCard(i)
-		}
-		return m, nil
-	}
-	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.onJumpPill(click.X, click.Y) {
-		m.chat.transcript.GotoBottom()
-		m.chat.live.hold = false
-		return m, nil
-	}
-	if next, c, ok := m.selectMouse(msg); ok {
+	if next, c, ok := m.selectMouse(msg); ok { // (a click on a picker card or the jump pill too: emberselect.go)
 		return next, c
 	} else {
 		m = next

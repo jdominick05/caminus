@@ -134,6 +134,29 @@ caminus ember setup                           # prints the root script for these
 log and relays are in their own home already; relays listen on fixed local ports, so a second owner's relay takes
 another one (`relay install ... --port 8775`, and the agent's `--endpoint` to match).
 
+## The mouse: clicks and copying
+
+The chat (`caminus ember ui`) takes the mouse: the wheel scrolls the history, and a click opens a folded card, picks a
+card in the session picker (Shift+Tab) or presses the jump-to-newest pill. Taking the mouse turns the terminal's own
+selection off, so the chat selects text itself:
+
+- **Drag to copy.** Drag over any text on the screen: the conversation and its cards (folded or open), the side pane
+  (tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the
+  button copies the plain text to the clipboard (wl-copy on Wayland, xclip or xsel on X11, and OSC 52 for terminals that
+  take it, such as a remote session). The copy has no colours or styling; its lines break where the screen breaks them.
+  The status line says how many lines it copied.
+- **One area at a time.** A drag selects inside the area it began in, so the conversation never picks up the side pane
+  beside it and the other way round. In the conversation, dragging past its top or bottom scrolls and keeps
+  selecting. A box's border (the composer's, a dialog's, between the picker's cards) is left out of the copy; a │ or ─
+  inside a dialog's content (a diff, a table) is copied as it is.
+- **Click or drag.** Pressing the button does nothing yet. If the pointer gets two or more cells away before the
+  release, it is a drag and selects; if it doesn't, or it comes back to the cell where you pressed, it is a click, and the click acts where you pressed. So a drag that starts
+  on a card or a session never opens or switches it.
+- **Clearing.** A click clears the selection; outside the conversation a key or a resize clears it too, since the
+  screen under it changes.
+- **The terminal's own selection.** Shift+drag still gives it, in terminals that offer one (VTE / GNOME Terminal do).
+  `/panel` is the control panel's own screen and keeps its own mouse handling.
+
 ## Defaults
 
 Every setting below works without being set. The resident's `config.json` lives in its home; a key in the table is a
@@ -223,6 +246,7 @@ index, journal or note. Hits from the running goal come last, marked "this goal"
 | Its config, state, memory and notes | `~/homes/NAME/config.json`, `STATE.md`, `MEMORY.md`, `notes/` |
 | Its free time | `~/homes/NAME/journal/`, `studio/` (with `studio/PROJECTS.md` and `studio/for-you/`, what it leaves you) |
 | Its instructions | `~/ROBOTS.md` in the agent's account (refreshed by `caminus ember setup`) |
+| Its Python | `~/.venvs/caminus-cpu` in the agent's account, filled by `caminus ember setup` and topped up by `caminus ember agent install` (both add only what is missing; a venv left without a working pip is repaired in place, and when it cannot be, setup fails and names the apt package, python3-venv): pillow, requests, beautifulsoup4, lxml, scipy, pandas, matplotlib, ddgs, weasyprint, pypdf (about 110 MB to download, 460 MB on disk), CPU torch and numpy with `--test-venv`. pandoc makes PDFs with `--pdf-engine=$HOME/.venvs/caminus-cpu/bin/weasyprint`; weasyprint needs pango (`sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libharfbuzz-subset0`; setup says so when it is missing) |
 | Your key for its account | `~/.ssh/caminus_env_key` |
 | Your audit log | `~/.local/state/caminus/env-audit.jsonl` |
 | The setup script | `~/.local/share/caminus/env-setup.sh` |

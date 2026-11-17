@@ -1,9 +1,10 @@
 """web_search and web_fetch: reading the web from the agent's account.
 
 - web_search(query): text search through ddgs (MIT; a metasearch library: DuckDuckGo, Bing, Brave and others). The
-  runtime is standard library only, so ddgs lives in its own Python (config `search_python`, else ~/.venvs/ddgs, else
-  the runtime's own interpreter if it has ddgs) and is called as a subprocess, one backend at a time: an empty or
-  failed backend hands over to the next, and the result says what each one gave.
+  runtime is standard library only, so ddgs lives in its own Python (config `search_python`, else the agent's venv
+  that `caminus ember setup` fills, discovery.AGENT_VENV, else the runtime's own interpreter if it has ddgs) and is
+  called as a subprocess, one backend at a time: an empty or failed backend hands over to the next, and the result
+  says what each one gave.
 - web_fetch(url): one page as text (HTML reduced to its readable text, a PDF through pdftotext or a small built-in
   reader), standard library only. 429 and 5xx answers are retried within a bounded wait; a page fetched once in a goal
   is answered from a cache for a while.
@@ -25,6 +26,7 @@ import urllib.request
 import zlib
 from pathlib import Path
 
+from .discovery import AGENT_VENV
 from .model import retry_after
 
 SEARCH_TIMEOUT = 75   # all backends of one search
@@ -68,7 +70,8 @@ for line in sys.stdin:
 
 
 def _search_python(rt):
-    candidates = [rt.config.get('search_python'), str(Path.home() / '.venvs' / 'ddgs' / 'bin' / 'python'), sys.executable]
+    venv = Path.home() / AGENT_VENV.removeprefix('~/') / 'bin' / 'python'
+    candidates = [rt.config.get('search_python'), str(venv), sys.executable]
     for py in candidates:
         if not py or not Path(py).exists():
             continue
@@ -137,8 +140,8 @@ def search(rt, query, max_results=8, timelimit=None):
     if run is None:
         py = _search_python(rt)
         if py is None:
-            raise ValueError('web search is not set up: ddgs is not installed (your human can run: python3 -m venv '
-                             '~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs in your account); web_fetch still works')
+            raise ValueError(f'web search is not set up: ddgs is not installed in {AGENT_VENV} (your human can run: '
+                             'caminus ember setup, which installs it there); web_fetch still works')
         run = _Ddgs(py)
     try:
         return _search(rt, run, query, max_results, timelimit)
