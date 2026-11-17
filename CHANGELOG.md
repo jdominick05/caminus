@@ -112,6 +112,13 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Fixed
 
+- **Qwen3-30B-A3B runs at its model card's sampling settings.** Its GGUF file carries no sampling settings, so it was
+  served at temperature 1.0 with no presence penalty. Each served model now gets the sampling its card recommends for
+  agentic work: Qwen3-30B-A3B temperature 0.6, top_p 0.95, top_k 20, min_p 0 and presence penalty 1.5 (0.7 / 0.8 /
+  20 / 0 / 1.5 without thinking, as its card gives); the Qwen3.8 models 1.0 / 0.95 / 20 / 0, as before. A request's own
+  fields still win, and a greedy request (temperature 0) gets no default penalty. `/props` reports the defaults in
+  effect and the card's recommended output length. A GGUF file outside the catalog keeps its own
+  `general.sampling.*` settings, now including its repeat penalty. See [models](docs/models.md#sampling-defaults).
 - **The two-card check re-reads a PCIe link before refusing a card, and judges a link the driver has lowered at full
   speed.** On the test machine the check once refused the XTX as "on a PCIe 1.0 x1 link" while it sat in its x16 slot.
   The cause was not found and the reading has not come back. When the graphics driver reports that it has lowered an

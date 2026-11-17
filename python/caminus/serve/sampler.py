@@ -106,8 +106,9 @@ LLAMA_DEFAULT_SEED = 0xFFFFFFFF     # llama.cpp's "pick a random seed"
 
 @dataclass(frozen=True)
 class SamplingParams:
-    """Defaults: the GGUF's general.sampling.* (top_k 20, top_p 0.95, temp 1.0) and the llama-server reference runs' min_p 0; the
-    penalties are llama.cpp's defaults (off, window 64). penalty_last_n: 0 = off, -1 = the whole history.
+    """Built-in defaults (the last layer under model_defaults: the catalog's recommendation, then the GGUF's general.sampling.*):
+    the Qwen3.8 line's top_k 20, top_p 0.95, temp 1.0 and the llama-server reference runs' min_p 0; the penalties are
+    llama.cpp's defaults (off, window 64). penalty_last_n: 0 = off, -1 = the whole history.
     seed None (or -1 / LLAMA_DEFAULT_SEED) = a random seed, fixed per request by resolve()."""
     temperature: float = 1.0
     top_k: int = 20
@@ -125,11 +126,19 @@ class SamplingParams:
         """defaults from GGUF metadata (caminus.serve.vocab.Vocab.meta), then keyword overrides"""
         kw = {}
         for gk, name, typ in (('general.sampling.temp', 'temperature', float), ('general.sampling.top_k', 'top_k', int),
-                              ('general.sampling.top_p', 'top_p', float), ('general.sampling.min_p', 'min_p', float)):
+                              ('general.sampling.top_p', 'top_p', float), ('general.sampling.min_p', 'min_p', float),
+                              ('general.sampling.penalty_repeat', 'repeat_penalty', float)):
             if gk in meta:
                 kw[name] = typ(meta[gk])
         kw.update(over)
         return cls(**kw)
+
+    @classmethod
+    def from_recommended(cls, rec, meta):
+        """the catalog's recommendation rec (caminus.models.Sampling, or None) over the GGUF metadata's general.sampling.*,
+        over the built-in defaults: a field rec leaves None keeps the GGUF's value, then the built-in one"""
+        over = {} if rec is None else {k: getattr(rec, k) for k in REC_FIELDS if getattr(rec, k) is not None}
+        return cls.from_gguf_meta(meta or {}, **over)
 
     def with_request(self, req):
         """apply a request's sampling fields (OpenAI, Anthropic and llama.cpp names; absent or None = keep)"""
@@ -159,6 +168,33 @@ class SamplingParams:
     def penalties_on(self):
         return self.penalty_last_n != 0 and not (self.repeat_penalty == 1.0 and self.frequency_penalty == 0.0
                                                  and self.presence_penalty == 0.0)
+
+
+REC_FIELDS = ('temperature', 'top_p', 'top_k', 'min_p', 'presence_penalty', 'repeat_penalty')   # (caminus.models.Sampling's)
+
+
+PENALTY_FIELDS = {'presence_penalty': 0.0, 'repeat_penalty': 1.0, 'frequency_penalty': 0.0}   # (request name: off)
+
+
+def model_defaults(path, meta):
+    """caminus serve's request defaults for the GGUF at path with header metadata meta (caminus.serve.vocab.Vocab.meta):
+    (SamplingParams with thinking on, SamplingParams with thinking off or None: the same set, max_output or None). The
+    served model is found in the catalog by its file (caminus.models.sampling_of: name and size, the same identification
+    as arch.default_alias), so no architecture is named here"""
+    from .. import models
+    rec = models.sampling_of(path) if path else None
+    if rec is None:
+        return SamplingParams.from_recommended(None, meta), None, None
+    nothink = SamplingParams.from_recommended(rec.nothink, meta) if rec.nothink is not None else None
+    return SamplingParams.from_recommended(rec, meta), nothink, rec.max_output
+
+
+def greedy_defaults(p, req):
+    """a greedy request's params (p.temperature 0): the penalties the request does not send itself switched off. Greedy
+    requests are tests, gates and benchmarks (the cards advise against greedy decoding for real use), so a model's default
+    penalty never changes their output or puts them on the penalty path; a penalty the request sends is kept"""
+    off = {k: v for k, v in PENALTY_FIELDS.items() if req.get(k) is None or isinstance(req.get(k), bool)}
+    return replace(p, **off) if off else p
 
 
 # ---------------------------------------------------------------- filter chain
