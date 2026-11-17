@@ -127,7 +127,11 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 		}
 		m.chat.sel.dragging = false
 		if m.chat.sel.a == m.chat.sel.b {
+			row := m.chat.sel.a[0]
 			m.chat.sel = chatSelection{} // a click, not a drag
+			if m.foldedAt(row) && !(m.chat.cards && m.chat.expanded) {
+				return m.toggleLayout(), nil, true // a click on a folded card opens it (clicking did nothing; Ctrl+O did)
+			}
 			return m, nil, true
 		}
 		m.chat.sel.shown = true // before the text: span reads only a selection that is dragging or shown
@@ -193,4 +197,15 @@ func copyToClipboard(text string) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+// foldedAt: the transcript line at row shows something folded (a card's fold mark, "… N more lines", "earlier lines").
+func (m emberModel) foldedAt(row int) bool {
+	lines := strings.Split(m.chat.transcript.GetContent(), "\n")
+	if row < 0 || row >= len(lines) {
+		return false
+	}
+	l := strings.TrimSpace(ansi.Strip(lines[row]))
+	return (g.collapsed != "" && strings.HasPrefix(l, g.collapsed+" ")) || strings.HasSuffix(l, " …") ||
+		strings.Contains(l, "more lines") || strings.Contains(l, "earlier lines")
 }

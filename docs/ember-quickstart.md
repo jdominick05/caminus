@@ -10,13 +10,11 @@ either a local `caminus serve` or a paid API through a spend-capped key relay.
 
 ```sh
 python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
-pip install "caminus>=0.3.0rc1"       # once 0.3.0 is out: pip install caminus
+pip install caminus
 caminus ember --help
 ```
 
-The version pin matters while 0.3.0 is a release candidate: a plain `pip install caminus` skips release candidates and
-installs 0.2.1, which has no Ember. (Don't use `--pre` for this: it also installs test versions of Caminus's
-dependencies.) Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
+Ember is in the package from 0.3.0 on. Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
 
 The panel (`caminus ember ui`) ships inside the package. From a source checkout, build it first:
 `cd panel && go build -o caminus-panel .`

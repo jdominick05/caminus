@@ -39,12 +39,12 @@ open the panel, start the model for your cards, then set up Ember.
 
 **Build it from source (recommended).** The build runs the release recipe inside the public build image: on the CPU, no
 GPU needed, nothing installed on your system besides Docker. Built from a release tag, the wheel is byte for byte the
-published one. Releases build this way from 0.3.0 on; until 0.3.0 is out, build the development branch (`testing`):
+published one. Build the tag of the latest release:
 
 ```bash
 git clone https://github.com/jdominick05/caminus.git && cd caminus
-git checkout testing        # from 0.3.0 on: the tag of the "Latest" release instead (not a nightly pre-release)
-tools/release/in_image.sh tools/release/release_build.sh --untagged    # GPU code + wheel into dist/ (drop --untagged on a release tag)
+git checkout v0.3.0         # the tag of the "Latest" release (not a nightly pre-release)
+tools/release/in_image.sh tools/release/release_build.sh    # GPU code + wheel into dist/ (--untagged at any other commit)
 python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards
 pip install dist/caminus-*.whl
@@ -56,9 +56,8 @@ The build needs Docker that your user can run (`docker run hello-world` works). 
 
 **Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
 release is built with the same recipe and signed, and its provenance can be checked against the source
-([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember arrives on PyPI with 0.3.0; while
-0.3.0 is a release candidate, install it with `pip install "caminus>=0.3.0rc1"` (a plain `pip install caminus` skips
-release candidates and gets 0.2.1, without Ember).
+([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember is in the package
+from 0.3.0 on.
 
 ### 2. Open the panel
 
@@ -139,9 +138,9 @@ are welcome too.
 | Model | Cards | Decode | llama.cpp, same cards |
 |---|---|---|---|
 | Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
-| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; served, 206 on two cards against 240 on one (two cards are faster from about 32K) | 148 tok/s; 112 on two cards (`-sm tensor`) |
+| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; served, 213 on two cards against 245 on one (two cards are faster from about 32K) | 148 tok/s; 112 on two cards (`-sm tensor`) |
 | Swift 1.5 27B Q4_K_M (17 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
-| ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1; or 2 | 47 tok/s; 68 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
+| ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1; or 2 | 47 tok/s; 69 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
 | Qwen3.8-27B GSQ-RCO IQ3_S (12 GB) | 1 | 55 tok/s | not measured yet |
 
 **Paused for this release:** Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
