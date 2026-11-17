@@ -80,8 +80,8 @@ pre-release tagged `vX.Y.Z.devYYYYMMDD` with the wheel, the sdist and SHA256SUMS
 patch), so a nightly sorts after the last release and before the next one, and `pip install caminus` never picks one.
 
 ```bash
-pip install "caminus>=0.2.2.dev0"            # the newest build, nightly or release
-pip install "caminus==0.2.2.dev20261112"     # one nightly
+pip install "caminus>=X.Y.Z.dev0"            # the newest build, nightly or release (X.Y.Z: the next release)
+pip install "caminus==X.Y.Z.devYYYYMMDD"     # one nightly
 ```
 
 Name a dev version in the request, as above, rather than passing `--pre`: pip then takes pre-releases of Caminus only,
