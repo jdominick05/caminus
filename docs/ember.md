@@ -55,6 +55,44 @@ either faster.
 - **Everything is recorded.** Your audit log has every root request, answer, grant and panel control; its journal
   has every goal, tool call and result.
 
+## Paid brains
+
+A paid model is reached through a **key relay**: a small service in your own account that holds the API key, forwards
+only the provider's chat endpoints, allows only priced models, and refuses requests once the day's dollar cap is spent
+(HTTP 402; it resets at midnight). The agent is given the relay's local address, never the key.
+
+| Provider | Key file (mode 600) | Relay address | Agent `--api` |
+|---|---|---|---|
+| Anthropic | `~/.config/anthropic/api_key` | `http://127.0.0.1:8765/v1` | `anthropic` |
+| DeepInfra | `~/.config/caminus/deepinfra-key` | `http://127.0.0.1:8766/v1/openai` | `openai` (the default) |
+| Mistral | `~/.config/caminus/mistral-key` (and its price file, `~/.config/caminus/mistral-prices.json`) | `http://127.0.0.1:8767/v1` | `openai` |
+
+Anthropic, step by step (the others follow the same pattern; the quickstart shows DeepInfra):
+
+```sh
+mkdir -p ~/.config/anthropic
+[ -e ~/.config/anthropic/api_key ] || install -m 600 /dev/null ~/.config/anthropic/api_key
+$EDITOR ~/.config/anthropic/api_key                       # the key alone, on one line
+caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5
+caminus ember agent install
+caminus ember agent init resident --model claude-haiku-5-5 --api anthropic --endpoint http://127.0.0.1:8765/v1
+caminus ember agent provider resident add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
+```
+
+- **Which models.** The Anthropic relay allows only the models named with `--model` (repeat it; Claude Haiku 5.5 when
+  none is given). DeepInfra and Mistral allow the models their price lists cover. Rerun `relay install` with new
+  options to change them; the service restarts with them.
+- **Several providers.** Install one relay per provider and add each with `agent provider NAME add`; `caminus ember
+  agent models NAME --refresh` lists what each serves (context windows, output caps, prices), and `/model` in the chat
+  (or `caminus ember agent model NAME ID`) switches between them at the next turn.
+- **Spend.** `caminus ember relay status` shows each relay's spend today against its cap. The chat's status line shows
+  the agent's own running cost.
+- **The advisor.** An agent can ask a stronger model for advice (`caminus ember agent advisor NAME --model
+  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`). It goes through the same relay, so allow its
+  model there too (`--model claude-haiku-5-5 --model claude-opus-5-5`); its own daily budget is counted by the agent
+  on top of the relay's cap.
+- **Removing one.** `caminus ember relay uninstall --provider anthropic` stops it; the key file stays where you put it.
+
 ## Where things live
 
 | What | Where |
