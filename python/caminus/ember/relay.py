@@ -240,7 +240,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             self.wfile.write(raw)
             log('refused %d %s' % (status, message))
 
-        def watch_client(self, conn, done):
+        def watch_client(self, upsock, done):
             """While a stream is relayed, notice a client that hangs up even when upstream sends nothing (a long
             prompt, a model thinking): the upstream connection is closed at once, so the provider stops generating.
             Without this the hang-up was seen only at the next write, after upstream's next line. Returns the event
@@ -260,10 +260,9 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     if done.is_set():
                         return
                     gone.set()
-                    sock = getattr(conn, 'sock', None)
-                    if sock is not None:
+                    if upsock is not None:
                         try:
-                            sock.shutdown(socket.SHUT_RDWR)
+                            upsock.shutdown(socket.SHUT_RDWR)
                         except OSError:
                             pass
                     return
@@ -358,6 +357,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     if beta:
                         headers['anthropic-beta'] = beta
                 conn.request('POST', path, raw, headers)
+                # (taken now: http.client drops conn.sock in getresponse when upstream will close the connection)
+                upsock = getattr(conn, 'sock', None)
                 up = conn.getresponse()
                 # A client that hangs up (an interrupt, a steer and /advisor end a reply this way) never skips the
                 # ledger, on any path: before the headers, mid-stream or on a whole reply. Upstream already billed it.
@@ -374,18 +375,21 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
                 rid = up.getheader('request-id') or up.getheader('x-request-id')
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
-                    watched = threading.Event()
-                    gone = self.watch_client(conn, watched)
+                    watched, ended = threading.Event(), False   # ended: the reply's last event came
+                    gone = self.watch_client(upsock, watched)
                     while not client_gone:
                         try:
                             line = up.readline()
-                        except OSError:
+                        except (OSError, ValueError):
                             if not gone.is_set():
                                 raise
                             line = b''
                         if not line:
-                            client_gone = client_gone or gone.is_set()
+                            # (a client that closes right after the last event is not a hang-up)
+                            client_gone = client_gone or (gone.is_set() and not ended)
                             break
+                        if line[5:].strip() == b'[DONE]' or b'"message_stop"' in line:
+                            ended = True
                         try:
                             self.wfile.write(line)
                             self.wfile.flush()

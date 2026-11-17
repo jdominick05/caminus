@@ -3032,6 +3032,39 @@ for line in sys.stdin:
             self.assertGreater(ledger.spent(), 0, 'the prompt was still read: metered')
         finally:
             released.set();srv.shutdown();srv.server_close()
+        # the same through a real http.client connection to a silent upstream, chunked (kept alive) or announcing
+        # Connection: close (http.client then drops conn.sock in getresponse: the socket is taken before it)
+        import http.client
+        for framing in (b'Transfer-Encoding: chunked\r\n', b'Connection: close\r\n'):
+            up = socket.socket();up.bind(('127.0.0.1', 0));up.listen(1)
+            closed = threading.Event()
+            def upstream(up=up, framing=framing, closed=closed):
+                c, _ = up.accept();c.settimeout(20)
+                try:
+                    c.recv(65536)
+                    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n' + framing + b'\r\n')
+                    while c.recv(65536):pass          # silent until the relay closes its end
+                except OSError:pass
+                closed.set();c.close()
+            threading.Thread(target=upstream, daemon=True).start()
+            log2 = []
+            handler = relay.make_handler('anthropic', 'SECRET-KEY', relay.Ledger(self.home/'ledger-real.json', 50.0),
+                                         {'claude-haiku-5-5'}, 4096, log2.append, None,
+                                         lambda port=up.getsockname()[1]: http.client.HTTPConnection('127.0.0.1', port, timeout=30))
+            srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                s = socket.create_connection(('127.0.0.1', srv.server_address[1]), timeout=10)
+                s.sendall(b'POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % len(data) + data)
+                s.recv(4096)
+                s.shutdown(socket.SHUT_RDWR);s.close()
+                self.assertTrue(closed.wait(3), framing.decode().strip() + ': the upstream connection closed when the client went')
+                for _ in range(100):
+                    if any('CLIENT-GONE' in l for l in log2):break
+                    time.sleep(0.05)
+                self.assertTrue(any('CLIENT-GONE' in l for l in log2), (framing, log2))
+            finally:
+                srv.shutdown();srv.server_close();up.close()
 
     def test_a_client_that_hangs_up_is_still_metered_from_what_was_streamed(self):
         # an interrupt, a steer and /advisor end a reply by hanging up: the spend is recorded, estimated from the

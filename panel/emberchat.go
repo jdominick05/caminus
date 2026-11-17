@@ -2431,13 +2431,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Esc while the agent waits on a reply interrupts that turn only; the next message steers. Not only once text
 		// streams: a long prompt read or a paid model's thinking shows nothing for a while, and the call (and the
-		// server's work on it) is just as live then. The resident queues it only while a call is out.
-		if m.chat.live.active {
-			if goal := m.interruptibleGoal(); goal != "" {
-				m.msg = "interrupting the turn…"
-				return m, interruptTurn(m, goal)
-			}
-		}
+		// server's work on it) is just as live then. The resident queues it only while a call is out. Leaving
+		// "new goal" mode comes first: the call is now live for its whole length, and that Esc means "back".
 		if m.chat.forceNew && m.chat.prevTarget != "" { // out of "new goal", back to the goal you were talking to
 			m.chat.target, m.chat.newGoal, m.chat.forceNew = m.chat.prevTarget, false, false
 			m.chat.prevTarget = ""
@@ -3087,9 +3082,16 @@ func (m emberModel) chatFoot(w int) string {
 	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
+	// the speed is the last finished reply's: after an Esc it read as if the dropped turn were still generating
+	tps := m.resident.TokPerS
+	if ag := m.activeGoal(); ag != nil {
+		if _, held := m.interruptedUntil(ag.ID); held {
+			tps = 0
+		}
+	}
 	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
-		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
+		tps: tps, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip
 	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
 	// frame, so nothing appears and goes below it)

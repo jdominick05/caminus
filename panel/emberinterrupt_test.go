@@ -38,10 +38,11 @@ func TestEscInterruptsACallBeforeItsFirstToken(t *testing.T) {
 	if cmd == nil || m.msg != "interrupting the turn…" {
 		t.Fatalf("Esc while the goal works sends the interrupt even before the first token: %q", m.msg)
 	}
-	// "new goal" mode while nothing streams: Esc still goes back to the goal you were talking to
+	// "new goal" mode, a call out: Esc goes back to the goal you were talking to (a second Esc interrupts)
 	m = interruptFixture(t)
 	m.chat.forceNew, m.chat.prevTarget = true, "original"
 	m.chat.target = ""
+	m.chat.live = residentLive{turn: "t1", active: true}
 	mm, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = mm.(emberModel)
 	if m.chat.target != "original" || m.msg == "interrupting the turn…" {
@@ -55,6 +56,10 @@ func TestAnInterruptedTurnStopsTheClockAndSaysSo(t *testing.T) {
 	m.residentEvents = []residentEvent{
 		{Seq: 1, Goal: "original", Kind: "user_message", Ts: now - 30, Data: map[string]any{"text": "a goal"}},
 		{Seq: 2, Goal: "original", Kind: "turn_interrupted", Ts: now - 2, Data: map[string]any{"hold_s": 120.0, "turn": "t1"}},
+	}
+	m.resident.TokPerS, m.resident.ContextUsed = 55, 20000
+	if foot := ansi.Strip(m.chatFoot(140)); strings.Contains(foot, "tok/s") {
+		t.Fatalf("the last reply's speed is not shown as current after an Esc: %q", foot)
 	}
 	line := ansi.Strip(m.activityLine(140))
 	if m.working() != nil || !strings.Contains(line, "turn interrupted") || clockRe.MatchString(line) ||
@@ -74,6 +79,9 @@ func TestAnInterruptedTurnStopsTheClockAndSaysSo(t *testing.T) {
 	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 3, Goal: "original", Kind: "user_message", Ts: now, Data: map[string]any{"text": "shorter"}})
 	if m.working() == nil || strings.Contains(ansi.Strip(m.activityLine(140)), "turn interrupted") {
 		t.Fatal("after your message the goal works again")
+	}
+	if foot := ansi.Strip(m.chatFoot(140)); !strings.Contains(foot, "55 tok/s") {
+		t.Fatalf("working again: the speed shows again: %q", foot)
 	}
 	// so does a new call going out after the hold (its live turn is not the dropped one)
 	m.residentEvents = m.residentEvents[:2]
