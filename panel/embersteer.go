@@ -321,8 +321,10 @@ func (m emberModel) planCard(w int) string {
 	inner := max(10, w-4)
 	rows := []string{emberWarn.Render("PLAN · goal " + shortGoal(g.ID) + " waits for your OK")}
 	plan := strings.Split(ansi.Hardwrap(residentText(g.PlanText), inner, true), "\n")
-	if len(plan) > 14 {
-		plan = append(plan[:14], "… (/diff, /export or the goals overlay show more)")
+	// the card, the composer and the status line all fit: the plan is cut to a share of the screen
+	keep := min(14, max(2, (m.height-18)/2))
+	if len(plan) > keep {
+		plan = append(plan[:keep], fmt.Sprintf("… %d more lines · /plan shows the whole plan", len(plan)-keep))
 	}
 	for _, l := range plan {
 		rows = append(rows, lipgloss.NewStyle().Foreground(cText).Render(l))

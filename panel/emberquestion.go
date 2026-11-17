@@ -85,6 +85,11 @@ func (m *emberModel) openPrompt(r emberReq) {
 		r.Recommended = m.askedRecommended(r.Text) // an older resident's request file does not carry it; its call does
 		m.chat.question.Recommended = r.Recommended
 	}
+	if r.kind() != "question" {
+		// No is preselected for a root command and a GitHub hand-off (the owner's choice): one Enter on a hand-off
+		// posted it under their name, with no second check
+		m.chat.questionChoice = 1
+	}
 	opts := promptOptions(r)
 	for i, o := range opts {
 		if r.Recommended != "" && o == r.Recommended {
@@ -196,6 +201,16 @@ func (m emberModel) questionBox() string {
 	}
 	if m.chat.questionError != "" {
 		lines = append(lines, prefixAll(wrap(m.chat.questionError, emberCtxHot), " ")...)
+	}
+	// the options, the free-text row and the hint always fit: the text above them is cut to what is left (a long
+	// hand-off body pushed the options off the screen, so you picked blind)
+	fixed := 2 + 1 + len(promptOptions(*r)) + 2 + 1 + 8 // rule, header · blank · options · rule, free text · hint · header, footer, transcript
+	if m.chat.questionCustom {
+		fixed++
+	}
+	if budget := max(2, m.height-fixed); len(lines)-2 > budget {
+		cut := len(lines) - 2 - (budget - 1)
+		lines = append(lines[:2+budget-1], " "+emberDim.Render(fmt.Sprintf("… %d more lines", cut)))
 	}
 	lines = append(lines, "")
 	opts := promptOptions(*r)
@@ -432,6 +447,7 @@ func outcomeText(question bool, decision, answer string, rc any, by string) stri
 func (m *emberModel) requestOutcomes() map[string]string {
 	out := map[string]string{}
 	question := map[string]bool{}
+	timedOut := map[string]bool{}
 	var ids []string
 	for _, e := range m.residentEvents {
 		str := func(k string) string { v, _ := e.Data[k].(string); return v }
@@ -442,12 +458,16 @@ func (m *emberModel) requestOutcomes() map[string]string {
 				question[id] = e.Kind == "question"
 			}
 		case "request_answered":
-			if id := str("request"); id != "" && out[id] == "" {
-				out[id] = outcomeText(question[id], str("decision"), "", nil, "")
+			if id := str("request"); id != "" && (out[id] == "" || str("by") == "timeout") {
+				out[id] = outcomeText(question[id], str("decision"), "", nil, str("by"))
+				if str("by") == "timeout" {
+					timedOut[id] = true
+				}
 			}
 		case "question_unanswered":
 			if id := str("id"); id != "" {
 				out[id] = outcomeText(question[id] && e.Data["approval"] != true, "", "", nil, "timeout")
+				timedOut[id] = true
 			}
 		case "tool_result":
 			name := str("name")
@@ -467,6 +487,9 @@ func (m *emberModel) requestOutcomes() map[string]string {
 			decision, _ := res["decision"].(string)
 			if t := outcomeText(name == "ask_user", decision, answer, res["rc"], by); t != "" {
 				out[id] = t
+				if by == "timeout" {
+					timedOut[id] = true
+				}
 			}
 		}
 	}
@@ -474,6 +497,9 @@ func (m *emberModel) requestOutcomes() map[string]string {
 		m.chat.resSeen = map[string]string{}
 	}
 	for _, id := range ids {
+		if timedOut[id] {
+			continue // nobody answered: the timeout is the outcome, whatever a late file says
+		}
 		if t, ok := m.chat.resSeen[id]; ok {
 			out[id] = t // the owner's answer is the most exact (it has the words)
 			continue

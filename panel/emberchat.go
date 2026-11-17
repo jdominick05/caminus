@@ -48,12 +48,15 @@ type residentChat struct {
 	questionAt                              time.Time         // when the prompt opened (a grace period before Enter decides)
 	picker                                  bool
 	pickerSel                               int
-	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
-	pickerNew                               bool   // the switcher is asking for a new session's name
-	pickerName                              string // that name as typed
-	pickerDestroy                           string // the session x armed: a second x destroys it
-	goals, goalsDetail                      bool   // the Goals overlay, and its selected goal opened in full
-	loadingShown                            bool   // the transcript shows "loading NAME…"
+	hostShell                               bool      // shell mode runs in your own shell on this machine (!!), not the agent's
+	shellStash                              string    // the draft held aside while a second shell command is typed
+	prevTarget                              string    // the goal before Ctrl+N or /new (Esc goes back to it)
+	quitArmed                               time.Time // Ctrl+C cleared a draft: a second one within 2 s quits
+	pickerNew                               bool      // the switcher is asking for a new session's name
+	pickerName                              string    // that name as typed
+	pickerDestroy                           string    // the session x armed: a second x destroys it
+	goals, goalsDetail                      bool      // the Goals overlay, and its selected goal opened in full
+	loadingShown                            bool      // the transcript shows "loading NAME…"
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
 	studio                                  studioState   // the Studio overlay (/studio)
@@ -491,7 +494,15 @@ func (m *emberModel) syncChat() {
 func (m emberModel) bodyHeight() int {
 	// the header is two lines (title, rule) or more when the goal wraps under it; the footer one or two (chatFoot)
 	w := max(20, m.width)
-	return max(4, max(12, m.height)-lipgloss.Height(m.chatHead(w))-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w)))
+	// the cards drawn under the transcript (a recap, a waiting plan) take their rows from it too: they pushed the
+	// composer and the status line off the screen
+	cards := 0
+	for _, c := range []string{m.recapCard(w), m.planCard(w)} {
+		if c != "" {
+			cards += lipgloss.Height(c)
+		}
+	}
+	return max(1, max(12, m.height)-lipgloss.Height(m.chatHead(w))-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w))-cards)
 }
 
 // chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
@@ -2177,6 +2188,15 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch k {
 	case "ctrl+c":
+		// an unsent draft is not thrown away with the window: the first Ctrl+C clears it (Up brings it back), the
+		// second quits
+		if d := m.chat.compose.Value(); strings.TrimSpace(d) != "" && time.Since(m.chat.quitArmed) > 2*time.Second {
+			saveTyped(m.agentName, d)
+			m.chat.compose.Reset()
+			m.chat.quitArmed = time.Now()
+			m.msg = "draft cleared (Up brings it back) · Ctrl+C again quits"
+			return m, nil
+		}
 		return m, tea.Quit
 	case "ctrl+p":
 		m.chat.picker, m.chat.pickerSel = true, 0
@@ -2240,6 +2260,9 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.scrollLive(3)
 		return m, nil
 	case "esc":
+		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode, a draft held aside comes back
+			return m.leaveShell(), nil
+		}
 		if m.chat.live.active {
 			// Esc while a reply is being written interrupts that turn only; the next message steers.
 			if goal := m.targetGoal(); goal != "" {
@@ -2247,7 +2270,13 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, interruptTurn(m, goal)
 			}
 		}
-		return m, nil // (idle, Esc does nothing: the browse mode it opened is gone, PgUp/PgDn and the wheel scroll)
+		if m.chat.forceNew && m.chat.prevTarget != "" { // out of "new goal", back to the goal you were talking to
+			m.chat.target, m.chat.newGoal, m.chat.forceNew = m.chat.prevTarget, false, false
+			m.chat.prevTarget = ""
+			m.msg = "back to goal " + shortGoal(m.chat.target)
+			return m, nil
+		}
+		return m, nil // (idle, Esc does nothing else: PgUp/PgDn and the wheel scroll)
 	case "up", "down":
 		if next, done := m.slashMenuKey(k); done {
 			return next, nil
@@ -2264,10 +2293,14 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+n":
 		if !m.chat.sending {
+			// the draft stays (it becomes the new goal's text); Esc goes back to the goal you were talking to
+			if m.chat.target != "" {
+				m.chat.prevTarget = m.chat.target
+			}
 			m.chat.newGoal = true
 			m.chat.forceNew = true
 			m.chat.target = ""
-			m.chat.compose.Reset()
+			m.msg = "new goal · Esc goes back"
 			return m, m.chat.compose.Focus()
 		}
 		return m, nil
@@ -2285,6 +2318,15 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setShell(true)
 		return m, nil
 	}
+	// "!" on the empty last line of a draft (a command's output waits there): shell mode, the draft held aside; the
+	// next command's output joins it, and leaving shell mode gives it back. It was typed into the draft as text,
+	// and Enter sent the output and "!!cmd" as a message.
+	if k == "!" && !m.chat.shell && strings.HasSuffix(m.chat.compose.Value(), "\n") && m.chat.compose.Line() == m.chat.compose.LineCount()-1 {
+		m.chat.shellStash = strings.TrimRight(m.chat.compose.Value(), "\n")
+		m.chat.compose.Reset()
+		m.setShell(true)
+		return m, nil
+	}
 	// "!" again on the empty agent shell: the host shell, your own account on this machine (!! as in a terminal)
 	if k == "!" && m.chat.compose.Value() == "" && m.chat.shell && !m.chat.hostShell {
 		m.chat.hostShell = true
@@ -2292,8 +2334,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
-		m.setShell(false)
-		return m, nil
+		return m.leaveShell(), nil
 	}
 	if m.chat.shell && k == "enter" {
 		cmd := strings.TrimSpace(m.chat.compose.Value())
@@ -2332,6 +2373,7 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	}
 	// A leading // sends the rest as a message, so a goal about /etc or /tmp is not taken for a command.
 	if strings.HasPrefix(trimmed, "//") {
+		saveTyped(m.agentName, trimmed) // (history gives back what you typed, // included)
 		return m.sendCompose(strings.TrimPrefix(trimmed, "/"))
 	}
 	if strings.HasPrefix(trimmed, "/") {
@@ -2341,6 +2383,7 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
+	saveTyped(m.agentName, text)
 	return m.sendCompose(text)
 }
 
@@ -2353,7 +2396,11 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	m.chat.sending = true
 	return m, func() tea.Msg {
 		if strings.ContainsAny(text, "@+") { // (it checked only "@": a message with only +path attached nothing)
-			text = expandAttachments(m, text) // +path: the file, read as the agent, goes with the message
+			var problems []string
+			text, problems = expandAttachmentsChecked(m, text) // +path: the file, read as the agent, goes with the message
+			if len(problems) > 0 {                             // nothing is sent; the draft stays to fix
+				return residentComposeResult{agent: name, epoch: epoch, err: "not sent: " + strings.Join(problems, " · ")}
+			}
 		}
 		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
@@ -2402,6 +2449,9 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/quit":
 		return m, tea.Quit
 	case "/new":
+		if m.chat.target != "" {
+			m.chat.prevTarget = m.chat.target // (Esc goes back to it)
+		}
 		m.chat.newGoal, m.chat.target = true, ""
 		m.chat.forceNew = true
 		clear()
@@ -2456,7 +2506,13 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "No selected goal to cancel"
 			return m, nil
 		}
+		if goalEnded(g.State) { // (it said "cancelled" again and recorded another cancel)
+			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State)
+			return m, nil
+		}
 		clear()
+		// the composer starts a new goal after it (it pointed at the previous, finished goal)
+		m.chat.newGoal, m.chat.target, m.chat.forceNew = true, "", true
 		return m, residentAction(m, []string{"cancel", m.agentName, g.ID, "--json"}, "")
 	case "/model":
 		// alone: the Models overlay over the catalog; with an id (provider/id when two serve it): pick it
@@ -2480,6 +2536,10 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "No selected goal to pause"
 			return m, nil
 		}
+		if goalEnded(g.State) {
+			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State) + ": nothing to pause"
+			return m, nil
+		}
 		clear()
 		return m, residentAction(m, []string{"pause", m.agentName, g.ID, "--json"}, "")
 	case "/halt":
@@ -2494,6 +2554,10 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
 		// pass rather than writing history from here.
 		g := m.selectedResidentGoal()
+		if g != nil && goalEnded(g.State) {
+			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State) + ": nothing to compact"
+			return m, nil
+		}
 		args := []string{"compact", m.agentName}
 		if g != nil {
 			args = append(args, g.ID)
@@ -2973,4 +3037,30 @@ func keyLines(v map[string]any, limit int) []string {
 	}
 	walk(v, "")
 	return lines(strings.Join(out, "\n"), limit)
+}
+
+// goalEnded: the goal is over (cancelled, completed, failed or an error); goal commands have nothing to act on.
+func goalEnded(state string) bool {
+	switch state {
+	case "cancelled", "completed", "failed", "error":
+		return true
+	}
+	return false
+}
+
+func endedWord(state string) string {
+	if state == "error" {
+		return "failed"
+	}
+	return state
+}
+
+// leaveShell ends shell mode; a draft held aside for a second command comes back.
+func (m emberModel) leaveShell() emberModel {
+	m.setShell(false)
+	if m.chat.shellStash != "" {
+		m.chat.compose.SetValue(m.chat.shellStash + "\n")
+		m.chat.shellStash = ""
+	}
+	return m
 }

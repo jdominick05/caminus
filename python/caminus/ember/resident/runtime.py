@@ -532,7 +532,9 @@ class Runtime:
             with self.store.transaction():
                 self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, text, 'nudge'))
                 self.store.settle_request(r['id'], 'done')
-                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision')), gid)
+                # by: 'timeout' when nobody answered (the owner's record says "timed out", not a human's no)
+                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision'),
+                                                          by=result.get('by', '')), gid)
 
     def open_requests(self, gid):
         return [json.loads(r['data'])['rid'] for r in self.store.db.execute(

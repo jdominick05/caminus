@@ -55,13 +55,15 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 |---|---|
 | Esc | while a reply is being written, interrupt that turn (nothing of it is kept; the goal waits up to two minutes for your message); the activity line says "esc interrupts" then. PgUp/PgDn and the wheel scroll the transcript |
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
-| Ctrl+R | earlier prompts containing the draft, newest first |
+| Ctrl+R | earlier prompts containing the draft, newest first (as you typed them: `//`, `@` and `+` kept) |
+| Ctrl+N | a new goal; the draft stays and becomes its text, Esc goes back to the goal you were talking to |
+| Ctrl+C | with a draft: clear it (Up brings it back); again, or with no draft: quit |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
 | Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
 | Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
-| `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell") |
-| `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
+| `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell"); `!` on the draft's empty last line runs another, its output joining the first |
+| `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8); a missing file, a folder or a `..` path stops the message with what is wrong and keeps the draft. `@` only drops from a word that reads as a path (`@alice` stays). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
 
 While a reply is written, a bounded live box shows its thinking, the tools it
 starts and the text so far, with Ember, the Caminus mascot, flickering beside
@@ -98,7 +100,7 @@ arguments are appended) and is sent as a message.
 
 A waiting request asks where you type: the composer becomes a prompt with the command (and why) or the question,
 "1 of N" when more wait, and the time left. A root command or a GitHub hand-off offers Yes / No / "Tell it something
-else"; a question offers its choices (the recommended one marked and preselected) and "Answer in your own words". The
+else", with No preselected; a question offers its choices (the recommended one marked and preselected) and "Answer in your own words". The
 arrows and Enter, or a digit, pick; the last option opens a line for your text (for a root command: a denial that
 tells the agent what to do instead, filed as a steer). Esc leaves it waiting: a line above the composer says so, and
 Tab, or the next request, brings it back. Yes runs the command under your sudo; the resident never runs root. The
