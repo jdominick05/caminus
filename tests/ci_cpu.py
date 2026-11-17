@@ -80,6 +80,7 @@ SUITES = [
     ('serve_smoke_installed', ['tests/tools/test_serve_smoke_installed.py', '--scratch', '{scratch}'], set()),
     ('nightly_plan', ['tests/tools/test_nightly_plan.py', '--scratch', '{scratch}'], set()),
     ('objcheck', ['tests/tools/test_objcheck.py', '--scratch', '{scratch}'], set()),
+    ('bench_runner', ['tests/tools/test_bench_runner.py', '--scratch', '{scratch}'], set()),
     ('pr_ready', ['tests/tools/test_pr_ready.py', '--scratch', '{scratch}'], set()),
     ('served_cards_ab', ['tests/benchmarks/test_served_cards_ab.py', '--scratch', '{scratch}'], set()),
     ('bounds_host', ['tests/engine/test_bounds_host.py'], {'torch'}),
