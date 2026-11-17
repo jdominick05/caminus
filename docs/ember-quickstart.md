@@ -106,7 +106,7 @@ thoughts, its task list and what it is running now.
   waiting; Tab brings it back. Nothing waits on you: an
   unanswered question times out to the agent's recommended option, a permission question to no.
 - **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).
-- **Copy**: drag over the history; the release copies it.
+- **Copy**: drag over any text on the screen; the release copies it ([the mouse](ember.md#the-mouse-clicks-and-copying)).
 - **Leave**: `/quit` closes the panel; the agent keeps working. `caminus ember ui` brings you back to the same
   conversation.
 

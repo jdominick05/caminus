@@ -56,7 +56,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
 | `envchat.go`, `envgroup.go` | the transcript (compact view, cards), Ember's box and the side panel, the task / now line |
-| `envcomposer.go`, `envsteer.go`, `envselect.go` | the composer, steering (interrupt, pullback, rewind), select to copy |
+| `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
 | `envgoals.go`, `envmodels.go`, `envsessions.go`, `envstudio.go`, `envpages.go` | the overlays |

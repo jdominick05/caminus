@@ -528,6 +528,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.chat.sel = chatSelection{} // its cells moved
 		m.syncChat()
 		return m, nil
 	case spinTickMsg:
@@ -845,6 +846,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshLocal()
 		return m, nil // the running tick chain continues; a second one would double every poll
 	case tea.KeyPressMsg:
+		if m.chat.sel.screen {
+			m.chat.sel = chatSelection{} // a key redraws what a selection over the frame pointed at
+		}
 		if m.tab != 6 {
 			// Leaving the conversation page ends its live reader; the next visit starts a fresh one.
 			m.chat.stopStream()
@@ -1236,7 +1240,7 @@ func (m emberModel) render() string {
 	if m.hostedOpen {
 		return m.hosted.View(max(20, m.width), max(12, m.height)) // /panel, in the whole frame
 	}
-	return m.renderChat()
+	return m.highlightSelection(m.renderChat(), true)
 }
 
 func (m emberModel) renderPages() string {

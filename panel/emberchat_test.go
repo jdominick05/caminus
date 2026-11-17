@@ -456,6 +456,11 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	}
 	next, _ = m.chatUpdate(tea.MouseClickMsg{X: 3, Y: top + 3, Button: tea.MouseLeft})
 	m = next.(emberModel)
+	if m.agentName == "research" {
+		t.Fatal("the press only arms: a drag from a card selects its text instead of switching")
+	}
+	next, _ = m.chatUpdate(tea.MouseReleaseMsg{X: 3, Y: top + 3, Button: tea.MouseLeft})
+	m = next.(emberModel)
 	if m.agentName != "research" || m.chat.picker {
 		t.Fatalf("a click on a card switches to its session: %q", m.agentName)
 	}
@@ -1731,7 +1736,7 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 	m = next.(emberModel)
 	next, _ = m.chatUpdate(tea.MouseMotionMsg{X: x2, Y: y(second), Button: tea.MouseLeft})
 	m = next.(emberModel)
-	if !strings.Contains(m.highlightSelection(m.chat.transcript.View()), "\x1b[7m") {
+	if !strings.Contains(m.render(), "\x1b[7m") {
 		t.Fatal("the drag is highlighted while it goes on")
 	}
 	next, cmd := m.chatUpdate(tea.MouseReleaseMsg{X: x2, Y: y(second), Button: tea.MouseLeft})
@@ -1749,6 +1754,154 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 	m = next.(emberModel)
 	if m.chat.sel.shown || m.chat.sel.dragging {
 		t.Fatal("a click without a drag clears the selection")
+	}
+}
+
+// dragOver drags the mouse through the program's Update from the first cell of from to the last cell of to (each the
+// first row of the drawn screen that holds it) and returns the model after the release and the text it copied (what
+// the release's OSC 52 command carries; the desktop tool's command beside it is never run).
+func dragOver(t *testing.T, m emberModel, from, to string) (emberModel, string) {
+	t.Helper()
+	at := func(s string, last bool) (int, int) {
+		for y, row := range strings.Split(ansi.Strip(m.render()), "\n") {
+			if i := strings.Index(row, s); i >= 0 {
+				x := ansi.StringWidth(row[:i])
+				if last {
+					x += ansi.StringWidth(s) - 1
+				}
+				return x, y
+			}
+		}
+		t.Fatalf("%q is not on the screen:\n%s", s, ansi.Strip(m.render()))
+		return 0, 0
+	}
+	x1, y1 := at(from, false)
+	x2, y2 := at(to, true)
+	for _, msg := range []tea.Msg{tea.MouseClickMsg{X: x1, Y: y1, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: x2, Y: y2, Button: tea.MouseLeft}} {
+		next, _ := m.Update(msg)
+		m = next.(emberModel)
+	}
+	if !strings.Contains(m.render(), "\x1b[7m") {
+		t.Fatal("the drag is highlighted while it goes on")
+	}
+	next, cmd := m.Update(tea.MouseReleaseMsg{X: x2, Y: y2, Button: tea.MouseLeft})
+	m = next.(emberModel)
+	var batch tea.BatchMsg
+	if cmd != nil {
+		batch, _ = cmd().(tea.BatchMsg)
+	}
+	if len(batch) == 0 || !strings.Contains(m.msg, "copied") {
+		t.Fatalf("the release copies (msg %q)", m.msg)
+	}
+	return m, fmt.Sprint(batch[0]())
+}
+
+func TestDragSelectsAndCopiesInEveryAreaOfTheScreen(t *testing.T) {
+	cases := []struct {
+		name, from, to string
+		open           func(*emberModel)
+		want           string
+		has, not       []string
+	}{
+		{name: "chat", from: "total_value starts", to: "never counts.",
+			want: "total_value starts at items[1:], so the first row never counts."},
+		{name: "folded card", from: "● terminal", to: "FAILED (failures=1)",
+			want: "● terminal  $ python3 -m unittest -q  ·  exit 1 · 7 lines\n  ⎿ Ran 4 tests in 0.002s\n\n    FAILED (failures=1)"},
+		{name: "unfolded card", from: "▾ ± edit", to: "price in items:",
+			want: "▾ ± edit  inventory.py  ·  +1 −1\n   │   16 -     for name, qty, price in items[1:]:\n   │   16 +     for name, qty, price in items:"},
+		{name: "side pane", from: "tasks  3 of 4", to: "◐ run the tests",
+			want: "tasks  3 of 4 done\n ● read inventory.py\n ● state the done check\n ● fix total_value\n ◐ run the tests",
+			not:  []string{"FAILED", "test_stock", "edit"}},
+		{name: "header", from: "CAMINUS", to: "● working", want: "CAMINUS · resident ● working"},
+		{name: "status line", from: "◈ swift-1.5", to: "42 tok/s", want: "◈ swift-1.5 · 9K/32K ▓▓░░░░░░ · ⇢ 42 tok/s"},
+		{name: "typing box", from: "╭─ to goal", to: "! for shell mode",
+			want: "to goal g1\n› message the agent · Enter nudges · /steer redirects · ! for shell mode"},
+		{name: "dialog", from: "goals  1 open", to: "n new goal", open: func(m *emberModel) { m.chat.goals = true },
+			not: []string{"│", "╭", "─"}},
+		{name: "session picker", from: "no goal yet", to: "Esc back", open: func(m *emberModel) { m.chat.picker = true },
+			has: []string{"+ new session", "no GitHub account\n$0.00 today in this session", "Esc back"}, not: []string{"│", "╭", "╮", "╯", "╰"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := shotEmber(t, shotWidth, shotHeight) // wide enough for the side pane
+			if c.open != nil {
+				c.open(&m)
+			}
+			m, got := dragOver(t, m, c.from, c.to)
+			if c.want != "" && got != c.want {
+				t.Fatalf("copied:\n%q\nwant:\n%q", got, c.want)
+			}
+			if !strings.HasPrefix(got, strings.TrimLeft(c.from, "╭─ ")) {
+				t.Fatalf("the copy starts where the drag did: %q", got)
+			}
+			for _, part := range c.has {
+				if !strings.Contains(got, part) {
+					t.Fatalf("the copy lost %q:\n%s", part, got)
+				}
+			}
+			for _, bad := range c.not {
+				if strings.Contains(got, bad) {
+					t.Fatalf("the copy took %q from outside its area or a frame:\n%s", bad, got)
+				}
+			}
+			t.Logf("copied from the %s:\n%s", c.name, got)
+			next, _ := m.Update(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft})
+			next, _ = next.(emberModel).Update(tea.MouseReleaseMsg{X: 1, Y: 1, Button: tea.MouseLeft})
+			if m = next.(emberModel); strings.Contains(m.render(), "\x1b[7m") {
+				t.Fatal("a click clears the selection")
+			}
+		})
+	}
+}
+
+func TestASelectionShowsOnlyWhereItsTextIs(t *testing.T) {
+	m := shotEmber(t, shotWidth, shotHeight)
+	m, _ = dragOver(t, m, "total_value starts", "never counts.")
+	m.chat.goals = true
+	if strings.Contains(m.render(), "\x1b[7m") {
+		t.Fatal("a dialog over the history hides the history's selection; it is not drawn over the dialog")
+	}
+	m.chat.goals = false
+	m, _ = dragOver(t, m, "╭─ to goal", "! for shell mode")
+	lit := strings.Split(m.render(), "\x1b[7m")[1:]
+	if len(lit) != 2 {
+		t.Fatalf("both selected rows show (%d)", len(lit))
+	}
+	for _, seg := range lit {
+		if seg = seg[:strings.Index(seg, "\x1b[")]; strings.ContainsAny(seg, "╭╮│") {
+			t.Fatalf("the composer's border is not highlighted (it is not copied): %q", seg)
+		}
+	}
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if strings.Contains(next.(emberModel).render(), "\x1b[7m") {
+		t.Fatal("a key clears a selection over the frame")
+	}
+}
+
+func TestAClickStillActsAndOnlyADragSelects(t *testing.T) {
+	m := shotEmber(t, shotWidth, shotHeight)
+	m.chat.cards, m.chat.expanded = true, false // the cards view folds the agent's thinking to one line
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	m.chat.transcript.GotoTop()
+	y := -1
+	for i, row := range strings.Split(ansi.Strip(m.render()), "\n") {
+		if y < 0 && strings.Contains(row, "thinking · 1 line") {
+			y = i
+		}
+	}
+	if top := lipgloss.Height(m.chatHead(shotWidth)); y < 0 || !m.foldedAt(y-top+m.chat.transcript.YOffset()) {
+		t.Fatal("fixture: the thinking is folded")
+	}
+	next, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	if m := next.(emberModel); !m.chat.expanded || cmd != nil || strings.Contains(m.msg, "copied") {
+		t.Fatal("a press and a release on one cell is a click: it opens the folded card and copies nothing")
+	}
+	m, got := dragOver(t, m, "thinking · 1", "1 line")
+	if m.chat.expanded || got != "thinking · 1 line" {
+		t.Fatalf("a drag over the folded card selects (%q); it does not open it", got)
 	}
 }
 
@@ -2230,8 +2383,11 @@ func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
 		t.Fatal("scrolled up: the jump pill shows")
 	}
 	w := max(20, m.width)
+	m.syncChat() // the pill's row as the screen draws it (the live window took rows from the history)
 	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
 	next, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.jumpPillX(m.transcriptWidth(w)) + 2, Y: row})
+	m = next.(emberModel)
+	next, _ = m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: m.jumpPillX(m.transcriptWidth(w)) + 2, Y: row})
 	m = next.(emberModel)
 	if !m.chat.transcript.AtBottom() || strings.Contains(ansi.Strip(m.View().Content), strings.TrimSpace(jumpPillText)) {
 		t.Fatal("a click on the pill goes to the newest message and the pill goes away")
