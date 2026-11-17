@@ -493,8 +493,8 @@ func TestPanelShot(t *testing.T) {
 		ctx *= 1024
 	}
 
-	m := newCtl(newCtlCLI("caminus"), false, "")
-	m.w = shotWidth // the basic layout's height is its content's (m.h sizes only the advanced options list)
+	m := newCtl(newCtlCLI("caminus"), "")
+	m.w, m.h = shotWidth, 60 // (the screen is as tall as its content)
 	m.ember = emberMsg{ok: true, known: true}
 	for _, k := range []string{"models", "ps", "harness", "options"} {
 		m.loaded[k] = true

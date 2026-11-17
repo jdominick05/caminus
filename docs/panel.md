@@ -4,63 +4,71 @@ By the end of this page you'll know every part of the Caminus panel and its keys
 easiest way to download models, start and stop them, and run Qwen Code on them.
 
 ```bash
-caminus panel            # the basic layout
-caminus panel -advanced  # every server option, the card choice, the brain / hands team
+caminus panel
 ```
 
 ![The Caminus panel](panel.svg)
 
-## The parts
+## The screen
+
+The panel is one screen, top to bottom:
 
 | Part | What it shows |
 |---|---|
-| **MODELS** | Every model Caminus knows, its size, whether it's on disk, and the card count and drafter for its next start. |
-| **SERVERS** | The models you started: their address, context size and current speed. |
-| **QWEN CODE** | Whether Qwen Code is installed and set up for your server. Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched. Its last row says whether Ember is set up. |
-| **OPTIONS** | Advanced layout only: every option of the server, for the next start. |
-| **HARDWARE** | Shows up only when something is wrong with your cards, for example a card in a slot that's too slow. |
+| **Header** | `CAMINUS`, the version, and each card's memory in use. |
+| **running** | The server in use: its model, cards, port, context and how long it has run, then its live speed (decode and prefill tokens per second), its Qwen Code clients and how much of the prompts came from the cache, with a line of its recent decode speed. A server started outside the panel (by a script, or `caminus serve` directly) shows too, marked "started outside the panel"; the panel watches it but never stops or restarts it. With nothing running the card says `no server running · enter starts the selected model`. |
+| **models** | Every model Caminus knows, its download size and a mark: `●` running, `✓` on disk (yellow when its optional drafter is missing), `↓` not downloaded. Beside the list (below it in a narrow terminal), the selected model: what it is, how fast, its choices (cards, drafter, and for `qwen3-30b-a3b` the KV cache and the long-context mode), the context that fits your cards, any edited server options, and whether its last start failed. |
+| **agents** | Ember (its sessions and how many work on a goal) and Qwen Code (its version, or what to do to set it up). |
+| **Hardware** | Shows up under the header only when something is wrong with your cards, for example a card in a slot that's too slow. |
 
-`tab` moves between the parts. The keys at the bottom always belong to the part you're in.
+The last line lists the keys that do something right now.
 
 ## Keys
 
-| Where | Key | What it does |
-|---|---|---|
-| MODELS | `enter` | Start the model. |
-| | `p` | Download it. |
-| | `n` | Choose one or two cards where the model supports both. |
-| | `d` | Choose its drafter: auto (the server's measured default), off, MTP or DFlash where supported at that card count. |
-| | `v` | `qwen3-30b-a3b`: choose the KV cache: auto (F16; in the long-context mode the mode picks Q8 where only it holds the context), F16 or Q8 (half the memory per token: [models](models.md)). |
-| | `l` | `qwen3-30b-a3b`: turn the long-context mode on or off (YaRN x4: up to 131,072 tokens on two cards; on one card as far as it holds, measured 81,920 on an XTX with Q8, which the fit row shows for your cards; short texts can read slightly differently, so it is off by default). |
-| | `c` | Advanced: choose the card (auto, or a card number). |
-| | `b` | Advanced: start the brain / hands team (below). |
-| SERVERS | `enter` | Open Qwen Code on this server. |
-| | `x` | Stop it. |
-| | `t` | Restart it. |
-| | `l` | Show its log. |
-| | `m` | Open the live monitor. |
-| QWEN CODE | `enter` | Launch Qwen Code. |
-| | `u` | Set it up for the running server. |
-| | `i` | Install it (needs Node.js and npm). |
-| | `e` | Open Ember, the agent environment (`caminus ember ui`); before it is set up, the row says to run `caminus ember setup` ([Ember](ember.md)). |
-| OPTIONS | `enter` | Edit or toggle an option. |
-| | `d` | Reset it to its default. |
-| Anywhere | `a` | Switch between the basic and advanced layouts. |
-| | `R` | Refresh. |
-| | `q` | Quit. Running models keep running. |
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Choose a model. |
+| `tab` | Move to the selected model's next choice. |
+| `←` `→` | Change that choice. The choice in brackets goes to the next start. |
+| `enter` | Start the selected model. |
+| `p` | Download it, or its missing DFlash drafter. |
+| `s` | Stop the server in the running card (it asks first). |
+| `t` | Restart it (it asks first). |
+| `L` | Show its log. |
+| `m` | Open the full monitor on it (`caminus top`, below). |
+| `e` | Open Ember, the agent environment (`caminus ember ui`); before it is set up, the line says to run `caminus ember setup` ([Ember](ember.md)). |
+| `c` | Open Qwen Code on the running server. |
+| `u` | Set up Qwen Code for the running server. |
+| `i` | Install Qwen Code (needs Node.js and npm). |
+| `o` | The options editor: the card for one-card models, every option of the server, your cards and notes about them. |
+| `n` `d` `v` `l` | Shortcuts for the choices: card count, drafter, KV cache, long context. |
+| `R` | Refresh. |
+| `?` | Every key. |
+| `q` or `esc` | Quit. Running models keep running. |
 
-The card count and drafter are available in both layouts. Auto leaves the choice to the server's measured default for
-that model and card count; off explicitly disables drafting. Only the architecture's supported modes are offered.
-If a model is on disk but its optional DFlash file is missing, `p` offers to download the drafter. Selecting DFlash
-requires that file; off and the model's built-in MTP block can start without it.
-In the advanced layout, `--drafter` can point to a different file; the server validates that file when it starts.
-The panel remembers the choices for each model and card count, along with your layout and other option values, in
+`s`, `t`, `L`, `m` and `c` act on the server in the running card: the selected model's server when it runs, otherwise
+the first one that's ready. Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched.
+
+The choices: **cards** is one or two cards where the model supports both. **drafter** is auto (the server's measured
+default for that model and card count), off, MTP or DFlash where supported at that card count. **KV cache**
+(`qwen3-30b-a3b`): auto (F16; in the long-context mode the mode picks Q8 where only it holds the context), F16 or Q8
+(half the memory per token: [models](models.md)). **context** (`qwen3-30b-a3b`): native, or long (YaRN x4: up to 131,072
+tokens on two cards; on one card as far as it holds, measured 81,920 on an XTX with Q8, which the fit line shows for your
+cards; short texts can read slightly differently, so it is off by default). Only the architecture's supported modes are
+offered. If a model is on disk but its optional DFlash file is missing, `p` offers to download the drafter. Selecting
+DFlash requires that file; off and the model's built-in MTP block can start without it.
+
+In the options editor (`o`), `↑` `↓` choose, `enter` edits a value or switches an option on or off, `d` puts it back to
+its default and `esc` goes back. Edited options go to every start and show on the main screen beside the model, so
+nothing reaches the server out of sight. `--drafter` can point to a different file; the server validates that file when
+it starts. The panel remembers the choices for each model and card count, along with the card and option values, in
 `~/.config/caminus/panel.json`.
 
 ## The live monitor
 
-`m` in **SERVERS**, or `caminus top` in a terminal, opens a live view of a running server: its speed, how much of each
-prompt came from the cache, each card's memory and power, and any errors.
+`m` in the panel, or `caminus top` in a terminal, opens the full live view of a running server: its speed, how much of each
+prompt came from the cache, each card's memory and power, and any errors. The panel's running card shows a few of these
+numbers; the monitor has all of them.
 
 ### Agent-state lighting
 
@@ -131,9 +139,9 @@ column above are `offline`, `loading`, `idle` / `quiet`, `between`, `waiting`, `
 ## The brain / hands team
 
 > [!NOTE]
-> **Paused for this release**, with Qwen3.6 (its hands): `b` and `caminus start --team brain-hands` say so and start
-> nothing. It comes back with Qwen3.6.
+> **Paused for this release**, with Qwen3.6 (its hands): `caminus start --team brain-hands` says so and starts
+> nothing. It comes back with Qwen3.6, from the command line.
 
 With two cards you can run two models together: AREX-2 plans on the 24 GB card (the brain) and Qwen3.6 does the work on
-the other card (the hands). Press `b` in the advanced layout, or run `caminus start --team brain-hands`. Qwen Code then
+the other card (the hands). Run `caminus start --team brain-hands`. Qwen Code then
 uses the brain as its main model and hands tasks to Qwen3.6.

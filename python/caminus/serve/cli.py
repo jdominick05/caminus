@@ -84,7 +84,7 @@ SHOWN_DEFAULTS = {'kv': 'f16'}
 
 
 def options_json():
-    """every option caminus serve accepts, for caminus panel's advanced layout (and scripts): flag, dest, type (int / float /
+    """every option caminus serve accepts, for caminus panel's options editor (and scripts): flag, dest, type (int / float /
     str / bool / ctx), the default caminus serve uses, the help text; read from the parser itself, so it never drifts"""
     out = []
     for act in parser()._actions:
@@ -412,7 +412,7 @@ def fit_report(argv):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    if '--options-json' in argv:                 # (caminus panel's advanced layout: nothing is loaded, no GPU)
+    if '--options-json' in argv:                 # (caminus panel's options editor: nothing is loaded, no GPU)
         import json
         print(json.dumps(options_json()))
         return 0

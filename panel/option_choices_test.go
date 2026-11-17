@@ -12,7 +12,7 @@ import (
 
 func TestServeOptionsNumericChoices(t *testing.T) {
 	// --cards is an argparse integer choice; --draft is a string choice. One numeric choice must not discard
-	// the whole options response, including the advanced options that do not have choices.
+	// the whole options response, including the options that have no choices.
 	var opts []option
 	err := json.Unmarshal([]byte(`[
 		{"flag":"--cards","dest":"cards","type":"int","choices":[1,2]},
@@ -28,11 +28,11 @@ func TestServeOptionsNumericChoices(t *testing.T) {
 	if checkValue(opts[1], "mtp") != nil || checkValue(opts[1], "other") == nil {
 		t.Fatal("string choices must still constrain the entered argument")
 	}
-	m := newCtl(newCtlCLI("caminus"), true, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	next, _ := m.Update(optsMsg{v: opts})
-	rows := strings.Join(next.(ctl).optionRows(20), "\n")
+	rows := strings.Join(next.optionRows(20), "\n")
 	if !strings.Contains(rows, "--max-ctx") || strings.Contains(rows, "gave no options") {
-		t.Fatalf("advanced options disappeared:\n%s", rows)
+		t.Fatalf("options without choices disappeared:\n%s", rows)
 	}
 }
 

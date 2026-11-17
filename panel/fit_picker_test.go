@@ -69,7 +69,7 @@ func presentPicker(path string) camModel {
 
 // The real path: Update -> fitCmd -> fitMsg -> render, with the fake caminus answering the real JSON shape.
 func TestFitRowRealPathOK(t *testing.T) {
-	m := newCtl(fakeFitCLI(t, fitOK, 0), false, "")
+	m := newCtl(fakeFitCLI(t, fitOK, 0), "")
 	mi := presentPicker("/models/dense.gguf")
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	m = settle(m, m.fitCmd(), 0)
@@ -100,7 +100,7 @@ func TestFitRowQ8Shapes(t *testing.T) {
 		if c.reply == fitRefusedQ8 || c.reply == fitFail {
 			exit = 1
 		}
-		m := newCtl(fakeFitCLI(t, c.reply, exit), false, "")
+		m := newCtl(fakeFitCLI(t, c.reply, exit), "")
 		m.models, m.loaded["models"] = []camModel{mi}, true
 		m = settle(m, m.fitCmd(), 0)
 		row := ansi.Strip(m.fitRow(mi))
@@ -123,7 +123,7 @@ func TestFitRowOwnCache(t *testing.T) {
 		{fitFixedNone, 0, "context that fits (its own 8-bit cache): none with this card count"},
 		{fitFixedFail, 1, "context that fits (its own 8-bit cache): no two supported cards"},
 	} {
-		m := newCtl(fakeFitCLI(t, c.reply, c.exit), false, "")
+		m := newCtl(fakeFitCLI(t, c.reply, c.exit), "")
 		m.models, m.loaded["models"] = []camModel{mi}, true
 		m = settle(m, m.fitCmd(), 0)
 		row := ansi.Strip(m.fitRow(mi))
@@ -141,14 +141,14 @@ func TestFitRowOwnCache(t *testing.T) {
 func TestFitRowRealPathNoFitAndRefusal(t *testing.T) {
 	mi := presentPicker("/models/dense.gguf")
 
-	none := newCtl(fakeFitCLI(t, fitNone, 0), false, "")
+	none := newCtl(fakeFitCLI(t, fitNone, 0), "")
 	none.models, none.loaded["models"] = []camModel{mi}, true
 	none = settle(none, none.fitCmd(), 0)
 	if r := ansi.Strip(none.fitRow(mi)); !strings.Contains(r, "no context fits at F16") {
 		t.Fatalf("no F16 maximum is said, not a number: %q", r)
 	}
 
-	bad := newCtl(fakeFitCLI(t, fitFail, 1), false, "")
+	bad := newCtl(fakeFitCLI(t, fitFail, 1), "")
 	bad.models, bad.loaded["models"] = []camModel{mi}, true
 	bad = settle(bad, bad.fitCmd(), 0)
 	r := ansi.Strip(bad.fitRow(mi))
@@ -172,7 +172,7 @@ func TestFitRowRealPathNoFitAndRefusal(t *testing.T) {
 
 // A model that is not on disk gets no read and no line.
 func TestFitNotOnDiskNoReadNoLine(t *testing.T) {
-	m := newCtl(fakeFitCLI(t, fitOK, 0), false, "")
+	m := newCtl(fakeFitCLI(t, fitOK, 0), "")
 	mi := pickerModel()
 	mi.Present = false // (pickerModel is on disk by default: this one is not)
 	m.models, m.loaded["models"] = []camModel{mi}, true
@@ -190,7 +190,7 @@ func TestFitNotOnDiskNoReadNoLine(t *testing.T) {
 
 // R and every start, stop or restart (actMsg) forget the reads; a reply from before is dropped.
 func TestFitCacheClearsAndDropsStaleReply(t *testing.T) {
-	m := newCtl(fakeFitCLI(t, fitOK, 0), false, "")
+	m := newCtl(fakeFitCLI(t, fitOK, 0), "")
 	mi := presentPicker("/models/dense.gguf")
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	m = settle(m, m.fitCmd(), 0)
@@ -199,7 +199,7 @@ func TestFitCacheClearsAndDropsStaleReply(t *testing.T) {
 	}
 	gen := m.fitGen
 	next, _ := m.Update(actMsg{what: "start dense"})
-	m = next.(ctl)
+	m = next
 	if m.fitGen == gen {
 		t.Fatal("a start, stop or restart advances the fit generation")
 	}
@@ -209,7 +209,7 @@ func TestFitCacheClearsAndDropsStaleReply(t *testing.T) {
 	// a reply from the generation before the action is dropped, not kept
 	stale := fitMsg{key: m.fitKey(mi), gen: gen, v: fitInfo{OK: true}}
 	next, _ = m.Update(stale)
-	m = next.(ctl)
+	m = next
 	if e := m.fits[m.fitKey(mi)]; e.done {
 		t.Fatal("a stale reply is dropped, not kept")
 	}
@@ -223,7 +223,7 @@ func TestFitCacheClearsAndDropsStaleReply(t *testing.T) {
 
 // Advanced options that change the start reach fit; the card choice is labelled as not in the figure.
 func TestFitAdvancedOptionsPassThrough(t *testing.T) {
-	m := newCtl(fakeFitCLI(t, fitOK, 0), true, "")
+	m := newCtl(fakeFitCLI(t, fitOK, 0), "")
 	m.opts = []option{
 		{Flag: "--auto-cache-slots", Dest: "auto_cache_slots", Type: "int"},
 		{Flag: "--kv-host", Dest: "kv_host", Type: "bool"},
@@ -250,7 +250,7 @@ func TestFitAdvancedOptionsPassThrough(t *testing.T) {
 
 // -once: the frame is drawn only after the fit read is answered (no "reading" forever).
 func TestOnceFrameAnswersFitRead(t *testing.T) {
-	m := newCtl(fakeFitCLI(t, fitOK, 0), false, "")
+	m := newCtl(fakeFitCLI(t, fitOK, 0), "")
 	mi := presentPicker("/models/dense.gguf")
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	m = settle(m, m.fitCmd(), 0)

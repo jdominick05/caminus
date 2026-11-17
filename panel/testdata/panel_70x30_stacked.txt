@@ -1,0 +1,22 @@
+CAMINUS 0.1.0             XTX ▓▓▓▓▓▓▓░ 21.3/24G   XT ▓▓▓▓▓▓░░ 15.1/20G
+╭─ running ──────────────────────────────────────────────────────────╮
+│ ● coder · 2 cards · :8092 · 1M ctx · up 2h14m                      │
+│   104 tok/s decode                                                 │
+╰────────────────────────────────────────────────────────────────────╯
+ models
+   coder          59 GB  ●
+   swift-1.5      20 GB  ✓
+   thinkingcap    16 GB  ✓
+   qwen3.8-27b    14 GB  ↓
+ › qwen3-30b-a3b  19 GB  ✓
+  qwen3-30b-a3b
+  Qwen3-30B-A3B
+  cards    1
+  drafter  [auto] off
+  KV cache [auto] F16 Q8
+  context  [native] long
+  enter starts it
+ agents
+   Ember set up · e     Qwen Code 0.26.9 · c
+
+ ↑↓ model  tab ←→ choice  enter start  s stop  e Ember  ? help  q quit

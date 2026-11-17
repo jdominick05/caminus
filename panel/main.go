@@ -3,7 +3,7 @@
 
 // caminus-panel: Caminus's terminal programs in one binary (the Python CLI runs it: `caminus panel`, `caminus top`).
 //
-//	caminus-panel [-advanced] [-caminus CMD]   the control panel (control.go)
+//	caminus-panel [-caminus CMD]               the control panel (control.go, panelview.go, panellive.go)
 //	caminus-panel top [llm-top's flags]        the monitor: llm-top, baked into Caminus on 11-07 (top_main.go and the
 //	                                           files beside it; its own -config / -once / -web flags)
 //	caminus-panel env --user U --bridge D --audit F --key K   the agent environment's TUI (envui.go; `caminus ember ui`)
