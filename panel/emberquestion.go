@@ -131,16 +131,44 @@ func freeTextLabel(r emberReq) string {
 	return "Tell it something else"
 }
 
-// timeLeft is how long the request still waits before its timeout answers it (a question: its recommended option;
-// root: no).
-func timeLeft(r emberReq, now time.Time) string {
-	end := time.Unix(int64(r.Ts), 0).Add(defaultRequestWait)
+// questionLeft is how long the request still waits before its timeout answers it (a question: the advisor's pick or
+// its recommended option; an approval or root: no), and whether it waits because the human is away. It mirrors the
+// resident's approval.wait_left: a work question waits its question_timeout (Expires - Ts) from Ts or from the human's
+// return, whichever is later, and nothing but the r.AwayMax cap runs out while they are away. No stamp yet (p.Seen 0)
+// waits from Ts.
+func questionLeft(r emberReq, p presence, now time.Time) (time.Duration, bool) {
+	end := r.Ts + defaultRequestWait.Seconds()
 	if r.Expires > 0 {
-		end = time.Unix(int64(r.Expires), 0)
+		end = r.Expires
 	}
-	left := end.Sub(now)
-	if left <= 0 {
+	t := float64(now.UnixMilli()) / 1000
+	if r.AwayMax > 0 {
+		capAt, after := r.Ts+r.AwayMax, r.AwayAfter
+		if after <= 0 {
+			after = presenceAwayAfter
+		}
+		switch {
+		case p.Seen == 0:
+			end = min(end, capAt)
+		case t-p.Seen > after:
+			return time.Duration((capAt - t) * float64(time.Second)), true
+		default:
+			end = min(max(r.Ts, p.Back)+end-r.Ts, capAt)
+		}
+	}
+	return time.Duration((end - t) * float64(time.Second)), false
+}
+
+// timeLeft is the prompt's countdown text.
+func timeLeft(r emberReq, p presence, now time.Time) string {
+	left, away := questionLeft(r, p, now)
+	switch {
+	case left <= 0:
 		return "timing out"
+	case away:
+		return "waits while you're away"
+	case left >= time.Hour:
+		return fmt.Sprintf("%d:%02d:%02d left", int(left.Hours()), int(left.Minutes())%60, int(left.Seconds())%60)
 	}
 	return fmt.Sprintf("%d:%02d left", int(left.Minutes()), int(left.Seconds())%60)
 }
@@ -165,7 +193,7 @@ func (m emberModel) questionBox() string {
 	}
 	chip := map[string]string{"root": g.root + " root", "github": "⇡ github", "question": "? question"}[r.kind()]
 	head := emberWarn.Bold(true).Render(chip) + emberDim.Render(fmt.Sprintf(" · %d of %d", pos, max(1, len(pending))))
-	left := emberDim.Render(timeLeft(*r, time.Now()))
+	left := emberDim.Render(timeLeft(*r, m.presence, time.Now()))
 	head += strings.Repeat(" ", max(1, inner-ansi.StringWidth(ansi.Strip(head))-ansi.StringWidth(ansi.Strip(left)))) + left
 	wrap := func(s string, st lipgloss.Style) []string {
 		var out []string
