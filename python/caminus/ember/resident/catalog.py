@@ -86,6 +86,25 @@ def deepinfra_entries(data, provider):
     return out
 
 
+# The reasoning levels each Mistral model takes (capabilities.reasoning only says whether it reasons at all): the cards
+# and docs.mistral.ai/capabilities/reasoning, 2026-11. A reasoning model not listed takes low / medium / high.
+MISTRAL_EFFORTS = (
+    (r'^mistral-large-(4|latest)', ['low', 'medium', 'high']),
+    (r'^(mistral-medium-|magistral-medium-)', ['none', 'high']),
+    (r'^zai-glm-5-3', ['low', 'high', 'max']),
+)
+
+
+def mistral_efforts(model_id, caps):
+    if not caps.get('reasoning'):
+        return []
+    import re
+    for pat, levels in MISTRAL_EFFORTS:
+        if re.search(pat, model_id):
+            return list(levels)
+    return ['low', 'medium', 'high']
+
+
 def mistral_entries(data, provider):
     """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out."""
     out, seen = [], set()
@@ -100,7 +119,8 @@ def mistral_entries(data, provider):
         prices = dict(input=float(p['input']), output=float(p['output']),
                       cache_read=float(p.get('cache_read', p['input']))) if 'input' in p and 'output' in p else None
         out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
-                        max_output=None, efforts=[], thinking='', vision=bool(caps.get('vision')), prices=prices))
+                        max_output=None, efforts=mistral_efforts(m['id'], caps), thinking='', vision=bool(caps.get('vision')),
+                        prices=prices))
     return out
 
 

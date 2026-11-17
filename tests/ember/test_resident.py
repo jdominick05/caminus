@@ -2066,7 +2066,7 @@ for line in sys.stdin:
         self.assertNotIn('api',json.loads((self.home/'config.json').read_text()),'OpenAI-compatible is the default transport')
         # one scale on every brain: xhigh runs as GLM's nearest, high
         out=self.cmd('effort',['xhigh'])
-        self.assertEqual((out['effort'],out['runs_as']),('xhigh','high'));self.assertIn('xhigh and max run as high',out['summary'])
+        self.assertEqual((out['effort'],out['runs_as']),('xhigh','high'));self.assertIn('xhigh as high',out['summary'])
         self.assertEqual(self.cmd('effort',['no'])['effort'],'none')
         # the level stays across /model when the new brain has effort control; Opus always thinks, so none runs as low
         out=self.cmd('model',['claude-opus-5-5'])['current']
@@ -2735,6 +2735,31 @@ for line in sys.stdin:
             self.assertEqual((rt.model.config.get('model_variants'),rt.model.config.get('top_p')),
                              (dict(none='swift-1.5-nothink',xhigh='swift-1.5-xhigh'),0.9))
         finally:rt.mail.close();rt.store.close()
+
+    def test_mistral_models_take_their_cards_levels(self):
+        from caminus.ember.resident import catalog, effort as eff
+        rows=(('mistral-large-4',True,['low','medium','high'],dict(none='low',medium='medium',xhigh='high',max='high')),
+              ('mistral-large-latest',True,['low','medium','high'],dict(none='low')),
+              ('mistral-large-2512',False,[],{}),
+              ('mistral-medium-3-5',True,['none','high'],dict(none='none',low='none',medium='high',max='high')),
+              ('magistral-medium-latest',True,['none','high'],dict(low='none')),
+              ('zai-glm-5-3',True,['low','high','max'],dict(none='low',medium='high',max='max')),
+              ('some-new-reasoner',True,['low','medium','high'],dict(xhigh='high')))
+        data=dict(data=[dict(id=i,capabilities=dict(completion_chat=True,function_calling=True,reasoning=r)) for i,r,_,_ in rows])
+        entries={e['id']:e for e in catalog.mistral_entries(data,'mistral')}
+        for mid,_,levels,mapping in rows:
+            self.assertEqual(entries[mid]['efforts'],levels,mid)
+            cfg=dict(provider_kind='mistral',model=mid,efforts=levels)
+            for level,want in mapping.items():
+                self.assertEqual(eff.resolve(dict(cfg,effort=level))['reasoning_effort'],want,'%s %s' % (mid,level))
+            if not levels:
+                self.assertIsNone(eff.resolve(dict(cfg,effort='high'))['reasoning_effort'],'no reasoning: no field')
+        self.assertEqual(eff.default_level(dict(provider_kind='mistral',model='mistral-large-4',efforts=['low','medium','high'])),'high')
+        self.assertEqual(eff.default_level(dict(provider_kind='mistral',model='mistral-medium-3-5',efforts=['none','high'])),'high')
+        # Medium 3.5's card: top_p only at high
+        med=dict(provider_kind='mistral',model='mistral-medium-3-5',efforts=['none','high'])
+        self.assertEqual(eff.sampling(med,True),dict(temperature=0.7,top_p=0.95))
+        self.assertEqual(eff.sampling(dict(med,effort='low'),True),dict(temperature=0.7))
 
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model

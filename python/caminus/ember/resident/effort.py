@@ -35,7 +35,8 @@ CARDS = (
     (r'k3-coder|coder|swift|thinkingcap|qwen3\.8|qwen38', dict(local=True, default='xhigh', max_output=393216)),
     (r'deepseek-v4\.1-flash', dict(sampling=dict(temperature=1.0, top_p=1.0))),
     (r'mistral-large-4|mistral-large-latest', dict(default='high', sampling=dict(temperature=1.0, top_p=0.95))),
-    (r'mistral-medium-3\.5|mistral-medium-latest', dict(default='high', sampling=dict(temperature=0.7, top_p=0.95))),
+    (r'mistral-medium-|magistral-medium-', dict(default='high', sampling=dict(temperature=0.7, top_p=0.95),
+                                                 sampling_none=dict(temperature=0.7))),   # (top_p only at high)
 )
 
 
@@ -149,8 +150,28 @@ def runs_as(cfg, level):
     if ln == 'onoff':
         return 'none' if level == 'none' else 'on'
     if ln == 'reasoning':
-        return {'xhigh': 'high', 'max': 'high'}.get(level, level)
+        return nearest(level, cfg.get('efforts') or ['low', 'medium', 'high'])
     return level
+
+
+def nearest(level, have):
+    """A level among the model's own (have, in scale order): itself when it has it; none: its lowest; low: the next
+    lower (or higher); medium: the next higher; xhigh: the next lower (or higher); max: its highest. This gives the
+    cards' mappings: Large 4 (low, medium, high) none->low, xhigh/max->high; Medium 3.5 (none, high) low->none,
+    medium->high; GLM 5.3 (low, high, max) none->low, medium->high."""
+    have = [l for l in LEVELS if l in have]
+    if not have or level in have or level not in LEVELS:
+        return level
+    i = LEVELS.index(level)
+    lower = [l for l in have if LEVELS.index(l) < i]
+    higher = [l for l in have if LEVELS.index(l) > i]
+    if level == 'none':
+        return have[0]
+    if level == 'max':
+        return have[-1]
+    if level in ('low', 'xhigh'):
+        return (lower[-1] if lower else higher[0])
+    return higher[0] if higher else lower[-1]
 
 
 def resolve(cfg, short=False):
@@ -187,7 +208,9 @@ def note(cfg):
     if ln == 'onoff':
         return 'this model only has thinking on or off: none turns it off, every other level is on'
     if ln == 'reasoning':
-        return 'on this model xhigh and max run as high'
+        have = [l for l in LEVELS if l in (cfg.get('efforts') or ['low', 'medium', 'high'])]
+        moved = ['%s as %s' % (l, nearest(l, have)) for l in LEVELS if nearest(l, have) != l]
+        return 'this model has ' + ', '.join(have) + (': ' + ', '.join(moved) if moved else '')
     if ln == 'anthropic' and always_thinks(cfg):
         return 'this model always thinks: none runs as low'
     if ln == 'anthropic' and thinking_off_mode(cfg.get('model')) == 'between_tools':
@@ -203,7 +226,10 @@ def sampling(cfg, remote):
     out = {k: cfg[k] for k in ('temperature', 'top_k', 'top_p', 'min_p', 'presence_penalty') if k in cfg}
     if out or not remote:
         return out
-    return dict(card(cfg.get('model')).get('sampling') or {})
+    c = card(cfg.get('model'))
+    if c.get('sampling_none') and resolve(cfg)['reasoning_effort'] == 'none':
+        return dict(c['sampling_none'])     # (a card with its own sampling for no reasoning: Mistral Medium 3.5)
+    return dict(c.get('sampling') or {})
 
 
 def reply_limit(cfg, remote):
