@@ -51,6 +51,29 @@ func (t *toolGroup) line(w int) string {
 	return ansi.Truncate("  "+strings.Join(segs, emberDim.Render(" · ")), max(10, w), "…")
 }
 
+// noteCalls keeps an assistant event's tool calls by id, so a result's card can name what was asked (both views).
+func (c *residentChat) noteCalls(e residentEvent) []callInfo {
+	var out []callInfo
+	calls, _ := e.Data["tool_calls"].([]any)
+	for _, raw := range calls {
+		call, _ := raw.(map[string]any)
+		f, _ := call["function"].(map[string]any)
+		name, _ := f["name"].(string)
+		var args map[string]any
+		if s, _ := f["arguments"].(string); s != "" {
+			_ = json.Unmarshal([]byte(s), &args)
+		}
+		if id, _ := call["id"].(string); id != "" {
+			if c.calls == nil {
+				c.calls = map[string]callInfo{}
+			}
+			c.calls[id] = callInfo{name: name, args: args}
+		}
+		out = append(out, callInfo{name: name, args: args})
+	}
+	return out
+}
+
 // fold takes an event into the group when it is tool work; false means it is drawn as its own block.
 func (c *residentChat) fold(e residentEvent) bool {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
@@ -60,24 +83,10 @@ func (c *residentChat) fold(e residentEvent) bool {
 	}
 	switch e.Kind {
 	case "assistant":
-		calls, _ := e.Data["tool_calls"].([]any)
-		for _, raw := range calls {
-			call, _ := raw.(map[string]any)
-			f, _ := call["function"].(map[string]any)
-			name, _ := f["name"].(string)
-			var args map[string]any
-			if s, _ := f["arguments"].(string); s != "" {
-				_ = json.Unmarshal([]byte(s), &args)
-			}
-			if id, _ := call["id"].(string); id != "" {
-				if c.calls == nil {
-					c.calls = map[string]callInfo{}
-				}
-				c.calls[id] = callInfo{name: name, args: args}
-			}
+		for _, call := range c.noteCalls(e) {
 			// each call becomes its own card when its result arrives (actionBlock); the line only says what still runs
-			if name == "terminal" {
-				if cmd, _ := args["command"].(string); strings.TrimSpace(cmd) != "" {
+			if call.name == "terminal" {
+				if cmd, _ := call.args["command"].(string); strings.TrimSpace(cmd) != "" {
 					g.running, g.runningSince, g.runningGoal = oneLine(residentText(cmd)), e.Ts, e.Goal
 				}
 			}

@@ -536,8 +536,10 @@ class Resident(unittest.TestCase):
         home=self.home
         w=files.write(home,'src/a.py','def f(n):\n    if n > 3:\n        return 1\n    return 0\n')
         self.assertTrue(w['created']);self.assertIn('4 lines',w['note'])
-        r=files.read(home,'src/a.py',offset=2,limit=2)
-        self.assertEqual(r['shown'],'2-3');self.assertIn('     2\t    if n > 3:',r['text']);self.assertIn('offset=4',r['next'])
+        r=files.read(home,'src/a.py',start=2,lines=2)
+        self.assertEqual(r['shown'],'2-3 of 4');self.assertIn('     2\t    if n > 3:',r['text']);self.assertIn('start=4',r['next'])
+        self.assertEqual(files.read(home,'src/a.py')['shown'],'1-4 of 4','the default is unchanged: the whole window')
+        self.assertEqual(files.read(home,'src/a.py',start=9)['shown'],'none of 4')
         e=files.edit(home,'src/a.py','if n > 3:','if n >= 3:')
         self.assertEqual((e['added'],e['removed']),(1,1));self.assertIn('-    if n > 3:',e['diff']);self.assertIn('+    if n >= 3:',e['diff'])
         with self.assertRaises(ValueError) as c:files.edit(home,'src/a.py','return','yield')
@@ -624,6 +626,8 @@ class Resident(unittest.TestCase):
         self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
                      call('edit',dict(path='notes.txt',old='beta',new='gamma')),
                      call('read',dict(path='notes.txt')),
+                     call('search',dict(pattern='gam+a')),
+                     call('read',dict(path='notes.txt',offset=2)),       # the old name: read says it ignored it
                      call('finish',dict(summary='Edited.')))
         out=self.cmd('once',['--goal','Write and edit a file.'])
         self.assertEqual(out['state'],'completed')
@@ -632,7 +636,81 @@ class Resident(unittest.TestCase):
         try:
             results=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result']
             self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
+            self.assertTrue(any(r.get('name')=='search' and r['result'].get('text')=='notes.txt\n     1-  alpha\n     2:  gamma' for r in results),results)
+            self.assertTrue(any(r.get('name')=='read' and 'ignored unknown argument(s) offset; read takes: lines, path, start'
+                                in r['result'].get('note','') for r in results),results)
         finally:store.close()
+
+    def test_search_finds_names_and_text_the_same_with_and_without_ripgrep(self):
+        import shutil,stat
+        from caminus.ember.resident import files
+        home=self.home;proj=home/'proj'
+        def put(rel,data):
+            q=proj/rel;q.parent.mkdir(parents=True,exist_ok=True)
+            q.write_bytes(data if isinstance(data,bytes) else data.encode())
+        put('.gitignore','ignored/\n*.log\n')
+        put('src/stock.py','import csv\n\n\ndef total(items):\n    s = 0\n    for q, p in items:\n        s += q * p\n'+'    #\n'*3+'    return s  # total\n')
+        put('src/report.py','from stock import total\nprint(total([]))\n')
+        put('ignored/old.py','total = 1\n');put('run.log','total 3\n');put('blob.dat',b'\0\1total\n')
+        put('win.txt',b'grand total\r\nnext\r\n');put('many.txt',''.join(f'hit {i}\n' for i in range(100)))
+        for i in range(25):put(f'spread/f{i:02}.txt','spread hit\n')
+        put('wide/long.txt',('x'*400+'\n')*80)
+        subprocess.run(['git','init','-q',str(proj)],check=True)
+        plain=home/'plain'                                   # no repository: the walk, which skips build/ and node_modules/
+        for rel in ('a.txt','build/b.txt','node_modules/m/c.txt','deep/d.txt'):
+            (plain/rel).parent.mkdir(parents=True,exist_ok=True);(plain/rel).write_text('total\n')
+        queries=[dict(path='proj',pattern='total'),dict(path='proj',glob='*.py'),dict(path='proj',glob='src/*.py'),
+                 dict(path='proj',glob='*.py',pattern='def ',context=0),dict(path='proj',pattern='total$'),
+                 dict(path='proj',pattern='(?<=grand )total'),dict(path='proj',pattern='(?i)TOTAL'),
+                 dict(path='proj',pattern='hit'),dict(path='proj/many.txt',pattern='hit'),dict(path='plain',pattern='total'),
+                 dict(path='proj/ignored',pattern='total'),dict(path='proj',pattern='nothing here'),
+                 dict(path='proj/wide',pattern='x+')]
+        log=S/('rg-'+uuid.uuid4().hex);wrapper=S/('rg-wrap-'+uuid.uuid4().hex)
+        if shutil.which('rg'):
+            wrapper.write_text(f'#!/bin/sh\necho run >> {log}\nexec {shutil.which("rg")} "$@"\n');wrapper.chmod(0o755)
+        runs={}
+        with unittest.mock.patch.dict(os.environ,GIT_CEILING_DIRECTORIES=str(home)):
+            with unittest.mock.patch.object(files,'_rg',return_value=None):
+                runs['stdlib']=[files.search(home,**q) for q in queries]
+            if shutil.which('rg'):
+                with unittest.mock.patch.object(files,'_rg',return_value=str(wrapper)):
+                    runs['rg']=[files.search(home,**q) for q in queries]
+                self.assertTrue(log.exists(),'ripgrep ran')
+                self.assertEqual(runs['rg'],runs['stdlib'],'ripgrep only narrows the files: the result is the same')
+            else:print('SKIP the ripgrep leg: rg is not on PATH')
+        r=runs['stdlib']
+        self.assertEqual((r[0]['matches'],r[0]['files']),(5,3),r[0])          # .gitignore'd, .log and binary files skipped
+        self.assertTrue(r[0]['text'].startswith('proj/src/report.py\n'),'paths are relative to the home, sorted')
+        self.assertIn('     4:  def total(items):',r[0]['text']);self.assertIn('     5-      s = 0',r[0]['text'])
+        self.assertIn('    --',r[0]['text'],'separate groups of context are marked')
+        for skipped in ('ignored/','run.log','blob.dat'):self.assertNotIn(skipped,r[0]['text'])
+        self.assertEqual(r[1]['text'],'proj/src/report.py\nproj/src/stock.py');self.assertEqual(r[2]['files'],2)
+        self.assertEqual((r[3]['matches'],r[3]['text']),(1,'proj/src/stock.py\n     4:  def total(items):'))
+        self.assertIn('proj/win.txt',r[4]['text'],'a CRLF line ends before its \\r')
+        self.assertEqual(r[5]['matches'],1,'a lookbehind (not ripgrep syntax) still searches')
+        self.assertEqual(r[6]['matches'],r[0]['matches'])
+        self.assertEqual((r[7]['matches'],r[7]['files']),(125,26))
+        self.assertEqual(r[7]['more'],'65 more matches in 25 more files not shown: narrow pattern, glob or path')
+        self.assertEqual(r[8]['more'],'40 more matches not shown: narrow pattern, glob or path')
+        self.assertEqual(r[9]['text'].count('plain/'),2,'build/ and node_modules/ are skipped outside a repository')
+        self.assertEqual(r[10]['matches'],1,'a folder git ignores, asked for by name, is walked')
+        self.assertEqual((r[11]['matches'],r[11]['text']),(0,''));self.assertNotIn('more',r[11])
+        from caminus.ember.resident import outputs
+        shown=r[12]['text'].count(':  x')                    # long lines: the text cap stops it before the match cap
+        self.assertTrue(10<shown<60,shown);self.assertLess(len(r[12]['text']),files.SEARCH_CHARS+1000)
+        self.assertEqual(r[12]['more'],f'{80-shown} more matches not shown: narrow pattern, glob or path')
+        self.assertLess(len(json.dumps(r[12])),outputs.LIMIT_CHARS,'a capped search is never spilled to a file')
+        first=r[3]['text'].split('\n')[0]
+        self.assertIn('def total',files.read(home,first,start=4,lines=1)['text'],'paths go to read as they are')
+        with self.assertRaises(ValueError):files.search(home,'proj')
+        with self.assertRaises(ValueError) as c:files.search(home,'proj',pattern='total(')
+        self.assertIn('not a valid regex',str(c.exception))
+        with self.assertRaises(FileNotFoundError):files.search(home,'nowhere',pattern='x')
+        if os.geteuid():
+            locked=home/'locked';locked.mkdir();locked.chmod(0);self.addCleanup(locked.chmod,stat.S_IRWXU)
+            with self.assertRaises(PermissionError):files.search(home,'locked',pattern='x')
+        desc=[t for t in TOOLS if t['function']['name']=='search'][0]['function']
+        self.assertEqual(sorted(desc['parameters']['properties']),['context','glob','path','pattern'])
 
     def test_big_outputs_go_to_a_file_with_a_preview(self):
         from caminus.ember.resident import outputs
@@ -652,7 +730,7 @@ class Resident(unittest.TestCase):
     def test_a_big_tool_result_reaches_the_model_shortened(self):
         big='\n'.join(f'row {i}' for i in range(20000))
         (self.home/'big.txt').write_text(big)
-        self.replies(call('read',dict(path='big.txt',limit=2000)),call('finish',dict(summary='Read it.')))
+        self.replies(call('read',dict(path='big.txt',lines=2000)),call('finish',dict(summary='Read it.')))
         self.cmd('once',['--goal','Read the big file.'])
         last=[b for k,b in Endpoint.seen if k==self.key][-1]
         tool_msgs=[m for m in last['messages'] if m.get('role')=='tool']

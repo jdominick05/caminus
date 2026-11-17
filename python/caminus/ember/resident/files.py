@@ -1,11 +1,15 @@
-"""read, edit and write: file tools that do not go through the terminal.
+"""read, search, edit and write: file tools that do not go through the terminal.
 
 The terminal is where an agent's edits went wrong: a PTY's line endings, quoting inside heredocs, a sed that matched
 twice. These tools work on the file itself:
 
-- read(path, offset, limit): numbered lines, a window at a time, never a binary file. A PNG, JPEG, GIF or WebP file
-  comes back as its size and format (image_info, from the header: no image library) with a sha256; the transport
+- read(path, start, lines): numbered lines, a window at a time, never a binary file. A PNG, JPEG, GIF or WebP
+  file comes back as its size and format (image_info, from the header: no image library) with a sha256; the transport
   (model.py) sends the file itself as an image to a brain that can see, and a plain line to one that can't.
+- search(path, glob, pattern, context): file names by glob, text by regex with context lines; .gitignore honoured in a
+  git repository, binary files skipped, results capped with a count of the rest. ripgrep, when it is installed, only
+  narrows the files to look in; the matching, the context and the caps are this module's, so the result is the same
+  either way.
 - edit(path, old, new, replace_all): an exact string replacement. old must occur exactly once (or replace_all), so an
   edit never lands somewhere the agent did not mean. A file with CRLF endings keeps them.
 - write(path, content): the whole file, created or replaced.
@@ -16,15 +20,31 @@ file renamed into place, the old file's mode kept).
 """
 import difflib
 import hashlib
+from fnmatch import fnmatchcase
 import os
+import re
+import shutil
+import subprocess
 import tempfile
+import time
 from pathlib import Path
+
+from .diff import _run
 
 READ_DEFAULT = 400        # lines per read when no limit is given
 READ_MAX = 2000           # lines one read may return
 LINE_MAX = 2000           # characters of one line shown
 WRITE_MAX = 2_000_000     # bytes one write or edit may produce
 DIFF_MAX = 120            # diff lines returned to the model and the chat
+SEARCH_NAMES = 200        # file names one glob search lists
+SEARCH_FILES = 20         # files with matches one search shows
+SEARCH_MATCHES = 60       # matching lines one search shows
+SEARCH_CHARS = 16_000     # characters of matches and context one search shows (the result stays below outputs' spill)
+SEARCH_LINE = 300         # characters of one line shown (minified code is one huge line)
+SEARCH_SCAN = 20_000      # matches counted before a search stops counting
+SEARCH_FILE_MAX = 10_000_000   # bytes: a bigger file is skipped (the stdlib path reads each file whole)
+SEARCH_SECONDS = 60       # a search stops looking after this long and says so
+SKIP_DIRS = frozenset(('.git', 'node_modules', 'build'))   # skipped by the walk outside a git repository
 # An image goes to the model whole (no resizing without an image library), so read refuses one past these: 5 MB once
 # base64-encoded is the smallest per-image limit among Claude's platforms (Bedrock; the API's own is 10 MB), and past
 # 20 images in one request a stricter size limit applies to every image (resent results count), which images of 3000 px
@@ -108,9 +128,13 @@ def _path(home, path):
     return p if p.is_absolute() else Path(home) / p
 
 
+def _binary(data):
+    return b'\0' in data[:8192]
+
+
 def _text(p, strict=False):
     data = p.read_bytes()
-    if b'\0' in data[:8192]:
+    if _binary(data):
         raise ValueError(f'{p} looks binary; read it with the terminal (xxd, file) instead')
     if strict:
         # edit and write put the text back: a lossy decode would turn every non-UTF-8 byte into U+FFFD without a
@@ -155,7 +179,7 @@ def _atomic_write(p, text):
         raise
 
 
-def read(home, path, offset=None, limit=None):
+def read(home, path, start=None, lines=None):
     p = _path(home, path)
     if p.is_dir():
         names = sorted(e.name + ('/' if e.is_dir() else '') for e in p.iterdir())
@@ -163,21 +187,159 @@ def read(home, path, offset=None, limit=None):
     if (img := image(p)) is not None:
         return img
     text = _text(p)
-    lines = text.split('\n')
-    if lines and lines[-1] == '':
-        lines.pop()
-    start = max(1, int(offset or 1))
-    count = max(1, min(int(limit or READ_DEFAULT), READ_MAX))
-    shown = []
-    for n in range(start, min(start + count, len(lines) + 1)):
-        ln = lines[n - 1].rstrip('\r')
-        if len(ln) > LINE_MAX:
-            ln = ln[:LINE_MAX] + f' … [{len(ln) - LINE_MAX} more characters]'
-        shown.append(f'{n:>6}\t{ln}')
+    rows = _lines(text)
+    start = max(1, int(start or 1))
+    count = max(1, min(int(lines or READ_DEFAULT), READ_MAX))
+    shown = [_numbered(n, rows[n - 1], LINE_MAX) for n in range(start, min(start + count, len(rows) + 1))]
     end = start + len(shown) - 1
-    out = dict(path=str(p), lines=len(lines), shown=f'{start}-{end}' if shown else 'none', text='\n'.join(shown))
-    if end < len(lines):
-        out['next'] = f'read with offset={end + 1} for more'
+    out = dict(path=str(p), shown=(f'{start}-{end}' if shown else 'none') + f' of {len(rows)}', text='\n'.join(shown))
+    if end < len(rows):
+        out['next'] = f'read with start={end + 1} for more'
+    return out
+
+
+def _lines(text):
+    rows = [ln.rstrip('\r') for ln in text.split('\n')]
+    if rows and rows[-1] == '':
+        rows.pop()
+    return rows
+
+
+def _numbered(n, ln, width, mark='\t'):
+    if len(ln) > width:
+        ln = ln[:width] + f' … [{len(ln) - width} more characters]'
+    return f'{n:>6}{mark}{ln}'
+
+
+def _rg():
+    return shutil.which('rg')
+
+
+def _size(p):
+    try:
+        return p.stat().st_size
+    except OSError:
+        return -1                         # (gone since it was listed)
+
+
+def _listing(root):
+    """The files a search looks in, sorted: what git lists (tracked and untracked, not ignored) inside a repository,
+    else a walk that skips SKIP_DIRS. A file git lists but that is gone, or a submodule, is left out. A folder git
+    lists nothing in (one it ignores, asked for by name) is walked."""
+    if root.is_file():
+        return [root]
+    r = _run(['git', '-C', str(root), 'ls-files', '-co', '--exclude-standard', '-z'], 30)
+    files = [root / n for n in r.stdout.split('\0') if n] if r is not None and r.returncode == 0 else []
+    if not files:
+        for d, dirs, names in os.walk(root):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+            files += [Path(d) / n for n in names]
+    return sorted((p for p in files if p.is_file()), key=lambda p: str(p.relative_to(root)))
+
+
+def _rg_candidates(rg, pattern, files, deadline):
+    """The files ripgrep finds a match in, or None when it cannot answer for this pattern (a lookaround or a
+    backreference: its regex syntax is not Python's) and the stdlib reads every file instead."""
+    found = set()
+    for i in range(0, len(files), 500):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            r = subprocess.run([rg, '--no-config', '--text', '--crlf', '--files-with-matches', '--null', '-e', pattern,
+                                '--', *map(str, files[i:i + 500])], capture_output=True, timeout=left)
+        except subprocess.TimeoutExpired:
+            break
+        except OSError:
+            return None
+        if r.returncode == 2 and not r.stdout:      # (2 with output: some file was unreadable, the rest were searched)
+            return None
+        found.update(os.fsdecode(n) for n in r.stdout.split(b'\0') if n)
+    return [p for p in files if str(p) in found]
+
+
+def _glob_match(p, root, g):
+    """A glob without a slash matches the file's name at any depth; with one, its path under root (fnmatch's * also
+    crosses folders, and a leading **/ may match none)."""
+    if '/' not in g:
+        return fnmatchcase(p.name, g)
+    rel = p.name if p == root else str(p.relative_to(root))
+    return fnmatchcase(rel, g) or (g.startswith('**/') and fnmatchcase(rel, g[3:]))
+
+
+def search(home, path='.', glob=None, pattern=None, context=2):
+    if not glob and not pattern:
+        raise ValueError('give glob (file names), pattern (a regex to find in the text), or both')
+    root = _path(home, path or '.')
+    if root.is_dir():                     # refused as read refuses it: missing or unreadable
+        os.scandir(root).close()
+    else:
+        open(root, 'rb').close()
+    base = Path(home)
+    show = lambda p: os.path.relpath(p, base) if p == base or base in p.parents else str(p)
+    files = _listing(root)
+    if glob:
+        files = [p for p in files if _glob_match(p, root, glob.removeprefix('./'))]
+    out = dict(path=show(root))
+    if not pattern:
+        out.update(files=len(files), text='\n'.join(show(p) for p in files[:SEARCH_NAMES]))
+        if len(files) > SEARCH_NAMES:
+            out['more'] = f'{len(files) - SEARCH_NAMES} more files not listed: narrow glob or path'
+        return out
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f'pattern is not a valid regex ({e}); escape special characters such as ( [ . * with \\')
+    big = [p for p in files if _size(p) > SEARCH_FILE_MAX]
+    files = [p for p in files if 0 <= _size(p) <= SEARCH_FILE_MAX]
+    deadline = time.monotonic() + SEARCH_SECONDS
+    rg = _rg()
+    look = (_rg_candidates(rg, pattern, files, deadline) if rg and files else None)
+    if look is None:
+        look = files
+    context = max(0, min(int(context if context is not None else 2), 10))
+    total = nfiles = shown_m = shown_f = chars = 0
+    text, late = [], False
+    for p in look:
+        if total >= SEARCH_SCAN or time.monotonic() > deadline:
+            late = total < SEARCH_SCAN
+            break
+        try:
+            data = p.read_bytes()
+        except OSError:
+            continue                      # (unreadable: the account may not read it)
+        if _binary(data):
+            continue
+        rows = _lines(data.decode('utf-8', errors='replace'))
+        hits = [i for i, ln in enumerate(rows) if rx.search(ln)]
+        if not hits:
+            continue
+        total += len(hits)
+        nfiles += 1
+        if shown_m >= SEARCH_MATCHES or shown_f >= SEARCH_FILES or chars >= SEARCH_CHARS:
+            continue
+        shown_f += 1
+        keep = hits[:SEARCH_MATCHES - shown_m]
+        hit, last = set(keep), None
+        text.append(show(p))
+        for i in sorted({j for h in keep for j in range(max(0, h - context), min(len(rows), h + context + 1))}):
+            if i in hit and chars >= SEARCH_CHARS:
+                break                             # (the text is full: this match and the rest are counted, not shown)
+            if last is not None and i > last + 1:
+                text.append('    --')
+            text.append(_numbered(i + 1, rows[i], SEARCH_LINE, ':  ' if i in hit else '-  '))
+            chars += len(text[-1]) + 1
+            shown_m += i in hit
+            last = i
+    out.update(matches=total, files=nfiles, searched=len(files), text='\n'.join(text))
+    if total > shown_m:
+        where = f' in {nfiles - shown_f} more files' if nfiles > shown_f else ''
+        out['more'] = (f'{"at least " if total >= SEARCH_SCAN else ""}{total - shown_m} more matches{where} not shown: '
+                       'narrow pattern, glob or path')
+    if late:
+        out['stopped'] = f'stopped looking after {SEARCH_SECONDS} s: the counts are partial; narrow path or glob'
+    if big:
+        out['skipped'] = f'{len(big)} files over {SEARCH_FILE_MAX // 1_000_000} MB not searched'
     return out
 
 
