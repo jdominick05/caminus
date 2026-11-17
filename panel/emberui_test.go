@@ -4,6 +4,7 @@
 package main
 
 import (
+	tea "charm.land/bubbletea/v2"
 	"encoding/json"
 	"github.com/charmbracelet/x/ansi"
 	"os"
@@ -132,18 +133,15 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 	if err := appendAudit(audit, map[string]any{"event": "run", "cmd": "id"}); err != nil {
 		t.Fatal(err)
 	}
-	// The chat is the only screen: the queue opens as the approvals overlay, the audit and context pages as overlays.
+	// The chat is the only screen: a waiting request asks in the composer's place, the context page is an overlay.
 	m := chatFixture(t)
 	m.user, m.bridge, m.auditPath, m.key, m.seen, m.width, m.height = "agent", bridge, audit, "k", map[string]bool{}, 120, 40
 	m.refreshLocal()
 	v := ansi.Strip(m.render())
-	if strings.Contains(v, "CAMINUS ENV") || !strings.Contains(v, "1 pending ^A") {
-		t.Fatalf("the chat must be the screen and name the waiting request:\n%s", v)
+	if strings.Contains(v, "CAMINUS ENV") || !strings.Contains(v, "systemctl restart foo") || strings.Contains(v, "pending ^A") {
+		t.Fatalf("the chat is the screen and the waiting request asks where you type:\n%s", v)
 	}
-	next, _ := m.chatSlash("/approvals")
-	if v = ansi.Strip(next.(emberModel).render()); !strings.Contains(v, "systemctl restart foo") || !strings.Contains(v, "a a approve") {
-		t.Fatalf("approvals overlay missing the request:\n%s", v)
-	}
+	var next tea.Model
 	// the audit log, the servers and the jobs are CLI only now (caminus ember audit / ctx / agent jobs)
 	for _, gone := range []string{"/audit", "/servers", "/jobs", "/identity", "/update", "/export", "/freetime"} {
 		if next, _ = m.chatSlash(gone); next.(emberModel).chat.page >= 0 || !strings.Contains(next.(emberModel).msg, "Unknown command") {
@@ -215,57 +213,6 @@ func TestKeyDenyAndSkip(t *testing.T) {
 	m = mm.(emberModel)
 	if m.mode != "normal" {
 		t.Fatal("esc did not leave edit mode")
-	}
-}
-
-func TestQuestionFlow(t *testing.T) {
-	bridge := t.TempDir()
-	writeReq(t, bridge, "q1", "", 1)
-	// overwrite as a question
-	q := emberReq{ID: "q1", Pid: 7, User: "agent", CWD: "/home/agent", Kind: "question",
-		Text: "which model?", Choices: []string{"coder", "swift"}, Ts: 1}
-	data, _ := json.Marshal(q)
-	if err := os.WriteFile(filepath.Join(bridge, "req", "q1.json"), data, 0o660); err != nil {
-		t.Fatal(err)
-	}
-	audit := filepath.Join(t.TempDir(), "a.jsonl")
-	m := emberModel{user: "agent", bridge: bridge, auditPath: audit, key: "k",
-		seen: map[string]bool{}, mode: "normal", width: 120, height: 40}
-	m.refreshLocal()
-	if len(m.reqs) != 1 || m.reqs[0].kind() != "question" {
-		t.Fatalf("question not loaded: %+v", m.reqs)
-	}
-	m.width = 120
-	m.initChat()
-	m.chat.approvals, m.chat.approvalDetail = true, true
-	m.tab = 6
-	v := ansi.Strip(m.render())
-	if !strings.Contains(v, "? ask") || !strings.Contains(v, "which model?") || !strings.Contains(v, "1 coder") {
-		t.Fatalf("approvals overlay missing the question:\n%s", v)
-	}
-	m.tab, m.chat.approvals = 0, false
-	mm, _ := m.onKey("a")
-	m = mm.(emberModel)
-	if m.mode != "answer" {
-		t.Fatalf("a on a question should open answer mode, mode=%s", m.mode)
-	}
-	mm, _ = m.onKey("2")
-	m = mm.(emberModel)
-	mm, _ = m.onKey("enter")
-	m = mm.(emberModel)
-	if m.mode != "normal" || len(m.reqs) != 0 {
-		t.Fatalf("after enter: mode=%s reqs=%+v", m.mode, m.reqs)
-	}
-	res, err := os.ReadFile(filepath.Join(bridge, "res", "q1.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ans map[string]any
-	if json.Unmarshal(res, &ans) != nil {
-		t.Fatal("bad res json")
-	}
-	if ans["decision"] != "answered" || ans["answer"] != "swift" {
-		t.Fatalf("choice 2 should map to swift: %v", ans)
 	}
 }
 

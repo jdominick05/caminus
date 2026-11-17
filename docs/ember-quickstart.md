@@ -103,8 +103,9 @@ account. You see its replies, one dim line per batch of tool work, and on a wide
 thoughts, its task list and what it is running now.
 
 - **Steer**: type while it works. A message reaches it at its next step; `/steer TEXT` redirects it.
-- **Answer**: questions and root requests appear as cards. Ctrl+A decides them: `a a` approves a root command (it runs under
-  your sudo, never the agent's), `d` denies, `/deny TEXT` denies with what to do instead. Nothing waits on you: an
+- **Answer**: questions and root requests ask where you type: pick with the arrows and Enter (a root command is yes or
+  no; Yes runs it under your sudo, never the agent's), or tell it something else in your own words. Esc leaves it
+  waiting; Tab brings it back. Nothing waits on you: an
   unanswered question times out to the agent's recommended option, a permission question to no.
 - **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).
 - **Copy**: drag over the history; the release copies it.

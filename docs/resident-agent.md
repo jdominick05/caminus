@@ -59,7 +59,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
 | Ctrl+E | open or fold every tool card; Ctrl+O shows every line of an open card (40 otherwise) |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
-| Ctrl+G, Ctrl+A, Shift+Tab | the goals and approvals overlays, and the session switcher |
+| Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell") |
 | `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
 
@@ -75,7 +75,6 @@ it; the durable blocks replace it when the turn lands.
 | `/btw QUESTION` | a side question with no tools; nothing enters the goal |
 | `/diff` | the goal's changes in its git repositories (new files included) |
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
-| `/approvals` (Ctrl+A), `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
 | `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
@@ -97,15 +96,15 @@ arguments are appended) and is sent as a message.
 
 ### Root requests and questions
 
-A root request is an inline card; Ctrl+A opens the approvals overlay to decide it: `a a` approves (two presses: the
-first only names the command), `g g` approves and grants that exact command for
-the rest of its goal, `e` edits, `d` denies; `/deny TEXT` in the chat denies with what to do
-instead. When several wait, one card lists them all and the overlay's rows pick. A granted
-repeat (the same command in the same goal, within 12 hours of your approval, as
-your own audit log records it) runs with one `a`, still under your sudo; the
-resident never runs root, and `caminus ember watch` honours grants the same way.
-`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant`
-do the same from the command line.
+A waiting request asks where you type: the composer becomes a prompt with the command (and why) or the question,
+"1 of N" when more wait, and the time left. A root command or a GitHub hand-off offers Yes / No / "Tell it something
+else"; a question offers its choices (the recommended one marked and preselected) and "Answer in your own words". The
+arrows and Enter, or a digit, pick; the last option opens a line for your text (for a root command: a denial that
+tells the agent what to do instead, filed as a steer). Esc leaves it waiting: a line above the composer says so, and
+Tab, or the next request, brings it back. Yes runs the command under your sudo; the resident never runs root. The
+transcript keeps one line for each: `⚿ root: CMD` and then `· yes` / `· no: TEXT` / `· timed out (no)`. A granted
+repeat (the same command in the same goal, within 12 hours of your approval) is honoured by `caminus ember watch`;
+`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant` work from the command line.
 
 Nothing waits on you. A pending request parks only the step that needs it: the
 agent is told it is pending, works on what does not need the answer, and gets

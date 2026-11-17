@@ -58,6 +58,10 @@ type emberReq struct {
 	Reason  string   `json:"reason"`
 	Ts      float64  `json:"ts"`
 	Granted bool     `json:"granted"` // the resident says this exact command was granted for its goal (checked, not trusted)
+	// a question's recommended choice (preselected in the prompt) and when the request times out (Unix time; 0: the
+	// default 15 minutes from Ts)
+	Recommended string  `json:"recommended"`
+	Expires     float64 `json:"expires"`
 	// a GitHub hand-off (kind "github"): what the agent's token may not do upstream, as checked fields; the owner's
 	// side builds the gh command from them (caminus ember answer) and runs it as the owner
 	Summary string         `json:"summary"`

@@ -97,13 +97,6 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 	if !m.chat.newGoal || m.chat.target != "" {
 		t.Fatal("poll changed an explicit new goal into steering")
 	}
-	m.chat.compose.SetValue("/approvals")
-	next, _ = m.submitCompose()
-	m = next.(emberModel)
-	if m.tab != 6 || !m.chat.approvals {
-		t.Fatal("/approvals did not open the approvals overlay in the chat")
-	}
-	m.chat.approvals = false
 	m.chat.compose.SetValue("/unknown keep this")
 	next, cmd = m.submitCompose()
 	m = next.(emberModel)
@@ -465,17 +458,6 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	m = next.(emberModel)
 	if m.agentName != "research" || m.chat.picker {
 		t.Fatalf("a click on a card switches to its session: %q", m.agentName)
-	}
-	// A question arriving with the switcher open keeps F2 as the explicit takeover.
-	m2 := chatFixture(t)
-	m2.sessionNames = []string{"resident"}
-	m2.chat.picker = true
-	wrong := emberReq{ID: "q1", Kind: "question"}
-	m2.chat.question = &wrong
-	next, _ = m2.chatKey(tea.KeyPressMsg{Code: tea.KeyF2})
-	m2 = next.(emberModel)
-	if m2.chat.picker || !m2.chat.questionArmed || m2.chat.compose.Focused() {
-		t.Fatal("F2 with the switcher open did not take over the question")
 	}
 }
 
@@ -1173,7 +1155,7 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	folded := ansi.Strip(m.chat.content)
-	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "Ctrl+A", "/deny TEXT"} {
+	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "root: apt-get install -y libcmocka-dev"} {
 		if !strings.Contains(folded, want) {
 			t.Fatalf("folded transcript missing %q:\n%s", want, folded)
 		}
@@ -1190,75 +1172,6 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
 	if next.(emberModel).chat.expanded {
 		t.Fatal("a second Ctrl+E must fold them again")
-	}
-}
-
-// A waiting root request is decided in the chat through the Requests page's own handler: d writes the denial to the
-// bridge (and the audit), /deny TEXT denies with what to do instead in the same answer (the runtime steers with it).
-func TestChatDecidesRootRequestsInline(t *testing.T) {
-	for _, viaSlash := range []bool{false, true} {
-		m := chatFixture(t)
-		bridge := t.TempDir()
-		writeReq(t, bridge, "r1", "apt-get install -y libfoo-dev", 1)
-		m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
-		m.refreshLocal()
-		if m.pendingRoot() != 0 {
-			t.Fatal("the waiting request is not found")
-		}
-		if viaSlash {
-			var next tea.Model
-			next, _ = m.chatSlash("/deny use the vendored copy in third_party/ instead")
-			m = next.(emberModel)
-		} else {
-			m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
-			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
-			m = next.(emberModel)
-		}
-		data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json"))
-		if err != nil || !strings.Contains(string(data), `"denied"`) {
-			t.Fatalf("no denial in the bridge (slash=%v): %s %v", viaSlash, data, err)
-		}
-		if viaSlash && !strings.Contains(string(data), `"answer":"use the vendored copy in third_party/ instead"`) {
-			t.Fatalf("/deny carries its instruction in the denial: %s", data)
-		}
-		if m.pendingRoot() != -1 {
-			t.Fatal("a decided request still shows as waiting")
-		}
-	}
-}
-
-// Approving runs a root command: one stray "a" while reading must not do it. The first press only arms it and names
-// the command; a second approves; any other key in between disarms.
-func TestChatApprovalNeedsASecondPress(t *testing.T) {
-	m := chatFixture(t)
-	bridge := t.TempDir()
-	writeReq(t, bridge, "r1", "rm -rf /var/cache/foo", 1)
-	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
-	m.refreshLocal()
-	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
-	press := func(r rune) {
-		next, _ := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
-		m = next.(emberModel)
-	}
-	press('a')
-	if m.chat.armed != "a:r1" || !strings.Contains(m.msg, "rm -rf /var/cache/foo") || !strings.Contains(m.msg, "press a again") {
-		t.Fatalf("the first a must only arm and name the command: %q", m.msg)
-	}
-	press('j') // scrolling in between
-	if m.chat.armed != "" {
-		t.Fatal("another key must disarm the approval")
-	}
-	press('a')
-	if m.chat.armed != "a:r1" {
-		t.Fatal("a fresh a arms again")
-	}
-	m.chat.armedAt = m.chat.armedAt.Add(-11 * time.Second)
-	press('a')
-	if m.chat.armed != "a:r1" {
-		t.Fatal("a stale arm (over 10 s) only re-arms")
-	}
-	if _, err := os.Stat(filepath.Join(bridge, "res", "r1.json")); err == nil {
-		t.Fatal("nothing may be decided before a confirmed approval")
 	}
 }
 
@@ -1599,40 +1512,6 @@ func TestSteeringViews(t *testing.T) {
 	}
 }
 
-func TestSeveralRootRequestsShareOneCard(t *testing.T) {
-	m := chatFixture(t)
-	bridge := t.TempDir()
-	writeReq(t, bridge, "r1", "apt-get install -y jq", 1)
-	writeReq(t, bridge, "r2", "systemctl restart foo", 2)
-	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
-	m.refreshLocal()
-	v := ansi.Strip(m.renderChat())
-	if !strings.Contains(v, "2 ROOT REQUESTS WAITING") || !strings.Contains(v, "1  apt-get install -y jq") || !strings.Contains(v, "2  systemctl restart foo") {
-		t.Fatalf("one card lists both:\n%s", v)
-	}
-	if m.reqs[m.pendingRoot()].ID != "r2" {
-		t.Fatal("the keys act on the newest by default")
-	}
-	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A; its rows pick one)
-	for row, i := range m.approvalOrder() {
-		if m.reqs[i].ID == "r1" {
-			m.chat.approvalSel = row
-		}
-	}
-	var next tea.Model
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	m = next.(emberModel)
-	if data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json")); err != nil || !strings.Contains(string(data), `"denied"`) {
-		t.Fatalf("d denies the highlighted one: %s %v", data, err)
-	}
-	if _, err := os.Stat(filepath.Join(bridge, "res", "r2.json")); err == nil {
-		t.Fatal("the other request is untouched")
-	}
-	if strings.Contains(ansi.Strip(m.renderChat()), "ROOT REQUESTS WAITING") {
-		t.Fatal("one request left: no shared card")
-	}
-}
-
 func TestTheLiveReplyHasTheWholeWidth(t *testing.T) {
 	old := g
 	defer func() { g = old }()
@@ -1646,42 +1525,6 @@ func TestTheLiveReplyHasTheWholeWidth(t *testing.T) {
 	}
 	if n := m.liveBlock(40); strings.Contains(ansi.Strip(n), "▀") {
 		t.Fatalf("a narrow box leaves Ember out:\n%s", ansi.Strip(n))
-	}
-}
-
-func TestGrantTakesTwoPressesAndAGrantedRepeatOne(t *testing.T) {
-	m := chatFixture(t)
-	bridge := t.TempDir()
-	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
-	writeReq(t, bridge, "r1", "systemctl restart foo", 1)
-	m.refreshLocal()
-	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
-	press := func(r rune) tea.Cmd {
-		next, cmd := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
-		m = next.(emberModel)
-		return cmd
-	}
-	if press('g'); m.chat.armed != "g:r1" || !strings.Contains(m.msg, "grant for this goal") {
-		t.Fatalf("the first g only arms the grant: %q", m.msg)
-	}
-	if press('a'); m.chat.armed != "a:r1" {
-		t.Fatal("a after g does not run the grant: it arms a plain approval")
-	}
-	// a request the agent marks granted: honoured only when your own audit holds the grant, within 12 hours
-	r := emberReq{ID: "r2", Goal: "goal1", Cmd: "systemctl restart foo", Granted: true}
-	if grantRecorded(m.auditPath, r, time.Now()) {
-		t.Fatal("the agent's flag alone is not a grant")
-	}
-	_ = appendAudit(m.auditPath, map[string]any{"event": "root_result", "decision": "approved", "cmd": r.Cmd,
-		"goal": "goal1", "granted": true})
-	if !grantRecorded(m.auditPath, r, time.Now()) {
-		t.Fatal("your audited grant for this goal and command is honoured")
-	}
-	if grantRecorded(m.auditPath, emberReq{ID: "r3", Goal: "goal2", Cmd: r.Cmd, Granted: true}, time.Now()) {
-		t.Fatal("another goal's grant is not honoured")
-	}
-	if grantRecorded(m.auditPath, r, time.Now().Add(13*time.Hour)) {
-		t.Fatal("a grant ends after 12 hours on the owner's side")
 	}
 }
 
@@ -2244,25 +2087,6 @@ func TestShellModeLikeClaudeCode(t *testing.T) {
 	}
 }
 
-func TestAGithubHandoffIsACardAndTakesTwoPresses(t *testing.T) {
-	m := chatFixture(t)
-	m.width, m.height = 100, 30
-	if card := ansi.Strip(approvalCard("github", "open a pull request on a/b: me:x -> testing: t", "token is read-only", 90)); !strings.Contains(card, "GITHUB") ||
-		!strings.Contains(card, "run it as you") || strings.Contains(card, "grant") {
-		t.Fatalf("a hand-off card offers run and deny, never a grant: %q", card)
-	}
-	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Agent: m.agentName, Summary: "open a pull request on a/b"}}
-	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A) // (the card's keys work while browsing: "esc, then a a")
-	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
-	m = next.(emberModel)
-	if cmd != nil || !strings.Contains(m.msg, "run on GitHub as you") {
-		t.Fatalf("the first a only arms it: %q", m.msg)
-	}
-	if next, _ = m.chatKey(tea.KeyPressMsg{Code: 'g', Text: "g"}); strings.Contains(next.(emberModel).msg, "grant") {
-		t.Fatal("g never grants a hand-off")
-	}
-}
-
 func TestAFencedCodeBlockIsAVisiblePlate(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 100, 40
@@ -2348,20 +2172,14 @@ func TestAGithubCardShowsTheTextItWillPost(t *testing.T) {
 		body.WriteString(fmt.Sprintf("body line %d\n", i))
 	}
 	h := map[string]any{"action": "comment", "repo": "a/b", "number": float64(5), "body": body.String()}
-	m.residentEvents = []residentEvent{{Seq: 1, Goal: "g1", Kind: "approval_requested", Data: map[string]any{
-		"kind": "github", "summary": "comment on a/b#5 (168 characters)", "reason": "read-only token", "github": h}}}
-	m.chat.rendered, m.chat.content = 0, ""
-	m.syncChat()
-	v := ansi.Strip(m.chat.content)
-	if !strings.Contains(v, "body line 1") || !strings.Contains(v, "body line 10") || strings.Contains(v, "body line 11") ||
-		!strings.Contains(v, "4 more lines") {
-		t.Fatalf("the card shows the body's first lines and how much more:\n%s", v)
-	}
-	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Summary: "comment on a/b#5", Github: h}}
-	m.chat.approvalDetail = true
-	detail := ansi.Strip(strings.Join(m.approvalDetail([]int{0}, 0, 80), "\n"))
-	if !strings.Contains(detail, "body (posted as you):") || !strings.Contains(detail, "body line 14") || !strings.Contains(detail, "number: #5") {
-		t.Fatalf("the detail view shows every field and the whole body:\n%s", detail)
+	m.width, m.height = 120, 50
+	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Agent: m.agentName, Summary: "comment on a/b#5", Github: h}}
+	m.chat.ready = true
+	m.syncQuestion()
+	v := ansi.Strip(m.questionBox())
+	if !strings.Contains(v, "comment on a/b#5") || !strings.Contains(v, "body line 1") || !strings.Contains(v, "body line 10") ||
+		strings.Contains(v, "body line 11") || !strings.Contains(v, "4 more lines") || !strings.Contains(v, "1. Yes") {
+		t.Fatalf("the hand-off asks where you type, with the text it will post:\n%s", v)
 	}
 }
 
@@ -2872,7 +2690,7 @@ func TestATimedOutQuestionIsNotDrawnAsYourAnswer(t *testing.T) {
 	e := residentEvent{Seq: 3, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "ask_user", "call_id": "q",
 		"result": map[string]any{"decision": "answered", "by": "timeout", "answer": "(no answer from your human in 15 min.) Silence is not approval"}}}
 	v := ansi.Strip(m.chat.eventBlock(e))
-	if strings.Contains(v, "you · answer") || strings.Contains(v, "Silence is not approval") || !strings.Contains(v, "no answer in time") {
+	if strings.Contains(v, "you · answer") || strings.Contains(v, "Silence is not approval") || !strings.Contains(v, "recommended (timed out)") {
 		t.Fatalf("a timeout reads as one, not as your words:\n%s", v)
 	}
 }

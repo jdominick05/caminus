@@ -144,8 +144,8 @@ Its terminals then use that account for `gh` and `git push`, and its commits car
 GitHub links to the account, so a CLA check can find its signature). The token's text never appears in what it sees.
 
 What its token may not do on your repositories (open a pull request from its fork, comment, approve a CI run from its
-fork) reaches you as a **GITHUB** card: `a a` runs it with your own `gh`, exactly as filed; `d` denies, `/deny TEXT`
-says what to do instead. Nothing it files is a command: the card holds checked fields, and the command is built from
+fork) asks where you type, like a root request: Yes runs it with your own `gh`, exactly as filed; No denies; "Tell it
+something else" says what to do instead. Nothing it files is a command: the card holds checked fields, and the command is built from
 them on your side.
 
 Your files never move into the agent's account unless you put them there or approve a command that does.

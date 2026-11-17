@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,25 +22,5 @@ func TestNoKeyLeavesTheChat(t *testing.T) {
 				t.Fatalf("browsing=%v %v left the chat:\n%s", browsing, k, v)
 			}
 		}
-	}
-}
-
-// Editing a root command is a typed prompt in the composer's slot, not the old page.
-func TestEditPromptStaysInTheChat(t *testing.T) {
-	m := chatFixture(t)
-	bridge := t.TempDir()
-	writeReq(t, bridge, "r1", "apt-get install -y foo", 1)
-	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "a"), map[string]bool{}
-	m.refreshLocal()
-	m.chat.approvals = true // (the approvals overlay, Ctrl+A, decides and edits requests)
-	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'e', Text: "e"})
-	m = next.(emberModel)
-	v := ansi.Strip(m.render())
-	if m.tab != 6 || m.mode != "edit" || !strings.Contains(v, "edit the root command") || !strings.Contains(v, "apt-get install -y foo") {
-		t.Fatalf("the edit prompt is not in the chat (tab %d, mode %q):\n%s", m.tab, m.mode, v)
-	}
-	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m = next.(emberModel); m.mode != "normal" || m.tab != 6 {
-		t.Fatal("Esc must cancel the prompt and stay in the chat")
 	}
 }

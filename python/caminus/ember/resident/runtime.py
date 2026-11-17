@@ -557,6 +557,8 @@ class Runtime:
         if not req.exists() and not res.exists():
             value = dict(id=rid, pid=os.getpid(), user=getpass.getuser(), cwd=str(self.home), kind=kind,
                          ts=time.time(), agent=self.config['name'], goal=action['goal'])
+            # when it times out, for the owner's prompt to count down (the request waits question_timeout)
+            value['expires'] = value['ts'] + float(self.config.get('question_timeout', QUESTION_TIMEOUT))
             if kind == 'github':
                 from . import github
                 value.update(github=github.handoff(args), reason=args.get('reason', ''), summary=github.describe(args))
@@ -569,6 +571,8 @@ class Runtime:
                     value['granted'] = True
             else:
                 value.update(text=args['question'], choices=args.get('choices', []))
+                if args.get('recommended'):
+                    value['recommended'] = args['recommended']   # preselected in the owner's prompt
             parent = req.parent
             parent.mkdir(parents=True, exist_ok=True)
             atomic_json(req, value, mode=0o660, group=parent.stat().st_gid)
