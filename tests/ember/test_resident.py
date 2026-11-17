@@ -840,9 +840,10 @@ class Resident(unittest.TestCase):
         res['torch']='failed: no index';self.assertFalse(E.agent_extras(a,transport,say=said.append),'torch asked for and failed')
         res.clear();res['error']='python3 -m venv failed: ensurepip is not available (Debian / Ubuntu: sudo apt install python3-venv)'
         plain=types.SimpleNamespace(git_name=None,git_email=None,test_venv=False)
-        self.assertTrue(E.agent_extras(plain,transport,say=said.append),'no venv: reported, and setup still passes')
+        self.assertFalse(E.agent_extras(plain,transport,say=said.append),'no venv with a working pip: setup fails, saying what to install')
         self.assertIn('sudo apt install python3-venv',said[-1])
-        self.assertFalse(E.agent_extras(a,transport,say=said.append),'unless torch was asked for')
+        def slow(argv,**kw):raise subprocess.TimeoutExpired(argv,kw.get('timeout'))
+        self.assertFalse(E.agent_extras(plain,slow,say=said.append));self.assertIn('no answer in 3600 s',said[-1])
 
     def test_agent_venv_fill_is_idempotent_and_reports_failures_offline_and_missing_libs(self):
         # the agent's venv, filled by the real script against a fake pip (no network): one call per missing package
@@ -855,6 +856,7 @@ class Resident(unittest.TestCase):
 args = sys.argv[1:]
 with open(os.environ['FAKE_PIP_LOG'], 'a') as f: f.write(' '.join(args) + '\\n')
 if args[:2] == ['config', 'list']: sys.exit(0)
+if args == ['--version']: sys.exit(print('pip 99.0 (fake)') or 0)
 spec = args[-1]; name = spec.split('>=')[0]
 if os.environ['FAKE_PIP'] == 'offline':
     sys.exit(print("WARNING: Retrying after connection broken by 'NewConnectionError(Failed to establish a new "
@@ -867,10 +869,13 @@ site = pathlib.Path(sysconfig.get_paths()['purelib']); d = site / (name + '-99.0
 if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WEASY'])
 ''');(venv/'bin'/'pip').chmod(0o755)
             return home
-        def fill(home,mode,weasy=''):
+        pybin=self.home/'pybin';pybin.mkdir(exist_ok=True)
+        if not (pybin/'python3').exists():(pybin/'python3').symlink_to(sys.executable)   # (the script's python3 made the venvs)
+        def fill(home,mode,weasy='',**extra):
             log=home/'pip.log';log.write_text('')
-            env=dict(os.environ,HOME=str(home),FAKE_PIP=mode,FAKE_PIP_LOG=str(log),FAKE_WEASY=weasy)
-            env.pop('PIP_NO_INDEX',None)
+            env=dict(os.environ,HOME=str(home),FAKE_PIP=mode,FAKE_PIP_LOG=str(log),FAKE_WEASY=weasy,
+                     PATH=f'{pybin}:{os.environ["PATH"]}')
+            env.pop('PIP_NO_INDEX',None);env.update(extra)
             r=subprocess.run(['bash','-s'],input=agent_side.venv_command(),capture_output=True,text=True,env=env,timeout=300)
             installs=[l.split()[-1] for l in log.read_text().splitlines() if l.startswith('install')]
             return (*agent_side.venv_report(r),installs)
@@ -891,6 +896,29 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
         self.assertTrue(ok);self.assertEqual(len(installs),1,'offline: the first network failure stops the rest')
         self.assertTrue(any('no package index reachable' in l and 'when online' in l and 'pypdf' in l for l in lines),lines)
         self.assertIn("'torch': False",agent_side.venv_command(),'torch only with --test-venv')
+        # an installed 5 meets a floor of 5.0 (it was reinstalled on every run)
+        home=fake_home('h3');venv=home/'.venvs'/'caminus-cpu';site=next(venv.glob('lib/python*/site-packages'))
+        (site/'lxml-5.dist-info').mkdir();(site/'lxml-5.dist-info'/'METADATA').write_text('Metadata-Version: 2.1\nName: lxml\nVersion: 5\n')
+        lines,ok,installs=fill(home,'')
+        self.assertNotIn('lxml>=5.0',installs);self.assertEqual(len(installs),len(names)-1)
+        # every package failing: no line says the rest are fine
+        lines,ok,installs=fill(fake_home('h4'),','.join(names))
+        self.assertEqual(len(installs),len(names));self.assertFalse(any('the rest are fine' in l for l in lines),lines)
+        # python3 -m venv without python3-venv leaves bin/python and no pip (a --without-pip venv is the same state):
+        # it is not taken as made. While the venv cannot be given a pip, setup fails and says what to install, every
+        # run; once it can, the venv is repaired in place
+        home=self.home/'h5';venv=home/'.venvs'/'caminus-cpu'
+        subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+        (venv/'pyvenv.cfg').rename(home/'cfg');(venv/'pyvenv.cfg').mkdir()   # (what stops venv from finishing here)
+        for _ in range(2):
+            lines,ok,installs=fill(home,'')
+            self.assertFalse(ok);self.assertEqual(installs,[])
+            self.assertTrue(any('without a working pip' in l and 'sudo apt install python3-venv' in l for l in lines),lines)
+        (venv/'pyvenv.cfg').rmdir()
+        lines,ok,installs=fill(home,'',PIP_NO_INDEX='1')     # (a real pip now: no index, so no network)
+        self.assertTrue(ok,lines);self.assertTrue(os.access(venv/'bin'/'pip',os.X_OK))
+        self.assertTrue(any('repaired (it had no working pip)' in l for l in lines),lines)
+        self.assertTrue(any('pip is set to --no-index' in l for l in lines),lines)
 
     def test_github_link_env_redaction_and_handoff_fields(self):
         from caminus.ember.resident import github
@@ -2544,6 +2572,14 @@ for line in sys.stdin:
         u=json.loads((fake/'homes'/'old'/'update.json').read_text())
         self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
         self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
+        # a top-up past its hour (a very slow link) is a line on stderr: the install's JSON and exit code stay
+        def slow(argv,input=None,**kw):
+            if 'CAMINUS_VENV' in input:raise subprocess.TimeoutExpired(argv,kw.get('timeout'))
+            return transport(argv,input,**kw)
+        out=_io.StringIO();err=_io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):code=agent_host.main(['install'],slow)
+        self.assertEqual(code,0);self.assertIn('installed',json.loads(out.getvalue().strip().splitlines()[-1]))
+        self.assertIn('no answer in 3600 s',err.getvalue())
 
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)

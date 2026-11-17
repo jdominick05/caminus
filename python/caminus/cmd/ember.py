@@ -361,8 +361,7 @@ def agent_extras(a, tr, say=print):
             else f'setting the agent git identity failed: {(r.stderr or "").strip()}')
     say(f'agent venv {AGENT_VENV}: checking its packages (a first install downloads about 110 MB, 460 MB on disk'
         f'{", 200 MB more for torch" if a.test_venv else ""})…')
-    r = runner.run_shell(agent_side.venv_command(torch=a.test_venv), transport=tr, timeout=3600)
-    lines, good = agent_side.venv_report(r, torch=a.test_venv)
+    lines, good = agent_side.fill_venv(tr, torch=a.test_venv)
     for line in lines:
         say(line)
     return ok and good
@@ -479,12 +478,15 @@ def _status(tr,json_mode=False):
     leases = _leases_status()
     check(f'leases {leases["path"]}', leases['ok'], leases['fix'])
     # informational, never a FAIL: the identity is opt-in (setup --git-name/--git-email); setup reports the venv itself
-    r = runner.run_shell(f'git config --global user.email; test -x {AGENT_VENV}/bin/python && echo venv', transport=tr)
+    # (a venv whose pip does not run is not present: python3 -m venv without python3-venv leaves exactly that)
+    r = runner.run_shell(f'git config --global user.email; test -x {AGENT_VENV}/bin/python && echo venv; '
+                         f'{AGENT_VENV}/bin/pip --version >/dev/null 2>&1 && echo pip', transport=tr)
     lines = (r.stdout or '').split()
-    info = dict(git_email=next((l for l in lines if '@' in l), None), test_venv='venv' in lines)
+    venv = ('present' if 'pip' in lines else 'no working pip' if 'venv' in lines else 'not made')
+    info = dict(git_email=next((l for l in lines if '@' in l), None), venv=venv)
     if not json_mode:
         print(f"info agent git identity: {info['git_email'] or 'not set (setup --git-name NAME --git-email EMAIL)'}")
-        print(f"info agent venv {AGENT_VENV}: {'present' if info['test_venv'] else 'not made (caminus ember setup)'}")
+        print(f"info agent venv {AGENT_VENV}: {venv}{'' if venv == 'present' else ' (caminus ember setup)'}")
     if json_mode:
         print(json.dumps(dict(ok=all(c['ok'] for c in checks),checks=checks,leases=leases,agent=info)))
     # (each check is a dict: unpacking one as a tuple read its keys, so every status passed)

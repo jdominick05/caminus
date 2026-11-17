@@ -55,8 +55,9 @@ container. You may use apt: inspect installed packages and the local apt catalog
 then request an exact apt-get command through ask_root if system installation or
 an index update needs root. Choose the practical route instead of assuming that
 everything must be rebuilt in your home. Do not bypass a task's installation ban.
-Your own Python, {venv}/bin/python (when present), has {packages}, and CPU torch and numpy when your human added
-them for a repository's CPU tests; pandoc makes PDFs with --pdf-engine=$HOME/{venv_rel}/bin/weasyprint. Your git
+Your own Python, {venv}/bin/python (when present), is where setup installs {packages}, and CPU torch
+and numpy when your human added them for a repository's CPU tests; a setup that was offline or failed leaves some out,
+so import one to check before relying on it. pandoc makes PDFs with --pdf-engine=$HOME/{venv_rel}/bin/weasyprint. Your git
 identity, when setup set one, is account-wide (git config --global): check it before your first commit.
 
 ## The runtime block
