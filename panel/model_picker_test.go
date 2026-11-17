@@ -231,3 +231,77 @@ func TestModelPickerFitRowFromServeProjection(t *testing.T) {
 		t.Fatalf("no F16 maximum row: %q", r)
 	}
 }
+
+func q3mModel() camModel {
+	return camModel{Name: "qwen3-30b-a3b", Cards: 1, Present: true, Path: "/m/q3.gguf", Modes: []serveMode{
+		{Cards: 1, Drafts: []string{"off"}, KV: []string{"f16", "q8"}, Long: true},
+		{Cards: 2, Drafts: []string{"off"}, KV: []string{"f16", "q8"}, Long: true},
+	}}
+}
+
+func TestModelPickerKVAndLongContext(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), false, "")
+	m.prefs = filepath.Join(t.TempDir(), "prefs.json")
+	mi := q3mModel()
+	m.models, m.loaded["models"] = []camModel{mi}, true
+	keys := m.keysLine()
+	if !strings.Contains(keys, "v KV cache") || !strings.Contains(keys, "l long context") {
+		t.Fatalf("both choices are discoverable for the 30B: %s", keys)
+	}
+	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b"}) {
+		t.Fatalf("defaults pass no flags (the server's F16, native): %v", got)
+	}
+	for _, want := range []string{"f16", "q8", "auto"} {
+		next, cmd := m.modelsKey("v")
+		m = next.(ctl)
+		if cmd != nil {
+			t.Fatal("choosing a cache must not launch anything")
+		}
+		mode, _ := m.modelMode(mi)
+		if kv, _ := m.modelExtras(mi, mode); kv != want {
+			t.Fatalf("KV cycle: got %s, want %s", kv, want)
+		}
+	}
+	next, _ := m.modelsKey("l")
+	m = next.(ctl)
+	next, _ = m.modelsKey("v") // f16
+	m = next.(ctl)
+	next, _ = m.modelsKey("v") // q8
+	m = next.(ctl)
+	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b", "--kv", "q8", "--long-context"}) {
+		t.Fatalf("start takes its own --kv and --long-context: %v", got)
+	}
+	if _, fa := m.fitArgs(mi); !strings.Contains(strings.Join(fa, " "), "--cards 1 --kv q8 --long-context --json") {
+		t.Fatalf("fit projects the same choice: %v", fa)
+	}
+	if rows := strings.Join(m.modelRows(), "\n"); !strings.Contains(ansi.Strip(rows), "KV q8 · long context") {
+		t.Fatalf("the next start shows the choice: %s", ansi.Strip(rows))
+	}
+	// per card count: two cards start from the defaults, and the one-card choice comes back
+	m.cycleModelMode(mi, true)
+	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b", "--cards", "2"}) {
+		t.Fatalf("two cards keep their own (default) choice: %v", got)
+	}
+	m.cycleModelMode(mi, true)
+	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b", "--kv", "q8", "--long-context"}) {
+		t.Fatalf("the one-card choice was lost: %v", got)
+	}
+	// a model without the choices shows neither key and ignores both
+	d := pickerModel()
+	m.models = []camModel{d}
+	if k := m.keysLine(); strings.Contains(k, "KV cache") || strings.Contains(k, "long context") {
+		t.Fatalf("no KV or long-context keys for a model without them: %s", k)
+	}
+	m.cycleExtra(d, false)
+	m.cycleExtra(d, true)
+	if got := m.startArgs(d); !reflect.DeepEqual(got, []string{"start", "dense"}) {
+		t.Fatalf("a model without the choices passes neither flag: %v", got)
+	}
+	var parsed camModel
+	if err := json.Unmarshal([]byte(`{"name":"q","cards":1,"serve_modes":[{"cards":1,"drafts":["off"],"kv":["f16","q8"],"long_context":true}]}`), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if md := parsed.servingModes()[0]; !md.Long || len(md.KV) != 2 {
+		t.Fatalf("the CLI's kv / long_context keys reach the picker: %+v", md)
+	}
+}

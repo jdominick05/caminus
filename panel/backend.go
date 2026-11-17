@@ -37,6 +37,10 @@ type camModel struct {
 type serveMode struct {
 	Cards  int      `json:"cards"`
 	Drafts []string `json:"drafts"`
+	// KV is the F16 / Q8 cache choice where the entry has one (["f16", "q8"]: caminus start --kv), empty otherwise.
+	KV []string `json:"kv,omitempty"`
+	// Long is whether the entry has a long-context mode (caminus start --long-context: YaRN x4 for Qwen3-30B-A3B).
+	Long bool `json:"long_context,omitempty"`
 }
 
 // serverInfo is one server of `caminus ps --json`.

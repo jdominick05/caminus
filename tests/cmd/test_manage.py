@@ -51,7 +51,7 @@ def main():
           # (the plain 27B has no two-card form: one card only, so no two-card drafting is offered)
           and manage.serving_modes(models.BY_NAME['qwen3.8-27b']) == [dict(cards=1, drafts=['off', 'mtp', 'dflash'])]
           # (Qwen3-30B-A3B: two cards offered, one card first: the catalog's card count, the picker's default)
-          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off']), dict(cards=2, drafts=['off'])]
+          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=n, drafts=['off'], kv=['f16', 'q8'], long_context=True) for n in (1, 2)]
           and models.BY_NAME['qwen3-30b-a3b'].cards == 1
           and manage.serving_modes(models.BY_NAME['coder']) == [dict(cards=2, drafts=['off', 'dflash'])]
           and 'torch' not in sys.modules,

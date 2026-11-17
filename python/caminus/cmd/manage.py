@@ -94,7 +94,8 @@ def serving_modes(m):
     The picker also offers auto: it omits --draft, leaving Arch.default_draft to choose from the served measurements.
     A two-card variant of a one-card model is offered only for the catalog models it names (two_card_models: the dense
     line's two-card form exists for Swift 1.5 and ThinkingCap, not the plain 27B), and a drafter only where its entry does
-    not refuse it (Arch.draft_refusal, here without a file).
+    not refuse it (Arch.draft_refusal, here without a file). An entry with the F16 / Q8 cache choice adds kv (its
+    formats), and one with a long-context mode adds long_context: true (the keys are absent otherwise).
     """
     from .. import arch
     A = arch.lookup(m.arch)
@@ -107,7 +108,12 @@ def serving_modes(m):
         if a is not A and m.name not in getattr(a, 'two_card_models', (m.name,)):
             continue
         ds = {d for d in (a.drafter, *getattr(a, 'drafters', ())) if d in ('mtp', 'dflash') and a.draft_refusal(d) is None}
-        out.append(dict(cards=nc, drafts=['off'] + [d for d in ('mtp', 'dflash') if d in ds]))
+        mode = dict(cards=nc, drafts=['off'] + [d for d in ('mtp', 'dflash') if d in ds])
+        if len(a.kv_formats) > 1:                  # (the F16 / Q8 cache choice: caminus start --kv)
+            mode['kv'] = list(a.kv_formats)
+        if hasattr(a, 'long_refusal'):             # (the long-context mode: caminus start --long-context; YaRN for the 30B)
+            mode['long_context'] = True
+        out.append(mode)
     return out
 
 
