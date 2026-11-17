@@ -1993,6 +1993,17 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_side_question_sees_the_words_that_redirected_the_goal(self):
+        from caminus.ember.resident import btw
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('design a very simple block breaking game in javascript')
+            rt.store.event('user_message',dict(text='review caminus and embers design',kind='nudge'),gid)
+            sys_msg=btw.brief(rt,gid)['content']
+            self.assertIn('LATER WORDS FROM YOUR HUMAN',sys_msg);self.assertIn('review caminus and embers design',sys_msg)
+            self.assertLess(sys_msg.index('block breaking'),sys_msg.index('review caminus'),'the goal first, the redirect after')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_default_brain_follows_the_cards(self):
         from caminus.ember import serve
         card=lambda mib,pci:dict(card='card'+pci,pci=pci,label='x',total_mib=mib,status='supported',link=dict(gbps=31.5))

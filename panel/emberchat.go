@@ -418,6 +418,30 @@ func (m emberModel) bodyHeight() int {
 
 // chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
 // under them (three at most). The goal was cut at 47 characters before.
+// goalAim is what a goal works toward now: its prompt, or, once a message from its human was followed by a new done
+// check (the goal re-aimed: a user started a block-breaker game and then asked for a design review in the same goal),
+// that message. redirected says which.
+func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
+	text, msg, checked := g.Prompt, "", false
+	for _, e := range m.residentEvents {
+		if e.Goal != g.ID {
+			continue
+		}
+		switch e.Kind {
+		case "user_message":
+			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" && checked {
+				msg = t // (a message before the first done check refines the prompt; it does not redirect it)
+			}
+		case "done_check":
+			if msg != "" {
+				text, redirected, msg = msg, true, ""
+			}
+			checked = true
+		}
+	}
+	return text, redirected
+}
+
 func (m emberModel) chatHead(w int) string {
 	state := "stopped"
 	if m.resident.DaemonAlive {
@@ -426,7 +450,11 @@ func (m emberModel) chatHead(w int) string {
 	steps, goalText := 0, ""
 	if sel := m.selectedResidentGoal(); sel != nil {
 		state, steps = sel.State, sel.Steps
-		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+		aim, redirected := m.goalAim(sel)
+		goalText = strings.Join(strings.Fields(residentText(aim)), " ")
+		if redirected {
+			goalText = "↪ " + goalText
+		}
 	}
 	if !m.resident.DaemonAlive {
 		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
@@ -1167,6 +1195,19 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			code, _ := result["exit_code"].(float64)
 			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
 		}
+		if str("name") == "finish" {
+			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
+			// open when expanded (its raw JSON repeated the summary right above the block)
+			verdict := residentText(firstLine(fmt.Sprint(result["judge"])))
+			if result["judge"] == nil {
+				verdict = "no judge"
+			}
+			var more []string
+			if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
+				more = append(more, "left open: "+residentText(open))
+			}
+			return toolCard("finish", "judge: "+verdict, "", true, c.expanded, more, w)
+		}
 		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
 			return toolCard("result", residentText(str("name")), "", true, c.expanded, lines(string(b), 30), w)
 		}
@@ -1665,7 +1706,8 @@ func (m emberModel) todoPinned() string {
 	// the task: the current todo item, else the goal itself
 	task, dots := "", ""
 	if goal != nil {
-		task = oneLine(residentText(goal.Prompt))
+		aim, _ := m.goalAim(goal)
+		task = oneLine(residentText(aim))
 		for i := len(m.residentEvents) - 1; i >= 0; i-- {
 			e := m.residentEvents[i]
 			if e.Goal != goal.ID || e.Kind != "todo" {

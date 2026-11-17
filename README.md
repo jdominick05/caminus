@@ -3,14 +3,14 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/caminus/"><img src="https://img.shields.io/pypi/v/caminus?label=pypi&labelColor=3b4252&color=88c0d0" alt="PyPI version"></a>
-  <a href="https://github.com/jdominick05/caminus/releases/latest"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?label=release&labelColor=3b4252&color=5e81ac" alt="newest release"></a>
-  <a href="https://github.com/jdominick05/caminus/releases"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?include_prereleases&filter=*.dev*&label=nightly&labelColor=3b4252&color=a3be8c" alt="newest nightly build"></a>
-  <a href="docs/verifying.md"><img src="https://img.shields.io/badge/SLSA-build%20L3%2C%20self--assessed-d08770?labelColor=3b4252" alt="self-assessed against SLSA Build L3: signed provenance for every release"></a>
-  <img src="https://img.shields.io/badge/status-early%20testing-ebcb8b?labelColor=3b4252" alt="status: early testing">
-  <a href="docs/hardware.md"><img src="https://img.shields.io/badge/GPU-RX%207900%20XTX%20%2F%20XT-8fbcbb?labelColor=3b4252" alt="GPU: RX 7900 XTX / XT"></a>
-  <img src="https://img.shields.io/badge/Linux-Python%203.12-81a1c1?labelColor=3b4252&logo=linux&logoColor=d8dee9" alt="Linux, Python 3.12">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-b48ead?labelColor=3b4252" alt="AGPL-3.0-or-later"></a>
+  <a href="https://pypi.org/project/caminus/"><img src="https://img.shields.io/pypi/v/caminus?label=pypi&labelColor=39424b&color=5fc4b0" alt="PyPI version"></a>
+  <a href="https://github.com/jdominick05/caminus/releases/latest"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?label=release&labelColor=39424b&color=7fb2e5" alt="newest release"></a>
+  <a href="https://github.com/jdominick05/caminus/releases"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?include_prereleases&filter=*.dev*&label=nightly&labelColor=39424b&color=8fd081" alt="newest nightly build"></a>
+  <a href="docs/verifying.md"><img src="https://img.shields.io/badge/SLSA-build%20L3%2C%20self--assessed-e0904f?labelColor=39424b" alt="self-assessed against SLSA Build L3: signed provenance for every release"></a>
+  <img src="https://img.shields.io/badge/status-early%20testing-ecc95e?labelColor=39424b" alt="status: early testing">
+  <a href="docs/hardware.md"><img src="https://img.shields.io/badge/GPU-RX%207900%20XTX%20%2F%20XT-5fc4b0?labelColor=39424b" alt="GPU: RX 7900 XTX / XT"></a>
+  <img src="https://img.shields.io/badge/Linux-Python%203.12-7fb2e5?labelColor=39424b&logo=linux&logoColor=ece8e1" alt="Linux, Python 3.12">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-d9ad62?labelColor=39424b" alt="AGPL-3.0-or-later"></a>
 </p>
 
 <p align="center">
