@@ -798,6 +798,13 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncChat()
 			return m, nil
 		}
+		if msg.turn != "" && msg.turn == m.chat.deadTurn {
+			// a late line of the turn an Esc dropped: its tail must not come back
+			if m.chat.stream != nil {
+				return m, streamLine(msg.agent, msg.epoch, m.chat.stream.sc)
+			}
+			return m, nil
+		}
 		if msg.reset || msg.turn != m.chat.live.turn {
 			m.chat.live = residentLive{turn: msg.turn, text: msg.text, reasoning: msg.reasoning,
 				tools: msg.tools, active: true, wrapText: &wrapCache{}, wrapThink: &wrapCache{}}

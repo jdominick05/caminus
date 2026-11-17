@@ -38,6 +38,8 @@ import http.server
 import json
 import os
 from pathlib import Path
+import select
+import socket
 import ssl
 import sys
 import threading
@@ -238,6 +240,36 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             self.wfile.write(raw)
             log('refused %d %s' % (status, message))
 
+        def watch_client(self, conn, done):
+            """While a stream is relayed, notice a client that hangs up even when upstream sends nothing (a long
+            prompt, a model thinking): the upstream connection is closed at once, so the provider stops generating.
+            Without this the hang-up was seen only at the next write, after upstream's next line. Returns the event
+            set when the client went; setting done ends the watch."""
+            gone = threading.Event()
+
+            def watch():
+                while not done.is_set():
+                    try:
+                        r, _, _ = select.select([self.connection], [], [], 0.1)
+                        if not r or self.connection.recv(1, socket.MSG_PEEK) != b'':
+                            if r:
+                                time.sleep(0.1)     # (bytes waiting from the client: not a hang-up)
+                            continue
+                    except (OSError, ValueError):
+                        pass                        # (the connection is already closed: the client went)
+                    if done.is_set():
+                        return
+                    gone.set()
+                    sock = getattr(conn, 'sock', None)
+                    if sock is not None:
+                        try:
+                            sock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                    return
+            threading.Thread(target=watch, daemon=True, name='relay-client-watch').start()
+            return gone
+
         def auth(self):
             return {'x-api-key': key} if provider == 'anthropic' else {'Authorization': 'Bearer ' + key}
 
@@ -342,9 +374,17 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
                 rid = up.getheader('request-id') or up.getheader('x-request-id')
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
+                    watched = threading.Event()
+                    gone = self.watch_client(conn, watched)
                     while not client_gone:
-                        line = up.readline()
+                        try:
+                            line = up.readline()
+                        except OSError:
+                            if not gone.is_set():
+                                raise
+                            line = b''
                         if not line:
+                            client_gone = client_gone or gone.is_set()
                             break
                         try:
                             self.wfile.write(line)
@@ -385,6 +425,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         elif t == 'content_block_delta':
                             d = ev.get('delta') or {}
                             streamed += sum(len(d.get(k) or '') for k in ('text', 'thinking', 'partial_json'))
+                    watched.set()
                 else:
                     data = up.read()
                     try:

@@ -188,7 +188,10 @@ class Scripted(Brain):
 
 class _DrivenHandler(_Handler):
     """You are the model: each request is written to CTL/NNNNNN.req.json and answered by CTL/NNNNNN.rep.json, which
-    `lab.py reply` writes (a tool call or text). The judge answers met unless the brain was opened with :judge."""
+    `lab.py reply` writes (a tool call or text). The judge answers met unless the brain was opened with :judge.
+    A caller that hangs up while its request waits (an Esc, a /cancel: the resident closes the call so a real server
+    stops generating) is noticed as caminus serve notices it, and recorded in CTL/NNNNNN.gone.json (when, after how
+    long); that request is no longer waiting."""
     ctl = None
     judge = False
     wait = 3600
@@ -213,8 +216,16 @@ class _DrivenHandler(_Handler):
             tmp.write_text(json.dumps(body))
             os.replace(tmp, req)
         rep = ctl / f'{n:06d}.rep.json'
-        end = time.time() + self.wait
+        t0 = time.time()
+        end = t0 + self.wait
         while time.time() < end and not rep.exists():
+            if self.hung_up():
+                gone = ctl / f'{n:06d}.gone.json'
+                tmp = gone.with_suffix('.tmp')
+                tmp.write_text(json.dumps(dict(ts=time.time(), waited_s=round(time.time() - t0, 2))))
+                os.replace(tmp, gone)
+                self.close_connection = True
+                return
             time.sleep(0.2)
         if not rep.exists():
             return self.respond(dict(error='no reply from the driver in time'), 504)
@@ -226,6 +237,16 @@ class _DrivenHandler(_Handler):
         else:
             msg, reason = dict(role='assistant', content=r.get('text') or ''), 'stop'
         self.respond(dict(choices=[dict(message=msg, finish_reason=reason)], usage=usage))
+
+
+    def hung_up(self):
+        """the caller closed its end (readable with nothing to read), the check caminus serve makes while it works"""
+        import select, socket
+        try:
+            r, _, _ = select.select([self.connection], [], [], 0)
+            return bool(r) and self.connection.recv(1, socket.MSG_PEEK) == b''
+        except OSError:
+            return True
 
 
 def serve_driven(ctl, judge=False, ttl=14400):

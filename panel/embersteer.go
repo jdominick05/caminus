@@ -4,7 +4,7 @@
 package main
 
 // envsteer.go: steering and inspection from the chat.
-//   Esc while a reply is being written   interrupts that turn only (nothing stored; the next message steers)
+//   Esc while the agent waits on a reply interrupts that turn only (nothing stored; the next message steers)
 //   ↑ on an empty composer               pulls back your newest message the agent has not read yet
 //   /btw QUESTION                        a side question with no tools; the answer opens here, the goal keeps nothing
 //   /diff                                what the goal changed in its git repositories, coloured, in an overlay
@@ -114,16 +114,41 @@ func (m emberModel) targetGoal() string {
 	return ""
 }
 
+// interruptTurn asks the resident to drop the model call in flight. It is queued only while a call is out (the
+// resident says so); the runtime then closes the call's connection, so the server stops generating, and records
+// turn_interrupted, which the activity line shows. The reply comes back a moment later so the refresh it triggers
+// already holds that event (the runtime checks for the request about four times a second).
 func interruptTurn(m emberModel, goal string) tea.Cmd {
 	return func() tea.Msg {
 		var out struct {
-			Queued bool `json:"queued"`
+			Queued     bool `json:"queued"`
+			Generating bool `json:"generating"`
 		}
 		if err := residentJSON(m, []string{"interrupt", m.agentName, goal, "--json"}, &out); err != nil {
 			return residentActionMsg{"interrupt: " + err.Error()}
 		}
+		if !out.Queued {
+			return residentActionMsg{"nothing to interrupt: no reply is being generated right now"}
+		}
+		time.Sleep(interruptSettle)
 		return residentActionMsg{"turn interrupted: nothing from it is kept; your next message steers"}
 	}
+}
+
+// interruptSettle: how long the interrupt's reply waits before the refresh (a test sets it to 0).
+var interruptSettle = 600 * time.Millisecond
+
+// interruptibleGoal is the goal whose model call an Esc would drop: the goal at work (also before its first token
+// and between the live reader's restarts), else the goal of the reply being shown; "" when nothing can be
+// interrupted (no goal at work, or its turn was already interrupted and it waits for your message).
+func (m emberModel) interruptibleGoal() string {
+	if g := m.working(); g != nil {
+		return g.ID
+	}
+	if m.chat.live.active {
+		return m.targetGoal()
+	}
+	return ""
 }
 
 func unsendLast(m emberModel, goal string) tea.Cmd {

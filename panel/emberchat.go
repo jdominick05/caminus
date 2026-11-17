@@ -95,6 +95,7 @@ type residentChat struct {
 	stream                                  *streamState
 	streamStarting                          bool      // a reader is being started: the tick starts no second one
 	streamRetry                             time.Time // a reader that ended is restarted no sooner than this
+	deadTurn                                string    // the live turn an Esc dropped: its late lines are ignored
 }
 
 // residentLive is the reply being generated: shown under the durable transcript and replaced by it when the
@@ -310,6 +311,16 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 			if e.Kind == "assistant" {
 				// The durable block replaces the live tail; keeping both would show the reply twice.
 				m.chat.live = residentLive{}
+			}
+			if e.Kind == "turn_interrupted" {
+				// The dropped turn's tail goes (nothing of it was kept), and a late line of it must not bring it back.
+				turn, _ := e.Data["turn"].(string)
+				if turn == "" || m.chat.live.turn == turn {
+					m.chat.live = residentLive{}
+				}
+				if turn != "" {
+					m.chat.deadTurn = turn
+				}
 			}
 		}
 	}
@@ -935,6 +946,8 @@ func (m emberModel) nowState(goal *residentGoal) (string, string) {
 		now = "parked until " + m.parkedUntil(goal.ID)
 	case goal != nil && m.compactingNote(goal.ID) != "":
 		now = m.compactingNote(goal.ID)
+	case goal != nil && goal.State == "working" && func() bool { _, held := m.interruptedUntil(goal.ID); return held }():
+		now = "interrupted · your next message steers"
 	case l.active && l.text != "":
 		now = "writing its reply"
 	case l.active && len(l.tools) > 0:
@@ -1808,7 +1821,7 @@ func helpLines(width int) []string {
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
 		{"@ path", "names a path (the agent's folders; Tab completes)"},
 		{"+ path", "attaches the file (read as the agent, up to 64 KB)"},
-		{"Esc", "while a reply is written, interrupt that turn"},
+		{"Esc", "while the agent waits on a reply, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
 		{"Shift+Tab", "sessions: a card per session"},
@@ -2416,9 +2429,11 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chat.menuClosed = m.chat.compose.Value() // the menu closes; the text stays (typing opens it again)
 			return m, nil
 		}
+		// Esc while the agent waits on a reply interrupts that turn only; the next message steers. Not only once text
+		// streams: a long prompt read or a paid model's thinking shows nothing for a while, and the call (and the
+		// server's work on it) is just as live then. The resident queues it only while a call is out.
 		if m.chat.live.active {
-			// Esc while a reply is being written interrupts that turn only; the next message steers.
-			if goal := m.targetGoal(); goal != "" {
+			if goal := m.interruptibleGoal(); goal != "" {
 				m.msg = "interrupting the turn…"
 				return m, interruptTurn(m, goal)
 			}
@@ -2428,6 +2443,10 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chat.prevTarget = ""
 			m.msg = "back to goal " + shortGoal(m.chat.target)
 			return m, nil
+		}
+		if goal := m.interruptibleGoal(); goal != "" {
+			m.msg = "interrupting the turn…"
+			return m, interruptTurn(m, goal)
 		}
 		return m, nil // (idle, Esc does nothing else: PgUp/PgDn and the wheel scroll)
 	case "up", "down":

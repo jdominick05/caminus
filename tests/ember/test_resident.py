@@ -2842,6 +2842,73 @@ for line in sys.stdin:
             self.assertLess(time.time()-t0,4)
         finally:rt.mail.close();rt.store.close();srv.close()
 
+    def test_an_esc_before_the_first_token_closes_the_call_on_both_transports(self):
+        """Esc while a call has sent nothing back yet (a long prompt read, a paid model thinking): the turn is shown in
+        flight from its first moment, the panel's interrupt is queued, the call's connection closes so the server
+        stops, and turn_interrupted says how long the goal holds. On the OpenAI-compatible and the Anthropic transport."""
+        import socket,threading
+        from caminus.ember.resident.runtime import Live, INTERRUPT_HOLD
+        from caminus.ember.resident.model import Cancelled, Model as RealModel
+        for api in ('openai','anthropic'):
+            srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);port=srv.getsockname()[1]
+            closed=threading.Event()
+            def serve(srv=srv,closed=closed):         # reads the request, never answers, notes the close
+                c,_=srv.accept();c.settimeout(10)
+                try:
+                    while c.recv(65536):pass
+                except OSError:pass
+                closed.set();c.close()
+            threading.Thread(target=serve,daemon=True).start()
+            rt=Runtime(self.home);live=None
+            try:
+                gid=rt.store.enqueue('A '+api+'.');rt.store.update(gid,state='working')
+                rt.model=RealModel(dict(endpoint=f'http://127.0.0.1:{port}/v1',model='x',timeout=30,context=65536,api=api))
+                rt.model.counter=False                # (no count_tokens call to the silent server)
+                live=Live(self.home,gid,rt.store);live.start()
+                self.assertTrue((self.home/'live'/(gid+'.json')).exists(),'in flight before any piece arrives')
+                queued={}
+                threading.Timer(.4,lambda:queued.update(self.cmd('interrupt',[gid]))).start()
+                t0=time.time()
+                with self.assertRaises(Cancelled):
+                    rt._watched(live,lambda on_delta:rt.model.complete([dict(role='user',content='hi')],max_tokens=10,on_delta=on_delta),poll=.05)
+                self.assertTrue(closed.wait(3),api+': the server sees the client go')
+                self.assertLess(time.time()-t0,5)
+                self.assertEqual(queued,dict(goal=gid,queued=True,generating=True))
+                self.assertTrue(live.interrupted)
+                ev=[e for e in rt.store.events(0,1000) if e['kind']=='turn_interrupted' and e['goal']==gid]
+                self.assertEqual((ev[-1]['data']['hold_s'],ev[-1]['data']['turn']),(INTERRUPT_HOLD,live.turn))
+            finally:
+                if live:live.clear()
+                rt.mail.close();rt.store.close();srv.close()
+        # no call out (a tool running, between turns): nothing is queued, and the caller is told so
+        self.assertEqual(self.cmd('interrupt',[gid]),dict(goal=gid,queued=False,generating=False))
+
+    def test_the_anthropic_stream_shows_thinking_live_and_stops_on_it(self):
+        """A paid model's thinking streams as reasoning pieces (the panel showed nothing while it thought), and each
+        piece is a point where a cancel or an Esc stops the call."""
+        from caminus.ember.resident.model import Cancelled, Model as RealModel
+        ev=lambda d:('data: '+json.dumps(d)+'\n').encode()
+        lines=[ev(dict(type='message_start',message=dict(model='claude-x',usage=dict(input_tokens=5)))),
+               ev(dict(type='content_block_start',index=0,content_block=dict(type='thinking'))),
+               ev(dict(type='content_block_delta',index=0,delta=dict(type='thinking_delta',thinking='weighing it'))),
+               ev(dict(type='content_block_start',index=1,content_block=dict(type='text'))),
+               ev(dict(type='content_block_delta',index=1,delta=dict(type='text_delta',text='Answer.'))),
+               ev(dict(type='message_delta',delta=dict(stop_reason='end_turn'),usage=dict(output_tokens=9))),
+               ev(dict(type='message_stop'))]
+        class Resp:
+            headers={}
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+            def __iter__(s):return iter(lines)
+        m=RealModel(dict(endpoint='http://127.0.0.1:1/v1',model='claude-x',context=65536,api='anthropic'),opener=lambda req,timeout:Resp())
+        m.counter=False
+        seen=[]
+        out=m.complete([dict(role='user',content='hi')],max_tokens=4096,on_delta=lambda k,v:seen.append((k,v)))
+        self.assertEqual(seen,[('reasoning','weighing it'),('content','Answer.')])
+        self.assertEqual(out['content'],'Answer.');self.assertNotIn('reasoning_content',out)
+        with self.assertRaises(Cancelled):
+            m.complete([dict(role='user',content='hi')],max_tokens=4096,on_delta=lambda k,v:k!='reasoning')
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
         sent=[]
@@ -2924,6 +2991,47 @@ for line in sys.stdin:
             code,body=self._post(base+'/v1/openai/chat/completions',dict(model='zai-org/GLM-5.2',messages=[]))
             self.assertEqual(code,402);self.assertEqual(calls,[])
         finally:stop()
+
+    def test_a_client_hang_up_closes_upstream_even_while_upstream_is_silent(self):
+        """An interrupt closes the resident's call; the relay saw that only at its next write, after upstream's next
+        line, so a long prompt read or a model thinking kept the provider generating. Now it closes upstream at once."""
+        import socket, threading, http.server
+        from caminus.ember import relay
+        released, log = threading.Event(), []
+        class Sock:
+            def shutdown(s, how):released.set()
+        class Resp:
+            status = 200
+            def getheader(s, name):return 'text/event-stream' if name == 'Content-Type' else None
+            def readline(s):
+                released.wait(20)                     # upstream says nothing until its connection is closed
+                return b''
+            def read(s):return b''
+        class Conn:
+            sock = Sock()
+            def request(s, *a, **k):pass
+            def getresponse(s):return Resp()
+            def close(s):pass
+        ledger = relay.Ledger(self.home/'ledger-silent.json', 50.0)
+        handler = relay.make_handler('anthropic', 'SECRET-KEY', ledger, {'claude-haiku-5-5'}, 4096, log.append, None, lambda: Conn())
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            data = json.dumps(dict(model='claude-haiku-5-5', max_tokens=4096, messages=[], stream=True)).encode()
+            s = socket.create_connection(('127.0.0.1', srv.server_address[1]), timeout=10)
+            s.sendall(b'POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % len(data) + data)
+            s.recv(4096)                              # the headers: the stream is open, upstream silent
+            t0 = time.time()
+            s.shutdown(socket.SHUT_RDWR);s.close()    # what Model.abort does
+            self.assertTrue(released.wait(3), 'upstream closed when the client went')
+            self.assertLess(time.time() - t0, 3)
+            for _ in range(100):
+                if any('CLIENT-GONE' in l for l in log):break
+                time.sleep(0.05)
+            self.assertTrue(any('CLIENT-GONE' in l for l in log), log)
+            self.assertGreater(ledger.spent(), 0, 'the prompt was still read: metered')
+        finally:
+            released.set();srv.shutdown();srv.server_close()
 
     def test_a_client_that_hangs_up_is_still_metered_from_what_was_streamed(self):
         # an interrupt, a steer and /advisor end a reply by hanging up: the spend is recorded, estimated from the
@@ -4298,7 +4406,7 @@ for line in sys.stdin:
         p=subprocess.Popen(self.argv('once',['--goal-id',gid]),stdout=subprocess.PIPE,text=True)
         self.wait(lambda: any('stream goal' in json.dumps(b) for _,b in Endpoint.seen),15)
         mid=self.cmd('interrupt',[gid])
-        self.assertEqual(mid,dict(goal=gid,queued=True))
+        self.assertEqual(mid,dict(goal=gid,queued=True,generating=True))
         # the interrupted goal holds for the human's message (it would otherwise rerun the same turn at once)
         self.wait(lambda: 'turn_interrupted' in [e['kind'] for e in self.cmd('events')],15)
         self.cmd('send',['--goal-id',gid,'carry on, and finish'])
@@ -4311,8 +4419,8 @@ for line in sys.stdin:
         # nothing of the dropped turn was stored or executed
         self.assertNotIn(streamed,json.dumps(self.cmd('events')))
         self.assertNotIn(streamed,json.dumps(Endpoint.seen[-1][1]))
-        # an Esc between turns interrupts nothing (and cannot cut the next turn)
-        self.assertEqual(self.cmd('interrupt',[gid]),dict(goal=gid,queued=True))
+        # an Esc between turns interrupts nothing (nothing is queued, so it cannot cut the next turn)
+        self.assertEqual(self.cmd('interrupt',[gid]),dict(goal=gid,queued=False,generating=False))
         self.assertEqual([r['state'] for r in self.cmd('status')['goals']],['completed'])
 
     def test_btw_answers_a_side_question_outside_the_goal(self):

@@ -865,9 +865,13 @@ def main(argv=None,stdin=None):
             finally:rt.mail.close();rt.store.close()
             emit(dict(text=text),a.json);return 0
         if a.op=='interrupt':
+            # Only a model call in flight is interrupted: its live snapshot exists from the moment the call goes out
+            # (before the first token too). Anything else (a tool running, the gap between turns) has nothing to stop,
+            # and the caller says so instead of claiming an interrupt.
             gid=store.resolve(a.goal_id)
-            store.request(gid,'interrupt')
-            emit(dict(goal=gid,queued=True),a.json);store.close();return 0
+            generating=(home/'live'/(gid+'.json')).exists()
+            if generating:store.request(gid,'interrupt')
+            emit(dict(goal=gid,queued=generating,generating=generating),a.json);store.close();return 0
         if a.op=='unsend':
             gid,text=store.unsend(a.goal_id)
             emit(dict(goal=gid,text=text),a.json);store.close();return 0
