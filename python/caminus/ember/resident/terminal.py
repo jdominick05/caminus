@@ -146,6 +146,8 @@ def worker_env(home):
         pass
     # Commands here must never block on a pager: nothing waits for a keypress.
     env.update(PAGER='cat', GIT_PAGER='cat', MANPAGER='cat')
+    # and never colour: escape codes cost the model tokens and showed as text in the owner's cards
+    env.update(NO_COLOR='1', PYTHON_COLORS='0', CLICOLOR='0', FORCE_COLOR='0')
     return env
 
 

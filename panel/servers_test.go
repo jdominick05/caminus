@@ -11,67 +11,154 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// The server list's name column: a server takes its model's name, and a long one (qwen3-coder-next: 16 characters)
-// stays whole and apart from the model column, the model columns of all rows line up, a list of short names keeps
-// the old 10-cell column, and the panel still fits an 80-column terminal.
-func TestServerRowNames(t *testing.T) {
+// The running card follows the server in use: the selected model's when it runs, else the first ready one. Others
+// get one line each; a record that failed or stopped is never in the card.
+func TestRunningCardFollowsTheServerInUse(t *testing.T) {
 	tps := 136.0
-	srv := func(name string) serverInfo {
-		return serverInfo{Name: name, Model: name, State: "ready", URL: "http://127.0.0.1:8092", MaxCtx: 262144, DecodeTPS: &tps}
+	m := newCtl(newCtlCLI("caminus"), "")
+	m.loaded["ps"], m.loaded["models"] = true, true
+	m.models = []camModel{{Name: "swift-1.5", Title: "Swift 1.5 27B", Cards: 1, Present: true},
+		{Name: "qwen3-30b-a3b", Title: "Qwen3-30B-A3B", Cards: 1, Present: true}}
+	m.ps = psInfo{Servers: []serverInfo{
+		{Name: "swift-1.5", Model: "swift-1.5", State: "failed", Error: "RuntimeError: old", Port: 8094},
+		{Name: "qwen3-30b-a3b", Model: "qwen3-30b-a3b", State: "ready", URL: "http://127.0.0.1:8093", Port: 8093, Cards: []string{"XT"},
+			MaxCtx: 40960, DecodeTPS: &tps, UptimeS: 600},
+	}}
+	card := ansi.Strip(strings.Join(m.runningRows(96), "\n"))
+	if !strings.Contains(card, "qwen3-30b-a3b") || !strings.Contains(card, ":8093") || !strings.Contains(card, "136 tok/s decode") ||
+		strings.Contains(card, "failed") {
+		t.Fatalf("the card shows the ready server, never the failed record:\n%s", card)
 	}
-	modelAt := func(row, model string) int { // the cell where the model column starts
-		plain := ansi.Strip(row)
-		dot := strings.Index(plain, "● ")
-		i := strings.Index(plain[dot+len("● "):], " "+model+" ")
-		if dot < 0 || i < 0 {
-			t.Fatalf("no model %q in %q", model, plain)
-		}
-		return lipgloss.Width(plain[:dot+len("● ")+i+1])
+	if p := m.primary(); p == nil || p.Name != "qwen3-30b-a3b" {
+		t.Fatalf("stop / restart act on the ready server: %+v", p)
 	}
-	m := newCtl(newCtlCLI("caminus"), false, "")
-	m.w, m.h = 80, 40
-	m.loaded["ps"] = true
-
-	m.ps = psInfo{Servers: []serverInfo{srv("qwen3-coder-next"), srv("qwen3.6")}}
-	rows := m.serverRows()
-	if p := ansi.Strip(rows[0]); !strings.Contains(p, "qwen3-coder-next qwen3-coder-next") || strings.Contains(p, "…") {
-		t.Fatalf("a 16-character name is whole and apart from its model: %q", p)
+	if d := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(d, "last start failed: RuntimeError: old") {
+		t.Fatalf("the failed record stays readable on its own model's details:\n%s", d)
 	}
-	if a, b := modelAt(rows[0], "qwen3-coder-next"), modelAt(rows[1], "qwen3.6"); a != b {
-		t.Fatalf("the model columns line up: %d and %d", a, b)
+	m.ps.Servers = append(m.ps.Servers, serverInfo{Name: "swift-1.5", Model: "swift-1.5", State: "ready", URL: "http://127.0.0.1:8092", Port: 8092})
+	if p := m.primary(); p == nil || p.Name != "swift-1.5" {
+		t.Fatalf("with its model selected, a running server is the one in use: %+v", p)
 	}
-
-	m.ps = psInfo{Servers: []serverInfo{srv("qwen3.6")}}
-	// the cursor's 2 cells, "● ", then the name in 10 cells (9 and its space), as before
-	if got := modelAt(m.serverRows()[0], "qwen3.6"); got != 2+2+10 {
-		t.Fatalf("short names keep the 10-cell column: the model starts at cell %d", got)
+	if card := ansi.Strip(strings.Join(m.runningRows(96), "\n")); !strings.Contains(card, "qwen3-30b-a3b · :8093") {
+		t.Fatalf("the other running server keeps a line:\n%s", card)
 	}
-
-	m.ps = psInfo{Servers: []serverInfo{srv("qwen3-coder-next"), srv("thinkingcap")}}
-	for _, l := range strings.Split(m.render(), "\n") {
-		if w := lipgloss.Width(l); w > 80 {
-			t.Fatalf("a line of %d cells in an 80-column terminal: %q", w, ansi.Strip(l))
+	for _, w := range []int{80, 100, 160, 240} {
+		for i, l := range strings.Split(m.View(w, 40), "\n") {
+			if lw := lipgloss.Width(l); lw > w {
+				t.Fatalf("%d columns: line %d is %d cells: %q", w, i, lw, ansi.Strip(l))
+			}
 		}
 	}
 }
 
+// One old record must never paint the panel failed: the header carries no server state, and with nothing live the card
+// says so quietly.
+func TestAFailedRecordNeverPaintsThePanel(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), "")
+	m.loaded["ps"], m.loaded["models"] = true, true
+	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, Present: true}}
+	m.ps = psInfo{Servers: []serverInfo{{Name: "brain", Model: "arex-2", State: "failed",
+		Error: "GUARD REFUSED: a GPU fault was recorded (FAULT_FILE). Stop all GPU work and report to the lead."},
+		{Name: "coder", Model: "coder", State: "stopped"}}}
+	out := ansi.Strip(m.View(100, 30))
+	head := strings.SplitN(out, "\n", 2)[0]
+	if strings.Contains(head, "failed") || strings.Contains(out, "GUARD REFUSED") {
+		t.Fatalf("a record of another model paints nothing:\n%s", out)
+	}
+	if !strings.Contains(out, "no server running · enter starts the selected model") {
+		t.Fatalf("nothing live: the quiet line:\n%s", out)
+	}
+	if m.primary() != nil {
+		t.Fatal("a failed or stopped record is not a server in use")
+	}
+}
+
+// A healthy server started outside the panel (caminus ps --json lists it external) shows as running, on its model's
+// row too, and s / t refuse to touch it.
+func TestAServerStartedOutsideThePanelRuns(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), "")
+	m.loaded["ps"], m.loaded["models"] = true, true
+	m.models = []camModel{{Name: "coder", Title: "Qwen3.8-Flash-Next Coder", Cards: 2, Present: true}}
+	m.ps = psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "stopped", Port: 8092},
+		{Name: "observed-8092", Model: "coder", State: "ready", URL: "http://127.0.0.1:8092", Port: 8092, MaxCtx: 1048576,
+			External: true}}}
+	card := ansi.Strip(strings.Join(m.runningRows(96), "\n"))
+	if !strings.Contains(card, "coder · Qwen3.8-Flash-Next Coder") || !strings.Contains(card, "1M ctx") ||
+		!strings.Contains(card, "started outside the panel") || strings.Contains(card, "observed-8092") {
+		t.Fatalf("the outside server runs under its model's name:\n%s", card)
+	}
+	if l := ansi.Strip(m.listRows()[0]); !strings.Contains(l, pg().working) {
+		t.Fatalf("its model's row is marked running: %q", l)
+	}
+	for _, k := range []string{"s", "t"} {
+		n, cmd := m.serverKey(k)
+		if cmd != nil || n.confirm != nil || !strings.Contains(n.note, "started outside the panel") {
+			t.Fatalf("%s on an outside server does nothing but say so: cmd %v confirm %+v note %q", k, cmd != nil, n.confirm, n.note)
+		}
+	}
+	if _, cmd := m.serverKey("m"); cmd == nil {
+		t.Fatal("m opens the full monitor on it")
+	}
+	if n, cmd := m.modelsKey("enter"); cmd != nil || !strings.Contains(n.note, "already running on :8092") {
+		t.Fatalf("enter on its model starts nothing: cmd %v note %q", cmd != nil, n.note)
+	}
+	m.hs = harnessInfo{Installed: true, Configured: true, Version: "0.26.9"}
+	for _, k := range []string{"c", "u"} {
+		if n, cmd := m.agentKey(k); cmd != nil || n.busy != "" || !strings.Contains(n.note, "started outside it") {
+			t.Fatalf("%s with only an outside server runs nothing and says why: cmd %v note %q", k, cmd != nil, n.note)
+		}
+	}
+	// ps asks it /health with a 1 s limit: a read that misses it keeps it while the live round still reaches it, for a
+	// few reads, then lets it go
+	m.live.url, m.live.srv.Up = "http://127.0.0.1:8092", true
+	for i := 0; i < extGrace; i++ {
+		m, _ = m.Update(psMsg{v: psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "stopped", Port: 8092}}}})
+		if m.primary() == nil {
+			t.Fatalf("read %d: a missed answer keeps the outside server running", i+1)
+		}
+	}
+	m, _ = m.Update(psMsg{v: psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "stopped", Port: 8092}}}})
+	if m.primary() != nil {
+		t.Fatal("past the grace the outside server is gone")
+	}
+	m.live.srv.Up = false
+	m.ps.Servers = append(m.ps.Servers, serverInfo{Name: "observed-8092", Model: "coder", State: "ready", URL: "http://127.0.0.1:8092",
+		Port: 8092, External: true})
+	m, _ = m.Update(psMsg{v: psInfo{}})
+	if m.primary() != nil {
+		t.Fatal("a server the live round no longer reaches is not kept")
+	}
+}
+
 func TestThePanelHasAWayIntoEmber(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), false, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	m.loaded["harness"] = true
 	m.ember = emberMsg{known: true}
-	if v := ansi.Strip(strings.Join(m.harnessRows(), "\n")); !strings.Contains(v, "Ember not set up") || !strings.Contains(v, "caminus ember setup") {
-		t.Fatalf("not set up, the row says how:\n%s", v)
+	if v := ansi.Strip(strings.Join(m.agentLines(120), "\n")); !strings.Contains(v, "Ember not set up") || !strings.Contains(v, "caminus ember setup") {
+		t.Fatalf("not set up, the line says how:\n%s", v)
 	}
-	next, _ := m.harnessKey("e")
-	if n := next.(ctl); !strings.Contains(n.note, "caminus ember setup") {
-		t.Fatalf("e without Ember names the setup: %q", n.note)
+	next, _ := m.agentKey("e")
+	if !strings.Contains(next.note, "caminus ember setup") {
+		t.Fatalf("e without Ember names the setup: %q", next.note)
 	}
 	m.ember = emberMsg{ok: true, known: true}
-	if v := ansi.Strip(strings.Join(m.harnessRows(), "\n")); !strings.Contains(v, "e opens the agent chat") {
-		t.Fatalf("set up, the row offers it:\n%s", v)
+	if v := ansi.Strip(m.emberText()); !strings.Contains(v, "Ember set up · e") {
+		t.Fatalf("set up, the line offers it: %s", v)
 	}
-	if _, cmd := m.harnessKey("e"); cmd == nil {
+	m.live.ember = emberCounts{known: true, sessions: 3, active: 1}
+	if v := ansi.Strip(m.emberText()); v != "Ember 3 sessions, 1 working · e" {
+		t.Fatalf("its sessions are counted: %q", v)
+	}
+	if _, cmd := m.agentKey("e"); cmd == nil {
 		t.Fatal("e opens caminus ember ui")
+	}
+	m.hosted = true // inside Ember, e goes back to it
+	_, cmd := m.agentKey("e")
+	if cmd == nil {
+		t.Fatal("e inside Ember closes the panel")
+	}
+	if _, ok := cmd().(panelCloseMsg); !ok {
+		t.Fatal("e inside Ember is a close, not a second Ember")
 	}
 }
 
@@ -84,10 +171,12 @@ func TestThePanelAndTopPaintTheThemeAsEmberDoes(t *testing.T) {
 	if themeRole("bg") != "#15181c" || themeRole("accent") != "#5fc4b0" {
 		t.Fatalf("the default is Iron & Patina: bg %s accent %s", themeRole("bg"), themeRole("accent"))
 	}
-	m := newCtl(newCtlCLI("caminus"), false, "")
-	m.w, m.h = 100, 30
-	if v := m.View(); !strings.Contains(v.Content, bgSeq("#15181c")) {
-		t.Fatal("the panel paints the theme's background, as Ember does")
+	h := panelHost{p: newCtl(newCtlCLI("caminus"), ""), w: 100, h: 30}
+	if v := h.View(); !strings.Contains(v.Content, bgSeq("#15181c")) {
+		t.Fatal("the panel's host paints the theme's background, as Ember does")
+	}
+	if strings.Contains(h.p.View(100, 30), bgSeq("#15181c")) {
+		t.Fatal("the component leaves the background to its host (Ember paints its own)")
 	}
 	if err := themeLoad("nord"); err != nil {
 		t.Fatal(err)

@@ -67,7 +67,7 @@ func residentJSON(m emberModel, args []string, into any, input ...string) error 
 	if len(input) > 0 {
 		stdin = input[0] // (a description or a question, kept off the command line)
 	}
-	out, err := residentCommand(m, args, stdin).CombinedOutput()
+	out, err := runResident(residentCommand(m, args, stdin))
 	if err != nil {
 		text := strings.TrimSpace(string(out))
 		if i := strings.LastIndex(text, "\n"); i >= 0 {
@@ -121,12 +121,16 @@ func setEffort(m emberModel, level string) tea.Cmd {
 			args = []string{"effort", m.agentName, level, "--json"}
 		}
 		var out struct {
-			Effort *string  `json:"effort"`
-			Levels []string `json:"levels"`
-			Model  string   `json:"model"`
+			Effort  *string  `json:"effort"`
+			Levels  []string `json:"levels"`
+			Model   string   `json:"model"`
+			Summary string   `json:"summary"`
 		}
 		if err := residentJSON(m, args, &out); err != nil {
 			return residentActionMsg{"effort: " + err.Error()}
+		}
+		if out.Summary != "" { // the level, what it runs as on this model, and the cache note (the resident's words)
+			return residentActionMsg{residentText(out.Summary)}
 		}
 		cur := "the model's default"
 		if out.Effort != nil && *out.Effort != "" {
@@ -211,7 +215,7 @@ func (m emberModel) modelsOverlay(w, h int) string {
 	case st.err != "" && len(st.list) == 0:
 		rows = append(rows, emberWarn.Render(ansi.Truncate(st.err, inner, "…")))
 	case len(st.list) == 0:
-		rows = append(rows, emberDim.Render("no models: add a provider (caminus ember agent provider NAME add …), then r"))
+		rows = append(rows, emberDim.Render(ansi.Wordwrap("no models yet: add a provider with caminus ember agent provider NAME add …, then press r here to ask it again", inner, " ")))
 	}
 	for i := first; i < min(first+listH, len(st.list)); i++ {
 		rows = append(rows, m.modelRow(st.list[i], i == sel, inner))
@@ -222,7 +226,7 @@ func (m emberModel) modelsOverlay(w, h int) string {
 	} else if st.err != "" && len(st.list) > 0 {
 		note = st.err
 	}
-	body := strings.Join(rows, "\n") + "\n\n" + emberDim.Render(ansi.Truncate(note, inner, "…"))
+	body := strings.Join(rows, "\n") + "\n\n" + emberDim.Render(ansi.Wordwrap(note, inner, " ")) // (cut at 80)
 	title := fmt.Sprintf("MODELS  %d", len(st.list))
 	if st.current.Model != "" {
 		title += "  ·  now " + st.current.Model
@@ -274,40 +278,6 @@ func (m emberModel) modelsLoaded(msg modelsLoadedMsg) emberModel {
 	return m
 }
 
-// updateResident: /update uploads the runtime this panel's caminus carries (agent install) and asks the resident to
-// move to it; the daemon does it between goals (or at the next turn with /update now) and its heartbeat confirms it.
-func updateResident(m emberModel, now bool) tea.Cmd {
-	return func() tea.Msg {
-		if len(m.cli) == 0 {
-			return residentActionMsg{"resident controls need the caminus CLI (--cli)"}
-		}
-		var inst struct {
-			Sha256 string `json:"sha256"`
-		}
-		if out, err := residentCommand(m, []string{"install"}, "").CombinedOutput(); err != nil {
-			return residentActionMsg{"update: install failed: " + strings.TrimSpace(string(out))}
-		} else if i := strings.LastIndex(string(out), "{"); i >= 0 {
-			_ = json.Unmarshal(out[i:], &inst)
-		}
-		args := []string{"update", m.agentName, "--json"}
-		if now {
-			args = append(args, "--now")
-		}
-		var out struct {
-			Runtime string `json:"runtime"`
-			Note    string `json:"note"`
-		}
-		if err := residentJSON(m, args, &out); err != nil {
-			return residentActionMsg{"update: " + err.Error()}
-		}
-		short := out.Runtime
-		if len(short) > 12 {
-			short = short[:12]
-		}
-		return residentActionMsg{"update to runtime " + short + " queued: " + out.Note}
-	}
-}
-
 // emergencyStop (/halt) runs `caminus ember stop-all`: a STOP file in the sticky bridge folder that every resident reads before
 // each step and cannot remove. /halt clear lifts it; paused goals still wait for /resume.
 func emergencyStop(m emberModel, arg string) tea.Cmd {
@@ -328,4 +298,12 @@ func emergencyStop(m emberModel, arg string) tea.Cmd {
 		}
 		return residentActionMsg{text}
 	}
+}
+
+// withEffort is a model name with its effort level ("swift-1.5 · xhigh"), or the name alone.
+func withEffort(model, effort string) string {
+	if model == "" || effort == "" {
+		return model
+	}
+	return model + " · " + effort
 }

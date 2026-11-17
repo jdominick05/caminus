@@ -52,21 +52,21 @@ Each line says PASS, INFO, WARN or FAIL, with the area it checked. Fix every FAI
 caminus panel
 ```
 
-1. In **MODELS**, move to the model for your cards with the arrow keys: `thinkingcap` on one XT (it fits any supported
+1. In the model list, move to the model for your cards with the arrow keys: `thinkingcap` on one XT (it fits any supported
    card), `swift-1.5` on one XTX, `coder` on an XTX + XT ([the setup table](../README.md#get-started)).
    These are Ember's defaults too. On a 24 GB card, `qwen3-30b-a3b` writes about five times as fast as ThinkingCap.
    Read each model's licence before any commercial use: ThinkingCap's is PolyForm Small Business 1.0.0
    ([licences](models.md#licences)); `qwen3-30b-a3b` is Apache-2.0. The steps below use `thinkingcap`.
 2. Press `p` to download it.
 3. Press `enter` to start it. The first start takes about a minute.
-4. Press `tab` until you reach **QWEN CODE**. Press `i` to install Qwen Code (only once), then `u` to set it up.
-5. Press `tab` to reach **SERVERS**, then `enter`. Qwen Code opens, talking to your model.
+4. Once the running card at the top shows it, press `i` to install Qwen Code (only once), then `u` to set it up.
+5. Press `c`. Qwen Code opens, talking to your model.
 
-Press `q` to leave the panel. The model keeps running until you stop it: `x` in **SERVERS**, or `caminus stop thinkingcap`.
+Press `q` to leave the panel. The model keeps running until you stop it: `s` in the panel, or `caminus stop thinkingcap`.
 
 ## Next steps
 
-- [The panel](panel.md): every key, the advanced layout, the live monitor.
+- [The panel](panel.md): every key, the options editor, the live monitor.
 - [Models](models.md): which model to pick for your cards.
 - [Harnesses](harnesses.md): Hermes Agent, Claude Code, or any OpenAI- or Anthropic-compatible tool.
 - [Without the panel](cli.md): the same steps as commands.

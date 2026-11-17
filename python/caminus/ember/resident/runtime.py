@@ -292,6 +292,15 @@ class Live:
         return self.flush()
 
     def flush(self):
+        if not self.check():
+            return False
+        atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
+                                    content=''.join(self.content), reasoning=''.join(self.reasoning),
+                                    tools=self.tools))
+        return True
+
+    def check(self):
+        """False when the turn must stop: the goal was cancelled, or an Esc asked to interrupt it."""
         if self.store.goal(self.gid)['state'] == 'cancelled':
             return False
         # Esc while generating (agent interrupt): the request arrives through the store like /pause, and this
@@ -303,9 +312,6 @@ class Live:
             self.store.event('turn_interrupted', {}, self.gid)
             self.interrupted = True
             return False
-        atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
-                                    content=''.join(self.content), reasoning=''.join(self.reasoning),
-                                    tools=self.tools))
         return True
 
     def clear(self):
@@ -410,7 +416,7 @@ class Runtime:
                          f'Assisted-by trailer, a report), name this model, not one you see in your history.')
         # The reply limit: a reply past it is cut off and nothing in it runs, so the agent must know it beforehand.
         parts.append(f"REPLY LIMIT: each reply, text and tool calls together, is at most "
-                     f"{int(self.config.get('max_tokens',4096)):,} tokens. Write a big file in parts (write, then edit "
+                     f"{self._reply_limit():,} tokens. Write a big file in parts (write, then edit "
                      f"or further writes) rather than in one call.")
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
@@ -495,7 +501,7 @@ class Runtime:
             return ''
         trigger, _ = self.compaction_ratios()
         trigger_tokens = int(size * trigger)
-        reserve = min(int(self.config.get('max_tokens',4096)),size // 4)
+        reserve = min(self._reply_limit(),size // 4)
         limit = min(trigger_tokens,size - reserve)
         if not same:
             return (f'\n\nContext budget: no measured count for this goal yet; the window is {size:,} tokens and '
@@ -532,7 +538,9 @@ class Runtime:
             with self.store.transaction():
                 self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, text, 'nudge'))
                 self.store.settle_request(r['id'], 'done')
-                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision')), gid)
+                # by: 'timeout' when nobody answered (the owner's record says "timed out", not a human's no)
+                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision'),
+                                                          by=result.get('by', '')), gid)
 
     def open_requests(self, gid):
         return [json.loads(r['data'])['rid'] for r in self.store.db.execute(
@@ -557,6 +565,8 @@ class Runtime:
         if not req.exists() and not res.exists():
             value = dict(id=rid, pid=os.getpid(), user=getpass.getuser(), cwd=str(self.home), kind=kind,
                          ts=time.time(), agent=self.config['name'], goal=action['goal'])
+            # when it times out, for the owner's prompt to count down (the request waits question_timeout)
+            value['expires'] = value['ts'] + float(self.config.get('question_timeout', QUESTION_TIMEOUT))
             if kind == 'github':
                 from . import github
                 value.update(github=github.handoff(args), reason=args.get('reason', ''), summary=github.describe(args))
@@ -569,6 +579,8 @@ class Runtime:
                     value['granted'] = True
             else:
                 value.update(text=args['question'], choices=args.get('choices', []))
+                if args.get('recommended'):
+                    value['recommended'] = args['recommended']   # preselected in the owner's prompt
             parent = req.parent
             parent.mkdir(parents=True, exist_ok=True)
             atomic_json(req, value, mode=0o660, group=parent.stat().st_gid)
@@ -718,6 +730,10 @@ class Runtime:
                 it = dict(text=it, state='pending')
             if not isinstance(it, dict):
                 raise ValueError('each todo item is {"text": ..., "state": "pending" | "in_progress" | "done"}')
+            extra = sorted(set(it) - {'text', 'state'})
+            if extra:   # ("status" was taken silently and every item showed as pending)
+                raise ValueError(f'a todo item has only "text" and "state", not {", ".join(map(repr, extra))}: '
+                                 'send state as "pending", "in_progress" or "done"')
             text, state = str(it.get('text', '')).strip(), it.get('state', 'pending')
             if not text:
                 continue
@@ -847,10 +863,65 @@ class Runtime:
                         break
             # the cut replies' calls must not run after the rewind (a reply with several calls, a waiting request)
             self.store.db.execute("DELETE FROM actions WHERE goal=? AND state!='done'", (gid,))
+            # the undone steps are no rewind points any more (/rewind kept offering what was just undone)
+            self.store.db.execute('DELETE FROM file_snapshots WHERE goal=? AND step>?', (gid, to))
             self.store.update(gid, messages=g['messages'][:cut], steps=to, state='paused', summary='',
                               error='rewound to step %d (terminal side effects are not undone)' % to)
         self.store.event('rewound', dict(to=to, restored=restored, removed=removed, skipped=skipped), gid)
         return dict(restored=restored, removed=removed, skipped=skipped)
+
+    def _note_cut_turns(self):
+        """A live snapshot left from before this process started is a turn the old daemon was generating when it died:
+        the step runs again (nothing was stored), and the transcript says so (a restart that retried left no trace)."""
+        for p in sorted((self.home / 'live').glob('*.json')) if (self.home / 'live').is_dir() else []:
+            gid = p.stem
+            try:
+                g = self.store.goal(gid)
+            except ValueError:
+                g = None
+            if g and g['state'] in ('working', 'waiting_model', 'queued'):
+                self.store.event('turn_retried', dict(step=int(g.get('steps') or 0) + 1, reason='agent restarted'), gid)
+            p.unlink(missing_ok=True)
+
+    def _watched(self, live, call, poll=.25):
+        """Run one model call on a worker thread while this thread watches the goal: a /cancel (or an Esc) aborts it at
+        once, also before the first token. A cancelled goal's call held the daemon until the server answered it (the
+        queue sat behind it; minutes on a slow local model). The worker never touches the store: its streamed pieces
+        come back here and go through live.on_delta, which owns the cancel and interrupt checks. An abandoned call
+        finishes on its own; its result is dropped."""
+        import queue, threading
+        if not isinstance(self.model, Model):
+            return call(live.on_delta)          # (a stand-in model may use the store itself: it runs on this thread)
+        pieces, out, stop = queue.Queue(), {}, threading.Event()
+
+        def on_delta(kind, value):
+            if stop.is_set():
+                return False
+            pieces.put((kind, value))
+            return True
+
+        def run():
+            try:
+                out['reply'] = call(on_delta)
+            except BaseException as e:          # (re-raised on this thread below)
+                out['error'] = e
+            pieces.put(None)
+
+        threading.Thread(target=run, daemon=True, name='model-call').start()
+        while True:
+            try:
+                item = pieces.get(timeout=poll)
+            except queue.Empty:
+                item = ()
+            if item is None:
+                break
+            if item and live.on_delta(*item) is False or not item and not live.check():
+                stop.set()
+                self.model.abort()   # (the server stops too: an abandoned call kept it generating)
+                raise Cancelled()
+        if 'error' in out:
+            raise out['error']
+        return out['reply']
 
     def _apply_rewinds(self):
         """/rewind: queued like /pause and applied here, between steps, so a tool is never cut off mid-call."""
@@ -1293,7 +1364,7 @@ class Runtime:
         # paused on a context error instead of compacting.
         tail = [c] if (c := self.context_message(gid)) else []
         size = self.free.window(gid, self.model.context_size())   # free time keeps inside the server's side slot
-        reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
+        reserve = min(self._reply_limit(), size // 4)
         before_tokens = self.model.tokens([system, *messages, *tail], self.tools)
         trigger, target = self.compaction_ratios()
         trigger_tokens, target_tokens = int(size * trigger), int(size * target)
@@ -1657,6 +1728,14 @@ class Runtime:
             note = '[gate] the done check\'s gate fails now:\n' + out[-3000:]
         self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
 
+    def _reply_limit(self):
+        """A reply's token limit for the brain in force (effort.reply_limit: config max_tokens, else a local brain's
+        card maximum up to 64K, a paid one's 4096)."""
+        from . import effort
+        if hasattr(self.model, 'reply_limit'):
+            return self.model.reply_limit()
+        return effort.reply_limit(self.config, getattr(self.model, 'remote', False))
+
     def compaction_ratios(self):
         """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
         compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
@@ -1766,7 +1845,8 @@ class Runtime:
         return True
 
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
-                  'provider', 'provider_kind', 'api_key_env', 'temperature')
+                  'provider', 'provider_kind', 'api_key_env', 'temperature', 'top_p', 'top_k', 'min_p',
+                  'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto')   # (a /model takes effect whole)
 
     def _stamp(self):
         try:
@@ -1903,10 +1983,9 @@ class Runtime:
                 request = [self.system(),*messages]
                 if (budget := self.context_message(gid)):
                     request.append(budget)
-                reply = self.model.complete(request,self.tools,
-                                            max_tokens=min(self._out_boost.get(gid) or int(self.config.get('max_tokens',4096)),
-                                                           self.model.context_size()//4),
-                                            on_delta=live.on_delta)
+                limit = min(self._out_boost.get(gid) or self._reply_limit(), self.model.context_size()//4)
+                reply = self._watched(live, lambda on_delta: self.model.complete(request, self.tools, max_tokens=limit,
+                                                                                 on_delta=on_delta))
             finally:
                 live.clear()
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
@@ -1964,7 +2043,7 @@ class Runtime:
                     self.store.update(gid,state='waiting_model',error=str(e))
                     self.store.event('model_cut',dict(error=str(e),attempt=attempt),gid)
                     return False
-                limit=self._out_boost.get(gid) or int(self.config.get('max_tokens',4096))
+                limit=self._out_boost.get(gid) or self._reply_limit()
                 boost=min(OUTPUT_BOOST_MAX,limit*2,max(1,self.model.context_size()//4))
                 if isinstance(e,ModelTruncated) and getattr(self.model,'remote',False) and gid not in self._out_boost \
                         and boost>limit:
@@ -1982,7 +2061,7 @@ class Runtime:
                     count=self.truncations.get(gid,0)+1
                     self.truncations[gid]=count
                     if count<TRUNCATION_LIMIT:
-                        limit=int(self.config.get('max_tokens',4096))
+                        limit=self._reply_limit()
                         self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,
                             f'[harness] Your last reply hit the output limit ({limit} tokens) and was cut off, so '
                             'nothing in it ran. Keep each reply under the limit: write a big file in parts (write '
@@ -2089,6 +2168,8 @@ class Runtime:
     def run(self, target=None, stop=None, poll=.2, observe=None):
         """Same loop for daemon and oneshot; callers own the process lock."""
         last_heartbeat=0
+        if not target:
+            self._note_cut_turns()
         while stop is None or not stop():
             if not target and self._maybe_update():
                 return None                   # systemd restarts the daemon on the new runtime
@@ -2115,9 +2196,15 @@ class Runtime:
                 atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working',runtime=RUNTIME))
                 last_heartbeat=time.time()
             for gid in goals:
-                progressed |= self.tick(gid)
+                moved = self.tick(gid)
+                progressed |= bool(moved)
                 if observe:
                     observe(self.store)
+                if moved and not target:
+                    # one goal at a time, in queue order: a goal that made progress has the pass; the next one starts
+                    # only while those before it wait (parked, a pending request, the model away). Every goal was
+                    # ticked each pass, so queued goals ran interleaved with the working one, all three "working".
+                    break
                 if target:
                     state = self.store.goal(gid)['state']
                     if state in PAUSED or state == 'waiting_model':

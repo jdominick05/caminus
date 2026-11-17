@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -21,13 +24,76 @@ type residentSessionsMsg struct {
 	names              []string
 }
 
-type residentCreatedMsg struct{ name, err string }
+// sessionCardsMsg: the switcher's cards, loaded after the names so the session list never waits on them.
+type sessionCardsMsg struct {
+	agent string
+	cards []sessionCard
+}
+
+// loadSessionCards reads every session's card at once (each command has residentCommand's own deadline).
+func loadSessionCards(m emberModel, names []string) tea.Cmd {
+	return func() tea.Msg {
+		cards := make([]sessionCard, len(names))
+		var wg sync.WaitGroup
+		for i, n := range names {
+			wg.Add(1)
+			go func() { defer wg.Done(); cards[i] = loadSessionCard(m, n) }()
+		}
+		wg.Wait()
+		return sessionCardsMsg{agent: m.agentName, cards: cards}
+	}
+}
+
+type residentCreatedMsg struct{ name, model, err string }
+
+// residentDestroyedMsg: a session the switcher removed, and where its home is kept.
+type residentDestroyedMsg struct{ name, kept, err string }
+
+// destroyResidentSession cancels every live goal of the session (which withdraws their open requests), then removes it:
+// its service stops, its name leaves the mail bus, its home moves to removed-sessions.
+func destroyResidentSession(m emberModel, name string, active []string) tea.Cmd {
+	return func() tea.Msg {
+		// a runtime from before `remove` refuses here, before the goal is cancelled: nothing changes half-way
+		if out, err := runResident(residentCommand(m, []string{"remove", name, "--dry-run", "--json"}, "")); err != nil {
+			text := strings.TrimSpace(string(out))
+			if strings.Contains(text, "invalid choice") {
+				text = "the agent's runtime predates destroy: run caminus ember agent install, then try again"
+			}
+			return residentDestroyedMsg{name: name, err: text}
+		}
+		// the goals as they are now, not as the card last read them (a card still loading, or one read minutes ago,
+		// knows none or stale ones): a status that cannot be read stops the destroy
+		now := loadSessionCard(m, name)
+		if now.status == "unknown" {
+			return residentDestroyedMsg{name: name, err: "could not read its goals; nothing was changed, try again"}
+		}
+		for _, id := range now.active {
+			if !slices.Contains(active, id) {
+				active = append(active, id)
+			}
+		}
+		for _, id := range active { // every live goal, so none leaves a request behind for a session that is gone
+			_, _ = runResident(residentCommand(m, []string{"cancel", name, id, "--json"}, ""))
+		}
+		out, err := runResident(residentCommand(m, []string{"remove", name, "--json"}, ""))
+		if err != nil {
+			return residentDestroyedMsg{name: name, err: strings.TrimSpace(string(out))}
+		}
+		var r struct {
+			Kept string `json:"kept"`
+		}
+		if i := strings.LastIndex(string(out), "{"); i >= 0 {
+			_ = json.Unmarshal(out[i:], &r)
+		}
+		return residentDestroyedMsg{name: name, kept: r.Kept}
+	}
+}
 
 func emberClip(text string, width int) string {
 	if width <= 0 {
 		width = 110
 	}
-	return ansi.Truncate(text, width, "")
+	return ansi.Truncate(text, width, "…") // a cut line says so (it read as complete: a goal title, a hint, a record)
 }
 
 func (m emberModel) detailViewport() viewport.Model {
@@ -63,7 +129,7 @@ func residentSessions(m emberModel) tea.Cmd {
 		if len(m.cli) == 0 {
 			return residentSessionsMsg{agent: m.agentName, err: "resident sessions need the caminus CLI (--cli)"}
 		}
-		out, err := residentCommand(m, []string{"peers", m.agentName, "--json"}, "").CombinedOutput()
+		out, err := runResident(residentCommand(m, []string{"peers", m.agentName, "--json"}, ""))
 		if err != nil {
 			return residentSessionsMsg{agent: m.agentName, err: strings.TrimSpace(string(out))}
 		}
@@ -77,7 +143,7 @@ func residentSessions(m emberModel) tea.Cmd {
 		for _, p := range peers {
 			result.names = append(result.names, p.Name)
 		}
-		out, err = residentCommand(m, []string{"memory", m.agentName, "--json"}, "").CombinedOutput()
+		out, err = runResident(residentCommand(m, []string{"memory", m.agentName, "--json"}, ""))
 		var memory struct {
 			Memory string `json:"memory"`
 		}
@@ -90,15 +156,21 @@ func residentSessions(m emberModel) tea.Cmd {
 
 func createResidentSession(m emberModel, name string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := residentCommand(m, []string{"create", name, "--from", m.agentName, "--json"}, "").CombinedOutput()
+		// the setup's default local model (the one chosen for these cards), not the brain of the session in view:
+		// a new session from a paid one spent the same relay's money
+		out, err := runResident(residentCommand(m, []string{"create", name, "--from", m.agentName, "--local-default", "--json"}, ""))
 		if err != nil {
 			return residentCreatedMsg{err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
-		out, err = residentCommand(m, []string{"start", name, "--json"}, "").CombinedOutput()
+		var made struct {
+			Model string `json:"model"`
+		}
+		_ = jsonInto(out, &made)
+		out, err = runResident(residentCommand(m, []string{"start", name, "--json"}, ""))
 		if err != nil {
 			return residentCreatedMsg{err: "Session created; runtime start failed: " + strings.TrimSpace(string(out))}
 		}
-		return residentCreatedMsg{name: name}
+		return residentCreatedMsg{name: name, model: made.Model}
 	}
 }
 
@@ -107,6 +179,7 @@ func (m *emberModel) openResident(name string) {
 		m.residentEpoch++
 		m.agentName = name
 		m.resident = residentStatus{}
+		m.statusAt = time.Time{} // nothing known yet: "loading", not "stopped", until its first status lands
 		m.residentEvents = nil
 		m.chat = residentChat{}
 		m.goalSel = 0
@@ -206,26 +279,6 @@ func (m emberModel) sessionKeys(k string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// pickerNames lists the sessions the Ctrl+P query still matches; an empty list
-// keeps the current name so the switcher can always reopen it.
-func (m emberModel) pickerNames() []string {
-	names := m.sessionNames
-	if len(names) == 0 {
-		names = []string{m.agentName}
-	}
-	query := strings.ToLower(m.chat.pickerQuery)
-	if query == "" {
-		return names
-	}
-	var out []string
-	for _, n := range names {
-		if strings.Contains(strings.ToLower(n), query) {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
 func (m emberModel) sessionsPane() string {
 	lines := []string{emberHead.Render("SESSIONS"), "Enter opens a conversation · n creates a session · ↑/↓ select", ""}
 	names := m.sessionNames
@@ -258,13 +311,13 @@ func (m emberModel) residentSettingsPane() string {
 	add("window", fmt.Sprintf("%s tokens", short(m.resident.Context)))
 	add("compaction", fmt.Sprintf("at %.0f %%, down to %.0f %%", m.resident.CompactThreshold*100, m.resident.CompactTarget*100))
 	lines = append(lines, "", emberDim.Render("  Read-only here: /model picks the brain, /effort its depth. New sessions take this one's settings."),
-		emberDim.Render("  Root approvals are in /requests; credentials are never shown."), "")
+		emberDim.Render("  Root approvals are in /approvals; credentials are never shown."), "")
 	key := func(k, v string) {
 		lines = append(lines, "  "+emberTitle.Render(fmt.Sprintf("%-12s", k))+emberDim.Render(v))
 	}
 	key("Enter", "send · Alt+Enter a new line · ↑ ↓ your sent messages")
 	key("Esc", "browse the history · PgUp PgDn scroll · Ctrl+L follow")
 	key("/", "commands, with what each does")
-	key("Ctrl+P", "sessions · Ctrl+G goals · Ctrl+A approvals")
+	key("Shift+Tab", "sessions · Ctrl+G goals · Ctrl+A approvals")
 	return strings.Join(lines, "\n")
 }

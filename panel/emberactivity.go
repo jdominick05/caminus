@@ -9,6 +9,7 @@ package main
 // tokens it has written, how many actions, what the goal has cost.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -35,10 +36,37 @@ var (
 
 // working: the agent is on a goal right now (not waiting on you).
 func (m emberModel) working() *residentGoal {
-	if g := m.activeGoal(); g != nil && (g.State == "working" || g.State == "waiting_model") {
+	if m.daemonDown() {
+		return nil // the header says stopped: no spinner counting under it
+	}
+	if g := m.activeGoal(); g != nil && (g.State == "working" || g.State == "waiting_model") && m.parkedUntil(g.ID) == "" {
 		return g
 	}
 	return nil
+}
+
+// daemonDown: the status has arrived and says the session's loop is not running.
+func (m emberModel) daemonDown() bool { return !m.statusAt.IsZero() && !m.resident.DaemonAlive }
+
+// parkedUntil is "HH:MM" while the goal sleeps on schedule (its newest scheduled event has no wake-up, step or
+// message after it), else "". The status still says working then.
+func (m emberModel) parkedUntil(goal string) string {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != goal {
+			continue
+		}
+		switch e.Kind {
+		case "scheduled":
+			if at, _ := e.Data["wake_at"].(float64); at > float64(time.Now().Unix()) {
+				return time.Unix(int64(at), 0).Format("15:04")
+			}
+			return ""
+		case "woke", "assistant", "user_message", "cancelled", "paused", "finished":
+			return ""
+		}
+	}
+	return ""
 }
 
 // spinStep advances the spinner while the agent works; the chain stops by itself when it is idle.
@@ -120,6 +148,11 @@ func (m emberModel) stretch(gid string) (since time.Time, actions, tokens int) {
 
 // activityLine is the line over the composer while the agent works; "" otherwise.
 func (m emberModel) activityLine(w int) string {
+	if g := m.activeGoal(); g != nil && !m.daemonDown() {
+		if at := m.parkedUntil(g.ID); at != "" {
+			return ansi.Truncate(" "+emberDim.Render("◌ parked until "+at+" · a message wakes it sooner"), max(10, w), "…")
+		}
+	}
 	gl := m.working()
 	if gl == nil {
 		return ""
@@ -135,6 +168,16 @@ func (m emberModel) activityLine(w int) string {
 		heat = 2 - heat
 	}
 	spin := lipgloss.NewStyle().Foreground(lipgloss.Color(blendHex(themeRole("hot"), themeRole("warn"), heat))).Bold(true).Render(frames[f])
+	if m.chat.question != nil { // the prompt below asks: the activity line must not say "type below"
+		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your answer"), max(10, w), "…")
+	}
+	if m.waitingForYou(gl.ID) { // parked on wait(until=message): no work, no spinner; it waits for your words
+		hint := "  · type below to answer"
+		if len(m.sessionRequests()) > 0 { // a request was put off: it is answered with Tab, not by typing
+			hint = "  · Tab answers its request"
+		}
+		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your message")+emberDim.Render(hint), max(10, w), "…")
+	}
 	verb := emberVerbs[(m.spinN/55+len(gl.ID))%len(emberVerbs)] + "…" // a new word every ~6 s
 	doing := ""
 	l := m.chat.live
@@ -171,5 +214,39 @@ func (m emberModel) activityLine(w int) string {
 	if len(stats) > 0 {
 		line += emberDim.Render("  (" + strings.Join(stats, " · ") + ")")
 	}
+	if m.chat.live.active { // the one moment Esc does something here: say so where the eye already is
+		line += emberDim.Render("  · esc interrupts")
+	}
 	return ansi.Truncate(line, max(10, w), "…")
+}
+
+// waitingForYou: the goal's newest call is wait(until=message) and it has not returned: the agent is parked until you
+// write (the header said "working" with the spinner going).
+func (m emberModel) waitingForYou(goal string) bool {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != goal {
+			continue
+		}
+		switch e.Kind {
+		case "tool_result", "user_message":
+			return false
+		case "assistant":
+			calls, _ := e.Data["tool_calls"].([]any)
+			if len(calls) == 0 {
+				return false
+			}
+			c, _ := calls[len(calls)-1].(map[string]any)
+			f, _ := c["function"].(map[string]any)
+			if name, _ := f["name"].(string); name != "wait" {
+				return false
+			}
+			raw, _ := f["arguments"].(string)
+			var args struct {
+				Until string `json:"until"`
+			}
+			return json.Unmarshal([]byte(raw), &args) == nil && args.Until == "message"
+		}
+	}
+	return false
 }

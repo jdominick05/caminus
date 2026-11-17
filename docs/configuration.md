@@ -31,7 +31,7 @@ kv_dir = "/fast-ssd/caminus-kv"
 
 ## Server options
 
-Each model starts with good defaults. To change one, use the panel's advanced layout (`a`, then **OPTIONS**), or pass it to
+Each model starts with good defaults. To change one, use the panel's options editor (`o`), or pass it to
 `caminus serve` (`caminus serve --help` lists them all). A few you may want:
 
 | Option | What it does |

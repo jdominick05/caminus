@@ -25,7 +25,7 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
 - **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
   takes the agent's recommended option after 15 minutes; an unanswered permission or root request is a no.
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
-  and leaves you things it thinks you will like (`/studio`, `/recap`). Free time is never graded and spends its own
+  and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
 - **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
 
@@ -120,6 +120,39 @@ caminus ember setup                           # prints the root script for these
 log and relays are in their own home already; relays listen on fixed local ports, so a second owner's relay takes
 another one (`relay install ... --port 8775`, and the agent's `--endpoint` to match).
 
+## Defaults
+
+Every setting below works without being set. The resident's `config.json` lives in its home; a key in the table is a
+key of that file.
+
+| Setting | Default | What it does | Change it with |
+|---|---|---|---|
+| Compaction, local brain | at 85 % of the window, down to 20 % | old tool output is trimmed first; a summary only if needed | `compact_threshold`, `compact_target_ratio` |
+| Compaction, paid brain | at 38 % of the window, down to 7.6 % | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
+| Free time | off | stretches of 30 min with 30 min rests; $0.50 a day on a priced model; 3 questions a day, each waiting 10 min; a dream pass from 03:00 | `caminus ember agent heartbeat NAME on`; `free_time.*` |
+| Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
+| Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
+| Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
+| A request's wait | 15 min | a question then takes its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
+| Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
+
+Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
+
+### Per model
+
+| Model | Effort (default) | Sampling | One reply at most |
+|---|---|---|---|
+| Qwen3.8 line on Caminus (the Coder, Swift 1.5, ThinkingCap, Qwen3.8-27B) | xhigh; low, medium and xhigh are its levels (high and max run as xhigh, none turns thinking off) | the server's, from the model file (1.0 / top_p 0.95 / top_k 20) | 64K (the card allows 393K; capped so a runaway reply cannot hold the server) |
+| Qwen3-30B-A3B on Caminus | thinking on (none turns it off; it has no other levels) | the server's | 32K (its card) |
+| Anthropic | medium; low to max natively. none: thinking off at effort high on Haiku 5.5 and Opus 5, thinking only between tools on Sonnet 5.5; Opus 5.5, Fable and any other model always think, so none runs as low | none sent (the API refuses temperature, top_p and top_k) | the model's listed maximum, at most 64K |
+| Mistral Large 4 | high; it has low, medium, high (none runs as low, xhigh and max as high) | 1.0 / top_p 0.95 | the listed maximum, at most 64K |
+| Mistral Medium 3.5 | high; it has none and high (low runs as none, medium and above as high) | 0.7 / top_p 0.95 (top_p only at high) | the listed maximum, at most 64K |
+| DeepSeek-V4.1-Flash | the provider's | 1.0 / top_p 1.0 | the listed maximum, at most 64K |
+| Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
+
+A side call (the judge's check of a finish) always runs with thinking off.
+
 ## Where things live
 
 | What | Where |
@@ -139,13 +172,13 @@ another one (`relay install ... --port 8775`, and the agent's `--endpoint` to ma
 ## Its GitHub account
 
 Give an agent its own GitHub account and a token file in its account (the token never leaves it), then link them
-with `/identity` in the chat (`l`), or `caminus ember agent github NAME link --token-file PATH --repo OWNER/NAME`.
+with `caminus ember agent github NAME link --token-file PATH --repo OWNER/NAME`.
 Its terminals then use that account for `gh` and `git push`, and its commits carry its identity (the noreply email
 GitHub links to the account, so a CLA check can find its signature). The token's text never appears in what it sees.
 
 What its token may not do on your repositories (open a pull request from its fork, comment, approve a CI run from its
-fork) reaches you as a **GITHUB** card: `a a` runs it with your own `gh`, exactly as filed; `d` denies, `/deny TEXT`
-says what to do instead. Nothing it files is a command: the card holds checked fields, and the command is built from
+fork) asks where you type, like a root request: Yes runs it with your own `gh`, exactly as filed; No denies; "Tell it
+something else" says what to do instead. Nothing it files is a command: the card holds checked fields, and the command is built from
 them on your side.
 
 Your files never move into the agent's account unless you put them there or approve a command that does.

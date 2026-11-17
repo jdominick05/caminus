@@ -20,7 +20,7 @@ import (
 
 // glyphs is one tier's symbols. unicode is the default and needs no special font; nerd needs a Nerd Font (e.g.
 // MesloLGS NF from the powerlevel10k README) and adds icons and powerline segments; ascii is for terminals that
-// render neither. A terminal cannot report its font, so the tier is the owner's setting (/glyphs cycles it).
+// render neither. A terminal cannot report its font, so the tier is the owner's setting (g on the theme screen cycles it).
 type glyphs struct {
 	name                                 string
 	working, waiting, done, idle, failed string // goal states
@@ -54,7 +54,7 @@ var glyphTiers = map[string]glyphs{
 }
 
 // unicode is the shipped default: it needs no special font, so it works in any terminal and over SSH from a phone.
-// nerd is a per-user choice saved by /glyphs (most terminals have no Nerd Font and would show empty boxes).
+// nerd is a per-user choice saved from the theme screen (most terminals have no Nerd Font and would show empty boxes).
 var g = glyphTiers["unicode"]
 
 // init applies the user's saved tier (CAMINUS_GLYPHS wins).
@@ -93,7 +93,7 @@ func glyphsSavePath() string {
 	return ""
 }
 
-// glyphsNext is the tier after the current one, for /glyphs without a name.
+// glyphsNext is the tier after the current one, for g on the theme screen.
 func glyphsNext() string {
 	order := []string{"nerd", "unicode", "ascii"}
 	for i, n := range order {
@@ -128,7 +128,7 @@ func shellHeader(agent, state, goal string, steps, w int) string {
 	if goal != "" {
 		detail = lipgloss.NewStyle().Foreground(cBlue).Render(goal)
 	}
-	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(fmt.Sprintf("%d steps", steps)), w)
+	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(plural(steps, "step", "steps")), w)
 }
 
 // screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): CAMINUS · what · its
@@ -182,7 +182,7 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 	}
 	icon, st := g.tool, emberTool
 	switch kind {
-	case "edit":
+	case "edit", "write":
 		icon, st = g.edit, lipgloss.NewStyle().Foreground(cPurple)
 	case "gate":
 		icon, st = g.gate, emberCtxOK
@@ -240,7 +240,7 @@ func approvalCard(kind, cmd, why string, w int) string {
 }
 
 // approvalCardKeys draws the card; inline false says where to decide instead of offering keys the view does not
-// handle yet (the chat decides root requests in /requests until its own keys are wired).
+// handle yet (the chat decides root requests in /approvals until its own keys are wired).
 func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	// the card shows exactly what runs: control characters and escapes in the agent's text are shown as escapes, so a
 	// \r or a cursor move cannot draw a different command over the one that will run (idempotent on safe text)
@@ -249,19 +249,16 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	if kind == "question" {
 		title = "? QUESTION"
 	}
-	keys := emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" approve  ") + emberWarn.Render("g g") +
-		emberDim.Render(" grant for the goal  ") + emberWarn.Render("e") +
-		emberDim.Render(" edit  ") + emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
-		emberDim.Render(" says what to do instead")
+	keys := emberWarn.Render("Ctrl+A") + emberDim.Render(" decides it (approve, grant for the goal, edit, deny)  ·  ") +
+		emberWarn.Render("/deny TEXT") + emberDim.Render(" says what to do instead")
 	if kind == "github" {
 		// a hand-off runs once, as filed, with the owner's gh: no grant, no edit
 		title = "⇡ GITHUB"
-		keys = emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" run it as you  ") +
-			emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
-			emberDim.Render(" says what to do instead")
+		keys = emberWarn.Render("Ctrl+A") + emberDim.Render(" decides it (run it as you, deny)  ·  ") +
+			emberWarn.Render("/deny TEXT") + emberDim.Render(" says what to do instead")
 	}
 	if !inline {
-		keys = emberDim.Render("decide in ") + emberWarn.Render("/requests")
+		keys = emberDim.Render("decide in ") + emberWarn.Render("/approvals")
 	}
 	inner := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(cmd) + "\n" +
 		emberDim.Render("why: "+why) + "\n" + keys
@@ -380,6 +377,7 @@ func labBadge(model string) string {
 // powerline pills; elsewhere they are joined by a dot.
 type status struct {
 	brain        string
+	cwd          string // the folder the agent works in, left of the context pill; empty hides it
 	used, window int
 	compact      float64 // the compaction threshold as a fraction of the window; the bar warms toward it
 	usd          float64 // this goal's spend; negative hides the segment (an unpriced brain)
@@ -413,8 +411,13 @@ func statusLine(s status, w int) string {
 	bar := barSt.Render(strings.Repeat(g.bar, full)) + emberDim.Render(strings.Repeat(g.barEmpty, cells-full))
 	segs := []string{
 		strings.TrimSpace(labBadge(s.brain) + " " + s.brain),
-		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window))) + bar,
 	}
+	if s.cwd != "" {
+		segs = append(segs, emberCode.Render(clipPath(s.cwd, max(12, w/5))))
+	}
+	segs = append(segs,
+		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window)))+bar,
+	)
 	if s.usd >= 0 {
 		seg := strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd))
 		if s.usdDay > 0 {

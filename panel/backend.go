@@ -47,7 +47,7 @@ type serveMode struct {
 type serverInfo struct {
 	Name      string   `json:"name"`
 	Model     string   `json:"model"`
-	State     string   `json:"state"` // ready | loading | failed | stopped
+	State     string   `json:"state"` // ready | loading | failed | stopped (only ready and loading run)
 	URL       string   `json:"url"`
 	Port      int      `json:"port"`
 	Cards     []string `json:"cards"`
@@ -59,19 +59,23 @@ type serverInfo struct {
 	Alias     string   `json:"alias"`
 	Log       string   `json:"log"`
 	Error     string   `json:"error"`
+	Note      string   `json:"note"`     // why a record that looked failed is not (its guard refusal no longer applies)
+	External  bool     `json:"external"` // started outside caminus start (a script, caminus serve): watched, never controlled
+	KV        string   `json:"kv"`
 }
 
 // cardInfo is one usable GPU of `caminus ps --json` (index: the position `--card` takes; pci: the card's identity).
 type cardInfo struct {
-	Index   int     `json:"index"`
-	Name    string  `json:"name"`
-	Pci     string  `json:"pci"`
-	UsedMiB float64 `json:"used_mib"`
-	LineMiB float64 `json:"line_mib"`
-	Link    string  `json:"link"`
-	LinkOK  bool    `json:"link_ok"`
-	Display bool    `json:"display"`
-	Status  string  `json:"status"` // supported | untested
+	Index    int     `json:"index"`
+	Name     string  `json:"name"`
+	Pci      string  `json:"pci"`
+	UsedMiB  float64 `json:"used_mib"`
+	LineMiB  float64 `json:"line_mib"`
+	TotalMiB float64 `json:"total_mib"`
+	Link     string  `json:"link"`
+	LinkOK   bool    `json:"link_ok"`
+	Display  bool    `json:"display"`
+	Status   string  `json:"status"` // supported | untested
 }
 
 // problemInfo is one line about the host's GPUs (caminus.device.host.problems): level error (Caminus cannot run anything:
@@ -101,7 +105,7 @@ type harnessInfo struct {
 	Target     string `json:"target"` // the server it is set up for
 }
 
-// option is one flag of `caminus serve --options-json` (the advanced layout's list: every option the server accepts).
+// option is one flag of `caminus serve --options-json` (the options editor's list: every option the server accepts).
 type option struct {
 	Flag    string        `json:"flag"`
 	Dest    string        `json:"dest"`

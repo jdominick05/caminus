@@ -41,6 +41,14 @@ def _online_s(pid):
     except (TypeError, ValueError, OSError, IndexError):
         return None
 
+def _effort_shown(cfg):
+    """The effort in force as the status line shows it (the level that runs; '' with no effort control)."""
+    from . import effort as eff
+    if not eff.line(cfg):
+        return ''
+    return eff.runs_as(cfg,cfg.get('effort') or eff.default_level(cfg))
+
+
 def _current(cfg):
     keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
@@ -120,63 +128,109 @@ def model_ops(a,home):
         if not a.id:
             emit(dict(current=_current(cfg)),a.json);return 0
         cat=catalog.load(home)
+        a.level_from_id=None
         entry=catalog.find(cat,a.id,a.provider)
         if entry is None:
             cat=catalog.refresh(home,cfg)
             entry=catalog.find(cat,a.id,a.provider)
+        if entry is None:
+            # a local effort id (k3-coder-xhigh): its base model at that level
+            from . import effort as eff
+            for lvl,suffix in eff.SUFFIX.items():
+                if a.id.endswith(suffix):
+                    entry=catalog.find(cat,a.id[:-len(suffix)],a.provider)
+                    if entry is not None and (entry.get('variants') or {}).get(lvl)==a.id:
+                        a.level_from_id=lvl
+                        break
+                    entry=None
         if entry is None:
             raise ValueError(f'no model {a.id} in the catalog: `models --refresh` lists what the providers serve')
         spec=catalog.providers(cfg).get(entry['provider'])
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking'):
+        for k in ('relay','prices','context','thinking','model_variants','efforts'):
             cfg.pop(k,None)
+        if cfg.pop('max_tokens_auto',None):
+            cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
         if cfg.get('compaction_model') and catalog.find(cat,cfg['compaction_model'],entry['provider']) is None:
             cfg.pop('compaction_model')
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])
-        if entry.get('max_output'):
-            # a paid brain bills what it writes: its catalog maximum (up to 64K), not a local server's limit
-            cfg['max_tokens']=min(int(entry['max_output']),65536)
+        if entry.get('variants'):
+            cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
+        elif spec['kind'] not in ('local','anthropic'):
+            cfg['efforts']=list(entry.get('efforts') or [])   # whether this model takes reasoning_effort at all
+        if entry.get('max_output') and spec['kind']!='local':
+            # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
+            cfg['max_tokens'],cfg['max_tokens_auto']=min(int(entry['max_output']),65536),True
         if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
             cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
-        levels=entry.get('efforts') or []
-        if cfg.get('effort') not in levels:
+        # the effort level stays when the new brain has effort control (every level runs as its nearest); with none it
+        # goes back to the default
+        from . import effort as eff
+        note='a running resident takes it at its next turn'
+        if cfg.get('effort') and not eff.line(cfg):
             cfg.pop('effort',None)
-            if 'medium' in levels:cfg['effort']='medium'
+            note+='; this model has no effort control, so the effort is back to its default'
+        if a.level_from_id:
+            cfg['effort']=a.level_from_id
         if cfg.get('api')=='openai':
             cfg.pop('api',None)               # openai is the default transport
         atomic_json(home/'config.json',cfg)
-        emit(dict(current=_current(cfg),entry=entry,note='a running resident takes it at its next turn'),a.json);return 0
+        emit(dict(current=_current(cfg),entry=entry,note=note),a.json);return 0
     if a.op=='effort':
-        cat=catalog.load(home)
-        try:entry=catalog.find(cat,cfg.get('model',''),cfg.get('provider'))
-        except ValueError:entry=None
-        levels=(entry or {}).get('efforts') or []
+        # one scale on every brain (none .. max); the model runs each level as its nearest (effort.py)
+        from . import effort as eff
+        line=eff.line(cfg)
+        levels=list(eff.LEVELS) if line else []
+        before=eff.template_line(cfg,cfg.get('effort') or eff.default_level(cfg))
         if a.level:
-            if a.level=='default':
+            level=eff.normalize(a.level)
+            if level=='default':
                 cfg.pop('effort',None)
-            elif entry is not None and a.level not in levels:
-                raise ValueError('%s offers %s' % (cfg.get('model'), ', '.join(levels) if levels else 'no effort control'))
+            elif not line:
+                raise ValueError('%s has no effort control' % cfg.get('model'))
+            elif level not in eff.LEVELS:
+                raise ValueError('effort is one of %s, or default' % ', '.join(eff.LEVELS))
             else:
-                cfg['effort']=a.level
+                cfg['effort']=level
             atomic_json(home/'config.json',cfg)
-        emit(dict(effort=cfg.get('effort'),levels=levels,model=cfg.get('model')),a.json);return 0
+        current=cfg.get('effort') or eff.default_level(cfg)
+        runs=eff.runs_as(cfg,current) if current else ''
+        summary='effort %s%s' % (current or "the model's default",
+                                  ' (the lab\'s default)' if current and not cfg.get('effort') else '')
+        if runs and runs!=current:
+            summary+=' · runs as '+runs
+        summary+=' · '+cfg.get('model','')+': '+eff.note(cfg)
+        if not a.level and (sc:=eff.scale(cfg,current)):
+            summary+='\n'+sc            # (bare /effort: every level and what it runs as on this model)
+        if a.level and eff.template_line(cfg,current)!=before:
+            # the template's effort line is the system message's first text: the server reads the conversation again
+            try:used=int(json.loads((home/'context.json').read_text()).get('tokens') or 0)
+            except (OSError,ValueError,AttributeError,TypeError):used=0
+            # (once, the count first: the note said it too, and at 80 columns the count was cut)
+            summary+=(' · %dK tokens re-read once' % (used//1000)) if used>8000 else ' · the conversation is re-read once'
+        emit(dict(effort=cfg.get('effort'),current=current,runs_as=runs,levels=levels,model=cfg.get('model'),
+                  summary=summary),a.json);return 0
 
 
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
         p.add_argument('--json',action='store_true')
         if op=='create':
             p.add_argument('--from',dest='template',required=True,help='copy model settings from a sibling resident; memory/history start fresh')
+            p.add_argument('--model',help='a local model instead of the sibling\'s brain (the session switcher passes the setup\'s default)')
+            p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1',help='with --model: the local server')
+        if op=='remove':
+            p.add_argument('--dry-run',action='store_true',help='check the session exists and say what would happen; change nothing')
         if op=='memory':
             p.add_argument('--text',help='append a note to this resident\'s MEMORY.md')
             p.add_argument('--stdin',action='store_true')
@@ -188,7 +242,7 @@ def parser():
             p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1')
             p.add_argument('--bridge',default=os.environ.get('CAMINUS_ENV_BRIDGE','/srv/caminus-env-bridge'))
             p.add_argument('--context',type=int)
-            p.add_argument('--max-tokens',type=int,default=4096)
+            p.add_argument('--max-tokens',type=int,help='one reply\'s token limit (default: the model\'s own, effort.reply_limit)')
             p.add_argument('--compact-threshold',type=float,default=.85)
             p.add_argument('--compact-target-ratio',type=float,default=.2)
             p.add_argument('--compaction-model',help='optional model alias for summaries on the same endpoint')
@@ -402,6 +456,16 @@ def main(argv=None,stdin=None):
             source=home.parent/a.template
             cfg=json.loads((source/'config.json').read_text())
             cfg['name']=a.name
+            if a.model:
+                # a local brain in place of the sibling's: as /model does, drop what belonged to a paid one (its relay,
+                # prices, window, thinking, effort) and keep the providers so /model can switch back
+                cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
+                cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
+                # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
+                # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
+                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
+                          'fallback','advisor','judge_model'):
+                    cfg.pop(k,None)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -412,7 +476,7 @@ def main(argv=None,stdin=None):
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()
-            emit(dict(name=a.name,home=str(home),configured=True),True)
+            emit(dict(name=a.name,home=str(home),configured=True,model=cfg['model']),True)
             return 0
         if a.op=='discover':
             emit(discover(home,a.topic,a.query),True)
@@ -424,7 +488,7 @@ def main(argv=None,stdin=None):
         if a.op=='init':
             if not 0 < a.compact_target_ratio < a.compact_threshold < 1:
                 raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
-            if a.max_tokens<1 or a.context is not None and a.context<1024:
+            if (a.max_tokens is not None and a.max_tokens<1) or a.context is not None and a.context<1024:
                 raise ValueError('invalid model context or output budget')
             home.mkdir(parents=True,exist_ok=True,mode=0o700)
             cfg=dict(name=a.name,model=a.model,endpoint=a.endpoint.rstrip('/'),bridge=a.bridge,
@@ -472,6 +536,35 @@ def main(argv=None,stdin=None):
                     value=mail.send(a.to,text,recipient_goal=a.recipient_goal,reply_to=a.reply_to)
                 emit(value,True)
             finally:mail.close()
+            return 0
+        if a.op=='remove':
+            # The session switcher's destroy: its service stops and is disabled, its name leaves the mail bus, and its
+            # home (config, memory, history, files) moves to removed-sessions, kept and restorable by moving it back.
+            # The panel cancels a running goal first with `cancel`, which also withdraws its open requests.
+            if not (home/'config.json').exists():
+                raise ValueError('no session named '+a.name)
+            if a.dry_run:
+                emit(dict(name=a.name,removed=False,would='stop and disable its service, leave the mail bus, move its home to removed-sessions'),True)
+                return 0
+            unit='caminus-agent-'+a.name+'.service'
+            env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
+            subprocess.run(['systemctl','--user','disable','--now',unit],env=env,check=False,capture_output=True)
+            unit_file=Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd/user'/unit
+            if unit_file.exists():
+                unit_file.unlink()
+                subprocess.run(['systemctl','--user','daemon-reload'],env=env,check=False,capture_output=True)
+            mail=Mail(json.loads((home/'config.json').read_text()))
+            try:mail.unregister()
+            finally:mail.close()
+            import time as _time
+            root=(home.parent if a.home else Path.home()/'.local/share/caminus')/'removed-sessions'  # (a test's --home stays in its folder)
+            kept=root/(a.name+'-'+_time.strftime('%Y%m%d-%H%M%S'))
+            kept.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            os.replace(home,kept)
+            env_file=Path.home()/'.config/caminus/agents'/(a.name+'.env')
+            if env_file.exists():
+                os.replace(env_file,kept/'agent.env')
+            emit(dict(name=a.name,removed=True,kept=str(kept)),True)
             return 0
         if a.op in ('unit','start','stop'):
             unit='caminus-agent-'+a.name+'.service'
@@ -660,6 +753,7 @@ def main(argv=None,stdin=None):
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
                       compact_threshold=trig,compact_target_ratio=targ,
+                      effort=_effort_shown(cfg),
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
                       online_s=_online_s(heartbeat.get('pid')),**store.status()),True)
@@ -740,7 +834,7 @@ def main(argv=None,stdin=None):
                     rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,note,'nudge'))
                     rt.store.request(gid,'interrupt')
                     rt.store.event('advisor_review',dict(model=out.get('model'),usd=out.get('usd'),
-                                                         focus=(a.text or '')[:300]),gid)
+                                                         focus=(a.text or '')[:300],advice=(out.get('advice') or '')[:4000]),gid)
             finally:rt.mail.close();rt.store.close()
             emit(dict(goal=gid,model=out.get('model'),usd=out.get('usd'),advice=out['advice']),a.json);return 0
         if a.op=='github':

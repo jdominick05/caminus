@@ -84,7 +84,7 @@ SHOWN_DEFAULTS = {'kv': 'f16'}
 
 
 def options_json():
-    """every option caminus serve accepts, for caminus panel's advanced layout (and scripts): flag, dest, type (int / float /
+    """every option caminus serve accepts, for caminus panel's options editor (and scripts): flag, dest, type (int / float /
     str / bool / ctx), the default caminus serve uses, the help text; read from the parser itself, so it never drifts"""
     out = []
     for act in parser()._actions:
@@ -412,7 +412,7 @@ def fit_report(argv):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    if '--options-json' in argv:                 # (caminus panel's advanced layout: nothing is loaded, no GPU)
+    if '--options-json' in argv:                 # (caminus panel's options editor: nothing is loaded, no GPU)
         import json
         print(json.dumps(options_json()))
         return 0
@@ -460,6 +460,15 @@ def main(argv=None):
     if long_note: print(f'caminus serve: {long_note}', flush=True)
     opt['model_alias'] = opt['model_alias'] or _arch.default_alias(opt['model'])
     A.set_ids(opt['model_alias'], tok)
+    # a request's defaults: the catalog's recommended sampling for this file's model, then the GGUF's general.sampling.*,
+    # then the built-in ones (a request's own fields still win)
+    from .sampler import model_defaults
+    sampling, sampling_nothink, max_output = model_defaults(opt['model'], getattr(tok.vocab, 'meta', None))
+    for label, sp in (('', sampling), (' without thinking', sampling_nothink)):
+        if sp is not None:
+            print(f'caminus serve: sampling defaults{label} temperature {sp.temperature:g}, top_p {sp.top_p:g}, top_k '
+                  f'{sp.top_k}, min_p {sp.min_p:g}, presence {sp.presence_penalty:g}, repeat {sp.repeat_penalty:g}'
+                  + (f'; recommended output up to {max_output:,} tokens' if max_output and not label else ''), flush=True)
     stats = EngineStats(enabled=not opt['no_stats'], physics=A.physics(0))
     hw = None
     flight = None
@@ -470,7 +479,8 @@ def main(argv=None):
                    log_dir=opt['log_dir'] or None, ping_interval=float(opt['ping']), max_queue=int(opt['max_queue']),
                    incremental_tool_args=bool(opt['incremental_tool_args']), model_path=opt['model'], hw=hw, stats=stats,
                    loading=True, model_alias=opt['model_alias'], flight=flight, loop_guard=not opt['no_loop_guard'],
-                   kv_cache={'type': opt.get('kv') or 'f16', 'format': None})   # (the built engine's below: kv_cache_of)
+                   kv_cache={'type': opt.get('kv') or 'f16', 'format': None},   # (the built engine's below: kv_cache_of)
+                   sampling=sampling, sampling_nothink=sampling_nothink, max_output=max_output)
     srv.start(background=True)
     print(f'caminus serve: http://{opt["host"]}:{srv.port} (loading)  pid={os.getpid()}', flush=True)
     from ..device import kernels

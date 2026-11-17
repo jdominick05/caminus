@@ -272,6 +272,11 @@ func (m emberModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
+	case "g": // the symbol set (nerd / unicode / ascii), here since it is a look setting like the theme
+		if err := glyphsSet(glyphsNext()); err == nil {
+			m.msg = "symbols: " + g.name + "  " + g.working + " " + g.waiting + " " + g.done + " " + g.root
+		}
+		return m, nil
 	case "n", "/":
 		t.describing, t.err = true, ""
 		return m, nil
@@ -356,7 +361,7 @@ func (m emberModel) themesOverlay(w, h int) string {
 	}
 	_ = themeLoad(current)
 	applyThemeStyles()
-	room := max(4, h-6)
+	room := max(3, h-6-4) // (the describe lines under the list take four rows)
 	top := 0
 	if t.sel >= room {
 		top = t.sel - room + 1
@@ -375,11 +380,21 @@ func (m emberModel) themesOverlay(w, h int) string {
 	default:
 		list = append(list, "", emberDim.Render("n  describe a new theme"))
 	}
-	pw := max(30, w-listW-8)
-	preview := themePreview(current, pw)
 	left := lipgloss.NewStyle().Width(listW).Render(strings.Join(list, "\n"))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", preview)
-	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · n describe a new one · Esc back", w, h)
+	body := left
+	// the preview keeps to its column and the box's height (below 160 columns it wrapped into the list and pushed
+	// the box's border, its hint and the status line off the screen); with no room for it, the list alone
+	if pw := w - listW - 12; pw >= 24 { // (the box's borders and padding, and the gap: 8 left it three cells wide)
+		pl := strings.Split(themePreview(current, pw), "\n")
+		if len(pl) > max(3, h-6) {
+			pl = pl[:max(3, h-6)]
+		}
+		for i := range pl {
+			pl[i] = ansi.Truncate(pl[i], pw, "…")
+		}
+		body = lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", strings.Join(pl, "\n"))
+	}
+	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · g symbols · n describe a new one", w, h)
 }
 
 // themePreview draws one of every element the chat uses, in the theme in force.
@@ -402,13 +417,13 @@ func themePreview(name string, w int) string {
 	add(todoLine([]todoItem{{"read the parser", "done"}, {"add the tests", "now"}, {"open a PR", "next"}}, w))
 	add(emberSel.Render(" a selected row "), "")
 	add(borderTitle(emberBorder.Render(fgc("muted").Render("a framed box: menus, the composer, Ember's thoughts")), "a title", emberDim))
-	add(footBar([]string{g.model + " " + name, "120K/1M", "$0.42"}, []string{"esc browse", "/help"}, w))
+	add(footBar([]string{g.model + " " + name, "120K/1M", "$0.42"}, []string{"⇧Tab sessions", "/help"}, w))
 	return strings.Join(out, "\n")
 }
 
 // overlayOpen: an overlay or the session picker covers the conversation (the background pattern is not drawn then).
 func (m emberModel) overlayOpen() bool {
 	c := m.chat
-	return c.approvals || c.goals || c.models.open || c.identity.open || c.advisor.open || c.themes.open || c.studio.open || c.view.open || c.rewind.open ||
+	return c.goals || c.models.open || c.themes.open || c.studio.open || c.view.open || c.rewind.open ||
 		c.page >= 0 || c.picker
 }

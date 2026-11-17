@@ -474,15 +474,52 @@ class Store:
             self.update(g['id'], messages=[*g['messages'], msg], state=g['state'] if keep else 'working')
             self.event('tool_result', dict(name=action['name'], call_id=action['call_id'], result=result), g['id'])
 
+    def aim(self, gid):
+        """The goal's redirected aim, or None when it still works toward its prompt (the panel's goalAim rule)."""
+        return _aim_rows(self.db.execute("SELECT kind,data FROM events WHERE goal=? AND kind IN ('user_message','done_check') "
+                                         "ORDER BY seq", (gid,)))
+
     def status(self):
         goals = [dict(r) for r in self.db.execute('SELECT id,prompt,state,summary,error,steps,created,updated,'
-                                                  'plan,plan_text FROM goals ORDER BY created DESC LIMIT 50')]
+                                                  'plan,plan_text,wake_at FROM goals ORDER BY created DESC LIMIT 50')]
+        now = time.time()
+        for g in goals:
+            # parked (schedule): its state stays working in the store, so every UI showed two working goals with the
+            # one-at-a-time loop; parked_until says it is waiting for its wake time instead
+            w = g.pop('wake_at', None)
+            if w and w > now and g['state'] in ('working', 'queued'):
+                g['parked_until'] = w
         waiting = [dict(r) for r in self.db.execute("SELECT goal,name,bridge_id FROM actions WHERE state='waiting'")]
         # compactions per goal, counted from the whole history (the panel keeps only its newest events)
         compactions = {g: n for g, n in self.db.execute("SELECT goal,count(*) FROM events WHERE kind='compacted' "
                                                          "AND goal IS NOT NULL GROUP BY goal")}
-        return dict(goals=goals, waiting=waiting, compactions=compactions,
+        # what a redirected goal works toward now (a message after its first done check, then a new check): the panel's
+        # header reads it from the events it holds; a session switcher card has only this status
+        aims = {g['id']: a for g in goals[:5] if (a := self.aim(g['id']))}
+        # a queued goal's place in the run order (1 runs next): the list is newest first, the queue is not
+        places = {q['id']: q['position'] for q in self.queue()}
+        for g in goals:
+            if g['id'] in places:
+                g['queue'] = places[g['id']]
+        return dict(goals=goals, waiting=waiting, compactions=compactions, aims=aims,
                     last_event=self.db.execute('SELECT coalesce(max(seq),0) FROM events').fetchone()[0])
+
+
+def _aim_rows(rows):
+    text, msg, checked = None, None, False
+    for kind, data in rows:
+        if kind == 'user_message':
+            try:
+                t = (json.loads(data).get('text') or '').strip()
+            except (ValueError, AttributeError):
+                t = ''
+            if t and checked:
+                msg = t  # (a message before the first done check refines the prompt; it does not redirect it)
+        else:
+            if msg:
+                text, msg = msg, None
+            checked = True
+    return text
 
 
 def log_failure(home, record):

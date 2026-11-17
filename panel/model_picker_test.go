@@ -22,18 +22,19 @@ func pickerModel() camModel {
 }
 
 func TestModelPickerBasicChoices(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), false, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	mi := pickerModel()
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "dense"}) {
 		t.Fatalf("auto leaves the measured default to serve: %v", got)
 	}
-	if !strings.Contains(m.keysLine(), "drafter") || !strings.Contains(m.keysLine(), "card count") {
-		t.Fatal("both choices are discoverable in the basic model picker")
+	if d := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(d, "drafter") || !strings.Contains(d, "cards") ||
+		!strings.Contains(m.keysLine(), "choice") {
+		t.Fatalf("both choices are on the screen, and the key line says how to change them:\n%s\n%s", d, ansi.Strip(m.keysLine()))
 	}
 	for _, want := range []string{"off", "mtp", "dflash", "auto"} {
 		next, cmd := m.modelsKey("d")
-		m = next.(ctl)
+		m = next
 		if cmd != nil {
 			t.Fatal("choosing a drafter must not launch anything")
 		}
@@ -49,13 +50,13 @@ func TestModelPickerBasicChoices(t *testing.T) {
 			t.Fatalf("drafter not passed: %s", args)
 		}
 	}
-	if rows := strings.Join(m.modelRows(), "\n"); !strings.Contains(rows, "auto (server default)") {
+	if rows := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(rows, "[auto] off mtp dflash") {
 		t.Fatalf("the next start is visible: %s", rows)
 	}
 }
 
 func TestModelPickerPerCardCountAndModel(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), false, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	mi := pickerModel()
 	m.cycleModelMode(mi, false) // off
 	m.cycleModelMode(mi, false) // mtp
@@ -85,7 +86,7 @@ func TestModelPickerPerCardCountAndModel(t *testing.T) {
 }
 
 func TestModelPickerCapabilitiesAndLegacyOptions(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), true, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	m.card = "1"
 	m.vals = map[string]string{"cards": "2", "draft": "mtp", "no_drafter": "true", "max_ctx": "8192"}
 	m.opts = []option{
@@ -113,12 +114,12 @@ func TestModelPickerCapabilitiesAndLegacyOptions(t *testing.T) {
 
 func TestModelPickerRememberedChoices(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "panel.json")
-	m := newCtl(newCtlCLI("caminus"), false, p)
+	m := newCtl(newCtlCLI("caminus"), p)
 	mi := pickerModel()
 	m.cycleModelMode(mi, false) // explicit off
 	m.cycleModelMode(mi, true)
 	m.cycleModelMode(mi, false) // explicit off for two cards
-	loaded := newCtl(newCtlCLI("caminus"), false, p)
+	loaded := newCtl(newCtlCLI("caminus"), p)
 	if got, want := loaded.startArgs(mi), m.startArgs(mi); !reflect.DeepEqual(got, want) {
 		t.Fatalf("saved model/card choices: got %v want %v", got, want)
 	}
@@ -135,7 +136,7 @@ func TestModelPickerRememberedChoices(t *testing.T) {
 }
 
 func TestModelPickerMissingOptionalDrafter(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), false, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	mi := pickerModel()
 	mi.MissingDrafter, mi.MissingDrafterGB = "dflash", 2.1
 	m.models, m.loaded["models"] = []camModel{mi}, true
@@ -149,24 +150,24 @@ func TestModelPickerMissingOptionalDrafter(t *testing.T) {
 	}
 	m.cycleModelMode(mi, false) // DFlash: refuse the start before a command is made
 	next, cmd := m.modelsKey("enter")
-	m = next.(ctl)
+	m = next
 	if cmd != nil || !m.noteErr || !strings.Contains(m.note, "not downloaded") {
 		t.Fatalf("missing DFlash did not refuse the start: command=%v note=%q", cmd != nil, m.note)
 	}
 	next, cmd = m.modelsKey("p")
-	m = next.(ctl)
+	m = next
 	if cmd != nil || m.confirm == nil || m.confirm.run == nil || !strings.Contains(m.confirm.q, "dflash drafter (2.1 GB)") {
 		t.Fatalf("an installed model can fetch its missing drafter after confirmation: %+v", m.confirm)
 	}
-	if rows := strings.Join(m.modelRows(), "\n"); !strings.Contains(rows, "dflash missing") {
+	if rows := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(rows, "dflash missing") {
 		t.Fatalf("the missing optional file is visible: %s", rows)
 	}
 }
 
 func TestModelPickerCustomDrafter(t *testing.T) {
-	for _, advanced := range []bool{false, true} {
+	{ // (the options editor's --drafter now always reaches the start: there is no basic layout that ignored it)
 		for _, path := range []string{"", "  ", "/fixture/custom.gguf"} {
-			m := newCtl(newCtlCLI("caminus"), advanced, "")
+			m := newCtl(newCtlCLI("caminus"), "")
 			mi := pickerModel()
 			mi.MissingDrafter = "dflash"
 			m.models = []camModel{mi}
@@ -174,9 +175,9 @@ func TestModelPickerCustomDrafter(t *testing.T) {
 			m.vals["drafter"] = path
 			m.picks = map[string]modelPick{mi.Name: {Cards: 1, Drafts: map[int]string{1: "dflash"}}}
 			_, cmd := m.modelsKey("enter")
-			wantStart := advanced && strings.TrimSpace(path) != ""
+			wantStart := strings.TrimSpace(path) != ""
 			if (cmd != nil) != wantStart {
-				t.Fatalf("advanced %v, custom %q: start=%v want %v", advanced, path, cmd != nil, wantStart)
+				t.Fatalf("custom %q: start=%v want %v", path, cmd != nil, wantStart)
 			}
 			if wantStart {
 				args := strings.Join(m.startArgs(mi), " ")
@@ -191,7 +192,7 @@ func TestModelPickerCustomDrafter(t *testing.T) {
 // The picker shows serve's F16 and Q8 maxima from `caminus fit --json` for the selected model, card count and drafter
 // (q8 null: "not offered" for a model without the 8-bit cache). The panel does no memory math of its own.
 func TestModelPickerFitRowFromServeProjection(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), false, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	mi := pickerModel()
 	m.models, m.loaded["models"] = []camModel{mi}, true
 	key, args := m.fitArgs(mi)
@@ -212,23 +213,23 @@ func TestModelPickerFitRowFromServeProjection(t *testing.T) {
 	}
 	f16 := 40960
 	next, _ := m.update(fitMsg{key: key, v: fitInfo{OK: true, MaxCtx: fitCtx{F16: &f16}, KVFormats: []string{"f16"}}})
-	row := ansi.Strip(next.(ctl).fitRow(mi))
+	row := ansi.Strip(next.fitRow(mi))
 	if !strings.Contains(row, "40960") || !strings.Contains(row, "Q8: not offered") {
 		t.Fatalf("F16 maximum shown from fit, Q8 not offered: %q", row)
 	}
 	// a drafter change is another choice with its own read
-	m2 := next.(ctl)
+	m2 := next
 	m2.picks = map[string]modelPick{"dense": {Cards: 1, Drafts: map[int]string{1: "mtp"}}}
 	if k2, a2 := m2.fitArgs(mi); k2 == key || !strings.Contains(strings.Join(a2, " "), "--draft mtp") {
 		t.Fatalf("drafter choice: key %s args %v", k2, a2)
 	}
 	// serve says nothing fits at F16: shown as no context, not as a number
 	none := ctl{}
-	none = newCtl(newCtlCLI("caminus"), false, "")
+	none = newCtl(newCtlCLI("caminus"), "")
 	none.models, none.loaded["models"] = []camModel{mi}, true
 	nk, _ := none.fitArgs(mi)
 	nn, _ := none.update(fitMsg{key: nk, v: fitInfo{OK: true}})
-	if r := nn.(ctl).fitRow(mi); !strings.Contains(r, "no context fits") {
+	if r := nn.fitRow(mi); !strings.Contains(r, "no context fits") {
 		t.Fatalf("no F16 maximum row: %q", r)
 	}
 }
@@ -241,20 +242,20 @@ func q3mModel() camModel {
 }
 
 func TestModelPickerKVAndLongContext(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), false, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	m.prefs = filepath.Join(t.TempDir(), "prefs.json")
 	mi := q3mModel()
 	m.models, m.loaded["models"] = []camModel{mi}, true
-	keys := m.keysLine()
-	if !strings.Contains(keys, "v KV cache") || !strings.Contains(keys, "l long context") {
-		t.Fatalf("both choices are discoverable for the 30B: %s", keys)
+	if d := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(d, "KV cache") || !strings.Contains(d, "context") ||
+		!strings.Contains(ansi.Strip(m.keysLine()), "tab ←→ choice") {
+		t.Fatalf("both choices are discoverable for the 30B:\n%s", d)
 	}
 	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b"}) {
 		t.Fatalf("defaults pass no flags (the server's F16, native): %v", got)
 	}
 	for _, want := range []string{"f16", "q8", "auto"} {
 		next, cmd := m.modelsKey("v")
-		m = next.(ctl)
+		m = next
 		if cmd != nil {
 			t.Fatal("choosing a cache must not launch anything")
 		}
@@ -264,22 +265,23 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 		}
 	}
 	next, _ := m.modelsKey("l")
-	m = next.(ctl)
+	m = next
 	next, _ = m.modelsKey("v") // f16
-	m = next.(ctl)
+	m = next
 	next, _ = m.modelsKey("v") // q8
-	m = next.(ctl)
+	m = next
 	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b", "--kv", "q8", "--long-context"}) {
 		t.Fatalf("start takes its own --kv and --long-context: %v", got)
 	}
 	if _, fa := m.fitArgs(mi); !strings.Contains(strings.Join(fa, " "), "--cards 1 --kv q8 --long-context --json") {
 		t.Fatalf("fit projects the same choice: %v", fa)
 	}
-	if rows := strings.Join(m.modelRows(), "\n"); !strings.Contains(ansi.Strip(rows), "KV q8 · long context (YaRN x4, as far as the card holds") {
-		t.Fatalf("the next start shows the choice: %s", ansi.Strip(rows))
+	if rows := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(rows, "auto F16 [Q8]") ||
+		!strings.Contains(rows, "native [long] YaRN x4, as far as the card holds") {
+		t.Fatalf("the next start shows the choice: %s", rows)
 	}
 	// the choice survives a restart of the panel (KV and Long saved with the picks)
-	re := newCtl(newCtlCLI("caminus"), false, m.prefs)
+	re := newCtl(newCtlCLI("caminus"), m.prefs)
 	if got := re.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b", "--kv", "q8", "--long-context"}) {
 		t.Fatalf("the saved choice was not reloaded: %v", got)
 	}
@@ -295,8 +297,8 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 	// a model without the choices shows neither key and ignores both
 	d := pickerModel()
 	m.models = []camModel{d}
-	if k := m.keysLine(); strings.Contains(k, "KV cache") || strings.Contains(k, "long context") {
-		t.Fatalf("no KV or long-context keys for a model without them: %s", k)
+	if k := ansi.Strip(strings.Join(m.detailRows(80), "\n")); strings.Contains(k, "KV cache") || strings.Contains(k, "context ") {
+		t.Fatalf("no KV or long-context choice for a model without them: %s", k)
 	}
 	m.cycleExtra(d, false)
 	m.cycleExtra(d, true)
@@ -313,7 +315,7 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 }
 
 func TestModelPickerAdvancedValuesCarryIntoThePick(t *testing.T) {
-	m := newCtl(newCtlCLI("caminus"), true, "")
+	m := newCtl(newCtlCLI("caminus"), "")
 	m.prefs = filepath.Join(t.TempDir(), "prefs.json")
 	mi := q3mModel()
 	m.models, m.loaded["models"] = []camModel{mi}, true
@@ -326,10 +328,9 @@ func TestModelPickerAdvancedValuesCarryIntoThePick(t *testing.T) {
 		t.Fatalf("the first pick dropped the advanced drafter or cache: %s", got)
 	}
 	m.busy = "starting x"
-	m.focus = paneModels
 	before := strings.Join(m.startArgs(mi), " ")
 	next, _ := m.key(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	if got := strings.Join(next.(ctl).startArgs(mi), " "); got != before {
-		t.Fatalf("l in MODELS while a start runs must be refused like the other choices: %s -> %s", before, got)
+	if got := strings.Join(next.startArgs(mi), " "); got != before {
+		t.Fatalf("l while a start runs must be refused like the other choices: %s -> %s", before, got)
 	}
 }
