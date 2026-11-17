@@ -1906,6 +1906,7 @@ for line in sys.stdin:
         except subprocess.TimeoutExpired:self.fail('the daemon was still waiting 5 s after SIGTERM')
         self.assertEqual(code,0,p.stderr.read());self.assertLess(time.monotonic()-t0,5)
         waited=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='wait']
+        self.assertTrue(waited,'SIGTERM landed before the wait began (the test raced the daemon, not the bug)')
         self.assertIn('stopped',waited[-1]['happened'],'the agent learns why its wait ended')
 
     def test_a_terminal_worker_stopped_by_sigterm_reads_stopped(self):
@@ -1920,21 +1921,29 @@ for line in sys.stdin:
         self.wait(lambda:not os.path.exists(f'/proc/{out["pid"]}') or
                   open(f'/proc/{out["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)   # its command ended too
         # a worker that could not write (SIGKILL) leaves "running" behind: every reader says stopped, not running
+        # (its command ignores the pty's hang-up, so it outlives the worker: the emergency stop must still reach it)
         sid2=uuid.uuid4().hex
-        out2=t.call(sid2,dict(command='sleep 300',yield_ms=300))
+        out2=t.call(sid2,dict(command="trap '' HUP; sleep 300",yield_ms=300))
         os.kill(out2['worker'],signal.SIGKILL)
-        try:os.killpg(out2['pid'],signal.SIGKILL)
-        except ProcessLookupError:pass
-        self.wait(lambda:json.loads((self.home/'jobs'/sid2/'state.json').read_text())['phase']=='running' and
-                  t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['phase']=='stopped',10)
-        self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['running'])
-        from caminus.ember.resident import housemate
-        rt=Runtime(self.home)
         try:
-            gid=rt.store.enqueue('Wait for the session.')
-            self.assertIn('ended',housemate.wait(rt,gid,'session',sid2,timeout=3)['happened'])
-            self.assertNotIn(sid2,[s['session'] for s in housemate.machine(rt)['my_running_sessions']])
-        finally:rt.mail.close();rt.store.close()
+            self.wait(lambda:json.loads((self.home/'jobs'/sid2/'state.json').read_text())['phase']=='running' and
+                      t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['phase']=='stopped',10)
+            self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['running'])
+            from caminus.ember.resident import housemate
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Wait for the session.')
+                self.assertIn('ended',housemate.wait(rt,gid,'session',sid2,timeout=3)['happened'])
+                self.assertNotIn(sid2,[s['session'] for s in housemate.machine(rt)['my_running_sessions']])
+            finally:rt.mail.close();rt.store.close()
+            os.killpg(out2['pid'],0)                      # the command is still alive here
+            self.assertEqual(t.signal_running(signal.SIGTERM),[sid2],'the emergency stop still reaches its command')
+            self.wait(lambda:not os.path.exists(f'/proc/{out2["pid"]}') or
+                      open(f'/proc/{out2["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)
+            self.assertEqual(t.signal_running(signal.SIGTERM),[],'a stopped job its worker ended is not signalled again')
+        finally:
+            try:os.killpg(out2['pid'],signal.SIGKILL)
+            except ProcessLookupError:pass
 
     def test_a_gate_ends_when_the_runtime_stops(self):
         from caminus.ember.resident.judge import run_gate

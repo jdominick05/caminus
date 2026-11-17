@@ -291,7 +291,9 @@ class Terminal:
         for job in self.jobs.iterdir() if self.jobs.is_dir() else []:
             state = read_state(job)
             pid = state.get('pid')
-            if state.get('phase') in ('starting', 'running') and isinstance(pid, int) and alive(pid):
+            # (a job read as stopped without an end on record lost its worker, not its command: still reached)
+            if state.get('phase') in ('starting', 'running', 'stopped') and 'ended' not in state \
+                    and isinstance(pid, int) and alive(pid):
                 try:
                     os.killpg(pid, sig)
                     hit.append(job.name)

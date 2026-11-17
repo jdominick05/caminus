@@ -1716,8 +1716,7 @@ class Runtime:
         ok, out = run_gate(self.home, gate, timeout=GATE_TURN_TIMEOUT, stop=self.stopping)
         took = time.time() - t0
         if self.stopping():
-            self._gate_dirty.add(gid)        # cut short by the daemon's exit: nothing decided, it runs after the restart
-            return
+            return                           # cut short by the daemon's exit: nothing decided (the finish gate still runs)
         if not ok and out.startswith('the gate did not finish'):
             self._gate_slow[gid] = 'off'
             self.store.event('gate', dict(command=gate, passed=False, output=out, when='turn', disabled=True), gid)
