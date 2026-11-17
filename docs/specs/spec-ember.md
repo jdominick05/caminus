@@ -68,6 +68,8 @@ The agent user files a request; only the harness side answers and executes. File
 - `req/<id>.json`: `{'id', 'pid', 'user', 'cwd', 'cmd', 'ts'}` — written by the agent side (`ask-root CMD...`, or
   `caminus ember ask-root CMD...` when the package is installed in that user).
 - `res/<id>.json`: `{'id', 'decision', 'cmd', 'approved_by', 'rc', 'out', 'err', 'ts'}` — written by the harness side.
+- `presence.json`: `{'seen', 'back'}` — written by the panel on your keys and mouse: the last input, and the first input
+  after more than 5 minutes without one. The resident reads it to know whether you are at the screen (§9).
 
 `caminus ember watch` drains `req/`, shows you each command with its origin, and asks: **a**pprove runs exactly that
 string as `sudo sh -c <cmd>` (sudo asks for your password on your terminal), **e**dit lets you change it first,
@@ -125,6 +127,13 @@ The bridge carries typed requests, not just root: `kind: "root"` (cmd) and `kind
 Agent side: `~/bin/env-ask TEXT CHOICE...` prints the human's answer (a number picks a choice); `caminus ember ask`
 when the package is installed in that user. Harness side: `caminus ember watch` prompts for the answer, the TUI opens
 an answer line on `a`; both write `decision: "answered"` with the `answer` field, same schema otherwise.
+
+A work question waits `question_timeout` (15 minutes) while you are at the screen. While `presence.json` says you are
+away it waits on, until `question_timeout` after you come back, at most `question_away_max` (8 hours) from when it was
+asked; with no stamp at all (no panel has run) it waits the plain `question_timeout`. Its request carries the rule
+(`expires` - `ts`, `away_max`, `away_after`, in seconds) so the panel's countdown matches the resident
+(`approval.wait_left`).
+Root requests and GitHub hand-offs always time out after `question_timeout`: silence never grants root.
 
 Steering runs the other way through the resident's own channel: a message, `/steer` or `caminus ember agent send
 --steer` reaches the running goal at its next step (the old notes inbox, `env say` / `env-note`, is gone).

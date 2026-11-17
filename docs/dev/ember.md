@@ -66,7 +66,10 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - The resident package stays standard library only and self-contained (the zipapp holds nothing else).
 - The agent never holds root or a key: root goes through the bridge and runs under the owner's sudo; paid brains go
   through the owner's relay.
-- Nothing waits on the human: a question times out to the recommended option, a permission or root request to no.
+- Nothing waits on the human: a question times out to the advisor's pick or the recommended option, a permission or
+  root request to no. A question waits longer while the human is away (the panel's `presence.json` stamp,
+  `approval.wait_left`, mirrored by `questionLeft` in `panel/emberquestion.go`), never past `question_away_max`; a
+  root request never does.
 - The prompt says what the runtime does. When you change a refusal, a limit or a guard, change `resident/prompt.py`
   (and the docs) in the same commit.
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is

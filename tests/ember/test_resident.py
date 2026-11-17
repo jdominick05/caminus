@@ -1942,6 +1942,84 @@ for line in sys.stdin:
                               'inside the timeout the question waits for the human')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_away_rule_matches_the_panels_countdown(self):
+        # the same cases as panel/emberquestion_test.go TestQuestionCountdownFollowsPresence: the two must agree
+        ts,wait,cap=1000,900,28800
+        for now,stamp,left,away in ((1899,None,1,False),(1900,None,0,False),
+                                    (1500,(1490,0),400,False),             # at the screen since before it was asked
+                                    (1500,(1199,0),28300,True),            # no input for 301 s: away, only the cap runs
+                                    (5200,(5100,5000),700,False),          # back at 5000: question_timeout from there
+                                    (29750,(29700,29500),50,False),        # back near the cap: the cap still holds
+                                    (29900,(20000,20000),-100,True)):      # away past the cap: due
+            self.assertEqual(approval.wait_left(ts,now,wait,cap,stamp),(left,away),(now,stamp))
+        self.bridge.mkdir(parents=True,exist_ok=True);(self.bridge/approval.PRESENCE).write_text('not json')
+        self.assertIsNone(approval.presence(self.bridge),'a broken stamp reads as unknown (the plain timeout)')
+        (self.bridge/approval.PRESENCE).write_text(json.dumps(dict(seen=50.0,back=40.0)))
+        self.assertEqual(approval.presence(self.bridge),(50.0,40.0))
+        (self.bridge/approval.PRESENCE).write_text(json.dumps(dict(seen=1490.0)))
+        self.assertEqual(approval.wait_left(ts,1500,wait,cap,approval.presence(self.bridge)),(400,False),
+                         'no return on record counts from when it was asked, as the panel does (Back 0)')
+
+    def test_a_question_waits_while_the_human_is_away(self):
+        from caminus.ember.resident import runtime as rtmod
+        rt=Runtime(self.home)
+        clock=[time.time()]
+        t0=clock[0]
+        self.bridge.mkdir(parents=True,exist_ok=True)
+        def stamp(seen,back):(self.bridge/approval.PRESENCE).write_text(json.dumps(dict(seen=seen,back=back)))
+        def ask(name,args,at,rid):
+            clock[0]=at
+            return rt._bridge(dict(name=name,goal=gid,id=rid*32,bridge_id=None),args)
+        try:
+            gid=rt.store.enqueue('Tidy the reports.')
+            asked=[]
+            rt.config['advisor']=dict(model='claude-opus-5-5',endpoint='http://127.0.0.1:1/v1',budget_usd=1)
+            rt.advisor.raw=lambda g,msgs,n,who='judge':(asked.append(msgs[0]['content']),('Archive: it can be undone.','claude-opus-5-5'))[1]
+            q=dict(question='Delete the old reports or archive them?',choices=['delete','archive'],recommended='archive')
+            with unittest.mock.patch.object(rtmod.time,'time',lambda:clock[0]):
+                stamp(t0-10,t0-3600)                                       # at the screen when it asks
+                self.assertIsNone(ask('ask_user',q,t0,'a'))
+                req=json.loads(next((self.bridge/'req').glob('*.json')).read_text())
+                self.assertEqual((req['expires']-req['ts'],req['away_max'],req['away_after']),(900,8*3600,approval.AWAY_AFTER),
+                                 'the request carries its rule for the panel\'s countdown')
+                self.assertIsNone(ask('ask_user',q,t0+600,'a'),'present: inside 15 min it waits')
+                self.assertIsNone(ask('ask_user',q,t0+901,'a'),'no input for 911 s: away, so 15 min do not end it')
+                self.assertIsNone(ask('ask_user',q,t0+3*3600,'a'),'still away after 3 h: it waits')
+                back=t0+3*3600+60
+                stamp(back,back)
+                self.assertIsNone(ask('ask_user',q,back+899,'a'),'back: question_timeout from the return')
+                stamp(back+880,back)
+                out=ask('ask_user',q,back+900,'a')
+                self.assertEqual((out['decision'],out['by']),('answered','timeout'))
+                self.assertIn('The advisor (claude-opus-5-5) suggests: Archive',out['answer'])
+                self.assertIn('in 3 h',out['answer'],'it says how long it really waited');self.assertIn('in 3 h',asked[0])
+                # away the whole time: the cap answers it, the advisor for a question, NO for an approval
+                stamp(t0,t0)
+                t1=t0+6*3600
+                self.assertIsNone(ask('ask_user',q,t1,'b'))
+                self.assertIsNone(ask('ask_user',q,t1+8*3600-1,'b'))
+                out=ask('ask_user',q,t1+8*3600,'b')
+                self.assertIn('Archive',out['answer']);self.assertIn('in 8 h',out['answer'])
+                rt.advisor.raw=lambda *a,**k:self.fail('a permission request never goes to the advisor')
+                p=dict(question='May I delete ~/old-reports?',choices=['yes','no'],recommended='yes',approval=True)
+                t2=t1+9*3600
+                self.assertIsNone(ask('ask_user',p,t2,'c'));self.assertIsNone(ask('ask_user',p,t2+3600,'c'),'an approval waits too')
+                self.assertIn('Treat this as NO',ask('ask_user',p,t2+8*3600,'c')['answer'])
+                # root keeps its 15 minutes while the human is away: silence never grants root
+                t3=t2+9*3600
+                root=dict(command='apt-get install jq',reason='x')
+                self.assertIsNone(ask('ask_root',root,t3,'d'))
+                self.assertNotIn('away_max',json.loads(next((self.bridge/'req').glob('*.json')).read_text()))
+                r=ask('ask_root',root,t3+900,'d')
+                self.assertEqual((r['decision'],r['by']),('denied','timeout'));self.assertIn('NOT run',r['reason'])
+                # no stamp at all (no panel has run): the plain 15 minutes, as before
+                (self.bridge/approval.PRESENCE).unlink()
+                rt.advisor.raw=lambda g,msgs,n,who='judge':('Archive.','claude-opus-5-5')
+                t4=t3+3600
+                self.assertIsNone(ask('ask_user',q,t4,'e'))
+                self.assertEqual(ask('ask_user',q,t4+900,'e')['by'],'timeout')
+        finally:rt.mail.close();rt.store.close()
+
     def test_a_waiting_question_times_out_when_the_goal_is_run_again(self):
         self.replies(call('ask_user',dict(question='Keep going?',choices=['yes','no'],recommended='yes')),
                      call('finish',dict(summary='Carried on.')))

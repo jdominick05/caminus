@@ -151,6 +151,7 @@ RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the run
 # target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
 PAID_COMPACT = (.38, .38 * .20)
 QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
+QUESTION_AWAY_MAX = 8 * 3600   # a question's longest wait while its human is away (approval.wait_left)
 SUMMARY_TOKENS = 2048    # a compaction summary's output allowance: the floor (it grows with the window)
 SUMMARY_TOKENS_MAX = 16384
 TRUNCATION_LIMIT = 3     # replies in a row cut off at the output limit before a goal pauses  # consecutive plain-text replies (no tool call) before a goal pauses
@@ -180,8 +181,9 @@ TOOLS = [
     tool('terminal', 'Use the Ubuntu OS through a real persistent terminal (read-only commands work any time; one that changes something needs define_done first). Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. Paths and programs are those of your Unix account.',
          dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, offset={'type':'integer'}, max_output={'type':'integer'})),
-    tool('ask_user', 'Ask your human a question; the answer returns as this tool result. Your human may be away: if '
-         'no answer arrives in time (question_timeout, 15 minutes by default) the question is withdrawn and you carry '
+    tool('ask_user', 'Ask your human a question; the answer returns as this tool result. It waits question_timeout '
+         '(15 minutes by default) while your human is at the screen, and while they are away until question_timeout '
+         'after they come back, at most question_away_max (8 hours by default). With no answer by then the question is withdrawn and you carry '
          'on with the better option (the advisor\'s pick when one is configured, else your recommended choice). So '
          'give choices and say which you recommend. Silence is never approval: an irreversible change, an action in '
          'your human\'s name or spending money falls back to the safe, reversible option. Set approval true when '
@@ -565,8 +567,12 @@ class Runtime:
         if not req.exists() and not res.exists():
             value = dict(id=rid, pid=os.getpid(), user=getpass.getuser(), cwd=str(self.home), kind=kind,
                          ts=time.time(), agent=self.config['name'], goal=action['goal'])
-            # when it times out, for the owner's prompt to count down (the request waits question_timeout)
+            # when it times out, for the owner's prompt to count down (the request waits question_timeout); a work
+            # question also carries its away rule (approval.wait_left), which the prompt's countdown follows
             value['expires'] = value['ts'] + float(self.config.get('question_timeout', QUESTION_TIMEOUT))
+            if kind == 'question' and not self.free.is_free(action['goal']):
+                value.update(away_max=float(self.config.get('question_away_max', QUESTION_AWAY_MAX)),
+                             away_after=approval.AWAY_AFTER)
             if kind == 'github':
                 from . import github
                 value.update(github=github.handoff(args), reason=args.get('reason', ''), summary=github.describe(args))
@@ -620,32 +626,41 @@ class Runtime:
                               note='denied; your human said what to do instead (also delivered as a steer)')
             return result
         # Nothing blocks on the human: past the timeout the resident withdraws its own request (it never writes a
-        # decision on the human's behalf) and carries on. A root command is then not run; silence never grants root.
+        # decision on the human's behalf) and carries on. A root command or a hand-off is then not done, after
+        # question_timeout whether or not the human is there: silence never grants root. A work question waits longer
+        # while its human is away (approval.wait_left: the panel's presence stamp), up to question_away_max.
         free = self.free.is_free(action['goal'])
         timeout = self.free.afk_seconds if free else float(self.config.get('question_timeout', QUESTION_TIMEOUT))
         asked = json.loads(req.read_text()).get('ts', time.time()) if req.exists() else time.time()
-        if timeout >= 0 and time.time() - asked >= timeout:
+        now = time.time()
+        left = asked + timeout - now
+        if kind == 'question' and not free:
+            left, _ = approval.wait_left(asked, now, timeout,
+                                         float(self.config.get('question_away_max', QUESTION_AWAY_MAX)),
+                                         approval.presence(root))
+        if timeout >= 0 and left <= 0:
             try:
                 req.unlink()
             except OSError:
                 pass
-            return self._unanswered(action, args, kind, rid, timeout, free)
+            return self._unanswered(action, args, kind, rid, now - asked, free)
         if park:
             self.store.update(action['goal'], state='waiting_root' if kind in ('root', 'github') else 'waiting_user')
         return None
 
-    def _unanswered(self, action, args, kind, rid, timeout, free):
-        gid, mins = action['goal'], max(1, round(timeout / 60))
+    def _unanswered(self, action, args, kind, rid, elapsed, free):
+        gid, mins = action['goal'], max(1, round(elapsed / 60))
+        waited = f'{mins} min' if mins < 120 else f'{round(mins / 60)} h'   # (an away question waits up to 8 h)
         if kind == 'github':
-            self.store.event('root_unanswered', dict(id=rid, github=args.get('action'), after_s=int(timeout)), gid)
+            self.store.event('root_unanswered', dict(id=rid, github=args.get('action'), after_s=int(elapsed)), gid)
             return dict(id=rid, decision='denied', by='timeout',
-                        reason=f'no answer from your human in {mins} min, so the hand-off was withdrawn and nothing was '
+                        reason=f'no answer from your human in {waited}, so the hand-off was withdrawn and nothing was '
                                'done on GitHub. Report what is ready (the branch, and the title and body you wanted) in '
                                'your finish, as waiting for your human.')
         if kind == 'root':
-            self.store.event('root_unanswered', dict(id=rid, command=args.get('command', ''), after_s=int(timeout)), gid)
+            self.store.event('root_unanswered', dict(id=rid, command=args.get('command', ''), after_s=int(elapsed)), gid)
             return dict(id=rid, decision='denied', by='timeout',
-                        reason=f'no answer from your human in {mins} min, so the request was withdrawn and the command '
+                        reason=f'no answer from your human in {waited}, so the request was withdrawn and the command '
                                'was NOT run. Carry on without it (a user-level route, or other parts of the goal); if '
                                'the goal truly cannot go on without root, say so with report need_you and keep the '
                                'rest moving.')
@@ -658,13 +673,13 @@ class Runtime:
             # Asking permission: an unanswered request is a refusal, never the advisor's or the agent's call.
             self.store.event('question_unanswered', dict(id=rid, text=q, approval=True, outcome='no'), gid)
             return dict(id=rid, decision='answered', by='timeout',
-                        answer=f'(no answer from your human in {mins} min.) Treat this as NO: do not take that '
+                        answer=f'(no answer from your human in {waited}.) Treat this as NO: do not take that '
                                'action. Take the safe, reversible route instead, or leave it for your human: note it '
                                'in STATE.md and name it in your finish as waiting for their decision. Carry on with '
                                'the rest of the goal.')
         advice, who = '', ''
         if self.advisor.cfg:
-            brief = (f"An agent asked its human this and got no answer in {mins} minutes; it must carry on now.\n"
+            brief = (f"An agent asked its human this and got no answer in {waited}; it must carry on now.\n"
                      f"GOAL:\n{self.store.goal(gid)['prompt'][:3000]}\n\nQUESTION:\n{q}\n"
                      + (('CHOICES:\n' + '\n'.join('- ' + str(c) for c in choices) + '\n') if choices else '')
                      + (f'THE AGENT RECOMMENDS: {rec}\n' if rec else '')
@@ -680,7 +695,7 @@ class Runtime:
         pick = (f'The advisor ({who}) suggests: {advice.strip()}' if advice.strip() else
                 f'Go with your recommended option: {rec}.' if rec else 'Go with the option you judge best.')
         return dict(id=rid, decision='answered', by='timeout',
-                    answer=f'(no answer from your human in {mins} min; this is not their answer.) {pick} '
+                    answer=f'(no answer from your human in {waited}; this is not their answer.) {pick} '
                            'Silence is not approval: for an irreversible change, an action in your human\'s name '
                            'or spending money, take the safe, reversible option or leave it for them. Record the '
                            'choice and why in STATE.md, mention it in your finish, and carry on; your human can '
@@ -1870,7 +1885,7 @@ class Runtime:
         for k in self.MODEL_KEYS:
             if k not in fresh:
                 self.config.pop(k, None)
-        for k in ('question_timeout', 'judge_model'):
+        for k in ('question_timeout', 'question_away_max', 'judge_model'):
             if k in fresh:
                 self.config[k] = fresh[k]
         if not changed or not self._own_model:
