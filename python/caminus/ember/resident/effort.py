@@ -91,10 +91,39 @@ def default_level(cfg):
     return card(cfg.get('model')).get('default', '')
 
 
+# How each Claude model turns thinking off (Anthropic's error-code docs): 'disabled' at effort high or below (Haiku 5.5,
+# Opus 5; a 400 at xhigh / max); 'between_tools' at high or below (Sonnet 5.5, where 'disabled' is a 400); None: it
+# cannot be turned off (Opus 5.5, Fable: 'disabled' is a 400 at any effort), so thinking is omitted and effort low is
+# the nearest. An unknown Claude model gets None: omitting thinking at effort low never fails.
+THINKING_OFF = {
+    'claude-haiku-5-5': 'disabled',
+    'claude-opus-5': 'disabled',
+    'claude-sonnet-5-5': 'between_tools',
+    'claude-opus-5-5': None,
+    'claude-fable-5': None, 'claude-fable-5-1': None, 'claude-fable-5-2': None,
+}
+
+
+def thinking_off_mode(model):
+    return THINKING_OFF.get(model)
+
+
+def anthropic_thinking_off(body):
+    """Turn a Messages API body's thinking off the way its model takes it (THINKING_OFF); the effort follows."""
+    mode = thinking_off_mode(body.get('model'))
+    oc = body.setdefault('output_config', {})
+    if mode:
+        body['thinking'] = dict(type=mode)
+        if oc.get('effort') not in ('low', 'medium', 'high'):
+            oc['effort'] = 'high'                      # (accepted up to high: the nearest level that runs)
+    else:
+        body.pop('thinking', None)
+        oc['effort'] = 'low'
+
+
 def always_thinks(cfg):
-    """An Anthropic model that refuses thinking off (current Opus and Sonnet): none runs as low there."""
-    from .model import THINKING_REQUIRED
-    return line(cfg) == 'anthropic' and cfg.get('model') in THINKING_REQUIRED
+    """An Anthropic model whose thinking cannot be turned off: none runs as low there."""
+    return line(cfg) == 'anthropic' and thinking_off_mode(cfg.get('model')) is None
 
 
 def template_line(cfg, level):
@@ -158,6 +187,8 @@ def note(cfg):
         return 'on this model xhigh and max run as high'
     if ln == 'anthropic' and always_thinks(cfg):
         return 'this model always thinks: none runs as low'
+    if ln == 'anthropic' and thinking_off_mode(cfg.get('model')) == 'between_tools':
+        return 'none thinks only between tools (sent with effort high)'
     if ln == 'anthropic':
         return 'none turns thinking off (sent with effort high)'
     return 'this model has no effort control'

@@ -2691,6 +2691,26 @@ for line in sys.stdin:
                 self.assertNotIn(k,body,'the current API version refuses sampling fields')
             self.assertEqual((body['output_config']['effort'],body.get('thinking')==dict(type='disabled')),want)
 
+    def test_each_claude_model_turns_thinking_off_its_own_way(self):
+        """Anthropic's rules per model: disabled up to effort high (Haiku 5.5, Opus 5), between_tools up to high (Sonnet
+        5.5), no off at all (Opus 5.5, Fable, and any model not in the table): thinking omitted at effort low."""
+        from caminus.ember.resident import effort as eff
+        from caminus.ember.resident.model import Model
+        rows=(('claude-haiku-5-5',dict(type='disabled'),'high'),('claude-opus-5',dict(type='disabled'),'high'),
+              ('claude-sonnet-5-5',dict(type='between_tools'),'high'),('claude-opus-5-5',None,'low'),
+              ('claude-fable-5-2',None,'low'),('claude-mystery-9',None,'low'))
+        for model,thinking,level in rows:
+            m=Model(dict(endpoint='https://api.anthropic.com/v1',model=model,api='anthropic',provider_kind='anthropic',
+                         context=200000,effort='none'))
+            body=m._to_anthropic([dict(role='user',content='hi')],None,None)
+            self.assertEqual((body.get('thinking'),body['output_config']['effort']),(thinking,level),model+': effort none')
+            # the judge's short call at the session's xhigh: the same rule, the effort brought within it
+            m.config['effort']='xhigh'
+            body=m._to_anthropic([dict(role='user',content='hi')],None,None)
+            self.assertEqual(body['output_config']['effort'],'xhigh')
+            eff.anthropic_thinking_off(body)
+            self.assertEqual((body.get('thinking'),body['output_config']['effort']),(thinking,level),model+': a short call')
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
         sent=[]

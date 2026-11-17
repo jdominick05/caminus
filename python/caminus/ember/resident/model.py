@@ -507,12 +507,10 @@ class Model:
         # Adaptive by default (the switch-off is simply not sent: current models then think as they see fit, older ones
         # do not think at all, so no model refuses it). On a CTF benchmark the same agent solved 10 of 14 tasks with
         # thinking and 2 without; Qwen Code sends adaptive thinking too. thinking 'disabled' in the config turns it off.
-        if self.config.get('thinking', 'adaptive') == 'disabled':
-            body['thinking'] = dict(type='disabled')
         choice = effort.resolve(self.config)
-        if choice['thinking_off']:
-            body['thinking'] = dict(type='disabled')           # (effort none: sent with effort high, effort.py)
         body['output_config'] = dict(effort=choice['anthropic_effort'] or 'medium')
+        if choice['thinking_off'] or self.config.get('thinking', 'adaptive') == 'disabled':
+            effort.anthropic_thinking_off(body)   # each model's own way (effort.THINKING_OFF): a wrong one is a 400
         if self.config.get('fallbacks') and body['model'] in FALLBACK_MODELS:
             # A safety classifier can decline a legitimate request (cyber work on one's own machine trips it); the
             # server then re-runs it on a fallback model in the same call. Off for models that do not accept it.
@@ -526,10 +524,8 @@ class Model:
         # A short side call (the finish judge's 600 tokens, a fresh look, a theme) answers without thinking: thinking
         # shares the output budget, and with it on the judge's verdict came back empty in 20 of 54 calls on a CTF
         # benchmark run (each one a finish let through unchecked). Main turns keep their thinking.
-        if (max_tokens or 0) < SHORT_CALL and 'thinking' not in body and body['model'] not in THINKING_REQUIRED:
-            body['thinking'] = dict(type='disabled')
-        if body.get('thinking') == dict(type='disabled') and body['output_config']['effort'] not in ('low', 'medium', 'high'):
-            body['output_config']['effort'] = 'high'   # thinking off is accepted up to high: the nearest level that runs
+        if (max_tokens or 0) < SHORT_CALL:
+            effort.anthropic_thinking_off(body)   # (Opus 5.5 and Fable cannot: they answer at effort low)
         return self._anthropic_stream(body, on_delta or (lambda kind, value: None))
 
     def _anthropic_stream(self, body, on_delta):

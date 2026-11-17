@@ -145,7 +145,7 @@ Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-
 |---|---|---|---|
 | Qwen3.8 line on Caminus (the Coder, Swift 1.5, ThinkingCap, Qwen3.8-27B) | xhigh; low, medium and xhigh are its levels (high and max run as xhigh, none turns thinking off) | the server's, from the model file (1.0 / top_p 0.95 / top_k 20) | 64K (the card allows 393K; capped so a runaway reply cannot hold the server) |
 | Qwen3-30B-A3B on Caminus | thinking on (none turns it off; it has no other levels) | the server's | 32K (its card) |
-| Anthropic | medium; low to max natively (none is thinking off, sent at effort high; current Opus and Sonnet always think, so none runs as low there) | none sent (the API refuses temperature, top_p and top_k) | the model's listed maximum, at most 64K |
+| Anthropic | medium; low to max natively. none: thinking off at effort high on Haiku 5.5 and Opus 5, thinking only between tools on Sonnet 5.5; Opus 5.5, Fable and any other model always think, so none runs as low | none sent (the API refuses temperature, top_p and top_k) | the model's listed maximum, at most 64K |
 | Mistral Large 4 | high | 1.0 / top_p 0.95 | the listed maximum, at most 64K |
 | Mistral Medium 3.5 | high | 0.7 / top_p 0.95 | the listed maximum, at most 64K |
 | DeepSeek-V4.1-Flash | the provider's | 1.0 / top_p 1.0 | the listed maximum, at most 64K |
