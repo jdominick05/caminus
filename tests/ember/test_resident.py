@@ -1244,10 +1244,12 @@ class Resident(unittest.TestCase):
             (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        if k.get("backend")=="auto":raise RuntimeError("No results found.")\n        return [dict(title="t",href="https://example.org/b",body=k["backend"])]\n')
             out=web.search(rt,'rdna3 wmma')
             self.assertEqual(out['engine'],'bing');self.assertEqual(out['results'][0]['snippet'],'bing')
-            self.assertEqual(out['tried'],['auto: empty','bing: 1 results'],'ddgs "No results found." reads as empty')
+            self.assertEqual(out['tried'],['auto: "No results found" (empty or refused)','bing: 1 results'],
+                             'ddgs "No results found." is reported apart from an empty list')
             (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return []\n')
+            rt.web_sleep=lambda s:None
             with self.assertRaises(ValueError) as c:web.search(rt,'nothing at all')
-            self.assertIn('no engine found results',str(c.exception))
+            self.assertIn('no engine found results',str(c.exception));self.assertIn('bing (again after 2.5 s): empty',str(c.exception))
             class Resp:
                 status=200;headers={'Content-Type':'text/html; charset=utf-8'}
                 def __init__(self,body):self.body=body
@@ -1280,12 +1282,36 @@ class Resident(unittest.TestCase):
             self.assertEqual(out['tried'],['auto: error (RatelimitException: https://duckduckgo.com 202 Ratelimit)',
                                            'bing: error (no answer in 25 s)','brave: 2 results'])
             self.assertEqual(calls,['auto','bing','brave'],'a hung engine does not stop the next one; stop at the first answer')
+            slept=[];rt.web_sleep=slept.append
             rt.search_backend=fake(dict(mojeek=RuntimeError('HTTP 403')))
             with self.assertRaises(ValueError) as c:web.search(rt,'nothing anywhere')
             msg=str(c.exception)
             for part in ('auto: empty','bing: empty','brave: empty','mojeek: error (HTTP 403)','wikipedia: empty','rephrase'):
                 self.assertIn(part,msg)
+            self.assertNotIn('again',msg);self.assertEqual(slept,[],'an engine failed outright: no second round')
             self.assertLess(len(msg),700,'the error stays short for the model')
+            # every engine empty or "No results found" (a rate limit looks the same): auto and bing once more, after a pause
+            class Second:
+                n=0
+                def __call__(s,backend,args,timeout):
+                    calls.append(backend)
+                    if backend=='auto':
+                        s.n+=1
+                        if s.n==2:return [dict(title='t',url='https://example.org/a',snippet='late')]*5
+                    if backend in ('auto','bing'):raise web.NoResults('DDGSException: No results found.')
+                    return []
+            calls.clear();rt.search_backend=Second()
+            out=web.search(rt,'worked seconds later')
+            self.assertEqual((out['engine'],len(out['results'])),('auto',5));self.assertEqual(slept,[2.5])
+            self.assertEqual(calls,['auto','bing','brave','mojeek','wikipedia','auto'])
+            self.assertEqual(out['tried'],['auto: "No results found" (empty or refused)','bing: "No results found" (empty or refused)',
+                                           'brave: empty','mojeek: empty','wikipedia: empty','auto (again after 2.5 s): 5 results'])
+            # still nothing on the second round: the error names it, and there is no third round
+            slept.clear();calls.clear();rt.search_backend=fake(dict(auto=web.NoResults('No results found.')))
+            with self.assertRaises(ValueError) as c:web.search(rt,'really nothing')
+            self.assertEqual(calls,['auto','bing','brave','mojeek','wikipedia','auto','bing']);self.assertEqual(slept,[2.5])
+            self.assertIn('auto (again after 2.5 s): "No results found"',str(c.exception))
+            self.assertLess(len(str(c.exception)),800)
         finally:rt.mail.close();rt.store.close()
 
     def test_web_fetch_retries_busy_sites_caches_per_goal_and_reads_pdfs(self):
