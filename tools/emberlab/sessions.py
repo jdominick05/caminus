@@ -8,7 +8,9 @@
   turn    with the driven brain YOU are the model: print the request waiting for an answer (the conversation tail, the
           tools offered, the newest tool result)
   reply   answer that request: a tool call (--call NAME --args JSON) or text
-  events  what happened since you last looked; status: the resident's status; close: stop the daemon (the home stays)
+  events  what happened since you last looked; status: the resident's status
+  close   stop the daemon, its job workers (a box and the Chrome in it outlive the daemon by design) and the driven brain:
+          TERM, then KILL after CLOSE_GRACE seconds for whatever is left, and say what it had to kill (the home stays)
 
 Ask the agent what it can and cannot do from inside its account, have it try a tool and report what got in the way, or
 drive it yourself to see exactly what a model sees. Everything stays in the session's own home (agent host: ~/lab/,
@@ -17,7 +19,6 @@ never ~/homes), and the daemon exits after --ttl.
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import time
@@ -273,24 +274,91 @@ def reply(a):
     return _print_new(a, s, _host(s))
 
 
+CLOSE_GRACE = 10   # seconds between TERM and KILL; longer than a terminal worker's own TERM-to-KILL for its command
+
+# Run on the session's host (as runner.MERGE is): argv ROOT GRACE [PID:LABEL ...]. Signals the daemon named in
+# ROOT/heartbeat.json, every worker and command in ROOT/jobs/*/state.json and the PIDs given, each as its process group
+# when it leads one; KILLs what is left after GRACE seconds; prints what it stopped, killed and could not end. A pid is
+# signalled only when its command line or environment names ROOT (the daemon's --home, a worker's job folder, a
+# command's WORKSPACE), so a recycled pid in a stale file is never someone else's process.
+STOP = r"""
+import json, os, signal, sys, time
+from pathlib import Path
+root, grace = Path(sys.argv[1]), float(sys.argv[2])
+mark = str(root).encode()
+def gone(pid):
+    try:
+        st = Path(f'/proc/{pid}/stat').read_text()
+        return st[st.rindex(')') + 2] in 'ZX'
+    except (OSError, ValueError, IndexError):
+        return True
+def ours(pid):
+    try:
+        return any(mark in Path(f'/proc/{pid}/{f}').read_bytes() for f in ('cmdline', 'environ'))
+    except OSError:
+        return False
+found = {}
+def add(pid, what):
+    if isinstance(pid, int) and pid > 1 and pid != os.getpid() and not gone(pid) and ours(pid):
+        found.setdefault(pid, what)
+try:
+    add(json.loads((root / 'heartbeat.json').read_text()).get('pid'), 'daemon')
+except (OSError, ValueError, AttributeError):
+    pass
+for arg in sys.argv[3:]:
+    pid, _, what = arg.partition(':')
+    add(int(pid), what)
+for f in sorted(root.glob('jobs/*/state.json')):
+    try:
+        st = json.loads(f.read_text())
+    except (OSError, ValueError):
+        continue
+    if isinstance(st, dict):
+        add(st.get('worker'), 'worker ' + f.parent.name[:8])
+        add(st.get('pid'), 'command ' + f.parent.name[:8])
+def send(pid, sig):
+    try:
+        os.killpg(pid, sig) if os.getpgid(pid) == pid else os.kill(pid, sig)
+    except OSError:
+        pass
+def settle(secs):
+    end = time.monotonic() + secs
+    while time.monotonic() < end and not all(gone(p) for p in found):
+        time.sleep(.1)
+    return [p for p in found if not gone(p)]
+for pid in found:
+    send(pid, signal.SIGTERM)
+killed = settle(grace)
+for pid in killed:
+    send(pid, signal.SIGKILL)
+left = settle(3)
+row = lambda pids: [dict(pid=p, what=found[p]) for p in pids]
+print(json.dumps(dict(stopped=row(found), killed=row(killed), left=row(left))))
+"""
+
+
+def _stop(run, root, extra=()):
+    """STOP on a host (run: the host's run, or a local one); its report, or a report naming why there is none."""
+    r = run(['python3', '-I', '-c', STOP, root, str(CLOSE_GRACE), *extra], CLOSE_GRACE + 20)
+    return runner._json_tail(r.stdout) or dict(stopped=[], killed=[], left=[dict(pid=0, what='unknown: ' + (
+        r.stderr or r.stdout).decode(errors='replace')[-200:].strip())])
+
+
 def close(a):
     s = _load(a.out, a.name)
     h = _host(s)
-    if s['host'] == 'agent':
-        import shlex
-        hb = shlex.quote(f'{s["home"]}/heartbeat.json')
-        h._ssh(f"pid=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"pid\") or \"\")' {hb} "
-               f'2>/dev/null); [ -n "$pid" ] && kill "$pid"', 30)
-    elif s.get('daemon_pid'):
-        try:
-            os.killpg(s['daemon_pid'], signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    # the local daemon runs under timeout (its group is ours to signal); on the agent host heartbeat.json names it
+    reps = [_stop(h.run, s['home'], [f'{s["daemon_pid"]}:daemon timeout wrapper'] if s.get('daemon_pid') else [])]
     if s.get('driven_pid'):
-        try:
-            os.killpg(s['driven_pid'], signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        reps.append(_stop(hosts_mod.Local(a.out).run, s['driven'], [f'{s["driven_pid"]}:driven brain']))
+    names = lambda key: ', '.join(f'{x["what"]} ({x["pid"]})' for r in reps for x in r[key])
+    stopped, killed, left = names('stopped'), names('killed'), names('left')
+    print(f'lab session {a.name}: ' + (f'stopped {stopped}' if stopped else 'nothing was running'))
+    if killed:
+        print(f'had to SIGKILL after {CLOSE_GRACE} s: {killed}')
+    if left:
+        print(f'still running after SIGKILL: {left}; the session stays open (close it again, or end them by hand)')
+        return 1
     p = _dir(a.out, a.name) / 'session.json'
     p.rename(p.with_name('session.closed.json'))
     print(f'lab session {a.name} closed; its home stays at {s["home"]} ({s["host"]} host)')
