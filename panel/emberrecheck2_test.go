@@ -106,3 +106,12 @@ func TestThirdRecheck(t *testing.T) {
 		t.Fatal("a send drops the cleared draft")
 	}
 }
+
+func TestTheGoalsOverlayStopsFollowingAMovedGoalOnAnyOtherKey(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.goals, m.chat.goalsFollow = true, "g1"
+	next, _ := m.goalsKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if next.(emberModel).chat.goalsFollow != "" {
+		t.Fatal("navigating stops the follow: a refresh pulled the ▸ back, and x or p hit the moved goal")
+	}
+}

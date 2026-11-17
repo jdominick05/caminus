@@ -158,6 +158,11 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if k == "ctrl+c" {
 		return m, tea.Quit
 	}
+	switch k {
+	case "shift+up", "shift+down", "K", "J":
+	default:
+		m.chat.goalsFollow = "" // any other key: a refresh no longer pulls the ▸ back to the goal you last moved
+	}
 	order := m.goalOrder()
 	sel := max(0, min(m.chat.goalsSel, len(order)-1))
 	m.chat.goalsSel = sel
