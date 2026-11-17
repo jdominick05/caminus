@@ -1362,6 +1362,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
 	case "judged":
 		v := str("verdict")
+		if v == "met" { // the finish line right after it carries the verdict and its reason: one line, not two
+			return ""
+		}
 		return toolCard("gate", "judge: "+strings.ReplaceAll(v, "_", " "), firstLine(str("reason")), v == "met" || v == "unread", v != "met", lines(str("reason"), 6), w)
 	case "gate":
 		ok, _ := e.Data["passed"].(bool)
@@ -2820,6 +2823,9 @@ func (m emberModel) chatFoot(w int) string {
 	}
 	if m.chat.live.active && m.chat.live.hold {
 		keys = append([]string{"held · ^T follow"}, keys...)
+	}
+	if m.runtimeOutdated() {
+		keys = append([]string{emberWarn.Render("older runtime · caminus ember agent install")}, keys...)
 	}
 	if m.runtimeOutdated() {
 		keys = append([]string{emberWarn.Render("older runtime · caminus ember agent install")}, keys...)
