@@ -150,7 +150,10 @@ def runs_as(cfg, level):
     if ln == 'onoff':
         return 'none' if level == 'none' else 'on'
     if ln == 'reasoning':
-        return nearest(level, cfg.get('efforts') or ['low', 'medium', 'high'])
+        if 'efforts' not in cfg:
+            # an older config (no catalog list stored): sent as before, none included (a short call turns it off)
+            return {'xhigh': 'high', 'max': 'high'}.get(level, level)
+        return nearest(level, cfg['efforts'] or ['low', 'medium', 'high'])
     return level
 
 
