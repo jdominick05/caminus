@@ -270,7 +270,9 @@ On a remote model free time spends its own allowance (`free_time.budget_usd`,
 ## When you are away
 
 Nothing waits on you. A question you have not answered within `question_timeout`
-(900 seconds by default; free time uses its own shorter window) is withdrawn by the
+(900 seconds by default; free time uses its own shorter window) while you are at the
+screen, or by `question_timeout` after you come back when you were away (at most
+`question_away_max`, 8 hours; how away is judged: docs/specs/spec-ember.md §9), is withdrawn by the
 resident itself, never answered in your name, and the agent carries on: with the
 advisor's pick when an advisor is configured, else with the option it recommended,
 recording the choice in `STATE.md` and its finish. Silence is never approval: a
@@ -345,7 +347,7 @@ workspace values:
 ```sh
 caminus ember agent prompt resident
 caminus ember agent discover resident --json
-caminus ember agent discover resident --topic commands --query pdf --json
+caminus ember agent discover resident --topic commands --query 'ocr pdf' --json
 caminus ember agent discover resident --topic packages --query tshark --json
 caminus ember agent discover resident --topic containers --json
 ```
@@ -361,8 +363,12 @@ document, networking, development, Python, container and package information.
 Overview inspects metadata without launching discovered programs, importing
 third-party modules, reading user documents, contacting the internet or
 initializing GPUs. Python results describe the current interpreter only.
-Container queries explicitly use a local Docker socket or local podman; package
-queries read installed status and cached apt policy. These queries have a
+A commands query ranks the programs on PATH by the words that hit a name or
+its man-page line (read through `apropos`, offline; a rare word counts more
+than a common one, and "a" or "to" beside real words is dropped), so "ocr" finds
+`tesseract`; a short table in `discovery.py` adds the words man pages miss
+("video" and "audio" for `ffmpeg`). Container queries explicitly use a local
+Docker socket or local podman; package queries read installed status and cached apt policy. These catalog queries have a
 three-second timeout and a bounded returned output. No image is run or pulled,
 and no package is installed or index updated by discovery.
 

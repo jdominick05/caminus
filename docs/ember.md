@@ -23,7 +23,9 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   something that looked after the last change, a refused edit blocks the finish until the change is made or the file
   is read, and the judge sees which files were actually changed.
 - **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
-  takes the agent's recommended option after 15 minutes; an unanswered permission or root request is a no.
+  waits 15 minutes while you are at the screen and longer while you are away (until 15 minutes after you come back,
+  at most 8 hours); then the advisor's pick or the agent's recommended option. An unanswered permission is a no, and a
+  root request is a no after 15 minutes either way.
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
@@ -151,7 +153,8 @@ key of that file.
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
 | Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
-| A request's wait | 15 min | a question then takes its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| A request's wait | 15 min | a question then takes the advisor's pick or its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min; the prompt then says "waits while you're away"; root requests keep their 15 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
 | The browser's idle close | 30 min | a browser nobody called for that long closes itself (a paused goal keeps its box, not a running Chrome); the next `open` starts a new one and says so | `sandbox.browser_idle_s` (seconds; `0`: never, it stays open until the goal ends) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
