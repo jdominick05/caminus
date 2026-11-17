@@ -1055,7 +1055,7 @@
    "cards": "nd",
    "kind": "speed",
    "tier": "release",
-   "run": "swift-decode-short-xtx",
+   "run": "swift-decode-short-xt",
    "parse": "'  decode, ms per token over positions N .. M: median (\\d+\\.\\d+)' -> tok/s = 1000/ms"
   },
   {
@@ -1199,7 +1199,7 @@
    "cards": "nd",
    "kind": "speed",
    "tier": "release",
-   "run": "swift-verify-xtx-512",
+   "run": "swift-verify-xt-512",
    "parse": "'depth 512 walk: decode step ([0-9.]+) ms' and 'depth 512 walk: verify T=(\\d)\\s+([0-9.]+) ms per pass'"
   },
   {
@@ -1211,7 +1211,7 @@
    "cards": "nd",
    "kind": "speed",
    "tier": "release",
-   "run": "swift-verify-xtx-512",
+   "run": "swift-verify-xt-512",
    "parse": "'depth 4096 walk: decode step' / 'depth 4096 walk: verify T=k'"
   },
   {
@@ -1451,7 +1451,7 @@
    "cards": "nd",
    "kind": "speed",
    "tier": "release",
-   "run": "swift-mtp-engine-owntexts-xtx",
+   "run": "swift-mtp-engine-owntexts-xt",
    "parse": "same as the XTX own-texts row"
   },
   {
@@ -2375,19 +2375,19 @@
    "est": 300
   },
   "q3m-kld-128-1card": {
-   "command": "$PY -I tools/gates/q3moe_gmodel.py $Q3M --ref $HOME/.local/share/caminus/artifacts/q3moe-refs/ref128.npz --llama $HOME/.local/share/caminus/artifacts/q3moe-refs/llama128.bin",
+   "command": "$PY -I tools/gates/q3moe_gmodel.py $Q3M --ref $ARTIFACTS/q3moe-refs/ref128.npz --llama $ARTIFACTS/q3moe-refs/llama128.bin",
    "cards": "disp",
    "timeout": 900,
    "est": 90
   },
   "q3m-kld-depth-16384-1card": {
-   "command": "$PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --ref $HOME/.local/share/caminus/artifacts/q3moe-refs/ref32_16384.npz --llama $HOME/.local/share/caminus/artifacts/q3moe-refs/llama_16384.bin",
+   "command": "$PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --ref $ARTIFACTS/q3moe-refs/ref32_16384.npz --llama $ARTIFACTS/q3moe-refs/llama_16384.bin",
    "cards": "disp",
    "timeout": 1800,
    "est": 120
   },
   "q3m-kld-depth-40896-1card": {
-   "command": "$PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --ref $HOME/.local/share/caminus/artifacts/q3moe-refs/ref32_40896.npz --llama $HOME/.local/share/caminus/artifacts/q3moe-refs/llama_40896.bin",
+   "command": "$PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --ref $ARTIFACTS/q3moe-refs/ref32_40896.npz --llama $ARTIFACTS/q3moe-refs/llama_40896.bin",
    "cards": "disp",
    "timeout": 1800,
    "est": 180
@@ -2399,13 +2399,13 @@
    "est": 1200
   },
   "q3m-kld-depth-16384-2card": {
-   "command": "CAMINUS_UPLOAD_LOG=$SCRATCH/q3m-gd16k-tp.ulog $PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --cards 2 --ref $HOME/.local/share/caminus/artifacts/q3moe-refs/ref32_16384.npz --llama $HOME/.local/share/caminus/artifacts/q3moe-refs/llama_16384.bin",
+   "command": "CAMINUS_UPLOAD_LOG=$SCRATCH/q3m-gd16k-tp.ulog $PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --cards 2 --ref $ARTIFACTS/q3moe-refs/ref32_16384.npz --llama $ARTIFACTS/q3moe-refs/llama_16384.bin",
    "cards": "both",
    "timeout": 1800,
    "est": 150
   },
   "q3m-kld-depth-40896-2card": {
-   "command": "CAMINUS_UPLOAD_LOG=$SCRATCH/q3m-gd40k-tp.ulog $PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --cards 2 --ref $HOME/.local/share/caminus/artifacts/q3moe-refs/ref32_40896.npz --llama $HOME/.local/share/caminus/artifacts/q3moe-refs/llama_40896.bin",
+   "command": "CAMINUS_UPLOAD_LOG=$SCRATCH/q3m-gd40k-tp.ulog $PY -I tools/gates/q3moe_depth_gmodel.py $Q3M --cards 2 --ref $ARTIFACTS/q3moe-refs/ref32_40896.npz --llama $ARTIFACTS/q3moe-refs/llama_40896.bin",
    "cards": "both",
    "timeout": 1800,
    "est": 200
@@ -2518,7 +2518,8 @@
    "command": "$PY -I tests/prefill/test_q35_prefill.py $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz --llama $SCRATCH/swift-LL.bin",
    "cards": "nd",
    "timeout": 1800,
-   "est": 420
+   "est": 420,
+   "blocked": "reads inputs no run produces yet (swift-LL.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-served-greedy-xtx": {
    "command": "$PY -I tools/serve_smoke1.py --model $SWIFT --scratch $SCRATCH/smoke-xtx --card 0 --max-ctx 32768 --needle 28000 --restart --block-imports gguf,tokenizers",
@@ -2542,7 +2543,8 @@
    "command": "$PY -I benchmarks/q35_mtp_spec.py $SWIFT --prompt 48 --n 128 --ids $SCRATCH/accept_ids.json",
    "cards": "disp",
    "timeout": 1800,
-   "est": 360
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (accept_ids.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-mtp-engine-owntexts-xtx": {
    "command": "$PY -I benchmarks/q35_mtp_spec.py $SWIFT --n 128",
@@ -2560,37 +2562,43 @@
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/accept_ids.json --scratch $SCRATCH/sab-swift-mtp --card 0 --draft mtp --max-ctx 12288",
    "cards": "disp",
    "timeout": 3600,
-   "est": 900
+   "est": 900,
+   "blocked": "reads inputs no run produces yet (accept_ids.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-mtp-served-depth-agent40k": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/AGENT40K.json --scratch $SCRATCH/sab-tcap-agent --card 1 --draft mtp --max-ctx 40960",
    "cards": "nd",
    "timeout": 3600,
-   "est": 1500
+   "est": 1500,
+   "blocked": "reads inputs no run produces yet (AGENT40K.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-mtp-served-depth-code22k": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/CODE32K.json --scratch $SCRATCH/sab-tcap-code --card 1 --draft mtp --max-ctx 32768",
    "cards": "nd",
    "timeout": 3600,
-   "est": 1200
+   "est": 1200,
+   "blocked": "reads inputs no run produces yet (CODE32K.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-mtp-served-depth-agent40k": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/AGENT40K.json --scratch $SCRATCH/sab-swift-agent --card 0 --draft mtp --max-ctx 40960",
    "cards": "disp",
    "timeout": 3600,
-   "est": 1500
+   "est": 1500,
+   "blocked": "reads inputs no run produces yet (AGENT40K.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-mtp-served-depth-code22k": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/CODE32K.json --scratch $SCRATCH/sab-swift-code --card 0 --draft mtp --max-ctx 32768",
    "cards": "disp",
    "timeout": 3600,
-   "est": 1200
+   "est": 1200,
+   "blocked": "reads inputs no run produces yet (CODE32K.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-dflash-served-code": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/accept_ids.json --scratch $SCRATCH/sab-swift-dflash --card 0 --draft dflash --max-ctx 12288",
    "cards": "disp",
    "timeout": 3600,
-   "est": 900
+   "est": 900,
+   "blocked": "reads inputs no run produces yet (accept_ids.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-dflash-smoke-greedy": {
    "command": "$PY -I tools/serve_smoke1.py --model $SWIFT --scratch $SCRATCH/smoke-dflash --card 0 --draft dflash --max-ctx 12288 --block-imports gguf,tokenizers",
@@ -2632,13 +2640,15 @@
    "command": "$PY -I tests/prefill/test_q35_prefill.py $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz --llama $SCRATCH/tcap-llama-pd.bin --speed 2048",
    "cards": "disp",
    "timeout": 1800,
-   "est": 420
+   "est": 420,
+   "blocked": "reads inputs no run produces yet (tcap-llama-pd.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-gmodel-acc": {
    "command": "$PY -I tools/gates/q35_gmodel.py $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz --llama $SCRATCH/tcap-llama128.bin",
    "cards": "nd",
    "timeout": 1800,
-   "est": 300
+   "est": 300,
+   "blocked": "reads inputs no run produces yet (tcap-llama128.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-served-smoke-xtx": {
    "command": "$PY -I tools/serve_smoke1.py --model $TCAP --scratch $SCRATCH/tcap-smoke-xtx --card 0 --max-ctx 32768 --needle 28000 --restart --block-imports gguf,tokenizers --draft off",
@@ -2656,13 +2666,15 @@
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids48.json --scratch $SCRATCH/tcap-mtp-ab --card 1 --draft mtp --max-ctx 12288",
    "cards": "nd",
    "timeout": 3600,
-   "est": 400
+   "est": 400,
+   "blocked": "reads inputs no run produces yet (ids48.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-mtp-engine-xt": {
    "command": "$PY -I benchmarks/q35_mtp_spec.py $TCAP --prompt 48 --n 128 --ids $SCRATCH/ids48.json",
    "cards": "nd",
    "timeout": 1200,
-   "est": 300
+   "est": 300,
+   "blocked": "reads inputs no run produces yet (ids48.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-mtp-gate-xt": {
    "command": "for w in '' 3 6 7; do HIP_VISIBLE_DEVICES=1 K3_PER_WGP=$w tools/guard.sh $SCRATCH/tcap-mtp-gate-$w.log 1800 $PY -I tests/engine/test_q35_mtp.py $TCAP; done",
@@ -2674,31 +2686,36 @@
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids48.json --scratch $SCRATCH/tcap-dflash-ab --card 1 --max-ctx 12288",
    "cards": "nd",
    "timeout": 3600,
-   "est": 420
+   "est": 420,
+   "blocked": "reads inputs no run produces yet (ids48.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "q38-served-mtp-xtx": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $Q38 --ids $SCRATCH/ids-chat3.json --scratch $SCRATCH/q38-mtp-ab --card 0 --draft mtp --max-ctx 12288",
    "cards": "disp",
    "timeout": 3600,
-   "est": 420
+   "est": 420,
+   "blocked": "reads inputs no run produces yet (ids-chat3.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "q38-served-dflash-xtx": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $Q38 --ids $SCRATCH/ids-chat3.json --scratch $SCRATCH/q38-dflash-ab --card 0 --draft dflash --max-ctx 12288",
    "cards": "disp",
    "timeout": 3600,
-   "est": 420
+   "est": 420,
+   "blocked": "reads inputs no run produces yet (ids-chat3.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-tp-engine-decode": {
    "command": "$PY -I tools/gates/q35_gmodel.py $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz --llama $SCRATCH/swift-llama128.bin --cards 2 --speed 64 --ffn-share 0.5",
    "cards": "both",
    "timeout": 1800,
-   "est": 360
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (swift-llama128.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-tp-engine-decode": {
    "command": "$PY -I tools/gates/q35_gmodel.py $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz --llama $SCRATCH/tcap-llama128.bin --cards 2 --speed 64 --ffn-share 0.53",
    "cards": "both",
    "timeout": 1800,
-   "est": 360
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (tcap-llama128.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-tp-served-plain": {
    "command": "$PY -I tools/serve_smoke1.py --model $SWIFT --scratch $SCRATCH/swift-tp-smoke --card 0,1 --cards 2 --draft off --block-imports gguf,tokenizers",
@@ -2716,13 +2733,15 @@
    "command": "$PY -I tests/prefill/test_q35_prefill_tp.py $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz --llama $SCRATCH/swift-llama-pd.bin --speed 2048",
    "cards": "both",
    "timeout": 1800,
-   "est": 480
+   "est": 480,
+   "blocked": "reads inputs no run produces yet (swift-llama-pd.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-tp-prefill-2048": {
    "command": "$PY -I tests/prefill/test_q35_prefill_tp.py $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz --llama $SCRATCH/tcap-llama-pd.bin --speed 2048",
    "cards": "both",
    "timeout": 1800,
-   "est": 480
+   "est": 480,
+   "blocked": "reads inputs no run produces yet (tcap-llama-pd.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tp-auto-context": {
    "command": "$PY -I tools/serve_smoke1.py --model $TCAP --scratch $SCRATCH/tcap-tp-auto --card 0,1 --cards 2 --draft off --block-imports gguf,tokenizers",
@@ -2734,55 +2753,82 @@
    "command": "$PY -I tools/gates/q35_gmodel.py $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz --llama $SCRATCH/swift-llama128.bin --cards 2 --speed 64",
    "cards": "both",
    "timeout": 1800,
-   "est": 0
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (swift-llama128.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-tp-gmodel-acc": {
    "command": "$PY -I tools/gates/q35_gmodel.py $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz --llama $SCRATCH/tcap-llama128.bin --cards 2 --speed 64",
    "cards": "both",
    "timeout": 1800,
-   "est": 0
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (tcap-llama128.bin): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-tp-mtp-served-long": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/ids-both.json --scratch $SCRATCH/swift-tp-mtp --card 0,1 --cards 2 --draft mtp --max-ctx 40960",
    "cards": "both",
    "timeout": 3600,
-   "est": 540
+   "est": 540,
+   "blocked": "reads inputs no run produces yet (ids-both.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-tp-dflash-served-long": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/ids-both.json --scratch $SCRATCH/swift-tp-dflash --card 0,1 --cards 2 --draft dflash --max-ctx 40960",
    "cards": "both",
    "timeout": 3600,
-   "est": 540
+   "est": 540,
+   "blocked": "reads inputs no run produces yet (ids-both.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-tp-mtp-served-long": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids-both.json --scratch $SCRATCH/tcap-tp-mtp --card 0,1 --cards 2 --draft mtp --max-ctx 40960",
    "cards": "both",
    "timeout": 3600,
-   "est": 540
+   "est": 540,
+   "blocked": "reads inputs no run produces yet (ids-both.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-tp-dflash-served-long": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids-both.json --scratch $SCRATCH/tcap-tp-dflash --card 0,1 --cards 2 --draft dflash --max-ctx 40960",
    "cards": "both",
    "timeout": 3600,
-   "est": 540
+   "est": 540,
+   "blocked": "reads inputs no run produces yet (ids-both.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "swift-tp-dflash-agent": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $SWIFT --ids $SCRATCH/ids-agent.json --scratch $SCRATCH/swift-tp-agent --card 0,1 --cards 2 --draft dflash --max-ctx 40960",
    "cards": "both",
    "timeout": 3600,
-   "est": 360
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (ids-agent.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-tp-dflash-agent": {
    "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids-agent.json --scratch $SCRATCH/tcap-tp-agent --card 0,1 --cards 2 --draft dflash --max-ctx 40960",
    "cards": "both",
    "timeout": 3600,
-   "est": 360
+   "est": 360,
+   "blocked": "reads inputs no run produces yet (ids-agent.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tp-served-e2e-identity": {
    "command": "for m in $SWIFT $TCAP; do for d in off mtp dflash; do tools/guard.sh $SCRATCH/tp-e2e-$d.log 2400 $PY -I tools/serve_smoke1.py --model $m --scratch $SCRATCH/tp-e2e-$d --card 0,1 --cards 2 --draft $d --block-imports gguf,tokenizers --restart; done; done",
    "cards": "both",
    "timeout": 5400,
-   "est": 2700
+   "est": 2700,
+   "blocked": "the byte-identity across arms is compared outside the tool and both models share one scratch: needs a comparison step"
+  },
+  "swift-decode-short-xt": {
+   "command": "$PY -I tests/engine/test_q35_dense.py --scratch $SCRATCH/dense --model $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz",
+   "cards": "nd",
+   "timeout": 1800,
+   "est": 400
+  },
+  "swift-verify-xt-512": {
+   "command": "$PY -I benchmarks/q35_verify.py $SWIFT --depths 512,4096 --per-wgp 5,6,7",
+   "cards": "nd",
+   "timeout": 1800,
+   "est": 420
+  },
+  "swift-mtp-engine-owntexts-xt": {
+   "command": "$PY -I benchmarks/q35_mtp_spec.py $SWIFT --n 128",
+   "cards": "nd",
+   "timeout": 1800,
+   "est": 360
   }
  },
  "note": "runs with \"blocked\" are listed by check / plan and never run until the reason is cleared; rows of tier \"derived\" cite other rows (cross-references, ranges) and are updated by hand from them"

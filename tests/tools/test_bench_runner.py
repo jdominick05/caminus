@@ -14,6 +14,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +84,16 @@ check('decode 98.2 tok/s' in row['one'] and 'RESULT PASS' in row['one'], 'table:
 check('NOT RUN' in row['two'], 'table: a release row whose run left no log is NOT RUN')
 check('not rerun: refs gone' in row['three'], 'table: a blocked run says why it was not rerun')
 check('not rerun for this release (yardstick)' in row['four'], 'table: a yardstick row is marked not rerun')
+
+# ---- a step's verdict and the parse fragments
+for name, body, want in (('ok', 'decode 9 ms\nRESULT PASS\n', True), ('done', 'RESULT DONE\n', True), ('bad', 'x\nRESULT FAIL\n', False),
+                         ('plain', '96 tokens: median 9.9 ms/token\n', True), ('trace', 'Traceback (most recent call last):\n', False),
+                         ('empty', '', False)):
+    f = os.path.join(A.scratch, name + '.log'); open(f, 'w').write(body)
+    check(br.step_ok(f) is want, f'step_ok: {name} -> {want} (.done only for a step that finished well)')
+pats = br.patterns("^plain (\\w+) rep2: .* tok/s ; also 'greedy: .* decode' after a header")
+check(any(re.search(p, 'plain prose rep2: 128 tokens = 104.6 tok/s') for p in pats) and any(re.search(p, 'greedy: 64 tokens decode 41 tok/s') for p in pats),
+      f'patterns: ^-anchored and quoted fragments both match ({pats})')
 
 print('RESULT', 'FAIL' if FAILS else 'PASS')
 sys.exit(1 if FAILS else 0)

@@ -165,6 +165,9 @@ def run(a):
     ws = windows(m, a.window_s)
     if not 0 <= a.window < len(ws): raise SystemExit(f'bench_runner: --window {a.window}: the plan has windows 0 .. {len(ws) - 1}')
     card, rids = ws[a.window]
+    if not os.access(WINDOW, os.X_OK):
+        raise SystemExit(f'bench_runner: the GPU window script is not here ({WINDOW}): install the caminus-gpu-window skill')
+    print(f'window {a.window} of the plan at --window-s {a.window_s} (plan with the same value): {card}, {", ".join(rids)}')
     os.makedirs(a.out, exist_ok=True)
     steps, todo = [], []
     for rid in rids:
@@ -186,9 +189,29 @@ def run(a):
         if os.path.exists(log):
             os.replace(log, os.path.join(a.out, rid + '.log'))
             if os.path.exists(log + '.out'): os.replace(log + '.out', os.path.join(a.out, rid + '.log.out'))
-            open(os.path.join(a.out, rid + '.done'), 'w').write(f'window {a.window} rc {rc}\n')
+            ok = step_ok(os.path.join(a.out, rid + '.log'))
+            # (.done only for a step that finished well: a failed, killed or timed-out step reruns when the window resumes)
+            open(os.path.join(a.out, rid + ('.done' if ok else '.failed')), 'w').write(f'window {a.window} rc {rc}\n')
+            if ok and os.path.exists(os.path.join(a.out, rid + '.failed')): os.remove(os.path.join(a.out, rid + '.failed'))
+            print(f'{rid}: {"done" if ok else "FAILED (reruns on resume): " + rid + ".log"}')
     print(f'window {a.window} ended rc {rc}; logs in {a.out}')
     return rc
+
+
+def step_ok(log):
+    """a step finished well: its log (and the step's .out) end with RESULT PASS / DONE, or carry no RESULT line and no
+    guard stop (a plain benchmark that printed its numbers)"""
+    text = ''.join(open(f, errors='replace').read() for f in (log, log + '.out') if os.path.exists(f))
+    res = re.findall(r'RESULT (PASS|FAIL|DONE|PARTIAL)', text)
+    if res: return res[-1] in ('PASS', 'DONE')
+    return bool(text.strip()) and not re.search(r'guard: (killed|timeout|fault)|Traceback \(most recent call last\)', text)
+
+
+def patterns(parse):
+    """the regexes a row's parse field names: each ^-anchored fragment and each quoted one"""
+    out = [p.strip().split(' ; ')[0] for p in re.findall(r'\^[^;\']+', parse or '')]
+    out += [re.escape(q.strip()).replace(r'\.\*', '.*') for q in re.findall(r"'([^']{4,})'", parse or '')]
+    return [p for p in out if p]
 
 
 def table(a):
@@ -212,9 +235,9 @@ def table(a):
             else:
                 text = open(log, errors='replace').read() + (open(log + '.out', errors='replace').read() if os.path.exists(log + '.out') else '')
                 hits = []
-                for pat in re.findall(r'\^[^;]+', r['parse'] or ''):
+                for pat in patterns(r['parse']):
                     try:
-                        hits += [l.strip() for l in text.splitlines() if re.search(pat.strip().split(' ; ')[0], l)][:3]
+                        hits += [l.strip() for l in text.splitlines() if re.search(pat, l)][:3]
                     except re.error:
                         pass
                 res = re.findall(r'RESULT (PASS|FAIL|DONE)', text)
