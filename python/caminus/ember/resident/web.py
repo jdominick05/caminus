@@ -14,6 +14,7 @@ from collections import OrderedDict
 import html.parser
 import json
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -37,22 +38,32 @@ PDF_MAX_BYTES = 30_000_000   # (papers run past the page cap; a cut PDF loses it
 FETCH_TRIES = 3
 FETCH_RETRY_S = 30    # every retry of one fetch starts within this many seconds of the first try
 CACHE_S = 600
-CACHE_CHARS = 20_000_000
+CACHE_CHARS = 4_000_000   # every goal's pages together (a long PDF is ~1-3M characters; a daemon keeps them until they age out)
+PDF_BUDGET_S = 5      # the built-in PDF reader's time: past it, the text read so far comes back with a note
 UA = 'Mozilla/5.0 (X11; Linux x86_64) caminus-env/0.3'
 
-# One backend per run. ddgs raises "No results found." both for a real empty answer and when an engine refuses (a rate
-# limit): it is reported apart from an empty list.
+# One helper per search, one line in and one line out per backend, so ddgs is imported once and not once per engine.
+# ddgs raises "No results found." both for a real empty answer and when an engine refuses (a rate limit): it is
+# reported apart from an empty list.
 _SEARCH = r'''
 import json, sys
-a = json.loads(sys.stdin.read())
+out, sys.stdout = sys.stdout, sys.stderr     # (anything ddgs prints stays off the answer line)
 try:
     from ddgs import DDGS
-    rows = DDGS().text(a["query"], region=a.get("region") or "us-en", safesearch="moderate",
-                       timelimit=a.get("timelimit"), max_results=a["max_results"], backend=a["backend"])
+    failed = None
 except Exception as e:
-    print(json.dumps(dict(error="%s: %s" % (type(e).__name__, str(e)[:200]))))
-    sys.exit(0)
-print(json.dumps(dict(rows=[dict(title=r.get("title"), url=r.get("href"), snippet=r.get("body")) for r in rows or []])))
+    failed = e
+for line in sys.stdin:
+    a = json.loads(line)
+    try:
+        if failed:
+            raise failed
+        rows = DDGS().text(a["query"], region=a.get("region") or "us-en", safesearch="moderate",
+                           timelimit=a.get("timelimit"), max_results=a["max_results"], backend=a["backend"])
+        got = dict(rows=[dict(title=r.get("title"), url=r.get("href"), snippet=r.get("body")) for r in rows or []])
+    except Exception as e:
+        got = dict(error="%s: %s" % (type(e).__name__, str(e)[:200]))
+    print(json.dumps(got), file=out, flush=True)
 '''
 
 
@@ -69,18 +80,43 @@ def _search_python(rt):
     return None
 
 
-def _ddgs(py):
-    """the ddgs backend runner: (backend, args, timeout) -> rows, or raises with the engine's reason"""
-    def run(backend, args, timeout):
-        p = subprocess.run([py, '-I', '-c', _SEARCH], input=json.dumps(dict(args, backend=backend)),
-                           capture_output=True, text=True, timeout=timeout)
-        if p.returncode != 0:
-            raise RuntimeError((p.stderr.strip().splitlines() or ['the search helper failed'])[-1])
-        got = json.loads(p.stdout)
+class _Ddgs:
+    """the ddgs backend runner for one search: (backend, args, timeout) -> rows, or raises with the engine's reason.
+    A backend past its time is killed with its helper; the next backend starts a new one."""
+    def __init__(self, py):
+        self.py, self.p = py, None
+
+    def __call__(self, backend, args, timeout):
+        if self.p is None:
+            self.p = subprocess.Popen([self.py, '-I', '-c', _SEARCH], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True)
+        try:
+            self.p.stdin.write(json.dumps(dict(args, backend=backend)) + '\n')
+            self.p.stdin.flush()
+            ready = select.select([self.p.stdout], [], [], timeout)[0]
+            line = self.p.stdout.readline() if ready else None
+        except OSError:
+            line = ''
+        if not line:
+            self.close()
+            if line is None:
+                raise subprocess.TimeoutExpired('ddgs', timeout)
+            raise RuntimeError('the search helper stopped')
+        try:
+            got = json.loads(line)
+        except ValueError:
+            self.close()
+            raise RuntimeError('the search helper gave no answer line')
         if got.get('error'):
             raise (NoResults if 'no results found' in got['error'].lower() else RuntimeError)(got['error'])
         return got['rows']
-    return run
+
+    def close(self):
+        if self.p is not None:
+            p, self.p = self.p, None
+            p.kill()
+            with p:                  # (closes its pipes and reaps it)
+                pass
 
 
 class NoResults(Exception):
@@ -103,7 +139,14 @@ def search(rt, query, max_results=8, timelimit=None):
         if py is None:
             raise ValueError('web search is not set up: ddgs is not installed (your human can run: python3 -m venv '
                              '~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs in your account); web_fetch still works')
-        run = _ddgs(py)
+        run = _Ddgs(py)
+    try:
+        return _search(rt, run, query, max_results, timelimit)
+    finally:
+        getattr(run, 'close', lambda: None)()
+
+
+def _search(rt, run, query, max_results, timelimit):
     args = dict(query=query, max_results=max(1, min(int(max_results or 8), 20)), timelimit=timelimit or None)
     # 9 of 21 searches in a real goal failed with "No results found" when the first engine refused: the next engine is
     # tried before giving up, and each one's outcome is named. When no engine failed outright but none answered, auto
@@ -187,6 +230,7 @@ class _Text(html.parser.HTMLParser):
 
 _PDF_TOKEN = re.compile(rb'(\()|<([0-9A-Fa-f\s]*)>|(\[)|(\])|([-+]?(?:\d+\.?\d*|\.\d+))|/[^\s/\[\]()<>{}%]*|%[^\r\n]*'
                         rb"|([A-Za-z'\"*]+)|<<|>>|[{}]|\S")
+_PDF_STREAM = re.compile(rb'stream\r?\n')
 _PDF_ESC = {b'n': b'\n', b'r': b'\r', b't': b'\t', b'b': b'\b', b'f': b'\f'}
 
 
@@ -217,13 +261,17 @@ def _pdf_string(data, i):
     return bytes(out), n
 
 
-def _pdf_ops(data, out, counts):
-    """the text-showing operators of one content stream (Tj ' " TJ; Td TD T* Tm as line breaks) into out"""
-    stack, arr, last_y, i = [], None, None, 0
+def _pdf_ops(data, out, counts, deadline):
+    """the text-showing operators of one content stream (Tj ' " TJ; Td TD T* Tm as line breaks) into out; False when
+    the deadline passed first (one stream can inflate to hundreds of MB)"""
+    stack, arr, last_y, i, n = [], None, None, 0, 0
     while True:
         m = _PDF_TOKEN.search(data, i)
         if not m:
-            return
+            return True
+        n += 1
+        if not n & 4095 and time.monotonic() > deadline:
+            return False
         i = m.end()
         if m.group(1):
             s, i = _pdf_string(data, i)
@@ -285,14 +333,25 @@ def _pdf_builtin(raw, why='pdftotext is not installed'):
     """text from a PDF with the standard library only: Flate content streams and their text operators. Partial by
     design: fonts that map glyphs through their own tables, and other filters, are counted and skipped."""
     counts, out, budget = dict(read=0, other_filter=0, damaged=0, unmapped=0), [], 200_000_000
-    for m in re.finditer(rb'stream\r?\n', raw):
+    # One forward cursor: each stream's data runs to the next endstream and the search goes on after it, so the file
+    # is scanned once (a search to the end of the file from every "stream" keyword took 25.7 s on 880 KB of them);
+    # with no endstream after a stream, its data runs to the end of the file and the walk ends there.
+    pos, deadline, stopped = 0, time.monotonic() + PDF_BUDGET_S, False
+    while pos < len(raw):
+        if time.monotonic() > deadline:
+            stopped = True
+            break
+        m = _PDF_STREAM.search(raw, pos)
+        if not m:
+            break
+        end = raw.find(b'endstream', m.end())     # (scanned to, not taken from /Length: an indirect length is common)
+        pos = end + 9 if end >= 0 else len(raw)
         head = raw[max(0, m.start() - 600):m.start()]
         head = head[head.rfind(b'obj') + 3:] if b'obj' in head else head
         # (images, cross-reference and object streams, metadata and embedded font programs hold no page text)
         if not head.rstrip().endswith(b'>>') or re.search(
                 rb'/(Subtype\s*/(Image|Type1C|CIDFontType0C|OpenType)|Type\s*/(XRef|ObjStm|Metadata)|Length[123])', head):
             continue
-        end = raw.find(b'endstream', m.end())     # (scanned to, not taken from /Length: an indirect length is common)
         data = raw[m.end():end if end >= 0 else len(raw)]
         if b'/Filter' in head:
             if re.search(rb'/Filter\s*(\[\s*)?/FlateDecode\s*\]?\s*[/>]', head) is None:
@@ -304,7 +363,9 @@ def _pdf_builtin(raw, why='pdftotext is not installed'):
         if b'BT' not in data or (b'Tj' not in data and b'TJ' not in data):
             continue
         counts['read'] += 1
-        _pdf_ops(data, out, counts)
+        if not _pdf_ops(data, out, counts, deadline):
+            stopped = True
+            break
         if budget <= 0:
             break
     text = re.sub(r'[ \t]+', ' ', ''.join(out))
@@ -314,6 +375,7 @@ def _pdf_builtin(raw, why='pdftotext is not installed'):
     skipped += [f'{counts["unmapped"]} runs in font encodings it cannot map'] if counts['unmapped'] else []
     note = (f'partial: the built-in reader ({why}) read the text of '
             f'{counts["read"]} content streams' + ('; skipped ' + ', '.join(skipped) if skipped else '')
+            + (f'; stopped at its {PDF_BUDGET_S} s limit, {min(pos, len(raw)):,} of {len(raw):,} bytes in' if stopped else '')
             + '; pdftotext (poppler-utils) reads more')
     return text, note
 
@@ -433,9 +495,10 @@ def fetch(rt, url, max_chars=40_000, goal=None, paper=False, fresh=False):
     else:
         full = _read(rt, target)
         with _CACHE_LOCK:
-            cache[key] = (now, full)
-            cache.move_to_end(key)
-            while len(cache) > 1 and sum(len(v[1]['text']) for v in cache.values()) > CACHE_CHARS:
+            if len(full['text']) <= CACHE_CHARS:     # (a text past the whole cap is not kept at all)
+                cache[key] = (now, full)
+                cache.move_to_end(key)
+            while sum(len(v[1]['text']) for v in cache.values()) > CACHE_CHARS:
                 cache.popitem(last=False)
     text = full['text']
     limit = max(1000, min(int(max_chars or 40_000), 200_000))

@@ -173,10 +173,11 @@ A side call (the judge's check of a finish) always runs with thinking off.
   has it).
 - **web_fetch** makes up to three tries on HTTP 429 and 5xx, waiting what the site's Retry-After asks (else 2 s, then 4 s);
   a site that asks for a wait past 30 s fails at once, naming the wait. A URL fetched again within a goal comes from a
-  cache for 10 minutes, marked `cached` (`fresh=true` fetches it again). A PDF (by its content type or its first bytes,
-  up to 30 MB) comes back as text through `pdftotext` when it is installed (poppler-utils), else through a small
-  built-in reader that marks its text partial and says what it skipped. `paper=true` on an arXiv abstract URL fetches
-  the paper's PDF.
+  cache for 10 minutes, marked `cached` (`fresh=true` fetches it again); the cache holds 4M characters in all. A PDF (by
+  its content type or its first bytes, up to 30 MB) comes back as text through `pdftotext` when it is installed
+  (poppler-utils), else (or when pdftotext fails on it) through a small built-in reader that marks its text partial,
+  says what it skipped, and after 5 s returns what it has read so far. `paper=true` on an arXiv abstract URL fetches the
+  paper's PDF.
 
 ## Where things live
 

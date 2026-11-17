@@ -1252,10 +1252,19 @@ class Resident(unittest.TestCase):
             self.assertEqual(out['engine'],'bing');self.assertEqual(out['results'][0]['snippet'],'bing')
             self.assertEqual(out['tried'],['auto: "No results found" (empty or refused)','bing: 1 results'],
                              'ddgs "No results found." is reported apart from an empty list')
-            (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return []\n')
+            imports=self.home/'ddgs-imports'
+            (site/'ddgs'/'__init__.py').write_text(f'open({str(imports)!r},"a").write("x")\nclass DDGS:\n    def text(self,q,**k):\n        return []\n')
             rt.web_sleep=lambda s:None
             with self.assertRaises(ValueError) as c:web.search(rt,'nothing at all')
             self.assertIn('no engine found results',str(c.exception));self.assertIn('bing (again after 2.5 s): empty',str(c.exception))
+            self.assertEqual(imports.read_text(),'xx','seven engines asked: ddgs imported once to find its Python, once to search')
+            # an engine past its time is killed with its helper; the next engine gets a new one
+            imports.unlink()
+            (site/'ddgs'/'__init__.py').write_text(f'open({str(imports)!r},"a").write("x")\nimport time\nclass DDGS:\n    def text(self,q,**k):\n        if k["backend"]=="auto":time.sleep(60)\n        return [dict(title="t",href="https://example.org/b",body=k["backend"])]\n')
+            with unittest.mock.patch.object(web,'BACKEND_TIMEOUT',1):
+                t0=time.monotonic();out=web.search(rt,'slow engine')
+            self.assertLess(time.monotonic()-t0,15);self.assertEqual(out['engine'],'bing')
+            self.assertEqual(out['tried'],['auto: error (no answer in 1 s)','bing: 1 results']);self.assertEqual(imports.read_text(),'xxx')
             class Resp:
                 status=200;headers={'Content-Type':'text/html; charset=utf-8'}
                 def __init__(self,body):self.body=body
@@ -1361,6 +1370,10 @@ class Resident(unittest.TestCase):
             self.assertEqual(Endpoint.web_hits[f'/web/page/{tag}'],3)
             with unittest.mock.patch.object(web,'CACHE_S',0):
                 time.sleep(0.01);self.assertNotIn('cached',web.fetch(rt,page,goal='g1'),'an old entry is fetched again')
+            # the cache holds a bounded number of characters: a text past the whole bound is not kept
+            with unittest.mock.patch.object(web,'CACHE_CHARS',1000):
+                web.fetch(rt,page,goal='g4');self.assertNotIn('cached',web.fetch(rt,page,goal='g4'))
+                self.assertLessEqual(sum(len(v[1]['text']) for v in rt._web_cache.values()),1000)
             # a PDF (found by its magic, sent as octet-stream) as text: the built-in reader, marked partial ...
             with unittest.mock.patch.object(web.shutil,'which',return_value=None):
                 p=web.fetch(rt,f'{base}/pdf/{tag}')
@@ -1375,6 +1388,18 @@ class Resident(unittest.TestCase):
             self.assertIn('kept',text);self.assertIn('1 runs in font encodings it cannot map',how)
             font=b'5 0 obj\n<< /Length1 9 /Length 22 >>\nstream\nBT (FONTJUNK) Tj ET\nendstream\nendobj\n'
             self.assertNotIn('FONTJUNK',web._pdf_builtin(pdf(b'kept')+font)[0],'an embedded font program is not page text')
+            # "stream" keywords with no endstream after them, or one only at the very end, are read in one pass: a
+            # search to the end of the file from each one took 25.7 s on 880 KB
+            for tail in (b'',b'endstream\n'):
+                t0=time.monotonic();text,how=web._pdf_builtin(b'%PDF-1.4\n'+b'<<>>stream\n'*100_000+tail)
+                self.assertLess(time.monotonic()-t0,2.0,'1.1 MB of stream keywords');self.assertNotIn('limit',how)
+            # past its time the reader returns what it read so far and says where it stopped (a clock that moves a
+            # second per look: five streams fit in its 5 s)
+            clock=iter(range(1000))
+            with unittest.mock.patch.object(web,'time',type('Clock',(),dict(monotonic=staticmethod(lambda:next(clock))))):
+                text,how=web._pdf_builtin(b''.join(pdf(b'part%d' % i) for i in range(10)))
+            self.assertIn('part0',text);self.assertIn('part4',text);self.assertNotIn('part5',text)
+            self.assertIn('stopped at its 5 s limit',how)
             with unittest.mock.patch.object(web.shutil,'which',return_value=sys.executable):   # (a "pdftotext" that fails)
                 text,how=web.pdf_text(pdf(b'kept'))
             self.assertIn('kept',text);self.assertIn('pdftotext failed: exit',how)
