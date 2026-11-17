@@ -2,7 +2,7 @@
 
 Every Caminus release is built twice from its git tag: on the maintainer's machine and on GitHub's runners, in the same
 public build image. It is published only when the two builds are byte for byte equal. GitHub signs a record of the CI
-build (SLSA Build Level 3 provenance: which repository, workflow, tag and commit built which file), and PyPI keeps a
+build (provenance self-assessed against SLSA Build Level 3: which repository, workflow, tag and commit built which file), and PyPI keeps a
 signed record of who uploaded each file (a PEP 740 attestation). This page shows how to check both and how to rebuild a
 release yourself, so you don't have to take a download on trust.
 

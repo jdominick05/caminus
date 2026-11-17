@@ -6,7 +6,7 @@
   <a href="https://pypi.org/project/caminus/"><img src="https://img.shields.io/pypi/v/caminus?label=pypi&labelColor=3b4252&color=88c0d0" alt="PyPI version"></a>
   <a href="https://github.com/jdominick05/caminus/releases/latest"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?label=release&labelColor=3b4252&color=5e81ac" alt="newest release"></a>
   <a href="https://github.com/jdominick05/caminus/releases"><img src="https://img.shields.io/github/v/release/jdominick05/caminus?include_prereleases&filter=*.dev*&label=nightly&labelColor=3b4252&color=a3be8c" alt="newest nightly build"></a>
-  <a href="docs/verifying.md"><img src="https://img.shields.io/badge/SLSA-build%20level%203-d08770?labelColor=3b4252" alt="SLSA Build Level 3: signed provenance for every release"></a>
+  <a href="docs/verifying.md"><img src="https://img.shields.io/badge/SLSA-build%20L3%2C%20self--assessed-d08770?labelColor=3b4252" alt="self-assessed against SLSA Build L3: signed provenance for every release"></a>
   <img src="https://img.shields.io/badge/status-early%20testing-ebcb8b?labelColor=3b4252" alt="status: early testing">
   <a href="docs/hardware.md"><img src="https://img.shields.io/badge/GPU-RX%207900%20XTX%20%2F%20XT-8fbcbb?labelColor=3b4252" alt="GPU: RX 7900 XTX / XT"></a>
   <img src="https://img.shields.io/badge/Linux-Python%203.12-81a1c1?labelColor=3b4252&logo=linux&logoColor=d8dee9" alt="Linux, Python 3.12">
@@ -14,10 +14,10 @@
 </p>
 
 <p align="center">
-  <b>Fast local coding models on your AMD Radeon RX 7900 cards.</b><br>
-  Caminus is an inference engine written from the GPU kernels up for Radeon RDNA3 cards. It serves coding models to tools
-  like Qwen Code through OpenAI- and Anthropic-compatible APIs. On the same cards it writes 1.1 to 2.4 times as fast as
-  llama.cpp at short context.
+  <b>Fast local models on your AMD Radeon RX 7900 cards, and an AI agent that works with them.</b><br>
+  Caminus is an inference engine written from the GPU kernels up for Radeon RDNA3 cards; on the same cards it writes 1.1
+  to 2.4 times as fast as llama.cpp at short context. Ember, its agent environment, gives an AI agent its own account on
+  your machine: you give it goals and steer it while it works, on a local model or a paid API.
 </p>
 
 > [!WARNING]
@@ -27,42 +27,83 @@
 > Every report helps.
 
 <p align="center">
-  <img src="docs/panel.svg" alt="The Caminus panel: models, running servers and Qwen Code" width="92%">
-</p>
-
-<p align="center">
   <img src="docs/ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
 </p>
 
 ## Get started
 
-You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source).
+You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source). Four steps: install,
+open the panel, start the model for your cards, then set up Ember.
+
+### 1. Install
 
 **Build it from source (recommended).** The build runs the release recipe inside the public build image: on the CPU, no
 GPU needed, nothing installed on your system besides Docker. Built from a release tag, the wheel is byte for byte the
-published one. Releases build this way from 0.2.2 on; until 0.2.2 is out, build the development branch (`testing`):
+published one. Releases build this way from 0.3.0 on; until 0.3.0 is out, build the development branch (`testing`):
 
 ```bash
 git clone https://github.com/jdominick05/caminus.git && cd caminus
-git checkout testing        # from 0.2.2 on: the tag of the "Latest" release instead (not a nightly pre-release)
+git checkout testing        # from 0.3.0 on: the tag of the "Latest" release instead (not a nightly pre-release)
 tools/release/in_image.sh tools/release/release_build.sh --untagged    # GPU code + wheel into dist/ (drop --untagged on a release tag)
 python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards
 pip install dist/caminus-*.whl
-caminus panel
 ```
 
 The build needs Docker that your user can run (`docker run hello-world` works). It refuses a checkout with an old
-`dist/`: build from a fresh clone. The latest release is at
-[releases/latest](https://github.com/jdominick05/caminus/releases/latest); 0.2.1 and older predate the build image:
-build those with [their own building notes](https://github.com/jdominick05/caminus/blob/v0.2.1/docs/dev/building.md).
+`dist/`: build from a fresh clone. 0.2.1 and older predate the build image: build those with
+[their own building notes](https://github.com/jdominick05/caminus/blob/v0.2.1/docs/dev/building.md).
 
 **Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
-release is built with the same recipe, and its provenance can be checked against the source
-([verifying a download](docs/verifying.md), SLSA Build Level 3).
+release is built with the same recipe and signed, and its provenance can be checked against the source
+([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember arrives on PyPI with 0.3.0;
+until then the package there is 0.2.1, without it.
 
-In the panel you download a model, start it, and open Qwen Code on it. The [quickstart](docs/quickstart.md) walks you
-through it in about ten minutes, plus the download.
+### 2. Open the panel
+
+```bash
+caminus panel
+```
+
+The panel lists the models, downloads and starts them, shows your cards and running servers, and sets up the
+harnesses. If anything looks wrong, `caminus doctor` checks the machine ([troubleshooting](docs/troubleshooting.md)).
+
+<p align="center">
+  <img src="docs/panel.svg" alt="The Caminus panel: models, running servers and Qwen Code" width="92%">
+</p>
+
+### 3. Start the model for your setup
+
+| Your cards | What runs | Ember's default local model |
+|---|---|---|
+| One XT | ThinkingCap, the plain Qwen3.8 27B | ThinkingCap |
+| One XTX | Those two, plus Qwen3-30B-A3B and Swift 1.5 | Swift 1.5 |
+| XTX + XT | Everything, including the Coder and the two-card forms | the Coder (both cards) |
+| Two XTX | The same as XTX + XT. Untested: reports are welcome. | the Coder (both cards) |
+| Two XT | Two-card Swift 1.5, ThinkingCap or Qwen3-30B-A3B, or two one-card models side by side; no Coder. Untested: reports are welcome. | ThinkingCap |
+
+Download and start it from the panel, or `caminus pull MODEL && caminus start MODEL`. Qwen3-30B-A3B is the fastest
+writer on one 24 GB card but is not Ember's default yet: it finishes fewer agent tasks for now. Every model, its speed
+and its context: [models](docs/models.md).
+
+### 4. Set up Ember
+
+```bash
+caminus ember setup                               # writes the one root step and says how to run it
+sudo sh ~/.local/share/caminus/env-setup.sh       # the agent's account, its group and the shared folders; safe to rerun
+caminus ember setup                               # installs the agent's side; every line should say PASS
+caminus ember agent install
+caminus ember agent init resident --model MODEL_ID --endpoint http://127.0.0.1:8092/v1
+caminus ember agent start resident
+caminus ember ui
+```
+
+`caminus ember setup` names the default model for your cards at the end; `MODEL_ID` is what the running server reports.
+Ember works the same on a paid API, through a key relay that holds your key and caps the day's spend. The
+[Ember quickstart](docs/ember-quickstart.md) walks through all of it, and [the guide](docs/ember.md) explains how it works.
+
+Prefer another harness? The panel sets up [Qwen Code](docs/harnesses.md) on the same server, and any OpenAI- or
+Anthropic-compatible client can use it. The [quickstart](docs/quickstart.md) covers the panel and Qwen Code.
 
 **Nightly builds.** When the `testing` branch changes, it is built overnight and published as a
 [pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
@@ -97,7 +138,7 @@ are welcome too.
 | Model | Cards | Decode | llama.cpp, same cards |
 |---|---|---|---|
 | Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
-| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; 218 on two cards (engine, not yet served) | 148 tok/s; 112 on two cards (`-sm tensor`) |
+| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; served, 206 on two cards against 240 on one (two cards are faster from about 32K) | 148 tok/s; 112 on two cards (`-sm tensor`) |
 | Swift 1.5 27B Q4_K_M (17 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
 | ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1; or 2 | 47 tok/s; 68 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
 | Qwen3.8-27B GSQ-RCO IQ3_S (12 GB) | 1 | 55 tok/s | not measured yet |
