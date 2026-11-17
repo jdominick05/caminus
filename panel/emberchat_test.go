@@ -2679,3 +2679,11 @@ func TestTheAdvisorReviewCardShowsWhatTheAdvisorSaid(t *testing.T) {
 		t.Fatalf("the card carries the advice the agent reads:\n%s", v)
 	}
 }
+
+func TestAdvisorSetupPointsAtTheCLIInsteadOfRunningAReview(t *testing.T) {
+	m := chatFixture(t)
+	next, cmd, _ := m.steerSlash("/advisor", "setup")
+	if cmd != nil || !strings.Contains(next.msg, "caminus ember agent advisor") {
+		t.Fatalf("/advisor setup runs no paid review and names the CLI: %q", next.msg)
+	}
+}

@@ -464,6 +464,10 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 	case "/advisor":
 		// a review now: the advisor reads the goal and its advice reaches the agent with its current reply dropped, so
 		// it reads the advice before its next step (its settings: caminus ember agent advisor NAME).
+		if strings.TrimSpace(arg) == "setup" { // (the settings screen left the TUI: never a paid review about "setup")
+			m.msg = "the advisor's settings are in the CLI: caminus ember agent advisor " + m.agentName
+			return m, nil, true
+		}
 		if !need() {
 			return m, nil, true
 		}

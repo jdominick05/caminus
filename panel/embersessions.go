@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,17 @@ func destroyResidentSession(m emberModel, name string, active []string) tea.Cmd 
 				text = "the agent's runtime predates destroy: run caminus ember agent install, then try again"
 			}
 			return residentDestroyedMsg{name: name, err: text}
+		}
+		// the goals as they are now, not as the card last read them (a card still loading, or one read minutes ago,
+		// knows none or stale ones): a status that cannot be read stops the destroy
+		now := loadSessionCard(m, name)
+		if now.status == "unknown" {
+			return residentDestroyedMsg{name: name, err: "could not read its goals; nothing was changed, try again"}
+		}
+		for _, id := range now.active {
+			if !slices.Contains(active, id) {
+				active = append(active, id)
+			}
 		}
 		for _, id := range active { // every live goal, so none leaves a request behind for a session that is gone
 			_, _ = runResident(residentCommand(m, []string{"cancel", name, id, "--json"}, ""))
