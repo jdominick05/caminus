@@ -270,9 +270,10 @@ class Live:
     a continuation; the file is removed when the turn ends, so its absence is the "not generating" signal.
     """
 
-    def __init__(self, home, gid, store):
+    def __init__(self, home, gid, store, server=None):
         self.path = Path(home) / 'live' / (gid + '.json')
         self.store, self.gid = store, gid
+        self.server = server     # the Caminus server answering this call, when the brain is one (cli._engine_live)
         self.turn = uuid.uuid4().hex[:12]
         self.content, self.reasoning, self.tools = [], [], []
         self.last = 0.0
@@ -308,7 +309,7 @@ class Live:
     def _write(self):
         atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
                                     content=''.join(self.content), reasoning=''.join(self.reasoning),
-                                    tools=self.tools))
+                                    tools=self.tools, server=self.server))
 
     def check(self):
         """False when the turn must stop: the goal was cancelled, or an Esc asked to interrupt it."""
@@ -1369,13 +1370,23 @@ class Runtime:
         atomic_json(self.home / 'context.json', dict(goal=gid, tokens=tokens, size=size, ts=time.time()))
 
     def _throughput_note(self,gid,speed):
-        """Record the decode speed of the last streamed reply: the usage token count over client-measured
-        decode time (first to final chunk, prefill and queueing excluded) — measured, never estimated; a
-        non-streamed reply or a backend that sends no usage reports nothing. Like context.json, one small
-        file rewritten in place by the runtime lock's owner, for the UI footer."""
-        if not isinstance(speed,dict) or not isinstance(speed.get('tps'),(int,float)) or not speed['tps'] > 0:
+        """Record the last reply's speed (Model.last_speed): on a Caminus server the engine's own write and read
+        speeds from the reply's timings (source engine), elsewhere the usage token count over the client's decode
+        window (source estimate). A reply that gives neither keeps the previous record only when that record is not
+        another brain's engine figure: after a Caminus reply, a fallback or /model-switched brain's short reply showed
+        the engine's numbers, labelled as the engine's, for its turn. Like context.json, one small file rewritten in
+        place by the runtime lock's owner, for the UI footer."""
+        def rate(k):
+            return isinstance(speed.get(k),(int,float)) and speed[k]>0
+        path=self.home/'throughput.json'
+        if not isinstance(speed,dict) or not (rate('tps') or rate('prompt_tps')):
+            try:old=json.loads(path.read_text())
+            except (OSError,ValueError):return
+            here=getattr(self.model,'root',None) if getattr(self.model,'caminus',None) is True else None
+            if isinstance(old,dict) and old.get('source')=='engine' and old.get('server')!=here:
+                path.unlink(missing_ok=True)
             return
-        atomic_json(self.home/'throughput.json',dict(goal=gid,ts=time.time(),**speed))
+        atomic_json(path,dict(goal=gid,ts=time.time(),**speed))
 
     def _compact(self, gid, messages, force=False):
         """Summarize the transcript into working memory, and say whether it did.
@@ -2013,7 +2024,9 @@ class Runtime:
             # An Esc that landed between turns caught nothing: settle it here so it cannot cut the next turn.
             while (req := self.store.pending_request(gid, 'interrupt')):
                 self.store.settle_request(req['id'], 'done')
-            live = Live(self.home, gid, self.store)
+            # the call's own server, so a status poll never reads a Caminus server's speed for a fallback brain's reply
+            live = Live(self.home, gid, self.store,
+                        server=getattr(self.model, 'root', None) if getattr(self.model, 'caminus', None) is True else None)
             try:
                 live.start()
                 request = [self.system(),*messages]

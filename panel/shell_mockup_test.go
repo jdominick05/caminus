@@ -35,7 +35,7 @@ func mockHome(w int) string {
 		"",
 		todoLine([]todoItem{{"find the failing test", "done"}, {"fix the bounds check", "done"}, {"add the empty-input test", "now"}, {"run the gate", "next"}}, w),
 		composer("", "message the agent · Enter nudges at the next step · /steer redirects", "to goal original", w-2),
-		statusLine(status{brain: "k3-coder", used: 48_000, window: 1_048_574, usd: 0, tps: 31, queue: 1,
+		statusLine(status{brain: "k3-coder", used: 48_000, window: 1_048_574, usd: 0, speed: replySpeed{write: 31, read: 1240, source: "engine"}, queue: 1,
 			keys: []string{"esc stop", "^A approve", "/ cmds"}}, w),
 	}
 	return strings.Join(parts, "\n")

@@ -30,6 +30,11 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
 - **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
+  On a `caminus serve` brain the chat's speeds are the engine's own: "read 1,240 · write 62 tok/s" is how fast it read
+  the last reply's prompt and wrote the reply. While a reply streams, the write speed is the engine's live figure, its
+  mean over its most recent passes, so it can step when the reply ends.
+  Any other brain (llama-server included, whose timings Ember does not take as the engine's) gets Ember's own
+  estimate, marked "est.".
 
 Compared with Qwen Code and similar harnesses, the difference that matters most is what a harness cannot do: keep
 working when you close the window. On speed and cost there is one small measurement so far: a single bug-fix task (a
@@ -235,7 +240,7 @@ Your files never move into the agent's account unless you put them there or appr
 | A goal is `paused` | Its reason is on the goal (`/goals`): the watchdog (no progress, a token budget, the same call failing three times or repeated seven times), three plain replies, or three cut-off replies. Steer it, then `/resume`. |
 | HTTP 402 from the relay | The day's cap is spent: it resets at midnight, or raise it with `relay install --cap-usd N`. |
 | HTTP 403 "no published price" | The model is not on the provider's price list (or a stale model name in the config): pick one with `/model`. |
-| Ember's box says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
+| The thoughts box under the history says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
 | GNOME asks for an admin password | You opened a file in the agent's home from the file manager (an `admin://` path). Read its files with `caminus ember run` or from the panel instead. |
 | Too many desktop notifications | `CAMINUS_PANEL_NOTIFY=0 caminus ember ui`. |
 

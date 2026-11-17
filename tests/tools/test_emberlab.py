@@ -9,7 +9,7 @@ Checks:
   resume     a second `run` into the same folder runs nothing again
   compare    two arms over the same runs give "no difference"; the across-the-board rule on made-up cells
   session    a driven lab session: the request the model would see waits for us, our tool call reaches the resident,
-             an interrupt closes the waiting call (the driven brain records the hang-up),
+             the timings a driven:caminus brain sends are the resident's engine speed, an interrupt closes the waiting call (the driven brain records the hang-up),
              close stops the daemon
   tui        (with tmux) keys in, an exact screen and its SVG out; --read-only refuses a goal before anything runs
 """
@@ -95,7 +95,7 @@ check(c2['brains'][0]['arm']['runs'] == 2 and c2['errored'] == ['xB2'] and 'left
 
 # ---- session (driven: we are the model)
 so = S / 'sessions'
-p = lab('open', 'd', '--brain', 'driven', '--host', 'local', '--fixture', 'basic', '--out', str(so), '--ttl', '300')
+p = lab('open', 'd', '--brain', 'driven:caminus', '--host', 'local', '--fixture', 'basic', '--out', str(so), '--ttl', '300')
 check(p.returncode == 0, f'session: open ({p.stderr[-300:]})')
 bad = lab('say', 'd', 'a steer for no goal', '--goal', 'zzzz', '--out', str(so))
 check(bad.returncode != 0 and 'matches 0 goals' in (bad.stderr + bad.stdout) and 'sent (' not in bad.stdout,
@@ -104,9 +104,14 @@ lab('say', 'd', 'List the files in your work folder.', '--out', str(so))
 t = lab('turn', 'd', '--out', str(so), '--wait', '20')
 check(t.returncode == 0 and 'terminal' in t.stdout and 'List the files' in t.stdout,
       'session: the waiting request shows the tools offered and our goal')
-r = lab('reply', 'd', '--out', str(so), '--call', 'read', '--args', json.dumps({'path': 'work/inventory.py'}), '--settle', '3', '--width', '4000')
+r = lab('reply', 'd', '--out', str(so), '--call', 'read', '--args', json.dumps({'path': 'work/inventory.py'}), '--settle', '3', '--width', '4000',
+        '--timings', json.dumps({'prompt_n': 1488, 'prompt_per_second': 1240.2, 'predicted_n': 500, 'predicted_per_second': 62.4}))
 check('read' in r.stdout and 'total_value' in r.stdout, 'session: our tool call ran in the resident and its result came back')
 s = json.loads((so / 'sessions/d/session.json').read_text())
+tp = Path(s['home']) / 'throughput.json'
+tp = json.loads(tp.read_text()) if tp.exists() else {}
+check((tp.get('source'), tp.get('tps'), tp.get('prompt_tps')) == ('engine', 62.4, 1240.2),
+      f'session: a driven:caminus brain plays a caminus serve, and the resident takes its timings as the engine speed ({tp})')
 # an Esc while the next request waits: the resident closes the call, and the driven brain records the hang-up
 t = lab('turn', 'd', '--out', str(so), '--wait', '20')
 BOOT = "import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"

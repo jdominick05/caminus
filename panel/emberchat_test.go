@@ -410,7 +410,7 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	m.sessionNames = []string{"research", "resident"}
 	m.sessionCards = []sessionCard{
 		{name: "research", status: "working", goal: "survey the harness papers", model: "claude-haiku-5-5", github: "ember-bot",
-			workingS: 720, spendGoal: 0.42, spendToday: 4.12, tokPerS: 61, ctxUsed: 52000, ctx: 1000000},
+			workingS: 720, spendGoal: 0.42, spendToday: 4.12, speed: replySpeed{write: 61}, ctxUsed: 52000, ctx: 1000000},
 		{name: "resident", status: "listening", goal: "review the design", model: "swift-1.5"}}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
@@ -420,7 +420,7 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	}
 	frame := ansi.Strip(m.render())
 	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 on this goal",
-		"$4.12 today in this session", "claude-haiku-5-5 · 61 tok/s · 52K/1M", "GitHub ember-bot", "resident", "○ listening",
+		"$4.12 today in this session", "claude-haiku-5-5 · ~61 tok/s est. · 52K/1M", "GitHub ember-bot", "resident", "○ listening",
 		"no GitHub account", "worked ", "+ new session"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("a card shows %q:\n%s", want, frame)
@@ -624,39 +624,8 @@ func TestResidentCommandsWithoutTheCLIReportInsteadOfPanicking(t *testing.T) {
 	}
 }
 
-// The context bar shows what the daemon measured, graded against the
-// compaction trigger, and never invents a percentage of its own. The accent
-// piece (label, bar, share) takes the level's color; the counts stay dim.
-func TestContextBarShowsOnlyMeasuredUsage(t *testing.T) {
-	accent, rest := contextBar(0, 1048574, .85, 0)
-	if accent != "" || rest != "ctx 1.0M window" || strings.Contains(rest, "%") {
-		t.Fatalf("unmeasured context showed usage: %q / %q", accent, rest)
-	}
-	if accent, rest := contextBar(0, 0, .85, 0); accent != "" || rest != "" {
-		t.Fatalf("no capacity, no bar: %q / %q", accent, rest)
-	}
-	accent, rest = contextBar(314573, 1048574, .85, 0) // 30%
-	if filled := strings.Count(accent, "█"); filled != 3 || !strings.Contains(accent, "░") {
-		t.Fatalf("30%% carved the bar wrong: %q", accent)
-	}
-	if !strings.Contains(accent, "ctx") || !strings.Contains(accent, "30%") || strings.Count(accent, "%") != 1 {
-		t.Fatalf("accent lost its bar and share: %q", accent)
-	}
-	if !strings.Contains(rest, "of 1.0M · compact 85%") {
-		t.Fatalf("dim piece lost counts and trigger: %q", rest)
-	}
-	if _, rest := contextBar(314573, 1048574, .85, 87.3); !strings.Contains(rest, "87 tok/s") || !strings.Contains(rest, "compact 85%") {
-		t.Fatalf("measured tok/s did not annotate the dim piece: %q", rest)
-	}
-	if _, rest := contextBar(314573, 1048574, .85, 0); strings.Contains(rest, "tok/s") {
-		t.Fatalf("no speed reported, none may show: %q", rest)
-	}
-	if _, rest := contextBar(0, 1048574, .85, 87.3); strings.Contains(rest, "tok/s") {
-		t.Fatalf("tok/s without a measured context bar: %q", rest)
-	}
-	if accent, _ := contextBar(1048575, 1048574, .85, 0); !strings.HasPrefix(accent, "ctx ██████████ 100%") {
-		t.Fatalf("usage past the window did not clamp: %q", accent)
-	}
+// The context level is graded against the compaction trigger, and token counts read at footer density.
+func TestContextLevelAndTokenCounts(t *testing.T) {
 	if got := humanTokens(999); got != "999" || humanTokens(482000) != "482k" || humanTokens(1048574) != "1.0M" {
 		t.Fatalf("token formatting drifted: %s %s %s", humanTokens(999), humanTokens(482000), humanTokens(1048574))
 	}
@@ -705,6 +674,50 @@ func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
 		if ansi.StringWidth(row) > m.width {
 			t.Fatalf("footer line too wide: %q", row)
 		}
+	}
+}
+
+// A Caminus brain's speeds are the engine's own, read and write apart; a brain that reports none keeps Ember's
+// estimate, which says so. The footer drops the read speed first when narrow, the session card shows the write
+// speed, and the info page says where the numbers come from.
+func TestFooterShowsTheEnginesOwnSpeeds(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 160
+	m.resident.ContextUsed = 52000
+	m.resident.TokPerS, m.resident.PromptTokPerS, m.resident.SpeedSource = 62.4, 1240.2, "engine"
+	if foot := ansi.Strip(m.chatFoot(160)); !strings.Contains(foot, "read 1,240 · write 62 tok/s") || strings.Contains(foot, "est.") {
+		t.Fatalf("the footer shows the engine's read and write speeds:\n%s", foot)
+	}
+	if foot := ansi.Strip(m.chatFoot(100)); !strings.Contains(foot, "write 62 tok/s") || strings.Contains(foot, "read 1,240") {
+		t.Fatalf("a narrow footer keeps the write speed and drops the read speed:\n%s", foot)
+	}
+	for _, w := range []int{100, 160} {
+		for _, row := range strings.Split(ansi.Strip(m.chatFoot(w)), "\n") {
+			if ansi.StringWidth(row) > w {
+				t.Fatalf("footer line too wide at %d: %q", w, row)
+			}
+		}
+	}
+	if got := m.resident.speed().long(); got != "read 1,240 · write 62 tok/s (the Caminus engine's own; last reply)" {
+		t.Fatalf("info page speed row: %q", got)
+	}
+	m.resident.SpeedLive = true
+	if got := m.resident.speed().long(); !strings.Contains(got, "write live, read last reply") {
+		t.Fatalf("a live write speed says so: %q", got)
+	}
+	if got := (replySpeed{write: 62, read: 1240, source: "engine"}).short(true); got != "write 62 tok/s" {
+		t.Fatalf("the session card's speed: %q", got)
+	}
+	if got := (replySpeed{read: 980, source: "engine"}).short(true); got != "read 980 tok/s" {
+		t.Fatalf("a reply that only read keeps its read speed even when narrow: %q", got)
+	}
+	m.resident.SpeedSource, m.resident.PromptTokPerS, m.resident.SpeedLive = "estimate", 0, false
+	if foot := ansi.Strip(m.chatFoot(160)); !strings.Contains(foot, "~62 tok/s est.") || strings.Contains(foot, "write") {
+		t.Fatalf("an estimate is labelled as one:\n%s", foot)
+	}
+	m.resident.SpeedSource = "" // a resident from before sources were kept: its figure is an estimate
+	if got := m.resident.speed().long(); got != "~62 tok/s est. (estimated by Ember: tokens over the time they streamed; last reply)" {
+		t.Fatalf("an older resident's speed reads as an estimate: %q", got)
 	}
 }
 
@@ -1641,7 +1654,7 @@ func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
 	}
 }
 
-func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
+func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	old := g
 	defer func() { g = old }()
 	g = glyphTiers["unicode"]
@@ -1656,35 +1669,105 @@ func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
 		Data: map[string]any{"reasoning": "a\ttabbed\tthought"}})
 	m.syncChat()
 	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Unix())
-	frame := ansi.Strip(m.render())
-	rows := strings.Split(frame, "\n")
-	if len(rows) > m.height {
-		t.Fatalf("%d rows overflow %d", len(rows), m.height)
-	}
-	for _, r := range rows {
-		if ansi.StringWidth(r) > m.width {
-			t.Fatalf("row too wide (%d): %q", ansi.StringWidth(r), r)
+	fits := func(frame string) []string {
+		t.Helper()
+		rows := strings.Split(frame, "\n")
+		if len(rows) > m.height {
+			t.Fatalf("%d rows overflow %d", len(rows), m.height)
 		}
+		for _, r := range rows {
+			if ansi.StringWidth(r) > m.width {
+				t.Fatalf("row too wide (%d): %q", ansi.StringWidth(r), r)
+			}
+		}
+		return rows
 	}
-	for _, want := range []string{"first the NVD feed", "tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
+	side := func(row string) string { return ansi.Cut(row, m.transcriptWidth(max(20, m.width)), m.width) } // the right column's cells
+	frame := ansi.Strip(m.render())
+	rows := fits(frame)
+	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("missing %q:\n%s", want, frame)
 		}
 	}
-	if strings.Contains(frame, "Task 2 of 3") || strings.Contains(frame, "\t") {
-		t.Fatal("the line above the composer moves into the side panel; tabs are expanded")
+	// the tasks sit at the top right, on the transcript's first row; no thoughts box stays up there or anywhere
+	top := lipgloss.Height(m.chatHead(m.width))
+	if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") {
+		t.Fatalf("the first row of the right column is the tasks heading, got %q:\n%s", s, frame)
 	}
+	if strings.Contains(frame, "thoughts") || strings.Contains(frame, "first the NVD feed") || strings.Contains(frame, "tabbed") {
+		t.Fatalf("no thoughts box on a wide terminal:\n%s", frame)
+	}
+	if n := strings.Count(frame, "write the CLI"); n != 1 {
+		t.Fatalf("the tasks show once, not %d times:\n%s", n, frame)
+	}
+	if strings.Contains(frame, "Task 2 of 3") {
+		t.Fatal("the line above the composer moves into the side panel")
+	}
+	// a reply being written streams into the transcript as its last block, like a chat: no box under it, nothing across
+	// both columns, the right column at its full height (at 220 x 50 and at the smallest wide size)
+	for _, sz := range [][2]int{{220, 50}, {160, 24}} {
+		m.width, m.height = sz[0], sz[1]
+		m.chat.live = residentLive{}
+		m.syncChat()
+		idle := m.chat.transcript.Height()
+		m.chat.live = residentLive{active: true, turn: "t1", reasoning: "weighing the flags", text: "Writing the CLI now.", tools: []string{"terminal"}}
+		m.syncChat()
+		live := ansi.Strip(m.render())
+		rows = fits(live)
+		top, tw, h := lipgloss.Height(m.chatHead(m.width)), m.transcriptWidth(max(20, m.width)), m.chat.transcript.Height()
+		if h != idle || m.liveBlock(m.width) != "" {
+			t.Fatalf("%v: no box under the transcript (its height %d, %d idle):\n%s", sz, h, idle, live)
+		}
+		at := -1
+		for i := top; i < top+h; i++ {
+			if gap := ansi.Cut(rows[i], tw, tw+1); gap != " " && gap != "" {
+				t.Fatalf("%v: row %d runs across both columns: %q", sz, i, rows[i])
+			}
+			if strings.Contains(ansi.Cut(rows[i], 0, tw), "Writing the CLI now.▌") {
+				at = i
+			}
+		}
+		if at < 0 || !strings.Contains(live, "agent") || !strings.Contains(live, "terminal …") || strings.Contains(live, "weighing the flags") {
+			t.Fatalf("%v: the reply streams in the transcript (heading, tools, text and cursor; its reasoning folded):\n%s", sz, live)
+		}
+		if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") || strings.Count(live, "write the CLI") != 1 {
+			t.Fatalf("%v: the tasks stay at the top right, once:\n%s", sz, live)
+		}
+		// a tick between live updates leaves the streamed block as it was: a change there resets the whole transcript
+		// on every frame (BenchmarkResidentLiveWide frame)
+		before := m.liveInline(tw)
+		m.tickN++
+		if after := m.liveInline(tw); after != before {
+			t.Fatalf("%v: the streamed block moves with the clock:\n%q\n%q", sz, before, after)
+		}
+	}
+	// the transcript stays pinned to the bottom while text streams, unless the reader scrolled up
+	for i := 0; i < 40; i++ {
+		m.residentEvents = append(m.residentEvents, residentEvent{Seq: 1000 + i, Goal: "original", Kind: "user_message", Data: map[string]any{"text": fmt.Sprintf("note %d", i)}})
+	}
+	m.syncChat()
+	m.chat.transcript.GotoBottom()
+	next, _ := m.Update(residentLiveMsg{turn: "t1", text: " More."})
+	m = next.(emberModel)
+	if !m.chat.transcript.AtBottom() || !strings.Contains(ansi.Strip(m.chat.transcript.View()), "More.▌") {
+		t.Fatalf("pinned to the newest text:\n%s", ansi.Strip(m.chat.transcript.View()))
+	}
+	m.chat.transcript.ScrollUp(10)
+	off := m.chat.transcript.YOffset()
+	next, _ = m.Update(residentLiveMsg{turn: "t1", text: " Again."})
+	m = next.(emberModel)
+	if m.chat.transcript.YOffset() != off || !strings.Contains(m.chat.liveShown, "Again.") {
+		t.Fatalf("scrolled up, the view stays (offset %d, was %d)", m.chat.transcript.YOffset(), off)
+	}
+	m.width, m.height = 220, 50
+	m.chat.live = residentLive{}
+	m.syncChat()
 	m.resident.Goals[0].State = "completed"
 	if f := ansi.Strip(m.render()); strings.Contains(f, "make test") {
 		t.Fatal("a command of a goal that ended is not running now")
 	}
 	m.resident.Goals[0].State = "working"
-	// the thoughts sit beside the transcript, on the same rows
-	for _, r := range rows {
-		if strings.Contains(r, "Checking the CVEs.") && !strings.Contains(r, "│") {
-			continue
-		}
-	}
 	m.width = 120
 	if f := ansi.Strip(m.render()); strings.Contains(f, "Tasks  1 of 3") || !strings.Contains(f, "Task 2 of 3") {
 		t.Fatalf("a narrow terminal keeps the line above the composer:\n%s", f)
@@ -1693,8 +1776,8 @@ func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
 
 func TestEmbersEmptyNoteWrapsBesideEmber(t *testing.T) {
 	m := chatFixture(t)
-	m.width, m.height = 200, 50
-	box := ansi.Strip(m.emberBox(70, 8))
+	m.width, m.height = 100, 50
+	box := ansi.Strip(m.liveBlock(70))
 	for _, row := range strings.Split(box, "\n") {
 		if ansi.StringWidth(row) > 70 {
 			t.Fatalf("row wider than the box: %q", row)
@@ -1759,14 +1842,14 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 
 func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	m := chatFixture(t)
-	m.width, m.height = 200, 50
+	m.width, m.height = 100, 50
 	m.residentEvents = append(m.residentEvents,
 		residentEvent{Seq: 990, Goal: "original", Kind: "assistant", Data: map[string]any{
 			"content": "Let me check the BL density first.",
 			"tool_calls": []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{
 				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}}}},
 		residentEvent{Seq: 991, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": "0.0256"}}})
-	box := ansi.Strip(m.emberBox(90, 8))
+	box := ansi.Strip(m.liveBlock(90))
 	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") {
 		t.Fatalf("without reasoning, the words and the tool calls are the chain:\n%s", box)
 	}
@@ -1776,7 +1859,7 @@ func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	// a goal with no replies yet keeps the latest chain from any goal: the box never empties
 	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "fresh", State: "working", Prompt: "new"})
 	m.resident.Goals[0].State = "completed"
-	if box := ansi.Strip(m.emberBox(90, 8)); !strings.Contains(box, "BL density") {
+	if box := ansi.Strip(m.liveBlock(90)); !strings.Contains(box, "BL density") {
 		t.Fatalf("a fresh goal keeps the latest chain:\n%s", box)
 	}
 }

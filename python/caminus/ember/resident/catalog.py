@@ -199,6 +199,28 @@ def local_candidate(config):
 LOCAL_READ = 512 * 1024   # a local server's /models (a few ids) and /props (its chat template among them): at most this
 
 
+def caminus_props(endpoint, opener=urllib.request.urlopen, timeout=3):
+    """A local server's /props when it names the engine as `caminus serve` does (engine: caminus), else None. Raises
+    when the server cannot be reached or answers garbage, so a caller can tell "not Caminus" from "not asked"."""
+    props = _get(_root(endpoint) + '/props', {}, opener, timeout, LOCAL_READ)
+    return props if isinstance(props, dict) and props.get('engine') == 'caminus' else None
+
+
+STATUS_VERSION = 1   # the /caminus/status layout read here (caminus serve's stats.STATUS_VERSION; the panel reads the same)
+
+
+def decode_tps(status):
+    """A Caminus server's decode speed from its /caminus/status: 1000 / decode.ms_per_token (the engine's mean over its
+    recent passes), rounded to 0.1 tok/s; None for another engine, another status layout or no passes yet. The one
+    reading of that figure: `caminus ps` / the servers list (cmd/manage.py) and Ember's live speed use it."""
+    if not isinstance(status, dict) or status.get('engine') != 'caminus' or status.get('version') != STATUS_VERSION:
+        return None
+    ms = (status.get('decode') or {}).get('ms_per_token')
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms <= 0:
+        return None
+    return round(1000.0 / ms, 1)
+
+
 def local_brain(config, opener=urllib.request.urlopen, timeout=3):
     """Ask the agent's local server which model it serves and that model's effort ids: (base id, {level: id}), or None
     when it cannot be reached, is not a Caminus server (its /props engine; asked unless provider_kind is local) or
@@ -210,8 +232,8 @@ def local_brain(config, opener=urllib.request.urlopen, timeout=3):
     props = None
     try:
         if config.get('provider_kind') != 'local':
-            props = _get(_root(base) + '/props', {}, opener, timeout, LOCAL_READ)
-            if props.get('engine') != 'caminus':
+            props = caminus_props(base, opener, timeout)
+            if props is None:
                 return None
         groups = local_entries(_get(base + '/models', {}, opener, timeout, LOCAL_READ), '')
         groups = {m['id']: m['variants'] for m in groups}

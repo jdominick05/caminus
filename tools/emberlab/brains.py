@@ -191,10 +191,17 @@ class _DrivenHandler(_Handler):
     `lab.py reply` writes (a tool call or text). The judge answers met unless the brain was opened with :judge.
     A caller that hangs up while its request waits (an Esc, a /cancel: the resident closes the call so a real server
     stops generating) is noticed as caminus serve notices it, and recorded in CTL/NNNNNN.gone.json (when, after how
-    long); that request is no longer waiting."""
+    long); that request is no longer waiting. Opened with :caminus it plays a `caminus serve`: its /props names the
+    engine, and an answer whose reply file carries `timings` (`lab.py reply --timings`) sends them as that server does."""
     ctl = None
     judge = False
+    caminus = False
     wait = 3600
+
+    def do_GET(self):
+        if self.caminus and self.path.rstrip('/').endswith('/props'):
+            return self.respond(dict(n_ctx=65536, model_alias='driven', engine='caminus'))
+        super().do_GET()
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
@@ -236,7 +243,10 @@ class _DrivenHandler(_Handler):
             reason = 'tool_calls'
         else:
             msg, reason = dict(role='assistant', content=r.get('text') or ''), 'stop'
-        self.respond(dict(choices=[dict(message=msg, finish_reason=reason)], usage=usage))
+        out = dict(choices=[dict(message=msg, finish_reason=reason)], usage=usage)
+        if self.caminus and r.get('timings'):
+            out['timings'] = r['timings']
+        self.respond(out)
 
 
     def hung_up(self):
@@ -249,10 +259,11 @@ class _DrivenHandler(_Handler):
             return True
 
 
-def serve_driven(ctl, judge=False, ttl=14400):
-    """the driven brain's server process (`lab.py open --brain driven`); prints its port, then serves until ttl"""
+def serve_driven(ctl, judge=False, ttl=14400, caminus=False):
+    """the driven brain's server process (`lab.py open --brain driven[:judge][:caminus]`); prints its port, then serves
+    until ttl"""
     import time
-    _DrivenHandler.ctl, _DrivenHandler.judge = str(ctl), judge
+    _DrivenHandler.ctl, _DrivenHandler.judge, _DrivenHandler.caminus = str(ctl), judge, caminus
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _DrivenHandler)
     print(srv.server_port, flush=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
