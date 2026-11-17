@@ -2496,6 +2496,9 @@ func TestTheFinishResultIsOneLineNotItsJSON(t *testing.T) {
 	m.chat.expanded = true
 	if p := ansi.Strip(m.chat.eventBlock(e)); !strings.Contains(p, "left open: the CHANGELOG entry") {
 		t.Fatalf("expanded, it shows what was left open:\n%s", p)
+	}
+}
+
 func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 140, 30
