@@ -10,7 +10,8 @@ Steps, in order:
   type:TEXT       literal text
   wait:REGEX[@S]  until the screen matches (default 15 s); fails the run on timeout
   expect:REGEX    the screen matches now      absent:REGEX   the screen does not match now
-  sleep:S         pause                       shot:NAME      DIR/NAME.ans (with colour), .txt and .svg (.png with --png)
+  sleep:S         pause                       resize:WxH     resize the window (the program gets SIGWINCH)
+                                              shot:NAME      DIR/NAME.ans (with colour), .txt and .svg (.png with --png)
 
 --session opens the Ember chat on a lab session's home (lab.py open), through a CLI wrapper like tools/ember_demo.py's;
 --cmd runs anything, e.g. `caminus ember ui` on your real account. Against a real account pass --read-only: then only
@@ -276,6 +277,11 @@ def run(a, steps):
                 time.sleep(a.step_delay)
             elif kind == 'sleep':
                 time.sleep(float(arg))
+            elif kind == 'resize':
+                w, h = map(int, arg.lower().split('x'))
+                t.tm('resize-window', '-t', 'lab', '-x', str(w), '-y', str(h))
+                t.w, t.h = w, h
+                time.sleep(a.step_delay)
             elif kind == 'wait':
                 rx, _, secs = arg.rpartition('@') if re.search(r'@[\d.]+$', arg) else (arg, '', '15')
                 end = time.time() + float(secs)
@@ -291,9 +297,9 @@ def run(a, steps):
                 (out / f'{arg}.ans').write_text(ansi)
                 (out / f'{arg}.txt').write_text(t.screen())
                 sp = out / f'{arg}.svg'
-                sp.write_text(svg(ansi, w, h))
+                sp.write_text(svg(ansi, t.w, t.h))
                 if a.png:
-                    png(sp, w * 8.4, h * 17)
+                    png(sp, t.w * 8.4, t.h * 17)
             else:
                 raise SystemExit(f'unknown step {st!r}')
             log.append(('PASS ' if ok else 'FAIL ') + st)
