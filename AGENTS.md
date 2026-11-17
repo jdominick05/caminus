@@ -47,6 +47,12 @@ CLAUDE.md imports this file.
 - `kernels/*.hip`: device code only; `./build.sh` writes `build/*.hsaco` and records provenance.
 - The `k3_gguf*.hip` files are ONE engine compiled with different op / format whitelists: a persistent kernel has one
   register allocation for all its ops (budget 96 VGPRs, 0 spills) and a ~120-160 KB body against a 32 KB I-cache.
+  Register budget exemptions (`tools/gates/objcheck.py` `EXEMPT`, issue #127): each may sit outside the budget at no
+  more than its recorded counts, and `objcheck check` fails it past them. `k3` (109 VGPRs), `k3_trace` (110) and `k3_u16`
+  (173) are the old monolithic module and its variants, development and tests only (not in the installed runtime set);
+  `k3_gguf_gsq_mt` and `k3_gguf_gsq_mtp_mt` (the Coder's decode modules, shipped) and `k3_gguf_gsq_mt_trace` keep the one
+  spilled VGPR they have had since 0.1.0 (160 B private segment; their speed is what the Coder's benchmarks measure).
+  Every other object stays inside the budget; a new exemption needs its reason here and in `EXEMPT`.
 - A decode module holds only the ops its model's decode tape runs (`k3_q3m_lean.hip`: 7 ops, `k3.Q3M_LEAN_OPS`, built without the ggml headers).
   `k3_q3m_ver.hip` is the same ops in T-token forms for verify passes (`engine/q3moe_verify.py`): every T-token
   statement sits under `#ifdef K3_Q3M_VER` with the decode text in `#else`, so the decode module's object never changes.

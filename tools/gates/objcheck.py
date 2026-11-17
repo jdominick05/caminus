@@ -11,7 +11,7 @@ check fails (exit 1, RESULT FAIL) when
 - an object is gone (unless --allow-missing);
 - the persistent kernel (--kernel, default k3_run) of a changed or new object is over the register budget (--max-vgprs),
   spills a VGPR, or spills more SGPRs than before (unless --allow-sgpr-spill-up, with the measured cost in the pull
-  request). Unchanged objects are listed when they are outside the budget, never judged: this change did not build them.
+  request). The objects in EXEMPT may sit outside the budget up to their recorded counts, never past them. Unchanged objects are listed when they are outside the budget, never judged: this change did not build them.
 
 What is compared: the bytes of the sections that hold instructions (code) and of the loaded data sections (data). The
 whole file is NOT compared: the symbol and string tables carry names derived from the source path, so two builds of the
@@ -27,6 +27,17 @@ import sys
 SHT_PROGBITS, SHT_NOTE = 1, 7
 SHF_ALLOC, SHF_EXECINSTR = 0x2, 0x4
 NT_AMDGPU_METADATA = 32
+# objects allowed outside the budget, at no more than their recorded counts (VGPRs, VGPR spills), with the reason
+# (AGENTS.md, "Register budget exemptions"; issue #127). A changed exempt object passes at or under these counts and fails
+# past them, so an exemption never grows silently; every other object is held to the budget.
+EXEMPT = {
+    'k3': (109, 0, 'the old monolithic module: development and tests only, not in the installed runtime set'),
+    'k3_trace': (110, 0, 'k3 with the trace ops: development only'),
+    'k3_u16': (173, 0, 'k3 with 16-bit ids: development only'),
+    'k3_gguf_gsq_mt': (96, 1, 'the Coder\'s decode module since 0.1.0: one spilled VGPR (160 B private segment), measured in its benchmarks'),
+    'k3_gguf_gsq_mt_trace': (96, 1, 'the Coder\'s module with the trace ops: development only'),
+    'k3_gguf_gsq_mtp_mt': (96, 1, 'the Coder\'s decode module with the drafter taps since 0.1.0: one spilled VGPR, measured in its benchmarks'),
+}
 
 
 def sections(buf):
@@ -167,12 +178,15 @@ def check(a):
         if not regs: continue
         v, vs, ss, priv = regs
         was = before[n][2] if n in before else None
+        ex = EXEMPT.get(n) if a.kernel == 'k3_run' else None
         if n not in changed and n not in new:              # this change did not build it: reported, not judged
-            if v > a.max_vgprs or vs: old.append(f'{n} ({v} VGPRs, {vs} spilled)')
+            if (v > a.max_vgprs or vs) and not (ex and v <= ex[0] and vs <= ex[1]):
+                old.append(f'{n} ({v} VGPRs, {vs} spilled' + ('' if ex else ', not exempt') + ')')
             continue
         bad = []
-        if v > a.max_vgprs: bad.append(f'{v} VGPRs > {a.max_vgprs}')
-        if vs: bad.append(f'{vs} spilled VGPRs')
+        vmax, smax = (max(a.max_vgprs, ex[0]), ex[1]) if ex else (a.max_vgprs, 0)
+        if v > vmax: bad.append(f'{v} VGPRs > {vmax}' + (' (its exemption)' if ex and vmax > a.max_vgprs else ''))
+        if vs > smax: bad.append(f'{vs} spilled VGPRs' + (f' > {smax} (its exemption)' if ex and smax else ''))
         if was and ss > was[2] and not a.allow_sgpr_spill_up: bad.append(f'spilled SGPRs {was[2]} -> {ss}')
         moved = was is None or was != regs
         if bad or moved or a.verbose:
