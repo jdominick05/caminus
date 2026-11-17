@@ -448,7 +448,8 @@ func (m emberModel) rewindKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key := fmt.Sprintf("rewind:%s:%d", st.goal, s.Step)
 		if armed != key || time.Since(m.chat.armedAt) > 10*time.Second {
 			m.chat.armed, m.chat.armedAt = key, time.Now()
-			m.msg = fmt.Sprintf("undo goal %s from step %d on (%s)? it restores files: press Enter again",
+			// the instruction first (at 100 and 80 columns the end, where it was, was cut off)
+			m.msg = fmt.Sprintf("press Enter again to undo goal %s from step %d on (it restores files): %s",
 				shortGoal(st.goal), s.Step, residentText(s.Label))
 			return m, nil
 		}

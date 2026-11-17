@@ -2061,13 +2061,17 @@ for line in sys.stdin:
         catalog.refresh(self.home,conf,opener=self.catalog_opener())
         out=self.cmd('model',['zai-org/GLM-5.2'])
         cur=out['current']
-        self.assertEqual((cur['model'],cur['provider'],cur['context'],cur['max_tokens'],cur['effort'],cur['relay']),
-                         ('zai-org/GLM-5.2','deepinfra',202752,16384,'medium',True))
+        self.assertEqual((cur['model'],cur['provider'],cur['context'],cur['max_tokens'],cur.get('effort'),cur['relay']),
+                         ('zai-org/GLM-5.2','deepinfra',202752,16384,None,True))
         self.assertNotIn('api',json.loads((self.home/'config.json').read_text()),'OpenAI-compatible is the default transport')
-        with self.assertRaises(AssertionError):self.cmd('effort',['xhigh'])          # not a level GLM offers
-        self.assertEqual(self.cmd('effort',['none'])['effort'],'none')
+        # one scale on every brain: xhigh runs as GLM's nearest, high
+        out=self.cmd('effort',['xhigh'])
+        self.assertEqual((out['effort'],out['runs_as']),('xhigh','high'));self.assertIn('xhigh as high',out['summary'])
+        self.assertEqual(self.cmd('effort',['no'])['effort'],'none')
+        # the level stays across /model when the new brain has effort control; Opus always thinks, so none runs as low
         out=self.cmd('model',['claude-opus-5-5'])['current']
-        self.assertEqual((out['api'],out['thinking'],out['effort'],out['context']),('anthropic','adaptive','medium',1000000))
+        self.assertEqual((out['api'],out['thinking'],out['effort'],out['context']),('anthropic','adaptive','none',1000000))
+        self.assertEqual(self.cmd('effort',[])['runs_as'],'low')
         self.assertEqual(self.cmd('effort',['xhigh'])['effort'],'xhigh')
         # a running resident takes the new brain at its next turn, and meters a catalog model by its prices
         rt=Runtime(self.home)
@@ -2632,6 +2636,211 @@ for line in sys.stdin:
             self.assertIn('k3-coder-nothink',seen);self.assertIn(None,seen,'the main brain took the summary')
             self.assertIn('compaction_model_refused',[e['kind'] for e in rt.store.events()])
         finally:rt.mail.close();rt.store.close()
+
+    def test_local_models_group_by_base_and_each_level_runs_as_the_servers_id(self):
+        from caminus.ember.resident import effort as eff
+        from caminus.ember.resident.model import Model
+        groups=eff.group_local(['swift-1.5','swift-1.5-low','swift-1.5-xhigh','swift-1.5-nothink',
+                                'qwen3-30b-a3b','qwen3-30b-a3b-nothink','other'])
+        self.assertEqual(sorted(groups),['other','qwen3-30b-a3b','swift-1.5'],'the effort ids are levels, not models')
+        swift=dict(provider_kind='local',model='swift-1.5',model_variants=groups['swift-1.5'],endpoint='http://127.0.0.1:8092/v1')
+        sent=lambda cfg,**kw:eff.resolve(dict(cfg,**kw))['model']
+        self.assertEqual(sent(swift),'swift-1.5-xhigh','the lab\'s default: xhigh')
+        self.assertEqual([sent(swift,effort=l) for l in eff.LEVELS],
+                         ['swift-1.5-nothink','swift-1.5-low','swift-1.5','swift-1.5-xhigh','swift-1.5-xhigh','swift-1.5-xhigh'])
+        self.assertEqual(eff.resolve(swift,short=True)['model'],'swift-1.5-nothink','the judge thinks with nothing')
+        moe=dict(provider_kind='local',model='qwen3-30b-a3b',model_variants=groups['qwen3-30b-a3b'],endpoint='http://127.0.0.1:8092/v1')
+        self.assertEqual([sent(moe,effort=l) for l in ('none','low','max')],['qwen3-30b-a3b-nothink','qwen3-30b-a3b','qwen3-30b-a3b'])
+        self.assertIn('only has thinking on or off',eff.note(moe))
+        # a switch re-reads the conversation only when the template's effort line changes
+        self.assertEqual(eff.template_line(swift,'medium'),eff.template_line(swift,'none'))
+        self.assertEqual(eff.template_line(swift,'high'),eff.template_line(swift,'xhigh'))
+        self.assertNotEqual(eff.template_line(swift,'low'),eff.template_line(swift,'medium'))
+        self.assertEqual(eff.template_line(moe,'none'),eff.template_line(moe,'max'),'no effort line: never a re-read')
+        # the transport: the id for the level, no sampling fields, the card's reply limit up to 64K
+        bodies=[]
+        for cfg in (swift,moe):
+            m=Model(dict(cfg,context=500000))
+            m.request=lambda url,body=None:(bodies.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+            m.complete([dict(role='user',content='hi')])
+        bodies=[b for b in bodies if b and 'max_tokens' in b]
+        self.assertEqual([(b['model'],b['max_tokens']) for b in bodies],[('swift-1.5-xhigh',65536),('qwen3-30b-a3b',32768)])
+        for b in bodies:
+            for k in ('temperature','top_p','top_k','min_p','presence_penalty','reasoning_effort'):
+                self.assertNotIn(k,b,'a local server applies its model\'s own defaults')
+
+    def test_paid_brains_get_their_cards_sampling_and_anthropic_never_gets_any(self):
+        from caminus.ember.resident.model import Model
+        bodies=[]
+        def run(cfg):
+            m=Model(dict(cfg,context=500000))
+            m.request=lambda url,body=None:(bodies.append(body),dict(choices=[dict(message=dict(content='ok'),finish_reason='stop')]))[1]
+            m.complete([dict(role='user',content='hi')])
+            return [b for b in bodies if b and 'max_tokens' in b][-1]
+        flash=run(dict(endpoint='https://api.deepinfra.com/v1/openai',model='deepseek-ai/DeepSeek-V4.1-Flash',provider_kind='deepinfra'))
+        self.assertEqual((flash['temperature'],flash['top_p']),(1.0,1.0))
+        unknown=run(dict(endpoint='https://api.deepinfra.com/v1/openai',model='some/new-model',provider_kind='deepinfra'))
+        self.assertNotIn('temperature',unknown,'an unknown model gets its provider\'s defaults')
+        mistral=run(dict(endpoint='https://api.mistral.ai/v1',model='mistral-large-4',provider_kind='mistral',efforts=['low','medium','high']))
+        self.assertEqual((mistral['temperature'],mistral['top_p'],mistral['reasoning_effort']),(1.0,0.95,'high'),'the card\'s default effort')
+        plain=run(dict(endpoint='https://api.mistral.ai/v1',model='mistral-large-4',provider_kind='mistral',efforts=[]))
+        self.assertNotIn('reasoning_effort',plain,'a model the catalog lists without reasoning gets no effort field')
+        for model,want in (('claude-haiku-5-5',('high',True)),('claude-opus-5-5',('low',False))):
+            m=Model(dict(endpoint='https://api.anthropic.com/v1',model=model,api='anthropic',provider_kind='anthropic',
+                         context=200000,effort='none',temperature=0.6,top_p=0.9))
+            body=m._to_anthropic([dict(role='user',content='hi')],None,None)
+            for k in ('temperature','top_p','top_k'):
+                self.assertNotIn(k,body,'the current API version refuses sampling fields')
+            self.assertEqual((body['output_config']['effort'],body.get('thinking')==dict(type='disabled')),want)
+
+    def test_each_claude_model_turns_thinking_off_its_own_way(self):
+        """Anthropic's rules per model: disabled up to effort high (Haiku 5.5, Opus 5), between_tools up to high (Sonnet
+        5.5), no off at all (Opus 5.5, Fable, and any model not in the table): thinking omitted at effort low."""
+        from caminus.ember.resident import effort as eff
+        from caminus.ember.resident.model import Model
+        rows=(('claude-haiku-5-5',dict(type='disabled'),'high'),('claude-opus-5',dict(type='disabled'),'high'),
+              ('claude-sonnet-5-5',dict(type='between_tools'),'high'),('claude-opus-5-5',None,'low'),
+              ('claude-fable-5-2',None,'low'),('claude-mystery-9',None,'low'))
+        for model,thinking,level in rows:
+            m=Model(dict(endpoint='https://api.anthropic.com/v1',model=model,api='anthropic',provider_kind='anthropic',
+                         context=200000,effort='none'))
+            body=m._to_anthropic([dict(role='user',content='hi')],None,None)
+            self.assertEqual((body.get('thinking'),body['output_config']['effort']),(thinking,level),model+': effort none')
+            # the judge's short call at the session's xhigh: the same rule, the effort brought within it
+            m.config['effort']='xhigh'
+            body=m._to_anthropic([dict(role='user',content='hi')],None,None)
+            self.assertEqual(body['output_config']['effort'],'xhigh')
+            eff.anthropic_thinking_off(body)
+            self.assertEqual((body.get('thinking'),body['output_config']['effort']),(thinking,level),model+': a short call')
+
+    def test_review_fixes_for_the_effort_scale(self):
+        from caminus.ember.resident import effort as eff
+        from caminus.ember.resident.model import Model
+        # init's old max_tokens 4096 on a local brain gives way to the card's limit; on a paid one it stays
+        self.assertEqual(Model(dict(model='swift-1.5',endpoint='http://127.0.0.1:8092/v1',max_tokens=4096)).reply_limit(),65536)
+        self.assertEqual(Model(dict(model='swift-1.5',endpoint='http://127.0.0.1:8092/v1',max_tokens=2048)).reply_limit(),2048)
+        self.assertEqual(Model(dict(model='x',endpoint='https://api.example.com/v1',max_tokens=4096)).reply_limit(),4096)
+        # a provider model the catalog lists without reasoning gets no effort field, whatever was set before
+        self.assertEqual(eff.line(dict(provider_kind='deepinfra',efforts=[],effort='high')),'')
+        self.assertEqual(eff.resolve(dict(provider_kind='deepinfra',efforts=[],effort='high'))['reasoning_effort'],None)
+        # a paid model of a local family does not take the local card's default (Qwen3-Coder on DeepInfra)
+        self.assertEqual(eff.default_level(dict(provider_kind='deepinfra',model='Qwen/Qwen3-Coder-480B',efforts=['low','medium','high'])),'')
+        # a running resident takes a /model whole: the variants and the sampling keys
+        rt=Runtime(self.home)
+        try:
+            conf=json.loads((self.home/'config.json').read_text())
+            conf.update(model='swift-1.5',provider_kind='local',model_variants=dict(none='swift-1.5-nothink',xhigh='swift-1.5-xhigh'),top_p=0.9)
+            (self.home/'config.json').write_text(json.dumps(conf))
+            rt._follow_config()
+            self.assertEqual((rt.model.config.get('model_variants'),rt.model.config.get('top_p')),
+                             (dict(none='swift-1.5-nothink',xhigh='swift-1.5-xhigh'),0.9))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_mistral_models_take_their_cards_levels(self):
+        from caminus.ember.resident import catalog, effort as eff
+        rows=(('mistral-large-4',True,['low','medium','high'],dict(none='low',medium='medium',xhigh='high',max='high')),
+              ('mistral-large-latest',True,['low','medium','high'],dict(none='low')),
+              ('mistral-large-2512',False,[],{}),
+              ('mistral-medium-3-5',True,['none','high'],dict(none='none',low='none',medium='high',max='high')),
+              ('magistral-medium-latest',True,['none','high'],dict(low='none')),
+              ('zai-glm-5-3',True,['low','high','max'],dict(none='low',medium='high',max='max')),
+              ('some-new-reasoner',True,['low','medium','high'],dict(xhigh='high')))
+        data=dict(data=[dict(id=i,capabilities=dict(completion_chat=True,function_calling=True,reasoning=r)) for i,r,_,_ in rows])
+        entries={e['id']:e for e in catalog.mistral_entries(data,'mistral')}
+        for mid,_,levels,mapping in rows:
+            self.assertEqual(entries[mid]['efforts'],levels,mid)
+            cfg=dict(provider_kind='mistral',model=mid,efforts=levels)
+            for level,want in mapping.items():
+                self.assertEqual(eff.resolve(dict(cfg,effort=level))['reasoning_effort'],want,'%s %s' % (mid,level))
+            if not levels:
+                self.assertIsNone(eff.resolve(dict(cfg,effort='high'))['reasoning_effort'],'no reasoning: no field')
+        self.assertEqual(eff.default_level(dict(provider_kind='mistral',model='mistral-large-4',efforts=['low','medium','high'])),'high')
+        self.assertEqual(eff.default_level(dict(provider_kind='mistral',model='mistral-medium-3-5',efforts=['none','high'])),'high')
+        # Medium 3.5's card: top_p only at high
+        med=dict(provider_kind='mistral',model='mistral-medium-3-5',efforts=['none','high'])
+        self.assertEqual(eff.sampling(med,True),dict(temperature=0.7,top_p=0.95))
+        self.assertEqual(eff.sampling(dict(med,effort='low'),True),dict(temperature=0.7))
+
+    def test_one_goal_advances_per_pass_in_queue_order(self):
+        """A goal that made progress has the pass; the next starts only while those before it wait (every goal was
+        ticked each pass, so queued goals ran interleaved with the working one)."""
+        rt=Runtime(self.home)
+        try:
+            a=rt.store.enqueue('A.');b=rt.store.enqueue('B.')
+            ticked=[];passes=[0]
+            def tick(gid,progress):ticked.append(gid);return progress
+            rt.tick=lambda gid:tick(gid,gid==a)          # A makes progress, B would too if it were ticked
+            rt._maybe_update=lambda:False
+            rt.run(stop=lambda:(passes.__setitem__(0,passes[0]+1) or passes[0]>2),poll=0)
+            self.assertEqual(set(ticked),{a},'B waits while A moves')
+            ticked.clear();passes[0]=0
+            rt.tick=lambda gid:tick(gid,gid==b)          # A waits (parked, a pending request): B gets the pass
+            rt.run(stop=lambda:(passes.__setitem__(0,passes[0]+1) or passes[0]>2),poll=0)
+            self.assertEqual(ticked[:2],[a,b])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_third_recheck_fixes(self):
+        from caminus.ember.resident import effort as eff
+        import threading
+        v=dict(none='swift-1.5-nothink',low='swift-1.5-low',xhigh='swift-1.5-xhigh')
+        self.assertEqual(eff.scale(dict(provider_kind='local',model='swift-1.5',model_variants=v),'xhigh'),
+                         'no → thinking off · low → low · medium → medium · high, xhigh, max → xhigh (current)')
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A.');rt.store.update(gid,state='working')
+            # a parked goal reads parked in status (its stored state stays working)
+            rt.store.update(gid,wake_at=time.time()+600)
+            self.assertIn('parked_until',{g['id']:g for g in rt.store.status()['goals']}[gid])
+            rt.store.update(gid,wake_at=None)
+            # a /cancel aborts a call that has not answered yet, before its first token
+            from caminus.ember.resident.runtime import Live
+            from caminus.ember.resident.model import Cancelled
+            live=Live(self.home,gid,rt.store);hold=threading.Event()
+            def slow(on_delta):hold.wait(30);return dict(content='late')
+            rt.store.update(gid,state='cancelled')
+            t0=time.time()
+            from caminus.ember.resident.model import Model as RealModel
+            rt.model=RealModel(dict(endpoint='http://127.0.0.1:1/v1',model='x'))   # (only a real transport is watched)
+            with self.assertRaises(Cancelled):rt._watched(live,slow,poll=.05)
+            self.assertLess(time.time()-t0,2,'aborted at once, not when the server answers');hold.set()
+            # a turn cut by a daemon death is retried and says so
+            rt.store.update(gid,state='working',steps=3)
+            (self.home/'live').mkdir(exist_ok=True);(self.home/'live'/(gid+'.json')).write_text('{}')
+            rt._note_cut_turns()
+            ev=[e for e in rt.store.events_since(0) if e['kind']=='turn_retried'] if hasattr(rt.store,'events_since') else \
+               [e for e in self.cmd('events') if e['kind']=='turn_retried']
+            self.assertEqual(ev[-1]['data']['step'] if 'data' in ev[-1] else ev[-1]['step'],4)
+            self.assertFalse((self.home/'live'/(gid+'.json')).exists())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_cancel_closes_the_connection_so_the_server_stops_too(self):
+        """Abandoning the call left the server generating the reply and holding its slot: the cancel closes the socket
+        (caminus serve stops a job when its client goes, also during prefill)."""
+        import socket,threading
+        from caminus.ember.resident.runtime import Live
+        from caminus.ember.resident.model import Cancelled, Model as RealModel
+        srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);port=srv.getsockname()[1]
+        closed=threading.Event()
+        def serve():                                  # reads the request, never answers (a long prefill), notes the close
+            c,_=srv.accept();c.settimeout(10)
+            try:
+                while c.recv(65536):pass
+                closed.set()
+            except OSError:closed.set()
+            finally:c.close()
+        threading.Thread(target=serve,daemon=True).start()
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A.');rt.store.update(gid,state='working')
+            rt.model=RealModel(dict(endpoint=f'http://127.0.0.1:{port}/v1',model='x',timeout=30,context=65536))
+            live=Live(self.home,gid,rt.store)
+            threading.Timer(.4,lambda:Store(self.home).update(gid,state='cancelled')).start()
+            t0=time.time()
+            with self.assertRaises(Cancelled):
+                rt._watched(live,lambda on_delta:rt.model.complete([dict(role='user',content='hi')],max_tokens=10,on_delta=on_delta),poll=.05)
+            self.assertTrue(closed.wait(3),'the server sees the client go')
+            self.assertLess(time.time()-t0,4)
+        finally:rt.mail.close();rt.store.close();srv.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
@@ -4280,6 +4489,8 @@ for line in sys.stdin:
         self.assertEqual((st['state'],st['steps']),('paused',2))
         self.assertIn('rewound to step 2',st['error'])
         self.assertIn('rewound',[e['kind'] for e in self.cmd('events')])
+        self.assertEqual(self.cmd('rewind',[gid,'--list'])['steps'],[dict(step=2,label='write notes/a.txt')],
+                         'the undone step 3 is no rewind point any more')
         store=Store(self.home)
         try:
             ms=store.goal(gid)['messages']
@@ -4297,7 +4508,7 @@ for line in sys.stdin:
             self.assertEqual(out2['skipped'],[str(bigp)])
             self.assertEqual(afile.read_text(),'OLD ONE\n')
             listed=self.cmd('rewind',[gid,'--list'])['steps']
-            self.assertIn('skipped',listed[-1]['label'])
+            self.assertEqual(listed,[],'every step after 1 was undone (or could not be): none is offered again')
             self.assertTrue(bigp.exists())            # not restorable does not mean deleted
         finally:store.close()
         # and the goal carries on from the cut point

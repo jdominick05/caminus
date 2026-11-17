@@ -481,7 +481,14 @@ class Store:
 
     def status(self):
         goals = [dict(r) for r in self.db.execute('SELECT id,prompt,state,summary,error,steps,created,updated,'
-                                                  'plan,plan_text FROM goals ORDER BY created DESC LIMIT 50')]
+                                                  'plan,plan_text,wake_at FROM goals ORDER BY created DESC LIMIT 50')]
+        now = time.time()
+        for g in goals:
+            # parked (schedule): its state stays working in the store, so every UI showed two working goals with the
+            # one-at-a-time loop; parked_until says it is waiting for its wake time instead
+            w = g.pop('wake_at', None)
+            if w and w > now and g['state'] in ('working', 'queued'):
+                g['parked_until'] = w
         waiting = [dict(r) for r in self.db.execute("SELECT goal,name,bridge_id FROM actions WHERE state='waiting'")]
         # compactions per goal, counted from the whole history (the panel keeps only its newest events)
         compactions = {g: n for g, n in self.db.execute("SELECT goal,count(*) FROM events WHERE kind='compacted' "

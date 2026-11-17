@@ -166,7 +166,7 @@ func TestASessionCardFromAnOlderRuntimeWithoutAims(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := loadSessionCard(emberModel{agentName: "resident", cli: []string{script}}, "research")
-	if c.status != "idle" || c.goal != "design a game" || c.aimed || c.model != "claude-haiku-5-5" || c.spendToday != 4.12 || c.ctxUsed != 52335 {
+	if c.status != "listening" || c.goal != "design a game" || c.aimed || c.model != "claude-haiku-5-5" || c.spendToday != 4.12 || c.ctxUsed != 52335 {
 		t.Fatalf("a full card from a status without aims: %+v", c)
 	}
 }

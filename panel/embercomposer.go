@@ -505,3 +505,90 @@ func sentShape(s string) string {
 		return w
 	}))
 }
+
+// typedFormOf is a sent message as it was typed: the newest typed entry it is the sent form of, else the message
+// turned back (+path, a leading //).
+func (m emberModel) typedFormOf(sent string) string {
+	shape := sentShape(unexpand(sent))
+	typed := loadTyped(m.agentName)
+	for i := len(typed) - 1; i >= 0; i-- {
+		if sentShape(typed[i]) == shape {
+			return typed[i]
+		}
+	}
+	return retype(unexpand(sent))
+}
+
+// Drafts that Ctrl+C or Ctrl+U cleared go into the typed history too (Up brings them back) but were never sent: they
+// are remembered apart (the last 50) so the history says "your draft" for them, not "sent message".
+var demoDrafts = map[string][]string{}
+
+func draftsPath(agent string) string {
+	if p := typedPath(agent); p != "" {
+		return strings.TrimSuffix(p, ".json") + "-drafts.json"
+	}
+	return ""
+}
+
+func loadDrafts(agent string) []string {
+	if demoMode {
+		return demoDrafts[agent]
+	}
+	var out []string
+	if p := draftsPath(agent); p != "" {
+		if data, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal(data, &out)
+		}
+	}
+	return out
+}
+
+func markDraft(agent, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	all := append(loadDrafts(agent), text)
+	if len(all) > 50 {
+		all = all[len(all)-50:]
+	}
+	if demoMode {
+		demoDrafts[agent] = all
+		return
+	}
+	if p := draftsPath(agent); p != "" {
+		if data, err := json.Marshal(all); err == nil && os.MkdirAll(filepath.Dir(p), 0o755) == nil {
+			_ = os.WriteFile(p, data, 0o600)
+		}
+	}
+}
+
+func unmarkDraft(agent, text string) {
+	all := loadDrafts(agent)
+	keep := all[:0:0]
+	for _, d := range all {
+		if d != text {
+			keep = append(keep, d)
+		}
+	}
+	if len(keep) == len(all) {
+		return
+	}
+	if demoMode {
+		demoDrafts[agent] = keep
+		return
+	}
+	if p := draftsPath(agent); p != "" {
+		if data, err := json.Marshal(keep); err == nil {
+			_ = os.WriteFile(p, data, 0o600)
+		}
+	}
+}
+
+func isDraft(agent, text string) bool {
+	for _, d := range loadDrafts(agent) {
+		if d == text {
+			return true
+		}
+	}
+	return false
+}

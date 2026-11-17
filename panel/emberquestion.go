@@ -175,6 +175,9 @@ func (m emberModel) questionBox() string {
 		return out
 	}
 	lines := []string{emberDim.Render(strings.Repeat("─", w)), " " + head}
+	if n := m.noticeShown(); n != "" { // the last answer's flash ("root request: no"): the next prompt took its frame
+		lines = append(lines, " "+emberDim.Render(emberClip(terminalText(n, false), inner)))
+	}
 	switch r.kind() {
 	case "question":
 		lines = append(lines, prefixAll(wrap(r.Text, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
@@ -450,6 +453,7 @@ func (m *emberModel) requestOutcomes() map[string]string {
 	out := map[string]string{}
 	question := map[string]bool{}
 	timedOut := map[string]bool{}
+	rec := map[string]string{} // a question's recommended choice: a timeout names it
 	var ids []string
 	for _, e := range m.residentEvents {
 		str := func(k string) string { v, _ := e.Data[k].(string); return v }
@@ -458,6 +462,9 @@ func (m *emberModel) requestOutcomes() map[string]string {
 			if id := str("id"); id != "" {
 				ids = append(ids, id)
 				question[id] = e.Kind == "question"
+				if r := str("recommended"); r != "" {
+					rec[id] = r
+				}
 			}
 		case "request_answered":
 			// a timeout already recorded stays (an approval question's question_unanswered says "no" and comes first)
@@ -469,6 +476,9 @@ func (m *emberModel) requestOutcomes() map[string]string {
 			}
 		case "question_unanswered":
 			if id := str("id"); id != "" {
+				if r := str("recommended"); r != "" {
+					rec[id] = r
+				}
 				out[id] = outcomeText(question[id] && e.Data["approval"] != true, "", "", nil, "timeout")
 				timedOut[id] = true
 			}
@@ -523,6 +533,11 @@ func (m *emberModel) requestOutcomes() map[string]string {
 		if t := outcomeText(question[id], decision, answer, res["rc"], ""); t != "" {
 			m.chat.resSeen[id] = t
 			out[id] = t
+		}
+	}
+	for id, r := range rec {
+		if out[id] == "recommended (timed out)" { // which option it went with, not only that it timed out
+			out[id] = oneLine(residentText(r)) + " (recommended, timed out)"
 		}
 	}
 	for _, r := range m.sessionRequests() {
