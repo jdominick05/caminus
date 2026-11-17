@@ -31,10 +31,18 @@ type residentDestroyedMsg struct{ name, kept, err string }
 // its service stops, its name leaves the mail bus, its home moves to removed-sessions.
 func destroyResidentSession(m emberModel, name, goalID string, active bool) tea.Cmd {
 	return func() tea.Msg {
-		if active && goalID != "" {
-			_, _ = residentCommand(m, []string{"cancel", name, goalID, "--json"}, "").CombinedOutput()
+		// a runtime from before `remove` refuses here, before the goal is cancelled: nothing changes half-way
+		if out, err := runResident(residentCommand(m, []string{"remove", name, "--dry-run", "--json"}, "")); err != nil {
+			text := strings.TrimSpace(string(out))
+			if strings.Contains(text, "invalid choice") {
+				text = "the agent's runtime predates destroy: run caminus ember agent install, then try again"
+			}
+			return residentDestroyedMsg{name: name, err: text}
 		}
-		out, err := residentCommand(m, []string{"remove", name, "--json"}, "").CombinedOutput()
+		if active && goalID != "" {
+			_, _ = runResident(residentCommand(m, []string{"cancel", name, goalID, "--json"}, ""))
+		}
+		out, err := runResident(residentCommand(m, []string{"remove", name, "--json"}, ""))
 		if err != nil {
 			return residentDestroyedMsg{name: name, err: strings.TrimSpace(string(out))}
 		}

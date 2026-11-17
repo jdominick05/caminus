@@ -177,6 +177,8 @@ def parser():
         p.add_argument('--json',action='store_true')
         if op=='create':
             p.add_argument('--from',dest='template',required=True,help='copy model settings from a sibling resident; memory/history start fresh')
+        if op=='remove':
+            p.add_argument('--dry-run',action='store_true',help='check the session exists and say what would happen; change nothing')
         if op=='memory':
             p.add_argument('--text',help='append a note to this resident\'s MEMORY.md')
             p.add_argument('--stdin',action='store_true')
@@ -479,6 +481,9 @@ def main(argv=None,stdin=None):
             # The panel cancels a running goal first with `cancel`, which also withdraws its open requests.
             if not (home/'config.json').exists():
                 raise ValueError('no session named '+a.name)
+            if a.dry_run:
+                emit(dict(name=a.name,removed=False,would='stop and disable its service, leave the mail bus, move its home to removed-sessions'),True)
+                return 0
             unit='caminus-agent-'+a.name+'.service'
             env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
             subprocess.run(['systemctl','--user','disable','--now',unit],env=env,check=False,capture_output=True)
