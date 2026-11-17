@@ -102,6 +102,7 @@ type emberModel struct {
 	chat           residentChat
 	residentEpoch  uint64
 	sessionNames   []string
+	sessionCards   []sessionCard // the switcher: one card per session
 	sessionSel     int
 	sessionMemory  string
 	pageScroll     int
@@ -615,7 +616,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishCompose(msg)
 	case residentSessionsMsg:
 		if msg.agent == m.agentName {
-			m.sessionNames, m.sessionMemory = msg.names, msg.memory
+			m.sessionNames, m.sessionMemory, m.sessionCards = msg.names, msg.memory, msg.cards
 			if msg.err != "" {
 				m.msg = msg.err
 			}

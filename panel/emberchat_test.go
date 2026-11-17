@@ -387,38 +387,59 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	}
 }
 
-func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
+func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	m := chatFixture(t)
+	m.width, m.height = 120, 40
 	m.sessionNames = []string{"research", "resident"}
+	m.sessionCards = []sessionCard{
+		{name: "research", status: "working", goal: "survey the harness papers", model: "claude-haiku-5-5", github: "ember-bot",
+			workingS: 720, spendGoal: 0.42, spendToday: 4.12, tokPerS: 61, ctxUsed: 52000, ctx: 1000000},
+		{name: "resident", status: "idle", goal: "review the design", model: "swift-1.5"}}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 	m = next.(emberModel)
-	if !m.chat.picker || m.chat.pickerQuery != "" {
-		t.Fatal("Ctrl+P did not open the switcher")
+	if !m.chat.picker || m.chat.compose.Value() != "an unsent draft" {
+		t.Fatal("Ctrl+P opens the switcher and keeps the draft")
 	}
-	if m.chat.compose.Value() != "an unsent draft" {
-		t.Fatal("the switcher destroyed the draft")
+	frame := ansi.Strip(m.render())
+	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 goal", "$4.12 today",
+		"claude-haiku-5-5 · 61 tok/s", "GitHub ember-bot", "52K/1M context", "resident", "○ idle", "no GitHub account"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("a card shows %q:\n%s", want, frame)
+		}
 	}
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	for _, row := range strings.Split(frame, "\n") {
+		if ansi.StringWidth(row) > m.width {
+			t.Fatalf("a row passes the terminal: %q", row)
+		}
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'c', Text: "c"})
-	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m = next.(emberModel)
-	if names := m.pickerNames(); len(names) != 1 || names[0] != "research" {
-		t.Fatalf("filter failed: %v", names)
+	if m.chat.pickerSel != 1 {
+		t.Fatal("→ moves to the next card")
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(emberModel)
 	if m.chat.picker || !m.chat.compose.Focused() || m.chat.compose.Value() != "an unsent draft" {
-		t.Fatal("Escape did not restore the composer")
+		t.Fatal("Esc goes back to the chat with the draft")
 	}
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	// Shift+Tab opens it when nothing is being completed
+	m.chat.compose.SetValue("")
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.chat.picker {
+		t.Fatal("Shift+Tab opens the switcher")
+	}
+	// a click on the first card switches to it
+	box := m.pickerBox()
+	top := m.height - lipgloss.Height(m.chatFoot(m.width)) - lipgloss.Height(box)
+	if m.cardAt(3, top+3) != 0 || m.cardAt(cardW+4, top+3) != 1 {
+		t.Fatalf("a click maps to the card under it (top %d)", top)
+	}
+	next, _ = m.chatUpdate(tea.MouseClickMsg{X: 3, Y: top + 3, Button: tea.MouseLeft})
 	m = next.(emberModel)
-	if m.agentName != "research" || m.chat.picker || m.chat.compose.Value() != "" {
-		t.Fatalf("Enter did not open the selected session: %q", m.agentName)
+	if m.agentName != "research" || m.chat.picker {
+		t.Fatalf("a click on a card switches to its session: %q", m.agentName)
 	}
 	// A question arriving with the switcher open keeps F2 as the explicit takeover.
 	m2 := chatFixture(t)
@@ -510,7 +531,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 		next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 		m = next.(emberModel)
 		frame = ansi.Strip(m.render())
-		if !strings.Contains(frame, "OPEN SESSION") {
+		if !strings.Contains(frame, "sessions") || !strings.Contains(frame, "Enter or click switches") {
 			t.Fatalf("%v: switcher panel missing", size)
 		}
 		for _, row := range strings.Split(frame, "\n") {
@@ -578,7 +599,7 @@ func TestQuickSwitcherScrollsPastTheFirstPageWithoutPanicking(t *testing.T) {
 	for sel := range names {
 		m.chat.pickerSel = sel
 		box := ansi.Strip(m.pickerBox()) // panicked with "slice bounds out of range" before the fix
-		if !strings.Contains(box, "› "+names[sel]) {
+		if !strings.Contains(box, " "+names[sel]+" ") {
 			t.Fatalf("selection %d (%s) is not shown:\n%s", sel, names[sel], box)
 		}
 	}

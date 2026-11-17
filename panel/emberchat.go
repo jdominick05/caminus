@@ -42,7 +42,6 @@ type residentChat struct {
 	questionInput                           textarea.Model
 	questionDeferred, questionError         string
 	picker                                  bool
-	pickerQuery                             string
 	pickerSel                               int
 	approvals                               bool // the Approvals overlay is over the conversation
 	approvalSel                             int  // the row it has selected
@@ -1931,6 +1930,12 @@ func (m emberModel) renderChat() string {
 func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.chat.picker {
+		if i := m.cardAt(click.X, click.Y); i >= 0 {
+			return m.switchToCard(i)
+		}
+		return m, nil
+	}
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.onJumpPill(click.X, click.Y) {
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false
@@ -2024,7 +2029,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "ctrl+p":
-		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.picker, m.chat.pickerSel = true, 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "ctrl+g":
@@ -2048,6 +2053,11 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if next, done := m.cyclePath(); done {
 			return next, nil
+		}
+		if k == "shift+tab" { // no completion under way: Shift+Tab opens the session switcher (Ctrl+P does too)
+			m.chat.picker, m.chat.pickerSel = true, 0
+			m.chat.compose.Blur()
+			return m, residentSessions(m)
 		}
 		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
@@ -2335,7 +2345,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
 		clear()
-		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.picker, m.chat.pickerSel = true, 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "/newsession":
@@ -2571,7 +2581,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/requests", "open questions and root approvals"},
 	{"/resume", "resume the selected goal"},
 	{"/session", "open a session NAME"},
-	{"/sessions", "open the Sessions homepage"},
+	{"/sessions", "every session as a card: switch with Enter or a click"},
 	{"/start", "run this session's loop"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/stop", "stop this session's loop"},
@@ -2807,61 +2817,33 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.chat.compose.Focus()
-	case "up", "k":
+	case "left", "h":
 		m.chat.pickerSel = max(0, m.chat.pickerSel-1)
-	case "down", "j":
+	case "right", "l":
 		m.chat.pickerSel++
+	case "up", "k":
+		m.chat.pickerSel = max(0, m.chat.pickerSel-cardCols(max(18, m.width-2)))
+	case "down", "j":
+		m.chat.pickerSel += cardCols(max(18, m.width-2))
 	case "enter":
-		names := m.pickerNames()
-		if len(names) == 0 {
-			return m, nil
-		}
-		name := names[min(m.chat.pickerSel, len(names)-1)]
-		if name == m.agentName {
-			m.chat.picker = false
-			return m, m.chat.compose.Focus()
-		}
-		m.openResident(name)
-		return m, tea.Batch(residentRefresh(m), residentSessions(m))
-	case "backspace":
-		if query := []rune(m.chat.pickerQuery); len(query) > 0 {
-			m.chat.pickerQuery = string(query[:len(query)-1])
-		}
-	default:
-		if r := msgRunes(k); r != nil {
-			m.chat.pickerQuery += string(r)
-		}
+		return m.switchToCard(m.chat.pickerSel)
 	}
-	m.chat.pickerSel = max(0, min(m.chat.pickerSel, len(m.pickerNames())-1))
+	m.chat.pickerSel = max(0, min(m.chat.pickerSel, len(m.switcherCards())-1))
 	return m, nil
 }
 
-func (m emberModel) pickerBox() string {
-	names := m.pickerNames()
-	w := max(18, m.width-2)
-	maxRows := max(1, m.height-8)
-	first := 0
-	if len(names) > maxRows {
-		first = max(0, min(m.chat.pickerSel-maxRows+1, len(names)-maxRows))
+// switchToCard opens card i's session (the one in view: back to the chat).
+func (m emberModel) switchToCard(i int) (tea.Model, tea.Cmd) {
+	cards := m.switcherCards()
+	if i < 0 || i >= len(cards) {
+		return m, nil
 	}
-	rows := []string{emberWarn.Render("OPEN SESSION"), "› " + residentText(m.chat.pickerQuery) + "█", ""}
-	if len(names) == 0 {
-		rows = append(rows, emberDim.Render("no matching session"))
+	if name := cards[i].name; name != m.agentName {
+		m.openResident(name)
+		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	}
-	for idx := first; idx < min(first+maxRows, len(names)); idx++ {
-		name := names[idx]
-		mark := "  "
-		if idx == m.chat.pickerSel {
-			mark = "› "
-		}
-		row := mark + residentText(name)
-		if idx == m.chat.pickerSel {
-			row = lipgloss.NewStyle().Bold(true).Render(row)
-		}
-		rows = append(rows, emberClip(row, w-4))
-	}
-	hint := "Enter opens · ↑/↓ choose · Esc cancels"
-	return emberBorder.Width(w).Render(strings.Join(rows, "\n") + "\n" + emberDim.Render(emberClip(hint, w-4)))
+	m.chat.picker = false
+	return m, m.chat.compose.Focus()
 }
 
 // chatFoot is the status line (shell.go) and, when something is only sometimes true, a dim line under it; bodyHeight

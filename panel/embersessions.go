@@ -19,6 +19,7 @@ import (
 type residentSessionsMsg struct {
 	agent, memory, err string
 	names              []string
+	cards              []sessionCard // the switcher's cards, one per name
 }
 
 type residentCreatedMsg struct{ name, err string }
@@ -76,6 +77,7 @@ func residentSessions(m emberModel) tea.Cmd {
 		result := residentSessionsMsg{agent: m.agentName}
 		for _, p := range peers {
 			result.names = append(result.names, p.Name)
+			result.cards = append(result.cards, loadSessionCard(m, p.Name))
 		}
 		out, err = residentCommand(m, []string{"memory", m.agentName, "--json"}, "").CombinedOutput()
 		var memory struct {
@@ -204,26 +206,6 @@ func (m emberModel) sessionKeys(k string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	}
 	return m, nil
-}
-
-// pickerNames lists the sessions the Ctrl+P query still matches; an empty list
-// keeps the current name so the switcher can always reopen it.
-func (m emberModel) pickerNames() []string {
-	names := m.sessionNames
-	if len(names) == 0 {
-		names = []string{m.agentName}
-	}
-	query := strings.ToLower(m.chat.pickerQuery)
-	if query == "" {
-		return names
-	}
-	var out []string
-	for _, n := range names {
-		if strings.Contains(strings.ToLower(n), query) {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 func (m emberModel) sessionsPane() string {
