@@ -36,7 +36,10 @@ type residentStatus struct {
 	Effort           string             `json:"effort"` // the effort level that runs ('' with no effort control)
 	Context          int                `json:"context"`
 	ContextUsed      int                `json:"context_used"` // measured at the last turn boundary; 0 means never measured
-	TokPerS          float64            `json:"tok_per_s"`    // measured decode speed of the last streamed reply; 0 means none reported
+	TokPerS          float64            `json:"tok_per_s"`        // write (generation) speed; 0 means none reported (replySpeed)
+	PromptTokPerS    float64            `json:"prompt_tok_per_s"` // read (prompt) speed, which a Caminus server reports; 0 none
+	SpeedSource      string             `json:"speed_source"`     // "engine": the Caminus server's own numbers; else Ember's estimate
+	SpeedLive        bool               `json:"speed_live"`       // TokPerS is the engine's figure now, not the last reply's
 	CompactThreshold float64            `json:"compact_threshold"`
 	CompactTarget    float64            `json:"compact_target_ratio"`
 	SpendToday       float64            `json:"spend_today"` // every priced turn today, across goals
@@ -53,6 +56,56 @@ type residentStatus struct {
 	Goals         []residentGoal `json:"goals"`
 	LastEvent     int            `json:"last_event"`
 }
+
+// replySpeed is a session's speed as its status reports it: a Caminus server's own read (prompt) and write
+// (generation) speeds from its reply timings (live: the write speed is the engine's figure while the reply streams),
+// or the write speed Ember estimated for a brain that reports none. A resident from before sources were kept sends no
+// source, and its figure is an estimate.
+type replySpeed struct {
+	write, read float64
+	source      string
+	live        bool
+}
+
+func (r residentStatus) speed() replySpeed {
+	return replySpeed{write: r.TokPerS, read: r.PromptTokPerS, source: r.SpeedSource, live: r.SpeedLive}
+}
+
+// short is the footer's and the session card's words; narrow drops the read speed first.
+func (s replySpeed) short(narrow bool) string {
+	if s.source != "engine" {
+		if s.write > 0 {
+			return fmt.Sprintf("~%.0f tok/s est.", s.write)
+		}
+		return ""
+	}
+	var parts []string
+	if s.read > 0 && (!narrow || s.write <= 0) {
+		parts = append(parts, "read "+humanInt(int(s.read+.5)))
+	}
+	if s.write > 0 {
+		parts = append(parts, fmt.Sprintf("write %.0f", s.write))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ") + " tok/s"
+}
+
+// long is the info page's row: both speeds and where they come from.
+func (s replySpeed) long() string {
+	words := s.short(false)
+	switch {
+	case words == "":
+		return ""
+	case s.source != "engine":
+		return words + " (estimated by Ember: tokens over the time they streamed; last reply)"
+	case s.live:
+		return words + " (the Caminus engine's own: write live, read last reply)"
+	}
+	return words + " (the Caminus engine's own; last reply)"
+}
+
 type residentEvent struct {
 	Seq  int            `json:"seq"`
 	Ts   float64        `json:"ts"`

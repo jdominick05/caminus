@@ -47,7 +47,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / edit / write, the web tools, MCP servers |
-| `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |
+| `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
 | `cli.py` | the entry point every mode uses (`once`, `run`, `send`, `status`, `stream`, ...) |
@@ -55,7 +55,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | Panel (`panel/`) | |
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
-| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), Ember's box and the side panel, the task / now line |
+| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, else the thoughts box under it), the side panel (tasks, now), the task / now line |
 | `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
@@ -66,12 +66,32 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - The resident package stays standard library only and self-contained (the zipapp holds nothing else).
 - The agent never holds root or a key: root goes through the bridge and runs under the owner's sudo; paid brains go
   through the owner's relay.
-- Nothing waits on the human: a question times out to the recommended option, a permission or root request to no.
+- Nothing waits on the human: a question times out to the advisor's pick or the recommended option, a permission or
+  root request to no. A question waits longer while the human is away (the panel's `presence.json` stamp,
+  `approval.wait_left`, mirrored by `questionLeft` in `panel/emberquestion.go`), never past `question_away_max`; a
+  root request never does.
 - The prompt says what the runtime does. When you change a refusal, a limit or a guard, change `resident/prompt.py`
   (and the docs) in the same commit.
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is
   never graded and never paused by a loop guard.
 - No GPU in any env test; the env suites are CPU only.
+- A speed shown for a local Caminus brain is the engine's own: the reply's `timings` (`model.engine_speed`; the brain is
+  Caminus when its `/props` names the engine, `catalog.caminus_props`) and, while a reply streams, `/caminus/status`
+  (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
+  (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
+  `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
+
+## Memory
+
+What the agent sees is in [the guide](../ember.md#its-memory); the rules and their reasons are in
+`resident/memory.py`'s docstring and comments.
+
+- **Limits.** `INDEX_CAP`, `INDEX_WARN` (80 %) and `LINE_CAP` live in `memory.py`. The `remember` and `history_search`
+  descriptions in `runtime.py` and the memory paragraph of `prompt.py` state them, so change all three together.
+- **No note is lost.** No write to MEMORY.md may leave a note file the old index named in neither the new index nor
+  `notes/index-archive.md`: eviction, a re-save (a merged line naming other notes stays) and `Memory.tidy` all keep it.
+- **Tests.** `test_resident.py`: `test_a_nearly_full_index_warns_in_the_context_and_in_remember`,
+  `test_tidy_rewrites_the_index_and_keeps_every_note_reachable`, `test_history_search_finds_past_goals_journal_and_notes`.
 
 ## Testing
 
@@ -103,7 +123,7 @@ inside the harness with an agent while you design it.
 |---|---|
 | `lab.py` | the command line: `run`, `report`, `compare`; `open`, `say`, `turn`, `reply`, `events`, `status`, `close` |
 | `runner.py` | suites, arms, the run matrix, one run (fresh home, `once`, events, the check) |
-| `brains.py` | `scripted:NAME`, `driven` (you answer each model call), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
+| `brains.py` | `scripted:NAME`, `driven` (you answer each model call; `driven:caminus` plays a `caminus serve` whose answers carry `reply --timings`), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
 | `hosts.py` | `local` (scratch folders as you) and `agent` (the agent account over Ember's SSH, under `~/lab/`) |
 | `report.py` | tables per brain, arm and task; the A/B verdict |
 | `sessions.py` | long-lived lab agents to talk with or drive |

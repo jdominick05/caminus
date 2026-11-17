@@ -23,11 +23,18 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   something that looked after the last change, a refused edit blocks the finish until the change is made or the file
   is read, and the judge sees which files were actually changed.
 - **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
-  takes the agent's recommended option after 15 minutes; an unanswered permission or root request is a no.
+  waits 15 minutes while you are at the screen and longer while you are away (until 15 minutes after you come back,
+  at most 8 hours); then the advisor's pick or the agent's recommended option. An unanswered permission is a no, and a
+  root request is a no after 15 minutes either way.
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
 - **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
+  On a `caminus serve` brain the chat's speeds are the engine's own: "read 1,240 · write 62 tok/s" is how fast it read
+  the last reply's prompt and wrote the reply. While a reply streams, the write speed is the engine's live figure, its
+  mean over its most recent passes, so it can step when the reply ends.
+  Any other brain (llama-server included, whose timings Ember does not take as the engine's) gets Ember's own
+  estimate, marked "est.".
 
 Compared with Qwen Code and similar harnesses, the difference that matters most is what a harness cannot do: keep
 working when you close the window. On speed and cost there is one small measurement so far: a single bug-fix task (a
@@ -163,7 +170,8 @@ key of that file.
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
 | Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
-| A request's wait | 15 min | a question then takes its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| A request's wait | 15 min | a question then takes the advisor's pick or its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min; the prompt then says "waits while you're away"; root requests keep their 15 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
 
@@ -184,6 +192,33 @@ made before that keeps running at medium until you pick a level.
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
 A side call (the judge's check of a finish) always runs with thinking off.
+
+## Its memory
+
+An agent keeps what it learns across goals in its home:
+
+- `STATE.md`: where it stands now (doing, verified, assumed, next). It loads first on every turn.
+- `MEMORY.md`: its notes index, one line per note. It loads into every goal, capped at 4 KB, and stays fixed for the
+  length of a goal.
+- `notes/NAME.md`: one fact each, read when needed. The `remember` tool writes a note and its index line together.
+
+Keeping the index small:
+
+- **The warning.** From 3,277 bytes (80 % of the cap), the goal's context and `remember`'s result say how full the
+  index is and how to tidy it.
+- **Tidying.** `remember` with action `tidy` takes the whole rewritten index (duplicate lines merged, long ones
+  shortened) and the old lines taken out, which move to `notes/index-archive.md`. A pinned line keeps its mark. It
+  is refused, with nothing written, when:
+  - a note would end up named in neither the index nor the archive;
+  - a pinned note loses its line;
+  - a new line names a note that does not exist;
+  - a line is over 160 bytes, or the index is over its cap.
+- **A full index.** A save that would pass the cap moves the least recently used unpinned lines to the archive and
+  names them.
+
+`history_search` searches the archive along with the agent's past goals, journal and notes. Archive hits come first
+(up to half the limit), each with the note its line names. Every hit gives its source: past goal, index archive, old
+index, journal or note. Hits from the running goal come last, marked "this goal", and its own prompt is left out.
 
 ## Where things live
 
@@ -227,7 +262,7 @@ Your files never move into the agent's account unless you put them there or appr
 | A goal is `paused` | Its reason is on the goal (`/goals`): the watchdog (no progress, a token budget, the same call failing three times or repeated seven times), three plain replies, or three cut-off replies. Steer it, then `/resume`. |
 | HTTP 402 from the relay | The day's cap is spent: it resets at midnight, or raise it with `relay install --cap-usd N`. |
 | HTTP 403 "no published price" | The model is not on the provider's price list (or a stale model name in the config): pick one with `/model`. |
-| Ember's box says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
+| The thoughts box under the history says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
 | GNOME asks for an admin password | You opened a file in the agent's home from the file manager (an `admin://` path). Read its files with `caminus ember run` or from the panel instead. |
 | Too many desktop notifications | `CAMINUS_PANEL_NOTIFY=0 caminus ember ui`. |
 

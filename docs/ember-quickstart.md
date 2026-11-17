@@ -14,7 +14,7 @@ pip install caminus
 caminus ember --help
 ```
 
-Ember is in the package from 0.3.0 on. Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
+Ember is in the package from 0.3.0 on (on PyPI from 0.3.1). Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
 
 The panel (`caminus ember ui`) ships inside the package. From a source checkout, build it first:
 `cd panel && go build -o caminus-panel .`
@@ -62,7 +62,7 @@ caminus ember setup --test-venv                                                 
 | two cards, an XTX first | the Coder (`coder`, both cards) |
 | two XTs | ThinkingCap (the Coder needs a 24 GB first card) |
 
-Qwen3-30B-A3B (`qwen3-30b-a3b`) runs on every setup too; it is not the default because it finishes fewer agent tasks
+Qwen3-30B-A3B (`qwen3-30b-a3b`) runs on an XTX or on two cards too; it is not the default because it finishes fewer agent tasks
 for now. Start the model with `caminus panel` or `caminus pull MODEL && caminus start MODEL` (see
 [the quickstart](quickstart.md)), then point the agent at it:
 
@@ -97,8 +97,10 @@ caminus ember ui
 
 Type a goal and press Enter: "Find out which of my Python projects have failing tests and write a short report."
 The agent first works out what done looks like (it may look around first), then works step by step in its own
-account. You see its replies, one dim line per batch of tool work, and on a wide terminal a side panel with its
-thoughts, its task list and what it is running now.
+account. You see its replies and one dim line per batch of tool work. On a wide terminal (160 columns or more) the
+reply it is writing streams into the history as its newest block, and the right column holds its task list at the top
+and what it is running now. A narrower terminal shows the reply being written in a box under the history, and the
+current task and what runs now in two lines above where you type.
 
 - **Steer**: type while it works. A message reaches it at its next step; `/steer TEXT` redirects it.
 - **Answer**: questions and root requests ask where you type: pick with the arrows and Enter (a root command is yes or
@@ -112,8 +114,10 @@ thoughts, its task list and what it is running now.
 
 With nothing to do, the agent has free time: it reads its journal, follows its own interests and keeps a studio
 (`/studio`). `caminus ember agent heartbeat resident now` starts a stretch now (after any running work);
-`caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). Its
-thoughts run in Ember's box: its reasoning when the model shows it, else its words and the tools it calls.
+`caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). On a
+narrow terminal its thoughts run in the box under the history (the latest stay up between replies): its reasoning when
+the model shows it, else its words and the tools it calls. A wide terminal leaves the reasoning out of the history, as
+the compact view always does; Ctrl+O shows it.
 
 ## Next
 
