@@ -41,6 +41,16 @@ def runtime_name():
 
 def main(args,transport):
     args=list(args)
+    if [a for a in args if a!='--local'][:1]==['create'] and '--local-default' in args:
+        # the session switcher's new session: the local model chosen for this machine's cards (the agent account
+        # cannot see the cards), on the local server
+        from . import serve
+        args.remove('--local-default')
+        model,why=serve.default_brain()
+        if model is None:
+            print(f'error: no default local model: {why}',file=sys.stderr)
+            return 1
+        args+=['--model',model,'--endpoint',f'http://127.0.0.1:{serve.PORT0}/v1']
     if '--local' in args:
         args.remove('--local')
         from .resident.cli import main as local
@@ -97,16 +107,6 @@ CAMINUS_INSTALL
             parser().print_help()
             print('\nRemote by default; --local selects the same runtime in a scratch home.\nagent install uploads the runtime without sudo.')
             return 0
-        if args[:1]==['create'] and '--local-default' in args:
-            # the session switcher's new session: the local model chosen for this machine's cards (the agent account
-            # cannot see the cards), on the local server
-            from . import serve
-            args.remove('--local-default')
-            model,why=serve.default_brain()
-            if model is None:
-                print(f'error: no default local model: {why}',file=sys.stderr)
-                return 1
-            args+=['--model',model,'--endpoint',f'http://127.0.0.1:{serve.PORT0}/v1']
         if args[:1]==['init'] and not any(a=='--bridge' or a.startswith('--bridge=') for a in args):
             # the agent account cannot see the owner's settings: a setup with its own bridge (CAMINUS_ENV_BRIDGE) is
             # named here, or the agent would wait on the default one

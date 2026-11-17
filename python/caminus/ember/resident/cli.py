@@ -410,7 +410,10 @@ def main(argv=None,stdin=None):
                 # a local brain in place of the sibling's: as /model does, drop what belonged to a paid one (its relay,
                 # prices, window, thinking, effort) and keep the providers so /model can switch back
                 cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'),max_tokens=4096)
-                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model'):
+                # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
+                # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
+                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
+                          'fallback','advisor','judge_model'):
                     cfg.pop(k,None)
             from .model import Model
             Model(cfg)

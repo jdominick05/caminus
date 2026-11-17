@@ -1508,7 +1508,8 @@ for line in sys.stdin:
         self.assertEqual(made.returncode,0,made.stdout+made.stderr)
         cfg=json.loads((self.home.parent/paid/'config.json').read_text())
         cfg.update(model='claude-haiku-5-5',relay=True,prices={'in':1},context=1000000,api='anthropic',thinking='adaptive',
-                   effort='medium',provider='anthropic',providers={'anthropic':{'kind':'anthropic'}})
+                   effort='medium',provider='anthropic',providers={'anthropic':{'kind':'anthropic'}},
+                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5')
         (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
         new='local-'+uuid.uuid4().hex[:8]
         home=self.home.parent/new
@@ -1517,7 +1518,7 @@ for line in sys.stdin:
         self.assertEqual(json.loads(made.stdout)['model'],'swift-1.5')
         got=json.loads((home/'config.json').read_text())
         self.assertEqual((got['model'],got['endpoint']),('swift-1.5','http://127.0.0.1:8092/v1'))
-        for k in ('relay','prices','context','api','thinking','effort','provider'):
+        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model'):
             self.assertNotIn(k,got,f'{k} belonged to the paid brain')
         self.assertIn('providers',got,'/model can still switch back to a paid brain')
 
@@ -1534,6 +1535,14 @@ for line in sys.stdin:
         self.assertNotIn('--local-default',seen['script'])
         with unittest.mock.patch.object(serve,'default_brain',return_value=(None,'no supported card')):
             self.assertEqual(agent_host.main(['create','x','--from','resident','--local-default'],None),1)
+        got={}
+        def local(args):
+            got['args']=args;return 0
+        with unittest.mock.patch.object(serve,'default_brain',return_value=('thinkingcap','one 20 GB card')), \
+             unittest.mock.patch('caminus.ember.resident.cli.main',local):
+            self.assertEqual(agent_host.main(['--local','create','x','--from','resident','--local-default'],None),0)
+        self.assertIn('thinkingcap',got['args'],'--local resolves it too')
+        self.assertNotIn('--local-default',got['args'])
 
     def test_remove_takes_a_session_off_the_bus_and_keeps_its_home(self):
         name='session-'+uuid.uuid4().hex
