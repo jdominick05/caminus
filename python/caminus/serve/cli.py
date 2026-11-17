@@ -463,10 +463,12 @@ def main(argv=None):
     # a request's defaults: the catalog's recommended sampling for this file's model, then the GGUF's general.sampling.*,
     # then the built-in ones (a request's own fields still win)
     from .sampler import model_defaults
-    sampling, max_output = model_defaults(opt['model'], getattr(tok.vocab, 'meta', None))
-    print(f'caminus serve: sampling defaults temperature {sampling.temperature:g}, top_p {sampling.top_p:g}, top_k '
-          f'{sampling.top_k}, min_p {sampling.min_p:g}, presence {sampling.presence_penalty:g}, repeat '
-          f'{sampling.repeat_penalty:g}' + (f'; recommended output up to {max_output:,} tokens' if max_output else ''), flush=True)
+    sampling, sampling_nothink, max_output = model_defaults(opt['model'], getattr(tok.vocab, 'meta', None))
+    for label, sp in (('', sampling), (' without thinking', sampling_nothink)):
+        if sp is not None:
+            print(f'caminus serve: sampling defaults{label} temperature {sp.temperature:g}, top_p {sp.top_p:g}, top_k '
+                  f'{sp.top_k}, min_p {sp.min_p:g}, presence {sp.presence_penalty:g}, repeat {sp.repeat_penalty:g}'
+                  + (f'; recommended output up to {max_output:,} tokens' if max_output and not label else ''), flush=True)
     stats = EngineStats(enabled=not opt['no_stats'], physics=A.physics(0))
     hw = None
     flight = None
@@ -478,7 +480,7 @@ def main(argv=None):
                    incremental_tool_args=bool(opt['incremental_tool_args']), model_path=opt['model'], hw=hw, stats=stats,
                    loading=True, model_alias=opt['model_alias'], flight=flight, loop_guard=not opt['no_loop_guard'],
                    kv_cache={'type': opt.get('kv') or 'f16', 'format': None},   # (the built engine's below: kv_cache_of)
-                   sampling=sampling, max_output=max_output)
+                   sampling=sampling, sampling_nothink=sampling_nothink, max_output=max_output)
     srv.start(background=True)
     print(f'caminus serve: http://{opt["host"]}:{srv.port} (loading)  pid={os.getpid()}', flush=True)
     from ..device import kernels

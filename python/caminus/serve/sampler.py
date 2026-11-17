@@ -173,13 +173,28 @@ class SamplingParams:
 REC_FIELDS = ('temperature', 'top_p', 'top_k', 'min_p', 'presence_penalty', 'repeat_penalty')   # (caminus.models.Sampling's)
 
 
+PENALTY_FIELDS = {'presence_penalty': 0.0, 'repeat_penalty': 1.0, 'frequency_penalty': 0.0}   # (request name: off)
+
+
 def model_defaults(path, meta):
     """caminus serve's request defaults for the GGUF at path with header metadata meta (caminus.serve.vocab.Vocab.meta):
-    (SamplingParams, max_output or None). The served model is found in the catalog by its file (caminus.models.sampling_of:
-    name and size, the same identification as arch.default_alias), so no architecture is named here"""
+    (SamplingParams with thinking on, SamplingParams with thinking off or None: the same set, max_output or None). The
+    served model is found in the catalog by its file (caminus.models.sampling_of: name and size, the same identification
+    as arch.default_alias), so no architecture is named here"""
     from .. import models
     rec = models.sampling_of(path) if path else None
-    return SamplingParams.from_recommended(rec, meta), (rec.max_output if rec is not None else None)
+    if rec is None:
+        return SamplingParams.from_recommended(None, meta), None, None
+    nothink = SamplingParams.from_recommended(rec.nothink, meta) if rec.nothink is not None else None
+    return SamplingParams.from_recommended(rec, meta), nothink, rec.max_output
+
+
+def greedy_defaults(p, req):
+    """a greedy request's params (p.temperature 0): the penalties the request does not send itself switched off. Greedy
+    requests are tests, gates and benchmarks (the cards advise against greedy decoding for real use), so a model's default
+    penalty never changes their output or puts them on the penalty path; a penalty the request sends is kept"""
+    off = {k: v for k, v in PENALTY_FIELDS.items() if req.get(k) is None or isinstance(req.get(k), bool)}
+    return replace(p, **off) if off else p
 
 
 # ---------------------------------------------------------------- filter chain

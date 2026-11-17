@@ -110,8 +110,12 @@ ALL = (
 # request's defaults (caminus.serve.sampler.model_defaults: these first, then the GGUF's general.sampling.* where a field is
 # None here, then SamplingParams' own defaults; a request's own fields still win). None = the card does not state it.
 # max_output: the card's recommended output length (reasoning included), a hint /props reports; the server never cuts a reply
-# there by itself (max_tokens stays the client's, clamped to the context's room). Read on 2026-11-16 at these revisions.
-Sampling = namedtuple('Sampling', 'temperature top_p top_k min_p presence_penalty repeat_penalty max_output')
+# there by itself (max_tokens stays the client's, clamped to the context's room). nothink: the card's separate set for answers
+# without thinking (a Sampling, or None: the same set either way), used where the request's profile turns thinking off (the
+# -nothink id, enable_thinking false). A greedy request (temperature 0) takes none of these penalties unless it sends its own
+# (caminus.serve.sampler.greedy_defaults). Read on 2026-11-16 at these revisions.
+Sampling = namedtuple('Sampling', 'temperature top_p top_k min_p presence_penalty repeat_penalty max_output nothink',
+                      defaults=(None,))
 _QWEN38 = Sampling(1.0, 0.95, 20, 0.0, 0.0, 1.0, 131072 + 262144)   # Thinking Mode; 131,072 answer + 262,144 reasoning
 SAMPLING = {
     # https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/812d96e10a0dd82b69d749e68693698cf6c36daa/README.md
@@ -134,8 +138,10 @@ SAMPLING = {
     # suppress repetitive outputs"; "an output length of 32,768 tokens for most queries"); also the base card
     # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/README.md. The GGUF carries no
     # general.sampling.* keys, so before this table it was served at temperature 1.0 and presence 0. No repetition penalty
-    # is stated (None: the GGUF's, else off). The card's non-thinking set (0.7 / 0.8) is not applied to the -nothink id.
-    'qwen3-30b-a3b': Sampling(0.6, 0.95, 20, 0.0, 1.5, None, 32768),
+    # is stated (None: the GGUF's, else off). nothink: the same section's non-thinking set ("For non-thinking mode
+    # (enable_thinking=False), we suggest using Temperature=0.7, TopP=0.8, TopK=20, MinP=0, and PresencePenalty=1.5").
+    'qwen3-30b-a3b': Sampling(0.6, 0.95, 20, 0.0, 1.5, None, 32768,
+                              nothink=Sampling(0.7, 0.8, 20, 0.0, 1.5, None, 32768)),
 }
 
 

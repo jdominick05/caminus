@@ -1,7 +1,9 @@
 """The served surface of the per-model sampling defaults (caminus.models.SAMPLING through caminus.serve.sampler), CPU only,
 on the mock engine: /props reports the effective defaults (default_generation_settings.params) and the max_output hint,
 /v1/models carries max_output in its meta, a request without sampling fields runs at the model's defaults and a request's
-own fields win (the request's effective params in /slots). The resolution itself: tests/test_model_sampling.py.
+own fields win, a greedy request takes no default penalty (an explicit one is kept), and a request with thinking off (the
+-nothink id, chat_template_kwargs enable_thinking false) takes the model's non-thinking set (each request's effective
+params read back from /slots). The resolution itself: tests/test_model_sampling.py.
 Run:  HIP_VISIBLE_DEVICES= python -I tests/serve/run_all.py"""
 import json
 import unittest
@@ -25,16 +27,19 @@ class TestQ3MoEDefaults(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rec = models.SAMPLING['qwen3-30b-a3b']
-        cls.srv = U.make_server(sampling=SamplingParams.from_recommended(rec, {}), max_output=rec.max_output)
+        cls.srv = U.make_server(sampling=SamplingParams.from_recommended(rec, {}),
+                                sampling_nothink=SamplingParams.from_recommended(rec.nothink, {}), max_output=rec.max_output)
 
     @classmethod
     def tearDownClass(cls):
         cls.srv.stop()
 
-    def chat(self, user, **body):
+    def chat(self, user, model='k3-coder', client=None, **body):
         msgs = [SYS, {'role': 'user', 'content': user}]
-        U.script(self.srv.eng, msgs, {'role': 'assistant', 'content': 'done'}, None)
-        b = {'model': 'k3-coder', 'messages': msgs, 'max_tokens': 64}
+        U.script(self.srv.eng, msgs, {'role': 'assistant', 'content': 'done'}, None, model=model, client=client)
+        b = {'model': model, 'messages': msgs, 'max_tokens': 64}
+        if client:
+            b['chat_template_kwargs'] = client
         b.update(body)
         st, h, j = U.post_json(self.srv, '/v1/chat/completions', b)
         self.assertEqual(st, 200, j)
@@ -64,8 +69,29 @@ class TestQ3MoEDefaults(unittest.TestCase):
     def test_request_fields_win(self):
         q = self.chat('Override: say done.', temperature=0.2)
         self.assertEqual((q['temperature'], q['presence_penalty']), (0.2, 1.5))
-        q = self.chat('Override 2: say done.', temperature=0, presence_penalty=0.0, top_k=5)
-        self.assertEqual((q['temperature'], q['presence_penalty'], q['top_k']), (0.0, 0.0, 5))
+        q = self.chat('Override 2: say done.', temperature=0.5, presence_penalty=0.0, top_k=5)
+        self.assertEqual((q['temperature'], q['presence_penalty'], q['top_k']), (0.5, 0.0, 5))
+
+    def test_greedy_takes_no_default_penalty(self):
+        q = self.chat('Greedy: say done.', temperature=0)
+        self.assertEqual((q['temperature'], q['presence_penalty'], q['repeat_penalty'], q['frequency_penalty']),
+                         (0.0, 0.0, 1.0, 0.0))
+        q = self.chat('Greedy, own penalty: say done.', temperature=0, presence_penalty=0.5)
+        self.assertEqual((q['temperature'], q['presence_penalty']), (0.0, 0.5))
+        q = self.chat('Sampled: say done.', temperature=0.7)
+        self.assertEqual((q['temperature'], q['presence_penalty']), (0.7, 1.5))
+
+    def test_nothink_takes_the_non_thinking_set(self):
+        for kw in ({'model': 'k3-coder-nothink'}, {'client': {'enable_thinking': False}}):
+            q = self.chat(f'No thinking {kw}: say done.', **kw)
+            self.assertEqual((q['temperature'], q['top_p'], q['top_k'], q['min_p'], q['presence_penalty']),
+                             (0.7, 0.8, 20, 0.0, 1.5), kw)
+            q = self.chat(f'No thinking, own temperature {kw}: say done.', temperature=0.3, **kw)
+            self.assertEqual((q['temperature'], q['top_p'], q['presence_penalty']), (0.3, 0.8, 1.5), kw)
+            q = self.chat(f'No thinking, greedy {kw}: say done.', temperature=0, **kw)
+            self.assertEqual((q['temperature'], q['presence_penalty']), (0.0, 0.0), kw)
+        q = self.chat('Thinking on: say done.', model='k3-coder-xhigh')
+        self.assertEqual((q['temperature'], q['top_p']), (0.6, 0.95), 'a thinking profile keeps the thinking set')
 
 
 class TestQwen38Defaults(unittest.TestCase):

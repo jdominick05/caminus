@@ -88,7 +88,7 @@ from . import metrics as MX
 from .agentmon import LoopDetector, harness_of, tool_call_report
 from .normalize import RequestError, anthropic_to_template, openai_chat_to_template
 from .side_question import is_side_question, SIDE_QUESTION_MAX_NEW
-from .sampler import SamplingParams
+from .sampler import SamplingParams, greedy_defaults
 from .stats import ENGINE, STATUS_VERSION, EngineStats, build_info
 from .template import MODEL_PROFILES, PromptBuilder
 from .toolparse import OutputParser, ToolSet
@@ -336,12 +336,15 @@ class K3Server:
     server.kv_cache: {'type': 'f16' | 'q8', 'format': the cache's format id}; caminus serve sets the built engine's,
     caminus.arch.kv_cache_of). sampling: a request's defaults (sampler.SamplingParams; None: the GGUF's general.sampling.*
     over the built-in ones; caminus serve passes sampler.model_defaults': the catalog's recommendation first);
+    sampling_nothink: the defaults of a chat request whose profile turns thinking off (the -nothink id, enable_thinking
+    false; None: sampling's); a greedy request takes no default penalty (sampler.greedy_defaults);
     max_output: the model card's output length, reported by /props and /v1/models (None: not known)."""
 
     def __init__(self, session, tokenizer, host='127.0.0.1', port=8092, log_dir=None, ping_interval=10.0,
                  max_queue=16, incremental_tool_args=False, drafter=None, sampling=None, model_path=None,
                  builder=None, stats=None, physics=None, hw=None, hw_interval=1.0, proc_name='caminus',
-                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True, kv_cache=None, max_output=None):
+                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True, kv_cache=None, max_output=None,
+                 sampling_nothink=None):
         self.sess = session
         self.flight = flight        # serve.flight.FlightRecorder or None (the per-request JSONL line, replay bundles)
         self.loop_guard = bool(loop_guard)
@@ -368,6 +371,7 @@ class K3Server:
         self.drafter = drafter
         self.model_path = model_path
         self.defaults = sampling or SamplingParams.from_gguf_meta(getattr(tokenizer.vocab, 'meta', {}) or {})
+        self.defaults_nothink = sampling_nothink   # (the defaults of a request with thinking off; None: self.defaults)
         self.max_output = None if max_output is None else int(max_output)   # (the model card's output length: a hint only)
         self.think_end_id = tokenizer.special.get(THINK_END)
         self.tool_open_id = tokenizer.special.get(TOOL_OPEN)
@@ -444,17 +448,20 @@ class K3Server:
             self.counts[k] = self.counts.get(k, 0) + 1
 
     # ------------------------------------------------------------------------------------------- request -> spec
-    def _sampling(self, req):
+    def _sampling(self, req, thinking=True):
         for key, (integer, lo, hi) in SAMPLING_FIELDS.items():
             _num(req, key, lo, hi, integer)
+        base = self.defaults if thinking or self.defaults_nothink is None else self.defaults_nothink
         try:
-            p = self.defaults.with_request(req)
+            p = base.with_request(req)
         except (TypeError, ValueError, OverflowError):
             raise HttpError(400, 'invalid sampling parameter') from None
         if not (0.0 < p.top_p <= 1.0):
             raise HttpError(400, "'top_p' is out of range")
         if 0.0 < p.temperature < MIN_TEMP:
             p = replace(p, temperature=0.0)
+        if p.greedy:
+            p = greedy_defaults(p, req)     # (no default penalty on a greedy request: only the ones it sends)
         return p.resolve()
 
     def _max_new(self, n_prompt, max_tokens):
@@ -546,9 +553,11 @@ class K3Server:
             raise HttpError(400, 'tool_choice requires tools')
         if force_name is not None and force_name not in names:
             raise HttpError(400, f'tool_choice names an unknown tool {force_name!r}')
-        params = self._sampling(req)
+        params = self._sampling(req)                # (checked before the prompt is built)
         prompt = self._build(norm, model)
         thinking = bool(prompt.kwargs.get('enable_thinking', True))
+        if not thinking and self.defaults_nothink is not None:
+            params = self._sampling(req, thinking=False)   # (the model's defaults for answers without thinking)
         force, prefix_text = None, ''
         if required or force_name is not None:
             force, prefix_text = self._force(force_name, thinking)
