@@ -140,8 +140,9 @@ gets; any field the request sends itself (`temperature`, `top_p`, `top_k`, `min_
 - The recommended output length is a hint only. `/props` reports it as `default_generation_settings.max_output` and
   `/v1/models` in each model's `meta`. A reply still ends at the request's `max_tokens` or when the context is full.
 - `/props` reports the defaults in effect with thinking on under `default_generation_settings.params`.
-- For another GGUF file, the server uses the file's own `general.sampling.*` settings, then the built-in defaults
-  (temperature 1.0, top_p 0.95, top_k 20, min_p 0, no penalties).
+- For another GGUF file, the server uses the file's own `general.sampling.*` settings (temperature, top_k, top_p, min_p
+  and its repeat penalty), then the built-in defaults for the rest (temperature 1.0, top_p 0.95, top_k 20, min_p 0,
+  repeat penalty 1.0, no presence or frequency penalty).
 
 ## The names your tools use
 

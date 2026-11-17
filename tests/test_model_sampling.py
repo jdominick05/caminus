@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'python'))
 
 from caminus import models                                    # noqa: E402
-from caminus.serve.sampler import SamplingParams, greedy_defaults, model_defaults   # noqa: E402
+from caminus.serve.sampler import Sampler, SamplingParams, greedy_defaults, model_defaults   # noqa: E402
 
 FAILS = []
 
@@ -126,6 +126,26 @@ def main():
     req = {'temperature': 0, 'repeat_penalty': 1.1}
     g = greedy_defaults(base.with_request({'temperature': 0, 'repeat_penalty': 1.1}), req)
     check((g.presence_penalty, g.repeat_penalty) == (0.0, 1.1), f'greedy: an explicit repeat_penalty is kept, presence off ({six(g)})')
+
+    # the same greedy token under the old params (before the catalog: SamplingParams' defaults, the 30B's GGUF has no keys)
+    # and the new ones (the catalog's thinking or non-thinking set, the greedy rule), on random logits rows with random
+    # histories: the server's greedy draw is the argmax of the penalized row, which top_p (0.8 vs 0.95) never changes.
+    # Rows with ties at the maximum included (values rounded): the first maximum wins under both
+    _, nothink, _ = model_defaults(q3, {})
+    rng = np.random.default_rng(20261117)
+    V = 4096
+    rows = [rng.standard_normal(V).astype(np.float32) * 4 for _ in range(48)]
+    rows += [np.round(rng.standard_normal(V) * 2).astype(np.float32) for _ in range(16)]   # (ties at the max)
+    for label, model_base in (('thinking', base), ('-nothink (top_p 0.8 vs 0.95)', nothink)):
+        for req in ({'temperature': 0}, {'temperature': 0, 'presence_penalty': 0.5}, {'temperature': 0, 'repeat_penalty': 1.3}):
+            old = Sampler(SamplingParams().with_request(req))
+            new = Sampler(greedy_defaults(model_base.with_request(req), req))
+            same = 0
+            for row in rows:
+                hist = [int(x) for x in rng.integers(0, V, 80)] + [int(np.argmax(row))] * 3   # (the max in the penalty window)
+                same += old.sample(row, hist) == new.sample(row, hist)
+            check(same == len(rows) and new.params.greedy,
+                  f'greedy token {label}, request {req}: old and new params pick the same token on {same} / {len(rows)} rows')
 
     print('RESULT ' + ('PASS' if not FAILS else f'FAIL ({len(FAILS)})'))
     return 1 if FAILS else 0
