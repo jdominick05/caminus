@@ -1,5 +1,6 @@
 """Model transports: OpenAI-compatible chat completions (the local server) and Anthropic's Messages API.
 Standard library only; no engine, GPU or agent-CLI dependency."""
+import email.utils
 import http.client
 import json
 import os
@@ -130,11 +131,23 @@ def http_error(e):
     err = ModelError(str(e) + (': ' + detail if detail else ''))
     err.status = e.code      # a refusal must not be retried like an outage
     err.request_id = (e.headers or {}).get('request-id')
-    try:
-        err.retry_after = float((e.headers or {}).get('retry-after') or 0) or None
-    except (TypeError, ValueError):
-        err.retry_after = None
+    err.retry_after = retry_after(e.headers) or None
     return err
+
+
+def retry_after(headers):
+    """the seconds a Retry-After header asks for (a number or an HTTP date), else None"""
+    value = (headers or {}).get('retry-after')
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(0.0, email.utils.parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
 
 
 def _recording_opener(held):

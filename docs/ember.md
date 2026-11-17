@@ -153,6 +153,19 @@ Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-
 
 A side call (the judge's check of a finish) always runs with thinking off.
 
+### The web tools
+
+- **web_search** asks the ddgs engines in turn (auto, Bing, Brave, Mojeek, Wikipedia) until one has results; each
+  engine gets at most 25 s, the search 75 s. The result's `tried` names what each engine gave (results, empty, or the
+  error), and so does the error when none had results. It needs ddgs in the agent's account (the install line is in
+  [the resident's tool table](resident-agent.md); `search_python` in `config.json` names another Python that has it).
+- **web_fetch** makes up to three tries on HTTP 429 and 5xx, waiting what the site's Retry-After asks (else 2 s, then 4 s);
+  a site that asks for a wait past 30 s fails at once, naming the wait. A URL fetched again within a goal comes from a
+  cache for 10 minutes, marked `cached` (`fresh=true` fetches it again). A PDF (by its content type or its first bytes,
+  up to 30 MB) comes back as text through `pdftotext` when it is installed (poppler-utils), else through a small
+  built-in reader that marks its text partial and says what it skipped. `paper=true` on an arXiv abstract URL fetches
+  the paper's PDF.
+
 ## Where things live
 
 | What | Where |

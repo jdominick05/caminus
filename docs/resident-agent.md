@@ -232,7 +232,7 @@ Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |
 | `report`, `budget`, `schedule` | fyi or need_you to the human; what the goal has used and has left; park the goal and wake it later |
-| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (installed in the agent's account: `python3 -m venv ~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs`); a page as readable text |
+| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (installed in the agent's account: `python3 -m venv ~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs`); a page or a PDF as readable text (retries, cache, arXiv papers: [the web tools](ember.md#the-web-tools)) |
 | `advisor` | A stronger model's advice, within the owner's limits (below) |
 | `mcp__SERVER__TOOL` | Tools from the agent's MCP servers (below) |
 

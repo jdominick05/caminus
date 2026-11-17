@@ -44,12 +44,44 @@ def call(name,args):
     return dict(role='assistant',content='',tool_calls=[dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name=name,arguments=json.dumps(args)))])
 
 
+def pdf(*runs):
+    """a small valid PDF: one page, one Flate content stream showing each run (bytes) with Tj on its own line"""
+    import zlib
+    ops=b'BT /F1 12 Tf 72 720 Td '+b' '.join(b'('+r+b') Tj 0 -14 Td' for r in runs)+b' ET'
+    body=zlib.compress(ops)
+    objs=[b'<< /Type /Catalog /Pages 2 0 R >>',b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+          b'<< /Length %d /Filter /FlateDecode >>\nstream\n' % len(body)+body+b'\nendstream',
+          b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
+    out=bytearray(b'%PDF-1.4\n');offs=[]
+    for i,o in enumerate(objs,1):offs.append(len(out));out+=b'%d 0 obj\n' % i+o+b'\nendobj\n'
+    x=len(out);out+=b'xref\n0 %d\n0000000000 65535 f \n' % (len(objs)+1)+b''.join(b'%010d 00000 n \n' % o for o in offs)
+    out+=b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(objs)+1,x)
+    return bytes(out)
+
+
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[]
+    queues={};seen=[];judges={};judge_seen=[];web_hits={}
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-    def do_GET(self):self.respond(dict(n_ctx=65536))
+    def do_GET(self):
+        if self.path.startswith('/web/'):self.web();return
+        self.respond(dict(n_ctx=65536))
+    def web(self):
+        """pages for web_fetch: /web/busy/SECS/ID answers 429 (Retry-After SECS) the first time per ID, then a page;
+        /web/down/ID always 503; /web/gone/ID 404; /web/page/ID a page; /web/pdf/ID a PDF sent as octet-stream"""
+        parts=self.path.split('/');kind,key=parts[2],self.path
+        n=Endpoint.web_hits[key]=Endpoint.web_hits.get(key,0)+1
+        def send(status,body=b'',ctype='text/html',**headers):
+            self.send_response(status);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(body)))
+            for k,v in headers.items():self.send_header(k.replace('_','-'),v)
+            self.end_headers();self.wfile.write(body)
+        if kind=='busy' and n==1:send(429,b'slow down',Retry_After=parts[3])
+        elif kind=='down':send(503,b'down')
+        elif kind=='gone':send(404,b'no')
+        elif kind=='pdf':send(200,pdf(b'Hello PDF world',b'second line'),'application/octet-stream')
+        else:send(200,b'<html><title>Fetched</title><p>page %d of %s</p><p>%s</p></html>' % (n,key.encode(),b'y'*3000))
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path.endswith('/count_tokens'):
@@ -1212,6 +1244,7 @@ class Resident(unittest.TestCase):
             (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        if k.get("backend")=="auto":raise RuntimeError("No results found.")\n        return [dict(title="t",href="https://example.org/b",body=k["backend"])]\n')
             out=web.search(rt,'rdna3 wmma')
             self.assertEqual(out['engine'],'bing');self.assertEqual(out['results'][0]['snippet'],'bing')
+            self.assertEqual(out['tried'],['auto: empty','bing: 1 results'],'ddgs "No results found." reads as empty')
             (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return []\n')
             with self.assertRaises(ValueError) as c:web.search(rt,'nothing at all')
             self.assertIn('no engine found results',str(c.exception))
@@ -1228,6 +1261,113 @@ class Resident(unittest.TestCase):
             self.assertEqual(f['title'],'WMMA notes');self.assertIn('Tiles',f['text']);self.assertIn('16x16 & fp16.',f['text'])
             self.assertNotIn('evil',f['text']);self.assertIn('more characters',f['more'])
             with self.assertRaises(ValueError):web.fetch(rt,'file:///etc/passwd')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_web_search_falls_through_backends_and_names_what_each_gave(self):
+        from caminus.ember.resident import web
+        rt=Runtime(self.home);calls=[]
+        try:
+            def fake(answers):
+                def run(backend,args,timeout):
+                    calls.append(backend);a=answers.get(backend,[])
+                    if isinstance(a,BaseException):raise a
+                    return [dict(title='t',url='https://example.org/'+backend,snippet=args['query'])]*a if isinstance(a,int) else a
+                return run
+            rt.search_backend=fake(dict(auto=RuntimeError('RatelimitException: https://duckduckgo.com 202 Ratelimit'),
+                                        bing=subprocess.TimeoutExpired('ddgs',25),brave=2))
+            out=web.search(rt,'three words query')
+            self.assertEqual((out['engine'],len(out['results'])),('brave',2))
+            self.assertEqual(out['tried'],['auto: error (RatelimitException: https://duckduckgo.com 202 Ratelimit)',
+                                           'bing: error (no answer in 25 s)','brave: 2 results'])
+            self.assertEqual(calls,['auto','bing','brave'],'a hung engine does not stop the next one; stop at the first answer')
+            rt.search_backend=fake(dict(mojeek=RuntimeError('HTTP 403')))
+            with self.assertRaises(ValueError) as c:web.search(rt,'nothing anywhere')
+            msg=str(c.exception)
+            for part in ('auto: empty','bing: empty','brave: empty','mojeek: error (HTTP 403)','wikipedia: empty','rephrase'):
+                self.assertIn(part,msg)
+            self.assertLess(len(msg),700,'the error stays short for the model')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_web_fetch_retries_busy_sites_caches_per_goal_and_reads_pdfs(self):
+        import email.utils, urllib.request
+        from caminus.ember.resident import web, model
+        base=f'http://127.0.0.1:{self.server.server_port}/web';tag=uuid.uuid4().hex
+        asked=[]
+        class Resp:
+            status=200
+            def __init__(s,body):s.body=body;s.headers={'Content-Type':'application/pdf' if body[:4]==b'%PDF' else 'text/html'}
+            def read(s,n):return s.body[:n]
+            def geturl(s):return asked[-1] if asked else 'https://example.org/scan.pdf'
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        rt=Runtime(self.home)
+        try:
+            rt.web_opener=urllib.request.build_opener(urllib.request.ProxyHandler({})).open   # (no proxy for the fixture)
+            # 429 then 200: the Retry-After wait is honoured and the page arrives
+            t0=time.monotonic();f=web.fetch(rt,f'{base}/busy/1/{tag}')
+            self.assertGreaterEqual(time.monotonic()-t0,1.0);self.assertEqual((f['tries'],f['title']),(2,'Fetched'))
+            # always 503: three tries, backing off, then a plain error
+            slept=[];rt.web_sleep=slept.append
+            with self.assertRaises(ValueError) as c:web.fetch(rt,f'{base}/down/{tag}')
+            self.assertEqual(slept,[2.0,4.0]);self.assertEqual(Endpoint.web_hits[f'/web/down/{tag}'],3)
+            self.assertIn('HTTP 503',str(c.exception));self.assertIn('after 3 tries',str(c.exception))
+            # a wait past the bound fails at once and says what the site asked for; a 404 is never retried
+            slept.clear()
+            with self.assertRaises(ValueError) as c:web.fetch(rt,f'{base}/busy/3600/{tag}')
+            self.assertIn('asks to wait 3600 s',str(c.exception));self.assertEqual(slept,[])
+            with self.assertRaises(ValueError) as c:web.fetch(rt,f'{base}/gone/{tag}')
+            self.assertEqual(Endpoint.web_hits[f'/web/gone/{tag}'],1);self.assertIn('HTTP 404',str(c.exception))
+            self.assertLess(len(str(c.exception)),300)
+            # the same URL in one goal comes from the cache (marked), the whole text kept for a larger max_chars
+            page=f'{base}/page/{tag}'
+            a=web.fetch(rt,page,max_chars=1000,goal='g1');b=web.fetch(rt,page,max_chars=5000,goal='g1')
+            self.assertNotIn('cached',a);self.assertIn('cached',b);self.assertEqual(b['text'][:200],a['text'][:200])
+            self.assertGreater(len(b['text']),len(a['text']));self.assertNotIn('more',b)
+            self.assertEqual(Endpoint.web_hits[f'/web/page/{tag}'],1)
+            self.assertNotIn('cached',web.fetch(rt,page,goal='g2'),'another goal fetches it itself')
+            self.assertNotIn('cached',web.fetch(rt,page,goal='g1',fresh=True))
+            self.assertEqual(Endpoint.web_hits[f'/web/page/{tag}'],3)
+            with unittest.mock.patch.object(web,'CACHE_S',0):
+                time.sleep(0.01);self.assertNotIn('cached',web.fetch(rt,page,goal='g1'),'an old entry is fetched again')
+            # a PDF (found by its magic, sent as octet-stream) as text: the built-in reader, marked partial ...
+            with unittest.mock.patch.object(web.shutil,'which',return_value=None):
+                p=web.fetch(rt,f'{base}/pdf/{tag}')
+            self.assertEqual(p['content_type'],'application/pdf');self.assertIn('Hello PDF world\nsecond line',p['text'])
+            self.assertTrue(p['pdf'].startswith('partial'),p['pdf'])
+            # ... and pdftotext where it is installed
+            if web.shutil.which('pdftotext'):
+                p=web.fetch(rt,f'{base}/pdf/{tag}',fresh=True)
+                self.assertEqual(p['pdf'],'pdftotext');self.assertIn('Hello PDF world',p['text'])
+            # the built-in reader says what it could not read, and a PDF without readable text is an error, not ''
+            text,how=web._pdf_builtin(pdf(b'kept',b'\\0A\\0B'))
+            self.assertIn('kept',text);self.assertIn('1 runs in font encodings it cannot map',how)
+            font=b'5 0 obj\n<< /Length1 9 /Length 22 >>\nstream\nBT (FONTJUNK) Tj ET\nendstream\nendobj\n'
+            self.assertNotIn('FONTJUNK',web._pdf_builtin(pdf(b'kept')+font)[0],'an embedded font program is not page text')
+            with unittest.mock.patch.object(web.shutil,'which',return_value=sys.executable):   # (a "pdftotext" that fails)
+                text,how=web.pdf_text(pdf(b'kept'))
+            self.assertIn('kept',text);self.assertIn('pdftotext failed: exit',how)
+            with unittest.mock.patch.object(web.shutil,'which',return_value=None):
+                rt.web_opener=lambda req,timeout:Resp(pdf(b'\\0A'))
+                with self.assertRaises(ValueError) as c:web.fetch(rt,'https://example.org/scan.pdf')
+            self.assertIn('no text that could be read',str(c.exception))
+            # arXiv: the abstract page by default (with a pointer), the paper's PDF when asked for it
+            self.assertEqual(web.paper_url('https://arxiv.org/abs/2401.01234'),'https://arxiv.org/pdf/2401.01234')
+            self.assertEqual(web.paper_url('http://www.arxiv.org/abs/hep-th/9901001v2'),'https://arxiv.org/pdf/hep-th/9901001v2')
+            self.assertEqual(web.paper_url('https://arxiv.org/abs/2401.01234v3?context=cs'),'https://arxiv.org/pdf/2401.01234v3')
+            self.assertIsNone(web.paper_url('https://example.org/abs/2401.01234'))
+            def opener(req,timeout):
+                asked.append(req.full_url)
+                return Resp(pdf(b'The paper') if '/pdf/' in req.full_url else b'<html><title>Abstract</title><p>abs</p></html>')
+            rt.web_opener=opener
+            f=web.fetch(rt,'https://arxiv.org/abs/2401.01234v2',goal='g3')
+            self.assertEqual(f['title'],'Abstract');self.assertIn('paper=true',f['paper'])
+            f=web.fetch(rt,'https://arxiv.org/abs/2401.01234v2',goal='g3',paper=True)
+            self.assertEqual(asked,['https://arxiv.org/abs/2401.01234v2','https://arxiv.org/pdf/2401.01234v2'])
+            self.assertIn('The paper',f['text']);self.assertIn('https://arxiv.org/pdf/2401.01234v2',f['paper'])
+            # Retry-After as an HTTP date (the model transport reads it the same way)
+            later=email.utils.formatdate(time.time()+60,usegmt=True)
+            self.assertTrue(50<model.retry_after({'retry-after':later})<=61)
+            self.assertEqual((model.retry_after({'retry-after':'7'}),model.retry_after({})),(7.0,None))
         finally:rt.mail.close();rt.store.close()
 
     MCP_SERVER = r"""
