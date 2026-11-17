@@ -35,24 +35,27 @@ var themeFS embed.FS
 // defaultTheme is the caminus palette: the roles' resting values.
 // A theme file only overrides what it names; the rest keeps these.
 func defaultTheme() map[string]string {
+	// Iron & Patina, Caminus's own palette (the furnace's metal): cast iron, verdigris, brass, copper. Every text and
+	// accent colour reads at WCAG AA (4.5:1) or better on its background. Its background is in themes/caminus.theme, not
+	// here: a theme without one keeps the terminal's own background.
 	return map[string]string{
-		"text":   "#ffffff", // what you read: replies, prompts, values
-		"muted":  "#a8adb6", // resting text: hints, echoes, output
-		"think":  "#cfd4dc", // thinking: dimmer than the reply, still comfortable to read
-		"dim":    "#5c626d", // rules, empty slots, chrome that recedes
-		"accent": "#4fd6ff", // bright cyan: titles, the active pane
-		"ok":     "#4dff9e", // healthy: ready, the agent's own voice
-		"warn":   "#ffd75f", // needs you: questions, pauses, a nearing compaction
-		"action": "#ffa25f", // action: tools running
-		"hot":    "#ff5f6d", // failure: errors, hot context
-		"purple": "#c98fff", // a distinct second stream of data
-		"user":   "#6fa8ff", // the human: goals, steering, your words
-		"teal":   "#4fffd0", // quiet positive chrome, inline code
-		"chrome": "#4a4f5a", // selection background, borders
+		"text":   "#ece8e1", // what you read: replies, prompts, values
+		"muted":  "#a6aeb4", // resting text: hints, echoes, output
+		"think":  "#cdd0cf", // thinking: dimmer than the reply, still comfortable to read
+		"dim":    "#39424b", // rules, empty slots, chrome that recedes
+		"accent": "#5fc4b0", // verdigris: titles, the active pane
+		"ok":     "#8fd081", // healthy: ready, the agent's own voice
+		"warn":   "#ecc95e", // needs you: questions, pauses, a nearing compaction
+		"action": "#e0904f", // copper: tools running (Ember's flame)
+		"hot":    "#ec6f60", // failure: errors, hot context
+		"purple": "#d9ad62", // brass: the second stream of data
+		"user":   "#7fb2e5", // the human: goals, steering, your words
+		"teal":   "#5fc4b0", // quiet positive chrome, inline code
+		"chrome": "#39424b", // selection background, borders
 
-		"code_bg":      "#2a2e35", // the plate under inline code
-		"codeblock_bg": "#16181d", // the plate under fenced blocks
-		"code_theme":   "dracula", // the chroma theme for fenced code
+		"code_bg":      "#262c33",     // the plate under inline code
+		"codeblock_bg": "#111417",     // the plate under fenced blocks
+		"code_theme":   "github-dark", // the chroma theme for fenced code
 	}
 }
 
@@ -249,11 +252,13 @@ func applyThemeStyles() {
 // defaults are already live, and a bad or absent save changes nothing.
 func init() {
 	applyThemeStyles()
-	b, err := os.ReadFile(themeSavePath())
-	if err == nil {
-		if name := strings.TrimSpace(string(b)); name != "" && name != "caminus" {
-			_ = themeLoad(name)
-		}
+	// the saved choice, else the built-in caminus theme: its file carries the background the defaults leave out
+	name := "caminus"
+	if b, err := os.ReadFile(themeSavePath()); err == nil && strings.TrimSpace(string(b)) != "" {
+		name = strings.TrimSpace(string(b))
+	}
+	if themeLoad(name) != nil && name != "caminus" {
+		_ = themeLoad("caminus")
 	}
 }
 
@@ -434,15 +439,4 @@ func emberMarkdownStyle() ansi.StyleConfig {
 	st.Table.ColumnSeparator = color("│")
 	st.Table.RowSeparator = color("─")
 	return st
-}
-
-// plainScreenTheme: caminus panel and caminus top paint no background, so a theme made for one (a light theme's dark
-// text, chosen in Ember) would draw dark on the terminal's own dark background there. Those screens keep the default
-// look under a background theme; a theme without one (only colours) is shared as before.
-func plainScreenTheme() {
-	if themeCurrent["bg"] == "" {
-		return
-	}
-	themeCurrent = defaultTheme()
-	applyThemeStyles()
 }

@@ -20,7 +20,6 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "top", "monitor":
-			plainScreenTheme()
 			topMain(args[1:])
 			return
 		case "ember", "env": // (env: the old name)
@@ -33,6 +32,5 @@ func main() {
 			args = args[1:]
 		}
 	}
-	plainScreenTheme()
 	ctlMain(args)
 }
