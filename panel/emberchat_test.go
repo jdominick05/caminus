@@ -1941,6 +1941,19 @@ func TestBtwAnswerIsASectionAboveTheComposerNotAnOverlay(t *testing.T) {
 	if lines := strings.Split(plain, "\n"); len(lines) > m.height {
 		t.Fatalf("%d lines overflow a %d-line terminal", len(lines), m.height)
 	}
+	// a popup, not more transcript: framed, its own surface colour, the title in the frame
+	sec := m.btwSection(118)
+	ps := ansi.Strip(sec)
+	surface, _ := overlayColors()
+	if !strings.Contains(ps, "╭─ by the way") || !strings.Contains(ps, "╰") || !strings.Contains(ps, "│") ||
+		!strings.Contains(sec, bgSeq(surface)) || surface == themeRole("codeblock_bg") {
+		t.Fatalf("the answer is a framed popup on its own surface:\n%s", ps)
+	}
+	for _, l := range strings.Split(ps, "\n") {
+		if ansi.StringWidth(l) > 118 {
+			t.Fatalf("a popup line passes its width: %q", l)
+		}
+	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if next.(emberModel).chat.btw.open {
 		t.Fatal("Esc on an empty draft closes the section")
