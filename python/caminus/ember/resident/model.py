@@ -463,12 +463,14 @@ class Model:
     def tokens(self, messages, tools):
         if self.counter and self.api == 'anthropic':
             try:
-                body = self._to_anthropic(messages, tools)
+                # (without the image blocks: compaction counts one request many times, and each count would upload
+                # every image again; their cost is added once, by the same patch rule the other counters use)
+                body = self._to_anthropic([{k: v for k, v in m.items() if k != 'image'} for m in messages], tools)
                 body.pop('max_tokens', None)
                 value = self.request(self.base + '/messages/count_tokens', body)['input_tokens']
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError('invalid token count')
-                return value
+                return value + self._image_cost(messages)
             except (ModelError, KeyError, ValueError, TypeError) as e:
                 if getattr(e, 'status', 0) in (401, 402, 403):
                     raise              # a missing or refused key is not a counting problem

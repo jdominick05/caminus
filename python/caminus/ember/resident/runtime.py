@@ -1136,6 +1136,9 @@ class Runtime:
                     result['note'] = 'ledger is now todo: send items with a state next time'
                 elif name == 'read':
                     result = files.read(self.home, args['path'], args.get('start'), args.get('lines'))
+                    img = result.get('image')
+                    if isinstance(img, dict) and 'sha256' in img and (getattr(self.model, 'config', None) or {}).get('vision'):
+                        img['seen'] = True            # (the transport sends it: the judge may take what it shows as seen)
                     rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
                     if rel.startswith('notes/') and rel.endswith('.md'):
                         self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer

@@ -645,16 +645,34 @@ class Resident(unittest.TestCase):
                          call('read',dict(path='code.png')),
                          call('verify',dict(evidence='the image shows the code 4711')),
                          call('finish',dict(summary='The code in code.png is 4711.')))
-            self.assertEqual(self.cmd('once',['--goal','What code is in code.png?'])['state'],'completed')
-            return [b for k,b in Endpoint.judge_seen if k==self.key][0]['messages']
-        sent=judged(True)
-        self.assertIn('each follows this brief, as the agent saw it',sent[1]['content'])
+            goal=self.cmd('once',['--goal','What code is in code.png?']);self.assertEqual(goal['state'],'completed')
+            return [b for k,b in Endpoint.judge_seen if k==self.key][0]['messages'],goal['id']
+        from caminus.ember.resident import judge
+        sent,gid=judged(True)
+        self.assertIn('IMAGES THE AGENT SAW (its model can see; each follows this brief, as the agent saw it)',sent[1]['content'])
         self.assertEqual(sent[2]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+base64.b64encode(data).decode())))
-        sent=judged(False)
+        # the agent saw it and the judge can't (the advisor as judge): the agent's account is an observation
+        rt=Runtime(self.home)
+        try:
+            self.assertTrue(judge.viewed(rt,gid)[0]['seen'],'read on a brain with vision marks the image seen')
+            brief=judge.evidence(rt,gid,'The code is 4711.','',sees=False)
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('IMAGES THE AGENT SAW (its model can see; you cannot see them here)',brief)
+        self.assertIn('is an observation, as a command',brief);self.assertNotIn('COULD NOT SEE',brief)
+        # a blind agent and a blind judge (one local brain): what the agent says the picture shows is no observation
+        sent,gid=judged(False)
         self.assertNotIn('image_url',json.dumps(sent))
         brief=sent[1]['content']
-        self.assertIn('code.png (5x2 PNG)',brief);self.assertIn('is an observation',brief)
+        self.assertIn('IMAGES THE AGENT READ BUT COULD NOT SEE',brief);self.assertIn('code.png (5x2 PNG)',brief)
+        self.assertIn('is not an observation',brief);self.assertNotIn('IMAGES THE AGENT SAW',brief)
+        self.assertNotIn('is an observation, as a command',brief)
         self.assertNotIn("can't see images",json.dumps(sent),'the judge gets the judge\'s note, not the agent\'s')
+        # a judge that can see is not handed an image the agent never saw as its own observation
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('seen',judge.viewed(rt,gid)[0])
+            self.assertIn('COULD NOT SEE',judge.evidence(rt,gid,'The code is 4711.','',sees=True))
+        finally:rt.mail.close();rt.store.close()
 
     def test_file_tools_through_the_loop(self):
         self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
@@ -5660,10 +5678,10 @@ class AnthropicTransport(unittest.TestCase):
         seen=self.model(sse('ok'),vision=True).tokens(h,[])
         self.assertEqual(seen-plain,image_tokens(2,3),'one 28 px patch, not the bytes')
         self.assertEqual((image_tokens(28,28),image_tokens(1000,1000),image_tokens(3000,3000)),(1,1296,4784))
-        # the Messages API counter sees the image block itself
+        # the Messages API counter: the image's patches added once, its bytes never uploaded (compaction counts often)
         m=self.model(dict(input_tokens=777),vision=True);m.counter=True
-        self.assertEqual(m.tokens(h,[]),777)
-        self.assertIn(b64,json.dumps(self.wire.requests[0][2]))
+        self.assertEqual(m.tokens(h,[]),777+image_tokens(2,3))
+        self.assertNotIn(b64,json.dumps(self.wire.requests[0][2]))
 
     def test_an_openai_compatible_brain_gets_the_image_after_the_turns_results(self):
         from caminus.ember.resident.model import Model
