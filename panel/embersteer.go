@@ -85,11 +85,12 @@ type rewindStep struct {
 }
 
 type rewindState struct {
-	open  bool
-	goal  string
-	steps []rewindStep
-	sel   int
-	err   string
+	open   bool
+	goal   string
+	steps  []rewindStep
+	sel    int
+	err    string
+	loaded bool // the list arrived (an empty one means nothing to rewind, not still loading)
 }
 
 type rewindListMsg struct {
@@ -397,6 +398,8 @@ func (m emberModel) rewindOverlay(w, h int) string {
 	var rows []string
 	if st.err != "" {
 		rows = append(rows, emberWarn.Render(ansi.Truncate(st.err, inner, "…")))
+	} else if len(st.steps) == 0 && st.loaded {
+		rows = append(rows, emberDim.Render("nothing to rewind yet: no step of this goal changed a file"))
 	} else if len(st.steps) == 0 {
 		rows = append(rows, emberDim.Render("reading the goal's steps…"))
 	}
@@ -416,7 +419,11 @@ func (m emberModel) rewindOverlay(w, h int) string {
 		}
 	}
 	rows = append(rows, "", emberDim.Render(ansi.Truncate("edited files are restored; terminal side effects are not undone", inner, "…")))
-	return overlayBox("REWIND  goal "+shortGoal(st.goal), strings.Join(rows, "\n"), "↑↓ move  ·  Enter twice rewinds", w, h)
+	hint := "↑↓ move  ·  Enter twice rewinds"
+	if m.msg != "" { // "Enter again to rewind": the composer's frame, where it went, is under this overlay
+		hint = terminalText(m.msg, false)
+	}
+	return overlayBox("REWIND  goal "+shortGoal(st.goal), strings.Join(rows, "\n"), hint, w, h)
 }
 
 func (m emberModel) rewindKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

@@ -424,12 +424,28 @@ class Resident(unittest.TestCase):
         self.assertIn('blocked by: no editor',bodies[-1])
         self.assertTrue(any('todo list still has unfinished items (check it)' in b for b in bodies),'finish refused while an item is open')
 
+    def test_status_gives_each_queued_goal_its_place_in_the_run_order(self):
+        rt=Runtime(self.home)
+        try:
+            a=rt.store.enqueue('A.');b=rt.store.enqueue('B.');c=rt.store.enqueue('C.')
+            rt.store.queue_move(c[:8],1)
+            places={g['id']:g.get('queue') for g in rt.store.status()['goals']}
+            self.assertEqual((places[c],places[a],places[b]),(1,2,3))
+        finally:rt.mail.close();rt.store.close()
+
     def test_todo_rejects_two_in_progress_and_bad_states(self):
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Plan.')
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='in_progress'),dict(text='b',state='in_progress')],[])
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='later')],[])
+            # a wrong key is refused by name ("status" was taken and every item showed as pending)
+            with self.assertRaisesRegex(ValueError,"'status'"):rt._todo(gid,[dict(text='a',status='done')],[])
+            # an edit whose old text is absent never claims it was applied because a short new text occurs somewhere
+            from caminus.ember.resident import files
+            (self.home/'f.txt').write_text('x = 1\n')
+            with self.assertRaises(Exception) as cm:files.edit(self.home,'f.txt','this text is not in the file','x')
+            self.assertNotIn('applied',str(cm.exception))
             self.assertEqual(rt._todo(gid,['bare string'],[])['left'],1)
             # a ledger stored before the todo list reads as pending items
             rt.store.db.execute('UPDATE goals SET ledger=? WHERE id=?',(json.dumps(dict(milestones=['old step'],blockers=[])),gid))

@@ -489,6 +489,11 @@ class Store:
         # what a redirected goal works toward now (a message after its first done check, then a new check): the panel's
         # header reads it from the events it holds; a session switcher card has only this status
         aims = {g['id']: a for g in goals[:5] if (a := self.aim(g['id']))}
+        # a queued goal's place in the run order (1 runs next): the list is newest first, the queue is not
+        places = {q['id']: q['position'] for q in self.queue()}
+        for g in goals:
+            if g['id'] in places:
+                g['queue'] = places[g['id']]
         return dict(goals=goals, waiting=waiting, compactions=compactions, aims=aims,
                     last_event=self.db.execute('SELECT coalesce(max(seq),0) FROM events').fetchone()[0])
 

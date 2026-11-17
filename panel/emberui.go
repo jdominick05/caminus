@@ -700,7 +700,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rewindListMsg:
 		if msg.goal == m.chat.rewind.goal {
-			m.chat.rewind.steps, m.chat.rewind.err = msg.steps, msg.err
+			m.chat.rewind.steps, m.chat.rewind.err, m.chat.rewind.loaded = msg.steps, msg.err, true
 			m.chat.rewind.sel = max(0, len(msg.steps)-1)
 		}
 		return m, nil

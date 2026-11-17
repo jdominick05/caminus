@@ -721,6 +721,9 @@ func (m emberModel) sidePanel(sw, height int) string {
 				// one line each, cut with … (wrapped tasks made a ragged block)
 				rows = append(rows, " "+mark+" "+st.Render(ansi.Truncate(strings.Join(strings.Fields(residentText(it.text)), " "), max(8, sw-4), "…")))
 			}
+			for _, b := range m.todoBlockers(goal.ID) { // what holds it up (the tool tells the model you see these)
+				rows = append(rows, " "+emberWarn.Render("!")+" "+emberWarn.Render(ansi.Truncate(oneLine(residentText(b)), max(8, sw-4), "…")))
+			}
 		}
 	}
 	now, command := m.nowState(goal)
@@ -877,6 +880,10 @@ func (m emberModel) nowState(goal *residentGoal) (string, string) {
 	now, command := "idle", ""
 	l := m.chat.live
 	switch {
+	case m.daemonDown():
+		now = "stopped · /start" // (it said "between steps" under a stopped header)
+	case goal != nil && m.parkedUntil(goal.ID) != "":
+		now = "parked until " + m.parkedUntil(goal.ID)
 	case goal != nil && m.compactingNote(goal.ID) != "":
 		now = m.compactingNote(goal.ID)
 	case l.active && l.text != "":
@@ -897,7 +904,7 @@ func (m emberModel) nowState(goal *residentGoal) (string, string) {
 		now = "idle (free time runs on its own schedule)"
 	default:
 		now = map[string]string{
-			"waiting_user": "waiting for your answer · Ctrl+A", "waiting_root": "waiting for a root approval · Ctrl+A",
+			"waiting_user": "waiting for your answer · Tab", "waiting_root": "waiting for a root approval · Tab",
 			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
 			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
 		}[goal.State]
@@ -1345,6 +1352,37 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			text += "  (" + strings.Join(opts, " / ") + ")"
 		}
 		return recordLine("?", text, w)
+	case "plan_proposed":
+		// one line each for the plan's steps: once its card closed nothing was left in the history
+		return recordLine("▤", "plan proposed: "+oneLine(residentText(str("plan"))), w)
+	case "plan_approved":
+		return recordLine("▤", "plan approved (you)", w)
+	case "plan_rejected":
+		line := "plan sent back (you)"
+		if n := strings.TrimSpace(str("note")); n != "" {
+			line += ": " + oneLine(residentText(n))
+		}
+		return recordLine("▤", line, w)
+	case "rewound":
+		// the cards above this line are undone: the files they changed are back (terminal side effects are not)
+		to, _ := e.Data["to"].(float64)
+		var parts []string
+		for _, k := range []string{"restored", "removed"} {
+			if l, _ := e.Data[k].([]any); len(l) > 0 {
+				var names []string
+				for _, x := range l {
+					names = append(names, shortPath(fmt.Sprint(x), c.home, c.cwd))
+				}
+				parts = append(parts, k+" "+strings.Join(names, ", "))
+			}
+		}
+		line := fmt.Sprintf("rewound to step %d", int(to))
+		if len(parts) > 0 {
+			line += ": " + strings.Join(parts, " · ")
+		}
+		return recordLine("↶", line+" · the changes above are undone; the goal is paused (/resume)", w)
+	case "rewind_failed":
+		return recordLine("↶", "rewind failed: "+oneLine(residentText(str("error"))), w)
 	case "compacted":
 		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
@@ -1922,7 +1960,11 @@ func (m emberModel) todoPinned() string {
 	// two lines, so neither crowds the other: the task, then what is happening now (a command wrapped under it)
 	var rows []string
 	if goal != nil && dots != "" { // without a todo list the header already shows the whole goal
-		rows = append(rows, ansi.Truncate(" "+dots+"  "+lipgloss.NewStyle().Foreground(cText).Render(task), w, "…"))
+		row := " " + dots + "  " + lipgloss.NewStyle().Foreground(cText).Render(task)
+		if bl := m.todoBlockers(goal.ID); len(bl) > 0 && m.sideWidth() == 0 { // (the side pane lists them when shown)
+			row += emberWarn.Render("  ! " + oneLine(residentText(bl[0])))
+		}
+		rows = append(rows, ansi.Truncate(row, w, "…"))
 	}
 	nowRow := " " + bold(cBlue).Render("Now") + "   " + emberBusy.Render(now)
 	if command != "" {
@@ -3063,4 +3105,23 @@ func (m emberModel) leaveShell() emberModel {
 		m.chat.shellStash = ""
 	}
 	return m
+}
+
+// todoBlockers are the newest todo list's blockers for a goal.
+func (m emberModel) todoBlockers(gid string) []string {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != gid || e.Kind != "todo" {
+			continue
+		}
+		var out []string
+		raw, _ := e.Data["blockers"].([]any)
+		for _, b := range raw {
+			if t, _ := b.(string); strings.TrimSpace(t) != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	return nil
 }

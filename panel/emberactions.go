@@ -315,9 +315,19 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		}
 	}
 	dot := map[string]lipgloss.Style{"ok": emberCtxOK, "fail": emberCtxHot, "warn": emberWarn, "busy": emberBusy}[state]
-	line := dot.Render(g.working) + " " + toolFamily(name).Render(name) + "  " + lipgloss.NewStyle().Foreground(cText).Render(oneLine(subject))
+	// the outcome (exit 3, refused, still running) is what the card is for: a long subject is cut, never the meta
+	tail := ""
 	if meta != "" {
-		line += emberDim.Render("  ·  " + oneLine(meta))
+		tail = "  ·  " + oneLine(meta)
+		if room := w - 4 - ansi.StringWidth(name) - 12; ansi.StringWidth(tail) > room {
+			tail = ansi.Truncate(tail, max(12, room), "…")
+		}
+	}
+	room := max(8, w-2-ansi.StringWidth(name)-2-ansi.StringWidth(tail))
+	line := dot.Render(g.working) + " " + toolFamily(name).Render(name) + "  " +
+		lipgloss.NewStyle().Foreground(cText).Render(ansi.Truncate(oneLine(subject), room, "…"))
+	if tail != "" {
+		line += emberDim.Render(tail)
 	}
 	out := []string{ansi.Truncate(line, w, "…")}
 	rule := "  " + emberDim.Render("⎿ ")
@@ -343,6 +353,10 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 		}
 		return ""
 	case "finish":
+		// what was left open is what the human most needs to see: compact showed it nowhere
+		if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
+			return recordLine("!", "left open: "+oneLine(residentText(open)), w)
+		}
 		return ""
 	case "report": // the report's own line ("note fyi: …") says it; a card repeated it
 		if err, _ := result["error"].(string); err == "" {

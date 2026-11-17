@@ -25,6 +25,7 @@ type residentGoal struct {
 	Steps    int    `json:"steps"`
 	Plan     int    `json:"plan"`      // 0 a plain goal, 1 in plan mode, 2 its plan approved
 	PlanText string `json:"plan_text"` // the plan it proposed (state waiting_plan)
+	Queue    int    `json:"queue"`     // a queued goal's place in the run order (1 runs next); 0 from an older resident
 }
 type residentStatus struct {
 	Name             string             `json:"name"`

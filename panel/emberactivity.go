@@ -36,10 +36,37 @@ var (
 
 // working: the agent is on a goal right now (not waiting on you).
 func (m emberModel) working() *residentGoal {
-	if g := m.activeGoal(); g != nil && (g.State == "working" || g.State == "waiting_model") {
+	if m.daemonDown() {
+		return nil // the header says stopped: no spinner counting under it
+	}
+	if g := m.activeGoal(); g != nil && (g.State == "working" || g.State == "waiting_model") && m.parkedUntil(g.ID) == "" {
 		return g
 	}
 	return nil
+}
+
+// daemonDown: the status has arrived and says the session's loop is not running.
+func (m emberModel) daemonDown() bool { return !m.statusAt.IsZero() && !m.resident.DaemonAlive }
+
+// parkedUntil is "HH:MM" while the goal sleeps on schedule (its newest scheduled event has no wake-up, step or
+// message after it), else "". The status still says working then.
+func (m emberModel) parkedUntil(goal string) string {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != goal {
+			continue
+		}
+		switch e.Kind {
+		case "scheduled":
+			if at, _ := e.Data["wake_at"].(float64); at > float64(time.Now().Unix()) {
+				return time.Unix(int64(at), 0).Format("15:04")
+			}
+			return ""
+		case "woke", "assistant", "user_message", "cancelled", "paused", "finished":
+			return ""
+		}
+	}
+	return ""
 }
 
 // spinStep advances the spinner while the agent works; the chain stops by itself when it is idle.
@@ -121,6 +148,11 @@ func (m emberModel) stretch(gid string) (since time.Time, actions, tokens int) {
 
 // activityLine is the line over the composer while the agent works; "" otherwise.
 func (m emberModel) activityLine(w int) string {
+	if g := m.activeGoal(); g != nil && !m.daemonDown() {
+		if at := m.parkedUntil(g.ID); at != "" {
+			return ansi.Truncate(" "+emberDim.Render("◌ parked until "+at+" · a message wakes it sooner"), max(10, w), "…")
+		}
+	}
 	gl := m.working()
 	if gl == nil {
 		return ""

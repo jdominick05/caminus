@@ -724,6 +724,10 @@ class Runtime:
                 it = dict(text=it, state='pending')
             if not isinstance(it, dict):
                 raise ValueError('each todo item is {"text": ..., "state": "pending" | "in_progress" | "done"}')
+            extra = sorted(set(it) - {'text', 'state'})
+            if extra:   # ("status" was taken silently and every item showed as pending)
+                raise ValueError(f'a todo item has only "text" and "state", not {", ".join(map(repr, extra))}: '
+                                 'send state as "pending", "in_progress" or "done"')
             text, state = str(it.get('text', '')).strip(), it.get('state', 'pending')
             if not text:
                 continue
