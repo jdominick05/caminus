@@ -651,6 +651,9 @@ func (m ctl) qwenText() string {
 		return name + " " + fg(cText).Render(h.Version) + fg(cYellow).Render(", not set up") + fg(cMuted).Render(" · ") +
 			bold(cAccent).Render("u") + fg(cMuted).Render(" sets it up")
 	}
+	if !m.anyManaged() {
+		return name + " " + fg(cText).Render(h.Version)
+	}
 	return name + " " + fg(cText).Render(h.Version) + fg(cMuted).Render(" · ") + bold(cAccent).Render("c")
 }
 
@@ -713,7 +716,10 @@ func (m ctl) keysLine() string {
 		} else {
 			p = append(p, k("e", "Ember"))
 		}
-		p = append(p, k("c", "Qwen Code"), k("o", "options"))
+		if m.anyManaged() { // (caminus qwen follows the servers caminus start records)
+			p = append(p, k("c", "Qwen Code"))
+		}
+		p = append(p, k("o", "options"))
 	}
 	tail := []string{k("?", "help"), k("q", "quit")}
 	if m.hosted {

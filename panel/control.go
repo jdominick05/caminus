@@ -737,6 +737,7 @@ func (m ctl) update(msg tea.Msg) (ctl, tea.Cmd) {
 	case psMsg:
 		m.loaded["ps"] = true
 		if msg.err == nil {
+			msg.v.Servers = m.keepExternal(msg.v.Servers)
 			m.ps = msg.v
 		} else if m.busy == "" {
 			m.setNote(msg.err.Error(), true)
@@ -938,6 +939,14 @@ func (m ctl) modelsKey(s string) (ctl, tea.Cmd) {
 			m.setNote(mi.Name+" is not downloaded: p to pull it", true)
 			return m, nil
 		}
+		if sv := m.liveOf(mi.Name); sv != nil {
+			why := " (s stops it)"
+			if sv.External {
+				why = " (started outside the panel)"
+			}
+			m.setNote(fmt.Sprintf("%s is already running on :%d%s", mi.Name, sv.Port, why), false)
+			return m, nil
+		}
 		_, draft := m.modelMode(*mi)
 		customDrafter := m.optByDest("drafter") != nil && strings.TrimSpace(m.vals["drafter"]) != ""
 		if mi.MissingDrafter != "" && draft == mi.MissingDrafter && !customDrafter {
@@ -1009,8 +1018,14 @@ func (m ctl) serverKey(s string) (ctl, tea.Cmd) {
 // agentKey: Ember and Qwen Code.
 func (m ctl) agentKey(s string) (ctl, tea.Cmd) {
 	target := ""
-	if sv := m.primary(); sv != nil && !sv.External {
+	sv := m.primary()
+	if sv != nil && !sv.External {
 		target = sv.Name
+	}
+	if sv != nil && sv.External && (s == "c" || s == "u") && !m.anyManaged() {
+		// (caminus qwen and its setup follow the servers caminus start records; this one has no record)
+		m.setNote("Qwen Code follows servers started by the panel or caminus start: "+sv.Model+" was started outside it", false)
+		return m, nil
 	}
 	switch s {
 	case "e":
@@ -1048,6 +1063,16 @@ func (m ctl) agentKey(s string) (ctl, tea.Cmd) {
 			run: m.action("Qwen Code install", 20*time.Minute, "qwen-code", "setup", "--install")}
 	}
 	return m, nil
+}
+
+// anyManaged is whether a server caminus start recorded runs.
+func (m ctl) anyManaged() bool {
+	for _, s := range m.liveServers() {
+		if !s.External {
+			return true
+		}
+	}
+	return false
 }
 
 // optionsKey: the options editor (o). Row 0 is the card for one-card models, then every serve option.

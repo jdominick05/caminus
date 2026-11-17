@@ -99,6 +99,35 @@ func TestAServerStartedOutsideThePanelRuns(t *testing.T) {
 	if _, cmd := m.serverKey("m"); cmd == nil {
 		t.Fatal("m opens the full monitor on it")
 	}
+	if n, cmd := m.modelsKey("enter"); cmd != nil || !strings.Contains(n.note, "already running on :8092") {
+		t.Fatalf("enter on its model starts nothing: cmd %v note %q", cmd != nil, n.note)
+	}
+	m.hs = harnessInfo{Installed: true, Configured: true, Version: "0.26.9"}
+	for _, k := range []string{"c", "u"} {
+		if n, cmd := m.agentKey(k); cmd != nil || n.busy != "" || !strings.Contains(n.note, "started outside it") {
+			t.Fatalf("%s with only an outside server runs nothing and says why: cmd %v note %q", k, cmd != nil, n.note)
+		}
+	}
+	// ps asks it /health with a 1 s limit: a read that misses it keeps it while the live round still reaches it, for a
+	// few reads, then lets it go
+	m.live.url, m.live.srv.Up = "http://127.0.0.1:8092", true
+	for i := 0; i < extGrace; i++ {
+		m, _ = m.Update(psMsg{v: psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "stopped", Port: 8092}}}})
+		if m.primary() == nil {
+			t.Fatalf("read %d: a missed answer keeps the outside server running", i+1)
+		}
+	}
+	m, _ = m.Update(psMsg{v: psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "stopped", Port: 8092}}}})
+	if m.primary() != nil {
+		t.Fatal("past the grace the outside server is gone")
+	}
+	m.live.srv.Up = false
+	m.ps.Servers = append(m.ps.Servers, serverInfo{Name: "observed-8092", Model: "coder", State: "ready", URL: "http://127.0.0.1:8092",
+		Port: 8092, External: true})
+	m, _ = m.Update(psMsg{v: psInfo{}})
+	if m.primary() != nil {
+		t.Fatal("a server the live round no longer reaches is not kept")
+	}
 }
 
 func TestThePanelHasAWayIntoEmber(t *testing.T) {

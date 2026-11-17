@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -30,9 +29,10 @@ type liveMon struct {
 	clients  int // Qwen Code sessions active in the last agentFresh that talk to this server
 	rounds   int
 
-	emberAsked bool
-	emberBusy  bool
-	ember      emberCounts
+	extMissed map[string]int // outside servers the last ps reads missed while the live round still saw them, by URL
+
+	emberBusy bool
+	ember     emberCounts
 }
 
 // emberCounts is Ember's sessions: how many, and how many work on a goal now.
@@ -151,32 +151,23 @@ func (m ctl) emberCount() tea.Cmd {
 			return emberCountMsg{id: id}
 		}
 		v := emberCounts{known: true, sessions: len(peers)}
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		for _, p := range peers {
-			wg.Add(1)
-			go func(name string) {
-				defer wg.Done()
-				var st struct {
-					Alive bool `json:"daemon_alive"`
-					Goals []struct {
-						State string `json:"state"`
-					} `json:"goals"`
+		for _, p := range peers { // (one after another: each is a command over Ember's one SSH connection)
+			var st struct {
+				Alive bool `json:"daemon_alive"`
+				Goals []struct {
+					State string `json:"state"`
+				} `json:"goals"`
+			}
+			if be.call(&st, 30*time.Second, "ember", "agent", "status", p.Name, "--json") != nil || !st.Alive {
+				continue
+			}
+			for _, g := range st.Goals {
+				if g.State == "working" || g.State == "queued" {
+					v.active++
+					break
 				}
-				if be.call(&st, 30*time.Second, "ember", "agent", "status", name, "--json") != nil || !st.Alive {
-					return
-				}
-				for _, g := range st.Goals {
-					if g.State == "working" || g.State == "queued" {
-						mu.Lock()
-						v.active++
-						mu.Unlock()
-						return
-					}
-				}
-			}(p.Name)
+			}
 		}
-		wg.Wait()
 		return emberCountMsg{id: id, v: v}
 	}
 }
@@ -225,6 +216,34 @@ func (m ctl) liveUpdate(msg tea.Msg) (ctl, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// extGrace is how many ps reads in a row may miss an outside server the live round still sees: ps asks it /health
+// with a 1 s limit, and a saturated server misses some (a running server must not blink out of the card).
+const extGrace = 3
+
+// keepExternal is servers with the outside servers the previous read listed but this one missed, kept while the live
+// round still reaches them, for up to extGrace reads.
+func (m ctl) keepExternal(servers []serverInfo) []serverInfo {
+	lv := m.live
+	if lv.extMissed == nil {
+		lv.extMissed = map[string]int{}
+	}
+	listed := map[string]bool{}
+	for _, s := range servers {
+		if s.External {
+			listed[s.URL] = true
+			delete(lv.extMissed, s.URL)
+		}
+	}
+	for _, s := range m.ps.Servers {
+		if !s.External || listed[s.URL] || s.URL != lv.url || !lv.srv.Up || lv.extMissed[s.URL] >= extGrace {
+			continue
+		}
+		lv.extMissed[s.URL]++
+		servers = append(servers, s)
+	}
+	return servers
 }
 
 // liveNumbers is what the running card prints, from the live round where it has one and else from caminus ps.

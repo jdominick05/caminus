@@ -47,7 +47,8 @@ The last line lists the keys that do something right now.
 | `q` or `esc` | Quit. Running models keep running. |
 
 `s`, `t`, `L`, `m` and `c` act on the server in the running card: the selected model's server when it runs, otherwise
-the first one that's ready. Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched.
+the first one that's ready. A server started outside the panel is only watched: `s`, `t`, `L`, `c` and `u` say so and do
+nothing (`m` opens the monitor on it). Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched.
 
 The choices: **cards** is one or two cards where the model supports both. **drafter** is auto (the server's measured
 default for that model and card count), off, MTP or DFlash where supported at that card count. **KV cache**

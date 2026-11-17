@@ -424,6 +424,10 @@ func TestGoldenFrames(t *testing.T) {
 	}
 }
 
+// panelShotWidth is the panel picture's terminal width: the panel's widest layout (maxLayoutW), so the window holds no
+// empty band on its right.
+const panelShotWidth = maxLayoutW
+
 // TestPanelShot writes panel.svg, the README's picture of the control panel (`caminus panel`): its real render() in a
 // GNOME terminal window. What the tree knows comes from the tree: the version, the model catalog (names, titles,
 // cards, sizes, speeds) and the Qwen Code pin, handed over by tools/release/panel_shot.py, which every release runs
@@ -494,7 +498,7 @@ func TestPanelShot(t *testing.T) {
 	}
 
 	m := newCtl(newCtlCLI("caminus"), "")
-	m.w, m.h = shotWidth, 60 // (the screen is as tall as its content)
+	m.w, m.h = panelShotWidth, 60 // (the screen is as tall as its content)
 	m.ember = emberMsg{ok: true, known: true}
 	for _, k := range []string{"models", "ps", "harness", "options"} {
 		m.loaded[k] = true
@@ -502,15 +506,15 @@ func TestPanelShot(t *testing.T) {
 	m.models = tree.Models
 	m.ps = psInfo{
 		Servers: []serverInfo{{Name: sm.Name, Model: sm.Name, State: "ready", URL: "http://127.0.0.1:8092", Port: 8092,
-			Cards: []string{"0"}, MaxCtx: ctx, UptimeS: 5400, DecodeTPS: &tps, Alias: sm.Name}},
+			Cards: []string{"XTX"}, MaxCtx: ctx, UptimeS: 5400, DecodeTPS: &tps, Alias: sm.Name}},
 		Cards: []cardInfo{
-			{Index: 0, Name: "XTX", Pci: "0000:03:00.0", UsedMiB: 21300, LineMiB: 23800, Link: "PCIe 4.0 x16", LinkOK: true, Display: true, Status: "supported"},
-			{Index: 1, Name: "XT", Pci: "0000:07:00.0", UsedMiB: 410, LineMiB: 19850, Link: "PCIe 4.0 x4", LinkOK: true, Status: "supported"},
+			{Index: 0, Name: "XTX", Pci: "0000:03:00.0", UsedMiB: 21300, LineMiB: 23800, TotalMiB: 24560, Link: "PCIe 4.0 x16", LinkOK: true, Display: true, Status: "supported"},
+			{Index: 1, Name: "XT", Pci: "0000:07:00.0", UsedMiB: 410, LineMiB: 19850, TotalMiB: 20464, Link: "PCIe 4.0 x4", LinkOK: true, Status: "supported"},
 		},
 	}
 	m.hs = harnessInfo{Installed: true, Version: tree.QwenPin, Pinned: tree.QwenPin, Configured: true, Npm: true, Target: sm.Name}
 	frame := m.render()
-	frame = paintBackground(frame, 0, shotWidth, lipgloss.Height(frame), false) // the theme's background, as the panel's View paints it
+	frame = paintBackground(frame, 0, panelShotWidth, lipgloss.Height(frame), false) // the theme's background, as the panel's host paints it
 	svg := svgFrames([]string{frame}, "caminus panel", 1)
 	for d := xml.NewDecoder(strings.NewReader(svg)); ; { // well-formed, or browsers show an error page instead
 		if _, err := d.Token(); err == io.EOF {
