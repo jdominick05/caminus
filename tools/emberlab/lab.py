@@ -13,10 +13,11 @@ Sessions (design with the agent):
   lab.py open NAME --brain BRAIN --out DIR [--host agent] [--fixture SUITE]   a lab agent, its daemon up
   lab.py say NAME TEXT [--goal ID] [--wait S]  a goal (or a steer to goal ID); prints what it did
   lab.py turn NAME [--system]                  driven brain: the request waiting for YOU, the model, to answer
-  lab.py reply NAME --call TOOL --args JSON | --text TEXT
+  lab.py reply NAME --call TOOL --args JSON | --text TEXT [--timings JSON]
   lab.py events NAME [--all] / status NAME / close NAME
 
-Brains (brains.py): scripted:NAME, driven (you answer each model call), openai:URL[#MODEL], openai+relay:URL#MODEL,
+Brains (brains.py): scripted:NAME, driven (you answer each model call; :caminus plays a caminus serve, whose replies carry
+`reply --timings`), openai:URL[#MODEL], openai+relay:URL#MODEL,
 anthropic:PORT#MODEL (through the owner's relay; the lab never handles a key). Hosts (hosts.py): local (scratch folders as
 you; no real model unless --unsafe-local) and agent (the agent account, ~/lab/; the default for real brains).
 
@@ -137,7 +138,7 @@ def main(argv=None):
 
     p = sub.add_parser('open')
     p.add_argument('name')
-    p.add_argument('--brain', required=True, help='driven, driven:judge, openai:URL[#MODEL], anthropic:PORT#MODEL, ...')
+    p.add_argument('--brain', required=True, help='driven, driven:judge, driven:caminus, openai:URL[#MODEL], anthropic:PORT#MODEL, ...')
     p.add_argument('--out', required=True)
     p.add_argument('--host', choices=('local', 'agent'), default='agent')
     p.add_argument('--arm', default='base')
@@ -163,6 +164,8 @@ def main(argv=None):
             p.add_argument('--call')
             p.add_argument('--args')
             p.add_argument('--text')
+            p.add_argument('--timings', help="a driven:caminus brain sends these with the answer (caminus serve's "
+                                             'timings JSON: predicted_per_second, prompt_per_second, ...)')
             p.add_argument('--settle', type=float, default=1.5, help='seconds to wait before printing what followed')
         if name == 'events':
             p.add_argument('--all', action='store_true')
@@ -170,9 +173,10 @@ def main(argv=None):
     p.add_argument('ctl')
     p.add_argument('--ttl', type=int, default=14400)
     p.add_argument('--judge', action='store_true')
+    p.add_argument('--caminus', action='store_true')
     a = ap.parse_args(argv)
     if a.cmd == 'serve-driven':
-        brains_mod.serve_driven(a.ctl, a.judge, a.ttl)
+        brains_mod.serve_driven(a.ctl, a.judge, a.ttl, a.caminus)
         return 0
     return dict(run=cmd_run, report=cmd_report, compare=cmd_compare, open=sessions.open_session, say=sessions.say,
                 turn=sessions.turn, reply=sessions.reply, events=sessions.events, status=sessions.status,

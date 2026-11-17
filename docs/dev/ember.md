@@ -75,6 +75,11 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is
   never graded and never paused by a loop guard.
 - No GPU in any env test; the env suites are CPU only.
+- A speed shown for a local Caminus brain is the engine's own: the reply's `timings` (`model.engine_speed`; the brain is
+  Caminus when its `/props` names the engine, `catalog.caminus_props`) and, while a reply streams, `/caminus/status`
+  (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
+  (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
+  `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
 
 ## Memory
 
@@ -118,7 +123,7 @@ inside the harness with an agent while you design it.
 |---|---|
 | `lab.py` | the command line: `run`, `report`, `compare`; `open`, `say`, `turn`, `reply`, `events`, `status`, `close` |
 | `runner.py` | suites, arms, the run matrix, one run (fresh home, `once`, events, the check) |
-| `brains.py` | `scripted:NAME`, `driven` (you answer each model call), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
+| `brains.py` | `scripted:NAME`, `driven` (you answer each model call; `driven:caminus` plays a `caminus serve` whose answers carry `reply --timings`), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
 | `hosts.py` | `local` (scratch folders as you) and `agent` (the agent account over Ember's SSH, under `~/lab/`) |
 | `report.py` | tables per brain, arm and task; the A/B verdict |
 | `sessions.py` | long-lived lab agents to talk with or drive |
