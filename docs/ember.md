@@ -80,17 +80,22 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
 ```
 
 - **Which models.** The Anthropic relay allows only the models named with `--model` (repeat it; Claude Haiku 5.5 when
-  none is given). DeepInfra and Mistral allow the models their price lists cover. Rerun `relay install` with new
-  options to change them; the service restarts with them.
+  none is given). DeepInfra allows any chat model it publishes a price for. Mistral publishes no prices, so its relay
+  allows only the models in your price file: JSON, USD per million tokens, for example
+  `{"mistral-large-latest": [2.0, 6.0]}` as `[input, output]`, re-read when it changes; then
+  `caminus ember relay install --provider mistral --cap-usd 3`.
+- **Changing a relay.** `relay install` rewrites the service from the options you give it and restarts it (today's
+  spend carries over), so give the whole set again: `--cap-usd` is required, and every `--model` you still want.
 - **Several providers.** Install one relay per provider and add each with `agent provider NAME add`; `caminus ember
   agent models NAME --refresh` lists what each serves (context windows, output caps, prices), and `/model` in the chat
   (or `caminus ember agent model NAME ID`) switches between them at the next turn.
 - **Spend.** `caminus ember relay status` shows each relay's spend today against its cap. The chat's status line shows
   the agent's own running cost.
 - **The advisor.** An agent can ask a stronger model for advice (`caminus ember agent advisor NAME --model
-  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`). It goes through the same relay, so allow its
-  model there too (`--model claude-haiku-5-5 --model claude-opus-5-5`); its own daily budget is counted by the agent
-  on top of the relay's cap.
+  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Anthropic API). It goes
+  through the same relay, so allow its model there too, with the cap restated:
+  `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
+  Its own daily budget is counted by the agent, inside the relay's cap.
 - **Removing one.** `caminus ember relay uninstall --provider anthropic` stops it; the key file stays where you put it.
 
 ## Where things live
