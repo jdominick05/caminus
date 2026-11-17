@@ -179,10 +179,18 @@ func (m emberModel) questionBox() string {
 	case "question":
 		lines = append(lines, prefixAll(wrap(r.Text, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
 	case "github":
-		lines = append(lines, prefixAll(wrap(r.Summary, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
+		summary := prefixAll(wrap(r.Summary, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")
+		var why []string
+		if strings.TrimSpace(r.Reason) != "" {
+			why = prefixAll(wrap("why: "+r.Reason, emberDim), " ")
+		}
+		lines = append(lines, summary...)
 		if _, body := handoffText(r.Github); strings.TrimSpace(body) != "" { // what it will post as you
 			all := strings.Split(strings.TrimRight(residentText(body), "\n"), "\n")
-			shown := all[:min(len(all), 10)]
+			// the body takes what the summary, the reason and the options leave (the reason was cut off before, and
+			// the hidden lines were counted one short)
+			room := max(1, m.promptBudget(*r)-len(summary)-len(why)-1)
+			shown := all[:min(len(all), 10, room)]
 			for _, l := range shown {
 				lines = append(lines, " "+emberDim.Render(emberClip("│ "+l, inner-1)))
 			}
@@ -190,9 +198,7 @@ func (m emberModel) questionBox() string {
 				lines = append(lines, " "+emberDim.Render(fmt.Sprintf("│ … %d more lines", len(all)-len(shown))))
 			}
 		}
-		if strings.TrimSpace(r.Reason) != "" {
-			lines = append(lines, prefixAll(wrap("why: "+r.Reason, emberDim), " ")...)
-		}
+		lines = append(lines, why...)
 	default:
 		lines = append(lines, prefixAll(wrap(r.Cmd, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
 		if strings.TrimSpace(r.Reason) != "" {
@@ -204,11 +210,7 @@ func (m emberModel) questionBox() string {
 	}
 	// the options, the free-text row and the hint always fit: the text above them is cut to what is left (a long
 	// hand-off body pushed the options off the screen, so you picked blind)
-	fixed := 2 + 1 + len(promptOptions(*r)) + 2 + 1 + 8 // rule, header · blank · options · rule, free text · hint · header, footer, transcript
-	if m.chat.questionCustom {
-		fixed++
-	}
-	if budget := max(2, m.height-fixed); len(lines)-2 > budget {
+	if budget := m.promptBudget(*r); len(lines)-2 > budget {
 		cut := len(lines) - 2 - (budget - 1)
 		lines = append(lines[:2+budget-1], " "+emberDim.Render(fmt.Sprintf("… %d more lines", cut)))
 	}
@@ -527,4 +529,14 @@ func (m *emberModel) requestOutcomes() map[string]string {
 		out[r.ID] = "waiting"
 	}
 	return out
+}
+
+// promptBudget is how many rows the prompt's text (the command, the question, a hand-off's body and reason) may take:
+// the options, the free-text row, the hint and the chat's own header, footer and a few transcript rows always fit.
+func (m emberModel) promptBudget(r emberReq) int {
+	fixed := 2 + 1 + len(promptOptions(r)) + 2 + 1 + 8 // rule, header · blank · options · rule, free text · hint · the chat around it
+	if m.chat.questionCustom {
+		fixed++
+	}
+	return max(2, m.height-fixed)
 }

@@ -428,7 +428,14 @@ func validBridgeName(s string) bool {
 	return s != "." && s != ".."
 }
 
+// demoTyped is the typed history of a demo run: kept in memory (the demo never writes the human's state folder), so
+// Up still brings back what Ctrl+C cleared there.
+var demoTyped = map[string][]string{}
+
 func loadTyped(agent string) []string {
+	if demoMode {
+		return append([]string(nil), demoTyped[agent]...)
+	}
 	var out []string
 	if p := typedPath(agent); p != "" {
 		if data, err := os.ReadFile(p); err == nil {
@@ -440,12 +447,19 @@ func loadTyped(agent string) []string {
 
 // saveTyped adds what you typed to the session's history (the last 200 kept).
 func saveTyped(agent, text string) {
-	p := typedPath(agent)
-	if p == "" || demoMode || strings.TrimSpace(text) == "" {
+	if strings.TrimSpace(text) == "" {
 		return
 	}
 	all := loadTyped(agent)
 	if len(all) > 0 && all[len(all)-1] == text {
+		return
+	}
+	if demoMode {
+		demoTyped[agent] = append(all, text)
+		return
+	}
+	p := typedPath(agent)
+	if p == "" {
 		return
 	}
 	all = append(all, text)

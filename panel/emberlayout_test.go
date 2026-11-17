@@ -6,6 +6,7 @@ package main
 // Tests for the 2026-11-16 audit's third group: layout at the release widths, and the copy.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -133,5 +134,74 @@ func TestANudgeIsNotLabelledSteerAndOneStepIsOneStep(t *testing.T) {
 	}
 	if got := plural(1, "step", "steps"); got != "1 step" {
 		t.Fatal(got)
+	}
+}
+
+func TestRecheckFollowUps(t *testing.T) {
+	// a demo run keeps the typed history in memory (it never writes the human's state)
+	demoMode = true
+	saveTyped("resident", "typed in a demo")
+	got := loadTyped("resident")
+	demoMode = false
+	if len(got) != 1 || got[0] != "typed in a demo" {
+		t.Fatalf("Up brings back what Ctrl+C cleared, in a demo too: %q", got)
+	}
+	// Ctrl+U clears a many-line draft whole
+	m := chatFixture(t)
+	m.chat.compose.SetValue("```\n$ ls\nwork\n```\n!ls work")
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	if v := next.(emberModel).chat.compose.Value(); v != "" {
+		t.Fatalf("Ctrl+U clears the whole draft: %q", v)
+	}
+	// a refused goal command leaves the composer empty
+	m.resident.Goals = []residentGoal{{ID: "00f32512aa", State: "cancelled", Prompt: "p"}}
+	m.chat.compose.SetValue("/cancel")
+	next, _ = m.submitCompose()
+	if v := next.(emberModel).chat.compose.Value(); v != "" {
+		t.Fatalf("the refused command is cleared: %q", v)
+	}
+	// a parked goal's header says parked, and a new goal being written shows no old goal
+	m = chatFixture(t)
+	m.statusAt, m.resident.DaemonAlive = time.Now(), true
+	m.resident.Goals = []residentGoal{{ID: "g1abcdef", State: "working", Prompt: "check CI"}}
+	m.goalSel, m.chat.target = 0, "g1abcdef"
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "g1abcdef", Kind: "scheduled", Data: map[string]any{"wake_at": float64(time.Now().Add(9 * time.Minute).Unix())}}}
+	if h := ansi.Strip(m.chatHead(120)); !strings.Contains(h, "parked until") || strings.Contains(h, "working") {
+		t.Fatalf("the header says parked: %q", h)
+	}
+	m.resident.Goals[0].State = "completed"
+	m.chat.newGoal, m.chat.forceNew, m.chat.target = true, true, ""
+	if h := ansi.Strip(m.chatHead(120)); strings.Contains(h, "completed") || strings.Contains(h, "check CI") {
+		t.Fatalf("a new goal shows no old goal: %q", h)
+	}
+	// a command seen running, then seen to end: its card says how it ended
+	m = chatFixture(t)
+	m.width, m.height = 120, 30
+	call := map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "terminal", "arguments": `{"command":"make test"}`}}
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "original", Kind: "assistant", Data: map[string]any{"role": "assistant", "tool_calls": []any{call}}},
+		{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c1", "result": map[string]any{"session": "s1", "running": true, "output": "building\n"}}},
+		{Seq: 3, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c2", "result": map[string]any{"session": "s1", "exit_code": 0.0, "output": "ok\n"}}},
+	}
+	for _, compact := range []bool{false, true} {
+		if compact {
+			m.chat.cards, m.chat.expanded = false, false
+		}
+		m.chat.rendered, m.chat.content = 0, ""
+		m.syncChat()
+		if v := ansi.Strip(m.chat.content); strings.Contains(v, "still running") || strings.Contains(v, "running ·") || !strings.Contains(v, "ended later: exit 0") {
+			t.Fatalf("compact=%v: the earlier card follows the end:\n%s", compact, v)
+		}
+	}
+	// a cut hand-off keeps its reason and counts the hidden lines right
+	m2, bridge := promptFixture(t)
+	m2.width, m2.height = 80, 24
+	writeHandoff(t, bridge, "h1", longText(13, "body"))
+	m2.refreshLocal()
+	m2.syncQuestion()
+	box := ansi.Strip(m2.questionBox())
+	shown := strings.Count(box, "│ body line")
+	if !strings.Contains(box, "why: from my fork") || !strings.Contains(box, fmt.Sprintf("… %d more lines", 13-shown)) {
+		t.Fatalf("the reason stays and %d shown + the count make 13:\n%s", shown, box)
 	}
 }

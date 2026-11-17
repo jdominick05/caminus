@@ -207,6 +207,7 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.msg = map[bool]string{true: "it runs next already", false: "it is last already"}[to < 1]
 			return m, nil
 		}
+		m.chat.goalsFollow = gl.ID // the ▸ stays on the goal you moved, not on the row (the next move acted on another)
 		return m, moveQueued(m, gl.ID, to)
 	case "n":
 		closeIt()

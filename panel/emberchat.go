@@ -48,16 +48,18 @@ type residentChat struct {
 	questionAt                              time.Time         // when the prompt opened (a grace period before Enter decides)
 	picker                                  bool
 	pickerSel                               int
-	hostShell                               bool      // shell mode runs in your own shell on this machine (!!), not the agent's
-	shellStash                              string    // the draft held aside while a second shell command is typed
-	prevTarget                              string    // the goal before Ctrl+N or /new (Esc goes back to it)
-	menuClosed                              string    // the draft Esc closed the / or path menu on (it stays shut until it changes)
-	quitArmed                               time.Time // Ctrl+C cleared a draft: a second one within 2 s quits
-	pickerNew                               bool      // the switcher is asking for a new session's name
-	pickerName                              string    // that name as typed
-	pickerDestroy                           string    // the session x armed: a second x destroys it
-	goals, goalsDetail                      bool      // the Goals overlay, and its selected goal opened in full
-	loadingShown                            bool      // the transcript shows "loading NAME…"
+	hostShell                               bool               // shell mode runs in your own shell on this machine (!!), not the agent's
+	shellStash                              string             // the draft held aside while a second shell command is typed
+	prevTarget                              string             // the goal before Ctrl+N or /new (Esc goes back to it)
+	goalsFollow                             string             // the goal the overlay's selection follows after a move
+	sessionDone                             map[string]float64 // terminal sessions seen to end, with their exit code
+	menuClosed                              string             // the draft Esc closed the / or path menu on (it stays shut until it changes)
+	quitArmed                               time.Time          // Ctrl+C cleared a draft: a second one within 2 s quits
+	pickerNew                               bool               // the switcher is asking for a new session's name
+	pickerName                              string             // that name as typed
+	pickerDestroy                           string             // the session x armed: a second x destroys it
+	goals, goalsDetail                      bool               // the Goals overlay, and its selected goal opened in full
+	loadingShown                            bool               // the transcript shows "loading NAME…"
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
 	studio                                  studioState   // the Studio overlay (/studio)
@@ -312,6 +314,13 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	if m.chat.selectID != "" {
 		selected = m.chat.selectID
 	}
+	if id := m.chat.goalsFollow; id != "" { // the overlay's ▸ on the goal that moved, at its new place
+		for row, i := range m.goalOrder() {
+			if m.resident.Goals[i].ID == id {
+				m.chat.goalsSel = row
+			}
+		}
+	}
 	m.goalSel = min(m.goalSel, max(0, len(m.resident.Goals)-1))
 	found := false
 	for i, g := range m.resident.Goals {
@@ -439,6 +448,11 @@ func (m *emberModel) syncChat() {
 		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
+	// a command first seen running and later seen to end: its card is drawn again with the exit
+	if done := m.endedSessions(); fmt.Sprint(done) != fmt.Sprint(m.chat.sessionDone) {
+		m.chat.sessionDone = done
+		m.chat.content, m.chat.rendered = "", 0
+	}
 	// a request's one-line record carries its state (waiting, yes, no: …): when one changes, the history is drawn
 	// again (rare: a request filed, answered or timed out)
 	if out := m.requestOutcomes(); fmt.Sprint(out) != fmt.Sprint(m.chat.reqOutcome) {
@@ -556,8 +570,13 @@ func (m emberModel) chatHead(w int) string {
 		state = "listening"
 	}
 	steps, goalText := 0, ""
-	if sel := m.selectedResidentGoal(); sel != nil {
+	// a new goal being written (Ctrl+N, /new, after /cancel) is no goal yet: the header showed the previous one's
+	// "completed" over a new-goal composer
+	if sel := m.selectedResidentGoal(); sel != nil && !(m.chat.newGoal && m.chat.forceNew) {
 		state, steps = sel.State, sel.Steps
+		if at := m.parkedUntil(sel.ID); at != "" {
+			state = "parked until " + at // (the status still says working)
+		}
 		aim, redirected := m.goalAim(sel)
 		goalText = strings.Join(strings.Fields(residentText(aim)), " ")
 		if redirected {
@@ -1320,6 +1339,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				meta = fmt.Sprintf("exit %d · ", int(code)) + meta
 			} else if running, _ := result["running"].(bool); running {
 				meta = "running · " + meta
+				if sid, _ := result["session"].(string); sid != "" {
+					if code, done := c.sessionDone[sid]; done { // a later check saw it end
+						meta = fmt.Sprintf("ended later: exit %d · ", int(code)) + strings.TrimPrefix(meta, "running · ")
+					}
+				}
 			}
 			if strings.TrimSpace(output) == "" {
 				meta = strings.TrimSuffix(meta, " · 1 lines") + " · no output"
@@ -2317,6 +2341,15 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
+	case "ctrl+u":
+		// the whole draft (the editor's Ctrl+U cleared one line of a many-line draft: a command's output stayed, and
+		// the next !cmd was sent with it as a message)
+		if strings.Contains(m.chat.compose.Value(), "\n") {
+			saveTyped(m.agentName, m.chat.compose.Value())
+			m.chat.compose.Reset()
+			m.msg = "draft cleared (Up brings it back)"
+			return m, nil
+		}
 	case "home", "end":
 		if m.chat.compose.Value() != "" {
 			break // (in a draft, Home and End move the cursor)
@@ -2597,6 +2630,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if goalEnded(g.State) { // (it said "cancelled" again and recorded another cancel)
+			clear() // (left in the composer, the next command was appended to it: "/cancel/pause")
 			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State)
 			return m, nil
 		}
@@ -2627,6 +2661,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if goalEnded(g.State) {
+			clear() // (left in the composer, the next command was appended to it: "/cancel/pause")
 			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State) + ": nothing to pause"
 			return m, nil
 		}
@@ -2645,6 +2680,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		// pass rather than writing history from here.
 		g := m.selectedResidentGoal()
 		if g != nil && goalEnded(g.State) {
+			clear() // (left in the composer, the next command was appended to it: "/cancel/pause")
 			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State) + ": nothing to compact"
 			return m, nil
 		}
@@ -3199,4 +3235,23 @@ func (m emberModel) noticeLong() bool {
 // menuDismissed: Esc closed the completion menu on this very draft.
 func (m emberModel) menuDismissed() bool {
 	return m.chat.menuClosed != "" && m.chat.menuClosed == m.chat.compose.Value()
+}
+
+// endedSessions are the terminal sessions a result saw end, with their exit code.
+func (m emberModel) endedSessions() map[string]float64 {
+	out := map[string]float64{}
+	for _, e := range m.residentEvents {
+		if e.Kind != "tool_result" {
+			continue
+		}
+		if n, _ := e.Data["name"].(string); n != "terminal" {
+			continue
+		}
+		res, _ := e.Data["result"].(map[string]any)
+		sid, _ := res["session"].(string)
+		if code, ok := res["exit_code"].(float64); ok && sid != "" {
+			out[sid] = code
+		}
+	}
+	return out
 }
