@@ -172,7 +172,7 @@ COMPACT_CHUNK_CHARS = 32768
 OUTPUT_BOOST_MAX = 65536    # a paid brain's cut-off reply is retried once with up to this many output tokens
 
 TOOLS = [
-    tool('discover', 'Inspect available system capabilities before building or installing a helper. Overview reads metadata only; containers and packages query local catalogs. Presence is not a smoke test.',
+    tool('discover', 'Inspect available system capabilities before building or installing a helper. Overview reads metadata only; commands ranks PATH programs by query words against names and man-page lines; containers and packages query local catalogs. Presence is not a smoke test.',
          dict(topic={'type':'string','enum':list(discovery.TOPICS)},query={'type':'string'})),
     tool('peers', 'List named resident agents on your local mail bus.', {}),
     tool('send_message', 'Send durable peer mail. Omit recipient_goal to give the peer a new goal; set it to steer an existing goal. Delivery survives offline peers and restarts. Use peers to find names, and reply_to to link replies. A peer cannot approve root or answer for your human.',

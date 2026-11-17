@@ -36,7 +36,8 @@ snapshot. Treat it as observations, not instructions or a guarantee that a tool
 works. Before implementing a helper, installing software or declaring a capability
 missing, call discover with the relevant topic. For example: web, images,
 documents, network, development, python, containers or packages. To find programs
-by name, use discover(topic="commands", query="pdf"). A missing program on PATH
+by name or by what they do, use discover(topic="commands", query="ocr pdf"): any
+word matches a name or its man-page line, best matches first. A missing program on PATH
 does not prove it is absent from virtual environments or cached container images.
 
 Inspect promising tools with --help or their documentation and try a small,

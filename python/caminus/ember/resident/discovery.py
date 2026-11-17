@@ -1,8 +1,9 @@
 """Bounded local capability discovery. Metadata presence is not a smoke test.
 
 Overview never executes discovered programs, imports third-party modules, scans
-user documents or queries devices. Explicit packages/containers topics may run
-only the fixed read-only catalog commands below, with a timeout and output cap.
+user documents or queries devices. Explicit commands/packages/containers topics
+may run only the fixed read-only catalog commands below (apropos, dpkg-query,
+apt-cache, docker/podman image ls), with a timeout and output cap.
 """
 import datetime
 import grp
@@ -32,6 +33,11 @@ COMMANDS = {
     'containers': ('docker','podman','bwrap','tmux','screen','systemctl'),
     'packages': ('apt','apt-cache','apt-get','dpkg-query'),
 }
+# The commands search reads the man pages' one-line descriptions (apropos), so "ocr" finds tesseract. These are the
+# capability words those lines miss for common tools (ffmpeg's says "media converter"); a COMMANDS category name
+# (image, document, ...) also counts as a word for its tools.
+WORDS = {'video': ('ffmpeg','ffprobe','ffplay','mpv','vlc'), 'audio': ('ffmpeg','ffprobe','ffplay','sox','mpv','vlc'),
+         'ocr': ('tesseract',)}
 MODULES = ('requests','bs4','playwright','selenium','PIL','cv2','numpy','scipy','pandas',
            'matplotlib','Crypto','sympy','z3','scapy','pyzbar')
 
@@ -42,7 +48,7 @@ def _read(path, limit=16384):
     except OSError:return ''
 
 
-def _probe(argv):
+def _probe(argv, limit=16384):
     """Local metadata only: no shell, bounded time, bounded in-memory output."""
     with tempfile.TemporaryFile() as output:
         try:
@@ -57,9 +63,9 @@ def _probe(argv):
             return dict(command=argv,status='timed_out',note='catalog availability remains unverified')
         except OSError as e:
             return dict(command=argv,status='unavailable',error=str(e))
-        output.seek(0);raw=output.read(16385)
+        output.seek(0);raw=output.read(limit+1)
     return dict(command=argv,status='ok' if result.returncode==0 else 'query_failed',rc=result.returncode,
-                output=raw[:16384].decode(errors='replace'),truncated=len(raw)>16384)
+                output=raw[:limit].decode(errors='replace'),truncated=len(raw)>limit)
 
 
 def _hardware(workspace):
@@ -90,6 +96,56 @@ def _hardware(workspace):
     return dict(os=os_release,kernel=platform.release(),cpu=cpu,logical_cpus=os.cpu_count(),memory=mem,disk=disk,gpus=gpus)
 
 
+_PATH_NAMES = {}   # PATH string -> (directory mtimes, executable names): one scan per process until a directory changes
+
+
+def _path_names():
+    """Names on PATH, scanned once per process and again only when a PATH directory changes (an install)."""
+    dirs=list(dict.fromkeys(os.get_exec_path()))
+    stamp=[]
+    for directory in dirs:
+        try:stamp.append(os.stat(directory).st_mtime_ns)
+        except OSError:stamp.append(None)
+    key=os.pathsep.join(dirs)
+    if (hit:=_PATH_NAMES.get(key)) and hit[0]==stamp:return hit[1:]
+    names=set();limited=False
+    for directory in dirs:
+        try:
+            with os.scandir(directory) as entries:
+                for i,entry in enumerate(entries):
+                    if i>=10000:limited=True;break
+                    names.add(entry.name)
+        except OSError:continue
+    _PATH_NAMES[key]=(stamp,names,limited)
+    return names,limited
+
+
+def _commands(query, cap=64):
+    """Rank PATH executables by how many query words hit their name, man-page line, COMMANDS category or WORDS entry;
+    ties go to hits by name or table over man-page hits, then to the rarer words. Nothing found is executed; apropos reads man-db's index (one bounded call)."""
+    words=list(dict.fromkeys(re.findall(r'[a-z0-9][\w+.-]*',query.casefold())))[:8]
+    names,limited=_path_names()
+    about={}
+    # Only plain words reach apropos (its keywords are regular expressions; `--` ends its options).
+    if (plain:=[w for w in words if re.fullmatch(r'[a-z0-9][a-z0-9_-]*',w)]) and (apropos:=shutil.which('apropos')):
+        for line in _probe([apropos,'--long','-s','1:6:8','--',*plain],limit=262144).get('output','').splitlines():
+            if m:=re.match(r'(.+?) \([^)]*\)\s+- (.*)',line):
+                for name in m.group(1).split(', '):about.setdefault(name.strip(),m.group(2).strip())
+    tags={}
+    for table in (COMMANDS,WORDS):
+        for word,tools in table.items():
+            for name in tools:tags.setdefault(name,set()).update((word,word.rstrip('s')))
+    hits={};strong={}
+    for name in names:
+        text=about.get(name,'').casefold()
+        strong[name]={w for w in words if w in name.casefold() or w in tags.get(name,())}
+        if hit:=strong[name]|{w for w in words if re.search(r'(?<![a-z0-9])'+re.escape(w),text)}:hits[name]=hit
+    count={w:sum(w in hit for hit in hits.values()) for w in words}
+    ranked=sorted(hits,key=lambda name:(-len(hits[name]),-len(strong[name]),-sum(1/count[w] for w in hits[name]),name))
+    found=[(name,path,about.get(name,'')) for name in ranked[:cap] if (path:=shutil.which(name))]
+    return found,limited or len(ranked)>cap
+
+
 def discover(workspace, topic='overview', query=''):
     if topic not in TOPICS:raise ValueError('unknown discovery topic')
     if not isinstance(query,str) or len(query)>128:raise ValueError('query must be at most128characters')
@@ -111,20 +167,10 @@ def discover(workspace, topic='overview', query=''):
     result['programs']={category:{name:found for name in names if (found:=shutil.which(name))}
                         for category,names in categories.items() if names}
     if topic=='commands':
-        if not query:raise ValueError('commands topic needs a program-name query')
-        matches={};limited=False
-        for directory in dict.fromkeys(os.get_exec_path()):
-            try:
-                with os.scandir(directory) as entries:
-                    for i,entry in enumerate(entries):
-                        if i>=10000:limited=True;break
-                        if query.casefold() in entry.name.casefold() and entry.name not in matches:
-                            path=shutil.which(entry.name)
-                            if path:matches[entry.name]=path
-                        if len(matches)>=64:limited=True;break
-            except OSError:continue
-            if len(matches)>=64:break
-        result.update(matches=matches,truncated=limited,scope='executable names on current PATH only')
+        if not query:raise ValueError('commands topic needs a query: program names or what they do')
+        found,limited=_commands(query)
+        result.update(matches={name:path for name,path,_ in found},about={name:about for name,_,about in found if about},
+                      truncated=limited,scope='executables on current PATH; any query word against the name and its man-page line')
     if topic in ('overview','python'):
         modules={}
         for name in MODULES:
