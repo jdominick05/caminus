@@ -64,10 +64,17 @@ def worker(job):
                 state.update(phase='finished', exit_code=126, error=f'the box did not start: {e}', ended=time.time())
                 atomic_json(job / 'state.json', state)
                 return 0
+        browser = None
+        if req.get('browser'):
+            # the browser (browser.py): Chrome in the box, driven over its DevTools pipe by a thread of this worker
+            from .browser import Driver
+            browser = Driver(job, req)
         pid, fd = pty.fork()
         if pid == 0 and box is not None:
             try:
                 box.child()
+                if browser is not None:
+                    browser.child()
                 os.execv(argv[0], argv) if argv[0].startswith('/') else os.execvp(argv[0], argv)
             except BaseException as e:
                 os.write(2, str(e).encode())
@@ -85,6 +92,8 @@ def worker(job):
                 os._exit(127)
         state.update(phase='running', pid=pid)
         atomic_json(job / 'state.json', state)
+        if browser is not None:
+            browser.start(box.proxy)
         os.set_blocking(fd, False)
         (job / 'control').mkdir(exist_ok=True)
         (job / 'ack').mkdir(exist_ok=True)
@@ -99,6 +108,9 @@ def worker(job):
                         op = json.loads(p.read_text())
                         # Record uncertainty before a non-idempotent terminal write.
                         atomic_json(ack, dict(state='sending'))
+                        if browser is not None and 'browser' in op:
+                            browser.submit(ack, op['browser'])     # its thread writes the result into the ack
+                            continue
                         try:
                             if 'stdin' in op:
                                 data = op['stdin'].encode()
@@ -141,6 +153,8 @@ def worker(job):
                         break
         finally:
             os.close(fd)
+            if browser is not None:
+                browser.stop()
             if box is not None:
                 state.update(box.finish())
             if exit_status is None:
@@ -293,7 +307,10 @@ class Terminal:
                 self.launch(job)
         elif not job.is_dir():
             raise ValueError(f'unknown {tool} session')
-        boxed = 'box' in json.loads((job / 'request.json').read_text())
+        req = json.loads((job / 'request.json').read_text())
+        if 'browser' in req:
+            raise ValueError('that session is the browser: use the browser tool')
+        boxed = 'box' in req
         if boxed != (box is not None):
             raise ValueError('that session is a sandbox: call sandbox with it' if boxed else
                              'that session is a terminal, not a sandbox: call terminal with it')

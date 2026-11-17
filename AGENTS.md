@@ -216,6 +216,7 @@ CLAUDE.md imports this file.
   must not let another model's newer logs hide this server's sessions.
 - `ember/`: Ember, the agent environment (`caminus ember`; `caminus env` is kept as an alias; docs/specs/spec-ember.md): agent work as a second user on this machine over SSH, root only through a human-approved bridge; its system prompt is share/harness/ember/ROBOTS.md; stdlib only, no GPU, CPU tests only.
   `ember/resident/sandbox.py`: the resident's `sandbox` tool (untrusted code in a bubblewrap box; docs/dev/ember.md).
+  `ember/resident/browser.py`: the resident's `browser` tool (Chrome in a sandbox box over the DevTools pipe; docs/dev/ember.md).
 - `panel/openrgb.go`: optional agent-state lighting over backwards-compatible SDK v3. Active per-LED modes need no
   mode change; `openrgb.switch_modes` opts into temporary Direct/Custom/Static mode changes. Restore the first-seen
   colors and complete mode payload on exit, using freshly discovered identities and matching layouts after reconnects.

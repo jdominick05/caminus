@@ -33,6 +33,44 @@ S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
 BOOT="import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
 
 
+PAGE=('<!doctype html><title>Fixture</title><h1>Welcome</h1><p>Read <a href="/about.html">About us</a>.</p>'
+      '<form action="/done.html"><label>Name <input name="who"></label><label>Color <select name="color">'
+      '<option>Red</option><option value="g">Green</option></select></label>'
+      '<label>Secret <input type="password" name="pw"></label><button type="submit">Send</button></form>')
+_sites={}
+
+
+def site(name='main'):
+    """A local web site for the browser tests (one per name, started once): a page with a link and a form (a text
+    field, a select, a password field, a button), the page the form goes to, and /echo (the request it got)."""
+    if name not in _sites:
+        class Page(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):
+                body={'/':PAGE,'/about.html':'<title>About</title><h1>About</h1>',
+                      '/done.html':'<title>Done</title><h1>Thanks</h1><p id=q></p><script>q.textContent="sent "+location.search</script>',
+                      '/echo':self.requestline+'\n'+str(self.headers),'/report.txt':'a downloaded file\n'}.get(self.path.split('?')[0])
+                if body is None:self.send_error(404);return
+                raw=body.encode();self.send_response(200);self.send_header('Content-Type','text/html')
+                if self.path=='/report.txt':self.send_header('Content-Disposition','attachment; filename="report.txt"')
+                self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),Page)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        _sites[name]=f'127.0.0.1:{srv.server_address[1]}'
+    return _sites[name]
+
+
+def chrome_skip(test):
+    """Skip a browser test, saying why, where Chrome cannot run in a box here: none found (or only a snap), no
+    bubblewrap, or an address-space limit (ulimit -v), under which Chrome does not start."""
+    from caminus.ember.resident import browser
+    import resource
+    if (why:=browser.available()):test.skipTest(why)
+    if resource.getrlimit(resource.RLIMIT_AS)[0]!=resource.RLIM_INFINITY:
+        test.skipTest('an address-space limit (ulimit -v): Chrome reserves more than it uses and does not start; '
+                      'bound these tests with a memory cgroup instead')
+
+
 def newest_history(body):
     """The newest message that is history. The runtime appends its context-budget note as a trailing system
     message on purpose - after the history, so the cached prefix stays identical from turn to turn and the
@@ -107,8 +145,8 @@ class Resident(unittest.TestCase):
             except subprocess.TimeoutExpired:p.kill();p.wait()
     def argv(self,op,extra=()):
         return [sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local',op,'test','--home',str(self.home),'--json',*extra]
-    def cmd(self,op,extra=(),code=0,stdin=None):
-        p=subprocess.run(self.argv(op,extra),input=stdin,capture_output=True,text=True,timeout=15)
+    def cmd(self,op,extra=(),code=0,stdin=None,timeout=15):
+        p=subprocess.run(self.argv(op,extra),input=stdin,capture_output=True,text=True,timeout=timeout)
         self.assertEqual(p.returncode,code,p.stdout+'\n'+p.stderr)
         return json.loads(p.stdout)
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
@@ -932,6 +970,70 @@ class Resident(unittest.TestCase):
             ev=[e['data'] for e in store.events(limit=500) if e['kind']=='sandbox_connections']
         finally:store.close()
         self.assertEqual([c['target'] for e in ev for c in e['connections']],['not-listed.invalid:443'],ev)
+
+    def test_browser_keeps_its_page_across_calls_and_ends_with_the_goal(self):
+        chrome_skip(self)
+        from caminus.ember.resident.terminal import read_state
+        self.replies(call('browser',dict(action='open',url=f'http://{site()}/')),
+                     call('browser',dict(action='type',ref='e2',text='Ada')),
+                     call('browser',dict(action='click',ref='e5')),
+                     call('browser',dict(action='screenshot')),
+                     call('finish',dict(summary='Sent the form.')))
+        out=self.cmd('once',['--goal','Send the form on the page.'],timeout=120)
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            ev=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='browser']
+        finally:store.close()
+        self.assertEqual(len(ev),4,ev)
+        opened,typed,clicked,shot=(e['result'] for e in ev)
+        self.assertIn('textbox "Name" [e2]',opened['snapshot']);self.assertIn('button "Send" [e5]',opened['snapshot'])
+        self.assertIn('= "Ada"',typed['snapshot'],'the second call types into the page the first opened')
+        self.assertEqual(clicked['title'],'Done');self.assertIn('who=Ada',clicked['url'])
+        self.assertTrue(shot['screenshot'].endswith('/screenshots/shot-1.png'),shot)
+        self.assertEqual({o['session'] for o in (opened,typed,clicked,shot)},{opened['session']},'one browser for the goal')
+        # every connection goes to the panel's card on the event; the model gets a count
+        self.assertNotIn('_panel',opened);self.assertEqual(set(opened['network']),{'allowed'})
+        self.assertEqual({(c['target'],c['verdict']) for c in ev[0]['panel']['connections']},{(site(),'allowed (named)')})
+        self.assertEqual(len(ev[0]['panel']['connections']),opened['network']['allowed'])
+        self.assertFalse((self.home/'boxes').exists() and any((self.home/'boxes').iterdir()),'the box ended with the goal')
+        self.assertEqual(read_state(self.home/'jobs'/opened['session'])['phase'],'finished','the browser closed with it')
+
+    def test_browser_looks_before_define_done_and_acts_after(self):
+        chrome_skip(self)
+        self.gates_on()
+        self.replies(call('browser',dict(action='open',url=f'http://{site()}/')),
+                     call('browser',dict(action='click',ref='e1')),               # refused: no done check yet
+                     call('define_done',dict(check='the About page is open')),
+                     call('browser',dict(action='click',ref='e1')),
+                     call('verify',dict(evidence='the snapshot shows the About heading')),
+                     call('finish',dict(summary='Opened About.')))
+        goal=self.cmd('once',['--goal','Open the About page.'],timeout=120)
+        self.assertEqual(goal['state'],'completed')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='browser']
+        self.assertNotIn('error',results[0],'opening a page is looking')
+        self.assertIn('define_done',results[1]['error'],'a click waits for the done check')
+        self.assertEqual(results[2]['title'],'About')
+
+    def test_browser_open_names_localhost_and_addresses_but_not_a_dns_name(self):
+        # a page could steer the agent to a name that resolves to the LAN: such a name needs allow
+        from caminus.ember.resident.browser import _names_itself
+        for host in ('localhost','app.localhost','127.0.0.1','[::1]','192.168.1.5','169.254.1.1'):
+            self.assertTrue(_names_itself(host),host)
+        for host in ('example.com','router.lan','8.8.8.8'):
+            self.assertFalse(_names_itself(host),host)
+
+    def test_browser_is_not_offered_without_a_chrome_that_runs_in_a_box(self):
+        from caminus.ember.resident import browser,prompt
+        saved=browser._found;self.addCleanup(setattr,browser,'_found',saved)
+        browser._found=(None,'no Chrome or Chromium found outside a snap')
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('browser',[t['function']['name'] for t in rt.tools])
+            self.assertNotIn('use browser',prompt.render(self.home))
+            with self.assertRaises(ValueError) as cm:browser.call(rt,'g',uuid.uuid4().hex,dict(action='open',url='http://x.org/'))
+            self.assertIn('no Chrome',str(cm.exception))
+        finally:rt.mail.close();rt.store.close()
 
     def test_sandbox_of_a_cancelled_goal_is_swept(self):
         from caminus.ember.resident import sandbox
@@ -4988,6 +5090,39 @@ class Sandbox(unittest.TestCase):
         self.assertTrue(all(v.startswith('refused') for v in log),log)
         self.assertEqual(sum('non-public' in v for v in log),2,log)
 
+    def test_the_web_proxy_allows_public_addresses_and_refuses_local_ones_unless_named(self):
+        import asyncio,ipaddress,socket
+        job=self.home/'wjob';job.mkdir()
+        proxy=self.sb.Proxy(job/'p.sock',[],job/'log.jsonl',web=True)
+        table={'public.example':'93.184.215.14','lan.example':'192.168.1.20','link.example':'169.254.169.254',
+               'localhost':'127.0.0.1'}
+        mine=[a for a in self.sb.local_addresses() if ipaddress.ip_address(a).is_global]
+        if mine:table['me.example']=mine[0]               # this machine's own public address
+        async def fake(host,port,type=0):return [(0,0,0,'',(table.get(host,host),port))]
+        fhost,fport=site().split(':')
+        async def connect(addr,port):                     # no network: every allowed connection reaches the fixture
+            return await asyncio.open_connection(fhost,int(fport))
+        proxy.resolve,proxy.connect=fake,connect;proxy.start();self.addCleanup(proxy.close)
+        def ask(head):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(head.encode())
+                out=b''
+                while (d:=s.recv(65536)):out+=d
+                return out.decode()
+        got=ask('GET http://public.example/echo?x=1 HTTP/1.1\r\nHost: public.example\r\nProxy-Connection: keep-alive\r\n\r\n')
+        self.assertIn(' 200 ',got.split('\r\n')[0])
+        self.assertIn('GET /echo?x=1 HTTP/1.1',got,'plain HTTP is forwarded in origin form');self.assertIn('Connection: close',got)
+        self.assertNotIn('Proxy-Connection',got)
+        refused=['CONNECT lan.example:443','CONNECT link.example:80',f'GET http://localhost:{fport}/echo','CONNECT 10.0.0.1:443',
+                 'CONNECT [::1]:22']+(['CONNECT me.example:443'] if mine else [])
+        for head in refused:
+            self.assertIn(' 403 ',ask(head+' HTTP/1.1\r\n\r\n').split('\r\n')[0],head)
+        proxy.named.add(('localhost',int(fport)))         # a browser call named it
+        self.assertIn(' 200 ',ask(f'GET http://localhost:{fport}/echo HTTP/1.1\r\n\r\n').split('\r\n')[0])
+        log=[json.loads(l)['verdict'] for l in (job/'log.jsonl').read_text().splitlines()]
+        self.assertEqual((log[0],log[-1]),('allowed','allowed (named)'),log)
+        self.assertEqual(sum(v.startswith('refused') for v in log),len(refused),log)
+
     def test_a_folder_that_holds_the_home_or_the_state_is_refused(self):
         other=self.home.parent/(self.home.name+'-other');(other/'notes').mkdir(parents=True);(other/'work').mkdir()
         (other/'agent.sqlite3').write_text('another resident of this account')
@@ -5037,6 +5172,123 @@ class Sandbox(unittest.TestCase):
         self.assertIn('MemoryError',r['output']);self.assertEqual(r['limits']['enforced'],'rlimit')
         r=self.run_box('sleep 60',conf=conf,timeout=2)
         self.assertEqual(r['limit_hit'],'time')
+
+
+class Browser(unittest.TestCase):
+    """The browser tool for real: Chrome in a box against the local fixture sites, no other network. Skipped, with
+    the reason, where Chrome cannot run in a box here (chrome_skip)."""
+    def setUp(self):
+        chrome_skip(self)
+        from caminus.ember.resident import browser,sandbox
+        self.br,self.sb=browser,sandbox
+        self.home=S/('browser-'+uuid.uuid4().hex[:12]);self.home.mkdir(parents=True)
+        class RT:pass
+        self.rt=RT();self.rt.home=self.home;self.rt.config={};self.rt.terminal=Terminal(self.home)
+        self.addCleanup(self.sb.end,self.home,'g1')
+    def go(self,**args):
+        return self.br.call(self.rt,'g1',uuid.uuid4().hex,args)
+    def ref(self,snapshot,text):
+        return next(l.split(' [')[1].split(']')[0] for l in snapshot.splitlines() if text in l and ' [e' in l)
+
+    def test_open_snapshot_type_select_and_click_change_the_page(self):
+        self.assertEqual(self.go(action='open',url=f'http://{site()}/')['title'],'Fixture')
+        snap=self.go(action='snapshot')['snapshot']
+        for want in ('heading "Welcome" (level 1)','link "About us"','-> /about.html','textbox "Name"',
+                     'combobox "Color"','options: Red | Green','button "Send"','textbox "Secret"','(password)'):
+            self.assertIn(want,snap)
+        self.assertNotIn('text "Name"',snap,'a label is its field\'s name, not a line of its own')
+        r=self.go(action='type',ref=self.ref(snap,'textbox "Name"'),text='Ada')
+        self.assertIn('textbox "Name"',r['did']);self.assertIn('= "Ada"',r['snapshot'])
+        self.assertIn('= "Green"',self.go(action='select',ref=self.ref(snap,'combobox'),value='Green')['snapshot'])
+        r=self.go(action='click',ref=self.ref(snap,'button "Send"'))
+        self.assertEqual(r['title'],'Done');self.assertIn('who=Ada&color=g',r['url'])
+        self.assertIn('sent ?who=Ada',r['snapshot'])
+        self.assertIn('error',self.go(action='click',ref='e2'),'a ref of the page before is not on this one')
+        self.assertEqual(self.go(action='back')['title'],'Fixture')
+        log={(c['target'],c['verdict']) for c in map(json.loads,(self.home/'jobs'/r['session']/'connections.jsonl').read_text().splitlines())}
+        self.assertEqual(log,{(site(),'allowed (named)')},'only the fixture: Chrome\'s own traffic is off')
+
+    def test_a_password_field_is_never_typed_into(self):
+        pw=self.ref(self.go(action='open',url=f'http://{site()}/')['snapshot'],'(password)')
+        r=self.go(action='type',ref=pw,text='hunter2')
+        self.assertIn('password field',r['error']);self.assertIn('ask_user',r['error'])
+        self.go(action='click',ref=pw)                    # focused by a click, then typed key by key
+        self.assertIn('password field',self.go(action='press',key='x').get('error',''))
+        self.assertEqual(self.go(action='eval',js='document.querySelector("input[type=password]").value')['value'],'')
+        self.assertNotIn('error',self.go(action='press',key='Tab'),'a key that types nothing still works there')
+        # focus inside another site's frame: the browser cannot see the field there, so it types nothing
+        self.go(action='open',url=f'http://{site()}/',allow=[site('other')])
+        self.go(action='eval',js=f'new Promise(ok => {{ const f = document.createElement("iframe"); f.onload = ok; '
+                                 f'f.src = "http://{site("other")}/"; document.body.append(f); }}).then(() => '
+                                 'document.querySelector("iframe").focus())')
+        self.assertIn('frame from another site',self.go(action='press',key='x').get('error',''))
+
+    def test_a_local_port_is_reached_only_when_a_call_names_it(self):
+        self.go(action='open',url=f'http://{site()}/')     # (opening it names it)
+        fetch=f'fetch("http://{site("other")}/echo",{{mode:"no-cors"}}).then(()=>"ok",()=>"failed")'
+        r=self.go(action='eval',js=fetch)
+        self.assertEqual(r['network']['refused'],[f'{site("other")} (refused: LAN, loopback, link-local or this '
+                                                  'machine (not named in a browser call))'],r)
+        self.go(action='open',url=f'http://{site()}/',allow=[site('other')])
+        r=self.go(action='eval',js=fetch)
+        self.assertNotIn('refused',r['network']);self.assertGreaterEqual(r['network']['allowed'],1)
+
+    def test_ending_the_goal_removes_the_box_the_profile_and_chrome(self):
+        from caminus.ember.resident.terminal import read_state
+        r=self.go(action='open',url=f'http://{site()}/')
+        job=self.home/'jobs'/r['session']
+        def tree(root):
+            kids={}
+            for d in Path('/proc').iterdir():
+                try:
+                    stat=(d/'stat').read_text();kids.setdefault(int(stat[stat.rindex(')')+2:].split()[1]),[]).append(int(d.name))
+                except (OSError,ValueError):pass
+            out,todo=[],[root]
+            while todo:
+                p=todo.pop();out.append(p);todo+=kids.get(p,[])
+            return out
+        procs=tree(read_state(job)['pid'])
+        cmd=lambda p:Path(f'/proc/{p}/cmdline').read_bytes() if Path(f'/proc/{p}').exists() else b''
+        self.assertTrue(any(b'--remote-debugging-pipe' in cmd(p) for p in procs),'Chrome runs under the box')
+        self.assertTrue((self.home/'boxes'/'g1'/'browser'/'profile').is_dir(),'its profile is in the goal\'s box')
+        self.assertTrue(self.sb.end(self.home,'g1'))
+        self.assertFalse((self.home/'boxes'/'g1').exists(),'the box and the profile in it are gone')
+        end=time.monotonic()+10
+        while any(Path(f'/proc/{p}').exists() for p in procs) and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual([p for p in procs if Path(f'/proc/{p}').exists()],[],'Chrome\'s whole process tree is gone')
+        self.assertEqual(read_state(job)['phase'],'finished')
+
+    def test_close_then_open_starts_a_new_browser_and_says_so(self):
+        from caminus.ember.resident.terminal import read_state
+        r=self.go(action='open',url=f'http://{site()}/')
+        self.assertTrue(self.go(action='close')['closed'])
+        end=time.monotonic()+10
+        while read_state(self.home/'jobs'/r['session']).get('phase')!='finished' and time.monotonic()<end:time.sleep(.1)
+        with self.assertRaises(ValueError) as cm:self.go(action='snapshot')
+        self.assertIn('no browser is open',str(cm.exception))
+        r2=self.go(action='open',url=f'http://{site()}/about.html')
+        self.assertEqual(r2['title'],'About');self.assertNotEqual(r2['session'],r['session'])
+        self.assertIn('new one',r2['note'])
+
+    def test_a_download_lands_in_the_box(self):
+        self.go(action='open',url=f'http://{site()}/')
+        r=self.go(action='open',url=f'http://{site()}/report.txt')
+        self.assertNotIn('error',r);self.assertEqual(r['title'],'Fixture','a file opens no page: the last one stays')
+        got=self.home/'boxes'/'g1'/'downloads'/'report.txt'
+        end=time.monotonic()+10
+        while not got.exists() and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual(got.read_text(),'a downloaded file\n')
+        self.assertTrue(any('downloading report.txt to /box/downloads' in n for n in r.get('notes',[])),r)
+
+    def test_a_browser_nobody_calls_closes_itself(self):
+        from caminus.ember.resident.terminal import read_state
+        self.rt.config=dict(sandbox=dict(browser_idle_s=2))
+        job=self.home/'jobs'/self.go(action='open',url=f'http://{site()}/')['session']
+        end=time.monotonic()+20
+        while read_state(job).get('phase')!='finished' and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual(read_state(job)['phase'],'finished','Chrome closed after 2 s without a call')
+        with self.assertRaises(ValueError) as cm:self.go(action='snapshot')
+        self.assertIn('closed itself after 2 s',str(cm.exception))
 
 
 class WorkerEnv(unittest.TestCase):

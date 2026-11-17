@@ -46,6 +46,12 @@ either faster.
   unknown repository, an install script) goes to its `sandbox` tool, not its terminal: a bubblewrap box that sees none
   of its home, no GPU and no network unless the call names hosts, with time, memory and process limits. Its prompt
   asks for this; nothing forces it. What the box sees: [the tool reference](resident-agent.md#tools).
+- **A browser in a box.** Its `browser` tool drives a headless Chrome in the same kind of box, with a fresh profile
+  per goal and no logins; public sites are open to it and logged, your LAN and this machine only when a call names
+  the address ([the tool reference](resident-agent.md#tools)). It needs Google Chrome or a Chromium that is not a
+  snap (bubblewrap cannot run snaps: Ubuntu's chromium and Firefox are snaps). Install Google Chrome's `.deb` from
+  google.com/chrome (`sudo apt install ./google-chrome-stable_current_amd64.deb`); without one the tool is not
+  offered.
 - **Root only with your approval.** The agent asks through `ask_root` with the exact command, the goal it unblocks,
   the expected effect and how to undo it. You approve, edit or deny it in the panel; approved commands run under your
   sudo, never the agent's. A grant (`g g`) lets that exact command repeat for the rest of its goal, at most 12 hours.

@@ -1341,6 +1341,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 			return toolCard("read", residentText(path), meta, true, false, nil, w)
 		}
+		if str("name") == "browser" && result["error"] == nil {
+			panel, _ := e.Data["panel"].(map[string]any)
+			return toolCard("browser", browserSubject(nil, result), browserMeta(result, c.home, c.cwd), true, c.expanded,
+				browserLines(result, panel), w)
+		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
 			var rest []string

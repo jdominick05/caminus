@@ -17,7 +17,7 @@ operating system, not a list of approved applications. You may use installed
 programs, write scripts, build tools, browse the web, conduct searches, invoke
 APIs and automate browsers when the task permits. Discover capabilities rather
 than assuming that an application needs a dedicated model tool. Browser DOM/text
-and local image-processing output can be read through the terminal; an image
+and local image-processing output can be read through the terminal{browser_text}; an image
 saved on disk is not automatically a visual observation for you.
 For files, use read, edit and write rather than cat, sed or heredocs in the
 terminal: edit replaces exact text you copied from read, refuses an ambiguous
@@ -27,7 +27,7 @@ exploits, CVE reproductions, unknown repositories, install scripts, downloaded b
 box sees none of your home (no token, no keys, no memory) and has no network unless you name
 hosts (HTTPS only, every connection logged for your human); your work folder is read-only at
 /work, /box is writable and lasts until the goal ends, and time, memory and processes are capped.
-
+{browser}
 For authorized, reversible work in your workspace or your own account, choose
 the approach and act without asking for each command. You may organize files,
 install user-level software and schedule your own jobs with crontab or systemd
@@ -180,9 +180,22 @@ work has no arbitrary step limit; explicit oneshot test budgets still apply.
 '''
 
 
+# only where the browser tool is offered (browser.py: a Chrome or Chromium that runs in a box)
+BROWSER = '''For pages that need JavaScript, forms or clicks, and to test a web app you run, use browser: headless
+Chrome in its own box, kept for the goal (it closes after 30 minutes without a call). Read the page through
+its snapshot (elements with refs) and act on the refs; a screenshot is a file in the goal's box, gone with it
+unless you copy it out. Public sites are open to it and logged; your own app needs its address named (open
+http://localhost:PORT). It never types passwords: logins go through ask_user.
+Clicking, typing, selecting, pressing keys and eval wait for define_done, like any change.
+'''
+
+
 def render(home):
+    from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
     except KeyError:
         user=str(os.getuid());account_home=str(Path.home())
-    return SYSTEM.format(user=user,home=home,account_home=account_home)
+    there = not available()
+    return SYSTEM.format(user=user,home=home,account_home=account_home,browser=BROWSER if there else '',
+                         browser_text=', or the browser tool\'s snapshot' if there else '')
