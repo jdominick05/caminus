@@ -16,7 +16,7 @@ The panel is one screen, top to bottom:
 | Part | What it shows |
 |---|---|
 | **Header** | `CAMINUS`, the version, and each card's memory in use. |
-| **running** | The server in use: its model, cards, port, context and how long it has run, then its live speed (decode and prefill tokens per second), its clients (Qwen Code sessions on it, and Ember sessions whose model is one of its model ids) and how much of the prompts came from the cache, with a line of its recent decode speed. A server started outside the panel (by a script, or `caminus serve` directly) shows too, marked "started outside the panel"; the panel watches it but never stops or restarts it. With nothing running the card says `no server running · enter starts the selected model`. |
+| **running** | The server in use: its model, cards, port, context and how long it has run, then its live speed (decode and prefill tokens per second), its clients (Qwen Code sessions on it, and Ember sessions whose model is one of its model ids) and how much of the prompts came from the cache, with a line of its recent decode speed. A server started outside the panel (by a script, or `caminus serve` directly) shows too, marked "started outside the panel"; the panel watches it but never stops or restarts it (`s` says the command that stops it). With nothing running the card says `no server running · enter starts the selected model`. |
 | **models** | Every model Caminus knows, its download size and a mark: `●` running, `✓` on disk (yellow when its optional drafter is missing), `↓` not downloaded. Beside the list (below it in a narrow terminal), the selected model: what it is, how fast, its choices (cards, drafter, and for `qwen3-30b-a3b` the KV cache and the long-context mode), the context that fits your cards, any edited server options, and whether its last start failed. |
 | **agents** | Ember (its sessions and how many work on a goal) and Qwen Code (its version, or what to do to set it up). |
 | **Hardware** | Shows up under the header only when something is wrong with your cards, for example a card in a slot that's too slow. |
@@ -30,7 +30,7 @@ The last line lists the keys that do something right now.
 | `↑` `↓` | Choose a model. |
 | `tab` | Move to the selected model's next choice. |
 | `←` `→` | Change that choice. The choice in brackets goes to the next start. |
-| `enter` | Start the selected model. |
+| `enter` | Start the selected model. If another server runs, it asks once (`stop coder and start swift-1.5? enter / esc`), stops it, waits until its card's memory is free, then starts the selected model. |
 | `p` | Download it, or its missing DFlash drafter. |
 | `s` | Stop the server in the running card (it asks first). |
 | `t` | Restart it (it asks first). |
@@ -47,8 +47,21 @@ The last line lists the keys that do something right now.
 | `q` or `esc` | Quit. Running models keep running. |
 
 `s`, `t`, `L`, `m` and `c` act on the server in the running card: the selected model's server when it runs, otherwise
-the first one that's ready. A server started outside the panel is only watched: `s`, `t`, `L`, `c` and `u` say so and do
-nothing (`m` opens the monitor on it). Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched.
+the first one that's ready. A server started outside the panel is only watched: `t`, `L`, `c` and `u` say so and do
+nothing (`m` opens the monitor on it). `caminus stop` only stops the servers `caminus start` recorded, so for an outside
+server `s` shows the command that stops it instead: `kill PID` with the pid `caminus ps` found (a SIGTERM: `caminus serve`
+drains, parks its conversation and exits; for the packaged systemd unit, `systemctl --user stop caminus` does the same).
+The panel never signals it itself. `enter` on another model says the same and starts nothing until that server is gone.
+
+Swapping models (`enter` while a model runs): each step shows at the top (`stopping coder`, `waiting: XTX still has
+19.3 GB in use`, `starting swift-1.5`). The start waits until the stopped servers are gone from `caminus ps` and their
+cards are under the 2 GiB `caminus start` itself refuses above, for up to a minute. If a step fails, the note says which
+one and why, and the new model is not started. Every running server is stopped first, so a second one-card model is
+never started beside a running one from the panel (`caminus start` in a terminal still can). `esc` and `q` do nothing
+while the old server is stopped and its memory freed (`ctrl+c` closes anyway, and the new model is then not started).
+Inside Ember (`/panel`) the keys do the same.
+
+Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched.
 
 The choices: **cards** is one or two cards where the model supports both. **drafter** is auto (the server's measured
 default for that model and card count), off, MTP or DFlash where supported at that card count. **KV cache**

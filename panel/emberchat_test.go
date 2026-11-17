@@ -2527,6 +2527,59 @@ func TestAdvisorSetupPointsAtTheCLIInsteadOfRunningAReview(t *testing.T) {
 	}
 }
 
+// The owner's /advisor failed with the key relay refusing the advisor's model: the notice showed the raw JSON error
+// for a few seconds. Now the reason and the exact command open in a view that stays until Esc.
+func TestAdvisorThatCannotBeCalledShowsTheFixToRun(t *testing.T) {
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "fake-cli")
+	fix := "caminus ember relay install --provider anthropic --cap-usd 3.0 --model claude-haiku-5-5 --model claude-opus-5-5"
+	script := "#!/bin/sh\necho 'ControlSocket notice' >&2\necho '{\"error\": \"the advisor cannot be called: x\", \"unavailable\": {\"reason\": \"the key relay at http://127.0.0.1:8765/v1 does not allow claude-opus-5-5\", \"fix\": \"" + fix + "\", \"kind\": \"relay_model\"}}'\nexit 1\n"
+	if err := os.WriteFile(cli, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	m := chatFixture(t)
+	m.cli = []string{cli}
+	msg := adviseNow(m, "original", "")()
+	view, ok := msg.(textViewMsg)
+	if !ok {
+		t.Fatalf("an advisor the setup blocks opens a view, not a passing notice: %#v", msg)
+	}
+	next, _ := m.Update(view)
+	got := next.(emberModel)
+	if !got.chat.view.open {
+		t.Fatal("the view is open")
+	}
+	body := strings.Join(got.chat.view.lines, "\n")
+	pasted := strings.Join(strings.Fields(strings.ReplaceAll(body, "\\\n", " ")), " ") // what a shell reads
+	if !strings.Contains(body, "does not allow claude-opus-5-5") || !strings.Contains(pasted, fix) || strings.Contains(body, "{") {
+		t.Fatalf("the reason and the exact command, no JSON:\n%s", body)
+	}
+	for _, l := range got.chat.view.lines {
+		if strings.HasPrefix(l, "  ") && len(l) > 76 {
+			t.Fatalf("the command wraps at spaces with shell continuations, not at the frame's edge: %q", l)
+		}
+	}
+	// a cause with no command to give (the relay's cap is spent): the reason, and where to look
+	capped := "#!/bin/sh\necho '{\"error\": \"x\", \"unavailable\": {\"reason\": \"the key relay at http://127.0.0.1:8765/v1 has spent its daily cap\", \"fix\": \"\", \"kind\": \"relay_cap\"}}'\nexit 1\n"
+	if err := os.WriteFile(cli, []byte(capped), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cv, ok := adviseNow(m, "original", "")().(textViewMsg)
+	if body := strings.Join(cv.lines, "\n"); !ok || !strings.Contains(body, "spent its daily cap") ||
+		!strings.Contains(body, "caminus ember relay status") || strings.Contains(body, "Run this") {
+		t.Fatalf("no command to run: the reason and the relay status command:\n%s", body)
+	}
+	// any other failure: the error's text in the notice, unwrapped from the resident's JSON
+	plain := "#!/bin/sh\necho '{\"error\": \"the advisor did not answer: HTTP Error 529: \\\"overloaded\\\"\"}'\nexit 1\n"
+	if err := os.WriteFile(cli, []byte(plain), 0700); err != nil {
+		t.Fatal(err)
+	}
+	notice, ok := adviseNow(m, "original", "")().(residentActionMsg)
+	if !ok || notice.text != `advisor: the advisor did not answer: HTTP Error 529: "overloaded"` {
+		t.Fatalf("the notice carries the text, not the JSON: %#v", notice)
+	}
+}
+
 func TestOneSlashMatchGetsTheSameMenuAsMany(t *testing.T) {
 	m := chatFixture(t)
 	m.height, m.width = 40, 110

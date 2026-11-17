@@ -36,6 +36,89 @@ class FakeTransport:
         return subprocess.CompletedProcess(argv, self.rc, self.out, self.err)
 
 
+def _kill_pidfile(path):
+    try:
+        pid = int(open(path).read().strip())
+        if pid > 1:
+            os.kill(pid, 9)
+    except (OSError, ValueError):
+        pass
+
+
+def root_runs(S, bridge, cmd_env, settings):
+    """An approved root command through the real runner (no fake transport), with a stand-in sudo first on PATH that
+    runs it as the caller with an empty environment (as sudo's env_reset does). The owner's report: apt finished and
+    the answer never came back, because the wait was for the end of the output pipe and something kept it open."""
+    import contextlib, io, re
+    bin_dir = os.path.join(S, 'fake-sudo-bin')
+    os.makedirs(bin_dir, exist_ok=True)
+    with open(os.path.join(bin_dir, 'sudo'), 'w') as f:
+        f.write('#!/bin/sh\nexec env -i PATH="$PATH" "$@"\n')
+    os.chmod(os.path.join(bin_dir, 'sudo'), 0o755)
+    saved_path = os.environ['PATH']
+    os.environ['PATH'] = bin_dir + os.pathsep + saved_path
+    pids = []
+    try:
+        # the same no-prompt settings as the panel (one list each side; they must not drift)
+        go = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'panel', 'emberroot.go')).read()
+        block = re.search(r'var rootEnv = \[\]string\{(.*?)\}', go, re.S)
+        check(block is not None and tuple(re.findall(r'"([^"]+)"', block.group(1))) == bridge.ROOT_ENV,
+              'bridge: ROOT_ENV matches the panel rootEnv')
+        check(bridge.ROOT_WAIT == 30 * 60 and 'var rootWait = 30 * time.Minute' in go,
+              'bridge: ROOT_WAIT matches the panel rootWait')
+
+        child = os.path.join(S, 'root-child.pid')
+        pids.append(child)
+        cmd = f'echo installed; sleep 30 & echo $! > {child}'
+        rid = 'rootchild1'
+        bridge._write_atomic(os.path.join(settings.bridge_dir(), 'req', rid + '.json'),
+                             {'id': rid, 'kind': 'root', 'cmd': cmd, 'user': 'test-agent', 'ts': time.time()})
+        digest = [r for r in bridge.pending(settings.bridge_dir()) if r['id'] == rid][0]['_digest']
+        result = {}
+
+        def answer():
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result['rc'] = cmd_env.main(['answer', rid, 'approved', '--digest', digest, '--json'])
+        start = time.time()
+        t = threading.Thread(target=answer, daemon=True)
+        t.start()
+        t.join(10)
+        took = time.time() - start
+        res = json.load(open(os.path.join(settings.bridge_dir(), 'res', rid + '.json'))) if not t.is_alive() else {}
+        check(not t.is_alive() and took < 5 and result.get('rc') == 0,
+              f'bridge: an approved command returns when it exits, though a background child keeps its output '
+              f'open ({took:.1f}s)')
+        check(res.get('decision') == 'approved' and res.get('rc') == 0 and 'installed' in res.get('out', ''),
+              "bridge: that command's result reaches the agent")
+        check(os.path.exists(child), 'bridge: the background child really started (the case above means something)')
+
+        r = bridge.execute_root('printf "%s|%s|%s\\n" "$DEBIAN_FRONTEND" "$NEEDRESTART_MODE" "$PAGER"; '
+                                'if read x; then echo "read: $x"; else echo no-input; fi')
+        check(r.returncode == 0 and 'noninteractive|l|cat' in r.stdout,
+              'bridge: the no-prompt settings reach the command through sudo')
+        check('no-input' in r.stdout, 'bridge: the command reads end of input, never the terminal')
+
+        hang = os.path.join(S, 'root-hang.pid')
+        pids.append(hang)
+        start = time.time()
+        r = bridge.execute_root(f'echo waiting; echo $$ > {hang}; exec sleep 30', wait=0.5)
+        took = time.time() - start
+        pid = int(open(hang).read().strip())
+        alive = True
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            alive = False
+        check(r.returncode == bridge.ROOT_RC_TIMEOUT and took < 5 and 'waiting' in r.stdout
+              and f'timed out after 0.5s, still running as pid {pid}' in r.stderr,
+              'bridge: a command past the wait returns rc 124 saying it is still running and its pid')
+        check(alive, 'bridge: a command past the wait is left running, never killed')
+    finally:
+        os.environ['PATH'] = saved_path
+        for p in pids:
+            _kill_pidfile(p)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--scratch', required=True)
@@ -134,7 +217,8 @@ def main():
     # execute_root: exactly the approved string, under sudo, argv-safe
     tr2 = FakeTransport(rc=0, out='root says hi\n')
     r = bridge.execute_root('rm -rf /x', runner=tr2)
-    check(tr2.calls[0][0] == ['sudo', 'sh', '-c', 'rm -rf /x'], 'bridge: root runs as `sudo sh -c <approved string>`')
+    check(tr2.calls[0][0] == ['sudo', 'env', *bridge.ROOT_ENV, 'sh', '-c', 'rm -rf /x'],
+          'bridge: root runs as `sudo env <no-prompt settings> sh -c <approved string>`')
 
     # audit
     audit.log(settings.audit_path(), {'event': 'run', 'cmd': 'id'})
@@ -142,6 +226,7 @@ def main():
     ev = audit.tail(settings.audit_path(), 10)
     check([e['event'] for e in ev] == ['run', 'root_decision'], 'audit: appends and tails in order')
     check(audit.tail(os.path.join(S, 'missing.jsonl')) == [], 'audit: a missing log is empty')
+    root_runs(S, bridge, cmd_env, settings)   # after the audit checks: an answer appends to the same log
 
     # agent side: the installed script is valid python with the bridge baked in
     src = agent_side.ask_root_source(bridge_dir)

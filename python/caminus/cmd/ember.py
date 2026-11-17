@@ -612,7 +612,7 @@ def _root_result(req,decision,cmd,actor,tr,grant=False):
     audit.log(settings.audit_path(),dict(event='root_claim',id=req['id'],decision=decision,by=actor,cmd=cmd,
                                          **({'granted': True} if grant else {})))
     try:r=bridge.execute_root(cmd,runner=tr)
-    except (OSError,ValueError) as e:r=subprocess.CompletedProcess(['sudo','sh','-c',cmd],127,'',str(e))
+    except (OSError,ValueError) as e:r=subprocess.CompletedProcess(bridge.root_argv(cmd),127,'',str(e))
     bridge.finish(settings.bridge_dir(),req['id'],token,r.returncode,r.stdout or '',r.stderr or '')
     return r
 

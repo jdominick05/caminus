@@ -3,6 +3,42 @@
 Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (two-card: XTX + XT) unless a line says
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md).
 
+## 0.3.1 (2026-11-17)
+
+The fixes to 0.3.0's known issues, and the first release of 0.3 on PyPI (0.3.0's upload step failed; it is on GitHub
+only). After upgrading, run `caminus ember agent install` so a running agent picks up the fixes.
+
+### Fixed
+
+- **A root command you approve always comes back to Ember.** An approved `apt install` could hang at its end
+  ("Processing triggers ...") and never return to the chat: the panel waited for every process holding the command's
+  output. It now waits for the command itself, with a bound, and returns its exit code and output to the chat.
+- **Esc stops the reply on the server too.** After an interrupt, the server could keep generating and the status line
+  kept counting. The call is closed from its first moment, so the server stops the job, and the status line says
+  interrupted.
+- **The panel swaps models.** Starting a model while another runs asks once ("stop X and start Y?") and does both,
+  and `s` stops the running model, saying what it does for a server started outside the panel.
+- **The advisor says what to run when it cannot be called,** for example when the key relay doesn't allow its model,
+  instead of a raw error that vanished after a few seconds.
+- **`/effort` works on a local model session made before this release.** It asks the session's own server which effort
+  levels it serves (the Coder's `-low`, `-xhigh` and `-nothink` ids) instead of saying "no effort control".
+
+### For contributors
+
+- **The release workflow uploads to PyPI.** twine attaches the PEP 740 attestations only when they are named beside the
+  files; 0.3.0's upload stopped there.
+- **Growth rules for a tree written by agents** (ENTROPY.md, `tools/entropy.py`, and `tools/pr_ready.py`'s size check):
+  a pull request that adds more lines than it removes says what it reused and removed.
+
+### Known issues
+
+- Clicking a folded card in Ember opens every card (as Ctrl+O does), not only that one.
+- The `/theme` picker is still slow to move.
+- The output of a `!` or `!!` command lands in the typing box (to send with your words), not in the chat.
+
+Benchmarks: no engine or kernel code changed since 0.3.0, so its numbers stand (docs/dev/benchmarks.md, measured on
+0.3.0).
+
 ## 0.3.0 (2026-11-17)
 
 ### New
@@ -38,14 +74,14 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   the model than llama.cpp's. Both take opt-in drafters (`--draft mtp` and `--draft dflash`, below). See
   [models](docs/models.md).
 - **The two dense 27B models on two cards.** `caminus start swift-1.5 --cards 2` (or `thinkingcap`, or `caminus serve
-  --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
+  --cards 2`) splits every layer across both cards: decode at 64 and 69 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on two cards, offered.** `caminus start qwen3-30b-a3b --cards 2` (or `caminus serve --cards 2`, or the
   panel's two-card mode) splits every layer across an XTX + XT: each card holds half the attention heads and part of every
   expert (two thirds on the bigger card, card 0). Still Caminus's own code end to end. One card stays the default: served, two cards decode more slowly on short
-  turns (206 against 240 tok/s) and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every
-  prompt from 4K tokens on faster (1.09x at 4K, 1.29x at 40,768). The context stays 40,960
+  turns (213 against 245 tok/s) and faster from about 32K tokens on (121 against 109 tok/s at 40,768), and read every
+  prompt from 4K tokens on faster (1.10x at 4K, 1.29x at 40,768). The context stays 40,960
   tokens, the model's own limit. See [benchmarks](docs/dev/benchmarks.md).
 - **An 8-bit KV cache for Qwen3-30B-A3B.** `caminus start qwen3-30b-a3b --kv q8` (or `caminus serve --kv q8`), on one
   card or two, stores the attention cache in 8-bit rows (the keys rotated first) at about half the memory per token of
@@ -162,7 +198,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Known issues
 
-Found in the release test of Ember; the fixes come in the next release.
+Found in the release test of Ember; all four are fixed in 0.3.1.
 
 - A command run as root through Ember (an `apt install`, for example) can hang at its end and never return to Ember.
 - Interrupting a reply with Esc can leave the reply running: the status line keeps counting and the server keeps
