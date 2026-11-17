@@ -23,7 +23,7 @@ const shotWidth, shotHeight = 170, 40
 
 // TestEmberShot writes ember-chat.svg, the README's picture of Ember's chat (`caminus ember ui`), from the program's
 // own drawing: its real render() painted with the default theme's background as its View does, at shotWidth, so the
-// side pane (tasks, now), the live reply under the transcript, the activity line and the status line show. The goal is made up (a stock-list bug:
+// side pane (tasks, now), the live reply streaming in the transcript, the activity line and the status line show. The goal is made up (a stock-list bug:
 // read, a done check, a failing test, a wrong path, the fix, the tests running again); nothing from a real machine
 // goes in. tools/release/panel_shot.py redraws it with panel.svg at every release.
 //
@@ -50,7 +50,7 @@ func TestEmberShot(t *testing.T) {
 			t.Fatalf("the picture lost %q (the side pane and the status line must show):\n%s", want, plain)
 		}
 	}
-	// the tasks head the right column (no thoughts box above them); the reply being written runs under the transcript
+	// the tasks head the right column (no thoughts box above them); the reply being written streams in the transcript
 	top := lipgloss.Height(m.chatHead(shotWidth))
 	if side := ansi.Cut(strings.Split(plain, "\n")[top], m.transcriptCols(), shotWidth); !strings.Contains(side, "tasks") || strings.Contains(plain, "thoughts") {
 		t.Fatalf("the picture's top right is the tasks, with no thoughts box (got %q):\n%s", side, plain)

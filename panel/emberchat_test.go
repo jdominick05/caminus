@@ -1686,24 +1686,54 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	if strings.Contains(frame, "Task 2 of 3") {
 		t.Fatal("the line above the composer moves into the side panel")
 	}
-	// a reply being written runs in the box under the transcript (the earlier chains above it, tabs expanded); the
-	// tasks stay at the top right, at 220 x 50 and at the smallest wide size
-	m.chat.live = residentLive{active: true, turn: "t1", reasoning: "now reading the CLI code"}
+	// a reply being written streams into the transcript as its last block, like a chat: no box under it, nothing across
+	// both columns, the right column at its full height (at 220 x 50 and at the smallest wide size)
 	for _, sz := range [][2]int{{220, 50}, {160, 24}} {
 		m.width, m.height = sz[0], sz[1]
+		m.chat.live = residentLive{}
+		m.syncChat()
+		idle := m.chat.transcript.Height()
+		m.chat.live = residentLive{active: true, turn: "t1", reasoning: "weighing the flags", text: "Writing the CLI now.", tools: []string{"terminal"}}
 		m.syncChat()
 		live := ansi.Strip(m.render())
 		rows = fits(live)
-		top := lipgloss.Height(m.chatHead(m.width))
-		if !strings.Contains(live, "now reading the") || !strings.Contains(live, "live ·") || strings.Contains(live, "\t") {
-			t.Fatalf("%v: the live reply shows while it is written, tabs expanded:\n%s", sz, live)
+		top, tw, h := lipgloss.Height(m.chatHead(m.width)), m.transcriptCols(), m.chat.transcript.Height()
+		if h != idle || m.liveBlock(m.width) != "" {
+			t.Fatalf("%v: no box under the transcript (its height %d, %d idle):\n%s", sz, h, idle, live)
+		}
+		at := -1
+		for i := top; i < top+h; i++ {
+			if gap := ansi.Cut(rows[i], tw, tw+1); gap != " " && gap != "" {
+				t.Fatalf("%v: row %d runs across both columns: %q", sz, i, rows[i])
+			}
+			if strings.Contains(ansi.Cut(rows[i], 0, tw), "Writing the CLI now.▌") {
+				at = i
+			}
+		}
+		if at < 0 || !strings.Contains(live, "agent") || !strings.Contains(live, "terminal …") || strings.Contains(live, "weighing the flags") {
+			t.Fatalf("%v: the reply streams in the transcript (heading, tools, text and cursor; its reasoning folded):\n%s", sz, live)
 		}
 		if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") || strings.Count(live, "write the CLI") != 1 {
 			t.Fatalf("%v: the tasks stay at the top right, once:\n%s", sz, live)
 		}
 	}
-	if !strings.Contains(ansi.Strip(m.render()), "tabbed") {
-		t.Fatal("the earlier chain with tabs is drawn in the live box")
+	// the transcript stays pinned to the bottom while text streams, unless the reader scrolled up
+	for i := 0; i < 40; i++ {
+		m.residentEvents = append(m.residentEvents, residentEvent{Seq: 1000 + i, Goal: "original", Kind: "user_message", Data: map[string]any{"text": fmt.Sprintf("note %d", i)}})
+	}
+	m.syncChat()
+	m.chat.transcript.GotoBottom()
+	next, _ := m.Update(residentLiveMsg{turn: "t1", text: " More."})
+	m = next.(emberModel)
+	if !m.chat.transcript.AtBottom() || !strings.Contains(ansi.Strip(m.chat.transcript.View()), "More.▌") {
+		t.Fatalf("pinned to the newest text:\n%s", ansi.Strip(m.chat.transcript.View()))
+	}
+	m.chat.transcript.ScrollUp(10)
+	off := m.chat.transcript.YOffset()
+	next, _ = m.Update(residentLiveMsg{turn: "t1", text: " Again."})
+	m = next.(emberModel)
+	if m.chat.transcript.YOffset() != off || !strings.Contains(m.chat.liveShown, "Again.") {
+		t.Fatalf("scrolled up, the view stays (offset %d, was %d)", m.chat.transcript.YOffset(), off)
 	}
 	m.width, m.height = 220, 50
 	m.chat.live = residentLive{}
