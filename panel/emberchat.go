@@ -50,6 +50,7 @@ type residentChat struct {
 	approvalSel                             int    // the row it has selected
 	approvalDetail                          bool   // Enter opened the selected request in full
 	goals, goalsDetail                      bool   // the Goals overlay, and its selected goal opened in full
+	loadingShown                            bool   // the transcript shows "loading NAME…"
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
 	identity                                identityState // the Identity screen (/identity): the agent's GitHub account
@@ -391,7 +392,7 @@ func (m *emberModel) syncChat() {
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
-	if changed || m.chat.transcript.TotalLineCount() == 0 {
+	if changed || m.chat.transcript.TotalLineCount() == 0 || m.chat.loadingShown != m.statusAt.IsZero() {
 		body := strings.TrimRight(m.chat.content, "\n")
 		if !m.chat.group.empty() {
 			body += "\n\n" + m.chat.group.line(w) // the work in progress, fixed when the next block arrives
@@ -399,8 +400,10 @@ func (m *emberModel) syncChat() {
 		if body != "" && m.height >= 24 && m.sideWidth() > 0 {
 			body += "\n" // the gap above the composer, in the transcript's column only (chatBottom)
 		}
+		m.chat.loadingShown = false
 		if body == "" && m.statusAt.IsZero() {
 			body = emberDim.Render("loading " + residentText(m.agentName) + "…")
+			m.chat.loadingShown = true // (replaced by the welcome or the history once the status lands)
 		} else if body == "" {
 			body = mascotBeside(0, "", emberTitle.Render("CAMINUS")+emberDim.Render(" env"),
 				"Your agent's conversation and commands will stay here.",

@@ -2680,7 +2680,9 @@ func TestASwitchedSessionSaysLoadingNotStoppedUntilItsStatusLands(t *testing.T) 
 		t.Fatalf("the tab title says loading: %q", m.windowTitle())
 	}
 	m.receiveResident(residentMsg{agent: "local-testing", status: residentStatus{Name: "local-testing", DaemonAlive: false}})
-	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") {
-		t.Fatal("once its status says so, a stopped session says stopped")
+	m.syncChat()
+	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") || strings.Contains(frame, "loading") ||
+		!strings.Contains(frame, "will stay here") {
+		t.Fatalf("once its status lands, an empty stopped session shows stopped and the welcome, no loading line:\n%s", frame)
 	}
 }
