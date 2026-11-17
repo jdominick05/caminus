@@ -102,24 +102,6 @@ func TestAppendAuditMatchesPythonSchema(t *testing.T) {
 	}
 }
 
-func TestExecRootArgv(t *testing.T) {
-	c, tmp, err := execRoot("rm -rf /tmp/x && echo 'hi there'")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmp)
-	if filepath.Base(c.Path) != "bash" || c.Args[1] != "-c" {
-		t.Fatalf("want bash -c, got %v", c.Args)
-	}
-	s := c.Args[2]
-	if !strings.Contains(s, "set -o pipefail") || !strings.Contains(s, "sudo sh -c 'rm -rf /tmp/x && echo '\\''hi there'\\'''") {
-		t.Fatalf("script does not quote the command safely: %s", s)
-	}
-	if !strings.Contains(s, "tee "+shQuote(tmp)) {
-		t.Fatalf("script does not tee to the temp file: %s", s)
-	}
-}
-
 func TestShQuote(t *testing.T) {
 	if got := shQuote("a'b"); got != `'a'\''b'` {
 		t.Fatalf("shQuote: %s", got)

@@ -622,6 +622,11 @@ class Model:
                             text.append(delta['text'])
                             if on_delta('content', delta['text']) is False:
                                 raise Cancelled()
+                        elif delta.get('type') == 'thinking_delta' and delta.get('thinking'):
+                            # shown live like a local model's reasoning (it is not kept in the reply); each piece
+                            # is also a point where a cancel or an Esc stops the call
+                            if on_delta('reasoning', delta['thinking']) is False:
+                                raise Cancelled()
                         elif delta.get('type') == 'input_json_delta':
                             blocks[ev['index']]['json'] += delta.get('partial_json', '')
                     elif kind == 'message_delta':

@@ -189,10 +189,19 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			}
 		}
 	case "remember":
-		subject = residentText(argStr(args, "name"))
-		meta = residentText(firstLine(argStr(args, "summary")))
-		if p, _ := args["pin"].(bool); p {
-			meta += " · pinned"
+		if argStr(args, "action") == "tidy" {
+			// a refused tidy keeps the error as its meta
+			subject = "tidy MEMORY.md"
+			was, _ := result["was_bytes"].(float64)
+			if now, ok := result["index_bytes"].(float64); ok {
+				meta = fmt.Sprintf("%.0f → %.0f bytes", was, now)
+			}
+		} else {
+			subject = residentText(argStr(args, "name"))
+			meta = residentText(firstLine(argStr(args, "summary")))
+			if p, _ := args["pin"].(bool); p {
+				meta += " · pinned"
+			}
 		}
 	case "send_message":
 		subject = "→ " + residentText(argStr(args, "to"))

@@ -47,7 +47,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / search / edit / write (search: ripgrep only narrows the files, and only for a plain literal with `rg -F`; the stdlib matches, so both give one result), the web tools, MCP servers |
-| `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |
+| `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
 | `cli.py` | the entry point every mode uses (`once`, `run`, `send`, `status`, `stream`, ...) |
@@ -72,6 +72,18 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is
   never graded and never paused by a loop guard.
 - No GPU in any env test; the env suites are CPU only.
+
+## Memory
+
+What the agent sees is in [the guide](../ember.md#its-memory); the rules and their reasons are in
+`resident/memory.py`'s docstring and comments.
+
+- **Limits.** `INDEX_CAP`, `INDEX_WARN` (80 %) and `LINE_CAP` live in `memory.py`. The `remember` and `history_search`
+  descriptions in `runtime.py` and the memory paragraph of `prompt.py` state them, so change all three together.
+- **No note is lost.** No write to MEMORY.md may leave a note file the old index named in neither the new index nor
+  `notes/index-archive.md`: eviction, a re-save (a merged line naming other notes stays) and `Memory.tidy` all keep it.
+- **Tests.** `test_resident.py`: `test_a_nearly_full_index_warns_in_the_context_and_in_remember`,
+  `test_tidy_rewrites_the_index_and_keeps_every_note_reachable`, `test_history_search_finds_past_goals_journal_and_notes`.
 
 ## Testing
 

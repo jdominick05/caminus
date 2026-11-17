@@ -214,7 +214,17 @@ def _pending(s):
     ctl = Path(s.get('driven') or '')
     if not s.get('driven'):
         raise SystemExit('this session has no driven brain (open it with --brain driven)')
-    return sorted(p for p in ctl.glob('*.req.json') if not p.with_name(p.name.replace('.req.', '.rep.')).exists())
+    return sorted(p for p in ctl.glob('*.req.json') if not p.with_name(p.name.replace('.req.', '.rep.')).exists()
+                  and not p.with_name(p.name.replace('.req.', '.gone.')).exists())
+
+
+def _hung_up(s):
+    """the newest request, when its caller hung up before it was answered: (number, gone record), else None"""
+    reqs = sorted(Path(s.get('driven') or '').glob('*.req.json'))
+    if not reqs:
+        return None
+    gone = reqs[-1].with_name(reqs[-1].name.replace('.req.', '.gone.'))
+    return (reqs[-1].name[:6], json.loads(gone.read_text())) if gone.exists() else None
 
 
 def turn(a):
@@ -223,6 +233,8 @@ def turn(a):
     while not (pend := _pending(s)) and time.time() < end:
         time.sleep(0.5)
     if not pend:
+        if (h := _hung_up(s)):
+            print(f'request {h[0]}: the resident hung up after {h[1].get("waited_s")}s (an Esc or a /cancel closed the call)')
         print('no request waiting (the agent is idle, or between steps)')
         return 1
     body = json.loads(pend[0].read_text())

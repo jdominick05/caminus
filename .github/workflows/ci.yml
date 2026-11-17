@@ -139,7 +139,8 @@ jobs:
           path: ${{ runner.temp }}/caminus-panel
           retention-days: 7
 
-  # The pull request's own text (AGENTS.md, Conventions): title, trailers, the GPU-gate block, private text. The review
+  # The pull request's own text (AGENTS.md, Conventions and Growth): title, trailers, the GPU-gate block, what it reuses
+  # and removes, private text. The review
   # bot's verdict is checked by hand with tools/pr_ready.py N, not here.
   pr-metadata:
     name: Pull request title, trailers, gate block and private text
