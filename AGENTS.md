@@ -40,6 +40,7 @@ CLAUDE.md imports this file.
 | The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
 | The agent environment (`caminus ember`): its module map, rules and tests | docs/dev/ember.md (users: docs/ember.md, docs/ember-quickstart.md) |
+| Why the Growth rules exist (what agents do to a tree over time), and what checks them | ENTROPY.md |
 | Agent skills: after a kernel edit (`kernel-change-evidence`), before calling a pull request ready (`pr-ready`) | .agents/skills/*/SKILL.md (linked from .claude/skills) |
 
 ## Layout (the parts that need a reason)
@@ -59,8 +60,8 @@ CLAUDE.md imports this file.
   Every op inlined into `k3_run` adds live scalars; past the SGPRs, each segment hop of each wave pays the reloads
   (qwen3moe: 190 spilled scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid, same bits). An op for prefill,
   verify or a drafter goes into its own module, never into a decode module; the host refuses it there.
-  `k3_q35_swift.hip` is the dense qwen35 line's decode module on own code (`k3.Q35S_OPS`, `engine/q35_dense.py`; not
-  yet served): its header `k3_q35_ops.h` takes `k3_q3m_ops.h`'s ops under `K3_OPS_NO_DISPATCH` and dispatches its own
+  `k3_q35_swift.hip` is the dense qwen35 line's decode module on own code (`k3.Q35S_OPS`, `engine/q35_dense.py`):
+  its header `k3_q35_ops.h` takes `k3_q3m_ops.h`'s ops under `K3_OPS_NO_DISPATCH` and dispatches its own
   tape's, so an edit there must leave the qwen3moe modules' machine code unchanged (compare the `.text` sections).
   Their decode attention is the split pair of `kernels/k3_attn_split.h` (`K3_Q35_ATTN_SPLIT`, defined by the Swift and
   ThinkingCap module files, the MTP drafter modules too, not by the DFlash modules; `k3.Q35_SPLIT_MODULES`): the header's `K3_Q35_ATTN_SPLIT` branch
@@ -335,6 +336,19 @@ Process:
 - Unattended agents never run commands that need a permission prompt (deletes, writes to /tmp, sudo, installs, network).
 - When an invariant or command here changes, update this file in the same commit.
 
+Growth (the reasons: ENTROPY.md):
+- Before adding a file, function, flag, test or doc section, search for what already does that job (by name and by
+  behaviour) and extend it: you see a slice of this tree, and adding is the easy move.
+- What a change replaces, it deletes in the same pull request: no second path, no kept alias, no `_v2`. An old path
+  that must stay names what will remove it.
+- Before changing a name, a contract or a file's place, search the whole tree for what names it (code, tests, docs,
+  this file) and change those in the same commit.
+- One fact lives in one file and the rest point to it; a second copy of a file is a link (as `tools/guard.sh` is).
+- Merge what is the same today, not what might be tomorrow, and never across code objects: a variant is a define
+  over one source, and merging kernel or tape code is a kernel change with every gate above. Test scripts keep their
+  own helpers.
+- This file is the map: a new module gets one line here, its detail in its docs/dev file.
+
 ## Conventions
 
 - Workflow: topic branch -> pull request into `testing` -> `main` for releases (tags). Never open pull requests against
@@ -374,6 +388,10 @@ Codex flags P0 / P1 issues only. In this repository these are P1:
   the reason itself, not a private reference.
 - Flag third-party code added without its licence notice in the file header and a THIRD_PARTY.md entry in the same
   pull request.
+
+### Growth
+- Flag added code, a test or a doc section that does what an existing one already does (name the existing one), and a
+  path the change replaces but leaves in place.
 
 ### Not findings
 - Formatting, naming and comment style. The CPU suites, the vendored-code checks and the privacy scan run in CI.
