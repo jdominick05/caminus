@@ -171,12 +171,18 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 
 // switcherCards are the cards in order: the sessions found, the one in view when none were read yet.
 func (m emberModel) switcherCards() []sessionCard {
-	if len(m.sessionCards) > 0 {
+	if len(m.sessionNames) == 0 && len(m.sessionCards) > 0 {
 		return m.sessionCards
 	}
-	var out []sessionCard // (the cards are still loading: the names alone)
+	var out []sessionCard // one per session name, its card when loaded (a name alone while it loads)
 	for _, n := range m.sessionNames {
-		out = append(out, sessionCard{name: n, status: "unknown"})
+		c := sessionCard{name: n, status: "loading"}
+		for _, have := range m.sessionCards {
+			if have.name == n {
+				c = have
+			}
+		}
+		out = append(out, c)
 	}
 	if len(out) == 0 {
 		out = []sessionCard{{name: m.agentName, status: "unknown"}}
