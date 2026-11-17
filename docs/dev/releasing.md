@@ -75,8 +75,9 @@ Every job runs only in `jdominick05/caminus` (`if: github.repository == ...`), s
 ## Nightly builds: nightly.sh on a timer, then nightly.yml
 
 A nightly is the head of `testing`, built like a release and published without a person in the loop: a GitHub
-pre-release tagged `vX.Y.Z.devYYYYMMDD` with the wheel, the sdist and SHA256SUMS, and the wheel on PyPI as
-`caminus X.Y.Z.devYYYYMMDD`. `X.Y.Z` is the next release (the tree's `__version__` when it has no tag yet, else its next
+pre-release tagged `vX.Y.Z.devYYYYMMDD` with the wheel, the sdist and SHA256SUMS. The wheel also goes to PyPI as
+`caminus X.Y.Z.devYYYYMMDD`, but only when the repository variable `NIGHTLY_PYPI` is `true` (below), and it is not set
+today: nightlies are on GitHub only, and the two commands below find none on PyPI. `X.Y.Z` is the next release (the tree's `__version__` when it has no tag yet, else its next
 patch), so a nightly sorts after the last release and before the next one, and `pip install caminus` never picks one.
 
 ```bash
