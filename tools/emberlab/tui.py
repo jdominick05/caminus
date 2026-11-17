@@ -189,6 +189,10 @@ if [ "$1 $2" = "env agent" ] || [ "$1 $2" = "ember agent" ]; then
   shift 2; op="$1"; shift 2
   exec {runtime} "$op" lab --home {home} "$@"
 fi
+if [ "$1 $2" = "ember run" ] || [ "$1 $2" = "env run" ]; then
+  shift 2; [ "$1" = "-s" ] && shift
+  {run}
+fi
 echo "emberlab: '$*' is not part of a lab session" >&2; exit 2
 '''
 
@@ -203,7 +207,12 @@ def session_cmd(a, out):
     if s['host'] == 'agent':
         rt = h.ssh + ['python3', '-I', s['program']]
     wrapper = out / 'lab-cli.sh'
-    wrapper.write_text(WRAPPER.format(runtime=' '.join(shlex.quote(x) for x in rt), home=shlex.quote(s['home'])))
+    # `ember run -s SCRIPT` (path completion, attachments, ! shell mode): the script in the session's home, as its user
+    if s['host'] == 'agent':
+        run = ' '.join(shlex.quote(x) for x in h.ssh) + ' "cd ' + shlex.quote(s['home']) + ' && $*"; exit $?'
+    else:
+        run = 'cd ' + shlex.quote(s['home']) + ' && exec sh -c "$*"'
+    wrapper.write_text(WRAPPER.format(runtime=' '.join(shlex.quote(x) for x in rt), home=shlex.quote(s['home']), run=run))
     wrapper.chmod(0o700)
     # a local session's own bridge, so its approvals and questions show; an agent-host session's stay on that host
     bridge = Path(s['home']).parent / 'bridge' if s['host'] == 'local' else out / 'bridge'
