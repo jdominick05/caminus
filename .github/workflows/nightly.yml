@@ -194,4 +194,4 @@ jobs:
           fi
           echo "::add-mask::$api_token"
           python -m twine check dist/caminus-*.whl
-          TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" TWINE_NON_INTERACTIVE=1 python -m twine upload --verbose --skip-existing --attestations dist/caminus-*.whl
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" TWINE_NON_INTERACTIVE=1 python -m twine upload --verbose --skip-existing --attestations dist/caminus-*.whl dist/caminus-*.whl.*.attestation
