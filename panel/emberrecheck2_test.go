@@ -72,3 +72,16 @@ func TestCopyFixes(t *testing.T) {
 		t.Fatalf("a timeout names the option: %q", got)
 	}
 }
+
+func TestAClearedDraftInHistoryReadsYourDraft(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.target, m.chat.newGoal = "original", false
+	m.chat.compose.SetValue("never sent")
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = next.(emberModel)
+	m.chat.clearedDraft = "" // (already brought back once)
+	m, _ = m.recallStep("up", true)
+	if m.chat.compose.Value() != "never sent" || !strings.HasPrefix(m.msg, "your draft 1 of") {
+		t.Fatalf("a never-sent draft is labelled as one: %q / %q", m.chat.compose.Value(), m.msg)
+	}
+}

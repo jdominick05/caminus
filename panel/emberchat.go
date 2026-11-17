@@ -1708,7 +1708,11 @@ func (m emberModel) recallStep(k string, asked bool) (emberModel, bool) {
 		m.chat.compose.SetValue(past[i-1])
 		m.chat.compose.CursorEnd()
 		m.chat.recallIdx, m.chat.recallText = i, past[i-1]
-		m.msg = fmt.Sprintf("sent message %d of %d · ↑ older · ↓ newer · edit or Enter to send", i, len(past))
+		what := "sent message"
+		if isDraft(m.agentName, past[i-1]) { // a draft Ctrl+C or Ctrl+U cleared was never sent
+			what = "your draft"
+		}
+		m.msg = fmt.Sprintf("%s %d of %d · ↑ older · ↓ newer · edit or Enter to send", what, i, len(past))
 	}
 	m.syncChat()
 	return m, true
@@ -2310,6 +2314,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// second quits
 		if d := m.chat.compose.Value(); strings.TrimSpace(d) != "" && time.Since(m.chat.quitArmed) > 2*time.Second {
 			saveTyped(m.agentName, d)
+			markDraft(m.agentName, d)
 			m.chat.clearedDraft = d
 			m.chat.compose.Reset()
 			m.chat.quitArmed = time.Now()
@@ -2366,6 +2371,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the next !cmd was sent with it as a message)
 		if strings.Contains(m.chat.compose.Value(), "\n") {
 			saveTyped(m.agentName, m.chat.compose.Value())
+			markDraft(m.agentName, m.chat.compose.Value())
 			m.chat.clearedDraft = m.chat.compose.Value()
 			m.chat.compose.Reset()
 			m.msg = "draft cleared (Up brings it back)"
@@ -2518,6 +2524,7 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	// A leading // sends the rest as a message, so a goal about /etc or /tmp is not taken for a command.
 	if strings.HasPrefix(trimmed, "//") {
 		saveTyped(m.agentName, trimmed) // (history gives back what you typed, // included)
+		unmarkDraft(m.agentName, trimmed)
 		return m.sendCompose(strings.TrimPrefix(trimmed, "/"))
 	}
 	if strings.HasPrefix(trimmed, "/") {
@@ -2528,6 +2535,7 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
 	saveTyped(m.agentName, text)
+	unmarkDraft(m.agentName, text) // (a cleared draft sent later is a sent message)
 	return m.sendCompose(text)
 }
 
