@@ -3035,20 +3035,24 @@ for line in sys.stdin:
         # the same through a real http.client connection to a silent upstream, chunked (kept alive) or announcing
         # Connection: close (http.client then drops conn.sock in getresponse: the socket is taken before it)
         import http.client
-        for framing in (b'Transfer-Encoding: chunked\r\n', b'Connection: close\r\n'):
+        # (the third: a chunked upstream shut mid-chunk, ending mid-line so readline blocks inside the chunk, raises
+        #  IncompleteRead, which must be metered like the others)
+        for framing, partial in ((b'Transfer-Encoding: chunked\r\n', b''), (b'Connection: close\r\n', b''),
+                                 (b'Transfer-Encoding: chunked\r\n', b'80\r\nevent: ping\ndata: {"ty')):
             up = socket.socket();up.bind(('127.0.0.1', 0));up.listen(1)
             closed = threading.Event()
-            def upstream(up=up, framing=framing, closed=closed):
+            def upstream(up=up, framing=framing, closed=closed, partial=partial):
                 c, _ = up.accept();c.settimeout(20)
                 try:
                     c.recv(65536)
-                    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n' + framing + b'\r\n')
+                    c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n' + framing + b'\r\n' + partial)
                     while c.recv(65536):pass          # silent until the relay closes its end
                 except OSError:pass
                 closed.set();c.close()
             threading.Thread(target=upstream, daemon=True).start()
             log2 = []
-            handler = relay.make_handler('anthropic', 'SECRET-KEY', relay.Ledger(self.home/'ledger-real.json', 50.0),
+            ledger2 = relay.Ledger(self.home/('ledger-real-%d.json' % len(partial)), 50.0)
+            handler = relay.make_handler('anthropic', 'SECRET-KEY', ledger2,
                                          {'claude-haiku-5-5'}, 4096, log2.append, None,
                                          lambda port=up.getsockname()[1]: http.client.HTTPConnection('127.0.0.1', port, timeout=30))
             srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
@@ -3062,7 +3066,11 @@ for line in sys.stdin:
                 for _ in range(100):
                     if any('CLIENT-GONE' in l for l in log2):break
                     time.sleep(0.05)
-                self.assertTrue(any('CLIENT-GONE' in l for l in log2), (framing, log2))
+                self.assertTrue(any('CLIENT-GONE' in l for l in log2), (framing, partial, log2))
+                for _ in range(100):
+                    if ledger2.spent() > 0:break
+                    time.sleep(0.05)
+                self.assertGreater(ledger2.spent(), 0, (framing, partial, 'the hang-up is metered'))
             finally:
                 srv.shutdown();srv.server_close();up.close()
 

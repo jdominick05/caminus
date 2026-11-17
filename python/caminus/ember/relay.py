@@ -380,7 +380,9 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     while not client_gone:
                         try:
                             line = up.readline()
-                        except (OSError, ValueError):
+                        except (OSError, ValueError, http.client.HTTPException):
+                            # (a chunked upstream shut mid-chunk raises IncompleteRead, an HTTPException: the hang-up is
+                            #  still metered, as for a plain socket error)
                             if not gone.is_set():
                                 raise
                             line = b''
