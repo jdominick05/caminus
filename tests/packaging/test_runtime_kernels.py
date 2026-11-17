@@ -314,6 +314,33 @@ class RuntimeKernels(unittest.TestCase):
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime(want)
 
+    def test_q3_long_context_mode_selects_shipped_objects(self):
+        # caminus serve --long-context for Qwen3-30B-A3B (YaRN): the real module property picks each decode module's YaRN
+        # build (F16 / Q8, one card; the two-card ones through k3.Q3M_TP_OF), the prefills load the YaRN row kernel's object
+        # beside their own (and the Q8 attention's object with Q8 rows); every one is in the installed runtime set
+        from caminus import rope
+        Y = rope.YarnMode(4.0, 32768)
+        one = q3_engine(rope=Y).module
+        q8 = q3_engine(rope=Y, q8=True).module
+        self.assertEqual((one, q8), ('k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn'))
+        tps = [k3.Q3M_TP_OF[one], k3.Q3M_TP_OF[q8]]
+        self.assertEqual(tps, ['k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn'])
+        for q8_ in (False, True):
+            with self.subTest(q8=q8_):
+                m = NS(dev=0, D=256, nh=8, nkv=1, hd=128, k_used=1, n_exp=2, ffn=256, q8=q8_, rope=Y, rope_key=Y.key(),
+                       L=[{key: ('Q4_K',) for key in q3m.MM_KEYS}], emb=NS(shape=(256, 64), rows=lambda: (64, 144)))
+                start = len(self.loads)
+                q3m.Q3MPrefill(m, chunk=16, check=False)
+                names = self.loads[start:]
+                want = ['q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_kvq8_yarn'] if q8_ else ['q3m_prefill', 'q3m_prefill_yarn']
+                self.assertEqual(names, want)
+                self.require_runtime(names)
+        self.require_runtime([one, q8] + tps)
+        for name in (one, 'q3m_prefill_yarn'):
+            without = tuple(n for n in kernels.RUNTIME_SET if n != name)
+            with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                self.require_runtime([one, 'q3m_prefill', 'q3m_prefill_yarn'])
+
     def test_lazy_sampler_and_guard_are_included(self):
         # Exercise the lazy sampler module selection, without allocating candidates.
         with patch.dict(topk._mods, {}, clear=True):

@@ -1,5 +1,9 @@
 # Ember: the anti-harness
 
+<p align="center">
+  <img src="ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="100%">
+</p>
+
 Ember (`caminus ember`; `caminus env` still works) gives an AI agent a place to live on your machine: its own Unix account, its own files, its own
 long-running loop. You give it goals and steer it as it works; when there is nothing to do, it has free time. New
 here: [the quickstart](ember-quickstart.md). Every command and panel view: [the reference](resident-agent.md).
@@ -54,6 +58,49 @@ either faster.
   its account (`sudo gpasswd -d caminus-agent render`) if you do not want it near them.
 - **Everything is recorded.** Your audit log has every root request, answer, grant and panel control; its journal
   has every goal, tool call and result.
+
+## Paid brains
+
+A paid model is reached through a **key relay**: a small service in your own account that holds the API key, forwards
+only the provider's chat endpoints, allows only priced models, and refuses requests once the day's dollar cap is spent
+(HTTP 402; it resets at midnight). The agent is given the relay's local address, never the key.
+
+| Provider | Key file (mode 600) | Relay address | Agent `--api` |
+|---|---|---|---|
+| Anthropic | `~/.config/anthropic/api_key` | `http://127.0.0.1:8765/v1` | `anthropic` |
+| DeepInfra | `~/.config/caminus/deepinfra-key` | `http://127.0.0.1:8766/v1/openai` | `openai` (the default) |
+| Mistral | `~/.config/caminus/mistral-key` (and its price file, `~/.config/caminus/mistral-prices.json`) | `http://127.0.0.1:8767/v1` | `openai` |
+
+Anthropic, step by step (the others follow the same pattern; the quickstart shows DeepInfra):
+
+```sh
+mkdir -p ~/.config/anthropic
+[ -e ~/.config/anthropic/api_key ] || install -m 600 /dev/null ~/.config/anthropic/api_key
+$EDITOR ~/.config/anthropic/api_key                       # the key alone, on one line
+caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5
+caminus ember agent install
+caminus ember agent init resident --model claude-haiku-5-5 --api anthropic --endpoint http://127.0.0.1:8765/v1
+caminus ember agent provider resident add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
+```
+
+- **Which models.** The Anthropic relay allows only the models named with `--model` (repeat it; Claude Haiku 5.5 when
+  none is given). DeepInfra allows any chat model it publishes a price for. Mistral publishes no prices, so its relay
+  allows only the models in your price file: JSON, USD per million tokens, for example
+  `{"mistral-large-latest": [2.0, 6.0]}` as `[input, output]`, re-read when it changes; then
+  `caminus ember relay install --provider mistral --cap-usd 3`.
+- **Changing a relay.** `relay install` rewrites the service from the options you give it and restarts it (today's
+  spend carries over), so give the whole set again: `--cap-usd` is required, and every `--model` you still want.
+- **Several providers.** Install one relay per provider and add each with `agent provider NAME add`; `caminus ember
+  agent models NAME --refresh` lists what each serves (context windows, output caps, prices), and `/model` in the chat
+  (or `caminus ember agent model NAME ID`) switches between them at the next turn.
+- **Spend.** `caminus ember relay status` shows each relay's spend today against its cap. The chat's status line shows
+  the agent's own running cost.
+- **The advisor.** An agent can ask a stronger model for advice (`caminus ember agent advisor NAME --model
+  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Anthropic API). It goes
+  through the same relay, so allow its model there too, with the cap restated:
+  `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
+  Its own daily budget is counted by the agent, inside the relay's cap.
+- **Removing one.** `caminus ember relay uninstall --provider anthropic` stops it; the key file stays where you put it.
 
 ## A second setup on one machine
 

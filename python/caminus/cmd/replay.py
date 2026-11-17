@@ -124,6 +124,10 @@ def main(argv=None):
                drafter=a.drafter or eng.get('drafter_path') or cli.DEFAULT_DRAFTER,
                # (a Q8 KV server's bundle: its key names the format (caminus serve --kv q8), so the engine is built with it)
                kv=kv_of_key(eng.get('key')))
+    ktp = (eng.get('key') or {}).get('tp') or {}
+    if ktp.get('rope'): opt['long_context'] = True          # (a long-context server's bundle: its YaRN engine, as serve built it)
+    try: A.long_mode(opt)
+    except ValueError as e: raise SystemExit(f'replay: {e}') from None
     m, pf, df, dr = A.build(opt, log=print, T=T)
     for d in m.devs: torch.cuda.synchronize(d)
     pc = PC.PromptCache(m, pf, dr, cache_dir=cdir, retention_days=1e6)

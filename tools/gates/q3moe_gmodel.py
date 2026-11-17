@@ -15,12 +15,20 @@ file the like-for-like one: --llama-kv names which, for the printout). --save-lo
 (f32 [rows, vocab]); --against PATH (another run's saved logits: the F16 cache's) gates KLD(that || this) and top-1 agreement
 between the two runs (tools/gates/kv_against.py): against llama.cpp's own F16-KV -> q8_0-KV cost on the same tokens
 (--against-llama ITS_F16KV.bin with --llama ITS_Q8_0KV.bin --llama-kv q8_0; then the --llama rule above is the
-like-for-like one) or explicit bars (--against-kld MEAN --against-top1 PERCENT); --against without a bound is refused."""
+like-for-like one) or explicit bars (--against-kld MEAN --against-top1 PERCENT); --against without a bound is refused.
+--yarn: the long-context mode (YaRN x4): REF made by tools/reference/q3moe_ref.py --yarn 4:32768 (it carries a yarn entry;
+the mismatch either way is refused), the engine on its YaRN modules, LLAMA.bin from gg_golden with the job line
+'yarn 4 32768' (llama.cpp's --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768) as the bound; gg_golden's LOAD line
+must say 'RoPE yarn (freq_scale 0.25, orig ctx 32768)'. Under --yarn the relative rule gets an absolute bar on llama.cpp's
+mean KLD against the YaRN reference (--llama-max-kld, default 5.7e-03: twice its native 2.83e-03) and, with
+--native-ref NATIVE.npz (the native reference of the same tokens), both engines must sit closer to the YaRN reference than
+to the native one (tools/gates/yarn_bound.py)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kv_against
 import numpy as np
+import yarn_bound
 
 
 def lsm(v):
@@ -48,15 +56,22 @@ if __name__ == '__main__':
     ap.add_argument('--llama', default=None); ap.add_argument('--module', default=None)
     ap.add_argument('--cards', type=int, default=1, choices=(1, 2))
     ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('--llama-kv', default='f16', choices=('f16', 'q8_0'))
-    kv_against.add_args(ap)
-    A = ap.parse_args(); kv_against.check_args(ap, A)
+    ap.add_argument('--yarn', action='store_true', help='the long-context mode (YaRN): the reference must be a YaRN one (its yarn '
+                    'entry: tools/reference/q3moe_ref*.py --yarn), the engine runs its YaRN modules (rope=YarnMode)')
+    kv_against.add_args(ap); yarn_bound.add_args(ap, 'short')
+    A = ap.parse_args(); kv_against.check_args(ap, A); yarn_bound.check_args(ap, A)
     z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']
+    zy = tuple(float(v) for v in z['yarn']) if 'yarn' in z.files else None
+    if bool(zy) != A.yarn:   # (a YaRN reference against a native engine, or the reverse, measures the RoPE change, not the engine)
+        raise SystemExit(f'--ref {A.ref}: ' + (f'a YaRN reference ({zy}): pass --yarn' if zy else 'a native reference: --yarn needs one made with --yarn'))
+    from caminus.rope import YarnMode
+    rope = YarnMode(zy[0], int(zy[1])) if zy else None
     import torch
     ok = True
     if A.cards == 2:
         from caminus.engine.q3moe_tp import Q3MoETP
         print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
-        eng = Q3MoETP(A.gguf, max_ctx=len(seq) + 8, module=A.module, q8=A.kv == 'q8')
+        eng = Q3MoETP(A.gguf, max_ctx=len(seq) + 8, module=A.module, q8=A.kv == 'q8', rope=rope)
         print(f'two cards: module {eng.module}, KV {getattr(eng, "kv_format_id", "f16")}, expert rows {eng.exp_rows}, kv heads {eng.kvc}, '
               f'head rows {eng.vh} / {eng.vocab - eng.vh}, grids {eng.per_wgp_c}, splits {eng.splits}', flush=True)
         rows, rep_bad = [], []
@@ -72,7 +87,7 @@ if __name__ == '__main__':
     else:
         from caminus.engine.q3moe_one import Q3MoEOne
         print(torch.cuda.get_device_name(0), flush=True)
-        eng = Q3MoEOne(A.gguf, max_ctx=len(seq) + 8, module=A.module, q8=A.kv == 'q8')
+        eng = Q3MoEOne(A.gguf, max_ctx=len(seq) + 8, module=A.module, q8=A.kv == 'q8', rope=rope)
         print(f'one card: module {eng.module}, KV {getattr(eng, "kv_format_id", "f16")}', flush=True)
         ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
     so = score(ref, ours); print(line('caminus' if A.kv == 'f16' else 'caminus q8', so), flush=True)
@@ -85,6 +100,12 @@ if __name__ == '__main__':
         print(('PASS' if c1 else 'FAIL') + f' mean KLD vs float64: caminus {so["mean"]:.3e} <= llama.cpp {sl["mean"]:.3e}')
         print(('PASS' if c2 else 'FAIL') + f' top-1 agreement: caminus {so["top1"]} >= llama.cpp {sl["top1"]}')
         ok = ok and c1 and c2
+    if A.yarn:   # (the relative rule above loosens with a wrong reference or llama.cpp run: an absolute bar, the native check)
+        nat = yarn_bound.load_native(A.native_ref, seq, len(seq)) if A.native_ref else None
+        ll_, sl_ = (ll, sl) if A.llama else (None, None)
+        c4, lines = yarn_bound.gate(score, 'short', ours, so, ll_, sl_, nat, A.llama_max_kld, A.llama_log)
+        for l in lines: print(l, flush=True)
+        ok = ok and c4
     if A.against:   # (this run against another run of the same rows: the Q8 cache against the F16 cache, gated)
         n = ours.shape[0]
         lf = kv_against.load_rows(A.against_llama, n, '--against-llama') if A.against_llama else None

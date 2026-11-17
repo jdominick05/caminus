@@ -69,15 +69,26 @@ def splits_for(nkv, cap=ATS_SPLITS):
     return max(1, min(int(cap), card_per_wgp() * wgps // int(nkv)))
 
 
+def _rope_mode(rope, who):
+    """rope as an engine takes it: None or a caminus.rope.YarnMode"""
+    from ..rope import YarnMode
+    if rope is not None and not isinstance(rope, YarnMode): raise ValueError(f'{who}: rope must be None or a caminus.rope.YarnMode, not {rope!r}')
+    return rope
+
+
 class Q3MoEOne:
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp='card', gu=True, attn_batched=True, attn_one=True,
                  attn_split=True, splits=None, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8,
-                 link_keepalive=True, q8=False):
+                 link_keepalive=True, q8=False, rope=None):
         """q8: the KV cache as Q8_0 rows on k3_q3m_lean_kvq8 (KV_FORMAT_Q8; the lean tape form and a file without codebook
         or row-scale tensors only; its batched prefill is Q3MPrefill's Q8 path). A refused encoding (a non-finite K / V
-        value) raises caminus.errors.InvalidKVEncoding and leaves the engine broken: reset() keeps it"""
+        value) raises caminus.errors.InvalidKVEncoding and leaves the engine broken: reset() keeps it.
+        rope: None (the trained RoPE: max_ctx up to the file's context_length) or a caminus.rope.YarnMode (the long-context
+        mode: the module's YaRN build, k3.Q3M_YARN_OF, its table after eps in every layer's qk_par, max_ctx up to the
+        mode's factor x original context; the lean tape form only, F16 or Q8). The engine key carries rope_key"""
         if type(q8) is not bool: raise ValueError(f'Q3MoEOne: q8 must be a bool, not {q8!r}')
         self.q8 = q8
+        self.rope = _rope_mode(rope, 'Q3MoEOne')
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoEOne: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -91,8 +102,12 @@ class Q3MoEOne:
         assert int(hp('attention.value_length', self.hd)) == self.hd and self.k_used <= 64
         libm = ctypes.CDLL('libm.so.6'); libm.powf.restype = ctypes.c_float; libm.powf.argtypes = [ctypes.c_float, ctypes.c_float]
         self.theta_scale = libm.powf(float(hp('rope.freq_base')), -2.0 / self.hd)
-        n_ctx = int(hp('context_length'))
-        if not isinstance(max_ctx, int) or not 1 <= max_ctx <= n_ctx: raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
+        n_ctx = int(hp('context_length')) if self.rope is None else self.rope.max_ctx   # (YaRN: the mode's positions)
+        if not isinstance(max_ctx, int) or not 1 <= max_ctx <= n_ctx:
+            raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}' + ('' if self.rope is not None else ' (the long-context mode, rope=YarnMode, serves more)'))
+        if self.rope is not None:
+            self.rope_key = self.rope.key()
+            self.rope_table = self.rope.table(self.hd, float(hp('rope.freq_base')))
         self.dev, self.max_ctx, self.limit_us, self.module, self.fused = int(device), max_ctx, limit_us, module, fused   # (module None: by the tape form)
         self.rpt = rpt   # rows per matvec task: 'auto' = each stage's tasks fit the resident grid once, or a number
         # the fused tape: one more one-task segment beside the final norm whose buffers are host memory the card addresses
@@ -168,7 +183,22 @@ class Q3MoEOne:
     # -- weights -----------------------------------------------------------------------------------------------------------
     @property
     def module(self):
-        """the code object: the one set, else the lean decode module for the default tape form and the full one for the others"""
+        """the code object: the one set, else the lean decode module for the default tape form and the full one for the
+        others; with rope (the long-context mode) that module's YaRN build (k3.Q3M_YARN_OF: the lean forms only)"""
+        yarn, named = getattr(self, 'rope', None) is not None, getattr(self, '_module', None)
+        if named in k3.Q3M_YARN_MODULES:
+            if not yarn: raise ValueError(f'Q3MoEOne: {named} is a YaRN build: it needs rope=YarnMode (the long-context mode)')
+            self._module = k3.Q3M_YARN_BASE[named]
+            try: base = self._module_base()
+            finally: self._module = named
+        else:
+            base = self._module_base()
+        if not yarn: return base
+        if base not in k3.Q3M_YARN_OF:
+            raise ValueError(f'Q3MoEOne: the long-context mode (YaRN) runs on the lean decode modules only ({sorted(k3.Q3M_YARN_OF)}), not {base}')
+        return k3.Q3M_YARN_OF[base]
+
+    def _module_base(self):
         lean = self.fused and self.gu and self.attn_one and self.attn_split
         if getattr(self, 'q8', False):   # (the Q8 cache: k3_q3m_lean's Q8 build only; set explicitly or picked here)
             one = k3.Q3M_KV_Q8_OF[MODULE_LEAN]   # (the one-card Q8 module; its two-card build only when set by name: the
@@ -225,7 +255,8 @@ class Q3MoEOne:
             if len(d['ffn_gate_exps']) > 4:   # (the row-scale tile's fused gate | up: the gate's scales, then the up's)
                 d['gu_rs'] = torch.cat([d['ffn_gate_exps'][4], d['ffn_up_exps'][4]]).contiguous()
             d['qk_par'] = torch.cat([d['q_norm'], d['k_norm'], torch.tensor([self.theta_scale, self.eps], dtype=torch.float32,
-                                                                              device='cuda')]).contiguous()
+                                                                              device='cuda')]
+                                    + ([torch.from_numpy(self.rope_table).to('cuda')] if self.rope is not None else [])).contiguous()
         self.out_norm = self._f32('output_norm.weight')
         self.head = self._w('output.weight')
         self.emb_dev = torch.from_numpy(np.ascontiguousarray(np.asarray(self.emb.data()))).to('cuda')

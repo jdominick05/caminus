@@ -85,11 +85,14 @@ check(all(re.search(r'#define ' + mac + r'\b', tp) for mac in ('K3_TP', 'K3_Q3M_
 
 # ---- the host: names, build.sh, capabilities, the build check ---------------------------------------------------------------
 bs = open(os.path.join(ROOT, 'build.sh')).read()
-check(k3.Q3M_TP_OF == {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
+NATIVE_TP_OF = {k: v for k, v in k3.Q3M_TP_OF.items() if k not in k3.Q3M_YARN_MODULES}   # (the YaRN builds: their own pairs below)
+check(NATIVE_TP_OF == {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
+      and all(k3.Q3M_TP_OF[k3.Q3M_YARN_OF[b]] == k3.Q3M_YARN_OF[k3.Q3M_TP_OF[b]] for b in ('k3_q3m_lean', 'k3_q3m_lean_kvq8'))
       and k3.Q3M_TP_MODULES == tuple(k3.Q3M_TP_OF.values())
       and all(os.path.exists(os.path.join(ROOT, 'kernels', m + '.hip')) for m in k3.Q3M_TP_MODULES)
       and 'for src in kernels/*.hip; do' in bs and re.search(r'kernels/k3_q3m\*\.hip\|[^)]*\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs),
-      'k3.Q3M_TP_OF: kernels/<name>.hip for each two-card module; build.sh compiles every kernels/*.hip, k3_q3m*.hip with max-ilp and no ggml path')
+      'k3.Q3M_TP_OF: the native pairs, and each YaRN build\'s two-card form is the YaRN build of its native two-card module; '
+      'kernels/<name>.hip for each two-card module; build.sh compiles every kernels/*.hip, k3_q3m*.hip with max-ilp and no ggml path')
 check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS['k3_q3m_lean'] | {('OWN_SLOT_SUM', '-')} for m in k3.Q3M_TP_MODULES)
       and ('OWN_SLOT_SUM', '-') not in k3.MODULE_CAPS['k3_q3m_lean'] and k3.Q3M_TP_OPS == k3.Q3M_LEAN_OPS | {k3.OP_XCHG, k3.OP_OWN_SLOT_SUM},
       'capabilities: the lean module\'s plus OWN_SLOT_SUM; ops: the lean set plus OP_XCHG and OP_OWN_SLOT_SUM')
@@ -179,11 +182,15 @@ def atts(module, splits):
         return str(x)
 
 
-one_mods = k3.Q3M_LEAN_MODULES + k3.Q3M_VER_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES)
+# (the YaRN builds refuse a block without their table, so the split limits run on the native modules here; the YaRN builds
+#  share the op and its limits: tests/engine/test_q3moe_yarn_cpu.py checks their table refusal)
+NO_YARN = lambda ms: tuple(m for m in ms if m not in k3.Q3M_YARN_MODULES)
+one_mods = NO_YARN(k3.Q3M_LEAN_MODULES + k3.Q3M_VER_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES))
+tp_mods = NO_YARN(k3.Q3M_TP_MODULES)
 r65 = {m: atts(m, 65) for m in one_mods}
 check(all(r65.values()) and all(atts(m, 64) is None for m in one_mods) and all(k3.atts_max_splits(m) == 64 for m in one_mods),
       f'own_atts refuses 65 splits and takes 64 on the one-card modules ({len(one_mods)}: lean, verify, IQ, row-scale): {r65["k3_q3m_lean"]}')
-check(all(atts(m, n) is None for m in k3.Q3M_TP_MODULES for n in (1, 64, 65, 105, 128)) and all(atts(m, 129) for m in k3.Q3M_TP_MODULES)
+check(all(atts(m, n) is None for m in tp_mods for n in (1, 64, 65, 105, 128)) and all(atts(m, 129) for m in tp_mods)
       and all(k3.atts_max_splits(m) == 128 for m in k3.Q3M_TP_MODULES),
       'own_atts takes 1 .. 128 splits on k3_q3m_lean_tp and its trace form (64, 65, 105, 128 tried) and refuses 129')
 

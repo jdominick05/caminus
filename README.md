@@ -30,6 +30,10 @@
   <img src="docs/panel.svg" alt="The Caminus panel: models, running servers and Qwen Code" width="92%">
 </p>
 
+<p align="center">
+  <img src="docs/ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
+</p>
+
 ## Get started
 
 You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source).

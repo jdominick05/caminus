@@ -52,7 +52,7 @@ from ..device import capacity
 from . import k3, upload
 from .own_layout import q6k_planes
 from .q35_dense_tp import cut, vocab_cut
-from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN, KV_FORMAT_Q8
+from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN, KV_FORMAT_Q8, _rope_mode
 
 SPLITS_CAP = 128         # the most attention splits per kv head on a card (splits_cap); one card's engine caps at 64. A card holds half
                           # the kv heads, so 64 splits fill 128 of the XTX's 192 / the XT's 210 workgroups; the two-card
@@ -108,12 +108,12 @@ def _role(name):
     return 'rep'   # (the embedding, every norm, the q / k norms, the router)
 
 
-def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP, q8=False):
+def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP, q8=False, yarn=False):
     """bytes per card by term, from the header alone: [dict(split, rep, kv, ats, slots, small, tape) for card 0, card 1].
     split: its slices of the split matrices (exact: the cuts are whole blocks); rep: the replicated tensors (the embedding,
     the norms, the router); kv: its kv heads' KV cache (f16, or q8: Q8_0 rows), max_ctx + ATS_PAD rows; ats: OP_OWN_ATTS's scratch at splits_cap
     splits (the most a card takes); slots: the exchanges' receive slots (16 words + D floats, 2 nl of them, uncached VRAM outside
-    torch); small: the per-layer q / k norm blocks and the router choices; tape: TAPE_MIB. max_ctx is not bounded by the
+    torch); small: the per-layer q / k norm blocks (yarn: with the YaRN table) and the router choices; tape: TAPE_MIB. max_ctx is not bounded by the
     file's context_length here (a projection for a longer context is arithmetic only)"""
     c = shapes(F); kv0 = c['nkv'] // 2 if kv_heads is None else int(kv_heads)
     _check_split(c, kv0, int(exp_rows))
@@ -131,7 +131,7 @@ def projection_terms(F, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=V
         out[k].update(kv=c['nl'] * (int(max_ctx) + k3.Engine.ATS_PAD) * k3.kv_pos_bytes(kvs[k] * c['hd'], bool(q8)),
                       ats=4 * k3.Engine.atts_scratch_floats(kvs[k], splits_cap),   # (a card's splits are at most the cap)
                       slots=2 * c['nl'] * (16 + c['D']) * 4,
-                      small=c['nl'] * ((2 * c['hd'] + 2) * 4 + c['k_used'] * 8),
+                      small=c['nl'] * ((2 * c['hd'] + 2 + (k3.YARN_TABLE_FLOATS if yarn else 0)) * 4 + c['k_used'] * 8),
                       tape=TAPE_MIB * 2 ** 20)
     return out
 
@@ -141,7 +141,7 @@ class Q3MoETP:
 
     def __init__(self, path, devices=(0, 1), max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=16, rpt_down=None,
                  rpt_head=64, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, lmin=ATS_LMIN, local_only=False,
-                 vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8, splits_cap=SPLITS_CAP, q8=False):
+                 vram_check=True, vram_extra_mib=(0.0, 0.0), max_retries=8, splits_cap=SPLITS_CAP, q8=False, rope=None):
         """path: a qwen3moe GGUF with Q4_K / Q6_K matrices (the lean module's formats). devices: the two torch / HIP device
         indices (card 0 first: its partials come first in every sum). exp_rows: card 0's rows of every expert's
         intermediate (a multiple of 256); kv_heads: card 0's kv heads (None: half); vocab_share: card 0's part of the
@@ -155,9 +155,12 @@ class Q3MoETP:
         (1 .. k3.atts_max_splits of the module: 128 on the two-card modules; default SPLITS_CAP = 128); each card takes
         q3moe_one.splits_for(its kv heads, splits_cap), and the projection counts the cap's scratch. q8: the KV caches as Q8_0
         rows on k3_q3m_lean_tp_kvq8 (KV_FORMAT_Q8; module None or that module only; not with the _trace build); a refused
-        encoding raises caminus.errors.InvalidKVEncoding and leaves the engine broken (reset() keeps it)"""
+        encoding raises caminus.errors.InvalidKVEncoding and leaves the engine broken (reset() keeps it). rope: None or a
+        caminus.rope.YarnMode (the long-context mode: the two-card module's YaRN build, k3.Q3M_YARN_OF, the table after eps in
+        every layer's qk_par on both cards, max_ctx up to the mode's positions; Q3MoEOne's)"""
         if type(q8) is not bool: raise ValueError(f'Q3MoETP: q8 must be a bool, not {q8!r}')
         self.q8 = q8
+        self.rope = _rope_mode(rope, 'Q3MoETP')
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen3moe': raise ValueError(f'Q3MoETP: {path} is a {F.arch!r} GGUF, not qwen3moe')
         hp = F.hp
@@ -171,19 +174,27 @@ class Q3MoETP:
         _check_split(c, self.kv0, self.exp_rows0)
         libm = ctypes.CDLL('libm.so.6'); libm.powf.restype = ctypes.c_float; libm.powf.argtypes = [ctypes.c_float, ctypes.c_float]
         self.theta_scale = libm.powf(float(hp('rope.freq_base')), -2.0 / self.hd)
-        n_ctx = int(hp('context_length'))
+        n_ctx = int(hp('context_length')) if self.rope is None else self.rope.max_ctx   # (YaRN: the mode's positions)
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or not 1 <= max_ctx <= n_ctx:
-            raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
+            raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}' + ('' if self.rope is not None else ' (the long-context mode, rope=YarnMode, serves more)'))
+        if self.rope is not None:
+            self.rope_key = self.rope.key()
+            self.rope_table = self.rope.table(self.hd, float(hp('rope.freq_base')))
         devices = tuple(int(d) for d in devices)
         if len(devices) != 2 or devices[0] == devices[1]: raise ValueError(f'Q3MoETP: two different devices, not {devices}')
         self.devs, self.max_ctx, self.limit_us = list(devices), int(max_ctx), limit_us
         self.cache_rows = self.max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
         one = module or ('k3_q3m_lean_kvq8' if q8 else 'k3_q3m_lean')
         one = {v: k for k, v in k3.Q3M_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
+        if one in k3.Q3M_YARN_MODULES and self.rope is None: raise ValueError(f'Q3MoETP: {one} is a YaRN build: it needs rope=YarnMode')
+        if self.rope is not None:   # (the long-context mode: the YaRN build of the module the rest of these checks pick)
+            if one not in k3.Q3M_YARN_OF and one not in k3.Q3M_YARN_MODULES:
+                raise ValueError(f'Q3MoETP: the long-context mode (YaRN) has no build of {one} ({sorted(k3.Q3M_YARN_OF)})')
+            one = k3.Q3M_YARN_OF.get(one, one)
         if one not in k3.Q3M_TP_OF: raise ValueError(f'Q3MoETP: module {one} has no two-card build ({sorted(k3.Q3M_TP_OF)})')
         if (k3.Q3M_TP_OF[one] in k3.Q3M_KV_Q8_MODULES) != q8:   # (before anything is read: the module decides the cache format)
             raise ValueError(f'Q3MoETP: module {k3.Q3M_TP_OF[one]} ' + ('needs q8=True' if not q8 else
-                             f'reads F16 rows (the Q8 KV cache runs on {k3.Q3M_TP_OF[k3.Q3M_KV_Q8_OF["k3_q3m_lean"]]} only)'))
+                             f'reads F16 rows (the Q8 KV cache runs on {k3.Q3M_TP_OF[k3.Q3M_KV_Q8_OF["k3_q3m_lean"]]} only, or its YaRN build)'))
         self.module = k3.Q3M_TP_OF[one]
         if q8: self.kv_format_id = KV_FORMAT_Q8   # (the engine key carries it: Q8 rows never restore into F16 ones)
         self.emb = F.T['token_embd.weight']
@@ -206,7 +217,7 @@ class Q3MoETP:
         # (the prompt cache's key: the split changes the partial sums' bits)
         self.tp_key = dict(exp_rows=self.exp_rows0, kv_heads=self.kv0, vocab_rows=self.vh)
         # VRAM, every term before the first allocation (the uploader's pinned staging is host memory, checked by it)
-        terms = projection_terms(F, self.max_ctx, self.exp_rows0, self.kv0, self.vocab_share, self.splits_cap, q8=q8)
+        terms = projection_terms(F, self.max_ctx, self.exp_rows0, self.kv0, self.vocab_share, self.splits_cap, q8=q8, yarn=self.rope is not None)
         h2d = upload.mode_of(default=upload.TWO_CARD_DEFAULT)                     # (CAMINUS_H2D: how the weights reach the cards; engine/upload.py)
         self.vram_mib = [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(terms, upload.extra_mib(h2d, 2))]
         ex = [float(v) for v in vram_extra_mib]
@@ -240,13 +251,14 @@ class Q3MoETP:
         self._load_logged(); self._build_tapes()
 
     @staticmethod
-    def projection_mib(path, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP, q8=False):
+    def projection_mib(path, max_ctx, exp_rows=EXP_ROWS, kv_heads=None, vocab_share=VOCAB_SHARE, splits_cap=SPLITS_CAP, q8=False, yarn=False):
         """per card, MiB the engine allocates at max_ctx, from the file's header alone (nothing on a card): __init__'s own
         check counts the same terms (with the CAMINUS_H2D arm's buffer: upload.extra_mib, 0 unless peer). max_ctx past the
-        file's context_length is computed, not refused (the engine refuses it). q8: the Q8_0 rows"""
+        file's context_length is computed, not refused (the engine refuses it outside the long-context mode). q8: the Q8_0
+        rows; yarn: the long-context mode's table in each layer's block"""
         F = ggufio.GGUFFile(path)
         try:
-            return [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(projection_terms(F, max_ctx, exp_rows, kv_heads, vocab_share, splits_cap, q8),
+            return [sum(t.values()) / 2 ** 20 + 256 + e for t, e in zip(projection_terms(F, max_ctx, exp_rows, kv_heads, vocab_share, splits_cap, q8, yarn),
                                                                        upload.extra_mib(upload.mode_of(default=upload.TWO_CARD_DEFAULT), 2))]
         finally: F.close()
 
@@ -296,14 +308,16 @@ class Q3MoETP:
         return out
 
     def _qk_par(self, il):
-        """OP_OWN_ATTS's block of layer il on the host: q_norm | k_norm | theta_scale, eps (fp32; Q3MoEOne's)"""
+        """OP_OWN_ATTS's block of layer il on the host: q_norm | k_norm | theta_scale, eps (fp32; Q3MoEOne's), then the YaRN
+        table in the long-context mode"""
         p = f'blk.{il}.'
         f = lambda n: self.F.T[n].pread(0, self.F.T[n].n_bytes).view(np.float32)
         for n in (p + 'attn_q_norm.weight', p + 'attn_k_norm.weight'):
             t = self.F.T[n]
             if t.type != 'F32' or t.n_values != self.hd: raise ValueError(f'Q3MoETP: {n} is {t.type} {list(t.shape)}, the tape needs F32 [{self.hd}]')
         return np.ascontiguousarray(np.concatenate([f(p + 'attn_q_norm.weight'), f(p + 'attn_k_norm.weight'),
-                                                    np.array([self.theta_scale, self.eps], dtype=np.float32)]))
+                                                    np.array([self.theta_scale, self.eps], dtype=np.float32)]
+                                                   + ([self.rope_table] if self.rope is not None else [])))   # (YaRN: + freq | mscale)
 
     def _load(self):
         D, hd, nh, nkv, E, FF = self.D, self.hd, self.nh, self.nkv, self.n_exp, self.ffn

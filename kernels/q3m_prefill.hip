@@ -521,8 +521,8 @@ extern "C" __global__ void __launch_bounds__(256) q3p_swiglu(const float * __res
 // all 128 dims -> q16 [n][nh][128]; kv heads (blockIdx.y - nh = g): k the same with k_norm -> the cache row's K part
 // (fp16), v -> its V part (fp16). OP_OWN_ATTS's statements (the four wave sums in order, rsqrtf, (scale x) w, theta =
 // pos powf(theta_scale, j), fma(x0, c, -(x1 s)) / fma(x1, c, x0 s)). qkv: fp32 [n][ldq] = q | k | v. Grid (n, nh + nkv),
-// block 128. par: q_norm [128] | k_norm [128] | theta_scale | eps (the decode's block). The host checks the positions
-// against the cache's rows.
+// block 128. par: q_norm [128] | k_norm [128] | theta_scale | eps (the decode's block; the YaRN objects, Q3P_YARN: then
+// freq [64] | attention factor, caminus.rope.yarn_table). The host checks the positions against the cache's rows.
 #ifdef Q3P_KV_Q8
 // q3p_qk_rope_q8 (the Q8 KV object, kernels/q3m_prefill_kvq8.hip): the same statements; the kv heads' K and V go to the
 // cache row as Q8_0 blocks (kernels/own_kv_codec.h's wave encode: wave w of a kv head's workgroup = block w of its K and
@@ -557,7 +557,13 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
 #endif
     const float x = isq ? row[(size_t)hy * 128 + i] : row[nh * 128 + (size_t)g * 128 + i];
     const float wn = isq ? par[i] : par[128 + i], eps = par[257];
+#ifdef Q3P_YARN
+    // YaRN (q3m_prefill_yarn / q3m_prefill_kvq8_yarn): pair i's frequency par[258 + i] and the attention factor par[322] on
+    // cos and sin, OP_OWN_ATTS's K3_Q3M_YARN statements on the same block (caminus.rope.yarn_table)
+    if (i < 64) { const float theta = (float)pos * par[258 + i], ms = par[322]; rc[i] = cosf(theta) * ms; rs[i] = sinf(theta) * ms; }
+#else
     if (i < 64) { const float theta = (float)pos * powf(par[256], (float)i); rc[i] = cosf(theta); rs[i] = sinf(theta); }
+#endif
     float ss = x * x; ss = wsum(ss); if (lane == 0) part[wave] = ss;
     __syncthreads();
     float tot = 0.0f; for (int q = 0; q < 4; q++) tot += part[q];

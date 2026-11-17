@@ -130,7 +130,9 @@ speed, matching prefill, cache park/restore, the GSQ verify objects and two card
 `k3_q3m_lean`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
 `q3p_qk_rope_q8` and `q3p_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
 `q3m_prefill`. Served: `caminus serve --kv q8` (or `caminus start --kv q8`) sets `opt['kv']`, which the registry's
-projection and build read (`Arch.kv_check`, `arch.kv_q8`); both objects are in the installed runtime set.
+projection and build read (`Arch.kv_check`, `arch.kv_q8`); both objects are in the installed runtime set. The long-context mode
+(YaRN) picks the Q8 rows by itself on one card where only they hold its context (no `--kv` given), on
+`k3_q3m_lean_kvq8_yarn` and `q3m_prefill_kvq8_yarn`.
 
 Format: the same wire codec and row layout as the dense line (`kernels/own_kv_codec.h`, `caminus.ref_kv`), with K
 rotated (`Q3MoEOne.kv_format_id` = `q8_0-v1:qk-hadamard128:f16-rounded-v1`). Each block encodes the fp16-rounded values

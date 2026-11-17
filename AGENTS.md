@@ -151,15 +151,26 @@ CLAUDE.md imports this file.
   reports `max_ctx` per KV format (`{f16, q8}`, each projected on its own, q8 null without a Q8 build); `--kv` selects
   only which format's placement the report describes.
   `meta()` keeps the header's `rope.scaling.*` keys; every entry refuses a file that sets them (`Arch.rope_refusal`, from
-  serve's `recipe` and replay): no engine applies a file's RoPE scaling yet, and such a file is never served unscaled.
-  `rope_facts` holds each model card's native context and long-context recipe as data only.
+  serve's `recipe` and replay): no engine applies a file's RoPE scaling keys, and such a file is never served unscaled.
+  `rope_facts` holds each model card's native context and long-context recipe; `shipped` names what Caminus serves past
+  the GGUF's context: the Coder's NTK mode, and Qwen3-30B-A3B's opt-in YaRN x4 (`_Q3MLong`, `--long-context` or an explicit
+  `--max-ctx` past 40,960; `Arch.long_mode` resolves it in `recipe` before placement, every other entry refuses the flag;
+  `_Q3MLong.long_refusal` refuses a qwen3moe file whose header is not that model's, context_length 40,960 and
+  rope.freq_base 1e6, or that has codebook / row-scale tensors).
+  YaRN runs on separate objects (`k3.Q3M_YARN_OF`: `k3_q3m_lean*_yarn` under `K3_Q3M_YARN`, `q3m_prefill*_yarn` under
+  `Q3P_YARN`): the table `caminus.rope.yarn_table` (llama.cpp's rope_yarn: freq per pair, mscale on cos / sin) is appended
+  to each layer's qk_par and read by decode and prefill with the same statements; the default objects keep their code.
+  In the mode with no `kv` asked for, `placement_extra` picks F16 where the context fits, else Q8_0 where it holds more
+  (one XTX: about 80K); the engine key carries `tp.rope`. Each YaRN object's spilled scalars must equal its native peer's
+  (53 / 19 / 66 / 33): objcheck cannot pair them.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `k3_q3m_lean_tp`: kv heads and each
   expert's rows split, router replicated; `check_replicas` compares the residual and every layer's router ids; served by
   `caminus serve --cards 2` through `arch.Q3MoETP` (`TWO_CARD['qwen3moe']`; one card stays the default, the picker offers
   two for `Q3MoETP.two_card_models`): card 0 is the bigger card (placement's order) and takes 512 of each expert's 768
-  rows, a smaller card 0 is refused (`pair_refusal`), max_ctx auto capped at the file's 40,960; both objects
+  rows, a smaller card 0 is refused (`pair_refusal`), max_ctx auto capped at the file's 40,960 (131,072 in the
+  long-context mode); both objects
   (`k3_q3m_lean_tp`, `q3m_prefill_tp`) are in the installed runtime set, with its Q8 KV build (`--kv q8`);
   `tests/engine/test_q3moe_tp_cpu.py`, GPU gate
   `tests/engine/test_q3moe_tp.py`). Its batched

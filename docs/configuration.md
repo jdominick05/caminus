@@ -36,7 +36,8 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 
 | Option | What it does |
 |---|---|
-| `--max-ctx N` | A smaller context than the largest that fits. |
+| `--max-ctx N` | A smaller context than the largest that fits. Above the model's own context it turns on the long-context mode where the model has one (below). |
+| `--long-context` | `qwen3-30b-a3b`: YaRN x4, up to 131,072 tokens (about 80K on one XTX, with 8-bit cache rows where only they fit; 131,072 on two cards). Short texts can read slightly differently, so it is off by default. `coder`: needs a `--max-ctx` above 262,144. Other models refuse it. |
 | `--cards 2` | Run a one-card model across two cards (tensor parallel): `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b`. Without it each model runs on its own card count. For `qwen3-30b-a3b` one card stays the default: two cards write more slowly below about 16K tokens of context and faster past it, and the context stays 40,960 tokens either way (the model's own limit). The bigger card is card 0: it holds two thirds of every expert. `caminus fit --cards 2` reports the context two cards hold. |
 | `--kv q8` | `qwen3-30b-a3b` only, on one card or two: an 8-bit attention cache instead of F16, the default. It takes about half the memory per token of context (0.050 MiB instead of 0.094), so the full 40,960 tokens still fit when the desktop or another program holds part of the card; decode runs at about the same speed. A conversation saved by a server with one format is never restored by a server with the other: it is read again. Every other model refuses it (the dense 27B models keep F16, the Coder its own 8-bit cache). `caminus start --kv q8` takes it too, and `caminus fit` reports the context that fits with each cache; `caminus ps` shows the cache a server holds. See [models](models.md#the-8-bit-kv-cache-qwen3-30b-a3b). |
 | `--kv-host` | `coder` only: keep the attention cache in system memory (the cards read it directly). Same results, less VRAM. |
@@ -47,6 +48,22 @@ Each model starts with good defaults. To change one, use the panel's advanced la
 | `--no-loop-guard` | Allow sustained repeated answer prose when repetition is intentional. |
 | `--idle-park-s N` | Save an idle conversation to disk after N seconds (default 8 hours). |
 | `--config FILE` | Read options from a JSON or TOML file (the same names with underscores). |
+
+### Long context (`qwen3-30b-a3b`, up to 131,072 tokens)
+
+`--long-context` (or `--max-ctx` above 40,960) serves the model card's YaRN recipe: positions scaled by 4 from the
+native 32,768 tokens, up to 131,072. It is opt-in: without it the server is unchanged (40,960 tokens, no scaling).
+
+- The context: one XTX holds about 80K tokens, with the attention cache as 8-bit rows (the server picks them only where
+  the 16-bit cache would hold less, and logs it); two cards hold 131,072 with the 16-bit cache. `caminus fit
+  --long-context` reports what your cards hold.
+- YaRN applies at every position, so short texts can read slightly differently than in the default mode (the model card
+  advises it only past 32,768 tokens).
+- A conversation saved in one mode is never restored into the other.
+- `caminus start qwen3-30b-a3b --long-context` passes it to the server.
+- The recipe is for Qwen3-30B-A3B's own file (its header says 40,960 tokens and RoPE base 1,000,000). Another file of the
+  same architecture, such as the 2507 releases or Qwen3-Coder-30B-A3B (262,144 tokens natively, another base), is refused
+  in this mode, as is a file with codebook (IQ) or row-scaled tensors; without the flag those files serve as before.
 
 ### Long context (`coder`, up to 1M tokens)
 

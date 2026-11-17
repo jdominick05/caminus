@@ -331,7 +331,8 @@ def engine_key(m, pf, draft=None, build=None):
                 gdn_keys=int(m.gdn_keys), moe_blocks=int(m.moe_blocks), vocab_share=float(m.vocab_share), ntok=int(m.ntok),
                 local_only=bool(getattr(m, 'local_only', False)), **dict(getattr(m, 'tp_key', None) or {}),
                 **({'spec_T': int(m.spec_T)} if hasattr(m, 'spec_T') else {}),   # (the dense own line: the verify width, when drafting)
-                **({'kv': str(m.kv_format_id)} if getattr(m, 'kv_format_id', None) else {})),   # (a Q8 KV cache's format: never restored into F16 rows)
+                **({'kv': str(m.kv_format_id)} if getattr(m, 'kv_format_id', None) else {}),    # (a Q8 KV cache's format: never restored into F16 rows)
+                **({'rope': str(m.rope_key)} if getattr(m, 'rope_key', None) else {})),         # (the long-context mode's YaRN: never restored into a native engine)
         qsa=dict(qsa=bool(m.qsa), dual=bool(getattr(m, 'dual', False)), qsa_limit=m.qsa_limit, max_ctx=int(m.max_ctx),
                  idx_cache=bool(m.idx_cache)),
         features=dict(layers=[int(x) for x in m.feature_layers], card=int(m.feature_card)),

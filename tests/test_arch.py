@@ -281,14 +281,14 @@ def main():
 
     # ---- the model cards' context facts in the registry (data only: nothing serves from them yet)
     F = {n: ent.rope_facts for n, ent in arch.ARCHS.items()}
-    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), None, None, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
+    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), 'yarn', 4.0, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
           and F['qwen3moe'] is F['qwen3moe-tp'] is arch.QWEN3MOE_ROPE
           and F['qwen35-own'] is F['qwen35-own-tp'] is arch.QWEN35_ROPE
           and (F['qwen35-own'].native_ctx, F['qwen35-own'].card_factors, F['qwen35-own'].shipped) == (262144, (2.0, 4.0), None)
           and (F['qwen4exp'].native_ctx, F['qwen4exp'].card_kind, F['qwen4exp'].shipped, F['qwen4exp'].shipped_factor)
           == (262144, 'yarn', 'ntk', arch.LONG_NTK)
           and all(F[n] is None for n in ('qwen35moe', 'qwen35', 'qwen3next')),
-          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card, not applied), the dense 27B line 262,144, the Coder '
+          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card; x4 shipped as the opt-in long-context mode), the dense 27B line 262,144, the Coder '
           'ships NTK x4 where its card names YaRN x4; the paused entries have none')
 
     # ---- caminus serve's options: --model-alias '' = the model's own id
@@ -309,7 +309,7 @@ def main():
         args = fn.args.args[-len(fn.args.defaults):]
         return next(ast.literal_eval(d) for a_, d in zip(args, fn.args.defaults) if a_.arg == 'q8')
     q8s = {n: (a.kv_formats, a.kv_fixed) for n, a in arch.ARCHS.items()}
-    check(cli.parse([])['kv'] == 'f16' and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
+    check(cli.parse([])['kv'] is None and not arch.kv_q8(cli.parse([])) and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
           and q8s == {'qwen4exp': (('f16',), 'q8_0'), 'qwen35moe': (('f16',), 'q8_0'), 'qwen35': (('f16',), 'q8_0'),
                       'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen3next': (('f16',), 'q8_0'),
                       'qwen35-own-tp': (('f16',), None), 'qwen3moe-tp': (('f16', 'q8'), None)}
@@ -323,7 +323,7 @@ def main():
           and arch.kv_q8_built(types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[1])) and not arch.kv_q8_built(object())
           and not arch.kv_q8_built(types.SimpleNamespace(kv_format_id='f16-v1:x'))
           and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two)',
-          f'cli: --kv f16 (default) / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
+          f'cli: --kv unset by default (F16; the long-context mode may choose) / f16 / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
 
     # every kv_format_id an engine assigns is a Q8 id listed in arch.KV_Q8_FORMATS, under `if q8` (serve's startup check
     # and /props read a built engine's cache from that list, so an id outside it would read as F16)

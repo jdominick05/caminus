@@ -207,15 +207,25 @@ class ContextFit(unittest.TestCase):
         self.assertEqual(report['cards'], [cards[1]['pci'], cards[0]['pci']])
         self.assertEqual(placed['split'], {'exp_rows': 512, 'vocab_share': 0.532})
         self.assertEqual(report['need_mib'], need(40960))
+        self.assertEqual(report['kv'], 'f16')                                  # (the KV format the maximum assumes)
         # the runtime route (max_ctx auto in serve, the placement's split stored) reads the same plan
         ropt = dict(opt, placement=dict(split=placed['split']))
         with patch.object(capacity, 'caps_mib', return_value=caps), patch.object(capacity, 'cache_reserve_mib', return_value=reserves):
             self.assertEqual(A.context_fit(ropt).report(), A.context_fit(opt, pair).report())
             self.assertEqual(A.auto_max_ctx(ropt, log=lambda *a, **kw: None), 40960)
-        # past the file's context_length: no native fit reported
+        # past the file's context_length: the long-context mode (YaRN x4, as an explicit --max-ctx past the Coder's own
+        # context_length is its NTK mode): the same report shape, its cap 131,072; past the cap: refused, no maximum
         stdout = io.StringIO()
         with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):
-            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 1)
+            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '65536', '--json']), 0)
+        long_report = json.loads(stdout.getvalue())
+        self.assertEqual(set(long_report), set(report))
+        self.assertEqual(long_report['native_ctx'], 131072)
+        self.assertIn(long_report['kv'], ('f16', 'q8'))                        # (the mode's choice, named)
+        self.assertGreaterEqual(long_report['max_ctx'][long_report['kv']], 40960)   # (the chosen format's figure)
+        stdout = io.StringIO()
+        with patch.object(host, 'gpus', return_value=cards), contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.fit_report([*argv, '--max-ctx', '131073', '--json']), 1)
         self.assertIsNone(json.loads(stdout.getvalue())['max_ctx']['f16'])
 
     def test_qwen3moe_two_card_fit_below_the_file_context_takes_the_largest_step_that_fits(self):
@@ -328,7 +338,8 @@ class ContextFit(unittest.TestCase):
         # the Q8 rows, so a card whose room holds the Q8 cache at the file's 40,960 but not the F16 one gets the full
         # context with q8 and less without; the cap stays the file's context_length. Every other model is refused in the
         # recipe, before any placement, naming the model that takes q8
-        self.assertEqual(cli.parse([])['kv'], 'f16')
+        self.assertIsNone(cli.parse([])['kv'])                         # (unset: F16, or the long-context mode's choice)
+        self.assertEqual(cli.parse(['--kv', 'f16'])['kv'], 'f16')
         self.assertEqual(cli.parse(['--kv', 'q8'])['kv'], 'q8')
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.parse(['--kv', 'q4'])

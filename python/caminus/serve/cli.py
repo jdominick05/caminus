@@ -49,10 +49,10 @@ DEFAULT_GGUF = _config.coder()
 DEFAULT_DRAFTER = _config.dflash()
 DEFAULTS = dict(model=DEFAULT_GGUF, drafter=DEFAULT_DRAFTER, no_drafter=False, draft=None, host='127.0.0.1',
                 port=8092, max_ctx='auto', auto_cache_slots=4, chunk=2048, cache_dir=_config.kv_dir(), no_disk_cache=False, cache_cap_gb=None, kv_host=False,
-                kv='f16',
+                kv=None,
                 log_dir='', no_stats=False, no_side_route=False, no_loop_guard=False, hw_root='/', idle_park_s=28800.0, max_queue=16,
                 model_alias='', ping=10.0, incremental_tool_args=False, drain_s=60.0, park_s=90.0,
-                flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None)
+                flight_dir=_config.flight_dir(), flight_cap_gb=10.0, cards=None, long_context=False)
 
 
 def load_config(path):
@@ -78,6 +78,11 @@ def load_config(path):
 EXIT_BROKEN = 75
 
 
+# defaults whose DEFAULTS value is None only so a mode can tell "not given" (kv: the long-context mode picks F16 or Q8_0
+# rows itself when no --kv is given); the options surface shows what serve then uses outside such a mode
+SHOWN_DEFAULTS = {'kv': 'f16'}
+
+
 def options_json():
     """every option caminus serve accepts, for caminus panel's advanced layout (and scripts): flag, dest, type (int / float /
     str / bool / ctx), the default caminus serve uses, the help text; read from the parser itself, so it never drifts"""
@@ -94,7 +99,8 @@ def options_json():
             typ = act.type.__name__
         else:
             typ = 'str'
-        out.append(dict(flag=flag, dest=act.dest, type=typ, default=DEFAULTS.get(act.dest), help=act.help or '',
+        default = SHOWN_DEFAULTS.get(act.dest, DEFAULTS.get(act.dest))
+        out.append(dict(flag=flag, dest=act.dest, type=typ, default=default, help=act.help or '',
                         choices=list(act.choices) if act.choices else None))
     return out
 
@@ -130,6 +136,12 @@ def parser():
     ap.add_argument('--max-ctx', type=ctx_arg, help='the engine\'s KV positions, or auto (the default): the largest context '
                                                    'that fits the card(s) now with a working prompt cache (Arch.auto_max_ctx; the '
                                                    'Coder: 262,144)')
+    ap.add_argument('--long-context', action='store_true', default=None,
+                    help='the model\'s long-context mode. qwen3-30b-a3b: YaRN x4 (the model card\'s recipe), up to 131,072 '
+                         'positions (one card: as far as the card holds, with Q8_0 KV rows where only they fit; two cards: '
+                         '131,072 at F16); an explicit --max-ctx past 40,960 implies it. YaRN applies at every position, so '
+                         'short texts can read slightly differently: the default stays the native 40,960. The Coder: an '
+                         'explicit --max-ctx past 262,144 (its NTK mode). Other models refuse it')
     ap.add_argument('--auto-cache-slots', type=int, help='max_ctx auto: VRAM checkpoint slots the context must leave room for '
                                                          '(default 4; more: a smaller context, more cached restore points)')
     ap.add_argument('--chunk', type=int, help='the batched prefill\'s chunk (tokens)')
@@ -263,6 +275,8 @@ def recipe(opt, log=print):
     # --kv (or a config file's kv): a format this model has no build for is refused here, before any placement (the
     # message names the model that takes it)
     A.kv_check(opt, who=_arch.default_alias(opt['model']))
+    mode = A.long_mode(opt)                     # (the long-context mode, before placement: the projections read it)
+    if mode: log(f'caminus serve: long-context mode ({mode})', flush=True)
     opt['arch'] = A.name
     draft = 'off' if opt.get('no_drafter') else opt.get('draft')
     defaulted = draft is None
@@ -351,6 +365,12 @@ def fit_report(argv):
         kv = 'q8' if _arch.kv_q8(opt) else 'f16'
         failed.update(kv=kv, kv_formats=list(A.kv_formats), kv_fixed=A.kv_fixed)   # (every refusal past the recipe names them)
         opt['max_ctx'] = ctx_arg(opt['max_ctx'])
+        if opt.get('rope') == 'yarn' and opt.get('kv') is None:   # (the long-context mode picks the format itself: serve's)
+            try:
+                kv = getattr(project(dict(opt))[0], 'kv', kv)
+            except host.PlacementError:
+                pass
+            opt['kv'] = kv; failed['kv'] = kv
         if opt.get('kv_host'):
             raise ValueError('fit currently reports native device-memory context; host KV requires a separate host-memory projection')
         base = dict(opt)                         # (before the selected pass's drafter keep changes draft)

@@ -21,6 +21,7 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 |---|---|
 | `--card N` | Use card N (as `caminus ps` numbers them) instead of choosing. |
 | `--ctx N` | A context of N tokens instead of the largest that fits. |
+| `--long-context` | The model's long-context mode: `qwen3-30b-a3b` with YaRN x4, up to 131,072 tokens ([models](models.md#long-context-for-qwen3-30b-a3b-opt-in)). Other models refuse it. |
 | `--kv q8` | `qwen3-30b-a3b` only: the 8-bit KV cache instead of F16, the default ([models](models.md#the-8-bit-kv-cache-qwen3-30b-a3b)). Other models refuse it before a card is picked, and `--team` refuses it (each team model keeps its own cache). |
 | `--name NAME` | Call the server NAME (default: the model's name). |
 | `--port N` | Listen on port N (default: the first free port from 8092). |
@@ -39,7 +40,9 @@ caminus fit --model MODEL.gguf --drafter DRAFTER.gguf --draft dflash --json
 ```
 
 The report gives the largest native context that fits, the chosen cards, and projected and available memory per card.
-It includes checkpoint slots and drafter buffers. An unavailable projection returns an error and no maximum.
+It includes checkpoint slots and drafter buffers. For a model with more than one KV cache format (Qwen3-30B-A3B), the
+JSON's `kv` names the format the maximum assumes (`f16` or `q8`): in the long-context mode the mode picks it. An
+unavailable projection returns an error and no maximum.
 Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
 the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
 `max_ctx` has one entry per KV cache format, `{"f16": N, "q8": N}`, each the largest context that fits with that cache.

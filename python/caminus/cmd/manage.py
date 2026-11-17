@@ -430,23 +430,26 @@ def pick_port(want, taken):
     raise ManageError(f'no free port in {PORT0}..{PORT0 + 99}')
 
 
-def fits_fn(entry, ctx=None, kv=None):
+def fits_fn(entry, ctx=None, kv=None, long_context=False):
     """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
-    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects); without torch (no projection here) a size rule:
+    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects; long_context: in the model's long-context mode,
+    Arch.long_mode, whose format choice applies when kv is not given); without torch (no projection here) a size rule:
     the file + 4 GiB within the line"""
     size_mib = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20   # (the files it serves with: an optional drafter is not loaded by default)
     rule = lambda g: size_mib * 1.1 + 4096 <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
     try:
         from .. import arch
         A = arch.of(entry['path'])
-        opt = dict(model=entry['path'], chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4, kv=kv or 'f16')
+        opt = dict(model=entry['path'], chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4,
+                   kv=kv if long_context else (kv or 'f16'), long_context=bool(long_context))
+        A.long_mode(opt)                         # (the long-context mode's cap and format: refused by start_one before here)
         A.auto_need(opt, 4)                      # (probe the projection without inventing a zero-card fit)
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
         return rule
     return lambda g: A.fits(opt, [g])
 
 
-def pair_fits(m, entry, ctx=None, cards=None, kv=None):
+def pair_fits(m, entry, ctx=None, cards=None, kv=None, long_context=False):
     """why(cards) for a two-card catalog model: None when the registry's projection at 32K positions (or --ctx) fits those
     cards now, with its drafter when that file is here (caminus.arch.Arch.fits, sysfs only; the projection caminus serve
     places itself with), else the reason. None when it can't run here (the model file missing, no torch, a header it can't
@@ -459,7 +462,11 @@ def pair_fits(m, entry, ctx=None, cards=None, kv=None):
     dk = models.drafter_item(m)
     dpath = (entry.get('paths') or {}).get(dk) if dk else None
     opt = dict(model=entry['path'], drafter=dpath, no_drafter=not dpath, chunk=2048, max_ctx=ctx or 'auto', auto_cache_slots=4,
-               kv=kv or 'f16')
+               kv=kv if long_context else (kv or 'f16'), long_context=bool(long_context))
+    try:
+        A.long_mode(opt)                         # (the long-context mode: refused by start_one before here)
+    except Exception:
+        return None
 
     def fit(cards):
         try:
@@ -476,7 +483,7 @@ def pair_fits(m, entry, ctx=None, cards=None, kv=None):
     return fit
 
 
-def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None):
+def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context=False):
     """the card positions (caminus ps's index) a model runs on, in engine order. held: the positions other servers hold.
     cards: how many (default: the model's own; 2 for a one-card model with a two-card form: caminus start --cards 2). kv:
     --kv, the KV cache the fit projects (q8: the Q8_0 rows)"""
@@ -499,7 +506,7 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None):
             why = None
         if why:
             raise ManageError(f'{m.name}: {why}')
-        fit = pair_fits(m, entry, ctx, cards=cards, kv=kv)
+        fit = pair_fits(m, entry, ctx, cards=cards, kv=kv, long_context=long_context)
         why = fit(pr) if fit is not None else None
         if why:
             raise ManageError(f'{m.name}: {why}')
@@ -514,7 +521,7 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None):
     if not free:
         raise ManageError('every card is held by a Caminus server (caminus ps; caminus stop NAME)')
     try:
-        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv), held=held_pci)['pci']]]
+        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv, long_context=long_context), held=held_pci)['pci']]]
     except host.PlacementError as e:
         raise ManageError(f'{m.name}: {e}') from None
 
@@ -558,7 +565,7 @@ def start_kv(m, nc, kv, extra):
     return kv
 
 
-def serve_argv(m, e, name, port, ctx=None, extra=()):
+def serve_argv(m, e, name, port, ctx=None, extra=(), long_context=False):
     """caminus serve's flags for catalog model m (model_entry e) as server `name`: the model's first file, the port, a cache
     and a flight directory of its own; its drafter's file when its architecture loads one (caminus.arch; --no-drafter when
     that file is not on disk). No --model-alias: the server finds its catalog id itself (arch.default_alias)"""
@@ -576,11 +583,13 @@ def serve_argv(m, e, name, port, ctx=None, extra=()):
         #  load its file or report it missing, never silently become off)
     if ctx:
         serve += ['--max-ctx', str(ctx)]
+    if long_context and '--long-context' not in extra:
+        serve += ['--long-context']
     return serve + list(extra)
 
 
 def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None,
-              cards=None, kv=None):
+              cards=None, kv=None, long_context=False):
     if models.paused(model_name):
         raise ManageError(models.paused(model_name))
     if model_name not in models.BY_NAME:
@@ -605,7 +614,14 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     kv = start_kv(m, nc, kv, extra if argv_override is None else argv_override)
     if kv is not None and argv_override is None and _serve_arg(extra, '--kv') is None:
         extra = list(extra) + ['--kv', kv]
-    devs = devs_override or pick_cards(m, e, card, held, ctx=ctx, cards=nc, kv=kv)
+    long_context = bool(long_context) or '--long-context' in extra
+    if long_context:                             # (a model without the mode is refused here, before a card is picked)
+        try:
+            from .. import arch
+            arch.lookup(m.arch).variant(nc).long_mode(dict(model=e['path'], max_ctx=ctx or 'auto', long_context=True))
+        except ValueError as ex:
+            raise ManageError(f'{m.name}: {ex}') from None
+    devs = devs_override or pick_cards(m, e, card, held, ctx=ctx, cards=nc, kv=kv, long_context=long_context)
     busy = busy_elsewhere(devs)
     if busy:
         raise ManageError(f'VRAM in use on {", ".join(busy)} by a process Caminus did not start: stop it first')
@@ -619,7 +635,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
             if x == '--port' and i + 1 < len(serve):
                 serve[i + 1] = str(port)
     else:
-        serve = serve_argv(m, e, name, port, ctx, extra)
+        serve = serve_argv(m, e, name, port, ctx, extra, long_context=long_context)
     cmd = guarded.command_reloading('serve', serve, logp, 0)   # (exit 75, a broken engine: reloaded once)
     view = {c['index']: c for c in card_view()}
     env = dict(os.environ, HIP_VISIBLE_DEVICES=','.join(str(view[i]['hip']) for i in devs))   # (HIP's indices, the iGPU counted)
@@ -706,6 +722,8 @@ def cmd_start(argv):
     ap.add_argument('--ctx', help='auto (default: the largest context that fits) or a number of positions')
     ap.add_argument('--kv', choices=('f16', 'q8'), help='the KV cache: f16 (the default) or q8 (8-bit rows, about half the memory '
                     'per position: qwen3-30b-a3b on one card or two; caminus serve --kv)')
+    ap.add_argument('--long-context', action='store_true', help='the model\'s long-context mode (caminus serve --long-context: '
+                    'qwen3-30b-a3b YaRN x4, up to 131,072 positions; short texts can read slightly differently)')
     ap.add_argument('--team', choices=sorted(TEAMS))
     ap.add_argument('--no-wait', action='store_true', help='return once the server is launched (caminus ps shows it loading)')
     ap.add_argument('--json', action='store_true')
@@ -733,7 +751,7 @@ def cmd_start(argv):
                 notes.append(f"{role}: {model_name} on {'+'.join(s['card_names'])} :{s['port']}")
             return '; '.join(notes)
         s = start_one(a.model, name=a.name, card=a.card, port=a.port, ctx=a.ctx, extra=extra, wait=not a.no_wait, log=say,
-                      cards=a.cards, kv=a.kv)
+                      cards=a.cards, kv=a.kv, long_context=a.long_context)
         return f"{s['name']}: {s['model']} on {'+'.join(s['card_names'])} at http://127.0.0.1:{s['port']}"
     return run_action(a, go)
 
