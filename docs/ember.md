@@ -14,7 +14,9 @@ Most coding agents are a harness around your terminal: they run in your session,
 is open, and each tool is something the harness hands them. `caminus ember` turns that around (hence anti-harness):
 
 - **The agent is a resident, not a guest.** It runs as `caminus-agent`, a normal user with its own home, crontab,
-  user services and installed tools. The terminal is the whole operating system, not a list of approved apps.
+  user services and installed tools. The terminal is the whole operating system, not a list of approved apps. Beside
+  it, file tools: `read` (a line range: `start`, `lines`), `search` (file names by glob, text by regex with context,
+  following .gitignore, using ripgrep when installed), `edit` (exact text, with the diff) and `write`.
 - **It keeps going.** A systemd user service runs its loop, so it outlives your terminal and your logout. Goals
   queue; long commands keep running between turns; an interrupted step is reported, not replayed blind.
 - **You steer, it decides how.** A message reaches it at its next step; `/steer` redirects. It defines what done

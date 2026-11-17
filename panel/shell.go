@@ -198,7 +198,7 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		}
 	case "note":
 		icon, st = g.idle, emberDim
-	case "read":
+	case "read", "search":
 		icon, st = g.collapsed, emberDim
 	case "free", "dream":
 		icon, st = g.done, emberCtxOK

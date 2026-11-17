@@ -198,8 +198,10 @@ TOOLS = [
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
-    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
-         dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
+    tool('read', 'Read a text file with line numbers, a window at a time (start is the first line, lines the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
+         dict(path={'type':'string'}, start={'type':'integer'}, lines={'type':'integer'}), ('path',)),
+    tool('search', 'Find files under path (default: your home). glob matches file names (*.py; with a slash, the path: src/**/test_*.py). pattern is a Python regex found in the text ((?i) ignores case), shown with context lines around each match (2 by default). Follows .gitignore inside a git repository, skips binary files, and caps the result with a count of what it left out. Paths come back ready for read.',
+         dict(path={'type':'string'}, glob={'type':'string'}, pattern={'type':'string'}, context={'type':'integer'})),
     tool('edit', 'Replace exact text in a file (a goal\'s first change needs define_done first). old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
     tool('write', 'Create a file, or replace a whole file, with content (a goal\'s first change needs define_done first). Returns the diff against what was there.',
@@ -325,7 +327,7 @@ REPEAT_EXEMPT = {'wait', 'todo', 'note', 'remember', 'heartbeat', 'machine', 'ma
 
 # Before define_done a goal may look but not change: these tools, and terminal commands the per-turn gate's
 # classifier calls read-only (or polls of a running one).
-PRE_DONE_ALLOWED = {'read', 'discover', 'history_search', 'web_search', 'web_fetch', 'machine', 'todo', 'ask_user',
+PRE_DONE_ALLOWED = {'read', 'search', 'discover', 'history_search', 'web_search', 'web_fetch', 'machine', 'todo', 'ask_user',
                     'advisor', 'peers', 'mail', 'remember', 'note', 'wait'}
 
 class Runtime:
@@ -937,7 +939,7 @@ class Runtime:
                 self.store.event('rewind_failed', dict(error=str(e)), gid)
 
     CHANGE_TOOLS = ('edit', 'write')
-    LOOK_TOOLS = ('read', 'terminal', 'web_fetch', 'web_search', 'discover', 'machine', 'history_search', 'browser')
+    LOOK_TOOLS = ('read', 'search', 'terminal', 'web_fetch', 'web_search', 'discover', 'machine', 'history_search', 'browser')
 
     def _change_record(self, gid):
         """This goal's tool results in order, as the harness recorded them: (seq, name, path, ok, error). path is the
@@ -1122,7 +1124,7 @@ class Runtime:
                     result = self._todo(action['goal'], args.get('milestones'), args.get('blockers'))
                     result['note'] = 'ledger is now todo: send items with a state next time'
                 elif name == 'read':
-                    result = files.read(self.home, args['path'], args.get('offset'), args.get('limit'))
+                    result = files.read(self.home, args['path'], args.get('start'), args.get('lines'))
                     rel = str(args['path']).removeprefix(str(self.home) + '/').removeprefix('./')
                     if rel.startswith('notes/') and rel.endswith('.md'):
                         self.memory.touch(rel)        # a note read is a note used: it stays in a full index longer
@@ -1153,8 +1155,8 @@ class Runtime:
                     # (launch or queue input only: reading here advanced the cursor, and the poll below then lost the
                     # output since the last poll)
                     result = self.terminal.call(action['id'],{**args,'yield_ms':0,'_prepare':True})
-                elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch') or name.startswith('mcp__'):
-                    result = None         # catalog queries, network calls and waits stay outside the write transaction
+                elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch', 'search') or name.startswith('mcp__'):
+                    result = None         # catalog queries, network calls, waits and searches stay outside the write transaction
                 elif name == 'peers':
                     result = dict(peers=self.mail.peers())
                 elif name == 'propose_plan':
@@ -1222,6 +1224,9 @@ class Runtime:
                 result = web.search(self, args['query'], args.get('max_results', 8), args.get('timelimit'))
             elif name == 'web_fetch':
                 result = web.fetch(self, args['url'], args.get('max_chars', 40_000))
+            elif name == 'search':
+                result = files.search(self.home, args.get('path') or '.', args.get('glob'), args.get('pattern'),
+                                      args.get('context', 2))
             elif name.startswith('mcp__'):
                 result = self.mcp.call(name, args)
             elif (name == 'finish' and 'error' not in result and self.loop_gates and self.judge

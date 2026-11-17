@@ -3,7 +3,7 @@
 A build log, a test run or a large read can be hundreds of kilobytes. Put into the conversation whole, one result
 fills the window and every later turn re-reads it. Past LIMIT_CHARS (about 8K tokens) the large text fields of a
 result are saved under ~/outputs/ and replaced by their head and tail with the file's path, so the agent can read or
-search the rest when it needs it (read with offset, grep in the terminal, history_search for the preview).
+search the rest when it needs it (read with start, search, history_search for the preview).
 """
 import json
 import time
@@ -66,8 +66,8 @@ def spill(home, name, action_id, result):
         saved = out['saved']
     else:
         out['saved'] = saved
-    out['note'] = ('large output saved to a file and shortened here; read the file (with offset) or grep it in the '
-                   'terminal for the part you need')
+    out['note'] = ('large output saved to a file and shortened here; read the file (with start) or search it (pattern) '
+                   'for the part you need')
     _prune(folder)
     return out
 

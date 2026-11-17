@@ -46,7 +46,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `prompt.py` | the system prompt (what the agent is told; keep it true to what `runtime.py` enforces) |
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
-| `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / edit / write, the web tools, MCP servers |
+| `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / search / edit / write (search: ripgrep only narrows the files, the stdlib matches, so both give one result), the web tools, MCP servers |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
