@@ -9,6 +9,7 @@ package main
 // the composer says so; Tab brings it back, and so does the next request). There is no separate approvals screen.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -64,6 +65,10 @@ func (m *emberModel) openPrompt(r emberReq) {
 	m.chat.questionCustom = false
 	m.chat.questionError = ""
 	m.chat.questionChoice = 0
+	if r.Recommended == "" && r.kind() == "question" {
+		r.Recommended = m.askedRecommended(r.Text) // an older resident's request file does not carry it; its call does
+		m.chat.question.Recommended = r.Recommended
+	}
 	opts := promptOptions(r)
 	for i, o := range opts {
 		if r.Recommended != "" && o == r.Recommended {
@@ -269,9 +274,12 @@ func (m emberModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	switch k {
-	case "esc": // later: it keeps waiting; the line above the composer says so and Tab brings it back
+	case "esc": // later: every waiting request steps back (one Esc gives the composer back); Tab brings them back
 		if m.chat.later == nil {
 			m.chat.later = map[string]bool{}
+		}
+		for _, p := range m.sessionRequests() {
+			m.chat.later[p.ID] = true
 		}
 		m.chat.later[r.ID] = true
 		m.closePrompt()
@@ -346,4 +354,79 @@ func (m emberModel) answerQuestion(r emberReq, answer string) (tea.Model, tea.Cm
 	m.refreshLocal()
 	m.syncChat()
 	return m, residentRefresh(m)
+}
+
+// askedRecommended is the recommended choice of the ask_user call that asked this question (by its text).
+func (m *emberModel) askedRecommended(question string) string {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Kind != "assistant" {
+			continue
+		}
+		calls, _ := e.Data["tool_calls"].([]any)
+		for _, raw := range calls {
+			c, _ := raw.(map[string]any)
+			f, _ := c["function"].(map[string]any)
+			if n, _ := f["name"].(string); n != "ask_user" {
+				continue
+			}
+			var args struct {
+				Question    string `json:"question"`
+				Recommended string `json:"recommended"`
+			}
+			if a, _ := f["arguments"].(string); json.Unmarshal([]byte(a), &args) == nil && args.Question == question {
+				return args.Recommended
+			}
+		}
+	}
+	return ""
+}
+
+// requestOutcomes: each request's state for its one-line record, by request id: waiting while it is on disk, else what
+// came of it (from its tool result).
+func (m emberModel) requestOutcomes() map[string]string {
+	out := map[string]string{}
+	for _, e := range m.residentEvents {
+		if e.Kind != "tool_result" {
+			continue
+		}
+		name, _ := e.Data["name"].(string)
+		if name != "ask_user" && name != "ask_root" && name != "github_handoff" {
+			continue
+		}
+		res, _ := e.Data["result"].(map[string]any)
+		id, _ := res["id"].(string)
+		if id == "" {
+			id, _ = res["request"].(string)
+		}
+		if id == "" {
+			continue
+		}
+		by, _ := res["by"].(string)
+		answer, _ := res["answer"].(string)
+		decision, _ := res["decision"].(string)
+		switch {
+		case res["pending"] == true:
+			out[id] = "waiting"
+		case by == "timeout" && name == "ask_user":
+			out[id] = "recommended (timed out)"
+		case by == "timeout":
+			out[id] = "timed out (no)"
+		case name == "ask_user" && strings.TrimSpace(answer) != "":
+			out[id] = oneLine(residentText(answer)) + " (you)"
+		case decision == "approved":
+			out[id] = "yes"
+			if rc, ok := res["rc"].(float64); ok {
+				out[id] += fmt.Sprintf(" · exit %d", int(rc))
+			}
+		case decision == "denied" && strings.TrimSpace(answer) != "":
+			out[id] = "no: " + oneLine(residentText(answer))
+		case decision == "denied":
+			out[id] = "no"
+		}
+	}
+	for _, r := range m.sessionRequests() {
+		out[r.ID] = "waiting"
+	}
+	return out
 }

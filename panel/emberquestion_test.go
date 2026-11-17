@@ -169,20 +169,85 @@ func TestEscLeavesItWaitingAndTabBringsItBack(t *testing.T) {
 	}
 }
 
-func TestTwoWaitingSayOneOfTwoAndANewOneComesUp(t *testing.T) {
+func TestTwoWaitingSayOneOfTwoAndOneEscHidesBoth(t *testing.T) {
 	m, bridge := promptFixture(t)
 	now := float64(time.Now().Unix())
 	writeReq(t, bridge, "r1", "apt-get install -y jq", now-10)
-	writeQuestion(t, bridge, "q1", "Which Python?", []string{"3.12"}, "", now)
+	writeQuestion(t, bridge, "q1", "Which Python?", []string{"3.12", "both"}, "", now)
 	m.refreshLocal()
 	m.syncQuestion()
 	if box := ansi.Strip(m.chatComposer()); !strings.Contains(box, "root · 1 of 2") || !strings.Contains(box, "apt-get install -y jq") {
 		t.Fatalf("the oldest first, with how many wait:\n%s", box)
 	}
-	m = press(t, m, kEsc) // the root request later: the question, not put off, comes up
+	m = press(t, m, kEsc)
 	m.syncQuestion()
-	if m.chat.question == nil || m.chat.question.ID != "q1" {
-		t.Fatal("the next request comes up where you type")
+	if m.chat.question != nil || !m.chat.compose.Focused() {
+		t.Fatal("one Esc gives the composer back, whatever else waits (keys meant for one never reach another)")
+	}
+	if !strings.Contains(ansi.Strip(m.chatBottom()), "2 waiting · Tab answers") {
+		t.Fatalf("both still wait:\n%s", ansi.Strip(m.chatBottom()))
+	}
+	writeQuestion(t, bridge, "q2", "Run the slow tests too?", []string{"yes", "no"}, "", now+5)
+	m.refreshLocal()
+	m.syncQuestion()
+	if m.chat.question == nil || m.chat.question.ID != "q2" {
+		t.Fatal("a new request comes up where you type")
+	}
+}
+
+func TestARequestsRecordIsOneLineWithItsStateAndTheModelsNoteNeverShows(t *testing.T) {
+	m, bridge := promptFixture(t)
+	writeReq(t, bridge, "r1", "apt-get install -y jq", float64(time.Now().Unix()))
+	m.refreshLocal()
+	call := `{"command":"apt-get install -y jq","reason":"tests need it"}`
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "original", Kind: "assistant", Data: map[string]any{"role": "assistant", "content": "", "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "ask_root", "arguments": call}}}}},
+		{Seq: 2, Goal: "original", Kind: "approval_requested", Data: map[string]any{"id": "r1", "cmd": "apt-get install -y jq", "reason": "tests need it"}},
+		{Seq: 3, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "ask_root", "call_id": "c1", "result": map[string]any{
+			"id": "r1", "pending": true, "note": "your human has not answered yet. Work on what does not need the answer"}}},
+		{Seq: 4, Goal: "original", Kind: "question", Data: map[string]any{"id": "q9", "text": "Which Python?", "choices": []any{"3.12", "3.14"}}},
+		{Seq: 5, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "ask_user", "call_id": "c2", "result": map[string]any{
+			"id": "q9", "decision": "answered", "by": "timeout", "answer": "(no answer) Silence is not approval"}}},
+	}
+	for _, expanded := range []bool{false, true} {
+		m.chat.expanded = expanded
+		m.chat.rendered, m.chat.content = 0, ""
+		m.syncChat()
+		v := ansi.Strip(m.chat.content)
+		if !strings.Contains(v, "root: apt-get install -y jq · waiting") || !strings.Contains(v, "question: Which Python?  (3.12 / 3.14) · recommended (timed out)") {
+			t.Fatalf("expanded=%v: one line each, with the state:\n%s", expanded, v)
+		}
+		if strings.Contains(v, "has not answered yet") || strings.Contains(v, "Silence is not approval") || strings.Contains(v, "? · ") {
+			t.Fatalf("expanded=%v: no model-facing note and no orphan status line:\n%s", expanded, v)
+		}
+	}
+}
+
+func TestTheActivityLineDoesNotSayTypeWhileThePromptAsks(t *testing.T) {
+	m, bridge := promptFixture(t)
+	writeQuestion(t, bridge, "q1", "Which Python?", []string{"3.12"}, "", float64(time.Now().Unix()))
+	m.refreshLocal()
+	m.syncQuestion()
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: "p"}}
+	m.chat.target = "original"
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "original", Kind: "assistant", Data: map[string]any{"role": "assistant", "content": "", "tool_calls": []any{
+		map[string]any{"id": "w", "type": "function", "function": map[string]any{"name": "wait", "arguments": `{"until":"message"}`}}}}}}
+	if v := ansi.Strip(m.activityLine(120)); strings.Contains(v, "type below") {
+		t.Fatalf("the prompt asks; the activity line must not say type below: %q", v)
+	}
+}
+
+func TestAnOlderRequestFileStillGetsItsRecommendedChoice(t *testing.T) {
+	m, bridge := promptFixture(t)
+	writeQuestion(t, bridge, "q1", "Which Python?", []string{"3.12", "3.14"}, "", float64(time.Now().Unix()))
+	m.residentEvents = []residentEvent{{Seq: 1, Goal: "original", Kind: "assistant", Data: map[string]any{"role": "assistant", "content": "", "tool_calls": []any{
+		map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": "ask_user",
+			"arguments": `{"question":"Which Python?","choices":["3.12","3.14"],"recommended":"3.14"}`}}}}}}
+	m.refreshLocal()
+	m.syncQuestion()
+	if box := ansi.Strip(m.chatComposer()); !strings.Contains(box, "› 2. 3.14 (Recommended)") {
+		t.Fatalf("the call's recommended choice, when the file lacks it:\n%s", box)
 	}
 }
 

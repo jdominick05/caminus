@@ -136,6 +136,9 @@ func (m emberModel) activityLine(w int) string {
 		heat = 2 - heat
 	}
 	spin := lipgloss.NewStyle().Foreground(lipgloss.Color(blendHex(themeRole("hot"), themeRole("warn"), heat))).Bold(true).Render(frames[f])
+	if m.chat.question != nil { // the prompt below asks: the activity line must not say "type below"
+		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your answer"), max(10, w), "…")
+	}
 	if m.waitingForYou(gl.ID) { // parked on wait(until=message): no work, no spinner; it waits for your words
 		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your message")+emberDim.Render("  · type below to answer"), max(10, w), "…")
 	}

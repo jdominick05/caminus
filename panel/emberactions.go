@@ -193,11 +193,22 @@ func actionCard(name string, args, result map[string]any, w int) string {
 // question, the finish, the plan); edits and writes keep their diff cards.
 func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	name, _ := e.Data["name"].(string)
+	result, _ := e.Data["result"].(map[string]any)
 	switch name {
-	case "ask_user", "finish", "propose_plan", "":
+	case "ask_user", "ask_root", "github_handoff", "":
+		// a request's outcome is on its one-line record (approval_requested / question); only one never filed shows
+		if err, _ := result["error"].(string); err != "" && name != "" {
+			return recordLine(map[string]string{"ask_user": "?", "ask_root": g.root, "github_handoff": "⇡"}[name], "not sent: "+humanRefusal(err), w)
+		}
+		return ""
+	case "finish":
+		return ""
+	case "propose_plan":
+		if err, _ := result["error"].(string); err != "" { // a refused plan had no card at all
+			return toolCard("error", "propose_plan", firstLine(err), false, false, nil, w)
+		}
 		return ""
 	}
-	result, _ := e.Data["result"].(map[string]any)
 	if (name == "edit" || name == "write") && result["error"] == nil {
 		return c.eventBlock(e)
 	}

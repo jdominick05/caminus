@@ -40,7 +40,8 @@ type residentChat struct {
 	questionArmed                           bool
 	questionInput                           textarea.Model
 	questionDeferred, questionError         string
-	later                                   map[string]bool // requests put off with Esc: they wait; Tab brings them back
+	later                                   map[string]bool   // requests put off with Esc: they wait; Tab brings them back
+	reqOutcome                              map[string]string // each request's state for its one-line record
 	picker                                  bool
 	pickerSel                               int
 	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
@@ -411,6 +412,12 @@ func (m *emberModel) syncChat() {
 		// header and the status line still use the full width.
 		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
+	}
+	// a request's one-line record carries its state (waiting, yes, no: …): when one changes, the history is drawn
+	// again (rare: a request filed, answered or timed out)
+	if out := m.requestOutcomes(); fmt.Sprint(out) != fmt.Sprint(m.chat.reqOutcome) {
+		m.chat.reqOutcome = out
+		m.chat.content, m.chat.rendered = "", 0
 	}
 	changed := m.chat.rendered != len(m.residentEvents)
 	if m.chat.rendered == 0 {
@@ -1211,35 +1218,10 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return strings.Join(parts, "\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
-		if name := str("name"); name == "ask_user" || name == "ask_root" {
-			// the outcome of asking you, one line under the request's: model-facing text never shows
-			icon := map[string]string{"ask_user": "?", "ask_root": g.root}[name]
-			errText, _ := result["error"].(string)
-			by, _ := result["by"].(string)
-			pending, _ := result["pending"].(bool)
-			answer, _ := result["answer"].(string)
-			decision, _ := result["decision"].(string)
-			switch {
-			case errText != "":
-				return recordLine(icon, "· not sent: "+humanRefusal(errText), w)
-			case pending:
-				return recordLine(icon, "· waiting", w)
-			case by == "timeout" && name == "ask_root":
-				return recordLine(icon, "· timed out (no)", w)
-			case by == "timeout":
-				return recordLine(icon, "· recommended (timed out)", w)
-			case name == "ask_user" && strings.TrimSpace(answer) != "":
-				return recordLine(icon, "· "+oneLine(residentText(answer))+" (you)", w)
-			case decision == "approved":
-				line := "· yes"
-				if rc, ok := result["rc"].(float64); ok {
-					line += fmt.Sprintf(" · exit %d", int(rc))
-				}
-				return recordLine(icon, line, w)
-			case decision == "denied" && strings.TrimSpace(answer) != "":
-				return recordLine(icon, "· no: "+oneLine(residentText(answer)), w)
-			case decision == "denied":
-				return recordLine(icon, "· no", w)
+		if name := str("name"); name == "ask_user" || name == "ask_root" || name == "github_handoff" {
+			// the outcome is on the request's one-line record; only a request never filed shows here
+			if errText, _ := result["error"].(string); errText != "" {
+				return recordLine(map[string]string{"ask_user": "?", "ask_root": g.root, "github_handoff": "⇡"}[name], "not sent: "+humanRefusal(errText), w)
 			}
 			return ""
 		}
@@ -1317,10 +1299,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
 		// one line, not a card: you decide in the prompt where you type (the outcome is the result's line)
-		if str("kind") == "github" {
-			return recordLine("⇡", "github: "+oneLine(residentText(str("summary"))), w)
+		status := ""
+		if s := c.reqOutcome[str("id")]; s != "" {
+			status = " · " + s
 		}
-		return recordLine(g.root, "root: "+oneLine(residentText(str("cmd"))), w)
+		if str("kind") == "github" {
+			return recordLine("⇡", "github: "+oneLine(residentText(str("summary")))+status, w)
+		}
+		return recordLine(g.root, "root: "+oneLine(residentText(str("cmd")))+status, w)
 	case "question":
 		text := "question: " + oneLine(residentText(str("text")))
 		if ch, _ := e.Data["choices"].([]any); len(ch) > 0 {
@@ -1331,6 +1317,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			text += "  (" + strings.Join(opts, " / ") + ")"
+		}
+		if s := c.reqOutcome[str("id")]; s != "" {
+			text += " · " + s
 		}
 		return recordLine("?", text, w)
 	case "compacted":
