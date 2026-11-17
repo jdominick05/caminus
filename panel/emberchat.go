@@ -418,6 +418,30 @@ func (m emberModel) bodyHeight() int {
 
 // chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
 // under them (three at most). The goal was cut at 47 characters before.
+// goalAim is what a goal works toward now: its prompt, or, once a message from its human was followed by a new done
+// check (the goal re-aimed: a user started a block-breaker game and then asked for a design review in the same goal),
+// that message. redirected says which.
+func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
+	text, msg, checked := g.Prompt, "", false
+	for _, e := range m.residentEvents {
+		if e.Goal != g.ID {
+			continue
+		}
+		switch e.Kind {
+		case "user_message":
+			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" && checked {
+				msg = t // (a message before the first done check refines the prompt; it does not redirect it)
+			}
+		case "done_check":
+			if msg != "" {
+				text, redirected, msg = msg, true, ""
+			}
+			checked = true
+		}
+	}
+	return text, redirected
+}
+
 func (m emberModel) chatHead(w int) string {
 	state := "stopped"
 	if m.resident.DaemonAlive {
@@ -426,7 +450,11 @@ func (m emberModel) chatHead(w int) string {
 	steps, goalText := 0, ""
 	if sel := m.selectedResidentGoal(); sel != nil {
 		state, steps = sel.State, sel.Steps
-		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+		aim, redirected := m.goalAim(sel)
+		goalText = strings.Join(strings.Fields(residentText(aim)), " ")
+		if redirected {
+			goalText = "↪ " + goalText
+		}
 	}
 	if !m.resident.DaemonAlive {
 		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
@@ -1459,7 +1487,7 @@ func (m emberModel) btwSection(w int) string {
 	}
 	var art []string // (no Ember beside the answer; the section heading says what it is)
 	artW := 0
-	textW := max(10, min(readingWidth, w-1-artW))
+	textW := max(10, min(readingWidth, w-4-artW)) // (the frame and its inner margin: a body line is 1 + textW, the box textW + 2)
 	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-4))
 	body := []string{emberBusy.Render("you ") + q}
 	rows := m.btwRows()
@@ -1481,16 +1509,26 @@ func (m emberModel) btwSection(w int) string {
 			keys = fmt.Sprintf("shift+↑↓ scroll (%d-%d of %d) · esc closes", top+1, end, len(lines))
 		}
 	}
-	var out []string
+	// a popup, not more transcript: its own tinted surface in a frame, the title and keys in the top border (a user
+	// read the unframed answer as history)
+	surface, border := overlayColors()
+	seq, edge := bgSeq(surface), lipgloss.NewStyle().Foreground(lipgloss.Color(border))
+	inner := min(w-2, textW+2)
+	title := " " + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("by the way") + " " +
+		emberDim.Render(emberClip("not added to the goal · "+keys, max(4, inner-16))) + " "
+	fill := max(0, inner-1-ansi.StringWidth(title))
+	out := []string{edge.Render("╭─") + title + edge.Render(strings.Repeat("─", fill)+"╮")}
 	for i, l := range body {
 		a := strings.Repeat(" ", artW)
 		if i < len(art) {
 			a = art[i] + "  "
 		}
-		out = append(out, " "+a+l)
+		cell := " " + a + l
+		pad := max(0, inner-ansi.StringWidth(cell))
+		out = append(out, edge.Render("│")+seq+replate(cell, seq)+strings.Repeat(" ", pad)+"\x1b[m"+edge.Render("│"))
 	}
-	// a reading surface: the shared heading, no frame; the keys ride on the heading's note
-	return sectionHead("by the way", cAccent, "not added to the goal · "+keys, w) + "\n" + strings.Join(out, "\n")
+	out = append(out, edge.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return strings.Join(out, "\n")
 }
 
 // helpLines: every command with what it does (the slash menu's two columns), then the keys.
@@ -1668,7 +1706,8 @@ func (m emberModel) todoPinned() string {
 	// the task: the current todo item, else the goal itself
 	task, dots := "", ""
 	if goal != nil {
-		task = oneLine(residentText(goal.Prompt))
+		aim, _ := m.goalAim(goal)
+		task = oneLine(residentText(aim))
 		for i := len(m.residentEvents) - 1; i >= 0; i-- {
 			e := m.residentEvents[i]
 			if e.Goal != goal.ID || e.Kind != "todo" {
