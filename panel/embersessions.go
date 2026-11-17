@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -107,6 +108,7 @@ func (m *emberModel) openResident(name string) {
 		m.residentEpoch++
 		m.agentName = name
 		m.resident = residentStatus{}
+		m.statusAt = time.Time{} // nothing known yet: "loading", not "stopped", until its first status lands
 		m.residentEvents = nil
 		m.chat = residentChat{}
 		m.goalSel = 0

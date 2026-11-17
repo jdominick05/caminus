@@ -2526,3 +2526,21 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
 	}
 }
+
+func TestASwitchedSessionSaysLoadingNotStoppedUntilItsStatusLands(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.sessionNames = []string{"resident", "local-testing"}
+	m.openResident("local-testing")
+	frame := ansi.Strip(m.render())
+	if strings.Contains(frame, "stopped") || strings.Contains(frame, "will stay here") || !strings.Contains(frame, "loading") {
+		t.Fatalf("before its first status a session is loading, not stopped with the empty welcome:\n%s", frame)
+	}
+	if !strings.Contains(m.windowTitle(), "loading") {
+		t.Fatalf("the tab title says loading: %q", m.windowTitle())
+	}
+	m.receiveResident(residentMsg{agent: "local-testing", status: residentStatus{Name: "local-testing", DaemonAlive: false}})
+	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") {
+		t.Fatal("once its status says so, a stopped session says stopped")
+	}
+}
