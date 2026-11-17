@@ -205,8 +205,8 @@ at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
 A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
 and a terminal command runs only when every part of it is a read-only program
-(`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent
-files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
+(`ls`, `grep`, `git status`, `sed -n '1,20p' FILE`, ...; anything unclear counts
+as a change). The agent files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
 `agent plan NAME GOAL approve|reject [--note TEXT]`.
 
 The emergency stop: `caminus ember stop-all [--reason TEXT]` (`/halt`) writes a

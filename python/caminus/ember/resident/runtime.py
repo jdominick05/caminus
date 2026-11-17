@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import time
+import shlex
 import subprocess
 import sys
 import uuid
@@ -51,7 +52,9 @@ READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd',
                        # cd only moves this shell; the rest only print what they read (a CTF's first look at a binary
                        # or an archive was refused as a change before the done check)
                        'cd', 'strings', 'xxd', 'od', 'hexdump', 'readelf', 'objdump', 'nm', 'sha256sum', 'sha1sum',
-                       'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath'))
+                       'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath',
+                       # (their --help lists no flag that writes a file or runs a program)
+                       'nl', 'tac', 'rev', 'cmp', 'comm', 'paste', 'fold'))
 # Archive tools in their listing-only forms (any other form extracts or writes)
 LISTING = {'unzip': ('-l', '-v', '-Z', '-Z1'), '7z': ('l',), 'tar': ('-t', '-tf', '-tvf', '-tzf', '-tjf', '-tJf', 't', 'tf', 'tvf')}
 READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files', 'shortlog', 'describe',
@@ -65,6 +68,75 @@ CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fp
 # The flags of xxd and uniq that take a value: that value is not a file (xxd -l 64 f reads one file).
 VALUE_FLAGS = {'xxd': ('-l', '-s', '-c', '-g', '-o', '-n', '-len', '-seek', '-cols', '-groupsize', '-offset', '-name'),
                'uniq': ('-f', '-s', '-w')}
+
+
+# sed and awk read only in a narrow form, checked word by word (shlex) on an exact grammar; anything else is a change.
+# sed: these flags (-i / --in-place writes, -f reads a script that may write), each script one address (a line, $, a
+# step, /regex/, a range) and one command that only prints or stops: p = l q Q d (w, W, e, s///w, r ... are refused)
+SED_FLAGS = frozenset(('-n', '--quiet', '--silent', '-E', '-r', '--regexp-extended', '-s', '--separate', '-u',
+                       '--unbuffered', '-z', '--null-data', '--posix', '--'))
+_SED_ADDR = r'(?:\d+(?:~\d+)?|\$|/(?:[^/\\\n]|\\.)*/[IM]?)'
+SED_PRINT = re.compile(rf'\s*(?:{_SED_ADDR}(?:\s*,\s*(?:{_SED_ADDR}|[+~]\d+))?)?\s*!?\s*(?:[p=dqQ]|l\s*\d*|[qQ]\s*\d+)\s*')
+# awk: an optional -F separator and one program of a pattern (/regex/ or NR / NF compared with a number) and / or
+# {print FIELDS}: no function call, getline, redirection or pipe can appear (system(), getline, print > f, -f, -i ...)
+_AWK_FIELDS = r'(?:\$(?:\d+|NF)|NR|NF)(?:\s*,?\s*(?:\$(?:\d+|NF)|NR|NF))*'
+AWK_PRINT = re.compile(rf'\s*(?:/(?:[^/\\\n]|\\.)*/|(?:NR|NF)\s*(?:==|!=|<=?)\s*\d+)?\s*'
+                       rf'(?:\{{\s*print(?:\s+{_AWK_FIELDS})?\s*;?\s*\}})?\s*')
+
+
+def _plain_words(part):
+    """The words of one command, or None if the shell would change them: a $ expansion, a glob or brace expansion (with a
+    file named -i, `sed -n 1p *` would edit in place) or an escape outside single quotes, or unbalanced quotes."""
+    quote = ''
+    for c in part:
+        if quote == "'":
+            quote = '' if c == "'" else quote
+        elif c in '$\\`' or (not quote and c in '*?[{'):
+            return None
+        elif c in '\'"':
+            quote = '' if quote == c else (quote or c)
+    try:
+        return shlex.split(part)
+    except ValueError:
+        return None
+
+
+def _sed_reads(words):
+    """sed in a print-only form (SED_FLAGS, SED_PRINT): `sed -n '1,20p' f` was refused before the done check."""
+    scripts, operands, i, opts = [], [], 1, True     # (words[0] is sed)
+    while i < len(words):
+        w = words[i]
+        if opts and w == '--':
+            opts = False
+        elif opts and w in ('-e', '--expression') and i + 1 < len(words):
+            scripts.append(words[i + 1]); i += 1
+        elif opts and w.startswith('--expression='):
+            scripts.append(w.split('=', 1)[1])
+        elif opts and re.fullmatch(r'-[nErsuz]+e', w) and i + 1 < len(words):
+            scripts.append(words[i + 1]); i += 1
+        elif opts and w.startswith('-') and w != '-':
+            if w not in SED_FLAGS and not re.fullmatch(r'-[nErsuz]+', w):
+                return False
+        else:
+            operands.append(w)
+        i += 1
+    if not scripts:
+        if not operands:
+            return False
+        scripts.append(operands.pop(0))
+    return all(SED_PRINT.fullmatch(x) for x in scripts)
+
+
+def _awk_reads(words):
+    """awk in the AWK_PRINT form only (awk '{print $1}' f, awk -F: 'NR==2' f)."""
+    args = words[1:]
+    if args[:1] == ['-F'] and len(args) > 1:
+        args = args[2:]
+    elif args[:1] and args[0].startswith('-F') and len(args[0]) > 2:
+        args = args[1:]
+    if not args or args[0].startswith('-') or not args[0].strip():
+        return False
+    return bool(AWK_PRINT.fullmatch(args[0])) and not any(a.startswith('-') and a != '-' for a in args[1:])
 
 
 def _sort_writes(w):
@@ -104,7 +176,11 @@ def read_only_command(cmd):
         words = part.split()
         if not words:
             continue
-        if words[0] == 'git':
+        if words[0] in ('sed', 'awk'):
+            plain = _plain_words(part)
+            if not plain or not (_sed_reads if plain[0] == 'sed' else _awk_reads)(plain):
+                return False
+        elif words[0] == 'git':
             sub = words[1:2]
             if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
                 continue                  # listing branches; with any other argument it creates or deletes one

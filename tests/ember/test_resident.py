@@ -976,6 +976,34 @@ class Resident(unittest.TestCase):
             self.assertLess(time.time()-rt.progress[gid],5,'the idle clock starts over so the nudge can land')
         finally:rt.mail.close();rt.store.close()
 
+    def test_sed_n_and_other_reads_pass_the_read_only_classifier(self):
+        # a goal's first look, `sed -n '1,20p' file`, was refused before define_done and in plan mode as a change
+        from caminus.ember.resident import runtime as R
+        reads=("sed -n '1,20p' notes.txt","sed -n 5p notes.txt","sed -n -e 1p -e '$p' notes.txt","sed -n '/^b/,/^d/p' notes.txt",
+               "sed 3q notes.txt","sed -n '$=' notes.txt",'sed -n "2,3p" notes.txt',"sed -n l notes.txt","sed '/^#/d' notes.txt",
+               "sed -nE '2,+1p' notes.txt","cat notes.txt | sed -n 2p","sed -n --expression=1p -- notes.txt",
+               "awk '{print $1}' notes.txt","awk -F: '{print $1, $2}' notes.txt","awk 'NR==2' notes.txt",
+               "awk '/b/ {print $NF}' notes.txt","nl notes.txt","tac notes.txt","head -5 notes.txt | nl","rev notes.txt")
+        for cmd in reads:
+            self.assertTrue(R.read_only_command(cmd),cmd)
+        # they read and print, nothing else: run each in a folder and find it unchanged
+        d=self.home/('ro-'+uuid.uuid4().hex);d.mkdir()
+        (d/'notes.txt').write_text('a:1 x\nb:2 y\n#c:3 z\nd:4 w\ne:5 v\nf:6 u\n')
+        before=sorted((p.name,p.read_bytes()) for p in d.iterdir())
+        for cmd in reads:
+            r=subprocess.run(['bash','-c',cmd],cwd=d,capture_output=True,text=True,timeout=10)
+            self.assertEqual(r.returncode,0,cmd+': '+r.stderr);self.assertTrue(r.stdout,cmd)
+        self.assertEqual(sorted((p.name,p.read_bytes()) for p in d.iterdir()),before,'the folder is unchanged')
+        for cmd in ("sed -i 's/a/b/' f","sed -i.bak 1d f","sed --in-place 1d f","sed -ni 1p f","sed -s -i 1d f",
+                    "sed -n 'w out' f","sed -n '1w out' f","sed -n 'W out' f","sed -n '1p' f > out","sed -e 's/a/b/w x' f",
+                    "sed '1e date' f","sed e f","sed -f prog.sed f","sed -n \"$X\" f","sed -n $X f","sed -n 1p *",
+                    "sed -n 1p {-i,f}","sed -n '1p;w out' f","sed -n '1p;5p' f","sed -n 'r /etc/passwd' f",
+                    "sed --expression=1p --in-pl f","sed -n '1p' \\-i f",
+                    "awk '{system(\"rm x\")}' f","awk '{print > \"out\"}' f","awk '{print | \"sh\"}' f","awk -f prog.awk f",
+                    "awk -i inplace '{print}' f","awk '{getline; print}' f","awk -v x=1 '{print}' f",
+                    "awk \"{print \\$1}\" f","awk '{print $1}' *"):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+
     def test_a_handoff_with_private_text_is_never_posted(self):
         from caminus.ember.resident import github
         base=dict(action='comment',repo='jdominick05/caminus',number=5)
