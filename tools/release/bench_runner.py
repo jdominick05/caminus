@@ -174,8 +174,13 @@ def run(a):
         if os.path.exists(os.path.join(a.out, rid + '.done')):
             print(f'skip {rid}: done'); continue
         r = m['runs'][rid]
-        cmd, missing = expand(r['command'], values(a.set, scratch=os.path.join(a.out, 'scratch', rid)))
+        v = values(a.set, scratch=os.path.join(a.out, 'scratch', rid))
+        cmd, missing = expand(r['command'], v)
         if missing: raise SystemExit(f'bench_runner: {rid}: unfilled {", ".join(missing)} (run check)')
+        # (tools that read the paths from the environment, through caminus.devpaths: CODER, DFLASH, ARTIFACTS, as AGENTS.md
+        #  says to export them; the window's step runs `bash -c` on this line, so the assignments reach the tool)
+        env = ' '.join(f'{k}={shlex.quote(v[k])}' for k in ('CODER', 'DFLASH', 'ARTIFACTS') if k in v)
+        cmd = f'{env} {cmd}' if env else cmd
         os.makedirs(os.path.join(a.out, 'scratch', rid), exist_ok=True)
         steps.append(f'{card}:{int(r["timeout"])}:{cmd}'); todo.append(rid)
     if not steps:
