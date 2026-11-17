@@ -40,9 +40,41 @@ func (m emberModel) working() *residentGoal {
 		return nil // the header says stopped: no spinner counting under it
 	}
 	if g := m.activeGoal(); g != nil && (g.State == "working" || g.State == "waiting_model") && m.parkedUntil(g.ID) == "" {
+		if _, held := m.interruptedUntil(g.ID); held {
+			return nil // an Esc dropped its turn: it waits for your message, so nothing counts (it kept counting)
+		}
 		return g
 	}
 	return nil
+}
+
+// interruptedUntil: an Esc dropped the goal's turn and it now waits for your message (its stored state stays
+// working). It holds while its newest turn event is turn_interrupted, no new reply is being generated and the hold has
+// not run out; until is when the runtime carries on by itself.
+func (m emberModel) interruptedUntil(goal string) (until time.Time, held bool) {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != goal {
+			continue
+		}
+		switch e.Kind {
+		case "turn_interrupted":
+			hold, _ := e.Data["hold_s"].(float64)
+			turn, _ := e.Data["turn"].(string)
+			if hold <= 0 {
+				hold = 120 // (an older runtime's event: its hold)
+			}
+			until = time.Unix(int64(e.Ts), 0).Add(time.Duration(hold) * time.Second)
+			if l := m.chat.live; l.active && l.turn != "" && l.turn != turn {
+				return time.Time{}, false // a new call is out: the agent carries on
+			}
+			return until, time.Now().Before(until)
+		case "assistant", "user_message", "peer_message", "tool_result", "goal_queued", "goal_continued", "woke",
+			"turn_retried", "cancelled", "paused", "finished", "rewound", "emergency_stop", "scheduled", "compacting":
+			return time.Time{}, false
+		}
+	}
+	return time.Time{}, false
 }
 
 // daemonDown: the status has arrived and says the session's loop is not running.
@@ -151,6 +183,13 @@ func (m emberModel) activityLine(w int) string {
 	if g := m.activeGoal(); g != nil && !m.daemonDown() {
 		if at := m.parkedUntil(g.ID); at != "" {
 			return ansi.Truncate(" "+emberDim.Render("◌ parked until "+at+" · a message wakes it sooner"), max(10, w), "…")
+		}
+	}
+	if g := m.activeGoal(); g != nil && !m.daemonDown() {
+		if until, held := m.interruptedUntil(g.ID); held {
+			// no spinner and no clock: nothing runs until you write (or the hold runs out and it carries on)
+			return ansi.Truncate(" "+emberWarn.Render("◌ turn interrupted · nothing from it was kept")+
+				emberDim.Render("  · type below to steer · it carries on by itself at "+until.Format("15:04")), max(10, w), "…")
 		}
 	}
 	gl := m.working()
