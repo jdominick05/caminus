@@ -4,6 +4,9 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -339,5 +342,71 @@ func TestPanelGoldenFrames(t *testing.T) {
 		if got != string(want) {
 			t.Errorf("%s differs (LLMTOP_GOLDEN=update after a deliberate change):\n%s", c.name, got)
 		}
+	}
+}
+
+// "clients" counts the Qwen Code sessions on the server and the running Ember sessions whose brain is it: their status'
+// model is one of the server's /v1/models ids. A session on a paid brain is not one of its clients. The Ember reads are
+// the ones the panel already makes (peers, then one status each); /v1/models comes with the live round.
+func TestClientsCountEmberSessionsOnThisServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			fmt.Fprint(w, `{"status":"ok"}`)
+		case "/v1/models":
+			fmt.Fprint(w, `{"object":"list","data":[{"id":"k3-coder"},{"id":"k3-coder-xhigh"},{"id":"k3-coder-low"}]}`)
+		case "/props":
+			fmt.Fprint(w, `{"engine":"caminus","model_alias":"k3-coder","default_generation_settings":{"n_ctx":1048576}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "caminus.sh")
+	body := `#!/bin/sh
+case "$3" in
+peers) echo '[{"name":"a"},{"name":"b"},{"name":"paid"},{"name":"stopped"}]' ;;
+status) case "$4" in
+  a) echo '{"daemon_alive":true,"model":"k3-coder","goals":[{"state":"working"}]}' ;;
+  b) echo '{"daemon_alive":true,"model":"k3-coder-xhigh","goals":[]}' ;;
+  paid) echo '{"daemon_alive":true,"model":"claude-haiku-5-5","goals":[{"state":"working"}]}' ;;
+  stopped) echo '{"daemon_alive":false,"model":"k3-coder","goals":[]}' ;;
+  esac ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := fixturePanel()
+	m.be = &ctlCLI{argv: []string{"sh", script}, timeout: 10 * time.Second}
+	m.ps.Servers[0].URL = srv.URL
+	m = settle(m, m.liveRound(), 0) // one round: health, props, and the model ids
+	if !m.live.srv.Up || len(m.live.ids) != 3 {
+		t.Fatalf("the round reads the server's model ids: up %v ids %v", m.live.srv.Up, m.live.ids)
+	}
+	m = settle(m, m.emberCount(), 0)
+	if c := m.live.ember; c.sessions != 4 || c.active != 2 || len(c.brains) != 3 {
+		t.Fatalf("Ember's reads: %+v", c)
+	}
+	m, _ = m.Update(sessionsMsg{id: m.id, n: 1}) // one Qwen Code session
+	if got := m.clientsText(); got != "3 clients (Qwen Code 1, Ember 2)" {
+		t.Fatalf("2 Ember sessions on this server + 1 Qwen Code session, the paid and the stopped one not counted: %q", got)
+	}
+	if card := ansi.Strip(strings.Join(m.runningRows(110), "\n")); !strings.Contains(card, "3 clients (Qwen Code 1, Ember 2)") {
+		t.Fatalf("the running card says it:\n%s", card)
+	}
+	m, _ = m.Update(sessionsMsg{id: m.id, n: 0})
+	if got := m.clientsText(); got != "2 clients" {
+		t.Fatalf("one kind only: no breakdown: %q", got)
+	}
+	m.live.ember.brains = []string{"claude-haiku-5-5"}
+	if got := m.clientsText(); got != "0 clients" {
+		t.Fatalf("a paid brain is not a client: %q", got)
+	}
+	m.live.ids = nil // before /v1/models answers: the alias and its variants still match
+	m.live.ember.brains = []string{"k3-coder-low"}
+	if got := m.clientsText(); got != "1 client" {
+		t.Fatalf("the alias rule: %q", got)
 	}
 }

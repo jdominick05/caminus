@@ -4,13 +4,17 @@
 // panellive.go: the panel's live numbers, read the way the monitor (caminus top) reads them and with its readers: one
 // round of the server's monitoring surface a second (server.go's srvClient and serverState: /health, /props, /metrics,
 // /slots, /caminus/status), the Qwen Code sessions that talk to it (top_main.go's session scan), and Ember's sessions
-// (`caminus ember agent peers / status --json`). Every read is a command the panel's own ticks start, one at a time:
+// (`caminus ember agent peers / status --json`; a session whose model is one of the server's /v1/models ids is one of
+// its clients). Every read is a command the panel's own ticks start, one at a time:
 // nothing runs in the background once the panel is closed, and nothing here ever changes the server.
 package main
 
 import (
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,6 +32,8 @@ type liveMon struct {
 	scanning bool
 	clients  int // Qwen Code sessions active in the last agentFresh that talk to this server
 	rounds   int
+	ids      []string  // the followed server's model ids (/v1/models): an Ember session thinking with one is its client
+	idsAt    time.Time // when they were last asked
 
 	extMissed map[string]int // outside servers the last ps reads missed while the live round still saw them, by URL
 
@@ -39,6 +45,7 @@ type liveMon struct {
 type emberCounts struct {
 	known            bool
 	sessions, active int
+	brains           []string // the model id each running session thinks with (its status' model)
 }
 
 func newLiveMon() *liveMon {
@@ -51,6 +58,7 @@ type (
 		id  int
 		url string
 		p   probe
+		ids []string // the server's model ids (/v1/models), asked when the round's idsDue was set; nil otherwise
 	}
 	sessionsMsg struct {
 		id, n int
@@ -98,7 +106,7 @@ func (m ctl) liveRound() tea.Cmd {
 	lv := m.live
 	target := m.liveTarget()
 	if target != lv.url {
-		lv.url, lv.srv, lv.inflight, lv.clients = target, serverState{}, false, 0
+		lv.url, lv.srv, lv.inflight, lv.clients, lv.ids, lv.idsAt = target, serverState{}, false, 0, nil, time.Time{}
 		lv.client = nil
 		if target != "" {
 			lv.client = newClient(target)
@@ -109,7 +117,60 @@ func (m ctl) liveRound() tea.Cmd {
 	}
 	lv.inflight = true
 	c, id, url := lv.client, m.id, target
-	return func() tea.Msg { return liveMsg{id: id, url: url, p: c.round(time.Now())} }
+	askIDs := time.Since(lv.idsAt) >= idsEvery
+	if askIDs {
+		lv.idsAt = time.Now()
+	}
+	return func() tea.Msg {
+		msg := liveMsg{id: id, url: url, p: c.round(time.Now())}
+		if askIDs && msg.p.Health == http.StatusOK {
+			msg.ids = modelIDs(c)
+		}
+		return msg
+	}
+}
+
+// idsEvery is how often the server's model ids are asked again (they change only with a restart).
+const idsEvery = 30 * time.Second
+
+// modelIDs is the ids the server answers to (GET /v1/models), nil when it does not answer.
+func modelIDs(c *srvClient) []string {
+	code, b := c.get("/v1/models")
+	if code != http.StatusOK {
+		return nil
+	}
+	var v struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return nil
+	}
+	ids := []string{}
+	for _, d := range v.Data {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids
+}
+
+// emberClients is how many running Ember sessions think with the followed server: their model is one of its ids, or
+// its alias or an alias variant (alias-xhigh: the session logs' rule, session.talksTo). A paid brain never matches.
+func (m ctl) emberClients() int {
+	lv := m.live
+	alias := lv.srv.Props.Alias
+	n := 0
+	for _, b := range lv.ember.brains {
+		if b == "" {
+			continue
+		}
+		if slices.Contains(lv.ids, b) || alias != "" && (b == alias || strings.HasPrefix(b, alias+"-")) {
+			n++
+		}
+	}
+	return n
 }
 
 // sessionScan counts the Qwen Code sessions of the followed server (top's scan: the newest logs of the last 6 h in
@@ -153,7 +214,8 @@ func (m ctl) emberCount() tea.Cmd {
 		v := emberCounts{known: true, sessions: len(peers)}
 		for _, p := range peers { // (one after another: each is a command over Ember's one SSH connection)
 			var st struct {
-				Alive bool `json:"daemon_alive"`
+				Alive bool   `json:"daemon_alive"`
+				Model string `json:"model"`
 				Goals []struct {
 					State string `json:"state"`
 				} `json:"goals"`
@@ -161,6 +223,7 @@ func (m ctl) emberCount() tea.Cmd {
 			if be.call(&st, 30*time.Second, "ember", "agent", "status", p.Name, "--json") != nil || !st.Alive {
 				continue
 			}
+			v.brains = append(v.brains, st.Model)
 			for _, g := range st.Goals {
 				if g.State == "working" || g.State == "queued" {
 					v.active++
@@ -192,6 +255,9 @@ func (m ctl) liveUpdate(msg tea.Msg) (ctl, tea.Cmd) {
 		if msg.url == lv.url {
 			lv.inflight = false
 			lv.srv.apply(msg.p)
+			if msg.ids != nil {
+				lv.ids = msg.ids
+			}
 		}
 	case sessionsMsg:
 		if msg.id == m.id {

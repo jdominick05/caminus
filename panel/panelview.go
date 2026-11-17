@@ -279,12 +279,7 @@ func (m ctl) runningRows(w int) []string {
 		nums = append(nums, bold(cYellow).Render(humanInt(int(n.prefill+0.5)))+fg(cText).Render(" tok/s prefill"))
 	}
 	if m.live.url == sv.URL && m.live.srv.Up {
-		c := m.live.clients
-		word := " clients"
-		if c == 1 {
-			word = " client"
-		}
-		nums = append(nums, fg(cText).Render(strconv.Itoa(c)+word))
+		nums = append(nums, fg(cText).Render(m.clientsText()))
 	}
 	if n.cached >= 0 {
 		nums = append(nums, fg(cBlue).Render(fmt.Sprintf("%.0f%%", n.cached*100))+fg(cText).Render(" cached"))
@@ -346,6 +341,20 @@ func liveSpark(v []float64, w int) string {
 		b.WriteString(fg(cGreen).Render(string(blocks[max(1, min(8, int(x/top*8+0.5)))])))
 	}
 	return b.String()
+}
+
+// clientsText is the followed server's clients: its Qwen Code sessions and the Ember sessions that think with it,
+// "3 clients", or "3 clients (Qwen Code 1, Ember 2)" when both kinds are there.
+func (m ctl) clientsText() string {
+	q, e := m.live.clients, m.emberClients()
+	t := strconv.Itoa(q+e) + " clients"
+	if q+e == 1 {
+		t = "1 client"
+	}
+	if q > 0 && e > 0 {
+		t += fmt.Sprintf(" (Qwen Code %d, Ember %d)", q, e)
+	}
+	return t
 }
 
 // ---------- models and the selected model's details ----------
