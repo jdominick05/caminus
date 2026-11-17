@@ -1,0 +1,386 @@
+{
+ "name": "basic",
+ "about": "Five everyday agent tasks on a small invented Python project: read code, edit, run tests, use a tool, report back. Each task runs in a fresh copy of fixture/ placed at DIR; check runs in DIR with sh and passes on exit 0.",
+ "pristine": [
+  "inventory.py",
+  "tests"
+ ],
+ "dirs": [
+  "answers"
+ ],
+ "timeout": 1500,
+ "tasks": [
+  {
+   "key": "read",
+   "kind": "read code",
+   "prompt": "In the folder DIR there is a small Python project. Without changing any file, find out what total_value(load('data/stock.csv')) in inventory.py returns right now, and write just that number to DIR/answers/read.txt.",
+   "check": "python3 -c \"import sys; v=float(open('answers/read.txt').read().strip()); sys.exit(0 if abs(v-71.51)<0.005 else 1)\"",
+   "scripts": {
+    "solve": [
+     [
+      "terminal",
+      {
+       "command": "cd DIR && python3 -c \"import inventory; print(inventory.total_value(inventory.load('data/stock.csv')))\""
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "DIR/answers/read.txt holds the number total_value printed"
+      }
+     ],
+     [
+      "write",
+      {
+       "path": "DIR/answers/read.txt",
+       "content": "71.51\n"
+      }
+     ],
+     [
+      "read",
+      {
+       "path": "DIR/answers/read.txt"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "read.txt holds 71.51, the number the command printed"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "total_value returns 71.51; written to answers/read.txt."
+      }
+     ]
+    ],
+    "claim": [
+     [
+      "terminal",
+      {
+       "command": "ls DIR"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "the goal is done"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "it is done"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "Done."
+      }
+     ]
+    ]
+   }
+  },
+  {
+   "key": "edit",
+   "kind": "edit",
+   "prompt": "In DIR/inventory.py, change low_stock so that an item with exactly threshold units counts as low too. Change nothing else in the file.",
+   "check": "python3 - <<'PY'\nimport ast,sys\nsys.path.insert(0,'.')\nimport inventory\nok=inventory.low_stock([('a',5,1.0),('b',6,1.0)],5)==['a']\nnew={f.name:ast.dump(f) for f in ast.parse(open('inventory.py').read()).body if isinstance(f,ast.FunctionDef)}\nold={f.name:ast.dump(f) for f in ast.parse(open('.orig/inventory.py').read()).body if isinstance(f,ast.FunctionDef)}\nsame=all(new.get(k)==v for k,v in old.items() if k!='low_stock') and set(new)==set(old)\nsys.exit(0 if ok and same else 1)\nPY",
+   "scripts": {
+    "solve": [
+     [
+      "read",
+      {
+       "path": "DIR/inventory.py"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "low_stock counts qty == threshold as low; nothing else changed"
+      }
+     ],
+     [
+      "edit",
+      {
+       "path": "DIR/inventory.py",
+       "old": "if qty < threshold",
+       "new": "if qty <= threshold"
+      }
+     ],
+     [
+      "read",
+      {
+       "path": "DIR/inventory.py"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "low_stock now compares qty <= threshold"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "low_stock now counts an item at exactly the threshold as low."
+      }
+     ]
+    ],
+    "claim": [
+     [
+      "terminal",
+      {
+       "command": "ls DIR"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "the goal is done"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "it is done"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "Done."
+      }
+     ]
+    ]
+   }
+  },
+  {
+   "key": "tests",
+   "kind": "run tests",
+   "prompt": "Run the tests in DIR (python3 -m unittest discover -s tests) and fix the cause of any failure in inventory.py, not in the tests. The goal is done when every test passes.",
+   "check": "python3 -m unittest discover -s tests >/dev/null 2>&1 && cmp -s tests/test_inventory.py .orig/tests/test_inventory.py",
+   "scripts": {
+    "solve": [
+     [
+      "terminal",
+      {
+       "command": "cd DIR && python3 -m unittest discover -s tests"
+      }
+     ],
+     [
+      "read",
+      {
+       "path": "DIR/inventory.py"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "python3 -m unittest discover -s tests passes with the tests unchanged"
+      }
+     ],
+     [
+      "edit",
+      {
+       "path": "DIR/inventory.py",
+       "old": "items[1:]",
+       "new": "items"
+      }
+     ],
+     [
+      "terminal",
+      {
+       "command": "cd DIR && python3 -m unittest discover -s tests"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "the test run passes"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "total_value skipped the first item; fixed, and the tests pass."
+      }
+     ]
+    ],
+    "claim": [
+     [
+      "terminal",
+      {
+       "command": "ls DIR"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "the goal is done"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "it is done"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "Done."
+      }
+     ]
+    ]
+   }
+  },
+  {
+   "key": "tool",
+   "kind": "use a tool",
+   "prompt": "DIR/tools/report.py turns a stock CSV into a report. Find out how to use it, then use it to write a JSON report of DIR/data/stock.csv to DIR/answers/report.json.",
+   "check": "python3 -c \"import json,sys; r=json.load(open('answers/report.json')); sys.exit(0 if r.get('items')==6 and 'total' in r else 1)\"",
+   "scripts": {
+    "solve": [
+     [
+      "terminal",
+      {
+       "command": "python3 DIR/tools/report.py --help"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "DIR/answers/report.json is the JSON report of data/stock.csv"
+      }
+     ],
+     [
+      "terminal",
+      {
+       "command": "python3 DIR/tools/report.py --format json --out DIR/answers/report.json DIR/data/stock.csv"
+      }
+     ],
+     [
+      "read",
+      {
+       "path": "DIR/answers/report.json"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "report.json has items 6 and a total"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "Wrote the JSON report to answers/report.json."
+      }
+     ]
+    ],
+    "claim": [
+     [
+      "terminal",
+      {
+       "command": "ls DIR"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "the goal is done"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "it is done"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "Done."
+      }
+     ]
+    ]
+   }
+  },
+  {
+   "key": "report",
+   "kind": "report back",
+   "prompt": "Write DIR/answers/REPORT.md for a teammate: three bullet points on what inventory.py does now, then one line naming a risk you see in it. Finish with the same summary.",
+   "check": "python3 -c \"import re,sys; t=open('answers/REPORT.md').read(); b=[l for l in t.splitlines() if re.match(r'\\s*[-*] ',l)]; sys.exit(0 if len(b)>=3 and re.search(r'total_value|low_stock|load',t) else 1)\"",
+   "scripts": {
+    "solve": [
+     [
+      "read",
+      {
+       "path": "DIR/inventory.py"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "DIR/answers/REPORT.md has three bullets on inventory.py and a risk line"
+      }
+     ],
+     [
+      "write",
+      {
+       "path": "DIR/answers/REPORT.md",
+       "content": "- load reads data rows into (name, qty, price)\n- total_value sums qty x price\n- low_stock lists items under a threshold\n\nRisk: total_value skips the first item (items[1:]).\n"
+      }
+     ],
+     [
+      "read",
+      {
+       "path": "DIR/answers/REPORT.md"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "REPORT.md has the three bullets and the risk line"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "load reads the CSV, total_value sums value, low_stock finds low items; risk: total_value skips the first item."
+      }
+     ]
+    ],
+    "claim": [
+     [
+      "terminal",
+      {
+       "command": "ls DIR"
+      }
+     ],
+     [
+      "define_done",
+      {
+       "check": "the goal is done"
+      }
+     ],
+     [
+      "verify",
+      {
+       "evidence": "it is done"
+      }
+     ],
+     [
+      "finish",
+      {
+       "summary": "Done."
+      }
+     ]
+    ]
+   }
+  }
+ ]
+}

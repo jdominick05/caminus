@@ -54,6 +54,7 @@ SUITES = [
     # caminus ember from an installed wheel (synthetic code objects; no checkout on the path): needs setuptools, else SKIP
     ('env_installed', ['tests/ember/test_installed_wheel.py', '--scratch', '{scratch}'], set()),
     ('resident_compare', ['tests/tools/test_resident_compare.py', '--scratch', '{scratch}'], set()),
+    ('emberlab', ['tests/tools/test_emberlab.py', '--scratch', '{scratch}'], set()),
     ('docs', ['tests/docs/test_docs.py'], set()),
     ('own_code', ['tests/test_own_code.py'], set()),
     ('own_dequant', ['tests/io/test_own_dequant.py'], set()),

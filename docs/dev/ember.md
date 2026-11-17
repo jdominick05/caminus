@@ -76,7 +76,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 ## Testing
 
 ```sh
-python -I tests/ci_cpu.py --scratch DIR --only env,resident,resident_discovery,resident_compare,env_setup_e2e
+python -I tests/ci_cpu.py --scratch DIR --only env,resident,resident_discovery,resident_compare,env_setup_e2e,emberlab
 (cd panel && go vet ./... && go test ./...)
 python -I tools/ember_demo.py            # the chat on a scripted model in a scratch home: no account, server or key
 ```
@@ -92,3 +92,71 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
   The panel never sends desktop notifications from a test binary.
 - A live change: `caminus ember agent install` then `caminus ember agent update NAME` installs this checkout's runtime
   into a running resident between goals (`--now` at the next step); its heartbeat names the runtime it runs.
+
+## The lab
+
+`tools/emberlab/` develops and tests Ember the way a model meets it: a real resident in a fresh home per run, a real
+brain or a stand-in, and a scorer that does not trust the agent. It measures a harness change, and it lets you work
+inside the harness with an agent while you design it.
+
+| Module | |
+|---|---|
+| `lab.py` | the command line: `run`, `report`, `compare`; `open`, `say`, `turn`, `reply`, `events`, `status`, `close` |
+| `runner.py` | suites, arms, the run matrix, one run (fresh home, `once`, events, the check) |
+| `brains.py` | `scripted:NAME`, `driven` (you answer each model call), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
+| `hosts.py` | `local` (scratch folders as you) and `agent` (the agent account over Ember's SSH, under `~/lab/`) |
+| `report.py` | tables per brain, arm and task; the A/B verdict |
+| `sessions.py` | long-lived lab agents to talk with or drive |
+| `tui.py` | a terminal program in a hidden tmux window: keys in, exact screens out (text, colour, SVG) |
+
+The suites live in `benchmarks/ember/suites/` ([their format](../../benchmarks/ember/README.md)).
+
+**Measure a harness change.** An arm is a version of the harness: a checkout plus config.json keys and environment
+variables. Run both arms on the same suite and brains, then compare:
+
+```sh
+python -I tools/emberlab/lab.py run --suite basic --brain openai:http://127.0.0.1:8093/v1 \
+  --arm base=../caminus-testing --arm candidate=. --repeats 3 --out DIR
+python -I tools/emberlab/lab.py compare DIR --base base --arm candidate
+```
+
+- **The score.** The task's check decides each run. The resident's own verdict is recorded beside it, and a goal that
+  finished while its check failed counts as a false completion.
+- **The verdict.** An arm is better only if it is better across the board: no brain's pass rate drops, no brain's
+  false completions rise, and at least one improves. Fewer than three repeats per cell are marked noise-prone.
+- **Order.** Arms alternate their order every repeat, so neither always runs first.
+- **Records.** Each record names its runtime's commit and whether its tree was dirty.
+- **Resuming.** `run` appends to `results.jsonl` and skips the ids already there, so an interrupted matrix resumes.
+
+**Work with the agent.** A lab session is a resident with its daemon running, in its own home:
+
+```sh
+python -I tools/emberlab/lab.py open s1 --brain openai:http://127.0.0.1:8093/v1 --fixture basic --out DIR
+python -I tools/emberlab/lab.py say s1 "Try the tools in your work folder and tell me which ones got in your way" --out DIR
+```
+
+- **Ask it, or drive it.** Ask the agent what it can and cannot do from inside its account, have it try a tool, or
+  steer a goal with `say --goal ID`.
+- **Be the model.** With `--brain driven` you answer each model call yourself. `turn` prints the waiting request (the
+  conversation tail, the tools offered, the newest result), and `reply --call TOOL --args JSON` or `reply --text`
+  answers it. You see exactly what a model sees, gate refusals included.
+- **The TUI.** `tui.py --session NAME --lab-out DIR` opens the chat on that session's home. It runs with its own
+  config folders, so it never reads or writes your panel settings.
+
+**Hosts and safety.**
+
+- **Real models run in the agent account.** A real model runs only on the `agent` host: the local host would give it a
+  shell as you, and the lab refuses that unless you pass `--unsafe-local`.
+- **What the agent host leaves alone.** It works under `~/lab/` in the agent account and never touches `~/homes` (the
+  live sessions), a systemd unit or the owner's bridge. Each run has its own bridge, which nobody answers, so a root
+  request times out to no.
+- **Paid brains.** They go through the owner's key relay (`caminus ember relay`), whose daily cap is the spend guard.
+  The lab never reads or passes a key.
+- **Local servers.** A local server answers one request stream at a time (`--parallel 1`, the default for `openai:`).
+  Don't point the lab at a server someone is using without asking: lab goals evict that server's cached prompt.
+- **The output folder stays private.** It holds model output and paths from your machine, so keep it out of the
+  repository.
+
+**Real accounts.** `tui.py --cmd 'caminus ember ui' --read-only` drives your own chat with look-around keys only:
+navigation, Escape, shift+tab, ^P, and Enter after a few read-only slash commands. A step that would send a goal,
+start, stop or destroy a session is refused before the run begins.
