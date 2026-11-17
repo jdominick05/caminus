@@ -150,7 +150,7 @@ def local_entries(data, provider, context=None, vision=False):
 def discover(name, spec, opener=urllib.request.urlopen, key=None):
     """One provider's entries. spec: {kind, endpoint}. key: an API key to send (none through a relay)."""
     kind, base = spec.get('kind', 'openai'), spec['endpoint'].rstrip('/')
-    if kind not in KINDS:
+    if kind not in KINDS + ('auto',):
         raise ValueError(f'unknown provider kind {kind!r}')
     if kind == 'anthropic':
         headers = {'anthropic-version': '2023-06-01', **({'x-api-key': key} if key else {})}
@@ -158,6 +158,11 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         return anthropic_entries(data, name)
     headers = {'Authorization': 'Bearer ' + key} if key else {}
     data = _get(base + '/models', headers, opener)
+    if kind == 'auto':
+        # (agent init, before any provider is configured: model_vision) the list's own shape says whose it is
+        rows = [m for m in data.get('data') or [] if isinstance(m, dict)]
+        kind = ('deepinfra' if any(isinstance(m.get('metadata'), dict) for m in rows) else
+                'mistral' if any(isinstance(m.get('capabilities'), dict) for m in rows) else 'local')
     if kind == 'deepinfra':
         return deepinfra_entries(data, name)
     if kind == 'mistral':
@@ -227,3 +232,24 @@ def find(cat, model, provider=None):
     return hits[0] if len(hits) == 1 else None if not hits else \
         (_ for _ in ()).throw(ValueError(f'{model} is served by {", ".join(h["provider"] for h in hits)}: '
                                          'name the provider (provider/model)'))
+
+
+def model_vision(home, cfg, ask=True):
+    """Whether cfg's model takes images, by the catalog: home's models.json, else (ask) one short question to cfg's own
+    endpoint, since a new home has no catalog yet (agent init). Only a loopback endpoint is asked: the local server or
+    the owner's key relay, which every paid brain goes through. Unknown is no."""
+    import urllib.parse
+    from .model import LOOPBACK
+    try:
+        entry = find(load(home), cfg['model'], cfg.get('provider'))
+    except ValueError:
+        entry = None
+    if entry is None and ask and urllib.parse.urlsplit(cfg.get('endpoint') or '').hostname in LOOPBACK:
+        kind = cfg.get('provider_kind') or ('anthropic' if cfg.get('api') == 'anthropic' else 'auto')
+        try:
+            listed = discover('init', dict(kind=kind, endpoint=cfg['endpoint']),
+                              lambda req, timeout=None: urllib.request.urlopen(req, timeout=3))
+            entry = next((m for m in listed if m['id'] == cfg['model']), None)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, urllib.error.HTTPError):
+            entry = None
+    return bool(entry and entry.get('vision'))

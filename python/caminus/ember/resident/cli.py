@@ -467,6 +467,8 @@ def main(argv=None,stdin=None):
                 for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
                           'fallback','advisor','judge_model'):
                     cfg.pop(k,None)
+                from . import catalog
+                if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -507,6 +509,8 @@ def main(argv=None,stdin=None):
             if not urllib.parse.urlsplit(cfg['endpoint']).path.strip('/'):cfg['endpoint']+='/v1'
             from .model import Model
             Model(cfg)                     # validate before persisting
+            from . import catalog
+            if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()

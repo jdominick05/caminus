@@ -120,9 +120,10 @@ def price(model, usage, served=None):
     return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
-# Images (files.read): a tool message names its image (store.action_result), and each request sends the file itself, so
-# the store keeps no bytes and a brain switched mid-goal gets what it can take: the image where its config says vision
-# (the catalog's flag, copied at /model), a line saying it can't see where not.
+# Images (files.read): a tool message names its image (store.action_result; a user message can too: the finish judge's),
+# and each request sends the file itself, so the store keeps no bytes and a brain switched mid-goal gets what it can
+# take: the image where its config says vision (the catalog's flag, copied at init and /model), a line saying it can't
+# see where not.
 IMAGES_PER_REQUEST = 20    # newest image results sent as images; 20 x 5 MB stays inside the API's 128 MB request
 IMAGE_CACHE = 32           # encoded files kept per brain: compaction counts the same request many times
 NO_VISION = ("this model can't see images; {name} is a {w}x{h} {fmt}; describe-by-tool options: discover topic images "
@@ -523,8 +524,9 @@ class Model:
             return None
 
     def _image_plan(self, messages):
-        """{index: (base64 data or None, a line for the text or None)} for each tool message that names an image"""
-        found = [i for i, m in enumerate(messages) if m.get('role') == 'tool' and isinstance(m.get('image'), dict)]
+        """{index: (base64 data or None, a line for the text or None)} for each tool or user message naming an image"""
+        found = [i for i, m in enumerate(messages)
+                 if m.get('role') in ('tool', 'user') and isinstance(m.get('image'), dict)]
         recent, plan = set(found[-IMAGES_PER_REQUEST:]), {}
         for i in found:
             img = messages[i]['image']
@@ -550,7 +552,8 @@ class Model:
     def _wire(self, messages):
         """The messages as an OpenAI-compatible request sends them. A Chat Completions tool message carries text only
         (OpenAI's spec: ChatCompletionToolMessageParam takes a string or text parts), so an image goes in a user message
-        after its turn's last tool result, never between parallel results; a message without an image is sent as stored."""
+        after its turn's last tool result, never between parallel results (a user message's image joins its own text); a
+        message without an image is sent as stored."""
         plan = self._image_plan(messages)
         if not plan:
             return messages
@@ -562,7 +565,10 @@ class Model:
             if i in plan:
                 img, (data, line) = m['image'], plan[i]
                 m = {k: v for k, v in m.items() if k != 'image'}
-                if data:
+                if data and m['role'] == 'user':
+                    m['content'] = [dict(type='text', text=m.get('content') or ''), dict(
+                        type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif data:
                     parts += [dict(type='text', text=f"{img['path']} (the read in call {m.get('tool_call_id')}):"),
                               dict(type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
                 elif line:
@@ -587,6 +593,14 @@ class Model:
         tail = rest.pop()['content'] if rest and rest[-1]['role'] == 'system' else None
         out, images = [], self._image_plan(rest)
 
+        def with_image(i, text):
+            """a message's text, as blocks with its image after it, or with the line that says why none is sent"""
+            data, line = images.get(i, (None, None))
+            if data:
+                return [dict(type='text', text=text), dict(type='image', source=dict(
+                    type='base64', media_type='image/' + rest[i]['image']['format'], data=data))]
+            return text + '\n' + line if line else text
+
         def add(role, blocks):
             if not blocks:
                 return
@@ -599,15 +613,9 @@ class Model:
             role = m['role']
             if role == 'system':                     # a mid-history system message: kept as an operator note
                 add('user', [dict(type='text', text='[system] ' + m['content'])])
-            elif role == 'tool':
-                content = m['content'] or ''
-                data, line = images.get(i, (None, None))
-                if data:                             # (a tool_result's content may hold image blocks)
-                    content = [dict(type='text', text=content), dict(type='image', source=dict(
-                        type='base64', media_type='image/' + m['image']['format'], data=data))]
-                elif line:
-                    content += '\n' + line
-                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=content)])
+            elif role == 'tool':                     # (a tool_result's content may hold image blocks)
+                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'],
+                                  content=with_image(i, m['content'] or ''))])
             elif role == 'assistant':
                 blocks = [dict(type='text', text=m['content'])] if m.get('content') else []
                 for call in m.get('tool_calls') or []:
@@ -621,7 +629,8 @@ class Model:
                     blocks.append(dict(type='tool_use', id=call['id'], name=f['name'], input=args))
                 add('assistant', blocks)
             else:
-                add('user', [dict(type='text', text=m['content'] or ' ')])
+                blocks = with_image(i, m['content'] or ' ')
+                add('user', blocks if isinstance(blocks, list) else [dict(type='text', text=blocks)])
         if out and out[0]['role'] != 'user':
             out.insert(0, dict(role='user', content=[dict(type='text', text='(conversation resumed)')]))
         if out:

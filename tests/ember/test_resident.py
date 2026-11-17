@@ -60,11 +60,14 @@ def image_msg(path,call_id='t1'):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[]
+    queues={};seen=[];judges={};judge_seen=[];models={}
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-    def do_GET(self):self.respond(dict(n_ctx=65536))
+    def do_GET(self):
+        key=self.path.split('/')[1]
+        if '/models' in self.path and key in self.models:self.respond(self.models[key]);return   # (a test's model list)
+        self.respond(dict(n_ctx=65536))
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path.endswith('/count_tokens'):
@@ -621,6 +624,31 @@ class Resident(unittest.TestCase):
             rt.store.action_result(rt.store.actions(gid)[0],dict(path=str(self.home/'plot.png'),image=dict(width=4,height=3)))
             self.assertNotIn('image',rt.store.goal(gid)['messages'][-1])
         finally:rt.mail.close();rt.store.close()
+
+    def test_the_finish_judge_sees_the_images_the_agent_read_or_takes_its_account_of_them(self):
+        # a live Haiku run read a code off a picture, and a judge that was never shown the picture refused the correct
+        # finish twice (the agent went on to install an OCR model)
+        import base64
+        self.gates_on()
+        data=png(5,2);(self.home/'code.png').write_bytes(data)
+        def judged(vision):
+            conf=json.loads((self.home/'config.json').read_text());conf['vision']=vision
+            (self.home/'config.json').write_text(json.dumps(conf))
+            Endpoint.judge_seen.clear()
+            self.replies(call('define_done',dict(check='I have read the code in code.png')),
+                         call('read',dict(path='code.png')),
+                         call('verify',dict(evidence='the image shows the code 4711')),
+                         call('finish',dict(summary='The code in code.png is 4711.')))
+            self.assertEqual(self.cmd('once',['--goal','What code is in code.png?'])['state'],'completed')
+            return [b for k,b in Endpoint.judge_seen if k==self.key][0]['messages']
+        sent=judged(True)
+        self.assertIn('each follows this brief, as the agent saw it',sent[1]['content'])
+        self.assertEqual(sent[2]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+base64.b64encode(data).decode())))
+        sent=judged(False)
+        self.assertNotIn('image_url',json.dumps(sent))
+        brief=sent[1]['content']
+        self.assertIn('code.png (5x2 PNG)',brief);self.assertIn('is an observation',brief)
+        self.assertNotIn("can't see images",json.dumps(sent),'the judge gets the judge\'s note, not the agent\'s')
 
     def test_file_tools_through_the_loop(self):
         self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
@@ -1946,8 +1974,38 @@ for line in sys.stdin:
         cfg=init('haiku','--model','claude-haiku-5-5','--endpoint','https://api.anthropic.com/v1','--api','anthropic','--context','100000','--effort','low','--max-model-retries','4')
         self.assertEqual((cfg['api'],cfg['effort'],cfg['max_model_retries'],cfg['endpoint']),('anthropic','low',4,'https://api.anthropic.com/v1'))
         self.assertEqual(init('di','--model','m','--endpoint','https://api.deepinfra.com/v1/openai','--context','8192')['endpoint'],'https://api.deepinfra.com/v1/openai')
-        cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:8092')
-        self.assertEqual(cfg['endpoint'],'http://127.0.0.1:8092/v1');self.assertNotIn('api',cfg)
+        cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:9')
+        self.assertEqual(cfg['endpoint'],'http://127.0.0.1:9/v1');self.assertNotIn('api',cfg)
+
+    def test_init_and_create_take_vision_from_the_catalog(self):
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        def init(name,*extra):
+            argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init',name,'--home',str(self.home/name),'--json',
+                  '--bus',str(self.home/'mail.sqlite3'),'--bridge',str(self.bridge),'--endpoint',url,*extra]
+            p=subprocess.run(argv,capture_output=True,text=True,timeout=15);self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+            return json.loads((self.home/name/'config.json').read_text())
+        # the owner's Anthropic relay: the Messages API list's image_input
+        Endpoint.models[self.key]=dict(data=[dict(id='claude-sees',capabilities=dict(image_input=dict(supported=True))),
+                                             dict(id='claude-blind',capabilities=dict(image_input=dict(supported=False)))])
+        anthropic=('--api','anthropic','--context','200000')
+        self.assertTrue(init('a','--model','claude-sees',*anthropic)['vision'])
+        self.assertNotIn('vision',init('b','--model','claude-blind',*anthropic))
+        # an OpenAI-compatible relay: the list's shape names the provider (DeepInfra's tags here)
+        Endpoint.models[self.key]=dict(data=[dict(id='Qwen/VL',metadata=dict(tags=['chat','vision','vlm'])),
+                                             dict(id='GLM',metadata=dict(tags=['chat']))])
+        self.assertTrue(init('c','--model','Qwen/VL')['vision'])
+        self.assertNotIn('vision',init('d','--model','GLM'))
+        self.assertNotIn('vision',init('e','--model','gone'),'a model the list does not name: unknown is no')
+        # a new session on a local model: the sibling's catalog says whether it sees (nothing is asked)
+        (self.home/'models.json').write_text(json.dumps(dict(models=[dict(id='qwen-vl',provider='local',vision=True),
+                                                                     dict(id='swift-1.5',provider='local',vision=False)])))
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','create']
+        for model,sees in (('qwen-vl',True),('swift-1.5',False)):
+            new='s-'+uuid.uuid4().hex[:8]
+            made=subprocess.run(base+[new,'--from',self.home.name,'--model',model,'--endpoint','http://127.0.0.1:9/v1',
+                                      '--home',str(self.home.parent/new),'--json'],capture_output=True,text=True,timeout=15)
+            self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+            self.assertEqual(json.loads((self.home.parent/new/'config.json').read_text()).get('vision',False),sees,model)
 
     # ---- free time ------------------------------------------------------------------------------------------
 
@@ -5013,6 +5071,16 @@ class AnthropicTransport(unittest.TestCase):
         m.complete(h,None,max_tokens=16000)
         line=[b for b in self.wire.requests[0][2]['messages'][2]['content'] if b['type']=='tool_result'][1]['content']
         self.assertIn('changed or is gone since it was read',line)
+
+    def test_a_user_message_carries_its_image_too(self):
+        # the finish judge's brief: the images follow it as user messages
+        h,_,b64=self.image_history()
+        brief=[dict(role='system',content='JUDGE'),dict(role='user',content='brief'),
+               dict(role='user',content='a.png, as the agent saw it:',image=h[4]['image'])]
+        m=self.model(sse('ok'),vision=True)
+        m.complete(brief,None,max_tokens=600)
+        blocks=self.wire.requests[0][2]['messages'][0]['content']
+        self.assertEqual([b['type'] for b in blocks],['text','text','image']);self.assertEqual(blocks[2]['source']['data'],b64)
 
     def test_an_image_counts_as_its_patches_not_its_base64(self):
         from caminus.ember.resident.model import image_tokens

@@ -121,6 +121,14 @@ def image(p):
     return dict(path=str(p), image=info)
 
 
+def image_ref(tool, result):
+    """The image a tool result names for the transport to send (model.py: a message's `image`), or None. Only read's
+    own result names one: another tool's 'image' and 'path' (an MCP server's) are its data, never a file to send."""
+    if tool == 'read' and isinstance(result, dict) and isinstance(result.get('image'), dict) and result.get('path'):
+        return dict(result['image'], path=result['path'])
+    return None
+
+
 def _path(home, path):
     if not isinstance(path, str) or not path.strip():
         raise ValueError('a path is required')
