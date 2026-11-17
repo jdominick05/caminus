@@ -22,10 +22,7 @@ var pageOverlays = map[string]struct {
 	tab   int
 	title string
 }{
-	"/memory":  {3, "MEMORY & NOTES"},
-	"/servers": {4, "SERVERS"},
-	"/audit":   {5, "AUDIT"},
-	"/jobs":    {9, "JOBS & PROCESSES"},
+	"/memory":  {3, "MEMORY"},
 	"/context": {10, "CONTEXT"},
 }
 

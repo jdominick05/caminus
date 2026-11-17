@@ -144,24 +144,18 @@ func TestViewShowsQueueAndAudit(t *testing.T) {
 	if v = ansi.Strip(next.(emberModel).render()); !strings.Contains(v, "systemctl restart foo") || !strings.Contains(v, "a a approve") {
 		t.Fatalf("approvals overlay missing the request:\n%s", v)
 	}
-	next, _ = m.chatSlash("/audit")
-	// a table row (when, event, detail), not the raw JSON record
-	if v = ansi.Strip(next.(emberModel).render()); !strings.Contains(v, "run") || !strings.Contains(v, "id") || strings.Contains(v, `"event"`) {
-		t.Fatalf("audit overlay missing the event:\n%s", ansi.Strip(v))
-	}
-	next, _ = m.chatSlash("/servers")
-	if !strings.Contains(ansi.Strip(next.(emberModel).render()), "servers · ") {
-		t.Fatal("servers overlay missing")
+	// the audit log, the servers and the jobs are CLI only now (caminus ember audit / ctx / agent jobs)
+	for _, gone := range []string{"/audit", "/servers", "/jobs", "/identity", "/update", "/export", "/freetime"} {
+		if next, _ = m.chatSlash(gone); next.(emberModel).chat.page >= 0 || !strings.Contains(next.(emberModel).msg, "Unknown command") {
+			t.Fatalf("%s left the TUI", gone)
+		}
 	}
 	m.resident.Context, m.resident.ContextUsed, m.resident.CompactThreshold = 1000000, 250000, .38
 	next, _ = m.chatSlash("/context")
 	if v := ansi.Strip(next.(emberModel).render()); !strings.Contains(v, "context · ") || !strings.Contains(v, "25.0 %") || !strings.Contains(v, "38.0 %") {
 		t.Fatalf("context overlay shows the agent's own window:\n%s", v)
 	}
-	next, _ = m.chatSlash("/jobs")
-	if !strings.Contains(ansi.Strip(next.(emberModel).render()), "jobs & processes") {
-		t.Fatal("jobs overlay missing")
-	}
+
 }
 
 func TestKeyDenyAndSkip(t *testing.T) {

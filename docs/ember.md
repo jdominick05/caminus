@@ -139,7 +139,7 @@ another one (`relay install ... --port 8775`, and the agent's `--endpoint` to ma
 ## Its GitHub account
 
 Give an agent its own GitHub account and a token file in its account (the token never leaves it), then link them
-with `/identity` in the chat (`l`), or `caminus ember agent github NAME link --token-file PATH --repo OWNER/NAME`.
+with `caminus ember agent github NAME link --token-file PATH --repo OWNER/NAME`.
 Its terminals then use that account for `gh` and `git push`, and its commits carry its identity (the noreply email
 GitHub links to the account, so a CLA check can find its signature). The token's text never appears in what it sees.
 

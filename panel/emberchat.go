@@ -53,8 +53,6 @@ type residentChat struct {
 	loadingShown                            bool   // the transcript shows "loading NAME…"
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
-	identity                                identityState // the Identity screen (/identity): the agent's GitHub account
-	advisor                                 advisorState  // the Advisor screen (/advisor)
 	studio                                  studioState   // the Studio overlay (/studio)
 	recap                                   string        // the "while you were away" card, until Esc
 	chordAt                                 time.Time     // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
@@ -1899,14 +1897,6 @@ func (m emberModel) renderChat() string {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.modelsOverlay(w, h) + "\n" + foot
 	}
-	if m.chat.identity.open {
-		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
-		return head + "\n" + m.identityOverlay(w, h) + "\n" + foot
-	}
-	if m.chat.advisor.open {
-		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
-		return head + "\n" + m.advisorOverlay(w, h) + "\n" + foot
-	}
 	if m.chat.themes.open && len(m.chat.themes.names) > 0 {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.themesOverlay(w, h) + "\n" + foot
@@ -1986,7 +1976,7 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.identity.open && !m.chat.advisor.open && !m.chat.themes.open && !m.chat.studio.open &&
+	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.themes.open && !m.chat.studio.open &&
 		!m.chat.view.open && !m.chat.rewind.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
@@ -2004,12 +1994,6 @@ func (m emberModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.chat.models.open {
 		return m.modelsKey(msg)
-	}
-	if m.chat.identity.open {
-		return m.identityKey(msg)
-	}
-	if m.chat.advisor.open {
-		return m.advisorKey(msg)
 	}
 	if m.chat.themes.open {
 		return m.themesKey(msg)
@@ -2367,7 +2351,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
 		m.chat.armed = ""
 		m.chat.compose.Blur()
-	case "/memory", "/context", "/audit", "/jobs", "/servers":
+	case "/memory", "/context":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
@@ -2421,18 +2405,9 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.chat.models.open, m.chat.models.loading, m.chat.models.err = true, true, ""
 		return m, fetchModels(m, false)
-	case "/identity":
-		// the agent's accounts: its linked GitHub account, the identity its commits carry; link or unlink here
-		clear()
-		return m.openIdentity()
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
-	case "/freetime":
-		// a free-time stretch now: after any running work, within the day's free-time budget
-		clear()
-		m.msg = "free time asked: it starts at the agent's next pass (after any running work)"
-		return m, residentAction(m, []string{"heartbeat", m.agentName, "now", "--json"}, "")
 	case "/studio":
 		clear()
 		m.chat.studio = studioState{open: true, loading: true}
@@ -2449,14 +2424,10 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.msg = "emergency stop…"
 		return m, emergencyStop(m, strings.TrimSpace(arg))
-	case "/btw", "/diff", "/export", "/rewind", "/plan", "/advisor":
+	case "/btw", "/diff", "/rewind", "/plan", "/advisor":
 		clear()
 		next, cmd, _ := m.steerSlash(command, arg)
 		return next, cmd
-	case "/update":
-		clear()
-		m.msg = "uploading the runtime…"
-		return m, updateResident(m, strings.TrimSpace(arg) == "now")
 	case "/compact":
 		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
 		// pass rather than writing history from here.
@@ -2545,11 +2516,9 @@ var slashCommands = []struct{ name, hint string }{
 	{"/compact", "summarize this goal's history into memory now"},
 	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
-	{"/identity", "the agent's GitHub account: link, unlink, what its commits carry"},
-	{"/advisor", "the advisor reviews the goal now and the agent reads it before its next step; /advisor setup: model, budget"},
+	{"/advisor", "the advisor reviews the goal now and the agent reads it before its next step"},
 	{"/pause", "pause the selected goal at its next step; /resume continues it"},
 	{"/halt", "emergency stop: every resident pauses after its step (/halt clear lifts it)"},
-	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},
 	{"/goals", "the goals overlay (Ctrl+G)"},
 	{"/help", "the commands and keys"},
 	{"/new", "start a new goal"},
@@ -2563,15 +2532,10 @@ var slashCommands = []struct{ name, hint string }{
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
 	{"/memory", "memory and notes"},
 	{"/context", "what the agent's context holds"},
-	{"/audit", "the audit log"},
-	{"/jobs", "the agent's jobs and processes"},
 	{"/btw", "a side question with no tools; the goal keeps nothing"},
 	{"/diff", "what this goal changed in its git repositories"},
-	{"/export", "this goal as markdown in the agent's ~/exports"},
 	{"/rewind", "back to an earlier step, files included"},
 	{"/plan", "TEXT starts a goal that plans first; approve or revise TEXT answers a waiting plan"},
-	{"/servers", "the model servers and their windows"},
-	{"/freetime", "start a free-time stretch now (after any running work)"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }
 
@@ -2879,6 +2843,13 @@ func (m emberModel) switchToCard(i int) (tea.Model, tea.Cmd) {
 	return m, m.chat.compose.Focus()
 }
 
+// runtimeOutdated: the daemon runs another runtime than this caminus installs (the /update command's job is now a
+// hint: `caminus ember agent install` queues the new one for every running daemon, taken between goals).
+func (m emberModel) runtimeOutdated() bool {
+	r := m.resident
+	return r.DaemonAlive && r.Heartbeat.Runtime != "" && r.RuntimeLatest != "" && r.Heartbeat.Runtime != r.RuntimeLatest
+}
+
 // chatFoot is the status line (shell.go) and, when something is only sometimes true, a dim line under it; bodyHeight
 // measures it so the frame never outgrows the terminal.
 func (m emberModel) chatFoot(w int) string {
@@ -2906,6 +2877,9 @@ func (m emberModel) chatFoot(w int) string {
 	}
 	if len(m.reqs) > 0 {
 		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
+	}
+	if m.runtimeOutdated() {
+		keys = append([]string{emberWarn.Render("older runtime · caminus ember agent install")}, keys...)
 	}
 	// Spend shows once anything has been priced (a paid brain); a local brain's turns cost nothing and hide it.
 	usd := -1.0

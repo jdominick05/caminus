@@ -1493,6 +1493,14 @@ for line in sys.stdin:
         self.assertEqual(subprocess.run(args,capture_output=True,text=True,timeout=15).returncode,1)
         self.assertIn('Source-only memory.',self.cmd('memory')['memory'])
 
+    def test_runtime_bundle_is_named_by_its_content(self):
+        from caminus.ember import agent_host
+        first=agent_host.bundle()
+        import time as _t;_t.sleep(1.1)                      # zip entries used to carry the current time
+        self.assertEqual(first,agent_host.bundle(),'the same files give the same bytes, so the same file name')
+        import hashlib
+        self.assertEqual(agent_host.runtime_name(),hashlib.sha256(first).hexdigest()+'.pyz')
+
     def test_remove_takes_a_session_off_the_bus_and_keeps_its_home(self):
         name='session-'+uuid.uuid4().hex
         home=self.home.parent/name

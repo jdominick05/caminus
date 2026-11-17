@@ -5,7 +5,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"image/color"
 	"os"
@@ -268,21 +267,23 @@ func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
 	// The old audit page is an overlay over the chat now: it fits the terminal and Page Down scrolls it.
 	m := chatFixture(t)
 	m.width, m.height = 80, 24
-	next, _ := m.chatSlash("/audit") // (opening reads the audit file; the fixture fills the lines after)
-	m = next.(emberModel)
+	var long []string
 	for i := 0; i < 90; i++ {
-		m.events = append(m.events, fmt.Sprintf("audit entry %d with a long but readable message", i))
+		long = append(long, fmt.Sprintf("memory line %d with a long but readable note", i))
 	}
+	m.sessionMemory = strings.Join(long, "\n")
+	next, _ := m.chatSlash("/memory")
+	m = next.(emberModel)
 	frame := m.render()
-	if m.tab != 6 || m.chat.page != 5 || !strings.Contains(ansi.Strip(frame), "audit · ") {
-		t.Fatalf("/audit did not open the overlay:\n%s", ansi.Strip(frame))
+	if m.tab != 6 || m.chat.page != 3 || !strings.Contains(ansi.Strip(frame), "memory · ") {
+		t.Fatalf("/memory did not open the overlay:\n%s", ansi.Strip(frame))
 	}
 	if len(strings.Split(frame, "\n")) > m.height {
-		t.Fatal("audit overlay exceeded terminal height")
+		t.Fatal("the overlay exceeded terminal height")
 	}
 	for _, line := range strings.Split(frame, "\n") {
 		if ansi.StringWidth(line) > m.width {
-			t.Fatal("audit overlay exceeded terminal width")
+			t.Fatal("the overlay exceeded terminal width")
 		}
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
@@ -340,13 +341,13 @@ func sortedCopy(in []string) []string {
 }
 
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
-	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/servers /sessions]" {
+	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/sessions]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/servers /sessions /start /steer /studio]" {
+	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/sessions /start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -355,7 +356,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /approvals /sessions /remember /goals /start /cancel /compact /resume /theme /deny /steer /memory /context /audit /model /identity /advisor /effort /update /pause /halt /freetime /studio /jobs /servers /btw /diff /export /rewind /plan /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /approvals /sessions /remember /goals /start /cancel /compact /resume /theme /deny /steer /memory /context /model /advisor /effort /pause /halt /studio /btw /diff /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -364,17 +365,17 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	next, done := m.cycleSlash()
 	m = next.(emberModel)
 	// (A to Z, as the menu lists them)
-	if !done || m.chat.compose.Value() != "/servers " {
+	if !done || m.chat.compose.Value() != "/sessions " {
 		t.Fatalf("first Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/sessions " {
+	if !done || m.chat.compose.Value() != "/start " {
 		t.Fatalf("second Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/start " {
+	if !done || m.chat.compose.Value() != "/steer " {
 		t.Fatalf("third Tab gave %q", m.chat.compose.Value())
 	}
 	m.chat.compose.SetValue("/new steer me")
@@ -2230,65 +2231,6 @@ func TestAGithubHandoffIsACardAndTakesTwoPresses(t *testing.T) {
 	}
 }
 
-func TestTheIdentityScreenShowsTheLinkAndUnlinksOnTwoPresses(t *testing.T) {
-	m := chatFixture(t)
-	m.width, m.height = 110, 34
-	m, cmd := m.openIdentity()
-	if !m.chat.identity.open || cmd == nil || !m.overlayOpen() {
-		t.Fatal("/identity opens the screen and reads the link")
-	}
-	m = m.identityLoaded(identityLoadedMsg{link: githubLink{Linked: true, Login: "agent-login",
-		Email: "1+agent-login@users.noreply.github.com", TokenFile: "~/homes/x/.config/github-token",
-		Repos: map[string]string{"jdominick05/caminus": "read"}}})
-	view := ansi.Strip(m.identityOverlay(100, 30))
-	for _, want := range []string{"agent-login", "1+agent-login@users.noreply.github.com", "github-token", "on jdominick05/caminus", "GITHUB cards"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("the screen shows %q: %s", want, view)
-		}
-	}
-	next, cmd := m.identityKey(tea.KeyPressMsg{Code: 'u', Text: "u"})
-	m = next.(emberModel)
-	if cmd != nil || !strings.Contains(m.msg, "press u again") {
-		t.Fatalf("the first u only asks: %q", m.msg)
-	}
-	if _, cmd = m.identityKey(tea.KeyPressMsg{Code: 'u', Text: "u"}); cmd == nil {
-		t.Fatal("the second u unlinks")
-	}
-	next, _ = m.identityKey(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	if m = next.(emberModel); m.chat.identity.editing != 1 || m.chat.identity.token.Value() != "~/homes/x/.config/github-token" {
-		t.Fatal("l starts a link with the current token file filled in")
-	}
-}
-
-func TestTheAdvisorScreenShowsItAndTurnsOffOnTwoPresses(t *testing.T) {
-	m := chatFixture(t)
-	m.width, m.height = 110, 34
-	m, cmd := m.openAdvisor()
-	if !m.chat.advisor.open || cmd == nil || !m.overlayOpen() {
-		t.Fatal("/advisor opens the screen and reads the advisor")
-	}
-	var info advisorInfo
-	_ = json.Unmarshal([]byte(`{"advisor":{"model":"claude-opus-5-5","endpoint":"http://127.0.0.1:8765/v1","budget_usd":3,"calls_per_goal":5},"today":{"usd":0.12,"calls":2}}`), &info)
-	m = m.advisorLoaded(advisorLoadedMsg{info: info})
-	view := ansi.Strip(m.advisorOverlay(100, 30))
-	for _, want := range []string{"claude-opus-5-5", "$3.00 a day", "$0.12 spent today in 2 calls", "before the watchdog pauses"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("the screen shows %q: %s", want, view)
-		}
-	}
-	next, cmd := m.advisorKey(tea.KeyPressMsg{Code: 'o', Text: "o"})
-	if m = next.(emberModel); cmd != nil || !strings.Contains(m.msg, "press o again") {
-		t.Fatalf("the first o only asks: %q", m.msg)
-	}
-	if _, cmd = m.advisorKey(tea.KeyPressMsg{Code: 'o', Text: "o"}); cmd == nil {
-		t.Fatal("the second o turns it off")
-	}
-	next, _ = m.advisorKey(tea.KeyPressMsg{Code: 'b', Text: "b"})
-	if m = next.(emberModel); m.chat.advisor.field != "budget-usd" || m.chat.advisor.input.Value() != "3.00" {
-		t.Fatal("b edits the budget, starting from the current one")
-	}
-}
-
 func TestAFencedCodeBlockIsAVisiblePlate(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 100, 40
@@ -2684,5 +2626,23 @@ func TestASwitchedSessionSaysLoadingNotStoppedUntilItsStatusLands(t *testing.T) 
 	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") || strings.Contains(frame, "loading") ||
 		!strings.Contains(frame, "will stay here") {
 		t.Fatalf("once its status lands, an empty stopped session shows stopped and the welcome, no loading line:\n%s", frame)
+	}
+}
+
+func TestAnOutdatedRuntimeShowsAHintInsteadOfAnUpdateCommand(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 160, 40
+	m.resident.DaemonAlive = true
+	m.resident.Heartbeat.Runtime, m.resident.RuntimeLatest = "aaa.pyz", "bbb.pyz"
+	if !strings.Contains(ansi.Strip(m.chatFoot(m.width)), "older runtime · caminus ember agent install") {
+		t.Fatal("a daemon on another runtime than this caminus installs gets the hint")
+	}
+	m.resident.RuntimeLatest = "aaa.pyz"
+	if strings.Contains(ansi.Strip(m.chatFoot(m.width)), "older runtime") {
+		t.Fatal("the same runtime: no hint")
+	}
+	m.resident.RuntimeLatest = "" // an older CLI that does not report it
+	if m.runtimeOutdated() {
+		t.Fatal("nothing to compare: no hint")
 	}
 }

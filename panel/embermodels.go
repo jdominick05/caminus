@@ -274,40 +274,6 @@ func (m emberModel) modelsLoaded(msg modelsLoadedMsg) emberModel {
 	return m
 }
 
-// updateResident: /update uploads the runtime this panel's caminus carries (agent install) and asks the resident to
-// move to it; the daemon does it between goals (or at the next turn with /update now) and its heartbeat confirms it.
-func updateResident(m emberModel, now bool) tea.Cmd {
-	return func() tea.Msg {
-		if len(m.cli) == 0 {
-			return residentActionMsg{"resident controls need the caminus CLI (--cli)"}
-		}
-		var inst struct {
-			Sha256 string `json:"sha256"`
-		}
-		if out, err := runResident(residentCommand(m, []string{"install"}, "")); err != nil {
-			return residentActionMsg{"update: install failed: " + strings.TrimSpace(string(out))}
-		} else if i := strings.LastIndex(string(out), "{"); i >= 0 {
-			_ = json.Unmarshal(out[i:], &inst)
-		}
-		args := []string{"update", m.agentName, "--json"}
-		if now {
-			args = append(args, "--now")
-		}
-		var out struct {
-			Runtime string `json:"runtime"`
-			Note    string `json:"note"`
-		}
-		if err := residentJSON(m, args, &out); err != nil {
-			return residentActionMsg{"update: " + err.Error()}
-		}
-		short := out.Runtime
-		if len(short) > 12 {
-			short = short[:12]
-		}
-		return residentActionMsg{"update to runtime " + short + " queued: " + out.Note}
-	}
-}
-
 // emergencyStop (/halt) runs `caminus ember stop-all`: a STOP file in the sticky bridge folder that every resident reads before
 // each step and cannot remove. /halt clear lifts it; paused goals still wait for /resume.
 func emergencyStop(m emberModel, arg string) tea.Cmd {

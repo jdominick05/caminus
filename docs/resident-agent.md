@@ -73,17 +73,23 @@ it; the durable blocks replace it when the turn lands.
 | `/plan TEXT`, `/plan approve`, `/plan revise NOTE` | a plan-first goal: it explores read-only, proposes a plan and waits; the plan shows as a card above the composer |
 | `/steer TEXT`, `/pause`, `/resume`, `/cancel` | steer, pause at the next step, resume, cancel |
 | `/btw QUESTION` | a side question with no tools; nothing enters the goal |
-| `/diff`, `/export` | the goal's changes in its git repositories (new files included); the goal as markdown in the agent's `~/exports` |
+| `/diff` | the goal's changes in its git repositories (new files included) |
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
 | `/approvals` (Ctrl+A), `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
-| `/context`, `/memory`, `/audit` | what the agent's context holds, its brain, window and where compaction starts; memory; the audit log |
-| `/jobs`, `/servers` | the agent's jobs and processes; the model servers |
+| `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
-| `/update`, `/halt` | install this caminus's runtime between goals; the emergency stop (`/halt clear` lifts it) |
+| `/halt` | the emergency stop (`/halt clear` lifts it) |
 | `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |
 | `/sessions` (Ctrl+P, Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches, `n` creates one, `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
+
+In the CLI only (rare, or about the machine rather than the conversation): `caminus ember agent export NAME GOAL`
+(the goal as markdown), `caminus ember agent install` (a new runtime; running daemons take it between goals, and the
+status line says "older runtime" until they do), `caminus ember ctx` (the model servers), `caminus ember audit` (the
+audit log), `caminus ember jobs` (the agent's jobs), `caminus ember agent github NAME` (its GitHub account),
+`caminus ember agent advisor NAME` (the advisor's model and budget) and `caminus ember agent heartbeat NAME now`
+(free time now).
 
 Custom commands: a markdown file `~/.config/caminus/commands/NAME.md` becomes
 `/NAME ARGS` (front matter is dropped; `$ARGUMENTS` is replaced, else the
@@ -251,7 +257,7 @@ nightly dream consolidates notes. On the local server it works in the full conte
 window: before a stretch overwrites the human's conversation, the prompt cache
 parks it to disk and the human's next request restores it. `caminus ember agent
 heartbeat NAME on|off|status|recap|now`; the recap is the "while you were away" line, and `now` (the panel's
-`/freetime`) starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
+`caminus ember agent heartbeat NAME now`) starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
 step limit (0, the default, means none); `--rest-minutes` sets the rest between stretches and `--budget-usd` the daily allowance.
 On a remote model free time spends its own allowance (`free_time.budget_usd`,
 0.50 USD a day by default).

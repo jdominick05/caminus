@@ -38,10 +38,14 @@ type residentStatus struct {
 	SpendGoals       map[string]float64 `json:"spend_goals"` // per goal
 	Compactions      map[string]int     `json:"compactions"` // per goal: how many times its history was compacted
 	OnlineS          float64            `json:"online_s"`    // how long the daemon has been running (0: unknown)
-	CacheHit         *float64           `json:"cache_hit"`   // today's input served from the prompt cache, 0-1 (nil: no turns yet)
-	DaemonAlive      bool               `json:"daemon_alive"`
-	Goals            []residentGoal     `json:"goals"`
-	LastEvent        int                `json:"last_event"`
+	Heartbeat        struct {
+		Runtime string `json:"runtime"` // the runtime file the daemon runs (its sha256)
+	} `json:"heartbeat"`
+	RuntimeLatest string         `json:"runtime_latest"` // the one this caminus installs: differing, the agent is outdated
+	CacheHit      *float64       `json:"cache_hit"`      // today's input served from the prompt cache, 0-1 (nil: no turns yet)
+	DaemonAlive   bool           `json:"daemon_alive"`
+	Goals         []residentGoal `json:"goals"`
+	LastEvent     int            `json:"last_event"`
 }
 type residentEvent struct {
 	Seq  int            `json:"seq"`
