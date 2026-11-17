@@ -2864,3 +2864,13 @@ func TestWaitingOnYourMessageIsNotWorking(t *testing.T) {
 		t.Fatal("the header says it waits for you")
 	}
 }
+
+func TestATimedOutQuestionIsNotDrawnAsYourAnswer(t *testing.T) {
+	m := chatFixture(t)
+	e := residentEvent{Seq: 3, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "ask_user", "call_id": "q",
+		"result": map[string]any{"decision": "answered", "by": "timeout", "answer": "(no answer from your human in 15 min.) Silence is not approval"}}}
+	v := ansi.Strip(m.chat.eventBlock(e))
+	if strings.Contains(v, "you · answer") || strings.Contains(v, "Silence is not approval") || !strings.Contains(v, "no answer in time") {
+		t.Fatalf("a timeout reads as one, not as your words:\n%s", v)
+	}
+}
