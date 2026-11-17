@@ -266,7 +266,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
 
     def probe(self, timeout=3.0):
         """whether the server answers at all (a local server's /props, a short timeout); a remote API is assumed up"""
@@ -276,14 +276,22 @@ class Model:
             with self.opener(urllib.request.Request(self.root + '/props', None, self.headers()), timeout=timeout) as r:
                 r.read(65536)
             return True
-        except (OSError, ValueError, urllib.error.HTTPError):
+        except (OSError, ValueError, urllib.error.HTTPError) as e:
+            self._failed(e)
             return False
+
+    def _failed(self, e):
+        """A call's transport failure as a ModelError. A connection that failed may come back as another server on the
+        same port (llama-server where caminus serve was): whether the brain is Caminus is then asked again."""
+        if isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError):
+            self.caminus = None
+        return ModelError(str(e))
 
     def is_caminus(self):
         """Whether this brain is a local Caminus server (catalog.caminus_props: its /props names the engine). Asked once
-        and kept; a server that cannot be reached is asked again next time, never remembered as another engine. A
-        paid brain (remote, or through the key relay) is never asked. Any failure is "not now": the reply it follows is
-        already read, and a speed lookup must never fail it."""
+        and kept until a call fails to connect (_failed); a server that cannot be reached is asked again next time,
+        never remembered as another engine. A paid brain (remote, or through the key relay) is never asked. Any failure
+        is "not now": the reply it follows is already read, and a speed lookup must never fail it."""
         if self.caminus is None:
             if self.remote:
                 self.caminus = False
@@ -469,7 +477,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
         self.last_usage = usage
         self.last_speed = self._speed(timings, usage.get('completion_tokens') if isinstance(usage, dict) else None,
                                       t_first, t_last)
@@ -705,7 +713,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
         self.last_call = dict(model=body.get('model'), served=served, fallback_ran=fallback_ran,
                               declined_by=[m for m in declined if m], stop_reason=stop,
                               stop_category=(details or {}).get('category'), request_id=request_id)

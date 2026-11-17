@@ -29,15 +29,19 @@ SPEED_FRESH_S = 120   # seconds a measured decode speed stays on the status line
 LIVE_POLL_S = 1.0     # the longest a status call waits on a Caminus server's /caminus/status for the live speed
 
 
-def _engine_live(home, opener=None):
+def _engine_live(home, daemon_alive, opener=None):
     """The engine's write speed while this session's reply streams from a Caminus server: 1000 / its /caminus/status
     decode.ms_per_token (the engine's mean ms per emitted token over its last passes, across requests, so the figure
     steps when a reply ends). Asked only of the server a live snapshot names (the runtime names it when the call's
     brain is known to be Caminus, so never for a fallback brain's reply), once that snapshot holds streamed text and
-    while the server's slot is decoding; None otherwise, or when the server does not answer within LIVE_POLL_S. The
+    while the server's slot is decoding; None otherwise, or when the server does not answer within LIVE_POLL_S. A
+    snapshot counts only while the daemon that writes it runs and it is younger than SPEED_FRESH_S: a daemon that died
+    mid-turn leaves its snapshot, and another client decoding on that server was shown as this session's speed. The
     panel polls status every few seconds, so this is one small GET each."""
     from . import catalog
     import urllib.request
+    if not daemon_alive:
+        return None
     server = None
     for f in (Path(home) / 'live').glob('*.json'):
         try:
@@ -45,7 +49,8 @@ def _engine_live(home, opener=None):
         except (OSError, ValueError):
             continue
         if isinstance(snap, dict) and isinstance(snap.get('server'), str) and \
-                (snap.get('content') or snap.get('reasoning') or snap.get('tools')):
+                (snap.get('content') or snap.get('reasoning') or snap.get('tools')) and \
+                isinstance(snap.get('ts'), (int, float)) and time.time() - snap['ts'] < SPEED_FRESH_S:
             server = snap['server']
     if not server:
         return None
@@ -54,13 +59,11 @@ def _engine_live(home, opener=None):
                           LIVE_POLL_S, catalog.LOCAL_READ)
         slot = st.get('slot') or {}
         decoded = ((slot.get('next_token') or [{}])[0] or {}).get('n_decoded')
-        ms = (st.get('decode') or {}).get('ms_per_token')
     except Exception:       # (a status line never fails on a server's answer: no live figure then)
         return None
-    if st.get('engine') != 'caminus' or not slot.get('is_processing') or not decoded or isinstance(ms, bool) \
-            or not isinstance(ms, (int, float)) or ms <= 0:
+    if not slot.get('is_processing') or not decoded:
         return None
-    return round(1000 / ms, 1)
+    return catalog.decode_tps(st)
 
 
 def _online_s(pid):
@@ -800,7 +803,7 @@ def main(argv=None,stdin=None):
             busy=any(g['state'] in ('working','waiting_model') for g in store.status().get('goals',[]))
             if not isinstance(speed,dict) or not busy:
                 speed={}
-            live=_engine_live(home) if busy else None
+            live=_engine_live(home,alive(heartbeat.get('pid'))) if busy else None
             if live:
                 # the read speed stays the last reply's when that came from the engine too (an estimate has none)
                 speed=dict(speed if speed.get('source')=='engine' else {},source='engine',tps=live,live=True)

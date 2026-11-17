@@ -1356,13 +1356,21 @@ class Runtime:
     def _throughput_note(self,gid,speed):
         """Record the last reply's speed (Model.last_speed): on a Caminus server the engine's own write and read
         speeds from the reply's timings (source engine), elsewhere the usage token count over the client's decode
-        window (source estimate); a reply that gives neither reports nothing. Like context.json, one small file
-        rewritten in place by the runtime lock's owner, for the UI footer."""
+        window (source estimate). A reply that gives neither keeps the previous record only when that record is not
+        another brain's engine figure: after a Caminus reply, a fallback or /model-switched brain's short reply showed
+        the engine's numbers, labelled as the engine's, for its turn. Like context.json, one small file rewritten in
+        place by the runtime lock's owner, for the UI footer."""
         def rate(k):
             return isinstance(speed.get(k),(int,float)) and speed[k]>0
+        path=self.home/'throughput.json'
         if not isinstance(speed,dict) or not (rate('tps') or rate('prompt_tps')):
+            try:old=json.loads(path.read_text())
+            except (OSError,ValueError):return
+            here=getattr(self.model,'root',None) if getattr(self.model,'caminus',None) is True else None
+            if isinstance(old,dict) and old.get('source')=='engine' and old.get('server')!=here:
+                path.unlink(missing_ok=True)
             return
-        atomic_json(self.home/'throughput.json',dict(goal=gid,ts=time.time(),**speed))
+        atomic_json(path,dict(goal=gid,ts=time.time(),**speed))
 
     def _compact(self, gid, messages, force=False):
         """Summarize the transcript into working memory, and say whether it did.

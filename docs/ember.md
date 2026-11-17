@@ -31,7 +31,8 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   On a `caminus serve` brain the chat's speeds are the engine's own: "read 1,240 · write 62 tok/s" is how fast it read
   the last reply's prompt and wrote the reply. While a reply streams, the write speed is the engine's live figure, its
   mean over its most recent passes, so it can step when the reply ends.
-  Any other brain reports no speed, so the chat shows Ember's estimate, marked "est.".
+  Any other brain (llama-server included, whose timings Ember does not take as the engine's) gets Ember's own
+  estimate, marked "est.".
 
 Compared with Qwen Code and similar harnesses, the difference that matters most is what a harness cannot do: keep
 working when you close the window. On speed and cost there is one small measurement so far: a single bug-fix task (a

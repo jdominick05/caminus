@@ -4774,25 +4774,70 @@ for line in sys.stdin:
         finally:st.close()
         live=snap.path
         self.assertEqual(json.loads(live.read_text())['server'],server)
-        Endpoint.status[self.key]=dict(engine='caminus',decode=dict(ms_per_token=16.0),
-                                       slot=dict(is_processing=True,next_token=[dict(n_decoded=40)]))
+        decoding=dict(version=1,engine='caminus',decode=dict(ms_per_token=16.0),
+                      slot=dict(is_processing=True,next_token=[dict(n_decoded=40)]))
+        Endpoint.status[self.key]=decoding
+        write=lambda **k:live.write_text(json.dumps(dict(dict(turn='t',goal=gid,content='Wor',reasoning='',tools=[],
+                                                               server=server,ts=time.time()),**k)))
+        hb=self.home/'heartbeat.json'
+        hb.write_text(json.dumps(dict(pid=os.getpid())))         # (a running daemon writes the snapshot)
         status=self.cmd('status')
         self.assertEqual((status['tok_per_s'],status['speed_live']),(62.4,False),
                          'nothing streamed yet (a prefill): the last reply, not the server\'s window')
-        live.write_text(json.dumps(dict(turn='t',goal=gid,content='Wor',reasoning='',tools=[],server=None)))
+        write(server=None)
         before=len(Endpoint.gets)
         status=self.cmd('status')
         self.assertEqual(status['speed_live'],False,"a call that names no Caminus server (a fallback brain's): no poll")
         self.assertFalse(any(p.endswith('/caminus/status') for p in Endpoint.gets[before:]))
-        live.write_text(json.dumps(dict(turn='t',goal=gid,content='Wor',reasoning='',tools=[],server=server)))
+        write()
         status=self.cmd('status')
         self.assertEqual((status['tok_per_s'],status['prompt_tok_per_s'],status['speed_live']),(62.5,1240.2,True),
                          "1000 / the engine's ms per token while the reply streams; the read speed stays the last reply's")
         self.assertTrue(any(p.endswith('/caminus/status') for p in Endpoint.gets))
-        Endpoint.status[self.key]=dict(engine='caminus',decode=dict(ms_per_token=16.0),slot=dict(is_processing=False))
+        write(ts=time.time()-600)
+        self.assertEqual(self.cmd('status')['speed_live'],False,'a snapshot ten minutes old is no reply in flight')
+        write();hb.write_text(json.dumps(dict(pid=2**22+12345)))
+        self.assertEqual(self.cmd('status')['speed_live'],False,
+                         "its daemon is gone (it died mid-turn): another client's decoding is not this session's")
+        hb.write_text(json.dumps(dict(pid=os.getpid())))
+        Endpoint.status[self.key]=dict(decoding,version=2)
+        self.assertEqual(self.cmd('status')['speed_live'],False,'a status layout this resident does not know: no figure')
+        Endpoint.status[self.key]=dict(decoding,slot=dict(is_processing=False))
         self.assertEqual(self.cmd('status')['speed_live'],False,'the server is not decoding: the last reply again')
         del Endpoint.status[self.key]           # (the fixture then answers without the fields: no live figure)
         self.assertEqual((self.cmd('status')['tok_per_s']),62.4)
+
+    def test_another_brains_speedless_reply_drops_the_engine_record(self):
+        # after a Caminus reply, a fallback or /model-switched brain's short reply (no estimate: under 16 tokens or
+        # 0.25 s) showed the engine's numbers, labelled as the engine's, for its turn
+        self.serve_ids(['fixture'])
+        self.replies(self.engine_stream())
+        self.cmd('once',['--goal','Stream a short answer.'])
+        server=f'http://127.0.0.1:{self.server.server_port}/{self.key}'
+        self.assertEqual(json.loads((self.home/'throughput.json').read_text())['server'],server)
+        class Same:                       # the same Caminus server, a reply that gave no speed: the record stays
+            caminus,root,last_speed=True,server,None
+            def context_size(self):return 65536
+            def tokens(self,messages,tools):return 10
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return dict(role='assistant',content='done')
+        class Paid(Same):                 # another brain: not Caminus
+            root,caminus='https://api.example.org/v1',False
+        for brain,kept in ((Same(),True),(Paid(),False)):
+            rt=Runtime(self.home,model=brain)
+            try:rt.run(target=rt.store.enqueue('A short turn.'))
+            finally:rt.mail.close();rt.store.close()
+            self.assertEqual((self.home/'throughput.json').exists(),kept,type(brain).__name__)
+        _,status=self.working_status()
+        self.assertEqual((status['speed_source'],status['tok_per_s']),(None,None))
+
+    def test_a_failed_connection_asks_again_whether_the_brain_is_caminus(self):
+        # a server replaced on the same port (llama-server where caminus serve was) must not keep the engine label
+        from caminus.ember.resident.model import Model,ModelError
+        m=Model(dict(json.loads((self.home/'config.json').read_text()),endpoint='http://127.0.0.1:9/v1',context=None))
+        m.caminus=True
+        with self.assertRaises(ModelError):m.complete([dict(role='user',content='hi')])
+        self.assertIsNone(m.caminus,'asked again at the next reply with timings')
+
     def test_a_plan_first_goal_files_its_plan_and_waits_for_approval(self):
         plan='1. read the roster\n2. write dist/report.md'
         g=self.cmd('send',['plan goal','--plan'])

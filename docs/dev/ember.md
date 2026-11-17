@@ -74,8 +74,9 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - No GPU in any env test; the env suites are CPU only.
 - A speed shown for a local Caminus brain is the engine's own: the reply's `timings` (`model.engine_speed`; the brain is
   Caminus when its `/props` names the engine, `catalog.caminus_props`) and, while a reply streams, `/caminus/status`
-  (`cli._engine_live`). Ember's own estimate (`model.estimated_speed`) is only for a brain that reports none, and the
-  panel labels it (`replySpeed` in `panel/emberresident.go`).
+  (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
+  (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
+  `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
 
 ## Testing
 
