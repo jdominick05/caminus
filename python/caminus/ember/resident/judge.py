@@ -88,13 +88,14 @@ def gate_variables(gate):
 
 def unset_variables(home, gate, env):
     """The gate's variables that are unset in its environment, asked of the same login shell (a profile may export one)."""
-    from .terminal import shell_argv
+    from .terminal import SHELL, shell_argv
     names = gate_variables(gate)
     if not names:
         return []
     probe = 'for v in "$@"; do [ -n "${!v+x}" ] || printf "unset:%s\\n" "$v"; done'
     try:
-        r = subprocess.run(shell_argv(home, probe) + ['gate'] + names, cwd=home, env=env, stdin=subprocess.DEVNULL,
+        r = subprocess.run(shell_argv(home, probe) + ['gate'] + names, executable=SHELL, cwd=home, env=env,
+                           stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -111,10 +112,10 @@ def run_gate(home, gate, timeout=GATE_TIMEOUT):
     import os
     import signal
     import tempfile
-    from .terminal import shell_argv, worker_env
+    from .terminal import SHELL, shell_argv, worker_env
     env = worker_env(home)
     with tempfile.TemporaryFile() as out:
-        p = subprocess.Popen(shell_argv(home, gate), cwd=home, env=env, stdout=out, stderr=subprocess.STDOUT,
+        p = subprocess.Popen(shell_argv(home, gate), executable=SHELL, cwd=home, env=env, stdout=out, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
         try:
             code = p.wait(timeout=timeout)

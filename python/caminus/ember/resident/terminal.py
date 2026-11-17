@@ -57,7 +57,7 @@ def worker(job):
             try:
                 os.chdir(req['cwd'])
                 argv = shell_argv(req['cwd'], req['command'])
-                os.execv(argv[0], argv)
+                os.execv(SHELL, argv)
             except BaseException as e:
                 os.write(2, str(e).encode())
                 os._exit(127)
@@ -127,8 +127,12 @@ def worker(job):
 
 def shell_argv(cwd, command):
     """A command as the agent's terminal runs it: a login bash that starts in cwd (after the profile, which may cd).
-    The done check's gate runs through this and worker_env too, so it sees what a terminal command sees."""
-    return ['/bin/bash', '-lc', 'builtin cd -- ' + shlex.quote(str(cwd)) + ' || exit 127\n' + command]
+    The done check's gate runs through this and worker_env too, so it sees what a terminal command sees. Started as
+    SHELL with argv[0] `bash`, so its errors read `bash: line 1: ...` as they always did."""
+    return ['bash', '-lc', 'builtin cd -- ' + shlex.quote(str(cwd)) + ' || exit 127\n' + command]   # run as SHELL
+
+
+SHELL = '/bin/bash'
 
 
 def worker_env(home):

@@ -3550,6 +3550,7 @@ for line in sys.stdin:
             ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
         self.assertFalse(ok,msg)
         self.assertIn("$NOT_SET_FOR_GATE is not set in the gate's environment",msg)
+        self.assertIn('\nbash: line',msg,'errors still read bash: ..., as in the terminal');self.assertNotIn('/bin/bash:',msg)
         for name in ('X_MINE','WORKSPACE','NF'):self.assertNotIn('$'+name+' is not set',msg)
 
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
