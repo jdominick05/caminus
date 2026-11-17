@@ -3,10 +3,19 @@
 Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (two-card: XTX + XT) unless a line says
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md).
 
-## Unreleased
+## 0.3.0 (2026-11-17)
 
 ### New
 
+- **Ember, an agent that works on your machine in its own account.** `caminus ember` sets up an agent as a second user
+  on this machine: it works toward a goal you give it, with your local model or a paid one, and asks before anything
+  needs root or would post on GitHub under your name. Talk to it in `caminus ember ui`: steer it mid-task, interrupt it
+  with Esc, pull back a message it hasn't read, rewind its file changes, queue goals, and answer its questions and
+  approvals inline. One effort scale (none to max) works on every model, with each model's recommended settings by
+  default. See [Ember](docs/ember.md) and [its quickstart](docs/ember-quickstart.md).
+- **A new control panel.** `caminus panel` opens on one status-first screen: the running server, the models with what
+  each needs, and the agents. It also opens inside Ember with `/panel`. A server started outside the panel is watched,
+  never stopped or restarted by it. See [the panel](docs/panel.md).
 - **Qwen3-30B-A3B reads longer texts, opt-in.** `caminus start qwen3-30b-a3b --long-context` (or `caminus serve
   --long-context`) uses the model card's recipe for long texts, YaRN x4, for up to 131,072 tokens: about 80K on one
   RX 7900 XTX by the memory projection (the server stores the cache as 8-bit rows there and says so) and the full 131,072 on two cards. The default
@@ -29,14 +38,14 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   the model than llama.cpp's. Both take opt-in drafters (`--draft mtp` and `--draft dflash`, below). See
   [models](docs/models.md).
 - **The two dense 27B models on two cards.** `caminus start swift-1.5 --cards 2` (or `thinkingcap`, or `caminus serve
-  --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
+  --cards 2`) splits every layer across both cards: decode at 64 and 69 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
 - **Qwen3-30B-A3B on two cards, offered.** `caminus start qwen3-30b-a3b --cards 2` (or `caminus serve --cards 2`, or the
   panel's two-card mode) splits every layer across an XTX + XT: each card holds half the attention heads and part of every
   expert (two thirds on the bigger card, card 0). Still Caminus's own code end to end. One card stays the default: served, two cards decode more slowly on short
-  turns (206 against 240 tok/s) and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every
-  prompt from 4K tokens on faster (1.09x at 4K, 1.29x at 40,768). The context stays 40,960
+  turns (213 against 245 tok/s) and faster from about 32K tokens on (121 against 109 tok/s at 40,768), and read every
+  prompt from 4K tokens on faster (1.10x at 4K, 1.29x at 40,768). The context stays 40,960
   tokens, the model's own limit. See [benchmarks](docs/dev/benchmarks.md).
 - **An 8-bit KV cache for Qwen3-30B-A3B.** `caminus start qwen3-30b-a3b --kv q8` (or `caminus serve --kv q8`), on one
   card or two, stores the attention cache in 8-bit rows (the keys rotated first) at about half the memory per token of
@@ -150,6 +159,17 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   `python -I tools/release/make_banner.py --social` draws the repository's social preview (docs/social-preview.png),
   and the README's banner now takes turns between CAMINUS and QWAMINUS (CAMINUS only for readers who ask for less
   motion).
+
+### Known issues
+
+Found in the release test of Ember; the fixes come in the next release.
+
+- A command run as root through Ember (an `apt install`, for example) can hang at its end and never return to Ember.
+- Interrupting a reply with Esc can leave the reply running: the status line keeps counting and the server keeps
+  generating.
+- The panel doesn't stop a running model before starting another, so starting a second model fails while the first is
+  loaded: stop the first one, then start the other.
+- Ember's advisor can fail to start.
 
 ## 0.2.1 (2026-11-09)
 

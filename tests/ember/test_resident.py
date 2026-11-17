@@ -1679,7 +1679,7 @@ for line in sys.stdin:
         shown=output.getvalue()
         for control in ('\x1b','\r','\u009b','\u202e'):self.assertNotIn(control,shown)
         for visible in ('printf actual',r'\x1b',r'\r',r'\u202e'):self.assertIn(visible,shown)
-        self.assertEqual(calls,[['sudo','sh','-c',command]])
+        self.assertEqual(calls,[human_bridge.root_argv(command)])
 
     def test_oneshot_actual_shell_and_json(self):
         # The model fixture must observe completion, not assume worker startup
@@ -4362,7 +4362,7 @@ for line in sys.stdin:
             self.assertEqual(calls,[])
             fresh=approval.snapshot(self.bridge,'review')
             self.assertEqual(cmd_env.main(['answer','review','approved','--digest',fresh['_digest'],'--json'],transport=transport),0)
-        self.assertEqual(calls,[['sudo','sh','-c','printf replacement']])
+        self.assertEqual(calls,[human_bridge.root_argv('printf replacement')])
         self.assertEqual(approval.response(self.bridge,'review')['out'],'fixture result')
 
     def test_context_note_records_measured_prompt_tokens_for_the_ui_bar(self):
@@ -4725,9 +4725,9 @@ for line in sys.stdin:
              patch('builtins.input',return_value='d'),contextlib.redirect_stdout(end):
             self.assertEqual(cmd_env.main(['watch','--once'],transport=transport),0)
         self.assertEqual(approval.response(self.bridge,second[0]['id'])['approved_by'],'grant')
-        sudo=[c for c in calls if c[:3]==['sudo','sh','-c']]
+        sudo=[c for c in calls if c[:-1]==human_bridge.root_argv('')[:-1]]
         self.assertEqual(len(sudo),2,"the granted answer runs it once, the watch's auto-approval runs it again")
-        self.assertEqual(sudo[1][3],cmd)
+        self.assertEqual(sudo[1][-1],cmd)
         self.cmd('once',['--goal-id',gid],code=21)          # by: grant in the resident's result
         events=self.cmd('events')
         self.assertIn('grant_used',[e['kind'] for e in events])
