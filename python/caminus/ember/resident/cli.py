@@ -49,6 +49,28 @@ def _effort_shown(cfg):
     return eff.runs_as(cfg,cfg.get('effort') or eff.default_level(cfg))
 
 
+def _local_effort(cfg, keep_level=False):
+    """A local brain stored without its effort ids (a session switcher session: create --model stores the catalog name
+    and no provider; or a /model pick from a catalog written before the ids were grouped) asks its server for them:
+    the id it serves and its -low / -xhigh / -nothink ids (catalog.local_brain). A stored effort id (k3-coder-nothink)
+    becomes its base at that level, as /model takes one. keep_level: an existing session keeps the level it ran (the
+    server runs its base id at medium) instead of moving to the lab's default and re-reading the conversation. True
+    when cfg changed; nothing changes when the server cannot be reached."""
+    from . import catalog
+    if cfg.get('model_variants') or not catalog.local_candidate(cfg):
+        return False
+    got = catalog.local_brain(cfg)
+    if not got or not got[1]:
+        return False
+    level = next((lvl for lvl, i in got[1].items() if i == cfg.get('model')), None)
+    cfg['model'], cfg['model_variants'] = got
+    if level:
+        cfg['effort'] = level
+    elif keep_level and not cfg.get('effort'):
+        cfg['effort'] = 'medium'
+    return True
+
+
 def _current(cfg):
     keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices','vision')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
@@ -162,7 +184,9 @@ def model_ops(a,home):
         if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
-        elif spec['kind'] not in ('local','anthropic'):
+        elif spec['kind']=='local':
+            _local_effort(cfg)                        # (an entry from a catalog written before the ids were grouped)
+        elif spec['kind']!='anthropic':
             cfg['efforts']=list(entry.get('efforts') or [])   # whether this model takes reasoning_effort at all
         if entry.get('max_output') and spec['kind']!='local':
             # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
@@ -185,6 +209,8 @@ def model_ops(a,home):
     if a.op=='effort':
         # one scale on every brain (none .. max); the model runs each level as its nearest (effort.py)
         from . import effort as eff
+        if _local_effort(cfg,keep_level=True):
+            atomic_json(home/'config.json',cfg)
         line=eff.line(cfg)
         levels=list(eff.LEVELS) if line else []
         before=eff.template_line(cfg,cfg.get('effort') or eff.default_level(cfg))
@@ -471,8 +497,12 @@ def main(argv=None,stdin=None):
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
                 # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
                 for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
-                          'fallback','advisor','judge_model'):
+                          'fallback','advisor','judge_model','model_variants','efforts'):
                     cfg.pop(k,None)
+                _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
+                from . import catalog
+                # (after _local_effort: the catalog knows the base id, not an effort id such as ...-nothink)
+                if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -513,6 +543,9 @@ def main(argv=None,stdin=None):
             if not urllib.parse.urlsplit(cfg['endpoint']).path.strip('/'):cfg['endpoint']+='/v1'
             from .model import Model
             Model(cfg)                     # validate before persisting
+            _local_effort(cfg)             # a local server's own id and its effort ids, when it is up
+            from . import catalog
+            if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()
@@ -906,9 +939,13 @@ def main(argv=None,stdin=None):
             finally:rt.mail.close();rt.store.close()
             emit(dict(text=text),a.json);return 0
         if a.op=='interrupt':
+            # Only a model call in flight is interrupted: its live snapshot exists from the moment the call goes out
+            # (before the first token too). Anything else (a tool running, the gap between turns) has nothing to stop,
+            # and the caller says so instead of claiming an interrupt.
             gid=store.resolve(a.goal_id)
-            store.request(gid,'interrupt')
-            emit(dict(goal=gid,queued=True),a.json);store.close();return 0
+            generating=(home/'live'/(gid+'.json')).exists()
+            if generating:store.request(gid,'interrupt')
+            emit(dict(goal=gid,queued=generating,generating=generating),a.json);store.close();return 0
         if a.op=='unsend':
             gid,text=store.unsend(a.goal_id)
             emit(dict(goal=gid,text=text),a.json);store.close();return 0
@@ -1104,7 +1141,11 @@ def main(argv=None,stdin=None):
         emit(dict(type='result',**result) if a.jsonl else result,a.json or a.jsonl)
         return EXIT.get(result['state'],1)
     except (OSError,ValueError,KeyError,subprocess.SubprocessError) as e:
-        if getattr(a,'json',False):emit(dict(error=str(e)),True)
+        # an advisor that cannot be called (advisor.AdvisorUnavailable): its reason and the owner's fix apart, so the
+        # panel shows the command to run and the owner's side can make it exact (agent_host)
+        extra=dict(unavailable=dict(reason=e.reason,fix=e.fix,kind=e.kind,model=e.model,endpoint=e.endpoint)) \
+            if getattr(e,'fix',None) is not None and hasattr(e,'reason') else {}
+        if getattr(a,'json',False):emit(dict(error=str(e),**extra),True)
         else:print('caminus ember agent: '+str(e),file=sys.stderr)
         return 1
 

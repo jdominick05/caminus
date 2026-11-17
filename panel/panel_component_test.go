@@ -579,8 +579,8 @@ func TestLogKeyOnAnOutsideServer(t *testing.T) {
 		t.Fatalf("L's note: %q, want %q", n.note, want)
 	}
 	n, _ = m.key(tea.KeyPressMsg{Code: 's', Text: "s"})
-	if !strings.Contains(n.note, "stop or restart it where it was started") {
-		t.Fatalf("s keeps its own note: %q", n.note)
+	if want := "coder was started outside the panel: stop it where it was started"; n.note != want {
+		t.Fatalf("s on an outside server caminus ps gave no pid for: %q, want %q", n.note, want)
 	}
 }
 

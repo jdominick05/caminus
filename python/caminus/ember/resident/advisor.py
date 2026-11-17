@@ -20,6 +20,12 @@ Configuration, in config.json under "advisor" (absent: no advisor; the tool answ
                           one's own machine (the cyber category trips easily), and the server then re-runs the request
                           on a fallback model in the same call; false/null turns it off
 
+A call that cannot reach the advisor model at all (the owner's key relay does not allow the model, is not running or
+has spent its daily cap; a direct endpoint without its key variable) raises AdvisorUnavailable: one line with the reason
+and, where it is known, the command the owner runs (.fix: a command or nothing, never prose). Nothing was billed, so it
+does not count against the goal's calls. The owner's side (agent_host) rebuilds the command from the installed relay
+and shows only what it built: every word of this one comes from the agent's account.
+
 Every failure is recorded in failures.jsonl (who 'advisor'): an error, a hard refusal (stop_reason refusal, with its
 category), a soft refusal (advice that declines in words: refusal.py, the Qwen Code advisor's detector), and a call that
 a server-side fallback rescued. Refusal records keep the brief, so the call can be rerun against other models.
@@ -31,6 +37,9 @@ read's result. They keep their own ledger (eyes.json) and daily budget, priced p
 import datetime
 import json
 import os
+import re
+import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import catalog
@@ -45,6 +54,48 @@ BRIEF = ('You are the advisor to an autonomous agent that works in its own Unix 
          'see a brief of its goal and recent work, and its question. Give concrete, prioritized advice: what to do '
          'next, what to check, what to avoid, and why. Point out an assumption it has not verified. Be brief; it pays '
          'for every token. You cannot run anything yourself.')
+
+
+class AdvisorUnavailable(ValueError):
+    """The advisor cannot be called until the owner changes the setup. str(): the reason and the fix in one line, for
+    the agent's tool result and the CLI; .reason and .fix (the command, or '') apart, for the panel."""
+    def __init__(self, reason, fix='', kind='', model='', endpoint=''):
+        super().__init__('the advisor cannot be called: %s%s' % (reason, ('. Fix it on the owner\'s side: ' + fix) if fix else ''))
+        self.reason, self.fix, self.kind, self.model, self.endpoint = reason, fix, kind, model, endpoint
+
+
+# a relay command as the relay itself prints it: flags and plain values, nothing a shell would read as another command
+SAFE_COMMAND = re.compile(r'caminus ember relay install(?: --[a-z-]+ [\w.:/@-]+)+')
+
+
+def unavailable(e, cfg, name='NAME'):
+    """The AdvisorUnavailable for a failure that never reached the model, or None (an outage, a refusal by the model,
+    anything the provider answered). Recognises the relay's refusals in the wording of every relay version."""
+    model, endpoint = cfg['model'], cfg['endpoint']
+    text, status = str(e), getattr(e, 'status', None)
+    host = urllib.parse.urlsplit(endpoint).hostname
+    local = host in ('127.0.0.1', 'localhost', '::1')
+    if status == 403 and 'relay: model not allowed' in text:
+        m = SAFE_COMMAND.search(text.split('to allow it too: ', 1)[1]) if 'to allow it too: ' in text else None
+        fix = m.group(0) if m else ''
+        why = '' if fix else (' (allow it with caminus ember relay install, naming every --model it should serve, '
+                              'its current ones too; caminus ember relay status lists them)')
+        return AdvisorUnavailable('the key relay at %s does not allow %s%s' % (endpoint, model, why), fix,
+                                  'relay_model', model, endpoint)
+    if status == 402 and 'relay:' in text:
+        return AdvisorUnavailable('the key relay at %s has spent its daily cap; it resets at midnight, or the owner raises '
+                                  'it with caminus ember relay install --cap-usd (naming every --model again)' % endpoint,
+                                  '', 'relay_cap', model, endpoint)
+    reason = getattr(e, '__cause__', None)
+    reason = getattr(reason, 'reason', reason)
+    if local and (isinstance(reason, ConnectionRefusedError) or 'Connection refused' in text):
+        return AdvisorUnavailable('nothing answers at %s: the owner\'s key relay is not running there (caminus ember '
+                                  'relay status shows the installed relays)' % endpoint, '', 'relay_down', model, endpoint)
+    if status == 401 and 'is not set in the agent environment' in text:
+        return AdvisorUnavailable('%s is not a local key relay and the agent has no key for it' % endpoint,
+                                  'caminus ember agent advisor %s --endpoint http://127.0.0.1:8765/v1' % name,
+                                  'no_key', model, endpoint)
+    return None
 
 
 class Advisor:
@@ -74,6 +125,8 @@ class Advisor:
         # refused and failed calls count too: each may be billed, and a refusal must not invite endless retries
         # (counted in the database: events() pages from the first 200, so past them no call was counted)
         return self.rt.store.db.execute(
+            # (advice_unavailable is not counted: the call never left the machine, and five of them would hide the fix
+            #  behind 'this goal has used its advisor calls')
             "SELECT count(*) FROM events WHERE goal=? AND kind IN ('advice','advice_refused','advice_failed')",
             (gid,)).fetchone()[0]
 
@@ -114,6 +167,15 @@ class Advisor:
             reply = model.complete(messages, max_tokens=int(cfg['max_tokens']))
         except ModelError as e:
             refused = isinstance(e, ModelRefused)
+            setup = None if refused else unavailable(e, cfg, self.rt.config.get('name') or 'NAME')
+            if setup is not None:
+                # refused before the model (by the relay) or never sent: nothing billed, the owner has a fix to run
+                log_failure(self.rt.home, dict(goal=gid, who='advisor', model=cfg['model'], error_type='unavailable',
+                                               error=str(e)[:2048], status=getattr(e, 'status', None),
+                                               fix=setup.fix, question=question[:1000]))
+                self.rt.store.event('advice_unavailable', dict(error=setup.reason[:500], fix=setup.fix[:500],
+                                                               kind=setup.kind), gid)
+                raise setup
             self._spend(cfg, model)            # a refused or failed call can still have been billed
             log_failure(self.rt.home, dict(goal=gid, who='advisor', model=cfg['model'], error_type=type(e).__name__,
                                            error=str(e)[:2048], status=getattr(e, 'status', None),
@@ -162,6 +224,11 @@ class Advisor:
         try:
             reply = model.complete(messages, max_tokens=max_tokens)
         except ModelError as e:
+            setup = unavailable(e, cfg, self.rt.config.get('name') or 'NAME')
+            if setup is not None:
+                log_failure(self.rt.home, dict(goal=gid, who=who, model=cfg['model'], error_type='unavailable',
+                                               error=str(e)[:2048], status=getattr(e, 'status', None), fix=setup.fix))
+                raise setup
             self._spend(cfg, model)
             log_failure(self.rt.home, dict(goal=gid, who=who, model=cfg['model'], error_type=type(e).__name__,
                                            error=str(e)[:2048], status=getattr(e, 'status', None),
@@ -311,18 +378,14 @@ class Eyes(Advisor):
 
 def eyes_refusal(cfg, e):
     """What the agent hears when the eyes call fails, with the exact fix where a relay refuses the model. The Anthropic
-    relay's model list is its --model flags, which install replaces (a relay of this version names the whole command;
-    an older one only the model); the Mistral relay's is its price file, re-read on change (it takes no --model)."""
+    relay's refusals (model not allowed, cap spent, not running) are read by unavailable(), as the advisor's are: the
+    relay's own command where it names one, checked against SAFE_COMMAND. The Mistral relay's model list is its price
+    file, re-read on change (it takes no --model)."""
     text, status, model = str(e), getattr(e, 'status', None), cfg['model']
-    if status == 402:
-        return ("the %s relay's daily cap is reached, so no description today: ask your human, or use the image tools "
-                'in the terminal' % cfg['provider'])
-    if status == 403 and 'model not allowed' in text:
-        cmd = text.split('to allow it: ', 1)[1].split(')', 1)[0].strip() if 'to allow it: ' in text else (
-            'caminus ember relay install --provider anthropic --cap-usd <its daily cap> --model <each model it allows '
-            'now> --model %s' % model)
-        return ("your human's relay does not allow the eyes model %s. They can allow it (install replaces the relay's "
-                'model list): %s' % (model, cmd))
+    u = unavailable(e, dict(model=model, endpoint=cfg.get('endpoint', '')))
+    if u is not None and u.kind in ('relay_model', 'relay_cap', 'relay_down'):
+        return ('the eyes model %s cannot be called: %s%s; until then, ask your human or use the image tools in the '
+                'terminal' % (model, u.reason, ('. Your human can fix it: ' + u.fix) if u.fix else ''))
     if status == 403 and 'no price for' in text:
         return ("your human's relay has no price for the eyes model %s, so it refuses it. They can add it to the relay's "
                 'price file (~/.config/caminus/mistral-prices.json unless its --prices names another) as "%s": [input, '

@@ -5,7 +5,9 @@ When a graded goal calls finish (after define_done and verify), two things run b
 1. The gate: the shell command the agent gave define_done as `gate`, if any, run in its home. A non-zero exit refuses
    the finish and its output becomes the agent's next prompt.
 2. The judge: a fresh model call with no tools that sees the goal, the done check, the human's steers, the recorded
-   evidence and the recent tool results - not the agent's reasoning or its plan. It applies the evidence rules and
+   evidence and the recent tool results - not the agent's reasoning or its plan. Images the agent read go with it to a
+   judge brain with vision; any other judge is told what the agent says an image shows is an observation (a judge that
+   could not see refused correct finishes read off a picture). It applies the evidence rules and
    answers met, not_yet or wait. not_yet refuses the finish with what is missing; wait refuses it because the proof
    depends on something still running (a build, CI, a service coming up) and points the agent at its wait tool. The
    judge never declares a goal impossible (the owner's rule, 11-15: it stopped solvable work; on one benchmark task the
@@ -32,6 +34,7 @@ GATE_TIMEOUT = 600
 JUDGE_LIMIT = 3
 WAIT_LIMIT = 6
 EVIDENCE_RESULTS = 12
+JUDGE_IMAGES = 4          # newest images the agent read that go with the brief to a judge that can see
 
 # advising rounds per goal before a run of refusals pauses it (each round: the advisor's, or a fresh look)
 ADVISE_ROUNDS = 3
@@ -85,7 +88,25 @@ def run_gate(home, gate, timeout=GATE_TIMEOUT):
     return code == 0, f'exit {code}\n{text}'.strip()
 
 
-def evidence(rt, gid, summary, open_work):
+def viewed(rt, gid):
+    """The images the agent read in this goal, newest last (at most JUDGE_IMAGES, each file once), as the transport's
+    image references (files.image_ref). `seen` marks one the agent's brain saw (the runtime sets it when read runs on
+    a brain with vision); one without it reached the agent as its size and format only."""
+    from .files import image_ref
+    seen = {}
+    for r in rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='tool_result' ORDER BY seq", (gid,)):
+        d = json.loads(r['data'])
+        ref = image_ref(d.get('name'), d.get('result'))
+        if ref and 'sha256' in ref:                    # (one past read's caps was never shown to the agent either)
+            seen.pop(ref['path'], None)
+            seen[ref['path']] = ref
+    return list(seen.values())[-JUDGE_IMAGES:]
+
+
+def evidence(rt, gid, summary, open_work, images=None, sees=False):
+    """The judge's brief. images: what the agent read (viewed()); sees: whether the ones the agent saw go with it (a
+    judge brain with vision), else the judge is told the agent's account of them is an observation it cannot check
+    here. An image the agent's brain could not see is listed as such: what the agent says it shows is no evidence."""
     g = rt.store.goal(gid)
     parts = ['GOAL:\n' + g['prompt'][:4000], 'DONE CHECK:\n' + (g.get('done_check') or '(none)')]
     steers = [s['text'] for s in rt.store.steers(gid)]
@@ -103,6 +124,20 @@ def evidence(rt, gid, summary, open_work):
             res = json.dumps(d.get('result'), ensure_ascii=False)
             lines.append(f"{d.get('name')} -> {res[:800]}")
     parts.append('EVIDENCE (oldest first):\n' + ('\n'.join(lines[-EVIDENCE_RESULTS:]) or '(none recorded)'))
+    images = viewed(rt, gid) if images is None else images
+    listed = lambda imgs: '\n'.join(f"- {os.path.relpath(i['path'], str(rt.home))} ({i.get('width')}x{i.get('height')} "
+                                    f"{str(i.get('format', '')).upper()})" for i in imgs)
+    saw, blind = [i for i in images if i.get('seen')], [i for i in images if not i.get('seen')]
+    if saw:
+        parts.append(('IMAGES THE AGENT SAW (its model can see; each follows this brief, as the agent saw it):\n'
+                      + listed(saw)) if sees else
+                     ('IMAGES THE AGENT SAW (its model can see; you cannot see them here):\n' + listed(saw) +
+                      '\nWhat the agent says such an image shows is an observation, as a command\'s output would be: do '
+                      'not refuse a finish only because you cannot see the image yourself.'))
+    if blind:
+        parts.append('IMAGES THE AGENT READ BUT COULD NOT SEE (its model has no vision: read gave it only each file\'s '
+                     'size and format):\n' + listed(blind) + '\nWhat the agent says such an image shows is not an '
+                     'observation: count it only where a command\'s output above (an OCR or image tool) shows it.')
     # what the harness itself recorded, so a claimed change can be checked against it
     try:
         rec = rt._change_record(gid)
@@ -147,14 +182,23 @@ def review(rt, gid, result):
     refusals = rt.store.db.execute(
         "SELECT count(*) FROM events WHERE goal=? AND kind='judged' AND data LIKE '%\"not_yet\"%' AND seq>?",
         (gid, since)).fetchone()[0]
-    messages = [dict(role='system', content=SYSTEM),
-                dict(role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')))]
-    def ask(msgs):
+    images = viewed(rt, gid)
+
+    def brief(sees):
+        """the judge's messages: a judge that can see gets the images the agent read (the transport sends the files)"""
+        return [dict(role='system', content=SYSTEM),
+                dict(role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', ''), images,
+                                                   sees))] + \
+               [dict(role='user', content=os.path.basename(i['path']) + ', as the agent saw it:', image=i)
+                for i in (images if sees else []) if i.get('seen')]
+    def ask(extra):
         if rt.config.get('judge_model') == 'advisor':
             try:
-                return rt.advisor.raw(gid, msgs, 600)   # the owner chose an independent, paid reviewer
+                # the owner chose an independent, paid reviewer (its config names no vision: it gets the text)
+                return rt.advisor.raw(gid, brief(False) + extra, 600)
             except Exception:
                 pass
+        msgs = brief(bool((getattr(rt.model, 'config', None) or {}).get('vision'))) + extra
         reply = rt.model.complete(msgs, tools=None, max_tokens=600)
         try:
             rt.brains.account(gid)
@@ -166,12 +210,12 @@ def review(rt, gid, result):
         name = effort.resolve(cfg, short=True)['model'] or cfg.get('model') or rt.config.get('model', '')
         return (reply.get('content') if isinstance(reply, dict) else '') or '', name
     try:
-        text, who = ask(messages)
+        text, who = ask([])
         v = verdict(text)
         if v is None:                                    # once more, strictly
-            text, who = ask(messages + [dict(role='assistant', content=text[:2000]),
-                                        dict(role='user', content='Answer with only the JSON object: '
-                                             '{"verdict": "met" | "not_yet" | "wait", "reason": "..."}')])
+            text, who = ask([dict(role='assistant', content=text[:2000]),
+                             dict(role='user', content='Answer with only the JSON object: '
+                                  '{"verdict": "met" | "not_yet" | "wait", "reason": "..."}')])
             v = verdict(text)
     except Exception as e:                               # the brain is down or refused: do not trap the goal
         rt.store.event('judged', dict(verdict='unread', reason=f'the judge call failed: {type(e).__name__}'), gid)

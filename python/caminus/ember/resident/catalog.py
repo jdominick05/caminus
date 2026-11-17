@@ -23,6 +23,7 @@ keeps its last entries, marked stale. What a provider does not say stays unknown
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -35,12 +36,12 @@ DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
 DEEPINFRA_OUTPUT_CAP = 16384
 
 
-def _get(url, headers, opener):
+def _get(url, headers, opener, timeout=TIMEOUT, limit=8 * 1024 * 1024):
     req = urllib.request.Request(url, None, {'Accept': 'application/json', **headers})
-    with opener(req, timeout=TIMEOUT) as r:
-        raw = r.read(8 * 1024 * 1024 + 1)
-    if len(raw) > 8 * 1024 * 1024:
-        raise ValueError('model list larger than 8 MiB')
+    with opener(req, timeout=timeout) as r:
+        raw = r.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(f'reply larger than {limit // 1024} KiB')
     return json.loads(raw)
 
 
@@ -151,7 +152,7 @@ def local_entries(data, provider, context=None, vision=False):
 def discover(name, spec, opener=urllib.request.urlopen, key=None):
     """One provider's entries. spec: {kind, endpoint}. key: an API key to send (none through a relay)."""
     kind, base = spec.get('kind', 'openai'), spec['endpoint'].rstrip('/')
-    if kind not in KINDS:
+    if kind not in KINDS + ('auto',):
         raise ValueError(f'unknown provider kind {kind!r}')
     if kind == 'anthropic':
         headers = {'anthropic-version': '2023-06-01', **({'x-api-key': key} if key else {})}
@@ -159,6 +160,11 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         return anthropic_entries(data, name)
     headers = {'Authorization': 'Bearer ' + key} if key else {}
     data = _get(base + '/models', headers, opener)
+    if kind == 'auto':
+        # (agent init, before any provider is configured: model_vision) the list's own shape says whose it is
+        rows = [m for m in data.get('data') or [] if isinstance(m, dict)]
+        kind = ('deepinfra' if any(isinstance(m.get('metadata'), dict) for m in rows) else
+                'mistral' if any(isinstance(m.get('capabilities'), dict) for m in rows) else 'local')
     if kind == 'deepinfra':
         return deepinfra_entries(data, name)
     if kind == 'mistral':
@@ -180,6 +186,54 @@ def providers(config):
         out[own] = dict(kind=config.get('provider_kind') or ('anthropic' if config.get('api') == 'anthropic'
                                                              else 'openai'), endpoint=config['endpoint'])
     return out
+
+
+def local_candidate(config):
+    """Whether the agent's own brain may be a local Caminus server: provider_kind local, or a config from before
+    providers (agent init, create --model) on a loopback endpoint that is neither marked relayed nor the Messages API.
+    A candidate without provider_kind is local only when its /props says so (local_brain): the key relay listens on
+    loopback too, and init writes no provider_kind or relay for it."""
+    kind = config.get('provider_kind')
+    if kind:
+        return kind == 'local'
+    if config.get('relay') or config.get('api') == 'anthropic' or not config.get('endpoint'):
+        return False
+    from .model import LOOPBACK
+    return urllib.parse.urlsplit(config['endpoint']).hostname in LOOPBACK
+
+
+LOCAL_READ = 512 * 1024   # a local server's /models (a few ids) and /props (its chat template among them): at most this
+
+
+def local_brain(config, opener=urllib.request.urlopen, timeout=3):
+    """Ask the agent's local server which model it serves and that model's effort ids: (base id, {level: id}), or None
+    when it cannot be reached, is not a Caminus server (its /props engine; asked unless provider_kind is local) or
+    names no such model. The configured id when the server lists it; an effort id (k3-coder-low) its base; else its
+    only model (with several, its default: /props model_alias). The session switcher stores the catalog name (coder),
+    and the server runs an id it does not list as its default model."""
+    from . import effort
+    base = config['endpoint'].rstrip('/')
+    props = None
+    try:
+        if config.get('provider_kind') != 'local':
+            props = _get(_root(base) + '/props', {}, opener, timeout, LOCAL_READ)
+            if props.get('engine') != 'caminus':
+                return None
+        groups = local_entries(_get(base + '/models', {}, opener, timeout, LOCAL_READ), '')
+        groups = {m['id']: m['variants'] for m in groups}
+        model = config.get('model') or ''
+        if model not in groups:
+            bases = [model[:-len(s)] for s in effort.SUFFIX.values() if model.endswith(s) and model[:-len(s)] in groups]
+            if bases:
+                model = bases[0]
+            elif len(groups) == 1:
+                model = next(iter(groups))
+            else:
+                props = props or _get(_root(base) + '/props', {}, opener, timeout, LOCAL_READ)
+                model = props.get('model_alias') if props.get('model_alias') in groups else None
+    except (OSError, ValueError, AttributeError, KeyError, TypeError, urllib.error.HTTPError):
+        return None
+    return (model, groups[model]) if model else None
 
 
 def path(home):
@@ -230,3 +284,24 @@ def find(cat, model, provider=None):
     return hits[0] if len(hits) == 1 else None if not hits else \
         (_ for _ in ()).throw(ValueError(f'{model} is served by {", ".join(h["provider"] for h in hits)}: '
                                          'name the provider (provider/model)'))
+
+
+def model_vision(home, cfg, ask=True):
+    """Whether cfg's model takes images, by the catalog: home's models.json, else (ask) one short question to cfg's own
+    endpoint, since a new home has no catalog yet (agent init). Only a loopback endpoint is asked: the local server or
+    the owner's key relay, which every paid brain goes through. Unknown is no."""
+    import urllib.parse
+    from .model import LOOPBACK
+    try:
+        entry = find(load(home), cfg['model'], cfg.get('provider'))
+    except ValueError:
+        entry = None
+    if entry is None and ask and urllib.parse.urlsplit(cfg.get('endpoint') or '').hostname in LOOPBACK:
+        kind = cfg.get('provider_kind') or ('anthropic' if cfg.get('api') == 'anthropic' else 'auto')
+        try:
+            listed = discover('init', dict(kind=kind, endpoint=cfg['endpoint']),
+                              lambda req, timeout=None: urllib.request.urlopen(req, timeout=3))
+            entry = next((m for m in listed if m['id'] == cfg['model']), None)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, urllib.error.HTTPError):
+            entry = None
+    return bool(entry and entry.get('vision'))

@@ -97,6 +97,7 @@ type residentChat struct {
 	stream                                  *streamState
 	streamStarting                          bool      // a reader is being started: the tick starts no second one
 	streamRetry                             time.Time // a reader that ended is restarted no sooner than this
+	deadTurn                                string    // the live turn an Esc dropped: its late lines are ignored
 }
 
 // residentLive is the reply being generated: shown under the durable transcript and replaced by it when the
@@ -313,6 +314,16 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 				// The durable block replaces the live tail; keeping both would show the reply twice.
 				m.chat.live = residentLive{}
 			}
+			if e.Kind == "turn_interrupted" {
+				// The dropped turn's tail goes (nothing of it was kept), and a late line of it must not bring it back.
+				turn, _ := e.Data["turn"].(string)
+				if turn == "" || m.chat.live.turn == turn {
+					m.chat.live = residentLive{}
+				}
+				if turn != "" {
+					m.chat.deadTurn = turn
+				}
+			}
 		}
 	}
 	if m.chat.selectID != "" {
@@ -498,6 +509,8 @@ func (m *emberModel) syncChat() {
 			if m.chat.fold(e) {
 				continue
 			}
+		} else if e.Kind == "assistant" {
+			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
 		if block := m.chat.eventBlock(e); block != "" {
 			m.chat.flushGroup(w)
@@ -937,6 +950,8 @@ func (m emberModel) nowState(goal *residentGoal) (string, string) {
 		now = "parked until " + m.parkedUntil(goal.ID)
 	case goal != nil && m.compactingNote(goal.ID) != "":
 		now = m.compactingNote(goal.ID)
+	case goal != nil && goal.State == "working" && func() bool { _, held := m.interruptedUntil(goal.ID); return held }():
+		now = "interrupted · your next message steers"
 	case l.active && l.text != "":
 		now = "writing its reply"
 	case l.active && len(l.tools) > 0:
@@ -1082,7 +1097,7 @@ func (m emberModel) thoughtChains(gid string) []thoughtChain {
 				_ = json.Unmarshal([]byte(s), &args)
 			}
 			what := name
-			for _, k := range []string{"command", "path", "query", "url", "check", "evidence", "summary", "question"} {
+			for _, k := range []string{"command", "pattern", "glob", "path", "query", "url", "check", "evidence", "summary", "question"} {
 				if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
 					what += "  " + oneLine(residentText(v))
 					break
@@ -1271,7 +1286,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			call, _ := raw.(map[string]any)
 			f, _ := call["function"].(map[string]any)
 			name, _ := f["name"].(string)
-			if name == "ask_user" || name == "read" || name == "edit" || name == "write" {
+			if name == "ask_user" || name == "read" || name == "search" || name == "edit" || name == "write" {
 				continue
 			} // the durable question gets a native UI below; a file tool's result card says what it did
 			rawArgs, _ := f["arguments"].(string)
@@ -1330,6 +1345,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
 			return toolCard("read", residentText(path), readMeta(result), true, false, nil, w)
+		}
+		if str("name") == "search" && result["error"] == nil {
+			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
+			text, _ := result["text"].(string)
+			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
 		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
@@ -1805,7 +1825,7 @@ func helpLines(width int) []string {
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
 		{"@ path", "names a path (the agent's folders; Tab completes)"},
 		{"+ path", "attaches the file (read as the agent, up to 64 KB)"},
-		{"Esc", "while a reply is written, interrupt that turn"},
+		{"Esc", "while the agent waits on a reply, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
 		{"Shift+Tab", "sessions: a card per session"},
@@ -2413,18 +2433,19 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chat.menuClosed = m.chat.compose.Value() // the menu closes; the text stays (typing opens it again)
 			return m, nil
 		}
-		if m.chat.live.active {
-			// Esc while a reply is being written interrupts that turn only; the next message steers.
-			if goal := m.targetGoal(); goal != "" {
-				m.msg = "interrupting the turn…"
-				return m, interruptTurn(m, goal)
-			}
-		}
+		// Esc while the agent waits on a reply interrupts that turn only; the next message steers. Not only once text
+		// streams: a long prompt read or a paid model's thinking shows nothing for a while, and the call (and the
+		// server's work on it) is just as live then. The resident queues it only while a call is out. Leaving
+		// "new goal" mode comes first: the call is now live for its whole length, and that Esc means "back".
 		if m.chat.forceNew && m.chat.prevTarget != "" { // out of "new goal", back to the goal you were talking to
 			m.chat.target, m.chat.newGoal, m.chat.forceNew = m.chat.prevTarget, false, false
 			m.chat.prevTarget = ""
 			m.msg = "back to goal " + shortGoal(m.chat.target)
 			return m, nil
+		}
+		if goal := m.interruptibleGoal(); goal != "" {
+			m.msg = "interrupting the turn…"
+			return m, interruptTurn(m, goal)
 		}
 		return m, nil // (idle, Esc does nothing else: PgUp/PgDn and the wheel scroll)
 	case "up", "down":
@@ -3079,9 +3100,16 @@ func (m emberModel) chatFoot(w int) string {
 	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
+	// the speed is the last finished reply's: after an Esc it read as if the dropped turn were still generating
+	tps := m.resident.TokPerS
+	if ag := m.activeGoal(); ag != nil {
+		if _, held := m.interruptedUntil(ag.ID); held {
+			tps = 0
+		}
+	}
 	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
-		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
+		tps: tps, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip
 	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
 	// frame, so nothing appears and goes below it)
