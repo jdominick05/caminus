@@ -31,6 +31,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 |---|---|
 | `cmd/ember.py` | every `caminus ember` subcommand: setup, status, run / shell, the bridge (reqs, answer, watch), jobs, sessions, stop-all |
 | `env/provision.py` | the root setup script (safe to rerun, checks itself) |
+| `agent_side.py` | what setup puts in the agent's account without root: ask-root, env-ask, its venv (the package set is `resident/discovery.py` `AGENT_PACKAGES`, which the prompt names too) |
 | `env/runner.py` | the SSH transport: one ControlMaster connection to `caminus-agent@127.0.0.1` |
 | `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
 | `env/audit.py` | the owner's audit log (one JSON object per line) |

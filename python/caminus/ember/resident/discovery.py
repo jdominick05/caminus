@@ -34,6 +34,13 @@ COMMANDS = {
 }
 MODULES = ('requests','bs4','playwright','selenium','PIL','cv2','numpy','scipy','pandas',
            'matplotlib','Crypto','sympy','z3','scapy','pyzbar')
+# The agent's own Python: `caminus ember setup` makes it and keeps this set in it (system pip refuses installs, PEP 668;
+# every data task began with a venv step). (pip requirement, module it provides); lower bounds, never exact pins.
+AGENT_VENV = '~/.venvs/caminus-cpu'
+AGENT_PACKAGES = (('pillow>=10.0','PIL'),('requests>=2.31','requests'),('beautifulsoup4>=4.12','bs4'),
+                  ('lxml>=5.0','lxml'),('scipy>=1.11','scipy'),('pandas>=2.1','pandas'),
+                  ('matplotlib>=3.8','matplotlib'),('ddgs>=9.0','ddgs'),('weasyprint>=62.0','weasyprint'),
+                  ('pypdf>=4.0','pypdf'))
 
 
 def _read(path, limit=16384):

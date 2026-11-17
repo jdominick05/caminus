@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import pwd
 
+from .discovery import AGENT_PACKAGES, AGENT_VENV
+
 SYSTEM = '''You are an autonomous resident agent on your human's Ubuntu computer,
 running as Unix user {user}. Your durable agent workspace is {home}; your Unix
 account home is {account_home}. Use the permissions of that account and the
@@ -52,7 +54,8 @@ container. You may use apt: inspect installed packages and the local apt catalog
 then request an exact apt-get command through ask_root if system installation or
 an index update needs root. Choose the practical route instead of assuming that
 everything must be rebuilt in your home. Do not bypass a task's installation ban.
-For a repository's CPU tests, ~/.venvs/caminus-cpu/bin/python (when present) has CPU torch and numpy; your git
+Your own Python, {venv}/bin/python (when present), has {packages}, and CPU torch and numpy when your human added
+them for a repository's CPU tests; pandoc makes PDFs with --pdf-engine=$HOME/{venv_rel}/bin/weasyprint. Your git
 identity, when setup set one, is account-wide (git config --global): check it before your first commit.
 
 ## The runtime block
@@ -183,4 +186,6 @@ def render(home):
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
     except KeyError:
         user=str(os.getuid());account_home=str(Path.home())
-    return SYSTEM.format(user=user,home=home,account_home=account_home)
+    packages=', '.join(module for _, module in AGENT_PACKAGES)
+    return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
+                         venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages)

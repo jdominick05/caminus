@@ -44,6 +44,7 @@ import time
 
 from ..ember import agent_side, audit, bridge, jobs, runner, serve, sessions, settings
 from ..ember.display import terminal_text
+from ..ember.resident.discovery import AGENT_VENV
 
 
 def _parser():
@@ -58,8 +59,8 @@ def _parser():
     p.add_argument('--git-email', help="the agent account's git author email, e.g. LOGIN@users.noreply.github.com: "
                                        'commits under any other identity cannot be linked to its account (a CLA check fails)')
     p.add_argument('--test-venv', action='store_true',
-                   help=f'make {TEST_VENV} in the agent account (CPU torch and numpy, about 200 MB from the '
-                        'internet) so it can run the repository\'s CPU tests; skipped when it is already there')
+                   help=f'also put CPU torch and numpy (about 200 MB from the internet) in the agent\'s venv '
+                        f'{AGENT_VENV}, so it can run the repository\'s CPU tests; skipped when they are already there')
     p.add_argument('--json', action='store_true', help='the final check as JSON')
 
     p = sub.add_parser('status', help='check user, key, ssh login, bridge, ask-root, leases')
@@ -344,12 +345,10 @@ def main(rest, transport=None):
     return 2
 
 
-TEST_VENV = '~/.venvs/caminus-cpu'
-
-
 def agent_extras(a, tr, say=print):
-    """The agent account's git identity and CPU test interpreter, when asked for: a real agent spent turns building
-    the interpreter itself (no python on PATH, no torch), and its commits under user@localhost failed a CLA check."""
+    """The agent's venv with its package set (always) and CPU torch (when asked), and its git identity (when asked): a
+    real agent spent turns building the interpreter itself (no python on PATH, no torch; system pip refuses installs),
+    and its commits under user@localhost failed a CLA check."""
     ok = True
     if a.git_name or a.git_email:
         if not (a.git_name and a.git_email):
@@ -360,18 +359,13 @@ def agent_extras(a, tr, say=print):
         ok &= r.returncode == 0
         say(f"agent git identity: {a.git_name} <{a.git_email}>" if r.returncode == 0
             else f'setting the agent git identity failed: {(r.stderr or "").strip()}')
-    if a.test_venv:
-        v = TEST_VENV
-        cmd = (f'test -x {v}/bin/python && {v}/bin/python -c "import torch, numpy" 2>/dev/null && echo present || '
-               f'{{ python3 -m venv {v} && {v}/bin/pip install -q --index-url https://download.pytorch.org/whl/cpu torch '
-               f'&& {v}/bin/pip install -q numpy && echo made; }}')
-        say(f'agent test interpreter {v}: checking (a first install downloads about 200 MB)…')
-        r = runner.run_shell(cmd, transport=tr, timeout=1800)
-        out = (r.stdout or '').strip().splitlines()
-        ok &= r.returncode == 0
-        say(f'agent test interpreter {v}: ' + ((out[-1] if out else 'done') if r.returncode == 0
-                                                 else 'failed: ' + (r.stderr or '').strip()[-300:]))
-    return ok
+    say(f'agent venv {AGENT_VENV}: checking its packages (a first install downloads about 110 MB, 460 MB on disk'
+        f'{", 200 MB more for torch" if a.test_venv else ""})…')
+    r = runner.run_shell(agent_side.venv_command(torch=a.test_venv), transport=tr, timeout=3600)
+    lines, good = agent_side.venv_report(r, torch=a.test_venv)
+    for line in lines:
+        say(line)
+    return ok and good
 
 
 def setup_script_path():
@@ -419,7 +413,7 @@ def _setup(a, tr):
                                                     settings.memory_path()), transport=tr)
     if r.returncode:
         print(f'installing the agent side failed: {(r.stderr or "").strip()}', file=sys.stderr)
-    extras = agent_extras(a, tr)
+    extras = agent_extras(a, tr, say=(lambda s: print(s, file=sys.stderr)) if a.json else print)   # stdout: the JSON
     code = _status(tr, json_mode=a.json) or (0 if extras else 1)
     if not a.json:
         model, why = serve.default_brain()
@@ -484,13 +478,13 @@ def _status(tr,json_mode=False):
     check('ask-root installed', r.returncode == 0, 'run: caminus ember setup --agent-side' if r.returncode else '')
     leases = _leases_status()
     check(f'leases {leases["path"]}', leases['ok'], leases['fix'])
-    # informational, never a FAIL: both are opt-in (setup --git-name/--git-email, --test-venv)
-    r = runner.run_shell(f'git config --global user.email; test -x {TEST_VENV}/bin/python && echo venv', transport=tr)
+    # informational, never a FAIL: the identity is opt-in (setup --git-name/--git-email); setup reports the venv itself
+    r = runner.run_shell(f'git config --global user.email; test -x {AGENT_VENV}/bin/python && echo venv', transport=tr)
     lines = (r.stdout or '').split()
     info = dict(git_email=next((l for l in lines if '@' in l), None), test_venv='venv' in lines)
     if not json_mode:
         print(f"info agent git identity: {info['git_email'] or 'not set (setup --git-name NAME --git-email EMAIL)'}")
-        print(f"info agent test interpreter {TEST_VENV}: {'present' if info['test_venv'] else 'not made (setup --test-venv)'}")
+        print(f"info agent venv {AGENT_VENV}: {'present' if info['test_venv'] else 'not made (caminus ember setup)'}")
     if json_mode:
         print(json.dumps(dict(ok=all(c['ok'] for c in checks),checks=checks,leases=leases,agent=info)))
     # (each check is a dict: unpacking one as a tuple read its keys, so every status passed)

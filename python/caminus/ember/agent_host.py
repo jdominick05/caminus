@@ -101,6 +101,12 @@ print(json.dumps(dict(installed=str(link),artifact=str(p),sha256=digest,updates_
 CAMINUS_INSTALL
 '''.replace('PAYLOAD',repr(data))
         result=runner.run_shell(script,transport=transport)
+        if result.returncode==0:
+            # the runtime's tools look for packages in the agent's venv (web_search: ddgs), so an upgrade tops it up
+            # too, as setup does (torch stays setup --test-venv's); never fails the install; stdout stays the JSON
+            from . import agent_side
+            lines,_=agent_side.venv_report(runner.run_shell(agent_side.venv_command(),transport=transport,timeout=3600))
+            for line in lines:print(line,file=sys.stderr)
     else:
         if args[:1] in (['--help'],['-h']) or not args:
             from .resident.cli import parser
