@@ -1063,7 +1063,11 @@ def main(argv=None,stdin=None):
         emit(dict(type='result',**result) if a.jsonl else result,a.json or a.jsonl)
         return EXIT.get(result['state'],1)
     except (OSError,ValueError,KeyError,subprocess.SubprocessError) as e:
-        if getattr(a,'json',False):emit(dict(error=str(e)),True)
+        # an advisor that cannot be called (advisor.AdvisorUnavailable): its reason and the owner's fix apart, so the
+        # panel shows the command to run and the owner's side can make it exact (agent_host)
+        extra=dict(unavailable=dict(reason=e.reason,fix=e.fix,kind=e.kind,model=e.model,endpoint=e.endpoint)) \
+            if getattr(e,'fix',None) is not None and hasattr(e,'reason') else {}
+        if getattr(a,'json',False):emit(dict(error=str(e),**extra),True)
         else:print('caminus ember agent: '+str(e),file=sys.stderr)
         return 1
 

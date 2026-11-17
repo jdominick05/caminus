@@ -99,7 +99,11 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Anthropic API). It goes
   through the same relay, so allow its model there too, with the cap restated:
   `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
-  Its own daily budget is counted by the agent, inside the relay's cap.
+  Its own daily budget is counted by the agent, inside the relay's cap. `agent advisor` warns when the relay it names
+  would refuse the model, and `caminus ember relay status` lists the models each Anthropic relay allows. When the
+  advisor cannot be called (the relay refuses its model, is not running, or has spent its cap), `/advisor` opens the
+  reason and the exact command to run, the agent's advisor tool says the same, and the attempt does not count against
+  the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart.
 - **Removing one.** `caminus ember relay uninstall --provider anthropic` stops it; the key file stays where you put it.
 
 ## A second setup on one machine
