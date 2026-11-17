@@ -1474,7 +1474,7 @@ func (m emberModel) btwSection(w int) string {
 	}
 	var art []string // (no Ember beside the answer; the section heading says what it is)
 	artW := 0
-	textW := max(10, min(readingWidth, w-1-artW))
+	textW := max(10, min(readingWidth, w-4-artW)) // (the frame and its inner margin: a body line is 1 + textW, the box textW + 2)
 	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-4))
 	body := []string{emberBusy.Render("you ") + q}
 	rows := m.btwRows()
@@ -1496,16 +1496,26 @@ func (m emberModel) btwSection(w int) string {
 			keys = fmt.Sprintf("shift+↑↓ scroll (%d-%d of %d) · esc closes", top+1, end, len(lines))
 		}
 	}
-	var out []string
+	// a popup, not more transcript: its own tinted surface in a frame, the title and keys in the top border (a user
+	// read the unframed answer as history)
+	surface, border := overlayColors()
+	seq, edge := bgSeq(surface), lipgloss.NewStyle().Foreground(lipgloss.Color(border))
+	inner := min(w-2, textW+2)
+	title := " " + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("by the way") + " " +
+		emberDim.Render(emberClip("not added to the goal · "+keys, max(4, inner-16))) + " "
+	fill := max(0, inner-1-ansi.StringWidth(title))
+	out := []string{edge.Render("╭─") + title + edge.Render(strings.Repeat("─", fill)+"╮")}
 	for i, l := range body {
 		a := strings.Repeat(" ", artW)
 		if i < len(art) {
 			a = art[i] + "  "
 		}
-		out = append(out, " "+a+l)
+		cell := " " + a + l
+		pad := max(0, inner-ansi.StringWidth(cell))
+		out = append(out, edge.Render("│")+seq+replate(cell, seq)+strings.Repeat(" ", pad)+"\x1b[m"+edge.Render("│"))
 	}
-	// a reading surface: the shared heading, no frame; the keys ride on the heading's note
-	return sectionHead("by the way", cAccent, "not added to the goal · "+keys, w) + "\n" + strings.Join(out, "\n")
+	out = append(out, edge.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return strings.Join(out, "\n")
 }
 
 // helpLines: every command with what it does (the slash menu's two columns), then the keys.

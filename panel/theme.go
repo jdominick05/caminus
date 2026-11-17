@@ -59,7 +59,7 @@ func defaultTheme() map[string]string {
 // optionalRoles are a theme's background, all optional: none of them keeps the terminal's own background (every theme
 // before them). bg is the background (and makes light themes possible: the text roles are read against it), bg2 a
 // second colour for a gradient, pattern the ink of a background pattern, bg_pattern the pattern itself.
-var optionalRoles = map[string]bool{"bg": true, "bg2": true, "pattern": true, "bg_pattern": true}
+var optionalRoles = map[string]bool{"bg": true, "bg2": true, "pattern": true, "bg_pattern": true, "overlay": true, "overlay_border": true}
 
 // bgPatterns are the background patterns a theme may name (drawn in the empty cells behind the text, bgpaint.go).
 var bgPatterns = map[string]bool{"none": true, "dots": true, "grid": true, "diagonal": true, "waves": true,
@@ -92,7 +92,7 @@ func validThemeValue(key, v string) bool {
 	if key == "bg_pattern" {
 		return bgPatterns[v]
 	}
-	if key == "bg" || key == "bg2" || key == "pattern" {
+	if key == "bg" || key == "bg2" || key == "pattern" || key == "overlay" || key == "overlay_border" {
 		// painted into every cell as 24-bit colour: only #rrggbb paints (a #rgb, #rrggbbaa or term_N loaded without an
 		// error and then painted nothing, leaving a light theme's dark text on the terminal's dark background)
 		_, _, _, ok := hexRGB(v)
@@ -164,6 +164,24 @@ func themeRole(role string) string {
 }
 
 // themeColor is themeRole as a color.Color for places beyond the shared styles.
+// overlayColors are a popup's surface and frame: the theme's overlay and overlay_border when it sets them, else its
+// background (or code-block plate) tinted toward its accent, framed in the accent. A popup must not read as more of the
+// transcript behind it.
+func overlayColors() (surface, border string) {
+	surface, border = themeCurrent["overlay"], themeCurrent["overlay_border"]
+	if surface == "" {
+		base := themeRole("bg")
+		if base == "" {
+			base = themeRole("codeblock_bg")
+		}
+		surface = blendHex(base, themeRole("accent"), 0.10)
+	}
+	if border == "" {
+		border = themeRole("accent")
+	}
+	return surface, border
+}
+
 func themeColor(role string) color.Color {
 	return lipgloss.Color(themeRole(role))
 }
