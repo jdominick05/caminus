@@ -532,7 +532,9 @@ class Runtime:
             with self.store.transaction():
                 self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, text, 'nudge'))
                 self.store.settle_request(r['id'], 'done')
-                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision')), gid)
+                # by: 'timeout' when nobody answered (the owner's record says "timed out", not a human's no)
+                self.store.event('request_answered', dict(request=d['rid'], decision=result.get('decision'),
+                                                          by=result.get('by', '')), gid)
 
     def open_requests(self, gid):
         return [json.loads(r['data'])['rid'] for r in self.store.db.execute(
@@ -722,6 +724,10 @@ class Runtime:
                 it = dict(text=it, state='pending')
             if not isinstance(it, dict):
                 raise ValueError('each todo item is {"text": ..., "state": "pending" | "in_progress" | "done"}')
+            extra = sorted(set(it) - {'text', 'state'})
+            if extra:   # ("status" was taken silently and every item showed as pending)
+                raise ValueError(f'a todo item has only "text" and "state", not {", ".join(map(repr, extra))}: '
+                                 'send state as "pending", "in_progress" or "done"')
             text, state = str(it.get('text', '')).strip(), it.get('state', 'pending')
             if not text:
                 continue

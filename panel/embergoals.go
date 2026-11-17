@@ -9,6 +9,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,14 +41,33 @@ func (m emberModel) goalOrder() []int {
 	for i := range out {
 		out[i] = len(out) - 1 - i
 	}
+	// the queued goals take their slots in run order (a move showed nowhere: they stayed in creation order)
+	var slots, queued []int
+	for k, i := range out {
+		if m.resident.Goals[i].State == "queued" {
+			slots, queued = append(slots, k), append(queued, i)
+		}
+	}
+	sort.SliceStable(queued, func(a, b int) bool { return m.queuePlace(queued[a]) < m.queuePlace(queued[b]) })
+	for j, k := range slots {
+		out[k] = queued[j]
+	}
 	return out
+}
+
+// queuePlace is a queued goal's place in the run order: the resident's, else its age (the queue runs oldest first).
+func (m emberModel) queuePlace(i int) int {
+	if q := m.resident.Goals[i].Queue; q > 0 {
+		return q
+	}
+	return 1000 + len(m.resident.Goals) - i
 }
 
 func (m emberModel) goalRow(i int, selected bool, width int) string {
 	gl := m.resident.Goals[i]
 	mark, st := goalGlyph(gl.State)
 	text := strings.Join(strings.Fields(residentText(gl.Prompt)), " ")
-	meta := fmt.Sprintf("%s · %d steps", gl.State, gl.Steps)
+	meta := gl.State + " · " + plural(gl.Steps, "step", "steps")
 	target := ""
 	if !m.chat.newGoal && gl.ID == m.chat.target {
 		target = "  " + g.user
@@ -116,7 +136,8 @@ func (m emberModel) goalsOverlay(w, h int) string {
 	if len(detail) > 0 {
 		body += "\n\n" + strings.Join(detail, "\n")
 	} else {
-		body += "\n\n" + emberDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  p pause  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
+		// wrapped, not cut (at 80 and 100 columns the last keys were lost)
+		body += "\n\n" + emberDim.Render(ansi.Wordwrap("Enter targets it  ·  space shows it  ·  v the whole plan  ·  x x cancel  ·  p pause  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, " "))
 	}
 	active := 0
 	for _, gl := range m.resident.Goals {
@@ -124,7 +145,11 @@ func (m emberModel) goalsOverlay(w, h int) string {
 			active++
 		}
 	}
-	return overlayBox(fmt.Sprintf("GOALS  %d open of %d", active, len(order)), body, "↑↓ move  ·  Enter target", w, h)
+	hint := "↑↓ move  ·  Enter target  ·  v the whole plan"
+	if m.msg != "" { // what x, p, r or a move did: the composer's frame, where it went, is under this overlay
+		hint = terminalText(m.msg, false)
+	}
+	return overlayBox(fmt.Sprintf("GOALS  %d open of %d", active, len(order)), body, hint, w, h)
 }
 
 // goalsKey: the overlay owns the keyboard while open. Actions reuse the chat's slash handlers.
@@ -161,10 +186,11 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.msg = "only a queued goal can move"
 			return m, nil
 		}
+		// in run order (the list is newest first: Shift+↑ moved the wrong way and said nothing)
 		var queued []string
-		for _, q := range m.resident.Goals {
-			if q.State == "queued" {
-				queued = append(queued, q.ID)
+		for _, i := range m.goalOrder() {
+			if m.resident.Goals[i].State == "queued" {
+				queued = append(queued, m.resident.Goals[i].ID)
 			}
 		}
 		pos := 0
@@ -178,8 +204,10 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			to = pos + 1
 		}
 		if to < 1 || to > len(queued) {
+			m.msg = map[bool]string{true: "it runs next already", false: "it is last already"}[to < 1]
 			return m, nil
 		}
+		m.chat.goalsFollow = gl.ID // the ▸ stays on the goal you moved, not on the row (the next move acted on another)
 		return m, moveQueued(m, gl.ID, to)
 	case "n":
 		closeIt()

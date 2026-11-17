@@ -95,6 +95,9 @@ func (c *residentChat) fold(e residentEvent) bool {
 			}
 		}
 		return true
+	case "paused", "cancelled", "rewound", "turn_interrupted", "finished", "emergency_stop", "scheduled":
+		g.running = "" // the call never ran or the goal stopped: nothing is running
+		return false
 	case "gate":
 		if ok, _ := e.Data["passed"].(bool); ok {
 			g.gate = "passes"
@@ -120,6 +123,9 @@ func compactAssistant(e residentEvent) residentEvent {
 
 // flushGroup fixes the group's line into the transcript and starts a new one.
 func (c *residentChat) flushGroup(w int) {
+	// only the gate's result stays in the history: "running: CMD" is the live tail's (fixed in, it stayed after the
+	// command ended, was paused or cancelled, and repeated the command above its card)
+	c.group.running = ""
 	if !c.group.empty() {
 		c.content += c.group.line(w) + "\n\n"
 	}

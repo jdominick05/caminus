@@ -222,7 +222,7 @@ func (m emberModel) modelsOverlay(w, h int) string {
 	} else if st.err != "" && len(st.list) > 0 {
 		note = st.err
 	}
-	body := strings.Join(rows, "\n") + "\n\n" + emberDim.Render(ansi.Truncate(note, inner, "…"))
+	body := strings.Join(rows, "\n") + "\n\n" + emberDim.Render(ansi.Wordwrap(note, inner, " ")) // (cut at 80)
 	title := fmt.Sprintf("MODELS  %d", len(st.list))
 	if st.current.Model != "" {
 		title += "  ·  now " + st.current.Model

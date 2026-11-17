@@ -130,10 +130,15 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				}
 			} else if running, _ := result["running"].(bool); running {
 				meta, state = "still running", "busy"
+			} else if code, ok := result["ended_later"].(float64); ok {
+				meta = fmt.Sprintf("ended later: exit %d", int(code))
+				if code != 0 {
+					state = "warn"
+				}
 			}
 			switch {
 			case n > 0:
-				meta = strings.TrimPrefix(meta+fmt.Sprintf(" · %d lines", n), " · ")
+				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
 				preview = all[max(0, len(all)-3):]
 			case result["no_new_output"] == true:
@@ -248,7 +253,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			if cx, ok := result["context"].(map[string]any); ok {
 				t, _ := cx["tokens"].(float64)
 				win, _ := cx["window"].(float64)
-				parts = append(parts, kOf(t)+" / "+kOf(win)+" context")
+				parts = append(parts, short(int(t))+" / "+short(int(win))+" context") // (66K for a 65K window before)
 			}
 			meta = strings.Join(parts, " · ")
 		}
@@ -279,7 +284,9 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				used, _ := gp["vram_used_mib"].(float64)
 				total, _ := gp["vram_total_mib"].(float64)
 				busy, _ := gp["busy_percent"].(float64)
-				parts = append(parts, fmt.Sprintf("%.0f/%.0f GB %d %%", used/1024, total/1024, int(busy)))
+				if total > 0 { // ("0/0 GB" when the card reports nothing)
+					parts = append(parts, fmt.Sprintf("%.0f/%.0f GB %d %%", used/1024, total/1024, int(busy)))
+				}
 			}
 			if mem, ok := result["memory"].(map[string]any); ok {
 				av, _ := mem["available_mib"].(float64)
@@ -315,9 +322,19 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		}
 	}
 	dot := map[string]lipgloss.Style{"ok": emberCtxOK, "fail": emberCtxHot, "warn": emberWarn, "busy": emberBusy}[state]
-	line := dot.Render(g.working) + " " + toolFamily(name).Render(name) + "  " + lipgloss.NewStyle().Foreground(cText).Render(oneLine(subject))
+	// the outcome (exit 3, refused, still running) is what the card is for: a long subject is cut, never the meta
+	tail := ""
 	if meta != "" {
-		line += emberDim.Render("  ·  " + oneLine(meta))
+		tail = "  ·  " + oneLine(meta)
+		if room := w - 4 - ansi.StringWidth(name) - 12; ansi.StringWidth(tail) > room {
+			tail = ansi.Truncate(tail, max(12, room), "…")
+		}
+	}
+	room := max(8, w-2-ansi.StringWidth(name)-2-ansi.StringWidth(tail))
+	line := dot.Render(g.working) + " " + toolFamily(name).Render(name) + "  " +
+		lipgloss.NewStyle().Foreground(cText).Render(ansi.Truncate(oneLine(subject), room, "…"))
+	if tail != "" {
+		line += emberDim.Render(tail)
 	}
 	out := []string{ansi.Truncate(line, w, "…")}
 	rule := "  " + emberDim.Render("⎿ ")
@@ -343,6 +360,10 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 		}
 		return ""
 	case "finish":
+		// what was left open is what the human most needs to see: compact showed it nowhere
+		if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
+			return recordLine("!", "left open: "+oneLine(residentText(open)), w)
+		}
 		return ""
 	case "report": // the report's own line ("note fyi: …") says it; a card repeated it
 		if err, _ := result["error"].(string); err == "" {
@@ -359,6 +380,18 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	}
 	id, _ := e.Data["call_id"].(string)
 	call := c.calls[id]
+	if running, _ := result["running"].(bool); running && name == "terminal" {
+		if sid, _ := result["session"].(string); sid != "" {
+			if code, done := c.sessionDone[sid]; done { // a later check saw it end: this card said "still running" for good
+				r2 := map[string]any{}
+				for k, v := range result {
+					r2[k] = v
+				}
+				r2["running"], r2["ended_later"] = false, code
+				result = r2
+			}
+		}
+	}
 	return actionCard(name, call.args, result, w, c.home, c.cwd)
 }
 

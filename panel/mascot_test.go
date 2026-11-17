@@ -31,7 +31,7 @@ func TestMascotShapeAndEmptyChat(t *testing.T) {
 	m.residentEvents, m.chat.content, m.chat.rendered = nil, "", 0
 	m.chat.transcript.SetContent("")
 	m.syncChat()
-	if v := ansi.Strip(m.chat.transcript.View()); !strings.Contains(v, "▀") || !strings.Contains(v, "CAMINUS") {
+	if v := ansi.Strip(m.chat.transcript.View()); !strings.Contains(v, "▀") || !strings.Contains(v, "EMBER") {
 		t.Fatalf("the empty chat does not show the ember:\n%s", v)
 	}
 }

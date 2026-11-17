@@ -73,14 +73,14 @@ func TestARootRequestAsksWhereYouTypeAndNoDenies(t *testing.T) {
 	m.refreshLocal()
 	m.syncQuestion()
 	box := ansi.Strip(m.chatComposer())
-	for _, want := range []string{"root · 1 of 1", "left", "apt-get install -y python3-pytest", "› 1. Yes", "2. No", "3. Tell it something else", "Esc later"} {
+	for _, want := range []string{"root · 1 of 1", "left", "apt-get install -y python3-pytest", "1. Yes", "› 2. No", "3. Tell it something else", "Esc later"} {
 		if !strings.Contains(box, want) {
 			t.Fatalf("the prompt takes the composer's place with %q:\n%s", want, box)
 		}
 	}
-	m = press(t, m, kDown, kEnter)
+	m = press(t, m, kEnter)
 	if v := answerFile(t, bridge, "r1"); v["decision"] != "denied" {
-		t.Fatalf("↓ Enter is No: %v", v)
+		t.Fatalf("No is preselected: Enter alone denies: %v", v)
 	}
 	if m.chat.question != nil {
 		t.Fatal("the prompt closes once decided")
@@ -282,7 +282,7 @@ func TestARecordFollowsTheBridgeOnceAnswered(t *testing.T) {
 		{Seq: 3, Goal: "original", Kind: "approval_requested", Data: map[string]any{"id": "r2", "cmd": "systemctl restart foo"}},
 	}
 	m.syncQuestion()
-	m = press(t, m, kDown, kEnter) // r1: No
+	m = press(t, m, kEnter) // r1: No (preselected)
 	m.syncQuestion()
 	m = press(t, m, tea.KeyPressMsg{Code: '1', Text: "1"}) // q1: the first choice
 	// r2 was decided by the resident's watch elsewhere: only its event says so (its files are gone)
