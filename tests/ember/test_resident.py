@@ -3443,7 +3443,7 @@ for line in sys.stdin:
         import base64
         from caminus.ember.resident import agenda, files
         from caminus.ember.resident.model import Model
-        self.eyes_home()                     # no eyes block: the mistral relay provider turns on the default pick
+        self.eyes_home(eyes=dict(provider='mistral',model='ministral-8b-latest'))
         rt=Runtime(self.home)
         try:
             rt.eyes_opener=wire=Wire(self.chat('The terminal shows "make: *** [all] Error 2" in red.'))
@@ -3499,31 +3499,32 @@ for line in sys.stdin:
             self.assertGreater(rt.eyes.spent_today(),0)
         finally:rt.mail.close();rt.store.close()
 
-    def test_eyes_are_off_without_a_relay_provider_and_the_read_says_how_to_turn_them_on(self):
+    def test_eyes_are_opt_in_off_without_a_block_even_with_a_relay_provider(self):
         class Blind:
             config={}
             def __init__(self,replies):self.replies=list(replies)
             def context_size(self):return 65536
             def tokens(self,m,t):return len(json.dumps([m,t]))//4
             def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return self.replies.pop(0)
-        (self.home/'shot.png').write_bytes(png(6,4))
+        self.eyes_home(providers=('mistral','anthropic'))      # both relay providers, no eyes block
         rt=Runtime(self.home,model=Blind([call('read',dict(path='shot.png')),dict(role='assistant',content='Done.')]))
         try:
             rt.eyes_opener=wire=Wire()
-            self.assertIsNone(rt.eyes.cfg,'no providers: no eyes, nothing billed')
+            self.assertIsNone(rt.eyes.cfg,'no eyes block: off, whatever relays the session has; nothing billed')
             gid=rt.store.enqueue('Look at shot.png.')
             for _ in range(4):
                 if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
                 rt.tick(gid)
             result=next(e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result')
-            self.assertIn('caminus ember agent eyes',result['note']);self.assertNotIn('description',result)
+            self.assertIn('caminus ember agent eyes NAME --provider P --model M',result['note'])
+            self.assertIn('--auto',result['note']);self.assertNotIn('description',result)
             self.assertEqual(wire.requests,[])
         finally:rt.mail.close();rt.store.close()
         rt=Runtime(self.home)
         try:
-            # a running resident follows `agent provider` and `agent eyes` at its next turn
-            self.eyes_home();rt._follow_config()
-            self.assertEqual(rt.eyes.cfg['model'],'ministral-8b-latest','a relay provider added later turns on the pick')
+            # on once the human runs `agent eyes` (it writes the block); a running resident follows it at its next turn
+            self.cmd('eyes',['--auto']);rt._follow_config()
+            self.assertEqual(rt.eyes.cfg['model'],'ministral-8b-latest','on after agent eyes --auto')
             conf=json.loads((self.home/'config.json').read_text());conf['eyes']=False
             (self.home/'config.json').write_text(json.dumps(conf));rt._follow_config()
             self.assertIsNone(rt.eyes.cfg,'eyes false: off even with a relay provider')
@@ -3538,6 +3539,7 @@ for line in sys.stdin:
             def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                 self.seen.append(messages);return self.replies.pop(0)
         self.eyes_home()
+        self.cmd('eyes',['--provider','mistral','--model','ministral-8b-latest'])
         brain=Blind([call('read',dict(path='shot.png',question='Which line is red?')),dict(role='assistant',content='Line 3.')])
         rt=Runtime(self.home,model=brain)
         try:
@@ -3593,18 +3595,25 @@ for line in sys.stdin:
             self.assertIn("can't see images",got['eyes_error']);self.assertEqual(wire.requests,[])
         finally:rt.mail.close();rt.store.close()
 
-    def test_agent_eyes_sets_the_model_returns_to_the_auto_pick_or_turns_them_off(self):
+    def test_agent_eyes_turns_them_on_with_a_model_or_the_auto_pick_and_off(self):
+        self.cmd('eyes',['--auto'],code=1)                          # no relay provider: nothing to pick
         self.eyes_home(providers=('mistral','anthropic'))
-        self.assertEqual(self.cmd('eyes')['eyes']['model'],'ministral-8b-latest','the auto pick')
+        self.assertIsNone(self.cmd('eyes')['eyes'],'opt-in: relay providers alone turn nothing on')
+        self.cmd('eyes',['--budget-usd','0.5'],code=1)               # a budget alone names no model
+        out=self.cmd('eyes',['--auto'])
+        self.assertEqual((out['eyes']['provider'],out['eyes']['model']),('mistral','ministral-8b-latest'),'the auto pick')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['eyes'],
+                         dict(provider='mistral',model='ministral-8b-latest'),'--auto writes the pick as the block')
         out=self.cmd('eyes',['--budget-usd','0.5'])
-        self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd']),('ministral-8b-latest',0.5),'a budget alone keeps the pick')
+        self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd']),('ministral-8b-latest',0.5),'a budget alone keeps the model')
         out=self.cmd('eyes',['--provider','anthropic','--model','claude-haiku-5-5','--budget-usd','0.1'])
         self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd'],out['eyes']['endpoint']),('claude-haiku-5-5',0.1,self.ANTHROPIC))
         self.cmd('eyes',['--provider','nowhere','--model','m'],code=1)
         self.assertIsNone(self.cmd('eyes',['--off'])['eyes'])
         self.assertFalse(json.loads((self.home/'config.json').read_text())['eyes'])
-        self.assertEqual(self.cmd('eyes',['--auto'])['eyes']['model'],'ministral-8b-latest')
-        self.assertNotIn('eyes',json.loads((self.home/'config.json').read_text()))
+        conf=json.loads((self.home/'config.json').read_text());conf['providers'].pop('mistral')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.assertEqual(self.cmd('eyes',['--auto'])['eyes']['model'],'claude-haiku-5-5','no Mistral relay: Haiku')
 
     # ---- two brains -------------------------------------------------------------------------------------------
 

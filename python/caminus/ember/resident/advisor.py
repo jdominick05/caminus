@@ -200,9 +200,8 @@ class Advisor:
 
 # ---- eyes ---------------------------------------------------------------------------------------------------------
 
-# Where no eyes block says otherwise, the first of these whose provider kind is configured through the owner's relay
-# (catalog providers with relay true) describes the images: chosen by a lab comparison on screenshots and diagrams
-# (docs/ember.md, "Eyes").
+# What `agent eyes --auto` picks: the first of these whose provider kind is configured through the owner's relay
+# (catalog providers with relay true); chosen by a lab comparison on screenshots and diagrams (docs/ember.md, "Eyes").
 EYES_AUTO = (('mistral', 'ministral-8b-latest'), ('anthropic', 'claude-haiku-5-5'))
 EYES_DEFAULTS = dict(budget_usd=0.25, max_tokens=1024, timeout=120)
 EYES_QUESTION = 'Describe what matters in this image for the task.'
@@ -211,38 +210,39 @@ EYES_BRIEF = ('You are the eyes of an agent whose model cannot see images. It re
               'colours as shown, and say plainly when something is unreadable or not in the image; never guess. Be '
               'concise: no preamble.')
 EYES_OFF = ('No eyes model is set up to describe images for you. Your human can turn eyes on: caminus ember agent eyes '
-            'NAME --provider mistral --model ministral-8b-latest (a provider on their key relay; see docs/ember.md).')
+            'NAME --provider P --model M (a vision model on their key relay), or --auto (ministral-8b-latest on a '
+            'Mistral relay, else Claude Haiku 5.5); see docs/ember.md, "Eyes".')
 
 
 class Eyes(Advisor):
     """The borrowed eyes: one vision call per image a non-vision brain reads (the advisor's ledger code, its own file).
 
-    Configuration, in config.json under "eyes": false turns them off; {provider, model} picks a configured provider
+    Opt-in only. Configuration, in config.json under "eyes": {provider, model} picks a configured provider
     (`providers`, normally the owner's relay) and a vision model it serves; budget_usd (0.25 a day), max_tokens (the
-    description's length, 1024) and timeout (120 s) are optional. No block: EYES_AUTO's first match, else off."""
+    description's length, 1024) and timeout (120 s) are optional. No block, or false: off."""
     LEDGER = 'eyes.json'
 
     @property
     def cfg(self):
         raw = self.rt.config.get('eyes')
-        if raw is False:
-            return None
-        provs = catalog.providers(self.rt.config)
-        if isinstance(raw, dict) and raw.get('provider') and raw.get('model'):
-            spec, picked = provs.get(raw['provider']), dict(raw)
-        elif raw is None:
-            spec = picked = None
-            for kind, model in EYES_AUTO:
-                name = next((n for n, s in provs.items() if s.get('kind') == kind and s.get('relay')), None)
-                if name:
-                    spec, picked = provs[name], dict(provider=name, model=model)
-                    break
-        else:
-            return None
+        if not (isinstance(raw, dict) and raw.get('provider') and raw.get('model')):
+            return None                           # opt-in only: no block (or false) is off
+        spec = catalog.providers(self.rt.config).get(raw['provider'])
         if not spec or not spec.get('endpoint'):
             return None
-        return {**EYES_DEFAULTS, **picked, 'kind': spec.get('kind'), 'endpoint': spec['endpoint'],
+        return {**EYES_DEFAULTS, **raw, 'kind': spec.get('kind'), 'endpoint': spec['endpoint'],
                 'relay': bool(spec.get('relay'))}
+
+    @staticmethod
+    def auto_pick(config):
+        """`agent eyes --auto`: {provider, model} for the first of EYES_AUTO whose provider kind is configured through
+        the relay, or None. Only the human's command writes it; a session never switches eyes on by itself."""
+        provs = catalog.providers(config)
+        for kind, model in EYES_AUTO:
+            name = next((n for n, s in provs.items() if s.get('kind') == kind and s.get('relay')), None)
+            if name:
+                return dict(provider=name, model=model)
+        return None
 
     def see(self, gid, result, question=None):
         """read's result for an image that the brain can't see: with the eyes model's description and

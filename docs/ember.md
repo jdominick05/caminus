@@ -100,21 +100,22 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   through the same relay, so allow its model there too, with the cap restated:
   `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
   Its own daily budget is counted by the agent, inside the relay's cap.
-- **Eyes.** A brain without vision (every local Caminus model) can still look at an image: when it reads one, Ember
-  sends that image, with the agent's question (read's `question` argument, else "describe what matters in this image
-  for the task") and the first lines of its goal, to a vision model on your relay, and the description is the read's
-  result. The chat's read card says `image WxH · described by MODEL`. Nothing is set up by hand: with a Mistral relay
-  provider on the agent, ministral-8b-latest describes the images; with only an Anthropic one, Claude Haiku 5.5;
-  with neither, eyes are off and the read tells the agent how you turn them on. Pick another model with
-  `caminus ember agent eyes NAME --provider mistral --model ministral-14b-latest` (`--auto` goes back to the default
-  pick, `--off` turns them off, `--budget-usd` sets their daily budget, $0.25 by default, counted by the agent like
-  the advisor's and inside the relay's cap). The candidates, with the prices the relays are set up with (USD per
-  million tokens, input / output):
+- **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
+  when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
+  With the image go the agent's question (read's `question` argument, else "describe what matters in this image for
+  the task") and the first 600 characters of its goal, so the eyes model knows what matters. The chat's read card says
+  `image WxH · described by MODEL`. Eyes are off until you turn them on, whatever relays the agent has; until then
+  the read tells the agent its image's size and format and how you turn them on. Turn them on with
+  `caminus ember agent eyes NAME --auto` (ministral-8b-latest on a Mistral relay provider, else Claude Haiku 5.5 on an
+  Anthropic one) or a model of your choice, `--provider mistral --model ministral-14b-latest`. `--off` turns them off
+  again, and `--budget-usd` sets their daily budget ($0.25 by default, counted by the agent like the advisor's and
+  inside the relay's cap). The candidates, with the prices the relays are set up with (USD per million tokens,
+  input / output):
 
   | Model | Relay | Price | An 860x480 terminal screenshot | On four images (terminal, chart, form, diagram) |
   |---|---|---|---|---|
   | ministral-3b-latest | Mistral | 0.10 / 0.10 | $0.00008 | every fact found; misquoted one character of an assertion |
-  | ministral-8b-latest (the default) | Mistral | 0.15 / 0.15 | $0.00012 | every fact right, text quoted exactly |
+  | ministral-8b-latest (`--auto`'s pick) | Mistral | 0.15 / 0.15 | $0.00012 | every fact right, text quoted exactly |
   | ministral-14b-latest | Mistral | 0.20 / 0.20 | $0.00015 | every fact right |
   | claude-haiku-5-5 | Anthropic | 0.10 / 0.50 | $0.00014 | every fact right, the most complete (quotes notes and labels too) |
 
@@ -157,8 +158,8 @@ key of that file.
 | A request's wait | 15 min | a question then takes its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
-| Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model (below) describes it, or, eyes off, the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784 | `/model` sets `vision`; a fallback brain: `fallback.vision` |
-| Eyes | ministral-8b-latest on a Mistral relay provider, else Claude Haiku 5.5 on an Anthropic one, else off; $0.25 a day | a vision model describes an image for a brain that can't see it (Eyes, above) | `caminus ember agent eyes NAME --provider P --model M`, `--auto`, `--off`, `--budget-usd N`; `eyes` |
+| Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model describes it once you turn eyes on (Eyes, above), else the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784 | `/model` sets `vision`; a fallback brain: `fallback.vision` |
+| Eyes | off; once on, $0.25 a day | a vision model describes an image for a brain that can't see it (Eyes, above) | `caminus ember agent eyes NAME --provider P --model M` or `--auto` (ministral-8b-latest on a Mistral relay, else Claude Haiku 5.5), `--off`, `--budget-usd N`; `eyes` |
 
 Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
 

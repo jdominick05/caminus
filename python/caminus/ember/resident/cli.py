@@ -321,7 +321,7 @@ def parser():
             p.add_argument('--provider',help='a configured provider (agent provider), normally your key relay: mistral, anthropic, ...')
             p.add_argument('--model',help='a vision model it serves, e.g. ministral-8b-latest or claude-haiku-5-5')
             p.add_argument('--budget-usd',type=float,help='dollars per day the eyes may spend (default 0.25)')
-            p.add_argument('--auto',action='store_true',help='the default pick: the first relay provider of the recommended kinds')
+            p.add_argument('--auto',action='store_true',help='turn eyes on with the recommended pick: ministral-8b-latest on a Mistral relay provider, else claude-haiku-5-5 on an Anthropic one')
             p.add_argument('--off',action='store_true',help='no eyes: a brain without vision gets the image\'s size and format')
         if op=='heartbeat':
             p.add_argument('state',nargs='?',choices=('on','off','status','recap','now'),default='status',
@@ -695,25 +695,27 @@ def main(argv=None,stdin=None):
             cfg=json.loads((home/'config.json').read_text())
             eyes=cfg.get('eyes')
             if a.off:eyes=False
-            elif a.auto:eyes=None
-            elif a.provider or a.model or a.budget_usd is not None:
-                eyes=dict(eyes) if isinstance(eyes,dict) else {}
-                now=Eyes(types.SimpleNamespace(config=cfg,home=home)).cfg
-                if now and not (a.provider or a.model):   # (a budget alone: on the model in use, the auto pick included)
-                    eyes.setdefault('provider',now['provider']);eyes.setdefault('model',now['model'])
+            elif a.auto or a.provider or a.model or a.budget_usd is not None:
+                eyes=dict(eyes) if isinstance(eyes,dict) else {}   # (a budget alone stays on the model set before)
+                if a.auto:                                         # (opt-in: only this command writes the pick)
+                    pick=Eyes.auto_pick(cfg)
+                    if not pick:
+                        raise ValueError('--auto needs a Mistral or Anthropic provider on your key relay, e.g. caminus '
+                                         'ember agent provider NAME add mistral --kind mistral --endpoint '
+                                         'http://127.0.0.1:8767/v1 --relay')
+                    eyes.update(pick)
                 for flag in ('provider','model','budget_usd'):
                     v=getattr(a,flag)
                     if v is not None:
                         if isinstance(v,float) and v<0:raise ValueError('--budget-usd must be 0 or more')
                         eyes[flag]=v
                 if not (eyes.get('provider') and eyes.get('model')):
-                    raise ValueError('eyes need --provider and --model (or --auto, or --off)')
+                    raise ValueError('eyes need --provider and --model, or --auto')
                 if eyes['provider'] not in catalog.providers(cfg):
                     raise ValueError('no provider named %s: add it first (caminus ember agent provider NAME add %s '
                                      '--kind KIND --endpoint RELAY-URL --relay)' % (eyes['provider'],eyes['provider']))
-            if eyes!=cfg.get('eyes') or (eyes is None)!=('eyes' not in cfg):
-                if eyes is None:cfg.pop('eyes',None)
-                else:cfg['eyes']=eyes
+            if eyes is not None and eyes!=cfg.get('eyes'):
+                cfg['eyes']=eyes
                 atomic_json(home/'config.json',cfg)
             shown=Eyes(types.SimpleNamespace(config=cfg,home=home))
             emit(dict(eyes=shown.cfg,today=shown._state().get(__import__('datetime').date.today().isoformat(),
