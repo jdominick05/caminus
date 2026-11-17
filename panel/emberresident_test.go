@@ -170,3 +170,29 @@ func TestASessionCardFromAnOlderRuntimeWithoutAims(t *testing.T) {
 		t.Fatalf("a full card from a status without aims: %+v", c)
 	}
 }
+
+// Destroy cancels every live goal, not only the one the card shows: a second goal waiting on root left its request
+// in the bridge for a session that no longer existed.
+func TestDestroyCancelsEveryLiveGoalThenRemoves(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := filepath.Join(dir, "fake-caminus")
+	body := "#!/bin/sh\nop=$3\nshift 2\necho \"$*\" >> " + log + "\ncase \"$op\" in\n" +
+		"  status) echo '{\"name\":\"research\",\"daemon_alive\":true,\"goals\":[{\"id\":\"a\",\"prompt\":\"x\",\"state\":\"working\"},{\"id\":\"b\",\"prompt\":\"y\",\"state\":\"waiting_root\"},{\"id\":\"c\",\"prompt\":\"z\",\"state\":\"completed\"}]}' ;;\n" +
+		"  remove) echo '{\"name\":\"research\",\"removed\":true,\"kept\":\"/k\"}' ;;\n" +
+		"  *) echo '{}' ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := emberModel{agentName: "resident", cli: []string{script}}
+	c := loadSessionCard(m, "research")
+	if strings.Join(c.active, ",") != "a,b" {
+		t.Fatalf("the live goals are a and b: %v", c.active)
+	}
+	msg := destroyResidentSession(m, "research", c.active)().(residentDestroyedMsg)
+	calls, _ := os.ReadFile(log)
+	want := "remove research --dry-run --json\ncancel research a --json\ncancel research b --json\nremove research --json\n"
+	if msg.err != "" || msg.kept != "/k" || !strings.HasSuffix(string(calls), want) {
+		t.Fatalf("dry run, cancel each live goal, then remove: %+v\n%s", msg, calls)
+	}
+}

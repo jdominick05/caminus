@@ -48,9 +48,9 @@ type residentCreatedMsg struct{ name, err string }
 // residentDestroyedMsg: a session the switcher removed, and where its home is kept.
 type residentDestroyedMsg struct{ name, kept, err string }
 
-// destroyResidentSession cancels the session's running goal (which withdraws its open requests), then removes it:
+// destroyResidentSession cancels every live goal of the session (which withdraws their open requests), then removes it:
 // its service stops, its name leaves the mail bus, its home moves to removed-sessions.
-func destroyResidentSession(m emberModel, name, goalID string, active bool) tea.Cmd {
+func destroyResidentSession(m emberModel, name string, active []string) tea.Cmd {
 	return func() tea.Msg {
 		// a runtime from before `remove` refuses here, before the goal is cancelled: nothing changes half-way
 		if out, err := runResident(residentCommand(m, []string{"remove", name, "--dry-run", "--json"}, "")); err != nil {
@@ -60,8 +60,8 @@ func destroyResidentSession(m emberModel, name, goalID string, active bool) tea.
 			}
 			return residentDestroyedMsg{name: name, err: text}
 		}
-		if active && goalID != "" {
-			_, _ = runResident(residentCommand(m, []string{"cancel", name, goalID, "--json"}, ""))
+		for _, id := range active { // every live goal, so none leaves a request behind for a session that is gone
+			_, _ = runResident(residentCommand(m, []string{"cancel", name, id, "--json"}, ""))
 		}
 		out, err := runResident(residentCommand(m, []string{"remove", name, "--json"}, ""))
 		if err != nil {

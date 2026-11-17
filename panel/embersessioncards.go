@@ -21,8 +21,9 @@ import (
 // status line and side pane show for the session in view).
 type sessionCard struct {
 	name, status, goal, model, github string
-	goalID                            string // the goal the card shows (destroy cancels it when it runs)
-	aimed                             bool   // the goal was redirected: the card shows what it works toward now
+	goalID                            string   // the goal the card shows
+	active                            []string // every goal still running, queued, paused or waiting: destroy cancels each
+	aimed                             bool     // the goal was redirected: the card shows what it works toward now
 	workingS, spendGoal, spendToday   float64
 	tokPerS                           float64
 	ctxUsed, ctx                      int
@@ -62,6 +63,11 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 	c.status = "idle"
 	if !st.Alive {
 		c.status = "stopped"
+	}
+	for _, x := range st.Goals {
+		if x.State == "queued" || x.State == "working" || x.State == "paused" || strings.HasPrefix(x.State, "waiting") {
+			c.active = append(c.active, x.ID)
+		}
 	}
 	if len(st.Goals) > 0 {
 		g := st.Goals[0] // the newest, unless one is running or waiting

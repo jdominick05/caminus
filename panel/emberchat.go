@@ -2829,8 +2829,7 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.openResident(other)
 			m.chat.picker = true
 		}
-		active := c.status == "working" || c.status == "waiting"
-		return m, destroyResidentSession(m, c.name, c.goalID, active)
+		return m, destroyResidentSession(m, c.name, c.active)
 	case "n": // a new session from this one: its name on a line under the cards
 		m.chat.pickerNew, m.chat.pickerName = true, ""
 		return m, nil
