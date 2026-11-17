@@ -1003,6 +1003,16 @@ class Resident(unittest.TestCase):
                     "awk -i inplace '{print}' f","awk '{getline; print}' f","awk -v x=1 '{print}' f",
                     "awk \"{print \\$1}\" f","awk '{print $1}' *"):
             self.assertFalse(R.read_only_command(cmd),cmd)
+        # the review: a glob outside quotes can expand to a file named like a flag for every program here, not only sed
+        # (a file named --pre=sh made `rg foo *` run every file through sh; -oout.txt made `sort *` write out.txt), and
+        # quotes can splice a flag the raw text hides
+        for cmd in ('rg foo *','sort *','find *','find . -name x *','xxd *','uniq *','tar -tf *','cat ./{a,b}','ls @(-i)',
+                    'sort !(x)','grep x ?','ls [-]*','ls $X','echo $HOME',"find . \"-delete\"","find . -del''ete",
+                    "rg --pr''e=sh foo .",'sort "-o" out in','ls \\*'):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        for cmd in ('find . -name "*.py"',"rg 'foo*' src",'ls "$WORKSPACE"','cat "${WORKSPACE}/a b"','ls -la ~/work',
+                    'sort -k2,2 -t, in'):
+            self.assertTrue(R.read_only_command(cmd),cmd)
 
     def test_a_handoff_with_private_text_is_never_posted(self):
         from caminus.ember.resident import github

@@ -84,17 +84,28 @@ AWK_PRINT = re.compile(rf'\s*(?:/(?:[^/\\\n]|\\.)*/|(?:NR|NF)\s*(?:==|!=|<=?)\s*
                        rf'(?:\{{\s*print(?:\s+{_AWK_FIELDS})?\s*;?\s*\}})?\s*')
 
 
-def _plain_words(part):
-    """The words of one command, or None if the shell would change them: a $ expansion, a glob or brace expansion (with a
-    file named -i, `sed -n 1p *` would edit in place) or an escape outside single quotes, or unbalanced quotes."""
-    quote = ''
-    for c in part:
+def _plain_words(part, variables=True):
+    """The words of one command as the shell will pass them, or None if the shell could change them. Every check runs on
+    these words: a glob, brace or extglob (`(`) outside quotes can expand to a file named like a flag (with a file named
+    --pre=sh, `rg foo *` ran every file through sh; -oout.txt made `sort *` write), an unquoted $ expansion splits into
+    words, and quotes can splice a flag the raw text hides (`find . "-delete"`). Refused: those characters and escapes
+    outside quotes, backquotes, unbalanced quotes, and with variables false any $ (sed and awk read a $ as their own).
+    Allowed: anything single-quoted, and inside double quotes a plain "$NAME" / "${NAME}" (one word, from the
+    harness's environment: `ls "$WORKSPACE"`)."""
+    quote, i = '', 0
+    while i < len(part):
+        c = part[i]
         if quote == "'":
             quote = '' if c == "'" else quote
-        elif c in '$\\`' or (not quote and c in '*?[{'):
+        elif c == '`' or (not quote and c in '$\\*?[{('):
+            return None
+        elif c == '\\':
+            i += 1                        # (inside double quotes: the next character is literal, a \" included)
+        elif c == '$' and not (variables and re.match(r'\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})', part[i:])):
             return None
         elif c in '\'"':
             quote = '' if quote == c else (quote or c)
+        i += 1
     try:
         return shlex.split(part)
     except ValueError:
@@ -173,12 +184,13 @@ def read_only_command(cmd):
     if CHANGING.search(cmd) or '<(' in cmd:
         return False                      # (a process substitution runs a command: `cat <(rm -f x)`)
     for part in re.split(r'\|\||&&|[|;&\n]', cmd):
-        words = part.split()
-        if not words:
+        if not part.split():
             continue
+        words = _plain_words(part)
+        if not words or CHANGING.search(' '.join(words)):
+            return False                  # (CHANGING again on the words: a quoted "-delete" or --pr''e is one)
         if words[0] in ('sed', 'awk'):
-            plain = _plain_words(part)
-            if not plain or not (_sed_reads if plain[0] == 'sed' else _awk_reads)(plain):
+            if not _plain_words(part, variables=False) or not (_sed_reads if words[0] == 'sed' else _awk_reads)(words):
                 return False
         elif words[0] == 'git':
             sub = words[1:2]
