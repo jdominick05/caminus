@@ -88,3 +88,13 @@ func TestPanelOpensInsideEmberAndEscComesBack(t *testing.T) {
 		t.Fatal("/help lists /panel")
 	}
 }
+
+func TestPanelGetsEmbersArgvWithSpacesIntact(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := chatFixture(t)
+	m.cli = []string{"python3", "-I", "-c", "import sys; from caminus.__main__ import main; main()"}
+	m, _ = m.openPanel()
+	if got := m.hosted.be.argv; len(got) != 4 || got[3] != m.cli[3] {
+		t.Fatalf("the panel runs the same argv: %q", got)
+	}
+}

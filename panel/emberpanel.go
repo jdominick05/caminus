@@ -9,14 +9,21 @@ package main
 // arrived meanwhile asks or waits as usual).
 
 import (
-	"strings"
+	"encoding/json"
 
 	tea "charm.land/bubbletea/v2"
 )
 
 // openPanel builds a fresh component (each /panel starts from what is on the machine now) and starts it.
 func (m emberModel) openPanel() (emberModel, tea.Cmd) {
-	p := newPanel(panelOptions{CLI: strings.Join(m.cli, " "), Prefs: prefsPath(), Hosted: true})
+	// as a JSON array: the argv may hold spaces (caminus ember ui's interpreter and boot script), and a joined string
+	// was split apart again
+	cli := ""
+	if len(m.cli) > 0 {
+		b, _ := json.Marshal(m.cli)
+		cli = string(b)
+	}
+	p := newPanel(panelOptions{CLI: cli, Prefs: prefsPath(), Hosted: true})
 	m.hosted, m.hostedOpen = p, true
 	m.chat.compose.Blur()
 	return m, p.Init()
