@@ -204,7 +204,7 @@ Your files never move into the agent's account unless you put them there or appr
 | A goal is `paused` | Its reason is on the goal (`/goals`): the watchdog (no progress, a token budget, the same call failing three times or repeated seven times), three plain replies, or three cut-off replies. Steer it, then `/resume`. |
 | HTTP 402 from the relay | The day's cap is spent: it resets at midnight, or raise it with `relay install --cap-usd N`. |
 | HTTP 403 "no published price" | The model is not on the provider's price list (or a stale model name in the config): pick one with `/model`. |
-| Ember's box says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
+| The thoughts box under the history says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
 | GNOME asks for an admin password | You opened a file in the agent's home from the file manager (an `admin://` path). Read its files with `caminus ember run` or from the panel instead. |
 | Too many desktop notifications | `CAMINUS_PANEL_NOTIFY=0 caminus ember ui`. |
 

@@ -448,7 +448,7 @@ func (m *emberModel) syncChat() {
 	// composer, so a generating reply never rewrites the durable content.
 	// Half the body is the live window while a reply is written; the transcript keeps the other half.
 	tail := 0
-	if live := m.liveBlock(w); live != "" {
+	if live := m.liveBlock(max(20, m.width)); live != "" { // (renderChat draws it under both columns)
 		tail = lipgloss.Height(live)
 	}
 	height := max(1, m.bodyHeight()-tail)
@@ -684,12 +684,7 @@ func (m emberModel) windowTitle() string {
 func (m emberModel) liveHeight() int { return max(3, m.bodyHeight()/2-3) }
 
 // liveWindow is the number of body lines the live box shows: its content height less the label line.
-func (m emberModel) liveWindow() int {
-	if sw := m.sideWidth(); sw > 0 {
-		return m.sideEmberRows()
-	}
-	return max(1, min(m.liveHeight(), thoughtRows+1)-1)
-}
+func (m emberModel) liveWindow() int { return max(1, min(m.liveHeight(), thoughtRows+1)-1) }
 
 // sideWidth is the side panel's width on a wide terminal (0: none). The transcript's prose wraps at readingWidth, so
 // past about 160 columns the right part of the screen was empty; the panel takes it.
@@ -702,7 +697,6 @@ func (m emberModel) sideWidth() int {
 
 const sideMinTerminal, sideMax = 160, 90
 
-// sideEmberRows is the thoughts' window in the side panel: about 60 % of the body, the rest for tasks and now.
 // goalCompactions is how many times the goal in view was compacted (the resident counts from its whole history);
 // -1 with no goal in view hides the bubble.
 func (m emberModel) goalCompactions() int {
@@ -732,18 +726,10 @@ func (m emberModel) onlineSeconds() float64 {
 	return m.resident.OnlineS + time.Since(m.statusAt).Seconds()
 }
 
-// sideEmberRows: the thoughts keep one size (they do not jump as text arrives) but a modest one, about a third of the
-// panel, so tasks start right under them; the spare rows go to the bottom of the panel, not between the two (at 60 %
-// there was a wide gap above tasks).
-func (m emberModel) sideEmberRows() int { return max(6, min(14, m.bodyHeight()*35/100)) }
-
-// sidePanel is the right column: Ember's box on top (one size), then the goal's whole todo list and what runs now.
+// sidePanel is the right column: the goal's whole todo list at the top, then what runs now. (A thoughts box sat above
+// the tasks until the owner asked for the tasks in its place; the live reply runs under the transcript instead.)
 func (m emberModel) sidePanel(sw, height int) string {
-	box := m.emberBox(sw, m.sideEmberRows())
 	rows := []string{}
-	if box != "" {
-		rows = strings.Split(box, "\n")
-	}
 	goal := m.activeGoal()
 	if goal == nil {
 		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
@@ -769,7 +755,7 @@ func (m emberModel) sidePanel(sw, height int) string {
 					done++
 				}
 			}
-			rows = append(rows, "", sectionHead("tasks", cAccent, fmt.Sprintf("%d of %d done", done, len(items)), sw))
+			rows = append(rows, sectionHead("tasks", cAccent, fmt.Sprintf("%d of %d done", done, len(items)), sw))
 			for _, it := range items {
 				mark, st := emberDim.Render("○"), emberDim
 				switch it.state {
@@ -789,7 +775,10 @@ func (m emberModel) sidePanel(sw, height int) string {
 		}
 	}
 	now, command := m.nowState(goal)
-	rows = append(rows, "", sectionHead("now", cBlue, "", sw), " "+emberBusy.Render(now))
+	if len(rows) > 0 {
+		rows = append(rows, "") // (with no todo list, now is the top row)
+	}
+	rows = append(rows, sectionHead("now", cBlue, "", sw), " "+emberBusy.Render(now))
 	if command != "" {
 		rows = append(rows, wrap(command, 3, textSt, 8)...)
 	}
@@ -865,30 +854,18 @@ const liveEmberMin = 50
 // user's call): the thoughts take the whole width.
 func liveTextWidth(inner int) int { return inner }
 
-// thoughtsWidth is the text width emberBox draws the thoughts at: the side panel's on a wide terminal, the chat's
-// otherwise.
+// thoughtsWidth is the text width liveBlock draws the thoughts at: the chat's, which the box spans on every terminal.
 func (m emberModel) thoughtsWidth() int {
-	w := max(20, m.width)
-	if sw := m.sideWidth(); sw > 0 {
-		w = sw
-	}
-	return min(liveTextWidth(max(10, w-4)), readingWidth)
+	return min(liveTextWidth(max(10, max(20, m.width)-4)), readingWidth)
 }
 
+// liveBlock is the thoughts box under the transcript, liveWindow lines of them, w cells wide. A wide terminal shows it
+// only while a reply is written: between replies its right column holds the tasks, and no thoughts box stays up.
 func (m emberModel) liveBlock(w int) string {
-	if m.sideWidth() > 0 {
-		return "" // a wide terminal shows Ember in the side panel
-	}
-	return m.emberBox(w, min(m.liveHeight(), thoughtRows+1)-1)
-}
-
-// emberBox is Ember and the thoughts, window lines of them, w cells wide: under the transcript on a narrow terminal,
-// at the top of the side panel on a wide one.
-func (m emberModel) emberBox(w, window int) string {
 	l := m.chat.live
 	inner := max(10, w-4)
 	text := min(liveTextWidth(inner), readingWidth)
-	if !l.active && m.sideWidth() == 0 && m.bodyHeight() < 2*(thoughtRows+3) {
+	if !l.active && (m.sideWidth() > 0 || m.bodyHeight() < 2*(thoughtRows+3)) {
 		return "" // a small terminal keeps its rows for the transcript between replies
 	}
 	body := m.thoughts(text)
@@ -903,7 +880,7 @@ func (m emberModel) emberBox(w, window int) string {
 	}
 	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves. The
 	// thoughts run downward, newest last.
-	window = max(1, window)
+	window := m.liveWindow()
 	top := max(0, len(body)-window)
 	if l.active && l.hold {
 		top = m.liveTop(len(body))
@@ -1020,10 +997,10 @@ func (m emberModel) activeGoal() *residentGoal {
 	return nil
 }
 
-// thoughtRows is the number of lines of thoughts Ember's box shows, generating or not.
+// thoughtRows is the number of lines of thoughts the box under the transcript (liveBlock) shows, generating or not.
 const thoughtRows = 8
 
-// thoughts is the stream Ember's box shows: the last few replies' thought chains, oldest first, then the reply being
+// thoughts is the stream liveBlock shows: the last few replies' thought chains, oldest first, then the reply being
 // written. A chain is the reply's reasoning when the model shows it, else its own words and the tools it called (a
 // model that answers without reasoning, as DeepSeek on DeepInfra does, left the box saying "no thinking"). It keeps
 // the current goal's chains; with none yet it keeps the latest from any goal, so the box never empties.
@@ -1669,8 +1646,8 @@ func (m emberModel) chatBottom() string {
 	// a blank line between the conversation and what sits under it, as Claude Code leaves: the composer read as part
 	// of the last block when it touched it
 	// (a small terminal keeps every row for the transcript; with the side panel the gap is the transcript's own last
-	// line instead, so the panel, and Ember sitting at its foot, reach down to the composer)
-	if m.height >= 24 && m.sideWidth() == 0 {
+	// line instead, so the panel reaches down to the composer, unless the live reply's box sits under both columns)
+	if m.height >= 24 && (m.sideWidth() == 0 || m.chat.live.active) {
 		out = "\n" + out
 	}
 	return out

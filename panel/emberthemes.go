@@ -425,7 +425,7 @@ func themePreview(name string, w int) string {
 	add(emberCtxHot.Render("✗ the gate fails: 1 test failed"))
 	add(todoLine([]todoItem{{"read the parser", "done"}, {"add the tests", "now"}, {"open a PR", "next"}}, w))
 	add(emberSel.Render(" a selected row "), "")
-	add(borderTitle(emberBorder.Render(fgc("muted").Render("a framed box: menus, the composer, Ember's thoughts")), "a title", emberDim))
+	add(borderTitle(emberBorder.Render(fgc("muted").Render("a framed box: menus, the composer")), "a title", emberDim))
 	add(footBar([]string{g.model + " " + name, "120K/1M", "$0.42"}, []string{"⇧Tab sessions", "/help"}, w))
 	return strings.Join(out, "\n")
 }

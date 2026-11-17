@@ -1636,7 +1636,7 @@ func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
 	}
 }
 
-func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
+func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	old := g
 	defer func() { g = old }()
 	g = glyphTiers["unicode"]
@@ -1651,35 +1651,68 @@ func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
 		Data: map[string]any{"reasoning": "a\ttabbed\tthought"}})
 	m.syncChat()
 	m.chat.group.running, m.chat.group.runningSince = "make test", float64(time.Now().Unix())
-	frame := ansi.Strip(m.render())
-	rows := strings.Split(frame, "\n")
-	if len(rows) > m.height {
-		t.Fatalf("%d rows overflow %d", len(rows), m.height)
-	}
-	for _, r := range rows {
-		if ansi.StringWidth(r) > m.width {
-			t.Fatalf("row too wide (%d): %q", ansi.StringWidth(r), r)
+	fits := func(frame string) []string {
+		t.Helper()
+		rows := strings.Split(frame, "\n")
+		if len(rows) > m.height {
+			t.Fatalf("%d rows overflow %d", len(rows), m.height)
 		}
+		for _, r := range rows {
+			if ansi.StringWidth(r) > m.width {
+				t.Fatalf("row too wide (%d): %q", ansi.StringWidth(r), r)
+			}
+		}
+		return rows
 	}
-	for _, want := range []string{"first the NVD feed", "tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
+	side := func(row string) string { return ansi.Cut(row, m.transcriptCols(), m.width) } // the right column's cells
+	frame := ansi.Strip(m.render())
+	rows := fits(frame)
+	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("missing %q:\n%s", want, frame)
 		}
 	}
-	if strings.Contains(frame, "Task 2 of 3") || strings.Contains(frame, "\t") {
-		t.Fatal("the line above the composer moves into the side panel; tabs are expanded")
+	// the tasks sit at the top right, on the transcript's first row; no thoughts box stays up there or anywhere
+	top := lipgloss.Height(m.chatHead(m.width))
+	if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") {
+		t.Fatalf("the first row of the right column is the tasks heading, got %q:\n%s", s, frame)
 	}
+	if strings.Contains(frame, "thoughts") || strings.Contains(frame, "first the NVD feed") || strings.Contains(frame, "tabbed") {
+		t.Fatalf("no thoughts box on a wide terminal:\n%s", frame)
+	}
+	if n := strings.Count(frame, "write the CLI"); n != 1 {
+		t.Fatalf("the tasks show once, not %d times:\n%s", n, frame)
+	}
+	if strings.Contains(frame, "Task 2 of 3") {
+		t.Fatal("the line above the composer moves into the side panel")
+	}
+	// a reply being written runs in the box under the transcript (the earlier chains above it, tabs expanded); the
+	// tasks stay at the top right, at 220 x 50 and at the smallest wide size
+	m.chat.live = residentLive{active: true, turn: "t1", reasoning: "now reading the CLI code"}
+	for _, sz := range [][2]int{{220, 50}, {160, 24}} {
+		m.width, m.height = sz[0], sz[1]
+		m.syncChat()
+		live := ansi.Strip(m.render())
+		rows = fits(live)
+		top := lipgloss.Height(m.chatHead(m.width))
+		if !strings.Contains(live, "now reading the") || !strings.Contains(live, "live ·") || strings.Contains(live, "\t") {
+			t.Fatalf("%v: the live reply shows while it is written, tabs expanded:\n%s", sz, live)
+		}
+		if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") || strings.Count(live, "write the CLI") != 1 {
+			t.Fatalf("%v: the tasks stay at the top right, once:\n%s", sz, live)
+		}
+	}
+	if !strings.Contains(ansi.Strip(m.render()), "tabbed") {
+		t.Fatal("the earlier chain with tabs is drawn in the live box")
+	}
+	m.width, m.height = 220, 50
+	m.chat.live = residentLive{}
+	m.syncChat()
 	m.resident.Goals[0].State = "completed"
 	if f := ansi.Strip(m.render()); strings.Contains(f, "make test") {
 		t.Fatal("a command of a goal that ended is not running now")
 	}
 	m.resident.Goals[0].State = "working"
-	// the thoughts sit beside the transcript, on the same rows
-	for _, r := range rows {
-		if strings.Contains(r, "Checking the CVEs.") && !strings.Contains(r, "│") {
-			continue
-		}
-	}
 	m.width = 120
 	if f := ansi.Strip(m.render()); strings.Contains(f, "Tasks  1 of 3") || !strings.Contains(f, "Task 2 of 3") {
 		t.Fatalf("a narrow terminal keeps the line above the composer:\n%s", f)
@@ -1688,8 +1721,8 @@ func TestAWideTerminalPutsEmberTasksAndNowInTheSidePanel(t *testing.T) {
 
 func TestEmbersEmptyNoteWrapsBesideEmber(t *testing.T) {
 	m := chatFixture(t)
-	m.width, m.height = 200, 50
-	box := ansi.Strip(m.emberBox(70, 8))
+	m.width, m.height = 100, 50
+	box := ansi.Strip(m.liveBlock(70))
 	for _, row := range strings.Split(box, "\n") {
 		if ansi.StringWidth(row) > 70 {
 			t.Fatalf("row wider than the box: %q", row)
@@ -1754,14 +1787,14 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 
 func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	m := chatFixture(t)
-	m.width, m.height = 200, 50
+	m.width, m.height = 100, 50
 	m.residentEvents = append(m.residentEvents,
 		residentEvent{Seq: 990, Goal: "original", Kind: "assistant", Data: map[string]any{
 			"content": "Let me check the BL density first.",
 			"tool_calls": []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{
 				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}}}},
 		residentEvent{Seq: 991, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": "0.0256"}}})
-	box := ansi.Strip(m.emberBox(90, 8))
+	box := ansi.Strip(m.liveBlock(90))
 	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") {
 		t.Fatalf("without reasoning, the words and the tool calls are the chain:\n%s", box)
 	}
@@ -1771,7 +1804,7 @@ func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	// a goal with no replies yet keeps the latest chain from any goal: the box never empties
 	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "fresh", State: "working", Prompt: "new"})
 	m.resident.Goals[0].State = "completed"
-	if box := ansi.Strip(m.emberBox(90, 8)); !strings.Contains(box, "BL density") {
+	if box := ansi.Strip(m.liveBlock(90)); !strings.Contains(box, "BL density") {
 		t.Fatalf("a fresh goal keeps the latest chain:\n%s", box)
 	}
 }
