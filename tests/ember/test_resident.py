@@ -1993,6 +1993,21 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_the_default_brain_follows_the_cards(self):
+        from caminus.ember import serve
+        card=lambda mib,pci:dict(card='card'+pci,pci=pci,label='x',total_mib=mib,status='supported',link=dict(gbps=31.5))
+        XTX,XT=24560,20464
+        self.assertEqual(serve.default_brain([card(XTX,'1')])[0],'swift-1.5')
+        self.assertEqual(serve.default_brain([card(XT,'1')])[0],'thinkingcap')
+        self.assertEqual(serve.default_brain([card(XT,'1'),card(XTX,'2')])[0],'coder','the 24 GB card is ranked first')
+        self.assertEqual(serve.default_brain([card(XT,'1'),card(XT,'2')])[0],'thinkingcap','two XTs cannot run the Coder')
+        self.assertEqual(serve.default_brain([card(XTX,'1'),card(XTX,'2')])[0],'coder')
+        none=serve.default_brain([dict(card='card0',pci='0',label='x',total_mib=8000,status='unsupported',link=None)])
+        self.assertIsNone(none[0]);self.assertIn('no supported card',none[1])
+        from caminus import models
+        for name in ('swift-1.5','thinkingcap','coder'):
+            self.assertIn(name,models.BY_NAME,'a default is a catalog model')
+
     def test_install_queues_an_update_for_every_running_daemon_on_an_older_runtime(self):
         # an upgrade left a days-old daemon running: install alone restarted nothing
         from caminus.ember import agent_host

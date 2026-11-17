@@ -123,7 +123,7 @@ def _parser():
 
     p = sub.add_parser('serve', help='start a model server as an agent-user job (own home/port/session)')
     p.add_argument('name')
-    p.add_argument('model')
+    p.add_argument('model', nargs='?', help="a catalog model (default: the one for this machine's cards)")
     p.add_argument('--placement', default='auto', choices=serve.PLACEMENTS,
                    help="auto: the model's own card count; 0/1: that one card; 2: split across both")
     p.add_argument('--ctx')
@@ -420,7 +420,13 @@ def _setup(a, tr):
     if r.returncode:
         print(f'installing the agent side failed: {(r.stderr or "").strip()}', file=sys.stderr)
     extras = agent_extras(a, tr)
-    return _status(tr, json_mode=a.json) or (0 if extras else 1)
+    code = _status(tr, json_mode=a.json) or (0 if extras else 1)
+    if not a.json:
+        model, why = serve.default_brain()
+        if model:
+            print(f'\nnext, a brain: on these cards ({why}) the local default is {model}: caminus pull {model} && '
+                  f'caminus start {model}, then step 3 of the quickstart (a paid API works too)')
+    return code
 
 
 def json_mode_quiet(a):
@@ -828,6 +834,11 @@ def _serve(a, tr):
         return 2
     extra = list(getattr(a, 'extra', []) or [])
     try:
+        if not a.model:
+            a.model, why = serve.default_brain()
+            if not a.model:
+                raise serve.ServeError(why)
+            print(f'caminus ember serve: {a.model} ({why}: the default for these cards)', file=sys.stderr)
         m, e, devs, nc = serve.resolve(a.model, a.placement, ctx=a.ctx)
     except serve.ServeError as ex:
         print(f'caminus ember serve: {ex}', file=sys.stderr)

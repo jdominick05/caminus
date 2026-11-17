@@ -17,6 +17,28 @@ from ..cmd import manage
 
 PORT0 = manage.PORT0
 PLACEMENTS = ('auto', '0', '1', '2')
+BIG_CARD_MIB = 22_000     # a 24 GB card (an RX 7900 XTX reports about 24,500 MiB, an XT about 20,400)
+
+
+def default_brain(gs=None):
+    """(model, why): the local model Ember suggests for this host's cards. Two cards with a 24 GB first card: the Coder
+    (it needs a 24 GB card 0); one 24 GB card (XTX): Swift 1.5; otherwise (one XT, or two XTs, where the Coder cannot
+    run): ThinkingCap. Qwen3-30B-A3B is offered on every setup but is not the default. (None, why) without a usable card."""
+    from ..device import host
+    try:
+        cards = host.ranked(host.gpus() if gs is None else gs)
+    except OSError as e:
+        return None, f'the cards could not be read: {e}'
+    if not cards:
+        return None, 'no supported card (an RX 7900 XTX or XT)'
+    big = (cards[0].get('total_mib') or 0) >= BIG_CARD_MIB
+    if len(cards) >= 2 and big:
+        return 'coder', 'two cards, the first with 24 GB'
+    if big:
+        return 'swift-1.5', 'one 24 GB card'
+    if len(cards) >= 2:
+        return 'thinkingcap', 'two 20 GB cards (the Coder needs a 24 GB first card)'
+    return 'thinkingcap', 'one 20 GB card'
 
 
 class ServeError(Exception):
