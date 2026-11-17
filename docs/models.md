@@ -117,6 +117,28 @@ llama.cpp's: on one card at 16,384 tokens 60 of 64 rows against its 61. A conver
 the other; switching reads it again. The other models refuse `--kv q8`: the dense 27B models keep their F16 cache and
 the Coder its own 8-bit one.
 
+## Sampling defaults
+
+Each model is served with the sampling its model card recommends for agentic work with thinking on. These are the
+defaults a request gets; any field the request sends itself (`temperature`, `top_p`, `top_k`, `min_p`,
+`presence_penalty`, `repeat_penalty` and the rest) wins.
+
+| Model | temperature | top_p | top_k | min_p | presence penalty | repeat penalty | recommended output |
+|---|---|---|---|---|---|---|---|
+| `qwen3-30b-a3b` | 0.6 | 0.95 | 20 | 0 | 1.5 | 1.0 (not stated) | 32,768 tokens |
+| `coder`, `swift-1.5`, `thinkingcap`, `qwen3.8-27b` | 1.0 | 0.95 | 20 | 0 | 0 | 1.0 | 393,216 tokens (131,072 answer + 262,144 thinking) |
+
+- Qwen3-30B-A3B's card recommends a presence penalty of 1.5 for quantized models, to suppress repetition. Its GGUF file
+  carries no sampling settings, so before this table it was served at temperature 1.0 with no penalty. The penalty
+  counts the last 64 tokens, as in llama.cpp. Its card's settings for answers without thinking (temperature 0.7,
+  top_p 0.8) are not applied to `qwen3-30b-a3b-nothink`: send them in the request.
+- The Qwen3.8 models' GGUF files already carry 1.0 / 20 / 0.95, so nothing changes for them.
+- The recommended output length is a hint only. `/props` reports it as `default_generation_settings.max_output` and
+  `/v1/models` in each model's `meta`. A reply still ends at the request's `max_tokens` or when the context is full.
+- `/props` reports the defaults in effect under `default_generation_settings.params`.
+- For another GGUF file, the server uses the file's own `general.sampling.*` settings, then the built-in defaults
+  (temperature 1.0, top_p 0.95, top_k 20, min_p 0, no penalties).
+
 ## The names your tools use
 
 Each server answers to its model id and to the same id with `-nothink` (no thinking before answering):

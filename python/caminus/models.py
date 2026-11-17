@@ -106,6 +106,46 @@ ALL = (
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
            '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
 )
+# Each served model's recommended sampling for agentic work (thinking on), from its model card: what caminus serve uses as a
+# request's defaults (caminus.serve.sampler.model_defaults: these first, then the GGUF's general.sampling.* where a field is
+# None here, then SamplingParams' own defaults; a request's own fields still win). None = the card does not state it.
+# max_output: the card's recommended output length (reasoning included), a hint /props reports; the server never cuts a reply
+# there by itself (max_tokens stays the client's, clamped to the context's room). Read on 2026-11-16 at these revisions.
+Sampling = namedtuple('Sampling', 'temperature top_p top_k min_p presence_penalty repeat_penalty max_output')
+_QWEN38 = Sampling(1.0, 0.95, 20, 0.0, 0.0, 1.0, 131072 + 262144)   # Thinking Mode; 131,072 answer + 262,144 reasoning
+SAMPLING = {
+    # https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/812d96e10a0dd82b69d749e68693698cf6c36daa/README.md
+    # ("Thinking Mode: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0" and
+    # its output length section); the GSQ-RCO GGUF card states none, its header carries 1.0 / 20 / 0.95
+    'coder': _QWEN38,
+    # https://huggingface.co/Qwen/Qwen3.8-27B/blob/37561816e66b5b9153b1b64c10968c18c1e6f4a0/README.md (the same Thinking Mode
+    # line and output length); the GSQ-RCO GGUF card states none, its header carries 1.0 / 20 / 0.95 / min_p 0
+    'qwen3.8-27b': _QWEN38,
+    # https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27B-GGUF/blob/14bfe4b42be4a925d98816db830155f476c605e7/README.md (its
+    # evaluation sampling: temperature 1.0, top_p 0.95, top_k 20, min_p 0, presence_penalty 0, repetition_penalty 1, the base
+    # Qwen3.8-27B card's Thinking Mode set; the output length from that base card)
+    'swift-1.5': _QWEN38,
+    # https://huggingface.co/bottlecapai/ThinkingCap-Qwen3.8-27B-GGUF-RCO-4.2bpw/blob/67c3324641f39f169e1cbc8280f9748e890f3046/README.md
+    # ("Use the sampling settings from the main model card (temperature 1.0, top_p 0.95, top_k 20, min_p 0.0). Greedy
+    # decoding can loop."); the penalties and the output length from the base Qwen3.8-27B card it defers to
+    'thinkingcap': _QWEN38,
+    # https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/blob/e4d4bafdfb96a411a163846265362aceb0b9c63a/README.md (thinking mode:
+    # temperature 0.6, top_p 0.95, top_k 20, min_p 0; "We recommend setting presence_penalty to 1.5 for quantized models to
+    # suppress repetitive outputs"; "an output length of 32,768 tokens for most queries"); also the base card
+    # https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/README.md. The GGUF carries no
+    # general.sampling.* keys, so before this table it was served at temperature 1.0 and presence 0. No repetition penalty
+    # is stated (None: the GGUF's, else off). The card's non-thinking set (0.7 / 0.8) is not applied to the -nothink id.
+    'qwen3-30b-a3b': Sampling(0.6, 0.95, 20, 0.0, 1.5, None, 32768),
+}
+
+
+def sampling_of(path):
+    """the recommended sampling (Sampling) of the catalog model whose first file this is (model_of: same name and size), or
+    None: a file outside the catalog, or a model with no entry (the paused ones)"""
+    m = model_of(path)
+    return SAMPLING.get(m.name) if m is not None else None
+
+
 # Paused models: in the tree (their engines, kernels and files stay) but not offered: `caminus models`, `caminus pull`,
 # `caminus start` and the panel leave them out, and caminus serve refuses their architectures (caminus.arch.PAUSED), until
 # they are measured again on the current code. CAMINUS_ALLOW_PAUSED=1 offers them anyway (development and gates).

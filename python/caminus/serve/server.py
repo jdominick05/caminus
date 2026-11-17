@@ -334,12 +334,14 @@ class K3Server:
     route answers 503 'Loading model', as llama-server does until its model is loaded; set_loading() changes it),
     model_alias (/props' model_alias: the default model id), kv_cache (/props caminus.kv_cache and /caminus/status
     server.kv_cache: {'type': 'f16' | 'q8', 'format': the cache's format id}; caminus serve sets the built engine's,
-    caminus.arch.kv_cache_of)."""
+    caminus.arch.kv_cache_of). sampling: a request's defaults (sampler.SamplingParams; None: the GGUF's general.sampling.*
+    over the built-in ones; caminus serve passes sampler.model_defaults': the catalog's recommendation first);
+    max_output: the model card's output length, reported by /props and /v1/models (None: not known)."""
 
     def __init__(self, session, tokenizer, host='127.0.0.1', port=8092, log_dir=None, ping_interval=10.0,
                  max_queue=16, incremental_tool_args=False, drafter=None, sampling=None, model_path=None,
                  builder=None, stats=None, physics=None, hw=None, hw_interval=1.0, proc_name='caminus',
-                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True, kv_cache=None):
+                 loading=False, model_alias='k3-coder', flight=None, loop_guard=True, kv_cache=None, max_output=None):
         self.sess = session
         self.flight = flight        # serve.flight.FlightRecorder or None (the per-request JSONL line, replay bundles)
         self.loop_guard = bool(loop_guard)
@@ -366,6 +368,7 @@ class K3Server:
         self.drafter = drafter
         self.model_path = model_path
         self.defaults = sampling or SamplingParams.from_gguf_meta(getattr(tokenizer.vocab, 'meta', {}) or {})
+        self.max_output = None if max_output is None else int(max_output)   # (the model card's output length: a hint only)
         self.think_end_id = tokenizer.special.get(THINK_END)
         self.tool_open_id = tokenizer.special.get(TOOL_OPEN)
         self.worker = EngineWorker(session, tokenizer, max_queue=max_queue, tool_open_id=self.tool_open_id,
@@ -767,7 +770,10 @@ class K3Server:
         eos = getattr(tok, 'eos_id', None)
         return {
             'default_generation_settings': {'params': MX.task_params(p, -1, False, self.spec_types),
-                                            'n_ctx': self.max_ctx},
+                                            'n_ctx': self.max_ctx,
+                                            # (the model card's recommended output length, reasoning included; null: none
+                                            # known. A hint: n_predict stays -1, a reply ends at max_tokens or the context)
+                                            'max_output': self.max_output},
             'total_slots': 1, 'model_alias': self.model_alias, 'model_ftype': '',
             'model_path': self.model_path or '',
             'modalities': {'vision': False, 'video': False, 'audio': False}, 'media_marker': '<__media__>',
@@ -987,7 +993,7 @@ class K3Handler(BaseHTTPRequestHandler):
             elif path in ('/v1/models', '/models'):
                 self._send(200, {'object': 'list', 'data': [
                     {'id': m, 'object': 'model', 'created': int(srv.t_start), 'owned_by': 'k3',
-                     'meta': {'n_ctx': srv.max_ctx}} for m in MODEL_PROFILES]})
+                     'meta': {'n_ctx': srv.max_ctx, 'max_output': srv.max_output}} for m in MODEL_PROFILES]})
             elif path == '/props':
                 self._send(200, srv.props())
             elif path == '/slots':
