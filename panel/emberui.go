@@ -658,6 +658,15 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.msg = "new session " + residentText(msg.name) + " on " + residentText(msg.model) + " · /model switches it"
 		}
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
+	case dirListedMsg:
+		if msg.agent == m.agentName {
+			if m.chat.dirs == nil {
+				m.chat.dirs = map[string][]string{}
+			}
+			m.chat.dirs[msg.dir] = msg.entries // (an unreadable folder caches empty: no retry per keystroke)
+			delete(m.chat.dirsPending, msg.dir)
+		}
+		return m, nil
 	case residentDestroyedMsg:
 		if msg.err != "" {
 			m.msg = "destroy " + residentText(msg.name) + ": " + residentText(msg.err)
@@ -839,7 +848,12 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.stopStream()
 		}
 		if m.tab == 6 && (m.mode == "" || m.mode == "normal") {
-			return m.chatKey(msg)
+			next, cmd := m.chatKey(msg)
+			if em, ok := next.(emberModel); ok { // an @ / + word: its folder's listing, once
+				em, list := em.ensureListing()
+				return em, tea.Batch(cmd, list)
+			}
+			return next, cmd
 		}
 		return m.onKey(msg.String())
 	case tea.MouseWheelMsg:

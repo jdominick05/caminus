@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -78,6 +77,8 @@ type residentChat struct {
 	slashFor                                string      // the draft slashSel belongs to (a new draft starts at the top)
 	slashToken, slashText                   string
 	pathIdx                                 int
+	dirs                                    map[string][]string // the agent's folders listed for @ / + completion
+	dirsPending                             map[string]bool
 	pathPrefix, pathPick                    string
 	live                                    residentLive
 	stream                                  *streamState
@@ -1416,7 +1417,7 @@ func (m emberModel) chatComposer() string {
 			// can offer: directories in the navigation accent, files resting, and
 			// the absence of any match in the failure color so a typo shows itself.
 			hint := emberDim.Render("Tab completes · ") + emberCode.Render(token) // (it overwrote the draft, so it drew twice)
-			if matches := pathMatches(token); len(matches) > 0 {
+			if matches := m.pathMatches(token); len(matches) > 0 {
 				lines := matches
 				if len(lines) > 4 {
 					lines = lines[:4]
@@ -1432,6 +1433,8 @@ func (m emberModel) chatComposer() string {
 					lines[i] = style.Render(l)
 				}
 				hint += emberDim.Render(" · " + strings.Join(lines, "  "))
+			} else if _, abs, _ := m.pathDir(token); m.chat.dirs[abs] == nil && m.chat.dirsPending[abs] {
+				hint += emberDim.Render(" listing the agent's folder…")
 			} else {
 				hint += emberCtxHot.Render(" no match")
 			}
@@ -1656,6 +1659,8 @@ func helpLines(width int) []string {
 		{"Enter", "send · Alt+Enter adds a line"},
 		{"↑ ↓", "your sent messages (an unread one is pulled back first)"},
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
+		{"@ path", "names a path (the agent's folders; Tab completes)"},
+		{"+ path", "attaches the file (read as the agent, up to 64 KB)"},
 		{"Esc", "while a reply is written, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
@@ -1730,7 +1735,7 @@ func (m emberModel) pathMenu(w int) string {
 	if !ok {
 		return ""
 	}
-	matches := pathMatches(token)
+	matches := m.pathMatches(token)
 	if len(matches) == 0 {
 		return ""
 	}
@@ -2627,94 +2632,6 @@ func slashMatches(draft string) []string {
 	return slices.Compact(out)
 }
 
-// pathToken reports the trailing token of the draft when it is a path the user
-// is still typing: it contains a separator (/, ~/ , ./, ../) and the draft does
-// not end in whitespace, so a finished word never matches. A leading / alone is
-// left to slashMatches, which sees commands first; a path wins once the token
-// goes deeper than a bare command could (/home) or does not start with / at all.
-func pathToken(draft string) (string, bool) {
-	if draft == "" || strings.Contains(draft, "\n") || strings.HasSuffix(draft, " ") {
-		return "", false
-	}
-	token := draft
-	if i := strings.LastIndex(draft, " "); i >= 0 {
-		token = draft[i+1:]
-	}
-	if !strings.Contains(token, "/") {
-		return "", false
-	}
-	if strings.HasPrefix(token, "/") && !strings.HasPrefix(token, "//") {
-		if rest := token[1:]; !strings.Contains(rest, "/") {
-			// A bare /word still belongs to the command completer until no
-			// command could grow into it; /h stays /help, /home is a path.
-			if isCommandPrefix(rest) {
-				return "", false
-			}
-		}
-	}
-	return token, true
-}
-
-// isCommandPrefix reports whether the word after the leading slash could still
-// complete to any slash command.
-func isCommandPrefix(token string) bool {
-	for _, c := range slashCommands {
-		if strings.HasPrefix(c.name[1:], token) {
-			return true
-		}
-	}
-	return false
-}
-
-// pathMatches lists what the typed path points at, directories first with
-// their trailing separator, so Tab keeps descending into a directory and the
-// same token prefix re-lists its children. Hidden entries only surface once
-// the typed prefix includes their dot. The list is capped so /usr/lib never
-// floods the hint line.
-func pathMatches(token string) []string {
-	dir, prefix := token, ""
-	if !strings.HasSuffix(token, "/") {
-		i := strings.LastIndex(token, "/")
-		prefix = token[i+1:]
-		dir = token[:i+1]
-	}
-	if dir == "~" {
-		dir = "~/"
-	}
-	fsDir := dir
-	if strings.HasPrefix(fsDir, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		fsDir = home + fsDir[1:]
-	}
-	entries, err := os.ReadDir(fsDir)
-	if err != nil {
-		return nil
-	}
-	var dirs, files []string
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
-			continue
-		}
-		if e.IsDir() {
-			dirs = append(dirs, dir+name+"/")
-		} else {
-			files = append(files, dir+name)
-		}
-	}
-	out := append(dirs, files...)
-	if len(out) > 64 {
-		out = out[:64]
-	}
-	return out
-}
-
 // cyclePath completes the trailing path token on Tab. The first Tab takes the
 // best match; later Tabs cycle the rest of that list; taking a directory puts
 // its separator on the draft, so the next Tab walks into it. A token that
@@ -2735,7 +2652,7 @@ func (m emberModel) cyclePath() (tea.Model, bool) {
 		// pathIdx already points at the next pick of the running cycle.
 		prefix, idx = m.chat.pathPrefix, m.chat.pathIdx
 	}
-	matches := pathMatches(prefix)
+	matches := m.pathMatches(prefix)
 	if len(matches) == 0 {
 		return m, false
 	}

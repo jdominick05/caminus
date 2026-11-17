@@ -256,24 +256,33 @@ func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
 	return m
 }
 
-var attachRe = regexp.MustCompile(`(^|\s)@((?:~/|/|\./)?[A-Za-z0-9_./~+-]+)`)
-
-// expandAttachments appends each @path's file (read as the agent, at most 64 KB) to the message.
+// expandAttachments: each +path's file (read as the agent, at most 64 KB, at most 8, never "..") goes with the message,
+// its word marked "(attached)"; an @path is a plain path, sent without the mark. Relative paths are the agent's
+// working folder's, as completion lists them.
 func expandAttachments(m emberModel, text string) string {
-	found := attachRe.FindAllStringSubmatch(text, 8)
 	var blocks []string
-	for _, f := range found {
-		path := f[2]
-		if strings.Contains(path, "..") {
-			continue
+	base := m.agentCwdAbs()
+	n := 0
+	text = attachRe.ReplaceAllStringFunc(text, func(word string) string {
+		g := attachRe.FindStringSubmatch(word)
+		lead, p := g[1], g[2]
+		if n >= 8 || strings.Contains(p, "..") {
+			return word
 		}
-		out, err := agentRun(m, "head -c 65536 -- "+shellQuote(path))
+		n++
+		full := p
+		if base != "" {
+			full = resolveIn(m.resident.Home, base, p)
+		}
+		out, err := agentRun(m, "head -c 65536 -- "+shellQuote(full))
 		if err != nil {
-			blocks = append(blocks, fmt.Sprintf("[could not attach %s: %s]", path, strings.TrimSpace(out)))
-			continue
+			blocks = append(blocks, fmt.Sprintf("[could not attach %s: %s]", p, strings.TrimSpace(out)))
+			return lead + p
 		}
-		blocks = append(blocks, fmt.Sprintf("Attached %s:\n```\n%s\n```", path, strings.TrimRight(out, "\n")))
-	}
+		blocks = append(blocks, fmt.Sprintf("Attached %s:\n```\n%s\n```", p, strings.TrimRight(out, "\n")))
+		return lead + p + " (attached)"
+	})
+	text = nameRe.ReplaceAllString(text, "${1}${2}")
 	if len(blocks) == 0 {
 		return text
 	}

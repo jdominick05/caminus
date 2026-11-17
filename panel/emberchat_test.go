@@ -1039,118 +1039,120 @@ func TestThemeSetPersistsAndTheSlashCommandSwitches(t *testing.T) {
 	}
 }
 
-func TestPathTokenDetectsPathsButLeavesCommandsAlone(t *testing.T) {
-	for _, want := range []string{"/home/ig", "~/src/", "./build/x", "../notes", "/home"} {
+func TestAtAndPlusAreTheOnlyPathMarks(t *testing.T) {
+	for _, want := range []string{"@wo", "@", "+work/x", "see @work/", "@~/notes", "+/etc/hosts"} {
 		if _, ok := pathToken(want); !ok {
-			t.Fatalf("%q should be a path token", want)
+			t.Fatalf("%q is a path word", want)
 		}
 	}
-	for _, no := range []string{"", "hello", "/h", "goal one", "see /home later ", "a\nb /home"} {
+	for _, no := range []string{"", "/home", "/h", "see work/x", "C++", "a@b.c", "@x ", "x+y", "a\nb @w"} {
 		if tok, ok := pathToken(no); ok {
-			t.Fatalf("%q should not be a path token (got %q)", no, tok)
+			t.Fatalf("%q is not a path word (got %q)", no, tok)
 		}
 	}
 }
 
-func TestPathMatchesListsDirectoriesFirstAndHidesDotfiles(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "alpha"), 0o755); err != nil {
-		t.Fatal(err)
+func pathFixture(t *testing.T) emberModel {
+	m := chatFixture(t)
+	m.resident.Home = "/srv/agent/homes/r"
+	m.chat.dirs = map[string][]string{"/srv/agent/homes/r": {"work/", "notes.md", ".hidden"}}
+	return m
+}
+
+func TestPathsCompleteFromTheAgentsFolderListedOncePerFolder(t *testing.T) {
+	m := pathFixture(t)
+	if got := m.pathMatches(""); fmt.Sprint(got) != "[work/ notes.md]" {
+		t.Fatalf("@ alone lists the agent's folder, folders first, hidden ones hidden: %v", got)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "zeta.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	if got := m.pathMatches("w"); fmt.Sprint(got) != "[work/]" {
+		t.Fatalf("a prefix filters: %v", got)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".hidden"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	if got := m.pathMatches("."); fmt.Sprint(got) != "[.hidden]" {
+		t.Fatalf("a dot shows hidden entries: %v", got)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "alpha", "inner.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	if got := m.pathMatches("work/"); got != nil {
+		t.Fatalf("a folder not listed yet shows nothing until its listing arrives: %v", got)
 	}
-	d := dir + "/"
-	if got := pathMatches(d); len(got) != 2 || got[0] != d+"alpha/" || got[1] != d+"zeta.txt" {
-		t.Fatalf("unexpected matches: %v", got)
+	m.cli = []string{"/bin/true"}
+	m.chat.compose.SetValue("@work/")
+	m, cmd := m.ensureListing()
+	if cmd == nil || !m.chat.dirsPending["/srv/agent/homes/r/work"] {
+		t.Fatal("the folder is asked for once")
 	}
-	if got := pathMatches(d + "a"); len(got) != 1 || got[0] != d+"alpha/" {
-		t.Fatalf("prefix filter failed: %v", got)
+	if _, again := m.ensureListing(); again != nil {
+		t.Fatal("not again while it is on its way")
 	}
-	if got := pathMatches(d + "."); len(got) != 1 || !strings.HasSuffix(got[0], ".hidden") {
-		t.Fatalf("dot entries should surface with a dot prefix: %v", got)
+	next, _ := m.Update(dirListedMsg{agent: m.agentName, dir: "/srv/agent/homes/r/work", entries: []string{"inventory.py"}})
+	m = next.(emberModel)
+	if got := m.pathMatches("work/"); fmt.Sprint(got) != "[work/inventory.py]" {
+		t.Fatalf("then it lists: %v", got)
 	}
-	if got := pathMatches(dir + "/nowhere/"); len(got) != 0 {
-		t.Fatalf("an unreadable directory should match nothing: %v", got)
+	if _, again := m.ensureListing(); again != nil {
+		t.Fatal("a cached folder is never listed again")
 	}
 }
 
-func TestTabCompletesAWalksIntoDirectoriesAndCyclesFiles(t *testing.T) {
-	themeFixture(t)
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "walk", "alpha"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "gamma.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "walk", "alpha", "inner.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m := chatFixture(t)
-	m.chat.compose.SetValue(dir + "/walk/a")
+func TestTabCompletesAnAtWordAndKeepsItsMark(t *testing.T) {
+	m := pathFixture(t)
+	m.chat.dirs["/srv/agent/homes/r/work"] = []string{"inventory.py"}
+	m.chat.compose.SetValue("look at +w")
 	m.chat.compose.Focus()
 	next, _ := m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = next.(emberModel)
-	if m.chat.compose.Value() != dir+"/walk/alpha/" {
-		t.Fatalf("first Tab should take the directory: %q", m.chat.compose.Value())
+	if m.chat.compose.Value() != "look at +work/" {
+		t.Fatalf("Tab takes the folder and keeps the +: %q", m.chat.compose.Value())
 	}
 	next, _ = m.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = next.(emberModel)
-	if m.chat.compose.Value() != dir+"/walk/alpha/inner.txt" {
-		t.Fatalf("Tab in the directory should descend: %q", m.chat.compose.Value())
+	if m.chat.compose.Value() != "look at +work/inventory.py" {
+		t.Fatalf("Tab descends: %q", m.chat.compose.Value())
 	}
-	// From a files-only view cycling walks the matches in order; directories
-	// would have gone first.
-	files := t.TempDir()
-	if err := os.WriteFile(filepath.Join(files, "beta.txt"), []byte("x"), 0o644); err != nil {
+}
+
+func TestPlusAttachesAtNamesAndMidWordMarksDoNothing(t *testing.T) {
+	m := pathFixture(t)
+	script := filepath.Join(t.TempDir(), "fake-caminus")
+	// agentRun: caminus ember run -s SCRIPT; the fake prints what it was asked to read
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"CONTENT($4)\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(files, "gamma.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	m.cli = []string{script}
+	got := expandAttachments(m, "check +work/inventory.py please")
+	if !strings.Contains(got, "work/inventory.py (attached)") || !strings.Contains(got, "Attached work/inventory.py:") ||
+		!strings.Contains(got, "/srv/agent/homes/r/work/inventory.py") {
+		t.Fatalf("+path attaches the file, read as the agent from its folder:\n%s", got)
 	}
-	reset := chatFixture(t)
-	reset.chat.compose.SetValue(files + "/")
-	for _, want := range []string{files + "/beta.txt", files + "/gamma.txt"} {
-		nx, _ := reset.chatDraftKey(tea.KeyPressMsg{Code: tea.KeyTab})
-		reset = nx.(emberModel)
-		if got := reset.chat.compose.Value(); got != want {
-			t.Fatalf("cycling files: got %q, want %q", got, want)
-		}
+	got = expandAttachments(m, "see @work/notes.md")
+	if got != "see work/notes.md" {
+		t.Fatalf("@path names the path and attaches nothing: %q", got)
+	}
+	got = expandAttachments(m, "C++ and a@b.c and x+y")
+	if got != "C++ and a@b.c and x+y" {
+		t.Fatalf("a mark inside a word is plain text: %q", got)
 	}
 }
 
 func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
 	themeFixture(t)
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
-	m := chatFixture(t)
-	m.chat.compose.SetValue("./")
+	m := pathFixture(t)
+	m.chat.compose.SetValue("@")
 	m.height = 40
 	// the same framed menu as the commands: the path and what it is, above the composer, not a line inside it
 	menu := ansi.Strip(m.chatBottom())
-	if !strings.Contains(menu, "sub/") || !strings.Contains(menu, "folder") || strings.Contains(ansi.Strip(m.chatComposer()), "Tab completes") {
-		t.Fatalf("a path in progress opens the completion menu:\n%s", menu)
+	if !strings.Contains(menu, "work/") || !strings.Contains(menu, "folder") || strings.Contains(ansi.Strip(m.chatComposer()), "Tab completes") {
+		t.Fatalf("an @ word opens the completion menu:\n%s", menu)
 	}
 	m.height = 12 // too short for the menu: the composer names the matches on one line, as before
-	if view := m.chatComposer(); !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
+	if view := m.chatComposer(); !strings.Contains(view, "Tab completes") || !strings.Contains(view, "work/") {
 		t.Fatalf("a short terminal keeps the one-line hint:\n%s", view)
 	}
-	m.chat.compose.SetValue("./zzz")
+	m.chat.compose.SetValue("+zzz")
 	if view := m.chatComposer(); !strings.Contains(view, "no match") {
 		t.Fatalf("a dead path should announce itself:\n%s", view)
+	}
+	m.chat.compose.SetValue("see work/x") // a "/" in a sentence opens nothing
+	if strings.Contains(ansi.Strip(m.chatBottom()), "folder") || strings.Contains(m.chatComposer(), "Tab completes") {
+		t.Fatal("a slash inside a sentence is not a path")
 	}
 }
 

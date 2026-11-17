@@ -61,7 +61,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
 | Ctrl+G, Ctrl+A, Shift+Tab | the goals and approvals overlays, and the session switcher |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell") |
-| `@path` | in a message, attach that file from the agent's account (64 KB) |
+| `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
 
 While a reply is written, a bounded live box shows its thinking, the tools it
 starts and the text so far, with Ember, the Caminus mascot, flickering beside
