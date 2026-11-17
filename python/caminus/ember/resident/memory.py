@@ -317,20 +317,25 @@ class Memory:
         return out
 
     # --- history_search ---------------------------------------------------------------------------------------
-    def search(self, query, limit=8):
+    def search(self, query, limit=8, gid=None):
         terms = [t for t in re.findall(r'\w+', query.lower()) if len(t) > 1]
         if not terms:
             raise ValueError('history_search needs at least one word to look for')
         limit = max(1, min(int(limit or 8), 25))
         # Prefix terms: "tokeniz" finds tokenizer and tokenizing; long words are cut to a stem-like prefix.
         fts = ' '.join('"%s"*' % t.replace('"', '')[:max(4, len(t) - 3)] if len(t) > 5 else '"%s"*' % t for t in terms)
-        hits = []
+        # The running goal (gid) is not the past: its own prompt matched every search drawn from it and came first,
+        # labelled a past goal, so it is left out (the agent has it); its other hits are 'this goal' and come last.
+        hits, mine = [], []
         for r in self.rt.store.db.execute(
                 'SELECT f.seq, f.goal, f.kind, snippet(history_fts, 0, "[", "]", " … ", 24) AS snip, e.ts '
                 'FROM history_fts f JOIN events e ON e.seq=f.seq WHERE history_fts MATCH ? '
-                'ORDER BY rank LIMIT ?', (fts, limit)):
-            hits.append(dict(source='past goal', where=f"goal {(r['goal'] or '')[:8]} · {r['kind']}",
-                             when=time.strftime('%Y-%m-%d %H:%M', time.localtime(r['ts'])), text=r['snip']))
+                'AND NOT (f.goal IS ? AND f.kind=\'goal_queued\') ORDER BY f.goal IS ?, rank LIMIT ?',
+                (fts, gid or '', gid or '', limit)):
+            this = bool(gid) and r['goal'] == gid
+            (mine if this else hits).append(dict(
+                source='this goal' if this else 'past goal', where=f"goal {(r['goal'] or '')[:8]} · {r['kind']}",
+                when=time.strftime('%Y-%m-%d %H:%M', time.localtime(r['ts'])), text=r['snip']))
         # The index archive, the journal and the notes live in files the agent writes; search them line by line (they
         # are small). The two index archives come first and give up to half the limit in matching lines, each naming
         # the note it points to: one line there is one note, so the first hit alone hid the rest, and the cap leaves
@@ -361,5 +366,5 @@ class Memory:
                         break
             if len(file_hits) >= limit * 2:
                 break
-        hits = hits + file_hits
+        hits = hits + file_hits + mine
         return dict(query=query, hits=hits[:limit * 2], note='no matches' if not hits else '')

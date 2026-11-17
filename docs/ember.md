@@ -178,7 +178,7 @@ Keeping the index small:
 
 `history_search` searches the archive along with the agent's past goals, journal and notes. Archive hits come first
 (up to half the limit), each with the note its line names. Every hit gives its source: past goal, index archive, old
-index, journal or note.
+index, journal or note. Hits from the running goal come last, marked "this goal", and its own prompt is left out.
 
 ## Where things live
 

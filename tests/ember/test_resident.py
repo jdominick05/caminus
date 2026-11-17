@@ -1476,7 +1476,24 @@ for line in sys.stdin:
             hits=rt.memory.search('tokenizer',limit=4)['hits']
             self.assertEqual(sum(h['source']=='index archive' for h in hits),2,hits)
             self.assertTrue({'journal','note'}<={h['source'] for h in hits},hits)
+            # the running goal is not the past: its own prompt matched first, labelled a past goal (a smoke test saw it)
+            cur=rt.store.enqueue('Find how the crash with NUL bytes was fixed.')
+            rt.store.event('assistant',dict(content='Looking for the NUL crash in my history.'),cur)
+            hits=rt.memory.search('NUL crash',gid=cur)['hits']
+            self.assertFalse(any('Find how the' in h['text'] for h in hits),'its own prompt is left out')
+            self.assertEqual(hits[-1]['source'],'this goal',hits);self.assertIn('Looking for',hits[-1]['text'])
+            self.assertEqual(hits[0]['source'],'past goal',hits)
+            self.assertTrue(any('Find how the' in h['text'] for h in rt.memory.search('NUL crash')['hits']),
+                            'with no running goal it is history like any other')
         finally:rt.mail.close();rt.store.close()
+        # the tool as a model calls it: the running goal's prompt is not a hit
+        self.replies(call('history_search',dict(query='flux capacitor')),call('finish',dict(summary='Searched.')))
+        self.assertEqual(self.cmd('once',['--goal','Where did the flux capacitor go?'])['state'],'completed')
+        store=Store(self.home)
+        try:
+            res=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='history_search']
+            self.assertTrue(res and not any('Where did the' in h['text'] for h in res[-1]['hits']),res)
+        finally:store.close()
 
     def test_history_index_is_built_for_an_older_database(self):
         rt=Runtime(self.home)
