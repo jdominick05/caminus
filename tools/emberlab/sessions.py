@@ -153,9 +153,21 @@ def say(a):
     s = _load(a.out, a.name)
     h = _host(s)
     text = a.text if a.text != '-' else sys.stdin.read()
-    args = ['--goal-id', a.goal, '--goal', text] if a.goal else ['--goal', text]
-    sent = runner._json_tail(_agent(s, h, 'send', *args).stdout) or {}
-    gid = sent.get('id') or a.goal
+    goal = a.goal
+    if goal:
+        # the agent's send takes a full goal id; a short one (as status and the panel print them) is resolved here, and an
+        # unknown or ambiguous one stops before anything is sent
+        st = runner._json_tail(_agent(s, h, 'status').stdout) or {}
+        hits = [g['id'] for g in st.get('goals', []) if str(g.get('id', '')).startswith(goal)]
+        if len(hits) != 1:
+            raise SystemExit(f'say: goal {goal} matches {len(hits)} goals' + (f': {", ".join(hits)}' if hits else ''))
+        goal = hits[0]
+    args = ['--goal-id', goal, '--goal', text] if goal else ['--goal', text]
+    r = _agent(s, h, 'send', *args)
+    sent = runner._json_tail(r.stdout) or {}
+    if r.returncode or sent.get('error'):
+        raise SystemExit('say: not sent: ' + (sent.get('error') or (r.stderr or r.stdout).decode()[-300:]))
+    gid = sent.get('id') or goal
     print(f'sent ({gid})' + (f': {sent["note"]}' if sent.get('note') else ''))
     wait = a.wait if a.wait is not None else (0 if s['brain'].startswith('driven') else 900)
     end = time.time() + wait

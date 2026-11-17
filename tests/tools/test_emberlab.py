@@ -83,6 +83,9 @@ check(v(mk('x', 'A', 3, 2) + mk('x', 'B', 3, 2, false=1)).startswith('worse for 
 so = S / 'sessions'
 p = lab('open', 'd', '--brain', 'driven', '--host', 'local', '--fixture', 'basic', '--out', str(so), '--ttl', '300')
 check(p.returncode == 0, f'session: open ({p.stderr[-300:]})')
+bad = lab('say', 'd', 'a steer for no goal', '--goal', 'zzzz', '--out', str(so))
+check(bad.returncode != 0 and 'matches 0 goals' in (bad.stderr + bad.stdout) and 'sent (' not in bad.stdout,
+      'session: say --goal with an unknown short id is refused, not reported as sent')
 lab('say', 'd', 'List the files in your work folder.', '--out', str(so))
 t = lab('turn', 'd', '--out', str(so), '--wait', '20')
 check(t.returncode == 0 and 'terminal' in t.stdout and 'List the files' in t.stdout,
