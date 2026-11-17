@@ -2707,3 +2707,23 @@ func TestOneSlashMatchGetsTheSameMenuAsMany(t *testing.T) {
 		t.Fatal("a command typed in full closes the menu")
 	}
 }
+
+func TestGoalsVOpensThePlanAndABareVerdictIsNoGoal(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 40
+	m.resident.Goals = []residentGoal{{ID: "g1abcdef", State: "completed", Prompt: "p", PlanText: "1. a\n2. b"}}
+	m.chat.goals, m.chat.goalsSel = true, 0
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'v', Text: "v"})
+	m = next.(emberModel)
+	if m.chat.goals || !m.chat.view.open || !strings.Contains(ansi.Strip(m.render()), "2. b") {
+		t.Fatal("v closes the goals overlay and shows the whole plan")
+	}
+	m.chat.view.open = false
+	for _, bare := range []string{"approve", "revise"} {
+		m.chat.sending = false
+		next, cmd, _ := m.steerSlash("/plan", bare)
+		if cmd != nil || next.chat.sending || next.msg != "no plan is waiting" {
+			t.Fatalf("/plan %s with no plan waiting starts nothing: %q", bare, next.msg)
+		}
+	}
+}

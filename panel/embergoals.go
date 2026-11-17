@@ -187,6 +187,7 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.chat.compose.Focus()
 	case "v": // the whole plan, in the viewer /diff uses
 		if len(order) > 0 && strings.TrimSpace(m.resident.Goals[order[sel]].PlanText) != "" {
+			closeIt() // (the viewer draws and takes keys only with the overlay closed)
 			m.chat.view = planView(m.resident.Goals[order[sel]], m.width)
 		}
 		return m, nil

@@ -509,6 +509,10 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		}
 		// approve / revise answer a waiting plan; with none waiting, all of TEXT is a new goal's ("/plan revise the
 		// README" starts one, it does not report that no plan waits)
+		if !planWaiting && (verdict == "approve" || verdict == "revise") && strings.TrimSpace(note) == "" {
+			m.msg = "no plan is waiting" // (a bare verdict is never a new goal's text)
+			return m, nil, true
+		}
 		if !planWaiting || (verdict != "approve" && verdict != "revise") {
 			if strings.TrimSpace(arg) == "" {
 				m.msg = "usage: /plan TEXT starts a goal that plans first  ·  /plan approve  ·  /plan revise WHAT TO CHANGE"
