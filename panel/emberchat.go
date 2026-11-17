@@ -1446,7 +1446,7 @@ func (m emberModel) btwSection(w int) string {
 	}
 	var art []string // (no Ember beside the answer; the section heading says what it is)
 	artW := 0
-	textW := max(10, min(readingWidth, w-1-artW))
+	textW := max(10, min(readingWidth, w-4-artW)) // (the frame and its inner margin: a body line is 1 + textW, the box textW + 2)
 	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-4))
 	body := []string{emberBusy.Render("you ") + q}
 	rows := m.btwRows()

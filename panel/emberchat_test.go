@@ -1954,6 +1954,14 @@ func TestBtwAnswerIsASectionAboveTheComposerNotAnOverlay(t *testing.T) {
 			t.Fatalf("a popup line passes its width: %q", l)
 		}
 	}
+	for _, w := range []int{60, 80, 100, 118} { // every row as wide as the frame (a narrow terminal made the right edge ragged)
+		rows := strings.Split(ansi.Strip(m.btwSection(w)), "\n")
+		for _, r := range rows {
+			if ansi.StringWidth(r) != ansi.StringWidth(rows[0]) || ansi.StringWidth(r) > w {
+				t.Fatalf("width %d: rows %d and %d wide:\n%s", w, ansi.StringWidth(rows[0]), ansi.StringWidth(r), strings.Join(rows, "\n"))
+			}
+		}
+	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if next.(emberModel).chat.btw.open {
 		t.Fatal("Esc on an empty draft closes the section")
