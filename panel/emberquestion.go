@@ -55,14 +55,28 @@ func (m *emberModel) syncQuestion() {
 		if m.chat.later[r.ID] {
 			continue
 		}
+		if strings.TrimSpace(m.chat.compose.Value()) != "" && m.chat.compose.Focused() {
+			// you are typing: a request never takes the keyboard mid-sentence (the next Enter would decide it);
+			// it waits on the line above the composer, and Tab brings it up
+			if m.chat.later == nil {
+				m.chat.later = map[string]bool{}
+			}
+			m.chat.later[r.ID] = true
+			continue
+		}
 		m.openPrompt(r)
 		return
 	}
 }
 
+// promptGrace is how long a freshly opened prompt ignores Enter and digits: a key already on its way (the end of a
+// sentence, a double Enter) must not decide a request the human has not read.
+var promptGrace = 600 * time.Millisecond
+
 func (m *emberModel) openPrompt(r emberReq) {
 	copy := r
 	m.chat.question = &copy
+	m.chat.questionAt = time.Now()
 	m.chat.questionArmed = true
 	m.chat.questionCustom = false
 	m.chat.questionError = ""
@@ -291,9 +305,12 @@ func (m emberModel) questionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.chat.questionChoice = min(free, m.chat.questionChoice+1)
 	case "enter":
+		if time.Since(m.chat.questionAt) < promptGrace {
+			return m, nil
+		}
 		return m.decide(r, m.chat.questionChoice, "")
 	default:
-		if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+		if len(k) == 1 && k[0] >= '1' && k[0] <= '9' && time.Since(m.chat.questionAt) >= promptGrace {
 			if i := int(k[0] - '1'); i <= free {
 				m.chat.questionChoice = i
 				return m.decide(r, i, "")

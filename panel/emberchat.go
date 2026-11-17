@@ -43,6 +43,7 @@ type residentChat struct {
 	later                                   map[string]bool   // requests put off with Esc: they wait; Tab brings them back
 	reqOutcome                              map[string]string // each request's state for its one-line record
 	resSeen                                 map[string]string // answers read from the bridge's res/ (final: read once)
+	questionAt                              time.Time         // when the prompt opened (a grace period before Enter decides)
 	picker                                  bool
 	pickerSel                               int
 	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
@@ -2175,11 +2176,6 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.compose.Blur()
 		return m, nil
 	case "tab", "shift+tab":
-		if k == "tab" && strings.TrimSpace(m.chat.compose.Value()) == "" {
-			if next, ok := m.reopenPrompt(); ok { // a request put off with Esc comes back where you type
-				return next, nil
-			}
-		}
 		if next, done := m.slashMenuKey("tab"); done && k == "tab" {
 			next.syncChat()
 			return next, nil
@@ -2189,6 +2185,11 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if next, done := m.cyclePath(); done {
 			return next, nil
+		}
+		if k == "tab" { // no completion under way: a waiting request comes back where you type (the draft is kept)
+			if next, ok := m.reopenPrompt(); ok {
+				return next, nil
+			}
 		}
 		if k == "shift+tab" { // no completion under way: Shift+Tab opens the session switcher (Ctrl+P does too)
 			m.chat.picker, m.chat.pickerSel = true, 0

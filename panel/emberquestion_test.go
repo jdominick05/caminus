@@ -34,6 +34,9 @@ func promptFixture(t *testing.T) (emberModel, string) {
 	m.width, m.height = 120, 40
 	bridge := t.TempDir()
 	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
+	saved := promptGrace
+	promptGrace = 0 // (the tests press at once; TestARequestNeverTakesTheKeyboardMidSentence checks the grace)
+	t.Cleanup(func() { promptGrace = saved })
 	return m, bridge
 }
 
@@ -296,5 +299,29 @@ func TestARecordFollowsTheBridgeOnceAnswered(t *testing.T) {
 	}
 	if strings.Contains(v, "waiting") || strings.Contains(v, "3.14 (newest)") {
 		t.Fatalf("answered: no waiting, no choices:\n%s", v)
+	}
+}
+
+func TestARequestNeverTakesTheKeyboardMidSentence(t *testing.T) {
+	m, bridge := promptFixture(t)
+	m.chat.compose.SetValue("then use 2 workers")
+	writeReq(t, bridge, "r1", "systemctl restart foo", float64(time.Now().Unix()))
+	m.refreshLocal()
+	m.syncQuestion()
+	if m.chat.question != nil || !m.chat.compose.Focused() {
+		t.Fatal("a request arriving while you type waits; the keyboard stays yours")
+	}
+	if !strings.Contains(ansi.Strip(m.chatBottom()), "1 waiting · Tab answers") {
+		t.Fatalf("it says it waits:\n%s", ansi.Strip(m.chatBottom()))
+	}
+	m = press(t, m, kTab)
+	if m.chat.question == nil || m.chat.compose.Value() != "then use 2 workers" {
+		t.Fatal("Tab brings it up and the draft is kept")
+	}
+	promptGrace = time.Hour // a prompt that just opened ignores Enter and digits
+	m.chat.questionAt = time.Now()
+	m = press(t, m, kEnter, tea.KeyPressMsg{Code: '1', Text: "1"})
+	if _, err := os.Stat(filepath.Join(bridge, "res", "r1.json")); err == nil || m.chat.question == nil {
+		t.Fatal("a key already on its way decided a request nobody had read")
 	}
 }
