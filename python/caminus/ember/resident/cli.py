@@ -771,7 +771,7 @@ def main(argv=None,stdin=None):
                     rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,note,'nudge'))
                     rt.store.request(gid,'interrupt')
                     rt.store.event('advisor_review',dict(model=out.get('model'),usd=out.get('usd'),
-                                                         focus=(a.text or '')[:300]),gid)
+                                                         focus=(a.text or '')[:300],advice=(out.get('advice') or '')[:4000]),gid)
             finally:rt.mail.close();rt.store.close()
             emit(dict(goal=gid,model=out.get('model'),usd=out.get('usd'),advice=out['advice']),a.json);return 0
         if a.op=='github':

@@ -69,15 +69,15 @@ it; the durable blocks replace it when the turn lands.
 
 | Command | Action |
 |---|---|
-| `/new [goal]`, `/goals` | start a goal, or open the goals overlay to pick one (Shift+↑/↓ there reorders the queue) |
-| `/plan TEXT`, `/plan approve`, `/plan revise NOTE` | a plan-first goal: it explores read-only, proposes a plan and waits; the plan shows as a card above the composer |
+| `/new [goal]`, `/goals` | start a goal, or open the goals overlay to pick one: Enter targets it, space shows it (with its plan; `v` opens the whole plan), `p` pauses, `r` resumes, `x x` cancels, Shift+↑/↓ reorders the queue |
+| `/plan`, `/plan TEXT`, `/plan approve`, `/plan revise NOTE` | alone, the whole plan in a scrolling view; TEXT starts a plan-first goal (it explores read-only, proposes a plan and waits; the plan shows as a card above the composer); approve or revise answers a waiting plan |
 | `/steer TEXT`, `/pause`, `/resume`, `/cancel` | steer, pause at the next step, resume, cancel |
 | `/btw QUESTION` | a side question with no tools; nothing enters the goal |
 | `/diff` | the goal's changes in its git repositories (new files included) |
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
 | `/approvals` (Ctrl+A), `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
-| `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory |
+| `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
 | `/halt` | the emergency stop (`/halt clear` lifts it) |

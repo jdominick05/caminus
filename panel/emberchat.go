@@ -1293,7 +1293,8 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "advice":
 		return toolCard("note", "asked its advisor", residentText(str("model"))+" · "+firstLine(str("question")), true, false, nil, w)
 	case "advisor_review":
-		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · the agent reads it before its next step", true, false, nil, w)
+		// what the advisor said, which the agent reads before its next step (a card without it said nothing)
+		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · "+firstLine(str("advice")), true, c.expanded, lines(str("advice"), 30), w)
 	case "watchdog_advised":
 		return toolCard("note", "the advisor stepped in", "the goal was about to pause ("+residentText(str("reason"))+"); its advice went to the agent", true, false, nil, w)
 	case "woke":
@@ -2351,7 +2352,11 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
 		m.chat.armed = ""
 		m.chat.compose.Blur()
-	case "/memory", "/context":
+	case "/memory":
+		clear()
+		m.msg = "reading the memory…"
+		return m, fetchMemoryView(m)
+	case "/context":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
@@ -2530,12 +2535,12 @@ var slashCommands = []struct{ name, hint string }{
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
-	{"/memory", "memory and notes"},
+	{"/memory", "this session's memory file"},
 	{"/context", "what the agent's context holds"},
 	{"/btw", "a side question with no tools; the goal keeps nothing"},
 	{"/diff", "what this goal changed in its git repositories"},
 	{"/rewind", "back to an earlier step, files included"},
-	{"/plan", "TEXT starts a goal that plans first; approve or revise TEXT answers a waiting plan"},
+	{"/plan", "alone: the whole plan; TEXT starts a goal that plans first; approve or revise answers a waiting plan"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }
 

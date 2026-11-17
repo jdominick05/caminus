@@ -49,6 +49,29 @@ type textView struct {
 	colourDiff  bool
 }
 
+// planView is a goal's whole plan in the scrollable viewer (the plan card above the composer shows its first lines).
+func planView(g residentGoal, width int) textView {
+	lines := strings.Split(ansi.Hardwrap(residentText(g.PlanText), max(20, width-8), true), "\n")
+	keys := "↑↓ scroll · Esc back"
+	if g.State == "waiting_plan" {
+		keys = "/plan approve · /plan revise WHAT TO CHANGE · Esc back"
+	}
+	return textView{open: true, title: "plan · goal " + shortGoal(g.ID), keys: keys, lines: lines}
+}
+
+// fetchMemoryView reads the session's memory file into the viewer: /memory.
+func fetchMemoryView(m emberModel) tea.Cmd {
+	return func() tea.Msg {
+		var r struct {
+			Memory string `json:"memory"`
+		}
+		if err := residentJSON(m, []string{"memory", m.agentName, "--json"}, &r); err != nil {
+			return textViewMsg{err: "memory: " + err.Error()}
+		}
+		return textViewMsg{title: "memory · " + residentText(m.agentName), lines: strings.Split(strings.TrimRight(residentText(r.Memory), "\n"), "\n")}
+	}
+}
+
 type textViewMsg struct {
 	title string
 	lines []string
@@ -126,10 +149,16 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 			Model string  `json:"model"`
 			USD   float64 `json:"usd"`
 		}
-		if err := residentJSON(m, append(args, "--json"), &out); err != nil {
+		raw, err := runResident(residentCommandWithin(m, append(args, "--json"), "", 3*time.Minute))
+		if err == nil {
+			err = jsonInto(raw, &out)
+		} else {
+			err = fmt.Errorf("%s", cliError(raw))
+		}
+		if err != nil {
 			text := err.Error()
 			if strings.Contains(text, "no advisor") {
-				text = "no advisor set up: /advisor setup picks one"
+				text = "no advisor set up: caminus ember agent advisor " + m.agentName + " picks one"
 			}
 			return residentActionMsg{"advisor: " + terminalText(text, false)}
 		}
@@ -147,7 +176,7 @@ func askBtw(m emberModel, goal, question string) tea.Cmd {
 		if len(m.cli) == 0 {
 			return textViewMsg{err: "needs the caminus CLI (--cli)"}
 		}
-		raw, err := runResident(residentCommand(m, args, question))
+		raw, err := runResident(residentCommandWithin(m, args, question, 2*time.Minute))
 		if err == nil {
 			if i := strings.Index(string(raw), "{"); i >= 0 {
 				err = jsonInto(raw[i:], &out)
@@ -460,6 +489,15 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		m.chat.rewind = rewindState{open: true, goal: goal}
 		return m, fetchRewind(m, goal), true
 	case "/plan":
+		if strings.TrimSpace(arg) == "" { // alone: the waiting plan (or the selected goal's), whole, in the viewer
+			for _, gl := range m.resident.Goals {
+				if gl.State == "waiting_plan" || (gl.ID == goal && strings.TrimSpace(gl.PlanText) != "") {
+					m.chat.view = planView(gl, m.width)
+					m.chat.compose.Blur()
+					return m, nil, true
+				}
+			}
+		}
 		verdict, note, _ := strings.Cut(strings.TrimSpace(arg), " ")
 		planWaiting := false
 		for _, gl := range m.resident.Goals {

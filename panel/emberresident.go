@@ -122,11 +122,17 @@ func runResident(c *exec.Cmd) ([]byte, error) {
 }
 
 func residentCommand(m emberModel, args []string, input string) *exec.Cmd {
+	return residentCommandWithin(m, args, input, 30*time.Second)
+}
+
+// residentCommandWithin is residentCommand with its own deadline: a model call (/btw, an advisor review) takes longer
+// than the 30 s a control gets.
+func residentCommandWithin(m emberModel, args []string, input string, limit time.Duration) *exec.Cmd {
 	if len(m.cli) == 0 {
 		return nil // the panel can run without --cli; callers report the missing CLI instead of panicking
 	}
 	// Bounded: a stalled CLI or SSH session must not leave the composer on "Sending…" forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	_ = cancel // the deadline fires on its own; the process is killed when it passes
 	argv := append(append([]string{}, m.cli[1:]...), "ember", "agent")
 	argv = append(argv, args...)
@@ -251,12 +257,52 @@ func residentAction(m emberModel, args []string, input string) tea.Cmd {
 			_ = appendAudit(m.auditPath, ev)
 		}
 		out, err := runResident(residentCommand(m, args, input))
-		text := strings.TrimSpace(string(out))
 		if err != nil {
-			text = err.Error() + ": " + cliError(out)
+			return residentActionMsg{err.Error() + ": " + cliError(out)}
 		}
-		return residentActionMsg{text}
+		return residentActionMsg{actionSentence(args, out)}
 	}
+}
+
+// actionSentence says what a control did, in words: the status line showed the CLI's JSON (and /remember the whole
+// memory file).
+func actionSentence(args []string, out []byte) string {
+	if len(args) == 0 {
+		return ""
+	}
+	goal, name := "", ""
+	if len(args) > 1 {
+		name = residentText(args[1])
+	}
+	if len(args) > 2 && !strings.HasPrefix(args[2], "-") {
+		goal = shortGoal(args[2])
+	}
+	switch args[0] {
+	case "cancel":
+		return "goal " + goal + " cancelled"
+	case "pause":
+		return "goal " + goal + " pauses after its current step · /resume continues it"
+	case "resume":
+		return "goal " + goal + " resumed"
+	case "start":
+		return name + " is running"
+	case "stop":
+		return name + " stopped · /start runs it again"
+	case "memory":
+		return "remembered"
+	case "send":
+		var r struct {
+			ResumeRequired bool `json:"resume_required"`
+		}
+		if json.Unmarshal(out, &r) == nil && r.ResumeRequired {
+			return "steer queued; the goal is stopped, so it waits for /resume"
+		}
+		return "steer sent: the agent reads it before its next step"
+	}
+	if text := strings.TrimSpace(string(out)); text != "" && !strings.HasPrefix(text, "{") && !strings.HasPrefix(text, "[") {
+		return text
+	}
+	return args[0] + ": done"
 }
 
 func residentText(s string) string {

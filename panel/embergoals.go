@@ -83,6 +83,10 @@ func (m emberModel) goalDetail(i, width int) []string {
 		}
 	}
 	add("goal", gl.Prompt)
+	add("plan", gl.PlanText)
+	if strings.TrimSpace(gl.PlanText) != "" {
+		out = append(out, emberDim.Render("          v shows the whole plan"))
+	}
 	add("summary", gl.Summary)
 	add("error", gl.Error)
 	return out
@@ -112,7 +116,7 @@ func (m emberModel) goalsOverlay(w, h int) string {
 	if len(detail) > 0 {
 		body += "\n\n" + strings.Join(detail, "\n")
 	} else {
-		body += "\n\n" + emberDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
+		body += "\n\n" + emberDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  p pause  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
 	}
 	active := 0
 	for _, gl := range m.resident.Goals {
@@ -181,7 +185,12 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		closeIt()
 		m.chat.newGoal, m.chat.forceNew, m.chat.target = true, true, ""
 		return m, m.chat.compose.Focus()
-	case "enter", "x", "r":
+	case "v": // the whole plan, in the viewer /diff uses
+		if len(order) > 0 && strings.TrimSpace(m.resident.Goals[order[sel]].PlanText) != "" {
+			m.chat.view = planView(m.resident.Goals[order[sel]], m.width)
+		}
+		return m, nil
+	case "enter", "x", "r", "p":
 		if len(order) == 0 {
 			return m, nil
 		}
@@ -202,6 +211,8 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.chatSlash("/cancel")
 		case "r":
 			return m.chatSlash("/resume")
+		case "p":
+			return m.chatSlash("/pause")
 		}
 	}
 	return m, nil

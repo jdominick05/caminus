@@ -263,40 +263,63 @@ func TestChatRejectsResponsesFromAnEarlierVisitToTheSameSession(t *testing.T) {
 	}
 }
 
-func TestMainPagesScrollInsideTheTerminal(t *testing.T) {
-	// The old audit page is an overlay over the chat now: it fits the terminal and Page Down scrolls it.
+func TestMemoryOpensInTheScrollingViewer(t *testing.T) {
+	// /memory reads the file into the viewer /diff uses: it fits the terminal and Page Down scrolls it.
 	m := chatFixture(t)
 	m.width, m.height = 80, 24
+	if _, cmd := m.chatSlash("/memory"); cmd == nil {
+		t.Fatal("/memory reads the memory file")
+	}
 	var long []string
 	for i := 0; i < 90; i++ {
 		long = append(long, fmt.Sprintf("memory line %d with a long but readable note", i))
 	}
-	m.sessionMemory = strings.Join(long, "\n")
-	next, _ := m.chatSlash("/memory")
+	next, _ := m.Update(textViewMsg{title: "memory · resident", lines: long})
 	m = next.(emberModel)
 	frame := m.render()
-	if m.tab != 6 || m.chat.page != 3 || !strings.Contains(ansi.Strip(frame), "memory · ") {
-		t.Fatalf("/memory did not open the overlay:\n%s", ansi.Strip(frame))
+	if !m.chat.view.open || !strings.Contains(ansi.Strip(frame), "memory line 0") {
+		t.Fatalf("the memory shows in the viewer:\n%s", ansi.Strip(frame))
 	}
 	if len(strings.Split(frame, "\n")) > m.height {
-		t.Fatal("the overlay exceeded terminal height")
+		t.Fatal("the viewer exceeded terminal height")
 	}
 	for _, line := range strings.Split(frame, "\n") {
 		if ansi.StringWidth(line) > m.width {
-			t.Fatal("the overlay exceeded terminal width")
+			t.Fatal("the viewer exceeded terminal width")
 		}
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = next.(emberModel)
-	if m.chat.pageTop == 0 || ansi.Strip(m.render()) == ansi.Strip(frame) {
-		t.Fatal("Page Down did not scroll the audit overlay")
-	}
-	if _, cmd := m.chatKey(tea.KeyPressMsg{Code: 'q', Text: "q"}); cmd != nil {
-		t.Fatal("q must not quit inside an overlay")
+	if m.chat.view.top == 0 {
+		t.Fatal("Page Down scrolls the viewer")
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if next.(emberModel).chat.page != -1 {
-		t.Fatal("Esc must close the overlay")
+	if next.(emberModel).chat.view.open {
+		t.Fatal("Esc closes the viewer")
+	}
+}
+
+func TestThePlanOpensWholeAndGoalsPauseWithP(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 100, 40
+	var plan []string
+	for i := 0; i < 30; i++ {
+		plan = append(plan, fmt.Sprintf("%d. step number %d", i+1, i+1))
+	}
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "p1abcdef", State: "waiting_plan", PlanText: strings.Join(plan, "\n")})
+	next, _ := m.chatSlash("/plan")
+	m = next.(emberModel)
+	if !m.chat.view.open || !strings.Contains(strings.Join(m.chat.view.lines, "\n"), "30. step number 30") || !strings.Contains(m.chat.view.keys, "/plan approve") {
+		t.Fatalf("/plan alone opens the whole waiting plan: %+v", m.chat.view)
+	}
+	if s := actionSentence([]string{"pause", "resident", "p1abcdef", "--json"}, []byte(`{"id":"p1abcdef"}`)); !strings.Contains(s, "pauses") || strings.Contains(s, "{") {
+		t.Fatalf("a control answers in words: %q", s)
+	}
+	if s := actionSentence([]string{"send", "resident", "--goal-id", "g", "--steer"}, []byte(`{"queued":true,"resume_required":true}`)); !strings.Contains(s, "/resume") {
+		t.Fatalf("a steer on a stopped goal says it waits for /resume: %q", s)
+	}
+	if s := actionSentence([]string{"memory", "resident", "--stdin", "--json"}, []byte(`{"memory":"# a long file"}`)); s != "remembered" {
+		t.Fatalf("/remember says remembered, not the file: %q", s)
 	}
 }
 
@@ -2644,5 +2667,15 @@ func TestAnOutdatedRuntimeShowsAHintInsteadOfAnUpdateCommand(t *testing.T) {
 	m.resident.RuntimeLatest = "" // an older CLI that does not report it
 	if m.runtimeOutdated() {
 		t.Fatal("nothing to compare: no hint")
+	}
+}
+
+func TestTheAdvisorReviewCardShowsWhatTheAdvisorSaid(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.expanded = true
+	e := residentEvent{Seq: 4, Goal: "original", Kind: "advisor_review", Data: map[string]any{"model": "claude-opus-5-5",
+		"advice": "Stop rereading the file.\nRun the failing test and read its first error."}}
+	if v := ansi.Strip(m.chat.eventBlock(e)); !strings.Contains(v, "Stop rereading the file.") || !strings.Contains(v, "first error") {
+		t.Fatalf("the card carries the advice the agent reads:\n%s", v)
 	}
 }
