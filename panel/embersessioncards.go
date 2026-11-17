@@ -197,7 +197,11 @@ func (m emberModel) pickerBox() string {
 		}
 		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, intersperse(row, " ")...))
 	}
-	lines = append(lines, emberDim.Render(emberClip(" ←↑↓→ choose · Enter or click switches · Esc back", w)))
+	if m.chat.pickerNew {
+		lines = append(lines, emberClip(" "+emberWarn.Render("new session:")+" "+residentText(m.chat.pickerName)+"█"+emberDim.Render("  Enter creates · Esc cancels"), w))
+	} else {
+		lines = append(lines, emberDim.Render(emberClip(" ←↑↓→ choose · Enter or click switches · n new · s stop/start · Esc back", w)))
+	}
 	return strings.Join(lines, "\n")
 }
 

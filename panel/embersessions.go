@@ -240,7 +240,7 @@ func (m emberModel) residentSettingsPane() string {
 	add("window", fmt.Sprintf("%s tokens", short(m.resident.Context)))
 	add("compaction", fmt.Sprintf("at %.0f %%, down to %.0f %%", m.resident.CompactThreshold*100, m.resident.CompactTarget*100))
 	lines = append(lines, "", emberDim.Render("  Read-only here: /model picks the brain, /effort its depth. New sessions take this one's settings."),
-		emberDim.Render("  Root approvals are in /requests; credentials are never shown."), "")
+		emberDim.Render("  Root approvals are in /approvals; credentials are never shown."), "")
 	key := func(k, v string) {
 		lines = append(lines, "  "+emberTitle.Render(fmt.Sprintf("%-12s", k))+emberDim.Render(v))
 	}

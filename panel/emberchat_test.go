@@ -98,11 +98,11 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 	if !m.chat.newGoal || m.chat.target != "" {
 		t.Fatal("poll changed an explicit new goal into steering")
 	}
-	m.chat.compose.SetValue("/requests")
+	m.chat.compose.SetValue("/approvals")
 	next, _ = m.submitCompose()
 	m = next.(emberModel)
 	if m.tab != 6 || !m.chat.approvals {
-		t.Fatal("/requests did not open the approvals overlay in the chat")
+		t.Fatal("/approvals did not open the approvals overlay in the chat")
 	}
 	m.chat.approvals = false
 	m.chat.compose.SetValue("/unknown keep this")
@@ -340,13 +340,13 @@ func sortedCopy(in []string) []string {
 }
 
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
-	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/servers /session /sessions /settings]" {
+	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/servers /sessions]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop /studio]" {
+	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/servers /session /sessions /settings /start /steer /stop /studio]" {
+	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/servers /sessions /start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -355,7 +355,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /identity /advisor /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /approvals /sessions /remember /goals /start /cancel /compact /resume /theme /deny /steer /memory /context /audit /model /identity /advisor /effort /update /pause /halt /freetime /studio /jobs /servers /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -369,13 +369,13 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/session " {
+	if !done || m.chat.compose.Value() != "/sessions " {
 		t.Fatalf("second Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/sessions " {
-		t.Fatalf("cycle skipped a longer command: %q", m.chat.compose.Value())
+	if !done || m.chat.compose.Value() != "/start " {
+		t.Fatalf("third Tab gave %q", m.chat.compose.Value())
 	}
 	m.chat.compose.SetValue("/new steer me")
 	next, done = m.cycleSlash()
@@ -519,7 +519,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 				t.Fatalf("%v: line too wide: %q", size, row)
 			}
 		}
-		if !strings.Contains(frame, "/session") || (size[1] >= 32 && !strings.Contains(frame, "open a session NAME")) {
+		if !strings.Contains(frame, "/session") || (size[1] >= 32 && !strings.Contains(frame, "every session as a card")) {
 			t.Fatalf("%v: the slash menu (name and what it does) is missing:\n%s", size, frame)
 		}
 		if len(rows) < 3 {
@@ -718,29 +718,34 @@ func TestSlashPrefixedMessageSendsVerbatimWithDoubleSlash(t *testing.T) {
 	}
 }
 
-func TestSessionCommandRejectsAnUnknownNameWithoutClearingTheTranscript(t *testing.T) {
+func TestMergedAwayCommandsAreGoneAndKeepTheTranscript(t *testing.T) {
 	m := chatFixture(t)
 	m.sessionNames = []string{"resident", "research"}
 	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
 		events: []residentEvent{{Seq: 2, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "keep me"}}}})
 	before := len(m.residentEvents)
-	m.chat.compose.SetValue("/session rescarch")
+	// switching, creating and stopping sessions live in the switcher now; the rest merged into another command
+	for _, gone := range []string{"/session research", "/agent research", "/newsession x", "/agents", "/stop", "/requests",
+		"/settings", "/glyphs ascii", "/recap", "/models"} {
+		m.chat.compose.SetValue(gone)
+		next, _ := m.submitCompose()
+		m = next.(emberModel)
+		if m.agentName != "resident" || len(m.residentEvents) != before || !strings.Contains(ansi.Strip(m.chat.content), "keep me") {
+			t.Fatalf("%s acted or cleared the transcript", gone)
+		}
+		if !strings.Contains(m.msg, "Unknown command") {
+			t.Fatalf("%s is not a command any more: %q", gone, m.msg)
+		}
+		if len(slashMatches(strings.Fields(gone)[0])) > 0 && slices.Contains(slashMatches(strings.Fields(gone)[0]), strings.Fields(gone)[0]) {
+			t.Fatalf("%s is still in the menu", gone)
+		}
+	}
+	// /plan TEXT starts a plan-first goal (it was /goal --plan TEXT)
+	m.chat.compose.SetValue("/goal --plan x")
 	next, _ := m.submitCompose()
 	m = next.(emberModel)
-	if m.agentName != "resident" || len(m.residentEvents) != before {
-		t.Fatalf("a typo switched sessions: agent=%q events=%d/%d", m.agentName, len(m.residentEvents), before)
-	}
-	if !strings.Contains(ansi.Strip(m.chat.content), "keep me") {
-		t.Fatal("a typo cleared the transcript")
-	}
-	if !strings.Contains(m.msg, "no such session") {
-		t.Fatalf("no warning shown: %q", m.msg)
-	}
-	m.chat.compose.SetValue("/session research")
-	next, _ = m.submitCompose()
-	m = next.(emberModel)
-	if m.agentName != "research" {
-		t.Fatalf("a known session did not open: %q", m.agentName)
+	if strings.Contains(m.msg, "plans first") {
+		t.Fatal("/goal --plan is gone: /plan TEXT starts one")
 	}
 }
 
@@ -2526,5 +2531,33 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	}
 	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "block breaking") {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
+	}
+}
+
+func TestSwitcherCreatesAndStopsSessions(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.sessionCards = []sessionCard{{name: "resident", status: "idle"}, {name: "research", status: "stopped"}}
+	m.chat.picker = true
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = next.(emberModel)
+	if !m.chat.pickerNew || !strings.Contains(ansi.Strip(m.pickerBox()), "new session:") {
+		t.Fatal("n asks for a new session's name under the cards")
+	}
+	for _, r := range "lab" {
+		next, _ = m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(emberModel)
+	}
+	if m.chat.pickerName != "lab" || m.chat.pickerSel != 0 {
+		t.Fatalf("typing goes into the name, not the switcher's keys: %q sel %d", m.chat.pickerName, m.chat.pickerSel)
+	}
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	if m.chat.pickerNew || cmd == nil {
+		t.Fatal("Enter creates the session")
+	}
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if cmd == nil || !next.(emberModel).chat.picker {
+		t.Fatal("s stops or starts the selected session and keeps the switcher open")
 	}
 }

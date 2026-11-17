@@ -43,10 +43,12 @@ type residentChat struct {
 	questionDeferred, questionError         string
 	picker                                  bool
 	pickerSel                               int
-	approvals                               bool // the Approvals overlay is over the conversation
-	approvalSel                             int  // the row it has selected
-	approvalDetail                          bool // Enter opened the selected request in full
-	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
+	pickerNew                               bool   // the switcher is asking for a new session's name
+	pickerName                              string // that name as typed
+	approvals                               bool   // the Approvals overlay is over the conversation
+	approvalSel                             int    // the row it has selected
+	approvalDetail                          bool   // Enter opened the selected request in full
+	goals, goalsDetail                      bool   // the Goals overlay, and its selected goal opened in full
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
 	identity                                identityState // the Identity screen (/identity): the agent's GitHub account
@@ -457,7 +459,7 @@ func (m emberModel) chatHead(w int) string {
 	}
 	if !m.resident.DaemonAlive {
 		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
-		// after /stop while a newly queued goal waited
+		// after a stop while a newly queued goal waited
 		state = "stopped · /start"
 	}
 	agent := residentText(m.agentName)
@@ -1855,7 +1857,7 @@ func (m emberModel) renderChat() string {
 	head := m.chatHead(w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /approvals · /remember TEXT · /memory · /context · /audit · /settings") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
+		foot += "\n" + clip("/new [goal] · /goals · /cancel · /resume · /compact · /approvals") + "\n" + clip("/sessions · /remember TEXT · /memory · /context · /audit") + "\n" + clip("/start · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
 	}
 	if m.chat.approvals {
 		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
@@ -2329,18 +2331,13 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.chat.compose.SetValue(arg)
 			return m.sendCompose(arg)
 		}
-	case "/requests":
-		clear()
-		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
-		m.chat.armed = ""
-		m.chat.compose.Blur()
 	case "/approvals":
-		// The overlay over the conversation; /requests still opens the page that edits and answers.
+		// the overlay over the conversation: questions and root requests, to approve, edit or deny
 		clear()
 		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
 		m.chat.armed = ""
 		m.chat.compose.Blur()
-	case "/memory", "/context", "/audit", "/settings", "/jobs", "/servers", "/agents":
+	case "/memory", "/context", "/audit", "/jobs", "/servers":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
@@ -2348,13 +2345,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.picker, m.chat.pickerSel = true, 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
-	case "/newsession":
-		if arg == "" {
-			m.msg = "Use /newsession NAME"
-			return m, nil
-		}
-		clear()
-		return m, createResidentSession(m, arg)
 	case "/remember":
 		if arg == "" {
 			m.msg = "Use /remember TEXT"
@@ -2366,16 +2356,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
 		m.chat.compose.Blur()
-	case "/goal":
-		if plan, ok := strings.CutPrefix(arg, "--plan"); ok {
-			if strings.TrimSpace(plan) == "" {
-				m.msg = "usage: /goal --plan TEXT — it explores and proposes a plan before it changes anything"
-				return m, nil
-			}
-			clear()
-			m.chat.newGoal, m.chat.target = true, ""
-			return m.sendPlanGoal(strings.TrimSpace(plan))
-		}
+	case "/goal": // (not in the menu or help: the Goals overlay targets a goal; kept for a typed ID prefix)
 		var found []int
 		for i, g := range m.resident.Goals {
 			if arg != "" && strings.HasPrefix(g.ID, arg) {
@@ -2390,20 +2371,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.goalSel = found[0]
 		m.chat.forceNew = false
 		m.targetSelectedGoal()
-	case "/agent", "/session":
-		if arg == "" {
-			m.msg = "Use /agent NAME"
-			return m, nil
-		}
-		// A typo here used to clear the transcript and leave an empty conversation behind.
-		if len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, arg) {
-			m.msg = "no such session " + terminalText(arg, true) + " · Ctrl+P lists them"
-			return m, nil
-		}
-		clear()
-		m.openResident(arg)
-		return m, tea.Batch(residentRefresh(m), residentSessions(m))
-	case "/start", "/stop":
+	case "/start": // (the header asks for it when the loop is down; Ctrl+P stops and starts any session)
 		clear()
 		return m, residentAction(m, []string{strings.TrimPrefix(command, "/"), m.agentName, "--json"}, "")
 	case "/cancel":
@@ -2414,10 +2382,10 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		clear()
 		return m, residentAction(m, []string{"cancel", m.agentName, g.ID, "--json"}, "")
-	case "/model", "/models":
+	case "/model":
 		// alone: the Models overlay over the catalog; with an id (provider/id when two serve it): pick it
 		clear()
-		if id := strings.TrimSpace(arg); id != "" && command == "/model" {
+		if id := strings.TrimSpace(arg); id != "" {
 			m.msg = "switching to " + id + "…"
 			return m, pickModel(m, id)
 		}
@@ -2435,10 +2403,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.msg = "free time asked: it starts at the agent's next pass (after any running work)"
 		return m, residentAction(m, []string{"heartbeat", m.agentName, "now", "--json"}, "")
-	case "/recap":
-		clear()
-		m.chat.recapAsked = recapOnDemand
-		return m, fetchRecap(m, 0)
 	case "/studio":
 		clear()
 		m.chat.studio = studioState{open: true, loading: true}
@@ -2519,20 +2483,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.mode, m.edit, m.editRequest = "denywhy", text, &r
 		clear()
 		return m.submitInput()
-	case "/glyphs":
-		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
-		name := strings.TrimSpace(arg)
-		if name == "" {
-			name = glyphsNext()
-		}
-		if err := glyphsSet(name); err != nil {
-			m.msg = err.Error()
-			return m, nil
-		}
-		m.msg = "glyphs: " + name + "  " + g.working + " " + g.waiting + " " + g.done + " " + g.root + " " + g.model + " " + g.queue +
-			"  (boxes? pick /glyphs unicode)"
-		m.syncChat()
-		return m, nil
 	case "/resume":
 		g := m.selectedResidentGoal()
 		if g == nil {
@@ -2560,7 +2510,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 // slashCommands backs the composer autocomplete; every name must be handled by
 // chatSlash. The list stays in one place so the two never drift apart.
 var slashCommands = []struct{ name, hint string }{
-	{"/agent", "open another session NAME"},
 	{"/approvals", "open the approvals overlay (Ctrl+A)"},
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
@@ -2571,37 +2520,28 @@ var slashCommands = []struct{ name, hint string }{
 	{"/pause", "pause the selected goal at its next step; /resume continues it"},
 	{"/halt", "emergency stop: every resident pauses after its step (/halt clear lifts it)"},
 	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},
-	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "the goals overlay (Ctrl+G)"},
-	{"/help", "toggle the help footer"},
+	{"/help", "the commands and keys"},
 	{"/new", "start a new goal"},
-	{"/newsession", "create a session NAME"},
 	{"/quit", "close the UI; the daemon continues"},
 	{"/remember", "append TEXT to this session's memory"},
-	{"/requests", "open questions and root approvals"},
 	{"/resume", "resume the selected goal"},
-	{"/session", "open a session NAME"},
 	{"/sessions", "every session as a card: switch with Enter or a click"},
-	{"/start", "run this session's loop"},
+	{"/start", "run this session's loop (stop and start any session from Ctrl+P)"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
-	{"/stop", "stop this session's loop"},
 	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
-	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
 	{"/memory", "memory and notes"},
 	{"/context", "what the agent's context holds"},
 	{"/audit", "the audit log"},
-	{"/settings", "this session's settings"},
 	{"/jobs", "the agent's jobs and processes"},
 	{"/btw", "a side question with no tools; the goal keeps nothing"},
 	{"/diff", "what this goal changed in its git repositories"},
 	{"/export", "this goal as markdown in the agent's ~/exports"},
 	{"/rewind", "back to an earlier step, files included"},
-	{"/plan", "approve or revise a waiting plan (/goal --plan TEXT starts one)"},
+	{"/plan", "TEXT starts a goal that plans first; approve or revise TEXT answers a waiting plan"},
 	{"/servers", "the model servers and their windows"},
-	{"/agents", "every resident on this machine (advanced)"},
 	{"/freetime", "start a free-time stretch now (after any running work)"},
-	{"/recap", "while you were away: free time since your last goal"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
 }
 
@@ -2786,6 +2726,27 @@ func (m emberModel) cycleSlash() (tea.Model, bool) {
 // slot, so it reuses the composer's measured height.
 func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	if m.chat.pickerNew {
+		switch k {
+		case "esc":
+			m.chat.pickerNew = false
+		case "enter":
+			name := strings.TrimSpace(m.chat.pickerName)
+			m.chat.pickerNew, m.chat.pickerName = false, ""
+			if name != "" {
+				return m, createResidentSession(m, name)
+			}
+		case "backspace":
+			if r := []rune(m.chat.pickerName); len(r) > 0 {
+				m.chat.pickerName = string(r[:len(r)-1])
+			}
+		default:
+			if r := msgRunes(k); r != nil {
+				m.chat.pickerName += string(r)
+			}
+		}
+		return m, nil
+	}
 	switch k {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -2817,6 +2778,19 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.chat.compose.Focus()
+	case "n": // a new session from this one: its name on a line under the cards
+		m.chat.pickerNew, m.chat.pickerName = true, ""
+		return m, nil
+	case "s": // stop the selected session's loop, or start it when it is stopped
+		cards := m.switcherCards()
+		if i := m.chat.pickerSel; i >= 0 && i < len(cards) {
+			op := "stop"
+			if cards[i].status == "stopped" {
+				op = "start"
+			}
+			return m, tea.Sequence(residentAction(m, []string{op, cards[i].name, "--json"}, ""), residentSessions(m))
+		}
+		return m, nil
 	case "left", "h":
 		m.chat.pickerSel = max(0, m.chat.pickerSel-1)
 	case "right", "l":

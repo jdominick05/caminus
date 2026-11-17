@@ -112,7 +112,7 @@ thoughts, its task list and what it is running now.
   conversation.
 
 With nothing to do, the agent has free time: it reads its journal, follows its own interests and keeps a studio
-(`/studio`, `/recap`). `/freetime` starts a stretch now (after any running work); `caminus ember agent heartbeat
+(`/studio`). `/freetime` starts a stretch now (after any running work); `caminus ember agent heartbeat
 resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). Its
 thoughts run in Ember's box: its reasoning when the model shows it, else its words and the tools it calls.
 
