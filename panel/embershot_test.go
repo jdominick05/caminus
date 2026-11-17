@@ -15,7 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// TestEmberShot writes ember.svg, the README's picture of Ember's chat (`caminus ember ui`): its real render() in the
+// TestEmberShot writes ember-chat.svg, the README's picture of Ember's chat (`caminus ember ui`): its real render() in the
 // same GNOME terminal window as panel.svg, redrawn with it at every release by tools/release/panel_shot.py. The goal
 // is made up (a small stock-list project, a bug, its tests) and walks the loop the README describes: read, state what
 // done looks like, change, run the check, verify, and the judge's verdict on the finish. Nothing about a real machine
@@ -97,11 +97,11 @@ func TestEmberShot(t *testing.T) {
 		if _, err := d.Token(); err == io.EOF {
 			break
 		} else if err != nil {
-			t.Fatalf("ember.svg is not well-formed XML: %v", err)
+			t.Fatalf("ember-chat.svg is not well-formed XML: %v", err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "ember.svg"), []byte(svg), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ember-chat.svg"), []byte(svg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("ember.svg: %d KB", len(svg)/1024)
+	t.Logf("ember-chat.svg: %d KB", len(svg)/1024)
 }

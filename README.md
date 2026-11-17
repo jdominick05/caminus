@@ -31,7 +31,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/ember.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
+  <img src="docs/ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
 </p>
 
 ## Get started

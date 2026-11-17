@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 jdominick05
-"""Redraw docs/panel.svg and docs/ember.svg, the README's pictures of `caminus panel` and Ember's chat, from this tree.
+"""Redraw docs/panel.svg and docs/ember-chat.svg, the README's pictures of `caminus panel` and Ember's chat, from this tree.
 
-  python -I tools/release/panel_shot.py [--out DIR]       # needs Go; writes DIR/panel.svg and DIR/ember.svg (default: docs/)
+  python -I tools/release/panel_shot.py [--out DIR]       # needs Go; writes DIR/panel.svg and DIR/ember-chat.svg (default: docs/)
 
 Every release runs it after setting the version (docs/dev/releasing.md, "Making a release"); tests/docs/test_docs.py
 fails while the picture names another version than python/caminus/__init__.py.
@@ -32,7 +32,7 @@ def tree_state():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='panel_shot.py', description=__doc__.split('\n\n')[0])
-    ap.add_argument('--out', default=os.path.join(ROOT, 'docs'), help='directory for panel.svg and ember.svg (default: docs/)')
+    ap.add_argument('--out', default=os.path.join(ROOT, 'docs'), help='directory for panel.svg and ember-chat.svg (default: docs/)')
     a = ap.parse_args(argv)
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
@@ -44,7 +44,7 @@ def main(argv=None):
     if r.returncode != 0:
         sys.stderr.write(r.stdout[-4000:] + r.stderr[-4000:])
         return r.returncode
-    print(f'{os.path.join(out, "panel.svg")}: caminus {state["version"]}, {len(state["models"])} models; {os.path.join(out, "ember.svg")}')
+    print(f'{os.path.join(out, "panel.svg")}: caminus {state["version"]}, {len(state["models"])} models; {os.path.join(out, "ember-chat.svg")}')
     return 0
 
 
