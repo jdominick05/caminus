@@ -1191,13 +1191,15 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 			"diff": "@@ -1,3 +1,3 @@\n int f(void) {\n-    if (n > len) return -1;\n+    if (n >= len) return -1;"}}},
 		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
 			"path": "src/parse.c", "shown": "1-40", "text": "secret body"}}},
+		{Seq: 4, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
+			"path": "plots/loss.png", "image": map[string]any{"format": "png", "width": float64(640), "height": float64(480)}}}},
 	}
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
 	// the file's line numbers from the hunk header, the marker, then the code (highlighted, so compare it stripped)
 	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "   1   int f(void) {", "   2 -     if (n > len) return -1;",
-		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
+		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40", "read  plots/loss.png  ·  image 640x480"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}

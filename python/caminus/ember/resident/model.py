@@ -1,7 +1,10 @@
 """Model transports: OpenAI-compatible chat completions (the local server) and Anthropic's Messages API.
 Standard library only; no engine, GPU or agent-CLI dependency."""
+import base64
+import hashlib
 import http.client
 import json
+import math
 import os
 import socket
 import threading
@@ -117,6 +120,23 @@ def price(model, usage, served=None):
     return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
+# Images (files.read): a tool message names its image (store.action_result), and each request sends the file itself, so
+# the store keeps no bytes and a brain switched mid-goal gets what it can take: the image where its config says vision
+# (the catalog's flag, copied at /model), a line saying it can't see where not.
+IMAGES_PER_REQUEST = 20    # newest image results sent as images; 20 x 5 MB stays inside the API's 128 MB request
+IMAGE_CACHE = 32           # encoded files kept per brain: compaction counts the same request many times
+NO_VISION = ("this model can't see images; {name} is a {w}x{h} {fmt}; describe-by-tool options: discover topic images "
+             "lists the image tools installed here (identify, exiftool, tesseract for text in it, ...) to run in the "
+             "terminal, or ask your human")
+
+
+def image_tokens(width, height):
+    """An image's input tokens, estimated by Claude's rule (platform.claude.com vision): one token per 28x28-pixel patch,
+    after a downscale to its high-resolution tier (2576 px long edge, 4784 patches). It stands in where a provider counts
+    no tokens (Qwen-VL patches are 28 px too) and errs high for Claude's standard tier (1568 at most)."""
+    s = min(1.0, 2576 / max(width, height, 1))
+    return min(4784, math.ceil(width * s / 28) * math.ceil(height * s / 28))
+
 
 def http_error(e):
     """a ModelError carrying the status, the provider's reason (the body's first 2 KB), any retry-after and the
@@ -190,6 +210,7 @@ class Model:
         self.last_usage = {}
         self.last_speed = None
         self.last_call = {}      # the newest Messages API call: requested and serving model, fallback, stop, request id
+        self._images = {}        # (path, mtime_ns, size) -> (sha256, base64): see _image_data
 
     def _held(self, sock):
         with self._sockets_lock:
@@ -278,7 +299,7 @@ class Model:
         # the effort in force (effort.py): a local model takes it as the server's model id for the level, a provider
         # with reasoning_effort as that field; a short side call (the judge's) runs with thinking off
         choice = effort.resolve(self.config, short=limit < SHORT_CALL)
-        body = dict(model=model or choice['model'] or self.config['model'], messages=messages,
+        body = dict(model=model or choice['model'] or self.config['model'], messages=self._wire(messages),
                     stream=on_delta is not None, max_tokens=limit)
         # sampling: none for a local brain (its server applies the model's own defaults: a fixed 0.6 overrode the
         # Qwen3.8 cards' 1.0), a paid model's card values when known, the config's own when set
@@ -475,12 +496,81 @@ class Model:
                 value = result['input_tokens']
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError('invalid token count')
-                return value
+                return value + self._image_cost(messages)   # (the converted messages carry the images' text only)
             except (ModelError, KeyError, ValueError):
                 # Other compatible providers need not implement Caminus's counter.
                 # UTF8 bytes plus framing is conservative for byte-based tokenizers.
                 self.counter = False
-        return len(json.dumps(dict(messages=messages, tools=tools), ensure_ascii=False).encode()) + 256 * len(messages)
+        return (len(json.dumps(dict(messages=messages, tools=tools), ensure_ascii=False).encode()) + 256 * len(messages)
+                + self._image_cost(messages))
+
+    # ---- images ------------------------------------------------------------------------------------------------
+
+    def _image_data(self, img):
+        """the image file as base64 while it still is the file that was read (its sha256), else None"""
+        try:
+            st = os.stat(img['path'])
+            key = (img['path'], st.st_mtime_ns, st.st_size)
+            if key not in self._images:
+                with open(img['path'], 'rb') as f:
+                    raw = f.read()
+                if len(self._images) >= IMAGE_CACHE:
+                    self._images.clear()
+                self._images[key] = (hashlib.sha256(raw).hexdigest(), base64.b64encode(raw).decode())
+            sha, data = self._images[key]
+            return data if sha == img.get('sha256') else None
+        except (OSError, KeyError, TypeError):
+            return None
+
+    def _image_plan(self, messages):
+        """{index: (base64 data or None, a line for the text or None)} for each tool message that names an image"""
+        found = [i for i, m in enumerate(messages) if m.get('role') == 'tool' and isinstance(m.get('image'), dict)]
+        recent, plan = set(found[-IMAGES_PER_REQUEST:]), {}
+        for i in found:
+            img = messages[i]['image']
+            name = os.path.basename(str(img.get('path') or '')) or 'the file'
+            if not self.config.get('vision'):
+                plan[i] = (None, NO_VISION.format(name=name, w=img.get('width'), h=img.get('height'),
+                                                  fmt=str(img.get('format') or '').upper()))
+            elif 'sha256' not in img:
+                plan[i] = (None, None)                       # past read's caps: the result's note says so
+            elif i not in recent:
+                plan[i] = (None, f'[{name}: not sent again; a request carries the newest {IMAGES_PER_REQUEST} images: '
+                                 'read it again to see it]')
+            else:
+                data = self._image_data(img)
+                plan[i] = (data, None) if data else (None, f'[{name} changed or is gone since it was read: no image '
+                                                           'sent; read it again]')
+        return plan
+
+    def _image_cost(self, messages):
+        return sum(image_tokens(int(messages[i]['image']['width']), int(messages[i]['image']['height']))
+                   for i, (data, _) in self._image_plan(messages).items() if data)
+
+    def _wire(self, messages):
+        """The messages as an OpenAI-compatible request sends them. A Chat Completions tool message carries text only
+        (OpenAI's spec: ChatCompletionToolMessageParam takes a string or text parts), so an image goes in a user message
+        after its turn's last tool result, never between parallel results; a message without an image is sent as stored."""
+        plan = self._image_plan(messages)
+        if not plan:
+            return messages
+        out, parts = [], []
+        for i, m in enumerate(messages):
+            if parts and m.get('role') != 'tool':
+                out.append(dict(role='user', content=parts))
+                parts = []
+            if i in plan:
+                img, (data, line) = m['image'], plan[i]
+                m = {k: v for k, v in m.items() if k != 'image'}
+                if data:
+                    parts += [dict(type='text', text=f"{img['path']} (the read in call {m.get('tool_call_id')}):"),
+                              dict(type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif line:
+                    m['content'] = (m.get('content') or '') + '\n' + line
+            out.append(m)
+        if parts:
+            out.append(dict(role='user', content=parts))
+        return out
 
     # ---- Anthropic Messages API ---------------------------------------------------------------------------
 
@@ -495,7 +585,7 @@ class Model:
         while rest and rest[0]['role'] == 'system':
             system.append(rest.pop(0)['content'])
         tail = rest.pop()['content'] if rest and rest[-1]['role'] == 'system' else None
-        out = []
+        out, images = [], self._image_plan(rest)
 
         def add(role, blocks):
             if not blocks:
@@ -505,12 +595,19 @@ class Model:
             else:
                 out.append(dict(role=role, content=list(blocks)))
 
-        for m in rest:
+        for i, m in enumerate(rest):
             role = m['role']
             if role == 'system':                     # a mid-history system message: kept as an operator note
                 add('user', [dict(type='text', text='[system] ' + m['content'])])
             elif role == 'tool':
-                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=m['content'] or '')])
+                content = m['content'] or ''
+                data, line = images.get(i, (None, None))
+                if data:                             # (a tool_result's content may hold image blocks)
+                    content = [dict(type='text', text=content), dict(type='image', source=dict(
+                        type='base64', media_type='image/' + m['image']['format'], data=data))]
+                elif line:
+                    content += '\n' + line
+                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=content)])
             elif role == 'assistant':
                 blocks = [dict(type='text', text=m['content'])] if m.get('content') else []
                 for call in m.get('tool_calls') or []:

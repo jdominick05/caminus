@@ -468,6 +468,10 @@ class Store:
                 return
             self.db.execute("UPDATE actions SET state='done',result=? WHERE id=?", (json.dumps(result), action['id']))
             msg = dict(role='tool', tool_call_id=action['call_id'], content=json.dumps(result, ensure_ascii=False))
+            if action.get('name') == 'read' and isinstance(result.get('image'), dict) and result.get('path'):
+                # an image read: the transport sends the file with this result (model.py), so the store keeps no bytes;
+                # only read's own result names one (an MCP server's 'image' and 'path' are its data, never a file to send)
+                msg['image'] = dict(result['image'], path=result['path'])
             # A stop made while the call ran (cancel, the repeat-failure watchdog's pause, an error) stands: recording
             # the result must not set the goal back to working (it did, so the watchdog could never stop a loop).
             keep = g['state'] in ('cancelled', 'paused', 'error', 'completed')

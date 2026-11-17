@@ -26,6 +26,7 @@ func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 		{"terminal", map[string]any{"command": "cd " + cwd + " && python3 -m unittest"}, map[string]any{"exit_code": 0.0, "output": "\x1b[32mOK\x1b[0m\n"}, "$ python3 -m unittest"},
 		{"read", map[string]any{"path": cwd + "/inventory.py"}, map[string]any{"shown": "1-20"}, "read  inventory.py"},
 		{"read", map[string]any{"path": home + "/notes/a.md"}, map[string]any{"shown": "1-2"}, "~/notes/a.md"},
+		{"read", map[string]any{"path": cwd + "/plot.png"}, map[string]any{"path": cwd + "/plot.png", "image": map[string]any{"format": "png", "width": 640.0, "height": 480.0, "bytes": 2048.0}}, "read  plot.png  ·  image 640x480"},
 		{"peers", nil, map[string]any{"peers": []any{map[string]any{"name": "lab"}}}, "1 peer: lab"},
 		{"lease", map[string]any{"action": "list"}, map[string]any{"leases": []any{}}, "no leases"},
 		{"discover", nil, map[string]any{"account": map[string]any{"user": "agent"}, "programs": map[string]any{"build": map[string]any{"make": "/usr/bin/make", "gcc": "/usr/bin/gcc"}}}, "account agent · 2 programs found"},

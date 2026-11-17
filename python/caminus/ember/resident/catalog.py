@@ -2,7 +2,8 @@
 
 A provider is one endpoint the resident can reach (directly, or through the owner's key relay, which adds the key):
 
-- local      the Caminus server (OpenAI-compatible): GET /v1/models, the window from GET /props (n_ctx)
+- local      the Caminus server (OpenAI-compatible): GET /v1/models, the window and vision from GET /props (n_ctx,
+             modalities.vision)
 - anthropic  the Messages API: GET /v1/models gives max_input_tokens (the window), max_tokens (the output cap) and a
              capabilities tree (thinking types, effort levels). Prices are not in it: the transport's price table.
 - deepinfra  OpenAI-compatible at https://api.deepinfra.com/v1/openai: GET {base}/models gives metadata.context_length,
@@ -124,15 +125,16 @@ def mistral_entries(data, provider):
     return out
 
 
-def openai_entries(data, provider, context=None):
-    return [dict(id=m['id'], name=m['id'], provider=provider, context=context, max_output=None, efforts=[],
+def openai_entries(data, provider):
+    return [dict(id=m['id'], name=m['id'], provider=provider, context=None, max_output=None, efforts=[],
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
 
 
-def local_entries(data, provider, context=None):
+def local_entries(data, provider, context=None, vision=False):
     """A local Caminus server's models, one entry per base model: its -low / -xhigh / -nothink ids are that model's
     effort levels (effort.py), not models of their own. efforts lists the scale (every level runs as the nearest the
-    model has); variants maps a level to the id that runs it; max_output is the card's (the reply limit: up to 64K)."""
+    model has); variants maps a level to the id that runs it; max_output is the card's (the reply limit: up to 64K).
+    vision is /props' modalities.vision (llama-server's key; caminus serve reports false: K3 has no vision path)."""
     from . import effort
     ids = [m['id'] for m in data.get('data') or []]
     out = []
@@ -141,7 +143,7 @@ def local_entries(data, provider, context=None):
         line = effort.line(cfg)
         out.append(dict(id=base, name=base, provider=provider, context=context,
                         max_output=effort.card(base).get('max_output'), efforts=list(effort.LEVELS) if line else [],
-                        variants=variants, thinking='', vision=False, prices=None))
+                        variants=variants, thinking='', vision=vision, prices=None))
     return out
 
 
@@ -160,15 +162,13 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         return deepinfra_entries(data, name)
     if kind == 'mistral':
         return mistral_entries(data, name)
-    context = None
     if kind == 'local':
         try:
-            context = _get(_root(base) + '/props', headers, opener).get('n_ctx')
+            props = _get(_root(base) + '/props', headers, opener)
         except (OSError, ValueError, urllib.error.HTTPError):
-            pass
-    if kind == 'local':
-        return local_entries(data, name, context)
-    return openai_entries(data, name, context)
+            props = {}
+        return local_entries(data, name, props.get('n_ctx'), bool((props.get('modalities') or {}).get('vision')))
+    return openai_entries(data, name)
 
 
 def providers(config):

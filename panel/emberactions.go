@@ -42,6 +42,20 @@ func toolFamily(name string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(cText).Bold(true)
 }
 
+// readMeta is a read card's note: the lines shown, "directory", or "image WxH" for an image file (files.py image_info).
+func readMeta(result map[string]any) string {
+	if img, ok := result["image"].(map[string]any); ok {
+		w, _ := img["width"].(float64)
+		h, _ := img["height"].(float64)
+		return fmt.Sprintf("image %dx%d", int(w), int(h))
+	}
+	if d, _ := result["directory"].(bool); d {
+		return "directory"
+	}
+	shown, _ := result["shown"].(string)
+	return "lines " + shown
+}
+
 func argStr(args map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
@@ -152,10 +166,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 	case "read":
 		subject = residentText(shortPath(argStr(args, "path"), home, cwd))
 		if state == "ok" {
-			meta = "lines " + rs("shown")
-			if d, _ := result["directory"].(bool); d {
-				meta = "directory"
-			}
+			meta = readMeta(result)
 		}
 	case "web_search":
 		subject = "“" + residentText(argStr(args, "query")) + "”"

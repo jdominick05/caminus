@@ -198,7 +198,7 @@ TOOLS = [
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
-    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. Paths are relative to your home unless absolute.',
+    tool('read', 'Read a text file with line numbers, a window at a time (offset is the first line, limit the count; 400 by default). A directory lists its entries. A PNG, JPEG, GIF or WebP file comes back as an image if your model can see (up to 3000 px a side and 3.75 MB), else as its size and format. Paths are relative to your home unless absolute.',
          dict(path={'type':'string'}, offset={'type':'integer'}, limit={'type':'integer'}), ('path',)),
     tool('edit', 'Replace exact text in a file (a goal\'s first change needs define_done first). old must occur exactly once (copy it from read, without the line numbers), or set replace_all. Returns the diff. Prefer this to sed or heredocs in the terminal.',
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
@@ -1846,7 +1846,7 @@ class Runtime:
 
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
                   'provider', 'provider_kind', 'api_key_env', 'temperature', 'top_p', 'top_k', 'min_p',
-                  'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto')   # (a /model takes effect whole)
+                  'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto', 'vision')   # (a /model takes effect whole)
 
     def _stamp(self):
         try:

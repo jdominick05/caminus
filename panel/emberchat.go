@@ -1329,12 +1329,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
-			shown, _ := result["shown"].(string)
-			meta := "lines " + shown
-			if dir, _ := result["directory"].(bool); dir {
-				meta = "directory"
-			}
-			return toolCard("read", residentText(path), meta, true, false, nil, w)
+			return toolCard("read", residentText(path), readMeta(result), true, false, nil, w)
 		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
