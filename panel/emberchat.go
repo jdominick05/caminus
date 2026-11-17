@@ -422,20 +422,21 @@ func (m emberModel) bodyHeight() int {
 // check (the goal re-aimed: a user started a block-breaker game and then asked for a design review in the same goal),
 // that message. redirected says which.
 func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
-	text, msg := g.Prompt, ""
+	text, msg, checked := g.Prompt, "", false
 	for _, e := range m.residentEvents {
 		if e.Goal != g.ID {
 			continue
 		}
 		switch e.Kind {
 		case "user_message":
-			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" {
-				msg = t
+			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" && checked {
+				msg = t // (a message before the first done check refines the prompt; it does not redirect it)
 			}
 		case "done_check":
 			if msg != "" {
 				text, redirected, msg = msg, true, ""
 			}
+			checked = true
 		}
 	}
 	return text, redirected

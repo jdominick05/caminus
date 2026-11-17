@@ -2475,6 +2475,13 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	if aim, re := m.goalAim(&g); !re || aim != "review caminus and embers design" {
 		t.Fatalf("a message followed by a new done check is what the goal works toward: %q %v", aim, re)
 	}
+	early := residentGoal{ID: "fresh", Prompt: "add a CHANGELOG entry"}
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 5, Goal: "fresh", Kind: "user_message", Data: map[string]any{"text": "under 0.3.0, please"}},
+		residentEvent{Seq: 6, Goal: "fresh", Kind: "done_check", Data: map[string]any{"check": "the entry is under 0.3.0"}})
+	if aim, re := m.goalAim(&early); re || aim != early.Prompt {
+		t.Fatalf("a message before the first done check refines the goal, it does not redirect it: %q %v", aim, re)
+	}
 	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "block breaking") {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
 	}
