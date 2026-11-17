@@ -73,3 +73,12 @@ func TestThePickerRestylesWithoutRedrawingTheHistory(t *testing.T) {
 		t.Fatal("closing the picker redraws the history")
 	}
 }
+
+func TestARecalledHostCommandRunsInYourShell(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.compose.SetValue("!!echo hi")
+	next, cmd := m.submitCompose()
+	if cmd == nil || next.(emberModel).msg != "running in your shell…" {
+		t.Fatalf("!!cmd from the history runs in your shell, not the agent's: %q", next.(emberModel).msg)
+	}
+}

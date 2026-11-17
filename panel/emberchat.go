@@ -2543,7 +2543,14 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "/") {
 		return m.chatSlash(trimmed)
 	}
+	if strings.HasPrefix(trimmed, "!!") && len(strings.TrimSpace(trimmed[2:])) > 0 {
+		// your own shell, as typed in !! mode (a recalled !!cmd ran in the agent's account with a stray !)
+		saveTyped(m.agentName, trimmed)
+		m.msg = "running in your shell…"
+		return m, runHostBang(strings.TrimSpace(trimmed[2:]))
+	}
 	if strings.HasPrefix(trimmed, "!") && len(trimmed) > 1 {
+		saveTyped(m.agentName, trimmed)
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
