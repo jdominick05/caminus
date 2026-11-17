@@ -134,7 +134,12 @@ def check_gpus(R, root='/'):
               + (f'; idle now at {host.link_text(dict(gts=c["link"]["now_gts"], width=c["link"]["now_width"]))} (the driver\'s link power saving)'
                  if host.link_lowered(c['link']) else ''))
     if len(u) == 1:
-        R.add('PASS', 'gpu', 'one card: the one-card models run (Qwen3.6, AREX-2); the two-card models (the Coder, Qwen3-Coder-Next) need two')
+        if u[0]['total_mib'] >= 22 * 1024:
+            R.add('PASS', 'gpu', 'one 24 GB card: every one-card model runs (ThinkingCap, the plain Qwen3.8 27B, Qwen3-30B-A3B, '
+                  'Swift 1.5); the Coder needs two cards')
+        else:
+            R.add('PASS', 'gpu', 'one 20 GB card: ThinkingCap and the plain Qwen3.8 27B run; Qwen3-30B-A3B and Swift 1.5 need a '
+                  '24 GB card, the Coder two cards')
     elif len(u) >= 2:
         try:
             pr = host.pair(gs)
@@ -144,7 +149,7 @@ def check_gpus(R, root='/'):
                   f'{cs["gdn_keys"]} / {cs["moe_blocks"]}')
             if pr[0]['total_mib'] < 22 * 1024:
                 R.add('WARN', 'gpu', 'the Coder needs a 24 GB RX 7900 XTX as card 0 (it holds the bigger share of its split); '
-                      'Qwen3-Coder-Next and the one-card models run on this pair')
+                      'two-card Swift 1.5, ThinkingCap and Qwen3-30B-A3B, and the one-card models, run on this pair')
         except host.PlacementError as e:
             R.add('WARN', 'gpu', f'two-card models: {e}')
     for lv, _, text in host.problems(gs):
@@ -256,12 +261,17 @@ def check_models(R, verify):
     paths[1] = ('coder-2', (shard2(c1), 'next to shard 1') if c1 and shard2(c1) else (None, None))
     for key, (p, where) in paths:
         it = models.BY_KEY[key]
-        lvl_missing = 'WARN' if key == 'dflash' else 'FAIL'
+        # a model you have not downloaded is not a fault: a one-XT setup never needs the Coder. A path you set yourself
+        # (CAMINUS_CODER, config.toml) that is missing is one.
+        chosen = where not in ('default', 'next to shard 1') or (key == 'coder-2' and paths[0][1][1] != 'default')
+        lvl_missing = ('WARN' if key == 'dflash' else 'FAIL') if chosen else 'INFO'
         if not p:
             R.add(lvl_missing, 'models', f'{key}: no path'); continue
         if not os.path.isfile(p):
-            R.add(lvl_missing, 'models', f'{key}: {p} ({where}) does not exist: `caminus download`'
-                  + (' (or set CAMINUS_CODER / coder in config.toml)' if key == 'coder-1' else ' (or set CAMINUS_DFLASH; without it: --no-drafter)' if key == 'dflash' else ''))
+            R.add(lvl_missing, 'models', f'{key}: {p} ({where}) does not exist' + (
+                  ': `caminus download`' + (' (or set CAMINUS_CODER / coder in config.toml)' if key == 'coder-1' else
+                                            ' (or set CAMINUS_DFLASH; without it: --no-drafter)' if key == 'dflash' else '')
+                  if chosen else ': not downloaded (`caminus pull coder` when you want the Coder)'))
             continue
         sz = os.path.getsize(p)
         same_name = os.path.basename(p) == os.path.basename(it.path)
