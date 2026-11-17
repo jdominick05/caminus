@@ -399,7 +399,9 @@ func (m *emberModel) syncChat() {
 		if body != "" && m.height >= 24 && m.sideWidth() > 0 {
 			body += "\n" // the gap above the composer, in the transcript's column only (chatBottom)
 		}
-		if body == "" {
+		if body == "" && m.statusAt.IsZero() {
+			body = emberDim.Render("loading " + residentText(m.agentName) + "…")
+		} else if body == "" {
 			body = mascotBeside(0, "", emberTitle.Render("CAMINUS")+emberDim.Render(" env"),
 				"Your agent's conversation and commands will stay here.",
 				emberDim.Render("Type a goal below. /help shows the controls."))
@@ -458,7 +460,11 @@ func (m emberModel) chatHead(w int) string {
 			goalText = "↪ " + goalText
 		}
 	}
-	if !m.resident.DaemonAlive {
+	if m.statusAt.IsZero() {
+		// no status yet (a session just opened or switched to): its blank state is not "stopped", which flashed
+		// with the empty-session welcome on every switch
+		state, steps, goalText = "loading…", 0, ""
+	} else if !m.resident.DaemonAlive {
 		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
 		// after a stop while a newly queued goal waited
 		state = "stopped · /start"
@@ -484,6 +490,9 @@ func (m emberModel) chatHead(w int) string {
 // windowTitle is the terminal tab's title: the agent's state glyph, its name and what it is doing now, so a glance
 // at the tab bar says it (Claude Code's own tab shows a glyph and the session name the same way).
 func (m emberModel) windowTitle() string {
+	if m.statusAt.IsZero() {
+		return "◌ " + residentText(m.agentName) + " · loading — caminus ember"
+	}
 	state := "stopped"
 	if m.resident.DaemonAlive {
 		state = "idle"
