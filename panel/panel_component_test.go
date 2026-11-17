@@ -410,3 +410,225 @@ esac
 		t.Fatalf("the alias rule: %q", got)
 	}
 }
+
+// At 80x24 (and shorter) the key list reaches every key: in columns when they fit, else in pages, each page but the
+// last saying how many are left and that ? shows them. Standalone and hosted.
+func TestHelpReachesEveryKeyWhenShort(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	for _, hosted := range []bool{false, true} {
+		for _, sz := range [][2]int{{80, 24}, {80, 14}, {100, 30}, {160, 48}} {
+			m := fixturePanel()
+			m.hosted = hosted
+			m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+			var seen []string
+			for i := 0; m.view == viewHelp; i++ {
+				if i > 10 {
+					t.Fatalf("hosted %v %dx%d: ? never leaves the key list", hosted, sz[0], sz[1])
+				}
+				out := ansi.Strip(m.View(sz[0], sz[1]))
+				for n, l := range strings.Split(out, "\n") {
+					if lipgloss.Width(l) > sz[0] {
+						t.Fatalf("hosted %v %dx%d line %d: %d cells", hosted, sz[0], sz[1], n+1, lipgloss.Width(l))
+					}
+				}
+				if m.seen.helpPages > 1 && m.helpPage+1 < m.seen.helpPages && !strings.Contains(out, "more · ? next page") {
+					t.Fatalf("hosted %v %dx%d: a page with more after it says so:\n%s", hosted, sz[0], sz[1], out)
+				}
+				seen = append(seen, out)
+				m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+			}
+			all := strings.Join(seen, "\n")
+			for _, k := range m.mainKeys() {
+				if !strings.Contains(all, k.what) {
+					t.Errorf("hosted %v %dx%d: %q (%s) is in no page of the key list:\n%s", hosted, sz[0], sz[1], k.keys, k.what, all)
+				}
+			}
+			if sz == [2]int{80, 14} && len(seen) < 2 {
+				t.Errorf("hosted %v 80x14: the keys cannot fit one page, yet it showed one", hosted)
+			}
+		}
+	}
+	// any other key closes it, on any page
+	m := fixturePanel()
+	m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+	m.View(80, 14)
+	m, _ = m.key(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if m.view != viewMain || m.helpPage != 0 {
+		t.Fatal("a key other than ? closes the key list")
+	}
+}
+
+// keyTokens is the keys of a key line: each hint's key (the known keys, longest first), labels or none.
+func keyTokens(line string) []string {
+	known := []string{"tab ←→", "↑↓", "←→", "enter", "p", "s", "e", "c", "o", "?", "q"}
+	var out []string
+	for _, seg := range strings.Split(strings.TrimSpace(ansi.Strip(line)), "  ") {
+		for _, k := range known {
+			if seg == k || strings.HasPrefix(seg, k+" ") {
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// The key line never drops a key silently: at 80 and 70 columns, for every model, standalone and hosted, with a server
+// of the panel's, one started outside it and none, every key the wide line has is on the narrow one, or it ends "? more".
+func TestKeyLineKeepsEveryKeyOrSaysMore(t *testing.T) {
+	for _, hosted := range []bool{false, true} {
+		for _, srv := range []string{"managed", "external", "none"} {
+			for cur := 0; cur < 5; cur++ {
+				m := fixturePanel()
+				m.hosted, m.curM = hosted, cur
+				switch srv {
+				case "external":
+					m.ps.Servers[0].External = true
+				case "none":
+					m.ps.Servers = nil
+				}
+				m.w = 400
+				wide := keyTokens(m.keysLine())
+				for _, w := range []int{80, 70} {
+					ls := strings.Split(m.View(w, 24), "\n")
+					line := ls[len(ls)-1]
+					if lipgloss.Width(line) > w {
+						t.Fatalf("%d wide: the key line is %d cells", w, lipgloss.Width(line))
+					}
+					if strings.Contains(ansi.Strip(line), "? more") {
+						continue
+					}
+					got := strings.Join(keyTokens(line), " ")
+					if got != strings.Join(wide, " ") {
+						t.Errorf("hosted %v, %s server, model %d, %d wide: keys %q, wide line has %q:\n%s", hosted, srv, cur, w,
+							got, strings.Join(wide, " "), ansi.Strip(line))
+					}
+				}
+			}
+		}
+	}
+	// at the audit's case (80x24, a server of the panel's, a model with two choices) o is on the line
+	m := fixturePanel()
+	m.curM = 1
+	m.ps.Servers[0].Model, m.ps.Servers[0].Name = "swift-1.5", "swift-1.5"
+	ls := strings.Split(ansi.Strip(m.View(80, 24)), "\n")
+	if !strings.Contains(" "+ls[len(ls)-1]+" ", " o ") {
+		t.Fatalf("80x24: o is on the key line: %q", ls[len(ls)-1])
+	}
+}
+
+// The options field opens with its value selected: the first character typed replaces it (no ctrl+u needed), an arrow
+// keeps it, and backspace edits it as before.
+func TestOptionsFieldTypingReplacesTheShownValue(t *testing.T) {
+	open := func() ctl {
+		m := fixturePanel()
+		m, _ = m.key(tea.KeyPressMsg{Code: 'o', Text: "o"})
+		m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyDown})
+		m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyEnter}) // edit --max-ctx (shows "auto")
+		if !m.editing || m.edit != "auto" {
+			t.Fatalf("the field opens with the value: editing %v %q", m.editing, m.edit)
+		}
+		return m
+	}
+	m := open()
+	for _, r := range "32768" {
+		m, _ = m.key(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if m.edit != "32768" {
+		t.Fatalf("typing replaces the shown value: %q", m.edit)
+	}
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.vals["max_ctx"] != "32768" || m.noteErr {
+		t.Fatalf("32768 is saved: %q (note %q)", m.vals["max_ctx"], m.note)
+	}
+	m = open()
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.edit != "aut" {
+		t.Fatalf("backspace trims one character: %q", m.edit)
+	}
+	m, _ = m.key(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if m.edit != "auto" {
+		t.Fatalf("after backspace typing appends: %q", m.edit)
+	}
+	m = open()
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyRight})
+	m, _ = m.key(tea.KeyPressMsg{Code: '1', Text: "1"})
+	if m.edit != "auto1" {
+		t.Fatalf("an arrow keeps the value, then typing appends: %q", m.edit)
+	}
+}
+
+// L on a server started outside the panel says where its log is, not the stop / restart text; s still says that.
+func TestLogKeyOnAnOutsideServer(t *testing.T) {
+	m := fixturePanel()
+	m.ps.Servers[0].External, m.ps.Servers[0].Name = true, "observed-8092"
+	n, cmd := m.key(tea.KeyPressMsg{Code: 'L', Text: "L"})
+	if cmd != nil || n.confirm != nil {
+		t.Fatal("L on an outside server runs nothing")
+	}
+	if want := "coder was started outside the panel, so its log is wherever it was started"; n.note != want {
+		t.Fatalf("L's note: %q, want %q", n.note, want)
+	}
+	n, _ = m.key(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if !strings.Contains(n.note, "stop or restart it where it was started") {
+		t.Fatalf("s keeps its own note: %q", n.note)
+	}
+}
+
+// A failed read says "couldn't read" with its reason, in full and inside the screen, never "not installed"; the next
+// read that answers clears it.
+func TestFailedReadsSayCouldntRead(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	why := "caminus models --json: the lab wrapper refused this command because it is not part of a lab session (end)"
+	hwhy := "caminus qwen-code status --json: the lab wrapper refused it as well (qwen end)"
+	m := newPanel(panelOptions{CLI: "caminus-not-run"})
+	m, _ = m.Update(modelsMsg{err: fmt.Errorf("%s", why)})
+	m, _ = m.Update(psMsg{})
+	m, _ = m.Update(harnessMsg{err: fmt.Errorf("%s", hwhy)})
+	m.note = "" // (the note line shows the last error too: the checks below read the models and agents areas only)
+	flat := func(ls []string) string { return strings.Join(strings.Fields(strings.Join(ls, " ")), " ") }
+	for _, sz := range [][2]int{{160, 48}, {100, 30}, {80, 24}} {
+		out := ansi.Strip(m.View(sz[0], sz[1]))
+		ls := strings.Split(out, "\n")
+		for n, l := range ls {
+			if lipgloss.Width(l) > sz[0] {
+				t.Fatalf("%dx%d line %d: %d cells", sz[0], sz[1], n+1, lipgloss.Width(l))
+			}
+		}
+		mi, ai := -1, -1
+		for i, l := range ls {
+			switch strings.TrimSpace(l) {
+			case "models":
+				mi = i
+			case "agents":
+				ai = i
+			}
+		}
+		if mi < 0 || ai < mi {
+			t.Fatalf("%dx%d: no models / agents areas:\n%s", sz[0], sz[1], out)
+		}
+		if got := flat(ls[mi+1 : ai]); !strings.Contains(got, "couldn't read the model list: "+why) {
+			t.Errorf("%dx%d: the models area gives the whole reason: %q", sz[0], sz[1], got)
+		}
+		agents := flat(ls[ai+1:])
+		if !strings.Contains(agents, "Qwen Code couldn't read its status") || !strings.Contains(agents, hwhy) {
+			t.Errorf("%dx%d: the agents area says the read failed and why: %q", sz[0], sz[1], agents)
+		}
+		if strings.Contains(out, "not installed") || strings.Contains(out, "no models known") {
+			t.Errorf("%dx%d: a failed read is not a missing install or an empty list:\n%s", sz[0], sz[1], out)
+		}
+	}
+	if n, _ := m.key(tea.KeyPressMsg{Code: 'c', Text: "c"}); !strings.HasPrefix(n.note, "couldn't read Qwen Code's status") {
+		t.Errorf("c after a failed read: %q", n.note)
+	}
+	m, _ = m.Update(harnessMsg{v: harnessInfo{Npm: true}})
+	m, _ = m.Update(modelsMsg{})
+	out := ansi.Strip(m.View(100, 30))
+	if strings.Contains(out, "couldn't read") || !strings.Contains(out, "not installed") || !strings.Contains(out, "no models known") {
+		t.Errorf("reads that answer clear the failure:\n%s", out)
+	}
+}

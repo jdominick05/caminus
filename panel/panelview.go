@@ -64,7 +64,11 @@ func (m ctl) View(w, h int) string {
 	var body []string
 	switch m.view {
 	case viewHelp:
-		body = m.helpLines(W, room)
+		var pages int
+		body, pages = m.helpLines(W, room)
+		if m.seen != nil {
+			m.seen.helpPages = pages
+		}
 	case viewOptions:
 		body = m.optionsLines(W, room)
 	default:
@@ -557,6 +561,13 @@ func (m ctl) editedText(mi camModel) string {
 // modelsLines is the models' section in room lines at most: the list with the details beside it, or below it when
 // the screen is narrow.
 func (m ctl) modelsLines(W, room int) []string {
+	if m.loaded["models"] && len(m.models) == 0 { // (no list to put details beside: the reason takes the whole width)
+		why := fg(cMuted).Render("no models known (caminus models)")
+		if err := m.readErr["models"]; err != nil {
+			why = fg(cYellow).Render("couldn't read the model list: " + oneLine(err.Error()))
+		}
+		return append([]string{fg(cMuted).Render(" models")}, indent(wrapped(why, W-2, max(1, min(4, room-1))), " ")...)
+	}
 	list := m.listRows()
 	listW := 2 + m.nameWidth() + 1 + 6 + 2 + 1 + 3
 	head := fg(cMuted).Render(" models")
@@ -598,6 +609,14 @@ func (m ctl) modelsLines(W, room int) []string {
 	return out
 }
 
+// indent puts p before each line.
+func indent(ls []string, p string) []string {
+	for i := range ls {
+		ls[i] = p + ls[i]
+	}
+	return ls
+}
+
 // window is the first row of an n-row view of a list of total rows that keeps cur in sight.
 func window(cur, total, n int) int {
 	if total <= n {
@@ -612,6 +631,10 @@ func window(cur, total, n int) int {
 func (m ctl) agentLines(W int) []string {
 	e, q := m.emberText(), m.qwenText()
 	head := fg(cMuted).Render(" agents")
+	if err := m.readErr["harness"]; err != nil && !m.hs.Installed { // (the reason on its own lines, wrapped, never cut)
+		out := []string{head, ansi.Truncate("   "+e, W, "…"), ansi.Truncate("   "+q, W, "…")}
+		return append(out, indent(wrapped(fg(cMuted).Render(oneLine(err.Error())), W-5, 2), "     ")...)
+	}
 	if lipgloss.Width(e)+lipgloss.Width(q)+8 <= W {
 		return []string{head, "   " + e + "     " + q}
 	}
@@ -652,6 +675,9 @@ func (m ctl) qwenText() string {
 	switch {
 	case !m.loaded["harness"]:
 		return name + fg(cMuted).Render(" checking…")
+	case m.readErr["harness"] != nil && !h.Installed: // (a failed read is not "not installed"; the reason goes under it)
+		return name + fg(cYellow).Render(" couldn't read its status") + fg(cMuted).Render(" · ") + bold(cAccent).Render("R") +
+			fg(cMuted).Render(" reads again")
 	case !h.Installed && !h.Npm:
 		return name + fg(cYellow).Render(" not installed") + fg(cMuted).Render(" · needs Node.js / npm")
 	case !h.Installed:
@@ -683,20 +709,23 @@ func (m ctl) noteLine(W int) string {
 }
 
 // keysLine is the key hints that fit the width: what the selected model and the running server allow, ? and q always.
+// A key is never dropped silently: the labels shorten first, then go (the keys stay), and only then are keys left out,
+// with "? more" at the end (the key list has every one).
 func (m ctl) keysLine() string {
 	w := m.w
 	if w <= 0 {
 		w = 120
 	}
-	k := func(key, what string) string { return bold(cAccent).Render(key) + emberDim.Render(" "+what) }
-	var p []string
+	type hint struct{ key, what, short string }
+	var p []hint
+	k := func(key, what string) hint { return hint{key, what, what} }
 	switch {
 	case m.confirm != nil:
-		p = []string{k("y", "yes"), k("any other key", "no")}
+		p = []hint{k("y", "yes"), k("any other key", "no")}
 	case m.view == viewHelp:
-		p = []string{k("any key", "back")}
+		p = []hint{k("any key", "back")}
 	case m.view == viewOptions && m.editing:
-		p = []string{k("enter", "save"), k("esc", "cancel"), k("ctrl+u", "clear")}
+		p = []hint{k("enter", "save"), k("esc", "cancel"), k("ctrl+u", "clear")}
 	case m.view == viewOptions:
 		for _, x := range optionKeys() {
 			p = append(p, k(x.keys, x.what))
@@ -721,26 +750,65 @@ func (m ctl) keysLine() string {
 			p = append(p, k("s", "stop"))
 		}
 		if m.hosted {
-			p = append(p, k("e", "back to Ember"))
+			p = append(p, hint{"e", "back to Ember", "back"})
 		} else {
 			p = append(p, k("e", "Ember"))
 		}
 		if m.anyManaged() { // (caminus qwen follows the servers caminus start records)
-			p = append(p, k("c", "Qwen Code"))
+			p = append(p, hint{"c", "Qwen Code", "Qwen"})
 		}
-		p = append(p, k("o", "options"))
+		p = append(p, hint{"o", "options", "opts"})
 	}
-	tail := []string{k("?", "help"), k("q", "quit")}
+	main := m.view == viewMain && m.confirm == nil
+	quit := "quit"
 	if m.hosted {
-		tail[1] = k("q", "close")
+		quit = "close"
 	}
-	if m.view != viewMain || m.confirm != nil {
-		tail = nil
+	render := func(hs []hint, label func(hint) string, more bool) string {
+		var parts []string
+		for _, h := range hs {
+			t := bold(cAccent).Render(h.key)
+			if l := label(h); l != "" {
+				t += emberDim.Render(" " + l)
+			}
+			parts = append(parts, t)
+		}
+		if main {
+			help := "help"
+			if more {
+				help = "more"
+			}
+			parts = append(parts, bold(cAccent).Render("?")+emberDim.Render(" "+help), bold(cAccent).Render("q")+emberDim.Render(" "+quit))
+		}
+		return " " + strings.Join(parts, "  ")
 	}
-	for len(p) > 0 && lipgloss.Width(" "+strings.Join(append(append([]string{}, p...), tail...), "  ")) > w {
-		p = p[:len(p)-1]
+	if l := render(p, func(h hint) string { return h.what }, false); lipgloss.Width(l) <= w {
+		return l
 	}
-	return ansi.Truncate(" "+strings.Join(append(p, tail...), "  "), w, "…")
+	labelled := map[string]bool{} // (short labels, then the last keys' labels go one by one: the first keys keep theirs)
+	for _, h := range p {
+		labelled[h.key] = true
+	}
+	for i := len(p); i >= 0; i-- {
+		if i < len(p) {
+			labelled[p[i].key] = false
+		}
+		short := func(h hint) string {
+			if labelled[h.key] {
+				return h.short
+			}
+			return ""
+		}
+		if l := render(p, short, false); lipgloss.Width(l) <= w {
+			return l
+		}
+	}
+	for n := len(p) - 1; n > 0; n-- {
+		if l := render(p[:n], func(hint) string { return "" }, true); lipgloss.Width(l) <= w {
+			return l
+		}
+	}
+	return ansi.Truncate(render(p[:min(1, len(p))], func(hint) string { return "" }, true), w, "…")
 }
 
 // ---------- the options editor and the key list ----------
@@ -793,6 +861,10 @@ func (m ctl) optionRows(height int) []string {
 		}
 		if m.editing && i+1 == m.curO {
 			val = lipgloss.NewStyle().Foreground(cText).Background(cDim).Render(m.edit + "▏")
+			if m.editFresh { // (selected: the first character typed replaces it)
+				val = lipgloss.NewStyle().Foreground(cText).Background(cDim).Reverse(true).Render(m.edit) +
+					lipgloss.NewStyle().Foreground(cText).Background(cDim).Render("▏")
+			}
 		}
 		all = append(all, cur(i+1)+fit(fg(cText).Render(o.Flag), 26)+val)
 	}
@@ -854,31 +926,66 @@ func (m ctl) optionsLines(W, room int) []string {
 	return out
 }
 
-// helpLines is every key of the main view and what it does, in two columns when wide.
-func (m ctl) helpLines(W, room int) []string {
+// helpLines is every key of the main view and what it does: in two columns when both fit the width, and in pages when
+// the keys do not fit the height (each page but the last ends with "… N more · ? next page"). It returns the lines and
+// the number of pages.
+func (m ctl) helpLines(W, room int) ([]string, int) {
 	var items []string
 	for _, x := range m.mainKeys() {
 		items = append(items, fit(bold(cAccent).Render(x.keys), 7)+fg(cText).Render(x.what))
 	}
 	inner := W - 4
-	cols := 1
-	if inner >= 96 {
-		cols = 2
-	}
-	per := (len(items) + cols - 1) / cols
-	var rows []string
-	for i := 0; i < per; i++ {
-		var l string
-		for c := 0; c < cols; c++ {
-			if j := c*per + i; j < len(items) {
-				l += fit(items[j], inner/cols)
+	cols, colW := 1, []int{inner}
+	if half := (len(items) + 1) / 2; half > 0 {
+		w0, w1 := 0, 0
+		for i, it := range items {
+			if i < half {
+				w0 = max(w0, lipgloss.Width(it))
+			} else {
+				w1 = max(w1, lipgloss.Width(it))
 			}
 		}
-		rows = append(rows, l)
+		if inner >= 96 || w0+2+w1 <= inner { // (wide: the even split it always had; narrower: as wide as the keys need)
+			cols, colW = 2, []int{inner / 2, inner - inner/2}
+			if inner < 96 {
+				colW = []int{w0 + 2, inner - w0 - 2}
+			}
+		}
 	}
-	rows = append(rows, "", fg(cMuted).Render("the full monitor with every engine number: m, or caminus top in a terminal"))
-	if len(rows) > room-2 {
-		rows = rows[:max(1, room-2)]
+	grid := func(its []string) []string {
+		per := (len(its) + cols - 1) / cols
+		var rows []string
+		for i := 0; i < per; i++ {
+			var l string
+			for c := 0; c < cols; c++ {
+				if j := c*per + i; j < len(its) {
+					l += fit(its[j], colW[c])
+				}
+			}
+			rows = append(rows, l)
+		}
+		return rows
 	}
-	return strings.Split(panel("keys", cAccent, W, rows), "\n")
+	avail := max(2, room-2)
+	rows := grid(items)
+	foot := []string{"", fg(cMuted).Render("the full monitor with every engine number: m, or caminus top in a terminal")}
+	switch {
+	case len(rows)+len(foot) <= avail:
+		return strings.Split(panel("keys", cAccent, W, append(rows, foot...)), "\n"), 1
+	case len(rows) <= avail: // (the monitor hint goes before any key)
+		return strings.Split(panel("keys", cAccent, W, rows), "\n"), 1
+	}
+	cols, colW = 1, []int{inner} // (pages are one column: a key never lands in a column too narrow for it)
+	per := avail - 1             // (one row of each page says what is left)
+	pages := (len(items) + per - 1) / per
+	pg := m.helpPage % pages
+	lo, hi := pg*per, min(len(items), (pg+1)*per)
+	rows = grid(items[lo:hi])
+	if hi < len(items) {
+		rows = append(rows, fg(cMuted).Render(fmt.Sprintf("… %d more · ", len(items)-hi))+bold(cAccent).Render("?")+
+			fg(cMuted).Render(" next page"))
+	} else {
+		rows = append(rows, fg(cMuted).Render(fmt.Sprintf("page %d of %d · any key back", pg+1, pages)))
+	}
+	return strings.Split(panel("keys", cAccent, W, rows), "\n"), pages
 }

@@ -19,4 +19,4 @@ CAMINUS 0.1.0             XTX ▓▓▓▓▓▓▓░ 21.3/24G   XT ▓▓▓�
  agents
    Ember set up · e     Qwen Code 0.26.9 · c
 
- ↑↓ model  tab ←→ choice  enter start  s stop  e Ember  ? help  q quit
+ ↑↓ model  tab ←→ choice  enter start  s stop  e  c  o  ? help  q quit

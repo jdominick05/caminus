@@ -84,6 +84,7 @@ type ctl struct {
 	ember   emberMsg // whether Ember is set up
 	opts    []option
 	loaded  map[string]bool      // which reads answered at least once
+	readErr map[string]error     // the last failed read of models / harness (nil once a read answers): said as "couldn't read"
 	vals    map[string]string    // serve option values for the next start (dest -> text); absent = the default
 	card    string               // one-card models: "auto", "0", "1" (the options editor's first row)
 	picks   map[string]modelPick // model name -> card count and drafter choice at each count
@@ -95,14 +96,21 @@ type ctl struct {
 	view    int
 	editing bool
 	edit    string
-	confirm *pending // a y / n question
-	busy    string   // the action in flight ("" = none)
-	note    string   // the last result line
-	noteErr bool
-	prefs   string
+	// editFresh: the field still holds the value it opened with, as if selected: the first typed character replaces it
+	editFresh bool
+	helpPage  int        // the key list's page (?)
+	seen      *panelSeen // what the last View drew (View has a value receiver; the keys read it from here)
+	confirm   *pending   // a y / n question
+	busy      string     // the action in flight ("" = none)
+	note      string     // the last result line
+	noteErr   bool
+	prefs     string
 
 	live *liveMon // the running server's live numbers and its clients (panellive.go)
 }
+
+// panelSeen is what the last View drew that a key needs: how many pages the key list took at that size.
+type panelSeen struct{ helpPages int }
 
 // pending is an action waiting for y.
 type pending struct {
@@ -728,6 +736,7 @@ func (m ctl) update(msg tea.Msg) (ctl, tea.Cmd) {
 		return m.liveUpdate(msg)
 	case modelsMsg:
 		m.loaded["models"] = true
+		m.readErr["models"] = msg.err
 		if msg.err != nil {
 			m.setNote(msg.err.Error(), true)
 		} else {
@@ -746,6 +755,7 @@ func (m ctl) update(msg tea.Msg) (ctl, tea.Cmd) {
 		m.ember = msg
 	case harnessMsg:
 		m.loaded["harness"] = true
+		m.readErr["harness"] = msg.err
 		if msg.err == nil {
 			m.hs = msg.v
 		}
@@ -812,8 +822,12 @@ func (m ctl) key(k tea.KeyPressMsg) (ctl, tea.Cmd) {
 		return m, nil
 	}
 	switch m.view {
-	case viewHelp: // any key closes the list (esc and q too, without closing the panel)
-		m.view = viewMain
+	case viewHelp: // ? shows the next page while there is one; any other key closes the list (esc and q too, not the panel)
+		if s == "?" && m.seen != nil && m.helpPage+1 < m.seen.helpPages {
+			m.helpPage++
+			return m, nil
+		}
+		m.view, m.helpPage = viewMain, 0
 		return m, nil
 	case viewOptions:
 		if m.editing {
@@ -825,7 +839,7 @@ func (m ctl) key(k tea.KeyPressMsg) (ctl, tea.Cmd) {
 	case "ctrl+c", "q", "esc":
 		return m, closePanel
 	case "?":
-		m.view = viewHelp
+		m.view, m.helpPage = viewHelp, 0
 		return m, nil
 	case "o":
 		m.view, m.curO = viewOptions, 0
@@ -998,6 +1012,15 @@ func (m ctl) serverKey(s string) (ctl, tea.Cmd) {
 		return m, nil
 	}
 	name := sv.Name
+	if sv.External && s == "L" {
+		// (caminus ps keeps no log for a server started outside caminus start, and caminus logs finds only theirs)
+		shown := name
+		if sv.Model != "" {
+			shown = sv.Model
+		}
+		m.setNote(shown+" was started outside the panel, so its log is wherever it was started", false)
+		return m, nil
+	}
 	if sv.External && s != "m" {
 		m.setNote(name+" was started outside the panel: stop or restart it where it was started", false)
 		return m, nil
@@ -1038,6 +1061,10 @@ func (m ctl) agentKey(s string) (ctl, tea.Cmd) {
 		}
 		return m, m.interactive("Ember", "ember", "ui")
 	case "c":
+		if err := m.readErr["harness"]; err != nil && !m.hs.Installed {
+			m.setNote("couldn't read Qwen Code's status: "+err.Error(), true)
+			return m, m.loadHarness()
+		}
 		if !m.hs.Installed {
 			m.setNote("Qwen Code is not installed: i to install it", true)
 			return m, nil
@@ -1117,7 +1144,7 @@ func (m ctl) optionsKey(s string) (ctl, tea.Cmd) {
 			m.savePrefs()
 			return m, nil
 		}
-		m.editing, m.edit = true, m.valueOf(o)
+		m.editing, m.edit, m.editFresh = true, m.valueOf(o), true
 	case "d", "backspace", "delete":
 		delete(m.vals, o.Dest)
 		m.savePrefs()
@@ -1132,6 +1159,8 @@ func (m ctl) editKey(k tea.KeyPressMsg) (ctl, tea.Cmd) {
 		return m, nil
 	}
 	o := vo[min(m.curO-1, len(vo)-1)]
+	fresh := m.editFresh
+	m.editFresh = false // (any key ends the selection: arrows keep the value, backspace edits it as before)
 	switch k.String() {
 	case "esc":
 		m.editing = false
@@ -1156,6 +1185,9 @@ func (m ctl) editKey(k tea.KeyPressMsg) (ctl, tea.Cmd) {
 		m.edit = ""
 	default:
 		if t := k.Text; t != "" {
+			if fresh { // the first character replaces the value the field opened with
+				m.edit = ""
+			}
 			m.edit += t
 		}
 	}
@@ -1299,8 +1331,8 @@ func newPanel(o panelOptions) ctl {
 
 func newCtl(be *ctlCLI, prefsFile string) ctl {
 	panelSeq++
-	m := ctl{be: be, id: panelSeq, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile,
-		fits: map[string]fitEntry{}, live: newLiveMon()}
+	m := ctl{be: be, id: panelSeq, loaded: map[string]bool{}, readErr: map[string]error{}, vals: map[string]string{}, card: "auto",
+		prefs: prefsFile, fits: map[string]fitEntry{}, live: newLiveMon(), seen: &panelSeen{}}
 	m.loadPrefs()
 	return m
 }
