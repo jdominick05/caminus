@@ -495,6 +495,18 @@ def stage_doctor(S):
           and any(l.startswith('FAIL') and 'coder-1' in l and 'caminus download' in l for l in lines))
     for area in ('python', 'kernels', 'deps', 'gguf', 'torch', 'gpu', 'guard', 'host', 'models', 'disk', 'port', 'config'):
         check(f'doctor: reports {area}', any(l[6:].split()[0] == area for l in lines))
+    # what one card runs, by its size (a fake sysfs: nothing reads a real card)
+    from caminus.cmd import doctor as D
+    A = '0x1002'
+    for name, total, want in (('one XTX', 24560, 'one 24 GB card: every one-card model runs'),
+                              ('one XT', 20464, 'one 20 GB card: ThinkingCap and the plain Qwen3.8 27B run')):
+        root = os.path.join(S, 'sysfs-' + name.replace(' ', '-'))
+        fixture(root, [('card0', total, '0x744c', 128, 0, {}, A, '0000:03:00.0')], [(128, 110000)])
+        R = D.Report()
+        D.check_gpus(R, root)
+        msgs = [m for lv, area, m in R.rows if area == 'gpu']
+        check(f'doctor: {name}: says what runs on it', any(want in m for m in msgs), str(msgs)[-300:])
+        check(f'doctor: {name}: names no paused model', not any(x in m for m in msgs for x in ('Qwen3.6', 'AREX', 'Coder-Next')), str(msgs)[-300:])
     rj = subprocess.run(cam('doctor', '--json'), capture_output=True, text=True, env=env, timeout=300)
     try:
         js = json.loads(rj.stdout); ok = js['result'] == 'FAIL' and all(set(c) == {'level', 'area', 'message'} for c in js['checks'])
