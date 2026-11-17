@@ -170,13 +170,15 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
         p.add_argument('--json',action='store_true')
         if op=='create':
             p.add_argument('--from',dest='template',required=True,help='copy model settings from a sibling resident; memory/history start fresh')
+        if op=='remove':
+            p.add_argument('--dry-run',action='store_true',help='check the session exists and say what would happen; change nothing')
         if op=='memory':
             p.add_argument('--text',help='append a note to this resident\'s MEMORY.md')
             p.add_argument('--stdin',action='store_true')
@@ -472,6 +474,35 @@ def main(argv=None,stdin=None):
                     value=mail.send(a.to,text,recipient_goal=a.recipient_goal,reply_to=a.reply_to)
                 emit(value,True)
             finally:mail.close()
+            return 0
+        if a.op=='remove':
+            # The session switcher's destroy: its service stops and is disabled, its name leaves the mail bus, and its
+            # home (config, memory, history, files) moves to removed-sessions, kept and restorable by moving it back.
+            # The panel cancels a running goal first with `cancel`, which also withdraws its open requests.
+            if not (home/'config.json').exists():
+                raise ValueError('no session named '+a.name)
+            if a.dry_run:
+                emit(dict(name=a.name,removed=False,would='stop and disable its service, leave the mail bus, move its home to removed-sessions'),True)
+                return 0
+            unit='caminus-agent-'+a.name+'.service'
+            env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
+            subprocess.run(['systemctl','--user','disable','--now',unit],env=env,check=False,capture_output=True)
+            unit_file=Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd/user'/unit
+            if unit_file.exists():
+                unit_file.unlink()
+                subprocess.run(['systemctl','--user','daemon-reload'],env=env,check=False,capture_output=True)
+            mail=Mail(json.loads((home/'config.json').read_text()))
+            try:mail.unregister()
+            finally:mail.close()
+            import time as _time
+            root=(home.parent if a.home else Path.home()/'.local/share/caminus')/'removed-sessions'  # (a test's --home stays in its folder)
+            kept=root/(a.name+'-'+_time.strftime('%Y%m%d-%H%M%S'))
+            kept.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            os.replace(home,kept)
+            env_file=Path.home()/'.config/caminus/agents'/(a.name+'.env')
+            if env_file.exists():
+                os.replace(env_file,kept/'agent.env')
+            emit(dict(name=a.name,removed=True,kept=str(kept)),True)
             return 0
         if a.op in ('unit','start','stop'):
             unit='caminus-agent-'+a.name+'.service'

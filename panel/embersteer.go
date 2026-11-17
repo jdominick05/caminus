@@ -10,7 +10,7 @@ package main
 //   /diff                                what the goal changed in its git repositories, coloured, in an overlay
 //   /export                              the goal as markdown, in the agent's ~/exports
 //   /rewind                              back to an earlier step, files included (two presses: it rewrites files)
-//   /goal --plan TEXT, /plan approve|revise [NOTE]   a goal that explores and proposes before it changes anything
+//   /plan TEXT, /plan approve|revise [NOTE]   a goal that explores and proposes before it changes anything
 //   Shift+↑/↓ in the Goals overlay       move a queued goal up or down the queue
 
 import (
@@ -483,9 +483,20 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		return m, fetchRewind(m, goal), true
 	case "/plan":
 		verdict, note, _ := strings.Cut(strings.TrimSpace(arg), " ")
-		if verdict != "approve" && verdict != "revise" {
-			m.msg = "usage: /plan approve  ·  /plan revise WHAT TO CHANGE"
-			return m, nil, true
+		planWaiting := false
+		for _, gl := range m.resident.Goals {
+			planWaiting = planWaiting || gl.State == "waiting_plan"
+		}
+		// approve / revise answer a waiting plan; with none waiting, all of TEXT is a new goal's ("/plan revise the
+		// README" starts one, it does not report that no plan waits)
+		if !planWaiting || (verdict != "approve" && verdict != "revise") {
+			if strings.TrimSpace(arg) == "" {
+				m.msg = "usage: /plan TEXT starts a goal that plans first  ·  /plan approve  ·  /plan revise WHAT TO CHANGE"
+				return m, nil, true
+			}
+			m.chat.newGoal, m.chat.target = true, "" // /plan TEXT: a goal that explores and proposes before it changes anything
+			next, cmd := m.sendPlanGoal(strings.TrimSpace(arg))
+			return next.(emberModel), cmd, true
 		}
 		var waiting string
 		for _, gl := range m.resident.Goals {

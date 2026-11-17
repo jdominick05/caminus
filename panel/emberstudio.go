@@ -5,7 +5,7 @@ package main
 
 // envstudio.go: what the resident did while you were away. The recap ("while you were away": each free-time stretch
 // since you last looked, from the event store, no model call) is a card above the composer when a session opens; Esc
-// dismisses it and remembers when you looked. /recap shows it again. /studio opens the Studio overlay: the "for you"
+// dismisses it and remembers when you looked. /studio has it all. /studio opens the Studio overlay: the "for you"
 // shelf, the journal and the studio, newest first; Enter reads one inside the overlay.
 
 import (

@@ -1493,6 +1493,42 @@ for line in sys.stdin:
         self.assertEqual(subprocess.run(args,capture_output=True,text=True,timeout=15).returncode,1)
         self.assertIn('Source-only memory.',self.cmd('memory')['memory'])
 
+    def test_remove_takes_a_session_off_the_bus_and_keeps_its_home(self):
+        name='session-'+uuid.uuid4().hex
+        home=self.home.parent/name
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['create',name,'--from',self.home.name,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        (home/'MEMORY.md').write_text('# Persistent memory\n\nkeep me\n')
+        self.assertIn(name,[p['name'] for p in self.cmd('peers')])
+        dry=subprocess.run(base+['remove',name,'--dry-run','--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(dry.returncode,0,dry.stdout+dry.stderr)
+        self.assertTrue(home.exists(),'a dry run changes nothing')
+        gone=subprocess.run(base+['remove',name,'--home',str(home),'--json'],capture_output=True,text=True,timeout=30)
+        self.assertEqual(gone.returncode,0,gone.stdout+gone.stderr)
+        kept=Path(json.loads(gone.stdout)['kept'])
+        self.assertFalse(home.exists(),'the session is gone from its place')
+        self.assertIn('keep me',(kept/'MEMORY.md').read_text(),'its home is kept, not deleted')
+        self.assertEqual(kept.parent,self.home.parent/'removed-sessions','a test home never moves into the real home')
+        self.assertNotIn(name,[p['name'] for p in self.cmd('peers')],'it left the mail bus')
+        again=subprocess.run(base+['remove',name,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(again.returncode,1,'removing a session that is not there fails')
+
+    def test_status_names_what_a_redirected_goal_works_toward(self):
+        from caminus.ember.resident.store import Store
+        store=Store(self.home)
+        try:
+            gid=store.enqueue('design a block breaking game')
+            store.event('user_message',dict(text='also use emoji'),gid)      # before the first check: refines
+            store.event('done_check',dict(check='the game runs',gate=''),gid)
+            self.assertNotIn(gid,store.status()['aims'])
+            store.event('user_message',dict(text='review the design instead'),gid)
+            self.assertNotIn(gid,store.status()['aims'],'a message alone is not yet a redirect')
+            store.event('done_check',dict(check='the review exists',gate=''),gid)
+            self.assertEqual(store.status()['aims'][gid],'review the design instead')
+        finally:
+            store.close()
+
     def test_explicit_followup_continues_completed_conversation(self):
         self.replies(call('finish',dict(summary='Earlier observation: copper.')))
         first=self.cmd('once',['--goal','Inspect the inventory.'])

@@ -98,11 +98,11 @@ func TestChatSlashCommandsAndNewGoalRemainExplicit(t *testing.T) {
 	if !m.chat.newGoal || m.chat.target != "" {
 		t.Fatal("poll changed an explicit new goal into steering")
 	}
-	m.chat.compose.SetValue("/requests")
+	m.chat.compose.SetValue("/approvals")
 	next, _ = m.submitCompose()
 	m = next.(emberModel)
 	if m.tab != 6 || !m.chat.approvals {
-		t.Fatal("/requests did not open the approvals overlay in the chat")
+		t.Fatal("/approvals did not open the approvals overlay in the chat")
 	}
 	m.chat.approvals = false
 	m.chat.compose.SetValue("/unknown keep this")
@@ -340,13 +340,13 @@ func sortedCopy(in []string) []string {
 }
 
 func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
-	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/servers /session /sessions /settings]" {
+	if got := slashMatches("/se"); fmt.Sprint(sortedCopy(got)) != "[/servers /sessions]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /stop /studio]" {
+	if got := slashMatches("/st"); fmt.Sprint(sortedCopy(got)) != "[/start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
-	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/servers /session /sessions /settings /start /steer /stop /studio]" {
+	if got := slashMatches("/s"); fmt.Sprint(sortedCopy(got)) != "[/servers /sessions /start /steer /studio]" {
 		t.Fatalf("unexpected matches: %v", got)
 	}
 	for _, draft := range []string{"", "hello", "/remember queue pace", "/new\nsome goal"} {
@@ -355,7 +355,7 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 		}
 	}
 	for _, c := range slashCommands {
-		if !strings.Contains("/help /quit /new /requests /approvals /sessions /newsession /remember /goals /goal /agent /session /start /stop /cancel /compact /resume /theme /glyphs /deny /steer /memory /context /audit /settings /model /identity /advisor /effort /update /pause /halt /freetime /recap /studio /jobs /servers /agents /btw /diff /export /rewind /plan /", c.name+" ") {
+		if !strings.Contains("/help /quit /new /approvals /sessions /remember /goals /start /cancel /compact /resume /theme /deny /steer /memory /context /audit /model /identity /advisor /effort /update /pause /halt /freetime /studio /jobs /servers /btw /diff /export /rewind /plan /", c.name+" ") {
 			t.Fatalf("autocomplete offers %q, which chatSlash does not handle", c.name)
 		}
 	}
@@ -369,13 +369,13 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/session " {
+	if !done || m.chat.compose.Value() != "/sessions " {
 		t.Fatalf("second Tab gave %q", m.chat.compose.Value())
 	}
 	next, done = m.cycleSlash()
 	m = next.(emberModel)
-	if !done || m.chat.compose.Value() != "/sessions " {
-		t.Fatalf("cycle skipped a longer command: %q", m.chat.compose.Value())
+	if !done || m.chat.compose.Value() != "/start " {
+		t.Fatalf("third Tab gave %q", m.chat.compose.Value())
 	}
 	m.chat.compose.SetValue("/new steer me")
 	next, done = m.cycleSlash()
@@ -387,38 +387,60 @@ func TestSlashAutocompleteMatchesAndTabCycles(t *testing.T) {
 	}
 }
 
-func TestQuickSwitcherOpensRecordsAndFiltersSessions(t *testing.T) {
+func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	m := chatFixture(t)
+	m.width, m.height = 120, 40
 	m.sessionNames = []string{"research", "resident"}
+	m.sessionCards = []sessionCard{
+		{name: "research", status: "working", goal: "survey the harness papers", model: "claude-haiku-5-5", github: "ember-bot",
+			workingS: 720, spendGoal: 0.42, spendToday: 4.12, tokPerS: 61, ctxUsed: 52000, ctx: 1000000},
+		{name: "resident", status: "idle", goal: "review the design", model: "swift-1.5"}}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 	m = next.(emberModel)
-	if !m.chat.picker || m.chat.pickerQuery != "" {
-		t.Fatal("Ctrl+P did not open the switcher")
+	if !m.chat.picker || m.chat.compose.Value() != "an unsent draft" {
+		t.Fatal("Ctrl+P opens the switcher and keeps the draft")
 	}
-	if m.chat.compose.Value() != "an unsent draft" {
-		t.Fatal("the switcher destroyed the draft")
+	frame := ansi.Strip(m.render())
+	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 on this goal",
+		"$4.12 today in this session", "claude-haiku-5-5 · 61 tok/s · 52K/1M", "GitHub ember-bot", "resident", "○ idle",
+		"no GitHub account", "worked ", "+ new session"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("a card shows %q:\n%s", want, frame)
+		}
 	}
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	for _, row := range strings.Split(frame, "\n") {
+		if ansi.StringWidth(row) > m.width {
+			t.Fatalf("a row passes the terminal: %q", row)
+		}
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'c', Text: "c"})
-	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m = next.(emberModel)
-	if names := m.pickerNames(); len(names) != 1 || names[0] != "research" {
-		t.Fatalf("filter failed: %v", names)
+	if m.chat.pickerSel != 1 {
+		t.Fatal("→ moves to the next card")
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(emberModel)
 	if m.chat.picker || !m.chat.compose.Focused() || m.chat.compose.Value() != "an unsent draft" {
-		t.Fatal("Escape did not restore the composer")
+		t.Fatal("Esc goes back to the chat with the draft")
 	}
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	// Shift+Tab opens it when nothing is being completed
+	m.chat.compose.SetValue("")
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.chat.picker {
+		t.Fatal("Shift+Tab opens the switcher")
+	}
+	// a click on the first card switches to it
+	box := m.pickerBox()
+	top := m.height - lipgloss.Height(m.chatFoot(m.width)) - lipgloss.Height(box)
+	if m.cardAt(3, top+3) != 0 || m.cardAt(cardW+4, top+3) != 1 {
+		t.Fatalf("a click maps to the card under it (top %d)", top)
+	}
+	next, _ = m.chatUpdate(tea.MouseClickMsg{X: 3, Y: top + 3, Button: tea.MouseLeft})
 	m = next.(emberModel)
-	if m.agentName != "research" || m.chat.picker || m.chat.compose.Value() != "" {
-		t.Fatalf("Enter did not open the selected session: %q", m.agentName)
+	if m.agentName != "research" || m.chat.picker {
+		t.Fatalf("a click on a card switches to its session: %q", m.agentName)
 	}
 	// A question arriving with the switcher open keeps F2 as the explicit takeover.
 	m2 := chatFixture(t)
@@ -498,7 +520,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 				t.Fatalf("%v: line too wide: %q", size, row)
 			}
 		}
-		if !strings.Contains(frame, "/session") || (size[1] >= 32 && !strings.Contains(frame, "open a session NAME")) {
+		if !strings.Contains(frame, "/session") || (size[1] >= 32 && !strings.Contains(frame, "every session as a card")) {
 			t.Fatalf("%v: the slash menu (name and what it does) is missing:\n%s", size, frame)
 		}
 		if len(rows) < 3 {
@@ -510,7 +532,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 		next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 		m = next.(emberModel)
 		frame = ansi.Strip(m.render())
-		if !strings.Contains(frame, "OPEN SESSION") {
+		if !strings.Contains(frame, "sessions") || !strings.Contains(frame, "Enter or click switches") {
 			t.Fatalf("%v: switcher panel missing", size)
 		}
 		for _, row := range strings.Split(frame, "\n") {
@@ -578,7 +600,7 @@ func TestQuickSwitcherScrollsPastTheFirstPageWithoutPanicking(t *testing.T) {
 	for sel := range names {
 		m.chat.pickerSel = sel
 		box := ansi.Strip(m.pickerBox()) // panicked with "slice bounds out of range" before the fix
-		if !strings.Contains(box, "› "+names[sel]) {
+		if !strings.Contains(box, " "+names[sel]+" ") {
 			t.Fatalf("selection %d (%s) is not shown:\n%s", sel, names[sel], box)
 		}
 	}
@@ -697,29 +719,45 @@ func TestSlashPrefixedMessageSendsVerbatimWithDoubleSlash(t *testing.T) {
 	}
 }
 
-func TestSessionCommandRejectsAnUnknownNameWithoutClearingTheTranscript(t *testing.T) {
+func TestMergedAwayCommandsAreGoneAndKeepTheTranscript(t *testing.T) {
 	m := chatFixture(t)
 	m.sessionNames = []string{"resident", "research"}
 	m.receiveResident(residentMsg{agent: "resident", status: m.resident,
 		events: []residentEvent{{Seq: 2, Goal: "original", Kind: "assistant", Data: map[string]any{"content": "keep me"}}}})
 	before := len(m.residentEvents)
-	m.chat.compose.SetValue("/session rescarch")
+	// switching, creating and stopping sessions live in the switcher now; the rest merged into another command
+	for _, gone := range []string{"/session research", "/agent research", "/newsession x", "/agents", "/stop", "/requests",
+		"/settings", "/glyphs ascii", "/recap", "/models"} {
+		m.chat.compose.SetValue(gone)
+		next, _ := m.submitCompose()
+		m = next.(emberModel)
+		if m.agentName != "resident" || len(m.residentEvents) != before || !strings.Contains(ansi.Strip(m.chat.content), "keep me") {
+			t.Fatalf("%s acted or cleared the transcript", gone)
+		}
+		if !strings.Contains(m.msg, "Unknown command") {
+			t.Fatalf("%s is not a command any more: %q", gone, m.msg)
+		}
+		if len(slashMatches(strings.Fields(gone)[0])) > 0 && slices.Contains(slashMatches(strings.Fields(gone)[0]), strings.Fields(gone)[0]) {
+			t.Fatalf("%s is still in the menu", gone)
+		}
+	}
+	// /plan TEXT starts a plan-first goal (it was /goal --plan TEXT), even when TEXT starts with a verdict's word
+	for _, text := range []string{"tidy the README", "revise the README for 0.3"} {
+		m.chat.sending = false
+		m.chat.compose.SetValue("/plan " + text)
+		next, cmd := m.submitCompose()
+		m = next.(emberModel)
+		if !m.chat.sending || !m.chat.newGoal || cmd == nil || strings.Contains(m.msg, "no plan is waiting") {
+			t.Fatalf("/plan %s sends a plan-first goal (sending %v, msg %q)", text, m.chat.sending, m.msg)
+		}
+	}
+	// with a plan waiting, revise answers it
+	m.chat.sending = false
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "p1", State: "waiting_plan"})
+	m.chat.compose.SetValue("/plan revise smaller steps")
 	next, _ := m.submitCompose()
-	m = next.(emberModel)
-	if m.agentName != "resident" || len(m.residentEvents) != before {
-		t.Fatalf("a typo switched sessions: agent=%q events=%d/%d", m.agentName, len(m.residentEvents), before)
-	}
-	if !strings.Contains(ansi.Strip(m.chat.content), "keep me") {
-		t.Fatal("a typo cleared the transcript")
-	}
-	if !strings.Contains(m.msg, "no such session") {
-		t.Fatalf("no warning shown: %q", m.msg)
-	}
-	m.chat.compose.SetValue("/session research")
-	next, _ = m.submitCompose()
-	m = next.(emberModel)
-	if m.agentName != "research" {
-		t.Fatalf("a known session did not open: %q", m.agentName)
+	if next.(emberModel).chat.sending && next.(emberModel).chat.newGoal {
+		t.Fatal("with a plan waiting, /plan revise answers it instead of starting a goal")
 	}
 }
 
@@ -1309,10 +1347,13 @@ func TestGateAndJudgeVerdicts(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
-	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix", "judge: met  ·  41 passed"} {
+	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
+	}
+	if strings.Contains(v, "41 passed") {
+		t.Fatal("a met verdict shows on the finish line, not as its own card")
 	}
 }
 
@@ -2544,5 +2585,160 @@ func TestOneSlashMatchGetsTheSameMenuAsMany(t *testing.T) {
 	m.chat.compose.SetValue("/btw")
 	if strings.Contains(ansi.Strip(m.chatBottom()), slashHint("/btw")[:20]) {
 		t.Fatal("a command typed in full closes the menu")
+	}
+}
+
+func TestSwitcherCreatesAndStopsSessions(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.sessionCards = []sessionCard{{name: "resident", status: "idle"}, {name: "research", status: "stopped"}}
+	m.chat.picker = true
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = next.(emberModel)
+	if !m.chat.pickerNew || !strings.Contains(ansi.Strip(m.pickerBox()), "new session:") {
+		t.Fatal("n asks for a new session's name under the cards")
+	}
+	for _, r := range "lab" {
+		next, _ = m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = next.(emberModel)
+	}
+	if m.chat.pickerName != "lab" || m.chat.pickerSel != 0 {
+		t.Fatalf("typing goes into the name, not the switcher's keys: %q sel %d", m.chat.pickerName, m.chat.pickerSel)
+	}
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	if m.chat.pickerNew || cmd == nil {
+		t.Fatal("Enter creates the session")
+	}
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if cmd == nil || !next.(emberModel).chat.picker {
+		t.Fatal("s stops or starts the selected session and keeps the switcher open")
+	}
+}
+
+func TestSwitcherCardsSayWhatIsTrueAndDestroyTakesTwoPresses(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 150, 40
+	m.resident.TokPerS = 55 // the status bar's live figure for the session in view
+	m.sessionCards = []sessionCard{
+		{name: "resident", status: "working", goal: "design a block breaking game", goalID: "g1", workingS: 60},
+		{name: "research", status: "idle", goal: "review the design", aimed: true, workingS: 180}}
+	m.chat.picker = true
+	box := ansi.Strip(m.pickerBox())
+	for _, want := range []string{"55 tok/s", "↪ review the design", "worked 3m", "+ new session", "x x destroy"} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("the switcher shows %q:\n%s", want, box)
+		}
+	}
+	if strings.Contains(box, "working 3m") {
+		t.Fatal("an idle card says worked, not working")
+	}
+	// x once arms and names what goes; another key disarms; x twice destroys
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	if cmd != nil || m.chat.pickerDestroy != "resident" || !strings.Contains(ansi.Strip(m.pickerBox()), "x again destroys resident") {
+		t.Fatal("the first x only arms, with a warning naming the session")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	m = next.(emberModel)
+	if m.chat.pickerDestroy != "" {
+		t.Fatal("another key disarms")
+	}
+	m.chat.pickerSel = 0
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	if cmd == nil || m.agentName != "research" {
+		t.Fatalf("x twice destroys; destroying the session in view moves to another first (now %q)", m.agentName)
+	}
+	// the last session stays
+	m.sessionCards = []sessionCard{{name: "research", status: "idle"}}
+	m.chat.pickerSel = 0
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	if m.chat.pickerDestroy != "" || !strings.Contains(m.msg, "last session") {
+		t.Fatal("the last session can't be destroyed")
+	}
+	// Enter on "+ new session" asks for the name
+	m.chat.pickerSel = 1
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !next.(emberModel).chat.pickerNew {
+		t.Fatal("Enter on the new-session card asks for a name")
+	}
+}
+
+func TestSessionListArrivesBeforeTheCardsAndAFailureKeepsIt(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.picker = true
+	next, cmd := m.Update(residentSessionsMsg{agent: m.agentName, names: []string{"resident", "research"}})
+	m = next.(emberModel)
+	if len(m.sessionNames) != 2 || cmd == nil {
+		t.Fatal("the names land at once and the open switcher then loads the cards")
+	}
+	if box := ansi.Strip(m.pickerBox()); !strings.Contains(box, "research") || !strings.Contains(box, "loading") {
+		t.Fatalf("a card shows its name while it loads:\n%s", box)
+	}
+	next, _ = m.Update(sessionCardsMsg{agent: m.agentName, cards: []sessionCard{{name: "research", status: "idle", goal: "survey"}}})
+	m = next.(emberModel)
+	if box := ansi.Strip(m.pickerBox()); !strings.Contains(box, "survey") || !strings.Contains(box, "resident") {
+		t.Fatalf("the loaded card fills in by name; the others stay:\n%s", box)
+	}
+	next, _ = m.Update(residentSessionsMsg{agent: m.agentName, err: "ssh: timeout"})
+	if len(next.(emberModel).sessionNames) != 2 {
+		t.Fatal("a failed read keeps the sessions already known")
+	}
+}
+
+func TestASwitchedSessionSaysLoadingNotStoppedUntilItsStatusLands(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.sessionNames = []string{"resident", "local-testing"}
+	m.openResident("local-testing")
+	frame := ansi.Strip(m.render())
+	if strings.Contains(frame, "stopped") || strings.Contains(frame, "will stay here") || !strings.Contains(frame, "loading") {
+		t.Fatalf("before its first status a session is loading, not stopped with the empty welcome:\n%s", frame)
+	}
+	if !strings.Contains(m.windowTitle(), "loading") {
+		t.Fatalf("the tab title says loading: %q", m.windowTitle())
+	}
+	m.receiveResident(residentMsg{agent: "local-testing", status: residentStatus{Name: "local-testing", DaemonAlive: false}})
+	m.syncChat()
+	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") || strings.Contains(frame, "loading") ||
+		!strings.Contains(frame, "will stay here") {
+		t.Fatalf("once its status lands, an empty stopped session shows stopped and the welcome, no loading line:\n%s", frame)
+	}
+}
+
+func TestAMetVerdictShowsOnceOnTheFinishLine(t *testing.T) {
+	m := chatFixture(t)
+	met := residentEvent{Seq: 8, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists"}}
+	if b := m.chat.eventBlock(met); b != "" {
+		t.Fatalf("a met verdict has no card of its own; the finish line carries it:\n%s", ansi.Strip(b))
+	}
+	notYet := residentEvent{Seq: 9, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "not_yet", "reason": "no tests ran"}}
+	if b := ansi.Strip(m.chat.eventBlock(notYet)); !strings.Contains(b, "judge: not yet") {
+		t.Fatalf("a refusal keeps its card (no finish line follows it):\n%s", b)
+	}
+}
+
+// The judge records a met verdict and then returns the finish result with judge "met: REASON" (judge.review): the
+// transcript shows that sentence once, in both the card and the compact view.
+func TestAMetVerdictAppearsExactlyOnceInTheTranscript(t *testing.T) {
+	for _, cards := range []bool{true, false} {
+		m := chatFixture(t)
+		m.height = 40
+		m.chat.cards = cards
+		m.residentEvents = []residentEvent{
+			{Seq: 1, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists with all sections"}},
+			{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "finish", "call_id": "c9",
+				"result": map[string]any{"summary": "Wrote the review.", "judge": "met: The review file exists with all sections"}}},
+		}
+		m.chat.rendered, m.chat.content = 0, ""
+		m.syncChat()
+		v := ansi.Strip(m.chat.content)
+		if n := strings.Count(v, "The review file exists with all sections"); n != 1 {
+			t.Fatalf("cards=%v: the verdict shows %d times:\n%s", cards, n, v)
+		}
 	}
 }

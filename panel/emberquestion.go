@@ -203,7 +203,7 @@ func (m emberModel) deferQuestion() (tea.Model, tea.Cmd) {
 	m.chat.questionDeferred = m.chat.question.ID
 	m.chat.question = nil
 	m.chat.questionError = ""
-	m.msg = "Question deferred; /requests answers it. Steering does not answer a pending question."
+	m.msg = "Question deferred; /approvals answers it. Steering does not answer a pending question."
 	return m, m.chat.compose.Focus()
 }
 
@@ -213,12 +213,12 @@ func (m emberModel) answerQuestion(answer string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if r.kind() != "question" {
-		m.chat.questionError = "Root requests require explicit review in /requests"
+		m.chat.questionError = "Root requests require explicit review in /approvals (Ctrl+A)"
 		return m, nil
 	}
 	if err := writeAnswer(m.bridge, currentUser(), *r, "answered", "", nil, "", "", answer); err != nil {
 		m.chat.questionError = err.Error()
-		m.msg = "Question changed or was answered elsewhere; review /requests."
+		m.msg = "Question changed or was answered elsewhere; review /approvals."
 		return m, nil
 	}
 	_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID, "decision": "answered", "by": currentUser(), "answer": answer})

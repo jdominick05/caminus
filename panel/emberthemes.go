@@ -272,6 +272,11 @@ func (m emberModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
+	case "g": // the symbol set (nerd / unicode / ascii), here since it is a look setting like the theme
+		if err := glyphsSet(glyphsNext()); err == nil {
+			m.msg = "symbols: " + g.name + "  " + g.working + " " + g.waiting + " " + g.done + " " + g.root
+		}
+		return m, nil
 	case "n", "/":
 		t.describing, t.err = true, ""
 		return m, nil
@@ -379,7 +384,7 @@ func (m emberModel) themesOverlay(w, h int) string {
 	preview := themePreview(current, pw)
 	left := lipgloss.NewStyle().Width(listW).Render(strings.Join(list, "\n"))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", preview)
-	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · n describe a new one · Esc back", w, h)
+	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · g symbols · n describe a new one · Esc back", w, h)
 }
 
 // themePreview draws one of every element the chat uses, in the theme in force.

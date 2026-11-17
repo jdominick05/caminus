@@ -69,21 +69,21 @@ it; the durable blocks replace it when the turn lands.
 
 | Command | Action |
 |---|---|
-| `/new [goal]`, `/goal ID`, `/goals` | start a goal, select one, or open the goals overlay (Shift+↑/↓ there reorders the queue) |
-| `/goal --plan TEXT`, `/plan approve`, `/plan revise NOTE` | a plan-first goal: it explores read-only, proposes a plan and waits; the plan shows as a card above the composer |
+| `/new [goal]`, `/goals` | start a goal, or open the goals overlay to pick one (Shift+↑/↓ there reorders the queue) |
+| `/plan TEXT`, `/plan approve`, `/plan revise NOTE` | a plan-first goal: it explores read-only, proposes a plan and waits; the plan shows as a card above the composer |
 | `/steer TEXT`, `/pause`, `/resume`, `/cancel` | steer, pause at the next step, resume, cancel |
 | `/btw QUESTION` | a side question with no tools; nothing enters the goal |
 | `/diff`, `/export` | the goal's changes in its git repositories (new files included); the goal as markdown in the agent's `~/exports` |
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
-| `/approvals`, `/requests`, `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
+| `/approvals` (Ctrl+A), `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
-| `/context`, `/memory`, `/audit`, `/settings` | what the agent's context holds and where compaction starts; memory; the audit log; settings |
-| `/jobs`, `/servers`, `/agents` | the agent's jobs and processes; the model servers; every resident (advanced) |
-| `/recap`, `/studio` | while you were away; what free time made (the shelf, the journal, the studio) |
+| `/context`, `/memory`, `/audit` | what the agent's context holds, its brain, window and where compaction starts; memory; the audit log |
+| `/jobs`, `/servers` | the agent's jobs and processes; the model servers |
+| `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
 | `/update`, `/halt` | install this caminus's runtime between goals; the emergency stop (`/halt clear` lifts it) |
-| `/glyphs`, `/theme` | symbol set (nerd, unicode, ascii) and colours |
-| `/session NAME`, `/sessions`, `/start`, `/stop`, `/quit` | sessions, the resident's loop, close the UI (the agent keeps running) |
+| `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |
+| `/sessions` (Ctrl+P, Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches, `n` creates one, `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
 
 Custom commands: a markdown file `~/.config/caminus/commands/NAME.md` becomes
 `/NAME ARGS` (front matter is dropped; `$ARGUMENTS` is replaced, else the
@@ -192,7 +192,7 @@ that is not enough. A paid brain (remote, or through a key relay) compacts early
 at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
 `paid_compact_target_ratio`); a local one at 85 % down to 20 %.
 
-A plan-first goal (`send --plan`, `/goal --plan`) explores before it changes
+A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
 and a terminal command runs only when every part of it is a read-only program
 (`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent

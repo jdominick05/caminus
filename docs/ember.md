@@ -25,7 +25,7 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
 - **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
   takes the agent's recommended option after 15 minutes; an unanswered permission or root request is a no.
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
-  and leaves you things it thinks you will like (`/studio`, `/recap`). Free time is never graded and spends its own
+  and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
 - **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
 

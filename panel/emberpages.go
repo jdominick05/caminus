@@ -22,13 +22,11 @@ var pageOverlays = map[string]struct {
 	tab   int
 	title string
 }{
-	"/memory":   {3, "MEMORY & NOTES"},
-	"/servers":  {4, "SERVERS"},
-	"/audit":    {5, "AUDIT"},
-	"/agents":   {7, "AGENTS"},
-	"/settings": {8, "SETTINGS"},
-	"/jobs":     {9, "JOBS & PROCESSES"},
-	"/context":  {10, "CONTEXT"},
+	"/memory":  {3, "MEMORY & NOTES"},
+	"/servers": {4, "SERVERS"},
+	"/audit":   {5, "AUDIT"},
+	"/jobs":    {9, "JOBS & PROCESSES"},
+	"/context": {10, "CONTEXT"},
 }
 
 // pageTitle is the overlay title for a page index.

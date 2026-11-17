@@ -102,6 +102,7 @@ type emberModel struct {
 	chat           residentChat
 	residentEpoch  uint64
 	sessionNames   []string
+	sessionCards   []sessionCard // the switcher: one card per session
 	sessionSel     int
 	sessionMemory  string
 	pageScroll     int
@@ -613,11 +614,17 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case residentComposeResult:
 		return m.finishCompose(msg)
+	case sessionCardsMsg:
+		if msg.agent == m.agentName {
+			m.sessionCards = msg.cards
+		}
+		return m, nil
 	case residentSessionsMsg:
 		if msg.agent == m.agentName {
-			m.sessionNames, m.sessionMemory = msg.names, msg.memory
 			if msg.err != "" {
-				m.msg = msg.err
+				m.msg = msg.err // (the names already known stay: a failed read must not empty the switcher)
+			} else {
+				m.sessionNames, m.sessionMemory = msg.names, msg.memory
 			}
 			if m.pendingLast != "" {
 				last := m.pendingLast
@@ -636,6 +643,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(residentRefresh(m), residentSessions(m))
 				}
 			}
+			if m.chat.picker && msg.err == "" {
+				return m, loadSessionCards(m, m.sessionNames) // the cards follow the names; the list never waits on them
+			}
 		}
 		return m, nil
 	case residentCreatedMsg:
@@ -645,6 +655,13 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.openResident(msg.name)
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
+	case residentDestroyedMsg:
+		if msg.err != "" {
+			m.msg = "destroy " + residentText(msg.name) + ": " + residentText(msg.err)
+		} else {
+			m.msg = "destroyed " + residentText(msg.name) + "; its home is kept in " + residentText(msg.kept)
+		}
+		return m, residentSessions(m)
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
 	case identityLoadedMsg:
