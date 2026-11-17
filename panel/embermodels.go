@@ -67,7 +67,7 @@ func residentJSON(m emberModel, args []string, into any, input ...string) error 
 	if len(input) > 0 {
 		stdin = input[0] // (a description or a question, kept off the command line)
 	}
-	out, err := residentCommand(m, args, stdin).CombinedOutput()
+	out, err := runResident(residentCommand(m, args, stdin))
 	if err != nil {
 		text := strings.TrimSpace(string(out))
 		if i := strings.LastIndex(text, "\n"); i >= 0 {
@@ -284,7 +284,7 @@ func updateResident(m emberModel, now bool) tea.Cmd {
 		var inst struct {
 			Sha256 string `json:"sha256"`
 		}
-		if out, err := residentCommand(m, []string{"install"}, "").CombinedOutput(); err != nil {
+		if out, err := runResident(residentCommand(m, []string{"install"}, "")); err != nil {
 			return residentActionMsg{"update: install failed: " + strings.TrimSpace(string(out))}
 		} else if i := strings.LastIndex(string(out), "{"); i >= 0 {
 			_ = json.Unmarshal(out[i:], &inst)

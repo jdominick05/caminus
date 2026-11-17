@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -100,6 +101,22 @@ func cliError(out []byte) string {
 	return text
 }
 
+// runResident runs a resident command and returns what it printed on stdout. Its JSON is on stdout; stderr carries
+// the transport's own notices (SSH says "ControlSocket … already exists, disabling multiplexing" when the shared
+// connection refuses another session), and mixing them in broke every parse: the switcher showed one session and the
+// header "stopped". A failure returns stderr then stdout, for the message.
+func runResident(c *exec.Cmd) ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("resident controls need the caminus CLI (--cli)")
+	}
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Run(); err != nil {
+		return append(stderr.Bytes(), stdout.Bytes()...), err
+	}
+	return stdout.Bytes(), nil
+}
+
 func residentCommand(m emberModel, args []string, input string) *exec.Cmd {
 	if len(m.cli) == 0 {
 		return nil // the panel can run without --cli; callers report the missing CLI instead of panicking
@@ -173,7 +190,7 @@ func residentRefresh(m emberModel) tea.Cmd {
 		if len(m.cli) == 0 {
 			return residentMsg{agent: name, epoch: epoch, err: "resident controls need the caminus CLI (--cli)"}
 		}
-		out, err := residentCommand(m, []string{"status", name, "--json"}, "").CombinedOutput()
+		out, err := runResident(residentCommand(m, []string{"status", name, "--json"}, ""))
 		if err != nil {
 			return residentMsg{agent: name, epoch: epoch, err: cliError(out)}
 		}
@@ -193,7 +210,7 @@ func residentRefresh(m emberModel) tea.Cmd {
 			pages = 8
 		}
 		for page := 0; page < pages && after < status.LastEvent; page++ {
-			out, err = residentCommand(m, []string{"events", name, "--after", fmt.Sprint(after), "--json"}, "").CombinedOutput()
+			out, err = runResident(residentCommand(m, []string{"events", name, "--after", fmt.Sprint(after), "--json"}, ""))
 			if err != nil {
 				return residentMsg{agent: name, epoch: epoch, err: cliError(out)}
 			}
@@ -229,7 +246,7 @@ func residentAction(m emberModel, args []string, input string) tea.Cmd {
 			}
 			_ = appendAudit(m.auditPath, ev)
 		}
-		out, err := residentCommand(m, args, input).CombinedOutput()
+		out, err := runResident(residentCommand(m, args, input))
 		text := strings.TrimSpace(string(out))
 		if err != nil {
 			text = err.Error() + ": " + cliError(out)
