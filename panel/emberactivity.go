@@ -171,5 +171,8 @@ func (m emberModel) activityLine(w int) string {
 	if len(stats) > 0 {
 		line += emberDim.Render("  (" + strings.Join(stats, " · ") + ")")
 	}
+	if m.chat.live.active { // the one moment Esc does something here: say so where the eye already is
+		line += emberDim.Render("  · esc interrupts")
+	}
 	return ansi.Truncate(line, max(10, w), "…")
 }

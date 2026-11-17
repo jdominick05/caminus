@@ -2794,3 +2794,19 @@ func TestAHostCommandStopsAtItsLimitEvenWithAChildRunning(t *testing.T) {
 		t.Fatalf("a background child does not hold the result past the limit: %v after %s", err, time.Since(start))
 	}
 }
+
+func TestTheActivityLineSaysEscInterruptsWhileAReplyIsWritten(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 40
+	m.resident.DaemonAlive = true
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}
+	m.chat.target = "original"
+	m.chat.live.active = false
+	if strings.Contains(ansi.Strip(m.activityLine(140)), "esc interrupts") {
+		t.Fatal("nothing to interrupt: no hint")
+	}
+	m.chat.live.active = true
+	if line := ansi.Strip(m.activityLine(140)); !strings.Contains(line, "esc interrupts") {
+		t.Fatalf("while a reply is written the activity line says Esc interrupts it: %q", line)
+	}
+}
