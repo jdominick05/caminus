@@ -3,6 +3,41 @@
 Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (two-card: XTX + XT) unless a line says
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md).
 
+## 0.3.1 (2026-11-17)
+
+The fixes to 0.3.0's known issues, and the first release of 0.3 on PyPI (0.3.0's upload step failed; it is on GitHub
+only). After upgrading, run `caminus ember agent install` so a running agent picks up the fixes.
+
+### Fixed
+
+- **A root command you approve always comes back to Ember.** An approved `apt install` could hang at its end
+  ("Processing triggers ...") and never return to the chat: the panel waited for every process holding the command's
+  output. It now waits for the command itself, with a bound, and returns its exit code and output to the chat.
+- **Esc stops the reply on the server too.** After an interrupt, the server could keep generating and the status line
+  kept counting. The call is closed from its first moment, so the server stops the job, and the status line says
+  interrupted.
+- **The panel swaps models.** Starting a model while another runs asks once ("stop X and start Y?") and does both,
+  and `s` stops the running model, saying what it does for a server started outside the panel.
+- **The advisor says what to run when it cannot be called,** for example when the key relay doesn't allow its model,
+  instead of a raw error that vanished after a few seconds.
+- **`/effort` works on a local model session made before this release.** It asks the session's own server which effort
+  levels it serves (the Coder's `-low`, `-xhigh` and `-nothink` ids) instead of saying "no effort control".
+
+### For contributors
+
+- **The release workflow uploads to PyPI.** twine attaches the PEP 740 attestations only when they are named beside the
+  files; 0.3.0's upload stopped there.
+- **Growth rules for a tree written by agents** (ENTROPY.md, `tools/entropy.py`, and `tools/pr_ready.py`'s size check):
+  a pull request that adds more lines than it removes says what it reused and removed.
+
+### Known issues
+
+- Clicking a folded card in Ember opens every card (as Ctrl+O does), not only that one.
+- The `/theme` picker is still slow to move.
+
+Benchmarks: no engine or kernel code changed since 0.3.0, so its numbers stand (docs/dev/benchmarks.md, measured on
+0.3.0).
+
 ## 0.3.0 (2026-11-17)
 
 ### New
@@ -162,7 +197,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Known issues
 
-Found in the release test of Ember; the fixes come in the next release.
+Found in the release test of Ember; all four are fixed in 0.3.1.
 
 - A command run as root through Ember (an `apt install`, for example) can hang at its end and never return to Ember.
 - Interrupting a reply with Esc can leave the reply running: the status line keeps counting and the server keeps
