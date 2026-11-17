@@ -1129,7 +1129,11 @@ func (m ctl) savePrefs() {
 // ---------- rendering ----------
 
 func (m ctl) View() tea.View {
-	v := tea.NewView(m.render())
+	frame := m.render()
+	if themeBackground() != nil { // the theme's background in every cell, as Ember paints it: the two share one look
+		frame = paintBackground(frame, 0, m.w, max(m.h, lipgloss.Height(frame)), false)
+	}
+	v := tea.NewView(frame)
 	v.AltScreen = true
 	v.WindowTitle = "caminus panel"
 	return v

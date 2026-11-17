@@ -75,21 +75,24 @@ func TestThePanelHasAWayIntoEmber(t *testing.T) {
 	}
 }
 
-func TestABackgroundThemeStaysInEmber(t *testing.T) {
+func TestThePanelAndTopPaintTheThemeAsEmberDoes(t *testing.T) {
 	saved := themeCurrent
 	defer func() { themeCurrent = saved; applyThemeStyles() }()
-	themeCurrent = map[string]string{}
-	for k, v := range defaultTheme() {
-		themeCurrent[k] = v
+	if err := themeLoad("caminus"); err != nil {
+		t.Fatal(err)
 	}
-	themeCurrent["bg"], themeCurrent["text"] = "#f5f1e8", "#202020"
-	plainScreenTheme()
-	if themeCurrent["bg"] != "" || themeCurrent["text"] != defaultTheme()["text"] {
-		t.Fatal("panel and top do not paint a background: a light theme's dark text is not used there")
+	if themeRole("bg") != "#15181c" || themeRole("accent") != "#5fc4b0" {
+		t.Fatalf("the default is Iron & Patina: bg %s accent %s", themeRole("bg"), themeRole("accent"))
 	}
-	themeCurrent["accent"] = "#ff00ff" // a colours-only theme stays shared
-	plainScreenTheme()
-	if themeCurrent["accent"] != "#ff00ff" {
-		t.Fatal("a theme without a background is shared as before")
+	m := newCtl(newCtlCLI("caminus"), false, "")
+	m.w, m.h = 100, 30
+	if v := m.View(); !strings.Contains(v.Content, bgSeq("#15181c")) {
+		t.Fatal("the panel paints the theme's background, as Ember does")
+	}
+	if err := themeLoad("nord"); err != nil {
+		t.Fatal(err)
+	}
+	if themeCurrent["bg"] != "" && themeCurrent["bg"] == "#15181c" {
+		t.Fatal("a theme without a background does not inherit the default's")
 	}
 }
