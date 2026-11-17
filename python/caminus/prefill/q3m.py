@@ -86,15 +86,15 @@ class Q3MPrefill(PrefillDriver):
         self.dev = dev = torch.device(f'cuda:{m.dev}')
         self.crossover = CROSSOVER if crossover is None else int(crossover)
         fmts = {L[key][0] for L in m.L for key in MM_KEYS}
-        if module is None:   # (a file with codebook-format tensors: the study object, as the engine picks its decode module)
-            module = q3m_ops.IQ_MODULE if fmts & set(q3m_ops.IQ_KERNEL) else 'q3m_prefill'
+        if module is None:   # (a file with codebook-format tensors: the study object; Q4_0 ones: the Q4_0 family's; as the engine picks its decode module)
+            module = q3m_ops.module_for(fmts)
         for il, L in enumerate(m.L):
             for key in MM_KEYS:
                 if L[key][0] not in q3m_ops.formats(module): raise ValueError(f'Q3MPrefill: blk.{il} {key} is {L[key][0]} ({module})')
         self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache format: the Q8 kernels for its rows, never F16 ones)
-        if self.q8 and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the Q8 KV cache runs with q3m_prefill only (not {module})')
+        if self.q8 and module not in ('q3m_prefill', q3m_ops.Q40_MODULE): raise ValueError(f'Q3MPrefill: the Q8 KV cache runs with q3m_prefill or {q3m_ops.Q40_MODULE} only (not {module})')
         self.yarn = getattr(m, 'rope', None) is not None   # (the long-context mode: q3p_qk_rope from its YaRN build, on the same par block)
-        if self.yarn and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the long-context mode runs with q3m_prefill only (not {module})')
+        if self.yarn and module not in ('q3m_prefill', q3m_ops.Q40_MODULE): raise ValueError(f'Q3MPrefill: the long-context mode runs with q3m_prefill or {q3m_ops.Q40_MODULE} only (not {module})')
         T = self.chunk
         self.need_mib = buffer_need_mib(m, T)
         if check: capacity.check([dev.index], [self.need_mib], f'Q3MPrefill buffers (chunk {T})')

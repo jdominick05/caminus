@@ -85,7 +85,7 @@ check(all(re.search(r'#define ' + mac + r'\b', tp) for mac in ('K3_TP', 'K3_Q3M_
 
 # ---- the host: names, build.sh, capabilities, the build check ---------------------------------------------------------------
 bs = open(os.path.join(ROOT, 'build.sh')).read()
-NATIVE_TP_OF = {k: v for k, v in k3.Q3M_TP_OF.items() if k not in k3.Q3M_YARN_MODULES}   # (the YaRN builds: their own pairs below)
+NATIVE_TP_OF = {k: v for k, v in k3.Q3M_TP_OF.items() if k not in k3.Q3M_YARN_MODULES and k not in k3.Q3M_Q40_BASE}   # (the YaRN builds: their own pairs below; the Q4_0 family's twins: tests/engine/test_q3moe_q40_cpu.py)
 check(NATIVE_TP_OF == {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3_q3m_lean_tp_trace', 'k3_q3m_lean_kvq8': 'k3_q3m_lean_tp_kvq8'}
       and all(k3.Q3M_TP_OF[k3.Q3M_YARN_OF[b]] == k3.Q3M_YARN_OF[k3.Q3M_TP_OF[b]] for b in ('k3_q3m_lean', 'k3_q3m_lean_kvq8'))
       and k3.Q3M_TP_MODULES == tuple(k3.Q3M_TP_OF.values())
@@ -93,7 +93,8 @@ check(NATIVE_TP_OF == {'k3_q3m_lean': 'k3_q3m_lean_tp', 'k3_q3m_lean_trace': 'k3
       and 'for src in kernels/*.hip; do' in bs and re.search(r'kernels/k3_q3m\*\.hip\|[^)]*\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs),
       'k3.Q3M_TP_OF: the native pairs, and each YaRN build\'s two-card form is the YaRN build of its native two-card module; '
       'kernels/<name>.hip for each two-card module; build.sh compiles every kernels/*.hip, k3_q3m*.hip with max-ilp and no ggml path')
-check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS['k3_q3m_lean'] | {('OWN_SLOT_SUM', '-')} for m in k3.Q3M_TP_MODULES)
+LEAN_OF = lambda m: k3.Q3M_Q40_OF['k3_q3m_lean'] if m in k3.Q3M_Q40_BASE else 'k3_q3m_lean'   # (a Q4_0 twin: its family's lean module)
+check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS[LEAN_OF(m)] | {('OWN_SLOT_SUM', '-')} for m in k3.Q3M_TP_MODULES)
       and ('OWN_SLOT_SUM', '-') not in k3.MODULE_CAPS['k3_q3m_lean'] and k3.Q3M_TP_OPS == k3.Q3M_LEAN_OPS | {k3.OP_XCHG, k3.OP_OWN_SLOT_SUM},
       'capabilities: the lean module\'s plus OWN_SLOT_SUM; ops: the lean set plus OP_XCHG and OP_OWN_SLOT_SUM')
 from caminus.device import kernels as dk

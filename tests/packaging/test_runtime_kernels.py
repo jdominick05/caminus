@@ -49,11 +49,11 @@ class Metadata:
         return {'block_count': 2, 'nextn_predict_layers': 1}[key]
 
 
-def q3_engine(iq=(), rs=(), **flags):
+def q3_engine(iq=(), rs=(), q40=False, **flags):
     m = q3moe_one.Q3MoEOne.__new__(q3moe_one.Q3MoEOne)
     m.module = None
     m.fused = m.gu = m.attn_one = m.attn_split = True
-    m.iq, m.rs = set(iq), set(rs)
+    m.iq, m.rs, m.q40 = set(iq), set(rs), q40
     for key, value in flags.items():
         setattr(m, key, value)
     return m
@@ -239,6 +239,11 @@ class RuntimeKernels(unittest.TestCase):
                 selected = q3_engine(rs=(fmt,)).module
                 self.assertEqual(selected, want)
                 self.require_runtime([selected])
+        for q8 in (False, True):   # (a Q4_0 file: the Q4_0 family's twin of what a Q4_K file would select)
+            with self.subTest(q40=True, q8=q8):
+                selected = q3_engine(q40=True, q8=q8).module
+                self.assertEqual(selected, k3.Q3M_Q40_OF[k3.Q3M_KV_Q8_OF[q3moe_one.MODULE_LEAN] if q8 else q3moe_one.MODULE_LEAN])
+                self.require_runtime([selected])
 
     def test_q3_experimental_or_invalid_tapes_are_not_promoted(self):
         for flag in ('fused', 'gu', 'attn_one', 'attn_split'):
@@ -251,13 +256,19 @@ class RuntimeKernels(unittest.TestCase):
             with self.subTest(iq=iq, rs=rs), self.assertRaises(ValueError):
                 q3_engine(iq=iq, rs=rs).module
 
-    def test_real_q3_prefill_selects_base_or_iq_and_refuses_rs(self):
+    def test_real_q3_prefill_selects_base_iq_or_q40_and_refuses_rs(self):
         for fmt in ('Q4_K', 'Q6_K') + tuple(q3m_ops.IQ_KERNEL):
             with self.subTest(fmt=fmt):
                 names = self.q3_prefill(fmt)
                 self.assertEqual(names, [q3m_ops.IQ_MODULE if fmt in q3m_ops.IQ_KERNEL else 'q3m_prefill'])
                 self.require_runtime(names)
         for fmt in q3moe_one.MODULE_RS:
+            if fmt == 'Q4_0':   # (a Q4_0 matrix: the Q4_0 family's object)
+                with self.subTest(fmt=fmt):
+                    names = self.q3_prefill(fmt)
+                    self.assertEqual(names, [q3m_ops.Q40_MODULE])
+                    self.require_runtime(names)
+                continue
             with self.subTest(fmt=fmt), self.assertRaises(ValueError):
                 self.q3_prefill(fmt)
 

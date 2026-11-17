@@ -151,8 +151,9 @@ class Q3MPrefillTP(PrefillDriver):
         self.devs = [torch.device(f'cuda:{d}') for d in m.devs]
         self.crossover = CROSSOVER if crossover is None else int(crossover)
         self.W = [[card_weights(m, c, il) for il in range(m.nl)] for c in (0, 1)]
+        self.module = q3m_ops.Q40_MODULE if getattr(m, 'module', None) in k3.Q3M_Q40_MODULES else 'q3m_prefill'   # (the decode module's family)
         bad = [f'blk.{il} {k} card {c}: {self.W[c][il][k][0]}' for c in (0, 1) for il in range(m.nl) for k in MM_KEYS
-               if self.W[c][il][k][0] not in q3m_ops.formats('q3m_prefill')]
+               if self.W[c][il][k][0] not in q3m_ops.formats(self.module)]
         if m.emb.type != 'Q4_K': bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q3MPrefillTP: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
         self.yarn = getattr(m, 'rope', None) is not None   # (the long-context mode: q3p_qk_rope from its YaRN build on each card)
@@ -165,7 +166,7 @@ class Q3MPrefillTP(PrefillDriver):
             dev = self.devs[c]
             f32, f16, i32 = layout_tp(self.sh[c], T)
             with torch.cuda.device(dev):
-                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8, yarn=self.yarn)); self.S.append(SlotSum(dev))
+                self.O.append(q3m_ops.Ops(dev, self.module, q8=self.q8, yarn=self.yarn)); self.S.append(SlotSum(dev))
                 b = {}
                 for n, k in f32.items(): b[n] = torch.zeros(k, dtype=torch.float32, device=dev)
                 for n, k in f16.items(): b[n] = torch.zeros(k, dtype=torch.float16, device=dev)

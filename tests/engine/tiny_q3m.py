@@ -5,11 +5,13 @@ the two-card split falls on whole blocks), top-2, two layers. The formats are th
 for attn_v and ffn_down in layer 0 (Q4_K in layer 1), a Q4_K embedding and a Q6_K head, F32 router and norms. The
 quantized blocks are random valid blocks with small scales (tiny_q35.quant): caminus.ref_q3moe decodes the same bytes,
 so the reference and the engine see one model. A few MiB.
+q40=True: the Q4_0 family's formats (the GPTQ-Int4 checkpoint converted: tools/eval/gptq_to_gguf.py): every attention and
+expert matrix Q4_0 (one scale per 128 values), the Q4_K embedding and the Q6_K head as above.
 tp=True: the two-card engine's shapes (caminus.engine.q3moe_tp, the served split's per card): 32 query / 4 kv heads (2 kv
 heads and their 16 query heads per card, as the served file's 4 kv heads split), and a vocabulary of 384 rows (the head's
 cut at the bandwidth share falls at 256 / 128 rows: unequal halves).
 
-  write(path, seed=7, n_ctx=4096, tp=False) -> dict(path, D, V, layers, H, HKV, HD, E, KU, FF)"""
+  write(path, seed=7, n_ctx=4096, tp=False, q40=False) -> dict(path, D, V, layers, H, HKV, HD, E, KU, FF)"""
 import os
 import struct
 import sys
@@ -25,7 +27,7 @@ TP_SHAPES = dict(H=32, HKV=4, V=384)   # (tp=True: two kv heads per card)
 FORMATS = [dict(attn_v='Q6_K', ffn_down='Q6_K'), dict(attn_v='Q4_K', ffn_down='Q4_K')]
 
 
-def write(path, seed=7, n_ctx=4096, tp=False):
+def write(path, seed=7, n_ctx=4096, tp=False, q40=False):
     """the file at path; n_ctx: its context_length (the most max_ctx an engine on it takes); tp: the two-card shapes"""
     H, HKV, V = (TP_SHAPES['H'], TP_SHAPES['HKV'], TP_SHAPES['V']) if tp else (globals()['H'], globals()['HKV'], globals()['V'])
     rng = np.random.default_rng(seed)
@@ -33,6 +35,7 @@ def write(path, seed=7, n_ctx=4096, tp=False):
     T = {}   # name -> (format, bytes, dims innermost first)
 
     def mat(name, fmt, rows, K, n=1):   # n > 1: n matrices of [rows, K] (the experts: dims K, rows, n)
+        if q40 and name.startswith('blk.'): fmt = 'Q4_0'
         T[name] = (fmt, quant(rng, fmt, rows * n, K), (K, rows) + ((n,) if n > 1 else ()))
 
     def vec(name, a):

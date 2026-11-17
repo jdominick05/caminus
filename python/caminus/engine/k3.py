@@ -134,6 +134,23 @@ def atts_max_splits(module):
     """the most OP_OWN_ATTS splits per kv head the module's merge takes (Engine.own_atts refuses more)"""
     return ATS_MAXS_TP if module in Q3M_TP_MODULES else ATS_MAXS
 Q3M_VER_MODULES = ('k3_q3m_ver', 'k3_q3m_ver_trace')   # (kernels/k3_q3m_ver.hip: the lean module's ops with their T-token forms, for speculative verify passes)
+# the Q4_0 family (kernels/k3_q3m_q40*.hip, K3_Q3M_Q40: the official GPTQ-Int4 checkpoint as Q4_0, its head Q6_K): one twin
+# per lean / Q8 KV / YaRN / two-card / verify build, the same ops with the Q4_0 tile in place of the Q4_K one. Every map
+# above takes each twin's entry from its base's (tests/engine/test_q3moe_q40_cpu.py checks each map, both directions)
+Q3M_Q40_OF = {m: m.replace('k3_q3m_lean', 'k3_q3m_q40', 1) if m.startswith('k3_q3m_lean') else m.replace('k3_q3m_', 'k3_q3m_q40_', 1)
+              for m in Q3M_LEAN_MODULES + Q3M_TP_MODULES + Q3M_VER_MODULES}
+Q3M_Q40_BASE = {t: b for b, t in Q3M_Q40_OF.items()}
+Q3M_Q40_MODULES = tuple(Q3M_Q40_OF.values())
+Q3M_LEAN_MODULES += tuple(Q3M_Q40_OF[m] for m in Q3M_LEAN_MODULES)
+Q3M_KV_Q8_BASE.update({Q3M_Q40_OF[q]: Q3M_Q40_OF[b] for q, b in list(Q3M_KV_Q8_BASE.items())})
+Q3M_KV_Q8_OF = {base: name for name, base in Q3M_KV_Q8_BASE.items()}
+Q3M_KV_Q8_MODULES = tuple(Q3M_KV_Q8_BASE)
+Q3M_TP_OF.update({Q3M_Q40_OF[one]: Q3M_Q40_OF[tp] for one, tp in list(Q3M_TP_OF.items())})
+Q3M_TP_MODULES = tuple(Q3M_TP_OF.values())
+Q3M_YARN_OF.update({Q3M_Q40_OF[b]: Q3M_Q40_OF[y] for b, y in list(Q3M_YARN_OF.items())})
+Q3M_YARN_BASE = {y: b for b, y in Q3M_YARN_OF.items()}
+Q3M_YARN_MODULES = tuple(Q3M_YARN_OF.values())
+Q3M_VER_MODULES += tuple(Q3M_Q40_OF[m] for m in Q3M_VER_MODULES)
 # the plain Qwen3.8-27B GSQ-RCO files' verify modules: k3_q35_gsq_ver (k3_q35_gsq.hip + K3_Q3M_VER: ThinkingCap's T-token
 # tiles + IQ2_XXS / IQ2_XS / Q2_K / Q4_K) and k3_q35_gsq_ver_m (K3_Q35_GSQ_M: the one IQ1_M matrix's T-token matvec alone, in
 # its own launch: with it, k3_q35_gsq_ver's k3_run passed 96 VGPRs). In Q35TV_MODULES: ThinkingCap's verify line's ops and attention
@@ -357,6 +374,10 @@ MODULE_CAPS.update({m: MODULE_CAPS['k3_q3m_lean'] | {('OWN_MV', f'{f}/a16_1rt{g}
 MODULE_CAPS.update({m: MODULE_CAPS['k3_q3m_lean'] | {('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_IQ_FMT for g in ('', '_gu')}
                     for m in Q3M_IQ_MODULES})
 MODULE_CAPS.update({m: MODULE_CAPS['k3_q3m_lean'] | {('OWN_MV', f'{f}/a16_1rt{g}') for g in ('', '_gu')} for m, f in Q3M_RS_MODULES.items()})
+# the Q4_0 family: its base's pairs with the Q4_0 tile's forms in place of the Q4_K tile's (K3_Q3M_Q40 compiles the Q4_K
+# tile out: a Q4_K matrix there would leave its rows unwritten)
+MODULE_CAPS.update({t: frozenset((op, f.replace('Q4_K/', 'Q4_0/', 1) if op == 'OWN_MV' else f) for op, f in MODULE_CAPS[b])
+                    for b, t in Q3M_Q40_OF.items()})
 for _m_ in ATTN_SPLIT_MODULES: MODULE_CAPS[_m_] = MODULE_CAPS[_m_] | {('ATTN', n) for n in ATTN_SPLIT_OPS.values()}
 # whitelisted pairs whose device code is not built yet: tapes using them build, runs refuse (an unknown op is a nop on the
 # device). Empty since S2 (OP_BF16_MV)
@@ -788,7 +809,9 @@ class Engine:
             raise ValueError(f'own_matvec_1rt: T = 1 (on {Q35V_MODULES}: tokens = T; on {Q35M_ALL} also 1; T {self.T}, tokens {tokens})')
         mtp = self.module in Q35M_MODULES
         if mtp and fmt not in ('Q4_0', 'Q6_K'): raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} (Q4_0, Q6_K)')
-        if not mtp and fmt == 'Q4_0': raise ValueError(f'own_matvec_1rt: Q4_0 on {self.module} (the drafter module {Q35M_MODULES} only)')
+        q40 = self.module in Q3M_Q40_MODULES
+        if q40 and fmt not in ('Q4_0', 'Q6_K'): raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} (the Q4_0 family: Q4_0, Q6_K)')
+        if not mtp and not q40 and fmt == 'Q4_0': raise ValueError(f'own_matvec_1rt: Q4_0 on {self.module} (the drafter module {Q35M_MODULES} and the Q4_0 family {Q3M_Q40_MODULES} only)')
         if tokens != 1 or x_per_token or union:
             if self.module not in Q3M_VER_MODULES + Q35V_MODULES or (self.module in Q35V_MODULES and (x_per_token or union)): raise ValueError(f'own_matvec_1rt: module {self.module} has no T-token forms ({Q3M_VER_MODULES})')
             if not 1 <= tokens <= 15 or (tokens > 1 and (ids is not None or up is not None or x_per_token)):
@@ -807,7 +830,7 @@ class Engine:
                      or (self.module in Q35TM_MODULES and fmt not in (('Q6_K', 'Q4_K') if self.module in Q35RM_MODULES else ('Q6_K',)))):   # (the MTP modules compile the Q6_K T-token tile only, the GSQ one also its Q4_K head's)
             raise ValueError(f'own_matvec_1rt: module {self.module} runs {q35_fmts}, one matrix, no ids, one token '
                              f'(T tokens on {Q35TV_MODULES + Q35TPV_MODULES}; got {fmt}, tokens {tokens})')
-        if not q35t and not mtp and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
+        if not q35t and not mtp and not q40 and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
             raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} ({OWN_1RT_FMT}; {sorted(OWN_IQ_FMT)} on {Q3M_IQ_MODULES}; {Q3M_RS_MODULES})')
         if (scales is not None) != rs: raise ValueError(f'own_matvec_1rt: scales are the row-scale formats\' ({sorted(OWN_RS_FMT)}), and they need them (fmt {fmt})')
         if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:

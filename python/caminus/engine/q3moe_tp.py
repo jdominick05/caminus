@@ -50,7 +50,7 @@ import torch
 from .. import ggufio
 from ..device import capacity
 from . import k3, upload
-from .own_layout import q6k_planes
+from .own_layout import q4_0_planes, q6k_planes
 from .q35_dense_tp import cut, vocab_cut
 from .q3moe_one import card_per_wgp, splits_for, ATS_SPLITS, ATS_LMIN, KV_FORMAT_Q8, _rope_mode
 
@@ -184,7 +184,9 @@ class Q3MoETP:
         if len(devices) != 2 or devices[0] == devices[1]: raise ValueError(f'Q3MoETP: two different devices, not {devices}')
         self.devs, self.max_ctx, self.limit_us = list(devices), int(max_ctx), limit_us
         self.cache_rows = self.max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
+        q40 = any(t.type == 'Q4_0' for t in F.tensors if t.name != 'token_embd.weight')   # (Q4_0 matrices: the Q4_0 family, k3.Q3M_Q40_OF)
         one = module or ('k3_q3m_lean_kvq8' if q8 else 'k3_q3m_lean')
+        if module is None and q40: one = k3.Q3M_Q40_OF[one]
         one = {v: k for k, v in k3.Q3M_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
         if one in k3.Q3M_YARN_MODULES and self.rope is None: raise ValueError(f'Q3MoETP: {one} is a YaRN build: it needs rope=YarnMode')
         if self.rope is not None:   # (the long-context mode: the YaRN build of the module the rest of these checks pick)
@@ -199,9 +201,10 @@ class Q3MoETP:
         if q8: self.kv_format_id = KV_FORMAT_Q8   # (the engine key carries it: Q8 rows never restore into F16 ones)
         self.emb = F.T['token_embd.weight']
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoETP: token_embd is {self.emb.type} (Q4_K only)')
+        mats = ('Q4_0', 'Q6_K') if self.module in k3.Q3M_Q40_MODULES else ('Q4_K', 'Q6_K')   # (the module's matrix formats)
         for t in F.tensors:
-            if len(t.shape) >= 2 and t.type not in ('Q4_K', 'Q6_K', 'F32'):
-                raise ValueError(f'Q3MoETP: {t.name} is {t.type} (Q4_K / Q6_K matrices: {self.module}\'s formats)')
+            if len(t.shape) >= 2 and t.type not in mats + ('F32',) and t.name != 'token_embd.weight':
+                raise ValueError(f'Q3MoETP: {t.name} is {t.type} ({" / ".join(mats)} matrices: {self.module}\'s formats)')
         self.per_wgp = per_wgp
         pair = lambda v: [int(v[0]), int(v[1])] if isinstance(v, (tuple, list)) else [int(v), int(v)]
         self.rpt_c = pair(rpt); self.rpt_down_c = pair(rpt if rpt_down is None else rpt_down); self.rpt_head = int(rpt_head)
@@ -289,9 +292,10 @@ class Q3MoETP:
                 if t.type == 'F32':
                     out.append(dict(name=name, fmt='F32', rows=Rl, K=Kl, w=self.h2d.up(np.ascontiguousarray(x.view(np.float32)).reshape(Rl, Kl), name, c, 'cut')))
                 else:
-                    if t.type not in ('Q4_K', 'Q6_K'): raise ValueError(f'Q3MoETP: {name} is {t.type} (Q4_K / Q6_K)')
+                    if t.type not in ('Q4_K', 'Q6_K', 'Q4_0'): raise ValueError(f'Q3MoETP: {name} is {t.type} (Q4_K / Q6_K / Q4_0)')
                     y = x.reshape(-1)
                     if t.type == 'Q6_K': y = q6k_planes(y, Rl, Kl)
+                    elif t.type == 'Q4_0': y = q4_0_planes(y, Rl, Kl)
                     out.append(dict(name=name, fmt=t.type, rows=Rl, K=Kl, w=self.h2d.up(np.ascontiguousarray(y), name, c, 'cut')))
             self._kept(name, c, 'cut', out[-1]['w'], (rows, cols))
         return out
@@ -388,6 +392,7 @@ class Q3MoETP:
         if t.type == 'F32': return np.ascontiguousarray(x.view(np.float32)).reshape(Rl, Kl)
         y = x.reshape(-1)
         if t.type == 'Q6_K': y = q6k_planes(y, Rl, Kl)
+        elif t.type == 'Q4_0': y = q4_0_planes(y, Rl, Kl)
         return np.ascontiguousarray(y)
 
     # -- the tapes ---------------------------------------------------------------------------------------------------------

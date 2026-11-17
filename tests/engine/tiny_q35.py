@@ -16,7 +16,7 @@ D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 256, 512, 64, 128, 1, 2, 6, 1, 256, 
 CH = 2 * NK * S + NV * S
 KINDS = [True, True, True, False]
 TYPE_ID = {'F32': 0, 'Q8_0': 8, 'Q2_K': 10, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14, 'IQ2_XXS': 16, 'IQ2_XS': 17, 'IQ3_XXS': 18, 'IQ3_S': 21,
-           'IQ2_S': 22, 'IQ4_XS': 23, 'IQ1_M': 29, 'BF16': 30}
+           'IQ2_S': 22, 'IQ4_XS': 23, 'IQ1_M': 29, 'BF16': 30, 'Q4_0': 2}
 # per block: the format of each matrix (ffn gate, up, down; then the block's own)
 FORMATS = [
     dict(ffn_gate='Q4_K', ffn_up='Q4_K', ffn_down='Q4_K', attn_qkv='Q8_0', attn_gate='Q8_0', ssm_out='Q8_0'),
@@ -72,6 +72,10 @@ def quant(rng, fmt, rows, K):
     if fmt == 'Q8_0':
         nb = K // 32; b = np.zeros((rows, nb, 34), np.uint8)
         b[:, :, 0:2] = _f16(rng, (rows, nb), 1e-3).view(np.uint8).reshape(rows, nb, 2); b[:, :, 2:] = rnd(rows, nb, 32)
+        return b.reshape(-1)
+    if fmt == 'Q4_0':      # d, qs[16]: w = d (q - 8); one d per 128 values, as the GPTQ-Int4 checkpoint's groups
+        nb = K // 32; b = np.zeros((rows, nb, 18), np.uint8)
+        b[:, :, 0:2] = np.repeat(_f16(rng, (rows, nb // 4), 1e-2), 4, axis=1).view(np.uint8).reshape(rows, nb, 2); b[:, :, 2:] = rnd(rows, nb, 16)
         return b.reshape(-1)
     nb = K // 256
     if fmt == 'Q4_K':      # d, dmin, scales[12], qs[128]: w = d * sc * q - dmin * m

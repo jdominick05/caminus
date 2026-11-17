@@ -14,6 +14,17 @@
 enum { OWN_Q4_0 = 14 };   // (k3.py OWN_MTP_FMT)
 #endif
 #endif
+#if defined(K3_Q3M_Q40) && !defined(K3_Q35_MTP)
+// the Q4_0 family of the qwen3moe modules (kernels/k3_q3m_q40*.hip: the official GPTQ-Int4 checkpoint as Q4_0, every
+// matrix but the Q6_K head): the drafter module's Q4_0 tile (kernels/own_quant_q4_0.h, plane layout) in the one-round-trip
+// op in place of the Q4_K tile. A decode module runs it with one token (OWN_MT 1: no array for tokens it never has); the
+// verify module keeps own_quant_mt.h's OWN_MT, and each token's statements are the one-token pass's, so the bits match
+#ifndef K3_Q3M_VER
+#define OWN_MT 1
+#endif
+#include "own_quant_q4_0.h"
+enum { OWN_Q4_0 = 14 };   // (k3.py OWN_FMT_NAME)
+#endif
 #ifdef K3_Q3M_IQ
 #include "own_quant_iq.h"   // the codebook formats' tiles (the IQ study module, kernels/k3_q3m_iq.hip)
 #endif
@@ -78,8 +89,16 @@ typedef __attribute__((address_space(3))) float AS3F;
 #endif
 __device__ __forceinline__ void own_1rt_acc(const uint8_t * W, const Seg & sg, int grow, int lim, int total,
                                             const _Float16 * x, int lane, float * res OWN_RS_PAR) {
-#ifndef OWN_K3_NO_Q4   // (OWN_K3_NO_*: register-budget experiments only)
+#if !defined(OWN_K3_NO_Q4) && !defined(K3_Q3M_Q40)   // (OWN_K3_NO_*: register-budget experiments only; the Q4_0 family has no Q4_K matrix)
     if (sg.work == OWN_Q4_K) own_rows_q4k_1rt<0, OWN_K3_RW, 1, 1>(W, grow, lim, x, nullptr, lane, sg.K, res);
+#endif
+#ifdef K3_Q3M_Q40
+    if (sg.work == OWN_Q4_0) {
+        float rq[OWN_MT][OWN_K3_RW];
+        own_rows_q4_0_1rt<OWN_K3_RW>(W, total, grow, lim, x, [](int) -> size_t { return 0; }, 1, lane, sg.K, rq);
+#pragma unroll
+        for (int i = 0; i < OWN_K3_RW; i++) res[i] = rq[0][i];
+    }
 #endif
 #ifndef OWN_K3_NO_Q6
     if (sg.work == OWN_Q6_K) own_rows_q6k_planes<0, OWN_K3_RW, 1, 1>(W, total, grow, lim, x, nullptr, lane, sg.K, res);
@@ -201,7 +220,11 @@ __device__ __forceinline__ void own_op_mv_1rt(const Seg & sg, int t, int wave, i
 #endif
         if (sg.work == OWN_Q6_K) own_rows_q6k_planes_mt2<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
 #else
+#ifdef K3_Q3M_Q40   // (the Q4_0 family's verify module: the decode module's tile with nt tokens)
+        if (sg.work == OWN_Q4_0) own_rows_q4_0_1rt<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+#else
         if (sg.work == OWN_Q4_K) own_rows_q4k_1rt_mt<OWN_K3_RW>(Wm, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
+#endif
         if (sg.work == OWN_Q6_K) own_rows_q6k_planes_mt<OWN_K3_RW>(Wm, total, grow, lim, (const _Float16 *)sg.a, xoff, nt, lane, sg.K, rm);
 #endif
         if (lane == 0) {

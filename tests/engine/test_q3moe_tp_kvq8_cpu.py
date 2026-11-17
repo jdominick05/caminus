@@ -145,7 +145,7 @@ capacity.check = lambda *a, **k: None
 
 # ---- the module tables -------------------------------------------------------------------------------------------------------
 TPQ = 'k3_q3m_lean_tp_kvq8'
-check(k3.Q3M_KV_Q8_BASE == {'k3_q3m_lean_kvq8': 'k3_q3m_lean', TPQ: 'k3_q3m_lean_tp',     # (+ their YaRN builds: test_q3moe_yarn_cpu.py)
+check({q: b for q, b in k3.Q3M_KV_Q8_BASE.items() if q not in k3.Q3M_Q40_BASE} == {'k3_q3m_lean_kvq8': 'k3_q3m_lean', TPQ: 'k3_q3m_lean_tp',     # (+ their YaRN builds: test_q3moe_yarn_cpu.py)
                            'k3_q3m_lean_kvq8_yarn': 'k3_q3m_lean_yarn', TPQ + '_yarn': 'k3_q3m_lean_tp_yarn'}
       and k3.Q3M_KV_Q8_OF['k3_q3m_lean_tp'] == TPQ and k3.Q3M_TP_OF['k3_q3m_lean_kvq8'] == TPQ
       and TPQ in k3.Q3M_TP_MODULES and TPQ in k3.Q3M_KV_Q8_MODULES and TPQ in k3.Q3M_MODULES and TPQ not in k3.Q3M_LEAN_MODULES

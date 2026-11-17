@@ -43,7 +43,12 @@ Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill',
           # --long-context: YaRN x4): the YaRN builds of the decode modules and the prefill's qk_rope, F16 and Q8_0 rows
           'k3_q3m_lean_kvq8', 'k3_q3m_lean_tp_kvq8', 'q3m_prefill_kvq8',
           'k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn', 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn',
-          'q3m_prefill_yarn', 'q3m_prefill_kvq8_yarn')
+          'q3m_prefill_yarn', 'q3m_prefill_kvq8_yarn',
+          # the Q4_0 family (a file whose matrices are Q4_0: the official GPTQ-Int4 checkpoint converted): the twins of the
+          # serving decode modules above (k3.Q3M_Q40_OF) and the prefill object with the Q4_0 GEMM; the Q8 KV cache's and
+          # the long-context mode's prefill kernels stay on the objects above
+          'k3_q3m_q40', 'k3_q3m_q40_tp', 'k3_q3m_q40_kvq8', 'k3_q3m_q40_tp_kvq8',
+          'k3_q3m_q40_yarn', 'k3_q3m_q40_kvq8_yarn', 'k3_q3m_q40_tp_yarn', 'k3_q3m_q40_tp_kvq8_yarn', 'q3m_prefill_q40')
 DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
                'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
                'k3_q35_gsq', 'q35_prefill_gsq', 'k3_q35_gsq_ver', 'k3_q35_gsq_ver_m',

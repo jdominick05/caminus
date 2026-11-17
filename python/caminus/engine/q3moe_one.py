@@ -21,12 +21,14 @@ import torch
 from .. import ggufio
 from ..device import capacity, hip
 from . import k3
-from .own_layout import q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
+from .own_layout import q4_0_planes, q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
 MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
 MODULE_IQ = 'k3_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
-MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
+MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md; Q4_0 files run there only when module names it)
+# a file whose matrices are Q4_0 (the official GPTQ-Int4 checkpoint, tools/eval/gptq_to_gguf.py) runs on the Q4_0 family:
+# the lean modules' twins (k3.Q3M_Q40_OF), the matrices in engine.own_layout.q4_0_planes
 # the KV cache as Q8_0 rows (q8=True): kernels/own_kv_codec.h's blocks of the fp16 values the F16 cache holds, K (and q)
 # through the head's Walsh-Hadamard transform first (kernels/own_kv_rot128.h): a Q8 row is
 # caminus.ref_kv.encode_q8_kv(ref_kv.hadamard128(K), V) of the F16 row's K and V; the lean decode form only, one card.
@@ -128,7 +130,10 @@ class Q3MoEOne:
         self.emb = F.T['token_embd.weight']
         # the codebook formats among the matrices (they pick the module: MODULE_IQ)
         self.iq = {t.type for t in F.tensors if t.type in k3.OWN_IQ_FMT and t.name != 'token_embd.weight'}
-        self.rs = {t.type for t in F.tensors if t.type in RS_CONT and t.name != 'token_embd.weight'}   # (-> MODULE_RS: one code width per module)
+        mats = {t.type for t in F.tensors if t.name != 'token_embd.weight'}
+        rs_named = getattr(self, '_module', None) in k3.Q3M_RS_MODULES
+        self.rs = {f for f in mats if f in RS_CONT and (f != 'Q4_0' or rs_named)}   # (-> MODULE_RS: one code width per module)
+        self.q40 = 'Q4_0' in mats and not rs_named   # (-> the Q4_0 family)
         # VRAM: every tensor (same bytes in our layouts; the embedding too: its row is decoded on the device), the KV
         # cache, the buffers (+ slack)
         if self.emb.type != 'Q4_K': raise ValueError(f'Q3MoEOne: token_embd is {self.emb.type} (Q4_K only)')
@@ -201,7 +206,7 @@ class Q3MoEOne:
     def _module_base(self):
         lean = self.fused and self.gu and self.attn_one and self.attn_split
         if getattr(self, 'q8', False):   # (the Q8 cache: k3_q3m_lean's Q8 build only; set explicitly or picked here)
-            one = k3.Q3M_KV_Q8_OF[MODULE_LEAN]   # (the one-card Q8 module; its two-card build only when set by name: the
+            one = k3.Q3M_KV_Q8_OF[k3.Q3M_Q40_OF[MODULE_LEAN] if getattr(self, 'q40', False) else MODULE_LEAN]   # (the one-card Q8 module; its two-card build only when set by name: the
             #  one-card probe of that object, tests/engine/test_q3m_tp_probe.py --kv q8, as the F16 two-card module)
             if self._module not in (None, one, k3.Q3M_TP_OF[one]) or not lean or self.iq or self.rs:
                 raise ValueError(f'Q3MoEOne: the Q8 KV cache runs on {one} only (the default tape form, a file '
@@ -216,6 +221,9 @@ class Q3MoEOne:
         if self.iq:
             if not lean: raise ValueError(f'Q3MoEOne: {sorted(self.iq)} tensors run on {MODULE_IQ} only (the default tape form)')
             return MODULE_IQ
+        if getattr(self, 'q40', False):
+            if not lean or self.iq or self.rs: raise ValueError(f'Q3MoEOne: Q4_0 matrices run on {k3.Q3M_Q40_OF[MODULE_LEAN]} only (the default tape form, no codebook or row-scale tensors)')
+            return k3.Q3M_Q40_OF[MODULE_LEAN]
         return MODULE_LEAN if lean else MODULE
 
     @module.setter
@@ -227,11 +235,12 @@ class Q3MoEOne:
         t = self.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         b = np.asarray(t.data())
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
+        elif t.type == 'Q4_0' and self.q40: b = q4_0_planes(b, R, K)
         elif t.type in IQ_REC: b = iq_records(b, R, K, t.type)
         elif t.type in RS_CONT:   # (-> the codes and, a fifth entry, the row scales; a row with two scales is refused there)
             b, sc = rs_planes(b, R, K, t.type)
             return (MODULE_RS[t.type][1], int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda'), torch.from_numpy(sc).to('cuda'))
-        elif t.type not in ('Q4_K', 'IQ4_XS'): raise ValueError(f'Q3MoEOne: {name} is {t.type} ({sorted((set(k3.OWN_BLOCK) - set(k3.OWN_RS_FMT)) | set(RS_CONT))} only)')
+        elif t.type not in ('Q4_K', 'IQ4_XS', 'Q4_0'): raise ValueError(f'Q3MoEOne: {name} is {t.type} ({sorted((set(k3.OWN_BLOCK) - set(k3.OWN_RS_FMT)) | set(RS_CONT))} only)')
         return t.type, int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to('cuda')
 
     def _f32(self, name, shape=None):

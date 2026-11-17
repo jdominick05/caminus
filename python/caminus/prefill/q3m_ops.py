@@ -5,6 +5,7 @@ bytes in the decode's layout: Q4_K raw blocks, Q6_K planes); an expert tensor is
   Ops(dev).mm(W, x16, ldx, y, ldy, n=...)                  dense: y[t] = W x16[t] for t < n (fp32 out, row stride ldy)
   Ops(dev).mm(W, x16, ldx, y, ldy, work=(items, nitems, bound, xs, yd))   experts: the grouped pairs (group())
   emb / add_rms16 / router / topk / group / swiglu / qk_rope / attn: one kernel each (kernels/q3m_prefill.hip)
+The Q4_0 family's object q3m_prefill_q40 (kernels/q3m_prefill_q40.hip) adds mm for Q4_0 (engine.own_layout.q4_0_planes).
 The study object q3m_prefill_iq (kernels/q3m_prefill_iq.hip, docs/dev/iq-quant-study.md) adds mm for the codebook formats
 (IQ4_XS raw blocks; IQ3_XXS / IQ3_S / IQ2_XXS in engine.own_layout.iq_records' layout); on the shipped object the host
 refuses them."""
@@ -28,11 +29,18 @@ YARN_MODULE = {False: 'q3m_prefill_yarn', True: 'q3m_prefill_kvq8_yarn'}
 YARN_PAR = 2 * 128 + 2 + k3.YARN_TABLE_FLOATS                       # floats of a YaRN par block (q_norm | k_norm | theta_scale, eps | table)
 IQ_MODULE = 'q3m_prefill_iq'                                      # the study object: the shipped kernels + the four below
 IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_XXS': 'q3p_mm_iq2xxs'}
+Q40_MODULE = 'q3m_prefill_q40'   # the Q4_0 family's object (kernels/q3m_prefill_q40.hip): the shipped kernels + q3p_mm_q40
+Q40_UNIT = 18                    # (Q4_0: bytes per 32 values, in engine.own_layout.q4_0_planes' two planes)
+
+
+def module_for(fmts):
+    """the prefill object for a file's matrix formats (as the decode engine picks its module)"""
+    return IQ_MODULE if set(fmts) & set(IQ_KERNEL) else Q40_MODULE if 'Q4_0' in fmts else 'q3m_prefill'
 
 
 def formats(module):
     """the weight formats a prefill object's mm takes"""
-    return tuple(BLOCK_BYTES) + (tuple(IQ_KERNEL) if module == IQ_MODULE else ())
+    return tuple(BLOCK_BYTES) + (tuple(IQ_KERNEL) if module == IQ_MODULE else ('Q4_0',) if module == Q40_MODULE else ())
 
 
 def items_bound(npairs, n_exp):
@@ -47,7 +55,7 @@ class Ops:
         (the YaRN table in par: YARN_PAR floats), every other kernel as without it"""
         self.dev = torch.device(dev) if not isinstance(dev, torch.device) else dev
         self.module, self.q8, self.yarn = module, bool(q8), bool(yarn)
-        if self.yarn and module != 'q3m_prefill': raise ValueError(f'q3m Ops: the long-context mode runs with q3m_prefill only (not {module})')
+        if self.yarn and module not in ('q3m_prefill', Q40_MODULE): raise ValueError(f'q3m Ops: the long-context mode runs with q3m_prefill or {Q40_MODULE} only (not {module})')
         with torch.cuda.device(self.dev):
             self.mod = hip.Module(module)
             self.kvmod = hip.Module(KVQ8_MODULE) if self.q8 else None
@@ -73,6 +81,10 @@ class Ops:
         elif fmt == 'Q6_K':
             rtot = wb.numel() // (K // 256 * BLOCK_BYTES['Q6_K'])
             self.mod.q3p_mm_q6k(grid, (256,), wb, I(R), I(rtot), I(K), x16, I(ldx), xs, y, I(ldy), yd, items, nitems, I(ntok))
+        elif fmt == 'Q4_0' and self.module == Q40_MODULE:   # (the plane layout: plane B is placed by the buffer's rows)
+            rtot, rem = divmod(wb.numel(), K // 32 * Q40_UNIT)
+            if rem or rtot < R: raise ValueError(f'q3m mm: Q4_0 buffer of {wb.numel()} B is not q4_0_planes of rows x {K}')
+            self.mod.q3p_mm_q40(grid, (256,), wb, I(R), I(rtot), I(K), x16, I(ldx), xs, y, I(ldy), yd, items, nitems, I(ntok))
         elif fmt in IQ_KERNEL and self.module == IQ_MODULE:
             if fmt in IQ_REC:                                # (the record layout: its planes are placed by the buffer's rows)
                 rtot, rem = divmod(wb.numel() - IQ_PAD, K // 256 * IQ_REC[fmt][0])

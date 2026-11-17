@@ -358,6 +358,28 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
   of 64 chunks), with the Q6_K head -0.0230 ± 0.0017; the Q6_K head costs 0.0005 nats against F16. So the head can
   be Q6_K (the same bytes per token as today) at almost no cost. One text, and a GPTQ calibration set may lean
   towards text like it (the checkpoint does not name its set); no common bf16 reference, so no KLD.
+- **Where the Q4_0 family stopped (work in progress, nothing measured on a card yet).** The target file is the converted
+  checkpoint with the Q4_K_M file's Q4_K embedding and Q6_K head spliced in (`gguf_splice.py --match
+  '^(output|token_embd)\.weight$'`), so the engine needs no F16 op.
+  - Built: `kernels/k3_q3m_q40*.hip`, twelve twins of the lean, Q8 KV, YaRN, two-card and verify modules
+    (`K3_Q3M_Q40` in `kernels/k3_own_ops.h`: the Q4_0 tile of `kernels/own_quant_q4_0.h` in place of the Q4_K one, in
+    the one-token and the T-token forms); `kernels/q3m_prefill_q40.hip`, the shipped prefill kernels plus `q3p_mm_q40`
+    (WMMA, B = q - 8 exact, d outside; 121 VGPRs, no spills). The host: `k3.Q3M_Q40_OF` and its tables, the module
+    choice in `engine/q3moe_one.py` and `engine/q3moe_tp.py` (Q4_0 matrices pick the family; a row-scale module only
+    when named), `prefill/q3m_ops.py` / `q3m.py` / `q3m_tp.py`, the runtime set, `arch.py`'s YaRN formats.
+  - Passing: `objcheck` against the base build (every shipped object unchanged; the twins at 96 VGPRs, no VGPR spill,
+    1 to 3 more spilled SGPRs than their bases), `tests/engine/test_q3moe_q40_cpu.py` and the CPU suites the change
+    touches (runtime_kernels, arch, own_code, q3m_tp_kernels, q3moe_tp, q3moe_kvq8, q3moe_tp_kvq8, q3moe_yarn,
+    q3m_prefill_tp).
+  - Next: the GPU gates in short windows (the non-display card first): the decode tile against the standalone
+    `own_mv_q4_0_k3` and float64 on the file's rows, the 30B G-model gate against the target file's own float64
+    reference (`tools/reference/q3moe_ref.py`, about 17 min of CPU; llama.cpp golden logits for the bound), the depth
+    rows, the embedding perplexity check, then served speed against Q4_K_M (one card and two, F16 and Q8 KV).
+  - Open: the iu8 decode path (`v_dot4_i32_iu8` on int8 activations, per 32 or 128) against this fp16 path at the
+    bandwidth bound, with its own accuracy gate; a per-128 scale layout (4.125 bits per weight instead of 4.5) for both;
+    whether `unroll 1` in `q3p_mm_q40` costs prefill speed; the catalog (the converter needs the Q4_K_M file for the
+    metadata, the embedding and the head: partial reads of that file over HTTP, a second download, or a hosted
+    converted file).
 
 ## The long-context mode (YaRN x4, opt-in)
 

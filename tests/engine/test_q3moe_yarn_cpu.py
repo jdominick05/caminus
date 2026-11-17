@@ -113,7 +113,7 @@ check(raises(lambda: rope.yarn_table(64, 1e6, 4.0, 32768)) and raises(lambda: ro
       'the table is for 128 dims only; a factor <= 1 is refused')
 
 # ---- the module tables ------------------------------------------------------------------------------------------------------------
-YO = k3.Q3M_YARN_OF
+YO = {b: y for b, y in k3.Q3M_YARN_OF.items() if b not in k3.Q3M_Q40_BASE}   # (the Q4_0 family's twins: tests/engine/test_q3moe_q40_cpu.py)
 mem = lambda m: (m in k3.Q3M_LEAN_MODULES, m in k3.Q3M_TP_MODULES, m in k3.Q3M_KV_Q8_MODULES, m in k3.Q3M_MODULES,
                  k3.MODULE_CAPS.get(m), k3.atts_max_splits(m), m in k3.Q3M_VER_MODULES)
 check(set(YO) == {'k3_q3m_lean', 'k3_q3m_lean_kvq8', 'k3_q3m_lean_tp', 'k3_q3m_lean_tp_kvq8'}
@@ -306,12 +306,12 @@ check(not bad and raises(lambda: co.long_mode(dict(long_context=True, max_ctx='a
 # YaRN builds do not run (codebook, row-scale), before placement; its native serve is unchanged
 from tiny_q35 import TYPE_ID as _TID, _s as _gs, _val as _gv
 from caminus.engine.own_layout import RS_CONT
-_BLK = {'F32': (1, 4), 'Q4_K': (256, 144), 'Q6_K': (256, 210), 'Q4_0': (32, 18), 'IQ4_XS': (256, 136), 'IQ3_S': (256, 110)}
+_BLK = {'F32': (1, 4), 'Q4_K': (256, 144), 'Q6_K': (256, 210), 'Q4_0': (32, 18), 'Q2_0': (64, 18), 'IQ4_XS': (256, 136), 'IQ3_S': (256, 110)}
 
 
 def head_file(name, ctx, base, fmts=('Q4_K',)):
     """a header-only qwen3moe file (zero tensors of the given formats; long_mode reads the header and the formats only)"""
-    _TID.setdefault('Q4_0', 2)
+    _TID.setdefault('Q4_0', 2); _TID.setdefault('Q2_0', 42)
     meta = {'general.architecture': 'qwen3moe', 'qwen3moe.block_count': 1, 'qwen3moe.context_length': int(ctx)}
     if base is not None: meta['qwen3moe.rope.freq_base'] = float(base)
     ts = [('token_embd.weight', 'IQ4_XS', 256)] + [(f'blk.0.t{i}.weight', f, 256) for i, f in enumerate(fmts)]
@@ -332,23 +332,24 @@ h_base = head_file('h-base.gguf', 40960, 1e7)
 h_nob = head_file('h-nobase.gguf', 40960, None)
 h_ctx = head_file('h-ctx.gguf', 32768, 1e6)
 h_iq = head_file('h-iq.gguf', 40960, 1e6, ('Q4_K', 'IQ4_XS'))
-h_rs = head_file('h-rs.gguf', 40960, 1e6, ('Q4_K', 'Q4_0'))
+h_rs = head_file('h-rs.gguf', 40960, 1e6, ('Q4_K', 'Q2_0'))
+h_q40 = head_file('h-q40.gguf', 40960, 1e6, ('Q4_K', 'Q4_0'))   # (Q4_0 matrices: the Q4_0 family, which has the YaRN builds)
 errs = {}
 for nm, path_ in (('2507', h_2507), ('base', h_base), ('nobase', h_nob), ('ctx', h_ctx), ('iq', h_iq), ('rs', h_rs)):
     for how, o in (('flag', dict(model=path_, long_context=True)), ('ctx', dict(model=path_, max_ctx=300000 if nm == '2507' else 50000))):
         try: q.long_mode(o); errs[(nm, how)] = None
         except ValueError as e: errs[(nm, how)] = str(e)
-check(q.long_mode(dict(model=h_ok, long_context=True)) == 'YaRN x4' and all(errs.values())
+check(q.long_mode(dict(model=h_ok, long_context=True)) == 'YaRN x4' and all(errs.values()) and q.long_mode(dict(model=h_q40, long_context=True)) == 'YaRN x4'
       and q.long_mode(dict(model=h_2507, max_ctx=200000)) is None and q.long_mode(dict(model=h_2507)) is None
       and 'context_length 262,144' in errs[('2507', 'flag')] and 'rope.freq_base 1e+07' in errs[('2507', 'flag')]
-      and 'IQ4_XS' in errs[('iq', 'flag')] and 'Q4_0' in errs[('rs', 'ctx')] and 'IQ4_XS' not in (errs[('rs', 'flag')] or '')
+      and 'IQ4_XS' in errs[('iq', 'flag')] and 'Q2_0' in errs[('rs', 'ctx')] and 'IQ4_XS' not in (errs[('rs', 'flag')] or '')
       and qt.long_refusal(h_2507) and qt.long_refusal(h_ok) is None,
       'mode: refused for a qwen3moe file that is not the recipe\'s model (context_length 262,144 or 32,768, another or no '
       'rope.freq_base; flag and explicit max_ctx) or with codebook / row-scale tensors (the token embedding\'s format not '
-      'counted); such a file within its own context_length stays native; the recipe\'s file takes it'
+      'counted); such a file within its own context_length stays native; the recipe\'s file takes it, Q4_0 matrices too'
       + ('' if all(errs.values()) else f' (not refused: {[k for k, v in errs.items() if not v]})'))
-check(q.LONG_OFF_FORMATS == frozenset(k3.OWN_IQ_FMT) | frozenset(RS_CONT),
-      f'mode: the refused formats are the engine\'s codebook (k3.OWN_IQ_FMT) and row-scale (own_layout.RS_CONT) tables '
+check(q.LONG_OFF_FORMATS == frozenset(k3.OWN_IQ_FMT) | (frozenset(RS_CONT) - {'Q4_0'}),
+      f'mode: the refused formats are the engine\'s codebook (k3.OWN_IQ_FMT) and row-scale (own_layout.RS_CONT but Q4_0: the Q4_0 family) tables '
       f'({sorted(q.LONG_OFF_FORMATS)})')
 
 # ---- the gates' YaRN bounds (tools/gates/yarn_bound.py) and the resumable depth reference (q3moe_ref32 state) --------------------

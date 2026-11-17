@@ -650,10 +650,11 @@ class _Q3MLong:
     # releases, Qwen3-Coder-30B-A3B: 262,144 positions natively, another base) reaches this entry by its header too; the
     # mode would give it a scaling it was not trained with, so the mode refuses it (its native serve is unchanged)
     LONG_FREQ_BASE = 1e6
-    # the weight formats the mode's builds run (the lean decode modules, q3m_prefill): the codebook (k3.OWN_IQ_FMT) and
-    # row-scale (own_layout.RS_CONT) formats run on their own modules, which have no YaRN build; refused here, before a card
-    # is placed, rather than at engine build (tests/engine/test_q3moe_yarn_cpu.py checks these names against those tables)
-    LONG_OFF_FORMATS = frozenset(('IQ3_XXS', 'IQ4_XS', 'IQ3_S', 'IQ2_XXS', 'Q4_0', 'Q2_0'))
+    # the weight formats the mode's builds run (the lean decode modules and their Q4_0 family, q3m_prefill / q3m_prefill_q40):
+    # the codebook (k3.OWN_IQ_FMT) and row-scale (own_layout.RS_CONT but Q4_0, which the Q4_0 family runs) formats run on
+    # their own modules, which have no YaRN build; refused here, before a card is placed, rather than at engine build
+    # (tests/engine/test_q3moe_yarn_cpu.py checks these names against those tables)
+    LONG_OFF_FORMATS = frozenset(('IQ3_XXS', 'IQ4_XS', 'IQ3_S', 'IQ2_XXS', 'Q2_0'))
 
     def long_refusal(self, path):
         """why the long-context mode refuses this file (None: it is the model the recipe is for, in formats the YaRN builds run)"""
