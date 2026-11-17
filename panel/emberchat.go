@@ -1278,6 +1278,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
 	case "judged":
 		v := str("verdict")
+		if v == "met" { // the finish line right after it carries the verdict and its reason: one line, not two
+			return ""
+		}
 		return toolCard("gate", "judge: "+strings.ReplaceAll(v, "_", " "), firstLine(str("reason")), v == "met" || v == "unread", v != "met", lines(str("reason"), 6), w)
 	case "gate":
 		ok, _ := e.Data["passed"].(bool)
@@ -2290,7 +2293,7 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		if strings.Contains(text, "@") {
 			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
 		}
-		out, err := residentCommand(m, args, text).CombinedOutput()
+		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
