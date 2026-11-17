@@ -45,7 +45,7 @@ def call(name,args):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[]
+    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[];status={}
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -56,6 +56,8 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
             self.respond(dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in self.models[key]]));return
         if self.path.endswith('/props') and key in self.props:
             self.respond(self.props[key]);return
+        if self.path.endswith('/caminus/status') and key in self.status:
+            self.respond(self.status[key]);return
         self.respond(dict(n_ctx=65536))
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -4681,8 +4683,113 @@ for line in sys.stdin:
             note=json.loads((self.home/'throughput.json').read_text())
             self.assertEqual((note['tps'],note['tokens'],note['goal']),(88.0,88,gid))
             rt.store.update(gid,state='working')         # (the status line shows a speed only while a goal works)
-            self.assertEqual(self.cmd('status')['tok_per_s'],88.0)
+            status=self.cmd('status')
+            self.assertEqual((status['tok_per_s'],status['speed_source']),(88.0,'estimate'),
+                             'a record without a source is an estimate')
         finally:rt.mail.close();rt.store.close()
+
+    TIMINGS=dict(cache_n=2000,prompt_n=1488,prompt_ms=1200.0,prompt_per_second=1240.2,predicted_n=500,
+                 predicted_ms=8012.0,predicted_per_second=62.4,decode_tps=63.1,passes=180)
+
+    def engine_stream(self,timings=None):
+        """a streamed reply as caminus serve sends it: pieces, the finish chunk with timings, then the usage chunk"""
+        return dict(_deltas=[dict(choices=[dict(delta=dict(content='Hel'))]),dict(choices=[dict(delta=dict(content='lo.'))]),
+                             dict(choices=[dict(delta={},finish_reason='stop')],timings=timings or self.TIMINGS),
+                             dict(choices=[],usage=dict(prompt_tokens=3488,completion_tokens=500))])
+
+    def working_status(self):
+        """status with a goal working (the status line shows a speed only then)"""
+        import sqlite3
+        gid=self.cmd('send',['Keep working.'])['id']
+        db=sqlite3.connect(self.home/'agent.sqlite3');db.execute("UPDATE goals SET state='working' WHERE id=?",(gid,));db.commit();db.close()
+        return gid,self.cmd('status')
+
+    def test_a_caminus_brain_shows_the_engines_own_speeds(self):
+        # the owner's rule: running locally, tok/s comes from our own engine's stats, never from Ember's clock
+        self.serve_ids(['fixture'])
+        self.replies(self.engine_stream())
+        self.assertEqual(self.cmd('once',['--goal','Stream a short answer.'])['state'],'completed')
+        note=json.loads((self.home/'throughput.json').read_text())
+        self.assertEqual((note['source'],note['tps'],note['prompt_tps'],note['tokens'],note['prompt_n'],note['cache_n']),
+                         ('engine',62.4,1240.2,500,1488,2000),'exactly the final chunk timings, not 500 tokens over the stream time')
+        _,status=self.working_status()
+        self.assertEqual((status['tok_per_s'],status['prompt_tok_per_s'],status['speed_source'],status['speed_live']),
+                         (62.4,1240.2,'engine',False))
+        # once the brain is known to be Caminus, each call's live snapshot names its server (the live poll asks it)
+        from caminus.ember.resident import runtime as R
+        seen=[]
+        class Spy(R.Live):
+            def __init__(s,*a,**k):seen.append(k.get('server'));super().__init__(*a,**k)
+        rt=Runtime(self.home)
+        try:
+            self.assertTrue(rt.model.is_caminus())
+            self.replies(self.engine_stream())
+            with unittest.mock.patch.object(R,'Live',Spy):rt.run(target=rt.store.enqueue('Again.'))
+        finally:rt.mail.close();rt.store.close()
+        self.assertEqual(seen[:1],[f'http://127.0.0.1:{self.server.server_port}/{self.key}'])
+
+    def test_a_caminus_reply_that_read_only_from_cache_leaves_the_read_speed_out(self):
+        from caminus.ember.resident.model import Model
+        self.serve_ids(['fixture'])
+        cfg=json.loads((self.home/'config.json').read_text())
+        m=Model(cfg)
+        self.replies(self.engine_stream(dict(self.TIMINGS,prompt_n=0,prompt_ms=0.0,prompt_per_second=0.0)))
+        m.complete([dict(role='user',content='hi')],on_delta=lambda k,v:True)
+        self.assertEqual((m.last_speed['tps'],m.last_speed['prompt_tps']),(62.4,None),'a 0 is no speed, not 0 tok/s')
+        # a non-streamed reply (no client window at all) still carries the engine's numbers
+        Endpoint.queues[self.key]=deque([lambda body:dict(role='assistant',content='ok')])
+        orig=Endpoint.respond
+        def with_timings(handler,value,status=200):
+            if isinstance(value,dict) and value.get('choices'):value=dict(value,timings=self.TIMINGS)
+            orig(handler,value,status)
+        with unittest.mock.patch.object(Endpoint,'respond',with_timings):
+            m.complete([dict(role='user',content='hi')])
+        self.assertEqual((m.last_speed['source'],m.last_speed['tps']),('engine',62.4))
+
+    def test_another_server_sending_timings_keeps_the_estimate_labelled(self):
+        # llama-server sends the same timings keys: only a server whose /props names the engine caminus is trusted,
+        # and everything else keeps Ember's own measurement, marked as an estimate
+        self.serve_ids(['fixture'],caminus=False)
+        self.replies(dict(_slow=0.25,**self.engine_stream()))   # (a window well past SPEED_MIN_S: an estimate exists)
+        self.assertEqual(self.cmd('once',['--goal','Stream a short answer.'])['state'],'completed')
+        note=json.loads((self.home/'throughput.json').read_text())
+        self.assertEqual(note['source'],'estimate');self.assertNotIn('prompt_tps',note)
+        self.assertNotEqual(note['tps'],62.4,'its own window: 500 tokens over the time they streamed')
+        _,status=self.working_status()
+        self.assertEqual((status['speed_source'],status['prompt_tok_per_s']),('estimate',None))
+
+    def test_a_streaming_caminus_reply_shows_the_engines_live_speed(self):
+        self.serve_ids(['fixture'])
+        self.replies(self.engine_stream())
+        self.cmd('once',['--goal','Stream a short answer.'])
+        gid,_=self.working_status()
+        from caminus.ember.resident.runtime import Live
+        server=f'http://127.0.0.1:{self.server.server_port}/{self.key}'
+        st=Store(self.home)
+        try:
+            snap=Live(self.home,gid,st,server=server);snap.start()   # (as the runtime writes it for a Caminus brain)
+        finally:st.close()
+        live=snap.path
+        self.assertEqual(json.loads(live.read_text())['server'],server)
+        Endpoint.status[self.key]=dict(engine='caminus',decode=dict(ms_per_token=16.0),
+                                       slot=dict(is_processing=True,next_token=[dict(n_decoded=40)]))
+        status=self.cmd('status')
+        self.assertEqual((status['tok_per_s'],status['speed_live']),(62.4,False),
+                         'nothing streamed yet (a prefill): the last reply, not the server\'s window')
+        live.write_text(json.dumps(dict(turn='t',goal=gid,content='Wor',reasoning='',tools=[],server=None)))
+        before=len(Endpoint.gets)
+        status=self.cmd('status')
+        self.assertEqual(status['speed_live'],False,"a call that names no Caminus server (a fallback brain's): no poll")
+        self.assertFalse(any(p.endswith('/caminus/status') for p in Endpoint.gets[before:]))
+        live.write_text(json.dumps(dict(turn='t',goal=gid,content='Wor',reasoning='',tools=[],server=server)))
+        status=self.cmd('status')
+        self.assertEqual((status['tok_per_s'],status['prompt_tok_per_s'],status['speed_live']),(62.5,1240.2,True),
+                         "1000 / the engine's ms per token while the reply streams; the read speed stays the last reply's")
+        self.assertTrue(any(p.endswith('/caminus/status') for p in Endpoint.gets))
+        Endpoint.status[self.key]=dict(engine='caminus',decode=dict(ms_per_token=16.0),slot=dict(is_processing=False))
+        self.assertEqual(self.cmd('status')['speed_live'],False,'the server is not decoding: the last reply again')
+        del Endpoint.status[self.key]           # (the fixture then answers without the fields: no live figure)
+        self.assertEqual((self.cmd('status')['tok_per_s']),62.4)
     def test_a_plan_first_goal_files_its_plan_and_waits_for_approval(self):
         plan='1. read the roster\n2. write dist/report.md'
         g=self.cmd('send',['plan goal','--plan'])
@@ -5176,6 +5283,18 @@ class AnthropicTransport(unittest.TestCase):
         m=self.model(sse('ok'))
         m.complete(self.history(),TOOLS[:1],max_tokens=16000)
         self.assertIsNone(m.last_speed,'no measurable window: no speed (the last real one stays on the status line)')
+
+    def test_a_local_caminus_server_on_the_messages_api_gives_its_own_speeds(self):
+        # caminus serve's Anthropic route puts its timings on message_delta; its /props names the engine
+        ev=sse('ok');ev[-2]['timings']=dict(prompt_per_second=1240.25,predicted_per_second=62.37,predicted_n=40)
+        m=self.model(ev,dict(engine='caminus',n_ctx=65536),endpoint='http://127.0.0.1:9/v1',key=None)
+        m.complete(self.history(),TOOLS[:1],max_tokens=16000)
+        self.assertEqual((m.last_speed['source'],m.last_speed['tps'],m.last_speed['prompt_tps']),('engine',62.37,1240.25),
+                         'as the server sent them, though the reply came in one burst')
+        self.assertEqual(self.wire.requests[-1][0],'http://127.0.0.1:9/props')
+        paid=self.model(sse('ok'))       # api.anthropic.com: no timings, and its /props is never asked
+        paid.complete(self.history(),TOOLS[:1],max_tokens=16000)
+        self.assertEqual(len(self.wire.requests),1)
 
     def test_request_shape(self):
         m=self.model(sse('Done.'))

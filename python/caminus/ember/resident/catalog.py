@@ -199,6 +199,13 @@ def local_candidate(config):
 LOCAL_READ = 512 * 1024   # a local server's /models (a few ids) and /props (its chat template among them): at most this
 
 
+def caminus_props(endpoint, opener=urllib.request.urlopen, timeout=3):
+    """A local server's /props when it names the engine as `caminus serve` does (engine: caminus), else None. Raises
+    when the server cannot be reached or answers garbage, so a caller can tell "not Caminus" from "not asked"."""
+    props = _get(_root(endpoint) + '/props', {}, opener, timeout, LOCAL_READ)
+    return props if isinstance(props, dict) and props.get('engine') == 'caminus' else None
+
+
 def local_brain(config, opener=urllib.request.urlopen, timeout=3):
     """Ask the agent's local server which model it serves and that model's effort ids: (base id, {level: id}), or None
     when it cannot be reached, is not a Caminus server (its /props engine; asked unless provider_kind is local) or
@@ -210,8 +217,8 @@ def local_brain(config, opener=urllib.request.urlopen, timeout=3):
     props = None
     try:
         if config.get('provider_kind') != 'local':
-            props = _get(_root(base) + '/props', {}, opener, timeout, LOCAL_READ)
-            if props.get('engine') != 'caminus':
+            props = caminus_props(base, opener, timeout)
+            if props is None:
                 return None
         groups = local_entries(_get(base + '/models', {}, opener, timeout, LOCAL_READ), '')
         groups = {m['id']: m['variants'] for m in groups}

@@ -26,6 +26,41 @@ from . import export as export_mod
 
 
 SPEED_FRESH_S = 120   # seconds a measured decode speed stays on the status line while a goal works
+LIVE_POLL_S = 1.0     # the longest a status call waits on a Caminus server's /caminus/status for the live speed
+
+
+def _engine_live(home, opener=None):
+    """The engine's write speed while this session's reply streams from a Caminus server: 1000 / its /caminus/status
+    decode.ms_per_token (the engine's mean ms per emitted token over its last passes, across requests, so the figure
+    steps when a reply ends). Asked only of the server a live snapshot names (the runtime names it when the call's
+    brain is known to be Caminus, so never for a fallback brain's reply), once that snapshot holds streamed text and
+    while the server's slot is decoding; None otherwise, or when the server does not answer within LIVE_POLL_S. The
+    panel polls status every few seconds, so this is one small GET each."""
+    from . import catalog
+    import urllib.request
+    server = None
+    for f in (Path(home) / 'live').glob('*.json'):
+        try:
+            snap = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(snap, dict) and isinstance(snap.get('server'), str) and \
+                (snap.get('content') or snap.get('reasoning') or snap.get('tools')):
+            server = snap['server']
+    if not server:
+        return None
+    try:
+        st = catalog._get(server.rstrip('/') + '/caminus/status', {}, opener or urllib.request.urlopen,
+                          LIVE_POLL_S, catalog.LOCAL_READ)
+        slot = st.get('slot') or {}
+        decoded = ((slot.get('next_token') or [{}])[0] or {}).get('n_decoded')
+        ms = (st.get('decode') or {}).get('ms_per_token')
+    except Exception:       # (a status line never fails on a server's answer: no live figure then)
+        return None
+    if st.get('engine') != 'caminus' or not slot.get('is_processing') or not decoded or isinstance(ms, bool) \
+            or not isinstance(ms, (int, float)) or ms <= 0:
+        return None
+    return round(1000 / ms, 1)
 
 
 def _online_s(pid):
@@ -759,11 +794,17 @@ def main(argv=None,stdin=None):
             # Measured prompt footprint from the last turn's compaction probe; absent when the
             # runtime has never measured this agent, so a UI shows capacity only, no estimate.
             measured=json.loads((home/'context.json').read_text()) if (home/'context.json').exists() else {}
-            # Measured decode speed of the last streamed reply; absent until a reply reports usage.
+            # The last reply's speed (runtime._throughput_note): a Caminus server's own numbers, else an estimate.
             speed=json.loads((home/'throughput.json').read_text()) if (home/'throughput.json').exists() else {}
             # a speed is shown while it is current: the last reply's figure stayed on the status line for hours of idle
             busy=any(g['state'] in ('working','waiting_model') for g in store.status().get('goals',[]))
-            if not isinstance(speed,dict) or not busy or time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
+            if not isinstance(speed,dict) or not busy:
+                speed={}
+            live=_engine_live(home) if busy else None
+            if live:
+                # the read speed stays the last reply's when that came from the engine too (an estimate has none)
+                speed=dict(speed if speed.get('source')=='engine' else {},source='engine',tps=live,live=True)
+            elif time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
                 speed={}
             # the thresholds in force: a paid brain (remote, or through the key relay) compacts early
             from .runtime import PAID_COMPACT
@@ -779,7 +820,10 @@ def main(argv=None,stdin=None):
             cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
             emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
-                      tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
+                      tok_per_s=speed.get('tps'),prompt_tok_per_s=speed.get('prompt_tps'),
+                      # engine: the Caminus server's own numbers; estimate: measured here (a record from before
+                      # sources were kept is one); live: tok_per_s is the engine's figure now, not the last reply's
+                      speed_source=(speed.get('source') or 'estimate') if speed else None,speed_live=bool(speed.get('live')),
                       compact_threshold=trig,compact_target_ratio=targ,
                       effort=_effort_shown(cfg),
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
