@@ -17,31 +17,38 @@ tools/eval/sweep_262k.py), so the numbers can be reproduced on the same hardware
 cache, DFlash with `--spec-draft-n-max 3`; llama-bench for prompt processing. llama.cpp's numbers were measured on 2026-11-01
 unless a row says otherwise.
 
+**0.3.0 (2026-11-17):** the release rows were rerun on the release commit (006130e) with tools/release/bench_runner.py:
+45 of them measured, 54 marked not rerun (their inputs or references were lost, the Swift features test's second engine
+does not fit beside the first on one card, the two-card byte comparison needs a step outside the runner, or the runner's
+command for the ThinkingCap MTP gate failed to start). One more ran but does not print its value (the Coder server's
+next-turn first token), so it keeps its 11-06 number. The llama.cpp yardstick rows and the diagnostic rows keep their dated
+numbers (not rerun for 0.3.0).
+
 ## Decode
 
 | What | Caminus | llama.cpp | Date | Tool and conditions |
 |---|---|---|---|---|
-| Plain decode, short context | **9.87 ms/token** (101 tok/s) | | 11-03 | `benchmarks/fn_bench.py 96 $CODER --tp`: 96 greedy tokens, the two-card engine, one token per pass |
-| Plain decode in the generation loop | **104.6 / 104.9 / 103.9 tok/s** (prose / code / shell) | **44.2 / 44.2 / 38.0 tok/s** | 11-06 | `tools/k3_smoke.py --model coder`: 128 greedy tokens after a 200-token prompt, per text; llama.cpp: 256 tokens through llama-server, the same prompts (its shell run is a low outlier: 43.8 in another repetition) |
-| Decode with DFlash | **156.0 / 202.5 / 123.3 tok/s** | **92.4 / 89.1 / 65.1 tok/s** | 11-06 | the same smoke run: the DFlash2 drafter inside the engine, 4-token verify passes; the output equals plain greedy decoding (checked in the run) |
+| Plain decode, short context | **9.87 ms/token** (101 tok/s) | | 11-17, 0.3.0 | `benchmarks/fn_bench.py 96 $CODER --tp`: 96 greedy tokens, the two-card engine, one token per pass |
+| Plain decode in the generation loop | **104.6 / 104.9 / 103.9 tok/s** (prose / code / shell) | **44.2 / 44.2 / 38.0 tok/s** | 11-06; not rerun for 0.3.0 (references lost) | `tools/k3_smoke.py --model coder`: 128 greedy tokens after a 200-token prompt, per text; llama.cpp: 256 tokens through llama-server, the same prompts (its shell run is a low outlier: 43.8 in another repetition) |
+| Decode with DFlash | **156.0 / 202.5 / 123.3 tok/s** | **92.4 / 89.1 / 65.1 tok/s** | 11-06; not rerun for 0.3.0 (references lost) | the same smoke run: the DFlash2 drafter inside the engine, 4-token verify passes; the output equals plain greedy decoding (checked in the run) |
 | The same smoke on the release package | plain 103.8-105.1, DFlash 156.0 / 202.8 / 123.2 tok/s | | 11-06 | `tools/k3_smoke.py` against the installed wheel (`CAMINUS_SMOKE_INSTALLED=1`) |
-| Plain decode at depth | 10.4 / 10.9 / 11.6 / 12.8 / 15.3 ms/token at 2K / 32K / 64K / 128K / 262K | ~30 / ~38 / ~60 ms/token at 64K / 128K / 262K | 11-05 | `tools/eval/sweep_262k.py plain` and `curves`: 128 tokens after a prompt of that depth; llama.cpp: its one-token decodes in the sweep's reference jobs (docs/specs/sweep-262k.md, section 5) |
+| Plain decode at depth | 10.4 / 10.9 / 11.6 / 12.8 / 15.3 ms/token at 2K / 32K / 64K / 128K / 262K | ~30 / ~38 / ~60 ms/token at 64K / 128K / 262K | 11-05; not rerun for 0.3.0 (references lost) | `tools/eval/sweep_262k.py plain` and `curves`: 128 tokens after a prompt of that depth; llama.cpp: its one-token decodes in the sweep's reference jobs (docs/specs/sweep-262k.md, section 5) |
 | Plain decode at depth, parallel pool selection | 10.69 -> 10.57 / 11.17 -> 10.72 / 15.58 -> 11.39 ms/token at 2,048 / 32,768 / 261,632 (before -> after) | | 11-08 | the change that made the indexer's pool selection parallel (OP_QSA_PSEL): the sweep's plain-stage timing (tokens 16 .. 143 of 144 greedy tokens after a batched prefill of that depth, one text), old and new interleaved, medians of 3; the same greedy tokens. The row above predates it; the sweep has not been rerun |
 | Decode at 32K before / after split attention | 25.00 -> 11.17 ms/token | 25.8 ms/token | 11-03 | one-token decode passes at that depth without a fill, measured in the split-attention step |
 
 How many drafted tokens are accepted depends on the exact greedy text. A change of the attention's summation order (split
 attention, 11-03) shifted near-tied tokens and with them the acceptance, without any change to the drafter. At ~262K DFlash
-costs more than plain decoding on prose (18.25 vs 15.26 ms/token), so the server drafts only when its rolling measurements say
+costs more than plain decoding on prose (18.25 vs 15.26 ms/token; measured 11-05, not rerun for 0.3.0: references lost), so the server drafts only when its rolling measurements say
 it pays (`serve/draftpolicy.py`).
 
 ## Accuracy
 
 | What | Result | Bar | Date | Tool |
 |---|---|---|---|---|
-| End to end against llama.cpp, short context (the D-281 gate) | mean KLD **0.0057**, top-1 **96.2 %** over 768 positions (3 texts x 256) | llama.cpp's own batch-vs-decode floor: KLD 0.0076, top-1 95.9 % | 11-03 | `tests/engine/test_flashnext_e2e.py` against llama.cpp's one-token decode dumps of the same tokens (teacher forced) |
-| The smoke's quick check | mean KLD 0.0044 against a floor of 0.0063 (64 positions x 3 texts) | the floor on the same positions | 11-06 | `tools/k3_smoke.py` on the release package (a subset of the gate above, recomputed each run) |
-| Long context with the QSA indexer | mean KLD 0.0021 / 0.00052, top-1 99.6 / 100 % at 8K / 32K | the long-context floors | 11-03 | `tools/eval/lc_baseline.py` on `tools/eval/lc_probes.py`'s contexts; copy probes answered as llama.cpp answers them |
-| The batched prefill against llama.cpp's prefill-then-decode (G4b) | 0.00092 / 0.00127 / 0.00321 / 0.00020 at 65,536 / 81,920 / 131,072 / 261,632 | 0.0076 / 95.9 % | 11-05 | `tools/eval/sweep_262k.py k3 ... g4` and `cmp`; llama.cpp at ub 2048 to 81,920, ub 512 beyond (its memory) |
+| End to end against llama.cpp, short context (the D-281 gate) | mean KLD **0.0057**, top-1 **96.2 %** over 768 positions (3 texts x 256) | llama.cpp's own batch-vs-decode floor: KLD 0.0076, top-1 95.9 % | 11-03; not rerun for 0.3.0 (references lost) | `tests/engine/test_flashnext_e2e.py` against llama.cpp's one-token decode dumps of the same tokens (teacher forced) |
+| The smoke's quick check | mean KLD 0.0044 against a floor of 0.0063 (64 positions x 3 texts) | the floor on the same positions | 11-06; not rerun for 0.3.0 (references lost) | `tools/k3_smoke.py` on the release package (a subset of the gate above, recomputed each run) |
+| Long context with the QSA indexer | mean KLD 0.0021 / 0.00052, top-1 99.6 / 100 % at 8K / 32K | the long-context floors | 11-03; not rerun for 0.3.0 (references lost) | `tools/eval/lc_baseline.py` on `tools/eval/lc_probes.py`'s contexts; copy probes answered as llama.cpp answers them |
+| The batched prefill against llama.cpp's prefill-then-decode (G4b) | 0.00092 / 0.00127 / 0.00321 / 0.00020 at 65,536 / 81,920 / 131,072 / 261,632 | 0.0076 / 95.9 % | 11-05; not rerun for 0.3.0 (references lost) | `tools/eval/sweep_262k.py k3 ... g4` and `cmp`; llama.cpp at ub 2048 to 81,920, ub 512 beyond (its memory) |
 | Needle and rare-string recall, 64K to ~262K | **17 / 18** probes | llama.cpp **16 / 18** on the same probes | 11-05 | `tools/eval/sweep_262k.py k3 ... probes`; no probe llama.cpp passes fails here (docs/specs/sweep-262k.md, section 3) |
 | A 262K soak | one policed run of 65,472 four-token passes from 0 to 261,888, no unexplained bail | | 11-05 | `tools/eval/sweep_262k.py k3 ... soak` |
 
@@ -54,9 +61,9 @@ other.
 
 | What | Caminus | llama.cpp | Date | Tool and conditions |
 |---|---|---|---|---|
-| From empty, including the hand-off to decode | **2,909 / 2,873 / 2,806 tok/s** at 4K / 8K / 32K | llama-bench pp4096 2,628, pp8192 2,884-2,901, pp32768 2,791 | 11-04 | `tests/prefill/test_prefill_s6.py $CODER speed7 --max-ctx 33024` (TTFT medians); llama-bench at its best ubatch |
-| Deep prompts | 2,775 / 2,715 / 2,576 / 2,393 tok/s at 8K / 64K / 128K / 262K | 1,890 / 1,433 / ~950 tok/s at 64K / 128K / 262K (ub 512, what fits) | 11-05 | `tools/eval/sweep_262k.py k3 ... curves`; llama.cpp: its probe fills in the sweep |
-| Through the server | 11,285 tokens in 4.4 s (2,557 tok/s); 101,525 tokens in 40.1 s (2,538 tok/s); 2,537 tokens: first token in 1.2 s | | 11-06 | `tools/serve_smoke.py --stages server`: the real `caminus serve` at its default configuration, synthetic prompts |
+| From empty, including the hand-off to decode | **2,909 / 2,873 / 2,806 tok/s** at 4K / 8K / 32K | llama-bench pp4096 2,628, pp8192 2,884-2,901, pp32768 2,791 | 11-04; not rerun for 0.3.0 (references lost) | `tests/prefill/test_prefill_s6.py $CODER speed7 --max-ctx 33024` (TTFT medians); llama-bench at its best ubatch |
+| Deep prompts | 2,775 / 2,715 / 2,576 / 2,393 tok/s at 8K / 64K / 128K / 262K | 1,890 / 1,433 / ~950 tok/s at 64K / 128K / 262K (ub 512, what fits) | 11-05; not rerun for 0.3.0 (references lost) | `tools/eval/sweep_262k.py k3 ... curves`; llama.cpp: its probe fills in the sweep |
+| Through the server | 11,285 tokens in 4.4 s (2,557 tok/s); 101,525 tokens in 40.1 s (2,538 tok/s); 2,537 tokens: first token in 1.2 s | | 11-06; the 101,525-token read rerun 11-17, 0.3.0 (same within 2 %; the 0.3.0 run prints no time for the other two) | `tools/serve_smoke.py --stages server`: the real `caminus serve` at its default configuration, synthetic prompts |
 
 The prefill misses its own target of 3,000 tok/s at 8K (about 1 % under llama.cpp's best there).
 
@@ -74,17 +81,17 @@ Reading: gfx1100 has no fp8 WMMA (the builtins are gfx12-only), and its one 8-bi
 
 ## Serving
 
-All from `tools/serve_smoke.py` on 11-06 (the real server at its default 262,144-token configuration, started twice; scratch
+All from `tools/serve_smoke.py` on 11-06, rerun 11-17 on 0.3.0 where a row says so (the real server at its default 262,144-token configuration, started twice; scratch
 cache directories; synthetic conversations):
 
 | What | Measured |
 |---|---|
-| Start to ready | 49-51 s (the engine build 41 s) |
-| VRAM | XTX 23,071 MiB at ready, 23,091 at the peak (its guard line 23,800, with a 512 MiB reserve kept); XT 19,019 / 19,037 (line 19,850) |
-| The next turn of an 11K-token conversation | first token in 0.21-0.23 s (its state live in VRAM) |
-| After a restart | the conversation back from the disk tier, first token in 0.21 s at 11.6K tokens; the stop's park took 0.65 s (1.8 GiB), 1.45 s at 101K (3.9 GiB) |
-| Decode through the server | 5.7-5.9 ms/token on tool-call code with DFlash at 0.6K and 32K (most drafts accepted); prose and thinking text accept fewer drafts and run slower |
-| Server overhead | the SSE chat route + tool parser over the engine alone: +0.73 % (OpenAI) / +1.19 % (Anthropic) at 0.6K, +0.26 % / +0.22 % at 32K |
+| Start to ready | 67-68 s (the engine build 46 s; 11-17, 0.3.0) |
+| VRAM | XTX 23,071 MiB at ready, 23,091 at the peak (its guard line 23,800, with a 512 MiB reserve kept); XT 19,019 / 19,037 (line 19,850); rerun 11-17, 0.3.0: same within 2 % |
+| The next turn of an 11K-token conversation | first token in 0.21-0.23 s (its state live in VRAM; 11-06: the 0.3.0 rerun passed but prints no time for this turn) |
+| After a restart | the conversation back from the disk tier, first token in 0.21 s at 11.6K tokens; the stop's park took 0.90 s (1.8 GiB), 1.76 s at 101K (3.9 GiB) (11-17, 0.3.0) |
+| Decode through the server | 5.8-5.9 ms/token on tool-call code with DFlash at 0.6K and 32K (most drafts accepted; 11-17, 0.3.0); prose and thinking text accept fewer drafts and run slower |
+| Server overhead | the SSE chat route + tool parser over the engine alone: +0.83 % (OpenAI) / +1.39 % (Anthropic) at 0.6K, -0.13 % / +0.09 % at 32K (11-17, 0.3.0) |
 
 ## The other models
 
@@ -108,7 +115,7 @@ isn't written yet. Tools: `tests/prefill/test_q36_prefill.py` (ops, handoff, e2e
 
 ### Swift 1.5 Q4_K_M (dense 27B, own code)
 
-Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untuned: decode short context only.
+Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untuned: decode short context only. The Caminus rows are not rerun for 0.3.0 (references lost).
 
 | | RX 7900 XTX | RX 7900 XT |
 |---|---|---|
@@ -118,12 +125,12 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
 | llama.cpp prefill (pp2048 / pp512) | — | 763 / 770 |
 
 - Accuracy: prefill 64 positions, then 64 decode passes against the float64 reference: mean KLD 3.0e-7, top-1 64/64.
-  llama.cpp's own prefill-then-decode on the same rows: 3.2e-4, 64/64 (`tools/guard.sh LOG 1800 python -I tests/prefill/test_q35_prefill.py GGUF --ref REF.npz --llama LL.bin`).
-- The served path on the XTX (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0
+  llama.cpp's own prefill-then-decode on the same rows: 3.2e-4, 64/64 (`tools/guard.sh LOG 1800 python -I tests/prefill/test_q35_prefill.py GGUF --ref REF.npz --llama LL.bin`) (measured 11-11; not rerun for 0.3.0: inputs lost).
+- The served path on the XTX (rerun 11-17 on 0.3.0; `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0
   --max-ctx 32768 --needle 28000 --restart --block-imports gguf,tokenizers`):
-  - greedy decode 44 tok/s;
-  - a 6,760-token prompt at 748 tok/s, then decode at 28 tok/s;
-  - a 27,712-token prompt at 335 tok/s, then decode at 15 tok/s.
+  - greedy decode 46 tok/s;
+  - a 6,760-token prompt at 1,168 tok/s, then decode at 43 tok/s;
+  - a 27,712-token prompt at 979 tok/s, then decode at 39 tok/s.
 
   The attention reads every earlier position per query head, so both the prompt rate and decode fall with depth.
 - Swift 1.5 needs a 24 GB card. With its prompt cache it projects 19.1 GiB at 12K, past an XT's room.
@@ -131,16 +138,16 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. Untune
 #### Verify passes (the base for speculative decoding)
 
 `engine/q35_dense_verify.py` runs T tokens in one pass on the decode engine's weights and states (module
-`k3_q35_swift_ver`). Measured 2026-11-11 after an own prefill of real text: ms per pass against one decode step at the
+`k3_q35_swift_ver`). Measured 2026-11-11, the table rerun 2026-11-17 on 0.3.0 (its faster decode step raises the ratios), after an own prefill of real text: ms per pass against one decode step at the
 same depth, with the pass committing its own accepted tokens as it would in use (the benchmark's walk: medians of 9
 interleaved rounds; `tools/guard.sh LOG 1800 python -I benchmarks/q35_verify.py GGUF --depths 512,4096 --per-wgp 5,6,7`):
 
 | card | depth | decode step | T = 2 | T = 3 | T = 4 |
 |---|---|---|---|---|---|
-| RX 7900 XTX | 512 | 24.4 ms | 27.7 (1.14x) | 31.6 (1.30x) | 35.3 (1.45x) |
-| RX 7900 XTX | 4,096 | 30.9 ms | 34.3 (1.11x) | 38.1 (1.23x) | 42.2 (1.37x) |
-| RX 7900 XT | 512 | 28.6 ms | 31.7 (1.11x) | 36.2 (1.27x) | 40.8 (1.43x) |
-| RX 7900 XT | 4,096 | 36.1 ms | 39.5 (1.09x) | 44.3 (1.23x) | 49.1 (1.36x) |
+| RX 7900 XTX | 512 | 22.4 ms | 27.1 (1.21x) | 31.4 (1.40x) | 35.1 (1.57x) |
+| RX 7900 XTX | 4,096 | 23.0 ms | 28.1 (1.22x) | 32.6 (1.42x) | 36.9 (1.61x) |
+| RX 7900 XT | 512 | 26.5 ms | 31.1 (1.18x) | 35.9 (1.35x) | 40.7 (1.54x) |
+| RX 7900 XT | 4,096 | 27.3 ms | 32.4 (1.19x) | 37.5 (1.37x) | 42.5 (1.56x) |
 
 The T-token tiles unpack each weight word once per pass and run every token's sums on it (the same bits). Before
 (the tiles unpacking again per token, the rows tiles running whole per token), T = 4 cost 1.92x / 1.70x (XTX) and
@@ -153,7 +160,7 @@ matvecs 2x a decode step's time for the same rows, the Q8_0 / Q5_K rows tiles 2.
 - The commit's replay (the state taking the accepted tokens first) costs little: the same passes at commit 0 are at most
   1.3 ms (2.4 %) faster. The grid makes little difference: at T = 4, 5 to 7 workgroups per WGP are within 2.1 ms of the decode
   engine's grid (XTX at 4,096: 6 per WGP 51.9 ms against 53.9).
-- The gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_verify.py GGUF --depths 0,512`): for T = 1 .. 4 a
+- The gate (rerun 11-17 on 0.3.0 on the XTX: passes; `tools/guard.sh LOG 1800 python -I tests/engine/test_q35_verify.py GGUF --depths 0,512`): for T = 1 .. 4 a
   walk of passes with rejected rows holding wrong tokens, decode steps between them, the lazily committed states handed
   both ways: every accepted row and every decode step bitwise the decode steps; passes of different T on one state (a pass
   of 2 committing 3 of a pass of 4) bitwise; a commit past the last pass's tokens refused on the host; T = 4 at 3 / 6 / 7
@@ -195,7 +202,7 @@ output on the code prompt from token 42; Caminus's is the plain loop's token for
 for the last round's accepted drafts and the newest token from the verify pass's h rows, then chains 3 drafts on the
 card. The verify pass of 4 tokens keeps the drafts its own greedy tokens equal. `tools/guard.sh LOG 1800 python -I
 benchmarks/q35_mtp_spec.py GGUF --prompt 48 --n 128 --ids IDS.json` runs plain greedy decoding and the speculative loop
-on the same prompts. Every generated token is the plain loop's. Decode tok/s over the 127 tokens after the first:
+on the same prompts. Every generated token is the plain loop's. Decode tok/s over the 127 tokens after the first (measured 11-12; not rerun for 0.3.0: inputs lost):
 
 | prompt | RX 7900 XTX: plain | speculative | tokens per round | llama-server + its MTP (plain 35.6), same prompts |
 |---|---|---|---|---|
@@ -206,14 +213,14 @@ on the same prompts. Every generated token is the plain loop's. Decode tok/s ove
 The prompts are the first 48 tokens of the e2e reference texts (code / prose / shell), the inputs llama.cpp's MTP was
 measured on. A round's parts on the XTX: the drafter 5.4 ms (its 3 heads are most of it: 1.4 ms each), the verify pass
 34.4 ms. On this tree's own texts (256-token prompts of `python/caminus/arch.py`, `docs/dev/architecture.md` and
-`build.sh`, no `--ids`): XTX 81.3 / 56.6 / 75.1 tok/s (plain 41.7), XT 70.8 / 49.3 / 65.7 (plain 35.8). The prose
+`build.sh`, no `--ids`): XTX 81.1 / 56.5 / 74.8 tok/s (plain 44.6), XT 70.6 / 49.1 / 65.4 (plain 37.7; both rerun 11-17 on 0.3.0). The prose
 page is mostly tables, where the block's drafts are kept less often (2.27 tokens per round).
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_mtp.py GGUF`), XT:
   - Rows filled in tapes of 4, of 3 + 1 and of 1 give the same bits, and a round of 1 to 4 rows gives the KV rows, hn
     and draft of one-row rounds.
   - The device argmax is the first maximum, and a NaN loses.
   - Drafts agree with the block in fp32 torch at 63 of 63 positions, including both chained drafts. The first draft's
-    logits are at mean KLD 3.0e-7.
+    logits are at mean KLD 2.9e-7 (rerun 11-17 on 0.3.0).
 
 Served (`caminus serve --draft mtp`): `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids
 IDS.json --scratch DIR --card 0 --draft mtp --max-ctx 12288`, the server's own decode timing for 128 greedy tokens,
@@ -221,7 +228,7 @@ interleaved over 3 rounds, the same prompts as the DFlash table below, measured 
 nothing else on the cards. The replies are the plain server's token for token. The llama.cpp columns are stock llama.cpp's
 `llama-server` with its own MTP on the same card, prompts and settings (f16 KV, `-c 12288`, 128 greedy tokens, median of 3
 interleaved runs, measured 2026-11-13): `tools/guard.sh LOG 1800 python -I benchmarks/llamacpp_spec_ab.py --bin
-LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft-mtp --spec-draft-n-max 3`).
+LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft-mtp --spec-draft-n-max 3`). The Caminus columns are not rerun for 0.3.0 (inputs lost).
 
 | prompt | RX 7900 XTX: `--draft off` | `--draft mtp` | llama-server: plain | + its MTP (accepted) |
 |---|---|---|---|---|
@@ -236,7 +243,7 @@ LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft
 
 Served at depth on rendered real sessions (a 40,885-token agent session and a 22,700-token code session, rendered to
 ChatML ids from saved Qwen Code chats, 11-13; `benchmarks/q35_served_ab.py`, median of 3 rounds, 128 greedy tokens,
-one card, testing's objects):
+one card, testing's objects; not rerun for 0.3.0: inputs lost):
 
 | model, card | prompt | max-ctx | off | mtp | x |
 |---|---|---|---|---|---|
@@ -262,7 +269,7 @@ Served: `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model G
 --max-ctx 12288` starts `caminus serve` once with `--draft off` and once with `--draft dflash`, interleaved over 3
 rounds, and reads the server's own decode timing (`timings.predicted_per_second`) for 128 greedy tokens. The prompts are
 the 48-token inputs llama.cpp's own drafter was measured on (the server puts 248044 first: one prompt token more).
-Measured 2026-11-12 with nothing else on the cards. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time).
+Measured 2026-11-12 with nothing else on the cards. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time). The Caminus columns are not rerun for 0.3.0 (inputs lost).
 The llama.cpp column is `llama-server --spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`; its
 plain decode in that setup is 35.4-36.0 tok/s.
 
@@ -278,23 +285,23 @@ plain decode in that setup is 35.4-36.0 tok/s.
   ~23.2 GB of ~22.3 GB room, projected), so `--draft dflash` is placed from 8K and `max_ctx auto` takes the largest that
   fits. `--draft mtp` and `--draft off` keep the 32K floor and more.
 - `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --draft dflash --max-ctx
-  12288 --block-imports gguf,tokenizers` passes: greedy 68.6 tok/s; a 6,760-token prompt at 678 tok/s, then decode
+  12288 --block-imports gguf,tokenizers` passes (rerun 11-17 on 0.3.0): greedy 58.1 tok/s; a 6,760-token prompt at 1,154 tok/s, then decode
   at 44 tok/s.
 - Prompt reading with the drafter: every prefill chunk's features go through the drafter's batched inject
   (`Dflash35.inject_rows`: fc and k / v as the prefill's own WMMA GEMMs, passes of 512 rows). The same smoke's 6,760-token
-  prompt: 1,068 tok/s with `--draft dflash` (TTFT 6.35 s) against 1,081 with `--draft off` (6.28 s); the first build's
+  prompt: 1,154 tok/s with `--draft dflash` (TTFT 5.88 s) against 1,163 with `--draft off` (5.84 s; 11-17, 0.3.0); the first build's
   4-row inject tape read it at 678.
 - The drafter's gate (`tools/guard.sh LOG 1800 python -I tests/engine/test_q35_dflash.py GGUF DFLASH_GGUF`), XT: against
   the float64 reference (`caminus/ref_dflash.py`, itself equal to llama.cpp's drafts at 10 of 10 positions), the injected
   K / V within 5e-4, the drafts' logits within 1.7e-3 and the drafts equal, at 20 positions and after 4,200 (past the
   2,048-position window and the 4,096-row ring's wrap); ring rows, logits and drafts bitwise at 3, 6 and 7 workgroups per
-  WGP. `k3_q35_dflash`: 88 VGPRs, 0 spills; every other object unchanged.
+  WGP. `k3_q35_dflash`: 88 VGPRs, 0 spills; every other object unchanged. Rerun 11-17 on 0.3.0 (XT): passes within the same bounds.
 - The one-token passes' feature export (`Dense35Own(feature_layers=)`) changes no logit and exports the verify pass's rows
-  bit for bit (`tests/engine/test_q35_features.py`).
+  bit for bit (`tests/engine/test_q35_features.py`) (measured 11-12; not rerun for 0.3.0: the test's second engine does not fit beside the first on one card, a test fix after 0.3.0).
 
 ### ThinkingCap RCO 4.2 bpw (dense 27B, own code end to end)
 
-Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The grid and task sizes are untuned. Caminus's figure is the median of positions 64 .. 127 with each step synchronized
+Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The grid and task sizes are untuned. The Caminus rows are not rerun for 0.3.0 (references and inputs lost). Caminus's figure is the median of positions 64 .. 127 with each step synchronized
 (`tests/engine/test_q35_dense.py --model GGUF --ref REF.npz`).
 
 | | RX 7900 XTX | RX 7900 XT |
@@ -306,18 +313,18 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The gr
 
 - Accuracy, against the float64 reference (`tools/reference/q35_ref.py`), 128 positions: mean KLD 2.4e-7, top-1 128/128.
   llama.cpp's one-token decode of the same rows: 2.7e-4, 128/128
-  (`tools/guard.sh LOG 1800 python -I tools/gates/q35_gmodel.py GGUF --ref REF.npz --llama LLAMA.bin`).
+  (`tools/guard.sh LOG 1800 python -I tools/gates/q35_gmodel.py GGUF --ref REF.npz --llama LLAMA.bin`) (measured 11-11; not rerun for 0.3.0: inputs lost).
 - Per-matvec error against float64 on real rows: 1.0-1.9e-4 mean on every shape and format, against llama.cpp's 6.2-9.6e-3
   (`tools/guard.sh LOG 1800 python -I benchmarks/own_mv_census.py GGUF`).
 - Prefill 64 positions, then 64 decode passes against the float64 reference: mean KLD 2.6e-7, top-1 64/64. llama.cpp's
   own prefill-then-decode of the same rows: 4.5e-4, 64/64 (`tools/guard.sh LOG 1800 python -I
   tests/prefill/test_q35_prefill.py GGUF --ref REF.npz --llama LL.bin --speed 2048`, which also prints the prefill speed
-  above).
-- The served path (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N
+  above) (measured 11-11; not rerun for 0.3.0: inputs lost).
+- The served path (rerun 11-17 on 0.3.0; `tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N
   --block-imports gguf,tokenizers`; the XTX with `--max-ctx 32768 --needle 28000 --restart`):
-  - XTX: greedy decode 49.5 tok/s; a 6,760-token prompt at 707 tok/s, then decode at 30 tok/s; a 27,712-token prompt at
-    326 tok/s (the needle found), then decode at 16 tok/s;
-  - XT: the server picks 53,248 tokens of context by itself; greedy decode 40.9 tok/s; a 6,760-token prompt at 532 tok/s.
+  - XTX: greedy decode 52.6 tok/s; a 6,760-token prompt at 1,011 tok/s, then decode at 49 tok/s; a 27,712-token prompt at
+    887 tok/s (the needle found), then decode at 44 tok/s;
+  - XT: the server picks 53,248 tokens of context by itself; greedy decode 43.5 tok/s; a 6,760-token prompt at 766 tok/s.
 
 #### Speculative decoding with its own prediction block (served)
 
@@ -325,7 +332,7 @@ ThinkingCap's multi-token-prediction block (`blk.64`, all Q6_K) on `kernels/k3_q
 tiles, its Q8_0 head as a rows tile, the IQ2_S embedding reading the argmax key on the card for the chained steps),
 `engine/q35_mtp.py`, 3 drafts a round, verified by the 4-token pass. `tools/guard.sh LOG 3600 python -I
 benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --draft mtp --max-ctx 12288`, measured
-2026-11-12 with nothing else on the cards, the same prompts as the DFlash table below. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time).:
+2026-11-12 with nothing else on the cards, the same prompts as the DFlash table below. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time). Not rerun for 0.3.0 (inputs lost):
 
 | prompt | RX 7900 XT: `--draft off` | `--draft mtp` |
 |---|---|---|
@@ -339,7 +346,7 @@ Stock llama.cpp's `llama-server` with its own MTP, the same card, prompts and se
 token 27) and shell (from token 66), in every run.
 
 In the engine (`tools/guard.sh LOG 1200 python -I benchmarks/q35_mtp_spec.py GGUF --prompt 48 --n 128 --ids IDS.json`,
-XT, 2026-11-13, testing with the two-step Q8_0 rows tile): 1.52x / 1.73x / 1.39x at 3.10 / 3.53 / 2.82 tokens a round.
+XT, 2026-11-13, testing with the two-step Q8_0 rows tile; not rerun for 0.3.0: inputs lost): 1.52x / 1.73x / 1.39x at 3.10 / 3.53 / 2.82 tokens a round.
 A round is the drafter 7.5 ms (9.1 before that tile: its three head passes) and the verify pass 43.0 ms, 1.74x a decode
 step (24.8 ms). On shell Caminus keeps 61 % of its drafts ((2.82 - 1) / 3)
 against llama.cpp's 72 %; at 72 % our round would give about 1.55x, so most of the shell gap is the round's fixed cost
@@ -351,7 +358,7 @@ and the rest acceptance.
   3 + 1 and 1 give the same bits; a round of T rows gives T one-row rounds' KV rows, hn and draft; drafts agree with the
   block in fp32 torch at 100 % (first and chained), mean KLD 2.3e-7, the same at
   `K3_PER_WGP=3/6/7` (every check passes at each grid). A round (k = 3, the catch rows and two chained steps) takes 8.9 ms on the XT; the split
-  per segment is not measured yet (the three passes of the Q8_0 head on its rows tile are the likely part).
+  per segment is not measured yet (the three passes of the Q8_0 head on its rows tile are the likely part). (Measured 11-12; not rerun for 0.3.0: the runner's command for this gate failed to start.)
 
 #### Speculative decoding with DFlash 2 (served)
 
@@ -359,7 +366,7 @@ The same drafter on ThinkingCap's module (`kernels/k3_q35_tcap_dflash.hip`: its 
 verify module (`kernels/k3_q35_tcap_ver.hip`, the T-token tiles of `kernels/own_quant_tcap_mt.h`). `tools/guard.sh LOG
 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --max-ctx 12288`, measured
 2026-11-12 with nothing else on the cards; the prompts are the 48-token inputs llama.cpp's own drafter was measured on;
-llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time).
+llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time). The Caminus columns are not rerun for 0.3.0 (inputs lost).
 
 | prompt | RX 7900 XT: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
 |---|---|---|---|
@@ -389,11 +396,11 @@ llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8
   | attn_qkv [10240 x 5120] | 50.9 | 40.1 | 43.9 |
   | attn_gate [6144 x 5120] / ssm_out [5120 x 6144] | 34.2 / 34.8 | 27.3 / 27.6 | 29.8 / 31.5 |
 
-  Plain decode in the engine (`benchmarks/q35_mtp_spec.py`, XT, interleaved): 40.4 / 40.5 -> 40.9 / 41.2 tok/s (+1.6 %).
+  Plain decode in the engine (`benchmarks/q35_mtp_spec.py`, XT, interleaved): 40.4 / 40.5 -> 40.9 / 41.2 tok/s (+1.6 %) (measured 11-13; not rerun for 0.3.0: inputs lost).
   LDS per workgroup: 8.2 -> 14.4 KB (8 per WGP still fit in 128 KB); the verify module 10.6 -> 16.7 KB (7 per WGP: the
   engines' 4 / 5 and the gates' 3 / 6 / 7 fit); the DFlash module drops its matvec op and both grids (16.1 -> 11.0 KB).
 - The verify pass of 4 tokens: 43.0 ms against a 25.3 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`), 1.63x;
-  Swift's is 1.45x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
+  Swift's was 1.45x (11-11; 1.57x on 0.3.0, against its faster decode step). `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
 
 ### Qwen3.8-27B GSQ-RCO IQ3_S (dense 27B, own code end to end)
 
@@ -404,7 +411,7 @@ matrix, Q4_K head, Q6_K MTP block). Decode module `k3_q35_gsq`, verify modules `
 Served: `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 0
 --draft mtp --max-ctx 12288` (and `--draft dflash`), one RX 7900 XTX, 128 greedy tokens, median of 3 interleaved
 rounds, three short chat prompts of 35-39 tokens (code: an ISO 8601 parser with tests; prose: how a refrigerator moves
-heat; shell: the ten largest files under /var/log), measured 2026-11-15 on the commit that added the drafter modules.
+heat; shell: the ten largest files under /var/log), measured 2026-11-15 on the commit that added the drafter modules; not rerun for 0.3.0 (inputs lost).
 Every drafted reply equals the plain reply token for token.
 
 | prompt | `--draft off` | `--draft mtp` | `--draft dflash` |
@@ -424,19 +431,19 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
 
 | | Swift 1.5 Q4_K_M | ThinkingCap RCO 4.2 bpw |
 |---|---|---|
-| Decode, two cards (short context, the engine) | 59.8 tok/s (even split) | 65.4 tok/s (16.73 -> 15.29 ms at the bandwidth split) |
-| Decode, two cards (served, greedy) | 63.6 tok/s | 67.8 tok/s |
+| Decode, two cards (short context, the engine; 11-11, not rerun for 0.3.0: inputs lost) | 59.8 tok/s (even split) | 65.4 tok/s (16.73 -> 15.29 ms at the bandwidth split) |
+| Decode, two cards (served, greedy; 11-17, 0.3.0) | 63.6 tok/s (63.2 on 0.3.0, same within 1 %) | 73.0 tok/s at `--max-ctx 32768`; 69.2 at the context the server picks (262,144) |
 | Decode, one XTX (for comparison) | 42 tok/s | 46.9 tok/s |
-| Prefill, 2,048 positions from empty | 982 tok/s | 936 tok/s |
-| Context the server picks by itself | 262,144 | (262,144 fits: 16.6 / 16.1 GB projected) |
+| Prefill, 2,048 positions from empty (11-11, not rerun for 0.3.0: inputs lost) | 982 tok/s | 936 tok/s |
+| Context the server picks by itself (11-17, 0.3.0) | 262,144 | (262,144 fits: 16.6 / 16.1 GB projected) |
 
 - Accuracy against the float64 reference, 128 positions: mean KLD 2.5e-7 (Swift) and 2.2e-7 (ThinkingCap), top-1 128/128;
   llama.cpp's one-card decode 2.7e-4 (`tools/guard.sh LOG 1800 python -I tools/gates/q35_gmodel.py GGUF --ref REF.npz
   --llama LLAMA.bin --cards 2 --speed 64`, which also checks the replicated residual is the same bits on both cards after
-  every token).
+  every token) (measured 11-11; not rerun for 0.3.0: inputs lost).
 - Prefill 64 positions on both cards, then 64 two-card decode passes: mean KLD 2.4e-7 (Swift) and 4.5e-7 (ThinkingCap),
   top-1 64/64; llama.cpp's own prefill-then-decode 3.2e-4 / 4.5e-4. Chunk geometry and the prompt cache's stops change no bit
-  (`tests/prefill/test_q35_prefill_tp.py GGUF --ref REF.npz --llama LL.bin --speed 2048`).
+  (`tests/prefill/test_q35_prefill_tp.py GGUF --ref REF.npz --llama LL.bin --speed 2048`) (measured 11-11; not rerun for 0.3.0: inputs lost).
 - The exchange alone: 128 exchanges of a 5,120-float partial cost 0.82 ms per token (6.7 us each) on this machine's link
   (`benchmarks/q35_tp_xchg.py`).
 - The feed-forward split, ThinkingCap decode: 15.75 ms at 50 / 50, 15.29 ms at 53 / 47, 15.13 ms at 56 / 44.
@@ -445,8 +452,8 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
 - The served path, plain (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1
   --cards 2 --draft off --block-imports gguf,tokenizers`, measured before drafting was the two-card default; ThinkingCap
   with `--max-ctx 32768 --needle 28000 --restart`): ThinkingCap reads a
-  6,760-token prompt at 759 tok/s and a 27,712-token one at 403 tok/s (the needle found), decode 15 tok/s at that depth;
-  Swift reads 6,760 tokens at 790 tok/s.
+  6,760-token prompt at 975 tok/s and a 27,712-token one at 869 tok/s (the needle found), decode 63 tok/s at that depth;
+  Swift reads 6,760 tokens at 1,064 tok/s (both rerun 11-17 on 0.3.0 with `--draft off`).
 - llama.cpp on the same two cards (`llama-bench -dev ROCm0/ROCm1 -ngl 99 -fa 1 -p 2048 -n 128 -r 3`):
 
   | | Swift 1.5 decode / prefill | ThinkingCap decode / prefill |
@@ -466,7 +473,7 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
 on card 0; DFlash on the card with more room left). DFlash is the two-card default for both models. Measured 2026-11-15
 on an RX 7900 XTX + RX 7900 XT with `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS
 --scratch DIR --card 0,1 --cards 2 --draft KIND --max-ctx 40960`: three interleaved rounds, 128 greedy tokens. Every
-drafted round was token-identical to plain.
+drafted round was token-identical to plain. Not rerun for 0.3.0 (inputs lost).
 
 Public prompts of 9,661 and 34,444 tokens, built from this repository's source:
 
@@ -479,7 +486,7 @@ Public prompts of 9,661 and 34,444 tokens, built from this repository's source:
 
 (Each drafter's off column comes from its own interleaved run.)
 
-Agent-style prompts, DFlash against off, same command: a coding-agent system prompt, 7 tool schemas and tool-call turns
+Agent-style prompts, DFlash against off, same command (not rerun for 0.3.0: inputs lost): a coding-agent system prompt, 7 tool schemas and tool-call turns
 whose results are this repository's source files, ending on a tool result; they render to 11,465 and 28,902 tokens.
 
 | two cards | off | DFlash | x |
@@ -491,22 +498,22 @@ whose results are this repository's source files, ending on a tool result; they 
 
 - The served end to end (`tools/serve_smoke1.py --cards 2 --draft off|mtp|dflash --block-imports gguf,tokenizers
   --restart`, per model): greedy and sampled replies byte-identical to `--draft off`; own code objects only; the restart
-  served from the disk tier.
+  served from the disk tier (measured 11-15; not rerun for 0.3.0: the byte comparison across arms needs a step outside the runner).
 - Seen, not blockers: a server started with `--draft mtp` runs its plain passes slower than a `--draft off` server
   (ThinkingCap 15.0 vs 14.1 ms per pass greedy, 19.0 vs 14.5 sampled) while its policy has drafting switched off. The
   first drafted request after a load is slower than later ones (28.8 ms per pass, then 15-18).
 
 ### Qwen3-30B-A3B Q4_K_M
 
-Measured 2026-11-10 on the RX 7900 XTX; llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`. The model runs on
+Measured 2026-11-10 on the RX 7900 XTX, the Caminus column rerun 2026-11-17 on 0.3.0 (006130e; numbers within 2 % kept); llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`. The model runs on
 Caminus's own kernels, so its accuracy gate is not llama.cpp but a floating-point reference of the model, with llama.cpp
 measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3-30b-a3b.md) has the method.
 
 | What | Caminus | llama.cpp | Tool and conditions |
 |---|---|---|---|
 | Decode at depth 8 / 1,024 / 4,096 / 16,384 / 32,768 / 40,900 | **248 / 235 / 213 / 161 / 124 / 111 tok/s** | 148 / - / 134 / 110 / 90 / - tok/s | `benchmarks/q3moe_depth.py --tokens 32 --rounds 5`: one token per pass, medians; llama.cpp: tg64 at `-d` 0, 4096, 16384, 32768 |
-| Prefill of 512 / 4,096 / 32,768 tokens | **5,166 / 6,432 / 2,791 tok/s** (32,768: before the Q4_K overflow guard, which costs 0.9 % at 512 and 4,096) | 4,330 / 3,853 / 1,794 tok/s | `benchmarks/q3moe_prefill.py --chunk 2048 --rounds 3` from empty; llama.cpp: pp512, pp4096, pp32768 |
-| Through the server | decode 238 tok/s short, 195 after 6,587 prompt tokens, 123 after 37,659; that prompt read at 2,473 tok/s, first token in 15.3 s | | `tools/serve_smoke1.py --max-ctx 40960 --needle 38000 --block-imports gguf,tokenizers`: one request each |
+| Prefill of 512 / 4,096 / 32,768 tokens | **5,166 / 6,432 / 2,791 tok/s** (rerun 11-17 on 0.3.0, with the Q4_K overflow guard: within 2 %) | 4,330 / 3,853 / 1,794 tok/s | `benchmarks/q3moe_prefill.py --chunk 2048 --rounds 3` from empty; llama.cpp: pp512, pp4096, pp32768 |
+| Through the server | decode 240 tok/s short, 197 after 6,587 prompt tokens, 123 after 37,659; that prompt read at 2,254 tok/s, first token in 16.7 s | | `tools/serve_smoke1.py --max-ctx 40960 --needle 38000 --block-imports gguf,tokenizers`: one request each |
 | Mean KLD against the reference, 128 tokens | **4.66e-04**, top-1 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
 | The same for the last 64 of 16,384 / 40,896 tokens | **8.80e-04**, 62 / 64; **6.64e-04**, 64 / 64 | 5.06e-03, 60 / 64; 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
 
@@ -516,30 +523,30 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 model's default. Each card holds 2 of the 4 kv heads with their query heads, and 512 (XTX) or 256 (XT) of each expert's
 768 rows; the two cards add their partial results 96 times per token.
 
-Served, 2026-11-16: `benchmarks/served_cards_ab.py` (under `tools/guard.sh`), `caminus serve` on one XTX against the
+Served, 2026-11-17 on 0.3.0 (006130e): `benchmarks/served_cards_ab.py` (under `tools/guard.sh`), `caminus serve` on one XTX against the
 XTX + XT, both `--draft off` and `--no-disk-cache`, own code (`--block-imports gguf,tokenizers`). Three rounds, each
 round a fresh one-card server then a fresh two-card server; one prompt per depth built from this repository's own source,
 read from empty (0 cached tokens on every request), then 128 greedy tokens. Medians of the three rounds (tok/s):
 
 | Depth (prompt tokens) | 8 | 4,096 | 16,384 | 32,768 | 40,768 |
 |---|---|---|---|---|---|
-| Decode, two cards | 206 | 183 | 151 | 123 | 115 |
-| Decode, one XTX | 240 | 206 | 155 | 117 | 104 |
-| Decode, two / one | 0.86x | 0.89x | 0.97x | 1.05x | 1.11x |
-| Prefill, two cards | 188 | 6,860 | 5,100 | 3,533 | 2,993 |
-| Prefill, one XTX | 235 | 6,307 | 4,181 | 2,796 | 2,326 |
-| Prefill, two / one | 0.80x | 1.09x | 1.22x | 1.26x | 1.29x |
+| Decode, two cards | 213 | 188 | 158 | 129 | 121 |
+| Decode, one XTX | 245 | 211 | 159 | 122 | 109 |
+| Decode, two / one | 0.87x | 0.89x | 1.00x | 1.06x | 1.12x |
+| Prefill, two cards | 207 | 6,928 | 5,117 | 3,539 | 2,997 |
+| Prefill, one XTX | 242 | 6,304 | 4,176 | 2,795 | 2,323 |
+| Prefill, two / one | 0.85x | 1.10x | 1.23x | 1.27x | 1.29x |
 
 - Every range sits within 5 % of its median. The 8-token prefill is one short pass, not a throughput figure.
 - Two cards read every prompt from 4K tokens on faster, and decode faster from about 32K tokens on. Short turns decode
   faster on one card, which is why one card stays the default.
 - The two-card engine is not bitwise to the one-card engine by design (the summation order differs). Its accuracy is
   gated against an fp32 reference at depth instead (`tools/gates/q3moe_depth_gmodel.py --cards 2`, the two-card
-  prefill then decode, 2026-11-16): mean KLD 1.02e-03 over the last 64 of 16,384 positions and 8.0e-04
+  prefill then decode, 2026-11-16; rerun 11-17 on 0.3.0: the same): mean KLD 1.02e-03 over the last 64 of 16,384 positions and 8.0e-04
   over the last 64 of 40,896, both below llama.cpp's on the same file (5.06e-03 and 5.73e-03).
-- Engine level (no server), for reference: decode 218 / 195 / 163 / 133 / 125 tok/s at 8 / 4,096 / 16,384 / 32,768 /
-  40,900 against one XTX's 246 / 210 / 159 / 120 / 105 (2026-11-15, `benchmarks/q3moe_depth.py --cards 2`); prefill
-  from empty 7,041 against 6,503 tok/s at 4,096 and 3,556 against 2,788 at 32,768 (2026-11-16,
+- Engine level (no server), for reference: decode 216 / 189 / 161 / 132 / 125 tok/s at 8 / 4,096 / 16,384 / 32,768 /
+  40,900 against one XTX's 249 / 213 / 161 / 124 / 111 (2026-11-17 on 0.3.0, `benchmarks/q3moe_depth.py --cards 2`); prefill
+  from empty 7,041 against 6,503 tok/s at 4,096 and 3,556 against 2,788 at 32,768 (2026-11-16, rerun 11-17 on 0.3.0: within 2 %;
   `benchmarks/q3moe_prefill.py --cards 2`, interleaved, medians of three).
 
 ## Two-card yardstick: stock llama.cpp, tensor and layer split
@@ -555,7 +562,7 @@ each card whole layers.
 | ThinkingCap RCO 4.2 bpw | 65.4 / 936 | 46.0 / 978 | 36.3 / 1,509 |
 | Qwen3-Coder-Next UD-IQ3_S | 136.5 / ~135 (no batched prefill yet) | 72.5 / 2,046 (even split) | 80.8 / 3,625 |
 | The Coder (IQ1_M) | 104; 123-203 with its drafter / ~2,800 | 39.6 / 1,336 | 40.5 / 2,328 |
-| Qwen3-30B-A3B Q4_K_M | 206 served (218 engine level) / no 2,048-token row (4,096: 6,860 served) | 112.4 / 2,909 | 126.2 / 5,780 |
+| Qwen3-30B-A3B Q4_K_M | 213 served (216 engine level) / no 2,048-token row (4,096: 6,928 served) | 112.4 / 2,909 | 126.2 / 5,780 |
 
 - Qwen3-30B-A3B's row was measured later, 2026-11-15, with the same build (7bcbc04) and command (`-ts 53/47 -fa 1`);
   its Caminus column is the served two-card section above (engine level in brackets). Both two-card modes decode below llama.cpp's

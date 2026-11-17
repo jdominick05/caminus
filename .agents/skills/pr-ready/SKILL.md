@@ -29,6 +29,7 @@ script only reads GitHub; it changes and posts nothing. What a pull request must
    | `review: findings open` | a finding stands on the head commit | AGENTS.md, "Conventions": fix it, or answer in its thread; then ask for a review again |
    | `threads: N unresolved` | the branch rules refuse the merge | reply in each thread with the commit that fixes it or the reason; the thread is then resolved by the pull request's author or the maintainer |
    | `gates` | a kernel or tape change whose body names no GPU gate or no card | add the gates you ran, on which cards, with their numbers (the `kernel-change-evidence` skill produces the object and register lines) |
+   | `size` | the pull request adds more lines than it removes and its body lacks a `Reuses:` or `Removes:` line, names a file it did not delete or shorten, or adds to `tools/entropy.json` with no `Baseline:` line | AGENTS.md, "Invariants", Growth: first look for what this change can delete or merge into; then write the lines in the body |
    | `text` | a decision id, a machine path or a session link in the title, body or a commit message | reword the title or body; for a commit message, say so in the pull request (`testing` gets one commit per pull request, with its own message) |
    | `base` | wrong target, a draft, or a conflict | CONTRIBUTING.md, step 6, names the target; for a conflict see "When testing moved" |
 
