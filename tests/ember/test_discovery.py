@@ -36,6 +36,38 @@ class Discovery(unittest.TestCase):
             self.assertEqual(result['matches'],{'local-pdf-extractor':str(tool)})
             self.assertFalse((Path(td)/'SHOULD_NOT_RUN').exists())
 
+    def test_commands_query_matches_any_word_against_names_and_man_descriptions(self):
+        # Canned `apropos --long` lines as man-db prints them; the stubs' names hold none of the query words.
+        apropos=('tesseract (1)        - command-line OCR engine\n'
+                 'pandoc (1)           - general markup converter\n'
+                 'pdftotext (1)        - Portable Document Format (PDF) to text converter\n'
+                 'grep (1)             - print lines that match patterns\n')
+        calls=[]
+        def probe(argv,limit=16384):
+            calls.append(argv);return dict(status='ok',output=apropos)
+        with tempfile.TemporaryDirectory() as td:
+            for name in ('apropos','tesseract','pandoc','ffmpeg','pdftotext','pdfinfo','pdf-and-ocr-tool'):
+                (Path(td)/name).write_text('#!/bin/sh\ntouch SHOULD_NOT_RUN\n');(Path(td)/name).chmod(0o755)
+            with patch.dict(os.environ,{'PATH':td}),patch.object(discovery,'_probe',side_effect=probe):
+                ocr=discovery.discover(td,'commands','ocr')
+                multi=discovery.discover(td,'commands','search ocr pdf')
+                video=discovery.discover(td,'commands','video')
+                odd=discovery.discover(td,'commands','.* -- ?')
+                flag=discovery.discover(td,'commands','ocr --config-file=x')
+                filler=discovery.discover(td,'commands','tool to ocr a pdf')
+            self.assertFalse((Path(td)/'SHOULD_NOT_RUN').exists())
+        self.assertEqual(ocr['matches'],{'tesseract':td+'/tesseract','pdf-and-ocr-tool':td+'/pdf-and-ocr-tool'})
+        self.assertEqual(ocr['about']['tesseract'],'command-line OCR engine')
+        # Ranked by the words hit, each weighted by rarity (ocr hits 2 tools, pdf 3); grep is on no PATH here.
+        self.assertEqual(list(multi['matches']),['pdf-and-ocr-tool','tesseract','pdfinfo','pdftotext'])
+        self.assertIn('ffmpeg',video['matches'])          # the man page says "media converter": the short table's word
+        self.assertEqual(odd['matches'],{});self.assertIn('tesseract',flag['matches'])
+        # "a" and "to" hit almost every name: beside real words they are dropped, and they never reach apropos
+        self.assertEqual(list(filler['matches'])[:2],['pdf-and-ocr-tool','tesseract'])
+        self.assertFalse({'a','to'}&{argv[-1] for argv in calls})
+        self.assertTrue(all(argv[-1]!='.*' and '--config-file=x' not in argv[argv.index('--')+1:] for argv in calls))
+        with self.assertRaises(ValueError):discovery.discover('.','commands','  ')
+
     def test_packages_query_is_exact_and_argv_only(self):
         calls=[]
         def probe(argv):calls.append(argv);return dict(status='ok')
