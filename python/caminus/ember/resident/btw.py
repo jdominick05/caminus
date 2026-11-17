@@ -15,6 +15,20 @@ def brief(rt, gid):
     """The system part of a side question: what the goal is and where it stands."""
     g = rt.store.goal(gid)
     system = ['GOAL: ' + (g['prompt'] or '')[:PROMPT_LIMIT]]
+    # what the human said since the goal began: a goal re-aimed by a message (a game, then "review the design") had its
+    # old prompt and new done check side by side, and the side answer called the goal contradictory
+    said = [r['data'] for r in rt.store.db.execute(
+        "SELECT data FROM events WHERE goal=? AND kind='user_message' ORDER BY seq DESC LIMIT 5", (gid,))]
+    told = []
+    for raw in reversed(said):
+        try:
+            t = str(__import__('json').loads(raw).get('text') or '').strip()
+        except (ValueError, AttributeError):
+            t = ''
+        if t:
+            told.append('- ' + t[:600])
+    if told:
+        system.append('LATER WORDS FROM YOUR HUMAN (newest last; they redirect the goal\'s first words):\n' + '\n'.join(told))
     if g.get('done_check'):
         system.append('DONE CHECK: ' + g['done_check'])
     todo = rt.store.todo(gid)

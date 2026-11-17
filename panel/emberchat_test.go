@@ -2479,3 +2479,50 @@ func TestRereviewFixesInThePanel(t *testing.T) {
 		t.Fatal("a stale reader's end stopped the current reader")
 	}
 }
+
+func TestTheFinishResultIsOneLineNotItsJSON(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.cards = false
+	e := residentEvent{Seq: 9, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "finish", "call_id": "c9",
+		"result": map[string]any{"summary": "Wrote the review.", "open": "", "judge": "met: the review file exists with all sections"}}}
+	plain := ansi.Strip(m.chat.eventBlock(e))
+	if strings.Contains(plain, "{") || strings.Contains(plain, "\"summary\"") || !strings.Contains(plain, "judge: met: the review file exists") {
+		t.Fatalf("one line with the verdict, no JSON:\n%s", plain)
+	}
+	if strings.Count(strings.TrimSpace(plain), "\n") > 0 {
+		t.Fatalf("collapsed, it is one line:\n%s", plain)
+	}
+	e.Data["result"].(map[string]any)["open"] = "the CHANGELOG entry"
+	m.chat.expanded = true
+	if p := ansi.Strip(m.chat.eventBlock(e)); !strings.Contains(p, "left open: the CHANGELOG entry") {
+		t.Fatalf("expanded, it shows what was left open:\n%s", p)
+	}
+}
+
+func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 30
+	g := residentGoal{ID: "original", State: "completed", Prompt: "design a very simple block breaking game in javascript"}
+	m.resident.Goals = []residentGoal{g}
+	m.residentEvents = []residentEvent{
+		{Seq: 2, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "a block breaker at index.html"}},
+		{Seq: 3, Goal: "original", Kind: "user_message", Data: map[string]any{"text": "review caminus and embers design", "kind": "nudge"}},
+	}
+	if aim, re := m.goalAim(&g); re || aim != g.Prompt {
+		t.Fatalf("a message without a new done check does not re-aim the goal: %q %v", aim, re)
+	}
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 4, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "a design review is filed"}})
+	if aim, re := m.goalAim(&g); !re || aim != "review caminus and embers design" {
+		t.Fatalf("a message followed by a new done check is what the goal works toward: %q %v", aim, re)
+	}
+	early := residentGoal{ID: "fresh", Prompt: "add a CHANGELOG entry"}
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 5, Goal: "fresh", Kind: "user_message", Data: map[string]any{"text": "under 0.3.0, please"}},
+		residentEvent{Seq: 6, Goal: "fresh", Kind: "done_check", Data: map[string]any{"check": "the entry is under 0.3.0"}})
+	if aim, re := m.goalAim(&early); re || aim != early.Prompt {
+		t.Fatalf("a message before the first done check refines the goal, it does not redirect it: %q %v", aim, re)
+	}
+	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "block breaking") {
+		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
+	}
+}
