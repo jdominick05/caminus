@@ -1319,7 +1319,7 @@ func (m emberModel) chatComposer() string {
 				}
 				input = emberDim.Render(emberClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
 			}
-		} else if token, ok := pathToken(value); ok {
+		} else if token, ok := pathToken(value); ok && m.pathMenu(max(18, m.width-2)) == "" {
 			// The path so far is rendered in the inline-code role, then what Tab
 			// can offer: directories in the navigation accent, files resting, and
 			// the absence of any match in the failure color so a typo shows itself.
@@ -1414,6 +1414,8 @@ func (m emberModel) chatBottom() string {
 		out = side + "\n" + out
 	}
 	if menu := m.slashMenu(max(18, m.width-2)); menu != "" {
+		out = menu + "\n" + out
+	} else if menu := m.pathMenu(max(18, m.width-2)); menu != "" {
 		out = menu + "\n" + out
 	}
 	// a blank line between the conversation and what sits under it, as Claude Code leaves: the composer read as part
@@ -1611,12 +1613,41 @@ func (m emberModel) slashMenu(w int) string {
 		return ""
 	}
 	_, matches, sel := m.slashPick()
-	// the box takes at most a third of the terminal; on a terminal too small for two rows it stays shut (Tab still
-	// cycles the names)
-	rows := min(slashMenuRows, len(matches), max(0, (m.height-18)/2))
-	if rows < 2 {
+	return m.completionMenu(matches, slashHint, sel, w)
+}
+
+// pathMenu: the @path completions in the same framed list as the commands, folders marked as such; the highlight
+// follows Tab's cycle.
+func (m emberModel) pathMenu(w int) string {
+	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker || m.slashMenuOpen() {
 		return ""
 	}
+	token, ok := pathToken(strings.TrimRight(m.chat.compose.Value(), " "))
+	if !ok {
+		return ""
+	}
+	matches := pathMatches(token)
+	if len(matches) == 0 {
+		return ""
+	}
+	sel := max(0, slices.Index(matches, m.chat.pathPick))
+	hint := func(p string) string {
+		if strings.HasSuffix(p, "/") {
+			return "folder"
+		}
+		return "file"
+	}
+	return m.completionMenu(matches, hint, sel, w)
+}
+
+// completionMenu draws the list both completions share: one match or many, the same box.
+func (m emberModel) completionMenu(matches []string, hintOf func(string) string, sel, w int) string {
+	// the box takes at most a third of the terminal; on a terminal too small for two rows it stays shut (Tab still
+	// cycles the names, and the composer names them on one line)
+	if max(0, (m.height-18)/2) < 2 || len(matches) == 0 {
+		return ""
+	}
+	rows := min(slashMenuRows, len(matches), (m.height-18)/2)
 	top := 0
 	if sel >= rows {
 		top = sel - rows + 1
@@ -1647,7 +1678,7 @@ func (m emberModel) slashMenu(w int) string {
 			desc = lipgloss.NewStyle().Foreground(cText)
 		}
 		line := name.Render(n) + strings.Repeat(" ", max(1, nameW-ansi.StringWidth(n))) +
-			desc.Render(emberClip(slashHint(n), max(1, textW-nameW)))
+			desc.Render(emberClip(hintOf(n), max(1, textW-nameW)))
 		line = emberClip(line, textW)
 		line += strings.Repeat(" ", max(0, textW-ansi.StringWidth(line)))
 		if scroll {
