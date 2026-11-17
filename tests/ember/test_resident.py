@@ -933,6 +933,20 @@ class Resident(unittest.TestCase):
         finally:store.close()
         self.assertEqual([c['target'] for e in ev for c in e['connections']],['not-listed.invalid:443'],ev)
 
+    def test_terminal_takes_timeout_like_sandbox(self):
+        # a real model passed timeout to terminal three times; it was dropped as unknown, the command unbounded
+        self.replies(call('terminal',dict(command='sleep 20',timeout=1,yield_ms=5000)),
+                     call('finish',dict(summary='Timed out as asked.')))
+        out=self.cmd('once',['--goal','Run a command with a timeout.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            r=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='terminal'][0]
+        finally:store.close()
+        self.assertEqual(r.get('limit_hit'),'time',r);self.assertNotIn('ignored unknown argument',r.get('note',''))
+        desc={t['function']['name']:t['function']['description'] for t in TOOLS}
+        for name in ('terminal','sandbox'):self.assertIn('yield_ms',desc[name])
+
     def test_sandbox_of_a_cancelled_goal_is_swept(self):
         from caminus.ember.resident import sandbox
         rt=Runtime(self.home)
@@ -5037,6 +5051,22 @@ class Sandbox(unittest.TestCase):
         self.assertIn('MemoryError',r['output']);self.assertEqual(r['limits']['enforced'],'rlimit')
         r=self.run_box('sleep 60',conf=conf,timeout=2)
         self.assertEqual(r['limit_hit'],'time')
+
+
+class TerminalTimeout(unittest.TestCase):
+    def test_a_terminal_timeout_kills_the_command_and_says_so(self):
+        from caminus.ember.resident.terminal import Terminal
+        home=S/('tmo-'+uuid.uuid4().hex[:12]);home.mkdir(parents=True);term=Terminal(home)
+        sid=uuid.uuid4().hex;t0=time.monotonic()
+        r=term.call(sid,dict(command='sleep 30 & sleep 30; echo SURVIVED',timeout=1,yield_ms=10000))
+        while r['running'] and time.monotonic()-t0<20:
+            r=term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        self.assertEqual(r.get('limit_hit'),'time',r);self.assertNotIn('SURVIVED',r['output'])
+        self.assertLess(time.monotonic()-t0,10)
+        r=term.call(uuid.uuid4().hex,dict(command='echo done',yield_ms=10000))
+        self.assertNotIn('limit_hit',r,'no timeout: no bound and no limit field')
+        for bad in (0,3601,True):
+            with self.assertRaises(ValueError,msg=bad):term.call(uuid.uuid4().hex,dict(command='true',timeout=bad))
 
 
 class WorkerEnv(unittest.TestCase):

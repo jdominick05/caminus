@@ -140,6 +140,9 @@ func TestASandboxCardIsMarkedAndSaysItsNetworkAndTheLimitHit(t *testing.T) {
 			t.Fatalf("want %q in the compact card:\n%s", want, v)
 		}
 	}
+	if v := ansi.Strip(actionCard("terminal", map[string]any{"command": "sleep 20"}, map[string]any{"exit_code": -9.0, "output": "", "limit_hit": "time"}, 200, "", "")); !strings.Contains(v, "time limit hit: command killed") {
+		t.Fatalf("a terminal timeout says so on its card:\n%s", v)
+	}
 	if v := ansi.Strip(actionCard("sandbox", map[string]any{"command": "make"}, map[string]any{"exit_code": 0.0, "output": "ok\n", "hosts": []any{}}, 200, "", "")); !strings.Contains(v, "no network") || strings.Contains(v, "limit hit") {
 		t.Fatalf("a box without hosts says no network, and no limit when none hit:\n%s", v)
 	}

@@ -220,8 +220,10 @@ loop; real residents get the gates by default.
 
 ## Tools
 
-Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
-`ask_root`), a resident has:
+Besides `terminal` (its `timeout`, 1 to 3600 seconds, kills a command that runs
+longer and the result says so, as `sandbox`'s does; `yield_ms` only bounds how long
+one call waits for output), `discover`, the loop's tools and the bridge
+(`ask_user`, `ask_root`), a resident has:
 
 | Tool | What it does |
 |---|---|

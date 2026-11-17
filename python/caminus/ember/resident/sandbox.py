@@ -29,8 +29,10 @@ import subprocess
 import threading
 import time
 
+from .terminal import check_timeout
+
 BWRAP = '/usr/bin/bwrap'
-TIME_DEFAULT, TIME_MAX = 600, 3600
+TIME_DEFAULT = 600       # seconds; the bound and its checks are the terminal job's (terminal.check_timeout)
 # config.json "sandbox" may change these (a test sets small ones); the agent sets only the time
 DEFAULTS = dict(memory_mb=4096, tasks=512, cpu_percent=max(100, (os.cpu_count() or 2) * 50), limiter='auto')
 HOSTS_MAX = 16
@@ -147,9 +149,7 @@ def check_folder(home, folder, config):
 
 def limits_of(config, timeout=None):
     conf = {**DEFAULTS, **((config or {}).get('sandbox') or {})}
-    t = TIME_DEFAULT if timeout is None else int(timeout)
-    if not 1 <= t <= TIME_MAX:
-        raise ValueError(f'timeout is 1 to {TIME_MAX} seconds')
+    t = check_timeout(TIME_DEFAULT if timeout is None else timeout)
     if conf['limiter'] not in ('auto', 'systemd', 'rlimit'):
         raise ValueError('config sandbox.limiter is auto, systemd or rlimit')
     return dict(time_s=t, memory_mb=int(conf['memory_mb']), tasks=int(conf['tasks']),
@@ -232,7 +232,7 @@ class Proxy:
         # resident's job folder can be deeper than that (bwrap's bind mount takes the full path)
         self._dir = os.open(self.path.parent, os.O_PATH | os.O_DIRECTORY)
         self.short = f'/proc/self/fd/{self._dir}/{self.path.name}'
-        self.loop = None
+        self.loop = self.srv = self.thread = None
         self.resolve = None          # a test replaces DNS (getaddrinfo's shape)
 
     def log(self, target, verdict):
@@ -303,7 +303,7 @@ class Proxy:
             self.path.unlink()
         old = os.umask(0o177)
         try:
-            srv = await asyncio.start_unix_server(self._handle, self.short)
+            srv = self.srv = await asyncio.start_unix_server(self._handle, self.short)
         finally:
             os.umask(old)
         ready.set()
@@ -325,7 +325,8 @@ class Proxy:
             except OSError as e:
                 failed.append(e)
                 ready.set()
-        threading.Thread(target=run, daemon=True).start()
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
         end = time.monotonic() + 5
         while time.monotonic() < end:
             if failed:
@@ -341,8 +342,11 @@ class Proxy:
         raise OSError(f'the sandbox proxy did not answer on {self.path}')
 
     def close(self):
-        if self.loop is not None:
-            self.loop.call_soon_threadsafe(self.loop.stop)
+        # the server first, while the folder's descriptor still names its socket; then the descriptor
+        if self.loop is not None and self.srv is not None:
+            self.loop.call_soon_threadsafe(self.srv.close)
+        if self.thread is not None:
+            self.thread.join(5)
         for undo in (self.path.unlink, lambda: os.close(self._dir)):
             try:
                 undo()
@@ -371,7 +375,6 @@ class Supervisor:
         self.proxy = None
         self.hit = None
         self.cgroup = None
-        self.started = time.monotonic()
         self._next = 0
         self.killed = False
 
@@ -424,10 +427,8 @@ class Supervisor:
         os.nice(10)
 
     def check(self, pid):
-        """A limit just hit ('time', 'memory', 'processes'), or None; the caller kills the box."""
-        if time.monotonic() - self.started > self.limits['time_s']:
-            self.hit = 'time'
-            return self.hit
+        """A limit just hit ('memory', 'processes'), or None; the caller kills the box. (Time is the worker's: it
+        bounds every job.)"""
         if self.limits.get('enforced') != 'systemd' or time.monotonic() < self._next:
             return None
         self._next = time.monotonic() + .1

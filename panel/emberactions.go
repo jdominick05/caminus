@@ -148,11 +148,11 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
 			}
+			// what stopped it (a timeout, a box's limit): the limit hit is the outcome, so it leads
+			if hit := limitHit(name, result); hit != "" {
+				meta, state = strings.TrimPrefix(hit+" · "+meta, " · "), "fail"
+			}
 			if name == "sandbox" {
-				// what the box was allowed and what stopped it: the limit hit is the outcome, so it leads
-				if hit := sandboxHit(result); hit != "" {
-					meta, state = strings.TrimPrefix(hit+" · "+meta, " · "), "fail"
-				}
 				if net := sandboxNet(args, result); net != "" {
 					meta += " · " + net
 				}
@@ -411,10 +411,10 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	return actionCard(name, call.args, result, w, c.home, c.cwd)
 }
 
-// sandboxHit names the limit that killed a box ("" when none did).
-func sandboxHit(result map[string]any) string {
+// limitHit names the limit that killed a command or a box ("" when none did).
+func limitHit(name string, result map[string]any) string {
 	if hit, _ := result["limit_hit"].(string); hit != "" {
-		return hit + " limit hit: box killed"
+		return hit + " limit hit: " + map[bool]string{true: "box", false: "command"}[name == "sandbox"] + " killed"
 	}
 	return ""
 }
@@ -469,7 +469,7 @@ func sandboxLines(result map[string]any) []string {
 		}
 		out = append(out, line)
 	}
-	if hit := sandboxHit(result); hit != "" {
+	if hit := limitHit("sandbox", result); hit != "" {
 		out = append(out, hit)
 	}
 	if hosts, _ := result["hosts"].([]any); len(hosts) == 0 {

@@ -1375,10 +1375,10 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			}
 			code, _ := result["exit_code"].(float64)
 			body := lines(output, 30)
+			if hit := limitHit(str("name"), result); hit != "" {
+				meta, code = hit+" · "+meta, 1
+			}
 			if str("name") == "sandbox" {
-				if hit := sandboxHit(result); hit != "" {
-					meta, code = hit+" · "+meta, 1
-				}
 				body = append(sandboxLines(result), body...)
 			}
 			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, body, w)
