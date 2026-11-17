@@ -631,9 +631,9 @@ func window(cur, total, n int) int {
 func (m ctl) agentLines(W int) []string {
 	e, q := m.emberText(), m.qwenText()
 	head := fg(cMuted).Render(" agents")
-	if err := m.readErr["harness"]; err != nil && !m.hs.Installed { // (the reason on its own lines, wrapped, never cut)
+	if err := m.readErr["harness"]; err != nil && !m.hs.Installed { // (the reason on its own lines, wrapped: 4 at most)
 		out := []string{head, ansi.Truncate("   "+e, W, "…"), ansi.Truncate("   "+q, W, "…")}
-		return append(out, indent(wrapped(fg(cMuted).Render(oneLine(err.Error())), W-5, 2), "     ")...)
+		return append(out, indent(wrapped(fg(cMuted).Render(oneLine(err.Error())), W-5, 4), "     ")...)
 	}
 	if lipgloss.Width(e)+lipgloss.Width(q)+8 <= W {
 		return []string{head, "   " + e + "     " + q}

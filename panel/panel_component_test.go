@@ -441,7 +441,7 @@ func TestHelpReachesEveryKeyWhenShort(t *testing.T) {
 			}
 			all := strings.Join(seen, "\n")
 			for _, k := range m.mainKeys() {
-				if !strings.Contains(all, k.what) {
+				if !strings.Contains(all, k.keys+strings.Repeat(" ", max(0, 7-lipgloss.Width(k.keys)))+k.what) {
 					t.Errorf("hosted %v %dx%d: %q (%s) is in no page of the key list:\n%s", hosted, sz[0], sz[1], k.keys, k.what, all)
 				}
 			}
@@ -509,7 +509,14 @@ func TestKeyLineKeepsEveryKeyOrSaysMore(t *testing.T) {
 			}
 		}
 	}
-	// at the audit's case (80x24, a server of the panel's, a model with two choices) o is on the line
+	// too narrow for every key even without labels: the line ends "? more" and keeps q
+	m0 := fixturePanel()
+	m0.curM = 2
+	ls0 := strings.Split(ansi.Strip(m0.View(40, 24)), "\n")
+	if l := ls0[len(ls0)-1]; !strings.Contains(l, "? more") || !strings.Contains(l, "q quit") || lipgloss.Width(l) > 40 {
+		t.Fatalf("40 wide: the key line says ? more and keeps q, inside 40 cells: %q", l)
+	}
+	// at the 80x24 case of a server of the panel's and a model with two choices, o is on the line
 	m := fixturePanel()
 	m.curM = 1
 	m.ps.Servers[0].Model, m.ps.Servers[0].Name = "swift-1.5", "swift-1.5"
@@ -584,7 +591,8 @@ func TestFailedReadsSayCouldntRead(t *testing.T) {
 	g = glyphTiers["unicode"]
 	defer func() { g = oldG }()
 	why := "caminus models --json: the lab wrapper refused this command because it is not part of a lab session (end)"
-	hwhy := "caminus qwen-code status --json: the lab wrapper refused it as well (qwen end)"
+	hwhy := "caminus qwen-code status --json: the lab wrapper refused it as well, and this reason goes on long enough " +
+		"that it needs more than two lines at eighty columns to be read in full by the person at the panel (qwen end)"
 	m := newPanel(panelOptions{CLI: "caminus-not-run"})
 	m, _ = m.Update(modelsMsg{err: fmt.Errorf("%s", why)})
 	m, _ = m.Update(psMsg{})

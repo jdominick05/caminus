@@ -784,7 +784,7 @@ func (m ctl) update(msg tea.Msg) (ctl, tea.Cmd) {
 // panelKey is one key of the screen: the help (?) lists them, and a test keeps every key bound once per view.
 type panelKey struct{ keys, what string }
 
-// mainKeys are the main view's keys, in the help's order. The key line shows the first ones that fit.
+// mainKeys are the main view's keys, in the help's order. The key line shows the ones the selection allows.
 func (m ctl) mainKeys() []panelKey {
 	ember := "open Ember"
 	if m.hosted {
