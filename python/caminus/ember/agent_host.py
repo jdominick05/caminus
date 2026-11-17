@@ -84,6 +84,11 @@ CAMINUS_INSTALL
             parser().print_help()
             print('\nRemote by default; --local selects the same runtime in a scratch home.\nagent install uploads the runtime without sudo.')
             return 0
+        if args[:1]==['init'] and not any(a=='--bridge' or a.startswith('--bridge=') for a in args):
+            # the agent account cannot see the owner's settings: a setup with its own bridge (CAMINUS_ENV_BRIDGE) is
+            # named here, or the agent would wait on the default one
+            from . import settings
+            args+=['--bridge',settings.bridge_dir()]
         payload=json.dumps(dict(args=args,stdin=sys.stdin.read() if '--stdin' in args else ''),ensure_ascii=False)
         # A fresh delimiter prevents goal text from terminating the script payload.
         import uuid
