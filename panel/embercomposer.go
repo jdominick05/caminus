@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -190,14 +191,23 @@ func hostRun(script string) (string, error) {
 	if sh == "" {
 		sh = "/bin/sh"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hostRunLimit)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, sh, "-c", script).CombinedOutput()
+	c := exec.CommandContext(ctx, sh, "-c", script)
+	// the shell and everything it starts are one process group, killed together at the limit; and the output is not
+	// waited on past it (a backgrounded child kept the pipe open, so the result never came)
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+	c.WaitDelay = 2 * time.Second
+	out, err := c.CombinedOutput()
 	if ctx.Err() != nil {
-		return string(out), fmt.Errorf("timed out after 30 s")
+		return string(out), fmt.Errorf("timed out after %s", hostRunLimit)
 	}
 	return string(out), err
 }
+
+// hostRunLimit bounds a !! command (a test shortens it).
+var hostRunLimit = 30 * time.Second
 
 func runHostBang(cmd string) tea.Cmd {
 	return func() tea.Msg {

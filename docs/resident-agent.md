@@ -59,7 +59,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
 | Ctrl+E | open or fold every tool card; Ctrl+O shows every line of an open card (40 otherwise) |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
-| Ctrl+G, Ctrl+A, Ctrl+P | the goals, approvals and sessions overlays |
+| Ctrl+G, Ctrl+A, Shift+Tab | the goals and approvals overlays, and the session switcher |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell") |
 | `@path` | in a message, attach that file from the agent's account (64 KB) |
 
@@ -82,7 +82,7 @@ it; the durable blocks replace it when the turn lands.
 | `/compact`, `/remember TEXT` | compact now; add to memory |
 | `/halt` | the emergency stop (`/halt clear` lifts it) |
 | `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |
-| `/sessions` (Ctrl+P, Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches; `n` or the "+ new session" card creates one on your setup's default local model (the one chosen for your cards; `/model` switches it); `x x` destroys one (its home is kept in `~/.local/share/caminus/removed-sessions`); `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
+| `/sessions` (Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches; `n` or the "+ new session" card creates one on your setup's default local model (the one chosen for your cards; `/model` switches it); `x x` destroys one (its home is kept in `~/.local/share/caminus/removed-sessions`); `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
 
 In the CLI only (rare, or about the machine rather than the conversation): `caminus ember agent export NAME GOAL`
 (the goal as markdown), `caminus ember agent install` (a new runtime; running daemons take it between goals, and the

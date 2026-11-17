@@ -1594,7 +1594,7 @@ func helpLines() []string {
 		{"Esc", "browse the history; while a reply is written, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
-		{"Shift+Tab, Ctrl+P", "sessions: a card per session"},
+		{"Shift+Tab", "sessions: a card per session"},
 		{"Ctrl+G", "goals"},
 		{"Ctrl+A", "approvals"},
 		{"Ctrl+R", "search what you sent"},
@@ -2458,7 +2458,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.goalSel = found[0]
 		m.chat.forceNew = false
 		m.targetSelectedGoal()
-	case "/start": // (the header asks for it when the loop is down; Ctrl+P stops and starts any session)
+	case "/start": // (the header asks for it when the loop is down; Shift+Tab stops and starts any session)
 		clear()
 		return m, residentAction(m, []string{strings.TrimPrefix(command, "/"), m.agentName, "--json"}, "")
 	case "/cancel":
@@ -2599,7 +2599,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/remember", "append TEXT to this session's memory"},
 	{"/resume", "resume the selected goal"},
 	{"/sessions", "every session as a card: switch with Enter or a click"},
-	{"/start", "run this session's loop (stop and start any session from Shift+Tab or Ctrl+P)"},
+	{"/start", "run this session's loop (stop and start any session from Shift+Tab)"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
 	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
 	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
@@ -2935,7 +2935,7 @@ func (m emberModel) chatFoot(w int) string {
 	}
 	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
 	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
-	keys := []string{"esc browse", "^P sessions", "/help"}
+	keys := []string{"⇧Tab sessions", "/help"} // (Ctrl+P still opens it; Shift+Tab is the one shown)
 	if m.chat.seq < m.resident.LastEvent {
 		keys = append([]string{"loading history"}, keys...)
 	}

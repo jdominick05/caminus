@@ -2783,3 +2783,14 @@ func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {
 		t.Fatalf("the folder sits left of the context pill:\n%s", foot)
 	}
 }
+
+func TestAHostCommandStopsAtItsLimitEvenWithAChildRunning(t *testing.T) {
+	saved := hostRunLimit
+	hostRunLimit = time.Second
+	defer func() { hostRunLimit = saved }()
+	start := time.Now()
+	_, err := hostRun("sleep 30 & wait")
+	if err == nil || !strings.Contains(err.Error(), "timed out") || time.Since(start) > 6*time.Second {
+		t.Fatalf("a background child does not hold the result past the limit: %v after %s", err, time.Since(start))
+	}
+}

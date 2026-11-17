@@ -67,7 +67,7 @@ func TestApprovalsOverlayOpensListsAndCloses(t *testing.T) {
 		}
 		frame := ansi.Strip(m.render())
 		for _, want := range []string{"approvals  2 pending", g.root + " root", "? ask", "apt-get install -y libcmocka-dev",
-			"Which parser should the empty-input test use?", "esc close", "CAMINUS", "^P sessions"} {
+			"Which parser should the empty-input test use?", "esc close", "CAMINUS", "⇧Tab sessions"} {
 			if !strings.Contains(frame, want) {
 				t.Fatalf("%s: the overlay is missing %q:\n%s", open, want, frame)
 			}

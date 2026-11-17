@@ -318,6 +318,6 @@ func (m emberModel) residentSettingsPane() string {
 	key("Enter", "send · Alt+Enter a new line · ↑ ↓ your sent messages")
 	key("Esc", "browse the history · PgUp PgDn scroll · Ctrl+L follow")
 	key("/", "commands, with what each does")
-	key("Ctrl+P", "sessions · Ctrl+G goals · Ctrl+A approvals")
+	key("Shift+Tab", "sessions · Ctrl+G goals · Ctrl+A approvals")
 	return strings.Join(lines, "\n")
 }
