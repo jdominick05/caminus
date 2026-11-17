@@ -741,12 +741,23 @@ func TestMergedAwayCommandsAreGoneAndKeepTheTranscript(t *testing.T) {
 			t.Fatalf("%s is still in the menu", gone)
 		}
 	}
-	// /plan TEXT starts a plan-first goal (it was /goal --plan TEXT)
-	m.chat.compose.SetValue("/goal --plan x")
+	// /plan TEXT starts a plan-first goal (it was /goal --plan TEXT), even when TEXT starts with a verdict's word
+	for _, text := range []string{"tidy the README", "revise the README for 0.3"} {
+		m.chat.sending = false
+		m.chat.compose.SetValue("/plan " + text)
+		next, cmd := m.submitCompose()
+		m = next.(emberModel)
+		if !m.chat.sending || !m.chat.newGoal || cmd == nil || strings.Contains(m.msg, "no plan is waiting") {
+			t.Fatalf("/plan %s sends a plan-first goal (sending %v, msg %q)", text, m.chat.sending, m.msg)
+		}
+	}
+	// with a plan waiting, revise answers it
+	m.chat.sending = false
+	m.resident.Goals = append(m.resident.Goals, residentGoal{ID: "p1", State: "waiting_plan"})
+	m.chat.compose.SetValue("/plan revise smaller steps")
 	next, _ := m.submitCompose()
-	m = next.(emberModel)
-	if strings.Contains(m.msg, "plans first") {
-		t.Fatal("/goal --plan is gone: /plan TEXT starts one")
+	if next.(emberModel).chat.sending && next.(emberModel).chat.newGoal {
+		t.Fatal("with a plan waiting, /plan revise answers it instead of starting a goal")
 	}
 }
 
@@ -2631,5 +2642,27 @@ func TestSwitcherCardsSayWhatIsTrueAndDestroyTakesTwoPresses(t *testing.T) {
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !next.(emberModel).chat.pickerNew {
 		t.Fatal("Enter on the new-session card asks for a name")
+	}
+}
+
+func TestSessionListArrivesBeforeTheCardsAndAFailureKeepsIt(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.picker = true
+	next, cmd := m.Update(residentSessionsMsg{agent: m.agentName, names: []string{"resident", "research"}})
+	m = next.(emberModel)
+	if len(m.sessionNames) != 2 || cmd == nil {
+		t.Fatal("the names land at once and the open switcher then loads the cards")
+	}
+	if box := ansi.Strip(m.pickerBox()); !strings.Contains(box, "research") || !strings.Contains(box, "loading") {
+		t.Fatalf("a card shows its name while it loads:\n%s", box)
+	}
+	next, _ = m.Update(sessionCardsMsg{agent: m.agentName, cards: []sessionCard{{name: "research", status: "idle", goal: "survey"}}})
+	m = next.(emberModel)
+	if box := ansi.Strip(m.pickerBox()); !strings.Contains(box, "survey") || !strings.Contains(box, "resident") {
+		t.Fatalf("the loaded card fills in by name; the others stay:\n%s", box)
+	}
+	next, _ = m.Update(residentSessionsMsg{agent: m.agentName, err: "ssh: timeout"})
+	if len(next.(emberModel).sessionNames) != 2 {
+		t.Fatal("a failed read keeps the sessions already known")
 	}
 }

@@ -483,7 +483,13 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		return m, fetchRewind(m, goal), true
 	case "/plan":
 		verdict, note, _ := strings.Cut(strings.TrimSpace(arg), " ")
-		if verdict != "approve" && verdict != "revise" {
+		planWaiting := false
+		for _, gl := range m.resident.Goals {
+			planWaiting = planWaiting || gl.State == "waiting_plan"
+		}
+		// approve / revise answer a waiting plan; with none waiting, all of TEXT is a new goal's ("/plan revise the
+		// README" starts one, it does not report that no plan waits)
+		if !planWaiting || (verdict != "approve" && verdict != "revise") {
 			if strings.TrimSpace(arg) == "" {
 				m.msg = "usage: /plan TEXT starts a goal that plans first  ·  /plan approve  ·  /plan revise WHAT TO CHANGE"
 				return m, nil, true

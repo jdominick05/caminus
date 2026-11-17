@@ -179,21 +179,26 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 
 // switcherCards are the cards in order: the sessions found, the one in view when none were read yet.
 func (m emberModel) switcherCards() []sessionCard {
-	if len(m.sessionCards) > 0 {
-		out := append([]sessionCard(nil), m.sessionCards...)
-		for i := range out {
-			if out[i].name == m.agentName { // the session in view: the status bar's live speed, not the snapshot's
-				out[i].tokPerS = m.resident.TokPerS
+	var out []sessionCard // one per session name, its card when loaded (a name alone while it loads)
+	if len(m.sessionNames) == 0 {
+		out = append(out, m.sessionCards...)
+	}
+	for _, n := range m.sessionNames {
+		c := sessionCard{name: n, status: "loading"}
+		for _, have := range m.sessionCards {
+			if have.name == n {
+				c = have
 			}
 		}
-		return out
-	}
-	var out []sessionCard // (the cards are still loading: the names alone)
-	for _, n := range m.sessionNames {
-		out = append(out, sessionCard{name: n, status: "unknown"})
+		out = append(out, c)
 	}
 	if len(out) == 0 {
 		out = []sessionCard{{name: m.agentName, status: "unknown"}}
+	}
+	for i := range out {
+		if out[i].name == m.agentName && out[i].status != "loading" { // the session in view: the status bar's live speed
+			out[i].tokPerS = m.resident.TokPerS
+		}
 	}
 	return out
 }

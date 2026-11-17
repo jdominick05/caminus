@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -19,7 +20,26 @@ import (
 type residentSessionsMsg struct {
 	agent, memory, err string
 	names              []string
-	cards              []sessionCard // the switcher's cards, one per name
+}
+
+// sessionCardsMsg: the switcher's cards, loaded after the names so the session list never waits on them.
+type sessionCardsMsg struct {
+	agent string
+	cards []sessionCard
+}
+
+// loadSessionCards reads every session's card at once (each command has residentCommand's own deadline).
+func loadSessionCards(m emberModel, names []string) tea.Cmd {
+	return func() tea.Msg {
+		cards := make([]sessionCard, len(names))
+		var wg sync.WaitGroup
+		for i, n := range names {
+			wg.Add(1)
+			go func() { defer wg.Done(); cards[i] = loadSessionCard(m, n) }()
+		}
+		wg.Wait()
+		return sessionCardsMsg{agent: m.agentName, cards: cards}
+	}
 }
 
 type residentCreatedMsg struct{ name, err string }
@@ -109,7 +129,6 @@ func residentSessions(m emberModel) tea.Cmd {
 		result := residentSessionsMsg{agent: m.agentName}
 		for _, p := range peers {
 			result.names = append(result.names, p.Name)
-			result.cards = append(result.cards, loadSessionCard(m, p.Name))
 		}
 		out, err = runResident(residentCommand(m, []string{"memory", m.agentName, "--json"}, ""))
 		var memory struct {
