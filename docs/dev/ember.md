@@ -84,8 +84,9 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
 
 - `tests/ember/test_env.py`: the owner side (settings, the SSH argv, the bridge, the audit log, the setup script).
 - `tests/ember/test_resident.py` `Sandbox`: real boxes with small limits (the home and token unreadable, writes outside
-  `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, each limit killing and naming
-  itself); it skips, saying why, where bubblewrap cannot make user namespaces.
+  `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, no user namespace inside, each
+  limit killing and naming itself, an unreadable folder the box left removed without stopping the loop, the capped
+  connection log); it skips, saying why, where bubblewrap cannot make user namespaces.
 - `tests/ember/test_resident.py`: the resident against an in-process OpenAI-compatible fixture (`Endpoint`, scripted
   replies; its judge says met unless a test queues a verdict). Most behaviour tests live here: add one per fix, named
   for the behaviour.

@@ -5052,6 +5052,69 @@ class Sandbox(unittest.TestCase):
         r=self.run_box('sleep 60',conf=conf,timeout=2)
         self.assertEqual(r['limit_hit'],'time')
 
+    def test_an_unreadable_folder_in_the_box_is_removed_and_never_stops_the_loop(self):
+        # a box's mode-000 folder made the removal retry os.open and raise TypeError: the daemon crash-looped
+        r=self.run_box('mkdir -p a/b/c && touch a/b/c/f && chmod 000 a/b && chmod 500 a && echo DONE',goal='g9')
+        self.assertIn('DONE',r['output'])
+        self.assertTrue(self.sb.end(self.home,'g9'));self.assertFalse((self.home/'boxes'/'g9').exists())
+        # one box that will not go (whatever end raises) is reported once, and the sweep goes on
+        class Store:
+            events=[]
+            class db:
+                @staticmethod
+                def execute(q,a):
+                    class R:
+                        def fetchone(self):return ('completed',)
+                    return R()
+            def event(self,kind,data,goal=None):self.events.append(kind)
+        class RT:pass
+        rt=RT();rt.home=self.home;rt.store=Store()
+        for g in ('x1','x2'):(self.home/'boxes'/g).mkdir(parents=True)
+        real=self.sb.end
+        def broken(home,gid,store=None):raise TypeError('a box that will not go')
+        self.sb.end=broken
+        try:
+            self.sb.sweep(rt);self.sb.sweep(rt)
+        finally:self.sb.end=real
+        self.assertEqual(rt.store.events,['box_not_removed']*2,'each box once, and the second pass went on')
+
+    def test_no_user_namespace_and_bounded_tmp_and_disk(self):
+        conf=dict(self.conf,sandbox=dict(memory_mb=256,tasks=64,disk_mb=8))
+        r=self.run_box('unshare -Urn true 2>/dev/null && echo USERNS; df -m /tmp | tail -1',conf=conf)
+        self.assertNotIn('USERNS',r['output'],'no user namespace inside the box (--disable-userns)')
+        self.assertIn(' 256 ',r['output'],'the tmpfs /tmp is no bigger than the memory limit')
+        self.assertEqual(r['limits']['disk_mb'],8)
+        r=self.run_box('dd if=/dev/zero of=/box/big bs=1M count=32 2>/dev/null; sleep 20; echo SURVIVED',conf=conf)
+        self.assertEqual(r['limit_hit'],'disk',r);self.assertNotIn('SURVIVED',r['output'])
+
+    def test_public_addresses_seen_through_ipv6_forms(self):
+        for a in ('93.184.215.14','2606:4700::1','64:ff9b::808:808'):
+            self.assertTrue(self.sb.public(a),a)
+        # mapped, NAT64, 6to4 forms of LAN or loopback addresses, and the deprecated IPv4-compatible / site-local
+        for a in ('::ffff:192.168.1.1','::ffff:127.0.0.1','64:ff9b::c0a8:101','64:ff9b:1::a00:1','2002:c0a8:101::1',
+                  '::808:808','fec0::1','10.1.2.3','fe80::1%eth0'):
+            self.assertFalse(self.sb.public(a),a)
+
+    def test_the_connection_log_and_each_result_are_capped(self):
+        import socket
+        job=self.home/'cjob';job.mkdir()
+        proxy=self.sb.Proxy(job/'p.sock',['example.com'],job/'connections.jsonl')
+        proxy.start();self.addCleanup(proxy.close)
+        saved=self.sb.LOG_MAX;self.sb.LOG_MAX=3;self.addCleanup(setattr,self.sb,'LOG_MAX',saved)
+        for _ in range(6):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(b'CONNECT evil.example.org:443 HTTP/1.1\r\n\r\n');s.recv(100)
+        lines=(job/'connections.jsonl').read_text().splitlines()
+        self.assertEqual(len(lines),4,lines);self.assertIn('log is full',lines[-1])
+        # a result returns at most CONNECTIONS_MAX new ones and counts the rest
+        box=self.sb.spec(self.home,'g1',dict(command='true',hosts=['example.com']),self.conf)
+        (job/'request.json').write_text(json.dumps(dict(command='true',cwd=box['box'],box=box)))
+        (job/'connections.jsonl').write_text(''.join(json.dumps(dict(ts=0,target=f'h{i}:443',verdict='refused'))+'\n' for i in range(60)))
+        (job/'connections.cursor').unlink(missing_ok=True)
+        v=self.sb.view(job,{})
+        self.assertEqual((len(v['connections']),v['connections_more']),(self.sb.CONNECTIONS_MAX,60-self.sb.CONNECTIONS_MAX))
+        self.assertEqual(self.sb.view(job,{})['connections'],[],'what one result returned is not returned again')
+
 
 class TerminalTimeout(unittest.TestCase):
     def test_a_terminal_timeout_kills_the_command_and_says_so(self):

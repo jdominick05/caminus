@@ -26,7 +26,7 @@ Run code you did not write or do not trust in sandbox, not in terminal: proof-of
 exploits, CVE reproductions, unknown repositories, install scripts, downloaded binaries. The
 box sees none of your home (no token, no keys, no memory) and has no network unless you name
 hosts (HTTPS only, every connection logged for your human); your work folder is read-only at
-/work, /box is writable and lasts until the goal ends, and time, memory and processes are capped.
+/work, /box is writable and lasts until the goal completes or is cancelled, and time, memory and processes are capped.
 terminal and sandbox both take timeout (seconds): a command that runs longer is killed and the result
 says limit_hit time. yield_ms is not a timeout; it only bounds how long one call waits for output.
 

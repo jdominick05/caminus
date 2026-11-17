@@ -4,7 +4,9 @@ A box sees /usr and /etc read-only, a private /tmp, /dev without the GPUs, its o
 services, no D-Bus, no X11 / Wayland, no keyring) and no capabilities, and nothing of the agent's home: the account
 home holds a GitHub token, SSH keys and the agent's state, and the workspace holds its memory and conversation.
 What it can see: the work folder the call names, read-only at /work, and a writable box directory at /box
-(boxes/GOAL in the workspace), kept across the goal's sandbox calls and removed when the goal ends.
+(boxes/GOAL in the workspace), kept across the goal's sandbox calls and removed when the goal completes or is
+cancelled (a paused or failed goal keeps it: it can resume). /box takes at most disk_mb (4 GB) and the tmpfs /tmp
+and /run at most the memory limit; no user namespace can be made inside.
 
 Network: none, unless the call names hosts. Then this module's proxy runs outside the box with that allowlist and a
 bridge inside forwards 127.0.0.1:3128 to it through a bind-mounted socket: CONNECT to port 443 only, names only (no
@@ -25,6 +27,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -34,8 +37,12 @@ from .terminal import check_timeout
 BWRAP = '/usr/bin/bwrap'
 TIME_DEFAULT = 600       # seconds; the bound and its checks are the terminal job's (terminal.check_timeout)
 # config.json "sandbox" may change these (a test sets small ones); the agent sets only the time
-DEFAULTS = dict(memory_mb=4096, tasks=512, cpu_percent=max(100, (os.cpu_count() or 2) * 50), limiter='auto')
+DEFAULTS = dict(memory_mb=4096, tasks=512, cpu_percent=max(100, (os.cpu_count() or 2) * 50), limiter='auto',
+                disk_mb=4096)
 HOSTS_MAX = 16
+LOG_MAX = 1000           # connection log lines kept per box (one more says the rest were not logged)
+CONNECTIONS_MAX = 50     # new connections one result returns ("connections_more" counts the rest)
+DISK_EVERY = 2           # seconds between /box size checks
 NAME = re.compile(r'(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?')
 # what the resident keeps in its workspace: never a work folder (its memory, its conversation, its jobs' logs)
 RESIDENT_ENTRIES = {'agent.sqlite3', 'config.json', 'MEMORY.md', 'STATE.md', 'IDENTITY.md', 'jobs', 'live', 'notes',
@@ -78,7 +85,8 @@ def usable():
     global _usable
     if _usable is None:
         try:
-            p = subprocess.run([BWRAP, '--unshare-all', '--die-with-parent', '--ro-bind', '/usr', '/usr',
+            p = subprocess.run([BWRAP, '--unshare-all', '--unshare-user', '--disable-userns', '--die-with-parent',
+                                '--ro-bind', '/usr', '/usr',
                                 '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib',
                                 '--symlink', 'usr/lib64', '/lib64', '/usr/bin/true'],
                                capture_output=True, text=True, timeout=20)
@@ -153,7 +161,7 @@ def limits_of(config, timeout=None):
     if conf['limiter'] not in ('auto', 'systemd', 'rlimit'):
         raise ValueError('config sandbox.limiter is auto, systemd or rlimit')
     return dict(time_s=t, memory_mb=int(conf['memory_mb']), tasks=int(conf['tasks']),
-                cpu_percent=int(conf['cpu_percent']), limiter=conf['limiter'])
+                cpu_percent=int(conf['cpu_percent']), disk_mb=int(conf['disk_mb']), limiter=conf['limiter'])
 
 
 def spec(home, gid, args, config):
@@ -179,10 +187,15 @@ def spec(home, gid, args, config):
 
 def bwrap_argv(box, command, sock=None):
     """The box: what it sees is listed here and nothing else."""
-    argv = [BWRAP, '--die-with-parent', '--unshare-all', '--new-session', '--cap-drop', 'ALL', '--hostname', 'box',
+    # --disable-userns: no user namespace inside the box (one gives back every capability within it and, with a new
+    # network namespace, nf_tables: the usual road of a kernel privilege-escalation proof of concept). The tmpfs
+    # /tmp and /run are no bigger than the memory limit (under the rlimit fallback nothing else would bound them).
+    tmp = str(int(box['limits']['memory_mb']) << 20)
+    argv = [BWRAP, '--die-with-parent', '--unshare-all', '--unshare-user', '--disable-userns', '--new-session',
+            '--cap-drop', 'ALL', '--hostname', 'box',
             '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib',
             '--symlink', 'usr/lib64', '/lib64', '--symlink', 'usr/sbin', '/sbin', '--ro-bind', '/etc', '/etc',
-            '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--tmpfs', '/run',
+            '--proc', '/proc', '--dev', '/dev', '--size', tmp, '--tmpfs', '/tmp', '--size', tmp, '--tmpfs', '/run',
             '--bind', box['box'], '/box']
     if box.get('folder'):
         argv += ['--ro-bind', box['folder'], '/work']
@@ -223,6 +236,33 @@ def host_ok(host, names):
     return any(n and (h == n or h.endswith('.' + n)) for n in names)
 
 
+NAT64 = (ipaddress.ip_network('64:ff9b::/96'), ipaddress.ip_network('64:ff9b:1::/48'))
+REFUSED_V6 = (ipaddress.ip_network('::/96'), ipaddress.ip_network('fec0::/10'))   # IPv4-compatible, site-local
+
+
+def address(a):
+    """The address a connection to a reaches, as an address object: an IPv6 form that carries an IPv4 address
+    (::ffff:a.b.c.d, 6to4, NAT64's 64:ff9b::/96, where 64:ff9b::c0a8:101 is 192.168.1.1 behind the gateway) is that
+    IPv4 address; None for the deprecated forms (::a.b.c.d, fec0::/10), which no check should pass."""
+    ip = ipaddress.ip_address(str(a).split('%')[0].strip('[]'))
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            return ip.ipv4_mapped
+        if ip.sixtofour:
+            return ip.sixtofour
+        if any(ip in n for n in NAT64):
+            return ipaddress.IPv4Address(int(ip) & 0xffffffff)
+        if any(ip in n for n in REFUSED_V6):
+            return None
+    return ip
+
+
+def public(a):
+    """A public address (what the proxy lets a listed name reach), seen through the IPv6 forms above."""
+    ip = address(a)
+    return ip is not None and ip.is_global
+
+
 class Proxy:
     """The allowlist HTTPS proxy, outside the box, on a Unix socket only the box is given."""
 
@@ -234,8 +274,16 @@ class Proxy:
         self.short = f'/proc/self/fd/{self._dir}/{self.path.name}'
         self.loop = self.srv = self.thread = None
         self.resolve = None          # a test replaces DNS (getaddrinfo's shape)
+        self.logged = 0
 
     def log(self, target, verdict):
+        """One line per connection, at most LOG_MAX in all (it is on the host's disk, outside the box's limits; a
+        loop of refused requests filled it): then one line saying the rest are not logged."""
+        self.logged += 1
+        if self.logged > LOG_MAX + 1:
+            return
+        if self.logged == LOG_MAX + 1:
+            target, verdict = '…', f'the log is full ({LOG_MAX} connections): later ones are not logged'
         with self.log_path.open('a') as f:
             f.write(json.dumps(dict(ts=time.time(), target=target, verdict=verdict)) + '\n')
 
@@ -277,7 +325,7 @@ class Proxy:
             resolve = self.resolve or asyncio.get_running_loop().getaddrinfo
             infos = await resolve(host, 443, type=socket.SOCK_STREAM)
             addrs = [i[4][0] for i in infos]
-            if not addrs or any(not ipaddress.ip_address(a.split('%')[0]).is_global for a in addrs):
+            if not addrs or not all(public(a) for a in addrs):
                 self.log(target, f'refused: non-public address {addrs[:3]}')
                 w.write(b'HTTP/1.1 403 Non-public address\r\n\r\n')
                 return
@@ -354,6 +402,25 @@ class Proxy:
                 pass
 
 
+def du(path, stop):
+    """The bytes the files under path take on disk, counted until past stop (links not followed)."""
+    total, todo = 0, [str(path)]
+    while todo and total <= stop:
+        try:
+            with os.scandir(todo.pop()) as it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    total += st.st_blocks * 512
+                    if e.is_dir(follow_symlinks=False):
+                        todo.append(e.path)
+        except OSError:
+            continue
+    return total
+
+
 def _events(path):
     out = {}
     try:
@@ -375,7 +442,7 @@ class Supervisor:
         self.proxy = None
         self.hit = None
         self.cgroup = None
-        self._next = 0
+        self._next = self._disk_next = 0
         self.killed = False
 
     def prepare(self):
@@ -427,8 +494,13 @@ class Supervisor:
         os.nice(10)
 
     def check(self, pid):
-        """A limit just hit ('memory', 'processes'), or None; the caller kills the box. (Time is the worker's: it
-        bounds every job.)"""
+        """A limit just hit ('disk', 'memory', 'processes'), or None; the caller kills the box. (Time is the
+        worker's: it bounds every job.)"""
+        if self.limits.get('disk_mb') and time.monotonic() >= self._disk_next:
+            self._disk_next = time.monotonic() + DISK_EVERY
+            if du(self.box['box'], self.limits['disk_mb'] << 20) > self.limits['disk_mb'] << 20:
+                self.hit = 'disk'           # /box is on the workspace's disk: a dd there would fill it
+                return self.hit
         if self.limits.get('enforced') != 'systemd' or time.monotonic() < self._next:
             return None
         self._next = time.monotonic() + .1
@@ -493,45 +565,63 @@ def view(job, state, consume=True):
     out = dict(box=box['box'], folder=box['folder'] or None, hosts=box['hosts'], limits=limits,
                limit_hit=state.get('limit_hit'))
     if box['hosts']:
-        cur = job / 'connections.cursor'
-        try:
-            seen = int(cur.read_text())
-        except (OSError, ValueError):
-            seen = 0
-        try:
-            lines = (job / 'connections.jsonl').read_text().splitlines()
-        except OSError:
-            lines = []
-        new = []
-        for line in lines[seen:]:
-            try:
-                c = json.loads(line)
-                new.append(dict(target=c['target'], verdict=c['verdict']))
-            except (ValueError, KeyError):
-                continue
-        if consume and len(lines) > seen:
-            cur.write_text(str(len(lines)))
-        out['connections'] = new
+        new = new_connections(job, consume)
+        out['connections'] = new[:CONNECTIONS_MAX]
+        if len(new) > CONNECTIONS_MAX:
+            out['connections_more'] = len(new) - CONNECTIONS_MAX
     return out
 
 
+def new_connections(job, consume=True):
+    """The connections in the box's log that no earlier call returned (target and verdict each)."""
+    job = Path(job)
+    cur = job / 'connections.cursor'
+    try:
+        seen = int(cur.read_text())
+    except (OSError, ValueError):
+        seen = 0
+    try:
+        lines = (job / 'connections.jsonl').read_text().splitlines()
+    except OSError:
+        lines = []
+    new = []
+    for line in lines[seen:]:
+        try:
+            c = json.loads(line)
+            new.append(dict(target=c['target'], verdict=c['verdict']))
+        except (ValueError, KeyError):
+            continue
+    if consume and len(lines) > seen:
+        cur.write_text(str(len(lines)))
+    return new
+
+
 def _rmtree(path):
-    """Remove a box the box's code wrote: a folder it made read-only is opened up to be emptied, and a symbolic link
-    is removed, never followed (chmod follows links: a link to a file of the agent's would change that file)."""
+    """Remove a box the box's code wrote: a folder it made read-only or unreadable is opened up and emptied, and a
+    symbolic link is removed, never followed (chmod follows links: a link to a file of the agent's would change that
+    file). Never raises: a box that cannot be removed stays, and the caller sees it is still there."""
+    seen = set()
+
     def unlock(fn, p, _e):
+        # (never fn(p) again: rmtree's fn is os.open, os.scandir or os.lstat as often as os.unlink, and they take
+        # other arguments; a box's mode-000 folder made os.open's retry raise TypeError and crash-loop the daemon)
         try:
             parent = os.path.dirname(p)
             if not os.path.islink(parent):
                 os.chmod(parent, 0o700)
-            if os.path.islink(p):
-                os.unlink(p)
-                return
-            if fn is not os.unlink:
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode):
+                os.unlink(p)                 # a file or a link (the link itself)
+            elif p not in seen:
+                seen.add(p)
                 os.chmod(p, 0o700)
-            fn(p)
-        except OSError:
+                shutil.rmtree(p, onerror=unlock)
+        except Exception:
             pass
-    shutil.rmtree(path, onerror=unlock)
+    try:
+        shutil.rmtree(path, onerror=unlock)
+    except Exception:
+        pass
 
 
 def end(home, gid, store=None):
@@ -574,4 +664,10 @@ def sweep(rt):
     for d in root.iterdir():
         row = rt.store.db.execute('SELECT state FROM goals WHERE id=?', (d.name,)).fetchone()
         if row is None or row[0] in ('completed', 'cancelled'):
-            end(rt.home, d.name, rt.store)
+            try:
+                end(rt.home, d.name, rt.store)
+            except Exception as e:           # one box that will not go never stops the loop (it runs every pass)
+                failed = rt.__dict__.setdefault('_box_failed', set())
+                if d.name not in failed:
+                    failed.add(d.name)
+                    rt.store.event('box_not_removed', dict(box=str(d), error=f'{type(e).__name__}: {e}'[:300]))

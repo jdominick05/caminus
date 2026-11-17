@@ -464,6 +464,9 @@ func sandboxLines(result map[string]any) []string {
 		tasks, _ := l["tasks"].(float64)
 		cpu, _ := l["cpu_percent"].(float64)
 		line := fmt.Sprintf("limits: %ds · %d MB · %d processes · CPU %d %%", int(ts), int(mb), int(tasks), int(cpu))
+		if disk, _ := l["disk_mb"].(float64); disk > 0 {
+			line += fmt.Sprintf(" · /box %d MB", int(disk))
+		}
 		if e, _ := l["enforced"].(string); e != "" {
 			line += " (" + residentText(e) + ")"
 		}
@@ -477,6 +480,9 @@ func sandboxLines(result map[string]any) []string {
 	}
 	for _, c := range sandboxConnections(result["connections"]) {
 		out = append(out, "connection: "+c)
+	}
+	if more, _ := result["connections_more"].(float64); more > 0 { // (a result carries at most 50 new ones)
+		out = append(out, fmt.Sprintf("… %d more connections", int(more)))
 	}
 	return out
 }
