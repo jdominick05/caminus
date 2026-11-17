@@ -1006,7 +1006,7 @@ def main(argv=None,stdin=None):
                         result=approval.withdraw(bridge,rid,gid)
                         if result.get('decision')=='executing':in_flight.append(rid)
                 store.update(gid,state='cancelled')
-                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name='terminal'",(gid,)):
+                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name IN ('terminal','sandbox')",(gid,)):
                     try:args=json.loads(act['args'])
                     except ValueError:continue
                     if not isinstance(args,dict):continue

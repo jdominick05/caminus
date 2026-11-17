@@ -47,6 +47,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / edit / write, the web tools, MCP servers |
+| `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
@@ -82,6 +83,9 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
 ```
 
 - `tests/ember/test_env.py`: the owner side (settings, the SSH argv, the bridge, the audit log, the setup script).
+- `tests/ember/test_resident.py` `Sandbox`: real boxes with small limits (the home and token unreadable, writes outside
+  `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, each limit killing and naming
+  itself); it skips, saying why, where bubblewrap cannot make user namespaces.
 - `tests/ember/test_resident.py`: the resident against an in-process OpenAI-compatible fixture (`Endpoint`, scripted
   replies; its judge says met unless a test queues a verdict). Most behaviour tests live here: add one per fix, named
   for the behaviour.

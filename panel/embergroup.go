@@ -76,7 +76,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 				c.calls[id] = callInfo{name: name, args: args}
 			}
 			// each call becomes its own card when its result arrives (actionBlock); the line only says what still runs
-			if name == "terminal" {
+			if name == "terminal" || name == "sandbox" {
 				if cmd, _ := args["command"].(string); strings.TrimSpace(cmd) != "" {
 					g.running, g.runningSince, g.runningGoal = oneLine(residentText(cmd)), e.Ts, e.Goal
 				}
@@ -89,7 +89,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 			return false
 		}
 		result, _ := e.Data["result"].(map[string]any)
-		if name == "terminal" {
+		if name == "terminal" || name == "sandbox" {
 			if running, _ := result["running"].(bool); !running {
 				g.running = ""
 			}

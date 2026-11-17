@@ -2,7 +2,8 @@
 
 While the plan is unapproved (goals.plan == 1) the goal only explores: the changing tools are refused
 and `terminal` stays allowed on the prompt's promise of read-only use — the runtime cannot see what a
-shell command actually touched, so that limit is advisory there. `propose_plan` files the plan and
+shell command actually touched, so that limit is advisory there. `sandbox` stays allowed: its box changes
+nothing outside its own folder, which ends with the goal. `propose_plan` files the plan and
 parks the goal (state waiting_plan, which never times out) until the human answers: approve sets
 goals.plan = 2 and lifts plan mode, reject keeps plan mode with the note in the inbox.
 """
@@ -34,7 +35,7 @@ def loop_line(g):
         return ('PLAN MODE: your plan was rejected and your human sent a revision note in the inbox; '
                 'propose a revised plan with propose_plan. Until it is approved the changing tools are refused.')
     return ('PLAN MODE: this goal is plan-first. Explore read-only (read, web, history_search, terminal for '
-            'observing only) and call propose_plan with the plan; write, edit, checkpoint, rollback and ask_root '
+            'observing only, sandbox) and call propose_plan with the plan; write, edit, checkpoint, rollback and ask_root '
             'are refused until your human approves it.')
 
 

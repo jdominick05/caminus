@@ -1279,10 +1279,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
 				label := "terminal" // (any call with a command read "terminal": a root request among them)
-				if name == "ask_root" {
+				body := lines(command, 40)
+				switch name {
+				case "ask_root":
 					label = "asks for root"
+				case "sandbox": // marked as the box it is, with what it may reach
+					label = "sandbox"
+					body = append(body, sandboxNet(args, nil))
 				}
-				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, body, w))
 				continue
 			}
 			summary := ""
@@ -1369,7 +1374,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			code, _ := result["exit_code"].(float64)
-			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
+			body := lines(output, 30)
+			if str("name") == "sandbox" {
+				if hit := sandboxHit(result); hit != "" {
+					meta, code = hit+" · "+meta, 1
+				}
+				body = append(sandboxLines(result), body...)
+			}
+			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, body, w)
 		}
 		if str("name") == "finish" {
 			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
@@ -1503,6 +1515,8 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("note", "woke up", firstLine(str("note")), true, false, nil, w)
 	case "brain":
 		return toolCard("note", "now answering: "+residentText(str("model")), str("brain"), true, false, nil, w)
+	case "sandbox_connections": // every connection a box made or was refused, as it happened
+		return wrappedRecord("⇄", "sandbox network: "+strings.Join(sandboxConnections(e.Data["connections"]), " · "), w)
 	}
 	return ""
 }
@@ -3298,7 +3312,7 @@ func (m emberModel) endedSessions() map[string]float64 {
 		if e.Kind != "tool_result" {
 			continue
 		}
-		if n, _ := e.Data["name"].(string); n != "terminal" {
+		if n, _ := e.Data["name"].(string); n != "terminal" && n != "sandbox" {
 			continue
 		}
 		res, _ := e.Data["result"].(map[string]any)

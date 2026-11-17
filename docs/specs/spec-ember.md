@@ -170,4 +170,6 @@ the job and the session. Provisioning for agent-user servers: the bind-mount lin
 - Does not confine: network egress, world-readable files, GPU, disk, and any shared writable tree remain open. An
   agent with full network IO can exfiltrate whatever it can read — which is why it can only read its own scoped
   environment.
+- The resident's `sandbox` tool confines what runs inside it (namespaces, no home, no network unless the call names
+  hosts, limits; docs/resident-agent.md "Tools"). The agent chooses when to use it: its terminal stays unconfined.
 - The bridge directory is writable by the agent user; treat request files as untrusted input (they are display-only).
