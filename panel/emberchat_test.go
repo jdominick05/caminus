@@ -2547,3 +2547,25 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
 	}
 }
+
+func TestSessionListArrivesBeforeTheCardsAndAFailureKeepsIt(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.picker = true
+	next, cmd := m.Update(residentSessionsMsg{agent: m.agentName, names: []string{"resident", "research"}})
+	m = next.(emberModel)
+	if len(m.sessionNames) != 2 || cmd == nil {
+		t.Fatal("the names land at once and the open switcher then loads the cards")
+	}
+	if box := ansi.Strip(m.pickerBox()); !strings.Contains(box, "research") || !strings.Contains(box, "loading") {
+		t.Fatalf("a card shows its name while it loads:\n%s", box)
+	}
+	next, _ = m.Update(sessionCardsMsg{agent: m.agentName, cards: []sessionCard{{name: "research", status: "idle", goal: "survey"}}})
+	m = next.(emberModel)
+	if box := ansi.Strip(m.pickerBox()); !strings.Contains(box, "survey") || !strings.Contains(box, "resident") {
+		t.Fatalf("the loaded card fills in by name; the others stay:\n%s", box)
+	}
+	next, _ = m.Update(residentSessionsMsg{agent: m.agentName, err: "ssh: timeout"})
+	if len(next.(emberModel).sessionNames) != 2 {
+		t.Fatal("a failed read keeps the sessions already known")
+	}
+}

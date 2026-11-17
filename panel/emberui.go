@@ -614,11 +614,17 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case residentComposeResult:
 		return m.finishCompose(msg)
+	case sessionCardsMsg:
+		if msg.agent == m.agentName {
+			m.sessionCards = msg.cards
+		}
+		return m, nil
 	case residentSessionsMsg:
 		if msg.agent == m.agentName {
-			m.sessionNames, m.sessionMemory, m.sessionCards = msg.names, msg.memory, msg.cards
 			if msg.err != "" {
-				m.msg = msg.err
+				m.msg = msg.err // (the names already known stay: a failed read must not empty the switcher)
+			} else {
+				m.sessionNames, m.sessionMemory = msg.names, msg.memory
 			}
 			if m.pendingLast != "" {
 				last := m.pendingLast
@@ -636,6 +642,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.msg = "session " + terminalText(last, true) + " no longer exists; pick another"
 					return m, tea.Batch(residentRefresh(m), residentSessions(m))
 				}
+			}
+			if m.chat.picker && msg.err == "" {
+				return m, loadSessionCards(m, m.sessionNames) // the cards follow the names; the list never waits on them
 			}
 		}
 		return m, nil
