@@ -41,8 +41,9 @@ NEEDS = dict(open=('url',), click=('ref',), type=('ref', 'text'), select=('ref',
 ALLOW_MAX = 16
 CALL_TIMEOUT = 90         # the runtime's wait for one action (a page load is bounded at LOAD_TIMEOUT inside it)
 LOAD_TIMEOUT = 30
-IDLE_CLOSE = 1800         # seconds without a call before the browser closes itself (config.json sandbox.browser_idle_s;
-                          # no time limit otherwise: a paused goal keeps its box, but not a Chrome running for nobody)
+IDLE_CLOSE = 1800         # the default seconds without a call before the browser closes itself (config.json
+                          # sandbox.browser_idle_s; 0: never, it stays open until the goal ends). No time limit
+                          # otherwise: a paused goal keeps its box, but by default not a Chrome running for nobody
 SNAPSHOT_LINES, SNAPSHOT_CHARS = 250, 16000
 PROFILE = '/box/browser'
 FLAGS = ('--headless=new', '--no-sandbox', '--remote-debugging-pipe', f'--user-data-dir={PROFILE}/profile',
@@ -155,6 +156,15 @@ def _check(args):
             raise ValueError('amount is 1 to 20000 pixels')
 
 
+def idle_of(config):
+    """config.json sandbox.browser_idle_s: seconds without a call before the browser closes itself, 0 for never."""
+    v = ((config or {}).get('sandbox') or {}).get('browser_idle_s', IDLE_CLOSE)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError('config sandbox.browser_idle_s is a whole number of seconds, or 0 for never (the browser '
+                         'then stays open until the goal ends)')
+    return v
+
+
 def _launch(rt, gid):
     """A new browser job for the goal: Chrome in its box, with the web proxy."""
     exe, ro = find()
@@ -168,8 +178,7 @@ def _launch(rt, gid):
     job = rt.terminal.jobs / uuid.uuid4().hex
     job.mkdir()
     atomic_json(job / 'request.json', dict(command=command, cwd=str(box_d), workspace=str(rt.home), box=box,
-                                           browser=dict(launcher=exe, idle_s=int(((rt.config or {}).get('sandbox') or {})
-                                                                                  .get('browser_idle_s', IDLE_CLOSE)))))
+                                           browser=dict(launcher=exe, idle_s=idle_of(rt.config))))
     rt.terminal.launch(job)
     rt.__dict__.setdefault('_browsers', {})[gid] = job.name
     return job
@@ -411,7 +420,7 @@ class Driver:
             broken = f'Chrome did not start in its box: {e}'
         while True:
             try:
-                item = self.q.get(timeout=self.idle)
+                item = self.q.get(timeout=self.idle or None)     # (0: never closes on its own)
             except queue.Empty:
                 # a paused or failed goal keeps its box (it can resume), not a Chrome left running for nobody
                 (self.job / 'closed').write_text(f'it closed itself after {self.idle} s without a call')

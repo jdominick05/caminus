@@ -182,7 +182,8 @@ work has no arbitrary step limit; explicit oneshot test budgets still apply.
 
 # only where the browser tool is offered (browser.py: a Chrome or Chromium that runs in a box)
 BROWSER = '''For pages that need JavaScript, forms or clicks, and to test a web app you run, use browser: headless
-Chrome in its own box, kept for the goal (it closes after 30 minutes without a call). Read the page through
+Chrome in its own box, kept for the goal (by default it closes after 30 minutes without a call; your human
+can change that). Read the page through
 its snapshot (elements with refs) and act on the refs; a screenshot is a file in the goal's box, gone with it
 unless you copy it out. Public sites are open to it and logged; your own app needs its address named (open
 http://localhost:PORT). It never types passwords: logins go through ask_user.

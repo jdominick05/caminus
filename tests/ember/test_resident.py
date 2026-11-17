@@ -5290,6 +5290,25 @@ class Browser(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:self.go(action='snapshot')
         self.assertIn('closed itself after 2 s',str(cm.exception))
 
+    def test_an_uncapped_browser_stays_open_until_the_goal_ends(self):
+        from caminus.ember.resident.terminal import read_state
+        self.rt.config=dict(sandbox=dict(browser_idle_s=-1))
+        with self.assertRaises(ValueError) as cm:self.go(action='open',url=f'http://{site()}/')
+        self.assertIn('0 for never',str(cm.exception))
+        self.rt.config=dict(sandbox=dict(browser_idle_s=0))       # 0: never closes on its own
+        opened=self.go(action='open',url=f'http://{site()}/')
+        job=self.home/'jobs'/opened['session']
+        self.assertEqual(json.loads((job/'request.json').read_text())['browser']['idle_s'],0)
+        self.go(action='type',ref=self.ref(opened['snapshot'],'textbox "Name"'),text='Ada')
+        time.sleep(4)                                             # (twice the idle test's limit)
+        self.assertEqual(read_state(job)['phase'],'running')
+        r=self.go(action='snapshot')
+        self.assertEqual(r['session'],opened['session']);self.assertIn('= "Ada"',r['snapshot'],'the same page, kept')
+        self.assertTrue(self.sb.end(self.home,'g1'))
+        end=time.monotonic()+10
+        while read_state(job).get('phase')!='finished' and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual(read_state(job)['phase'],'finished','the goal\'s end closes it')
+
 
 class WorkerEnv(unittest.TestCase):
     def test_key_not_inherited(self):
