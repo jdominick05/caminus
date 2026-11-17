@@ -1215,6 +1215,13 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if errText != "" {
 				return toolCard(map[string]string{"ask_user": "question", "ask_root": "root request"}[name], "not sent: "+humanRefusal(errText), "", false, c.expanded, lines(errText, 8), w)
 			}
+			if by, _ := result["by"].(string); by == "timeout" {
+				// no answer came in time: the resident carried on (a question with its recommended option, root
+				// with no); the answer text is addressed to the model and is not yours
+				what := map[string]string{"ask_user": "no answer in time: it carried on with its recommended option",
+					"ask_root": "no answer in time: not run"}[name]
+				return toolCard(map[string]string{"ask_user": "question", "ask_root": "root request"}[name], what, "", true, false, nil, w)
+			}
 			if pending, _ := result["pending"].(bool); pending {
 				if name == "ask_root" {
 					return toolCard("root request", "waiting for your approval · Ctrl+A decides", "", true, false, nil, w)
