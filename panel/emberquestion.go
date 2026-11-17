@@ -458,7 +458,8 @@ func (m *emberModel) requestOutcomes() map[string]string {
 				question[id] = e.Kind == "question"
 			}
 		case "request_answered":
-			if id := str("request"); id != "" && (out[id] == "" || str("by") == "timeout") {
+			// a timeout already recorded stays (an approval question's question_unanswered says "no" and comes first)
+			if id := str("request"); id != "" && !timedOut[id] && (out[id] == "" || str("by") == "timeout") {
 				out[id] = outcomeText(question[id], str("decision"), "", nil, str("by"))
 				if str("by") == "timeout" {
 					timedOut[id] = true

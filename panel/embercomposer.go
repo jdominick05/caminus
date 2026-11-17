@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -292,10 +293,14 @@ func expandAttachmentsChecked(m emberModel, text string) (string, []string) {
 		parts[k] = attachRe.ReplaceAllStringFunc(parts[k], func(word string) string {
 			g := attachRe.FindStringSubmatch(word)
 			lead, p := g[1], g[2]
+			// sentence punctuation after a path is not part of it ("see +notes.md." reads notes.md); "+1..." is a word
+			whole := p
+			p = strings.TrimRight(p, ".,;:!?")
+			trail := whole[len(p):]
 			if !strings.ContainsAny(p, "/.") {
 				return word
 			}
-			if strings.Contains(p, "..") {
+			if slices.Contains(strings.Split(p, "/"), "..") {
 				problems = append(problems, p+": a path with .. is not attached")
 				return word
 			}
@@ -323,7 +328,7 @@ func expandAttachmentsChecked(m emberModel, text string) (string, []string) {
 				return lead + p
 			}
 			blocks = append(blocks, fmt.Sprintf("Attached %s:\n```\n%s\n```", p, strings.TrimRight(out, "\n")))
-			return lead + p + " (attached)"
+			return lead + p + " (attached)" + trail
 		})
 		// @ names a path (it reads as one: a / or a .); "@alice" is a word with its @
 		parts[k] = nameRe.ReplaceAllStringFunc(parts[k], func(w string) string {
