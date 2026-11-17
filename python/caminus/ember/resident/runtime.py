@@ -917,6 +917,7 @@ class Runtime:
                 break
             if item and live.on_delta(*item) is False or not item and not live.check():
                 stop.set()
+                self.model.abort()   # (the server stops too: an abandoned call kept it generating)
                 raise Cancelled()
         if 'error' in out:
             raise out['error']

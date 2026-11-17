@@ -1,7 +1,10 @@
 """Model transports: OpenAI-compatible chat completions (the local server) and Anthropic's Messages API.
 Standard library only; no engine, GPU or agent-CLI dependency."""
+import http.client
 import json
 import os
+import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -134,6 +137,29 @@ def http_error(e):
     return err
 
 
+def _recording_opener(held):
+    """urlopen that hands each connection's socket to held(sock) as it connects (Model.abort closes them)."""
+    class Conn(http.client.HTTPConnection):
+        def connect(self):
+            super().connect()
+            held(self.sock)
+
+    class Conns(http.client.HTTPSConnection):
+        def connect(self):
+            super().connect()
+            held(self.sock)
+
+    class Plain(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(Conn, req)
+
+    class Secure(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(Conns, req, context=self._context)
+
+    return urllib.request.build_opener(Plain, Secure).open
+
+
 class Cancelled(Exception):
     """the goal was cancelled while the model was generating; nothing of this reply is stored"""
 
@@ -141,6 +167,10 @@ class Cancelled(Exception):
 class Model:
     def __init__(self, config, opener=urllib.request.urlopen):
         self.config, self.opener = config, opener
+        self._sockets, self._sockets_lock = set(), threading.Lock()
+        if opener is urllib.request.urlopen:
+            self.opener = _recording_opener(self._held)   # (abort() can then close an open call: see abort)
+
         self.base = config['endpoint'].rstrip('/')
         parsed = urllib.parse.urlsplit(self.base)
         if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
@@ -161,6 +191,22 @@ class Model:
         self.last_speed = None
         self.last_call = {}      # the newest Messages API call: requested and serving model, fallback, stop, request id
 
+    def _held(self, sock):
+        with self._sockets_lock:
+            self._sockets = {s for s in self._sockets if s.fileno() != -1}   # (closed ones out)
+            self._sockets.add(sock)
+
+    def abort(self):
+        """Close every open call's connection. A cancelled or interrupted turn stops here and on the server: abandoning
+        the call left the server generating the reply (up to the reply limit) and holding its slot; caminus serve stops
+        a job when its client's socket closes, also during prefill."""
+        with self._sockets_lock:
+            held, self._sockets = self._sockets, set()
+        for s in held:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass                      # (already closed)
     def headers(self, stream=False, beta=None):
         name = self.config.get('api_key_env', 'CAMINUS_AGENT_API_KEY')
         key = os.environ.get(name)

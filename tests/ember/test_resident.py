@@ -2813,6 +2813,35 @@ for line in sys.stdin:
             self.assertFalse((self.home/'live'/(gid+'.json')).exists())
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_cancel_closes_the_connection_so_the_server_stops_too(self):
+        """Abandoning the call left the server generating the reply and holding its slot: the cancel closes the socket
+        (caminus serve stops a job when its client goes, also during prefill)."""
+        import socket,threading
+        from caminus.ember.resident.runtime import Live
+        from caminus.ember.resident.model import Cancelled, Model as RealModel
+        srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);port=srv.getsockname()[1]
+        closed=threading.Event()
+        def serve():                                  # reads the request, never answers (a long prefill), notes the close
+            c,_=srv.accept();c.settimeout(10)
+            try:
+                while c.recv(65536):pass
+                closed.set()
+            except OSError:closed.set()
+            finally:c.close()
+        threading.Thread(target=serve,daemon=True).start()
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A.');rt.store.update(gid,state='working')
+            rt.model=RealModel(dict(endpoint=f'http://127.0.0.1:{port}/v1',model='x',timeout=30,context=65536))
+            live=Live(self.home,gid,rt.store)
+            threading.Timer(.4,lambda:Store(self.home).update(gid,state='cancelled')).start()
+            t0=time.time()
+            with self.assertRaises(Cancelled):
+                rt._watched(live,lambda on_delta:rt.model.complete([dict(role='user',content='hi')],max_tokens=10,on_delta=on_delta),poll=.05)
+            self.assertTrue(closed.wait(3),'the server sees the client go')
+            self.assertLess(time.time()-t0,4)
+        finally:rt.mail.close();rt.store.close();srv.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
         sent=[]
