@@ -161,6 +161,12 @@ rc, out = run('check', ex, ex)
 check(rc == 0 and 'k3_u16' not in out.split('not judged here)')[-1] and 'k3_old (109 VGPRs, 0 spilled, not exempt)' in out,
       'check: an unchanged exempt object inside its exemption is not listed; an unexempt one is listed as not exempt')
 
+rc, out = run('check', ex, build('ex4', dict(BASE, k3_u16=elf(b'U' * 40, regs=(180, 0, 0, 0)))), '--allow-missing')
+check('k3_u16 (180 VGPRs, 0 spilled, past its exemption 173 / 0)' in out,
+      'check: an unchanged object past its exemption is listed as past it, not as not exempt')
+rc, out = run('check', base, build('ex5', dict(BASE, k3_trace=elf(b'T' * 40, regs=(110, 0, 0, 0)))))
+check(rc == 0 and 'new: k3_trace' in out and 'PASS k3_trace: 110 VGPRs' in out, 'check: a new exempt object at its recorded counts passes')
+
 # ---- not a code object
 junk = build('junk', {'k3_a': b'not an object file'})
 rc, out = run('snap', junk)

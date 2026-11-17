@@ -284,7 +284,7 @@ CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LO
 python -I tools/gates/sdma_classify.py ULOG ADDR --pid PID                # (CPU) a fault address: live / freed / neither upload source
 ```
 
-After a kernel change: `objcheck.py check` (every other object's code unchanged; k3_run <= 96 VGPRs, 0 spills;
+After a kernel change: `objcheck.py check` (every other object's code unchanged; k3_run <= 96 VGPRs, 0 spills, or within its recorded exemption above;
 `.sgpr_spill_count` not up: spilled scalars slow every hop, a change in one op measured +13 % on all of them; the
 counts are the ones `llvm-readelf --notes` prints); rerun the gates at `K3_PER_WGP=3/6/7`
 (`gates.sh OUT grids qsa`: still bitwise); first runs on a non-display card (`caminus ps` lists the cards).
@@ -363,7 +363,7 @@ Codex flags P0 / P1 issues only. In this repository these are P1:
   equal to one-token steps, and the `K3_PER_WGP=3/6/7` grids), or, where a change cannot be bitwise by design, the KLD
   floor (mean KLD against llama.cpp's one-token decode within llama.cpp's own batch-versus-decode floor, top-1 within one
   point), or, where it changes a quantized pair's math, the docs/specs/spec-own-quant.md gates (G-acc, G-model, G-self,
-  G-speed, with their numbers). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill.
+  G-speed, with their numbers). Flag one that lists none, or that reports k3_run above 96 VGPRs or any VGPR spill outside the recorded exemptions (`objcheck` `EXEMPT`).
 - Flag a device wait without a time bound (`limit_us`), a GPU allocation that is not projected and checked through
   `caminus.device.capacity` before it happens, and a position-indexed host entry that does not call `k3.check_span`.
 - Flag a GPU command in a script, test or doc that does not run under `tools/guard.sh`.

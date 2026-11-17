@@ -181,7 +181,7 @@ def check(a):
         ex = EXEMPT.get(n) if a.kernel == 'k3_run' else None
         if n not in changed and n not in new:              # this change did not build it: reported, not judged
             if (v > a.max_vgprs or vs) and not (ex and v <= ex[0] and vs <= ex[1]):
-                old.append(f'{n} ({v} VGPRs, {vs} spilled' + ('' if ex else ', not exempt') + ')')
+                old.append(f'{n} ({v} VGPRs, {vs} spilled' + (f', past its exemption {ex[0]} / {ex[1]}' if ex else ', not exempt') + ')')
             continue
         bad = []
         vmax, smax = (max(a.max_vgprs, ex[0]), ex[1]) if ex else (a.max_vgprs, 0)
