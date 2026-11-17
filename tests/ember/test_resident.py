@@ -45,11 +45,16 @@ def call(name,args):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[]
+    queues={};seen=[];judges={};judge_seen=[];models={};gets=[]
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-    def do_GET(self):self.respond(dict(n_ctx=65536))
+    def do_GET(self):
+        # a test that sets models[key] gets a local server's model list (its effort ids included); /props otherwise
+        key=self.path.split('/')[1];self.gets.append(self.path)
+        if self.path.endswith('/v1/models') and key in self.models:
+            self.respond(dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in self.models[key]]));return
+        self.respond(dict(n_ctx=65536))
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path.endswith('/count_tokens'):
@@ -1529,14 +1534,104 @@ for line in sys.stdin:
         (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
         new='local-'+uuid.uuid4().hex[:8]
         home=self.home.parent/new
-        made=subprocess.run(base+['create',new,'--from',paid,'--model','swift-1.5','--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'   # (never the machine's own server on 8092)
+        made=subprocess.run(base+['create',new,'--from',paid,'--model','swift-1.5','--endpoint',url,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
         self.assertEqual(made.returncode,0,made.stdout+made.stderr)
         self.assertEqual(json.loads(made.stdout)['model'],'swift-1.5')
         got=json.loads((home/'config.json').read_text())
-        self.assertEqual((got['model'],got['endpoint']),('swift-1.5','http://127.0.0.1:8092/v1'))
+        self.assertEqual((got['model'],got['endpoint']),('swift-1.5',url))
         for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model'):
             self.assertNotIn(k,got,f'{k} belonged to the paid brain')
         self.assertIn('providers',got,'/model can still switch back to a paid brain')
+
+    CODER_IDS=['k3-coder','k3-coder-xhigh','k3-coder-low','k3-coder-nothink']   # what the Coder's server lists
+
+    def sent_models(self,levels):
+        """For each level: set it with /effort, run a goal, and return the model id its first request named."""
+        out={}
+        for level in levels:
+            self.cmd('effort',[level])
+            before=len(Endpoint.seen)
+            self.replies(call('finish',dict(summary='ok')))
+            self.assertEqual(self.cmd('once',['--goal','Say ok.'])['state'],'completed')
+            out[level]=[b for k,b in Endpoint.seen[before:] if k==self.key][0]['model']
+        return out
+
+    def test_a_local_session_from_the_session_switcher_finds_its_servers_effort_ids(self):
+        # the owner's Coder session: create --local-default stored the catalog name (coder) and no provider, so /effort
+        # said "coder has no effort control" while the server listed k3-coder-low / -xhigh / -nothink
+        Endpoint.models[self.key]=self.CODER_IDS
+        conf=json.loads((self.home/'config.json').read_text());conf['model']='coder'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        out=self.cmd('effort',[])
+        self.assertEqual((out['model'],out['current'],out['runs_as']),('k3-coder','medium','medium'),
+                         'an existing session keeps the level it ran (the base id runs medium): no re-read')
+        self.assertIn('high, xhigh, max → xhigh',out['summary'])
+        cfg=json.loads((self.home/'config.json').read_text())
+        self.assertEqual(cfg['model_variants'],dict(none='k3-coder-nothink',low='k3-coder-low',xhigh='k3-coder-xhigh'))
+        self.assertEqual(self.sent_models(['low','medium','high','no']),
+                         dict(low='k3-coder-low',medium='k3-coder',high='k3-coder-xhigh',no='k3-coder-nothink'))
+        # once found, the ids are kept: /effort asks the server no more
+        Endpoint.gets.clear();self.cmd('effort',['xhigh'])
+        self.assertFalse([g for g in Endpoint.gets if g.startswith('/'+self.key+'/') and g.endswith('/models')])
+        # a session that stored an effort id as its model keeps that level
+        conf=json.loads((self.home/'config.json').read_text());conf.update(model='k3-coder-nothink');conf.pop('model_variants');conf.pop('effort')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        out=self.cmd('effort',[])
+        self.assertEqual((out['model'],out['current']),('k3-coder','none'))
+
+    def test_a_local_session_with_an_old_catalog_finds_its_servers_effort_ids(self):
+        # a /model pick from a models.json written before the effort ids were grouped: four separate models, none with
+        # variants, and a config with provider_kind local and no model_variants
+        Endpoint.models[self.key]=self.CODER_IDS
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        conf=json.loads((self.home/'config.json').read_text())
+        conf.update(model='k3-coder',provider='coder-2card',provider_kind='local',providers={'coder-2card':dict(kind='local',endpoint=url)})
+        (self.home/'config.json').write_text(json.dumps(conf))
+        (self.home/'models.json').write_text(json.dumps(dict(updated=1,providers={'coder-2card':dict(kind='local',ok=True)},
+            models=[dict(id=i,name=i,provider='coder-2card',context=None,max_output=None,efforts=[],thinking='',vision=False,prices=None)
+                    for i in self.CODER_IDS])))
+        self.assertEqual(self.sent_models(['low','medium','high','no']),
+                         dict(low='k3-coder-low',medium='k3-coder',high='k3-coder-xhigh',no='k3-coder-nothink'))
+        # /model on the old entry takes the ids from the server too
+        conf=json.loads((self.home/'config.json').read_text());conf.pop('model_variants');conf.pop('effort')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.cmd('model',['k3-coder'])
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['model_variants']['low'],'k3-coder-low')
+        # an old entry for an effort id is its base at that level
+        cfg=self.cmd('model',['k3-coder-low'])['current']
+        self.assertEqual((cfg['model'],cfg['effort']),('k3-coder','low'))
+
+    def test_a_new_local_session_takes_its_servers_id_and_the_labs_default_level(self):
+        from caminus.ember.resident import effort as eff
+        Endpoint.models[self.key]=self.CODER_IDS
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        new='coder-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['create',new,'--from',self.home.name,'--model','coder','--endpoint',url,'--home',str(home),'--json'],
+                            capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        cfg=json.loads((home/'config.json').read_text())
+        self.assertEqual((cfg['model'],cfg['model_variants']['xhigh'],cfg.get('effort')),('k3-coder','k3-coder-xhigh',None))
+        self.assertEqual(eff.resolve(cfg)['model'],'k3-coder-xhigh','the lab\'s default for the Qwen3.8 line')
+        # a server that is down changes nothing: the session keeps what create stored
+        down='down-'+uuid.uuid4().hex[:8]
+        made=subprocess.run(base+['create',down,'--from',self.home.name,'--model','coder','--endpoint','http://127.0.0.1:9/v1',
+                                  '--home',str(self.home.parent/down),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        got=json.loads((self.home.parent/down/'config.json').read_text())
+        self.assertEqual((got['model'],got.get('model_variants')),('coder',None))
+
+    def test_a_paid_brain_without_effort_control_asks_no_server(self):
+        Endpoint.models[self.key]=self.CODER_IDS
+        conf=json.loads((self.home/'config.json').read_text())
+        conf.update(provider='deepinfra',provider_kind='deepinfra',efforts=[],relay=True)
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.gets.clear()
+        p=subprocess.run(self.argv('effort',['low']),capture_output=True,text=True,timeout=15)
+        self.assertEqual(p.returncode,1);self.assertIn('fixture has no effort control',json.loads(p.stdout)['error'])
+        self.assertFalse([g for g in Endpoint.gets if g.startswith('/'+self.key+'/')],'a paid brain\'s catalog decides')
+        self.assertNotIn('model_variants',json.loads((self.home/'config.json').read_text()))
 
     def test_local_default_resolves_on_the_owner_side(self):
         from caminus.ember import agent_host, serve
@@ -1786,8 +1881,8 @@ for line in sys.stdin:
         cfg=init('haiku','--model','claude-haiku-5-5','--endpoint','https://api.anthropic.com/v1','--api','anthropic','--context','100000','--effort','low','--max-model-retries','4')
         self.assertEqual((cfg['api'],cfg['effort'],cfg['max_model_retries'],cfg['endpoint']),('anthropic','low',4,'https://api.anthropic.com/v1'))
         self.assertEqual(init('di','--model','m','--endpoint','https://api.deepinfra.com/v1/openai','--context','8192')['endpoint'],'https://api.deepinfra.com/v1/openai')
-        cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:8092')
-        self.assertEqual(cfg['endpoint'],'http://127.0.0.1:8092/v1');self.assertNotIn('api',cfg)
+        cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:9')   # (init asks a local server: none listens on 9)
+        self.assertEqual(cfg['endpoint'],'http://127.0.0.1:9/v1');self.assertNotIn('api',cfg)
 
     # ---- free time ------------------------------------------------------------------------------------------
 

@@ -138,6 +138,8 @@ key of that file.
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
 
 Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
+A local session finds its server's effort ids by asking the server (at creation, `/model` or `/effort`); a session
+made before that keeps running at medium until you pick a level.
 
 ### Per model
 

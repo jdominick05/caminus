@@ -22,6 +22,7 @@ keeps its last entries, marked stale. What a provider does not say stays unknown
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -34,9 +35,9 @@ DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
 DEEPINFRA_OUTPUT_CAP = 16384
 
 
-def _get(url, headers, opener):
+def _get(url, headers, opener, timeout=TIMEOUT):
     req = urllib.request.Request(url, None, {'Accept': 'application/json', **headers})
-    with opener(req, timeout=TIMEOUT) as r:
+    with opener(req, timeout=timeout) as r:
         raw = r.read(8 * 1024 * 1024 + 1)
     if len(raw) > 8 * 1024 * 1024:
         raise ValueError('model list larger than 8 MiB')
@@ -179,6 +180,38 @@ def providers(config):
         out[own] = dict(kind=config.get('provider_kind') or ('anthropic' if config.get('api') == 'anthropic'
                                                              else 'openai'), endpoint=config['endpoint'])
     return out
+
+
+def is_local(config):
+    """Whether the agent's own brain is a local server: provider_kind local, or a config from before providers (agent
+    init, create --model) on a loopback endpoint that is neither the key relay nor the Messages API."""
+    kind = config.get('provider_kind')
+    if kind:
+        return kind == 'local'
+    if config.get('relay') or config.get('api') == 'anthropic' or not config.get('endpoint'):
+        return False
+    from .model import LOOPBACK
+    return urllib.parse.urlsplit(config['endpoint']).hostname in LOOPBACK
+
+
+def local_brain(config, opener=urllib.request.urlopen, timeout=3):
+    """Ask the agent's local server which model it serves and that model's effort ids: (base id, {level: id}), or None
+    when it cannot be reached or names no such model. The configured id when the server lists it; else its only model
+    (with several, its default: /props model_alias). The session switcher stores the catalog name (coder), and the
+    server runs an id it does not list as its default model."""
+    base = config['endpoint'].rstrip('/')
+    try:
+        groups = local_entries(_get(base + '/models', {}, opener, timeout), '')
+        groups = {m['id']: m['variants'] for m in groups}
+        model = config.get('model')
+        if model not in groups:
+            alias = None
+            if len(groups) > 1:
+                alias = _get(_root(base) + '/props', {}, opener, timeout).get('model_alias')
+            model = alias if alias in groups else next(iter(groups)) if len(groups) == 1 else None
+    except (OSError, ValueError, AttributeError, KeyError, TypeError, urllib.error.HTTPError):
+        return None
+    return (model, groups[model]) if model else None
 
 
 def path(home):
