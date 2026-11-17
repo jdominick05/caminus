@@ -212,10 +212,8 @@ def refresh(home, config, opener=urllib.request.urlopen, only=None):
             status[name] = dict(kind=spec.get('kind'), ok=False, error=f'{type(e).__name__}: {str(e)[:200]}',
                                 at=time.time())
     cat = dict(updated=time.time(), providers=status, models=models)
-    p = path(home)
-    tmp = p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(cat, indent=1))
-    tmp.replace(p)
+    from .store import atomic_json
+    atomic_json(path(home), cat)   # (a temp file per writer: two windows refreshing at once both wrote models.tmp)
     return cat
 
 

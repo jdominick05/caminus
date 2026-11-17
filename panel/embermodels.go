@@ -121,8 +121,8 @@ func setEffort(m emberModel, level string) tea.Cmd {
 			args = []string{"effort", m.agentName, level, "--json"}
 		}
 		var out struct {
-			Effort *string  `json:"effort"`
-			Levels []string `json:"levels"`
+			Effort  *string  `json:"effort"`
+			Levels  []string `json:"levels"`
 			Model   string   `json:"model"`
 			Summary string   `json:"summary"`
 		}
@@ -215,7 +215,7 @@ func (m emberModel) modelsOverlay(w, h int) string {
 	case st.err != "" && len(st.list) == 0:
 		rows = append(rows, emberWarn.Render(ansi.Truncate(st.err, inner, "…")))
 	case len(st.list) == 0:
-		rows = append(rows, emberDim.Render("no models: add a provider (caminus ember agent provider NAME add …), then r"))
+		rows = append(rows, emberDim.Render(ansi.Wordwrap("no models yet: add a provider with caminus ember agent provider NAME add …, then press r here to ask it again", inner, " ")))
 	}
 	for i := first; i < min(first+listH, len(st.list)); i++ {
 		rows = append(rows, m.modelRow(st.list[i], i == sel, inner))

@@ -100,6 +100,10 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 	state := "ok"
 	if errText := rs("error"); errText != "" {
 		state = "fail"
+		// the agent's own paths read short (a raw error carried the whole home path)
+		if home != "" {
+			errText = strings.ReplaceAll(errText, home+"/", "~/")
+		}
 		meta = firstLine(residentText(errText))
 		preview = lines(residentText(errText), 4)
 		if len(preview) <= 1 {
@@ -284,8 +288,11 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				used, _ := gp["vram_used_mib"].(float64)
 				total, _ := gp["vram_total_mib"].(float64)
 				busy, _ := gp["busy_percent"].(float64)
-				if total > 0 { // ("0/0 GB" when the card reports nothing)
+				switch {
+				case total >= 1024:
 					parts = append(parts, fmt.Sprintf("%.0f/%.0f GB %d %%", used/1024, total/1024, int(busy)))
+				case total > 0: // (a 512 MiB integrated GPU read "0/0 GB")
+					parts = append(parts, fmt.Sprintf("%.0f/%.0f MiB %d %%", used, total, int(busy)))
 				}
 			}
 			if mem, ok := result["memory"].(map[string]any); ok {

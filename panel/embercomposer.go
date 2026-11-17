@@ -505,3 +505,16 @@ func sentShape(s string) string {
 		return w
 	}))
 }
+
+// typedFormOf is a sent message as it was typed: the newest typed entry it is the sent form of, else the message
+// turned back (+path, a leading //).
+func (m emberModel) typedFormOf(sent string) string {
+	shape := sentShape(unexpand(sent))
+	typed := loadTyped(m.agentName)
+	for i := len(typed) - 1; i >= 0; i-- {
+		if sentShape(typed[i]) == shape {
+			return typed[i]
+		}
+	}
+	return retype(unexpand(sent))
+}

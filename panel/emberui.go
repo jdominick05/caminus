@@ -731,7 +731,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.msg = "nothing to pull back: the agent has read your messages"
 		default:
-			m.chat.compose.SetValue(*msg.text)
+			// as you typed it (@names, +files, a leading //), not as it was sent: //x came back as /x and Enter ran it as
+			// a command while the message stayed withdrawn
+			m.chat.compose.SetValue(m.typedFormOf(*msg.text))
 			m.msg = "pulled back: edit it and Enter to send again"
 		}
 		return m, nil

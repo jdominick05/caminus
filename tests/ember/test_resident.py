@@ -2761,6 +2761,24 @@ for line in sys.stdin:
         self.assertEqual(eff.sampling(med,True),dict(temperature=0.7,top_p=0.95))
         self.assertEqual(eff.sampling(dict(med,effort='low'),True),dict(temperature=0.7))
 
+    def test_one_goal_advances_per_pass_in_queue_order(self):
+        """A goal that made progress has the pass; the next starts only while those before it wait (every goal was
+        ticked each pass, so queued goals ran interleaved with the working one)."""
+        rt=Runtime(self.home)
+        try:
+            a=rt.store.enqueue('A.');b=rt.store.enqueue('B.')
+            ticked=[];passes=[0]
+            def tick(gid,progress):ticked.append(gid);return progress
+            rt.tick=lambda gid:tick(gid,gid==a)          # A makes progress, B would too if it were ticked
+            rt._maybe_update=lambda:False
+            rt.run(stop=lambda:(passes.__setitem__(0,passes[0]+1) or passes[0]>2),poll=0)
+            self.assertEqual(set(ticked),{a},'B waits while A moves')
+            ticked.clear();passes[0]=0
+            rt.tick=lambda gid:tick(gid,gid==b)          # A waits (parked, a pending request): B gets the pass
+            rt.run(stop=lambda:(passes.__setitem__(0,passes[0]+1) or passes[0]>2),poll=0)
+            self.assertEqual(ticked[:2],[a,b])
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
         sent=[]
@@ -4408,6 +4426,8 @@ for line in sys.stdin:
         self.assertEqual((st['state'],st['steps']),('paused',2))
         self.assertIn('rewound to step 2',st['error'])
         self.assertIn('rewound',[e['kind'] for e in self.cmd('events')])
+        self.assertEqual(self.cmd('rewind',[gid,'--list'])['steps'],[dict(step=2,label='write notes/a.txt')],
+                         'the undone step 3 is no rewind point any more')
         store=Store(self.home)
         try:
             ms=store.goal(gid)['messages']
@@ -4425,7 +4445,7 @@ for line in sys.stdin:
             self.assertEqual(out2['skipped'],[str(bigp)])
             self.assertEqual(afile.read_text(),'OLD ONE\n')
             listed=self.cmd('rewind',[gid,'--list'])['steps']
-            self.assertIn('skipped',listed[-1]['label'])
+            self.assertEqual(listed,[],'every step after 1 was undone (or could not be): none is offered again')
             self.assertTrue(bigp.exists())            # not restorable does not mean deleted
         finally:store.close()
         # and the goal carries on from the cut point

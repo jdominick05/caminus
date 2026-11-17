@@ -235,6 +235,7 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch k {
 		case "enter":
 			closeIt()
+			m.chat.pickedGoal = id // chosen by hand: it stays chosen even when it is over (a refresh moved it before)
 			return m, tea.Batch(cmd, m.chat.compose.Focus())
 		case "x":
 			return m.chatSlash("/cancel")

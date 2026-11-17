@@ -857,6 +857,8 @@ class Runtime:
                         break
             # the cut replies' calls must not run after the rewind (a reply with several calls, a waiting request)
             self.store.db.execute("DELETE FROM actions WHERE goal=? AND state!='done'", (gid,))
+            # the undone steps are no rewind points any more (/rewind kept offering what was just undone)
+            self.store.db.execute('DELETE FROM file_snapshots WHERE goal=? AND step>?', (gid, to))
             self.store.update(gid, messages=g['messages'][:cut], steps=to, state='paused', summary='',
                               error='rewound to step %d (terminal side effects are not undone)' % to)
         self.store.event('rewound', dict(to=to, restored=restored, removed=removed, skipped=skipped), gid)
@@ -2134,9 +2136,15 @@ class Runtime:
                 atomic_json(self.home / 'heartbeat.json',dict(pid=os.getpid(),ts=time.time(),state='working',runtime=RUNTIME))
                 last_heartbeat=time.time()
             for gid in goals:
-                progressed |= self.tick(gid)
+                moved = self.tick(gid)
+                progressed |= bool(moved)
                 if observe:
                     observe(self.store)
+                if moved and not target:
+                    # one goal at a time, in queue order: a goal that made progress has the pass; the next one starts
+                    # only while those before it wait (parked, a pending request, the model away). Every goal was
+                    # ticked each pass, so queued goals ran interleaved with the working one, all three "working".
+                    break
                 if target:
                     state = self.store.goal(gid)['state']
                     if state in PAUSED or state == 'waiting_model':
