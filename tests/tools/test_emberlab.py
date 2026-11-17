@@ -51,7 +51,8 @@ check(p.returncode == 0 and len(rows) == 10, f'suite: 10 runs recorded, exit 0 (
 check(len(solve) == 5 and all(r['check'] and r['finished'] and not r['false_completion'] for r in solve),
       'suite: the scripted solver passes all five checks through the gates: '
       + ', '.join(f"{r['task']}={r.get('state')}/{r.get('check')}" for r in solve))
-check(len(claim) == 5 and not any(r['check'] for r in claim) and all(r['false_completion'] == r['finished'] for r in claim),
+check(len(claim) == 5 and not any(r['check'] for r in claim) and all(r['false_completion'] == r['finished'] for r in claim)
+      and any(r['false_completion'] for r in claim),   # (vacuous if no claim goal ever finished)
       'suite: the claiming script passes no check; every goal it finished is a false completion')
 check(all((out / 'runs' / r['id'] / f).exists() for r in rows for f in ('events.jsonl', 'check.out', 'run.json')),
       'suite: each run keeps its events, check output and record')
@@ -61,6 +62,13 @@ check(all(r.get('commit') and 'dirty' in r for r in rows), 'suite: each record n
 p = lab('run', '--suite', 'basic', '--brain', 'scripted:solve', '--out', str(out))
 check('5 runs (0 to do)' in p.stdout and len((out / 'results.jsonl').read_text().splitlines()) == 10,
       'resume: a second run into the same folder runs nothing again')
+res = out / 'results.jsonl'
+lines = res.read_text().splitlines()
+first = json.loads(lines[0]); first.update(state='error', error='ssh dropped')
+res.write_text('\n'.join([json.dumps(first)] + lines[1:]) + '\n')
+p = lab('run', '--suite', 'basic', '--brain', 'scripted:' + first['brain'].split(':')[-1], '--out', str(out))
+check('(1 to do)' in p.stdout and {r['id']: r for r in report.load(out)}[first['id']].get('state') != 'error',
+      f'resume: a run that ended in error runs again ({p.stdout[-200:]})')
 
 # ---- compare
 arms = S / 'arms.json'
@@ -78,6 +86,11 @@ check(v(mk('x', 'A', 3, 1) + mk('x', 'B', 3, 3) + mk('y', 'A', 3, 2) + mk('y', '
       'compare: a brain that drops makes the arm worse, whatever the others gain')
 check(v(mk('x', 'A', 3, 2) + mk('x', 'B', 3, 2, false=1)).startswith('worse for x'),
       'compare: more false completions at the same pass rate is worse')
+errored = mk('x', 'B', 3, 2)
+errored[2].update(state='error')                # an infrastructure failure, not a failed check of the harness
+c2 = report.compare(mk('x', 'A', 3, 2) + errored, 'A', 'B')
+check(c2['brains'][0]['arm']['runs'] == 2 and c2['errored'] == ['xB2'] and 'left out' in report.compare_md(c2),
+      f'compare: a run that ended in error is left out and named, not a failed check ({c2["verdict"]})')
 
 # ---- session (driven: we are the model)
 so = S / 'sessions'

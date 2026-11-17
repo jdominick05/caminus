@@ -71,6 +71,9 @@ def compare(rows, base, arm):
     """per brain: pass rate and false completions, arm against base; the across-the-board verdict"""
     out, better, worse = [], [], []
     thin = False
+    # a run that ended in error says nothing about the harness: it is counted apart, not as a failed check
+    errored = [r['id'] for r in rows if r.get('state') == 'error']
+    rows = [r for r in rows if r.get('state') != 'error']
     for brain in sorted({r['brain'] for r in rows}):
         b = [r for r in rows if r['brain'] == brain and r['arm'] == base]
         x = [r for r in rows if r['brain'] == brain and r['arm'] == arm]
@@ -93,7 +96,7 @@ def compare(rows, base, arm):
                'better across the board' if better else 'no difference')
     if thin and not missing:
         verdict += ' (fewer than 3 repeats per cell: noise-prone)'
-    return dict(base=base, arm=arm, verdict=verdict, brains=out)
+    return dict(base=base, arm=arm, verdict=verdict, brains=out, errored=errored)
 
 
 def compare_md(c):
@@ -108,4 +111,7 @@ def compare_md(c):
         lines.append(f"| {o['brain']} | {b['passed']}/{b['runs']} -> {x['passed']}/{x['runs']} | "
                      f"{b['false_completions']} -> {x['false_completions']} | {b['errors']} -> {x['errors']} | "
                      f"{b['median_steps']:g} -> {x['median_steps']:g} |")
+    if c.get('errored'):
+        lines += ['', f"{len(c['errored'])} runs ended in error and are left out (run again into the same folder): "
+                  + ', '.join(c['errored'])]
     return '\n'.join(lines)

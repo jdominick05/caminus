@@ -20,7 +20,8 @@ Brains (brains.py): scripted:NAME, driven (you answer each model call), openai:U
 anthropic:PORT#MODEL (through the owner's relay; the lab never handles a key). Hosts (hosts.py): local (scratch folders as
 you; no real model unless --unsafe-local) and agent (the agent account, ~/lab/; the default for real brains).
 
-Results: DIR/results.jsonl (one record per run, appended; a rerun of `run` skips the ids already there), DIR/runs/ID/
+Results: DIR/results.jsonl (one record per run, appended; a rerun of `run` skips the ids already there, except runs that
+ended in error), DIR/runs/ID/
 (once.out, events.jsonl, check.out, run.json). Records name the arm's commit and whether its tree was dirty. Nothing
 here belongs in the repository: results hold model output and may hold your paths.
 """
@@ -51,7 +52,8 @@ def cmd_run(a):
     host = hosts_mod.make(host_kind, out, runner.REPO)
     only = [k for k in (a.only or '').split(',') if k] or None
     runs = runner.plan(suite, bs, arms, a.repeats, only)
-    done = {r['id'] for r in report_mod.load(out)} if not a.rerun else set()
+    # a run that ended in error (an SSH drop, an upload failure, a brain outage) runs again; a finished one is skipped
+    done = {r['id'] for r in report_mod.load(out) if r.get('state') != 'error'} if not a.rerun else set()
     todo = [r for r in runs if r['id'] not in done]
     paid = [b.label() for b in bs if b.paid]
     print(f'{len(runs)} runs ({len(todo)} to do) on the {host_kind} host: suite {suite["name"]}, '
