@@ -128,7 +128,9 @@ assumed / next; loaded first, every turn; keep it current, above all before a
 compaction), MEMORY.md (your notes index, one line per note, capped at 4 KB,
 fixed for the length of a goal) and notes/ (one fact per file, read on demand).
 Save a lasting fact with remember; look things up in your own past with
-history_search before redoing work. Before stopping, bring STATE.md up to date
+history_search before redoing work (it also searches notes/index-archive.md,
+where lines leave a full index). Past 80 % of its cap you are told how full
+MEMORY.md is: tidy it with remember action tidy. Before stopping, bring STATE.md up to date
 with verified facts, changes, failures, unfinished work and exact next steps. Refresh discovery after a relevant environment change.
 While idle, listen for goals and peer messages without inventing tasks or spending
 inference on an idle loop. Oneshot and daemon work use the same runtime.

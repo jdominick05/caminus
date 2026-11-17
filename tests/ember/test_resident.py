@@ -1352,6 +1352,72 @@ for line in sys.stdin:
             self.assertTrue([l for l in (self.home/'MEMORY.md').read_text().splitlines() if 'core.md' in l][0].endswith(' · pinned'),'re-saving keeps the pin')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_nearly_full_index_warns_in_the_context_and_in_remember(self):
+        # the index filled silently until saves started moving lines out: past 80 % the agent is told, with the way out
+        rt=Runtime(self.home)
+        try:
+            (self.home/'MEMORY.md').write_text(''.join(f'- [n {i}](notes/n-{i}.md) — {"w"*100}\n' for i in range(20)))
+            gid=rt.store.enqueue('Some goal.')
+            self.assertNotIn('% full',rt.context_message(gid)['content'],'about 2.5 KB: no warning')
+            out=rt.memory.remember('Big','fact','s'*150)
+            self.assertNotIn('index_warning',out)
+            for i in range(20,27):out=rt.memory.remember(f'n {i}','fact','w'*100)
+            self.assertGreater(out['index_bytes'],3276);self.assertIn('% full',out['index_warning'])
+            self.assertIn('action tidy',out['index_warning'])
+            note=rt.context_message(gid)['content']
+            self.assertIn(f'MEMORY.md is {out["index_bytes"]} of its 4096 bytes',note,'the live size, though the goal keeps its snapshot')
+            rt.memory.call(dict(action='tidy',index='- [Big](notes/big.md) — one merged line\n',
+                                archive=(self.home/'MEMORY.md').read_text()))
+            self.assertNotIn('% full',rt.context_message(gid)['content'],'a tidy clears the warning in the same goal')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_tidy_rewrites_the_index_and_keeps_every_note_reachable(self):
+        (self.home/'notes').mkdir()
+        for n in ('build','build-2','machine','gpu','old'):(self.home/'notes'/f'{n}.md').write_text(n+'\n')
+        before=('# Notes\n- [Machine](notes/machine.md) — the cards and disks · pinned\n'
+                '- [Build](notes/build.md) — use ./build.sh\n- [Build again](notes/build-2.md) — build with ./build.sh, BUILD_JOBS=8\n'
+                '- [GPU](notes/gpu.md) — two cards\n- [Old](notes/old.md) — an old fact\n- [Gone](notes/gone.md) — its file was deleted\n')
+        (self.home/'MEMORY.md').write_text(before)
+        rt=Runtime(self.home)
+        try:
+            def refused(index,archive='',why=''):
+                with self.assertRaises(ValueError) as c:rt.memory.call(dict(action='tidy',index=index,archive=archive))
+                self.assertIn('MEMORY.md is unchanged',str(c.exception));self.assertIn(why,str(c.exception))
+                self.assertEqual((self.home/'MEMORY.md').read_text(),before,'a refused tidy writes nothing')
+                self.assertFalse((self.home/'notes'/'index-archive.md').exists())
+            merged='- [Build](notes/build.md), [more](notes/build-2.md) — ./build.sh; BUILD_JOBS sets parallelism\n'
+            refused('- [Machine](notes/machine.md) — cards\n'+merged,why='notes/gpu.md, notes/old.md would be reachable from nowhere')
+            refused(merged+'- [GPU](notes/gpu.md) — two cards\n','- [Old](notes/old.md) — an old fact',why='notes/machine.md is pinned')
+            refused('- [Machine](notes/machine.md) — cards\n- [New](notes/new.md) — x\n'+merged+'- [GPU](notes/gpu.md) — two\n',
+                    '- [Old](notes/old.md) — an old fact',why='notes/new.md, which does not exist')
+            refused('- [Machine](notes/machine.md) — cards\n'+merged+'- [GPU](notes/gpu.md) — two cards\n'+'x'*4100,
+                    '- [Old](notes/old.md) — an old fact',why='over its 4096-byte cap')
+            # a long line is refused, not cut: a cut could take the link the agent wrote
+            refused(merged+'- [GPU](notes/gpu.md) — two cards\n- [Machine, '+'c'*150+'](notes/machine.md)\n',
+                    '- [Old](notes/old.md) — an old fact',why='line(s) 3 of index are over the 160-byte line cap')
+            with self.assertRaises(ValueError) as c:rt.memory.call(dict(action='tidy'))
+            self.assertIn('needs index',str(c.exception))
+            # merged duplicates, a shortened line, a pinned line whose mark the agent dropped, one line moved out, and a
+            # note whose file is gone left behind (nothing to reach)
+            out=rt.memory.call(dict(action='tidy',index='# Notes\n- [Machine](notes/machine.md) — cards, disks\n'+merged
+                                    +'- [GPU](notes/gpu.md) — two cards\n',archive='- [Old](notes/old.md) — an old fact\n'))
+            idx=(self.home/'MEMORY.md').read_text()
+            self.assertIn('- [Machine](notes/machine.md) — cards, disks · pinned',idx,'a pinned line keeps its mark')
+            self.assertEqual(out['kept_pinned'],['notes/machine.md']);self.assertEqual(out['archived'],1)
+            self.assertLess(out['index_bytes'],out['was_bytes']);self.assertNotIn('notes/old.md',idx)
+            self.assertIn('- [Old](notes/old.md) — an old fact',(self.home/'notes'/'index-archive.md').read_text())
+            # re-saving one note of a merged line keeps the line, so the other note stays named
+            rt.memory.remember('build 2','BUILD_JOBS=8','build parallelism')
+            idx=(self.home/'MEMORY.md').read_text()
+            self.assertIn(merged.strip(),idx);self.assertIn('- [build 2](notes/build-2.md) — build parallelism',idx)
+        finally:rt.mail.close();rt.store.close()
+        # the tool as a model calls it: a tidy needs no name, text or summary
+        (self.home/'MEMORY.md').write_text(before)
+        self.replies(call('remember',dict(action='tidy',index=before.replace('use ./build.sh','./build.sh'))),
+                     call('finish',dict(summary='Tidied.')))
+        self.assertEqual(self.cmd('once',['--goal','Tidy your index.'])['state'],'completed')
+        self.assertIn('— ./build.sh\n',(self.home/'MEMORY.md').read_text())
+
     def test_define_done_refuses_a_gate_that_cannot_fail(self):
         from caminus.ember.resident.runtime import weak_gate
         for g in ('true',':','exit 0','echo done','test -f ~/caminus/.gate-ok','[ -e out.txt ]','false'):
@@ -1390,8 +1456,26 @@ for line in sys.stdin:
             self.assertTrue(any('NUL' in h['text'] and 'assistant' in h['where'] for h in hits),hits)
             self.assertTrue(any('finished' in h['where'] for h in hits),hits)
             self.assertFalse(any('ledger' in h['where'] for h in hits))
-            self.assertTrue(any(h['where'].startswith('journal/') for h in rt.memory.search('tokenizer fuzzing')['hits']))
+            self.assertTrue(any(h['where'].startswith('journal/') and h['source']=='journal' for h in rt.memory.search('tokenizer fuzzing')['hits']))
+            self.assertEqual({h['source'] for h in hits},{'past goal'},hits)
             self.assertEqual(rt.memory.search('zebra')['note'],'no matches')
+            # the index archive: every matching line (one line is one note), each naming its note; a note gives its first
+            (self.home/'notes').mkdir()
+            (self.home/'notes'/'index-archive.md').write_text('# Index lines moved out of MEMORY.md (oldest first)\n\n'
+                '- [Tokenizer fuzz](notes/tok-fuzz.md) — fuzzing the tokenizer\n- [GPU](notes/gpu.md) — two cards\n'
+                '- [Tokenizer NUL](notes/tok-nul.md) — tokenizer NUL bytes\n')
+            (self.home/'notes'/'tok-nul.md').write_text('tokenizer: escape NUL\ntokenizer: and again\n')
+            hits=rt.memory.search('tokenizer')['hits']
+            arch=[h for h in hits if h['source']=='index archive']
+            self.assertEqual([h['note'] for h in arch],['notes/tok-fuzz.md','notes/tok-nul.md'],hits)
+            self.assertEqual(arch[0]['where'],'notes/index-archive.md:3')
+            self.assertEqual([h['where'] for h in hits if h['source']=='note'],['notes/tok-nul.md:1'])
+            # the archive takes at most half the hits: the journal and the notes keep room
+            with (self.home/'notes'/'index-archive.md').open('a') as f:
+                f.write(''.join(f'- [Tok {i}](notes/tok-{i}.md) — tokenizer fact {i}\n' for i in range(10)))
+            hits=rt.memory.search('tokenizer',limit=4)['hits']
+            self.assertEqual(sum(h['source']=='index archive' for h in hits),2,hits)
+            self.assertTrue({'journal','note'}<={h['source'] for h in hits},hits)
         finally:rt.mail.close();rt.store.close()
 
     def test_history_index_is_built_for_an_older_database(self):

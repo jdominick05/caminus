@@ -1573,8 +1573,12 @@ func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 			map[string]any{"title": "Fix for CVE-2026-1", "href": "https://www.example.org/a"}}}),
 		res(504, "c4", "remember", map[string]any{"ok": true}),
 		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
-		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`)}}},
+		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`),
+			call("c6", "remember", `{"action":"tidy","index":"- [a](notes/a.md) — x"}`),
+			call("c7", "remember", `{"action":"tidy","index":"- [b](notes/b.md) — y"}`)}}},
 		res(507, "c5", "terminal", map[string]any{"error": "boom"}),
+		res(508, "c6", "remember", map[string]any{"index_bytes": float64(2100), "was_bytes": float64(3500)}),
+		res(509, "c7", "remember", map[string]any{"error": "tidy refused, MEMORY.md is unchanged: notes/a.md would be reachable from nowhere"}),
 	)
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
@@ -1583,7 +1587,8 @@ func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 	}
 	for _, want := range []string{"terminal  $ ls cve/  ·  exit 0 · 4 lines", "d", "read  a.md  ·  lines 1-40",
 		"web_search  “CVE-2026-1 patch”  ·  1 results · bing", "Fix for CVE-2026-1  example.org",
-		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom"} {
+		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom", "remember  tidy MEMORY.md  ·  3500 → 2100 bytes",
+		"remember  tidy MEMORY…  ·  tidy refused, MEMORY.md is unchanged"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("every action is a card (missing %q):\n%s", want, v)
 		}

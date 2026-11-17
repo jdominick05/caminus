@@ -153,6 +153,33 @@ Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-
 
 A side call (the judge's check of a finish) always runs with thinking off.
 
+## Its memory
+
+An agent keeps what it learns across goals in its home:
+
+- `STATE.md`: where it stands now (doing, verified, assumed, next). It loads first on every turn.
+- `MEMORY.md`: its notes index, one line per note. It loads into every goal, capped at 4 KB, and stays fixed for the
+  length of a goal.
+- `notes/NAME.md`: one fact each, read when needed. The `remember` tool writes a note and its index line together.
+
+Keeping the index small:
+
+- **The warning.** From 3,277 bytes (80 % of the cap), the goal's context and `remember`'s result say how full the
+  index is and how to tidy it.
+- **Tidying.** `remember` with action `tidy` takes the whole rewritten index (duplicate lines merged, long ones
+  shortened) and the old lines taken out, which move to `notes/index-archive.md`. A pinned line keeps its mark. It
+  is refused, with nothing written, when:
+  - a note would end up named in neither the index nor the archive;
+  - a pinned note loses its line;
+  - a new line names a note that does not exist;
+  - a line is over 160 bytes, or the index is over its cap.
+- **A full index.** A save that would pass the cap moves the least recently used unpinned lines to the archive and
+  names them.
+
+`history_search` searches the archive along with the agent's past goals, journal and notes. Archive hits come first
+(up to half the limit), each with the note its line names. Every hit gives its source: past goal, index archive, old
+index, journal or note.
+
 ## Where things live
 
 | What | Where |
