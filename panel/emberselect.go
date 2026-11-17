@@ -12,25 +12,25 @@ package main
 //
 // A drag selects inside the area it began in, so text beside it never comes along:
 //   - the transcript: its content lines, so dragging past the top or the bottom scrolls and keeps selecting;
-//   - the side pane (thoughts, tasks, now): its columns only;
+//   - the side pane (tasks, now): its columns only;
 //   - the band above the transcript (the header), and the band below it (the live window, the activity and task
 //     lines, the composer, menus, the session picker, the status line);
 //   - the whole frame while an overlay covers the transcript (goals, models, themes, studio, pages, rewind).
 //
 // Outside the transcript the text comes from the drawn frame, with a box's border (the composer's, a dialog's, the
-// seam between the picker's cards) and a heading's trailing rule left out; the highlight covers what is copied.
+// seam between the picker's cards: only at the columns the layout draws them in) and a heading's trailing rule left
+// out; the highlight covers what is copied.
 //
-// Click or drag: the press only arms. Moving to another cell while the button is down makes it a drag; a release
-// without that is a click, and the click acts on release where it was pressed: it opens a folded card, picks a card
-// in the session picker, presses the jump pill, or clears the selection shown.
+// Click or drag: the press only arms. Moving two or more cells away while the button is down makes it a drag; a
+// release without that, or back on the cell it was pressed on, is a click (a shaky hand still clicks), and the click
+// acts on release where it was pressed: it opens a folded card, picks a card in the session picker, presses the jump
+// pill, or clears the selection shown.
 
 import (
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -40,7 +40,8 @@ import (
 // chatSelection is a range of cells: [line, cell] at both ends, a where the drag began. In the transcript a line is
 // a content line; elsewhere (screen) it is a row of the drawn frame.
 type chatSelection struct {
-	dragging, moved, shown bool
+	dragging, moved, shown bool   // moved: the pointer went 2 or more cells from the press (less is a shaky click)
+	edges                  []int  // over the screen: the columns where the area's boxes draw their sides
 	screen                 bool   // over the frame's rows, not the transcript's content
 	x0, x1, y0, y1         int    // the area the drag began in: cells [x0, x1); for the screen, rows [y0, y1)
 	at                     [2]int // where the button went down (x, y): a release without a drag clicks there
@@ -84,16 +85,25 @@ func (m emberModel) selectionAt(x, y int) chatSelection {
 	w := max(20, m.width)
 	top, rows, tw := lipgloss.Height(m.chatHead(w)), m.chat.transcript.Height(), m.transcriptWidth(w)
 	s := chatSelection{dragging: true, screen: true, x1: w, y1: max(1, m.height), at: [2]int{x, y}}
+	s.edges = []int{0, w - 1} // an overlay's box spans the frame
 	if m.transcriptShown() {
 		switch {
 		case y >= top && y < top+rows && x < tw:
-			s.screen, s.x1 = false, tw
+			s.screen, s.x1, s.edges = false, tw, nil
 		case y >= top && y < top+rows:
-			s.x0, s.y0, s.y1 = tw+1, top, top+rows // the side pane
+			s.x0, s.y0, s.y1, s.edges = tw+1, top, top+rows, nil // the side pane: no box
 		case y < top:
-			s.y1 = top
+			s.y1, s.edges = top, nil
 		default:
 			s.y0 = top + rows
+			bw := max(18, w-2) // the boxes under the transcript (composer, prompt, menus) are drawn this wide
+			s.edges = []int{0, bw - 1}
+			if m.chat.picker { // the session picker's cards sit side by side: each card's two sides
+				cols, cw := cardCols(bw), cardWidth(bw)
+				for c := 0; c < cols; c++ {
+					s.edges = append(s.edges, c*(cw+1), c*(cw+1)+cw-1)
+				}
+			}
 		}
 	}
 	s.a = m.selectionPos(s, x, y)
@@ -137,10 +147,9 @@ func (s chatSelection) cells(i int, plain string) (int, int, string) {
 	if !ok {
 		return 0, 0, ""
 	}
-	cut := ansi.Cut(plain, start, end)
-	text, lead := strings.TrimRight(cut, " "), 0
+	text, lead := strings.TrimRight(ansi.Cut(plain, start, end), " "), 0
 	if s.screen {
-		text, lead = unframe(cut)
+		text, lead = unframe(plain, start, end, s.edges, s.x1)
 	}
 	if text == "" {
 		return 0, 0, ""
@@ -149,21 +158,60 @@ func (s chatSelection) cells(i int, plain string) (int, int, string) {
 	return start, start + ansi.StringWidth(text), text
 }
 
-// boxSeam is where two boxes drawn side by side meet (the session picker's cards): one's right edge, a space, the
-// next one's left edge, with the rules of a top or bottom edge on either side.
-var boxSeam = regexp.MustCompile(`─*[│╮╯] [│╭╰]─*`)
-
-// unframe drops what frames a line of the drawn screen: a box's side borders (and the space inside them), its top or
-// bottom edge with any title kept, the seam between boxes side by side (as blanks, so columns stay where they were),
-// a heading's trailing rule. lead is how many cells it dropped on the left.
-func unframe(line string) (text string, lead int) {
-	line = boxSeam.ReplaceAllStringFunc(line, func(s string) string { return strings.Repeat(" ", utf8.RuneCountInString(s)) })
-	text = strings.TrimRight(line, " ")
-	if t := strings.TrimLeft(text, "│╭╰"); t != text {
-		text = strings.TrimPrefix(strings.TrimLeft(t, "─"), " ")
+// unframe is the text of cells [start, end) of a drawn row (plain) without what frames it, judged only at the columns
+// the layout puts a frame in, so a │ or ─ inside an overlay's content (a diff, a table, tree art) is copied as is:
+//   - at an edge column: a box's side, or a corner with the rule running from it along a top or bottom edge (a title
+//     on it stays), copied as blanks so the columns beside it stay put (the seam between the picker's cards);
+//   - a rule running to the area's last column (areaEnd - 1): a heading's trailing rule;
+//   - a row left with nothing but rule (a heading's underline).
+//
+// At the start of the text, the dropped cells and the one space of padding inside a side go; lead counts them.
+func unframe(plain string, start, end int, edges []int, areaEnd int) (string, int) {
+	cell := func(c int) string { return ansi.Cut(plain, c, c+1) }
+	blank := map[int]bool{}
+	run := func(from, step int) { // the rule from a corner (or the area's end) along its edge
+		for i := from; i >= 0 && cell(i) == "─"; i += step {
+			blank[i] = true
+		}
 	}
-	text = strings.TrimRight(strings.TrimRight(text, "│╮╯"), "─ ")
-	return text, ansi.StringWidth(line[:strings.Index(line, text)])
+	for _, c := range edges {
+		switch r := cell(c); r {
+		case "│":
+			blank[c] = true
+		case "╭", "╰":
+			blank[c] = true
+			run(c+1, 1)
+		case "╮", "╯":
+			blank[c] = true
+			run(c-1, -1)
+		}
+	}
+	run(areaEnd-1, -1)
+	i := start
+	for i < end && blank[i] {
+		i++
+	}
+	if i > start && i < end && cell(i) == " " {
+		i++
+	}
+	var b strings.Builder
+	for j := i; j < end; {
+		k := j
+		for k < end && blank[k] == blank[j] {
+			k++
+		}
+		if blank[j] {
+			b.WriteString(strings.Repeat(" ", k-j))
+		} else {
+			b.WriteString(ansi.Cut(plain, j, k))
+		}
+		j = k
+	}
+	text := strings.TrimRight(b.String(), " ")
+	if strings.Trim(text, "─ ") == "" {
+		return "", 0
+	}
+	return text, i - start
 }
 
 // selectMouse handles a press, a drag and a release anywhere on the chat; handled false leaves the message to the
@@ -191,7 +239,7 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 			}
 		}
 		s.b = m.selectionPos(s, ev.X, ev.Y)
-		s.moved = s.moved || s.at != [2]int{ev.X, ev.Y}
+		s.moved = s.moved || max(ev.X-s.at[0], s.at[0]-ev.X)+max(ev.Y-s.at[1], s.at[1]-ev.Y) >= 2
 		m.chat.sel = s
 		return m, nil, true
 	case tea.MouseReleaseMsg:
@@ -200,7 +248,7 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 			return m, nil, false
 		}
 		m.chat.sel = chatSelection{}
-		if !s.moved {
+		if !s.moved || s.at == [2]int{ev.X, ev.Y} { // a shaky click: never 2 cells away, or back where it began
 			next, cmd := m.clickAt(s)
 			return next, cmd, true
 		}

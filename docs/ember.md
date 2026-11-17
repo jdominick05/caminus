@@ -134,15 +134,16 @@ card in the session picker (Shift+Tab) or presses the jump-to-newest pill. Takin
 selection off, so the chat selects text itself:
 
 - **Drag to copy.** Drag over any text on the screen: the conversation and its cards (folded or open), the side pane
-  (thoughts, tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the
+  (tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the
   button copies the plain text to the clipboard (wl-copy on Wayland, xclip or xsel on X11, and OSC 52 for terminals that
   take it, such as a remote session). The copy has no colours or styling; its lines break where the screen breaks them.
   The status line says how many lines it copied.
 - **One area at a time.** A drag selects inside the area it began in, so the conversation never picks up the side pane
   beside it and the other way round. In the conversation, dragging past its top or bottom scrolls and keeps
-  selecting. A box's border (the composer's, a dialog's) is left out of the copy.
-- **Click or drag.** Pressing the button does nothing yet. If the pointer moves to another cell before the release,
-  it is a drag and selects; if it doesn't, it is a click, and the click acts where you pressed. So a drag that starts
+  selecting. A box's border (the composer's, a dialog's, between the picker's cards) is left out of the copy; a │ or ─
+  inside a dialog's content (a diff, a table) is copied as it is.
+- **Click or drag.** Pressing the button does nothing yet. If the pointer gets two or more cells away before the
+  release, it is a drag and selects; if it doesn't, or it comes back to the cell where you pressed, it is a click, and the click acts where you pressed. So a drag that starts
   on a card or a session never opens or switches it.
 - **Clearing.** A click clears the selection; outside the conversation a key or a resize clears it too, since the
   screen under it changes.

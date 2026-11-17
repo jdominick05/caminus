@@ -1905,6 +1905,53 @@ func TestAClickStillActsAndOnlyADragSelects(t *testing.T) {
 	}
 }
 
+func TestAShakyClickStillClicks(t *testing.T) {
+	for _, path := range []struct {
+		name  string
+		moves [][2]int // pointer offsets from the press, the last one where the button comes up
+	}{
+		{"one cell over and back", [][2]int{{1, 0}, {0, 0}}},
+		{"one cell over", [][2]int{{0, 1}}},
+		{"away and back where it began", [][2]int{{4, 0}, {0, 0}}},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			m := shotEmber(t, shotWidth, shotHeight)
+			m.chat.cards, m.chat.expanded = true, false
+			m.chat.rendered, m.chat.content = 0, ""
+			m.syncChat()
+			m.chat.transcript.GotoTop()
+			x, y := 4, -1
+			for i, row := range strings.Split(ansi.Strip(m.render()), "\n") {
+				if y < 0 && strings.Contains(row, "thinking · 1 line") {
+					y = i
+				}
+			}
+			next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			for _, d := range path.moves {
+				next, _ = next.(emberModel).Update(tea.MouseMotionMsg{X: x + d[0], Y: y + d[1], Button: tea.MouseLeft})
+			}
+			last := path.moves[len(path.moves)-1]
+			next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: x + last[0], Y: y + last[1], Button: tea.MouseLeft})
+			if m := next.(emberModel); !m.chat.expanded || cmd != nil || strings.Contains(m.msg, "copied") {
+				t.Fatal("a press, a move of less than 2 cells (or back to the press) and a release is a click: the card opens, nothing is copied")
+			}
+		})
+	}
+}
+
+func TestADialogsOwnBoxLinesAreCopied(t *testing.T) {
+	m := shotEmber(t, shotWidth, shotHeight)
+	m.chat.view = textView{open: true, title: "diff", lines: []string{"│ │ a table row │", "├── tree", "x ─── y"}}
+	m, got := dragOver(t, m, "│ │ a table", "x ─── y")
+	if want := "│ │ a table row │\n├── tree\nx ─── y"; got != want {
+		t.Fatalf("only the dialog's own frame is left out; the │ and ─ in its content stay:\n%q\nwant\n%q", got, want)
+	}
+	_, got = dragOver(t, m, "diff", "x ─── y") // from the title: the box's side and the rule under the title go
+	if !strings.HasPrefix(got, "diff\n") || strings.Contains(got, "────") || !strings.HasSuffix(got, "x ─── y") {
+		t.Fatalf("the frame's side and the title's underline are left out:\n%s", got)
+	}
+}
+
 func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 200, 50
