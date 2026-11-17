@@ -5,6 +5,7 @@
 Model files are sparse files of the manifest's sizes under a scratch model directory; servers are server.json files with
 dead or live (this process's child) guard pids; the Qwen homes are scratch directories (never ~/.config/caminus or ~/.qwen)."""
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -233,18 +234,45 @@ def main():
     dead = subprocess.Popen(['true']); dead.wait()
     put('crashed', dead.pid, 'caminus serve: http://127.0.0.1:1 (loading)  pid=1\nRuntimeError: something broke\n', 18092)
     put('clean', dead.pid, 'caminus serve: http://127.0.0.1:1 (loading)  pid=1\ncaminus serve: stopped in 0.2 s\n', 18093)
-    guard_refusal = 'GUARD REFUSED: a GPU fault was recorded ($HOME/.local/state/k3/GPU_FAULT_STOP). Stop all GPU work and report to the lead.'
+    fault = os.path.join(S, 'k3', 'GPU_FAULT_STOP')         # (a scratch stop file: never the real one)
+    os.makedirs(os.path.dirname(fault), exist_ok=True)
+    with open(fault, 'w') as f:
+        f.write('fault\n')
+    guard_refusal = f'GUARD REFUSED: a GPU fault was recorded ({fault}). Stop all GPU work and report to the lead.'
     put('guard-refused', dead.pid, guard_refusal + '\n', 18095)
+    gone = os.path.join(S, 'k3', 'GPU_FAULT_STOP.cleared')
+    put('guard-cleared', dead.pid, guard_refusal.replace(fault, gone) + '\n', 18097)
     v = {x['name']: x for x in map(manage.server_view, manage.all_servers())}
     check(v['crashed']['state'] == 'failed' and 'something broke' in v['crashed']['error'], f"ps: a crashed server is failed ({v['crashed']['error']})")
     check(v['clean']['state'] == 'stopped', 'ps: a cleanly stopped server is stopped')
     check(v['guard-refused']['state'] == 'failed' and v['guard-refused']['error'] == guard_refusal,
-          'ps: a guard refusal preserves the startup failure reason')
+          'ps: a guard refusal on a fault file that is still there preserves the startup failure reason')
+    check(v['guard-cleared']['state'] == 'stopped' and v['guard-cleared']['error'] == '' and 'cleared' in v['guard-cleared']['note'],
+          f"ps: a guard refusal whose fault file is gone is re-checked: stopped, with a note ({v['guard-cleared']})")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         manage.cmd_ps(['--json'])
-    refused = next(s for s in json.loads(buf.getvalue())['servers'] if s['name'] == 'guard-refused')
+    listed = {s['name']: s for s in json.loads(buf.getvalue())['servers']}
+    refused = listed['guard-refused']
     check(refused['error'] == guard_refusal, 'ps --json: the panel receives the guard refusal reason')
+    # a dead record of a paused model (AREX-2's old brain) is left out of caminus ps; with CAMINUS_ALLOW_PAUSED it shows
+    put('old-brain', dead.pid, guard_refusal + '\n', 18098)
+    put('kept', dead.pid, guard_refusal + '\n', 18099)
+    for n, model in (('old-brain', 'arex-2'), ('kept', 'coder')):
+        rec = manage.load_server(n); rec['model'] = model
+        with open(os.path.join(manage.server_dir(n), 'server.json'), 'w') as f:
+            json.dump(rec, f)
+    shown_allowed = {s['name'] for s in manage.shown_servers()}
+    os.environ.pop('CAMINUS_ALLOW_PAUSED')
+    try:
+        shown_paused = {s['name'] for s in manage.shown_servers()}
+    finally:
+        os.environ['CAMINUS_ALLOW_PAUSED'] = '1'
+    check('old-brain' in shown_allowed and 'old-brain' not in shown_paused and 'kept' in shown_paused,
+          f'ps: a dead record of a paused model is hidden ({sorted(shown_paused)})')
+    for n in ('old-brain', 'kept'):
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(manage.server_dir(n), 'server.json'))
     # a live 'guard' (a sleeping child whose command line holds guard.sh) not answering HTTP -> loading
     g = os.path.join(S, 'guard.sh')
     with open(g, 'w') as f:
@@ -548,6 +576,63 @@ def unmanaged_checks(S):
     ports = [s['port'] for s in found]
     check(ports == sorted(ports) and len(ports) == len(set(ports)),
           f'unmanaged: one entry per server, sorted by port ({ports})')
+    check(manage.serve_argv_of(['python', '-I', 'tools/caminus_serve.py', '--model', 'x.gguf'])
+          and manage.serve_argv_of(['/usr/bin/caminus', 'serve', '--port', '8100'])
+          and manage.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'serve'])
+          and not manage.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'ps', '--json'])
+          and not manage.serve_argv_of(['nginx', 'serve']),
+          'unmanaged: caminus_serve.py and the CLI\'s serve command are servers; other caminus commands and programs are not')
+    # a fake /proc: a server started by a script without --port (it listens on 8092), its wrapper, and a guard's command
+    # line; the port comes from the socket table, the catalog name from /props' model path (none here: the file label)
+    proc = os.path.join(S, 'proc')
+    def proc_pid(pid, argv, sockets=()):
+        d = os.path.join(proc, str(pid))
+        os.makedirs(os.path.join(d, 'fd'), exist_ok=True)
+        with open(os.path.join(d, 'cmdline'), 'wb') as f:
+            f.write(b'\0'.join(a.encode() for a in argv) + b'\0')
+        with open(os.path.join(d, 'stat'), 'w') as f:
+            f.write(f'{pid} (x) S ' + ' '.join(['0'] * 18) + ' 100 0\n')
+        for i, ino in enumerate(sockets):
+            with contextlib.suppress(FileExistsError):
+                os.symlink(f'socket:[{ino}]', os.path.join(d, 'fd', str(i + 3)))
+    proc_pid(4101, ['timeout', '9h', 'python', '-I', 'tools/caminus_serve.py', '--model', '/m/Coder-00001-of-00002.gguf'])
+    proc_pid(4102, ['python', '-I', 'tools/caminus_serve.py', '--max-ctx', '1048576', '--model', '/m/Coder/IQ1_M/Coder-00001-of-00002.gguf'],
+             sockets=('7777',))
+    proc_pid(4103, ['bash', '/x/guard.sh', 'log', '0', 'python', '-I', 'tools/caminus_serve.py', '--port', '18200'])
+    os.makedirs(os.path.join(proc, 'net'), exist_ok=True)
+    with open(os.path.join(proc, 'net', 'tcp'), 'w') as f:
+        f.write('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
+                '   0: 0100007F:1F9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7777 1\n')
+    with open(os.path.join(proc, 'uptime'), 'w') as f:
+        f.write('5000.0 1.0\n')
+    check(manage.listen_ports(4102, proc) == [8092] and manage.listen_ports(4101, proc) == [],
+          'unmanaged: the listening port is read from the process\'s sockets')
+    real_http, real_all = manage.http_json, manage.all_servers
+    asked = []
+    def fake_http(url, timeout=1.0):
+        asked.append(url)
+        if url.endswith('/health'):
+            return (200, {'status': 'ok'}) if ':8092/' in url else (None, None)
+        if url.endswith('/props'):
+            return 200, {'engine': 'caminus', 'model_alias': 'k3-coder', 'model_path': '/m/none.gguf',
+                         'default_generation_settings': {'n_ctx': 1048576}}
+        return 200, {'decode': {'ms_per_token': 10.0}}
+    manage.http_json, manage.all_servers = fake_http, lambda: []
+    try:
+        seen = manage.unmanaged_servers(proc)
+    finally:
+        manage.http_json, manage.all_servers = real_http, real_all
+    check(len(seen) == 1 and seen[0]['port'] == 8092 and seen[0]['pid'] == 4102 and seen[0]['external'] is True
+          and seen[0]['state'] == 'ready' and seen[0]['max_ctx'] == 1048576 and seen[0]['decode_tps'] == 100.0
+          and not any(':18200/' in u for u in asked),
+          f'unmanaged: a server started without --port is found on its socket\'s port, once, marked external; a guard\'s '
+          f'command line is not a server ({seen})')
+    manage.http_json, manage.all_servers = (lambda url, timeout=1.0: (200, {'engine': 'llama.cpp'} if url.endswith('/props') else {})), (lambda: [])
+    try:
+        other = manage.unmanaged_servers(proc)
+    finally:
+        manage.http_json, manage.all_servers = real_http, real_all
+    check(other == [], f'unmanaged: a port answered by another engine is not this process\'s server ({other})')
 
 
 if __name__ == '__main__':
