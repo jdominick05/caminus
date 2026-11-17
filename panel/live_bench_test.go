@@ -26,7 +26,7 @@ func BenchmarkLiveBody(b *testing.B) {
 func TestWrapCacheMatchesAFullWrap(t *testing.T) {
 	full := func(s string, w int) []string {
 		var out []string
-		for _, ln := range strings.Split(ansi.Hardwrap(s, w, true), "\n") {
+		for _, ln := range strings.Split(ansi.Wrap(s, w, ""), "\n") {
 			out = append(out, highlightLive(ln))
 		}
 		return out

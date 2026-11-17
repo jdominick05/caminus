@@ -8,6 +8,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -83,5 +84,25 @@ func TestAClearedDraftInHistoryReadsYourDraft(t *testing.T) {
 	m, _ = m.recallStep("up", true)
 	if m.chat.compose.Value() != "never sent" || !strings.HasPrefix(m.msg, "your draft 1 of") {
 		t.Fatalf("a never-sent draft is labelled as one: %q / %q", m.chat.compose.Value(), m.msg)
+	}
+}
+
+func TestThirdRecheck(t *testing.T) {
+	g := residentGoal{ID: "g1", State: "working", Parked: float64(time.Now().Add(time.Hour).Unix())}
+	if g.shownState() != "parked" {
+		t.Fatal("a parked goal reads parked")
+	}
+	c := &residentChat{renderWidth: 120}
+	v := ansi.Strip(c.eventBlock(residentEvent{Seq: 1, Goal: "g1", Kind: "turn_retried", Data: map[string]any{"step": 4.0}}))
+	if !strings.Contains(v, "agent restarted · step 4 retried") {
+		t.Fatalf("a restart's retry shows: %q", v)
+	}
+	m := chatFixture(t)
+	m.chat.clearedDraft = "old draft"
+	m.chat.target, m.chat.newGoal = "original", false
+	m.chat.compose.SetValue("a new message")
+	m.submitCompose()
+	if next, _ := m.submitCompose(); next.(emberModel).chat.clearedDraft != "" {
+		t.Fatal("a send drops the cleared draft")
 	}
 }

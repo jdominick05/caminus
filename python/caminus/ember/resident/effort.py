@@ -206,8 +206,7 @@ def note(cfg):
     """One line for /effort: how this model runs the scale."""
     ln = line(cfg)
     if ln == 'scale':
-        return ('on this model high and max run as xhigh. Pick the level at the start of a chat; on the Qwen3.8 '
-                'models a change re-reads the conversation once')
+        return 'pick the level at the start of a chat'
     if ln == 'onoff':
         return 'this model only has thinking on or off: none turns it off, every other level is on'
     if ln == 'reasoning':
@@ -221,6 +220,24 @@ def note(cfg):
     if ln == 'anthropic':
         return 'none turns thinking off (sent with effort high)'
     return 'this model has no effort control'
+
+
+def scale(cfg, current=''):
+    """The six levels and what each runs as on this model, levels that run the same grouped: 'no -> thinking off ·
+    low -> low · medium -> medium · high, xhigh, max -> xhigh (current)'."""
+    if not line(cfg):
+        return ''
+    word = {'none': 'thinking off', 'on': 'thinking on'}
+    groups = []
+    for lvl in LEVELS:
+        real = runs_as(cfg, lvl)
+        if groups and groups[-1][1] == real:
+            groups[-1][0].append(lvl)
+        else:
+            groups.append(([lvl], real))
+    cur = runs_as(cfg, current) if current else None
+    return ' · '.join('%s → %s%s' % (', '.join('no' if l == 'none' else l for l in ls), word.get(real, real),
+                                      ' (current)' if real == cur else '') for ls, real in groups)
 
 
 def sampling(cfg, remote):

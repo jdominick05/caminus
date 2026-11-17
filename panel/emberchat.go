@@ -122,13 +122,13 @@ func (c *wrapCache) wrap(s string, width int, style func(string) string) []strin
 		c.width, c.done, c.lines = width, 0, nil
 	}
 	if cut > c.done {
-		for _, ln := range strings.Split(ansi.Hardwrap(strings.TrimSuffix(s[c.done:cut], "\n"), width, true), "\n") {
+		for _, ln := range strings.Split(ansi.Wrap(strings.TrimSuffix(s[c.done:cut], "\n"), width, ""), "\n") {
 			c.lines = append(c.lines, style(ln))
 		}
 		c.done = cut
 	}
 	out := slices.Clip(c.lines)
-	for _, ln := range strings.Split(ansi.Hardwrap(s[cut:], width, true), "\n") {
+	for _, ln := range strings.Split(ansi.Wrap(s[cut:], width, ""), "\n") {
 		out = append(out, style(ln))
 	}
 	return out
@@ -926,7 +926,7 @@ func (m emberModel) emberBox(w, window int) string {
 
 // nowState is what the agent is doing this moment, and the command when one runs (the time first in now).
 func (m emberModel) nowState(goal *residentGoal) (string, string) {
-	now, command := "idle", ""
+	now, command := "listening", ""
 	l := m.chat.live
 	switch {
 	case m.daemonDown():
@@ -1098,7 +1098,7 @@ func (m emberModel) thoughtChains(gid string) []thoughtChain {
 
 // emberTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
 func emberTail(s string, width, maxLines int) string {
-	lines := strings.Split(ansi.Hardwrap(s, max(8, width), true), "\n")
+	lines := strings.Split(ansi.Wrap(s, max(8, width), ""), "\n") // (at words; a long word still breaks)
 	if len(lines) > maxLines {
 		lines = append([]string{emberDim.Render("…")}, lines[len(lines)-maxLines:]...)
 	}
@@ -1443,6 +1443,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
 		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
+	case "turn_retried": // a daemon restart cut a step that was generating: it runs again
+		step, _ := e.Data["step"].(float64)
+		return recordLine("↻", fmt.Sprintf("agent restarted · step %d retried", int(step)), w)
 	case "model_back":
 		down, _ := e.Data["down_s"].(float64)
 		tries, _ := e.Data["attempts"].(float64)
@@ -2525,6 +2528,7 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "//") {
 		saveTyped(m.agentName, trimmed) // (history gives back what you typed, // included)
 		unmarkDraft(m.agentName, trimmed)
+		m.chat.clearedDraft = ""
 		return m.sendCompose(strings.TrimPrefix(trimmed, "/"))
 	}
 	if strings.HasPrefix(trimmed, "/") {
@@ -2536,6 +2540,7 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	}
 	saveTyped(m.agentName, text)
 	unmarkDraft(m.agentName, text) // (a cleared draft sent later is a sent message)
+	m.chat.clearedDraft = ""       // (Up after a send is the history again, newest first: an old cleared draft came first)
 	return m.sendCompose(text)
 }
 

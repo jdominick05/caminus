@@ -205,11 +205,14 @@ def model_ops(a,home):
         if runs and runs!=current:
             summary+=' · runs as '+runs
         summary+=' · '+cfg.get('model','')+': '+eff.note(cfg)
+        if not a.level and (sc:=eff.scale(cfg,current)):
+            summary+='\n'+sc            # (bare /effort: every level and what it runs as on this model)
         if a.level and eff.template_line(cfg,current)!=before:
             # the template's effort line is the system message's first text: the server reads the conversation again
             try:used=int(json.loads((home/'context.json').read_text()).get('tokens') or 0)
             except (OSError,ValueError,AttributeError,TypeError):used=0
-            summary+=' · switching re-reads the conversation once'+(' (%dK tokens)' % (used//1000) if used>8000 else '')
+            # (once, the count first: the note said it too, and at 80 columns the count was cut)
+            summary+=(' · %dK tokens re-read once' % (used//1000)) if used>8000 else ' · the conversation is re-read once'
         emit(dict(effort=cfg.get('effort'),current=current,runs_as=runs,levels=levels,model=cfg.get('model'),
                   summary=summary),a.json);return 0
 

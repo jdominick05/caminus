@@ -27,7 +27,7 @@ func goalGlyph(state string) (string, lipgloss.Style) {
 		return g.queue, emberDim
 	case "completed":
 		return g.done, emberCtxOK
-	case "paused", "waiting_human", "waiting_root":
+	case "paused", "waiting_human", "waiting_root", "parked":
 		return g.waiting, emberWarn
 	case "error", "cancelled":
 		return g.fail, emberCtxHot
@@ -65,9 +65,9 @@ func (m emberModel) queuePlace(i int) int {
 
 func (m emberModel) goalRow(i int, selected bool, width int) string {
 	gl := m.resident.Goals[i]
-	mark, st := goalGlyph(gl.State)
+	mark, st := goalGlyph(gl.shownState())
 	text := strings.Join(strings.Fields(residentText(gl.Prompt)), " ")
-	meta := gl.State + " · " + plural(gl.Steps, "step", "steps")
+	meta := gl.shownState() + " · " + plural(gl.Steps, "step", "steps")
 	target := ""
 	if !m.chat.newGoal && gl.ID == m.chat.target {
 		target = "  " + g.user
@@ -246,4 +246,12 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// shownState is the state a UI shows: parked for a working goal waiting for its wake time (the store keeps it working).
+func (g residentGoal) shownState() string {
+	if g.Parked > float64(time.Now().Unix()) {
+		return "parked"
+	}
+	return g.State
 }

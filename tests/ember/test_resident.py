@@ -2779,6 +2779,40 @@ for line in sys.stdin:
             self.assertEqual(ticked[:2],[a,b])
         finally:rt.mail.close();rt.store.close()
 
+    def test_third_recheck_fixes(self):
+        from caminus.ember.resident import effort as eff
+        import threading
+        v=dict(none='swift-1.5-nothink',low='swift-1.5-low',xhigh='swift-1.5-xhigh')
+        self.assertEqual(eff.scale(dict(provider_kind='local',model='swift-1.5',model_variants=v),'xhigh'),
+                         'no → thinking off · low → low · medium → medium · high, xhigh, max → xhigh (current)')
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A.');rt.store.update(gid,state='working')
+            # a parked goal reads parked in status (its stored state stays working)
+            rt.store.update(gid,wake_at=time.time()+600)
+            self.assertIn('parked_until',{g['id']:g for g in rt.store.status()['goals']}[gid])
+            rt.store.update(gid,wake_at=None)
+            # a /cancel aborts a call that has not answered yet, before its first token
+            from caminus.ember.resident.runtime import Live
+            from caminus.ember.resident.model import Cancelled
+            live=Live(self.home,gid,rt.store);hold=threading.Event()
+            def slow(on_delta):hold.wait(30);return dict(content='late')
+            rt.store.update(gid,state='cancelled')
+            t0=time.time()
+            from caminus.ember.resident.model import Model as RealModel
+            rt.model=RealModel(dict(endpoint='http://127.0.0.1:1/v1',model='x'))   # (only a real transport is watched)
+            with self.assertRaises(Cancelled):rt._watched(live,slow,poll=.05)
+            self.assertLess(time.time()-t0,2,'aborted at once, not when the server answers');hold.set()
+            # a turn cut by a daemon death is retried and says so
+            rt.store.update(gid,state='working',steps=3)
+            (self.home/'live').mkdir(exist_ok=True);(self.home/'live'/(gid+'.json')).write_text('{}')
+            rt._note_cut_turns()
+            ev=[e for e in rt.store.events_since(0) if e['kind']=='turn_retried'] if hasattr(rt.store,'events_since') else \
+               [e for e in self.cmd('events') if e['kind']=='turn_retried']
+            self.assertEqual(ev[-1]['data']['step'] if 'data' in ev[-1] else ev[-1]['step'],4)
+            self.assertFalse((self.home/'live'/(gid+'.json')).exists())
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
         sent=[]

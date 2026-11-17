@@ -17,15 +17,18 @@ import (
 )
 
 type residentGoal struct {
-	ID       string `json:"id"`
-	Prompt   string `json:"prompt"`
-	State    string `json:"state"`
-	Summary  string `json:"summary"`
-	Error    string `json:"error"`
-	Steps    int    `json:"steps"`
-	Plan     int    `json:"plan"`      // 0 a plain goal, 1 in plan mode, 2 its plan approved
-	PlanText string `json:"plan_text"` // the plan it proposed (state waiting_plan)
-	Queue    int    `json:"queue"`     // a queued goal's place in the run order (1 runs next); 0 from an older resident
+	ID       string  `json:"id"`
+	Prompt   string  `json:"prompt"`
+	State    string  `json:"state"`
+	Summary  string  `json:"summary"`
+	Error    string  `json:"error"`
+	Steps    int     `json:"steps"`
+	Plan     int     `json:"plan"`         // 0 a plain goal, 1 in plan mode, 2 its plan approved
+	PlanText string  `json:"plan_text"`    // the plan it proposed (state waiting_plan)
+	Queue    int     `json:"queue"`        // a queued goal's place in the run order (1 runs next); 0 from an older resident
+	Parked   float64 `json:"parked_until"` // a working goal waiting for its wake time (0: not parked)
+	Created  float64 `json:"created"`
+	Updated  float64 `json:"updated"`
 }
 type residentStatus struct {
 	Name             string             `json:"name"`
