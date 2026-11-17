@@ -27,6 +27,7 @@ import json
 import os
 import re
 import subprocess
+import time
 
 GATE_TIMEOUT = 600
 JUDGE_LIMIT = 3
@@ -58,27 +59,32 @@ Answer with one JSON object and nothing else:
 {"verdict": "met" | "not_yet" | "wait", "reason": "one or two sentences naming the evidence, what is missing, or what to wait for"}'''
 
 
-def run_gate(home, gate, timeout=GATE_TIMEOUT):
+def run_gate(home, gate, timeout=GATE_TIMEOUT, stop=None):
     """Run the done check. Its output goes to a file, not a pipe: a gate that starts something in the background (a
     server, `cmd &`) left the pipe open, so waiting for the pipe took the whole timeout and failed a gate that had
     passed. The gate is waited for as a process, in its own process group; whatever it left running is ended after it
-    exits (and the whole group on a timeout)."""
+    exits (and the whole group on a timeout). stop (the runtime's stopping): checked every second; when it says yes the
+    gate is ended as on a timeout, so a daemon told to exit does not sit out a ten-minute gate."""
     import os
     import signal
     import tempfile
     with tempfile.TemporaryFile() as out:
         p = subprocess.Popen(['bash', '-lc', gate], cwd=home, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                              start_new_session=True)
-        try:
-            code = p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            code = None
+        end, code = time.monotonic() + timeout, None
+        while code is None and time.monotonic() < end and not (stop and stop()):
+            try:
+                code = p.wait(timeout=max(0, min(1, end - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
         try:
             os.killpg(p.pid, signal.SIGKILL)    # the gate's leftovers (or the gate itself, timed out)
         except OSError:
             pass
         if code is None:
             p.wait()
+            if stop and stop():
+                return False, 'the gate was cut short: the runtime is stopping'
             return False, f'the gate did not finish in {timeout} s'
         out.seek(0)
         text = out.read().decode('utf-8', errors='replace')[-4000:]
@@ -137,7 +143,9 @@ def review(rt, gid, result):
     g = rt.store.goal(gid)
     gate = g.get('gate')
     if gate:
-        ok, out = run_gate(rt.home, gate)
+        ok, out = run_gate(rt.home, gate, stop=getattr(rt, 'stopping', None))
+        if not ok and getattr(rt, 'stopping', lambda: False)():
+            return dict(error='your runtime was stopped while the gate ran, so nothing was decided: finish again')
         rt.store.event('gate', dict(command=gate, passed=ok, output=out[-2000:]), gid)
         if not ok:
             return dict(error='the gate failed, so the goal is not done; fix what it shows, then finish again:\n' + out)

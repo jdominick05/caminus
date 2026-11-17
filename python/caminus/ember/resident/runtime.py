@@ -204,7 +204,7 @@ TOOLS = [
          dict(path={'type':'string'}, old={'type':'string'}, new={'type':'string'}, replace_all={'type':'boolean'}), ('path','old','new')),
     tool('write', 'Create a file, or replace a whole file, with content (a goal\'s first change needs define_done first). Returns the diff against what was there.',
          dict(path={'type':'string'}, content={'type':'string'}), ('path','content')),
-    tool('wait', 'Block without spending tokens until something happens: until=time (target: seconds, or a Unix time), file (a path appears or changes), port (host:port or a port number opens), process (a pid exits), session (one of your terminal sessions ends), or message. A message for this goal, cancellation or newly queued work always ends the wait early. timeout in seconds (default 300, at most 1800).',
+    tool('wait', 'Block without spending tokens until something happens: until=time (target: seconds, or a Unix time), file (a path appears or changes), port (host:port or a port number opens), process (a pid exits), session (one of your terminal sessions ends), or message. A message for this goal, cancellation, newly queued work or your runtime stopping always ends the wait early. timeout in seconds (default 300, at most 1800).',
          dict(until={'type':'string','enum':['time','file','port','process','session','message']}, target={'type':'string'}, timeout={'type':'integer'}), ('until',)),
     tool('machine', 'A snapshot of this shared machine, readable without root: GPUs (busy %, VRAM), memory, disk, load, the model servers on their ports, your running terminal sessions and the other agents. Read it before heavy work.', {}),
     tool('lease', 'Claim GPU cards (HIP indices), memory (ram_gib) or both for some minutes (at most 120) before heavy work, with a reason your human sees; refused while another lease (yours, another agent\'s or your human\'s GPU window) holds a card you ask for. action=take, release (lease id, or all of this goal\'s) or list. A lease ends with the goal.',
@@ -357,6 +357,7 @@ class Runtime:
         self.primary = self.model
         self.terminal = terminal or Terminal(self.home)
         self.mail = Mail(self.config)
+        self._stop = None         # the daemon's stop flag (run's stop): see stopping()
         self.retry = {}
         self.busy_since = {}      # goal -> when the provider's capacity errors began (see _schedule_retry)
         self.base_timeout = float(self.config.get('timeout', 900))
@@ -925,7 +926,7 @@ class Runtime:
                 item = ()
             if item is None:
                 break
-            if item and live.on_delta(*item) is False or not item and not live.check():
+            if self.stopping() or item and live.on_delta(*item) is False or not item and not live.check():
                 stop.set()
                 self.model.abort()   # (the server stops too: an abandoned call kept it generating)
                 raise Cancelled()
@@ -1712,8 +1713,11 @@ class Runtime:
             return
         from .judge import run_gate
         t0 = time.time()
-        ok, out = run_gate(self.home, gate, timeout=GATE_TURN_TIMEOUT)
+        ok, out = run_gate(self.home, gate, timeout=GATE_TURN_TIMEOUT, stop=self.stopping)
         took = time.time() - t0
+        if self.stopping():
+            self._gate_dirty.add(gid)        # cut short by the daemon's exit: nothing decided, it runs after the restart
+            return
         if not ok and out.startswith('the gate did not finish'):
             self._gate_slow[gid] = 'off'
             self.store.event('gate', dict(command=gate, passed=False, output=out, when='turn', disabled=True), gid)
@@ -1756,6 +1760,12 @@ class Runtime:
             return (float(self.config.get('paid_compact_threshold', PAID_COMPACT[0])),
                     float(self.config.get('paid_compact_target_ratio', PAID_COMPACT[1])))
         return float(self.config.get('compact_threshold', .85)), float(self.config.get('compact_target_ratio', .2))
+
+    def stopping(self):
+        """True once the daemon was asked to exit (SIGTERM / SIGINT set run's stop flag). Anything that holds the loop
+        for long checks it about once a second and ends early: a wait sat out its whole timeout after a SIGTERM (340 s,
+        then SIGKILL), because the flag was read only between steps."""
+        return bool(self._stop and self._stop())
 
     def stop_reason(self):
         """The emergency stop: a STOP file in the shared bridge folder (caminus ember stop-all), for every resident. The
@@ -2187,6 +2197,7 @@ class Runtime:
 
     def run(self, target=None, stop=None, poll=.2, observe=None):
         """Same loop for daemon and oneshot; callers own the process lock."""
+        self._stop = stop
         last_heartbeat=0
         if not target:
             self._note_cut_turns()

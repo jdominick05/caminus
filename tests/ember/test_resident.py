@@ -1892,6 +1892,56 @@ for line in sys.stdin:
             self.assertEqual(result['state'],'completed');self.assertIsNone(p.poll())
         status=self.cmd('status');self.assertTrue(status['daemon_alive']);self.assertEqual(len(status['goals']),2)
 
+    def test_a_daemon_waiting_for_a_message_exits_on_sigterm(self):
+        # (SIGTERM only set the daemon's stop flag, which a wait never read: one sat out its wait 340 s after a second
+        # SIGTERM, and systemd or a test had to SIGKILL it)
+        self.replies(call('wait',dict(until='message',timeout=300)))
+        p=subprocess.Popen(self.argv('run'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);self.processes.append(p)
+        self.wait(lambda:(self.home/'heartbeat.json').exists())
+        self.cmd('send',['--goal','Wait for my message.'])
+        self.wait(lambda:any(e['kind']=='assistant' for e in self.cmd('events')))
+        time.sleep(1.5)                                   # inside the wait now
+        t0=time.monotonic();p.send_signal(signal.SIGTERM)
+        try:code=p.wait(timeout=5)
+        except subprocess.TimeoutExpired:self.fail('the daemon was still waiting 5 s after SIGTERM')
+        self.assertEqual(code,0,p.stderr.read());self.assertLess(time.monotonic()-t0,5)
+        waited=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='wait']
+        self.assertIn('stopped',waited[-1]['happened'],'the agent learns why its wait ended')
+
+    def test_a_terminal_worker_stopped_by_sigterm_reads_stopped(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        out=t.call(sid,dict(command='sleep 300',yield_ms=300))
+        self.assertTrue(out['running'])
+        os.kill(out['worker'],signal.SIGTERM)
+        self.wait(lambda:t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['phase']=='stopped',10)
+        state=json.loads((self.home/'jobs'/sid/'state.json').read_text())
+        self.assertEqual(state['phase'],'stopped','the worker records its own end')
+        self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'])
+        self.wait(lambda:not os.path.exists(f'/proc/{out["pid"]}') or
+                  open(f'/proc/{out["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)   # its command ended too
+        # a worker that could not write (SIGKILL) leaves "running" behind: every reader says stopped, not running
+        sid2=uuid.uuid4().hex
+        out2=t.call(sid2,dict(command='sleep 300',yield_ms=300))
+        os.kill(out2['worker'],signal.SIGKILL)
+        try:os.killpg(out2['pid'],signal.SIGKILL)
+        except ProcessLookupError:pass
+        self.wait(lambda:json.loads((self.home/'jobs'/sid2/'state.json').read_text())['phase']=='running' and
+                  t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['phase']=='stopped',10)
+        self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['running'])
+        from caminus.ember.resident import housemate
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait for the session.')
+            self.assertIn('ended',housemate.wait(rt,gid,'session',sid2,timeout=3)['happened'])
+            self.assertNotIn(sid2,[s['session'] for s in housemate.machine(rt)['my_running_sessions']])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_gate_ends_when_the_runtime_stops(self):
+        from caminus.ember.resident.judge import run_gate
+        flag=[];threading.Timer(.5,lambda:flag.append(1)).start()
+        t0=time.monotonic();ok,out=run_gate(self.home,'sleep 60',stop=lambda:bool(flag))
+        self.assertFalse(ok);self.assertIn('runtime is stopping',out);self.assertLess(time.monotonic()-t0,5)
+
     def test_recovery_reuses_command_after_conversation_crash(self):
         self.replies(call('terminal',dict(command='printf once >> counter; sleep .8; printf done',yield_ms=1000)),call('finish',dict(summary='Recovered.')))
         p=subprocess.Popen(self.argv('once',['--goal','Recover this.']),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);self.processes.append(p)
