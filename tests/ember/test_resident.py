@@ -689,7 +689,7 @@ class Resident(unittest.TestCase):
             results=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result']
             self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
             self.assertTrue(any(r.get('name')=='search' and r['result'].get('text')=='notes.txt\n     1-  alpha\n     2:  gamma' for r in results),results)
-            self.assertTrue(any(r.get('name')=='read' and 'ignored unknown argument(s) offset; read takes: lines, path, start'
+            self.assertTrue(any(r.get('name')=='read' and 'ignored unknown argument(s) offset; read takes: lines, path, question, start'
                                 in r['result'].get('note','') for r in results),results)
         finally:store.close()
 
@@ -1862,7 +1862,8 @@ for line in sys.stdin:
         cfg=json.loads((self.home.parent/paid/'config.json').read_text())
         cfg.update(model='claude-haiku-5-5',relay=True,prices={'in':1},context=1000000,api='anthropic',thinking='adaptive',
                    effort='medium',provider='anthropic',providers={'anthropic':{'kind':'anthropic'}},
-                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5')
+                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5',
+                   eyes={'provider':'anthropic','model':'claude-haiku-5-5'})
         (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
         new='local-'+uuid.uuid4().hex[:8]
         home=self.home.parent/new
@@ -1872,8 +1873,8 @@ for line in sys.stdin:
         self.assertEqual(json.loads(made.stdout)['model'],'swift-1.5')
         got=json.loads((home/'config.json').read_text())
         self.assertEqual((got['model'],got['endpoint']),('swift-1.5',url))
-        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model'):
-            self.assertNotIn(k,got,f'{k} belonged to the paid brain')
+        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model','eyes'):
+            self.assertNotIn(k,got,f'{k} belonged to the paid brain')   # (eyes bill too: the owner turns them on again)
         self.assertIn('providers',got,'/model can still switch back to a paid brain')
 
     CODER_IDS=['k3-coder','k3-coder-xhigh','k3-coder-low','k3-coder-nothink']   # what the Coder's server lists
@@ -3668,19 +3669,6 @@ for line in sys.stdin:
             self.assertLess(ledger.spent(),len(big)/4*0.15/1e6/20,'a twentieth of what its bytes would have booked')
         finally:stop()
 
-    def test_the_anthropic_relay_names_the_command_that_allows_a_refused_model(self):
-        from caminus.ember import relay
-        base,calls,ledger,log,stop=self._relay('anthropic',lambda c:(200,b'{}','application/json'),cap=3.0,
-                                               models={'claude-opus-5-5'})
-        try:
-            code,body=self._post(base+'/v1/messages',dict(model='claude-haiku-5-5',max_tokens=10,messages=[]))
-            self.assertEqual(code,403);self.assertEqual(calls,[])
-            self.assertIn(b'to allow it: caminus ember relay install --provider anthropic --cap-usd 3 --model claude-opus-5-5 '
-                          b'--model claude-haiku-5-5',body,'install replaces the list: the command keeps what it allows now')
-            code,body=self._post(base+'/v1/messages',dict(model='gpt-9',max_tokens=10,messages=[]))
-            self.assertIn(b'without a price',body);self.assertNotIn(b'relay install',body)
-        finally:stop()
-
     def test_the_mistral_relay_meters_from_the_owners_prices_and_sends_no_stream_options(self):
         from caminus.ember import relay
         pf=self.home/'mistral-prices.json';pf.write_text(json.dumps({'mistral-medium-latest':[0.4,2.0]}))
@@ -3692,7 +3680,8 @@ for line in sys.stdin:
         try:
             code,body=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
             self.assertEqual(code,403);self.assertEqual(calls,[],'an unpriced model goes nowhere')
-            self.assertIn(('price file %s as \\"codestral-latest\\"' % pf).encode(),body,'the refusal names the file and the entry')
+            self.assertIn(b'--prices file as \\"codestral-latest\\"',body,'the refusal names the entry')
+            self.assertNotIn(str(pf).encode(),body,'and no path of the owner\'s: the text reaches the agent')
             code,_=self._post(base+'/v1/chat/completions',dict(model='mistral-medium-latest',messages=[],stream=True))
             self.assertEqual(code,200);sent=calls[-1]
             self.assertEqual(sent['path'],'/v1/chat/completions');self.assertEqual(sent['headers']['Authorization'],'Bearer SECRET-KEY')
@@ -4279,6 +4268,27 @@ for line in sys.stdin:
             result=next(e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result')
             self.assertEqual(result['image']['described_by'],'ministral-8b-latest','the panel card names the eyes')
             self.assertEqual(rt.store.goal(gid)['state'],'completed')
+            # the finish judge: the agent saw a description, not the image; it is the eyes model's observation
+            from caminus.ember.resident import judge
+            self.assertNotIn('seen',judge.viewed(rt,gid)[0])
+            brief=judge.evidence(rt,gid,'test_parse failed.','')
+            self.assertIn('IMAGES DESCRIBED TO THE AGENT',brief)
+            self.assertIn('shot.png (6x4 PNG) described by ministral-8b-latest',brief)
+            self.assertIn('the eyes model\'s observation',brief)
+            self.assertNotIn('COULD NOT SEE',brief);self.assertNotIn('IMAGES THE AGENT SAW',brief)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_eyes_get_at_most_600_characters_of_the_goal(self):
+        from caminus.ember.resident import files
+        self.eyes_home(eyes=dict(provider='mistral',model='ministral-8b-latest'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('A red line.'))
+            goal='Find the failing test. '+''.join(f'{i:04}' for i in range(200))   # 823 characters, none repeated
+            gid=rt.store.enqueue(goal)
+            rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            text=wire.requests[0][2]['messages'][1]['content'][0]['text']
+            self.assertIn(goal[:600],text);self.assertNotIn(goal[:601],text,'the goal is cut at 600 characters')
         finally:rt.mail.close();rt.store.close()
 
     def test_a_relay_that_refuses_the_eyes_model_says_the_exact_fix(self):
@@ -4286,22 +4296,22 @@ for line in sys.stdin:
         from caminus.ember.resident.advisor import eyes_refusal
         self.eyes_home(eyes=dict(provider='anthropic',model='claude-haiku-5-5'),providers=('anthropic',))
         new=json.dumps(dict(type='error',error=dict(type='permission_error',message=(
-            "relay: model not allowed: 'claude-haiku-5-5' (this relay allows claude-opus-5-5; to allow it: caminus ember "
-            'relay install --provider anthropic --cap-usd 3 --model claude-opus-5-5 --model claude-haiku-5-5)'))))
+            "relay: model not allowed: 'claude-haiku-5-5' (this relay allows claude-opus-5-5; to allow it too: caminus ember "
+            'relay install --provider anthropic --cap-usd 3.0 --model claude-opus-5-5 --model claude-haiku-5-5)'))))
         old=json.dumps(dict(type='error',error=dict(type='permission_error',message="relay: model not allowed: 'claude-haiku-5-5'")))
         rt=Runtime(self.home)
         try:
             rt.eyes_opener=Wire((403,new),(403,old),(402,json.dumps(dict(error=dict(message='relay: daily cap $3.00 reached')))))
             gid=rt.store.enqueue('x')
             got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
-            self.assertIn('caminus ember relay install --provider anthropic --cap-usd 3 --model claude-opus-5-5 '
-                          '--model claude-haiku-5-5',got['eyes_error'],'this relay version names the whole command')
+            self.assertIn('Your human can fix it: caminus ember relay install --provider anthropic --cap-usd 3.0 --model '
+                          'claude-opus-5-5 --model claude-haiku-5-5',got['eyes_error'],'this relay version names the whole command')
             self.assertNotIn('described_by',got['image'])
             got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
-            self.assertIn('--cap-usd <its daily cap> --model <each model it allows now> --model claude-haiku-5-5',
-                          got['eyes_error'],'an older relay: the command with what the agent cannot know marked')
+            self.assertIn('does not allow claude-haiku-5-5',got['eyes_error'])
+            self.assertIn('naming every --model it should serve',got['eyes_error'],'an older relay: how, without a command')
             got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
-            self.assertIn("daily cap is reached",got['eyes_error'])
+            self.assertIn('spent its daily cap',got['eyes_error'])
             self.assertTrue(any(e['kind']=='eyes_failed' for e in rt.store.events()))
         finally:rt.mail.close();rt.store.close()
         from caminus.ember.resident.model import ModelError

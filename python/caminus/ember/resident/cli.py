@@ -495,9 +495,9 @@ def main(argv=None,stdin=None):
                 cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
-                # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
+                # judge or advisor on the relay would bill every finish, eyes every image read; the owner adds them back on purpose)
                 for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
-                          'fallback','advisor','judge_model','model_variants','efforts'):
+                          'fallback','advisor','judge_model','eyes','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
                 from . import catalog

@@ -91,7 +91,8 @@ def run_gate(home, gate, timeout=GATE_TIMEOUT):
 def viewed(rt, gid):
     """The images the agent read in this goal, newest last (at most JUDGE_IMAGES, each file once), as the transport's
     image references (files.image_ref). `seen` marks one the agent's brain saw (the runtime sets it when read runs on
-    a brain with vision); one without it reached the agent as its size and format only."""
+    a brain with vision); `described_by` one the eyes model described for it (advisor.Eyes); one with neither reached
+    the agent as its size and format only."""
     from .files import image_ref
     seen = {}
     for r in rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='tool_result' ORDER BY seq", (gid,)):
@@ -106,7 +107,9 @@ def viewed(rt, gid):
 def evidence(rt, gid, summary, open_work, images=None, sees=False):
     """The judge's brief. images: what the agent read (viewed()); sees: whether the ones the agent saw go with it (a
     judge brain with vision), else the judge is told the agent's account of them is an observation it cannot check
-    here. An image the agent's brain could not see is listed as such: what the agent says it shows is no evidence."""
+    here. An image the eyes model described is listed with that model: its description is that model's observation.
+    An image the agent's brain could not see, undescribed, is listed as such: what the agent says it shows is no
+    evidence."""
     g = rt.store.goal(gid)
     parts = ['GOAL:\n' + g['prompt'][:4000], 'DONE CHECK:\n' + (g.get('done_check') or '(none)')]
     steers = [s['text'] for s in rt.store.steers(gid)]
@@ -126,16 +129,26 @@ def evidence(rt, gid, summary, open_work, images=None, sees=False):
     parts.append('EVIDENCE (oldest first):\n' + ('\n'.join(lines[-EVIDENCE_RESULTS:]) or '(none recorded)'))
     images = viewed(rt, gid) if images is None else images
     listed = lambda imgs: '\n'.join(f"- {os.path.relpath(i['path'], str(rt.home))} ({i.get('width')}x{i.get('height')} "
-                                    f"{str(i.get('format', '')).upper()})" for i in imgs)
-    saw, blind = [i for i in images if i.get('seen')], [i for i in images if not i.get('seen')]
+                                    f"{str(i.get('format', '')).upper()})"
+                                    + (f" described by {i['described_by']}" if i.get('described_by') else '')
+                                    for i in imgs)
+    saw = [i for i in images if i.get('seen')]
+    told = [i for i in images if not i.get('seen') and i.get('described_by')]
+    blind = [i for i in images if not i.get('seen') and not i.get('described_by')]
     if saw:
         parts.append(('IMAGES THE AGENT SAW (its model can see; each follows this brief, as the agent saw it):\n'
                       + listed(saw)) if sees else
                      ('IMAGES THE AGENT SAW (its model can see; you cannot see them here):\n' + listed(saw) +
                       '\nWhat the agent says such an image shows is an observation, as a command\'s output would be: do '
                       'not refuse a finish only because you cannot see the image yourself.'))
+    if told:
+        parts.append('IMAGES DESCRIBED TO THE AGENT (its model has no vision; the eyes model named after each described it, '
+                     'and the description is in the read\'s result):\n'
+                     + listed(told) + '\nWhat the agent says such an image shows rests on that description: it is the eyes model\'s '
+                     'observation, as a command\'s output would be, not the agent\'s own.')
     if blind:
-        parts.append('IMAGES THE AGENT READ BUT COULD NOT SEE (its model has no vision: read gave it only each file\'s '
+        parts.append('IMAGES THE AGENT READ BUT COULD NOT SEE (its model has no vision and no eyes described them: read '
+                     'gave it only each file\'s '
                      'size and format):\n' + listed(blind) + '\nWhat the agent says such an image shows is not an '
                      'observation: count it only where a command\'s output above (an OCR or image tool) shows it.')
     # what the harness itself recorded, so a claimed change can be checked against it
