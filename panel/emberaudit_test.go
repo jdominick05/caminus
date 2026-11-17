@@ -191,3 +191,18 @@ func TestAPlusPathThatCannotBeAttachedIsNotSent(t *testing.T) {
 		t.Fatalf("plain words, short paths: %q", res.err)
 	}
 }
+
+func TestProseWithDotsIsNotAPathAndATimeoutStaysNo(t *testing.T) {
+	m := pathFixture(t)
+	if out, problems := expandAttachmentsChecked(m, "I'd say +1... but let's wait"); len(problems) > 0 || out != "I'd say +1... but let's wait" {
+		t.Fatalf("+1... is a word: %q %v", out, problems)
+	}
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "g", Kind: "question", Data: map[string]any{"id": "q1", "text": "May I delete the cache?", "approval": true}},
+		{Seq: 2, Goal: "g", Kind: "question_unanswered", Data: map[string]any{"id": "q1", "approval": true, "outcome": "no"}},
+		{Seq: 3, Goal: "g", Kind: "request_answered", Data: map[string]any{"request": "q1", "decision": "answered", "by": "timeout"}},
+	}
+	if got := m.requestOutcomes()["q1"]; got != "timed out (no)" {
+		t.Fatalf("an unanswered permission stays a no: %q", got)
+	}
+}
