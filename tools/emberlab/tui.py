@@ -205,7 +205,8 @@ def session_cmd(a, out):
     wrapper = out / 'lab-cli.sh'
     wrapper.write_text(WRAPPER.format(runtime=' '.join(shlex.quote(x) for x in rt), home=shlex.quote(s['home'])))
     wrapper.chmod(0o700)
-    bridge = out / 'bridge'          # (root requests of an agent-host session stay on that host: this one is empty)
+    # a local session's own bridge, so its approvals and questions show; an agent-host session's stay on that host
+    bridge = Path(s['home']).parent / 'bridge' if s['host'] == 'local' else out / 'bridge'
     for sub in ('req', 'res'):
         (bridge / sub).mkdir(parents=True, exist_ok=True)
     panel = a.panel

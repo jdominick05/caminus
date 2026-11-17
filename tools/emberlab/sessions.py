@@ -119,7 +119,7 @@ def open_session(a):
                              stdout=subprocess.PIPE, stderr=open(d / 'driven.log', 'wb'), start_new_session=True)
         port = int(p.stdout.readline())
         s.update(driven=str(ctl), driven_pid=p.pid)
-        init = ['--model', 'driven', '--endpoint', f'http://127.0.0.1:{port}/{a.name}/v1']
+        init = ['--model', 'driven', '--endpoint', f'http://127.0.0.1:{port}/{a.name}/v1', '--context', '65536']
         cfg = {}
     else:
         b = brains_mod.parse(a.brain)
