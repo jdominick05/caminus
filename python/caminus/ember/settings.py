@@ -13,6 +13,12 @@ def user():
     return os.environ.get('CAMINUS_ENV_USER') or DEFAULT_USER
 
 
+def bridge_group():
+    """the group the owner and the agent share the bridge through. A second setup on one machine (its own agent account
+    and bridge) needs its own group too: with a shared one, either side could write into the other's bridge."""
+    return os.environ.get('CAMINUS_ENV_GROUP') or BRIDGE_GROUP
+
+
 def key_path():
     """the harness's private key for that user (authorized_keys pins it to 127.0.0.1)"""
     return os.environ.get('CAMINUS_ENV_KEY') or os.path.join(os.path.expanduser('~/.ssh'), 'caminus_env_key')

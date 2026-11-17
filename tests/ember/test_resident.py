@@ -1993,6 +1993,30 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_second_setup_takes_its_own_group_and_its_bridge_reaches_agent_init(self):
+        from caminus.ember import settings, agent_host
+        old={k:os.environ.get(k) for k in ('CAMINUS_ENV_GROUP','CAMINUS_ENV_BRIDGE')}
+        try:
+            os.environ.pop('CAMINUS_ENV_GROUP',None);os.environ.pop('CAMINUS_ENV_BRIDGE',None)
+            self.assertEqual(settings.bridge_group(),'caminus-env')
+            os.environ['CAMINUS_ENV_GROUP']='ember-alex';os.environ['CAMINUS_ENV_BRIDGE']='/srv/ember-alex-bridge'
+            self.assertEqual(settings.bridge_group(),'ember-alex')
+            sent=[]
+            def transport(argv,input=None,**kw):
+                sent.append(input);return subprocess.CompletedProcess(argv,0,'{}','')
+            import contextlib,io as _io
+            with contextlib.redirect_stdout(_io.StringIO()):
+                agent_host.main(['init','a','--model','m','--endpoint','http://127.0.0.1:1/v1'],transport)
+                agent_host.main(['init','b','--model','m','--bridge','/x'],transport)
+                agent_host.main(['status','a'],transport)
+            self.assertIn('/srv/ember-alex-bridge',sent[0],'init carries the owner\'s bridge to the agent account')
+            self.assertNotIn('/srv/ember-alex-bridge',sent[1],'an explicit --bridge is kept')
+            self.assertNotIn('--bridge',sent[2],'only init takes it')
+        finally:
+            for k,v in old.items():
+                if v is None:os.environ.pop(k,None)
+                else:os.environ[k]=v
+
     def test_install_queues_an_update_for_every_running_daemon_on_an_older_runtime(self):
         # an upgrade left a days-old daemon running: install alone restarted nothing
         from caminus.ember import agent_host

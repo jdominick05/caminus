@@ -55,6 +55,24 @@ either faster.
 - **Everything is recorded.** Your audit log has every root request, answer, grant and panel control; its journal
   has every goal, tool call and result.
 
+## A second setup on one machine
+
+The defaults (the `caminus-agent` account, the `caminus-env` group, the bridge in `/srv/caminus-env-bridge`) are one
+setup per machine. A second person on the same machine, or a trial setup beside yours, needs its own of all three:
+with a shared group, either side could write into the other's bridge. Set them in the second owner's shell (its
+`~/.profile` keeps them) before the quickstart:
+
+```sh
+export CAMINUS_ENV_USER=ember-alex            # its agent account (created by the root script)
+export CAMINUS_ENV_GROUP=ember-alex           # the group that owner and that agent share
+export CAMINUS_ENV_BRIDGE=/srv/ember-alex-bridge
+caminus ember setup                           # prints the root script for these names
+```
+
+`caminus ember agent init` passes that bridge to the agent. Each owner's SSH key (`~/.ssh/caminus_env_key`), audit
+log and relays are in their own home already; relays listen on fixed local ports, so a second owner's relay takes
+another one (`relay install ... --port 8775`, and the agent's `--endpoint` to match).
+
 ## Where things live
 
 | What | Where |

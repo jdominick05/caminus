@@ -393,7 +393,7 @@ def _setup(a, tr):
             return 1
         print(f'made your key for the agent account: {key}')
     path = setup_script_path()
-    text = provision.script(settings.user(), settings.BRIDGE_GROUP, getpass.getuser(), settings.bridge_dir(),
+    text = provision.script(settings.user(), settings.bridge_group(), getpass.getuser(), settings.bridge_dir(),
                             open(key + '.pub').read(), path)
     if a.print_script:
         print(text, end='')
@@ -445,7 +445,7 @@ def leases_report(path,group,gid):
 
 
 def _leases_status():
-    group=settings.BRIDGE_GROUP
+    group=settings.bridge_group()
     path=os.path.join(settings.bridge_dir(),'leases')
     try:gid=grp.getgrnam(group).gr_gid
     except KeyError:
