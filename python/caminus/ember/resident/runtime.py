@@ -294,10 +294,18 @@ class Live:
     def flush(self):
         if not self.check():
             return False
+        self._write()
+        return True
+
+    def start(self):
+        """The empty snapshot, written as the call goes out: a UI sees a turn in flight from its first moment (a prefill
+        or a paid model's thinking sends no piece for a long while), so an Esc then reaches it too."""
+        self._write()
+
+    def _write(self):
         atomic_json(self.path, dict(turn=self.turn, goal=self.gid, ts=time.time(),
                                     content=''.join(self.content), reasoning=''.join(self.reasoning),
                                     tools=self.tools))
-        return True
 
     def check(self):
         """False when the turn must stop: the goal was cancelled, or an Esc asked to interrupt it."""
@@ -309,7 +317,9 @@ class Live:
         req = self.store.pending_request(self.gid, 'interrupt')
         if req is not None:
             self.store.settle_request(req['id'], 'done')
-            self.store.event('turn_interrupted', {}, self.gid)
+            # hold_s: how long the goal waits for the steering message before it carries on by itself (the panel
+            # shows it as interrupted, not working, until then); turn: the live snapshot's turn it ends
+            self.store.event('turn_interrupted', dict(hold_s=INTERRUPT_HOLD, turn=self.turn), self.gid)
             self.interrupted = True
             return False
         return True
@@ -1874,6 +1884,15 @@ class Runtime:
         for k in ('question_timeout', 'judge_model'):
             if k in fresh:
                 self.config[k] = fresh[k]
+        # the advisor, set up or removed while the daemon runs (`agent advisor NAME ...`): the tool answered "no advisor
+        # is configured" until a restart, while the CLI and /advisor (a fresh runtime each) already used it
+        if fresh.get('advisor') != self.config.get('advisor'):
+            if fresh.get('advisor'):
+                self.config['advisor'] = fresh['advisor']
+                if isinstance(fresh['advisor'], dict) and fresh['advisor'].get('prices'):
+                    remember_prices(fresh['advisor'].get('model'), fresh['advisor']['prices'])
+            else:
+                self.config.pop('advisor', None)
         if not changed or not self._own_model:
             return
         if self.config.get('prices'):
@@ -1981,6 +2000,7 @@ class Runtime:
                 self.store.settle_request(req['id'], 'done')
             live = Live(self.home, gid, self.store)
             try:
+                live.start()
                 request = [self.system(),*messages]
                 if (budget := self.context_message(gid)):
                     request.append(budget)

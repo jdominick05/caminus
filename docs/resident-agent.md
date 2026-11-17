@@ -53,7 +53,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 
 | Key | Action |
 |---|---|
-| Esc | while a reply is being written, interrupt that turn (nothing of it is kept; the goal waits up to two minutes for your message); the activity line says "esc interrupts" then. PgUp/PgDn and the wheel scroll the transcript |
+| Esc | while the agent waits on a reply (also before its first word: a long prompt read, a paid model thinking), interrupt that turn: the call is closed, so the server stops generating, and nothing of it is kept. The activity line then says "turn interrupted" with no clock, and the goal waits up to two minutes for your message before it carries on by itself. Esc while a tool runs says there is nothing to interrupt. PgUp/PgDn and the wheel scroll the transcript |
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
 | Ctrl+R | earlier prompts containing the draft, newest first (as you typed them: `//`, `@` and `+` kept) |
 | Home, End | with an empty draft: the top or the bottom of the history |

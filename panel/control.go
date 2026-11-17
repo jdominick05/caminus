@@ -102,7 +102,8 @@ type ctl struct {
 	editFresh bool
 	helpPage  int        // the key list's page (?)
 	seen      *panelSeen // what the last View drew (View has a value receiver; the keys read it from here)
-	confirm   *pending   // a y / n question
+	confirm   *pending   // a question: y / n, or enter / esc
+	swap      *swapPlan  // a confirmed stop-then-start in flight (panelswap.go)
 	busy      string     // the action in flight ("" = none)
 	note      string     // the last result line (a key's or an action's: a read's failure is said in that read's own area)
 	noteErr   bool
@@ -116,10 +117,12 @@ type ctl struct {
 // panelSeen is what the last View drew that a key needs: how many pages the key list took at that size.
 type panelSeen struct{ helpPages int }
 
-// pending is an action waiting for y.
+// pending is an action waiting for y (enter: for enter).
 type pending struct {
-	q   string
-	run tea.Cmd
+	q     string
+	enter bool               // enter answers yes (esc or any other key: no); else y does
+	run   tea.Cmd            // what yes runs (the header says q without its question mark while it does)
+	yes   func(*ctl) tea.Cmd // instead of run: sets its own state and busy label, returns the first step
 }
 
 // panelCloseMsg is the component asking its host to close it (Esc or q, or e inside Ember). The panel's own host
@@ -783,6 +786,8 @@ func (m ctl) update(msg tea.Msg) (ctl, tea.Cmd) {
 		return m, tea.Batch(m.loadPS(), m.retryReads(time.Now()), m.pollCmd())
 	case liveTick, liveMsg, sessionsMsg, emberTick, emberCountMsg:
 		return m.liveUpdate(msg)
+	case swapStopMsg, swapPollMsg:
+		return m.swapUpdate(msg)
 	// (a read's failure goes to its own area, never the note line: a poll that keeps failing never hides a key's note)
 	case modelsMsg:
 		m.readDone("models", msg.err)
@@ -861,7 +866,11 @@ func (m ctl) key(k tea.KeyPressMsg) (ctl, tea.Cmd) {
 	if m.confirm != nil {
 		c := m.confirm
 		m.confirm = nil
-		if s == "y" || s == "Y" {
+		if c.enter && s == "enter" || !c.enter && (s == "y" || s == "Y") {
+			if c.yes != nil {
+				cmd := c.yes(&m) // (before m is returned: it sets the swap and the busy label on m)
+				return m, cmd
+			}
 			m.busy = strings.TrimSuffix(c.q, "? y / n")
 			return m, c.run
 		}
@@ -883,7 +892,13 @@ func (m ctl) key(k tea.KeyPressMsg) (ctl, tea.Cmd) {
 		return m.optionsKey(s)
 	}
 	switch s {
-	case "ctrl+c", "q", "esc":
+	case "q", "esc":
+		if m.swap != nil { // (closing now would leave the stopped server's model not started: ctrl+c still closes)
+			m.setNote("wait: "+m.busy+" · ctrl+c closes anyway, and "+m.swap.model+" won't be started", false)
+			return m, nil
+		}
+		return m, closePanel
+	case "ctrl+c":
 		return m, closePanel
 	case "?":
 		m.view, m.helpPage = viewHelp, 0
@@ -1018,6 +1033,9 @@ func (m ctl) modelsKey(s string) (ctl, tea.Cmd) {
 			m.setNote(mi.Name+"'s "+draft+" drafter is not downloaded: p to pull it", true)
 			return m, nil
 		}
+		if live := m.liveServers(); len(live) > 0 { // (caminus start would refuse the held card: stop it first, once asked)
+			return m.askSwap(*mi, live)
+		}
 		m.busy = "starting " + mi.Name
 		return m, m.action("start "+mi.Name, 15*time.Minute, m.startArgs(*mi)...)
 	case "p":
@@ -1069,15 +1087,15 @@ func (m ctl) serverKey(s string) (ctl, tea.Cmd) {
 	name := sv.Name
 	if sv.External && s == "L" {
 		// (caminus ps keeps no log for a server started outside caminus start, and caminus logs finds only theirs)
-		shown := name
-		if sv.Model != "" {
-			shown = sv.Model
-		}
-		m.setNote(shown+" was started outside the panel, so its log is wherever it was started", false)
+		m.setNote(shownName(*sv)+" was started outside the panel, so its log is wherever it was started", false)
 		return m, nil
 	}
-	if sv.External && s != "m" {
-		m.setNote(name+" was started outside the panel: stop or restart it where it was started", false)
+	if sv.External && s == "s" { // (caminus stop knows only the servers caminus start recorded: say what stops it)
+		m.setNote(outsideStopNote(*sv, ""), false)
+		return m, nil
+	}
+	if sv.External && s == "t" {
+		m.setNote(shownName(*sv)+" was started outside the panel: restart it where it was started", false)
 		return m, nil
 	}
 	switch s {

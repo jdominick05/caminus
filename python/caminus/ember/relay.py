@@ -38,6 +38,8 @@ import http.server
 import json
 import os
 from pathlib import Path
+import select
+import socket
 import ssl
 import sys
 import threading
@@ -216,7 +218,9 @@ class OwnerPrices:
             return None
 
 
-def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None):
+def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, connect=None, install_args=None):
+    """install_args: the `relay install` flags that would rebuild this relay (cap, port, ...; models aside), so a refused
+    model's error names the exact command that allows it as well"""
     spec = PROVIDERS[provider]
     connect = connect or (lambda: http.client.HTTPSConnection(spec['host'], timeout=900,
                                                               context=ssl.create_default_context()))
@@ -237,6 +241,35 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             self.end_headers()
             self.wfile.write(raw)
             log('refused %d %s' % (status, message))
+
+        def watch_client(self, upsock, done):
+            """While a stream is relayed, notice a client that hangs up even when upstream sends nothing (a long
+            prompt, a model thinking): the upstream connection is closed at once, so the provider stops generating.
+            Without this the hang-up was seen only at the next write, after upstream's next line. Returns the event
+            set when the client went; setting done ends the watch."""
+            gone = threading.Event()
+
+            def watch():
+                while not done.is_set():
+                    try:
+                        r, _, _ = select.select([self.connection], [], [], 0.1)
+                        if not r or self.connection.recv(1, socket.MSG_PEEK) != b'':
+                            if r:
+                                time.sleep(0.1)     # (bytes waiting from the client: not a hang-up)
+                            continue
+                    except (OSError, ValueError):
+                        pass                        # (the connection is already closed: the client went)
+                    if done.is_set():
+                        return
+                    gone.set()
+                    if upsock is not None:
+                        try:
+                            upsock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                    return
+            threading.Thread(target=watch, daemon=True, name='relay-client-watch').start()
+            return gone
 
         def auth(self):
             return {'x-api-key': key} if provider == 'anthropic' else {'Authorization': 'Bearer ' + key}
@@ -290,7 +323,13 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             model = body.get('model')
             if provider == 'anthropic':
                 if model not in models:
-                    return self.refuse(403, 'permission_error', 'model not allowed: %r' % model)
+                    # the allowed list and the command that adds this model while keeping them: an advisor or a /model
+                    # on a model the relay was not installed for failed with no hint of the fix
+                    hint = ''
+                    if isinstance(model, str) and model in PRICES and install_args is not None:
+                        hint = '; to allow it too: ' + install_command(provider, install_args, sorted(models) + [model])
+                    return self.refuse(403, 'permission_error', 'model not allowed: %r (this relay allows %s%s)' % (
+                        model, ', '.join(sorted(models)), hint))
                 rates = None
             else:
                 rates = prices.get(model) if isinstance(model, str) else None
@@ -326,6 +365,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     if beta:
                         headers['anthropic-beta'] = beta
                 conn.request('POST', path, raw, headers)
+                # (taken now: http.client drops conn.sock in getresponse when upstream will close the connection)
+                upsock = getattr(conn, 'sock', None)
                 up = conn.getresponse()
                 # A client that hangs up (an interrupt, a steer and /advisor end a reply this way) never skips the
                 # ledger, on any path: before the headers, mid-stream or on a whole reply. Upstream already billed it.
@@ -342,10 +383,23 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
                 rid = up.getheader('request-id') or up.getheader('x-request-id')
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
+                    watched, ended = threading.Event(), False   # ended: the reply's last event came
+                    gone = self.watch_client(upsock, watched)
                     while not client_gone:
-                        line = up.readline()
+                        try:
+                            line = up.readline()
+                        except (OSError, ValueError, http.client.HTTPException):
+                            # (a chunked upstream shut mid-chunk raises IncompleteRead, an HTTPException: the hang-up is
+                            #  still metered, as for a plain socket error)
+                            if not gone.is_set():
+                                raise
+                            line = b''
                         if not line:
+                            # (a client that closes right after the last event is not a hang-up)
+                            client_gone = client_gone or (gone.is_set() and not ended)
                             break
+                        if line[5:].strip() == b'[DONE]' or b'"message_stop"' in line:
+                            ended = True
                         try:
                             self.wfile.write(line)
                             self.wfile.flush()
@@ -385,6 +439,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         elif t == 'content_block_delta':
                             d = ev.get('delta') or {}
                             streamed += sum(len(d.get(k) or '') for k in ('text', 'thinking', 'partial_json'))
+                    watched.set()
                 else:
                     data = up.read()
                     try:
@@ -449,6 +504,79 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             finally:
                 conn.close()
     return Relay
+
+
+def install_command(provider, args, models):
+    """The `caminus ember relay install` line for these flags and exactly these models (install replaces the list, so
+    every model the relay should keep is named)."""
+    import shlex
+    return ' '.join(shlex.quote(x) for x in ['caminus', 'ember', 'relay', 'install', '--provider', provider, *args,
+                                              *[a for m in models for a in ('--model', m)]])
+
+
+def _flags(argv):
+    """a relay's own flags (from its unit's ExecStart): the install flags apart from --model, and the models"""
+    ap = argparse.ArgumentParser(add_help=False)
+    for f in ('--cap-usd', '--port', '--max-tokens', '--key-file', '--prices'):
+        ap.add_argument(f)
+    ap.add_argument('--model', action='append')
+    a, _ = ap.parse_known_args(argv)
+    args = []
+    for f in ('cap_usd', 'port', 'max_tokens', 'key_file', 'prices'):
+        if getattr(a, f) is not None:
+            args += ['--' + f.replace('_', '-'), getattr(a, f)]
+    return args, a
+
+
+def installed(provider):
+    """The installed relay service for a provider, read from its unit: dict(port, cap_usd, models, args, active?) or
+    None. models is None for a provider that allows every priced model."""
+    import shlex
+    try:
+        text = (unit_dir() / unit_name(provider)).read_text()
+    except OSError:
+        return None
+    line = next((l for l in text.splitlines() if l.startswith('ExecStart=')), None)
+    if line is None:
+        return None
+    try:
+        argv = shlex.split(line[len('ExecStart='):])
+    except ValueError:
+        return None
+    if '--provider' not in argv:
+        return None
+    args, a = _flags(argv[argv.index('--provider'):])       # (the relay's own flags, after the interpreter's)
+    try:
+        port = int(a.port or PROVIDERS[provider]['port'])
+        cap = float(a.cap_usd) if a.cap_usd is not None else None
+    except ValueError:
+        return None
+    models = (sorted(set(a.model or ['claude-haiku-5-5'])) if provider == 'anthropic' else None)
+    return dict(port=port, cap_usd=cap, models=models, args=args)
+
+
+def unit_at(endpoint):
+    """The installed Anthropic relay (installed()) that answers at this endpoint on this machine, or None."""
+    import urllib.parse
+    try:
+        u = urllib.parse.urlsplit(endpoint or '')
+        port = u.port
+    except ValueError:
+        return None
+    if u.hostname not in ('127.0.0.1', 'localhost', '::1') or port is None:
+        return None
+    r = installed('anthropic')
+    return r if r and r['port'] == port else None
+
+
+def allow_command(endpoint, model):
+    """For an Anthropic endpoint on this machine served by an installed relay that does not allow `model`: the exact
+    command that allows it as well (keeping the cap, port and the models it serves now). None when no installed relay
+    answers there, or it allows the model already."""
+    r = unit_at(endpoint)
+    if not r or model in r['models'] or model not in PRICES:
+        return None
+    return install_command('anthropic', r['args'], r['models'] + [model])
 
 
 def unit_name(provider):
@@ -547,11 +675,18 @@ def service(argv, run=subprocess.run):
         return 0
     state = Path.home() / '.local/state/caminus'
     for prov in ([a.provider] if a.provider else sorted(PROVIDERS)):
-        installed = (unit_dir() / unit_name(prov)).exists()
-        active = ctl('is-active', unit_name(prov)).stdout.strip() if installed else 'not installed'
+        unit = installed(prov)
+        is_on = (unit_dir() / unit_name(prov)).exists()
+        active = ctl('is-active', unit_name(prov)).stdout.strip() if is_on else 'not installed'
         ledger = state / ('key-relay-ledger.json' if prov == 'anthropic' else f'{prov}-relay-ledger.json')
         spent = Ledger(ledger, 0).spent() if ledger.exists() else 0.0
-        print(f'{prov:10s} {active:14s} today ${spent:.4f}')
+        line = f'{prov:10s} {active:14s} today ${spent:.4f}'
+        if unit:
+            # the cap, the port and (Anthropic) the models it allows: an advisor or brain on another model is refused
+            line += (f' of ${unit["cap_usd"]:.2f}' if unit['cap_usd'] is not None else '') + f'  port {unit["port"]}'
+            if unit['models'] is not None:
+                line += '  models ' + ', '.join(unit['models'])
+        print(line)
     return 0
 
 
@@ -606,8 +741,15 @@ def main(argv=None):
               OwnerPrices(a.prices or spec['prices'], log, fetch=lambda: _list_models(spec, key))
               if a.provider == 'mistral' else None)
     port = a.port or spec['port']
+    # (no --key-file or --prices: the hint reaches the agent, which has no business with the owner's file paths; the
+    # owner's side adds them from the installed unit, and an install without them stops at a missing default key file)
+    install_args = ['--cap-usd', str(a.cap_usd)]
+    for flag, val, default in (('--port', a.port, None), ('--max-tokens', a.max_tokens, 65536)):
+        if val is not None and val != default:
+            install_args += [flag, str(val)]
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', port),
-                                          make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices))
+                                          make_handler(a.provider, key, ledger, models, a.max_tokens, log, prices,
+                                                       install_args=install_args))
     if a.ttl > 0:
         threading.Timer(a.ttl, srv.shutdown).start()
     root = '/v1/openai' if a.provider == 'deepinfra' else '/v1'
