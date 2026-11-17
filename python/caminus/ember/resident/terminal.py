@@ -56,11 +56,8 @@ def worker(job):
         if pid == 0:
             try:
                 os.chdir(req['cwd'])
-                # $WORKSPACE: the agent's workspace, where the file tools' relative paths start (~ is the account home:
-                # an agent wrote a file by a relative path, then looked for it under ~ in the shell)
-                os.environ['WORKSPACE'] = req.get('workspace') or req['cwd']
-                script='builtin cd -- '+shlex.quote(req['cwd'])+' || exit 127\n'+req['command']
-                os.execv('/bin/bash', ['bash', '-lc', script])
+                argv = shell_argv(req['cwd'], req['command'])
+                os.execv(argv[0], argv)
             except BaseException as e:
                 os.write(2, str(e).encode())
                 os._exit(127)
@@ -128,10 +125,20 @@ def worker(job):
         return 0
 
 
+def shell_argv(cwd, command):
+    """A command as the agent's terminal runs it: a login bash that starts in cwd (after the profile, which may cd).
+    The done check's gate runs through this and worker_env too, so it sees what a terminal command sees."""
+    return ['/bin/bash', '-lc', 'builtin cd -- ' + shlex.quote(str(cwd)) + ' || exit 127\n' + command]
+
+
 def worker_env(home):
-    """The daemon's environment without the model API key: the model's commands run in this worker, and a key
-    it could print is a key it could leak. (A key in a file this account can read is not protected by this.)"""
+    """The environment of the agent's commands (terminal jobs and the done check's gate): the daemon's, without the
+    model API key (a key it could print is a key it could leak; a key in a file this account can read is not protected
+    by this), with $WORKSPACE."""
     env = dict(os.environ)
+    # $WORKSPACE: the agent's workspace, where the file tools' relative paths start (~ is the account home: an agent
+    # wrote a file by a relative path, then looked for it under ~ in the shell)
+    env['WORKSPACE'] = str(home)
     try:
         name = json.loads((Path(home) / 'config.json').read_text()).get('api_key_env', 'CAMINUS_AGENT_API_KEY')
     except (OSError, ValueError, AttributeError):
@@ -261,7 +268,7 @@ class Terminal:
                 raise ValueError('cwd is not a directory')
             job.mkdir(exist_ok=True)
             if not (job / 'request.json').exists():
-                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), workspace=str(self.home)))
+                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd)))
             if not read_state(job):
                 self.launch(job)
         elif not job.is_dir():

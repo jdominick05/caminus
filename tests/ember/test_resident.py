@@ -3525,6 +3525,33 @@ for line in sys.stdin:
         out=t.call(sid,dict(command='printf "%s" "$WORKSPACE"',yield_ms=3000))
         self.assertEqual(out['output'],str(self.home))
 
+    def test_the_gate_runs_with_the_terminal_environment(self):
+        # a real gate `cd "$WORKSPACE" && adb devices | grep -q -w device && ...` exited 0 in the terminal and failed as
+        # the gate: the gate had the daemon's environment, with no $WORKSPACE (the agent then hard-coded the path)
+        from caminus.ember.resident import judge
+        (self.home/'sub').mkdir(exist_ok=True);(self.home/'sub'/'marker').write_text('x')
+        gate='cd "$WORKSPACE/sub" && test -f marker && test -z "$CAMINUS_AGENT_API_KEY"'
+        with unittest.mock.patch.dict(os.environ,{'CAMINUS_AGENT_API_KEY':'secret'}):
+            os.environ.pop('WORKSPACE',None)
+            t=Terminal(self.home);sid=uuid.uuid4().hex
+            out=t.call(sid,dict(command=gate+'; echo "rc=$?"',yield_ms=5000))
+            text=out['output']
+            for _ in range(50):
+                if not out['running']:break
+                out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=200));text+=out['output']
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertIn('rc=0',text,'the terminal passes')
+        self.assertTrue(ok,'the gate passes where the terminal does (no model key either): '+msg)
+        # a variable unset even there is named in the result, not left to fail silently; set and assigned ones are not
+        gate=('X_MINE=1; test -n "$X_MINE" && test -d "${WORKSPACE}" && awk \'{print $NF}\' /dev/null && '
+              'cd "$NOT_SET_FOR_GATE/sub"')
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop('NOT_SET_FOR_GATE',None)
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertFalse(ok,msg)
+        self.assertIn("$NOT_SET_FOR_GATE is not set in the gate's environment",msg)
+        for name in ('X_MINE','WORKSPACE','NF'):self.assertNotIn('$'+name+' is not set',msg)
+
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog
         data=dict(data=[dict(id='mistral-medium-2508',aliases=['mistral-medium-latest'],max_context_length=131072,

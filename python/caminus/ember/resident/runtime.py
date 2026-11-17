@@ -196,7 +196,7 @@ TOOLS = [
          dict(action={'type':'string','enum':['open_pr','comment','approve_ci']}, repo={'type':'string'}, head={'type':'string'},
               base={'type':'string'}, title={'type':'string'}, body={'type':'string'}, number={'type':'integer'},
               run_id={'type':'integer'}, reason={'type':'string'}), ('action','repo','reason')),
-    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run in your home) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
+    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run like a terminal command: in your workspace, with the same environment) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),

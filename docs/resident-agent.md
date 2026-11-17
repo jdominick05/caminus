@@ -158,8 +158,10 @@ is left named. `checkpoint` tars named paths before a destructive or
 milestone-crossing action and `rollback` puts them back.
 
 Before a graded goal completes, `finish` runs two checks. The **gate** is an
-optional shell command given to `define_done` (`gate`), run in the agent's home;
-a non-zero exit refuses the finish and its output becomes the next prompt. The
+optional shell command given to `define_done` (`gate`), run as a terminal command
+runs (in the agent's home, with the terminal's environment: `$WORKSPACE`, no model
+key); a non-zero exit refuses the finish and its output becomes the next prompt,
+naming any variable the gate uses that is not set there. The
 **judge** is a fresh model call with no tools that sees the goal, the done check,
 the human's steers and the recorded evidence, not the agent's reasoning, and
 answers met, not yet or wait. Not yet refuses the finish with what is missing;
