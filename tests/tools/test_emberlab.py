@@ -141,9 +141,8 @@ def gone(pid):
     if p is not None:
         return p.poll() is not None
     try:
-        os.kill(pid, 0)
-        return False
-    except ProcessLookupError:
+        return open(f'/proc/{pid}/stat').read().rsplit(')', 1)[1].split()[0] in 'ZX'
+    except OSError:
         return True
 
 
@@ -158,6 +157,10 @@ jobs = {stubborn: (spawn(IGNORE_TERM, str(stubborn)), spawn(SLEEP, env=command_e
 for job, (worker, cmd) in jobs.items():
     job.mkdir(parents=True)
     (job / 'state.json').write_text(json.dumps(dict(phase='running', worker=worker, pid=cmd)))
+# and one real terminal job, started the way the resident starts it (its own worker, command and paths)
+sys.path.insert(0, str(ROOT / 'python'))
+from caminus.ember.resident.terminal import Terminal  # noqa: E402
+real = Terminal(home).call('d' * 32, dict(command='sleep 120', yield_ms=500))
 daemon = json.loads((home / 'heartbeat.json').read_text())['pid']
 time.sleep(0.5)
 t0 = time.monotonic()
@@ -165,7 +168,8 @@ c = lab('close', 'd', '--out', str(so), timeout=120)
 took = time.monotonic() - t0
 time.sleep(0.5)
 after = c.stdout.split('had to SIGKILL')[-1]
-check(c.returncode == 0 and all(gone(p) for p in [daemon, *jobs[stubborn], *jobs[polite]]),
+check(real.get('running') and c.returncode == 0
+      and all(gone(p) for p in [daemon, *jobs[stubborn], *jobs[polite], real['worker'], real['pid']]),
       f'session: close ends the daemon, the job workers and their commands ({c.stdout.strip()} {c.stderr[-300:]})')
 check('had to SIGKILL' in c.stdout and f'worker {"a" * 8} ({jobs[stubborn][0]})' in after
       and f'worker {"b" * 8}' not in after and took < 60,
@@ -182,6 +186,11 @@ for p in procs:                 # the test's own fake processes: the decoy, and 
     if p.poll() is None:
         p.kill()
     p.wait()
+for pid in (real.get('worker'), real.get('pid')):
+    try:
+        os.killpg(pid, 9) if pid and not gone(pid) else None
+    except OSError:
+        pass
 
 # ---- tui
 if shutil.which('tmux'):
