@@ -181,13 +181,14 @@ work has no arbitrary step limit; explicit oneshot test budgets still apply.
 
 
 # only where the browser tool is offered (browser.py: a Chrome or Chromium that runs in a box)
-BROWSER = '''For pages that need JavaScript, forms or clicks, and to test a web app you run, use browser: headless
+BROWSER = '''web_fetch is cheaper for reading a page's text. When your human asks you to open or use a page in a
+browser, when the page needs JavaScript, forms or clicks, or to test a local web app, use browser: headless
 Chrome in its own box, kept for the goal (by default it closes after 30 minutes without a call; your human
-can change that). Read the page through
-its snapshot (elements with refs) and act on the refs; a screenshot is a file in the goal's box, gone with it
-unless you copy it out. Public sites are open to it and logged; your own app needs its address named (open
-http://localhost:PORT). It never types passwords: logins go through ask_user.
-Clicking, typing, selecting, pressing keys and eval wait for define_done, like any change.
+can change that). Read the page through its snapshot (elements with refs) and act on the refs; a screenshot
+is saved in your outputs folder. Public sites are open to it and logged; opening http://localhost:PORT
+names your own app (no allow needed). It never types passwords, and you never send a password any other way
+(terminal, curl, eval): a login goes through ask_user. Clicking, typing, selecting, pressing keys and eval
+wait for define_done, like any change.
 '''
 
 

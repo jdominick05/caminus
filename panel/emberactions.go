@@ -194,7 +194,9 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		}
 	case "browser":
 		subject = browserSubject(args, result)
-		if state == "ok" {
+		if skipped := rs("skipped"); skipped != "" { // an earlier call of the turn was refused: this one never ran
+			meta, state = "skipped: "+firstLine(skipped), "warn"
+		} else if state == "ok" {
 			meta = browserMeta(result, home, cwd)
 			preview = browserExcerpt(result, 3)
 		}

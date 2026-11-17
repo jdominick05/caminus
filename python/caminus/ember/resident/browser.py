@@ -3,7 +3,8 @@ DevTools protocol on --remote-debugging-pipe (fd 3 in, fd 4 out, NUL-separated J
 
 One browser per goal, kept across calls (tabs, cookies, the page), closed when the goal ends with its box. It is a
 box job (sandbox.py, terminal.py's worker): bubblewrap is the sandbox, so Chrome's own is off; its profile and
-downloads live in the goal's /box and go with it; its network is the box proxy's web mode (any public address,
+downloads live in the goal's /box (the downloads are copied to outputs/GOAL/ when it ends, the screenshots are written
+there); its network is the box proxy's web mode (any public address,
 logged; a LAN, link-local or loopback address, or this machine, only when a call named that host:port). The worker
 runs a Driver thread that owns the pipe; the runtime hands it each action through the job's control/ and ack/
 files, keyed by the action's id, so a recovered action never clicks twice.
@@ -22,6 +23,7 @@ from pathlib import Path
 import queue
 import shlex
 import shutil
+import stat
 import threading
 import time
 import uuid
@@ -35,6 +37,7 @@ NAMES = tuple(n for n in discovery.COMMANDS['web'] if 'chrom' in n)    # (the na
 ACTIONS = ('open', 'snapshot', 'click', 'type', 'select', 'press', 'scroll', 'back', 'eval', 'screenshot', 'console',
            'close')
 ACTS = ('click', 'type', 'select', 'press', 'eval')     # act on the page: after define_done, outside plan mode
+CHANGES = ACTS + ('open', 'back')    # change the page: skipped for the rest of a turn after a refused browser call
 REPEATS = ('snapshot', 'scroll', 'press', 'back', 'console', 'screenshot')   # repeated on purpose (the loop guard)
 VIEWS = ('open', 'snapshot', 'click', 'type', 'select', 'press', 'scroll', 'back')   # return the page's new snapshot
 NEEDS = dict(open=('url',), click=('ref',), type=('ref', 'text'), select=('ref', 'value'), press=('key',), eval=('js',))
@@ -45,6 +48,7 @@ IDLE_CLOSE = 1800         # the default seconds without a call before the browse
                           # sandbox.browser_idle_s; 0: never, it stays open until the goal ends). No time limit
                           # otherwise: a paused goal keeps its box, but by default not a Chrome running for nobody
 SNAPSHOT_LINES, SNAPSHOT_CHARS = 250, 16000
+KEEP_MB = 512             # downloads copied out of the box at goal end, at most
 PROFILE = '/box/browser'
 FLAGS = ('--headless=new', '--no-sandbox', '--remote-debugging-pipe', f'--user-data-dir={PROFILE}/profile',
          '--proxy-server=http://127.0.0.1:%d' % sandbox.PROXY_PORT,
@@ -65,8 +69,11 @@ PREFS = dict(net=dict(network_prediction_options=2), search=dict(suggest_enabled
              profile=dict(password_manager_enabled=False),
              default_search_provider_data=dict(template_url_data=dict(
                  keyword='duckduckgo.com', short_name='DuckDuckGo', url='https://duckduckgo.com/?q={searchTerms}')))
-PASSWORD = ('that is a password field: the browser never types passwords. A login goes through your human: ask_user '
-            'them to log in another way or to give you what the task needs (a token, a test account)')
+# (a rule, not a limit of the browser: a model offered to send the login with curl "around the browser's guard")
+PASSWORD = ('that is a password field: the browser never types passwords, and you never send a password any other way '
+            '(terminal, curl, eval, a script). A login goes through your human: ask_user how they want it done (they '
+            'log in themselves, or give you a token or a test account)')
+SHOT_NOTE = 'look at it with read if you can see images; otherwise it is for your human'
 PASSWORD_FN = ('function(){ const a = ((this.getAttribute && this.getAttribute("autocomplete")) || "").toLowerCase();'
                ' return this.tagName === "INPUT" && (this.type === "password" || /\\b(current|new)-password\\b/.test(a)); }')
 # the focused element, through shadow roots and same-origin frames; focus inside a frame it cannot read (another
@@ -154,6 +161,38 @@ def _check(args):
             raise ValueError('direction is up, down, left or right')
         if not 1 <= int(args.get('amount', 600)) <= 20000:
             raise ValueError('amount is 1 to 20000 pixels')
+
+
+def kept_dir(home, gid):
+    """The goal's folder under outputs/: its screenshots, and its downloads once the goal ends (the box goes)."""
+    return Path(home) / 'outputs' / gid
+
+
+def keep(home, gid):
+    """Before the goal's box is removed: copy what the browser downloaded into it to the goal's outputs folder.
+    Regular files only, never a link (code in the box could have left one to a file of the agent's), at most
+    KEEP_MB in all. Returns the files copied."""
+    src = sandbox.box_dir(home, gid) / 'downloads'
+    if src.is_symlink() or not src.is_dir():
+        return []
+    dst, left, out = kept_dir(home, gid) / 'downloads', KEEP_MB << 20, []
+    for p in sorted(src.iterdir()):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_size > left:
+            continue
+        dst.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, 'rb') as f, open(dst / p.name, 'wb') as g:
+                shutil.copyfileobj(f, g)
+        except OSError:
+            continue
+        left -= st.st_size
+        out.append(str(dst / p.name))
+    return out
 
 
 def idle_of(config):
@@ -379,6 +418,7 @@ class Driver:
 
     def __init__(self, job, req):
         self.job, self.box = Path(job), Path(req['box']['box'])
+        self.home, self.goal = Path(req['workspace']), req['box']['goal']
         self.idle = int(req['browser'].get('idle_s', IDLE_CLOSE))
         # Chrome reads fd 3 and writes fd 4; the child's ends are copied to 10 and up first, so placing them on 3
         # and 4 can't overwrite one with the other
@@ -471,7 +511,8 @@ class Driver:
             self.gone = True
         if method == 'Browser.downloadWillBegin':
             self.downloads[p.get('guid')] = name = str(p.get('suggestedFilename') or 'a file')[:120]
-            self.notes.append(f'downloading {name} to /box/downloads ({self.box}/downloads)')
+            self.notes.append(f'downloading {name} to {self.box}/downloads (kept in '
+                              f'{kept_dir(self.home, self.goal)}/downloads when the goal ends)')
             return
         if method == 'Browser.downloadProgress' and p.get('state') in ('completed', 'canceled'):
             self.notes.append(f"download {p['state']}: {self.downloads.get(p.get('guid'), 'a file')}")
@@ -690,33 +731,21 @@ class Driver:
 
     def a_screenshot(self, op):
         data = base64.b64decode(self.page('Page.captureScreenshot', dict(format='png'))['data'])
-        # written from outside the box into a folder that code in the box could have filled with links: opened by
-        # descriptor, never following a link, never overwriting
-        dfd = os.open(self.box, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
+        # into the goal's outputs folder, outside the box: it outlives the goal, and code in the box cannot reach it
+        folder = kept_dir(self.home, self.goal) / 'screenshots'
+        folder.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while True:
+            path = folder / f'shot-{n}.png'
             try:
-                os.mkdir('screenshots', 0o700, dir_fd=dfd)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                break
             except FileExistsError:
-                pass
-            sfd = os.open('screenshots', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
-            try:
-                n = 1
-                while True:
-                    name = f'shot-{n}.png'
-                    try:
-                        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=sfd)
-                        break
-                    except FileExistsError:
-                        n += 1
-                with os.fdopen(fd, 'wb') as f:
-                    f.write(data)
-            finally:
-                os.close(sfd)
-        finally:
-            os.close(dfd)
+                n += 1
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
         info = self.cdp.send('Target.getTargetInfo', dict(targetId=self.target))['targetInfo']
-        return dict(screenshot=str(self.box / 'screenshots' / name), in_box=f'/box/screenshots/{name}',
-                    title=info.get('title', ''), url=info.get('url', ''))
+        return dict(screenshot=str(path), title=info.get('title', ''), url=info.get('url', ''), note=SHOT_NOTE)
 
     def a_console(self, op):
         new = [m for n, m in self.console if n > self.console_seen]

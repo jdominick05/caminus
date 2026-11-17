@@ -990,7 +990,9 @@ class Resident(unittest.TestCase):
         self.assertIn('textbox "Name" [e2]',opened['snapshot']);self.assertIn('button "Send" [e5]',opened['snapshot'])
         self.assertIn('= "Ada"',typed['snapshot'],'the second call types into the page the first opened')
         self.assertEqual(clicked['title'],'Done');self.assertIn('who=Ada',clicked['url'])
-        self.assertTrue(shot['screenshot'].endswith('/screenshots/shot-1.png'),shot)
+        self.assertEqual(shot['screenshot'],str(self.home/'outputs'/out['id']/'screenshots'/'shot-1.png'),shot)
+        self.assertIn('read',shot['note'])
+        self.assertTrue(Path(shot['screenshot']).is_file(),'the screenshot outlives the goal and its box')
         self.assertEqual({o['session'] for o in (opened,typed,clicked,shot)},{opened['session']},'one browser for the goal')
         # every connection goes to the panel's card on the event; the model gets a count
         self.assertNotIn('_panel',opened);self.assertEqual(set(opened['network']),{'allowed'})
@@ -998,6 +1000,26 @@ class Resident(unittest.TestCase):
         self.assertEqual(len(ev[0]['panel']['connections']),opened['network']['allowed'])
         self.assertFalse((self.home/'boxes').exists() and any((self.home/'boxes').iterdir()),'the box ended with the goal')
         self.assertEqual(read_state(self.home/'jobs'/opened['session'])['phase'],'finished','the browser closed with it')
+
+    def test_a_refused_browser_call_skips_the_turns_later_page_changes(self):
+        # a password refused, and the click on Log in in the same turn sent an empty login (a Haiku smoke test)
+        chrome_skip(self)
+        two=dict(role='assistant',content='',tool_calls=[
+            dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name='browser',arguments=json.dumps(dict(action='type',ref='e4',text='hunter2')))),
+            dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name='browser',arguments=json.dumps(dict(action='click',ref='e5')))),
+            dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name='browser',arguments=json.dumps(dict(action='snapshot'))))])
+        self.replies(call('browser',dict(action='open',url=f'http://{site()}/')),two,
+                     call('browser',dict(action='click',ref='e5')),
+                     call('finish',dict(summary='Stopped at the login.')))
+        out=self.cmd('once',['--goal','Log in on the page.'],timeout=120)
+        self.assertEqual(out['state'],'completed')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='browser']
+        opened,typed,clicked,looked,again=results
+        self.assertIn('password field',typed['error']);self.assertIn('curl',typed['error'])
+        self.assertTrue(clicked['skipped'].startswith('an earlier browser call this turn was refused'),clicked)
+        self.assertNotIn('error',clicked,'a skipped call is not a failure of its own')
+        self.assertEqual(looked['title'],'Fixture','a look still runs; the form was not sent')
+        self.assertEqual(again['title'],'Done','the next turn acts again')
 
     def test_browser_looks_before_define_done_and_acts_after(self):
         chrome_skip(self)
@@ -5278,7 +5300,10 @@ class Browser(unittest.TestCase):
         end=time.monotonic()+10
         while not got.exists() and time.monotonic()<end:time.sleep(.1)
         self.assertEqual(got.read_text(),'a downloaded file\n')
-        self.assertTrue(any('downloading report.txt to /box/downloads' in n for n in r.get('notes',[])),r)
+        self.assertTrue(any('downloading report.txt to' in n for n in r.get('notes',[])),r)
+        self.assertTrue(self.sb.end(self.home,'g1'))
+        self.assertEqual((self.home/'outputs'/'g1'/'downloads'/'report.txt').read_text(),'a downloaded file\n',
+                         'the goal\'s end keeps its downloads in its outputs folder')
 
     def test_a_browser_nobody_calls_closes_itself(self):
         from caminus.ember.resident.terminal import read_state

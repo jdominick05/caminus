@@ -653,6 +653,8 @@ def end(home, gid, store=None):
             store.event('sandbox_connections', dict(session=job.name, connections=late), gid)
     d = box_dir(home, gid)
     if d.is_dir():
+        from .browser import keep
+        keep(home, gid)                 # (what the browser downloaded outlives the box, in the goal's outputs)
         _rmtree(d)
     return not d.exists()
 

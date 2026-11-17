@@ -190,6 +190,11 @@ func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
 	if !strings.Contains(refused, "password field") {
 		t.Fatalf("a refusal shows its reason:\n%s", refused)
 	}
+	skipped := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e6"},
+		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", ""))
+	if !strings.Contains(skipped, "click e6") || !strings.Contains(skipped, "skipped: an earlier browser call this turn was refused") {
+		t.Fatalf("a skipped call says it never ran:\n%s", skipped)
+	}
 
 	// expanded: the whole snapshot and every connection (the event's panel field, not the model's result)
 	m := chatFixture(t)
