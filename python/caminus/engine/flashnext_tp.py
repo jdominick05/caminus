@@ -400,6 +400,9 @@ class FlashNextTP(FlashNextK3):
             dict(hc_attn_up=(16, 16), hc_ffn_up=(16, 16), output_hc_up=(16, 16), router=(4, 4), attn_qkv=(16, 16),
                  ssm_out=(8, 8), attn_output=(8, 8), down_shexp=(64, 64), hc_down=(4, 4))
         E, S, res, pos, ple_emb, epoch, slots = [], [], [], [], [], [], []
+        # the Coder's trunk / QSA modules run its dense Q4_K, Q5_K and IQ4_XS matrices on Caminus's own tiles (k3.GSQ_OWN_MODULES:
+        # OP_OWN_MV on the producers' fp16 copies); REAP-308's modules and the MTP pair keep the GG matvec
+        own16 = k3.module_for(self.module, Tn) in k3.GSQ_OWN_MODULES
         # the per-pass inputs, one contiguous block per card (one H2D copy per pass from one pinned host block, the same
         # bytes for both cards): 64 words of scalars (the engine's params [16], pos at word 16, epoch at word 17), then the
         # residual [Tn * HC, D], then the PLE input [Tn, D]; every piece 256-byte aligned. The host rewrites the whole block
@@ -434,6 +437,9 @@ class FlashNextTP(FlashNextK3):
                               pq=q8b(Tn * D), pkey=B(Tn * HC, D), pval=B(Tn * D), pkn=B(Tn * HC, D), pqn=B(Tn * HC, D),
                               pgated=B(Tn * HC, D), pg=B(Tn * HC), pnrm=B(Tn * HC, D), pco=B(Tn * HC * D),
                               one_id=torch.zeros(Tn, dtype=torch.int32, device='cuda'), one_w=torch.ones(Tn, device='cuda')))
+                if own16:   # the fp16 copies OP_OWN_MV reads (its producers store them beside mixed / fin / gat)
+                    S[c].update(mixed16=B(Tn * D, dt=torch.float16), fin16=B(Tn * 384 * kc[c], dt=torch.float16),
+                                gat16=B(Tn * nh * hd, dt=torch.float16))
             slots.append(Slots(self.devs[c], self.n_ex, Tn * D))
         # the XT (card 1) direction of the one-token exchanges by pull: card 1 stores its partial into its own uncached slot
         # (local, ~0.5 us cheaper to complete than the PCIe push at x4) and sends only the flag; card 0, which waits for
@@ -526,9 +532,16 @@ class FlashNextTP(FlashNextK3):
         assert all(r >= 1 for _, v in gg_rpt for r in v), 'K3_GG_RPT / GG_RPT: rows per task >= 1'
         ggr = lambda name, rpt, c: next((v[c] for k, v in gg_rpt if k.search(name)), rpt)
 
-        def mv(c, W, x, out, dep, rpt=16, silu_scale=None, xf=None):
+        def mv(c, W, x, out, dep, rpt=16, silu_scale=None, xf=None, x16=None):
             """W . x -> out. x: the GG formats' activation (q8_1 blocks, or fp32 quantized per workgroup); xf: the fp32
-            activation [T, cols] a BF16 W reads instead (OP_BF16_MV; llama.cpp's mul_mat_vec_f reads fp32)"""
+            activation [T, cols] a BF16 W reads instead (OP_BF16_MV; llama.cpp's mul_mat_vec_f reads fp32); x16: its fp16
+            copy [T, cols], which the own tiles read (own16: k3.OWN_GSQ_1RT formats, OP_OWN_MV)"""
+            if own16 and W['fmt'] in k3.OWN_GSQ_1RT:
+                assert x16 is not None and silu_scale is None, f"{W['name']}: {W['fmt']} weights at a call site without an fp16 activation"
+                rpt = ggr(W['name'], rpt, c)
+                si = E[c].own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['cols'], x16, out, rows_per_task=rpt, dep=dep, tokens=Tn,
+                                         x_stride=W['cols'], out_stride=W['rows'])
+                self.seg_names[c][si] = W['name']; return si
             if W['fmt'] == 'BF16':
                 assert xf is not None, f"{W['name']}: BF16 weights at a call site without an fp32 activation"
                 rpt = bfr(W['name'], rpt, c)
@@ -579,7 +592,7 @@ class FlashNextTP(FlashNextK3):
                     elif Tn == 1: a = mv(c, up[c], s['lo'], s['gate'].reshape(-1), a, RPT[prefix.split('.')[-1] + '_up'][c], silu_scale=1.0 / HC)
                     else:   # (LDS quantization of all T tokens' silu(lo / HC) per workgroup measured slower: T=4 pass 18.6 -> 20.4 ms)
                         a = E[c].gg_q8_1(s['lo'], s['loq'], dep=a, silu_scale=1.0 / HC); a = mv(c, up[c], s['loq'], s['gate'].reshape(-1), a, 16)
-                    M.append(E[c].hc_mean(s['xn'], s['gate'], s['mixed'], dep=a, q8=s['mq'])); IJ.append(ij)
+                    M.append(E[c].hc_mean(s['xn'], s['gate'], s['mixed'], dep=a, q8=s['mq'], x16=s.get('mixed16'))); IJ.append(ij)
             return M, IJ
 
         # the tapes (spec-qsa.md S6, the two-tape fix): one or two per card over ONE set of buffers (the stage block with
@@ -642,15 +655,15 @@ class FlashNextTP(FlashNextK3):
                             gblk = st_((c, il, 'gdn'), lambda: torch.zeros(k3.gdn_block_size(H, 128, kc[c], Tn), device='cuda'))
                             a_ = mv(c, al[c], s['mq'], s['al'], M[c], xf=s['mixed']); b_ = mv(c, be[c], s['mq'], s['be'], M[c], xf=s['mixed'])
                             gt = E[c].also(E[c].gdn_gates(s['al'], s['be'], dt[c], sa[c], s['gates'], dep=a_), b_)
-                            q_ = mv(c, qkv[c], s['mq'], s['qkv'], M[c], RPT['attn_qkv'][c])
+                            q_ = mv(c, qkv[c], s['mq'], s['qkv'], M[c], RPT['attn_qkv'][c], x16=s.get('mixed16'))
                             c_ = E[c].gdn_conv(s['qkv'], conv_w[c], conv_st, s['conv'], cxp, dep=q_)
                             l_ = E[c].gdn_l2(s['conv'], s['qk'], 2 * kc[c], 128, EPS, x_stride=CH[c], dep=c_)
-                            z_ = mv(c, z[c], s['mq'], s['z'], M[c])
-                            nv = Tn * 128 * H; fqv = s['fq'][:nv // 32 * 36]
+                            z_ = mv(c, z[c], s['mq'], s['z'], M[c], x16=s.get('mixed16'))
+                            nv = Tn * 128 * H; fqv = s['fq'][:nv // 32 * 36]; f16 = s['fin16'][:nv] if own16 else None
                             st = E[c].also(E[c].gdn_step(s['qk'], s['conv'][256 * kc[c]:], s['gates'], gblk, s['att'][:nv], H, 128, kc[c], CH[c], dep=l_), gt)
                             E[c].gdn_save(s['qk'], s['conv'][256 * kc[c]:], s['gates'], gblk, H, 128, kc[c], CH[c], dep=st)   # off the critical path
-                            nm = E[c].also(E[c].gdn_norm(s['att'][:nv], nw[c], s['z'], s['fin'], H, 128, EPS, dep=st, q8=fqv), z_)
-                            BLK.append(mv(c, so[c], fqv, s['blkp'], nm, RPT['ssm_out'][c]))
+                            nm = E[c].also(E[c].gdn_norm(s['att'][:nv], nw[c], s['z'], s['fin'], H, 128, EPS, dep=st, q8=fqv, x16=f16), z_)
+                            BLK.append(mv(c, so[c], fqv, s['blkp'], nm, RPT['ssm_out'][c], x16=f16))
                 else:                                            # attention, split by kv head
                     aq = self._rows(f'{p}.attn_q.weight', [[(nh * 2 * hd * c, nh * 2 * hd * (c + 1))] for c in (0, 1)])
                     ak = self._rows(f'{p}.attn_k.weight', [[(hd * c, hd * (c + 1))] for c in (0, 1)])
@@ -673,7 +686,7 @@ class FlashNextTP(FlashNextK3):
                                                   (lambda: torch.zeros(self.max_ctx * pb, dtype=torch.uint8, device='cuda')))
                             # claim order: the short k / v chain (k, v, k norm + rope, hadamards, kv append) before q's 384 tasks,
                             # so its one-task glue segments are claimed while q's rows still stream
-                            k_ = mv(c, ak[c], s['mq'], s['kr'], M[c]); v_ = mv(c, av[c], s['mq'], s['vr'], M[c])
+                            k_ = mv(c, ak[c], s['mq'], s['kr'], M[c], x16=s.get('mixed16')); v_ = mv(c, av[c], s['mq'], s['vr'], M[c], x16=s.get('mixed16'))
                             kd = E[c].qk_nr(s['kr'], hd, nkv, hd, kn_[c], pos[c], s['ko'], self.nrot, self.theta_scale, EPS, dep=k_)
                             vd = v_
                             if self.q8: kd = E[c].hadamard(s['ko'], hd, dep=kd); vd = E[c].hadamard(s['vr'], 64, dep=vd)
@@ -692,7 +705,7 @@ class FlashNextTP(FlashNextK3):
                                 ia = E[c].idx_append(s['ikr'], raw, pool, pos[c], ikn[c], self.theta_scale, EPS, n_rot=self.nrot, dep=ik)
                                 iq = mv(c, iqw[c], None, s['iq'], M[c], 4, xf=s['mixed'])
                                 iqd = E[c].qk_nr(s['iq'], idd, idh, idd, iqn[c], pos[c], iqo_, self.nrot, self.theta_scale, EPS, dep=iq)
-                            q_ = mv(c, aq[c], s['mq'], s['qf'], M[c])
+                            q_ = mv(c, aq[c], s['mq'], s['qf'], M[c], x16=s.get('mixed16'))
                             if idxraw_t:   # IDXRAW[pos] = q8_0(k_proj(mixed)): the bytes IDX_APPEND writes (split rows at T > 1)
                                 if 'ikr' not in s: s['ikr'] = B(Tn * idd)
                                 if Tn > 1 and 'ikb' not in s: s['ikb'] = B(Tn * idd // 2)
@@ -716,9 +729,9 @@ class FlashNextTP(FlashNextK3):
                             else:
                                 a_ = E[c].also(E[c].attn_dec(s['qo'], cache, pos[c], s['att'][:na], nh, nkv, hd, 1.0 / np.sqrt(hd), q8=self.q8, dep=ap, **akw(c)), qd)
                             if self.q8: a_ = E[c].hadamard(s['att'][:na], 64, rows_per_task=4, dep=a_)
-                            fqa = s['fq'][:na // 32 * 36]
-                            a_ = E[c].gate_mul(s['att'][:na], s['qf'], 2 * hd, hd, s['gat'], hd, dep=a_, q8=fqa)
-                            BLK.append(mv(c, ao[c], fqa, s['blkp'], a_, RPT['attn_output'][c]))
+                            fqa = s['fq'][:na // 32 * 36]; g16 = s.get('gat16')
+                            a_ = E[c].gate_mul(s['att'][:na], s['qf'], 2 * hd, hd, s['gat'], hd, dep=a_, q8=fqa, x16=g16)
+                            BLK.append(mv(c, ao[c], fqa, s['blkp'], a_, RPT['attn_output'][c], x16=g16))
                     ai += 1
                 XB = []
                 for c in (0, 1):
@@ -757,7 +770,7 @@ class FlashNextTP(FlashNextK3):
                             s_ = E[c].gg_q8_1(s['shh'], s['shq'], dep=s_)
                         else:   # gate and up each in its own format: two matvecs, then shq = q8_1(silu(gate) * up)
                             if 'shu' not in s: s['shu'] = torch.zeros(Tn * ffc[c], device='cuda')
-                            sg_ = mv(c, sgu[c], s['mq'], s['shh'], M[c]); su_ = mv(c, suu[c], s['mq'], s['shu'], M[c])
+                            sg_ = mv(c, sgu[c], s['mq'], s['shh'], M[c], x16=s.get('mixed16')); su_ = mv(c, suu[c], s['mq'], s['shu'], M[c], x16=s.get('mixed16'))
                             s_ = E[c].also(E[c].gg_q8_1(s['shh'], s['shq'], dep=sg_, mul=s['shu']), su_)
                         s_ = E[c].also(mv(c, sdd[c], s['shq'], s['shx'], s_, RPT['down_shexp'][c]), sl)
                         r_ = E[c].gg_moe_gu(g[c]['w'], u[c]['w'], g[c]['fmt'], g[c]['slab'], ffc[c], D, s['ids'], s['mq'], s['h'], rows_per_task=8, dep=r_, up_fmt=u[c]['fmt'])

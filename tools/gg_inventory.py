@@ -22,13 +22,17 @@ MV_NAMES = ('attn_qkv', 'attn_gate', 'ssm_out', 'ssm_alpha', 'ssm_beta', 'attn_q
 ROUTER_NAMES = ('ffn_gate_inp', 'ffn_gate_inp_shexp')
 
 
-def mv_kind(fmt):
+def mv_kind(fmt, caps=frozenset()):
+    """a dense matrix's (op, format) pair: OP_OWN_MV's own tile where the module has it (k3.OWN_GSQ_1RT on the Coder's
+    trunk / QSA modules), else the GG matvec"""
+    if ('OWN_MV', f'{fmt}/a16_1rt') in caps: return ('OWN_MV', f'{fmt}/a16_1rt')
     return ('BF16_MV', 'BF16') if fmt == 'BF16' else ('F32_MV', 'F32') if fmt == 'F32' else ('MV', fmt)
 
 
 def header_inventory(path, caps):
     """{(op, fmt): sorted layer list ('out' = the head)}, host tensors {name: fmt}, errors"""
     rd = GGUFReader(path, 'r'); T = {t.name: t.tensor_type.name for t in rd.tensors}
+    mv_kind_ = lambda fm: mv_kind(fm, caps)
     f = {x.name: x for x in rd.fields.values()}
     nl = int(f['qwen4exp.block_count'].contents())
     inv, errs = defaultdict(set), []
@@ -36,19 +40,19 @@ def header_inventory(path, caps):
     for il in range(nl):
         p = f'blk.{il}.'
         for n in MV_NAMES:
-            if p + n + '.weight' in T: add(mv_kind(T[p + n + '.weight']), il)
+            if p + n + '.weight' in T: add(mv_kind_(T[p + n + '.weight']), il)
         for n in ROUTER_NAMES:
             fm = T[p + n + '.weight']
             if fm not in ('F32', 'BF16'): errs.append(f'{p}{n}: {fm} (router / shared gate: F32 or BF16 only)')
-            add(mv_kind(fm), il)
+            add(mv_kind_(fm), il)
         g, u = T[p + 'ffn_gate_shexp.weight'], T[p + 'ffn_up_shexp.weight']
         if g == u and ('GU_DENSE', g) in caps: add(('GU_DENSE', g), il)
-        else: add(mv_kind(g), il); add(mv_kind(u), il); add(('Q8_1', 'SWIGLU'), il)
+        else: add(mv_kind_(g), il); add(mv_kind_(u), il); add(('Q8_1', 'SWIGLU'), il)
         ge, ue = T[p + 'ffn_gate_exps.weight'], T[p + 'ffn_up_exps.weight']
         if ge != ue: errs.append(f'{p}ffn_gate/up_exps: {ge} / {ue} (one format decodes both)')
         add(('MOE_GU', ge), il); add(('MOE_DOWN', T[p + 'ffn_down_exps.weight']), il)
     for n in ('output_hc_down', 'output_hc_up', 'output'):
-        add(mv_kind(T[n + '.weight']), 'out')
+        add(mv_kind_(T[n + '.weight']), 'out')
     host = {n: T[n] for n in ('token_embd.weight',) if n in T}
     # the other shards (split GGUF): only the PLE table is used, on the host
     from caminus.engine.flashnext import split_tensors
@@ -109,7 +113,8 @@ def main():
         m = FlashNextTP(path, module=module, local_only=True, tape_only=True, ntok=ntok)
         tl = time.time() - t0
         used = [torch.cuda.memory_allocated(d) / 2**30 for d in (0, 1)]
-        tinv = [m.engines[c].inventory() for c in (0, 1)]
+        one = lambda k: (k[0], k[1].replace('/a16_1rt_mt', '/a16_1rt'))   # (an own tile's T-token form: the header's pair)
+        tinv = [{one(k): v for k, v in m.engines[c].inventory().items()} for c in (0, 1)]
         tk = set(tinv[0]) | set(tinv[1])
         glue = {('Q8_1', 'PLAIN'), ('Q8_1', 'SILU')}   # generic glue (every module has it): not in the header map
         same = tk - glue == set(inv) - glue and set(tinv[0]) == set(tinv[1])

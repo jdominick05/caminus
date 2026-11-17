@@ -128,6 +128,11 @@ CLAUDE.md imports this file.
   check their inclusion; finding them in a checkout's build directory does not prove that a wheel ships them.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
+- The Coder's trunk and QSA modules (`k3.GSQ_OWN_MODULES`, `K3_GSQ_OWN` in `kernels/k3_gguf_gsq.hip`) run its dense Q4_K,
+  Q5_K and IQ4_XS matrices on Caminus's own one-round-trip tiles (OP_OWN_MV: GGUF blocks read in place, the fp16 input
+  stored by its producer beside the q8_1 copy: hc_mean / gdn_norm / gate_mul `x16=`); its other pairs, the MTP pair, the
+  DFlash drafter and the prefill's MMQ keep llama.cpp's math, so the prefill rows of those three formats are no longer
+  bitwise the decode's (the prefill's gates against K3's decode are KLD bars: `tests/prefill/test_prefill_s6.py` g4a).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
   count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename. Qwen3-30B-A3B's is
   `k3_q3m_lean_kvq8` (+ `q3m_prefill_kvq8` for the prefill's rows and attention; `Q3MoEOne(q8=True)`, served by

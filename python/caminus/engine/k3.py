@@ -204,9 +204,19 @@ CAPS_REAP = frozenset({(op, f) for op in ('MV', 'MOE_GU', 'MOE_DOWN', 'GU_DENSE'
 CAPS_GSQ = frozenset({('MV', f) for f in ('Q4_K', 'Q5_K', 'Q6_K', 'IQ4_XS', 'IQ4_NL', 'Q8_0')} |
                      {('MOE_GU', f) for f in ('IQ2_S', 'IQ3_XXS', 'IQ3_S', 'IQ4_XS')} | {('MOE_DOWN', f) for f in ('IQ4_NL', 'Q2_0')} |
                      {('BF16_MV', 'BF16')} | _Q8_1)
+# the Coder's trunk and QSA modules (K3_GSQ_OWN, kernels/k3_gguf_ops.h gsq_own_mv): the dense Q4_K, Q5_K and IQ4_XS matrices
+# on Caminus's own one-round-trip tiles (OP_OWN_MV, GGUF blocks read in place, the fp16 input from its producer's copy:
+# hc_mean / gdn_norm / gate_mul x16=) instead of the GG matvec; the _mt modules also in their T-token forms (tokens = T <= 4).
+# The MTP pair (MTP_MODULES) keeps CAPS_GSQ (its code object unchanged)
+GSQ_OWN_MT = ('k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace', 'k3_gguf_gsq_qsa_mt')
+GSQ_OWN_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_qsa') + GSQ_OWN_MT
+OWN_GSQ_1RT = ('Q4_K', 'Q5_K', 'IQ4_XS')
+CAPS_GSQ_OWN = (CAPS_GSQ - {('MV', f) for f in OWN_GSQ_1RT}) | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_GSQ_1RT}
+CAPS_GSQ_OWN_MT = CAPS_GSQ_OWN | {('OWN_MV', f'{f}/a16_1rt_mt') for f in OWN_GSQ_1RT}
 MODULE_CAPS = {m: CAPS_REAP for m in ('k3_gguf', 'k3_gguf_trace', 'k3_gguf_mt', 'k3_gguf_mt_trace')}
 MODULE_CAPS.update({m: CAPS_REAP | {('Q8_1', 'SWIGLU')} for m in ('k3_gguf_swiglu', 'k3_gguf_mt_swiglu')})
-MODULE_CAPS.update({m: CAPS_GSQ for m in ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace')})
+MODULE_CAPS.update({m: CAPS_GSQ_OWN_MT if m in GSQ_OWN_MT else CAPS_GSQ_OWN
+                    for m in ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace')})
 # the MTP block's module pair (kernels/k3_gguf_gsq_mtp*.hip, python/caminus/decode/mtp.py): the Coder's formats, the F32 router of the
 # sidecar (op_f32_mv is compiled into every GGUF module) and OP_BF16_MV's fp32 swiglu stage (work 2, bf16_mv(swiglu_mul=))
 MTP_MODULES = ('k3_gguf_gsq_mtp', 'k3_gguf_gsq_mtp_mt')
@@ -222,7 +232,8 @@ DRAFT_MODULES = ('k3_gguf_draft', 'k3_gguf_draft_trace')
 DRAFT_OPS = {OP_NOP, OP_XCHG, OP_GG_Q8_1, OP_GG_MV, OP_RMS_MUL, OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC} | set(DF_OPS)
 MODULE_CAPS.update({m: frozenset({('MV', 'Q6_K'), ('MV', 'Q8_0'), ('Q8_1', 'PERM')} | _Q8_1 |
                                  {('DF', n) for n in DF_OPS.values()}) for m in DRAFT_MODULES})
-MODULE_CAPS.update({m: CAPS_GSQ | {('QSA', n) for n in QSA_OPS.values()} for m in QSA_MODULES})
+MODULE_CAPS.update({m: (CAPS_GSQ_OWN_MT if m in GSQ_OWN_MT else CAPS_GSQ_OWN) | {('QSA', n) for n in QSA_OPS.values()}
+                    for m in QSA_MODULES})
 # qwen3next (kernels/k3_gguf_q3n.hip's K3_FMTS_*): Q6_K / IQ3_S matvecs, IQ2_S gate / up, IQ3_S down, the F32 router and
 # shared-expert gate, the q8_1 glue with SWIGLU (the shared expert as two MVs)
 CAPS_Q3N = frozenset({('MV', f) for f in ('Q6_K', 'IQ3_S')} | {('MOE_GU', 'IQ2_S')} | {('MOE_DOWN', 'IQ3_S')} | {('F32_MV', 'F32')} | _Q8_1)
@@ -784,13 +795,18 @@ class Engine:
           union (ids, at most 32 slots): slots with the same id share one read of the expert's rows (the same bits).
           The row-scale modules (Q3M_RS_MODULES) only, fmt RS4 / RS2: w (and up) are engine.own_layout.rs_planes' codes,
           scales its fp32 row scales on the device: [total_rows], or with up [2 * total_rows] (w's, then up's)."""
-        if self.T != 1 and not (self.module in Q35V_MODULES and tokens == self.T) and not (self.module in Q35M_ALL and tokens == 1):
-            raise ValueError(f'own_matvec_1rt: T = 1 (on {Q35V_MODULES}: tokens = T; on {Q35M_ALL} also 1; T {self.T}, tokens {tokens})')
+        gsq = self.module in GSQ_OWN_MODULES
+        if gsq and (fmt not in OWN_GSQ_1RT or ids is not None or up is not None or scales is not None or x_per_slot or x_per_token
+                    or union or tokens != self.T or (tokens > 1 and self.module not in GSQ_OWN_MT)):
+            raise ValueError(f'own_matvec_1rt: module {self.module} runs {OWN_GSQ_1RT}, one matrix, no ids, tokens = T '
+                             f'(T > 1 on {GSQ_OWN_MT}; got {fmt}, tokens {tokens}, T {self.T})')
+        if self.T != 1 and not (self.module in Q35V_MODULES + GSQ_OWN_MT and tokens == self.T) and not (self.module in Q35M_ALL and tokens == 1):
+            raise ValueError(f'own_matvec_1rt: T = 1 (on {Q35V_MODULES + GSQ_OWN_MT}: tokens = T; on {Q35M_ALL} also 1; T {self.T}, tokens {tokens})')
         mtp = self.module in Q35M_MODULES
         if mtp and fmt not in ('Q4_0', 'Q6_K'): raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} (Q4_0, Q6_K)')
         if not mtp and fmt == 'Q4_0': raise ValueError(f'own_matvec_1rt: Q4_0 on {self.module} (the drafter module {Q35M_MODULES} only)')
         if tokens != 1 or x_per_token or union:
-            if self.module not in Q3M_VER_MODULES + Q35V_MODULES or (self.module in Q35V_MODULES and (x_per_token or union)): raise ValueError(f'own_matvec_1rt: module {self.module} has no T-token forms ({Q3M_VER_MODULES})')
+            if self.module not in Q3M_VER_MODULES + Q35V_MODULES + GSQ_OWN_MT or (self.module in Q35V_MODULES and (x_per_token or union)): raise ValueError(f'own_matvec_1rt: module {self.module} has no T-token forms ({Q3M_VER_MODULES})')
             if not 1 <= tokens <= 15 or (tokens > 1 and (ids is not None or up is not None or x_per_token)):
                 raise ValueError(f'own_matvec_1rt: tokens {tokens} (1 .. 15; with ids or up: 1)')
             if x_per_token and (ids is None or x_per_slot or ids.numel() % 8): raise ValueError('own_matvec_1rt: x_per_token needs ids, 8 slots per token, no x_per_slot')
@@ -807,7 +823,7 @@ class Engine:
                      or (self.module in Q35TM_MODULES and fmt not in (('Q6_K', 'Q4_K') if self.module in Q35RM_MODULES else ('Q6_K',)))):   # (the MTP modules compile the Q6_K T-token tile only, the GSQ one also its Q4_K head's)
             raise ValueError(f'own_matvec_1rt: module {self.module} runs {q35_fmts}, one matrix, no ids, one token '
                              f'(T tokens on {Q35TV_MODULES + Q35TPV_MODULES}; got {fmt}, tokens {tokens})')
-        if not q35t and not mtp and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
+        if not q35t and not mtp and not gsq and fmt not in OWN_1RT_FMT and not (fmt in OWN_IQ_FMT and self.module in Q3M_IQ_MODULES) and not (rs and Q3M_RS_MODULES.get(self.module) == fmt):
             raise ValueError(f'own_matvec_1rt: {fmt} on {self.module} ({OWN_1RT_FMT}; {sorted(OWN_IQ_FMT)} on {Q3M_IQ_MODULES}; {Q3M_RS_MODULES})')
         if (scales is not None) != rs: raise ValueError(f'own_matvec_1rt: scales are the row-scale formats\' ({sorted(OWN_RS_FMT)}), and they need them (fmt {fmt})')
         if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:
@@ -971,12 +987,19 @@ class Engine:
                              team, wr if wr < R else 0, 0))
         return len(self.segs) - 1
 
-    def hc_mean(self, xn, gate, out, rows_per_task=256, dep=-1, team=-1, q8=None):
-        """out[i] = (1 / hc) sum_s xn[s, i] * sigmoid(gate[s, i]); xn, gate [hc, n]"""
+    def _x16(self, x16, n, what):
+        """the fp16 copy a producer stores beside its fp32 output (OP_OWN_MV's input on the Coder's modules): its address"""
+        if x16 is None: return None
+        if self.module not in GSQ_OWN_MODULES: raise ValueError(f'{what}: x16 on {self.module} (the Coder\'s modules {GSQ_OWN_MODULES})')
+        assert x16.dtype == torch.float16 and x16.is_cuda and x16.numel() >= n and x16.data_ptr() % 16 == 0, (what, x16.numel(), n)
+        self.keep.append(x16); return x16.data_ptr()
+
+    def hc_mean(self, xn, gate, out, rows_per_task=256, dep=-1, team=-1, q8=None, x16=None):
+        """out[i] = (1 / hc) sum_s xn[s, i] * sigmoid(gate[s, i]); xn, gate [hc, n]; x16: out's fp16 copy too"""
         n = xn.shape[-1]; hc = xn.numel() // n // self.T; N = self.T * n; self.keep += [xn, gate, out]
         assert n % rows_per_task == 0 or self.T == 1
         if q8 is not None: assert n % 32 == 0 and rows_per_task % 32 == 0; self.keep.append(q8)
-        self.segs.append(Seg(OP_HC_MEAN, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, gate.data_ptr(), None,
+        self.segs.append(Seg(OP_HC_MEAN, (N + rows_per_task - 1) // rows_per_task, dep, rows_per_task, gate.data_ptr(), self._x16(x16, N, 'hc_mean'),
                              xn.data_ptr(), None if q8 is None else q8.data_ptr(), out.data_ptr(), 1.0 / hc, N, hc, 1, 0, team,
                              n if self.T > 1 else 0, 0))
         return len(self.segs) - 1
@@ -1034,12 +1057,12 @@ class Engine:
         sg.aux = block.data_ptr(); self.segs.append(sg)
         return len(self.segs) - 1
 
-    def gdn_norm(self, o, w, z, out, H, S, eps, dep=-1, team=-1, q8=None):
-        """per head: rms_norm(o) * w * sigmoid(z)"""
+    def gdn_norm(self, o, w, z, out, H, S, eps, dep=-1, team=-1, q8=None, x16=None):
+        """per head: rms_norm(o) * w * sigmoid(z); x16: out's fp16 copy too"""
         self.keep += [o, w, z, out]; H = self.T * H
         if q8 is not None: assert S % 32 == 0; self.keep.append(q8)
         self.segs.append(Seg(OP_GDN_NORM, H, dep, 1, w.data_ptr(), z.data_ptr(), o.data_ptr(), None if q8 is None else q8.data_ptr(), out.data_ptr(), eps, H,
-                             S, 1, 0, team, 0, 0))
+                             S, 1, 0, team, 0, 0, 0, self._x16(x16, H * S, 'gdn_norm')))
         return len(self.segs) - 1
 
     def gdn_norm16(self, o, w, z, out16, H, S, eps, dep=-1, team=-1):
@@ -1198,11 +1221,11 @@ class Engine:
                              kv_heads | (int(row_only) | 2 * int(no_store)) << 8 | tok << 16, lmin, 0, par.data_ptr()))
         return len(self.segs) - 1
 
-    def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None):
-        """out = a * sigmoid(gate[h * head_stride + offset + d])"""
+    def gate_mul(self, a, gate, head_stride, offset, out, dim, rows_per_task=256, dep=-1, team=-1, q8=None, x16=None):
+        """out = a * sigmoid(gate[h * head_stride + offset + d]); x16: out's fp16 copy too"""
         n = a.numel(); self.keep += [a, gate, out]
         if q8 is not None: assert n % 32 == 0 and rows_per_task % 32 == 0; self.keep.append(q8)
-        self.segs.append(Seg(OP_GATE_MUL, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, gate.data_ptr(), None,
+        self.segs.append(Seg(OP_GATE_MUL, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, gate.data_ptr(), self._x16(x16, n, 'gate_mul'),
                              a.data_ptr(), None if q8 is None else q8.data_ptr(), out.data_ptr(), 0.0, n, dim, 1, 0, team, head_stride, offset))
         return len(self.segs) - 1
 

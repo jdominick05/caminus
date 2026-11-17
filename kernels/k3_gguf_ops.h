@@ -36,6 +36,15 @@ constexpr unsigned K3_MASK_MV = gg_bits(K3_FMTS_MV), K3_MASK_MOE_GU = gg_bits(K3
 // GG_ACT_F32_SILU = the same with silu(x * Seg.rs) first (OP_GG_Q8_1 work 1). At most AQ_BLOCKS blocks.
 enum { GG_ACT_Q8 = 1, GG_ACT_F32 = 2, GG_ACT_F32_SILU = 3 };
 // tokens per pass (speculative verification): Seg.team (k3_run ignores teams; <= 1 means one token)
+// OP_HC_MEAN / OP_GATE_MUL (Seg.gs, unused by them otherwise) and OP_GDN_NORM (Seg.aux: its Seg.gs is z) in the Coder's
+// modules (K3_GSQ_OWN): an fp16 copy (nullptr: none) of the value they store, rounded to nearest even: the input of
+// OP_OWN_MV (below), beside the q8_1 copy the GG formats read. Each copy costs k3_run spilled scalars (k3_gguf_gsq 143 ->
+// 145 with OP_OWN_MV; the copy through Seg.aux in all three ops: 155)
+#ifdef K3_GSQ_OWN
+#define GSQ_X16(P, i, v) do { if (P) ((_Float16 *)(P))[i] = (_Float16)(v); } while (0)
+#else
+#define GSQ_X16(P, i, v) do { } while (0)
+#endif
 __device__ __forceinline__ int seg_T(const Seg & sg) { return sg.team > 1 ? sg.team : 1; }
 #define AQ_BLOCKS 80
 #if defined(K3_GSQ) && defined(K3_MT)
@@ -1279,6 +1288,7 @@ __device__ __forceinline__ void op_hc_mean(const Seg & sg, int t) {
         const float v = sg.rs * sum;
         ((float *)sg.y)[i] = v;
         if (sg.asum) q8_emit((void *)sg.asum, i, v);   // optional q8_1 copy (task bounds multiples of 32)
+        GSQ_X16(sg.gs, i, v);
     }
 }
 
@@ -1482,6 +1492,7 @@ __device__ __forceinline__ void op_gdn_norm(const Seg & sg, int t) {
 #endif
         y[i] = v;
         if (sg.asum) q8_emit((void *)sg.asum, (size_t)t * K + i, v);
+        GSQ_X16(sg.aux, (size_t)t * K + i, v);
     }
     __syncthreads();
 }
@@ -1615,6 +1626,7 @@ __device__ __forceinline__ void op_gate_mul(const Seg & sg, int t) {
         const float v = a[i] * sgm;
         ((float *)sg.y)[i] = v;
         if (sg.asum) q8_emit((void *)sg.asum, i, v);
+        GSQ_X16(sg.gs, i, v);
     }
 }
 
@@ -1822,6 +1834,81 @@ enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #ifdef K3_OWN   // Caminus's own quantized matvec (kernels/k3_own_ops.h; the *_own modules only: every other module unchanged)
 #include "k3_own_ops.h"
 #endif
+#ifdef K3_GSQ_OWN   // the Coder's modules (kernels/k3_gguf_gsq.hip): its dense matvecs whose GGUF blocks are read in place
+                    // on Caminus's own one-round-trip tiles (docs/specs/spec-own-quant.md), no vec_dot
+#include "own_quant_iq.h"
+#include "own_quant_q5k.h"
+#ifdef K3_MT
+#include "own_quant_tcap_mt.h"   // (the T-token tiles, own_quant_mt.h's Q4_K included: each token's sums the one-token tile's bits)
+// IQ4_XS at T tokens: the one-token tile once per token (its weight bytes read again from L2 for tokens 1 .. T - 1). The
+// T-token tile own_rows_iq4xs_mt took k3_gguf_gsq_mt to 3 spilled VGPRs (1 with this loop, its exemption) and
+// k3_gguf_gsq_qsa_mt to 203 spilled scalars (198 with it; 195 before OP_OWN_MV). The same bits either way
+template <class XO>
+__device__ __forceinline__ void gsq_iq4xs_tok(const uint8_t * W, int row, int lim, const _Float16 * x, const XO & xo, int NT,
+                                              int l, int K, float (&rm)[OWN_MT][2]) {
+    for (int j = 0; j < OWN_MT; j++) {
+        if (j >= NT) break;
+        float r2[2] = {0.0f, 0.0f};
+        own_rows_iq4xs_1rt<0, 2, 1, 1>(W, row, lim, x + xo(j), nullptr, l, K, r2);
+        rm[j][0] = r2[0]; rm[j][1] = r2[1];
+    }
+}
+#endif
+// OP_OWN_MV: out[r] = W[r] . x16 for rows r of a task (Seg.rows_per_task, even): wave w takes the row pairs r0 + 2 w,
+// r0 + 2 (w + 8), ... (kernels/k3_q35t_ops.h q35t_op_mv's loop and tiles in their K3 form: runtime K, 2 rows per wave,
+// UNR 1). Seg.W = the GGUF rows as they are (Q4_K 144, Q5_K 176, IQ4_XS 136 bytes per 256 values), Seg.a = x16 fp16
+// [K] (the producer's fp16 copy, Seg.aux of OP_HC_MEAN / OP_GDN_NORM / OP_GATE_MUL: no conversion segment), Seg.y = fp32
+// out [N], Seg.N = rows, Seg.K = K, Seg.work = the format (its GG number). The K3_MT modules: Seg.pad1 bits 8 .. 11 =
+// tokens NT (0: one), token j's activations at x16 + j xs and its rows at y + j ys (xs / ys: Seg.gs's low / high half).
+// A row's sum depends on neither the grid nor the task size nor T. Compiled in place of these formats' GG matvec (the
+// three GG instances out of K3_FMTS_MV): k3_run's VGPRs do not grow (k3_gguf_gsq 96 -> 95, k3_gguf_gsq_qsa 96 -> 83); its
+// spilled scalars do, mostly from the producers' fp16 copies (GSQ_X16): k3_gguf_gsq 143 -> 145, _qsa 169 -> 181.
+enum { OP_OWN_MV = 44 };
+enum { OWN_GSQ_Q4_K = 4, OWN_GSQ_Q5_K = 5, OWN_GSQ_IQ4_XS = 6 };   // (GG_Q4_K, GG_Q5_K, GG_IQ4_XS: engine/k3.py OWN_GSQ_FMT)
+__device__ __forceinline__ void gsq_own_mv(const Seg & sg, int t) {
+    const int wave = (int)__builtin_amdgcn_readfirstlane(K3TID / 32), lane = K3TID % 32;
+    const int rpt = sg.rows_per_task, r0 = t * rpt, r1 = min(sg.N, r0 + rpt), fmt = sg.work;
+    const _Float16 * x = (const _Float16 *)sg.a;
+#ifdef K3_MT
+    const int NT = max(1, (int)__builtin_amdgcn_readfirstlane((sg.pad1 >> 8) & 15));
+    const uint64_t st = (uint64_t)sg.gs;
+    const size_t xs = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)st), ys = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)(st >> 32));
+    const auto xo = [&](int j) -> size_t { return (size_t)j * xs; };
+    // one row loop per format, the format chosen outside it (k3_q35t_ops.h: five tiles in one loop body spilled k3_run)
+#define GSQ_MT_LOOP(CALL)                                                                                              \
+    for (int row = r0 + 2 * wave; row < r1; row += 16) {                                                               \
+        const int lim = min(row + 2, r1);                                                                              \
+        float rm[OWN_MT][2];                                                                                           \
+        int l = lane; asm volatile("" : "+v"(l));                                                                      \
+        CALL;                                                                                                          \
+        if (lane == 0) {                                                                                               \
+            _Pragma("unroll") for (int j = 0; j < OWN_MT; j++) {                                                       \
+                if (j >= NT) break;                                                                                    \
+                ((float *)sg.y)[(size_t)j * ys + row] = rm[j][0];                                                      \
+                if (row + 1 < lim) ((float *)sg.y)[(size_t)j * ys + row + 1] = rm[j][1];                               \
+            }                                                                                                          \
+        }                                                                                                              \
+    }
+    if (fmt == OWN_GSQ_IQ4_XS) { GSQ_MT_LOOP(gsq_iq4xs_tok(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else if (fmt == OWN_GSQ_Q5_K) { GSQ_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
+    else { GSQ_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_GSQ_Q4_K: host-checked)
+#undef GSQ_MT_LOOP
+#else
+    for (int row = r0 + 2 * wave; row < r1; row += 16) {
+        const int lim = min(row + 2, r1);
+        float res[2] = {0.0f, 0.0f};
+        int l = lane; asm volatile("" : "+v"(l));
+        if (fmt == OWN_GSQ_IQ4_XS) own_rows_iq4xs_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);
+        else if (fmt == OWN_GSQ_Q5_K) own_rows_q5k_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);
+        else own_rows_q4k_1rt<0, 2, 1, 1>(sg.W, row, lim, x, nullptr, l, sg.K, res);   // (OWN_GSQ_Q4_K: host-checked)
+        if (lane == 0) {
+            ((float *)sg.y)[row] = res[0];
+            if (row + 1 < lim) ((float *)sg.y)[row + 1] = res[1];
+        }
+    }
+#endif
+}
+#endif
 // a GG op's format dispatch over its whitelist MASK: FN<type, vdr>(sg, t) for Seg.work. The REAP-308 four keep the switch
 // they always had, written out in k3_extra_op (unlisted formats decode as Q8_0): its code object is unchanged (the same
 // switch inside a forceinline function, or a generic lambda, changed k3_run's code). Any other mask goes through
@@ -1915,6 +2002,9 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_HC_MEAN) { op_hc_mean(sg, t); return true; }
     if (sg.op == OP_HC_POST) { op_hc_post(sg, t); return true; }
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
+#ifdef K3_GSQ_OWN
+    if (sg.op == OP_OWN_MV) { gsq_own_mv(sg, t); return true; }
+#endif
 #ifdef K3_OWN
     if (sg.op == OP_OWN_MV) { own_op_mv(sg, t); return true; }
     if (sg.op == OP_OWN_F16) { own_op_f16(sg, t); return true; }

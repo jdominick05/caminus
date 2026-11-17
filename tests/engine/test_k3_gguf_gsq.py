@@ -3,6 +3,12 @@
   MV       Q4_K Q5_K Q6_K IQ4_XS IQ4_NL Q8_0 (full matrices and the TP column splits), q8_1 and fp32 (AQ) activations
   MOE_GU   IQ2_S IQ3_XXS IQ3_S IQ4_XS (640 rows per expert and the TP row splits 384 / 256), h fp32 and h q8_1
   MOE_DOWN IQ4_NL Q2_0 (K 640 and the TP column splits 384 / 256)
+The dense Q4_K, Q5_K and IQ4_XS matrices run on Caminus's own tiles there (OP_OWN_MV, k3.OWN_GSQ_1RT; fp16 activations):
+for them (a) and (b) check the own op instead (G-self: every grid and task size gives the T = 1 own rows bitwise, and
+T = 2 / 3 / 4 rows equal them), and (e) is docs/specs/spec-own-quant.md's G-acc on every row: |y - y_ref| / rms(y_ref)
+(mean and p99), y_ref the float64 dot of the dequantized rows with the fp32 activation, for the own op and for
+llama.cpp's standalone gg_mv_* on the same activation's q8_1 blocks; the own op's mean and p99 may not exceed llama.cpp's.
+Activations: Gaussian and heavy-tailed (Student t, 3 degrees of freedom) vectors.
 checks
   (a) the engine op is bitwise the standalone kernels (gg_mv_*; MoE: per-expert gg_mv_* composed with the engine's own
       silu (gg_silu_mul) or summed in llama.cpp's mul-then-add order) at 3 / 5 / 6 / 7 / 8 workgroups per WGP, every card;
@@ -19,7 +25,7 @@ checks
         integer step emulated; (c2) per row, |out - exact| <= B + 1e-6 sum |w| |xq|, with B the analytic truncation bound
         sum over 32-value sub-blocks of c |d d8| (c = 7/8 IQ2_S: the /2 truncation <= 1/2, divided by 4, plus the /4
         truncation <= 3/4; c = 3/4 IQ3_XXS: (1/2)/2 + 1/2). The derivation is checked per sub-block in float64.
-  (d) unlisted (op, format) pairs: build() raises, run() refuses, and a forced launch (refuse cleared) leaves a sentinel
+  (d) unlisted (op, format) pairs (the GG matvec of the own tiles' formats among them): build() raises, run() refuses, and a forced launch (refuse cleared) leaves a sentinel
       output untouched, for MV, MOE_GU and MOE_DOWN at T = 1 and 4.
   tools/guard.sh LOG 900 python -I tests/engine/test_k3_gguf_gsq.py [CODER-00001-of-00002.gguf] [--cards 0,1] [--wgp 3,5,6,7,8]
       [--module k3_gguf_gsq | k3_gguf_gsq_trace] [--ops MV,MOE_GU,MOE_DOWN,REFUSE] [--c-cards 0,1]"""
@@ -178,10 +184,62 @@ def mv_cases():
             if ONLY is None or ONLY in label: yield label, wc, qt
 
 
+def gacc(raw, qt, X, outs):
+    """(e) G-acc over every row of raw [n, rb]: {arm: (mean, p99)} of |out - y_ref| / rms(y_ref), y_ref the float64 dot of
+    the dequantized rows with the fp32 activation X (numpy), outs {arm: float64 numpy [n]}"""
+    W = quants.dequantize(raw, qt).astype(np.float64).reshape(raw.shape[0], -1)
+    y = W @ X.astype(np.float64); rms = max(float(np.sqrt(np.mean(y * y))), 1e-30)
+    return {k: (float(np.mean(np.abs(o - y))) / rms, float(np.quantile(np.abs(o - y), 0.99)) / rms) for k, o in outs.items()}
+
+
+GACC = {}   # (format, activation) -> [(own mean, own p99, llama mean, llama p99)] per case and token
+
+
+def run_own_mv(card, label, w, qt, N, K):
+    """the own tile's checks: (a) G-self over grids and task sizes, (b) T tokens, (e) G-acc against llama.cpp's matvec"""
+    dev = f'cuda:{card}'; n_ok = n_all = 0; fmt = qt.name
+    gen = torch.Generator(device=dev).manual_seed(1000 + N + K)
+    Xs = {'gauss': torch.randn(4, K, device=dev, generator=gen) * 0.5}
+    torch.manual_seed(N + K)
+    Xs['t3'] = (torch.distributions.StudentT(torch.tensor(3.0)).sample((4, K)) * 0.3).to(dev)
+    for an, X in Xs.items():
+        x16 = X.half().contiguous(); refs = []
+        for t in range(4):
+            e = k3.Engine(module=M1, grid=grid(M1, 8)); r_ = torch.full((N,), float('nan'), device=dev)
+            e.own_matvec_1rt(w.reshape(-1), fmt, N, K, x16[t], r_, rows_per_task=16); e.build().run(); refs.append(r_)
+        n_all += 1; n_ok += check(bool(torch.isfinite(refs[0]).all()), f'card {card} OWN_MV {fmt} {label} {an}: non-finite rows')
+        for nw in WGP:
+            for rpt in (2, 8, 16, 24):   # (a) G-self: every grid and task size, the same bits
+                e = k3.Engine(module=M1, grid=grid(M1, nw)); out = torch.full((N,), float('nan'), device=dev)
+                e.own_matvec_1rt(w.reshape(-1), fmt, N, K, x16[0], out, rows_per_task=rpt); e.build().run()
+                n_all += 1; n_ok += check(torch.equal(out, refs[0]), f'card {card} OWN_MV {fmt} {label} {an} wgp {nw} rpt {rpt}: != the default grid')
+            for T in TS:           # (b) T tokens (the _mt modules' T-token tiles; the served T > 1 module too) vs the T = 1 rows
+                for mt in (MT,) + (('k3_gguf_gsq_qsa_mt',) if M1 == 'k3_gguf_gsq' else ()):
+                    e = k3.Engine(module=mt, grid=grid(mt, nw), T=T); assert e.module == mt
+                    out4 = torch.full((T * N,), float('nan'), device=dev)
+                    e.own_matvec_1rt(w.reshape(-1), fmt, N, K, x16[:T].reshape(-1), out4, rows_per_task=16, tokens=T, x_stride=K, out_stride=N)
+                    e.build().run()
+                    n_all += 1; n_ok += check(all(torch.equal(out4[t * N:(t + 1) * N], refs[t]) for t in range(T)),
+                                              f'card {card} OWN_MV {fmt} {label} {an} {mt} wgp {nw} T={T}: rows != T=1')
+        if card in C_CARDS:   # (e) G-acc, every row, tokens 0 and 3
+            raw = np_(w)
+            for t in (0, 3):
+                lc = G.matvec(w, qt, N, K, G.quantize_q8_1(X[t].contiguous()))
+                g = gacc(raw, qt, np_(X[t]), {'own': np_(refs[t].double()), 'llama': np_(lc.double())})
+                GACC.setdefault((fmt, an), []).append((*g['own'], *g['llama']))
+                n_all += 1; n_ok += check(g['own'][0] <= g['llama'][0] and g['own'][1] <= g['llama'][1],
+                                          f'card {card} OWN_MV {fmt} {label} {an} token {t}: G-acc own {g["own"]} > llama.cpp {g["llama"]}')
+    return n_ok, n_all
+
+
 def run_mv(card):
     dev = f'cuda:{card}'; n_ok = n_all = 0
     for label, w0, qt in mv_cases():
         w = w0.to(dev); N, rb = w.shape; K = ncols(w, qt); fmt = qt.name
+        if fmt in k3.OWN_GSQ_1RT:   # (the own tile: G-self, T tokens, G-acc; its GG matvec is refused in (d))
+            ok_, all_ = run_own_mv(card, label, w, qt, N, K); n_ok += ok_; n_all += all_
+            print(f'  card {card} OWN_MV {fmt:6s} {label:42s} N {N:5d} K {K:5d}: {ok_}/{all_} checks', flush=True)
+            continue
         gen = torch.Generator(device=dev).manual_seed(1000 + N + K)
         X = torch.randn(4, K, device=dev, generator=gen) * 0.5
         xq = [G.quantize_q8_1(X[t]) for t in range(4)]
@@ -200,7 +258,7 @@ def run_mv(card):
                 e.build().run()
                 n_all += 1; n_ok += check(torch.equal(out, ref[0]), f'card {card} MV {fmt} {label} wgp {nw} {mode}: engine != standalone')
             for T in TS:           # (b) T tokens (multi-token module) vs T = 1 rows
-                e = k3.Engine(module=M1, grid=grid(MT, nw), T=T); assert e.module == MT
+                e = k3.Engine(module=MT, grid=grid(MT, nw), T=T); assert e.module == MT
                 out4 = torch.full((T * N,), float('nan'), device=dev)
                 e.gg_matvec(w.reshape(-1), fmt, N, K, rb, torch.cat(xq[:T]), out4, rows_per_task=16)
                 e.build().run()
@@ -253,7 +311,7 @@ def run_moe_gu(card):
                         good = torch.equal(h, G.quantize_q8_1(href[0])) if hq8 else torch.equal(h, href[0])
                         n_all += 1; n_ok += check(good, f'card {card} MOE_GU {fmt} rows {r0}:{r1} wgp {nw} {mode} h_q8 {hq8}: engine != standalone')
                 for T in TS:
-                    e = k3.Engine(module=M1, grid=grid(MT, nw), T=T); assert e.module == MT
+                    e = k3.Engine(module=MT, grid=grid(MT, nw), T=T); assert e.module == MT
                     h4 = torch.full((T * K_USED * F,), float('nan'), device=dev)
                     e.gg_moe_gu(g.reshape(-1), u.reshape(-1), fmt, slab, F, D, torch.cat(ids[:T]), torch.cat(xq[:T]), h4, rows_per_task=8, up_fmt=fmt)
                     e.build().run()
@@ -296,7 +354,7 @@ def run_moe_down(card):
                     e.build().run()
                     n_all += 1; n_ok += check(torch.equal(out, ref[0]), f'card {card} MOE_DOWN {fmt} K {K} wgp {nw} {mode}: engine != standalone')
                 for T in TS:
-                    e = k3.Engine(module=M1, grid=grid(MT, nw), T=T); assert e.module == MT
+                    e = k3.Engine(module=MT, grid=grid(MT, nw), T=T); assert e.module == MT
                     out4 = torch.full((T * D,), float('nan'), device=dev)
                     e.gg_moe_down(dw.reshape(-1), fmt, slab, K, D, torch.cat(ids[:T]), torch.cat(wts[:T]), torch.cat(hq[:T]), out4, rows_per_task=8)
                     e.build().run()
@@ -308,7 +366,7 @@ def run_moe_down(card):
 
 
 # ---- (d) unlisted pairs ----
-UNLISTED = [('MV', 'IQ3_XXS'), ('MV', 'IQ2_S'), ('MV', 'Q2_0'), ('MOE_GU', 'Q4_K'), ('MOE_GU', 'IQ4_NL'), ('MOE_GU', 'Q8_0'),
+UNLISTED = [('MV', 'IQ3_XXS'), ('MV', 'IQ2_S'), ('MV', 'Q2_0'), ('MV', 'Q4_K'), ('MV', 'Q5_K'), ('MV', 'IQ4_XS'), ('MOE_GU', 'Q4_K'), ('MOE_GU', 'IQ4_NL'), ('MOE_GU', 'Q8_0'),
             ('MOE_DOWN', 'IQ4_XS'), ('MOE_DOWN', 'Q6_K'), ('MOE_DOWN', 'Q8_0')]
 SENT = 1234.5
 
@@ -371,5 +429,9 @@ print('worst standalone vs float64 (max |out - ref| / sum|w||xq|; "int" = intege
 asw = [f'{op} {f}: {o}/{n} slices > 1e-6' for (op, f), (n, o) in sorted(WORST.slices.items()) if o]
 print('G1(c) as written (exact dot <= 1e-6): ' + ('PASS for every pair' if not asw else 'FAILS for ' + '; '.join(asw))
       + ' (IQ2_S / IQ3_XXS gated on the proposed int-emulated + analytic-bound criterion instead)')
+for (fmt, an), vs in sorted(GACC.items()):
+    v = np.array(vs)
+    print(f'G-acc {fmt:6s} {an:5s} ({len(vs)} cases): own mean {v[:, 0].mean():.2e} p99 {v[:, 1].mean():.2e} | llama.cpp mean '
+          f'{v[:, 2].mean():.2e} p99 {v[:, 3].mean():.2e} (averages over the cases; each case gated own <= llama.cpp)')
 print(f'checks: {tot_ok}/{tot}; failures: {len(fails)}')
 print('PASS' if not fails else 'FAIL'); sys.exit(0 if not fails else 1)
