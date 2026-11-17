@@ -4,6 +4,11 @@
 
 <!-- One or two sentences. Link the issue if there is one. -->
 
+<!-- If it adds more lines than it removes: what existing code or doc it builds on, and the files it deleted or made
+     shorter (or `nothing:` and why). AGENTS.md, Invariants, Growth. -->
+Reuses:
+Removes:
+
 ## How you tested it
 
 - [ ] `python -I tests/ci_cpu.py --scratch <a fresh directory>` passes

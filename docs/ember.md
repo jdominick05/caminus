@@ -47,6 +47,9 @@ either faster.
 - **Root only with your approval.** The agent asks through `ask_root` with the exact command, the goal it unblocks,
   the expected effect and how to undo it. You approve, edit or deny it in the panel; approved commands run under your
   sudo, never the agent's. A grant (`g g`) lets that exact command repeat for the rest of its goal, at most 12 hours.
+  An approved command runs without input (package tools ask nothing, no pager opens), and the chat comes back when it
+  exits. After 30 minutes the chat comes back anyway, and the agent hears that the command is still running and its
+  pid; nothing kills it.
 - **You reach it; it does not reach you.** You log in to its account over SSH with your key, from this machine
   only, without forwarding. It has no way into your account.
 - **Keys stay with you.** A paid brain goes through a relay: a service in your account that holds the API key, allows
@@ -101,7 +104,11 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Anthropic API). It goes
   through the same relay, so allow its model there too, with the cap restated:
   `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
-  Its own daily budget is counted by the agent, inside the relay's cap.
+  Its own daily budget is counted by the agent, inside the relay's cap. `agent advisor` warns when the relay it names
+  would refuse the model, and `caminus ember relay status` lists the models each Anthropic relay allows. When the
+  advisor cannot be called (the relay refuses its model, is not running, or has spent its cap), `/advisor` opens the
+  reason and the exact command to run, the agent's advisor tool says the same, and the attempt does not count against
+  the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart.
 - **Removing one.** `caminus ember relay uninstall --provider anthropic` stops it; the key file stays where you put it.
 
 ## A second setup on one machine
@@ -141,6 +148,8 @@ key of that file.
 | Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images when its brain sees; otherwise it is told the agent's account of an image is an observation | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
 
 Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
+A local session finds its server's effort ids by asking the server (at creation, `/model` or `/effort`); a session
+made before that keeps running at medium until you pick a level.
 
 ### Per model
 
@@ -155,6 +164,33 @@ Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
 A side call (the judge's check of a finish) always runs with thinking off.
+
+## Its memory
+
+An agent keeps what it learns across goals in its home:
+
+- `STATE.md`: where it stands now (doing, verified, assumed, next). It loads first on every turn.
+- `MEMORY.md`: its notes index, one line per note. It loads into every goal, capped at 4 KB, and stays fixed for the
+  length of a goal.
+- `notes/NAME.md`: one fact each, read when needed. The `remember` tool writes a note and its index line together.
+
+Keeping the index small:
+
+- **The warning.** From 3,277 bytes (80 % of the cap), the goal's context and `remember`'s result say how full the
+  index is and how to tidy it.
+- **Tidying.** `remember` with action `tidy` takes the whole rewritten index (duplicate lines merged, long ones
+  shortened) and the old lines taken out, which move to `notes/index-archive.md`. A pinned line keeps its mark. It
+  is refused, with nothing written, when:
+  - a note would end up named in neither the index nor the archive;
+  - a pinned note loses its line;
+  - a new line names a note that does not exist;
+  - a line is over 160 bytes, or the index is over its cap.
+- **A full index.** A save that would pass the cap moves the least recently used unpinned lines to the archive and
+  names them.
+
+`history_search` searches the archive along with the agent's past goals, journal and notes. Archive hits come first
+(up to half the limit), each with the note its line names. Every hit gives its source: past goal, index archive, old
+index, journal or note. Hits from the running goal come last, marked "this goal", and its own prompt is left out.
 
 ## Where things live
 

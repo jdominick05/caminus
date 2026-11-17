@@ -7,7 +7,8 @@ views (one per call, the last repeated) and the review threads.
 Cases: a clean pull request; the reviewer's receipt and its state comment as the verdict; a head pushed after the
 review; a merge of `testing` after the review (refused, accepted with --allow-base-merges, and a later non-merge commit
 still refused); open findings at the head; no review at all; an unresolved thread; a failed check, and a cancelled
-duplicate beside its success; a kernel change whose body names no gate or no card; a decision id, a machine path and a
+duplicate beside its success; a kernel change whose body names no gate or no card; a pull request that adds more lines
+than it removes with and without its `Reuses:` / `Removes:` lines, and one that adds to the tree checks' baseline; a decision id, a machine path and a
 session link in the body or a commit message; the wrong base, a draft, a conflict; --wait while CI runs (passes once
 it finishes), a bound shorter than one poll, no wait on a failure, a wait for a review that was asked for; no `gh`."""
 import argparse
@@ -91,7 +92,7 @@ def line(out, key): return next((l for l in out.splitlines() if l[5:].startswith
 
 # ---- the passing forms
 rc, out, _, _ = run(view())
-check(rc == 0 and out.strip().endswith('RESULT PASS') and out.count('PASS ') == 8, f'a clean pull request passes its eight checks ({out.strip().splitlines()[-1]})')
+check(rc == 0 and out.strip().endswith('RESULT PASS') and out.count('PASS ') == 9, f'a clean pull request passes its nine checks ({out.strip().splitlines()[-1]})')
 rc, out, _, _ = run(view(), repo=False)
 check(rc == 0, 'without -R the repository comes from `gh repo view`')
 rc, out, _, _ = run(view(reviews=[], comments=[state(C1)]))
@@ -139,6 +140,36 @@ rc, out, _, _ = run(view(body='Gates: bitwise against the previous reference.', 
 check(rc == 1 and 'no card named' in line(out, 'gates') and 'no GPU gate' not in line(out, 'gates'), 'gates without a card still fail')
 rc, out, _, _ = run(view(body='Gates: bitwise against the previous reference, XT then XTX.', files=[{'path': 'python/caminus/engine/k3.py'}]))
 check(rc == 0 and line(out, 'gates').startswith('PASS'), 'a tape change that names its gates and cards passes')
+
+# ---- size: a pull request that grows the tree names what it reused and what it removed
+grow = dict(files=[{'path': 'tools/new.py', 'additions': 80, 'deletions': 0, 'changeType': 'ADDED'}, {'path': 'tools/old.py', 'additions': 2, 'deletions': 30, 'changeType': 'MODIFIED'},
+                   {'path': 'tools/dead.py', 'additions': 0, 'deletions': 9, 'changeType': 'DELETED'}, {'path': 'AGENTS.md', 'additions': 3, 'deletions': 1, 'changeType': 'MODIFIED'}])
+rc, out, _, _ = run(view(**grow))
+check(rc == 1 and 'no `Reuses:` line' in line(out, 'size') and 'no `Removes:` line' in line(out, 'size')
+      and '+85 -40 lines, +1 -1 files, AGENTS.md +3 -1' in line(out, 'size'), 'a pull request that adds more than it removes and says neither fails, with its numbers')
+rc, out, _, _ = run(view(body='Docs.\nReuses: tools/old.py, its reader.\nRemoves: old.py (the second reader) and tools/dead.py.', **grow))
+check(rc == 0 and line(out, 'size').startswith('PASS'), 'naming what it extends, a file it made shorter and one it deleted passes')
+rc, out, _, _ = run(view(body='Reuses: tools/old.py.\nRemoves: tools/new.py and AGENTS.md', **grow))
+check(rc == 1 and "names ['tools/new.py', 'AGENTS.md']" in line(out, 'size'), 'a file it added, or only edited, is not a removal')
+rc, out, _, _ = run(view(body='Reuses: tools/old.py.\nRemoves: the old reader', **grow))
+check(rc == 1 and 'names no file' in line(out, 'size'), '`Removes:` names files')
+rc, out, _, _ = run(view(body='Reuses: nothing existing; searched tools/ for a reader.\nRemoves: nothing.', **grow))
+check(rc == 1 and 'without its reason' in line(out, 'size'), '`Removes: nothing` needs its reason')
+rc, out, _, _ = run(view(body='Reuses: nothing existing; searched tools/ for a reader.\nRemoves: nothing: the old reader is still served.', **grow))
+check(rc == 0, '`Removes: nothing:` with a reason passes')
+rc, out, _, _ = run(view(body='It Reuses: a thing, and Removes: tools/old.py, inside a sentence.', **grow))
+check(rc == 1 and 'no `Reuses:` line' in line(out, 'size'), 'the two lines start a line of the body')
+rc, out, _, _ = run(view(files=[{'path': 'tools/old.py', 'additions': 2, 'deletions': 30}]))
+check(rc == 0 and '+2 -30 lines' in line(out, 'size'), 'a pull request that removes more than it adds needs neither line')
+base = dict(files=[{'path': 'tools/entropy.json', 'additions': 1, 'deletions': 4}])
+rc, out, _, _ = run(view(**base))
+check(rc == 1 and 'no `Baseline:` line' in line(out, 'size'), 'a line added to the tree checks\' baseline needs its reason, in a pull request that shrinks too')
+rc, out, _, _ = run(view(body='Baseline: tools/x.py is run by hand at a release.', **base))
+check(rc == 0, 'the baseline line with a reason passes')
+rc, out, _, _ = run(view(files=[{'path': 'tools/entropy.json', 'additions': 0, 'deletions': 4}]), '--metadata')
+check(rc == 0 and line(out, 'size').startswith('PASS'), 'removing baseline entries needs nothing; --metadata prints size')
+rc, out, _, _ = run(view(author={'login': 'app/dependabot'}, title='build(deps): bump x', commits=[commit(C1, 'build(deps): bump x', '')], files=[{'path': 'panel/go.sum', 'additions': 4, 'deletions': 2}]))
+check(rc == 0 and line(out, 'size').startswith('PASS'), 'a Dependabot pull request is exempt from the two lines')
 
 # ---- private text (the strings are put together here so this file holds none)
 did, home, link = 'D-' + '281', '/ho' + 'me/someone/notes', 'https://claude' + '.ai/code/session_x'
