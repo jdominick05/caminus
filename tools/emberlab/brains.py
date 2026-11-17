@@ -98,7 +98,8 @@ class Anthropic(Brain):
         return f'{self.model}@relay'
 
     def init_args(self, key):
-        return ['--model', self.model, '--endpoint', self.url, '--api', 'anthropic']
+        # the Messages API reports no window: the resident needs one (200K: what every current Claude model takes)
+        return ['--model', self.model, '--endpoint', self.url, '--api', 'anthropic', '--context', '200000']
 
     def config(self):
         return dict(relay=True)
