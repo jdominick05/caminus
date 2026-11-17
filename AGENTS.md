@@ -349,6 +349,7 @@ Growth (the reasons: ENTROPY.md):
   over one source, and merging kernel or tape code is a kernel change with every gate above. Test scripts keep their
   own helpers.
 - This file is the map: a new module gets one line here, its detail in its docs/dev file.
+- A pull request that adds more lines than it removes says what it reused and removed (`tools/pr_ready.py`, `size`).
 
 ## Conventions
 

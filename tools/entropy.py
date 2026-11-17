@@ -14,7 +14,7 @@ uses. CPU, standard library only, no network; the CPU suite `entropy` (tests/too
 
 The baseline, tools/entropy.json, lists by name what was already wrong when a check arrived. A check fails on anything not
 listed and on a listed entry that no longer applies, so the file is exactly what is wrong today and only shrinks; adding
-an entry is an edit by hand that the pull request explains."""
+an entry is an edit by hand that the pull request explains (tools/pr_ready.py, `size`, asks for it)."""
 import argparse
 import collections
 import fnmatch

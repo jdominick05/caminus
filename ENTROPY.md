@@ -22,14 +22,15 @@ session loads, and each has a place where it is checked.
 
 | Rule (AGENTS.md) | Check |
 |---|---|
-| Search for what exists and extend it | The review flags a duplicate (AGENTS.md, Code Review Rules, Growth) |
-| What a change replaces, it deletes | `orphans`: a test, tool or benchmark that no other file names was left behind. The review flags a replaced path left in place |
+| Search for what exists and extend it | `size` in `tools/pr_ready.py`: a pull request that adds more lines than it removes names what it extends. The review flags a duplicate (AGENTS.md, Code Review Rules, Growth) |
+| What a change replaces, it deletes | `size`: it also names the files it deleted or made shorter, checked against its file list. `orphans`: a test, tool or benchmark that no other file names was left behind |
 | Change what names a thing with the thing | `refs`: a path a doc names is in the tree. For code, the CPU suites |
 | One fact in one file | `copies`: no two files hold the same bytes |
-| AGENTS.md is the map | `refs` keeps it true; nothing keeps it small yet |
+| AGENTS.md is the map | `refs` keeps it true. `size` prints what each pull request adds to it; nothing caps it yet |
 
 `python -I tools/entropy.py` runs `refs`, `orphans` and `copies` (the CPU suite `entropy`). Each failure says what to
-delete, link or correct: the cheapest way to pass is never to add.
+delete, link or correct: the cheapest way to pass is never to add. `python -I tools/pr_ready.py N` runs `size` with a
+pull request's other checks, and CI runs it on every pull request; one that removes more than it adds owes nothing.
 
 ## The baseline
 
@@ -38,7 +39,7 @@ names, pairs of files that are still copies (kept equal until one is a link). A 
 longer applies, so the file is exactly what is wrong today.
 
 - It only shrinks. Fix an entry, and `python -I tools/entropy.py --prune` drops it. The tool never adds one.
-- Adding an entry is an edit by hand, and the pull request body says why.
+- Adding an entry is an edit by hand, and the pull request body says why; `size` fails without it.
 - It is the consolidation backlog: an orphan is deleted or wired in, a dead name corrected or its sentence removed.
   An orphan is named in no file, which does not prove that nobody runs it by hand: ask before deleting one.
 
