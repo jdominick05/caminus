@@ -22,13 +22,7 @@ var pageOverlays = map[string]struct {
 	tab   int
 	title string
 }{
-	"/memory":   {3, "MEMORY & NOTES"},
-	"/servers":  {4, "SERVERS"},
-	"/audit":    {5, "AUDIT"},
-	"/agents":   {7, "AGENTS"},
-	"/settings": {8, "SETTINGS"},
-	"/jobs":     {9, "JOBS & PROCESSES"},
-	"/context":  {10, "CONTEXT"},
+	"/context": {10, "CONTEXT"},
 }
 
 // pageTitle is the overlay title for a page index.
@@ -127,7 +121,15 @@ func (m emberModel) contextPane() string {
 	r := m.resident
 	pct := func(f float64) string { return fmt.Sprintf("%.1f %%", f*100) }
 	lines := []string{emberHead.Render("CONTEXT · " + residentText(m.agentName))}
-	add := func(k, v string) { lines = append(lines, emberDim.Render(fmt.Sprintf("  %-14s", k))+v) }
+	// a long value wraps under its own column (it ran back to column 0 at 80)
+	vw := max(16, m.width-8-16)
+	add := func(k, v string) {
+		ls := strings.Split(ansi.Wordwrap(v, vw, " "), "\n")
+		lines = append(lines, emberDim.Render(fmt.Sprintf("  %-14s", k))+ls[0])
+		for _, l := range ls[1:] {
+			lines = append(lines, strings.Repeat(" ", 16)+l)
+		}
+	}
 	add("brain", residentText(r.Model))
 	add("window", fmt.Sprintf("%s tokens", short(r.Context)))
 	if r.ContextUsed > 0 && r.Context > 0 {

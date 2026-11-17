@@ -9,9 +9,14 @@ either a local `caminus serve` or a paid API through a spend-capped key relay.
 ## 1. Install
 
 ```sh
-pip install caminus
+python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
+pip install "caminus>=0.3.0rc1"       # once 0.3.0 is out: pip install caminus
 caminus ember --help
 ```
+
+The version pin matters while 0.3.0 is a release candidate: a plain `pip install caminus` skips release candidates and
+installs 0.2.1, which has no Ember. (Don't use `--pre` for this: it also installs test versions of Caminus's
+dependencies.) Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
 
 The panel (`caminus ember ui`) ships inside the package. From a source checkout, build it first:
 `cd panel && go build -o caminus-panel .`
@@ -98,8 +103,9 @@ account. You see its replies, one dim line per batch of tool work, and on a wide
 thoughts, its task list and what it is running now.
 
 - **Steer**: type while it works. A message reaches it at its next step; `/steer TEXT` redirects it.
-- **Answer**: questions and root requests appear as cards. Esc, then `a a` approves a root command (it runs under
-  your sudo, never the agent's), `d` denies, `/deny TEXT` denies with what to do instead. Nothing waits on you: an
+- **Answer**: questions and root requests ask where you type: pick with the arrows and Enter (a root command is yes or
+  no; Yes runs it under your sudo, never the agent's), or tell it something else in your own words. Esc leaves it
+  waiting; Tab brings it back. Nothing waits on you: an
   unanswered question times out to the agent's recommended option, a permission question to no.
 - **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).
 - **Copy**: drag over the history; the release copies it.
@@ -107,8 +113,8 @@ thoughts, its task list and what it is running now.
   conversation.
 
 With nothing to do, the agent has free time: it reads its journal, follows its own interests and keeps a studio
-(`/studio`, `/recap`). `/freetime` starts a stretch now (after any running work); `caminus ember agent heartbeat
-resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). Its
+(`/studio`). `caminus ember agent heartbeat resident now` starts a stretch now (after any running work);
+`caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). Its
 thoughts run in Ember's box: its reasoning when the model shows it, else its words and the tools it calls.
 
 ## Next

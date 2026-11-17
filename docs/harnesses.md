@@ -5,8 +5,8 @@ with: Qwen Code, Hermes Agent, Claude Code, or anything that speaks the OpenAI o
 
 ## Qwen Code (the easiest)
 
-The panel sets it up for you: in **QWEN CODE** press `i` to install it, `u` to set it up, then `enter` on a server in
-**SERVERS**. From a terminal:
+The panel sets it up for you: press `i` to install it, `u` to set it up for the running server, then `c` to open it.
+From a terminal:
 
 ```bash
 caminus qwen-code setup --install   # installs Qwen Code (needs Node.js) and points it at your running server

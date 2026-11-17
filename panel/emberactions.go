@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -57,8 +58,39 @@ func hostOf(u string) string {
 	return u
 }
 
-// actionCard is one tool call with its result, as a compact card w cells wide.
-func actionCard(name string, args, result map[string]any, w int) string {
+// shortPath shows a path the agent gave as it would say it: relative to its working folder, else ~/ under its home.
+func shortPath(p, home, cwd string) string {
+	if cwd != "" && strings.HasPrefix(p, cwd+"/") {
+		return strings.TrimPrefix(p, cwd+"/")
+	}
+	if home != "" && (p == home || strings.HasPrefix(p, home+"/")) {
+		return "~" + strings.TrimPrefix(p, home)
+	}
+	return p
+}
+
+// shortCommand drops a leading "cd WORKING-FOLDER &&" and writes the home as ~ (the card's subject only).
+func shortCommand(cmd, home, cwd string) string {
+	if cwd != "" {
+		for _, lead := range []string{"cd " + cwd + " && ", "cd " + cwd + "; ", "cd " + cwd + "\n"} {
+			cmd = strings.TrimPrefix(cmd, lead)
+		}
+	}
+	if home != "" {
+		cmd = strings.ReplaceAll(cmd, home+"/", "~/")
+	}
+	return cmd
+}
+
+func kOf(n float64) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.0fK", n/1000)
+	}
+	return fmt.Sprintf("%.0f", n)
+}
+
+// actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths.
+func actionCard(name string, args, result map[string]any, w int, home, cwd string) string {
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -68,6 +100,10 @@ func actionCard(name string, args, result map[string]any, w int) string {
 	state := "ok"
 	if errText := rs("error"); errText != "" {
 		state = "fail"
+		// the agent's own paths read short (a raw error carried the whole home path)
+		if home != "" {
+			errText = strings.ReplaceAll(errText, home+"/", "~/")
+		}
 		meta = firstLine(residentText(errText))
 		preview = lines(residentText(errText), 4)
 		if len(preview) <= 1 {
@@ -77,7 +113,7 @@ func actionCard(name string, args, result map[string]any, w int) string {
 	switch name {
 	case "terminal":
 		if cmd := argStr(args, "command"); cmd != "" {
-			subject = "$ " + firstLine(cmd)
+			subject = "$ " + firstLine(shortCommand(cmd, home, cwd))
 		} else if argStr(args, "stdin") != "" {
 			subject = "input → session"
 		} else if _, sig := args["signal"]; sig {
@@ -86,7 +122,7 @@ func actionCard(name string, args, result map[string]any, w int) string {
 			subject = "↻ checked on its command"
 		}
 		if state == "ok" {
-			out := rs("output")
+			out := ansi.Strip(rs("output")) // (a program's colour codes are not text)
 			n := 0
 			if strings.TrimSpace(out) != "" {
 				n = strings.Count(strings.TrimRight(out, "\n"), "\n") + 1
@@ -98,10 +134,15 @@ func actionCard(name string, args, result map[string]any, w int) string {
 				}
 			} else if running, _ := result["running"].(bool); running {
 				meta, state = "still running", "busy"
+			} else if code, ok := result["ended_later"].(float64); ok {
+				meta = fmt.Sprintf("ended later: exit %d", int(code))
+				if code != 0 {
+					state = "warn"
+				}
 			}
 			switch {
 			case n > 0:
-				meta = strings.TrimPrefix(meta+fmt.Sprintf(" · %d lines", n), " · ")
+				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
 				preview = all[max(0, len(all)-3):]
 			case result["no_new_output"] == true:
@@ -109,7 +150,7 @@ func actionCard(name string, args, result map[string]any, w int) string {
 			}
 		}
 	case "read":
-		subject = residentText(argStr(args, "path"))
+		subject = residentText(shortPath(argStr(args, "path"), home, cwd))
 		if state == "ok" {
 			meta = "lines " + rs("shown")
 			if d, _ := result["directory"].(bool); d {
@@ -150,6 +191,120 @@ func actionCard(name string, args, result map[string]any, w int) string {
 	case "send_message":
 		subject = "→ " + residentText(argStr(args, "to"))
 		preview = lines(residentText(argStr(args, "text")), 3)
+		if strings.Contains(rs("error"), "mail bus") {
+			meta = "no session called " + residentText(argStr(args, "to")) + " gets mail here"
+		}
+	case "peers":
+		var names []string
+		ps, _ := result["peers"].([]any)
+		for _, p := range ps {
+			if d, ok := p.(map[string]any); ok {
+				n, _ := d["name"].(string)
+				names = append(names, residentText(n))
+			} else if n, ok := p.(string); ok {
+				names = append(names, residentText(n))
+			}
+		}
+		if state == "ok" {
+			meta = plural(len(names), "peer", "peers")
+			if len(names) > 0 {
+				meta += ": " + strings.Join(names, ", ")
+			}
+		}
+	case "lease":
+		subject = argStr(args, "action")
+		if state == "ok" {
+			if ls, ok := result["leases"].([]any); ok {
+				meta = map[bool]string{true: "no leases", false: plural(len(ls), "lease", "leases")}[len(ls) == 0]
+			} else if id := rs("lease"); id != "" {
+				meta = fmt.Sprintf("lease %s · cards %v until %s", id, result["cards"], rs("until"))
+			} else if rel, ok := result["released"].([]any); ok {
+				meta = "released " + plural(len(rel), "lease", "leases")
+			}
+		}
+	case "discover":
+		subject = argStr(args, "topic")
+		if subject == "" {
+			subject = "overview"
+		}
+		if state == "ok" {
+			var parts []string
+			if acct, ok := result["account"].(map[string]any); ok {
+				u, _ := acct["user"].(string)
+				parts = append(parts, "account "+residentText(u))
+			}
+			n := 0
+			if progs, ok := result["programs"].(map[string]any); ok {
+				for _, cat := range progs {
+					if m, ok := cat.(map[string]any); ok {
+						n += len(m)
+					}
+				}
+				parts = append(parts, plural(n, "program found", "programs found"))
+			}
+			if ms, ok := result["matches"].(map[string]any); ok {
+				parts = append(parts, plural(len(ms), "match", "matches"))
+			}
+			meta = strings.Join(parts, " · ")
+		}
+	case "budget":
+		if state == "ok" {
+			var parts []string
+			if gl, ok := result["goal"].(map[string]any); ok {
+				st, _ := gl["steps"].(float64)
+				parts = append(parts, plural(int(st), "step", "steps"))
+			}
+			if cx, ok := result["context"].(map[string]any); ok {
+				t, _ := cx["tokens"].(float64)
+				win, _ := cx["window"].(float64)
+				parts = append(parts, short(int(t))+" / "+short(int(win))+" context") // (66K for a 65K window before)
+			}
+			meta = strings.Join(parts, " · ")
+		}
+	case "todo", "ledger":
+		if state == "ok" {
+			items, _ := result["items"].(float64)
+			left, _ := result["left"].(float64)
+			meta = plural(int(items), "task", "tasks") + fmt.Sprintf(" · %d left", int(left))
+		}
+	case "wait":
+		subject = strings.TrimSpace(argStr(args, "until") + " " + argStr(args, "target"))
+		if state == "ok" {
+			s, _ := result["waited_s"].(float64)
+			meta = residentText(rs("happened")) + fmt.Sprintf(" · waited %s", (time.Duration(s)*time.Second).String())
+		}
+	case "rollback":
+		subject = argStr(args, "id")
+		if r, ok := result["restored"].([]any); ok && state == "ok" {
+			meta = "restored " + plural(len(r), "file", "files")
+		}
+	case "machine":
+		if state == "ok" {
+			var parts []string
+			gpus, _ := result["gpus"].([]any)
+			parts = append(parts, plural(len(gpus), "GPU", "GPUs"))
+			for _, x := range gpus {
+				gp, _ := x.(map[string]any)
+				used, _ := gp["vram_used_mib"].(float64)
+				total, _ := gp["vram_total_mib"].(float64)
+				busy, _ := gp["busy_percent"].(float64)
+				switch {
+				case total >= 1024:
+					parts = append(parts, fmt.Sprintf("%.0f/%.0f GB %d %%", used/1024, total/1024, int(busy)))
+				case total > 0: // (a 512 MiB integrated GPU read "0/0 GB")
+					parts = append(parts, fmt.Sprintf("%.0f/%.0f MiB %d %%", used, total, int(busy)))
+				}
+			}
+			if mem, ok := result["memory"].(map[string]any); ok {
+				av, _ := mem["available_mib"].(float64)
+				parts = append(parts, fmt.Sprintf("RAM %.0f GB free", av/1024))
+			}
+			meta = strings.Join(parts, " · ")
+		}
+	case "schedule":
+		if state == "ok" {
+			meta = "parked until " + rs("sleeping_until")
+		}
 	case "github_handoff":
 		subject = strings.TrimSpace(argStr(args, "action") + " " + argStr(args, "repo"))
 		if t := argStr(args, "title"); t != "" {
@@ -174,9 +329,19 @@ func actionCard(name string, args, result map[string]any, w int) string {
 		}
 	}
 	dot := map[string]lipgloss.Style{"ok": emberCtxOK, "fail": emberCtxHot, "warn": emberWarn, "busy": emberBusy}[state]
-	line := dot.Render(g.working) + " " + toolFamily(name).Render(name) + "  " + lipgloss.NewStyle().Foreground(cText).Render(oneLine(subject))
+	// the outcome (exit 3, refused, still running) is what the card is for: a long subject is cut, never the meta
+	tail := ""
 	if meta != "" {
-		line += emberDim.Render("  ·  " + oneLine(meta))
+		tail = "  ·  " + oneLine(meta)
+		if room := w - 4 - ansi.StringWidth(name) - 12; ansi.StringWidth(tail) > room {
+			tail = ansi.Truncate(tail, max(12, room), "…")
+		}
+	}
+	room := max(8, w-2-ansi.StringWidth(name)-2-ansi.StringWidth(tail))
+	line := dot.Render(g.working) + " " + toolFamily(name).Render(name) + "  " +
+		lipgloss.NewStyle().Foreground(cText).Render(ansi.Truncate(oneLine(subject), room, "…"))
+	if tail != "" {
+		line += emberDim.Render(tail)
 	}
 	out := []string{ansi.Truncate(line, w, "…")}
 	rule := "  " + emberDim.Render("⎿ ")
@@ -193,17 +358,48 @@ func actionCard(name string, args, result map[string]any, w int) string {
 // question, the finish, the plan); edits and writes keep their diff cards.
 func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	name, _ := e.Data["name"].(string)
+	result, _ := e.Data["result"].(map[string]any)
 	switch name {
-	case "ask_user", "finish", "propose_plan", "":
+	case "ask_user", "ask_root", "github_handoff", "":
+		// a request's outcome is on its one-line record (approval_requested / question); only one never filed shows
+		if err, _ := result["error"].(string); err != "" && name != "" {
+			return recordLine(map[string]string{"ask_user": "?", "ask_root": g.root, "github_handoff": "⇡"}[name], "not sent: "+humanRefusal(err), w)
+		}
+		return ""
+	case "finish":
+		// what was left open is what the human most needs to see: compact showed it nowhere
+		if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
+			return recordLine("!", "left open: "+oneLine(residentText(open)), w)
+		}
+		return ""
+	case "report": // the report's own line ("note fyi: …") says it; a card repeated it
+		if err, _ := result["error"].(string); err == "" {
+			return ""
+		}
+	case "propose_plan":
+		if err, _ := result["error"].(string); err != "" { // a refused plan had no card at all
+			return toolCard("error", "propose_plan", firstLine(err), false, false, nil, w)
+		}
 		return ""
 	}
-	result, _ := e.Data["result"].(map[string]any)
 	if (name == "edit" || name == "write") && result["error"] == nil {
 		return c.eventBlock(e)
 	}
 	id, _ := e.Data["call_id"].(string)
 	call := c.calls[id]
-	return actionCard(name, call.args, result, w)
+	if running, _ := result["running"].(bool); running && name == "terminal" {
+		if sid, _ := result["session"].(string); sid != "" {
+			if code, done := c.sessionDone[sid]; done { // a later check saw it end: this card said "still running" for good
+				r2 := map[string]any{}
+				for k, v := range result {
+					r2[k] = v
+				}
+				r2["running"], r2["ended_later"] = false, code
+				result = r2
+			}
+		}
+	}
+	return actionCard(name, call.args, result, w, c.home, c.cwd)
 }
 
 // firstLine is a text's first line, with " …" when more follows.

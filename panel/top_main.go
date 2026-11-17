@@ -1017,7 +1017,11 @@ const minW = 40
 var spin = []string{"◴", "◷", "◶", "◵"}
 
 func (m model) View() tea.View {
-	v := tea.NewView(m.render())
+	frame := m.render()
+	if themeBackground() != nil { // the theme's background in every cell, as the panel and Ember paint it
+		frame = paintBackground(frame, 0, m.w, max(m.h, lipgloss.Height(frame)), false)
+	}
+	v := tea.NewView(frame)
 	v.AltScreen = true
 	v.WindowTitle = "caminus top"
 	return v

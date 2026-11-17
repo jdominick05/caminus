@@ -105,7 +105,7 @@ rc, out = run('check', base, moved)
 check(open(os.path.join(base, 'k3_a.hsaco'), 'rb').read() != open(os.path.join(moved, 'k3_a.hsaco'), 'rb').read()
       and rc == 0 and '4 with the same code and data sections as before, 0 changed' in out and out.strip().endswith('RESULT PASS'),
       'check: objects that differ only in their string table are unchanged')
-check('not judged' in out and 'k3_old (109 VGPRs' in out, 'check: an unchanged object outside the budget is listed, not judged')
+check('not judged' in out and 'k3_old (109 VGPRs, 0 spilled, not exempt)' in out, 'check: an unchanged object outside the budget is listed, not judged')
 
 # ---- a change, named or not
 edit = build('edit', with_b())
@@ -148,6 +148,24 @@ rc, out = run('check', base, build('new', dict(BASE, k3_new=elf(b'N' * 40, regs=
 check(rc == 1 and 'new: k3_new' in out and 'FAIL k3_new: 100 VGPRs' in out, 'check: a new object over the budget fails')
 rc, out = run('check', base, build('new2', dict(BASE, k3_new=elf(b'N' * 40, regs=(60, 0, 0, 0)))), '--expect', 'k3_new')
 check(rc == 0 and 'PASS k3_new: 60 VGPRs' in out and '(new)' in out, 'check: a new object inside the budget passes, named or not')
+
+# ---- the recorded exemptions (EXEMPT, AGENTS.md): at or under the recorded counts passes, past them fails
+ex = build('ex0', dict(BASE, k3_u16=elf(b'U' * 40, regs=(173, 0, 0, 0))))
+rc, out = run('check', ex, build('ex1', dict(BASE, k3_u16=elf(b'V' * 40, regs=(173, 0, 0, 0)))), '--expect', 'k3_u16')
+check(rc == 0 and 'PASS changed (code): k3_u16' in out, 'check: a changed exempt object at its recorded VGPRs passes')
+rc, out = run('check', ex, build('ex2', dict(BASE, k3_u16=elf(b'W' * 40, regs=(174, 0, 0, 0)))), '--expect', 'k3_u16')
+check(rc == 1 and '174 VGPRs > 173 (its exemption)' in out, 'check: an exempt object past its recorded VGPRs fails')
+rc, out = run('check', ex, build('ex3', dict(BASE, k3_gguf_gsq_mt=elf(b'G' * 40, regs=(96, 2, 0, 0)))), '--expect', 'k3_gguf_gsq_mt')
+check(rc == 1 and '2 spilled VGPRs > 1 (its exemption)' in out, 'check: an exempt object past its recorded spills fails')
+rc, out = run('check', ex, ex)
+check(rc == 0 and 'k3_u16' not in out.split('not judged here)')[-1] and 'k3_old (109 VGPRs, 0 spilled, not exempt)' in out,
+      'check: an unchanged exempt object inside its exemption is not listed; an unexempt one is listed as not exempt')
+
+rc, out = run('check', ex, build('ex4', dict(BASE, k3_u16=elf(b'U' * 40, regs=(180, 0, 0, 0)))), '--allow-missing')
+check('k3_u16 (180 VGPRs, 0 spilled, past its exemption 173 / 0)' in out,
+      'check: an unchanged object past its exemption is listed as past it, not as not exempt')
+rc, out = run('check', base, build('ex5', dict(BASE, k3_trace=elf(b'T' * 40, regs=(110, 0, 0, 0)))))
+check(rc == 0 and 'new: k3_trace' in out and 'PASS k3_trace: 110 VGPRs' in out, 'check: a new exempt object at its recorded counts passes')
 
 # ---- not a code object
 junk = build('junk', {'k3_a': b'not an object file'})

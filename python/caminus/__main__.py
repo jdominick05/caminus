@@ -4,7 +4,7 @@
   fit       report the context that fits: same options as serve plus --json (CPU/sysfs only)
   start     start a server in the background: caminus start NAME [--card N] [--ctx auto|N] (--team brain-hands)
   ps        the running servers and the cards; stop NAME | --all, restart NAME, logs NAME [-f], top [NAME]
-  panel     the control panel (a terminal UI: basic and advanced layouts)
+  panel     the control panel (a terminal UI: one status-first screen)
   qwen      Qwen Code on the running server, in Caminus's own Qwen home (qwen-code status | setup [--install])
   advisor   the Qwen Code advisor add-on: a hosted or local model steers Qwen Code when it looks lost
             (advisor setup [--local-only] | status | update | uninstall)

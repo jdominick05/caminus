@@ -1,0 +1,15 @@
+CAMINUS 0.1.0                       XTX ▓▓▓▓▓▓▓░ 21.3/24G   XT ▓▓▓▓▓▓░░ 15.1/20G
+╭─ running ────────────────────────────────────────────────────────────────────╮
+│ ● coder · 2 cards · :8092 · 1M ctx · up 2h14m                                │
+│   104 tok/s decode                                                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ models                      coder
+ › coder          59 GB  ●   Qwen3.8-Flash-Next Coder IQ1_M
+   swift-1.5      20 GB  ✓   ~104 tok/s, 123-203 with DFlash
+   thinkingcap    16 GB  ✓   cards    2
+   qwen3.8-27b    14 GB  ↓   drafter  [auto] off dflash
+   qwen3-30b-a3b  19 GB  ✓   running on :8092 · s stops it
+ agents
+   Ember set up · e     Qwen Code 0.26.9 · c
+
+ ↑↓ model  ←→ choice  s stop  e Ember  c Qwen Code  o options  ? help  q quit

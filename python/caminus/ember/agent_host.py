@@ -15,19 +15,42 @@ from . import runner
 
 
 def bundle():
+    """The agent runtime as a zipapp. Its bytes depend on its files alone (every entry has the same fixed date), so its
+    sha256, the installed file's name, says which code a daemon runs: status compares it with this caminus's."""
     root=Path(__file__).resolve().parents[1]
     out=io.BytesIO()
-    with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED) as z:
+    def put(z,name,data):
+        info=zipfile.ZipInfo(name,date_time=(1980,1,1,0,0,0))
+        info.compress_type=zipfile.ZIP_DEFLATED
+        info.external_attr=0o644<<16
+        z.writestr(info,data)
+    with zipfile.ZipFile(out,'w') as z:
         for rel in ('__init__.py','ember/__init__.py'):
-            z.writestr('caminus/'+rel,(root/rel).read_bytes())
+            put(z,'caminus/'+rel,(root/rel).read_bytes())
         for p in sorted((root/'ember/resident').glob('*.py')):
-            z.writestr('caminus/ember/resident/'+p.name,p.read_bytes())
-        z.writestr('__main__.py','from caminus.ember.resident.cli import main\nraise SystemExit(main())\n')
+            put(z,'caminus/ember/resident/'+p.name,p.read_bytes())
+        put(z,'__main__.py','from caminus.ember.resident.cli import main\nraise SystemExit(main())\n')
     return out.getvalue()
+
+
+def runtime_name():
+    """The file name `agent install` gives this caminus's runtime (its sha256): a daemon's heartbeat names its own."""
+    import hashlib
+    return hashlib.sha256(bundle()).hexdigest()+'.pyz'
 
 
 def main(args,transport):
     args=list(args)
+    if [a for a in args if a!='--local'][:1]==['create'] and '--local-default' in args:
+        # the session switcher's new session: the local model chosen for this machine's cards (the agent account
+        # cannot see the cards), on the local server
+        from . import serve
+        args.remove('--local-default')
+        model,why=serve.default_brain()
+        if model is None:
+            print(f'error: no default local model: {why}',file=sys.stderr)
+            return 1
+        args+=['--model',model,'--endpoint',f'http://127.0.0.1:{serve.PORT0}/v1']
     if '--local' in args:
         args.remove('--local')
         from .resident.cli import main as local
@@ -98,6 +121,17 @@ CAMINUS_INSTALL
         # instead of arriving as one buffered result when the process ends.
         live='--jsonl' in args or args[:1]==['stream']
         result=runner.run_shell_stream(script) if live else runner.run_shell(script,transport=transport)
-    sys.stdout.write(result.stdout or '')
+    out=result.stdout or ''
+    if args[:1]==['status'] and '--json' in args and result.returncode==0:
+        # the runtime this caminus would install, beside the daemon's own (heartbeat.runtime): the panel says when
+        # they differ, in place of the /update command
+        try:
+            value=json.loads(out)
+            if isinstance(value,dict):
+                value['runtime_latest']=runtime_name()
+                out=json.dumps(value)+'\n'
+        except ValueError:
+            pass
+    sys.stdout.write(out)
     sys.stderr.write(result.stderr or '')
     return result.returncode

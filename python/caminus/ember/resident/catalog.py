@@ -86,6 +86,25 @@ def deepinfra_entries(data, provider):
     return out
 
 
+# The reasoning levels each Mistral model takes (capabilities.reasoning only says whether it reasons at all): the cards
+# and docs.mistral.ai/capabilities/reasoning, 2026-11. A reasoning model not listed takes low / medium / high.
+MISTRAL_EFFORTS = (
+    (r'^mistral-large-(4|latest)', ['low', 'medium', 'high']),
+    (r'^(mistral-medium-|magistral-medium-)', ['none', 'high']),
+    (r'^zai-glm-5-3', ['low', 'high', 'max']),
+)
+
+
+def mistral_efforts(model_id, caps):
+    if not caps.get('reasoning'):
+        return []
+    import re
+    for pat, levels in MISTRAL_EFFORTS:
+        if re.search(pat, model_id):
+            return list(levels)
+    return ['low', 'medium', 'high']
+
+
 def mistral_entries(data, provider):
     """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out."""
     out, seen = [], set()
@@ -100,13 +119,30 @@ def mistral_entries(data, provider):
         prices = dict(input=float(p['input']), output=float(p['output']),
                       cache_read=float(p.get('cache_read', p['input']))) if 'input' in p and 'output' in p else None
         out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
-                        max_output=None, efforts=[], thinking='', vision=bool(caps.get('vision')), prices=prices))
+                        max_output=None, efforts=mistral_efforts(m['id'], caps), thinking='', vision=bool(caps.get('vision')),
+                        prices=prices))
     return out
 
 
 def openai_entries(data, provider, context=None):
     return [dict(id=m['id'], name=m['id'], provider=provider, context=context, max_output=None, efforts=[],
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
+
+
+def local_entries(data, provider, context=None):
+    """A local Caminus server's models, one entry per base model: its -low / -xhigh / -nothink ids are that model's
+    effort levels (effort.py), not models of their own. efforts lists the scale (every level runs as the nearest the
+    model has); variants maps a level to the id that runs it; max_output is the card's (the reply limit: up to 64K)."""
+    from . import effort
+    ids = [m['id'] for m in data.get('data') or []]
+    out = []
+    for base, variants in effort.group_local(ids).items():
+        cfg = dict(provider_kind='local', model=base, model_variants=variants)
+        line = effort.line(cfg)
+        out.append(dict(id=base, name=base, provider=provider, context=context,
+                        max_output=effort.card(base).get('max_output'), efforts=list(effort.LEVELS) if line else [],
+                        variants=variants, thinking='', vision=False, prices=None))
+    return out
 
 
 def discover(name, spec, opener=urllib.request.urlopen, key=None):
@@ -130,6 +166,8 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
             context = _get(_root(base) + '/props', headers, opener).get('n_ctx')
         except (OSError, ValueError, urllib.error.HTTPError):
             pass
+    if kind == 'local':
+        return local_entries(data, name, context)
     return openai_entries(data, name, context)
 
 
@@ -174,10 +212,8 @@ def refresh(home, config, opener=urllib.request.urlopen, only=None):
             status[name] = dict(kind=spec.get('kind'), ok=False, error=f'{type(e).__name__}: {str(e)[:200]}',
                                 at=time.time())
     cat = dict(updated=time.time(), providers=status, models=models)
-    p = path(home)
-    tmp = p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(cat, indent=1))
-    tmp.replace(p)
+    from .store import atomic_json
+    atomic_json(path(home), cat)   # (a temp file per writer: two windows refreshing at once both wrote models.tmp)
     return cat
 
 

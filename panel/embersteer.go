@@ -10,7 +10,7 @@ package main
 //   /diff                                what the goal changed in its git repositories, coloured, in an overlay
 //   /export                              the goal as markdown, in the agent's ~/exports
 //   /rewind                              back to an earlier step, files included (two presses: it rewrites files)
-//   /goal --plan TEXT, /plan approve|revise [NOTE]   a goal that explores and proposes before it changes anything
+//   /plan TEXT, /plan approve|revise [NOTE]   a goal that explores and proposes before it changes anything
 //   Shift+↑/↓ in the Goals overlay       move a queued goal up or down the queue
 
 import (
@@ -49,6 +49,29 @@ type textView struct {
 	colourDiff  bool
 }
 
+// planView is a goal's whole plan in the scrollable viewer (the plan card above the composer shows its first lines).
+func planView(g residentGoal, width int) textView {
+	lines := strings.Split(ansi.Hardwrap(residentText(g.PlanText), max(20, width-8), true), "\n")
+	keys := "↑↓ scroll · Esc back"
+	if g.State == "waiting_plan" {
+		keys = "/plan approve · /plan revise WHAT TO CHANGE · Esc back"
+	}
+	return textView{open: true, title: "plan · goal " + shortGoal(g.ID), keys: keys, lines: lines}
+}
+
+// fetchMemoryView reads the session's memory file into the viewer: /memory.
+func fetchMemoryView(m emberModel) tea.Cmd {
+	return func() tea.Msg {
+		var r struct {
+			Memory string `json:"memory"`
+		}
+		if err := residentJSON(m, []string{"memory", m.agentName, "--json"}, &r); err != nil {
+			return textViewMsg{err: "memory: " + err.Error()}
+		}
+		return textViewMsg{title: "memory · " + residentText(m.agentName), lines: strings.Split(strings.TrimRight(residentText(r.Memory), "\n"), "\n")}
+	}
+}
+
 type textViewMsg struct {
 	title string
 	lines []string
@@ -62,11 +85,12 @@ type rewindStep struct {
 }
 
 type rewindState struct {
-	open  bool
-	goal  string
-	steps []rewindStep
-	sel   int
-	err   string
+	open   bool
+	goal   string
+	steps  []rewindStep
+	sel    int
+	err    string
+	loaded bool // the list arrived (an empty one means nothing to rewind, not still loading)
 }
 
 type rewindListMsg struct {
@@ -126,10 +150,16 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 			Model string  `json:"model"`
 			USD   float64 `json:"usd"`
 		}
-		if err := residentJSON(m, append(args, "--json"), &out); err != nil {
+		raw, err := runResident(residentCommandWithin(m, append(args, "--json"), "", 3*time.Minute))
+		if err == nil {
+			err = jsonInto(raw, &out)
+		} else {
+			err = fmt.Errorf("%s", cliError(raw))
+		}
+		if err != nil {
 			text := err.Error()
 			if strings.Contains(text, "no advisor") {
-				text = "no advisor set up: /advisor setup picks one"
+				text = "no advisor set up: caminus ember agent advisor " + m.agentName + " picks one"
 			}
 			return residentActionMsg{"advisor: " + terminalText(text, false)}
 		}
@@ -147,7 +177,7 @@ func askBtw(m emberModel, goal, question string) tea.Cmd {
 		if len(m.cli) == 0 {
 			return textViewMsg{err: "needs the caminus CLI (--cli)"}
 		}
-		raw, err := residentCommand(m, args, question).CombinedOutput()
+		raw, err := runResident(residentCommandWithin(m, args, question, 2*time.Minute))
 		if err == nil {
 			if i := strings.Index(string(raw), "{"); i >= 0 {
 				err = jsonInto(raw[i:], &out)
@@ -195,19 +225,6 @@ func fetchDiff(m emberModel, goal string) tea.Cmd {
 			lines[i] = residentText(l)
 		}
 		return textViewMsg{title: "diff", lines: lines, diff: true}
-	}
-}
-
-func exportGoal(m emberModel, goal string) tea.Cmd {
-	return func() tea.Msg {
-		var out struct {
-			Path  string `json:"path"`
-			Bytes int    `json:"bytes"`
-		}
-		if err := residentJSON(m, []string{"export", m.agentName, goal, "--json"}, &out); err != nil {
-			return residentActionMsg{"export: " + err.Error()}
-		}
-		return residentActionMsg{fmt.Sprintf("exported to %s (%d bytes, in the agent's account)", out.Path, out.Bytes)}
 	}
 }
 
@@ -280,7 +297,7 @@ func (m emberModel) sendPlanGoal(text string) (tea.Model, tea.Cmd) {
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
-		out, err := residentCommand(m, []string{"send", name, "--plan", "--stdin", "--json"}, text).CombinedOutput()
+		out, err := runResident(residentCommand(m, []string{"send", name, "--plan", "--stdin", "--json"}, text))
 		var reply struct {
 			ID string `json:"id"`
 		}
@@ -305,8 +322,10 @@ func (m emberModel) planCard(w int) string {
 	inner := max(10, w-4)
 	rows := []string{emberWarn.Render("PLAN · goal " + shortGoal(g.ID) + " waits for your OK")}
 	plan := strings.Split(ansi.Hardwrap(residentText(g.PlanText), inner, true), "\n")
-	if len(plan) > 14 {
-		plan = append(plan[:14], "… (/diff, /export or the goals overlay show more)")
+	// the card, the composer and the status line all fit: the plan is cut to a share of the screen
+	keep := min(14, max(2, (m.height-18)/2))
+	if len(plan) > keep {
+		plan = append(plan[:keep], fmt.Sprintf("… %d more lines · /plan shows the whole plan", len(plan)-keep))
 	}
 	for _, l := range plan {
 		rows = append(rows, lipgloss.NewStyle().Foreground(cText).Render(l))
@@ -379,6 +398,8 @@ func (m emberModel) rewindOverlay(w, h int) string {
 	var rows []string
 	if st.err != "" {
 		rows = append(rows, emberWarn.Render(ansi.Truncate(st.err, inner, "…")))
+	} else if len(st.steps) == 0 && st.loaded {
+		rows = append(rows, emberDim.Render("nothing to rewind yet: no step of this goal changed a file"))
 	} else if len(st.steps) == 0 {
 		rows = append(rows, emberDim.Render("reading the goal's steps…"))
 	}
@@ -398,7 +419,11 @@ func (m emberModel) rewindOverlay(w, h int) string {
 		}
 	}
 	rows = append(rows, "", emberDim.Render(ansi.Truncate("edited files are restored; terminal side effects are not undone", inner, "…")))
-	return overlayBox("REWIND  goal "+shortGoal(st.goal), strings.Join(rows, "\n"), "↑↓ move  ·  Enter twice rewinds", w, h)
+	hint := "↑↓ move  ·  Enter twice rewinds"
+	if m.msg != "" { // "Enter again to rewind": the composer's frame, where it went, is under this overlay
+		hint = terminalText(m.msg, false)
+	}
+	return overlayBox("REWIND  goal "+shortGoal(st.goal), strings.Join(rows, "\n"), hint, w, h)
 }
 
 func (m emberModel) rewindKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -423,7 +448,8 @@ func (m emberModel) rewindKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key := fmt.Sprintf("rewind:%s:%d", st.goal, s.Step)
 		if armed != key || time.Since(m.chat.armedAt) > 10*time.Second {
 			m.chat.armed, m.chat.armedAt = key, time.Now()
-			m.msg = fmt.Sprintf("undo goal %s from step %d on (%s)? it restores files: press Enter again",
+			// the instruction first (at 100 and 80 columns the end, where it was, was cut off)
+			m.msg = fmt.Sprintf("press Enter again to undo goal %s from step %d on (it restores files): %s",
 				shortGoal(st.goal), s.Step, residentText(s.Label))
 			return m, nil
 		}
@@ -447,10 +473,10 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 	switch command {
 	case "/advisor":
 		// a review now: the advisor reads the goal and its advice reaches the agent with its current reply dropped, so
-		// it reads the advice before its next step. /advisor setup is the settings screen (model, budget, off).
-		if strings.TrimSpace(arg) == "setup" {
-			next, cmd := m.openAdvisor()
-			return next, cmd, true
+		// it reads the advice before its next step (its settings: caminus ember agent advisor NAME).
+		if strings.TrimSpace(arg) == "setup" { // (the settings screen left the TUI: never a paid review about "setup")
+			m.msg = "the advisor's settings are in the CLI: caminus ember agent advisor " + m.agentName
+			return m, nil, true
 		}
 		if !need() {
 			return m, nil, true
@@ -470,11 +496,6 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 	case "/diff":
 		m.msg = "reading the changes…"
 		return m, fetchDiff(m, goal), true
-	case "/export":
-		if !need() {
-			return m, nil, true
-		}
-		return m, exportGoal(m, goal), true
 	case "/rewind":
 		if !need() {
 			return m, nil, true
@@ -482,10 +503,34 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		m.chat.rewind = rewindState{open: true, goal: goal}
 		return m, fetchRewind(m, goal), true
 	case "/plan":
+		if strings.TrimSpace(arg) == "" { // alone: the waiting plan (or the selected goal's), whole, in the viewer
+			for _, gl := range m.resident.Goals {
+				if gl.State == "waiting_plan" || (gl.ID == goal && strings.TrimSpace(gl.PlanText) != "") {
+					m.chat.view = planView(gl, m.width)
+					m.chat.compose.Blur()
+					return m, nil, true
+				}
+			}
+		}
 		verdict, note, _ := strings.Cut(strings.TrimSpace(arg), " ")
-		if verdict != "approve" && verdict != "revise" {
-			m.msg = "usage: /plan approve  ·  /plan revise WHAT TO CHANGE"
+		planWaiting := false
+		for _, gl := range m.resident.Goals {
+			planWaiting = planWaiting || gl.State == "waiting_plan"
+		}
+		// approve / revise answer a waiting plan; with none waiting, all of TEXT is a new goal's ("/plan revise the
+		// README" starts one, it does not report that no plan waits)
+		if !planWaiting && (verdict == "approve" || verdict == "revise") && strings.TrimSpace(note) == "" {
+			m.msg = "no plan is waiting" // (a bare verdict is never a new goal's text)
 			return m, nil, true
+		}
+		if !planWaiting || (verdict != "approve" && verdict != "revise") {
+			if strings.TrimSpace(arg) == "" {
+				m.msg = "usage: /plan TEXT starts a goal that plans first  ·  /plan approve  ·  /plan revise WHAT TO CHANGE"
+				return m, nil, true
+			}
+			m.chat.newGoal, m.chat.target = true, "" // /plan TEXT: a goal that explores and proposes before it changes anything
+			next, cmd := m.sendPlanGoal(strings.TrimSpace(arg))
+			return next.(emberModel), cmd, true
 		}
 		var waiting string
 		for _, gl := range m.resident.Goals {

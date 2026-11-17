@@ -9,6 +9,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ func goalGlyph(state string) (string, lipgloss.Style) {
 		return g.queue, emberDim
 	case "completed":
 		return g.done, emberCtxOK
-	case "paused", "waiting_human", "waiting_root":
+	case "paused", "waiting_human", "waiting_root", "parked":
 		return g.waiting, emberWarn
 	case "error", "cancelled":
 		return g.fail, emberCtxHot
@@ -40,14 +41,33 @@ func (m emberModel) goalOrder() []int {
 	for i := range out {
 		out[i] = len(out) - 1 - i
 	}
+	// the queued goals take their slots in run order (a move showed nowhere: they stayed in creation order)
+	var slots, queued []int
+	for k, i := range out {
+		if m.resident.Goals[i].State == "queued" {
+			slots, queued = append(slots, k), append(queued, i)
+		}
+	}
+	sort.SliceStable(queued, func(a, b int) bool { return m.queuePlace(queued[a]) < m.queuePlace(queued[b]) })
+	for j, k := range slots {
+		out[k] = queued[j]
+	}
 	return out
+}
+
+// queuePlace is a queued goal's place in the run order: the resident's, else its age (the queue runs oldest first).
+func (m emberModel) queuePlace(i int) int {
+	if q := m.resident.Goals[i].Queue; q > 0 {
+		return q
+	}
+	return 1000 + len(m.resident.Goals) - i
 }
 
 func (m emberModel) goalRow(i int, selected bool, width int) string {
 	gl := m.resident.Goals[i]
-	mark, st := goalGlyph(gl.State)
+	mark, st := goalGlyph(gl.shownState())
 	text := strings.Join(strings.Fields(residentText(gl.Prompt)), " ")
-	meta := fmt.Sprintf("%s · %d steps", gl.State, gl.Steps)
+	meta := gl.shownState() + " · " + plural(gl.Steps, "step", "steps")
 	target := ""
 	if !m.chat.newGoal && gl.ID == m.chat.target {
 		target = "  " + g.user
@@ -83,6 +103,10 @@ func (m emberModel) goalDetail(i, width int) []string {
 		}
 	}
 	add("goal", gl.Prompt)
+	add("plan", gl.PlanText)
+	if strings.TrimSpace(gl.PlanText) != "" {
+		out = append(out, emberDim.Render("          v shows the whole plan"))
+	}
 	add("summary", gl.Summary)
 	add("error", gl.Error)
 	return out
@@ -112,7 +136,8 @@ func (m emberModel) goalsOverlay(w, h int) string {
 	if len(detail) > 0 {
 		body += "\n\n" + strings.Join(detail, "\n")
 	} else {
-		body += "\n\n" + emberDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
+		// wrapped, not cut (at 80 and 100 columns the last keys were lost)
+		body += "\n\n" + emberDim.Render(ansi.Wordwrap("Enter targets it  ·  space shows it  ·  v the whole plan  ·  x x cancel  ·  p pause  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, " "))
 	}
 	active := 0
 	for _, gl := range m.resident.Goals {
@@ -120,7 +145,11 @@ func (m emberModel) goalsOverlay(w, h int) string {
 			active++
 		}
 	}
-	return overlayBox(fmt.Sprintf("GOALS  %d open of %d", active, len(order)), body, "↑↓ move  ·  Enter target", w, h)
+	hint := "↑↓ move  ·  Enter target  ·  v the whole plan"
+	if m.msg != "" { // what x, p, r or a move did: the composer's frame, where it went, is under this overlay
+		hint = terminalText(m.msg, false)
+	}
+	return overlayBox(fmt.Sprintf("GOALS  %d open of %d", active, len(order)), body, hint, w, h)
 }
 
 // goalsKey: the overlay owns the keyboard while open. Actions reuse the chat's slash handlers.
@@ -128,6 +157,11 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	if k == "ctrl+c" {
 		return m, tea.Quit
+	}
+	switch k {
+	case "shift+up", "shift+down", "K", "J":
+	default:
+		m.chat.goalsFollow = "" // any other key: a refresh no longer pulls the ▸ back to the goal you last moved
 	}
 	order := m.goalOrder()
 	sel := max(0, min(m.chat.goalsSel, len(order)-1))
@@ -157,10 +191,11 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.msg = "only a queued goal can move"
 			return m, nil
 		}
+		// in run order (the list is newest first: Shift+↑ moved the wrong way and said nothing)
 		var queued []string
-		for _, q := range m.resident.Goals {
-			if q.State == "queued" {
-				queued = append(queued, q.ID)
+		for _, i := range m.goalOrder() {
+			if m.resident.Goals[i].State == "queued" {
+				queued = append(queued, m.resident.Goals[i].ID)
 			}
 		}
 		pos := 0
@@ -174,14 +209,22 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			to = pos + 1
 		}
 		if to < 1 || to > len(queued) {
+			m.msg = map[bool]string{true: "it runs next already", false: "it is last already"}[to < 1]
 			return m, nil
 		}
+		m.chat.goalsFollow = gl.ID // the ▸ stays on the goal you moved, not on the row (the next move acted on another)
 		return m, moveQueued(m, gl.ID, to)
 	case "n":
 		closeIt()
 		m.chat.newGoal, m.chat.forceNew, m.chat.target = true, true, ""
 		return m, m.chat.compose.Focus()
-	case "enter", "x", "r":
+	case "v": // the whole plan, in the viewer /diff uses
+		if len(order) > 0 && strings.TrimSpace(m.resident.Goals[order[sel]].PlanText) != "" {
+			closeIt() // (the viewer draws and takes keys only with the overlay closed)
+			m.chat.view = planView(m.resident.Goals[order[sel]], m.width)
+		}
+		return m, nil
+	case "enter", "x", "r", "p":
 		if len(order) == 0 {
 			return m, nil
 		}
@@ -197,12 +240,23 @@ func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch k {
 		case "enter":
 			closeIt()
+			m.chat.pickedGoal = id // chosen by hand: it stays chosen even when it is over (a refresh moved it before)
 			return m, tea.Batch(cmd, m.chat.compose.Focus())
 		case "x":
 			return m.chatSlash("/cancel")
 		case "r":
 			return m.chatSlash("/resume")
+		case "p":
+			return m.chatSlash("/pause")
 		}
 	}
 	return m, nil
+}
+
+// shownState is the state a UI shows: parked for a working goal waiting for its wake time (the store keeps it working).
+func (g residentGoal) shownState() string {
+	if g.Parked > float64(time.Now().Unix()) {
+		return "parked"
+	}
+	return g.State
 }

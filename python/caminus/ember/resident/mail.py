@@ -35,6 +35,10 @@ class Mail:
     def close(self):
         self.db.close()
 
+    def unregister(self):
+        """Take this name off the bus (its session was removed): peers stop listing it and mail to it is refused."""
+        self.db.execute('DELETE FROM peers WHERE name=?', (self.name,))
+
     def register(self, home):
         home = str(Path(home).resolve())
         # A name identifies one home. Reinitializing a different home must not

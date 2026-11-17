@@ -3,9 +3,9 @@
 Qwen3-30B-A3B's Q8 KV cache is served (`caminus serve --kv q8`, one card or two: [below](#serving-qwen3-30b-a3b-with---kv-q8)).
 The dense line's is staged: the own-code dense line has separate `*_kvq8` persistent objects. They keep the F16 objects
 and the weight-format selection unchanged. `Dense35Own(..., q8=True)` is an internal bring-up path: `caminus serve --kv
-q8` refuses the dense models at startup, before any card is picked. The panel's advanced layout lists `--kv` for every
-model, as it lists every serve option, and its values are saved: a `q8` set there goes to every later start from that
-layout, and a dense model or the Coder started with it refuses to start (nothing is ignored silently). Batched prefill refuses a Q8 engine until its matching implementation
+q8` refuses the dense models at startup, before any card is picked. The panel offers the KV cache choice only on the
+models whose serve modes list it (`kv` in `caminus models --json`), so it never passes `--kv q8` to a dense model or the
+Coder; started by hand with it, they refuse to start (nothing is ignored silently). Batched prefill refuses a Q8 engine until its matching implementation
 lands. Device correctness, model accuracy and speed are not yet verified for these objects.
 
 ## Objects

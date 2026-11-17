@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
-	"os"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,7 +25,8 @@ import (
 type residentChat struct {
 	ready, sending, newGoal, help, forceNew bool
 	shell                                   bool      // shell mode: "!" on an empty draft; Enter runs the line as the agent
-	expanded                                bool      // Ctrl+E: every card open (tool calls, output, thinking)
+	expanded                                bool      // Ctrl+O: every card open (tool calls, output, thinking)
+	home, cwd                               string    // the agent's home and working folder: cards show paths short
 	armed                                   string    // the root request a first "a" armed; a second approves
 	armedAt                                 time.Time // when it was armed (10 s to confirm)
 	compose                                 textarea.Model
@@ -41,17 +42,28 @@ type residentChat struct {
 	questionArmed                           bool
 	questionInput                           textarea.Model
 	questionDeferred, questionError         string
+	later                                   map[string]bool   // requests put off with Esc: they wait; Tab brings them back
+	reqOutcome                              map[string]string // each request's state for its one-line record
+	resSeen                                 map[string]string // answers read from the bridge's res/ (final: read once)
+	questionAt                              time.Time         // when the prompt opened (a grace period before Enter decides)
 	picker                                  bool
-	pickerQuery                             string
 	pickerSel                               int
-	approvals                               bool // the Approvals overlay is over the conversation
-	approvalSel                             int  // the row it has selected
-	approvalDetail                          bool // Enter opened the selected request in full
-	goals, goalsDetail                      bool // the Goals overlay, and its selected goal opened in full
+	hostShell                               bool               // shell mode runs in your own shell on this machine (!!), not the agent's
+	shellStash                              string             // the draft held aside while a second shell command is typed
+	prevTarget                              string             // the goal before Ctrl+N or /new (Esc goes back to it)
+	goalsFollow                             string             // the goal the overlay's selection follows after a move
+	pickedGoal                              string             // the goal picked by hand in the overlay (no refresh moves off it)
+	clearedDraft                            string             // the draft Ctrl+C / Ctrl+U cleared: the next Up brings it back first
+	sessionDone                             map[string]float64 // terminal sessions seen to end, with their exit code
+	menuClosed                              string             // the draft Esc closed the / or path menu on (it stays shut until it changes)
+	quitArmed                               time.Time          // Ctrl+C cleared a draft: a second one within 2 s quits
+	pickerNew                               bool               // the switcher is asking for a new session's name
+	pickerName                              string             // that name as typed
+	pickerDestroy                           string             // the session x armed: a second x destroys it
+	goals, goalsDetail                      bool               // the Goals overlay, and its selected goal opened in full
+	loadingShown                            bool               // the transcript shows "loading NAME…"
 	goalsSel                                int
 	models                                  modelsState   // the Models overlay (/model)
-	identity                                identityState // the Identity screen (/identity): the agent's GitHub account
-	advisor                                 advisorState  // the Advisor screen (/advisor)
 	studio                                  studioState   // the Studio overlay (/studio)
 	recap                                   string        // the "while you were away" card, until Esc
 	chordAt                                 time.Time     // Ctrl+X pressed: Ctrl+E within 2 s opens $EDITOR
@@ -60,7 +72,7 @@ type residentChat struct {
 	full                                    bool          // Ctrl+O: cards show every line
 	rootSel                                 string        // the root request the decision keys act on (shared card)
 	group                                   toolGroup     // compact view: the tool work since the last drawn block
-	cards                                   bool          // Ctrl+E: every tool card instead of the compact line
+	cards                                   bool          // Ctrl+O: every tool card instead of the compact line
 	sel                                     chatSelection // select to copy (envselect.go)
 	view                                    textView      // /btw's answer, /diff
 	rewind                                  rewindState   // the /rewind step picker
@@ -76,6 +88,8 @@ type residentChat struct {
 	slashFor                                string      // the draft slashSel belongs to (a new draft starts at the top)
 	slashToken, slashText                   string
 	pathIdx                                 int
+	dirs                                    map[string][]string // the agent's folders listed for @ / + completion
+	dirsPending                             map[string]bool
 	pathPrefix, pathPick                    string
 	live                                    residentLive
 	stream                                  *streamState
@@ -108,13 +122,13 @@ func (c *wrapCache) wrap(s string, width int, style func(string) string) []strin
 		c.width, c.done, c.lines = width, 0, nil
 	}
 	if cut > c.done {
-		for _, ln := range strings.Split(ansi.Hardwrap(strings.TrimSuffix(s[c.done:cut], "\n"), width, true), "\n") {
+		for _, ln := range strings.Split(ansi.Wrap(strings.TrimSuffix(s[c.done:cut], "\n"), width, ""), "\n") {
 			c.lines = append(c.lines, style(ln))
 		}
 		c.done = cut
 	}
 	out := slices.Clip(c.lines)
-	for _, ln := range strings.Split(ansi.Hardwrap(s[cut:], width, true), "\n") {
+	for _, ln := range strings.Split(ansi.Wrap(s[cut:], width, ""), "\n") {
 		out = append(out, style(ln))
 	}
 	return out
@@ -215,10 +229,23 @@ func shellMark(info textarea.PromptInfo) string {
 	return ""
 }
 
+// hostShellMark is the host shell's prompt: "!!", run as you on this machine.
+func hostShellMark(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
+		return "!! "
+	}
+	return ""
+}
+
 // setShell switches shell mode: the prompt, its colour and the placeholder say which mode the draft is in.
 func (m *emberModel) setShell(on bool) {
 	m.chat.shell = on
-	if on {
+	if !on {
+		m.chat.hostShell = false
+	}
+	if on && m.chat.hostShell {
+		m.chat.compose.SetPromptFunc(3, hostShellMark)
+	} else if on {
 		m.chat.compose.SetPromptFunc(2, shellMark)
 	} else {
 		m.chat.compose.SetPromptFunc(2, promptMark)
@@ -234,6 +261,9 @@ func (m *emberModel) chatStyles() {
 	s.Focused.Prompt, s.Blurred.Prompt = emberBusy, emberBusy
 	if m.chat.shell {
 		s.Focused.Prompt, s.Blurred.Prompt = emberShell, emberShell
+	}
+	if m.chat.hostShell {
+		s.Focused.Prompt, s.Blurred.Prompt = hostShellStyle(), hostShellStyle()
 	}
 	s.Focused.Placeholder, s.Blurred.Placeholder = emberDim, emberDim
 	// the editor's default cursor line has a grey background: the placeholder sat under a highlight bar
@@ -286,12 +316,29 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	if m.chat.selectID != "" {
 		selected = m.chat.selectID
 	}
+	if id := m.chat.goalsFollow; id != "" { // the overlay's ▸ on the goal that moved, at its new place
+		for row, i := range m.goalOrder() {
+			if m.resident.Goals[i].ID == id {
+				m.chat.goalsSel = row
+			}
+		}
+	}
 	m.goalSel = min(m.goalSel, max(0, len(m.resident.Goals)-1))
+	found := false
 	for i, g := range m.resident.Goals {
 		if g.ID == selected {
 			m.goalSel = i
 			m.chat.selectID = ""
+			found = true
 			break
+		}
+	}
+	// nothing chosen yet (a fresh panel), or the chosen goal was cancelled: the goal being worked on, else the newest
+	// one not cancelled. The newest goal is not the one in progress when later ones were queued and cancelled: the
+	// header, the composer, /compact and /rewind all followed a cancelled goal.
+	if g := m.selectedResidentGoal(); !found || (g != nil && g.State == "cancelled" && g.ID != m.chat.pickedGoal) {
+		if i := m.liveGoalIndex(); i >= 0 {
+			m.goalSel = i
 		}
 	}
 	if m.chat.compose.Value() == "" && !m.chat.sending && !m.chat.forceNew && m.chat.selectID == "" {
@@ -299,6 +346,56 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	}
 	m.syncQuestion()
 	m.syncChat()
+}
+
+// liveGoalIndex is the goal being worked on (or waiting for you), else the newest goal not cancelled; -1 for none.
+func (m emberModel) liveGoalIndex() int {
+	for i, g := range m.resident.Goals {
+		switch g.State {
+		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan", "paused":
+			return i
+		}
+	}
+	for i, g := range m.resident.Goals {
+		if g.State != "cancelled" {
+			return i
+		}
+	}
+	return -1
+}
+
+// recordLine is a request's one-line record in the transcript.
+func recordLine(icon, text string, w int) string {
+	return emberClip(" "+emberWarn.Render(icon)+" "+emberDim.Render(text), max(10, w))
+}
+
+// recordState is a record whose body is cut, never its state (" · no: open it as a draft PR" stays whole), then
+// what follows the state (a waiting question's choices) in the room left.
+func recordState(icon, body, state, after string, w int) string {
+	tail := ""
+	if state != "" {
+		tail = " · " + state
+	}
+	if room := max(10, w) - 4; ansi.StringWidth(tail) > room-12 {
+		tail = ansi.Truncate(tail, max(12, room-12), "…")
+	}
+	room := max(12, max(10, w)-4-ansi.StringWidth(tail))
+	text := ansi.Truncate(body, room, "…") + tail
+	if after != "" {
+		text += "  " + after
+	}
+	return recordLine(icon, text, w)
+}
+
+// humanRefusal says why a request was not filed, for a person: the gate's text addresses the model.
+func humanRefusal(err string) string {
+	switch {
+	case strings.Contains(err, "no done check yet"):
+		return "the agent asked before stating what done looks like"
+	case strings.Contains(err, "already waiting"), strings.Contains(err, "still waiting"):
+		return "another request is already waiting for you"
+	}
+	return firstLine(err)
 }
 
 func (m *emberModel) targetSelectedGoal() {
@@ -323,6 +420,7 @@ func (m *emberModel) syncChat() {
 		m.chat.questionInput.SetHeight(min(3, max(1, h-12)))
 	}
 	oldBottom := m.chat.transcript.AtBottom()
+	oldShare := m.chat.transcript.ScrollPercent() // (a redraw at a new width keeps this share of the history in view)
 	// A viewport re-wraps its whole content on a size change, and this runs on every live snapshot, so a
 	// 1 MB history would be re-read ten times a second while a reply streams. Only resize when it moved.
 	tw := w
@@ -353,9 +451,25 @@ func (m *emberModel) syncChat() {
 		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
+	// a command first seen running and later seen to end: its card is drawn again with the exit
+	if done := m.endedSessions(); fmt.Sprint(done) != fmt.Sprint(m.chat.sessionDone) {
+		m.chat.sessionDone = done
+		m.chat.content, m.chat.rendered = "", 0
+	}
+	// a request's one-line record carries its state (waiting, yes, no: …): when one changes, the history is drawn
+	// again (rare: a request filed, answered or timed out)
+	if out := m.requestOutcomes(); fmt.Sprint(out) != fmt.Sprint(m.chat.reqOutcome) {
+		m.chat.reqOutcome = out
+		m.chat.content, m.chat.rendered = "", 0
+	}
+	if m.chat.home != m.resident.Home || m.chat.cwd != m.agentCwdAbs() {
+		m.chat.home, m.chat.cwd = m.resident.Home, m.agentCwdAbs()
+		m.chat.content, m.chat.rendered = "", 0 // (the paths on the cards are drawn short against them)
+	}
+	rendering := m.chat.rendered == 0 // drawing the history from the start (a resize, Ctrl+O, a state change)
 	changed := m.chat.rendered != len(m.residentEvents)
 	if m.chat.rendered == 0 {
-		m.chat.group = toolGroup{}   // drawing from the start (a resize, Ctrl+E): the group starts over too
+		m.chat.group = toolGroup{}   // drawing from the start (a resize, Ctrl+O): the group starts over too
 		m.chat.sel = chatSelection{} // and the lines a selection pointed at are gone
 	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
@@ -365,7 +479,7 @@ func (m *emberModel) syncChat() {
 				// its words first (they close the line above them), then its calls start the next line
 				if block := m.chat.eventBlock(compactAssistant(e)); block != "" {
 					m.chat.flushGroup(w)
-					m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
+					m.chat.content += ansi.Wrap(block, w, "") + "\n\n" // (at words: Hardwrap broke them mid-word)
 				}
 				m.chat.fold(e)
 				continue
@@ -373,9 +487,9 @@ func (m *emberModel) syncChat() {
 			if e.Kind == "tool_result" {
 				// every action is its own card (60 calls, 60 cards: emberactions.go)
 				if block := m.chat.actionBlock(e, w); block != "" {
+					m.chat.fold(e) // first: a finished command's "running:" line must not be fixed above its card
 					m.chat.flushGroup(w)
 					m.chat.content += block + "\n\n"
-					m.chat.fold(e) // (the running line still clears)
 					continue
 				}
 			}
@@ -385,11 +499,11 @@ func (m *emberModel) syncChat() {
 		}
 		if block := m.chat.eventBlock(e); block != "" {
 			m.chat.flushGroup(w)
-			m.chat.content += ansi.Hardwrap(block, w, true) + "\n\n"
+			m.chat.content += ansi.Wrap(block, w, "") + "\n\n"
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
-	if changed || m.chat.transcript.TotalLineCount() == 0 {
+	if changed || m.chat.transcript.TotalLineCount() == 0 || m.chat.loadingShown != m.statusAt.IsZero() {
 		body := strings.TrimRight(m.chat.content, "\n")
 		if !m.chat.group.empty() {
 			body += "\n\n" + m.chat.group.line(w) // the work in progress, fixed when the next block arrives
@@ -397,12 +511,22 @@ func (m *emberModel) syncChat() {
 		if body != "" && m.height >= 24 && m.sideWidth() > 0 {
 			body += "\n" // the gap above the composer, in the transcript's column only (chatBottom)
 		}
-		if body == "" {
-			body = mascotBeside(0, "", emberTitle.Render("CAMINUS")+emberDim.Render(" env"),
-				"Your agent's conversation and commands will stay here.",
-				emberDim.Render("Type a goal below. /help shows the controls."))
+		m.chat.loadingShown = false
+		if body == "" && m.statusAt.IsZero() {
+			body = emberDim.Render("loading " + residentText(m.agentName) + "…")
+			m.chat.loadingShown = true // (replaced by the welcome or the history once the status lands)
+		} else if body == "" {
+			room := max(10, w-lipgloss.Width(mascot(0)[0])-2) // (a narrow terminal cut the lines with no marker)
+			body = mascotBeside(0, "", emberTitle.Render("EMBER")+emberDim.Render(" · Caminus"),
+				emberClip("Your agent's conversation and commands will stay here.", room),
+				emberDim.Render(emberClip("Type a goal below. /help shows the controls.", room)))
 		}
+		redrawn := m.chat.transcript.TotalLineCount() > 0 && rendering
 		m.chat.transcript.SetContent(body)
+		if redrawn && !oldBottom {
+			// a resize redrew the history at the new width: the place you were reading stays (80->160->80 lost it)
+			m.chat.transcript.SetYOffset(int(oldShare * float64(max(0, m.chat.transcript.TotalLineCount()-m.chat.transcript.Height()))))
+		}
 	}
 	if oldBottom {
 		m.chat.transcript.GotoBottom()
@@ -413,24 +537,72 @@ func (m *emberModel) syncChat() {
 func (m emberModel) bodyHeight() int {
 	// the header is two lines (title, rule) or more when the goal wraps under it; the footer one or two (chatFoot)
 	w := max(20, m.width)
-	return max(4, max(12, m.height)-lipgloss.Height(m.chatHead(w))-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w)))
+	// the cards drawn under the transcript (a recap, a waiting plan) take their rows from it too: they pushed the
+	// composer and the status line off the screen
+	cards := 0
+	for _, c := range []string{m.recapCard(w), m.planCard(w)} {
+		if c != "" {
+			cards += lipgloss.Height(c)
+		}
+	}
+	return max(1, max(12, m.height)-lipgloss.Height(m.chatHead(w))-lipgloss.Height(m.chatBottom())-lipgloss.Height(m.chatFoot(w))-cards)
 }
 
 // chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
 // under them (three at most). The goal was cut at 47 characters before.
+// goalAim is what a goal works toward now: its prompt, or, once a message from its human was followed by a new done
+// check (the goal re-aimed: a user started a block-breaker game and then asked for a design review in the same goal),
+// that message. redirected says which.
+func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
+	text, msg, checked := g.Prompt, "", false
+	for _, e := range m.residentEvents {
+		if e.Goal != g.ID {
+			continue
+		}
+		switch e.Kind {
+		case "user_message":
+			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" && checked {
+				msg = t // (a message before the first done check refines the prompt; it does not redirect it)
+			}
+		case "done_check":
+			if msg != "" {
+				text, redirected, msg = msg, true, ""
+			}
+			checked = true
+		}
+	}
+	return text, redirected
+}
+
 func (m emberModel) chatHead(w int) string {
 	state := "stopped"
 	if m.resident.DaemonAlive {
 		state = "listening"
 	}
 	steps, goalText := 0, ""
-	if sel := m.selectedResidentGoal(); sel != nil {
+	// a new goal being written (Ctrl+N, /new, after /cancel) is no goal yet: the header showed the previous one's
+	// "completed" over a new-goal composer
+	if sel := m.selectedResidentGoal(); sel != nil && !(m.chat.newGoal && m.chat.forceNew) {
 		state, steps = sel.State, sel.Steps
-		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+		if at := m.parkedUntil(sel.ID); at != "" {
+			state = "parked until " + at // (the status still says working)
+		}
+		aim, redirected := m.goalAim(sel)
+		goalText = strings.Join(strings.Fields(residentText(aim)), " ")
+		if redirected {
+			goalText = "↪ " + goalText
+		}
 	}
-	if !m.resident.DaemonAlive {
+	if sel := m.selectedResidentGoal(); sel != nil && sel.State == "working" && m.waitingForYou(sel.ID) {
+		state = "waiting for you"
+	}
+	if m.statusAt.IsZero() {
+		// no status yet (a session just opened or switched to): its blank state is not "stopped", which flashed
+		// with the empty-session welcome on every switch
+		state, steps, goalText = "loading…", 0, ""
+	} else if !m.resident.DaemonAlive {
 		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
-		// after /stop while a newly queued goal waited
+		// after a stop while a newly queued goal waited
 		state = "stopped · /start"
 	}
 	agent := residentText(m.agentName)
@@ -440,7 +612,8 @@ func (m emberModel) chatHead(w int) string {
 	}
 	head = shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
-	wrapped := strings.Split(ansi.Wordwrap(goalText, max(10, w-4), " "), "\n")
+	// Wrap breaks a long path too (Wordwrap left it to be cut at the edge with no marker)
+	wrapped := strings.Split(ansi.Wrap(goalText, max(10, w-4), " "), "\n")
 	if len(wrapped) > 3 {
 		wrapped = append(wrapped[:2], ansi.Truncate(wrapped[2], max(10, w-5), "")+"…")
 	}
@@ -454,6 +627,9 @@ func (m emberModel) chatHead(w int) string {
 // windowTitle is the terminal tab's title: the agent's state glyph, its name and what it is doing now, so a glance
 // at the tab bar says it (Claude Code's own tab shows a glyph and the session name the same way).
 func (m emberModel) windowTitle() string {
+	if m.statusAt.IsZero() {
+		return "◌ " + residentText(m.agentName) + " · loading — caminus ember"
+	}
 	state := "stopped"
 	if m.resident.DaemonAlive {
 		state = "idle"
@@ -593,6 +769,9 @@ func (m emberModel) sidePanel(sw, height int) string {
 				}
 				// one line each, cut with … (wrapped tasks made a ragged block)
 				rows = append(rows, " "+mark+" "+st.Render(ansi.Truncate(strings.Join(strings.Fields(residentText(it.text)), " "), max(8, sw-4), "…")))
+			}
+			for _, b := range m.todoBlockers(goal.ID) { // what holds it up (the tool tells the model you see these)
+				rows = append(rows, " "+emberWarn.Render("!")+" "+emberWarn.Render(ansi.Truncate(oneLine(residentText(b)), max(8, sw-4), "…")))
 			}
 		}
 	}
@@ -747,9 +926,13 @@ func (m emberModel) emberBox(w, window int) string {
 
 // nowState is what the agent is doing this moment, and the command when one runs (the time first in now).
 func (m emberModel) nowState(goal *residentGoal) (string, string) {
-	now, command := "idle", ""
+	now, command := "listening", ""
 	l := m.chat.live
 	switch {
+	case m.daemonDown():
+		now = "stopped · /start" // (it said "between steps" under a stopped header)
+	case goal != nil && m.parkedUntil(goal.ID) != "":
+		now = "parked until " + m.parkedUntil(goal.ID)
 	case goal != nil && m.compactingNote(goal.ID) != "":
 		now = m.compactingNote(goal.ID)
 	case l.active && l.text != "":
@@ -767,10 +950,10 @@ func (m emberModel) nowState(goal *residentGoal) (string, string) {
 		}
 		command = m.chat.group.running
 	case goal == nil:
-		now = "idle (free time runs on its own schedule)"
+		now = "listening (free time runs on its own schedule)" // (the header's word for the same state; it said idle)
 	default:
 		now = map[string]string{
-			"waiting_user": "waiting for your answer · Ctrl+A", "waiting_root": "waiting for a root approval · Ctrl+A",
+			"waiting_user": "waiting for your answer · Tab", "waiting_root": "waiting for a root approval · Tab",
 			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
 			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
 		}[goal.State]
@@ -915,7 +1098,7 @@ func (m emberModel) thoughtChains(gid string) []thoughtChain {
 
 // emberTail keeps the last maxLines wrapped lines of s, so the live tail has a fixed ceiling.
 func emberTail(s string, width, maxLines int) string {
-	lines := strings.Split(ansi.Hardwrap(s, max(8, width), true), "\n")
+	lines := strings.Split(ansi.Wrap(s, max(8, width), ""), "\n") // (at words; a long word still breaks)
 	if len(lines) > maxLines {
 		lines = append([]string{emberDim.Render("…")}, lines[len(lines)-maxLines:]...)
 	}
@@ -1006,7 +1189,7 @@ func fenced(text, language string) string {
 }
 
 // eventBlock draws one durable event in the shell's style (shell.go): the human's words and the agent's replies as
-// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+E expands them all), root
+// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+O expands them all), root
 // requests as the inline approval card. The result is final: syncChat caches it and never draws it again.
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
@@ -1053,7 +1236,16 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if text == "" {
 			return ""
 		}
-		return turn(g.user, "you · steer "+shortGoal(e.Goal), cBlue, c.renderMarkdown(text))
+		// a plain message is a nudge (it keeps the plan); only /steer is labelled steer. Your line breaks stay (as a
+		// Markdown hard break: soft breaks joined four lines into one)
+		label := "you · " + shortGoal(e.Goal)
+		if k, _ := e.Data["kind"].(string); k == "steer" {
+			label = "you · steer " + shortGoal(e.Goal)
+		}
+		if e.Kind == "peer_message" {
+			label = "peer · " + shortGoal(e.Goal)
+		}
+		return turn(g.user, label, cBlue, c.renderMarkdown(strings.ReplaceAll(text, "\n", "  \n")))
 	case "assistant":
 		var parts []string
 		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
@@ -1062,7 +1254,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if c.expanded {
 				parts = append(parts, eventCard(emberThink.Render(g.expanded+" thinking")+"\n"+emberThink.Render(c.renderMarkdown(text))))
 			} else {
-				parts = append(parts, emberDim.Render(g.collapsed+" thinking · "+fmt.Sprintf("%d lines", strings.Count(text, "\n")+1)))
+				parts = append(parts, emberDim.Render(g.collapsed+" thinking · "+plural(strings.Count(text, "\n")+1, "line", "lines")))
 			}
 		}
 		if text := str("content"); text != "" {
@@ -1084,7 +1276,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
-				parts = append(parts, toolCard("terminal", firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				label := "terminal" // (any call with a command read "terminal": a root request among them)
+				if name == "ask_root" {
+					label = "asks for root"
+				}
+				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, lines(command, 40), w))
 				continue
 			}
 			summary := ""
@@ -1094,34 +1290,30 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 					break
 				}
 			}
-			var pretty any
-			text := rawArgs
-			if json.Unmarshal([]byte(rawArgs), &pretty) == nil {
-				if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
-					text = string(b)
-				}
+			body := lines(rawArgs, 40)
+			if len(args) > 0 {
+				body = keyLines(args, 40) // key: value lines, not a JSON dump
 			}
-			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, lines(text, 40), w))
+			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, body, w))
 		}
 		return strings.Join(parts, "\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
-		if str("name") == "ask_user" {
-			answer, _ := result["answer"].(string)
-			if answer == "" {
-				answer, _ = result["decision"].(string)
+		if name := str("name"); name == "ask_user" || name == "ask_root" || name == "github_handoff" {
+			// the outcome is on the request's one-line record; only a request never filed shows here
+			if errText, _ := result["error"].(string); errText != "" {
+				return recordLine(map[string]string{"ask_user": "?", "ask_root": g.root, "github_handoff": "⇡"}[name], "not sent: "+humanRefusal(errText), w)
 			}
-			return turn(g.user, "you · answer", cBlue, c.renderMarkdown(answer))
+			return ""
 		}
 		if name := str("name"); (name == "edit" || name == "write") && result["error"] == nil {
-			// an edit is a diff card: open when it is short, folded (Ctrl+E) when it is long
+			// an edit is a diff card: open when it is short, folded (Ctrl+O) when it is long
 			path, _ := result["path"].(string)
 			added, _ := result["added"].(float64)
 			removed, _ := result["removed"].(float64)
 			meta := fmt.Sprintf("+%d −%d", int(added), int(removed))
 			if created, _ := result["created"].(bool); created {
-				note, _ := result["note"].(string)
-				meta = note
+				meta = "created"
 			}
 			diff, _ := result["diff"].(string)
 			changed := 0
@@ -1131,7 +1323,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			// line numbers, tinted added / removed plates, the code highlighted for its language (emberdiff.go)
-			return editCard(residentText(path), meta, c.expanded || c.full || changed <= 12, diff, w)
+			return editCard(name, residentText(shortPath(path, c.home, c.cwd)), meta, c.expanded || c.full || changed <= 12, diff, w)
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
@@ -1143,15 +1335,25 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			return toolCard("read", residentText(path), meta, true, false, nil, w)
 		}
 		if err, ok := result["error"].(string); ok {
-			// a failed call stays open: the reason is what the reader needs
-			return toolCard("error", residentText(str("name")), firstLine(err), false, true, lines(err, 12), w)
+			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
+			var rest []string
+			if i := strings.IndexByte(strings.TrimSpace(err), '\n'); i >= 0 {
+				rest = lines(strings.TrimSpace(err)[i+1:], 12)
+			}
+			return toolCard("error", residentText(str("name")), firstLine(err), false, true, rest, w)
 		}
 		if output, ok := result["output"].(string); ok {
-			meta := fmt.Sprintf("%d lines", strings.Count(strings.TrimRight(output, "\n"), "\n")+1)
+			output = ansi.Strip(output) // (a program's colour codes are not text)
+			meta := plural(strings.Count(strings.TrimRight(output, "\n"), "\n")+1, "line", "lines")
 			if code, ok := result["exit_code"].(float64); ok {
 				meta = fmt.Sprintf("exit %d · ", int(code)) + meta
 			} else if running, _ := result["running"].(bool); running {
 				meta = "running · " + meta
+				if sid, _ := result["session"].(string); sid != "" {
+					if code, done := c.sessionDone[sid]; done { // a later check saw it end
+						meta = fmt.Sprintf("ended later: exit %d · ", int(code)) + strings.TrimPrefix(meta, "running · ")
+					}
+				}
 			}
 			if strings.TrimSpace(output) == "" {
 				meta = strings.TrimSuffix(meta, " · 1 lines") + " · no output"
@@ -1167,35 +1369,83 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			code, _ := result["exit_code"].(float64)
 			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
 		}
-		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
-			return toolCard("result", residentText(str("name")), "", true, c.expanded, lines(string(b), 30), w)
+		if str("name") == "finish" {
+			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
+			// open when expanded (its raw JSON repeated the summary right above the block)
+			verdict := residentText(firstLine(fmt.Sprint(result["judge"])))
+			if result["judge"] == nil {
+				verdict = "no judge"
+			}
+			var more []string
+			if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
+				more = append(more, "left open: "+residentText(open))
+			}
+			return toolCard("finish", "judge: "+verdict, "", true, c.expanded, more, w)
 		}
+		return toolCard("result", residentText(str("name")), "", true, c.expanded, keyLines(result, 30), w)
 	case "finished":
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
+		// one line, not a card: you decide in the prompt where you type (the outcome is the result's line)
+		// a long command is cut, never its state
 		if str("kind") == "github" {
-			// the card shows what will be posted under your name: the summary, then the body's first lines (all of it
-			// in the approvals screen, Ctrl+A then Enter)
-			text := residentText(str("summary"))
-			if h, ok := e.Data["github"].(map[string]any); ok {
-				if _, body := handoffText(h); strings.TrimSpace(body) != "" {
-					lines := strings.Split(strings.TrimRight(residentText(body), "\n"), "\n")
-					shown := lines[:min(len(lines), 10)]
-					text += "\n\n" + strings.Join(shown, "\n")
-					if len(lines) > len(shown) {
-						text += fmt.Sprintf("\n… %d more lines · Ctrl+A, Enter shows all of it", len(lines)-len(shown))
-					}
+			return recordState("⇡", "github: "+oneLine(residentText(str("summary"))), c.reqOutcome[str("id")], "", w)
+		}
+		return recordState(g.root, "root: "+oneLine(residentText(str("cmd"))), c.reqOutcome[str("id")], "", w)
+	case "question":
+		// the state first (a long question's choices must not push it off the line); the choices only while it waits
+		// a long question is cut, never its state; a waiting one's choices follow in the room left
+		state := c.reqOutcome[str("id")]
+		after := ""
+		if ch, _ := e.Data["choices"].([]any); len(ch) > 0 && (state == "" || state == "waiting") {
+			var opts []string
+			for _, x := range ch {
+				if t, _ := x.(string); t != "" {
+					opts = append(opts, residentText(t))
 				}
 			}
-			return approvalCard("github", text, residentText(str("reason")), w)
+			after = "(" + strings.Join(opts, " / ") + ")"
 		}
-		return approvalCard("root", residentText(str("cmd")), residentText(str("reason")), w)
-	case "question":
-		return turn("?", "question", cYellow, c.renderMarkdown(str("text")))
+		return recordState("?", oneLine(residentText(str("text"))), state, after, w)
+	case "plan_proposed":
+		// one line each for the plan's steps: once its card closed nothing was left in the history
+		return recordLine("▤", "plan proposed: "+oneLine(residentText(str("plan"))), w)
+	case "plan_approved":
+		return recordLine("▤", "plan approved (you)", w)
+	case "plan_rejected":
+		line := "plan sent back (you)"
+		if n := strings.TrimSpace(str("note")); n != "" {
+			line += ": " + oneLine(residentText(n))
+		}
+		return recordLine("▤", line, w)
+	case "rewound":
+		// the cards above this line are undone: the files they changed are back (terminal side effects are not)
+		to, _ := e.Data["to"].(float64)
+		var parts []string
+		for _, k := range []string{"restored", "removed"} {
+			if l, _ := e.Data[k].([]any); len(l) > 0 {
+				var names []string
+				for _, x := range l {
+					names = append(names, shortPath(fmt.Sprint(x), c.home, c.cwd))
+				}
+				parts = append(parts, k+" "+strings.Join(names, ", "))
+			}
+		}
+		line := fmt.Sprintf("rewound to step %d", int(to))
+		if len(parts) > 0 {
+			line += ": " + strings.Join(parts, " · ")
+		}
+		// wrapped, not cut: its end (the goal is paused) could not be read even in the expanded view
+		return wrappedRecord("↶", line+" · the changes above are undone; the goal is paused (/resume)", w)
+	case "rewind_failed":
+		return recordLine("↶", "rewind failed: "+oneLine(residentText(str("error"))), w)
 	case "compacted":
 		return toolCard("note", "context compacted", "the whole conversation stays in this transcript", true, false, nil, w)
 	case "cancelled":
 		return toolCard("note", "goal "+shortGoal(e.Goal)+" cancelled", "", true, false, nil, w)
+	case "turn_retried": // a daemon restart cut a step that was generating: it runs again
+		step, _ := e.Data["step"].(float64)
+		return recordLine("↻", fmt.Sprintf("agent restarted · step %d retried", int(step)), w)
 	case "model_back":
 		down, _ := e.Data["down_s"].(float64)
 		tries, _ := e.Data["attempts"].(float64)
@@ -1225,6 +1475,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("error", strings.ReplaceAll(e.Kind, "_", " "), firstLine(text), false, true, body, w)
 	case "judged":
 		v := str("verdict")
+		if v == "met" { // the finish line right after it carries the verdict and its reason: one line, not two
+			return ""
+		}
 		return toolCard("gate", "judge: "+strings.ReplaceAll(v, "_", " "), firstLine(str("reason")), v == "met" || v == "unread", v != "met", lines(str("reason"), 6), w)
 	case "gate":
 		ok, _ := e.Data["passed"].(bool)
@@ -1240,7 +1493,8 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	case "advice":
 		return toolCard("note", "asked its advisor", residentText(str("model"))+" · "+firstLine(str("question")), true, false, nil, w)
 	case "advisor_review":
-		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · the agent reads it before its next step", true, false, nil, w)
+		// what the advisor said, which the agent reads before its next step (a card without it said nothing)
+		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · "+firstLine(str("advice")), true, c.expanded, lines(str("advice"), 30), w)
 	case "watchdog_advised":
 		return toolCard("note", "the advisor stepped in", "the goal was about to pause ("+residentText(str("reason"))+"); its advice went to the agent", true, false, nil, w)
 	case "woke":
@@ -1278,12 +1532,12 @@ func (m emberModel) chatComposer() string {
 				}
 				input = emberDim.Render(emberClip("Tab completes · "+strings.Join(lines, "  "), max(18, m.width-6))) + "\n" + input
 			}
-		} else if token, ok := pathToken(value); ok {
+		} else if token, ok := pathToken(value); ok && m.pathMenu(max(18, m.width-2)) == "" {
 			// The path so far is rendered in the inline-code role, then what Tab
 			// can offer: directories in the navigation accent, files resting, and
 			// the absence of any match in the failure color so a typo shows itself.
-			input = emberDim.Render("Tab completes · ") + emberCode.Render(token)
-			if matches := pathMatches(token); len(matches) > 0 {
+			hint := emberDim.Render("Tab completes · ") + emberCode.Render(token) // (it overwrote the draft, so it drew twice)
+			if matches := m.pathMatches(token); len(matches) > 0 {
 				lines := matches
 				if len(lines) > 4 {
 					lines = lines[:4]
@@ -1298,20 +1552,29 @@ func (m emberModel) chatComposer() string {
 					}
 					lines[i] = style.Render(l)
 				}
-				input += emberDim.Render(" · " + strings.Join(lines, "  "))
+				hint += emberDim.Render(" · " + strings.Join(lines, "  "))
+			} else if _, abs, _ := m.pathDir(token); m.chat.dirs[abs] == nil && m.chat.dirsPending[abs] {
+				hint += emberDim.Render(" listing the agent's folder…")
 			} else {
-				input += emberCtxHot.Render(" no match")
+				hint += emberCtxHot.Render(" no match")
 			}
-			input = emberClip(input, max(18, m.width-6)) + "\n" + input
+			input = emberClip(hint, max(18, m.width-6)) + "\n" + input
 		}
 	}
 	box := composerBox(input, m.composerTitle(), max(18, m.width-2))
 	if m.chat.shell {
-		box = borderTitle(emberBorder.BorderForeground(cPurple).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
-			m.composerTitle(), emberShell)
+		edge, st := cPurple, emberShell
+		if m.chat.hostShell { // your own shell, not the agent's: its own colour, so the two never look alike
+			edge, st = cOrange, hostShellStyle()
+		}
+		box = borderTitle(emberBorder.BorderForeground(edge).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
+			m.composerTitle(), st)
 	}
 	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
 	// the status line, which appeared and went with every message
+	if m.noticeShown() == "" || m.noticeLong() {
+		return box // expired, or too long for the frame: it is drawn whole above the composer (chatBottom)
+	}
 	return borderNote(box, terminalText(m.msg, false), emberDim)
 }
 
@@ -1320,6 +1583,8 @@ func (m emberModel) chatComposer() string {
 func (m emberModel) composerTitle() string {
 	title := "new goal"
 	switch {
+	case m.chat.hostShell:
+		title = "host shell · runs as you, on this machine"
 	case m.chat.shell:
 		title = "shell · runs as the agent"
 	case m.chat.sending:
@@ -1332,19 +1597,16 @@ func (m emberModel) composerTitle() string {
 			title = "continue goal " + shortGoal(m.chat.target)
 		}
 	}
-	if !m.chat.compose.Focused() && !m.chat.sending {
-		title += " · browsing"
-	}
 	return title
 }
 
 // composerHint is the composer's placeholder: what Enter does with the draft now.
 func (m emberModel) composerHint() string {
-	if m.chat.shell {
-		return "a command, run in the agent's account · Enter runs it · Backspace leaves"
+	if m.chat.hostShell {
+		return "a command, run as you in your own shell · Enter runs it · Backspace leaves"
 	}
-	if !m.chat.compose.Focused() {
-		return "browsing history · Enter returns to typing"
+	if m.chat.shell {
+		return "a command, run in the agent's account · ! again: your own shell · Enter runs it · Backspace leaves"
 	}
 	if m.chat.newGoal {
 		return "type a goal · Enter starts it · ! for shell mode · /help"
@@ -1369,10 +1631,24 @@ func (m emberModel) chatBottom() string {
 	if act := m.activityLine(max(18, m.width-2)); act != "" && m.height >= 20 { // (a small terminal keeps its rows)
 		out = act + "\n" + out // above the todo list, where the work is described
 	}
+	if line := m.waitingLine(); line != "" && m.chat.question == nil {
+		out = line + "\n" + out // requests put off with Esc: they still wait, Tab answers
+	}
+	if m.noticeLong() && m.chat.question == nil {
+		// a notice too long for the composer's frame, whole (it was cut where the next step was named)
+		w := max(18, m.width-4)
+		ls := strings.Split(ansi.Wordwrap(terminalText(m.noticeShown(), false), w, " "), "\n")
+		if len(ls) > 3 {
+			ls = append(ls[:2], ansi.Truncate(ls[2], w-1, "")+"…")
+		}
+		out = " " + emberDim.Render(strings.Join(ls, "\n ")) + "\n" + out
+	}
 	if side := m.btwSection(max(18, m.width-2)); side != "" {
 		out = side + "\n" + out
 	}
 	if menu := m.slashMenu(max(18, m.width-2)); menu != "" {
+		out = menu + "\n" + out
+	} else if menu := m.pathMenu(max(18, m.width-2)); menu != "" {
 		out = menu + "\n" + out
 	}
 	// a blank line between the conversation and what sits under it, as Claude Code leaves: the composer read as part
@@ -1395,6 +1671,14 @@ func (m emberModel) recall(k string) (emberModel, bool) { return m.recallStep(k,
 func (m emberModel) recallStep(k string, asked bool) (emberModel, bool) {
 	value := m.chat.compose.Value()
 	recalling := m.chat.recallIdx > 0 && value == m.chat.recallText
+	if !recalling && k == "up" && strings.TrimSpace(value) == "" && m.chat.clearedDraft != "" {
+		// a draft Ctrl+C or Ctrl+U just cleared comes back first: Up went to the resident and pulled back (withdrew) a
+		// sent message instead, and the draft was gone
+		m.chat.compose.SetValue(m.chat.clearedDraft)
+		m.chat.clearedDraft = ""
+		m.msg = "your draft is back"
+		return m, true
+	}
 	if !recalling {
 		m.chat.recallIdx = 0
 		if k == "down" || strings.TrimSpace(value) != "" {
@@ -1427,7 +1711,11 @@ func (m emberModel) recallStep(k string, asked bool) (emberModel, bool) {
 		m.chat.compose.SetValue(past[i-1])
 		m.chat.compose.CursorEnd()
 		m.chat.recallIdx, m.chat.recallText = i, past[i-1]
-		m.msg = fmt.Sprintf("sent message %d of %d · ↑ older · ↓ newer · edit or Enter to send", i, len(past))
+		what := "sent message"
+		if isDraft(m.agentName, past[i-1]) { // a draft Ctrl+C or Ctrl+U cleared was never sent
+			what = "your draft"
+		}
+		m.msg = fmt.Sprintf("%s %d of %d · ↑ older · ↓ newer · edit or Enter to send", what, i, len(past))
 	}
 	m.syncChat()
 	return m, true
@@ -1446,7 +1734,7 @@ func (m emberModel) btwSection(w int) string {
 	}
 	var art []string // (no Ember beside the answer; the section heading says what it is)
 	artW := 0
-	textW := max(10, min(readingWidth, w-1-artW))
+	textW := max(10, min(readingWidth, w-4-artW)) // (the frame and its inner margin: a body line is 1 + textW, the box textW + 2)
 	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-4))
 	body := []string{emberBusy.Render("you ") + q}
 	rows := m.btwRows()
@@ -1468,27 +1756,46 @@ func (m emberModel) btwSection(w int) string {
 			keys = fmt.Sprintf("shift+↑↓ scroll (%d-%d of %d) · esc closes", top+1, end, len(lines))
 		}
 	}
-	var out []string
+	// a popup, not more transcript: its own tinted surface in a frame, the title and keys in the top border (a user
+	// read the unframed answer as history)
+	surface, border := overlayColors()
+	seq, edge := bgSeq(surface), lipgloss.NewStyle().Foreground(lipgloss.Color(border))
+	inner := min(w-2, textW+2)
+	title := " " + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("by the way") + " " +
+		emberDim.Render(emberClip("not added to the goal · "+keys, max(4, inner-16))) + " "
+	fill := max(0, inner-1-ansi.StringWidth(title))
+	out := []string{edge.Render("╭─") + title + edge.Render(strings.Repeat("─", fill)+"╮")}
 	for i, l := range body {
 		a := strings.Repeat(" ", artW)
 		if i < len(art) {
 			a = art[i] + "  "
 		}
-		out = append(out, " "+a+l)
+		cell := " " + a + l
+		pad := max(0, inner-ansi.StringWidth(cell))
+		out = append(out, edge.Render("│")+seq+replate(cell, seq)+strings.Repeat(" ", pad)+"\x1b[m"+edge.Render("│"))
 	}
-	// a reading surface: the shared heading, no frame; the keys ride on the heading's note
-	return sectionHead("by the way", cAccent, "not added to the goal · "+keys, w) + "\n" + strings.Join(out, "\n")
+	out = append(out, edge.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return strings.Join(out, "\n")
 }
 
 // helpLines: every command with what it does (the slash menu's two columns), then the keys.
-func helpLines() []string {
+func helpLines(width int) []string {
 	names := make([]string, 0, len(slashCommands))
 	for _, c := range slashCommands {
 		names = append(names, c.name)
 	}
 	slices.Sort(names)
+	// the description wraps at a word under its own column (an 80-column terminal cut it mid-word: "reads it be"), and
+	// a tab never reaches the frame (a custom command's text with one pushed the border out)
+	textW := max(20, width-6-16)
 	row := func(k, v string, w int) string {
-		return lipgloss.NewStyle().Foreground(cText).Bold(true).Render(k) + strings.Repeat(" ", max(1, w-ansi.StringWidth(k))) + emberDim.Render(v)
+		v = strings.ReplaceAll(v, "\t", " ")
+		wrapped := strings.Split(ansi.Wordwrap(v, textW, " "), "\n")
+		out := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(k) + strings.Repeat(" ", max(1, w-ansi.StringWidth(k))) + emberDim.Render(wrapped[0])
+		for _, more := range wrapped[1:] {
+			out += "\n" + strings.Repeat(" ", w) + emberDim.Render(more)
+		}
+		return out
 	}
 	out := []string{emberTitle.Render("commands"), ""}
 	for _, n := range names {
@@ -1499,14 +1806,18 @@ func helpLines() []string {
 		{"Enter", "send · Alt+Enter adds a line"},
 		{"↑ ↓", "your sent messages (an unread one is pulled back first)"},
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
-		{"Esc", "browse the history; while a reply is written, interrupt that turn"},
+		{"@ path", "names a path (the agent's folders; Tab completes)"},
+		{"+ path", "attaches the file (read as the agent, up to 64 KB)"},
+		{"Esc", "while a reply is written, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
-		{"Ctrl+P", "sessions"},
+		{"Shift+Tab", "sessions: a card per session"},
 		{"Ctrl+G", "goals"},
-		{"Ctrl+A", "approvals"},
+		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
+		{"!  !!", "on an empty draft: a command in the agent's account; again: in your own shell"},
+		{"Home  End", "the top or the bottom of the history (with an empty draft)"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
 	} {
@@ -1520,7 +1831,7 @@ const slashMenuRows = 10
 
 // slashMenuOpen: the draft is a command still being typed (a "/" token with more than one way to go on).
 func (m emberModel) slashMenuOpen() bool {
-	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker {
+	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker || m.menuDismissed() {
 		return false
 	}
 	value := strings.TrimRight(m.chat.compose.Value(), " ")
@@ -1560,12 +1871,42 @@ func (m emberModel) slashMenu(w int) string {
 		return ""
 	}
 	_, matches, sel := m.slashPick()
-	// the box takes at most a third of the terminal; on a terminal too small for two rows it stays shut (Tab still
-	// cycles the names)
-	rows := min(slashMenuRows, len(matches), max(0, (m.height-18)/2))
-	if rows < 2 {
+	return m.completionMenu(matches, slashHint, sel, w)
+}
+
+// pathMenu: the @path completions in the same framed list as the commands, folders marked as such; the highlight
+// follows Tab's cycle.
+func (m emberModel) pathMenu(w int) string {
+	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker || m.slashMenuOpen() ||
+		m.menuDismissed() {
 		return ""
 	}
+	token, ok := pathToken(strings.TrimRight(m.chat.compose.Value(), " "))
+	if !ok {
+		return ""
+	}
+	matches := m.pathMatches(token)
+	if len(matches) == 0 {
+		return ""
+	}
+	sel := max(0, slices.Index(matches, m.chat.pathPick))
+	hint := func(p string) string {
+		if strings.HasSuffix(p, "/") {
+			return "folder"
+		}
+		return "file"
+	}
+	return m.completionMenu(matches, hint, sel, w)
+}
+
+// completionMenu draws the list both completions share: one match or many, the same box.
+func (m emberModel) completionMenu(matches []string, hintOf func(string) string, sel, w int) string {
+	// the box takes at most a third of the terminal; on a terminal too small for two rows it stays shut (Tab still
+	// cycles the names, and the composer names them on one line)
+	if max(0, (m.height-12)/2) < 2 || len(matches) == 0 {
+		return ""
+	}
+	rows := min(slashMenuRows, len(matches), (m.height-12)/2) // (three rows at 80x24 while five above stayed empty)
 	top := 0
 	if sel >= rows {
 		top = sel - rows + 1
@@ -1596,7 +1937,7 @@ func (m emberModel) slashMenu(w int) string {
 			desc = lipgloss.NewStyle().Foreground(cText)
 		}
 		line := name.Render(n) + strings.Repeat(" ", max(1, nameW-ansi.StringWidth(n))) +
-			desc.Render(emberClip(slashHint(n), max(1, textW-nameW)))
+			desc.Render(emberClip(hintOf(n), max(1, textW-nameW)))
 		line = emberClip(line, textW)
 		line += strings.Repeat(" ", max(0, textW-ansi.StringWidth(line)))
 		if scroll {
@@ -1655,7 +1996,8 @@ func (m emberModel) todoPinned() string {
 	// the task: the current todo item, else the goal itself
 	task, dots := "", ""
 	if goal != nil {
-		task = oneLine(residentText(goal.Prompt))
+		aim, _ := m.goalAim(goal)
+		task = oneLine(residentText(aim))
 		for i := len(m.residentEvents) - 1; i >= 0; i-- {
 			e := m.residentEvents[i]
 			if e.Goal != goal.ID || e.Kind != "todo" {
@@ -1701,7 +2043,11 @@ func (m emberModel) todoPinned() string {
 	// two lines, so neither crowds the other: the task, then what is happening now (a command wrapped under it)
 	var rows []string
 	if goal != nil && dots != "" { // without a todo list the header already shows the whole goal
-		rows = append(rows, ansi.Truncate(" "+dots+"  "+lipgloss.NewStyle().Foreground(cText).Render(task), w, "…"))
+		row := " " + dots + "  " + lipgloss.NewStyle().Foreground(cText).Render(task)
+		if bl := m.todoBlockers(goal.ID); len(bl) > 0 && m.sideWidth() == 0 { // (the side pane lists them when shown)
+			row += emberWarn.Render("  ! " + oneLine(residentText(bl[0])))
+		}
+		rows = append(rows, ansi.Truncate(row, w, "…"))
 	}
 	nowRow := " " + bold(cBlue).Render("Now") + "   " + emberBusy.Render(now)
 	if command != "" {
@@ -1817,13 +2163,7 @@ func (m emberModel) renderChat() string {
 	head := m.chatHead(w)
 	foot := m.chatFoot(w)
 	if m.chat.help {
-		foot += "\n" + clip("/new [goal] · /goals · /goal ID · /cancel · /resume · /compact · /approvals") + "\n" + clip("/newsession NAME · /session NAME · /sessions · /approvals · /remember TEXT · /memory · /context · /audit · /settings") + "\n" + clip("/start · /stop · /theme NAME · /help · /quit · Esc browse · Ctrl+N new · Ctrl+L follow · Ctrl+A approvals · Ctrl+G goals")
-	}
-	if m.chat.approvals {
-		// The overlay takes the transcript's and the composer's place; the header and the footer stay. The floor is
-		// small so a short terminal (with /help's extra lines) still gets a box inside the frame.
-		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
-		return head + "\n" + m.approvalOverlay(w, h) + "\n" + foot
+		foot += "\n" + clip("/new [goal] · /goals · /cancel · /resume · /compact") + "\n" + clip("/sessions · /remember TEXT · /memory · /context") + "\n" + clip("/start · /theme NAME · /help · /quit · Ctrl+N new · Ctrl+L follow · Ctrl+G goals")
 	}
 	if m.chat.goals {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
@@ -1832,14 +2172,6 @@ func (m emberModel) renderChat() string {
 	if m.chat.models.open {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
 		return head + "\n" + m.modelsOverlay(w, h) + "\n" + foot
-	}
-	if m.chat.identity.open {
-		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
-		return head + "\n" + m.identityOverlay(w, h) + "\n" + foot
-	}
-	if m.chat.advisor.open {
-		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
-		return head + "\n" + m.advisorOverlay(w, h) + "\n" + foot
 	}
 	if m.chat.themes.open && len(m.chat.themes.names) > 0 {
 		h := max(6, max(12, m.height)-lipgloss.Height(head)-lipgloss.Height(foot)+1)
@@ -1883,15 +2215,22 @@ func (m emberModel) renderChat() string {
 	if card := m.planCard(w); card != "" {
 		body = append(body, card)
 	}
-	if card := m.rootsCard(w); card != "" {
-		body = append(body, card)
-	}
 	return strings.Join(append(body, m.chatBottom(), foot), "\n")
 }
 
 func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.chat.picker {
+		if i := m.cardAt(click.X, click.Y); i >= 0 {
+			if i == len(m.switcherCards()) {
+				m.chat.pickerSel, m.chat.pickerNew, m.chat.pickerName = i, true, ""
+				return m, nil
+			}
+			return m.switchToCard(i)
+		}
+		return m, nil
+	}
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.onJumpPill(click.X, click.Y) {
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false
@@ -1910,7 +2249,7 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.questionCustom {
 			m.chat.questionInput, cmd = m.chat.questionInput.Update(msg)
 		}
-	} else if !m.chat.sending && !m.chat.approvals && !m.chat.goals && !m.chat.models.open && !m.chat.identity.open && !m.chat.advisor.open && !m.chat.themes.open && !m.chat.studio.open &&
+	} else if !m.chat.sending && !m.chat.goals && !m.chat.models.open && !m.chat.themes.open && !m.chat.studio.open &&
 		!m.chat.view.open && !m.chat.rewind.open {
 		// (the approvals overlay owns the keyboard; a paste must not fill the draft behind it)
 		m.chat.compose, cmd = m.chat.compose.Update(msg)
@@ -1920,20 +2259,11 @@ func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m emberModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.initChat()
-	if m.chat.approvals {
-		return m.approvalKey(msg)
-	}
 	if m.chat.goals {
 		return m.goalsKey(msg)
 	}
 	if m.chat.models.open {
 		return m.modelsKey(msg)
-	}
-	if m.chat.identity.open {
-		return m.identityKey(msg)
-	}
-	if m.chat.advisor.open {
-		return m.advisorKey(msg)
 	}
 	if m.chat.themes.open {
 		return m.themesKey(msg)
@@ -1983,20 +2313,24 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch k {
 	case "ctrl+c":
+		// an unsent draft is not thrown away with the window: the first Ctrl+C clears it (Up brings it back), the
+		// second quits
+		if d := m.chat.compose.Value(); strings.TrimSpace(d) != "" && time.Since(m.chat.quitArmed) > 2*time.Second {
+			saveTyped(m.agentName, d)
+			markDraft(m.agentName, d)
+			m.chat.clearedDraft = d
+			m.chat.compose.Reset()
+			m.chat.quitArmed = time.Now()
+			m.msg = "draft cleared (Up brings it back) · Ctrl+C again quits"
+			return m, nil
+		}
 		return m, tea.Quit
 	case "ctrl+p":
-		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.picker, m.chat.pickerSel = true, 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "ctrl+g":
 		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
-		m.chat.compose.Blur()
-		return m, nil
-	case "ctrl+a":
-		// The Approvals overlay over the conversation: the requests a person has to decide, in the one box every
-		// overlay uses. It owns the keys while it is open, so the composer lets go of them.
-		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
-		m.chat.armed = ""
 		m.chat.compose.Blur()
 		return m, nil
 	case "tab", "shift+tab":
@@ -2009,6 +2343,16 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if next, done := m.cyclePath(); done {
 			return next, nil
+		}
+		if k == "tab" { // no completion under way: a waiting request comes back where you type (the draft is kept)
+			if next, ok := m.reopenPrompt(); ok {
+				return next, nil
+			}
+		}
+		if k == "shift+tab" { // no completion under way: Shift+Tab opens the session switcher (Ctrl+P does too)
+			m.chat.picker, m.chat.pickerSel = true, 0
+			m.chat.compose.Blur()
+			return m, residentSessions(m)
 		}
 		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
@@ -2025,13 +2369,32 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
+	case "ctrl+u":
+		// the whole draft (the editor's Ctrl+U cleared one line of a many-line draft: a command's output stayed, and
+		// the next !cmd was sent with it as a message)
+		if strings.Contains(m.chat.compose.Value(), "\n") {
+			saveTyped(m.agentName, m.chat.compose.Value())
+			markDraft(m.agentName, m.chat.compose.Value())
+			m.chat.clearedDraft = m.chat.compose.Value()
+			m.chat.compose.Reset()
+			m.msg = "draft cleared (Up brings it back)"
+			return m, nil
+		}
+	case "home", "end":
+		if m.chat.compose.Value() != "" {
+			break // (in a draft, Home and End move the cursor)
+		}
+		if k == "home" {
+			m.chat.transcript.GotoTop()
+		} else {
+			m.chat.transcript.GotoBottom()
+			m.chat.live.hold = false
+		}
+		return m, nil
 	case "ctrl+l", "ctrl+end":
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
 		return m, nil
-	case "ctrl+e":
-		// (Ctrl+O's layout switch; Ctrl+E kept for the hands that learned it)
-		return m.toggleLayout(), nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.
 		m.chat.live.hold = !m.chat.live.hold
@@ -2046,6 +2409,13 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.scrollLive(3)
 		return m, nil
 	case "esc":
+		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode, a draft held aside comes back
+			return m.leaveShell(), nil
+		}
+		if !m.menuDismissed() && (m.slashMenuOpen() || m.pathMenu(m.width) != "") {
+			m.chat.menuClosed = m.chat.compose.Value() // the menu closes; the text stays (typing opens it again)
+			return m, nil
+		}
 		if m.chat.live.active {
 			// Esc while a reply is being written interrupts that turn only; the next message steers.
 			if goal := m.targetGoal(); goal != "" {
@@ -2053,8 +2423,13 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, interruptTurn(m, goal)
 			}
 		}
-		m.chat.compose.Blur()
-		return m, nil
+		if m.chat.forceNew && m.chat.prevTarget != "" { // out of "new goal", back to the goal you were talking to
+			m.chat.target, m.chat.newGoal, m.chat.forceNew = m.chat.prevTarget, false, false
+			m.chat.prevTarget = ""
+			m.msg = "back to goal " + shortGoal(m.chat.target)
+			return m, nil
+		}
+		return m, nil // (idle, Esc does nothing else: PgUp/PgDn and the wheel scroll)
 	case "up", "down":
 		if next, done := m.slashMenuKey(k); done {
 			return next, nil
@@ -2071,92 +2446,21 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+n":
 		if !m.chat.sending {
+			// the draft stays (it becomes the new goal's text); Esc goes back to the goal you were talking to
+			if m.chat.target != "" {
+				m.chat.prevTarget = m.chat.target
+			}
 			m.chat.newGoal = true
 			m.chat.forceNew = true
 			m.chat.target = ""
-			m.chat.compose.Reset()
+			m.msg = "new goal · Esc goes back"
 			return m, m.chat.compose.Focus()
 		}
 		return m, nil
 	}
 	if !m.chat.compose.Focused() {
-		// A pending root request is decided right here, through the Requests page's own handler (the same sudo
-		// run, claim, audit entry and answer files): a approves, d denies, e opens it in the Requests editor.
-		// Approving runs a root command, so it takes two presses: the first a arms it and shows the exact
-		// command, a second a within 10 s approves. Any other key disarms. Denying runs nothing and needs one.
-		armed := m.chat.armed
-		m.chat.armed = ""
-		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "g" || k == "d" || k == "e") {
-			r := m.reqs[i]
-			// A command you granted for this goal (checked against your own audit, not the agent's word) runs with
-			// one a; anything else, and every grant, takes two presses.
-			granted := k == "a" && grantRecorded(m.auditPath, r, time.Now())
-			if (k == "a" || k == "g") && !granted && (armed != k+":"+r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
-				m.chat.armed, m.chat.armedAt = k+":"+r.ID, time.Now()
-				what := "approve as root: "
-				if k == "g" {
-					what = "approve and grant for this goal (the same command then needs one a): "
-				}
-				m.msg = what + terminalText(r.Cmd, false) + " ? press " + k + " again (any other key cancels)"
-				if r.kind() == "github" {
-					m.chat.armed = ""
-					m.msg = "a hand-off runs once, as filed: a a runs it as you, d denies"
-					if k == "a" {
-						m.chat.armed = k + ":" + r.ID
-						m.msg = "run on GitHub as you: " + terminalText(r.Summary, false) + " ? press a again (any other key cancels)"
-					}
-				}
-				return m, nil
-			}
-			if r.kind() == "github" && (k == "g" || k == "e") {
-				return m, nil // a hand-off runs once, as filed
-			}
-			m.sel = i
-			return m.reqKeys(k) // e opens the edit prompt in the composer's slot
-		}
-		if armed != "" {
-			m.msg = "approval cancelled"
-		}
-		if roots := m.pendingRoots(); len(roots) > 1 && (k == "[" || k == "]") {
-			pos := 0
-			for n, i := range roots {
-				if i == m.pendingRoot() {
-					pos = n
-				}
-			}
-			if k == "[" {
-				pos = max(0, pos-1)
-			} else {
-				pos = min(len(roots)-1, pos+1)
-			}
-			m.chat.rootSel = m.reqs[roots[pos]].ID
-			m.msg = fmt.Sprintf("request %d of %d: %s", pos+1, len(roots), terminalText(m.reqs[roots[pos]].Cmd, false))
-			return m, nil
-		}
-		switch k {
-		case "enter", "t":
-			return m, m.chat.compose.Focus()
-		case "n":
-			m.chat.newGoal = true
-			m.chat.forceNew = true
-			m.chat.target = ""
-			return m, m.chat.compose.Focus()
-		case "q":
-			return m, tea.Quit
-		case "up", "k":
-			m.chat.transcript.ScrollUp(1)
-			return m, nil
-		case "down", "j":
-			m.chat.transcript.ScrollDown(1)
-			return m, nil
-		case "home":
-			m.chat.transcript.GotoTop()
-			return m, nil
-		case "end":
-			m.chat.transcript.GotoBottom()
-			return m, nil
-		}
-		return m, nil
+		// (no browse mode any more: a composer left unfocused takes the key back to typing)
+		return m, m.chat.compose.Focus()
 	}
 	if m.chat.sending {
 		return m, nil
@@ -2167,17 +2471,36 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setShell(true)
 		return m, nil
 	}
-	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
-		m.setShell(false)
+	// "!" on the empty last line of a draft (a command's output waits there): shell mode, the draft held aside; the
+	// next command's output joins it, and leaving shell mode gives it back. It was typed into the draft as text,
+	// and Enter sent the output and "!!cmd" as a message.
+	if k == "!" && !m.chat.shell && strings.HasSuffix(m.chat.compose.Value(), "\n") && m.chat.compose.Line() == m.chat.compose.LineCount()-1 {
+		m.chat.shellStash = strings.TrimRight(m.chat.compose.Value(), "\n")
+		m.chat.compose.Reset()
+		m.setShell(true)
 		return m, nil
+	}
+	// "!" again on the empty agent shell: the host shell, your own account on this machine (!! as in a terminal)
+	if k == "!" && m.chat.compose.Value() == "" && m.chat.shell && !m.chat.hostShell {
+		m.chat.hostShell = true
+		m.setShell(true)
+		return m, nil
+	}
+	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
+		return m.leaveShell(), nil
 	}
 	if m.chat.shell && k == "enter" {
 		cmd := strings.TrimSpace(m.chat.compose.Value())
 		if cmd == "" {
 			return m, nil
 		}
+		host := m.chat.hostShell
 		m.chat.compose.Reset()
 		m.setShell(false)
+		if host {
+			m.msg = "running in your shell…"
+			return m, runHostBang(cmd)
+		}
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, cmd)
 	}
@@ -2203,6 +2526,9 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	}
 	// A leading // sends the rest as a message, so a goal about /etc or /tmp is not taken for a command.
 	if strings.HasPrefix(trimmed, "//") {
+		saveTyped(m.agentName, trimmed) // (history gives back what you typed, // included)
+		unmarkDraft(m.agentName, trimmed)
+		m.chat.clearedDraft = ""
 		return m.sendCompose(strings.TrimPrefix(trimmed, "/"))
 	}
 	if strings.HasPrefix(trimmed, "/") {
@@ -2212,6 +2538,9 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
+	saveTyped(m.agentName, text)
+	unmarkDraft(m.agentName, text) // (a cleared draft sent later is a sent message)
+	m.chat.clearedDraft = ""       // (Up after a send is the history again, newest first: an old cleared draft came first)
 	return m.sendCompose(text)
 }
 
@@ -2223,10 +2552,14 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
-		if strings.Contains(text, "@") {
-			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
+		if strings.ContainsAny(text, "@+") { // (it checked only "@": a message with only +path attached nothing)
+			var problems []string
+			text, problems = expandAttachmentsChecked(m, text) // +path: the file, read as the agent, goes with the message
+			if len(problems) > 0 {                             // nothing is sent; the draft stays to fix
+				return residentComposeResult{agent: name, epoch: epoch, err: "not sent: " + strings.Join(problems, " · ")}
+			}
 		}
-		out, err := residentCommand(m, args, text).CombinedOutput()
+		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
@@ -2268,11 +2601,14 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	switch command {
 	case "/help":
 		clear()
-		m.chat.view = textView{open: true, title: "help", lines: helpLines()}
+		m.chat.view = textView{open: true, title: "help", lines: strings.Split(strings.Join(helpLines(m.width), "\n"), "\n")}
 		m.chat.compose.Blur()
 	case "/quit":
 		return m, tea.Quit
 	case "/new":
+		if m.chat.target != "" {
+			m.chat.prevTarget = m.chat.target // (Esc goes back to it)
+		}
 		m.chat.newGoal, m.chat.target = true, ""
 		m.chat.forceNew = true
 		clear()
@@ -2280,32 +2616,18 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.chat.compose.SetValue(arg)
 			return m.sendCompose(arg)
 		}
-	case "/requests":
+	case "/memory":
 		clear()
-		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
-		m.chat.armed = ""
-		m.chat.compose.Blur()
-	case "/approvals":
-		// The overlay over the conversation; /requests still opens the page that edits and answers.
-		clear()
-		m.chat.approvals, m.chat.approvalSel, m.chat.approvalDetail = true, 0, false
-		m.chat.armed = ""
-		m.chat.compose.Blur()
-	case "/memory", "/context", "/audit", "/settings", "/jobs", "/servers", "/agents":
+		m.msg = "reading the memory…"
+		return m, fetchMemoryView(m)
+	case "/context":
 		clear()
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
 		clear()
-		m.chat.picker, m.chat.pickerQuery, m.chat.pickerSel = true, "", 0
+		m.chat.picker, m.chat.pickerSel = true, 0
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
-	case "/newsession":
-		if arg == "" {
-			m.msg = "Use /newsession NAME"
-			return m, nil
-		}
-		clear()
-		return m, createResidentSession(m, arg)
 	case "/remember":
 		if arg == "" {
 			m.msg = "Use /remember TEXT"
@@ -2317,16 +2639,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		clear()
 		m.chat.goals, m.chat.goalsSel, m.chat.goalsDetail = true, 0, false
 		m.chat.compose.Blur()
-	case "/goal":
-		if plan, ok := strings.CutPrefix(arg, "--plan"); ok {
-			if strings.TrimSpace(plan) == "" {
-				m.msg = "usage: /goal --plan TEXT — it explores and proposes a plan before it changes anything"
-				return m, nil
-			}
-			clear()
-			m.chat.newGoal, m.chat.target = true, ""
-			return m.sendPlanGoal(strings.TrimSpace(plan))
-		}
+	case "/goal": // (not in the menu or help: the Goals overlay targets a goal; kept for a typed ID prefix)
 		var found []int
 		for i, g := range m.resident.Goals {
 			if arg != "" && strings.HasPrefix(g.ID, arg) {
@@ -2341,20 +2654,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.goalSel = found[0]
 		m.chat.forceNew = false
 		m.targetSelectedGoal()
-	case "/agent", "/session":
-		if arg == "" {
-			m.msg = "Use /agent NAME"
-			return m, nil
-		}
-		// A typo here used to clear the transcript and leave an empty conversation behind.
-		if len(m.sessionNames) > 0 && !slices.Contains(m.sessionNames, arg) {
-			m.msg = "no such session " + terminalText(arg, true) + " · Ctrl+P lists them"
-			return m, nil
-		}
-		clear()
-		m.openResident(arg)
-		return m, tea.Batch(residentRefresh(m), residentSessions(m))
-	case "/start", "/stop":
+	case "/start": // (the header asks for it when the loop is down; Shift+Tab stops and starts any session)
 		clear()
 		return m, residentAction(m, []string{strings.TrimPrefix(command, "/"), m.agentName, "--json"}, "")
 	case "/cancel":
@@ -2363,33 +2663,30 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "No selected goal to cancel"
 			return m, nil
 		}
+		if goalEnded(g.State) { // (it said "cancelled" again and recorded another cancel)
+			clear() // (left in the composer, the next command was appended to it: "/cancel/pause")
+			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State)
+			return m, nil
+		}
 		clear()
+		// the composer starts a new goal after it (it pointed at the previous, finished goal)
+		m.chat.newGoal, m.chat.target, m.chat.forceNew = true, "", true
 		return m, residentAction(m, []string{"cancel", m.agentName, g.ID, "--json"}, "")
-	case "/model", "/models":
+	case "/model":
 		// alone: the Models overlay over the catalog; with an id (provider/id when two serve it): pick it
 		clear()
-		if id := strings.TrimSpace(arg); id != "" && command == "/model" {
+		if id := strings.TrimSpace(arg); id != "" {
 			m.msg = "switching to " + id + "…"
 			return m, pickModel(m, id)
 		}
 		m.chat.models.open, m.chat.models.loading, m.chat.models.err = true, true, ""
 		return m, fetchModels(m, false)
-	case "/identity":
-		// the agent's accounts: its linked GitHub account, the identity its commits carry; link or unlink here
-		clear()
-		return m.openIdentity()
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
-	case "/freetime":
-		// a free-time stretch now: after any running work, within the day's free-time budget
+	case "/panel":
 		clear()
-		m.msg = "free time asked: it starts at the agent's next pass (after any running work)"
-		return m, residentAction(m, []string{"heartbeat", m.agentName, "now", "--json"}, "")
-	case "/recap":
-		clear()
-		m.chat.recapAsked = recapOnDemand
-		return m, fetchRecap(m, 0)
+		return m.openPanel()
 	case "/studio":
 		clear()
 		m.chat.studio = studioState{open: true, loading: true}
@@ -2400,24 +2697,30 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 			m.msg = "No selected goal to pause"
 			return m, nil
 		}
+		if goalEnded(g.State) {
+			clear() // (left in the composer, the next command was appended to it: "/cancel/pause")
+			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State) + ": nothing to pause"
+			return m, nil
+		}
 		clear()
 		return m, residentAction(m, []string{"pause", m.agentName, g.ID, "--json"}, "")
 	case "/halt":
 		clear()
 		m.msg = "emergency stop…"
 		return m, emergencyStop(m, strings.TrimSpace(arg))
-	case "/btw", "/diff", "/export", "/rewind", "/plan", "/advisor":
+	case "/btw", "/diff", "/rewind", "/plan", "/advisor":
 		clear()
 		next, cmd, _ := m.steerSlash(command, arg)
 		return next, cmd
-	case "/update":
-		clear()
-		m.msg = "uploading the runtime…"
-		return m, updateResident(m, strings.TrimSpace(arg) == "now")
 	case "/compact":
 		// Compaction needs the model and the single writer, so this asks the runtime to do it on its next
 		// pass rather than writing history from here.
 		g := m.selectedResidentGoal()
+		if g != nil && goalEnded(g.State) {
+			clear() // (left in the composer, the next command was appended to it: "/cancel/pause")
+			m.msg = "goal " + shortGoal(g.ID) + " already " + endedWord(g.State) + ": nothing to compact"
+			return m, nil
+		}
 		args := []string{"compact", m.agentName}
 		if g != nil {
 			args = append(args, g.ID)
@@ -2439,6 +2742,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		// The panel's colors; the transcript's markdown is rebuilt below to pick
 		// up the new roles. Nothing else in the session changes.
 		name := strings.TrimSpace(arg)
+		clear() // (it alone kept "/theme" in the composer: the next command was typed onto it)
 		if name == "" {
 			return m.openThemes(), nil // the theme screen: every theme, previewed on every element
 		}
@@ -2449,39 +2753,6 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.markdown = nil
 		m.chatStyles() // the composer's prompt and hint keep the palette's colours
 		m.msg = "theme: " + name
-		m.syncChat()
-		return m, nil
-	case "/deny":
-		// "No, do this instead": deny the newest root request and send the text to its goal as a steer.
-		i := m.pendingRoot()
-		if i < 0 {
-			m.msg = "no root request is waiting"
-			return m, nil
-		}
-		text := strings.TrimSpace(arg)
-		if text == "" {
-			m.msg = "usage: /deny TEXT — denies the root request and tells the agent what to do instead"
-			return m, nil
-		}
-		// The instruction rides in the denial itself; the runtime files it as a steer on the request's goal (one
-		// write, so a denial can never arrive without its instruction).
-		r := m.reqs[i]
-		m.sel = i
-		m.mode, m.edit, m.editRequest = "denywhy", text, &r
-		clear()
-		return m.submitInput()
-	case "/glyphs":
-		// The symbol set (shell.go): nerd needs a Nerd Font; unicode needs none; ascii is for anything else.
-		name := strings.TrimSpace(arg)
-		if name == "" {
-			name = glyphsNext()
-		}
-		if err := glyphsSet(name); err != nil {
-			m.msg = err.Error()
-			return m, nil
-		}
-		m.msg = "glyphs: " + name + "  " + g.working + " " + g.waiting + " " + g.done + " " + g.root + " " + g.model + " " + g.queue +
-			"  (boxes? pick /glyphs unicode)"
 		m.syncChat()
 		return m, nil
 	case "/resume":
@@ -2511,49 +2782,31 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 // slashCommands backs the composer autocomplete; every name must be handled by
 // chatSlash. The list stays in one place so the two never drift apart.
 var slashCommands = []struct{ name, hint string }{
-	{"/agent", "open another session NAME"},
-	{"/approvals", "open the approvals overlay (Ctrl+A)"},
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
-	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
+	{"/effort", "how hard it thinks: none, low, medium, high, xhigh, max (the model's nearest); alone, what this model does"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
-	{"/identity", "the agent's GitHub account: link, unlink, what its commits carry"},
-	{"/advisor", "the advisor reviews the goal now and the agent reads it before its next step; /advisor setup: model, budget"},
+	{"/advisor", "the advisor reviews the goal now and the agent reads it before its next step"},
 	{"/pause", "pause the selected goal at its next step; /resume continues it"},
 	{"/halt", "emergency stop: every resident pauses after its step (/halt clear lifts it)"},
-	{"/update", "install this caminus's runtime between goals (now: at the next turn)"},
-	{"/goal", "select a goal by ID prefix"},
 	{"/goals", "the goals overlay (Ctrl+G)"},
-	{"/help", "toggle the help footer"},
+	{"/help", "the commands and keys"},
 	{"/new", "start a new goal"},
-	{"/newsession", "create a session NAME"},
 	{"/quit", "close the UI; the daemon continues"},
 	{"/remember", "append TEXT to this session's memory"},
-	{"/requests", "open questions and root approvals"},
 	{"/resume", "resume the selected goal"},
-	{"/session", "open a session NAME"},
-	{"/sessions", "open the Sessions homepage"},
-	{"/start", "run this session's loop"},
+	{"/sessions", "every session as a card: switch with Enter or a click"},
+	{"/start", "run this session's loop (stop and start any session from Shift+Tab)"},
 	{"/steer", "redirect this goal with TEXT (a plain message nudges)"},
-	{"/stop", "stop this session's loop"},
 	{"/theme", "the theme screen: preview and pick (or /theme NAME)"},
-	{"/glyphs", "symbols: nerd, unicode or ascii; alone, the next one"},
-	{"/deny", "deny the waiting root request and tell the agent what to do instead"},
-	{"/memory", "memory and notes"},
+	{"/memory", "this session's memory file"},
 	{"/context", "what the agent's context holds"},
-	{"/audit", "the audit log"},
-	{"/settings", "this session's settings"},
-	{"/jobs", "the agent's jobs and processes"},
 	{"/btw", "a side question with no tools; the goal keeps nothing"},
 	{"/diff", "what this goal changed in its git repositories"},
-	{"/export", "this goal as markdown in the agent's ~/exports"},
 	{"/rewind", "back to an earlier step, files included"},
-	{"/plan", "approve or revise a waiting plan (/goal --plan TEXT starts one)"},
-	{"/servers", "the model servers and their windows"},
-	{"/agents", "every resident on this machine (advanced)"},
-	{"/freetime", "start a free-time stretch now (after any running work)"},
-	{"/recap", "while you were away: free time since your last goal"},
+	{"/plan", "alone: the whole plan; TEXT starts a goal that plans first; approve or revise answers a waiting plan"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
+	{"/panel", "the Caminus panel: models, servers and the cards (Esc comes back)"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
@@ -2581,94 +2834,6 @@ func slashMatches(draft string) []string {
 	return slices.Compact(out)
 }
 
-// pathToken reports the trailing token of the draft when it is a path the user
-// is still typing: it contains a separator (/, ~/ , ./, ../) and the draft does
-// not end in whitespace, so a finished word never matches. A leading / alone is
-// left to slashMatches, which sees commands first; a path wins once the token
-// goes deeper than a bare command could (/home) or does not start with / at all.
-func pathToken(draft string) (string, bool) {
-	if draft == "" || strings.Contains(draft, "\n") || strings.HasSuffix(draft, " ") {
-		return "", false
-	}
-	token := draft
-	if i := strings.LastIndex(draft, " "); i >= 0 {
-		token = draft[i+1:]
-	}
-	if !strings.Contains(token, "/") {
-		return "", false
-	}
-	if strings.HasPrefix(token, "/") && !strings.HasPrefix(token, "//") {
-		if rest := token[1:]; !strings.Contains(rest, "/") {
-			// A bare /word still belongs to the command completer until no
-			// command could grow into it; /h stays /help, /home is a path.
-			if isCommandPrefix(rest) {
-				return "", false
-			}
-		}
-	}
-	return token, true
-}
-
-// isCommandPrefix reports whether the word after the leading slash could still
-// complete to any slash command.
-func isCommandPrefix(token string) bool {
-	for _, c := range slashCommands {
-		if strings.HasPrefix(c.name[1:], token) {
-			return true
-		}
-	}
-	return false
-}
-
-// pathMatches lists what the typed path points at, directories first with
-// their trailing separator, so Tab keeps descending into a directory and the
-// same token prefix re-lists its children. Hidden entries only surface once
-// the typed prefix includes their dot. The list is capped so /usr/lib never
-// floods the hint line.
-func pathMatches(token string) []string {
-	dir, prefix := token, ""
-	if !strings.HasSuffix(token, "/") {
-		i := strings.LastIndex(token, "/")
-		prefix = token[i+1:]
-		dir = token[:i+1]
-	}
-	if dir == "~" {
-		dir = "~/"
-	}
-	fsDir := dir
-	if strings.HasPrefix(fsDir, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		fsDir = home + fsDir[1:]
-	}
-	entries, err := os.ReadDir(fsDir)
-	if err != nil {
-		return nil
-	}
-	var dirs, files []string
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
-			continue
-		}
-		if e.IsDir() {
-			dirs = append(dirs, dir+name+"/")
-		} else {
-			files = append(files, dir+name)
-		}
-	}
-	out := append(dirs, files...)
-	if len(out) > 64 {
-		out = out[:64]
-	}
-	return out
-}
-
 // cyclePath completes the trailing path token on Tab. The first Tab takes the
 // best match; later Tabs cycle the rest of that list; taking a directory puts
 // its separator on the draft, so the next Tab walks into it. A token that
@@ -2689,7 +2854,7 @@ func (m emberModel) cyclePath() (tea.Model, bool) {
 		// pathIdx already points at the next pick of the running cycle.
 		prefix, idx = m.chat.pathPrefix, m.chat.pathIdx
 	}
-	matches := pathMatches(prefix)
+	matches := m.pathMatches(prefix)
 	if len(matches) == 0 {
 		return m, false
 	}
@@ -2737,6 +2902,30 @@ func (m emberModel) cycleSlash() (tea.Model, bool) {
 // slot, so it reuses the composer's measured height.
 func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	if k != "x" {
+		m.chat.pickerDestroy = ""
+	}
+	if m.chat.pickerNew {
+		switch k {
+		case "esc":
+			m.chat.pickerNew = false
+		case "enter":
+			name := strings.TrimSpace(m.chat.pickerName)
+			m.chat.pickerNew, m.chat.pickerName = false, ""
+			if name != "" {
+				return m, createResidentSession(m, name)
+			}
+		case "backspace":
+			if r := []rune(m.chat.pickerName); len(r) > 0 {
+				m.chat.pickerName = string(r[:len(r)-1])
+			}
+		default:
+			if r := msgRunes(k); r != nil {
+				m.chat.pickerName += string(r)
+			}
+		}
+		return m, nil
+	}
 	switch k {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -2754,7 +2943,7 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
-	case "esc":
+	case "esc", "shift+tab": // (Shift+Tab opened it: it closes it too)
 		m.chat.picker = false
 		return m, m.chat.compose.Focus()
 	case "f2":
@@ -2768,61 +2957,79 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.chat.compose.Focus()
-	case "up", "k":
-		m.chat.pickerSel = max(0, m.chat.pickerSel-1)
-	case "down", "j":
-		m.chat.pickerSel++
-	case "enter":
-		names := m.pickerNames()
-		if len(names) == 0 {
+	case "x": // destroy the selected session: armed by the first x, done by the second
+		cards := m.switcherCards()
+		i := m.chat.pickerSel
+		if i < 0 || i >= len(cards) {
 			return m, nil
 		}
-		name := names[min(m.chat.pickerSel, len(names)-1)]
-		if name == m.agentName {
-			m.chat.picker = false
-			return m, m.chat.compose.Focus()
+		if len(cards) < 2 {
+			m.msg = "the last session can't be destroyed"
+			return m, nil
 		}
-		m.openResident(name)
-		return m, tea.Batch(residentRefresh(m), residentSessions(m))
-	case "backspace":
-		if query := []rune(m.chat.pickerQuery); len(query) > 0 {
-			m.chat.pickerQuery = string(query[:len(query)-1])
+		if m.chat.pickerDestroy != cards[i].name {
+			m.chat.pickerDestroy = cards[i].name
+			return m, nil
 		}
-	default:
-		if r := msgRunes(k); r != nil {
-			m.chat.pickerQuery += string(r)
+		m.chat.pickerDestroy = ""
+		c := cards[i]
+		if c.name == m.agentName { // never stay in the session being removed: the next card first
+			other := cards[(i+1)%len(cards)].name
+			m.openResident(other)
+			m.chat.picker = true
 		}
+		return m, destroyResidentSession(m, c.name, c.active)
+	case "n": // a new session from this one: its name on a line under the cards
+		m.chat.pickerNew, m.chat.pickerName = true, ""
+		return m, nil
+	case "s": // stop the selected session's loop, or start it when it is stopped
+		cards := m.switcherCards()
+		if i := m.chat.pickerSel; i >= 0 && i < len(cards) {
+			op := "stop"
+			if cards[i].status == "stopped" {
+				op = "start"
+			}
+			return m, tea.Sequence(residentAction(m, []string{op, cards[i].name, "--json"}, ""), residentSessions(m))
+		}
+		return m, nil
+	case "left", "h":
+		m.chat.pickerSel = max(0, m.chat.pickerSel-1)
+	case "right", "l":
+		m.chat.pickerSel++
+	case "up", "k":
+		m.chat.pickerSel = max(0, m.chat.pickerSel-cardCols(max(18, m.width-2)))
+	case "down", "j":
+		m.chat.pickerSel += cardCols(max(18, m.width-2))
+	case "enter":
+		if m.chat.pickerSel == len(m.switcherCards()) { // the "+ new session" card
+			m.chat.pickerNew, m.chat.pickerName = true, ""
+			return m, nil
+		}
+		return m.switchToCard(m.chat.pickerSel)
 	}
-	m.chat.pickerSel = max(0, min(m.chat.pickerSel, len(m.pickerNames())-1))
+	m.chat.pickerSel = max(0, min(m.chat.pickerSel, m.cardCount()-1))
 	return m, nil
 }
 
-func (m emberModel) pickerBox() string {
-	names := m.pickerNames()
-	w := max(18, m.width-2)
-	maxRows := max(1, m.height-8)
-	first := 0
-	if len(names) > maxRows {
-		first = max(0, min(m.chat.pickerSel-maxRows+1, len(names)-maxRows))
+// switchToCard opens card i's session (the one in view: back to the chat).
+func (m emberModel) switchToCard(i int) (tea.Model, tea.Cmd) {
+	cards := m.switcherCards()
+	if i < 0 || i >= len(cards) {
+		return m, nil
 	}
-	rows := []string{emberWarn.Render("OPEN SESSION"), "› " + residentText(m.chat.pickerQuery) + "█", ""}
-	if len(names) == 0 {
-		rows = append(rows, emberDim.Render("no matching session"))
+	if name := cards[i].name; name != m.agentName {
+		m.openResident(name)
+		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	}
-	for idx := first; idx < min(first+maxRows, len(names)); idx++ {
-		name := names[idx]
-		mark := "  "
-		if idx == m.chat.pickerSel {
-			mark = "› "
-		}
-		row := mark + residentText(name)
-		if idx == m.chat.pickerSel {
-			row = lipgloss.NewStyle().Bold(true).Render(row)
-		}
-		rows = append(rows, emberClip(row, w-4))
-	}
-	hint := "Enter opens · ↑/↓ choose · Esc cancels"
-	return emberBorder.Width(w).Render(strings.Join(rows, "\n") + "\n" + emberDim.Render(emberClip(hint, w-4)))
+	m.chat.picker = false
+	return m, m.chat.compose.Focus()
+}
+
+// runtimeOutdated: the daemon runs another runtime than this caminus installs (the /update command's job is now a
+// hint: `caminus ember agent install` queues the new one for every running daemon, taken between goals).
+func (m emberModel) runtimeOutdated() bool {
+	r := m.resident
+	return r.DaemonAlive && r.Heartbeat.Runtime != "" && r.RuntimeLatest != "" && r.Heartbeat.Runtime != r.RuntimeLatest
 }
 
 // chatFoot is the status line (shell.go) and, when something is only sometimes true, a dim line under it; bodyHeight
@@ -2837,7 +3044,7 @@ func (m emberModel) chatFoot(w int) string {
 	}
 	// The status line: brain, context, speed and queue, then the keys that matter now (shell.go). Everything that is
 	// only sometimes true (scroll position, the live hold, history loading, a message) rides on the line under it.
-	keys := []string{"esc browse", "^P sessions", "/help"}
+	keys := []string{"⇧Tab sessions", "/help"} // (Ctrl+P still opens it; Shift+Tab is the one shown)
 	if m.chat.seq < m.resident.LastEvent {
 		keys = append([]string{"loading history"}, keys...)
 	}
@@ -2850,8 +3057,8 @@ func (m emberModel) chatFoot(w int) string {
 	if m.chat.live.active && m.chat.live.hold {
 		keys = append([]string{"held · ^T follow"}, keys...)
 	}
-	if len(m.reqs) > 0 {
-		keys = append([]string{fmt.Sprintf("%s %d pending ^A", g.root, len(m.reqs))}, keys...)
+	if m.runtimeOutdated() {
+		keys = append([]string{emberWarn.Render("older runtime · caminus ember agent install")}, keys...)
 	}
 	// Spend shows once anything has been priced (a paid brain); a local brain's turns cost nothing and hide it.
 	usd := -1.0
@@ -2861,7 +3068,7 @@ func (m emberModel) chatFoot(w int) string {
 	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
-	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
+	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
 		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip
@@ -2870,77 +3077,22 @@ func (m emberModel) chatFoot(w int) string {
 	return statusBar
 }
 
-// pendingRoots are the indexes in m.reqs of this resident's waiting root requests, oldest first.
-func (m emberModel) pendingRoots() []int {
-	var out []int
-	for i, r := range m.reqs {
-		if r.kind() != "question" && (r.Agent == "" || r.Agent == m.agentName) { // root requests and GitHub hand-offs
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-// pendingRoot is the index in m.reqs of the root request the keys act on: the one highlighted on the shared card
-// ([ and ] move it), else the newest; -1 when none waits.
-func (m emberModel) pendingRoot() int {
-	roots := m.pendingRoots()
-	if len(roots) == 0 {
-		return -1
-	}
-	for _, i := range roots {
-		if m.reqs[i].ID == m.chat.rootSel {
-			return i
-		}
-	}
-	return roots[len(roots)-1]
-}
-
-// rootsCard: when several root requests wait, one card above the composer lists them all; the decision keys act on
-// the highlighted one. One request needs no extra card (its card is in the transcript).
-func (m emberModel) rootsCard(w int) string {
-	roots := m.pendingRoots()
-	anyGranted := false
-	for _, i := range roots {
-		anyGranted = anyGranted || grantRecorded(m.auditPath, m.reqs[i], time.Now())
-	}
-	if len(roots) < 2 && !anyGranted {
-		return ""
-	}
-	cur := m.pendingRoot()
-	inner := max(10, min(w, 96)-4)
-	var rows []string
-	for n, i := range roots {
-		r := m.reqs[i]
-		line := fmt.Sprintf("%d  %s", n+1, residentText(r.Cmd))
-		if grantRecorded(m.auditPath, r, time.Now()) {
-			line += "   granted for this goal: one a runs it"
-		}
-		if i == cur {
-			rows = append(rows, emberSel.Render(ansi.Truncate(g.collapsed+" "+line, inner, "…")))
-		} else {
-			rows = append(rows, emberDim.Render(ansi.Truncate("  "+line, inner, "…")))
-		}
-	}
-	rows = append(rows, emberDim.Render("esc, then [ ] pick  ·  a a approve  ·  g g grant for the goal  ·  e edit  ·  d deny  ·  /deny TEXT what instead"))
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cYellow).Padding(0, 1).
-		Width(min(w, 96)).Render(strings.Join(rows, "\n"))
-	title := fmt.Sprintf("%s %d ROOT REQUESTS WAITING", g.root, len(roots))
-	if len(roots) == 1 {
-		title = g.root + " ROOT REQUEST WAITING"
-	}
-	return borderTitle(box, title, emberWarn.Bold(true))
-}
-
 // toggleLayout switches the two layouts: compact (a card per action with short previews, replies in full) and
 // everything (every call, result and gate as a card, in full, with the thinking).
 func (m emberModel) toggleLayout() emberModel {
 	all := !(m.chat.cards && m.chat.expanded)
 	m.chat.cards, m.chat.expanded, m.chat.full = all, all, all
-	m.msg = map[bool]string{true: "everything: every card in full, the thinking, every gate · Ctrl+O back to compact",
-		false: "compact: a card per action, short previews · Ctrl+O shows everything"}[all]
+	m.msg = map[bool]string{true: "everything · Ctrl+O back to compact", false: "compact · Ctrl+O shows everything"}[all]
+	// keep the place: at the bottom stays at the bottom; scrolled up keeps the same share of the history
+	atBottom := m.chat.transcript.AtBottom()
+	frac := m.chat.transcript.ScrollPercent()
 	m.chat.content, m.chat.rendered = "", 0
 	m.syncChat()
+	if atBottom {
+		m.chat.transcript.GotoBottom()
+	} else {
+		m.chat.transcript.SetYOffset(int(frac * float64(max(0, m.chat.transcript.TotalLineCount()-m.chat.transcript.Height()))))
+	}
 	return m
 }
 
@@ -2989,4 +3141,168 @@ func (m emberModel) onJumpPill(x, y int) bool {
 	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
 	x0 := m.jumpPillX(m.transcriptWidth(w))
 	return y == row && x >= x0 && x < x0+ansi.StringWidth(jumpPillText)
+}
+
+// keyLines is a tool's arguments or result as "key: value" lines (nested maps indented, lists joined when short), at
+// most limit lines: the expanded view read as a raw JSON dump.
+func keyLines(v map[string]any, limit int) []string {
+	var out []string
+	var walk func(m map[string]any, indent string)
+	walk = func(m map[string]any, indent string) {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			switch x := m[k].(type) {
+			case map[string]any:
+				out = append(out, indent+k+":")
+				walk(x, indent+"  ")
+			case []any:
+				var parts []string
+				simple := true
+				for _, e := range x {
+					switch e.(type) {
+					case map[string]any, []any:
+						simple = false
+					}
+					parts = append(parts, fmt.Sprint(e))
+				}
+				if simple && len(strings.Join(parts, ", ")) <= 100 {
+					out = append(out, indent+k+": "+strings.Join(parts, ", "))
+					continue
+				}
+				out = append(out, indent+k+":")
+				for _, e := range x {
+					if em, ok := e.(map[string]any); ok {
+						out = append(out, indent+"  -")
+						walk(em, indent+"    ")
+					} else {
+						out = append(out, indent+"  - "+fmt.Sprint(e))
+					}
+				}
+			case string:
+				ls := strings.Split(strings.TrimRight(x, "\n"), "\n")
+				out = append(out, indent+k+": "+ls[0])
+				for _, l := range ls[1:] {
+					out = append(out, indent+"  "+l)
+				}
+			case float64:
+				if x == float64(int64(x)) {
+					out = append(out, fmt.Sprintf("%s%s: %d", indent, k, int64(x)))
+				} else {
+					out = append(out, fmt.Sprintf("%s%s: %g", indent, k, x))
+				}
+			default:
+				out = append(out, fmt.Sprintf("%s%s: %v", indent, k, x))
+			}
+		}
+	}
+	walk(v, "")
+	return lines(strings.Join(out, "\n"), limit)
+}
+
+// goalEnded: the goal is over (cancelled, completed, failed or an error); goal commands have nothing to act on.
+func goalEnded(state string) bool {
+	switch state {
+	case "cancelled", "completed", "failed", "error":
+		return true
+	}
+	return false
+}
+
+func endedWord(state string) string {
+	if state == "error" {
+		return "failed"
+	}
+	return state
+}
+
+// leaveShell ends shell mode; a draft held aside for a second command comes back.
+func (m emberModel) leaveShell() emberModel {
+	m.setShell(false)
+	if m.chat.shellStash != "" {
+		m.chat.compose.SetValue(m.chat.shellStash + "\n")
+		m.chat.shellStash = ""
+	}
+	return m
+}
+
+// todoBlockers are the newest todo list's blockers for a goal.
+func (m emberModel) todoBlockers(gid string) []string {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != gid || e.Kind != "todo" {
+			continue
+		}
+		var out []string
+		raw, _ := e.Data["blockers"].([]any)
+		for _, b := range raw {
+			if t, _ := b.(string); strings.TrimSpace(t) != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// noticeShown is the notice on the composer's frame now ("" once it expired: the tick clears it, a stalled tick must
+// not keep it).
+func (m emberModel) noticeShown() string {
+	if m.msg == m.msgOf && !m.msgAt.IsZero() && time.Since(m.msgAt) > noticeTTL(m.msg) {
+		return ""
+	}
+	return m.msg
+}
+
+// noticeTTL is how long a notice stays: 6 s, and a second more for every 20 characters past the first 60 (15 s at
+// most), so a long error can be read before it goes.
+func noticeTTL(msg string) time.Duration {
+	extra := max(0, ansi.StringWidth(msg)-60) / 20
+	return time.Duration(min(15, 6+extra)) * time.Second
+}
+
+// noticeLong: the notice does not fit the composer's frame (half its width).
+func (m emberModel) noticeLong() bool {
+	n := m.noticeShown()
+	return n != "" && ansi.StringWidth(n) > max(18, m.width-2)/2-4
+}
+
+// menuDismissed: Esc closed the completion menu on this very draft.
+func (m emberModel) menuDismissed() bool {
+	return m.chat.menuClosed != "" && m.chat.menuClosed == m.chat.compose.Value()
+}
+
+// endedSessions are the terminal sessions a result saw end, with their exit code.
+func (m emberModel) endedSessions() map[string]float64 {
+	out := map[string]float64{}
+	for _, e := range m.residentEvents {
+		if e.Kind != "tool_result" {
+			continue
+		}
+		if n, _ := e.Data["name"].(string); n != "terminal" {
+			continue
+		}
+		res, _ := e.Data["result"].(map[string]any)
+		sid, _ := res["session"].(string)
+		if code, ok := res["exit_code"].(float64); ok && sid != "" {
+			out[sid] = code
+		}
+	}
+	return out
+}
+
+// wrappedRecord is a record line that wraps under itself instead of being cut (a long one whose end matters).
+func wrappedRecord(icon, text string, w int) string {
+	ls := strings.Split(ansi.Wordwrap(text, max(10, w-4), " "), "\n")
+	for i, l := range ls {
+		if i == 0 {
+			ls[i] = " " + emberWarn.Render(icon) + " " + emberDim.Render(l)
+		} else {
+			ls[i] = "   " + emberDim.Render(l)
+		}
+	}
+	return strings.Join(ls, "\n")
 }

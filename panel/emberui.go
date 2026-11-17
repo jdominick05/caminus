@@ -58,6 +58,10 @@ type emberReq struct {
 	Reason  string   `json:"reason"`
 	Ts      float64  `json:"ts"`
 	Granted bool     `json:"granted"` // the resident says this exact command was granted for its goal (checked, not trusted)
+	// a question's recommended choice (preselected in the prompt) and when the request times out (Unix time; 0: the
+	// default 15 minutes from Ts)
+	Recommended string  `json:"recommended"`
+	Expires     float64 `json:"expires"`
 	// a GitHub hand-off (kind "github"): what the agent's token may not do upstream, as checked fields; the owner's
 	// side builds the gh command from them (caminus ember answer) and runs it as the owner
 	Summary string         `json:"summary"`
@@ -86,6 +90,8 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var emberNavigation = []int{7, 5, 8, 3, 4}
 
 type emberModel struct {
+	hosted         ctl // /panel: the Caminus panel component, full screen while hostedOpen (emberpanel.go)
+	hostedOpen     bool
 	notes          notifier // desktop notifications already shown (notify.go)
 	user           string
 	bridge         string
@@ -102,6 +108,7 @@ type emberModel struct {
 	chat           residentChat
 	residentEpoch  uint64
 	sessionNames   []string
+	sessionCards   []sessionCard // the switcher: one card per session
 	sessionSel     int
 	sessionMemory  string
 	pageScroll     int
@@ -531,6 +538,9 @@ func parseServers(out string) []server {
 // ---------------------------------------------------------------- model
 
 func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.hostedOpen { // /panel is open: it takes the keys; the rest still reaches the chat underneath (emberpanel.go)
+		return m.panelUpdate(msg)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -542,7 +552,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tickN++
 		if m.msg != m.msgOf {
 			m.msgOf, m.msgAt = m.msg, time.Now()
-		} else if m.msg != "" && time.Since(m.msgAt) > 6*time.Second {
+		} else if m.msg != "" && time.Since(m.msgAt) > noticeTTL(m.msg) {
 			m.msg, m.msgOf = "", ""
 		}
 		m.refreshLocal()
@@ -613,11 +623,17 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case residentComposeResult:
 		return m.finishCompose(msg)
+	case sessionCardsMsg:
+		if msg.agent == m.agentName {
+			m.sessionCards = msg.cards
+		}
+		return m, nil
 	case residentSessionsMsg:
 		if msg.agent == m.agentName {
-			m.sessionNames, m.sessionMemory = msg.names, msg.memory
 			if msg.err != "" {
-				m.msg = msg.err
+				m.msg = msg.err // (the names already known stay: a failed read must not empty the switcher)
+			} else {
+				m.sessionNames, m.sessionMemory = msg.names, msg.memory
 			}
 			if m.pendingLast != "" {
 				last := m.pendingLast
@@ -636,6 +652,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(residentRefresh(m), residentSessions(m))
 				}
 			}
+			if m.chat.picker && msg.err == "" {
+				return m, loadSessionCards(m, m.sessionNames) // the cards follow the names; the list never waits on them
+			}
 		}
 		return m, nil
 	case residentCreatedMsg:
@@ -644,13 +663,28 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.openResident(msg.name)
+		if msg.model != "" {
+			m.msg = "new session " + residentText(msg.name) + " on " + residentText(msg.model) + " · /model switches it"
+		}
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
+	case dirListedMsg:
+		if msg.agent == m.agentName {
+			if m.chat.dirs == nil {
+				m.chat.dirs = map[string][]string{}
+			}
+			m.chat.dirs[msg.dir] = msg.entries // (an unreadable folder caches empty: no retry per keystroke)
+			delete(m.chat.dirsPending, msg.dir)
+		}
+		return m, nil
+	case residentDestroyedMsg:
+		if msg.err != "" {
+			m.msg = "destroy " + residentText(msg.name) + ": " + residentText(msg.err)
+		} else {
+			m.msg = "destroyed " + residentText(msg.name) + "; its home is kept in " + residentText(msg.kept)
+		}
+		return m, residentSessions(m)
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
-	case identityLoadedMsg:
-		return m.identityLoaded(msg), nil
-	case advisorLoadedMsg:
-		return m.advisorLoaded(msg), nil
 	case editorDoneMsg:
 		if msg.err != "" {
 			m.msg = msg.err
@@ -671,7 +705,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rewindListMsg:
 		if msg.goal == m.chat.rewind.goal {
-			m.chat.rewind.steps, m.chat.rewind.err = msg.steps, msg.err
+			m.chat.rewind.steps, m.chat.rewind.err, m.chat.rewind.loaded = msg.steps, msg.err, true
 			m.chat.rewind.sel = max(0, len(msg.steps)-1)
 		}
 		return m, nil
@@ -702,7 +736,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.msg = "nothing to pull back: the agent has read your messages"
 		default:
-			m.chat.compose.SetValue(*msg.text)
+			// as you typed it (@names, +files, a leading //), not as it was sent: //x came back as /x and Enter ran it as
+			// a command while the message stayed withdrawn
+			m.chat.compose.SetValue(m.typedFormOf(*msg.text))
 			m.msg = "pulled back: edit it and Enter to send again"
 		}
 		return m, nil
@@ -823,7 +859,12 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.stopStream()
 		}
 		if m.tab == 6 && (m.mode == "" || m.mode == "normal") {
-			return m.chatKey(msg)
+			next, cmd := m.chatKey(msg)
+			if em, ok := next.(emberModel); ok { // an @ / + word: its folder's listing, once
+				em, list := em.ensureListing()
+				return em, tea.Batch(cmd, list)
+			}
+			return next, cmd
 		}
 		return m.onKey(msg.String())
 	case tea.MouseWheelMsg:
@@ -942,7 +983,7 @@ func (m emberModel) submitInput() (tea.Model, tea.Cmd) {
 		_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
 			"decision": "denied", "by": currentUser(), "instead": instead})
 		m.seen[r.ID] = true
-		m.msg = "denied " + r.ID + " with an instruction (sent as a steer)"
+		m.msg = map[string]string{"github": "GitHub hand-off", "root": "root request"}[r.kind()] + ": no, with what to do instead (sent as a steer)"
 		m.refreshLocal()
 		return m, nil
 	case "sessionnew":
@@ -1083,7 +1124,7 @@ func (m emberModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 			_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
 				"decision": "denied", "by": currentUser()})
 			m.seen[r.ID] = true
-			m.msg = "denied " + r.ID
+			m.msg = map[string]string{"github": "GitHub hand-off", "root": "root request", "question": "question"}[r.kind()] + ": no"
 			m.refreshLocal()
 		}
 	case "s":
@@ -1203,6 +1244,9 @@ func (m emberModel) render() string {
 	// The chat is the only screen; the old pages' content opens as overlays (envpages.go). renderPages is kept only
 	// for the page tests and is never reached from a key.
 	m.initChat()
+	if m.hostedOpen {
+		return m.hosted.View(max(20, m.width), max(12, m.height)) // /panel, in the whole frame
+	}
 	return m.renderChat()
 }
 

@@ -9,7 +9,7 @@
   caminus ps [--json]                           the servers this user started, their state, and the cards
   caminus logs NAME [-f]                        the server's log (less; -f follows it)
   caminus top [NAME]                            the monitor (caminus-panel top, the former llm-top) on that server
-  caminus panel [-advanced]                     the control panel (caminus-panel)
+  caminus panel                                 the control panel (caminus-panel): one status-first screen
 
 Each server runs `caminus serve` under the guard (caminus.cmd.guarded) in the background, in its own session, with its own
 state directory ($state_dir/servers/NAME: server.json, serve.log, guard.txt), prompt-cache disk tier ($kv_dir/NAME) and
@@ -259,7 +259,8 @@ def server_view(s):
     exited without the clean-stop line), stopped"""
     v = dict(name=s['name'], model=s['model'], url=f"http://127.0.0.1:{s['port']}", port=s['port'], cards=s.get('card_names', []),
              pid=s.get('guard_pid'), log=s['log'], uptime_s=max(0.0, time.time() - s.get('started', time.time())),
-             max_ctx=None, decode_tps=None, alias=s.get('alias'), busy=False, error='', kv=None)
+             max_ctx=None, decode_tps=None, alias=s.get('alias'), busy=False, error='', kv=None, note='',
+             external=False)
     if alive(s.get('guard_pid')):
         code, _ = http_json(v['url'] + '/health')
         v['state'] = 'ready' if code == 200 else 'loading'
@@ -285,7 +286,22 @@ def server_view(s):
         v['state'] = 'stopped' if clean else 'failed'
         if not clean:
             v['error'] = log_error(s['log']) or 'the server exited (caminus logs ' + s['name'] + ')'
+            cleared = cleared_refusal(v['error'])
+            if cleared:                      # (the guard refused on a fault file that is gone: nothing stops a start now)
+                v['state'], v['error'], v['note'] = 'stopped', '', cleared
     return v
+
+
+def cleared_refusal(error):
+    """a note when error is the guard's refusal on a recorded GPU fault whose stop file no longer exists (the fault was
+    cleared: the record is a stopped server, not a failed one), else None"""
+    head = 'GUARD REFUSED: a GPU fault was recorded ('
+    if head not in error:
+        return None
+    path = error.split(head, 1)[1].split(')', 1)[0]
+    if not path or os.path.exists(os.path.expanduser(os.path.expandvars(path))):
+        return None
+    return 'its last start was refused on a GPU fault that has since been cleared'
 
 
 def card_view(gs=None):
@@ -311,10 +327,49 @@ def problem_view(gs):
     return [dict(level=lv, card=c, text=x) for lv, c, x in host.problems(gs)]
 
 
-def unmanaged_servers():
-    """Live caminus_serve.py processes no slot in the registry owns: watched read-only, never
-    controlled (no start/stop/restart, no qwen attach). Observation only — a slot's server is
-    skipped even here so the registry stays the one source of control."""
+def listen_ports(pid, proc='/proc'):
+    """the TCP ports the process listens on (its sockets' inodes in /proc/net/tcp and tcp6, state 0A), sorted"""
+    inodes = set()
+    try:
+        for fd in os.listdir(f'{proc}/{pid}/fd'):
+            with contextlib.suppress(OSError):
+                t = os.readlink(f'{proc}/{pid}/fd/{fd}')
+                if t.startswith('socket:['):
+                    inodes.add(t[8:-1])
+    except OSError:
+        return []
+    ports = set()
+    for table in ('tcp', 'tcp6'):
+        try:
+            with open(f'{proc}/net/{table}') as f:
+                rows = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        for r in rows:
+            c = r.split()
+            if len(c) > 9 and c[3] == '0A' and c[9] in inodes:
+                with contextlib.suppress(ValueError, IndexError):
+                    ports.add(int(c[1].rsplit(':', 1)[1], 16))
+    return sorted(ports)
+
+
+def serve_argv_of(argv):
+    """whether a command line runs the Caminus server: tools/caminus_serve.py, or the caminus CLI's serve command
+    (`caminus serve`, `python -m caminus serve`, a boot script importing caminus.__main__)"""
+    if any(a.endswith('caminus_serve.py') for a in argv):
+        return True
+    if 'serve' not in argv:
+        return False
+    head = argv[:argv.index('serve')]
+    return any(os.path.basename(a) == 'caminus' or a == 'caminus' or 'caminus.__main__' in a for a in head)
+
+
+def unmanaged_servers(proc='/proc'):
+    """Live Caminus servers no slot in the registry owns (started by a script or `caminus serve` directly): watched
+    read-only, never controlled (no start/stop/restart, no qwen attach); the panel shows them as started outside it.
+    The port is the one the process listens on (else its --port, else serve's default), and the server must answer
+    /health with a Caminus /props (its engine marker) to count. A slot's server is skipped even here so the registry
+    stays the one source of control."""
     managed_ports = set()
     for s in all_servers():
         try:
@@ -324,44 +379,49 @@ def unmanaged_servers():
             pass
     out = []
     cand = {}
-    for entry in os.listdir('/proc'):
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return out
+    for entry in entries:
         if not entry.isdigit():
             continue
         pid = int(entry)
         try:
-            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            with open(f'{proc}/{pid}/cmdline', 'rb') as f:
                 argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
         except OSError:
             continue
-        if not any(a.endswith('caminus_serve.py') for a in argv) or '--port' not in argv or '--model' not in argv:
-            continue
+        if not serve_argv_of(argv) or any(os.path.basename(a) == 'guard.sh' for a in argv):
+            continue                          # (a guard's own command line: its server is a slot's, or its child is seen)
+        flag = lambda k: argv[argv.index(k) + 1] if k in argv and argv.index(k) + 1 < len(argv) else None
+        ports = listen_ports(pid, proc)
         try:
-            flag = lambda k: argv[argv.index(k) + 1]
-            port = int(flag('--port'))
-            model = flag('--model')
-        except (ValueError, IndexError):
+            port = ports[0] if ports else int(flag('--port') or 8092)
+        except ValueError:
             continue
         if port in managed_ports:
             continue
+        model = flag('--model') or ''
         base = os.path.basename(model.rstrip('/'))
         label = os.path.basename(os.path.dirname(model.rstrip('/'))) if '-of-' in base and 'gguf' in base.lower() else base
         # (an argv ending in --cache-dir has no value after it: the port names the server then, never an IndexError
         # that took down caminus ps and caminus top)
-        i = argv.index('--cache-dir') if '--cache-dir' in argv else -1
-        name = 'observed-' + (os.path.basename(argv[i + 1]) if 0 <= i < len(argv) - 1 else str(port))
-        cand.setdefault(port, []).append((name, label, pid, argv[0]))
+        cdir = flag('--cache-dir')
+        name = 'observed-' + (os.path.basename(cdir) if cdir else str(port))
+        cand.setdefault(port, []).append((name, label, pid, argv[0], model, bool(ports)))
     for port, group in sorted(cand.items()):
-        # the same server is usually seen several times (guard.sh's command line, a timeout/env wrapper and the
-        # python process itself): keep the python process, else the first candidate listed for that port
-        _, _, pid, _ = next((c for c in group if 'python' in os.path.basename(c[3])), group[0])
-        name, model = group[0][0], group[0][1]
-        view = dict(name=name, model=model, url=f'http://127.0.0.1:{port}',
+        # the same server is usually seen several times (a timeout/env wrapper and the python process itself): keep the
+        # process that holds the socket, else the python process, else the first candidate listed for that port
+        pick = next((c for c in group if c[5]), None) or next((c for c in group if 'python' in os.path.basename(c[3])), group[0])
+        name, label, pid, _, model, _ = pick
+        view = dict(name=name, model=label, url=f'http://127.0.0.1:{port}',
                     port=port, cards=[], pid=pid, log=None, max_ctx=None, decode_tps=None,
-                    alias=None, busy=False, error='')
+                    alias=None, busy=False, error='', external=True)
         try:
-            with open(f'/proc/{pid}/stat') as f:
+            with open(f'{proc}/{pid}/stat') as f:
                 start_ticks = int(f.read().split(') ', 1)[1].split()[19])
-            with open('/proc/uptime') as f:
+            with open(f'{proc}/uptime') as f:
                 view['uptime_s'] = max(0.0, float(f.read().split()[0]) - start_ticks / os.sysconf('SC_CLK_TCK'))
         except (OSError, ValueError, IndexError):
             view['uptime_s'] = None
@@ -371,29 +431,42 @@ def unmanaged_servers():
         view['state'] = 'ready' if code == 200 else 'loading'
         if code == 200:
             _, props = http_json(view['url'] + '/props')
-            if isinstance(props, dict):
-                view['max_ctx'] = find_key(props, 'n_ctx')
-                view['alias'] = props.get('model_alias')
+            if not isinstance(props, dict) or props.get('engine') != 'caminus':
+                continue  # another server on that port (or not Caminus's): not this process's
+            view['max_ctx'] = find_key(props, 'n_ctx')
+            view['alias'] = props.get('model_alias')
+            model = props.get('model_path') or model
             _, st = http_json(view['url'] + '/caminus/status', timeout=2.0)
             mpt = find_key(st, 'ms_per_token')
             if isinstance(mpt, (int, float)) and mpt > 0:
                 view['decode_tps'] = round(1000.0 / mpt, 1)
             ph = find_key(st, 'phase')
             view['busy'] = ph in ('prefill', 'decode')
+        m = models.model_of(model) if model else None
+        if m is not None:                     # (the catalog name: the panel shows it on that model's row)
+            view['model'] = m.name
         out.append(view)
     return out
+
+
+def shown_servers():
+    """the registry's servers caminus ps lists: a dead record of a paused model is left out (it can't be started again,
+    and an old failure of one is no news)"""
+    return [s for s in all_servers() if alive(s.get('guard_pid')) or not models.paused(s.get('model', ''))]
 
 
 def cmd_ps(argv):
     ap = argparse.ArgumentParser(prog='caminus ps')
     ap.add_argument('--json', action='store_true')
     a = ap.parse_args(argv)
-    views = [server_view(s) for s in all_servers()]
+    views = [server_view(s) for s in shown_servers()]
     gs = host.gpus(ROOT)
     cards = card_view(gs)
     probs = problem_view(gs)
+    obs = unmanaged_servers()
     if a.json:
-        print(json.dumps({'servers': views, 'cards': cards, 'gpus': gpu_view(gs), 'problems': probs}))
+        # (the servers started outside caminus start come last, marked external: the panel shows them running, read-only)
+        print(json.dumps({'servers': views + obs, 'cards': cards, 'gpus': gpu_view(gs), 'problems': probs}))
         return 0
     if not views:
         print('no servers (caminus start NAME; caminus models lists the names)')
@@ -401,9 +474,8 @@ def cmd_ps(argv):
         extra = ((f"  {v['max_ctx']:,} ctx" if v['max_ctx'] else '') + (f"  kv {v['kv']}" if v.get('kv') else '')
                  + (f"  {v['decode_tps']} tok/s decode" if v['decode_tps'] else ''))
         print(f"{v['name']:<12} {v['model']:<18} {v['state']:<8} {v['url']:<24} cards {'+'.join(v['cards'])}{extra}")
-        if v['error']:
-            print(f"{'':<12} {v['error']}")
-    obs = unmanaged_servers()
+        if v['error'] or v.get('note'):
+            print(f"{'':<12} {v['error'] or v['note']}")
     if obs:
         print('unmanaged (read-only: started outside caminus; watch with caminus top):')
         for v in obs:
@@ -896,10 +968,8 @@ def cmd_top(argv):
         # No slot-registered server runs; watch an unmanaged caminus_serve listening on this
         # machine instead — the monitor never controls it (no stop/restart by construction).
         obs = unmanaged_servers()
-        if obs:
-            observed = obs[0]
-            if a.name and observed['name'] != a.name:
-                observed = None
+        # by name among all of them: the panel's m passes the one it shows (observed-PORT), not always the first
+        observed = next((o for o in obs if o['name'] == a.name), None) if a.name else (obs[0] if obs else None)
     if not ss and not observed:
         print('caminus top: no running server' + (f' named {a.name!r}' if a.name else '') + ' (caminus ps)', file=sys.stderr)
         return 1

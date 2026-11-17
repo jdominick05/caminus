@@ -39,6 +39,7 @@ SUITES = [
     ('kernel_staging', ['tests/packaging/test_kernel_staging.py', '--scratch', '{scratch}'], set()),
     ('runtime_kernels', ['tests/packaging/test_runtime_kernels.py'], {'torch'}),
     ('arch', ['tests/test_arch.py', '--scratch', '{scratch}'], set()),
+    ('model_sampling', ['tests/test_model_sampling.py', '--scratch', '{scratch}'], set()),
     ('context_fit', ['tests/test_context_fit.py', '--scratch', '{scratch}'], {'torch'}),
     ('host', ['tests/device/test_host.py', '--scratch', '{scratch}'], set()),
     ('manage', ['tests/cmd/test_manage.py', '--scratch', '{scratch}'], set()),
@@ -54,6 +55,7 @@ SUITES = [
     # caminus ember from an installed wheel (synthetic code objects; no checkout on the path): needs setuptools, else SKIP
     ('env_installed', ['tests/ember/test_installed_wheel.py', '--scratch', '{scratch}'], set()),
     ('resident_compare', ['tests/tools/test_resident_compare.py', '--scratch', '{scratch}'], set()),
+    ('emberlab', ['tests/tools/test_emberlab.py', '--scratch', '{scratch}'], set()),
     ('docs', ['tests/docs/test_docs.py'], set()),
     ('own_code', ['tests/test_own_code.py'], set()),
     ('own_dequant', ['tests/io/test_own_dequant.py'], set()),

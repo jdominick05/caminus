@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,81 @@ func TestACrashShowsItsExceptionNotTheTracebackHeader(t *testing.T) {
 	}
 	if got := cliError([]byte("error: no agent named x\n")); got != "error: no agent named x" {
 		t.Fatalf("plain errors pass as they are: %q", got)
+	}
+}
+
+// The SSH transport prints notices on stderr ("ControlSocket … already exists, disabling multiplexing" when the
+// shared connection refuses a session): the status, the sessions and the switcher's cards must still read stdout's
+// JSON. Mixed in, every parse failed: one session in the switcher and "stopped" in the header.
+func TestResidentJSONIgnoresTransportNoticesOnStderr(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "fake-caminus")
+	body := "#!/bin/sh\n" +
+		"echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2\n" +
+		"echo 'ControlSocket /x already exists, disabling multiplexing' >&2\n" +
+		"case \"$3\" in\n" +
+		"  peers) echo '[{\"name\":\"resident\"},{\"name\":\"research\"}]' ;;\n" +
+		"  memory) echo '{\"memory\":\"m\"}' ;;\n" +
+		"  *) echo '{\"name\":\"resident\",\"model\":\"claude-haiku-5-5\",\"daemon_alive\":true,\"goals\":[]}' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := emberModel{agentName: "resident", cli: []string{script}}
+	out, err := runResident(residentCommand(m, []string{"status", "resident", "--json"}, ""))
+	var st residentStatus
+	if err != nil || json.Unmarshal(out, &st) != nil || st.Model != "claude-haiku-5-5" || !st.DaemonAlive {
+		t.Fatalf("the status reads stdout only: %v %q", err, out)
+	}
+	msg := residentSessions(m)().(residentSessionsMsg)
+	if msg.err != "" || len(msg.names) != 2 {
+		t.Fatalf("every session is listed despite the notices: %+v", msg)
+	}
+	if _, err := runResident(nil); err == nil {
+		t.Fatal("no CLI is an error, not a panic")
+	}
+}
+
+// A runtime from before `aims` (the one the owner had installed): its status still makes a full card, with the
+// goal's own prompt.
+func TestASessionCardFromAnOlderRuntimeWithoutAims(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "fake-caminus")
+	body := "#!/bin/sh\necho 'ControlSocket /x already exists, disabling multiplexing' >&2\ncase \"$3\" in\n" +
+		"  github) echo '{\"linked\":false}' ;;\n" +
+		"  *) echo '{\"name\":\"research\",\"model\":\"claude-haiku-5-5\",\"daemon_alive\":true,\"spend_today\":4.12,\"context\":1000000,\"context_used\":52335,\"goals\":[{\"id\":\"g1\",\"prompt\":\"design a game\",\"state\":\"completed\",\"created\":1,\"updated\":181}]}' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := loadSessionCard(emberModel{agentName: "resident", cli: []string{script}}, "research")
+	if c.status != "listening" || c.goal != "design a game" || c.aimed || c.model != "claude-haiku-5-5" || c.spendToday != 4.12 || c.ctxUsed != 52335 {
+		t.Fatalf("a full card from a status without aims: %+v", c)
+	}
+}
+
+// Destroy cancels every live goal, not only the one the card shows: a second goal waiting on root left its request
+// in the bridge for a session that no longer existed.
+func TestDestroyCancelsEveryLiveGoalThenRemoves(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := filepath.Join(dir, "fake-caminus")
+	body := "#!/bin/sh\nop=$3\nshift 2\necho \"$*\" >> " + log + "\ncase \"$op\" in\n" +
+		"  status) echo '{\"name\":\"research\",\"daemon_alive\":true,\"goals\":[{\"id\":\"a\",\"prompt\":\"x\",\"state\":\"working\"},{\"id\":\"b\",\"prompt\":\"y\",\"state\":\"waiting_root\"},{\"id\":\"c\",\"prompt\":\"z\",\"state\":\"completed\"}]}' ;;\n" +
+		"  remove) echo '{\"name\":\"research\",\"removed\":true,\"kept\":\"/k\"}' ;;\n" +
+		"  *) echo '{}' ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := emberModel{agentName: "resident", cli: []string{script}}
+	c := loadSessionCard(m, "research")
+	if strings.Join(c.active, ",") != "a,b" {
+		t.Fatalf("the live goals are a and b: %v", c.active)
+	}
+	_ = os.Remove(log)
+	// a card still loading knows no goals: destroy reads them itself
+	msg := destroyResidentSession(m, "research", nil)().(residentDestroyedMsg)
+	calls, _ := os.ReadFile(log)
+	want := "remove research --dry-run --json\nstatus research --json\ngithub research status --json\ncancel research a --json\ncancel research b --json\nremove research --json\n"
+	if msg.err != "" || msg.kept != "/k" || !strings.HasSuffix(string(calls), want) {
+		t.Fatalf("dry run, cancel each live goal, then remove: %+v\n%s", msg, calls)
 	}
 }

@@ -53,15 +53,19 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 
 | Key | Action |
 |---|---|
-| Esc | browse the transcript (the draft stays); while a reply is being written, interrupt that turn instead (nothing of it is kept; the goal waits up to two minutes for your message) |
+| Esc | while a reply is being written, interrupt that turn (nothing of it is kept; the goal waits up to two minutes for your message); the activity line says "esc interrupts" then. PgUp/PgDn and the wheel scroll the transcript |
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
-| Ctrl+R | earlier prompts containing the draft, newest first |
+| Ctrl+R | earlier prompts containing the draft, newest first (as you typed them: `//`, `@` and `+` kept) |
+| Home, End | with an empty draft: the top or the bottom of the history |
+| Esc on the `/` or path menu | closes it; the text stays |
+| Ctrl+N | a new goal; the draft stays and becomes its text, Esc goes back to the goal you were talking to |
+| Ctrl+C | with a draft: clear it (Up brings it back); again, or with no draft: quit |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
-| Ctrl+E | open or fold every tool card; Ctrl+O shows every line of an open card (40 otherwise) |
+| Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
-| Ctrl+G, Ctrl+A, Ctrl+P | the goals, approvals and sessions overlays |
-| `!cmd` | run `cmd` in the agent's account; the command and its output land in the draft |
-| `@path` | in a message, attach that file from the agent's account (64 KB) |
+| Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
+| `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell"); `!` on the draft's empty last line runs another, its output joining the first |
+| `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8); a missing file, a folder or a `..` path stops the message with what is wrong and keeps the draft. `@` only drops from a word that reads as a path (`@alice` stays). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
 
 While a reply is written, a bounded live box shows its thinking, the tools it
 starts and the text so far, with Ember, the Caminus mascot, flickering beside
@@ -69,21 +73,27 @@ it; the durable blocks replace it when the turn lands.
 
 | Command | Action |
 |---|---|
-| `/new [goal]`, `/goal ID`, `/goals` | start a goal, select one, or open the goals overlay (Shift+↑/↓ there reorders the queue) |
-| `/goal --plan TEXT`, `/plan approve`, `/plan revise NOTE` | a plan-first goal: it explores read-only, proposes a plan and waits; the plan shows as a card above the composer |
+| `/new [goal]`, `/goals` | start a goal, or open the goals overlay to pick one: Enter targets it, space shows it (with its plan; `v` opens the whole plan), `p` pauses, `r` resumes, `x x` cancels, Shift+↑/↓ reorders the queue |
+| `/plan`, `/plan TEXT`, `/plan approve`, `/plan revise NOTE` | alone, the whole plan in a scrolling view; TEXT starts a plan-first goal (it explores read-only, proposes a plan and waits; the plan shows as a card above the composer); approve or revise answers a waiting plan |
 | `/steer TEXT`, `/pause`, `/resume`, `/cancel` | steer, pause at the next step, resume, cancel |
 | `/btw QUESTION` | a side question with no tools; nothing enters the goal |
-| `/diff`, `/export` | the goal's changes in its git repositories (new files included); the goal as markdown in the agent's `~/exports` |
+| `/diff` | the goal's changes in its git repositories (new files included) |
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
-| `/approvals`, `/requests`, `/deny TEXT` | waiting questions and root requests; deny with what to do instead (it reaches the agent as a steer) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
-| `/context`, `/memory`, `/audit`, `/settings` | what the agent's context holds and where compaction starts; memory; the audit log; settings |
-| `/jobs`, `/servers`, `/agents` | the agent's jobs and processes; the model servers; every resident (advanced) |
-| `/recap`, `/studio` | while you were away; what free time made (the shelf, the journal, the studio) |
+| `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
+| `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
+| `/panel` | the Caminus panel (models, servers, the cards) full screen inside Ember; Esc, q or e comes back to the chat as it was |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
-| `/update`, `/halt` | install this caminus's runtime between goals; the emergency stop (`/halt clear` lifts it) |
-| `/glyphs`, `/theme` | symbol set (nerd, unicode, ascii) and colours |
-| `/session NAME`, `/sessions`, `/start`, `/stop`, `/quit` | sessions, the resident's loop, close the UI (the agent keeps running) |
+| `/halt` | the emergency stop (`/halt clear` lifts it) |
+| `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |
+| `/sessions` (Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches; `n` or the "+ new session" card creates one on your setup's default local model (the one chosen for your cards; `/model` switches it); `x x` destroys one (its home is kept in `~/.local/share/caminus/removed-sessions`); `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
+
+In the CLI only (rare, or about the machine rather than the conversation): `caminus ember agent export NAME GOAL`
+(the goal as markdown), `caminus ember agent install` (a new runtime; running daemons take it between goals, and the
+status line says "older runtime" until they do), `caminus ember ctx` (the model servers), `caminus ember audit` (the
+audit log), `caminus ember jobs` (the agent's jobs), `caminus ember agent github NAME` (its GitHub account),
+`caminus ember agent advisor NAME` (the advisor's model and budget) and `caminus ember agent heartbeat NAME now`
+(free time now).
 
 Custom commands: a markdown file `~/.config/caminus/commands/NAME.md` becomes
 `/NAME ARGS` (front matter is dropped; `$ARGUMENTS` is replaced, else the
@@ -91,15 +101,15 @@ arguments are appended) and is sent as a message.
 
 ### Root requests and questions
 
-A root request is an inline card. Esc, then `a a` approves (two presses: the
-first only names the command), `g g` approves and grants that exact command for
-the rest of its goal, `e` edits, `d` denies, `/deny TEXT` denies with what to do
-instead. When several wait, one card lists them all and `[` `]` pick. A granted
-repeat (the same command in the same goal, within 12 hours of your approval, as
-your own audit log records it) runs with one `a`, still under your sudo; the
-resident never runs root, and `caminus ember watch` honours grants the same way.
-`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant`
-do the same from the command line.
+A waiting request asks where you type: the composer becomes a prompt with the command (and why) or the question,
+"1 of N" when more wait, and the time left. A root command or a GitHub hand-off offers Yes / No / "Tell it something
+else", with No preselected; a question offers its choices (the recommended one marked and preselected) and "Answer in your own words". The
+arrows and Enter, or a digit, pick; the last option opens a line for your text (for a root command: a denial that
+tells the agent what to do instead, filed as a steer). Esc leaves it waiting: a line above the composer says so, and
+Tab, or the next request, brings it back. Yes runs the command under your sudo; the resident never runs root. The
+transcript keeps one line for each: `⚿ root: CMD` and then `· yes` / `· no: TEXT` / `· timed out (no)`. A granted
+repeat (the same command in the same goal, within 12 hours of your approval) is honoured by `caminus ember watch`;
+`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant` work from the command line.
 
 Nothing waits on you. A pending request parks only the step that needs it: the
 agent is told it is pending, works on what does not need the answer, and gets
@@ -192,7 +202,7 @@ that is not enough. A paid brain (remote, or through a key relay) compacts early
 at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
 `paid_compact_target_ratio`); a local one at 85 % down to 20 %.
 
-A plan-first goal (`send --plan`, `/goal --plan`) explores before it changes
+A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
 and a terminal command runs only when every part of it is a read-only program
 (`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent
@@ -251,7 +261,7 @@ nightly dream consolidates notes. On the local server it works in the full conte
 window: before a stretch overwrites the human's conversation, the prompt cache
 parks it to disk and the human's next request restores it. `caminus ember agent
 heartbeat NAME on|off|status|recap|now`; the recap is the "while you were away" line, and `now` (the panel's
-`/freetime`) starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
+`caminus ember agent heartbeat NAME now`) starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
 step limit (0, the default, means none); `--rest-minutes` sets the rest between stretches and `--budget-usd` the daily allowance.
 On a remote model free time spends its own allowance (`free_time.budget_usd`,
 0.50 USD a day by default).

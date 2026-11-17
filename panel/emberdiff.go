@@ -62,9 +62,9 @@ func bgSeq(hex string) string {
 }
 
 // editCard is toolCard for an edit: the same header, then the diff as diffLines draws it under the card's rule.
-func editCard(path, meta string, expanded bool, diff string, w int) string {
+func editCard(label, path, meta string, expanded bool, diff string, w int) string {
 	body := diffLines(path, diff, max(10, w-5))
-	head := toolCard("edit", path, meta, true, false, nil, w)
+	head := toolCard(label, path, meta, true, false, nil, w)
 	if len(body) == 0 {
 		return head
 	}
@@ -72,7 +72,7 @@ func editCard(path, meta string, expanded bool, diff string, w int) string {
 	shown := body
 	if !expanded && len(body) > editPreview {
 		// a long change shows its first lines, as a code review does, instead of only its header: the code the
-		// agent writes was invisible until Ctrl+E
+		// agent writes was invisible until Ctrl+O
 		shown = body[:editPreview]
 	}
 	out := []string{strings.Replace(head, g.collapsed, g.expanded, 1)}
