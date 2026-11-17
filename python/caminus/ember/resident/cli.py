@@ -57,7 +57,7 @@ def _local_effort(cfg, keep_level=False):
     server runs its base id at medium) instead of moving to the lab's default and re-reading the conversation. True
     when cfg changed; nothing changes when the server cannot be reached."""
     from . import catalog
-    if cfg.get('model_variants') or not catalog.is_local(cfg):
+    if cfg.get('model_variants') or not catalog.local_candidate(cfg):
         return False
     got = catalog.local_brain(cfg)
     if not got or not got[1]:

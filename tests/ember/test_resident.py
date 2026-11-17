@@ -45,15 +45,17 @@ def call(name,args):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[];models={};gets=[]
+    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[]
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
     def do_GET(self):
-        # a test that sets models[key] gets a local server's model list (its effort ids included); /props otherwise
+        # a test that sets models[key] / props[key] gets that model list (effort ids included) and /props; else n_ctx
         key=self.path.split('/')[1];self.gets.append(self.path)
         if self.path.endswith('/v1/models') and key in self.models:
             self.respond(dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in self.models[key]]));return
+        if self.path.endswith('/props') and key in self.props:
+            self.respond(self.props[key]);return
         self.respond(dict(n_ctx=65536))
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -1546,6 +1548,11 @@ for line in sys.stdin:
 
     CODER_IDS=['k3-coder','k3-coder-xhigh','k3-coder-low','k3-coder-nothink']   # what the Coder's server lists
 
+    def serve_ids(self,ids,alias=None,caminus=True):
+        """The fixture as a local server listing ids; caminus: its /props names the engine as `caminus serve` does."""
+        Endpoint.models[self.key]=list(ids)
+        Endpoint.props[self.key]=dict(n_ctx=65536,model_alias=alias or ids[0],**(dict(engine='caminus') if caminus else {}))
+
     def sent_models(self,levels):
         """For each level: set it with /effort, run a goal, and return the model id its first request named."""
         out={}
@@ -1560,7 +1567,7 @@ for line in sys.stdin:
     def test_a_local_session_from_the_session_switcher_finds_its_servers_effort_ids(self):
         # the owner's Coder session: create --local-default stored the catalog name (coder) and no provider, so /effort
         # said "coder has no effort control" while the server listed k3-coder-low / -xhigh / -nothink
-        Endpoint.models[self.key]=self.CODER_IDS
+        self.serve_ids(self.CODER_IDS)
         conf=json.loads((self.home/'config.json').read_text());conf['model']='coder'
         (self.home/'config.json').write_text(json.dumps(conf))
         out=self.cmd('effort',[])
@@ -1583,7 +1590,7 @@ for line in sys.stdin:
     def test_a_local_session_with_an_old_catalog_finds_its_servers_effort_ids(self):
         # a /model pick from a models.json written before the effort ids were grouped: four separate models, none with
         # variants, and a config with provider_kind local and no model_variants
-        Endpoint.models[self.key]=self.CODER_IDS
+        self.serve_ids(self.CODER_IDS)
         url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
         conf=json.loads((self.home/'config.json').read_text())
         conf.update(model='k3-coder',provider='coder-2card',provider_kind='local',providers={'coder-2card':dict(kind='local',endpoint=url)})
@@ -1604,7 +1611,7 @@ for line in sys.stdin:
 
     def test_a_new_local_session_takes_its_servers_id_and_the_labs_default_level(self):
         from caminus.ember.resident import effort as eff
-        Endpoint.models[self.key]=self.CODER_IDS
+        self.serve_ids(self.CODER_IDS)
         url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
         new='coder-'+uuid.uuid4().hex[:8];home=self.home.parent/new
         base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
@@ -1622,8 +1629,33 @@ for line in sys.stdin:
         got=json.loads((self.home.parent/down/'config.json').read_text())
         self.assertEqual((got['model'],got.get('model_variants')),('coder',None))
 
+    def test_a_paid_brain_through_the_relay_on_loopback_is_left_alone(self):
+        # init --endpoint http://127.0.0.1:8766/v1/openai writes no provider_kind and no relay: the relay is not a
+        # Caminus server (its /props names no engine), so nothing is rewritten even when its list has effort-like ids
+        self.serve_ids(self.CODER_IDS,caminus=False)
+        conf=json.loads((self.home/'config.json').read_text());conf['model']='deepseek-ai/DeepSeek-V4.1-Flash'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.gets.clear()
+        p=subprocess.run(self.argv('effort',['low']),capture_output=True,text=True,timeout=15)
+        self.assertEqual(p.returncode,1,p.stdout+p.stderr);self.assertIn('no effort control',json.loads(p.stdout)['error'])
+        got=json.loads((self.home/'config.json').read_text())
+        self.assertEqual((got['model'],got.get('model_variants'),got.get('effort')),('deepseek-ai/DeepSeek-V4.1-Flash',None,None))
+        self.assertFalse([g for g in Endpoint.gets if g.startswith('/'+self.key+'/') and g.endswith('/models')],
+                         'the model list is not read from a server that is not Caminus')
+
+    def test_an_effort_id_session_on_a_server_with_several_models_stays_on_its_base(self):
+        # a session stored on k3-coder-low; the server also serves swift-1.5, its default: the effort id maps to its base
+        # by its suffix, never to the server's default model
+        self.serve_ids(self.CODER_IDS+['swift-1.5','swift-1.5-low','swift-1.5-xhigh','swift-1.5-nothink'],alias='swift-1.5')
+        conf=json.loads((self.home/'config.json').read_text());conf['model']='k3-coder-low'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        out=self.cmd('effort',[])
+        self.assertEqual((out['model'],out['current']),('k3-coder','low'))
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['model_variants']['xhigh'],'k3-coder-xhigh')
+        self.assertEqual(self.sent_models(['low','high']),dict(low='k3-coder-low',high='k3-coder-xhigh'))
+
     def test_a_paid_brain_without_effort_control_asks_no_server(self):
-        Endpoint.models[self.key]=self.CODER_IDS
+        self.serve_ids(self.CODER_IDS)
         conf=json.loads((self.home/'config.json').read_text())
         conf.update(provider='deepinfra',provider_kind='deepinfra',efforts=[],relay=True)
         (self.home/'config.json').write_text(json.dumps(conf))

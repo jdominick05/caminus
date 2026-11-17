@@ -35,12 +35,12 @@ DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
 DEEPINFRA_OUTPUT_CAP = 16384
 
 
-def _get(url, headers, opener, timeout=TIMEOUT):
+def _get(url, headers, opener, timeout=TIMEOUT, limit=8 * 1024 * 1024):
     req = urllib.request.Request(url, None, {'Accept': 'application/json', **headers})
     with opener(req, timeout=timeout) as r:
-        raw = r.read(8 * 1024 * 1024 + 1)
-    if len(raw) > 8 * 1024 * 1024:
-        raise ValueError('model list larger than 8 MiB')
+        raw = r.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(f'reply larger than {limit // 1024} KiB')
     return json.loads(raw)
 
 
@@ -182,9 +182,11 @@ def providers(config):
     return out
 
 
-def is_local(config):
-    """Whether the agent's own brain is a local server: provider_kind local, or a config from before providers (agent
-    init, create --model) on a loopback endpoint that is neither the key relay nor the Messages API."""
+def local_candidate(config):
+    """Whether the agent's own brain may be a local Caminus server: provider_kind local, or a config from before
+    providers (agent init, create --model) on a loopback endpoint that is neither marked relayed nor the Messages API.
+    A candidate without provider_kind is local only when its /props says so (local_brain): the key relay listens on
+    loopback too, and init writes no provider_kind or relay for it."""
     kind = config.get('provider_kind')
     if kind:
         return kind == 'local'
@@ -194,21 +196,35 @@ def is_local(config):
     return urllib.parse.urlsplit(config['endpoint']).hostname in LOOPBACK
 
 
+LOCAL_READ = 512 * 1024   # a local server's /models (a few ids) and /props (its chat template among them): at most this
+
+
 def local_brain(config, opener=urllib.request.urlopen, timeout=3):
     """Ask the agent's local server which model it serves and that model's effort ids: (base id, {level: id}), or None
-    when it cannot be reached or names no such model. The configured id when the server lists it; else its only model
-    (with several, its default: /props model_alias). The session switcher stores the catalog name (coder), and the
-    server runs an id it does not list as its default model."""
+    when it cannot be reached, is not a Caminus server (its /props engine; asked unless provider_kind is local) or
+    names no such model. The configured id when the server lists it; an effort id (k3-coder-low) its base; else its
+    only model (with several, its default: /props model_alias). The session switcher stores the catalog name (coder),
+    and the server runs an id it does not list as its default model."""
+    from . import effort
     base = config['endpoint'].rstrip('/')
+    props = None
     try:
-        groups = local_entries(_get(base + '/models', {}, opener, timeout), '')
+        if config.get('provider_kind') != 'local':
+            props = _get(_root(base) + '/props', {}, opener, timeout, LOCAL_READ)
+            if props.get('engine') != 'caminus':
+                return None
+        groups = local_entries(_get(base + '/models', {}, opener, timeout, LOCAL_READ), '')
         groups = {m['id']: m['variants'] for m in groups}
-        model = config.get('model')
+        model = config.get('model') or ''
         if model not in groups:
-            alias = None
-            if len(groups) > 1:
-                alias = _get(_root(base) + '/props', {}, opener, timeout).get('model_alias')
-            model = alias if alias in groups else next(iter(groups)) if len(groups) == 1 else None
+            bases = [model[:-len(s)] for s in effort.SUFFIX.values() if model.endswith(s) and model[:-len(s)] in groups]
+            if bases:
+                model = bases[0]
+            elif len(groups) == 1:
+                model = next(iter(groups))
+            else:
+                props = props or _get(_root(base) + '/props', {}, opener, timeout, LOCAL_READ)
+                model = props.get('model_alias') if props.get('model_alias') in groups else None
     except (OSError, ValueError, AttributeError, KeyError, TypeError, urllib.error.HTTPError):
         return None
     return (model, groups[model]) if model else None
