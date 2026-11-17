@@ -2994,12 +2994,15 @@ for line in sys.stdin:
                 live=Live(self.home,gid,rt.store);live.start()
                 self.assertTrue((self.home/'live'/(gid+'.json')).exists(),'in flight before any piece arrives')
                 queued={}
-                threading.Timer(.4,lambda:queued.update(self.cmd('interrupt',[gid]))).start()
+                esc=threading.Timer(.4,lambda:queued.update(self.cmd('interrupt',[gid])));esc.start()
                 t0=time.time()
                 with self.assertRaises(Cancelled):
                     rt._watched(live,lambda on_delta:rt.model.complete([dict(role='user',content='hi')],max_tokens=10,on_delta=on_delta),poll=.05)
                 self.assertTrue(closed.wait(3),api+': the server sees the client go')
                 self.assertLess(time.time()-t0,5)
+                # the CLI queues the interrupt (which cancels the call) before it prints its answer: on a slow runner
+                # the answer came after this check, and it read {}
+                esc.join(30)
                 self.assertEqual(queued,dict(goal=gid,queued=True,generating=True))
                 self.assertTrue(live.interrupted)
                 ev=[e for e in rt.store.events(0,1000) if e['kind']=='turn_interrupted' and e['goal']==gid]
