@@ -1324,10 +1324,13 @@ func TestGateAndJudgeVerdicts(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
-	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix", "judge: met  ·  41 passed"} {
+	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
+	}
+	if strings.Contains(v, "41 passed") {
+		t.Fatal("a met verdict shows on the finish line, not as its own card")
 	}
 }
 
@@ -2567,5 +2570,58 @@ func TestSessionListArrivesBeforeTheCardsAndAFailureKeepsIt(t *testing.T) {
 	next, _ = m.Update(residentSessionsMsg{agent: m.agentName, err: "ssh: timeout"})
 	if len(next.(emberModel).sessionNames) != 2 {
 		t.Fatal("a failed read keeps the sessions already known")
+	}
+}
+
+func TestASwitchedSessionSaysLoadingNotStoppedUntilItsStatusLands(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.sessionNames = []string{"resident", "local-testing"}
+	m.openResident("local-testing")
+	frame := ansi.Strip(m.render())
+	if strings.Contains(frame, "stopped") || strings.Contains(frame, "will stay here") || !strings.Contains(frame, "loading") {
+		t.Fatalf("before its first status a session is loading, not stopped with the empty welcome:\n%s", frame)
+	}
+	if !strings.Contains(m.windowTitle(), "loading") {
+		t.Fatalf("the tab title says loading: %q", m.windowTitle())
+	}
+	m.receiveResident(residentMsg{agent: "local-testing", status: residentStatus{Name: "local-testing", DaemonAlive: false}})
+	m.syncChat()
+	if frame = ansi.Strip(m.render()); !strings.Contains(frame, "stopped") || strings.Contains(frame, "loading") ||
+		!strings.Contains(frame, "will stay here") {
+		t.Fatalf("once its status lands, an empty stopped session shows stopped and the welcome, no loading line:\n%s", frame)
+	}
+}
+
+func TestAMetVerdictShowsOnceOnTheFinishLine(t *testing.T) {
+	m := chatFixture(t)
+	met := residentEvent{Seq: 8, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists"}}
+	if b := m.chat.eventBlock(met); b != "" {
+		t.Fatalf("a met verdict has no card of its own; the finish line carries it:\n%s", ansi.Strip(b))
+	}
+	notYet := residentEvent{Seq: 9, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "not_yet", "reason": "no tests ran"}}
+	if b := ansi.Strip(m.chat.eventBlock(notYet)); !strings.Contains(b, "judge: not yet") {
+		t.Fatalf("a refusal keeps its card (no finish line follows it):\n%s", b)
+	}
+}
+
+// The judge records a met verdict and then returns the finish result with judge "met: REASON" (judge.review): the
+// transcript shows that sentence once, in both the card and the compact view.
+func TestAMetVerdictAppearsExactlyOnceInTheTranscript(t *testing.T) {
+	for _, cards := range []bool{true, false} {
+		m := chatFixture(t)
+		m.height = 40
+		m.chat.cards = cards
+		m.residentEvents = []residentEvent{
+			{Seq: 1, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists with all sections"}},
+			{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "finish", "call_id": "c9",
+				"result": map[string]any{"summary": "Wrote the review.", "judge": "met: The review file exists with all sections"}}},
+		}
+		m.chat.rendered, m.chat.content = 0, ""
+		m.syncChat()
+		v := ansi.Strip(m.chat.content)
+		if n := strings.Count(v, "The review file exists with all sections"); n != 1 {
+			t.Fatalf("cards=%v: the verdict shows %d times:\n%s", cards, n, v)
+		}
 	}
 }
