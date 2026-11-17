@@ -26,11 +26,18 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   something that looked after the last change, a refused edit blocks the finish until the change is made or the file
   is read, and the judge sees which files were actually changed.
 - **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
-  takes the agent's recommended option after 15 minutes; an unanswered permission or root request is a no.
+  waits 15 minutes while you are at the screen and longer while you are away (until 15 minutes after you come back,
+  at most 8 hours); then the advisor's pick or the agent's recommended option. An unanswered permission is a no, and a
+  root request is a no after 15 minutes either way.
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
 - **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
+  On a `caminus serve` brain the chat's speeds are the engine's own: "read 1,240 · write 62 tok/s" is how fast it read
+  the last reply's prompt and wrote the reply. While a reply streams, the write speed is the engine's live figure, its
+  mean over its most recent passes, so it can step when the reply ends.
+  Any other brain (llama-server included, whose timings Ember does not take as the engine's) gets Ember's own
+  estimate, marked "est.".
 
 Compared with Qwen Code and similar harnesses, the difference that matters most is what a harness cannot do: keep
 working when you close the window. On speed and cost there is one small measurement so far: a single bug-fix task (a
@@ -130,6 +137,29 @@ caminus ember setup                           # prints the root script for these
 log and relays are in their own home already; relays listen on fixed local ports, so a second owner's relay takes
 another one (`relay install ... --port 8775`, and the agent's `--endpoint` to match).
 
+## The mouse: clicks and copying
+
+The chat (`caminus ember ui`) takes the mouse: the wheel scrolls the history, and a click opens a folded card, picks a
+card in the session picker (Shift+Tab) or presses the jump-to-newest pill. Taking the mouse turns the terminal's own
+selection off, so the chat selects text itself:
+
+- **Drag to copy.** Drag over any text on the screen: the conversation and its cards (folded or open), the side pane
+  (tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the
+  button copies the plain text to the clipboard (wl-copy on Wayland, xclip or xsel on X11, and OSC 52 for terminals that
+  take it, such as a remote session). The copy has no colours or styling; its lines break where the screen breaks them.
+  The status line says how many lines it copied.
+- **One area at a time.** A drag selects inside the area it began in, so the conversation never picks up the side pane
+  beside it and the other way round. In the conversation, dragging past its top or bottom scrolls and keeps
+  selecting. A box's border (the composer's, a dialog's, between the picker's cards) is left out of the copy; a │ or ─
+  inside a dialog's content (a diff, a table) is copied as it is.
+- **Click or drag.** Pressing the button does nothing yet. If the pointer gets two or more cells away before the
+  release, it is a drag and selects; if it doesn't, or it comes back to the cell where you pressed, it is a click, and the click acts where you pressed. So a drag that starts
+  on a card or a session never opens or switches it.
+- **Clearing.** A click clears the selection; outside the conversation a key or a resize clears it too, since the
+  screen under it changes.
+- **The terminal's own selection.** Shift+drag still gives it, in terminals that offer one (VTE / GNOME Terminal do).
+  `/panel` is the control panel's own screen and keeps its own mouse handling.
+
 ## Defaults
 
 Every setting below works without being set. The resident's `config.json` lives in its home; a key in the table is a
@@ -143,7 +173,8 @@ key of that file.
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
 | Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
-| A request's wait | 15 min | a question then takes its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| A request's wait | 15 min | a question then takes the advisor's pick or its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
+| A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min; the prompt then says "waits while you're away"; root requests keep their 15 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
 | Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image read by a brain without vision is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
@@ -165,6 +196,23 @@ made before that keeps running at medium until you pick a level.
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
 A side call (the judge's check of a finish) always runs with thinking off.
+
+### The web tools
+
+- **web_search** asks the ddgs engines in turn (auto, Bing, Brave, Mojeek, Wikipedia) until one has results; each
+  engine gets at most 25 s, the search 75 s. The result's `tried` names what each engine gave (results, empty, or the
+  error), and so does the error when none had results. ddgs says "No results found" both for an empty answer and for
+  an engine that refuses (a rate limit), so that is named apart from an empty list; when no engine failed outright but
+  none had results, auto and Bing are asked once more after 2.5 s. It needs ddgs in the agent's account (the install
+  line is in [the resident's tool table](resident-agent.md); `search_python` in `config.json` names another Python that
+  has it).
+- **web_fetch** makes up to three tries on HTTP 429 and 5xx, waiting what the site's Retry-After asks (else 2 s, then 4 s);
+  a site that asks for a wait past 30 s fails at once, naming the wait. A URL fetched again within a goal comes from a
+  cache for 10 minutes, marked `cached` (`fresh=true` fetches it again); the cache holds 4M characters in all. A PDF (by
+  its content type or its first bytes, up to 30 MB) comes back as text through `pdftotext` when it is installed
+  (poppler-utils), else (or when pdftotext fails on it) through a small built-in reader that marks its text partial,
+  says what it skipped, and after 5 s returns what it has read so far. `paper=true` on an arXiv abstract URL fetches the
+  paper's PDF.
 
 ## Its memory
 
@@ -202,6 +250,7 @@ index, journal or note. Hits from the running goal come last, marked "this goal"
 | Its config, state, memory and notes | `~/homes/NAME/config.json`, `STATE.md`, `MEMORY.md`, `notes/` |
 | Its free time | `~/homes/NAME/journal/`, `studio/` (with `studio/PROJECTS.md` and `studio/for-you/`, what it leaves you) |
 | Its instructions | `~/ROBOTS.md` in the agent's account (refreshed by `caminus ember setup`) |
+| Its Python | `~/.venvs/caminus-cpu` in the agent's account, filled by `caminus ember setup` and topped up by `caminus ember agent install` (both add only what is missing; a venv left without a working pip is repaired in place, and when it cannot be, setup fails and names the apt package, python3-venv): pillow, requests, beautifulsoup4, lxml, scipy, pandas, matplotlib, ddgs, weasyprint, pypdf (about 110 MB to download, 460 MB on disk), CPU torch and numpy with `--test-venv`. pandoc makes PDFs with `--pdf-engine=$HOME/.venvs/caminus-cpu/bin/weasyprint`; weasyprint needs pango (`sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libharfbuzz-subset0`; setup says so when it is missing) |
 | Your key for its account | `~/.ssh/caminus_env_key` |
 | Your audit log | `~/.local/state/caminus/env-audit.jsonl` |
 | The setup script | `~/.local/share/caminus/env-setup.sh` |
@@ -235,7 +284,7 @@ Your files never move into the agent's account unless you put them there or appr
 | A goal is `paused` | Its reason is on the goal (`/goals`): the watchdog (no progress, a token budget, the same call failing three times or repeated seven times), three plain replies, or three cut-off replies. Steer it, then `/resume`. |
 | HTTP 402 from the relay | The day's cap is spent: it resets at midnight, or raise it with `relay install --cap-usd N`. |
 | HTTP 403 "no published price" | The model is not on the provider's price list (or a stale model name in the config): pick one with `/model`. |
-| Ember's box says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
+| The thoughts box under the history says there are no thoughts | The model answers without reasoning on this provider: `/effort` turns it on, at a token cost. |
 | GNOME asks for an admin password | You opened a file in the agent's home from the file manager (an `admin://` path). Read its files with `caminus ember run` or from the panel instead. |
 | Too many desktop notifications | `CAMINUS_PANEL_NOTIFY=0 caminus ember ui`. |
 

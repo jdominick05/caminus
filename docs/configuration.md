@@ -76,7 +76,7 @@ native 32,768 tokens, up to 131,072. It is opt-in: without it the server is unch
 - Positions are stretched (NTK RoPE scaling, factor 4) so the model can recall past its training length. In our tests it
   found 3 of 3 planted values at 1,040,384 tokens, including one 936K tokens back; without the scaling it missed that one.
   The stretch costs a little at short range: KL divergence 0.0077 against llama.cpp, versus 0.0057 without it.
-- Conversations are still saved to disk (since 0.2.2; 0.2.1 turned this off in this mode). Saving one writes its whole
+- Conversations are still saved to disk (since 0.3.0; 0.2.1 turned this off in this mode). Saving one writes its whole
   attention cache, about 12.4 KB per token (5 GB at 400K tokens), so the disk cap is 64 GB here unless you set
   `--cache-cap-gb`. When another conversation pushes yours out (a second session, or a harness's background job too
   big for the side slot), yours comes back from disk in seconds instead of being read again: about 1,100 tokens/s at

@@ -616,7 +616,7 @@ def unmanaged_checks(S):
         if url.endswith('/props'):
             return 200, {'engine': 'caminus', 'model_alias': 'k3-coder', 'model_path': '/m/none.gguf',
                          'default_generation_settings': {'n_ctx': 1048576}}
-        return 200, {'decode': {'ms_per_token': 10.0}}
+        return 200, {'version': 1, 'engine': 'caminus', 'decode': {'ms_per_token': 10.0}}
     manage.http_json, manage.all_servers = fake_http, lambda: []
     try:
         seen = manage.unmanaged_servers(proc)
