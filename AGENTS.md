@@ -265,6 +265,7 @@ export HF_TOKENIZER_JSON=/path/to/tokenizer.json   # optional: two tokenizer cro
 (cd panel && go build -o caminus-panel . && go test ./...)
 python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI runs them (a FRESH DIR; skips with the reason what's missing; --jobs N suites at once)
 python -I tools/release/privacy_scan.py .           # no secrets, machine paths or session links in the tree (CI runs it)
+python -I tools/entropy.py                          # ENTROPY.md's tree checks: a path a doc names exists, every test / tool / benchmark is named somewhere, no copies (the CPU suite entropy; --prune drops fixed baseline entries)
 python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
 python -I tools/gates/objcheck.py snap build -o FILE   # the built objects' code / data digests and k3_run's registers, before an edit
 python -I tools/gates/objcheck.py check FILE build --expect 'MODULE*'   # after it: only the named objects changed; registers in budget (reads files, CPU)
