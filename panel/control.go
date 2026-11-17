@@ -84,7 +84,9 @@ type ctl struct {
 	ember   emberMsg // whether Ember is set up
 	opts    []option
 	loaded  map[string]bool      // which reads answered at least once
-	readErr map[string]error     // the last failed read of models / harness (nil once a read answers): said as "couldn't read"
+	readErr map[string]error     // the last failed read of models / ps / harness / ember / opts (nil once one answers): said as "couldn't read" in its own area
+	retry   map[string]bool      // the failed reads the poll is reading again (one at a time each: a slow failure never piles up)
+	failAt  map[string]time.Time // when each failed read's answer came: the poll reads it again readRetry later
 	vals    map[string]string    // serve option values for the next start (dest -> text); absent = the default
 	card    string               // one-card models: "auto", "0", "1" (the options editor's first row)
 	picks   map[string]modelPick // model name -> card count and drafter choice at each count
@@ -102,8 +104,10 @@ type ctl struct {
 	seen      *panelSeen // what the last View drew (View has a value receiver; the keys read it from here)
 	confirm   *pending   // a y / n question
 	busy      string     // the action in flight ("" = none)
-	note      string     // the last result line
+	note      string     // the last result line (a key's or an action's: a read's failure is said in that read's own area)
 	noteErr   bool
+	noteRead  string // the read a key's "couldn't read" note is about ("" = none): cleared when that read next answers
+	helpDrawn int    // the key list's page count in the View being drawn (the key line under it reads it)
 	prefs     string
 
 	live *liveMon // the running server's live numbers and its clients (panellive.go)
@@ -139,9 +143,13 @@ type (
 		v   harnessInfo
 		err error
 	}
-	// emberMsg: whether Ember, the agent environment, is set up (caminus ember status --json)
-	emberMsg struct{ ok, known bool }
-	optsMsg  struct {
+	// emberMsg: whether Ember, the agent environment, is set up (caminus ember status --json); err is a read that failed
+	// (no JSON came back), which is not "not set up": status answers ok false for that
+	emberMsg struct {
+		ok, known bool
+		err       error
+	}
+	optsMsg struct {
 		v   []option
 		err error
 	}
@@ -384,15 +392,56 @@ func (m ctl) loadHarness() tea.Cmd {
 	}
 }
 
-// loadEmber reads whether Ember is set up; any failure reads as not set up (the row then says how).
+// loadEmber reads whether Ember is set up: ok false is not set up, a failed read is said as one (the row says which).
 func (m ctl) loadEmber() tea.Cmd {
 	return func() tea.Msg {
 		var v struct {
 			OK bool `json:"ok"`
 		}
 		err := m.be.call(&v, 20*time.Second, "ember", "status", "--json")
-		return emberMsg{ok: err == nil && v.OK, known: true}
+		return emberMsg{ok: err == nil && v.OK, known: true, err: err}
 	}
+}
+
+// readRetry is how long after a failed read of the models, Qwen Code, Ember or the serve options the poll reads it
+// again (ps is read on every poll anyway): its area clears on the next read that answers, without R.
+const readRetry = 4 * time.Second
+
+// retryReads is the failed reads (not ps) whose wait is over and that are not already being read again.
+func (m *ctl) retryReads(now time.Time) tea.Cmd {
+	load := map[string]func() tea.Cmd{"models": m.loadModels, "harness": m.loadHarness, "ember": m.loadEmber, "opts": m.loadOpts}
+	var cmds []tea.Cmd
+	for _, k := range []string{"models", "harness", "ember", "opts"} {
+		if m.readErr[k] == nil || m.retry[k] || now.Sub(m.failAt[k]) < readRetry {
+			continue
+		}
+		m.retry[k] = true
+		cmds = append(cmds, load[k]())
+	}
+	return tea.Batch(cmds...)
+}
+
+// readDone records a read's answer: its error (said in its area) or, when it answered, no error and no key note about it.
+func (m *ctl) readDone(k string, err error) {
+	m.loaded[k] = true
+	m.readErr[k] = err
+	delete(m.retry, k)
+	if err != nil {
+		m.failAt[k] = time.Now()
+		return
+	}
+	if m.noteRead == k {
+		m.setNote("", false)
+	}
+}
+
+// psDown is whether the last caminus ps read failed: what runs is not known, so nothing is offered a start.
+func (m ctl) psDown() bool { return m.readErr["ps"] != nil }
+
+// psDownNote is the note of a key that needs to know what runs while caminus ps can't be read.
+func (m *ctl) psDownNote(what string) {
+	m.setNote(what+"couldn't read the running servers · R reads again: "+m.readErr["ps"].Error(), true)
+	m.noteRead = "ps"
 }
 
 func (m ctl) loadOpts() tea.Cmd {
@@ -433,7 +482,7 @@ func (m ctl) Init() tea.Cmd {
 		func() tea.Msg { return panelOpenMsg{id} })
 }
 
-func (m *ctl) setNote(s string, isErr bool) { m.note, m.noteErr = s, isErr }
+func (m *ctl) setNote(s string, isErr bool) { m.note, m.noteErr, m.noteRead = s, isErr, "" }
 
 func (m ctl) selModel() *camModel {
 	if m.curM >= 0 && m.curM < len(m.models) {
@@ -731,36 +780,34 @@ func (m ctl) update(msg tea.Msg) (ctl, tea.Cmd) {
 		if !m.mine(msg.id, msg.epoch) {
 			return m, nil
 		}
-		return m, tea.Batch(m.loadPS(), m.pollCmd())
+		return m, tea.Batch(m.loadPS(), m.retryReads(time.Now()), m.pollCmd())
 	case liveTick, liveMsg, sessionsMsg, emberTick, emberCountMsg:
 		return m.liveUpdate(msg)
+	// (a read's failure goes to its own area, never the note line: a poll that keeps failing never hides a key's note)
 	case modelsMsg:
-		m.loaded["models"] = true
-		m.readErr["models"] = msg.err
-		if msg.err != nil {
-			m.setNote(msg.err.Error(), true)
-		} else {
+		m.readDone("models", msg.err)
+		if msg.err == nil {
 			m.models = msg.v
 			m.curM = min(m.curM, max(0, len(m.models)-1))
 		}
 	case psMsg:
-		m.loaded["ps"] = true
+		m.readDone("ps", msg.err)
 		if msg.err == nil {
 			msg.v.Servers = m.keepExternal(msg.v.Servers)
 			m.ps = msg.v
-		} else if m.busy == "" {
-			m.setNote(msg.err.Error(), true)
 		}
 	case emberMsg:
-		m.ember = msg
+		m.readDone("ember", msg.err)
+		if msg.err == nil || !m.ember.known { // (a failed read keeps what the last answer said)
+			m.ember = msg
+		}
 	case harnessMsg:
-		m.loaded["harness"] = true
-		m.readErr["harness"] = msg.err
+		m.readDone("harness", msg.err)
 		if msg.err == nil {
 			m.hs = msg.v
 		}
 	case optsMsg:
-		m.loaded["opts"] = true
+		m.readDone("opts", msg.err)
 		if msg.err == nil {
 			m.opts = msg.v
 		}
@@ -945,6 +992,10 @@ func (m ctl) modelsKey(s string) (ctl, tea.Cmd) {
 	}
 	switch s {
 	case "enter":
+		if m.psDown() { // (what runs is not known: a start could land on a busy card or start a model twice)
+			m.psDownNote("can't start " + mi.Name + ": ")
+			return m, nil
+		}
 		if e := m.hwError(); e != "" {
 			m.setNote(e, true)
 			return m, nil
@@ -1007,6 +1058,10 @@ func (m ctl) modelsKey(s string) (ctl, tea.Cmd) {
 // serverKey acts on the server in the running card: stop, restart, its log, the full monitor.
 func (m ctl) serverKey(s string) (ctl, tea.Cmd) {
 	sv := m.primary()
+	if sv == nil && m.psDown() {
+		m.psDownNote("")
+		return m, nil
+	}
 	if sv == nil {
 		m.setNote("no server running", false)
 		return m, nil
@@ -1055,6 +1110,11 @@ func (m ctl) agentKey(s string) (ctl, tea.Cmd) {
 		if m.hosted {
 			return m, closePanel // (inside Ember: e goes back to it)
 		}
+		if err := m.readErr["ember"]; err != nil && !m.ember.ok {
+			m.setNote("couldn't read Ember's status: "+err.Error(), true)
+			m.noteRead = "ember"
+			return m, m.loadEmber()
+		}
 		if !m.ember.ok {
 			m.setNote("Ember is not set up: run caminus ember setup (docs/ember-quickstart.md walks through it)", true)
 			return m, m.loadEmber()
@@ -1063,6 +1123,7 @@ func (m ctl) agentKey(s string) (ctl, tea.Cmd) {
 	case "c":
 		if err := m.readErr["harness"]; err != nil && !m.hs.Installed {
 			m.setNote("couldn't read Qwen Code's status: "+err.Error(), true)
+			m.noteRead = "harness"
 			return m, m.loadHarness()
 		}
 		if !m.hs.Installed {
@@ -1331,7 +1392,8 @@ func newPanel(o panelOptions) ctl {
 
 func newCtl(be *ctlCLI, prefsFile string) ctl {
 	panelSeq++
-	m := ctl{be: be, id: panelSeq, loaded: map[string]bool{}, readErr: map[string]error{}, vals: map[string]string{}, card: "auto",
+	m := ctl{be: be, id: panelSeq, loaded: map[string]bool{}, readErr: map[string]error{}, retry: map[string]bool{},
+		failAt: map[string]time.Time{}, vals: map[string]string{}, card: "auto",
 		prefs: prefsFile, fits: map[string]fitEntry{}, live: newLiveMon(), seen: &panelSeen{}}
 	m.loadPrefs()
 	return m

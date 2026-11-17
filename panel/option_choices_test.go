@@ -30,7 +30,7 @@ func TestServeOptionsNumericChoices(t *testing.T) {
 	}
 	m := newCtl(newCtlCLI("caminus"), "")
 	next, _ := m.Update(optsMsg{v: opts})
-	rows := strings.Join(next.optionRows(20), "\n")
+	rows := strings.Join(next.optionRows(116, 20), "\n")
 	if !strings.Contains(rows, "--max-ctx") || strings.Contains(rows, "gave no options") {
 		t.Fatalf("options without choices disappeared:\n%s", rows)
 	}

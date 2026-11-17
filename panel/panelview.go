@@ -69,6 +69,10 @@ func (m ctl) View(w, h int) string {
 		if m.seen != nil {
 			m.seen.helpPages = pages
 		}
+		// (the key line under the list says whether ? turns the page: drawn again with this frame's page count, one line
+		//  either way, so the room above it is unchanged)
+		m.helpDrawn = pages
+		bottom = append([]string{m.noteLine(W)}, strings.Split(m.keysLine(), "\n")...)
 	case viewOptions:
 		body = m.optionsLines(W, room)
 	default:
@@ -231,6 +235,9 @@ func (m ctl) runningRows(w int) []string {
 		return []string{fg(cMuted).Render(spin[m.frame%len(spin)] + " looking for servers")}
 	}
 	sv := m.primary()
+	if sv == nil && m.psDown() { // (a failed read is not "no server": nothing is offered a start until ps answers)
+		return []string{m.psDownLine(), ansi.Truncate(fg(cMuted).Render("  "+oneLine(m.readErr["ps"].Error())), w, "…")}
+	}
 	if sv == nil {
 		return []string{fg(cMuted).Render("no server running · enter starts the selected model")}
 	}
@@ -273,6 +280,9 @@ func (m ctl) runningRows(w int) []string {
 		line = dot + " " + strings.Join(append(parts[:1:1], parts[2:]...), sep)
 	}
 	rows := []string{line}
+	if m.psDown() { // (the last good read's server stays, with the failure under its line: the sparkline goes first when short)
+		rows = append(rows, ansi.Truncate(m.psDownLine()+fg(cMuted).Render(": "+oneLine(m.readErr["ps"].Error())), w, "…"))
+	}
 
 	n := m.liveNumbers(*sv)
 	var nums []string
@@ -324,6 +334,16 @@ func (m ctl) runningRows(w int) []string {
 		rows = append(rows, "  "+fg(cMuted).Render("decode ")+liveSpark(n.spark, sw)+" "+what)
 	}
 	return rows
+}
+
+// psDownLine is the running card's line while caminus ps can't be read.
+func (m ctl) psDownLine() string {
+	return fg(cYellow).Render("couldn't read the running servers") + rAgain()
+}
+
+// rAgain is the hint after a failed read: " · R reads again".
+func rAgain() string {
+	return fg(cMuted).Render(" · ") + bold(cAccent).Render("R") + fg(cMuted).Render(" reads again")
 }
 
 // liveSpark is the decode speed of the last rounds, w cells (newest on the right): a dim floor where it was idle.
@@ -539,6 +559,12 @@ func (m ctl) detailRows(w int) []string {
 	switch {
 	case !mi.Present:
 		rows = append(rows, fg(cYellow).Render("not downloaded")+fg(cMuted).Render(" · p downloads it ("+gbText(mi.SizeGB)+")"))
+	case m.psDown() && m.liveOf(mi.Name) == nil: // (enter starts nothing until what runs is known)
+		rows = append(rows, wrapped(fg(cYellow).Render("no start until the running servers can be read")+rAgain(), w, 2)...)
+		if mi.MissingDrafter != "" {
+			rows = append(rows, wrapped(fg(cYellow).Render(mi.MissingDrafter+" missing")+
+				fg(cMuted).Render(fmt.Sprintf(": p downloads it (%.1f GB)", mi.MissingDrafterGB)), w, 2)...)
+		}
 	case mi.MissingDrafter != "":
 		rows = append(rows, wrapped(bold(cAccent).Render("enter")+fg(cMuted).Render(" starts it · ")+
 			fg(cYellow).Render(mi.MissingDrafter+" missing")+fg(cMuted).Render(fmt.Sprintf(": p downloads it (%.1f GB)", mi.MissingDrafterGB)), w, 2)...)
@@ -563,10 +589,17 @@ func (m ctl) editedText(mi camModel) string {
 func (m ctl) modelsLines(W, room int) []string {
 	if m.loaded["models"] && len(m.models) == 0 { // (no list to put details beside: the reason takes the whole width)
 		why := fg(cMuted).Render("no models known (caminus models)")
-		if err := m.readErr["models"]; err != nil {
-			why = fg(cYellow).Render("couldn't read the model list: " + oneLine(err.Error()))
+		if err := m.readErr["models"]; err != nil { // (the headline, then the reason wrapped under it: 4 lines at most)
+			out := []string{fg(cMuted).Render(" models"), " " + ansi.Truncate(fg(cYellow).Render("couldn't read the model list")+rAgain(), W-1, "…")}
+			return append(out, indent(wrapped(fg(cMuted).Render(oneLine(err.Error())), W-3, max(1, min(4, room-2))), "   ")...)
 		}
 		return append([]string{fg(cMuted).Render(" models")}, indent(wrapped(why, W-2, max(1, min(4, room-1))), " ")...)
+	}
+	stale := "" // (a read that failed after one that answered: the last list stays, the failure on a line of its own)
+	if err := m.readErr["models"]; err != nil {
+		stale = " " + ansi.Truncate(fg(cYellow).Render("couldn't read the model list again")+rAgain()+
+			fg(cMuted).Render(": "+oneLine(err.Error())), W-1, "…")
+		room--
 	}
 	list := m.listRows()
 	listW := 2 + m.nameWidth() + 1 + 6 + 2 + 1 + 3
@@ -582,6 +615,9 @@ func (m ctl) modelsLines(W, room int) []string {
 		n = min(n, max(3, room-1))
 		lo := window(m.curM, len(list), n)
 		out := []string{fit(head, listW) + " " + name}
+		if stale != "" {
+			out = append(out, stale)
+		}
 		for i := 0; i < n; i++ {
 			l, d := "", ""
 			if lo+i < len(list) {
@@ -598,6 +634,9 @@ func (m ctl) modelsLines(W, room int) []string {
 	nl := min(len(list), max(3, room-2-len(det)))
 	lo := window(m.curM, len(list), nl)
 	out := []string{head}
+	if stale != "" {
+		out = append(out, stale)
+	}
 	for i := lo; i < lo+nl && i < len(list); i++ {
 		out = append(out, " "+list[i])
 	}
@@ -631,14 +670,37 @@ func window(cur, total, n int) int {
 func (m ctl) agentLines(W int) []string {
 	e, q := m.emberText(), m.qwenText()
 	head := fg(cMuted).Render(" agents")
-	if err := m.readErr["harness"]; err != nil && !m.hs.Installed { // (the reason on its own lines, wrapped: 4 at most)
-		out := []string{head, ansi.Truncate("   "+e, W, "…"), ansi.Truncate("   "+q, W, "…")}
-		return append(out, indent(wrapped(fg(cMuted).Render(oneLine(err.Error())), W-5, 4), "     ")...)
+	eErr, qErr := m.emberReadErr(), m.harnessReadErr()
+	if eErr != nil || qErr != nil { // (one row each, a failed read's reason on its own lines under its row, wrapped: 4 at most)
+		why := func(err error) []string {
+			if err == nil {
+				return nil
+			}
+			return indent(wrapped(fg(cMuted).Render(oneLine(err.Error())), W-5, 4), "     ")
+		}
+		out := append([]string{head, ansi.Truncate("   "+e, W, "…")}, why(eErr)...)
+		return append(append(out, ansi.Truncate("   "+q, W, "…")), why(qErr)...)
 	}
 	if lipgloss.Width(e)+lipgloss.Width(q)+8 <= W {
 		return []string{head, "   " + e + "     " + q}
 	}
 	return []string{head, ansi.Truncate("   "+e, W, "…"), ansi.Truncate("   "+q, W, "…")}
+}
+
+// emberReadErr is the failed read of Ember's status the row says (nil when hosted, or when an earlier read said set up).
+func (m ctl) emberReadErr() error {
+	if m.hosted || m.ember.ok {
+		return nil
+	}
+	return m.readErr["ember"]
+}
+
+// harnessReadErr is the failed read of Qwen Code's status the row says (nil when an earlier read found it installed).
+func (m ctl) harnessReadErr() error {
+	if m.hs.Installed {
+		return nil
+	}
+	return m.readErr["harness"]
 }
 
 func (m ctl) emberText() string {
@@ -649,6 +711,8 @@ func (m ctl) emberText() string {
 		return name + fg(cMuted).Render(" (here)") + key + fg(cMuted).Render(" goes back")
 	case !m.ember.known:
 		return name + fg(cMuted).Render(" checking…")
+	case m.emberReadErr() != nil: // (a failed read is not "not set up"; the reason goes under it)
+		return fg(cYellow).Render("couldn't read ") + name + fg(cYellow).Render("'s status") + rAgain()
 	case !m.ember.ok:
 		return name + fg(cYellow).Render(" not set up") + fg(cMuted).Render(" · run caminus ember setup")
 	}
@@ -675,9 +739,8 @@ func (m ctl) qwenText() string {
 	switch {
 	case !m.loaded["harness"]:
 		return name + fg(cMuted).Render(" checking…")
-	case m.readErr["harness"] != nil && !h.Installed: // (a failed read is not "not installed"; the reason goes under it)
-		return name + fg(cYellow).Render(" couldn't read its status") + fg(cMuted).Render(" · ") + bold(cAccent).Render("R") +
-			fg(cMuted).Render(" reads again")
+	case m.harnessReadErr() != nil: // (a failed read is not "not installed"; the reason goes under it)
+		return name + fg(cYellow).Render(" couldn't read its status") + rAgain()
 	case !h.Installed && !h.Npm:
 		return name + fg(cYellow).Render(" not installed") + fg(cMuted).Render(" · needs Node.js / npm")
 	case !h.Installed:
@@ -723,6 +786,10 @@ func (m ctl) keysLine() string {
 	case m.confirm != nil:
 		p = []hint{k("y", "yes"), k("any other key", "no")}
 	case m.view == viewHelp:
+		if pages := m.helpDrawn; pages > 1 && m.helpPage%pages+1 < pages { // (? turns the page here: say so)
+			return " " + bold(cAccent).Render("?") + emberDim.Render(" next page · ") + bold(cAccent).Render("any other key") +
+				emberDim.Render(" back")
+		}
 		p = []hint{k("any key", "back")}
 	case m.view == viewOptions && m.editing:
 		p = []hint{k("enter", "save"), k("esc", "cancel"), k("ctrl+u", "clear")}
@@ -739,7 +806,7 @@ func (m ctl) keysLine() string {
 			} else if n == 1 {
 				p = append(p, k("←→", "choice"))
 			}
-			if mi.Present && m.liveOf(mi.Name) == nil {
+			if mi.Present && m.liveOf(mi.Name) == nil && !m.psDown() { // (no start while what runs is unknown)
 				p = append(p, k("enter", "start"))
 			}
 			if !mi.Present || mi.MissingDrafter != "" {
@@ -829,7 +896,7 @@ func (m ctl) nextCard() string {
 
 // optionRows are the options editor's rows in height lines: the card pin, then every serve option (the ones in this
 // colour go to the next start), and the help of the one under the cursor.
-func (m ctl) optionRows(height int) []string {
+func (m ctl) optionRows(w, height int) []string {
 	if !m.loaded["opts"] {
 		return []string{fg(cMuted).Render(spin[m.frame%len(spin)] + " reading caminus serve's options")}
 	}
@@ -868,7 +935,11 @@ func (m ctl) optionRows(height int) []string {
 		}
 		all = append(all, cur(i+1)+fit(fg(cText).Render(o.Flag), 26)+val)
 	}
-	if len(vo) == 0 {
+	switch err := m.readErr["opts"]; {
+	case len(vo) == 0 && err != nil: // (a failed read is not an empty answer)
+		all = append(all, indent(wrapped(fg(cYellow).Render("couldn't read the serve options: "+oneLine(err.Error()))+rAgain(),
+			max(1, w-2), 4), "  ")...)
+	case len(vo) == 0:
 		all = append(all, fg(cMuted).Render("  caminus serve --options-json gave no options"))
 	}
 	n := max(3, height-3)
@@ -919,7 +990,7 @@ func (m ctl) optionsLines(W, room int) []string {
 	if room >= 14+len(cards)+2 {
 		optH = room - len(cards) - 4
 	}
-	out := strings.Split(panel("options", cAccent, W, m.optionRows(max(3, optH))), "\n")
+	out := strings.Split(panel("options", cAccent, W, m.optionRows(W-4, max(3, optH))), "\n")
 	if len(out)+len(cards)+2 <= room {
 		out = append(out, strings.Split(panel("cards", cGray, W, cards), "\n")...)
 	}
