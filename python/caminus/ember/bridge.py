@@ -103,10 +103,49 @@ claim=approval.claim
 finish=approval.finish
 
 
-def execute_root(cmd, runner=subprocess.run):
+# Set inside the sudo boundary (sudo resets the caller's environment, so it goes through `env`): package tools ask
+# nothing (debconf, apt-listchanges, needrestart lists instead of asking) and nothing opens a pager. The approved
+# string stays one untouched `sh -c` word. The panel's rootEnv (panel/emberroot.go) is the same list.
+ROOT_ENV = ('DEBIAN_FRONTEND=noninteractive', 'APT_LISTCHANGES_FRONTEND=none', 'NEEDRESTART_MODE=l',
+            'PAGER=cat', 'SYSTEMD_PAGER=cat', 'GIT_PAGER=cat')
+# The bound on the wait for an approved command (the panel's rootWait); past it the result says the command is still
+# running and under which pid. It is never killed. Longer than sudo's own password wait.
+ROOT_WAIT = 1800.0
+ROOT_RC_TIMEOUT = 124
+
+
+def root_argv(cmd):
+    return ['sudo', 'env', *ROOT_ENV, 'sh', '-c', cmd]
+
+
+def execute_root(cmd, runner=subprocess.run, wait=ROOT_WAIT):
     """harness side: run exactly the string the human approved, as the invoking user under sudo (sudo asks for the
-    human's password on the controlling terminal); returns the CompletedProcess"""
-    return runner(['sudo', 'sh', '-c', cmd], capture_output=True, text=True)
+    human's password on the controlling terminal); returns the CompletedProcess. A test's fake runner is called as
+    runner(argv, capture_output=True, text=True)."""
+    argv = root_argv(cmd)
+    if runner is not subprocess.run:
+        return runner(argv, capture_output=True, text=True)
+    return _run_root(argv, wait)
+
+
+def _run_root(argv, wait):
+    """Output goes to regular files and the wait is for the process itself, never for the end of a pipe: a background
+    child that keeps the output open (a daemon a package's triggers started) cannot hold the answer. stdin is
+    /dev/null, so nothing waits on a prompt; sudo reads the password from the terminal itself."""
+    with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe:
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe)
+        try:
+            rc = p.wait(timeout=wait)
+            note = ''
+        except subprocess.TimeoutExpired:
+            rc = ROOT_RC_TIMEOUT
+            mins = f'{round(wait / 60)} min' if wait >= 60 else f'{wait:g}s'
+            note = (f'\ncaminus: timed out after {mins}, still running as pid {p.pid}; stopped waiting '
+                    '(its later output is not recorded)\n')
+        fo.seek(0)
+        fe.seek(0)
+        out, err = fo.read().decode('utf-8', 'replace'), fe.read().decode('utf-8', 'replace')
+    return subprocess.CompletedProcess(argv, rc, out, err + note)
 
 
 def _user():

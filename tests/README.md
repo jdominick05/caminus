@@ -15,7 +15,7 @@ arguments (most take the GGUF path). The directories mirror the package (`python
 | `cmd/`, `packaging/`, `tools/` | the management CLI, the installable package, tool self-tests | CPU |
 | `benchmarks/` | the benchmarks' own CPU parts: `served_cards_ab.py`'s prompt builder, argument checks and per-request checks (on a stand-in server; needs a git checkout) | CPU |
 | `test_arch.py` (top level, as `caminus/arch.py` is) | the architecture registry and its readers: the catalog, caminus serve's options, caminus start's flags | CPU |
-| `docs/test_docs.py` | the docs check: every relative link and #anchor in README / CONTRIBUTING / GLOSSARY / docs/*.md / docs/dev/*.md resolves, every `caminus COMMAND` the user docs show exists, every script the public AGENTS.md names exists | CPU (stdlib) |
+| `docs/test_docs.py` | the docs check: every relative link and #anchor in README / CONTRIBUTING / GLOSSARY / docs/*.md / docs/dev/*.md resolves, every `caminus COMMAND` the user docs show exists (the paths a doc names: `tools/entropy.py`) | CPU (stdlib) |
 | `device/test_host.py` | caminus.device.host: the card inventory (status, the PCIe link's slowest hop, HIP order), placement (pair, split, one, place: a given HIP_VISIBLE_DEVICES rewritten into engine order) and the hardware lines, on fixture trees of every layout (one card, any pair, three cards, a slow link, unsupported cards, headless, two displays) | CPU |
 | `train/` | the dormant S1 training stack | GPU, needs the private trainer |
 

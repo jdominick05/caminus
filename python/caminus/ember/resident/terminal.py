@@ -18,6 +18,16 @@ import time
 from .store import atomic_json
 
 LOG_LIMIT = 16 * 1024 * 1024
+TIME_MAX = 3600          # a job's timeout: 1 s to an hour (a longer job runs without one and is polled)
+
+
+def check_timeout(t):
+    """A job's time bound in seconds, checked: past it the worker kills the job (terminal's process group, or the
+    whole box) and the state says limit_hit 'time'. yield_ms is something else: how long one call waits for output."""
+    if isinstance(t, bool) or not isinstance(t, int) or not 1 <= t <= TIME_MAX:
+        raise ValueError(f'timeout is 1 to {TIME_MAX} seconds (it ends the command; yield_ms only bounds how long '
+                         'one call waits for output)')
+    return t
 
 
 def alive(pid):
@@ -94,6 +104,7 @@ def worker(job):
         atomic_json(job / 'state.json', state)
         if browser is not None:
             browser.start(box.proxy)
+        limit_s, t0, timed_out = req.get('timeout'), time.monotonic(), False
         os.set_blocking(fd, False)
         (job / 'control').mkdir(exist_ok=True)
         (job / 'ack').mkdir(exist_ok=True)
@@ -135,6 +146,16 @@ def worker(job):
                             truncated |= len(data) > take
                         except OSError:
                             pass
+                    if limit_s and not timed_out and time.monotonic() - t0 > limit_s:
+                        timed_out = True           # over its time: the job goes (a box whole, else its process group)
+                        if box is not None:
+                            box.hit = 'time'
+                            box.kill(pid)
+                        else:
+                            try:
+                                os.killpg(pid, signal.SIGKILL)
+                            except OSError:
+                                pass
                     if box is not None and box.check(pid):
                         box.kill(pid)              # over a limit: the whole box goes
                     done, code = os.waitpid(pid, os.WNOHANG)
@@ -157,6 +178,8 @@ def worker(job):
                 browser.stop()
             if box is not None:
                 state.update(box.finish())
+            elif timed_out:
+                state['limit_hit'] = 'time'
             if exit_status is None:
                 state.update(phase='interrupted', error='worker interrupted; command effects may already exist')
             else:
@@ -300,9 +323,12 @@ class Terminal:
             if not cwd.is_dir():
                 raise ValueError('cwd is not a directory')
             job.mkdir(exist_ok=True)
+            timeout = box['limits']['time_s'] if box else args.get('timeout')
+            if timeout is not None:
+                timeout = check_timeout(timeout)
             if not (job / 'request.json').exists():
                 atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), workspace=str(self.home),
-                                                       **({'box': box} if box else {})))
+                                                       timeout=timeout, **({'box': box} if box else {})))
             if not read_state(job):
                 self.launch(job)
         elif not job.is_dir():

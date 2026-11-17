@@ -70,9 +70,17 @@ The agent user files a request; only the harness side answers and executes. File
 - `res/<id>.json`: `{'id', 'decision', 'cmd', 'approved_by', 'rc', 'out', 'err', 'ts'}` — written by the harness side.
 
 `caminus ember watch` drains `req/`, shows you each command with its origin, and asks: **a**pprove runs exactly that
-string as `sudo sh -c <cmd>` (sudo asks for your password on your terminal), **e**dit lets you change it first,
-**d**eny answers 126, **s**kip leaves it queued. The result (exit code, stdout, stderr) goes back to the waiting
-agent process. A request nobody answers times out (agent side: exit 124). The harness never executes anything from a
+string as `sudo env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=l PAGER=cat
+SYSTEMD_PAGER=cat GIT_PAGER=cat sh -c <cmd>` (sudo asks for your password on your terminal), **e**dit lets you change
+it first, **d**eny answers 126, **s**kip leaves it queued. The result (exit code, stdout, stderr) goes back to the
+waiting agent process.
+
+The run never waits on a prompt or on an open pipe. The `env` settings sit inside the sudo boundary (sudo resets the
+caller's environment): debconf and apt-listchanges ask nothing, needrestart lists what to restart instead of asking,
+and no pager opens. The command's stdin is `/dev/null` (sudo still reads your password from the terminal). Its output
+goes to a file, and the wait is for the command's own exit: a background child that keeps the output open (a daemon a
+package's triggers started) cannot hold the answer. The wait is bounded at 30 minutes. Past it the answer is exit 124
+with "timed out after 30 min, still running as pid N", and the command keeps running; nothing kills a root process. A request nobody answers times out (agent side: exit 124). The harness never executes anything from a
 request file other than the string it displayed and you approved.
 
 ## 5. The audit log
@@ -93,8 +101,9 @@ root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the l
 ## 7. The TUI (`caminus ember ui`) and the scriptable CLI
 
 `caminus ember ui` execs `caminus-panel env --user ... --bridge ... --audit ... --key ...` (panel/envui.go, same binary
-and build as the control panel). Seven live tabs (tab / 1-7), starting on **agent** (goals and activity): **requests** (ROOT: `a` approve — sudo runs attached to
-the terminal via `tea.ExecProcess` so your password prompt works, output teed to a temp file; `e` edit, `d` deny,
+and build as the control panel). Seven live tabs (tab / 1-7), starting on **agent** (goals and activity): **requests** (ROOT: `a` approve — sudo runs on
+the released terminal via `tea.Exec` so your password prompt works, its output in a temp file shown as it grows, run
+and bounded as section 4 says, and the chat comes back when it exits or the wait runs out; `e` edit, `d` deny,
 `s` skip — ASK: `a` answer, a number picks a choice), **jobs** (detached processes in the agent user: `K` kill,
 `l` tail the log, `n` new job), **procs** (the agent user's busiest processes), **notes** (steering inbox: `n` new,
 `d` delete), **ctx** (servers and their `/props` windows), **audit** (log tail). Answering a question also appends

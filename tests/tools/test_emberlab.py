@@ -9,6 +9,7 @@ Checks:
   resume     a second `run` into the same folder runs nothing again
   compare    two arms over the same runs give "no difference"; the across-the-board rule on made-up cells
   session    a driven lab session: the request the model would see waits for us, our tool call reaches the resident,
+             an interrupt closes the waiting call (the driven brain records the hang-up),
              close stops the daemon
   tui        (with tmux) keys in, an exact screen and its SVG out; --read-only refuses a goal before anything runs
 """
@@ -106,6 +107,22 @@ check(t.returncode == 0 and 'terminal' in t.stdout and 'List the files' in t.std
 r = lab('reply', 'd', '--out', str(so), '--call', 'read', '--args', json.dumps({'path': 'work/inventory.py'}), '--settle', '3', '--width', '4000')
 check('read' in r.stdout and 'total_value' in r.stdout, 'session: our tool call ran in the resident and its result came back')
 s = json.loads((so / 'sessions/d/session.json').read_text())
+# an Esc while the next request waits: the resident closes the call, and the driven brain records the hang-up
+t = lab('turn', 'd', '--out', str(so), '--wait', '20')
+BOOT = "import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
+agent = [sys.executable, '-I', '-c', BOOT, str(ROOT / 'python'), 'ember', 'agent', '--local']
+st = subprocess.run(agent + ['status', 'lab', '--home', s['home'], '--json'], capture_output=True, text=True, timeout=60)
+gid = json.loads(st.stdout)['goals'][-1]['id'] if st.returncode == 0 else ''
+it = subprocess.run(agent + ['interrupt', 'lab', '--home', s['home'], gid, '--json'], capture_output=True, text=True, timeout=60)
+gone = []
+for _ in range(50):
+    gone = sorted(Path(s['driven']).glob('*.gone.json'))
+    if gone:
+        break
+    time.sleep(0.2)
+t2 = lab('turn', 'd', '--out', str(so), '--wait', '1')
+check(t.returncode == 0 and it.returncode == 0 and '"queued": true' in it.stdout and gone and 'hung up' in t2.stdout,
+      f'session: an interrupt closes the waiting call and the driven brain records the hang-up ({it.stdout.strip()} {t2.stdout.strip()[:200]})')
 lab('close', 'd', '--out', str(so))
 time.sleep(1)
 try:

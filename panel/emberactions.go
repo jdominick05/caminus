@@ -149,11 +149,11 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
 			}
+			// what stopped it (a timeout, a box's limit): the limit hit is the outcome, so it leads
+			if hit := limitHit(name, result); hit != "" {
+				meta, state = strings.TrimPrefix(hit+" · "+meta, " · "), "fail"
+			}
 			if name == "sandbox" {
-				// what the box was allowed and what stopped it: the limit hit is the outcome, so it leads
-				if hit := sandboxHit(result); hit != "" {
-					meta, state = strings.TrimPrefix(hit+" · "+meta, " · "), "fail"
-				}
 				if net := sandboxNet(args, result); net != "" {
 					meta += " · " + net
 				}
@@ -201,10 +201,19 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			preview = browserExcerpt(result, 3)
 		}
 	case "remember":
-		subject = residentText(argStr(args, "name"))
-		meta = residentText(firstLine(argStr(args, "summary")))
-		if p, _ := args["pin"].(bool); p {
-			meta += " · pinned"
+		if argStr(args, "action") == "tidy" {
+			// a refused tidy keeps the error as its meta
+			subject = "tidy MEMORY.md"
+			was, _ := result["was_bytes"].(float64)
+			if now, ok := result["index_bytes"].(float64); ok {
+				meta = fmt.Sprintf("%.0f → %.0f bytes", was, now)
+			}
+		} else {
+			subject = residentText(argStr(args, "name"))
+			meta = residentText(firstLine(argStr(args, "summary")))
+			if p, _ := args["pin"].(bool); p {
+				meta += " · pinned"
+			}
 		}
 	case "send_message":
 		subject = "→ " + residentText(argStr(args, "to"))
@@ -420,10 +429,10 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	return actionCard(name, call.args, result, w, c.home, c.cwd)
 }
 
-// sandboxHit names the limit that killed a box ("" when none did).
-func sandboxHit(result map[string]any) string {
+// limitHit names the limit that killed a command or a box ("" when none did).
+func limitHit(name string, result map[string]any) string {
 	if hit, _ := result["limit_hit"].(string); hit != "" {
-		return hit + " limit hit: box killed"
+		return hit + " limit hit: " + map[bool]string{true: "box", false: "command"}[name == "sandbox"] + " killed"
 	}
 	return ""
 }
@@ -473,12 +482,15 @@ func sandboxLines(result map[string]any) []string {
 		tasks, _ := l["tasks"].(float64)
 		cpu, _ := l["cpu_percent"].(float64)
 		line := fmt.Sprintf("limits: %ds · %d MB · %d processes · CPU %d %%", int(ts), int(mb), int(tasks), int(cpu))
+		if disk, _ := l["disk_mb"].(float64); disk > 0 {
+			line += fmt.Sprintf(" · /box %d MB", int(disk))
+		}
 		if e, _ := l["enforced"].(string); e != "" {
 			line += " (" + residentText(e) + ")"
 		}
 		out = append(out, line)
 	}
-	if hit := sandboxHit(result); hit != "" {
+	if hit := limitHit("sandbox", result); hit != "" {
 		out = append(out, hit)
 	}
 	if hosts, _ := result["hosts"].([]any); len(hosts) == 0 {
@@ -486,6 +498,9 @@ func sandboxLines(result map[string]any) []string {
 	}
 	for _, c := range sandboxConnections(result["connections"]) {
 		out = append(out, "connection: "+c)
+	}
+	if more, _ := result["connections_more"].(float64); more > 0 { // (a result carries at most 50 new ones)
+		out = append(out, fmt.Sprintf("… %d more connections", int(more)))
 	}
 	return out
 }

@@ -2506,13 +2506,15 @@
    "command": "$PY -I tests/engine/test_q35_dense.py --scratch $SCRATCH/dense --model $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz",
    "cards": "disp",
    "timeout": 1800,
-   "est": 400
+   "est": 400,
+   "blocked": "not rerun for 0.3.0: its 27B reference folder (REFS27) was lost (the owner's choice, 2026-11-17); rebuild after 0.3.0"
   },
   "swift-prefill-2048-xt": {
    "command": "$PY -I tests/prefill/test_q35_prefill.py $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz --speed 2048",
    "cards": "nd",
    "timeout": 1800,
-   "est": 420
+   "est": 420,
+   "blocked": "not rerun for 0.3.0: its 27B reference folder (REFS27) was lost (the owner's choice, 2026-11-17); rebuild after 0.3.0"
   },
   "swift-prefill-accuracy": {
    "command": "$PY -I tests/prefill/test_q35_prefill.py $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz --llama $SCRATCH/swift-LL.bin",
@@ -2622,19 +2624,22 @@
    "command": "$PY -I tests/engine/test_q35_features.py $SWIFT",
    "cards": "nd",
    "timeout": 1800,
-   "est": 360
+   "est": 360,
+   "blocked": "not rerun for 0.3.0: its checks up to the verify part passed on the release commit, then the test's second Swift engine (16.8 GB) does not fit beside the first (13.6 GB) on one card; fix the test after 0.3.0"
   },
   "tcap-decode-short-xtx": {
    "command": "$PY -I tests/engine/test_q35_dense.py --scratch $SCRATCH/tcap-dense-xtx --model $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz",
    "cards": "disp",
    "timeout": 1800,
-   "est": 420
+   "est": 420,
+   "blocked": "not rerun for 0.3.0: its 27B reference folder (REFS27) was lost (the owner's choice, 2026-11-17); rebuild after 0.3.0"
   },
   "tcap-decode-short-xt": {
    "command": "$PY -I tests/engine/test_q35_dense.py --scratch $SCRATCH/tcap-dense-xt --model $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz",
    "cards": "nd",
    "timeout": 1800,
-   "est": 420
+   "est": 420,
+   "blocked": "not rerun for 0.3.0: its 27B reference folder (REFS27) was lost (the owner's choice, 2026-11-17); rebuild after 0.3.0"
   },
   "tcap-prefill-2048-xtx": {
    "command": "$PY -I tests/prefill/test_q35_prefill.py $TCAP --ref $REFS27/thinkingcap-rco42-ref64-n128.npz --llama $SCRATCH/tcap-llama-pd.bin --speed 2048",
@@ -2816,7 +2821,8 @@
    "command": "$PY -I tests/engine/test_q35_dense.py --scratch $SCRATCH/dense --model $SWIFT --ref $REFS27/swift15-q4km-ref64-n128.npz",
    "cards": "nd",
    "timeout": 1800,
-   "est": 400
+   "est": 400,
+   "blocked": "not rerun for 0.3.0: its 27B reference folder (REFS27) was lost (the owner's choice, 2026-11-17); rebuild after 0.3.0"
   },
   "swift-verify-xt-512": {
    "command": "$PY -I benchmarks/q35_verify.py $SWIFT --depths 512,4096 --per-wgp 5,6,7",

@@ -1573,8 +1573,12 @@ func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 			map[string]any{"title": "Fix for CVE-2026-1", "href": "https://www.example.org/a"}}}),
 		res(504, "c4", "remember", map[string]any{"ok": true}),
 		residentEvent{Seq: 505, Kind: "gate", Data: map[string]any{"command": "test -s PRIVILEGED-STAGE1.md && grep -q Step1", "passed": false}},
-		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`)}}},
+		residentEvent{Seq: 506, Kind: "assistant", Data: map[string]any{"tool_calls": []any{call("c5", "terminal", `{"command":"jq . n.json"}`),
+			call("c6", "remember", `{"action":"tidy","index":"- [a](notes/a.md) — x"}`),
+			call("c7", "remember", `{"action":"tidy","index":"- [b](notes/b.md) — y"}`)}}},
 		res(507, "c5", "terminal", map[string]any{"error": "boom"}),
+		res(508, "c6", "remember", map[string]any{"index_bytes": float64(2100), "was_bytes": float64(3500)}),
+		res(509, "c7", "remember", map[string]any{"error": "tidy refused, MEMORY.md is unchanged: notes/a.md would be reachable from nowhere"}),
 	)
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
@@ -1583,7 +1587,8 @@ func TestCompactTranscriptDrawsACardPerAction(t *testing.T) {
 	}
 	for _, want := range []string{"terminal  $ ls cve/  ·  exit 0 · 4 lines", "d", "read  a.md  ·  lines 1-40",
 		"web_search  “CVE-2026-1 patch”  ·  1 results · bing", "Fix for CVE-2026-1  example.org",
-		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom"} {
+		"remember  cve-list  ·  two CVEs open", "terminal  $ jq . n.json  ·  boom", "remember  tidy MEMORY.md  ·  3500 → 2100 bytes",
+		"remember  tidy MEMORY…  ·  tidy refused, MEMORY.md is unchanged"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("every action is a card (missing %q):\n%s", want, v)
 		}
@@ -2519,6 +2524,59 @@ func TestAdvisorSetupPointsAtTheCLIInsteadOfRunningAReview(t *testing.T) {
 	next, cmd, _ := m.steerSlash("/advisor", "setup")
 	if cmd != nil || !strings.Contains(next.msg, "caminus ember agent advisor") {
 		t.Fatalf("/advisor setup runs no paid review and names the CLI: %q", next.msg)
+	}
+}
+
+// The owner's /advisor failed with the key relay refusing the advisor's model: the notice showed the raw JSON error
+// for a few seconds. Now the reason and the exact command open in a view that stays until Esc.
+func TestAdvisorThatCannotBeCalledShowsTheFixToRun(t *testing.T) {
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "fake-cli")
+	fix := "caminus ember relay install --provider anthropic --cap-usd 3.0 --model claude-haiku-5-5 --model claude-opus-5-5"
+	script := "#!/bin/sh\necho 'ControlSocket notice' >&2\necho '{\"error\": \"the advisor cannot be called: x\", \"unavailable\": {\"reason\": \"the key relay at http://127.0.0.1:8765/v1 does not allow claude-opus-5-5\", \"fix\": \"" + fix + "\", \"kind\": \"relay_model\"}}'\nexit 1\n"
+	if err := os.WriteFile(cli, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	m := chatFixture(t)
+	m.cli = []string{cli}
+	msg := adviseNow(m, "original", "")()
+	view, ok := msg.(textViewMsg)
+	if !ok {
+		t.Fatalf("an advisor the setup blocks opens a view, not a passing notice: %#v", msg)
+	}
+	next, _ := m.Update(view)
+	got := next.(emberModel)
+	if !got.chat.view.open {
+		t.Fatal("the view is open")
+	}
+	body := strings.Join(got.chat.view.lines, "\n")
+	pasted := strings.Join(strings.Fields(strings.ReplaceAll(body, "\\\n", " ")), " ") // what a shell reads
+	if !strings.Contains(body, "does not allow claude-opus-5-5") || !strings.Contains(pasted, fix) || strings.Contains(body, "{") {
+		t.Fatalf("the reason and the exact command, no JSON:\n%s", body)
+	}
+	for _, l := range got.chat.view.lines {
+		if strings.HasPrefix(l, "  ") && len(l) > 76 {
+			t.Fatalf("the command wraps at spaces with shell continuations, not at the frame's edge: %q", l)
+		}
+	}
+	// a cause with no command to give (the relay's cap is spent): the reason, and where to look
+	capped := "#!/bin/sh\necho '{\"error\": \"x\", \"unavailable\": {\"reason\": \"the key relay at http://127.0.0.1:8765/v1 has spent its daily cap\", \"fix\": \"\", \"kind\": \"relay_cap\"}}'\nexit 1\n"
+	if err := os.WriteFile(cli, []byte(capped), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cv, ok := adviseNow(m, "original", "")().(textViewMsg)
+	if body := strings.Join(cv.lines, "\n"); !ok || !strings.Contains(body, "spent its daily cap") ||
+		!strings.Contains(body, "caminus ember relay status") || strings.Contains(body, "Run this") {
+		t.Fatalf("no command to run: the reason and the relay status command:\n%s", body)
+	}
+	// any other failure: the error's text in the notice, unwrapped from the resident's JSON
+	plain := "#!/bin/sh\necho '{\"error\": \"the advisor did not answer: HTTP Error 529: \\\"overloaded\\\"\"}'\nexit 1\n"
+	if err := os.WriteFile(cli, []byte(plain), 0700); err != nil {
+		t.Fatal(err)
+	}
+	notice, ok := adviseNow(m, "original", "")().(residentActionMsg)
+	if !ok || notice.text != `advisor: the advisor did not answer: HTTP Error 529: "overloaded"` {
+		t.Fatalf("the notice carries the text, not the JSON: %#v", notice)
 	}
 }
 

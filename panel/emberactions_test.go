@@ -133,12 +133,16 @@ func TestASandboxCardIsMarkedAndSaysItsNetworkAndTheLimitHit(t *testing.T) {
 	args := map[string]any{"command": "python3 build.py", "hosts": []any{"example.com"}}
 	result := map[string]any{"exit_code": -9.0, "output": "building\n", "limit_hit": "memory", "hosts": []any{"example.com"},
 		"connections": conns, "box": "/srv/agent/homes/r/boxes/g1",
-		"limits": map[string]any{"time_s": 600.0, "memory_mb": 4096.0, "tasks": 512.0, "cpu_percent": 800.0, "enforced": "systemd"}}
+		"limits":           map[string]any{"time_s": 600.0, "memory_mb": 4096.0, "tasks": 512.0, "cpu_percent": 800.0, "disk_mb": 4096.0, "enforced": "systemd"},
+		"connections_more": 7.0}
 	v := ansi.Strip(actionCard("sandbox", args, result, 200, "", ""))
 	for _, want := range []string{"sandbox", "$ python3 build.py", "memory limit hit: box killed", "net: example.com", "1 refused"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("want %q in the compact card:\n%s", want, v)
 		}
+	}
+	if v := ansi.Strip(actionCard("terminal", map[string]any{"command": "sleep 20"}, map[string]any{"exit_code": -9.0, "output": "", "limit_hit": "time"}, 200, "", "")); !strings.Contains(v, "time limit hit: command killed") {
+		t.Fatalf("a terminal timeout says so on its card:\n%s", v)
 	}
 	if v := ansi.Strip(actionCard("sandbox", map[string]any{"command": "make"}, map[string]any{"exit_code": 0.0, "output": "ok\n", "hosts": []any{}}, 200, "", "")); !strings.Contains(v, "no network") || strings.Contains(v, "limit hit") {
 		t.Fatalf("a box without hosts says no network, and no limit when none hit:\n%s", v)
@@ -154,7 +158,7 @@ func TestASandboxCardIsMarkedAndSaysItsNetworkAndTheLimitHit(t *testing.T) {
 	}
 	res := residentEvent{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "sandbox", "call_id": "s1", "result": result}}
 	v = ansi.Strip(m.chat.eventBlock(res))
-	for _, want := range []string{"memory limit hit", "limits: 600s · 4096 MB · 512 processes · CPU 800 % (systemd)",
+	for _, want := range []string{"memory limit hit", "limits: 600s · 4096 MB · 512 processes · CPU 800 % · /box 4096 MB (systemd)", "… 7 more connections",
 		"connection: example.com:443  allowed", "connection: www.iana.org:443  refused: not in hosts", "building"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("want %q in the expanded result:\n%s", want, v)

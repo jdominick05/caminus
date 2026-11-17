@@ -3,8 +3,9 @@
 While the plan is unapproved (goals.plan == 1) the goal only explores: the changing tools are refused
 and `terminal` stays allowed on the prompt's promise of read-only use — the runtime cannot see what a
 shell command actually touched, so that limit is advisory there. `sandbox` stays allowed: its box changes
-nothing outside its own folder, which ends with the goal. `browser` may look (open, snapshot, scroll, back,
-screenshot, console) but not act (click, type, select, press, eval: a form sent is a change outside). `propose_plan` files the plan and
+nothing of the agent's outside its own folder (with hosts it can still send data to them, logged for the human).
+`browser` may look (open, snapshot, scroll, back, screenshot, console) but not act (click, type, select, press,
+eval: a form sent is a change outside). `propose_plan` files the plan and
 parks the goal (state waiting_plan, which never times out) until the human answers: approve sets
 goals.plan = 2 and lifts plan mode, reject keeps plan mode with the note in the inbox.
 """

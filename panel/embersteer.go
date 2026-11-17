@@ -4,7 +4,7 @@
 package main
 
 // envsteer.go: steering and inspection from the chat.
-//   Esc while a reply is being written   interrupts that turn only (nothing stored; the next message steers)
+//   Esc while the agent waits on a reply interrupts that turn only (nothing stored; the next message steers)
 //   ↑ on an empty composer               pulls back your newest message the agent has not read yet
 //   /btw QUESTION                        a side question with no tools; the answer opens here, the goal keeps nothing
 //   /diff                                what the goal changed in its git repositories, coloured, in an overlay
@@ -114,16 +114,41 @@ func (m emberModel) targetGoal() string {
 	return ""
 }
 
+// interruptTurn asks the resident to drop the model call in flight. It is queued only while a call is out (the
+// resident says so); the runtime then closes the call's connection, so the server stops generating, and records
+// turn_interrupted, which the activity line shows. The reply comes back a moment later so the refresh it triggers
+// already holds that event (the runtime checks for the request about four times a second).
 func interruptTurn(m emberModel, goal string) tea.Cmd {
 	return func() tea.Msg {
 		var out struct {
-			Queued bool `json:"queued"`
+			Queued     bool `json:"queued"`
+			Generating bool `json:"generating"`
 		}
 		if err := residentJSON(m, []string{"interrupt", m.agentName, goal, "--json"}, &out); err != nil {
 			return residentActionMsg{"interrupt: " + err.Error()}
 		}
+		if !out.Queued {
+			return residentActionMsg{"nothing to interrupt: no reply is being generated right now"}
+		}
+		time.Sleep(interruptSettle)
 		return residentActionMsg{"turn interrupted: nothing from it is kept; your next message steers"}
 	}
+}
+
+// interruptSettle: how long the interrupt's reply waits before the refresh (a test sets it to 0).
+var interruptSettle = 600 * time.Millisecond
+
+// interruptibleGoal is the goal whose model call an Esc would drop: the goal at work (also before its first token
+// and between the live reader's restarts), else the goal of the reply being shown; "" when nothing can be
+// interrupted (no goal at work, or its turn was already interrupted and it waits for your message).
+func (m emberModel) interruptibleGoal() string {
+	if g := m.working(); g != nil {
+		return g.ID
+	}
+	if m.chat.live.active {
+		return m.targetGoal()
+	}
+	return ""
 }
 
 func unsendLast(m emberModel, goal string) tea.Cmd {
@@ -154,7 +179,10 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 		if err == nil {
 			err = jsonInto(raw, &out)
 		} else {
-			err = fmt.Errorf("%s", cliError(raw))
+			if view, ok := advisorUnavailableView(raw); ok {
+				return view
+			}
+			err = fmt.Errorf("%s", cliErrorText(raw))
 		}
 		if err != nil {
 			text := err.Error()
@@ -166,6 +194,90 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 		return residentActionMsg{fmt.Sprintf("advisor (%s) reviewed the goal; the agent reads it before its next step ($%.2f)",
 			terminalText(out.Model, false), out.USD)}
 	}
+}
+
+// advisorUnavailableView: an advisor the setup keeps from being called (the key relay does not allow its model, is not
+// running, or spent its cap) opens a view with the reason and the exact command to run, instead of a notice that
+// showed the raw JSON error for 15 seconds and went. ok is false for any other failure.
+func advisorUnavailableView(raw []byte) (textViewMsg, bool) {
+	var out struct {
+		Unavailable *struct {
+			Reason string `json:"reason"`
+			Fix    string `json:"fix"`
+		} `json:"unavailable"`
+	}
+	if lastJSON(raw, &out) != nil || out.Unavailable == nil {
+		return textViewMsg{}, false
+	}
+	lines := []string{"The advisor cannot be called: " + residentText(out.Unavailable.Reason) + ".", ""}
+	// (the fix is a command `caminus ember agent` built from your own relay unit, never the agent's text; without
+	// one, the command that shows the relays)
+	if fix := residentText(out.Unavailable.Fix); fix != "" {
+		lines = append(lines, "Run this on your side, then /advisor again (Esc closes):", "")
+		for _, l := range shellWrap(fix, 72) {
+			lines = append(lines, "  "+l)
+		}
+	} else {
+		lines = append(lines, "Check your key relays (Esc closes):", "", "  caminus ember relay status")
+	}
+	return textViewMsg{title: "advisor · not available", lines: lines}, true
+}
+
+// shellWrap breaks a long command at spaces into lines of at most width characters joined by " \", so it wraps
+// where a shell reads it whole when pasted (the view broke it mid-word at the frame's edge). A flag stays on the line
+// of its value.
+func shellWrap(cmd string, width int) []string {
+	var words []string
+	for _, w := range strings.Fields(cmd) {
+		if n := len(words); n > 0 && strings.HasPrefix(words[n-1], "--") && !strings.Contains(words[n-1], " ") &&
+			!strings.HasPrefix(w, "-") {
+			words[n-1] += " " + w
+			continue
+		}
+		words = append(words, w)
+	}
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		if cur != "" && len(cur)+1+len(w) > width-2 {
+			lines = append(lines, cur+" \\")
+			cur = "    " + w
+			continue
+		}
+		if cur == "" {
+			cur = w
+		} else {
+			cur += " " + w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
+// lastJSON reads the last line of a command's output that holds a JSON object (the resident prints one with --json;
+// SSH notices may come before it).
+func lastJSON(raw []byte, v any) error {
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); strings.HasPrefix(l, "{") {
+			return json.Unmarshal([]byte(l), v)
+		}
+	}
+	return fmt.Errorf("no JSON object in the output")
+}
+
+// cliErrorText is cliError with a resident's {"error": ...} line unwrapped to its text (the notice showed the JSON,
+// escaped quotes and all).
+func cliErrorText(raw []byte) string {
+	var out struct {
+		Error string `json:"error"`
+	}
+	if lastJSON(raw, &out) == nil && out.Error != "" {
+		return out.Error
+	}
+	return cliError(raw)
 }
 
 func askBtw(m emberModel, goal, question string) tea.Cmd {

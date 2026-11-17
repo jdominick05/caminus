@@ -12,13 +12,18 @@ Checks, each printed PASS / FAIL, then RESULT PASS / RESULT FAIL (exit 0 / 1):
 - threads: no review thread is unresolved (the branch rules refuse the merge otherwise);
 - gates: a change under kernels/ or to code that builds a tape names its GPU gates and the cards in the body
   (AGENTS.md, Code Review Rules; CONTRIBUTING.md);
+- size: the lines and files the pull request adds and removes, and what it adds to AGENTS.md (GitHub's file list). One
+  that adds more lines than it removes says in its body what it builds on and what it took out (AGENTS.md, Invariants,
+  Growth): a `Reuses:` line (what it extends, or `nothing existing` and what was searched for) and a `Removes:` line
+  (files it deleted or made shorter, or `nothing:` and why). One that adds lines to tools/entropy.json, the list of
+  what the tree checks accept as already wrong, says why in a `Baseline:` line;
 - title: the pull request title and every authored commit headline read `<area> : <what>` (a merge of `testing` is not authored);
 - trailers: each authored commit carries exactly one `Assisted-by:` trailer and no `Co-Authored-By:`, or, when the body
   says `AI assistance: none`, no `Assisted-by:` at all;
-- exempt: a Dependabot pull request has no title or trailer rule (its bumps are made by the bot);
+- exempt: a Dependabot pull request has no title, trailer or `Reuses:` / `Removes:` rule (its bumps are made by the bot);
 - text: the title, body and commit messages carry no decision id, machine path or session link.
 
---metadata checks only base, title, trailers, gates and text (no CI, review or thread wait): what CI runs on each pull
+--metadata checks only base, title, trailers, gates, size and text (no CI, review or thread wait): what CI runs on each pull
 request, since the review bot's verdict is not known there.
 
 --wait SECS polls every 30 s (--poll), for at most SECS, while only `ci` or `review` are still pending on the head
@@ -40,8 +45,10 @@ MERGE = re.compile(r'Merge ')                               # merges are not aut
 TRAILER = re.compile(r'^Assisted-by:\s*\S', re.M)
 COAUTHOR = re.compile(r'^Co-Authored-By:', re.I | re.M)
 NO_AI = re.compile(r'^AI assistance: none\s*$', re.M)      # the body's declaration for a pull request with no AI-assisted commit
+NAMED = re.compile(r'\w[\w.-]*(?:/[\w.-]+)+|\w[\w-]+\.[A-Za-z]\w*')   # a file's name in a Removes: line: a path, or a name with its extension
+BASELINE = 'tools/entropy.json'                             # what tools/entropy.py accepts as already wrong: adding to it needs a reason
 BOTS = ('app/dependabot', 'dependabot[bot]', 'dependabot')  # gh reports the bot as app/dependabot, the REST API as dependabot[bot]
-METADATA = ('base', 'title', 'trailers', 'gates', 'text')   # what --metadata checks: the pull request's text, not CI or review
+METADATA = ('base', 'title', 'trailers', 'gates', 'size', 'text')   # what --metadata checks: the pull request's text, not CI or review
 THREADS = '''query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){
   reviewThreads(first:100){nodes{isResolved isOutdated path comments(first:1){nodes{author{login} body}}}}}}}'''
 
@@ -114,17 +121,50 @@ def look(a):
     return res, (pending if not hard else set())
 
 
+def said(body, key):
+    """the text after `Key:` at the start of a line of the body, '' without one"""
+    m = re.search(rf'^{key}:[ \t]*(\S.*)$', body, re.M)
+    return m.group(1).strip() if m else ''
+
+
+def size(pr, body, bot):
+    """(ok, text): what the pull request adds and removes; one that grows the tree names what it reused and removed"""
+    fs = pr['files']
+    add, rem = sum(f.get('additions', 0) for f in fs), sum(f.get('deletions', 0) for f in fs)
+    new, gone = (sum(f.get('changeType') == t for f in fs) for t in ('ADDED', 'DELETED'))
+    shorter = [f['path'] for f in fs if f.get('changeType') == 'DELETED' or f.get('deletions', 0) > f.get('additions', 0)]
+    miss = []
+    if add > rem and not bot:
+        if not said(body, 'Reuses'): miss.append('no `Reuses:` line (what existing code or doc this extends, or `nothing existing` and what was searched for)')
+        removes = said(body, 'Removes')
+        named = [n.rstrip('.') for n in NAMED.findall(removes)]
+        if not removes: miss.append('no `Removes:` line (the files this deleted or made shorter, or `nothing:` and why)')
+        elif re.match(r'nothing\b', removes, re.I):
+            if not re.search(r'\w', removes[7:]): miss.append('`Removes: nothing` without its reason')
+        elif not named: miss.append('`Removes:` names no file')
+        else:
+            bad = [n for n in named if not any(p == n or p.endswith('/' + n) for p in shorter)]
+            if bad: miss.append(f'`Removes:` names {bad}: not a file this pull request deleted or made shorter')
+    if any(f['path'] == BASELINE and f.get('additions', 0) for f in fs) and not said(body, 'Baseline'):
+        miss.append(f'adds to {BASELINE} with no `Baseline:` line (why each new entry is not fixed here instead)')
+    ag = next((f for f in fs if f['path'] == 'AGENTS.md'), None)
+    return (not miss, f'+{add} -{rem} lines, +{new} -{gone} files' + (f', AGENTS.md +{ag.get("additions", 0)} -{ag.get("deletions", 0)}' if ag else '')
+            + (': ' + '; '.join(miss) if miss else ''))
+
+
 def content(pr, res):
-    """the pull request's own text: the title format, the trailers, the gate block, private text"""
+    """the pull request's own text: the gate block, what it adds and removes, the title format, the trailers, private text"""
     files, body = [f['path'] for f in pr['files']], pr['body'] or ''
+    bot = ((pr.get('author') or {}).get('login') or '') in BOTS   # Dependabot's bumps carry neither a title nor a trailer
     tape = [f for f in files if f.startswith(TAPE)]
     miss = []
     if tape and not GATE.search(body): miss.append('no GPU gate named')
     if tape and not CARD.search(body): miss.append('no card named')
     res['gates'] = (not miss, (f'{len(tape)} kernel / tape files' if tape else 'no kernel or tape file changed') + (': ' + ', '.join(miss) if miss else ''))
+    res['size'] = size(pr, body, bot)
 
     authored = [c for c in pr['commits'] if not MERGE.match(c['messageHeadline'])]   # (merges of testing are not authored)
-    if ((pr.get('author') or {}).get('login') or '') in BOTS:   # Dependabot's bumps carry neither a title nor a trailer
+    if bot:
         res['title'] = (True, f'exempt: a Dependabot pull request ({len(authored)} commits)')
         res['trailers'] = (True, 'exempt: a Dependabot pull request')
     else:
@@ -152,7 +192,7 @@ def main(argv):
     ap.add_argument('n', type=int); ap.add_argument('-R', '--repo'); ap.add_argument('--wait', type=int, default=0, metavar='SECS')
     ap.add_argument('--reviewer', default='chatgpt-codex-connector'); ap.add_argument('--poll', type=int, default=30, metavar='SECS')
     ap.add_argument('--allow-base-merges', action='store_true', help='accept merges of testing made after the review without a new review')
-    ap.add_argument('--metadata', action='store_true', help='check only the text: base, title, trailers, gates, private text (no CI, review or threads; for CI)')
+    ap.add_argument('--metadata', action='store_true', help='check only the text: base, title, trailers, gates, size, private text (no CI, review or threads; for CI)')
     a = ap.parse_args(argv)
     a.repo = a.repo or gh('repo', 'view', '--json', 'nameWithOwner')['nameWithOwner']
     end = time.monotonic() + a.wait

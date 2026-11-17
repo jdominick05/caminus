@@ -49,7 +49,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / edit / write, the web tools, MCP servers |
 | `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy (and its web mode, the browser's) and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
 | `browser.py` | the `browser` tool: Chrome in the goal's box as a box job (`request.json` `browser`; the box proxy in its web mode, Chrome's install folder bound read-only, no time limit, no address-space rlimit), its `Driver` thread in the worker on the DevTools pipe (fd 3 / 4: requests by id, a reader thread for every event: console, dialogs, new tabs, loads), the actions handed over through the job's `control/` and `ack/` files by action id, the accessibility-tree snapshot and its refs, the password refusal, screenshots in `outputs/GOAL/` and the downloads copied there at goal end (`keep`, from `sandbox.end`), and finding a Chrome that is not a snap (the tool is hidden without one). Every connection rides on the tool_result event's `panel` field, not in the model's result |
-| `memory.py`, `freetime.py`, `agenda.py` | notes, STATE.md and history search; free time and dreams; report / budget / schedule |
+| `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
 | `cli.py` | the entry point every mode uses (`once`, `run`, `send`, `status`, `stream`, ...) |
@@ -75,6 +75,18 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   never graded and never paused by a loop guard.
 - No GPU in any env test; the env suites are CPU only.
 
+## Memory
+
+What the agent sees is in [the guide](../ember.md#its-memory); the rules and their reasons are in
+`resident/memory.py`'s docstring and comments.
+
+- **Limits.** `INDEX_CAP`, `INDEX_WARN` (80 %) and `LINE_CAP` live in `memory.py`. The `remember` and `history_search`
+  descriptions in `runtime.py` and the memory paragraph of `prompt.py` state them, so change all three together.
+- **No note is lost.** No write to MEMORY.md may leave a note file the old index named in neither the new index nor
+  `notes/index-archive.md`: eviction, a re-save (a merged line naming other notes stays) and `Memory.tidy` all keep it.
+- **Tests.** `test_resident.py`: `test_a_nearly_full_index_warns_in_the_context_and_in_remember`,
+  `test_tidy_rewrites_the_index_and_keeps_every_note_reachable`, `test_history_search_finds_past_goals_journal_and_notes`.
+
 ## Testing
 
 ```sh
@@ -85,8 +97,9 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
 
 - `tests/ember/test_env.py`: the owner side (settings, the SSH argv, the bridge, the audit log, the setup script).
 - `tests/ember/test_resident.py` `Sandbox`: real boxes with small limits (the home and token unreadable, writes outside
-  `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, each limit killing and naming
-  itself); it skips, saying why, where bubblewrap cannot make user namespaces.
+  `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, no user namespace inside, each
+  limit killing and naming itself, an unreadable folder the box left removed without stopping the loop, the capped
+  connection log); it skips, saying why, where bubblewrap cannot make user namespaces.
 - `tests/ember/test_resident.py` `Browser` (and the `test_browser_*` runtime tests): real Chrome in a box against
   local fixture sites (`site()`), no other network: open, snapshot, type, select, click; the password refusal; a local
   port reached only once named; the box, the profile and Chrome's process tree gone at goal end; only the fixture in

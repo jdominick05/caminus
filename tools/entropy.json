@@ -1,0 +1,109 @@
+{
+ "copies": [
+  [
+   "packaging/harness/qwen-code/brain-hands/BRAIN.md",
+   "python/caminus/share/harness/qwen-code/brain-hands/BRAIN.md"
+  ],
+  [
+   "packaging/harness/qwen-code/brain-hands/agents/hands.md",
+   "python/caminus/share/harness/qwen-code/brain-hands/agents/hands.md"
+  ]
+ ],
+ "orphans": [
+  "benchmarks/bench_k3_vram.py",
+  "benchmarks/fp8_pack_probe.hip",
+  "benchmarks/own_mv_bench.py",
+  "benchmarks/own_mv_k3.py",
+  "benchmarks/own_mv_k3_token.py",
+  "benchmarks/q3moe_ab.py",
+  "benchmarks/q3moe_speed.py",
+  "tests/decode/test_mtp_ops.py",
+  "tests/device/test_smoke.py",
+  "tests/device/test_wmma_probe.py",
+  "tests/engine/test_bounds_device.py",
+  "tests/engine/test_golden_attn.py",
+  "tests/engine/test_golden_ffn.py",
+  "tests/engine/test_golden_gdn.py",
+  "tests/engine/test_golden_hc.py",
+  "tests/engine/test_golden_layers.py",
+  "tests/engine/test_golden_moe.py",
+  "tests/engine/test_k3_gguf_engine.py",
+  "tests/engine/test_k3_gguf_moe.py",
+  "tests/engine/test_kv_host.py",
+  "tests/engine/test_own_attn.py",
+  "tests/engine/test_own_atts.py",
+  "tests/engine/test_q35_dflash_e2e.py",
+  "tests/engine/test_q35_nonfinite.py",
+  "tests/engine/test_qsa_ops.py",
+  "tests/io/test_ggufio.py",
+  "tests/prefill/test_q3m_ops.py",
+  "tests/train/test_gdn_layer.py",
+  "tools/eval/q3m_dflash_feats.py"
+ ],
+ "refs": {
+  "docs/dev/ember.md": [
+   "env/agent_host.py",
+   "env/audit.py",
+   "env/bridge.py",
+   "env/jobs.py",
+   "env/prompt.py",
+   "env/provision.py",
+   "env/relay.py",
+   "env/runner.py",
+   "envapprovals.go",
+   "envbridge.go",
+   "envchat.go",
+   "envcomposer.go",
+   "envgoals.go",
+   "envgroup.go",
+   "envmodels.go",
+   "envpages.go",
+   "envquestion.go",
+   "envresident.go",
+   "envselect.go",
+   "envsessions.go",
+   "envsteer.go",
+   "envstudio.go",
+   "envui.go",
+   "panel/env*.go",
+   "panel/env*_test.go"
+  ],
+  "docs/dev/smoke.md": [
+   "spec_k3.py"
+  ],
+  "docs/dev/training-stack.md": [
+   "python/caminus/{actq,fuse,gdn,gemm,headloss,linear,qlinear,wquant}.py",
+   "tests/test_gemm*.py"
+  ],
+  "docs/dev/yardsticks.md": [
+   "kernels/gemm/rdna3_f16_gemm.py",
+   "rdna3_int8_gemm.py"
+  ],
+  "docs/specs/spec-cache-api.md": [
+   "tools/eval/cache_replay.py"
+  ],
+  "docs/specs/spec-drafters.md": [
+   "docs/QUANTS.md",
+   "tools/draft_vocab.py"
+  ],
+  "docs/specs/spec-ember.md": [
+   "env/prompt.py",
+   "panel/envui.go",
+   "panel/envui_test.go"
+  ],
+  "docs/specs/spec-gsq-port.md": [
+   "tests/test_golden_{hc,ffn,gdn,attn,ple,moe,layers}.py"
+  ],
+  "docs/specs/spec-metrics.md": [
+   "docs/AGENTIC-PLAN.md"
+  ],
+  "docs/specs/spec-prefill-cache.md": [
+   "docs/AMD_HIP_PERFORMANCE.md",
+   "lbench.sh",
+   "vram_map.py"
+  ],
+  "training/README.md": [
+   "packaging/public-manifest.txt"
+  ]
+ }
+}

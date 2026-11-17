@@ -406,7 +406,7 @@ def _names_itself(host):
         a = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return not a.is_global or str(a) in sandbox.local_addresses()
+    return sandbox.local(a)
 
 
 def _prop(n, key):
@@ -686,8 +686,8 @@ class Driver:
                              'or Meta+ in front if needed')
         if mask & 7:
             text = None                            # (Control+a is a command, not text)
-        if text and text != '\r':
-            self._refuse_focused_password()
+        if (text and text != '\r') or (mask and key.lower() == 'v'):
+            self._refuse_focused_password()          # (Control+V would paste into it)
         base = dict(key=' ' if key == 'Space' else key, windowsVirtualKeyCode=code, modifiers=mask)
         self.page('Input.dispatchKeyEvent', dict(base, type='keyDown' if text else 'rawKeyDown',
                                                  **({'text': text} if text else {})))
