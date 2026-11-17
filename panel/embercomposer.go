@@ -263,26 +263,32 @@ func expandAttachments(m emberModel, text string) string {
 	var blocks []string
 	base := m.agentCwdAbs()
 	n := 0
-	text = attachRe.ReplaceAllStringFunc(text, func(word string) string {
-		g := attachRe.FindStringSubmatch(word)
-		lead, p := g[1], g[2]
-		if n >= 8 || strings.Contains(p, "..") {
-			return word
-		}
-		n++
-		full := p
-		if base != "" {
-			full = resolveIn(m.resident.Home, base, p)
-		}
-		out, err := agentRun(m, "head -c 65536 -- "+shellQuote(full))
-		if err != nil {
-			blocks = append(blocks, fmt.Sprintf("[could not attach %s: %s]", p, strings.TrimSpace(out)))
-			return lead + p
-		}
-		blocks = append(blocks, fmt.Sprintf("Attached %s:\n```\n%s\n```", p, strings.TrimRight(out, "\n")))
-		return lead + p + " (attached)"
-	})
-	text = nameRe.ReplaceAllString(text, "${1}${2}")
+	// only outside fenced blocks (a pasted diff's "+added" lines are text), and only a word that reads as a path: it
+	// has a "/" or a "." ("+1 for that" is not a file)
+	parts := strings.Split(text, "```")
+	for k := 0; k < len(parts); k += 2 {
+		parts[k] = attachRe.ReplaceAllStringFunc(parts[k], func(word string) string {
+			g := attachRe.FindStringSubmatch(word)
+			lead, p := g[1], g[2]
+			if n >= 8 || strings.Contains(p, "..") || !strings.ContainsAny(p, "/.") {
+				return word
+			}
+			n++
+			full := p
+			if base != "" {
+				full = resolveIn(m.resident.Home, base, p)
+			}
+			out, err := agentRun(m, "head -c 65536 -- "+shellQuote(full))
+			if err != nil {
+				blocks = append(blocks, fmt.Sprintf("[could not attach %s: %s]", p, strings.TrimSpace(out)))
+				return lead + p
+			}
+			blocks = append(blocks, fmt.Sprintf("Attached %s:\n```\n%s\n```", p, strings.TrimRight(out, "\n")))
+			return lead + p + " (attached)"
+		})
+		parts[k] = nameRe.ReplaceAllString(parts[k], "${1}${2}")
+	}
+	text = strings.Join(parts, "```")
 	if len(blocks) == 0 {
 		return text
 	}

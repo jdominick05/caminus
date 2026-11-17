@@ -2876,3 +2876,42 @@ func TestATimedOutQuestionIsNotDrawnAsYourAnswer(t *testing.T) {
 		t.Fatalf("a timeout reads as one, not as your words:\n%s", v)
 	}
 }
+
+func TestSendingAPlusPathAttachesAndPlusWordsThatAreNotPathsDoNot(t *testing.T) {
+	m := pathFixture(t)
+	dir := t.TempDir()
+	sent := filepath.Join(dir, "sent")
+	script := filepath.Join(dir, "fake-caminus")
+	// "ember run -s SCRIPT" reads a file as the agent; "ember agent send …" receives the message on stdin
+	body := "#!/bin/sh\nif [ \"$2\" = run ]; then echo \"CONTENT\"; exit 0; fi\ncat > " + sent + "\necho '{\"id\":\"g\"}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.cli = []string{script}
+	_, cmd := m.sendCompose("check +work/inventory.py")
+	cmd()
+	got, _ := os.ReadFile(sent)
+	if !strings.Contains(string(got), "work/inventory.py (attached)") || !strings.Contains(string(got), "CONTENT") {
+		t.Fatalf("a message with only +path attaches it:\n%s", got)
+	}
+	for _, plain := range []string{"+1 for that", "```diff\n+added.go\n```"} {
+		if out := expandAttachments(m, plain); out != plain {
+			t.Fatalf("%q is not an attachment: %q", plain, out)
+		}
+	}
+}
+
+func TestAFolderListingDropsNamesWithControlCharacters(t *testing.T) {
+	m := pathFixture(t)
+	script := filepath.Join(t.TempDir(), "fake-caminus")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'ok.txt\\nx\\033]0;pwned\\007\\nwork/\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.cli = []string{script}
+	m.chat.compose.SetValue("@work/")
+	m, cmd := m.ensureListing()
+	msg := cmd().(dirListedMsg)
+	if fmt.Sprint(msg.entries) != "[ok.txt work/]" {
+		t.Fatalf("an escape sequence in a name never reaches the menu: %q", msg.entries)
+	}
+}

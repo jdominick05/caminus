@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -121,7 +122,9 @@ func (m emberModel) ensureListing() (emberModel, tea.Cmd) {
 			return msg
 		}
 		for _, l := range strings.Split(out, "\n") {
-			if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "ls:") {
+			// a name with a control character is left out: the agent can name a file anything, and an escape
+			// sequence in it would reach the owner's terminal through the menu
+			if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "ls:") && !strings.ContainsFunc(l, unicode.IsControl) {
 				msg.entries = append(msg.entries, l)
 			}
 		}

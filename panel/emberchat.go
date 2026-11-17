@@ -2358,8 +2358,8 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
-		if strings.Contains(text, "@") {
-			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
+		if strings.ContainsAny(text, "@+") { // (it checked only "@": a message with only +path attached nothing)
+			text = expandAttachments(m, text) // +path: the file, read as the agent, goes with the message
 		}
 		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
