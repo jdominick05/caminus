@@ -44,7 +44,7 @@ func loadSessionCards(m emberModel, names []string) tea.Cmd {
 	}
 }
 
-type residentCreatedMsg struct{ name, err string }
+type residentCreatedMsg struct{ name, model, err string }
 
 // residentDestroyedMsg: a session the switcher removed, and where its home is kept.
 type residentDestroyedMsg struct{ name, kept, err string }
@@ -156,15 +156,21 @@ func residentSessions(m emberModel) tea.Cmd {
 
 func createResidentSession(m emberModel, name string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := runResident(residentCommand(m, []string{"create", name, "--from", m.agentName, "--json"}, ""))
+		// the setup's default local model (the one chosen for these cards), not the brain of the session in view:
+		// a new session from a paid one spent the same relay's money
+		out, err := runResident(residentCommand(m, []string{"create", name, "--from", m.agentName, "--local-default", "--json"}, ""))
 		if err != nil {
 			return residentCreatedMsg{err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
+		var made struct {
+			Model string `json:"model"`
+		}
+		_ = jsonInto(out, &made)
 		out, err = runResident(residentCommand(m, []string{"start", name, "--json"}, ""))
 		if err != nil {
 			return residentCreatedMsg{err: "Session created; runtime start failed: " + strings.TrimSpace(string(out))}
 		}
-		return residentCreatedMsg{name: name}
+		return residentCreatedMsg{name: name, model: made.Model}
 	}
 }
 

@@ -1501,6 +1501,40 @@ for line in sys.stdin:
         import hashlib
         self.assertEqual(agent_host.runtime_name(),hashlib.sha256(first).hexdigest()+'.pyz')
 
+    def test_a_new_session_on_a_local_model_drops_the_paid_brains_settings(self):
+        paid='paid-'+uuid.uuid4().hex[:8]
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['create',paid,'--from',self.home.name,'--home',str(self.home.parent/paid),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        cfg=json.loads((self.home.parent/paid/'config.json').read_text())
+        cfg.update(model='claude-haiku-5-5',relay=True,prices={'in':1},context=1000000,api='anthropic',thinking='adaptive',
+                   effort='medium',provider='anthropic',providers={'anthropic':{'kind':'anthropic'}})
+        (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
+        new='local-'+uuid.uuid4().hex[:8]
+        home=self.home.parent/new
+        made=subprocess.run(base+['create',new,'--from',paid,'--model','swift-1.5','--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        self.assertEqual(json.loads(made.stdout)['model'],'swift-1.5')
+        got=json.loads((home/'config.json').read_text())
+        self.assertEqual((got['model'],got['endpoint']),('swift-1.5','http://127.0.0.1:8092/v1'))
+        for k in ('relay','prices','context','api','thinking','effort','provider'):
+            self.assertNotIn(k,got,f'{k} belonged to the paid brain')
+        self.assertIn('providers',got,'/model can still switch back to a paid brain')
+
+    def test_local_default_resolves_on_the_owner_side(self):
+        from caminus.ember import agent_host, serve
+        seen={}
+        class R:returncode=0;stdout='{}';stderr=''
+        def run(script,transport=None):
+            seen['script']=script;return R()
+        with unittest.mock.patch.object(serve,'default_brain',return_value=('thinkingcap','one 20 GB card')), \
+             unittest.mock.patch.object(agent_host.runner,'run_shell',run):
+            self.assertEqual(agent_host.main(['create','x','--from','resident','--local-default','--json'],None),0)
+        self.assertIn('"--model", "thinkingcap"',seen['script'])
+        self.assertNotIn('--local-default',seen['script'])
+        with unittest.mock.patch.object(serve,'default_brain',return_value=(None,'no supported card')):
+            self.assertEqual(agent_host.main(['create','x','--from','resident','--local-default'],None),1)
+
     def test_remove_takes_a_session_off_the_bus_and_keeps_its_home(self):
         name='session-'+uuid.uuid4().hex
         home=self.home.parent/name

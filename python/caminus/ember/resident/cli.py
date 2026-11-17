@@ -177,6 +177,8 @@ def parser():
         p.add_argument('--json',action='store_true')
         if op=='create':
             p.add_argument('--from',dest='template',required=True,help='copy model settings from a sibling resident; memory/history start fresh')
+            p.add_argument('--model',help='a local model instead of the sibling\'s brain (the session switcher passes the setup\'s default)')
+            p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1',help='with --model: the local server')
         if op=='remove':
             p.add_argument('--dry-run',action='store_true',help='check the session exists and say what would happen; change nothing')
         if op=='memory':
@@ -404,6 +406,12 @@ def main(argv=None,stdin=None):
             source=home.parent/a.template
             cfg=json.loads((source/'config.json').read_text())
             cfg['name']=a.name
+            if a.model:
+                # a local brain in place of the sibling's: as /model does, drop what belonged to a paid one (its relay,
+                # prices, window, thinking, effort) and keep the providers so /model can switch back
+                cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'),max_tokens=4096)
+                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model'):
+                    cfg.pop(k,None)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -414,7 +422,7 @@ def main(argv=None,stdin=None):
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()
-            emit(dict(name=a.name,home=str(home),configured=True),True)
+            emit(dict(name=a.name,home=str(home),configured=True,model=cfg['model']),True)
             return 0
         if a.op=='discover':
             emit(discover(home,a.topic,a.query),True)

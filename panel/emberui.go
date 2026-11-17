@@ -654,6 +654,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.openResident(msg.name)
+		if msg.model != "" {
+			m.msg = "new session " + residentText(msg.name) + " on " + residentText(msg.model) + " · /model switches it"
+		}
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
 	case residentDestroyedMsg:
 		if msg.err != "" {
