@@ -147,7 +147,7 @@ func askBtw(m emberModel, goal, question string) tea.Cmd {
 		if len(m.cli) == 0 {
 			return textViewMsg{err: "needs the caminus CLI (--cli)"}
 		}
-		raw, err := residentCommand(m, args, question).CombinedOutput()
+		raw, err := runResident(residentCommand(m, args, question))
 		if err == nil {
 			if i := strings.Index(string(raw), "{"); i >= 0 {
 				err = jsonInto(raw[i:], &out)
@@ -280,7 +280,7 @@ func (m emberModel) sendPlanGoal(text string) (tea.Model, tea.Cmd) {
 	name, epoch := m.agentName, m.residentEpoch
 	m.chat.sending = true
 	return m, func() tea.Msg {
-		out, err := residentCommand(m, []string{"send", name, "--plan", "--stdin", "--json"}, text).CombinedOutput()
+		out, err := runResident(residentCommand(m, []string{"send", name, "--plan", "--stdin", "--json"}, text))
 		var reply struct {
 			ID string `json:"id"`
 		}

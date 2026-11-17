@@ -1,22 +1,29 @@
-# caminus — the panel's built-in palette: white on the terminal's own
-# background, color spent only on what the eye should find first.
-# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
-# or term_N for the terminal's own palette.
+# caminus: Iron & Patina, Caminus's own palette and the default for the panel, top and Ember. The furnace's metal:
+# a cast-iron background, verdigris as the accent, brass as the second colour, copper for actions (Ember's flame).
+# Every text and accent colour reads at WCAG AA (4.5:1) or better on the background.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa or term_N for the terminal's own palette.
 
-text = #ffffff
-muted = #a8adb6
-think = #cfd4dc
-dim = #5c626d
-accent = #4fd6ff
-ok = #4dff9e
-warn = #ffd75f
-action = #ffa25f
-hot = #ff5f6d
-purple = #c98fff
-user = #6fa8ff
-teal = #4fffd0
-chrome = #4a4f5a
+text = #ece8e1
+muted = #a6aeb4
+think = #cdd0cf
+dim = #39424b
+accent = #5fc4b0
+ok = #8fd081
+warn = #ecc95e
+action = #e0904f
+hot = #ec6f60
+purple = #d9ad62
+user = #7fb2e5
+teal = #5fc4b0
+chrome = #39424b
 
-code_bg = #2a2e35
-codeblock_bg = #16181d
-code_theme = dracula
+code_bg = #262c33
+codeblock_bg = #111417
+code_theme = github-dark
+
+bg = #15181c
+bg2 = #1e2328
+pattern = #1b1f24
+bg_pattern = none
+overlay = #1c2a2a
+overlay_border = #5fc4b0

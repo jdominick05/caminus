@@ -2506,6 +2506,25 @@ func TestRereviewFixesInThePanel(t *testing.T) {
 	}
 }
 
+func TestTheFinishResultIsOneLineNotItsJSON(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.cards = false
+	e := residentEvent{Seq: 9, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "finish", "call_id": "c9",
+		"result": map[string]any{"summary": "Wrote the review.", "open": "", "judge": "met: the review file exists with all sections"}}}
+	plain := ansi.Strip(m.chat.eventBlock(e))
+	if strings.Contains(plain, "{") || strings.Contains(plain, "\"summary\"") || !strings.Contains(plain, "judge: met: the review file exists") {
+		t.Fatalf("one line with the verdict, no JSON:\n%s", plain)
+	}
+	if strings.Count(strings.TrimSpace(plain), "\n") > 0 {
+		t.Fatalf("collapsed, it is one line:\n%s", plain)
+	}
+	e.Data["result"].(map[string]any)["open"] = "the CHANGELOG entry"
+	m.chat.expanded = true
+	if p := ansi.Strip(m.chat.eventBlock(e)); !strings.Contains(p, "left open: the CHANGELOG entry") {
+		t.Fatalf("expanded, it shows what was left open:\n%s", p)
+	}
+}
+
 func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 140, 30

@@ -1196,6 +1196,19 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			code, _ := result["exit_code"].(float64)
 			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
 		}
+		if str("name") == "finish" {
+			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
+			// open when expanded (its raw JSON repeated the summary right above the block)
+			verdict := residentText(firstLine(fmt.Sprint(result["judge"])))
+			if result["judge"] == nil {
+				verdict = "no judge"
+			}
+			var more []string
+			if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
+				more = append(more, "left open: "+residentText(open))
+			}
+			return toolCard("finish", "judge: "+verdict, "", true, c.expanded, more, w)
+		}
 		if b, err := json.MarshalIndent(result, "", "  "); err == nil {
 			return toolCard("result", residentText(str("name")), "", true, c.expanded, lines(string(b), 30), w)
 		}
@@ -2277,7 +2290,7 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		if strings.Contains(text, "@") {
 			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
 		}
-		out, err := residentCommand(m, args, text).CombinedOutput()
+		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
