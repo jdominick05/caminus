@@ -1303,10 +1303,13 @@ func TestGateAndJudgeVerdicts(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
-	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix", "judge: met  ·  41 passed"} {
+	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
+	}
+	if strings.Contains(v, "41 passed") {
+		t.Fatal("a met verdict shows on the finish line, not as its own card")
 	}
 }
 
@@ -2524,5 +2527,17 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	}
 	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "block breaking") {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
+	}
+}
+
+func TestAMetVerdictShowsOnceOnTheFinishLine(t *testing.T) {
+	m := chatFixture(t)
+	met := residentEvent{Seq: 8, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists"}}
+	if b := m.chat.eventBlock(met); b != "" {
+		t.Fatalf("a met verdict has no card of its own; the finish line carries it:\n%s", ansi.Strip(b))
+	}
+	notYet := residentEvent{Seq: 9, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "not_yet", "reason": "no tests ran"}}
+	if b := ansi.Strip(m.chat.eventBlock(notYet)); !strings.Contains(b, "judge: not yet") {
+		t.Fatalf("a refusal keeps its card (no finish line follows it):\n%s", b)
 	}
 }
