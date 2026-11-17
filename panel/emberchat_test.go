@@ -2541,3 +2541,24 @@ func TestAMetVerdictShowsOnceOnTheFinishLine(t *testing.T) {
 		t.Fatalf("a refusal keeps its card (no finish line follows it):\n%s", b)
 	}
 }
+
+// The judge records a met verdict and then returns the finish result with judge "met: REASON" (judge.review): the
+// transcript shows that sentence once, in both the card and the compact view.
+func TestAMetVerdictAppearsExactlyOnceInTheTranscript(t *testing.T) {
+	for _, cards := range []bool{true, false} {
+		m := chatFixture(t)
+		m.height = 40
+		m.chat.cards = cards
+		m.residentEvents = []residentEvent{
+			{Seq: 1, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists with all sections"}},
+			{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "finish", "call_id": "c9",
+				"result": map[string]any{"summary": "Wrote the review.", "judge": "met: The review file exists with all sections"}}},
+		}
+		m.chat.rendered, m.chat.content = 0, ""
+		m.syncChat()
+		v := ansi.Strip(m.chat.content)
+		if n := strings.Count(v, "The review file exists with all sections"); n != 1 {
+			t.Fatalf("cards=%v: the verdict shows %d times:\n%s", cards, n, v)
+		}
+	}
+}
