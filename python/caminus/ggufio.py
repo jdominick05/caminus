@@ -1,6 +1,7 @@
 """Caminus's own GGUF reader: the header, the metadata and the tensor table of a GGUF file, and memory-mapped views of
 the tensors' raw bytes. Written from the file format (docs/specs/spec-own-quant.md: the format is the data contract; this
-module replaces gguf-py on the model path, gguf-py stays a test oracle).
+module replaces gguf-py on the model path, gguf-py stays a test oracle). GGUFFile.write_like writes the study tools' files
+(tools/eval/): a file's header and metadata with a new tensor table and data.
 
 Layout (little-endian): magic b'GGUF', u32 version (2 or 3), u64 tensor count, u64 metadata count; then the metadata
 (key: u64 length + UTF-8 bytes, u32 value type, value) and the tensor table (name, u32 dims, u64 dims[n] innermost first,
@@ -145,6 +146,35 @@ class GGUFFile:
     def hp(self, key, default=None):
         """an architecture hyperparameter: meta['<arch>.<key>']"""
         return self.meta.get(f'{self.arch}.{key}', default)
+
+    def write_like(self, path, entries, drop_cache=False):
+        """write a GGUF that is this file's header and metadata bytes (general.file_type included: a study file keeps
+        naming its base's quantization) with a new tensor table: entries, in order, each (name, shape innermost first,
+        type_id, n_bytes, chunks), chunks() yielding the tensor's bytes in file order (uint8 arrays or bytes, n_bytes in
+        all). Each tensor starts at the next multiple of this file's alignment, zero padding between. Written to
+        path + '.part' and renamed when complete. drop_cache: after each tensor, sync the output and drop its pages from
+        the page cache (a file the size of the host's free RAM must not crowd out the rest)"""
+        entries = list(entries); al = self.alignment; table = bytearray(); off = 0; offs = []
+        for name, shape, tid, nb, _ in entries:
+            if tid not in TYPES: raise GGUFError(f'{name}: unknown tensor type {tid}')
+            b = name.encode()
+            table += struct.pack('<Q', len(b)) + b + struct.pack('<I', len(shape)) + struct.pack(f'<{len(shape)}Q', *shape)
+            table += struct.pack('<IQ', tid, off); offs.append(off)
+            off = (off + nb + al - 1) // al * al
+        head = bytes(self._mm[:self.table_start])
+        data_start = (len(head) + len(table) + al - 1) // al * al
+        with open(path + '.part', 'wb') as f:
+            f.write(head); f.write(table); f.write(b'\0' * (data_start - len(head) - len(table)))
+            for (name, _, _, nb, chunks), o in zip(entries, offs):
+                assert f.tell() == data_start + o
+                n = 0
+                for c in chunks():
+                    c = memoryview(np.ascontiguousarray(c) if isinstance(c, np.ndarray) else c).cast('B'); f.write(c); n += c.nbytes
+                if n != nb: raise GGUFError(f'{name}: {n} bytes written, {nb} declared')
+                f.write(b'\0' * (-n % al))
+                if drop_cache: f.flush(); os.fdatasync(f.fileno()); os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(path + '.part', path)
 
     def close(self):
         """unmap the file; while tensor views still exist the mapping stays until they are gone (BufferError otherwise)"""

@@ -1,7 +1,7 @@
 """Write a GGUF that is BASE with some of its tensors replaced by DONOR's tensors of the same name and shape (another
 quantization of the same weights): a study file that differs from BASE in those tensors only. The header and the
-metadata are BASE's bytes, the tensor table and the data are written here (each tensor at the next multiple of the
-file's alignment, zero padding between), so general.file_type keeps naming BASE's quantization. Read with
+metadata are BASE's bytes, the tensor table and the data are new (caminus.ggufio GGUFFile.write_like: each tensor at
+the next multiple of the file's alignment, zero padding between), so general.file_type keeps naming BASE's quantization. Read with
 caminus.ggufio; nothing here decodes a block.
 
 After writing, the output is opened again and checked: its metadata equals BASE's, every replaced tensor's type and
@@ -9,7 +9,7 @@ bytes are DONOR's, every other tensor's are BASE's. With DONOR = BASE the output
 (--self).
   python -I tools/eval/gguf_splice.py BASE DONOR OUT [--match 'ffn_(gate|up|down)_exps'] [--self]
 Prints the per-type census of the replaced tensors and RESULT PASS | FAIL (exit 1)."""
-import argparse, collections, hashlib, os, re, struct, sys
+import argparse, collections, hashlib, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
 from caminus import ggufio
@@ -20,7 +20,7 @@ A = ap.parse_args()
 CH = 64 << 20
 B, D = ggufio.GGUFFile(A.base), ggufio.GGUFFile(A.donor)
 if os.path.exists(A.out): sys.exit(f'{A.out} exists')
-pat = re.compile(A.match); al = B.alignment
+pat = re.compile(A.match)
 src = []
 for t in B.tensors:
     if pat.search(t.name):
@@ -29,22 +29,13 @@ for t in B.tensors:
         src.append(d)
     else: src.append(t)
 if not any(s is not t for s, t in zip(src, B.tensors)) and not A.self: sys.exit(f'--match {A.match!r} names no tensor')
-table = bytearray(); off = 0; offs = []
-for s in src:
-    nb = s.name.encode()
-    table += struct.pack('<Q', len(nb)) + nb + struct.pack('<I', len(s.shape)) + struct.pack(f'<{len(s.shape)}Q', *s.shape)
-    table += struct.pack('<IQ', s.type_id, off); offs.append(off)
-    off = (off + s.n_bytes + al - 1) // al * al
-head = bytes(B._mm[:B.table_start])
-data_start = (len(head) + len(table) + al - 1) // al * al
-with open(A.out, 'wb') as f:
-    f.write(head); f.write(table); f.write(b'\0' * (data_start - len(head) - len(table)))
-    for s, o in zip(src, offs):
-        assert f.tell() == data_start + o
-        v = s.data()
-        for i in range(0, s.n_bytes, CH): f.write(v[i:i + CH])
-        f.write(b'\0' * (-s.n_bytes % al))
-    f.flush(); os.fsync(f.fileno())
+
+
+def chunks(s):
+    return lambda: (s.data()[i:i + CH] for i in range(0, s.n_bytes, CH))
+
+
+B.write_like(A.out, [(s.name, s.shape, s.type_id, s.n_bytes, chunks(s)) for s in src])
 
 # -- the checks ---------------------------------------------------------------------------------------------------------
 O = ggufio.GGUFFile(A.out); bad = 0

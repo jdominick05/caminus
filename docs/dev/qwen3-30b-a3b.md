@@ -317,6 +317,48 @@ reads), with their predictions written down before the first timed run, and meas
   is about half its distance to a reference with Q8_0 experts (the official file may also come from other source
   weights; that split is not measured).
 
+## The official GPTQ checkpoint (converted, not served)
+
+Qwen also publishes `Qwen/Qwen3-30B-A3B-GPTQ-Int4` (read at revision 9b534e43): one safetensors file, every attention and expert matrix as 4-bit
+GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the embedding, head, norms and router in fp16.
+
+- **It maps to Q4_0 exactly.** GPTQ decodes w = s (q - (z + 1)) per group of 128 inputs; this checkpoint stores z = 7 in
+  every one of its 18,624 matrices, so w = s (q - 8), which is Q4_0's w = d (q - 8) with the group's fp16 scale repeated
+  over its four 32-value blocks and the codes copied. `tools/eval/gptq_to_gguf.py GPTQ_DIR BASE OUT` writes that file
+  (BASE: the official Q4_K_M GGUF, for the metadata and the tensor table; the embedding and head stay F16, the norms
+  and router F32) and checks it against the checkpoint decoded by the GPTQ formula from its own int32 words. On
+  this checkpoint: the same fp32 bits in all 243 float tensors, every attention matrix and every expert of layers 0,
+  23 and 47 and 4 experts of every other layer (1,884 matrices, 4.2 G values); each matrix differs from the Q4_K_M
+  file's by 6.7 to 7.2 % (relative norm; the head 1.8 %), the distance between two 4-bit quantizations of the same
+  weights, and the norms and router are equal to it.
+- **The engine cannot run it yet.** The qwen3moe modules (decode, verify, two cards, the batched prefill) take Q4_K and
+  Q6_K matrices, a Q4_K embedding and a quantized head. The file needs a Q4_0 grouped expert tile with the gate|up
+  fusion in the lean decode modules (the Q4_0 tile of `kernels/own_quant_q4_0.h` is compiled into Swift's drafter
+  module only), Q4_0 GEMMs in `kernels/q3m_prefill.hip`, and an F16 embedding row and head. `Q3MoEOne` refuses it
+  today (token_embd F16; a Q4_0 matrix would otherwise go to the row-scale study's module, which refuses a row with
+  more than one scale).
+- **What it would read per token**, from the two files' tensor tables: 2.20 GB against the Q4_K_M file's 1.92. The
+  matrices are 1.58 GB against 1.66 (Q4_0 and Q4_K are both 4.5 bits per weight; the Q4_K_M file keeps half its
+  attention v and expert down tensors in Q6_K), and the F16 head is 0.62 GB against the Q6_K head's 0.26. At the
+  858 GB/s of the bound above that is 2.57 ms against 2.24 ms: slower in decode unless the head is requantized,
+  which gives up the exact mapping for that one tensor.
+- **Its weights predict text better, by llama.cpp's perplexity.** The G-model gates compare an engine with its own
+  file's exact float reference, so they cannot rank two files. llama.cpp (stock, HIP, one RX 7900 XT) read each file
+  over the same text: `llama-perplexity -f wiki.test.raw -c 4096 --chunks 64 -ngl 99 -fa on -lm dio`, wikitext-2 raw
+  test, 64 chunks of 4,096 tokens (2026-11-17):
+
+  | File | Perplexity |
+  |---|---|
+  | Q4_K_M (the served file) | 7.9688 ± 0.0631 |
+  | GPTQ as Q4_0, F16 head | **7.7835** ± 0.0608 |
+  | GPTQ as Q4_0, the Q4_K_M file's Q6_K head (`tools/eval/gguf_splice.py --match '^output\.weight$'`) | **7.7874** ± 0.0608 |
+
+  The ± is each run's own error; on the same chunks the difference is much tighter. From the running figures, each
+  chunk's mean log loss against Q4_K_M's: GPTQ -0.0235 ± 0.0017 nats per token (2.3 % lower perplexity, lower on 62
+  of 64 chunks), with the Q6_K head -0.0230 ± 0.0017; the Q6_K head costs 0.0005 nats against F16. So the head can
+  be Q6_K (the same bytes per token as today) at almost no cost. One text, and a GPTQ calibration set may lean
+  towards text like it (the checkpoint does not name its set); no common bf16 reference, so no KLD.
+
 ## The long-context mode (YaRN x4, opt-in)
 
 The model card gives 32,768 tokens natively and 131,072 with YaRN (factor 4, original_max_position_embeddings 32,768),

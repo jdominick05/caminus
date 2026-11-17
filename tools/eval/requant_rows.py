@@ -45,7 +45,7 @@ CS = {4: np.geomspace(0.10, 1.0, 16), 2: np.geomspace(0.35, 3.0, 16)}[A.bits]   
 B, D = ggufio.GGUFFile(A.base), ggufio.GGUFFile(A.donor)
 if os.path.exists(A.out): sys.exit(f'{A.out} exists')
 assert ggufio.TYPES[TYPE_ID][1:] == (BLK, BB), ggufio.TYPES[TYPE_ID]
-pat = re.compile(A.match); al = B.alignment
+pat = re.compile(A.match)
 E = int(B.hp('expert_count'))
 
 
@@ -144,30 +144,14 @@ def requant(t):
     print(f'  {t.name}: weighted relative error {st[0] / st[1]:.4e} (shifted level set {st[4] / st[1]:.4e}), plain {st[2] / st[3]:.4e}', flush=True)
 
 
-table = bytearray(); off = 0; offs = []
-for t, nb in plan:
-    name = t.name.encode()
-    table += struct.pack('<Q', len(name)) + name + struct.pack('<I', len(t.shape)) + struct.pack(f'<{len(t.shape)}Q', *t.shape)
-    table += struct.pack('<IQ', TYPE_ID if nb else t.type_id, off); offs.append(off)
-    off = (off + (nb or t.n_bytes) + al - 1) // al * al
-head = bytes(B._mm[:B.table_start])
-data_start = (len(head) + len(table) + al - 1) // al * al
-with open(A.out + '.part', 'wb') as f:
-    f.write(head); f.write(table); f.write(b'\0' * (data_start - len(head) - len(table)))
-    for (t, nb), o in zip(plan, offs):
-        assert f.tell() == data_start + o
-        if nb is None:
-            v = t.data()
-            for i in range(0, t.n_bytes, CH): f.write(v[i:i + CH])
-            n = t.n_bytes
-        else:
-            n = 0
-            for chunk in requant(t): f.write(chunk.tobytes()); n += chunk.size
-            assert n == nb, (t.name, n, nb)
-            f.flush(); os.fdatasync(f.fileno()); os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)   # (nor the output)
-        f.write(b'\0' * (-n % al))
-    f.flush(); os.fsync(f.fileno())
-os.replace(A.out + '.part', A.out)
+
+
+def source(t, nb):
+    if nb is None: return lambda: (t.data()[i:i + CH] for i in range(0, t.n_bytes, CH))
+    return lambda: requant(t)
+
+
+B.write_like(A.out, [(t.name, t.shape, TYPE_ID if nb else t.type_id, nb or t.n_bytes, source(t, nb)) for t, nb in plan], drop_cache=True)   # (nor the output)
 
 # -- the checks ---------------------------------------------------------------------------------------------------------
 O = ggufio.GGUFFile(A.out); bad = 0
