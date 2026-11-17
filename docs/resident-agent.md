@@ -53,7 +53,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 
 | Key | Action |
 |---|---|
-| Esc | browse the transcript (the draft stays); while a reply is being written, interrupt that turn instead (nothing of it is kept; the goal waits up to two minutes for your message) |
+| Esc | while a reply is being written, interrupt that turn (nothing of it is kept; the goal waits up to two minutes for your message); the activity line says "esc interrupts" then. PgUp/PgDn and the wheel scroll the transcript |
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
 | Ctrl+R | earlier prompts containing the draft, newest first |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
@@ -97,10 +97,10 @@ arguments are appended) and is sent as a message.
 
 ### Root requests and questions
 
-A root request is an inline card. Esc, then `a a` approves (two presses: the
+A root request is an inline card; Ctrl+A opens the approvals overlay to decide it: `a a` approves (two presses: the
 first only names the command), `g g` approves and grants that exact command for
-the rest of its goal, `e` edits, `d` denies, `/deny TEXT` denies with what to do
-instead. When several wait, one card lists them all and `[` `]` pick. A granted
+the rest of its goal, `e` edits, `d` denies; `/deny TEXT` in the chat denies with what to do
+instead. When several wait, one card lists them all and the overlay's rows pick. A granted
 repeat (the same command in the same goal, within 12 hours of your approval, as
 your own audit log records it) runs with one `a`, still under your sudo; the
 resident never runs root, and `caminus ember watch` honours grants the same way.

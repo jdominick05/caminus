@@ -33,7 +33,7 @@ func TestEditPromptStaysInTheChat(t *testing.T) {
 	writeReq(t, bridge, "r1", "apt-get install -y foo", 1)
 	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "a"), map[string]bool{}
 	m.refreshLocal()
-	m.chat.compose.Blur()
+	m.chat.approvals = true // (the approvals overlay, Ctrl+A, decides and edits requests)
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	m = next.(emberModel)
 	v := ansi.Strip(m.render())

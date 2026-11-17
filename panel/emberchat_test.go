@@ -75,8 +75,8 @@ func TestChatComposerCapturesTargetAndKeepsFailedDraft(t *testing.T) {
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(emberModel)
-	if m.chat.compose.Focused() || m.chat.compose.Value() == "" {
-		t.Fatal("Escape should browse without deleting the draft")
+	if !m.chat.compose.Focused() || m.chat.compose.Value() == "" {
+		t.Fatal("Esc while idle does nothing: the draft and the composer stay")
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(emberModel)
@@ -1171,7 +1171,7 @@ func TestTranscriptCardsFoldOpenAndShowRootInline(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	folded := ansi.Strip(m.chat.content)
-	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "a approve", "/deny TEXT"} {
+	for _, want := range []string{g.collapsed + " " + g.tool + " terminal  make test …", "exit 0 · 2 lines", "permission denied", "ROOT", "apt-get install -y libcmocka-dev", "Ctrl+A", "/deny TEXT"} {
 		if !strings.Contains(folded, want) {
 			t.Fatalf("folded transcript missing %q:\n%s", want, folded)
 		}
@@ -1208,7 +1208,7 @@ func TestChatDecidesRootRequestsInline(t *testing.T) {
 			next, _ = m.chatSlash("/deny use the vendored copy in third_party/ instead")
 			m = next.(emberModel)
 		} else {
-			m.chat.compose.Blur()
+			m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
 			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
 			m = next.(emberModel)
 		}
@@ -1233,7 +1233,7 @@ func TestChatApprovalNeedsASecondPress(t *testing.T) {
 	writeReq(t, bridge, "r1", "rm -rf /var/cache/foo", 1)
 	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
 	m.refreshLocal()
-	m.chat.compose.Blur()
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
 	press := func(r rune) {
 		next, _ := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(emberModel)
@@ -1611,12 +1611,13 @@ func TestSeveralRootRequestsShareOneCard(t *testing.T) {
 	if m.reqs[m.pendingRoot()].ID != "r2" {
 		t.Fatal("the keys act on the newest by default")
 	}
-	m.chat.compose.Blur()
-	next, _ := m.chatKey(tea.KeyPressMsg{Code: '[', Text: "["})
-	m = next.(emberModel)
-	if m.reqs[m.pendingRoot()].ID != "r1" {
-		t.Fatal("[ moves to the older request")
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A; its rows pick one)
+	for row, i := range m.approvalOrder() {
+		if m.reqs[i].ID == "r1" {
+			m.chat.approvalSel = row
+		}
 	}
+	var next tea.Model
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	m = next.(emberModel)
 	if data, err := os.ReadFile(filepath.Join(bridge, "res", "r1.json")); err != nil || !strings.Contains(string(data), `"denied"`) {
@@ -1652,7 +1653,7 @@ func TestGrantTakesTwoPressesAndAGrantedRepeatOne(t *testing.T) {
 	m.bridge, m.auditPath, m.seen = bridge, filepath.Join(t.TempDir(), "audit.jsonl"), map[string]bool{}
 	writeReq(t, bridge, "r1", "systemctl restart foo", 1)
 	m.refreshLocal()
-	m.chat.compose.Blur()
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A)
 	press := func(r rune) tea.Cmd {
 		next, cmd := m.chatKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = next.(emberModel)
@@ -2048,7 +2049,7 @@ func TestThemeScreenPreviewsKeepsAndRestores(t *testing.T) {
 	}
 	frame := m.render()
 	plain := ansi.Strip(frame)
-	for _, want := range []string{"themes  ", "add tests for the parser", "the gate fails", "a framed box", "esc browse", "↑↓ preview"} {
+	for _, want := range []string{"themes  ", "add tests for the parser", "the gate fails", "a framed box", "⇧Tab sessions", "↑↓ preview"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("the screen misses %q:\n%s", want, plain)
 		}
@@ -2249,7 +2250,7 @@ func TestAGithubHandoffIsACardAndTakesTwoPresses(t *testing.T) {
 		t.Fatalf("a hand-off card offers run and deny, never a grant: %q", card)
 	}
 	m.reqs = []emberReq{{ID: "abcdef0123456789", Kind: "github", Agent: m.agentName, Summary: "open a pull request on a/b"}}
-	m.chat.compose.Blur() // (the card's keys work while browsing: "esc, then a a")
+	m.chat.approvals = true // (requests are decided in the approvals overlay: Ctrl+A) // (the card's keys work while browsing: "esc, then a a")
 	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m = next.(emberModel)
 	if cmd != nil || !strings.Contains(m.msg, "run on GitHub as you") {

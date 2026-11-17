@@ -103,7 +103,7 @@ account. You see its replies, one dim line per batch of tool work, and on a wide
 thoughts, its task list and what it is running now.
 
 - **Steer**: type while it works. A message reaches it at its next step; `/steer TEXT` redirects it.
-- **Answer**: questions and root requests appear as cards. Esc, then `a a` approves a root command (it runs under
+- **Answer**: questions and root requests appear as cards. Ctrl+A decides them: `a a` approves a root command (it runs under
   your sudo, never the agent's), `d` denies, `/deny TEXT` denies with what to do instead. Nothing waits on you: an
   unanswered question times out to the agent's recommended option, a permission question to no.
 - **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).

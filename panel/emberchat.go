@@ -1409,9 +1409,6 @@ func (m emberModel) composerTitle() string {
 			title = "continue goal " + shortGoal(m.chat.target)
 		}
 	}
-	if !m.chat.compose.Focused() && !m.chat.sending {
-		title += " · browsing"
-	}
 	return title
 }
 
@@ -1422,9 +1419,6 @@ func (m emberModel) composerHint() string {
 	}
 	if m.chat.shell {
 		return "a command, run in the agent's account · ! again: your own shell · Enter runs it · Backspace leaves"
-	}
-	if !m.chat.compose.Focused() {
-		return "browsing history · Enter returns to typing"
 	}
 	if m.chat.newGoal {
 		return "type a goal · Enter starts it · ! for shell mode · /help"
@@ -1591,7 +1585,7 @@ func helpLines() []string {
 		{"Enter", "send · Alt+Enter adds a line"},
 		{"↑ ↓", "your sent messages (an unread one is pulled back first)"},
 		{"/", "commands: ↑ ↓ choose, Tab or Enter take"},
-		{"Esc", "browse the history; while a reply is written, interrupt that turn"},
+		{"Esc", "while a reply is written, interrupt that turn"},
 		{"PgUp PgDn", "scroll · Ctrl+L follow new activity"},
 		{"Ctrl+N", "a new goal"},
 		{"Shift+Tab", "sessions: a card per session"},
@@ -2176,8 +2170,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, interruptTurn(m, goal)
 			}
 		}
-		m.chat.compose.Blur()
-		return m, nil
+		return m, nil // (idle, Esc does nothing: the browse mode it opened is gone, PgUp/PgDn and the wheel scroll)
 	case "up", "down":
 		if next, done := m.slashMenuKey(k); done {
 			return next, nil
@@ -2203,83 +2196,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.chat.compose.Focused() {
-		// A pending root request is decided right here, through the Requests page's own handler (the same sudo
-		// run, claim, audit entry and answer files): a approves, d denies, e opens it in the Requests editor.
-		// Approving runs a root command, so it takes two presses: the first a arms it and shows the exact
-		// command, a second a within 10 s approves. Any other key disarms. Denying runs nothing and needs one.
-		armed := m.chat.armed
-		m.chat.armed = ""
-		if i := m.pendingRoot(); i >= 0 && (k == "a" || k == "g" || k == "d" || k == "e") {
-			r := m.reqs[i]
-			// A command you granted for this goal (checked against your own audit, not the agent's word) runs with
-			// one a; anything else, and every grant, takes two presses.
-			granted := k == "a" && grantRecorded(m.auditPath, r, time.Now())
-			if (k == "a" || k == "g") && !granted && (armed != k+":"+r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
-				m.chat.armed, m.chat.armedAt = k+":"+r.ID, time.Now()
-				what := "approve as root: "
-				if k == "g" {
-					what = "approve and grant for this goal (the same command then needs one a): "
-				}
-				m.msg = what + terminalText(r.Cmd, false) + " ? press " + k + " again (any other key cancels)"
-				if r.kind() == "github" {
-					m.chat.armed = ""
-					m.msg = "a hand-off runs once, as filed: a a runs it as you, d denies"
-					if k == "a" {
-						m.chat.armed = k + ":" + r.ID
-						m.msg = "run on GitHub as you: " + terminalText(r.Summary, false) + " ? press a again (any other key cancels)"
-					}
-				}
-				return m, nil
-			}
-			if r.kind() == "github" && (k == "g" || k == "e") {
-				return m, nil // a hand-off runs once, as filed
-			}
-			m.sel = i
-			return m.reqKeys(k) // e opens the edit prompt in the composer's slot
-		}
-		if armed != "" {
-			m.msg = "approval cancelled"
-		}
-		if roots := m.pendingRoots(); len(roots) > 1 && (k == "[" || k == "]") {
-			pos := 0
-			for n, i := range roots {
-				if i == m.pendingRoot() {
-					pos = n
-				}
-			}
-			if k == "[" {
-				pos = max(0, pos-1)
-			} else {
-				pos = min(len(roots)-1, pos+1)
-			}
-			m.chat.rootSel = m.reqs[roots[pos]].ID
-			m.msg = fmt.Sprintf("request %d of %d: %s", pos+1, len(roots), terminalText(m.reqs[roots[pos]].Cmd, false))
-			return m, nil
-		}
-		switch k {
-		case "enter", "t":
-			return m, m.chat.compose.Focus()
-		case "n":
-			m.chat.newGoal = true
-			m.chat.forceNew = true
-			m.chat.target = ""
-			return m, m.chat.compose.Focus()
-		case "q":
-			return m, tea.Quit
-		case "up", "k":
-			m.chat.transcript.ScrollUp(1)
-			return m, nil
-		case "down", "j":
-			m.chat.transcript.ScrollDown(1)
-			return m, nil
-		case "home":
-			m.chat.transcript.GotoTop()
-			return m, nil
-		case "end":
-			m.chat.transcript.GotoBottom()
-			return m, nil
-		}
-		return m, nil
+		// (no browse mode any more: a composer left unfocused takes the key back to typing)
+		return m, m.chat.compose.Focus()
 	}
 	if m.chat.sending {
 		return m, nil

@@ -165,9 +165,9 @@ func (m emberModel) approvalOverlay(w, h int) string {
 	for i := first; i < min(first+listH, len(order)); i++ {
 		rows = append(rows, m.approvalRow(order[i], i == sel, inner))
 	}
-	hint := "Enter shows the full request  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT in the chat says what instead"
+	hint := "Enter shows the full request  ·  a a approve  ·  g g grant for the goal  ·  e edit  ·  d deny  ·  /deny TEXT in the chat says what instead"
 	if m.chat.approvalDetail {
-		hint = "Enter folds the full request again  ·  a a approve  ·  e edit  ·  d deny  ·  /deny TEXT says what instead"
+		hint = "Enter folds the full request again  ·  a a approve  ·  g g grant  ·  e edit  ·  d deny  ·  /deny TEXT says what instead"
 	}
 	body := strings.Join(rows, "\n")
 	if len(detail) > 0 {
@@ -202,15 +202,25 @@ func (m emberModel) approvalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.chat.approvalSel = min(max(0, len(order)-1), sel+1)
 	case "enter":
 		m.chat.approvalDetail = !m.chat.approvalDetail
-	case "a", "d", "e":
+	case "a", "g", "d", "e":
 		if sel >= len(order) {
 			return m, nil
 		}
 		r := m.reqs[order[sel]]
-		// Approving runs a root command, so it takes two presses, exactly as the inline card does.
-		if k == "a" && r.kind() != "question" && (armed != r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
-			m.chat.armed, m.chat.armedAt = r.ID, time.Now()
+		if r.kind() == "github" && (k == "g" || k == "e") {
+			return m, nil // a hand-off runs once, as filed: no grant, no edit
+		}
+		// Approving runs a root command, so it takes two presses; a command you granted for this goal (checked against
+		// your own audit, not the agent's word) runs with one a. g approves and grants it for the goal: two presses.
+		granted := k == "a" && grantRecorded(m.auditPath, r, time.Now())
+		if (k == "a" || k == "g") && r.kind() != "question" && !granted &&
+			(armed != k+":"+r.ID || time.Since(m.chat.armedAt) > 10*time.Second) {
+			m.chat.armed, m.chat.armedAt = k+":"+r.ID, time.Now()
 			m.msg = "approve as root: " + terminalText(r.Cmd, false) + " ? press a again (any other key cancels)"
+			if k == "g" {
+				m.msg = "approve and grant for this goal (the same command then needs one a): " + terminalText(r.Cmd, false) +
+					" ? press g again (any other key cancels)"
+			}
 			if r.kind() == "github" {
 				m.msg = "run on GitHub as you: " + terminalText(r.Summary, false) + " ? press a again (any other key cancels)"
 			}

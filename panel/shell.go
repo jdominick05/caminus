@@ -249,16 +249,13 @@ func approvalCardKeys(kind, cmd, why string, inline bool, w int) string {
 	if kind == "question" {
 		title = "? QUESTION"
 	}
-	keys := emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" approve  ") + emberWarn.Render("g g") +
-		emberDim.Render(" grant for the goal  ") + emberWarn.Render("e") +
-		emberDim.Render(" edit  ") + emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
-		emberDim.Render(" says what to do instead")
+	keys := emberWarn.Render("Ctrl+A") + emberDim.Render(" decides it (approve, grant for the goal, edit, deny)  ·  ") +
+		emberWarn.Render("/deny TEXT") + emberDim.Render(" says what to do instead")
 	if kind == "github" {
 		// a hand-off runs once, as filed, with the owner's gh: no grant, no edit
 		title = "⇡ GITHUB"
-		keys = emberDim.Render("esc, then ") + emberWarn.Render("a a") + emberDim.Render(" run it as you  ") +
-			emberWarn.Render("d") + emberDim.Render(" deny  ·  ") + emberWarn.Render("/deny TEXT") +
-			emberDim.Render(" says what to do instead")
+		keys = emberWarn.Render("Ctrl+A") + emberDim.Render(" decides it (run it as you, deny)  ·  ") +
+			emberWarn.Render("/deny TEXT") + emberDim.Render(" says what to do instead")
 	}
 	if !inline {
 		keys = emberDim.Render("decide in ") + emberWarn.Render("/approvals")
