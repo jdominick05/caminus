@@ -34,6 +34,7 @@ only). After upgrading, run `caminus ember agent install` so a running agent pic
 
 - Clicking a folded card in Ember opens every card (as Ctrl+O does), not only that one.
 - The `/theme` picker is still slow to move.
+- The output of a `!` or `!!` command lands in the typing box (to send with your words), not in the chat.
 
 Benchmarks: no engine or kernel code changed since 0.3.0, so its numbers stand (docs/dev/benchmarks.md, measured on
 0.3.0).
