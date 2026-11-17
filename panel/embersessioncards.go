@@ -25,7 +25,7 @@ type sessionCard struct {
 	active                            []string // every goal still running, queued, paused or waiting: destroy cancels each
 	aimed                             bool     // the goal was redirected: the card shows what it works toward now
 	workingS, spendGoal, spendToday   float64
-	tokPerS                           float64
+	speed                             replySpeed
 	ctxUsed, ctx                      int
 	lastTS                            float64
 }
@@ -40,26 +40,16 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 	c := sessionCard{name: name, status: "unknown"}
 	out, err := runResident(residentCommand(m, []string{"status", name, "--json"}, ""))
 	var st struct {
-		Model      string             `json:"model"`
-		Effort     string             `json:"effort"`
-		TokPerS    *float64           `json:"tok_per_s"`
-		SpendToday float64            `json:"spend_today"`
-		SpendGoals map[string]float64 `json:"spend_goals"`
-		Aims       map[string]string  `json:"aims"`
-		Context    int                `json:"context"`
-		Used       int                `json:"context_used"`
-		Alive      bool               `json:"daemon_alive"`
-		Goals      []residentGoal     `json:"goals"`
+		residentStatus                   // the status line's own reading (its speed among it)
+		Aims           map[string]string `json:"aims"`
 	}
 	if err != nil || json.Unmarshal(out, &st) != nil {
 		return c
 	}
-	c.model, c.spendToday, c.ctx, c.ctxUsed = withEffort(st.Model, st.Effort), st.SpendToday, st.Context, st.Used
-	if st.TokPerS != nil {
-		c.tokPerS = *st.TokPerS
-	}
+	c.model, c.spendToday, c.ctx, c.ctxUsed = withEffort(st.Model, st.Effort), st.SpendToday, st.Context, st.ContextUsed
+	c.speed = st.speed()
 	c.status = "listening" // (the word the header uses for the same state)
-	if !st.Alive {
+	if !st.DaemonAlive {
 		c.status = "stopped"
 	}
 	for _, x := range st.Goals {
@@ -80,7 +70,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 			c.goal, c.aimed = aim, true
 		}
 		switch {
-		case !st.Alive:
+		case !st.DaemonAlive:
 		case g.shownState() == "parked":
 			c.status = "parked"
 		case g.State == "working" || g.State == "queued":
@@ -157,9 +147,9 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 	if c.status == "working" {
 		worked = "working "
 	}
-	speed := "–"
-	if c.tokPerS > 0 {
-		speed = fmt.Sprintf("%.0f tok/s", c.tokPerS)
+	speed := c.speed.short(true) // (a card has no room for both speeds: the write speed)
+	if speed == "" {
+		speed = "–"
 	}
 	gh := "no GitHub account"
 	if c.github != "" {
@@ -204,7 +194,7 @@ func (m emberModel) switcherCards() []sessionCard {
 	}
 	for i := range out {
 		if out[i].name == m.agentName && out[i].status != "loading" { // the session in view: the status bar's live speed
-			out[i].tokPerS = m.resident.TokPerS
+			out[i].speed = m.resident.speed()
 		}
 	}
 	return out

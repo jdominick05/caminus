@@ -23,6 +23,32 @@ THINKING_REQUIRED = frozenset(('claude-opus-5-5', 'claude-opus-5', 'claude-sonne
                                'claude-fable-5-2', 'claude-fable-5-1', 'claude-fable-5'))
 
 
+def estimated_speed(tokens, t_first, t_last):
+    """A reply's decode speed measured here: its usage token count over the client's window from the first piece to
+    the last, prefill and queueing excluded; None when the window is too short to mean anything. Only for a brain whose
+    server reports no speed of its own (engine_speed)."""
+    if isinstance(tokens, int) and tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
+        return dict(source='estimate', tokens=tokens, seconds=round(t_last - t_first, 3),
+                    tps=round(tokens / (t_last - t_first), 1))
+    return None
+
+
+def engine_speed(timings, server):
+    """A reply's speeds as a Caminus server measured them (its `timings`, as sent: predicted_per_second for writing,
+    prompt_per_second for reading the prompt's uncached part); None when it reports neither. A 0 is not a speed (a
+    prompt read wholly from the cache reads nothing) and is left out rather than shown as 0 tok/s."""
+    if not isinstance(timings, dict):
+        return None
+    def rate(key):
+        v = timings.get(key)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+    tps, prompt_tps = rate('predicted_per_second'), rate('prompt_per_second')
+    if tps is None and prompt_tps is None:
+        return None
+    return dict(source='engine', server=server, tps=tps, prompt_tps=prompt_tps, tokens=timings.get('predicted_n'),
+                prompt_n=timings.get('prompt_n'), cache_n=timings.get('cache_n'))
+
+
 def split_content(content):
     """An OpenAI-compatible message content as (text, thinking). Most servers send a string; Mistral sends typed blocks
     for its reasoning models: [{type: thinking, thinking: [{type: text, text}] or str}, {type: text, text}]."""
@@ -188,7 +214,8 @@ class Model:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
         self.counter = True
         self.last_usage = {}
-        self.last_speed = None
+        self.last_speed = None   # the last reply's speed: engine_speed on a Caminus server, else estimated_speed
+        self.caminus = None     # whether the endpoint is a Caminus server, once asked (is_caminus)
         self.last_call = {}      # the newest Messages API call: requested and serving model, fallback, stop, request id
 
     def _held(self, sock):
@@ -239,7 +266,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
 
     def probe(self, timeout=3.0):
         """whether the server answers at all (a local server's /props, a short timeout); a remote API is assumed up"""
@@ -249,8 +276,41 @@ class Model:
             with self.opener(urllib.request.Request(self.root + '/props', None, self.headers()), timeout=timeout) as r:
                 r.read(65536)
             return True
-        except (OSError, ValueError, urllib.error.HTTPError):
+        except (OSError, ValueError, urllib.error.HTTPError) as e:
+            self._failed(e)
             return False
+
+    def _failed(self, e):
+        """A call's transport failure as a ModelError. A connection that failed may come back as another server on the
+        same port (llama-server where caminus serve was): whether the brain is Caminus is then asked again."""
+        if isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError):
+            self.caminus = None
+        return ModelError(str(e))
+
+    def is_caminus(self):
+        """Whether this brain is a local Caminus server (catalog.caminus_props: its /props names the engine). Asked once
+        and kept until a call fails to connect (_failed); a server that cannot be reached is asked again next time,
+        never remembered as another engine. A paid brain (remote, or through the key relay) is never asked. Any failure
+        is "not now": the reply it follows is already read, and a speed lookup must never fail it."""
+        if self.caminus is None:
+            if self.remote:
+                self.caminus = False
+            else:
+                from . import catalog
+                try:
+                    self.caminus = catalog.caminus_props(self.base, self.opener, 3) is not None
+                except Exception:
+                    return False
+        return self.caminus
+
+    def _speed(self, timings, tokens=None, t_first=None, t_last=None):
+        """The reply's speed: a Caminus server's own numbers whenever the brain is one (never an estimate there, even
+        when it sent none), else the client's estimate."""
+        if timings is not None and self.is_caminus():
+            return engine_speed(timings, self.root)
+        if self.caminus:
+            return None
+        return estimated_speed(tokens, t_first, t_last)
 
     def context_size(self):
         if self.context is None:
@@ -302,12 +362,14 @@ class Model:
         if tools:
             body['tools'] = tools
         if on_delta is not None:
-            # usage in the final chunk gives the generated token count for a client-measured decode speed
+            # usage in the final chunk gives the generated token count for a client-measured decode speed (a Caminus
+            # server's own timings replace it: _speed)
             body['stream_options'] = dict(include_usage=True)
             return self._stream(body, on_delta)
         result = self.request(self.base + '/chat/completions', body)
         self.last_usage = result.get('usage') or {}
-        self.last_speed = None     # no decode timing without streamed pieces: nothing is reported rather than a wrong number
+        # no decode window without streamed pieces: only a server's own timings give a speed here
+        self.last_speed = self._speed(result.get('timings'))
         try:
             m = result['choices'][0]['message']
             if result['choices'][0].get('finish_reason') == 'length':
@@ -340,7 +402,7 @@ class Model:
         A backend that answers with one whole JSON body instead of a stream is accepted and reported once."""
         req = urllib.request.Request(self.base + '/chat/completions', json.dumps(body).encode(),
                                      self.headers(stream=True))
-        content, reasoning, calls, finish, usage = [], [], {}, None, {}
+        content, reasoning, calls, finish, usage, timings = [], [], {}, None, {}, None
         self.last_speed = None
         t_first = t_last = None    # decode window: first choice-chunk to the last chunk read, prefill excluded
         done_seen = False
@@ -363,6 +425,7 @@ class Model:
                             if on_delta('tool', call['function']['name']) is False:
                                 raise Cancelled()
                         self.last_usage = whole.get('usage') or {}
+                        self.last_speed = self._speed(whole.get('timings'))
                         if whole['choices'][0].get('finish_reason') == 'length':
                             raise ModelTruncated(m)
                         return self._message(m)
@@ -377,6 +440,8 @@ class Model:
                     t_last = now
                     if chunk.get('usage'):
                         usage = chunk['usage']
+                    if isinstance(chunk.get('timings'), dict):
+                        timings = chunk['timings']    # (caminus serve: on the finish chunk, before the usage chunk)
                     for choice in chunk.get('choices') or []:
                         if choice.get('finish_reason'):
                             finish = choice['finish_reason']
@@ -412,12 +477,10 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
         self.last_usage = usage
-        tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
-        if isinstance(tokens, int) and tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
-            self.last_speed = dict(tokens=tokens, seconds=round(t_last - t_first, 3),
-                                   tps=round(tokens / (t_last - t_first), 1))
+        self.last_speed = self._speed(timings, usage.get('completion_tokens') if isinstance(usage, dict) else None,
+                                      t_first, t_last)
         try:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:
@@ -578,7 +641,7 @@ class Model:
         """read a Messages API event stream into the reply shape complete() returns"""
         req = urllib.request.Request(self.base + '/messages', json.dumps(body).encode(),
                                      self.headers(stream=True, beta=FALLBACK_BETA if 'fallbacks' in body else None))
-        text, blocks, stop, usage, details = [], {}, None, {}, None
+        text, blocks, stop, usage, details, timings = [], {}, None, {}, None, None
         served, declined, fallback_ran, request_id = body.get('model'), [], False, None
         self.last_call = dict(model=body.get('model'))
         self.last_speed = None
@@ -633,6 +696,8 @@ class Model:
                         stop = (ev.get('delta') or {}).get('stop_reason') or stop
                         details = (ev.get('delta') or {}).get('stop_details') or details
                         usage.update(ev.get('usage') or {})
+                        if isinstance(ev.get('timings'), dict):
+                            timings = ev['timings']   # (caminus serve's Anthropic route: on message_delta)
                         if any((i or {}).get('type') == 'fallback_message' for i in (usage.get('iterations') or [])):
                             fallback_ran = True
                     elif kind == 'message_stop':
@@ -648,7 +713,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
         self.last_call = dict(model=body.get('model'), served=served, fallback_ran=fallback_ran,
                               declined_by=[m for m in declined if m], stop_reason=stop,
                               stop_category=(details or {}).get('category'), request_id=request_id)
@@ -658,9 +723,7 @@ class Model:
         self.last_usage = dict(prompt_tokens=(usage.get('input_tokens') or 0) + read + wrote,
                                completion_tokens=out_tokens, cache_read_input_tokens=read,
                                cache_creation_input_tokens=wrote)
-        if out_tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
-            self.last_speed = dict(tokens=out_tokens, seconds=round(t_last - t_first, 3),
-                                   tps=round(out_tokens / (t_last - t_first), 1))
+        self.last_speed = self._speed(timings, out_tokens, t_first, t_last)
         out = dict(role='assistant', content=''.join(text))
         if not done:
             raise ModelTruncated(out, 'the reply ended before it was complete; nothing was executed', retryable=True)

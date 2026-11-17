@@ -14,7 +14,7 @@ pip install caminus
 caminus ember --help
 ```
 
-Ember is in the package from 0.3.0 on. Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
+Ember is in the package from 0.3.0 on (on PyPI from 0.3.1). Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
 
 The panel (`caminus ember ui`) ships inside the package. From a source checkout, build it first:
 `cd panel && go build -o caminus-panel .`
@@ -62,7 +62,7 @@ caminus ember setup --test-venv                                                 
 | two cards, an XTX first | the Coder (`coder`, both cards) |
 | two XTs | ThinkingCap (the Coder needs a 24 GB first card) |
 
-Qwen3-30B-A3B (`qwen3-30b-a3b`) runs on every setup too; it is not the default because it finishes fewer agent tasks
+Qwen3-30B-A3B (`qwen3-30b-a3b`) runs on an XTX or on two cards too; it is not the default because it finishes fewer agent tasks
 for now. Start the model with `caminus panel` or `caminus pull MODEL && caminus start MODEL` (see
 [the quickstart](quickstart.md)), then point the agent at it:
 

@@ -2084,10 +2084,6 @@ func (m emberModel) todoPinned() string {
 	return strings.Join(rows, "\n")
 }
 
-// contextBarSlots is the fixed width of the usage bar: readable at a glance,
-// small enough to keep the footer one line.
-const contextBarSlots = 10
-
 // humanTokens renders a token count at footer density: 482k, 1.0M.
 func humanTokens(n int) string {
 	switch {
@@ -2123,34 +2119,6 @@ func contextBarLevel(used, capacity int, threshold float64) int {
 	default:
 		return 0
 	}
-}
-
-// contextBar renders the measured context footprint for the footer as two
-// pieces: an accent (label, bar, share) that takes the level's color, and a
-// dim remainder (window size, trigger). A used count of 0 means the daemon
-// has not measured anything yet; then only the window size shows — capacity
-// is never presented as usage, and no percentage is invented from events.
-// tps is the measured decode speed of the agent's last streamed reply; it
-// only annotates a measured bar, and a count of 0 shows nothing at all.
-func contextBar(used, capacity int, threshold, tps float64) (accent, rest string) {
-	if capacity <= 0 {
-		return "", ""
-	}
-	if used <= 0 {
-		return "", "ctx " + humanTokens(capacity) + " window"
-	}
-	share := float64(used) / float64(capacity)
-	if share > 1 {
-		share = 1
-	}
-	filled := int(share*contextBarSlots + 0.5)
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", contextBarSlots-filled)
-	speed := ""
-	if tps > 0 {
-		speed = fmt.Sprintf(" · %.0f tok/s", tps)
-	}
-	return fmt.Sprintf("ctx %s %d%%", bar, int(share*100+0.5)),
-		fmt.Sprintf(" of %s · compact %.0f%%", humanTokens(capacity), compactTrigger(threshold)*100) + speed
 }
 
 // contextStateStyle colors the header's status light by what it means: busy
@@ -3099,15 +3067,15 @@ func (m emberModel) chatFoot(w int) string {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
 	// the speed is the last finished reply's: after an Esc it read as if the dropped turn were still generating
-	tps := m.resident.TokPerS
+	speed := m.resident.speed()
 	if ag := m.activeGoal(); ag != nil {
 		if _, held := m.interruptedUntil(ag.ID); held {
-			tps = 0
+			speed = replySpeed{}
 		}
 	}
 	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
-		tps: tps, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
+		speed: speed, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip
 	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
 	// frame, so nothing appears and goes below it)
