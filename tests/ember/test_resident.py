@@ -1777,7 +1777,8 @@ for line in sys.stdin:
 
     def free_runtime(self,model=None,**cfg):
         conf=json.loads((self.home/'config.json').read_text())
-        conf['free_time']=dict(dict(enabled=True,rest_seconds=0,afk_seconds=600),**cfg)
+        # dream_hour 99: never night, unless a test asks for it (a run at 03:00 got the dream pass, not free time)
+        conf['free_time']=dict(dict(enabled=True,rest_seconds=0,afk_seconds=600,dream_hour=99),**cfg)
         (self.home/'config.json').write_text(json.dumps(conf))
         return Runtime(self.home,model=model)
 
