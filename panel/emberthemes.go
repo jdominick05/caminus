@@ -31,6 +31,7 @@ type themeScreen struct {
 	draft      string // the description typed so far
 	busy       string // the description being written (a spinner shows); "" when idle
 	err        string // why the last one was refused
+	dirty      bool   // a preview restyled the screen; the history is redrawn when the picker closes
 }
 
 // themeGenMsg is the brain's answer for a described theme.
@@ -239,8 +240,14 @@ func (m *emberModel) previewTheme(name string) {
 		return
 	}
 	m.chat.markdown = nil
-	m.chat.content, m.chat.rendered = "", 0
 	m.chatStyles()
+	if m.chat.themes.open {
+		// the picker covers the history: redrawing all of it on every arrow made the picker lag; it is drawn once,
+		// in the chosen theme, when the picker closes
+		m.chat.themes.dirty = true
+		return
+	}
+	m.chat.content, m.chat.rendered = "", 0
 	m.syncChat()
 }
 
@@ -301,6 +308,8 @@ func (m emberModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.previewTheme(name)
 		}
 		m.chat.themes = themeScreen{}
+		m.chat.content, m.chat.rendered = "", 0 // (in the theme kept)
+		m.syncChat()
 		return m, m.chat.compose.Focus()
 	case "esc", "q":
 		// back to exactly what was showing (the saved name can differ from it: a theme file edited since, a test)

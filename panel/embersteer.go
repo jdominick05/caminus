@@ -179,7 +179,10 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 		if err == nil {
 			err = jsonInto(raw, &out)
 		} else {
-			err = fmt.Errorf("%s", cliError(raw))
+			if view, ok := advisorUnavailableView(raw); ok {
+				return view
+			}
+			err = fmt.Errorf("%s", cliErrorText(raw))
 		}
 		if err != nil {
 			text := err.Error()
@@ -191,6 +194,90 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 		return residentActionMsg{fmt.Sprintf("advisor (%s) reviewed the goal; the agent reads it before its next step ($%.2f)",
 			terminalText(out.Model, false), out.USD)}
 	}
+}
+
+// advisorUnavailableView: an advisor the setup keeps from being called (the key relay does not allow its model, is not
+// running, or spent its cap) opens a view with the reason and the exact command to run, instead of a notice that
+// showed the raw JSON error for 15 seconds and went. ok is false for any other failure.
+func advisorUnavailableView(raw []byte) (textViewMsg, bool) {
+	var out struct {
+		Unavailable *struct {
+			Reason string `json:"reason"`
+			Fix    string `json:"fix"`
+		} `json:"unavailable"`
+	}
+	if lastJSON(raw, &out) != nil || out.Unavailable == nil {
+		return textViewMsg{}, false
+	}
+	lines := []string{"The advisor cannot be called: " + residentText(out.Unavailable.Reason) + ".", ""}
+	// (the fix is a command `caminus ember agent` built from your own relay unit, never the agent's text; without
+	// one, the command that shows the relays)
+	if fix := residentText(out.Unavailable.Fix); fix != "" {
+		lines = append(lines, "Run this on your side, then /advisor again (Esc closes):", "")
+		for _, l := range shellWrap(fix, 72) {
+			lines = append(lines, "  "+l)
+		}
+	} else {
+		lines = append(lines, "Check your key relays (Esc closes):", "", "  caminus ember relay status")
+	}
+	return textViewMsg{title: "advisor · not available", lines: lines}, true
+}
+
+// shellWrap breaks a long command at spaces into lines of at most width characters joined by " \", so it wraps
+// where a shell reads it whole when pasted (the view broke it mid-word at the frame's edge). A flag stays on the line
+// of its value.
+func shellWrap(cmd string, width int) []string {
+	var words []string
+	for _, w := range strings.Fields(cmd) {
+		if n := len(words); n > 0 && strings.HasPrefix(words[n-1], "--") && !strings.Contains(words[n-1], " ") &&
+			!strings.HasPrefix(w, "-") {
+			words[n-1] += " " + w
+			continue
+		}
+		words = append(words, w)
+	}
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		if cur != "" && len(cur)+1+len(w) > width-2 {
+			lines = append(lines, cur+" \\")
+			cur = "    " + w
+			continue
+		}
+		if cur == "" {
+			cur = w
+		} else {
+			cur += " " + w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
+// lastJSON reads the last line of a command's output that holds a JSON object (the resident prints one with --json;
+// SSH notices may come before it).
+func lastJSON(raw []byte, v any) error {
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); strings.HasPrefix(l, "{") {
+			return json.Unmarshal([]byte(l), v)
+		}
+	}
+	return fmt.Errorf("no JSON object in the output")
+}
+
+// cliErrorText is cliError with a resident's {"error": ...} line unwrapped to its text (the notice showed the JSON,
+// escaped quotes and all).
+func cliErrorText(raw []byte) string {
+	var out struct {
+		Error string `json:"error"`
+	}
+	if lastJSON(raw, &out) == nil && out.Error != "" {
+		return out.Error
+	}
+	return cliError(raw)
 }
 
 func askBtw(m emberModel, goal, question string) tea.Cmd {

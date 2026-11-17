@@ -148,7 +148,10 @@ Root goes only through ask_root. Supply the exact command in command; include
 the goal it unblocks, expected effect, undo steps and user-level alternatives
 already tried in reason. The human reviews, approves, edits or denies execution.
 Batch related operations when reviewable and continue independent work while
-waiting. Use this bridge instead of running sudo, su or pkexec yourself. If you
+waiting. An approved command runs with no input and no pager (package tools in
+noninteractive mode), so give it every answer as flags. If it is still running
+after 30 minutes, the answer is exit 124 with its pid, and it keeps running.
+Use this bridge instead of running sudo, su or pkexec yourself. If you
 find an unintended elevation route or stray credentials, report the setup issue
 and leave it unused. Keep history, logs, approval records and the configuration
 that runs you intact.

@@ -91,6 +91,8 @@ type residentChat struct {
 	dirs                                    map[string][]string // the agent's folders listed for @ / + completion
 	dirsPending                             map[string]bool
 	pathPrefix, pathPick                    string
+	pathSel                                 int    // the path suggestions' highlighted row (arrows)
+	pathSelFor                              string // the token pathSel belongs to (a new token starts at its pick)
 	live                                    residentLive
 	stream                                  *streamState
 	streamStarting                          bool      // a reader is being started: the tick starts no second one
@@ -1902,7 +1904,7 @@ func (m emberModel) pathMenu(w int) string {
 	if len(matches) == 0 {
 		return ""
 	}
-	sel := max(0, slices.Index(matches, m.chat.pathPick))
+	sel := m.pathSelected(token, matches)
 	hint := func(p string) string {
 		if strings.HasSuffix(p, "/") {
 			return "folder"
@@ -2448,6 +2450,9 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if next, done := m.slashMenuKey(k); done {
 			return next, nil
 		}
+		if next, done := m.pathMenuKey(k); done {
+			return next, nil
+		}
 		if next, done := m.recall(k); done {
 			return next, nil
 		}
@@ -2509,6 +2514,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		host := m.chat.hostShell
+		saveTyped(m.agentName, map[bool]string{true: "!!", false: "!"}[host]+cmd) // (Up brings the command back)
 		m.chat.compose.Reset()
 		m.setShell(false)
 		if host {
@@ -2522,6 +2528,9 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if next, done := m.slashMenuKey("enter"); done {
 			next.syncChat()
+			return next, nil
+		}
+		if next, done := m.pathMenuKey("enter"); done {
 			return next, nil
 		}
 		return m.submitCompose()
@@ -2548,7 +2557,14 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "/") {
 		return m.chatSlash(trimmed)
 	}
+	if strings.HasPrefix(trimmed, "!!") && len(strings.TrimSpace(trimmed[2:])) > 0 {
+		// your own shell, as typed in !! mode (a recalled !!cmd ran in the agent's account with a stray !)
+		saveTyped(m.agentName, trimmed)
+		m.msg = "running in your shell…"
+		return m, runHostBang(strings.TrimSpace(trimmed[2:]))
+	}
 	if strings.HasPrefix(trimmed, "!") && len(trimmed) > 1 {
+		saveTyped(m.agentName, trimmed)
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
@@ -3326,4 +3342,44 @@ func wrappedRecord(icon, text string, w int) string {
 		}
 	}
 	return strings.Join(ls, "\n")
+}
+
+// pathSelected is the path suggestions' highlighted row: the arrows' choice for this token, else Tab's pick.
+func (m emberModel) pathSelected(token string, matches []string) int {
+	if m.chat.pathSelFor == token && len(matches) > 0 {
+		return ((m.chat.pathSel % len(matches)) + len(matches)) % len(matches)
+	}
+	return max(0, slices.Index(matches, m.chat.pathPick))
+}
+
+// pathMenuKey: while the path suggestions show, Up and Down move their highlight (the draft is untouched) and Enter
+// takes the highlighted path into the draft (a folder then shows what it holds). Only Tab worked before.
+func (m emberModel) pathMenuKey(k string) (emberModel, bool) {
+	if m.pathMenu(max(18, m.width-2)) == "" {
+		return m, false
+	}
+	value := strings.TrimRight(m.chat.compose.Value(), " ")
+	token, _ := pathToken(value)
+	matches := m.pathMatches(token)
+	sel := m.pathSelected(token, matches)
+	switch k {
+	case "up", "down":
+		d := 1
+		if k == "up" {
+			d = -1
+		}
+		m.chat.pathSelFor, m.chat.pathSel = token, (sel+d+len(matches))%len(matches)
+		return m, true
+	case "enter":
+		pick := matches[sel]
+		if pick == token {
+			return m, false // already complete: Enter sends
+		}
+		m.chat.compose.SetValue(value[:len(value)-len(token)] + pick)
+		m.chat.compose.CursorEnd()
+		m.chat.pathPrefix, m.chat.pathPick, m.chat.pathIdx = pick, pick, 0
+		m.chat.pathSelFor = ""
+		return m, true
+	}
+	return m, false
 }

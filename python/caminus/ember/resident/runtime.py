@@ -1883,6 +1883,15 @@ class Runtime:
         for k in ('question_timeout', 'judge_model'):
             if k in fresh:
                 self.config[k] = fresh[k]
+        # the advisor, set up or removed while the daemon runs (`agent advisor NAME ...`): the tool answered "no advisor
+        # is configured" until a restart, while the CLI and /advisor (a fresh runtime each) already used it
+        if fresh.get('advisor') != self.config.get('advisor'):
+            if fresh.get('advisor'):
+                self.config['advisor'] = fresh['advisor']
+                if isinstance(fresh['advisor'], dict) and fresh['advisor'].get('prices'):
+                    remember_prices(fresh['advisor'].get('model'), fresh['advisor']['prices'])
+            else:
+                self.config.pop('advisor', None)
         if not changed or not self._own_model:
             return
         if self.config.get('prices'):
