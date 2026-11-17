@@ -1138,9 +1138,15 @@ func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
 	t.Chdir(dir)
 	m := chatFixture(t)
 	m.chat.compose.SetValue("./")
-	view := m.chatComposer()
-	if !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
-		t.Fatalf("a path in progress gets no completion hint:\n%s", view)
+	m.height = 40
+	// the same framed menu as the commands: the path and what it is, above the composer, not a line inside it
+	menu := ansi.Strip(m.chatBottom())
+	if !strings.Contains(menu, "sub/") || !strings.Contains(menu, "folder") || strings.Contains(ansi.Strip(m.chatComposer()), "Tab completes") {
+		t.Fatalf("a path in progress opens the completion menu:\n%s", menu)
+	}
+	m.height = 12 // too short for the menu: the composer names the matches on one line, as before
+	if view := m.chatComposer(); !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
+		t.Fatalf("a short terminal keeps the one-line hint:\n%s", view)
 	}
 	m.chat.compose.SetValue("./zzz")
 	if view := m.chatComposer(); !strings.Contains(view, "no match") {
@@ -2685,5 +2691,19 @@ func TestAdvisorSetupPointsAtTheCLIInsteadOfRunningAReview(t *testing.T) {
 	next, cmd, _ := m.steerSlash("/advisor", "setup")
 	if cmd != nil || !strings.Contains(next.msg, "caminus ember agent advisor") {
 		t.Fatalf("/advisor setup runs no paid review and names the CLI: %q", next.msg)
+	}
+}
+
+func TestOneSlashMatchGetsTheSameMenuAsMany(t *testing.T) {
+	m := chatFixture(t)
+	m.height, m.width = 40, 110
+	m.chat.compose.SetValue("/bt")
+	bottom := ansi.Strip(m.chatBottom())
+	if !strings.Contains(bottom, "/btw") || !strings.Contains(bottom, slashHint("/btw")[:20]) || strings.Contains(bottom, "Tab completes") {
+		t.Fatalf("one match opens the framed menu with its description, like several:\n%s", bottom)
+	}
+	m.chat.compose.SetValue("/btw")
+	if strings.Contains(ansi.Strip(m.chatBottom()), slashHint("/btw")[:20]) {
+		t.Fatal("a command typed in full closes the menu")
 	}
 }
