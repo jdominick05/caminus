@@ -51,6 +51,7 @@ type residentChat struct {
 	hostShell                               bool      // shell mode runs in your own shell on this machine (!!), not the agent's
 	shellStash                              string    // the draft held aside while a second shell command is typed
 	prevTarget                              string    // the goal before Ctrl+N or /new (Esc goes back to it)
+	menuClosed                              string    // the draft Esc closed the / or path menu on (it stays shut until it changes)
 	quitArmed                               time.Time // Ctrl+C cleared a draft: a second one within 2 s quits
 	pickerNew                               bool      // the switcher is asking for a new session's name
 	pickerName                              string    // that name as typed
@@ -357,6 +358,24 @@ func recordLine(icon, text string, w int) string {
 	return emberClip(" "+emberWarn.Render(icon)+" "+emberDim.Render(text), max(10, w))
 }
 
+// recordState is a record whose body is cut, never its state (" · no: open it as a draft PR" stays whole), then
+// what follows the state (a waiting question's choices) in the room left.
+func recordState(icon, body, state, after string, w int) string {
+	tail := ""
+	if state != "" {
+		tail = " · " + state
+	}
+	if room := max(10, w) - 4; ansi.StringWidth(tail) > room-12 {
+		tail = ansi.Truncate(tail, max(12, room-12), "…")
+	}
+	room := max(12, max(10, w)-4-ansi.StringWidth(tail))
+	text := ansi.Truncate(body, room, "…") + tail
+	if after != "" {
+		text += "  " + after
+	}
+	return recordLine(icon, text, w)
+}
+
 // humanRefusal says why a request was not filed, for a person: the gate's text addresses the model.
 func humanRefusal(err string) string {
 	switch {
@@ -479,7 +498,7 @@ func (m *emberModel) syncChat() {
 			body = emberDim.Render("loading " + residentText(m.agentName) + "…")
 			m.chat.loadingShown = true // (replaced by the welcome or the history once the status lands)
 		} else if body == "" {
-			body = mascotBeside(0, "", emberTitle.Render("CAMINUS")+emberDim.Render(" env"),
+			body = mascotBeside(0, "", emberTitle.Render("EMBER")+emberDim.Render(" · Caminus"),
 				"Your agent's conversation and commands will stay here.",
 				emberDim.Render("Type a goal below. /help shows the controls."))
 		}
@@ -564,7 +583,8 @@ func (m emberModel) chatHead(w int) string {
 	}
 	head = shellHeader(agent, state, "", steps, w)
 	title, rule, _ := strings.Cut(head, "\n")
-	wrapped := strings.Split(ansi.Wordwrap(goalText, max(10, w-4), " "), "\n")
+	// Wrap breaks a long path too (Wordwrap left it to be cut at the edge with no marker)
+	wrapped := strings.Split(ansi.Wrap(goalText, max(10, w-4), " "), "\n")
 	if len(wrapped) > 3 {
 		wrapped = append(wrapped[:2], ansi.Truncate(wrapped[2], max(10, w-5), "")+"…")
 	}
@@ -1187,7 +1207,16 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if text == "" {
 			return ""
 		}
-		return turn(g.user, "you · steer "+shortGoal(e.Goal), cBlue, c.renderMarkdown(text))
+		// a plain message is a nudge (it keeps the plan); only /steer is labelled steer. Your line breaks stay (as a
+		// Markdown hard break: soft breaks joined four lines into one)
+		label := "you · " + shortGoal(e.Goal)
+		if k, _ := e.Data["kind"].(string); k == "steer" {
+			label = "you · steer " + shortGoal(e.Goal)
+		}
+		if e.Kind == "peer_message" {
+			label = "peer · " + shortGoal(e.Goal)
+		}
+		return turn(g.user, label, cBlue, c.renderMarkdown(strings.ReplaceAll(text, "\n", "  \n")))
 	case "assistant":
 		var parts []string
 		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
@@ -1196,7 +1225,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if c.expanded {
 				parts = append(parts, eventCard(emberThink.Render(g.expanded+" thinking")+"\n"+emberThink.Render(c.renderMarkdown(text))))
 			} else {
-				parts = append(parts, emberDim.Render(g.collapsed+" thinking · "+fmt.Sprintf("%d lines", strings.Count(text, "\n")+1)))
+				parts = append(parts, emberDim.Render(g.collapsed+" thinking · "+plural(strings.Count(text, "\n")+1, "line", "lines")))
 			}
 		}
 		if text := str("content"); text != "" {
@@ -1286,7 +1315,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		}
 		if output, ok := result["output"].(string); ok {
 			output = ansi.Strip(output) // (a program's colour codes are not text)
-			meta := fmt.Sprintf("%d lines", strings.Count(strings.TrimRight(output, "\n"), "\n")+1)
+			meta := plural(strings.Count(strings.TrimRight(output, "\n"), "\n")+1, "line", "lines")
 			if code, ok := result["exit_code"].(float64); ok {
 				meta = fmt.Sprintf("exit %d · ", int(code)) + meta
 			} else if running, _ := result["running"].(bool); running {
@@ -1324,24 +1353,16 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
 		// one line, not a card: you decide in the prompt where you type (the outcome is the result's line)
-		status := ""
-		if s := c.reqOutcome[str("id")]; s != "" {
-			status = " · " + s
-		}
-		room := max(12, w-10-ansi.StringWidth(status)) // a long command is cut, never its state
+		// a long command is cut, never its state
 		if str("kind") == "github" {
-			return recordLine("⇡", "github: "+ansi.Truncate(oneLine(residentText(str("summary"))), room, "…")+status, w)
+			return recordState("⇡", "github: "+oneLine(residentText(str("summary"))), c.reqOutcome[str("id")], "", w)
 		}
-		return recordLine(g.root, "root: "+ansi.Truncate(oneLine(residentText(str("cmd"))), room, "…")+status, w)
+		return recordState(g.root, "root: "+oneLine(residentText(str("cmd"))), c.reqOutcome[str("id")], "", w)
 	case "question":
 		// the state first (a long question's choices must not push it off the line); the choices only while it waits
+		// a long question is cut, never its state; a waiting one's choices follow in the room left
 		state := c.reqOutcome[str("id")]
-		tail := ""
-		if state != "" {
-			tail = " · " + state
-		}
-		// a long question is cut, never its state
-		text := ansi.Truncate(oneLine(residentText(str("text"))), max(12, w-4-ansi.StringWidth(tail)), "…") + tail
+		after := ""
 		if ch, _ := e.Data["choices"].([]any); len(ch) > 0 && (state == "" || state == "waiting") {
 			var opts []string
 			for _, x := range ch {
@@ -1349,9 +1370,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 					opts = append(opts, residentText(t))
 				}
 			}
-			text += "  (" + strings.Join(opts, " / ") + ")"
+			after = "(" + strings.Join(opts, " / ") + ")"
 		}
-		return recordLine("?", text, w)
+		return recordState("?", oneLine(residentText(str("text"))), state, after, w)
 	case "plan_proposed":
 		// one line each for the plan's steps: once its card closed nothing was left in the history
 		return recordLine("▤", "plan proposed: "+oneLine(residentText(str("plan"))), w)
@@ -1513,8 +1534,8 @@ func (m emberModel) chatComposer() string {
 	}
 	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
 	// the status line, which appeared and went with every message
-	if m.msg == m.msgOf && !m.msgAt.IsZero() && time.Since(m.msgAt) > 6*time.Second {
-		return box // expired (the tick clears it; a stalled tick must not keep it on the frame)
+	if m.noticeShown() == "" || m.noticeLong() {
+		return box // expired, or too long for the frame: it is drawn whole above the composer (chatBottom)
 	}
 	return borderNote(box, terminalText(m.msg, false), emberDim)
 }
@@ -1574,6 +1595,15 @@ func (m emberModel) chatBottom() string {
 	}
 	if line := m.waitingLine(); line != "" && m.chat.question == nil {
 		out = line + "\n" + out // requests put off with Esc: they still wait, Tab answers
+	}
+	if m.noticeLong() && m.chat.question == nil {
+		// a notice too long for the composer's frame, whole (it was cut where the next step was named)
+		w := max(18, m.width-4)
+		ls := strings.Split(ansi.Wordwrap(terminalText(m.noticeShown(), false), w, " "), "\n")
+		if len(ls) > 3 {
+			ls = append(ls[:2], ansi.Truncate(ls[2], w-1, "")+"…")
+		}
+		out = " " + emberDim.Render(strings.Join(ls, "\n ")) + "\n" + out
 	}
 	if side := m.btwSection(max(18, m.width-2)); side != "" {
 		out = side + "\n" + out
@@ -1736,6 +1766,8 @@ func helpLines(width int) []string {
 		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
+		{"!  !!", "on an empty draft: a command in the agent's account; again: in your own shell"},
+		{"Home  End", "the top or the bottom of the history (with an empty draft)"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
 	} {
@@ -1749,7 +1781,7 @@ const slashMenuRows = 10
 
 // slashMenuOpen: the draft is a command still being typed (a "/" token with more than one way to go on).
 func (m emberModel) slashMenuOpen() bool {
-	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker {
+	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker || m.menuDismissed() {
 		return false
 	}
 	value := strings.TrimRight(m.chat.compose.Value(), " ")
@@ -1795,7 +1827,8 @@ func (m emberModel) slashMenu(w int) string {
 // pathMenu: the @path completions in the same framed list as the commands, folders marked as such; the highlight
 // follows Tab's cycle.
 func (m emberModel) pathMenu(w int) string {
-	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker || m.slashMenuOpen() {
+	if !(m.mode == "" || m.mode == "normal") || m.chat.sending || !m.chat.compose.Focused() || m.chat.picker || m.slashMenuOpen() ||
+		m.menuDismissed() {
 		return ""
 	}
 	token, ok := pathToken(strings.TrimRight(m.chat.compose.Value(), " "))
@@ -1820,10 +1853,10 @@ func (m emberModel) pathMenu(w int) string {
 func (m emberModel) completionMenu(matches []string, hintOf func(string) string, sel, w int) string {
 	// the box takes at most a third of the terminal; on a terminal too small for two rows it stays shut (Tab still
 	// cycles the names, and the composer names them on one line)
-	if max(0, (m.height-18)/2) < 2 || len(matches) == 0 {
+	if max(0, (m.height-12)/2) < 2 || len(matches) == 0 {
 		return ""
 	}
-	rows := min(slashMenuRows, len(matches), (m.height-18)/2)
+	rows := min(slashMenuRows, len(matches), (m.height-12)/2) // (three rows at 80x24 while five above stayed empty)
 	top := 0
 	if sel >= rows {
 		top = sel - rows + 1
@@ -2284,6 +2317,17 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
+	case "home", "end":
+		if m.chat.compose.Value() != "" {
+			break // (in a draft, Home and End move the cursor)
+		}
+		if k == "home" {
+			m.chat.transcript.GotoTop()
+		} else {
+			m.chat.transcript.GotoBottom()
+			m.chat.live.hold = false
+		}
+		return m, nil
 	case "ctrl+l", "ctrl+end":
 		m.chat.transcript.GotoBottom()
 		m.chat.live.hold = false // follow the live tail again too
@@ -2304,6 +2348,10 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode, a draft held aside comes back
 			return m.leaveShell(), nil
+		}
+		if !m.menuDismissed() && (m.slashMenuOpen() || m.pathMenu(m.width) != "") {
+			m.chat.menuClosed = m.chat.compose.Value() // the menu closes; the text stays (typing opens it again)
+			return m, nil
 		}
 		if m.chat.live.active {
 			// Esc while a reply is being written interrupts that turn only; the next message steers.
@@ -2821,7 +2869,7 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.transcript.PageDown()
 		return m, nil
-	case "esc":
+	case "esc", "shift+tab": // (Shift+Tab opened it: it closes it too)
 		m.chat.picker = false
 		return m, m.chat.compose.Focus()
 	case "f2":
@@ -3124,4 +3172,31 @@ func (m emberModel) todoBlockers(gid string) []string {
 		return out
 	}
 	return nil
+}
+
+// noticeShown is the notice on the composer's frame now ("" once it expired: the tick clears it, a stalled tick must
+// not keep it).
+func (m emberModel) noticeShown() string {
+	if m.msg == m.msgOf && !m.msgAt.IsZero() && time.Since(m.msgAt) > noticeTTL(m.msg) {
+		return ""
+	}
+	return m.msg
+}
+
+// noticeTTL is how long a notice stays: 6 s, and a second more for every 20 characters past the first 60 (15 s at
+// most), so a long error can be read before it goes.
+func noticeTTL(msg string) time.Duration {
+	extra := max(0, ansi.StringWidth(msg)-60) / 20
+	return time.Duration(min(15, 6+extra)) * time.Second
+}
+
+// noticeLong: the notice does not fit the composer's frame (half its width).
+func (m emberModel) noticeLong() bool {
+	n := m.noticeShown()
+	return n != "" && ansi.StringWidth(n) > max(18, m.width-2)/2-4
+}
+
+// menuDismissed: Esc closed the completion menu on this very draft.
+func (m emberModel) menuDismissed() bool {
+	return m.chat.menuClosed != "" && m.chat.menuClosed == m.chat.compose.Value()
 }

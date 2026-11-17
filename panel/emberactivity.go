@@ -172,7 +172,11 @@ func (m emberModel) activityLine(w int) string {
 		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your answer"), max(10, w), "…")
 	}
 	if m.waitingForYou(gl.ID) { // parked on wait(until=message): no work, no spinner; it waits for your words
-		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your message")+emberDim.Render("  · type below to answer"), max(10, w), "…")
+		hint := "  · type below to answer"
+		if len(m.sessionRequests()) > 0 { // a request was put off: it is answered with Tab, not by typing
+			hint = "  · Tab answers its request"
+		}
+		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your message")+emberDim.Render(hint), max(10, w), "…")
 	}
 	verb := emberVerbs[(m.spinN/55+len(gl.ID))%len(emberVerbs)] + "…" // a new word every ~6 s
 	doing := ""

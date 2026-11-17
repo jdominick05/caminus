@@ -56,6 +56,8 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Esc | while a reply is being written, interrupt that turn (nothing of it is kept; the goal waits up to two minutes for your message); the activity line says "esc interrupts" then. PgUp/PgDn and the wheel scroll the transcript |
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
 | Ctrl+R | earlier prompts containing the draft, newest first (as you typed them: `//`, `@` and `+` kept) |
+| Home, End | with an empty draft: the top or the bottom of the history |
+| Esc on the `/` or path menu | closes it; the text stays |
 | Ctrl+N | a new goal; the draft stays and becomes its text, Esc goes back to the goal you were talking to |
 | Ctrl+C | with a draft: clear it (Up brings it back); again, or with no draft: quit |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |

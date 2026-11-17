@@ -133,7 +133,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			}
 			switch {
 			case n > 0:
-				meta = strings.TrimPrefix(meta+fmt.Sprintf(" · %d lines", n), " · ")
+				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
 				preview = all[max(0, len(all)-3):]
 			case result["no_new_output"] == true:
@@ -248,7 +248,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			if cx, ok := result["context"].(map[string]any); ok {
 				t, _ := cx["tokens"].(float64)
 				win, _ := cx["window"].(float64)
-				parts = append(parts, kOf(t)+" / "+kOf(win)+" context")
+				parts = append(parts, short(int(t))+" / "+short(int(win))+" context") // (66K for a 65K window before)
 			}
 			meta = strings.Join(parts, " · ")
 		}
@@ -279,7 +279,9 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				used, _ := gp["vram_used_mib"].(float64)
 				total, _ := gp["vram_total_mib"].(float64)
 				busy, _ := gp["busy_percent"].(float64)
-				parts = append(parts, fmt.Sprintf("%.0f/%.0f GB %d %%", used/1024, total/1024, int(busy)))
+				if total > 0 { // ("0/0 GB" when the card reports nothing)
+					parts = append(parts, fmt.Sprintf("%.0f/%.0f GB %d %%", used/1024, total/1024, int(busy)))
+				}
 			}
 			if mem, ok := result["memory"].(map[string]any); ok {
 				av, _ := mem["available_mib"].(float64)

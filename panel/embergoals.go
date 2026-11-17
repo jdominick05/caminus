@@ -67,7 +67,7 @@ func (m emberModel) goalRow(i int, selected bool, width int) string {
 	gl := m.resident.Goals[i]
 	mark, st := goalGlyph(gl.State)
 	text := strings.Join(strings.Fields(residentText(gl.Prompt)), " ")
-	meta := fmt.Sprintf("%s · %d steps", gl.State, gl.Steps)
+	meta := gl.State + " · " + plural(gl.Steps, "step", "steps")
 	target := ""
 	if !m.chat.newGoal && gl.ID == m.chat.target {
 		target = "  " + g.user
@@ -136,7 +136,8 @@ func (m emberModel) goalsOverlay(w, h int) string {
 	if len(detail) > 0 {
 		body += "\n\n" + strings.Join(detail, "\n")
 	} else {
-		body += "\n\n" + emberDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  p pause  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
+		// wrapped, not cut (at 80 and 100 columns the last keys were lost)
+		body += "\n\n" + emberDim.Render(ansi.Wordwrap("Enter targets it  ·  space shows it  ·  v the whole plan  ·  x x cancel  ·  p pause  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, " "))
 	}
 	active := 0
 	for _, gl := range m.resident.Goals {

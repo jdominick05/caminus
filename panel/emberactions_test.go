@@ -29,7 +29,7 @@ func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 		{"peers", nil, map[string]any{"peers": []any{map[string]any{"name": "lab"}}}, "1 peer: lab"},
 		{"lease", map[string]any{"action": "list"}, map[string]any{"leases": []any{}}, "no leases"},
 		{"discover", nil, map[string]any{"account": map[string]any{"user": "agent"}, "programs": map[string]any{"build": map[string]any{"make": "/usr/bin/make", "gcc": "/usr/bin/gcc"}}}, "account agent · 2 programs found"},
-		{"budget", nil, map[string]any{"goal": map[string]any{"steps": 17.0}, "context": map[string]any{"tokens": 13000.0, "window": 65536.0}}, "17 steps · 13K / 66K context"},
+		{"budget", nil, map[string]any{"goal": map[string]any{"steps": 17.0}, "context": map[string]any{"tokens": 13000.0, "window": 65536.0}}, "17 steps · 13K / 65K context"},
 		{"todo", nil, map[string]any{"items": 2.0, "left": 2.0}, "2 tasks · 2 left"},
 		{"wait", map[string]any{"until": "time"}, map[string]any{"happened": "timeout", "waited_s": 30.0}, "timeout · waited 30s"},
 		{"rollback", map[string]any{"id": "cp1"}, map[string]any{"restored": []any{"a.py"}}, "restored 1 file"},

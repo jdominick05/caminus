@@ -128,7 +128,7 @@ func shellHeader(agent, state, goal string, steps, w int) string {
 	if goal != "" {
 		detail = lipgloss.NewStyle().Foreground(cBlue).Render(goal)
 	}
-	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(fmt.Sprintf("%d steps", steps)), w)
+	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(plural(steps, "step", "steps")), w)
 }
 
 // screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): CAMINUS · what · its
