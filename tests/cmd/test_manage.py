@@ -633,6 +633,18 @@ def unmanaged_checks(S):
     finally:
         manage.http_json, manage.all_servers = real_http, real_all
     check(other == [], f'unmanaged: a port answered by another engine is not this process\'s server ({other})')
+    # caminus top NAME picks the named outside server, not the first one
+    configs = []
+    real = (manage.all_servers, manage.unmanaged_servers, manage.top_config, manage.exec_panel)
+    manage.all_servers = lambda: []
+    manage.unmanaged_servers = lambda: [dict(name='observed-8092', port=8092), dict(name='observed-8093', port=8093)]
+    manage.top_config = lambda s: configs.append(s['name']) or '/dev/null'
+    manage.exec_panel = lambda argv: 0
+    try:
+        rc = manage.cmd_top(['observed-8093'])
+    finally:
+        manage.all_servers, manage.unmanaged_servers, manage.top_config, manage.exec_panel = real
+    check(rc == 0 and configs == ['observed-8093'], f'top: the named outside server is watched, not the first ({rc} {configs})')
 
 
 if __name__ == '__main__':
