@@ -968,10 +968,8 @@ def cmd_top(argv):
         # No slot-registered server runs; watch an unmanaged caminus_serve listening on this
         # machine instead — the monitor never controls it (no stop/restart by construction).
         obs = unmanaged_servers()
-        if obs:
-            observed = obs[0]
-            if a.name and observed['name'] != a.name:
-                observed = None
+        # by name among all of them: the panel's m passes the one it shows (observed-PORT), not always the first
+        observed = next((o for o in obs if o['name'] == a.name), None) if a.name else (obs[0] if obs else None)
     if not ss and not observed:
         print('caminus top: no running server' + (f' named {a.name!r}' if a.name else '') + ' (caminus ps)', file=sys.stderr)
         return 1

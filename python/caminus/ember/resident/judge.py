@@ -160,7 +160,10 @@ def review(rt, gid, result):
             rt.brains.account(gid)
         except Exception:
             pass
-        name = (getattr(rt.model, 'config', None) or {}).get('model') or rt.config.get('model', '')
+        cfg = getattr(rt.model, 'config', None) or {}
+        from . import effort
+        # the id sent (a short call runs with thinking off: the -nothink variant), not the base name
+        name = effort.resolve(cfg, short=True)['model'] or cfg.get('model') or rt.config.get('model', '')
         return (reply.get('content') if isinstance(reply, dict) else '') or '', name
     try:
         text, who = ask(messages)

@@ -552,7 +552,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tickN++
 		if m.msg != m.msgOf {
 			m.msgOf, m.msgAt = m.msg, time.Now()
-		} else if m.msg != "" && time.Since(m.msgAt) > 6*time.Second {
+		} else if m.msg != "" && time.Since(m.msgAt) > noticeTTL(m.msg) {
 			m.msg, m.msgOf = "", ""
 		}
 		m.refreshLocal()
@@ -705,7 +705,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rewindListMsg:
 		if msg.goal == m.chat.rewind.goal {
-			m.chat.rewind.steps, m.chat.rewind.err = msg.steps, msg.err
+			m.chat.rewind.steps, m.chat.rewind.err, m.chat.rewind.loaded = msg.steps, msg.err, true
 			m.chat.rewind.sel = max(0, len(msg.steps)-1)
 		}
 		return m, nil
@@ -736,7 +736,9 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.msg = "nothing to pull back: the agent has read your messages"
 		default:
-			m.chat.compose.SetValue(*msg.text)
+			// as you typed it (@names, +files, a leading //), not as it was sent: //x came back as /x and Enter ran it as
+			// a command while the message stayed withdrawn
+			m.chat.compose.SetValue(m.typedFormOf(*msg.text))
 			m.msg = "pulled back: edit it and Enter to send again"
 		}
 		return m, nil
@@ -981,7 +983,7 @@ func (m emberModel) submitInput() (tea.Model, tea.Cmd) {
 		_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
 			"decision": "denied", "by": currentUser(), "instead": instead})
 		m.seen[r.ID] = true
-		m.msg = "denied " + r.ID + " with an instruction (sent as a steer)"
+		m.msg = map[string]string{"github": "GitHub hand-off", "root": "root request"}[r.kind()] + ": no, with what to do instead (sent as a steer)"
 		m.refreshLocal()
 		return m, nil
 	case "sessionnew":
@@ -1122,7 +1124,7 @@ func (m emberModel) reqKeys(k string) (tea.Model, tea.Cmd) {
 			_ = appendAudit(m.auditPath, map[string]any{"event": "decision", "id": r.ID,
 				"decision": "denied", "by": currentUser()})
 			m.seen[r.ID] = true
-			m.msg = "denied " + r.ID
+			m.msg = map[string]string{"github": "GitHub hand-off", "root": "root request", "question": "question"}[r.kind()] + ": no"
 			m.refreshLocal()
 		}
 	case "s":

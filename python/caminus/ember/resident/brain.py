@@ -37,7 +37,8 @@ class Brains:
         if self.cfg:
             conf = {k: v for k, v in self.cfg.items() if k not in DEFAULTS}
             conf.setdefault('name', runtime.config.get('name'))
-            conf.setdefault('max_tokens', runtime.config.get('max_tokens', 4096))
+            if runtime.config.get('max_tokens') is not None:   # (else the brain's own default, effort.reply_limit)
+                conf.setdefault('max_tokens', runtime.config['max_tokens'])
             self.fallback = getattr(runtime, 'fallback_model', None) or Model(conf)
 
     # ---- spend ---------------------------------------------------------------------------------------------

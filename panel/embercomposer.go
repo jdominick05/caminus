@@ -13,11 +13,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -109,7 +111,15 @@ func (m emberModel) openEditor() (tea.Cmd, string) {
 
 // pastPrompts: what you sent (goals and messages), newest first, without repeats.
 func (m emberModel) pastPrompts() []string {
+	// what you typed comes first, as you typed it (@names, +files, a leading //); the events hold what was sent,
+	// with names made plain and files inlined, so an event that is a sent form of a typed entry is left out
+	typed := loadTyped(m.agentName)
+	sentForm := map[string]bool{}
 	var all []string
+	for i := len(typed) - 1; i >= 0; i-- {
+		all = append(all, typed[i])
+		sentForm[sentShape(typed[i])] = true
+	}
 	for i := len(m.residentEvents) - 1; i >= 0; i-- {
 		e := m.residentEvents[i]
 		key := map[string]string{"goal_queued": "prompt", "user_message": "text"}[e.Kind]
@@ -119,12 +129,14 @@ func (m emberModel) pastPrompts() []string {
 		if k, _ := e.Data["kind"].(string); k == "free" || k == "dream" {
 			continue
 		}
-		if s, _ := e.Data[key].(string); strings.TrimSpace(s) != "" {
-			all = append(all, s)
+		if s, _ := e.Data[key].(string); strings.TrimSpace(s) != "" && !sentForm[sentShape(unexpand(s))] {
+			all = append(all, retype(unexpand(s)))
 		}
 	}
 	for i := len(m.resident.Goals) - 1; i >= 0; i-- {
-		all = append(all, m.resident.Goals[i].Prompt)
+		if p := m.resident.Goals[i].Prompt; !sentForm[sentShape(unexpand(p))] {
+			all = append(all, retype(unexpand(p)))
+		}
 	}
 	seen, out := map[string]bool{}, []string{}
 	for _, s := range all {
@@ -248,6 +260,9 @@ func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
 		block += "\n(" + msg.err + ")"
 	}
 	draft := strings.TrimSpace(m.chat.compose.Value())
+	if m.chat.shellStash != "" { // the draft held aside while this command was typed (the earlier output)
+		draft, m.chat.shellStash = strings.TrimSpace(m.chat.shellStash+"\n\n"+draft), ""
+	}
 	if draft != "" && !strings.HasPrefix(draft, "!") {
 		block = draft + "\n\n" + block
 	}
@@ -260,6 +275,14 @@ func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
 // its word marked "(attached)"; an @path is a plain path, sent without the mark. Relative paths are the agent's
 // working folder's, as completion lists them.
 func expandAttachments(m emberModel, text string) string {
+	out, _ := expandAttachmentsChecked(m, text)
+	return out
+}
+
+// expandAttachmentsChecked is expandAttachments with what could not be attached, in plain words ("work/nope.py: no
+// such file", "work/data is a folder"): with any, the message is not sent and the draft stays.
+func expandAttachmentsChecked(m emberModel, text string) (string, []string) {
+	var problems []string
 	var blocks []string
 	base := m.agentCwdAbs()
 	n := 0
@@ -270,7 +293,19 @@ func expandAttachments(m emberModel, text string) string {
 		parts[k] = attachRe.ReplaceAllStringFunc(parts[k], func(word string) string {
 			g := attachRe.FindStringSubmatch(word)
 			lead, p := g[1], g[2]
-			if n >= 8 || strings.Contains(p, "..") || !strings.ContainsAny(p, "/.") {
+			// sentence punctuation after a path is not part of it ("see +notes.md." reads notes.md); "+1..." is a word
+			whole := p
+			p = strings.TrimRight(p, ".,;:!?")
+			trail := whole[len(p):]
+			if !strings.ContainsAny(p, "/.") {
+				return word
+			}
+			if slices.Contains(strings.Split(p, "/"), "..") {
+				problems = append(problems, p+": a path with .. is not attached")
+				return word
+			}
+			if n >= 8 {
+				problems = append(problems, p+": at most 8 files go with one message")
 				return word
 			}
 			n++
@@ -280,19 +315,35 @@ func expandAttachments(m emberModel, text string) string {
 			}
 			out, err := agentRun(m, "head -c 65536 -- "+shellQuote(full))
 			if err != nil {
-				blocks = append(blocks, fmt.Sprintf("[could not attach %s: %s]", p, strings.TrimSpace(out)))
+				why := "could not be read"
+				switch low := strings.ToLower(out); {
+				case strings.Contains(low, "no such file"):
+					why = "no such file"
+				case strings.Contains(low, "is a directory"):
+					why = "is a folder (attach its files)"
+				case strings.Contains(low, "permission denied"):
+					why = "the agent may not read it"
+				}
+				problems = append(problems, p+": "+why)
 				return lead + p
 			}
 			blocks = append(blocks, fmt.Sprintf("Attached %s:\n```\n%s\n```", p, strings.TrimRight(out, "\n")))
-			return lead + p + " (attached)"
+			return lead + p + " (attached)" + trail
 		})
-		parts[k] = nameRe.ReplaceAllString(parts[k], "${1}${2}")
+		// @ names a path (it reads as one: a / or a .); "@alice" is a word with its @
+		parts[k] = nameRe.ReplaceAllStringFunc(parts[k], func(w string) string {
+			g := nameRe.FindStringSubmatch(w)
+			if strings.ContainsAny(g[2], "/.") {
+				return g[1] + g[2]
+			}
+			return w
+		})
 	}
 	text = strings.Join(parts, "```")
 	if len(blocks) == 0 {
-		return text
+		return text, problems
 	}
-	return text + "\n\n" + strings.Join(blocks, "\n\n")
+	return text + "\n\n" + strings.Join(blocks, "\n\n"), problems
 }
 
 func shellQuote(s string) string {
@@ -355,4 +406,189 @@ func expandCustom(path, args string) (string, error) {
 		body += "\n\n" + args
 	}
 	return body, nil
+}
+
+// typedPath is where a session's typed history is kept (this machine, this user): what you typed, newest last.
+func typedPath(agent string) string {
+	if p := lastSessionPath(); p != "" && validBridgeName(agent) {
+		return filepath.Join(filepath.Dir(p), "ember-typed-"+agent+".json")
+	}
+	return ""
+}
+
+func validBridgeName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return s != "." && s != ".."
+}
+
+// demoTyped is the typed history of a demo run: kept in memory (the demo never writes the human's state folder), so
+// Up still brings back what Ctrl+C cleared there.
+var demoTyped = map[string][]string{}
+
+func loadTyped(agent string) []string {
+	if demoMode {
+		return append([]string(nil), demoTyped[agent]...)
+	}
+	var out []string
+	if p := typedPath(agent); p != "" {
+		if data, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal(data, &out)
+		}
+	}
+	return out
+}
+
+// saveTyped adds what you typed to the session's history (the last 200 kept).
+func saveTyped(agent, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	all := loadTyped(agent)
+	if len(all) > 0 && all[len(all)-1] == text {
+		return
+	}
+	if demoMode {
+		demoTyped[agent] = append(all, text)
+		return
+	}
+	p := typedPath(agent)
+	if p == "" {
+		return
+	}
+	all = append(all, text)
+	if len(all) > 200 {
+		all = all[len(all)-200:]
+	}
+	if data, err := json.Marshal(all); err == nil && os.MkdirAll(filepath.Dir(p), 0o755) == nil {
+		_ = os.WriteFile(p, data, 0o600)
+	}
+}
+
+var attachedRe = regexp.MustCompile(`(^|\s)(\S+) \(attached\)`)
+
+// unexpand undoes what sending did to a message: the attached files' blocks go, "PATH (attached)" is +PATH again.
+func unexpand(s string) string {
+	for _, cut := range []string{"\n\nAttached ", "\n\n[could not attach "} {
+		if i := strings.Index(s, cut); i >= 0 {
+			s = s[:i]
+		}
+	}
+	return attachedRe.ReplaceAllString(s, "${1}+${2}")
+}
+
+// retype is a sent message as it must be typed to send it again: a leading / was typed as //.
+func retype(s string) string {
+	if strings.HasPrefix(strings.TrimSpace(s), "/") {
+		return "/" + strings.TrimSpace(s)
+	}
+	return s
+}
+
+// sentShape is the form a typed entry arrives in (names plain, one slash of // dropped), to match it to its event.
+func sentShape(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "//") {
+		s = s[1:]
+	}
+	return strings.TrimSpace(nameRe.ReplaceAllStringFunc(s, func(w string) string {
+		g := nameRe.FindStringSubmatch(w)
+		if strings.ContainsAny(g[2], "/.") {
+			return g[1] + g[2]
+		}
+		return w
+	}))
+}
+
+// typedFormOf is a sent message as it was typed: the newest typed entry it is the sent form of, else the message
+// turned back (+path, a leading //).
+func (m emberModel) typedFormOf(sent string) string {
+	shape := sentShape(unexpand(sent))
+	typed := loadTyped(m.agentName)
+	for i := len(typed) - 1; i >= 0; i-- {
+		if sentShape(typed[i]) == shape {
+			return typed[i]
+		}
+	}
+	return retype(unexpand(sent))
+}
+
+// Drafts that Ctrl+C or Ctrl+U cleared go into the typed history too (Up brings them back) but were never sent: they
+// are remembered apart (the last 50) so the history says "your draft" for them, not "sent message".
+var demoDrafts = map[string][]string{}
+
+func draftsPath(agent string) string {
+	if p := typedPath(agent); p != "" {
+		return strings.TrimSuffix(p, ".json") + "-drafts.json"
+	}
+	return ""
+}
+
+func loadDrafts(agent string) []string {
+	if demoMode {
+		return demoDrafts[agent]
+	}
+	var out []string
+	if p := draftsPath(agent); p != "" {
+		if data, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal(data, &out)
+		}
+	}
+	return out
+}
+
+func markDraft(agent, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	all := append(loadDrafts(agent), text)
+	if len(all) > 50 {
+		all = all[len(all)-50:]
+	}
+	if demoMode {
+		demoDrafts[agent] = all
+		return
+	}
+	if p := draftsPath(agent); p != "" {
+		if data, err := json.Marshal(all); err == nil && os.MkdirAll(filepath.Dir(p), 0o755) == nil {
+			_ = os.WriteFile(p, data, 0o600)
+		}
+	}
+}
+
+func unmarkDraft(agent, text string) {
+	all := loadDrafts(agent)
+	keep := all[:0:0]
+	for _, d := range all {
+		if d != text {
+			keep = append(keep, d)
+		}
+	}
+	if len(keep) == len(all) {
+		return
+	}
+	if demoMode {
+		demoDrafts[agent] = keep
+		return
+	}
+	if p := draftsPath(agent); p != "" {
+		if data, err := json.Marshal(keep); err == nil {
+			_ = os.WriteFile(p, data, 0o600)
+		}
+	}
+}
+
+func isDraft(agent, text string) bool {
+	for _, d := range loadDrafts(agent) {
+		if d == text {
+			return true
+		}
+	}
+	return false
 }

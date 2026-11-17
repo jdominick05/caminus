@@ -85,6 +85,11 @@ func (m *emberModel) openPrompt(r emberReq) {
 		r.Recommended = m.askedRecommended(r.Text) // an older resident's request file does not carry it; its call does
 		m.chat.question.Recommended = r.Recommended
 	}
+	if r.kind() != "question" {
+		// No is preselected for a root command and a GitHub hand-off (the owner's choice): one Enter on a hand-off
+		// posted it under their name, with no second check
+		m.chat.questionChoice = 1
+	}
 	opts := promptOptions(r)
 	for i, o := range opts {
 		if r.Recommended != "" && o == r.Recommended {
@@ -170,14 +175,25 @@ func (m emberModel) questionBox() string {
 		return out
 	}
 	lines := []string{emberDim.Render(strings.Repeat("─", w)), " " + head}
+	if n := m.noticeShown(); n != "" { // the last answer's flash ("root request: no"): the next prompt took its frame
+		lines = append(lines, " "+emberDim.Render(emberClip(terminalText(n, false), inner)))
+	}
 	switch r.kind() {
 	case "question":
 		lines = append(lines, prefixAll(wrap(r.Text, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
 	case "github":
-		lines = append(lines, prefixAll(wrap(r.Summary, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
+		summary := prefixAll(wrap(r.Summary, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")
+		var why []string
+		if strings.TrimSpace(r.Reason) != "" {
+			why = prefixAll(wrap("why: "+r.Reason, emberDim), " ")
+		}
+		lines = append(lines, summary...)
 		if _, body := handoffText(r.Github); strings.TrimSpace(body) != "" { // what it will post as you
 			all := strings.Split(strings.TrimRight(residentText(body), "\n"), "\n")
-			shown := all[:min(len(all), 10)]
+			// the body takes what the summary, the reason and the options leave (the reason was cut off before, and
+			// the hidden lines were counted one short)
+			room := max(1, m.promptBudget(*r)-len(summary)-len(why)-1)
+			shown := all[:min(len(all), 10, room)]
 			for _, l := range shown {
 				lines = append(lines, " "+emberDim.Render(emberClip("│ "+l, inner-1)))
 			}
@@ -185,9 +201,7 @@ func (m emberModel) questionBox() string {
 				lines = append(lines, " "+emberDim.Render(fmt.Sprintf("│ … %d more lines", len(all)-len(shown))))
 			}
 		}
-		if strings.TrimSpace(r.Reason) != "" {
-			lines = append(lines, prefixAll(wrap("why: "+r.Reason, emberDim), " ")...)
-		}
+		lines = append(lines, why...)
 	default:
 		lines = append(lines, prefixAll(wrap(r.Cmd, lipgloss.NewStyle().Foreground(cText).Bold(true)), " ")...)
 		if strings.TrimSpace(r.Reason) != "" {
@@ -196,6 +210,12 @@ func (m emberModel) questionBox() string {
 	}
 	if m.chat.questionError != "" {
 		lines = append(lines, prefixAll(wrap(m.chat.questionError, emberCtxHot), " ")...)
+	}
+	// the options, the free-text row and the hint always fit: the text above them is cut to what is left (a long
+	// hand-off body pushed the options off the screen, so you picked blind)
+	if budget := m.promptBudget(*r); len(lines)-2 > budget {
+		cut := len(lines) - 2 - (budget - 1)
+		lines = append(lines[:2+budget-1], " "+emberDim.Render(fmt.Sprintf("… %d more lines", cut)))
 	}
 	lines = append(lines, "")
 	opts := promptOptions(*r)
@@ -432,6 +452,8 @@ func outcomeText(question bool, decision, answer string, rc any, by string) stri
 func (m *emberModel) requestOutcomes() map[string]string {
 	out := map[string]string{}
 	question := map[string]bool{}
+	timedOut := map[string]bool{}
+	rec := map[string]string{} // a question's recommended choice: a timeout names it
 	var ids []string
 	for _, e := range m.residentEvents {
 		str := func(k string) string { v, _ := e.Data[k].(string); return v }
@@ -440,14 +462,25 @@ func (m *emberModel) requestOutcomes() map[string]string {
 			if id := str("id"); id != "" {
 				ids = append(ids, id)
 				question[id] = e.Kind == "question"
+				if r := str("recommended"); r != "" {
+					rec[id] = r
+				}
 			}
 		case "request_answered":
-			if id := str("request"); id != "" && out[id] == "" {
-				out[id] = outcomeText(question[id], str("decision"), "", nil, "")
+			// a timeout already recorded stays (an approval question's question_unanswered says "no" and comes first)
+			if id := str("request"); id != "" && !timedOut[id] && (out[id] == "" || str("by") == "timeout") {
+				out[id] = outcomeText(question[id], str("decision"), "", nil, str("by"))
+				if str("by") == "timeout" {
+					timedOut[id] = true
+				}
 			}
 		case "question_unanswered":
 			if id := str("id"); id != "" {
+				if r := str("recommended"); r != "" {
+					rec[id] = r
+				}
 				out[id] = outcomeText(question[id] && e.Data["approval"] != true, "", "", nil, "timeout")
+				timedOut[id] = true
 			}
 		case "tool_result":
 			name := str("name")
@@ -467,6 +500,9 @@ func (m *emberModel) requestOutcomes() map[string]string {
 			decision, _ := res["decision"].(string)
 			if t := outcomeText(name == "ask_user", decision, answer, res["rc"], by); t != "" {
 				out[id] = t
+				if by == "timeout" {
+					timedOut[id] = true
+				}
 			}
 		}
 	}
@@ -474,6 +510,9 @@ func (m *emberModel) requestOutcomes() map[string]string {
 		m.chat.resSeen = map[string]string{}
 	}
 	for _, id := range ids {
+		if timedOut[id] {
+			continue // nobody answered: the timeout is the outcome, whatever a late file says
+		}
 		if t, ok := m.chat.resSeen[id]; ok {
 			out[id] = t // the owner's answer is the most exact (it has the words)
 			continue
@@ -496,8 +535,23 @@ func (m *emberModel) requestOutcomes() map[string]string {
 			out[id] = t
 		}
 	}
+	for id, r := range rec {
+		if out[id] == "recommended (timed out)" { // which option it went with, not only that it timed out
+			out[id] = oneLine(residentText(r)) + " (recommended, timed out)"
+		}
+	}
 	for _, r := range m.sessionRequests() {
 		out[r.ID] = "waiting"
 	}
 	return out
+}
+
+// promptBudget is how many rows the prompt's text (the command, the question, a hand-off's body and reason) may take:
+// the options, the free-text row, the hint and the chat's own header, footer and a few transcript rows always fit.
+func (m emberModel) promptBudget(r emberReq) int {
+	fixed := 2 + 1 + len(promptOptions(r)) + 2 + 1 + 8 // rule, header · blank · options · rule, free text · hint · the chat around it
+	if m.chat.questionCustom {
+		fixed++
+	}
+	return max(2, m.height-fixed)
 }

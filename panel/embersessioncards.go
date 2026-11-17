@@ -41,6 +41,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 	out, err := runResident(residentCommand(m, []string{"status", name, "--json"}, ""))
 	var st struct {
 		Model      string             `json:"model"`
+		Effort     string             `json:"effort"`
 		TokPerS    *float64           `json:"tok_per_s"`
 		SpendToday float64            `json:"spend_today"`
 		SpendGoals map[string]float64 `json:"spend_goals"`
@@ -48,19 +49,16 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 		Context    int                `json:"context"`
 		Used       int                `json:"context_used"`
 		Alive      bool               `json:"daemon_alive"`
-		Goals      []struct {
-			ID, Prompt, State string
-			Created, Updated  float64
-		} `json:"goals"`
+		Goals      []residentGoal     `json:"goals"`
 	}
 	if err != nil || json.Unmarshal(out, &st) != nil {
 		return c
 	}
-	c.model, c.spendToday, c.ctx, c.ctxUsed = st.Model, st.SpendToday, st.Context, st.Used
+	c.model, c.spendToday, c.ctx, c.ctxUsed = withEffort(st.Model, st.Effort), st.SpendToday, st.Context, st.Used
 	if st.TokPerS != nil {
 		c.tokPerS = *st.TokPerS
 	}
-	c.status = "idle"
+	c.status = "listening" // (the word the header uses for the same state)
 	if !st.Alive {
 		c.status = "stopped"
 	}
@@ -72,7 +70,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 	if len(st.Goals) > 0 {
 		g := st.Goals[0] // the newest, unless one is running or waiting
 		for _, x := range st.Goals {
-			if x.State == "working" || x.State == "queued" || strings.HasPrefix(x.State, "waiting") {
+			if (x.State == "working" || x.State == "queued" || strings.HasPrefix(x.State, "waiting")) && x.shownState() != "parked" {
 				g = x
 				break
 			}
@@ -83,6 +81,8 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 		}
 		switch {
 		case !st.Alive:
+		case g.shownState() == "parked":
+			c.status = "parked"
 		case g.State == "working" || g.State == "queued":
 			c.status = "working"
 			c.workingS = float64(time.Now().Unix()) - g.Created
@@ -138,7 +138,8 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 	}
 	inner := cw - 2
 	dot := map[string]string{"working": emberBusy.Render("● working"), "waiting": emberWarn.Render("● waiting"),
-		"idle": emberDim.Render("○ idle"), "stopped": emberDim.Render("○ stopped")}[c.status]
+		"listening": emberDim.Render("○ listening"), "parked": emberWarn.Render("◷ parked"),
+		"stopped": emberDim.Render("○ stopped")}[c.status]
 	if dot == "" {
 		dot = emberDim.Render("? " + c.status)
 	}

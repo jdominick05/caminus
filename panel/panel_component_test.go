@@ -410,3 +410,443 @@ esac
 		t.Fatalf("the alias rule: %q", got)
 	}
 }
+
+// At 80x24 (and shorter) the key list reaches every key: in columns when they fit, else in pages, each page but the
+// last saying how many are left and that ? shows them. Standalone and hosted.
+func TestHelpReachesEveryKeyWhenShort(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	for _, hosted := range []bool{false, true} {
+		for _, sz := range [][2]int{{80, 24}, {80, 14}, {100, 30}, {160, 48}} {
+			m := fixturePanel()
+			m.hosted = hosted
+			m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+			var seen []string
+			for i := 0; m.view == viewHelp; i++ {
+				if i > 10 {
+					t.Fatalf("hosted %v %dx%d: ? never leaves the key list", hosted, sz[0], sz[1])
+				}
+				out := ansi.Strip(m.View(sz[0], sz[1]))
+				for n, l := range strings.Split(out, "\n") {
+					if lipgloss.Width(l) > sz[0] {
+						t.Fatalf("hosted %v %dx%d line %d: %d cells", hosted, sz[0], sz[1], n+1, lipgloss.Width(l))
+					}
+				}
+				if m.seen.helpPages > 1 && m.helpPage+1 < m.seen.helpPages && !strings.Contains(out, "more · ? next page") {
+					t.Fatalf("hosted %v %dx%d: a page with more after it says so:\n%s", hosted, sz[0], sz[1], out)
+				}
+				seen = append(seen, out)
+				m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+			}
+			all := strings.Join(seen, "\n")
+			for _, k := range m.mainKeys() {
+				if !strings.Contains(all, k.keys+strings.Repeat(" ", max(0, 7-lipgloss.Width(k.keys)))+k.what) {
+					t.Errorf("hosted %v %dx%d: %q (%s) is in no page of the key list:\n%s", hosted, sz[0], sz[1], k.keys, k.what, all)
+				}
+			}
+			if sz == [2]int{80, 14} && len(seen) < 2 {
+				t.Errorf("hosted %v 80x14: the keys cannot fit one page, yet it showed one", hosted)
+			}
+		}
+	}
+	// any other key closes it, on any page
+	m := fixturePanel()
+	m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+	m.View(80, 14)
+	m, _ = m.key(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if m.view != viewMain || m.helpPage != 0 {
+		t.Fatal("a key other than ? closes the key list")
+	}
+}
+
+// keyTokens is the keys of a key line: each hint's key (the known keys, longest first), labels or none.
+func keyTokens(line string) []string {
+	known := []string{"tab ←→", "↑↓", "←→", "enter", "p", "s", "e", "c", "o", "?", "q"}
+	var out []string
+	for _, seg := range strings.Split(strings.TrimSpace(ansi.Strip(line)), "  ") {
+		for _, k := range known {
+			if seg == k || strings.HasPrefix(seg, k+" ") {
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// The key line never drops a key silently: at 80 and 70 columns, for every model, standalone and hosted, with a server
+// of the panel's, one started outside it and none, every key the wide line has is on the narrow one, or it ends "? more".
+func TestKeyLineKeepsEveryKeyOrSaysMore(t *testing.T) {
+	for _, hosted := range []bool{false, true} {
+		for _, srv := range []string{"managed", "external", "none"} {
+			for cur := 0; cur < 5; cur++ {
+				m := fixturePanel()
+				m.hosted, m.curM = hosted, cur
+				switch srv {
+				case "external":
+					m.ps.Servers[0].External = true
+				case "none":
+					m.ps.Servers = nil
+				}
+				m.w = 400
+				wide := keyTokens(m.keysLine())
+				for _, w := range []int{80, 70} {
+					ls := strings.Split(m.View(w, 24), "\n")
+					line := ls[len(ls)-1]
+					if lipgloss.Width(line) > w {
+						t.Fatalf("%d wide: the key line is %d cells", w, lipgloss.Width(line))
+					}
+					if strings.Contains(ansi.Strip(line), "? more") {
+						continue
+					}
+					got := strings.Join(keyTokens(line), " ")
+					if got != strings.Join(wide, " ") {
+						t.Errorf("hosted %v, %s server, model %d, %d wide: keys %q, wide line has %q:\n%s", hosted, srv, cur, w,
+							got, strings.Join(wide, " "), ansi.Strip(line))
+					}
+				}
+			}
+		}
+	}
+	// too narrow for every key even without labels: the line ends "? more" and keeps q
+	m0 := fixturePanel()
+	m0.curM = 2
+	ls0 := strings.Split(ansi.Strip(m0.View(40, 24)), "\n")
+	if l := ls0[len(ls0)-1]; !strings.Contains(l, "? more") || !strings.Contains(l, "q quit") || lipgloss.Width(l) > 40 {
+		t.Fatalf("40 wide: the key line says ? more and keeps q, inside 40 cells: %q", l)
+	}
+	// at the 80x24 case of a server of the panel's and a model with two choices, o is on the line
+	m := fixturePanel()
+	m.curM = 1
+	m.ps.Servers[0].Model, m.ps.Servers[0].Name = "swift-1.5", "swift-1.5"
+	ls := strings.Split(ansi.Strip(m.View(80, 24)), "\n")
+	if !strings.Contains(" "+ls[len(ls)-1]+" ", " o ") {
+		t.Fatalf("80x24: o is on the key line: %q", ls[len(ls)-1])
+	}
+}
+
+// The options field opens with its value selected: the first character typed replaces it (no ctrl+u needed), an arrow
+// keeps it, and backspace edits it as before.
+func TestOptionsFieldTypingReplacesTheShownValue(t *testing.T) {
+	open := func() ctl {
+		m := fixturePanel()
+		m, _ = m.key(tea.KeyPressMsg{Code: 'o', Text: "o"})
+		m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyDown})
+		m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyEnter}) // edit --max-ctx (shows "auto")
+		if !m.editing || m.edit != "auto" {
+			t.Fatalf("the field opens with the value: editing %v %q", m.editing, m.edit)
+		}
+		return m
+	}
+	m := open()
+	for _, r := range "32768" {
+		m, _ = m.key(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if m.edit != "32768" {
+		t.Fatalf("typing replaces the shown value: %q", m.edit)
+	}
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.vals["max_ctx"] != "32768" || m.noteErr {
+		t.Fatalf("32768 is saved: %q (note %q)", m.vals["max_ctx"], m.note)
+	}
+	m = open()
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.edit != "aut" {
+		t.Fatalf("backspace trims one character: %q", m.edit)
+	}
+	m, _ = m.key(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if m.edit != "auto" {
+		t.Fatalf("after backspace typing appends: %q", m.edit)
+	}
+	m = open()
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyRight})
+	m, _ = m.key(tea.KeyPressMsg{Code: '1', Text: "1"})
+	if m.edit != "auto1" {
+		t.Fatalf("an arrow keeps the value, then typing appends: %q", m.edit)
+	}
+}
+
+// L on a server started outside the panel says where its log is, not the stop / restart text; s still says that.
+func TestLogKeyOnAnOutsideServer(t *testing.T) {
+	m := fixturePanel()
+	m.ps.Servers[0].External, m.ps.Servers[0].Name = true, "observed-8092"
+	n, cmd := m.key(tea.KeyPressMsg{Code: 'L', Text: "L"})
+	if cmd != nil || n.confirm != nil {
+		t.Fatal("L on an outside server runs nothing")
+	}
+	if want := "coder was started outside the panel, so its log is wherever it was started"; n.note != want {
+		t.Fatalf("L's note: %q, want %q", n.note, want)
+	}
+	n, _ = m.key(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if !strings.Contains(n.note, "stop or restart it where it was started") {
+		t.Fatalf("s keeps its own note: %q", n.note)
+	}
+}
+
+// A failed read says "couldn't read" with its reason, in full and inside the screen, never "not installed"; the next
+// read that answers clears it.
+func TestFailedReadsSayCouldntRead(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	why := "caminus models --json: the lab wrapper refused this command because it is not part of a lab session (end)"
+	hwhy := "caminus qwen-code status --json: the lab wrapper refused it as well, and this reason goes on long enough " +
+		"that it needs more than two lines at eighty columns to be read in full by the person at the panel (qwen end)"
+	m := newPanel(panelOptions{CLI: "caminus-not-run"})
+	m, _ = m.Update(modelsMsg{err: fmt.Errorf("%s", why)})
+	m, _ = m.Update(psMsg{})
+	m, _ = m.Update(harnessMsg{err: fmt.Errorf("%s", hwhy)})
+	m.note = "" // (the note line shows the last error too: the checks below read the models and agents areas only)
+	flat := func(ls []string) string { return strings.Join(strings.Fields(strings.Join(ls, " ")), " ") }
+	for _, sz := range [][2]int{{160, 48}, {100, 30}, {80, 24}} {
+		out := ansi.Strip(m.View(sz[0], sz[1]))
+		ls := strings.Split(out, "\n")
+		for n, l := range ls {
+			if lipgloss.Width(l) > sz[0] {
+				t.Fatalf("%dx%d line %d: %d cells", sz[0], sz[1], n+1, lipgloss.Width(l))
+			}
+		}
+		mi, ai := -1, -1
+		for i, l := range ls {
+			switch strings.TrimSpace(l) {
+			case "models":
+				mi = i
+			case "agents":
+				ai = i
+			}
+		}
+		if mi < 0 || ai < mi {
+			t.Fatalf("%dx%d: no models / agents areas:\n%s", sz[0], sz[1], out)
+		}
+		if got := flat(ls[mi+1 : ai]); !strings.Contains(got, "couldn't read the model list · R reads again "+why) {
+			t.Errorf("%dx%d: the models area gives the whole reason: %q", sz[0], sz[1], got)
+		}
+		agents := flat(ls[ai+1:])
+		if !strings.Contains(agents, "Qwen Code couldn't read its status") || !strings.Contains(agents, hwhy) {
+			t.Errorf("%dx%d: the agents area says the read failed and why: %q", sz[0], sz[1], agents)
+		}
+		if strings.Contains(out, "not installed") || strings.Contains(out, "no models known") {
+			t.Errorf("%dx%d: a failed read is not a missing install or an empty list:\n%s", sz[0], sz[1], out)
+		}
+	}
+	if n, _ := m.key(tea.KeyPressMsg{Code: 'c', Text: "c"}); !strings.HasPrefix(n.note, "couldn't read Qwen Code's status") {
+		t.Errorf("c after a failed read: %q", n.note)
+	}
+	m, _ = m.Update(harnessMsg{v: harnessInfo{Npm: true}})
+	m, _ = m.Update(modelsMsg{})
+	out := ansi.Strip(m.View(100, 30))
+	if strings.Contains(out, "couldn't read") || !strings.Contains(out, "not installed") || !strings.Contains(out, "no models known") {
+		t.Errorf("reads that answer clear the failure:\n%s", out)
+	}
+}
+
+// A failed caminus ps read is not "no server running": the card says couldn't read with the reason, and nothing offers
+// a start (the card, the details, the key line) and enter says why it starts nothing; s says the same. A server the last
+// good read listed stays, the failure under its line. The next read that answers clears the card and the note.
+func TestFailedPsReadOffersNoStart(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	why := "caminus ps --json: the lab wrapper refused it (ps end)"
+	m := fixturePanel()
+	m.ps.Servers = nil
+	m.curM = 1 // swift-1.5: on disk, not running
+	m, _ = m.Update(psMsg{err: fmt.Errorf("%s", why)})
+	for _, sz := range [][2]int{{160, 48}, {100, 30}, {80, 24}} {
+		out := ansi.Strip(m.View(sz[0], sz[1]))
+		if strings.Contains(out, "no server running") || strings.Contains(out, "enter starts") {
+			t.Errorf("%dx%d: a failed ps read is not no server, and offers no start:\n%s", sz[0], sz[1], out)
+		}
+		if !strings.Contains(out, "couldn't read the running servers · R reads again") || !strings.Contains(out, why) {
+			t.Errorf("%dx%d: the card says the read failed and why:\n%s", sz[0], sz[1], out)
+		}
+		ls := strings.Split(out, "\n")
+		if strings.Contains(ls[len(ls)-1], "enter") {
+			t.Errorf("%dx%d: the key line offers no start: %q", sz[0], sz[1], ls[len(ls)-1])
+		}
+	}
+	n, cmd := m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil || n.busy != "" || !n.noteErr || !strings.Contains(n.note, "can't start swift-1.5: couldn't read the running servers · R reads again: "+why) {
+		t.Fatalf("enter starts nothing and says why: cmd %v busy %q note %q", cmd != nil, n.busy, n.note)
+	}
+	if s, _ := m.key(tea.KeyPressMsg{Code: 's', Text: "s"}); !strings.HasPrefix(s.note, "couldn't read the running servers") {
+		t.Fatalf("s while ps can't be read: %q", s.note)
+	}
+	n, _ = n.Update(psMsg{err: fmt.Errorf("%s", why)}) // (the poll fails again: enter's note stays)
+	if !strings.Contains(n.note, "can't start swift-1.5") {
+		t.Fatalf("a repeated ps failure keeps enter's note: %q", n.note)
+	}
+	n, _ = n.Update(psMsg{v: psInfo{Cards: m.ps.Cards}})
+	out := ansi.Strip(n.View(100, 30))
+	if n.note != "" || strings.Contains(out, "couldn't read") || !strings.Contains(out, "no server running") || !strings.Contains(out, "enter starts it") {
+		t.Errorf("a ps read that answers clears the card and enter's note (%q):\n%s", n.note, out)
+	}
+	// a server the last good read listed stays, with the failure under it
+	m = fixturePanel()
+	m, _ = m.Update(psMsg{err: fmt.Errorf("%s", why)})
+	out = ansi.Strip(m.View(160, 48))
+	if !strings.Contains(out, "coder") || !strings.Contains(out, ":8092") || !strings.Contains(out, "couldn't read the running servers · R reads again: "+why) {
+		t.Errorf("the last read's server stays, the failure under it:\n%s", out)
+	}
+}
+
+// A failed caminus ember status read is not "not set up": the row says couldn't read with the reason under it (beside
+// Qwen Code's when both fail), e says the same, an answer of ok false still says not set up, and hosted the row is
+// unchanged. The next read that answers clears it.
+func TestFailedEmberReadSaysCouldntRead(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	why := "caminus ember status --json: the lab wrapper refused it (ember end)"
+	m := fixturePanel()
+	m.ember = emberMsg{}
+	m, _ = m.Update(emberMsg{known: true, err: fmt.Errorf("%s", why)})
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	for _, sz := range [][2]int{{160, 48}, {100, 30}, {80, 24}} {
+		out := ansi.Strip(m.View(sz[0], sz[1]))
+		if strings.Contains(out, "not set up") {
+			t.Errorf("%dx%d: a failed read is not not set up:\n%s", sz[0], sz[1], out)
+		}
+		if f := flat(out); !strings.Contains(f, "couldn't read Ember's status · R reads again") || !strings.Contains(f, why) {
+			t.Errorf("%dx%d: the row says the read failed and why:\n%s", sz[0], sz[1], out)
+		}
+	}
+	n, _ := m.key(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	if !strings.HasPrefix(n.note, "couldn't read Ember's status: "+why) {
+		t.Fatalf("e after a failed read: %q", n.note)
+	}
+	n, _ = n.Update(emberMsg{known: true, ok: true})
+	if out := ansi.Strip(n.View(100, 30)); n.note != "" || strings.Contains(out, "couldn't read") {
+		t.Errorf("a read that answers clears the row and e's note (%q):\n%s", n.note, out)
+	}
+	h := m
+	h.hosted = true
+	if out := ansi.Strip(h.View(100, 30)); strings.Contains(out, "couldn't read") || !strings.Contains(out, "Ember (here)") {
+		t.Errorf("hosted, the row is unchanged:\n%s", out)
+	}
+	s, _ := fixturePanel().Update(emberMsg{known: true})
+	if out := ansi.Strip(s.View(100, 30)); !strings.Contains(out, "Ember not set up") {
+		t.Errorf("an answer of ok false is not set up:\n%s", out)
+	}
+	// every read failing at 80x24 with long reasons: every couldn't read line is on the screen
+	long := strings.Repeat("a long reason that keeps going ", 8)
+	a := newPanel(panelOptions{CLI: "caminus-not-run"})
+	a, _ = a.Update(modelsMsg{err: fmt.Errorf("models: %s", long)})
+	a, _ = a.Update(psMsg{err: fmt.Errorf("ps: %s", long)})
+	a, _ = a.Update(harnessMsg{err: fmt.Errorf("qwen: %s", long)})
+	a, _ = a.Update(emberMsg{known: true, err: fmt.Errorf("ember: %s", long)})
+	a, _ = a.Update(optsMsg{err: fmt.Errorf("opts: %s", long)})
+	out := flat(ansi.Strip(a.View(80, 24)))
+	for _, want := range []string{"couldn't read the running servers", "couldn't read the model list", "couldn't read Ember's status",
+		"Qwen Code couldn't read its status"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("80x24, every read failed: %q is on the screen:\n%s", want, ansi.Strip(a.View(80, 24)))
+		}
+	}
+}
+
+// A failed caminus serve --options-json read says couldn't read with the reason in the options editor; an answer with no
+// options still says it gave none.
+func TestFailedOptionsReadSaysCouldntRead(t *testing.T) {
+	why := "caminus serve --options-json: the lab wrapper refused it (opts end)"
+	m := fixturePanel()
+	m.opts = nil
+	m, _ = m.Update(optsMsg{err: fmt.Errorf("%s", why)})
+	m, _ = m.key(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	for _, sz := range [][2]int{{160, 48}, {80, 24}} {
+		out := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(m.View(sz[0], sz[1])), "│", " ")), " ")
+		if strings.Contains(out, "gave no options") || !strings.Contains(out, "couldn't read the serve options: "+why) {
+			t.Errorf("%dx%d: the options editor says the read failed and why:\n%s", sz[0], sz[1], ansi.Strip(m.View(sz[0], sz[1])))
+		}
+	}
+	m, _ = m.Update(optsMsg{})
+	if out := ansi.Strip(m.View(160, 48)); strings.Contains(out, "couldn't read") || !strings.Contains(out, "gave no options") {
+		t.Errorf("an answer with no options says so:\n%s", out)
+	}
+}
+
+// A read's failure never takes the note line: a key's note (L, c, p, an action's result) stays while ps fails on every
+// poll and the other reads fail. The poll reads a failed read again after readRetry (one at a time), and the next read
+// that answers clears its area: the models area without R. A list from an earlier read stays with the failure above it.
+func TestReadFailuresKeepKeyNotesAndClearOnTheNextRead(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	m := fixturePanel()
+	m, _ = m.Update(actMsg{what: "pull swift-1.5", note: "already on disk"})
+	note := m.note
+	for i := 0; i < 5; i++ {
+		m, _ = m.Update(psMsg{err: fmt.Errorf("caminus ps --json: refused")})
+	}
+	m, _ = m.Update(modelsMsg{err: fmt.Errorf("caminus models --json: refused")})
+	m, _ = m.Update(harnessMsg{err: fmt.Errorf("caminus qwen-code status --json: refused")})
+	m, _ = m.Update(emberMsg{known: true, err: fmt.Errorf("caminus ember status --json: refused")})
+	m, _ = m.Update(optsMsg{err: fmt.Errorf("caminus serve --options-json: refused")})
+	if m.note != note {
+		t.Fatalf("failed reads leave the key's note: %q, want %q", m.note, note)
+	}
+	out := ansi.Strip(m.View(160, 48))
+	if !strings.Contains(out, "couldn't read the model list again · R reads again: caminus models --json: refused") ||
+		!strings.Contains(out, "swift-1.5") {
+		t.Errorf("the last list stays with the failure above it:\n%s", out)
+	}
+	if c := m.retryReads(time.Now()); c != nil || len(m.retry) != 0 {
+		t.Fatal("a failed read is not read again before readRetry")
+	}
+	later := time.Now().Add(readRetry)
+	if c := m.retryReads(later); c == nil || !m.retry["models"] || !m.retry["harness"] || !m.retry["opts"] || !m.retry["ember"] {
+		t.Fatalf("after readRetry the poll reads models, harness, Ember and the options again: %v", m.retry)
+	}
+	if c := m.retryReads(later.Add(time.Minute)); c != nil {
+		t.Fatal("a read already being read again is not asked twice")
+	}
+	m, _ = m.Update(modelsMsg{v: m.models})
+	if out := ansi.Strip(m.View(160, 48)); strings.Contains(out, "model list") || m.retry["models"] {
+		t.Errorf("the next models read that answers clears its area:\n%s", out)
+	}
+	// from the start: no list, the failure with the R hint, cleared by the next read without R
+	f := newPanel(panelOptions{CLI: "caminus-not-run"})
+	f, _ = f.Update(modelsMsg{err: fmt.Errorf("caminus models --json: refused")})
+	if out := strings.Join(strings.Fields(ansi.Strip(f.View(100, 30))), " "); !strings.Contains(out, "couldn't read the model list · R reads again caminus models --json: refused") {
+		t.Errorf("the models area's failure says R reads again:\n%s", out)
+	}
+	f, _ = f.Update(modelsMsg{v: fixturePanel().models})
+	if out := ansi.Strip(f.View(100, 30)); strings.Contains(out, "couldn't read") || !strings.Contains(out, "coder") {
+		t.Errorf("the next good read clears the models area:\n%s", out)
+	}
+	// the poll itself asks again: its batch carries the retried read
+	p := fixturePanel()
+	p, _ = p.Update(harnessMsg{err: fmt.Errorf("refused")})
+	p.failAt["harness"] = time.Now().Add(-readRetry)
+	p, _ = p.Update(ctlPoll{p.id, p.epoch})
+	if !p.retry["harness"] {
+		t.Fatal("the poll reads a failed read again after readRetry")
+	}
+}
+
+// The key list's bottom line: on a page with more after it, ? turns the page and says so; on the last page (or the only
+// one) any key goes back.
+func TestHelpKeyLineSaysNextPage(t *testing.T) {
+	oldG := g
+	g = glyphTiers["unicode"]
+	defer func() { g = oldG }()
+	m := fixturePanel()
+	m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+	last := func(s string) string {
+		ls := strings.Split(ansi.Strip(s), "\n")
+		return strings.TrimSpace(ls[len(ls)-1])
+	}
+	if got := last(m.View(160, 48)); got != "any key back" {
+		t.Fatalf("one page: %q", got)
+	}
+	if got := last(m.View(80, 14)); got != "? next page · any other key back" {
+		t.Fatalf("page 1 of %d at 80x14: %q", m.seen.helpPages, got)
+	}
+	for m.helpPage+1 < m.seen.helpPages {
+		m, _ = m.key(tea.KeyPressMsg{Code: '?', Text: "?"})
+	}
+	if got := last(m.View(80, 14)); got != "any key back" {
+		t.Fatalf("the last page at 80x14: %q", got)
+	}
+}

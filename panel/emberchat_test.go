@@ -411,7 +411,7 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	m.sessionCards = []sessionCard{
 		{name: "research", status: "working", goal: "survey the harness papers", model: "claude-haiku-5-5", github: "ember-bot",
 			workingS: 720, spendGoal: 0.42, spendToday: 4.12, tokPerS: 61, ctxUsed: 52000, ctx: 1000000},
-		{name: "resident", status: "idle", goal: "review the design", model: "swift-1.5"}}
+		{name: "resident", status: "listening", goal: "review the design", model: "swift-1.5"}}
 	m.chat.compose.SetValue("an unsent draft")
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 	m = next.(emberModel)
@@ -420,7 +420,7 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	}
 	frame := ansi.Strip(m.render())
 	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 on this goal",
-		"$4.12 today in this session", "claude-haiku-5-5 · 61 tok/s · 52K/1M", "GitHub ember-bot", "resident", "○ idle",
+		"$4.12 today in this session", "claude-haiku-5-5 · 61 tok/s · 52K/1M", "GitHub ember-bot", "resident", "○ listening",
 		"no GitHub account", "worked ", "+ new session"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("a card shows %q:\n%s", want, frame)

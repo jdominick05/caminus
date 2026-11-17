@@ -93,7 +93,7 @@ func emberClip(text string, width int) string {
 	if width <= 0 {
 		width = 110
 	}
-	return ansi.Truncate(text, width, "")
+	return ansi.Truncate(text, width, "…") // a cut line says so (it read as complete: a goal title, a hint, a record)
 }
 
 func (m emberModel) detailViewport() viewport.Model {
