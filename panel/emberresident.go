@@ -38,6 +38,7 @@ type residentStatus struct {
 	SpendGoals       map[string]float64 `json:"spend_goals"` // per goal
 	Compactions      map[string]int     `json:"compactions"` // per goal: how many times its history was compacted
 	OnlineS          float64            `json:"online_s"`    // how long the daemon has been running (0: unknown)
+	Home             string             `json:"home"`        // the session's home: the agent's default working folder
 	Heartbeat        struct {
 		Runtime string `json:"runtime"` // the runtime file the daemon runs (its sha256)
 	} `json:"heartbeat"`

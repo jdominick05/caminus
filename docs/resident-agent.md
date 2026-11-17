@@ -60,7 +60,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+E | open or fold every tool card; Ctrl+O shows every line of an open card (40 otherwise) |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
 | Ctrl+G, Ctrl+A, Ctrl+P | the goals, approvals and sessions overlays |
-| `!cmd` | run `cmd` in the agent's account; the command and its output land in the draft |
+| `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell") |
 | `@path` | in a message, attach that file from the agent's account (64 KB) |
 
 While a reply is written, a bounded live box shows its thinking, the tools it

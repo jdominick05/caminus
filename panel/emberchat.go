@@ -43,6 +43,7 @@ type residentChat struct {
 	questionDeferred, questionError         string
 	picker                                  bool
 	pickerSel                               int
+	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
 	pickerNew                               bool   // the switcher is asking for a new session's name
 	pickerName                              string // that name as typed
 	pickerDestroy                           string // the session x armed: a second x destroys it
@@ -216,10 +217,23 @@ func shellMark(info textarea.PromptInfo) string {
 	return ""
 }
 
+// hostShellMark is the host shell's prompt: "!!", run as you on this machine.
+func hostShellMark(info textarea.PromptInfo) string {
+	if info.LineNumber == 0 {
+		return "!! "
+	}
+	return ""
+}
+
 // setShell switches shell mode: the prompt, its colour and the placeholder say which mode the draft is in.
 func (m *emberModel) setShell(on bool) {
 	m.chat.shell = on
-	if on {
+	if !on {
+		m.chat.hostShell = false
+	}
+	if on && m.chat.hostShell {
+		m.chat.compose.SetPromptFunc(3, hostShellMark)
+	} else if on {
 		m.chat.compose.SetPromptFunc(2, shellMark)
 	} else {
 		m.chat.compose.SetPromptFunc(2, promptMark)
@@ -235,6 +249,9 @@ func (m *emberModel) chatStyles() {
 	s.Focused.Prompt, s.Blurred.Prompt = emberBusy, emberBusy
 	if m.chat.shell {
 		s.Focused.Prompt, s.Blurred.Prompt = emberShell, emberShell
+	}
+	if m.chat.hostShell {
+		s.Focused.Prompt, s.Blurred.Prompt = hostShellStyle(), hostShellStyle()
 	}
 	s.Focused.Placeholder, s.Blurred.Placeholder = emberDim, emberDim
 	// the editor's default cursor line has a grey background: the placeholder sat under a highlight bar
@@ -1361,8 +1378,12 @@ func (m emberModel) chatComposer() string {
 	}
 	box := composerBox(input, m.composerTitle(), max(18, m.width-2))
 	if m.chat.shell {
-		box = borderTitle(emberBorder.BorderForeground(cPurple).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
-			m.composerTitle(), emberShell)
+		edge, st := cPurple, emberShell
+		if m.chat.hostShell { // your own shell, not the agent's: its own colour, so the two never look alike
+			edge, st = cOrange, hostShellStyle()
+		}
+		box = borderTitle(emberBorder.BorderForeground(edge).Padding(0, 1).Width(max(18, m.width-2)).Render(input),
+			m.composerTitle(), st)
 	}
 	// a message (delivered, queued, an error) sits on the frame for a few seconds instead of a line of its own under
 	// the status line, which appeared and went with every message
@@ -1374,6 +1395,8 @@ func (m emberModel) chatComposer() string {
 func (m emberModel) composerTitle() string {
 	title := "new goal"
 	switch {
+	case m.chat.hostShell:
+		title = "host shell · runs as you, on this machine"
 	case m.chat.shell:
 		title = "shell · runs as the agent"
 	case m.chat.sending:
@@ -1394,8 +1417,11 @@ func (m emberModel) composerTitle() string {
 
 // composerHint is the composer's placeholder: what Enter does with the draft now.
 func (m emberModel) composerHint() string {
+	if m.chat.hostShell {
+		return "a command, run as you in your own shell · Enter runs it · Backspace leaves"
+	}
 	if m.chat.shell {
-		return "a command, run in the agent's account · Enter runs it · Backspace leaves"
+		return "a command, run in the agent's account · ! again: your own shell · Enter runs it · Backspace leaves"
 	}
 	if !m.chat.compose.Focused() {
 		return "browsing history · Enter returns to typing"
@@ -2264,6 +2290,12 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setShell(true)
 		return m, nil
 	}
+	// "!" again on the empty agent shell: the host shell, your own account on this machine (!! as in a terminal)
+	if k == "!" && m.chat.compose.Value() == "" && m.chat.shell && !m.chat.hostShell {
+		m.chat.hostShell = true
+		m.setShell(true)
+		return m, nil
+	}
 	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
 		m.setShell(false)
 		return m, nil
@@ -2273,8 +2305,13 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if cmd == "" {
 			return m, nil
 		}
+		host := m.chat.hostShell
 		m.chat.compose.Reset()
 		m.setShell(false)
+		if host {
+			m.msg = "running in your shell…"
+			return m, runHostBang(cmd)
+		}
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, cmd)
 	}
@@ -2925,7 +2962,7 @@ func (m emberModel) chatFoot(w int) string {
 	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
-	statusBar := statusLine(status{brain: residentText(m.resident.Model), used: m.resident.ContextUsed,
+	statusBar := statusLine(status{brain: residentText(m.resident.Model), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
 		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip

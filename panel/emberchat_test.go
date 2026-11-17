@@ -2727,3 +2727,59 @@ func TestGoalsVOpensThePlanAndABareVerdictIsNoGoal(t *testing.T) {
 		}
 	}
 }
+
+func TestBangBangIsYourOwnShellInItsOwnColour(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
+	m = next.(emberModel)
+	if !m.chat.shell || m.chat.hostShell || !strings.Contains(m.composerTitle(), "runs as the agent") {
+		t.Fatal("! is the agent's shell")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
+	m = next.(emberModel)
+	if !m.chat.hostShell || !strings.Contains(m.composerTitle(), "runs as you") || m.chat.compose.Value() != "" {
+		t.Fatal("a second ! is your own shell, and types nothing")
+	}
+	if !strings.Contains(ansi.Strip(m.chatComposer()), "!! ") {
+		t.Fatal("its prompt is !!")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = next.(emberModel)
+	if m.chat.shell || m.chat.hostShell {
+		t.Fatal("Backspace on the empty line leaves")
+	}
+	msg := runHostBang("echo from-the-host")().(bangDoneMsg)
+	if msg.err != "" || msg.output != "from-the-host" || !msg.host {
+		t.Fatalf("it runs in your shell: %+v", msg)
+	}
+	m = m.bangDone(msg)
+	if !strings.Contains(m.chat.compose.Value(), "(my shell) $ echo from-the-host") {
+		t.Fatalf("the draft says the output came from your shell:\n%s", m.chat.compose.Value())
+	}
+}
+
+func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 160, 40
+	m.resident.Home = "/srv/agent/homes/resident"
+	if got := m.agentCwd(); got != "~/homes/resident" {
+		t.Fatalf("no terminal call yet: the session's home, %q", got)
+	}
+	call := func(args string) residentEvent {
+		return residentEvent{Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{
+			"function": map[string]any{"name": "terminal", "arguments": args}}}}}
+	}
+	m.residentEvents = []residentEvent{call(`{"command":"ls","cwd":"~/projects/inventory"}`)}
+	if got := m.agentCwd(); got != "~/projects/inventory" {
+		t.Fatalf("the newest terminal call's cwd: %q", got)
+	}
+	m.residentEvents = append(m.residentEvents, call(`{"command":"cd tests && python3 -m unittest"}`))
+	if got := m.agentCwd(); got != "~/homes/resident/tests" {
+		t.Fatalf("a leading cd counts, from the default folder: %q", got)
+	}
+	foot := ansi.Strip(m.chatFoot(m.width))
+	if i, j := strings.Index(foot, "~/homes/resident/tests"), strings.Index(foot, "/"+"0"); i < 0 || (j >= 0 && j < i) {
+		t.Fatalf("the folder sits left of the context pill:\n%s", foot)
+	}
+}
