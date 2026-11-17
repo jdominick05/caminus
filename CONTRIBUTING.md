@@ -28,6 +28,9 @@ Thanks for helping. Caminus has been tested on one machine so far, so you can he
 Commit messages look like `area : what changed`, for example `prefill : one launch checker per module`. Explain why in
 the body, with the numbers you measured if it's about speed.
 
+A pull request that adds more lines than it removes also says what it builds on and what it took out: a `Reuses:` and
+a `Removes:` line in the body (the template has both; `tools/pr_ready.py` explains a failure).
+
 ### The contributor licence agreement
 
 Before your first pull request is merged, you'll be asked to agree to the

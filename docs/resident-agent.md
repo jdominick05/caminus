@@ -53,7 +53,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 
 | Key | Action |
 |---|---|
-| Esc | while a reply is being written, interrupt that turn (nothing of it is kept; the goal waits up to two minutes for your message); the activity line says "esc interrupts" then. PgUp/PgDn and the wheel scroll the transcript |
+| Esc | while the agent waits on a reply (also before its first word: a long prompt read, a paid model thinking), interrupt that turn: the call is closed, so the server stops generating, and nothing of it is kept. The activity line then says "turn interrupted" with no clock, and the goal waits up to two minutes for your message before it carries on by itself. Esc while a tool runs says there is nothing to interrupt. PgUp/PgDn and the wheel scroll the transcript |
 | ↑ on an empty composer | pull back your newest message the agent has not read yet |
 | Ctrl+R | earlier prompts containing the draft, newest first (as you typed them: `//`, `@` and `+` kept) |
 | Home, End | with an empty draft: the top or the bottom of the history |
@@ -245,11 +245,8 @@ results are marked as data, never instructions.
 
 ## Memory
 
-`MEMORY.md` is a notes index: one line per note, capped at 4 KB, loaded into every
-turn and fixed for the length of a goal. Notes (`notes/NAME.md`, one fact each) are
-read on demand; `remember` writes a note and its index line together and is refused
-when the index is full. `STATE.md` (doing, verified, assumed, next) loads first on
-every turn and is asked for near compaction, so it is what the agent reads after a
+`STATE.md`, `MEMORY.md` and `notes/` are in [the Ember guide](ember.md#its-memory).
+`STATE.md` is asked for near compaction, so it is what the agent reads after a
 compaction or a restart. An older, longer `MEMORY.md` is copied whole into
 `notes/memory-before-index.md` the first time it is seen. Answers to questions stay
 in the goal's transcript; nothing is written to memory automatically.
