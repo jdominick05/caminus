@@ -6,7 +6,7 @@ shapes all of it: the gfx1100 code objects in the wheel were built and validated
 instructions and bitwise numerics (docs/dev/packaging.md, "Code objects"). That toolchain has no public URL, and a
 different compiler gives different code. So every release build runs in **one public container image** that holds it
 (below, "The build image"): the maintainer's builds, the nightly timer's and CI's. The release files are built twice, by the
-maintainer and by CI (build.yml, with SLSA Build Level 3 provenance), and are published only when the two are byte
+maintainer and by CI (build.yml, with provenance self-assessed against SLSA Build Level 3), and are published only when the two are byte
 for byte equal (below, "SLSA").
 
 Every action the workflows use is pinned by its commit SHA, with the release tag in a trailing comment
@@ -244,7 +244,7 @@ link torch's HIP runtime, so the image has no PyTorch. Changing the image means:
 
 For users: [verify your download](../verifying.md) has the checks and the rebuild as copy-paste commands.
 
-The release files reach **SLSA Build Level 3**: build.yml builds them on GitHub-hosted runners in a reusable workflow
+The release files meet **SLSA Build Level 3** by our own assessment (no one has audited it): build.yml builds them on GitHub-hosted runners in a reusable workflow
 (isolated from the calling workflow's steps) and GitHub signs non-forgeable provenance naming the repository, the commit,
 the workflow file and the run. Check a file:
 
