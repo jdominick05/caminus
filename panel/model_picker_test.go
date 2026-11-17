@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -274,8 +275,13 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 	if _, fa := m.fitArgs(mi); !strings.Contains(strings.Join(fa, " "), "--cards 1 --kv q8 --long-context --json") {
 		t.Fatalf("fit projects the same choice: %v", fa)
 	}
-	if rows := strings.Join(m.modelRows(), "\n"); !strings.Contains(ansi.Strip(rows), "KV q8 · long context") {
+	if rows := strings.Join(m.modelRows(), "\n"); !strings.Contains(ansi.Strip(rows), "KV q8 · long context (YaRN x4, as far as the card holds") {
 		t.Fatalf("the next start shows the choice: %s", ansi.Strip(rows))
+	}
+	// the choice survives a restart of the panel (KV and Long saved with the picks)
+	re := newCtl(newCtlCLI("caminus"), false, m.prefs)
+	if got := re.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "qwen3-30b-a3b", "--kv", "q8", "--long-context"}) {
+		t.Fatalf("the saved choice was not reloaded: %v", got)
 	}
 	// per card count: two cards start from the defaults, and the one-card choice comes back
 	m.cycleModelMode(mi, true)
@@ -303,5 +309,27 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 	}
 	if md := parsed.servingModes()[0]; !md.Long || len(md.KV) != 2 {
 		t.Fatalf("the CLI's kv / long_context keys reach the picker: %+v", md)
+	}
+}
+
+func TestModelPickerAdvancedValuesCarryIntoThePick(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), true, "")
+	m.prefs = filepath.Join(t.TempDir(), "prefs.json")
+	mi := q3mModel()
+	m.models, m.loaded["models"] = []camModel{mi}, true
+	m.vals["kv"], m.vals["long_context"], m.vals["draft"] = "q8", "true", "off"
+	if got := strings.Join(m.startArgs(mi), " "); !strings.Contains(got, "--kv q8 --long-context") || !strings.Contains(got, "-- --draft off") {
+		t.Fatalf("saved advanced --kv / --long-context / --draft values still apply before any pick: %s", got)
+	}
+	m.cycleExtra(mi, true) // long context off: the pick now exists and must keep the drafter and cache shown before
+	if got := strings.Join(m.startArgs(mi), " "); strings.Contains(got, "--long-context") || !strings.Contains(got, "--kv q8") || !strings.Contains(got, "-- --draft off") {
+		t.Fatalf("the first pick dropped the advanced drafter or cache: %s", got)
+	}
+	m.busy = "starting x"
+	m.focus = paneModels
+	before := strings.Join(m.startArgs(mi), " ")
+	next, _ := m.key(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	if got := strings.Join(next.(ctl).startArgs(mi), " "); got != before {
+		t.Fatalf("l in MODELS while a start runs must be refused like the other choices: %s -> %s", before, got)
 	}
 }

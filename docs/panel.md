@@ -31,7 +31,7 @@ caminus panel -advanced  # every server option, the card choice, the brain / han
 | | `n` | Choose one or two cards where the model supports both. |
 | | `d` | Choose its drafter: auto (the server's measured default), off, MTP or DFlash where supported at that card count. |
 | | `v` | `qwen3-30b-a3b`: choose the KV cache: auto (F16; in the long-context mode the mode picks Q8 where only it holds the context), F16 or Q8 (half the memory per token: [models](models.md)). |
-| | `l` | `qwen3-30b-a3b`: turn the long-context mode on or off (YaRN x4: up to 131,072 tokens on two cards, about 80K on one XTX with Q8; short texts can read slightly differently, so it is off by default). |
+| | `l` | `qwen3-30b-a3b`: turn the long-context mode on or off (YaRN x4: up to 131,072 tokens on two cards; on one card as far as it holds, measured 81,920 on an XTX with Q8, which the fit row shows for your cards; short texts can read slightly differently, so it is off by default). |
 | | `c` | Advanced: choose the card (auto, or a card number). |
 | | `b` | Advanced: start the brain / hands team (below). |
 | SERVERS | `enter` | Open Qwen Code on this server. |

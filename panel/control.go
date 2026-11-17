@@ -469,8 +469,12 @@ type modelPick struct {
 // long-context mode the format the mode picks for the cards), "f16" or "q8"; long true adds --long-context. A choice the
 // mode does not offer reads as the default.
 func (m ctl) modelExtras(mi camModel, mode serveMode) (string, bool) {
-	p := m.picks[mi.Name]
+	p, saved := m.picks[mi.Name]
 	kv := p.KV[mode.Cards]
+	long := p.Long[mode.Cards]
+	if !saved && m.advanced { // (an advanced layout's saved --kv / --long-context values, from before the picker owned them)
+		kv, long = m.vals["kv"], m.vals["long_context"] == "true"
+	}
 	ok := false
 	for _, f := range mode.KV {
 		if f == kv {
@@ -480,22 +484,28 @@ func (m ctl) modelExtras(mi camModel, mode serveMode) (string, bool) {
 	if !ok {
 		kv = "auto"
 	}
-	return kv, mode.Long && p.Long[mode.Cards]
+	return kv, mode.Long && long
 }
 
 // cycleExtra steps the cache choice (auto, then each format) or flips the long-context mode, for the current card count.
 func (m *ctl) cycleExtra(mi camModel, long bool) {
-	mode, _ := m.modelMode(mi)
+	mode, draft := m.modelMode(mi)
 	kv, lc := m.modelExtras(mi, mode)
 	p := m.picks[mi.Name]
+	if p.Drafts == nil {
+		p.Drafts = make(map[int]string)
+	}
 	if p.KV == nil {
 		p.KV = make(map[int]string)
 	}
 	if p.Long == nil {
 		p.Long = make(map[int]bool)
 	}
-	if p.Cards == 0 {
-		p.Cards = mode.Cards
+	// (the first saved pick carries what the next start shows now: the card count, drafter, cache and mode, which in the
+	//  advanced layout may come from its values; modelMode and modelExtras read only the pick once it exists)
+	p.Cards, p.Drafts[mode.Cards], p.Long[mode.Cards] = mode.Cards, draft, lc
+	if kv != "auto" {
+		p.KV[mode.Cards] = kv
 	}
 	if long {
 		if !mode.Long {
@@ -804,7 +814,7 @@ func (m ctl) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 		return m, nil
 	}
-	if m.busy != "" && s != "l" && s != "m" {
+	if m.busy != "" && !(m.focus == paneServers && (s == "l" || s == "m")) { // (log and monitor of a server only: MODELS' l is a choice)
 		m.setNote("wait: "+m.busy+" is still running", false)
 		return m, nil
 	}
@@ -1215,8 +1225,10 @@ func (m ctl) modelRows() []string {
 				next += " · KV " + kv
 			}
 			if mode.Long {
-				if lc {
-					next += " · long context (YaRN x4, up to 131,072 on two cards)"
+				if lc && mode.Cards >= 2 {
+					next += " · long context (YaRN x4, up to 131,072)"
+				} else if lc {
+					next += " · long context (YaRN x4, as far as the card holds: the fit row; 131,072 needs two cards)"
 				} else {
 					next += " · native context"
 				}
