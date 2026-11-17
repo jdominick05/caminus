@@ -30,6 +30,7 @@ type residentGoal struct {
 type residentStatus struct {
 	Name             string             `json:"name"`
 	Model            string             `json:"model"`
+	Effort           string             `json:"effort"` // the effort level that runs ('' with no effort control)
 	Context          int                `json:"context"`
 	ContextUsed      int                `json:"context_used"` // measured at the last turn boundary; 0 means never measured
 	TokPerS          float64            `json:"tok_per_s"`    // measured decode speed of the last streamed reply; 0 means none reported

@@ -54,7 +54,7 @@ def write(rt, description):
     request = [dict(role='system', content=PROMPT.format(roles=roles, background=background,
                                                         patterns=', '.join(PATTERNS), themes=', '.join(CODE_THEMES))),
                dict(role='user', content='The theme: ' + description)]
-    answer = rt.model.complete(request, None, max_tokens=min(2048, int(rt.config.get('max_tokens', 4096)))).get('content') or ''
+    answer = rt.model.complete(request, None, max_tokens=min(2048, rt._reply_limit())).get('content') or ''
     try:
         rt._meter('theme')                # a paid brain's theme shows in the spend like any turn
     except Exception:

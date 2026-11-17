@@ -44,7 +44,7 @@ def ask(rt, gid, question):
     question_msg = dict(role='user', content='BTW, a side question about this goal (your answer is shown to '
                                              'your human and kept nowhere else; you have no tools): '
                                              + question)
-    max_tokens = min(int(rt.config.get('max_tokens', 4096)), rt.model.context_size() // 4)
+    max_tokens = min(rt._reply_limit(), rt.model.context_size() // 4)
     # The recent conversation goes as text, not as chat turns: a slice of the history can start with a tool result
     # whose call was cut off, or end with a call still running, and the APIs refuse either.
     lines = [_line(m) for m in rt.store.goal(gid)['messages'][-KEEP:]]

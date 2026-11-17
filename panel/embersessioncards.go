@@ -41,6 +41,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 	out, err := runResident(residentCommand(m, []string{"status", name, "--json"}, ""))
 	var st struct {
 		Model      string             `json:"model"`
+		Effort     string             `json:"effort"`
 		TokPerS    *float64           `json:"tok_per_s"`
 		SpendToday float64            `json:"spend_today"`
 		SpendGoals map[string]float64 `json:"spend_goals"`
@@ -56,7 +57,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 	if err != nil || json.Unmarshal(out, &st) != nil {
 		return c
 	}
-	c.model, c.spendToday, c.ctx, c.ctxUsed = st.Model, st.SpendToday, st.Context, st.Used
+	c.model, c.spendToday, c.ctx, c.ctxUsed = withEffort(st.Model, st.Effort), st.SpendToday, st.Context, st.Used
 	if st.TokPerS != nil {
 		c.tokPerS = *st.TokPerS
 	}

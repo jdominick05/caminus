@@ -7,6 +7,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import effort
+
 
 # a speed is measured only over a window this long with this many tokens: a reply that arrived in one burst (Haiku
 # with thinking) divided its tokens by microseconds and the status line read 31,746,037 tok/s
@@ -212,6 +214,11 @@ class Model:
             raise ModelError('backend must report a positive context window, or set --context explicitly')
         return self.context
 
+    def reply_limit(self):
+        """A reply's token limit (effort.reply_limit): config max_tokens; else a local brain the card's maximum output up
+        to 64K, a paid one 4096 (its catalog maximum, up to 64K, is set when it is picked)."""
+        return effort.reply_limit(self.config, self.remote)
+
     def complete(self, messages, tools=None, max_tokens=None, model=None, on_delta=None):
         """One reply. With on_delta(kind, value) the reply streams: kind is 'reasoning', 'content' or 'tool'
         (a tool call's name starts), value is the text or the name. on_delta returning False cancels: the
@@ -220,17 +227,20 @@ class Model:
         if remaining < 1:
             raise ModelContextError('request exceeds the model context; compact or shorten the goal')
         if self.api == 'anthropic':
-            return self._anthropic(messages, tools, min(max_tokens or int(self.config.get('max_tokens', 4096)),
-                                                        remaining), model, on_delta)
-        body = dict(model=model or self.config['model'], messages=messages, stream=on_delta is not None,
-                    max_tokens=min(max_tokens or int(self.config.get('max_tokens', 4096)), remaining),
-                    temperature=float(self.config.get('temperature', .6)))
-        for name in ('top_k','top_p','min_p','presence_penalty'):
-            if name in self.config:
-                body[name] = self.config[name]
-        if self.config.get('effort'):
-            # OpenAI-compatible providers (DeepInfra) take reasoning depth as reasoning_effort; 'none' turns it off.
-            body['reasoning_effort'] = self.config['effort']
+            return self._anthropic(messages, tools, min(max_tokens or self.reply_limit(), remaining), model, on_delta)
+        limit = min(max_tokens or self.reply_limit(), remaining)
+        # the effort in force (effort.py): a local model takes it as the server's model id for the level, a provider
+        # with reasoning_effort as that field; a short side call (the judge's) runs with thinking off
+        choice = effort.resolve(self.config, short=limit < SHORT_CALL)
+        body = dict(model=model or choice['model'] or self.config['model'], messages=messages,
+                    stream=on_delta is not None, max_tokens=limit)
+        # sampling: none for a local brain (its server applies the model's own defaults: a fixed 0.6 overrode the
+        # Qwen3.8 cards' 1.0), a paid model's card values when known, the config's own when set
+        body.update(effort.sampling(self.config, self.remote))
+        if choice['reasoning_effort']:
+            body['reasoning_effort'] = choice['reasoning_effort']   # (DeepInfra, Mistral; 'none' turns it off)
+        if choice['thinking_off']:
+            body['chat_template_kwargs'] = dict(enable_thinking=False)   # a local server with no -nothink id
         if self.config.get('provider_kind') == 'mistral':
             # Mistral routes requests to its prompt cache by this key (a hint, not a promise): one stable key per agent,
             # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %.
@@ -242,9 +252,7 @@ class Model:
             # verdict came back cut off (GLM 5.3 on Mistral: a finish let through unchecked). Where the provider has a
             # switch it is turned off; either way the call gets room for thinking (billed per token written, so the
             # room costs nothing unused).
-            if self.config.get('effort'):
-                body['reasoning_effort'] = 'none'
-            body['max_tokens'] = min(SHORT_CALL, remaining)
+            body['max_tokens'] = min(SHORT_CALL, remaining)   # (thinking is off for it: effort.resolve(short=True))
         if tools:
             body['tools'] = tools
         if on_delta is not None:
@@ -501,7 +509,10 @@ class Model:
         # thinking and 2 without; Qwen Code sends adaptive thinking too. thinking 'disabled' in the config turns it off.
         if self.config.get('thinking', 'adaptive') == 'disabled':
             body['thinking'] = dict(type='disabled')
-        body['output_config'] = dict(effort=self.config.get('effort', 'medium'))
+        choice = effort.resolve(self.config)
+        if choice['thinking_off']:
+            body['thinking'] = dict(type='disabled')           # (effort none: sent with effort high, effort.py)
+        body['output_config'] = dict(effort=choice['anthropic_effort'] or 'medium')
         if self.config.get('fallbacks') and body['model'] in FALLBACK_MODELS:
             # A safety classifier can decline a legitimate request (cyber work on one's own machine trips it); the
             # server then re-runs it on a fallback model in the same call. Off for models that do not accept it.
@@ -517,10 +528,8 @@ class Model:
         # benchmark run (each one a finish let through unchecked). Main turns keep their thinking.
         if (max_tokens or 0) < SHORT_CALL and 'thinking' not in body and body['model'] not in THINKING_REQUIRED:
             body['thinking'] = dict(type='disabled')
-        allowed = ('low', 'medium', 'high') if body.get('thinking') == dict(type='disabled') else (
-            'low', 'medium', 'high', 'xhigh', 'max')
-        if self.config.get('effort', 'medium') not in allowed:
-            raise ValueError('effort must be one of %s here' % ', '.join(allowed))
+        if body.get('thinking') == dict(type='disabled') and body['output_config']['effort'] not in ('low', 'medium', 'high'):
+            body['output_config']['effort'] = 'high'   # thinking off is accepted up to high: the nearest level that runs
         return self._anthropic_stream(body, on_delta or (lambda kind, value: None))
 
     def _anthropic_stream(self, body, on_delta):

@@ -137,6 +137,17 @@ class TestTemplate(unittest.TestCase):
     def test_case_count(self):
         self.assertGreaterEqual(len(cases()), 30)
 
+    def test_an_effort_switch_rewrites_the_system_message_only_when_the_effort_line_changes(self):
+        """Ember's /effort picks the server's id per level: medium (k3-coder) and none (k3-coder-nothink) share the
+        system message, so switching between them keeps the prompt cache; xhigh and low write their own line first in
+        it, so a switch to or from them makes the server read the conversation again (Ember says so)."""
+        def system(model):
+            text = self.tpl.render([S, U], tools=T, add_generation_prompt=True, **MODEL_PROFILES[model])
+            return text[:text.index('<|im_end|>')]
+        self.assertEqual(system('k3-coder'), system('k3-coder-nothink'))
+        self.assertNotEqual(system('k3-coder'), system('k3-coder-xhigh'))
+        self.assertNotEqual(system('k3-coder'), system('k3-coder-low'))
+
     def test_byte_equal_to_transformers(self):
         n = 0
         for name, msgs, tools, gen, kw in cases():

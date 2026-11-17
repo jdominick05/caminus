@@ -1,0 +1,182 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 jdominick05
+"""One effort scale on every brain, and each model's generation settings from its lab.
+
+The scale: none, low, medium, high, xhigh, max (/effort LEVEL; 'no' means none). Each model runs a level as its
+nearest real one:
+- a local Caminus model with an effort line (the Qwen3.8 line: Coder, Swift 1.5, ThinkingCap, Qwen3.8-27B): its
+  template knows low, medium and xhigh, each a model id of the server (BASE-low, BASE, BASE-xhigh; BASE-nothink for
+  none). high and max run as xhigh. The server pins the effort per id (a per-request effort would rewrite the
+  system message and void the prompt cache), so the level is chosen by the id sent.
+- a local model with only thinking on or off (Qwen3-30B-A3B): none is BASE-nothink, every other level is BASE.
+- Anthropic: low .. max natively; none is thinking disabled, which the API takes only at high effort or below, so
+  it is sent with effort high.
+- an OpenAI-compatible provider with reasoning_effort (DeepInfra, Mistral): none, low, medium, high natively;
+  xhigh and max run as high.
+
+With no level set, the lab's recommendation for agentic work applies (model cards, 2026-11): the Qwen3.8 line xhigh,
+Qwen3-30B-A3B thinking on, Anthropic medium, Mistral Large 4 / Medium 3.5 high.
+
+Sampling: a local brain gets none (the server applies each model's own defaults from its GGUF); a paid brain gets
+its card's values when the model is known, none otherwise; Anthropic never gets temperature, top_p or top_k (the
+current API version refuses them).
+"""
+import re
+
+LEVELS = ('none', 'low', 'medium', 'high', 'xhigh', 'max')
+SUFFIX = {'none': '-nothink', 'low': '-low', 'xhigh': '-xhigh'}
+LOCAL_CAP = 65536          # the owner's cap on one local reply (a runaway think held the server for an hour)
+PAID_CAP = 65536           # a paid brain's output at most (its catalog maximum below that)
+
+# known models, matched on the id (lower case): the effort line, the lab's default level, the card's maximum output
+# and, for paid models, the card's sampling
+CARDS = (
+    (r'qwen3-30b|q3moe|qwen3moe', dict(line='onoff', default='medium', max_output=32768)),
+    (r'k3-coder|coder|swift|thinkingcap|qwen3\.8|qwen38', dict(line='scale', default='xhigh', max_output=393216)),
+    (r'deepseek-v4\.1-flash', dict(sampling=dict(temperature=1.0, top_p=1.0))),
+    (r'mistral-large-4|mistral-large-latest', dict(default='high', sampling=dict(temperature=1.0, top_p=0.95))),
+    (r'mistral-medium-3\.5|mistral-medium-latest', dict(default='high', sampling=dict(temperature=0.7, top_p=0.95))),
+)
+
+
+def card(model):
+    m = (model or '').lower()
+    for pat, facts in CARDS:
+        if re.search(pat, m):
+            return facts
+    return {}
+
+
+def normalize(level):
+    level = (level or '').strip().lower()
+    return 'none' if level in ('no', 'off') else level
+
+
+def group_local(ids):
+    """A local server's ids grouped by base model: {base: {level: id}} for the ids it lists (BASE-nothink,
+    BASE-low, BASE-xhigh next to BASE)."""
+    ids = list(ids)
+    have = set(ids)
+    out = {}
+    for i in ids:
+        if any(i.endswith(s) and i[:-len(s)] in have for s in SUFFIX.values()):
+            continue                                   # a variant: it belongs to its base
+        out[i] = {lvl: i + s for lvl, s in SUFFIX.items() if i + s in have}
+    return out
+
+
+def line(cfg):
+    """How the brain takes effort: 'scale' (local ids low/medium/xhigh), 'onoff' (local, thinking on or off),
+    'anthropic', 'reasoning' (reasoning_effort) or '' (no control)."""
+    kind = cfg.get('provider_kind') or ('anthropic' if cfg.get('api') == 'anthropic' else '')
+    if kind == 'anthropic' or cfg.get('api') == 'anthropic':
+        return 'anthropic'
+    variants = cfg.get('model_variants') or {}
+    if kind == 'local' or variants:
+        if 'low' in variants or 'xhigh' in variants:
+            return 'scale'
+        return 'onoff' if 'none' in variants else ''
+    if kind in ('deepinfra', 'mistral') or cfg.get('efforts') or cfg.get('effort'):
+        return 'reasoning'      # (an effort set on an older config without a provider kind is sent as before)
+    return ''
+
+
+def default_level(cfg):
+    """The lab's recommended level for this brain, or '' (the model's own default)."""
+    ln = line(cfg)
+    if ln == 'anthropic':
+        return 'medium'
+    if ln in ('scale', 'onoff'):
+        return card(cfg.get('model')).get('default') or ('xhigh' if ln == 'scale' else 'medium')
+    return card(cfg.get('model')).get('default', '')
+
+
+def always_thinks(cfg):
+    """An Anthropic model that refuses thinking off (current Opus and Sonnet): none runs as low there."""
+    from .model import THINKING_REQUIRED
+    return line(cfg) == 'anthropic' and cfg.get('model') in THINKING_REQUIRED
+
+
+def template_line(cfg, level):
+    """The effort line the local template writes first in the system message for a level: 'xhigh' and 'low' write
+    their own, medium and none write none (the Qwen3.8 template). A change of it rewrites the prompt from its
+    first token, so the server reads the whole conversation again; a model with thinking on or off only has none."""
+    if line(cfg) != 'scale':
+        return ''
+    real = runs_as(cfg, level)
+    return real if real in ('xhigh', 'low') else ''
+
+
+def runs_as(cfg, level):
+    """The level the model really runs (the nearest it has)."""
+    ln, level = line(cfg), normalize(level)
+    if level == 'none' and always_thinks(cfg):
+        return 'low'
+    if ln == 'scale':
+        return {'high': 'xhigh', 'max': 'xhigh'}.get(level, level)
+    if ln == 'onoff':
+        return 'none' if level == 'none' else 'on'
+    if ln == 'reasoning':
+        return {'xhigh': 'high', 'max': 'high'}.get(level, level)
+    return level
+
+
+def resolve(cfg, short=False):
+    """What the transport sends for the effort in force: dict(model=ID or None, reasoning_effort=... or None,
+    anthropic_effort=... or None, thinking_off=bool). short: a side call (the judge) runs with thinking off."""
+    ln = line(cfg)
+    level = normalize(cfg.get('effort')) or default_level(cfg)
+    if short and (level or ln in ('scale', 'onoff')):
+        level = 'none'      # (a provider whose model shows no effort control gets no reasoning field at all)
+    out = dict(model=None, reasoning_effort=None, anthropic_effort=None, thinking_off=False)
+    if ln in ('scale', 'onoff'):
+        variants = cfg.get('model_variants') or {}
+        real = runs_as(cfg, level)
+        out['model'] = variants.get(real) if real in variants else cfg.get('model')
+        out['thinking_off'] = real == 'none' and 'none' not in variants
+    elif ln == 'anthropic':
+        if level == 'none' and always_thinks(cfg):
+            out['anthropic_effort'] = 'low'
+        elif level == 'none':
+            out.update(anthropic_effort='high', thinking_off=True)   # (thinking off is accepted up to high)
+        else:
+            out['anthropic_effort'] = level or 'medium'
+    elif ln == 'reasoning' and level:
+        out['reasoning_effort'] = runs_as(cfg, level)
+    return out
+
+
+def note(cfg):
+    """One line for /effort: how this model runs the scale."""
+    ln = line(cfg)
+    if ln == 'scale':
+        return ('on this model high and max run as xhigh. Pick the level at the start of a chat; on the Qwen3.8 '
+                'models a change re-reads the conversation once')
+    if ln == 'onoff':
+        return 'this model only has thinking on or off: none turns it off, every other level is on'
+    if ln == 'reasoning':
+        return 'on this model xhigh and max run as high'
+    if ln == 'anthropic' and always_thinks(cfg):
+        return 'this model always thinks: none runs as low'
+    if ln == 'anthropic':
+        return 'none turns thinking off (sent with effort high)'
+    return 'this model has no effort control'
+
+
+def sampling(cfg, remote):
+    """The sampling fields to send: the config's own when set; else a paid brain's card values; else none (a local
+    server applies its model's defaults)."""
+    out = {k: cfg[k] for k in ('temperature', 'top_k', 'top_p', 'min_p', 'presence_penalty') if k in cfg}
+    if out or not remote:
+        return out
+    return dict(card(cfg.get('model')).get('sampling') or {})
+
+
+def reply_limit(cfg, remote):
+    """A reply's token limit: config max_tokens when set; a local brain the card's maximum output, at most 64K (the
+    owner's cap); a paid brain 4096 (its catalog maximum, up to 64K, is set as max_tokens when it is picked)."""
+    if cfg.get('max_tokens') is not None:
+        return int(cfg['max_tokens'])
+    if remote:
+        return 4096
+    return min(int(card(cfg.get('model')).get('max_output') or LOCAL_CAP), LOCAL_CAP)

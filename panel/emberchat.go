@@ -2747,7 +2747,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 var slashCommands = []struct{ name, hint string }{
 	{"/cancel", "cancel the selected goal"},
 	{"/compact", "summarize this goal's history into memory now"},
-	{"/effort", "reasoning depth LEVEL among the model's; alone, its levels"},
+	{"/effort", "how hard it thinks: none, low, medium, high, xhigh, max (the model's nearest); alone, what this model does"},
 	{"/model", "pick the brain: the models overlay; or /model ID"},
 	{"/advisor", "the advisor reviews the goal now and the agent reads it before its next step"},
 	{"/pause", "pause the selected goal at its next step; /resume continues it"},
@@ -3030,7 +3030,7 @@ func (m emberModel) chatFoot(w int) string {
 	if ag := m.activeGoal(); ag != nil && m.compactingNote(ag.ID) != "" {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
-	statusBar := statusLine(status{brain: residentText(m.resident.Model), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
+	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
 		tps: m.resident.TokPerS, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip

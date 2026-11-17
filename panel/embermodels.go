@@ -123,10 +123,14 @@ func setEffort(m emberModel, level string) tea.Cmd {
 		var out struct {
 			Effort *string  `json:"effort"`
 			Levels []string `json:"levels"`
-			Model  string   `json:"model"`
+			Model   string   `json:"model"`
+			Summary string   `json:"summary"`
 		}
 		if err := residentJSON(m, args, &out); err != nil {
 			return residentActionMsg{"effort: " + err.Error()}
+		}
+		if out.Summary != "" { // the level, what it runs as on this model, and the cache note (the resident's words)
+			return residentActionMsg{residentText(out.Summary)}
 		}
 		cur := "the model's default"
 		if out.Effort != nil && *out.Effort != "" {
@@ -294,4 +298,12 @@ func emergencyStop(m emberModel, arg string) tea.Cmd {
 		}
 		return residentActionMsg{text}
 	}
+}
+
+// withEffort is a model name with its effort level ("swift-1.5 · xhigh"), or the name alone.
+func withEffort(model, effort string) string {
+	if model == "" || effort == "" {
+		return model
+	}
+	return model + " · " + effort
 }

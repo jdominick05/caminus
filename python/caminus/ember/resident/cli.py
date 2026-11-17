@@ -41,6 +41,14 @@ def _online_s(pid):
     except (TypeError, ValueError, OSError, IndexError):
         return None
 
+def _effort_shown(cfg):
+    """The effort in force as the status line shows it (the level that runs; '' with no effort control)."""
+    from . import effort as eff
+    if not eff.line(cfg):
+        return ''
+    return eff.runs_as(cfg,cfg.get('effort') or eff.default_level(cfg))
+
+
 def _current(cfg):
     keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
@@ -120,51 +128,88 @@ def model_ops(a,home):
         if not a.id:
             emit(dict(current=_current(cfg)),a.json);return 0
         cat=catalog.load(home)
+        a.level_from_id=None
         entry=catalog.find(cat,a.id,a.provider)
         if entry is None:
             cat=catalog.refresh(home,cfg)
             entry=catalog.find(cat,a.id,a.provider)
+        if entry is None:
+            # a local effort id (k3-coder-xhigh): its base model at that level
+            from . import effort as eff
+            for lvl,suffix in eff.SUFFIX.items():
+                if a.id.endswith(suffix):
+                    entry=catalog.find(cat,a.id[:-len(suffix)],a.provider)
+                    if entry is not None and (entry.get('variants') or {}).get(lvl)==a.id:
+                        a.level_from_id=lvl
+                        break
+                    entry=None
         if entry is None:
             raise ValueError(f'no model {a.id} in the catalog: `models --refresh` lists what the providers serve')
         spec=catalog.providers(cfg).get(entry['provider'])
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking'):
+        for k in ('relay','prices','context','thinking','model_variants'):
             cfg.pop(k,None)
+        if cfg.pop('max_tokens_auto',None):
+            cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
         if cfg.get('compaction_model') and catalog.find(cat,cfg['compaction_model'],entry['provider']) is None:
             cfg.pop('compaction_model')
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])
-        if entry.get('max_output'):
-            # a paid brain bills what it writes: its catalog maximum (up to 64K), not a local server's limit
-            cfg['max_tokens']=min(int(entry['max_output']),65536)
+        if entry.get('variants'):
+            cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
+        if entry.get('max_output') and spec['kind']!='local':
+            # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
+            cfg['max_tokens'],cfg['max_tokens_auto']=min(int(entry['max_output']),65536),True
         if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
             cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
-        levels=entry.get('efforts') or []
-        if cfg.get('effort') not in levels:
+        # the effort level stays when the new brain has effort control (every level runs as its nearest); with none it
+        # goes back to the default
+        from . import effort as eff
+        note='a running resident takes it at its next turn'
+        if cfg.get('effort') and not eff.line(cfg):
             cfg.pop('effort',None)
-            if 'medium' in levels:cfg['effort']='medium'
+            note+='; this model has no effort control, so the effort is back to its default'
+        if a.level_from_id:
+            cfg['effort']=a.level_from_id
         if cfg.get('api')=='openai':
             cfg.pop('api',None)               # openai is the default transport
         atomic_json(home/'config.json',cfg)
-        emit(dict(current=_current(cfg),entry=entry,note='a running resident takes it at its next turn'),a.json);return 0
+        emit(dict(current=_current(cfg),entry=entry,note=note),a.json);return 0
     if a.op=='effort':
-        cat=catalog.load(home)
-        try:entry=catalog.find(cat,cfg.get('model',''),cfg.get('provider'))
-        except ValueError:entry=None
-        levels=(entry or {}).get('efforts') or []
+        # one scale on every brain (none .. max); the model runs each level as its nearest (effort.py)
+        from . import effort as eff
+        line=eff.line(cfg)
+        levels=list(eff.LEVELS) if line else []
+        before=eff.template_line(cfg,cfg.get('effort') or eff.default_level(cfg))
         if a.level:
-            if a.level=='default':
+            level=eff.normalize(a.level)
+            if level=='default':
                 cfg.pop('effort',None)
-            elif entry is not None and a.level not in levels:
-                raise ValueError('%s offers %s' % (cfg.get('model'), ', '.join(levels) if levels else 'no effort control'))
+            elif not line:
+                raise ValueError('%s has no effort control' % cfg.get('model'))
+            elif level not in eff.LEVELS:
+                raise ValueError('effort is one of %s, or default' % ', '.join(eff.LEVELS))
             else:
-                cfg['effort']=a.level
+                cfg['effort']=level
             atomic_json(home/'config.json',cfg)
-        emit(dict(effort=cfg.get('effort'),levels=levels,model=cfg.get('model')),a.json);return 0
+        current=cfg.get('effort') or eff.default_level(cfg)
+        runs=eff.runs_as(cfg,current) if current else ''
+        summary='effort %s%s' % (current or "the model's default",
+                                  ' (the lab\'s default)' if current and not cfg.get('effort') else '')
+        if runs and runs!=current:
+            summary+=' · runs as '+runs
+        summary+=' · '+cfg.get('model','')+': '+eff.note(cfg)
+        if a.level and eff.template_line(cfg,current)!=before:
+            # the template's effort line is the system message's first text: the server reads the conversation again
+            try:used=int(json.loads((home/'context.json').read_text()).get('tokens') or 0)
+            except (OSError,ValueError,AttributeError,TypeError):used=0
+            summary+=' · switching re-reads the conversation once'+(' (%dK tokens)' % (used//1000) if used>8000 else '')
+        emit(dict(effort=cfg.get('effort'),current=current,runs_as=runs,levels=levels,model=cfg.get('model'),
+                  summary=summary),a.json);return 0
 
 
 def parser():
@@ -702,6 +747,7 @@ def main(argv=None,stdin=None):
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
                       compact_threshold=trig,compact_target_ratio=targ,
+                      effort=_effort_shown(cfg),
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
                       online_s=_online_s(heartbeat.get('pid')),**store.status()),True)

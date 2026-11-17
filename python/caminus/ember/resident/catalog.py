@@ -109,6 +109,22 @@ def openai_entries(data, provider, context=None):
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
 
 
+def local_entries(data, provider, context=None):
+    """A local Caminus server's models, one entry per base model: its -low / -xhigh / -nothink ids are that model's
+    effort levels (effort.py), not models of their own. efforts lists the scale (every level runs as the nearest the
+    model has); variants maps a level to the id that runs it; max_output is the card's (the reply limit: up to 64K)."""
+    from . import effort
+    ids = [m['id'] for m in data.get('data') or []]
+    out = []
+    for base, variants in effort.group_local(ids).items():
+        cfg = dict(provider_kind='local', model=base, model_variants=variants)
+        line = effort.line(cfg)
+        out.append(dict(id=base, name=base, provider=provider, context=context,
+                        max_output=effort.card(base).get('max_output'), efforts=list(effort.LEVELS) if line else [],
+                        variants=variants, thinking='', vision=False, prices=None))
+    return out
+
+
 def discover(name, spec, opener=urllib.request.urlopen, key=None):
     """One provider's entries. spec: {kind, endpoint}. key: an API key to send (none through a relay)."""
     kind, base = spec.get('kind', 'openai'), spec['endpoint'].rstrip('/')
@@ -130,6 +146,8 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
             context = _get(_root(base) + '/props', headers, opener).get('n_ctx')
         except (OSError, ValueError, urllib.error.HTTPError):
             pass
+    if kind == 'local':
+        return local_entries(data, name, context)
     return openai_entries(data, name, context)
 
 

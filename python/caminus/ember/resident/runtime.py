@@ -410,7 +410,7 @@ class Runtime:
                          f'Assisted-by trailer, a report), name this model, not one you see in your history.')
         # The reply limit: a reply past it is cut off and nothing in it runs, so the agent must know it beforehand.
         parts.append(f"REPLY LIMIT: each reply, text and tool calls together, is at most "
-                     f"{int(self.config.get('max_tokens',4096)):,} tokens. Write a big file in parts (write, then edit "
+                     f"{self._reply_limit():,} tokens. Write a big file in parts (write, then edit "
                      f"or further writes) rather than in one call.")
         if (note := self._context_budget(gid)):
             parts.append(note.strip())
@@ -495,7 +495,7 @@ class Runtime:
             return ''
         trigger, _ = self.compaction_ratios()
         trigger_tokens = int(size * trigger)
-        reserve = min(int(self.config.get('max_tokens',4096)),size // 4)
+        reserve = min(self._reply_limit(),size // 4)
         limit = min(trigger_tokens,size - reserve)
         if not same:
             return (f'\n\nContext budget: no measured count for this goal yet; the window is {size:,} tokens and '
@@ -1303,7 +1303,7 @@ class Runtime:
         # paused on a context error instead of compacting.
         tail = [c] if (c := self.context_message(gid)) else []
         size = self.free.window(gid, self.model.context_size())   # free time keeps inside the server's side slot
-        reserve = min(int(self.config.get('max_tokens',4096)), size // 4)
+        reserve = min(self._reply_limit(), size // 4)
         before_tokens = self.model.tokens([system, *messages, *tail], self.tools)
         trigger, target = self.compaction_ratios()
         trigger_tokens, target_tokens = int(size * trigger), int(size * target)
@@ -1667,6 +1667,14 @@ class Runtime:
             note = '[gate] the done check\'s gate fails now:\n' + out[-3000:]
         self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
 
+    def _reply_limit(self):
+        """A reply's token limit for the brain in force (effort.reply_limit: config max_tokens, else a local brain's
+        card maximum up to 64K, a paid one's 4096)."""
+        from . import effort
+        if hasattr(self.model, 'reply_limit'):
+            return self.model.reply_limit()
+        return effort.reply_limit(self.config, getattr(self.model, 'remote', False))
+
     def compaction_ratios(self):
         """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
         compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
@@ -1914,7 +1922,7 @@ class Runtime:
                 if (budget := self.context_message(gid)):
                     request.append(budget)
                 reply = self.model.complete(request,self.tools,
-                                            max_tokens=min(self._out_boost.get(gid) or int(self.config.get('max_tokens',4096)),
+                                            max_tokens=min(self._out_boost.get(gid) or self._reply_limit(),
                                                            self.model.context_size()//4),
                                             on_delta=live.on_delta)
             finally:
@@ -1974,7 +1982,7 @@ class Runtime:
                     self.store.update(gid,state='waiting_model',error=str(e))
                     self.store.event('model_cut',dict(error=str(e),attempt=attempt),gid)
                     return False
-                limit=self._out_boost.get(gid) or int(self.config.get('max_tokens',4096))
+                limit=self._out_boost.get(gid) or self._reply_limit()
                 boost=min(OUTPUT_BOOST_MAX,limit*2,max(1,self.model.context_size()//4))
                 if isinstance(e,ModelTruncated) and getattr(self.model,'remote',False) and gid not in self._out_boost \
                         and boost>limit:
@@ -1992,7 +2000,7 @@ class Runtime:
                     count=self.truncations.get(gid,0)+1
                     self.truncations[gid]=count
                     if count<TRUNCATION_LIMIT:
-                        limit=int(self.config.get('max_tokens',4096))
+                        limit=self._reply_limit()
                         self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,
                             f'[harness] Your last reply hit the output limit ({limit} tokens) and was cut off, so '
                             'nothing in it ran. Keep each reply under the limit: write a big file in parts (write '
