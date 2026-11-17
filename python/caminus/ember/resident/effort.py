@@ -31,8 +31,8 @@ PAID_CAP = 65536           # a paid brain's output at most (its catalog maximum 
 # known models, matched on the id (lower case): the effort line, the lab's default level, the card's maximum output
 # and, for paid models, the card's sampling
 CARDS = (
-    (r'qwen3-30b|q3moe|qwen3moe', dict(line='onoff', default='medium', max_output=32768)),
-    (r'k3-coder|coder|swift|thinkingcap|qwen3\.8|qwen38', dict(line='scale', default='xhigh', max_output=393216)),
+    (r'qwen3-30b|q3moe|qwen3moe', dict(local=True, default='medium', max_output=32768)),
+    (r'k3-coder|coder|swift|thinkingcap|qwen3\.8|qwen38', dict(local=True, default='xhigh', max_output=393216)),
     (r'deepseek-v4\.1-flash', dict(sampling=dict(temperature=1.0, top_p=1.0))),
     (r'mistral-large-4|mistral-large-latest', dict(default='high', sampling=dict(temperature=1.0, top_p=0.95))),
     (r'mistral-medium-3\.5|mistral-medium-latest', dict(default='high', sampling=dict(temperature=0.7, top_p=0.95))),
@@ -76,9 +76,9 @@ def line(cfg):
         if 'low' in variants or 'xhigh' in variants:
             return 'scale'
         return 'onoff' if 'none' in variants else ''
-    if kind in ('deepinfra', 'mistral') or cfg.get('efforts') or cfg.get('effort'):
-        return 'reasoning'      # (an effort set on an older config without a provider kind is sent as before)
-    return ''
+    if 'efforts' in cfg:        # what the catalog says this model takes (stored by /model)
+        return 'reasoning' if cfg['efforts'] else ''
+    return 'reasoning' if cfg.get('effort') else ''   # (an older config with an effort set: sent as before)
 
 
 def default_level(cfg):
@@ -86,9 +86,12 @@ def default_level(cfg):
     ln = line(cfg)
     if ln == 'anthropic':
         return 'medium'
+    c = card(cfg.get('model'))
     if ln in ('scale', 'onoff'):
-        return card(cfg.get('model')).get('default') or ('xhigh' if ln == 'scale' else 'medium')
-    return card(cfg.get('model')).get('default', '')
+        return (c.get('default') if c.get('local') else '') or ('xhigh' if ln == 'scale' else 'medium')
+    if ln == 'reasoning' and not c.get('local'):
+        return c.get('default', '')   # (a local card's default never applies to a paid model of the same family)
+    return ''
 
 
 # How each Claude model turns thinking off (Anthropic's error-code docs): 'disabled' at effort high or below (Haiku 5.5,
@@ -206,8 +209,14 @@ def sampling(cfg, remote):
 def reply_limit(cfg, remote):
     """A reply's token limit: config max_tokens when set; a local brain the card's maximum output, at most 64K (the
     owner's cap); a paid brain 4096 (its catalog maximum, up to 64K, is set as max_tokens when it is picked)."""
-    if cfg.get('max_tokens') is not None:
+    if cfg.get('max_tokens') is not None and not _legacy_limit(cfg, remote):
         return int(cfg['max_tokens'])
     if remote:
         return 4096
     return min(int(card(cfg.get('model')).get('max_output') or LOCAL_CAP), LOCAL_CAP)
+
+
+def _legacy_limit(cfg, remote):
+    """agent init wrote max_tokens 4096 into every config before the per-model limits: on a local brain that value is
+    the old default, not the owner's choice, so it gives way to the card's limit."""
+    return not remote and cfg.get('max_tokens') == 4096 and not cfg.get('max_tokens_auto')

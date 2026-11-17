@@ -1784,7 +1784,8 @@ class Runtime:
         return True
 
     MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
-                  'provider', 'provider_kind', 'api_key_env', 'temperature')
+                  'provider', 'provider_kind', 'api_key_env', 'temperature', 'top_p', 'top_k', 'min_p',
+                  'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto')   # (a /model takes effect whole)
 
     def _stamp(self):
         try:

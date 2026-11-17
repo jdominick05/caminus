@@ -149,7 +149,7 @@ def model_ops(a,home):
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking','model_variants'):
+        for k in ('relay','prices','context','thinking','model_variants','efforts'):
             cfg.pop(k,None)
         if cfg.pop('max_tokens_auto',None):
             cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
@@ -161,6 +161,8 @@ def model_ops(a,home):
         if entry.get('context'):cfg['context']=int(entry['context'])
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
+        elif spec['kind'] not in ('local','anthropic'):
+            cfg['efforts']=list(entry.get('efforts') or [])   # whether this model takes reasoning_effort at all
         if entry.get('max_output') and spec['kind']!='local':
             # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
             cfg['max_tokens'],cfg['max_tokens_auto']=min(int(entry['max_output']),65536),True
@@ -237,7 +239,7 @@ def parser():
             p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1')
             p.add_argument('--bridge',default=os.environ.get('CAMINUS_ENV_BRIDGE','/srv/caminus-env-bridge'))
             p.add_argument('--context',type=int)
-            p.add_argument('--max-tokens',type=int,default=4096)
+            p.add_argument('--max-tokens',type=int,help='one reply\'s token limit (default: the model\'s own, effort.reply_limit)')
             p.add_argument('--compact-threshold',type=float,default=.85)
             p.add_argument('--compact-target-ratio',type=float,default=.2)
             p.add_argument('--compaction-model',help='optional model alias for summaries on the same endpoint')
@@ -454,7 +456,8 @@ def main(argv=None,stdin=None):
             if a.model:
                 # a local brain in place of the sibling's: as /model does, drop what belonged to a paid one (its relay,
                 # prices, window, thinking, effort) and keep the providers so /model can switch back
-                cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'),max_tokens=4096)
+                cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
+                cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
                 # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
                 for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
@@ -482,7 +485,7 @@ def main(argv=None,stdin=None):
         if a.op=='init':
             if not 0 < a.compact_target_ratio < a.compact_threshold < 1:
                 raise ValueError('compaction ratios must satisfy 0 < target < threshold < 1')
-            if a.max_tokens<1 or a.context is not None and a.context<1024:
+            if (a.max_tokens is not None and a.max_tokens<1) or a.context is not None and a.context<1024:
                 raise ValueError('invalid model context or output budget')
             home.mkdir(parents=True,exist_ok=True,mode=0o700)
             cfg=dict(name=a.name,model=a.model,endpoint=a.endpoint.rstrip('/'),bridge=a.bridge,

@@ -2681,8 +2681,10 @@ for line in sys.stdin:
         self.assertEqual((flash['temperature'],flash['top_p']),(1.0,1.0))
         unknown=run(dict(endpoint='https://api.deepinfra.com/v1/openai',model='some/new-model',provider_kind='deepinfra'))
         self.assertNotIn('temperature',unknown,'an unknown model gets its provider\'s defaults')
-        mistral=run(dict(endpoint='https://api.mistral.ai/v1',model='mistral-large-4',provider_kind='mistral'))
-        self.assertEqual((mistral['temperature'],mistral['top_p'],mistral['reasoning_effort']),(1.0,0.95,'high'))
+        mistral=run(dict(endpoint='https://api.mistral.ai/v1',model='mistral-large-4',provider_kind='mistral',efforts=['low','medium','high']))
+        self.assertEqual((mistral['temperature'],mistral['top_p'],mistral['reasoning_effort']),(1.0,0.95,'high'),'the card\'s default effort')
+        plain=run(dict(endpoint='https://api.mistral.ai/v1',model='mistral-large-4',provider_kind='mistral',efforts=[]))
+        self.assertNotIn('reasoning_effort',plain,'a model the catalog lists without reasoning gets no effort field')
         for model,want in (('claude-haiku-5-5',('high',True)),('claude-opus-5-5',('low',False))):
             m=Model(dict(endpoint='https://api.anthropic.com/v1',model=model,api='anthropic',provider_kind='anthropic',
                          context=200000,effort='none',temperature=0.6,top_p=0.9))
@@ -2710,6 +2712,29 @@ for line in sys.stdin:
             self.assertEqual(body['output_config']['effort'],'xhigh')
             eff.anthropic_thinking_off(body)
             self.assertEqual((body.get('thinking'),body['output_config']['effort']),(thinking,level),model+': a short call')
+
+    def test_review_fixes_for_the_effort_scale(self):
+        from caminus.ember.resident import effort as eff
+        from caminus.ember.resident.model import Model
+        # init's old max_tokens 4096 on a local brain gives way to the card's limit; on a paid one it stays
+        self.assertEqual(Model(dict(model='swift-1.5',endpoint='http://127.0.0.1:8092/v1',max_tokens=4096)).reply_limit(),65536)
+        self.assertEqual(Model(dict(model='swift-1.5',endpoint='http://127.0.0.1:8092/v1',max_tokens=2048)).reply_limit(),2048)
+        self.assertEqual(Model(dict(model='x',endpoint='https://api.example.com/v1',max_tokens=4096)).reply_limit(),4096)
+        # a provider model the catalog lists without reasoning gets no effort field, whatever was set before
+        self.assertEqual(eff.line(dict(provider_kind='deepinfra',efforts=[],effort='high')),'')
+        self.assertEqual(eff.resolve(dict(provider_kind='deepinfra',efforts=[],effort='high'))['reasoning_effort'],None)
+        # a paid model of a local family does not take the local card's default (Qwen3-Coder on DeepInfra)
+        self.assertEqual(eff.default_level(dict(provider_kind='deepinfra',model='Qwen/Qwen3-Coder-480B',efforts=['low','medium','high'])),'')
+        # a running resident takes a /model whole: the variants and the sampling keys
+        rt=Runtime(self.home)
+        try:
+            conf=json.loads((self.home/'config.json').read_text())
+            conf.update(model='swift-1.5',provider_kind='local',model_variants=dict(none='swift-1.5-nothink',xhigh='swift-1.5-xhigh'),top_p=0.9)
+            (self.home/'config.json').write_text(json.dumps(conf))
+            rt._follow_config()
+            self.assertEqual((rt.model.config.get('model_variants'),rt.model.config.get('top_p')),
+                             (dict(none='swift-1.5-nothink',xhigh='swift-1.5-xhigh'),0.9))
+        finally:rt.mail.close();rt.store.close()
 
     def test_the_openai_transport_sends_reasoning_effort(self):
         from caminus.ember.resident.model import Model
