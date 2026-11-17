@@ -90,6 +90,8 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var emberNavigation = []int{7, 5, 8, 3, 4}
 
 type emberModel struct {
+	hosted         ctl // /panel: the Caminus panel component, full screen while hostedOpen (emberpanel.go)
+	hostedOpen     bool
 	notes          notifier // desktop notifications already shown (notify.go)
 	user           string
 	bridge         string
@@ -536,6 +538,9 @@ func parseServers(out string) []server {
 // ---------------------------------------------------------------- model
 
 func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.hostedOpen { // /panel is open: it takes the keys; the rest still reaches the chat underneath (emberpanel.go)
+		return m.panelUpdate(msg)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -1237,6 +1242,9 @@ func (m emberModel) render() string {
 	// The chat is the only screen; the old pages' content opens as overlays (envpages.go). renderPages is kept only
 	// for the page tests and is never reached from a key.
 	m.initChat()
+	if m.hostedOpen {
+		return m.hosted.View(max(20, m.width), max(12, m.height)) // /panel, in the whole frame
+	}
 	return m.renderChat()
 }
 

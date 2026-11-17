@@ -78,6 +78,7 @@ it; the durable blocks replace it when the turn lands.
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
 | `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
+| `/panel` | the Caminus panel (models, servers, the cards) full screen inside Ember; Esc, q or e comes back to the chat as it was |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
 | `/halt` | the emergency stop (`/halt clear` lifts it) |
 | `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |

@@ -2470,6 +2470,9 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	case "/effort":
 		clear()
 		return m, setEffort(m, strings.TrimSpace(arg))
+	case "/panel":
+		clear()
+		return m.openPanel()
 	case "/studio":
 		clear()
 		m.chat.studio = studioState{open: true, loading: true}
@@ -2579,6 +2582,7 @@ var slashCommands = []struct{ name, hint string }{
 	{"/rewind", "back to an earlier step, files included"},
 	{"/plan", "alone: the whole plan; TEXT starts a goal that plans first; approve or revise answers a waiting plan"},
 	{"/studio", "what free time made: the shelf, the journal, the studio"},
+	{"/panel", "the Caminus panel: models, servers and the cards (Esc comes back)"},
 }
 
 // slashMatches returns the commands whose name the draft token still prefixes.
