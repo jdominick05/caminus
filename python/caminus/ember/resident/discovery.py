@@ -8,6 +8,7 @@ apt-cache, docker/podman image ls), with a timeout and output cap.
 import datetime
 import grp
 import importlib.util
+import math
 import os
 from pathlib import Path
 import platform
@@ -34,10 +35,10 @@ COMMANDS = {
     'packages': ('apt','apt-cache','apt-get','dpkg-query'),
 }
 # The commands search reads the man pages' one-line descriptions (apropos), so "ocr" finds tesseract. These are the
-# capability words those lines miss for common tools (ffmpeg's says "media converter"); a COMMANDS category name
+# capability words those lines miss for common tools (ffmpeg's says "media converter", vlc's "media player"; ocr is
+# here for machines without a man index); a COMMANDS category name
 # (image, document, ...) also counts as a word for its tools.
-WORDS = {'video': ('ffmpeg','ffprobe','ffplay','mpv','vlc'), 'audio': ('ffmpeg','ffprobe','ffplay','sox','mpv','vlc'),
-         'ocr': ('tesseract',)}
+WORDS = {'video': ('ffmpeg','ffprobe','ffplay','vlc'), 'audio': ('ffmpeg','ffprobe','ffplay','vlc'), 'ocr': ('tesseract',)}
 MODULES = ('requests','bs4','playwright','selenium','PIL','cv2','numpy','scipy','pandas',
            'matplotlib','Crypto','sympy','z3','scapy','pyzbar')
 
@@ -121,16 +122,20 @@ def _path_names():
 
 
 def _commands(query, cap=64):
-    """Rank PATH executables by how many query words hit their name, man-page line, COMMANDS category or WORDS entry;
-    ties go to hits by name or table over man-page hits, then to the rarer words. Nothing found is executed; apropos reads man-db's index (one bounded call)."""
+    """Rank PATH executables by the query words that hit their name, man-page line, COMMANDS category or WORDS entry,
+    each word weighted by its rarity (a word that hits every other program, like "tool", adds almost nothing); ties go
+    to hits by name or table over man-page hits. Nothing found is executed: apropos reads man-db's index."""
     words=list(dict.fromkeys(re.findall(r'[a-z0-9][\w+.-]*',query.casefold())))[:8]
+    if any(len(w)>2 for w in words):words=[w for w in words if len(w)>2]   # "a", "to": filler beside real words
     names,limited=_path_names()
     about={}
-    # Only plain words reach apropos (its keywords are regular expressions; `--` ends its options).
-    if (plain:=[w for w in words if re.fullmatch(r'[a-z0-9][a-z0-9_-]*',w)]) and (apropos:=shutil.which('apropos')):
-        for line in _probe([apropos,'--long','-s','1:6:8','--',*plain],limit=262144).get('output','').splitlines():
-            if m:=re.match(r'(.+?) \([^)]*\)\s+- (.*)',line):
-                for name in m.group(1).split(', '):about.setdefault(name.strip(),m.group(2).strip())
+    # One bounded call per word, so a common word's long output can't crowd out a rare one's lines. Only plain words
+    # reach apropos (its keywords are regular expressions; `--` ends its options).
+    if apropos:=shutil.which('apropos'):
+        for word in (w for w in words if re.fullmatch(r'[a-z0-9][a-z0-9_-]+',w)):
+            for line in _probe([apropos,'--long','-s','1:6:8','--',word],limit=262144).get('output','').splitlines():
+                if m:=re.match(r'(.+?) \([^)]*\)\s+- (.*)',line):
+                    for name in m.group(1).split(', '):about.setdefault(name.strip(),m.group(2).strip())
     tags={}
     for table in (COMMANDS,WORDS):
         for word,tools in table.items():
@@ -140,8 +145,8 @@ def _commands(query, cap=64):
         text=about.get(name,'').casefold()
         strong[name]={w for w in words if w in name.casefold() or w in tags.get(name,())}
         if hit:=strong[name]|{w for w in words if re.search(r'(?<![a-z0-9])'+re.escape(w),text)}:hits[name]=hit
-    count={w:sum(w in hit for hit in hits.values()) for w in words}
-    ranked=sorted(hits,key=lambda name:(-len(hits[name]),-len(strong[name]),-sum(1/count[w] for w in hits[name]),name))
+    weight={w:math.log((len(names)+1)/max(1,sum(w in hit for hit in hits.values()))) for w in words}
+    ranked=sorted(hits,key=lambda name:(-round(sum(weight[w] for w in hits[name]),6),-len(strong[name]),name))
     found=[(name,path,about.get(name,'')) for name in ranked[:cap] if (path:=shutil.which(name))]
     return found,limited or len(ranked)>cap
 

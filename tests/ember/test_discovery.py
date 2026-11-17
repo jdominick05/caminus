@@ -54,13 +54,17 @@ class Discovery(unittest.TestCase):
                 video=discovery.discover(td,'commands','video')
                 odd=discovery.discover(td,'commands','.* -- ?')
                 flag=discovery.discover(td,'commands','ocr --config-file=x')
+                filler=discovery.discover(td,'commands','tool to ocr a pdf')
             self.assertFalse((Path(td)/'SHOULD_NOT_RUN').exists())
         self.assertEqual(ocr['matches'],{'tesseract':td+'/tesseract','pdf-and-ocr-tool':td+'/pdf-and-ocr-tool'})
         self.assertEqual(ocr['about']['tesseract'],'command-line OCR engine')
-        # Ranked by how many words hit, then by the rarer word (ocr hits 2 tools, pdf 3); grep is on no PATH here.
+        # Ranked by the words hit, each weighted by rarity (ocr hits 2 tools, pdf 3); grep is on no PATH here.
         self.assertEqual(list(multi['matches']),['pdf-and-ocr-tool','tesseract','pdfinfo','pdftotext'])
         self.assertIn('ffmpeg',video['matches'])          # the man page says "media converter": the short table's word
         self.assertEqual(odd['matches'],{});self.assertIn('tesseract',flag['matches'])
+        # "a" and "to" hit almost every name: beside real words they are dropped, and they never reach apropos
+        self.assertEqual(list(filler['matches'])[:2],['pdf-and-ocr-tool','tesseract'])
+        self.assertFalse({'a','to'}&{argv[-1] for argv in calls})
         self.assertTrue(all(argv[-1]!='.*' and '--config-file=x' not in argv[argv.index('--')+1:] for argv in calls))
         with self.assertRaises(ValueError):discovery.discover('.','commands','  ')
 
