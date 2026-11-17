@@ -9,6 +9,7 @@ package main
 // tokens it has written, how many actions, what the goal has cost.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -135,6 +136,9 @@ func (m emberModel) activityLine(w int) string {
 		heat = 2 - heat
 	}
 	spin := lipgloss.NewStyle().Foreground(lipgloss.Color(blendHex(themeRole("hot"), themeRole("warn"), heat))).Bold(true).Render(frames[f])
+	if m.waitingForYou(gl.ID) { // parked on wait(until=message): no work, no spinner; it waits for your words
+		return ansi.Truncate(" "+emberWarn.Render("◌ waiting for your message")+emberDim.Render("  · type below to answer"), max(10, w), "…")
+	}
 	verb := emberVerbs[(m.spinN/55+len(gl.ID))%len(emberVerbs)] + "…" // a new word every ~6 s
 	doing := ""
 	l := m.chat.live
@@ -175,4 +179,35 @@ func (m emberModel) activityLine(w int) string {
 		line += emberDim.Render("  · esc interrupts")
 	}
 	return ansi.Truncate(line, max(10, w), "…")
+}
+
+// waitingForYou: the goal's newest call is wait(until=message) and it has not returned: the agent is parked until you
+// write (the header said "working" with the spinner going).
+func (m emberModel) waitingForYou(goal string) bool {
+	for i := len(m.residentEvents) - 1; i >= 0; i-- {
+		e := m.residentEvents[i]
+		if e.Goal != goal {
+			continue
+		}
+		switch e.Kind {
+		case "tool_result", "user_message":
+			return false
+		case "assistant":
+			calls, _ := e.Data["tool_calls"].([]any)
+			if len(calls) == 0 {
+				return false
+			}
+			c, _ := calls[len(calls)-1].(map[string]any)
+			f, _ := c["function"].(map[string]any)
+			if name, _ := f["name"].(string); name != "wait" {
+				return false
+			}
+			raw, _ := f["arguments"].(string)
+			var args struct {
+				Until string `json:"until"`
+			}
+			return json.Unmarshal([]byte(raw), &args) == nil && args.Until == "message"
+		}
+	}
+	return false
 }

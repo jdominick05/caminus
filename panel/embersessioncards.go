@@ -252,7 +252,11 @@ func (m emberModel) pickerBox() string {
 	} else if m.chat.pickerNew {
 		lines = append(lines, emberClip(" "+emberWarn.Render("new session:")+" "+residentText(m.chat.pickerName)+"█"+emberDim.Render("  Enter creates · Esc cancels"), w))
 	} else {
-		lines = append(lines, emberDim.Render(emberClip(" ←↑↓→ choose · Enter or click switches · n new · x x destroy · s start/stop · Esc back", w)))
+		hint := " ←↑↓→ choose · Enter or click switches · n new · x x destroy · s start/stop · Esc back"
+		if ansi.StringWidth(hint) > w { // a narrow terminal cut it before "Esc back": the short form keeps every key
+			hint = " ↵ switch · n new · x x destroy · s start/stop · Esc back"
+		}
+		lines = append(lines, emberDim.Render(emberClip(hint, w)))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -384,7 +384,7 @@ func (m emberModel) themesOverlay(w, h int) string {
 	preview := themePreview(current, pw)
 	left := lipgloss.NewStyle().Width(listW).Render(strings.Join(list, "\n"))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", preview)
-	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · g symbols · n describe a new one · Esc back", w, h)
+	return overlayBox("THEMES  "+current, body, "↑↓ preview · Enter keep · g symbols · n describe a new one", w, h)
 }
 
 // themePreview draws one of every element the chat uses, in the theme in force.

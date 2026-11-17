@@ -305,11 +305,21 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 		selected = m.chat.selectID
 	}
 	m.goalSel = min(m.goalSel, max(0, len(m.resident.Goals)-1))
+	found := false
 	for i, g := range m.resident.Goals {
 		if g.ID == selected {
 			m.goalSel = i
 			m.chat.selectID = ""
+			found = true
 			break
+		}
+	}
+	// nothing chosen yet (a fresh panel), or the chosen goal was cancelled: the goal being worked on, else the newest
+	// one not cancelled. The newest goal is not the one in progress when later ones were queued and cancelled: the
+	// header, the composer, /compact and /rewind all followed a cancelled goal.
+	if g := m.selectedResidentGoal(); !found || (g != nil && g.State == "cancelled") {
+		if i := m.liveGoalIndex(); i >= 0 {
+			m.goalSel = i
 		}
 	}
 	if m.chat.compose.Value() == "" && !m.chat.sending && !m.chat.forceNew && m.chat.selectID == "" {
@@ -317,6 +327,33 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	}
 	m.syncQuestion()
 	m.syncChat()
+}
+
+// liveGoalIndex is the goal being worked on (or waiting for you), else the newest goal not cancelled; -1 for none.
+func (m emberModel) liveGoalIndex() int {
+	for i, g := range m.resident.Goals {
+		switch g.State {
+		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan", "paused":
+			return i
+		}
+	}
+	for i, g := range m.resident.Goals {
+		if g.State != "cancelled" {
+			return i
+		}
+	}
+	return -1
+}
+
+// humanRefusal says why a request was not filed, for a person: the gate's text addresses the model.
+func humanRefusal(err string) string {
+	switch {
+	case strings.Contains(err, "no done check yet"):
+		return "the agent asked before stating what done looks like"
+	case strings.Contains(err, "already waiting"), strings.Contains(err, "still waiting"):
+		return "another request is already waiting for you"
+	}
+	return firstLine(err)
 }
 
 func (m *emberModel) targetSelectedGoal() {
@@ -477,6 +514,9 @@ func (m emberModel) chatHead(w int) string {
 		if redirected {
 			goalText = "↪ " + goalText
 		}
+	}
+	if sel := m.selectedResidentGoal(); sel != nil && sel.State == "working" && m.waitingForYou(sel.ID) {
+		state = "waiting for you"
 	}
 	if m.statusAt.IsZero() {
 		// no status yet (a session just opened or switched to): its blank state is not "stopped", which flashed
@@ -1141,7 +1181,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
-				parts = append(parts, toolCard("terminal", firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				label := "terminal" // (any call with a command read "terminal": a root request among them)
+				if name == "ask_root" {
+					label = "asks for root"
+				}
+				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, lines(command, 40), w))
 				continue
 			}
 			summary := ""
@@ -1163,10 +1207,28 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return strings.Join(parts, "\n")
 	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
-		if str("name") == "ask_user" {
+		if name := str("name"); name == "ask_user" || name == "ask_root" {
+			// the result of asking you, in your words: the model-facing text ("your human has not answered yet. Work
+			// on…", a gate's refusal) was shown as is, and a question not answered yet drew an empty answer bubble
+			errText, _ := result["error"].(string)
+			if errText != "" {
+				return toolCard(map[string]string{"ask_user": "question", "ask_root": "root request"}[name], "not sent: "+humanRefusal(errText), "", false, c.expanded, lines(errText, 8), w)
+			}
+			if pending, _ := result["pending"].(bool); pending {
+				if name == "ask_root" {
+					return toolCard("root request", "waiting for your approval · Ctrl+A decides", "", true, false, nil, w)
+				}
+				return "" // the question's own card asks it
+			}
 			answer, _ := result["answer"].(string)
 			if answer == "" {
 				answer, _ = result["decision"].(string)
+			}
+			if strings.TrimSpace(answer) == "" {
+				return ""
+			}
+			if name == "ask_root" {
+				return toolCard("root request", answer, "", answer != "denied", false, nil, w)
 			}
 			return turn(g.user, "you · answer", cBlue, c.renderMarkdown(answer))
 		}
@@ -1353,7 +1415,7 @@ func (m emberModel) chatComposer() string {
 			// The path so far is rendered in the inline-code role, then what Tab
 			// can offer: directories in the navigation accent, files resting, and
 			// the absence of any match in the failure color so a typo shows itself.
-			input = emberDim.Render("Tab completes · ") + emberCode.Render(token)
+			hint := emberDim.Render("Tab completes · ") + emberCode.Render(token) // (it overwrote the draft, so it drew twice)
 			if matches := pathMatches(token); len(matches) > 0 {
 				lines := matches
 				if len(lines) > 4 {
@@ -1369,11 +1431,11 @@ func (m emberModel) chatComposer() string {
 					}
 					lines[i] = style.Render(l)
 				}
-				input += emberDim.Render(" · " + strings.Join(lines, "  "))
+				hint += emberDim.Render(" · " + strings.Join(lines, "  "))
 			} else {
-				input += emberCtxHot.Render(" no match")
+				hint += emberCtxHot.Render(" no match")
 			}
-			input = emberClip(input, max(18, m.width-6)) + "\n" + input
+			input = emberClip(hint, max(18, m.width-6)) + "\n" + input
 		}
 	}
 	box := composerBox(input, m.composerTitle(), max(18, m.width-2))
@@ -1567,14 +1629,23 @@ func (m emberModel) btwSection(w int) string {
 }
 
 // helpLines: every command with what it does (the slash menu's two columns), then the keys.
-func helpLines() []string {
+func helpLines(width int) []string {
 	names := make([]string, 0, len(slashCommands))
 	for _, c := range slashCommands {
 		names = append(names, c.name)
 	}
 	slices.Sort(names)
+	// the description wraps at a word under its own column (an 80-column terminal cut it mid-word: "reads it be"), and
+	// a tab never reaches the frame (a custom command's text with one pushed the border out)
+	textW := max(20, width-6-16)
 	row := func(k, v string, w int) string {
-		return lipgloss.NewStyle().Foreground(cText).Bold(true).Render(k) + strings.Repeat(" ", max(1, w-ansi.StringWidth(k))) + emberDim.Render(v)
+		v = strings.ReplaceAll(v, "\t", " ")
+		wrapped := strings.Split(ansi.Wordwrap(v, textW, " "), "\n")
+		out := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(k) + strings.Repeat(" ", max(1, w-ansi.StringWidth(k))) + emberDim.Render(wrapped[0])
+		for _, more := range wrapped[1:] {
+			out += "\n" + strings.Repeat(" ", w) + emberDim.Render(more)
+		}
+		return out
 	}
 	out := []string{emberTitle.Render("commands"), ""}
 	for _, n := range names {
@@ -2320,7 +2391,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 	switch command {
 	case "/help":
 		clear()
-		m.chat.view = textView{open: true, title: "help", lines: helpLines()}
+		m.chat.view = textView{open: true, title: "help", lines: strings.Split(strings.Join(helpLines(m.width), "\n"), "\n")}
 		m.chat.compose.Blur()
 	case "/quit":
 		return m, tea.Quit
@@ -2444,6 +2515,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		// The panel's colors; the transcript's markdown is rebuilt below to pick
 		// up the new roles. Nothing else in the session changes.
 		name := strings.TrimSpace(arg)
+		clear() // (it alone kept "/theme" in the composer: the next command was typed onto it)
 		if name == "" {
 			return m.openThemes(), nil // the theme screen: every theme, previewed on every element
 		}

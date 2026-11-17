@@ -556,7 +556,7 @@ func TestChatFrameStaysSlimWithHintsAndSwitcher(t *testing.T) {
 		next, _ := m.chatKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 		m = next.(emberModel)
 		frame = ansi.Strip(m.render())
-		if !strings.Contains(frame, "sessions") || !strings.Contains(frame, "Enter or click switches") {
+		if !strings.Contains(frame, "sessions") || !(strings.Contains(frame, "Enter or click switches") || strings.Contains(frame, "↵ switch")) {
 			t.Fatalf("%v: switcher panel missing", size)
 		}
 		for _, row := range strings.Split(frame, "\n") {
@@ -2809,5 +2809,58 @@ func TestTheActivityLineSaysEscInterruptsWhileAReplyIsWritten(t *testing.T) {
 	m.chat.live.active = true
 	if line := ansi.Strip(m.activityLine(140)); !strings.Contains(line, "esc interrupts") {
 		t.Fatalf("while a reply is written the activity line says Esc interrupts it: %q", line)
+	}
+}
+
+func TestAMessageOnTheComposerFrameExpires(t *testing.T) {
+	m := chatFixture(t)
+	m = m.toggleLayout()
+	next, _ := m.Update(emberTickMsg(time.Now()))
+	m = next.(emberModel)
+	if m.msg == "" {
+		t.Fatal("it shows first")
+	}
+	m.msgAt = m.msgAt.Add(-7 * time.Second)
+	next, _ = m.Update(emberTickMsg(time.Now()))
+	if next.(emberModel).msg != "" {
+		t.Fatalf("after 6 s it goes: %q", next.(emberModel).msg)
+	}
+}
+
+func TestThemeLeavesNothingInTheComposer(t *testing.T) {
+	m := chatFixture(t)
+	m.chat.compose.SetValue("/theme")
+	next, _ := m.submitCompose()
+	m = next.(emberModel)
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if v := next.(emberModel).chat.compose.Value(); v != "" {
+		t.Fatalf("after /theme and Esc the composer is empty, not %q", v)
+	}
+}
+
+func TestTheChatFollowsTheGoalInProgressNotANewerCancelledOne(t *testing.T) {
+	m := emberModel{agentName: "resident", tab: 6, width: 120, height: 40, mode: "normal"}
+	m.initChat()
+	st := residentStatus{Name: "resident", DaemonAlive: true, Goals: []residentGoal{
+		{ID: "c3", State: "cancelled"}, {ID: "c2", State: "cancelled"}, {ID: "w1", State: "working", Prompt: "the real work"}}}
+	m.receiveResident(residentMsg{agent: "resident", status: st})
+	if g := m.selectedResidentGoal(); g == nil || g.ID != "w1" || m.chat.target != "w1" {
+		t.Fatalf("the header and the composer follow the working goal: %+v target %q", g, m.chat.target)
+	}
+}
+
+func TestWaitingOnYourMessageIsNotWorking(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 40
+	m.resident.DaemonAlive = true
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}
+	m.chat.target = "original"
+	m.residentEvents = []residentEvent{{Goal: "original", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{
+		"id": "w", "function": map[string]any{"name": "wait", "arguments": `{"until":"message"}`}}}}}}
+	if line := ansi.Strip(m.activityLine(140)); !strings.Contains(line, "waiting for your message") {
+		t.Fatalf("parked on wait(until=message): %q", line)
+	}
+	if !strings.Contains(ansi.Strip(m.chatHead(140)), "waiting for you") {
+		t.Fatal("the header says it waits for you")
 	}
 }
