@@ -15,7 +15,7 @@ CAMINUS 0.1.0             XTX ▓▓▓▓▓▓▓░ 21.3/24G   XT ▓▓▓�
   drafter  [auto] off
   KV cache [auto] F16 Q8
   context  [native] long
-  enter starts it
+  enter stops coder and starts it (asks first)
  agents
    Ember set up · e     Qwen Code 0.26.9 · c
 
