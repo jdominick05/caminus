@@ -418,6 +418,29 @@ func (m emberModel) bodyHeight() int {
 
 // chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
 // under them (three at most). The goal was cut at 47 characters before.
+// goalAim is what a goal works toward now: its prompt, or, once a message from its human was followed by a new done
+// check (the goal re-aimed: a user started a block-breaker game and then asked for a design review in the same goal),
+// that message. redirected says which.
+func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
+	text, msg := g.Prompt, ""
+	for _, e := range m.residentEvents {
+		if e.Goal != g.ID {
+			continue
+		}
+		switch e.Kind {
+		case "user_message":
+			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" {
+				msg = t
+			}
+		case "done_check":
+			if msg != "" {
+				text, redirected, msg = msg, true, ""
+			}
+		}
+	}
+	return text, redirected
+}
+
 func (m emberModel) chatHead(w int) string {
 	state := "stopped"
 	if m.resident.DaemonAlive {
@@ -426,7 +449,11 @@ func (m emberModel) chatHead(w int) string {
 	steps, goalText := 0, ""
 	if sel := m.selectedResidentGoal(); sel != nil {
 		state, steps = sel.State, sel.Steps
-		goalText = strings.Join(strings.Fields(residentText(sel.Prompt)), " ")
+		aim, redirected := m.goalAim(sel)
+		goalText = strings.Join(strings.Fields(residentText(aim)), " ")
+		if redirected {
+			goalText = "↪ " + goalText
+		}
 	}
 	if !m.resident.DaemonAlive {
 		// a stopped daemon runs nothing, whatever its goals last recorded: the header said "working" for an hour
@@ -1655,7 +1682,8 @@ func (m emberModel) todoPinned() string {
 	// the task: the current todo item, else the goal itself
 	task, dots := "", ""
 	if goal != nil {
-		task = oneLine(residentText(goal.Prompt))
+		aim, _ := m.goalAim(goal)
+		task = oneLine(residentText(aim))
 		for i := len(m.residentEvents) - 1; i >= 0; i-- {
 			e := m.residentEvents[i]
 			if e.Goal != goal.ID || e.Kind != "todo" {
