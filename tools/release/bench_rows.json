@@ -2445,56 +2445,56 @@
    "cards": "both",
    "timeout": 900,
    "est": 600,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-decode-depth": {
    "command": "$PY -I tools/eval/sweep_262k.py plain $CODER --json $SCRATCH/sweep-plain.json",
    "cards": "both",
    "timeout": 3600,
    "est": 1200,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-dflash-262k-prose": {
    "command": "$PY -I tools/eval/sweep_262k.py k3 $CODER curves --json $SCRATCH/sweep-curves.json",
    "cards": "both",
    "timeout": 3600,
    "est": 1500,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-acc-d281": {
    "command": "$PY -I tests/engine/test_flashnext_e2e.py $ARTIFACTS/refs/d281-short/e2e_prose_decode $ARTIFACTS/refs/d281-short/e2e_code_decode $ARTIFACTS/refs/d281-short/e2e_shell_decode --model $CODER --tp",
    "cards": "both",
    "timeout": 1200,
    "est": 400,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-acc-smoke": {
    "command": "CAMINUS_SMOKE_INSTALLED=1 $PY -I tools/k3_smoke.py --model coder --n 128 --tf 64 --spec dflash --out $SCRATCH/smoke-installed",
    "cards": "both",
    "timeout": 900,
    "est": 600,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has (tools/k3_smoke.py reads the d281-short dumps); rebuild them before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-acc-lc": {
    "command": "$PY -I tools/eval/lc_baseline.py run $ARTIFACTS/qsa/lc --qsa --depths 8192,32768",
    "cards": "both",
    "timeout": 1800,
    "est": 900,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-acc-g4b": {
    "command": "$PY -I tools/eval/sweep_262k.py k3 $CODER g4 --json $SCRATCH/sweep-g4.json && $PY -I tools/eval/sweep_262k.py cmp --json $SCRATCH/sweep-cmp.json",
    "cards": "both",
    "timeout": 1800,
    "est": 700,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-prefill-speed7": {
    "command": "$PY -I tests/prefill/test_prefill_s6.py $CODER speed7 --max-ctx 33024 --reps 3 --json $SCRATCH/prefill-speed7.json",
    "cards": "both",
    "timeout": 1800,
    "est": 500,
-   "blocked": "needs reference dumps under $ARTIFACTS that this machine no longer has; rebuild them (tools/reference/, tools/eval/lc_probes.py build) before this run"
+   "blocked": "not rerun for 0.3.0: its reference dumps were lost and the Coder engine is unchanged in this release (the owner's choice); rebuild the references after 0.3.0"
   },
   "coder-prefill-served": {
    "command": "$PY -I tools/serve_smoke.py --scratch $SCRATCH/serve-smoke --stages server timing --reps 5 --json $SCRATCH/serve-smoke.json",
