@@ -107,8 +107,9 @@ def _miss_hint(before, old, new):
     them with quotes escaped as \\" that the file does not have."""
     # only a new text that carries the change (longer than a few characters, and containing what old did not) can
     # say "already applied": a one-letter new text occurs in any file (an audit's edit "x" claimed it was applied)
-    if new and new != old and len(new.strip()) >= 12 and new in before:
-        return ' (new is already in the file: the edit may have been applied before; read the file to check)'
+    whole_line = new.strip() and new.strip() in {ln.strip() for ln in before.splitlines()}
+    if new and new != old and new in before and (whole_line or len(new.strip()) >= 12):
+        return ' (but new is already there: the edit may have been applied before; read the file to check)'
     if old.strip() and old.strip() in before:
         return ' (it occurs with different leading or trailing whitespace: copy it exactly from read)'
     unescaped = old.replace('\\"', '"').replace("\\'", "'").replace('\\n', '\n').replace('\\t', '\t')
