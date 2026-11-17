@@ -54,20 +54,30 @@ func BenchmarkResidentTyping(b *testing.B) {
 	}
 }
 
-// BenchmarkResidentLiveWide: one live snapshot on a wide terminal, where the reply streams into the transcript (each
-// snapshot sets the transcript's content again), drawn, at history sizes.
+// BenchmarkResidentLiveWide: a wide terminal, where the reply streams into the transcript, at history sizes. snapshot
+// is one live update drawn (it sets the transcript's content again); frame is one tick drawn between live updates
+// (the spinner moves, the text does not), which must cost what typing does: with the spinner in the streamed block,
+// every frame reset the whole transcript (5.7 against 3.2 ms at 2000 events).
 func BenchmarkResidentLiveWide(b *testing.B) {
 	for _, events := range []int{10, 500, 2000} {
-		b.Run(fmt.Sprintf("history_%d_events", events), func(b *testing.B) {
-			m := benchChat(b, events)
-			m.chat.live = residentLive{active: true, turn: "t1", wrapText: &wrapCache{}, wrapThink: &wrapCache{}}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+		for _, kind := range []string{"snapshot", "frame"} {
+			b.Run(fmt.Sprintf("history_%d_events/%s", events, kind), func(b *testing.B) {
+				m := benchChat(b, events)
+				m.chat.live = residentLive{active: true, turn: "t1", wrapText: &wrapCache{}, wrapThink: &wrapCache{}}
 				next, _ := m.Update(residentLiveMsg{turn: "t1", text: "tok "})
 				m = next.(emberModel)
-				residentFrameSink = m.View().Content
-			}
-		})
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if kind == "snapshot" {
+						next, _ = m.Update(residentLiveMsg{turn: "t1", text: "tok "})
+						m = next.(emberModel)
+					} else {
+						m.tickN++
+					}
+					residentFrameSink = m.View().Content
+				}
+			})
+		}
 	}
 }

@@ -1664,7 +1664,7 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 		}
 		return rows
 	}
-	side := func(row string) string { return ansi.Cut(row, m.transcriptCols(), m.width) } // the right column's cells
+	side := func(row string) string { return ansi.Cut(row, m.transcriptWidth(max(20, m.width)), m.width) } // the right column's cells
 	frame := ansi.Strip(m.render())
 	rows := fits(frame)
 	for _, want := range []string{"tasks  1 of 3 done", "◐ write the CLI", "now", "make test", "Checking the CVEs."} {
@@ -1697,7 +1697,7 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 		m.syncChat()
 		live := ansi.Strip(m.render())
 		rows = fits(live)
-		top, tw, h := lipgloss.Height(m.chatHead(m.width)), m.transcriptCols(), m.chat.transcript.Height()
+		top, tw, h := lipgloss.Height(m.chatHead(m.width)), m.transcriptWidth(max(20, m.width)), m.chat.transcript.Height()
 		if h != idle || m.liveBlock(m.width) != "" {
 			t.Fatalf("%v: no box under the transcript (its height %d, %d idle):\n%s", sz, h, idle, live)
 		}
@@ -1715,6 +1715,13 @@ func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 		}
 		if s := side(rows[top]); !strings.Contains(s, "tasks  1 of 3 done") || strings.Count(live, "write the CLI") != 1 {
 			t.Fatalf("%v: the tasks stay at the top right, once:\n%s", sz, live)
+		}
+		// a tick between live updates leaves the streamed block as it was: a change there resets the whole transcript
+		// on every frame (BenchmarkResidentLiveWide frame)
+		before := m.liveInline(tw)
+		m.tickN++
+		if after := m.liveInline(tw); after != before {
+			t.Fatalf("%v: the streamed block moves with the clock:\n%q\n%q", sz, before, after)
 		}
 	}
 	// the transcript stays pinned to the bottom while text streams, unless the reader scrolled up

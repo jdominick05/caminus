@@ -52,7 +52,7 @@ func TestEmberShot(t *testing.T) {
 	}
 	// the tasks head the right column (no thoughts box above them); the reply being written streams in the transcript
 	top := lipgloss.Height(m.chatHead(shotWidth))
-	if side := ansi.Cut(strings.Split(plain, "\n")[top], m.transcriptCols(), shotWidth); !strings.Contains(side, "tasks") || strings.Contains(plain, "thoughts") {
+	if side := ansi.Cut(strings.Split(plain, "\n")[top], m.transcriptWidth(shotWidth), shotWidth); !strings.Contains(side, "tasks") || strings.Contains(plain, "thoughts") {
 		t.Fatalf("the picture's top right is the tasks, with no thoughts box (got %q):\n%s", side, plain)
 	}
 	svg := svgFrames([]string{frame}, "caminus ember ui", 1)

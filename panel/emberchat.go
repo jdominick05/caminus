@@ -887,7 +887,9 @@ func (m emberModel) liveInline(w int) string {
 	if !l.active || m.sideWidth() == 0 {
 		return ""
 	}
-	rows := []string{m.liveHead("  live")}
+	// no spinner here: a frame that changed this block reset the whole transcript (a render works on a copy, so every
+	// tick between live updates redrew it: 5.7 against 3.2 ms a frame at 2000 events); the activity line moves instead
+	rows := []string{m.liveWho() + emberDim.Render("  live")}
 	for _, ln := range l.reply(min(max(10, w-4), readingWidth)) {
 		rows = append(rows, "  "+ln)
 	}
@@ -895,14 +897,14 @@ func (m emberModel) liveInline(w int) string {
 	return strings.Join(rows, "\n")
 }
 
-// liveHead is the live reply's heading: who is writing (thinking while only reasoning has come), a spinner, a hint.
-func (m emberModel) liveHead(hint string) string {
+// liveWho is the live reply's heading: who is writing (thinking while only reasoning has come).
+func (m emberModel) liveWho() string {
 	l := m.chat.live
 	who := g.agent + " agent"
 	if l.reasoning != "" && l.text == "" {
 		who = g.agent + " thinking"
 	}
-	return bold(cGreen).Render(who) + " " + emberBusy.Render(g.spinner[m.tickN%len(g.spinner)]) + emberDim.Render(hint)
+	return bold(cGreen).Render(who)
 }
 
 // liveBlock is the thoughts box under the transcript on a narrow terminal, liveWindow lines of them, w cells wide. A
@@ -937,7 +939,7 @@ func (m emberModel) liveBlock(w int) string {
 		if l.hold {
 			hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+window)))
 		}
-		head = m.liveHead(hint)
+		head = m.liveWho() + " " + emberBusy.Render(g.spinner[m.tickN%len(g.spinner)]) + emberDim.Render(hint)
 	} else {
 		head = sectionHeadRight(g.agent+" thoughts", cGreen, "newest ↓", max(18, w-1))
 	}
