@@ -2278,7 +2278,7 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		if strings.Contains(text, "@") {
 			text = expandAttachments(m, text) // @path: the file, read as the agent, goes with the message
 		}
-		out, err := residentCommand(m, args, text).CombinedOutput()
+		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
 			return residentComposeResult{agent: name, epoch: epoch, err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}

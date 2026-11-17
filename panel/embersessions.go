@@ -63,7 +63,7 @@ func residentSessions(m emberModel) tea.Cmd {
 		if len(m.cli) == 0 {
 			return residentSessionsMsg{agent: m.agentName, err: "resident sessions need the caminus CLI (--cli)"}
 		}
-		out, err := residentCommand(m, []string{"peers", m.agentName, "--json"}, "").CombinedOutput()
+		out, err := runResident(residentCommand(m, []string{"peers", m.agentName, "--json"}, ""))
 		if err != nil {
 			return residentSessionsMsg{agent: m.agentName, err: strings.TrimSpace(string(out))}
 		}
@@ -77,7 +77,7 @@ func residentSessions(m emberModel) tea.Cmd {
 		for _, p := range peers {
 			result.names = append(result.names, p.Name)
 		}
-		out, err = residentCommand(m, []string{"memory", m.agentName, "--json"}, "").CombinedOutput()
+		out, err = runResident(residentCommand(m, []string{"memory", m.agentName, "--json"}, ""))
 		var memory struct {
 			Memory string `json:"memory"`
 		}
@@ -90,11 +90,11 @@ func residentSessions(m emberModel) tea.Cmd {
 
 func createResidentSession(m emberModel, name string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := residentCommand(m, []string{"create", name, "--from", m.agentName, "--json"}, "").CombinedOutput()
+		out, err := runResident(residentCommand(m, []string{"create", name, "--from", m.agentName, "--json"}, ""))
 		if err != nil {
 			return residentCreatedMsg{err: strings.TrimSpace(string(out)) + ": " + err.Error()}
 		}
-		out, err = residentCommand(m, []string{"start", name, "--json"}, "").CombinedOutput()
+		out, err = runResident(residentCommand(m, []string{"start", name, "--json"}, ""))
 		if err != nil {
 			return residentCreatedMsg{err: "Session created; runtime start failed: " + strings.TrimSpace(string(out))}
 		}
