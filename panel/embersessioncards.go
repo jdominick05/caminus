@@ -37,7 +37,7 @@ func cardWidth(w int) int { return max(20, min(cardW, w-2)) }
 // loadSessionCard reads one session's card; a session that cannot be read still gets a card with its name.
 func loadSessionCard(m emberModel, name string) sessionCard {
 	c := sessionCard{name: name, status: "unknown"}
-	out, err := residentCommand(m, []string{"status", name, "--json"}, "").Output()
+	out, err := runResident(residentCommand(m, []string{"status", name, "--json"}, ""))
 	var st struct {
 		Model      string             `json:"model"`
 		TokPerS    *float64           `json:"tok_per_s"`
@@ -87,7 +87,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 			c.workingS = g.Updated - g.Created
 		}
 	}
-	if out, err := residentCommand(m, []string{"github", name, "status", "--json"}, "").Output(); err == nil {
+	if out, err := runResident(residentCommand(m, []string{"github", name, "status", "--json"}, "")); err == nil {
 		var gh struct {
 			Login string `json:"login"`
 		}
