@@ -47,7 +47,34 @@ if not p.exists():
 b=Path.home()/'bin';b.mkdir(exist_ok=True)
 link=b/'caminus-agent';tmp=b/('caminus-agent.'+str(os.getpid())+'.tmp')
 tmp.symlink_to(p);os.replace(tmp,link)
-print(json.dumps(dict(installed=str(link),artifact=str(p),sha256=digest)))
+# every running daemon on an older runtime takes this one between goals (an upgrade left a days-old daemon running:
+# install alone restarts nothing); the same request `caminus ember agent update NAME` makes
+queued,skipped=[],[]
+for home in sorted((Path.home()/'homes').glob('*')):
+    try:
+        hb=json.loads((home/'heartbeat.json').read_text())
+        pid=hb.get('pid') if isinstance(hb,dict) else None
+        if not isinstance(pid,int) or pid<=1:
+            continue                      # (kill(0) and kill(-1) succeed: they signal groups, not a daemon)
+        os.kill(pid,0)
+    except (OSError,ValueError,TypeError,OverflowError):
+        continue
+    if hb.get('runtime')==p.name:
+        continue
+    u=home/'update.json'
+    try:
+        pending=json.loads(u.read_text()).get('program') if u.exists() else None
+    except (OSError,ValueError,AttributeError):
+        pending=None
+    if pending==str(p):
+        continue                          # already on its way to this runtime
+    try:
+        t=home/'update.json.tmp'
+        t.write_text(json.dumps(dict(program=str(p),now=False,ts=__import__('time').time())));os.replace(t,u)
+        queued.append(home.name)          # (a pending request for another runtime is replaced by this one)
+    except OSError as e:
+        skipped.append(dict(agent=home.name,error=str(e)[:200]))
+print(json.dumps(dict(installed=str(link),artifact=str(p),sha256=digest,updates_queued=queued,updates_skipped=skipped)))
 CAMINUS_INSTALL
 '''.replace('PAYLOAD',repr(data))
         result=runner.run_shell(script,transport=transport)

@@ -24,6 +24,7 @@ judge cannot trap a goal. Every verdict records the model that gave it, and unre
 with verdict "unread"), so a model that answers loosely shows up in the evals instead of quietly turning the judge off.
 """
 import json
+import os
 import re
 import subprocess
 
@@ -102,6 +103,17 @@ def evidence(rt, gid, summary, open_work):
             res = json.dumps(d.get('result'), ensure_ascii=False)
             lines.append(f"{d.get('name')} -> {res[:800]}")
     parts.append('EVIDENCE (oldest first):\n' + ('\n'.join(lines[-EVIDENCE_RESULTS:]) or '(none recorded)'))
+    # what the harness itself recorded, so a claimed change can be checked against it
+    try:
+        rec = rt._change_record(gid)
+    except Exception:
+        rec = []
+    home = str(rt.home)
+    changed = sorted({os.path.relpath(p, home) for _s, n, p, ok, _e in rec if p and ok and n in rt.CHANGE_TOOLS})
+    failed = [f'{n} {os.path.relpath(p, home)}: {e[:160]}' for _s, n, p, ok, e in rec if p and not ok and n in rt.CHANGE_TOOLS]
+    parts.append('FILES CHANGED IN THIS GOAL (the harness\'s record of edit / write calls that succeeded; terminal '
+                 'commands are not counted, so read their output above):\n' + ('\n'.join('- ' + c for c in changed) or '(none)')
+                 + (('\nREFUSED OR FAILED CHANGES:\n' + '\n'.join('- ' + f for f in failed[-10:])) if failed else ''))
     parts.append('THE AGENT SAYS IT IS DONE:\n' + summary[:2000] + (('\nLEFT OPEN: ' + open_work[:1000]) if open_work else ''))
     return '\n\n'.join(parts)
 

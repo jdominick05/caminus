@@ -124,7 +124,8 @@ def main():
         check(code == 0, 'agent init against the stub brain')
         Stub.replies.extend([call('define_done', dict(check='the file hello.txt exists')),
                              call('write', dict(path='hello.txt', content='hello')),
-                             call('verify', dict(evidence='hello.txt written')),
+                             call('read', dict(path='hello.txt')),            # (verify needs a look after the change)
+                             call('verify', dict(evidence='read shows hello')),
                              call('finish', dict(summary='Wrote hello.txt.'))])
         code, out = sh(in_group(caminus + ['env', 'agent', 'once', 'resident', '--goal', 'Write hello.txt.', '--json']),
                        env, timeout=300)

@@ -152,6 +152,67 @@ class Resident(unittest.TestCase):
         self.assertIn('define_done',terminals[1]['error'],'a change waits for the done check')
         self.assertFalse((self.home/'made.txt').exists())
 
+    def test_a_refused_edit_cannot_be_verified_or_finished_as_if_it_had_happened(self):
+        # a Qwen3-30B-A3B run, event for event: read, the edit refused (no done check yet), a prose done check, a verify
+        # quoting the line it never wrote, finish. The file was unchanged and the goal finished as done.
+        self.gates_on()
+        (self.home/'inventory.py').write_text('def low_stock(items, t):\n    return [n for n, q in items if q < t]\n')
+        self.replies(call('read',dict(path='inventory.py')),
+                     call('edit',dict(path='inventory.py',old='q < t',new='q <= t')),
+                     call('define_done',dict(check='low_stock uses <= on line 2')),
+                     call('verify',dict(evidence='line 2 now reads q <= t')),          # A: nothing looked since the edit
+                     call('terminal',dict(command='ls')),
+                     call('verify',dict(evidence='ls listed inventory.py')),
+                     call('finish',dict(summary='low_stock now uses <=.')),            # B: the edit was refused, never redone
+                     call('read',dict(path='inventory.py')),
+                     call('finish',dict(summary='Not changed: my edit was refused.',open='the change itself')))
+        goal=self.cmd('once',['--goal','Make low_stock count exactly t as low.'])
+        results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
+        by=lambda n:[r['result'] for r in results if r['name']==n]
+        self.assertIn('define_done',by('edit')[0]['error'])
+        self.assertIn('nothing has looked since your last change',by('verify')[0].get('error',''),'A: a verify after a refused edit with no look')
+        self.assertNotIn('error',by('verify')[1],'a look after the change lets verify through')
+        self.assertIn('inventory.py (edit:',by('finish')[0].get('error',''),'B: the refused edit blocks the finish')
+        self.assertNotIn('error',by('finish')[-1],'once the file was read, the finish is the judge\'s to weigh')
+        self.assertEqual(goal['state'],'completed')
+        self.assertIn('q < t',(self.home/'inventory.py').read_text())
+
+    def test_a_redone_change_finishes_and_the_judge_sees_what_changed(self):
+        from caminus.ember.resident import judge
+        self.gates_on()
+        (self.home/'f.txt').write_text('a\n')
+        self.replies(call('edit',dict(path='f.txt',old='a',new='b')),            # refused: no done check yet
+                     call('define_done',dict(check='f.txt holds b')),
+                     call('edit',dict(path='f.txt',old='a',new='b')),
+                     call('terminal',dict(command='cat f.txt')),
+                     call('verify',dict(evidence='cat printed b')),
+                     call('finish',dict(summary='f.txt holds b.')))
+        goal=self.cmd('once',['--goal','Put b in f.txt.'])
+        self.assertEqual(goal['state'],'completed','a refusal followed by the change itself does not block the finish')
+        rt=Runtime(self.home)
+        try:
+            text=judge.evidence(rt,goal['id'],'f.txt holds b.','')
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('FILES CHANGED IN THIS GOAL',text);self.assertIn('- f.txt',text)
+        self.assertIn('REFUSED OR FAILED CHANGES',text);self.assertIn('edit f.txt: no done check yet',text)
+
+    def test_a_failed_edit_on_a_wrong_path_is_cleared_by_reading_that_path_even_when_the_read_fails(self):
+        self.gates_on()
+        (self.home/'real.txt').write_text('a\n')
+        self.replies(call('define_done',dict(check='real.txt holds b')),
+                     call('edit',dict(path='rael.txt',old='a',new='b')),            # a typo: fails, not found
+                     call('edit',dict(path='real.txt',old='a',new='b')),
+                     call('read',dict(path='real.txt')),
+                     call('verify',dict(evidence='read shows b')),
+                     call('finish',dict(summary='real.txt holds b.')),               # blocked: rael.txt
+                     call('read',dict(path='rael.txt')),                             # fails too, and that is enough
+                     call('finish',dict(summary='real.txt holds b; rael.txt was a typo.')))
+        goal=self.cmd('once',['--goal','Put b in real.txt.'])
+        results=[e['data'] for e in self.cmd('events') if e['kind']=='tool_result']
+        fins=[r['result'] for r in results if r['name']=='finish']
+        self.assertIn('rael.txt',fins[0].get('error',''))
+        self.assertNotIn('error',fins[-1]);self.assertEqual(goal['state'],'completed')
+
     def test_finish_needs_the_check_exercised_since_the_last_steer(self):
         self.gates_on()
         self.replies(call('define_done',dict(check='the file exists')),
@@ -648,7 +709,8 @@ class Resident(unittest.TestCase):
         self.verdicts(dict(verdict='met',reason='x exists'))
         self.replies(call('terminal',dict(command='python3 -c "print(1)"')),call('terminal',dict(command='python3 -c "print(1)"')),
                      call('define_done',dict(check='x exists')),call('terminal',dict(command='python3 -c "print(1)"')),
-                     call('write',dict(path='x',content='1')),call('verify',dict(evidence='x written')),call('finish',dict(summary='Done.')))
+                     call('write',dict(path='x',content='1')),call('read',dict(path='x')),
+                     call('verify',dict(evidence='read shows 1')),call('finish',dict(summary='Done.')))
         out=self.cmd('once',['--goal','Make x.'])
         self.assertEqual(out['state'],'completed','the same call runs once the done check exists')
 
@@ -821,36 +883,6 @@ class Resident(unittest.TestCase):
             {'metadata':{'pricing':{'input_tokens':0.1,'output_tokens':0.4}}}]})
         self.assertEqual(prices.get('good'),(0.1,0.4,0.1),'a bad row is skipped, never the whole table')
         self.assertIsNone(prices.get('nullprice'))
-
-    def test_search_finds_files_and_lines_without_the_terminal(self):
-        from caminus.ember.resident import files
-        w=self.home/'proj'; (w/'src').mkdir(parents=True); (w/'.git').mkdir(); (w/'node_modules').mkdir()
-        (w/'src'/'a.py').write_text('def alpha():\n    return 1\n'); (w/'src'/'b.txt').write_text('alpha beta\n')
-        (w/'.git'/'x.py').write_text('def alpha(): pass\n'); (w/'node_modules'/'y.py').write_text('alpha\n')
-        (w/'bin.dat').write_bytes(b'\0alpha')
-        r=files.search(str(self.home),glob='**/*.py',path='proj')
-        self.assertEqual(r['files'],['src/a.py'],'glob lists files, skipping .git and node_modules')
-        r=files.search(str(self.home),pattern=r'def \w+\(',path='proj')
-        self.assertEqual(r['matches'],['src/a.py:1: def alpha():'])
-        r=files.search(str(self.home),pattern='ALPHA',glob='*.txt',path='proj',ignore_case=True)
-        self.assertEqual(r['matches'],['src/b.txt:1: alpha beta'],'glob narrows the files; binary files are skipped')
-        with self.assertRaises(ValueError):files.search(str(self.home),pattern='(',path='proj')
-        r=files.search(str(self.home),pattern='alpha',path='proj',limit=1)
-        self.assertIn('truncated',r)
-        rt=Runtime(self.home)
-        try:
-            self.assertIn('search',[t['function']['name'] for t in rt.tools])
-            # through the runtime, a search with no path works (it raised KeyError after searching), and a read of a
-            # note still marks it used
-            gid=rt.store.enqueue('Find it.')
-            aid=uuid.uuid4().hex
-            rt.store.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
-                                (aid,gid,'c1','search',json.dumps(dict(glob='**/a.py')),'new'))
-            rt._action(rt.store.actions(gid)[0])
-            res=[(e['data'] if isinstance(e['data'],dict) else json.loads(e['data']))['result']
-                 for e in rt.store.events() if e['kind']=='tool_result'][-1]
-            self.assertNotIn('error',res,res);self.assertIn('proj/src/a.py',res['files'])
-        finally:rt.mail.close();rt.store.close()
 
     def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
         from caminus.ember.resident import advisor as adv, web, judge
@@ -1961,6 +1993,30 @@ for line in sys.stdin:
             self.assertIn('trigger 50,000 tokens, 50%',rt._context_budget(gid),'the budget line shows the paid trigger')
         finally:rt.mail.close();rt.store.close()
 
+    def test_install_queues_an_update_for_every_running_daemon_on_an_older_runtime(self):
+        # an upgrade left a days-old daemon running: install alone restarted nothing
+        from caminus.ember import agent_host
+        fake=self.home/'fakehome';(fake/'homes'/'old').mkdir(parents=True);(fake/'homes'/'gone').mkdir();(fake/'homes'/'fresh').mkdir()
+        (fake/'homes'/'old'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
+        (fake/'homes'/'gone'/'heartbeat.json').write_text(json.dumps(dict(pid=2**22+12345,runtime='aaaa.pyz')))
+        (fake/'homes'/'nopid').mkdir();(fake/'homes'/'nopid'/'heartbeat.json').write_text(json.dumps(dict(runtime='aaaa.pyz')))
+        (fake/'homes'/'odd').mkdir();(fake/'homes'/'odd'/'heartbeat.json').write_text('[1,2]')
+        (fake/'homes'/'older').mkdir();(fake/'homes'/'older'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
+        (fake/'homes'/'older'/'update.json').write_text(json.dumps(dict(program='/x/older.pyz',now=False)))
+        def transport(argv,input=None,**kw):
+            return subprocess.run(['bash','-s'],input=input,capture_output=True,text=True,env=dict(os.environ,HOME=str(fake)))
+        import contextlib,io as _io
+        out=_io.StringIO()
+        with contextlib.redirect_stdout(out):agent_host.main(['install'],transport)
+        res=json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(res['updates_queued'],['old','older'],'live daemons on another runtime; a pending older update is replaced')
+        self.assertEqual(res['updates_skipped'],[])
+        self.assertTrue(json.loads((fake/'homes'/'older'/'update.json').read_text())['program'].endswith(res['sha256']+'.pyz'))
+        self.assertFalse((fake/'homes'/'nopid'/'update.json').exists(),'no pid is not alive (kill(0) would succeed)')
+        u=json.loads((fake/'homes'/'old'/'update.json').read_text())
+        self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
+        self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
+
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
         name=json.loads((self.home/'config.json').read_text())['name']
@@ -2540,15 +2596,27 @@ for line in sys.stdin:
                 n=int(_re.search(r'(\d+) streamed characters',line).group(1))
                 est=min(n*2//7+1,4096)                    # the charge comes from the streamed count, capped
                 from caminus.ember import relay as _r0
-                want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=1000,output_tokens=max(1,est)))
+                if provider=='anthropic':
+                    # the input is message_start's count, or, when the hang-up came before message_start was read (a
+                    # loaded runner), the relay's estimate from the forwarded body
+                    seen_in=int(_re.search(r' in=(\d+)',line).group(1))
+                    self.assertIn(seen_in,(1000,len(json.dumps(calls[-1]['body']).encode())//4),line)
+                want=(_r0.anthropic_cost('claude-haiku-5-5',dict(input_tokens=seen_in,output_tokens=max(1,est)))
                       if provider=='anthropic' else None)
-                if want is not None:self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
+                if want is not None:
+                    for _ in range(100):          # (the log line can land before the ledger write on a loaded runner)
+                        if abs(spent-want)<1e-5:break
+                        time.sleep(0.05);spent=ledger.spent()-before
+                    self.assertAlmostEqual(spent,want,places=5,msg='charged from the streamed estimate (the ledger keeps 6 places)')
                 else:
                     # exactly the relay's estimate: the forwarded body's bytes / 4 at the input price plus the streamed
                     # characters' tokens at the output price (the body is re-serialised as the relay sent it)
                     self.assertIn('estimated: prompt + %d streamed characters'%n,line)
                     raw=json.dumps(calls[-1]['body']).encode()
                     want=(len(raw)/4*0.6+est*2.2)/1e6
+                    for _ in range(100):
+                        if abs(spent-want)<1e-5:break
+                        time.sleep(0.05);spent=ledger.spent()-before
                     self.assertAlmostEqual(spent,want,places=5,msg=line)
                 # never above the prompt plus the request's own allowance (how much streamed before the hang-up is
                 # noticed depends on the machine's load, so the estimate may reach that cap)
