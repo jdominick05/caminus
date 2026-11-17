@@ -1115,9 +1115,15 @@ func TestChatComposerHintsAboutPathsThematically(t *testing.T) {
 	t.Chdir(dir)
 	m := chatFixture(t)
 	m.chat.compose.SetValue("./")
-	view := m.chatComposer()
-	if !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
-		t.Fatalf("a path in progress gets no completion hint:\n%s", view)
+	m.height = 40
+	// the same framed menu as the commands: the path and what it is, above the composer, not a line inside it
+	menu := ansi.Strip(m.chatBottom())
+	if !strings.Contains(menu, "sub/") || !strings.Contains(menu, "folder") || strings.Contains(ansi.Strip(m.chatComposer()), "Tab completes") {
+		t.Fatalf("a path in progress opens the completion menu:\n%s", menu)
+	}
+	m.height = 12 // too short for the menu: the composer names the matches on one line, as before
+	if view := m.chatComposer(); !strings.Contains(view, "Tab completes") || !strings.Contains(view, "sub/") {
+		t.Fatalf("a short terminal keeps the one-line hint:\n%s", view)
 	}
 	m.chat.compose.SetValue("./zzz")
 	if view := m.chatComposer(); !strings.Contains(view, "no match") {
@@ -1342,10 +1348,13 @@ func TestGateAndJudgeVerdicts(t *testing.T) {
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
-	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix", "judge: met  ·  41 passed"} {
+	for _, want := range []string{"gate: make test  ·  failed", "1 failed", "judge: not yet", "no test output shows the fix"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
+	}
+	if strings.Contains(v, "41 passed") {
+		t.Fatal("a met verdict shows on the finish line, not as its own card")
 	}
 }
 
@@ -2507,6 +2516,20 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	}
 }
 
+func TestOneSlashMatchGetsTheSameMenuAsMany(t *testing.T) {
+	m := chatFixture(t)
+	m.height, m.width = 40, 110
+	m.chat.compose.SetValue("/bt")
+	bottom := ansi.Strip(m.chatBottom())
+	if !strings.Contains(bottom, "/btw") || !strings.Contains(bottom, slashHint("/btw")[:20]) || strings.Contains(bottom, "Tab completes") {
+		t.Fatalf("one match opens the framed menu with its description, like several:\n%s", bottom)
+	}
+	m.chat.compose.SetValue("/btw")
+	if strings.Contains(ansi.Strip(m.chatBottom()), slashHint("/btw")[:20]) {
+		t.Fatal("a command typed in full closes the menu")
+	}
+}
+
 func TestSwitcherCreatesAndStopsSessions(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 120, 40
@@ -2652,5 +2675,38 @@ func TestAdvisorSetupPointsAtTheCLIInsteadOfRunningAReview(t *testing.T) {
 	next, cmd, _ := m.steerSlash("/advisor", "setup")
 	if cmd != nil || !strings.Contains(next.msg, "caminus ember agent advisor") {
 		t.Fatalf("/advisor setup runs no paid review and names the CLI: %q", next.msg)
+	}
+}
+
+func TestAMetVerdictShowsOnceOnTheFinishLine(t *testing.T) {
+	m := chatFixture(t)
+	met := residentEvent{Seq: 8, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists"}}
+	if b := m.chat.eventBlock(met); b != "" {
+		t.Fatalf("a met verdict has no card of its own; the finish line carries it:\n%s", ansi.Strip(b))
+	}
+	notYet := residentEvent{Seq: 9, Goal: "original", Kind: "judged", Data: map[string]any{"verdict": "not_yet", "reason": "no tests ran"}}
+	if b := ansi.Strip(m.chat.eventBlock(notYet)); !strings.Contains(b, "judge: not yet") {
+		t.Fatalf("a refusal keeps its card (no finish line follows it):\n%s", b)
+	}
+}
+
+// The judge records a met verdict and then returns the finish result with judge "met: REASON" (judge.review): the
+// transcript shows that sentence once, in both the card and the compact view.
+func TestAMetVerdictAppearsExactlyOnceInTheTranscript(t *testing.T) {
+	for _, cards := range []bool{true, false} {
+		m := chatFixture(t)
+		m.height = 40
+		m.chat.cards = cards
+		m.residentEvents = []residentEvent{
+			{Seq: 1, Goal: "g1", Kind: "judged", Data: map[string]any{"verdict": "met", "reason": "The review file exists with all sections"}},
+			{Seq: 2, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "finish", "call_id": "c9",
+				"result": map[string]any{"summary": "Wrote the review.", "judge": "met: The review file exists with all sections"}}},
+		}
+		m.chat.rendered, m.chat.content = 0, ""
+		m.syncChat()
+		v := ansi.Strip(m.chat.content)
+		if n := strings.Count(v, "The review file exists with all sections"); n != 1 {
+			t.Fatalf("cards=%v: the verdict shows %d times:\n%s", cards, n, v)
+		}
 	}
 }

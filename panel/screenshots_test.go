@@ -16,6 +16,7 @@ package main
 //	LLMTOP_GOLDEN=update go test -run TestGoldenFrames .
 
 import (
+	"charm.land/lipgloss/v2"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -446,6 +447,12 @@ func TestPanelShot(t *testing.T) {
 	old := version
 	version = tree.Version
 	defer func() { version = old }()
+	// the default theme, never the saved one of whoever runs the redraw (the package loads that at start)
+	savedTheme := themeCurrent
+	if err := themeLoad("caminus"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { themeCurrent = savedTheme; applyThemeStyles() }()
 
 	// the made-up host: these two not downloaded (names the catalog no longer has are ignored), the server runs
 	// shotServer (else the first one-card model) on the XTX
@@ -487,7 +494,8 @@ func TestPanelShot(t *testing.T) {
 	}
 
 	m := newCtl(newCtlCLI("caminus"), false, "")
-	m.w = 112 // the basic layout's height is its content's (m.h sizes only the advanced options list)
+	m.w = shotWidth // the basic layout's height is its content's (m.h sizes only the advanced options list)
+	m.ember = emberMsg{ok: true, known: true}
 	for _, k := range []string{"models", "ps", "harness", "options"} {
 		m.loaded[k] = true
 	}
@@ -501,7 +509,9 @@ func TestPanelShot(t *testing.T) {
 		},
 	}
 	m.hs = harnessInfo{Installed: true, Version: tree.QwenPin, Pinned: tree.QwenPin, Configured: true, Npm: true, Target: sm.Name}
-	svg := svgFrames([]string{m.render()}, "caminus panel", 1)
+	frame := m.render()
+	frame = paintBackground(frame, 0, shotWidth, lipgloss.Height(frame), false) // the theme's background, as the panel's View paints it
+	svg := svgFrames([]string{frame}, "caminus panel", 1)
 	for d := xml.NewDecoder(strings.NewReader(svg)); ; { // well-formed, or browsers show an error page instead
 		if _, err := d.Token(); err == io.EOF {
 			break
