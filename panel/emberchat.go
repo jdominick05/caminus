@@ -42,6 +42,7 @@ type residentChat struct {
 	questionDeferred, questionError         string
 	later                                   map[string]bool   // requests put off with Esc: they wait; Tab brings them back
 	reqOutcome                              map[string]string // each request's state for its one-line record
+	resSeen                                 map[string]string // answers read from the bridge's res/ (final: read once)
 	picker                                  bool
 	pickerSel                               int
 	hostShell                               bool   // shell mode runs in your own shell on this machine (!!), not the agent's
@@ -1303,13 +1304,21 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if s := c.reqOutcome[str("id")]; s != "" {
 			status = " · " + s
 		}
+		room := max(12, w-10-ansi.StringWidth(status)) // a long command is cut, never its state
 		if str("kind") == "github" {
-			return recordLine("⇡", "github: "+oneLine(residentText(str("summary")))+status, w)
+			return recordLine("⇡", "github: "+ansi.Truncate(oneLine(residentText(str("summary"))), room, "…")+status, w)
 		}
-		return recordLine(g.root, "root: "+oneLine(residentText(str("cmd")))+status, w)
+		return recordLine(g.root, "root: "+ansi.Truncate(oneLine(residentText(str("cmd"))), room, "…")+status, w)
 	case "question":
-		text := "question: " + oneLine(residentText(str("text")))
-		if ch, _ := e.Data["choices"].([]any); len(ch) > 0 {
+		// the state first (a long question's choices must not push it off the line); the choices only while it waits
+		state := c.reqOutcome[str("id")]
+		tail := ""
+		if state != "" {
+			tail = " · " + state
+		}
+		// a long question is cut, never its state
+		text := ansi.Truncate(oneLine(residentText(str("text"))), max(12, w-4-ansi.StringWidth(tail)), "…") + tail
+		if ch, _ := e.Data["choices"].([]any); len(ch) > 0 && (state == "" || state == "waiting") {
 			var opts []string
 			for _, x := range ch {
 				if t, _ := x.(string); t != "" {
@@ -1317,9 +1326,6 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			text += "  (" + strings.Join(opts, " / ") + ")"
-		}
-		if s := c.reqOutcome[str("id")]; s != "" {
-			text += " · " + s
 		}
 		return recordLine("?", text, w)
 	case "compacted":

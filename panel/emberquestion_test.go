@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -215,10 +216,10 @@ func TestARequestsRecordIsOneLineWithItsStateAndTheModelsNoteNeverShows(t *testi
 		m.chat.rendered, m.chat.content = 0, ""
 		m.syncChat()
 		v := ansi.Strip(m.chat.content)
-		if !strings.Contains(v, "root: apt-get install -y jq · waiting") || !strings.Contains(v, "question: Which Python?  (3.12 / 3.14) · recommended (timed out)") {
+		if !strings.Contains(v, "root: apt-get install -y jq · waiting") || !strings.Contains(v, "? Which Python? · recommended (timed out)") || strings.Contains(v, "(3.12 / 3.14)") {
 			t.Fatalf("expanded=%v: one line each, with the state:\n%s", expanded, v)
 		}
-		if strings.Contains(v, "has not answered yet") || strings.Contains(v, "Silence is not approval") || strings.Contains(v, "? · ") {
+		if strings.Contains(v, "has not answered yet") || strings.Contains(v, "Silence is not approval") || regexp.MustCompile(`(?m)^\s*\? · `).MatchString(v) {
 			t.Fatalf("expanded=%v: no model-facing note and no orphan status line:\n%s", expanded, v)
 		}
 	}
@@ -260,5 +261,40 @@ func TestHelpHasNoApprovalsScreen(t *testing.T) {
 	}
 	if !strings.Contains(help, "Tab") {
 		t.Fatal("/help says Tab answers a waiting request")
+	}
+}
+
+func TestARecordFollowsTheBridgeOnceAnswered(t *testing.T) {
+	m, bridge := promptFixture(t)
+	now := float64(time.Now().Unix())
+	writeReq(t, bridge, "r1", "apt-get install -y jq", now-20)
+	writeQuestion(t, bridge, "q1", "Which Python version should the project target, given the CI and the servers?",
+		[]string{"3.12 (the system Python)", "3.14 (newest)", "both"}, "", now-10)
+	writeReq(t, bridge, "r2", "systemctl restart foo", now)
+	m.refreshLocal()
+	m.residentEvents = []residentEvent{
+		{Seq: 1, Goal: "original", Kind: "approval_requested", Data: map[string]any{"id": "r1", "cmd": "apt-get install -y jq"}},
+		{Seq: 2, Goal: "original", Kind: "question", Data: map[string]any{"id": "q1", "text": "Which Python version should the project target, given the CI and the servers?",
+			"choices": []any{"3.12 (the system Python)", "3.14 (newest)", "both"}}},
+		{Seq: 3, Goal: "original", Kind: "approval_requested", Data: map[string]any{"id": "r2", "cmd": "systemctl restart foo"}},
+	}
+	m.syncQuestion()
+	m = press(t, m, kDown, kEnter) // r1: No
+	m.syncQuestion()
+	m = press(t, m, tea.KeyPressMsg{Code: '1', Text: "1"}) // q1: the first choice
+	// r2 was decided by the resident's watch elsewhere: only its event says so (its files are gone)
+	_ = os.Remove(filepath.Join(bridge, "req", "r2.json"))
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: 4, Goal: "original", Kind: "request_answered", Data: map[string]any{"request": "r2", "decision": "approved"}})
+	m.refreshLocal()
+	m.width = 90
+	m.syncChat()
+	v := ansi.Strip(m.chat.content)
+	for _, want := range []string{"root: apt-get install -y jq · no", "· 3.12 (the system Python) (you)", "root: systemctl restart foo · yes"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("the record follows the bridge: %q missing:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "waiting") || strings.Contains(v, "3.14 (newest)") {
+		t.Fatalf("answered: no waiting, no choices:\n%s", v)
 	}
 }

@@ -11,6 +11,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -382,47 +384,99 @@ func (m *emberModel) askedRecommended(question string) string {
 	return ""
 }
 
-// requestOutcomes: each request's state for its one-line record, by request id: waiting while it is on disk, else what
-// came of it (from its tool result).
-func (m emberModel) requestOutcomes() map[string]string {
+// outcomeText is a request's state for its record from a decision (the res file's or the tool result's fields).
+func outcomeText(question bool, decision, answer string, rc any, by string) string {
+	answer = oneLine(residentText(answer))
+	switch {
+	case by == "timeout" && question:
+		return "recommended (timed out)"
+	case by == "timeout":
+		return "timed out (no)"
+	case question && strings.TrimSpace(answer) != "":
+		return answer + " (you)"
+	case question:
+		return "answered"
+	case decision == "approved":
+		if code, ok := rc.(float64); ok {
+			return fmt.Sprintf("yes · exit %d", int(code))
+		}
+		return "yes"
+	case decision == "denied" && strings.TrimSpace(answer) != "":
+		return "no: " + answer
+	case decision == "denied":
+		return "no"
+	}
+	return ""
+}
+
+// requestOutcomes: each request's state for its one-line record, by request id. The bridge is the truth: a request on
+// disk without an answer waits; an answer in res/ (the owner's, read once and kept) is what came of it; then the
+// resident's own events (request_answered, a tool result, a timeout) for one whose files are gone.
+func (m *emberModel) requestOutcomes() map[string]string {
 	out := map[string]string{}
+	question := map[string]bool{}
+	var ids []string
 	for _, e := range m.residentEvents {
-		if e.Kind != "tool_result" {
-			continue
-		}
-		name, _ := e.Data["name"].(string)
-		if name != "ask_user" && name != "ask_root" && name != "github_handoff" {
-			continue
-		}
-		res, _ := e.Data["result"].(map[string]any)
-		id, _ := res["id"].(string)
-		if id == "" {
-			id, _ = res["request"].(string)
-		}
-		if id == "" {
-			continue
-		}
-		by, _ := res["by"].(string)
-		answer, _ := res["answer"].(string)
-		decision, _ := res["decision"].(string)
-		switch {
-		case res["pending"] == true:
-			out[id] = "waiting"
-		case by == "timeout" && name == "ask_user":
-			out[id] = "recommended (timed out)"
-		case by == "timeout":
-			out[id] = "timed out (no)"
-		case name == "ask_user" && strings.TrimSpace(answer) != "":
-			out[id] = oneLine(residentText(answer)) + " (you)"
-		case decision == "approved":
-			out[id] = "yes"
-			if rc, ok := res["rc"].(float64); ok {
-				out[id] += fmt.Sprintf(" · exit %d", int(rc))
+		str := func(k string) string { v, _ := e.Data[k].(string); return v }
+		switch e.Kind {
+		case "approval_requested", "question":
+			if id := str("id"); id != "" {
+				ids = append(ids, id)
+				question[id] = e.Kind == "question"
 			}
-		case decision == "denied" && strings.TrimSpace(answer) != "":
-			out[id] = "no: " + oneLine(residentText(answer))
-		case decision == "denied":
-			out[id] = "no"
+		case "request_answered":
+			if id := str("request"); id != "" && out[id] == "" {
+				out[id] = outcomeText(question[id], str("decision"), "", nil, "")
+			}
+		case "question_unanswered":
+			if id := str("id"); id != "" {
+				out[id] = outcomeText(question[id] && e.Data["approval"] != true, "", "", nil, "timeout")
+			}
+		case "tool_result":
+			name := str("name")
+			if name != "ask_user" && name != "ask_root" && name != "github_handoff" {
+				continue
+			}
+			res, _ := e.Data["result"].(map[string]any)
+			id, _ := res["id"].(string)
+			if id == "" {
+				id, _ = res["request"].(string)
+			}
+			if id == "" || res["pending"] == true {
+				continue
+			}
+			by, _ := res["by"].(string)
+			answer, _ := res["answer"].(string)
+			decision, _ := res["decision"].(string)
+			if t := outcomeText(name == "ask_user", decision, answer, res["rc"], by); t != "" {
+				out[id] = t
+			}
+		}
+	}
+	if m.chat.resSeen == nil {
+		m.chat.resSeen = map[string]string{}
+	}
+	for _, id := range ids {
+		if t, ok := m.chat.resSeen[id]; ok {
+			out[id] = t // the owner's answer is the most exact (it has the words)
+			continue
+		}
+		if m.bridge == "" || !validBridgeID(id) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(m.bridge, "res", id+".json"))
+		if err != nil {
+			continue
+		}
+		var res map[string]any
+		if json.Unmarshal(data, &res) != nil {
+			continue
+		}
+		decision, _ := res["decision"].(string)
+		answer, _ := res["answer"].(string)
+		if t := outcomeText(question[id], decision, answer, res["rc"], ""); t != "" {
+			m.chat.resSeen[id] = t
+			out[id] = t
 		}
 	}
 	for _, r := range m.sessionRequests() {
