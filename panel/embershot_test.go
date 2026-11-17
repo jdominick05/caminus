@@ -23,7 +23,7 @@ const shotWidth, shotHeight = 170, 40
 
 // TestEmberShot writes ember-chat.svg, the README's picture of Ember's chat (`caminus ember ui`), from the program's
 // own drawing: its real render() painted with the default theme's background as its View does, at shotWidth, so the
-// side pane (thoughts, tasks, now), the activity line and the status line show. The goal is made up (a stock-list bug:
+// side pane (tasks, now), the live reply streaming in the transcript, the activity line and the status line show. The goal is made up (a stock-list bug:
 // read, a done check, a failing test, a wrong path, the fix, the tests running again); nothing from a real machine
 // goes in. tools/release/panel_shot.py redraws it with panel.svg at every release.
 //
@@ -49,6 +49,11 @@ func TestEmberShot(t *testing.T) {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("the picture lost %q (the side pane and the status line must show):\n%s", want, plain)
 		}
+	}
+	// the tasks head the right column (no thoughts box above them); the reply being written streams in the transcript
+	top := lipgloss.Height(m.chatHead(shotWidth))
+	if side := ansi.Cut(strings.Split(plain, "\n")[top], m.transcriptWidth(shotWidth), shotWidth); !strings.Contains(side, "tasks") || strings.Contains(plain, "thoughts") {
+		t.Fatalf("the picture's top right is the tasks, with no thoughts box (got %q):\n%s", side, plain)
 	}
 	svg := svgFrames([]string{frame}, "caminus ember ui", 1)
 	for d := xml.NewDecoder(strings.NewReader(svg)); ; {
@@ -124,7 +129,8 @@ func shotEmber(t *testing.T, w, h int) emberModel {
 		evs = append(evs, residentEvent{Seq: i + 1, Ts: float64(time.Now().Unix()-240) + float64(i*15), Goal: goal, Kind: e["kind"].(string), Data: e["data"].(map[string]any)})
 	}
 	hit := 0.91
-	st := residentStatus{Name: "resident", Model: "swift-1.5", Context: 32768, ContextUsed: 9400, TokPerS: 42.3, DaemonAlive: true,
+	st := residentStatus{Name: "resident", Model: "swift-1.5", Context: 32768, ContextUsed: 9400, DaemonAlive: true,
+		TokPerS: 42.3, PromptTokPerS: 771, SpeedSource: "engine", // (a local Caminus brain: the engine's own speeds)
 		OnlineS: 5400, CacheHit: &hit, Compactions: map[string]int{goal: 0}, LastEvent: len(evs),
 		Goals: []residentGoal{{ID: goal, Prompt: prompt, State: "working", Steps: 5}}}
 	m.receiveResident(residentMsg{agent: "resident", status: st, events: evs})

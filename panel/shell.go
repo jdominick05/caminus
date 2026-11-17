@@ -382,13 +382,16 @@ type status struct {
 	compact      float64 // the compaction threshold as a fraction of the window; the bar warms toward it
 	usd          float64 // this goal's spend; negative hides the segment (an unpriced brain)
 	usdDay       float64 // today's spend across goals; shown with usd when positive
-	tps          float64
+	speed        replySpeed // the session's read / write speeds (emberresident.go); none hides the segment
 	queue        int
 	compactions  int     // times this goal's history was compacted; -1 hides the bubble (no goal in view)
 	online       float64 // how long the agent has been online, seconds; 0 hides it
 	cacheHit     float64 // today's input from the prompt cache, 0-1; negative hides it
 	keys         []string
 }
+
+// narrowSpeed: below this width the status line shows the write speed alone (the read speed goes first)
+const narrowSpeed = 120
 
 func statusLine(s status, w int) string {
 	frac := 0.0
@@ -425,8 +428,8 @@ func statusLine(s status, w int) string {
 		}
 		segs = append(segs, seg)
 	}
-	if s.tps > 0 {
-		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %.0f tok/s", g.speed, s.tps)))
+	if sp := s.speed.short(w < narrowSpeed); sp != "" {
+		segs = append(segs, strings.TrimSpace(g.speed+" "+sp))
 	}
 	if s.queue > 0 {
 		segs = append(segs, strings.TrimSpace(fmt.Sprintf("%s %d queued", g.queue, s.queue)))
