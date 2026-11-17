@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 # the paused models (caminus.models.PAUSED) stay in these fixtures; paused_checks() runs a child without the variable
 PAUSED_ENV = {k: v for k, v in os.environ.items() if k != 'CAMINUS_ALLOW_PAUSED'}
 os.environ['CAMINUS_ALLOW_PAUSED'] = '1'
-os.environ.pop('CAMINUS_ALLOW_TP_DRAFT', None)   # (two-card drafting stays refused here: the picker must not offer it)
 
 FAILS = []
 
@@ -47,10 +46,13 @@ def main():
 
     # The basic panel's model picker gets capabilities from the serving registry, without importing the GPU runtime.
     swift_modes = manage.serving_modes(models.BY_NAME['swift-1.5'])
-    check([r['cards'] for r in swift_modes] == [1, 2]
-          and swift_modes[0]['drafts'] == ['off', 'mtp', 'dflash']
-          and swift_modes[1]['drafts'] == ['off']          # (two-card drafting: refused until its GPU gates pass)
-          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off'])]
+    both = [dict(cards=1, drafts=['off', 'mtp', 'dflash']), dict(cards=2, drafts=['off', 'mtp', 'dflash'])]
+    check(swift_modes == both and manage.serving_modes(models.BY_NAME['thinkingcap']) == both
+          # (the plain 27B has no two-card form: one card only, so no two-card drafting is offered)
+          and manage.serving_modes(models.BY_NAME['qwen3.8-27b']) == [dict(cards=1, drafts=['off', 'mtp', 'dflash'])]
+          # (Qwen3-30B-A3B: two cards offered, one card first: the catalog's card count, the picker's default)
+          and manage.serving_modes(models.BY_NAME['qwen3-30b-a3b']) == [dict(cards=1, drafts=['off']), dict(cards=2, drafts=['off'])]
+          and models.BY_NAME['qwen3-30b-a3b'].cards == 1
           and manage.serving_modes(models.BY_NAME['coder']) == [dict(cards=2, drafts=['off', 'dflash'])]
           and 'torch' not in sys.modules,
           'model picker: supported card counts and drafters from the registry, no torch import; auto stays server-owned')
@@ -163,6 +165,9 @@ def main():
                                                              TH.card('card2', '0000:06:00.0', TH.XTX, 129, display=True)])
     check(pick('coder') == [1, 0] and pick('arex-2') == [1], 'cards: swapped DRM order: the Coder\'s pair in engine order (the XTX, '
           'position 1, first); AREX-2 on the XTX')
+    q3m, q3e = models.BY_NAME['qwen3-30b-a3b'], manage.model_entry(models.BY_NAME['qwen3-30b-a3b'])
+    check(manage.pick_cards(q3m, q3e, None, set(), cards=2) == [1, 0],
+          'cards: Qwen3-30B-A3B --cards 2 takes the pair in engine order (the bigger XTX first: its 512-row expert share)')
     manage.ROOT = TH.tree(os.path.join(S, 'sysfs-xtx2'), [TH.card('card1', '0000:03:00.0', TH.XTX, 128, display=True),
                                                           TH.card('card2', '0000:06:00.0', TH.XTX, 129)])
     check(pick('coder') == [0, 1] and pick('qwen3-coder-next') == [0, 1], 'cards: XTX + XTX: the Coder and Qwen3-Coder-Next placed')
@@ -265,6 +270,83 @@ def main():
             check('not downloaded' in str(err), f'start: a model not on disk is refused ({err})')
     finally:
         live.kill(); live.wait()
+
+    # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
+    # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props
+    q3 = models.BY_NAME['qwen3-30b-a3b']; sw = models.BY_NAME['swift-1.5']
+    check(manage.start_kv(q3, 1, 'q8', []) == 'q8' and manage.start_kv(q3, 2, None, ['--kv', 'q8']) == 'q8'
+          and manage.start_kv(q3, 1, None, ['--kv=f16']) == 'f16' and manage.start_kv(q3, 1, None, []) is None,
+          'start --kv: qwen3-30b-a3b takes q8 on one card and two (--kv or the serve flag); none given: the server\'s default')
+    refused = []
+    for mm, nc, kv, extra in ((sw, 1, 'q8', []), (sw, 2, None, ['--kv', 'q8']), (models.BY_NAME['coder'], 2, 'q8', []),
+                              (q3, 1, 'q8', ['--kv', 'f16']), (q3, 1, None, ['--kv', 'q4'])):
+        try:
+            manage.start_kv(mm, nc, kv, extra); refused.append((mm.name, kv, extra, 'accepted'))
+        except manage.ManageError as err:
+            if not ("kv 'q8'" in str(err) and 'qwen3-30b-a3b' in str(err) or 'disagree' in str(err) or "'f16' or 'q8'" in str(err)):
+                refused.append((mm.name, kv, extra, str(err)))
+    check(not refused, f'start --kv: q8 refused for swift-1.5 (one card or two) and the Coder, naming the model that takes it; '
+                       f'--kv and the serve flag disagreeing, or another format, refused ({refused or "all refused"})')
+    real_start_one, team_starts = manage.start_one, []
+    manage.start_one = lambda *x, **k: team_starts.append((x, k)) or {}
+    team_out = []
+    try:
+        for argv in (['--team', 'brain-hands', '--kv', 'q8'], ['--team', 'brain-hands', '--kv', 'f16'],
+                     ['--team', 'brain-hands', '--', '--kv', 'q8']):
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = manage.cmd_start(argv)
+            except SystemExit as e:
+                rc = e.code
+            team_out.append((rc, err.getvalue()))
+    finally:
+        manage.start_one = real_start_one
+    check(not team_starts and all(rc == 2 and '--kv applies to one model, not to --team brain-hands' in e for rc, e in team_out),
+          f'start --team with --kv (or `-- --kv`) is refused before any server starts, not dropped '
+          f'({[(rc, e.strip().splitlines()[-1:]) for rc, e in team_out]}, starts {len(team_starts)})')
+    from caminus import arch as _ar
+    seen = []
+
+    class Rec(_ar.Arch):
+        cards = 1
+        def auto_need(self, opt, slots, cards=None): seen.append(opt.get('kv')); return 40960, [0], 1.0, lambda c: [1.0]
+        def fits(self, opt, cards): seen.append(opt.get('kv')); return True
+        def variant(self, cards): return self
+    real_of = _ar.of
+    _ar.of = lambda path: Rec('rec', 'rec')
+    try:
+        ent = dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={})
+        manage.fits_fn(ent, kv='q8')(dict(line_mib=24000, display=False)); manage.pair_fits(q3, ent, cards=2, kv='q8')([{}, {}])
+        manage.fits_fn(ent)(dict(line_mib=24000, display=False))
+    finally:
+        _ar.of = real_of
+    check(seen == ['q8', 'q8', 'q8', 'f16', 'f16'], f'start --kv: the one-card and two-card fits project the asked cache (opt kv {seen})')
+    sv = dict(name='kvq8', model='qwen3-30b-a3b', path='/m/q3.gguf', port=18099, devices=[0], card_names=['XTX'], argv=[],
+              guard_pid=1, log=os.path.join(S, 'none.log'), started=time.time(), alias='qwen3-30b-a3b', kv='q8')
+    props = {'n_ctx': 40960, 'model_alias': 'qwen3-30b-a3b', 'caminus': {'kv_cache': {'type': 'q8', 'format': 'q8_0-v1:x'}}}
+    real_alive, real_http = manage.alive, manage.http_json
+    manage.alive = lambda pid: True
+    manage.http_json = lambda url, timeout=1.0: (200, props if url.endswith('/props') else {'status': 'ok'})
+    try:
+        v = manage.server_view(sv)
+        props_f16 = dict(props, caminus={})                     # (an older server: no kv_cache key -> nothing shown)
+        manage.http_json = lambda url, timeout=1.0: (200, props_f16 if url.endswith('/props') else {'status': 'ok'})
+        v_old = manage.server_view(sv)
+        buf = io.StringIO()
+        real_all = manage.all_servers
+        manage.all_servers = lambda: [sv]
+        manage.http_json = lambda url, timeout=1.0: (200, props if url.endswith('/props') else {'status': 'ok'})
+        try:
+            with contextlib.redirect_stdout(buf):
+                manage.ROOT = TH.tree(os.path.join(S, 'sysfs-kv'), [TH.card('card1', '0000:03:00.0', TH.XTX, 128, display=True)])
+                manage.cmd_ps([])
+        finally:
+            manage.all_servers = real_all; manage.ROOT = keep
+    finally:
+        manage.alive, manage.http_json = real_alive, real_http
+    check(v['state'] == 'ready' and v['kv'] == 'q8' and v_old['kv'] is None and 'kv q8' in buf.getvalue() and '40,960 ctx' in buf.getvalue(),
+          f'ps: the KV cache from /props (q8; an older server without the key: none shown): {buf.getvalue().splitlines()[:1]}')
 
     # ---- monitor: preserve global RGB/display preferences while routing each server to its own sessions and port
     prefs_dir = os.path.join(S, 'config', 'caminus')
@@ -381,6 +463,7 @@ def main():
     check(not os.path.exists(os.path.expanduser('~/.qwen/settings.json.bak-x')), 'qwen-code: nothing written under ~/.qwen')
 
     paused_checks(S)
+    unmanaged_checks(S)
     reload_checks(S)
     print(f'RESULT {"PASS" if not FAILS else "FAIL (" + str(len(FAILS)) + ")"}')
     return 0 if not FAILS else 1
@@ -446,6 +529,25 @@ def paused_checks(S):
     check(all(sv[a] and 'CAMINUS_ALLOW_PAUSED=1' in sv[a] for a in ('qwen35moe', 'qwen3next', 'qwen35'))
           and not any(sv[a] for a in ('qwen35-own', 'qwen3moe', 'qwen4exp')),
           'paused: caminus serve refuses the qwen35moe, qwen3next and qwen35 (AREX-2) architectures only')
+
+
+def unmanaged_checks(S):
+    """unmanaged_servers() scans /proc for caminus_serve.py processes outside the registry and never raises, even on a
+    machine with none running (CI): every entry is a dict with the keys cmd_ps and cmd_top read"""
+    from caminus.cmd import manage
+    try:
+        found = manage.unmanaged_servers()
+    except Exception as e:
+        check(False, f'unmanaged: unmanaged_servers() raised {type(e).__name__}: {e}')
+        return
+    check(isinstance(found, list)
+          and all(isinstance(s, dict) and isinstance(s.get('port'), int) and s.get('name') and 'model' in s
+                  and 'url' in s and 'state' in s for s in found),
+          f'unmanaged: read-only scan of /proc for live servers outside the registry -> {len(found)} entry(ies), each '
+          f'with port, name, model, url and state ({found})')
+    ports = [s['port'] for s in found]
+    check(ports == sorted(ports) and len(ports) == len(set(ports)),
+          f'unmanaged: one entry per server, sorted by port ({ports})')
 
 
 if __name__ == '__main__':

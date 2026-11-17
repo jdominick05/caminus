@@ -22,6 +22,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'python'))
 from caminus.errors import InvalidKVEncoding, NonFiniteLogits, NumericalFailure
+from caminus import arch as real_arch
 from caminus.cache.livestate import is_bail
 from caminus.serve.engine import EngineError, MockSession
 from caminus.serve.generate import run_generation
@@ -450,7 +451,8 @@ class StartupShutdown(unittest.TestCase):
         self.m = NS(devs=(0,), selfcheck=Mock(), max_ctx=128, qsa=False)
         self.pf = NS(chunk=16, crossover=4)
         self.build = Mock(return_value=(self.m, self.pf, None, None))
-        self.cli['_arch'] = NS(ARCHS={'synthetic': NS(build=self.build)})
+        self.cli['_arch'] = NS(ARCHS={'synthetic': NS(build=self.build, kv_fixed=None)}, kv_cache_of=real_arch.kv_cache_of,
+                               kv_q8=real_arch.kv_q8, kv_q8_built=real_arch.kv_q8_built)
         self.pc = NS(n_slots=0, tier_mib=(1.0,), store=None, side_rows=16)
         self.cache = ModuleType('caminus.cache.prompt')
         self.cache.PromptCache, self.cache.DEFAULT_CAP_GB = Mock(return_value=self.pc), 1.0
@@ -501,6 +503,30 @@ class StartupShutdown(unittest.TestCase):
         self.cache.PromptCache.assert_called_once()
         self.m.selfcheck.assert_called_once()
         self.torch.cuda.synchronize.assert_called_once_with(0)
+
+    def test_engine_with_another_kv_cache_than_asked_is_refused_before_cache(self):
+        # caminus serve --kv: the built engine must hold what was asked (a Q8 format id exactly when --kv q8), else the
+        # start stops before the prompt cache exists; the engine's cache is what the server reports (parts['kv']). An F16
+        # engine that names its own format (a kv_format_id outside arch.KV_Q8_FORMATS) is still F16: served by --kv f16,
+        # refused for --kv q8
+        q8id, f16id = real_arch.KV_Q8_FORMATS[0], 'f16-v1:fixture'
+        for kv, fid in (('q8', None), ('f16', q8id), (None, q8id), ('q8', f16id)):
+            with self.subTest(kv=kv, fid=fid):
+                self.m.kv_format_id = fid
+                with self.assertRaisesRegex(RuntimeError, 'KV cache'):
+                    self.cli['build_engine'](dict(self.opt, kv=kv), None, log=Mock())
+                self.cache.PromptCache.assert_not_called()
+        self.m.kv_format_id = q8id
+        _, parts = self.cli['build_engine'](dict(self.opt, kv='q8'), None, log=Mock())
+        self.assertEqual(parts['kv'], {'type': 'q8', 'format': q8id})
+        self.m.kv_format_id = None
+        _, parts = self.cli['build_engine'](dict(self.opt, kv='f16'), None, log=Mock())
+        self.assertEqual(parts['kv'], {'type': 'f16', 'format': 'f16'})
+        for kv in ('f16', None):
+            self.m.kv_format_id = f16id
+            _, parts = self.cli['build_engine'](dict(self.opt, kv=kv), None, log=Mock())
+            self.assertEqual(parts['kv'], {'type': 'f16', 'format': f16id})
+        self.m.kv_format_id = None
 
     def test_broken_shutdown_does_not_park_but_closes_cache(self):
         for cls in (InvalidKVEncoding, NonFiniteLogits):

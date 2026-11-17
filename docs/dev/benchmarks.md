@@ -418,7 +418,7 @@ cards are not measured yet.
 
 ### Swift 1.5 and ThinkingCap on two cards (tensor parallel, own code end to end)
 
-Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT (`caminus serve --cards 2`). Each card holds half of every layer's heads
+Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT (`caminus serve --cards 2`; today that serve drafts by default, so a rerun of these plain rows passes `--draft off`). Each card holds half of every layer's heads
 and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), and the two cards add their partial results
 128 times per token. The grid and task sizes are the one-card engines'; nothing is tuned for two cards yet.
 
@@ -442,8 +442,9 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
 - The feed-forward split, ThinkingCap decode: 15.75 ms at 50 / 50, 15.29 ms at 53 / 47, 15.13 ms at 56 / 44.
 - The prefill does not gain from the second card yet: its exchanges run between the layers' halves without overlap (a
   2,048-token chunk moves 2 x 64 x 2,048 x 5,120 floats each way).
-- The served path (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1 --cards 2
-  --block-imports gguf,tokenizers`; ThinkingCap with `--max-ctx 32768 --needle 28000 --restart`): ThinkingCap reads a
+- The served path, plain (`tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1
+  --cards 2 --draft off --block-imports gguf,tokenizers`, measured before drafting was the two-card default; ThinkingCap
+  with `--max-ctx 32768 --needle 28000 --restart`): ThinkingCap reads a
   6,760-token prompt at 759 tok/s and a 27,712-token one at 403 tok/s (the needle found), decode 15 tok/s at that depth;
   Swift reads 6,760 tokens at 790 tok/s.
 - llama.cpp on the same two cards (`llama-bench -dev ROCm0/ROCm1 -ngl 99 -fa 1 -p 2048 -n 128 -r 3`):
@@ -457,6 +458,43 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
   Tensor mode is the like-for-like comparison: decode here is 1.37x / 1.41x its best, prefill 1.08x / 0.97x. Layer mode
   reads prompts faster (no exchanges between the cards) and writes slower. `-sm row` does not run on this fork ("device
   ROCm0 does not support split buffers").
+
+#### Speculative decoding on two cards (served)
+
+`caminus serve --cards 2` with `--draft mtp` or `--draft dflash`: the two-card verify tape (`kernels/k3_q35_swift_tp_ver.hip`,
+`kernels/k3_q35_tcap_tp_ver.hip`) on both cards, the one-card drafter and a full copy of the output head on one of them (MTP
+on card 0; DFlash on the card with more room left). DFlash is the two-card default for both models. Measured 2026-11-15
+on an RX 7900 XTX + RX 7900 XT with `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS
+--scratch DIR --card 0,1 --cards 2 --draft KIND --max-ctx 40960`: three interleaved rounds, 128 greedy tokens. Every
+drafted round was token-identical to plain.
+
+Public prompts of 9,661 and 34,444 tokens, built from this repository's source:
+
+| Two cards (XTX + XT), served decode tok/s | off | MTP | x | DFlash | x |
+|---|---|---|---|---|---|
+| Swift 1.5, 10K | 60.7 | 88.9 | 1.46 | 82.2 | 1.36 |
+| Swift 1.5, 34K | 50.3 | 65.8 | 1.31 | 72.1 | 1.44 |
+| ThinkingCap, 10K | 65.6 | 83.7 | 1.28 | 74.5 | 1.13 |
+| ThinkingCap, 34K | 53.7 | 59.5 | 1.11 | 63.7 | 1.18 |
+
+(Each drafter's off column comes from its own interleaved run.)
+
+Agent-style prompts, DFlash against off, same command: a coding-agent system prompt, 7 tool schemas and tool-call turns
+whose results are this repository's source files, ending on a tool result; they render to 11,465 and 28,902 tokens.
+
+| two cards | off | DFlash | x |
+|---|---|---|---|
+| Swift 1.5, agent 11.5K | 59.7 | 71.6 | 1.20 |
+| Swift 1.5, agent 28.9K | 51.8 | 75.2 | 1.45 |
+| ThinkingCap, agent 11.5K | 64.8 | 82.0 | 1.26 |
+| ThinkingCap, agent 28.9K | 55.9 | 70.8 | 1.27 |
+
+- The served end to end (`tools/serve_smoke1.py --cards 2 --draft off|mtp|dflash --block-imports gguf,tokenizers
+  --restart`, per model): greedy and sampled replies byte-identical to `--draft off`; own code objects only; the restart
+  served from the disk tier.
+- Seen, not blockers: a server started with `--draft mtp` runs its plain passes slower than a `--draft off` server
+  (ThinkingCap 15.0 vs 14.1 ms per pass greedy, 19.0 vs 14.5 sampled) while its policy has drafting switched off. The
+  first drafted request after a load is slower than later ones (28.8 ms per pass, then 15-18).
 
 ### Qwen3-30B-A3B Q4_K_M
 
@@ -472,6 +510,38 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 | Mean KLD against the reference, 128 tokens | **4.66e-04**, top-1 128 / 128 | 2.83e-03, 127 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
 | The same for the last 64 of 16,384 / 40,896 tokens | **8.80e-04**, 62 / 64; **6.64e-04**, 64 / 64 | 5.06e-03, 60 / 64; 5.73e-03, 63 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode) |
 
+### Qwen3-30B-A3B on two cards
+
+`caminus serve --cards 2` (the `qwen3moe-tp` entry) runs the same file on an RX 7900 XTX + RX 7900 XT; one card stays the
+model's default. Each card holds 2 of the 4 kv heads with their query heads, and 512 (XTX) or 256 (XT) of each expert's
+768 rows; the two cards add their partial results 96 times per token.
+
+Served, 2026-11-16: `benchmarks/served_cards_ab.py` (under `tools/guard.sh`), `caminus serve` on one XTX against the
+XTX + XT, both `--draft off` and `--no-disk-cache`, own code (`--block-imports gguf,tokenizers`). Three rounds, each
+round a fresh one-card server then a fresh two-card server; one prompt per depth built from this repository's own source,
+read from empty (0 cached tokens on every request), then 128 greedy tokens. Medians of the three rounds (tok/s):
+
+| Depth (prompt tokens) | 8 | 4,096 | 16,384 | 32,768 | 40,768 |
+|---|---|---|---|---|---|
+| Decode, two cards | 206 | 183 | 151 | 123 | 115 |
+| Decode, one XTX | 240 | 206 | 155 | 117 | 104 |
+| Decode, two / one | 0.86x | 0.89x | 0.97x | 1.05x | 1.11x |
+| Prefill, two cards | 188 | 6,860 | 5,100 | 3,533 | 2,993 |
+| Prefill, one XTX | 235 | 6,307 | 4,181 | 2,796 | 2,326 |
+| Prefill, two / one | 0.80x | 1.09x | 1.22x | 1.26x | 1.29x |
+
+- Every range sits within 5 % of its median. The 8-token prefill is one short pass, not a throughput figure.
+- Two cards read every prompt from 4K tokens on faster, and decode faster from about 32K tokens on. Short turns decode
+  faster on one card, which is why one card stays the default.
+- The two-card engine is not bitwise to the one-card engine by design (the summation order differs). Its accuracy is
+  gated against an fp32 reference at depth instead (`tools/gates/q3moe_depth_gmodel.py --cards 2`, the two-card
+  prefill then decode, 2026-11-16): mean KLD 1.02e-03 over the last 64 of 16,384 positions and 8.0e-04
+  over the last 64 of 40,896, both below llama.cpp's on the same file (5.06e-03 and 5.73e-03).
+- Engine level (no server), for reference: decode 218 / 195 / 163 / 133 / 125 tok/s at 8 / 4,096 / 16,384 / 32,768 /
+  40,900 against one XTX's 246 / 210 / 159 / 120 / 105 (2026-11-15, `benchmarks/q3moe_depth.py --cards 2`); prefill
+  from empty 7,041 against 6,503 tok/s at 4,096 and 3,556 against 2,788 at 32,768 (2026-11-16,
+  `benchmarks/q3moe_prefill.py --cards 2`, interleaved, medians of three).
+
 ## Two-card yardstick: stock llama.cpp, tensor and layer split
 
 Measured 2026-11-11 on an RX 7900 XTX + RX 7900 XT with stock llama.cpp (ggml-org master 7bcbc04, built for gfx1100):
@@ -485,7 +555,11 @@ each card whole layers.
 | ThinkingCap RCO 4.2 bpw | 65.4 / 936 | 46.0 / 978 | 36.3 / 1,509 |
 | Qwen3-Coder-Next UD-IQ3_S | 136.5 / ~135 (no batched prefill yet) | 72.5 / 2,046 (even split) | 80.8 / 3,625 |
 | The Coder (IQ1_M) | 104; 123-203 with its drafter / ~2,800 | 39.6 / 1,336 | 40.5 / 2,328 |
+| Qwen3-30B-A3B Q4_K_M | 206 served (218 engine level) / no 2,048-token row (4,096: 6,860 served) | 112.4 / 2,909 | 126.2 / 5,780 |
 
+- Qwen3-30B-A3B's row was measured later, 2026-11-15, with the same build (7bcbc04) and command (`-ts 53/47 -fa 1`);
+  its Caminus column is the served two-card section above (engine level in brackets). Both two-card modes decode below llama.cpp's
+  one-card row above (148 tok/s, measured on the ignite-llama fork).
 - Files larger than the host's page cache (Qwen3-Coder-Next, the Coder on a 29 GiB host) need `-lm dio`: with the
   default memory-mapped loading llama-bench stalls after loading the weights, both cards idle.
 - Qwen3-Coder-Next with `-sm tensor -ts 53/47` stops on `GGML_ASSERT(split_state.ne[j] % div == 0)`; the even split runs.

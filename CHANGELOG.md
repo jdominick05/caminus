@@ -7,6 +7,12 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### New
 
+- **Qwen3-30B-A3B reads longer texts, opt-in.** `caminus start qwen3-30b-a3b --long-context` (or `caminus serve
+  --long-context`) uses the model card's recipe for long texts, YaRN x4, for up to 131,072 tokens: about 80K on one
+  RX 7900 XTX by the memory projection (the server stores the cache as 8-bit rows there and says so) and the full 131,072 on two cards. The default
+  stays 40,960 tokens without scaling: YaRN changes every position, so short texts can read slightly differently. Other
+  models refuse the flag. See [models](docs/models.md).
+
 - **Signed build provenance (SLSA Build Level 3).** Every release and nightly is now built again on GitHub's runners
   in the same build image the maintainer uses, published only when both builds are byte for byte equal, and signed:
   `gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus --signer-workflow
@@ -26,6 +32,25 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
   --cards 2`) splits every layer across both cards: decode at 64 and 68 tok/s on an XTX + XT, and the full 262,144-token
   context fits. Still Caminus's own code end to end, with the same accuracy. Reading prompts is no faster than on one XTX
   yet. See [benchmarks](docs/dev/benchmarks.md).
+- **Qwen3-30B-A3B on two cards, offered.** `caminus start qwen3-30b-a3b --cards 2` (or `caminus serve --cards 2`, or the
+  panel's two-card mode) splits every layer across an XTX + XT: each card holds half the attention heads and part of every
+  expert (two thirds on the bigger card, card 0). Still Caminus's own code end to end. One card stays the default: served, two cards decode more slowly on short
+  turns (206 against 240 tok/s) and faster from about 32K tokens on (115 against 104 tok/s at 40,768), and read every
+  prompt from 4K tokens on faster (1.09x at 4K, 1.29x at 40,768). The context stays 40,960
+  tokens, the model's own limit. See [benchmarks](docs/dev/benchmarks.md).
+- **An 8-bit KV cache for Qwen3-30B-A3B.** `caminus start qwen3-30b-a3b --kv q8` (or `caminus serve --kv q8`), on one
+  card or two, stores the attention cache in 8-bit rows (the keys rotated first) at about half the memory per token of
+  context: 0.050 MiB instead of 0.094. F16 stays the default. The context stays the model's 40,960 tokens, but the
+  full context fits with more of the card in use: on an XTX with the desktop holding 1 GiB, 40,960 tokens with the
+  8-bit cache, 32,768 with F16 (projected). Decode is about as fast (engine-level: on one XTX 0.97x on short turns,
+  1.06x with a full context; on two cards within 2 %). By mean KL divergence it changes the output less than
+  llama.cpp's 8-bit cache changes llama.cpp's; top-1 agreement with the F16 cache is within one row of llama.cpp's
+  (one card at 16,384 tokens: 60 of 64 rows against its 61). A conversation
+  saved in one format is never restored by a server running the other. `/props` reports the cache
+  (`caminus.kv_cache`) and `caminus ps` shows it. `caminus fit --json` reports the context that fits with each cache
+  (`max_ctx.q8` next to `max_ctx.f16`, `null` for models without the 8-bit cache) and the panel's model picker shows
+  both; for the Coder, which keeps its own 8-bit cache (`kv_fixed`), it shows that cache's one figure. Every other
+  model refuses `--kv q8`. See [models](docs/models.md#the-8-bit-kv-cache-qwen3-30b-a3b).
 - **Speculative decoding for both dense 27B models, served.** Two drafters on one card, both on Caminus's own
   code; the output is identical to `--draft off` token for token. `--draft dflash` is the default (above). Served decode, `caminus serve`, short prompts (code / prose / shell):
   - `--draft mtp` drafts 3 tokens with the model's own multi-token-prediction layer and verifies 4 tokens a pass; it
@@ -67,12 +92,18 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ### Changed
 
+- **Drafting on two cards for Swift 1.5 and ThinkingCap, DFlash2 by default.** `caminus start swift-1.5 --cards 2` (or
+  `thinkingcap`) now drafts with `--draft dflash` when the shared drafter file is there and 32,768 tokens of context
+  still fit with it; `--draft mtp` works on two cards too, and `--draft off` serves plain. The output is identical to
+  plain decoding. On an XTX + XT, served: 1.36-1.44x (Swift 1.5) and 1.13-1.18x (ThinkingCap) on 10K-34K-token prompts,
+  1.20-1.45x on 11K-29K-token agent prompts. The panel offers auto / off / MTP / DFlash for both on two cards. See
+  [benchmarks](docs/dev/benchmarks.md#speculative-decoding-on-two-cards-served).
 - **DFlash2 drafting is on by default for the three dense 27B models on one card.** `swift-1.5`, `thinkingcap` and
   `qwen3.8-27b` serve with `--draft dflash` when the shared 2 GB drafter file is there (`caminus pull` fetches it)
   and 32,768 tokens of context still fit with it, with the same output as plain decoding: about 1.1-1.4x on 10K and
   34K-token prompts and up to 2.2x on short ones. Swift 1.5 on a 24 GB card keeps plain decoding by default (the
   drafter would leave it about 12-16K tokens, too few for a coding harness); `--draft dflash` runs it anyway. Two
-  cards serve plain until two-card drafting is built.
+  cards: above.
 - **Qwen3.6, Qwen3-Coder-Next and AREX-2 are paused for this release.** The panel and `caminus models` no longer list
   them, and `caminus pull`, `caminus start` and `caminus serve` refuse them with the reason. Qwen3.6 and Qwen3-Coder-Next
   aren't measured on the current code; AREX-2 is outside this release's model set. The brain / hands team (AREX-2 +

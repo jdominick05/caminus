@@ -32,6 +32,10 @@
 //                                           split (HIP_VISIBLE_DEVICES picks it): llama.cpp at its defaults on one card
 //     ubatch N                              (optional, before the jobs) n_ubatch N instead of 512 (n_batch stays 2048 and
 //                                           must be >= N); every job of the run uses it
+//     yarn FACTOR ORIG                      (optional, before the jobs) YaRN RoPE scaling, llama-cli's --rope-scaling yarn
+//                                           --rope-scale FACTOR --yarn-orig-ctx ORIG (Qwen3-30B-A3B's long-context mode: yarn 4
+//                                           32768; ORIG must be given: llama.cpp otherwise takes the file's context_length);
+//                                           beta_fast / beta_slow / ext / attn factors stay llama.cpp's defaults
 //     tfx NAME TOKFILE D NPOS B SAVE OUT    memory cleared, tokens [0, D) as prompt passes of B tokens each (no logits;
 //                                           B = 1: one token per llama_decode, the decode path; D = 0: none), then tokens
 //                                           D .. D + NPOS - 1 one per llama_decode: OUT.tsv as tf's, and OUT.bin (f32
@@ -198,6 +202,7 @@ static uint64_t lc_fnv(const float * lg, int nv) {
 static int lc_mode(int argc, char ** argv) {
     if (argc < 4) { fprintf(stderr, "usage: %s MODEL --lc JOBS\n", argv[0]); return 1; }
     std::ifstream jf(argv[3]); std::string line; std::vector<std::vector<std::string>> jobs; int nctx = 0, nub = 512; std::string kvt = "q8_0"; bool onecard = false;   // (kv f16 | onecard: optional lines before the jobs)
+    float yarn_factor = 0.0f; int yarn_orig = 0;                                                                                   // (yarn FACTOR ORIG: optional)
     while (std::getline(jf, line)) {
         std::istringstream ls(line); std::vector<std::string> w; std::string x;
         while (ls >> x) w.push_back(x);
@@ -206,6 +211,10 @@ static int lc_mode(int argc, char ** argv) {
         else if (w[0] == "ubatch") { if (w.size() != 2 || atoi(w[1].c_str()) < 1 || atoi(w[1].c_str()) > 2048) { fprintf(stderr, "JOBS: bad ubatch line (ubatch N, 1..2048)\n"); return 1; } nub = atoi(w[1].c_str()); }
         else if (w[0] == "kv") { if (w.size() != 2 || (w[1] != "f16" && w[1] != "q8_0")) { fprintf(stderr, "JOBS: bad kv line (kv f16|q8_0)\n"); return 1; } kvt = w[1]; }
         else if (w[0] == "onecard") onecard = true;
+        else if (w[0] == "yarn") {
+            if (w.size() != 3 || atof(w[1].c_str()) <= 1.0 || atoi(w[2].c_str()) < 1) { fprintf(stderr, "JOBS: bad yarn line (yarn FACTOR>1 ORIG_CTX)\n"); return 1; }
+            yarn_factor = (float)atof(w[1].c_str()); yarn_orig = atoi(w[2].c_str());
+        }
         else jobs.push_back(w);
     }
     if (nctx <= 0) { fprintf(stderr, "JOBS: nctx N first\n"); return 1; }
@@ -221,6 +230,9 @@ static int lc_mode(int argc, char ** argv) {
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = nctx; cp.n_batch = 2048; cp.n_ubatch = nub; cp.n_seq_max = 1;
     cp.type_k = cp.type_v = kvt == "f16" ? GGML_TYPE_F16 : GGML_TYPE_Q8_0; cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    if (yarn_factor > 0.0f) {   // (llama-cli --rope-scaling yarn --rope-scale F --yarn-orig-ctx O: the same three fields)
+        cp.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN; cp.rope_freq_scale = 1.0f / yarn_factor; cp.yarn_orig_ctx = (uint32_t)yarn_orig;
+    }
     // the qsa jobs' dumps (inactive outside their one-token steps: nothing is asked for, the graph is not split)
     Golden g; g.active = false; g.prefix = "indexer_";
     bool any_qsa = false;
@@ -229,9 +241,10 @@ static int lc_mode(int argc, char ** argv) {
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "context failed\n"); return 1; }
     const int nv = llama_vocab_n_tokens(llama_model_get_vocab(model));
-    printf("LOAD %.1f s; n_ctx %u n_batch %u n_ubatch %u, KV %s, flash attention on, %s, n_vocab %d\n",
+    printf("LOAD %.1f s; n_ctx %u n_batch %u n_ubatch %u, KV %s, flash attention on, %s, n_vocab %d, RoPE %s (freq_scale %g, orig ctx %d)\n",
            now_s() - t0, llama_n_ctx(ctx), llama_n_batch(ctx), llama_n_ubatch(ctx), kvt.c_str(),
-           onecard ? "one card" : "split layer 0.55/0.45", nv);
+           onecard ? "one card" : "split layer 0.55/0.45", nv, yarn_factor > 0.0f ? "yarn" : "model default",
+           yarn_factor > 0.0f ? 1.0 / yarn_factor : 0.0, yarn_orig);
     fflush(stdout);
     auto ids_ok = [nv](const std::vector<llama_token> & t, const std::string & name) {
         for (size_t i = 0; i < t.size(); i++)

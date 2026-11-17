@@ -29,7 +29,7 @@ All are GET only. While the server loads, every route answers 503
 | Route | Shape | Notes |
 |---|---|---|
 | `/health` | `{"status": "ok"}`, or 503 while loading | llm-top's liveness probe |
-| `/props` | llama-server's `get_res_props` keys and JSON types | `default_generation_settings` = `{params, n_ctx}`. `params` is llama-server's `task_params::to_json(only_metrics=true)` set, with `n_predict` -1. Caminus adds `engine: "caminus"` (the engine marker), `caminus: {build_info, status, status_version, metrics_prefix, speculative_types, stats_enabled, code_objects}` (`code_objects`: the names of the GPU code objects the process has loaded so far), and its older keys `n_ctx`, `model`, `models`. `model_alias` is the default model id (`k3-coder`). `build_info` is `caminus-<short sha>`, read from .git. |
+| `/props` | llama-server's `get_res_props` keys and JSON types | `default_generation_settings` = `{params, n_ctx}`. `params` is llama-server's `task_params::to_json(only_metrics=true)` set, with `n_predict` -1. Caminus adds `engine: "caminus"` (the engine marker), `caminus: {build_info, status, status_version, metrics_prefix, speculative_types, stats_enabled, kv_cache, code_objects}` (`kv_cache`: `{type, format}`, the KV cache the engine holds: `type` `f16` or `q8` (`caminus serve --kv`), `format` its format id; `code_objects`: the names of the GPU code objects the process has loaded so far), and its older keys `n_ctx`, `model`, `models`. `model_alias` is the default model id (`k3-coder`). `build_info` is `caminus-<short sha>`, read from .git. |
 | `/slots` | a list with one slot, llama-server's `server_slot::to_json(only_metrics=true)` | Before the first request: only `id`, `n_ctx`, `speculative`, `is_processing`. After that, the last request's numbers stay, like llama-server's `task_prev`. `?fail_on_no_slot=1` answers 503 while busy. |
 | `/metrics` | Prometheus text, `Content-Type: text/plain; version=0.0.4`, header `Process-Start-Time-Unix` | First llama-server's block, in its order with its HELP texts. Then the `caminus:` series. |
 | `/caminus/status` | JSON, `version` 1 | Section 5 |
@@ -315,6 +315,7 @@ Absent values are `null`. Bump `version` on any incompatible change.
 | `server.requests_processing`, `server.requests_deferred`, `server.queue_depth` | requests | as the `llamacpp:` gauges |
 | `server.loading` | | answering 503 |
 | `server.speculative_types` | | `draft-dflash` or `none` |
+| `server.kv_cache` | | `{type, format}` as in /props |
 | `server.requests` | requests | requests that reached the engine and ended |
 | `llamacpp.prompt_tokens_total`, `llamacpp.prompt_tokens_cached_total`, `llamacpp.prompt_seconds_total`, `llamacpp.tokens_predicted_total`, `llamacpp.tokens_predicted_seconds_total`, `llamacpp.n_decode_total`, `llamacpp.n_tokens_max` | | the counters of section 3 |
 | `physics.floor_ms`, `physics.mode`, `physics.pass_pct`, `physics.token_pct`, `physics.k3_pass_p50_ms`, `physics.ms_per_token` | ms, % | section 4, speed vs physics |
@@ -587,7 +588,8 @@ crc checks), then the turn through the server's own session code (`K3Session` + 
 seed; it diffs the generated tokens and the first logits row, bitwise expected (`RESULT BITWISE`, else `RESULT DIFF` with the
 first difference). The engine key must match (a bundle saved by another build or another tree is `RESULT KEY MISMATCH`, exit
 2: the key holds every build/*.hsaco and the package sources, so a code update makes old bundles refuse; `--force` replays it
-anyway, not bitwise expected). Logits: the device-accept passes keep no later logits on the host, so every later position is
+anyway, not bitwise expected). A bundle from a `--cards 2` server of a one-card model (the dense own line, Qwen3-30B-A3B)
+is refused before the build: replay does not rebuild the two-card split and placement yet. Logits: the device-accept passes keep no later logits on the host, so every later position is
 compared by its token.
 
 ## 12. Measured (impl:m7-ops, 11-05; guarded, both cards, max_ctx 33024, everything on: the hardware sampler, the flight recorder, card timing)

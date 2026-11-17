@@ -1,0 +1,21 @@
+# solarized-dark: Solarized Dark, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #eee8d5
+muted = #93a1a1
+think = #c0c7c7
+dim = #586e75
+accent = #2aa198
+ok = #859900
+warn = #b58900
+action = #cb4b16
+hot = #dc322f
+purple = #6c71c4
+user = #268bd2
+teal = #2aa198
+chrome = #274650
+
+code_bg = #073642
+codeblock_bg = #002b36
+code_theme = solarized-dark

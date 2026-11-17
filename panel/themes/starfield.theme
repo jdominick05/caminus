@@ -1,0 +1,25 @@
+# starfield: Starfield (stars behind the text).
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #05060a
+bg_pattern = stars
+pattern = #3a4060
+
+text = #e8eaf6
+muted = #a0a6c0
+think = #c5cae9
+dim = #4a5070
+accent = #b388ff
+ok = #69f0ae
+warn = #ffe57f
+action = #ffab40
+hot = #ff5252
+purple = #ea80fc
+user = #82b1ff
+teal = #84ffff
+chrome = #22263a
+
+code_bg = #151826
+codeblock_bg = #0b0d15
+code_theme = dracula

@@ -1,0 +1,21 @@
+# kanagawa: Kanagawa (wave), mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #dcd7ba
+muted = #a6a69c
+think = #c8c093
+dim = #727169
+accent = #7fb4ca
+ok = #98bb6c
+warn = #e6c384
+action = #ffa066
+hot = #ff5d62
+purple = #957fb8
+user = #7e9cd8
+teal = #7aa89f
+chrome = #363646
+
+code_bg = #2a2a37
+codeblock_bg = #1f1f28
+code_theme = doom-one

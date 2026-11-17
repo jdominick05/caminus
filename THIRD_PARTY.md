@@ -8,6 +8,15 @@ not part of this repository and stay under their own licenses (the last section)
 
 When new third-party code comes in, list it here in the same commit and keep its notice in the file header.
 
+## Resident conversation UI dependencies
+
+The Go panel links [Bubbles](https://github.com/charmbracelet/bubbles) v2.2.1 (MIT) for the Unicode textarea and
+scrollable viewport, and [Glamour](https://github.com/charmbracelet/glamour) v2.0.1 (MIT) for terminal Markdown.
+Glamour uses [Chroma](https://github.com/alecthomas/chroma) (MIT) for syntax highlighting and
+[Goldmark](https://github.com/yuin/goldmark) (MIT) for parsing. These are pinned Go module dependencies, not copied
+source; upstream module archives retain their license notices. `panel/go.mod` and `panel/go.sum` record the complete
+dependency versions and checksums. The panel's existing Bubble Tea and Lip Gloss dependencies are MIT licensed too.
+
 ## llama.cpp / ggml (MIT)
 
 https://github.com/ggml-org/llama.cpp, used through the ignite-llama fork (https://github.com/jdominick05/ignite-llama at

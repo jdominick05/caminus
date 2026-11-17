@@ -7,10 +7,10 @@ CLAUDE.md imports this file.
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
 - It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
-  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, on
+  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, Swift 1.5, ThinkingCap and Qwen3-30B-A3B also on two; on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
-  `--draft mtp` (their own multi-token-prediction block on one card; `decode/mtp35.py`) and `--draft dflash` (its base
-  model's DFlash2 drafter on one card; `decode/dflash35.py`). `python/caminus/models.py` is the catalog.
+  `--draft mtp` (their own multi-token-prediction block; `decode/mtp35.py`) and `--draft dflash` (its base
+  model's DFlash2 drafter; `decode/dflash35.py`), on one card or two. `python/caminus/models.py` is the catalog.
 - K3, the core: a persistent decode megakernel; one GPU launch per pass walks a tape of tasks; two cards work as one
   through tensor parallelism over PCIe peer-to-peer.
 - Tested on one machine only: an RX 7900 XTX (drives the monitors) + an RX 7900 XT on a PCIe 4.0 x4 link, 29 GiB RAM, Linux.
@@ -39,6 +39,7 @@ CLAUDE.md imports this file.
 | Outside RDNA3 kernels (FlyDSL, rocKE, CK, AITER) measured at our shapes: yardsticks and borrow sources, never dependencies | docs/dev/yardsticks.md |
 | The model that runs on own code only, and its gates | docs/dev/qwen3-30b-a3b.md, tests/test_own_code.py |
 | User-facing behaviour | docs/*.md (quickstart, panel, models, hardware, harnesses, troubleshooting, cli, configuration) |
+| The agent environment (`caminus ember`): its module map, rules and tests | docs/dev/ember.md (users: docs/ember.md, docs/ember-quickstart.md) |
 | Agent skills: after a kernel edit (`kernel-change-evidence`), before calling a pull request ready (`pr-ready`) | .agents/skills/*/SKILL.md (linked from .claude/skills) |
 
 ## Layout (the parts that need a reason)
@@ -67,14 +68,16 @@ CLAUDE.md imports this file.
   Their two-card builds `k3_q35_swift_tp.hip` / `k3_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/k3_xchg.h` (the same exchange the GGUF
   modules include from `k3_gguf_ops.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
-  Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is in development: `arch.Dense35TP.draft_refusal`
-  refuses it in serve, `caminus fit`, the model picker and build unless `CAMINUS_ALLOW_TP_DRAFT=1` (development and its GPU
-  gates, docs/dev/testing.md "Dense two-card drafting"), and it is never a default. It runs the verify tape
+  Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is served for Swift 1.5 and ThinkingCap, DFlash2 by
+  default (`Dense35.DRAFT_DEFAULT` keyed by (module, 2), under serve's 32K rule; docs/dev/testing.md "Dense two-card
+  drafting" holds its gates). `arch.Dense35TP.draft_refusal` refuses it for a file whose decode module has no two-card
+  verify object (`k3.Q35_TPV_OF`; the plain 27B's `k3_q35_gsq` has no two-card form), and the model picker offers two
+  cards only for `Dense35TP.two_card_models`. It runs the verify tape
   (`engine/q35_dense_verify_tp.py`) on both cards and the one-card drafter beside it (`engine/q35_draft_tp.py`
   `DraftTarget35TP`: that card's device and embedding, a full head copy, named attributes only); MTP on card 0, DFlash on
   the card `Dense35TP.draft_card` picks once at placement from `context_fit` (stored in `opt['placement']`, read back by
   build). Its head copy and the drafter weights load through the trunk's uploader (`Uploader.loading` frames them in
-  `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects stay outside the installed runtime set until the refusal is lifted.
+  `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects are in the installed runtime set; the drafters are the one-card objects.
   `k3_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
@@ -119,7 +122,22 @@ CLAUDE.md imports this file.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
-  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename.
+  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename. Qwen3-30B-A3B's is
+  `k3_q3m_lean_kvq8` (+ `q3m_prefill_kvq8` for the prefill's rows and attention; `Q3MoEOne(q8=True)`, served by
+  `caminus serve --kv q8`): rows
+  that encode the F16 object's halves with K (and q) through the head's Hadamard128 (`kernels/own_kv_rot128.h`, reference
+  `caminus.ref_kv.hadamard128`; V unrotated), its statements under `K3_Q3M_KV_Q8` / `Q3P_KV_Q8` with the F16 text in
+  `#else`; its module file also defines `K3_Q3M_ADD_RMS_PIN` (OP_OWN_ADD_RMS16's counts pinned as scalars) and
+  OP_OWN_ATTS pins its own counts under `K3_Q3M_KV_Q8`: 19 spilled scalars against the F16 object's 53, which keeps its
+  code. Its two-card form is `k3_q3m_lean_tp_kvq8` (the same two defines over `k3_q3m_lean_tp.hip`; `k3.Q3M_TP_OF` and
+  `Q3M_KV_Q8_BASE` both list it; `Q3MoETP(q8=True)`, its prefill `Q3MPrefillTP` on `q3m_prefill_kvq8`'s kernels at each
+  card's local shapes; `--cards 2 --kv q8`): 33 spilled scalars against `k3_q3m_lean_tp`'s 66. All three Q8 objects are in
+  the installed runtime set. `caminus serve --kv {f16,q8}` (default f16; `caminus start --kv`, `caminus fit --kv`) sets
+  `opt['kv']`; `serve.cli.recipe` calls `Arch.kv_check`, so every registry entry but the two qwen3moe ones refuses
+  `q8` before placement, naming the model that takes it. `f16` selects nothing on an entry without the choice: the
+  GGUF engines keep their own q8_0 cache (`Arch.kv_fixed`), the dense line F16. `/props` (`caminus.kv_cache`) and
+  `/caminus/status` report the built engine's cache (`arch.kv_cache_of`); the engine key's `tp.kv` and module keep a
+  park of one format from ever being offered to the other (`tests/engine/kv_park_rt.py`).
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them
@@ -129,13 +147,37 @@ CLAUDE.md imports this file.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
   Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin
   below the guard distinct from the cache/display reserve; `tests/test_context_fit.py` checks parity at the fit limit
-  and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum.
+  and refuses GPU initialization in metadata reports. Failed projections return no numeric maximum. `caminus fit`
+  reports `max_ctx` per KV format (`{f16, q8}`, each projected on its own, q8 null without a Q8 build); `--kv` selects
+  only which format's placement the report describes.
   `meta()` keeps the header's `rope.scaling.*` keys; every entry refuses a file that sets them (`Arch.rope_refusal`, from
-  serve's `recipe` and replay): no engine applies a file's RoPE scaling yet, and such a file is never served unscaled.
-  `rope_facts` holds each model card's native context and long-context recipe as data only.
+  serve's `recipe` and replay): no engine applies a file's RoPE scaling keys, and such a file is never served unscaled.
+  `rope_facts` holds each model card's native context and long-context recipe; `shipped` names what Caminus serves past
+  the GGUF's context: the Coder's NTK mode, and Qwen3-30B-A3B's opt-in YaRN x4 (`_Q3MLong`, `--long-context` or an explicit
+  `--max-ctx` past 40,960; `Arch.long_mode` resolves it in `recipe` before placement, every other entry refuses the flag;
+  `_Q3MLong.long_refusal` refuses a qwen3moe file whose header is not that model's, context_length 40,960 and
+  rope.freq_base 1e6, or that has codebook / row-scale tensors).
+  YaRN runs on separate objects (`k3.Q3M_YARN_OF`: `k3_q3m_lean*_yarn` under `K3_Q3M_YARN`, `q3m_prefill*_yarn` under
+  `Q3P_YARN`): the table `caminus.rope.yarn_table` (llama.cpp's rope_yarn: freq per pair, mscale on cos / sin) is appended
+  to each layer's qk_par and read by decode and prefill with the same statements; the default objects keep their code.
+  In the mode with no `kv` asked for, `placement_extra` picks F16 where the context fits, else Q8_0 where it holds more
+  (one XTX: about 80K); the engine key carries `tp.rope`. Each YaRN object's spilled scalars must equal its native peer's
+  (53 / 19 / 66 / 33): objcheck cannot pair them.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
-  tokenizers library off its path).
+  tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `k3_q3m_lean_tp`: kv heads and each
+  expert's rows split, router replicated; `check_replicas` compares the residual and every layer's router ids; served by
+  `caminus serve --cards 2` through `arch.Q3MoETP` (`TWO_CARD['qwen3moe']`; one card stays the default, the picker offers
+  two for `Q3MoETP.two_card_models`): card 0 is the bigger card (placement's order) and takes 512 of each expert's 768
+  rows, a smaller card 0 is refused (`pair_refusal`), max_ctx auto capped at the file's 40,960 (131,072 in the
+  long-context mode); both objects
+  (`k3_q3m_lean_tp`, `q3m_prefill_tp`) are in the installed runtime set, with its Q8 KV build (`--kv q8`);
+  `tests/engine/test_q3moe_tp_cpu.py`, GPU gate
+  `tests/engine/test_q3moe_tp.py`). Its batched
+  prefill is `prefill/q3m_tp.py` (`Q3MPrefillTP`: the one-card chunk per card on its slices and KV rows, 2 exchanges per
+  layer through `prefill/xchg.py` in micro-chunks so an exchange overlaps the next piece's compute; the FFN partial
+  weighted over its slots first by `kernels/q3m_prefill_tp.hip`, its own object so `q3m_prefill.hsaco` stays unchanged;
+  `tests/prefill/test_q3m_prefill_tp_cpu.py`, GPU gate `tests/prefill/test_q3m_prefill_tp.py`, `--probe` on one card first).
 - `prefill/`: the batched prefill; every op is bitwise its K3 decode op on the same inputs; `driver.py` is the shared shell.
   Coder target KV follows the engine's `q8` policy: Q8 uses rotated blocks, F16 unrotated half rows. The QSA indexer
   stays Q8 in either mode. F16 target append and split attention use `prefill_attn_f16`; keep the default Q8 object
@@ -166,6 +208,7 @@ CLAUDE.md imports this file.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
   Session monitoring filters by the selected server's alias before applying its six-session limit; shared Qwen homes
   must not let another model's newer logs hide this server's sessions.
+- `ember/`: Ember, the agent environment (`caminus ember`; `caminus env` is kept as an alias; docs/specs/spec-ember.md): agent work as a second user on this machine over SSH, root only through a human-approved bridge; its system prompt is share/harness/ember/ROBOTS.md; stdlib only, no GPU, CPU tests only.
 - `panel/openrgb.go`: optional agent-state lighting over backwards-compatible SDK v3. Active per-LED modes need no
   mode change; `openrgb.switch_modes` opts into temporary Direct/Custom/Static mode changes. Restore the first-seen
   colors and complete mode payload on exit, using freshly discovered identities and matching layouts after reconnects.
@@ -218,7 +261,7 @@ python -I tools/release/privacy_scan.py .           # no secrets, machine paths 
 python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
 python -I tools/gates/objcheck.py snap build -o FILE   # the built objects' code / data digests and k3_run's registers, before an edit
 python -I tools/gates/objcheck.py check FILE build --expect 'MODULE*'   # after it: only the named objects changed; registers in budget (reads files, CPU)
-python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS)
+python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS; --metadata: the text only, run by CI)
 tools/release/in_image.sh tools/release/release_build.sh   # reproducible release files from a clean clone at a tag, in the build image (docs/dev/releasing.md)
 tools/release/nightly.sh --dry-run                  # the nightly of `testing` up to its verified files; without the flag it PUBLISHES (a timer's job)
 
@@ -227,8 +270,10 @@ tools/guard.sh LOG 600 python -I tools/k3_smoke.py --model coder          # ends
 tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # decode ms/token
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1 --cards 2   # its two-card form (swift-1.5, thinkingcap, qwen3-30b-a3b)
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --kv q8 --restart   # qwen3-30b-a3b's 8-bit KV cache (a fresh DIR; --restart-kv: a park of the other format is not offered)
 tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
-CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load, read back bit for bit
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load (qwen35 or qwen3moe), read back bit for bit
 CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 300 python -I tools/gates/h2d_pattern.py --seconds 180
 python -I tools/gates/sdma_classify.py ULOG ADDR --pid PID                # (CPU) a fault address: live / freed / neither upload source
 ```

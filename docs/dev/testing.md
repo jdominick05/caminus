@@ -90,12 +90,12 @@ the GPU. Without the environment switch the existing checkout server path is use
 
 ## Dense two-card drafting
 
-ThinkingCap's gates need its two-card verify register fix (#107) merged first; Swift's can run now.
-
-`--cards 2 --draft mtp|dflash` for Swift 1.5 and ThinkingCap is refused unless `CAMINUS_ALLOW_TP_DRAFT=1`, until the
-gates below pass on both models. The CPU check covers the feature-copy dependencies on either card, the drafter's full
-head and its uploads, the cache identity, the checkpoint layout against its projection, the prefill hooks, the drafter
-card's choice and the refusal itself:
+`--cards 2 --draft mtp|dflash` for Swift 1.5 and ThinkingCap passed gates 1-4 below on both models (2026-11-15) and is
+served; `--draft dflash` is the two-card default (docs/dev/benchmarks.md, "Speculative decoding on two cards"). A file
+whose decode module has no two-card verify object (the plain 27B's) is refused two-card drafting. The CPU check covers
+the feature-copy dependencies on either card, the drafter's full head and its uploads, the cache identity, the
+checkpoint layout against its projection, the prefill hooks, the drafter card's choice, that refusal and the two-card
+default with its 32K rule:
 
 ```bash
 python -I tests/engine/test_q35_verify_tp_cpu.py --scratch SCRATCH
@@ -113,16 +113,47 @@ CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_onl
 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers L --feature-card 0
 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/engine/test_q35_verify_tp.py GGUF --feature-layers L --feature-card 1
 # 3. per model and KIND: the served end to end (greedy and sampled identity against --draft off, own imports, restart)
-CAMINUS_ALLOW_TP_DRAFT=1 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF \
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF \
   --scratch DIR --card 0,1 --cards 2 --draft KIND --block-imports gguf,tokenizers --restart
 # 4. per model and drafter: the served gain at depth, at least three interleaved rounds
-CAMINUS_ALLOW_TP_DRAFT=1 tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS \
+tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS \
   --scratch DIR --card 0,1 --cards 2 --draft KIND
+# 5. per model: the default, with no --draft. Passes when the log has "--draft dflash (the default", "drafter on card N"
+#    and the "two-card --draft dflash on card N" build line and no later "--draft off (" fallback line, and greedy_sha256 /
+#    sampled_sha256 equal a --draft off run of the same smoke (record the "max_ctx auto ->" value)
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF \
+  --scratch DIR --card 0,1 --cards 2 --block-imports gguf,tokenizers --restart
 ```
 
 Gate 2 must hold at every accepted row, the rejected tails and grids 3/6/7 (the test runs them); gate 3 compares
-`greedy_sha256` and `sampled_sha256` with the `--draft off` run. Lifting the refusal also adds the two `_tp_ver` objects
-to `device/kernels.py`'s runtime set; a default needs gate 4's measured gain.
+`greedy_sha256` and `sampled_sha256` with the `--draft off` run. The two `_tp_ver` objects are in `device/kernels.py`'s
+runtime set (`tests/packaging/test_runtime_kernels.py`). A plain two-card measurement passes `--draft off`.
+
+## Qwen3-30B-A3B's 8-bit KV cache, served
+
+`caminus serve --kv q8` ([q8-kv.md](q8-kv.md#serving-qwen3-30b-a3b-with---kv-q8)). CPU: the two Q8 engine suites run
+the park path on the byte rows and the format mismatch both ways (`tests/engine/kv_park_rt.py`):
+
+```bash
+python -I tests/engine/test_q3moe_kvq8_cpu.py --scratch SCRATCH
+python -I tests/engine/test_q3moe_tp_kvq8_cpu.py --scratch SCRATCH
+```
+
+Served, each under the guard (the one-card runs on the XTX), each with a fresh scratch directory (the prompts are fixed:
+an earlier run's park would be restored):
+
+```bash
+# 1. one card: /props names q8, the Q8 decode object loaded (not its F16 base) with q3m_prefill_kvq8, own imports, the
+#    park restored, the restarted server's objects the Q8 ones again
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR1 --card 0 --kv q8 \
+  --block-imports gguf,tokenizers --restart
+# 2. two cards: the same
+CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR2 --card 0,1 \
+  --cards 2 --kv q8 --block-imports gguf,tokenizers --restart
+# 3. the mismatch: an F16 server parks (its parks must be on disk), a Q8 server on the same directories (its objects
+#    the Q8 ones) reads the long prompt from cold and leaves those parks on disk
+tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR3 --card 0 --restart --restart-kv q8
+```
 
 ## The accuracy rules
 

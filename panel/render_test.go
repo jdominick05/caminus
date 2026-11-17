@@ -138,9 +138,9 @@ func TestOfflineStates(t *testing.T) {
 		pill string
 		why  string
 	}{
-		{"before the first poll", serverState{}, "CONNECTING", "looking for the server"},
-		{"no server, its process still there", serverState{Polled: true}, "DOWN", "caminus is running but not answering"},
-		{"loading", serverState{Polled: true, Loading: true}, "LOADING", "model loading"},
+		{"before the first poll", serverState{}, "connecting", "looking for the server"},
+		{"no server, its process still there", serverState{Polled: true}, "down", "caminus is running but not answering"},
+		{"loading", serverState{Polled: true, Loading: true}, "loading", "model loading"},
 	}
 	for _, c := range cases {
 		st := demoState(t)

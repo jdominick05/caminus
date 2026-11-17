@@ -1,0 +1,21 @@
+# rose-pine: Rosé Pine, mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #e0def4
+muted = #908caa
+think = #c4c0e0
+dim = #6e6a86
+accent = #ebbcba
+ok = #9ccfd8
+warn = #f6c177
+action = #ea9a97
+hot = #eb6f92
+purple = #c4a7e7
+user = #3e8fb0
+teal = #9ccfd8
+chrome = #403d52
+
+code_bg = #26233a
+codeblock_bg = #1f1d2e
+code_theme = rose-pine

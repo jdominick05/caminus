@@ -12,6 +12,7 @@ import os
 import struct
 import sys
 import time
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'python'))
@@ -66,22 +67,43 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3next', 'qwen4exp'],
-          f'archs: the six served and the dense own line\'s two-card form ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3moe-tp', 'qwen3next', 'qwen4exp'],
+          f'archs: the six served, the dense own line\'s and Qwen3-30B-A3B\'s two-card forms ({sorted(arch.ARCHS)})')
     check(arch.ARCHS['qwen35-own'].variant(2) is arch.ARCHS['qwen35-own-tp'] and arch.ARCHS['qwen35-own'].variant(1) is arch.ARCHS['qwen35-own']
-          and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own'] and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp'},
+          and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own']
+          and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp', 'qwen3moe': 'qwen3moe-tp'},
           'variant: --cards 2 names the dense own line\'s two-card entry; 1 / None its own')
+    q3, q3tp = arch.ARCHS['qwen3moe'], arch.ARCHS['qwen3moe-tp']
+    check(q3.variant(2) is q3tp and q3.variant(1) is q3 and q3.variant(None) is q3 and q3.cards == 1
+          and models.BY_NAME['qwen3-30b-a3b'].cards == 1 and models.BY_NAME['qwen3-30b-a3b'].arch == 'qwen3moe',
+          'variant: Qwen3-30B-A3B --cards 2 builds the two-card recipe (qwen3moe-tp); one card stays its default (no --cards, '
+          'the catalog\'s card count)')
     try:
-        arch.ARCHS['qwen3moe'].variant(2); refused = False
+        arch.ARCHS['qwen35'].variant(2); refused = False
     except ValueError:
         refused = True
     check(refused and arch.ARCHS['qwen35-own-tp'].split([{'label': 'XTX'}, {'label': 'XT'}]) == {'ffn_share': 0.532}
           and arch.ARCHS['qwen35-own-tp'].split([{'label': 'XT'}, {'label': 'XT'}]) == {'ffn_share': 0.5},
           'variant: a model without a two-card form refuses --cards 2; the two-card split weighs the feed-forward rows by bandwidth')
+    xtx, xt = dict(label='XTX', total_mib=24560, card='card1', pci='0000:03:00.0'), dict(label='XT', total_mib=20464, card='card2', pci='0000:08:00.0')
+    check(q3tp.split([xtx, xt]) == {'exp_rows': 512, 'vocab_share': 0.532} and q3tp.split([xt, dict(xt, pci='x')]) == {'exp_rows': 512, 'vocab_share': 0.5}
+          and q3tp.split([xtx, dict(xtx, pci='x')]) == {'exp_rows': 512, 'vocab_share': 0.5} and q3tp.split(None)['exp_rows'] == 512
+          and q3tp._split({'placement': {'split': {'exp_rows': 512, 'vocab_share': 0.532}}}) == (512, 0.532),
+          'qwen3moe-tp split: card 0 (the bigger card first) takes 512 of 768 expert rows on every pair; the head by bandwidth; '
+          'build and max_ctx auto read the placement\'s stored split')
+    why = q3tp.pair_refusal([xt, xtx])
+    from caminus.device import host as _h
+    try:
+        q3tp.fits(dict(model='unused'), [xt, xtx]); raised = None
+    except _h.PlacementError as exc:
+        raised = str(exc)
+    check(q3tp.pair_refusal([xtx, xt]) is None and q3tp.pair_refusal([xt, dict(xt, pci='x')]) is None and bool(why)
+          and 'bigger card' in why and raised == why,
+          f'qwen3moe-tp pair: XTX + XT and equal cards pass; a smaller card 0 is refused, by placement too ({why})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
                     'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
-                    'qwen35-own-tp': ('tp', 2, 1, 'mtp')},
+                    'qwen35-own-tp': ('tp', 2, 1, 'mtp'), 'qwen3moe-tp': ('tp', 2, 1, None)},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
           'archs: the own-code qwen35 entry takes the own tokenizer, AREX-2\'s entry keeps its own')
@@ -186,7 +208,7 @@ def main():
           'rope keys: meta keeps every rope.scaling.* key the vendored gguf-py names')
     yarn = {'rope.scaling.type': 'yarn', 'rope.scaling.factor': 4.0, 'rope.scaling.original_context_length': 32768}
     by_header = {'qwen4exp': 'qwen4exp', 'qwen35moe': 'qwen35moe', 'qwen35': 'qwen35', 'qwen3moe': 'qwen3moe',
-                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35'}
+                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35', 'qwen3moe-tp': 'qwen3moe'}
     check(sorted(by_header) == sorted(arch.ARCHS), 'rope keys: every entry has a header architecture below')
 
     def rope_file(a, kv, tag):
@@ -254,18 +276,19 @@ def main():
     with contextlib.redirect_stdout(out):
         rc = _cli0.fit_report(['--model', rope_file('qwen3moe', yarn, 'yarn'), '--draft', 'off', '--json'])
     rep = json.loads(out.getvalue())
-    check(rc == 1 and rep['ok'] is False and rep['max_ctx'] is None and 'RoPE scaling' in rep['error'],
+    check(rc == 1 and rep['ok'] is False and rep['max_ctx'] == {'f16': None, 'q8': None} and 'RoPE scaling' in rep['error'],
           f'rope keys: caminus fit reports the refusal with no maximum ({rep})')
 
     # ---- the model cards' context facts in the registry (data only: nothing serves from them yet)
     F = {n: ent.rope_facts for n, ent in arch.ARCHS.items()}
-    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), None, None, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
+    check(F['qwen3moe'] == arch.RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), 'yarn', 4.0, 'https://huggingface.co/Qwen/Qwen3-30B-A3B')
+          and F['qwen3moe'] is F['qwen3moe-tp'] is arch.QWEN3MOE_ROPE
           and F['qwen35-own'] is F['qwen35-own-tp'] is arch.QWEN35_ROPE
           and (F['qwen35-own'].native_ctx, F['qwen35-own'].card_factors, F['qwen35-own'].shipped) == (262144, (2.0, 4.0), None)
           and (F['qwen4exp'].native_ctx, F['qwen4exp'].card_kind, F['qwen4exp'].shipped, F['qwen4exp'].shipped_factor)
           == (262144, 'yarn', 'ntk', arch.LONG_NTK)
           and all(F[n] is None for n in ('qwen35moe', 'qwen35', 'qwen3next')),
-          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card, not applied), the dense 27B line 262,144, the Coder '
+          'rope facts: Qwen3-30B-A3B native 32,768 (YaRN x2 / x4 on its card; x4 shipped as the opt-in long-context mode), the dense 27B line 262,144, the Coder '
           'ships NTK x4 where its card names YaRN x4; the paused entries have none')
 
     # ---- caminus serve's options: --model-alias '' = the model's own id
@@ -275,6 +298,61 @@ def main():
           'cli: --model-alias defaults to the model\'s own id (\'\')')
     check(not any(hasattr(cli, n) for n in ('ONE_CARD_ARCHS', 'TP_ARCHS', 'model_arch', 'build_model', 'auto_max_ctx')),
           'cli: no architecture table or builder of its own')
+    # --kv: f16 by default; q8 only where an entry builds it (the qwen3moe pair); the entries without the choice say what
+    # their engine always holds: the GGUF engines' own 8-bit q8_0 cache (each engine's q8 default is True and the build
+    # passes none), the dense own-code line F16. /props reports the built engine's (arch.kv_cache_of)
+    import ast
+    def q8_default(rel, cls):
+        tree = ast.parse(open(os.path.join(ROOT, 'python', 'caminus', 'engine', rel)).read())
+        fn = next(n for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls for n in c.body
+                  if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+        args = fn.args.args[-len(fn.args.defaults):]
+        return next(ast.literal_eval(d) for a_, d in zip(args, fn.args.defaults) if a_.arg == 'q8')
+    q8s = {n: (a.kv_formats, a.kv_fixed) for n, a in arch.ARCHS.items()}
+    check(cli.parse([])['kv'] is None and not arch.kv_q8(cli.parse([])) and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
+          and q8s == {'qwen4exp': (('f16',), 'q8_0'), 'qwen35moe': (('f16',), 'q8_0'), 'qwen35': (('f16',), 'q8_0'),
+                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen3next': (('f16',), 'q8_0'),
+                      'qwen35-own-tp': (('f16',), None), 'qwen3moe-tp': (('f16', 'q8'), None)}
+          and q8_default('flashnext_tp.py', 'FlashNextTP') is True and q8_default('qwen35_one.py', 'Qwen35One') is True
+          and q8_default('qwen3next_tp.py', 'Qwen3NextTP') is True
+          and q8_default('q3moe_one.py', 'Q3MoEOne') is False and q8_default('q3moe_tp.py', 'Q3MoETP') is False
+          and arch.kv_cache_of(arch.CODER, object()) == {'type': 'q8', 'format': 'q8_0'}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], object()) == {'type': 'f16', 'format': 'f16'}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[0])) == {'type': 'q8', 'format': arch.KV_Q8_FORMATS[0]}
+          and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id='f16-v1:x')) == {'type': 'f16', 'format': 'f16-v1:x'}
+          and arch.kv_q8_built(types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[1])) and not arch.kv_q8_built(object())
+          and not arch.kv_q8_built(types.SimpleNamespace(kv_format_id='f16-v1:x'))
+          and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two)',
+          f'cli: --kv unset by default (F16; the long-context mode may choose) / f16 / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
+
+    # every kv_format_id an engine assigns is a Q8 id listed in arch.KV_Q8_FORMATS, under `if q8` (serve's startup check
+    # and /props read a built engine's cache from that list, so an id outside it would read as F16)
+    edir = os.path.join(ROOT, 'python', 'caminus', 'engine')
+    consts = {}
+    for fn in sorted(os.listdir(edir)):
+        if fn.endswith('.py'):
+            for n in ast.parse(open(os.path.join(edir, fn)).read()).body:
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant):
+                    for t in n.targets:
+                        if isinstance(t, ast.Name): consts[(fn, t.id)] = n.value.value
+    sites, bad = [], []
+    for fn in sorted(os.listdir(edir)):
+        if not fn.endswith('.py'): continue
+        tree = ast.parse(open(os.path.join(edir, fn)).read())
+        imported = {a_.asname or a_.name: n.module.split('.')[-1] + '.py' for n in ast.walk(tree)
+                    if isinstance(n, ast.ImportFrom) and n.module and n.level == 1 for a_ in n.names}
+        parent = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == 'kv_format_id' for t in node.targets):
+                v = node.value
+                val = (v.value if isinstance(v, ast.Constant) else consts.get((fn, v.id)) or consts.get((imported.get(v.id), v.id))
+                       if isinstance(v, ast.Name) else None)
+                up = parent.get(node)
+                gated = isinstance(up, ast.If) and isinstance(up.test, ast.Name) and up.test.id == 'q8' and node in up.body
+                sites.append((fn, node.lineno))
+                if val not in arch.KV_Q8_FORMATS or not gated: bad.append((fn, node.lineno, val, gated))
+    check(len(sites) >= 3 and not bad and len(set(arch.KV_Q8_FORMATS)) == len(arch.KV_Q8_FORMATS),
+          f'kv: every engine kv_format_id is a listed Q8 id set under `if q8` ({len(sites)} sites; outside: {bad})')
 
     # ---- the Coder's long-context mode (an explicit --max-ctx past its context_length) and --kv-host
     check(cli.parse([])['kv_host'] is False and cli.parse(['--kv-host'])['kv_host'] is True, 'cli: --kv-host (default off)')
@@ -322,7 +400,7 @@ def main():
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
-                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP'},
+                        'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen3moe-tp': 'Q3MoETP'},
               f'engine_class: every entry\'s engine imports ({names})')
         # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
         # engine served greedy requests without them and failed its first sampled one on the card)
@@ -347,8 +425,8 @@ def main():
         check(nm == 4096 and need_m(4096)[0] > need_o(4096)[0] and ring > 0,
               f'qwen35-own auto_need --draft mtp on a synthetic nextn file: {need_m(4096)[0]:.1f} MiB vs off '
               f'{need_o(4096)[0]:.1f} (the adapter ring {ring:.4f} MiB included), no header-key error')
-        # the default drafter (no --draft): the table's kind on one card when the file has the MTP block, plain without it,
-        # off on two cards (no two-card drafter yet); the Coder keeps DFlash
+        # the default drafter (no --draft): the table's kind when the file has the MTP block, plain without it, on one card
+        # and two (the table here: off on two cards); the Coder keeps DFlash
         # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's k3_q35_gsq)
         from caminus import ggufio as _gio
         from caminus.engine import q35_dense as _qd
@@ -408,9 +486,38 @@ def main():
         check(got_default == 'off' and refused,
               f'serve: a default --draft dflash without the drafter file serves plain ({got_default}); an explicit one refuses ({refused})')
         dd = arch.Dense35.DRAFT_DEFAULT
+        from caminus.engine import k3 as _k3
+        tpv = {one for one, tpm in _k3.Q35_TP_OF.items() if tpm in _k3.Q35_TPV_OF}
         check(all(dd[(m, 1)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap', 'k3_q35_gsq'))
-              and all(dd[(m, 2)] == 'off' for m in ('k3_q35_swift', 'k3_q35_tcap')),
-              f'default_draft: one card DFlash2 for the three dense 27B files, two cards plain ({dd})')
+              and all(dd[(m, 2)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap'))
+              and {m for (m, c) in dd if c == 2} == tpv == {'k3_q35_swift', 'k3_q35_tcap'} and ('k3_q35_gsq', 2) not in dd,
+              f'default_draft: DFlash2 for the three dense 27B files on one card and for the two with a two-card verify '
+              f'object on two cards ({dd}; two-card verify for {sorted(tpv)})')
+        tpa = arch.ARCHS['qwen35-own-tp']
+        check(tpa.two_card_models == ('swift-1.5', 'thinkingcap') and all(models.BY_NAME[n].arch == 'qwen35-own' for n in tpa.two_card_models)
+              and 'qwen3.8-27b' not in tpa.two_card_models and tpa.draft_refusal('mtp') is None and tpa.draft_refusal('dflash') is None,
+              f'two cards: the picker\'s catalog models with a two-card form ({tpa.two_card_models}, not the plain 27B); no refusal without a file')
+        # Qwen3-30B-A3B on two cards: the registry's projection is the engine's own check (Q3MoETP.projection_mib at the
+        # placed split) + the two-card prefill's construction check + the cache's checkpoint slots (a T = 1 tail row of each
+        # card's kv heads), capped at the file's context_length; no drafter
+        sys.path.insert(0, os.path.join(ROOT, 'tests', 'engine'))
+        import tiny_q3m
+        from caminus.engine import q3moe_tp as _q3tp
+        from caminus.prefill import q3m_tp as _q3pf
+        q3f = os.path.join(S, 'tiny-q3m-tp-40k.gguf'); tiny_q3m.write(q3f, tp=True, n_ctx=40960)
+        q3tp = arch.ARCHS['qwen3moe-tp']
+        pair = [dict(label='XTX', total_mib=24560), dict(label='XT', total_mib=20464)]
+        n_ctx, devs, slot, need = q3tp.auto_need(dict(model=q3f), 4, cards=pair)
+        pj = _q3tp.Q3MoETP.projection_mib(q3f, 32768, exp_rows=512, vocab_share=0.532)
+        pf = _q3pf.need_tp_mib(_q3pf.tp_shapes(q3f, 512), q3tp.PREFILL_CHUNK)
+        sl = [v * 1.05 + 1.0 for v in _q3tp.Q3MoETP.kv_pos_mib(q3f)]
+        want = [a + b + 6 * c for a, b, c in zip(pj, pf, sl)]
+        check(q3tp.EXP_ROWS == _q3tp.EXP_ROWS and n_ctx == 40960 and devs == [0, 1] and slot == max(sl)
+              and all(abs(x - y) < 1e-9 for x, y in zip(need(32768), want)) and need(40960)[0] > need(32768)[0]
+              and q3tp.two_card_models == ('qwen3-30b-a3b',) and q3tp.default_draft({}) == 'off' and q3tp.drafter is None
+              and q3tp.tokenizer == 'own' and q3tp.min_ctx({}) == arch.MIN_CTX,
+              f'qwen3moe-tp auto_need: the engine projection + the prefill check + 6 checkpoint slots per card '
+              f'({" / ".join(f"{v:.1f}" for v in need(32768))} MiB at 32768), capped at the file\'s 40,960; no drafter')
         from caminus.device import capacity
         keep = capacity.caps_mib, capacity.cache_reserve_mib
         try:

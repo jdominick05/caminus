@@ -48,5 +48,28 @@ OWN_KV_FN bool own_kv_q8_encode(const float * x, OwnKvQ8Block * y) {
     for (int j = 0; j < 32; j++) y->qs[j] = (int8_t)roundf(x[j] * inv);
     return true;
 }
+#ifdef __HIPCC__
+// The same encode with one block per wave32 (lane l holds value l; all 32 lanes active): own_kv_q8_encode's statements,
+// the max as a wave reduction (fmaxf is exact and order-free on the finite blocks that are stored; a non-finite value
+// makes the max inf and refuses the block). store: write the block (34 bytes at y) or, refused, OR 2 into *err and leave
+// its bytes alone. Returns the lane's decoded value, float code * float stored scale (exact in fp32), on every lane.
+// The qwen3moe Q8 KV writers (kernels/k3_own_atts.h, kernels/q3m_prefill.hip) use it.
+__device__ __forceinline__ float own_kv_q8_encode_wave(float x, uint8_t * y, int lane, bool store, int * err) {
+#pragma clang fp contract(off)
+    float amax = isfinite(x) ? fabsf(x) : INFINITY;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor(amax, o, 32));
+    const float d = amax / 127.0f;
+    const float inv = d ? 1.0f / d : 0.0f;
+    const _Float16 stored = (_Float16)d;
+    const bool refuse = !isfinite(amax) || (amax != 0.0f && (d == 0.0f || !isfinite(d) || !isfinite(inv) || !isfinite((float)stored)));
+    const int8_t q = (int8_t)roundf(x * inv);
+    if (store) {
+        if (refuse) { if (lane == 0) atomicOr(err, 2); }
+        else { y[2 + lane] = (uint8_t)q; if (lane == 0) *(_Float16 *)y = stored; }
+    }
+    return (float)q * (float)stored;
+}
+#endif
 #undef OWN_KV_FN
 #endif

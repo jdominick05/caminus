@@ -10,7 +10,15 @@ SwiGLU product for down) is rounded to 8-bit integers with one scale per vector 
 the product; everything else as without it.
 OUT.npz: seq (int64 [N]), logits (float32 [M, vocab]) for positions N - M .. N - 1. Its peak VRAM is projected from the shapes
 (peak_mib), checked against the card's cap before the first device transfer, and set as the process's allocator limit:
-8.1 GB at N = 40,960, --qchunk 256 (measured at 40,896: 7.8 GB)."""
+8.1 GB at N = 40,960, --qchunk 256 (measured at 40,896: 7.8 GB). Projected (not measured): 9.4 GB at 65,536 and 17.3 GB at
+131,000 with --qchunk 64 (an RX 7900 XT holds both).
+--yarn FACTOR:ORIG (the long-context mode's reference: 4:32768): YaRN's angles from llama.cpp's statements (caminus.ref_q3moe's
+yarn_angles: float64, then cos and sin times 1 + 0.1 ln FACTOR, in fp32); OUT.npz then carries yarn = [FACTOR, ORIG].
+--resume DIR --budget-s S (depth references past one GPU window): after each layer the residual (N x D fp32: 1 GB at 131K)
+and the layer index go to DIR as one file (state.npz, written under a temporary name and renamed: a run killed mid-write
+leaves the previous layer's state whole, never a residual of one layer with the index of another); a run stops after the first layer that ends past S seconds (RESULT PARTIAL: rerun the same
+command) and a rerun starts at the next layer. The attention is about quadratic in N: estimated (not measured) 7 / 30
+minutes of layers at 65,536 / 131,000 on one card, so 131K takes 3 or 4 windows of about 10 minutes."""
 import argparse, glob, math, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np
@@ -202,6 +210,35 @@ def peak_mib(F, N, qchunk, nl, D, nh, nkv, hd, E, ff, a8=False):
     return (max(attn, moe, head) + emb) / 2 ** 20 + SLACK_MIB
 
 
+STATE = 'state.npz'
+
+
+def save_state(d, x, seq, next_layer, yarn, act8):
+    """--resume: the residual after layer next_layer - 1 and that index, in ONE file, replaced atomically (os.replace of a
+    finished temporary file): a kill at any point leaves either the old state or the new one, both consistent"""
+    tmp = os.path.join(d, STATE + '.tmp.npz')
+    with open(tmp, 'wb') as f:
+        np.savez(f, x=x, seq=np.array(seq, dtype=np.int64), next_layer=int(next_layer), yarn=str(yarn or ''), act8=bool(act8))
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, os.path.join(d, STATE))
+
+
+def load_state(d, seq, yarn, act8):
+    """--resume: (next layer, residual as numpy) from DIR's state, or (0, None) when it has none; another run's state (tokens,
+    --yarn or --act8 differ) or the older two-file layout (x.npy beside the index, not written together) is refused"""
+    st = os.path.join(d, STATE)
+    if not os.path.exists(st):
+        if os.path.exists(os.path.join(d, 'x.npy')):
+            raise SystemExit(f'--resume {d}: an older two-file state (x.npy): its residual and layer index may disagree; start a new directory')
+        return 0, None
+    with np.load(st) as z:
+        if 'x' not in z.files:
+            raise SystemExit(f'--resume {d}: an older two-file state (no residual in {STATE}); start a new directory')
+        if [int(v) for v in z['seq']] != list(seq) or str(z['yarn']) != str(yarn or '') or bool(z['act8']) != bool(act8):
+            raise SystemExit(f'--resume {d}: its state is another run\'s (tokens, --yarn or --act8 differ)')
+        return int(z['next_layer']), z['x']
+
+
 def tree_text():
     fs = sorted(glob.glob(os.path.join(ROOT, 'docs', '**', '*.md'), recursive=True)) + sorted(glob.glob(os.path.join(ROOT, 'python', 'caminus', '**', '*.py'), recursive=True))
     return ''.join(f'\n# file: {os.path.relpath(f, ROOT)}\n' + open(f, encoding='utf-8').read() for f in fs)
@@ -212,7 +249,13 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('out'); ap.add_argument('--n', type=int, required=True)
     ap.add_argument('--last', type=int, default=64); ap.add_argument('--seq', default=None); ap.add_argument('--qchunk', type=int, default=256)
     ap.add_argument('--act8', action='store_true', help='8-bit expert matvec inputs, one scale per vector (the row-scale study)')
+    ap.add_argument('--yarn', default=None, help='FACTOR:ORIG_CTX: the long-context mode\'s YaRN RoPE (4:32768)')
+    ap.add_argument('--resume', default=None, help='a directory for the per-layer residual (resumable depth references)')
+    ap.add_argument('--budget-s', type=float, default=None, help='with --resume: stop after the first layer that ends past this many seconds')
     A = ap.parse_args()
+    if A.budget_s is not None and not A.resume: ap.error('--budget-s needs --resume DIR')
+    import time
+    t_start = time.time()
     dev = torch.device('cuda:0')
     F = ggufio.GGUFFile(A.gguf); Wt = W(F, dev)   # (W reads a tensor when it is asked for: nothing on the card yet)
     hp = lambda k: F.hp(k)
@@ -229,18 +272,35 @@ def main():
     torch.cuda.set_per_process_memory_fraction(min(1.0, (need - 1024) * 2 ** 20 / torch.cuda.get_device_properties(0).total_memory), 0)
     print(torch.cuda.get_device_name(0), f'N {N}; projected peak {need:.0f} MiB' + ('; 8-bit expert inputs' if A.act8 else ''), flush=True)
     te = F.T['token_embd.weight']; _, rb = te.rows()
-    raw = torch.from_numpy(np.ascontiguousarray(np.asarray(te.data()).reshape(-1, rb)[np.array(seq)])).to(dev)
-    x = q4_k(raw.view(-1)).view(N, D)
+    il0 = 0
+    if A.resume:
+        os.makedirs(A.resume, exist_ok=True)
+        il0, xs = load_state(A.resume, seq, A.yarn, A.act8)
+        if il0:
+            x = torch.from_numpy(xs).to(dev); del xs
+            print(f'  resumed at layer {il0}', flush=True)
+    if il0 == 0:
+        raw = torch.from_numpy(np.ascontiguousarray(np.asarray(te.data()).reshape(-1, rb)[np.array(seq)])).to(dev)
+        x = q4_k(raw.view(-1)).view(N, D)
+        del raw
     kpos = torch.arange(N, device=dev)
     pos = torch.arange(N, device=dev, dtype=torch.float64)
-    inv = base ** (-torch.arange(0, hd, 2, device=dev, dtype=torch.float64) / hd)
-    ang = pos[:, None] * inv[None]; cos, sin = ang.cos().float(), ang.sin().float()     # [N, hd / 2]
+    if A.yarn:   # (llama.cpp's rope_yarn, caminus.ref_q3moe's statements: float64 angles, cos / sin times the attention factor)
+        from caminus.ref_q3moe import Q3MoERef, parse_yarn
+        yr = Q3MoERef.__new__(Q3MoERef); yr.yarn, yr.HD, yr.base = parse_yarn(A.yarn), hd, base
+        th1, ms = yr.yarn_angles(1.0)                                  # (the angle is pos x the pair's blended frequency)
+        ang = pos[:, None] * torch.from_numpy(th1).to(dev)[None]
+        cos, sin = (ang.cos() * ms).float(), (ang.sin() * ms).float()
+        print(f'  YaRN {A.yarn}: attention factor {ms:.7f}', flush=True)
+    else:
+        inv = base ** (-torch.arange(0, hd, 2, device=dev, dtype=torch.float64) / hd)
+        ang = pos[:, None] * inv[None]; cos, sin = ang.cos().float(), ang.sin().float()     # [N, hd / 2]
 
     def rope(t):   # t [N, h, hd], NEOX halves
         a, b = t[..., :hd // 2], t[..., hd // 2:]
         c, s = cos[:, None], sin[:, None]
         return torch.cat([a * c - b * s, b * c + a * s], -1)
-    for il in range(nl):
+    for il in range(il0, nl):
         p = f'blk.{il}.'
         h = rms(x, Wt.rows(p + 'attn_norm.weight')[0], eps)
         q = (h @ Wt.rows(p + 'attn_q.weight').T).view(N, nh, hd)
@@ -287,11 +347,17 @@ def main():
         del h, hq, y, lg, pr, wv, ids
         torch.cuda.empty_cache()
         if il % 8 == 0 or il == nl - 1: print(f'  layer {il} done', flush=True)
+        if A.resume and il < nl - 1:
+            save_state(A.resume, x.cpu().numpy(), seq, il + 1, A.yarn, A.act8)
+            if A.budget_s is not None and time.time() - t_start > A.budget_s:
+                print(f'RESULT PARTIAL: layers through {il} done in {time.time() - t_start:.0f} s; rerun the same command', flush=True)
+                return
     hl = rms(x[N - A.last:], Wt.rows('output_norm.weight')[0], eps).clone()
     del x; torch.cuda.empty_cache()   # (the head's decode gets one contiguous block)
     out = Wt.rows('output.weight')
     logits = (hl @ out.T).float().cpu().numpy()
-    np.savez(A.out, seq=np.array(seq, dtype=np.int64), logits=logits)
+    np.savez(A.out, seq=np.array(seq, dtype=np.int64), logits=logits,
+             **({'yarn': np.array(parse_yarn(A.yarn), dtype=np.float64)} if A.yarn else {}))
     print(f'peak {torch.cuda.max_memory_reserved() / 2 ** 20:.0f} MiB reserved, {torch.cuda.max_memory_allocated() / 2 ** 20:.0f} MiB live '
           f'({need:.0f} projected)')
     print(f'RESULT DONE: {A.out} ({A.last} rows at positions {N - A.last} .. {N - 1})')

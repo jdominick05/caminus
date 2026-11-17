@@ -34,13 +34,22 @@ PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'pref
 # Keep them explicit: doctor and wheel staging must not import torch or engines.
 # tests/packaging/test_runtime_kernels.py checks the real host selections against
 # this list without a GPU. Adding a serving module requires extending both.
-Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq')
-DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
-               'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
+Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq',
+          # its two-card serve (caminus serve --cards 2: engine/q3moe_tp.py's decode module, prefill/q3m_tp.py's slot sum;
+          # the exchange's add is prefill_tp, in PREFILL)
+          'k3_q3m_lean_tp', 'q3m_prefill_tp',
+          # its 8-bit KV cache (caminus serve --kv q8): the one- and two-card decode modules and the prefill's Q8 rows and
+          # attention (q3m_prefill_kvq8: one object for both card counts); and its long-context mode (caminus serve
+          # --long-context: YaRN x4): the YaRN builds of the decode modules and the prefill's qk_rope, F16 and Q8_0 rows
+          'k3_q3m_lean_kvq8', 'k3_q3m_lean_tp_kvq8', 'q3m_prefill_kvq8',
+          'k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn', 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn',
+          'q3m_prefill_yarn', 'q3m_prefill_kvq8_yarn')
+DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
+               'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
                'k3_q35_gsq', 'q35_prefill_gsq', 'k3_q35_gsq_ver', 'k3_q35_gsq_ver_m',
                'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash')   # paused plain 27B: packaging does not unpause the catalog
-# TP verify remains a phase-one test path until TP drafting is served. Trace,
-# ablation and standalone probes are also deliberately outside the runtime set.
+# The two-card verify objects (*_tp_ver) serve two-card drafting; its drafters are the one-card MTP / DFlash objects.
+# Trace, ablation and standalone probes are deliberately outside the runtime set.
 RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + ('own_topk', 'smoke')
 
 

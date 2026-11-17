@@ -8,7 +8,11 @@
   geometry   the prefill in chunks of 16 and in one chunk, and with the prompt cache's stops: the same cache rows, bit for
              bit (every GEMM row and attention query is computed from its own inputs only), so the same logits after
   bounds     a span past max_ctx is refused before any write; the engine's poisoned flag refuses a prefill
-  tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz [--llama LL.bin] [--from P]
+  rows       (--kv q8) the prefill's Q8 rows of the last layer byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of
+             the halves the F16 row kernel stores for the same q | k | v (the chunk's own last-layer buffer)
+  tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz [--llama LL.bin] [--from P] [--kv q8]
+--kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True): q3p_qk_rope_q8 / q3p_attn_q8 and
+k3_q3m_lean_kvq8); the same G-model, geometry and bounds checks.
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -21,7 +25,7 @@ from caminus.prefill.q3m import Q3MPrefill
 
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--ref', required=True)
 ap.add_argument('--llama', default=None); ap.add_argument('--from', dest='P', type=int, default=64)
-ap.add_argument('--module', default=None)
+ap.add_argument('--module', default=None); ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 A = ap.parse_args()
 z = np.load(A.ref); seq, ref = [int(v) for v in z['seq']], z['logits']; N, P = len(seq), A.P
 print(torch.cuda.get_device_name(0), flush=True)
@@ -42,13 +46,29 @@ def score(rows, cand):
     return float(np.mean(kl)), float(np.percentile(kl, 90)), float(np.max(kl)), int(sum(np.argmax(r) == np.argmax(c) for r, c in zip(rows, cand)))
 
 
-eng = Q3MoEOne(A.gguf, max_ctx=N + 64, module=A.module)
+eng = Q3MoEOne(A.gguf, max_ctx=N + 64, module=A.module, q8=A.kv == 'q8')
 pf = Q3MPrefill(eng, chunk=128)
+RB = k3.kv_pos_bytes(eng.nkv * eng.hd, eng.q8) // eng.L[0]['cache'].element_size()   # (cache elements per row: bytes / halves)
 # beside the engine and the prefill (which project their own memory): three snapshots of the prefilled cache rows of
 # every layer (the default chunking, chunks of 16, with stops), kept for the bitwise comparisons
-snap_mib = 3 * eng.nl * P * 2 * eng.nkv * eng.hd * 2 / 2 ** 20 + 2
+snap_mib = 3 * eng.nl * P * k3.kv_pos_bytes(eng.nkv * eng.hd, eng.q8) / 2 ** 20 + 2 + (P * 2 * eng.nkv * eng.hd * 2 / 2 ** 20 if eng.q8 else 0)
 capacity.check([eng.dev], [snap_mib], f'test_q3m_prefill: its cache snapshots ({P} rows x {eng.nl} layers x 3: {snap_mib:.0f} MiB)')
-cache_bytes = lambda: [L['cache'][:P * 2 * eng.nkv * eng.hd].clone() for L in eng.L]   # (the prefilled rows: later ones hold the last run's decode)
+cache_bytes = lambda: [L['cache'][:P * RB].clone() for L in eng.L]   # (the prefilled rows: later ones hold the last run's decode)
+
+
+def q8_rows_check(last):
+    """the last layer's Q8 rows of the one chunk [0, P): encode_q8_kv(hadamard128(K), V) of the F16 row kernel's halves for the
+    chunk's own last-layer q | k | v (pf.qkv: the last layer stops after its rows)"""
+    from caminus import ref_kv
+    from caminus.prefill import q3m_ops
+    Mk = eng.nkv * eng.hd; ldq = eng.nh * eng.hd + 2 * Mk; lay = ref_kv.Q8KVLayout(eng.nkv, eng.hd)
+    oops = q3m_ops.Ops(torch.device(f'cuda:{eng.dev}'), 'q3m_prefill')
+    oc = torch.zeros(P * 2 * Mk, dtype=torch.float16, device='cuda'); oq = torch.zeros(P * eng.nh * eng.hd, dtype=torch.float16, device='cuda')
+    oops.qk_rope(pf.qkv, ldq, eng.nh, eng.nkv, eng.L[-1]['qk_par'], 0, oq, oc, P); torch.cuda.synchronize()
+    hh = oc.float().cpu().numpy().reshape(P, 2, eng.nkv, eng.hd)
+    want = ref_kv.encode_q8_kv(ref_kv.hadamard128(np.ascontiguousarray(hh[:, 0])), np.ascontiguousarray(hh[:, 1]), lay)
+    check(np.array_equal(last.cpu().numpy().reshape(P, -1), want),
+          f'Q8 rows: the last layer\'s {P} prefilled rows byte for byte encode_q8_kv(hadamard128(K), V) of the F16 row kernel\'s halves')
 
 
 def decode_only():
@@ -60,6 +80,7 @@ def prefill_then_decode(chunk=None, stops=()):
     st = []
     pf.run(seq, 0, 0, P, chunk=chunk, stops=stops, at_stop=(lambda b, s: st.append(b)) if stops else None)
     rows = cache_bytes()
+    if eng.q8 and chunk is None and not stops: q8_rows_check(rows[-1])
     eng.pos_host = P
     out = np.stack([eng.step(t).float().cpu().numpy() for t in seq[P:]])
     return out, rows, st
@@ -81,7 +102,7 @@ check(so[0] <= 2.0 * sd[0] + 1e-4, f'prefill-then-decode KLD within 2x the decod
 # geometry: chunks of 16, one chunk with the cache's stops
 o16, rows16, _ = prefill_then_decode(chunk=16)
 ost, rowsst, st = prefill_then_decode(stops=(16, 40, 41))
-same = lambda ra, rb: all(torch.equal(x.view(torch.int16), y.view(torch.int16)) for x, y in zip(ra, rb))
+same = lambda ra, rb: all(torch.equal(x.view(torch.uint8), y.view(torch.uint8)) for x, y in zip(ra, rb))
 check(same(rows1, rows16), 'chunks of 16: the same cache rows, bit for bit')
 check(np.array_equal(o16, ours), 'chunks of 16: the same logits after, bit for bit')
 check(same(rows1, rowsst) and np.array_equal(ost, ours) and st == [16, 40, 41], f'stops at 16, 40, 41 (at_stop {st}): the same rows and logits')

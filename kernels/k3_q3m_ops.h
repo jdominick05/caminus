@@ -4,6 +4,9 @@
 // kernels/k3_gguf_ops.h (the same statements: the module's k3_run is instruction for instruction the one the ggml-include
 // build produced, checked by disassembly when this file changed); the wave reductions are own_quant.h's wave_sum / wave_max
 // (the xor butterfly, partners 16 .. 1: the order every reference and gate of these ops was recorded with).
+// The two-card build (kernels/k3_q3m_lean_tp.hip, K3_Q3M_TP) adds OP_XCHG (kernels/k3_xchg.h) and OP_OWN_SLOT_SUM inside
+// the dispatch block below, so neither the one-card modules nor the dense modules that take these ops (k3_q35_ops.h,
+// K3_OPS_NO_DISPATCH) change.
 #pragma once
 #include <stdint.h>
 
@@ -194,10 +197,32 @@ __device__ __forceinline__ float kv_get(const uint8_t * pos_base, int M, int typ
 #include "k3_own_ops.h"
 
 #ifndef K3_OPS_NO_DISPATCH   // (kernels/k3_q35_ops.h takes the ops above and dispatches its own tape's)
+#ifdef K3_Q3M_TP   // (the two-card modules k3_q3m_lean_tp*: OP_XCHG, its warm word and claim-time store, OP_OWN_SLOT_SUM)
+#include "k3_xchg.h"
+// OP_OWN_SLOT_SUM: y[i] = sum over slots s < pad1 of w[s] * d[s * N + i] (fma in slot order: OP_OWN_MOE_SUM's statements,
+// the sum stored instead of added). Seg.a = d, Seg.gs = w, Seg.y = y (the exchange's partial). A task = rows_per_task.
+// The FFN partial is weighted on its card before the exchange: N floats cross the link instead of the slots' rows
+// (8 x 2,048 floats per exchange measured 0.70 ms per token over 48 exchanges, 2,048 floats 0.19 ms)
+enum { OP_OWN_SLOT_SUM = 56 };
+__device__ __forceinline__ void own_op_slot_sum(const Seg & sg, int t) {
+    const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task), S = sg.pad1;
+    const float * d = (const float *)sg.a; const float * w = (const float *)sg.gs; float * y = (float *)sg.y;
+    for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < S; s++) acc = __builtin_fmaf(w[s], d[(size_t)s * sg.N + i], acc);
+        y[i] = acc;
+    }
+}
+#endif
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
     if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
+#ifdef K3_Q3M_KV_Q8   // (the Q8 KV build: a refused block's sticky word is the int32 after Sync, k3.Engine.kv_error)
+    static_assert(sizeof(Sync) == 4 * (2 * K3_MAXSEG + 8), "the KV error word follows Sync");
+    if (sg.op == OP_OWN_ATTS) { own_op_atts(sg, t, sy); return true; }
+#else
     if (sg.op == OP_OWN_ATTS) { own_op_atts(sg, t); return true; }
+#endif
 #ifdef K3_Q3M_LEAN_ATTN   // (measurement builds only: the per-head attention too, for A/Bs inside one code object)
     if (sg.op == OP_OWN_ATTN) { own_op_attn(sg, t); return true; }
 #endif
@@ -205,13 +230,24 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_ROUTER) { op_router(sg, t); return true; }
     if (sg.op == OP_OWN_EMB) { own_op_emb(sg OWN_TK_ARG); return true; }
+#ifdef K3_Q3M_TP
+    if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
+    if (sg.op == OP_OWN_SLOT_SUM) { own_op_slot_sum(sg, t); return true; }
+#endif
     return false;
 }
+#ifdef K3_Q3M_TP
+__device__ __forceinline__ uint32_t * k3_extra_warm(const Seg & sg) { return xchg_warm(sg); }
+#else
 __device__ __forceinline__ uint32_t * k3_extra_warm(const Seg &) { return nullptr; }
+#endif
 // before the dependency wait: the router matvec's (OP_F32_MV, one token) first weight bytes toward L2 (k3_gguf_ops.h's
 // k3_extra_prefetch with K3_XWARM 0, its test kept whole: OP_GG_MV never runs here, but dropping it changed k3_run's
 // branch layout)
 __device__ __forceinline__ void k3_extra_prefetch(const Seg & sg, int t) {
+#ifdef K3_Q3M_TP   // (the exchange's claim-time store to the peer's slot header, before the router test below)
+    xchg_prefetch(sg);
+#endif
     if (sg.op != OP_GG_MV && !(sg.op == OP_F32_MV && seg_T(sg) == 1 && sg.pad2 > 0)) return;
     const size_t row_bytes = (size_t)sg.pad2;
     const int r0 = t * sg.rows_per_task, r1 = min(sg.N, r0 + sg.rows_per_task);

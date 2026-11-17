@@ -30,6 +30,10 @@
   <img src="docs/panel.svg" alt="The Caminus panel: models, running servers and Qwen Code" width="92%">
 </p>
 
+<p align="center">
+  <img src="docs/ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
+</p>
+
 ## Get started
 
 You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source).
@@ -76,7 +80,8 @@ and please report what breaks.
 | Every other GPU | Not supported yet |
 
 One card runs the one-card models. Two cards run two models side by side, or a two-card model: the Qwen3.8 Coder on an
-XTX + XT or two XTX, or Swift 1.5 and ThinkingCap across both cards. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
+XTX + XT or two XTX, or Swift 1.5, ThinkingCap and (when you ask for it, one card being its default) Qwen3-30B-A3B
+across both cards. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
 
 **Got other AMD hardware?** Please try Caminus on it and
 [send a hardware report](https://github.com/jdominick05/caminus/issues/new?template=hardware_report.yml), even when it
@@ -92,7 +97,7 @@ are welcome too.
 | Model | Cards | Decode | llama.cpp, same cards |
 |---|---|---|---|
 | Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
-| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB) | 248 tok/s | 148 tok/s |
+| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; 218 on two cards (engine, not yet served) | 148 tok/s; 112 on two cards (`-sm tensor`) |
 | Swift 1.5 27B Q4_K_M (17 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
 | ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1; or 2 | 47 tok/s; 68 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
 | Qwen3.8-27B GSQ-RCO IQ3_S (12 GB) | 1 | 55 tok/s | not measured yet |
@@ -114,6 +119,8 @@ llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-
   [troubleshooting](docs/troubleshooting.md) ·
   [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [verify your download](docs/verifying.md) ·
   [what changed](CHANGELOG.md)
+- **The agent environment (`caminus ember`):** [quickstart](docs/ember-quickstart.md) · [the guide](docs/ember.md) ·
+  [every command and view](docs/resident-agent.md)
 - **Contribute:** [CONTRIBUTING.md](CONTRIBUTING.md) · [how it works](docs/dev/architecture.md) ·
   [building from source](docs/dev/building.md) · [testing](docs/dev/testing.md)
 - **AI agents working on this code:** [AGENTS.md](AGENTS.md)

@@ -43,7 +43,7 @@ jobs:
           python -m pip install numpy==2.5.4 jinja2==3.1.6 tokenizers==0.23.3
           python -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install transformers==5.20.2 anthropic==2.3.0
-          python -m pip install build==1.2.2.post1 twine==6.1.0 'pkginfo>=1.12'
+          python -m pip install build==1.2.2.post1 twine==6.1.0 'pkginfo>=1.12' setuptools==84.2.1   # setuptools: tests/ember/test_installed_wheel.py
 
       - name: Byte-compile every Python file
         run: python -I -m compileall -q python tools tests
@@ -64,6 +64,10 @@ jobs:
           echo "CODER=$RUNNER_TEMP/coder-vocab.gguf" >> "$GITHUB_ENV"
 
       - name: The CPU suites (each skipped when what it needs is missing; tests/ci_cpu.py --list says what)
+        env:
+          # tests/ember/test_setup_e2e.py: caminus ember setup from a clean account (it creates a Unix account with sudo;
+          # only a throwaway runner opts in)
+          CAMINUS_E2E_ROOT: '1'
         run: |
           python -I tests/ci_cpu.py --list
           python -I tests/ci_cpu.py --scratch "$RUNNER_TEMP/ci"
@@ -72,6 +76,19 @@ jobs:
         run: |
           python -m build --sdist --outdir "$RUNNER_TEMP/sdist" .
           python -m twine check --strict "$RUNNER_TEMP"/sdist/*
+
+      - name: Resident failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, same pin as build.yml
+        with:
+          name: resident-failure-evidence
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/ci/resident.log
+            ${{ runner.temp }}/ci/resident/
+            ${{ runner.temp }}/ci/env.log
+            ${{ runner.temp }}/ci/resident_compare.log
 
       - name: Vendored code (gguf-py at upstream llama.cpp 5aeac37a35; ggml's MMQ at the ignite-llama fork commit e4e3f8eda)
         # kernels/ggml_mmq's headers name the fork's development commit 842653396, published as e4e3f8eda with identical
@@ -83,3 +100,63 @@ jobs:
           python -I tools/release/vendor_gguf.py --check --src "$src"
           git -C "$src" fetch -q --depth 1 https://github.com/jdominick05/ignite-llama.git e4e3f8edac36544e7c06139eb03e35288797e73e
           python -I tools/release/vendor_mmq.py --check --src "$src" --commit e4e3f8edac36544e7c06139eb03e35288797e73e --label 842653396
+
+  # The panel (panel/, Go): vet and tests at the toolchain panel/go.mod pins (setup-go reads that line).
+  panel:
+    name: Panel Go vet and tests
+    if: github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: panel/go.mod
+          cache-dependency-path: panel/go.sum
+
+      - name: go vet
+        working-directory: panel
+        run: go vet ./...
+
+      - name: go test
+        working-directory: panel
+        run: go test -count=1 ./...
+
+      - name: Build the tested panel
+        working-directory: panel
+        run: go build -o "$RUNNER_TEMP/caminus-panel" .
+
+      - name: Resident typing cost with growing history
+        working-directory: panel
+        run: go test -run '^$' -bench '^BenchmarkResidentTyping$' -benchtime=200ms -benchmem
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: caminus-panel-linux
+          path: ${{ runner.temp }}/caminus-panel
+          retention-days: 7
+
+  # The pull request's own text (AGENTS.md, Conventions): title, trailers, the GPU-gate block, private text. The review
+  # bot's verdict is checked by hand with tools/pr_ready.py N, not here.
+  pr-metadata:
+    name: Pull request title, trailers, gate block and private text
+    if: github.event_name == 'pull_request' && github.repository == 'jdominick05/caminus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: tools/pr_ready.py N --metadata
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: python3 -I tools/pr_ready.py "$PR" -R "$GITHUB_REPOSITORY" --metadata

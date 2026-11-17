@@ -274,7 +274,7 @@ func TestCaminusPanels(t *testing.T) {
 	// offline: no panel and no engine rows, like every other panel's numbers
 	off := camState(t, "caminus_status.json")
 	off.srv.Up = false
-	if f := frame(t, off, 120, 40); strings.Contains(f, "CAMINUS") || strings.Contains(f, "engine  ") || strings.Contains(f, "tok/J") {
+	if f := frame(t, off, 120, 40); strings.Contains(f, "─ CAMINUS") || strings.Contains(f, "engine  ") || strings.Contains(f, "tok/J") {
 		t.Errorf("offline:\n%s", f)
 	}
 	// before the first status
@@ -335,7 +335,7 @@ func TestCaminusNotAnswering(t *testing.T) {
 	st := camState(t, "caminus_status.json")
 	st.srv = serverState{Polled: true}
 	st.sys.Pid = 3100
-	if out := frame(t, st, 120, 50); !strings.Contains(out, "caminus is running but not answering") || strings.Contains(out, "CAMINUS") {
+	if out := frame(t, st, 120, 50); !strings.Contains(out, "caminus is running but not answering") || strings.Contains(out, "─ CAMINUS") {
 		t.Errorf("down:\n%s", out)
 	}
 }

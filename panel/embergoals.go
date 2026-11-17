@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 jdominick05
+
+package main
+
+// envgoals.go: the Goals overlay. The resident's goals, newest first, in the one box every overlay uses. Enter makes
+// the selected goal the composer's target; x cancels it and r resumes it. Every action goes through the chat's own
+// /goal, /cancel and /resume handlers, so nothing here talks to the resident itself.
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+)
+
+// goalGlyph is a goal state's mark and style, from the shell's glyph tier.
+func goalGlyph(state string) (string, lipgloss.Style) {
+	switch state {
+	case "working", "waiting_model":
+		return g.working, emberBusy
+	case "queued":
+		return g.queue, emberDim
+	case "completed":
+		return g.done, emberCtxOK
+	case "paused", "waiting_human", "waiting_root":
+		return g.waiting, emberWarn
+	case "error", "cancelled":
+		return g.fail, emberCtxHot
+	}
+	return g.idle, emberDim
+}
+
+// goalOrder is the overlay's rows: indexes into m.resident.Goals, newest first.
+func (m emberModel) goalOrder() []int {
+	out := make([]int, len(m.resident.Goals))
+	for i := range out {
+		out[i] = len(out) - 1 - i
+	}
+	return out
+}
+
+func (m emberModel) goalRow(i int, selected bool, width int) string {
+	gl := m.resident.Goals[i]
+	mark, st := goalGlyph(gl.State)
+	text := strings.Join(strings.Fields(residentText(gl.Prompt)), " ")
+	meta := fmt.Sprintf("%s · %d steps", gl.State, gl.Steps)
+	target := ""
+	if !m.chat.newGoal && gl.ID == m.chat.target {
+		target = "  " + g.user
+	}
+	if selected {
+		row := " " + g.collapsed + " " + mark + " " + shortGoal(gl.ID) + "  " + text + "  ·  " + meta + target
+		return emberSel.Render(ansi.Truncate(row, max(8, width-1), "…"))
+	}
+	row := "   " + st.Render(mark) + " " + emberDim.Render(shortGoal(gl.ID)) + "  " +
+		lipgloss.NewStyle().Foreground(cText).Render(text) + emberDim.Render("  ·  "+meta+target)
+	return ansi.Truncate(row, width, "…")
+}
+
+// goalDetail is the selected goal in full under the list once space opens it (Enter targets it instead).
+func (m emberModel) goalDetail(i, width int) []string {
+	gl := m.resident.Goals[i]
+	var out []string
+	add := func(label, value string) {
+		value = strings.TrimSpace(residentText(value))
+		if value == "" {
+			return
+		}
+		for j, piece := range strings.Split(ansi.Hardwrap(value, max(8, width-10), true), "\n") {
+			if j == 6 {
+				out = append(out, emberDim.Render("          …"))
+				break
+			}
+			l := label + ": "
+			if j > 0 {
+				l = strings.Repeat(" ", len(label)+2)
+			}
+			out = append(out, emberDim.Render(l)+lipgloss.NewStyle().Foreground(cText).Render(piece))
+		}
+	}
+	add("goal", gl.Prompt)
+	add("summary", gl.Summary)
+	add("error", gl.Error)
+	return out
+}
+
+func (m emberModel) goalsOverlay(w, h int) string {
+	order := m.goalOrder()
+	sel := max(0, min(m.chat.goalsSel, len(order)-1))
+	inner := max(10, w-6)
+	var detail []string
+	if m.chat.goalsDetail && len(order) > 0 {
+		detail = m.goalDetail(order[sel], inner)
+	}
+	listH := max(1, (h-6)-len(detail)-1)
+	first := 0
+	if len(order) > listH {
+		first = max(0, min(sel-listH+1, len(order)-listH))
+	}
+	var rows []string
+	if len(order) == 0 {
+		rows = append(rows, emberDim.Render("no goals yet · Esc, then type one"))
+	}
+	for i := first; i < min(first+listH, len(order)); i++ {
+		rows = append(rows, m.goalRow(order[i], i == sel, inner))
+	}
+	body := strings.Join(rows, "\n")
+	if len(detail) > 0 {
+		body += "\n\n" + strings.Join(detail, "\n")
+	} else {
+		body += "\n\n" + emberDim.Render(ansi.Truncate("Enter targets it  ·  space shows it  ·  x x cancel  ·  r resume  ·  Shift+↑↓ queue order  ·  n new goal", inner, "…"))
+	}
+	active := 0
+	for _, gl := range m.resident.Goals {
+		if gl.State != "completed" && gl.State != "cancelled" && gl.State != "error" {
+			active++
+		}
+	}
+	return overlayBox(fmt.Sprintf("GOALS  %d open of %d", active, len(order)), body, "↑↓ move  ·  Enter target", w, h)
+}
+
+// goalsKey: the overlay owns the keyboard while open. Actions reuse the chat's slash handlers.
+func (m emberModel) goalsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	if k == "ctrl+c" {
+		return m, tea.Quit
+	}
+	order := m.goalOrder()
+	sel := max(0, min(m.chat.goalsSel, len(order)-1))
+	m.chat.goalsSel = sel
+	// Cancelling ends the agent's work on a goal, so it takes two presses, like a root approval: the first x arms it
+	// and names the goal, a second x within 10 s cancels, any other key disarms.
+	armed := m.chat.armed
+	m.chat.armed = ""
+	closeIt := func() { m.chat.goals, m.chat.goalsDetail = false, false }
+	switch k {
+	case "esc", "ctrl+g":
+		closeIt()
+		return m, m.chat.compose.Focus()
+	case "up", "k":
+		m.chat.goalsSel = max(0, sel-1)
+	case "down", "j":
+		m.chat.goalsSel = min(max(0, len(order)-1), sel+1)
+	case "space", " ":
+		m.chat.goalsDetail = !m.chat.goalsDetail
+	case "shift+up", "shift+down", "K", "J":
+		// A queued goal moves one place in the run order (the queue runs oldest first; 1 runs next).
+		if len(order) == 0 {
+			return m, nil
+		}
+		gl := m.resident.Goals[order[sel]]
+		if gl.State != "queued" {
+			m.msg = "only a queued goal can move"
+			return m, nil
+		}
+		var queued []string
+		for _, q := range m.resident.Goals {
+			if q.State == "queued" {
+				queued = append(queued, q.ID)
+			}
+		}
+		pos := 0
+		for i, id := range queued {
+			if id == gl.ID {
+				pos = i + 1
+			}
+		}
+		to := pos - 1
+		if k == "shift+down" || k == "J" {
+			to = pos + 1
+		}
+		if to < 1 || to > len(queued) {
+			return m, nil
+		}
+		return m, moveQueued(m, gl.ID, to)
+	case "n":
+		closeIt()
+		m.chat.newGoal, m.chat.forceNew, m.chat.target = true, true, ""
+		return m, m.chat.compose.Focus()
+	case "enter", "x", "r":
+		if len(order) == 0 {
+			return m, nil
+		}
+		gl := m.resident.Goals[order[sel]]
+		id := gl.ID
+		if k == "x" && (armed != "cancel:"+id || time.Since(m.chat.armedAt) > 10*time.Second) {
+			m.chat.armed, m.chat.armedAt = "cancel:"+id, time.Now()
+			m.msg = "cancel goal " + shortGoal(id) + " (" + gl.State + ")? press x again (any other key keeps it)"
+			return m, nil
+		}
+		next, cmd := m.chatSlash("/goal " + id)
+		m = next.(emberModel)
+		switch k {
+		case "enter":
+			closeIt()
+			return m, tea.Batch(cmd, m.chat.compose.Focus())
+		case "x":
+			return m.chatSlash("/cancel")
+		case "r":
+			return m.chatSlash("/resume")
+		}
+	}
+	return m, nil
+}

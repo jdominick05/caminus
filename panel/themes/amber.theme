@@ -1,0 +1,21 @@
+# amber: Amber phosphor (a retro monochrome terminal), mapped onto the panel's roles.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #ffd27a
+muted = #cc9a3d
+think = #e6b85c
+dim = #7a5a20
+accent = #ffb000
+ok = #ffc94d
+warn = #ffe08a
+action = #ff9d00
+hot = #ff5a36
+purple = #e8a87c
+user = #ffcf70
+teal = #ffbe4d
+chrome = #5a4215
+
+code_bg = #2a1f0a
+codeblock_bg = #1a1305
+code_theme = vulcan

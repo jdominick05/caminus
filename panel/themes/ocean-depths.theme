@@ -1,0 +1,25 @@
+# ocean-depths: Ocean depths (a gradient from deep blue to black).
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+bg = #0b1d33
+bg2 = #02070f
+bg_pattern = gradient
+
+text = #e3f2ff
+muted = #9cb6cc
+think = #c4d8ea
+dim = #4b6680
+accent = #4fc3f7
+ok = #5ee0a0
+warn = #ffd166
+action = #ff9f5a
+hot = #ff6b7a
+purple = #b39ddb
+user = #82b1ff
+teal = #64ffda
+chrome = #1d3550
+
+code_bg = #13283f
+codeblock_bg = #0a1828
+code_theme = nord

@@ -12,6 +12,9 @@ holding a single position, the chunk edges 128 / 129) and depth (default up to 8
 keeps its own cache (f16 rows, 2 KiB per position): the peak is projected from the arguments and checked against the
 card's guard line before the first transfer (defaults: about 360 MiB, --deep: about 745 MiB).
   tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py [--module k3_q3m_lean] [--deep]
+The two-card module's merge takes up to 128 splits (its second m | l load round from 65 active splits on: with lmin 64,
+positions past 4096; --deep reaches 128 active at 40,959):
+  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py --module k3_q3m_lean_tp --splits 128 --lmin 64 --deep
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -37,7 +40,7 @@ dev = 'cuda'
 GH = [int(x) for x in A.gh.split(',')]
 # one cache per form (the oracle, the reference split form, then every grid, head group and smaller split count below),
 # each form's scratch and q / k / v / output rows (under 1 MiB together), and the HIP context
-FORMS = 2 + len([w for w in A.grids.split(',') if w]) + len(GH) - 1 + len([x for x in (16, 4) if x < A.splits])
+FORMS = 2 + len([w for w in A.grids.split(',') if w]) + len(GH) - 1 + len([x for x in (64, 16, 4) if x < A.splits])
 CACHE_MIB = (CTX + k3.Engine.ATS_PAD) * 2 * M * 2 / 2 ** 20
 need_mib = FORMS * (CACHE_MIB + 1) + 256
 capacity.check([0], [need_mib], f'test_own_atts ({FORMS} forms x {CACHE_MIB:.0f} MiB of cache: {need_mib:.0f} MiB projected)')
@@ -89,10 +92,10 @@ def ref64(q, k, v, cache_np, p):
 u16 = lambda t: t.cpu().numpy().view(np.uint16)
 EO, O = oracle(); ES, S = split()
 # the forms that must give the reference form's bits: other grids, other head groups (every position), and fewer splits
-# (16, 4: while npos <= S * lmin both layouts are L = lmin)
+# (64, 16, 4: while npos <= S * lmin both layouts are L = lmin)
 others = ([(f'grid {w}', 1 << 30) + split(int(w)) for w in A.grids.split(',') if w] +
           [(f'heads per task {gh}', 1 << 30) + split(gh=gh) for gh in GH[1:]] +
-          [(f'splits {Sx}', Sx * A.lmin) + split(S=Sx) for Sx in (16, 4) if Sx < A.splits])
+          [(f'splits {Sx}', Sx * A.lmin) + split(S=Sx) for Sx in (64, 16, 4) if Sx < A.splits])
 base_np = base.numpy().copy()
 ok = True
 def check(c, msg):

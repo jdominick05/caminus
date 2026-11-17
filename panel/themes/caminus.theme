@@ -1,0 +1,22 @@
+# caminus — the panel's built-in palette: white on the terminal's own
+# background, color spent only on what the eye should find first.
+# btop-syntax theme: key = value, full-line # comments, #rgb/#rrggbb/#rrggbbaa
+# or term_N for the terminal's own palette.
+
+text = #ffffff
+muted = #a8adb6
+think = #cfd4dc
+dim = #5c626d
+accent = #4fd6ff
+ok = #4dff9e
+warn = #ffd75f
+action = #ffa25f
+hot = #ff5f6d
+purple = #c98fff
+user = #6fa8ff
+teal = #4fffd0
+chrome = #4a4f5a
+
+code_bg = #2a2e35
+codeblock_bg = #16181d
+code_theme = dracula

@@ -61,7 +61,7 @@ const (
 	paneOptions
 )
 
-var paneNames = []string{"MODELS", "SERVERS", "QWEN CODE", "OPTIONS"}
+var paneNames = []string{"models", "servers", "qwen code", "options"}
 
 // ctl is the control panel's Bubble Tea model.
 type ctl struct {
@@ -74,11 +74,14 @@ type ctl struct {
 	models  []camModel
 	ps      psInfo
 	hs      harnessInfo
+	ember   emberMsg // the harness pane's Ember row: set up or not
 	opts    []option
 	loaded  map[string]bool      // which reads answered at least once
 	vals    map[string]string    // advanced: option values for the next start (dest -> text); absent = the default
 	card    string               // one-card models: "auto", "0", "1" (advanced; basic: auto)
 	picks   map[string]modelPick // model name -> card count and drafter choice at each count
+	fits    map[string]fitEntry  // caminus fit --json per model, card count, drafter and advanced options (display only)
+	fitGen  int                  // bumped by R and by every action: a reply from an older generation is dropped
 	curM    int
 	curS    int
 	curO    int
@@ -110,7 +113,9 @@ type (
 		v   harnessInfo
 		err error
 	}
-	optsMsg struct {
+	// emberMsg: whether Ember, the agent environment, is set up (caminus ember status --json)
+	emberMsg struct{ ok, known bool }
+	optsMsg  struct {
 		v   []option
 		err error
 	}
@@ -118,9 +123,225 @@ type (
 		what, note string
 		err        error
 	}
+	fitMsg struct {
+		key string
+		gen int
+		v   fitInfo
+		err error
+	}
 	ctlTick time.Time
 	ctlPoll time.Time
 )
+
+// fitInfo is `caminus fit --json` (serve's own projection; the panel shows it and does no memory math). max_ctx is per KV
+// format, each the largest context that fits with that cache: q8 is null when the model has no 8-bit cache (kv_formats
+// lacks "q8") or when no cards hold it. kv_fixed names the cache of a model that always keeps its own (the Coder's
+// "q8_0"; empty for the others): its f16 slot is that cache's figure, and the row shows it as the only one.
+type fitInfo struct {
+	OK        bool     `json:"ok"`
+	Error     string   `json:"error"`
+	MaxCtx    fitCtx   `json:"max_ctx"`
+	KVFormats []string `json:"kv_formats"`
+	KVFixed   string   `json:"kv_fixed"`
+}
+
+// fitCtx is fit's max_ctx: positions per KV format, nil where none fits (or, for q8, where it is not offered).
+type fitCtx struct {
+	F16 *int `json:"f16"`
+	Q8  *int `json:"q8"`
+}
+
+// hasQ8 is whether fit projected the 8-bit cache for this model (kv_formats lists "q8").
+func (v fitInfo) hasQ8() bool {
+	for _, f := range v.KVFormats {
+		if f == "q8" {
+			return true
+		}
+	}
+	return false
+}
+
+// q8Text is the fit row's Q8 part: the figure, "none fits" for a model that has the 8-bit cache but no room for it, or
+// "not offered" for a model without one.
+func (v fitInfo) q8Text() string {
+	if v.MaxCtx.Q8 != nil {
+		return strconv.Itoa(*v.MaxCtx.Q8)
+	}
+	if v.hasQ8() {
+		return "none fits"
+	}
+	return "not offered"
+}
+
+// fixedText is the fit row's label for a model that keeps its own cache ("its own 8-bit cache" for q8_0), or "" for
+// a model with the F16 / Q8 choice.
+func (v fitInfo) fixedText() string {
+	switch {
+	case v.KVFixed == "":
+		return ""
+	case strings.HasPrefix(v.KVFixed, "q8"):
+		return "its own 8-bit cache"
+	}
+	return "its own " + v.KVFixed + " cache"
+}
+
+// fitEntry is one fit read: done once its answer (or error) has arrived.
+type fitEntry struct {
+	done     bool
+	info     fitInfo
+	err      error
+	failedAt time.Time // a failed read (error or ok:false) is retried after fitRetry, not kept
+}
+
+// fitRetry is how long a failed fit read waits before the picker asks again (the picker redraws every 150 ms).
+const fitRetry = 10 * time.Second
+
+// fitArgs is the fit query for the model's next start: its file, card count, drafter and the advanced options that
+// `caminus fit` takes (fit uses serve's parser, so these are the flags start would pass). The key is the whole query.
+func (m ctl) fitArgs(mi camModel) (string, []string) {
+	mode, draft := m.modelMode(mi)
+	a := []string{"fit", "--model", mi.Path, "--cards", strconv.Itoa(mode.Cards)}
+	if draft != "auto" {
+		a = append(a, "--draft", draft)
+	}
+	if m.advanced {
+		var keys []string
+		for k := range m.vals {
+			switch k {
+			case "cards", "draft", "no_drafter", "model", "config", "port":
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			o := m.optByDest(k)
+			if o == nil {
+				continue
+			}
+			v := m.vals[k]
+			if o.Type == "bool" {
+				if v == "true" {
+					a = append(a, o.Flag)
+				}
+				continue
+			}
+			if v != "" {
+				a = append(a, o.Flag, v)
+			}
+		}
+	}
+	return strings.Join(a, " "), append(a, "--json")
+}
+
+// fitKey is the cache key of the selected model's fit query (fitArgs' key).
+func (m ctl) fitKey(mi camModel) string {
+	k, _ := m.fitArgs(mi)
+	return k
+}
+
+// fitCmd reads the selected model's fit once per query; nil while that read is in flight, when a failed read is still
+// inside its retry wait, or when the model is not on disk (nothing to project).
+func (m ctl) fitCmd() tea.Cmd {
+	mi := m.selModel()
+	if mi == nil || !mi.Present || m.fits == nil {
+		return nil
+	}
+	key, args := m.fitArgs(*mi)
+	if e, seen := m.fits[key]; seen {
+		if !e.done || e.failedAt.IsZero() || time.Since(e.failedAt) < fitRetry {
+			return nil
+		}
+	}
+	m.fits[key] = fitEntry{}
+	gen, be := m.fitGen, m.be
+	return func() tea.Msg {
+		var v fitInfo
+		err := be.call(&v, 60*time.Second, args...)
+		return fitMsg{key: key, gen: gen, v: v, err: err}
+	}
+}
+
+// refreshFits forgets every fit read: fit depends on the cards' memory now, so R and every start, stop or restart
+// (actMsg) make the picker ask again. A reply still in flight from before is dropped by its generation.
+func (m *ctl) refreshFits() {
+	m.fitGen++
+	m.fits = map[string]fitEntry{}
+}
+
+// settle runs c and every command its messages return, feeding each message back into the model before the next:
+// the -once frame renders only after its reads have been answered, never with one still in flight.
+func settle(m ctl, c tea.Cmd, depth int) ctl {
+	if c == nil || depth > 32 {
+		return m
+	}
+	msg := c()
+	if b, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range b {
+			m = settle(m, sub, depth+1)
+		}
+		return m
+	}
+	nm, next := m.Update(msg)
+	return settle(nm.(ctl), next, depth+1)
+}
+
+// fitRow is the picker's line for the context that fits at F16 and with the 8-bit cache, or with the model's own cache
+// for one without the choice (empty when there is no read for the selection).
+func (m ctl) fitRow(mi camModel) string {
+	key, _ := m.fitArgs(mi)
+	e, seen := m.fits[key]
+	if !seen {
+		return ""
+	}
+	fixed := e.info.fixedText()
+	switch {
+	case !e.done:
+		return fg(cMuted).Render("context that fits: reading caminus fit")
+	case e.err != nil:
+		return fg(cYellow).Render("context that fits: " + e.err.Error())
+	case !e.info.OK && fixed != "":
+		return fg(cYellow).Render("context that fits (" + fixed + "): " + e.info.Error)
+	case !e.info.OK:
+		line := fg(cYellow).Render("context that fits: " + e.info.Error)
+		if q8 := e.info.MaxCtx.Q8; q8 != nil {
+			// (no cards for the selected cache, but the 8-bit one fits: fit keeps that figure in a refusal)
+			line += fg(cMuted).Render(" · Q8: ") + bold(cAccent).Render(strconv.Itoa(*q8)) + fg(cMuted).Render(" positions")
+		}
+		return line
+	case fixed != "" && e.info.MaxCtx.F16 == nil:
+		return fg(cYellow).Render("context that fits (" + fixed + "): none with this card count")
+	case e.info.MaxCtx.F16 == nil && e.info.MaxCtx.Q8 == nil && e.info.hasQ8():
+		// (both caches were projected: say Q8 fails too, so switching to --kv q8 is not the way out)
+		return fg(cYellow).Render("context that fits: no context fits at F16 or Q8 with this card count")
+	case e.info.MaxCtx.F16 == nil && e.info.MaxCtx.Q8 == nil:
+		return fg(cYellow).Render("context that fits: no context fits at F16 with this card count")
+	}
+	var line string
+	if fixed != "" {
+		// (no F16 / Q8 choice: f16 is the figure of the cache the model always builds, and there is no Q8 part)
+		line = fg(cMuted).Render("context that fits ("+fixed+"): ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
+			fg(cMuted).Render(" positions")
+	} else if e.info.MaxCtx.F16 == nil {
+		// (only the 8-bit cache fits: `caminus start --kv q8` is the way to serve this choice)
+		line = fg(cYellow).Render("context that fits: none at F16") + fg(cMuted).Render(" · Q8: ") +
+			bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.Q8)) + fg(cMuted).Render(" positions")
+	} else {
+		q8 := e.info.q8Text()
+		line = fg(cMuted).Render("context that fits at F16: ") + bold(cAccent).Render(strconv.Itoa(*e.info.MaxCtx.F16)) +
+			fg(cMuted).Render(" positions · Q8: ")
+		if e.info.MaxCtx.Q8 != nil {
+			line += bold(cAccent).Render(q8)
+		} else {
+			line += fg(cMuted).Render(q8)
+		}
+	}
+	if mode, _ := m.modelMode(mi); m.advanced && mode.Cards == 1 && m.card != "" && m.card != "auto" {
+		// caminus fit has no --card: it places the model itself, so a pinned card does not change this figure
+		line += fg(cYellow).Render(" · card " + m.card + " pinned: not in this figure")
+	}
+	return line
+}
 
 func ctlTickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg { return ctlTick(t) })
@@ -152,6 +373,17 @@ func (m ctl) loadHarness() tea.Cmd {
 		var v harnessInfo
 		err := m.be.call(&v, 15*time.Second, "qwen-code", "status", "--json")
 		return harnessMsg{v, err}
+	}
+}
+
+// loadEmber reads whether Ember is set up; any failure reads as not set up (the row then says how).
+func (m ctl) loadEmber() tea.Cmd {
+	return func() tea.Msg {
+		var v struct {
+			OK bool `json:"ok"`
+		}
+		err := m.be.call(&v, 20*time.Second, "ember", "status", "--json")
+		return emberMsg{ok: err == nil && v.OK, known: true}
 	}
 }
 
@@ -187,7 +419,7 @@ func (m ctl) interactive(what string, args ...string) tea.Cmd {
 }
 
 func (m ctl) Init() tea.Cmd {
-	return tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts(), ctlTickCmd(), ctlPollCmd())
+	return tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadEmber(), m.loadOpts(), ctlTickCmd(), ctlPollCmd())
 }
 
 func (m *ctl) panes() []int {
@@ -379,8 +611,27 @@ func (m ctl) visibleOpts() []option {
 	return out
 }
 
+// Update runs the message and then reads caminus fit for the selection when it is not yet known (cached per choice).
 func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nm, cmd := m.update(msg)
+	mm := nm.(ctl)
+	if mm.loaded["models"] {
+		return mm, tea.Batch(cmd, mm.fitCmd())
+	}
+	return mm, cmd
+}
+
+func (m ctl) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case fitMsg:
+		if msg.gen != m.fitGen {
+			return m, nil // a read from before R or a start, stop or restart: its cards' memory is no longer the current one
+		}
+		e := fitEntry{done: true, info: msg.v, err: msg.err}
+		if msg.err != nil || !msg.v.OK {
+			e.failedAt = time.Now() // not kept: asked again after fitRetry
+		}
+		m.fits[msg.key] = e
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 	case ctlTick:
@@ -404,6 +655,8 @@ func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.busy == "" {
 			m.setNote(msg.err.Error(), true)
 		}
+	case emberMsg:
+		m.ember = msg
 	case harnessMsg:
 		m.loaded["harness"] = true
 		if msg.err == nil {
@@ -416,6 +669,7 @@ func (m ctl) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case actMsg:
 		m.busy = ""
+		m.refreshFits() // a start, stop or restart changes the cards' memory: fit is read again
 		if msg.err != nil {
 			m.setNote(msg.what+": "+msg.err.Error(), true)
 		} else if msg.note != "" {
@@ -463,6 +717,7 @@ func (m ctl) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "R":
 		m.setNote("refreshing", false)
+		m.refreshFits()
 		return m, tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts())
 	case "up", "k":
 		m.move(-1)
@@ -604,6 +859,12 @@ func (m ctl) harnessKey(s string) (tea.Model, tea.Cmd) {
 		}
 		m.confirm = &pending{q: fmt.Sprintf("install Qwen Code %s into Caminus's own npm prefix (your own installs stay as they are)? y / n", v),
 			run: m.action("Qwen Code install", 20*time.Minute, "qwen-code", "setup", "--install")}
+	case "e":
+		if !m.ember.ok {
+			m.setNote("Ember is not set up: run caminus ember setup (docs/ember-quickstart.md walks through it)", true)
+			return m, m.loadEmber()
+		}
+		return m, m.interactive("Ember", "ember", "ui")
 	}
 	return m, nil
 }
@@ -795,28 +1056,26 @@ func stateColor(s string) color.Color {
 }
 
 func (m ctl) header(W int) string {
-	title := bold(cAccent).Render("◆ caminus") + fg(cMuted).Render(" control panel "+version)
-	mode := pill(cTeal, "BASIC")
-	if m.advanced {
-		mode = pill(cPurple, "ADVANCED")
-	}
-	state, c := "NO SERVER", cGray
-	for _, s := range m.ps.Servers {
+	state, st := g.idle+" no server", lipgloss.NewStyle().Foreground(cMuted)
+	for _, sv := range m.ps.Servers {
 		switch {
-		case s.State == "ready":
-			state, c = "READY", cGreen
-		case s.State == "loading" && state != "READY":
-			state, c = "LOADING", cYellow
-		case s.State == "failed" && state == "NO SERVER":
-			state, c = "FAILED", cRed
+		case sv.State == "ready":
+			state, st = g.done+" ready", lipgloss.NewStyle().Foreground(cGreen)
+		case sv.State == "loading" && !strings.HasSuffix(state, "ready"):
+			state, st = g.waiting+" loading", lipgloss.NewStyle().Foreground(cYellow)
+		case sv.State == "failed" && strings.HasSuffix(state, "no server"):
+			state, st = g.failed+" failed", lipgloss.NewStyle().Foreground(cRed)
 		}
 	}
-	right := ""
-	if m.busy != "" {
-		right = fg(cYellow).Render(spin[m.frame%len(spin)] + " " + m.busy)
+	mode := fg(cTeal).Render("basic")
+	if m.advanced {
+		mode = fg(cPurple).Render("advanced")
 	}
-	l := title + "  " + mode + " " + pill(c, state)
-	return l + strings.Repeat(" ", max(1, W-lipgloss.Width(l)-lipgloss.Width(right))) + right
+	right := emberDim.Render(version)
+	if m.busy != "" {
+		right = fg(cYellow).Render(spin[m.frame%len(spin)]+" "+m.busy) + "  " + right
+	}
+	return screenHeader("panel", state, st, mode, right, W)
 }
 
 func (m ctl) cursor(pane, i, cur int) string {
@@ -863,6 +1122,9 @@ func (m ctl) modelRows() []string {
 			draft = "auto (server default)"
 		}
 		rows = append(rows, "", fg(cMuted).Render("next start: ")+bold(cAccent).Render(fmt.Sprintf("%d card(s) · drafter %s", mode.Cards, draft)))
+		if fr := m.fitRow(*mi); fr != "" {
+			rows = append(rows, fr)
+		}
 	}
 	if m.advanced {
 		if mi := m.selModel(); mi != nil {
@@ -1008,6 +1270,15 @@ func (m ctl) harnessRows() []string {
 	} else {
 		rows = append(rows, fg(cMuted).Render("not set up yet: u writes Caminus's tested config into its own home"))
 	}
+	// Ember, the agent environment: an agent in its own account working toward goals you set (e opens its chat)
+	switch {
+	case !m.ember.known:
+		rows = append(rows, fg(cMuted).Render("Ember: checking…"))
+	case m.ember.ok:
+		rows = append(rows, fg(cGreen).Render("✓ Ember")+fg(cMuted).Render(" set up · e opens the agent chat (caminus ember ui)"))
+	default:
+		rows = append(rows, fg(cYellow).Render("Ember not set up")+fg(cMuted).Render(" · run caminus ember setup (docs/ember-quickstart.md)"))
+	}
 	return rows
 }
 
@@ -1048,7 +1319,8 @@ func (m ctl) optionRows(height int) []string {
 }
 
 func (m ctl) keysLine() string {
-	k := func(key, what string) string { return bold(cAccent).Render(key) + fg(cMuted).Render(" "+what) }
+	// the env chat's status line (footBar): what the next start will run as pills, the keys dim on the right
+	k := func(key, what string) string { return key + " " + what }
 	var p []string
 	switch m.focus {
 	case paneModels:
@@ -1068,7 +1340,7 @@ func (m ctl) keysLine() string {
 	case paneServers:
 		p = []string{k("enter", "Qwen Code on it"), k("x", "stop"), k("t", "restart"), k("l", "log"), k("m", "monitor")}
 	case paneHarness:
-		p = []string{k("enter", "launch"), k("u", "set up"), k("i", "install")}
+		p = []string{k("enter", "launch"), k("u", "set up"), k("i", "install"), k("e", "Ember")}
 	case paneOptions:
 		p = []string{k("enter", "edit / toggle"), k("d", "default")}
 		if m.editing {
@@ -1080,7 +1352,16 @@ func (m ctl) keysLine() string {
 		other = "basic"
 	}
 	p = append(p, k("tab", "next panel"), k("a", other), k("R", "refresh"), k("q", "quit"))
-	return strings.Join(p, fg(cDim).Render(" · "))
+	var segs []string
+	if mi := m.selModel(); mi != nil {
+		mode, _ := m.modelMode(*mi)
+		segs = append(segs, g.model+" "+mi.Name, fmt.Sprintf("%d card(s)", mode.Cards))
+	}
+	w := m.w
+	if w <= 0 {
+		w = 120
+	}
+	return footBar(segs, p, min(max(w, 60), 220))
 }
 
 func (m ctl) render() string {
@@ -1105,13 +1386,13 @@ func (m ctl) render() string {
 		}
 		return c
 	}
-	out := []string{m.header(W), ""}
+	out := []string{m.header(W)}
 	if hw := m.hwRows(); len(hw) > 0 && (m.advanced || m.hwError() != "" || m.hwWarn()) {
 		c := cYellow
 		if m.hwError() != "" {
 			c = cRed
 		}
-		out = append(out, panel("HARDWARE", c, W, hw), "")
+		out = append(out, panel("hardware", c, W, hw), "")
 	}
 	two := m.advanced && W >= 150
 	left := W
@@ -1123,7 +1404,7 @@ func (m ctl) render() string {
 		panel(title(paneServers), acc(paneServers, cGreen), left, m.serverRows()),
 	}
 	if m.advanced {
-		col = append(col, panel("CARDS", cOrange, left, m.cardRows()))
+		col = append(col, panel("cards", cOrange, left, m.cardRows()))
 	}
 	col = append(col, panel(title(paneHarness), acc(paneHarness, cPurple), left, m.harnessRows()))
 	body := strings.Join(col, "\n")
@@ -1175,7 +1456,8 @@ func upFor(s float64) string {
 }
 
 func newCtl(be *ctlCLI, advanced bool, prefsFile string) ctl {
-	m := ctl{be: be, advanced: advanced, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile}
+	m := ctl{be: be, advanced: advanced, loaded: map[string]bool{}, vals: map[string]string{}, card: "auto", prefs: prefsFile,
+		fits: map[string]fitEntry{}}
 	m.loadPrefs()
 	return m
 }
@@ -1209,10 +1491,8 @@ func ctlMain(args []string) {
 	if once {
 		m := newCtl(newCtlCLI(cli), adv, "") // (no prefs file: a one-off frame changes nothing)
 		m.w, m.h = w, h
-		for _, c := range []tea.Cmd{m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts()} {
-			nm, _ := m.Update(c())
-			m = nm.(ctl)
-		}
+		m = settle(m, tea.Batch(m.loadModels(), m.loadPS(), m.loadHarness(), m.loadOpts()), 0)
+		m = settle(m, m.fitCmd(), 0) // the selected model's fit is answered before the frame is drawn
 		fmt.Println(m.render())
 		return
 	}

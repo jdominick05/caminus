@@ -12,7 +12,9 @@ what a model needs; nothing else branches on a GGUF's general.architecture to bu
              layer)
   qwen3next  Qwen3-Coder-Next: Qwen3NextTP on both cards, T = 1, no drafter yet, no batched prefill yet (KPassOnly: every
              prompt runs as K3 passes)
-  qwen3moe   Qwen3-30B-A3B: Q3MoEOne on one card (own code from the GGUF to the logits), T = 1, no drafter yet, KPassOnly
+  qwen3moe   Qwen3-30B-A3B: Q3MoEOne on one card (own code from the GGUF to the logits), T = 1, no drafter, its own batched
+             prefill (caminus.prefill.q3m.Q3MPrefill); its two-card form qwen3moe-tp (TWO_CARD: --cards 2) is Q3MoETP with
+             Q3MPrefillTP, offered beside the one-card default
 
 Any other architecture takes the Coder's path, as before the registry: FlashNextTP refuses a GGUF it cannot load.
 
@@ -55,19 +57,14 @@ ROPE_KEYS = ('rope.scaling.type', 'rope.scaling.factor', 'rope.scaling.alpha', '
              'rope.scaling.yarn_beta_fast', 'rope.scaling.yarn_beta_slow', 'rope.scale_linear')
 # the header keys meta() keeps, under the architecture's prefix: what the projections below read, and the RoPE scaling keys
 HP_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
-           'ssm.state_size') + ROPE_KEYS
+           'ssm.state_size', 'rope.freq_base') + ROPE_KEYS
 _META = {}
+_TYPES = {}
 
 
 def _file_key(path):
     st = os.stat(path)
     return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
-
-
-def allow_tp_draft():
-    """CAMINUS_ALLOW_TP_DRAFT=1: the two-card dense entry (Dense35TP) builds --draft mtp / dflash. Development and its GPU
-    gates only: without it two-card drafting is refused (Arch.draft_refusal), because those gates have not passed"""
-    return os.environ.get('CAMINUS_ALLOW_TP_DRAFT') == '1'
 
 
 _CODER = {}
@@ -127,6 +124,23 @@ def meta(path):
     return _META[k]
 
 
+def tensor_types(path):
+    """the weight formats of a file's tensors but token_embd (which the engines keep on the host), read once per file by
+    Caminus's own reader; None when that reader refuses the file (the engines read it with the same reader, so they refuse
+    it then too)"""
+    k = _file_key(path)
+    if k not in _TYPES:
+        from . import ggufio
+        try:
+            F = ggufio.GGUFFile(path)
+        except ggufio.GGUFError:
+            _TYPES[k] = None
+        else:
+            try: _TYPES[k] = frozenset(t.type for t in F.tensors if t.name != 'token_embd.weight')
+            finally: F.close()
+    return _TYPES[k]
+
+
 def rope_scaling(hp):
     """the RoPE scaling a file's header asks for: {key: value} of the ROPE_KEYS present, or None when it asks for none.
     None: no scaling key; rope.scaling.type 'none' (llama.cpp never scales then); or an effective factor of 1 (the
@@ -147,8 +161,9 @@ def rope_scaling(hp):
 
 @dataclass(frozen=True)
 class RopeFacts:
-    """a model line's context facts from its model card, as data: nothing serves from them yet (no engine applies YaRN;
-    the Coder's NTK long mode is LONG_NTK, a serve option)"""
+    """a model line's context facts from its model card: the native context, the GGUF's, the card's recipe, and the scaling
+    Caminus ships past gguf_ctx (shipped: None refuses a longer max_ctx; 'yarn' is Qwen3-30B-A3B's opt-in long-context mode,
+    caminus serve --long-context, at shipped_factor from native_ctx; 'ntk' is the Coder's LONG_NTK mode)"""
     native_ctx: int                # the context the model was trained for (the card's original_max_position_embeddings)
     gguf_ctx: int                  # the GGUF's context_length: how far Caminus serves it unscaled today
     card_kind: str                 # the card's long-context recipe ('yarn')
@@ -160,8 +175,11 @@ class RopeFacts:
 
 # Qwen3-30B-A3B: "32,768 natively and 131,072 tokens with YaRN" (factor 4, original_max_position_embeddings 32768; the card
 # advises factor 2 for about 65,536 and no YaRN while contexts stay under 32,768). Its GGUF's context_length, 40,960, is
-# 32,768 for the output plus 8,192 for the prompt: served unscaled up to there, as the card allows
-QWEN3MOE_ROPE = RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), source='https://huggingface.co/Qwen/Qwen3-30B-A3B')
+# 32,768 for the output plus 8,192 for the prompt: served unscaled up to there, as the card allows (the default). The
+# long-context mode (--long-context, or an explicit --max-ctx past 40,960) serves YaRN x4 up to 131,072 at every position:
+# the card's note that static YaRN can cost short texts some quality is the mode's trade-off, so it is never the default
+QWEN3MOE_ROPE = RopeFacts(32768, 40960, 'yarn', (2.0, 4.0), shipped='yarn', shipped_factor=4.0,
+                          source='https://huggingface.co/Qwen/Qwen3-30B-A3B')
 # the dense Qwen3.8-27B line: 262,144 native, YaRN factor 4 from original 262,144 ("up to 1,000,000"; factor 2 for about
 # 524,288). Swift 1.5 and ThinkingCap keep the base's RoPE; their own cards make no RoPE-scaling statement, so the recipe
 # is the base card's, not one their authors claim
@@ -223,8 +241,26 @@ class Arch:
     engine = None            # 'module:Class' under caminus
     tokenizer = 'hf'         # caminus.serve.tokenizer.QwenTokenizer's BPE engine: 'hf' (the tokenizers library) or 'own'
 
+    # the KV cache formats opt['kv'] (caminus serve --kv) selects for this entry (kv_check); only the qwen3moe entries
+    # (Q3MoE, Q3MoETP) build 'q8'. 'f16' is the switch's default and selects nothing on an entry without the choice: the
+    # dense own-code line keeps its F16 cache, and the GGUF engines (the Coder, the paused one-card / Qwen3-Coder-Next
+    # entries) keep their own 8-bit q8_0 cache (kv_fixed), which /props reports from the built engine
+    kv_formats = ('f16',)
+    kv_fixed = None          # the cache an entry without the choice always builds, when it is not F16 (the GGUF engines: 'q8_0')
+
     def __init__(self, name, alias):
         self.name, self.alias = name, alias
+
+    def kv_check(self, opt, who=None):
+        """opt['kv'] for this entry: True for 'q8', False for 'f16' (the default). A format the entry has no build for is
+        refused with a ValueError before anything is read or allocated, so a Q8 request never runs an F16 engine. who: the
+        model's name for the message (caminus serve: the catalog's id), default the entry's alias"""
+        q8 = kv_q8(opt)
+        if q8 and 'q8' not in self.kv_formats:
+            raise ValueError(f"kv 'q8': {who or self.alias} keeps its own KV cache ("
+                             + ("its 8-bit q8_0 rows" if self.kv_fixed else "F16") + f"; no --kv choice in this release): "
+                             f"--kv q8 serves {kv_q8_models()} only")
+        return q8
 
     def __repr__(self):
         return f'<arch {self.name}: {self.kind}, {self.cards} card{"s" if self.cards > 1 else ""}, T {self.T}>'
@@ -334,8 +370,9 @@ class Arch:
             want = self.min_ctx(opt)
         return plan.fits(min(want, plan.native_ctx))
 
-    def draft_refusal(self, draft):
-        """why this entry must not serve --draft `draft` now (a sentence for the error), or None"""
+    def draft_refusal(self, draft, path=None):
+        """why this entry must not serve --draft `draft` for the GGUF at path (a sentence for the error), or None. Without a
+        path (the model picker: no file is read) only what the entry knows without a file"""
         return None
 
     def placement_extra(self, opt, cards):
@@ -353,9 +390,25 @@ class Arch:
         context for a drafter"""
         return MIN_CTX
 
+    def long_mode(self, opt):
+        """the long-context mode, resolved before placement (caminus serve's recipe, caminus fit, caminus start): sets what the
+        projections, placement and build read into opt and returns a short description, or None when the serve is not in
+        the mode. --long-context (opt['long_context']) on an entry without a mode is refused here, before anything is read
+        on a card; an explicit max_ctx past the context_length stays the engine's refusal (as before). The Coder and the
+        qwen3moe entries override it"""
+        if opt.get('long_context'):
+            raise ValueError(f'--long-context: {self.alias} ({self.name}) has no long-context mode (Qwen3-30B-A3B has YaRN x4, '
+                             f'the Coder its NTK mode); serve it without the flag, at most at its own context_length')
+        return None
+
+    def rope_mode(self, opt):
+        """the engine's rope argument for this serve: None (the trained RoPE) unless a long_mode set opt['rope']"""
+        return None
+
     def long_context(self, opt):
         """the long-context mode's settings into opt for an explicit max_ctx past the model's context_length (a note for the
-        log), or None: only the Coder has one (its KV in host memory); every other model refuses such a max_ctx in its engine"""
+        log), or None: the Coder (its KV in host memory, NTK) and the qwen3moe entries (YaRN, resolved by long_mode before
+        placement: this only words the note) have one; every other model refuses such a max_ctx in its engine"""
         return None
 
     def rope_refusal(self, path):
@@ -380,7 +433,8 @@ class Arch:
 
     def variant(self, cards):
         """the entry that serves this model on `cards` cards (None: its own count). An architecture with a two-card form names
-        it in TWO_CARD (the dense own line: Dense35 -> Dense35TP); any other count than its own is refused (ValueError)"""
+        it in TWO_CARD (the dense own line: Dense35 -> Dense35TP; Qwen3-30B-A3B: Q3MoE -> Q3MoETP); any other count than its
+        own is refused (ValueError)"""
         if cards is None or int(cards) == self.cards: return self
         alt = TWO_CARD.get(self.name) if int(cards) == 2 else None
         if alt is None:
@@ -399,6 +453,7 @@ class Arch:
 class Coder(Arch):
     kind, cards, T, drafter, engine = 'coder', 2, 4, 'dflash', 'engine.flashnext_tp:FlashNextTP'
     rope_facts = CODER_ROPE
+    kv_fixed = 'q8_0'        # (FlashNextTP's own cache: q8=True, its default; build passes none)
 
     def long_context(self, opt):
         """an explicit max_ctx past the Coder's context_length (262,144): the KV cache in pinned host memory (kv_host: 13 GB at
@@ -419,6 +474,16 @@ class Coder(Arch):
                 f'{"the disk tier capped at " + format(float(opt["cache_cap_gb"]), "g") + " GB (a park writes about 12.4 KB per token)" if disk else "no disk tier"}'
                 f'{", plain decoding at T = 1" if opt.get("no_drafter") else ""}')
 
+    def long_mode(self, opt):
+        """the Coder's mode is chosen by an explicit --max-ctx past its context_length (long_context below, unchanged);
+        --long-context with it is accepted, without it refused: the mode's context lives in host memory and has no auto size"""
+        if not opt.get('long_context'): return None
+        n = _explicit_ctx(opt)
+        if n is None or n <= CODER_CTX:
+            raise ValueError(f'--long-context: the Coder\'s long-context mode takes an explicit --max-ctx past {CODER_CTX:,} '
+                             f'(its KV cache in host memory, NTK RoPE x {LONG_NTK:g}; 1,048,576 at most measured)')
+        return 'NTK long-context mode'
+
     def _engine_kw(self, opt):
         """FlashNextTP's placement / long-context arguments from opt (kv_host, the long mode's ctx_extend + rope_ntk)"""
         kw = dict(kv_host=True) if opt.get('kv_host') else {}
@@ -426,6 +491,7 @@ class Coder(Arch):
         return kw
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         T = self.T if T is None else int(T)
         from .engine.flashnext_tp import FlashNextTP
         from .prefill import coder as P
@@ -478,6 +544,7 @@ class Coder(Arch):
         """the Coder's projection per card at its pair's split (D-292): FlashNextTP's own check (capacity.fixed_mib with the
         split's moved tensors, the context-sized buffers, the QSA tapes, the batched prefill's plan) + the prompt cache's
         slots + 2 checkpoint slots (its side rows are host memory); the DFlash drafter in extras_mib"""
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .device import capacity as C
         from .prefill.plan import PrefillPlan
         fa = coder_facts(opt['model']); g, st = fa['geom'], fa['tensors']
@@ -518,8 +585,158 @@ class Coder(Arch):
         effort line); a --model-alias renames only /props' default id"""
 
 
+def kv_q8(opt):
+    """the KV cache format an entry builds from opt['kv'] ('f16', the default, or 'q8': the Q8_0 rows of the entries that
+    have them; caminus serve --kv / caminus start --kv set it): True for q8; anything else is refused"""
+    v = opt.get('kv') or 'f16'
+    if v not in ('f16', 'q8'): raise ValueError(f"kv {v!r}: 'f16' or 'q8'")
+    return v == 'q8'
+
+
+# The own Q8_0 KV rows' format ids: an engine built with q8 names its rows by one (kv_format_id; the prompt cache keys
+# parks by it). A built engine holds a Q8 cache exactly when its id is one of these, so an F16 engine that names its own
+# format never reads as Q8 (tests/test_arch.py checks every kv_format_id an engine assigns is listed here).
+KV_Q8_FORMATS = ('q8_0-v1:qk-hadamard128:f16-rounded-v1',   # Qwen3-30B-A3B, one card and two (engine.q3moe_one)
+                 'q8_0-v1:qk-hadamard256:v-hadamard64-v1')  # the dense own-code line's staged Q8 (engine.q35_dense)
+
+
+def kv_q8_built(m):
+    """True when a built engine holds the own Q8_0 rows: its kv_format_id is one of KV_Q8_FORMATS"""
+    return getattr(m, 'kv_format_id', None) in KV_Q8_FORMATS
+
+
+def kv_q8_models():
+    """the models --kv q8 serves, for the refusals: each alias whose entries list 'q8' in kv_formats, with its card counts
+    ('qwen3-30b-a3b (one card or two)')"""
+    by = {}
+    for a in ARCHS.values():
+        if 'q8' in a.kv_formats: by.setdefault(a.alias, set()).add(a.cards)
+    words = {(1,): 'one card', (2,): 'two cards', (1, 2): 'one card or two'}
+    return ', '.join(f'{al} ({words.get(tuple(sorted(cs)), "cards " + "/".join(map(str, sorted(cs))))})'
+                     for al, cs in sorted(by.items())) or 'no model'
+
+
+def kv_cache_of(A, m):
+    """the KV cache a built engine holds, for /props and /caminus/status: {'type': 'f16' | 'q8', 'format': the engine's
+    format id (kv_format_id, one of KV_Q8_FORMATS: the own Q8_0 rows), 'q8_0' (the GGUF engines' own 8-bit cache,
+    A.kv_fixed) or 'f16' (an F16 engine's own kv_format_id when it names one)}"""
+    fid = getattr(m, 'kv_format_id', None)
+    if kv_q8_built(m): return {'type': 'q8', 'format': str(fid)}
+    if A is not None and A.kv_fixed: return {'type': 'q8', 'format': str(A.kv_fixed)}
+    return {'type': 'f16', 'format': str(fid) if fid else 'f16'}   # (an F16 engine may name its own format)
+
+
+def _explicit_ctx(opt):
+    """opt['max_ctx'] as an int when it is an explicit number, else None ('auto', unset)"""
+    v = opt.get('max_ctx')
+    if v is None or isinstance(v, bool) or str(v).strip().lower() == 'auto': return None
+    try: return int(v)
+    except (TypeError, ValueError): return None
+
+
+class _Q3MLong:
+    """the qwen3moe entries' long-context mode (Q3MoE one card, Q3MoETP two): YaRN at the model card's factor (x4 from
+    32,768: RopeFacts.shipped) on the YaRN builds of the decode modules and the prefill's qk_rope (caminus.rope).
+
+    In the mode: max_ctx auto and explicit up to the mode's 131,072 positions (the projection counts them; native_ctx of
+    the context fit is the mode's cap), the engine key carries the RoPE (a YaRN park never restores into a native server:
+    the module names differ too). The KV format: what opt['kv'] says when set; otherwise F16 where the asked context (an
+    explicit max_ctx, or the cap for auto) fits in F16, else Q8_0 rows where they give more positions (one XTX: about 80K
+    instead of about 45K), and the note says so. Native (no mode) stays the default: the card advises no YaRN under 32,768
+    and static YaRN at every position can cost short texts some quality"""
+
+    # the file the mode's recipe is for: the model card's YaRN numbers (x4 from 32,768) hold for Qwen3-30B-A3B's own weights,
+    # whose GGUF says context_length 40,960 and rope.freq_base 1e6. Another qwen3moe file (the 2507 Instruct / Thinking
+    # releases, Qwen3-Coder-30B-A3B: 262,144 positions natively, another base) reaches this entry by its header too; the
+    # mode would give it a scaling it was not trained with, so the mode refuses it (its native serve is unchanged)
+    LONG_FREQ_BASE = 1e6
+    # the weight formats the mode's builds run (the lean decode modules, q3m_prefill): the codebook (k3.OWN_IQ_FMT) and
+    # row-scale (own_layout.RS_CONT) formats run on their own modules, which have no YaRN build; refused here, before a card
+    # is placed, rather than at engine build (tests/engine/test_q3moe_yarn_cpu.py checks these names against those tables)
+    LONG_OFF_FORMATS = frozenset(('IQ3_XXS', 'IQ4_XS', 'IQ3_S', 'IQ2_XXS', 'Q4_0', 'Q2_0'))
+
+    def long_refusal(self, path):
+        """why the long-context mode refuses this file (None: it is the model the recipe is for, in formats the YaRN builds run)"""
+        hp, rf = meta(path)['hp'], self.rope_facts
+        ctx, base = hp.get('context_length'), hp.get('rope.freq_base')
+        if ctx is None or int(ctx) != rf.gguf_ctx or base is None or float(base) != self.LONG_FREQ_BASE:
+            return (f'the long-context mode (YaRN x{rf.shipped_factor:g} from {rf.native_ctx:,}) is Qwen3-30B-A3B\'s recipe '
+                    f'(context_length {rf.gguf_ctx:,}, rope.freq_base {self.LONG_FREQ_BASE:g}); this file says context_length '
+                    f'{ctx if ctx is None else f"{int(ctx):,}"}, rope.freq_base {base if base is None else f"{float(base):g}"}: '
+                    f'another model, whose RoPE the recipe does not fit (serve it natively, up to its own context_length)')
+        off = sorted((tensor_types(path) or frozenset()) & self.LONG_OFF_FORMATS)
+        if off:
+            return (f'the long-context mode runs on the default formats\' modules only; this file has {", ".join(off)} tensors '
+                    f'(codebook or row-scale formats: their modules have no YaRN build)')
+        return None
+
+    def long_mode(self, opt):
+        n, gguf_ctx = _explicit_ctx(opt), int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
+        if not (opt.get('long_context') or (n is not None and n > gguf_ctx)):
+            opt.pop('rope', None)
+            return None
+        why = self.long_refusal(opt['model'])
+        if why: raise ValueError(why)
+        mode = self._yarn()
+        if n is not None and n > mode.max_ctx:
+            raise ValueError(f'--max-ctx {n:,}: Qwen3-30B-A3B serves at most {mode.max_ctx:,} positions (its long-context mode, '
+                             f'YaRN x{mode.factor:g} from {mode.n_ctx_orig:,}; the model card names no longer context)')
+        opt['long_context'], opt['rope'] = True, 'yarn'
+        return f'YaRN x{mode.factor:g}'
+
+    def _yarn(self):
+        from .rope import YarnMode
+        rf = self.rope_facts
+        return YarnMode(rf.shipped_factor, rf.native_ctx)
+
+    def rope_mode(self, opt):
+        return self._yarn() if opt.get('rope') == 'yarn' else None
+
+    def _ctx_cap(self, opt):
+        """the context fit's native_ctx: the file's context_length, or the long-context mode's positions"""
+        if opt.get('rope') == 'yarn': return self._yarn().max_ctx
+        return int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
+
+    def context_fit(self, opt, cards=None):
+        """Arch.context_fit, and in the long-context mode with no opt['kv'] the format the mode would choose (F16 where the
+        asked context fits, else Q8 where it holds more): the plan carries it as .kv"""
+        if opt.get('rope') != 'yarn' or opt.get('kv') is not None:
+            plan = super().context_fit(opt, cards); plan.kv = 'q8' if kv_q8(opt) else 'f16'
+            return plan
+        f16 = super().context_fit(dict(opt, kv='f16'), cards); f16.kv = 'f16'
+        n = _explicit_ctx(opt)
+        want = min(n if n is not None else f16.native_ctx, f16.native_ctx)
+        if f16.fits(want): return f16
+        q8 = super().context_fit(dict(opt, kv='q8'), cards); q8.kv = 'q8'
+        if (q8.fits(want) if n is not None else (q8.maximum() or 0) > (f16.maximum() or 0)):
+            q8.kv_why = (f'F16 rows hold {f16.maximum() or 0:,} positions here, Q8_0 rows ' +
+                         (f'hold the asked {want:,}' if n is not None else f'{q8.maximum() or 0:,}'))
+            return q8
+        return f16
+
+    def placement_extra(self, opt, cards):
+        """the long-context mode's KV format, decided once on the placed cards (context_fit) and written to opt['kv'] (auto,
+        build and the engine key read it); recorded in the placement"""
+        if opt.get('rope') != 'yarn' or opt.get('kv') is not None: return {}
+        plan = self.context_fit(opt, cards)
+        opt['kv'] = plan.kv
+        if plan.kv == 'q8': opt['kv_auto_why'] = getattr(plan, 'kv_why', '')
+        return {'kv': plan.kv}
+
+    def long_context(self, opt):
+        if opt.get('rope') != 'yarn': return None
+        mode = self._yarn()
+        kv = 'q8' if kv_q8(opt) else 'f16'
+        why = opt.get('kv_auto_why')
+        return (f'long-context mode: YaRN x{mode.factor:g} from {mode.n_ctx_orig:,} (up to {mode.max_ctx:,} positions), max_ctx '
+                f'{int(opt["max_ctx"]):,}, KV {"Q8_0 rows" if kv == "q8" else "F16"}'
+                f'{" (chosen by the mode: " + why + ")" if why else ""}; YaRN applies at every position, so short texts can '
+                f'read slightly differently than in the default mode (the model card advises it only past 32,768)')
+
+
 class OneCard(Arch):
     kind, cards, T, engine = 'one-card', 1, 1, 'engine.qwen35_one:Qwen35One'
+    kv_fixed = 'q8_0'        # (Qwen35One's q8_0 cache: q8=True, its default; the own-code subclasses below set None)
 
     def __init__(self, name, alias):
         super().__init__(name, alias)
@@ -535,12 +752,14 @@ class OneCard(Arch):
         return self._shapes[k]
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         sh = self.shape(opt['model']); p = sh.projection_parts(); chunk = int(opt['chunk'])
         slot = (p['gdn'] + p['kv_pos']) / 2 ** 20 * 1.05 + 1.0          # a checkpoint: the recurrent state + T = 1 tail rows
         need = lambda c: [sh.projection_mib(c) + one_card_extra_mib(sh, chunk, c) + (slots + 2) * slot]   # (the side rows: host memory)
         return sh.n_ctx_train or 262144, [0], slot, need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.qwen35_one import Qwen35One
         from .prefill.q35 import Prefill35
         chunk, max_ctx = int(opt['chunk']), int(opt['max_ctx'])
@@ -564,29 +783,33 @@ class OneCard(Arch):
                              reserve_mib=(capacity.DISPLAY_RESERVE_MIB if c and c['display'] else 0,), card_names=(name,))
 
 
-class Q3MoE(OneCard):
+class Q3MoE(_Q3MLong, OneCard):
     """qwen3moe (Qwen3-30B-A3B): Q3MoEOne on one card, T = 1, Caminus's own code from the GGUF to the logits; no drafter yet;
     the prompt through its own batched prefill (caminus.prefill.q3m.Q3MPrefill, chunks of PREFILL_CHUNK). Full depth
-    (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960)."""
+    (context_length 40,960) fits the 24 GB card only: weights 17.3 GiB + f16 KV 96 KiB per position (3.75 GiB at 40,960).
+    The long-context mode (_Q3MLong: YaRN x4) on one XTX: about 80K positions with Q8_0 rows (the mode picks them)."""
     engine = 'engine.q3moe_one:Q3MoEOne'
     rope_facts = QWEN3MOE_ROPE
     tokenizer = 'own'          # (caminus.bpe: the qwen2 pre-tokenizer; the GGUF read by caminus.ggufio: no gguf-py, no tokenizers)
+    kv_formats = ('f16', 'q8')   # (caminus serve --kv q8: Q3MoEOne(q8=True), docs/dev/q8-kv.md; F16 the default)
+    kv_fixed = None
     PREFILL_CHUNK = 2048       # (XTX, from empty: 512 / 4K / 32K at 1024: 5,183 / 5,787 / 2,609 tok/s; 2048: 5,196 / 6,436 / 2,771; 281 MiB)
 
     def auto_need(self, opt, slots, cards=None):
         from .engine.q3moe_one import Q3MoEOne
         from .prefill import q3m
         path = opt['model']
-        n_ctx = int(meta(path)['hp'].get('context_length') or 40960)
-        slot = Q3MoEOne.kv_pos_mib(path) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
+        n_ctx = self._ctx_cap(opt)                          # (the file's 40,960, or the long-context mode's 131,072)
+        q8 = self.kv_check(opt)                             # (opt['kv']: caminus serve --kv; 'f16' by default)
+        slot = Q3MoEOne.kv_pos_mib(path, q8) * 1.05 + 1.0          # a checkpoint: one tail row of every layer (T = 1)
         pf = q3m.buffer_need_mib(q3m.shapes_of(path), self.PREFILL_CHUNK)
-        need = lambda c: [Q3MoEOne.projection_mib(path, c) + pf + (slots + 2) * slot]   # (the side rows: host memory)
+        need = lambda c: [Q3MoEOne.projection_mib(path, c, q8=q8) + pf + (slots + 2) * slot]   # (the side rows: host memory)
         return n_ctx, [0], slot, need
 
     def build(self, opt, log=print, T=None):
         from .engine.q3moe_one import Q3MoEOne
         from .prefill.q3m import Q3MPrefill
-        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
+        m = Q3MoEOne(opt['model'], device=0, max_ctx=int(opt['max_ctx']), q8=self.kv_check(opt), rope=self.rope_mode(opt))
         return m, Q3MPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
 
@@ -599,6 +822,7 @@ class Dense35(OneCard):
     the drafter module runs the block's Q4_0 and the file's Q6_K head)"""
     engine = 'engine.q35_dense:Dense35Own'
     rope_facts = QWEN35_ROPE
+    kv_fixed = None            # (F16: its Q8 objects are not served, kv_check refuses 'q8')
     drafter = 'mtp'
     drafters = ('mtp', 'dflash')   # (--draft dflash: the base model's DFlash 2 drafter, decode/dflash35.py; one card, Swift 1.5 first)
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
@@ -620,9 +844,11 @@ class Dense35(OneCard):
     # plain reply token for token: short prompts Swift ~2.2x (XTX), ThinkingCap 1.5-1.9x (XT), the plain 27B 1.17-1.37x
     # (XTX); public 10K / 34K prompts ThinkingCap 1.18x / 1.23x (XTX), the plain 27B 1.11x / 1.17x (XT), Swift 1.34x at
     # 10K (XTX). The drafter's 2 GB comes out of the context (min_ctx: 8K floor). Without the drafter file, plain.
-    # Two cards: off until two-card drafting exists (#80).
+    # Two cards (XTX + XT, served A/B with every drafted reply token for token the plain one): DFlash2 for Swift 1.5 and
+    # ThinkingCap, 1.13-1.44x on public 10K / 34K prompts and 1.20-1.45x on 11K / 29K agent prompts; the drafter's VRAM
+    # comes out of the two-card context. The plain 27B has no two-card form (no k3_q35_gsq entry: plain).
     DRAFT_DEFAULT = {('k3_q35_swift', 1): 'dflash', ('k3_q35_tcap', 1): 'dflash', ('k3_q35_gsq', 1): 'dflash',
-                     ('k3_q35_swift', 2): 'off', ('k3_q35_tcap', 2): 'off'}
+                     ('k3_q35_swift', 2): 'dflash', ('k3_q35_tcap', 2): 'dflash'}
 
     def default_draft(self, opt):
         from . import ggufio
@@ -671,6 +897,7 @@ class Dense35(OneCard):
         return Dflash35.need_mib(path, vocab, self.PREFILL_CHUNK) + Dense35Verify.need_mib(self.MTP_T, max_ctx=c, nfeat=len(layers))
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
         from .engine.q35_mtp import Mtp35
@@ -709,6 +936,7 @@ class Dense35(OneCard):
         finally: F.close()
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense import Dense35Own
         from .engine.q35_dense_verify import Dense35Verify
         from .engine.q35_mtp import Mtp35
@@ -760,8 +988,10 @@ class Dense35TP(Arch):
 
     Drafting (--draft mtp / dflash) runs the one-card drafters beside the trunk: the two-card verify tape
     (engine/q35_dense_verify_tp.py) on both cards, the drafter and a complete output head on one card
-    (engine/q35_draft_tp.py). It is in development: refused unless CAMINUS_ALLOW_TP_DRAFT=1 (draft_refusal) until its
-    GPU gates pass, and never a default (default_draft)."""
+    (engine/q35_draft_tp.py). The default is DFlash2 for both models (Dense35.DRAFT_DEFAULT, keyed by (module, 2)). A file
+    whose decode module has no two-card verify object (k3.Q35_TPV_OF; the plain 27B's k3_q35_gsq has no two-card form at
+    all) is refused two-card drafting (draft_refusal); two_card_models names the catalog models that have one, for the
+    model picker (it reads no file)."""
     kind, cards, T, engine = 'tp', 2, 1, 'engine.q35_dense_tp:Dense35TP'
     rope_facts = QWEN35_ROPE
     tokenizer = 'own'
@@ -771,18 +1001,37 @@ class Dense35TP(Arch):
     MTP_K, MTP_T = Dense35.MTP_K, Dense35.MTP_T
     _mtp, _dflash = Dense35._mtp, Dense35._dflash
 
-    def draft_refusal(self, draft):
-        if (draft or 'off') == 'off' or allow_tp_draft(): return None
-        return (f'--draft {draft} on two cards is in development and refused until its GPU gates pass (docs/dev/testing.md, '
-                f'"Dense two-card drafting"; CAMINUS_ALLOW_TP_DRAFT=1 runs it for those gates): --cards 1, or --draft off')
+    # the catalog models (caminus.models) whose files' decode modules have a two-card build and its verify object
+    # (k3.Q35_TP_OF, k3.Q35_TPV_OF: Swift's and ThinkingCap's). A fact about the catalog's files: the picker reads no file,
+    # so nothing derives it; a new two-card module adds its model here
+    two_card_models = ('swift-1.5', 'thinkingcap')
+
+    def draft_refusal(self, draft, path=None):
+        if (draft or 'off') == 'off' or path is None: return None
+        from . import ggufio
+        from .engine import k3
+        from .engine.q35_dense import module_of
+        try:
+            F = ggufio.GGUFFile(path)
+        except Exception:                       # noqa: BLE001 - a file this reader refuses: the engine's own checks say why
+            return None
+        try:
+            one = module_of(F)
+        except Exception:                       # noqa: BLE001 - formats module_of cannot place: the engine refuses them
+            return None
+        finally:
+            F.close()
+        if k3.Q35_TPV_OF.get(k3.Q35_TP_OF.get(one)) is None:
+            return (f'--draft {draft} on two cards: the decode module {one} has no two-card verify object (two-card drafting '
+                    f'serves Swift 1.5 and ThinkingCap): --cards 1, or --draft off')
+        return None
 
     @property
     def DRAFT_DEFAULT(self):
-        return Dense35.DRAFT_DEFAULT          # (one table, keyed by (module, cards): two cards are off there)
+        return Dense35.DRAFT_DEFAULT          # (one table, keyed by (module, cards))
 
     def default_draft(self, opt):
-        # never a drafter by default while two-card drafting is refused; the table decides after its served A/Bs
-        return Dense35.default_draft(self, opt) if allow_tp_draft() else 'off'
+        return Dense35.default_draft(self, opt)
 
     def split(self, cards):
         """{'ffn_share': card 0's part of the feed-forward rows}: the cards' measured streaming bandwidth (CARD_BW) by label"""
@@ -875,6 +1124,7 @@ class Dense35TP(Arch):
         return out
 
     def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense_tp import Dense35TP as E
         path, share = opt['model'], self._share(opt, cards)
         spec_T, dc, layers, dfl, extra = self._resources(opt, cards)
@@ -886,9 +1136,10 @@ class Dense35TP(Arch):
         return n_ctx, [0, 1], max(per_slot), need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_dense_tp import Dense35TP as E
         from .prefill.q35own_tp import Q35OwnPrefillTP
-        why = self.draft_refusal(opt.get('draft'))
+        why = self.draft_refusal(opt.get('draft'), opt['model'])
         if why: raise ValueError(why)
         path, share = opt['model'], self._share(opt)
         mc = int(opt['max_ctx'])
@@ -912,22 +1163,115 @@ class Dense35TP(Arch):
                 from .decode.mtp35 import Mtp35Drafter
                 m.mtp35 = d = Mtp35(target, k=self.MTP_K)
                 dr = Mtp35Drafter(d)
-            log(f'caminus serve: two-card --draft {opt["draft"]} (in development: CAMINUS_ALLOW_TP_DRAFT) on card {dc}: full head '
+            log(f'caminus serve: two-card --draft {opt["draft"]} on card {dc}: full head '
                 f'{target.mib:.0f} MiB, verify T {spec_T}', flush=True)
         pf = Q35OwnPrefillTP(m, chunk=self.PREFILL_CHUNK, feature_layers=layers)
         return m, pf, d, dr
 
 
-class TwoCardTP(Arch):
-    kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
+class Q3MoETP(_Q3MLong, Arch):
+    """qwen3moe (Qwen3-30B-A3B) on TWO cards (caminus serve --cards 2 / caminus start qwen3-30b-a3b --cards 2; one card stays
+    the model's default): engine/q3moe_tp.py's Q3MoETP (tensor parallel on the two-card build of the lean decode module), T = 1,
+    no drafter, its own two-card batched prefill (caminus.prefill.q3m_tp.Q3MPrefillTP). Never picked from a header or the
+    catalog: Q3MoE.variant(2) names it. The split: card 0 takes 2 of the 4 kv heads and rows 0 .. 511 of every expert's 768
+    (the down projection's K cut must fall on a whole 256-value block, so the only cuts are 512 / 256 and 256 / 512), the head
+    rows by the cards' streaming bandwidth (CARD_BW); the router, norms and embedding are on both cards.
+
+    Why 512 on card 0: placement (caminus.device.host.pair) puts the bigger card first, and the bigger card takes the bigger
+    expert share, as the Coder's split does; on an XTX + XT that is also the faster card (its 512 rows balance the XT's higher
+    fixed cost per segment). On two equal cards (XT + XT, XTX + XTX) the cut is still 512 / 256: no 50 / 50 cut exists on
+    256-value blocks, and the memory projection decides whether card 0 holds it. A pair whose card 0 is the smaller card (only
+    reachable by bypassing the placement's order) is refused (pair_refusal), not given the 256 / 512 cut: that cut is not
+    gated or measured.
+
+    max_ctx auto is capped at the file's context_length (40,960) as on one card, unless the serve is in the long-context
+    mode (_Q3MLong: YaRN x4, up to 131,072 positions; F16 holds them on two cards by the projection: about 213K would fit at
+    F16 on an XTX + XT). Two cards are slower than one at short context and faster past about 16K positions (engine level,
+    docs/dev/benchmarks.md), which is why one card stays the default."""
+    kind, cards, T, engine = 'tp', 2, 1, 'engine.q3moe_tp:Q3MoETP'
+    rope_facts = QWEN3MOE_ROPE
+    tokenizer = 'own'          # (caminus.bpe, as the one-card entry: no gguf-py, no tokenizers on the two-card path either)
+    PREFILL_CHUNK = Q3MoE.PREFILL_CHUNK
+    EXP_ROWS = 512             # card 0's rows of every expert (= caminus.engine.q3moe_tp.EXP_ROWS; tests/test_arch.py checks it)
+    # the catalog models this entry serves on two cards (the model picker reads no file: a fact about the catalog)
+    two_card_models = ('qwen3-30b-a3b',)
+    kv_formats = ('f16', 'q8')   # (caminus serve --cards 2 --kv q8: Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8 + Q3MPrefillTP's Q8 path)
+
+    def split(self, cards):
+        """{'exp_rows': card 0's rows of every expert, 'vocab_share': card 0's part of the head rows} for the pair in engine
+        order (the bigger card first): EXP_ROWS, and the cards' measured streaming bandwidth (CARD_BW) by label"""
+        if not cards: return {'exp_rows': self.EXP_ROWS, 'vocab_share': 0.5}
+        bw = [CARD_BW.get(c.get('label'), CARD_BW['XT']) for c in cards]
+        return {'exp_rows': self.EXP_ROWS, 'vocab_share': round(bw[0] / (bw[0] + bw[1]), 3)}
+
+    def _split(self, opt, cards=None):
+        """(exp_rows, vocab_share): from these cards (placement, caminus fit), else the placement's stored split (build, max_ctx
+        auto), else the default"""
+        sp = self.split(cards) if cards is not None else ((opt.get('placement') or {}).get('split') or self.split(None))
+        return int(sp.get('exp_rows', self.EXP_ROWS)), float(sp.get('vocab_share', 0.5))
+
+    def pair_refusal(self, cards):
+        if cards and len(cards) >= 2 and int(cards[0].get('total_mib') or 0) < int(cards[1].get('total_mib') or 0):
+            from .device import host
+            return (f'Qwen3-30B-A3B on two cards puts {self.EXP_ROWS} of each expert\'s 768 rows on card 0, so card 0 must be the '
+                    f'bigger card: {" + ".join(host.describe(c) for c in cards)} is in the other order (let caminus pick the '
+                    f'cards, or list the bigger card first in HIP_VISIBLE_DEVICES)')
+        return None
+
+    def fits(self, opt, cards):
+        why = self.pair_refusal(cards)
+        if why:
+            from .device import host
+            raise host.PlacementError(why)
+        return super().fits(opt, cards)
+
+    def _prefill_mib(self, path, exp_rows):
+        """per card, everything Q3MPrefillTP checks at construction (its buffers, receive rows, code objects and streams)"""
+        from .prefill.q3m_tp import need_tp_mib, tp_shapes
+        return need_tp_mib(tp_shapes(path, exp_rows), self.PREFILL_CHUNK)
 
     def auto_need(self, opt, slots, cards=None):
+        """per card: the engine's own projection (Q3MoETP.projection_mib, the terms its check counts) + the two-card prefill's
+        construction check + the prompt cache's slots + 2 checkpoint slots, each one T = 1 tail row of that card's kv heads in
+        every layer (cache/prompt.py Layout: no recurrent state); the side rows are host memory"""
+        q8 = self.kv_check(opt)                             # (opt['kv']: caminus serve --kv; 'f16' by default)
+        from .engine.q3moe_tp import Q3MoETP as E
+        path = opt['model']
+        er, vs = self._split(opt, cards)
+        n_ctx = self._ctx_cap(opt)                          # (the file's 40,960, or the long-context mode's 131,072)
+        yarn = opt.get('rope') == 'yarn'
+        pf = self._prefill_mib(path, er)
+        slot = [v * 1.05 + 1.0 for v in E.kv_pos_mib(path, q8=q8)]
+        need = lambda c: [p + f + (slots + 2) * s for p, f, s in zip(E.projection_mib(path, c, exp_rows=er, vocab_share=vs, q8=q8, yarn=yarn), pf, slot)]
+        return n_ctx, [0, 1], max(slot), need
+
+    def build(self, opt, log=print, T=None):
+        q8 = self.kv_check(opt)
+        from .engine.q3moe_tp import Q3MoETP as E
+        from .prefill.q3m_tp import Q3MPrefillTP
+        path = opt['model']
+        er, vs = self._split(opt)
+        # (the prefill's construction check counted in the engine's own, before anything is read)
+        m = E(path, devices=(0, 1), max_ctx=int(opt['max_ctx']), exp_rows=er, vocab_share=vs,
+              vram_extra_mib=self._prefill_mib(path, er), q8=q8, rope=self.rope_mode(opt))
+        log(f'caminus serve: two cards: expert rows {m.exp_rows[0]} / {m.exp_rows[1]}, kv heads {m.kvc[0]} / {m.kvc[1]}, '
+            f'head rows {m.vh} / {m.vocab - m.vh} (vocab_share {vs})', flush=True)
+        return m, Q3MPrefillTP(m, chunk=self.PREFILL_CHUNK), None, None
+
+
+class TwoCardTP(Arch):
+    kind, cards, T, engine = 'tp', 2, 1, 'engine.qwen3next_tp:Qwen3NextTP'
+    kv_fixed = 'q8_0'          # (Qwen3NextTP's q8_0 cache: q8=True, its default)
+
+    def auto_need(self, opt, slots, cards=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         sh = tp_shape(opt['model'])
         slot = (sh['state'] + sh['kv_pos']) / 2 ** 20 * 1.05 + 1.0
         need = lambda c: [sh['need_mib'](c) + (slots + 2) * slot] * 2   # (the side rows: host memory)
         return sh['n_ctx'], [0, 1], slot, need
 
     def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.qwen3next_tp import Qwen3NextTP
         from .prefill.kpass import KPassOnly
         # (its own check, before anything is read: qwen3next_tp.projection, the one auto_need reads)
@@ -937,8 +1281,11 @@ class TwoCardTP(Arch):
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
                              Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
-                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'))}
-TWO_CARD = {'qwen35-own': 'qwen35-own-tp'}   # (a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2)
+                             TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'),
+                             Q3MoETP('qwen3moe-tp', 'qwen3-30b-a3b'))}
+# a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2. Offered, never the default: a model's own
+# card count (its catalog entry, Arch.cards) is what a serve without --cards runs
+TWO_CARD = {'qwen35-own': 'qwen35-own-tp', 'qwen3moe': 'qwen3moe-tp'}
 CODER = ARCHS['qwen4exp']
 
 

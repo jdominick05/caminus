@@ -3,7 +3,9 @@
 The source contract is op_kv_append in kernels/k3_gguf_ops.h and the Q8
 append in kernels/prefill_attn.hip: each row is K then V, each flattened
 head-major vector split into 32-value blocks of little-endian fp16 scale
-and 32 signed bytes. No head padding or rotation is performed here.
+and 32 signed bytes. No head padding or rotation is performed by the encode.
+hadamard128 is the rotation reference of Qwen3-30B-A3B's Q8 KV cache (kernels/own_kv_rot128.h): its rows are
+encode_q8_kv(hadamard128(K), V) of the fp16-rounded K / V the F16 cache stores.
 
 Encode uses fp32 amax / 127, its fp32 reciprocal, fp32 multiplication and
 roundf's ties away from zero. Codes use the unrounded scale; only the stored
@@ -62,6 +64,29 @@ class Q8KVLayout:
     def cache_bytes(self, rows):
         """Exact physical bytes for this many exposed rows (no allocation)."""
         return _count(rows, 'rows') * self.row_bytes
+
+
+HADAMARD128_SCALE = np.float32(float.fromhex('0x1.6a09e6p-4'))   # float32(1 / sqrt(128)): kernels/own_kv_rot128.h's OWN_KV_ROT128_SCALE
+
+
+def hadamard128(x):
+    """The fp32 orthonormal Walsh-Hadamard transform of each 128-value head along the last axis, in the kernels' butterfly
+    order (kernels/own_kv_rot128.h, the dense line's q35_op_hadamard order): for h = 1, 2, 4 .. 64 the pair (i, i + h) of
+    each i with bit h clear becomes (a + b, a - b) in fp32, then each value times HADAMARD128_SCALE (one more fp32
+    rounding: 1 / sqrt(128) is not a power of two). Returns a new float32 array of x's shape."""
+    if not isinstance(x, np.ndarray) or x.dtype != np.dtype(np.float32):
+        raise ValueError('hadamard128 needs a float32 numpy array')
+    if x.ndim < 1 or x.shape[-1] != 128:
+        raise ValueError('hadamard128: the last axis must be 128 values')
+    y = np.array(x, dtype=np.float32).reshape(-1, 128)
+    h = 1
+    while h < 128:
+        z = y.reshape(-1, 128 // (2 * h), 2, h)
+        a, b = z[:, :, 0, :].copy(), z[:, :, 1, :].copy()
+        z[:, :, 0, :] = a + b
+        z[:, :, 1, :] = a - b
+        h *= 2
+    return (y * HADAMARD128_SCALE).reshape(x.shape)
 
 
 def encode_q8_kv(k, v, layout):
