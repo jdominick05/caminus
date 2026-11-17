@@ -24,6 +24,30 @@ type residentSessionsMsg struct {
 
 type residentCreatedMsg struct{ name, err string }
 
+// residentDestroyedMsg: a session the switcher removed, and where its home is kept.
+type residentDestroyedMsg struct{ name, kept, err string }
+
+// destroyResidentSession cancels the session's running goal (which withdraws its open requests), then removes it:
+// its service stops, its name leaves the mail bus, its home moves to removed-sessions.
+func destroyResidentSession(m emberModel, name, goalID string, active bool) tea.Cmd {
+	return func() tea.Msg {
+		if active && goalID != "" {
+			_, _ = residentCommand(m, []string{"cancel", name, goalID, "--json"}, "").CombinedOutput()
+		}
+		out, err := residentCommand(m, []string{"remove", name, "--json"}, "").CombinedOutput()
+		if err != nil {
+			return residentDestroyedMsg{name: name, err: strings.TrimSpace(string(out))}
+		}
+		var r struct {
+			Kept string `json:"kept"`
+		}
+		if i := strings.LastIndex(string(out), "{"); i >= 0 {
+			_ = json.Unmarshal(out[i:], &r)
+		}
+		return residentDestroyedMsg{name: name, kept: r.Kept}
+	}
+}
+
 func emberClip(text string, width int) string {
 	if width <= 0 {
 		width = 110

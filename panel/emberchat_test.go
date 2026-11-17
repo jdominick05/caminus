@@ -402,8 +402,9 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 		t.Fatal("Ctrl+P opens the switcher and keeps the draft")
 	}
 	frame := ansi.Strip(m.render())
-	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 goal", "$4.12 today",
-		"claude-haiku-5-5 · 61 tok/s", "GitHub ember-bot", "52K/1M context", "resident", "○ idle", "no GitHub account"} {
+	for _, want := range []string{"research", "● working", "survey the harness papers", "working 12m", "$0.42 on this goal",
+		"$4.12 today in this session", "claude-haiku-5-5 · 61 tok/s · 52K/1M", "GitHub ember-bot", "resident", "○ idle",
+		"no GitHub account", "worked ", "+ new session"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("a card shows %q:\n%s", want, frame)
 		}
@@ -2559,5 +2560,57 @@ func TestSwitcherCreatesAndStopsSessions(t *testing.T) {
 	next, cmd = m.chatKey(tea.KeyPressMsg{Code: 's', Text: "s"})
 	if cmd == nil || !next.(emberModel).chat.picker {
 		t.Fatal("s stops or starts the selected session and keeps the switcher open")
+	}
+}
+
+func TestSwitcherCardsSayWhatIsTrueAndDestroyTakesTwoPresses(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 150, 40
+	m.resident.TokPerS = 55 // the status bar's live figure for the session in view
+	m.sessionCards = []sessionCard{
+		{name: "resident", status: "working", goal: "design a block breaking game", goalID: "g1", workingS: 60},
+		{name: "research", status: "idle", goal: "review the design", aimed: true, workingS: 180}}
+	m.chat.picker = true
+	box := ansi.Strip(m.pickerBox())
+	for _, want := range []string{"55 tok/s", "↪ review the design", "worked 3m", "+ new session", "x x destroy"} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("the switcher shows %q:\n%s", want, box)
+		}
+	}
+	if strings.Contains(box, "working 3m") {
+		t.Fatal("an idle card says worked, not working")
+	}
+	// x once arms and names what goes; another key disarms; x twice destroys
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	if cmd != nil || m.chat.pickerDestroy != "resident" || !strings.Contains(ansi.Strip(m.pickerBox()), "x again destroys resident") {
+		t.Fatal("the first x only arms, with a warning naming the session")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	m = next.(emberModel)
+	if m.chat.pickerDestroy != "" {
+		t.Fatal("another key disarms")
+	}
+	m.chat.pickerSel = 0
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	if cmd == nil || m.agentName != "research" {
+		t.Fatalf("x twice destroys; destroying the session in view moves to another first (now %q)", m.agentName)
+	}
+	// the last session stays
+	m.sessionCards = []sessionCard{{name: "research", status: "idle"}}
+	m.chat.pickerSel = 0
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(emberModel)
+	if m.chat.pickerDestroy != "" || !strings.Contains(m.msg, "last session") {
+		t.Fatal("the last session can't be destroyed")
+	}
+	// Enter on "+ new session" asks for the name
+	m.chat.pickerSel = 1
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !next.(emberModel).chat.pickerNew {
+		t.Fatal("Enter on the new-session card asks for a name")
 	}
 }

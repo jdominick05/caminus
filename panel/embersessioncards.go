@@ -21,6 +21,8 @@ import (
 // status line and side pane show for the session in view).
 type sessionCard struct {
 	name, status, goal, model, github string
+	goalID                            string // the goal the card shows (destroy cancels it when it runs)
+	aimed                             bool   // the goal was redirected: the card shows what it works toward now
 	workingS, spendGoal, spendToday   float64
 	tokPerS                           float64
 	ctxUsed, ctx                      int
@@ -41,6 +43,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 		TokPerS    *float64           `json:"tok_per_s"`
 		SpendToday float64            `json:"spend_today"`
 		SpendGoals map[string]float64 `json:"spend_goals"`
+		Aims       map[string]string  `json:"aims"`
 		Context    int                `json:"context"`
 		Used       int                `json:"context_used"`
 		Alive      bool               `json:"daemon_alive"`
@@ -68,7 +71,10 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 				break
 			}
 		}
-		c.goal, c.spendGoal, c.lastTS = g.Prompt, st.SpendGoals[g.ID], g.Updated
+		c.goal, c.goalID, c.spendGoal, c.lastTS = g.Prompt, g.ID, st.SpendGoals[g.ID], g.Updated
+		if aim := st.Aims[g.ID]; aim != "" { // the header's rule: a redirect after a done check
+			c.goal, c.aimed = aim, true
+		}
 		switch {
 		case !st.Alive:
 		case g.State == "working" || g.State == "queued":
@@ -133,11 +139,17 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 	name := lipgloss.NewStyle().Foreground(cText).Bold(true).Render(emberClip(residentText(c.name), inner-14))
 	title := " " + name + " " + dot + " "
 	top := edge.Render("╭─") + title + edge.Render(strings.Repeat("─", max(0, inner-1-ansi.StringWidth(title)))+"╮")
-	goal := c.goal
-	if goal == "" {
+	goal := oneLine(residentText(c.goal))
+	if c.aimed {
+		goal = "↪ " + goal
+	}
+	if c.goal == "" {
 		goal = "no goal yet"
 	}
-	money := fmt.Sprintf("$%.2f goal · $%.2f today", c.spendGoal, c.spendToday)
+	worked := "worked " // (the word follows the state: an idle card's time is over)
+	if c.status == "working" {
+		worked = "working "
+	}
 	speed := "–"
 	if c.tokPerS > 0 {
 		speed = fmt.Sprintf("%.0f tok/s", c.tokPerS)
@@ -148,18 +160,14 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 	}
 	ctx := ""
 	if c.ctx > 0 {
-		ctx = shortTokens(c.ctxUsed) + "/" + shortTokens(c.ctx) + " context"
-	}
-	last := ""
-	if c.lastTS > 0 {
-		last = shortDur(float64(time.Now().Unix())-c.lastTS) + " ago"
+		ctx = " · " + shortTokens(c.ctxUsed) + "/" + shortTokens(c.ctx)
 	}
 	rows := []string{
-		lipgloss.NewStyle().Foreground(cText).Render(emberClip(oneLine(residentText(goal)), inner-2)),
-		emberDim.Render(emberClip("working "+shortDur(c.workingS)+" · "+money, inner-2)),
-		emberDim.Render(emberClip(residentText(c.model)+" · "+speed, inner-2)),
+		lipgloss.NewStyle().Foreground(cText).Render(emberClip(goal, inner-2)),
+		emberDim.Render(emberClip(worked+shortDur(c.workingS)+fmt.Sprintf(" · $%.2f on this goal", c.spendGoal), inner-2)),
+		emberDim.Render(emberClip(residentText(c.model)+" · "+speed+ctx, inner-2)),
 		emberDim.Render(emberClip(residentText(gh), inner-2)),
-		emberDim.Render(emberClip(strings.Trim(ctx+" · "+last, " ·"), inner-2)),
+		emberDim.Render(emberClip(fmt.Sprintf("$%.2f today in this session", c.spendToday), inner-2)),
 	}
 	out := []string{top}
 	for _, r := range rows {
@@ -172,7 +180,13 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 // switcherCards are the cards in order: the sessions found, the one in view when none were read yet.
 func (m emberModel) switcherCards() []sessionCard {
 	if len(m.sessionCards) > 0 {
-		return m.sessionCards
+		out := append([]sessionCard(nil), m.sessionCards...)
+		for i := range out {
+			if out[i].name == m.agentName { // the session in view: the status bar's live speed, not the snapshot's
+				out[i].tokPerS = m.resident.TokPerS
+			}
+		}
+		return out
 	}
 	var out []sessionCard // (the cards are still loading: the names alone)
 	for _, n := range m.sessionNames {
@@ -184,23 +198,50 @@ func (m emberModel) switcherCards() []sessionCard {
 	return out
 }
 
+// cardCount is the cards plus the last one, "+ new session".
+func (m emberModel) cardCount() int { return len(m.switcherCards()) + 1 }
+
+// newSessionCard is the last card: Enter or a click on it asks for the new session's name.
+func (m emberModel) newSessionCard(selected bool, cw int) []string {
+	edge := lipgloss.NewStyle().Foreground(cDim)
+	if selected {
+		_, border := overlayColors()
+		edge = lipgloss.NewStyle().Foreground(lipgloss.Color(border)).Bold(true)
+	}
+	inner := cw - 2
+	body := []string{"", lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("+ new session"), emberDim.Render("Enter or click names it"), "", ""}
+	out := []string{edge.Render("╭" + strings.Repeat("─", inner) + "╮")}
+	for _, r := range body {
+		cell := " " + r
+		out = append(out, edge.Render("│")+cell+strings.Repeat(" ", max(0, inner-ansi.StringWidth(cell)))+edge.Render("│"))
+	}
+	return append(out, edge.Render("╰"+strings.Repeat("─", inner)+"╯"))
+}
+
 // pickerBox is the switcher: a heading, the cards in rows, the keys.
 func (m emberModel) pickerBox() string {
 	w := max(18, m.width-2)
 	cards, cols, cw := m.switcherCards(), cardCols(w), cardWidth(w)
 	lines := []string{" " + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("sessions") + emberDim.Render(fmt.Sprintf("  %d", len(cards)))}
 	first, rows := m.cardRows()
-	for i := first * cols; i < min(len(cards), (first+rows)*cols); i += cols {
+	for i := first * cols; i < min(m.cardCount(), (first+rows)*cols); i += cols {
 		var row []string
-		for j := i; j < min(i+cols, len(cards)); j++ {
+		for j := i; j < min(i+cols, m.cardCount()); j++ {
+			if j == len(cards) {
+				row = append(row, strings.Join(m.newSessionCard(j == m.chat.pickerSel, cw), "\n"))
+				continue
+			}
 			row = append(row, strings.Join(m.sessionCardView(cards[j], j == m.chat.pickerSel, cw), "\n"))
 		}
 		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, intersperse(row, " ")...))
 	}
-	if m.chat.pickerNew {
+	if m.chat.pickerDestroy != "" {
+		lines = append(lines, emberClip(" "+emberCtxHot.Render("x again destroys "+residentText(m.chat.pickerDestroy)+":")+
+			emberDim.Render(" stops it, cancels its goal, removes the session (its home is kept in removed-sessions)"), w))
+	} else if m.chat.pickerNew {
 		lines = append(lines, emberClip(" "+emberWarn.Render("new session:")+" "+residentText(m.chat.pickerName)+"█"+emberDim.Render("  Enter creates · Esc cancels"), w))
 	} else {
-		lines = append(lines, emberDim.Render(emberClip(" ←↑↓→ choose · Enter or click switches · n new · s stop/start · Esc back", w)))
+		lines = append(lines, emberDim.Render(emberClip(" ←↑↓→ choose · Enter or click switches · n new · x x destroy · s start/stop · Esc back", w)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -219,7 +260,7 @@ func intersperse(xs []string, sep string) []string {
 // cardRows is the first card row shown and how many fit: the rows around the selection, as many as the height holds.
 func (m emberModel) cardRows() (first, rows int) {
 	cols := cardCols(max(18, m.width-2))
-	total := (len(m.switcherCards()) + cols - 1) / cols
+	total := (m.cardCount() + cols - 1) / cols
 	rows = max(1, min(total, (m.height-8)/7))
 	first = max(0, min(m.chat.pickerSel/cols-rows+1, total-rows))
 	return first, rows
@@ -239,7 +280,7 @@ func (m emberModel) cardAt(x, y int) int {
 		return -1
 	}
 	r += first
-	if i := r*cols + c; i < len(m.switcherCards()) {
+	if i := r*cols + c; i < m.cardCount() {
 		return i
 	}
 	return -1

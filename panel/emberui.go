@@ -646,6 +646,13 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.openResident(msg.name)
 		return m, tea.Batch(residentRefresh(m), residentSessions(m))
+	case residentDestroyedMsg:
+		if msg.err != "" {
+			m.msg = "destroy " + residentText(msg.name) + ": " + residentText(msg.err)
+		} else {
+			m.msg = "destroyed " + residentText(msg.name) + "; its home is kept in " + residentText(msg.kept)
+		}
+		return m, residentSessions(m)
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
 	case identityLoadedMsg:
