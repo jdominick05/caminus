@@ -189,9 +189,11 @@ func TestDestroyCancelsEveryLiveGoalThenRemoves(t *testing.T) {
 	if strings.Join(c.active, ",") != "a,b" {
 		t.Fatalf("the live goals are a and b: %v", c.active)
 	}
-	msg := destroyResidentSession(m, "research", c.active)().(residentDestroyedMsg)
+	_ = os.Remove(log)
+	// a card still loading knows no goals: destroy reads them itself
+	msg := destroyResidentSession(m, "research", nil)().(residentDestroyedMsg)
 	calls, _ := os.ReadFile(log)
-	want := "remove research --dry-run --json\ncancel research a --json\ncancel research b --json\nremove research --json\n"
+	want := "remove research --dry-run --json\nstatus research --json\ngithub research status --json\ncancel research a --json\ncancel research b --json\nremove research --json\n"
 	if msg.err != "" || msg.kept != "/k" || !strings.HasSuffix(string(calls), want) {
 		t.Fatalf("dry run, cancel each live goal, then remove: %+v\n%s", msg, calls)
 	}
