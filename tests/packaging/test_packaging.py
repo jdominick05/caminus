@@ -491,8 +491,13 @@ def stage_doctor(S):
     lines = [l for l in out.splitlines() if l[:4] in ('PASS', 'INFO', 'WARN', 'FAIL')]
     check('doctor: the CPU path runs and ends with a RESULT', 'RESULT ' in out and len(lines) > 15, (out + r.stderr)[-400:])
     check('doctor: no HIP initialized by the CPU path', 'HIP_INITIALIZED False' in out, out[-200:])
-    check('doctor: a missing model file is a FAIL with the download hint', r.returncode == 1 and 'RESULT FAIL' in out
-          and any(l.startswith('FAIL') and 'coder-1' in l and 'caminus download' in l for l in lines))
+    check('doctor: a model not downloaded is INFO with the pull hint, not a FAIL (one XT never needs the Coder)',
+          any(l.startswith('INFO') and 'coder-1' in l and 'caminus pull coder' in l for l in lines)
+          and not any(l.startswith('FAIL') and 'models' in l[:16] for l in lines), str([l for l in lines if 'models' in l[:16]])[-300:])
+    chosen = dict(env, CAMINUS_CODER=os.path.join(S, 'no-models', 'mine.gguf'))
+    rc = subprocess.run(cam('doctor'), capture_output=True, text=True, env=chosen, timeout=300)
+    check('doctor: a model path you set that is missing is a FAIL with the download hint', rc.returncode == 1
+          and any(l.startswith('FAIL') and 'coder-1' in l and 'caminus download' in l for l in rc.stdout.splitlines()), rc.stdout[-300:])
     for area in ('python', 'kernels', 'deps', 'gguf', 'torch', 'gpu', 'guard', 'host', 'models', 'disk', 'port', 'config'):
         check(f'doctor: reports {area}', any(l[6:].split()[0] == area for l in lines))
     # what one card runs, by its size (a fake sysfs: nothing reads a real card)

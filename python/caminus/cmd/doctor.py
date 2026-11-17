@@ -261,12 +261,17 @@ def check_models(R, verify):
     paths[1] = ('coder-2', (shard2(c1), 'next to shard 1') if c1 and shard2(c1) else (None, None))
     for key, (p, where) in paths:
         it = models.BY_KEY[key]
-        lvl_missing = 'WARN' if key == 'dflash' else 'FAIL'
+        # a model you have not downloaded is not a fault: a one-XT setup never needs the Coder. A path you set yourself
+        # (CAMINUS_CODER, config.toml) that is missing is one.
+        chosen = where not in ('default', 'next to shard 1') or (key == 'coder-2' and paths[0][1][1] != 'default')
+        lvl_missing = ('WARN' if key == 'dflash' else 'FAIL') if chosen else 'INFO'
         if not p:
             R.add(lvl_missing, 'models', f'{key}: no path'); continue
         if not os.path.isfile(p):
-            R.add(lvl_missing, 'models', f'{key}: {p} ({where}) does not exist: `caminus download`'
-                  + (' (or set CAMINUS_CODER / coder in config.toml)' if key == 'coder-1' else ' (or set CAMINUS_DFLASH; without it: --no-drafter)' if key == 'dflash' else ''))
+            R.add(lvl_missing, 'models', f'{key}: {p} ({where}) does not exist' + (
+                  ': `caminus download`' + (' (or set CAMINUS_CODER / coder in config.toml)' if key == 'coder-1' else
+                                            ' (or set CAMINUS_DFLASH; without it: --no-drafter)' if key == 'dflash' else '')
+                  if chosen else ': not downloaded (`caminus pull coder` when you want the Coder)'))
             continue
         sz = os.path.getsize(p)
         same_name = os.path.basename(p) == os.path.basename(it.path)
