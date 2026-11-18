@@ -190,4 +190,6 @@ the job and the session. Provisioning for agent-user servers: the bind-mount lin
   environment.
 - The resident's `sandbox` tool confines what runs inside it (namespaces, no home, no network unless the call names
   hosts, limits; docs/resident-agent.md "Tools"). The agent chooses when to use it: its terminal stays unconfined.
+  Its `browser` tool runs Chrome in such a box, with the proxy open to public addresses (logged) and closed to the
+  LAN and this machine unless a call names the address.
 - The bridge directory is writable by the agent user; treat request files as untrusted input (they are display-only).

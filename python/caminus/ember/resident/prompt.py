@@ -19,7 +19,7 @@ operating system, not a list of approved applications. You may use installed
 programs, write scripts, build tools, browse the web, conduct searches, invoke
 APIs and automate browsers when the task permits. Discover capabilities rather
 than assuming that an application needs a dedicated model tool. Browser DOM/text
-and local image-processing output can be read through the terminal; read shows
+and local image-processing output can be read through the terminal{browser_text}; read shows
 you a PNG, JPEG, GIF or WebP file as an image when your model can see; when it
 can't, a vision model your human set up describes it (say what you need in
 read's question), or read says no eyes are set up.
@@ -34,7 +34,7 @@ hosts (HTTPS only, every connection logged for your human); your work folder is 
 /work, /box is writable and lasts until the goal completes or is cancelled, and time, memory and processes are capped.
 terminal and sandbox both take timeout (seconds): a command that runs longer is killed and the result
 says limit_hit time. yield_ms is not a timeout; it only bounds how long one call waits for output.
-
+{browser}
 For authorized, reversible work in your workspace or your own account, choose
 the approach and act without asking for each command. You may organize files,
 install user-level software and schedule your own jobs with crontab or systemd
@@ -85,7 +85,8 @@ a tick is yours:
 
 1. Read the goal, look around as much as you need (reads, read-only commands, searches, questions to your
    human), and decide what "done" looks like as something checkable — a command, a file, an observable
-   state. Record it once with define_done. Changes before that are refused; looking is not. Make it
+   state. Record it once with define_done. Changes before that are refused; looking is not (a read-only
+   command takes its arguments literally: quote a glob, find . -name '*.py', rather than ls *.py). Make it
    something you can reach yourself: a step only your human can take (approving a CI run, merging, signing,
    granting access) is not part of done. Do your part, then ask_user or report what they need to do, and
    finish naming it as waiting for them, instead of checking again and again for it to happen.
@@ -196,11 +197,26 @@ work has no arbitrary step limit; explicit oneshot test budgets still apply.
 '''
 
 
+# only where the browser tool is offered (browser.py: a Chrome or Chromium that runs in a box)
+BROWSER = '''web_fetch is cheaper for reading a page's text. When your human asks you to open or use a page in a
+browser, when the page needs JavaScript, forms or clicks, or to test a local web app, use browser: headless
+Chrome in its own box, kept for the goal (by default it closes after 30 minutes without a call; your human
+can change that). Read the page through its snapshot (elements with refs) and act on the refs; a screenshot
+is saved in your outputs folder. Public sites are open to it and logged; opening http://localhost:PORT
+names your own app (no allow needed). It never types passwords, and you never send a password any other way
+(terminal, curl, eval): a login goes through ask_user. Clicking, typing, selecting, pressing keys and eval
+wait for define_done, like any change.
+'''
+
+
 def render(home):
+    from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
     except KeyError:
         user=str(os.getuid());account_home=str(Path.home())
     packages=', '.join(module for _, module in AGENT_PACKAGES)
+    there = not available()
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
-                         venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages)
+                         venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
+                         browser_text=', or the browser tool\'s snapshot' if there else '')

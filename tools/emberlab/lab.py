@@ -14,7 +14,8 @@ Sessions (design with the agent):
   lab.py say NAME TEXT [--goal ID] [--wait S]  a goal (or a steer to goal ID); prints what it did
   lab.py turn NAME [--system]                  driven brain: the request waiting for YOU, the model, to answer
   lab.py reply NAME --call TOOL --args JSON | --text TEXT [--timings JSON]
-  lab.py events NAME [--all] / status NAME / close NAME
+  lab.py events NAME [--all] / status NAME
+  lab.py close NAME                            stop its daemon, job workers (boxes, Chrome) and driven brain; KILLs what ignores TERM
 
 Brains (brains.py): scripted:NAME, driven (you answer each model call; :caminus plays a caminus serve, whose replies carry
 `reply --timings`), openai:URL[#MODEL], openai+relay:URL#MODEL,

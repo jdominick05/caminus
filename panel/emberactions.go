@@ -9,6 +9,7 @@ package main
 // Ctrl+O switches to everything: every card in full, the thinking, every gate run.
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -30,7 +31,7 @@ func toolFamily(name string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(cOrange).Bold(true)
 	case "read", "search", "edit", "write", "checkpoint", "rollback":
 		return lipgloss.NewStyle().Foreground(cPurple).Bold(true)
-	case "web_search", "web_fetch":
+	case "web_search", "web_fetch", "browser":
 		return lipgloss.NewStyle().Foreground(cTeal).Bold(true)
 	case "remember", "history_search", "todo":
 		return lipgloss.NewStyle().Foreground(cBlue).Bold(true)
@@ -224,6 +225,14 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			if t := rs("text"); t != "" {
 				meta = strings.TrimPrefix(meta+fmt.Sprintf(" · %d chars", len(t)), " · ")
 			}
+		}
+	case "browser":
+		subject = browserSubject(args, result)
+		if skipped := rs("skipped"); skipped != "" { // an earlier call of the turn was refused: this one never ran
+			meta, state = "skipped: "+firstLine(skipped), "warn"
+		} else if state == "ok" {
+			meta = browserMeta(result, home, cwd)
+			preview = browserExcerpt(result, 3)
 		}
 	case "remember":
 		if argStr(args, "action") == "tidy" {
@@ -594,6 +603,98 @@ func sandboxConnections(v any) []string {
 			verdict, _ := m["verdict"].(string)
 			out = append(out, residentText(target)+"  "+residentText(verdict))
 		}
+	}
+	return out
+}
+
+// browserSubject is what a browser call did: the result's own line (it names the element: clicked button "Send"),
+// else the action and its target from the arguments.
+func browserSubject(args, result map[string]any) string {
+	if did, _ := result["did"].(string); did != "" {
+		return residentText(did)
+	}
+	switch act := argStr(args, "action"); act {
+	case "open":
+		return "open " + residentText(argStr(args, "url"))
+	case "eval":
+		return "eval " + firstLine(argStr(args, "js"))
+	case "":
+		if _, ok := result["screenshot"]; ok {
+			return "screenshot"
+		}
+		return "page"
+	default: // (a refused type e4 or press x says what it tried)
+		return strings.TrimSpace(act + " " + residentText(argStr(args, "ref", "key", "direction")))
+	}
+}
+
+// browserMeta is where a browser call left the page: its title and address, a screenshot's file, the console's
+// count, eval's value, and how many connections the box refused.
+func browserMeta(result map[string]any, home, cwd string) string {
+	var parts []string
+	if p, _ := result["screenshot"].(string); p != "" {
+		parts = append(parts, "→ "+residentText(shortPath(p, home, cwd)))
+	}
+	if t, _ := result["title"].(string); strings.TrimSpace(t) != "" {
+		parts = append(parts, residentText(firstLine(t)))
+	}
+	if u, _ := result["url"].(string); u != "" {
+		parts = append(parts, residentText(strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")))
+	}
+	if m, ok := result["messages"].([]any); ok {
+		parts = append(parts, plural(len(m), "console message", "console messages"))
+	}
+	if v, ok := result["value"]; ok {
+		raw, _ := json.Marshal(v)
+		parts = append(parts, "= "+firstLine(string(raw)))
+	}
+	if c, _ := result["closed"].(bool); c {
+		parts = append(parts, "closed")
+	}
+	if net, _ := result["network"].(map[string]any); net != nil {
+		if r, _ := net["refused"].([]any); len(r) > 0 {
+			parts = append(parts, fmt.Sprintf("%d refused", len(r)))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// browserExcerpt is a browser card's first n preview lines: the dialogs and notes, then the page's snapshot (or the
+// console's newest messages).
+func browserExcerpt(result map[string]any, n int) []string {
+	var out []string
+	notes, _ := result["notes"].([]any)
+	for _, x := range notes {
+		out = append(out, "! "+residentText(fmt.Sprint(x)))
+	}
+	if snap, _ := result["snapshot"].(string); snap != "" {
+		out = append(out, lines(snap, n)...)
+	}
+	msgs, _ := result["messages"].([]any)
+	for _, x := range msgs {
+		if m, _ := x.(map[string]any); m != nil {
+			out = append(out, residentText(fmt.Sprint(m["level"]))+": "+firstLine(fmt.Sprint(m["text"])))
+		}
+	}
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// browserLines are an open browser card's lines: the notes, the whole snapshot (or console, or eval's value), then
+// every connection the box made or refused for that call (the event's panel field: the model only gets a count).
+func browserLines(result, panel map[string]any) []string {
+	out := browserExcerpt(result, 1<<20)
+	for i, l := range out {
+		out[i] = "  " + l // (a snapshot line's leading "-" is not a removed line)
+	}
+	if v, ok := result["value"]; ok {
+		raw, _ := json.MarshalIndent(v, "", "  ")
+		out = append(out, lines(residentText(string(raw)), 30)...)
+	}
+	for _, c := range sandboxConnections(panel["connections"]) {
+		out = append(out, "connection: "+c)
 	}
 	return out
 }

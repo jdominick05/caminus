@@ -21,11 +21,12 @@ import (
 )
 
 type themeScreen struct {
-	open  bool
-	names []string
-	sel   int
-	was   string            // the saved theme's name (marked "yours")
-	roles map[string]string // the colours in force when the screen opened: Esc restores exactly these
+	open     bool
+	names    []string
+	swatches map[string]string // each theme's strip of colours, drawn when names is read (themeSwatches)
+	sel      int
+	was      string            // the saved theme's name (marked "yours")
+	roles    map[string]string // the colours in force when the screen opened: Esc restores exactly these
 
 	describing bool   // n: typing a description for the brain to write a theme from
 	draft      string // the description typed so far
@@ -194,6 +195,7 @@ func (m emberModel) receiveThemeGen(msg themeGenMsg) emberModel {
 		return m
 	}
 	t.names, t.err = themeNames(), ""
+	t.swatches = themeSwatches(t.names)
 	for i, n := range t.names {
 		if n == name {
 			t.sel = i
@@ -229,7 +231,12 @@ func (m emberModel) openThemes() emberModel {
 	for k, v := range themeCurrent {
 		roles[k] = v
 	}
-	m.chat.themes = themeScreen{open: true, names: names, sel: sel, was: was, roles: roles}
+	m.chat.themes = themeScreen{open: true, names: names, swatches: themeSwatches(names), sel: sel, was: was, roles: roles}
+	// the theme under the cursor in force from the first frame (the saved name can differ from what was showing)
+	if len(names) > 0 && themeLoad(names[sel]) != nil {
+		themeCurrent = roles
+		applyThemeStyles()
+	}
 	m.chat.compose.Blur()
 	return m
 }
@@ -239,16 +246,29 @@ func (m *emberModel) previewTheme(name string) {
 	if themeLoad(name) != nil {
 		return
 	}
-	m.chat.markdown = nil
 	m.chatStyles()
 	if m.chat.themes.open {
-		// the picker covers the history: redrawing all of it on every arrow made the picker lag; it is drawn once,
-		// in the chosen theme, when the picker closes
+		// the picker covers the history: it is drawn once, in the chosen theme, when the picker closes. The markdown
+		// renderer stays too: dropped here, every frame drawn while the picker was open (each arrow, each spinner
+		// tick) made a new one and redrew the whole history through it in View's copy of the model, where the result
+		// was thrown away (117 ms a frame at 2000 events, BenchmarkThemePicker)
 		m.chat.themes.dirty = true
 		return
 	}
+	m.chat.markdown = nil
 	m.chat.content, m.chat.rendered = "", 0
 	m.syncChat()
+}
+
+// closeThemes closes the picker and draws the history once, in the theme now in force (a new markdown renderer: the
+// old one keeps the colours it was built with).
+func (m emberModel) closeThemes() (tea.Model, tea.Cmd) {
+	m.chat.themes = themeScreen{}
+	m.chat.markdown = nil
+	m.chat.content, m.chat.rendered = "", 0
+	m.chatStyles()
+	m.syncChat()
+	return m, m.chat.compose.Focus()
 }
 
 func (m emberModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -307,20 +327,12 @@ func (m emberModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.previewTheme(name)
 		}
-		m.chat.themes = themeScreen{}
-		m.chat.content, m.chat.rendered = "", 0 // (in the theme kept)
-		m.syncChat()
-		return m, m.chat.compose.Focus()
+		return m.closeThemes() // (in the theme kept)
 	case "esc", "q":
 		// back to exactly what was showing (the saved name can differ from it: a theme file edited since, a test)
 		themeCurrent = t.roles
 		applyThemeStyles()
-		m.chat.markdown = nil
-		m.chat.content, m.chat.rendered = "", 0
-		m.chatStyles()
-		m.syncChat()
-		m.chat.themes = themeScreen{}
-		return m, m.chat.compose.Focus()
+		return m.closeThemes()
 	case "ctrl+c":
 		return m, tea.Quit
 	}
@@ -329,30 +341,35 @@ func (m emberModel) themesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func fgTheme(role string) lipgloss.Style { return lipgloss.NewStyle().Foreground(themeColor(role)) }
 
-// themeSwatch is a strip of a theme's colours, read from its file without putting it in force.
-func themeSwatch(name string) string {
+// themeSwatches draws each theme's strip of colours from its file, then puts back the theme in force. They are drawn
+// when the list is read (the screen opens, a written theme joins it), not per frame: every frame loaded every theme
+// file and then the previewed one again.
+func themeSwatches(names []string) map[string]string {
 	saved := themeCurrent
-	defer func() { themeCurrent = saved }()
-	if themeLoad(name) != nil {
-		return ""
+	defer func() { themeCurrent = saved; applyThemeStyles() }()
+	out := make(map[string]string, len(names))
+	for _, name := range names {
+		if themeLoad(name) != nil {
+			continue
+		}
+		var b strings.Builder
+		if bg := themeRole("bg"); bg != "" {
+			b.WriteString(lipgloss.NewStyle().Foreground(themeColor("bg")).Render("▐"))
+		} else {
+			b.WriteString(" ")
+		}
+		for _, role := range []string{"accent", "ok", "warn", "action", "hot", "purple", "user", "teal"} {
+			b.WriteString(lipgloss.NewStyle().Foreground(themeColor(role)).Render("█"))
+		}
+		out[name] = b.String()
 	}
-	var b strings.Builder
-	if bg := themeRole("bg"); bg != "" {
-		b.WriteString(lipgloss.NewStyle().Foreground(themeColor("bg")).Render("▐"))
-	} else {
-		b.WriteString(" ")
-	}
-	for _, role := range []string{"accent", "ok", "warn", "action", "hot", "purple", "user", "teal"} {
-		b.WriteString(lipgloss.NewStyle().Foreground(themeColor(role)).Render("█"))
-	}
-	return b.String()
+	return out
 }
 
 // themesOverlay: the list on the left, the elements in the theme under the cursor on the right.
 func (m emberModel) themesOverlay(w, h int) string {
 	t := m.chat.themes
 	listW := 34
-	// the swatches load each theme's file: put the previewed one back in force afterwards
 	current := t.names[t.sel]
 	var list []string
 	for i, n := range t.names {
@@ -365,11 +382,8 @@ func (m emberModel) themesOverlay(w, h int) string {
 		if n == t.was {
 			name += emberDim.Render(" (yours)")
 		}
-		sw := themeSwatch(n)
-		list = append(list, mark+name+strings.Repeat(" ", max(1, listW-10-ansi.StringWidth(ansi.Strip(mark+name))))+sw)
+		list = append(list, mark+name+strings.Repeat(" ", max(1, listW-10-ansi.StringWidth(ansi.Strip(mark+name))))+t.swatches[n])
 	}
-	_ = themeLoad(current)
-	applyThemeStyles()
 	room := max(3, h-6-4) // (the describe lines under the list take four rows)
 	top := 0
 	if t.sel >= room {
