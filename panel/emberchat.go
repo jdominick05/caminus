@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -35,7 +36,9 @@ type residentChat struct {
 	seq, rendered, renderWidth              int
 	content                                 string
 	markdown                                *glamour.TermRenderer
-	calls                                   map[string]callInfo // each tool call's arguments by id: its result's card names what it acted on
+	cardMarkdown                            *glamour.TermRenderer // an open card's renderer: narrower by its rule's 5 cells
+	mdSource                                bool                  // Ctrl+Y: open cards show Markdown as its source, not rendered
+	calls                                   map[string]callInfo   // each tool call's arguments by id: its result's card names what it acted on
 	question                                *emberReq
 	questionChoice                          int
 	questionCustom                          bool
@@ -479,6 +482,7 @@ func (m *emberModel) syncChat() {
 		// Prose wraps at a reading width, not the terminal's: a 250-column line is hard to read. Tool lines, the
 		// header and the status line still use the full width.
 		m.chat.markdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-4, readingWidth))))
+		m.chat.cardMarkdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(max(10, min(w-7, readingWidth))))
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	// a command first seen running and later seen to end: its card is drawn again with the exit
@@ -506,7 +510,7 @@ func (m *emberModel) syncChat() {
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		// Compact (the default): a card per action between the agent's words; Ctrl+O draws everything.
 		if !m.chat.cards && !m.chat.expanded {
-			block := m.chat.compactBlock(e, w)
+			block := m.chat.drawnBlock(e, w)
 			if e.Kind != "assistant" {
 				m.chat.fold(e) // first: a finished command's "running:" line must not be fixed above its card
 			}
@@ -524,11 +528,11 @@ func (m *emberModel) syncChat() {
 		if e.Kind == "assistant" {
 			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
-		if block := m.chat.eventBlock(e); block != "" {
+		if block := m.chat.drawnBlock(e, w); block != "" {
 			if e.Seq >= 0 { // (the panel's own card, a ! command's, leaves the agent's running line under it)
 				m.chat.flushGroup(w)
 			}
-			m.chat.addBlock(e.Seq, ansi.Wrap(block, w, ""))
+			m.chat.addBlock(e.Seq, block)
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
@@ -1181,8 +1185,13 @@ func (c *residentChat) stopStream() {
 }
 
 func (c *residentChat) renderMarkdown(text string) string {
+	return renderWith(c.markdown, c.renderWidth-4, text)
+}
+
+// renderWith renders Markdown with r at most width cells wide (the replies' renderer, or an open card's).
+func renderWith(r *glamour.TermRenderer, width int, text string) string {
 	text = residentText(text)
-	if c.markdown == nil {
+	if r == nil {
 		return text
 	}
 	// fenced code goes to codePlate (a visible block: plate, language, highlighting); glamour left it as indented
@@ -1190,19 +1199,91 @@ func (c *residentChat) renderMarkdown(text string) string {
 	var parts []string
 	for _, seg := range splitFences(text) {
 		if seg.code {
-			parts = append(parts, codePlate(seg.lang, seg.text, max(10, min(c.renderWidth-4, readingWidth))))
+			parts = append(parts, codePlate(seg.lang, seg.text, max(10, min(width, readingWidth))))
 			continue
 		}
 		if strings.TrimSpace(seg.text) == "" {
 			continue
 		}
-		if rendered, err := c.markdown.Render(seg.text); err == nil {
+		if rendered, err := r.Render(seg.text); err == nil {
 			parts = append(parts, strings.Trim(rendered, "\n"))
 		} else {
 			parts = append(parts, seg.text)
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+var (
+	mdHeadingRe = regexp.MustCompile(`^#{2,6} +\S`)
+	mdTableSep  = regexp.MustCompile(`^\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?$`)
+)
+
+// looksLikeMarkdown is the one rule for when an open card's text is drawn as Markdown: it has two marks. A pipe table
+// (a row starting with | over its |---| separator row) counts two; a closed ``` or ~~~ fence, a heading of level 2 to 6
+// ("## " at a line's start) and two or more quote lines ("> ") one each. A mark counts only at the very start of a line
+// (after the > of a quote), so a diff's context lines, grep -n's "12:## ..." and a script's "# comment" never count,
+// and *, _ or a single heading alone leave ordinary output as it is.
+func looksLikeMarkdown(text string) bool {
+	lns, quotes := strings.Split(text, "\n"), 0
+	for i, ln := range lns {
+		if strings.HasPrefix(ln, "> ") || ln == ">" {
+			quotes++
+		}
+		for strings.HasPrefix(ln, ">") { // a quote's content is Markdown too (a table or a fence inside it)
+			ln = strings.TrimPrefix(ln[1:], " ")
+		}
+		lns[i] = strings.TrimRight(ln, " \r")
+	}
+	table, fenced, heading, fence := false, false, false, ""
+	for i, ln := range lns {
+		f := fenceRe.FindStringSubmatch(ln)
+		switch {
+		case fence != "":
+			if strings.HasPrefix(ln, fence) && strings.Trim(ln, fence[:1]) == "" {
+				fence, fenced = "", true
+			}
+		case f != nil && f[1] == "":
+			fence = f[2]
+		case mdHeadingRe.MatchString(ln):
+			heading = true
+		case strings.HasPrefix(ln, "|") && i+1 < len(lns) && mdTableSep.MatchString(lns[i+1]):
+			table = true
+		}
+	}
+	marks := 0
+	for _, mark := range []bool{table, table, fenced, heading, quotes >= 2} {
+		if mark {
+			marks++
+		}
+	}
+	return marks >= 2
+}
+
+// openCardMarkdown is an open card's text rendered as Markdown to sit behind the card's rule, "" when it is drawn as
+// it is: the source view (Ctrl+Y), text that is not clearly Markdown (looksLikeMarkdown), or more than an open card
+// shows (its last 5000 lines).
+func (c *residentChat) openCardMarkdown(text string) string {
+	if c.mdSource || c.cardMarkdown == nil || strings.Count(text, "\n") >= 5000 || !looksLikeMarkdown(text) {
+		return ""
+	}
+	return renderWith(c.cardMarkdown, c.renderWidth-7, text)
+}
+
+// ruled puts rendered lines behind a card's rule: first before the first line, rest before the others; a line wider
+// than the room left wraps under itself, so nothing passes w.
+func ruled(text, first, rest string, w int) string {
+	var out []string
+	for _, ln := range strings.Split(text, "\n") {
+		for _, piece := range strings.Split(ansi.Hardwrap(ln, max(4, w-ansi.StringWidth(first)), true), "\n") {
+			if len(out) == 0 {
+				out = append(out, first+piece)
+			} else {
+				out = append(out, rest+piece)
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // eventCard frames one event: its label, then its body behind a dim left rule, so the conversation reads as a
@@ -1310,6 +1391,9 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		var body []string
 		if strings.TrimSpace(out) != "" {
 			body = lines(ansi.Strip(out), 5000)
+		}
+		if md := c.openCardMarkdown(cardOutput(e)); md != "" {
+			return toolCard(kind, "$ "+str("command"), meta, str("error") == "", true, nil, w) + "\n" + ruled(md, cardRule(), cardRule(), w)
 		}
 		return toolCard(kind, "$ "+str("command"), meta, str("error") == "", true, body, w)
 	case "goal_queued":
@@ -1469,10 +1553,16 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if hit := limitHit(str("name"), result); hit != "" {
 				meta, code = hit+" · "+meta, 1
 			}
+			var head []string // (a box's own lines, above its output)
 			if str("name") == "sandbox" {
-				body = append(sandboxLines(result), body...)
+				head = sandboxLines(result)
 			}
-			return toolCard("output", residentText(str("name")), meta, code == 0, open, body, w)
+			if md := ""; open {
+				if md = c.openCardMarkdown(cardOutput(e)); md != "" {
+					return toolCard("output", residentText(str("name")), meta, code == 0, true, head, w) + "\n" + ruled(md, cardRule(), cardRule(), w)
+				}
+			}
+			return toolCard("output", residentText(str("name")), meta, code == 0, open, append(head, body...), w)
 		}
 		if str("name") == "finish" {
 			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
@@ -1926,6 +2016,7 @@ func helpLines(width int) []string {
 		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
+		{"Ctrl+Y", "Markdown in open cards: rendered or the source"},
 		{"!  !!", "a command in the agent's account; again: your own shell; its output: a card + your next Enter message"},
 		{"Home  End", "the top or the bottom of the history (with an empty draft)"},
 		{"Ctrl+T", "hold the live view"},
@@ -3185,7 +3276,20 @@ func (m emberModel) toggleLayout() emberModel {
 	all := !(m.chat.cards && m.chat.expanded)
 	m.chat.cards, m.chat.expanded, m.chat.full, m.chat.opened = all, all, all, nil
 	m.msg = map[bool]string{true: "everything · Ctrl+O back to compact", false: "compact · Ctrl+O shows everything"}[all]
-	// keep the place: at the bottom stays at the bottom; scrolled up keeps the same share of the history
+	return m.redrawInPlace()
+}
+
+// toggleMarkdownSource flips how open cards show Markdown text (looksLikeMarkdown): rendered, or its source as it came.
+func (m emberModel) toggleMarkdownSource() emberModel {
+	m.chat.mdSource = !m.chat.mdSource
+	m.msg = map[bool]string{true: "Markdown in open cards: the source · Ctrl+Y renders it",
+		false: "Markdown in open cards: rendered · Ctrl+Y shows the source"}[m.chat.mdSource]
+	return m.redrawInPlace()
+}
+
+// redrawInPlace draws the history again from the start and keeps the place: at the bottom stays at the bottom;
+// scrolled up keeps the same share of the history.
+func (m emberModel) redrawInPlace() emberModel {
 	atBottom := m.chat.transcript.AtBottom()
 	frac := m.chat.transcript.ScrollPercent()
 	m.chat.content, m.chat.rendered = "", 0

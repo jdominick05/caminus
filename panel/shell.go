@@ -220,7 +220,6 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 	if !expanded || len(body) == 0 {
 		return line
 	}
-	rule := lipgloss.NewStyle().Foreground(cGray).Render("│ ")
 	out := []string{line}
 	for _, b := range body {
 		st := emberDim
@@ -232,11 +231,14 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		}
 		// an open card shows everything: long lines wrap under the rule, nothing is cut
 		for _, piece := range strings.Split(ansi.Hardwrap(b, max(4, w-6), true), "\n") {
-			out = append(out, "   "+rule+st.Render(piece))
+			out = append(out, cardRule()+st.Render(piece))
 		}
 	}
 	return strings.Join(out, "\n")
 }
+
+// cardRule is what an open card's body lines sit behind.
+func cardRule() string { return "   " + lipgloss.NewStyle().Foreground(cGray).Render("│ ") }
 
 // approvalCard: a root request or a question, inline where the human is already looking.
 func approvalCard(kind, cmd, why string, w int) string {

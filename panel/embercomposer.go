@@ -7,6 +7,7 @@ package main
 //   Ctrl+X Ctrl+E   the draft in $VISUAL / $EDITOR; it comes back when the editor closes
 //   Ctrl+R          your earlier prompts that contain the draft, newest first; each press goes one further back
 //   Ctrl+O          every line of every open card (cards stop at their last 40 lines otherwise)
+//   Ctrl+Y          an open card's Markdown (looksLikeMarkdown) rendered or as its source
 //   !cmd, !!cmd     runs cmd in the agent's account (!!: your own shell); a card in the chat, and the output goes with your next Enter message
 //   @path           in a message, attaches that file from the agent's account (up to 64 KB), fenced
 //   /NAME args      a custom command: ~/.config/caminus/commands/NAME.md, $ARGUMENTS replaced, sent as a message
@@ -72,6 +73,8 @@ func (m emberModel) composerKey(msg tea.KeyPressMsg) (emberModel, tea.Cmd, bool)
 		return m.historyBack(), nil, true
 	case k == "ctrl+o":
 		return m.toggleLayout(), nil, true
+	case k == "ctrl+y":
+		return m.toggleMarkdownSource(), nil, true
 	}
 	if k != "ctrl+r" {
 		m.chat.histQuery, m.chat.histIdx = "", 0

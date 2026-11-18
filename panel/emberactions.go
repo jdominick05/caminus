@@ -111,13 +111,14 @@ func kOf(n float64) string {
 
 // actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths. open (a
 // click on the card) shows its whole preview: the full command, every output line, hit, result or message line.
-func actionCard(name string, args, result map[string]any, w int, home, cwd string, open bool) string {
+func actionCard(name string, args, result map[string]any, w int, home, cwd string, open bool, md string) string {
 	if args == nil {
 		args = map[string]any{}
 	}
 	rs := func(k string) string { v, _ := result[k].(string); return v }
 	subject, meta := "", ""
 	var preview []string
+	rendered := "" // an open command's output drawn as Markdown, under the preview
 	state := "ok"
 	rows := func(n int) int { // the preview's rows: n folded, everything open (bounded so one card cannot stall the screen)
 		if open {
@@ -176,6 +177,9 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
 				preview = all[max(0, len(all)-rows(3)):]
+				if open && md != "" { // the output rendered as Markdown (actionBlock) replaces its lines
+					preview, rendered = nil, md
+				}
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
 			}
@@ -426,6 +430,13 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			out = append(out, rule+emberDim.Render(part))
 		}
 	}
+	if rendered != "" {
+		first := "  " + emberDim.Render("⎿ ")
+		if len(out) > 1 {
+			first = "    "
+		}
+		out = append(out, ruled(rendered, first, "    ", w))
+	}
 	return strings.Join(out, "\n")
 }
 
@@ -514,7 +525,11 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 			}
 		}
 	}
-	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq])
+	md := ""
+	if c.opened[e.Seq] && (name == "terminal" || name == "sandbox") {
+		md = c.openCardMarkdown(cardOutput(e))
+	}
+	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq], md)
 }
 
 // limitHit names the limit that killed a command or a box ("" when none did).

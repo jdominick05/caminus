@@ -938,6 +938,165 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 }
 
+// cardMarkdownDoc is a Markdown document as a terminal prints it (cat of a notes file): a heading, a quote holding a
+// heading, bold, inline code, a table and a fence, then a fence of its own.
+const cardMarkdownDoc = "### 3.1 The fix: **count every row, keep the format**\n\n" +
+	"> #### The short version\n>\n> **The slice `items[1:]` skips the first row, so `total` is low.**\n>\n" +
+	"> | | rows `n` | total `t` |\n> |---|---|---|\n> | before | **3** | **71.51** |\n> | after | **4** | **93.11** |\n>\n" +
+	"> ```\n> python3 -m unittest -q   # Ran 4 tests in 0.002s\n> ```\n>\n> The `test_inventory.py` run is the **only** check.\n\n" +
+	"```python\ndef total_value(items):\n    return round(sum(qty * price for _, qty, price in items), 2)\n```\n"
+
+// Only text that is clearly Markdown is drawn as Markdown: two marks at line starts (a table counts two). Shell output
+// with *, _ and # comments, a diff or grep of a .md, YAML, a REPL stay as they are.
+func TestLooksLikeMarkdownOnlyForClearMarkdown(t *testing.T) {
+	for _, md := range []string{
+		cardMarkdownDoc,
+		"| model | tok/s |\n|:---|---:|\n| swift | 42 |\n",             // a table alone (a tool printing one)
+		"## Build\n\nRun it:\n\n```sh\nmake\n```\n",                    // a heading and a fence
+		"## Notes\n> one\n> two\n",                                     // a heading and quote lines
+		"> ## quoted heading\n> | a | b |\n> |---|---|\n> | 1 | 2 |\n", // marks inside a quote
+	} {
+		if !looksLikeMarkdown(md) {
+			t.Errorf("not taken as Markdown:\n%s", md)
+		}
+	}
+	for _, raw := range []string{
+		"#!/bin/sh\n# build everything\n## step 1\nmake -j8 *.o\n## step 2\nrm -f __pycache__/*.pyc\n", // a script's comments
+		"--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n ## Install\n-| a | b |\n+| a | c |\n |---|---|\n ```\n ```\n",
+		"README.md:3:## Install\nREADME.md:9:| a | b |\nREADME.md:10:|---|---|\n",
+		"name: build\non: [push]\njobs:\n  test:\n    # the CPU suites\n    runs-on: ubuntu-latest\n",
+		">>> print('**bold**')\n**bold**\n>>> 2 * 3\n6\n",
+		"## Results\ntotal_value: **93.11** (was _71.51_)\n* 4 tests passed\n",
+		"FAILED (failures=1)\n# 3 of 4\n> not a quote? \n",
+	} {
+		if looksLikeMarkdown(raw) {
+			t.Errorf("ordinary output taken as Markdown:\n%s", raw)
+		}
+	}
+}
+
+// markdownCardChat: a terminal call whose output is cardMarkdownDoc, then one whose output is shell text with *, _
+// and #, in the everything view (Ctrl+O).
+func markdownCardChat(t *testing.T, w, h int) emberModel {
+	t.Helper()
+	m := chatFixture(t)
+	m.width, m.height = w, h
+	m.chat.cards, m.chat.expanded, m.chat.full = true, true, true
+	call := func(id, cmd string) map[string]any {
+		return map[string]any{"tool_calls": []any{map[string]any{"id": id, "type": "function",
+			"function": map[string]any{"name": "terminal", "arguments": `{"command": "` + cmd + `"}`}}}}
+	}
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 2, Goal: "original", Kind: "assistant", Data: call("c1", "cat NOTES.md")},
+		residentEvent{Seq: 3, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c1",
+			"result": map[string]any{"exit_code": 0.0, "output": cardMarkdownDoc}}},
+		residentEvent{Seq: 4, Goal: "original", Kind: "assistant", Data: call("c2", "make")},
+		residentEvent{Seq: 5, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c2",
+			"result": map[string]any{"exit_code": 0.0, "output": "# build\n## step 1\ncc -o *.o __init__.c\n"}}})
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	return m
+}
+
+// compactView switches m to the compact view with the Markdown card (Seq 3) opened by a click.
+func compactView(m emberModel) emberModel {
+	m.chat.cards, m.chat.expanded, m.chat.full = false, false, false
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	return m.toggleCard(3)
+}
+
+// An open card whose output is Markdown draws it rendered (heading, quote, table, fences, bold and code without their
+// marks), within the transcript's width at every width, in both views; shell output beside it stays as it is; Ctrl+Y
+// shows the source and back.
+func TestAnOpenMarkdownCardRendersAndCtrlYShowsItsSource(t *testing.T) {
+	for _, w := range []int{40, 60, 90, 160} {
+		for _, view := range []string{"everything", "compact"} {
+			m := markdownCardChat(t, w, 80)
+			if view == "compact" {
+				m = compactView(m)
+			}
+			plain := ansi.Strip(m.chat.content)
+			for _, want := range []string{"The short version", "items[1:]", "93.11", "unittest", "def total_value(items):",
+				"# build\n", "## step 1", "cc -o *.o __init__.c"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("%s at %d: want %q in the open cards:\n%s", view, w, want, plain)
+				}
+			}
+			for _, mark := range []string{"### 3.1", "**", "|---|", "> |", "`items", "#### The short", "```"} {
+				if strings.Contains(plain, mark) {
+					t.Fatalf("%s at %d: the rendered card still shows %q:\n%s", view, w, mark, plain)
+				}
+			}
+			if w >= 90 && (!strings.Contains(plain, "3.1 The fix: count every row, keep the format") || !strings.Contains(plain, "│ 93.11")) {
+				t.Fatalf("%s at %d: the heading and the table are drawn:\n%s", view, w, plain)
+			}
+			tw := m.transcriptWidth(max(20, m.width))
+			for _, ln := range strings.Split(m.chat.content, "\n") {
+				if ansi.StringWidth(ln) > tw {
+					t.Fatalf("%s at %d: a card line passes the transcript's %d cells (%d): %q", view, w, tw, ansi.StringWidth(ln), ansi.Strip(ln))
+				}
+			}
+		}
+	}
+	m := markdownCardChat(t, 90, 60)
+	// the output is sanitised before it is rendered: a program's escape sequences and control bytes never reach the screen
+	if out := m.chat.openCardMarkdown(cardOutput(residentEvent{Kind: "shell", Data: map[string]any{
+		"output": cardMarkdownDoc + "\x1b]52;c;cHduZWQ=\x07 \x1b]2;title\x07 \u009b2J \x00 \x1b[2J"}})); out == "" ||
+		strings.ContainsAny(out, "\x07\x00\u009b") || strings.Contains(out, "\x1b]") || strings.Contains(out, "\x1b[2J") {
+		t.Fatalf("the rendered output carries the program's control sequences: %q", out)
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	m = next.(emberModel)
+	plain := ansi.Strip(m.chat.content)
+	if !strings.Contains(plain, "### 3.1 The fix: **count every row, keep the format**") || !strings.Contains(plain, "> |---|---|---|") ||
+		!strings.Contains(m.msg, "source") {
+		t.Fatalf("Ctrl+Y shows the source (msg %q):\n%s", m.msg, plain)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	if m = next.(emberModel); strings.Contains(ansi.Strip(m.chat.content), "### 3.1") {
+		t.Fatal("a second Ctrl+Y renders it again")
+	}
+}
+
+// In the compact view a folded card is as it was (its last lines, raw), whichever way Ctrl+Y is set.
+func TestAFoldedMarkdownCardStaysAsItWas(t *testing.T) {
+	m := markdownCardChat(t, 90, 60)
+	m.chat.cards, m.chat.expanded, m.chat.full = false, false, false
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	folded := m.chat.content
+	if !strings.Contains(ansi.Strip(folded), "    return round(sum(qty * price for _, qty, price in items), 2)\n    ```") {
+		t.Fatalf("the folded card previews its last lines as they are:\n%s", ansi.Strip(folded))
+	}
+	src := m
+	src.chat.mdSource = true
+	src.chat.content, src.chat.rendered = "", 0
+	src.syncChat()
+	if src.chat.content != folded {
+		t.Fatal("a folded card changed with the Markdown view")
+	}
+}
+
+// A drag over a rendered card copies its Markdown source, not the drawn table and rules; text around it as drawn. In
+// both views (their heads and rules differ).
+func TestCopyingARenderedMarkdownCardGivesItsSource(t *testing.T) {
+	for _, view := range []string{"everything", "compact"} {
+		m, head := markdownCardChat(t, 90, 80), "output  terminal"
+		if view == "compact" {
+			m, head = compactView(m), "terminal  $ cat NOTES.md"
+		}
+		m.chat.transcript.GotoTop()
+		_, got := dragOver(t, m, head, "cc -o *.o __init__.c")
+		if !strings.Contains(got, strings.TrimRight(cardMarkdownDoc, "\n")) {
+			t.Fatalf("%s: the copy is not the card's source:\n%s", view, got)
+		}
+		if !strings.Contains(got, head) || !strings.Contains(got, "cc -o *.o __init__.c") || strings.Contains(got, "│ 93.11") {
+			t.Fatalf("%s: the copy keeps the heads and the raw card as drawn, the rendered body as its source:\n%s", view, got)
+		}
+	}
+}
+
 // A table's header and cells read in the body's text colour in every built-in theme, and that colour reads on the
 // theme's background (WCAG AA, 4.5:1): they were in the chrome grey, barely visible on a dark background.
 func TestMarkdownTablesUseTheBodyTextColourInEveryTheme(t *testing.T) {

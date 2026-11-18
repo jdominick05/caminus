@@ -202,7 +202,8 @@ the jump-to-newest pill. Taking the mouse turns the terminal's own selection off
   (tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the
   button copies the plain text to the clipboard (wl-copy on Wayland, xclip or xsel on X11, and OSC 52 for terminals that
   take it, such as a remote session). The copy has no colours or styling; its lines break where the screen breaks them.
-  The status line says how many lines it copied.
+  The status line says how many lines it copied. An open card drawn as Markdown (Ctrl+Y, docs/resident-agent.md) is
+  copied as its source, whole, whatever part of its body the drag covers: the rendered table and rules are not text.
 - **One area at a time.** A drag selects inside the area it began in, so the conversation never picks up the side pane
   beside it and the other way round. In the conversation, dragging past its top or bottom scrolls and keeps
   selecting. A box's border (the composer's, a dialog's, between the picker's cards) is left out of the copy; a │ or ─
