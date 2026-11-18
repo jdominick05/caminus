@@ -22,7 +22,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   `caminus`.
 - **Agent side** (`python/caminus/ember/resident/`): the resident. Shipped as a zipapp holding only this package, so it
   imports nothing outside it and the standard library (a test fails if it does). Runs as `caminus-agent`.
-- **The panel** (`panel/env*.go`): the chat. It talks to the resident only through `caminus ember agent ...` over SSH
+- **The panel** (`panel/ember*.go`): the chat. It talks to the resident only through `caminus ember agent ...` over SSH
   (status, a streamed event feed, actions) and to the bridge for root requests.
 
 ## Module map
@@ -30,17 +30,17 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | Owner side | |
 |---|---|
 | `cmd/ember.py` | every `caminus ember` subcommand: setup, status, run / shell, the bridge (reqs, answer, watch), jobs, sessions, stop-all |
-| `env/provision.py` | the root setup script (safe to rerun, checks itself) |
+| `ember/provision.py` | the root setup script (safe to rerun, checks itself) |
 | `agent_side.py` | what setup puts in the agent's account without root: ask-root, env-ask, its venv (the package set is `resident/discovery.py` `AGENT_PACKAGES`, which the prompt names too) |
-| `env/runner.py` | the SSH transport: one ControlMaster connection to `caminus-agent@127.0.0.1` |
-| `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
-| `env/audit.py` | the owner's audit log (one JSON object per line) |
-| `env/agent_host.py` | builds the zipapp and addresses the resident over SSH (`caminus ember agent ...`) |
-| `env/relay.py` | the spend-capped key relay (anthropic, deepinfra, mistral, meta, opencode-go), its ledger priced by `resident/model.py`'s `row_cost` (an OpenCode reply's own `usage.cost` where it gives one, the Go allowance kept beside it); `relay install` runs a frozen copy of its code as a user service |
-| `env/jobs.py`, `sessions.py`, `serve.py`, `ctx.py` | detached jobs, tmux sessions, model servers and context budgets in the agent's account |
-| `env/prompt.py`, `share/harness/ember/ROBOTS.md` | the account's instructions (`~/ROBOTS.md`) |
+| `ember/runner.py` | the SSH transport: one ControlMaster connection to `caminus-agent@127.0.0.1` |
+| `ember/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
+| `ember/audit.py` | the owner's audit log (one JSON object per line) |
+| `ember/agent_host.py` | builds the zipapp and addresses the resident over SSH (`caminus ember agent ...`) |
+| `ember/relay.py` | the spend-capped key relay (anthropic, deepinfra, mistral, meta, opencode-go), its ledger priced by `resident/model.py`'s `row_cost` (an OpenCode reply's own `usage.cost` where it gives one, the Go allowance kept beside it); `relay install` runs a frozen copy of its code as a user service |
+| `ember/jobs.py`, `sessions.py`, `serve.py`, `ctx.py` | detached jobs, tmux sessions, model servers and context budgets in the agent's account |
+| `ember/prompt.py`, `share/harness/ember/ROBOTS.md` | the account's instructions (`~/ROBOTS.md`) |
 
-| Agent side (`env/resident/`) | |
+| Agent side (`ember/resident/`) | |
 |---|---|
 | `runtime.py` | the loop: ticks, tool dispatch, the per-turn gate, compaction, the watchdog, updates |
 | `store.py` | SQLite: goals, the conversation, actions, the inbox, the event stream the panel reads |
@@ -53,17 +53,17 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `browser.py` | the `browser` tool: Chrome in the goal's box as a box job (`request.json` `browser`; the box proxy in its web mode, Chrome's install folder bound read-only, no time limit, no address-space rlimit), its `Driver` thread in the worker on the DevTools pipe (fd 3 / 4: requests by id, a reader thread for every event: console, dialogs, new tabs, loads), the actions handed over through the job's `control/` and `ack/` files by action id, the accessibility-tree snapshot and its refs, the password refusal, screenshots in `outputs/GOAL/` and the downloads copied there at goal end (`keep`, from `sandbox.end`), and finding a Chrome that is not a snap (the tool is hidden without one). Every connection rides on the tool_result event's `panel` field, not in the model's result |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
-| `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
+| `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `caminus ember agent export`, spilling big outputs to files |
 | `cli.py` | the entry point every mode uses (`once`, `run`, `send`, `status`, `stream`, ...) |
 
 | Panel (`panel/`) | |
 |---|---|
-| `envui.go` | the program: flags, the model, update routing, the window title |
-| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, with the reasoning's last lines until its words start; else the thoughts box under it), the side panel (tasks, now), the task / now line |
+| `emberui.go` | the program: flags, the model, update routing, the window title |
+| `emberchat.go`, `embergroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, with the reasoning's last lines until its words start; else the thoughts box under it), the side panel (tasks, now), the task / now line |
 | `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
-| `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
-| `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
-| `envgoals.go`, `envmodels.go`, `envsessions.go`, `envstudio.go`, `envpages.go` | the overlays |
+| `emberquestion.go`, `emberbridge.go`, `emberroot.go` | approval cards and the overlay, questions, the root bridge and grants |
+| `emberresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
+| `embergoals.go`, `embermodels.go`, `embersessions.go`, `emberstudio.go`, `emberpages.go` | the overlays |
 
 ## Rules a change must keep
 
@@ -71,9 +71,8 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 - The agent never holds root or a key: root goes through the bridge and runs under the owner's sudo; paid brains go
   through the owner's relay.
 - Nothing waits on the human: a question times out to the advisor's pick or the recommended option, a permission or
-  root request to no. A question waits longer while the human is away (the panel's `presence.json` stamp,
-  `approval.wait_left`, mirrored by `questionLeft` in `panel/emberquestion.go`), never past `question_away_max`; a
-  root request never does.
+  root request to no ([the rules](../resident-agent.md#when-you-are-away); the panel mirrors `approval.wait_left` in
+  `questionLeft`, `panel/emberquestion.go`).
 - The prompt says what the runtime does. When you change a refusal, a limit or a guard, change `resident/prompt.py`
   (and the docs) in the same commit.
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is
@@ -137,7 +136,7 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
 - `tests/ember/test_setup_e2e.py`: setup from a clean account to the first reply against a stub brain, through the real
   SSH path. It creates a Unix account with sudo, so it runs only with passwordless sudo and `CAMINUS_E2E_ROOT=1` (CI);
   anywhere else it prints SKIP.
-- `panel/env*_test.go`: frames at fixed sizes (they must fit the terminal), keys, overlays, the side panel, selection.
+- `panel/ember*_test.go`: frames at fixed sizes (they must fit the terminal), keys, overlays, the side panel, selection.
   The panel never sends desktop notifications from a test binary.
 - A live change: `caminus ember agent install` then `caminus ember agent update NAME` installs this checkout's runtime
   into a running resident between goals (`--now` at the next step); its heartbeat names the runtime it runs.
