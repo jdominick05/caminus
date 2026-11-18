@@ -7,7 +7,7 @@ package main
 //   Ctrl+X Ctrl+E   the draft in $VISUAL / $EDITOR; it comes back when the editor closes
 //   Ctrl+R          your earlier prompts that contain the draft, newest first; each press goes one further back
 //   Ctrl+O          every line of every open card (cards stop at their last 40 lines otherwise)
-//   !cmd, !!cmd     runs cmd in the agent's account (!!: your own shell); the command and its output show in the chat
+//   !cmd, !!cmd     runs cmd in the agent's account (!!: your own shell); a card in the chat, and the output goes with your next message
 //   @path           in a message, attaches that file from the agent's account (up to 64 KB), fenced
 //   /NAME args      a custom command: ~/.config/caminus/commands/NAME.md, $ARGUMENTS replaced, sent as a message
 
@@ -250,8 +250,9 @@ func runBang(m emberModel, cmd string) tea.Cmd {
 }
 
 // bangDone puts the command and its output in the chat as its own card (eventBlock's "shell"), at the bottom where
-// it can be read, and leaves the draft alone. It is the panel's own event (a Seq below 0, never the resident's): the
-// agent does not see it, and it lasts as long as this chat's history (a new session or a restart starts without it).
+// it can be read, and leaves the draft alone. The card is the panel's own event (a Seq below 0, never the
+// resident's) and lasts as long as this chat's history; what reaches the agent is the same output, queued to go with
+// your next message (shellAttachment; sendCompose sends it, Esc on an empty composer drops it).
 func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
 	m.chat.localSeq--
 	data := map[string]any{"command": msg.cmd, "output": msg.output, "host": msg.host}
@@ -260,10 +261,52 @@ func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
 	}
 	m.residentEvents = append(m.residentEvents, residentEvent{Seq: m.chat.localSeq, Ts: float64(time.Now().Unix()),
 		Goal: m.chat.target, Kind: "shell", Data: data})
+	m.chat.shellQueue = append(m.chat.shellQueue, shellAttachment(msg))
 	m.msg = ""
 	m.syncChat()
 	m.chat.transcript.GotoBottom()
 	return m
+}
+
+// The most of one command's output that goes with a message: its last lines, so a long build log cannot fill the
+// agent's context (the card in the chat keeps the whole output).
+const shellAttachLines, shellAttachBytes = 200, 16 * 1024
+
+// shellAttachment is a command's output as it goes with your next message: marked as a command you ran (in your own
+// shell for !!, so the agent never takes it for its own account's), fenced, its tail when it is long, saying so.
+func shellAttachment(msg bangDoneMsg) string {
+	head := "output of `! " + msg.cmd + "` you ran in the agent's account:"
+	if msg.host {
+		head = "output of `!! " + msg.cmd + "` you ran in your own shell on this machine (not the agent's account):"
+	}
+	out := strings.TrimRight(msg.output, "\n")
+	all := strings.Split(out, "\n")
+	cut := 0
+	if len(all) > shellAttachLines {
+		cut, all = len(all)-shellAttachLines, all[len(all)-shellAttachLines:]
+	}
+	out = strings.Join(all, "\n")
+	chopped := false
+	for len(out) > shellAttachBytes { // whole lines off the front until it fits (a huge last line is cut by bytes)
+		i := strings.IndexByte(out, '\n')
+		if i < 0 || len(out)-i-1 < shellAttachBytes/2 {
+			out, chopped = "…"+strings.ToValidUTF8(out[len(out)-shellAttachBytes:], ""), true
+			break
+		}
+		out, cut = out[i+1:], cut+1
+	}
+	if cut > 0 || chopped {
+		head += fmt.Sprintf(" (cut to its last %d lines or %d KB", shellAttachLines, shellAttachBytes/1024)
+		if cut > 0 {
+			head += ": the first " + plural(cut, "line", "lines") + " left out"
+		}
+		head += ")"
+	}
+	block := head + "\n" + fenced("$ "+msg.cmd+"\n"+out, "")
+	if msg.err != "" {
+		block += "\n(" + msg.err + ")"
+	}
+	return block
 }
 
 // expandAttachments: each +path's file (read as the agent, at most 64 KB, at most 8, never "..") goes with the message,

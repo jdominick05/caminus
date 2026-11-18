@@ -146,6 +146,83 @@ func TestAShellCommandsOutputGoesToTheChat(t *testing.T) {
 	}
 }
 
+func TestShellOutputsGoWithTheNextMessage(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 30
+	m.chat.target, m.chat.newGoal = "original", false
+	dir := t.TempDir()
+	sent := filepath.Join(dir, "sent")
+	script := filepath.Join(dir, "fake-caminus")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat > "+sent+"\necho '{\"id\":\"original\"}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.cli = []string{script}
+	m = m.bangDone(bangDoneMsg{cmd: "ls work", output: "a.py\n+b.py"}) // (a +path in the output is never attached)
+	m = m.bangDone(bangDoneMsg{cmd: "uname", output: "Linux", host: true, err: "exit status 1"})
+	if got := ansi.Strip(m.chatComposer()); !strings.Contains(got, "+2 shell outputs attached (Esc drops)") {
+		t.Fatalf("the composer says what goes with the next message:\n%s", got)
+	}
+	next, cmd := m.sendCompose("what do you make of these?")
+	m = next.(emberModel)
+	res := cmd().(residentComposeResult)
+	body, _ := os.ReadFile(sent)
+	text := string(body)
+	ls, un := strings.Index(text, "output of `! ls work` you ran in the agent's account:\n```\n$ ls work\na.py\n+b.py\n```"),
+		strings.Index(text, "output of `!! uname` you ran in your own shell on this machine (not the agent's account):\n```\n$ uname\nLinux\n```\n(exit status 1)")
+	if res.err != "" || !strings.HasPrefix(text, "what do you make of these?\n\n") || ls < 0 || un < ls {
+		t.Fatalf("your words, then each output in the order run, marked and fenced (err %q):\n%s", res.err, text)
+	}
+	m = m.bangDone(bangDoneMsg{cmd: "date", output: "today"}) // (run while the message was on its way)
+	next, _ = m.finishCompose(res)
+	if m = next.(emberModel); len(m.chat.shellQueue) != 1 || !strings.Contains(m.chat.shellQueue[0], "`! date`") {
+		t.Fatalf("delivered: the outputs it carried leave the queue, a later one waits (%d)", len(m.chat.shellQueue))
+	}
+	if !strings.Contains(ansi.Strip(m.chatComposer()), "+1 shell output attached") {
+		t.Fatal("the marker counts what still waits")
+	}
+	m.chat.compose.SetValue("a draft")
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m = next.(emberModel); len(m.chat.shellQueue) != 1 {
+		t.Fatal("Esc with a draft keeps the queue")
+	}
+	m.chat.compose.Reset()
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m = next.(emberModel); len(m.chat.shellQueue) != 0 || !strings.Contains(m.msg, "dropped") ||
+		strings.Contains(ansi.Strip(m.chatComposer()), "attached") || !strings.Contains(ansi.Strip(m.chat.content), "$ date") {
+		t.Fatalf("Esc on an empty composer drops the queue, the cards stay (msg %q)", m.msg)
+	}
+	if next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape}); !strings.Contains(m.msg, "Esc again interrupts") ||
+		cmd == nil || next.(emberModel).msg != "interrupting the turn…" {
+		t.Fatal("with the goal working, the next Esc interrupts the turn as before")
+	}
+	_, cmd = m.sendCompose("and now?")
+	if res := cmd().(residentComposeResult); res.shells != 0 {
+		t.Fatal("nothing attached after the drop")
+	}
+	if body, _ := os.ReadFile(sent); string(body) != "and now?" {
+		t.Fatalf("the next message goes alone: %q", body)
+	}
+}
+
+func TestALongShellOutputIsCutToItsTail(t *testing.T) {
+	var long []string
+	for i := 1; i <= 500; i++ {
+		long = append(long, fmt.Sprintf("line %d", i))
+	}
+	got := shellAttachment(bangDoneMsg{cmd: "make", output: strings.Join(long, "\n")})
+	if !strings.Contains(got, "(cut to its last 200 lines or 16 KB: the first 300 lines left out)") ||
+		strings.Contains(got, "line 300\n") || !strings.Contains(got, "line 301\n") || !strings.Contains(got, "line 500\n```") {
+		t.Fatalf("its last 200 lines, saying so:\n%.300s", got)
+	}
+	wide := shellAttachment(bangDoneMsg{cmd: "cat log", output: strings.Repeat(strings.Repeat("x", 199)+"\n", 150)})
+	if len(wide) > shellAttachBytes+500 || !strings.Contains(wide, "lines left out") {
+		t.Fatalf("at most 16 KB, whole lines first (%d bytes)", len(wide))
+	}
+	if short := shellAttachment(bangDoneMsg{cmd: "ls", output: "a"}); strings.Contains(short, "cut") {
+		t.Fatalf("a short output goes whole: %q", short)
+	}
+}
+
 func TestCtrlCAndCtrlNKeepTheDraftAndEscGoesBack(t *testing.T) {
 	m := chatFixture(t)
 	m.chat.target, m.chat.newGoal = "original", false

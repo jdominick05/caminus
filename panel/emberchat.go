@@ -50,6 +50,7 @@ type residentChat struct {
 	pickerSel                               int
 	hostShell                               bool               // shell mode runs in your own shell on this machine (!!), not the agent's
 	localSeq                                int                // the panel's own events (a ! command's card) count down from -1
+	shellQueue                              []string           // the ! / !! outputs that go with your next message, in order (bangDone)
 	prevTarget                              string             // the goal before Ctrl+N or /new (Esc goes back to it)
 	goalsFollow                             string             // the goal the overlay's selection follows after a move
 	pickedGoal                              string             // the goal picked by hand in the overlay (no refresh moves off it)
@@ -198,6 +199,7 @@ type residentComposeResult struct {
 	agent, id, err string
 	note           string // the resident's remark on delivery (a stopped agent: it starts the goal at /start)
 	epoch          uint64
+	shells         int // the queued shell outputs that went with the message (delivered: they leave the queue)
 }
 
 func (m *emberModel) initChat() {
@@ -1674,6 +1676,9 @@ func (m emberModel) composerTitle() string {
 			title = "continue goal " + shortGoal(m.chat.target)
 		}
 	}
+	if n := len(m.chat.shellQueue); n > 0 && !m.chat.shell {
+		title += " · +" + plural(n, "shell output", "shell outputs") + " attached (Esc drops)"
+	}
 	return title
 }
 
@@ -1893,7 +1898,7 @@ func helpLines(width int) []string {
 		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
-		{"!  !!", "a command in the agent's account; again: your own shell; the output shows in the chat"},
+		{"!  !!", "a command in the agent's account; again: your own shell; its output: a card + your next message"},
 		{"Home  End", "the top or the bottom of the history (with an empty draft)"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
@@ -2456,6 +2461,16 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.msg = "back to goal " + shortGoal(m.chat.target)
 			return m, nil
 		}
+		// Esc on an empty composer drops the ! outputs waiting to go with your next message (the composer's title says
+		// "Esc drops"); with none waiting, or the next Esc, it interrupts as below
+		if len(m.chat.shellQueue) > 0 && strings.TrimSpace(m.chat.compose.Value()) == "" {
+			m.msg = plural(len(m.chat.shellQueue), "shell output", "shell outputs") + " dropped: not sent with your next message (the cards stay)"
+			if m.interruptibleGoal() != "" {
+				m.msg += " · Esc again interrupts the turn"
+			}
+			m.chat.shellQueue = nil
+			return m, nil
+		}
 		if goal := m.interruptibleGoal(); goal != "" {
 			m.msg = "interrupting the turn…"
 			return m, interruptTurn(m, goal)
@@ -2589,6 +2604,7 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		args = append(args, "--goal-id", m.chat.target, "--continue")
 	}
 	name, epoch := m.agentName, m.residentEpoch
+	shells := slices.Clone(m.chat.shellQueue) // the ! outputs since the last message go with this one, after your words
 	m.chat.sending = true
 	return m, func() tea.Msg {
 		if strings.ContainsAny(text, "@+") { // (it checked only "@": a message with only +path attached nothing)
@@ -2597,6 +2613,9 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 			if len(problems) > 0 {                             // nothing is sent; the draft stays to fix
 				return residentComposeResult{agent: name, epoch: epoch, err: "not sent: " + strings.Join(problems, " · ")}
 			}
+		}
+		if len(shells) > 0 { // (after the +path expansion: a path in a command's output is not attached)
+			text = strings.TrimRight(text, "\n") + "\n\n" + strings.Join(shells, "\n\n")
 		}
 		out, err := runResident(residentCommand(m, args, text))
 		if err != nil {
@@ -2609,7 +2628,7 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		if err = json.Unmarshal(out, &reply); err != nil || reply.ID == "" {
 			return residentComposeResult{agent: name, epoch: epoch, err: "Unrecognized delivery response; draft retained. Inspect /goals before retrying."}
 		}
-		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID, note: reply.Note}
+		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID, note: reply.Note, shells: len(shells)}
 	}
 }
 
@@ -2623,6 +2642,7 @@ func (m emberModel) finishCompose(msg residentComposeResult) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	m.chat.compose.Reset()
+	m.chat.shellQueue = m.chat.shellQueue[min(msg.shells, len(m.chat.shellQueue)):] // (one run while it was sent waits)
 	m.chat.forceNew = false
 	m.chat.target, m.chat.selectID, m.chat.newGoal = msg.id, msg.id, false
 	m.msg = "Delivered to goal " + shortGoal(msg.id)
