@@ -14,6 +14,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from . import catalog
 from .terminal import alive, read_state
 
 WAIT_MAX = 1800           # seconds one wait may block
@@ -180,7 +181,7 @@ def _servers(ports=range(8092, 8102)):
         try:
             with urllib.request.urlopen(f'http://127.0.0.1:{port}/props', timeout=2) as r:
                 props = json.loads(r.read(65536))
-            entry.update(model=props.get('model_alias') or props.get('model'), n_ctx=props.get('n_ctx'))
+            entry.update(model=props.get('model_alias') or props.get('model'), n_ctx=catalog.props_window(props))
         except Exception as e:                           # a loading or foreign server: say what it answered
             entry['answer'] = type(e).__name__
         out.append(entry)

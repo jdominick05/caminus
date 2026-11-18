@@ -661,6 +661,32 @@ func TestContextLevelAndTokenCounts(t *testing.T) {
 	}
 }
 
+// A brain whose server reports no window (status context null): the footer shows the tokens in use alone with an
+// empty bar, never "31K/0", and the context tab says the window is unknown instead of counting tokens against 0.
+func TestAnUnknownWindowShowsTheTokensInUseWithoutSlashZero(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 160
+	m.resident.Context, m.resident.ContextUsed = 0, 31_000
+	foot := ansi.Strip(m.chatFoot(m.width))
+	if !strings.Contains(foot, "31K") || strings.Contains(foot, "31K/") || strings.Contains(foot, "/0") {
+		t.Fatalf("an unknown window shows 31K alone:\n%s", foot)
+	}
+	if !strings.Contains(foot, "31K "+strings.Repeat(g.barEmpty, 8)) {
+		t.Fatalf("and an empty bar beside it:\n%s", foot)
+	}
+	pane := ansi.Strip(m.contextPane())
+	if !strings.Contains(pane, "unknown") || !strings.Contains(pane, "31K, measured") || strings.Contains(pane, "(0)") {
+		t.Fatalf("the context tab names the window unknown and counts nothing against 0:\n%s", pane)
+	}
+	if pane := ansi.Strip(m.residentSettingsPane()); !strings.Contains(pane, "unknown") || strings.Contains(pane, "0 tokens") {
+		t.Fatalf("the settings tab names the window unknown:\n%s", pane)
+	}
+	m.resident.Context = 1_048_574
+	if foot := ansi.Strip(m.chatFoot(m.width)); !strings.Contains(foot, "31K/1M") {
+		t.Fatalf("a known window is shown as before:\n%s", foot)
+	}
+}
+
 // The measured bar lands in the live footer, warning color included, without
 // pushing the frame past its width.
 func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {

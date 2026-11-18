@@ -2297,6 +2297,59 @@ for line in sys.stdin:
         got=json.loads((self.home.parent/down/'config.json').read_text())
         self.assertEqual((got['model'],got.get('model_variants')),('coder',None))
 
+    def test_a_local_session_without_a_window_reports_its_servers_n_ctx(self):
+        # the owner's footer read "31K/0": a session on the local Coder (create --model drops the paid sibling's window,
+        # init without --context stores none) had status context null while the server's /props said n_ctx 1048574
+        self.serve_ids(self.CODER_IDS)
+        Endpoint.props[self.key].update(n_ctx=1048574,default_generation_settings=dict(n_ctx=1048574))
+        self.assertIsNone(json.loads((self.home/'config.json').read_text()).get('context'),'init without --context')
+        self.assertEqual(self.cmd('status')['context'],1048574)
+        # the switcher's path: a session made from a paid sibling (a 1M window of its own) with a local brain
+        paid='paid-'+uuid.uuid4().hex[:8]
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['create',paid,'--from',self.home.name,'--home',str(self.home.parent/paid),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        cfg=json.loads((self.home.parent/paid/'config.json').read_text())
+        cfg.update(model='deepseek-v4',relay=True,context=1048576,provider='deepinfra')
+        (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        new='local-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        made=subprocess.run(base+['create',new,'--from',paid,'--model','coder','--endpoint',url,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        self.assertNotIn('context',json.loads((home/'config.json').read_text()))
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],1048574,'the server\'s window, not the paid one\'s')
+        self.assertEqual(self.cmd('status',['--home',str(self.home.parent/paid)])['context'],1048576,'a stored window is kept')
+        # not stored: status reports a server restarted with another window as it is now (a daemon reads it again at
+        # its next start)
+        Endpoint.props[self.key].update(n_ctx=262144)
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],262144)
+        self.assertNotIn('context',json.loads((home/'config.json').read_text()))
+        # the runtime measures compaction against the same window: a turn records it in context.json, never 0 or None
+        self.replies(call('finish',dict(summary='ok')))
+        self.assertEqual(self.cmd('once',['--goal','Say ok.'])['state'],'completed')
+        note=json.loads((self.home/'context.json').read_text())
+        self.assertEqual(note['size'],262144);self.assertGreater(note['tokens'],0)
+        # llama-server keeps n_ctx under default_generation_settings only (a provider_kind local brain asks any engine)
+        conf=json.loads((self.home/'config.json').read_text());conf['provider_kind']='local'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(default_generation_settings=dict(n_ctx=32768))
+        self.assertEqual(self.cmd('status')['context'],32768)
+        # a Caminus server added as a plain openai provider: its /props names the engine, so it counts
+        conf['provider_kind']='openai';(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=1048574)
+        self.assertEqual(self.cmd('status')['context'],1048574)
+        # nobody can say (a server that is down; a loopback relay whose /props names no engine): null, never 0
+        Endpoint.props[self.key]=dict(n_ctx=65536)
+        self.assertIsNone(self.cmd('status')['context'])
+        conf.pop('provider_kind');(self.home/'config.json').write_text(json.dumps(conf))
+        self.assertIsNone(self.cmd('status')['context'])
+        conf.update(relay=True);(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=1048574)
+        self.assertIsNone(self.cmd('status')['context'],'a relayed (paid) brain is never asked')
+        conf.pop('relay')
+        conf['endpoint']='http://127.0.0.1:9/v1';(self.home/'config.json').write_text(json.dumps(conf))
+        self.assertIsNone(self.cmd('status')['context'])
+
     def test_a_paid_brain_through_the_relay_on_loopback_is_left_alone(self):
         # init --endpoint http://127.0.0.1:8766/v1/openai writes no provider_kind and no relay: the relay is not a
         # Caminus server (its /props names no engine), so nothing is rewritten even when its list has effort-like ids
