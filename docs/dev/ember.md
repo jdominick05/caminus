@@ -31,6 +31,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 |---|---|
 | `cmd/ember.py` | every `caminus ember` subcommand: setup, status, run / shell, the bridge (reqs, answer, watch), jobs, sessions, stop-all |
 | `env/provision.py` | the root setup script (safe to rerun, checks itself) |
+| `agent_side.py` | what setup puts in the agent's account without root: ask-root, env-ask, its venv (the package set is `resident/discovery.py` `AGENT_PACKAGES`, which the prompt names too) |
 | `env/runner.py` | the SSH transport: one ControlMaster connection to `caminus-agent@127.0.0.1` |
 | `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
 | `env/audit.py` | the owner's audit log (one JSON object per line) |
@@ -45,8 +46,10 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `store.py` | SQLite: goals, the conversation, actions, the inbox, the event stream the panel reads |
 | `prompt.py` | the system prompt (what the agent is told; keep it true to what `runtime.py` enforces) |
 | `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
+| `advisor.py` | the advisor (a stronger model the agent consults) and the eyes (`Eyes`: one vision call per image a brain without vision reads, its description returned as the read's result); each its own daily ledger |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
-| `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read / edit / write, the web tools, MCP servers |
+| `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read (text, and images by their headers: `model.py` sends them) / search / edit / write (search: ripgrep only narrows the files, and only for a plain literal with `rg -F`; the stdlib matches, so both give one result), the web tools, MCP servers |
+| `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
@@ -55,8 +58,8 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | Panel (`panel/`) | |
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
-| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), Ember's box and the side panel, the task / now line |
-| `envcomposer.go`, `envsteer.go`, `envselect.go` | the composer, steering (interrupt, pullback, rewind), select to copy |
+| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, else the thoughts box under it), the side panel (tasks, now), the task / now line |
+| `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
 | `envgoals.go`, `envmodels.go`, `envsessions.go`, `envstudio.go`, `envpages.go` | the overlays |
@@ -102,6 +105,10 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
 ```
 
 - `tests/ember/test_env.py`: the owner side (settings, the SSH argv, the bridge, the audit log, the setup script).
+- `tests/ember/test_resident.py` `Sandbox`: real boxes with small limits (the home and token unreadable, writes outside
+  `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, no user namespace inside, each
+  limit killing and naming itself, an unreadable folder the box left removed without stopping the loop, the capped
+  connection log); it skips, saying why, where bubblewrap cannot make user namespaces.
 - `tests/ember/test_resident.py`: the resident against an in-process OpenAI-compatible fixture (`Endpoint`, scripted
   replies; its judge says met unless a test queues a verdict). Most behaviour tests live here: add one per fix, named
   for the behaviour.

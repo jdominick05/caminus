@@ -198,7 +198,7 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		}
 	case "note":
 		icon, st = g.idle, emberDim
-	case "read":
+	case "read", "search":
 		icon, st = g.collapsed, emberDim
 	case "free", "dream":
 		icon, st = g.done, emberCtxOK
@@ -379,9 +379,9 @@ type status struct {
 	brain        string
 	cwd          string // the folder the agent works in, left of the context pill; empty hides it
 	used, window int
-	compact      float64 // the compaction threshold as a fraction of the window; the bar warms toward it
-	usd          float64 // this goal's spend; negative hides the segment (an unpriced brain)
-	usdDay       float64 // today's spend across goals; shown with usd when positive
+	compact      float64    // the compaction threshold as a fraction of the window; the bar warms toward it
+	usd          float64    // this goal's spend; negative hides the segment (an unpriced brain)
+	usdDay       float64    // today's spend across goals; shown with usd when positive
 	speed        replySpeed // the session's read / write speeds (emberresident.go); none hides the segment
 	queue        int
 	compactions  int     // times this goal's history was compacted; -1 hides the bubble (no goal in view)
