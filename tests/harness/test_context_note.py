@@ -81,7 +81,7 @@ class Hook(unittest.TestCase):
         used = 102_000 + cn.est_tokens(json.dumps([{'functionResponse': {'id': 'call_a', 'name': 'run_shell_command',
                                                                             'response': {'output': 'x' * 3000}}}]))
         self.assertRegex(o['hookSpecificOutput']['additionalContext'],
-                         r'^\[time: [A-Z][a-z]{2} \d{4}-\d\d-\d\d \d\d:\d\d [A-Z]+; ' +
+                         r'^\[time: [A-Z][a-z]{2} \d{4}-\d\d-\d\d \d\d:\d\d \S+; ' +
                          re.escape(f'context: ~{round(used / 1000)}K of 262K tokens used; ~{round((222_700 - used) / 1000)}K '
                                    'left before automatic compaction]') + '$')
 

@@ -1760,6 +1760,19 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
                 rt.store.stamped.clear()   # (a restart: a new process)
                 self.assertTrue(stamped(self.stamp_step(rt,gid)),'the first result after a restart')
             finally:rt.mail.close();rt.store.close()
+            class Model:
+                def context_size(self):return 65536
+                def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
+                def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return dict(role='assistant',content='Done.')
+            rt=Runtime(self.home,model=Model())
+            try:
+                gid=rt.store.enqueue('Make y.');rt.store.stamped.clear()   # (queued by the CLI, another process)
+                t[0]+=3600;rt.run(target=gid)
+                first,discovery=rt.store.goal(gid)['messages'][:2]
+                self.assertTrue(discovery['content'].startswith('Read-only startup discovery'))
+                self.assertTrue(stamped(discovery),'a goal that waited in the queue starts with the time it starts')
+                self.assertNotEqual(first['content'][-30:],discovery['content'][-30:])
+            finally:rt.mail.close();rt.store.close()
 
     def test_the_time_stamp_keeps_the_cached_prefix(self):
         """a stamp is written once into the newest message: a later request's history starts with the earlier request's,

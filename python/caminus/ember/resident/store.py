@@ -125,7 +125,8 @@ class Store:
         - always (the caller says so): a goal's first message (_enqueue), its human's messages and the notes that
           arrive with them (a nudge, a steer, an answer, a scheduled wake-up: the runtime's inbox), the goal restated
           after a compaction, and the result of the wait tool;
-        - a tool result: the first one this process stores for the goal (a new goal, a restart), the first after the
+        - a tool result, or the first turn's discovery: the first one this process stores for the goal (a new goal, a
+          restart), the first after the
           goal was in a WAITING state (paused and resumed, parked on its human, root, a plan approval or the model) or
           after a compaction trimmed its history, and otherwise one once STAMP_EVERY_S passed since the last stamp.
 
