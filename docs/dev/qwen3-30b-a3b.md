@@ -41,6 +41,26 @@ which every number on this page was measured on unless it says otherwise.
   sha256 and that a catalog file gets it whatever template its header carries.
 - **Its own folder.** The new file's local path is `Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf` (`Item.local`):
   the repository name and the file name are the official file's, so without it the two would share a path.
+- **Gated on this file** (2026-11-18, the accuracy gates below against this file's own references: float64 at 128
+  tokens, fp32 for the last 64 of 16,384 / 40,896; llama.cpp, the ignite-llama fork, on the same file as the bound):
+
+  | Gate | Cards, KV | caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 |
+  |---|---|---|---|
+  | 128 tokens | XT, F16 | 3.40e-05, 128 / 128 | 2.40e-03, 128 / 128 |
+  | 128 tokens | XT, Q8 | 1.14e-03, 127 / 128 | 2.65e-03 (q8_0 KV), 127 / 128 |
+  | 128 tokens | XTX + XT, F16 | 2.42e-04, 128 / 128 | 2.40e-03, 128 / 128 |
+  | 128 tokens | XTX + XT, Q8 | 1.34e-03, 127 / 128 | 2.65e-03 (q8_0 KV), 127 / 128 |
+  | Last 64 of 16,384 | XTX, F16 | 1.96e-03, 63 / 64 | 7.94e-03, 63 / 64 |
+  | Last 64 of 40,896 | XTX, F16 | 8.56e-04, 64 / 64 | 3.85e-03, 61 / 64 |
+  | Last 64 of 16,384 | XTX + XT, F16 | 1.34e-03, 63 / 64 | 7.94e-03, 63 / 64 |
+  | Last 64 of 40,896 | XTX + XT, F16 | 1.07e-03, 63 / 64 | 3.85e-03, 61 / 64 |
+
+  The Q8 rows also pass against the F16 cache (mean KLD 1.16e-03 one card, 1.28e-03 two, top-1 99.2 %; llama.cpp's own
+  F16 to q8_0 cost 2.46e-03, 98.2 %); the two-card rows' replicas are equal after every token. The official file's
+  128-token gate, rerun the same day on the same build, still reads 4.66e-04 (llama.cpp 2.83e-03). Through the server
+  (`tools/serve_smoke1.py`, own code only, three alternating runs of each file, medians), decode is the same: one XTX
+  196.7 against 195.1 tok/s after a 6.6K-token prompt and 126.7 against 126.5 after 37.7K; XTX + XT 182.5 against
+  181.7 and 142.8 against 142.7.
 - Switching an existing install: [models](../models.md#switching-from-the-official-qwen3-30b-a3b-file).
 
 ## Results
