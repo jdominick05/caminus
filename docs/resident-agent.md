@@ -154,7 +154,7 @@ no check, while a steer is waiting, or when the check has not been exercised
 since the last steer. `todo` keeps the goal's checklist (pending, one item in
 progress, done) and what blocks it, pinned into every turn so it survives
 compaction and shown above the composer (items in Qwen Code's or Claude Code's todo
-shape, `content` and `status`, are taken as text and state; their `id`,
+shape, the list as `todos` and `content` and `status`, are taken as items, text and state; their `id`,
 `activeForm` and `priority` are dropped with a note); `finish` wants every item done or what
 is left named. `checkpoint` tars named paths before a destructive or
 milestone-crossing action and `rollback` puts them back.

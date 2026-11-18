@@ -508,6 +508,19 @@ class Resident(unittest.TestCase):
             self.assertEqual([it['state'] for it in rt.store.todo(gid)['items']],['done','in_progress','done'])
             self.assertEqual((r['left'],r['note']),(1,'ignored unknown field(s) activeForm: a todo item takes text and state'))
             self.assertNotIn('note',rt._todo(gid,[dict(text='a',state='done')],[]))
+            # an item with both forms keeps its own key, and the note says why the other went (not "unknown")
+            r=rt._todo(gid,[dict(text='keep me',content='a copy',state='done')],[])
+            self.assertEqual((rt.store.todo(gid)['items'],r['note']),([dict(text='keep me',state='done')],'ignored content: the item also had text'))
+            # a whole Qwen Code todo_write call, as the model sends it: the list as "todos", through the dispatcher
+            rt.store.model_reply(gid,call('todo',dict(todos=[dict(id='1',content='find the bug',status='completed'),
+                                                            dict(id='2',content='fix the bug',status='in_progress'),
+                                                            dict(id='3',content='run the tests',status='pending')])))
+            rt._action(rt.store.actions(gid)[0])
+            res=[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='todo'][-1]
+            self.assertNotIn('error',res)
+            self.assertEqual([(it['text'],it['state']) for it in rt.store.todo(gid)['items']],
+                             [('find the bug','done'),('fix the bug','in_progress'),('run the tests','pending')])
+            self.assertEqual((res['left'],res['note']),(2,'ignored unknown field(s) id: a todo item takes text and state · took todos as items'))
             # real errors are still refused: an unknown state (mapped or not), a field nothing maps, a missing text
             with self.assertRaisesRegex(ValueError,"'cancelled'"):rt._todo(gid,[dict(content='a',status='cancelled')],[])
             with self.assertRaisesRegex(ValueError,"'title'"):rt._todo(gid,[dict(title='a',state='done')],[])

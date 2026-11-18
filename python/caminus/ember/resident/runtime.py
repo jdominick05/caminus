@@ -38,6 +38,9 @@ TODO_STATES = ('pending', 'in_progress', 'done')
 TODO_KEYS = dict(content='text', status='state')
 TODO_SPELLINGS = {'in-progress': 'in_progress', 'completed': 'done'}
 TODO_DROPPED = ('id', 'activeForm', 'priority')
+# A tool's argument under the name a trained shape gives it (both todo shapes send their list as "todos"): taken as
+# ours with a note, before the required-argument check refuses it as missing.
+ARG_ALIASES = dict(todo=dict(todos='items'))
 # Tools that were replaced but may still be called from an older history: accepted, never advertised.
 MCP_SCHEMA = dict(type='object', properties={}, required=[])   # marker: an MCP tool, validated by its server
 LEGACY_TOOLS = {'ledger': dict(type='object', properties=dict(milestones={'type':'array','items':{'type':'string'}},
@@ -767,7 +770,7 @@ class Runtime:
 
     def _todo(self, gid, items, blockers):
         """Replace the goal's checklist. One item in progress at a time keeps the list honest about now."""
-        clean, dropped = [], set()
+        clean, dropped, doubled = [], set(), set()
         for it in items or []:
             if isinstance(it, str):                       # a bare string is a pending item
                 it = dict(text=it, state='pending')
@@ -780,7 +783,7 @@ class Runtime:
                     if ours not in it:
                         it[ours] = value
                     else:
-                        dropped.add(key)
+                        doubled.add(key)   # (the item had both: its own key wins)
             for key in TODO_DROPPED:
                 if key in it:
                     del it[key]
@@ -807,8 +810,14 @@ class Runtime:
         self.store.event('todo', dict(items=clean, blockers=blockers), gid)
         left = sum(1 for it in clean if it['state'] != 'done')
         result = dict(items=len(clean), left=left, blockers=blockers)
+        notes = []
         if dropped:
-            result['note'] = f'ignored unknown field(s) {", ".join(sorted(dropped))}: a todo item takes text and state'
+            notes.append(f'ignored unknown field(s) {", ".join(sorted(dropped))}: a todo item takes text and state')
+        if doubled:
+            notes.append(f'ignored {", ".join(sorted(doubled))}: the item also had '
+                         f'{", ".join(sorted(TODO_KEYS[k] for k in doubled))}')
+        if notes:
+            result['note'] = ' · '.join(notes)
         return result
 
     def _checkpoint(self, gid, paths, label=''):
@@ -1082,7 +1091,7 @@ class Runtime:
 
     def _action(self, action):
         refused = False
-        ignored = ''          # the note naming unknown arguments that were dropped
+        ignored = ''          # the note naming arguments taken under a trained name or dropped as unknown
         signature = None
         # STATE.md is the goal's whose action runs now: it moved only when a model turn started, so when two goals
         # interleaved, A's 'write STATE.md' landed in B's file and was filed as B's state at A's next turn
@@ -1110,6 +1119,13 @@ class Runtime:
             if schema is not MCP_SCHEMA:
                 # Name what is wrong: a bare "missing or unknown" left the model guessing, and it sent the same
                 # finish (with an extra choices argument) again. An unknown extra is dropped with a note, not refused.
+                took = []
+                for theirs, ours in ARG_ALIASES.get(name, {}).items():
+                    if theirs in args and ours not in args:
+                        args[ours] = args.pop(theirs)
+                        took.append(f'{theirs} as {ours}')
+                if took:
+                    ignored = 'took ' + ', '.join(took)
                 missing = sorted(set(schema['required']) - set(args))
                 extra = sorted(set(args) - set(schema['properties']))
                 if missing:
@@ -1117,7 +1133,7 @@ class Runtime:
                         ', '.join(missing), name, ', '.join(sorted(schema['properties']))))
                 if extra:
                     args = {k: v for k, v in args.items() if k not in extra}
-                    ignored = 'ignored unknown argument(s) %s; %s takes: %s' % (
+                    ignored = (ignored + ' · ' if ignored else '') + 'ignored unknown argument(s) %s; %s takes: %s' % (
                         ', '.join(extra), name, ', '.join(sorted(schema['properties'])))
             types = dict(string=str,integer=int,array=list,boolean=bool,object=dict)
             for key,value in (args.items() if schema is not MCP_SCHEMA else ()):
