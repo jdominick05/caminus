@@ -15,7 +15,31 @@ Before 2026-11-07 the session kept its own copy of the log and state, synced wit
 request, and worked out from its own epochs what the device held; four fixes (668dd7a, 03c0d93, facbdac, 500ff36) were
 drift between those copies.
 """
+import numpy as np
+
 from ..errors import NumericalFailure
+
+
+def lcp(a, b):
+    """the longest common prefix of two token sequences: lists (converted here) or int arrays (compared as they are: a
+    request's ids converted once by token_ids, the live log's LiveState.log_array, a disk entry's tokens)"""
+    n = min(len(a), len(b))
+    if n == 0: return 0
+    a, b = a[:n], b[:n]
+    x = np.flatnonzero((a if isinstance(a, np.ndarray) else np.asarray(a, dtype=np.int64))
+                       != (b if isinstance(b, np.ndarray) else np.asarray(b, dtype=np.int64)))
+    return int(x[0]) if x.size else n
+
+
+def token_ids(ids, a=None):
+    """(ids as a list of ints, the same ids as an int64 array of their own): a request's ids converted once, the list for
+    the log and the passes, the array for every prefix match. a: a pair this returned already (ids, a), passed on by a
+    caller that converted them (PromptCache.prompt to prepare and extend, K3Session to the cache): kept as it is"""
+    if a is not None and len(a) == len(ids):
+        return ids, a
+    a = np.array(ids, dtype=np.int64)
+    if a.ndim != 1: raise TypeError(f'token ids: a sequence of ints, not shape {a.shape}')
+    return a.tolist(), a
 
 
 def is_bail(e):
@@ -26,7 +50,7 @@ def is_bail(e):
 
 
 class LiveState:
-    __slots__ = ('log', 'st', 'marks', 'known', 'vouched')
+    __slots__ = ('log', 'st', 'marks', 'known', 'vouched', 'arr')
 
     def __init__(self):
         # known: False while the cache runs something that can leave the device state undefined if it fails part way (the
@@ -34,7 +58,28 @@ class LiveState:
         # vouched: the engine's (seq, token) when an operation the session asked for last completed (vouch): what a failure
         # report compares with. The marks move inside an operation too (an extend the cache refuses resets the slot and
         # re-marks before it raises), and the report must still see the reset the session's request ran into
-        self.log, self.st, self.marks, self.known, self.vouched = [], dict(i0=0, commit=0), None, True, None
+        # arr: (the log object, an int64 array of its first len(array) tokens): log_array's
+        self.log, self.st, self.marks, self.known, self.vouched, self.arr = [], dict(i0=0, commit=0), None, True, None, None
+
+    def set_log(self, log, arr=None):
+        """the log replaced (PromptCache.log's setter); arr: its tokens as an int64 array when the caller has them (a slice
+        of the request's token_ids array)"""
+        self.log, self.arr = log, ((log, arr) if arr is not None else None)
+
+    def log_array(self):
+        """the log as an int64 array, for prefix matches (lcp; read only). Kept between calls: the log is only ever replaced
+        (set_log) or extended in place (PromptCache.append), so while it is the same object and no shorter, the kept array
+        is its prefix and only what it gained is converted; another object, or a shorter one, is converted whole (and so
+        is one whose last kept token no longer matches: a log changed in place some other way)"""
+        log, c = self.log, self.arr
+        if c is not None and c[0] is log and len(c[1]) <= len(log) and (not len(c[1]) or log[len(c[1]) - 1] == c[1][-1]):
+            a = c[1]
+            if len(a) == len(log): return a
+            a = np.concatenate((a, np.asarray(log[len(a):], dtype=np.int64)))
+        else:
+            a = np.asarray(log, dtype=np.int64)
+        self.arr = (log, a)
+        return a
 
     @staticmethod
     def counters(m, df):
