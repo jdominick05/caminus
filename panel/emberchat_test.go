@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -934,6 +935,59 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 	if !seen {
 		t.Fatalf("the reply has no label:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A table's header and cells read in the body's text colour in every built-in theme, and that colour reads on the
+// theme's background (WCAG AA, 4.5:1): they were in the chrome grey, barely visible on a dark background.
+func TestMarkdownTablesUseTheBodyTextColourInEveryTheme(t *testing.T) {
+	themeFixture(t)
+	lum := func(hex string) float64 {
+		r, g, b, ok := hexRGB(hex)
+		if !ok {
+			return -1
+		}
+		ch := func(v uint8) float64 {
+			c := float64(v) / 255
+			if c <= 0.03928 {
+				return c / 12.92
+			}
+			return math.Pow((c+0.055)/1.055, 2.4)
+		}
+		return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b)
+	}
+	sgrBefore := func(out, word string) string { // the last colour set before word
+		i := strings.Index(out, word)
+		if i < 0 {
+			t.Fatalf("%q not rendered:\n%q", word, out)
+		}
+		j := strings.LastIndex(out[:i], "38;2;")
+		if j < 0 {
+			return ""
+		}
+		return out[j : j+strings.IndexByte(out[j:], 'm')]
+	}
+	for _, name := range themeNames() {
+		if err := themeLoad(name); err != nil {
+			t.Fatal(name, err)
+		}
+		r, err := glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(80))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := r.Render("Plainword before the table.\n\n| Headword | Other |\n|---|---|\n| Cellword | x |\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := sgrBefore(out, "Plainword")
+		if body == "" || sgrBefore(out, "Headword") != body || sgrBefore(out, "Cellword") != body {
+			t.Fatalf("%s: the table's header and cells are not in the body text colour (%q):\n%q", name, body, out)
+		}
+		if fg, bg := lum(themeRole("text")), lum(themeRole("bg")); fg >= 0 && bg >= 0 {
+			if ratio := (max(fg, bg) + 0.05) / (min(fg, bg) + 0.05); ratio < 4.5 {
+				t.Fatalf("%s: text on its background is %.2f:1, under 4.5:1", name, ratio)
+			}
+		}
 	}
 }
 
@@ -2679,6 +2733,74 @@ func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
 	m = next.(emberModel)
 	if !m.chat.transcript.AtBottom() || strings.Contains(ansi.Strip(m.View().Content), strings.TrimSpace(jumpPillText)) {
 		t.Fatal("a click on the pill goes to the newest message and the pill goes away")
+	}
+}
+
+func TestTheActivityLineCountsTheWholeTurnsTokens(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.resident.Goals = []residentGoal{{ID: "g1", State: "working", Prompt: "x"}}
+	now := float64(time.Now().Add(-60 * time.Second).Unix())
+	m.residentEvents = []residentEvent{{Seq: 10, Ts: now, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "x"}}}
+	seq, last := 10, 0
+	shown := func(step string) int {
+		t.Helper()
+		_, _, n := m.turnTokens("g1")
+		if n < last {
+			t.Fatalf("%s: the count went back from %d to %d", step, last, n)
+		}
+		last = n
+		return n
+	}
+	live := func(turn string, chars int) { // a call writing: its live text so far
+		next, _ := m.Update(residentLiveMsg{turn: turn, text: strings.Repeat("w", chars), reset: true})
+		m = next.(emberModel)
+	}
+	land := func(tokens int, kind string) { // a call's event, with the provider's count; or a new turn's message
+		seq++
+		data := map[string]any{"content": "x", "tokens": float64(tokens)}
+		if kind != "assistant" {
+			data = map[string]any{"text": "and now this"}
+		}
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+			events: []residentEvent{{Seq: seq, Ts: now + float64(seq), Goal: "g1", Kind: kind, Data: data}}})
+	}
+	// call 1 writes about 200 tokens; its live text clears and call 2 starts before call 1's event arrives (the
+	// stream is pushed, events are polled): the count holds instead of dropping back
+	live("t1", 800)
+	if n := shown("call 1 writing"); n != 200 {
+		t.Fatalf("call 1's estimate: %d", n)
+	}
+	m.chat.stopStream()
+	live("t2", 40)
+	shown("call 2 started before call 1 landed")
+	// call 1 lands at 180 real tokens, under its estimate: the line holds 200 until the real sum passes it
+	land(180, "assistant")
+	if n := shown("call 1 landed under its estimate"); n != 200 {
+		t.Fatalf("held at the peak: %d", n)
+	}
+	live("t2", 400)
+	if n := shown("call 2 writing"); n != 280 {
+		t.Fatalf("180 real + 100 estimated: %d", n)
+	}
+	// call 2 lands over its estimate: the real count replaces it
+	land(120, "assistant")
+	if n := shown("call 2 landed"); n != 300 {
+		t.Fatalf("180 + 120: %d", n)
+	}
+	live("t3", 200)
+	shown("call 3 writing")
+	land(60, "assistant")
+	if n := shown("call 3 landed"); n != 360 {
+		t.Fatalf("three calls sum to 180 + 120 + 60: %d", n)
+	}
+	if v := ansi.Strip(m.activityLine(120)); !strings.Contains(v, "↓ 360 tokens") {
+		t.Fatalf("the line shows the turn's sum: %q", v)
+	}
+	// a new turn (your message) starts the count over
+	land(0, "user_message")
+	if _, _, n := m.turnTokens("g1"); n != 0 || strings.Contains(ansi.Strip(m.activityLine(120)), "↓") {
+		t.Fatalf("a new turn resets the count: %d", n)
 	}
 }
 

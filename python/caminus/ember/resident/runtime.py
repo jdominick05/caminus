@@ -1897,6 +1897,18 @@ class Runtime:
             self.progress[gid] = time.time()
         return True
 
+    def _reply_tokens(self):
+        """The last reply's written tokens as its provider counted them (usage: completion_tokens, or output_tokens on
+        Anthropic), else a Caminus server's own count (timings predicted_n); 0 when neither said. A UI sums these over
+        a turn: its estimate from the live text restarted with every call."""
+        usage = getattr(self.model, 'last_usage', None) or {}
+        for key in ('completion_tokens', 'output_tokens'):
+            if isinstance(usage.get(key), int) and not isinstance(usage[key], bool) and usage[key] > 0:
+                return usage[key]
+        speed = getattr(self.model, 'last_speed', None)
+        n = speed.get('tokens') if isinstance(speed, dict) and speed.get('source') == 'engine' else None
+        return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
+
     def _meter(self, gid):
         """Every priced turn, whichever brain served it, into spend.json (per day and per goal): what the status line
         shows. The budgets (free time, the fallback, the advisor) keep their own ledgers; this one only reports."""
@@ -2270,7 +2282,7 @@ class Runtime:
             if down:
                 self.store.event('model_back', dict(attempts=down['attempts'], down_s=round(time.time() - down['since'])), gid)
             reasoning = reply.pop('reasoning_content','')
-            if not self.store.model_reply(gid,reply,reasoning=reasoning):
+            if not self.store.model_reply(gid,reply,reasoning=reasoning,tokens=self._reply_tokens()):
                 return True
             self.progress[gid] = time.time()
             if not reply.get('tool_calls'):

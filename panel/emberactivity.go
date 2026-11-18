@@ -141,10 +141,11 @@ func compactDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-// stretch is this stretch of work on goal gid: when it began (your message, the goal's start or a wake-up), and
-// since then the actions taken and about how many tokens were written (characters / 4, the live reply included).
+// stretch is this stretch of work on goal gid (a turn): when it began (your message, the goal's start or a wake-up),
+// and since then the actions taken and the tokens written: each finished call's own count as its provider reported
+// it (the assistant event's tokens), else its characters / 4, plus the call in flight's live text / 4. The live
+// snapshot restarts with every call, so counting it alone dropped back at each step of a many-call turn.
 func (m emberModel) stretch(gid string) (since time.Time, actions, tokens int) {
-	chars := 0
 	for i := len(m.residentEvents) - 1; i >= 0; i-- {
 		e := m.residentEvents[i]
 		if e.Goal != gid {
@@ -156,6 +157,11 @@ func (m emberModel) stretch(gid string) (since time.Time, actions, tokens int) {
 		case "tool_result":
 			actions++
 		case "assistant":
+			if n, _ := e.Data["tokens"].(float64); n > 0 {
+				tokens += int(n)
+				break
+			}
+			chars := 0
 			for _, k := range []string{"content", "reasoning"} {
 				s, _ := e.Data[k].(string)
 				chars += len(s)
@@ -167,15 +173,49 @@ func (m emberModel) stretch(gid string) (since time.Time, actions, tokens int) {
 				a, _ := f["arguments"].(string)
 				chars += len(a)
 			}
+			tokens += (chars + 3) / 4
 		}
 		if !since.IsZero() {
 			break
 		}
 	}
 	if m.chat.live.active {
-		chars += len(m.chat.live.text) + len(m.chat.live.reasoning)
+		tokens += (len(m.chat.live.text) + len(m.chat.live.reasoning) + 3) / 4
 	}
-	return since, actions, (chars + 3) / 4
+	return since, actions, tokens
+}
+
+// turnPeak is the most tokens the activity line has shown for one turn (a goal and its stretch's start).
+type turnPeak struct {
+	goal   string
+	since  time.Time
+	tokens int
+}
+
+// noteTurnTokens raises the turn's peak to what stretch counts now; a new turn (another goal, a new start) starts it
+// over. Called where the events or the live reply change, not per frame.
+func (m *emberModel) noteTurnTokens() {
+	gl := m.working()
+	if gl == nil {
+		return
+	}
+	since, _, tokens := m.stretch(gl.ID)
+	if p := &m.chat.turnPeak; p.goal != gl.ID || !p.since.Equal(since) {
+		*p = turnPeak{gl.ID, since, tokens}
+	} else if tokens > p.tokens {
+		p.tokens = tokens
+	}
+}
+
+// turnTokens is stretch with the count held at the turn's peak: it only goes up within a turn. Between a call's live
+// text clearing and its event arriving the sum dips for a moment, and a provider's count can come in under the
+// estimate it replaces; the line holds its number until the real sum passes it.
+func (m emberModel) turnTokens(gid string) (since time.Time, actions, tokens int) {
+	since, actions, tokens = m.stretch(gid)
+	if p := m.chat.turnPeak; p.goal == gid && p.since.Equal(since) && p.tokens > tokens {
+		tokens = p.tokens
+	}
+	return since, actions, tokens
 }
 
 // activityLine is the line over the composer while the agent works; "" otherwise.
@@ -232,7 +272,7 @@ func (m emberModel) activityLine(w int) string {
 	case l.active && len(l.tools) > 0:
 		doing = "calling " + l.tools[len(l.tools)-1]
 	}
-	since, actions, tokens := m.stretch(gl.ID)
+	since, actions, tokens := m.turnTokens(gl.ID)
 	var stats []string
 	if !since.IsZero() {
 		stats = append(stats, compactDuration(time.Since(since)))
