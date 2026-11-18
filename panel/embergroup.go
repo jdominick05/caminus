@@ -143,6 +143,19 @@ func (c *residentChat) compactBlock(e residentEvent, w int) string {
 	return ansi.Wrap(c.eventBlock(e), w, "")
 }
 
+// drawnBlock is the block syncChat adds for an event in the layout in force (compactBlock, or eventBlock wrapped to w);
+// a copy draws it again with the Markdown source to find a rendered card's body (markdownBodies).
+func (c *residentChat) drawnBlock(e residentEvent, w int) string {
+	if !c.cards && !c.expanded {
+		return c.compactBlock(e, w)
+	}
+	block := c.eventBlock(e)
+	if block == "" {
+		return ""
+	}
+	return ansi.Wrap(block, w, "")
+}
+
 // compactAssistant is an assistant event with only its words: the thinking line and the call cards go to the group.
 func compactAssistant(e residentEvent) residentEvent {
 	data := map[string]any{}

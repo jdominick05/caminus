@@ -1331,7 +1331,8 @@ def cpu_arrays(mk, base):
     """the prefix matches on arrays (cache/livestate.py): token_ids converts a request's ids once, LiveState.log_array keeps
     the live log's array (extended by what the log gains in place, converted again when the log is replaced, shorter, or
     its last kept token changed), lcp compares arrays as they are. (a) lcp on lists / int64 / int32 arrays == a Python
-    loop, tok_sha the same bytes for a list and an array, token_ids' list and array; (b) random log operations: the kept
+    loop, tok_sha the same bytes for a list and an array, token_ids' list and array (a list passed with its array kept as
+    it is, a tuple or an array converted to a list of ints even with one); (b) random log operations: the kept
     array == the log converted again after each; (c) one scenario of requests (prepare / plan / append / commit, an edit
     restored from a checkpoint, a side call, the prompt phase (prompt: the ids' array carried to prepare and extend), a
     commit of the live log itself, a lost live state, a park, a reset and the unpark) run with the matches on
@@ -1355,7 +1356,11 @@ def cpu_arrays(mk, base):
                 ok_a &= L.lcp(x, y) == want
         lst, arr = L.token_ids(np.asarray(a, np.int32))
         ok_a &= lst == a and all(type(v) is int for v in lst) and arr.dtype == np.int64 and arr.tolist() == a
-        ok_a &= L.token_ids(lst, arr) == (lst, arr) and pc.tok_sha(a) == pc.tok_sha(arr) == pc.tok_sha(np.asarray(a, np.int32))
+        same = L.token_ids(lst, arr)
+        ok_a &= same[0] is lst and same[1] is arr and pc.tok_sha(a) == pc.tok_sha(arr) == pc.tok_sha(np.asarray(a, np.int32))
+        for other in (tuple(a), np.asarray(a, np.int32)):      # (not a list: converted even with a matching array)
+            got = L.token_ids(other, arr)[0]
+            ok_a &= type(got) is list and got == a and all(type(v) is int for v in got)
     try: L.token_ids([[1, 2]]); ok_a = False
     except TypeError: pass
     # (b)
@@ -1417,7 +1422,7 @@ def cpu_arrays(mk, base):
     srcs = [r[1][0] for r in ref if isinstance(r, tuple) and len(r) == 6 and r[1] is not None]
     ok_c = strip(got_l) == ref and strip(got_a) == ref and kept
     check(ok_a and ok_b and ok_c and {'live', 'vram', 'disk'} <= set(srcs),
-          f'prefix matches on arrays: lcp / tok_sha / token_ids on lists and arrays {ok_a}; the kept log array == the log after '
+          f'prefix matches on arrays: lcp / tok_sha / token_ids on lists, tuples and arrays {ok_a}; the kept log array == the log after '
           f'400 random replacements / extensions / cuts {ok_b}; a scenario of {len(ref)} steps (sources {srcs}) with the '
           f'matches on arrays and the requests as lists and as int32 arrays == the matches on lists through a loop {ok_c} '
           f'(the kept array == the log after every step {kept})')

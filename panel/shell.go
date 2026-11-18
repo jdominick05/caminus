@@ -220,22 +220,25 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 	if !expanded || len(body) == 0 {
 		return line
 	}
-	rule := lipgloss.NewStyle().Foreground(cGray).Render("│ ")
-	out := []string{line}
-	for _, b := range body {
-		st := emberDim
+	// an open card shows everything: long lines wrap under the rule, nothing is cut
+	out := append([]string{line}, ruled(body, cardRule(), cardRule(), w, func(b, piece string) string {
 		switch {
 		case strings.HasPrefix(b, "+"):
-			st = emberCtxOK
+			return emberCtxOK.Render(piece)
 		case strings.HasPrefix(b, "-"):
-			st = emberCtxHot
+			return emberCtxHot.Render(piece)
 		}
-		// an open card shows everything: long lines wrap under the rule, nothing is cut
-		for _, piece := range strings.Split(ansi.Hardwrap(b, max(4, w-6), true), "\n") {
-			out = append(out, "   "+rule+st.Render(piece))
-		}
-	}
+		return emberDim.Render(piece)
+	})...)
 	return strings.Join(out, "\n")
+}
+
+// cardRule is what an open card's body lines sit behind.
+func cardRule() string { return "   " + lipgloss.NewStyle().Foreground(cGray).Render("│ ") }
+
+// cardBody is a drawing (rendered Markdown) behind an open card's rule.
+func cardBody(drawn string, w int) string {
+	return strings.Join(ruled(strings.Split(drawn, "\n"), cardRule(), cardRule(), w, nil), "\n")
 }
 
 // approvalCard: a root request or a question, inline where the human is already looking.

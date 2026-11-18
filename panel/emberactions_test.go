@@ -16,7 +16,7 @@ import (
 func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 	home, cwd := "/srv/agent/homes/resident", "/srv/agent/homes/resident/work"
 	card := func(name string, args, result map[string]any) string {
-		return ansi.Strip(actionCard(name, args, result, 160, home, cwd, false))
+		return ansi.Strip(actionCard(name, args, result, 160, home, cwd, false, ""))
 	}
 	cases := []struct {
 		name         string
@@ -144,16 +144,16 @@ func TestASandboxCardIsMarkedAndSaysItsNetworkAndTheLimitHit(t *testing.T) {
 		"connections": conns, "box": "/srv/agent/homes/r/boxes/g1",
 		"limits":           map[string]any{"time_s": 600.0, "memory_mb": 4096.0, "tasks": 512.0, "cpu_percent": 800.0, "disk_mb": 4096.0, "enforced": "systemd"},
 		"connections_more": 7.0}
-	v := ansi.Strip(actionCard("sandbox", args, result, 200, "", "", false))
+	v := ansi.Strip(actionCard("sandbox", args, result, 200, "", "", false, ""))
 	for _, want := range []string{"sandbox", "$ python3 build.py", "memory limit hit: box killed", "net: example.com", "1 refused"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("want %q in the compact card:\n%s", want, v)
 		}
 	}
-	if v := ansi.Strip(actionCard("terminal", map[string]any{"command": "sleep 20"}, map[string]any{"exit_code": -9.0, "output": "", "limit_hit": "time"}, 200, "", "", false)); !strings.Contains(v, "time limit hit: command killed") {
+	if v := ansi.Strip(actionCard("terminal", map[string]any{"command": "sleep 20"}, map[string]any{"exit_code": -9.0, "output": "", "limit_hit": "time"}, 200, "", "", false, "")); !strings.Contains(v, "time limit hit: command killed") {
 		t.Fatalf("a terminal timeout says so on its card:\n%s", v)
 	}
-	if v := ansi.Strip(actionCard("sandbox", map[string]any{"command": "make"}, map[string]any{"exit_code": 0.0, "output": "ok\n", "hosts": []any{}}, 200, "", "", false)); !strings.Contains(v, "no network") || strings.Contains(v, "limit hit") {
+	if v := ansi.Strip(actionCard("sandbox", map[string]any{"command": "make"}, map[string]any{"exit_code": 0.0, "output": "ok\n", "hosts": []any{}}, 200, "", "", false, "")); !strings.Contains(v, "no network") || strings.Contains(v, "limit hit") {
 		t.Fatalf("a box without hosts says no network, and no limit when none hit:\n%s", v)
 	}
 
@@ -183,7 +183,7 @@ func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
 	snap := "- heading \"Thanks\" (level 1)\n- text \"sent ?who=Ada\"\n- link \"Home\" [e6] -> /\n- button \"Again\" [e7]"
 	result := map[string]any{"did": "clicked button \"Send\"", "title": "Done", "url": "http://127.0.0.1:8000/done.html?who=Ada",
 		"snapshot": snap, "network": map[string]any{"allowed": 3.0, "refused": []any{"10.0.0.5:80 (refused: LAN)"}}}
-	v := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e5"}, result, 200, "", "", false))
+	v := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e5"}, result, 200, "", "", false, ""))
 	for _, want := range []string{"browser", "clicked button \"Send\"", "Done · 127.0.0.1:8000/done.html?who=Ada", "1 refused",
 		"heading \"Thanks\"", "link \"Home\" [e6]"} {
 		if !strings.Contains(v, want) {
@@ -194,17 +194,17 @@ func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
 		t.Fatalf("the compact card shows a short excerpt of the snapshot:\n%s", v)
 	}
 	shot := ansi.Strip(actionCard("browser", map[string]any{"action": "screenshot"},
-		map[string]any{"screenshot": "/h/w/boxes/g/screenshots/shot-1.png", "title": "Done", "url": "http://x/"}, 200, "/h", "/h/w", false))
+		map[string]any{"screenshot": "/h/w/boxes/g/screenshots/shot-1.png", "title": "Done", "url": "http://x/"}, 200, "/h", "/h/w", false, ""))
 	if !strings.Contains(shot, "screenshot") || !strings.Contains(shot, "→ boxes/g/screenshots/shot-1.png") {
 		t.Fatalf("a screenshot card names its file:\n%s", shot)
 	}
 	refused := ansi.Strip(actionCard("browser", map[string]any{"action": "type", "ref": "e4", "text": "x"},
-		map[string]any{"error": "that is a password field: the browser never types passwords"}, 200, "", "", false))
+		map[string]any{"error": "that is a password field: the browser never types passwords"}, 200, "", "", false, ""))
 	if !strings.Contains(refused, "password field") {
 		t.Fatalf("a refusal shows its reason:\n%s", refused)
 	}
 	skipped := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e6"},
-		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", "", false))
+		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", "", false, ""))
 	if !strings.Contains(skipped, "click e6") || !strings.Contains(skipped, "skipped: an earlier browser call this turn was refused") {
 		t.Fatalf("a skipped call says it never ran:\n%s", skipped)
 	}

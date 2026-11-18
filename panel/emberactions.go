@@ -111,13 +111,14 @@ func kOf(n float64) string {
 
 // actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths. open (a
 // click on the card) shows its whole preview: the full command, every output line, hit, result or message line.
-func actionCard(name string, args, result map[string]any, w int, home, cwd string, open bool) string {
+func actionCard(name string, args, result map[string]any, w int, home, cwd string, open bool, md string) string {
 	if args == nil {
 		args = map[string]any{}
 	}
 	rs := func(k string) string { v, _ := result[k].(string); return v }
 	subject, meta := "", ""
 	var preview []string
+	rendered := "" // an open command's output drawn as Markdown, under the preview
 	state := "ok"
 	rows := func(n int) int { // the preview's rows: n folded, everything open (bounded so one card cannot stall the screen)
 		if open {
@@ -176,6 +177,9 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
 				preview = all[max(0, len(all)-rows(3)):]
+				if open && md != "" { // the output rendered as Markdown (actionBlock) replaces its lines
+					preview, rendered = nil, md
+				}
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
 			}
@@ -409,22 +413,27 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		line += emberDim.Render(tail)
 	}
 	out := []string{ansi.Truncate(line, w, "…")}
-	rule := "  " + emberDim.Render("⎿ ")
-	for i, p := range preview {
-		if i > 0 {
-			rule = "    "
-		}
-		if !open {
-			out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
-			continue
-		}
-		// open: a long line wraps under itself instead of being cut
-		for j, part := range strings.Split(ansi.Hardwrap(terminalText(p, false), max(8, w-4), true), "\n") {
-			if j > 0 {
-				rule = "    "
+	first := "  " + emberDim.Render("⎿ ")
+	if !open {
+		for i, p := range preview {
+			if i > 0 {
+				first = "    "
 			}
-			out = append(out, rule+emberDim.Render(part))
+			out = append(out, ansi.Truncate(first+emberDim.Render(terminalText(p, false)), w, "…"))
 		}
+		return strings.Join(out, "\n")
+	}
+	// open: a long line wraps under itself instead of being cut; output drawn as Markdown goes under the rest
+	safe := make([]string, len(preview))
+	for i, p := range preview {
+		safe[i] = terminalText(p, false)
+	}
+	out = append(out, ruled(safe, first, "    ", w, func(_, piece string) string { return emberDim.Render(piece) })...)
+	if rendered != "" {
+		if len(out) > 1 {
+			first = "    "
+		}
+		out = append(out, ruled(strings.Split(rendered, "\n"), first, "    ", w, nil)...)
 	}
 	return strings.Join(out, "\n")
 }
@@ -514,7 +523,11 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 			}
 		}
 	}
-	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq])
+	md := ""
+	if c.opened[e.Seq] && (name == "terminal" || name == "sandbox") {
+		md = c.openCardMarkdown(cardOutput(e))
+	}
+	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq], md)
 }
 
 // limitHit names the limit that killed a command or a box ("" when none did).

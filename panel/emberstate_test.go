@@ -56,25 +56,25 @@ func TestARunningLineNeverStaysInTheHistory(t *testing.T) {
 
 func TestCompactCardsKeepTheOutcomeAndWhatWasLeftOpen(t *testing.T) {
 	long := `python3 -c "import sys; print(\"checking stock levels for every item in the inventory list now\"); sys.exit(3)" && echo done-with-everything-here`
-	v := ansi.Strip(actionCard("terminal", map[string]any{"command": long}, map[string]any{"exit_code": 3.0, "output": "checking\n"}, 100, "", "", false))
+	v := ansi.Strip(actionCard("terminal", map[string]any{"command": long}, map[string]any{"exit_code": 3.0, "output": "checking\n"}, 100, "", "", false, ""))
 	if !strings.Contains(strings.Split(v, "\n")[0], "exit 3") {
 		t.Fatalf("a long command is cut, never its exit code: %q", v)
 	}
 	script := map[string]any{"command": "cd work &&\nmake test"}
 	out := map[string]any{"exit_code": 0.0, "output": "one\ntwo\nthree\nfour\nfive\n"}
-	if v := ansi.Strip(actionCard("terminal", script, out, 100, "", "", false)); strings.Contains(v, "make test") || strings.Contains(v, "two") {
+	if v := ansi.Strip(actionCard("terminal", script, out, 100, "", "", false, "")); strings.Contains(v, "make test") || strings.Contains(v, "two") {
 		t.Fatalf("folded: the command's first line and the last 3 output lines: %q", v)
 	}
-	if v := ansi.Strip(actionCard("terminal", script, out, 100, "", "", true)); !strings.Contains(v, "make test") || !strings.Contains(v, "one") ||
+	if v := ansi.Strip(actionCard("terminal", script, out, 100, "", "", true, "")); !strings.Contains(v, "make test") || !strings.Contains(v, "one") ||
 		strings.Contains(strings.Split(v, "\n")[0], "…") {
 		t.Fatalf("open (a click): the whole command and every output line: %q", v)
 	}
 	wide := map[string]any{"exit_code": 0.0, "output": strings.Repeat("x", 150) + "END\n"}
-	if v := ansi.Strip(actionCard("terminal", script, wide, 100, "", "", true)); !strings.Contains(v, "END") {
+	if v := ansi.Strip(actionCard("terminal", script, wide, 100, "", "", true, "")); !strings.Contains(v, "END") {
 		t.Fatalf("open: a line wider than the card wraps, it is not cut: %q", v)
 	}
 	check := map[string]any{"check": "the stock total counts every row\nand the tests pass"}
-	if v := ansi.Strip(actionCard("define_done", check, map[string]any{}, 100, "", "", true)); !strings.Contains(v, "and the tests pass") {
+	if v := ansi.Strip(actionCard("define_done", check, map[string]any{}, 100, "", "", true, "")); !strings.Contains(v, "and the tests pass") {
 		t.Fatalf("open: a subject of several lines shows whole: %q", v)
 	}
 	c := &residentChat{}

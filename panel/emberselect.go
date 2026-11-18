@@ -135,16 +135,91 @@ func (m emberModel) selectedText() string {
 	}
 	lines := strings.Split(source, "\n")
 	a, b := s.ordered()
+	var bodies []mdBody
+	if !s.screen {
+		bodies = m.markdownBodies(a[0], b[0])
+	}
 	var out []string
 	for i := max(0, a[0]); i <= b[0] && i < len(lines); i++ {
+		if k := slices.IndexFunc(bodies, func(md mdBody) bool { return i >= md.from && i < md.to }); k >= 0 {
+			out = append(out, bodies[k].source) // a rendered card's body: its source, whole (the copy keeps it)
+			i = bodies[k].to - 1
+			continue
+		}
 		_, _, text := s.cells(i, ansi.Strip(lines[i]))
 		out = append(out, text)
 	}
 	return strings.Trim(strings.Join(out, "\n"), "\n")
 }
 
+// mdBody is an open card's body drawn as Markdown: content lines [from, to), and the text it was rendered from.
+type mdBody struct {
+	from, to int
+	source   string
+}
+
+// markdownBodies are the cards in content lines [a, b] whose body is drawn as Markdown (openCardMarkdown). Each is
+// found by drawing its event again with the source shown: the lines that differ are the body. A selection that touches
+// one copies its source whole, so a copy is the Markdown as it came (line-exact mapping does not exist: rendering
+// reflows it).
+func (m emberModel) markdownBodies(a, b int) []mdBody {
+	c := m.chat
+	if c.mdSource {
+		return nil
+	}
+	var out []mdBody
+	line, at := 0, 0
+	for _, sp := range c.spans {
+		line += strings.Count(c.content[at:sp.from], "\n")
+		at = sp.from
+		drawn := strings.Split(c.content[sp.from:sp.to], "\n")
+		if line+len(drawn) <= a {
+			continue
+		}
+		if line > b {
+			break
+		}
+		i := slices.IndexFunc(m.residentEvents, func(e residentEvent) bool { return e.Seq == sp.seq })
+		if i < 0 {
+			continue
+		}
+		e := m.residentEvents[i]
+		text := cardOutput(e)
+		if !looksLikeMarkdown(text) {
+			continue
+		}
+		src := c // (a copy: drawing it changes nothing on the model)
+		src.mdSource = true
+		raw := strings.Split(src.drawnBlock(e, max(20, c.renderWidth)), "\n")
+		h, t := 0, 0
+		for h < len(drawn) && h < len(raw) && drawn[h] == raw[h] {
+			h++
+		}
+		for t < len(drawn)-h && t < len(raw)-h && drawn[len(drawn)-1-t] == raw[len(raw)-1-t] {
+			t++
+		}
+		if h < len(drawn)-t {
+			out = append(out, mdBody{line + h, line + len(drawn) - t, strings.TrimRight(residentText(text), "\n")})
+		}
+	}
+	return out
+}
+
+// cardOutput is the text a card can draw as Markdown: a command's output (a ! card's, or a terminal result's).
+func cardOutput(e residentEvent) string {
+	out, _ := e.Data["output"].(string)
+	if e.Kind == "tool_result" {
+		result, _ := e.Data["result"].(map[string]any)
+		out, _ = result["output"].(string)
+	} else if e.Kind != "shell" {
+		return ""
+	}
+	return strings.ReplaceAll(ansi.Strip(out), "\r\n", "\n")
+}
+
 // cells is what the selection takes of line i (plain): its text and the cells [start, end) that text sits in (empty
-// when it takes nothing). The copy and the highlight both read it, so what shows selected is what is copied.
+// when it takes nothing). The copy and the highlight both read it, so what shows selected is what is copied, but for
+// a card drawn as Markdown: its body is copied as its source (markdownBodies).
 func (s chatSelection) cells(i int, plain string) (int, int, string) {
 	start, end, ok := s.span(i)
 	if !ok {
@@ -378,6 +453,20 @@ func (c *residentChat) cardAtLine(i int) (int, bool) {
 		return c.spans[k].seq, true
 	}
 	return 0, false
+}
+
+// cardLines is where the event's block sits in the drawn history: its first content line and how many lines it has;
+// false when it is not drawn.
+func (c *residentChat) cardLines(seq int) (int, int, bool) {
+	line, at := 0, 0
+	for _, sp := range c.spans {
+		line += strings.Count(c.content[at:sp.from], "\n")
+		at = sp.from
+		if sp.seq == seq {
+			return line, strings.Count(c.content[sp.from:sp.to], "\n") + 1, true
+		}
+	}
+	return 0, 0, false
 }
 
 // cardToggles: a click on the event's block opens or folds it. Only in the compact view (Ctrl+O shows every card

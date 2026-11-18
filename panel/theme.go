@@ -443,3 +443,11 @@ func emberMarkdownStyle() ansi.StyleConfig {
 	st.Table.RowSeparator = color("─")
 	return st
 }
+
+// emberCardStyle is emberMarkdownStyle for a command's output in an open card: its links are plain text, with no
+// colour or underline, so text a program printed never reads as something to click (screenSafe drops the OSC 8 link).
+func emberCardStyle() ansi.StyleConfig {
+	st := emberMarkdownStyle()
+	st.Link, st.LinkText = ansi.StylePrimitive{}, ansi.StylePrimitive{}
+	return st
+}

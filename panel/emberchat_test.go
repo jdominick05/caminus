@@ -938,6 +938,308 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 }
 
+// cardMarkdownDoc is a Markdown document as a terminal prints it (cat of a notes file): a heading, a quote holding a
+// heading, bold, inline code, a table and a fence, then a fence of its own.
+const cardMarkdownDoc = "### 3.1 The fix: **count every row, keep the format**\n\n" +
+	"> #### The short version\n>\n> **The slice `items[1:]` skips the first row, so `total` is low.**\n>\n" +
+	"> | | rows `n` | total `t` |\n> |---|---|---|\n> | before | **3** | **71.51** |\n> | after | **4** | **93.11** |\n>\n" +
+	"> ```\n> python3 -m unittest -q   # Ran 4 tests in 0.002s\n> ```\n>\n> The `test_inventory.py` run is the **only** check.\n\n" +
+	"```python\ndef total_value(items):\n    return round(sum(qty * price for _, qty, price in items), 2)\n```\n"
+
+// Only text that is clearly Markdown is drawn as Markdown: two marks at line starts (a table counts two). Shell output
+// with *, _ and # comments, a diff or grep of a .md, YAML, a REPL stay as they are.
+func TestLooksLikeMarkdownOnlyForClearMarkdown(t *testing.T) {
+	for _, md := range []string{
+		cardMarkdownDoc,
+		"| model | tok/s |\n|:---|---:|\n| swift | 42 |\n",             // a table alone (a tool printing one)
+		"## Build\n\nRun it:\n\n```sh\nmake\n```\n",                    // a heading and a fence
+		"## Notes\n> one\n> two\n",                                     // a heading and quote lines
+		"> ## quoted heading\n> | a | b |\n> |---|---|\n> | 1 | 2 |\n", // marks inside a quote
+	} {
+		if !looksLikeMarkdown(md) {
+			t.Errorf("not taken as Markdown:\n%s", md)
+		}
+	}
+	for _, raw := range []string{
+		"#!/bin/sh\n# build everything\n## step 1\nmake -j8 *.o\n## step 2\nrm -f __pycache__/*.pyc\n", // a script's comments
+		"--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n ## Install\n-| a | b |\n+| a | c |\n |---|---|\n ```\n ```\n",
+		"README.md:3:## Install\nREADME.md:9:| a | b |\nREADME.md:10:|---|---|\n",
+		"name: build\non: [push]\njobs:\n  test:\n    # the CPU suites\n    runs-on: ubuntu-latest\n",
+		">>> print('**bold**')\n**bold**\n>>> 2 * 3\n6\n",
+		"## Results\ntotal_value: **93.11** (was _71.51_)\n* 4 tests passed\n",
+		"FAILED (failures=1)\n# 3 of 4\n> not a quote? \n",
+		mixedOutput, // a log around one table: not mostly Markdown
+	} {
+		if looksLikeMarkdown(raw) {
+			t.Errorf("ordinary output taken as Markdown:\n%s", raw)
+		}
+	}
+}
+
+// markdownCardChat: a terminal call whose output is cardMarkdownDoc, then one whose output is shell text with *, _
+// and #, in the everything view (Ctrl+O).
+func markdownCardChat(t *testing.T, w, h int) emberModel {
+	t.Helper()
+	m := chatFixture(t)
+	m.width, m.height = w, h
+	m.chat.cards, m.chat.expanded, m.chat.full = true, true, true
+	call := func(id, cmd string) map[string]any {
+		return map[string]any{"tool_calls": []any{map[string]any{"id": id, "type": "function",
+			"function": map[string]any{"name": "terminal", "arguments": `{"command": "` + cmd + `"}`}}}}
+	}
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 2, Goal: "original", Kind: "assistant", Data: call("c1", "cat NOTES.md")},
+		residentEvent{Seq: 3, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c1",
+			"result": map[string]any{"exit_code": 0.0, "output": cardMarkdownDoc}}},
+		residentEvent{Seq: 4, Goal: "original", Kind: "assistant", Data: call("c2", "make")},
+		residentEvent{Seq: 5, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c2",
+			"result": map[string]any{"exit_code": 0.0, "output": "# build\n## step 1\ncc -o *.o __init__.c\n"}}})
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	return m
+}
+
+// compactView switches m to the compact view with the Markdown card (Seq 3) opened by a click.
+func compactView(m emberModel) emberModel {
+	m.chat.cards, m.chat.expanded, m.chat.full = false, false, false
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	return m.toggleCard(3)
+}
+
+// An open card whose output is Markdown draws it rendered (heading, quote, table, fences, bold and code without their
+// marks), within the transcript's width at every width, in both views; shell output beside it stays as it is; Ctrl+Y
+// shows the source and back.
+func TestAnOpenMarkdownCardRendersAndCtrlYShowsItsSource(t *testing.T) {
+	for _, w := range []int{40, 60, 90, 160} {
+		for _, view := range []string{"everything", "compact"} {
+			m := markdownCardChat(t, w, 80)
+			if view == "compact" {
+				m = compactView(m)
+			}
+			plain := ansi.Strip(m.chat.content)
+			for _, want := range []string{"The short version", "items[1:]", "93.11", "unittest", "def total_value(items):",
+				"# build\n", "## step 1", "cc -o *.o __init__.c"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("%s at %d: want %q in the open cards:\n%s", view, w, want, plain)
+				}
+			}
+			for _, mark := range []string{"### 3.1", "**", "|---|", "> |", "`items", "#### The short", "```"} {
+				if strings.Contains(plain, mark) {
+					t.Fatalf("%s at %d: the rendered card still shows %q:\n%s", view, w, mark, plain)
+				}
+			}
+			if w >= 90 && (!strings.Contains(plain, "3.1 The fix: count every row, keep the format") || !strings.Contains(plain, "│ 93.11")) {
+				t.Fatalf("%s at %d: the heading and the table are drawn:\n%s", view, w, plain)
+			}
+			tw := m.transcriptWidth(max(20, m.width))
+			for _, ln := range strings.Split(m.chat.content, "\n") {
+				if ansi.StringWidth(ln) > tw {
+					t.Fatalf("%s at %d: a card line passes the transcript's %d cells (%d): %q", view, w, tw, ansi.StringWidth(ln), ansi.Strip(ln))
+				}
+			}
+		}
+	}
+	m := markdownCardChat(t, 90, 60)
+	// the output is sanitised before it is rendered: a program's escape sequences and control bytes never reach the screen
+	if out := m.chat.openCardMarkdown(cardOutput(residentEvent{Kind: "shell", Data: map[string]any{
+		"output": cardMarkdownDoc + "\x1b]52;c;cHduZWQ=\x07 \x1b]2;title\x07 \u009b2J \x00 \x1b[2J"}})); out == "" ||
+		strings.ContainsAny(out, "\x07\x00\u009b") || strings.Contains(out, "\x1b]") || strings.Contains(out, "\x1b[2J") {
+		t.Fatalf("the rendered output carries the program's control sequences: %q", out)
+	}
+	next, _ := m.chatKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	m = next.(emberModel)
+	plain := ansi.Strip(m.chat.content)
+	if !strings.Contains(plain, "### 3.1 The fix: **count every row, keep the format**") || !strings.Contains(plain, "> |---|---|---|") ||
+		!strings.Contains(m.msg, "source") {
+		t.Fatalf("Ctrl+Y shows the source (msg %q):\n%s", m.msg, plain)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	if m = next.(emberModel); strings.Contains(ansi.Strip(m.chat.content), "### 3.1") {
+		t.Fatal("a second Ctrl+Y renders it again")
+	}
+}
+
+// In the compact view a folded card is as it was (its last lines, raw), whichever way Ctrl+Y is set.
+func TestAFoldedMarkdownCardStaysAsItWas(t *testing.T) {
+	m := markdownCardChat(t, 90, 60)
+	m.chat.cards, m.chat.expanded, m.chat.full = false, false, false
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	folded := m.chat.content
+	if !strings.Contains(ansi.Strip(folded), "    return round(sum(qty * price for _, qty, price in items), 2)\n    ```") {
+		t.Fatalf("the folded card previews its last lines as they are:\n%s", ansi.Strip(folded))
+	}
+	src := m
+	src.chat.mdSource = true
+	src.chat.content, src.chat.rendered = "", 0
+	src.syncChat()
+	if src.chat.content != folded {
+		t.Fatal("a folded card changed with the Markdown view")
+	}
+}
+
+// mixedOutput is a script's log with one table in it (a traceback, build lines, the table, its exit): rendered, it lost
+// <stdin> and <module> to the HTML sanitiser, a*b*c's and __init__'s marks to emphasis, and EXIT=0 became a table row.
+const mixedOutput = "Traceback (most recent call last):\n  File \"<stdin>\", line 1, in <module>\n    x = a*b*c\n" +
+	"ValueError: bad __init__ value\nbuilding foo.o\nbuilding bar.o\n\n| model | tok/s |\n|---|---|\n| swift | 42 |\nEXIT=0\n"
+
+// zzOutputs is markdownCardChat with the given outputs, one terminal card each (Seq 3, 5, ...), in the everything view.
+func outputCards(t *testing.T, w, h int, outputs ...string) emberModel {
+	t.Helper()
+	m := chatFixture(t)
+	m.width, m.height = w, h
+	m.chat.cards, m.chat.expanded, m.chat.full = true, true, true
+	for i, out := range outputs {
+		id := fmt.Sprintf("o%d", i)
+		m.residentEvents = append(m.residentEvents,
+			residentEvent{Seq: 2 + 2*i, Goal: "original", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"id": id,
+				"type": "function", "function": map[string]any{"name": "terminal", "arguments": `{"command": "cat ` + id + `.md"}`}}}}},
+			residentEvent{Seq: 3 + 2*i, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": id,
+				"result": map[string]any{"exit_code": 0.0, "output": out}}})
+	}
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	return m
+}
+
+// glamour turns HTML entities back into the bytes they name (&#27; is ESC), after the text was sanitised: what it
+// draws is filtered again, so no APC, DCS, OSC (titles, the clipboard, OSC 8 links), cursor or screen sequence, C0 or
+// C1 control or bidi override reaches the screen, from a card or from a reply. SGR colour stays.
+func TestRenderedMarkdownSendsTheTerminalOnlyTextAndColour(t *testing.T) {
+	evil := "kitty &#27;&#95;Ga=q,i=1;AAAA&#27;&#92; dcs &#27;P+q544e&#27;&#92; osc &#27;]52;c;aGk=&#7; title &#27;]0;t&#7; " +
+		"csi &#27;[2J c1 &#x9b;31m bidi &#x202E;txt.exe &#x2066;iso&#x2069; `&#27;[5m` ~~&#27;]0;x&#7;~~ [link](https://example.com/&#27;x)"
+	reply := chatFixture(t)
+	reply.width, reply.height = 100, 40
+	reply.residentEvents = append(reply.residentEvents, residentEvent{Seq: 2, Goal: "original", Kind: "assistant",
+		Data: map[string]any{"content": "## Notes\n\n" + evil}})
+	reply.chat.rendered, reply.chat.content = 0, ""
+	reply.syncChat()
+	card := outputCards(t, 100, 40, "## Notes\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n"+evil+"\n")
+	for name, m := range map[string]emberModel{"reply": reply, "card": card} {
+		m.chat.transcript.GotoTop()
+		screen := m.render()
+		if !strings.Contains(ansi.Strip(screen), "txt.exe") || !strings.Contains(screen, "\x1b[") {
+			t.Fatalf("%s: not rendered:\n%s", name, ansi.Strip(screen))
+		}
+		for _, bad := range []string{"\x1b_", "\x1bP", "\x1b]", "\x1b[2J", "\x1b[5m\x1b", "\x07", "\u009b", "\u202e", "\u2066", "\u2069"} {
+			if strings.Contains(screen, bad) {
+				t.Fatalf("%s: %q reached the screen:\n%q", name, bad, screen)
+			}
+		}
+		for i := 0; i < len(screen); i++ {
+			if screen[i] == 0x1b && (i+1 >= len(screen) || screen[i+1] != '[') {
+				t.Fatalf("%s: an escape that is not a CSI reached the screen: %q", name, screen[i:min(len(screen), i+12)])
+			}
+		}
+	}
+	if got := screenSafe("a\x1b[1;38;2;1;2;3mb\x1b[0m\x1b[2Jc\x1b]8;;http://x\x1b\\d\x1b_G\x1b\\e\u202e\x00\tf\n"); got !=
+		"a\x1b[1;38;2;1;2;3mb\x1b[0mcde\\u202e\\x00\tf\n" {
+		t.Fatalf("screenSafe kept or dropped the wrong things: %q", got)
+	}
+}
+
+// Deep quote or list nesting made glamour take seconds (a table and 200 > on one line: 3.8 s; 800: never), on the UI's
+// goroutine: past mdMaxDepth the card stays as it is, and a reply too, at once.
+func TestDeeplyNestedMarkdownStaysAsItIsAtOnce(t *testing.T) {
+	tbl := "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+	m := outputCards(t, 100, 40)
+	for name, text := range map[string]string{
+		"quotes": tbl + strings.Repeat(">", 800) + " x\n",
+		"lists":  tbl + strings.Repeat("- ", 200) + "x\n",
+		"indent": tbl + "## deep\n" + strings.Repeat("  ", 400) + "- x\n",
+		"mixed":  tbl + strings.Repeat("> - ", 100) + "x\n",
+	} {
+		start := time.Now()
+		card := m.chat.openCardMarkdown(text)
+		reply := m.chat.renderMarkdown(text)
+		if took := time.Since(start); took > 100*time.Millisecond {
+			t.Fatalf("%s: %v to decide", name, took)
+		}
+		if card != "" || reply != residentText(text) {
+			t.Fatalf("%s: rendered past the nesting bound", name)
+		}
+	}
+	if m.chat.openCardMarkdown(tbl+"> > > - - x\n") == "" {
+		t.Fatal("shallow nesting is rendered")
+	}
+}
+
+// Each card's text is drawn once per renderer: a redraw (Ctrl+O, Ctrl+Y, a click, a state change) reads the cache (a
+// table of 4990 rows took 0.57 s to draw, on every redraw); a new width or theme makes a new renderer and cache.
+func TestARenderedCardIsDrawnOncePerRenderer(t *testing.T) {
+	m := markdownCardChat(t, 90, 60)
+	if _, ok := m.chat.mdCache[cardMarkdownDoc]; !ok {
+		t.Fatal("the drawing is not cached")
+	}
+	m.chat.mdCache[cardMarkdownDoc] = "SENTINEL-DRAWING"
+	m = m.redrawInPlace()
+	if !strings.Contains(ansi.Strip(m.chat.content), "SENTINEL-DRAWING") {
+		t.Fatal("a redraw rendered the card again")
+	}
+	m.width = 120
+	m.syncChat()
+	if strings.Contains(ansi.Strip(m.chat.content), "SENTINEL-DRAWING") {
+		t.Fatal("a new width kept the old drawing")
+	}
+}
+
+// A command's output keeps its line breaks and every character: <tags> are text, links are plain (no OSC 8, no link
+// colour); and a log around a table stays as it is.
+func TestARenderedCardKeepsTheOutputsText(t *testing.T) {
+	doc := "## Run\n\n| step | result |\n|---|---|\n| build | ok |\n\nFile \"<stdin>\", line 1, in <module>\nsecond line\n\n" +
+		"See [the docs](https://example.com/docs).\n"
+	m := outputCards(t, 100, 60, doc, mixedOutput)
+	plain := ansi.Strip(m.chat.content)
+	for _, want := range []string{"File \"<stdin>\", line 1, in <module>\n", "second line", "the docs",
+		"  File \"<stdin>\", line 1, in <module>", "x = a*b*c", "bad __init__ value", "EXIT=0", "| model | tok/s |"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("want %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(m.chat.content, "\x1b]8;") {
+		t.Fatal("a link from command output is clickable")
+	}
+}
+
+// Ctrl+Y keeps the card being read in view: anchored on the card at the top of the view, not a share of the history
+// (with long rendered cards above and below, the share put it off screen).
+func TestCtrlYKeepsTheCardBeingReadInView(t *testing.T) {
+	big := "## Big\n\n"
+	for i := 0; i < 150; i++ {
+		big += fmt.Sprintf("- item %d, one long sentence that goes on for a while and wraps when it is rendered at this width.\n", i)
+	}
+	big += "\n```\ncode\n```\n"
+	m := outputCards(t, 90, 30, big, "## Target\n\n| target | here |\n|---|---|\n| TARGETCELL | 1 |\n", big)
+	at := slices.IndexFunc(strings.Split(ansi.Strip(m.chat.transcript.GetContent()), "\n"), func(l string) bool { return strings.Contains(l, "TARGETCELL") })
+	m.chat.transcript.SetYOffset(at - 2)
+	for range 2 {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+		if m = next.(emberModel); !strings.Contains(ansi.Strip(m.render()), "TARGETCELL") {
+			t.Fatalf("Ctrl+Y moved the card being read off screen (source view %v)", m.chat.mdSource)
+		}
+	}
+}
+
+// A drag over a rendered card copies its Markdown source, not the drawn table and rules; text around it as drawn. In
+// both views (their heads and rules differ).
+func TestCopyingARenderedMarkdownCardGivesItsSource(t *testing.T) {
+	for _, view := range []string{"everything", "compact"} {
+		m, head := markdownCardChat(t, 90, 80), "output  terminal"
+		if view == "compact" {
+			m, head = compactView(m), "terminal  $ cat NOTES.md"
+		}
+		m.chat.transcript.GotoTop()
+		_, got := dragOver(t, m, head, "cc -o *.o __init__.c")
+		if !strings.Contains(got, strings.TrimRight(cardMarkdownDoc, "\n")) {
+			t.Fatalf("%s: the copy is not the card's source:\n%s", view, got)
+		}
+		if !strings.Contains(got, head) || !strings.Contains(got, "cc -o *.o __init__.c") || strings.Contains(got, "│ 93.11") {
+			t.Fatalf("%s: the copy keeps the heads and the raw card as drawn, the rendered body as its source:\n%s", view, got)
+		}
+	}
+}
+
 // A table's header and cells read in the body's text colour in every built-in theme, and that colour reads on the
 // theme's background (WCAG AA, 4.5:1): they were in the chrome grey, barely visible on a dark background.
 func TestMarkdownTablesUseTheBodyTextColourInEveryTheme(t *testing.T) {

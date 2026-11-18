@@ -11,6 +11,10 @@ and the state through the cache and reports each pass it accepts (PromptCache.ap
           A counter that moved since means the engine was reset outside the cache (seq) or ran passes the cache was not told
           about (token).
 
+The log is only ever replaced (LiveState.set_log, the PromptCache.log setter) or extended in place (PromptCache.append),
+never edited in place. Two readers rely on it: K3Session's pass sequence (serve/k3_session.py _PassTokens) reads the log
+in place below i0 instead of copying it, and LiveState.log_array keeps an int64 array of the log's prefix.
+
 Before 2026-11-07 the session kept its own copy of the log and state, synced with the cache's by hand at the end of every
 request, and worked out from its own epochs what the device held; four fixes (668dd7a, 03c0d93, facbdac, 500ff36) were
 drift between those copies.
@@ -34,8 +38,9 @@ def lcp(a, b):
 def token_ids(ids, a=None):
     """(ids as a list of ints, the same ids as an int64 array of their own): a request's ids converted once, the list for
     the log and the passes, the array for every prefix match. a: a pair this returned already (ids, a), passed on by a
-    caller that converted them (PromptCache.prompt to prepare and extend, K3Session to the cache): kept as it is"""
-    if a is not None and len(a) == len(ids):
+    caller that converted them (PromptCache.prompt to prepare and extend, K3Session to the cache): kept as it is when ids
+    is a list (a tuple, an array or another sequence is converted even with one)"""
+    if a is not None and type(ids) is list and len(a) == len(ids):
         return ids, a
     a = np.array(ids, dtype=np.int64)
     if a.ndim != 1: raise TypeError(f'token ids: a sequence of ints, not shape {a.shape}')
@@ -67,10 +72,10 @@ class LiveState:
         self.log, self.arr = log, ((log, arr) if arr is not None else None)
 
     def log_array(self):
-        """the log as an int64 array, for prefix matches (lcp; read only). Kept between calls: the log is only ever replaced
-        (set_log) or extended in place (PromptCache.append), so while it is the same object and no shorter, the kept array
-        is its prefix and only what it gained is converted; another object, or a shorter one, is converted whole (and so
-        is one whose last kept token no longer matches: a log changed in place some other way)"""
+        """the log as an int64 array, for prefix matches (lcp; read only). Kept between calls (the module note's rule on
+        the log): while the log is the same object and no shorter, the kept array is its prefix and only what it gained is
+        converted; another object, or a shorter one, is converted whole (and so is one whose last kept token no longer
+        matches: a log changed in place some other way)"""
         log, c = self.log, self.arr
         if c is not None and c[0] is log and len(c[1]) <= len(log) and (not len(c[1]) or log[len(c[1]) - 1] == c[1][-1]):
             a = c[1]
