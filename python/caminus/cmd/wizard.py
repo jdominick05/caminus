@@ -272,7 +272,7 @@ class Wizard:
         if got.lower() in ('y', 'yes'):
             return 'start', names
         if len(running) == 1:
-            self.say(f'kept {names[0]}: no download, no start; Qwen Code is set up for it')
+            self.say(f'kept {names[0]}: no download, no start; Qwen Code is set up for it next (step 5)')
             return 'keep', names[0]
         for i, s in enumerate(running, 1):
             self.say(f"  {i}. {s['name']} ({s['model']})")

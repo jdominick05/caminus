@@ -147,8 +147,10 @@ def main():
           f'SETUPS: catalog names, two-card forms the registry has, the start model among what runs ({bad})')
     pkg = os.path.join(PY, 'caminus')
     copies = [os.path.relpath(os.path.join(d, f), pkg) for d, _, fs in os.walk(pkg) for f in fs if f.endswith('.py')
-              and f != 'models.py' and '22 * 1024' in open(os.path.join(d, f), encoding='utf-8').read()]
+              and f != 'models.py' and any(t in open(os.path.join(d, f), encoding='utf-8').read() for t in ('22 * 1024', '22528', '22 << 10'))]
     check(not copies, f'the 24 GB card rule lives in models.CLASS_MIB only (doctor and arch.Coder read card_class) ({copies})')
+    check(models.card_class(22528) == 'XTX' and models.card_class(22527) == 'XT',
+          'card_class: 22,528 MiB is a 24 GB card, 22,527 is not (the edge doctor and arch.Coder.fits now read)')
     cls = lambda *mib: models.setup_of([dict(total_mib=x) for x in mib])
     check(cls(24560)['start'] == 'swift-1.5' and cls(20464)['start'] == 'thinkingcap' and cls(24560, 20464)['start'] == 'coder'
           and cls(20464, 20464)['row'] == 'Two XT' and cls(49136)['row'] == 'One XTX' and cls(24560, 16368)['row'] == 'One XTX'
