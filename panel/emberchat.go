@@ -94,7 +94,8 @@ type residentChat struct {
 	pathSel                                 int    // the path suggestions' highlighted row (arrows)
 	pathSelFor                              string // the token pathSel belongs to (a new token starts at its pick)
 	live                                    residentLive
-	liveShown                               string // the reply being written as the transcript last drew it (wide terminals)
+	turnPeak                                turnPeak // the activity line's token count, held at its peak within a turn
+	liveShown                               string   // the reply being written as the transcript last drew it (wide terminals)
 	stream                                  *streamState
 	streamStarting                          bool      // a reader is being started: the tick starts no second one
 	streamRetry                             time.Time // a reader that ended is restarted no sooner than this
@@ -306,6 +307,7 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 		m.statusAt = time.Now() // (the online clock ticks on from here between refreshes)
 	}
 	defer m.notifyResident(msg.events)
+	defer m.noteTurnTokens() // (after the events and any live reset below)
 	for _, e := range msg.events {
 		if e.Seq > m.chat.seq {
 			if len(m.residentEvents) >= maxResidentEvents {

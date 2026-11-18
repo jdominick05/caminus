@@ -421,9 +421,10 @@ class Store:
             raise ValueError('no goals yet')
         return r['id']
 
-    def model_reply(self, gid, message, reasoning=''):
+    def model_reply(self, gid, message, reasoning='', tokens=0):
         """Store one reply. reasoning is displayed with the reply but never sent back to the model:
-        it is not part of messages, so replay and the token budget are unchanged."""
+        it is not part of messages, so replay and the token budget are unchanged. tokens (the provider's count of
+        what the reply wrote, 0 when unknown) goes on the event only, for the UI's per-turn count."""
         with self.transaction():
             g = self.goal(gid)
             if g['state'] == 'cancelled':
@@ -434,7 +435,10 @@ class Store:
                 f = call['function']
                 self.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
                     (uuid.uuid4().hex, gid, call['id'], f['name'], f['arguments'], 'pending'))
-            self.event('assistant', dict(message, reasoning=reasoning) if reasoning else message, gid)
+            shown = dict(message, reasoning=reasoning) if reasoning else dict(message)
+            if tokens:
+                shown['tokens'] = tokens
+            self.event('assistant', shown, gid)
         return True
 
     def _unique_calls(self, gid, message):

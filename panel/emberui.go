@@ -808,6 +808,7 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chat.live.tools = msg.tools
 			}
 		}
+		m.noteTurnTokens()
 		wasBottom := m.chat.transcript.AtBottom()
 		m.syncChat()
 		if wasBottom {

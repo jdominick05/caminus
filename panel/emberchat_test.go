@@ -2620,6 +2620,74 @@ func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
 	}
 }
 
+func TestTheActivityLineCountsTheWholeTurnsTokens(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.resident.Goals = []residentGoal{{ID: "g1", State: "working", Prompt: "x"}}
+	now := float64(time.Now().Add(-60 * time.Second).Unix())
+	m.residentEvents = []residentEvent{{Seq: 10, Ts: now, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "x"}}}
+	seq, last := 10, 0
+	shown := func(step string) int {
+		t.Helper()
+		_, _, n := m.turnTokens("g1")
+		if n < last {
+			t.Fatalf("%s: the count went back from %d to %d", step, last, n)
+		}
+		last = n
+		return n
+	}
+	live := func(turn string, chars int) { // a call writing: its live text so far
+		next, _ := m.Update(residentLiveMsg{turn: turn, text: strings.Repeat("w", chars), reset: true})
+		m = next.(emberModel)
+	}
+	land := func(tokens int, kind string) { // a call's event, with the provider's count; or a new turn's message
+		seq++
+		data := map[string]any{"content": "x", "tokens": float64(tokens)}
+		if kind != "assistant" {
+			data = map[string]any{"text": "and now this"}
+		}
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+			events: []residentEvent{{Seq: seq, Ts: now + float64(seq), Goal: "g1", Kind: kind, Data: data}}})
+	}
+	// call 1 writes about 200 tokens; its live text clears and call 2 starts before call 1's event arrives (the
+	// stream is pushed, events are polled): the count holds instead of dropping back
+	live("t1", 800)
+	if n := shown("call 1 writing"); n != 200 {
+		t.Fatalf("call 1's estimate: %d", n)
+	}
+	m.chat.stopStream()
+	live("t2", 40)
+	shown("call 2 started before call 1 landed")
+	// call 1 lands at 180 real tokens, under its estimate: the line holds 200 until the real sum passes it
+	land(180, "assistant")
+	if n := shown("call 1 landed under its estimate"); n != 200 {
+		t.Fatalf("held at the peak: %d", n)
+	}
+	live("t2", 400)
+	if n := shown("call 2 writing"); n != 280 {
+		t.Fatalf("180 real + 100 estimated: %d", n)
+	}
+	// call 2 lands over its estimate: the real count replaces it
+	land(120, "assistant")
+	if n := shown("call 2 landed"); n != 300 {
+		t.Fatalf("180 + 120: %d", n)
+	}
+	live("t3", 200)
+	shown("call 3 writing")
+	land(60, "assistant")
+	if n := shown("call 3 landed"); n != 360 {
+		t.Fatalf("three calls sum to 180 + 120 + 60: %d", n)
+	}
+	if v := ansi.Strip(m.activityLine(120)); !strings.Contains(v, "↓ 360 tokens") {
+		t.Fatalf("the line shows the turn's sum: %q", v)
+	}
+	// a new turn (your message) starts the count over
+	land(0, "user_message")
+	if _, _, n := m.turnTokens("g1"); n != 0 || strings.Contains(ansi.Strip(m.activityLine(120)), "↓") {
+		t.Fatalf("a new turn resets the count: %d", n)
+	}
+}
+
 func TestTheActivityLineShowsWhatTheAgentDoesWithItsNumbers(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 120, 40

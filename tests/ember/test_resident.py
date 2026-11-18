@@ -607,6 +607,23 @@ class Resident(unittest.TestCase):
             self.assertAlmostEqual(out['cache_hit'],0.7)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_replys_written_tokens_go_on_its_event_for_the_turn_count(self):
+        rt=Runtime(self.home)
+        try:
+            # the provider's count (OpenAI-style, Anthropic-style), else a Caminus server's predicted_n, else nothing
+            for usage,speed,want in ((dict(prompt_tokens=900,completion_tokens=42),None,42),(dict(input_tokens=9,output_tokens=7),None,7),
+                                     ({},dict(source='engine',tokens=31,tps=40.0),31),({},dict(source='estimate',tokens=50,tps=9.0),0),
+                                     (dict(completion_tokens=True),None,0)):
+                rt.model.last_usage,rt.model.last_speed=usage,speed
+                self.assertEqual(rt._reply_tokens(),want,(usage,speed))
+            gid=rt.store.enqueue('Count.')
+            rt.store.model_reply(gid,dict(role='assistant',content='done'),tokens=42)
+            rt.store.model_reply(gid,dict(role='assistant',content='again'))
+            shown=[e['data'] for e in rt.store.events() if e['kind']=='assistant']
+            self.assertEqual([d.get('tokens') for d in shown],[42,None])
+            self.assertFalse(any('tokens' in m for m in rt.store.goal(gid)['messages']),'the count is never sent back to the model')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_theme_op_asks_the_brain_once_with_the_roles_and_the_description(self):
         self.replies(dict(role='assistant',content='name = autumn\naccent = #ff8800'))
         out=self.cmd('theme',['warm autumn forest'])
