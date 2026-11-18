@@ -36,11 +36,18 @@ def penalty_ids(prm, history, drafts):
     the penalties off"""
     if not prm.penalties_on:
         return np.zeros(0, np.int64)
-    n = prm.penalty_last_n
-    h = list(history) + list(drafts)
-    if n > 0:
-        h = h[-(n + len(drafts)):]
+    h = penalty_tail(prm, history) + list(drafts)
     return np.unique(np.asarray(h, dtype=np.int64)) if h else np.zeros(0, np.int64)
+
+
+def penalty_tail(prm, history):
+    """the part of history any row's penalty window reads, as a list: its last penalty_last_n tokens (all of it for -1,
+    none with the penalties off). Row j's window, the last penalty_last_n of history + drafts[:j], is the same cut of
+    tail + drafts[:j]; only the window is copied, not the history before it"""
+    if not prm.penalties_on:
+        return []
+    n = prm.penalty_last_n
+    return list(history[-n:] if n > 0 else history)
 
 
 def k_prime(prm, n_pen):
@@ -166,9 +173,12 @@ def distribution(row, prm, history, counts=None):
     return S.filter_chain(row.full, prm, history)
 
 
-def sample(row, sampler, history, counts=None):
-    """sampler.Sampler.sample on one Row (the same token, bitwise the same arithmetic)"""
+def sample(row, sampler, history, counts=None, pos=None):
+    """sampler.Sampler.sample on one Row (the same token, bitwise the same arithmetic). pos: the token's absolute position
+    (its uniform's), when history is only the penalty window's tail (penalty_tail); default len(history)"""
     prm = sampler.params
+    if pos is None:
+        pos = len(history)
     if prm.greedy:
         if row.cards is not None:
             c = candidates(row, prm, history, counts)
@@ -180,8 +190,8 @@ def sample(row, sampler, history, counts=None):
     if row.cards is not None and prm.temperature > 0:
         c = candidates(row, prm, history, counts)
         if c is not None:
-            return draw_fast(c[0], c[1], prm, sampler.uniform(len(history)))
-    return S.draw(distribution(row, prm, history, counts), sampler.uniform(len(history)))
+            return draw_fast(c[0], c[1], prm, sampler.uniform(pos))
+    return S.draw(distribution(row, prm, history, counts), sampler.uniform(pos))
 
 
 def needs_full(row, prm, history):
@@ -191,9 +201,11 @@ def needs_full(row, prm, history):
 
 def sample_and_match(rows, sampler, drafts, history, stop_ids=(), fetch=None):
     """sampler.Sampler.sample_and_match over Rows: rows[j] predicts the token after history + drafts[:j]. fetch(j) -> float32
-    [V]: the full row j, called only for a row whose candidates cannot be exact (it fills row.full). Returns the emitted ids"""
+    [V]: the full row j, called only for a row whose candidates cannot be exact (it fills row.full). Returns the emitted ids.
+    Only the penalty window's tail of history is copied (penalty_tail); row j's position is len(history) + j"""
     prm = sampler.params
-    h = list(history)
+    pos = len(history)
+    h = penalty_tail(prm, history)
     out = []
     for j in range(len(drafts) + 1):
         r = rows[j]
@@ -202,7 +214,7 @@ def sample_and_match(rows, sampler, drafts, history, stop_ids=(), fetch=None):
             if fetch is None:
                 raise LookupError(f'candsample: row {j} needs the full row and no fetch was given')
             r.full = fetch(j)
-        y = sample(r, sampler, h, cn)
+        y = sample(r, sampler, h, cn, pos=pos + j)
         out.append(y)
         if y in stop_ids:
             break
@@ -281,15 +293,13 @@ def sample_and_match_batched(V0, I0, V1, I1, sampler, drafts, history, stop_ids=
         us = [sampler.uniform(base + j) for j in range(R)]
     toks, ok = draws_batched(V0[:R], I0[:R], V1[:R], I1[:R], sampler.params, us)
     out = []
-    h = None
     for j in range(R):
         if ok[j]:
             y = int(toks[j])
         else:
             if fetch is None:
                 raise LookupError(f'candsample: row {j} needs the full row and no fetch was given')
-            if h is None: h = list(history)
-            y = sampler.sample(fetch(j), list(history) + list(drafts[:j]))
+            y = sampler.sample(fetch(j), list(history) + list(drafts[:j]))   # (rare: a tie at a cut, a non-finite value)
         out.append(y)
         if y in stop_ids or j == len(drafts) or y != drafts[j]:
             break

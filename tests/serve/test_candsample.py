@@ -214,5 +214,129 @@ class TestCandidates(unittest.TestCase):
               f'(64-id window): {best_p * 1e6:.1f} us')
 
 
+def _old_window(history, drafts, last_n):
+    """the penalty window as the code before the tail took it (the whole history copied and converted, then cut): the oracle"""
+    h = list(history) + list(drafts)
+    if last_n > 0:
+        h = h[-(last_n + len(drafts)):]
+    return h
+
+
+# the tokens K3Session's sampled passes emitted in TestSessionTail on the code before the penalty tail (the whole history
+# copied into every sampler call): sha256 of the emitted ids, per case
+SESSION_TAIL_SHA = {
+    'presence+frequency, window 64, T 4': '1700bdc4bfe49d36',
+    'presence+frequency, whole history (-1), T 4': 'd094f3bd3b1f2d32',
+    'window past the history, repeat 1.1, T 1': '58e8458d95205f58',
+    'greedy with penalties, window 8, T 4': '44e7a32aee443dfb',
+    'penalties off, batched, ties, T 4': '313df32e6516f208',
+    'presence, top_k 0 (whole rows), T 4': '335656c433886b40',
+}
+
+
+class TestSessionTail(unittest.TestCase):
+    """K3Session's sampled pass at a long history (its own _seq, _penalty_rows and _sample_rows on a stand-in whose cards
+    are CS.emulate_rows of the full rows): the samplers take the penalty window's tail, the token's position travels apart
+    from it, and the emitted tokens stay the full-row reference's (sampler.Sampler on the whole history) and the tokens the
+    code before the tail emitted (SESSION_TAIL_SHA)"""
+    V, VH = 3000, 1400
+
+    def _row(self, pos, hist, kind):
+        r = np.random.default_rng(pos * 7919 + 13)
+        if kind == 'ties' and pos % 5 == 0:                 # (ties at the cards' cuts: the full-row fallback)
+            x = r.integers(-3, 4, self.V).astype(np.float32)
+        else:
+            x = (r.standard_normal(self.V) * 2).astype(np.float32)
+        x[np.asarray(hist[-24:], dtype=np.int64)] += 3.0     # (recent ids favoured: the penalties decide draws)
+        return x
+
+    def _run(self, prm, T, n0, steps, kind, seed):
+        import collections
+        from types import SimpleNamespace
+        from caminus.serve.k3_session import K3Session
+        rng = np.random.default_rng(seed)
+        hist = [int(x) for x in rng.integers(0, self.V, n0)]
+        hist[-200:] = [int(x) for x in rng.integers(0, 40, min(200, n0))]   # (a repetitive tail: real counts in the window)
+        smp = S.Sampler(prm)
+        s = K3Session.__new__(K3Session)
+        s.T, s.kmax, s.samp_t = T, 512, collections.deque(maxlen=8)
+        s.counters = collections.Counter()
+        box = {}
+        s.pc = SimpleNamespace(live_tokens=lambda: box['toks'])
+        s.rows_wait = lambda R, pid, kp: box['rows'][:R]
+        s.cards_wait = lambda R, kp: tuple(np.stack([r.cards[c][i] for r in box['rows'][:R]]) for c in (0, 1) for i in (0, 1))
+        s.full_row = lambda r, src=None: box['full'][r - box['F'] + 1]
+        out_all = []
+        for step in range(steps):
+            F = 1
+            k = min(T - F, 3) if step % 3 else 0
+            pos = len(hist)
+            ref_free = [smp.sample(self._row(pos, hist, kind), hist)] if k else []
+            drafts = []
+            for j in range(k):                               # (drafts the target likes, one corrupted now and then)
+                drafts.append(int(ref_free[-1]) if j == 0 else int(smp.sample(self._row(pos + j, hist + drafts, kind), hist + drafts)))
+            if k and step % 4 == 1:
+                drafts[int(rng.integers(0, k))] = int(rng.integers(0, self.V))
+            full = np.stack([self._row(pos + j, hist + drafts[:j], kind) for j in range(k + 1)])
+            toks, feed = hist[:-F], hist[-F:]
+            box.update(toks=toks, full=full, F=F, rows=CS.emulate_rows(full, self.VH, prm, hist, drafts, tie_order='high'))
+            i0, seq = s._seq(feed, drafts)
+            body = feed + drafts
+            old = toks + body + [body[-1]] * (T - len(body))
+            self.assertEqual(len(seq), len(old))
+            self.assertEqual(list(seq[i0:i0 + T]), old[i0:i0 + T])
+            self.assertEqual(list(seq[max(0, i0 - 5):i0 + T]), old[max(0, i0 - 5):i0 + T])
+            self.assertEqual([seq[i] for i in (0, i0 - 1, i0, i0 + T - 1)], [old[i] for i in (0, i0 - 1, i0, i0 + T - 1)])
+            pid, kp = s._penalty_rows(prm, hist, drafts)
+            if prm.penalties_on:
+                self.assertTrue(np.array_equal(pid, np.unique(np.asarray(_old_window(hist, drafts, prm.penalty_last_n), np.int64))))
+            got = s._sample_rows(F, k, drafts, smp, hist, frozenset(), pid, kp, False)
+            ref = smp.sample_and_match(full, drafts, list(hist), ())
+            self.assertEqual(got, ref, (step, k))
+            out_all += got
+            hist += got
+        return out_all
+
+    def test_tail_equal(self):
+        import hashlib
+        cases = {
+            'presence+frequency, window 64, T 4': (S.SamplingParams(temperature=0.6, top_k=20, top_p=0.95, presence_penalty=1.5,
+                                                                    frequency_penalty=0.5, seed=7), 4, 3000, 'normal'),
+            'presence+frequency, whole history (-1), T 4': (S.SamplingParams(temperature=0.8, top_k=40, presence_penalty=1.0,
+                                                                             frequency_penalty=0.3, penalty_last_n=-1, seed=8), 4, 1500, 'normal'),
+            'window past the history, repeat 1.1, T 1': (S.SamplingParams(temperature=1.0, top_k=20, repeat_penalty=1.1,
+                                                                          presence_penalty=0.5, penalty_last_n=64, seed=9), 1, 30, 'normal'),
+            'greedy with penalties, window 8, T 4': (S.SamplingParams(temperature=0.0, presence_penalty=1.5, frequency_penalty=0.5,
+                                                                      penalty_last_n=8, seed=10), 4, 3000, 'ties'),
+            'penalties off, batched, ties, T 4': (S.SamplingParams(temperature=0.7, top_k=20, top_p=0.95, seed=11), 4, 3000, 'ties'),
+            'presence, top_k 0 (whole rows), T 4': (S.SamplingParams(temperature=0.7, top_k=0, presence_penalty=1.5, seed=12),
+                                                    4, 3000, 'normal'),
+        }
+        for name, (prm, T, n0, kind) in cases.items():
+            toks = self._run(prm.resolve(), T, n0, 60, kind, seed=len(name))
+            sha = hashlib.sha256(repr(toks).encode()).hexdigest()
+            print(f'\n[candsample] session tail: {name}: {len(toks)} tokens == the full-row reference, sha {sha[:16]}')
+            self.assertEqual(sha[:16], SESSION_TAIL_SHA[name], name)
+
+    def test_window_oracle(self):
+        """sampler.penalty_counts and candsample.penalty_ids == the whole-history conversion cut afterwards (lists, tuples,
+        arrays; every window width against the history's length)"""
+        rng = np.random.default_rng(5)
+        for it in range(400):
+            n = int(rng.integers(0, 300))
+            h = [int(x) for x in rng.integers(0, 50, n)]
+            hist = (h, tuple(h), np.asarray(h, dtype=np.int64))[it % 3]
+            drafts = [int(x) for x in rng.integers(0, 50, int(rng.integers(0, 4)))]
+            for last_n in (-1, 0, 1, 8, 64, n, n + 5):
+                w = _old_window(hist, (), last_n) if last_n != 0 else []
+                ri, rc = np.unique(np.asarray(w, dtype=np.int64), return_counts=True)
+                gi, gc = S.penalty_counts(hist, last_n)
+                self.assertTrue(np.array_equal(gi, ri) and np.array_equal(gc, rc), (it, last_n))
+                prm = S.SamplingParams(presence_penalty=1.0, penalty_last_n=last_n).resolve()
+                pid = CS.penalty_ids(prm, hist, drafts)
+                want = np.unique(np.asarray(_old_window(hist, drafts, last_n), np.int64)) if prm.penalties_on else np.zeros(0, np.int64)
+                self.assertTrue(np.array_equal(pid, want), (it, last_n))
+
+
 if __name__ == '__main__':
     unittest.main()
