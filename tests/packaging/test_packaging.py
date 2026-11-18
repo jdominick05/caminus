@@ -506,8 +506,8 @@ def stage_doctor(S):
     # what one card runs, by its size (a fake sysfs: nothing reads a real card)
     from caminus.cmd import doctor as D
     A = '0x1002'
-    for name, total, want in (('one XTX', 24560, 'one 24 GB card: every one-card model runs'),
-                              ('one XT', 20464, 'one 20 GB card: ThinkingCap and the plain Qwen3.8 27B run')):
+    for name, total, want in (('one XTX', 24560, 'one card (One XTX): swift-1.5, thinkingcap, qwen3.8-27b, qwen3-30b-a3b run'),
+                              ('one XT', 20464, 'one card (One XT): thinkingcap, qwen3.8-27b run')):
         root = os.path.join(S, 'sysfs-' + name.replace(' ', '-'))
         fixture(root, [('card0', total, '0x744c', 128, 0, {}, A, '0000:03:00.0')], [(128, 110000)])
         R = D.Report()

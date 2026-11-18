@@ -6,6 +6,8 @@
   and a link's #anchor to a heading of that file (GitHub's slug rule);
 - every `caminus COMMAND` the user docs (README.md, docs/*.md) show is a command `caminus` has
   (caminus.__main__.COMMANDS, read from the file, not imported);
+- the README's setup table ("Your cards | What runs | Start with") holds exactly the rows of caminus.models.SETUPS, the
+  one source caminus wizard and Ember's default read (python/caminus/models.py, parsed, not imported);
 - (the paths a doc names, AGENTS.md's command lines among them, are checked by tools/entropy.py, `refs`);
 - docs/panel.svg, the README's picture of the control panel, shows the version python/caminus/__init__.py holds (a
   release sets the version and redraws it: python -I tools/release/panel_shot.py; a nightly's .dev version is skipped).
@@ -64,6 +66,17 @@ for d in user:
         seen.add(cmd)
         if cmd not in commands: unknown.append(f'{d}: caminus {cmd}')
 check(not unknown, f'commands: the user docs show {len(seen)} caminus commands, all real' + (f'; unknown: {sorted(set(unknown))}' if unknown else ''))
+
+# the README's setup table is caminus.models.SETUPS row by row (a plain literal there: read, not imported)
+msrc = open(os.path.join(ROOT, 'python', 'caminus', 'models.py'), encoding='utf-8').read()
+node = next(n for n in ast.parse(msrc).body if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == 'SETUPS')
+want = [f"| {s['row']} | {s['what']} | {s['start_text']} |" for s in ast.literal_eval(node.value)]
+readme = open(os.path.join(ROOT, 'README.md'), encoding='utf-8').read().splitlines()
+head = next((i for i, l in enumerate(readme) if l.startswith('| Your cards | What runs | Start with |')), None)
+got = readme[head + 2:head + 2 + len(want) + 1] if head is not None else []
+check(got[:len(want)] == want and (len(got) == len(want) or not got[-1].startswith('|')),
+      'README setup table: the rows of caminus.models.SETUPS' + ('' if got[:len(want)] == want else
+      ': write these rows under its header:\n' + '\n'.join(want)))
 
 ver = re.search(r"^__version__ = '([^']+)'", open(os.path.join(ROOT, 'python', 'caminus', '__init__.py'), encoding='utf-8').read(), re.M).group(1)
 shot = os.path.join(ROOT, 'docs', 'panel.svg')

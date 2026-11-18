@@ -81,6 +81,17 @@ def free_bytes(path):
     return shutil.disk_usage(p).free
 
 
+def need_bytes(todo):
+    """the bytes still to fetch for (item, final path) pairs: a .part already there counts as fetched"""
+    return sum(it.size - (os.path.getsize(f + '.part') if os.path.exists(f + '.part') else 0) for it, f in todo)
+
+
+def room(dest, need):
+    """(whether need bytes + MARGIN fit under dest, the free bytes there): the check download makes before fetching"""
+    free = free_bytes(dest)
+    return free >= need + MARGIN, free
+
+
 def _open(url, start, token, timeout):
     req = urllib.request.Request(url, headers={'User-Agent': 'caminus-download'})
     if start:
@@ -204,14 +215,15 @@ def download(items, dest, endpoint=None, token=None, verify=False, dry_run=False
                 log(f'{it.key}: present ({"sha256 verified earlier" if marker_ok(final, it.sha256) else "size matches; --verify hashes it"})')
             continue
         todo.append((it, final))
-    need = sum(it.size - (os.path.getsize(f + '.part') if os.path.exists(f + '.part') else 0) for it, f in todo)
+    need = need_bytes(todo)
     for it, final in todo:
         log(f'{it.key}: {it.repo}@{it.revision[:12]} {it.path} ({it.size / 1e9:.2f} GB) -> {final}'
             + (' (resuming)' if os.path.exists(final + '.part') else ''))
     if dry_run or not todo:
         return bad
-    if free_bytes(dest) < need + MARGIN:
-        log(f'download: {free_bytes(dest) / 1e9:.1f} GB free under {dest}, {need / 1e9:.1f} GB (+1 GiB) needed: refused')
+    ok, free = room(dest, need)
+    if not ok:
+        log(f'download: {free / 1e9:.1f} GB free under {dest}, {need / 1e9:.1f} GB (+1 GiB) needed: refused')
         return bad + len(todo)
     for it, final in todo:
         try:

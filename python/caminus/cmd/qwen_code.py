@@ -30,6 +30,7 @@ other hooks (the advisor's) are untouched. CAMINUS_CONTEXT_NOTE=0 silences it fo
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -41,6 +42,8 @@ from . import manage
 
 PIN = '0.26.9'
 PKG = '@qwen-code/qwen-code'
+NODE_MIN = 22                      # the Node.js major version Qwen Code PIN needs
+NODE_URL = 'https://nodejs.org/en/download'
 SHARE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'share', 'harness', 'qwen-code')
 NOTE = 'caminus-context-note'      # the context note's hook entry name in settings.json
 NOTE_SRC = os.path.join(SHARE, 'context_note.py')
@@ -289,10 +292,29 @@ def read_settings(h):
         return None
 
 
+def node_missing():
+    """what --install lacks: '' when Node.js NODE_MIN or newer and npm are on PATH, else what was found ('no node',
+    'Node.js 18', ', no npm')"""
+    node, npm = shutil.which('node'), shutil.which('npm')
+    major = None
+    if node:
+        try:
+            out = subprocess.run([node, '--version'], capture_output=True, text=True, timeout=20).stdout
+            m = re.match(r'v?(\d+)\.', out.strip())
+            major = int(m.group(1)) if m else None
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if major is not None and major >= NODE_MIN and npm:
+        return ''
+    return ('no node' if major is None else f'Node.js {major}') + ('' if npm else ', no npm')
+
+
 def install(say):
+    lacks = node_missing()
+    if lacks:
+        raise manage.ManageError(f'Qwen Code needs Node.js {NODE_MIN} or newer with npm (found: {lacks}): install it '
+                                 f'({NODE_URL}), then caminus qwen-code setup --install')
     npm = shutil.which('npm')
-    if not npm:
-        raise manage.ManageError('npm is not installed (Node.js >= 22): install it, then caminus qwen-code setup --install')
     os.makedirs(prefix(), exist_ok=True)
     say(f'qwen-code: npm install {PKG}@{PIN} into {prefix()}')
     r = subprocess.run([npm, 'install', '--prefix', prefix(), '--no-fund', '--no-audit', f'{PKG}@{PIN}'],

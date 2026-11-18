@@ -102,10 +102,11 @@ def check_torch(R):
     R.add('PASS' if ok else 'FAIL', 'torch', detail)
 
 
-def kfd_procs():
-    root = '/sys/class/kfd/kfd/proc'
+def kfd_procs(root='/'):
+    """the other processes holding a GPU context (KFD's process list under the sysfs root), or None when unreadable"""
+    d = os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'proc')
     try:
-        return sorted(int(p) for p in os.listdir(root) if p.isdigit() and int(p) != os.getpid())
+        return sorted(int(p) for p in os.listdir(d) if p.isdigit() and int(p) != os.getpid())
     except OSError:
         return None
 
@@ -133,13 +134,11 @@ def check_gpus(R, root='/'):
               + f'; {host.link_text(c["link"])}' + (f' (slowest hop at {c["link"]["at"]})' if c['link'] and c['link']['at'] != c['pci'] else '')
               + (f'; idle now at {host.link_text(dict(gts=c["link"]["now_gts"], width=c["link"]["now_width"]))} (the driver\'s link power saving)'
                  if host.link_lowered(c['link']) else ''))
-    if len(u) == 1:
-        if u[0]['total_mib'] >= 22 * 1024:
-            R.add('PASS', 'gpu', 'one 24 GB card: every one-card model runs (ThinkingCap, the plain Qwen3.8 27B, Qwen3-30B-A3B, '
-                  'Swift 1.5); the Coder needs two cards')
-        else:
-            R.add('PASS', 'gpu', 'one 20 GB card: ThinkingCap and the plain Qwen3.8 27B run; Qwen3-30B-A3B and Swift 1.5 need a '
-                  '24 GB card, the Coder two cards')
+    if len(u) == 1:                                       # (what runs: the setup table, caminus.models.SETUPS)
+        row = models.setup_of(u)
+        R.add('PASS' if row else 'WARN', 'gpu', f"one card ({row['row']}): {', '.join(row['runs'])} run on it; start with "
+              f"{row['start']}; the Coder needs two cards" if row else 'one card under 20 GB: no model was measured on such a '
+              'card (caminus fit says what fits once a model file is downloaded)')
     elif len(u) >= 2:
         try:
             pr = host.pair(gs)

@@ -220,9 +220,9 @@ def main():
     # -- an untested gfx1100 card: allowed, with the hardware-report request ----------------------------------------------
     r = tree(os.path.join(S, 'w7900'), [card('card1', '0000:03:00.0', XTX, 128), card('card2', '0000:06:00.0', W7900, 129)])
     g = H.gpus(r); p = H.pair(g)
-    check(g[1]['status'] == 'untested' and labels(p) == ['card2', 'XTX'] and H.split(p) == H.EVEN_SPLIT == dict(gdn_keys=8, moe_blocks=10)
+    check(g[1]['status'] == 'untested' and labels(p) == ['W7900', 'XTX'] and H.split(p) == H.EVEN_SPLIT == dict(gdn_keys=8, moe_blocks=10)
           and any(lv == 'warn' and 'hardware report' in t for lv, _, t in H.problems(g)),
-          'a W7900 (48 GB gfx1100) + an XTX: untested but used, the W7900 first, the even split, the report request shown')
+          'a W7900 (48 GB gfx1100) + an XTX: untested but used and named (caminus.device.machine.UNTESTED), the W7900 first, the even split, the report request shown')
 
     # -- headless and two displays: the flags follow the connectors --------------------------------------------------------
     r = tree(os.path.join(S, 'headless'), [card('card1', '0000:03:00.0', XTX, 128), card('card2', '0000:06:00.0', XT, 129)])

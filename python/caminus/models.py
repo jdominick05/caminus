@@ -209,6 +209,58 @@ PAUSED = {
 }
 
 
+# The model to start with on each setup: the README's "Get started" table (tests/docs/test_docs.py compares it with this row
+# by row) and what `caminus wizard` preselects. A plain literal, so the docs check reads it without importing the package.
+# cards: the setup's card classes, the bigger first ('XTX': a 24 GB card, 'XT': a 20 GB card; setup_of); runs: the catalog
+# models that run there, a two-card form as 'name:2' (the wizard's list before the files are on disk: the real projection
+# runs at caminus start); row / what / start_text: the README cells.
+SETUPS = (
+    {'cards': ('XT',), 'runs': ('thinkingcap', 'qwen3.8-27b'), 'start': 'thinkingcap',
+     'row': 'One XT', 'what': 'ThinkingCap, the plain Qwen3.8 27B', 'start_text': 'ThinkingCap'},
+    {'cards': ('XTX',), 'runs': ('swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b'), 'start': 'swift-1.5',
+     'row': 'One XTX', 'what': 'Those two, plus Qwen3-30B-A3B and Swift 1.5', 'start_text': 'Swift 1.5'},
+    {'cards': ('XTX', 'XT'), 'runs': ('coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b', 'swift-1.5:2',
+                                     'thinkingcap:2', 'qwen3-30b-a3b:2'), 'start': 'coder',
+     'row': 'XTX + XT', 'what': 'Everything, including the Coder and the two-card forms', 'start_text': 'the Coder (both cards)'},
+    {'cards': ('XTX', 'XTX'), 'runs': ('coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b', 'swift-1.5:2',
+                                      'thinkingcap:2', 'qwen3-30b-a3b:2'), 'start': 'coder',
+     'row': 'Two XTX', 'what': 'The same as XTX + XT. Untested: reports are welcome.', 'start_text': 'the Coder (both cards)'},
+    {'cards': ('XT', 'XT'), 'runs': ('thinkingcap', 'qwen3.8-27b', 'swift-1.5:2', 'thinkingcap:2', 'qwen3-30b-a3b:2'),
+     'start': 'thinkingcap', 'row': 'Two XT', 'what': 'Two-card Swift 1.5, ThinkingCap or Qwen3-30B-A3B, or two one-card models '
+     'side by side; no Coder. Untested: reports are welcome.', 'start_text': 'ThinkingCap'},
+)
+CLASS_MIB = (('XTX', 22 * 1024), ('XT', 19 * 1024))   # a card's class by its VRAM: 24,560 MiB the XTX, 20,464 the XT
+
+
+def card_class(total_mib):
+    """'XTX' (a 24 GB card or bigger), 'XT' (a 20 GB card) or None (smaller: no setup row was measured for it)"""
+    return next((c for c, lo in CLASS_MIB if (total_mib or 0) >= lo), None)
+
+
+def setup_of(cards):
+    """the SETUPS row of these usable cards (caminus.device.host dicts in placement order, the biggest first: host.ranked),
+    by their classes: the first two with a class, else the first one; None when no row matches (no card of 20 GB or more).
+    An untested gfx1100 card counts by its VRAM (a 48 GB W7900 as a 24 GB card)"""
+    cls = [c for c in (card_class(g['total_mib']) for g in cards) if c]
+    for key in (tuple(cls[:2]), tuple(cls[:1])):
+        row = next((s for s in SETUPS if s['cards'] == key), None)
+        if row is not None:
+            return row
+    return None
+
+
+def setup_here(gs):
+    """(row, why) for a host's GPUs (caminus.device.host.gpus): setup_of the pair host.pair allows, else of the first
+    usable card alone (a second card on too slow a link, or one card); why: the pair's refusal when two or more usable
+    cards make no pair, else None. caminus wizard and Ember's default brain both read it"""
+    from .device import host
+    cards = host.ranked(gs)
+    try:
+        return setup_of(host.pair(gs)), None
+    except host.PlacementError as e:
+        return setup_of(cards[:1]), (str(e) if len(cards) >= 2 else None)
+
+
 def allow_paused():
     """CAMINUS_ALLOW_PAUSED=1: paused models and architectures are offered and served anyway"""
     return os.environ.get('CAMINUS_ALLOW_PAUSED') == '1'

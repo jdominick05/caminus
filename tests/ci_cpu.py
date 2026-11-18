@@ -43,6 +43,7 @@ SUITES = [
     ('context_fit', ['tests/test_context_fit.py', '--scratch', '{scratch}'], {'torch'}),
     ('host', ['tests/device/test_host.py', '--scratch', '{scratch}'], set()),
     ('manage', ['tests/cmd/test_manage.py', '--scratch', '{scratch}'], set()),
+    ('wizard', ['tests/cmd/test_wizard.py', '--scratch', '{scratch}'], set()),
     ('qwen_settings', ['tests/cmd/test_qwen_settings.py'], set()),
     ('advisor', ['tests/harness/test_advisor.py', '--scratch', '{scratch}'], set()),
     ('advisor_setup', ['tests/harness/test_advisor_setup.py'], set()),

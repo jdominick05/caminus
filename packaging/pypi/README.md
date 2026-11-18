@@ -15,8 +15,7 @@ You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT.
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards (not on PyPI)
 pip install caminus
-caminus doctor     # is this machine ready?
-caminus panel      # download a model, start it, open Qwen Code on it
+caminus wizard     # checks the machine, downloads and starts the model for your cards, sets up Qwen Code
 ```
 
 The [quickstart](https://github.com/jdominick05/caminus/blob/main/docs/quickstart.md) walks you through it.

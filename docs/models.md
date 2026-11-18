@@ -25,8 +25,9 @@ again.
 
 ## Which one to pick
 
-- **One card:** with a 24 GB card, start with `swift-1.5`. `qwen3-30b-a3b` is the fastest writer (below), but it finishes
-  fewer agent tasks for now. On a 20 GB card, `thinkingcap` is the model that fits.
+- **Which to start with:** the last column of [the setup table](../README.md#the-model-for-your-setup), the model
+  `caminus wizard` preselects for your cards. `qwen3-30b-a3b` is the fastest writer on one 24 GB card (below), but it
+  finishes fewer agent tasks for now.
 - **An XTX + XT or two XTX:** `coder` handles the longest work: 262K tokens of context, a prompt cache that keeps whole
   conversations, and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from
   disk. Two XT cards are too small for it.

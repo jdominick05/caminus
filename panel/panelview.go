@@ -788,8 +788,26 @@ func (m ctl) noteLine(W int) string {
 			c = cRed
 		}
 		return ansi.Truncate(fg(c).Render(" "+m.note), W, "…")
+	case m.nothingSetUp():
+		return ansi.Truncate(emberDim.Render(" "+wizardHint), W, "…")
 	}
 	return ""
+}
+
+// wizardHint is the note line while nothing is set up: caminus wizard walks a first run from a terminal.
+const wizardHint = "new here? run `caminus wizard` in a terminal: it checks the machine, then pulls and starts a model and sets up Qwen Code"
+
+// nothingSetUp is whether this host has nothing to show yet: the model list read, no model on disk, no server running.
+func (m ctl) nothingSetUp() bool {
+	if !m.loaded["models"] || !m.loaded["ps"] || len(m.liveServers()) > 0 {
+		return false
+	}
+	for _, mi := range m.models {
+		if mi.Present {
+			return false
+		}
+	}
+	return true
 }
 
 // keysLine is the key hints that fit the width: what the selected model and the running server allow, ? and q always.

@@ -52,14 +52,8 @@ caminus ember setup --test-venv                                                 
 
 ## 3. Give it a brain
 
-**A local model** (no cost, your GPUs). Which one, by your cards (`caminus ember setup` names it at the end):
-
-| Your cards | Ember's default |
-|---|---|
-| one RX 7900 XTX | Swift 1.5 (`swift-1.5`) |
-| one RX 7900 XT | ThinkingCap (`thinkingcap`) |
-| two cards, an XTX first | the Coder (`coder`, both cards) |
-| two XTs | ThinkingCap (the Coder needs a 24 GB first card) |
+**A local model** (no cost, your GPUs). Ember's default is the model to start with on your cards, the last column of
+[the setup table](../README.md#the-model-for-your-setup) (`caminus ember setup` names it at the end).
 
 Qwen3-30B-A3B (`qwen3-30b-a3b`) runs on an XTX or on two cards too; it is not the default because it finishes fewer agent tasks
 for now. Start the model with `caminus panel` or `caminus pull MODEL && caminus start MODEL` (see

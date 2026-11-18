@@ -850,3 +850,31 @@ func TestHelpKeyLineSaysNextPage(t *testing.T) {
 		t.Fatalf("the last page at 80x14: %q", got)
 	}
 }
+
+// TestTheWizardHintShowsOnlyWhileNothingIsSetUp: no model on disk and no server running puts the one-line caminus wizard
+// hint on the note line; a model on disk, a running server or a note of its own takes it away.
+func TestTheWizardHintShowsOnlyWhileNothingIsSetUp(t *testing.T) {
+	m := fixturePanel()
+	if strings.Contains(m.noteLine(200), "caminus wizard") {
+		t.Fatal("a host with models on disk and a server running shows no wizard hint")
+	}
+	for i := range m.models {
+		m.models[i].Present = false
+	}
+	if strings.Contains(m.noteLine(200), "caminus wizard") {
+		t.Fatal("a running server is something set up: no hint")
+	}
+	m.ps.Servers = nil
+	if got := ansi.Strip(m.noteLine(200)); !strings.Contains(got, "run `caminus wizard` in a terminal") {
+		t.Fatalf("nothing on disk, nothing running: the hint, got %q", got)
+	}
+	m.setNote("pulled", false)
+	if strings.Contains(m.noteLine(200), "caminus wizard") {
+		t.Fatal("a note of the panel's own comes first")
+	}
+	m.note = ""
+	m.loaded["models"] = false
+	if m.noteLine(200) != "" {
+		t.Fatal("before the model list is read nothing is known: no hint")
+	}
+}

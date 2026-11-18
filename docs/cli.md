@@ -6,6 +6,7 @@ By the end of this page you'll be able to do everything the panel does from a te
 ## The usual flow
 
 ```bash
+caminus wizard                 # the first run: these steps one by one, each command printed first (the quickstart)
 caminus models                 # what's available, what's on disk, how many cards each model needs
 caminus pull thinkingcap       # download a model (resumes; checks every file's size and hash)
 caminus start thinkingcap      # start it in the background on the best card, with the largest context that fits
