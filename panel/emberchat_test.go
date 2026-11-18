@@ -2941,7 +2941,8 @@ func TestBangBangIsYourOwnShellInItsOwnColour(t *testing.T) {
 		t.Fatalf("the command and its output are a card in the chat marked as your shell, the composer empty (%q):\n%s",
 			m.chat.compose.Value(), card)
 	}
-	if !strings.Contains(m.chat.content, hostShellStyle().Render("!! my shell")) {
+	if hostShellStyle().Render("!! my shell") == emberShell.Render("!! my shell") ||
+		!strings.Contains(m.chat.content, hostShellStyle().Render("!! my shell")) {
 		t.Fatal("the card is in the host shell's copper, apart from the agent shell's purple")
 	}
 	t.Logf("after !! echo from-the-host:\n%s", ansi.Strip(m.render()))
