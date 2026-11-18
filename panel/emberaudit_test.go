@@ -6,6 +6,7 @@ package main
 // Tests for the 2026-11-16 audit's first group: what blocked use or changed what the human typed.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,28 +98,51 @@ func TestHistoryGivesBackWhatYouTyped(t *testing.T) {
 	}
 }
 
-func TestASecondShellCommandRunsAfterTheFirstsOutput(t *testing.T) {
+func TestAShellCommandsOutputGoesToTheChat(t *testing.T) {
 	m := chatFixture(t)
-	m.chat.compose.SetValue("```\n$ ls\nwork\n```\n")
-	m.chat.compose.MoveToEnd()
+	m.width, m.height = 120, 24
+	m.chat.cards = false      // the compact view (the default)
+	for i := 2; i < 30; i++ { // a history taller than its window, read from the top
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: i, Goal: "original",
+			Kind: "assistant", Data: map[string]any{"content": fmt.Sprintf("Observation %d.", i)}}}})
+	}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 30, Goal: "original",
+		Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"id": "c1", "function": map[string]any{
+			"name": "terminal", "arguments": `{"command":"make test"}`}}}}}}}) // the agent's own command, still running
+	m.chat.transcript.GotoTop()
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
 	m = next.(emberModel)
-	if !m.chat.shell || m.chat.compose.Value() != "" || m.chat.shellStash == "" {
-		t.Fatal("! on the empty last line opens shell mode with the draft held aside")
+	m.chat.compose.SetValue("echo hi")
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m = next.(emberModel); cmd == nil || m.chat.shell || m.chat.compose.Value() != "" {
+		t.Fatalf("Enter runs the command, leaves shell mode and empties the composer (%q)", m.chat.compose.Value())
 	}
-	m.setShell(false) // (Enter leaves shell mode as the command starts)
-	m = m.bangDone(bangDoneMsg{cmd: "echo hi", output: "hi"})
-	if v := m.chat.compose.Value(); !strings.Contains(v, "$ ls") || !strings.Contains(v, "$ echo hi") || strings.Contains(v, "!!") {
-		t.Fatalf("both outputs in the draft, nothing typed as text: %q", v)
+	m.chat.compose.SetValue("words typed while it ran")
+	m = m.bangDone(bangDoneMsg{cmd: "echo hi", output: "hi"}) // (what runBang returns for it)
+	if v := m.chat.compose.Value(); v != "words typed while it ran" {
+		t.Fatalf("the output stays out of the composer; a draft typed meanwhile is kept: %q", v)
 	}
-	m.chat.compose.SetValue("```\n$ ls\nwork\n```\n")
-	m.chat.compose.MoveToEnd()
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
-	m = next.(emberModel)
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
-	m = next.(emberModel)
-	if m.chat.shell || !strings.Contains(m.chat.compose.Value(), "$ ls") {
-		t.Fatal("leaving shell mode gives the draft back")
+	view := ansi.Strip(m.chat.transcript.View())
+	if !strings.Contains(view, "! shell  $ echo hi") || !strings.Contains(view, "│ hi") || strings.Contains(view, "my shell") {
+		t.Fatalf("the command and its output are a card at the bottom of the chat, scrolled into view:\n%s", view)
+	}
+	if m.chat.group.running != "make test" || !strings.Contains(view, "running: make test") {
+		t.Fatalf("your card leaves the agent's running command under it (it is still running):\n%s", view)
+	}
+	t.Logf("after ! echo hi:\n%s", ansi.Strip(m.render()))
+	m.chat.content, m.chat.rendered = "", 0 // a redraw from the start (a resize, a theme)
+	m.syncChat()
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if m = next.(emberModel); !strings.Contains(ansi.Strip(m.chat.content), "$ echo hi") {
+		t.Fatal("the card stays through a redraw and in the everything view")
+	}
+	m.chat.compose.SetValue("!echo again")
+	next, cmd = m.submitCompose()
+	if m = next.(emberModel); cmd == nil || m.chat.compose.Value() != "" {
+		t.Fatalf("a recalled !cmd sent from the composer runs and empties it too: %q", m.chat.compose.Value())
+	}
+	if m.chat.seq != 30 || m.residentEvents[len(m.residentEvents)-1].Seq >= 0 {
+		t.Fatal("the card is the panel's own event: it never moves the resident's event cursor")
 	}
 }
 

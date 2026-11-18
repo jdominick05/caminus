@@ -1460,11 +1460,6 @@ func TestComposerExtras(t *testing.T) {
 	if _, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); ok {
 		t.Fatal("Ctrl+E alone still folds the cards (not the editor)")
 	}
-	// !cmd: the output lands in the draft, fenced
-	m = m.bangDone(bangDoneMsg{cmd: "df -h ~", output: "/dev/x 100G 40G"})
-	if v := m.chat.compose.Value(); !strings.Contains(v, "```\n$ df -h ~\n/dev/x 100G 40G\n```") {
-		t.Fatalf("the command and its output are in the draft: %q", v)
-	}
 	// Ctrl+O: every line of the open cards
 	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	if !next.chat.full {
@@ -2929,14 +2924,27 @@ func TestBangBangIsYourOwnShellInItsOwnColour(t *testing.T) {
 	if m.chat.shell || m.chat.hostShell {
 		t.Fatal("Backspace on the empty line leaves")
 	}
-	msg := runHostBang("echo from-the-host")().(bangDoneMsg)
+	for _, k := range []string{"!", "!"} {
+		next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: k})
+		m = next.(emberModel)
+	}
+	m.chat.compose.SetValue("echo from-the-host")
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	msg := cmd().(bangDoneMsg)
 	if msg.err != "" || msg.output != "from-the-host" || !msg.host {
 		t.Fatalf("it runs in your shell: %+v", msg)
 	}
 	m = m.bangDone(msg)
-	if !strings.Contains(m.chat.compose.Value(), "(my shell) $ echo from-the-host") {
-		t.Fatalf("the draft says the output came from your shell:\n%s", m.chat.compose.Value())
+	card := ansi.Strip(m.chat.content)
+	if m.chat.compose.Value() != "" || !strings.Contains(card, "!! my shell  $ echo from-the-host") || !strings.Contains(card, "│ from-the-host") {
+		t.Fatalf("the command and its output are a card in the chat marked as your shell, the composer empty (%q):\n%s",
+			m.chat.compose.Value(), card)
 	}
+	if !strings.Contains(m.chat.content, hostShellStyle().Render("!! my shell")) {
+		t.Fatal("the card is in the host shell's copper, apart from the agent shell's purple")
+	}
+	t.Logf("after !! echo from-the-host:\n%s", ansi.Strip(m.render()))
 }
 
 func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {

@@ -7,7 +7,7 @@ package main
 //   Ctrl+X Ctrl+E   the draft in $VISUAL / $EDITOR; it comes back when the editor closes
 //   Ctrl+R          your earlier prompts that contain the draft, newest first; each press goes one further back
 //   Ctrl+O          every line of every open card (cards stop at their last 40 lines otherwise)
-//   !cmd            runs cmd in the agent's account; its output lands in the draft for your next message
+//   !cmd, !!cmd     runs cmd in the agent's account (!!: your own shell); the command and its output show in the chat
 //   @path           in a message, attaches that file from the agent's account (up to 64 KB), fenced
 //   /NAME args      a custom command: ~/.config/caminus/commands/NAME.md, $ARGUMENTS replaced, sent as a message
 
@@ -249,25 +249,20 @@ func runBang(m emberModel, cmd string) tea.Cmd {
 	}
 }
 
-// bangDone puts the command and its output in the draft, fenced, for the next message.
+// bangDone puts the command and its output in the chat as its own card (eventBlock's "shell"), at the bottom where
+// it can be read, and leaves the draft alone. It is the panel's own event (a Seq below 0, never the resident's): the
+// agent does not see it, and it lasts as long as this chat's history (a new session or a restart starts without it).
 func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
-	prompt := "$ "
-	if msg.host {
-		prompt = "(my shell) $ " // so the agent can tell your machine's output from its own account's
-	}
-	block := "```\n" + prompt + msg.cmd + "\n" + msg.output + "\n```"
+	m.chat.localSeq--
+	data := map[string]any{"command": msg.cmd, "output": msg.output, "host": msg.host}
 	if msg.err != "" {
-		block += "\n(" + msg.err + ")"
+		data["error"] = msg.err
 	}
-	draft := strings.TrimSpace(m.chat.compose.Value())
-	if m.chat.shellStash != "" { // the draft held aside while this command was typed (the earlier output)
-		draft, m.chat.shellStash = strings.TrimSpace(m.chat.shellStash+"\n\n"+draft), ""
-	}
-	if draft != "" && !strings.HasPrefix(draft, "!") {
-		block = draft + "\n\n" + block
-	}
-	m.chat.compose.SetValue(block + "\n")
-	m.msg = "command output is in the draft: add your words and Enter to send"
+	m.residentEvents = append(m.residentEvents, residentEvent{Seq: m.chat.localSeq, Ts: float64(time.Now().Unix()),
+		Goal: m.chat.target, Kind: "shell", Data: data})
+	m.msg = ""
+	m.syncChat()
+	m.chat.transcript.GotoBottom()
 	return m
 }
 

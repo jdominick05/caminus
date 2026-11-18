@@ -49,7 +49,7 @@ type residentChat struct {
 	picker                                  bool
 	pickerSel                               int
 	hostShell                               bool               // shell mode runs in your own shell on this machine (!!), not the agent's
-	shellStash                              string             // the draft held aside while a second shell command is typed
+	localSeq                                int                // the panel's own events (a ! command's card) count down from -1
 	prevTarget                              string             // the goal before Ctrl+N or /new (Esc goes back to it)
 	goalsFollow                             string             // the goal the overlay's selection follows after a move
 	pickedGoal                              string             // the goal picked by hand in the overlay (no refresh moves off it)
@@ -523,7 +523,9 @@ func (m *emberModel) syncChat() {
 			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.flushGroup(w)
+			if e.Seq >= 0 { // (the panel's own card, a ! command's, leaves the agent's running line under it)
+				m.chat.flushGroup(w)
+			}
 			m.chat.content += ansi.Wrap(block, w, "") + "\n\n"
 		}
 	}
@@ -1261,6 +1263,25 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return all
 	}
 	switch e.Kind {
+	case "shell":
+		// a command you ran from the composer (bangDone): "!" in the agent's account, "!!" in your own shell, each in
+		// its prompt's colour, open with its whole output
+		kind, out := "shell", strings.TrimRight(str("output"), "\n")
+		if host, _ := e.Data["host"].(bool); host {
+			kind = "my shell"
+		}
+		meta := plural(strings.Count(out, "\n")+1, "line", "lines")
+		if strings.TrimSpace(out) == "" {
+			meta = "no output"
+		}
+		if err := str("error"); err != "" {
+			meta = err + " · " + meta
+		}
+		var body []string
+		if strings.TrimSpace(out) != "" {
+			body = lines(ansi.Strip(out), 5000)
+		}
+		return toolCard(kind, "$ "+str("command"), meta, str("error") == "", true, body, w)
 	case "goal_queued":
 		label := "you · goal " + shortGoal(e.Goal)
 		if k, _ := e.Data["kind"].(string); k == "free" || k == "dream" {
@@ -1872,7 +1893,7 @@ func helpLines(width int) []string {
 		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
-		{"!  !!", "on an empty draft: a command in the agent's account; again: in your own shell"},
+		{"!  !!", "a command in the agent's account; again: your own shell; the output shows in the chat"},
 		{"Home  End", "the top or the bottom of the history (with an empty draft)"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
@@ -2417,8 +2438,9 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.scrollLive(3)
 		return m, nil
 	case "esc":
-		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode, a draft held aside comes back
-			return m.leaveShell(), nil
+		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode
+			m.setShell(false)
+			return m, nil
 		}
 		if !m.menuDismissed() && (m.slashMenuOpen() || m.pathMenu(m.width) != "") {
 			m.chat.menuClosed = m.chat.compose.Value() // the menu closes; the text stays (typing opens it again)
@@ -2483,15 +2505,6 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setShell(true)
 		return m, nil
 	}
-	// "!" on the empty last line of a draft (a command's output waits there): shell mode, the draft held aside; the
-	// next command's output joins it, and leaving shell mode gives it back. It was typed into the draft as text,
-	// and Enter sent the output and "!!cmd" as a message.
-	if k == "!" && !m.chat.shell && strings.HasSuffix(m.chat.compose.Value(), "\n") && m.chat.compose.Line() == m.chat.compose.LineCount()-1 {
-		m.chat.shellStash = strings.TrimRight(m.chat.compose.Value(), "\n")
-		m.chat.compose.Reset()
-		m.setShell(true)
-		return m, nil
-	}
 	// "!" again on the empty agent shell: the host shell, your own account on this machine (!! as in a terminal)
 	if k == "!" && m.chat.compose.Value() == "" && m.chat.shell && !m.chat.hostShell {
 		m.chat.hostShell = true
@@ -2499,7 +2512,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
-		return m.leaveShell(), nil
+		m.setShell(false)
+		return m, nil
 	}
 	if m.chat.shell && k == "enter" {
 		cmd := strings.TrimSpace(m.chat.compose.Value())
@@ -2553,11 +2567,13 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "!!") && len(strings.TrimSpace(trimmed[2:])) > 0 {
 		// your own shell, as typed in !! mode (a recalled !!cmd ran in the agent's account with a stray !)
 		saveTyped(m.agentName, trimmed)
+		m.chat.compose.Reset() // (the command and its output go to the chat: bangDone)
 		m.msg = "running in your shell…"
 		return m, runHostBang(strings.TrimSpace(trimmed[2:]))
 	}
 	if strings.HasPrefix(trimmed, "!") && len(trimmed) > 1 {
 		saveTyped(m.agentName, trimmed)
+		m.chat.compose.Reset()
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
@@ -3247,16 +3263,6 @@ func endedWord(state string) string {
 		return "failed"
 	}
 	return state
-}
-
-// leaveShell ends shell mode; a draft held aside for a second command comes back.
-func (m emberModel) leaveShell() emberModel {
-	m.setShell(false)
-	if m.chat.shellStash != "" {
-		m.chat.compose.SetValue(m.chat.shellStash + "\n")
-		m.chat.shellStash = ""
-	}
-	return m
 }
 
 // todoBlockers are the newest todo list's blockers for a goal.
