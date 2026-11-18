@@ -1,4 +1,4 @@
-"""setuptools glue for pyproject.toml (docs/dev/packaging.md). Three things pyproject cannot say:
+"""setuptools glue for pyproject.toml (docs/dev/packaging.md). Four things pyproject cannot say:
 
   * build/ holds ./build.sh's code objects, so setuptools builds in .pybuild/ instead;
   * a wheel is refused unless the gfx1100 runtime set is staged in python/caminus/hsaco/gfx1100 (tools/release/stage_kernels.py) and
@@ -6,10 +6,14 @@
     launch;
   * the wheel is a platform wheel, WHEEL_TAG (Root-Is-Purelib: false): it carries the panel, a static x86-64 Go binary, and
     nothing in it runs elsewhere. Static, so the oldest manylinux tag is the honest one; every pip that installs Python 3.12
-    reads PEP 600 tags, so no manylinux2014 alias is needed."""
+    reads PEP 600 tags, so no manylinux2014 alias is needed;
+  * a wheel is built only on x86-64 Linux (check_host): elsewhere pip falls back to the sdist, and it never checks the tag
+    of a wheel it built itself, so without the refusal it would install the x86-64 panel there. The sdist, the metadata
+    and editable builds are not refused."""
 import hashlib
 import json
 import os
+import platform
 import sys
 
 from setuptools import Distribution, setup
@@ -20,6 +24,12 @@ from setuptools.command.build_py import build_py
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGED = os.path.join(HERE, 'python', 'caminus', 'hsaco', 'gfx1100')
 WHEEL_TAG = 'py3-none-manylinux_2_17_x86_64'   # tools/release/verify_release.py reads it from here
+
+
+def check_host():
+    machine = platform.machine()
+    if not (sys.platform.startswith('linux') and machine == 'x86_64'):
+        raise SystemExit(f'caminus: Caminus runs on x86-64 Linux with AMD gfx1100 GPUs; this machine is {sys.platform} {machine}')
 
 
 def check_staged():
@@ -65,6 +75,10 @@ class PlatformDistribution(Distribution):
 
 
 class BdistWheel(bdist_wheel):
+    def run(self):
+        check_host()
+        super().run()
+
     def get_tag(self):
         return tuple(WHEEL_TAG.split('-'))
 

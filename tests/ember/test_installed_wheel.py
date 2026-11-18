@@ -79,11 +79,34 @@ def main():
         names = set(z.namelist())
         wn = [n for n in names if n.endswith('.dist-info/WHEEL')]
         wf = z.read(wn[0]).decode() if wn else ''
-    # a platform wheel: the panel it ships is an x86-64 binary, so pip must not offer it to aarch64 or macOS
-    plat = 'py3-none-manylinux_2_17_x86_64'
-    check(built[0].endswith('-' + plat + '.whl'), 'the wheel is tagged ' + plat, built[0])
-    check('Root-Is-Purelib: false' in wf.splitlines() and [l for l in wf.splitlines() if l.startswith('Tag:')] == ['Tag: ' + plat],
-          'its WHEEL says Root-Is-Purelib: false and the one platform tag (never any / purelib)', wf)
+    # a platform wheel: the panel it ships is an x86-64 binary, so pip must not offer it to aarch64 or macOS. The tag and the
+    # WHEEL rule are tools/release/verify_release.py's (setup.py's WHEEL_TAG, read from the tree copy)
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'release'))
+    import verify_release
+    sys.path.pop(0)
+    plat = verify_release.wheel_tag(tree)
+    check(bool(plat) and not plat.endswith('-any') and built[0].endswith('-' + plat + '.whl'), f'the wheel is tagged {plat} (setup.py\'s WHEEL_TAG)', built[0])
+    wp = verify_release.wheel_file_problem(wf, plat or '')
+    check(wp is None, 'its WHEEL says Root-Is-Purelib: false and the one platform tag (never any / purelib)', f'{wp}: {wf}')
+    # a source build (pip's fallback to the sdist) refuses a host that is not x86-64 Linux, and only the wheel step does
+    def bdist(system, machine, out):
+        code = ('import os, platform, runpy, sys; import setuptools.command.bdist_wheel; '
+                f'platform.machine = lambda: {machine!r}; sys.platform = {system!r}; '
+                f'sys.argv = ["setup.py", "-q", "bdist_wheel", "-d", {out!r}]; runpy.run_path("setup.py", run_name="__main__")')
+        r = subprocess.run([sys.executable, '-I', '-c', code], cwd=tree, capture_output=True, text=True, timeout=600)
+        return r, [f for f in os.listdir(out) if f.endswith('.whl')] if os.path.isdir(out) else []
+    for system, machine in (('linux', 'aarch64'), ('darwin', 'arm64'), ('darwin', 'x86_64')):
+        r, made = bdist(system, machine, os.path.join(S, f'refused-{system}-{machine}'))
+        check(r.returncode != 0 and not made and 'Caminus runs on x86-64 Linux with AMD gfx1100 GPUs; this machine is '
+              f'{system} {machine}' in r.stderr, f'a wheel build on {system} {machine} is refused with the one-line reason',
+              (r.stderr or r.stdout)[-400:])
+    r, made = bdist('linux', 'x86_64', os.path.join(S, 'linux-x86_64'))
+    check(r.returncode == 0 and made == built, 'the same build on linux x86_64 goes through (the same wheel name)', (r.stderr or r.stdout)[-400:] + str(made))
+    r = subprocess.run([sys.executable, '-I', '-c', 'import platform, runpy, sys; import setuptools; platform.machine = lambda: "aarch64"; '
+                        f'sys.argv = ["setup.py", "-q", "sdist", "-d", {os.path.join(S, "sdist")!r}]; runpy.run_path("setup.py", run_name="__main__")'],
+                       cwd=tree, capture_output=True, text=True, timeout=600)
+    check(r.returncode == 0 and any(f.endswith('.tar.gz') for f in os.listdir(os.path.join(S, 'sdist'))),
+          'an sdist still builds on aarch64 (only the wheel step refuses)', (r.stderr or r.stdout)[-400:])
     check(not any('.data/' in n for n in names), 'the package sits at the wheel\'s root (no .data/purelib or platlib tree)')
     check('caminus/share/harness/ember/ROBOTS.md' in names, 'the wheel ships ROBOTS.md')
     check(all(f'caminus/ember/{m}.py' in names for m in ('provision', 'runner', 'relay', 'agent_host')) and

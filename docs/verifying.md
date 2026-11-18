@@ -39,10 +39,11 @@ files match each other, not who made them; the attestation is the part that does
 
 ## The same file from PyPI
 
-PyPI serves the files the CI build made, so the same attestation applies to them:
+PyPI serves the files the CI build made, so the same attestation applies to them (`--platform` fetches the x86-64
+wheel from any machine, a Mac included):
 
 ```bash
-pip download caminus==X.Y.Z --no-deps --only-binary :all: -d caminus-dl
+pip download caminus==X.Y.Z --no-deps --only-binary :all: --platform manylinux_2_17_x86_64 -d caminus-dl
 gh attestation verify caminus-dl/caminus-X.Y.Z-py3-none-manylinux_2_17_x86_64.whl -R jdominick05/caminus \
    --signer-workflow jdominick05/caminus/.github/workflows/build.yml \
    --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners

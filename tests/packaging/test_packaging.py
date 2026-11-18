@@ -15,6 +15,9 @@ Stages (default: all):
   repro     tools/release/repro_dist.py on synthetic archives: two sdists and wheels of the same files with different times, owners,
             user names, modes and gzip times come out byte-identical; a second run changes nothing; a symlink member and a
             missing SOURCE_DATE_EPOCH are refused
+  verify    tools/release/verify_release.py's wheel rules on synthetic inputs: setup.py's WHEEL_TAG read (plain and annotated;
+            missing or not a literal is None, no traceback); the WHEEL check (the platform tag passes; `any`, Root-Is-Purelib
+            true and two Tag lines fail); the panel's ELF check (static x86-64 passes; aarch64, a PT_INTERP, not ELF fail)
   download  caminus download against a local fake HTTP server: fresh, resume (Range), a server that ignores Range, a dropped
             connection, a corrupt file (sha256), a short file, 404, an existing verified file, --verify of a present file
   doctor    caminus doctor's CPU path: runs, PASS / WARN / FAIL lines and a RESULT, no HIP initialized (torch.cuda never
@@ -701,6 +704,47 @@ def stage_repro(S):
           r.stderr[-200:])
 
 
+def stage_verify(S):
+    import struct
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'release'))
+    import verify_release as V
+    sys.path.pop(0)
+    os.makedirs(S)
+    tags = {}
+    for name, text in (('plain', "X = 1\nWHEEL_TAG = 'py3-none-manylinux_2_17_x86_64'\n"), ('annotated', "WHEEL_TAG: str = 'py3-none-x'\n"),
+                       ('missing', "OTHER = 'a'\n"), ('expression', "WHEEL_TAG = 'py3' + '-none'\n"), ('number', "WHEEL_TAG = 3\n")):
+        os.makedirs(os.path.join(S, name))
+        w(os.path.join(S, name, 'setup.py'), text)
+        tags[name] = V.wheel_tag(os.path.join(S, name))
+    check('verify: WHEEL_TAG read from setup.py (plain, annotated); missing or not a string literal is None',
+          tags == dict(plain='py3-none-manylinux_2_17_x86_64', annotated='py3-none-x', missing=None, expression=None, number=None), str(tags))
+    check('verify: the checkout\'s setup.py names a platform tag', (V.wheel_tag() or '-any').endswith('_x86_64'), str(V.wheel_tag()))
+    t = 'py3-none-manylinux_2_17_x86_64'
+    head = 'Wheel-Version: 1.0\nGenerator: setuptools (84.2.1)\n'
+    good = head + f'Root-Is-Purelib: false\nTag: {t}\n\n'
+    bad = {'any': (head + 'Root-Is-Purelib: true\nTag: py3-none-any\n', 'py3-none-any'),
+           'purelib true': (head + f'Root-Is-Purelib: true\nTag: {t}\n', t),
+           'no purelib line': (head + f'Tag: {t}\n', t),
+           'two tags': (good + 'Tag: py3-none-any\n', t),
+           'another tag': (head + 'Root-Is-Purelib: false\nTag: py3-none-manylinux_2_17_aarch64\n', t)}
+    probs = {k: V.wheel_file_problem(txt, tg) for k, (txt, tg) in bad.items()}
+    check('verify: the WHEEL check passes a platform wheel and fails any, purelib true, a missing purelib line, two or another tag',
+          V.wheel_file_problem(good, t) is None and all(probs.values()), str(probs))
+
+    def elf(machine=0x3e, interp=False):
+        phs = [(1,), (3,)] if interp else [(1,), (4,)]
+        hdr = bytearray(64)
+        hdr[:6] = b'\x7fELF\x02\x01'
+        struct.pack_into('<HH', hdr, 16, 2, machine)
+        struct.pack_into('<Q', hdr, 32, 64)
+        struct.pack_into('<HHH', hdr, 52, 64, 56, len(phs))
+        return bytes(hdr) + b''.join(struct.pack('<I', p[0]) + bytes(52) for p in phs)
+    eprobs = {'aarch64': V.elf_problem(elf(machine=0xb7)), 'interp': V.elf_problem(elf(interp=True)),
+              'not elf': V.elf_problem(b'#!/bin/sh\n' + bytes(80)), 'short': V.elf_problem(elf()[:40])}
+    check('verify: the panel check passes a static x86-64 ELF and fails aarch64, a PT_INTERP, a script, a short file',
+          V.elf_problem(elf()) is None and all(eprobs.values()), f'{V.elf_problem(elf())} {eprobs}')
+
+
 def stage_runtime(S):
     stub = os.path.join(S, 'stub')
     w(os.path.join(stub, 'torch', '__init__.py'),
@@ -733,7 +777,7 @@ def stage_runtime(S):
             check(f'runtime: {entry}: {label} before torch import', r.returncode == 0, (r.stdout + r.stderr)[-300:])
 
 
-STAGES = ('config', 'guard', 'kernels', 'repro', 'download', 'doctor', 'cli', 'torch', 'runtime')
+STAGES = ('config', 'guard', 'kernels', 'repro', 'verify', 'download', 'doctor', 'cli', 'torch', 'runtime')
 
 
 def main():

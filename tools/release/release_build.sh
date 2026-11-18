@@ -63,10 +63,11 @@ echo "release_build: ./build.sh done ($(ls build/*.hsaco | wc -l) code objects; 
 "$PY" -I tools/release/stage_kernels.py
 STAGED=python/caminus/hsaco/gfx1100
 echo "release_build: provenance: $("$PY" -I -c "import json; p = json.load(open('$STAGED/provenance.json')); g = p['ggml_headers']; print(f\"built {p['built']} ({p['built_from']}); ggml headers {g['commit']} {'(dirty)' if g['dirty'] else '(clean)'}\")")"
-# the panel (panel/, Go): built reproducibly (no VCS stamp, no build id, trimmed paths, the package's version) and staged as
+# the panel (panel/, Go): built reproducibly (no VCS stamp, no build id, trimmed paths, the package's version), static for
+# linux/amd64 whatever the host (the wheel's tag, setup.py's WHEEL_TAG, says x86-64; verify_release.py checks the ELF), and staged as
 # package data (pyproject.toml: share/caminus-panel), so `caminus panel` works from the wheel
 command -v go > /dev/null || die "go is missing: the panel is part of the release (panel/; Go 1.22 or newer)"
-(cd panel && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -ldflags "-s -w -buildid= -X main.version=$VER" \
+(cd panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-buildvcs=false go build -trimpath -ldflags "-s -w -buildid= -X main.version=$VER" \
     -o ../python/caminus/share/caminus-panel .) > build/release-panel.log 2>&1 || { tail -30 build/release-panel.log >&2; die "go build of the panel failed"; }
 echo "release_build: the panel built ($(go version | cut -d' ' -f3); sha256 $(sha256sum python/caminus/share/caminus-panel | cut -c1-16))"
 HASHES=packaging/gfx1100-kernels.sha256
