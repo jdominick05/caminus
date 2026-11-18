@@ -156,7 +156,7 @@ git -C "$W/b" checkout -q --detach "refs/tags/v$VER"
 say "clone B at v$VER: the release files ($W/b.log)"
 build "$W/b" "$W/b.log"
 dist=$W/b/dist
-files=("$dist/caminus-$VER-py3-none-any.whl" "$dist/caminus-$VER.tar.gz" "$dist/SHA256SUMS")
+files=("$dist"/caminus-"$VER"-*.whl "$dist/caminus-$VER.tar.gz" "$dist/SHA256SUMS")   # the wheel verify_release.py checked (setup.py's WHEEL_TAG)
 for f in "${files[@]}"; do [ -f "$f" ] || die "$f is missing"; done
 
 # ---- 6. the last checks before anything is public

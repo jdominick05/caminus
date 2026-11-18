@@ -1,13 +1,13 @@
 """Check a release's (or a nightly's) wheel and sdist before they go to PyPI (.github/workflows/release.yml and nightly.yml;
 tools/release/release_build.sh runs it too). CPU only, no network. Run it in a checkout of the release tag:
 
-  python -I tools/release/verify_release.py DIST --tag vX.Y.Z      DIST: caminus-X.Y.Z-py3-none-any.whl, caminus-X.Y.Z.tar.gz, SHA256SUMS
+  python -I tools/release/verify_release.py DIST --tag vX.Y.Z      DIST: caminus-X.Y.Z-<setup.py's WHEEL_TAG>.whl, caminus-X.Y.Z.tar.gz, SHA256SUMS
   python -I tools/release/verify_release.py DIST --tag vX.Y.Z.devYYYYMMDD   a nightly's files at its tag (docs/dev/releasing.md)
   python -I tools/release/verify_release.py DIST --untagged        a rehearsal at an untagged commit (the version from the tree)
 
 Checked: the tag's form and that it names HEAD; DIST holds exactly the two files and SHA256SUMS, whose hashes match; one version
 everywhere (the tag, the file names, the wheel's METADATA, the sdist's PKG-INFO, python/caminus/__init__.py); the wheel's tag
-(py3-none-any) and its RECORD hashes; every file of the package in the wheel is the checkout's file byte for byte
+(setup.py's WHEEL_TAG, a platform tag: Root-Is-Purelib false, no `any` platform) and its RECORD hashes; every file of the package in the wheel is the checkout's file byte for byte
 (only the code objects, their provenance.json and the panel are built); its code objects are exactly caminus.device.kernels.RUNTIME_SET, each one's sha256 and size equal
 provenance.json's and the committed packaging/gfx1100-kernels.sha256's; provenance.json names this commit, a clean tree, gfx1100,
 build.sh's sha256 and the kernel tree hash recomputed here (tools/release/stage_kernels.py's rule); the sdist carries the same code
@@ -16,6 +16,7 @@ tools/release/repro_dist.py's reproducible form (every sdist member at one time,
 0755, a gzip header without a file name at that time; every wheel entry at one time with modes 0644 / 0755; that time ==
 provenance.json's `built`). Exit 1 on any failure, every failure printed."""
 import argparse
+import ast
 import base64
 import hashlib
 import io
@@ -47,6 +48,13 @@ def check(what, ok, detail=''):
     if not ok:
         FAILS.append(what)
     return ok
+
+
+def wheel_tag():
+    """setup.py's WHEEL_TAG (the one place the wheel's tag is set), read without running setup.py"""
+    tree = ast.parse(open(os.path.join(ROOT, 'setup.py')).read())
+    return next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == 'WHEEL_TAG' for t in n.targets))
 
 
 def sha(b):
@@ -109,7 +117,8 @@ def main(argv=None):
     status = git('status', '--porcelain', '--untracked-files=no').stdout.strip()
     check('the checkout has no changes to tracked files', not status, status[:300])
 
-    whl_n, sd_n = f'caminus-{ver}-py3-none-any.whl', f'caminus-{ver}.tar.gz'
+    tag = wheel_tag()
+    whl_n, sd_n = f'caminus-{ver}-{tag}.whl', f'caminus-{ver}.tar.gz'
     names = sorted(os.listdir(a.dist))
     if not check('DIST holds the wheel, the sdist and SHA256SUMS, nothing else', names == sorted([whl_n, sd_n, 'SHA256SUMS']), str(names)):
         return 1
@@ -128,7 +137,10 @@ def main(argv=None):
     meta = files.get(di + 'METADATA', b'').decode()
     check('wheel METADATA: Name caminus, the release version', re.search(r'^Name: caminus$', meta, re.M) is not None
           and re.search(rf'^Version: {re.escape(ver)}$', meta, re.M) is not None, meta[:200])
-    check('wheel tag py3-none-any', re.search(r'^Tag: py3-none-any$', files.get(di + 'WHEEL', b'').decode(), re.M) is not None)
+    wf = files.get(di + 'WHEEL', b'').decode()
+    tags = re.findall(r'^Tag: (.*)$', wf, re.M)
+    check(f'wheel WHEEL: Root-Is-Purelib false, the one tag {tag} (a platform wheel: the panel is an x86-64 binary)',
+          re.search(r'^Root-Is-Purelib: false$', wf, re.M) is not None and tags == [tag] and not tag.endswith('-any'), wf)
     bad = []
     for line in files.get(di + 'RECORD', b'').decode().splitlines():
         p, h, _n = line.rsplit(',', 2)

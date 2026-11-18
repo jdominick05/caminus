@@ -6,7 +6,7 @@
 # use, so the files are byte for byte theirs; then it signs a provenance attestation for the wheel, the sdist and
 # SHA256SUMS (Sigstore's public-good instance, as for any public repository). The build steps run in this called workflow,
 # isolated from the caller's steps, and the provenance names this file as the signer and the caller's ref as the source:
-#   gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus \
+#   gh attestation verify caminus-X.Y.Z-py3-none-manylinux_2_17_x86_64.whl --repo jdominick05/caminus \
 #      --signer-workflow jdominick05/caminus/.github/workflows/build.yml --source-ref refs/tags/vX.Y.Z
 # (a nightly's source ref is refs/heads/testing: nightly.yml runs there; a rehearsal's is its ci/* branch)
 # The image is public (anyone can rebuild a release with it); this workflow still never runs for a fork's pull request,

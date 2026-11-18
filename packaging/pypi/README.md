@@ -10,7 +10,7 @@ On the same cards it writes 1.1 to 2.4 times as fast as llama.cpp at short conte
 
 ## Get started
 
-You need Linux, Python 3.12 and at least one RX 7900 XTX or XT.
+You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT.
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards (not on PyPI)

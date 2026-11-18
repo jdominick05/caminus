@@ -57,7 +57,7 @@ caller as the artifact `dist-built`, with SHA256SUMS as an output. It never runs
 
 ## release.yml: a published GitHub Release (or by hand with its tag)
 
-1. **verify** (`contents: read` only): checks out the tag, downloads the Release's attached `caminus-X.Y.Z-py3-none-any.whl`,
+1. **verify** (`contents: read` only): checks out the tag, downloads the Release's attached `caminus-X.Y.Z-py3-none-manylinux_2_17_x86_64.whl`,
    `caminus-X.Y.Z.tar.gz` and `SHA256SUMS`, and runs `tools/release/verify_release.py DIST --tag vX.Y.Z`: one version everywhere,
    SHA256SUMS, the wheel's RECORD, the code objects exactly `caminus.device.kernels.RUNTIME_SET` with each sha256 equal to
    provenance.json and to the committed `packaging/gfx1100-kernels.sha256` at the tag, provenance naming the tag's commit and
@@ -181,7 +181,7 @@ comes back only with them rerun.
 5. **Try the wheel** in a fresh environment: `pip install torch --index-url https://download.pytorch.org/whl/rocm7.2`, then the
    wheel; `caminus doctor`, `caminus doctor --gpu`, a short `caminus serve` (docs/quickstart.md).
 6. **Create the GitHub Release** with the three files attached, e.g.
-   `gh release create vX.Y.Z dist/caminus-X.Y.Z-py3-none-any.whl dist/caminus-X.Y.Z.tar.gz dist/SHA256SUMS --title "Caminus X.Y.Z" --notes-file NOTES.md`.
+   `gh release create vX.Y.Z dist/caminus-X.Y.Z-py3-none-manylinux_2_17_x86_64.whl dist/caminus-X.Y.Z.tar.gz dist/SHA256SUMS --title "Caminus X.Y.Z" --notes-file NOTES.md`.
    Publishing it starts release.yml.
 7. **Approve** the `pypi` deployment once verify, build and match have passed (the run's page on GitHub). The upload follows.
 
@@ -251,7 +251,7 @@ The release files meet **SLSA Build Level 3** by our own assessment (no one has 
 the workflow file and the run. Check a file:
 
 ```bash
-gh attestation verify caminus-X.Y.Z-py3-none-any.whl --repo jdominick05/caminus \
+gh attestation verify caminus-X.Y.Z-py3-none-manylinux_2_17_x86_64.whl --repo jdominick05/caminus \
    --signer-workflow jdominick05/caminus/.github/workflows/build.yml --source-ref refs/tags/vX.Y.Z
 ```
 

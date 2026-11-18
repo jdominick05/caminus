@@ -2,7 +2,8 @@
 
   python -I tests/ember/test_installed_wheel.py --scratch DIR
 
-Builds a wheel from a copy of this tree (no build isolation: needs setuptools; SKIP without it), installs it into a fresh
+Builds a wheel from a copy of this tree (no build isolation: needs setuptools; SKIP without it), checks it is the x86-64
+platform wheel setup.py's WHEEL_TAG sets (never any / purelib: the panel is an x86-64 binary), installs it into a fresh
 virtual environment with no dependencies, and from a folder outside the checkout checks that `caminus ember` works:
 the commands parse, ROBOTS.md ships as package data, the setup script is generated, and the resident's zipapp builds
 from the installed copy, runs, and holds only the resident package. Nothing here needs an agent account, a network,
@@ -76,6 +77,14 @@ def main():
     wheel = os.path.join(wheels, built[0])
     with zipfile.ZipFile(wheel) as z:
         names = set(z.namelist())
+        wn = [n for n in names if n.endswith('.dist-info/WHEEL')]
+        wf = z.read(wn[0]).decode() if wn else ''
+    # a platform wheel: the panel it ships is an x86-64 binary, so pip must not offer it to aarch64 or macOS
+    plat = 'py3-none-manylinux_2_17_x86_64'
+    check(built[0].endswith('-' + plat + '.whl'), 'the wheel is tagged ' + plat, built[0])
+    check('Root-Is-Purelib: false' in wf.splitlines() and [l for l in wf.splitlines() if l.startswith('Tag:')] == ['Tag: ' + plat],
+          'its WHEEL says Root-Is-Purelib: false and the one platform tag (never any / purelib)', wf)
+    check(not any('.data/' in n for n in names), 'the package sits at the wheel\'s root (no .data/purelib or platlib tree)')
     check('caminus/share/harness/ember/ROBOTS.md' in names, 'the wheel ships ROBOTS.md')
     check(all(f'caminus/ember/{m}.py' in names for m in ('provision', 'runner', 'relay', 'agent_host')) and
           'caminus/ember/resident/runtime.py' in names, 'the wheel ships the owner side and the resident')

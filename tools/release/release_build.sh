@@ -88,7 +88,8 @@ mkdir dist
 "$PY" -I -m pip wheel . --no-deps --no-build-isolation -w dist > build/release-wheel.log 2>&1 || { tail -30 build/release-wheel.log >&2; die "pip wheel failed"; }
 "$PY" -I -c "from setuptools import build_meta as b; b.build_sdist('dist')" > build/release-sdist.log 2>&1 || { tail -30 build/release-sdist.log >&2; die "build_sdist failed"; }
 "$PY" -I tools/release/repro_dist.py dist || die "tools/release/repro_dist.py refused the archives"
-(cd dist && sha256sum "caminus-$VER-py3-none-any.whl" "caminus-$VER.tar.gz" > SHA256SUMS)
+# the one wheel repro_dist.py found; its name carries setup.py's WHEEL_TAG, which verify_release.py checks
+(cd dist && sha256sum caminus-"$VER"-*.whl "caminus-$VER.tar.gz" > SHA256SUMS)
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "the build changed tracked files (git status)"
 if [ "$mode" = tag ]; then "$PY" -I tools/release/verify_release.py dist --tag "$TAG"; else "$PY" -I tools/release/verify_release.py dist --untagged; fi
 echo "release_build: dist/ ready:"; cat dist/SHA256SUMS

@@ -1,20 +1,25 @@
-"""setuptools glue for pyproject.toml (docs/dev/packaging.md). Two things pyproject cannot say:
+"""setuptools glue for pyproject.toml (docs/dev/packaging.md). Three things pyproject cannot say:
 
   * build/ holds ./build.sh's code objects, so setuptools builds in .pybuild/ instead;
   * a wheel is refused unless the gfx1100 runtime set is staged in python/caminus/hsaco/gfx1100 (tools/release/stage_kernels.py) and
     every object matches its provenance.json: a wheel without its code objects would install and then fail at the first
-    launch."""
+    launch;
+  * the wheel is a platform wheel, WHEEL_TAG (Root-Is-Purelib: false): it carries the panel, a static x86-64 Go binary, and
+    nothing in it runs elsewhere. Static, so the oldest manylinux tag is the honest one; every pip that installs Python 3.12
+    reads PEP 600 tags, so no manylinux2014 alias is needed."""
 import hashlib
 import json
 import os
 import sys
 
-from setuptools import setup
+from setuptools import Distribution, setup
+from setuptools.command.bdist_wheel import bdist_wheel
 from setuptools.command.build import build
 from setuptools.command.build_py import build_py
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGED = os.path.join(HERE, 'python', 'caminus', 'hsaco', 'gfx1100')
+WHEEL_TAG = 'py3-none-manylinux_2_17_x86_64'   # tools/release/verify_release.py reads it from here
 
 
 def check_staged():
@@ -52,4 +57,16 @@ class BuildPy(build_py):
         super().run()
 
 
-setup(cmdclass={'build': Build, 'build_py': BuildPy})
+class PlatformDistribution(Distribution):
+    # bdist_wheel writes Root-Is-Purelib: false and installs the package at the wheel's root (platlib) only for a
+    # distribution with extension modules; this one has none, but its wheel is as platform-bound as one that had
+    def has_ext_modules(self):
+        return True
+
+
+class BdistWheel(bdist_wheel):
+    def get_tag(self):
+        return tuple(WHEEL_TAG.split('-'))
+
+
+setup(distclass=PlatformDistribution, cmdclass={'build': Build, 'build_py': BuildPy, 'bdist_wheel': BdistWheel})

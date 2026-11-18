@@ -1,4 +1,4 @@
-# The installable `caminus` package (docs/dev/packaging.md): a pure py3-none-any wheel with the prebuilt gfx1100 code objects
+# The installable `caminus` package (docs/dev/packaging.md): a py3-none-manylinux_2_17_x86_64 wheel (setup.py) with the prebuilt gfx1100 code objects
 # and the guard as package data. Build: ./build.sh && python -I tools/release/stage_kernels.py && pip wheel . --no-deps
 # --no-build-isolation -w dist (setup.py refuses a wheel without a complete staged set). PyTorch (the ROCm build) is not
 # declared: PyPI's torch is a CUDA build.
