@@ -2591,7 +2591,10 @@ for line in sys.stdin:
         # a worker that could not write (SIGKILL) leaves "running" behind: every reader says stopped, not running
         # (its command ignores the pty's hang-up, so it outlives the worker: the emergency stop must still reach it)
         sid2=uuid.uuid4().hex
-        out2=t.call(sid2,dict(command="trap '' HUP; sleep 300",yield_ms=300))
+        out2=t.call(sid2,dict(command="trap '' HUP; echo TRAPPED; sleep 300",yield_ms=300))
+        # the worker dies only once the shell has set the trap: a login profile can take longer than the first poll,
+        # and a hang-up before the trap ends the command with its worker (the race CI hit)
+        self.wait(lambda:'TRAPPED' in t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=200,offset=0))['output'],20)
         os.kill(out2['worker'],signal.SIGKILL)
         try:
             self.wait(lambda:json.loads((self.home/'jobs'/sid2/'state.json').read_text())['phase']=='running' and
