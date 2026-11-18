@@ -17,11 +17,12 @@ even when everything works. That's how cards move from untested to supported.
 
 ## What runs on how many cards
 
-| Cards | What you can run |
-|---|---|
-| One | The one-card models. `thinkingcap` and `qwen3.8-27b` fit any supported card; `qwen3-30b-a3b` and `swift-1.5` need a 24 GB card. |
-| Two | `coder` on an XTX + XT or two XTX; `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b` across both (`--cards 2`); or two one-card models side by side (`caminus start` in a terminal; the panel runs one server at a time). |
-| Three or more | Two cards for a two-card model; one-card models on the rest. |
+What runs on one XT, one XTX, an XTX + XT, two XTX and two XT, and the model to start with on each:
+[the setup table](../README.md#the-model-for-your-setup). Beyond it:
+
+- Two cards can also run two one-card models side by side (`caminus start` in a terminal; the panel runs one server at
+  a time).
+- Three or more cards: two cards for a two-card model, one-card models on the rest.
 
 Caminus finds your cards itself and gives the bigger card the bigger share of a two-card model. `coder` needs an XTX as its first card, which holds the bigger share: it runs on an XTX + XT or on two XTX, and
 two XT cards are too small. Two XTX run the same split and the same kernels as the XTX + XT it was tested on, so expect at

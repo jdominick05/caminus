@@ -41,12 +41,14 @@ W7900, GRE = ('0x7448', 48, 110000), ('0x744c', 16, 110000)
 RX7800 = ('0x747e', 16, 110001)
 
 
-def host_tree(root, cards, slow=()):
+def host_tree(root, cards, slow=(), holders=()):
     """a minimal sysfs: each card's endpoint on a PCIe 4.0 x16 hop (a card index in slow: PCIe 1.0 x1), its DRM node, its
-    KFD node (card 1 drives the display)"""
+    KFD node (card 1 drives the display); holders: pids in KFD's process list (processes holding a GPU context)"""
     if os.path.isdir(root):
         shutil.rmtree(root)
     w(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', '0', 'properties'), 'simd_count 0\n')
+    for pid in holders:
+        os.makedirs(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'proc', str(pid)), exist_ok=True)
     for i, (did, gib, gfx) in enumerate(cards):
         slot, minor, name = f'0000:{3 + 3 * i:02x}:00.0', 128 + i, f'card{i + 1}'
         ep = os.path.join(root, 'sys', 'devices', 'pci0000:00', f'0000:00:01.{i + 1}', slot)
@@ -92,7 +94,8 @@ def main():
     for k in ('CAMINUS_CODER', 'K3_GGUF', 'CAMINUS_DFLASH', 'CAMINUS_MODEL_SEARCH', 'NO_COLOR'):
         os.environ.pop(k, None)
     from caminus import models
-    from caminus.cmd import doctor, download, manage, qwen_code, wizard
+    from caminus.cmd import download, manage, qwen_code, wizard
+    from caminus.device import host
 
     # ---- nothing may launch, download or exec: refusers under the seam
     def refuse(what):
@@ -110,23 +113,27 @@ def main():
     real_run_cmd = wizard.run_cmd
     os.execve = refuse('an exec')
     manage.unmanaged_servers = lambda proc='/proc': []     # (no /proc scan, no request to a live server on this machine)
-    doctor.kfd_procs = lambda: []
+    manage.http_json = lambda url, timeout=1.0: (None, None)   # (no request to any port: a live server reads as loading)
     download.free_bytes = lambda p: 10 ** 15
     qwen_code.binary = lambda: None
-    wizard.node_missing = lambda: ''
+    qwen_code.node_missing = lambda: ''
 
-    def go(cards, tag, yes=True, dry=True, answers=(), rc=None, slow=()):
-        manage.ROOT = host_tree(os.path.join(S, 'hosts', tag), cards, slow)
+    def go(cards, tag, yes=True, dry=True, answers=(), rc=None, slow=(), holders=()):
+        manage.ROOT = host_tree(os.path.join(S, 'hosts', tag), cards, slow, holders)
         runs = Runs(rc)
         wizard.run_cmd = runs
         it = iter(answers)
+        out = io.StringIO()
 
         def ask(prompt):
+            out.write(prompt + '\n')           # (a terminal shows the question: the checks read it with the output)
             try:
-                return next(it)
+                got = next(it)
             except StopIteration:
                 raise EOFError from None
-        out = io.StringIO()
+            if got is KeyboardInterrupt:
+                raise KeyboardInterrupt
+            return got
         code = wizard.Wizard(yes=yes, dry=dry, out=out, ask=ask).main()
         return code, runs.calls, out.getvalue()
 
@@ -169,6 +176,11 @@ def main():
     check(code == 0 and '* swift-1.5' in out and 'two-card models: ' in out and 'PCIe 1.0 x1' in out
           and 'does not run on these cards' in out and calls[-1] == ['pull', 'swift-1.5', '--dry-run'],
           'XTX + XT with the XT on a PCIe 1.0 x1 link: no pair, so the one-XTX setup applies (Swift 1.5), said why')
+    from caminus.ember import serve as ember_serve
+    check(ember_serve.default_brain(host.gpus(manage.ROOT))[0] == 'swift-1.5',
+          'the same slow link: Ember\'s default brain agrees with the wizard (models.setup_here, one helper)')
+    w7848 = host.gpus(host_tree(os.path.join(S, 'hosts', 'w7800-48'), [('0x7449', 48, 110000)]))[0]
+    check(w7848['label'] == 'W7800-48GB' and w7848['status'] == 'untested', 'the W7800 48GB (0x7449): named, untested')
     kfd0 = wizard.kfd_closed
     wizard.kfd_closed = lambda root: '/dev/kfd'
     code, calls, out = go([XTX], 'kfd', dry=False)
@@ -190,6 +202,26 @@ def main():
     check(['start', 'swift-1.5', '--cards', '2'] in calls, 'two XT: Swift 1.5 runs only in its two-card form: --cards 2')
     code, calls, out = go([XTX, XT], 'eof', yes=False, dry=False, answers=[])
     check(code == 1 and 'no answer' in out and ['pull', 'coder'] not in calls, 'end of input at a question: stopped cleanly')
+    code, calls, out = go([XTX, XT], 'ctrl-c', yes=False, dry=False, answers=[KeyboardInterrupt])
+    check(code == 130 and 'interrupted' in out and 'Done' not in out, 'Ctrl+C at a question: exit 130, the re-run hint')
+
+    class Interrupt(Runs):
+        def __call__(self, argv):
+            super().__call__(argv)
+            if argv[0] == 'pull':
+                raise KeyboardInterrupt
+            return 0
+    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-pull'), [XTX, XT])
+    wizard.run_cmd, out = Interrupt(), io.StringIO()
+    code = wizard.Wizard(yes=True, out=out).main()
+    check(code == 130 and ['start', 'coder'] not in wizard.run_cmd.calls and 'interrupted' in out.getvalue(),
+          'Ctrl+C during a command (the download): exit 130, nothing after it runs')
+    code, calls, out = go([XTX, XT], 'pull-fail', dry=False, rc={'pull': 1})
+    check(code == 1 and ['start', 'coder'] not in calls and 'the download did not finish' in out and 'Done' not in out,
+          'a caminus pull that fails: the wizard stops before the start')
+    code, calls, out = go([XTX, XT], 'qwen-fail', yes=False, dry=False, answers=['', 'y'], rc={'qwen': 1})
+    check(code == 1 and calls[-1] == ['qwen', '--server', 'coder'] and 'did not open Qwen Code (exit 1)' in out
+          and 'Done' not in out, 'caminus qwen fails (exit 1): said, with the command for later; no "Done."')
 
     # ---- refusals and skips
     code, calls, out = go([XTX], 'doctor-fail', dry=False, rc={'doctor': 1})
@@ -197,11 +229,9 @@ def main():
     check(go([XTX], 'doctor-fail-dry', rc={'doctor': 1})[0] == 1, 'a FAIL stops a dry run as well')
     code, calls, out = go([XTX], 'gpu-fail', dry=False, rc={'doctor --gpu': 1})
     check(code == 1 and calls[-1] == ['doctor', '--gpu'], 'a caminus doctor --gpu failure stops the wizard')
-    doctor.kfd_procs = lambda: [4242]
-    code, calls, out = go([XTX], 'held', dry=False)
+    code, calls, out = go([XTX], 'held', dry=False, holders=(4242,))
     check(['doctor', '--gpu'] not in calls and 'waits for idle cards: 1 process(es)' in out and 'skipped' in out,
-          'another process holds a GPU context: doctor --gpu is skipped, said so')
-    doctor.kfd_procs = lambda: []
+          'another process holds a GPU context (KFD\'s list under the fixture root): doctor --gpu is skipped, said so')
     download.free_bytes = lambda p: 5 * 10 ** 9
     code, calls, out = go([XTX, XT], 'disk', dry=False)
     check(code == 1 and ['pull', 'coder'] not in calls and 'not enough disk' in out and 'GB to download into ' + md in out,
@@ -219,54 +249,105 @@ def main():
     check(code == 0 and not any(c[0] == 'pull' for c in calls) and 'on disk already' in out
           and calls[2:4] == [['fit', '--model', tc, '--cards', '1', '--drafter', dfl], ['start', 'thinkingcap']],
           f'files on disk: no pull (re-runnable); caminus fit on the files start serves, then the start ({calls[2:4]})')
+    wrong = os.path.join(md, models.local_rel(models.BY_KEY['qwen3.8-27b']))
+    os.makedirs(os.path.dirname(wrong), exist_ok=True)
+    with open(wrong, 'wb') as f:
+        f.truncate(1000)
+    code, calls, out = go([XT], 'wrong-size', yes=False, dry=False, answers=['qwen3.8-27b'])
+    check(code == 1 and not any(c[0] == 'pull' for c in calls) and 'leaves it alone' in out and 'resumes' not in out,
+          'a file of the wrong size in the model folder: named, no promise that a re-run resumes, no pull')
+    os.remove(wrong)
     code, calls, out = go([XT], 'fit-fail', dry=False, rc={'fit': 1})
     check(code == 0 and ['start', 'thinkingcap'] in calls and 'caminus start checks again' in out,
           'a caminus fit that cannot project is said and does not stop the start (start checks again)')
 
-    # a running server: kept unless the user switches (manage.alive: the guard pid 4242 counts as alive)
-    os.makedirs(os.path.join(st, 'servers', 'thinkingcap'), exist_ok=True)
-    with open(os.path.join(st, 'servers', 'thinkingcap', 'server.json'), 'w') as f:
-        json.dump(dict(name='thinkingcap', model='thinkingcap', port=8092, guard_pid=4242, card_names=['XT'],
-                       log=os.path.join(S, 'x.log'), devices=[1]), f)
+    # running servers: found before any download; their model preselected; kept unless the user switches (manage.alive:
+    # the guard pids 4242 / 4243 count as alive; no request reaches a port, so each reads as still loading)
+    def server(name, pid, card):
+        os.makedirs(os.path.join(st, 'servers', name), exist_ok=True)
+        with open(os.path.join(st, 'servers', name, 'server.json'), 'w') as f:
+            json.dump(dict(name=name, model=name, port=8092 + pid - 4242, guard_pid=pid, card_names=[card],
+                           log=os.path.join(S, 'x.log'), devices=[pid - 4242]), f)
+    server('thinkingcap', 4242, 'XT')
     alive0 = manage.alive
-    manage.alive = lambda pid: pid == 4242
+    manage.alive = lambda pid: pid in (4242, 4243)
     code, calls, out = go([XTX, XT], 'keep', dry=False)
-    check(code == 0 and not any(c[0] in ('start', 'stop') for c in calls) and ['doctor', '--gpu'] not in calls
-          and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'] and 'K/s] k (--yes)' in out,
-          '--yes with another model running: kept, no start, Qwen Code set up for the running server')
-    code, calls, _ = go([XTX, XT], 'switch', yes=False, dry=False, answers=['', 's', 'n'])
-    check(calls[-3:] == [['stop', 'thinkingcap'], ['start', 'coder'], ['qwen-code', 'setup', '--server', 'coder', '--install']],
-          f'switch: caminus stop, then caminus start ({calls[-3:]})')
+    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls) and ['doctor', '--gpu'] not in calls
+          and '* thinkingcap' in out and 'runs thinkingcap already' in out and 'still loading' in out
+          and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
+          '--yes with a server running: its model preselected, kept: no download, no start; Qwen Code set up for it '
+          '(a re-run while it still loads: setup waits for it)')
+    code, calls, out = go([XTX, XT], 'keep-other', yes=False, dry=False, answers=['coder', '', 'n'])
+    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls) and '(stops thinkingcap first)? [K/s]' in out
+          and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
+          'another model chosen, then keep: asked before any download, no pull, Qwen Code set up for the kept server')
+    code, calls, out = go([XTX, XT], 'switch', yes=False, dry=False, answers=['coder', 's', 'n'])
+    check(calls[1:] == [['pull', 'coder'], ['stop', 'thinkingcap'], ['start', 'coder'],
+                        ['qwen-code', 'setup', '--server', 'coder', '--install']],
+          f'switch: the download first, then caminus stop, then caminus start ({calls[1:]})')
     code, calls, out = go([XT], 'same', dry=False)
-    check(code == 0 and not any(c[0] == 'start' for c in calls) and 'runs thinkingcap already' in out,
-          'the chosen model runs already: kept, no start')
+    check(code == 0 and not any(c[0] in ('pull', 'start') for c in calls) and 'runs thinkingcap already' in out,
+          'the chosen model runs already: kept, no download, no start')
     qwen_code.binary, qs0 = (lambda: '/opt/qwen'), qwen_code.status
     qwen_code.status = lambda: dict(target='thinkingcap')
     code, calls, out = go([XT], 'qwen-done', dry=False)
     check(not any(c[0] == 'qwen-code' for c in calls) and 'set up for thinkingcap already' in out,
           'Qwen Code set up for the server already: no second setup (each writes a backup)')
+    code, calls, out = go([XT], 'qwen-done-dry')
+    check('set up for thinkingcap already' in out and '$ caminus qwen-code' not in out,
+          'a dry run shows the same skip (status() only reads)')
     qwen_code.binary, qwen_code.status = (lambda: None), qs0
+    server('qwen3-30b-a3b', 4243, 'XTX')                    # (two servers: qwen3-30b-a3b sorts first)
+    code, calls, out = go([XTX, XT], 'two-keep', yes=False, dry=False, answers=['coder', '2', 'n'])
+    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls)
+          and '(stops qwen3-30b-a3b, thinkingcap first)? [1]' in out
+          and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
+          'two servers: the switch question names both; keeping, Qwen Code is set up for the one chosen (2: thinkingcap)')
+    code, calls, out = go([XTX, XT], 'two-stop-fail', yes=False, dry=False, answers=['coder', 's'],
+                          rc={'stop thinkingcap': 1})
+    check(code == 1 and not any(c[0] == 'start' for c in calls)
+          and 'stopped qwen3-30b-a3b; thinkingcap did not stop' in out and 'still running: thinkingcap. Nothing was started' in out,
+          'a stop that fails during a switch: what stopped and what still runs is said; nothing is started')
+    for n in ('thinkingcap', 'qwen3-30b-a3b'):
+        os.remove(os.path.join(st, 'servers', n, 'server.json'))
     manage.alive = alive0
     manage.unmanaged_servers = lambda proc='/proc': [dict(name='observed-8092', url='http://127.0.0.1:8092', model='x')]
     code, calls, out = go([XTX, XT], 'outside', dry=False)
-    check(code == 0 and not any(c[0] in ('start', 'stop', 'qwen-code', 'qwen') for c in calls) and 'started outside caminus start' in out
-          and 'step 4' in out and 'step 5' in out, 'a server started outside caminus start: kept, steps 4 and 5 skipped with the reason')
+    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop', 'qwen-code', 'qwen') for c in calls)
+          and 'started outside caminus start' in out and all(f'step {n}' in out for n in (3, 4, 5)),
+          'a server started outside caminus start: kept, steps 3-5 skipped with the reason, no download')
     manage.unmanaged_servers = lambda proc='/proc': []
-    wizard.node_missing = lambda: 'Node.js 18'
+    qwen_code.node_missing = lambda: 'Node.js 18'
     code, calls, out = go([XTX, XT], 'no-node', dry=False)
-    check(code == 0 and not any(c[0] in ('qwen-code', 'qwen') for c in calls) and wizard.NODE_URL in out
+    check(code == 0 and not any(c[0] in ('qwen-code', 'qwen') for c in calls) and qwen_code.NODE_URL in out
           and 'caminus qwen-code setup --server coder --install' in out and 'sudo' not in out,
           'no Node.js 22: the step is skipped with the install link and the command to run after (no sudo run or printed)')
-    wizard.node_missing = lambda: ''
+    try:
+        qwen_code.install(print)
+        refused = ''
+    except manage.ManageError as e:
+        refused = str(e)
+    check('Node.js 22 or newer' in refused and 'Node.js 18' in refused,
+          'caminus qwen-code setup --install refuses Node.js 18 itself (the one rule, qwen_code.node_missing)')
+    qwen_code.node_missing = lambda: ''
 
     # ---- the log: the lines and exit codes, never a key
     log = open(os.path.join(st, 'wizard.log')).read()
     check('$ caminus doctor' in log and '-> exit 0' in log and 'never-logged-sentinel' not in log and '\033[' not in log,
           'the log: commands and exit codes, no colour codes, no token')
 
-    # ---- the real seam (caminus.__main__.dispatch): a read-only command runs, a bad one returns its error code
-    check(real_run_cmd(['pull', 'thinkingcap', '--dry-run']) == 0 and real_run_cmd(['pull', 'no-such-model']) == 2,
-          'run_cmd: caminus pull --dry-run through dispatch exits 0; an unknown model, argparse\'s 2')
+    # ---- the real seam (caminus.__main__.main): a read-only command runs, a bad one returns its error code, and a broken
+    # config.toml is the CLI's own message (exit 2), not a traceback
+    from caminus import config
+    ok = real_run_cmd(['pull', 'thinkingcap', '--dry-run']) == 0 and real_run_cmd(['pull', 'no-such-model']) == 2
+    w(os.path.join(S, 'bad.toml'), 'model_dir = [\n')
+    os.environ['CAMINUS_CONFIG'] = os.path.join(S, 'bad.toml')
+    config._FILE.clear()
+    bad_rc = real_run_cmd(['models'])
+    os.environ['CAMINUS_CONFIG'] = os.path.join(S, 'none.toml')
+    config._FILE.clear()
+    check(ok and bad_rc == 2, f'run_cmd through caminus.__main__.main: pull --dry-run exits 0, an unknown model 2, a broken '
+                              f'config.toml 2 ({bad_rc})')
 
     # ---- the CLI knows the command (no torch import for its help)
     r = subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); from caminus.__main__ import main;'

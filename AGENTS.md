@@ -198,11 +198,12 @@ CLAUDE.md imports this file.
 - `device/host.py`: the host's cards from sysfs + KFD topology, never torch; `caminus serve` places itself and sets
   `HIP_VISIBLE_DEVICES` before HIP starts. `device/capacity.py`: every VRAM projection and check.
 - `cmd/`: console commands; `panel/`: the Go control panel and monitor (`caminus panel`, `caminus top`).
-  `cmd/wizard.py` (`caminus wizard`) only orchestrates: each step is a caminus command run through one seam (`run_cmd`),
-  printed first; what runs on which setup and the model to start with is `models.SETUPS`, which the README's table must
-  equal (tests/docs/test_docs.py) and Ember's default brain reads. Tests: tests/cmd/test_wizard.py (fake hosts).
   Session monitoring filters by the selected server's alias before applying its six-session limit; shared Qwen homes
   must not let another model's newer logs hide this server's sessions.
+  `cmd/wizard.py` (`caminus wizard`) only orchestrates: each step is a caminus command run through one seam (`run_cmd`),
+  printed first; what runs on which setup and the model to start with is `models.SETUPS`, which the README's table must
+  equal (tests/docs/test_docs.py); `models.setup_here` picks the row for a host (the pair the link rule allows), for
+  the wizard and Ember's default brain alike. Tests: tests/cmd/test_wizard.py (fake hosts).
 - `ember/`: Ember, the agent environment (`caminus ember`; `caminus env` is kept as an alias; docs/specs/spec-ember.md): agent work as a second user on this machine over SSH, root only through a human-approved bridge; its system prompt is share/harness/ember/ROBOTS.md; stdlib only, no GPU, CPU tests only.
   `ember/resident/sandbox.py`: the resident's `sandbox` tool (untrusted code in a bubblewrap box; docs/dev/ember.md).
   `ember/resident/browser.py`: the resident's `browser` tool (Chrome in a sandbox box over the DevTools pipe; docs/dev/ember.md).

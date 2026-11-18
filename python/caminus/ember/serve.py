@@ -26,12 +26,12 @@ def default_brain(gs=None):
     ThinkingCap, the model that fits the smallest measured card. (None, why) without a usable card."""
     from ..device import host
     try:
-        cards = host.ranked(host.gpus() if gs is None else gs)
+        gs = host.gpus() if gs is None else gs
     except OSError as e:
         return None, f'the cards could not be read: {e}'
-    if not cards:
+    if not host.usable(gs):
         return None, 'no supported card (an RX 7900 XTX or XT)'
-    row = models.setup_of(cards)
+    row, _ = models.setup_here(gs)              # (the pair the link rule allows, as caminus wizard picks)
     if row is None:
         return 'thinkingcap', 'no measured setup for cards under 20 GB'
     return row['start'], row['row'].replace('One ', 'one ').replace('Two ', 'two ')   # ('one XT', 'XTX + XT', 'two XTX')

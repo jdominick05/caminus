@@ -3597,7 +3597,7 @@ for line in sys.stdin:
 
     def test_the_default_brain_follows_the_cards(self):
         from caminus.ember import serve
-        card=lambda mib,pci:dict(card='card'+pci,pci=pci,label='x',total_mib=mib,status='supported',link=dict(gbps=31.5))
+        card=lambda mib,pci:dict(card='card'+pci,pci=pci,label='x',total_mib=mib,status='supported',link=dict(gbps=31.5),link_ok=True)
         XTX,XT=24560,20464
         self.assertEqual(serve.default_brain([card(XTX,'1')])[0],'swift-1.5')
         self.assertEqual(serve.default_brain([card(XT,'1')])[0],'thinkingcap')

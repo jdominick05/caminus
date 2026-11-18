@@ -102,10 +102,11 @@ def check_torch(R):
     R.add('PASS' if ok else 'FAIL', 'torch', detail)
 
 
-def kfd_procs():
-    root = '/sys/class/kfd/kfd/proc'
+def kfd_procs(root='/'):
+    """the other processes holding a GPU context (KFD's process list under the sysfs root), or None when unreadable"""
+    d = os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'proc')
     try:
-        return sorted(int(p) for p in os.listdir(root) if p.isdigit() and int(p) != os.getpid())
+        return sorted(int(p) for p in os.listdir(d) if p.isdigit() and int(p) != os.getpid())
     except OSError:
         return None
 

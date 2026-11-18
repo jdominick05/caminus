@@ -203,6 +203,18 @@ def setup_of(cards):
     return None
 
 
+def setup_here(gs):
+    """(row, why) for a host's GPUs (caminus.device.host.gpus): setup_of the pair host.pair allows, else of the first
+    usable card alone (a second card on too slow a link, or one card); why: the pair's refusal when two or more usable
+    cards make no pair, else None. caminus wizard and Ember's default brain both read it"""
+    from .device import host
+    cards = host.ranked(gs)
+    try:
+        return setup_of(host.pair(gs)), None
+    except host.PlacementError as e:
+        return setup_of(cards[:1]), (str(e) if len(cards) >= 2 else None)
+
+
 def allow_paused():
     """CAMINUS_ALLOW_PAUSED=1: paused models and architectures are offered and served anyway"""
     return os.environ.get('CAMINUS_ALLOW_PAUSED') == '1'

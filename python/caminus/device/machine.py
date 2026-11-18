@@ -20,7 +20,8 @@ CAP_MARGIN_MIB = 256        # kept free below every card's guard line (caminus.d
 NAMES = {(0x744c, 23): 'XTX', (0x744c, 24): 'XTX', (0x744c, 19): 'XT', (0x744c, 20): 'XT',   # (PCI device, total GiB) -> label
          (0x744c, 15): 'GRE', (0x744c, 16): 'GRE'}   # (the RX 7900 GRE shares the XTX / XT's device id: told apart by its 16 GB)
 # the other gfx1100 cards by PCI device id alone (pci.ids): allowed as untested (caminus.device.host: status 'untested')
-UNTESTED = {0x7448: 'W7900', 0x744a: 'W7900', 0x744b: 'W7900D', 0x745e: 'W7800'}
+# (labels are one word: guard.sh --lines and caminus doctor split its output on spaces)
+UNTESTED = {0x7448: 'W7900', 0x744a: 'W7900', 0x744b: 'W7900D', 0x745e: 'W7800', 0x7449: 'W7800-48GB'}
 
 
 def _read(p):

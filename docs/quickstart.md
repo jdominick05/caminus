@@ -52,7 +52,7 @@ Please report what breaks.
 ## 2. Run the wizard
 
 ```bash
-caminus wizard --dry-run   # the plan: runs only the read-only commands (doctor, pull --dry-run, fit), prints the rest
+caminus wizard --dry-run   # the plan: runs only the read-only commands (doctor, pull --dry-run, fit), writes only its log
 caminus wizard
 ```
 
@@ -62,11 +62,13 @@ It takes six steps and prints each `caminus` command before it runs it, so you l
    program uses a card). Fix every FAIL line ([reading `caminus doctor`](troubleshooting.md#reading-caminus-doctor)),
    then run the wizard again.
 2. Pick a model. The list says which models run on your cards, and the one to start with on your setup
-   ([the table](../README.md#the-model-for-your-setup)) is preselected: press Enter to take it. Read each model's licence
-   before any commercial use ([licences](models.md#licences)).
+   ([the table](../README.md#the-model-for-your-setup)) is preselected: press Enter to take it. While a server runs, its
+   model is preselected; choosing another asks, before anything downloads, whether to keep the server or switch (the
+   question names each server a switch stops). Read each model's licence before any commercial use
+   ([licences](models.md#licences)).
 3. `caminus pull MODEL` downloads it, after the wizard shows its size, the folder and the free space there.
 4. `caminus fit` says how much context fits on your cards, then `caminus start MODEL` starts the model; the first start
-   takes about a minute. A server that runs already is kept unless you choose to switch.
+   takes about a minute.
 5. `caminus qwen-code setup --install` installs Qwen Code (once) and points it at your server. Your own Qwen Code
    settings in `~/.qwen` stay untouched. Without Node.js 22 the wizard says what to install and skips this step.
 6. Open Qwen Code now? Enter opens it, talking to your model. Later, `caminus qwen` does the same.
