@@ -48,6 +48,8 @@ def budget(rt, gid):
                                   usd_per_day=float(rt.free.cfg['budget_usd']))
     if (adv := rt.advisor.cfg):
         spend['advisor'] = dict(usd_today=round(rt.advisor.spent_today(), 4), usd_per_day=float(adv['budget_usd']))
+    if (eyes := getattr(rt, 'eyes', None)) and eyes.cfg and eyes.spent_today():
+        spend['eyes'] = dict(usd_today=round(eyes.spent_today(), 4), usd_per_day=float(eyes.cfg['budget_usd']))
     out['spend'] = spend or 'no metered brain: the local model costs nothing per token'
     return out
 

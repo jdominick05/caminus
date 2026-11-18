@@ -469,6 +469,9 @@ class Store:
                 return
             self.db.execute("UPDATE actions SET state='done',result=? WHERE id=?", (json.dumps(result), action['id']))
             msg = dict(role='tool', tool_call_id=action['call_id'], content=json.dumps(result, ensure_ascii=False))
+            from .files import image_ref
+            if (ref := image_ref(action.get('name'), result)):
+                msg['image'] = ref    # an image read: the transport sends the file (model.py); the store keeps no bytes
             # A stop made while the call ran (cancel, the repeat-failure watchdog's pause, an error) stands: recording
             # the result must not set the goal back to working (it did, so the watchdog could never stop a loop).
             keep = g['state'] in ('cancelled', 'paused', 'error', 'completed')

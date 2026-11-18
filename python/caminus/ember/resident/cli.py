@@ -26,6 +26,44 @@ from . import export as export_mod
 
 
 SPEED_FRESH_S = 120   # seconds a measured decode speed stays on the status line while a goal works
+LIVE_POLL_S = 1.0     # the longest a status call waits on a Caminus server's /caminus/status for the live speed
+
+
+def _engine_live(home, daemon_alive, opener=None):
+    """The engine's write speed while this session's reply streams from a Caminus server: 1000 / its /caminus/status
+    decode.ms_per_token (the engine's mean ms per emitted token over its last passes, across requests, so the figure
+    steps when a reply ends). Asked only of the server a live snapshot names (the runtime names it when the call's
+    brain is known to be Caminus, so never for a fallback brain's reply), once that snapshot holds streamed text and
+    while the server's slot is decoding; None otherwise, or when the server does not answer within LIVE_POLL_S. A
+    snapshot counts only while the daemon that writes it runs and it is younger than SPEED_FRESH_S: a daemon that died
+    mid-turn leaves its snapshot, and another client decoding on that server was shown as this session's speed. The
+    panel polls status every few seconds, so this is one small GET each."""
+    from . import catalog
+    import urllib.request
+    if not daemon_alive:
+        return None
+    server = None
+    for f in (Path(home) / 'live').glob('*.json'):
+        try:
+            snap = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(snap, dict) and isinstance(snap.get('server'), str) and \
+                (snap.get('content') or snap.get('reasoning') or snap.get('tools')) and \
+                isinstance(snap.get('ts'), (int, float)) and time.time() - snap['ts'] < SPEED_FRESH_S:
+            server = snap['server']
+    if not server:
+        return None
+    try:
+        st = catalog._get(server.rstrip('/') + '/caminus/status', {}, opener or urllib.request.urlopen,
+                          LIVE_POLL_S, catalog.LOCAL_READ)
+        slot = st.get('slot') or {}
+        decoded = ((slot.get('next_token') or [{}])[0] or {}).get('n_decoded')
+    except Exception:       # (a status line never fails on a server's answer: no live figure then)
+        return None
+    if not slot.get('is_processing') or not decoded:
+        return None
+    return catalog.decode_tps(st)
 
 
 def _online_s(pid):
@@ -72,7 +110,7 @@ def _local_effort(cfg, keep_level=False):
 
 
 def _current(cfg):
-    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
+    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices','vision')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
 
 
@@ -171,7 +209,7 @@ def model_ops(a,home):
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking','model_variants','efforts'):
+        for k in ('relay','prices','context','thinking','model_variants','efforts','vision'):
             cfg.pop(k,None)
         if cfg.pop('max_tokens_auto',None):
             cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
@@ -181,6 +219,7 @@ def model_ops(a,home):
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])
+        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
         elif spec['kind']=='local':
@@ -246,7 +285,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -342,6 +381,12 @@ def parser():
             p.add_argument('--calls-per-goal',type=int,help='advice calls one goal may make (default 5)')
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
             p.add_argument('--off',action='store_true',help='remove the advisor')
+        if op=='eyes':
+            p.add_argument('--provider',help='a configured provider (agent provider), normally your key relay: mistral, anthropic, ...')
+            p.add_argument('--model',help='a vision model it serves, e.g. ministral-8b-latest or claude-haiku-5-5')
+            p.add_argument('--budget-usd',type=float,help='dollars per day the eyes may spend (default 0.25)')
+            p.add_argument('--auto',action='store_true',help='turn eyes on with the recommended pick: ministral-8b-latest on a Mistral relay provider, else claude-haiku-5-5 on an Anthropic one')
+            p.add_argument('--off',action='store_true',help='no eyes: a brain without vision gets the image\'s size and format')
         if op=='heartbeat':
             p.add_argument('state',nargs='?',choices=('on','off','status','recap','now'),default='status',
                            help='free time: the resident lives in its account when no work is queued')
@@ -488,11 +533,14 @@ def main(argv=None,stdin=None):
                 cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
-                # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
-                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
-                          'fallback','advisor','judge_model','model_variants','efforts'):
+                # judge or advisor on the relay would bill every finish, eyes every image read; the owner adds them back on purpose)
+                for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
+                          'fallback','advisor','judge_model','eyes','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
+                from . import catalog
+                # (after _local_effort: the catalog knows the base id, not an effort id such as ...-nothink)
+                if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -534,6 +582,8 @@ def main(argv=None,stdin=None):
             from .model import Model
             Model(cfg)                     # validate before persisting
             _local_effort(cfg)             # a local server's own id and its effort ids, when it is up
+            from . import catalog
+            if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()
@@ -708,6 +758,40 @@ def main(argv=None,stdin=None):
             emit(dict(advisor={**DEFAULTS,**adv} if adv else None,
                       today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,calls=0))),a.json)
             return 0
+        if a.op=='eyes':
+            # the vision model that describes images for a brain without vision (advisor.Eyes)
+            import types
+            from .advisor import Eyes
+            from . import catalog
+            cfg=json.loads((home/'config.json').read_text())
+            eyes=cfg.get('eyes')
+            if a.off:eyes=False
+            elif a.auto or a.provider or a.model or a.budget_usd is not None:
+                eyes=dict(eyes) if isinstance(eyes,dict) else {}   # (a budget alone stays on the model set before)
+                if a.auto:                                         # (opt-in: only this command writes the pick)
+                    pick=Eyes.auto_pick(cfg)
+                    if not pick:
+                        raise ValueError('--auto needs a Mistral or Anthropic provider on your key relay, e.g. caminus '
+                                         'ember agent provider NAME add mistral --kind mistral --endpoint '
+                                         'http://127.0.0.1:8767/v1 --relay')
+                    eyes.update(pick)
+                for flag in ('provider','model','budget_usd'):
+                    v=getattr(a,flag)
+                    if v is not None:
+                        if isinstance(v,float) and v<0:raise ValueError('--budget-usd must be 0 or more')
+                        eyes[flag]=v
+                if not (eyes.get('provider') and eyes.get('model')):
+                    raise ValueError('eyes need --provider and --model, or --auto')
+                if eyes['provider'] not in catalog.providers(cfg):
+                    raise ValueError('no provider named %s: add it first (caminus ember agent provider NAME add %s '
+                                     '--kind KIND --endpoint RELAY-URL --relay)' % (eyes['provider'],eyes['provider']))
+            if eyes is not None and eyes!=cfg.get('eyes'):
+                cfg['eyes']=eyes
+                atomic_json(home/'config.json',cfg)
+            shown=Eyes(types.SimpleNamespace(config=cfg,home=home))
+            emit(dict(eyes=shown.cfg,today=shown._state().get(__import__('datetime').date.today().isoformat(),
+                                                              dict(usd=0.0,calls=0))),a.json)
+            return 0
         if a.op=='heartbeat':
             from .freetime import settings
             cfg=json.loads((home/'config.json').read_text())
@@ -759,11 +843,17 @@ def main(argv=None,stdin=None):
             # Measured prompt footprint from the last turn's compaction probe; absent when the
             # runtime has never measured this agent, so a UI shows capacity only, no estimate.
             measured=json.loads((home/'context.json').read_text()) if (home/'context.json').exists() else {}
-            # Measured decode speed of the last streamed reply; absent until a reply reports usage.
+            # The last reply's speed (runtime._throughput_note): a Caminus server's own numbers, else an estimate.
             speed=json.loads((home/'throughput.json').read_text()) if (home/'throughput.json').exists() else {}
             # a speed is shown while it is current: the last reply's figure stayed on the status line for hours of idle
             busy=any(g['state'] in ('working','waiting_model') for g in store.status().get('goals',[]))
-            if not isinstance(speed,dict) or not busy or time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
+            if not isinstance(speed,dict) or not busy:
+                speed={}
+            live=_engine_live(home,alive(heartbeat.get('pid'))) if busy else None
+            if live:
+                # the read speed stays the last reply's when that came from the engine too (an estimate has none)
+                speed=dict(speed if speed.get('source')=='engine' else {},source='engine',tps=live,live=True)
+            elif time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
                 speed={}
             # the thresholds in force: a paid brain (remote, or through the key relay) compacts early
             from .runtime import PAID_COMPACT
@@ -779,7 +869,10 @@ def main(argv=None,stdin=None):
             cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
             emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
-                      tok_per_s=speed.get('tps') if isinstance(speed,dict) else None,
+                      tok_per_s=speed.get('tps'),prompt_tok_per_s=speed.get('prompt_tps'),
+                      # engine: the Caminus server's own numbers; estimate: measured here (a record from before
+                      # sources were kept is one); live: tok_per_s is the engine's figure now, not the last reply's
+                      speed_source=(speed.get('source') or 'estimate') if speed else None,speed_live=bool(speed.get('live')),
                       compact_threshold=trig,compact_target_ratio=targ,
                       effort=_effort_shown(cfg),
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,

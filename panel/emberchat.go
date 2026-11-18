@@ -73,7 +73,7 @@ type residentChat struct {
 	rootSel                                 string        // the root request the decision keys act on (shared card)
 	group                                   toolGroup     // compact view: the tool work since the last drawn block
 	cards                                   bool          // Ctrl+O: every tool card instead of the compact line
-	sel                                     chatSelection // select to copy (envselect.go)
+	sel                                     chatSelection // select to copy (emberselect.go)
 	view                                    textView      // /btw's answer, /diff
 	rewind                                  rewindState   // the /rewind step picker
 	recapNow                                float64       // when the recap was taken: saved as seen on dismiss
@@ -94,6 +94,7 @@ type residentChat struct {
 	pathSel                                 int    // the path suggestions' highlighted row (arrows)
 	pathSelFor                              string // the token pathSel belongs to (a new token starts at its pick)
 	live                                    residentLive
+	liveShown                               string // the reply being written as the transcript last drew it (wide terminals)
 	stream                                  *streamState
 	streamStarting                          bool      // a reader is being started: the tick starts no second one
 	streamRetry                             time.Time // a reader that ended is restarted no sooner than this
@@ -171,6 +172,16 @@ func (l residentLive) body(width int) []string {
 		}
 		out = append(out, l.wrapThink.wrap(l.reasoning, width, func(s string) string { return emberThink.Render(s) })...)
 	}
+	out = append(out, l.reply(width)...)
+	if len(out) == 0 {
+		out = []string{emberDim.Render("generating…")}
+	}
+	return out
+}
+
+// reply is the live reply without its reasoning: the tools it started, then the text.
+func (l residentLive) reply(width int) []string {
+	var out []string
 	for _, name := range l.tools {
 		out = append(out, emberDim.Render(g.collapsed+" ")+emberTool.Render(g.tool+" "+residentText(name))+emberDim.Render(" …"))
 	}
@@ -179,9 +190,6 @@ func (l residentLive) body(width int) []string {
 			l.wrapText = &wrapCache{}
 		}
 		out = append(out, l.wrapText.wrap(l.text, width, highlightLive)...)
-	}
-	if len(out) == 0 {
-		out = []string{emberDim.Render("generating…")}
 	}
 	return out
 }
@@ -444,13 +452,15 @@ func (m *emberModel) syncChat() {
 		m.chat.transcript.SetWidth(tw)
 	}
 	w = tw // the transcript's content (cards, wrapping, the group line) fits its column
-	// One header line and one footer line surround the transcript; the live tail sits between it and the
-	// composer, so a generating reply never rewrites the durable content.
+	// One header line and one footer line surround the transcript; on a narrow terminal the live tail sits between it
+	// and the composer, so a generating reply never rewrites the durable content.
 	// Half the body is the live window while a reply is written; the transcript keeps the other half.
 	tail := 0
 	if live := m.liveBlock(w); live != "" {
 		tail = lipgloss.Height(live)
 	}
+	// a wide terminal writes the reply into the transcript instead, as its last block (liveInline)
+	inline := m.liveInline(w)
 	height := max(1, m.bodyHeight()-tail)
 	if m.chat.help {
 		height = max(1, height-3)
@@ -509,6 +519,8 @@ func (m *emberModel) syncChat() {
 			if m.chat.fold(e) {
 				continue
 			}
+		} else if e.Kind == "assistant" {
+			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
 		if block := m.chat.eventBlock(e); block != "" {
 			m.chat.flushGroup(w)
@@ -516,10 +528,16 @@ func (m *emberModel) syncChat() {
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
-	if changed || m.chat.transcript.TotalLineCount() == 0 || m.chat.loadingShown != m.statusAt.IsZero() {
+	if changed || m.chat.transcript.TotalLineCount() == 0 || m.chat.loadingShown != m.statusAt.IsZero() || inline != m.chat.liveShown {
 		body := strings.TrimRight(m.chat.content, "\n")
 		if !m.chat.group.empty() {
 			body += "\n\n" + m.chat.group.line(w) // the work in progress, fixed when the next block arrives
+		}
+		if m.chat.liveShown = inline; inline != "" { // the reply being written, until its durable block replaces it
+			if body != "" {
+				body += "\n\n"
+			}
+			body += inline
 		}
 		if body != "" && m.height >= 24 && m.sideWidth() > 0 {
 			body += "\n" // the gap above the composer, in the transcript's column only (chatBottom)
@@ -684,12 +702,7 @@ func (m emberModel) windowTitle() string {
 func (m emberModel) liveHeight() int { return max(3, m.bodyHeight()/2-3) }
 
 // liveWindow is the number of body lines the live box shows: its content height less the label line.
-func (m emberModel) liveWindow() int {
-	if sw := m.sideWidth(); sw > 0 {
-		return m.sideEmberRows()
-	}
-	return max(1, min(m.liveHeight(), thoughtRows+1)-1)
-}
+func (m emberModel) liveWindow() int { return max(1, min(m.liveHeight(), thoughtRows+1)-1) }
 
 // sideWidth is the side panel's width on a wide terminal (0: none). The transcript's prose wraps at readingWidth, so
 // past about 160 columns the right part of the screen was empty; the panel takes it.
@@ -702,7 +715,6 @@ func (m emberModel) sideWidth() int {
 
 const sideMinTerminal, sideMax = 160, 90
 
-// sideEmberRows is the thoughts' window in the side panel: about 60 % of the body, the rest for tasks and now.
 // goalCompactions is how many times the goal in view was compacted (the resident counts from its whole history);
 // -1 with no goal in view hides the bubble.
 func (m emberModel) goalCompactions() int {
@@ -732,18 +744,10 @@ func (m emberModel) onlineSeconds() float64 {
 	return m.resident.OnlineS + time.Since(m.statusAt).Seconds()
 }
 
-// sideEmberRows: the thoughts keep one size (they do not jump as text arrives) but a modest one, about a third of the
-// panel, so tasks start right under them; the spare rows go to the bottom of the panel, not between the two (at 60 %
-// there was a wide gap above tasks).
-func (m emberModel) sideEmberRows() int { return max(6, min(14, m.bodyHeight()*35/100)) }
-
-// sidePanel is the right column: Ember's box on top (one size), then the goal's whole todo list and what runs now.
+// sidePanel is the right column: the goal's whole todo list at the top, then what runs now. (A thoughts box sat above
+// the tasks until the owner asked for the tasks in its place; the reply being written streams into the transcript.)
 func (m emberModel) sidePanel(sw, height int) string {
-	box := m.emberBox(sw, m.sideEmberRows())
 	rows := []string{}
-	if box != "" {
-		rows = strings.Split(box, "\n")
-	}
 	goal := m.activeGoal()
 	if goal == nil {
 		if sel := m.selectedResidentGoal(); sel != nil && (sel.State == "queued" || sel.State == "paused") {
@@ -769,7 +773,7 @@ func (m emberModel) sidePanel(sw, height int) string {
 					done++
 				}
 			}
-			rows = append(rows, "", sectionHead("tasks", cAccent, fmt.Sprintf("%d of %d done", done, len(items)), sw))
+			rows = append(rows, sectionHead("tasks", cAccent, fmt.Sprintf("%d of %d done", done, len(items)), sw))
 			for _, it := range items {
 				mark, st := emberDim.Render("○"), emberDim
 				switch it.state {
@@ -789,7 +793,10 @@ func (m emberModel) sidePanel(sw, height int) string {
 		}
 	}
 	now, command := m.nowState(goal)
-	rows = append(rows, "", sectionHead("now", cBlue, "", sw), " "+emberBusy.Render(now))
+	if len(rows) > 0 {
+		rows = append(rows, "") // (with no todo list, now is the top row)
+	}
+	rows = append(rows, sectionHead("now", cBlue, "", sw), " "+emberBusy.Render(now))
 	if command != "" {
 		rows = append(rows, wrap(command, 3, textSt, 8)...)
 	}
@@ -843,7 +850,7 @@ func (m emberModel) liveTop(body int) int {
 // Scrolling back to the bottom resumes following.
 func (m *emberModel) scrollLive(delta int) {
 	l := &m.chat.live
-	if !l.active {
+	if !m.liveBoxShown() {
 		return
 	}
 	// the same lines the box shows (the thoughts at its width), so the first scroll does not jump: it measured the
@@ -865,31 +872,51 @@ const liveEmberMin = 50
 // user's call): the thoughts take the whole width.
 func liveTextWidth(inner int) int { return inner }
 
-// thoughtsWidth is the text width emberBox draws the thoughts at: the side panel's on a wide terminal, the chat's
-// otherwise.
+// thoughtsWidth is the text width liveBlock draws the thoughts at: the chat's (the box is a narrow terminal's only).
 func (m emberModel) thoughtsWidth() int {
-	w := max(20, m.width)
-	if sw := m.sideWidth(); sw > 0 {
-		w = sw
-	}
-	return min(liveTextWidth(max(10, w-4)), readingWidth)
+	return min(liveTextWidth(max(10, max(20, m.width)-4)), readingWidth)
 }
 
+// liveBoxShown: the thoughts box under the transcript holds a reply being written (a narrow terminal), so PgUp / PgDn,
+// Ctrl+T and Alt+↑/↓ act on it; a wide terminal writes the reply into the transcript, which they scroll as always.
+func (m emberModel) liveBoxShown() bool { return m.chat.live.active && m.sideWidth() == 0 }
+
+// liveInline is the reply being written as the transcript's last block on a wide terminal (no box, so the right
+// column keeps its full height): the live heading, the tools it started and the text, with a cursor at the end; ""
+// on a narrow terminal or between replies. Its reasoning stays out, as the compact transcript folds it.
+func (m emberModel) liveInline(w int) string {
+	l := m.chat.live
+	if !l.active || m.sideWidth() == 0 {
+		return ""
+	}
+	// no spinner here: a frame that changed this block reset the whole transcript (a render works on a copy, so every
+	// tick between live updates redrew it: 5.7 against 3.2 ms a frame at 2000 events); the activity line moves instead
+	rows := []string{m.liveWho() + emberDim.Render("  live")}
+	for _, ln := range l.reply(min(max(10, w-4), readingWidth)) {
+		rows = append(rows, "  "+ln)
+	}
+	rows[len(rows)-1] += emberBusy.Render("▌")
+	return strings.Join(rows, "\n")
+}
+
+// liveWho is the live reply's heading: who is writing (thinking while only reasoning has come).
+func (m emberModel) liveWho() string {
+	l := m.chat.live
+	who := g.agent + " agent"
+	if l.reasoning != "" && l.text == "" {
+		who = g.agent + " thinking"
+	}
+	return bold(cGreen).Render(who)
+}
+
+// liveBlock is the thoughts box under the transcript on a narrow terminal, liveWindow lines of them, w cells wide. A
+// wide terminal has none: its right column holds the tasks, and the reply being written runs in the transcript.
 func (m emberModel) liveBlock(w int) string {
-	if m.sideWidth() > 0 {
-		return "" // a wide terminal shows Ember in the side panel
-	}
-	return m.emberBox(w, min(m.liveHeight(), thoughtRows+1)-1)
-}
-
-// emberBox is Ember and the thoughts, window lines of them, w cells wide: under the transcript on a narrow terminal,
-// at the top of the side panel on a wide one.
-func (m emberModel) emberBox(w, window int) string {
 	l := m.chat.live
 	inner := max(10, w-4)
 	text := min(liveTextWidth(inner), readingWidth)
-	if !l.active && m.sideWidth() == 0 && m.bodyHeight() < 2*(thoughtRows+3) {
-		return "" // a small terminal keeps its rows for the transcript between replies
+	if m.sideWidth() > 0 || (!l.active && m.bodyHeight() < 2*(thoughtRows+3)) {
+		return "" // (a small terminal keeps its rows for the transcript between replies)
 	}
 	body := m.thoughts(text)
 	if len(body) == 0 {
@@ -903,23 +930,18 @@ func (m emberModel) emberBox(w, window int) string {
 	}
 	// One fixed size, generating or not (a box that grew and shrank was hard to read): only the text moves. The
 	// thoughts run downward, newest last.
-	window = max(1, window)
+	window := m.liveWindow()
 	top := max(0, len(body)-window)
 	if l.active && l.hold {
 		top = m.liveTop(len(body))
 	}
 	var head string
 	if l.active {
-		spin := g.spinner[m.tickN%len(g.spinner)]
-		who := g.agent + " agent"
-		if l.reasoning != "" && l.text == "" {
-			who = g.agent + " thinking"
-		}
 		hint := "  live · Ctrl+T hold · Alt+↑/↓ scroll"
 		if l.hold {
 			hint = fmt.Sprintf("  held · %d below · Ctrl+T follow", max(0, len(body)-(top+window)))
 		}
-		head = bold(cGreen).Render(who) + " " + emberBusy.Render(spin) + emberDim.Render(hint)
+		head = m.liveWho() + " " + emberBusy.Render(g.spinner[m.tickN%len(g.spinner)]) + emberDim.Render(hint)
 	} else {
 		head = sectionHeadRight(g.agent+" thoughts", cGreen, "newest ↓", max(18, w-1))
 	}
@@ -1020,10 +1042,10 @@ func (m emberModel) activeGoal() *residentGoal {
 	return nil
 }
 
-// thoughtRows is the number of lines of thoughts Ember's box shows, generating or not.
+// thoughtRows is the number of lines of thoughts the box under the transcript (liveBlock) shows, generating or not.
 const thoughtRows = 8
 
-// thoughts is the stream Ember's box shows: the last few replies' thought chains, oldest first, then the reply being
+// thoughts is the stream liveBlock shows: the last few replies' thought chains, oldest first, then the reply being
 // written. A chain is the reply's reasoning when the model shows it, else its own words and the tools it called (a
 // model that answers without reasoning, as DeepSeek on DeepInfra does, left the box saying "no thinking"). It keeps
 // the current goal's chains; with none yet it keeps the latest from any goal, so the box never empties.
@@ -1095,7 +1117,7 @@ func (m emberModel) thoughtChains(gid string) []thoughtChain {
 				_ = json.Unmarshal([]byte(s), &args)
 			}
 			what := name
-			for _, k := range []string{"command", "path", "query", "url", "check", "evidence", "summary", "question"} {
+			for _, k := range []string{"command", "pattern", "glob", "path", "query", "url", "check", "evidence", "summary", "question"} {
 				if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
 					what += "  " + oneLine(residentText(v))
 					break
@@ -1284,7 +1306,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			call, _ := raw.(map[string]any)
 			f, _ := call["function"].(map[string]any)
 			name, _ := f["name"].(string)
-			if name == "ask_user" || name == "read" || name == "edit" || name == "write" {
+			if name == "ask_user" || name == "read" || name == "search" || name == "edit" || name == "write" {
 				continue
 			} // the durable question gets a native UI below; a file tool's result card says what it did
 			rawArgs, _ := f["arguments"].(string)
@@ -1347,12 +1369,17 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
-			shown, _ := result["shown"].(string)
-			meta := "lines " + shown
-			if dir, _ := result["directory"].(bool); dir {
-				meta = "directory"
-			}
-			return toolCard("read", residentText(path), meta, true, false, nil, w)
+			return toolCard("read", residentText(path), readMeta(result), true, false, nil, w)
+		}
+		if str("name") == "search" && result["error"] == nil {
+			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
+			text, _ := result["text"].(string)
+			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
+		}
+		if str("name") == "search" && result["error"] == nil {
+			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
+			text, _ := result["text"].(string)
+			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
 		}
 		if str("name") == "browser" && result["error"] == nil {
 			panel, _ := e.Data["panel"].(map[string]any)
@@ -1688,7 +1715,7 @@ func (m emberModel) chatBottom() string {
 	// a blank line between the conversation and what sits under it, as Claude Code leaves: the composer read as part
 	// of the last block when it touched it
 	// (a small terminal keeps every row for the transcript; with the side panel the gap is the transcript's own last
-	// line instead, so the panel, and Ember sitting at its foot, reach down to the composer)
+	// line instead, so the panel reaches down to the composer)
 	if m.height >= 24 && m.sideWidth() == 0 {
 		out = "\n" + out
 	}
@@ -2103,10 +2130,6 @@ func (m emberModel) todoPinned() string {
 	return strings.Join(rows, "\n")
 }
 
-// contextBarSlots is the fixed width of the usage bar: readable at a glance,
-// small enough to keep the footer one line.
-const contextBarSlots = 10
-
 // humanTokens renders a token count at footer density: 482k, 1.0M.
 func humanTokens(n int) string {
 	switch {
@@ -2142,34 +2165,6 @@ func contextBarLevel(used, capacity int, threshold float64) int {
 	default:
 		return 0
 	}
-}
-
-// contextBar renders the measured context footprint for the footer as two
-// pieces: an accent (label, bar, share) that takes the level's color, and a
-// dim remainder (window size, trigger). A used count of 0 means the daemon
-// has not measured anything yet; then only the window size shows — capacity
-// is never presented as usage, and no percentage is invented from events.
-// tps is the measured decode speed of the agent's last streamed reply; it
-// only annotates a measured bar, and a count of 0 shows nothing at all.
-func contextBar(used, capacity int, threshold, tps float64) (accent, rest string) {
-	if capacity <= 0 {
-		return "", ""
-	}
-	if used <= 0 {
-		return "", "ctx " + humanTokens(capacity) + " window"
-	}
-	share := float64(used) / float64(capacity)
-	if share > 1 {
-		share = 1
-	}
-	filled := int(share*contextBarSlots + 0.5)
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", contextBarSlots-filled)
-	speed := ""
-	if tps > 0 {
-		speed = fmt.Sprintf(" · %.0f tok/s", tps)
-	}
-	return fmt.Sprintf("ctx %s %d%%", bar, int(share*100+0.5)),
-		fmt.Sprintf(" of %s · compact %.0f%%", humanTokens(capacity), compactTrigger(threshold)*100) + speed
 }
 
 // contextStateStyle colors the header's status light by what it means: busy
@@ -2232,8 +2227,7 @@ func (m emberModel) renderChat() string {
 		}
 		return head + "\n" + m.pageOverlay(w, h) + "\n" + foot
 	}
-	view := m.highlightSelection(m.chat.transcript.View())
-	view = m.withJumpPill(view, m.transcriptWidth(w))
+	view := m.withJumpPill(m.highlightSelection(m.chat.transcript.View(), false), m.transcriptWidth(w))
 	if sw := m.sideWidth(); sw > 0 {
 		tw := w - sw - 1
 		view = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(tw).Render(view), " ",
@@ -2255,22 +2249,7 @@ func (m emberModel) renderChat() string {
 func (m emberModel) chatUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.initChat()
 	var cmd tea.Cmd
-	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.chat.picker {
-		if i := m.cardAt(click.X, click.Y); i >= 0 {
-			if i == len(m.switcherCards()) {
-				m.chat.pickerSel, m.chat.pickerNew, m.chat.pickerName = i, true, ""
-				return m, nil
-			}
-			return m.switchToCard(i)
-		}
-		return m, nil
-	}
-	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.onJumpPill(click.X, click.Y) {
-		m.chat.transcript.GotoBottom()
-		m.chat.live.hold = false
-		return m, nil
-	}
-	if next, c, ok := m.selectMouse(msg); ok {
+	if next, c, ok := m.selectMouse(msg); ok { // (a click on a picker card or the jump pill too: emberselect.go)
 		return next, c
 	} else {
 		m = next
@@ -2390,14 +2369,14 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil // the chat is the only screen: Tab completes and does nothing else
 	case "pgup":
-		if m.chat.live.active {
+		if m.liveBoxShown() {
 			m.scrollLive(-m.liveHeight())
 			return m, nil
 		}
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
-		if m.chat.live.active {
+		if m.liveBoxShown() {
 			m.scrollLive(m.liveHeight())
 			return m, nil
 		}
@@ -2431,7 +2410,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+t":
 		// Hold the live window where it is while the reply keeps arriving.
-		m.chat.live.hold = !m.chat.live.hold
+		m.chat.live.hold = !m.chat.live.hold && m.liveBoxShown() // (a wide terminal has no box to hold)
 		if !m.chat.live.hold {
 			m.chat.live.top = 0 // following recomputes the tail from the body length
 		}
@@ -2979,14 +2958,14 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "pgup":
-		if m.chat.live.active {
+		if m.liveBoxShown() {
 			m.scrollLive(-m.liveHeight())
 			return m, nil
 		}
 		m.chat.transcript.PageUp()
 		return m, nil
 	case "pgdown":
-		if m.chat.live.active {
+		if m.liveBoxShown() {
 			m.scrollLive(m.liveHeight())
 			return m, nil
 		}
@@ -3103,7 +3082,7 @@ func (m emberModel) chatFoot(w int) string {
 	if !m.sshOK {
 		keys = append([]string{emberWarn.Render("SSH …")}, keys...)
 	}
-	if m.chat.live.active && m.chat.live.hold {
+	if m.liveBoxShown() && m.chat.live.hold {
 		keys = append([]string{"held · ^T follow"}, keys...)
 	}
 	if m.runtimeOutdated() {
@@ -3118,15 +3097,15 @@ func (m emberModel) chatFoot(w int) string {
 		keys = append([]string{emberWarn.Render(g.spinner[m.tickN%len(g.spinner)] + " " + m.compactingNote(ag.ID))}, keys...)
 	}
 	// the speed is the last finished reply's: after an Esc it read as if the dropped turn were still generating
-	tps := m.resident.TokPerS
+	speed := m.resident.speed()
 	if ag := m.activeGoal(); ag != nil {
 		if _, held := m.interruptedUntil(ag.ID); held {
-			tps = 0
+			speed = replySpeed{}
 		}
 	}
 	statusBar := statusLine(status{brain: residentText(withEffort(m.resident.Model, m.resident.Effort)), cwd: residentText(m.agentCwd()), used: m.resident.ContextUsed,
 		window: m.resident.Context, compact: m.resident.CompactThreshold, usd: usd, usdDay: m.resident.SpendToday,
-		tps: tps, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
+		speed: speed, queue: queued, compactions: m.goalCompactions(), online: m.onlineSeconds(), cacheHit: m.cacheHit(), keys: keys}, w)
 	_ = clip
 	// (no line under the status line: the occasional states ride among its keys and a message sits on the composer's
 	// frame, so nothing appears and goes below it)

@@ -425,14 +425,12 @@ func themePreview(name string, w int) string {
 	add(emberCtxHot.Render("✗ the gate fails: 1 test failed"))
 	add(todoLine([]todoItem{{"read the parser", "done"}, {"add the tests", "now"}, {"open a PR", "next"}}, w))
 	add(emberSel.Render(" a selected row "), "")
-	add(borderTitle(emberBorder.Render(fgc("muted").Render("a framed box: menus, the composer, Ember's thoughts")), "a title", emberDim))
+	add(borderTitle(emberBorder.Render(fgc("muted").Render("a framed box: menus, the composer")), "a title", emberDim))
 	add(footBar([]string{g.model + " " + name, "120K/1M", "$0.42"}, []string{"⇧Tab sessions", "/help"}, w))
 	return strings.Join(out, "\n")
 }
 
 // overlayOpen: an overlay or the session picker covers the conversation (the background pattern is not drawn then).
 func (m emberModel) overlayOpen() bool {
-	c := m.chat
-	return c.goals || c.models.open || c.themes.open || c.studio.open || c.view.open || c.rewind.open ||
-		c.page >= 0 || c.picker
+	return !m.transcriptShown() || m.chat.picker
 }
