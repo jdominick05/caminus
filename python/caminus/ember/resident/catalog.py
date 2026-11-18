@@ -16,6 +16,12 @@ A provider is one endpoint the resident can reach (directly, or through the owne
 - meta       the Meta Model API (the Muse models), OpenAI-compatible at https://api.meta.ai/v1 (through the owner's relay):
              GET {base}/models gives ids only, so each Muse chat model's window, output cap and levels come from Meta's
              docs (META_MODELS) and its prices from the transport's table (model.META_PRICES).
+- opencode-go  OpenCode Go (the subscription), through the owner's relay; the provider's endpoint is the plan's root
+             (https://opencode.ai/inference/go, or the relay's http://127.0.0.1:8769/inference/go): GET {root}/v1/models
+             gives everything (window, output cap, prices with long-context tiers and peak-hour multipliers, levels,
+             image types, tools, the native API, whether prompts train a model). Each model is reached through its
+             native API under the root (OPENCODE_PATHS: Chat Completions or Messages; transport() gives the pair).
+             OpenCode Zen (pay as you go) is the same API under another root.
 - openai     any other OpenAI-compatible server: GET {base}/models, ids only.
 
 Every model is normalized to one entry: id, provider, context, max_output, efforts (the levels /effort offers, empty
@@ -30,7 +36,15 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'meta', 'openai')
+KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'meta', 'opencode-go', 'openai')
+# OpenCode's plans (Go today; Zen is the same API under another root): the transport sends each conversation's session
+# id and Ember's own user agent to them, and background work stays off them by default (brain.py)
+OPENCODE = ('opencode-go',)
+# an OpenCode model's native API -> (the transport's api, its path under the plan's root). Chat Completions and Messages
+# are native; a Responses-native text model is reached through Chat Completions, which Console translates (tool calls
+# through it were checked live, 2026-11-18; its reasoning was not). Gemini's generate-content is left out.
+OPENCODE_PROTOCOLS = {'chat-completions': 'openai', 'messages': 'anthropic', 'responses': 'openai'}
+OPENCODE_PATHS = {'openai': '/openai/v1', 'anthropic': '/anthropic/v1'}
 TIMEOUT = 20
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
@@ -162,6 +176,148 @@ def meta_entries(data, provider):
     return out
 
 
+def opencode_protocol(m):
+    """The transport's api for a listed OpenCode model (OPENCODE_PROTOCOLS: its native API, Chat Completions before
+    Responses), or None when Ember speaks none of its APIs."""
+    apis = m.get('api') if isinstance(m.get('api'), dict) else {}
+    for native in ('chat-completions', 'messages', 'responses'):
+        if native in apis:
+            return OPENCODE_PROTOCOLS[native]
+    return None
+
+
+def opencode_offered(m):
+    """Whether Ember offers (and the relay allows) a listed OpenCode model: a chat model that calls tools, reached
+    through an API Ember speaks, whose prompts train no model (go.training: the Contributor models, free ones too)."""
+    if not isinstance(m, dict) or not isinstance(m.get('id'), str) or m.get('type') != 'chat':
+        return False
+    if (m.get('go') or {}).get('training') or 'contributor' in m['id']:
+        return False
+    return bool(((m.get('capabilities') or {}).get('tools') or {}).get('supported')) and opencode_protocol(m) is not None
+
+
+def opencode_row(m):
+    """A listed OpenCode model's prices in model.PRICES' row form (USD per million: input, output, cache read, cache
+    write; below and above a context length), or None when it lists none. Its `context.gt` overrides are the
+    long-context tier (Claude Haiku 5.5 past 100K, MiniMax M3 past 512K): the lowest line, at the highest rates listed
+    past it, so a model with several tiers errs high. A cache rate it does not list is that tier's input rate."""
+    text = ((m.get('cost') or {}).get('text') or {}) if isinstance(m, dict) else {}
+    inp, out = text.get('input') or {}, text.get('output') or {}
+
+    def tiers(side):
+        return [side] + [ov for ov in side.get('overrides') or []
+                         if isinstance(((ov.get('when') or {}).get('context') or {}).get('gt'), int)]
+    def cache(t, k):
+        v = (t.get('cache') or {}).get(k, t['price'])
+        return float(max(v.values()) if isinstance(v, dict) else v)   # (a write rate per lifetime: the highest)
+    try:
+        low = (float(inp['price']), float(out['price']), cache(inp, 'read'), cache(inp, 'write'))
+        ins, outs = tiers(inp), tiers(out)
+        lines = [ov['when']['context']['gt'] for ov in ins[1:] + outs[1:]]
+        if not lines:
+            return (low, low, 10**9)
+        high = (max(float(t['price']) for t in ins), max(float(t['price']) for t in outs),
+                max(cache(t, 'read') for t in ins), max(cache(t, 'write') for t in ins))
+        return (low, high, min(lines))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+_DAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
+_TESTS = {'in': lambda a, b: isinstance(b, list) and a in b, 'eq': lambda a, b: a == b, 'gte': lambda a, b: a >= b,
+          'gt': lambda a, b: a > b, 'lte': lambda a, b: a <= b, 'lt': lambda a, b: a < b}
+
+
+def _holds(cond, now):
+    """Whether a price multiplier's `when` holds at now (UTC): True, False, or None for a test this code does not know
+    (utc_days, utc_hours and date comparisons, any / all of them)."""
+    if not isinstance(cond, dict):
+        return None
+    result = True
+    for key, test in cond.items():
+        if key in ('any', 'all'):
+            parts = [_holds(c, now) for c in test or []] if isinstance(test, list) else [None]
+            hit, miss = (True, False) if key == 'any' else (False, True)
+            r = hit if hit in parts else None if None in parts else miss
+        elif key in ('utc_days', 'utc_hours', 'date') and isinstance(test, dict) and test:
+            value = {'utc_days': _DAYS[now.weekday()], 'utc_hours': now.strftime('%H:%M'),
+                     'date': now.strftime('%Y-%m-%d')}[key]
+            try:
+                r = all(_TESTS[op](value, b) for op, b in test.items()) if set(test) <= set(_TESTS) else None
+            except TypeError:
+                r = None
+        else:
+            r = None
+        if r is False:
+            return False
+        if r is None:
+            result = None
+    return result
+
+
+def opencode_multiplier(m, now=None):
+    """The largest price multiplier a listed OpenCode model's rules apply now (DeepSeek V4.1 Flash costs twice as much
+    on weekday peak hours); a rule this code cannot evaluate counts as applying, so an estimate errs high. 1 without
+    rules."""
+    import datetime
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    factors = [1.0]
+    for rule in ((m.get('cost') or {}).get('multipliers') or []) if isinstance(m, dict) else []:
+        try:
+            if _holds(rule.get('when'), now) is not False:
+                factors.append(float(rule['factor']))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return max(factors)
+
+
+def opencode_entries(data, provider):
+    """The listed OpenCode models Ember offers (opencode_offered), with the API each is reached through (protocol) and
+    its prices: the first tier, the long-context tier under `long` (model.remember_prices meters both)."""
+    from .effort import WIRE
+    out = []
+    for m in data.get('data') or []:
+        if not opencode_offered(m):
+            continue
+        limit, caps = m.get('limit') or {}, m.get('capabilities') or {}
+        reasoning = caps.get('reasoning') or {}
+        row = opencode_row(m)
+        prices = None
+        if row:
+            prices = dict(input=row[0][0], output=row[0][1], cache_read=row[0][2], cache_write=row[0][3])
+            if row[2] < 10**9:
+                prices['long'] = dict(above=row[2], input=row[1][0], output=row[1][1], cache_read=row[1][2],
+                                      cache_write=row[1][3])
+        window = limit.get('input') if isinstance(limit.get('input'), int) else limit.get('context')
+        out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=window,
+                        max_output=limit.get('output'),
+                        efforts=[lv for lv in WIRE if lv in (reasoning.get('effort') or [])],
+                        thinking='toggle' if reasoning.get('toggle') else '',
+                        vision=any(str(t).startswith('image') for t in (m.get('modalities') or {}).get('input') or []),
+                        prices=prices, protocol=opencode_protocol(m)))
+    return out
+
+
+def plan_root(endpoint):
+    """An OpenCode provider's root (https://opencode.ai/inference/go, or the relay's), from it or from a model's API
+    address under it."""
+    e = endpoint.rstrip('/')
+    for suffix in (*OPENCODE_PATHS.values(), '/v1'):
+        if e.endswith(suffix):
+            return e[:-len(suffix)]
+    return e
+
+
+def transport(spec, entry=None):
+    """(endpoint, api) the transport uses for a provider's model: the provider's endpoint and its kind's api; an
+    OpenCode model's native API under the plan's root (the entry's protocol)."""
+    kind = spec.get('kind')
+    if kind in OPENCODE:
+        api = (entry or {}).get('protocol') or 'openai'
+        return plan_root(spec['endpoint']) + OPENCODE_PATHS[api], api
+    return spec['endpoint'], 'anthropic' if kind == 'anthropic' else 'openai'
+
+
 def openai_entries(data, provider):
     return [dict(id=m['id'], name=m['id'], provider=provider, context=None, max_output=None, efforts=[],
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
@@ -194,11 +350,14 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         data = _get(_root(base) + '/v1/models?limit=1000', headers, opener)
         return anthropic_entries(data, name)
     headers = {'Authorization': 'Bearer ' + key} if key else {}
+    if kind in OPENCODE:
+        return opencode_entries(_get(plan_root(base) + '/v1/models', headers, opener), name)
     data = _get(base + '/models', headers, opener)
     if kind == 'auto':
         # (agent init, before any provider is configured: model_vision) the list's own shape says whose it is
         rows = [m for m in data.get('data') or [] if isinstance(m, dict)]
         kind = ('deepinfra' if any(isinstance(m.get('metadata'), dict) for m in rows) else
+                'opencode-go' if any(isinstance(m.get('api'), dict) and isinstance(m.get('cost'), dict) for m in rows) else
                 'mistral' if any(isinstance(m.get('capabilities'), dict) for m in rows) else
                 'meta' if any(m.get('id') in META_MODELS for m in rows) else 'local')
     if kind == 'deepinfra':
@@ -207,6 +366,8 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         return mistral_entries(data, name)
     if kind == 'meta':
         return meta_entries(data, name)
+    if kind in OPENCODE:
+        return opencode_entries(data, name)
     if kind == 'local':
         try:
             props = _get(_root(base) + '/props', headers, opener)
@@ -221,8 +382,9 @@ def providers(config):
     out = dict(config.get('providers') or {})
     own = config.get('provider')
     if own and own not in out and config.get('endpoint'):
-        out[own] = dict(kind=config.get('provider_kind') or ('anthropic' if config.get('api') == 'anthropic'
-                                                             else 'openai'), endpoint=config['endpoint'])
+        kind = config.get('provider_kind') or ('anthropic' if config.get('api') == 'anthropic' else 'openai')
+        # (an OpenCode brain's endpoint is its model's API under the plan's root: the provider is the root)
+        out[own] = dict(kind=kind, endpoint=plan_root(config['endpoint']) if kind in OPENCODE else config['endpoint'])
     return out
 
 

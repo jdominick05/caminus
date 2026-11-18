@@ -1921,6 +1921,10 @@ class Runtime:
         wrote = usage.get('cache_creation_input_tokens') or 0
         total_in = usage.get('prompt_tokens') if isinstance(usage.get('prompt_tokens'), int) else \
             (usage.get('input_tokens') or 0) + read + wrote
+        # an OpenCode plan's turn: price() is what it charged (0 inside the Go allowance); the allowance it used, in
+        # dollars of the plan's monthly limit, is kept apart (allowance)
+        allowance = (usage.get('opencode') or {}).get('allowance') if isinstance(usage.get('opencode'), dict) else None
+        allowance = float(allowance) if isinstance(allowance, (int, float)) and not isinstance(allowance, bool) else 0.0
         if not usd and not total_in:
             return
         import datetime
@@ -1932,6 +1936,8 @@ class Runtime:
         day = state.setdefault('days', {}).setdefault(datetime.date.today().isoformat(), dict(usd=0.0, turns=0))
         day['in_tok'] = day.get('in_tok', 0) + int(total_in or 0)
         day['cache_read'] = day.get('cache_read', 0) + int(read or 0)
+        if allowance:
+            day['allowance'] = round(day.get('allowance', 0.0) + allowance, 8)
         if not usd:
             atomic_json(path, state)
             return
@@ -2266,8 +2272,9 @@ class Runtime:
                 if (budget := self.context_message(gid)):
                     request.append(budget)
                 limit = min(self._out_boost.get(gid) or self._reply_limit(), self.model.context_size()//4)
+                conv = dict(session=self._session(gid)) if getattr(self.model, 'opencode', False) else {}
                 reply = self._watched(live, lambda on_delta: self.model.complete(request, self.tools, max_tokens=limit,
-                                                                                 on_delta=on_delta))
+                                                                                 on_delta=on_delta, **conv))
             finally:
                 live.clear()
             self._throughput_note(gid,getattr(self.model,'last_speed',None))
@@ -2359,7 +2366,10 @@ class Runtime:
                                      dict(error=str(e),**(dict(partial=e.partial) if isinstance(e,ModelTruncated) else {})),gid)
                     return True
                 status=getattr(e,'status',0)
-                if status in (400,401,402,403,404,413,422):
+                # an OpenCode plan's 4xx (a limit reached: 429 or one it has not documented) stops the goal with its
+                # words: retrying in a loop is the traffic its abuse monitoring flags
+                plan_refused=getattr(self.model,'opencode',False) and isinstance(status,int) and 400<=status<500
+                if status in (400,401,402,403,404,413,422) or plan_refused:
                     # A misconfigured model (wrong alias, revoked key, rejected context) never succeeds:
                     # stop this goal with the reason instead of waking the loop forever.
                     self.store.update(gid,state='error',error=str(e))
@@ -2378,6 +2388,16 @@ class Runtime:
                     self.store.event('model_unavailable',dict(error=str(e),attempt=attempt,
                                                               down_s=round(time.time() - d['since'])),gid)
             return False
+
+    def _session(self, gid):
+        """The goal's conversation id for an OpenCode plan (x-opencode-session): random, made at its first turn on one
+        and kept with the goal, so every turn of it names the same conversation (and reads its cached prefix). Side
+        calls (the judge, a summary, btw) are conversations of their own: the transport gives each a fresh one."""
+        sid = self.store.goal(gid).get('session')
+        if not sid:
+            sid = uuid.uuid4().hex
+            self.store.update(gid, session=sid)
+        return sid
 
     def _record_failure(self, gid, e, who='resident', **extra):
         """every failed or refused model call goes to failures.jsonl, with what a debugger needs"""
@@ -2404,6 +2424,8 @@ class Runtime:
             limit=8
         busy_since = self.__dict__.setdefault('busy_since', {})
         busy = getattr(e,'status',None) in (429, 503, 529) or 'capacity' in str(e).lower() or 'overloaded' in str(e).lower()
+        # (an OpenCode plan: never the hour of unbudgeted retries; its retries count against the limit like any error's)
+        busy = busy and not getattr(self.model,'opencode',False)
         if busy:
             # The provider is out of capacity (Mistral: 429 backend_out_of_capacity): a refused call is not billed, so
             # it does not spend the retry budget; wait longer instead (up to 5 minutes apart), for up to an hour

@@ -348,8 +348,10 @@ class Eyes(Advisor):
             remember_prices(cfg['model'], entry['prices'])
         if price(cfg['model'], {}) is None:
             raise ValueError('the eyes model %s has no known price, so its spend cannot be limited' % cfg['model'])
-        model = Model(dict(model=cfg['model'], endpoint=cfg['endpoint'], provider_kind=cfg['kind'],
-                           api='anthropic' if cfg['kind'] == 'anthropic' else 'openai', relay=cfg['relay'],
+        endpoint, api = catalog.transport(dict(kind=cfg['kind'], endpoint=cfg['endpoint']), entry)
+        # (an OpenCode model's own levels, so one that lists none is sent none)
+        levels = dict(efforts=list(entry.get('efforts') or [])) if cfg['kind'] in catalog.OPENCODE else {}
+        model = Model(dict(model=cfg['model'], endpoint=endpoint, provider_kind=cfg['kind'], api=api, relay=cfg['relay'], **levels,
                            context=int(entry.get('context') or 100000), max_tokens=int(cfg['max_tokens']), vision=True,
                            api_key_env=cfg.get('api_key_env', 'CAMINUS_EYES_API_KEY'), timeout=float(cfg['timeout']),
                            cache=False, name=self.rt.config.get('name')),

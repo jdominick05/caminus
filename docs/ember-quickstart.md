@@ -74,7 +74,7 @@ caminus ember agent init resident --model MODEL_ID --endpoint http://127.0.0.1:8
 
 `MODEL_ID` is what the server reports (`curl -s http://127.0.0.1:8092/v1/models`).
 
-**A paid API** (DeepInfra here; Anthropic, Mistral and Meta, with their key files and addresses, are in [the guide](ember.md#paid-brains)). Put the key in a file only
+**A paid API** (DeepInfra here; Anthropic, Mistral, Meta and an OpenCode Go plan, with their key files and addresses, are in [the guide](ember.md#paid-brains)). Put the key in a file only
 you can read, then run a relay: a small service on your account that holds the key, so the agent never sees it, and
 stops at a daily cap.
 

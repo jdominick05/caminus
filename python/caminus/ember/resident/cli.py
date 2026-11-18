@@ -207,8 +207,8 @@ def model_ops(a,home):
             raise ValueError(f'no model {a.id} in the catalog: `models --refresh` lists what the providers serve')
         spec=catalog.providers(cfg).get(entry['provider'])
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
-        cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
-                   api='anthropic' if spec['kind']=='anthropic' else 'openai')
+        endpoint,api=catalog.transport(spec,entry)   # (an OpenCode model: its own API under the plan's root)
+        cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=endpoint,api=api)
         for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
             cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
         if cfg.pop('max_tokens_auto',None):
@@ -359,10 +359,11 @@ def parser():
             p.add_argument('--wait',type=float,default=0,help='seconds to wait for the daemon to come back on it')
         if op=='provider':
             p.add_argument('action',nargs='?',default='list',choices=('list','add','remove'))
-            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, mistral, meta, ...')
+            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, mistral, meta, opencode, ...')
             from .catalog import KINDS
             p.add_argument('--kind',choices=KINDS)
-            p.add_argument('--endpoint',help="its API root; the owner's key relay for a paid one (it adds the key)")
+            p.add_argument('--endpoint',help="its API root; the owner's key relay for a paid one (it adds the key); an "
+                           "OpenCode plan's root (http://127.0.0.1:8769/inference/go through its relay)")
             p.add_argument('--relay',action='store_true',help='the endpoint is the key relay: billed, retries bounded')
         if op=='models':
             p.add_argument('--refresh',action='store_true',help='ask the providers again (otherwise the cached list)')
@@ -402,6 +403,8 @@ def parser():
             p.add_argument('--messages-per-day',type=int)
             p.add_argument('--stretch-minutes',type=float)
             p.add_argument('--stretch-steps',type=int,help='model steps one free-time stretch may take; 0 (the default) = no step limit, its time ends it')
+            p.add_argument('--on-plan',choices=('yes','no'),help='whether free time may run on an OpenCode plan (default no: it '
+                           'runs on another brain, or rests)')
         if op=='message':
             p.add_argument('to')
             p.add_argument('--text')
@@ -826,9 +829,12 @@ def main(argv=None,stdin=None):
                 if spent and spent>=budget:
                     note=(f"today's free-time allowance is spent (${spent:.2f} of ${budget:.2f}): it starts tomorrow, or "
                           f"raise it: caminus ember agent heartbeat {a.name} --budget-usd N")
+                from .freetime import plan_note
+                note=plan_note(dict(cfg,name=a.name)) or note
                 emit(dict(free_time='asked',note=note,spent_today_usd=round(spent,4),budget_usd=budget),a.json)
                 return 0
             if a.state in ('on','off'):ft['enabled']=a.state=='on'
+            if a.on_plan:ft['on_plan']=a.on_plan=='yes'
             for flag,key,scale in (('rest_minutes','rest_seconds',60),('afk_minutes','afk_seconds',60),
                                    ('stretch_minutes','stretch_seconds',60),('budget_usd','budget_usd',1),
                                    ('messages_per_day','messages_per_day',1),('stretch_steps','stretch_steps',1)):
@@ -841,8 +847,10 @@ def main(argv=None,stdin=None):
             state=json.loads((home/'free_time.json').read_text()) if (home/'free_time.json').exists() else {}
             import datetime
             today=state.get('days',{}).get(datetime.date.today().isoformat(),{})
+            from .freetime import plan_note
             emit(dict(free_time=settings(cfg),spent_today_usd=today.get('usd',0.0),messages_today=today.get('messages',0),
-                      last_start=state.get('last_start'),last_end=state.get('last_end'),last_dream=state.get('last_dream')),a.json)
+                      last_start=state.get('last_start'),last_end=state.get('last_end'),last_dream=state.get('last_dream'),
+                      **({'note':n} if (n:=plan_note(dict(cfg,name=a.name))) else {})),a.json)
             return 0
         if a.op=='status':
             heartbeat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}
@@ -872,6 +880,7 @@ def main(argv=None,stdin=None):
             except (OSError,ValueError):spend={}
             today=(spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}
             spend_today=today.get('usd',0.0)
+            allowance_today=today.get('allowance')   # (an OpenCode plan: its allowance used today, not money)
             cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
             # the window the runtime compacts against (catalog.window): a local brain's from its server now, under the
             # owner's cap; None only when nobody can say, and the panel then shows the tokens in use alone
@@ -886,6 +895,7 @@ def main(argv=None,stdin=None):
                       compact_threshold=trig,compact_target_ratio=targ,
                       effort=_effort_shown(cfg),
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
+                      **({'allowance_today':allowance_today} if allowance_today else {}),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
                       online_s=_online_s(heartbeat.get('pid')),**store.status()),True)
             store.close();return 0

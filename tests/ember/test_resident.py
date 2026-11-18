@@ -1331,7 +1331,7 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
         rt=type('RT',(),{'config':{'name':'ember'}})()
         self.assertEqual([f.name for f in leases._own(d,rt)],['agent-ember-ab12cd34.json'],'ember-2 is not ember')
         from caminus.ember import relay
-        prices=relay.DeepInfraPrices('k',lambda *a:None,fetch=lambda:{'data':[
+        prices=relay.ListPrices(lambda *a:None,lambda:{'data':[
             {'id':'good','metadata':{'pricing':{'input_tokens':0.1,'output_tokens':0.4,'cache_read_tokens':None}}},
             {'id':'nullprice','metadata':{'pricing':{'input_tokens':None,'output_tokens':0.4}}},
             {'metadata':{'pricing':{'input_tokens':0.1,'output_tokens':0.4}}}]})
@@ -4288,7 +4288,7 @@ for line in sys.stdin:
             def getresponse(s):return Resp(*upstream(calls[-1]))
             def close(s):pass
         ledger=relay.Ledger(self.home/'ledger.json',cap)
-        prices=prices or relay.DeepInfraPrices('KEY',lines.append,fetch=lambda:dict(data=[
+        prices=prices or relay.ListPrices(lines.append,lambda:dict(data=[
             dict(id='zai-org/GLM-5.2',metadata=dict(pricing=dict(input_tokens=0.6,output_tokens=2.2,cache_read_tokens=0.11)))]))
         handler=relay.make_handler(provider,'SECRET-KEY',ledger,models or {'claude-haiku-5-5'},4096,lines.append,prices,Conn)
         srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
@@ -4898,6 +4898,427 @@ for line in sys.stdin:
         self.assertIn("$NOT_SET_FOR_GATE is not set in the gate's environment",msg)
         self.assertIn('\nbash: line',msg,'errors still read bash: ..., as in the terminal');self.assertNotIn('/bin/bash:',msg)
         for name in ('X_MINE','WORKSPACE','NF'):self.assertNotIn('$'+name+' is not set',msg)
+
+    # OpenCode Go's model list (GET /inference/go/v1/models, 2026-11-17), trimmed to nine rows: chat-completions (one with
+    # peak-hour pricing, one free), messages (long-context tiers; levels or none), responses, generate-content, and two
+    # whose prompts train a model
+    OPENCODE_GO=dict(object='list',data=json.loads('''[
+        {"id":"deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash 1017","type":"chat","modalities":{"input":["text","image/png"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"effort":["low","high","max"]}},"limit":{"context":1000000,"output":384000},"cost":{"text":{"input":{"price":0.15,"cache":{"read":0.003}},"output":{"price":0.6}},"multipliers":[{"when":{"utc_days":{"in":["mon","tue","wed","thu","fri"]},"any":[{"all":[{"utc_hours":{"gte":"01:00"}},{"utc_hours":{"lt":"04:00"}}]},{"all":[{"utc_hours":{"gte":"06:00"}},{"utc_hours":{"lt":"10:00"}}]}]},"factor":2}]},"api":{"chat-completions":{"base_url":"https://opencode.ai/inference/go/openai/v1"}},"go":{"training":false}},
+        {"id":"muse-spark-1.3-contributor","name":"Muse Spark 1.3 Contributor","type":"chat","modalities":{"input":["text","image/png","video/mp4"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"effort":["minimal","low","medium","high","xhigh"]}},"limit":{"context":1048576,"output":131072},"cost":{"text":{"input":{"price":0.1,"cache":{"read":0.002}},"output":{"price":0.2}}},"api":{"responses":{"base_url":"https://opencode.ai/inference/go/openai/v1"}},"go":{"training":true}},
+        {"id":"gpt-6-luna","name":"GPT-6 Luna","type":"chat","modalities":{"input":["text","image/png"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"effort":["none","low","medium","high","xhigh","max"]}},"limit":{"context":1050000,"input":922000,"output":128000},"cost":{"text":{"input":{"price":0.1,"cache":{"read":0.01,"write":{"30m":0.125,"12h":0.25}},"overrides":[{"when":{"context":{"gt":272000}},"price":0.2,"cache":{"read":0.02,"write":{"30m":0.25,"12h":0.5}}}]},"output":{"price":0.5,"overrides":[{"when":{"context":{"gt":272000}},"price":0.75}]}}},"api":{"responses":{"base_url":"https://opencode.ai/inference/go/openai/v1"}},"go":{"training":false}},
+        {"id":"claude-haiku-5-5","name":"Claude Haiku 5.5","type":"chat","modalities":{"input":["text","image/png"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"toggle":true,"effort":["low","medium","high","xhigh","max"]}},"limit":{"context":1000000,"output":128000},"cost":{"text":{"input":{"price":0.1,"cache":{"read":0.01,"write":0.125},"overrides":[{"when":{"context":{"gt":100000}},"price":0.5,"cache":{"read":0.05,"write":0.625}}]},"output":{"price":0.5,"overrides":[{"when":{"context":{"gt":100000}},"price":2.5}]}}},"api":{"messages":{"base_url":"https://opencode.ai/inference/go/anthropic/v1"}},"go":{"training":false}},
+        {"id":"minimax-m3","name":"MiniMax-M3","type":"chat","modalities":{"input":["text","image/png","video/mp4"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"toggle":true}},"limit":{"context":1000000,"output":131072},"cost":{"text":{"input":{"price":0.3,"cache":{"read":0.06},"overrides":[{"when":{"context":{"gt":512000}},"price":0.6,"cache":{"read":0.12}}]},"output":{"price":1.2,"overrides":[{"when":{"context":{"gt":512000}},"price":2.4}]}}},"api":{"messages":{"base_url":"https://opencode.ai/inference/go/anthropic/v1"}},"go":{"training":false}},
+        {"id":"beam-free","name":"Beam Free","type":"chat","modalities":{"input":["text"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"effort":["low","medium","high","xhigh","max"]}},"limit":{"context":1048576,"output":131072},"cost":{"text":{"input":{"price":0,"cache":{"read":0}},"output":{"price":0}}},"api":{"chat-completions":{"base_url":"https://opencode.ai/inference/go/openai/v1"}},"go":{"training":false}},
+        {"id":"qwen3.8-flash","name":"Qwen3.8 Flash","type":"chat","modalities":{"input":["text","image/png","video/mp4"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"toggle":true,"effort":["low","medium","xhigh"]}},"limit":{"context":1000000,"output":131072},"cost":{"text":{"input":{"price":0.15,"cache":{"read":0.016,"write":0.2}},"output":{"price":0.47}}},"api":{"messages":{"base_url":"https://opencode.ai/inference/go/anthropic/v1"}},"go":{"training":false}},
+        {"id":"iceman-contributor-free","name":"Iceman Contributor Free","type":"chat","modalities":{"input":["text"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true}},"limit":{"context":262144,"output":131072},"cost":{"text":{"input":{"price":0,"cache":{"read":0}},"output":{"price":0}}},"api":{"chat-completions":{"base_url":"https://opencode.ai/inference/go/openai/v1"}},"go":{"training":true}},
+        {"id":"gemini-4-argon","name":"Gemini 4 Argon","type":"chat","modalities":{"input":["text","image/png","video/mp4"]},"capabilities":{"tools":{"supported":true},"reasoning":{"supported":true,"effort":["low","medium","high"]}},"limit":{"context":1048576,"output":65536},"cost":{"text":{"input":{"price":2,"cache":{"read":0.1}},"output":{"price":10}},"audio":{"input":{"price":2}},"multipliers":[{"when":{"date":{"gte":"2026-12-01"}},"factor":2}]},"api":{"generate-content":{"base_url":"https://opencode.ai/inference/go/google/v1beta"}},"go":{"training":false}}
+    ]'''))
+
+    def _fake_opencode(self, listing):
+        """A fake opencode.ai over real HTTP, as the live gateway answered (2026-11-18): GET /inference/go/v1/models
+        lists `listing`; POST answers from a queue of (reply, usage), usage None for a reply cut before its usage. Chat
+        Completions: a message dict as one JSON body, or a list of deltas as SSE with the usage on the finish chunk
+        when include_usage asks. Messages: a list of blocks as an event stream, the usage on message_delta. Usage
+        carries cost and opencode as the gateway's does. No x-opencode-session: 400 MissingSessionID, as the gateway
+        answers. Every reply has an x-opencode-log-id. Returns (port, queue, seen, stop)."""
+        import http.server, threading
+        queue,seen=deque(),[]
+        class OC(http.server.BaseHTTPRequestHandler):
+            def log_message(s,*a):pass
+            def head(s,status,ctype):
+                s.send_response(status);s.send_header('Content-Type',ctype);s.send_header('x-opencode-log-id','log-%d' % len(seen))
+            def send(s,status,value):
+                raw=json.dumps(value).encode();s.head(status,'application/json')
+                s.send_header('Content-Length',str(len(raw)));s.end_headers();s.wfile.write(raw)
+            def do_GET(s):
+                seen.append(dict(method='GET',path=s.path,auth=s.headers.get('Authorization'),ua=s.headers.get('User-Agent')))
+                s.send(200,listing)
+            def do_POST(s):
+                body=json.loads(s.rfile.read(int(s.headers['Content-Length'])))
+                seen.append(dict(method='POST',path=s.path,auth=s.headers.get('Authorization'),ua=s.headers.get('User-Agent'),
+                                 session=s.headers.get('x-opencode-session'),version=s.headers.get('anthropic-version'),body=body))
+                if not s.headers.get('x-opencode-session'):
+                    return s.send(400,dict(type='error',error=dict(type='MissingSessionID',message='Request is missing x-opencode-session')))
+                reply,usage=queue.popleft()
+                if s.path.endswith('/messages') and not body.get('stream'):
+                    stop='tool_use' if any(b['type']=='tool_use' for b in reply) else 'end_turn'
+                    return s.send(200,dict(id='m0',type='message',role='assistant',model=body['model'],content=reply,
+                                           stop_reason=stop,usage=usage))
+                if s.path.endswith('/messages'):
+                    s.head(200,'text/event-stream');s.end_headers()
+                    ev=lambda e:s.wfile.write(('event: %s\ndata: %s\n\n' % (e['type'],json.dumps(e))).encode())
+                    ev(dict(type='message_start',message=dict(id='m1',type='message',role='assistant',model=body['model'],content=[],
+                                                              usage=dict(input_tokens=(usage or {}).get('input_tokens',0),output_tokens=1))))
+                    for i,b in enumerate(reply):
+                        if b['type']=='text':
+                            ev(dict(type='content_block_start',index=i,content_block=dict(type='text',text='')))
+                            ev(dict(type='content_block_delta',index=i,delta=dict(type='text_delta',text=b['text'])))
+                        else:
+                            ev(dict(type='content_block_start',index=i,content_block=dict(type='tool_use',id=b['id'],name=b['name'],input={})))
+                            ev(dict(type='content_block_delta',index=i,delta=dict(type='input_json_delta',partial_json=json.dumps(b['input']))))
+                        ev(dict(type='content_block_stop',index=i))
+                    if usage is not None:
+                        stop='tool_use' if any(b['type']=='tool_use' for b in reply) else 'end_turn'
+                        ev(dict(type='message_delta',delta=dict(stop_reason=stop),usage=usage));ev(dict(type='message_stop'))
+                    s.wfile.flush();return
+                if not body.get('stream'):
+                    finish='tool_calls' if reply.get('tool_calls') else 'stop'
+                    return s.send(200,dict(id='c1',object='chat.completion',model=body['model'],usage=usage,
+                                           choices=[dict(index=0,message=reply,finish_reason=finish)]))
+                s.head(200,'text/event-stream');s.end_headers()
+                chunk=lambda c:s.wfile.write(('data: '+json.dumps(dict(id='c2',object='chat.completion.chunk',**c))+'\n\n').encode())
+                for d in reply:
+                    chunk(dict(choices=[dict(index=0,delta=d,finish_reason=None)]))
+                if usage is not None:
+                    finish='tool_calls' if any('tool_calls' in d for d in reply) else 'stop'
+                    with_usage=(body.get('stream_options') or {}).get('include_usage')
+                    chunk(dict(choices=[dict(index=0,delta={},finish_reason=finish)],**(dict(usage=usage) if with_usage else {})))
+                    s.wfile.write(b'data: [DONE]\n\n')
+                s.wfile.flush()
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),OC)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        return srv.server_address[1],queue,seen,srv.shutdown
+
+    def test_the_opencode_go_catalog_offers_chat_and_messages_models_with_their_prices(self):
+        """OpenCode Go's rows -> catalog entries: the native API each is reached through (a Responses-native one through
+        Chat Completions), its levels, vision, window and prices with the long-context tier; Gemini's generate-content
+        and the models whose prompts train one are left out. Peak-hour multipliers are evaluated in UTC, and a reply's
+        own charge beats the price table."""
+        import datetime, copy
+        from caminus.ember.resident import catalog, effort as eff
+        from caminus.ember.resident.model import price, remember_prices
+        got={e['id']:e for e in catalog.opencode_entries(self.OPENCODE_GO,'opencode')}
+        self.assertEqual(sorted(got),['beam-free','claude-haiku-5-5','deepseek-v4.1-flash','gpt-6-luna','minimax-m3','qwen3.8-flash'],
+                         'no generate-content (Gemini), no Contributor rows (free or not)')
+        ds,haiku,mm,qw=got['deepseek-v4.1-flash'],got['claude-haiku-5-5'],got['minimax-m3'],got['qwen3.8-flash']
+        self.assertEqual((ds['protocol'],ds['efforts'],ds['vision'],ds['context'],ds['max_output']),
+                         ('openai',['low','high','max'],True,1000000,384000))
+        self.assertEqual(ds['prices'],dict(input=0.15,output=0.6,cache_read=0.003,cache_write=0.15))
+        self.assertEqual((haiku['protocol'],qw['protocol'],mm['protocol'],got['gpt-6-luna']['protocol']),
+                         ('anthropic','anthropic','anthropic','openai'),'Messages natives on Messages; Responses through Chat Completions')
+        self.assertEqual(haiku['prices']['long'],dict(above=100000,input=0.5,output=2.5,cache_read=0.05,cache_write=0.625))
+        self.assertEqual(got['gpt-6-luna']['prices']['cache_write'],0.25,'a write rate per lifetime: the highest')
+        self.assertEqual((mm['efforts'],qw['efforts'],mm['thinking']),([],['low','medium','xhigh'],'toggle'))
+        self.assertEqual(got['beam-free']['prices']['input'],0.0)
+        # its levels: Qwen3.8 runs the scale as its own three; MiniMax M3 lists none, so it has no effort control
+        qcfg=dict(provider_kind='opencode-go',api='anthropic',model='qwen3.8-flash',efforts=qw['efforts'])
+        self.assertEqual([eff.runs_as(qcfg,l) for l in ('low','medium','high','max')],['low','medium','xhigh','xhigh'])
+        self.assertEqual(eff.line(dict(qcfg,model='minimax-m3',efforts=[])),'')
+        # the address of each: its native API under the plan's root (the relay's, or opencode.ai's)
+        spec=dict(kind='opencode-go',endpoint='http://127.0.0.1:8769/inference/go')
+        self.assertEqual(catalog.transport(spec,qw),('http://127.0.0.1:8769/inference/go/anthropic/v1','anthropic'))
+        self.assertEqual(catalog.transport(spec,ds),('http://127.0.0.1:8769/inference/go/openai/v1','openai'))
+        self.assertEqual(catalog.plan_root('https://opencode.ai/inference/go/anthropic/v1'),'https://opencode.ai/inference/go')
+        self.assertEqual(catalog.providers(dict(provider='oc',provider_kind='opencode-go',
+                                                endpoint='http://127.0.0.1:8769/inference/go/openai/v1'))['oc']['endpoint'],
+                         'http://127.0.0.1:8769/inference/go','a brain\'s own provider is the plan\'s root')
+        # the long-context tier meters past its line (MiniMax M3 doubles past 512K)
+        remember_prices('minimax-m3',mm['prices'])
+        self.assertAlmostEqual(price('minimax-m3',dict(prompt_tokens=600_000,completion_tokens=1000)),(600_000*0.6+1000*2.4)/1e6)
+        self.assertAlmostEqual(price('minimax-m3',dict(prompt_tokens=100_000,completion_tokens=1000)),(100_000*0.3+1000*1.2)/1e6)
+        # a reply that says what it charged costs that: 0 inside the Go allowance, dollars from the balance past it
+        remember_prices('deepseek-v4.1-flash',ds['prices'])
+        used=dict(prompt_tokens=10**6,completion_tokens=0)
+        self.assertEqual(price('deepseek-v4.1-flash',dict(used,cost=0,opencode=dict(billing_source='go'))),0.0)
+        self.assertEqual(price('deepseek-v4.1-flash',dict(used,cost=0.25,opencode=dict(billing_source='balance'))),0.25)
+        self.assertAlmostEqual(price('deepseek-v4.1-flash',used),0.15,msg='no charge in the reply: the list price')
+        # DeepSeek V4.1 Flash costs twice as much on weekday peak hours (UTC); a rule this code cannot read counts
+        row=next(r for r in self.OPENCODE_GO['data'] if r['id']=='deepseek-v4.1-flash')
+        at=lambda *a:datetime.datetime(*a,tzinfo=datetime.timezone.utc)
+        self.assertEqual([catalog.opencode_multiplier(row,t) for t in (at(2026,11,18,2,0),at(2026,11,18,5,0),at(2026,11,18,9,59),
+                                                                    at(2026,11,18,10,0),at(2026,11,21,2,0))],[2,1,2,1,1])
+        odd=copy.deepcopy(row);odd['cost']['multipliers'].append(dict(when=dict(region=dict(eq='eu')),factor=3))
+        self.assertEqual(catalog.opencode_multiplier(odd,at(2026,11,21,2,0)),3,'unknown: assumed to apply (errs high)')
+        gem=next(r for r in self.OPENCODE_GO['data'] if r['id']=='gemini-4-argon')
+        self.assertEqual((catalog.opencode_multiplier(gem,at(2026,11,30,0,0)),catalog.opencode_multiplier(gem,at(2026,12,1,0,0))),(1,2))
+        self.assertEqual(catalog.opencode_multiplier(next(r for r in self.OPENCODE_GO['data'] if r['id']=='minimax-m3')),1)
+
+    def test_the_opencode_go_relay_needs_a_session_meters_what_the_reply_charged_and_books_a_cut_reply_high(self):
+        """The transport, the opencode-go relay and a fake opencode.ai over HTTP: the relay refuses a request without
+        x-opencode-session (and paths and models it does not allow) before anything goes upstream, forwards the
+        session as Ember (its User-Agent, the key as Bearer on both APIs), books the reply's own charge (0 inside the Go
+        allowance, which it keeps apart; dollars from the balance) and a reply cut before its usage at the list price
+        times the multiplier in force."""
+        import copy, http.client, http.server, threading, urllib.request
+        import caminus
+        from caminus.ember import relay
+        from caminus.ember.resident import catalog
+        from caminus.ember.resident.model import Model, ModelError, ModelTruncated, price, remember_prices
+        listing=copy.deepcopy(self.OPENCODE_GO)
+        ds_row=next(r for r in listing['data'] if r['id']=='deepseek-v4.1-flash')
+        ds_row['cost']['multipliers']=[dict(when=dict(utc_days=dict(**{'in':['mon','tue','wed','thu','fri','sat','sun']})),factor=2)]
+        port,queue,seen,stop_oc=self._fake_opencode(listing)
+        log=[]
+        ledger=relay.Ledger(self.home/'oc-ledger.json',5.0)
+        prices=relay.ListPrices(log.append,lambda:listing,relay.opencode_rates)
+        handler=relay.make_handler('opencode-go','FAKE-OC-KEY',ledger,set(),65536,log.append,prices,
+                                   lambda:http.client.HTTPConnection('127.0.0.1',port,timeout=10))
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        root='http://127.0.0.1:%d/inference/go' % srv.server_address[1]
+        posts=lambda:len([x for x in seen if x['method']=='POST'])
+        try:
+            spec=dict(kind='opencode-go',endpoint=root)
+            got={e['id']:e for e in catalog.discover('opencode',spec,urllib.request.urlopen)}
+            self.assertIn('qwen3.8-flash',got);self.assertNotIn('gemini-4-argon',got)
+            self.assertEqual((seen[0]['path'],seen[0]['ua']),('/inference/go/v1/models','ember/'+caminus.__version__))
+            self.assertEqual([e['id'] for e in catalog.discover('x',dict(kind='auto',endpoint=root+'/v1'),urllib.request.urlopen)],
+                             list(got),'its list\'s shape names it')
+            # refused here, never upstream: no session, a path it does not allow, a model Ember does not offer
+            code,body=self._post(root+'/openai/v1/chat/completions',dict(model='deepseek-v4.1-flash',messages=[]))
+            self.assertEqual(code,400);self.assertIn(b'x-opencode-session',body)
+            def post(path,body,sid='s'*32):
+                req=urllib.request.Request(root+path,json.dumps(body).encode(),{'Content-Type':'application/json','x-opencode-session':sid})
+                try:
+                    with urllib.request.urlopen(req,timeout=10) as r:return r.status,r.read()
+                except urllib.error.HTTPError as e:
+                    with e:return e.code,e.read()
+            self.assertEqual(post('/openai/v1/chat/completions',dict(model='deepseek-v4.1-flash',messages=[]),sid='a b')[0],400)
+            for path in ('/openai/v1/responses','/anthropic/v1/messages/count_tokens','/v1/chat/completions'):
+                self.assertEqual(post(path,dict(model='deepseek-v4.1-flash',messages=[]))[0],404,path)
+            for banned in ('gemini-4-argon','muse-spark-1.3-contributor','iceman-contributor-free'):
+                code,body=post('/openai/v1/chat/completions',dict(model=banned,messages=[]))
+                self.assertEqual(code,403,banned);self.assertIn(b'do not train on your prompts',body)
+            self.assertEqual(posts(),0,'nothing refused went upstream')
+            # a whole Chat Completions reply inside the Go allowance: $0 in the cap, the allowance kept apart
+            ds=got['deepseek-v4.1-flash'];endpoint,api=catalog.transport(spec,ds)
+            m=Model(dict(model=ds['id'],endpoint=endpoint,api=api,relay=True,provider_kind='opencode-go',context=ds['context'],
+                         efforts=ds['efforts'],prices=ds['prices'],max_tokens=65536,name='t'))
+            self.assertFalse(m.counter,'no count_tokens call to the plan')
+            msgs=[dict(role='system',content='be brief'),dict(role='user',content='hi'),dict(role='system',content='RUNTIME: step 1')]
+            plan=lambda cost,source,allowance:dict(prompt_tokens=301,completion_tokens=68,prompt_tokens_details=dict(cached_tokens=256),
+                                                  cost=cost,opencode=dict(billing_source=source,list_cost=0.0000859,allowance=allowance,
+                                                                          tokens=dict(input=45,output=68,cache_read=256)))
+            queue.append((dict(role='assistant',content='hello'),plan(0,'go',0.0000515)))
+            sid=uuid.uuid4().hex
+            self.assertEqual(m.complete(msgs,session=sid)['content'],'hello')
+            sent=seen[-1]
+            self.assertEqual((sent['path'],sent['auth'],sent['session'],sent['ua']),
+                             ('/inference/go/openai/v1/chat/completions','Bearer FAKE-OC-KEY',sid,'ember/'+caminus.__version__))
+            self.assertEqual(sent['body']['model'],'deepseek-v4.1-flash')
+            self.assertNotIn('reasoning_effort',sent['body'],'no level set: the model\'s own default')
+            self.assertEqual(ledger.spent(),0.0)
+            self.assertEqual(price(ds['id'],m.last_usage),0.0,'the agent\'s meter counts the charge too')
+            day=ledger.day()
+            self.assertEqual((day['billing'],round(day['allowance'],7)),({'go':1},0.0000515))
+            self.assertTrue(any('rid=log-' in l and 'billing=go' in l for l in log),log[-3:])
+            # past the allowance, from the balance: the dollars it says
+            queue.append((dict(role='assistant',content='again'),plan(0.0123,'balance',0)))
+            m.complete(msgs,session=sid)
+            self.assertAlmostEqual(ledger.spent(),0.0123,places=6);self.assertEqual(ledger.day()['billing'],{'go':1,'balance':1})
+            self.assertEqual(seen[-1]['session'],sid,'one conversation, one id')
+            # a streamed tool call: usage (with its charge) on the finish chunk, which include_usage asks for
+            queue.append(([dict(role='assistant',content=''),dict(reasoning_content='call it'),
+                           dict(tool_calls=[dict(index=0,id='call_1',type='function',function=dict(name='read',arguments='{"path": "x"}'))])],
+                          plan(0,'go',0.00002)))
+            tools=[dict(type='function',function=dict(name='read',description='read a file',
+                                                      parameters=dict(type='object',properties=dict(path=dict(type='string')))))]
+            out=m.complete(msgs,tools=tools,on_delta=lambda k,v:None,session=sid)
+            self.assertEqual(out['tool_calls'][0]['function']['name'],'read');self.assertEqual(out['reasoning_content'],'call it')
+            self.assertEqual(seen[-1]['body']['stream_options'],dict(include_usage=True))
+            for _ in range(100):
+                if ledger.day()['requests']>=3:break
+                time.sleep(0.05)
+            self.assertAlmostEqual(ledger.day()['allowance'],0.0000715,places=8)
+            # a Messages-native model talks Messages: Bearer, the checked version, no mid-conversation system message
+            qw=got['qwen3.8-flash'];endpoint,api=catalog.transport(spec,qw)
+            m2=Model(dict(model=qw['id'],endpoint=endpoint,api=api,relay=True,provider_kind='opencode-go',context=qw['context'],
+                          efforts=qw['efforts'],prices=qw['prices'],max_tokens=65536,name='t'))
+            usage=lambda cost:dict(input_tokens=328,output_tokens=162,cache_read_input_tokens=0,cache_creation_input_tokens=0,cost=cost,
+                                   opencode=dict(billing_source='balance' if cost else 'go',list_cost=0.000125,allowance=0 if cost else 0.00025))
+            queue.append(([dict(type='tool_use',id='toolu_1',name='read',input=dict(path='x'))],usage(0.002)))
+            out=m2.complete(msgs,tools=tools,on_delta=lambda k,v:None,session=sid)
+            self.assertEqual(out['tool_calls'],[dict(id='toolu_1',type='function',function=dict(name='read',arguments='{"path": "x"}'))])
+            sent=seen[-1]
+            self.assertEqual((sent['path'],sent['auth'],sent['version'],sent['session']),
+                             ('/inference/go/anthropic/v1/messages','Bearer FAKE-OC-KEY','2023-06-01',sid))
+            self.assertNotIn('system',[x['role'] for x in sent['body']['messages']])
+            self.assertIn('[system] RUNTIME: step 1',json.dumps(sent['body']['messages']))
+            self.assertEqual(sent['body']['output_config'],dict(effort='medium'))
+            self.assertAlmostEqual(price(qw['id'],m2.last_usage),0.002)
+            for _ in range(100):
+                if ledger.spent()>0.0123+1e-4:break
+                time.sleep(0.05)
+            self.assertAlmostEqual(ledger.spent(),0.0143,places=6,msg='the charge on message_delta')
+            # a whole Messages reply (not streamed): its charge too
+            queue.append(([dict(type='text',text='ok')],usage(0.001)))
+            code,_=post('/anthropic/v1/messages',dict(model='qwen3.8-flash',max_tokens=100,messages=[dict(role='user',content='hi')]))
+            self.assertEqual(code,200);self.assertAlmostEqual(ledger.spent(),0.0153,places=6)
+            # a short side call asks for its lowest level; a model that lists none is sent none
+            queue.append(([dict(type='text',text='{"verdict":"met"}')],usage(0)))
+            m2.complete(msgs,max_tokens=600)
+            self.assertEqual(seen[-1]['body']['output_config'],dict(effort='low'))
+            self.assertNotEqual(seen[-1]['session'],sid,'a side call is a conversation of its own')
+            mm=got['minimax-m3']
+            m3=Model(dict(model=mm['id'],endpoint=catalog.transport(spec,mm)[0],api='anthropic',relay=True,provider_kind='opencode-go',
+                          context=mm['context'],efforts=mm['efforts'],max_tokens=65536,name='t'))
+            queue.append(([dict(type='text',text='ok')],usage(0)))
+            m3.complete(msgs)
+            self.assertNotIn('output_config',seen[-1]['body'])
+            # a reply cut before its usage: the list price (prompt + the whole output allowance) at the multiplier in force
+            before=ledger.spent()
+            queue.append(([dict(role='assistant',content=''),dict(content='par')],None))
+            with self.assertRaises(ModelTruncated):
+                m.complete(msgs,max_tokens=5000,on_delta=lambda k,v:None,session=sid)
+            body=seen[-1]['body']
+            want=2*(relay.prompt_tokens(body,'opencode-go')*0.15+body['max_tokens']*0.6)/1e6
+            for _ in range(100):
+                if ledger.spent()>before:break
+                time.sleep(0.05)
+            self.assertAlmostEqual(ledger.spent()-before,want,places=6)
+            self.assertTrue(any('NO-USAGE' in l for l in log))
+            # a Messages stream cut before message_delta: its output estimated from what streamed
+            before=ledger.spent()
+            queue.append(([dict(type='text',text='x'*70)],None))
+            with self.assertRaises(ModelTruncated):
+                m2.complete(msgs,on_delta=lambda k,v:None,session=sid)
+            for _ in range(100):
+                if any('output estimated from 70 streamed characters' in l for l in log):break
+                time.sleep(0.05)
+            self.assertTrue(any('output estimated from 70 streamed characters' in l for l in log),log[-2:])
+            self.assertAlmostEqual(ledger.spent()-before,21*0.47/1e6,places=5)
+            # a client that names no conversation (a plain OpenAI brain pointed at the relay: the lab's, an advisor's)
+            plain=Model(dict(model=ds['id'],endpoint=endpoint.replace('/anthropic/','/openai/'),relay=True,context=100000,max_tokens=4096))
+            n=posts()
+            with self.assertRaises(ModelError) as cm:plain.complete(msgs)
+            self.assertEqual(cm.exception.status,400);self.assertIn('x-opencode-session',str(cm.exception));self.assertEqual(posts(),n)
+            self.assertFalse(any('FAKE-OC-KEY' in l for l in log),'the key is never logged')
+        finally:
+            srv.shutdown();stop_oc()
+
+    def test_an_opencode_conversation_keeps_one_session_and_a_plan_error_is_not_retried(self):
+        """The runtime gives each goal one random session id, kept with the goal and sent on its every turn; another goal
+        gets another. A 4xx from the plan (a limit: 429) stops the goal with its words, where another provider's 429
+        waits and tries again."""
+        import types
+        import caminus
+        from caminus.ember.resident.model import Model, ModelError
+        class Plan:
+            opencode=True;remote=True
+            def __init__(self,fail=None):self.config=dict(provider_kind='opencode-go',model='deepseek-v4.1-flash');self.sessions=[];self.fail=fail
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None,session=None):
+                self.sessions.append(session)
+                if self.fail:raise self.fail
+                return call('budget',{}) if len(self.sessions)%2 else dict(role='assistant',content='done')
+        plan=Plan()
+        rt=Runtime(self.home,model=plan)
+        try:
+            g1=rt.store.enqueue('first')
+            for _ in range(6):
+                if len(plan.sessions)>=2:break
+                rt.tick(g1)
+            g2=rt.store.enqueue('second');rt.tick(g2)
+            a,b,c=plan.sessions
+            self.assertEqual(a,b);self.assertNotEqual(a,c);self.assertRegex(a,r'^[0-9a-f]{32}$')
+            self.assertEqual(rt.store.goal(g1)['session'],a,'kept with the goal')
+            # a 429 from the plan: the goal stops with the reason, no retry booked
+            e=ModelError('HTTP Error 429: Too Many Requests: {"error":"weekly usage limit reached"}');e.status=429
+            rt.model=rt.primary=Plan(fail=e);rt.brains.primary=rt.model
+            g3=rt.store.enqueue('third');rt.tick(g3)
+            g=rt.store.goal(g3)
+            self.assertEqual(g['state'],'error');self.assertIn('weekly usage limit reached',g['error'])
+            self.assertNotIn(g3,rt.retry);self.assertIn('model_refused',[x['kind'] for x in rt.store.events() if x['goal']==g3])
+            # a 503 from the plan: bounded retries that count (never the hour of busy waiting other providers get)
+            e5=ModelError('HTTP Error 503: Service Unavailable: over capacity');e5.status=503
+            rt.model=rt.primary=Plan(fail=e5);rt.brains.primary=rt.model
+            g5=rt.store.enqueue('fifth');rt.tick(g5)
+            self.assertEqual(rt.store.goal(g5)['state'],'waiting_model');self.assertEqual(rt.retry[g5][1],1)
+            self.assertNotIn('model_busy',[x['kind'] for x in rt.store.events() if x['goal']==g5])
+            other=Plan(fail=e);other.opencode=False;other.config=dict(model='glm')
+            rt.model=rt.primary=other;rt.brains.primary=other
+            g4=rt.store.enqueue('fourth');rt.tick(g4)
+            self.assertEqual(rt.store.goal(g4)['state'],'waiting_model','another provider\'s 429 waits and tries again')
+        finally:rt.mail.close();rt.store.close()
+        # the transport: a call without the goal's id (a side call) is a conversation of its own; Ember's name on each
+        m=Model(dict(model='deepseek-v4.1-flash',endpoint='http://127.0.0.1:9/inference/go/openai/v1',relay=True,
+                     provider_kind='opencode-go',context=100000))
+        h1,h2,h3=m.headers(),m.headers(),m.headers(session='x'*32)
+        self.assertNotEqual(h1['x-opencode-session'],h2['x-opencode-session']);self.assertEqual(h3['x-opencode-session'],'x'*32)
+        self.assertEqual(h1['User-Agent'],'ember/'+caminus.__version__)
+        self.assertNotIn('x-opencode-session',Model(dict(model='m',endpoint='http://127.0.0.1:9/v1')).headers())
+
+    def test_model_puts_an_opencode_model_on_its_own_api(self):
+        """/model on an OpenCode plan's model: its native API under the plan's root, its levels, window and output cap;
+        the next pick moves the brain to the other API; a running resident's transport is the plan's."""
+        import io as _io
+        from caminus.ember.resident import catalog
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']=dict(opencode=dict(kind='opencode-go',endpoint='http://relay/opencode/inference/go',relay=True))
+        (self.home/'config.json').write_text(json.dumps(conf))
+        class R(_io.BytesIO):
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        urls=[]
+        def opener(req,timeout=None):
+            urls.append(req.full_url)
+            return R(json.dumps(self.OPENCODE_GO).encode())
+        catalog.refresh(self.home,conf,opener=opener)
+        self.assertEqual(urls,['http://relay/opencode/inference/go/v1/models'])
+        self.cmd('model',['qwen3.8-flash'])
+        cfg=json.loads((self.home/'config.json').read_text())
+        self.assertEqual((cfg['api'],cfg['endpoint'],cfg['provider_kind'],cfg['efforts'],cfg['context'],cfg['max_tokens'],cfg['relay']),
+                         ('anthropic','http://relay/opencode/inference/go/anthropic/v1','opencode-go',['low','medium','xhigh'],
+                          1000000,65536,True))
+        self.assertTrue(cfg['vision'])
+        self.assertEqual(self.cmd('effort',['high'])['runs_as'],'xhigh','its nearest level')
+        self.cmd('model',['deepseek-v4.1-flash'])
+        cfg=json.loads((self.home/'config.json').read_text())
+        self.assertNotIn('api',cfg,'Chat Completions: the default transport')
+        self.assertEqual((cfg['endpoint'],cfg['efforts']),('http://relay/opencode/inference/go/openai/v1',['low','high','max']))
+        rt=Runtime(self.home)
+        try:
+            self.assertTrue(rt.model.opencode);self.assertTrue(rt.model.remote);self.assertFalse(rt.model.counter)
+            self.assertEqual(rt.model.base,'http://relay/opencode/inference/go/openai/v1')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_free_time_stays_off_an_opencode_plan_unless_the_owner_opts_in(self):
+        """With an OpenCode plan as the brain, free time runs on the other brain when one is configured, else rests with
+        a note naming the setting; `heartbeat --on-plan yes` lets it use the plan; a stretch running when the plan
+        becomes off limits ends."""
+        class Plan:
+            opencode=True;remote=True
+            def __init__(self):self.config=dict(provider_kind='opencode-go',model='deepseek-v4.1-flash')
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None,session=None):
+                return dict(role='assistant',content='resting')
+        conf=json.loads((self.home/'config.json').read_text())
+        conf.update(model='deepseek-v4.1-flash',provider_kind='opencode-go',prices=dict(input=0.15,output=0.6,cache_read=0.003))
+        (self.home/'config.json').write_text(json.dumps(conf))
+        rt=self.free_runtime(model=Plan())
+        try:
+            self.assertIsNone(rt.free.pulse(),'no free time on the plan')
+            rest=[e['data'] for e in rt.store.events() if e['kind']=='free_time_rest']
+            self.assertEqual(rest[-1]['reason'],'plan');self.assertIn('--on-plan yes',rest[-1]['text'])
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('--on-plan yes',self.cmd('heartbeat')['note'],'the owner sees why')
+        self.assertTrue(self.cmd('heartbeat',['--on-plan','yes'])['free_time']['on_plan'])
+        self.assertNotIn('note',self.cmd('heartbeat'))
+        rt=Runtime(self.home,model=Plan())
+        try:
+            gid=rt.free.pulse();self.assertTrue(gid,'opted in: free time uses the plan')
+            self.assertIs(rt.brains.choose(gid),rt.model)
+            self.cmd('heartbeat',['--on-plan','no'])
+            self.assertIsNone(rt.free.pulse())
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'cancelled');self.assertIn('stays off an OpenCode plan',g['error'])
+        finally:rt.mail.close();rt.store.close()
+        # another brain configured (the local server as the fallback): free time goes there, work stays on the plan
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['fallback']=dict(model='fixture',endpoint=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.assertNotIn('note',self.cmd('heartbeat'))
+        rt=Runtime(self.home,model=Plan())
+        try:
+            (self.home/'free_time.json').unlink(missing_ok=True)
+            self.assertIs(rt.brains.free_brain(),rt.brains.fallback)
+            gid=rt.free.pulse();self.assertTrue(gid)
+            self.assertIs(rt.brains.choose(gid),rt.brains.fallback,'the stretch runs off the plan')
+            work=rt.store.enqueue('Real work.')
+            self.assertIs(rt.brains.choose(work),rt.brains.primary,'work stays on the plan')
+        finally:rt.mail.close();rt.store.close()
 
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog

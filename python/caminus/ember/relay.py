@@ -25,6 +25,14 @@ Providers:
              catalog). Its model list carries no prices; Meta's published table is the transport's
              (caminus.ember.resident.model.META_PRICES, with the long-prompt tier of Muse Ember (Meta)), so only the Muse chat
              models in it are allowed (Standard mode: the Contributor-mode ids, where Meta trains on the prompts, are not).
+  opencode-go  opencode.ai (OpenCode Go, the subscription), under /inference/go: POST its Chat Completions and Messages
+             endpoints (/openai/v1/chat/completions, /anthropic/v1/messages); GET /v1/models (the catalog, with prices).
+             The models Ember offers are allowed (catalog.opencode_offered: chat models that call tools, none whose
+             prompts train a model), priced from that list (refreshed hourly). Each request must name its conversation
+             (x-opencode-session, which Go requires; refused here with a 400 before it goes out) and goes out as Ember
+             (its User-Agent). A reply says what it charged (usage.cost: 0 inside the Go allowance, dollars from the
+             balance past it): that is what the cap counts; the allowance it used is kept beside it. A reply cut
+             before its usage came is booked at the list price times the largest peak-hour multiplier in force.
 
 Run a separate relay (own port, key file, cap, ledger and log) for each provider and for an advisor.
 
@@ -37,6 +45,7 @@ restarts on failure, no expiry: the daily cap guards spend):
 import argparse
 import base64
 import math
+import re
 import subprocess
 import datetime
 import http.client
@@ -52,8 +61,11 @@ import threading
 import time
 
 from .resident.files import IMAGE_HEAD, IMAGE_MAX_SIDE, image_info
-from .resident.model import FALLBACK_BETA, FALLBACK_MODELS, META_PRICES, PRICES, flat_row, image_tokens, row_cost
+from .resident.catalog import OPENCODE_PATHS, opencode_multiplier, opencode_offered, opencode_row
+from .resident.model import (FALLBACK_BETA, FALLBACK_MODELS, META_PRICES, OPENCODE_ANTHROPIC_VERSION, PRICES, USER_AGENT,
+                             flat_row, image_tokens, row_cost)
 
+GO = '/inference/go'
 PROVIDERS = {
     'anthropic': dict(host='api.anthropic.com', post=('/v1/messages', '/v1/messages/count_tokens'),
                       get=('/v1/models',), port=8765, key_file='~/.config/anthropic/api_key'),
@@ -63,7 +75,12 @@ PROVIDERS = {
                     key_file='~/.config/caminus/mistral-key', prices='~/.config/caminus/mistral-prices.json'),
     'meta': dict(host='api.meta.ai', post=('/v1/chat/completions',), get=('/v1/models',), port=8768,
                  key_file='~/.config/caminus/meta-key', hidden_reasoning=True),   # (reasoning_content comes empty)
+    # root: the plan's prefix (OpenCode Zen is the same API under another); session: every POST names its conversation
+    'opencode-go': dict(host='opencode.ai', root=GO, post=(GO + OPENCODE_PATHS['openai'] + '/chat/completions',
+                                                           GO + OPENCODE_PATHS['anthropic'] + '/messages'),
+                        get=(GO + '/v1/models',), port=8769, key_file='~/.config/caminus/opencode-key', session=True),
 }
+SESSION_ID = re.compile(r'[A-Za-z0-9_-]{8,128}')   # an x-opencode-session the relay forwards (Ember sends uuid4 hex)
 PRICE_REFRESH = 3600
 # A decode-rate ceiling for output a stream does not show (Meta bills its models' reasoning but sends it empty), used
 # only to bound a reply cut before its usage came. Meta publishes no speed: an assumed ceiling (unverified), above the
@@ -139,7 +156,15 @@ class Ledger:
         with self.lock:
             return self._load().get(self.today(), {}).get('usd', 0.0)
 
-    def add(self, usd, inp=0, out=0, read=0, wrote=0):
+    def day(self):
+        """today's row: usd, requests, tokens; an OpenCode plan's too: allowance and list_usd (USD), billing
+        ({source: requests})"""
+        with self.lock:
+            return dict(self._load().get(self.today(), {}))
+
+    def add(self, usd, inp=0, out=0, read=0, wrote=0, plan=None):
+        """plan: an OpenCode reply's usage.opencode (billing_source, allowance, list_cost), kept beside the dollars so
+        the Go allowance a day used shows apart from what the balance paid"""
         with self.lock:
             data = self._load()
             day = data.setdefault(self.today(), dict(usd=0.0, requests=0, input=0, output=0, cache_read=0, cache_write=0))
@@ -149,6 +174,13 @@ class Ledger:
             day['output'] += out
             day['cache_read'] += read
             day['cache_write'] += wrote
+            if isinstance(plan, dict):
+                for field, key in (('allowance', 'allowance'), ('list_cost', 'list_usd')):
+                    v = plan.get(field)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        day[key] = round(day.get(key, 0.0) + float(v), 8)
+                source = str(plan.get('billing_source') or 'unknown')[:16]
+                day.setdefault('billing', {})[source] = day.get('billing', {}).get(source, 0) + 1
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix('.tmp')
             tmp.write_text(json.dumps(data, indent=1))
@@ -156,54 +188,63 @@ class Ledger:
             return day['usd']
 
 
-class DeepInfraPrices:
-    """Per-model prices from DeepInfra's own model list, refreshed hourly; a model it publishes no price for is refused."""
+def deepinfra_rates(m):
+    """A DeepInfra model row's (input, output, cache read) in USD per million tokens, or None (a null price)."""
+    p = (m.get('metadata') or {}).get('pricing') or {}
+    cin, cout = p.get('input_tokens'), p.get('output_tokens')
+    if cin is None or cout is None:
+        return None
+    cread = p.get('cache_read_tokens')
+    return (float(cin), float(cout), float(cin if cread is None else cread))
 
-    def __init__(self, key, log, fetch=None):
-        self.key, self.log, self.table, self.at, self.lock = key, log, {}, 0.0, threading.Lock()
-        self.fetch = fetch or self._fetch
 
-    def _fetch(self):
-        conn = http.client.HTTPSConnection(PROVIDERS['deepinfra']['host'], timeout=60,
-                                           context=ssl.create_default_context())
-        try:
-            conn.request('GET', '/v1/openai/models', headers={'Authorization': 'Bearer ' + self.key})
-            up = conn.getresponse()
-            if up.status != 200:
-                raise OSError('model list status %d' % up.status)
-            return json.loads(up.read())
-        finally:
-            conn.close()
+def opencode_rates(m):
+    """An OpenCode model row's PRICES-form row (with its long-context tier) if Ember offers the model, else None."""
+    return opencode_row(m) if opencode_offered(m) else None
+
+
+class ListPrices:
+    """Per-model prices from the provider's own model list (DeepInfra's, OpenCode's), refreshed hourly; a model it
+    publishes no price for, or one rates() leaves out, is refused. fetch: () -> the list; rates: a row -> its rates
+    or None; rows keeps each priced row by id (OpenCode's peak-hour multipliers are read from it)."""
+
+    def __init__(self, log, fetch, rates=deepinfra_rates):
+        self.log, self.fetch, self.rates = log, fetch, rates
+        self.table, self.rows, self.at, self.lock = {}, {}, 0.0, threading.Lock()
 
     def get(self, model):
         with self.lock:
             if time.time() - self.at > PRICE_REFRESH or (model not in self.table and time.time() - self.at > 60):
                 try:
-                    table = {}
+                    table, rows = {}, {}
                     for m in self.fetch().get('data') or []:
                         # an entry with a null price or no id is skipped, never the whole table (a TypeError there
                         # dropped the client's connection and left every model unpriced)
                         try:
-                            p = (m.get('metadata') or {}).get('pricing') or {}
-                            cin, cout = p.get('input_tokens'), p.get('output_tokens')
-                            if cin is None or cout is None or not m.get('id'):
-                                continue
-                            cread = p.get('cache_read_tokens')
-                            table[m['id']] = (float(cin), float(cout), float(cin if cread is None else cread))
+                            r = self.rates(m) if m.get('id') else None
                         except (TypeError, ValueError, AttributeError):
                             continue
-                    self.table, self.at = table, time.time()
+                        if r is not None:
+                            table[m['id']], rows[m['id']] = r, m
+                    self.table, self.rows, self.at = table, rows, time.time()
                     self.log('prices: %d priced models' % len(table))
-                except (OSError, ValueError) as e:
+                except (OSError, ValueError, AttributeError) as e:
                     self.log('price list unavailable: %s' % type(e).__name__)
             return self.table.get(model)
+
+    def multiplier(self, model):
+        """the largest price multiplier the model's rules apply now (catalog.opencode_multiplier); 1 without rules"""
+        with self.lock:
+            row = self.rows.get(model)
+        return opencode_multiplier(row) if row else 1.0
 
 
 def _list_models(spec, key):
     """The provider's model list (GET its catalog path with the key), for resolving a model's names."""
     conn = http.client.HTTPSConnection(spec['host'], timeout=60, context=ssl.create_default_context())
     try:
-        conn.request('GET', spec['get'][0], headers={'Authorization': 'Bearer ' + key, 'accept': 'application/json'})
+        conn.request('GET', spec['get'][0], headers={'Authorization': 'Bearer ' + key, 'accept': 'application/json',
+                                                     'User-Agent': USER_AGENT})
         up = conn.getresponse()
         if up.status != 200:
             raise OSError('model list status %d' % up.status)
@@ -265,6 +306,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
     """install_args: the `relay install` flags that would rebuild this relay (cap, port, ...; models aside), so a refused
     model's error names the exact command that allows it as well"""
     spec = PROVIDERS[provider]
+    # the Messages wire (its events, usage keys and error shape): Anthropic's relay, and an OpenCode plan's Messages path
+    messages_wire = lambda path: provider == 'anthropic' or path.endswith('/messages') or path.endswith('/count_tokens')
     connect = connect or (lambda: http.client.HTTPSConnection(spec['host'], timeout=900,
                                                               context=ssl.create_default_context()))
 
@@ -275,8 +318,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             pass
 
         def refuse(self, status, kind, message):
-            err = dict(type='error', error=dict(type=kind, message='relay: ' + message)) if provider == 'anthropic' \
-                else dict(error=dict(message='relay: ' + message, type=kind, code=status))
+            err = dict(type='error', error=dict(type=kind, message='relay: ' + message)) \
+                if messages_wire(self.path.split('?')[0]) else dict(error=dict(message='relay: ' + message, type=kind, code=status))
             raw = json.dumps(err).encode()
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
@@ -327,6 +370,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 headers = dict(self.auth(), accept='application/json')
                 if provider == 'anthropic':
                     headers['anthropic-version'] = self.headers.get('anthropic-version') or '2026-10-21'
+                if spec.get('session'):
+                    headers['User-Agent'] = USER_AGENT
                 conn.request('GET', self.path, None, headers)
                 up = conn.getresponse()
                 data = up.read()
@@ -359,10 +404,18 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             path = self.path.split('?')[0]
             if path not in spec['post']:
                 return self.refuse(404, 'not_found_error', 'path not allowed: ' + path)
+            anth = messages_wire(path)
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
             except (ValueError, TypeError):
                 return self.refuse(400, 'invalid_request_error', 'body is not JSON')
+            session = self.headers.get('x-opencode-session') or ''
+            if spec.get('session') and not SESSION_ID.fullmatch(session):
+                # Go serves only clients that name each conversation (its gateway answers 400 MissingSessionID too);
+                # refused here, so it never reaches opencode: Ember's transport sends one per conversation
+                return self.refuse(400, 'invalid_request_error', 'no x-opencode-session header (8 to 128 letters, digits, '
+                                   '- or _): OpenCode Go serves only clients that send a session id per conversation, '
+                                   "as Ember's transport does for a brain of kind opencode-go")
             model = body.get('model')
             if provider == 'anthropic':
                 if model not in models:
@@ -382,7 +435,9 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         model, ' (add it to the relay\'s --prices file as "%s": [input, output] USD per million tokens; '
                                're-read on change)' % model if provider == 'mistral' else
                         ' (Caminus has Meta\'s published prices for the Muse chat models in Standard mode only)'
-                        if provider == 'meta' else ''))
+                        if provider == 'meta' else
+                        ' (Ember allows the chat models in the plan\'s list that call tools and do not train on your prompts)'
+                        if spec.get('session') else ''))
                 # (input, output, cache_read), or a PRICES-form row with a long-prompt tier (Meta's table)
                 row = rates if isinstance(rates[0], tuple) else flat_row(*rates)
             spent = ledger.spent()
@@ -391,7 +446,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
             counting = path.endswith('count_tokens')
             beta = None
             if not counting:
-                if provider != 'anthropic' and 'max_completion_tokens' in body:
+                if not anth and 'max_completion_tokens' in body:
                     # the newer name of the same cap (Meta takes both): folded into max_tokens, so the clamp below holds
                     newer = body.pop('max_completion_tokens')
                     if not isinstance(body.get('max_tokens'), int):
@@ -406,7 +461,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     beta = FALLBACK_BETA if 'fallbacks' in body and FALLBACK_BETA in (self.headers.get('anthropic-beta') or '') else None
                     if 'fallbacks' in body and not beta:
                         body.pop('fallbacks')
-                elif body.get('stream') and provider in ('deepinfra', 'meta'):
+                elif body.get('stream') and not anth and (provider in ('deepinfra', 'meta') or spec.get('session')):
                     body['stream_options'] = dict(include_usage=True)   # the only way their streams report usage
                     # (Mistral sends usage in its last stream chunk and refuses fields it does not know)
             raw = json.dumps(body).encode()
@@ -418,6 +473,10 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     headers['anthropic-version'] = self.headers.get('anthropic-version') or '2026-10-21'
                     if beta:
                         headers['anthropic-beta'] = beta
+                if spec.get('session'):
+                    headers.update({'x-opencode-session': session, 'User-Agent': USER_AGENT})
+                    if anth:
+                        headers['anthropic-version'] = OPENCODE_ANTHROPIC_VERSION   # (the version its gateway was checked at)
                 t_sent, t_seen = time.monotonic(), None   # t_seen: the first visible output piece (hidden_reasoning)
                 conn.request('POST', path, raw, headers)
                 # (taken now: http.client drops conn.sock in getresponse when upstream will close the connection)
@@ -428,7 +487,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 client_gone, streamed, final = False, 0, False   # streamed: output characters sent; final: the count came
                 try:
                     self.send_response(up.status)
-                    for name in ('Content-Type', 'retry-after', 'request-id', 'x-request-id'):
+                    for name in ('Content-Type', 'retry-after', 'request-id', 'x-request-id', 'x-opencode-log-id'):
                         if up.getheader(name):
                             self.send_header(name, up.getheader(name))
                     self.send_header('Connection', 'close')
@@ -436,7 +495,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                 except OSError:
                     client_gone = True
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
-                rid = up.getheader('request-id') or up.getheader('x-request-id')
+                rid = up.getheader('request-id') or up.getheader('x-request-id') or up.getheader('x-opencode-log-id')
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
                     watched, ended = threading.Event(), False   # ended: the reply's last event came
                     gone = self.watch_client(upsock, watched)
@@ -468,7 +527,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                             ev = json.loads(line[5:])
                         except ValueError:
                             continue
-                        if provider != 'anthropic':
+                        if not anth:
                             if ev.get('usage'):
                                 usage = ev['usage']
                             for ch in ev.get('choices') or []:
@@ -514,10 +573,13 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     ' served=%s' % served if served != model else '', ' FALLBACK' if fallback else '',
                     ' stop=%s' % stop if stop and stop not in ('end_turn', 'tool_use') else '',
                     ' category=%s' % category if category else '',
-                    ' rid=%s' % rid if (rid and (errtext or stop == 'refusal' or fallback)) else ''))
+                    # (an OpenCode reply's log id on every line: what opencode asks for when an issue is reported)
+                    ' rid=%s' % rid if (rid and (errtext or stop == 'refusal' or fallback or spec.get('session'))) else ''))
                 if client_gone:
                     extra += ' CLIENT-GONE'
-                    if provider == 'anthropic' and not final and 'text/event-stream' in (up.getheader('Content-Type') or ''):
+                # (an OpenCode Messages stream that upstream cut is estimated the same way: nothing else says its output)
+                if (client_gone or spec.get('session')) and up.status == 200:
+                    if anth and not final and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         if not usage:          # gone before message_start: the prompt was still read
                             usage = {'input_tokens': prompt_tokens(body, provider)}
                         # the final count never came (a hang-up: an interrupt, a steer, /advisor end a reply this way):
@@ -535,8 +597,21 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         model, usage.get('input_tokens'), usage.get('cache_read_input_tokens'),
                         usage.get('cache_creation_input_tokens'), usage.get('output_tokens'), usd, total, extra))
                 elif not counting and provider != 'anthropic' and up.status == 200:
-                    if usage:
-                        usd = row_cost(row, usage)
+                    # an estimate errs high at the price's peak-hour multiplier in force (OpenCode lists them; 1 else)
+                    mult = prices.multiplier(model) if hasattr(prices, 'multiplier') else 1.0
+                    plan = usage.get('opencode') if spec.get('session') and isinstance(usage.get('opencode'), dict) else None
+                    charged = usage.get('cost') if spec.get('session') else None
+                    streamed_reply = 'text/event-stream' in (up.getheader('Content-Type') or '')
+                    if isinstance(charged, (int, float)) and not isinstance(charged, bool) and (final or not anth or not streamed_reply):
+                        # what the reply says it charged: 0 inside a Go allowance, dollars from the balance past it
+                        usd = float(charged)
+                        if plan:
+                            extra += ' billing=%s allowance=%s list=%s' % (plan.get('billing_source'), plan.get('allowance'),
+                                                                         plan.get('list_cost'))
+                    elif usage:
+                        usd = row_cost(row, usage) * mult
+                        if spec.get('session'):
+                            extra += ' (no charge in the reply: list price x%g)' % mult
                     elif client_gone and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         # a hang-up before the usage chunk: the prompt plus what was streamed, not the whole allowance
                         # (at the rates past a long-prompt line, where the row has one: an estimate errs high)
@@ -548,17 +623,22 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                             hidden = ((t_seen or time.monotonic()) - t_sent) * HIDDEN_TPS
                             out_est += int(hidden)
                             extra += ' (+%d hidden-reasoning tokens by time)' % int(hidden)
-                        usd = (prompt_tokens(body, provider) * row[1][0]
-                               + min(out_est, body['max_tokens']) * row[1][1]) / 1e6
-                        extra += ' (estimated: prompt + %d streamed characters)' % streamed
+                        usd = mult * (prompt_tokens(body, provider) * row[1][0]
+                                      + min(out_est, body['max_tokens']) * row[1][1]) / 1e6
+                        extra += ' (estimated: prompt + %d streamed characters%s)' % (
+                            streamed, ', x%g peak' % mult if mult != 1 else '')
                     else:
                         # no usage reported (a cut stream): charge the request as if every output token was spent
-                        usd = (prompt_tokens(body, provider) * row[1][0] + body['max_tokens'] * row[1][1]) / 1e6
+                        usd = mult * (prompt_tokens(body, provider) * row[1][0] + body['max_tokens'] * row[1][1]) / 1e6
                         extra += ' NO-USAGE (charged the estimate)'
-                    total = ledger.add(usd, usage.get('prompt_tokens') or 0, usage.get('completion_tokens') or 0,
-                                       (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
-                    log('%s in=%s out=%s $%.5f today $%.4f%s' % (model, usage.get('prompt_tokens'),
-                                                                  usage.get('completion_tokens'), usd, total, extra))
+                    if anth:      # (an OpenCode plan's Messages usage: input_tokens beside its cache reads and writes)
+                        read, wrote = usage.get('cache_read_input_tokens') or 0, usage.get('cache_creation_input_tokens') or 0
+                        inp, out = (usage.get('input_tokens') or 0) + read + wrote, usage.get('output_tokens') or 0
+                    else:
+                        inp, out = usage.get('prompt_tokens') or 0, usage.get('completion_tokens') or 0
+                        read, wrote = (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0, 0
+                    total = ledger.add(usd, inp, out, read, wrote, plan=plan)
+                    log('%s in=%s out=%s $%.5f today $%.4f%s' % (model, inp, out, usd, total, extra))
                 if errtext or (provider == 'anthropic' and not usage and not counting) or (counting and up.status != 200):
                     log('%s %s status %d%s error=%s' % (model, path, up.status, extra, errtext or '(no usage)'))
                 self.close_connection = True
@@ -746,8 +826,11 @@ def service(argv, run=subprocess.run):
         is_on = (unit_dir() / unit_name(prov)).exists()
         active = ctl('is-active', unit_name(prov)).stdout.strip() if is_on else 'not installed'
         ledger = state / ('key-relay-ledger.json' if prov == 'anthropic' else f'{prov}-relay-ledger.json')
-        spent = Ledger(ledger, 0).spent() if ledger.exists() else 0.0
-        line = f'{prov:10s} {active:14s} today ${spent:.4f}'
+        day = Ledger(ledger, 0).day() if ledger.exists() else {}
+        line = f'{prov:11s} {active:14s} today ${day.get("usd", 0.0):.4f}'
+        if 'allowance' in day:
+            # an OpenCode plan: what the plan's allowance covered (in dollars of its monthly limit) is not money spent
+            line += f' (Go allowance ${day["allowance"]:.4f}, list ${day.get("list_usd", 0.0):.4f})'
         if unit:
             # the cap, the port and (Anthropic) the models it allows: an advisor or brain on another model is refused
             line += (f' of ${unit["cap_usd"]:.2f}' if unit['cap_usd'] is not None else '') + f'  port {unit["port"]}'
@@ -764,7 +847,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog='caminus ember relay', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--provider', choices=sorted(PROVIDERS), default='anthropic')
-    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra), 8767 (mistral), 8768 (meta)')
+    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra), 8767 (mistral), 8768 (meta), '
+                                             '8769 (opencode-go)')
     ap.add_argument('--prices', help='mistral: the owner\'s price file (default ~/.config/caminus/mistral-prices.json)')
     ap.add_argument('--cap-usd', type=float, default=1.0, help='daily spend cap in USD')
     ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own; 0 = never')
@@ -772,7 +856,8 @@ def main(argv=None):
     ap.add_argument('--max-tokens', type=int, default=65536)
     ap.add_argument('--model', action='append', help='anthropic: allowed model (repeatable); default claude-haiku-5-5')
     ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key, ~/.config/caminus/deepinfra-key, '
-                                       '~/.config/caminus/mistral-key or ~/.config/caminus/meta-key')
+                                       '~/.config/caminus/mistral-key, ~/.config/caminus/meta-key or '
+                                       '~/.config/caminus/opencode-key')
     ap.add_argument('--ledger', help='default ~/.local/state/caminus/<provider>-relay-ledger.json')
     ap.add_argument('--log', help='default ~/.local/state/caminus/<provider>-relay.log')
     a = ap.parse_args(argv)
@@ -804,8 +889,10 @@ def main(argv=None):
         logf.write('%s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
 
     ledger = Ledger(ledger_path, a.cap_usd)
-    prices = (DeepInfraPrices(key, log) if a.provider == 'deepinfra' else
-              OwnerPrices(a.prices or spec['prices'], log, fetch=lambda: _list_models(spec, key))
+    listed = lambda: _list_models(spec, key)
+    prices = (ListPrices(log, listed) if a.provider == 'deepinfra' else
+              ListPrices(log, listed, opencode_rates) if spec.get('session') else
+              OwnerPrices(a.prices or spec['prices'], log, fetch=listed)
               if a.provider == 'mistral' else META_PRICES if a.provider == 'meta' else None)
     port = a.port or spec['port']
     # (no --key-file or --prices: the hint reaches the agent, which has no business with the owner's file paths; the
@@ -819,7 +906,7 @@ def main(argv=None):
                                                        install_args=install_args))
     if a.ttl > 0:
         threading.Timer(a.ttl, srv.shutdown).start()
-    root = '/v1/openai' if a.provider == 'deepinfra' else '/v1'
+    root = '/v1/openai' if a.provider == 'deepinfra' else spec.get('root') or '/v1'
     log('start %s port %d cap $%.2f ttl %ds%s (spent today $%.4f)' % (
         a.provider, port, a.cap_usd, a.ttl, ' models %s' % sorted(models) if a.provider == 'anthropic' else '',
         ledger.spent()))

@@ -13,11 +13,17 @@ Configuration, in config.json under "fallback" (absent: one brain, as before): t
 model settings (model, endpoint, api, context, max_tokens, api_key_env, effort, ...) plus
     budget_usd     1.00   dollars per day the fallback may spend on work turns
     down_seconds   60     how long a failed primary is left alone before it is probed again
+
+An OpenCode plan (catalog.OPENCODE) is for the work its owner asks for, and its traffic is watched for abuse: free time
+stays off a brain on one unless free_time.on_plan is true (`heartbeat NAME --on-plan yes`). A free-time turn then runs
+on the other brain when that one is not a plan (and its free-time allowance holds), else free time rests with a note
+(freetime.py).
 """
 import datetime
 import json
 import time
 
+from . import catalog
 from .model import Model, ModelContextError, ModelTruncated, price
 from .store import atomic_json
 
@@ -53,7 +59,7 @@ class Brains:
         return float(self._state().get(datetime.date.today().isoformat(), {}).get('usd', 0.0))
 
     def _allowed(self, gid):
-        if self.fallback is None:
+        if self.fallback is None or self.plan_barred(self.fallback, gid):
             return False
         if price(self.fallback.config['model'], {}) is None and getattr(self.fallback, 'remote', False):
             return False                    # an unpriced remote fallback cannot be limited
@@ -86,11 +92,35 @@ class Brains:
         self.down_until = 0.0
         return True
 
+    # ---- OpenCode plans ------------------------------------------------------------------------------------
+
+    def plan_barred(self, model, gid=None):
+        """Whether a free-time turn (of goal gid, or any when None) may not run on this model: an OpenCode plan
+        while free_time.on_plan is off."""
+        if gid is not None and not self.rt.free.is_free(gid):
+            return False
+        kind = (getattr(model, 'config', None) or {}).get('provider_kind')
+        return kind in catalog.OPENCODE and not self.rt.free.cfg.get('on_plan')
+
+    def free_brain(self):
+        """The brain a free-time stretch would run on now: the usual one, or the other when the usual one is a plan it
+        may not use; None when neither may serve it (free time then rests)."""
+        if self.fallback is None:
+            return None if self.plan_barred(self.rt.model) else self.rt.model
+        usual = self.fallback if time.time() < self.down_until else self.primary
+        other = self.primary if usual is self.fallback else self.fallback
+        for m in (usual, other):
+            if not self.plan_barred(m) and (m is self.primary or self.rt.free.spent_today() < float(self.rt.free.cfg['budget_usd'])):
+                return m
+        return None
+
     def choose(self, gid):
         """the model for this goal's next turn"""
         if self.fallback is None:
             return self.rt.model            # one brain: whatever the runtime holds, untouched
         use = 'primary' if self._primary_up() or not self._allowed(gid) else 'fallback'
+        if use == 'primary' and self.plan_barred(self.primary, gid) and self._allowed(gid):
+            use = 'fallback'                # free time off an OpenCode plan, onto the other brain
         if self.last.get(gid) != use:
             if gid in self.last or use == 'fallback':
                 model = (self.primary if use == 'primary' else self.fallback).config.get('model')

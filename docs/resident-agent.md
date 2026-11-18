@@ -311,7 +311,8 @@ makes it a systemd user service with no expiry (the cap guards the spend) that r
 editing or moving a checkout cannot stop it; `relay status` shows each relay and today's spend, `relay uninstall`
 removes one. (`caminus ember relay --provider P --cap-usd N --ttl SECS` runs one in the foreground instead.)
 The Anthropic relay allows the models you name; the DeepInfra relay allows any chat model DeepInfra publishes a price
-for, priced from its own list. The catalog is what the providers report: Anthropic's model list gives each model's
+for, priced from its own list; the OpenCode Go relay allows the plan's chat models that call tools, priced from the
+plan's list, and books what each reply says it charged ([the guide](ember.md#paid-brains)). The catalog is what the providers report: Anthropic's model list gives each model's
 window, output cap, thinking and effort levels; DeepInfra's gives window, prices and whether it takes
 `reasoning_effort`. In the panel, `/model` opens the list (Enter picks) and `/effort LEVEL` sets the depth; a running
 resident takes either at its next turn.

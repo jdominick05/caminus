@@ -170,7 +170,8 @@ class Store:
         for name, decl in (('done_check','TEXT'), ('steer_seq','INTEGER NOT NULL DEFAULT 0'),
                            ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT'),
                            ('kind',"TEXT NOT NULL DEFAULT 'work'"), ('wake_at','REAL'), ('wake_note','TEXT'), ('gate','TEXT'),
-                           ('plan','INTEGER NOT NULL DEFAULT 0'), ('plan_text','TEXT')):
+                           ('plan','INTEGER NOT NULL DEFAULT 0'), ('plan_text','TEXT'),
+                           ('session','TEXT')):   # (session: the conversation's id an OpenCode plan is sent)
             if name not in have:
                 self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
         if 'position' not in have:
@@ -204,7 +205,7 @@ class Store:
     def update(self, gid, **fields):
         allowed = {'state', 'messages', 'summary', 'error', 'steps', 'step_limit', 'deadline',
                    'done_check', 'steer_seq', 'approach_changes', 'ledger', 'wake_at', 'wake_note', 'gate',
-                   'position', 'plan', 'plan_text'}
+                   'position', 'plan', 'plan_text', 'session'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('invalid goal fields')
         if 'messages' in fields:

@@ -36,7 +36,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
 | `env/audit.py` | the owner's audit log (one JSON object per line) |
 | `env/agent_host.py` | builds the zipapp and addresses the resident over SSH (`caminus ember agent ...`) |
-| `env/relay.py` | the spend-capped key relay (anthropic, deepinfra, mistral, meta), its ledger priced by `resident/model.py`'s `row_cost`; `relay install` runs a frozen copy of its code as a user service |
+| `env/relay.py` | the spend-capped key relay (anthropic, deepinfra, mistral, meta, opencode-go), its ledger priced by `resident/model.py`'s `row_cost` (an OpenCode reply's own `usage.cost` where it gives one, the Go allowance kept beside it); `relay install` runs a frozen copy of its code as a user service |
 | `env/jobs.py`, `sessions.py`, `serve.py`, `ctx.py` | detached jobs, tmux sessions, model servers and context budgets in the agent's account |
 | `env/prompt.py`, `share/harness/ember/ROBOTS.md` | the account's instructions (`~/ROBOTS.md`) |
 
@@ -45,7 +45,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `runtime.py` | the loop: ticks, tool dispatch, the per-turn gate, compaction, the watchdog, updates |
 | `store.py` | SQLite: goals, the conversation, actions, the inbox, the event stream the panel reads |
 | `prompt.py` | the system prompt (what the agent is told; keep it true to what `runtime.py` enforces) |
-| `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices (the built-in tables: Anthropic's `PRICES`, Meta's `META_PRICES` with the long-prompt tier of Muse Ember (Meta); Meta lists ids only, so `catalog.META_MODELS` holds its documented windows and levels) |
+| `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices (the built-in tables: Anthropic's `PRICES`, Meta's `META_PRICES` with the long-prompt tier of Muse Ember (Meta); Meta lists ids only, so `catalog.META_MODELS` holds its documented windows and levels; an OpenCode plan's list gives everything, and `catalog.transport` reaches each model through its native API under the plan's root; `brain.Brains.free_brain` keeps free time off a plan unless `free_time.on_plan`) |
 | `advisor.py` | the advisor (a stronger model the agent consults) and the eyes (`Eyes`: one vision call per image a brain without vision reads, its description returned as the read's result); each its own daily ledger |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read (text, and images by their headers: `model.py` sends them) / search / edit / write (search: ripgrep only narrows the files, and only for a plain literal with `rg -F`; the stdlib matches, so both give one result), the web tools, MCP servers |
@@ -78,6 +78,11 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   (and the docs) in the same commit.
 - Agent freedom: guards stop spending without progress; they do not decide what the agent may want. Free time is
   never graded and never paused by a loop guard.
+- An OpenCode plan (`catalog.OPENCODE`) is a client the plan expects: every request carries the conversation's id
+  (`x-opencode-session`: a goal's own, random, kept in its `session` column; a side call gets a fresh one) and
+  `model.USER_AGENT`; the relay refuses a request without the id before it goes upstream; a 4xx from the plan stops
+  the goal, never a retry loop (`runtime`); background work (free time) stays off it unless the owner opts in
+  (`free_time.on_plan`). A new background caller asks `brain.Brains.plan_barred` too.
 - No GPU in any env test; the env suites are CPU only.
 - A speed shown for a local Caminus brain is the engine's own: the reply's `timings` (`model.engine_speed`; the brain is
   Caminus when its `/props` names the engine, `catalog.caminus_props`) and, while a reply streams, `/caminus/status`

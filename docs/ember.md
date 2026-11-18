@@ -32,7 +32,7 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
-- **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra, Mistral, Meta) through a key relay you run.
+- **Any brain.** A local `caminus serve` model, a paid API (Anthropic, DeepInfra, Mistral, Meta) or your OpenCode Go plan, through a key relay you run.
   On a `caminus serve` brain the chat's speeds are the engine's own: "read 1,240 · write 62 tok/s" is how fast it read
   the last reply's prompt and wrote the reply. While a reply streams, the write speed is the engine's live figure, its
   mean over its most recent passes, so it can step when the reply ends.
@@ -95,6 +95,7 @@ only the provider's chat endpoints, allows only priced models, and refuses reque
 | DeepInfra | `~/.config/caminus/deepinfra-key` | `http://127.0.0.1:8766/v1/openai` | `openai` (the default) |
 | Mistral | `~/.config/caminus/mistral-key` (and its price file, `~/.config/caminus/mistral-prices.json`) | `http://127.0.0.1:8767/v1` | `openai` |
 | Meta (the Muse models) | `~/.config/caminus/meta-key` | `http://127.0.0.1:8768/v1` | `openai` |
+| OpenCode Go (your subscription) | `~/.config/caminus/opencode-key` | `http://127.0.0.1:8769/inference/go` (the plan's root) | per model: `openai` or `anthropic` (`/model` picks it) |
 
 Anthropic, step by step (the others follow the same pattern; the quickstart shows DeepInfra):
 
@@ -133,6 +134,30 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   Pick the model with `agent model` (or `/model`); a session from `agent init --model muse-ember-1.0` knows the Muse
   levels too. Past 200K input tokens every Muse Ember (Meta) turn costs three times as much, so it compacts at 85 % of
   that line (about 170K, 16 % of its window) instead of a paid brain's usual 38 % (Compaction, below).
+- **OpenCode Go.** Your Go subscription as the brain: a Console API key from the workspace that has the plan. The
+  relay offers the plan's chat models that call tools, each through its own API (Chat Completions for DeepSeek, GLM,
+  Kimi and the others; Messages for Claude Haiku 5.5, MiniMax M3 and the Qwen3.8 / Qwen4 models; the GPT and Grok
+  models through Chat Completions, which OpenCode translates). Gemini (its own API) and the models whose prompts train
+  a model (the Contributor ones) are left out. Prices, windows and levels come from the plan's own model list.
+
+  ```sh
+  mkdir -p ~/.config/caminus
+  [ -e ~/.config/caminus/opencode-key ] || install -m 600 /dev/null ~/.config/caminus/opencode-key
+  $EDITOR ~/.config/caminus/opencode-key                    # the key alone, on one line
+  caminus ember relay install --provider opencode-go --cap-usd 3
+  caminus ember agent provider NAME add opencode --kind opencode-go --endpoint http://127.0.0.1:8769/inference/go --relay
+  caminus ember agent model NAME deepseek-v4.1-flash
+  ```
+
+  OpenCode watches plan traffic for abuse, so Ember behaves as a client the plan expects: each conversation (a goal)
+  sends one random session id (`x-opencode-session`; the plan refuses requests without one, and so does the relay),
+  every request says it is Ember (`ember/VERSION`), and a refusal from the plan (a usage limit: 429, or any other 4xx)
+  stops the goal with its words instead of retrying. Free time stays off the plan: it runs on your fallback brain when
+  that is not a plan, else rests and says so; `caminus ember agent heartbeat NAME --on-plan yes` lets it use the plan.
+  Each reply says what it cost: $0 inside the Go allowance, dollars from your balance past it (with Extra Usage on).
+  The daily cap counts those dollars; `relay status` shows the allowance used beside them. A reply cut before its cost
+  arrived is booked at the list price times any peak-hour multiplier in force (DeepSeek costs twice as much on weekday
+  peak hours), so an estimate errs high.
 - **Changing a relay.** `relay install` rewrites the service from the options you give it and restarts it (today's
   spend carries over), so give the whole set again: `--cap-usd` is required, and every `--model` you still want.
 - **Several providers.** Install one relay per provider and add each with `agent provider NAME add`; `caminus ember
@@ -225,7 +250,7 @@ key of that file.
 | Compaction, local brain | at 85 % of the window, down to 20 % | old tool output is trimmed first; a summary only if needed | `compact_threshold`, `compact_target_ratio` |
 | Window, local brain | the window the server reports now (`caminus serve`'s mode: 262K native, 1M long) | compaction and the status line measure against it | `context_cap` (a limit under it; `agent init --context N` sets it) |
 | Compaction, paid brain | at 38 % of the window, down to 7.6 %; a model whose price rises past a prompt length (Muse Ember (Meta) past 200K, Claude Haiku 5.5 past 100K) at 85 % of that length when it comes first, down to a fifth of that | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
-| Free time | off | stretches of 30 min with 30 min rests; $0.50 a day on a priced model; 3 questions a day, each waiting 10 min; a dream pass from 03:00 | `caminus ember agent heartbeat NAME on`; `free_time.*` |
+| Free time | off | stretches of 30 min with 30 min rests; $0.50 a day on a priced model; 3 questions a day, each waiting 10 min; a dream pass from 03:00; never on an OpenCode plan unless you allow it | `caminus ember agent heartbeat NAME on`; `--on-plan yes`; `free_time.*` |
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
 | Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
@@ -253,6 +278,7 @@ made before that keeps running at medium until you pick a level.
 | DeepSeek-V4.1-Flash | the provider's | 1.0 / top_p 1.0 | the listed maximum, at most 64K |
 | Muse Ember (Meta), Muse Wonder | max (Meta's default); they have minimal, low, medium, high, xhigh and max, and always reason, so none runs as minimal | none sent (Meta's defaults) | 64K (Muse Ember lists 524K; Muse Wonder lists no maximum, and its reasoning counts inside the limit) |
 | Muse Spark | high (Meta's default); levels as above | none sent | 64K (Meta lists no maximum) |
+| OpenCode Go models | the model's own; each has the levels the plan's list names (DeepSeek V4.1 Flash low, high, max; Qwen3.8 low, medium, xhigh), each level as the nearest; a model that lists none has no effort control | its card's where Ember knows the model, else none | the listed maximum, at most 64K |
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
 A side call (the judge's check of a finish) runs with thinking off where the model can turn it off, else at its lowest
@@ -316,7 +342,7 @@ index, journal or note. Hits from the running goal come last, marked "this goal"
 | Your key for its account | `~/.ssh/caminus_env_key` |
 | Your audit log | `~/.local/state/caminus/env-audit.jsonl` |
 | The setup script | `~/.local/share/caminus/env-setup.sh` |
-| Relay keys | `~/.config/caminus/deepinfra-key`, `~/.config/caminus/mistral-key`, `~/.config/caminus/meta-key`, `~/.config/anthropic/api_key` (mode 600) |
+| Relay keys | `~/.config/caminus/deepinfra-key`, `~/.config/caminus/mistral-key`, `~/.config/caminus/meta-key`, `~/.config/caminus/opencode-key`, `~/.config/anthropic/api_key` (mode 600) |
 | Relay spend | `caminus ember relay status` |
 | The bridge | `/srv/caminus-env-bridge` (`req/`, `res/`, `notes/`, `leases/`, `STOP`) |
 

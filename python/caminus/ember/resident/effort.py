@@ -15,6 +15,8 @@ nearest real one:
   xhigh and max run as high.
 - the Meta Model API's Muse models: minimal, low, medium, high, xhigh, max; they always reason (none is a 400), so
   none runs as minimal.
+- an OpenCode plan's models: the levels the plan's model list names for each (DeepSeek V4.1 Flash low, high, max;
+  Qwen3.8 on Messages low, medium, xhigh), each level as the nearest; a model that lists none has no control.
 
 With no level set, the lab's recommendation for agentic work applies (model cards, 2026-11): the Qwen3.8 line xhigh,
 Qwen3-30B-A3B thinking on, Anthropic medium, Mistral Large 4 / Medium 3.5 high; Meta's own defaults (Muse Ember and
@@ -92,7 +94,9 @@ def line(cfg):
     'anthropic', 'reasoning' (reasoning_effort) or '' (no control)."""
     kind = cfg.get('provider_kind') or ('anthropic' if cfg.get('api') == 'anthropic' else '')
     if kind == 'anthropic' or cfg.get('api') == 'anthropic':
-        return 'anthropic'
+        # (an OpenCode model on Messages: the catalog's list of its levels, which may be none; model.py maps a level
+        #  to the nearest it names)
+        return '' if efforts(cfg) == [] else 'anthropic'
     variants = cfg.get('model_variants') or {}
     if kind == 'local' or variants:
         if 'low' in variants or 'xhigh' in variants:
@@ -171,6 +175,8 @@ def runs_as(cfg, level):
         return {'high': 'xhigh', 'max': 'xhigh'}.get(level, level)
     if ln == 'onoff':
         return 'none' if level == 'none' else 'on'
+    if ln == 'anthropic' and efforts(cfg):
+        return nearest(level, efforts(cfg))     # (an OpenCode model on Messages: the levels its list names)
     if ln == 'reasoning':
         have = efforts(cfg)
         if have is None:

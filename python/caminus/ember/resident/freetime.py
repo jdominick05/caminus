@@ -20,6 +20,10 @@ Configuration, in config.json under "free_time" (all optional):
     messages_per_day   3         questions free time may put to its human in a day
     dream_hour         3         local hour from which the night's dream pass may run (for three hours)
     context_tokens     0         a stretch's own context window; 0 = the resident's full window (owner 11-15)
+    on_plan            false     free time may run on an OpenCode plan (catalog.OPENCODE; `heartbeat --on-plan yes`).
+                                 Off: a stretch runs on the other brain when that is not a plan, else free time rests
+                                 with a note (brain.Brains.free_brain). The plan is for the work its owner asks for, and
+                                 its traffic is watched for abuse.
 
 Free time works in the resident's full context window, and must still not cost its human the conversation they come
 back to. The local server keeps that conversation by snapshot: a short stretch that fits the prompt cache's side slot
@@ -39,9 +43,12 @@ from .model import price
 from .store import atomic_json
 
 DEFAULTS = dict(enabled=False, rest_seconds=1800, stretch_steps=0, stretch_seconds=1800, budget_usd=0.50,
-                afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=0)
+                afk_seconds=600, messages_per_day=3, dream_hour=3, context_tokens=0, on_plan=False)
 KINDS = ('free', 'dream')
-NOW_MARKER = 'free_time_now'   # `heartbeat now` writes it; the next pulse starts a stretch and removes it
+NOW_MARKER = 'free_time_now'
+PLAN_REST = ("free time stays off an OpenCode plan (it is for the work you ask for, and its traffic is watched for "
+             "abuse), and no other brain can take it: resting. To let free time use the plan: "
+             "caminus ember agent heartbeat {name} --on-plan yes")   # `heartbeat now` writes it; the next pulse starts a stretch and removes it
 
 INVITATION = '''Free time. Nobody needs anything from you right now; this time is yours.
 
@@ -62,6 +69,18 @@ Before you stop, add a dated entry to {journal}: what you did, what you noticed,
 DREAM = '''Night: a dream pass. Nothing is asked of you tonight except to consolidate.
 
 Read your journal entries since the last dream ({journal}) and your notes. Merge what you learned into your notes and keep them short, link ideas that belong together, and drop what no longer matters. Then write a short dream entry in {journal}: what the day meant, and what you want to explore next. Start no new projects tonight. The free-time house rules apply. Call finish with one line when you are done.'''
+
+
+def plan_note(config):
+    """PLAN_REST for a resident whose free time has no brain but an OpenCode plan it may not use, by its config (the
+    owner's commands: heartbeat status / now), else ''."""
+    from .catalog import OPENCODE
+    fb = config.get('fallback') if isinstance(config.get('fallback'), dict) else {}
+    if settings(config)['on_plan'] or config.get('provider_kind') not in OPENCODE:
+        return ''                     # (a plan fallback serves only while the primary is down: Brains.free_brain)
+    if fb.get('model') and fb.get('endpoint') and fb.get('provider_kind') not in OPENCODE:
+        return ''                     # the fallback takes free time
+    return PLAN_REST.format(name=config.get('name') or 'NAME')
 
 
 def settings(config):
@@ -149,6 +168,11 @@ class FreeTime:
             for g in free:
                 self._end(g['id'], 'preempted: your human queued work; pick this up from your journal next time')
             return None
+        if free and self.rt.brains.free_brain() is None:
+            # the brain became an OpenCode plan mid-stretch (/model), and free time stays off it
+            for g in free:
+                self._end(g['id'], PLAN_REST.format(name=self.rt.config.get('name') or 'NAME'))
+            return None
         cfg = self.cfg
         # `heartbeat now` (the panel's /freetime): a stretch at the next pass, past the rest interval and even with
         # free time switched off; work still comes first (the request waits for it) and the budget still holds.
@@ -169,6 +193,8 @@ class FreeTime:
         wait = self._failure_wait(state)
         if wait and now < float(state.get('last_start', 0)) + wait:
             return None
+        if self.rt.brains.free_brain() is None:
+            return self._note_once(state, 'plan', PLAN_REST.format(name=self.rt.config.get('name') or 'NAME'))
         if self.rt.brains.next_is_remote():
             if self._price_unknown():
                 return self._note_once(state, 'unpriced', 'free time needs a known price on a remote model')
