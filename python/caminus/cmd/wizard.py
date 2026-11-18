@@ -41,7 +41,7 @@ GROUPS = 'sudo usermod -aG render,video $USER'     # (docs/quickstart.md "What y
 
 
 class Stop(Exception):
-    """the wizard ends here: rc 1, a step failed or was refused"""
+    """the wizard ends here: rc 1 (a step failed or was refused) or 130 (interrupted)"""
 
     def __init__(self, rc, text):
         super().__init__(text)
@@ -302,6 +302,8 @@ class Wizard:
             raise Stop(1, f'not enough disk: {need / 1e9:.1f} GB + 1 GiB needed, {free / 1e9:.1f} GB free. Free some space, or '
                           'set model_dir to a bigger disk (docs/configuration.md), then run caminus wizard again')
         rc = self.run(['pull', m.name, '--dry-run'], read_only=True) if self.dry else self.run(['pull', m.name])
+        if rc == 130:                           # (caminus pull catches Ctrl+C itself and returns 130: an interruption)
+            raise Stop(130, 'interrupted: run caminus wizard again to resume the download (it skips what is done)')
         if rc != 0:
             raise Stop(1, 'the download did not finish: the lines above say why (after a dropped connection, run caminus '
                           'wizard again: the download resumes)')
@@ -400,7 +402,7 @@ class Wizard:
                 self.skip(6, 'Qwen Code is not set up')
         except Stop as e:
             self.say()
-            self.say(str(e), 'bad' if e.rc else None)
+            self.say(str(e), 'warn' if e.rc == 130 else 'bad' if e.rc else None)
             return e.rc
         except KeyboardInterrupt:
             self.say()

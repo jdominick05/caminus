@@ -145,6 +145,10 @@ def main():
     check(not bad and all(s['start'] in s['runs'] for s in models.SETUPS)
           and all(set(s['cards']) <= {'XTX', 'XT'} for s in models.SETUPS),
           f'SETUPS: catalog names, two-card forms the registry has, the start model among what runs ({bad})')
+    pkg = os.path.join(PY, 'caminus')
+    copies = [os.path.relpath(os.path.join(d, f), pkg) for d, _, fs in os.walk(pkg) for f in fs if f.endswith('.py')
+              and f != 'models.py' and '22 * 1024' in open(os.path.join(d, f), encoding='utf-8').read()]
+    check(not copies, f'the 24 GB card rule lives in models.CLASS_MIB only (doctor and arch.Coder read card_class) ({copies})')
     cls = lambda *mib: models.setup_of([dict(total_mib=x) for x in mib])
     check(cls(24560)['start'] == 'swift-1.5' and cls(20464)['start'] == 'thinkingcap' and cls(24560, 20464)['start'] == 'coder'
           and cls(20464, 20464)['row'] == 'Two XT' and cls(49136)['row'] == 'One XTX' and cls(24560, 16368)['row'] == 'One XTX'
@@ -208,14 +212,29 @@ def main():
     class Interrupt(Runs):
         def __call__(self, argv):
             super().__call__(argv)
-            if argv[0] == 'pull':
+            if argv[0] == 'start':
                 raise KeyboardInterrupt
             return 0
-    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-pull'), [XTX, XT])
+    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-start'), [XTX, XT])
     wizard.run_cmd, out = Interrupt(), io.StringIO()
     code = wizard.Wizard(yes=True, out=out).main()
-    check(code == 130 and ['start', 'coder'] not in wizard.run_cmd.calls and 'interrupted' in out.getvalue(),
-          'Ctrl+C during a command (the download): exit 130, nothing after it runs')
+    check(code == 130 and not any(c[0] == 'qwen-code' for c in wizard.run_cmd.calls) and 'interrupted' in out.getvalue(),
+          'Ctrl+C during a command that lets it through (the start\'s wait): exit 130, nothing after it runs')
+
+    # Ctrl+C during the download, the real path: caminus pull (through caminus.__main__.main) catches it and returns 130
+    class RealPull(Runs):
+        def __call__(self, argv):
+            return real_run_cmd(argv) if argv[0] == 'pull' else super().__call__(argv)
+
+    def ctrl_c(*a, **k):
+        raise KeyboardInterrupt
+    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-pull'), [XTX, XT])
+    download.fetch, wizard.run_cmd, out = ctrl_c, RealPull(), io.StringIO()
+    code = wizard.Wizard(yes=True, out=out).main()
+    download.fetch = refuse('a download')
+    check(code == 130 and ['start', 'coder'] not in wizard.run_cmd.calls and 'resume the download' in out.getvalue()
+          and 'did not finish' not in out.getvalue(),
+          'Ctrl+C during the download (caminus pull returns 130): exit 130, "interrupted", not a failed download')
     code, calls, out = go([XTX, XT], 'pull-fail', dry=False, rc={'pull': 1})
     check(code == 1 and ['start', 'coder'] not in calls and 'the download did not finish' in out and 'Done' not in out,
           'a caminus pull that fails: the wizard stops before the start')
