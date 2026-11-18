@@ -5070,8 +5070,8 @@ for line in sys.stdin:
         lists `listing`; POST answers from a queue of (reply, usage), usage None for a reply cut before its usage. Chat
         Completions: a message dict as one JSON body, or a list of deltas as SSE with the usage on the finish chunk
         when include_usage asks. Messages: a list of blocks as an event stream, the usage on message_delta. Usage
-        carries cost and opencode as the gateway's does. No x-opencode-session: 400 MissingSessionID, as the gateway
-        answers. Every reply has an x-opencode-log-id. Returns (port, queue, seen, stop)."""
+        carries cost and opencode as the gateway's does (a Messages reply names usage's _model in place of the requested
+        one, when given). No x-opencode-session: 400 MissingSessionID, as the gateway answers. Every reply has an x-opencode-log-id. Returns (port, queue, seen, stop)."""
         import http.server, threading
         queue,seen=deque(),[]
         class OC(http.server.BaseHTTPRequestHandler):
@@ -5096,9 +5096,10 @@ for line in sys.stdin:
                     return s.send(200,dict(id='m0',type='message',role='assistant',model=body['model'],content=reply,
                                            stop_reason=stop,usage=usage))
                 if s.path.endswith('/messages'):
+                    usage=dict(usage) if usage is not None else None;named=(usage or {}).pop('_model',body['model'])
                     s.head(200,'text/event-stream');s.end_headers()
                     ev=lambda e:s.wfile.write(('event: %s\ndata: %s\n\n' % (e['type'],json.dumps(e))).encode())
-                    ev(dict(type='message_start',message=dict(id='m1',type='message',role='assistant',model=body['model'],content=[],
+                    ev(dict(type='message_start',message=dict(id='m1',type='message',role='assistant',model=named,content=[],
                                                               usage=dict(input_tokens=(usage or {}).get('input_tokens',0),output_tokens=1))))
                     for i,b in enumerate(reply):
                         if b['type']=='text':
@@ -5781,6 +5782,8 @@ for line in sys.stdin:
             self.assertIn('linker flags',got['advice']);self.assertEqual(got['calls_left'],1)
             url,headers,body=wire.requests[0]
             self.assertTrue(url.endswith('/v1/messages'));self.assertEqual(body['model'],'claude-opus-5-5')
+            h={k.lower():v for k,v in headers.items()}
+            self.assertNotIn('x-opencode-session',h);self.assertNotIn('ember/',h.get('user-agent',''),'no plan: no plan headers')
             self.assertNotIn('thinking',body,'Opus 5.5 refuses thinking off: the advisor leaves it adaptive')
             self.assertNotIn('tools',body,'the advisor cannot run anything')
             self.assertIn('make exits 0',json.dumps(body),'the brief carries the done check')
@@ -5887,6 +5890,7 @@ for line in sys.stdin:
                     urllib.error.HTTPError(req.full_url,402,'Payment Required',{},__import__('io').BytesIO(capped.encode())))
                 with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'What now?')
                 self.assertEqual((c.exception.kind,c.exception.fix),('relay_cap',''))
+                self.assertIn('relay install --provider anthropic --cap-usd',str(c.exception))
                 self.assertEqual(rt.advisor.calls(gid),0)
                 # an outage the provider answered is still an ordinary failure, counted as before
                 rt.advisor_opener=Wire((529,'{"type":"error","error":{"type":"overloaded_error"}}'))
@@ -5913,6 +5917,128 @@ for line in sys.stdin:
             self.assertIn('does not allow claude-opus-5-5',text)
             self.assertIn('caminus ember relay install --provider anthropic --cap-usd 3.0 --model claude-haiku-5-5 --model claude-opus-5-5',text)
         finally:stop()
+
+    def test_an_advisor_on_an_opencode_go_plan(self):
+        """The advisor on a Messages-native model of the owner's OpenCode Go plan (`agent advisor --kind opencode-go`):
+        set up from the plan's model list (its Messages address from the SDK-style root, its list price, which lets the
+        gate meter a model the built-in table lacks, its levels; a Chat Completions or unlisted model refused), each call
+        a session of its own sent as Ember, booked against the advisor's budget at no less than its list price. Free time
+        stays off the plan unless the owner allows it. Without the kind the plan refuses the call, and the relay's
+        refusals name the fix and cost no call."""
+        import copy
+        import caminus
+        from caminus.ember import relay
+        from caminus.ember.resident import model as M
+        from caminus.ember.resident.advisor import AdvisorUnavailable
+        port,queue,seen,stop_oc=self._fake_opencode(self.OPENCODE_GO)
+        root='http://127.0.0.1:%d/inference/go' % port
+        try:
+            # a list price that is not a finite amount of at least 0 is never kept: the spend meter would go NaN or negative
+            nan=copy.deepcopy(self.OPENCODE_GO)
+            next(r for r in nan['data'] if r['id']=='minimax-m3')['cost']['text']['input']['price']=float('nan')
+            port2,_,_,stop2=self._fake_opencode(nan)
+            try:self.assertIn('not a finite amount',self.cmd('advisor',['--model','minimax-m3','--endpoint',
+                              'http://127.0.0.1:%d/inference/go' % port2,'--kind','opencode-go'],code=1)['error'])
+            finally:stop2()
+            M.remember_prices('negative-rate',dict(input=-1,output=1,cache_read=0))
+            M.remember_prices('nan-rate',dict(input=float('nan'),output=1))
+            self.assertIsNone(M.price('negative-rate',{}));self.assertIsNone(M.price('nan-rate',{}))
+            for bad,why in (('deepseek-v4.1-flash','Messages API'),('gemini-4-argon','does not offer')):
+                self.assertIn(why,self.cmd('advisor',['--model',bad,'--endpoint',root+'/anthropic','--kind','opencode-go'],code=1)['error'])
+            out=self.cmd('advisor',['--model','qwen3.8-flash','--endpoint',root+'/anthropic','--kind','opencode-go'])['advisor']
+            self.assertEqual((out['kind'],out['relay'],out['endpoint'],out['efforts']),
+                             ('opencode-go',True,root+'/anthropic/v1',['low','medium','xhigh']))
+            self.assertEqual(out['prices']['input'],0.15)
+            # later commands keep it (its price from the config, in a fresh process), and the printed fix restores it
+            self.assertEqual(self.cmd('advisor',['--budget-usd','0.5'])['advisor']['kind'],'opencode-go')
+            self.cmd('advisor',['--kind','anthropic'],code=1)          # (qwen3.8-flash has no Anthropic price)
+            self.assertEqual(self.cmd('advisor',['--kind','opencode-go'])['advisor'],dict(out,budget_usd=0.5))
+            M.CATALOG_PRICES.pop('qwen3.8-flash',None)    # (the gate's price must come from the advisor's config)
+            charged=dict(input_tokens=300,output_tokens=40,cost=0.0012,opencode=dict(billing_source='balance'))
+            queue.extend([([dict(type='text',text='Check the linker flags.')],charged),
+                          ([dict(type='text',text='Then rerun make.')],charged)])
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Make the build pass.')
+                got=rt.advisor.ask(gid,'Undefined sqrt at link time?')
+                self.assertIn('linker flags',got['advice']);self.assertEqual(got['usd'],0.0012,'the reply\'s own charge')
+                rt.advisor.ask(gid,'And then?')
+                p1,p2=[x for x in seen if x['method']=='POST'][:2]
+                self.assertEqual(p1['path'],'/inference/go/anthropic/v1/messages')
+                self.assertEqual((p1['ua'],p1['version']),('ember/'+caminus.__version__,'2023-06-01'))
+                self.assertTrue(p1['session'] and p2['session']);self.assertNotEqual(p1['session'],p2['session'],'a side call: its own session')
+                self.assertIn(p1['body']['output_config']['effort'],out['efforts'])
+                opus=dict(rt.advisor.cfg,model='claude-opus-5-5')     # (in FALLBACK_MODELS: a plain advisor asks for it)
+                self.assertIsNone(rt.advisor._model(opus,4096,'medium').config['fallbacks'],"a plan is not sent Anthropic's fallback")
+                self.assertEqual(rt.advisor._model({k:v for k,v in opus.items() if k!='kind'},4096,'medium').config['fallbacks'],'default')
+                queue.append(([dict(type='text',text='DONE')],charged))   # the harness's own call (the loop judge)
+                self.assertEqual(rt.advisor.raw(gid,[dict(role='user',content='Done?')],600)[0],'DONE')
+                self.assertTrue(seen[-1]['session']);self.assertNotIn(seen[-1]['session'],(p1['session'],p2['session']))
+                # the advisor's budget counts a plan call at no less than its list price: $0 inside the Go allowance, a
+                # $0 it cannot trust (off the allowance) and a reply without usage.cost each book the list price
+                listed=M.price('qwen3.8-flash',dict(input_tokens=300,output_tokens=40))
+                self.assertGreater(listed,0)
+                booking=rt.store.enqueue('Booking.');before=rt.advisor.spent_today()
+                for usage in (dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='go')),
+                              dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='balance')),
+                              dict(input_tokens=300,output_tokens=40),
+                              # a reply naming another model: still the requested one's list price, never the
+                              # highest-known rates price() gives an unknown serving model
+                              dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='go'),
+                                   _model='qwen3.8-flash-20261101')):
+                    queue.append(([dict(type='text',text='Advice.')],usage))
+                    self.assertEqual(rt.advisor.ask(booking,'Booked?')['usd'],round(listed,5),usage)
+                self.assertAlmostEqual(rt.advisor.spent_today()-before,4*listed,places=5)
+                # free time stays off the plan unless the owner allows it (brain.plan_allows, free_choice's rule): refused
+                # before anything is counted or sent; free_time.on_plan lets it through
+                free=rt.store.enqueue('A stretch.',kind='free')
+                posts=len([x for x in seen if x['method']=='POST'])
+                with self.assertRaises(ValueError) as c:rt.advisor.ask(free,'Plan?')
+                self.assertIn('caminus ember agent heartbeat',str(c.exception));self.assertIn('--on-plan yes',str(c.exception))
+                with self.assertRaises(ValueError):rt.advisor.raw(free,[dict(role='user',content='Done?')],600)
+                self.assertEqual((len([x for x in seen if x['method']=='POST']),rt.advisor.calls(free)),(posts,0))
+                conf=json.loads((self.home/'config.json').read_text());conf['free_time']=dict(on_plan=True)
+                (self.home/'config.json').write_text(json.dumps(conf))
+                queue.append(([dict(type='text',text='Allowed.')],charged))
+                self.assertEqual(rt.advisor.ask(free,'Plan?')['advice'],'Allowed.')
+                # the same plan without the kind: no session, refused, and named as a setup fix (no call counted)
+                self.assertEqual(self.cmd('advisor',['--model','claude-haiku-5-5','--kind','anthropic'])['advisor']['endpoint'],
+                                 'http://127.0.0.1:8765/v1',"off the plan: the Anthropic relay, not the plan's address")
+                self.cmd('advisor',['--endpoint',root+'/anthropic/v1'])     # (an owner who points a plain advisor at the plan)
+                rt.config['advisor']=json.loads((self.home/'config.json').read_text())['advisor']
+                self.assertNotIn('kind',rt.config['advisor']);self.assertNotIn('prices',rt.config['advisor'])
+                with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'Again?')
+                self.assertEqual(c.exception.kind,'opencode_session');self.assertTrue(c.exception.fix.endswith('--kind opencode-go'))
+                self.assertIsNone(seen[-1]['session']);self.assertNotIn('ember/',seen[-1]['ua'] or '')
+                self.assertEqual(rt.advisor.calls(gid),2,'the refused call was not counted')
+                # the real relay's refusals, before anything goes upstream
+                test=self
+                class Up:
+                    def __init__(s,*a,**k):test.fail('a refused advisor call must never reach opencode')
+                handler=relay.make_handler('opencode-go','FAKE-OC-KEY',relay.Ledger(self.home/'oc-ledger.json',5.0),set(),
+                                           65536,lambda *_:None,relay.ListPrices(lambda *_:None,lambda:self.OPENCODE_GO,
+                                                                                 relay.opencode_rates),Up)
+                srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+                threading.Thread(target=srv.serve_forever,daemon=True).start()
+                rroot='http://127.0.0.1:%d/inference/go' % srv.server_address[1]
+                try:
+                    for adv,kind in ((dict(model='claude-haiku-5-5',endpoint=rroot+'/anthropic/v1'),'opencode_session'),
+                                     (dict(model='claude-haiku-5-5',endpoint=rroot+'/anthropic'),'relay_path'),
+                                     (dict(model='gemini-4-argon',endpoint=rroot,kind='opencode-go',relay=True,
+                                           prices=dict(input=2,output=10,cache_read=0.1)),'opencode_model')):
+                        rt.config['advisor']=adv
+                        M.remember_prices(adv['model'],adv.get('prices'))
+                        with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'Relay?')
+                        self.assertEqual(c.exception.kind,kind,str(c.exception))
+                    self.assertIn('does not offer gemini-4-argon',str(c.exception))
+                    rt.advisor_opener=Wire((402,'{"type":"error","error":{"type":"billing_error","message":"relay: daily cap $5.00 reached"}}'))
+                    with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'Cap?')
+                    self.assertEqual(c.exception.kind,'relay_cap');self.assertIn('--provider opencode-go --cap-usd',str(c.exception))
+                    self.assertNotIn('--model',str(c.exception))
+                    self.assertEqual(rt.advisor.calls(gid),2)
+                finally:srv.shutdown()
+            finally:rt.mail.close();rt.store.close()
+        finally:stop_oc()
 
     def test_a_running_resident_follows_an_advisor_set_up_after_it_started(self):
         # the daemon read config.json once: an advisor added with `agent advisor` while it ran stayed "not configured"
@@ -5985,6 +6111,9 @@ for line in sys.stdin:
                                                   endpoint='https://api.anthropic.com'))
             got=json.loads(agent_host.advisor_setup(['advise','resident','g1','--json'],json.dumps(nokey)))
             self.assertEqual(got['unavailable']['fix'],'caminus ember agent advisor resident --endpoint http://127.0.0.1:8765/v1')
+            nosession=dict(nokey,unavailable=dict(nokey['unavailable'],kind='opencode_session',endpoint='http://127.0.0.1:8769/inference/go'))
+            got=json.loads(agent_host.advisor_setup(['advise','resident','g1','--json'],json.dumps(nosession)))
+            self.assertEqual(got['unavailable']['fix'],'caminus ember agent advisor resident --kind opencode-go')
             ok=dict(advisor=dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:8765/v1'))
             self.assertNotIn('warning',json.loads(agent_host.advisor_setup(['advisor','resident','--json'],json.dumps(ok))))
             # relay status names what the relay allows, so the owner can see an advisor's model is missing

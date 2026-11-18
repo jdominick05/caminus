@@ -73,9 +73,6 @@ Ember has been tested on one machine, Ubuntu with systemd. What you can run into
 - **A new session offers only what it inherits.** Its `/model` lists the local Caminus server it runs on and the
   providers of the session it was opened from. Any other provider needs `caminus ember agent provider NAME add ...`
   ([Paid brains](#paid-brains)).
-- **The advisor needs an Anthropic relay.** It speaks only the Anthropic Messages API ([Paid brains](#paid-brains),
-  the advisor). It cannot use an OpenCode Go plan yet: its calls do not carry the session id the plan requires. A fix is
-  planned.
 - **Relays run frozen code.** A paid brain goes through a key relay with a daily dollar cap. Each relay runs the copy of
   its code taken at `relay install`, so after you upgrade Caminus, run `caminus ember relay install` again for each
   relay, with its whole set of options (Changing a relay, in [Paid brains](#paid-brains)).
@@ -206,7 +203,7 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
 - **Spend.** `caminus ember relay status` shows each relay's spend today against its cap. The chat's status line shows
   the agent's own running cost.
 - **The advisor.** An agent can ask a stronger model for advice (`caminus ember agent advisor NAME --model
-  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Anthropic API). It goes
+  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Messages API). It goes
   through the same relay, so allow its model there too, with the cap restated:
   `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
   Its own daily budget is counted by the agent, inside the relay's cap. `agent advisor` warns when the relay it names
@@ -219,6 +216,19 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   the agent's replies are; Ctrl+Y shows its source), and says why when the call fails (a spent budget, no calls left)
   until Esc closes it (while the agent works, the first Esc stops the agent, as always). `/advisor` waits while a
   `/btw` answer is on its way.
+  On an OpenCode Go plan, the advisor can be one of the plan's Messages-native models (`caminus ember agent models
+  NAME --refresh` lists each with its `protocol`; a Chat Completions one is refused), through the plan's relay:
+
+  ```sh
+  caminus ember agent advisor NAME --model claude-haiku-5-5 \
+    --endpoint http://127.0.0.1:8769/inference/go/anthropic --kind opencode-go
+  ```
+
+  The command reads the plan's model list through the relay (it must be running) for the model's list price and
+  levels. Each advice call is a conversation of its own to the plan (its own session id), and counts against the
+  advisor's `--budget-usd` at no less than the model's list price: inside the Go allowance the plan bills nothing, and
+  your daily limit still holds. Free time stays off the plan here too unless you allow it (`heartbeat NAME --on-plan
+  yes`). `--kind anthropic` goes back to the Anthropic relay (`http://127.0.0.1:8765/v1` unless `--endpoint` names one).
 - **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
   when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
   With the image go the agent's question (read's `question` argument, else "describe what matters in this image for
@@ -229,7 +239,8 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   `caminus ember agent eyes NAME --auto` (ministral-8b-latest on a Mistral relay provider, else Claude Haiku 5.5 on an
   Anthropic one) or a model of your choice, `--provider mistral --model ministral-14b-latest`. `--off` turns them off
   again, and `--budget-usd` sets their daily budget ($0.25 by default, counted by the agent like the advisor's and
-  inside the relay's cap). The candidates, with the prices the relays are set up with (USD per million tokens,
+  inside the relay's cap; eyes on an OpenCode plan provider count at no less than the model's list price, as a plan
+  advisor does). The candidates, with the prices the relays are set up with (USD per million tokens,
   input / output):
 
   | Model | Relay | Price | An 860x480 terminal screenshot | On four images (terminal, chart, form, diagram) |

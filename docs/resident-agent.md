@@ -339,7 +339,9 @@ the window) in the resident's config to change it; the local server keeps `compa
 
 `caminus ember agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
 agent an `advisor` tool on a model the owner picks, through the owner's own key
-relay, with a daily dollar cap and calls per goal. `caminus ember agent fallback NAME
+relay, with a daily dollar cap and calls per goal (`--kind opencode-go`: a
+Messages-native model of an OpenCode Go plan; docs/ember.md, "The advisor").
+`caminus ember agent fallback NAME
 --model ... --endpoint ...` adds a second brain used only while the local server is
 down, with its own daily allowance. Every failed or refused remote call is recorded
 in the resident's `failures.jsonl`.

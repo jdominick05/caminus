@@ -30,6 +30,12 @@ from .store import atomic_json
 DEFAULTS = dict(budget_usd=1.0, down_seconds=60)
 
 
+def plan_allows(cfg, on_plan):
+    """Whether background work (free time) may call cfg's model: never an OpenCode plan unless free_time.on_plan. The
+    plan half of free_choice; a side call made for a free-time goal (the advisor's) asks it too."""
+    return cfg.get('provider_kind') not in catalog.OPENCODE or bool(on_plan)
+
+
 def free_choice(primary, fallback, on_plan, free_left, primary_down=False):
     """The one rule for the brain a free-time turn may use: 'primary', 'fallback' or None. The daemon (Brains) and the
     owner's status (freetime.plan_note) both ask it. primary / fallback: the brains' configs (None: no such brain);
@@ -37,7 +43,7 @@ def free_choice(primary, fallback, on_plan, free_left, primary_down=False):
     the fallback also needs a known price when it bills, and the allowance. The primary comes first unless it is down
     (then it is still named when the fallback may not serve: the turn waits for it)."""
     def ok(cfg, fallback_side):
-        if cfg is None or (cfg.get('provider_kind') in catalog.OPENCODE and not on_plan):
+        if cfg is None or not plan_allows(cfg, on_plan):
             return False
         if not fallback_side:
             return True

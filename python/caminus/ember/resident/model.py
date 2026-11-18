@@ -140,14 +140,24 @@ def flat_row(inp, out, read):
     return ((inp, out, read, inp),) * 2 + (10**9,)
 
 
+def valid_prices(prices):
+    """Whether every rate in a catalog price dict (and its `long` tier) is a finite number of at least 0: a NaN or
+    negative rate would make the spend meter NaN (then no limit holds) or book negative spend."""
+    def ok(p):
+        return all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+                   for k, v in p.items() if k in ('input', 'output', 'cache_read', 'cache_write') and v is not None)
+    return isinstance(prices, dict) and ok(prices) and (not isinstance(prices.get('long'), dict) or ok(prices['long']))
+
+
 def remember_prices(model, prices):
     """prices: {input, output, cache_read, cache_write?} in USD per million tokens, as the catalog stores them, with a
-    long-context tier under `long` ({above, input, output, ...}: an OpenCode model's) where the provider lists one."""
+    long-context tier under `long` ({above, input, output, ...}: an OpenCode model's) where the provider lists one.
+    Prices that are not valid_prices are not kept: the model stays unpriced, and the spend gates refuse it."""
     def rates(p):
         inp = float(p['input'])
         return (inp, float(p['output']), float(p['cache_read']) if p.get('cache_read') is not None else inp,
                 float(p['cache_write']) if p.get('cache_write') is not None else inp)
-    if model and prices and prices.get('input') is not None and prices.get('output') is not None:
+    if model and prices and prices.get('input') is not None and prices.get('output') is not None and valid_prices(prices):
         low, long = rates(prices), prices.get('long')
         try:
             CATALOG_PRICES[model] = (low, rates(long), int(long['above'])) if isinstance(long, dict) else (low, low, 10**9)
