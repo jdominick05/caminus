@@ -23,12 +23,15 @@ package main
 //
 // Click or drag: the press only arms. Moving two or more cells away while the button is down makes it a drag; a
 // release without that, or back on the cell it was pressed on, is a click (a shaky hand still clicks), and the click
-// acts on release where it was pressed: it opens a folded card, picks a card in the session picker, presses the jump
-// pill, or clears the selection shown.
+// acts on release where it was pressed: it opens or folds the one card under it (cardToggles), picks a card in the
+// session picker, presses the jump pill, or clears the selection shown.
 
 import (
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -268,7 +271,8 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 }
 
 // clickAt is a click (a press and a release without a drag) where s was pressed: a card in the session picker
-// switches to it, the jump pill goes to the newest message, a folded card opens; anywhere else it only clears.
+// switches to it, the jump pill goes to the newest message, a folded card opens and an open one folds (that card
+// only: Ctrl+O opens them all); anywhere else it only clears.
 func (m emberModel) clickAt(s chatSelection) (emberModel, tea.Cmd) {
 	x, y := s.at[0], s.at[1]
 	if m.chat.picker {
@@ -286,8 +290,8 @@ func (m emberModel) clickAt(s chatSelection) (emberModel, tea.Cmd) {
 		m.chat.live.hold = false
 		return m, nil
 	}
-	if !s.screen && m.foldedAt(s.a[0]) && !(m.chat.cards && m.chat.expanded) {
-		return m.toggleLayout(), nil // a click on a folded card opens it (clicking did nothing; Ctrl+O did)
+	if seq, ok := m.chat.cardAtLine(s.a[0]); ok && !s.screen && m.cardToggles(seq) {
+		return m.toggleCard(seq), nil // (it opened every card, as Ctrl+O does)
 	}
 	return m, nil
 }
@@ -343,13 +347,80 @@ func copyToClipboard(text string) tea.Cmd {
 	}
 }
 
-// foldedAt: the transcript line at row shows something folded (a card's fold mark, "… N more lines", "earlier lines").
-func (m emberModel) foldedAt(row int) bool {
-	lines := strings.Split(m.chat.transcript.GetContent(), "\n")
-	if row < 0 || row >= len(lines) {
+// cardSpan is where one event's block sits in the drawn history: bytes [from, to) of content.
+type cardSpan struct{ from, to, seq int }
+
+// addBlock appends an event's block to the drawn history and notes where it sits (a click finds its card by that).
+func (c *residentChat) addBlock(seq int, block string) {
+	c.spans = append(c.spans, cardSpan{len(c.content), len(c.content) + len(block), seq})
+	c.content += block + "\n\n"
+}
+
+// cardAtLine is the event whose block the transcript's content line i is part of; false for a line between blocks,
+// the work line under them or the reply being written.
+func (c *residentChat) cardAtLine(i int) (int, bool) {
+	at := 0 // line i's first byte
+	if i < 0 {
+		return 0, false
+	}
+	for ; i > 0 && at < len(c.content); i-- {
+		next := strings.IndexByte(c.content[at:], '\n')
+		if next < 0 {
+			return 0, false
+		}
+		at += next + 1
+	}
+	if at >= len(c.content) {
+		return 0, false
+	}
+	k := sort.Search(len(c.spans), func(k int) bool { return c.spans[k].to > at })
+	if k < len(c.spans) && c.spans[k].from <= at {
+		return c.spans[k].seq, true
+	}
+	return 0, false
+}
+
+// cardToggles: a click on the event's block opens or folds it. Only in the compact view (Ctrl+O shows every card
+// in full already), only an open card or one that opening changes (a card with lines left out, a long diff, a
+// command of several lines): a click on the agent's words or a short card does nothing.
+func (m emberModel) cardToggles(seq int) bool {
+	c := &m.chat
+	if c.cards || c.expanded {
 		return false
 	}
-	l := strings.TrimSpace(ansi.Strip(lines[row]))
-	return (g.collapsed != "" && strings.HasPrefix(l, g.collapsed+" ")) || strings.HasSuffix(l, " …") ||
-		strings.Contains(l, "more lines") || strings.Contains(l, "earlier lines")
+	if c.opened[seq] {
+		return true
+	}
+	i := slices.IndexFunc(m.residentEvents, func(e residentEvent) bool { return e.Seq == seq })
+	if i < 0 {
+		return false
+	}
+	e, w := m.residentEvents[i], max(20, c.renderWidth)
+	folded := c.compactBlock(e, w)
+	c.opened = maps.Clone(c.opened) // (a trial: the model's map stays as it was)
+	if c.opened == nil {
+		c.opened = map[int]bool{}
+	}
+	c.opened[seq] = true
+	return c.compactBlock(e, w) != folded
+}
+
+// toggleCard opens or folds one card, and keeps it where it is on the screen: the history above it is unchanged, so
+// the same scroll offset puts it under the pointer again.
+func (m emberModel) toggleCard(seq int) emberModel {
+	opened := maps.Clone(m.chat.opened)
+	if opened == nil {
+		opened = map[int]bool{}
+	}
+	if opened[seq] {
+		delete(opened, seq)
+	} else {
+		opened[seq] = true
+	}
+	m.chat.opened = opened
+	top := m.chat.transcript.YOffset()
+	m.chat.content, m.chat.rendered = "", 0
+	m.syncChat()
+	m.chat.transcript.SetYOffset(top)
+	return m
 }

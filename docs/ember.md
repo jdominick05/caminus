@@ -162,9 +162,9 @@ another one (`relay install ... --port 8775`, and the agent's `--endpoint` to ma
 
 ## The mouse: clicks and copying
 
-The chat (`caminus ember ui`) takes the mouse: the wheel scrolls the history, and a click opens a folded card, picks a
-card in the session picker (Shift+Tab) or presses the jump-to-newest pill. Taking the mouse turns the terminal's own
-selection off, so the chat selects text itself:
+The chat (`caminus ember ui`) takes the mouse: the wheel scrolls the history, and a click opens a folded card (only
+that one, in place: Ctrl+O opens them all) or folds it again, picks a card in the session picker (Shift+Tab) or presses
+the jump-to-newest pill. Taking the mouse turns the terminal's own selection off, so the chat selects text itself:
 
 - **Drag to copy.** Drag over any text on the screen: the conversation and its cards (folded or open), the side pane
   (tasks, now), the header, the composer, the status line, the session picker and every dialog. Releasing the

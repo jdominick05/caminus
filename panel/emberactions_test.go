@@ -16,7 +16,7 @@ import (
 func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 	home, cwd := "/srv/agent/homes/resident", "/srv/agent/homes/resident/work"
 	card := func(name string, args, result map[string]any) string {
-		return ansi.Strip(actionCard(name, args, result, 160, home, cwd))
+		return ansi.Strip(actionCard(name, args, result, 160, home, cwd, false))
 	}
 	cases := []struct {
 		name         string

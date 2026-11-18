@@ -94,7 +94,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 		return false // its words are drawn (without the calls: compactAssistant)
 	case "tool_result":
 		name := str("name")
-		if name == "ask_user" || name == "finish" {
+		if !grouped(e) {
 			return false
 		}
 		result, _ := e.Data["result"].(map[string]any)
@@ -116,6 +116,31 @@ func (c *residentChat) fold(e residentEvent) bool {
 		return true
 	}
 	return false
+}
+
+// grouped: the event is tool work fold takes into the group (a result other than a question or the finish, a gate
+// run); the compact view draws a block for it only when it is an action card (compactBlock).
+func grouped(e residentEvent) bool {
+	name, _ := e.Data["name"].(string)
+	return e.Kind == "gate" || (e.Kind == "tool_result" && name != "ask_user" && name != "finish")
+}
+
+// compactBlock is what the compact view draws for an event ("" for none): the agent's words without their calls,
+// a card per action (60 calls, 60 cards: emberactions.go), every other event as its block. syncChat draws with it,
+// and a click compares it folded and open (cardToggles).
+func (c *residentChat) compactBlock(e residentEvent, w int) string {
+	if e.Kind == "assistant" {
+		return ansi.Wrap(c.eventBlock(compactAssistant(e)), w, "") // (at words: Hardwrap broke them mid-word)
+	}
+	if e.Kind == "tool_result" {
+		if block := c.actionBlock(e, w); block != "" {
+			return block
+		}
+	}
+	if grouped(e) {
+		return ""
+	}
+	return ansi.Wrap(c.eventBlock(e), w, "")
 }
 
 // compactAssistant is an assistant event with only its words: the thinking line and the call cards go to the group.

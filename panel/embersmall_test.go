@@ -42,21 +42,6 @@ func TestShellCommandsGoIntoTheHistory(t *testing.T) {
 	}
 }
 
-func TestAClickOnAFoldedCardOpensIt(t *testing.T) {
-	m := chatFixture(t)
-	m.width, m.height = 100, 30
-	m.chat.cards, m.chat.expanded = false, false
-	m.chat.transcript.SetContent("a reply\n  " + g.collapsed + " terminal make test …\nmore")
-	if !m.foldedAt(1) || m.foldedAt(0) {
-		t.Fatal("the folded line is found, a plain one is not")
-	}
-	m.chat.sel = chatSelection{dragging: true, a: [2]int{1, 3}, b: [2]int{1, 3}}
-	next, _, _ := m.selectMouse(tea.MouseReleaseMsg{Button: tea.MouseLeft})
-	if !next.chat.expanded {
-		t.Fatal("a click on it opens everything, as Ctrl+O does")
-	}
-}
-
 func TestThePickerRestylesWithoutRedrawingTheHistory(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 100, 30

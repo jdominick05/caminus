@@ -73,6 +73,8 @@ type residentChat struct {
 	rootSel                                 string        // the root request the decision keys act on (shared card)
 	group                                   toolGroup     // compact view: the tool work since the last drawn block
 	cards                                   bool          // Ctrl+O: every tool card instead of the compact line
+	opened                                  map[int]bool  // the cards a click opened in the compact view, by event Seq
+	spans                                   []cardSpan    // where each event's block sits in content (a click finds its card)
 	sel                                     chatSelection // select to copy (emberselect.go)
 	view                                    textView      // /btw's answer, /diff
 	rewind                                  rewindState   // the /rewind step picker
@@ -494,37 +496,30 @@ func (m *emberModel) syncChat() {
 	if m.chat.rendered == 0 {
 		m.chat.group = toolGroup{}   // drawing from the start (a resize, Ctrl+O): the group starts over too
 		m.chat.sel = chatSelection{} // and the lines a selection pointed at are gone
+		m.chat.spans = nil
 	}
 	for _, e := range m.residentEvents[m.chat.rendered:] {
 		// Compact (the default): a card per action between the agent's words; Ctrl+O draws everything.
 		if !m.chat.cards && !m.chat.expanded {
+			block := m.chat.compactBlock(e, w)
+			if e.Kind != "assistant" {
+				m.chat.fold(e) // first: a finished command's "running:" line must not be fixed above its card
+			}
+			if block != "" {
+				m.chat.flushGroup(w)
+				m.chat.addBlock(e.Seq, block)
+			}
 			if e.Kind == "assistant" {
-				// its words first (they close the line above them), then its calls start the next line
-				if block := m.chat.eventBlock(compactAssistant(e)); block != "" {
-					m.chat.flushGroup(w)
-					m.chat.content += ansi.Wrap(block, w, "") + "\n\n" // (at words: Hardwrap broke them mid-word)
-				}
-				m.chat.fold(e)
-				continue
+				m.chat.fold(e) // after its words (they close the line above them): its calls start the next line
 			}
-			if e.Kind == "tool_result" {
-				// every action is its own card (60 calls, 60 cards: emberactions.go)
-				if block := m.chat.actionBlock(e, w); block != "" {
-					m.chat.fold(e) // first: a finished command's "running:" line must not be fixed above its card
-					m.chat.flushGroup(w)
-					m.chat.content += block + "\n\n"
-					continue
-				}
-			}
-			if m.chat.fold(e) {
-				continue
-			}
-		} else if e.Kind == "assistant" {
+			continue
+		}
+		if e.Kind == "assistant" {
 			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
 		if block := m.chat.eventBlock(e); block != "" {
 			m.chat.flushGroup(w)
-			m.chat.content += ansi.Wrap(block, w, "") + "\n\n"
+			m.chat.addBlock(e.Seq, ansi.Wrap(block, w, ""))
 		}
 	}
 	m.chat.rendered = len(m.residentEvents)
@@ -1226,11 +1221,12 @@ func fenced(text, language string) string {
 }
 
 // eventBlock draws one durable event in the shell's style (shell.go): the human's words and the agent's replies as
-// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+O expands them all), root
-// requests as the inline approval card. The result is final: syncChat caches it and never draws it again.
+// labelled turns on a thin rule, every tool call and its result as a one-line card (Ctrl+O expands them all, a click
+// one), root requests as the inline approval card. syncChat caches it and draws it again only from the start.
 func (c *residentChat) eventBlock(e residentEvent) string {
 	str := func(key string) string { s, _ := e.Data[key].(string); return s }
 	w := max(20, c.renderWidth)
+	open := c.expanded || c.opened[e.Seq] // its cards open in full: every card (Ctrl+O) or this one (a click)
 	turn := func(mark, label string, col color.Color, body string) string {
 		if !c.cards && !c.expanded { // compact: the label, then the text indented, without the rule
 			lines := strings.Split(strings.Trim(body, "\n"), "\n")
@@ -1252,8 +1248,8 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 	}
 	lines := func(s string, limit int) []string {
 		all := strings.Split(strings.TrimRight(strings.ReplaceAll(residentText(s), "\r\n", "\n"), "\n"), "\n")
-		if c.full {
-			limit = max(limit, 5000) // Ctrl+O: the whole output, bounded so one card cannot stall the screen
+		if c.full || open {
+			limit = max(limit, 5000) // open: the whole output, bounded so one card cannot stall the screen
 		}
 		if len(all) > limit {
 			all = append([]string{fmt.Sprintf("… %d earlier lines (Ctrl+O shows all)", len(all)-limit)}, all[len(all)-limit:]...)
@@ -1265,7 +1261,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		label := "you · goal " + shortGoal(e.Goal)
 		if k, _ := e.Data["kind"].(string); k == "free" || k == "dream" {
 			label = "free time · " + k // the resident's own hours: the invitation, not the human's words
-			return toolCard(k, "stretch "+shortGoal(e.Goal)+" started", "", true, c.expanded, lines(str("prompt"), 30), w)
+			return toolCard(k, "stretch "+shortGoal(e.Goal)+" started", "", true, open, lines(str("prompt"), 30), w)
 		}
 		return turn(g.user, label, cBlue, c.renderMarkdown(str("prompt")))
 	case "user_message", "peer_message":
@@ -1288,7 +1284,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		// The reply's reasoning is shown once, above the answer, from the durable event: it is never
 		// sent back to the model, so this block is display only.
 		if text := str("reasoning"); text != "" {
-			if c.expanded {
+			if open {
 				parts = append(parts, eventCard(emberThink.Render(g.expanded+" thinking")+"\n"+emberThink.Render(c.renderMarkdown(text))))
 			} else {
 				parts = append(parts, emberDim.Render(g.collapsed+" thinking · "+plural(strings.Count(text, "\n")+1, "line", "lines")))
@@ -1317,7 +1313,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				if name == "ask_root" {
 					label = "asks for root"
 				}
-				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				parts = append(parts, toolCard(label, firstLine(command), "", true, open, lines(command, 40), w))
 				continue
 			}
 			summary := ""
@@ -1331,7 +1327,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			if len(args) > 0 {
 				body = keyLines(args, 40) // key: value lines, not a JSON dump
 			}
-			parts = append(parts, toolCard(residentText(name), summary, "", true, c.expanded, body, w))
+			parts = append(parts, toolCard(residentText(name), summary, "", true, open, body, w))
 		}
 		return strings.Join(parts, "\n")
 	case "tool_result":
@@ -1360,7 +1356,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			// line numbers, tinted added / removed plates, the code highlighted for its language (emberdiff.go)
-			return editCard(name, residentText(shortPath(path, c.home, c.cwd)), meta, c.expanded || c.full || changed <= 12, diff, w)
+			return editCard(name, residentText(shortPath(path, c.home, c.cwd)), meta, open || c.full || changed <= 12, diff, w)
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
@@ -1369,12 +1365,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if str("name") == "search" && result["error"] == nil {
 			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
 			text, _ := result["text"].(string)
-			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
-		}
-		if str("name") == "search" && result["error"] == nil {
-			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
-			text, _ := result["text"].(string)
-			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
+			return toolCard("search", subject, meta, true, open, lines(text, 40), w)
 		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
@@ -1409,7 +1400,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			code, _ := result["exit_code"].(float64)
-			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
+			return toolCard("output", residentText(str("name")), meta, code == 0, open, lines(output, 30), w)
 		}
 		if str("name") == "finish" {
 			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
@@ -1419,12 +1410,12 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				verdict = "no judge"
 			}
 			var more []string
-			if open, _ := result["open"].(string); strings.TrimSpace(open) != "" {
-				more = append(more, "left open: "+residentText(open))
+			if left, _ := result["open"].(string); strings.TrimSpace(left) != "" {
+				more = append(more, "left open: "+residentText(left))
 			}
-			return toolCard("finish", "judge: "+verdict, "", true, c.expanded, more, w)
+			return toolCard("finish", "judge: "+verdict, "", true, open, more, w)
 		}
-		return toolCard("result", residentText(str("name")), "", true, c.expanded, keyLines(result, 30), w)
+		return toolCard("result", residentText(str("name")), "", true, open, keyLines(result, 30), w)
 	case "finished":
 		return turn(g.done, "finished", cGreen, c.renderMarkdown(str("summary")))
 	case "approval_requested":
@@ -3094,10 +3085,11 @@ func (m emberModel) chatFoot(w int) string {
 }
 
 // toggleLayout switches the two layouts: compact (a card per action with short previews, replies in full) and
-// everything (every call, result and gate as a card, in full, with the thinking).
+// everything (every call, result and gate as a card, in full, with the thinking). The cards a click opened fold
+// again: back in compact, every card is compact.
 func (m emberModel) toggleLayout() emberModel {
 	all := !(m.chat.cards && m.chat.expanded)
-	m.chat.cards, m.chat.expanded, m.chat.full = all, all, all
+	m.chat.cards, m.chat.expanded, m.chat.full, m.chat.opened = all, all, all, nil
 	m.msg = map[bool]string{true: "everything · Ctrl+O back to compact", false: "compact · Ctrl+O shows everything"}[all]
 	// keep the place: at the bottom stays at the bottom; scrolled up keeps the same share of the history
 	atBottom := m.chat.transcript.AtBottom()

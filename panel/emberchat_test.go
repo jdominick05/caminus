@@ -1973,28 +1973,104 @@ func TestASelectionShowsOnlyWhereItsTextIs(t *testing.T) {
 	}
 }
 
-func TestAClickStillActsAndOnlyADragSelects(t *testing.T) {
-	m := shotEmber(t, shotWidth, shotHeight)
-	m.chat.cards, m.chat.expanded = true, false // the cards view folds the agent's thinking to one line
-	m.chat.rendered, m.chat.content = 0, ""
-	m.syncChat()
-	m.chat.transcript.GotoTop()
-	y := -1
-	for i, row := range strings.Split(ansi.Strip(m.render()), "\n") {
-		if y < 0 && strings.Contains(row, "thinking · 1 line") {
-			y = i
+// twoFoldedCards is the shot's session with its second test run finished: two terminal cards that each show only
+// their last 3 output lines.
+func twoFoldedCards(t *testing.T, h int) emberModel {
+	m := shotEmber(t, shotWidth, h)
+	m.chat.live = residentLive{}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 19, Goal: "g1",
+		Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c5", "result": map[string]any{
+			"session": "s2", "exit_code": 0.0, "output": "....\nall four pass\n\nRan 4 tests in 0.002s\n\nOK\n"}}}}})
+	m.chat.transcript.GotoBottom()
+	return m
+}
+
+// screenRow is the screen row (and the column) where s first shows; -1 when it is not on the screen.
+func screenRow(m emberModel, s string) (int, int) {
+	for y, row := range strings.Split(ansi.Strip(m.render()), "\n") {
+		if i := strings.Index(row, s); i >= 0 {
+			return y, ansi.StringWidth(row[:i])
 		}
 	}
-	if top := lipgloss.Height(m.chatHead(shotWidth)); y < 0 || !m.foldedAt(y-top+m.chat.transcript.YOffset()) {
-		t.Fatal("fixture: the thinking is folded")
+	return -1, 0
+}
+
+func click(m emberModel, x, y int) (emberModel, tea.Cmd) {
+	next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	return next.(emberModel), cmd
+}
+
+func TestAClickOpensOnlyTheCardUnderIt(t *testing.T) {
+	for _, place := range []string{"at the bottom", "scrolled up"} {
+		t.Run(place, func(t *testing.T) {
+			m := twoFoldedCards(t, 30) // (short: the history is taller than its window)
+			if place == "scrolled up" {
+				m.chat.transcript.GotoTop()
+			}
+			head := "exit 1 · 7 lines" // the first run's card; its first 4 output lines are folded away
+			y, x := screenRow(m, head)
+			tr := m.chat.transcript
+			if y < 0 || !strings.Contains(ansi.Strip(m.chat.content), "exit 0 · 6 lines") || tr.TotalLineCount() <= tr.Height() ||
+				tr.AtBottom() != (place == "at the bottom") {
+				t.Fatalf("fixture: both cards, a history taller than its window, the card on the screen:\n%s", ansi.Strip(m.render()))
+			}
+			for _, hidden := range []string{"FAIL: test_total", "all four pass"} {
+				if strings.Contains(ansi.Strip(m.chat.content), hidden) {
+					t.Fatalf("fixture: %q is folded away", hidden)
+				}
+			}
+			before := ansi.Strip(m.render())
+			m, cmd := click(m, x, y)
+			screen := ansi.Strip(m.render())
+			if !strings.Contains(screen, "FAIL: test_total") || m.chat.expanded || m.chat.cards || cmd != nil {
+				t.Fatalf("a click opens the card under it, in the compact view:\n%s", screen)
+			}
+			if strings.Contains(m.chat.content, "all four pass") || len(m.chat.opened) != 1 {
+				t.Fatalf("only that card opens, not the second (opened %v)", m.chat.opened)
+			}
+			if y2, _ := screenRow(m, head); y2 != y {
+				t.Fatalf("the card stays under the pointer: row %d, was %d", y2, y)
+			}
+			t.Logf("before the click:\n%s\nafter it:\n%s", before, screen)
+			m, _ = click(m, x, y)
+			if strings.Contains(ansi.Strip(m.render()), "FAIL: test_total") || len(m.chat.opened) != 0 {
+				t.Fatal("a second click on it folds it again")
+			}
+			m, _ = click(m, x, y)
+			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+			m = next.(emberModel)
+			if !m.chat.expanded || !strings.Contains(m.chat.content, "FAIL: test_total") || !strings.Contains(m.chat.content, "all four pass") {
+				t.Fatal("Ctrl+O still opens every card")
+			}
+			next, _ = m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+			if m = next.(emberModel); m.chat.expanded || strings.Contains(m.chat.content, "FAIL: test_total") {
+				t.Fatal("Ctrl+O back to compact folds every card, the one a click opened too")
+			}
+		})
 	}
-	next, _ := m.Update(tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
-	next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: 4, Y: y, Button: tea.MouseLeft})
-	if m := next.(emberModel); !m.chat.expanded || cmd != nil || strings.Contains(m.msg, "copied") {
-		t.Fatal("a press and a release on one cell is a click: it opens the folded card and copies nothing")
+}
+
+func TestAClickOnWordsOrAShortCardDoesNothing(t *testing.T) {
+	m := twoFoldedCards(t, shotHeight)
+	m.chat.transcript.GotoTop()
+	for _, s := range []string{"total_value starts", "inventory.py  ·  lines 14-18", "define_done"} {
+		y, x := screenRow(m, s)
+		if y < 0 {
+			t.Fatalf("fixture: %q shows", s)
+		}
+		before := m.chat.content
+		next, _ := click(m, x, y)
+		if next.chat.content != before || len(next.chat.opened) != 0 {
+			t.Fatalf("a click on %q changed the history", s)
+		}
 	}
-	m, got := dragOver(t, m, "thinking · 1", "1 line")
-	if m.chat.expanded || got != "thinking · 1 line" {
+}
+
+func TestADragOverAFoldedCardSelectsWithoutOpeningIt(t *testing.T) {
+	m := twoFoldedCards(t, shotHeight)
+	m, got := dragOver(t, m, "● terminal  $ python3 -m unittest -q  ·  exit 1", "FAILED (failures=1)")
+	if len(m.chat.opened) != 0 || m.chat.expanded || !strings.HasSuffix(got, "FAILED (failures=1)") {
 		t.Fatalf("a drag over the folded card selects (%q); it does not open it", got)
 	}
 }
@@ -2009,24 +2085,15 @@ func TestAShakyClickStillClicks(t *testing.T) {
 		{"away and back where it began", [][2]int{{4, 0}, {0, 0}}},
 	} {
 		t.Run(path.name, func(t *testing.T) {
-			m := shotEmber(t, shotWidth, shotHeight)
-			m.chat.cards, m.chat.expanded = true, false
-			m.chat.rendered, m.chat.content = 0, ""
-			m.syncChat()
-			m.chat.transcript.GotoTop()
-			x, y := 4, -1
-			for i, row := range strings.Split(ansi.Strip(m.render()), "\n") {
-				if y < 0 && strings.Contains(row, "thinking · 1 line") {
-					y = i
-				}
-			}
+			m := twoFoldedCards(t, shotHeight)
+			y, x := screenRow(m, "exit 1 · 7 lines")
 			next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			for _, d := range path.moves {
 				next, _ = next.(emberModel).Update(tea.MouseMotionMsg{X: x + d[0], Y: y + d[1], Button: tea.MouseLeft})
 			}
 			last := path.moves[len(path.moves)-1]
 			next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: x + last[0], Y: y + last[1], Button: tea.MouseLeft})
-			if m := next.(emberModel); !m.chat.expanded || cmd != nil || strings.Contains(m.msg, "copied") {
+			if m := next.(emberModel); len(m.chat.opened) != 1 || cmd != nil || strings.Contains(m.msg, "copied") {
 				t.Fatal("a press, a move of less than 2 cells (or back to the press) and a release is a click: the card opens, nothing is copied")
 			}
 		})
