@@ -1725,6 +1725,68 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
             self.assertIn('EMBER RUNTIME',rt.system()['content'])
         finally:rt.mail.close();rt.store.close()
 
+    def stamp_step(self,rt,gid,name='terminal',args=None):
+        """one model call and its result, as the runtime stores them; returns the stored tool message"""
+        rt.store.model_reply(gid,call(name,args or dict(command='ls')))
+        rt.store.action_result(rt.store.actions(gid)[-1],dict(output='ok'))
+        return rt.store.goal(gid)['messages'][-1]
+
+    def test_the_time_stamp_follows_its_rule(self):
+        """store.Store.stamp: first message, the wait tool, a result after a wait state, one 10 minutes after the last
+        stamp, the goal restated after a compaction; not a result a few minutes after the last stamp"""
+        import re
+        from caminus.ember.resident.store import STAMP_EVERY_S
+        stamped=lambda m:bool(re.search(r'\n\[time: [A-Z][a-z]{2} \d{4}-\d\d-\d\d \d\d:\d\d [^\]]+\]$',m['content']))
+        t=[1_800_000_000.0]
+        with unittest.mock.patch('time.time',lambda:t[0]):
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Make x.')
+                g=rt.store.goal(gid)
+                self.assertTrue(stamped(g['messages'][0]),'the first message');self.assertEqual(g['prompt'],'Make x.')
+                t[0]+=60;self.assertFalse(stamped(self.stamp_step(rt,gid)),'a minute later: no stamp')
+                t[0]+=STAMP_EVERY_S-120;self.assertFalse(stamped(self.stamp_step(rt,gid)),'still inside ten minutes')
+                t[0]+=60;tool=self.stamp_step(rt,gid);self.assertTrue(stamped(tool),'ten minutes after the last stamp')
+                self.assertEqual(json.loads(tool['content'].rsplit('\n',1)[0]),dict(output='ok'),'after the result JSON')
+                self.assertNotIn('time',json.dumps(rt.store.events(limit=10**6)[-1]['data']),'the panel event keeps the result')
+                t[0]+=5;self.assertTrue(stamped(self.stamp_step(rt,gid,'wait',dict(until='time',target=1))),'the wait tool')
+                t[0]+=5;self.assertFalse(stamped(self.stamp_step(rt,gid)))
+                for state in ('paused','waiting_user','waiting_model','error'):
+                    rt.store.update(gid,state=state);rt.store.update(gid,state='working');t[0]+=5
+                    self.assertTrue(stamped(self.stamp_step(rt,gid)),'the first result after '+state)
+                restated=rt._restate_goal(gid,rt.store.goal(gid)['messages'])[-1]
+                self.assertTrue(stamped(restated),'the goal restated after a compaction')
+                self.assertEqual(restated['content'].count('[time:'),1,'the restated goal is the prompt, not its old stamp')
+                rt.store.stamped.clear()   # (a restart: a new process)
+                self.assertTrue(stamped(self.stamp_step(rt,gid)),'the first result after a restart')
+            finally:rt.mail.close();rt.store.close()
+
+    def test_the_time_stamp_keeps_the_cached_prefix(self):
+        """a stamp is written once into the newest message: a later request's history starts with the earlier request's,
+        byte for byte, on the OpenAI and Anthropic wires; the system prompt and the tools never carry a time"""
+        from caminus.ember.resident.model import Model
+        t=[1_800_000_000.0]
+        with unittest.mock.patch('time.time',lambda:t[0]):
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Make x.')
+                fixed=json.dumps([rt.system(),rt.tools])
+                anth=Model(dict(model='claude-haiku-5-5',endpoint='http://127.0.0.1:9/v1',api='anthropic',context=200000))
+                requests=[]
+                for gap in (0,601,601,30):
+                    t[0]+=gap;self.stamp_step(rt,gid)
+                    history=[rt.system(),*rt.store.goal(gid)['messages']]
+                    requests.append((json.dumps(rt.model._wire(history)),
+                                     anth._to_anthropic([*history,rt.context_message(gid)],rt.tools)['messages']))
+                    self.assertEqual(json.dumps([rt.system(),rt.tools]),fixed,'no time in the system prompt or the tools')
+                for (a,an),(b,bn) in zip(requests,requests[1:]):
+                    self.assertTrue(b.startswith(a[:-1]),'the OpenAI request grows at its end only')
+                    strip=lambda ms:json.loads(json.dumps(ms).replace(', "cache_control": {"type": "ephemeral"}',''))
+                    self.assertEqual(strip(bn[:len(an)-1]),strip(an[:-1]),'the Anthropic history before the newest turn')
+                self.assertEqual(sum('\n[time: ' in m['content'] for m in rt.store.goal(gid)['messages']),3,
+                                 'the first message, then twice after ten minutes')
+            finally:rt.mail.close();rt.store.close()
+
     def test_three_refused_finishes_start_an_advising_round_instead_of_a_pause(self):
         from caminus.ember.resident import judge
         rt=Runtime(self.home)
@@ -2392,6 +2454,7 @@ for line in sys.stdin:
         self.assertEqual(len(steers),1,'the steer must reach the model exactly once')
         self.assertTrue(steers[0].startswith('[steer #') and 'supersedes earlier instructions where they conflict' in steers[0],
                         f'a steer must carry the latest-wins rule, got {steers[0]!r}')
+        self.assertRegex(steers[0],r'\n\[time: [^\]]+\]$','the human\'s message carries the time (Store.stamp)')
         rejected=self.cmd('send',['--goal-id',first['id'],'--stdin'],stdin='Too late.',code=1)
         self.assertIn('goal finished',rejected['error'])
 
@@ -2796,7 +2859,7 @@ for line in sys.stdin:
                         rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'New human direction.','steer'))
                         summary='Earlier result.'
                     else:
-                        self.observed=any((m.get('content') or '').endswith('New human direction.') and m.get('content','').startswith('[steer #') for m in messages)
+                        self.observed=any('New human direction.\n[time: ' in (m.get('content') or '') and m.get('content','').startswith('[steer #') for m in messages)
                         summary='Followed the new direction.'
                     return call('finish',dict(summary=summary)) if finish_tool else dict(role='assistant',content=summary)
             model=Model();rt=Runtime(self.home,model=model)
@@ -2834,7 +2897,7 @@ for line in sys.stdin:
         # The model fixture must observe completion, not assume worker startup
         # takes less than one second on a busy CI runner.
         def after_terminal(body):
-            result=json.loads(newest_history(body)['content'])
+            result=json.loads(newest_history(body)['content'].split('\n[time: ')[0])   # (a time stamp may follow)
             if result.get('running'):
                 (self.home/'release').write_text('go')
                 Endpoint.queues[self.key].appendleft(after_terminal)

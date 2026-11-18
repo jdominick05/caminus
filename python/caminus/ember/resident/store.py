@@ -9,6 +9,16 @@ import time
 import uuid
 from .memory import history_text
 
+STAMP_EVERY_S = 600     # tool results get a time stamp at most this often while the agent works on (Store.stamp)
+# Time passes in these states: the next message a goal stores after one of them carries the time (Store.stamp).
+WAITING = {'paused', 'waiting_user', 'waiting_root', 'waiting_plan', 'waiting_model', 'error'}
+
+
+def time_line(now):
+    """the time stamp's words: local time with weekday and zone, minute resolution, e.g. [time: Wed 2026-11-18 00:41 EST]
+    (Qwen Code's context note, share/harness/qwen-code/context_note.py, writes the same)"""
+    return time.strftime('[time: %a %Y-%m-%d %H:%M %Z]', time.localtime(now))
+
 
 def agent_home(name, home=None):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name):
@@ -106,6 +116,29 @@ class Store:
             UNIQUE(goal,command));
         ''')
         self._migrate()
+        self.stamped = {}    # goal id -> when this process last wrote the time into its conversation (stamp)
+
+    def stamp(self, gid, content, always=False):
+        """content with the time stamp (time_line) as its last line when the goal's conversation should learn the
+        time now, else content as it is. The one rule for when the agent is told the time:
+
+        - always (the caller says so): a goal's first message (_enqueue), its human's messages and the notes that
+          arrive with them (a nudge, a steer, an answer, a scheduled wake-up: the runtime's inbox), the goal restated
+          after a compaction, and the result of the wait tool;
+        - a tool result: the first one this process stores for the goal (a new goal, a restart), the first after the
+          goal was in a WAITING state (paused and resumed, parked on its human, root, a plan approval or the model) or
+          after a compaction trimmed its history, and otherwise one once STAMP_EVERY_S passed since the last stamp.
+
+        Written once, into the newest message as it is stored, and never at send time: every later request replays
+        the same bytes, so the prompt cache (Caminus serve's prefix cache, a provider's) keeps the whole history. A
+        stamp made at send time would change the message on every request; in the system prompt or the tools it would
+        void the cache from the first token. About a dozen tokens each."""
+        now = time.time()
+        last = self.stamped.get(gid)
+        if not (always or last is None or now - last >= STAMP_EVERY_S):
+            return content
+        self.stamped[gid] = now
+        return (content or '') + '\n' + time_line(now)
 
     def close(self):
         self.db.close()
@@ -150,7 +183,7 @@ class Store:
         # plan: 0 no, 1 unapproved plan mode, 2 plan approved (planning.py).
         self.db.execute('INSERT INTO goals(id,prompt,state,messages,step_limit,deadline,created,updated,kind,position,plan) '
                         'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-            (gid, prompt, 'queued', json.dumps([dict(role='user', content=prompt)]), max_steps,
+            (gid, prompt, 'queued', json.dumps([dict(role='user', content=self.stamp(gid, prompt, always=True))]), max_steps,
              now + max_seconds if max_seconds else None, now, now, kind, position, plan))
         self.event('goal_queued', dict(prompt=prompt, kind=kind) if kind != 'work' else dict(prompt=prompt), gid)
         return gid
@@ -207,6 +240,8 @@ class Store:
                    'position', 'plan', 'plan_text'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('invalid goal fields')
+        if fields.get('state') in WAITING:
+            self.stamped.pop(gid, None)     # time passes while it waits: its next message carries the time (stamp)
         if 'messages' in fields:
             fields['messages'] = json.dumps(fields['messages'], ensure_ascii=False)
         fields['updated'] = time.time()
@@ -472,7 +507,9 @@ class Store:
                 # only fail, and a missing row must never take the goal down.
                 return
             self.db.execute("UPDATE actions SET state='done',result=? WHERE id=?", (json.dumps(result), action['id']))
-            msg = dict(role='tool', tool_call_id=action['call_id'], content=json.dumps(result, ensure_ascii=False))
+            # the time goes into the stored message only: the action row and the event (the panel) keep the result
+            msg = dict(role='tool', tool_call_id=action['call_id'],
+                       content=self.stamp(g['id'], json.dumps(result, ensure_ascii=False), always=action.get('name') == 'wait'))
             from .files import image_ref
             if (ref := image_ref(action.get('name'), result)):
                 msg['image'] = ref    # an image read: the transport sends the file (model.py); the store keeps no bytes
