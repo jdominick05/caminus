@@ -76,21 +76,16 @@ instead of Qwen's official Q4_K_M.
 - **What changes:** the answers come closer to the unquantized model's. Measured against the BF16 model, the mean KL
   divergence is about a third of the official file's (0.0185 against 0.064 on prose, 0.028 against 0.090 on code;
   [how it was measured](dev/qwen3-30b-a3b.md#which-file)). It is the same model with the same weight formats and
-  nearly the same size, so the speed should stay the same.
-- **What stays:** the context, the sampling defaults, the long-context mode, the 8-bit KV cache and two-card serving.
-- **How to switch:** both files have the same name and go to the same place, so remove the old file first. Otherwise
-  `caminus pull` reports it and stops, `caminus start qwen3-30b-a3b` doesn't find the model, and a server started on
-  the old file by path runs without this model's sampling defaults. In the model directory (by default
-  `~/.local/share/caminus/models`):
-
-  ```bash
-  caminus stop qwen3-30b-a3b        # if it is running
-  rm ~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf      # or move it somewhere else to keep it
-  rm -f ~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf.sha256
-  caminus pull qwen3-30b-a3b        # 18.6 GB; checks the size and the sha256
-  ```
-
-  Conversations the server saved with the old file are not restored with the new one; they are read again.
+  nearly the same size, and it decodes at the same speed (measured through the server against the official file, one
+  card and two).
+- **What stays:** the prompts (the server keeps the official file's chat template for this model, whichever file it
+  serves), the context, the sampling defaults, the long-context mode, the 8-bit KV cache and two-card serving.
+- **How to switch:** `caminus pull qwen3-30b-a3b`. The new file goes to its own folder,
+  `Qwen3-30B-A3B-GGUF-unsloth/` in the model directory (by default `~/.local/share/caminus/models`), so the old file
+  can stay where it is; from then on `caminus start qwen3-30b-a3b` uses the new one. The old file, in
+  `Qwen3-30B-A3B-GGUF/`, is no longer used and can be deleted (with its `.sha256` file beside it, if there is one).
+  Until the new file is downloaded, `caminus start qwen3-30b-a3b` asks you to pull it.
+- Conversations the server saved with the old file are not restored with the new one; they are read again.
 
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
 --cards 2`). Each card holds half of every layer, so the model writes about 1.5 times as fast and the full 262,144-token

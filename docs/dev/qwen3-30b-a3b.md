@@ -29,11 +29,18 @@ which every number on this page was measured on unless it says otherwise.
 
   unsloth's published file gives that Q4_K_M's p99 KL divergence and top-1 agreement exactly. The
   [follow-up studies](#follow-up-studies-the-experts-weight-format) found the same thing for the experts alone.
-- **The chat template differs.** The server renders the file's own template. Through Caminus's request normalization
-  the two give the same prompt for system prompts, tools, tool calls and results, multi-step tool chains and reasoning
-  in earlier turns, with thinking on and off. There are two edge cases. An earlier assistant turn whose reasoning is
-  only whitespace gets no empty think block. A user message that holds a `<tool_response>` block, but doesn't start
-  and end with one, counts as the user's question; the official template took it for a tool result.
+- **The official chat template stays.** unsloth's file carries its own edit of the template. Through Caminus's request
+  normalization the two give the same prompt for system prompts, tools, tool calls and results, multi-step tool chains
+  and reasoning in earlier turns, with thinking on and off, but not in two edge cases: an earlier assistant turn whose
+  reasoning is only whitespace (unsloth's drops the empty think block) and a user message that holds a
+  `<tool_response>` block without starting and ending with one (unsloth's takes it for the user's question, the
+  official one for a tool result). So only the weights change: the catalog serves this model with the official
+  file's template (`caminus.models.CHAT_TEMPLATES`, the file `python/caminus/share/templates/qwen3-30b-a3b.jinja`, the
+  official text unchanged below a comment header), applied when the server reads the vocabulary
+  (`caminus.serve.vocab.load_gguf_vocab`). `tests/test_model_sampling.py` checks the copy against the official text's
+  sha256 and that a catalog file gets it whatever template its header carries.
+- **Its own folder.** The new file's local path is `Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf` (`Item.local`):
+  the repository name and the file name are the official file's, so without it the two would share a path.
 - Switching an existing install: [models](../models.md#switching-from-the-official-qwen3-30b-a3b-file).
 
 ## Results
@@ -440,7 +447,7 @@ guard ([gpu-safety](gpu-safety.md)).
 
 ```bash
 caminus pull qwen3-30b-a3b
-M=~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf
+M=~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf
 ./build.sh
 
 python -I tests/test_own_code.py --model $M                       # the own-code checks (CPU)

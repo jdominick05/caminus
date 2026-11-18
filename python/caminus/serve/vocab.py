@@ -34,7 +34,17 @@ def _field_str(f, i):
 
 
 def load_gguf_vocab(path):
-    """the tokenizer fields of a GGUF: Caminus's own reader (caminus.ggufio) first, gguf-py for a file it cannot read"""
+    """the tokenizer fields of a GGUF: Caminus's own reader (caminus.ggufio) first, gguf-py for a file it cannot read. A
+    catalog model with a chat template of its own (caminus.models.chat_template_of) gets that template instead of the file's"""
+    from .. import models
+    v = _load_gguf_vocab_own(path)
+    tpl = models.chat_template_of(path)
+    if tpl is not None:
+        v.chat_template = tpl
+    return v
+
+
+def _load_gguf_vocab_own(path):
     from .. import ggufio
     try:
         F = ggufio.GGUFFile(path)

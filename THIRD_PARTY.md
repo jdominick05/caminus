@@ -2,7 +2,7 @@
 
 Caminus is Copyright (C) 2026 jdominick05, licensed under the GNU Affero General Public License v3.0 or later
 ([LICENSE](LICENSE)). It includes, builds against or derives from the third-party code below: MIT-licensed (llama.cpp / ggml,
-Strata, flash-linear-attention, rocKE) and Apache-2.0-licensed (Hugging Face transformers; the license text is in
+Strata, flash-linear-attention, rocKE) and Apache-2.0-licensed (Hugging Face transformers, Qwen3-30B-A3B's chat template; the license text is in
 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)). Their terms require keeping these notices with the code. Model weights are
 not part of this repository and stay under their own licenses (the last section).
 
@@ -208,6 +208,30 @@ https://github.com/huggingface/transformers. Apache-2.0 is compatible with the A
 
 ```
 Copyright 2024 The HuggingFace Team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+## Qwen3-30B-A3B chat template (Apache-2.0)
+
+`python/caminus/share/templates/qwen3-30b-a3b.jinja` is the chat template (`tokenizer.chat_template`) of Qwen's official
+GGUF, https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF at revision e4d4bafdfb96a411a163846265362aceb0b9c63a, copied
+unchanged below a comment header that names its source, its sha256 and its licence. The server renders it for the
+catalog's Qwen3-30B-A3B file (`caminus.models.CHAT_TEMPLATES`). Apache-2.0; the license text is in
+[LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt).
+
+```
+Copyright 2025 Alibaba Cloud
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

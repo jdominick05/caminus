@@ -2,7 +2,8 @@
 
 Nothing here is redistributed: the files are downloaded from their public Hugging Face repositories at the pinned revisions.
 The local layout under the model directory (caminus.config.model_dir) is `<repository name>/<path in the repository>`, so the
-Coder's two shards share a directory (the loader finds shard 2 from shard 1's name).
+Coder's two shards share a directory (the loader finds shard 2 from shard 1's name). An item whose repository name would
+put it where another catalog file of the same name lived names its own directory (Item.local).
 
 Sources of the numbers (2026-11-06):
   * the Coder's shards: the revision and the LFS sha256 Hugging Face served when this machine downloaded them (the
@@ -18,7 +19,8 @@ from collections import namedtuple
 
 from . import arch as _arch
 
-Item = namedtuple('Item', 'key role repo revision path size sha256 source')
+# local: the item's directory under the model directory, when not its repository's name (None: the repository's name)
+Item = namedtuple('Item', 'key role repo revision path size sha256 source local', defaults=(None,))
 
 ITEMS = (
     Item('coder-1', 'coder', 'ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF', 'bba88856f8c3c0c9e40e45f82d05e228b814ac43',
@@ -48,12 +50,14 @@ ITEMS = (
 # Qwen3-30B-A3B (11-18): unsloth's Q4_K_M, made with an importance matrix (Apache-2.0, not gated): the same tensors in the
 # same formats as Qwen's official Q4_K_M (Q4_K + Q6_K, tensor for tensor), about a third of its distance to BF16
 # (docs/dev/qwen3-30b-a3b.md, "Which file"). Revision, size and LFS sha256 from Hugging Face's API (paths-info at the
-# pinned revision) on 2026-11-18 (the local file's sha256 computed and equal). Its local path is the official file's
-# (`<repository name>/<path>`), so the old file has to go first: docs/models.md, "Switching from the official file".
+# pinned revision) on 2026-11-18 (the local file's sha256 computed and equal). Its own local directory: the repository's
+# name is the official file's (Qwen/Qwen3-30B-A3B-GGUF, same file name), so both files can stay side by side and
+# `caminus pull` / `start` find this one with the old file still in place (docs/models.md, "Switching from the official
+# file"). It is served with the official file's chat template (CHAT_TEMPLATES).
 ITEMS = ITEMS + (
     Item('qwen3-30b-a3b', 'qwen3-30b-a3b', 'unsloth/Qwen3-30B-A3B-GGUF', 'd5b1d57bd0b504ac62ae6c725904e96ef228dc74',
          'Qwen3-30B-A3B-Q4_K_M.gguf', 18556686912,
-         '9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48', 'hf-lfs'),
+         '9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48', 'hf-lfs', local='Qwen3-30B-A3B-GGUF-unsloth'),
 )
 # Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
 # Face's API on 2026-11-11 (each local file's sha256 computed and equal). CATALOG names Swift 1.5 and ThinkingCap (their
@@ -156,6 +160,23 @@ def sampling_of(path):
     return SAMPLING.get(m.name) if m is not None else None
 
 
+# The chat template a catalog model is served with instead of its file's tokenizer.chat_template (a file under
+# share/templates/; caminus.serve.vocab.load_gguf_vocab applies it). Qwen3-30B-A3B: the official GGUF's template, copied
+# unchanged below a comment header (its sha256 in the file's header), so the prompts stay the official file's whichever
+# Q4_K_M is served; unsloth's file carries its own edit of it (two edge cases differ: docs/dev/qwen3-30b-a3b.md).
+CHAT_TEMPLATES = {'qwen3-30b-a3b': 'qwen3-30b-a3b.jinja'}
+
+
+def chat_template_of(path):
+    """the chat template text the catalog model whose first file this is (model_of) is served with, or None: the file's own"""
+    m = model_of(path)
+    name = CHAT_TEMPLATES.get(m.name) if m is not None else None
+    if name is None:
+        return None
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'share', 'templates', name), encoding='utf-8') as f:
+        return f.read()
+
+
 # Paused models: in the tree (their engines, kernels and files stay) but not offered: `caminus models`, `caminus pull`,
 # `caminus start` and the panel leave them out, and caminus serve refuses their architectures (caminus.arch.PAUSED), until
 # they are measured again on the current code. CAMINUS_ALLOW_PAUSED=1 offers them anyway (development and gates).
@@ -205,5 +226,5 @@ def drafter_item(m):
 
 
 def local_rel(it):
-    """an item's path under the model directory"""
-    return it.repo.split('/', 1)[1] + '/' + it.path
+    """an item's path under the model directory: its own directory (Item.local) or its repository's name, then its path"""
+    return (it.local or it.repo.split('/', 1)[1]) + '/' + it.path

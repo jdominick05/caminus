@@ -2,13 +2,16 @@
 caminus.serve.sampler.model_defaults): the catalog's recommendation first, then the GGUF's general.sampling.* where the
 catalog gives nothing, then SamplingParams' built-in defaults; a request's own fields still win. No GPU, no model file: the
 catalog files are sparse files of the catalog's name and size (caminus.models.model_of finds a model by both, never
-opening the file).
+opening the file). Also the chat template a catalog model is served with (caminus.models.CHAT_TEMPLATES: Qwen3-30B-A3B keeps
+the official GGUF's template) and the 30B file's own local directory.
 
   python -I tests/test_model_sampling.py --scratch DIR      RESULT PASS
 
 The served surface (/props, /v1/models, a request's effective params in /slots) is tests/serve/test_model_sampling.py."""
 import argparse
+import hashlib
 import os
+import struct
 import sys
 
 import numpy as np
@@ -44,6 +47,62 @@ def catalog_file(scratch, key):
 
 def six(p):
     return (p.temperature, p.top_p, p.top_k, p.min_p, p.presence_penalty, p.repeat_penalty)
+
+
+def _gs(s):
+    b = s.encode()
+    return struct.pack('<Q', len(b)) + b
+
+
+def tokenizer_gguf(path, template, size=None):
+    """a GGUF v3 header with no tensors and only the tokenizer keys load_gguf_vocab reads (three tokens), its chat template
+    `template`; size: grown to that many bytes, sparse (the catalog's size, so model_of takes it for the catalog file)"""
+    kv = [('general.architecture', struct.pack('<I', 8) + _gs('qwen3moe')),
+          ('tokenizer.ggml.model', struct.pack('<I', 8) + _gs('gpt2')),
+          ('tokenizer.ggml.tokens', struct.pack('<IIQ', 9, 8, 3) + b''.join(_gs(t) for t in ('a', 'b', 'ab'))),
+          ('tokenizer.ggml.token_type', struct.pack('<IIQ', 9, 5, 3) + struct.pack('<3i', 1, 1, 1)),
+          ('tokenizer.ggml.merges', struct.pack('<IIQ', 9, 8, 1) + _gs('a b')),
+          ('tokenizer.chat_template', struct.pack('<I', 8) + _gs(template))]
+    out = b'GGUF' + struct.pack('<IQQ', 3, 0, len(kv)) + b''.join(_gs(k) + v for k, v in kv)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(out)
+        if size: f.truncate(size)
+    return path
+
+
+def template_checks(S):
+    """the chat template a catalog model is served with (models.CHAT_TEMPLATES, applied by serve.vocab.load_gguf_vocab) and
+    the 30B's own local directory"""
+    from caminus.serve.template import ChatTemplate
+    from caminus.serve.vocab import load_gguf_vocab
+    it = models.BY_KEY['qwen3-30b-a3b']
+    shipped = models.chat_template_of(catalog_file(S, 'qwen3-30b-a3b'))
+    head, sep, body = (shipped or '').partition('-#}\n')
+    # the shipped file is the official GGUF's template (Qwen/Qwen3-30B-A3B-GGUF e4d4baf) below its comment header: the text's
+    # sha256 as the header records it, and the header renders to nothing
+    check(bool(sep) and head.startswith('{#-') and hashlib.sha256(body.encode()).hexdigest() ==
+          '57f1fd00f0013a2be96aa79b857391f27e23df5b5f847072b524c897e24d0361',
+          'qwen3-30b-a3b: the shipped chat template is the official GGUF\'s text (sha256 57f1fd00...) below a comment header')
+    msgs = [{'role': 'system', 'content': 's'}, {'role': 'user', 'content': 'q1'},
+            {'role': 'assistant', 'content': 'a1', 'reasoning_content': 'r1'}, {'role': 'user', 'content': 'q2'}]
+    for kw in ({}, {'enable_thinking': False}):
+        check(ChatTemplate(shipped).render(msgs, **kw) == ChatTemplate(body).render(msgs, **kw),
+              f'qwen3-30b-a3b: the comment header renders to nothing {kw or ""}')
+    # a file with the catalog's name and size gets the shipped template whatever its own header says; the same name at
+    # another size (not the catalog's file) keeps its own
+    p = tokenizer_gguf(os.path.join(S, 'tpl', 'catalog', os.path.basename(it.path)), 'OWN {{ messages }}', size=it.size)
+    v = load_gguf_vocab(p)
+    check(v.chat_template == shipped and v.tokens == ['a', 'b', 'ab'],
+          'qwen3-30b-a3b catalog file: served with the shipped template, not the file\'s own (the rest of the vocabulary read)')
+    p = tokenizer_gguf(os.path.join(S, 'tpl', 'other', os.path.basename(it.path)), 'OWN {{ messages }}')
+    check(load_gguf_vocab(p).chat_template == 'OWN {{ messages }}', 'a file outside the catalog: its own chat template')
+    check(set(models.CHAT_TEMPLATES) <= {m.name for m in models.ALL}, 'CHAT_TEMPLATES names only catalog models')
+    # the unsloth file's own directory: beside the official file's place (same repository name and file name), and no two
+    # catalog items share a local path
+    rels = [models.local_rel(i) for i in models.ITEMS]
+    check(models.local_rel(it) == 'Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf' and len(set(rels)) == len(rels),
+          f'qwen3-30b-a3b: its own local directory ({models.local_rel(it)}), every catalog path distinct')
 
 
 def main():
@@ -147,6 +206,7 @@ def main():
             check(same == len(rows) and new.params.greedy,
                   f'greedy token {label}, request {req}: old and new params pick the same token on {same} / {len(rows)} rows')
 
+    template_checks(S)
     print('RESULT ' + ('PASS' if not FAILS else f'FAIL ({len(FAILS)})'))
     return 1 if FAILS else 0
 
