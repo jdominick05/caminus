@@ -62,7 +62,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+C | with a draft: clear it (Up brings it back); again, or with no draft: quit |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
 | Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
-| Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
+| Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written (a narrow terminal's box under the history; on a wide one the reply streams into the history, which PgUp/PgDn and the wheel scroll) |
 | Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell"); `!` on the draft's empty last line runs another, its output joining the first |
 | `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8); a missing file, a folder or a `..` path stops the message with what is wrong and keeps the draft. `@` only drops from a word that reads as a path (`@alice` stays). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
@@ -158,8 +158,10 @@ is left named. `checkpoint` tars named paths before a destructive or
 milestone-crossing action and `rollback` puts them back.
 
 Before a graded goal completes, `finish` runs two checks. The **gate** is an
-optional shell command given to `define_done` (`gate`), run in the agent's home;
-a non-zero exit refuses the finish and its output becomes the next prompt. The
+optional shell command given to `define_done` (`gate`), run as a terminal command
+runs (in the agent's home, with the terminal's environment: `$WORKSPACE`, no model
+key); a non-zero exit refuses the finish and its output becomes the next prompt,
+naming any variable the gate uses that is not set there. The
 **judge** is a fresh model call with no tools that sees the goal, the done check,
 the human's steers and the recorded evidence, not the agent's reasoning, and
 answers met, not yet or wait. Not yet refuses the finish with what is missing;
@@ -205,8 +207,10 @@ at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
 A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
 and a terminal command runs only when every part of it is a read-only program
-(`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent
-files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
+(`ls`, `grep`, `git status`, `sed -n '1,20p' FILE`, ...) with literal arguments:
+a glob, brace, `$` or escape outside quotes could expand to a file named like a
+flag, so it counts as a change, as does anything else unclear (`find . -name
+'*.py'` and `ls "$WORKSPACE"` stay read-only). The agent files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
 `agent plan NAME GOAL approve|reject [--note TEXT]`.
 
 The emergency stop: `caminus ember stop-all [--reason TEXT]` (`/halt`) writes a
@@ -220,8 +224,10 @@ loop; real residents get the gates by default.
 
 ## Tools
 
-Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
-`ask_root`), a resident has:
+Besides `terminal` (its `timeout`, 1 to 3600 seconds, kills a command that runs
+longer and the result says so, as `sandbox`'s does; `yield_ms` only bounds how long
+one call waits for output), `discover`, the loop's tools and the bridge
+(`ask_user`, `ask_root`), a resident has:
 
 | Tool | What it does |
 |---|---|
@@ -232,7 +238,9 @@ Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |
 | `report`, `budget`, `schedule` | fyi or need_you to the human; what the goal has used and has left; park the goal and wake it later |
-| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (installed in the agent's account: `python3 -m venv ~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs`); a page as readable text |
+| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (in the agent's Python, which `caminus ember setup` fills: [ember.md](ember.md#where-things-live)); a page or a PDF as readable text (retries, cache, arXiv papers: [the web tools](ember.md#the-web-tools)) |
+| `sandbox` | Code the agent did not write or does not trust (exploit proofs of concept, CVE reproductions, unknown repositories, install scripts) in a [bubblewrap](https://github.com/containers/bubblewrap) box: nothing of the agent's home, `/usr` and `/etc` read-only, a private `/tmp`, no GPUs, no D-Bus, display or host services, no capabilities. `folder` is mounted read-only at `/work` (refused: a resident's workspace or its state, the account home, a hidden folder of the account, a folder holding the token); `/box` (`boxes/GOAL` in the workspace) is writable, kept across the goal's sandbox calls and removed when the goal completes or is cancelled (a paused or failed goal keeps it, since it can resume). No user namespace can be made inside (`--disable-userns`). No network unless the call names `hosts`: then a proxy outside the box allows HTTPS (port 443) to those names and their subdomains when every address is public, and each connection shows as an event and in the card's expanded view (one made after the last poll, when the goal ends). Limits per call: `timeout` (600 s, at most 3600), 4 GB, half the CPUs, 512 processes (config.json `sandbox`: `memory_mb`, `tasks`, `cpu_percent`, `limiter`) through a user systemd scope, else rlimits; `/box` at most 4 GB on disk (`disk_mb`, checked every 2 s) and the tmpfs `/tmp` and `/run` at most the memory limit; going over kills the box and the result names the limit. The connection log keeps 1000 connections per box and a result returns at most 50 new ones (`connections_more` counts the rest). Polled like a terminal session |
+| `browser` | Headless Google Chrome (or a Chromium that is not a snap) in the goal's sandbox box, over the DevTools protocol: `open` (`url`; `allow`: more `host:port` names), `snapshot`, `click` (`ref`), `type` (`ref`, `text`), `select` (`ref`, `value`), `press` (`key`), `scroll` (`direction`, `amount`), `back`, `eval` (`js`), `screenshot` (a PNG in `outputs/GOAL/screenshots/`, outside the box, kept after the goal; the result says to look at it with `read` when the brain can see images, else it is for the human), `console`, `close`. Downloads land in the box's `downloads/` (a note says so) and are copied to `outputs/GOAL/downloads/` when the goal ends (regular files only, at most 512 MB). One browser per goal, kept across calls and closed with the goal's box; its profile and downloads are in the box. The page reads as a snapshot: its accessibility tree as indented lines (role, name, value) with refs (`e5`) for the controls, capped at 250 lines; page actions return the new one. Chrome's own sandbox is off (bubblewrap is the sandbox); the box adds Chrome's install folder read-only. Network through the box proxy's web mode: any public address on any port, logged; a LAN, loopback or link-local address, or this machine, only when a call named that `host:port`: opening a URL whose host is `localhost` or an address names it; a DNS name that resolves to the LAN needs `allow` (a page could steer the agent to one). It refuses to type into a password field (`type`, or `press` of a printing key while one, or a frame of another site, has the focus), and the refusal and the prompt say this is a rule, not a limit of the browser: no password is sent any other way (terminal, curl, eval); a login goes through `ask_user`. `eval` is not guarded. After a refused browser call, the turn's later page-changing browser calls (`open`, `back`, `click`, `type`, `select`, `press`, `eval`) are skipped, each with a `skipped` result (not counted as a failure). Alerts are accepted, confirm and prompt dismissed. Before `define_done` and in plan mode it may open, snapshot, scroll, go back, screenshot and read the console; `click`, `type`, `select`, `press` and `eval` wait. No time limit: it lasts its goal, and by default closes itself after 30 minutes without a call (config.json `sandbox`: `browser_idle_s`, seconds; `0` keeps it open until the goal ends; [Defaults](ember.md#defaults)); the sandbox's memory, CPU, process and `/box` disk limits apply through a user systemd scope; without one (the rlimit fallback) the browser has no memory limit, since Chrome does not start under an address-space limit. Not offered when no such Chrome is installed |
 | `advisor` | A stronger model's advice, within the owner's limits (below) |
 | `mcp__SERVER__TOOL` | Tools from the agent's MCP servers (below) |
 

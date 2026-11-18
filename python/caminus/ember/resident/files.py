@@ -1,9 +1,17 @@
-"""read, edit and write: file tools that do not go through the terminal.
+"""read, search, edit and write: file tools that do not go through the terminal.
 
 The terminal is where an agent's edits went wrong: a PTY's line endings, quoting inside heredocs, a sed that matched
 twice. These tools work on the file itself:
 
-- read(path, offset, limit): numbered lines, a window at a time, never a binary file.
+- read(path, start, lines): numbered lines, a window at a time, never a binary file. A PNG, JPEG, GIF or WebP
+  file comes back as its size and format (image_info, from the header: no image library) with a sha256; the transport
+  (model.py) sends the file itself as an image to a brain that can see, and a plain line to one that can't.
+- search(path, glob, pattern, context): file names by glob, text by regex with context lines; .gitignore honoured in a
+  git repository (outside one, hidden folders, build/ and node_modules/ are skipped), binary files skipped, results
+  capped with a count of the rest, and the whole search stopped after SEARCH_SECONDS. ripgrep, when it is installed,
+  only narrows the files to look in, and only for a plain literal (`rg -F` on the raw bytes finds it in exactly the
+  files Python's re does; a regex is not, as their syntax and their reading of invalid UTF-8 differ); the matching,
+  the context and the caps are this module's, so the result is the same either way.
 - edit(path, old, new, replace_all): an exact string replacement. old must occur exactly once (or replace_all), so an
   edit never lands somewhere the agent did not mean. A file with CRLF endings keeps them.
 - write(path, content): the whole file, created or replaced.
@@ -13,15 +21,117 @@ may touch. Every edit and write returns a unified diff (bounded) for the chat's 
 file renamed into place, the old file's mode kept).
 """
 import difflib
+import hashlib
+from fnmatch import fnmatchcase
 import os
+import re
+import shutil
+import stat
+import subprocess
 import tempfile
+import time
 from pathlib import Path
+
+from .diff import _run
 
 READ_DEFAULT = 400        # lines per read when no limit is given
 READ_MAX = 2000           # lines one read may return
 LINE_MAX = 2000           # characters of one line shown
 WRITE_MAX = 2_000_000     # bytes one write or edit may produce
 DIFF_MAX = 120            # diff lines returned to the model and the chat
+SEARCH_NAMES = 200        # file names one glob search lists
+SEARCH_FILES = 20         # files with matches one search shows
+SEARCH_MATCHES = 60       # matching lines one search shows
+SEARCH_CHARS = 16_000     # characters of matches and context one search shows (the result stays below outputs' spill)
+SEARCH_LINE = 300         # characters of one line shown (minified code is one huge line)
+SEARCH_SCAN = 20_000      # matches counted before a search stops counting
+SEARCH_FILE_MAX = 10_000_000   # bytes: a bigger file is skipped (the stdlib path reads each file whole)
+SEARCH_SECONDS = 60       # a search (listing, stats and reading) stops looking after this long and says so
+SKIP_DIRS = frozenset(('node_modules', 'build'))   # skipped by the walk outside a git repository, with hidden folders
+PSEUDO_DIRS = frozenset(('/proc', '/sys', '/dev'))   # never walked into: files there report size 0 and may not end
+NOT_LITERAL = frozenset('.^$*+?{}[]\\|()\n\r\0\ufffd')   # a pattern with none of these goes to rg -F
+# An image goes to the model whole (no resizing without an image library), so read refuses one past these: 5 MB once
+# base64-encoded is the smallest per-image limit among Claude's platforms (Bedrock; the API's own is 10 MB), and past
+# 20 images in one request a stricter size limit applies to every image (resent results count), which images of 3000 px
+# a side or less stay under (platform.claude.com, build-with-claude/vision).
+IMAGE_MAX_BYTES = 3_750_000
+IMAGE_MAX_SIDE = 3000
+IMAGE_HEAD = 1 << 20      # bytes of a file searched for its dimensions (a JPEG's frame header follows its EXIF)
+
+
+def image_info(head):
+    """(format, width, height) from an image file's first bytes, None when they are not a PNG, JPEG, GIF or WebP;
+    ValueError when they start like one but the dimensions can't be read."""
+    be16, le16 = (lambda i: int.from_bytes(head[i:i + 2], 'big')), (lambda i: int.from_bytes(head[i:i + 2], 'little'))
+    if head[:8] == b'\x89PNG\r\n\x1a\n':
+        if head[12:16] != b'IHDR' or len(head) < 24:
+            raise ValueError('a PNG without its IHDR header')
+        return 'png', int.from_bytes(head[16:20], 'big'), int.from_bytes(head[20:24], 'big')
+    if head[:6] in (b'GIF87a', b'GIF89a'):
+        if len(head) < 10:
+            raise ValueError('a GIF cut short in its header')
+        return 'gif', le16(6), le16(8)
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        chunk = head[12:16]
+        if chunk == b'VP8 ' and head[23:26] == b'\x9d\x01\x2a':
+            return 'webp', le16(26) & 0x3fff, le16(28) & 0x3fff
+        if chunk == b'VP8L' and head[20:21] == b'\x2f' and len(head) >= 25:
+            bits = int.from_bytes(head[21:25], 'little')
+            return 'webp', (bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1
+        if chunk == b'VP8X' and len(head) >= 30:
+            return 'webp', int.from_bytes(head[24:27], 'little') + 1, int.from_bytes(head[27:30], 'little') + 1
+        raise ValueError('a WebP whose frame header is not VP8, VP8L or VP8X')
+    if head[:3] == b'\xff\xd8\xff':
+        i = 2
+        while i + 4 <= len(head):
+            if head[i] != 0xff:
+                raise ValueError('a JPEG with a broken segment at byte %d' % i)
+            m = head[i + 1]
+            if m == 0xff:                                   # (fill byte)
+                i += 1
+                continue
+            if m in (0x01, 0xd8) or 0xd0 <= m <= 0xd7:      # (markers without a length)
+                i += 2
+                continue
+            if m in (0xd9, 0xda):
+                break                                       # end of image / start of scan before any frame header
+            if 0xc0 <= m <= 0xcf and m not in (0xc4, 0xc8, 0xcc):
+                if i + 9 > len(head):
+                    break
+                return 'jpeg', be16(i + 7), be16(i + 5)
+            i += 2 + be16(i + 2)
+        raise ValueError('a JPEG whose frame header is not in its first %d bytes' % IMAGE_HEAD)
+    return None
+
+
+def image(p):
+    """read's answer for an image file, or None when p is not one"""
+    with open(p, 'rb') as f:
+        head = f.read(16)
+        if not head.startswith((b'\x89PNG', b'GIF8', b'RIFF', b'\xff\xd8\xff')):
+            return None                                     # (a text file costs 16 bytes here)
+        head += f.read(IMAGE_HEAD - 16)
+    found = image_info(head)
+    if found is None:
+        return None
+    fmt, w, h = found
+    size = p.stat().st_size
+    info = dict(format=fmt, width=w, height=h, bytes=size)
+    if size > IMAGE_MAX_BYTES or max(w, h) > IMAGE_MAX_SIDE:
+        return dict(path=str(p), image=info, note=(
+            f'{w}x{h}, {size:,} bytes: past what read sends as an image ({IMAGE_MAX_SIDE} px a side, '
+            f'{IMAGE_MAX_BYTES:,} bytes), so no image is sent. Make a smaller copy in the terminal (ImageMagick\'s '
+            'convert -resize, where installed) and read that.'))
+    info['sha256'] = hashlib.sha256(p.read_bytes()).hexdigest()   # (the transport sends the file only while it matches)
+    return dict(path=str(p), image=info)
+
+
+def image_ref(tool, result):
+    """The image a tool result names for the transport to send (model.py: a message's `image`), or None. Only read's
+    own result names one: another tool's 'image' and 'path' (an MCP server's) are its data, never a file to send."""
+    if tool == 'read' and isinstance(result, dict) and isinstance(result.get('image'), dict) and result.get('path'):
+        return dict(result['image'], path=result['path'])
+    return None
 
 
 def _path(home, path):
@@ -31,9 +141,13 @@ def _path(home, path):
     return p if p.is_absolute() else Path(home) / p
 
 
+def _binary(data):
+    return b'\0' in data[:8192]
+
+
 def _text(p, strict=False):
     data = p.read_bytes()
-    if b'\0' in data[:8192]:
+    if _binary(data):
         raise ValueError(f'{p} looks binary; read it with the terminal (xxd, file) instead')
     if strict:
         # edit and write put the text back: a lossy decode would turn every non-UTF-8 byte into U+FFFD without a
@@ -78,27 +192,202 @@ def _atomic_write(p, text):
         raise
 
 
-def read(home, path, offset=None, limit=None):
+def read(home, path, start=None, lines=None):
     p = _path(home, path)
     if p.is_dir():
         names = sorted(e.name + ('/' if e.is_dir() else '') for e in p.iterdir())
         return dict(path=str(p), directory=True, entries=names[:500], more=max(0, len(names) - 500))
+    if (img := image(p)) is not None:
+        return img
     text = _text(p)
-    lines = text.split('\n')
-    if lines and lines[-1] == '':
-        lines.pop()
-    start = max(1, int(offset or 1))
-    count = max(1, min(int(limit or READ_DEFAULT), READ_MAX))
-    shown = []
-    for n in range(start, min(start + count, len(lines) + 1)):
-        ln = lines[n - 1].rstrip('\r')
-        if len(ln) > LINE_MAX:
-            ln = ln[:LINE_MAX] + f' … [{len(ln) - LINE_MAX} more characters]'
-        shown.append(f'{n:>6}\t{ln}')
+    rows = _lines(text)
+    start = max(1, int(start or 1))
+    count = max(1, min(int(lines or READ_DEFAULT), READ_MAX))
+    shown = [_numbered(n, rows[n - 1], LINE_MAX) for n in range(start, min(start + count, len(rows) + 1))]
     end = start + len(shown) - 1
-    out = dict(path=str(p), lines=len(lines), shown=f'{start}-{end}' if shown else 'none', text='\n'.join(shown))
-    if end < len(lines):
-        out['next'] = f'read with offset={end + 1} for more'
+    out = dict(path=str(p), shown=(f'{start}-{end}' if shown else 'none') + f' of {len(rows)}', text='\n'.join(shown))
+    if end < len(rows):
+        out['next'] = f'read with start={end + 1} for more'
+    return out
+
+
+def _lines(text):
+    rows = [ln.rstrip('\r') for ln in text.split('\n')]
+    if rows and rows[-1] == '':
+        rows.pop()
+    return rows
+
+
+def _numbered(n, ln, width, mark='\t'):
+    if len(ln) > width:
+        ln = ln[:width] + f' … [{len(ln) - width} more characters]'
+    return f'{n:>6}{mark}{ln}'
+
+
+def _rg():
+    return shutil.which('rg')
+
+
+def _size(p):
+    try:
+        return p.stat().st_size
+    except OSError:
+        return -1                         # (gone since it was listed)
+
+
+def _literal(pattern):
+    """Is pattern plain text that `rg -F` finds in exactly the files Python's re finds it in? No regex syntax (so no
+    POSIX class, which ripgrep reads in [[:alpha:]] and Python does not), no line break or NUL, and no U+FFFD (Python
+    decodes an invalid UTF-8 byte to one; ripgrep sees the byte). Every other character is the same UTF-8 bytes in
+    both, so a line holds it for one exactly when it does for the other."""
+    return not NOT_LITERAL.intersection(pattern)
+
+
+def _listing(root, deadline):
+    """([(file, size)], late): the regular files a search looks in, sorted, with their sizes. Inside a repository,
+    what git lists (tracked and untracked, not ignored; a name that is not UTF-8 kept as the bytes it is); else a walk
+    that skips hidden folders below root, SKIP_DIRS and PSEUDO_DIRS. A file git lists but that is gone, or a submodule,
+    is left out. A folder git lists nothing in (one it ignores, asked for by name) is walked. late: the deadline came
+    first, and the list is what was found by then."""
+    if root.is_file():
+        return [(root, _size(root))], False
+    r = _run(['git', '-C', str(root), 'ls-files', '-co', '--exclude-standard', '-z'], 30, text=False)
+    files = [root / os.fsdecode(n) for n in r.stdout.split(b'\0') if n] if r is not None and r.returncode == 0 else []
+    late = False
+    if not files:
+        for d, dirs, names in os.walk(root):
+            if time.monotonic() > deadline:
+                late = True
+                break
+            dirs[:] = [x for x in dirs if not (x in SKIP_DIRS or x.startswith('.') or os.path.join(d, x) in PSEUDO_DIRS)]
+            files += [Path(d) / n for n in names]
+    out = []
+    for p in files:
+        if time.monotonic() > deadline:
+            late = True
+            break
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue                      # (gone since it was listed, or a link to nothing)
+        if stat.S_ISREG(st.st_mode):
+            out.append((p, st.st_size))
+    return sorted(out, key=lambda e: str(e[0].relative_to(root))), late
+
+
+def _rg_candidates(rg, pattern, files, deadline):
+    """The files ripgrep finds the literal pattern in (-F on the raw bytes: no encoding or BOM handling), or None
+    when ripgrep could not answer and the stdlib reads every file instead."""
+    found = set()
+    for i in range(0, len(files), 500):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            r = subprocess.run([rg, '--no-config', '--text', '--encoding', 'none', '--fixed-strings',
+                                '--files-with-matches', '--null', '-e', pattern, '--', *map(str, files[i:i + 500])],
+                               capture_output=True, timeout=left)
+        except subprocess.TimeoutExpired:
+            break
+        except OSError:
+            return None
+        if r.returncode == 2 and not r.stdout:      # (2 with output: some file was unreadable, the rest were searched)
+            return None
+        found.update(os.fsdecode(n) for n in r.stdout.split(b'\0') if n)
+    return [p for p in files if str(p) in found]
+
+
+def _glob_match(p, root, g):
+    """A glob without a slash matches the file's name at any depth; with one, its path under root (fnmatch's * also
+    crosses folders, and a leading **/ may match none)."""
+    if '/' not in g:
+        return fnmatchcase(p.name, g)
+    rel = p.name if p == root else str(p.relative_to(root))
+    return fnmatchcase(rel, g) or (g.startswith('**/') and fnmatchcase(rel, g[3:]))
+
+
+def search(home, path='.', glob=None, pattern=None, context=2):
+    if not glob and not pattern:
+        raise ValueError('give glob (file names), pattern (a regex to find in the text), or both')
+    root = _path(home, path or '.')
+    if root.is_dir():                     # refused as read refuses it: missing or unreadable
+        os.scandir(root).close()
+    else:
+        open(root, 'rb').close()
+    if pattern:
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f'pattern is not a valid regex ({e}); escape special characters such as ( [ . * with \\')
+    deadline = time.monotonic() + SEARCH_SECONDS
+    base = Path(home)
+    # A name that is not UTF-8 comes back escaped (caf\xe9.txt): the result is stored and sent as UTF-8 text.
+    show = lambda p: (os.path.relpath(p, base) if p == base or base in p.parents else str(p)).encode(
+        'utf-8', 'surrogateescape').decode('utf-8', 'backslashreplace')
+    files, late = _listing(root, deadline)
+    if glob:
+        files = [(p, n) for p, n in files if _glob_match(p, root, glob.removeprefix('./'))]
+    out = dict(path=show(root))
+    if not pattern:
+        out.update(files=len(files), text='\n'.join(show(p) for p, _ in files[:SEARCH_NAMES]))
+        if len(files) > SEARCH_NAMES:
+            out['more'] = f'{len(files) - SEARCH_NAMES} more files not listed: narrow glob or path'
+        if late:
+            out['stopped'] = f'stopped looking after {SEARCH_SECONDS} s: the list is partial; narrow path or glob'
+        return out
+    big = [p for p, n in files if n > SEARCH_FILE_MAX]
+    files = [p for p, n in files if n <= SEARCH_FILE_MAX]
+    rg = _rg()
+    look = (_rg_candidates(rg, pattern, files, deadline) if rg and files and _literal(pattern) else None)
+    if look is None:
+        look = files
+    context = max(0, min(int(context if context is not None else 2), 10))
+    total = nfiles = shown_m = shown_f = chars = 0
+    text = []
+    for p in look:
+        if total >= SEARCH_SCAN or time.monotonic() > deadline:
+            late = late or total < SEARCH_SCAN
+            break
+        try:
+            with open(p, 'rb') as f:      # (bounded: a file under /proc reports size 0 and can read gigabytes)
+                data = f.read(SEARCH_FILE_MAX + 1)
+        except OSError:
+            continue                      # (unreadable: the account may not read it)
+        if len(data) > SEARCH_FILE_MAX:
+            big.append(p)                 # (it grew since its size was read)
+            continue
+        if _binary(data):
+            continue
+        rows = _lines(data.decode('utf-8', errors='replace'))
+        hits = [i for i, ln in enumerate(rows) if rx.search(ln)]
+        if not hits:
+            continue
+        total += len(hits)
+        nfiles += 1
+        if shown_m >= SEARCH_MATCHES or shown_f >= SEARCH_FILES or chars >= SEARCH_CHARS:
+            continue
+        shown_f += 1
+        keep = hits[:SEARCH_MATCHES - shown_m]
+        hit, last = set(keep), None
+        text.append(show(p))
+        for i in sorted({j for h in keep for j in range(max(0, h - context), min(len(rows), h + context + 1))}):
+            if i in hit and chars >= SEARCH_CHARS:
+                break                             # (the text is full: this match and the rest are counted, not shown)
+            if last is not None and i > last + 1:
+                text.append('    --')
+            text.append(_numbered(i + 1, rows[i], SEARCH_LINE, ':  ' if i in hit else '-  '))
+            chars += len(text[-1]) + 1
+            shown_m += i in hit
+            last = i
+    out.update(matches=total, files=nfiles, searched=len(files), text='\n'.join(text))
+    if total > shown_m:
+        where = f' in {nfiles - shown_f} more files' if nfiles > shown_f else ''
+        out['more'] = (f'{"at least " if total >= SEARCH_SCAN else ""}{total - shown_m} more matches{where} not shown: '
+                       'narrow pattern, glob or path')
+    if late:
+        out['stopped'] = f'stopped looking after {SEARCH_SECONDS} s: the counts are partial; narrow path or glob'
+    if big:
+        out['skipped'] = f'{len(big)} files over {SEARCH_FILE_MAX // 1_000_000} MB not searched'
     return out
 
 
