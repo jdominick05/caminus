@@ -224,17 +224,23 @@ def props_window(props):
     return None
 
 
-def local_window(config, opener=urllib.request.urlopen, timeout=2):
-    """A local brain's window as its server reports it now (props_window), for a config that stores none: a session
-    made by the session switcher (create --model drops the paid brain's window) or by init without --context. None for
-    a brain that is not a local candidate, a server that cannot be reached, or one that is not Caminus (asked unless
-    provider_kind is local: the key relay listens on loopback too). A Caminus server added as a plain openai provider
-    counts when its /props names the engine: the runtime reads its window there all the same. Not stored: the daemon
-    asks the server at each start (Model.context_size) and keeps that figure until its brain changes."""
+def window_candidate(config):
+    """Whether local_window asks this brain's server: a local candidate, or a plain openai provider on loopback (a
+    Caminus server added that way; its /props then decides). Never the Messages API or a relayed brain."""
     if config.get('provider_kind') == 'openai':
         config = dict(config, provider_kind=None)
-    if not local_candidate(config):
+    return local_candidate(config)
+
+
+def local_window(config, opener=urllib.request.urlopen, timeout=2):
+    """A local brain's window as its server reports it now (props_window). None for a brain that is not a local
+    candidate, a server that cannot be reached, or one that is not Caminus (asked unless provider_kind is local: the key
+    relay listens on loopback too). A Caminus server added as a plain openai provider counts when its /props names the
+    engine. Never stored: window() combines it with the config each time it is asked."""
+    if not window_candidate(config):
         return None
+    if config.get('provider_kind') == 'openai':
+        config = dict(config, provider_kind=None)
     try:
         if config.get('provider_kind') == 'local':
             props = _get(_root(config['endpoint']) + '/props', {}, opener, timeout, LOCAL_READ)
@@ -243,6 +249,23 @@ def local_window(config, opener=urllib.request.urlopen, timeout=2):
     except (OSError, ValueError, urllib.error.HTTPError):
         return None
     return props_window(props)
+
+
+def window(config, served, local):
+    """The window a brain works in; status, the panel and compaction (Model.context_size) all read this one figure.
+    served: what its server reports now (local_window), or None. local: not a paid brain (Model.remote false).
+    - A local brain: the server's window, which `caminus serve` sizes per mode (262K native, 1M long), limited by
+      context_cap when the owner set one (init --context). Its stored context is a figure copied from a catalog or a
+      sibling session (/model before this, create --from), maybe from another mode of the same server: used only while
+      the server says nothing, never as a limit.
+    - A paid brain: its stored context (the catalog's maximum or the owner's), as before.
+    None when nothing is known: Model.context_size then asks the endpoint's /props whatever its engine."""
+    def valid(n):
+        return n if isinstance(n, int) and not isinstance(n, bool) and n >= 1024 else None
+    cap = valid(config.get('context_cap')) if local else None
+    if local and valid(served):
+        return min(served, cap) if cap else served
+    return cap or valid(config.get('context'))
 
 
 STATUS_VERSION = 1   # the /caminus/status layout read here (caminus serve's stats.STATUS_VERSION; the panel reads the same)

@@ -84,11 +84,14 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
   (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
   `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
-- A local brain's window is its server's `/props` n_ctx (`catalog.props_window`), asked when the config stores none
-  (`init` without `--context`, a session switcher session): the runtime at each start (`Model.context_size`), `status`
-  every time (`catalog.local_window`). It is not written to the config: a daemon keeps the figure it read at its start
-  until its brain changes, and the next start reads the server again. Status says `null` only when nobody can say; the
-  panel then shows the tokens in use alone, never `N/0`.
+- A brain's window is `catalog.window`, the one figure status (and so the panel) and compaction (`Model.context_size`)
+  read. A local brain's is its server's `/props` n_ctx now (`catalog.local_window`, `catalog.props_window`): `caminus
+  serve` sizes it per mode (262K native, 1M long), so a stored `context` (a catalog or sibling figure copied at `/model`
+  or `create`) is never a limit, only a fallback while the server says nothing. The owner's limit is `context_cap`
+  (`init --context` on a local server); `/model` and `create --model` drop it with the brain. A paid brain keeps its
+  stored `context`. A running daemon asks again every `model.WINDOW_TTL` seconds and after a failed connection, and a
+  lookup that learns nothing keeps the figure it had. Status says `null` only when nobody can say; the panel then shows
+  the tokens in use alone, never `N/0`.
 
 ## Memory
 

@@ -2561,6 +2561,79 @@ for line in sys.stdin:
         conf['endpoint']='http://127.0.0.1:9/v1';(self.home/'config.json').write_text(json.dumps(conf))
         self.assertIsNone(self.cmd('status')['context'])
 
+    def test_a_local_brains_window_is_its_servers_now_under_the_owners_cap(self):
+        # the owner's "13K/262K": a session on the Coder stored context 262144 (a catalog figure from the server's native
+        # mode, copied at /model) while the server ran its 1M mode; the runtime compacted against 262K
+        from caminus.ember.resident import model as model_mod
+        from caminus.ember.resident.model import Model
+        self.serve_ids(self.CODER_IDS)
+        Endpoint.props[self.key].update(n_ctx=1048574)
+        def conf(**kv):
+            c=json.loads((self.home/'config.json').read_text())
+            for k,v in kv.items():
+                if v is None:c.pop(k,None)
+                else:c[k]=v
+            (self.home/'config.json').write_text(json.dumps(c));return c
+        def runtime_window():
+            rt=Runtime(self.home)
+            try:return rt.model.context_size()
+            finally:rt.mail.close();rt.store.close()
+        conf(context=262144)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(1048574,1048574),
+                         'a stored figure is no limit: the server\'s window, for status and compaction alike')
+        self.replies(call('finish',dict(summary='ok')))
+        self.assertEqual(self.cmd('once',['--goal','Say ok.'])['state'],'completed')
+        self.assertEqual(json.loads((self.home/'context.json').read_text())['size'],1048574,'the turn measured against 1M')
+        # the owner's cap limits it
+        conf(context_cap=100000)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(100000,100000))
+        conf(context_cap=2000000)
+        self.assertEqual(self.cmd('status')['context'],1048574,'a cap above the server\'s window: the server\'s')
+        # a server restarted in its native mode: status at once, a running daemon after WINDOW_TTL or a failed call
+        conf(context_cap=None)
+        m=Model(json.loads((self.home/'config.json').read_text()))
+        self.assertEqual(m.context_size(),1048574)
+        Endpoint.props[self.key].update(n_ctx=262144)
+        self.assertEqual(self.cmd('status')['context'],262144)
+        self.assertEqual(m.context_size(),1048574,'kept for WINDOW_TTL')
+        m._context_at-=model_mod.WINDOW_TTL+1
+        self.assertEqual(m.context_size(),262144)
+        # a lookup that learns nothing keeps what the server said last, never the stored figure (262144 here): a /props
+        # without the engine, or a server that does not answer
+        Endpoint.props[self.key].update(n_ctx=1048574);m._context_at=0
+        self.assertEqual(m.context_size(),1048574)
+        Endpoint.props[self.key].pop('engine');m._context_at=0
+        self.assertEqual(m.context_size(),1048574)
+        def dead(req,timeout=None):raise ConnectionRefusedError('down')
+        m.opener=dead;m._context_at=0
+        self.assertEqual(m.context_size(),1048574)
+        # a server that says nothing (no Caminus engine in its /props): the stored figure
+        Endpoint.props[self.key]=dict(n_ctx=65536)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(262144,262144))
+        # a paid brain keeps its stored window whatever a loopback server says, and no cap applies to it
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=262144)
+        conf(relay=True,context=1048576,context_cap=100000)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(1048576,1048576))
+        # init --context on a local server is the owner's cap; /model to a local entry copies no window and drops the cap
+        conf(relay=None,context=None,context_cap=None)
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        new='capped-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['init',new,'--model','k3-coder','--endpoint',url,'--context','100000','--bridge',str(self.bridge),
+                                  '--bus',str(self.home/'mail.sqlite3'),'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        self.assertEqual(json.loads((home/'config.json').read_text())['context_cap'],100000)
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],100000)
+        c=json.loads((home/'config.json').read_text())
+        c.update(providers={'coder':dict(kind='local',endpoint=url)});(home/'config.json').write_text(json.dumps(c))
+        (home/'models.json').write_text(json.dumps(dict(updated=1,providers={'coder':dict(kind='local',ok=True)},
+            models=[dict(id='k3-coder',name='k3-coder',provider='coder',context=262144,max_output=None,efforts=[],thinking='',
+                         vision=False,prices=None)])))
+        self.cmd('model',['k3-coder','--home',str(home)])
+        c=json.loads((home/'config.json').read_text())
+        self.assertNotIn('context_cap',c);self.assertNotIn('context',c,'the catalog\'s 262144 is not copied')
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],262144,'the server\'s window as it runs now')
+
     def test_a_paid_brain_through_the_relay_on_loopback_is_left_alone(self):
         # init --endpoint http://127.0.0.1:8766/v1/openai writes no provider_kind and no relay: the relay is not a
         # Caminus server (its /props names no engine), so nothing is rewritten even when its list has effort-like ids
@@ -6885,10 +6958,11 @@ class AnthropicTransport(unittest.TestCase):
         from caminus.ember.resident.model import Model
         h,_,b64=self.image_history()
         def wired(**cfg):
-            w=Wire(dict(choices=[dict(message=dict(role='assistant',content='ok'),finish_reason='stop')]))
+            # (a local brain asks its server's /props for the window first: catalog.window)
+            w=Wire(dict(n_ctx=100000),dict(choices=[dict(message=dict(role='assistant',content='ok'),finish_reason='stop')]))
             m=Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',context=100000,**cfg),opener=w);m.counter=False
             m.complete(h,None,max_tokens=8000)
-            return w.requests[0][2]['messages']
+            return w.requests[-1][2]['messages']
         sent=wired(vision=True)
         self.assertEqual([m['role'] for m in sent],['system','user','assistant','tool','tool','user','user','system'])
         self.assertNotIn('image',sent[4],'the marker stays home')

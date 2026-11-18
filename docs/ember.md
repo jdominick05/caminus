@@ -202,6 +202,7 @@ key of that file.
 | Setting | Default | What it does | Change it with |
 |---|---|---|---|
 | Compaction, local brain | at 85 % of the window, down to 20 % | old tool output is trimmed first; a summary only if needed | `compact_threshold`, `compact_target_ratio` |
+| Window, local brain | the window the server reports now (`caminus serve`'s mode: 262K native, 1M long) | compaction and the status line measure against it | `context_cap` (a limit under it; `agent init --context N` sets it) |
 | Compaction, paid brain | at 38 % of the window, down to 7.6 % | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
 | Free time | off | stretches of 30 min with 30 min rests; $0.50 a day on a priced model; 3 questions a day, each waiting 10 min; a dream pass from 03:00 | `caminus ember agent heartbeat NAME on`; `free_time.*` |
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |

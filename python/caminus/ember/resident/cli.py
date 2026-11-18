@@ -209,8 +209,8 @@ def model_ops(a,home):
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking','model_variants','efforts','vision'):
-            cfg.pop(k,None)
+        for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
+            cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
         if cfg.pop('max_tokens_auto',None):
             cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
@@ -218,7 +218,10 @@ def model_ops(a,home):
             cfg.pop('compaction_model')
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
-        if entry.get('context'):cfg['context']=int(entry['context'])
+        from .model import LOOPBACK
+        live=spec['kind']=='local' and not spec.get('relay') and urllib.parse.urlsplit(spec['endpoint']).hostname in LOOPBACK
+        if entry.get('context') and not live:
+            cfg['context']=int(entry['context'])  # (a local server's window is asked live: catalog.window)
         if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
@@ -306,7 +309,8 @@ def parser():
             p.add_argument('--model',required=True)
             p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1')
             p.add_argument('--bridge',default=os.environ.get('CAMINUS_ENV_BRIDGE','/srv/caminus-env-bridge'))
-            p.add_argument('--context',type=int)
+            p.add_argument('--context',type=int,help='the window (needed for the Messages API); on a local server a cap '
+                                                     'under the window it reports (context_cap)')
             p.add_argument('--max-tokens',type=int,help='one reply\'s token limit (default: the model\'s own, effort.reply_limit)')
             p.add_argument('--compact-threshold',type=float,default=.85)
             p.add_argument('--compact-target-ratio',type=float,default=.2)
@@ -534,8 +538,8 @@ def main(argv=None,stdin=None):
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
                 # judge or advisor on the relay would bill every finish, eyes every image read; the owner adds them back on purpose)
-                for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
-                          'fallback','advisor','judge_model','eyes','model_variants','efforts'):
+                for k in ('relay','prices','context','context_cap','thinking','effort','vision','provider','provider_kind','api',
+                          'compaction_model','fallback','advisor','judge_model','eyes','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
                 from . import catalog
@@ -572,6 +576,9 @@ def main(argv=None,stdin=None):
                      compaction_model=a.compaction_model,loop_gates=not a.no_loop_gates,
                      idle_timeout=a.idle_timeout,token_budget=a.token_budget)
             if a.api!='openai':cfg['api']=a.api
+            from . import catalog
+            if a.context and catalog.local_candidate(cfg):
+                cfg['context_cap']=a.context   # the owner's limit on a local server's window (catalog.window)
             if a.effort:cfg['effort']=a.effort
             if getattr(a,'thinking',None):cfg['thinking']=a.thinking
             if a.max_model_retries is not None:
@@ -582,7 +589,6 @@ def main(argv=None,stdin=None):
             from .model import Model
             Model(cfg)                     # validate before persisting
             _local_effort(cfg)             # a local server's own id and its effort ids, when it is up
-            from . import catalog
             if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
@@ -867,10 +873,11 @@ def main(argv=None,stdin=None):
             today=(spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}
             spend_today=today.get('usd',0.0)
             cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
-            # a local brain stored without a window (a switcher session, init without --context) shows its server's
-            # n_ctx; None only when nobody can say, and the panel then shows the tokens in use alone
+            # the window the runtime compacts against (catalog.window): a local brain's from its server now, under the
+            # owner's cap; None only when nobody can say, and the panel then shows the tokens in use alone
             from . import catalog
-            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context') or catalog.local_window(cfg),
+            window=catalog.window(cfg,None if paid else catalog.local_window(cfg),not paid)
+            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=window,
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps'),prompt_tok_per_s=speed.get('prompt_tps'),
                       # engine: the Caminus server's own numbers; estimate: measured here (a record from before

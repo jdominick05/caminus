@@ -2085,8 +2085,8 @@ class Runtime:
             return False
         return True
 
-    MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'max_tokens', 'effort', 'thinking', 'relay', 'prices',
-                  'provider', 'provider_kind', 'api_key_env', 'temperature', 'top_p', 'top_k', 'min_p',
+    MODEL_KEYS = ('model', 'endpoint', 'api', 'context', 'context_cap', 'max_tokens', 'effort', 'thinking', 'relay',
+                  'prices', 'provider', 'provider_kind', 'api_key_env', 'temperature', 'top_p', 'top_k', 'min_p',
                   'presence_penalty', 'model_variants', 'efforts', 'max_tokens_auto', 'vision')   # (a /model takes effect whole)
 
     def _stamp(self):

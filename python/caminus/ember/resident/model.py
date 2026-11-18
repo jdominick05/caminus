@@ -73,6 +73,10 @@ def split_content(content):
     return ''.join(text), ''.join(thinking)
 
 
+# how long a local brain's window is kept before its server is asked again (Model.context_size)
+WINDOW_TTL = 60
+
+
 class ModelError(Exception):
     pass
 
@@ -243,9 +247,9 @@ class Model:
         # A paid provider reached through the owner's key relay listens on loopback but bills like a remote one.
         self.direct = parsed.hostname not in LOOPBACK
         self.remote = self.direct or bool(config.get('relay'))
-        self.context = config.get('context')
-        if self.api == 'anthropic' and self.context is None:
+        if self.api == 'anthropic' and config.get('context') is None:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
+        self.context, self._context_at = None, 0.0   # the window context_size resolved, and when
         self.counter = True
         self.last_usage = {}
         self.last_speed = None   # the last reply's speed: engine_speed on a Caminus server, else estimated_speed
@@ -320,6 +324,7 @@ class Model:
         same port (llama-server where caminus serve was): whether the brain is Caminus is then asked again."""
         if isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError):
             self.caminus = None
+            self._context_at = 0.0   # (and its window is asked again: the server that comes back may run another mode)
         return ModelError(str(e))
 
     def is_caminus(self):
@@ -348,10 +353,31 @@ class Model:
         return estimated_speed(tokens, t_first, t_last)
 
     def context_size(self):
-        if self.context is None:
+        """The window (catalog.window): a local brain's from its server now, asked again every WINDOW_TTL seconds and
+        after a failed connection, so a server restarted in another mode (262K, 1M) is measured as it runs; a paid
+        brain's from its config. Nothing known: the endpoint's /props, whatever its engine (llama-server, a fixture)."""
+        if self.context is None or not self.remote and time.monotonic() - self._context_at > WINDOW_TTL:
             from . import catalog
-            self.context = catalog.props_window(self.request(self.root + '/props'))
+            served = None
+            # (only a Caminus server, or provider_kind local, is asked each time: is_caminus remembers the answer, so a
+            # key relay on loopback is not asked every minute)
+            if not self.remote and catalog.window_candidate(self.config) and \
+                    (self.config.get('provider_kind') == 'local' or self.is_caminus()):
+                try:
+                    served = catalog.local_window(self.config, self.opener, 3)
+                except Exception:
+                    served = None   # (a window lookup never fails a turn)
+            if served is None and self.context is not None and not self.remote:
+                window = self.context   # a lookup that learns nothing keeps what the server said: never the stale config
+            else:
+                window = catalog.window(self.config, served, not self.remote)
+            if window is None:
+                window = catalog.props_window(self.request(self.root + '/props'))
+            self.context = window
+            if not self.remote:
+                self._context_at = time.monotonic()   # (a paid brain's window is its config's: never asked again)
         if isinstance(self.context, bool) or not isinstance(self.context, int) or self.context < 1024:
+            self.context = None
             raise ModelError('backend must report a positive context window, or set --context explicitly')
         return self.context
 
