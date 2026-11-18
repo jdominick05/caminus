@@ -490,14 +490,29 @@ class Resident(unittest.TestCase):
             self.assertEqual((places[c],places[a],places[b]),(1,2,3))
         finally:rt.mail.close();rt.store.close()
 
-    def test_todo_rejects_two_in_progress_and_bad_states(self):
+    def test_todo_maps_trained_shapes_and_rejects_bad_states(self):
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Plan.')
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='in_progress'),dict(text='b',state='in_progress')],[])
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='later')],[])
-            # a wrong key is refused by name ("status" was taken and every item showed as pending)
-            with self.assertRaisesRegex(ValueError,"'status'"):rt._todo(gid,[dict(text='a',status='done')],[])
+            # the shapes models are trained on map onto text / state ("status" was once taken and every item showed as
+            # pending: a mapped status must keep its state): Qwen Code's todo_write, then Claude Code's TodoWrite
+            r=rt._todo(gid,[dict(id='1',content='read the code',status='completed'),dict(id='2',content='fix it',status='in_progress'),
+                            dict(id='3',content='test it',status='pending',priority='high')],[])
+            self.assertEqual(rt.store.todo(gid)['items'],[dict(text='read the code',state='done'),dict(text='fix it',state='in_progress'),
+                                                          dict(text='test it',state='pending')])
+            self.assertEqual((r['left'],r['note']),(2,'ignored unknown field(s) id, priority: a todo item takes text and state'))
+            r=rt._todo(gid,[dict(content='read',status='completed',activeForm='Reading'),dict(content='fix',status='in-progress',activeForm='Fixing'),
+                            dict(text='ship',status='done')],[])
+            self.assertEqual([it['state'] for it in rt.store.todo(gid)['items']],['done','in_progress','done'])
+            self.assertEqual((r['left'],r['note']),(1,'ignored unknown field(s) activeForm: a todo item takes text and state'))
+            self.assertNotIn('note',rt._todo(gid,[dict(text='a',state='done')],[]))
+            # real errors are still refused: an unknown state (mapped or not), a field nothing maps, a missing text
+            with self.assertRaisesRegex(ValueError,"'cancelled'"):rt._todo(gid,[dict(content='a',status='cancelled')],[])
+            with self.assertRaisesRegex(ValueError,"'title'"):rt._todo(gid,[dict(title='a',state='done')],[])
+            with self.assertRaisesRegex(ValueError,'needs its text'):rt._todo(gid,[dict(id='1',status='done')],[])
+            with self.assertRaisesRegex(ValueError,'at most 30'):rt._todo(gid,[dict(content=f'step {i}',status='pending') for i in range(31)],[])
             # an edit whose old text is absent never claims it was applied because a short new text occurs somewhere
             from caminus.ember.resident import files
             (self.home/'f.txt').write_text('x = 1\n')
