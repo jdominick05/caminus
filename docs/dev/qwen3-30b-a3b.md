@@ -358,7 +358,7 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
   of 64 chunks), with the Q6_K head -0.0230 ± 0.0017; the Q6_K head costs 0.0005 nats against F16. So the head can
   be Q6_K (the same bytes per token as today) at almost no cost. One text, and a GPTQ calibration set may lean
   towards text like it (the checkpoint does not name its set); no common bf16 reference, so no KLD.
-- **Where the Q4_0 family stopped (work in progress; the first GPU checks below).** The target file is the converted
+- **Where the Q4_0 family stopped (work in progress; the GPU checks below, one failing).** The target file is the converted
   checkpoint with the Q4_K_M file's Q4_K embedding and Q6_K head spliced in (`gguf_splice.py --match
   '^(output|token_embd)\.weight$'`), so the engine needs no F16 op.
   - Built: `kernels/k3_q3m_q40*.hip`, twelve twins of the lean, Q8 KV, YaRN, two-card and verify modules
@@ -391,11 +391,28 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
       same check on the Q4_K_M file: top-1 63 / 64 against llama.cpp's 64 / 64, mean KLD 1.42e-03 against 2.27e-03
       (decode-only 64 / 64). The top-1 shortfall is the shipped Q8 prefill path's under that bound, on both files;
       [q8-kv.md](q8-kv.md)'s command for this test runs without `--llama`, so the shipped path was never held to it.
-  - Next: the two-card G-model gate, the depth rows (16,384 and 40,896 against
-    `q3moe_ref32.py` of this file on the published rows' tokens), the embedding perplexity check, the served smoke, then
-    served speed against Q4_K_M (one card and two, F16 and Q8 KV). The
-    embedding check's bar, set before its run: the target file's perplexity (the same command as the table above) below
-    the Q4_K_M file's 7.9688; its distance from the head-only splice's 7.7874 is the Q4_K embedding's cost, reported.
+    - The embedding check (its bar set before the run: below the Q4_K_M file's 7.9688): **7.7883** ± 0.0608 (PASS).
+      From the running figures, each chunk's mean log loss against Q4_K_M's: -0.0229 ± 0.0015 nats per token, lower
+      on 62 of 64 chunks; against the head-only splice +0.0001 ± 0.0005, so the Q4_K embedding costs nothing measurable.
+    - Two cards (XTX + XT), the G-model gate at 128 tokens: caminus 7.35e-05, 126 / 128 against llama.cpp's 2.18e-03,
+      125 / 128, the replicas equal after every token, no bail (PASS).
+    - At depth (RX 7900 XTX, F16 KV, the published rows' tokens, against `q3moe_ref32.py` of this file): the last 64 of
+      16,384 caminus 2.61e-03, 61 / 64 against llama.cpp's 5.80e-03, 61 / 64 (PASS); the last 64 of 40,896 caminus
+      1.19e-03, 64 / 64 against 1.27e-02, 60 / 64 (PASS).
+    - `tools/serve_smoke1.py --block-imports gguf,tokenizers` on the XTX (PASS): the server loaded `k3_q3m_q40`,
+      `q3m_prefill_q40` and `own_topk`, no ggml header in their closures; decode 220 tok/s on a short chat, 185 after a
+      6,587-token prompt, 124 after 37,659 (the needle found; prefill 5,090 and 2,480 tok/s).
+    - **`tests/prefill/test_q3m_prefill_tp.py` (two cards, F16 KV): FAIL.** Prefill-then-decode mean KLD 6.98e-04,
+      top-1 62 / 64; the same engine decode-only at those positions 1.30e-04, 63 / 64. It fails the test's rule
+      "prefill-then-decode within twice decode-only + 1e-4" (bar 3.59e-04) and top-1 against llama.cpp's one-token decode
+      (63 / 64); its mean KLD against llama.cpp's 2.20e-03 passes, and the replicas, geometry and bounds checks pass. The
+      same test on the Q4_K_M file passes (prefill-then-decode 7.16e-04, 64 / 64; decode-only 5.57e-04, 64 / 64;
+      llama.cpp 64 / 64). An observation for the owner's ruling, not a pass: the target's two-card prefill error is at
+      the Q4_K_M file's level (6.98e-04 against 7.16e-04), and the relative bar trips because its two-card decode-only is
+      unusually close to the reference (1.30e-04, against 6.5e-04 for the same file on one card). Not explained yet.
+    - Not run: served speed against Q4_K_M (one card and two, F16 and Q8 KV), stopped by the failure above.
+  - Next: the owner's ruling on the two-card prefill check; then served speed against Q4_K_M (one card and two, F16 and
+    Q8 KV, through `caminus serve`, interleaved).
   - Open: the iu8 decode path (`v_dot4_i32_iu8` on int8 activations, per 32 or 128) against this fp16 path at the
     bandwidth bound, with its own accuracy gate; a per-128 scale layout (4.125 bits per weight instead of 4.5) for both;
     whether `unroll 1` in `q3p_mm_q40` costs prefill speed; the catalog (the converter needs the Q4_K_M file for the
