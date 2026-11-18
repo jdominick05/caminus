@@ -13,9 +13,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import sys
 import uuid
 
-from ... import __version__
 from . import catalog, effort
 
 
@@ -105,7 +105,9 @@ class ModelRefused(ModelError):
 ANTHROPIC_VERSION = '2026-10-21'
 # What an OpenCode plan is sent (catalog.OPENCODE): Ember's own name, not a library's (OpenCode Go asks clients to
 # identify themselves), and the Messages API version its gateway was checked with (2026-11-18)
-USER_AGENT = 'ember/' + __version__
+# (the version from the top package, which Python loaded before this module: the zipapp and the frozen relay carry its
+#  __init__.py, and the resident package imports nothing outside itself)
+USER_AGENT = 'ember/' + str(getattr(sys.modules.get(__name__.split('.')[0]), '__version__', 'unknown'))
 OPENCODE_ANTHROPIC_VERSION = '2023-06-01'
 
 # USD per million tokens (input, output, cache read, 5-minute cache write), below and above a prompt-length line.
