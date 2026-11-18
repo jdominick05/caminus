@@ -64,7 +64,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written (a narrow terminal's box under the history; on a wide one the reply streams into the history, which PgUp/PgDn and the wheel scroll) |
 | Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
-| `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell"); `!` on the draft's empty last line runs another, its output joining the first |
+| `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output show in the chat as a card in the same colour (yours marked "my shell"; the last 32 KB of a longer output, saying so), and the typing box stays empty. The output also goes to the agent with the next message you send with Enter (not `/steer`), after your words, as it is (colour codes removed, not edited, so mind secrets in `!! env` and the like): each command you ran since your last message, in order, marked as yours (`!!` as your own shell, not its account), at most its last 200 lines or 16 KB (it says when it was cut). The typing box's title counts what waits ("+1 shell output attached to your next message"). Esc stops a working agent first, as always, and the outputs stay; with nothing running, Esc on an empty typing box drops them (the cards stay). A command that finishes after you switch sessions stays out of the session you switched to. The cards are this window's only: a new session or a restart of the UI starts without them |
 | `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8); a missing file, a folder or a `..` path stops the message with what is wrong and keeps the draft. `@` only drops from a word that reads as a path (`@alice` stays). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
 
 While a reply is written, a bounded live box shows its thinking, the tools it
@@ -206,8 +206,8 @@ Compaction has two tiers. When the context passes the threshold, old tool
 outputs (outside the newest eight messages) are first replaced by a one-line stub
 and the path of a file holding them, with no model call; a summary runs only if
 that is not enough. A paid brain (remote, or through a key relay) compacts early,
-at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
-`paid_compact_target_ratio`); a local one at 85 % down to 20 %.
+at 38 % of its window down to 7.6 %, earlier for a model whose price rises past a prompt length ([Defaults in the
+guide](ember.md#defaults); `paid_compact_threshold`, `paid_compact_target_ratio`); a local one at 85 % down to 20 %.
 
 A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
@@ -317,7 +317,7 @@ window, output cap, thinking and effort levels; DeepInfra's gives window, prices
 resident takes either at its next turn.
 
 A paid brain resends its whole context every turn, so it compacts early: at 38 % of its window, keeping the newest
-7.6 % (on a 1M window about 400K and 80K). Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
+7.6 % (on a 1M window about 400K and 80K); a model whose price rises past a prompt length compacts before it. Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
 the window) in the resident's config to change it; the local server keeps `compact_threshold` / `compact_target_ratio`
 (85 % / 20 %).
 
