@@ -3134,6 +3134,9 @@ for line in sys.stdin:
                                max_tokens=202752,pricing=dict(input_tokens=0.6000000001,output_tokens=2.2,cache_read_tokens=0.11))),
             dict(id='BAAI/bge-m3',object='model',created=1,owned_by='deepinfra',root='BAAI/bge-m3',
                  metadata=dict(description='x',tags=['embed'],pricing=dict(input_tokens=0.01)))]),
+        # Meta's list: ids only (its Model object has id, object, created, owned_by)
+        'http://relay/meta/v1/models': dict(object='list',data=[dict(id=i,object='model',created=1,owned_by='meta') for i in
+                                                                ('muse-ember-1.0','muse-spark-1.3','muse-spark-1.3-contributor','muse-image-1.0')]),
         'http://127.0.0.1:8092/v1/models': dict(data=[dict(id='k3-coder')]),
         'http://127.0.0.1:8092/props': dict(n_ctx=1048576),
         # a llama-server with a vision projector says so in /props (caminus serve says false)
@@ -4359,6 +4362,163 @@ for line in sys.stdin:
         listed=dict(data=[dict(id='mistral-large-2512',aliases=['mistral-large-latest']),dict(id='other',aliases=[])])
         op=relay.OwnerPrices(str(pf),lambda m:None,fetch=lambda:listed)
         self.assertEqual(op.get('mistral-large-latest'),(0.7,2.1,0.7));self.assertIsNone(op.get('other'));self.assertIsNone(op.get('nope'))
+
+    def _fake_meta(self):
+        """A fake api.meta.ai over real HTTP: GET /v1/models lists ids only (as Meta's does); POST /v1/chat/completions
+        answers from a queue of (reply, usage): a message dict as one JSON body, or a list of deltas as SSE whose usage
+        chunk comes only when stream_options.include_usage asks for it. It refuses what Meta documents as a 400
+        (reasoning_effort none, a tool_choice other than auto). Returns (port, queue, seen, stop)."""
+        import http.server, threading
+        queue,seen=deque(),[]
+        class Meta(http.server.BaseHTTPRequestHandler):
+            def log_message(s,*a):pass
+            def send(s,status,value,ctype='application/json'):
+                raw=json.dumps(value).encode()
+                s.send_response(status);s.send_header('Content-Type',ctype);s.send_header('Content-Length',str(len(raw)))
+                s.end_headers();s.wfile.write(raw)
+            def do_GET(s):
+                seen.append(dict(method='GET',path=s.path,auth=s.headers.get('Authorization')))
+                s.send(200,dict(object='list',data=[dict(id=i,object='model',created=1,owned_by='meta') for i in
+                                                    ('muse-ember-1.0','muse-spark-1.1','muse-spark-1.3-contributor','muse-image-1.0')]))
+            def do_POST(s):
+                body=json.loads(s.rfile.read(int(s.headers['Content-Length'])))
+                seen.append(dict(method='POST',path=s.path,auth=s.headers.get('Authorization'),body=body))
+                if body.get('reasoning_effort')=='none' or body.get('tool_choice') not in (None,'auto'):
+                    return s.send(400,dict(error=dict(message='invalid request',type='invalid_request_error')))
+                reply,usage=queue.popleft()
+                if not body.get('stream'):
+                    finish='tool_calls' if reply.get('tool_calls') else 'stop'
+                    return s.send(200,dict(id='r1',object='chat.completion',model=body['model'],usage=usage,
+                                           choices=[dict(index=0,message=reply,finish_reason=finish)]))
+                s.send_response(200);s.send_header('Content-Type','text/event-stream');s.end_headers()
+                chunk=lambda c:s.wfile.write(('data: '+json.dumps(dict(id='r2',object='chat.completion.chunk',**c))+'\n\n').encode())
+                for d in reply:
+                    chunk(dict(choices=[dict(index=0,delta=d,finish_reason=None)],usage=None))
+                chunk(dict(choices=[dict(index=0,delta={},finish_reason='tool_calls' if any('tool_calls' in d for d in reply) else 'stop')],usage=None))
+                if (body.get('stream_options') or {}).get('include_usage'):
+                    chunk(dict(choices=[],usage=usage))
+                s.wfile.write(b'data: [DONE]\n\n');s.wfile.flush()
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),Meta)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        return srv.server_address[1],queue,seen,srv.shutdown
+
+    def test_muse_ember_through_the_meta_relay_chats_calls_tools_streams_and_meters(self):
+        """Muse Ember (Meta) end to end on fake keys: the transport, the meta relay and a fake Meta server over HTTP; the
+        relay's ledger and the agent's spend.json price the same usage, cached tokens and the long-prompt tier too."""
+        import http.client, http.server, threading, datetime, urllib.request
+        from caminus.ember import relay
+        from caminus.ember.resident import catalog
+        from caminus.ember.resident.model import Model, META_PRICES, price
+        port,queue,seen,stop_meta=self._fake_meta()
+        log=[]
+        ledger=relay.Ledger(self.home/'meta-ledger.json',5.0)
+        handler=relay.make_handler('meta','FAKE-META-KEY',ledger,set(),65536,log.append,META_PRICES,
+                                   lambda:http.client.HTTPConnection('127.0.0.1',port,timeout=10))
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        base='http://127.0.0.1:%d/v1' % srv.server_address[1]
+        rt=Runtime(self.home)
+        try:
+            # the catalog: Meta lists ids only; the chat models come with Meta's documented facts and prices
+            for kind in ('meta','auto'):
+                got={e['id']:e for e in catalog.discover('meta',dict(kind=kind,endpoint=base),urllib.request.urlopen)}
+                self.assertEqual(sorted(got),['muse-ember-1.0','muse-spark-1.1'],'no image model, no Contributor-mode id (%s)' % kind)
+            ember=got['muse-ember-1.0']
+            self.assertEqual((ember['name'],ember['context'],ember['max_output'],ember['vision']),
+                             ('Muse Ember (Meta)',1048576,524288,True))
+            self.assertEqual(ember['prices'],dict(input=0.10,output=0.50,cache_read=0.004))
+            self.assertIsNone(got['muse-spark-1.1']['max_output'],'Meta publishes no output cap for Spark: unknown, never guessed')
+            self.assertEqual(seen[0]['auth'],'Bearer FAKE-META-KEY','the relay adds the key; the agent sends none')
+            m=Model(dict(model='muse-ember-1.0',endpoint=base,relay=True,provider_kind='meta',context=1048576,vision=True,
+                         efforts=ember['efforts'],prices=ember['prices'],max_tokens=65536,name='t'))
+            msgs=[dict(role='system',content='be brief'),dict(role='user',content='hi')]
+            # a whole reply: chat, at Meta's default level, priced with its cached tokens
+            queue.append((dict(role='assistant',content='hello'),
+                          dict(prompt_tokens=1000,completion_tokens=50,total_tokens=1050,prompt_tokens_details=dict(cached_tokens=400),
+                               completion_tokens_details=dict(reasoning_tokens=30))))
+            self.assertEqual(m.complete(msgs)['content'],'hello')
+            sent=seen[-1]
+            self.assertEqual((sent['path'],sent['auth']),('/v1/chat/completions','Bearer FAKE-META-KEY'))
+            self.assertEqual((sent['body']['model'],sent['body']['reasoning_effort']),('muse-ember-1.0','max'))
+            self.assertNotIn('tool_choice',sent['body']);self.assertTrue(sent['body']['prompt_cache_key'].startswith('ember-'))
+            want=(600*0.10+400*0.004+50*0.50)/1e6
+            self.assertAlmostEqual(ledger.spent(),want,places=6)      # (the ledger keeps 6 decimals)
+            self.assertAlmostEqual(price('muse-ember-1.0',m.last_usage),want,places=12)
+            rt.model=m;rt._meter('g1')
+            # a streamed tool call past 200K input tokens: Meta's long-prompt rates, in the ledger and in spend.json
+            queue.append(([dict(role='assistant',content=''),
+                           dict(tool_calls=[dict(index=0,id='call_1',type='function',function=dict(name='read',arguments='{"pa'))]),
+                           dict(tool_calls=[dict(index=0,function=dict(arguments='th": "x"}'))])],
+                          dict(prompt_tokens=300_000,completion_tokens=1000,total_tokens=301_000,
+                               prompt_tokens_details=dict(cached_tokens=100_000))))
+            names=[]
+            tools=[dict(type='function',function=dict(name='read',description='read a file',
+                                                      parameters=dict(type='object',properties=dict(path=dict(type='string')))))]
+            out=m.complete(msgs,tools=tools,on_delta=lambda kind,v:names.append((kind,v)))
+            self.assertEqual(out['tool_calls'],[dict(id='call_1',type='function',function=dict(name='read',arguments='{"path": "x"}'))])
+            self.assertIn(('tool','read'),names)
+            self.assertEqual(seen[-1]['body']['stream_options'],dict(include_usage=True),'Meta reports stream usage only on request')
+            long=(200_000*0.30+100_000*0.012+1000*1.50)/1e6
+            for _ in range(100):           # (the transport stops at [DONE]; the relay books the reply just after it)
+                if ledger.spent()>want+1e-4:break
+                time.sleep(0.05)
+            self.assertAlmostEqual(ledger.spent()-want,long,places=5)
+            self.assertAlmostEqual(price('muse-ember-1.0',m.last_usage),long,places=12)
+            rt._meter('g1')
+            day=json.loads((self.home/'spend.json').read_text())['days'][datetime.date.today().isoformat()]
+            self.assertAlmostEqual(day['usd'],round(want,6)+round(long,6),places=6)
+            self.assertAlmostEqual(day['usd'],ledger.spent(),places=5,msg='the agent and the relay agree')
+            # a side call (the judge's) asks for the lowest level: minimal, never none (Meta refuses none)
+            queue.append((dict(role='assistant',content='{"verdict":"met"}'),dict(prompt_tokens=10,completion_tokens=5,total_tokens=15)))
+            m.complete(msgs,max_tokens=600)
+            self.assertEqual(seen[-1]['body']['reasoning_effort'],'minimal')
+            # the newer name of the output cap is clamped like the old one
+            queue.append((dict(role='assistant',content='ok'),dict(prompt_tokens=10,completion_tokens=5,total_tokens=15)))
+            code,_=self._post(base+'/chat/completions',dict(model='muse-ember-1.0',messages=msgs,max_completion_tokens=10**7))
+            self.assertEqual(code,200)
+            self.assertEqual(seen[-1]['body']['max_tokens'],65536);self.assertNotIn('max_completion_tokens',seen[-1]['body'])
+            # an unpriced id (Contributor mode trains on the prompts) never goes upstream
+            n=len(seen)
+            code,body=self._post(base+'/chat/completions',dict(model='muse-spark-1.3-contributor',messages=msgs))
+            self.assertEqual(code,403);self.assertIn(b'Standard mode',body);self.assertEqual(len(seen),n)
+            self.assertFalse(any('FAKE-META-KEY' in l for l in log),'the key is never logged')
+        finally:
+            rt.mail.close();rt.store.close();srv.shutdown();stop_meta()
+        # the daily cap: once spent, a refusal before anything goes upstream
+        base,calls,ledger,log,stop=self._relay('meta',lambda c:(200,b'{}','application/json'),cap=0.0,prices=META_PRICES)
+        try:
+            code,body=self._post(base+'/v1/chat/completions',dict(model='muse-ember-1.0',messages=[]))
+            self.assertEqual(code,402);self.assertIn(b'daily cap',body);self.assertEqual(calls,[])
+        finally:stop()
+
+    def test_muse_models_run_the_effort_scale_as_metas_levels(self):
+        """Ember's scale on Meta's reasoning_effort: minimal .. max natively, none (a 400 there) as minimal; Meta's own
+        default when no level is set; /model stores the levels from the catalog and /effort shows the mapping."""
+        from caminus.ember.resident import catalog, effort as eff
+        entries={e['id']:e for e in catalog.meta_entries(self.CATALOG_REPLIES['http://relay/meta/v1/models'],'meta')}
+        self.assertEqual(sorted(entries),['muse-ember-1.0','muse-spark-1.3'])
+        ember=dict(provider_kind='meta',model='muse-ember-1.0',efforts=entries['muse-ember-1.0']['efforts'])
+        for level,want in dict(none='minimal',low='low',medium='medium',high='high',xhigh='xhigh',max='max').items():
+            self.assertEqual(eff.resolve(dict(ember,effort=level))['reasoning_effort'],want,level)
+            self.assertEqual(eff.resolve(dict(ember,effort=level),short=True)['reasoning_effort'],'minimal')
+        self.assertEqual(eff.default_level(ember),'max');self.assertEqual(eff.resolve(ember)['reasoning_effort'],'max')
+        self.assertEqual(eff.resolve(ember,short=True)['reasoning_effort'],'minimal','a side call with no level set: the lowest')
+        self.assertEqual(eff.default_level(dict(ember,model='muse-spark-1.3')),'high')
+        self.assertEqual(eff.sampling(ember,True),{},'Meta asks for its own sampling defaults')
+        self.assertIn('none as minimal',eff.note(ember))
+        # Meta refuses a tool name outside [a-zA-Z0-9_.-] or with two dots (a 400): every tool the agent offers fits
+        import re
+        from caminus.ember.resident.mcp import tool_name
+        for name in [t['function']['name'] for t in TOOLS]+[tool_name('my.server','do/it.now')]:
+            self.assertTrue(re.fullmatch(r'[A-Za-z0-9_.-]+',name) and name.count('.')<2,name)
+        # through the commands: provider add, /model, /effort
+        self.cmd('provider',['add','meta','--kind','meta','--endpoint','http://relay/meta/v1','--relay'])
+        catalog.refresh(self.home,json.loads((self.home/'config.json').read_text()),opener=self.catalog_opener())
+        cur=self.cmd('model',['muse-ember-1.0'])['current']
+        self.assertEqual((cur['provider'],cur['context'],cur['max_tokens'],cur['vision'],cur['relay']),('meta',1048576,65536,True,True))
+        out=self.cmd('effort',[])
+        self.assertEqual((out['current'],out['runs_as']),('max','max'));self.assertIn("lab's default",out['summary'])
+        self.assertEqual(self.cmd('effort',['no'])['runs_as'],'minimal')
 
     def test_mistral_typed_content_blocks_become_text_and_reasoning(self):
         from caminus.ember.resident.model import split_content, Model

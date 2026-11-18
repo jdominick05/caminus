@@ -13,6 +13,9 @@ A provider is one endpoint the resident can reach (directly, or through the owne
              {base}/models gives capabilities (completion_chat, function_calling, vision), max_context_length and
              aliases, and no prices: the owner's relay adds each priced model's `pricing` from its price file (the
              agent's spend meter needs them). No output cap.
+- meta       the Meta Model API (the Muse models), OpenAI-compatible at https://api.meta.ai/v1 (through the owner's relay):
+             GET {base}/models gives ids only, so each Muse chat model's window, output cap and levels come from Meta's
+             docs (META_MODELS) and its prices from the transport's table (model.META_PRICES).
 - openai     any other OpenAI-compatible server: GET {base}/models, ids only.
 
 Every model is normalized to one entry: id, provider, context, max_output, efforts (the levels /effort offers, empty
@@ -27,7 +30,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'openai')
+KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'meta', 'openai')
 TIMEOUT = 20
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
@@ -127,6 +130,38 @@ def mistral_entries(data, provider):
     return out
 
 
+# The Muse chat models, from dev.meta.ai/docs (models, muse-ember, muse-spark, muse-wonder, reasoning), 2026-11-17. Each
+# reads images (video, audio and PDF too) and calls tools; reasoning_effort runs minimal .. max and never none (a 400:
+# they always reason; the docs list the levels for Ember, Wonder and Spark 1.3, and give Spark 1.2 / 1.1 only the
+# parameter, so their list is assumed the same). Only Muse Ember (Meta)'s output cap is published; the others' stays
+# unknown. The name says Meta's: the harness is called Ember too. A listed id not here (images, voice, segmentation,
+# Contributor mode) is not a brain.
+META_EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+META_MODELS = {
+    'muse-ember-1.0': dict(name='Muse Ember (Meta)', context=1_048_576, max_output=524_288),
+    'muse-spark-1.3': dict(name='Muse Spark 1.3 (Meta)', context=1_048_576, max_output=None),
+    'muse-spark-1.2': dict(name='Muse Spark 1.2 (Meta)', context=1_048_576, max_output=None),
+    'muse-spark-1.1': dict(name='Muse Spark 1.1 (Meta)', context=1_048_576, max_output=None),
+    'muse-wonder-1.0': dict(name='Muse Wonder (Meta)', context=1_048_576, max_output=None),
+}
+
+
+def meta_entries(data, provider):
+    """The listed Muse chat models Caminus has Meta's facts and prices for; prices shows the first tier (Muse Ember's
+    long-prompt rates are metered from model.META_PRICES)."""
+    from .model import META_PRICES
+    out = []
+    for m in data.get('data') or []:
+        facts = META_MODELS.get(m.get('id')) if isinstance(m, dict) else None
+        if not facts or m['id'] not in META_PRICES:
+            continue
+        first = META_PRICES[m['id']][0]
+        out.append(dict(id=m['id'], name=facts['name'], provider=provider, context=facts['context'],
+                        max_output=facts['max_output'], efforts=list(META_EFFORTS), thinking='', vision=True,
+                        prices=dict(input=first[0], output=first[1], cache_read=first[2])))
+    return out
+
+
 def openai_entries(data, provider):
     return [dict(id=m['id'], name=m['id'], provider=provider, context=None, max_output=None, efforts=[],
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
@@ -164,11 +199,14 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         # (agent init, before any provider is configured: model_vision) the list's own shape says whose it is
         rows = [m for m in data.get('data') or [] if isinstance(m, dict)]
         kind = ('deepinfra' if any(isinstance(m.get('metadata'), dict) for m in rows) else
-                'mistral' if any(isinstance(m.get('capabilities'), dict) for m in rows) else 'local')
+                'mistral' if any(isinstance(m.get('capabilities'), dict) for m in rows) else
+                'meta' if any(m.get('id') in META_MODELS for m in rows) else 'local')
     if kind == 'deepinfra':
         return deepinfra_entries(data, name)
     if kind == 'mistral':
         return mistral_entries(data, name)
+    if kind == 'meta':
+        return meta_entries(data, name)
     if kind == 'local':
         try:
             props = _get(_root(base) + '/props', headers, opener)

@@ -13,9 +13,12 @@ nearest real one:
   it is sent with effort high.
 - an OpenAI-compatible provider with reasoning_effort (DeepInfra, Mistral): none, low, medium, high natively;
   xhigh and max run as high.
+- the Meta Model API's Muse models: minimal, low, medium, high, xhigh, max; they always reason (none is a 400), so
+  none runs as minimal.
 
 With no level set, the lab's recommendation for agentic work applies (model cards, 2026-11): the Qwen3.8 line xhigh,
-Qwen3-30B-A3B thinking on, Anthropic medium, Mistral Large 4 / Medium 3.5 high.
+Qwen3-30B-A3B thinking on, Anthropic medium, Mistral Large 4 / Medium 3.5 high; Meta's own defaults (Muse Ember and
+Muse Wonder max, Muse Spark high), so a side call still knows to run at the lowest.
 
 Sampling: a local brain gets none (the server applies each model's own defaults from its GGUF); a paid brain gets
 its card's values when the model is known, none otherwise; Anthropic never gets temperature, top_p or top_k (the
@@ -24,6 +27,8 @@ current API version refuses them).
 import re
 
 LEVELS = ('none', 'low', 'medium', 'high', 'xhigh', 'max')
+# what a provider's reasoning_effort may list, in order: the scale plus minimal (Meta's level below low)
+WIRE = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
 SUFFIX = {'none': '-nothink', 'low': '-low', 'xhigh': '-xhigh'}
 LOCAL_CAP = 65536          # the owner's cap on one local reply (a runaway think held the server for an hour)
 PAID_CAP = 65536           # a paid brain's output at most (its catalog maximum below that)
@@ -37,6 +42,10 @@ CARDS = (
     (r'mistral-large-4|mistral-large-latest', dict(default='high', sampling=dict(temperature=1.0, top_p=0.95))),
     (r'mistral-medium-|magistral-medium-', dict(default='high', sampling=dict(temperature=0.7, top_p=0.95),
                                                  sampling_none=dict(temperature=0.7))),   # (top_p only at high)
+    # Meta's defaults when no level is sent (dev.meta.ai/docs/reasoning); no sampling: Meta asks for one of temperature
+    # or top_p, not both, and its defaults are the tuned ones
+    (r'^muse-(ember|wonder)', dict(default='max')),
+    (r'^muse-spark', dict(default='high')),
 )
 
 
@@ -161,13 +170,13 @@ def nearest(level, have):
     """A level among the model's own (have, in scale order): itself when it has it; none: its lowest; low: the next
     lower (or higher); medium: the next higher; xhigh: the next lower (or higher); max: its highest. This gives the
     cards' mappings: Large 4 (low, medium, high) none->low, xhigh/max->high; Medium 3.5 (none, high) low->none,
-    medium->high; GLM 5.3 (low, high, max) none->low, medium->high."""
-    have = [l for l in LEVELS if l in have]
+    medium->high; GLM 5.3 (low, high, max) none->low, medium->high; Muse (minimal .. max) none->minimal."""
+    have = [l for l in WIRE if l in have]
     if not have or level in have or level not in LEVELS:
         return level
-    i = LEVELS.index(level)
-    lower = [l for l in have if LEVELS.index(l) < i]
-    higher = [l for l in have if LEVELS.index(l) > i]
+    i = WIRE.index(level)
+    lower = [l for l in have if WIRE.index(l) < i]
+    higher = [l for l in have if WIRE.index(l) > i]
     if level == 'none':
         return have[0]
     if level == 'max':
@@ -210,7 +219,7 @@ def note(cfg):
     if ln == 'onoff':
         return 'this model only has thinking on or off: none turns it off, every other level is on'
     if ln == 'reasoning':
-        have = [l for l in LEVELS if l in (cfg.get('efforts') or ['low', 'medium', 'high'])]
+        have = [l for l in WIRE if l in (cfg.get('efforts') or ['low', 'medium', 'high'])]
         moved = ['%s as %s' % (l, nearest(l, have)) for l in LEVELS if nearest(l, have) != l]
         return 'this model has ' + ', '.join(have) + (': ' + ', '.join(moved) if moved else '')
     if ln == 'anthropic' and always_thinks(cfg):

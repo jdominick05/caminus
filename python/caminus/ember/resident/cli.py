@@ -355,8 +355,9 @@ def parser():
             p.add_argument('--wait',type=float,default=0,help='seconds to wait for the daemon to come back on it')
         if op=='provider':
             p.add_argument('action',nargs='?',default='list',choices=('list','add','remove'))
-            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, mistral, ...')
-            p.add_argument('--kind',choices=('local','anthropic','deepinfra','mistral','openai'))
+            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, mistral, meta, ...')
+            from .catalog import KINDS
+            p.add_argument('--kind',choices=KINDS)
             p.add_argument('--endpoint',help="its API root; the owner's key relay for a paid one (it adds the key)")
             p.add_argument('--relay',action='store_true',help='the endpoint is the key relay: billed, retries bounded')
         if op=='models':

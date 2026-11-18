@@ -108,6 +108,14 @@ PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.6
 # have no server-side fallback). The same list as the Qwen Code advisor's ANTHROPIC_FALLBACK_MODELS.
 FALLBACK_MODELS = ('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-fable-5-1')
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+# The Meta Model API's Muse chat models, in the PRICES row form; Meta bills no cache writes (the fourth rate never
+# applies). Muse Ember's rates triple past 200K input tokens. Standard mode only: Contributor mode (the -contributor ids)
+# is cheaper because Meta trains on its prompts, files and replies, so it has no row and the relay refuses it. From
+# dev.meta.ai/docs/pricing-rate-limits as read 2026-11-17: check live pricing before budgeting on these numbers.
+_SPARK = ((1.25, 4.25, 0.15, 1.25),) * 2 + (10**9,)
+META_PRICES = {'muse-ember-1.0': ((0.10, 0.50, 0.004, 0.10), (0.30, 1.50, 0.012, 0.30), 200_000),
+               'muse-spark-1.3': _SPARK, 'muse-spark-1.2': _SPARK, 'muse-spark-1.1': _SPARK,
+               'muse-wonder-1.0': ((4.00, 20.00, 0.20, 4.00),) * 2 + (10**9,)}
 
 
 # Prices a provider published (the model catalog: DeepInfra's per-model pricing), in the PRICES row form. Filled from
@@ -115,23 +123,33 @@ FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 CATALOG_PRICES = {}
 
 
+def flat_row(inp, out, read):
+    """one price at every prompt length (USD per million: input, output, cache read), in the PRICES row form"""
+    return ((inp, out, read, inp),) * 2 + (10**9,)
+
+
 def remember_prices(model, prices):
     """prices: {input, output, cache_read} in USD per million tokens, as the catalog stores them."""
     if model and prices and prices.get('input') is not None and prices.get('output') is not None:
         inp, out = float(prices['input']), float(prices['output'])
-        read = float(prices['cache_read']) if prices.get('cache_read') is not None else inp
-        CATALOG_PRICES[model] = ((inp, out, read, inp),) * 2 + (10**9,)
+        CATALOG_PRICES[model] = flat_row(inp, out, float(prices['cache_read']) if prices.get('cache_read') is not None else inp)
 
 
 def price(model, usage, served=None):
     """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
     served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
-    rates when that model is not in the table: an estimate that errs high."""
-    row = PRICES.get(model) or CATALOG_PRICES.get(model)
+    rates when that model is not in the table: an estimate that errs high. Meta's published table, with Muse Ember's
+    long-prompt tier, comes before the catalog's flat copy of its first tier."""
+    row = PRICES.get(model) or META_PRICES.get(model) or CATALOG_PRICES.get(model)
     if row is None:
         return None
     if served and served != model:
         row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
+    return row_cost(row, usage)
+
+
+def row_cost(row, usage):
+    """One call's USD cost by a PRICES-form row, from either usage style; the key relay's ledger prices with it too."""
     low, high, line = row
     usage = usage or {}
     # Anthropic reports cache reads as cache_read_input_tokens; OpenAI-style providers (DeepInfra) inside
@@ -382,9 +400,10 @@ class Model:
             body['reasoning_effort'] = choice['reasoning_effort']   # (DeepInfra, Mistral; 'none' turns it off)
         if choice['thinking_off']:
             body['chat_template_kwargs'] = dict(enable_thinking=False)   # a local server with no -nothink id
-        if self.config.get('provider_kind') == 'mistral':
+        if self.config.get('provider_kind') in ('mistral', 'meta'):
             # Mistral routes requests to its prompt cache by this key (a hint, not a promise): one stable key per agent,
-            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %.
+            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %. Meta
+            # caches prefixes by itself and takes the same field (dev.meta.ai/docs/protocols/chat-completions).
             import hashlib
             body['prompt_cache_key'] = 'ember-' + hashlib.sha256(
                 ('%s|%s' % (self.config.get('name') or '', body['model'])).encode()).hexdigest()[:24]
