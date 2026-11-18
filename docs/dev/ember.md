@@ -49,7 +49,8 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `advisor.py` | the advisor (a stronger model the agent consults) and the eyes (`Eyes`: one vision call per image a brain without vision reads, its description returned as the read's result); each its own daily ledger |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read (text, and images by their headers: `model.py` sends them) / search / edit / write (search: ripgrep only narrows the files, and only for a plain literal with `rg -F`; the stdlib matches, so both give one result), the web tools, MCP servers |
-| `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
+| `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy (and its web mode, the browser's) and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
+| `browser.py` | the `browser` tool: Chrome in the goal's box as a box job (`request.json` `browser`; the box proxy in its web mode, Chrome's install folder bound read-only, no time limit, no address-space rlimit), its `Driver` thread in the worker on the DevTools pipe (fd 3 / 4: requests by id, a reader thread for every event: console, dialogs, new tabs, loads), the actions handed over through the job's `control/` and `ack/` files by action id, the accessibility-tree snapshot and its refs, the password refusal, screenshots in `outputs/GOAL/` and the downloads copied there at goal end (`keep`, from `sandbox.end`), and finding a Chrome that is not a snap (the tool is hidden without one). Every connection rides on the tool_result event's `panel` field, not in the model's result |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
@@ -58,7 +59,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | Panel (`panel/`) | |
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
-| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, else the thoughts box under it), the side panel (tasks, now), the task / now line |
+| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, with the reasoning's last lines until its words start; else the thoughts box under it), the side panel (tasks, now), the task / now line |
 | `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
@@ -83,6 +84,11 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
   (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
   `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
+- A local brain's window is its server's `/props` n_ctx (`catalog.props_window`), asked when the config stores none
+  (`init` without `--context`, a session switcher session): the runtime at each start (`Model.context_size`), `status`
+  every time (`catalog.local_window`). It is not written to the config: a daemon keeps the figure it read at its start
+  until its brain changes, and the next start reads the server again. Status says `null` only when nobody can say; the
+  panel then shows the tokens in use alone, never `N/0`.
 
 ## Memory
 
@@ -109,6 +115,12 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
   `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, no user namespace inside, each
   limit killing and naming itself, an unreadable folder the box left removed without stopping the loop, the capped
   connection log); it skips, saying why, where bubblewrap cannot make user namespaces.
+- `tests/ember/test_resident.py` `Browser` (and the `test_browser_*` runtime tests): real Chrome in a box against
+  local fixture sites (`site()`), no other network: open, snapshot, type, select, click; the password refusal; a local
+  port reached only once named; the box, the profile and Chrome's process tree gone at goal end; only the fixture in
+  the connection log (Chrome's own traffic off). They skip, saying why, with no usable Chrome or under an
+  address-space limit (`ulimit -v`): Chrome does not start under 4 GB of address space, so bound them with a memory
+  cgroup instead (`systemd-run --user --scope -p MemoryMax=4G`).
 - `tests/ember/test_resident.py`: the resident against an in-process OpenAI-compatible fixture (`Endpoint`, scripted
   replies; its judge says met unless a test queues a verdict). Most behaviour tests live here: add one per fix, named
   for the behaviour.
@@ -169,6 +181,10 @@ python -I tools/emberlab/lab.py say s1 "Try the tools in your work folder and te
   answers it. You see exactly what a model sees, gate refusals included.
 - **The TUI.** `tui.py --session NAME --lab-out DIR` opens the chat on that session's home. It runs with its own
   config folders, so it never reads or writes your panel settings.
+- **Close it.** A box (and the Chrome in it) outlives its daemon by design, so `close` stops more than the daemon. It
+  also stops every job worker and command in the home's `jobs/*/state.json`, and the driven brain. It sends TERM, then
+  KILL to whatever is still running 10 s later, and prints what it had to kill. It signals a pid only when that process
+  names the session's folder, so a stale file can't reach anyone else's process.
 
 **Hosts and safety.**
 

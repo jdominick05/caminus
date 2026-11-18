@@ -661,6 +661,32 @@ func TestContextLevelAndTokenCounts(t *testing.T) {
 	}
 }
 
+// A brain whose server reports no window (status context null): the footer shows the tokens in use alone with an
+// empty bar, never "31K/0", and the context tab says the window is unknown instead of counting tokens against 0.
+func TestAnUnknownWindowShowsTheTokensInUseWithoutSlashZero(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 160
+	m.resident.Context, m.resident.ContextUsed = 0, 31_000
+	foot := ansi.Strip(m.chatFoot(m.width))
+	if !strings.Contains(foot, "31K") || strings.Contains(foot, "31K/") || strings.Contains(foot, "/0") {
+		t.Fatalf("an unknown window shows 31K alone:\n%s", foot)
+	}
+	if !strings.Contains(foot, "31K "+strings.Repeat(g.barEmpty, 8)) {
+		t.Fatalf("and an empty bar beside it:\n%s", foot)
+	}
+	pane := ansi.Strip(m.contextPane())
+	if !strings.Contains(pane, "unknown") || !strings.Contains(pane, "31K, measured") || strings.Contains(pane, "(0)") {
+		t.Fatalf("the context tab names the window unknown and counts nothing against 0:\n%s", pane)
+	}
+	if pane := ansi.Strip(m.residentSettingsPane()); !strings.Contains(pane, "unknown") || strings.Contains(pane, "0 tokens") {
+		t.Fatalf("the settings tab names the window unknown:\n%s", pane)
+	}
+	m.resident.Context = 1_048_574
+	if foot := ansi.Strip(m.chatFoot(m.width)); !strings.Contains(foot, "31K/1M") {
+		t.Fatalf("a known window is shown as before:\n%s", foot)
+	}
+}
+
 // The measured bar lands in the live footer, warning color included, without
 // pushing the frame past its width.
 func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
@@ -1657,6 +1683,63 @@ func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
 		"error": "model output budget exhausted; increase --max-tokens and resume this goal", "recovered": true, "streak": 1.0}}))
 	if strings.Contains(block, "error") || strings.Contains(block, "--max-tokens") || !strings.Contains(block, "retries in smaller pieces (1 of 3") {
 		t.Fatalf("a handled cut-off is a quiet note:\n%s", block)
+	}
+}
+
+func TestAWideTerminalStreamsTheReasoningsLastLinesUntilTheText(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.width, m.height = 200, 40
+	tw := m.transcriptWidth(m.width)
+	var reasoning []string
+	for i := 1; i <= 9; i++ {
+		reasoning = append(reasoning, fmt.Sprintf("step %d of the plan", i))
+	}
+	long := "and a last thought long enough to wrap: " + strings.Repeat("word ", 40)
+	m.chat.live = residentLive{active: true, turn: "t1", reasoning: strings.Join(reasoning, "\n") + "\n" + long + "\n"}
+	m.syncChat()
+	block := m.liveInline(tw)
+	plain := strings.Split(ansi.Strip(block), "\n")
+	// the heading, then at most four dimmed gutter rows, the cursor at the end
+	if !strings.Contains(plain[0], "thinking") || len(plain) != 1+liveGistRows || !strings.HasSuffix(plain[len(plain)-1], "▌") {
+		t.Fatalf("the heading and the reasoning's last four rows:\n%s", ansi.Strip(block))
+	}
+	for _, r := range plain[1:] {
+		if !strings.HasPrefix(r, "  │ ") || ansi.StringWidth(r) > tw {
+			t.Fatalf("a dimmed gutter row inside the transcript's width (%d): %q", tw, r)
+		}
+	}
+	if !strings.Contains(block, emberDim.Render("│ step 9 of the plan")) || strings.Contains(block, "step 8") {
+		t.Fatalf("the last lines, dimmed (the wrapped thought takes the rest):\n%s", ansi.Strip(block))
+	}
+	if !strings.Contains(ansi.Strip(m.chat.transcript.View()), "step 9 of the plan") {
+		t.Fatal("the transcript shows them")
+	}
+	// a frame tick between updates leaves the block as it was (no transcript reset per frame)
+	m.tickN++
+	if again := m.liveInline(tw); again != block {
+		t.Fatalf("the block moved with the clock:\n%q\n%q", block, again)
+	}
+	// a tool call written with no reasoning says which tool is being prepared
+	m.chat.live = residentLive{active: true, turn: "t2", tools: []string{"terminal"}}
+	if b := ansi.Strip(m.liveInline(tw)); !strings.Contains(b, "preparing terminal▌") {
+		t.Fatalf("preparing the tool:\n%s", b)
+	}
+	// the reply text replaces the reasoning
+	m.chat.live = residentLive{active: true, turn: "t1", reasoning: strings.Join(reasoning, "\n"), text: "Here is the plan."}
+	m.syncChat()
+	if b := ansi.Strip(m.liveInline(tw)); !strings.Contains(b, "Here is the plan.▌") || strings.Contains(b, "step 9") || strings.Contains(b, "│") {
+		t.Fatalf("the text replaces the reasoning:\n%s", b)
+	}
+	// the landed turn folds the reasoning into the collapsed thinking line, as before
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 50, Goal: "original", Kind: "assistant",
+		Data: map[string]any{"content": "Here is the plan.", "reasoning": strings.Join(reasoning, "\n")}}}})
+	m.syncChat()
+	view := ansi.Strip(m.chat.transcript.View())
+	if m.liveInline(tw) != "" || !strings.Contains(view, "thinking · 9 lines") || strings.Contains(view, "step 9") || strings.Contains(view, "▌") {
+		t.Fatalf("landed, the reasoning folds:\n%s", view)
 	}
 }
 

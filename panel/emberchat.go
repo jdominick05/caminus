@@ -111,6 +111,7 @@ type residentLive struct {
 	active, hold          bool
 	top                   int
 	wrapText, wrapThink   *wrapCache // finished lines wrapped once per turn (body)
+	wrapGist              *wrapCache // the reasoning wrapped for the wide transcript's dimmed last lines (liveInline)
 }
 
 // wrapCache keeps the wrapped, styled lines of a growing text's finished part (everything up to its last newline),
@@ -896,12 +897,36 @@ func (m emberModel) liveInline(w int) string {
 	// no spinner here: a frame that changed this block reset the whole transcript (a render works on a copy, so every
 	// tick between live updates redrew it: 5.7 against 3.2 ms a frame at 2000 events); the activity line moves instead
 	rows := []string{m.liveWho() + emberDim.Render("  live")}
-	for _, ln := range l.reply(min(max(10, w-4), readingWidth)) {
-		rows = append(rows, "  "+ln)
+	width := min(max(10, w-4), readingWidth)
+	if l.text != "" {
+		for _, ln := range l.reply(width) {
+			rows = append(rows, "  "+ln)
+		}
+	} else {
+		// no reply text yet: a model thinking or writing a tool call sent nothing the block showed, so it looked
+		// frozen for most of a turn. Its reasoning's last lines show dimmed (the text replaces them; the landed turn
+		// folds them as before), else the tool being prepared.
+		if strings.TrimSpace(l.reasoning) != "" {
+			if l.wrapGist == nil {
+				l.wrapGist = &wrapCache{} // (a fixture without one; the live handler gives each turn its own)
+			}
+			// (a tab is one cell to the wrapper and up to eight on screen; trailing newlines would show empty rows)
+			text := strings.TrimRight(strings.ReplaceAll(residentText(l.reasoning), "\t", "    "), "\n")
+			lines := l.wrapGist.wrap(text, max(8, width-2), func(s string) string { return s })
+			for _, ln := range lines[max(0, len(lines)-liveGistRows):] {
+				rows = append(rows, "  "+emberDim.Render("│ "+ln))
+			}
+		}
+		if len(l.tools) > 0 {
+			rows = append(rows, "  "+emberDim.Render("preparing ")+emberTool.Render(residentText(strings.Join(l.tools, ", "))))
+		}
 	}
 	rows[len(rows)-1] += emberBusy.Render("▌")
 	return strings.Join(rows, "\n")
 }
+
+// liveGistRows is how many of the reasoning's last lines a wide transcript shows while no reply text has come.
+const liveGistRows = 4
 
 // liveWho is the live reply's heading: who is writing (thinking while only reasoning has come).
 func (m emberModel) liveWho() string {
@@ -1406,6 +1431,11 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
 			text, _ := result["text"].(string)
 			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
+		}
+		if str("name") == "browser" && result["error"] == nil {
+			panel, _ := e.Data["panel"].(map[string]any)
+			return toolCard("browser", browserSubject(nil, result), browserMeta(result, c.home, c.cwd), true, c.expanded,
+				browserLines(result, panel), w)
 		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)

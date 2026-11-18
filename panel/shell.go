@@ -381,8 +381,8 @@ func labBadge(model string) string {
 // powerline pills; elsewhere they are joined by a dot.
 type status struct {
 	brain        string
-	cwd          string // the folder the agent works in, left of the context pill; empty hides it
-	used, window int
+	cwd          string     // the folder the agent works in, left of the context pill; empty hides it
+	used, window int        // window 0: unknown
 	compact      float64    // the compaction threshold as a fraction of the window; the bar warms toward it
 	usd          float64    // this goal's spend; negative hides the segment (an unpriced brain)
 	usdDay       float64    // today's spend across goals; shown with usd when positive
@@ -422,9 +422,13 @@ func statusLine(s status, w int) string {
 	if s.cwd != "" {
 		segs = append(segs, emberCode.Render(clipPath(s.cwd, max(12, w/5))))
 	}
-	segs = append(segs,
-		emberDim.Render(fmt.Sprintf("%s/%s ", short(s.used), short(s.window)))+bar,
-	)
+	// an unknown window (a brain whose server reports none) shows the tokens in use alone, beside an empty bar: "/0"
+	// read as a full window of nothing
+	gauge := short(s.used)
+	if s.window > 0 {
+		gauge += "/" + short(s.window)
+	}
+	segs = append(segs, emberDim.Render(gauge+" ")+bar)
 	if s.usd >= 0 {
 		seg := strings.TrimSpace(fmt.Sprintf("%s%.2f", g.cost, s.usd))
 		if s.usdDay > 0 {
