@@ -5897,7 +5897,7 @@ for line in sys.stdin:
             messages=rt.store.goal(gid)['messages']
             # The bar shows the request as sent, its trailing context message included.
             tail=[c] if (c:=rt.context_message(gid)) else []
-            measured=rt.model.tokens([rt.system(),*messages,*tail],TOOLS)
+            measured=rt.model.tokens([rt.system(),*messages,*tail],rt.tools)   # (what is sent: no browser without a Chrome)
             out,compacted=rt._compact(gid,messages)
             self.assertEqual((out,compacted),(messages,False))
             note=json.loads((self.home/'context.json').read_text())
