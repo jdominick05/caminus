@@ -131,7 +131,7 @@ long sessions. Raw `/v1/completions` output is unchanged.
 
 `caminus ember setup` ends with a PASS / FAIL line per check, like the doctor; the
 [Ember guide](ember.md#troubleshooting) explains each one, and `caminus ember agent status NAME` shows an agent's goals
-and the last error.
+and the last error. Ember is an experiment: check [its known limits](ember.md#known-limits) too.
 
 ## Disk space
 

@@ -3,7 +3,7 @@
 By the end of this page your coding tool will be talking to a model running in Caminus. A harness is the tool you code
 with: Qwen Code, Hermes Agent, Claude Code, or anything that speaks the OpenAI or Anthropic API.
 
-## Qwen Code (the easiest)
+## Qwen Code (recommended)
 
 The panel sets it up for you: press `i` to install it, `u` to set it up for the running server, then `c` to open it.
 From a terminal:
@@ -107,6 +107,9 @@ conversation without pushing it out. A conversation you leave for 8 hours, or on
 is saved to disk and comes back in about a second.
 
 ## An agent with its own user (experimental)
+
+This is Ember's lower layer; [Ember](ember.md) is the agent built on it, an experiment with
+[known limits](ember.md#known-limits).
 
 Instead of a fixed tool list, an agent can get an environment: a second user on this machine (`caminus-agent` by
 default) that it reaches over SSH and can do anything in. Your own files, keys and processes stay out of its reach by

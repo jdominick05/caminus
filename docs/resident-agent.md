@@ -17,7 +17,8 @@ terminal under the account's normal permissions.
 ## Start and use a resident
 
 New here: [the quickstart](ember-quickstart.md) goes from install to the first conversation, and [the guide](ember.md)
-covers the security model, where things live and troubleshooting. This page is the reference. After `caminus ember
+covers the security model, where things live and troubleshooting; read its [known limits](ember.md#known-limits)
+first. This page is the reference. After `caminus ember
 setup` (one root script, then the command again):
 
 ```sh

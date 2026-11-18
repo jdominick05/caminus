@@ -14,10 +14,10 @@
 </p>
 
 <p align="center">
-  <b>Fast local models on your AMD Radeon RX 7900 cards, and an AI agent that works with them.</b><br>
+  <b>Fast local coding models on your AMD Radeon RX 7900 cards.</b><br>
   Caminus is an inference engine written from the GPU kernels up for Radeon RDNA3 cards; on the same cards it writes 1.1
-  to 2.4 times as fast as llama.cpp at short context. Ember, its agent environment, gives an AI agent its own account on
-  your machine: you give it goals and steer it while it works, on a local model or a paid API.
+  to 2.4 times as fast as llama.cpp at short context. It serves Qwen Code, and any OpenAI- or Anthropic-compatible tool,
+  from your own machine.
 </p>
 
 > [!WARNING]
@@ -26,14 +26,10 @@
 > [open an issue](https://github.com/jdominick05/caminus/issues/new/choose) and paste the output of `caminus doctor`.
 > Every report helps.
 
-<p align="center">
-  <img src="docs/ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
-</p>
-
 ## Get started
 
 You need Linux, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source). Four steps: install,
-open the panel, start the model for your cards, then set up Ember.
+open the panel, start the model for your cards, then set up Qwen Code.
 
 ### 1. Install
 
@@ -56,8 +52,7 @@ The build needs Docker that your user can run (`docker run hello-world` works). 
 
 **Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
 release is built with the same recipe and signed, and its provenance can be checked against the source
-([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3). Ember is in the package
-from 0.3.0 on (on PyPI from 0.3.1: 0.3.0's upload failed).
+([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3).
 
 ### 2. Open the panel
 
@@ -74,7 +69,7 @@ harnesses. If anything looks wrong, `caminus doctor` checks the machine ([troubl
 
 ### 3. Start the model for your setup
 
-| Your cards | What runs | Ember's default local model |
+| Your cards | What runs | Start with |
 |---|---|---|
 | One XT | ThinkingCap, the plain Qwen3.8 27B | ThinkingCap |
 | One XTX | Those two, plus Qwen3-30B-A3B and Swift 1.5 | Swift 1.5 |
@@ -83,29 +78,22 @@ harnesses. If anything looks wrong, `caminus doctor` checks the machine ([troubl
 | Two XT | Two-card Swift 1.5, ThinkingCap or Qwen3-30B-A3B, or two one-card models side by side; no Coder. Untested: reports are welcome. | ThinkingCap |
 
 Download and start it from the panel, or `caminus pull MODEL && caminus start MODEL`. Qwen3-30B-A3B is the fastest
-writer on one 24 GB card but is not Ember's default yet: it finishes fewer agent tasks for now. Every model, its speed
-and its context: [models](docs/models.md).
+writer on one 24 GB card, but it finishes fewer agent tasks for now. Every model, its speed and its context:
+[models](docs/models.md).
 
-### 4. Set up Ember
+### 4. Set up Qwen Code
+
+In the panel, press `i` to install Qwen Code (once), `u` to set it up for the running server, then `c` to open it. Or
+from a terminal (Qwen Code needs Node.js 22 or newer):
 
 ```bash
-caminus ember setup                               # writes the one root step and says how to run it
-sudo sh ~/.local/share/caminus/env-setup.sh       # the agent's account, its group and the shared folders; safe to rerun
-caminus ember setup                               # installs the agent's side; every line should say PASS
-caminus ember agent install
-caminus ember agent init resident --model MODEL_ID --endpoint http://127.0.0.1:8092/v1
-caminus ember agent start resident
-caminus ember ui
+caminus qwen-code setup --install   # installs Qwen Code and points it at your running server
+caminus qwen                        # starts Qwen Code on that server
 ```
 
-`caminus ember setup` names the default model for your cards at the end; `MODEL_ID` is what the running server reports.
-Ember works the same on a paid API, through a key relay that holds your key and caps the day's spend. The
-[Ember quickstart](docs/ember-quickstart.md) walks through all of it, and [the guide](docs/ember.md) explains how it works.
-After you upgrade Caminus (`pip install -U caminus`), run `caminus ember agent install` again: a running agent takes the
-new runtime between goals ([every command](docs/resident-agent.md)).
-
-Prefer another harness? The panel sets up [Qwen Code](docs/harnesses.md) on the same server, and any OpenAI- or
-Anthropic-compatible client can use it. The [quickstart](docs/quickstart.md) covers the panel and Qwen Code.
+Your own Qwen Code settings in `~/.qwen` stay untouched. [Harnesses](docs/harnesses.md) has the rest: side questions,
+the optional advisor, Hermes Agent, Claude Code, and the addresses for any OpenAI- or Anthropic-compatible client. The
+[quickstart](docs/quickstart.md) walks through the panel and Qwen Code step by step.
 
 **Nightly builds.** When the `testing` branch changes, it is built overnight and published as a
 [pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
@@ -156,6 +144,36 @@ Decode is how fast a model writes, at short context. Prompt reading, context siz
 Qwen3-30B-A3B runs on Caminus's own code at every step, from reading the GGUF file to the output token, with no
 llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-a3b.md).
 
+## Experiments
+
+Early work that ships in the package but is not the recommended setup yet. Expect rough edges.
+
+### Ember
+
+<p align="center">
+  <img src="docs/ember-chat.svg" alt="Ember's chat: an agent reads the code, states what done looks like, fixes a bug, runs the tests, and the judge checks the finish" width="92%">
+</p>
+
+Ember (`caminus ember`) gives an AI agent its own account on your machine: you give it goals and steer it while it
+works, on a local model or a paid API. It is early and tested on one machine, and its setup assumes Debian or Ubuntu
+with systemd: read [its known limits](docs/ember.md#known-limits) before you set it up.
+
+```bash
+caminus ember setup                               # writes the one root step and says how to run it
+sudo sh ~/.local/share/caminus/env-setup.sh       # the agent's account, its group and the shared folders; safe to rerun
+caminus ember setup                               # installs the agent's side; every line should say PASS
+caminus ember agent install
+caminus ember agent init resident --model MODEL_ID --endpoint http://127.0.0.1:8092/v1
+caminus ember agent start resident
+caminus ember ui
+```
+
+`caminus ember setup` names the default model for your cards at the end; `MODEL_ID` is what the running server reports.
+A paid API goes through a key relay that holds your key and caps the day's spend. The
+[Ember quickstart](docs/ember-quickstart.md) walks through all of it, and [the guide](docs/ember.md) explains how it works.
+After you upgrade Caminus (`pip install -U caminus`), run `caminus ember agent install` again: a running agent takes the
+new runtime between goals ([every command](docs/resident-agent.md)).
+
 ## Documentation
 
 - **Use Caminus:** [quickstart](docs/quickstart.md) · [the panel](docs/panel.md) · [models](docs/models.md) ·
@@ -163,8 +181,8 @@ llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-
   [troubleshooting](docs/troubleshooting.md) ·
   [without the panel](docs/cli.md) · [configuration](docs/configuration.md) · [verify your download](docs/verifying.md) ·
   [what changed](CHANGELOG.md)
-- **The agent environment (`caminus ember`):** [quickstart](docs/ember-quickstart.md) · [the guide](docs/ember.md) ·
-  [every command and view](docs/resident-agent.md)
+- **Experiments: Ember, the agent environment (`caminus ember`):** [known limits](docs/ember.md#known-limits) ·
+  [quickstart](docs/ember-quickstart.md) · [the guide](docs/ember.md) · [every command and view](docs/resident-agent.md)
 - **Contribute:** [CONTRIBUTING.md](CONTRIBUTING.md) · [how it works](docs/dev/architecture.md) ·
   [building from source](docs/dev/building.md) · [testing](docs/dev/testing.md)
 - **AI agents working on this code:** [AGENTS.md](AGENTS.md)
