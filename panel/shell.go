@@ -221,15 +221,9 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		return line
 	}
 	// an open card shows everything: long lines wrap under the rule, nothing is cut
-	out := append([]string{line}, ruled(body, cardRule(), cardRule(), w, func(b, piece string) string {
-		switch {
-		case strings.HasPrefix(b, "+"):
-			return emberCtxOK.Render(piece)
-		case strings.HasPrefix(b, "-"):
-			return emberCtxHot.Render(piece)
-		}
-		return emberDim.Render(piece)
-	})...)
+	// (all dim: a body is a command's output, a note, a result, never a diff: editCard draws those, and a "- " list in
+	// an advisor's review was drawn red as removed lines)
+	out := append([]string{line}, ruled(body, cardRule(), cardRule(), w, func(_, piece string) string { return emberDim.Render(piece) })...)
 	return strings.Join(out, "\n")
 }
 

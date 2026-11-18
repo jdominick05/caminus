@@ -434,6 +434,7 @@ func emberMarkdownStyle() ansi.StyleConfig {
 	if st.Item.BlockPrefix == "" {
 		st.Item.BlockPrefix = "• "
 	}
+	st.List.LevelIndent = 2 // a nested list steps in under its parent (with none, an advisor's sub-points read as points)
 	// a table's header and cells in the body's text colour: glamour draws the cells in this style (its borders in the
 	// terminal's own colour), and the chrome role it had (a border grey) left the words barely readable on a dark
 	// background while the rules around them were bright. glamour v2 has one style for header and cells.

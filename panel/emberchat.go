@@ -38,7 +38,7 @@ type residentChat struct {
 	markdown                                *glamour.TermRenderer
 	cardMarkdown                            *glamour.TermRenderer // an open card's renderer: narrower by its rule's 5 cells
 	mdSource                                bool                  // Ctrl+Y: open cards show Markdown as its source, not rendered
-	mdCache                                 map[string]string     // each card text's drawing by cardMarkdown ("": as it is)
+	mdCache                                 map[mdKey]string      // each card text's drawing by cardMarkdown ("": as it is)
 	calls                                   map[string]callInfo   // each tool call's arguments by id: its result's card names what it acted on
 	question                                *emberReq
 	questionChoice                          int
@@ -315,9 +315,11 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 		m.statusAt = time.Now() // (the online clock ticks on from here between refreshes)
 	}
 	defer m.notifyResident(msg.events)
-	defer m.noteTurnTokens() // (after the events and any live reset below)
+	defer m.noteTurnTokens()  // (after the events and any live reset below)
+	var fresh []residentEvent // the events not seen before
 	for _, e := range msg.events {
 		if e.Seq > m.chat.seq {
+			fresh = append(fresh, e)
 			if len(m.residentEvents) >= maxResidentEvents {
 				// Bounded: a resident that runs for days must not grow the panel without limit. The oldest
 				// events leave memory; the journal on the agent side keeps them.
@@ -376,6 +378,7 @@ func (m *emberModel) receiveResident(msg residentMsg) {
 	if m.chat.compose.Value() == "" && !m.chat.sending && !m.chat.forceNew && m.chat.selectID == "" {
 		m.targetSelectedGoal()
 	}
+	m.followAdvisorCalls(fresh)
 	m.syncQuestion()
 	m.syncChat()
 }
@@ -486,7 +489,7 @@ func (m *emberModel) syncChat() {
 		// a command's output keeps its line breaks, and its links are plain text (emberCardStyle)
 		m.chat.cardMarkdown, _ = glamour.NewTermRenderer(glamour.WithStyles(emberCardStyle()), glamour.WithPreservedNewLines(),
 			glamour.WithWordWrap(max(10, min(w-8, readingWidth))))
-		m.chat.mdCache = map[string]string{}
+		m.chat.mdCache = map[mdKey]string{}
 		m.chat.content, m.chat.rendered, m.chat.renderWidth = "", 0, w
 	}
 	// a command first seen running and later seen to end: its card is drawn again with the exit
@@ -1360,26 +1363,46 @@ func looksLikeMarkdown(text string) bool {
 	return marks >= 2 && 2*own > lines
 }
 
-// openCardMarkdown is an open card's text rendered as Markdown to sit behind the card's rule, "" when it is drawn as
-// it is: the source view (Ctrl+Y), text that is not clearly Markdown (looksLikeMarkdown), more than an open card shows
-// (its last 5000 lines), or text renderWith leaves as it is. Each text is rendered once per renderer (mdCache).
-func (c *residentChat) openCardMarkdown(text string) string {
-	if c.mdSource || c.cardMarkdown == nil {
+// openCardMarkdown is an open card's text (cardSource) rendered as Markdown to sit behind the card's rule, "" when it
+// is drawn as it is: the source view (Ctrl+Y), a program's output that is not clearly Markdown (looksLikeMarkdown),
+// more than an open card shows (its last 5000 lines), or text renderWith leaves as it is. Each text is rendered once
+// per renderer (mdCache).
+func (c *residentChat) openCardMarkdown(e residentEvent) string {
+	text, prose := cardSource(e)
+	if c.mdSource || c.cardMarkdown == nil || text == "" {
 		return ""
 	}
-	if out, ok := c.mdCache[text]; ok {
+	key := mdKey{text, prose}
+	if out, ok := c.mdCache[key]; ok {
 		return out
 	}
 	out := ""
-	if strings.Count(text, "\n") < 5000 && looksLikeMarkdown(text) && renderable(residentText(text)) {
+	if strings.Count(text, "\n") < 5000 && (prose || looksLikeMarkdown(text)) && renderable(residentText(text)) {
 		if out = renderWith(c.cardMarkdown, c.renderWidth-8, text); out == residentText(text) {
 			out = "" // (its drawing passed mdMaxOut)
 		}
 	}
 	if c.mdCache != nil {
-		c.mdCache[text] = out
+		c.mdCache[key] = out
 	}
 	return out
+}
+
+// mdKey is a card text in the drawing cache, with whether it is a model's words (cardSource).
+type mdKey struct {
+	text  string
+	prose bool
+}
+
+// noteCard is a note whose text (cardSource) can be Markdown: open, its body rendered (openCardMarkdown) or its lines
+// as they are.
+func (c *residentChat) noteCard(e residentEvent, what, meta string, open bool, body []string, w int) string {
+	if open {
+		if md := c.openCardMarkdown(e); md != "" {
+			return toolCard("note", what, meta, true, true, nil, w) + "\n" + cardBody(md, w)
+		}
+	}
+	return toolCard("note", what, meta, true, open, body, w)
 }
 
 // ruled puts lines behind a card's rule: first before the first line, rest before the others. A line wider than the
@@ -1508,7 +1531,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if strings.TrimSpace(out) != "" {
 			body = lines(ansi.Strip(out), 5000)
 		}
-		if md := c.openCardMarkdown(cardOutput(e)); md != "" {
+		if md := c.openCardMarkdown(e); md != "" {
 			return toolCard(kind, "$ "+str("command"), meta, str("error") == "", true, nil, w) + "\n" + cardBody(md, w)
 		}
 		return toolCard(kind, "$ "+str("command"), meta, str("error") == "", true, body, w)
@@ -1674,7 +1697,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				head = sandboxLines(result)
 			}
 			if md := ""; open {
-				if md = c.openCardMarkdown(cardOutput(e)); md != "" {
+				if md = c.openCardMarkdown(e); md != "" {
 					return toolCard("output", residentText(str("name")), meta, code == 0, true, head, w) + "\n" + cardBody(md, w)
 				}
 			}
@@ -1797,7 +1820,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if str("level") == "need_you" {
 			return turn("!", "needs you", cRed, c.renderMarkdown(str("text")))
 		}
-		return toolCard("note", "fyi: "+firstLine(str("text")), "", true, open, lines(str("text"), 20), w)
+		return c.noteCard(e, "fyi: "+firstLine(str("text")), "", open, lines(str("text"), 20), w)
 	case "scheduled":
 		at, _ := e.Data["wake_at"].(float64)
 		return toolCard("note", "parked until "+time.Unix(int64(at), 0).Format("15:04"), firstLine(str("note")), true, false, nil, w)
@@ -1805,7 +1828,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("note", "asked its advisor", residentText(str("model"))+" · "+firstLine(str("question")), true, false, nil, w)
 	case "advisor_review":
 		// what the advisor said, which the agent reads before its next step (a card without it said nothing)
-		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · "+firstLine(str("advice")), true, open, lines(str("advice"), 30), w)
+		return c.noteCard(e, "advisor review, asked for by you", residentText(str("model"))+" · "+firstLine(str("advice")), open, lines(str("advice"), 30), w)
 	case "watchdog_advised":
 		return toolCard("note", "the advisor stepped in", "the goal was about to pause ("+residentText(str("reason"))+"); its advice went to the agent", true, false, nil, w)
 	case "woke":
@@ -2040,9 +2063,9 @@ func (m emberModel) recallStep(k string, asked bool) (emberModel, bool) {
 // btwRows is the most answer lines the /btw section shows at once: a third of the terminal.
 func (m emberModel) btwRows() int { return max(3, min(14, m.height/3)) }
 
-// btwSection is the /btw side answer in its own box above the composer: a small Ember on the left (still while it
-// thinks, it blinks), the answer on the right, scrolled with Shift+Up / Shift+Down; Esc on an empty draft closes it.
-// The goal keeps nothing of it.
+// btwSection is the popup in its own box above the composer: the /btw side answer (the goal keeps nothing of it),
+// scrolled with Shift+Up / Shift+Down, or an advisor call while it runs (who asked, the advisor's model, the seconds
+// it has taken) and why it failed; Esc on an empty draft closes it.
 func (m emberModel) btwSection(w int) string {
 	b := m.chat.btw
 	if !b.open {
@@ -2051,15 +2074,27 @@ func (m emberModel) btwSection(w int) string {
 	var art []string // (no Ember beside the answer; the section heading says what it is)
 	artW := 0
 	textW := max(10, min(readingWidth, w-4-artW)) // (the frame and its inner margin: a body line is 1 + textW, the box textW + 2)
-	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-4))
-	body := []string{emberBusy.Render("you ") + q}
+	asker, label, note := "you", "by the way", "not added to the goal · "
+	thinking := " thinking… (no tools; nothing enters the goal)"
+	if b.advisor {
+		asker, label, note = b.asker, "advisor", "its advice goes to the agent · "
+		thinking = " asking the advisor"
+		if model := residentText(m.resident.Advisor); model != "" {
+			thinking += " (" + model + ")"
+		}
+		thinking += fmt.Sprintf("… %ds", int(time.Since(b.since).Seconds()))
+	}
+	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-ansi.StringWidth(asker)-2))
+	body := []string{emberBusy.Render(asker+" ") + q}
 	rows := m.btwRows()
 	keys := "esc closes"
 	switch {
 	case b.loading:
-		body = append(body, emberDim.Render(spin[m.tickN%len(spin)]+" thinking… (no tools; nothing enters the goal)"))
+		body = append(body, emberDim.Render(spin[m.tickN%len(spin)]+thinking))
 	case b.err != "":
-		body = append(body, emberCtxHot.Render(emberClip("could not ask: "+b.err, textW)))
+		for _, l := range strings.Split(ansi.Wordwrap("could not ask: "+b.err, textW, " "), "\n") {
+			body = append(body, emberCtxHot.Render(emberClip(l, textW)))
+		}
 	default:
 		var lines []string
 		for _, l := range b.lines {
@@ -2077,8 +2112,8 @@ func (m emberModel) btwSection(w int) string {
 	surface, border := overlayColors()
 	seq, edge := bgSeq(surface), lipgloss.NewStyle().Foreground(lipgloss.Color(border))
 	inner := min(w-2, textW+2)
-	title := " " + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render("by the way") + " " +
-		emberDim.Render(emberClip("not added to the goal · "+keys, max(4, inner-16))) + " "
+	title := " " + lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(label) + " " +
+		emberDim.Render(emberClip(note+keys, max(4, inner-16))) + " "
 	fill := max(0, inner-1-ansi.StringWidth(title))
 	out := []string{edge.Render("╭─") + title + edge.Render(strings.Repeat("─", fill)+"╮")}
 	for i, l := range body {

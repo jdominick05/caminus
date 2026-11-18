@@ -525,7 +525,7 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	}
 	md := ""
 	if c.opened[e.Seq] && (name == "terminal" || name == "sandbox") {
-		md = c.openCardMarkdown(cardOutput(e))
+		md = c.openCardMarkdown(e)
 	}
 	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq], md)
 }
