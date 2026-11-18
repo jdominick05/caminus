@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 
 from . import discovery, sandbox
 from .store import atomic_json
-from .terminal import alive, read_state
+from .terminal import ENDED, alive, read_state
 
 NAMES = tuple(n for n in discovery.COMMANDS['web'] if 'chrom' in n)    # (the names discover looks for)
 ACTIONS = ('open', 'snapshot', 'click', 'type', 'select', 'press', 'scroll', 'back', 'eval', 'screenshot', 'console',
@@ -293,7 +293,8 @@ def call(rt, gid, action_id, args):
             result = dict(got['result'])
             break
         state = read_state(job)
-        if state.get('phase') in ('finished', 'interrupted') or (state.get('worker') and not alive(state['worker'])):
+        # (read_state reads a worker that is gone or a zombie as stopped, and a SIGTERMed one writes stopped itself)
+        if state.get('phase') in ENDED:
             raise ValueError(f'the browser stopped during this call: {_ended(job)}')
         if time.monotonic() > end:
             raise ValueError(f'the browser did not answer in {CALL_TIMEOUT} s')
