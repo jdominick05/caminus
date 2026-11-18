@@ -278,11 +278,14 @@ class Advisor:
 
     def _spend(self, cfg, model):
         usage, served = model.last_usage or {}, (model.last_call or {}).get('served')
-        usd = price(cfg['model'], usage, served) or 0.0
-        if cfg.get('kind') in catalog.OPENCODE:
+        plan = cfg.get('kind') in catalog.OPENCODE
+        # (a plan has no Anthropic fallback, so a reply naming another model is still the requested one: priced by its
+        #  own list price, never at price()'s highest-known rates for an unknown serving model)
+        usd = price(cfg['model'], usage, None if plan else served) or 0.0
+        if plan:
             # a plan call counts against the advisor's budget at no less than its list price: inside the Go allowance
             # the plan bills $0, and the owner's daily limit still holds (usage without opencode: the list price)
-            usd = max(usd, price(cfg['model'], {k: v for k, v in usage.items() if k != 'opencode'}, served) or 0.0)
+            usd = max(usd, price(cfg['model'], {k: v for k, v in usage.items() if k != 'opencode'}) or 0.0)
         usd = usd if math.isfinite(usd) and usd > 0 else 0.0     # (the ledger never goes NaN or below zero)
         state = self._state()
         day = state.setdefault(datetime.date.today().isoformat(), dict(usd=0.0, calls=0))

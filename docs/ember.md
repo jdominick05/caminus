@@ -201,7 +201,8 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   `caminus ember agent eyes NAME --auto` (ministral-8b-latest on a Mistral relay provider, else Claude Haiku 5.5 on an
   Anthropic one) or a model of your choice, `--provider mistral --model ministral-14b-latest`. `--off` turns them off
   again, and `--budget-usd` sets their daily budget ($0.25 by default, counted by the agent like the advisor's and
-  inside the relay's cap). The candidates, with the prices the relays are set up with (USD per million tokens,
+  inside the relay's cap; eyes on an OpenCode plan provider count at no less than the model's list price, as a plan
+  advisor does). The candidates, with the prices the relays are set up with (USD per million tokens,
   input / output):
 
   | Model | Relay | Price | An 860x480 terminal screenshot | On four images (terminal, chart, form, diagram) |

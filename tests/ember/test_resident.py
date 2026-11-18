@@ -5070,8 +5070,8 @@ for line in sys.stdin:
         lists `listing`; POST answers from a queue of (reply, usage), usage None for a reply cut before its usage. Chat
         Completions: a message dict as one JSON body, or a list of deltas as SSE with the usage on the finish chunk
         when include_usage asks. Messages: a list of blocks as an event stream, the usage on message_delta. Usage
-        carries cost and opencode as the gateway's does. No x-opencode-session: 400 MissingSessionID, as the gateway
-        answers. Every reply has an x-opencode-log-id. Returns (port, queue, seen, stop)."""
+        carries cost and opencode as the gateway's does (a Messages reply names usage's _model in place of the requested
+        one, when given). No x-opencode-session: 400 MissingSessionID, as the gateway answers. Every reply has an x-opencode-log-id. Returns (port, queue, seen, stop)."""
         import http.server, threading
         queue,seen=deque(),[]
         class OC(http.server.BaseHTTPRequestHandler):
@@ -5096,9 +5096,10 @@ for line in sys.stdin:
                     return s.send(200,dict(id='m0',type='message',role='assistant',model=body['model'],content=reply,
                                            stop_reason=stop,usage=usage))
                 if s.path.endswith('/messages'):
+                    usage=dict(usage) if usage is not None else None;named=(usage or {}).pop('_model',body['model'])
                     s.head(200,'text/event-stream');s.end_headers()
                     ev=lambda e:s.wfile.write(('event: %s\ndata: %s\n\n' % (e['type'],json.dumps(e))).encode())
-                    ev(dict(type='message_start',message=dict(id='m1',type='message',role='assistant',model=body['model'],content=[],
+                    ev(dict(type='message_start',message=dict(id='m1',type='message',role='assistant',model=named,content=[],
                                                               usage=dict(input_tokens=(usage or {}).get('input_tokens',0),output_tokens=1))))
                     for i,b in enumerate(reply):
                         if b['type']=='text':
@@ -5978,10 +5979,14 @@ for line in sys.stdin:
                 booking=rt.store.enqueue('Booking.');before=rt.advisor.spent_today()
                 for usage in (dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='go')),
                               dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='balance')),
-                              dict(input_tokens=300,output_tokens=40)):
+                              dict(input_tokens=300,output_tokens=40),
+                              # a reply naming another model: still the requested one's list price, never the
+                              # highest-known rates price() gives an unknown serving model
+                              dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='go'),
+                                   _model='qwen3.8-flash-20261101')):
                     queue.append(([dict(type='text',text='Advice.')],usage))
                     self.assertEqual(rt.advisor.ask(booking,'Booked?')['usd'],round(listed,5),usage)
-                self.assertAlmostEqual(rt.advisor.spent_today()-before,3*listed,places=5)
+                self.assertAlmostEqual(rt.advisor.spent_today()-before,4*listed,places=5)
                 # free time stays off the plan unless the owner allows it (brain.plan_allows, free_choice's rule): refused
                 # before anything is counted or sent; free_time.on_plan lets it through
                 free=rt.store.enqueue('A stretch.',kind='free')
