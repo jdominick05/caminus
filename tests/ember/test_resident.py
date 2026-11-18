@@ -1438,6 +1438,27 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
             self.assertTrue(sandbox.box_dir(self.home,keep).exists(),'a paused goal can resume: its box stays')
         finally:rt.mail.close();rt.store.close()
 
+    def test_ending_a_goal_kills_a_box_whose_worker_is_gone(self):
+        # A worker killed outright (SIGKILL, a crash) leaves "running" in its state: read_state reads that job as
+        # stopped with no end on record, and its command can still run. Ending the goal must still kill it, then
+        # remove the box. (No bwrap needed: a job dir, a dead worker pid and a live command in its own session.)
+        from caminus.ember.resident import sandbox
+        from caminus.ember.resident.terminal import read_state
+        gone=subprocess.Popen(['true']);gone.wait()
+        cmd=subprocess.Popen(['sleep','60'],start_new_session=True)
+        try:
+            d=sandbox.box_dir(self.home,'gk');d.mkdir(parents=True)
+            job=self.home/'jobs'/uuid.uuid4().hex;job.mkdir(parents=True)
+            (job/'request.json').write_text(json.dumps(dict(command='sleep 60',cwd=str(d),box=dict(
+                goal='gk',box=str(d),folder='',hosts=[],limits=dict(time_s=600)))))
+            (job/'state.json').write_text(json.dumps(dict(phase='running',worker=gone.pid,pid=cmd.pid,
+                                                          started=time.time(),cwd=str(d))))
+            self.assertEqual(read_state(job)['phase'],'stopped')
+            self.assertTrue(sandbox.end(self.home,'gk'));self.assertFalse(d.exists())
+            self.assertEqual(cmd.wait(timeout=10),-signal.SIGKILL,'the command of a box whose worker is gone was killed')
+        finally:
+            if cmd.poll() is None:cmd.kill();cmd.wait()
+
     def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
         from caminus.ember.resident import advisor as adv, web, judge
         # a poll returns everything since the last poll (the preparation step read and lost the first chunk)

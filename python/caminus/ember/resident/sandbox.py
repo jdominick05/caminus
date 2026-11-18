@@ -751,7 +751,7 @@ def _rmtree(path):
 def end(home, gid, store=None):
     """The goal ended: kill its boxes still running, report the connections no poll returned (as the runtime's
     sandbox_connections events, with store), then remove its box directory."""
-    from .terminal import read_state, alive
+    from .terminal import read_state, alive, exited
     jobs = Path(home) / 'jobs'
     for job in jobs.iterdir() if jobs.is_dir() else []:
         try:
@@ -762,13 +762,17 @@ def end(home, gid, store=None):
             continue
         state = read_state(job)
         pid = state.get('pid')
-        if state.get('phase') in ('starting', 'running') and isinstance(pid, int) and alive(pid):
+        # (a job read as stopped with no end on record lost its worker, not its command: its box can still run, so
+        # it is killed too, as terminal.signal_running reaches it)
+        if state.get('phase') in ('starting', 'running', 'stopped') and 'ended' not in state \
+                and isinstance(pid, int) and alive(pid):
             try:
                 os.killpg(pid, signal.SIGKILL)
             except OSError:
                 pass
             end_by = time.monotonic() + 3
-            while time.monotonic() < end_by and read_state(job).get('phase') in ('starting', 'running'):
+            while time.monotonic() < end_by and (read_state(job).get('phase') in ('starting', 'running')
+                                                 or not exited(pid)):
                 time.sleep(.05)
         late = view(job, read_state(job)).get('connections')
         if late and store is not None:

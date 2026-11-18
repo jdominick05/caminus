@@ -176,6 +176,10 @@ python -I tools/emberlab/lab.py say s1 "Try the tools in your work folder and te
   answers it. You see exactly what a model sees, gate refusals included.
 - **The TUI.** `tui.py --session NAME --lab-out DIR` opens the chat on that session's home. It runs with its own
   config folders, so it never reads or writes your panel settings.
+- **Close it.** A box (and the Chrome in it) outlives its daemon by design, so `close` stops more than the daemon. It
+  also stops every job worker and command in the home's `jobs/*/state.json`, and the driven brain. It sends TERM, then
+  KILL to whatever is still running 10 s later, and prints what it had to kill. It signals a pid only when that process
+  names the session's folder, so a stale file can't reach anyone else's process.
 
 **Hosts and safety.**
 
