@@ -40,17 +40,17 @@ Scope credentials deliberately: give the agent user only short-lived, low-scope 
 
 ## 2. Provisioning
 
-`caminus ember setup` prints the exact sudo commands (they are run by you, never by an unattended agent): install and
+`caminus ember setup` writes one root script (`~/.local/share/caminus/env-setup.sh`; you run it with `sudo sh`, never an unattended agent; `--print` shows it, a second `setup` installs the agent's side) that does: install and
 start `openssh-server`, create the user with a locked password, create the `caminus-env` bridge group and put both
 users in it, the `render`/`video` groups for the agent user, the bridge directory `/srv/caminus-env-bridge` (root:
-group, 770, with `req/` and `res/`), enable linger, generate the harness key, and add one line to the agent user's
+group, sticky 1770, with setgid 2770 `req/`, `res/`, `notes/`, `leases/`), enable linger, generate the harness key, and add one line to the agent user's
 `authorized_keys`:
 
 ```
 from="127.0.0.1,::1",no-agent-forwarding,no-X11-forwarding,no-port-forwarding <harness pubkey>
 ```
 
-`caminus ember setup --agent-side` installs `~/bin/ask-root` as the agent user over SSH. `caminus ember status` checks
+The second `caminus ember setup` installs `~/bin/ask-root` as the agent user over SSH. `caminus ember status` checks
 each piece: the user exists, the key exists, `ssh` login works (`id -un` answers the agent user), the bridge is
 writable, `ask-root` is installed.
 
@@ -97,24 +97,19 @@ request, decision and result. `caminus ember audit --tail N` prints the last N. 
 it tells the agent what it is (a dedicated user on the human's real machine, not a sandbox), what it can do (full
 shell, network, GPU, its own home, persistent processes), what it cannot (the human's files and root), how to ask for
 root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the local model servers listen.
-`caminus ember prompt` prints it; `caminus ember setup --agent-side` installs it as the agent user's `~/ROBOTS.md`;
+`caminus ember prompt` prints it; `caminus ember setup` installs it as the agent user's `~/ROBOTS.md`;
 `caminus ember shell` points at it when opening a session.
 
 ## 7. The TUI (`caminus ember ui`) and the scriptable CLI
 
-`caminus ember ui` execs `caminus-panel env --user ... --bridge ... --audit ... --key ...` (panel/envui.go, same binary
-and build as the control panel). Seven live tabs (tab / 1-7), starting on **agent** (goals and activity): **requests** (ROOT: `a` approve — sudo runs on
-the released terminal via `tea.Exec` so your password prompt works, its output in a temp file shown as it grows, run
-and bounded as section 4 says, and the chat comes back when it exits or the wait runs out; `e` edit, `d` deny,
-`s` skip — ASK: `a` answer, a number picks a choice), **jobs** (detached processes in the agent user: `K` kill,
-`l` tail the log, `n` new job), **procs** (the agent user's busiest processes), **notes** (steering inbox: `n` new,
-`d` delete), **ctx** (servers and their `/props` windows), **audit** (log tail). Answering a question also appends
-the Q/A to the agent's `~/MEMORY.md`. Answer files and audit lines use the same JSON schema as `bridge.py` /
-`audit.py`, so `caminus ember watch` / `audit` and the TUI are interchangeable.
+`caminus ember ui` execs `caminus-panel ember --user ... --bridge ... --audit ... --key ... --cli ...` (panel/emberui.go,
+same binary and build as the control panel): the chat of [Resident agents](../resident-agent.md), with root requests and
+questions as prompts where you type. Answer files and audit lines use the same JSON schema as `bridge.py` /
+`audit.py`, so `caminus ember watch` / `audit` and the panel are interchangeable.
 
 For scripts and tests, everything is callable without the TUI: `caminus ember reqs --json`, `caminus ember answer ID
-approved|edited TEXT|denied|answered TEXT [--json] [--digest HASH]`, `jobs --json`, `notes --json`, `ctx --json`, `audit --json`,
-`memory` (print the agent's ~/MEMORY.md), `remember TEXT` (append to it). Go tests: panel/envui_test.go.
+approved|edited TEXT|denied|answered TEXT [--json] [--digest HASH]`, `jobs --json`, `ctx --json`, `audit --json`,
+`memory` (print the agent's ~/MEMORY.md), `remember TEXT` (append to it). Go tests: panel/emberui_test.go.
 
 Root `approved` and `edited` decisions require `--digest HASH`: copy the `_digest`
 from the same `env reqs --json` object whose command you reviewed. A changed request
@@ -134,8 +129,7 @@ is its own PTY. ROBOTS.md section "Long-running work and more terminals" tells t
 
 The bridge carries typed requests, not just root: `kind: "root"` (cmd) and `kind: "question"` (text, choices).
 Agent side: `~/bin/env-ask TEXT CHOICE...` prints the human's answer (a number picks a choice); `caminus ember ask`
-when the package is installed in that user. Harness side: `caminus ember watch` prompts for the answer, the TUI opens
-an answer line on `a`; both write `decision: "answered"` with the `answer` field, same schema otherwise.
+when the package is installed in that user. Harness side: `caminus ember watch` prompts for the answer, the chat asks where you type; both write `decision: "answered"` with the `answer` field, same schema otherwise.
 
 A work question waits `question_timeout` (15 minutes) while you are at the screen. While `presence.json` says you are
 away it waits on, until `question_timeout` after you come back, at most `question_away_max` (8 hours) from when it was
@@ -147,10 +141,10 @@ Root requests and GitHub hand-offs always time out after `question_timeout`: sil
 Steering runs the other way through the resident's own channel: a message, `/steer` or `caminus ember agent send
 --steer` reaches the running goal at its next step (the old notes inbox, `env say` / `env-note`, is gone).
 
-Memory: the agent's `~/MEMORY.md` (seeded by `setup --agent-side` from `env/prompt.py`'s MEMORY_TEMPLATE) is its
+Memory: the agent's `~/MEMORY.md` (seeded by `setup` from `ember/prompt.py`'s MEMORY_TEMPLATE) is its
 persistent, self-writable memory; ROBOTS.md tells it to read it every task and append learnings. `caminus ember
 memory` / `remember TEXT` read/append it from the harness side, and every answered question is auto-appended as a
-Q/A block (watch, TUI and `answer answered` all do this) — the learn loop.
+Q/A block (`watch` and `answer answered` do this; the chat does not) — the learn loop.
 
 Context: `caminus ember ctx` probes 127.0.0.1:8092-8101 `/props` and prints each running server's model and `n_ctx`
 (the real window, sized to the cards). The agent reads the same `/props` from inside its user and compacts itself
@@ -177,7 +171,7 @@ free port from 8092 is allocated. Every stateful path goes under the agent user'
 (state, kv, flight, qwen-home, XDG dirs — its own session home), model/drafter paths are remapped to the models
 bind-mount (`CAMINUS_ENV_MODELS`), and the server starts in a named tmux session running a generated
 `~/homes/NAME/run.sh` (guard + HIP_VISIBLE_DEVICES + `caminus serve ...`). `--dry-run` prints the launcher and the
-session command. In the TUI, `S` in the jobs tab runs this flow (model, then placement). `env stop NAME` kills
+session command. `env stop NAME` kills
 the job and the session. Provisioning for agent-user servers: the bind-mount lines in `caminus ember setup`
 (`/opt/caminus-runtime/{conda,src,models}` + `CAMINUS_ENV_PYTHON` / `CAMINUS_ENV_PKG` / `CAMINUS_ENV_MODELS`).
 

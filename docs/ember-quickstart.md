@@ -11,13 +11,8 @@ key relay.
 
 ## 1. Install
 
-```sh
-python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
-pip install caminus
-caminus ember --help
-```
-
-Ember is in the package from 0.3.0 on (on PyPI from 0.3.1). Ember itself needs no PyTorch; a local model does: [the quickstart](quickstart.md) installs it.
+Install Caminus ([the quickstart](quickstart.md#1-install-caminus)), then `caminus ember --help`. Ember is in the package
+from 0.3.0 on (on PyPI from 0.3.1) and needs no PyTorch; a local model does.
 
 The panel (`caminus ember ui`) ships inside the package. From a source checkout, build it first:
 `cd panel && go build -o caminus-panel .`
@@ -106,19 +101,10 @@ reply it is writing streams into the history as its newest block, and the right 
 and what it is running now. A narrower terminal shows the reply being written in a box under the history, and the
 current task and what runs now in two lines above where you type.
 
-- **Steer**: type while it works. A message reaches it at its next step; `/steer TEXT` redirects it.
-- **Answer**: questions and root requests ask where you type: pick with the arrows and Enter (a root command is yes or
-  no; Yes runs it under your sudo, never the agent's), or tell it something else in your own words. Esc leaves it
-  waiting; Tab brings it back. Nothing waits on you: an
-  unanswered question times out to the agent's recommended option, a permission question to no.
-- **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).
-- **Copy**: drag over any text on the screen; the release copies it ([the mouse](ember.md#the-mouse-clicks-and-copying)).
-- **Leave**: `/quit` closes the panel; the agent keeps working. `caminus ember ui` brings you back to the same
-  conversation.
+Keys and commands (steer, answer, stop, copy, leave): [the reference](resident-agent.md#the-panel-one-chat-with-overlays).
 
 With nothing to do, the agent has free time: it reads its journal, follows its own interests and keeps a studio
-(`/studio`). `caminus ember agent heartbeat resident now` starts a stretch now (after any running work);
-`caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). On a
+(`/studio`); it is off until you turn it on ([free time](resident-agent.md#free-time)). On a
 narrow terminal its thoughts run in the box under the history (the latest stay up between replies): its reasoning when
 the model shows it, else its words and the tools it calls. On a wide terminal, until the reply's words start, the
 streaming block shows the reasoning's last four lines dimmed (or "preparing" and the tool it is writing); the words
