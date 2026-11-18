@@ -156,8 +156,11 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 		gh = "GitHub " + c.github
 	}
 	ctx := ""
-	if c.ctx > 0 {
+	switch {
+	case c.ctx > 0:
 		ctx = " · " + shortTokens(c.ctxUsed) + "/" + shortTokens(c.ctx)
+	case c.ctxUsed > 0:
+		ctx = " · " + shortTokens(c.ctxUsed) // (an unknown window: the tokens in use alone, as the status line shows them)
 	}
 	rows := []string{
 		lipgloss.NewStyle().Foreground(cText).Render(emberClip(goal, inner-2)),

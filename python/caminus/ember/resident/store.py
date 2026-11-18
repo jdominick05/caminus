@@ -457,7 +457,8 @@ class Store:
             out.append(call)
         return dict(message, tool_calls=out) if changed else message
 
-    def action_result(self, action, result):
+    def action_result(self, action, result, panel=None):
+        """panel: what the event carries for the panel beside the result, never in the conversation."""
         with self.transaction():
             g = self.goal(action['goal'])
             # Only the runtime lock's owner calls this. Completed actions are never replayed.
@@ -475,7 +476,8 @@ class Store:
             # the result must not set the goal back to working (it did, so the watchdog could never stop a loop).
             keep = g['state'] in ('cancelled', 'paused', 'error', 'completed')
             self.update(g['id'], messages=[*g['messages'], msg], state=g['state'] if keep else 'working')
-            self.event('tool_result', dict(name=action['name'], call_id=action['call_id'], result=result), g['id'])
+            self.event('tool_result', dict(name=action['name'], call_id=action['call_id'], result=result,
+                                           **({'panel': panel} if panel else {})), g['id'])
 
     def aim(self, gid):
         """The goal's redirected aim, or None when it still works toward its prompt (the panel's goalAim rule)."""

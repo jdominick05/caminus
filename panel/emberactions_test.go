@@ -178,3 +178,49 @@ func TestASandboxCardIsMarkedAndSaysItsNetworkAndTheLimitHit(t *testing.T) {
 		t.Fatalf("the connections event is its own line:\n%s", v)
 	}
 }
+
+func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
+	snap := "- heading \"Thanks\" (level 1)\n- text \"sent ?who=Ada\"\n- link \"Home\" [e6] -> /\n- button \"Again\" [e7]"
+	result := map[string]any{"did": "clicked button \"Send\"", "title": "Done", "url": "http://127.0.0.1:8000/done.html?who=Ada",
+		"snapshot": snap, "network": map[string]any{"allowed": 3.0, "refused": []any{"10.0.0.5:80 (refused: LAN)"}}}
+	v := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e5"}, result, 200, "", ""))
+	for _, want := range []string{"browser", "clicked button \"Send\"", "Done · 127.0.0.1:8000/done.html?who=Ada", "1 refused",
+		"heading \"Thanks\"", "link \"Home\" [e6]"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("want %q in the compact card:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "button \"Again\"") {
+		t.Fatalf("the compact card shows a short excerpt of the snapshot:\n%s", v)
+	}
+	shot := ansi.Strip(actionCard("browser", map[string]any{"action": "screenshot"},
+		map[string]any{"screenshot": "/h/w/boxes/g/screenshots/shot-1.png", "title": "Done", "url": "http://x/"}, 200, "/h", "/h/w"))
+	if !strings.Contains(shot, "screenshot") || !strings.Contains(shot, "→ boxes/g/screenshots/shot-1.png") {
+		t.Fatalf("a screenshot card names its file:\n%s", shot)
+	}
+	refused := ansi.Strip(actionCard("browser", map[string]any{"action": "type", "ref": "e4", "text": "x"},
+		map[string]any{"error": "that is a password field: the browser never types passwords"}, 200, "", ""))
+	if !strings.Contains(refused, "password field") {
+		t.Fatalf("a refusal shows its reason:\n%s", refused)
+	}
+	skipped := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e6"},
+		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", ""))
+	if !strings.Contains(skipped, "click e6") || !strings.Contains(skipped, "skipped: an earlier browser call this turn was refused") {
+		t.Fatalf("a skipped call says it never ran:\n%s", skipped)
+	}
+
+	// expanded: the whole snapshot and every connection (the event's panel field, not the model's result)
+	m := chatFixture(t)
+	m.chat.expanded = true
+	conns := []any{map[string]any{"target": "127.0.0.1:8000", "verdict": "allowed (named)"},
+		map[string]any{"target": "10.0.0.5:80", "verdict": "refused: LAN"}}
+	res := residentEvent{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "browser", "call_id": "b1",
+		"result": result, "panel": map[string]any{"connections": conns}}}
+	v = ansi.Strip(m.chat.eventBlock(res))
+	for _, want := range []string{"browser", "clicked button \"Send\"", "button \"Again\" [e7]",
+		"connection: 127.0.0.1:8000  allowed (named)", "connection: 10.0.0.5:80  refused: LAN"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("want %q in the expanded card:\n%s", want, v)
+		}
+	}
+}
