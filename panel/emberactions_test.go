@@ -183,7 +183,7 @@ func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
 	snap := "- heading \"Thanks\" (level 1)\n- text \"sent ?who=Ada\"\n- link \"Home\" [e6] -> /\n- button \"Again\" [e7]"
 	result := map[string]any{"did": "clicked button \"Send\"", "title": "Done", "url": "http://127.0.0.1:8000/done.html?who=Ada",
 		"snapshot": snap, "network": map[string]any{"allowed": 3.0, "refused": []any{"10.0.0.5:80 (refused: LAN)"}}}
-	v := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e5"}, result, 200, "", ""))
+	v := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e5"}, result, 200, "", "", false))
 	for _, want := range []string{"browser", "clicked button \"Send\"", "Done · 127.0.0.1:8000/done.html?who=Ada", "1 refused",
 		"heading \"Thanks\"", "link \"Home\" [e6]"} {
 		if !strings.Contains(v, want) {
@@ -194,17 +194,17 @@ func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
 		t.Fatalf("the compact card shows a short excerpt of the snapshot:\n%s", v)
 	}
 	shot := ansi.Strip(actionCard("browser", map[string]any{"action": "screenshot"},
-		map[string]any{"screenshot": "/h/w/boxes/g/screenshots/shot-1.png", "title": "Done", "url": "http://x/"}, 200, "/h", "/h/w"))
+		map[string]any{"screenshot": "/h/w/boxes/g/screenshots/shot-1.png", "title": "Done", "url": "http://x/"}, 200, "/h", "/h/w", false))
 	if !strings.Contains(shot, "screenshot") || !strings.Contains(shot, "→ boxes/g/screenshots/shot-1.png") {
 		t.Fatalf("a screenshot card names its file:\n%s", shot)
 	}
 	refused := ansi.Strip(actionCard("browser", map[string]any{"action": "type", "ref": "e4", "text": "x"},
-		map[string]any{"error": "that is a password field: the browser never types passwords"}, 200, "", ""))
+		map[string]any{"error": "that is a password field: the browser never types passwords"}, 200, "", "", false))
 	if !strings.Contains(refused, "password field") {
 		t.Fatalf("a refusal shows its reason:\n%s", refused)
 	}
 	skipped := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e6"},
-		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", ""))
+		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", "", false))
 	if !strings.Contains(skipped, "click e6") || !strings.Contains(skipped, "skipped: an earlier browser call this turn was refused") {
 		t.Fatalf("a skipped call says it never ran:\n%s", skipped)
 	}
