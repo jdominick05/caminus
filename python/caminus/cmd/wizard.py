@@ -330,6 +330,7 @@ class Wizard:
             return
         dk = models.drafter_item(m)
         dp = e['paths'].get(dk) if dk else None
+        self.say('caminus fit reads the model to project the context that fits: this may take a while...', 'dim')
         if self.run(['fit', '--model', e['path'], '--cards', str(nc)] + (['--drafter', dp] if dp else []), read_only=True) != 0:
             self.say('caminus fit could not project it here (what the cards hold now counts); caminus start checks again', 'warn')
 
