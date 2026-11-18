@@ -1,7 +1,7 @@
 # Qwen3-30B-A3B on Caminus's own code
 
-Caminus serves the official Qwen3-30B-A3B Q4_K_M GGUF on one RX 7900 XTX with code written for this project at every
-step, from reading the file to the output token. No llama.cpp code runs or is compiled into that path. This page says
+Caminus serves a Qwen3-30B-A3B Q4_K_M GGUF (unsloth's, made with an importance matrix: [which file](#which-file)) on
+one RX 7900 XTX with code written for this project at every step, from reading the file to the output token. No llama.cpp code runs or is compiled into that path. This page says
 what "own code" covers, how fast and how accurate it is, where the remaining time goes, and how to reproduce every
 number.
 
@@ -9,9 +9,37 @@ It is the follow-up to [rdna3-decode-floor](https://github.com/jdominick05/rdna3
 the matrix-vector products of one decode token of this model cost on the same card. That study timed the token's 1,393 matvecs
 in isolation. This is the whole model: attention over the context, the tokenizer, the sampler and the HTTP server.
 
+## Which file
+
+The catalog's file is unsloth's `Qwen3-30B-A3B-Q4_K_M.gguf`
+([unsloth/Qwen3-30B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF)), quantized with an importance
+matrix. Until 2026-11-18 it was Qwen's official Q4_K_M ([Qwen/Qwen3-30B-A3B-GGUF](https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF)),
+which every number on this page was measured on unless it says otherwise.
+
+- **The same tensors in the same formats.** Both files hold the same 579 tensors, each in the same format (289 Q4_K,
+  49 Q6_K, 241 F32) and shape; the tokenizer's tokens, merges and types, the context length and the RoPE keys are
+  equal. So the engine, its kernels and the speed are the same.
+- **Closer to BF16.** Mean KL divergence from the BF16 model, measured with stock llama.cpp against the BF16 model's
+  logits, 64 chunks of 4,096 tokens of each text:
+
+  | File | wikitext-2 (test) | A code text |
+  |---|---|---|
+  | Official Q4_K_M | 0.064 | 0.090 |
+  | Q4_K_M made with an importance matrix | 0.0185 | 0.028 |
+
+  unsloth's published file gives that Q4_K_M's p99 KL divergence and top-1 agreement exactly. The
+  [follow-up studies](#follow-up-studies-the-experts-weight-format) found the same thing for the experts alone.
+- **The chat template differs.** The server renders the file's own template. Through Caminus's request normalization
+  the two give the same prompt for system prompts, tools, tool calls and results, multi-step tool chains and reasoning
+  in earlier turns, with thinking on and off. There are two edge cases. An earlier assistant turn whose reasoning is
+  only whitespace gets no empty think block. A user message that holds a `<tool_response>` block, but doesn't start
+  and end with one, counts as the user's question; the official template took it for a tool result.
+- Switching an existing install: [models](../models.md#switching-from-the-official-qwen3-30b-a3b-file).
+
 ## Results
 
-All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, 2026-11-10. llama.cpp is the
+All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, 2026-11-10, on the official Q4_K_M
+file ([which file](#which-file)). llama.cpp is the
 [ignite-llama](https://github.com/jdominick05/ignite-llama) fork at e4e3f8eda, a HIP build with the same toolchain,
 on the same file and card (`llama-bench -ngl 99 -fa 1`).
 
@@ -314,7 +342,8 @@ reads), with their predictions written down before the first timed run, and meas
   bandwidth bound is the per-stage cost described above, which no weight format changes.
 - The official file's experts are not the most accurate at their size: IQ4_XS, or Q4_0 made with an importance matrix,
   is about half its distance to a reference with Q8_0 experts (the official file may also come from other source
-  weights; that split is not measured).
+  weights; that split is not measured). This is why the catalog now serves an importance-matrix Q4_K_M
+  ([which file](#which-file)).
 
 ## The long-context mode (YaRN x4, opt-in)
 
@@ -394,7 +423,9 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
 - One card with 24 GB: the full 40,960-token context needs 22.4 GB (past it: the long-context mode above). A 20 GB card can't hold 32,768 tokens of it, which
   is the server's minimum. Two cards are offered too (`--cards 2`, an XTX + XT: the bigger card first); one card stays
   the default. See [models](../models.md).
-- One model file is tested: `Qwen/Qwen3-30B-A3B-GGUF`, `Qwen3-30B-A3B-Q4_K_M.gguf`. The kernels cover Q4_K and Q6_K.
+- Two model files, with the same tensors and formats: `unsloth/Qwen3-30B-A3B-GGUF` (the catalog's) and
+  `Qwen/Qwen3-30B-A3B-GGUF` (the one most numbers here come from), both `Qwen3-30B-A3B-Q4_K_M.gguf`
+  ([which file](#which-file)). The kernels cover Q4_K and Q6_K.
 - Speculative decoding is measured, not enabled (see above): `caminus serve` decodes this model one token per pass.
 - An 8-bit (Q8_0) KV cache on one card (`Q3MoEOne(q8=True)`, decode and the batched prefill) and on two
   (`Q3MoETP(q8=True)`, the same format over each card's kv heads), served with `caminus serve --kv q8` (F16 stays the

@@ -8,14 +8,16 @@ from its Hugging Face repository and checks every file before using it.
 | Name | Model | Cards | Download | Decode | Prompt reading |
 |---|---|---|---|---|---|
 | `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT, or two XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
-| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB; or 2 | 18.6 GB | 248 tok/s | 6,432 tok/s |
+| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M (unsloth's, made with an importance matrix) | 1, 24 GB; or 2 | 18.6 GB | 248 tok/s | 6,432 tok/s |
 | `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
 | `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 55 tok/s | 800 tok/s (measured on an XT) |
 | `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 47 tok/s; 69 on two cards | 942 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
-where each number comes from and how llama.cpp does on the same cards.
+where each number comes from and how llama.cpp does on the same cards. The `qwen3-30b-a3b` numbers were measured on
+Qwen's official Q4_K_M file, which has the same weight formats (see
+[switching from the official file](#switching-from-the-official-qwen3-30b-a3b-file)).
 
 **Paused for this release:** Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
 code, so `caminus pull`, `caminus start` and `caminus serve` refuse them for now; `CAMINUS_ALLOW_PAUSED=1` still serves them, unmeasured. They come back once they are measured
@@ -64,6 +66,31 @@ Caminus sizes the context to your cards: up to 262,144 tokens (40,960 for `qwen3
 long-context mode). It refuses to start a model
 that can't hold at least 32,768 tokens on your cards, rather than run out of memory later (8,192 with `--draft dflash` on
 the 27B models: the drafter's memory comes out of the context).
+
+### Switching from the official `qwen3-30b-a3b` file
+
+`caminus pull qwen3-30b-a3b` now downloads unsloth's Q4_K_M of Qwen3-30B-A3B
+([unsloth/Qwen3-30B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF)), made with an importance matrix,
+instead of Qwen's official Q4_K_M.
+
+- **What changes:** the answers come closer to the unquantized model's. Measured against the BF16 model, the mean KL
+  divergence is about a third of the official file's (0.0185 against 0.064 on prose, 0.028 against 0.090 on code;
+  [how it was measured](dev/qwen3-30b-a3b.md#which-file)). It is the same model with the same weight formats and
+  nearly the same size, so the speed should stay the same.
+- **What stays:** the context, the sampling defaults, the long-context mode, the 8-bit KV cache and two-card serving.
+- **How to switch:** both files have the same name and go to the same place, so remove the old file first. Otherwise
+  `caminus pull` reports it and stops, `caminus start qwen3-30b-a3b` doesn't find the model, and a server started on
+  the old file by path runs without this model's sampling defaults. In the model directory (by default
+  `~/.local/share/caminus/models`):
+
+  ```bash
+  caminus stop qwen3-30b-a3b        # if it is running
+  rm ~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf      # or move it somewhere else to keep it
+  rm -f ~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf.sha256
+  caminus pull qwen3-30b-a3b        # 18.6 GB; checks the size and the sha256
+  ```
+
+  Conversations the server saved with the old file are not restored with the new one; they are read again.
 
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
 --cards 2`). Each card holds half of every layer, so the model writes about 1.5 times as fast and the full 262,144-token

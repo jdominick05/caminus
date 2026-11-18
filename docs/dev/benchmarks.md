@@ -503,7 +503,10 @@ whose results are this repository's source files, ending on a tool result; they 
 
 ### Qwen3-30B-A3B Q4_K_M
 
-Measured 2026-11-10 on the RX 7900 XTX, the Caminus column rerun 2026-11-17 on 0.3.0 (006130e; numbers within 2 % kept); llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`. The model runs on
+Measured 2026-11-10 on the RX 7900 XTX, the Caminus column rerun 2026-11-17 on 0.3.0 (006130e; numbers within 2 % kept); llama.cpp on the same card with `llama-bench -ngl 99 -fa 1`.
+Every Qwen3-30B-A3B number on this page (this section, the two-card section and the yardstick row) was measured on Qwen's
+official Q4_K_M file; the catalog now serves unsloth's Q4_K_M, made with an importance matrix, which has the same tensors
+in the same formats ([which file](qwen3-30b-a3b.md#which-file)). The model runs on
 Caminus's own kernels, so its accuracy gate is not llama.cpp but a floating-point reference of the model, with llama.cpp
 measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3-30b-a3b.md) has the method.
 
