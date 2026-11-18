@@ -413,29 +413,27 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		line += emberDim.Render(tail)
 	}
 	out := []string{ansi.Truncate(line, w, "…")}
-	rule := "  " + emberDim.Render("⎿ ")
-	for i, p := range preview {
-		if i > 0 {
-			rule = "    "
-		}
-		if !open {
-			out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
-			continue
-		}
-		// open: a long line wraps under itself instead of being cut
-		for j, part := range strings.Split(ansi.Hardwrap(terminalText(p, false), max(8, w-4), true), "\n") {
-			if j > 0 {
-				rule = "    "
+	first := "  " + emberDim.Render("⎿ ")
+	if !open {
+		for i, p := range preview {
+			if i > 0 {
+				first = "    "
 			}
-			out = append(out, rule+emberDim.Render(part))
+			out = append(out, ansi.Truncate(first+emberDim.Render(terminalText(p, false)), w, "…"))
 		}
+		return strings.Join(out, "\n")
 	}
+	// open: a long line wraps under itself instead of being cut; output drawn as Markdown goes under the rest
+	safe := make([]string, len(preview))
+	for i, p := range preview {
+		safe[i] = terminalText(p, false)
+	}
+	out = append(out, ruled(safe, first, "    ", w, func(_, piece string) string { return emberDim.Render(piece) })...)
 	if rendered != "" {
-		first := "  " + emberDim.Render("⎿ ")
 		if len(out) > 1 {
 			first = "    "
 		}
-		out = append(out, ruled(rendered, first, "    ", w))
+		out = append(out, ruled(strings.Split(rendered, "\n"), first, "    ", w, nil)...)
 	}
 	return strings.Join(out, "\n")
 }

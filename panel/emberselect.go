@@ -455,6 +455,20 @@ func (c *residentChat) cardAtLine(i int) (int, bool) {
 	return 0, false
 }
 
+// cardLines is where the event's block sits in the drawn history: its first content line and how many lines it has;
+// false when it is not drawn.
+func (c *residentChat) cardLines(seq int) (int, int, bool) {
+	line, at := 0, 0
+	for _, sp := range c.spans {
+		line += strings.Count(c.content[at:sp.from], "\n")
+		at = sp.from
+		if sp.seq == seq {
+			return line, strings.Count(c.content[sp.from:sp.to], "\n") + 1, true
+		}
+	}
+	return 0, 0, false
+}
+
 // cardToggles: a click on the event's block opens or folds it. Only in the compact view (Ctrl+O shows every card
 // in full already), only an open card or one that opening changes (a card with lines left out, a long diff, a
 // command of several lines): a click on the agent's words or a short card does nothing.
