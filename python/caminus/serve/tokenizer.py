@@ -14,7 +14,10 @@ Literal spans: the chat template output is passed with literal-tag marks (templa
 splits only at real special-token text, then un-marks each fragment and encodes it as plain text, so a literal
 "<tool_call>" or "<|im_end|>" inside a tool result or user text becomes ordinary BPE tokens, never a special id."""
 import codecs
+import collections
 import re
+import threading
+from array import array
 
 
 from .vocab import CONTROL, NORMAL, UNUSED, USER_DEFINED, load_gguf_vocab
@@ -28,6 +31,7 @@ QWEN35_PRE = (r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n
 QWEN2_PRE = (r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
              r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
 PRE_REGEX = {'qwen35': QWEN35_PRE, 'qwen2': QWEN2_PRE}
+FRAG_MEMO_BYTES = 32 << 20     # the fragment memo's bound (QwenTokenizer.memo_bytes; a 240K-token agent conversation counts 1.6 MiB)
 
 # literal-tag marks (template.py writes them, encode_prompt reads them): MARK replaces the '<' of a literal special
 # token text, ESC escapes MARK/ESC characters that were already in the input. Both are Unicode private-use.
@@ -41,6 +45,13 @@ def unmark(s):
     if MARK not in s and ESC not in s:
         return s
     return _UNMARK_RE.sub(lambda m: m.group(1) or '<', s)
+
+
+def _flat(per):
+    ids = []
+    for e in per:
+        ids.extend(e)
+    return ids
 
 
 def bytes_to_unicode():
@@ -64,6 +75,11 @@ class QwenTokenizer:
             raise ValueError(f'unsupported tokenizer {vocab.model}/{vocab.pre}')
         if engine not in ('hf', 'own'): raise ValueError(f'QwenTokenizer: engine {engine!r} (hf / own)')
         self.engine = engine
+        # the fragment memo (_part_ids): a text fragment's ids keyed by the exact string encoded, the least recently used
+        # dropped past memo_bytes (its strings, its ids at 4 bytes each, 200 bytes an entry). Agent turns only append, so
+        # a request encodes only the fragments the last one did not have. memo_bytes 0: off
+        self.memo_bytes = FRAG_MEMO_BYTES
+        self._memo, self._memo_n, self._memo_lock = collections.OrderedDict(), 0, threading.Lock()
         self.vocab = vocab
         self.n_vocab = len(vocab.tokens)
         # (a vocabulary without a BOS token, bos_token_id absent: -1 in the GGUF reader, e.g. Qwen3-Coder-Next's: None)
@@ -124,35 +140,56 @@ class QwenTokenizer:
         return self._bpe.encode(text, add_special_tokens=False).ids
 
     def _split(self, text, parse_special):
-        """[(is_special, str_or_id)] in order, llama.cpp tokenizer_st_partition semantics"""
+        """[(is_special, str_or_id, end)] in order, llama.cpp tokenizer_st_partition semantics; end: the part's end offset
+        in text"""
         rx = self._re_all if parse_special else self._re_user
         out, pos = [], 0
         if rx is not None:
             for m in rx.finditer(text):
                 if m.start() > pos:
-                    out.append((False, text[pos:m.start()]))
-                out.append((True, self.special[m.group(0)]))
+                    out.append((False, text[pos:m.start()], m.start()))
+                out.append((True, self.special[m.group(0)], m.end()))
                 pos = m.end()
         if pos < len(text):
-            out.append((False, text[pos:]))
+            out.append((False, text[pos:], len(text)))
         return out
 
-    def _encode_parts(self, parts, fragment_fn=None):
-        frags = [p for sp, p in parts if not sp]
+    def _part_ids(self, parts, fragment_fn=None):
+        """each part's ids: [id] for a special token, a text fragment's BPE ids (every fragment encoded on its own)"""
+        frags = [p for sp, p, _ in parts if not sp]
         if fragment_fn is not None:
             frags = [fragment_fn(f) for f in frags]
-        if self._bpe is None:
-            enc = [self._own.encode(f, special=False) for f in frags]
+        memo = self._memo if self.memo_bytes > 0 else None
+        if memo is None:
+            enc = self._bpe_encode(frags)
         else:
-            enc = [e.ids for e in self._bpe.encode_batch(frags, add_special_tokens=False)] if frags else []
-        ids, k = [], 0
-        for sp, p in parts:
-            if sp:
-                ids.append(p)
-            else:
-                ids.extend(enc[k])
-                k += 1
-        return ids
+            with self._memo_lock:
+                enc = [memo.get(f) for f in frags]
+                for f, e in zip(frags, enc):
+                    if e is not None: memo.move_to_end(f)
+            miss = list({f: None for f, e in zip(frags, enc) if e is None})    # (each new fragment once, in order)
+            if miss:
+                got = dict(zip(miss, (array('i', e) for e in self._bpe_encode(miss))))
+                enc = [got[f] if e is None else e for f, e in zip(frags, enc)]
+                with self._memo_lock:
+                    for f, e in got.items():
+                        if f not in memo:
+                            memo[f] = e
+                            self._memo_n += len(f) + 4 * len(e) + 200
+                    while self._memo_n > self.memo_bytes and memo:
+                        f, e = memo.popitem(last=False)
+                        self._memo_n -= len(f) + 4 * len(e) + 200
+        it = iter(enc)
+        return [[p] if sp else next(it) for sp, p, _ in parts]
+
+    def _bpe_encode(self, frags):
+        """each text fragment's BPE ids, every fragment encoded on its own"""
+        if self._bpe is None:
+            return [self._own.encode(f, special=False) for f in frags]
+        return [e.ids for e in self._bpe.encode_batch(frags, add_special_tokens=False)] if frags else []
+
+    def _encode_parts(self, parts, fragment_fn=None):
+        return _flat(self._part_ids(parts, fragment_fn))
 
     def encode(self, text, parse_special=True):
         """llama_tokenize(text, add_special=False, parse_special) equivalent"""
@@ -162,6 +199,37 @@ class QwenTokenizer:
         """a rendered prompt that may carry literal-tag marks: special tokens only where the template wrote them,
         literal tags (marked) encoded as plain text in the context of their fragment"""
         return self._encode_parts(self._split(marked_text, True), unmark)
+
+    def encode_prompt_cuts(self, marked_text, cuts):
+        """(encode_prompt(marked_text), [n per cut]): n = len(encode_prompt(marked_text[:cut])) when those ids are a prefix of
+        the prompt's, else None, from the one encode. Each text fragment between two special tokens encodes on its own,
+        so a cut at a part's boundary is the sum of the parts' lengths before it; a cut inside a text fragment adds the
+        encoding of that fragment's head, checked against the prompt's ids there (as the whole prefix's encoding would be:
+        the parts before it are the same); a cut inside a special token's text, where the prefix's own split can differ,
+        encodes the prefix whole"""
+        parts = self._split(marked_text, True)
+        per = self._part_ids(parts, unmark)
+        ids = _flat(per)
+        out = []
+        for c in cuts:
+            n, start, at = 0, 0, None
+            for (sp, p, end), e in zip(parts, per):
+                if end <= c:
+                    n, start = n + len(e), end
+                    continue
+                if c <= start:
+                    at = n
+                elif sp:
+                    t = self.encode_prompt(marked_text[:c])
+                    at = len(t) if ids[:len(t)] == t else None
+                else:
+                    t = self.encode_plain(unmark(marked_text[start:c]))
+                    at = n + len(t) if ids[n:n + len(t)] == t else None
+                break
+            else:
+                at = n
+            out.append(at)
+        return ids, out
 
     # ------------------------------------------------------------------------------------------------ decode
     def token_bytes(self, i):

@@ -303,25 +303,36 @@ class PromptBuilder:
         turn that carries the trailing tool results). Found in the marked render (literal special-token text inside content
         is marked, so every '<|im_start|>' / '<|im_end|>' left is structural) and tokenized up to there: the text before a
         special token tokenizes on its own, so each mark's tokens are a prefix of the prompt's (checked; a mark that is not
-        is None)"""
+        is None). The marks come from the prompt's own encode (tokenizer.encode_prompt_cuts), not a second one"""
         profile, kw = resolve_template_kwargs(model, client_kwargs, self.allow_client_effort)
         marked = self.render_marked(messages, tools, kw, add_generation_prompt)
-        ids = self.tok.encode_prompt(marked)
-        if self.prepend_bos and self.tok.bos_id is not None:     # (no BOS in the vocabulary: none, as llama.cpp tokenizes it)
+        cuts = self.mark_cuts(marked) if marks else {}
+        ids, at = self.tok.encode_prompt_cuts(marked, list(cuts.values()))
+        bos = self.prepend_bos and self.tok.bos_id is not None   # (no BOS in the vocabulary: none, as llama.cpp tokenizes it)
+        if bos:
             ids = [self.tok.bos_id] + ids
-        mk = self.marks_of(marked, ids) if marks else None
+        mk = None
+        if marks:
+            b = 1 if self.prepend_bos else 0
+            if b == int(bos):
+                mk = dict(dict(root=None, user=None), **{k: None if n is None else n + b for k, n in zip(cuts, at)})
+            else:
+                # (prepend_bos on a vocabulary without a BOS: the mark offset has always counted a BOS the ids do not
+                #  hold; kept as it was, by encoding each mark's prefix again)
+                mk = dict(root=None, user=None)
+                for k, ch in cuts.items():
+                    t = self.tok.encode_prompt(marked[:ch]) if ch else []
+                    mk[k] = len(t) + b if list(ids[b:b + len(t)]) == list(t) else None
         return Prompt(unmark(marked), ids, profile, kw, mk)
 
-    def marks_of(self, marked, ids):
-        """the prompt cache's marks of a marked render whose tokens are ids (see build)"""
-        out = dict(root=None, user=None)
-        b = 1 if self.prepend_bos else 0
-        def pos(ch):
-            t = self.tok.encode_prompt(marked[:ch]) if ch else []
-            return len(t) + b if list(ids[b:b + len(t)]) == list(t) else None
+    @staticmethod
+    def mark_cuts(marked):
+        """the marks' offsets in a marked render (see build): {'root': the end of the system block, 'user': the start of
+        the last user turn}, each only when the render has it"""
+        out = {}
         if marked.startswith('<|im_start|>system'):
             e = marked.find('<|im_end|>\n')
-            if e >= 0: out['root'] = pos(e + len('<|im_end|>\n'))
+            if e >= 0: out['root'] = e + len('<|im_end|>\n')
         u = marked.rfind('<|im_start|>user')
-        if u >= 0: out['user'] = pos(u)
+        if u >= 0: out['user'] = u
         return out
