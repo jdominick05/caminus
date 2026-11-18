@@ -30,6 +30,11 @@ def check_timeout(t):
     return t
 
 
+# A job's phases: starting, running, then one of these. stopped: its worker was signalled (it records that itself on
+# SIGTERM) or is gone without a word (SIGKILL); read_state reports the second case, so no reader says running for it.
+ENDED = ('finished', 'interrupted', 'stopped')
+
+
 def alive(pid):
     try:
         os.kill(int(pid), 0)
@@ -38,9 +43,26 @@ def alive(pid):
         return False
 
 
+def exited(pid):
+    """A process has exited when it is gone or a zombie (exited, not yet collected by its parent: kill(pid, 0) still
+    succeeds for one; a worker is the daemon's child until something collects it)."""
+    if not alive(pid):
+        return True
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        return stat[stat.rindex(')') + 2] in 'ZX'
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def read_state(job):
     p = Path(job) / 'state.json'
-    return json.loads(p.read_text()) if p.exists() else {}
+    state = json.loads(p.read_text()) if p.exists() else {}
+    if state.get('phase') in ('starting', 'running') and exited(state.get('worker')):
+        # its worker could not write its end (SIGKILL, a crash): "running" in the file is not true
+        state.update(phase='stopped', error='the worker is gone (stopped or killed); its command may have been cut '
+                                            'short: inspect its effects before repeating it')
+    return state
 
 
 def read_cursor(job):
@@ -62,6 +84,10 @@ def worker(job):
         req = json.loads((job / 'request.json').read_text())
         state = dict(phase='starting', worker=os.getpid(), started=time.time(), cwd=req['cwd'])
         atomic_json(job / 'state.json', state)
+        # SIGTERM (an owner's stop, a lab close) ends the loop below, so the worker ends its command and records why
+        # instead of dying with "running" in its state
+        stopping = []
+        signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
         box = None
         if req.get('box'):
             # a sandbox call (sandbox.py): the same job, its command inside a bubblewrap box with limits
@@ -105,10 +131,10 @@ def worker(job):
         os.set_blocking(fd, False)
         (job / 'control').mkdir(exist_ok=True)
         (job / 'ack').mkdir(exist_ok=True)
-        used, truncated, exit_status = 0, False, None
+        used, truncated, exit_status, cut = 0, False, None, False
         try:
             with (job / 'output.log').open('ab', buffering=0) as log:
-                while exit_status is None:
+                while exit_status is None and not stopping:
                     for p in sorted((job / 'control').glob('*.json')):
                         ack = job / 'ack' / p.name
                         if ack.exists():
@@ -158,6 +184,10 @@ def worker(job):
                     done, code = os.waitpid(pid, os.WNOHANG)
                     if done:
                         exit_status = os.waitstatus_to_exitcode(code)
+                if stopping and exit_status is None:
+                    if box is not None:
+                        box.kill(pid)              # a stopped box goes whole, as on a limit (and its scope)
+                    exit_status, cut = _end(pid), True
                 # Drain bytes already emitted before exit.
                 while True:
                     try:
@@ -177,12 +207,35 @@ def worker(job):
                 state.update(box.finish())
             elif timed_out:
                 state['limit_hit'] = 'time'
-            if exit_status is None:
+            if cut:
+                state.update(phase='stopped', exit_code=exit_status, ended=time.time(),
+                             error='stopped by SIGTERM; its command was ended (TERM, then KILL after '
+                                   f'{STOP_GRACE} s): inspect its effects before repeating it')
+            elif exit_status is None:
                 state.update(phase='interrupted', error='worker interrupted; command effects may already exist')
             else:
                 state.update(phase='finished', exit_code=exit_status, truncated=truncated, ended=time.time())
             atomic_json(job / 'state.json', state)
         return 0
+
+
+STOP_GRACE = 3   # seconds a stopped worker's command gets between TERM and KILL
+
+
+def _end(pid):
+    """A stopped worker ends its command's process group: TERM, then KILL after STOP_GRACE. Its exit code, or None."""
+    for sig, wait in ((signal.SIGTERM, STOP_GRACE), (signal.SIGKILL, 1)):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            pass
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                return os.waitstatus_to_exitcode(code)
+            time.sleep(.05)
+    return None
 
 
 def shell_argv(cwd, command):
@@ -311,7 +364,9 @@ class Terminal:
         for job in self.jobs.iterdir() if self.jobs.is_dir() else []:
             state = read_state(job)
             pid = state.get('pid')
-            if state.get('phase') in ('starting', 'running') and isinstance(pid, int) and alive(pid):
+            # (a job read as stopped without an end on record lost its worker, not its command: still reached)
+            if state.get('phase') in ('starting', 'running', 'stopped') and 'ended' not in state \
+                    and isinstance(pid, int) and alive(pid):
                 try:
                     os.killpg(pid, sig)
                     hit.append(job.name)
@@ -364,16 +419,14 @@ class Terminal:
             # waiting (the wait held the database's write lock for up to yield_ms)
             state = read_state(job)
             return dict(session=session, **state, output='', next_offset=read_cursor(job), no_new_output=True,
-                        running=state.get('phase') not in ('finished', 'interrupted'))
+                        running=state.get('phase') not in ENDED)
         wait = min(10000, max(0, int(args.get('yield_ms', 1000)))) / 1000
         end = time.monotonic() + wait
         while time.monotonic() < end:
-            if read_state(job).get('phase') in ('finished', 'interrupted'):
+            if read_state(job).get('phase') in ENDED:
                 break
             time.sleep(.02)
         state = read_state(job)
-        if state.get('phase') in ('starting', 'running') and not alive(state.get('worker')):
-            state.update(phase='interrupted', error='worker disappeared; inspect effects before repeating the command')
         log = job / 'output.log'
         # Without an explicit offset, a poll returns only what this session has not yet returned (the persisted
         # read cursor). An explicit offset reads from there. Either way the cursor moves to the end of what was returned.
@@ -394,7 +447,7 @@ class Terminal:
         # built from what it read did not match the file (the local Coder lost a patch to it). Offsets stay in raw bytes.
         text = data.decode(errors='replace').replace('\r\n', '\n')
         out = dict(session=session, **state, output=text, next_offset=next_offset,
-                   no_new_output=not data, running=state.get('phase') not in ('finished', 'interrupted'))
+                   no_new_output=not data, running=state.get('phase') not in ENDED)
         if boxed:
             from .sandbox import view
             out.update(view(job, state))

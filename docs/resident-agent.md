@@ -127,7 +127,10 @@ There is no production step limit. Backend outages retain the goal and retry
 with backoff. `ROBOTS.md`, the resident's `IDENTITY.md` and `MEMORY.md` provide
 persistent instructions and memory; a SQLite journal records goals, tool calls,
 results and messages. Completed actions are checkpointed. An interrupted terminal
-with uncertain effects is reported as interrupted rather than blindly relaunched.
+with uncertain effects is reported as interrupted rather than blindly relaunched;
+one whose worker was stopped (SIGTERM: it ends its command and records that) or
+killed is reported as stopped, never as still running. SIGTERM stops the daemon
+within about a second, also in the middle of a `wait`, a model call or a gate.
 Context compaction summarizes bounded transcript fragments before continuing.
 
 Root commands are requests, never executed by the resident. The human reviews the
