@@ -187,8 +187,10 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   ```
 
   The command reads the plan's model list through the relay (it must be running) for the model's list price and
-  levels; each advice call is a conversation of its own to the plan (its own session id), booked at what the reply
-  says it charged. `--kind anthropic` goes back to an Anthropic relay.
+  levels. Each advice call is a conversation of its own to the plan (its own session id), and counts against the
+  advisor's `--budget-usd` at no less than the model's list price: inside the Go allowance the plan bills nothing, and
+  your daily limit still holds. Free time stays off the plan here too unless you allow it (`heartbeat NAME --on-plan
+  yes`). `--kind anthropic` goes back to the Anthropic relay (`http://127.0.0.1:8765/v1` unless `--endpoint` names one).
 - **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
   when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
   With the image go the agent's question (read's `question` argument, else "describe what matters in this image for

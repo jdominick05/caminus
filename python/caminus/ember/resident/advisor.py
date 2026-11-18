@@ -15,7 +15,8 @@ Configuration, in config.json under "advisor" (absent: no advisor; the tool answ
                    its own and Ember (catalog.OPENCODE), with relay true and the model's list price (prices) and
                    levels (efforts) from the plan's model list, stored by `agent advisor --kind opencode-go`
     api_key_env    the key variable, when the endpoint is not a local relay that adds the key itself
-    budget_usd     1.00   dollars per day the runtime lets the advisor spend (priced per call)
+    budget_usd     1.00   dollars per day the runtime lets the advisor spend (priced per call; a plan call at no less
+                          than its list price, also inside the plan's allowance)
     calls_per_goal 5      advice calls one goal may make
     effort         medium Messages API effort for the advisor (its thinking stays adaptive: the current Opus and
                           Sonnet do not accept thinking off)
@@ -40,6 +41,7 @@ read's result. They keep their own ledger (eyes.json) and daily budget, priced p
 """
 import datetime
 import json
+import math
 import os
 import re
 import urllib.error
@@ -47,7 +49,7 @@ import urllib.parse
 import urllib.request
 
 from . import catalog
-from .model import Model, ModelError, ModelRefused, price, remember_prices
+from .model import Model, ModelError, ModelRefused, price, remember_prices, valid_prices
 from .refusal import refusal_kind
 from .store import atomic_json, log_failure
 
@@ -88,8 +90,9 @@ def unavailable(e, cfg, name='NAME'):
                                   'relay_model', model, endpoint)
     if status == 402 and 'relay:' in text:
         return AdvisorUnavailable('the key relay at %s has spent its daily cap; it resets at midnight, or the owner raises '
-                                  'it with caminus ember relay install --cap-usd%s' % (
-                                      endpoint, '' if cfg.get('kind') in catalog.OPENCODE else ' (naming every --model again)'),
+                                  'it with caminus ember relay install --provider %s --cap-usd%s' % (
+                                      (endpoint, 'opencode-go', '') if cfg.get('kind') in catalog.OPENCODE else
+                                      (endpoint, 'anthropic', ' (naming every --model again)')),
                                   '', 'relay_cap', model, endpoint)
     # the OpenCode Go relay's refusals (and its gateway's, reached without the relay): a call without a session id (an
     # advisor not set up as a plan model), a model Ember does not offer from the plan, a path it does not serve
@@ -167,6 +170,7 @@ class Advisor:
         question = (question or '').strip()
         if not question:
             raise ValueError('ask the advisor a specific question')
+        self._off_plan(cfg, gid)
         if self.calls(gid) >= int(cfg['calls_per_goal']):
             raise ValueError('this goal has used its %d advisor calls; decide with what you have' % int(cfg['calls_per_goal']))
         if self.spent_today() >= float(cfg['budget_usd']):
@@ -227,6 +231,7 @@ class Advisor:
         cfg = self.cfg
         if cfg is None or self.spent_today() >= float(cfg['budget_usd']) or price(cfg['model'], {}) is None:
             raise ValueError('no advisor budget')
+        self._off_plan(cfg, gid)
         model = self._model(cfg, max_tokens, 'low')
         try:
             reply = model.complete(messages, max_tokens=max_tokens)
@@ -243,6 +248,16 @@ class Advisor:
             raise ValueError('the advisor model did not answer: %s' % e)
         self._spend(cfg, model)
         return reply.get('content') or '', (model.last_call or {}).get('served') or cfg['model']
+
+    def _off_plan(self, cfg, gid):
+        """Refuse a call for a free-time goal while the advisor is on an OpenCode plan that free time may not use
+        (brain.plan_allows, free_choice's rule), before anything is counted or sent."""
+        from .brain import plan_allows
+        if gid and self.rt.free.is_free(gid) and \
+                not plan_allows(dict(provider_kind=cfg.get('kind')), self.rt.free.cfg.get('on_plan')):
+            raise ValueError('free time stays off the OpenCode plan the advisor is on; decide with what you have. Your '
+                             'human can let free time use the plan: caminus ember agent heartbeat %s --on-plan yes'
+                             % (self.rt.config.get('name') or 'NAME'))
 
     def _model(self, cfg, max_tokens, effort):
         """The advisor model's transport, on the Messages API: through an Anthropic relay, or a Messages-native model of
@@ -262,7 +277,13 @@ class Advisor:
         return model
 
     def _spend(self, cfg, model):
-        usd = price(cfg['model'], model.last_usage, (model.last_call or {}).get('served')) or 0.0
+        usage, served = model.last_usage or {}, (model.last_call or {}).get('served')
+        usd = price(cfg['model'], usage, served) or 0.0
+        if cfg.get('kind') in catalog.OPENCODE:
+            # a plan call counts against the advisor's budget at no less than its list price: inside the Go allowance
+            # the plan bills $0, and the owner's daily limit still holds (usage without opencode: the list price)
+            usd = max(usd, price(cfg['model'], {k: v for k, v in usage.items() if k != 'opencode'}, served) or 0.0)
+        usd = usd if math.isfinite(usd) and usd > 0 else 0.0     # (the ledger never goes NaN or below zero)
         state = self._state()
         day = state.setdefault(datetime.date.today().isoformat(), dict(usd=0.0, calls=0))
         day['usd'] = round(day['usd'] + usd, 6)
@@ -416,6 +437,9 @@ def plan_fields(model, endpoint, opener=urllib.request.urlopen):
     if entry.get('protocol') != 'anthropic':
         raise ValueError('%s is served on Chat Completions, and the advisor speaks the Messages API: pick a Messages-native '
                          'plan model, e.g. claude-haiku-5-5' % model)
+    if entry.get('prices') and not valid_prices(entry['prices']):
+        raise ValueError("the plan lists %s at a price that is not a finite amount of at least 0 (%s), so its spend "
+                         'cannot be limited' % (model, json.dumps(entry['prices'])[:200]))
     return dict(endpoint=catalog.transport(spec, entry)[0], relay=True, efforts=list(entry.get('efforts') or []),
                 **(dict(prices=entry['prices']) if entry.get('prices') else {}))
 

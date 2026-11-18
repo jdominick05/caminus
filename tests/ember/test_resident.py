@@ -5887,6 +5887,7 @@ for line in sys.stdin:
                     urllib.error.HTTPError(req.full_url,402,'Payment Required',{},__import__('io').BytesIO(capped.encode())))
                 with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'What now?')
                 self.assertEqual((c.exception.kind,c.exception.fix),('relay_cap',''))
+                self.assertIn('relay install --provider anthropic --cap-usd',str(c.exception))
                 self.assertEqual(rt.advisor.calls(gid),0)
                 # an outage the provider answered is still an ordinary failure, counted as before
                 rt.advisor_opener=Wire((529,'{"type":"error","error":{"type":"overloaded_error"}}'))
@@ -5918,8 +5919,10 @@ for line in sys.stdin:
         """The advisor on a Messages-native model of the owner's OpenCode Go plan (`agent advisor --kind opencode-go`):
         set up from the plan's model list (its Messages address from the SDK-style root, its list price, which lets the
         gate meter a model the built-in table lacks, its levels; a Chat Completions or unlisted model refused), each call
-        a session of its own sent as Ember, booked at what the reply says it charged. Without the kind the plan refuses
-        the call, and the relay's refusals name the fix and cost no call."""
+        a session of its own sent as Ember, booked against the advisor's budget at no less than its list price. Free time
+        stays off the plan unless the owner allows it. Without the kind the plan refuses the call, and the relay's
+        refusals name the fix and cost no call."""
+        import copy
         import caminus
         from caminus.ember import relay
         from caminus.ember.resident import model as M
@@ -5927,6 +5930,16 @@ for line in sys.stdin:
         port,queue,seen,stop_oc=self._fake_opencode(self.OPENCODE_GO)
         root='http://127.0.0.1:%d/inference/go' % port
         try:
+            # a list price that is not a finite amount of at least 0 is never kept: the spend meter would go NaN or negative
+            nan=copy.deepcopy(self.OPENCODE_GO)
+            next(r for r in nan['data'] if r['id']=='minimax-m3')['cost']['text']['input']['price']=float('nan')
+            port2,_,_,stop2=self._fake_opencode(nan)
+            try:self.assertIn('not a finite amount',self.cmd('advisor',['--model','minimax-m3','--endpoint',
+                              'http://127.0.0.1:%d/inference/go' % port2,'--kind','opencode-go'],code=1)['error'])
+            finally:stop2()
+            M.remember_prices('negative-rate',dict(input=-1,output=1,cache_read=0))
+            M.remember_prices('nan-rate',dict(input=float('nan'),output=1))
+            self.assertIsNone(M.price('negative-rate',{}));self.assertIsNone(M.price('nan-rate',{}))
             for bad,why in (('deepseek-v4.1-flash','Messages API'),('gemini-4-argon','does not offer')):
                 self.assertIn(why,self.cmd('advisor',['--model',bad,'--endpoint',root+'/anthropic','--kind','opencode-go'],code=1)['error'])
             out=self.cmd('advisor',['--model','qwen3.8-flash','--endpoint',root+'/anthropic','--kind','opencode-go'])['advisor']
@@ -5951,12 +5964,40 @@ for line in sys.stdin:
                 self.assertEqual(p1['path'],'/inference/go/anthropic/v1/messages')
                 self.assertEqual((p1['ua'],p1['version']),('ember/'+caminus.__version__,'2023-06-01'))
                 self.assertTrue(p1['session'] and p2['session']);self.assertNotEqual(p1['session'],p2['session'],'a side call: its own session')
-                self.assertNotIn('fallbacks',p1['body']);self.assertIn(p1['body']['output_config']['effort'],out['efforts'])
+                self.assertIn(p1['body']['output_config']['effort'],out['efforts'])
+                opus=dict(rt.advisor.cfg,model='claude-opus-5-5')     # (in FALLBACK_MODELS: a plain advisor asks for it)
+                self.assertIsNone(rt.advisor._model(opus,4096,'medium').config['fallbacks'],"a plan is not sent Anthropic's fallback")
+                self.assertEqual(rt.advisor._model({k:v for k,v in opus.items() if k!='kind'},4096,'medium').config['fallbacks'],'default')
                 queue.append(([dict(type='text',text='DONE')],charged))   # the harness's own call (the loop judge)
                 self.assertEqual(rt.advisor.raw(gid,[dict(role='user',content='Done?')],600)[0],'DONE')
                 self.assertTrue(seen[-1]['session']);self.assertNotIn(seen[-1]['session'],(p1['session'],p2['session']))
+                # the advisor's budget counts a plan call at no less than its list price: $0 inside the Go allowance, a
+                # $0 it cannot trust (off the allowance) and a reply without usage.cost each book the list price
+                listed=M.price('qwen3.8-flash',dict(input_tokens=300,output_tokens=40))
+                self.assertGreater(listed,0)
+                booking=rt.store.enqueue('Booking.');before=rt.advisor.spent_today()
+                for usage in (dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='go')),
+                              dict(input_tokens=300,output_tokens=40,cost=0,opencode=dict(billing_source='balance')),
+                              dict(input_tokens=300,output_tokens=40)):
+                    queue.append(([dict(type='text',text='Advice.')],usage))
+                    self.assertEqual(rt.advisor.ask(booking,'Booked?')['usd'],round(listed,5),usage)
+                self.assertAlmostEqual(rt.advisor.spent_today()-before,3*listed,places=5)
+                # free time stays off the plan unless the owner allows it (brain.plan_allows, free_choice's rule): refused
+                # before anything is counted or sent; free_time.on_plan lets it through
+                free=rt.store.enqueue('A stretch.',kind='free')
+                posts=len([x for x in seen if x['method']=='POST'])
+                with self.assertRaises(ValueError) as c:rt.advisor.ask(free,'Plan?')
+                self.assertIn('caminus ember agent heartbeat',str(c.exception));self.assertIn('--on-plan yes',str(c.exception))
+                with self.assertRaises(ValueError):rt.advisor.raw(free,[dict(role='user',content='Done?')],600)
+                self.assertEqual((len([x for x in seen if x['method']=='POST']),rt.advisor.calls(free)),(posts,0))
+                conf=json.loads((self.home/'config.json').read_text());conf['free_time']=dict(on_plan=True)
+                (self.home/'config.json').write_text(json.dumps(conf))
+                queue.append(([dict(type='text',text='Allowed.')],charged))
+                self.assertEqual(rt.advisor.ask(free,'Plan?')['advice'],'Allowed.')
                 # the same plan without the kind: no session, refused, and named as a setup fix (no call counted)
-                self.cmd('advisor',['--model','claude-haiku-5-5','--kind','anthropic'])
+                self.assertEqual(self.cmd('advisor',['--model','claude-haiku-5-5','--kind','anthropic'])['advisor']['endpoint'],
+                                 'http://127.0.0.1:8765/v1',"off the plan: the Anthropic relay, not the plan's address")
+                self.cmd('advisor',['--endpoint',root+'/anthropic/v1'])     # (an owner who points a plain advisor at the plan)
                 rt.config['advisor']=json.loads((self.home/'config.json').read_text())['advisor']
                 self.assertNotIn('kind',rt.config['advisor']);self.assertNotIn('prices',rt.config['advisor'])
                 with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'Again?')
@@ -5983,6 +6024,10 @@ for line in sys.stdin:
                         with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'Relay?')
                         self.assertEqual(c.exception.kind,kind,str(c.exception))
                     self.assertIn('does not offer gemini-4-argon',str(c.exception))
+                    rt.advisor_opener=Wire((402,'{"type":"error","error":{"type":"billing_error","message":"relay: daily cap $5.00 reached"}}'))
+                    with self.assertRaises(AdvisorUnavailable) as c:rt.advisor.ask(gid,'Cap?')
+                    self.assertEqual(c.exception.kind,'relay_cap');self.assertIn('--provider opencode-go --cap-usd',str(c.exception))
+                    self.assertNotIn('--model',str(c.exception))
                     self.assertEqual(rt.advisor.calls(gid),2)
                 finally:srv.shutdown()
             finally:rt.mail.close();rt.store.close()

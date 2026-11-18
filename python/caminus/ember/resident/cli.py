@@ -861,6 +861,8 @@ def main(argv=None,stdin=None):
                     if isinstance(v,(int,float)) and v<0:raise ValueError('--'+flag.replace('_','-')+' must be 0 or more')
                     adv[flag]=v.rstrip('/') if flag=='endpoint' else v
             if a.kind is not None:
+                if adv.get('kind') in OPENCODE and a.kind not in OPENCODE and a.endpoint is None:
+                    adv['endpoint']='http://127.0.0.1:8765/v1'   # (off the plan: the Anthropic relay, not the plan's address)
                 for k in ('kind','relay','prices','efforts'):adv.pop(k,None)   # (a plan model's, set below again)
                 if a.kind in OPENCODE:adv['kind']=a.kind
             if adv.get('kind') in OPENCODE and adv.get('model') and adv.get('endpoint') and (a.kind or a.model or a.endpoint):
