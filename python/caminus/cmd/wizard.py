@@ -266,21 +266,19 @@ class Wizard:
         if not running:
             return 'start', []
         names = [s['name'] for s in running]
-        stops = ', '.join(names)
-        if len(running) == 1:
-            got = self.ask(f'Keep {names[0]} (no download, no start; Qwen Code is set up for it), or switch to {m.name} '
-                           f'(stops {stops} first)? [K/s]', 'k', valid=lambda x: x.lower() in ('k', 's', 'keep', 'switch'))
-            if got.lower() in ('k', 'keep'):
-                return 'keep', names[0]
+        stops = ', '.join(f"{s['name']} (:{s['port']})" for s in running)
+        got = self.ask(f'Switch to {m.name}? This stops {stops}. [y/N]', 'n',
+                       valid=lambda x: x.lower() in ('y', 'n', 'yes', 'no'))
+        if got.lower() in ('y', 'yes'):
             return 'start', names
+        if len(running) == 1:
+            self.say(f'kept {names[0]}: no download, no start; Qwen Code is set up for it')
+            return 'keep', names[0]
         for i, s in enumerate(running, 1):
-            self.say(f"  {i}. keep {s['name']} ({s['model']}) and set Qwen Code up for it")
-        got = self.ask(f'Keep the servers and set Qwen Code up for which one (1-{len(running)}), or s to switch to {m.name} '
-                       f'(stops {stops} first)? [1]', '1',
-                       valid=lambda x: x.lower() in ('s', 'switch') or (x.isdigit() and 1 <= int(x) <= len(running)))
-        if got.isdigit():
-            return 'keep', names[int(got) - 1]
-        return 'start', names
+            self.say(f"  {i}. {s['name']} ({s['model']})")
+        got = self.ask(f'Set Qwen Code up for which server (1-{len(running)})? [1]', '1',
+                       valid=lambda x: x.isdigit() and 1 <= int(x) <= len(running))
+        return 'keep', names[int(got) - 1]
 
     def pull(self, m):
         self.step(3, f'download {m.name}')

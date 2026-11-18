@@ -297,10 +297,10 @@ def main():
           '--yes with a server running: its model preselected, kept: no download, no start; Qwen Code set up for it '
           '(a re-run while it still loads: setup waits for it)')
     code, calls, out = go([XTX, XT], 'keep-other', yes=False, dry=False, answers=['coder', '', 'n'])
-    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls) and '(stops thinkingcap first)? [K/s]' in out
+    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls) and 'Switch to coder? This stops thinkingcap (:8092). [y/N]' in out
           and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
           'another model chosen, then keep: asked before any download, no pull, Qwen Code set up for the kept server')
-    code, calls, out = go([XTX, XT], 'switch', yes=False, dry=False, answers=['coder', 's', 'n'])
+    code, calls, out = go([XTX, XT], 'switch', yes=False, dry=False, answers=['coder', 'y', 'n'])
     check(calls[1:] == [['pull', 'coder'], ['stop', 'thinkingcap'], ['start', 'coder'],
                         ['qwen-code', 'setup', '--server', 'coder', '--install']],
           f'switch: the download first, then caminus stop, then caminus start ({calls[1:]})')
@@ -317,12 +317,13 @@ def main():
           'a dry run shows the same skip (status() only reads)')
     qwen_code.binary, qwen_code.status = (lambda: None), qs0
     server('qwen3-30b-a3b', 4243, 'XTX')                    # (two servers: qwen3-30b-a3b sorts first)
-    code, calls, out = go([XTX, XT], 'two-keep', yes=False, dry=False, answers=['coder', '2', 'n'])
+    code, calls, out = go([XTX, XT], 'two-keep', yes=False, dry=False, answers=['coder', '', '2', 'n'])
     check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls)
-          and '(stops qwen3-30b-a3b, thinkingcap first)? [1]' in out
+          and 'Switch to coder? This stops qwen3-30b-a3b (:8093), thinkingcap (:8092). [y/N]' in out
+          and 'Set Qwen Code up for which server (1-2)? [1]' in out
           and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
           'two servers: the switch question names both; keeping, Qwen Code is set up for the one chosen (2: thinkingcap)')
-    code, calls, out = go([XTX, XT], 'two-stop-fail', yes=False, dry=False, answers=['coder', 's'],
+    code, calls, out = go([XTX, XT], 'two-stop-fail', yes=False, dry=False, answers=['coder', 'yes'],
                           rc={'stop thinkingcap': 1})
     check(code == 1 and not any(c[0] == 'start' for c in calls)
           and 'stopped qwen3-30b-a3b; thinkingcap did not stop' in out and 'still running: thinkingcap. Nothing was started' in out,
