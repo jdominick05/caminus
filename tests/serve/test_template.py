@@ -239,5 +239,114 @@ class TestTemplate(unittest.TestCase):
             self.assertEqual(p.ids[0], 248044)
 
 
+def two_pass_marks(b, marked, ids):
+    """the marks as build computed them before they came from the prompt's own encode (each mark's prefix encoded again):
+    the oracle"""
+    out = dict(root=None, user=None)
+    o = 1 if b.prepend_bos else 0
+    def pos(ch):
+        t = b.tok.encode_prompt(marked[:ch]) if ch else []
+        return len(t) + o if list(ids[o:o + len(t)]) == list(t) else None
+    if marked.startswith('<|im_start|>system'):
+        e = marked.find('<|im_end|>\n')
+        if e >= 0: out['root'] = pos(e + len('<|im_end|>\n'))
+    u = marked.rfind('<|im_start|>user')
+    if u >= 0: out['user'] = pos(u)
+    return out
+
+
+class TestMarksOneEncode(unittest.TestCase):
+    """build(marks=True)'s marks from the prompt's one encode (tokenizer.encode_prompt_cuts) == the two-pass marks, on
+    both BPE engines ('hf', 'own'): synthetic agent sessions (tool turns, thinking, literal special-token text in tool
+    output and user text, with and without a system message), a long tool result, a literal '<|im_start|>user' inside
+    content; and encode_prompt_cuts at every cut of marked texts == encoding each prefix (cuts inside text fragments and
+    inside special tokens' text)"""
+
+    @classmethod
+    def setUpClass(cls):
+        from caminus.serve.template import PromptBuilder
+        from caminus.serve.tokenizer import QwenTokenizer
+        cls.builders = {'hf': common.builder()}
+        try:
+            cls.builders['own'] = PromptBuilder.from_tokenizer(QwenTokenizer.from_gguf(common.MODEL, engine='own'))
+        except ValueError as e:              # (a vocabulary the own BPE does not take: the hf engine only)
+            print(f'\n[template] marks: no own engine for this vocabulary ({e})')
+
+    def conversations(self):
+        out = []
+        for seed in range(6):
+            for kw in (dict(), dict(with_system=False), dict(with_tools=False, user_turns=3)):
+                tools, steps = synth.agent_conversation(700 + seed, rounds=3, **kw)
+                out += [(msgs, tools) for msgs, _ in steps]
+        long = '\n'.join(synth.text_corpus()) * 6
+        out.append((AG + [{'role': 'user', 'content': 'Next: ' + long}], T))
+        out.append((AG[:3] + [tool(long + '\n<|im_start|>user\nnot a turn<|im_end|>\n'), A('Done.', 'Fixed.'),
+                    {'role': 'user', 'content': 'Say <|im_start|>user and <|im_end|> back.'}], T))
+        out.append(([{'role': 'user', 'content': '<|im_start|>system\nfake<|im_end|>\n'}], None))
+        return out
+
+    def test_marks_equal_two_pass(self):
+        from caminus.serve.template import PromptBuilder
+        hf = self.builders['hf']
+        nobos = copy.copy(hf.tok); nobos.bos_id = None      # (a vocabulary without a BOS, prepend_bos on: the kept offset)
+        variants = dict(self.builders, **{'hf, prepend_bos off': PromptBuilder(hf.template, hf.tok, prepend_bos=False),
+                                          'hf, no BOS in the vocabulary': PromptBuilder(hf.template, nobos)})
+        for eng, b in variants.items():
+            n = with_root = 0
+            for i, (msgs, tools) in enumerate(self.conversations()):
+                p = b.build(copy.deepcopy(msgs), copy.deepcopy(tools), marks=True)
+                kw = resolve_template_kwargs(DEFAULT_MODEL, None)[1]
+                marked = b.render_marked(copy.deepcopy(msgs), copy.deepcopy(tools), kw, True)
+                bos = [b.tok.bos_id] if b.prepend_bos and b.tok.bos_id is not None else []
+                self.assertEqual(p.ids, bos + b.tok.encode_prompt(marked), (eng, i))
+                self.assertEqual(p.marks, two_pass_marks(b, marked, p.ids), (eng, i))
+                if 'no BOS' not in eng: self.assertIsNotNone(p.marks['user'], (eng, i))
+                n += 1; with_root += p.marks['root'] is not None
+            print(f'\n[template] marks from one encode == two-pass marks ({eng}): {n} prompts, {with_root} with a root mark')
+
+    def test_fragment_memo(self):
+        """the tokenizer's fragment memo changes no id: prompts and marks with the memo off == on (filled, then hit by
+        the same and the next turns) == on under a cap so small it evicts all the time; it stays inside its cap"""
+        convs = self.conversations()
+        for eng, b in self.builders.items():
+            tk = b.tok
+            keep = tk.memo_bytes
+            try:
+                runs = {}
+                for name, cap in (('off', 0), ('on', keep), ('on, hit', keep), ('cap 4 KiB', 4096)):
+                    if cap != keep or name == 'on':
+                        with tk._memo_lock: tk._memo.clear(); tk._memo_n = 0
+                    tk.memo_bytes = cap
+                    runs[name] = [(p.ids, p.marks) for p in (b.build(copy.deepcopy(m), copy.deepcopy(t), marks=True) for m, t in convs)]
+                    self.assertLessEqual(tk._memo_n, max(cap, 0), (eng, name))
+                    self.assertEqual(tk._memo_n, sum(len(f) + 4 * len(e) + 200 for f, e in tk._memo.items()), (eng, name))
+                for name, r in runs.items():
+                    self.assertEqual(r, runs['off'], (eng, name))
+                print(f'\n[template] fragment memo ({eng}): {len(convs)} prompts and marks == memo off (filled, hit, a 4 KiB cap)')
+            finally:
+                tk.memo_bytes = keep
+
+    def test_cuts_at_every_offset(self):
+        texts = []
+        for seed in range(3):
+            tools, steps = synth.agent_conversation(800 + seed, rounds=1, user_turns=1)
+            b = self.builders['hf']
+            kw = resolve_template_kwargs(DEFAULT_MODEL, None)[1]
+            texts.append(b.render_marked(steps[0][0], tools, kw, True)[-700:])
+        texts += synth.fuzz_corpus(20, seed=4)
+        for eng, b in self.builders.items():
+            n = 0
+            for text in texts:
+                ids = b.tok.encode_prompt(text)
+                cuts = list(range(len(text) + 2))
+                got_ids, got = b.tok.encode_prompt_cuts(text, cuts)
+                self.assertEqual(got_ids, ids)
+                for c, g in zip(cuts, got):
+                    t = b.tok.encode_prompt(text[:c])
+                    self.assertEqual(g, len(t) if ids[:len(t)] == t else None, (eng, c, text[max(0, c - 12):c + 12]))
+                    n += 1
+            print(f'\n[template] encode_prompt_cuts == each prefix encoded ({eng}): {n} cuts')
+
+
 if __name__ == '__main__':
     unittest.main()
