@@ -31,10 +31,10 @@ out the latest release's tag, run
 clone with the venv above active, `pip install dist/caminus-*.whl` in place of `pip install caminus`. The
 [README](../README.md#get-started) has the commands.
 
-**Nightly builds.** To run what is on the development branch before it is released, install with
-`pip install "caminus>=0.3.0.dev0"` instead: that takes the newest build, nightly or release. A nightly is built
-automatically from the `testing` branch whenever it changed; it passed the automatic tests, not a release's GPU tests.
-Don't use `--pre` for this: it also installs test versions of the packages Caminus depends on.
+**Nightly builds.** To run what is on the development branch before it is released, install a nightly in place of
+`pip install caminus`. A nightly is built automatically from the `testing` branch whenever it changed; it passed the
+automatic tests, not a release's GPU tests. Nightlies are GitHub pre-releases, not on PyPI for now: the
+[README](../README.md#get-started) says how to install one.
 
 ## 2. Check your machine
 

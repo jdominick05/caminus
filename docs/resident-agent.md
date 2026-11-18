@@ -62,7 +62,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+C | with a draft: clear it (Up brings it back); again, or with no draft: quit |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
 | Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
-| Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written |
+| Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written (a narrow terminal's box under the history; on a wide one the reply streams into the history, which PgUp/PgDn and the wheel scroll) |
 | Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output land in the draft (yours marked "my shell"); `!` on the draft's empty last line runs another, its output joining the first |
 | `@path`, `+path` | at the start of a word: `@` names a path, sent as plain text; `+` attaches the file, read as the agent (up to 64 KB each, at most 8); a missing file, a folder or a `..` path stops the message with what is wrong and keeps the draft. `@` only drops from a word that reads as a path (`@alice` stays). Both complete from the agent's own folders (Tab, the same menu as commands), relative to the folder it works in. `/` is for commands only |
@@ -161,8 +161,10 @@ is left named. `checkpoint` tars named paths before a destructive or
 milestone-crossing action and `rollback` puts them back.
 
 Before a graded goal completes, `finish` runs two checks. The **gate** is an
-optional shell command given to `define_done` (`gate`), run in the agent's home;
-a non-zero exit refuses the finish and its output becomes the next prompt. The
+optional shell command given to `define_done` (`gate`), run as a terminal command
+runs (in the agent's home, with the terminal's environment: `$WORKSPACE`, no model
+key); a non-zero exit refuses the finish and its output becomes the next prompt,
+naming any variable the gate uses that is not set there. The
 **judge** is a fresh model call with no tools that sees the goal, the done check,
 the human's steers and the recorded evidence, not the agent's reasoning, and
 answers met, not yet or wait. Not yet refuses the finish with what is missing;
@@ -223,8 +225,10 @@ loop; real residents get the gates by default.
 
 ## Tools
 
-Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
-`ask_root`), a resident has:
+Besides `terminal` (its `timeout`, 1 to 3600 seconds, kills a command that runs
+longer and the result says so, as `sandbox`'s does; `yield_ms` only bounds how long
+one call waits for output), `discover`, the loop's tools and the bridge
+(`ask_user`, `ask_root`), a resident has:
 
 | Tool | What it does |
 |---|---|
@@ -235,7 +239,8 @@ Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |
 | `report`, `budget`, `schedule` | fyi or need_you to the human; what the goal has used and has left; park the goal and wake it later |
-| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (installed in the agent's account: `python3 -m venv ~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs`); a page as readable text |
+| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (in the agent's Python, which `caminus ember setup` fills: [ember.md](ember.md#where-things-live)); a page or a PDF as readable text (retries, cache, arXiv papers: [the web tools](ember.md#the-web-tools)) |
+| `sandbox` | Code the agent did not write or does not trust (exploit proofs of concept, CVE reproductions, unknown repositories, install scripts) in a [bubblewrap](https://github.com/containers/bubblewrap) box: nothing of the agent's home, `/usr` and `/etc` read-only, a private `/tmp`, no GPUs, no D-Bus, display or host services, no capabilities. `folder` is mounted read-only at `/work` (refused: a resident's workspace or its state, the account home, a hidden folder of the account, a folder holding the token); `/box` (`boxes/GOAL` in the workspace) is writable, kept across the goal's sandbox calls and removed when the goal completes or is cancelled (a paused or failed goal keeps it, since it can resume). No user namespace can be made inside (`--disable-userns`). No network unless the call names `hosts`: then a proxy outside the box allows HTTPS (port 443) to those names and their subdomains when every address is public, and each connection shows as an event and in the card's expanded view (one made after the last poll, when the goal ends). Limits per call: `timeout` (600 s, at most 3600), 4 GB, half the CPUs, 512 processes (config.json `sandbox`: `memory_mb`, `tasks`, `cpu_percent`, `limiter`) through a user systemd scope, else rlimits; `/box` at most 4 GB on disk (`disk_mb`, checked every 2 s) and the tmpfs `/tmp` and `/run` at most the memory limit; going over kills the box and the result names the limit. The connection log keeps 1000 connections per box and a result returns at most 50 new ones (`connections_more` counts the rest). Polled like a terminal session |
 | `advisor` | A stronger model's advice, within the owner's limits (below) |
 | `mcp__SERVER__TOOL` | Tools from the agent's MCP servers (below) |
 
@@ -245,11 +250,8 @@ results are marked as data, never instructions.
 
 ## Memory
 
-`MEMORY.md` is a notes index: one line per note, capped at 4 KB, loaded into every
-turn and fixed for the length of a goal. Notes (`notes/NAME.md`, one fact each) are
-read on demand; `remember` writes a note and its index line together and is refused
-when the index is full. `STATE.md` (doing, verified, assumed, next) loads first on
-every turn and is asked for near compaction, so it is what the agent reads after a
+`STATE.md`, `MEMORY.md` and `notes/` are in [the Ember guide](ember.md#its-memory).
+`STATE.md` is asked for near compaction, so it is what the agent reads after a
 compaction or a restart. An older, longer `MEMORY.md` is copied whole into
 `notes/memory-before-index.md` the first time it is seen. Answers to questions stay
 in the goal's transcript; nothing is written to memory automatically.
@@ -272,7 +274,9 @@ On a remote model free time spends its own allowance (`free_time.budget_usd`,
 ## When you are away
 
 Nothing waits on you. A question you have not answered within `question_timeout`
-(900 seconds by default; free time uses its own shorter window) is withdrawn by the
+(900 seconds by default; free time uses its own shorter window) while you are at the
+screen, or by `question_timeout` after you come back when you were away (at most
+`question_away_max`, 8 hours; how away is judged: docs/specs/spec-ember.md §9), is withdrawn by the
 resident itself, never answered in your name, and the agent carries on: with the
 advisor's pick when an advisor is configured, else with the option it recommended,
 recording the choice in `STATE.md` and its finish. Silence is never approval: a
@@ -347,7 +351,7 @@ workspace values:
 ```sh
 caminus ember agent prompt resident
 caminus ember agent discover resident --json
-caminus ember agent discover resident --topic commands --query pdf --json
+caminus ember agent discover resident --topic commands --query 'ocr pdf' --json
 caminus ember agent discover resident --topic packages --query tshark --json
 caminus ember agent discover resident --topic containers --json
 ```
@@ -363,8 +367,12 @@ document, networking, development, Python, container and package information.
 Overview inspects metadata without launching discovered programs, importing
 third-party modules, reading user documents, contacting the internet or
 initializing GPUs. Python results describe the current interpreter only.
-Container queries explicitly use a local Docker socket or local podman; package
-queries read installed status and cached apt policy. These queries have a
+A commands query ranks the programs on PATH by the words that hit a name or
+its man-page line (read through `apropos`, offline; a rare word counts more
+than a common one, and "a" or "to" beside real words is dropped), so "ocr" finds
+`tesseract`; a short table in `discovery.py` adds the words man pages miss
+("video" and "audio" for `ffmpeg`). Container queries explicitly use a local
+Docker socket or local podman; package queries read installed status and cached apt policy. These catalog queries have a
 three-second timeout and a bounded returned output. No image is run or pulled,
 and no package is installed or index updated by discovery.
 

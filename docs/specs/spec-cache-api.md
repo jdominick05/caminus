@@ -36,7 +36,7 @@ pc = PromptCache(m, pf, draft=None, cache_dir=None, cap_gb=64, retention_days=7,
   sysfs use against the same lines (`capacity.caps_mib`).
 - **Counting.** The tier is counted by `capacity.cache_tier_mib` and checked by `capacity.check` before allocation:
   `n_slots` checkpoint slots, the io slot and, with `side_rows`, the side slot's checkpoint. The side slot's row area is
-  host memory since 0.2.2, not in the tier (`pc.side_host_bytes`). `side_rows` is clamped to the engine's `max_ctx`
+  host memory since 0.3.0, not in the tier (`pc.side_host_bytes`). `side_rows` is clamped to the engine's `max_ctx`
   (final round 4), and halved down to 8,192 when the area would not fit in MemAvailable with the host margin.
   `capacity.budget(cache=pc.tier)` adds it to a projection.
 - **Refusals at construction.**
@@ -249,7 +249,7 @@ without one.
 ## The side slot
 
 - **Use.** `prepare(ids, side=True)` is for side calls (titles, summaries, a harness's background memory jobs) of at most
-  `side_rows - T` positions. `side_rows` is 98,304 since 0.2.2 (8,192 before): Qwen Code 0.26.9 sends two background
+  `side_rows - T` positions. `side_rows` is 98,304 since 0.3.0 (8,192 before): Qwen Code 0.26.9 sends two background
   memory jobs (29,555 and 35,582 tokens, `max_tokens` 32,000) on every user message, and at 8,192 they took the main slot.
 - **What it saves.**
   - The main live state goes into the side checkpoint slot.
