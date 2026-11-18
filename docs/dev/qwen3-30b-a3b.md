@@ -374,7 +374,9 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
   - Next: the GPU gates in short windows (the non-display card first): the decode tile against the standalone
     `own_mv_q4_0_k3` and float64 on the file's rows, the 30B G-model gate against the target file's own float64
     reference (`tools/reference/q3moe_ref.py`, about 17 min of CPU; llama.cpp golden logits for the bound), the depth
-    rows, the embedding perplexity check, then served speed against Q4_K_M (one card and two, F16 and Q8 KV).
+    rows, the embedding perplexity check, then served speed against Q4_K_M (one card and two, F16 and Q8 KV). The
+    embedding check's bar, set before its run: the target file's perplexity (the same command as the table above) below
+    the Q4_K_M file's 7.9688; its distance from the head-only splice's 7.7874 is the Q4_K embedding's cost, reported.
   - Open: the iu8 decode path (`v_dot4_i32_iu8` on int8 activations, per 32 or 128) against this fp16 path at the
     bandwidth bound, with its own accuracy gate; a per-128 scale layout (4.125 bits per weight instead of 4.5) for both;
     whether `unroll 1` in `q3p_mm_q40` costs prefill speed; the catalog (the converter needs the Q4_K_M file for the
