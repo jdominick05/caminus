@@ -358,7 +358,7 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
   of 64 chunks), with the Q6_K head -0.0230 ± 0.0017; the Q6_K head costs 0.0005 nats against F16. So the head can
   be Q6_K (the same bytes per token as today) at almost no cost. One text, and a GPTQ calibration set may lean
   towards text like it (the checkpoint does not name its set); no common bf16 reference, so no KLD.
-- **Where the Q4_0 family stopped (work in progress, nothing measured on a card yet).** The target file is the converted
+- **Where the Q4_0 family stopped (work in progress; the first GPU checks below, one failed).** The target file is the converted
   checkpoint with the Q4_K_M file's Q4_K embedding and Q6_K head spliced in (`gguf_splice.py --match
   '^(output|token_embd)\.weight$'`), so the engine needs no F16 op.
   - Built: `kernels/k3_q3m_q40*.hip`, twelve twins of the lean, Q8 KV, YaRN, two-card and verify modules
@@ -370,11 +370,32 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
   - Passing: `objcheck` against the base build (every shipped object unchanged; the twins at 96 VGPRs, no VGPR spill,
     1 to 3 more spilled SGPRs than their bases), `tests/engine/test_q3moe_q40_cpu.py` and the CPU suites the change
     touches (runtime_kernels, arch, own_code, q3m_tp_kernels, q3moe_tp, q3moe_kvq8, q3moe_tp_kvq8, q3moe_yarn,
-    q3m_prefill_tp).
-  - Next: the GPU gates in short windows (the non-display card first): the decode tile against the standalone
-    `own_mv_q4_0_k3` and float64 on the file's rows, the 30B G-model gate against the target file's own float64
-    reference (`tools/reference/q3moe_ref.py`, about 17 min of CPU; llama.cpp golden logits for the bound), the depth
-    rows, the embedding perplexity check, then served speed against Q4_K_M (one card and two, F16 and Q8 KV). The
+    q3m_prefill_tp). After merging testing at 3a3612e: `objcheck` against a testing build, the same result (138 objects
+    unchanged, 13 new, every `k3_run` at 96 VGPRs with no VGPR spill).
+  - On the card (2026-11-18, RX 7900 XT alone, the target file; llama.cpp's bounds from stock llama.cpp at 7bcbc04 through
+    `tools/reference/gg_golden.cpp` linked against it, one card):
+    - Passed: `tests/engine/test_own_q40_ops.py` (the Q4_0 tile in `k3_q3m_q40` bitwise the standalone `own_mv_q4_0_k3`
+      at 3 / 6 / 7 / 8 workgroups per WGP on 14 matrices of layers 0 and 47, the fused gate | up, the Q6_K head bitwise
+      `own_mv_q6_k_pl`; 4 tokens in one segment of `k3_q3m_q40_ver` the one-token bits; the standalone kernel against
+      float64 at worst mean 7.0e-08, max 2.3e-06 of the rms); `test_q3m_yarn_rope.py --q40` (F16, Q8, two-card F16 and
+      Q8 builds); `test_q3m_tp_probe.py` on the file (F16 and Q8: `k3_q3m_q40_tp` bitwise `k3_q3m_q40` on one card).
+    - The G-model gate at 128 tokens against the file's own float64 reference (`q3moe_ref.py`, 48 min of CPU here):
+      F16 KV caminus 3.59e-04, top-1 127 / 128 against llama.cpp's 2.18e-03, 125 / 128 (PASS); Q8 KV caminus 1.24e-03,
+      126 / 128 against llama.cpp's q8_0 KV 2.22e-03, 123 / 128, and F16 -> Q8 1.33e-03, 97.7 % top-1 against
+      llama.cpp's own 2.81e-03, 97.4 % (PASS).
+    - `tests/prefill/test_q3m_prefill.py` (positions [0, 64) prefilled, then 64 decoded): F16 KV caminus 1.45e-04,
+      63 / 64 against llama.cpp's prefill-then-decode 1.64e-03, 63 / 64 (PASS). **Q8 KV, with llama.cpp's q8_0-KV
+      prefill-then-decode rows as the bound: FAIL** on top-1, 61 / 64 against 62 / 64 (mean KLD 7.29e-04 against
+      2.04e-03 passes; the same engine decode-only at those positions 63 / 64; the prefill's Q8 rows byte for byte their
+      encoding, the geometry and bounds checks pass). The same check on the Q4_K_M file fails the same way: 63 / 64
+      against llama.cpp's 64 / 64, mean KLD 1.42e-03 against 2.27e-03 (decode-only 64 / 64). So the shortfall is the
+      shipped Q8 prefill path's under this bound, not the Q4_0 family's; [q8-kv.md](q8-kv.md)'s command for this test
+      runs without `--llama`, so the shipped path was never held to it. Whether this rule gates the switch is open.
+    - Not run after that stop: the two-card G-model gate, the depth rows, the embedding perplexity check, the served
+      smoke, served speed.
+  - Next, once the Q8 prefill question is settled: the two-card G-model gate, the depth rows (16,384 and 40,896 against
+    `q3moe_ref32.py` of this file on the published rows' tokens), the embedding perplexity check, the served smoke, then
+    served speed against Q4_K_M (one card and two, F16 and Q8 KV). The
     embedding check's bar, set before its run: the target file's perplexity (the same command as the table above) below
     the Q4_K_M file's 7.9688; its distance from the head-only splice's 7.7874 is the Q4_K embedding's cost, reported.
   - Open: the iu8 decode path (`v_dot4_i32_iu8` on int8 activations, per 32 or 128) against this fp16 path at the
