@@ -45,12 +45,15 @@ ITEMS = (
          'Qwen3-Coder-Next-UD-IQ3_S.gguf', 29690687488,
          'fddff90a6e3b9f0aee320a2710024c458cd5f3b07f0b7bdfb33fcf23c08e5389', 'hf-lfs'),
 )
-# Qwen3-30B-A3B (11-10): the official Q4_K_M; revision, size and LFS sha256 from Hugging Face's API on 2026-11-10 (the
-# local file's sha256 computed and equal)
+# Qwen3-30B-A3B (11-18): unsloth's Q4_K_M, made with an importance matrix (Apache-2.0, not gated): the same tensors in the
+# same formats as Qwen's official Q4_K_M (Q4_K + Q6_K, tensor for tensor), about a third of its distance to BF16
+# (docs/dev/qwen3-30b-a3b.md, "Which file"). Revision, size and LFS sha256 from Hugging Face's API (paths-info at the
+# pinned revision) on 2026-11-18 (the local file's sha256 computed and equal). Its local path is the official file's
+# (`<repository name>/<path>`), so the old file has to go first: docs/models.md, "Switching from the official file".
 ITEMS = ITEMS + (
-    Item('qwen3-30b-a3b', 'qwen3-30b-a3b', 'Qwen/Qwen3-30B-A3B-GGUF', 'e4d4bafdfb96a411a163846265362aceb0b9c63a',
-         'Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824,
-         '0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5', 'hf-lfs'),
+    Item('qwen3-30b-a3b', 'qwen3-30b-a3b', 'unsloth/Qwen3-30B-A3B-GGUF', 'd5b1d57bd0b504ac62ae6c725904e96ef228dc74',
+         'Qwen3-30B-A3B-Q4_K_M.gguf', 18556686912,
+         '9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48', 'hf-lfs'),
 )
 # Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
 # Face's API on 2026-11-11 (each local file's sha256 computed and equal). CATALOG names Swift 1.5 and ThinkingCap (their
@@ -103,8 +106,9 @@ ALL = (
     _model('qwen3.8-27b', 'Qwen3.8 27B dense GSQ-RCO IQ3_S (own code end to end)', 'qwen35-own', ('qwen3.8-27b', 'dflash2-27b'),
            'qwen3.8-27b', '55 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
            'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
-    _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
-           '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
+    _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M, unsloth imatrix (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
+           '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row, '
+           'measured on the official Q4_K_M: the same formats)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
 )
 # Each served model's recommended sampling for agentic work (thinking on), from its model card: what caminus serve uses as a
 # request's defaults (caminus.serve.sampler.model_defaults: these first, then the GGUF's general.sampling.* where a field is
