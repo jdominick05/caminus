@@ -25,11 +25,11 @@ The [quickstart](https://github.com/jdominick05/caminus/blob/main/docs/quickstar
 
 | Model | Cards | Decode |
 |---|---|---|
-| Qwen3.6-35B-A3B, 2-bit | 1 | 175 tok/s |
-| Qwen3.6-35B-A3B HauhauCS | 1 (24 GB) | 192 tok/s |
-| AREX-2 27B | 1 (24 GB) | 41 tok/s |
 | Qwen3.8-Flash-Next Coder (262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter |
-| Qwen3-Coder-Next 80B | 2 | 136 tok/s |
+| Qwen3-30B-A3B Q4_K_M | 1 (24 GB); or 2 | 248 tok/s |
+| Swift 1.5 27B Q4_K_M | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards |
+| ThinkingCap 27B RCO 4.2 bpw | 1; or 2 | 47 tok/s; 69 on two cards |
+| Qwen3.8-27B GSQ-RCO IQ3_S | 1 | 55 tok/s |
 
 Details: [models](https://github.com/jdominick05/caminus/blob/main/docs/models.md) ·
 [hardware](https://github.com/jdominick05/caminus/blob/main/docs/hardware.md) ·

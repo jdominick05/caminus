@@ -104,16 +104,9 @@ Please report what breaks.
 
 ## Supported hardware
 
-| Card | Status |
-|---|---|
-| RX 7900 XTX (24 GB) | Supported and tested |
-| RX 7900 XT (20 GB) | Supported and tested |
-| Other cards with the same chip (gfx1100): RX 7900 GRE, Radeon Pro W7900, W7800 | Untested: Caminus will try them |
-| Every other GPU | Not supported yet |
-
-One card runs the one-card models. Two cards run two models side by side, or a two-card model: the Qwen3.8 Coder on an
-XTX + XT or two XTX, or Swift 1.5, ThinkingCap and (when you ask for it, one card being its default) Qwen3-30B-A3B
-across both cards. See [hardware](docs/hardware.md) for slots, memory and getting full speed.
+Supported and tested: RX 7900 XTX (24 GB) and RX 7900 XT (20 GB). Other gfx1100 cards (RX 7900 GRE, Radeon Pro W7900,
+W7800) are untested; Caminus will try them. Every other GPU is not supported yet. One card runs the one-card models; the
+Coder needs two. Which cards, slots and models work together: [hardware](docs/hardware.md).
 
 **Got other AMD hardware?** Please try Caminus on it and
 [send a hardware report](https://github.com/jdominick05/caminus/issues/new?template=hardware_report.yml), even when it
@@ -130,13 +123,11 @@ are welcome too.
 |---|---|---|---|
 | Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
 | Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; served, 213 on two cards against 245 on one (two cards are faster from about 32K) | 148 tok/s; 112 on two cards (`-sm tensor`) |
-| Swift 1.5 27B Q4_K_M (17 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
-| ThinkingCap 27B RCO 4.2 bpw (14 GB) | 1; or 2 | 47 tok/s; 69 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
-| Qwen3.8-27B GSQ-RCO IQ3_S (12 GB) | 1 | 55 tok/s | not measured yet |
+| Swift 1.5 27B Q4_K_M (19.5 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
+| ThinkingCap 27B RCO 4.2 bpw (16.4 GB) | 1; or 2 | 47 tok/s; 69 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
+| Qwen3.8-27B GSQ-RCO IQ3_S (14.2 GB) | 1 | 55 tok/s | not measured yet |
 
-**Paused for this release:** Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
-code, so `caminus pull`, `caminus start` and `caminus serve` refuse them for now; they come back once they are measured
-again.
+**Paused for this release:** Qwen3.6-35B-A3B, Qwen3-Coder-Next and AREX-2 ([models](docs/models.md#the-models)).
 
 Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:
 [models](docs/models.md). Where every number comes from: [benchmarks](docs/dev/benchmarks.md).
@@ -158,19 +149,7 @@ Ember (`caminus ember`) gives an AI agent its own account on your machine: you g
 works, on a local model or a paid API. It is early and tested on one machine, and its setup assumes Debian or Ubuntu
 with systemd: read [its known limits](docs/ember.md#known-limits) before you set it up.
 
-```bash
-caminus ember setup                               # writes the one root step and says how to run it
-sudo sh ~/.local/share/caminus/env-setup.sh       # the agent's account, its group and the shared folders; safe to rerun
-caminus ember setup                               # installs the agent's side; every line should say PASS
-caminus ember agent install
-caminus ember agent init resident --model MODEL_ID --endpoint http://127.0.0.1:8092/v1
-caminus ember agent start resident
-caminus ember ui
-```
-
-`caminus ember setup` names the default model for your cards at the end; `MODEL_ID` is what the running server reports.
-A paid API goes through a key relay that holds your key and caps the day's spend. The
-[Ember quickstart](docs/ember-quickstart.md) walks through all of it, and [the guide](docs/ember.md) explains how it works.
+The [Ember quickstart](docs/ember-quickstart.md) walks through the setup and [the guide](docs/ember.md) explains how it works.
 After you upgrade Caminus (`pip install -U caminus`), run `caminus ember agent install` again: a running agent takes the
 new runtime between goals ([every command](docs/resident-agent.md)).
 

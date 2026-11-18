@@ -1,6 +1,6 @@
 # Without the panel
 
-By the end of this page you'll be able to do everything the panel does from a terminal or a script. Every command takes
+By the end of this page you'll be able to do everything the panel does from a terminal or a script. Most commands take
 `--help`; most take `--json` for scripts.
 
 ## The usual flow
@@ -21,11 +21,13 @@ caminus stop thinkingcap       # stop it (--all stops every server)
 |---|---|
 | `--card N` | Use card N (as `caminus ps` numbers them) instead of choosing. |
 | `--ctx N` | A context of N tokens instead of the largest that fits. |
-| `--long-context` | The model's long-context mode: `qwen3-30b-a3b` with YaRN x4, up to 131,072 tokens ([models](models.md#long-context-for-qwen3-30b-a3b-opt-in)). Other models refuse it. |
+| `--long-context` | `qwen3-30b-a3b`'s long-context mode ([models](models.md#long-context-for-qwen3-30b-a3b-opt-in)). Other models refuse it; the `coder` has its own ([configuration](configuration.md#long-context-coder-up-to-1m-tokens)). |
 | `--kv q8` | `qwen3-30b-a3b` only: the 8-bit KV cache instead of F16, the default ([models](models.md#the-8-bit-kv-cache-qwen3-30b-a3b)). Other models refuse it before a card is picked, and `--team` refuses it (each team model keeps its own cache). |
 | `--name NAME` | Call the server NAME (default: the model's name). |
 | `--port N` | Listen on port N (default: the first free port from 8092). |
-| `--team brain-hands` | Start AREX-2 and Qwen3.6 together on two cards ([the team](panel.md#the-brain--hands-team)); paused with Qwen3.6 for this release. |
+| `--cards 2` | Run `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b` on both cards ([models](models.md)). |
+| `--no-wait` | Return once the server is launched (`caminus ps` shows it loading). |
+| `-- FLAGS` | Everything after `--` goes to `caminus serve`, for example `caminus start thinkingcap -- --draft mtp`. |
 
 `caminus restart NAME` restarts a server with the same settings.
 
@@ -43,8 +45,8 @@ The report gives the largest native context that fits, the chosen cards, and pro
 It includes checkpoint slots and drafter buffers. For a model with more than one KV cache format (Qwen3-30B-A3B), the
 JSON's `kv` names the format the maximum assumes (`f16` or `q8`): in the long-context mode the mode picks it. An
 unavailable projection returns an error and no maximum.
-Card usage can change between the query and startup, so serving checks capacity again. The query currently covers
-the configured serving recipe's native device-memory context; host KV and context extension need separate projections.
+Card usage can change between the query and startup, so serving checks capacity again. The query covers
+the native context (and Qwen3-30B-A3B's `--long-context`); the Coder's mode past 262,144 and host KV are not projected.
 `max_ctx` has one entry per KV cache format, `{"f16": N, "q8": N}`, each the largest context that fits with that cache.
 `q8` is `null` for a model without the 8-bit cache (`kv_formats` lists the formats a model has: only `qwen3-30b-a3b`,
 on one card or two, has `q8`) and when no cards hold it. For a model that always keeps its own cache (the Coder's
@@ -57,13 +59,8 @@ its own cache.
 
 ## Qwen Code
 
-```bash
-caminus qwen-code status            # installed? set up for which server?
-caminus qwen-code setup --install   # install it and point it at the running server
-caminus qwen                        # run it (add Qwen Code's own arguments after it)
-caminus advisor setup               # optional: an API advisor steers Qwen Code when it gets stuck (docs/advisor.md)
-caminus advisor status              # which advisor, hooked into which Qwen home
-```
+[Harnesses](harnesses.md#qwen-code-recommended) has `caminus qwen-code status|setup --install` and `caminus qwen` (`--model MODEL`
+starts a server first when none runs; `--server NAME` picks one); [the advisor](advisor.md) has `caminus advisor setup|status`.
 
 ## Running the server yourself
 

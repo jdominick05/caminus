@@ -7,7 +7,7 @@ from its Hugging Face repository and checks every file before using it.
 
 | Name | Model | Cards | Download | Decode | Prompt reading |
 |---|---|---|---|---|---|
-| `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT or XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
+| `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT, or two XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M | 1, 24 GB; or 2 | 18.6 GB | 248 tok/s | 6,432 tok/s |
 | `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
 | `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 55 tok/s | 800 tok/s (measured on an XT) |
@@ -23,8 +23,8 @@ again.
 
 ## Which one to pick
 
-- **One card:** with a 24 GB card, start with `qwen3-30b-a3b`, the fastest writer (below). On a 20 GB card, `thinkingcap`
-  is the model that fits.
+- **One card:** with a 24 GB card, start with `swift-1.5`. `qwen3-30b-a3b` is the fastest writer (below), but it finishes
+  fewer agent tasks for now. On a 20 GB card, `thinkingcap` is the model that fits.
 - **An XTX + XT or two XTX:** `coder` handles the longest work: 262K tokens of context, a prompt cache that keeps whole
   conversations, and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from
   disk. Two XT cards are too small for it.
@@ -45,8 +45,7 @@ again.
   too: on an XT the server picks about 53K tokens of context by itself. `--draft mtp` drafts with its own
   prediction block (about 1.8x on code and prose, served on an XT; no extra file); `--draft dflash` drafts with the base
   model's DFlash2 drafter (output identical to plain decoding; served on an XT about 1.9x on code and prose, 1.5x on
-  shell). It slows with depth (about 16 tok/s with 28K tokens of context). Its licence is PolyForm Small Business 1.0.0: read its terms
-  before any commercial use.
+  shell). It slows with depth (about 16 tok/s with 28K tokens of context).
 - **`qwen3.8-27b`** is the plain Qwen3.8 27B, not a finetune, quantized to about 3.6 bits per weight by ISTA-DASLab
   (GSQ-RCO, Apache-2.0). It is the smallest 27B download, fits either card and writes fastest of the three at short
   context (55 tok/s on an XTX). `--draft dflash` (about 1.2-1.4x, served on an XTX) and `--draft mtp` (about
@@ -67,7 +66,7 @@ that can't hold at least 32,768 tokens on your cards, rather than run out of mem
 the 27B models: the drafter's memory comes out of the context).
 
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
---cards 2`). Each card holds half of every layer, so the model writes about 1.4 times as fast and the full 262,144-token
+--cards 2`). Each card holds half of every layer, so the model writes about 1.5 times as fast and the full 262,144-token
 context fits with `--draft off` (with the default drafter it is projected to fit too on an XTX + XT with free memory, a
 little less when the desktop holds memory on the XTX). Reading a prompt is about as fast as on one XTX for now. Both
 drafters work on two cards too, with the same output as plain decoding, and `--draft dflash` is the default there when
@@ -147,7 +146,7 @@ gets; any field the request sends itself (`temperature`, `top_p`, `top_k`, `min_
 ## The names your tools use
 
 Each server answers to its model id and to the same id with `-nothink` (no thinking before answering):
-`qwen3-30b-a3b`, `swift-1.5`, `thinkingcap` (and, while paused, `arex-2`, `qwen3.6` and `qwen3-coder-next`). The Coder answers to `k3-coder`, `k3-coder-nothink`, `k3-coder-low` and `k3-coder-xhigh`
+`qwen3-30b-a3b`, `swift-1.5`, `thinkingcap` and `qwen3.8-27b`. The Coder answers to `k3-coder`, `k3-coder-nothink`, `k3-coder-low` and `k3-coder-xhigh`
 (the last two set how long it thinks).
 
 ## Licences
@@ -156,7 +155,7 @@ Caminus doesn't include any model weights. Each model has its own licence; read 
 
 | Model | Licence |
 |---|---|
-| AREX-2, Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO, and the paused Qwen3.6-35B-A3B and Qwen3-Coder-Next | Apache-2.0 |
+| Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO, and the paused AREX-2, Qwen3.6-35B-A3B and Qwen3-Coder-Next | Apache-2.0 |
 | Swift 1.5 | the Swift Open License 1.0 |
 | ThinkingCap | PolyForm Small Business 1.0.0 (read its terms before any commercial use) |
 | The DFlash2 drafters (the Coder's, and the 27B models' shared one) | Apache-2.0 |

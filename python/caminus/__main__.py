@@ -15,7 +15,7 @@
   purge     empty the prompt cache's disk tier and the flight recorder (lists only without --yes)
   replay    rerun a flight-recorder bundle, bitwise (GPU, under the guard)
   flight    the flight recorder: list / purge / bundle
-  kv-cache  the prompt cache's disk tier: list / purge
+  kv-cache  the prompt cache's disk tier: list / prune / purge
   guard     run any command under the guard: caminus guard LOG SECS CMD... (--lines: the cards and their kill lines)
   ember     Ember, the agent environment (experimental; `env` is an alias): work as a second user on this machine over SSH, root only with your
             approval (caminus ember setup | status | run | shell | prompt | ui | spawn | jobs | stop | reqs | answer | ask | say | notes | ctx | memory | remember | serve | new | sessions | send | attach | watch | audit)

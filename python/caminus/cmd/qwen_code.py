@@ -292,7 +292,7 @@ def read_settings(h):
 def install(say):
     npm = shutil.which('npm')
     if not npm:
-        raise manage.ManageError('npm is not installed (Node.js >= 20): install it, then caminus qwen-code setup --install')
+        raise manage.ManageError('npm is not installed (Node.js >= 22): install it, then caminus qwen-code setup --install')
     os.makedirs(prefix(), exist_ok=True)
     say(f'qwen-code: npm install {PKG}@{PIN} into {prefix()}')
     r = subprocess.run([npm, 'install', '--prefix', prefix(), '--no-fund', '--no-audit', f'{PKG}@{PIN}'],

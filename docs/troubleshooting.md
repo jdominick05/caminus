@@ -23,13 +23,14 @@ starting anything on a GPU. Every line starts with a level and an area:
 | `kernels` | The GPU code that ships with the package, against its own checksum list | FAIL "missing N of the runtime set" or "bad": a broken or partial install: reinstall (`pip install --force-reinstall caminus`, or rebuild the wheel). In a source checkout without a build, run `./build.sh`. WARN "uncommitted kernel sources": a development build. |
 | `deps` | numpy, jinja2 (new enough for its sandbox), tokenizers | `pip install` the one it names (`pip install -U jinja2` for an old one). |
 | `gguf` | The model-file reader | A broken install: reinstall Caminus. |
-| `torch` | PyTorch's AMD (ROCm) build, and the version Caminus was tested with | Install the ROCm build first: `pip install torch --index-url https://download.pytorch.org/whl/rocm7.2`. PyPI's default PyTorch is for NVIDIA cards. |
+| `torch` | PyTorch's AMD (ROCm) build, and the version Caminus was tested with | Install the ROCm build first ([Installing](#installing)). |
 | `gpu` | The supported cards, their memory and links; what runs on one card or on the pair; other GPU programs | FAIL "no supported card": see [Your cards](#your-cards). WARN "something holds VRAM" or "other process(es) hold a GPU context": another engine, a test or a game is using the card; Caminus wants it idle (`caminus ps` shows Caminus's own servers). WARN "the Coder needs a 24 GB RX 7900 XTX as card 0": your pair runs everything but the Coder. |
 | `clocks` | Whether the cards run at high clocks for full speed | WARN: about 13% slower; see [getting full speed](hardware.md#getting-full-speed). |
 | `guard` | The GPU guard script, its memory lines per card, a recorded fault, the kernel log | FAIL "a GPU fault was recorded": see [Exit 99](#while-it-runs) below. WARN "kernel log not readable": join the `systemd-journal` group and log in again, so the guard can watch for faults. |
 | `host` | System memory | WARN below 28 GiB: Caminus was tested with 29 GiB, and the guard stops a run when less than 1,500 MiB is left available; close other programs, or pick a smaller model. |
 | `models` | The Coder's files and its drafter: present, the size the release was tested with (`--verify`: the hash) | INFO "not downloaded": fine unless you want the Coder (`caminus pull coder`, or the panel's `p`). FAIL "does not exist" for a path you set yourself (`CAMINUS_CODER`, config.toml): fix the path or download it. FAIL on size or hash: a damaged or different file: download it again. The other models are checked when they start. |
 | `disk` | Free space where the models, the prompt cache and the request log live | WARN: free some space, or point them elsewhere ([configuration](configuration.md)); `caminus purge` lists what the caches hold. |
+| `gpu-run` (`--gpu` only) | A tiny kernel on each card, then peer access between two cards | FAIL: see Exit 99 below. WARN "peer access ... no": see [Your cards](#your-cards). |
 | `port` | Whether port 8092 is free | WARN: a server already runs there (`caminus ps`), or start the next one with `--port`. |
 | `config` (INFO) | Every setting and where it came from | Paste it in bug reports. |
 
@@ -49,12 +50,13 @@ NVIDIA cards and won't work.
 **"no supported GPU"**: Caminus didn't find an RX 7900 XTX or XT. Check that `ls /dev/kfd` works and that you're in the
 `render` and `video` groups (log out and back in after adding yourself). Other cards: see [hardware](hardware.md).
 
-**"two-card models refused on this pair"**: one of the cards sits on a link slower than PCIe 4.0 x4, or the board doesn't
-allow direct card-to-card access. Move the card to a faster slot. One-card models still run. When the graphics driver
-reports that it has lowered an idle card's link to save power, the check judges the link at full speed, and
-`caminus doctor` shows the idle reading as "idle now at".
+**"two-card models need PCIe 4.0 x4 or better"**: one of the cards sits on a link slower than PCIe 4.0 x4 (the message names it). Move the card to a faster slot. One-card models still run. When the graphics driver reports that it has lowered an idle card's link to save power, the check judges the link at full speed, and `caminus doctor` shows the idle reading as "idle now at".
 
-**"the fault watch is off" (GUARD WARNING)**: the guard can't read the kernel log. Add yourself to the `systemd-journal`
+**"two-card models need two free cards: 1 of 2 are in use"**: another model, a test or a game holds a card (`caminus ps`, `caminus doctor`). Stop it and try again.
+
+**"peer access ... no"** (`caminus doctor --gpu`): the board doesn't allow direct card-to-card access. Try another slot, or the BIOS IOMMU / ACS settings. One-card models still run.
+
+**"the amdgpu fault watch is OFF for this run" (GUARD WARNING)**: the guard can't read the kernel log. Add yourself to the `systemd-journal`
 group and log in again.
 
 ## Starting a model

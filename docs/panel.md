@@ -149,13 +149,3 @@ To choose a layout for another zone, add `zones` inside `openrgb`:
 The names match OpenRGB's zone names, ignoring case. `strip` disables circular effects for that zone. To change a state
 color, add `colors`, for example `"colors": {"writing": "#00ff80", "waiting": "#00b4dc"}`. The state names in the first
 column above are `offline`, `loading`, `idle` / `quiet`, `between`, `waiting`, `reading`, `writing`, `tool`, and `compacting`.
-
-## The brain / hands team
-
-> [!NOTE]
-> **Paused for this release**, with Qwen3.6 (its hands): `caminus start --team brain-hands` says so and starts
-> nothing. It comes back with Qwen3.6, from the command line.
-
-With two cards you can run two models together: AREX-2 plans on the 24 GB card (the brain) and Qwen3.6 does the work on
-the other card (the hands). Run `caminus start --team brain-hands`. Qwen Code then
-uses the brain as its main model and hands tasks to Qwen3.6.

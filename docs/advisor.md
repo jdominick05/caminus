@@ -37,7 +37,8 @@ writing the new configuration. Updating or uninstalling the hook leaves provider
   or 40 rounds of tool calls since your last message.
 - Automatic hints come at most once every 10 minutes (`min_interval_s`), so the model mostly works on its own.
 - Optionally, once per message, it checks whether the task is really done before the model stops.
-- `/advise` asks right away, any time.
+- At most 8 calls per Qwen Code session, `/advise` included; after that it stays quiet until a new session.
+- `/advise` asks right away, any time under that cap.
 
 If the advisor thinks the model is on track, nothing is added.
 

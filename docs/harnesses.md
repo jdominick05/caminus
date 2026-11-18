@@ -32,7 +32,7 @@ while keeping your external provider choices, MCP servers and hooks.
 ### Side questions (`/btw`)
 
 `/btw <question>` asks about the conversation without adding to it. Caminus recognizes the request and answers it in its
-side slot, so your conversation's next turn picks up where it was instead of being read again. Two things to know:
+side slot, so your conversation's next turn picks up where it was instead of being read again. Three things to know:
 
 - It waits for the current answer to finish: the server answers one request at a time.
 - In a short conversation it's quick: only the question is new.
@@ -108,40 +108,5 @@ is saved to disk and comes back in about a second.
 
 ## An agent with its own user (experimental)
 
-This is Ember's lower layer; [Ember](ember.md) is the agent built on it, an experiment with
-[known limits](ember.md#known-limits).
-
-Instead of a fixed tool list, an agent can get an environment: a second user on this machine (`caminus-agent` by
-default) that it reaches over SSH and can do anything in. Your own files, keys and processes stay out of its reach by
-Unix permissions, and root is never in its hands: a root command waits in a queue until you approve it in
-`caminus ember watch`, and only your side runs it under sudo.
-
-```bash
-caminus ember setup --agent-side   # one-time provisioning (prints the sudo commands to run yourself)
-caminus ember status               # user, key, ssh login, bridge, ask-root all OK?
-caminus ember shell                # interactive session as the agent user: run any agent here
-caminus ember run -- git status    # one command as the agent user
-caminus ember ui                   # the TUI: queued root requests + the live audit log
-caminus ember watch                # same, in plain text (approve / edit / deny queued root commands)
-caminus ember spawn -n build -- make -j4   # long work, detached (log ~/env-logs/build.log)
-caminus ember jobs                 # the detached jobs
-caminus ember stop build           # kill one
-caminus ember reqs --json          # pending root/question requests, machine-readable
-caminus ember answer ID answered "yes"   # answer one from a script (approved/edited/denied/answered)
-caminus ember memory               # the agent's ~/MEMORY.md (its persistent memory)
-caminus ember remember "TP wins at these shapes"   # append to it
-caminus ember serve coder coder --placement 2   # a model server as a job: own home/port/session, split on both cards
-caminus ember serve swift swift-1.5 --placement 0  # one small model on the 24 GB card (S in `caminus ember ui` does this)
-caminus ember new coder -- qwen    # a named session running your agent CLI (tmux, in the agent user)
-caminus ember sessions             # the sessions
-caminus ember send coder "run the TP benchmarks"   # type an instruction into it, live
-caminus ember attach coder         # sit in the same terminal
-caminus ember ctx                  # running servers and the context window each reports
-caminus ember audit --tail 20      # everything the environment did
-```
-
-Inside the agent user, `ask-root CMD...` asks you to run CMD as root and waits for the answer, and `~/ROBOTS.md` is
-its standing instruction — what it is, what it can do, and how root works (`caminus ember prompt` prints it from your
-side). The full design is in
-[spec-ember.md](specs/spec-ember.md). This is an environment, not a sandbox: the agent user still has the
-network and the GPU, so give it only scoped credentials in its own environment.
+[Ember](ember.md) gives an AI agent its own account on your machine. It is an experiment with
+[known limits](ember.md#known-limits); [every command and view](resident-agent.md).

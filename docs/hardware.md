@@ -20,7 +20,7 @@ even when everything works. That's how cards move from untested to supported.
 | Cards | What you can run |
 |---|---|
 | One | The one-card models. `thinkingcap` and `qwen3.8-27b` fit any supported card; `qwen3-30b-a3b` and `swift-1.5` need a 24 GB card. |
-| Two | `coder` on an XTX + XT or two XTX; `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b` across both (`--cards 2`); or two one-card models side by side. |
+| Two | `coder` on an XTX + XT or two XTX; `swift-1.5`, `thinkingcap` or `qwen3-30b-a3b` across both (`--cards 2`); or two one-card models side by side (`caminus start` in a terminal; the panel runs one server at a time). |
 | Three or more | Two cards for a two-card model; one-card models on the rest. |
 
 Caminus finds your cards itself and gives the bigger card the bigger share of a two-card model. `coder` needs an XTX as its first card, which holds the bigger share: it runs on an XTX + XT or on two XTX, and
@@ -52,12 +52,11 @@ can't read the log.
 ## Getting full speed
 
 The cards decode about 13% faster with their clocks held high. The guard does this when it finds a `gpu-high` helper:
-any executable that sets each card's `power_dpm_force_performance_level` to `high`, runs the command it's given, and sets
-it back afterwards. Writing those files needs root, so the helper needs its own sudo or udev rule. Caminus doesn't ship
+any executable that sets each card's `power_dpm_force_performance_level` to `high` and its `power/control` to `on`, runs the command it's given, and sets
+it back afterwards. The guard looks for `CAMINUS_GPU_HIGH`, then `gpu-high` on `PATH` or in `~/.local/bin`. Writing those files needs root, so the helper needs its own sudo or udev rule. Caminus doesn't ship
 one; whether to add one is up to you. Without it, everything works at normal clocks.
 
 ## Memory and disk
 
 - System RAM: the one-card models need little. `coder` was tested with 29 GB.
-- Disk: the model files (12-59 GB each), plus up to 30 GB for the prompt cache and 10 GB for the request log, both under
-  `~/.cache/caminus`. `caminus purge` empties them.
+- Disk: the model files (14-59 GB each, with their drafters), plus the prompt cache (up to 64 GB) and the request log (up to 10 GB), both under `~/.cache/caminus` ([where things go](configuration.md#where-things-go)). `caminus purge --yes` empties them.

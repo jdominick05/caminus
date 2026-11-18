@@ -157,7 +157,7 @@ def parser():
     ap.add_argument('--kv-host', action='store_true', default=None, help='the Coder: its attention KV cache in pinned host memory '
                                                                       '(both cards read it directly; frees VRAM; same results). A '
                                                                       '--max-ctx past the model\'s context_length implies it (the '
-                                                                      'long-context mode: also NTK RoPE scaling, no disk tier)')
+                                                                      'long-context mode: also NTK RoPE scaling; the disk tier stays on)')
     ap.add_argument('--log-dir', help="an access log: one more JSONL row per request in DIR (default '' = off: the flight "
                                       "recorder's line is the per-request log)")
     ap.add_argument('--no-side-route', action='store_true', default=None,
