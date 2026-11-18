@@ -995,6 +995,7 @@ def main(argv=None,stdin=None):
                       speed_source=(speed.get('source') or 'estimate') if speed else None,speed_live=bool(speed.get('live')),
                       compact_threshold=trig,compact_target_ratio=targ,
                       effort=_effort_shown(cfg),
+                      advisor=(cfg.get('advisor') or {}).get('model'),   # (the panel names it while a review is asked)
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
                       **({'allowance_today':allowance_today} if allowance_today else {}),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,

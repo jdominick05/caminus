@@ -25,13 +25,28 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// btwState is the /btw side answer: a section of its own above the composer (with a small Ember), not an overlay.
+// btwState is the popup above the composer (not an overlay): the /btw side answer, or an advisor call while it runs
+// (advisor: /advisor, or the agent's advisor tool) until its advice lands as a card or it fails, saying why.
 type btwState struct {
 	open, loading bool
 	question      string
 	lines         []string // the answer rendered (Markdown), sanitised
 	err           string
-	top           int // scrolled with Shift+Up / Shift+Down
+	top           int       // scrolled with Shift+Up / Shift+Down
+	advisor       bool      // an advisor call, not /btw
+	asker         string    // who asked the advisor: "you" (/advisor) or "agent" (its tool)
+	call          string    // the agent's advisor tool call it waits on ("" for /advisor)
+	goal          string    // that call's goal
+	after         string    // the call before it in the same reply: the advisor is asked when that one's result is in
+	since         time.Time // when the advisor was asked
+	escPassed     bool      // Esc went on to interrupt the working agent once; the next one closes the popup
+}
+
+// advisorDoneMsg is /advisor's outcome: the status line's note, the reason it failed, or the view for an advisor the
+// setup keeps from being called.
+type advisorDoneMsg struct {
+	note, err string
+	view      *textViewMsg
 }
 
 type btwMsg struct {
@@ -164,7 +179,8 @@ func unsendLast(m emberModel, goal string) tea.Cmd {
 }
 
 // adviseNow runs `agent advise NAME GOAL [FOCUS]`: the advisor's review of the goal, delivered to the agent with the
-// reply it is writing dropped. The outcome lands in the status line; the review shows in the conversation.
+// reply it is writing dropped. The popup shows the call until it ends (advisorDoneMsg); the review shows in the
+// conversation.
 func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 	return func() tea.Msg {
 		args := []string{"advise", m.agentName, goal}
@@ -180,7 +196,7 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 			err = jsonInto(raw, &out)
 		} else {
 			if view, ok := advisorUnavailableView(raw); ok {
-				return view
+				return advisorDoneMsg{view: &view}
 			}
 			err = fmt.Errorf("%s", cliErrorText(raw))
 		}
@@ -189,9 +205,9 @@ func adviseNow(m emberModel, goal, focus string) tea.Cmd {
 			if strings.Contains(text, "no advisor") {
 				text = "no advisor set up: caminus ember agent advisor " + m.agentName + " picks one"
 			}
-			return residentActionMsg{"advisor: " + terminalText(text, false)}
+			return advisorDoneMsg{err: terminalText(text, false)}
 		}
-		return residentActionMsg{fmt.Sprintf("advisor (%s) reviewed the goal; the agent reads it before its next step ($%.2f)",
+		return advisorDoneMsg{note: fmt.Sprintf("advisor (%s) reviewed the goal; the agent reads it before its next step ($%.2f)",
 			terminalText(out.Model, false), out.USD)}
 	}
 }
@@ -593,7 +609,16 @@ func (m emberModel) steerSlash(command, arg string) (emberModel, tea.Cmd, bool) 
 		if !need() {
 			return m, nil, true
 		}
-		m.msg = "the advisor is reviewing goal " + shortGoal(goal) + "…"
+		if m.chat.btw.open && m.chat.btw.loading && !m.chat.btw.advisor {
+			m.msg = "a /btw answer is on its way: /advisor once it is in"
+			return m, nil, true
+		}
+		question := "a review of goal " + shortGoal(goal)
+		if focus := strings.TrimSpace(arg); focus != "" {
+			question += ": " + focus
+		}
+		m.chat.btw = btwState{open: true, loading: true, question: question, advisor: true, asker: "you", since: time.Now()}
+		m.syncChat()
 		return m, adviseNow(m, goal, strings.TrimSpace(arg)), true
 	case "/btw":
 		if strings.TrimSpace(arg) == "" || !need() {
@@ -667,4 +692,81 @@ func jsonInto(b []byte, v any) error {
 		b = b[i:]
 	}
 	return json.Unmarshal(b, v)
+}
+
+// followAdvisorCalls opens the popup while the agent's advisor tool call runs (its call in the new events, no result
+// yet) and ends it with the result: gone when the advice came back (the result's card shows it), the reason when it
+// failed. Nothing records a tool's start, so the popup opens with the reply that holds the call and its clock starts
+// at the result of the call before it in that reply (calls run in order). It ends too, saying why, when that goal's
+// turn is interrupted, it pauses or is cancelled, the runtime fails, the agent's next reply comes without the result, or
+// the agent stops. It never takes the popup from a /btw answer or an /advisor review; and it opens nothing for a call
+// whose result is in the same batch (a rebuilt chat replays a failure you closed), one more than 5 minutes old (one
+// whose result the panel missed), or the one whose popup you closed.
+func (m *emberModel) followAdvisorCalls(events []residentEvent) {
+	b := &m.chat.btw
+	answered := map[string]bool{}
+	for _, e := range events {
+		if id, _ := e.Data["call_id"].(string); e.Kind == "tool_result" && id != "" {
+			answered[id] = true
+		}
+	}
+	mine := func(e residentEvent) bool { return b.open && b.advisor && b.call != "" && e.Goal == b.goal }
+	end := func(why string) { // a call that will never answer: gone, or the reason when there is one
+		if b.loading {
+			if why == "" {
+				*b = btwState{}
+			} else {
+				b.loading, b.err = false, why
+			}
+		}
+	}
+	for _, e := range events {
+		switch e.Kind {
+		case "assistant":
+			if mine(e) {
+				end("") // its next reply came without the advisor's result (the panel missed it)
+			}
+			prev := ""
+			for _, call := range toolCalls(e) {
+				if call.name == "advisor" && !(b.open && !(b.advisor && b.call != "")) && !answered[call.id] && call.id != m.advisorShut {
+					since := time.Unix(int64(e.Ts), 0)
+					if e.Ts <= 0 {
+						since = time.Now()
+					}
+					if time.Since(since) <= 5*time.Minute {
+						question, _ := call.args["question"].(string)
+						*b = btwState{open: true, loading: true, question: question, advisor: true, asker: "agent", call: call.id,
+							goal: e.Goal, after: prev, since: since}
+					}
+				}
+				prev = call.id
+			}
+		case "tool_result":
+			id, _ := e.Data["call_id"].(string)
+			switch {
+			case !mine(e):
+			case id == b.after && e.Ts > 0:
+				b.since, b.after = time.Unix(int64(e.Ts), 0), ""
+			case id == b.call:
+				result, _ := e.Data["result"].(map[string]any)
+				if err, _ := result["error"].(string); err != "" {
+					b.loading, b.err = false, err
+				} else {
+					*b = btwState{}
+				}
+			}
+		case "turn_interrupted", "paused", "cancelled", "emergency_stop":
+			if mine(e) {
+				end("")
+			}
+		case "runtime_error":
+			if mine(e) {
+				why, _ := e.Data["error"].(string)
+				end("the agent's runtime failed: " + why)
+			}
+		}
+	}
+	if b.open && b.advisor && b.call != "" && !m.resident.DaemonAlive && !m.statusAt.IsZero() {
+		end("the agent stopped before the advisor answered")
+	}
 }

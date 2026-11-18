@@ -20,8 +20,8 @@ import (
 )
 
 type callInfo struct {
-	name string
-	args map[string]any
+	id, name string
+	args     map[string]any
 }
 
 // toolFamily is the colour a tool's label takes: the shell, files, the web, memory, messages, the done check.
@@ -525,7 +525,7 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	}
 	md := ""
 	if c.opened[e.Seq] && (name == "terminal" || name == "sandbox") {
-		md = c.openCardMarkdown(cardOutput(e))
+		md = c.openCardMarkdown(e)
 	}
 	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq], md)
 }

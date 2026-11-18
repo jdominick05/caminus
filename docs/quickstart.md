@@ -1,8 +1,8 @@
 # Quickstart
 
 By the end of this page a model will be running on your Radeon card and Qwen Code will be using it. It takes about ten
-minutes, plus the model download (14 to 59 GB, by the model: [models](models.md)). For Ember, the agent environment, go
-on with [the Ember quickstart](ember-quickstart.md) once a model runs.
+minutes, plus the model download (14 to 59 GB, by the model: [models](models.md)). Qwen Code is the recommended setup;
+Ember, the agent environment, is an experiment ([its known limits](ember.md#known-limits)).
 
 ## What you need
 
@@ -53,7 +53,7 @@ caminus panel
 
 1. In the model list, move to the model for your cards with the arrow keys: `thinkingcap` on one XT (it fits any supported
    card), `swift-1.5` on one XTX, `coder` on an XTX + XT ([the setup table](../README.md#get-started)).
-   These are Ember's defaults too. On a 24 GB card, `qwen3-30b-a3b` writes about five times as fast as ThinkingCap.
+   On a 24 GB card, `qwen3-30b-a3b` writes about five times as fast as ThinkingCap.
    Read each model's licence before any commercial use: ThinkingCap's is PolyForm Small Business 1.0.0
    ([licences](models.md#licences)); `qwen3-30b-a3b` is Apache-2.0. The steps below use `thinkingcap`.
 2. Press `p` to download it.
@@ -69,5 +69,6 @@ Press `q` to leave the panel. The model keeps running until you stop it: `s` in 
 - [Models](models.md): which model to pick for your cards.
 - [Harnesses](harnesses.md): Hermes Agent, Claude Code, or any OpenAI- or Anthropic-compatible tool.
 - [Without the panel](cli.md): the same steps as commands.
-- [Ember](ember-quickstart.md): an AI agent with its own account on your machine, working on the model you started.
+- [Ember](ember-quickstart.md) (experimental): an AI agent with its own account on your machine, working on the model
+  you started. Read [its known limits](ember.md#known-limits) first.
 - [Troubleshooting](troubleshooting.md): what each `caminus doctor` line and each error means.

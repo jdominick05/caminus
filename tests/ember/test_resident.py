@@ -5757,6 +5757,7 @@ for line in sys.stdin:
 
     def test_advisor_configured_priced_capped_and_known_to_the_agent(self):
         self.assertIsNone(self.cmd('advisor')['advisor'])
+        self.assertIsNone(self.cmd('status')['advisor'])
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Make the build pass.')
@@ -5766,6 +5767,7 @@ for line in sys.stdin:
         finally:rt.mail.close();rt.store.close()
         out=self.cmd('advisor',['--model','claude-opus-5-5','--endpoint','http://127.0.0.1:8766/v1','--budget-usd','0.05','--calls-per-goal','2'])
         self.assertEqual((out['advisor']['model'],out['advisor']['budget_usd'],out['advisor']['calls_per_goal']),('claude-opus-5-5',0.05,2))
+        self.assertEqual(self.cmd('status')['advisor'],'claude-opus-5-5','the panel names the advisor while it is asked')
         self.cmd('advisor',['--model','some-unpriced-model'],code=1)
         rt=Runtime(self.home)
         try:

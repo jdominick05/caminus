@@ -1042,8 +1042,7 @@ func TestAnOpenMarkdownCardRendersAndCtrlYShowsItsSource(t *testing.T) {
 	}
 	m := markdownCardChat(t, 90, 60)
 	// the output is sanitised before it is rendered: a program's escape sequences and control bytes never reach the screen
-	if out := m.chat.openCardMarkdown(cardOutput(residentEvent{Kind: "shell", Data: map[string]any{
-		"output": cardMarkdownDoc + "\x1b]52;c;cHduZWQ=\x07 \x1b]2;title\x07 \u009b2J \x00 \x1b[2J"}})); out == "" ||
+	if out := m.chat.openCardMarkdown(shellCard(cardMarkdownDoc + "\x1b]52;c;cHduZWQ=\x07 \x1b]2;title\x07 \u009b2J \x00 \x1b[2J")); out == "" ||
 		strings.ContainsAny(out, "\x07\x00\u009b") || strings.Contains(out, "\x1b]") || strings.Contains(out, "\x1b[2J") {
 		t.Fatalf("the rendered output carries the program's control sequences: %q", out)
 	}
@@ -1139,6 +1138,11 @@ func TestRenderedMarkdownSendsTheTerminalOnlyTextAndColour(t *testing.T) {
 	}
 }
 
+// shellCard is a ! command's card with this output.
+func shellCard(output string) residentEvent {
+	return residentEvent{Kind: "shell", Data: map[string]any{"output": output}}
+}
+
 // Deep quote or list nesting made glamour take seconds (a table and 200 > on one line: 3.8 s; 800: never), on the UI's
 // goroutine: past mdMaxDepth the card stays as it is, and a reply too, at once.
 func TestDeeplyNestedMarkdownStaysAsItIsAtOnce(t *testing.T) {
@@ -1151,7 +1155,7 @@ func TestDeeplyNestedMarkdownStaysAsItIsAtOnce(t *testing.T) {
 		"mixed":  tbl + strings.Repeat("> - ", 100) + "x\n",
 	} {
 		start := time.Now()
-		card := m.chat.openCardMarkdown(text)
+		card := m.chat.openCardMarkdown(shellCard(text))
 		reply := m.chat.renderMarkdown(text)
 		if took := time.Since(start); took > 100*time.Millisecond {
 			t.Fatalf("%s: %v to decide", name, took)
@@ -1160,7 +1164,7 @@ func TestDeeplyNestedMarkdownStaysAsItIsAtOnce(t *testing.T) {
 			t.Fatalf("%s: rendered past the nesting bound", name)
 		}
 	}
-	if m.chat.openCardMarkdown(tbl+"> > > - - x\n") == "" {
+	if m.chat.openCardMarkdown(shellCard(tbl+"> > > - - x\n")) == "" {
 		t.Fatal("shallow nesting is rendered")
 	}
 }
@@ -1169,10 +1173,10 @@ func TestDeeplyNestedMarkdownStaysAsItIsAtOnce(t *testing.T) {
 // table of 4990 rows took 0.57 s to draw, on every redraw); a new width or theme makes a new renderer and cache.
 func TestARenderedCardIsDrawnOncePerRenderer(t *testing.T) {
 	m := markdownCardChat(t, 90, 60)
-	if _, ok := m.chat.mdCache[cardMarkdownDoc]; !ok {
+	if _, ok := m.chat.mdCache[mdKey{cardMarkdownDoc, false}]; !ok {
 		t.Fatal("the drawing is not cached")
 	}
-	m.chat.mdCache[cardMarkdownDoc] = "SENTINEL-DRAWING"
+	m.chat.mdCache[mdKey{cardMarkdownDoc, false}] = "SENTINEL-DRAWING"
 	m = m.redrawInPlace()
 	if !strings.Contains(ansi.Strip(m.chat.content), "SENTINEL-DRAWING") {
 		t.Fatal("a redraw rendered the card again")
@@ -3372,13 +3376,264 @@ func TestAnOutdatedRuntimeShowsAHintInsteadOfAnUpdateCommand(t *testing.T) {
 	}
 }
 
-func TestTheAdvisorReviewCardShowsWhatTheAdvisorSaid(t *testing.T) {
+// advisorAdvice is an advisor's review as the owner saw it (bold, code, "- " lists nested, a numbered list): drawn raw,
+// with every "- " line red as if the card were a diff's removed lines.
+const advisorAdvice = "**Mostly no. Send a short correction before anything else.**\n\n" +
+	"**1. The `check.py` mtimes: your explanation is wrong.**\n- Running a script does not change its mtime.\n" +
+	"- What to do:\n  - Find out what changed.\n  - Tell the human plainly.\n\n" +
+	"**Next steps, in order**\n1. Diff the checker edits.\n2. Re-run `check.py && check_md.py`.\n"
+
+// An advisor's review and a report are a model's words: open, their note card renders them as Markdown (the cards'
+// renderer, filters, bounds and cache), and no "- " line is drawn red; Ctrl+Y shows the source, still not red.
+func TestAnAdvisorNoteRendersItsMarkdownWithNoRedLines(t *testing.T) {
 	m := chatFixture(t)
-	m.chat.expanded = true
-	e := residentEvent{Seq: 4, Goal: "original", Kind: "advisor_review", Data: map[string]any{"model": "claude-opus-5-5",
-		"advice": "Stop rereading the file.\nRun the failing test and read its first error."}}
-	if v := ansi.Strip(m.chat.eventBlock(e)); !strings.Contains(v, "Stop rereading the file.") || !strings.Contains(v, "first error") {
-		t.Fatalf("the card carries the advice the agent reads:\n%s", v)
+	m.width, m.height = 110, 60
+	m.chat.cards, m.chat.expanded, m.chat.full = true, true, true
+	m.residentEvents = append(m.residentEvents,
+		residentEvent{Seq: 2, Goal: "original", Kind: "advisor_review", Data: map[string]any{"model": "claude-opus-5-5", "advice": advisorAdvice}},
+		residentEvent{Seq: 3, Goal: "original", Kind: "report", Data: map[string]any{"level": "fyi", "text": "Built **two** files:\n- `METRICS.md`\n- `shared.py`"}})
+	m.chat.rendered, m.chat.content = 0, ""
+	m.syncChat()
+	red := strings.SplitN(emberCtxHot.Render("X"), "X", 2)[0]
+	plain := ansi.Strip(m.chat.content)
+	for _, want := range []string{"advisor review, asked for by you", "Mostly no. Send a short correction", "The check.py mtimes",
+		"Running a script does not change its mtime.", "Find out what changed.", "Re-run check.py && check_md.py", "Built two files:", "METRICS.md"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("want %q:\n%s", want, plain)
+		}
+	}
+	var body []string // (the head's one-line summary is the text's first line, as every card's is)
+	for _, ln := range strings.Split(plain, "\n") {
+		if strings.HasPrefix(ln, "   │") {
+			body = append(body, ln)
+		}
+	}
+	for _, mark := range []string{"**", "`check.py`", "`METRICS.md`", "- Running", "  - Find"} {
+		if strings.Contains(strings.Join(body, "\n"), mark) {
+			t.Fatalf("the note shows %q raw:\n%s", mark, plain)
+		}
+	}
+	if i := strings.Index(plain, "• What to do:"); i < 0 || !strings.Contains(plain[i:], "\n   │   • Find out what changed.") {
+		t.Fatalf("a nested point steps in under its parent:\n%s", plain)
+	}
+	for _, view := range []string{"rendered", "source"} {
+		for _, ln := range strings.Split(m.chat.content, "\n") {
+			if p := ansi.Strip(ln); (strings.Contains(p, "Running a script") || strings.Contains(p, "Find out")) && strings.Contains(ln, red) {
+				t.Fatalf("%s: a list line is drawn red: %q", view, ln)
+			}
+		}
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+		m = next.(emberModel)
+	}
+	if m.chat.mdSource || !strings.Contains(ansi.Strip(m.chat.content), "• Running a script") {
+		t.Fatal("two Ctrl+Y presses: rendered again")
+	}
+	src := m
+	src.chat.mdSource = true
+	src = src.redrawInPlace()
+	if !strings.Contains(ansi.Strip(src.chat.content), "- Running a script does not change its mtime.") {
+		t.Fatalf("Ctrl+Y shows the advice's source:\n%s", ansi.Strip(src.chat.content))
+	}
+}
+
+// The advisor's popup (the /btw popup) shows from the call to its answer, or to its failure with the reason: /advisor's
+// review, and the agent's own advisor tool. It never takes a /btw answer's place, and /advisor waits for one on its way.
+func TestTheAdvisorPopupShowsFromCallToAnswerOrError(t *testing.T) {
+	popup := func(m emberModel) string { return ansi.Strip(m.btwSection(m.width - 2)) }
+	esc := func(m emberModel) emberModel {
+		next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+		return next.(emberModel)
+	}
+	m := chatFixture(t)
+	m.width, m.height = 110, 40
+	m.resident.Advisor = "claude-opus-5-5"
+	m.chat.target = "original"
+	asked, cmd, _ := m.steerSlash("/advisor", "the mtimes")
+	if cmd == nil || !strings.Contains(popup(asked), "asking the advisor (claude-opus-5-5)…") ||
+		!strings.Contains(popup(asked), "you a review of goal") || !strings.Contains(ansi.Strip(asked.render()), "asking the advisor") {
+		t.Fatalf("/advisor opens the popup:\n%s", popup(asked))
+	}
+	next, _ := asked.Update(advisorDoneMsg{note: "advisor (claude-opus-5-5) reviewed the goal; the agent reads it before its next step ($0.04)"})
+	if done := next.(emberModel); done.chat.btw.open || !strings.Contains(done.msg, "reviewed the goal") {
+		t.Fatalf("the answer closes the popup (msg %q)", done.msg)
+	}
+	next, _ = asked.Update(advisorDoneMsg{err: "the advisor's daily budget is spent"})
+	failed := next.(emberModel)
+	if !failed.chat.btw.open || !strings.Contains(popup(failed), "could not ask: the advisor's daily budget is spent") {
+		t.Fatalf("a failure stays, saying why:\n%s", popup(failed))
+	}
+	if esc(failed).chat.btw.open {
+		t.Fatal("Esc closes the popup")
+	}
+	next, _ = asked.Update(advisorDoneMsg{view: &textViewMsg{title: "advisor · not available", lines: []string{"The advisor cannot be called: x."}}})
+	if v := next.(emberModel); v.chat.btw.open || !v.chat.view.open {
+		t.Fatal("an advisor the setup blocks: the popup gives way to the view")
+	}
+	btw := m
+	btw.chat.btw = btwState{open: true, loading: true, question: "what is a mtime?"}
+	if refused, cmd, _ := btw.steerSlash("/advisor", ""); cmd != nil || refused.chat.btw.advisor || !strings.Contains(refused.msg, "/btw") {
+		t.Fatalf("/advisor waits for a /btw answer on its way (msg %q)", refused.msg)
+	}
+
+	now := float64(time.Now().Unix())
+	call := func(seq int, goal, id string, ts float64) residentEvent {
+		return residentEvent{Seq: seq, Ts: ts, Goal: goal, Kind: "assistant", Data: map[string]any{"tool_calls": []any{
+			map[string]any{"id": "t" + id, "type": "function", "function": map[string]any{"name": "terminal", "arguments": `{"command": "make"}`}},
+			map[string]any{"id": id, "type": "function", "function": map[string]any{"name": "advisor",
+				"arguments": `{"question": "I changed check.py.\n\nShould I\trevert it?"}`}}}}}
+	}
+	result := func(seq int, goal, id string, r map[string]any) residentEvent {
+		return residentEvent{Seq: seq, Ts: now + 30, Goal: goal, Kind: "tool_result", Data: map[string]any{"name": "advisor", "call_id": id, "result": r}}
+	}
+	feed := func(m *emberModel, events ...residentEvent) {
+		st := m.resident
+		st.DaemonAlive = true
+		m.receiveResident(residentMsg{agent: "resident", status: st, events: events})
+	}
+	agent := chatFixture(t)
+	agent.width, agent.height = 110, 40
+	agent.resident.Advisor = "claude-opus-5-5"
+	agent.resident.Goals = []residentGoal{{ID: "original", State: "waiting_user", Prompt: "a goal"}} // (idle: Esc closes)
+	feed(&agent, call(2, "original", "a1", now))
+	if !agent.chat.btw.open || !strings.Contains(popup(agent), "agent I changed check.py. Should I revert it?") ||
+		!strings.Contains(popup(agent), "asking the advisor (claude-opus-5-5)") {
+		t.Fatalf("the agent's advisor call opens the popup, its question on one line:\n%s", popup(agent))
+	}
+	feed(&agent, residentEvent{Seq: 3, Ts: now + 20, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "ta1", "result": map[string]any{}}})
+	if got := agent.chat.btw.since.Unix(); got != int64(now+20) {
+		t.Fatalf("its clock starts when the call before it ends: %d, want %d", got, int64(now+20))
+	}
+	feed(&agent, residentEvent{Seq: 4, Goal: "other", Kind: "paused", Data: map[string]any{}})
+	if !agent.chat.btw.open {
+		t.Fatal("another goal pausing closed the popup")
+	}
+	feed(&agent, result(5, "original", "a1", map[string]any{"advice": "No.", "model": "claude-opus-5-5"}))
+	if agent.chat.btw.open {
+		t.Fatal("the advice closes the popup")
+	}
+	feed(&agent, call(6, "original", "a2", now))
+	feed(&agent, result(7, "original", "a2", map[string]any{"error": "this goal used its 2 advisor calls"}))
+	if !agent.chat.btw.open || !strings.Contains(popup(agent), "could not ask: this goal used its 2 advisor calls") {
+		t.Fatalf("the tool's failure stays, saying why:\n%s", popup(agent))
+	}
+	agent = esc(agent)
+	if agent.chat.btw.open {
+		t.Fatal("Esc with nothing running closes the popup")
+	}
+	agent.chat.content, agent.chat.rendered, agent.chat.seq = "", 0, 1 // the chat rebuilt (a restart, a switch back)
+	feed(&agent, call(6, "original", "a2", now), result(7, "original", "a2", map[string]any{"error": "this goal used its 2 advisor calls"}))
+	if agent.chat.btw.open {
+		t.Fatal("a failure you closed came back when the chat was rebuilt")
+	}
+	for name, ev := range map[string]residentEvent{
+		"paused":        {Seq: 9, Goal: "original", Kind: "paused", Data: map[string]any{}},
+		"cancelled":     {Seq: 9, Goal: "original", Kind: "cancelled", Data: map[string]any{}},
+		"interrupted":   {Seq: 9, Goal: "original", Kind: "turn_interrupted", Data: map[string]any{}},
+		"runtime_error": {Seq: 9, Goal: "original", Kind: "runtime_error", Data: map[string]any{"error": "KeyError: 'advice'"}},
+	} {
+		c := agent
+		c.chat.btw = btwState{}
+		feed(&c, call(8, "original", "a"+name, now))
+		feed(&c, ev)
+		if name == "runtime_error" {
+			if !strings.Contains(popup(c), "the agent's runtime failed: KeyError") {
+				t.Fatalf("%s: the popup says why:\n%s", name, popup(c))
+			}
+		} else if c.chat.btw.open {
+			t.Fatalf("%s: the call will never answer; the popup stayed", name)
+		}
+	}
+	stopped := agent
+	feed(&stopped, call(10, "original", "a4", now))
+	st := stopped.resident
+	st.DaemonAlive = false
+	stopped.receiveResident(residentMsg{agent: "resident", status: st})
+	if !strings.Contains(popup(stopped), "the agent stopped before the advisor answered") {
+		t.Fatalf("a stopped agent: the popup says so:\n%s", popup(stopped))
+	}
+	old := agent
+	feed(&old, call(11, "original", "a5", now-600))
+	if old.chat.btw.open {
+		t.Fatal("a call 10 minutes old opened the popup")
+	}
+	busy := agent
+	busy.chat.btw = btwState{open: true, loading: true, question: "what is a mtime?"}
+	feed(&busy, call(12, "original", "a6", now))
+	if busy.chat.btw.advisor || busy.chat.btw.question != "what is a mtime?" {
+		t.Fatal("an advisor call took the /btw answer's place")
+	}
+}
+
+// The popup stays inside its frame and the screen whatever it holds: a question of several lines, a 2 KB error of many
+// lines (a provider's page) scrolled as an answer is, a long model name.
+func TestTheAdvisorPopupFitsItsFrameAndTheScreen(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 90, 30
+	m.resident.Advisor = strings.Repeat("a-very-long-advisor-model-name-", 3)
+	page := "HTTP Error 502: Bad Gateway\n<html>\n<head><title>502</title></head>\n\t<body>\x1b]2;owned\x07\x1b[2J" +
+		strings.Repeat("<p>upstream connect error or disconnect/reset before headers</p>\n", 30) + "</body></html>"
+	for name, b := range map[string]btwState{
+		"waiting": {open: true, loading: true, advisor: true, asker: "agent", call: "a1", goal: "original", since: time.Now(),
+			question: "I changed check.py.\n\nShould I\trevert it?\n" + strings.Repeat("more context ", 40)},
+		"error": {open: true, advisor: true, asker: "agent", call: "a1", goal: "original", question: "Q?", err: page},
+		"btw":   {open: true, question: "what?", err: page},
+	} {
+		m.chat.btw = b
+		box := m.btwSection(m.width - 2)
+		lines := strings.Split(box, "\n")
+		width := ansi.StringWidth(lines[0])
+		for _, l := range lines {
+			if ansi.StringWidth(l) != width || strings.Contains(l, "\x1b]") || strings.Contains(l, "\x1b[2J") || strings.Contains(l, "\t") {
+				t.Fatalf("%s: a row leaves the frame or carries a control: %q\n%s", name, l, ansi.Strip(box))
+			}
+		}
+		if len(lines) > m.btwRows()+3 {
+			t.Fatalf("%s: %d rows, past the answer's %d", name, len(lines), m.btwRows()+3)
+		}
+		if h := lipgloss.Height(m.render()); h > m.height {
+			t.Fatalf("%s: the screen is %d rows on a %d-row terminal", name, h, m.height)
+		}
+	}
+	m.chat.btw = btwState{open: true, question: "what?", err: page}
+	if !strings.Contains(ansi.Strip(m.btwSection(m.width-2)), "shift+↑↓ scroll") {
+		t.Fatal("a long error scrolls as an answer does")
+	}
+}
+
+// While the agent works, the first Esc on its advisor popup stops the agent (Esc's job, as always); the next closes it.
+func TestEscStopsTheWorkingAgentBeforeClosingItsAdvisorPopup(t *testing.T) {
+	m := chatFixture(t)
+	m.resident.Goals = []residentGoal{{ID: "original", State: "working", Prompt: "a goal"}}
+	m.chat.btw = btwState{open: true, advisor: true, asker: "agent", call: "a1", goal: "original", question: "Q?", err: "no calls left"}
+	if m.interruptibleGoal() == "" {
+		t.Skip("the fixture's goal is not interruptible")
+	}
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(emberModel)
+	if !m.chat.btw.open || cmd == nil || !strings.Contains(m.msg, "interrupting") {
+		t.Fatalf("the first Esc interrupts the agent and keeps the popup (msg %q)", m.msg)
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if next.(emberModel).chat.btw.open {
+		t.Fatal("the second Esc closes the popup")
+	}
+}
+
+// A command's output that is a unified diff keeps the diff's colours; output with "-" lines that is not one (ls -l), and
+// a note, stay dim.
+func TestOnlyADiffInACommandsOutputIsColouredAsOne(t *testing.T) {
+	red, green := strings.SplitN(emberCtxHot.Render("X"), "X", 2)[0], strings.SplitN(emberCtxOK.Render("X"), "X", 2)[0]
+	diff := toolCard("shell", "$ git diff", "", true, true, []string{"diff --git a/x b/x", "@@ -1,2 +1,2 @@", "-old line", "+new line", " same"}, 100)
+	if !strings.Contains(diff, red+"-old line") || !strings.Contains(diff, green+"+new line") {
+		t.Fatalf("a diff in a ! card is coloured:\n%q", diff)
+	}
+	for name, card := range map[string]string{
+		"ls -l": toolCard("output", "terminal", "", true, true, []string{"-rw-r--r-- 1 u u 3 check.py", "+x not a diff"}, 100),
+		"note":  toolCard("note", "advisor review", "", true, true, []string{"@@ -1 +1 @@", "- a point"}, 100),
+	} {
+		if strings.Contains(card, red) || strings.Contains(card, green) {
+			t.Fatalf("%s: drawn in a diff's colours:\n%q", name, card)
+		}
 	}
 }
 
@@ -3403,11 +3658,10 @@ func TestAdvisorThatCannotBeCalledShowsTheFixToRun(t *testing.T) {
 	m := chatFixture(t)
 	m.cli = []string{cli}
 	msg := adviseNow(m, "original", "")()
-	view, ok := msg.(textViewMsg)
-	if !ok {
+	if done, ok := msg.(advisorDoneMsg); !ok || done.view == nil {
 		t.Fatalf("an advisor the setup blocks opens a view, not a passing notice: %#v", msg)
 	}
-	next, _ := m.Update(view)
+	next, _ := m.Update(msg)
 	got := next.(emberModel)
 	if !got.chat.view.open {
 		t.Fatal("the view is open")
@@ -3427,7 +3681,11 @@ func TestAdvisorThatCannotBeCalledShowsTheFixToRun(t *testing.T) {
 	if err := os.WriteFile(cli, []byte(capped), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cv, ok := adviseNow(m, "original", "")().(textViewMsg)
+	cd, _ := adviseNow(m, "original", "")().(advisorDoneMsg)
+	cv, ok := textViewMsg{}, cd.view != nil
+	if ok {
+		cv = *cd.view
+	}
 	if body := strings.Join(cv.lines, "\n"); !ok || !strings.Contains(body, "spent its daily cap") ||
 		!strings.Contains(body, "caminus ember relay status") || strings.Contains(body, "Run this") {
 		t.Fatalf("no command to run: the reason and the relay status command:\n%s", body)
@@ -3437,8 +3695,9 @@ func TestAdvisorThatCannotBeCalledShowsTheFixToRun(t *testing.T) {
 	if err := os.WriteFile(cli, []byte(plain), 0700); err != nil {
 		t.Fatal(err)
 	}
-	notice, ok := adviseNow(m, "original", "")().(residentActionMsg)
-	if !ok || notice.text != `advisor: the advisor did not answer: HTTP Error 529: "overloaded"` {
+	done, ok := adviseNow(m, "original", "")().(advisorDoneMsg)
+	next, _ = m.Update(done)
+	if notice := next.(emberModel).msg; !ok || notice != `advisor: the advisor did not answer: HTTP Error 529: "overloaded"` {
 		t.Fatalf("the notice carries the text, not the JSON: %#v", notice)
 	}
 }

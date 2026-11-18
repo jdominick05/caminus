@@ -8,6 +8,10 @@ Ember (`caminus ember`; `caminus env` still works) gives an AI agent a place to 
 long-running loop. You give it goals and steer it as it works; when there is nothing to do, it has free time. New
 here: [the quickstart](ember-quickstart.md). Every command and panel view: [the reference](resident-agent.md).
 
+> [!WARNING]
+> **Ember is an experiment.** It is early, it has been tested on one machine, and it has the [known limits](#known-limits)
+> below. The recommended setup for working with your models is Qwen Code ([harnesses](harnesses.md)).
+
 ## What it is
 
 Most coding agents are a harness around your terminal: they run in your session, as you, for as long as the window
@@ -45,6 +49,38 @@ buggy library, ten unit tests, the tests not to be edited), three alternating ru
 model (DeepSeek-V4.1-Flash on DeepInfra) with the same relay and budget. All six runs passed; the medians were 16 s and
 0.005 USD for the resident against 20 s and 0.006 USD for Qwen Code. That is too few runs on too small a task to call
 either faster.
+
+## Known limits
+
+Ember has been tested on one machine, Ubuntu with systemd. What you can run into today:
+
+- **Debian or Ubuntu with systemd.** The root script (`caminus ember setup` writes it) installs `openssh-server` with
+  `apt-get` when no SSH server is installed, and starts the SSH service by its Debian name, `ssh`: on Fedora, Arch and
+  openSUSE the unit is `sshd`, so the script stops there with an error. It makes the account and group with `useradd`
+  and `groupadd` (Alpine's busybox has neither without the shadow package).
+- **systemd user services only.** The resident and the key relays run only as systemd user services (`systemctl
+  --user`), kept running after you log out by `loginctl enable-linger`. On OpenRC, runit or s6 nothing runs them.
+- **The sandbox needs bubblewrap.** The `sandbox` and `browser` tools need `/usr/bin/bwrap` and unprivileged user
+  namespaces. Setup does not install bubblewrap (`sudo apt install bubblewrap`) and does not change AppArmor, which
+  restricts unprivileged user namespaces on Ubuntu 24.04 and later. When no box can be made, both tools refuse and say
+  why; nothing runs outside a box instead.
+- **Sandbox memory.** Each box may use 4 GB of memory, whatever is free (`sandbox.memory_mb` in the resident's
+  `config.json`). Several boxes beside a large local model can run the machine out of memory; lower it on a machine with less RAM.
+- **Closing a session keeps it.** Closing a session in the switcher (`x x`) stops its service and moves its home
+  (config, memory, history, files) to `~/.local/share/caminus/removed-sessions` in the agent's account. Nothing is
+  deleted: the switcher's `r` or `caminus ember agent restore [NAME]` brings it back
+  ([the switcher](resident-agent.md)).
+- **A new session offers only what it inherits.** Its `/model` lists the local Caminus server it runs on and the
+  providers of the session it was opened from. Any other provider needs `caminus ember agent provider NAME add ...`
+  ([Paid brains](#paid-brains)).
+- **The advisor needs an Anthropic relay.** It speaks only the Anthropic Messages API ([Paid brains](#paid-brains),
+  the advisor). It cannot use an OpenCode Go plan yet: its calls do not carry the session id the plan requires. A fix is
+  planned.
+- **Relays run frozen code.** A paid brain goes through a key relay with a daily dollar cap. Each relay runs the copy of
+  its code taken at `relay install`, so after you upgrade Caminus, run `caminus ember relay install` again for each
+  relay, with its whole set of options (Changing a relay, in [Paid brains](#paid-brains)).
+- **Free time stays off an OpenCode Go plan** (dreams too) unless you allow it with `caminus ember agent heartbeat NAME
+  --on-plan yes` (OpenCode Go, in [Paid brains](#paid-brains)).
 
 ## The security model
 
@@ -177,7 +213,12 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   would refuse the model, and `caminus ember relay status` lists the models each Anthropic relay allows. When the
   advisor cannot be called (the relay refuses its model, is not running, or has spent its cap), `/advisor` opens the
   reason and the exact command to run, the agent's advisor tool says the same, and the attempt does not count against
-  the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart.
+  the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart. While the advisor
+  is asked (`/advisor`, or the agent's advisor tool), a popup over the typing box (the one `/btw` uses) shows who asked,
+  the advisor's model and the seconds it has taken; it goes when the advice lands as a card (rendered as Markdown, as
+  the agent's replies are; Ctrl+Y shows its source), and says why when the call fails (a spent budget, no calls left)
+  until Esc closes it (while the agent works, the first Esc stops the agent, as always). `/advisor` waits while a
+  `/btw` answer is on its way.
 - **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
   when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
   With the image go the agent's question (read's `question` argument, else "describe what matters in this image for
