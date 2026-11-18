@@ -663,6 +663,19 @@ def serve_argv(m, e, name, port, ctx=None, extra=(), long_context=False):
     return serve + list(extra)
 
 
+def restart_argv(argv, e, port):
+    """a restart's serve flags: the argv saved at start with the port picked now, and --model at the catalog file found now
+    (model_entry e). A catalog file that moved since the record was written (Qwen3-30B-A3B's switch to unsloth's file in
+    its own folder) is served from its new place, never from the old path"""
+    serve = list(argv)
+    for i, x in enumerate(serve[:-1]):
+        if x == '--port':
+            serve[i + 1] = str(port)
+        elif x == '--model':
+            serve[i + 1] = e['path']
+    return serve
+
+
 def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None,
               cards=None, kv=None, long_context=False):
     if models.paused(model_name):
@@ -705,10 +718,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     os.makedirs(d, mode=0o700, exist_ok=True)
     logp = os.path.join(d, 'serve.log')
     if argv_override is not None:
-        serve = list(argv_override)
-        for i, x in enumerate(serve):
-            if x == '--port' and i + 1 < len(serve):
-                serve[i + 1] = str(port)
+        serve = restart_argv(argv_override, e, port)
     else:
         serve = serve_argv(m, e, name, port, ctx, extra, long_context=long_context)
     cmd = guarded.command_reloading('serve', serve, logp, 0)   # (exit 75, a broken engine: reloaded once)
@@ -858,6 +868,9 @@ def cmd_restart(argv):
         s = load_server(a.name)
         if s is None:
             raise ManageError(f'no server named {a.name!r} (caminus ps)')
+        m = models.BY_NAME.get(s['model'])
+        if m is not None and not model_entry(m)['present']:   # (refused before the stop: a working server is never left down)
+            raise ManageError(f'{m.name} is not downloaded (caminus pull {m.name}); {a.name} keeps running')
         stop_one(a.name, log=say)
         n = start_one(s['model'], name=s['name'], port=s['port'], argv_override=s['argv'], devs_override=s['devices'], log=say)
         return f"{n['name']} restarted at http://127.0.0.1:{n['port']}"

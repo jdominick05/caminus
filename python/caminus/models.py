@@ -177,6 +177,27 @@ def chat_template_of(path):
         return f.read()
 
 
+# The special token ids a catalog model is served with instead of its file's tokenizer.ggml.* ids (caminus.serve.vocab
+# load_gguf_vocab sets them beside the template). Qwen3-30B-A3B: the official GGUF's (bos 151643 '<|endoftext|>', eos 151645
+# '<|im_end|>', padding 151643). unsloth's file has no bos_token_id and pads with 151654, so without this every served
+# prompt would lose the BOS id the official file's prompts start with (and /props would report no bos_token).
+SPECIAL_IDS = {'qwen3-30b-a3b': dict(bos_id=151643, eos_id=151645, pad_id=151643)}
+
+
+def special_ids_of(path):
+    """{field: id} of the serve vocabulary the catalog model whose first file this is (model_of) pins, or None"""
+    m = model_of(path)
+    return dict(SPECIAL_IDS[m.name]) if m is not None and m.name in SPECIAL_IDS else None
+
+
+# Files a catalog model was served from before, as (file name, size): model_of still takes them for that model, so a file
+# kept on disk and served by path keeps the model's sampling, model id, chat template and special ids. Download, pull and
+# start never use them (manage.locate_item matches the current item's size). Qwen3-30B-A3B: Qwen's official Q4_K_M
+# (Qwen/Qwen3-30B-A3B-GGUF e4d4bafdfb96a411a163846265362aceb0b9c63a, sha256 0d003f66...a8f5), the catalog's file up to
+# 0.3.2. Remove an entry together with its switch notes (docs/models.md, "Switching from the official qwen3-30b-a3b file").
+PREVIOUS_FILES = {'qwen3-30b-a3b': (('Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824),)}
+
+
 # Paused models: in the tree (their engines, kernels and files stay) but not offered: `caminus models`, `caminus pull`,
 # `caminus start` and the panel leave them out, and caminus serve refuses their architectures (caminus.arch.PAUSED), until
 # they are measured again on the current code. CAMINUS_ALLOW_PAUSED=1 offers them anyway (development and gates).
@@ -204,7 +225,7 @@ def paused(name):
 
 def model_of(path):
     """the catalog model whose first file this is (the same file name and size: what caminus start finds and passes as
-    --model), or None"""
+    --model; or one of the model's PREVIOUS_FILES), or None"""
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -212,7 +233,7 @@ def model_of(path):
     base = os.path.basename(path)
     for m in ALL:
         it = BY_KEY[m.items[0]]
-        if os.path.basename(it.path) == base and it.size == size:
+        if (os.path.basename(it.path) == base and it.size == size) or (base, size) in PREVIOUS_FILES.get(m.name, ()):
             return m
     return None
 

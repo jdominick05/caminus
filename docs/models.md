@@ -67,26 +67,6 @@ long-context mode). It refuses to start a model
 that can't hold at least 32,768 tokens on your cards, rather than run out of memory later (8,192 with `--draft dflash` on
 the 27B models: the drafter's memory comes out of the context).
 
-### Switching from the official `qwen3-30b-a3b` file
-
-`caminus pull qwen3-30b-a3b` now downloads unsloth's Q4_K_M of Qwen3-30B-A3B
-([unsloth/Qwen3-30B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF)), made with an importance matrix,
-instead of Qwen's official Q4_K_M.
-
-- **What changes:** the answers come closer to the unquantized model's. Measured against the BF16 model, the mean KL
-  divergence is about a third of the official file's (0.0185 against 0.064 on prose, 0.028 against 0.090 on code;
-  [how it was measured](dev/qwen3-30b-a3b.md#which-file)). It is the same model with the same weight formats and
-  nearly the same size, and it decodes at the same speed (measured through the server against the official file, one
-  card and two).
-- **What stays:** the prompts (the server keeps the official file's chat template for this model, whichever file it
-  serves), the context, the sampling defaults, the long-context mode, the 8-bit KV cache and two-card serving.
-- **How to switch:** `caminus pull qwen3-30b-a3b`. The new file goes to its own folder,
-  `Qwen3-30B-A3B-GGUF-unsloth/` in the model directory (by default `~/.local/share/caminus/models`), so the old file
-  can stay where it is; from then on `caminus start qwen3-30b-a3b` uses the new one. The old file, in
-  `Qwen3-30B-A3B-GGUF/`, is no longer used and can be deleted (with its `.sha256` file beside it, if there is one).
-  Until the new file is downloaded, `caminus start qwen3-30b-a3b` asks you to pull it.
-- Conversations the server saved with the old file are not restored with the new one; they are read again.
-
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
 --cards 2`). Each card holds half of every layer, so the model writes about 1.5 times as fast and the full 262,144-token
 context fits with `--draft off` (with the default drafter it is projected to fit too on an XTX + XT with free memory, a
@@ -103,6 +83,29 @@ and faster from about 32K tokens on (121 against 109 tok/s at 40,768), and read 
 (1.10x at 4K, 1.29x at 40,768); see [benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards). By default the context
 stays 40,960 tokens, so the second card buys speed with a long context; in the long-context mode two cards hold the
 full 131,072. No drafter on one card or two.
+
+### Switching from the official `qwen3-30b-a3b` file
+
+`caminus pull qwen3-30b-a3b` now downloads unsloth's Q4_K_M of Qwen3-30B-A3B
+([unsloth/Qwen3-30B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF)), made with an importance matrix,
+instead of Qwen's official Q4_K_M.
+
+- **What changes:** the weights. The answers come closer to the unquantized model's: measured against the BF16 model,
+  the mean KL divergence is about 3.5 times lower than the official file's (0.0185 against 0.064 on prose, 0.028
+  against 0.090 on code; [how it was measured](dev/qwen3-30b-a3b.md#which-file)). It is the same model with the same
+  weight formats and nearly the same size, and it decodes at the same speed (measured through the server against the
+  official file, one card and two).
+- **What stays:** the prompts, token for token (the server serves this model with the official file's chat template and
+  special token ids, whichever of the two files it reads), the context, the sampling defaults, the long-context mode,
+  the 8-bit KV cache and two-card serving.
+- **How to switch:** `caminus pull qwen3-30b-a3b`. The new file goes to its own folder,
+  `Qwen3-30B-A3B-GGUF-unsloth/` in the model directory (by default `~/.local/share/caminus/models`), so the old file
+  can stay where it is. From then on `caminus start qwen3-30b-a3b` and `caminus restart` use the new one; until it is
+  downloaded, `caminus start` asks you to pull it and `caminus restart` leaves the running server alone. The old file,
+  in `Qwen3-30B-A3B-GGUF/`, is no longer used and can be deleted (with its `.sha256` file beside it, if there is one).
+  Served by path (`caminus serve --model` on it), it is still recognised as this model: same model id, sampling
+  defaults, chat template and special ids.
+- Conversations the server saved with the old file are not restored with the new one; they are read again.
 
 ### Long context for `qwen3-30b-a3b` (opt-in)
 

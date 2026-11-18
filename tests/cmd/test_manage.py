@@ -493,6 +493,7 @@ def main():
     paused_checks(S)
     unmanaged_checks(S)
     reload_checks(S)
+    restart_checks(S)
     print(f'RESULT {"PASS" if not FAILS else "FAIL (" + str(len(FAILS)) + ")"}')
     return 0 if not FAILS else 1
 
@@ -513,6 +514,44 @@ out['team'] = manage.cmd_start(['--team', 'brain-hands', '--json'])
 out['serve'] = {a: arch.paused(arch.ARCHS[a]) for a in ('qwen35moe', 'qwen3next', 'qwen35', 'qwen35-own', 'qwen3moe', 'qwen4exp')}
 print(json.dumps(out))
 '''
+
+
+def restart_checks(S):
+    """caminus restart of a server recorded before its catalog file moved (Qwen3-30B-A3B: the official file's path, before the
+    switch to unsloth's file in its own folder): refused before the stop while the catalog file is missing; with it, the
+    restart serves the catalog file, not the recorded path"""
+    from caminus import models
+    from caminus.cmd import manage
+    it = models.BY_KEY['qwen3-30b-a3b']
+    old = os.path.join(S, 'old-models', 'Qwen3-30B-A3B-GGUF', os.path.basename(it.path))
+    rec = dict(name='q3-restart', model='qwen3-30b-a3b', path=old, port=8100, devices=[0], guard_pid=999999999,
+               argv=['--model', old, '--port', '8100', '--cache-dir', os.path.join(S, 'kv', 'q3-restart')])
+    d = manage.server_dir(rec['name']); os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'server.json'), 'w') as f:
+        json.dump(rec, f)
+    calls = []
+    real_stop, real_start = manage.stop_one, manage.start_one
+    manage.stop_one = lambda n, log=print: calls.append(('stop', n))
+    manage.start_one = lambda *x, **k: calls.append(('start', x, k)) or dict(name=rec['name'], port=8101)
+    try:
+        new = os.path.join(os.environ['CAMINUS_MODEL_DIR'], models.local_rel(it))
+        if os.path.exists(new): os.remove(new)
+        with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
+            rc = manage.cmd_restart([rec['name']])
+        check(rc != 0 and calls == [], f'restart: the catalog file missing: refused before the stop, the server keeps running ({rc}, {calls})')
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        with open(new, 'wb') as f:
+            f.truncate(it.size)
+        with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
+            rc = manage.cmd_restart([rec['name']])
+        check(rc == 0 and [c[0] for c in calls] == ['stop', 'start'] and calls[1][2]['argv_override'] == rec['argv'],
+              f'restart: stop, then start with the recorded argv ({[c[0] for c in calls]})')
+    finally:
+        manage.stop_one, manage.start_one = real_stop, real_start
+    e = manage.model_entry(models.BY_NAME['qwen3-30b-a3b'])
+    got = manage.restart_argv(rec['argv'], e, 8102)
+    check(e['path'] == new and got == ['--model', new, '--port', '8102'] + rec['argv'][4:],
+          f'restart: --model at the catalog file found now ({models.local_rel(it)}), not the recorded old path; the new port')
 
 
 def reload_checks(S):

@@ -35,12 +35,15 @@ def _field_str(f, i):
 
 def load_gguf_vocab(path):
     """the tokenizer fields of a GGUF: Caminus's own reader (caminus.ggufio) first, gguf-py for a file it cannot read. A
-    catalog model with a chat template of its own (caminus.models.chat_template_of) gets that template instead of the file's"""
+    catalog model with a chat template or special ids of its own (caminus.models.chat_template_of, special_ids_of) gets
+    those instead of the file's"""
     from .. import models
     v = _load_gguf_vocab_own(path)
     tpl = models.chat_template_of(path)
     if tpl is not None:
         v.chat_template = tpl
+    for k, i in (models.special_ids_of(path) or {}).items():
+        setattr(v, k, int(i))
     return v
 
 
