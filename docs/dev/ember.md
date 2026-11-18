@@ -36,7 +36,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `env/bridge.py`, `approval.py` (resident) | root requests: the agent files, only the owner answers; decisions serialize with withdrawal |
 | `env/audit.py` | the owner's audit log (one JSON object per line) |
 | `env/agent_host.py` | builds the zipapp and addresses the resident over SSH (`caminus ember agent ...`) |
-| `env/relay.py` | the spend-capped key relay; `relay install` runs a frozen copy of its code as a user service |
+| `env/relay.py` | the spend-capped key relay (anthropic, deepinfra, mistral, meta), its ledger priced by `resident/model.py`'s `row_cost`; `relay install` runs a frozen copy of its code as a user service |
 | `env/jobs.py`, `sessions.py`, `serve.py`, `ctx.py` | detached jobs, tmux sessions, model servers and context budgets in the agent's account |
 | `env/prompt.py`, `share/harness/ember/ROBOTS.md` | the account's instructions (`~/ROBOTS.md`) |
 
@@ -45,7 +45,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `runtime.py` | the loop: ticks, tool dispatch, the per-turn gate, compaction, the watchdog, updates |
 | `store.py` | SQLite: goals, the conversation, actions, the inbox, the event stream the panel reads |
 | `prompt.py` | the system prompt (what the agent is told; keep it true to what `runtime.py` enforces) |
-| `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices |
+| `model.py`, `brain.py`, `catalog.py` | transports (OpenAI-compatible, Anthropic), primary + fallback brains, the model catalog and prices (the built-in tables: Anthropic's `PRICES`, Meta's `META_PRICES` with the long-prompt tier of Muse Ember (Meta); Meta lists ids only, so `catalog.META_MODELS` holds its documented windows and levels) |
 | `advisor.py` | the advisor (a stronger model the agent consults) and the eyes (`Eyes`: one vision call per image a brain without vision reads, its description returned as the read's result); each its own daily ledger |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read (text, and images by their headers: `model.py` sends them) / search / edit / write (search: ripgrep only narrows the files, and only for a plain literal with `rg -F`; the stdlib matches, so both give one result), the web tools, MCP servers |

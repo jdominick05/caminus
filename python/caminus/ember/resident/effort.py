@@ -13,9 +13,12 @@ nearest real one:
   it is sent with effort high.
 - an OpenAI-compatible provider with reasoning_effort (DeepInfra, Mistral): none, low, medium, high natively;
   xhigh and max run as high.
+- the Meta Model API's Muse models: minimal, low, medium, high, xhigh, max; they always reason (none is a 400), so
+  none runs as minimal.
 
 With no level set, the lab's recommendation for agentic work applies (model cards, 2026-11): the Qwen3.8 line xhigh,
-Qwen3-30B-A3B thinking on, Anthropic medium, Mistral Large 4 / Medium 3.5 high.
+Qwen3-30B-A3B thinking on, Anthropic medium, Mistral Large 4 / Medium 3.5 high; Meta's own defaults (Muse Ember and
+Muse Wonder max, Muse Spark high), so a side call still knows to run at the lowest.
 
 Sampling: a local brain gets none (the server applies each model's own defaults from its GGUF); a paid brain gets
 its card's values when the model is known, none otherwise; Anthropic never gets temperature, top_p or top_k (the
@@ -24,6 +27,9 @@ current API version refuses them).
 import re
 
 LEVELS = ('none', 'low', 'medium', 'high', 'xhigh', 'max')
+# what a provider's reasoning_effort may list, in order: the scale plus minimal (Meta's level below low)
+WIRE = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+MUSE_EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')   # Meta's Muse models (the catalog's list too)
 SUFFIX = {'none': '-nothink', 'low': '-low', 'xhigh': '-xhigh'}
 LOCAL_CAP = 65536          # the owner's cap on one local reply (a runaway think held the server for an hour)
 PAID_CAP = 65536           # a paid brain's output at most (its catalog maximum below that)
@@ -37,6 +43,12 @@ CARDS = (
     (r'mistral-large-4|mistral-large-latest', dict(default='high', sampling=dict(temperature=1.0, top_p=0.95))),
     (r'mistral-medium-|magistral-medium-', dict(default='high', sampling=dict(temperature=0.7, top_p=0.95),
                                                  sampling_none=dict(temperature=0.7))),   # (top_p only at high)
+    # Meta's levels and its defaults when no level is sent (dev.meta.ai/docs/reasoning; none is a 400: they always
+    # reason); no sampling: Meta asks for one of temperature or top_p, not both, and its defaults are the tuned ones.
+    # paid_reply: the paid cap, since Meta lists no output cap for Spark or Wonder and their reasoning counts inside the
+    # reply limit (4K cut replies at high); billing is per token written, so the room costs nothing unused
+    (r'^muse-(ember|wonder)', dict(default='max', efforts=MUSE_EFFORTS, paid_reply=PAID_CAP)),
+    (r'^muse-spark', dict(default='high', efforts=MUSE_EFFORTS, paid_reply=PAID_CAP)),
 )
 
 
@@ -46,6 +58,15 @@ def card(model):
         if re.search(pat, m):
             return facts
     return {}
+
+
+def efforts(cfg):
+    """The reasoning_effort levels the model takes: the catalog's list stored by /model, else its card's (a config from
+    agent init or a fallback stores none), else None (unknown)."""
+    if 'efforts' in cfg:
+        return cfg['efforts']
+    c = card(cfg.get('model'))
+    return None if c.get('local') or 'efforts' not in c else list(c['efforts'])
 
 
 def normalize(level):
@@ -77,8 +98,9 @@ def line(cfg):
         if 'low' in variants or 'xhigh' in variants:
             return 'scale'
         return 'onoff' if 'none' in variants else ''
-    if 'efforts' in cfg:        # what the catalog says this model takes (stored by /model)
-        return 'reasoning' if cfg['efforts'] else ''
+    have = efforts(cfg)         # what the catalog says this model takes (stored by /model), else its card
+    if have is not None:
+        return 'reasoning' if have else ''
     return 'reasoning' if cfg.get('effort') else ''   # (an older config with an effort set: sent as before)
 
 
@@ -150,10 +172,12 @@ def runs_as(cfg, level):
     if ln == 'onoff':
         return 'none' if level == 'none' else 'on'
     if ln == 'reasoning':
-        if 'efforts' not in cfg:
-            # an older config (no catalog list stored): sent as before, none included (a short call turns it off)
+        have = efforts(cfg)
+        if have is None:
+            # an older config (no catalog list stored, no card's): sent as before, none included (a short call turns
+            # it off)
             return {'xhigh': 'high', 'max': 'high'}.get(level, level)
-        return nearest(level, cfg['efforts'] or ['low', 'medium', 'high'])
+        return nearest(level, have or ['low', 'medium', 'high'])
     return level
 
 
@@ -161,13 +185,13 @@ def nearest(level, have):
     """A level among the model's own (have, in scale order): itself when it has it; none: its lowest; low: the next
     lower (or higher); medium: the next higher; xhigh: the next lower (or higher); max: its highest. This gives the
     cards' mappings: Large 4 (low, medium, high) none->low, xhigh/max->high; Medium 3.5 (none, high) low->none,
-    medium->high; GLM 5.3 (low, high, max) none->low, medium->high."""
-    have = [l for l in LEVELS if l in have]
+    medium->high; GLM 5.3 (low, high, max) none->low, medium->high; Muse (minimal .. max) none->minimal."""
+    have = [l for l in WIRE if l in have]
     if not have or level in have or level not in LEVELS:
         return level
-    i = LEVELS.index(level)
-    lower = [l for l in have if LEVELS.index(l) < i]
-    higher = [l for l in have if LEVELS.index(l) > i]
+    i = WIRE.index(level)
+    lower = [l for l in have if WIRE.index(l) < i]
+    higher = [l for l in have if WIRE.index(l) > i]
     if level == 'none':
         return have[0]
     if level == 'max':
@@ -210,7 +234,7 @@ def note(cfg):
     if ln == 'onoff':
         return 'this model only has thinking on or off: none turns it off, every other level is on'
     if ln == 'reasoning':
-        have = [l for l in LEVELS if l in (cfg.get('efforts') or ['low', 'medium', 'high'])]
+        have = [l for l in WIRE if l in (efforts(cfg) or ['low', 'medium', 'high'])]
         moved = ['%s as %s' % (l, nearest(l, have)) for l in LEVELS if nearest(l, have) != l]
         return 'this model has ' + ', '.join(have) + (': ' + ', '.join(moved) if moved else '')
     if ln == 'anthropic' and always_thinks(cfg):
@@ -254,11 +278,12 @@ def sampling(cfg, remote):
 
 def reply_limit(cfg, remote):
     """A reply's token limit: config max_tokens when set; a local brain the card's maximum output, at most 64K (the
-    owner's cap); a paid brain 4096 (its catalog maximum, up to 64K, is set as max_tokens when it is picked)."""
+    owner's cap); a paid brain its card's paid_reply (up to 64K), else 4096 (its catalog maximum, up to 64K, is set as
+    max_tokens when it is picked)."""
     if cfg.get('max_tokens') is not None and not _legacy_limit(cfg, remote):
         return int(cfg['max_tokens'])
     if remote:
-        return 4096
+        return min(int(card(cfg.get('model')).get('paid_reply') or 4096), PAID_CAP)
     return min(int(card(cfg.get('model')).get('max_output') or LOCAL_CAP), LOCAL_CAP)
 
 
