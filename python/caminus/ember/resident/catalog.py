@@ -136,7 +136,6 @@ def mistral_entries(data, provider):
 # parameter, so their list is assumed the same). Only Muse Ember (Meta)'s output cap is published; the others' stays
 # unknown. The name says Meta's: the harness is called Ember too. A listed id not here (images, voice, segmentation,
 # Contributor mode) is not a brain.
-META_EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
 META_MODELS = {
     'muse-ember-1.0': dict(name='Muse Ember (Meta)', context=1_048_576, max_output=524_288),
     'muse-spark-1.3': dict(name='Muse Spark 1.3 (Meta)', context=1_048_576, max_output=None),
@@ -150,6 +149,7 @@ def meta_entries(data, provider):
     """The listed Muse chat models Caminus has Meta's facts and prices for; prices shows the first tier (Muse Ember's
     long-prompt rates are metered from model.META_PRICES)."""
     from .model import META_PRICES
+    from .effort import MUSE_EFFORTS
     out = []
     for m in data.get('data') or []:
         facts = META_MODELS.get(m.get('id')) if isinstance(m, dict) else None
@@ -157,7 +157,7 @@ def meta_entries(data, provider):
             continue
         first = META_PRICES[m['id']][0]
         out.append(dict(id=m['id'], name=facts['name'], provider=provider, context=facts['context'],
-                        max_output=facts['max_output'], efforts=list(META_EFFORTS), thinking='', vision=True,
+                        max_output=facts['max_output'], efforts=list(MUSE_EFFORTS), thinking='', vision=True,
                         prices=dict(input=first[0], output=first[1], cache_read=first[2])))
     return out
 

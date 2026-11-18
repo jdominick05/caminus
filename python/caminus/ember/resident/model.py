@@ -135,12 +135,17 @@ def remember_prices(model, prices):
         CATALOG_PRICES[model] = flat_row(inp, out, float(prices['cache_read']) if prices.get('cache_read') is not None else inp)
 
 
+def price_row(model):
+    """the model's PRICES-form row (input, output, cache read, write; below and above a prompt-length line), or None"""
+    return PRICES.get(model) or META_PRICES.get(model) or CATALOG_PRICES.get(model)
+
+
 def price(model, usage, served=None):
     """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
     served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
     rates when that model is not in the table: an estimate that errs high. Meta's published table, with Muse Ember's
     long-prompt tier, comes before the catalog's flat copy of its first tier."""
-    row = PRICES.get(model) or META_PRICES.get(model) or CATALOG_PRICES.get(model)
+    row = price_row(model)
     if row is None:
         return None
     if served and served != model:
@@ -489,7 +494,10 @@ class Model:
                         break
                     chunk = json.loads(data)
                     now = time.monotonic()
-                    if chunk.get('choices') and t_first is None:
+                    # the window opens at the first piece with text or a call in it: a role-only chunk first, then
+                    # reasoning a provider does not stream (Meta), would count that hidden time as writing
+                    if t_first is None and any(((c or {}).get('delta') or {}).get(k) for c in chunk.get('choices') or []
+                                               for k in ('content', 'reasoning_content', 'tool_calls')):
                         t_first = now
                     t_last = now
                     if chunk.get('usage'):
@@ -533,8 +541,11 @@ class Model:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             raise self._failed(e) from e
         self.last_usage = usage
-        self.last_speed = self._speed(timings, usage.get('completion_tokens') if isinstance(usage, dict) else None,
-                                      t_first, t_last)
+        written = usage.get('completion_tokens') if isinstance(usage, dict) else None
+        hidden = ((usage.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0) if isinstance(usage, dict) else 0
+        if isinstance(written, int) and not reasoning and isinstance(hidden, int) and 0 < hidden <= written:
+            written -= hidden      # reasoning billed but not streamed (Meta): not written inside the window
+        self.last_speed = self._speed(timings, written, t_first, t_last)
         try:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:
@@ -653,7 +664,7 @@ class Model:
         message without an image is sent as stored."""
         plan = self._image_plan(messages)
         if not plan:
-            return messages
+            return self._system_as_user(messages)
         out, parts = [], []
         for i, m in enumerate(messages):
             if parts and m.get('role') != 'tool':
@@ -673,7 +684,33 @@ class Model:
             out.append(m)
         if parts:
             out.append(dict(role='user', content=parts))
-        return out
+        return self._system_as_user(out)
+
+    def _system_as_user(self, messages):
+        """Meta merges every system message into the front instructions, so a trailing one (the runtime block, new each
+        turn) changed the prompt's start and voided its prefix cache on every turn. For Meta, each system message after
+        the leading ones goes as a user message marked [system], as the Messages API transport sends it, and after the
+        tool results its assistant turn still waits for (Meta refuses a message between a call and its results). Every
+        other provider gets the messages as they are."""
+        if self.config.get('provider_kind') != 'meta':
+            return messages
+        out, held, waiting, lead = [], [], set(), True
+        for m in messages:
+            lead = lead and m['role'] == 'system'
+            if lead:
+                out.append(m)
+                continue
+            if m['role'] == 'system':
+                (held if waiting else out).append(dict(role='user', content='[system] ' + str(m.get('content') or '')))
+                continue
+            if m['role'] == 'assistant':
+                waiting = {c['id'] for c in m.get('tool_calls') or []}
+            elif m['role'] == 'tool':
+                waiting.discard(m.get('tool_call_id'))
+            out.append(m)
+            if held and not waiting:
+                out, held = out + held, []
+        return out + held
 
     # ---- Anthropic Messages API ---------------------------------------------------------------------------
 

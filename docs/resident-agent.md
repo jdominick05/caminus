@@ -204,8 +204,8 @@ Compaction has two tiers. When the context passes the threshold, old tool
 outputs (outside the newest eight messages) are first replaced by a one-line stub
 and the path of a file holding them, with no model call; a summary runs only if
 that is not enough. A paid brain (remote, or through a key relay) compacts early,
-at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
-`paid_compact_target_ratio`); a local one at 85 % down to 20 %.
+at 38 % of its window down to 7.6 %, earlier for a model whose price rises past a prompt length ([Defaults in the
+guide](ember.md#defaults); `paid_compact_threshold`, `paid_compact_target_ratio`); a local one at 85 % down to 20 %.
 
 A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
@@ -315,7 +315,7 @@ window, output cap, thinking and effort levels; DeepInfra's gives window, prices
 resident takes either at its next turn.
 
 A paid brain resends its whole context every turn, so it compacts early: at 38 % of its window, keeping the newest
-7.6 % (on a 1M window about 400K and 80K). Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
+7.6 % (on a 1M window about 400K and 80K); a model whose price rises past a prompt length compacts before it. Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
 the window) in the resident's config to change it; the local server keeps `compact_threshold` / `compact_target_ratio`
 (85 % / 20 %).
 

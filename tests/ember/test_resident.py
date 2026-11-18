@@ -4452,7 +4452,8 @@ for line in sys.stdin:
             self.assertEqual(seen[0]['auth'],'Bearer FAKE-META-KEY','the relay adds the key; the agent sends none')
             m=Model(dict(model='muse-ember-1.0',endpoint=base,relay=True,provider_kind='meta',context=1048576,vision=True,
                          efforts=ember['efforts'],prices=ember['prices'],max_tokens=65536,name='t'))
-            msgs=[dict(role='system',content='be brief'),dict(role='user',content='hi')]
+            # (the trailing system message stands for the runtime block, which changes every turn)
+            msgs=[dict(role='system',content='be brief'),dict(role='user',content='hi'),dict(role='system',content='RUNTIME: step 1')]
             # a whole reply: chat, at Meta's default level, priced with its cached tokens
             queue.append((dict(role='assistant',content='hello'),
                           dict(prompt_tokens=1000,completion_tokens=50,total_tokens=1050,prompt_tokens_details=dict(cached_tokens=400),
@@ -4462,6 +4463,9 @@ for line in sys.stdin:
             self.assertEqual((sent['path'],sent['auth']),('/v1/chat/completions','Bearer FAKE-META-KEY'))
             self.assertEqual((sent['body']['model'],sent['body']['reasoning_effort']),('muse-ember-1.0','max'))
             self.assertNotIn('tool_choice',sent['body']);self.assertTrue(sent['body']['prompt_cache_key'].startswith('ember-'))
+            self.assertEqual([x['role'] for x in sent['body']['messages']],['system','user','user'],
+                             'no system message after the first: Meta moves them to the front, voiding the cached prefix')
+            self.assertEqual(sent['body']['messages'][-1]['content'],'[system] RUNTIME: step 1')
             want=(600*0.10+400*0.004+50*0.50)/1e6
             self.assertAlmostEqual(ledger.spent(),want,places=6)      # (the ledger keeps 6 decimals)
             self.assertAlmostEqual(price('muse-ember-1.0',m.last_usage),want,places=12)
@@ -4540,6 +4544,117 @@ for line in sys.stdin:
         out=self.cmd('effort',[])
         self.assertEqual((out['current'],out['runs_as']),('max','max'));self.assertIn("lab's default",out['summary'])
         self.assertEqual(self.cmd('effort',['no'])['runs_as'],'minimal')
+
+    def test_a_muse_config_without_a_level_list_never_sends_none(self):
+        """agent init / fallback --effort store no level list: the Muse card's levels apply, so a side call sends
+        minimal (Meta answers none with a 400), and the reply limit is the paid cap (Meta lists none for Spark)."""
+        from caminus.ember.resident import effort as eff
+        for cfg in (dict(model='muse-ember-1.0',effort='high'),                    # agent init --effort high
+                    dict(provider_kind='meta',model='muse-spark-1.3'),              # no level at all
+                    dict(model='muse-wonder-1.0',effort='no')):
+            self.assertEqual(eff.resolve(cfg,short=True)['reasoning_effort'],'minimal',cfg)
+            self.assertNotEqual(eff.resolve(cfg)['reasoning_effort'],'none',cfg)
+        self.assertEqual(eff.resolve(dict(model='muse-ember-1.0',effort='xhigh'))['reasoning_effort'],'xhigh')
+        self.assertEqual(eff.resolve(dict(model='muse-spark-1.3'))['reasoning_effort'],'high',"Meta's default, named")
+        self.assertEqual(eff.reply_limit(dict(model='muse-spark-1.3'),True),65536)
+        self.assertEqual(eff.reply_limit(dict(model='some-other-paid-model'),True),4096,'others unchanged')
+        self.assertIsNone(eff.resolve(dict(model='some-other-paid-model'),short=True)['reasoning_effort'])
+        # compaction comes before Muse Ember (Meta)'s 3x line at 200K, not at 38 % (about 400K) of its 1M window
+        from caminus.ember.resident.runtime import paid_compaction
+        trig,targ=paid_compaction(dict(model='muse-ember-1.0',context=1048576))
+        self.assertAlmostEqual(trig,.85*200_000/1048576);self.assertAlmostEqual(targ,trig*.2)
+        self.assertEqual(int(trig*1048576)//1000,170)
+        self.assertEqual(paid_compaction(dict(model='muse-spark-1.3',context=1048576)),(.38,.38*.2),'no line: as before')
+        self.assertEqual(paid_compaction(dict(model='muse-ember-1.0',context=1048576,paid_compact_threshold=.3))[0],.3,
+                         "the owner's setting wins")
+
+    def test_meta_gets_no_system_message_after_the_first_and_tool_results_stay_paired(self):
+        from caminus.ember.resident.model import Model
+        hist=[dict(role='system',content='prompt'),dict(role='user',content='go'),
+              dict(role='assistant',content='',tool_calls=[dict(id='a',type='function',function=dict(name='read',arguments='{}')),
+                                                          dict(id='b',type='function',function=dict(name='read',arguments='{}'))]),
+              dict(role='tool',tool_call_id='a',content='1'),dict(role='system',content='steer'),
+              dict(role='tool',tool_call_id='b',content='2'),dict(role='system',content='runtime block')]
+        cfg=dict(model='muse-ember-1.0',endpoint='http://127.0.0.1:9/v1',relay=True)
+        wire=Model(dict(cfg,provider_kind='meta'))._wire(hist)
+        self.assertEqual([(m['role'],m.get('tool_call_id') or m['content'][:9]) for m in wire],
+                         [('system','prompt'),('user','go'),('assistant',''),('tool','a'),('tool','b'),
+                          ('user','[system] '),('user','[system] ')])
+        self.assertEqual([m['content'] for m in wire[-2:]],['[system] steer','[system] runtime block'])
+        self.assertEqual(Model(dict(cfg,provider_kind='mistral'))._wire(hist),hist,'other providers: as stored')
+
+    def test_a_meta_stream_times_only_what_it_shows(self):
+        """Meta streams a role chunk, then reasons unseen: the speed window opens at the first text, and the reasoning
+        tokens it never streamed are left out of the count."""
+        import types, io
+        from caminus.ember.resident import model as M
+        lines=[dict(choices=[dict(index=0,delta=dict(role='assistant',content=''))]),
+               dict(choices=[dict(index=0,delta=dict(content='Hello'))]),
+               dict(choices=[dict(index=0,delta=dict(content=' there'),finish_reason='stop')]),
+               dict(choices=[],usage=dict(prompt_tokens=10,completion_tokens=100,completion_tokens_details=dict(reasoning_tokens=60)))]
+        raw=b''.join(b'data: '+json.dumps(l).encode()+b'\n\n' for l in lines)+b'data: [DONE]\n\n'
+        class R(io.BytesIO):
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        def opener(req,timeout=None):
+            if req.full_url.endswith('/chat/completions'):return R(raw)
+            raise OSError('no counter here')
+        m=M.Model(dict(model='muse-ember-1.0',endpoint='http://127.0.0.1:9/v1',relay=True,provider_kind='meta',
+                       context=1048576,efforts=['minimal','low','medium','high','xhigh','max']),opener=opener)
+        ticks=iter([100.0,110.0,112.0,112.0])     # the role chunk, 10 s unseen, then 2 s of text
+        fake=types.SimpleNamespace(**{k:getattr(M.time,k) for k in dir(M.time) if not k.startswith('__')})
+        fake.monotonic=lambda:next(ticks)
+        with unittest.mock.patch.object(M,'time',fake):
+            self.assertEqual(m.complete([dict(role='user',content='hi')],on_delta=lambda k,v:None)['content'],'Hello there')
+        self.assertEqual((m.last_speed['tokens'],m.last_speed['seconds'],m.last_speed['tps']),(40,2.0,20.0))
+
+    def test_a_hang_up_during_metas_hidden_reasoning_is_booked_by_time(self):
+        """Meta streams nothing while it reasons: an interrupt then was booked as about one output token. The relay now
+        books the time before the first visible piece at its ceiling rate (relay.HIDDEN_TPS), up to max_tokens."""
+        import socket, threading, http.server
+        from caminus.ember import relay
+        from caminus.ember.resident.model import META_PRICES
+        released,log=threading.Event(),[]
+        class Sock:
+            def shutdown(s,how):released.set()
+        class Resp:
+            status=200
+            def __init__(s):s.first=True
+            def getheader(s,name):return 'text/event-stream' if name=='Content-Type' else None
+            def readline(s):
+                if s.first:
+                    s.first=False
+                    return b'data: '+json.dumps(dict(choices=[dict(index=0,delta=dict(role='assistant',content=''))])).encode()+b'\n\n'
+                released.wait(20)               # reasoning, unseen, until the relay closes upstream
+                return b''
+            def read(s):return b''
+        class Conn:
+            sock=Sock()
+            def request(s,*a,**k):pass
+            def getresponse(s):return Resp()
+            def close(s):pass
+        ledger=relay.Ledger(self.home/'ledger-hidden.json',50.0)
+        handler=relay.make_handler('meta','FAKE-META-KEY',ledger,set(),65536,log.append,META_PRICES,lambda:Conn())
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        try:
+            data=json.dumps(dict(model='muse-wonder-1.0',max_tokens=65536,messages=[],stream=True)).encode()
+            s=socket.create_connection(('127.0.0.1',srv.server_address[1]),timeout=10)
+            s.sendall(b'POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % len(data)+data)
+            s.recv(4096)
+            time.sleep(1.0)                      # a second of hidden reasoning
+            s.shutdown(socket.SHUT_RDWR);s.close()
+            self.assertTrue(released.wait(3))
+            for _ in range(100):
+                if any('CLIENT-GONE' in l for l in log):break
+                time.sleep(0.05)
+            line=next(l for l in log if 'CLIENT-GONE' in l)
+            hidden=int(line.split('(+')[1].split()[0])
+            self.assertGreaterEqual(hidden,int(0.9*relay.HIDDEN_TPS),line)
+            self.assertLessEqual(hidden,65536)
+            self.assertGreaterEqual(ledger.spent(),round(hidden*20.0/1e6,6)-1e-6,'Wonder output at $20 per million')
+        finally:
+            released.set();srv.shutdown();srv.server_close()
 
     def test_mistral_typed_content_blocks_become_text_and_reasoning(self):
         from caminus.ember.resident.model import split_content, Model

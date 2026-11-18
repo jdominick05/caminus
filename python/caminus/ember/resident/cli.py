@@ -857,11 +857,10 @@ def main(argv=None,stdin=None):
             elif time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
                 speed={}
             # the thresholds in force: a paid brain (remote, or through the key relay) compacts early
-            from .runtime import PAID_COMPACT
+            from .runtime import paid_compaction
             from .model import LOOPBACK
             paid=bool(cfg.get('relay')) or urllib.parse.urlsplit(cfg.get('endpoint') or '').hostname not in LOOPBACK
-            trig,targ=((cfg.get('paid_compact_threshold',PAID_COMPACT[0]),cfg.get('paid_compact_target_ratio',PAID_COMPACT[1]))
-                       if paid else (cfg.get('compact_threshold',.85),cfg.get('compact_target_ratio',.2)))
+            trig,targ=(paid_compaction(cfg) if paid else (cfg.get('compact_threshold',.85),cfg.get('compact_target_ratio',.2)))
             import datetime as _dt
             try:spend=json.loads((home/'spend.json').read_text())
             except (OSError,ValueError):spend={}

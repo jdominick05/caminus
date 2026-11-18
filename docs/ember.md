@@ -130,9 +130,9 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   caminus ember agent model NAME muse-ember-1.0
   ```
 
-  Pick the model with `agent model` (or `/model`), so the agent learns its effort levels. A paid brain compacts at
-  38 % of its window (about 400K tokens on Muse's 1M), so on Muse Ember (Meta) most turns past 200K cost three times as much:
-  `paid_compact_threshold` in the session's config moves that line.
+  Pick the model with `agent model` (or `/model`); a session from `agent init --model muse-ember-1.0` knows the Muse
+  levels too. Past 200K input tokens every Muse Ember (Meta) turn costs three times as much, so it compacts at 85 % of
+  that line (about 170K, 16 % of its window) instead of a paid brain's usual 38 % (Compaction, below).
 - **Changing a relay.** `relay install` rewrites the service from the options you give it and restarts it (today's
   spend carries over), so give the whole set again: `--cap-usd` is required, and every `--model` you still want.
 - **Several providers.** Install one relay per provider and add each with `agent provider NAME add`; `caminus ember
@@ -223,7 +223,7 @@ key of that file.
 | Setting | Default | What it does | Change it with |
 |---|---|---|---|
 | Compaction, local brain | at 85 % of the window, down to 20 % | old tool output is trimmed first; a summary only if needed | `compact_threshold`, `compact_target_ratio` |
-| Compaction, paid brain | at 38 % of the window, down to 7.6 % | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
+| Compaction, paid brain | at 38 % of the window, down to 7.6 %; a model whose price rises past a prompt length (Muse Ember (Meta) past 200K, Claude Haiku 5.5 past 100K) at 85 % of that length when it comes first, down to a fifth of that | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
 | Free time | off | stretches of 30 min with 30 min rests; $0.50 a day on a priced model; 3 questions a day, each waiting 10 min; a dream pass from 03:00 | `caminus ember agent heartbeat NAME on`; `free_time.*` |
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
@@ -250,11 +250,13 @@ made before that keeps running at medium until you pick a level.
 | Mistral Large 4 | high; it has low, medium, high (none runs as low, xhigh and max as high) | 1.0 / top_p 0.95 | the listed maximum, at most 64K |
 | Mistral Medium 3.5 | high; it has none and high (low runs as none, medium and above as high) | 0.7 / top_p 0.95 (top_p only at high) | the listed maximum, at most 64K |
 | DeepSeek-V4.1-Flash | the provider's | 1.0 / top_p 1.0 | the listed maximum, at most 64K |
-| Muse Ember (Meta), Muse Wonder | max (Meta's default); they have minimal, low, medium, high, xhigh and max, and always reason, so none runs as minimal | none sent (Meta's defaults) | Muse Ember: its listed 524K, at most 64K; Muse Wonder: 4K (Meta lists no maximum) |
-| Muse Spark | high (Meta's default); levels as above | none sent | 4K (Meta lists no maximum; raise it with `max_tokens` in the session's config) |
+| Muse Ember (Meta), Muse Wonder | max (Meta's default); they have minimal, low, medium, high, xhigh and max, and always reason, so none runs as minimal | none sent (Meta's defaults) | 64K (Muse Ember lists 524K; Muse Wonder lists no maximum, and its reasoning counts inside the limit) |
+| Muse Spark | high (Meta's default); levels as above | none sent | 64K (Meta lists no maximum) |
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
-A side call (the judge's check of a finish) always runs with thinking off.
+A side call (the judge's check of a finish) runs with thinking off where the model can turn it off, else at its lowest
+level (Opus 5.5 and Fable low, the Muse models minimal); a paid model whose effort control Ember does not know (no
+level list in the catalog, no default) gets no effort field, so it reasons at the provider's default.
 
 ### The web tools
 

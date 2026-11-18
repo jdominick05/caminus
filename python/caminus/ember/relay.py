@@ -62,9 +62,13 @@ PROVIDERS = {
     'mistral': dict(host='api.mistral.ai', post=('/v1/chat/completions',), get=('/v1/models',), port=8767,
                     key_file='~/.config/caminus/mistral-key', prices='~/.config/caminus/mistral-prices.json'),
     'meta': dict(host='api.meta.ai', post=('/v1/chat/completions',), get=('/v1/models',), port=8768,
-                 key_file='~/.config/caminus/meta-key'),
+                 key_file='~/.config/caminus/meta-key', hidden_reasoning=True),   # (reasoning_content comes empty)
 }
 PRICE_REFRESH = 3600
+# A decode-rate ceiling for output a stream does not show (Meta bills its models' reasoning but sends it empty), used
+# only to bound a reply cut before its usage came. Meta publishes no speed: an assumed ceiling (unverified), above the
+# decode rates hosted APIs usually report, so a hang-up errs high rather than booking one token.
+HIDDEN_TPS = 400
 
 
 def anthropic_cost(model, usage, served=None):
@@ -414,6 +418,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     headers['anthropic-version'] = self.headers.get('anthropic-version') or '2026-10-21'
                     if beta:
                         headers['anthropic-beta'] = beta
+                t_sent, t_seen = time.monotonic(), None   # t_seen: the first visible output piece (hidden_reasoning)
                 conn.request('POST', path, raw, headers)
                 # (taken now: http.client drops conn.sock in getresponse when upstream will close the connection)
                 upsock = getattr(conn, 'sock', None)
@@ -471,6 +476,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                                 streamed += len(d.get('content') or '') + len(d.get('reasoning_content') or '')
                                 for tc in d.get('tool_calls') or []:
                                     streamed += len(((tc or {}).get('function') or {}).get('arguments') or '')
+                            if streamed and t_seen is None:
+                                t_seen = time.monotonic()
                             continue
                         t = ev.get('type')
                         if t == 'message_start':
@@ -533,8 +540,16 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     elif client_gone and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         # a hang-up before the usage chunk: the prompt plus what was streamed, not the whole allowance
                         # (at the rates past a long-prompt line, where the row has one: an estimate errs high)
+                        out_est = streamed * 2 // 7 + 1
+                        if spec.get('hidden_reasoning'):
+                            # its reasoning is billed but never streamed: the time before the first visible piece
+                            # (prefill included, so it errs high) at a ceiling decode rate, so an interrupt during the
+                            # reasoning is not booked as one token
+                            hidden = ((t_seen or time.monotonic()) - t_sent) * HIDDEN_TPS
+                            out_est += int(hidden)
+                            extra += ' (+%d hidden-reasoning tokens by time)' % int(hidden)
                         usd = (prompt_tokens(body, provider) * row[1][0]
-                               + min(streamed * 2 // 7 + 1, body['max_tokens']) * row[1][1]) / 1e6
+                               + min(out_est, body['max_tokens']) * row[1][1]) / 1e6
                         extra += ' (estimated: prompt + %d streamed characters)' % streamed
                     else:
                         # no usage reported (a cut stream): charge the request as if every output token was spent
