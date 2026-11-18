@@ -2545,6 +2545,11 @@ for line in sys.stdin:
         got=json.loads((home/'config.json').read_text())
         self.assertEqual((got['provider'],got['provider_kind']),('local','local'))
         self.assertEqual(got['providers']['local'],dict(kind='local',endpoint=url),'kept when /model moves to another brain')
+        # a Caminus model without effort ids (Swift 1.5 lists one id) is listed all the same
+        self.serve_ids(['swift-1.5'])
+        swift='swift-'+uuid.uuid4().hex[:8];home=self.home.parent/swift
+        run('create',swift,'--from',self.home.name,'--model','swift-1.5','--endpoint',url,'--home',str(home))
+        self.assertIn(('local','swift-1.5'),{(m['provider'],m['id']) for m in run('models',swift,'--refresh','--home',str(home))['models']})
         # a loopback server that is not Caminus: not listed as the local server
         self.serve_ids(['some-model'],caminus=False)
         other='relay-'+uuid.uuid4().hex[:8];home=self.home.parent/other

@@ -92,14 +92,20 @@ def _local_effort(cfg, keep_level=False):
     and no provider; or a /model pick from a catalog written before the ids were grouped) asks its server for them:
     the id it serves and its -low / -xhigh / -nothink ids (catalog.local_brain). A stored effort id (k3-coder-nothink)
     becomes its base at that level, as /model takes one. keep_level: an existing session keeps the level it ran (the
-    server runs its base id at medium) instead of moving to the lab's default and re-reading the conversation. True
-    when cfg changed; nothing changes when the server cannot be reached."""
+    server runs its base id at medium) instead of moving to the lab's default and re-reading the conversation. A
+    server that answered as Caminus is recorded as provider_kind local, effort ids or not (catalog.providers lists it).
+    True when cfg changed; nothing changes when the server cannot be reached."""
     from . import catalog
     if cfg.get('model_variants') or not catalog.local_candidate(cfg):
         return False
     got = catalog.local_brain(cfg)
-    if not got or not got[1]:
+    if not got:
         return False
+    kind = not cfg.get('provider_kind')
+    if kind:
+        cfg['provider_kind'] = 'local'
+    if not got[1]:
+        return kind
     level = next((lvl for lvl, i in got[1].items() if i == cfg.get('model')), None)
     cfg['model'], cfg['model_variants'] = got
     if level:

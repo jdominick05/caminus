@@ -2599,7 +2599,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "ctrl+p":
-		m.chat.picker, m.chat.pickerSel = true, 0
+		m.chat.picker, m.chat.pickerSel, m.chat.pickerRestore = true, 0, false
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "ctrl+g":
@@ -2623,7 +2623,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if k == "shift+tab" { // no completion under way: Shift+Tab opens the session switcher (Ctrl+P does too)
-			m.chat.picker, m.chat.pickerSel = true, 0
+			m.chat.picker, m.chat.pickerSel, m.chat.pickerRestore = true, 0, false
 			m.chat.compose.Blur()
 			return m, residentSessions(m)
 		}
@@ -2930,7 +2930,7 @@ func (m emberModel) chatSlash(text string) (tea.Model, tea.Cmd) {
 		return m.openPage(pageOverlays[command].tab)
 	case "/sessions":
 		clear()
-		m.chat.picker, m.chat.pickerSel = true, 0
+		m.chat.picker, m.chat.pickerSel, m.chat.pickerRestore = true, 0, false
 		m.chat.compose.Blur()
 		return m, residentSessions(m)
 	case "/remember":

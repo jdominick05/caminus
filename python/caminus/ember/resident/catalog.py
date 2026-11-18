@@ -400,8 +400,8 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
 def providers(config):
     """The configured providers: config `providers` {name: {kind, endpoint[, relay]}}, plus the agent's own endpoint:
     its named provider, or, for a brain with none (a session switcher session, an `agent init` one), the local server
-    it talks to, as `local`, once that server has shown it is Caminus (provider_kind local, or the effort ids
-    _local_effort read from it). Without that proof nothing is added: the key relay listens on loopback too, and a
+    it talks to, as `local`, once that server has shown it is Caminus (provider_kind local: _local_effort records it;
+    or effort ids read from it before that). Without that proof nothing is added: the key relay listens on loopback too, and a
     /model pick from it as a local provider would drop its prices."""
     out = dict(config.get('providers') or {})
     own, endpoint = config.get('provider'), (config.get('endpoint') or '').rstrip('/')

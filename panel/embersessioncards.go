@@ -272,7 +272,11 @@ func intersperse(xs []string, sep string) []string {
 func (m emberModel) cardRows() (first, rows int) {
 	cols := cardCols(max(18, m.width-2))
 	total := (m.cardCount() + cols - 1) / cols
-	rows = max(1, min(total, (m.height-8)/7))
+	extra := 0
+	if m.chat.pickerRestore { // the closed sessions' lines take the hint's place, five more at most
+		extra = 5
+	}
+	rows = max(1, min(total, (m.height-8-extra)/7))
 	first = max(0, min(m.chat.pickerSel/cols-rows+1, total-rows))
 	return first, rows
 }

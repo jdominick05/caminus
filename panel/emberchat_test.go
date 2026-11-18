@@ -3752,6 +3752,18 @@ func TestSwitcherRestoresAClosedSession(t *testing.T) {
 	if m.chat.pickerRestore || !m.chat.picker {
 		t.Fatal("Esc goes back to the cards")
 	}
+	// a short terminal: the list takes the room of a card row, so the switcher is no taller than with its hint
+	m.width, m.height = 100, 24
+	m.sessionCards = []sessionCard{{name: "resident"}, {name: "a"}, {name: "b"}, {name: "c"}}
+	plain := lipgloss.Height(m.pickerBox())
+	m.chat.pickerRestore = true
+	for i := 0; i < 5; i++ {
+		m.chat.closed = append(m.chat.closed, closedSession{Name: fmt.Sprint("s", i), Kept: fmt.Sprint("s", i, "-1")})
+	}
+	if h := lipgloss.Height(m.pickerBox()); h > plain {
+		t.Fatalf("the closed list makes the switcher taller on a short terminal: %d > %d", h, plain)
+	}
+	m.chat.pickerRestore = false
 	next, _ = m.Update(residentDestroyedMsg{name: "research", kept: "/k/research-1"})
 	if msg := next.(emberModel).msg; !strings.Contains(msg, "kept in /k/research-1") || !strings.Contains(msg, "r in the switcher restores it") {
 		t.Fatalf("a close says where the session went and how to bring it back: %q", msg)
