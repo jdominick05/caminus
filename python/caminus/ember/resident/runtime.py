@@ -12,7 +12,7 @@ import subprocess
 import sys
 import uuid
 
-from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices, price
+from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices, price, price_row
 from .store import log_failure, Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
@@ -248,6 +248,21 @@ RUNTIME = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ''   # the run
 # A paid brain's compaction trigger and target, as fractions of the window: the owner's Hermes setting (threshold 0.38,
 # target_ratio 0.20 of the threshold: on a 1M window it compacts at ~400K and keeps the newest ~80K).
 PAID_COMPACT = (.38, .38 * .20)
+
+
+def paid_compaction(config, model=None, window=None):
+    """A paid brain's (trigger, target) as fractions of the window: by default 38 % and 7.6 % (PAID_COMPACT), unless
+    paid_compact_threshold / paid_compact_target_ratio say otherwise. A model whose price rises past a prompt-length
+    line (Muse Ember (Meta) triples past 200K, Claude Haiku 5.5 five times past 100K) compacts by default at 85 % of
+    that line when it comes first (Muse Ember (Meta) on its 1M window: about 16 %), the target keeping its 20 % of the
+    trigger: past the line every turn paid the higher rate. model / window: the brain's (else the config's)."""
+    trigger = PAID_COMPACT[0]
+    row = price_row(model or config.get('model'))
+    window = window or config.get('context')
+    if row and row[2] < 10**9 and isinstance(window, int) and window > 0:
+        trigger = min(trigger, .85 * row[2] / window)
+    return (float(config.get('paid_compact_threshold', trigger)),
+            float(config.get('paid_compact_target_ratio', trigger * PAID_COMPACT[1] / PAID_COMPACT[0])))
 QUESTION_TIMEOUT = 900   # seconds a question or root request waits before the resident carries on without it
 QUESTION_AWAY_MAX = 8 * 3600   # a question's longest wait while its human is away (approval.wait_left)
 SUMMARY_TOKENS = 2048    # a compaction summary's output allowance: the floor (it grows with the window)
@@ -1973,13 +1988,10 @@ class Runtime:
 
     def compaction_ratios(self):
         """(trigger, target) as fractions of the window. A paid brain resends its whole context every turn, so it
-        compacts earlier: by default at 38 % of the window and down to 7.6 % (the owner's Hermes setting: on a 1M
-        window ~400K, keeping the newest ~80K), unless paid_compact_threshold / paid_compact_target_ratio (both
-        fractions of the window) say otherwise.
-        A local brain keeps compact_threshold / compact_target_ratio (85 % / 20 %)."""
+        compacts earlier (paid_compaction). A local brain keeps compact_threshold / compact_target_ratio (85 % / 20 %)."""
         if getattr(self.model, 'remote', False):
-            return (float(self.config.get('paid_compact_threshold', PAID_COMPACT[0])),
-                    float(self.config.get('paid_compact_target_ratio', PAID_COMPACT[1])))
+            return paid_compaction(self.config, (getattr(self.model, 'config', None) or {}).get('model'),
+                                   getattr(self.model, 'context', None))
         return float(self.config.get('compact_threshold', .85)), float(self.config.get('compact_target_ratio', .2))
 
     def stopping(self):

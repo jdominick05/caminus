@@ -32,7 +32,7 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
-- **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra) through a key relay you run.
+- **Any brain.** A local `caminus serve` model, or a paid API (Anthropic, DeepInfra, Mistral, Meta) through a key relay you run.
   On a `caminus serve` brain the chat's speeds are the engine's own: "read 1,240 · write 62 tok/s" is how fast it read
   the last reply's prompt and wrote the reply. While a reply streams, the write speed is the engine's live figure, its
   mean over its most recent passes, so it can step when the reply ends.
@@ -94,6 +94,7 @@ only the provider's chat endpoints, allows only priced models, and refuses reque
 | Anthropic | `~/.config/anthropic/api_key` | `http://127.0.0.1:8765/v1` | `anthropic` |
 | DeepInfra | `~/.config/caminus/deepinfra-key` | `http://127.0.0.1:8766/v1/openai` | `openai` (the default) |
 | Mistral | `~/.config/caminus/mistral-key` (and its price file, `~/.config/caminus/mistral-prices.json`) | `http://127.0.0.1:8767/v1` | `openai` |
+| Meta (the Muse models) | `~/.config/caminus/meta-key` | `http://127.0.0.1:8768/v1` | `openai` |
 
 Anthropic, step by step (the others follow the same pattern; the quickstart shows DeepInfra):
 
@@ -112,6 +113,26 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   allows only the models in your price file: JSON, USD per million tokens, for example
   `{"mistral-large-latest": [2.0, 6.0]}` as `[input, output]`, re-read when it changes; then
   `caminus ember relay install --provider mistral --cap-usd 3`.
+- **Meta.** Meta's Model API serves the Muse models: Muse Ember (Meta) (`muse-ember-1.0`, the cheap one: $0.10 in,
+  $0.50 out, $0.004 cached per million tokens, three times that past 200K input tokens; a 1M window, 524K output),
+  Muse Spark (`muse-spark-1.3`, `-1.2`, `-1.1`) and Muse Wonder (`muse-wonder-1.0`). Create a key in Meta's Model API
+  dashboard under API keys ([its guide](https://dev.meta.ai/docs/authentication)); the prices are
+  [Meta's table](https://dev.meta.ai/docs/pricing-rate-limits), built into the relay, so it allows only those models
+  and needs no price file. The Contributor-mode ids (cheaper because Meta trains on your prompts and replies) are
+  refused. Then:
+
+  ```sh
+  mkdir -p ~/.config/caminus
+  [ -e ~/.config/caminus/meta-key ] || install -m 600 /dev/null ~/.config/caminus/meta-key
+  $EDITOR ~/.config/caminus/meta-key                        # the key alone, on one line
+  caminus ember relay install --provider meta --cap-usd 3
+  caminus ember agent provider NAME add meta --kind meta --endpoint http://127.0.0.1:8768/v1 --relay
+  caminus ember agent model NAME muse-ember-1.0
+  ```
+
+  Pick the model with `agent model` (or `/model`); a session from `agent init --model muse-ember-1.0` knows the Muse
+  levels too. Past 200K input tokens every Muse Ember (Meta) turn costs three times as much, so it compacts at 85 % of
+  that line (about 170K, 16 % of its window) instead of a paid brain's usual 38 % (Compaction, below).
 - **Changing a relay.** `relay install` rewrites the service from the options you give it and restarts it (today's
   spend carries over), so give the whole set again: `--cap-usd` is required, and every `--model` you still want.
 - **Several providers.** Install one relay per provider and add each with `agent provider NAME add`; `caminus ember
@@ -202,7 +223,7 @@ key of that file.
 | Setting | Default | What it does | Change it with |
 |---|---|---|---|
 | Compaction, local brain | at 85 % of the window, down to 20 % | old tool output is trimmed first; a summary only if needed | `compact_threshold`, `compact_target_ratio` |
-| Compaction, paid brain | at 38 % of the window, down to 7.6 % | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
+| Compaction, paid brain | at 38 % of the window, down to 7.6 %; a model whose price rises past a prompt length (Muse Ember (Meta) past 200K, Claude Haiku 5.5 past 100K) at 85 % of that length when it comes first, down to a fifth of that | a paid brain resends its context every turn, so it compacts early | `paid_compact_threshold`, `paid_compact_target_ratio` |
 | Free time | off | stretches of 30 min with 30 min rests; $0.50 a day on a priced model; 3 questions a day, each waiting 10 min; a dream pass from 03:00 | `caminus ember agent heartbeat NAME on`; `free_time.*` |
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
@@ -212,7 +233,7 @@ key of that file.
 | The browser's idle close | 30 min | a browser nobody called for that long closes itself (a paused goal keeps its box, not a running Chrome); the next `open` starts a new one and says so | `sandbox.browser_idle_s` (seconds; `0`: never, it stays open until the goal ends) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
-| Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model describes it once you turn eyes on (Eyes, above), else the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image the eyes described is listed with the eyes model's name: the description is that model's observation. One read by a brain without vision and without eyes is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
+| Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, Meta's docs for the Muse models, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model describes it once you turn eyes on (Eyes, above), else the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image the eyes described is listed with the eyes model's name: the description is that model's observation. One read by a brain without vision and without eyes is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
 | Eyes | off; once on, $0.25 a day | a vision model describes an image for a brain that can't see it (Eyes, above) | `caminus ember agent eyes NAME --provider P --model M` or `--auto` (ministral-8b-latest on a Mistral relay, else Claude Haiku 5.5), `--off`, `--budget-usd N`; `eyes` |
 
 Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
@@ -229,9 +250,13 @@ made before that keeps running at medium until you pick a level.
 | Mistral Large 4 | high; it has low, medium, high (none runs as low, xhigh and max as high) | 1.0 / top_p 0.95 | the listed maximum, at most 64K |
 | Mistral Medium 3.5 | high; it has none and high (low runs as none, medium and above as high) | 0.7 / top_p 0.95 (top_p only at high) | the listed maximum, at most 64K |
 | DeepSeek-V4.1-Flash | the provider's | 1.0 / top_p 1.0 | the listed maximum, at most 64K |
+| Muse Ember (Meta), Muse Wonder | max (Meta's default); they have minimal, low, medium, high, xhigh and max, and always reason, so none runs as minimal | none sent (Meta's defaults) | 64K (Muse Ember lists 524K; Muse Wonder lists no maximum, and its reasoning counts inside the limit) |
+| Muse Spark | high (Meta's default); levels as above | none sent | 64K (Meta lists no maximum) |
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
-A side call (the judge's check of a finish) always runs with thinking off.
+A side call (the judge's check of a finish) runs with thinking off where the model can turn it off, else at its lowest
+level (Opus 5.5 and Fable low, the Muse models minimal); a paid model whose effort control Ember does not know (no
+level list in the catalog, no default) gets no effort field, so it reasons at the provider's default.
 
 ### The web tools
 
@@ -290,7 +315,7 @@ index, journal or note. Hits from the running goal come last, marked "this goal"
 | Your key for its account | `~/.ssh/caminus_env_key` |
 | Your audit log | `~/.local/state/caminus/env-audit.jsonl` |
 | The setup script | `~/.local/share/caminus/env-setup.sh` |
-| Relay keys | `~/.config/caminus/deepinfra-key`, `~/.config/anthropic/api_key` (mode 600) |
+| Relay keys | `~/.config/caminus/deepinfra-key`, `~/.config/caminus/mistral-key`, `~/.config/caminus/meta-key`, `~/.config/anthropic/api_key` (mode 600) |
 | Relay spend | `caminus ember relay status` |
 | The bridge | `/srv/caminus-env-bridge` (`req/`, `res/`, `notes/`, `leases/`, `STOP`) |
 
