@@ -36,7 +36,7 @@ The last line lists the keys that do something right now.
 | `t` | Restart it (it asks first). |
 | `L` | Show its log. |
 | `m` | Open the full monitor on it (`caminus top`, below). |
-| `e` | Open Ember, the agent environment (`caminus ember ui`); before it is set up, the line says to run `caminus ember setup` ([Ember](ember.md)). |
+| `e` | Open Ember, the experimental agent environment (`caminus ember ui`); before it is set up, the line says to run `caminus ember setup` ([Ember](ember.md), [its known limits](ember.md#known-limits)). |
 | `c` | Open Qwen Code on the running server. |
 | `u` | Set up Qwen Code for the running server. |
 | `i` | Install Qwen Code (needs Node.js and npm). |

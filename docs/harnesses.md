@@ -3,7 +3,7 @@
 By the end of this page your coding tool will be talking to a model running in Caminus. A harness is the tool you code
 with: Qwen Code, Hermes Agent, Claude Code, or anything that speaks the OpenAI or Anthropic API.
 
-## Qwen Code (the easiest)
+## Qwen Code (recommended)
 
 The panel sets it up for you: press `i` to install it, `u` to set it up for the running server, then `c` to open it.
 From a terminal:
@@ -47,15 +47,15 @@ positions) runs in the main slot as before.
 
 ### The context note
 
-The model can't see how full its context is, or what time it is. So after each batch of tool calls, Caminus adds one
-line to the last tool result, like this:
+The model can't see how full its context is. So after each batch of tool calls, Caminus adds one line to the last tool
+result, like this:
 
 ```text
-[time: Wed 2026-11-18 00:41 EST; context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
+[context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
 ```
 
-The model can then plan the rest of the task, finishing or writing notes before Qwen Code compacts the conversation, and
-knows how long a step took. The line stays in the conversation, so the prompt cache keeps working. The numbers come from the model's last call plus a
+The model can then plan the rest of the task, finishing or writing notes before Qwen Code compacts the conversation. The
+line stays in the conversation, so the prompt cache keeps working. The numbers come from the model's last call plus a
 high estimate of the new tool output, so the room left is never overstated.
 
 It's on in Caminus's Qwen homes. To turn it off, run `caminus qwen-code setup --context-note off` (it stays off), or set
@@ -107,6 +107,9 @@ conversation without pushing it out. A conversation you leave for 8 hours, or on
 is saved to disk and comes back in about a second.
 
 ## An agent with its own user (experimental)
+
+This is Ember's lower layer; [Ember](ember.md) is the agent built on it, an experiment with
+[known limits](ember.md#known-limits).
 
 Instead of a fixed tool list, an agent can get an environment: a second user on this machine (`caminus-agent` by
 default) that it reaches over SSH and can do anything in. Your own files, keys and processes stay out of its reach by

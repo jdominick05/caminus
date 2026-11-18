@@ -2,9 +2,12 @@
 
 From an installed Caminus to your first conversation with a resident agent: an AI that lives in its own Unix account
 on your machine and works toward goals you give it. What it is and how it is kept apart from you: [the guide](ember.md).
+Ember is an experiment: read [its known limits](ember.md#known-limits) first. The recommended setup for your models is
+Qwen Code ([the quickstart](quickstart.md)).
 
-You need Ubuntu (or another systemd Linux), `sudo` once for the setup, and a brain: a model the agent thinks with,
-either a local `caminus serve` or a paid API through a spend-capped key relay.
+You need Debian or Ubuntu with systemd (other systems: [known limits](ember.md#known-limits)), `sudo` once for the
+setup, and a brain: a model the agent thinks with, either a local `caminus serve` or a paid API through a spend-capped
+key relay.
 
 ## 1. Install
 
