@@ -87,7 +87,7 @@ it; the durable blocks replace it when the turn lands.
 | `/compact`, `/remember TEXT` | compact now; add to memory |
 | `/halt` | the emergency stop (`/halt clear` lifts it) |
 | `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |
-| `/sessions` (Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches; `n` or the "+ new session" card creates one on your setup's default local model (the one chosen for your cards; `/model` switches it); `x x` destroys one (its home is kept in `~/.local/share/caminus/removed-sessions`); `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
+| `/sessions` (Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches; `n` or the "+ new session" card creates one on your setup's default local model (the one chosen for your cards; `/model` switches it); `x x` closes one (its service stops and its home is kept in `~/.local/share/caminus/removed-sessions`); `r` lists the closed sessions and Enter restores one (`caminus ember agent restore [NAME]` from a shell: no name lists them, `--dry-run` checks); `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
 
 In the CLI only (rare, or about the machine rather than the conversation): `caminus ember agent export NAME GOAL`
 (the goal as markdown), `caminus ember agent install` (a new runtime; running daemons take it between goals, and the
@@ -312,6 +312,10 @@ caminus ember agent models NAME --refresh        # what each provider serves: wi
 caminus ember agent model NAME zai-org/GLM-5.2   # pick one (provider/id when two serve it)
 caminus ember agent effort NAME high             # among the levels that model offers
 ```
+
+A session's `/model` also lists the local server it talks to (as `local`, once that server answers as Caminus), and a
+session the switcher creates keeps every provider of the session it was opened from, that session's own brain among
+them, so providers are added once, not per session.
 
 Each relay reads its key from a file only you can read (`~/.config/anthropic/api_key`,
 `~/.config/caminus/deepinfra-key`; it refuses one others can read) and keeps a daily dollar cap. `relay install`
