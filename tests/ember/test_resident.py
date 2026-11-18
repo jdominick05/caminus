@@ -33,6 +33,44 @@ S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
 BOOT="import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
 
 
+PAGE=('<!doctype html><title>Fixture</title><h1>Welcome</h1><p>Read <a href="/about.html">About us</a>.</p>'
+      '<form action="/done.html"><label>Name <input name="who"></label><label>Color <select name="color">'
+      '<option>Red</option><option value="g">Green</option></select></label>'
+      '<label>Secret <input type="password" name="pw"></label><button type="submit">Send</button></form>')
+_sites={}
+
+
+def site(name='main'):
+    """A local web site for the browser tests (one per name, started once): a page with a link and a form (a text
+    field, a select, a password field, a button), the page the form goes to, and /echo (the request it got)."""
+    if name not in _sites:
+        class Page(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):
+                body={'/':PAGE,'/about.html':'<title>About</title><h1>About</h1>',
+                      '/done.html':'<title>Done</title><h1>Thanks</h1><p id=q></p><script>q.textContent="sent "+location.search</script>',
+                      '/echo':self.requestline+'\n'+str(self.headers),'/report.txt':'a downloaded file\n'}.get(self.path.split('?')[0])
+                if body is None:self.send_error(404);return
+                raw=body.encode();self.send_response(200);self.send_header('Content-Type','text/html')
+                if self.path=='/report.txt':self.send_header('Content-Disposition','attachment; filename="report.txt"')
+                self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),Page)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        _sites[name]=f'127.0.0.1:{srv.server_address[1]}'
+    return _sites[name]
+
+
+def chrome_skip(test):
+    """Skip a browser test, saying why, where Chrome cannot run in a box here: none found (or only a snap), no
+    bubblewrap, or an address-space limit (ulimit -v), under which Chrome does not start."""
+    from caminus.ember.resident import browser
+    import resource
+    if (why:=browser.available()):test.skipTest(why)
+    if resource.getrlimit(resource.RLIMIT_AS)[0]!=resource.RLIM_INFINITY:
+        test.skipTest('an address-space limit (ulimit -v): Chrome reserves more than it uses and does not start; '
+                      'bound these tests with a memory cgroup instead')
+
+
 def newest_history(body):
     """The newest message that is history. The runtime appends its context-budget note as a trailing system
     message on purpose - after the history, so the cached prefix stays identical from turn to turn and the
@@ -44,21 +82,69 @@ def call(name,args):
     return dict(role='assistant',content='',tool_calls=[dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name=name,arguments=json.dumps(args)))])
 
 
+def png(w,h):
+    """a real (black) PNG of w x h"""
+    import zlib
+    chunk=lambda kind,data:len(data).to_bytes(4,'big')+kind+data+zlib.crc32(kind+data).to_bytes(4,'big')
+    return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',w.to_bytes(4,'big')+h.to_bytes(4,'big')+b'\x08\x02\x00\x00\x00')
+            +chunk(b'IDAT',zlib.compress((b'\x00'+b'\x00'*3*w)*h))+chunk(b'IEND',b''))
+
+
+def image_msg(path,call_id='t1'):
+    """a stored tool message for a read of the image at path, as store.action_result writes it"""
+    from caminus.ember.resident import files
+    r=files.read('/',str(path))
+    return dict(role='tool',tool_call_id=call_id,content=json.dumps(r),image=dict(r['image'],path=r['path']))
+
+
+def pdf(*runs):
+    """a small valid PDF: one page, one Flate content stream showing each run (bytes) with Tj on its own line"""
+    import zlib
+    ops=b'BT /F1 12 Tf 72 720 Td '+b' '.join(b'('+r+b') Tj 0 -14 Td' for r in runs)+b' ET'
+    body=zlib.compress(ops)
+    objs=[b'<< /Type /Catalog /Pages 2 0 R >>',b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+          b'<< /Length %d /Filter /FlateDecode >>\nstream\n' % len(body)+body+b'\nendstream',
+          b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
+    out=bytearray(b'%PDF-1.4\n');offs=[]
+    for i,o in enumerate(objs,1):offs.append(len(out));out+=b'%d 0 obj\n' % i+o+b'\nendobj\n'
+    x=len(out);out+=b'xref\n0 %d\n0000000000 65535 f \n' % (len(objs)+1)+b''.join(b'%010d 00000 n \n' % o for o in offs)
+    out+=b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(objs)+1,x)
+    return bytes(out)
+
+
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[];status={}
+    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[];status={};web_hits={}
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
     def do_GET(self):
-        # a test that sets models[key] / props[key] gets that model list (effort ids included) and /props; else n_ctx
+        if self.path.startswith('/web/'):self.web();return
+        # a test that sets models[key] / props[key] gets that model list (a list of ids, effort ids included, or a dict
+        # sent as it is: a provider's own list shape) and /props; else n_ctx
         key=self.path.split('/')[1];self.gets.append(self.path)
-        if self.path.endswith('/v1/models') and key in self.models:
-            self.respond(dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in self.models[key]]));return
+        if '/models' in self.path and key in self.models:
+            m=self.models[key]
+            self.respond(m if isinstance(m,dict) else dict(object='list',data=[dict(id=i,object='model',owned_by='k3') for i in m]));return
         if self.path.endswith('/props') and key in self.props:
             self.respond(self.props[key]);return
         if self.path.endswith('/caminus/status') and key in self.status:
             self.respond(self.status[key]);return
         self.respond(dict(n_ctx=65536))
+    def web(self):
+        """pages for web_fetch: /web/busy/SECS/ID answers 429 (Retry-After SECS) the first time per ID, then a page;
+        /web/down/ID always 503; /web/gone/ID 404; /web/page/ID a page; /web/pdf/ID a PDF sent as octet-stream"""
+        parts=self.path.split('/');kind,key=parts[2],self.path
+        n=Endpoint.web_hits[key]=Endpoint.web_hits.get(key,0)+1
+        def send(status,body=b'',ctype='text/html',**headers):
+            self.send_response(status);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(body)))
+            for k,v in headers.items():self.send_header(k.replace('_','-'),v)
+            self.end_headers();self.wfile.write(body)
+        if kind=='busy' and n==1:send(429,b'slow down',Retry_After=parts[3])
+        elif kind=='down':send(503,b'down')
+        elif kind=='gone':send(404,b'no')
+        elif kind=='pdf':send(200,pdf(b'Hello PDF world',b'second line'),'application/octet-stream')
+        else:send(200,b'<html><title>Fetched</title><p>page %d of %s</p><p>%s</p></html>' % (n,key.encode(),b'y'*3000))
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path.endswith('/count_tokens'):
@@ -116,8 +202,8 @@ class Resident(unittest.TestCase):
             except subprocess.TimeoutExpired:p.kill();p.wait()
     def argv(self,op,extra=()):
         return [sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local',op,'test','--home',str(self.home),'--json',*extra]
-    def cmd(self,op,extra=(),code=0,stdin=None):
-        p=subprocess.run(self.argv(op,extra),input=stdin,capture_output=True,text=True,timeout=15)
+    def cmd(self,op,extra=(),code=0,stdin=None,timeout=15):
+        p=subprocess.run(self.argv(op,extra),input=stdin,capture_output=True,text=True,timeout=timeout)
         self.assertEqual(p.returncode,code,p.stdout+'\n'+p.stderr)
         return json.loads(p.stdout)
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
@@ -442,14 +528,42 @@ class Resident(unittest.TestCase):
             self.assertEqual((places[c],places[a],places[b]),(1,2,3))
         finally:rt.mail.close();rt.store.close()
 
-    def test_todo_rejects_two_in_progress_and_bad_states(self):
+    def test_todo_maps_trained_shapes_and_rejects_bad_states(self):
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Plan.')
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='in_progress'),dict(text='b',state='in_progress')],[])
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='later')],[])
-            # a wrong key is refused by name ("status" was taken and every item showed as pending)
-            with self.assertRaisesRegex(ValueError,"'status'"):rt._todo(gid,[dict(text='a',status='done')],[])
+            # the shapes models are trained on map onto text / state ("status" was once taken and every item showed as
+            # pending: a mapped status must keep its state): Qwen Code's todo_write, then Claude Code's TodoWrite
+            r=rt._todo(gid,[dict(id='1',content='read the code',status='completed'),dict(id='2',content='fix it',status='in_progress'),
+                            dict(id='3',content='test it',status='pending',priority='high')],[])
+            self.assertEqual(rt.store.todo(gid)['items'],[dict(text='read the code',state='done'),dict(text='fix it',state='in_progress'),
+                                                          dict(text='test it',state='pending')])
+            self.assertEqual((r['left'],r['note']),(2,'ignored unknown field(s) id, priority: a todo item takes text and state'))
+            r=rt._todo(gid,[dict(content='read',status='completed',activeForm='Reading'),dict(content='fix',status='in-progress',activeForm='Fixing'),
+                            dict(text='ship',status='done')],[])
+            self.assertEqual([it['state'] for it in rt.store.todo(gid)['items']],['done','in_progress','done'])
+            self.assertEqual((r['left'],r['note']),(1,'ignored unknown field(s) activeForm: a todo item takes text and state'))
+            self.assertNotIn('note',rt._todo(gid,[dict(text='a',state='done')],[]))
+            # an item with both forms keeps its own key, and the note says why the other went (not "unknown")
+            r=rt._todo(gid,[dict(text='keep me',content='a copy',state='done')],[])
+            self.assertEqual((rt.store.todo(gid)['items'],r['note']),([dict(text='keep me',state='done')],'ignored content: the item also had text'))
+            # a whole Qwen Code todo_write call, as the model sends it: the list as "todos", through the dispatcher
+            rt.store.model_reply(gid,call('todo',dict(todos=[dict(id='1',content='find the bug',status='completed'),
+                                                            dict(id='2',content='fix the bug',status='in_progress'),
+                                                            dict(id='3',content='run the tests',status='pending')])))
+            rt._action(rt.store.actions(gid)[0])
+            res=[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='todo'][-1]
+            self.assertNotIn('error',res)
+            self.assertEqual([(it['text'],it['state']) for it in rt.store.todo(gid)['items']],
+                             [('find the bug','done'),('fix the bug','in_progress'),('run the tests','pending')])
+            self.assertEqual((res['left'],res['note']),(2,'ignored unknown field(s) id: a todo item takes text and state · took todos as items'))
+            # real errors are still refused: an unknown state (mapped or not), a field nothing maps, a missing text
+            with self.assertRaisesRegex(ValueError,"'cancelled'"):rt._todo(gid,[dict(content='a',status='cancelled')],[])
+            with self.assertRaisesRegex(ValueError,"'title'"):rt._todo(gid,[dict(title='a',state='done')],[])
+            with self.assertRaisesRegex(ValueError,'needs its text'):rt._todo(gid,[dict(id='1',status='done')],[])
+            with self.assertRaisesRegex(ValueError,'at most 30'):rt._todo(gid,[dict(content=f'step {i}',status='pending') for i in range(31)],[])
             # an edit whose old text is absent never claims it was applied because a short new text occurs somewhere
             from caminus.ember.resident import files
             (self.home/'f.txt').write_text('x = 1\n')
@@ -493,6 +607,23 @@ class Resident(unittest.TestCase):
             self.assertAlmostEqual(out['cache_hit'],0.7)
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_replys_written_tokens_go_on_its_event_for_the_turn_count(self):
+        rt=Runtime(self.home)
+        try:
+            # the provider's count (OpenAI-style, Anthropic-style), else a Caminus server's predicted_n, else nothing
+            for usage,speed,want in ((dict(prompt_tokens=900,completion_tokens=42),None,42),(dict(input_tokens=9,output_tokens=7),None,7),
+                                     ({},dict(source='engine',tokens=31,tps=40.0),31),({},dict(source='estimate',tokens=50,tps=9.0),0),
+                                     (dict(completion_tokens=True),None,0)):
+                rt.model.last_usage,rt.model.last_speed=usage,speed
+                self.assertEqual(rt._reply_tokens(),want,(usage,speed))
+            gid=rt.store.enqueue('Count.')
+            rt.store.model_reply(gid,dict(role='assistant',content='done'),tokens=42)
+            rt.store.model_reply(gid,dict(role='assistant',content='again'))
+            shown=[e['data'] for e in rt.store.events() if e['kind']=='assistant']
+            self.assertEqual([d.get('tokens') for d in shown],[42,None])
+            self.assertFalse(any('tokens' in m for m in rt.store.goal(gid)['messages']),'the count is never sent back to the model')
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_theme_op_asks_the_brain_once_with_the_roles_and_the_description(self):
         self.replies(dict(role='assistant',content='name = autumn\naccent = #ff8800'))
         out=self.cmd('theme',['warm autumn forest'])
@@ -530,8 +661,10 @@ class Resident(unittest.TestCase):
         home=self.home
         w=files.write(home,'src/a.py','def f(n):\n    if n > 3:\n        return 1\n    return 0\n')
         self.assertTrue(w['created']);self.assertIn('4 lines',w['note'])
-        r=files.read(home,'src/a.py',offset=2,limit=2)
-        self.assertEqual(r['shown'],'2-3');self.assertIn('     2\t    if n > 3:',r['text']);self.assertIn('offset=4',r['next'])
+        r=files.read(home,'src/a.py',start=2,lines=2)
+        self.assertEqual(r['shown'],'2-3 of 4');self.assertIn('     2\t    if n > 3:',r['text']);self.assertIn('start=4',r['next'])
+        self.assertEqual(files.read(home,'src/a.py')['shown'],'1-4 of 4','the default is unchanged: the whole window')
+        self.assertEqual(files.read(home,'src/a.py',start=9)['shown'],'none of 4')
         e=files.edit(home,'src/a.py','if n > 3:','if n >= 3:')
         self.assertEqual((e['added'],e['removed']),(1,1));self.assertIn('-    if n > 3:',e['diff']);self.assertIn('+    if n >= 3:',e['diff'])
         with self.assertRaises(ValueError) as c:files.edit(home,'src/a.py','return','yield')
@@ -547,10 +680,122 @@ class Resident(unittest.TestCase):
         files.edit(home,'win.txt','one\ntwo','uno\ndos')
         self.assertEqual(p.read_bytes(),b'uno\r\ndos\r\n');self.assertEqual(p.stat().st_mode&0o777,0o640)
 
+    def test_read_knows_an_image_by_its_header_and_refuses_one_past_the_caps(self):
+        from caminus.ember.resident import files
+        import hashlib
+        le=lambda n,k:n.to_bytes(k,'little');be=lambda n,k:n.to_bytes(k,'big')
+        heads={
+            'png':png(7,5),
+            'gif':b'GIF89a'+le(7,2)+le(5,2)+b'\x00\x00\x00;',
+            # an APP0 segment first, as in every JFIF file: the frame header is found past it
+            'jpeg':b'\xff\xd8\xff\xe0'+be(16,2)+b'JFIF\x00'+b'\x00'*9+b'\xff\xc0'+be(17,2)+b'\x08'+be(5,2)+be(7,2)+b'\x03'+b'\x00'*9+b'\xff\xd9',
+            'webp-vp8':b'RIFF'+le(30,4)+b'WEBP'+b'VP8 '+le(18,4)+b'\x00\x00\x00\x9d\x01\x2a'+le(7,2)+le(5,2),
+            'webp-vp8l':b'RIFF'+le(30,4)+b'WEBP'+b'VP8L'+le(5,4)+b'\x2f'+le(6|(4<<14),4),
+            'webp-vp8x':b'RIFF'+le(30,4)+b'WEBP'+b'VP8X'+le(10,4)+b'\x00'*4+le(6,3)+le(4,3),
+        }
+        for name,data in heads.items():
+            (self.home/name).write_bytes(data)
+            r=files.read(self.home,name)
+            self.assertEqual((r['image']['format'],r['image']['width'],r['image']['height']),(name.split('-')[0],7,5),name)
+            self.assertEqual(r['image']['sha256'],hashlib.sha256(data).hexdigest(),'the transport sends the file only while it matches')
+            self.assertNotIn('text',r)
+        self.assertIsNone(files.image_info(b'plain text'),'a text file is not an image')
+        (self.home/'bad.png').write_bytes(b'\x89PNG\r\n\x1a\n'+b'\x00'*8)
+        with self.assertRaises(ValueError) as c:files.read(self.home,'bad.png')
+        self.assertIn('IHDR',str(c.exception))
+        (self.home/'bad.jpg').write_bytes(b'\xff\xd8\xff\xda'+b'\x00'*20)
+        with self.assertRaises(ValueError):files.read(self.home,'bad.jpg')
+        # past the caps: the size and format, no sha256 (nothing is sent), and how to make it fit
+        (self.home/'wide.png').write_bytes(png(files.IMAGE_MAX_SIDE+1,1))
+        (self.home/'heavy.gif').write_bytes(heads['gif']+b'\x00'*files.IMAGE_MAX_BYTES)
+        for name in ('wide.png','heavy.gif'):
+            r=files.read(self.home,name)
+            self.assertNotIn('sha256',r['image'],name);self.assertIn('no image is sent',r['note']);self.assertIn('smaller copy',r['note'])
+
+    def test_an_image_read_reaches_a_brain_that_sees_as_an_image_and_one_that_cannot_as_a_line(self):
+        import base64
+        data=png(4,3);(self.home/'plot.png').write_bytes(data)
+        conf=json.loads((self.home/'config.json').read_text());conf['vision']=True
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.seen.clear()
+        self.replies(call('read',dict(path='plot.png')),dict(role='assistant',content='A black 4x3 image.'))
+        self.assertEqual(self.cmd('once',['--goal','Look at plot.png.'])['state'],'completed')
+        sent=[b for k,b in Endpoint.seen if k==self.key][1]['messages']
+        i=next(n for n,m in enumerate(sent) if m['role']=='tool')
+        self.assertNotIn('image',sent[i],'the stored marker never reaches the provider')
+        self.assertEqual(sent[i+1]['role'],'user','the image follows its tool result')
+        self.assertEqual(sent[i+1]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+base64.b64encode(data).decode())))
+        result=next(e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result')
+        self.assertEqual((result['image']['width'],result['image']['height']),(4,3),'the card reads the size from the event')
+        self.assertNotIn(base64.b64encode(data).decode()[:40],(self.home/'agent.sqlite3').read_bytes().decode('latin-1'),
+                         'the store keeps no image bytes')
+        # the same read on a brain without vision: the result says so plainly, and no image goes out
+        conf['vision']=False;(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.seen.clear()
+        self.replies(call('read',dict(path='plot.png')),dict(role='assistant',content='I cannot see it.'))
+        self.cmd('once',['--goal','Look at plot.png again.'])
+        sent=[b for k,b in Endpoint.seen if k==self.key][1]['messages']
+        tool=next(m for m in sent if m['role']=='tool')
+        self.assertIn("this model can't see images; plot.png is a 4x3 PNG; describe-by-tool options",tool['content'])
+        self.assertNotIn('image_url',json.dumps(sent))
+        # only read's own result names an image to send: another tool's 'image' and 'path' are just its data
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('x')
+            rt.store.model_reply(gid,call('mcp__pics__get',{}))
+            rt.store.action_result(rt.store.actions(gid)[0],dict(path=str(self.home/'plot.png'),image=dict(width=4,height=3)))
+            self.assertNotIn('image',rt.store.goal(gid)['messages'][-1])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_finish_judge_sees_the_images_the_agent_read_or_takes_its_account_of_them(self):
+        # a live Haiku run read a code off a picture, and a judge that was never shown the picture refused the correct
+        # finish twice (the agent went on to install an OCR model)
+        import base64
+        self.gates_on()
+        data=png(5,2);(self.home/'code.png').write_bytes(data)
+        def judged(vision):
+            conf=json.loads((self.home/'config.json').read_text());conf['vision']=vision
+            (self.home/'config.json').write_text(json.dumps(conf))
+            Endpoint.judge_seen.clear()
+            self.replies(call('define_done',dict(check='I have read the code in code.png')),
+                         call('read',dict(path='code.png')),
+                         call('verify',dict(evidence='the image shows the code 4711')),
+                         call('finish',dict(summary='The code in code.png is 4711.')))
+            goal=self.cmd('once',['--goal','What code is in code.png?']);self.assertEqual(goal['state'],'completed')
+            return [b for k,b in Endpoint.judge_seen if k==self.key][0]['messages'],goal['id']
+        from caminus.ember.resident import judge
+        sent,gid=judged(True)
+        self.assertIn('IMAGES THE AGENT SAW (its model can see; each follows this brief, as the agent saw it)',sent[1]['content'])
+        self.assertEqual(sent[2]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+base64.b64encode(data).decode())))
+        # the agent saw it and the judge can't (the advisor as judge): the agent's account is an observation
+        rt=Runtime(self.home)
+        try:
+            self.assertTrue(judge.viewed(rt,gid)[0]['seen'],'read on a brain with vision marks the image seen')
+            brief=judge.evidence(rt,gid,'The code is 4711.','',sees=False)
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('IMAGES THE AGENT SAW (its model can see; you cannot see them here)',brief)
+        self.assertIn('is an observation, as a command',brief);self.assertNotIn('COULD NOT SEE',brief)
+        # a blind agent and a blind judge (one local brain): what the agent says the picture shows is no observation
+        sent,gid=judged(False)
+        self.assertNotIn('image_url',json.dumps(sent))
+        brief=sent[1]['content']
+        self.assertIn('IMAGES THE AGENT READ BUT COULD NOT SEE',brief);self.assertIn('code.png (5x2 PNG)',brief)
+        self.assertIn('is not an observation',brief);self.assertNotIn('IMAGES THE AGENT SAW',brief)
+        self.assertNotIn('is an observation, as a command',brief)
+        self.assertNotIn("can't see images",json.dumps(sent),'the judge gets the judge\'s note, not the agent\'s')
+        # a judge that can see is not handed an image the agent never saw as its own observation
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('seen',judge.viewed(rt,gid)[0])
+            self.assertIn('COULD NOT SEE',judge.evidence(rt,gid,'The code is 4711.','',sees=True))
+        finally:rt.mail.close();rt.store.close()
+
     def test_file_tools_through_the_loop(self):
         self.replies(call('write',dict(path='notes.txt',content='alpha\nbeta\n')),
                      call('edit',dict(path='notes.txt',old='beta',new='gamma')),
                      call('read',dict(path='notes.txt')),
+                     call('search',dict(pattern='gam+a')),
+                     call('read',dict(path='notes.txt',offset=2)),       # the old name: read says it ignored it
                      call('finish',dict(summary='Edited.')))
         out=self.cmd('once',['--goal','Write and edit a file.'])
         self.assertEqual(out['state'],'completed')
@@ -559,7 +804,105 @@ class Resident(unittest.TestCase):
         try:
             results=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result']
             self.assertTrue(any(r.get('name')=='edit' and '+gamma' in r['result'].get('diff','') for r in results),results)
+            self.assertTrue(any(r.get('name')=='search' and r['result'].get('text')=='notes.txt\n     1-  alpha\n     2:  gamma' for r in results),results)
+            self.assertTrue(any(r.get('name')=='read' and 'ignored unknown argument(s) offset; read takes: lines, path, question, start'
+                                in r['result'].get('note','') for r in results),results)
         finally:store.close()
+
+    def test_search_finds_names_and_text_the_same_with_and_without_ripgrep(self):
+        """ripgrep narrows only for a plain literal (rg -F on raw bytes). The cases where its regex is not Python's:
+        [[:alpha:]] (a POSIX class to ripgrep, a set to Python), . on an invalid UTF-8 byte (U+FFFD to Python's
+        decode), and a UTF-16 BOM (ripgrep transcodes by default; Python reads the bytes)."""
+        import shutil,stat
+        from caminus.ember.resident import files
+        home=self.home;proj=home/'proj'
+        def put(rel,data):
+            q=proj/rel;q.parent.mkdir(parents=True,exist_ok=True)
+            q.write_bytes(data if isinstance(data,bytes) else data.encode())
+        put('.gitignore','ignored/\n*.log\n')
+        put('src/stock.py','import csv\n\n\ndef total(items):\n    s = 0\n    for q, p in items:\n        s += q * p\n'+'    #\n'*3+'    return s  # total\n')
+        put('src/report.py','from stock import total\nprint(total([]))\n')
+        put('ignored/old.py','total = 1\n');put('run.log','total 3\n');put('blob.dat',b'\0\1total\n')
+        put('win.txt',b'grand total\r\nnext\r\n');put('many.txt',''.join(f'hit {i}\n' for i in range(100)))
+        for i in range(25):put(f'spread/f{i:02}.txt','spread hit\n')
+        put('wide/long.txt',('x'*400+'\n')*80)
+        subprocess.run(['git','init','-q',str(proj)],check=True)
+        plain=home/'plain'                       # no repository: the walk, which skips build/, node_modules/ and hidden folders
+        for rel in ('a.txt','build/b.txt','node_modules/m/c.txt','deep/d.txt','.cache/e.txt'):
+            (plain/rel).parent.mkdir(parents=True,exist_ok=True);(plain/rel).write_text('total\n')
+        def own(rel,data):(home/rel).parent.mkdir(parents=True,exist_ok=True);(home/rel).write_bytes(data)
+        own('posix/f.txt',b':]\n');own('latin/l1.txt',b'caf\xe9 ok\n');own('latin/u8.txt','café ok\n'.encode())
+        own('bom/w.txt',b'\xff\xfe'+'\u4141\u4141'.encode('utf-16-le')+b'\n')   # bytes AAAA after the BOM, no NUL
+        names=home/'names';own('names/'+os.fsdecode(b'caf\xe9.txt'),b'hello\n');own('names/plain.txt',b'hello\n')
+        subprocess.run(['git','init','-q',str(names)],check=True)
+        queries=[dict(path='proj',pattern='total'),dict(path='proj',glob='*.py'),dict(path='proj',glob='src/*.py'),
+                 dict(path='proj',glob='*.py',pattern='def ',context=0),dict(path='proj',pattern='total$'),
+                 dict(path='proj',pattern='(?<=grand )total'),dict(path='proj',pattern='(?i)TOTAL'),
+                 dict(path='proj',pattern='hit'),dict(path='proj/many.txt',pattern='hit'),dict(path='plain',pattern='total'),
+                 dict(path='proj/ignored',pattern='total'),dict(path='proj',pattern='nothing here'),
+                 dict(path='proj/wide',pattern='x+'),dict(path='posix',pattern='[[:alpha:]]'),
+                 dict(path='latin',pattern='caf. ok'),dict(path='latin',pattern=' ok'),dict(path='latin',pattern='é'),
+                 dict(path='bom',pattern='AA'),dict(path='names',pattern='hello'),dict(path='names',glob='*.txt'),
+                 dict(path='plain/.cache',pattern='total')]
+        log=S/('rg-'+uuid.uuid4().hex);wrapper=S/('rg-wrap-'+uuid.uuid4().hex)
+        if shutil.which('rg'):
+            wrapper.write_text(f'#!/bin/sh\necho run >> {log}\nexec {shutil.which("rg")} "$@"\n');wrapper.chmod(0o755)
+        runs={}
+        with unittest.mock.patch.dict(os.environ,GIT_CEILING_DIRECTORIES=str(home)):
+            with unittest.mock.patch.object(files,'_rg',return_value=None):
+                runs['stdlib']=[files.search(home,**q) for q in queries]
+            if shutil.which('rg'):
+                ran=lambda:log.read_text().count('run') if log.exists() else 0
+                runs['rg'],used=[],[]
+                with unittest.mock.patch.object(files,'_rg',return_value=str(wrapper)):
+                    for q in queries:
+                        n=ran();runs['rg'].append(files.search(home,**q));used.append(ran()>n)
+                self.assertEqual([used[i] for i in (0,4,13,14,15,16,17)],[True,False,False,False,True,True,True],
+                                 'ripgrep narrows plain literals only: never a regex such as [[:alpha:]] or caf. ok')
+                for i in range(len(queries)):
+                    self.assertEqual(runs['rg'][i],runs['stdlib'][i],f'ripgrep only narrows the files: {queries[i]}')
+            else:print('SKIP the ripgrep leg: rg is not on PATH')
+        r=runs['stdlib']
+        self.assertEqual((r[0]['matches'],r[0]['files']),(5,3),r[0])          # .gitignore'd, .log and binary files skipped
+        self.assertTrue(r[0]['text'].startswith('proj/src/report.py\n'),'paths are relative to the home, sorted')
+        self.assertIn('     4:  def total(items):',r[0]['text']);self.assertIn('     5-      s = 0',r[0]['text'])
+        self.assertIn('    --',r[0]['text'],'separate groups of context are marked')
+        for skipped in ('ignored/','run.log','blob.dat'):self.assertNotIn(skipped,r[0]['text'])
+        self.assertEqual(r[1]['text'],'proj/src/report.py\nproj/src/stock.py');self.assertEqual(r[2]['files'],2)
+        self.assertEqual((r[3]['matches'],r[3]['text']),(1,'proj/src/stock.py\n     4:  def total(items):'))
+        self.assertIn('proj/win.txt',r[4]['text'],'a CRLF line ends before its \\r')
+        self.assertEqual(r[5]['matches'],1,'a lookbehind (not ripgrep syntax) still searches')
+        self.assertEqual(r[6]['matches'],r[0]['matches'])
+        self.assertEqual((r[7]['matches'],r[7]['files']),(125,26))
+        self.assertEqual(r[7]['more'],'65 more matches in 25 more files not shown: narrow pattern, glob or path')
+        self.assertEqual(r[8]['more'],'40 more matches not shown: narrow pattern, glob or path')
+        self.assertEqual(r[9]['text'].count('plain/'),2,'build/ and node_modules/ are skipped outside a repository')
+        self.assertEqual(r[10]['matches'],1,'a folder git ignores, asked for by name, is walked')
+        self.assertEqual((r[11]['matches'],r[11]['text']),(0,''));self.assertNotIn('more',r[11])
+        from caminus.ember.resident import outputs
+        shown=r[12]['text'].count(':  x')                    # long lines: the text cap stops it before the match cap
+        self.assertTrue(10<shown<60,shown);self.assertLess(len(r[12]['text']),files.SEARCH_CHARS+1000)
+        self.assertEqual(r[12]['more'],f'{80-shown} more matches not shown: narrow pattern, glob or path')
+        self.assertEqual([r[i]['matches'] for i in (13,14,15,16,17)],[1,2,2,1,1],'the cases where rg and re differ')
+        self.assertEqual((r[18]['matches'],r[19]['files']),(2,2),'a name that is not UTF-8 fails nothing')
+        self.assertIn('names/caf\\xe9.txt',r[18]['text']);self.assertIn('names/caf\\xe9.txt',r[19]['text'])
+        json.dumps(r[18],ensure_ascii=False).encode()                   # (as the store writes it)
+        self.assertEqual(r[20]['matches'],1,'a hidden folder named as path is searched')
+        with unittest.mock.patch.dict(os.environ,GIT_CEILING_DIRECTORIES=str(home)),             unittest.mock.patch.object(files,'SEARCH_SECONDS',-1):
+            late=files.search(home,'plain',glob='*.txt')
+        self.assertEqual(late['files'],0);self.assertIn('the list is partial',late['stopped'])
+        self.assertLess(len(json.dumps(r[12])),outputs.LIMIT_CHARS,'a capped search is never spilled to a file')
+        first=r[3]['text'].split('\n')[0]
+        self.assertIn('def total',files.read(home,first,start=4,lines=1)['text'],'paths go to read as they are')
+        with self.assertRaises(ValueError):files.search(home,'proj')
+        with self.assertRaises(ValueError) as c:files.search(home,'proj',pattern='total(')
+        self.assertIn('not a valid regex',str(c.exception))
+        with self.assertRaises(FileNotFoundError):files.search(home,'nowhere',pattern='x')
+        if os.geteuid():
+            locked=home/'locked';locked.mkdir();locked.chmod(0);self.addCleanup(locked.chmod,stat.S_IRWXU)
+            with self.assertRaises(PermissionError):files.search(home,'locked',pattern='x')
+        desc=[t for t in TOOLS if t['function']['name']=='search'][0]['function']
+        self.assertEqual(sorted(desc['parameters']['properties']),['context','glob','path','pattern'])
 
     def test_big_outputs_go_to_a_file_with_a_preview(self):
         from caminus.ember.resident import outputs
@@ -579,7 +922,7 @@ class Resident(unittest.TestCase):
     def test_a_big_tool_result_reaches_the_model_shortened(self):
         big='\n'.join(f'row {i}' for i in range(20000))
         (self.home/'big.txt').write_text(big)
-        self.replies(call('read',dict(path='big.txt',limit=2000)),call('finish',dict(summary='Read it.')))
+        self.replies(call('read',dict(path='big.txt',lines=2000)),call('finish',dict(summary='Read it.')))
         self.cmd('once',['--goal','Read the big file.'])
         last=[b for k,b in Endpoint.seen if k==self.key][-1]
         tool_msgs=[m for m in last['messages'] if m.get('role')=='tool']
@@ -816,25 +1159,111 @@ class Resident(unittest.TestCase):
             self.assertIn('#128 review fixes',rt.context_message(work)['content'])
         finally:rt.mail.close();rt.store.close()
 
-    def test_setup_sets_the_agent_git_identity_and_test_interpreter_when_asked(self):
-        # a real agent built its own interpreter (no python, no torch) and committed as user@localhost (a CLA failed)
+    def test_setup_fills_the_agent_venv_and_sets_the_git_identity_when_asked(self):
+        # a real agent built its own interpreter (no python, no torch; system pip refuses installs) and committed as
+        # user@localhost (a CLA failed)
         import types
         from caminus.cmd import ember as E
         ran=[]
+        res=dict(made=False,present=['pillow'],installed=[],failed={},skipped=[],offline=None,torch='present',weasyprint='ok')
         def transport(argv,**kw):
-            ran.append((kw.get('input',''),kw.get('timeout')));return subprocess.CompletedProcess(argv,0,'made\n','')
+            ran.append((kw.get('input',''),kw.get('timeout')));return subprocess.CompletedProcess(argv,0,json.dumps(res)+'\n','')
         said=[]
         a=types.SimpleNamespace(git_name='agent-login',git_email='agent-login@users.noreply.github.com',test_venv=True)
         self.assertTrue(E.agent_extras(a,transport,say=said.append))
         self.assertIn("git config --global user.name agent-login",ran[0][0])
         self.assertIn("user.email agent-login@users.noreply.github.com",ran[0][0])
-        self.assertIn('download.pytorch.org/whl/cpu torch',ran[1][0]);self.assertEqual(ran[1][1],1800)
-        self.assertIn('test -x ~/.venvs/caminus-cpu/bin/python',ran[1][0],'an existing interpreter is kept')
+        self.assertIn('download.pytorch.org/whl/cpu',ran[1][0]);self.assertEqual(ran[1][1],3600)
+        self.assertIn("'venv': '~/.venvs/caminus-cpu'",ran[1][0])
+        self.assertIn('CPU torch and numpy present',said[-2])
         ran.clear()
         self.assertFalse(E.agent_extras(types.SimpleNamespace(git_name='x',git_email=None,test_venv=False),transport,say=said.append))
         self.assertEqual(ran,[],'a name without an email changes nothing')
         self.assertTrue(E.agent_extras(types.SimpleNamespace(git_name=None,git_email=None,test_venv=False),transport,say=said.append))
-        self.assertEqual(ran,[],'nothing asked, nothing run')
+        self.assertEqual(len(ran),1,'the package set is always checked')
+        self.assertIn("'torch': False",ran[0][0],'torch only when asked')
+        res['torch']='failed: no index';self.assertFalse(E.agent_extras(a,transport,say=said.append),'torch asked for and failed')
+        res.clear();res['error']='python3 -m venv failed: ensurepip is not available (Debian / Ubuntu: sudo apt install python3-venv)'
+        plain=types.SimpleNamespace(git_name=None,git_email=None,test_venv=False)
+        self.assertFalse(E.agent_extras(plain,transport,say=said.append),'no venv with a working pip: setup fails, saying what to install')
+        self.assertIn('sudo apt install python3-venv',said[-1])
+        def slow(argv,**kw):raise subprocess.TimeoutExpired(argv,kw.get('timeout'))
+        self.assertFalse(E.agent_extras(plain,slow,say=said.append));self.assertIn('no answer in 3600 s',said[-1])
+
+    def test_agent_venv_fill_is_idempotent_and_reports_failures_offline_and_missing_libs(self):
+        # the agent's venv, filled by the real script against a fake pip (no network): one call per missing package
+        from caminus.ember import agent_side
+        from caminus.ember.resident.discovery import AGENT_PACKAGES
+        def fake_home(name):
+            home=self.home/name;venv=home/'.venvs'/'caminus-cpu'
+            subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+            (venv/'bin'/'pip').write_text(f'#!{venv}/bin/python\n'+'''import os, pathlib, sys, sysconfig
+args = sys.argv[1:]
+with open(os.environ['FAKE_PIP_LOG'], 'a') as f: f.write(' '.join(args) + '\\n')
+if args[:2] == ['config', 'list']: sys.exit(0)
+if args == ['--version']: sys.exit(print('pip 99.0 (fake)') or 0)
+spec = args[-1]; name = spec.split('>=')[0]
+if os.environ['FAKE_PIP'] == 'offline':
+    sys.exit(print("WARNING: Retrying after connection broken by 'NewConnectionError(Failed to establish a new "
+                   "connection: [Errno -3] Temporary failure in name resolution)'", file=sys.stderr) or 1)
+if name in os.environ['FAKE_PIP'].split(','):
+    sys.exit(print('ERROR: Could not find a version that satisfies the requirement %s (from versions: none)\\n'
+                   'ERROR: No matching distribution found for %s' % (spec, spec), file=sys.stderr) or 1)
+site = pathlib.Path(sysconfig.get_paths()['purelib']); d = site / (name + '-99.0.dist-info'); d.mkdir()
+(d / 'METADATA').write_text('Metadata-Version: 2.1\\nName: %s\\nVersion: 99.0\\n' % name)
+if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WEASY'])
+''');(venv/'bin'/'pip').chmod(0o755)
+            return home
+        pybin=self.home/'pybin';pybin.mkdir(exist_ok=True)
+        if not (pybin/'python3').exists():(pybin/'python3').symlink_to(sys.executable)   # (the script's python3 made the venvs)
+        def fill(home,mode,weasy='',**extra):
+            log=home/'pip.log';log.write_text('')
+            env=dict(os.environ,HOME=str(home),FAKE_PIP=mode,FAKE_PIP_LOG=str(log),FAKE_WEASY=weasy,
+                     PATH=f'{pybin}:{os.environ["PATH"]}')
+            env.pop('PIP_NO_INDEX',None);env.update(extra)
+            r=subprocess.run(['bash','-s'],input=agent_side.venv_command(),capture_output=True,text=True,env=env,timeout=300)
+            installs=[l.split()[-1] for l in log.read_text().splitlines() if l.startswith('install')]
+            return (*agent_side.venv_report(r),installs)
+        names=[spec.split('>=')[0] for spec,_ in AGENT_PACKAGES]
+        home=fake_home('h1')
+        lines,ok,installs=fill(home,'scipy',weasy="raise OSError(\"cannot load library 'libpango-1.0-0': error 0x7e\")")
+        self.assertTrue(ok,'one optional package failing does not fail setup')
+        self.assertEqual([i.split('>=')[0] for i in installs],names,'one pip call per missing package')
+        self.assertTrue(any('scipy did not install' in l and 'No matching distribution' in l for l in lines),lines)
+        self.assertTrue(any('libharfbuzz-subset0' in l and 'sudo apt install' in l for l in lines),'the apt line for the owner')
+        lines,ok,installs=fill(home,'')
+        self.assertEqual(installs,['scipy>=1.11'],'a rerun installs only what is missing');self.assertTrue(ok)
+        lines,ok,installs=fill(home,'')
+        self.assertEqual(installs,[],'nothing missing, nothing installed')
+        self.assertTrue(any(l.endswith('installed nothing; already there: '+', '.join(names)) for l in lines),lines)
+        home=fake_home('h2')
+        lines,ok,installs=fill(home,'offline')
+        self.assertTrue(ok);self.assertEqual(len(installs),1,'offline: the first network failure stops the rest')
+        self.assertTrue(any('no package index reachable' in l and 'when online' in l and 'pypdf' in l for l in lines),lines)
+        self.assertIn("'torch': False",agent_side.venv_command(),'torch only with --test-venv')
+        # an installed 5 meets a floor of 5.0 (it was reinstalled on every run)
+        home=fake_home('h3');venv=home/'.venvs'/'caminus-cpu';site=next(venv.glob('lib/python*/site-packages'))
+        (site/'lxml-5.dist-info').mkdir();(site/'lxml-5.dist-info'/'METADATA').write_text('Metadata-Version: 2.1\nName: lxml\nVersion: 5\n')
+        lines,ok,installs=fill(home,'')
+        self.assertNotIn('lxml>=5.0',installs);self.assertEqual(len(installs),len(names)-1)
+        # every package failing: no line says the rest are fine
+        lines,ok,installs=fill(fake_home('h4'),','.join(names))
+        self.assertEqual(len(installs),len(names));self.assertFalse(any('the rest are fine' in l for l in lines),lines)
+        # python3 -m venv without python3-venv leaves bin/python and no pip (a --without-pip venv is the same state):
+        # it is not taken as made. While the venv cannot be given a pip, setup fails and says what to install, every
+        # run; once it can, the venv is repaired in place
+        home=self.home/'h5';venv=home/'.venvs'/'caminus-cpu'
+        subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True)
+        (venv/'pyvenv.cfg').rename(home/'cfg');(venv/'pyvenv.cfg').mkdir()   # (what stops venv from finishing here)
+        for _ in range(2):
+            lines,ok,installs=fill(home,'')
+            self.assertFalse(ok);self.assertEqual(installs,[])
+            self.assertTrue(any('without a working pip' in l and 'sudo apt install python3-venv' in l for l in lines),lines)
+        (venv/'pyvenv.cfg').rmdir()
+        lines,ok,installs=fill(home,'',PIP_NO_INDEX='1')     # (a real pip now: no index, so no network)
+        self.assertTrue(ok,lines);self.assertTrue(os.access(venv/'bin'/'pip',os.X_OK))
+        self.assertTrue(any('repaired (it had no working pip)' in l for l in lines),lines)
+        self.assertTrue(any('pip is set to --no-index' in l for l in lines),lines)
 
     def test_github_link_env_redaction_and_handoff_fields(self):
         from caminus.ember.resident import github
@@ -909,6 +1338,172 @@ class Resident(unittest.TestCase):
         self.assertEqual(prices.get('good'),(0.1,0.4,0.1),'a bad row is skipped, never the whole table')
         self.assertIsNone(prices.get('nullprice'))
 
+    def test_sandbox_two_calls_share_the_goals_box_and_it_goes_with_the_goal(self):
+        from caminus.ember.resident import sandbox
+        if (why:=sandbox.usable()):self.skipTest(why)
+        (self.home/'work').mkdir();(self.home/'work'/'main.c').write_text('int main(){return 0;}\n')
+        self.replies(call('sandbox',dict(command='cp /work/main.c . && echo built > artifact && ls',folder='work',yield_ms=10000)),
+                     call('sandbox',dict(command='cat artifact main.c',yield_ms=10000)),
+                     call('finish',dict(summary='Built in the box.')))
+        out=self.cmd('once',['--goal','Build it in the sandbox.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            results=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='sandbox']
+        finally:store.close()
+        self.assertEqual(len(results),2,results)
+        self.assertIn('built',results[1]['output'],'the second call sees what the first left in /box')
+        self.assertIn('int main',results[1]['output'])
+        self.assertFalse((self.home/'boxes').exists() and any((self.home/'boxes').iterdir()),'the box ended with the goal')
+
+    def test_sandbox_connections_after_the_last_poll_reach_the_human_when_the_goal_ends(self):
+        from caminus.ember.resident import sandbox
+        if (why:=sandbox.usable()):self.skipTest(why)
+        self.replies(call('sandbox',dict(command='sleep 1; curl -sS -m 5 https://not-listed.invalid/; sleep 30',
+                                         hosts=['example.com'],yield_ms=0)),
+                     call('wait',dict(until='time',target='4')),
+                     call('finish',dict(summary='Left it running.')))
+        out=self.cmd('once',['--goal','Try a host in the sandbox.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            ev=[e['data'] for e in store.events(limit=500) if e['kind']=='sandbox_connections']
+        finally:store.close()
+        self.assertEqual([c['target'] for e in ev for c in e['connections']],['not-listed.invalid:443'],ev)
+
+    def test_browser_keeps_its_page_across_calls_and_ends_with_the_goal(self):
+        chrome_skip(self)
+        from caminus.ember.resident.terminal import read_state
+        self.replies(call('browser',dict(action='open',url=f'http://{site()}/')),
+                     call('browser',dict(action='type',ref='e2',text='Ada')),
+                     call('browser',dict(action='click',ref='e5')),
+                     call('browser',dict(action='screenshot')),
+                     call('finish',dict(summary='Sent the form.')))
+        out=self.cmd('once',['--goal','Send the form on the page.'],timeout=120)
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            ev=[e['data'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='browser']
+        finally:store.close()
+        self.assertEqual(len(ev),4,ev)
+        opened,typed,clicked,shot=(e['result'] for e in ev)
+        self.assertIn('textbox "Name" [e2]',opened['snapshot']);self.assertIn('button "Send" [e5]',opened['snapshot'])
+        self.assertIn('= "Ada"',typed['snapshot'],'the second call types into the page the first opened')
+        self.assertEqual(clicked['title'],'Done');self.assertIn('who=Ada',clicked['url'])
+        self.assertEqual(shot['screenshot'],str(self.home/'outputs'/out['id']/'screenshots'/'shot-1.png'),shot)
+        self.assertIn('read',shot['note'])
+        self.assertTrue(Path(shot['screenshot']).is_file(),'the screenshot outlives the goal and its box')
+        self.assertEqual({o['session'] for o in (opened,typed,clicked,shot)},{opened['session']},'one browser for the goal')
+        # every connection goes to the panel's card on the event; the model gets a count
+        self.assertNotIn('_panel',opened);self.assertEqual(set(opened['network']),{'allowed'})
+        self.assertEqual({(c['target'],c['verdict']) for c in ev[0]['panel']['connections']},{(site(),'allowed (named)')})
+        self.assertEqual(len(ev[0]['panel']['connections']),opened['network']['allowed'])
+        self.assertFalse((self.home/'boxes').exists() and any((self.home/'boxes').iterdir()),'the box ended with the goal')
+        self.assertEqual(read_state(self.home/'jobs'/opened['session'])['phase'],'finished','the browser closed with it')
+
+    def test_a_refused_browser_call_skips_the_turns_later_page_changes(self):
+        # a password refused, and the click on Log in in the same turn sent an empty login (a Haiku smoke test)
+        chrome_skip(self)
+        two=dict(role='assistant',content='',tool_calls=[
+            dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name='browser',arguments=json.dumps(dict(action='type',ref='e4',text='hunter2')))),
+            dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name='browser',arguments=json.dumps(dict(action='click',ref='e5')))),
+            dict(id='call-'+uuid.uuid4().hex,type='function',function=dict(name='browser',arguments=json.dumps(dict(action='snapshot'))))])
+        self.replies(call('browser',dict(action='open',url=f'http://{site()}/')),two,
+                     call('browser',dict(action='click',ref='e5')),
+                     call('finish',dict(summary='Stopped at the login.')))
+        out=self.cmd('once',['--goal','Log in on the page.'],timeout=120)
+        self.assertEqual(out['state'],'completed')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='browser']
+        opened,typed,clicked,looked,again=results
+        self.assertIn('password field',typed['error']);self.assertIn('curl',typed['error'])
+        self.assertTrue(clicked['skipped'].startswith('an earlier browser call this turn was refused'),clicked)
+        self.assertNotIn('error',clicked,'a skipped call is not a failure of its own')
+        self.assertEqual(looked['title'],'Fixture','a look still runs; the form was not sent')
+        self.assertEqual(again['title'],'Done','the next turn acts again')
+
+    def test_browser_looks_before_define_done_and_acts_after(self):
+        chrome_skip(self)
+        self.gates_on()
+        self.replies(call('browser',dict(action='open',url=f'http://{site()}/')),
+                     call('browser',dict(action='click',ref='e1')),               # refused: no done check yet
+                     call('define_done',dict(check='the About page is open')),
+                     call('browser',dict(action='click',ref='e1')),
+                     call('verify',dict(evidence='the snapshot shows the About heading')),
+                     call('finish',dict(summary='Opened About.')))
+        goal=self.cmd('once',['--goal','Open the About page.'],timeout=120)
+        self.assertEqual(goal['state'],'completed')
+        results=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='browser']
+        self.assertNotIn('error',results[0],'opening a page is looking')
+        self.assertIn('define_done',results[1]['error'],'a click waits for the done check')
+        self.assertEqual(results[2]['title'],'About')
+
+    def test_browser_open_names_localhost_and_addresses_but_not_a_dns_name(self):
+        # a page could steer the agent to a name that resolves to the LAN: such a name needs allow
+        from caminus.ember.resident.browser import _names_itself
+        for host in ('localhost','app.localhost','127.0.0.1','[::1]','192.168.1.5','169.254.1.1'):
+            self.assertTrue(_names_itself(host),host)
+        for host in ('example.com','router.lan','8.8.8.8'):
+            self.assertFalse(_names_itself(host),host)
+
+    def test_browser_is_not_offered_without_a_chrome_that_runs_in_a_box(self):
+        from caminus.ember.resident import browser,prompt
+        saved=browser._found;self.addCleanup(setattr,browser,'_found',saved)
+        browser._found=(None,'no Chrome or Chromium found outside a snap')
+        rt=Runtime(self.home)
+        try:
+            self.assertNotIn('browser',[t['function']['name'] for t in rt.tools])
+            self.assertNotIn('use browser',prompt.render(self.home))
+            with self.assertRaises(ValueError) as cm:browser.call(rt,'g',uuid.uuid4().hex,dict(action='open',url='http://x.org/'))
+            self.assertIn('no Chrome',str(cm.exception))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_terminal_takes_timeout_like_sandbox(self):
+        # a real model passed timeout to terminal three times; it was dropped as unknown, the command unbounded
+        self.replies(call('terminal',dict(command='sleep 20',timeout=1,yield_ms=5000)),
+                     call('finish',dict(summary='Timed out as asked.')))
+        out=self.cmd('once',['--goal','Run a command with a timeout.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            r=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='terminal'][0]
+        finally:store.close()
+        self.assertEqual(r.get('limit_hit'),'time',r);self.assertNotIn('ignored unknown argument',r.get('note',''))
+        desc={t['function']['name']:t['function']['description'] for t in TOOLS}
+        for name in ('terminal','sandbox'):self.assertIn('yield_ms',desc[name])
+
+    def test_sandbox_of_a_cancelled_goal_is_swept(self):
+        from caminus.ember.resident import sandbox
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.');keep=rt.store.enqueue('Paused.')
+            for g in (gid,keep):sandbox.box_dir(self.home,g).mkdir(parents=True)
+            rt.store.update(gid,state='cancelled');rt.store.update(keep,state='paused')
+            sandbox.sweep(rt)
+            self.assertFalse(sandbox.box_dir(self.home,gid).exists())
+            self.assertTrue(sandbox.box_dir(self.home,keep).exists(),'a paused goal can resume: its box stays')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_ending_a_goal_kills_a_box_whose_worker_is_gone(self):
+        # A worker killed outright (SIGKILL, a crash) leaves "running" in its state: read_state reads that job as
+        # stopped with no end on record, and its command can still run. Ending the goal must still kill it, then
+        # remove the box. (No bwrap needed: a job dir, a dead worker pid and a live command in its own session.)
+        from caminus.ember.resident import sandbox
+        from caminus.ember.resident.terminal import read_state
+        gone=subprocess.Popen(['true']);gone.wait()
+        cmd=subprocess.Popen(['sleep','60'],start_new_session=True)
+        try:
+            d=sandbox.box_dir(self.home,'gk');d.mkdir(parents=True)
+            job=self.home/'jobs'/uuid.uuid4().hex;job.mkdir(parents=True)
+            (job/'request.json').write_text(json.dumps(dict(command='sleep 60',cwd=str(d),box=dict(
+                goal='gk',box=str(d),folder='',hosts=[],limits=dict(time_s=600)))))
+            (job/'state.json').write_text(json.dumps(dict(phase='running',worker=gone.pid,pid=cmd.pid,
+                                                          started=time.time(),cwd=str(d))))
+            self.assertEqual(read_state(job)['phase'],'stopped')
+            self.assertTrue(sandbox.end(self.home,'gk'));self.assertFalse(d.exists())
+            self.assertEqual(cmd.wait(timeout=10),-signal.SIGKILL,'the command of a box whose worker is gone was killed')
+        finally:
+            if cmd.poll() is None:cmd.kill();cmd.wait()
+
     def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
         from caminus.ember.resident import advisor as adv, web, judge
         # a poll returns everything since the last poll (the preparation step read and lost the first chunk)
@@ -977,6 +1572,44 @@ class Resident(unittest.TestCase):
                 self.assertTrue(rt._advise_before_pause(gid,'no progress',{}))
             self.assertLess(time.time()-rt.progress[gid],5,'the idle clock starts over so the nudge can land')
         finally:rt.mail.close();rt.store.close()
+
+    def test_sed_n_and_other_reads_pass_the_read_only_classifier(self):
+        # a goal's first look, `sed -n '1,20p' file`, was refused before define_done and in plan mode as a change
+        from caminus.ember.resident import runtime as R
+        reads=("sed -n '1,20p' notes.txt","sed -n 5p notes.txt","sed -n -e 1p -e '$p' notes.txt","sed -n '/^b/,/^d/p' notes.txt",
+               "sed 3q notes.txt","sed -n '$=' notes.txt",'sed -n "2,3p" notes.txt',"sed -n l notes.txt","sed '/^#/d' notes.txt",
+               "sed -nE '2,+1p' notes.txt","cat notes.txt | sed -n 2p","sed -n --expression=1p -- notes.txt",
+               "awk '{print $1}' notes.txt","awk -F: '{print $1, $2}' notes.txt","awk 'NR==2' notes.txt",
+               "awk '/b/ {print $NF}' notes.txt","nl notes.txt","tac notes.txt","head -5 notes.txt | nl","rev notes.txt")
+        for cmd in reads:
+            self.assertTrue(R.read_only_command(cmd),cmd)
+        # they read and print, nothing else: run each in a folder and find it unchanged
+        d=self.home/('ro-'+uuid.uuid4().hex);d.mkdir()
+        (d/'notes.txt').write_text('a:1 x\nb:2 y\n#c:3 z\nd:4 w\ne:5 v\nf:6 u\n')
+        before=sorted((p.name,p.read_bytes()) for p in d.iterdir())
+        for cmd in reads:
+            r=subprocess.run(['bash','-c',cmd],cwd=d,capture_output=True,text=True,timeout=10)
+            self.assertEqual(r.returncode,0,cmd+': '+r.stderr);self.assertTrue(r.stdout,cmd)
+        self.assertEqual(sorted((p.name,p.read_bytes()) for p in d.iterdir()),before,'the folder is unchanged')
+        for cmd in ("sed -i 's/a/b/' f","sed -i.bak 1d f","sed --in-place 1d f","sed -ni 1p f","sed -s -i 1d f",
+                    "sed -n 'w out' f","sed -n '1w out' f","sed -n 'W out' f","sed -n '1p' f > out","sed -e 's/a/b/w x' f",
+                    "sed '1e date' f","sed e f","sed -f prog.sed f","sed -n \"$X\" f","sed -n $X f","sed -n 1p *",
+                    "sed -n 1p {-i,f}","sed -n '1p;w out' f","sed -n '1p;5p' f","sed -n 'r /etc/passwd' f",
+                    "sed --expression=1p --in-pl f","sed -n '1p' \\-i f",
+                    "awk '{system(\"rm x\")}' f","awk '{print > \"out\"}' f","awk '{print | \"sh\"}' f","awk -f prog.awk f",
+                    "awk -i inplace '{print}' f","awk '{getline; print}' f","awk -v x=1 '{print}' f",
+                    "awk \"{print \\$1}\" f","awk '{print $1}' *"):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        # the review: a glob outside quotes can expand to a file named like a flag for every program here, not only sed
+        # (a file named --pre=sh made `rg foo *` run every file through sh; -oout.txt made `sort *` write out.txt), and
+        # quotes can splice a flag the raw text hides
+        for cmd in ('rg foo *','sort *','find *','find . -name x *','xxd *','uniq *','tar -tf *','cat ./{a,b}','ls @(-i)',
+                    'sort !(x)','grep x ?','ls [-]*','ls $X','echo $HOME',"find . \"-delete\"","find . -del''ete",
+                    "rg --pr''e=sh foo .",'sort "-o" out in','ls \\*'):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        for cmd in ('find . -name "*.py"',"rg 'foo*' src",'ls "$WORKSPACE"','cat "${WORKSPACE}/a b"','ls -la ~/work',
+                    'sort -k2,2 -t, in'):
+            self.assertTrue(R.read_only_command(cmd),cmd)
 
     def test_a_handoff_with_private_text_is_never_posted(self):
         from caminus.ember.resident import github
@@ -1221,9 +1854,21 @@ class Resident(unittest.TestCase):
             (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        if k.get("backend")=="auto":raise RuntimeError("No results found.")\n        return [dict(title="t",href="https://example.org/b",body=k["backend"])]\n')
             out=web.search(rt,'rdna3 wmma')
             self.assertEqual(out['engine'],'bing');self.assertEqual(out['results'][0]['snippet'],'bing')
-            (site/'ddgs'/'__init__.py').write_text('class DDGS:\n    def text(self,q,**k):\n        return []\n')
+            self.assertEqual(out['tried'],['auto: "No results found" (empty or refused)','bing: 1 results'],
+                             'ddgs "No results found." is reported apart from an empty list')
+            imports=self.home/'ddgs-imports'
+            (site/'ddgs'/'__init__.py').write_text(f'open({str(imports)!r},"a").write("x")\nclass DDGS:\n    def text(self,q,**k):\n        return []\n')
+            rt.web_sleep=lambda s:None
             with self.assertRaises(ValueError) as c:web.search(rt,'nothing at all')
-            self.assertIn('no engine found results',str(c.exception))
+            self.assertIn('no engine found results',str(c.exception));self.assertIn('bing (again after 2.5 s): empty',str(c.exception))
+            self.assertEqual(imports.read_text(),'xx','seven engines asked: ddgs imported once to find its Python, once to search')
+            # an engine past its time is killed with its helper; the next engine gets a new one
+            imports.unlink()
+            (site/'ddgs'/'__init__.py').write_text(f'open({str(imports)!r},"a").write("x")\nimport time\nclass DDGS:\n    def text(self,q,**k):\n        if k["backend"]=="auto":time.sleep(60)\n        return [dict(title="t",href="https://example.org/b",body=k["backend"])]\n')
+            with unittest.mock.patch.object(web,'BACKEND_TIMEOUT',1):
+                t0=time.monotonic();out=web.search(rt,'slow engine')
+            self.assertLess(time.monotonic()-t0,15);self.assertEqual(out['engine'],'bing')
+            self.assertEqual(out['tried'],['auto: error (no answer in 1 s)','bing: 1 results']);self.assertEqual(imports.read_text(),'xxx')
             class Resp:
                 status=200;headers={'Content-Type':'text/html; charset=utf-8'}
                 def __init__(self,body):self.body=body
@@ -1237,6 +1882,153 @@ class Resident(unittest.TestCase):
             self.assertEqual(f['title'],'WMMA notes');self.assertIn('Tiles',f['text']);self.assertIn('16x16 & fp16.',f['text'])
             self.assertNotIn('evil',f['text']);self.assertIn('more characters',f['more'])
             with self.assertRaises(ValueError):web.fetch(rt,'file:///etc/passwd')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_web_search_falls_through_backends_and_names_what_each_gave(self):
+        from caminus.ember.resident import web
+        rt=Runtime(self.home);calls=[]
+        try:
+            def fake(answers):
+                def run(backend,args,timeout):
+                    calls.append(backend);a=answers.get(backend,[])
+                    if isinstance(a,BaseException):raise a
+                    return [dict(title='t',url='https://example.org/'+backend,snippet=args['query'])]*a if isinstance(a,int) else a
+                return run
+            rt.search_backend=fake(dict(auto=RuntimeError('RatelimitException: https://duckduckgo.com 202 Ratelimit'),
+                                        bing=subprocess.TimeoutExpired('ddgs',25),brave=2))
+            out=web.search(rt,'three words query')
+            self.assertEqual((out['engine'],len(out['results'])),('brave',2))
+            self.assertEqual(out['tried'],['auto: error (RatelimitException: https://duckduckgo.com 202 Ratelimit)',
+                                           'bing: error (no answer in 25 s)','brave: 2 results'])
+            self.assertEqual(calls,['auto','bing','brave'],'a hung engine does not stop the next one; stop at the first answer')
+            slept=[];rt.web_sleep=slept.append
+            rt.search_backend=fake(dict(mojeek=RuntimeError('HTTP 403')))
+            with self.assertRaises(ValueError) as c:web.search(rt,'nothing anywhere')
+            msg=str(c.exception)
+            for part in ('auto: empty','bing: empty','brave: empty','mojeek: error (HTTP 403)','wikipedia: empty','rephrase'):
+                self.assertIn(part,msg)
+            self.assertNotIn('again',msg);self.assertEqual(slept,[],'an engine failed outright: no second round')
+            self.assertLess(len(msg),700,'the error stays short for the model')
+            # every engine empty or "No results found" (a rate limit looks the same): auto and bing once more, after a pause
+            class Second:
+                n=0
+                def __call__(s,backend,args,timeout):
+                    calls.append(backend)
+                    if backend=='auto':
+                        s.n+=1
+                        if s.n==2:return [dict(title='t',url='https://example.org/a',snippet='late')]*5
+                    if backend in ('auto','bing'):raise web.NoResults('DDGSException: No results found.')
+                    return []
+            calls.clear();rt.search_backend=Second()
+            out=web.search(rt,'worked seconds later')
+            self.assertEqual((out['engine'],len(out['results'])),('auto',5));self.assertEqual(slept,[2.5])
+            self.assertEqual(calls,['auto','bing','brave','mojeek','wikipedia','auto'])
+            self.assertEqual(out['tried'],['auto: "No results found" (empty or refused)','bing: "No results found" (empty or refused)',
+                                           'brave: empty','mojeek: empty','wikipedia: empty','auto (again after 2.5 s): 5 results'])
+            # still nothing on the second round: the error names it, and there is no third round
+            slept.clear();calls.clear();rt.search_backend=fake(dict(auto=web.NoResults('No results found.')))
+            with self.assertRaises(ValueError) as c:web.search(rt,'really nothing')
+            self.assertEqual(calls,['auto','bing','brave','mojeek','wikipedia','auto','bing']);self.assertEqual(slept,[2.5])
+            self.assertIn('auto (again after 2.5 s): "No results found"',str(c.exception))
+            self.assertLess(len(str(c.exception)),800)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_web_fetch_retries_busy_sites_caches_per_goal_and_reads_pdfs(self):
+        import email.utils, urllib.request
+        from caminus.ember.resident import web, model
+        base=f'http://127.0.0.1:{self.server.server_port}/web';tag=uuid.uuid4().hex
+        asked=[]
+        class Resp:
+            status=200
+            def __init__(s,body):s.body=body;s.headers={'Content-Type':'application/pdf' if body[:4]==b'%PDF' else 'text/html'}
+            def read(s,n):return s.body[:n]
+            def geturl(s):return asked[-1] if asked else 'https://example.org/scan.pdf'
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        rt=Runtime(self.home)
+        try:
+            rt.web_opener=urllib.request.build_opener(urllib.request.ProxyHandler({})).open   # (no proxy for the fixture)
+            # 429 then 200: the Retry-After wait is honoured and the page arrives
+            t0=time.monotonic();f=web.fetch(rt,f'{base}/busy/1/{tag}')
+            self.assertGreaterEqual(time.monotonic()-t0,1.0);self.assertEqual((f['tries'],f['title']),(2,'Fetched'))
+            # always 503: three tries, backing off, then a plain error
+            slept=[];rt.web_sleep=slept.append
+            with self.assertRaises(ValueError) as c:web.fetch(rt,f'{base}/down/{tag}')
+            self.assertEqual(slept,[2.0,4.0]);self.assertEqual(Endpoint.web_hits[f'/web/down/{tag}'],3)
+            self.assertIn('HTTP 503',str(c.exception));self.assertIn('after 3 tries',str(c.exception))
+            # a wait past the bound fails at once and says what the site asked for; a 404 is never retried
+            slept.clear()
+            with self.assertRaises(ValueError) as c:web.fetch(rt,f'{base}/busy/3600/{tag}')
+            self.assertIn('asks to wait 3600 s',str(c.exception));self.assertEqual(slept,[])
+            with self.assertRaises(ValueError) as c:web.fetch(rt,f'{base}/gone/{tag}')
+            self.assertEqual(Endpoint.web_hits[f'/web/gone/{tag}'],1);self.assertIn('HTTP 404',str(c.exception))
+            self.assertLess(len(str(c.exception)),300)
+            # the same URL in one goal comes from the cache (marked), the whole text kept for a larger max_chars
+            page=f'{base}/page/{tag}'
+            a=web.fetch(rt,page,max_chars=1000,goal='g1');b=web.fetch(rt,page,max_chars=5000,goal='g1')
+            self.assertNotIn('cached',a);self.assertIn('cached',b);self.assertEqual(b['text'][:200],a['text'][:200])
+            self.assertGreater(len(b['text']),len(a['text']));self.assertNotIn('more',b)
+            self.assertEqual(Endpoint.web_hits[f'/web/page/{tag}'],1)
+            self.assertNotIn('cached',web.fetch(rt,page,goal='g2'),'another goal fetches it itself')
+            self.assertNotIn('cached',web.fetch(rt,page,goal='g1',fresh=True))
+            self.assertEqual(Endpoint.web_hits[f'/web/page/{tag}'],3)
+            with unittest.mock.patch.object(web,'CACHE_S',0):
+                time.sleep(0.01);self.assertNotIn('cached',web.fetch(rt,page,goal='g1'),'an old entry is fetched again')
+            # the cache holds a bounded number of characters: a text past the whole bound is not kept
+            with unittest.mock.patch.object(web,'CACHE_CHARS',1000):
+                web.fetch(rt,page,goal='g4');self.assertNotIn('cached',web.fetch(rt,page,goal='g4'))
+                self.assertLessEqual(sum(len(v[1]['text']) for v in rt._web_cache.values()),1000)
+            # a PDF (found by its magic, sent as octet-stream) as text: the built-in reader, marked partial ...
+            with unittest.mock.patch.object(web.shutil,'which',return_value=None):
+                p=web.fetch(rt,f'{base}/pdf/{tag}')
+            self.assertEqual(p['content_type'],'application/pdf');self.assertIn('Hello PDF world\nsecond line',p['text'])
+            self.assertTrue(p['pdf'].startswith('partial'),p['pdf'])
+            # ... and pdftotext where it is installed
+            if web.shutil.which('pdftotext'):
+                p=web.fetch(rt,f'{base}/pdf/{tag}',fresh=True)
+                self.assertEqual(p['pdf'],'pdftotext');self.assertIn('Hello PDF world',p['text'])
+            # the built-in reader says what it could not read, and a PDF without readable text is an error, not ''
+            text,how=web._pdf_builtin(pdf(b'kept',b'\\0A\\0B'))
+            self.assertIn('kept',text);self.assertIn('1 runs in font encodings it cannot map',how)
+            font=b'5 0 obj\n<< /Length1 9 /Length 22 >>\nstream\nBT (FONTJUNK) Tj ET\nendstream\nendobj\n'
+            self.assertNotIn('FONTJUNK',web._pdf_builtin(pdf(b'kept')+font)[0],'an embedded font program is not page text')
+            # "stream" keywords with no endstream after them, or one only at the very end, are read in one pass: a
+            # search to the end of the file from each one took 25.7 s on 880 KB
+            for tail in (b'',b'endstream\n'):
+                t0=time.monotonic();text,how=web._pdf_builtin(b'%PDF-1.4\n'+b'<<>>stream\n'*100_000+tail)
+                self.assertLess(time.monotonic()-t0,2.0,'1.1 MB of stream keywords');self.assertNotIn('limit',how)
+            # past its time the reader returns what it read so far and says where it stopped (a clock that moves a
+            # second per look: five streams fit in its 5 s)
+            clock=iter(range(1000))
+            with unittest.mock.patch.object(web,'time',type('Clock',(),dict(monotonic=staticmethod(lambda:next(clock))))):
+                text,how=web._pdf_builtin(b''.join(pdf(b'part%d' % i) for i in range(10)))
+            self.assertIn('part0',text);self.assertIn('part4',text);self.assertNotIn('part5',text)
+            self.assertIn('stopped at its 5 s limit',how)
+            with unittest.mock.patch.object(web.shutil,'which',return_value=sys.executable):   # (a "pdftotext" that fails)
+                text,how=web.pdf_text(pdf(b'kept'))
+            self.assertIn('kept',text);self.assertIn('pdftotext failed: exit',how)
+            with unittest.mock.patch.object(web.shutil,'which',return_value=None):
+                rt.web_opener=lambda req,timeout:Resp(pdf(b'\\0A'))
+                with self.assertRaises(ValueError) as c:web.fetch(rt,'https://example.org/scan.pdf')
+            self.assertIn('no text that could be read',str(c.exception))
+            # arXiv: the abstract page by default (with a pointer), the paper's PDF when asked for it
+            self.assertEqual(web.paper_url('https://arxiv.org/abs/2401.01234'),'https://arxiv.org/pdf/2401.01234')
+            self.assertEqual(web.paper_url('http://www.arxiv.org/abs/hep-th/9901001v2'),'https://arxiv.org/pdf/hep-th/9901001v2')
+            self.assertEqual(web.paper_url('https://arxiv.org/abs/2401.01234v3?context=cs'),'https://arxiv.org/pdf/2401.01234v3')
+            self.assertIsNone(web.paper_url('https://example.org/abs/2401.01234'))
+            def opener(req,timeout):
+                asked.append(req.full_url)
+                return Resp(pdf(b'The paper') if '/pdf/' in req.full_url else b'<html><title>Abstract</title><p>abs</p></html>')
+            rt.web_opener=opener
+            f=web.fetch(rt,'https://arxiv.org/abs/2401.01234v2',goal='g3')
+            self.assertEqual(f['title'],'Abstract');self.assertIn('paper=true',f['paper'])
+            f=web.fetch(rt,'https://arxiv.org/abs/2401.01234v2',goal='g3',paper=True)
+            self.assertEqual(asked,['https://arxiv.org/abs/2401.01234v2','https://arxiv.org/pdf/2401.01234v2'])
+            self.assertIn('The paper',f['text']);self.assertIn('https://arxiv.org/pdf/2401.01234v2',f['paper'])
+            # Retry-After as an HTTP date (the model transport reads it the same way)
+            later=email.utils.formatdate(time.time()+60,usegmt=True)
+            self.assertTrue(50<model.retry_after({'retry-after':later})<=61)
+            self.assertEqual((model.retry_after({'retry-after':'7'}),model.retry_after({})),(7.0,None))
         finally:rt.mail.close();rt.store.close()
 
     MCP_SERVER = r"""
@@ -1635,7 +2427,8 @@ for line in sys.stdin:
         cfg=json.loads((self.home.parent/paid/'config.json').read_text())
         cfg.update(model='claude-haiku-5-5',relay=True,prices={'in':1},context=1000000,api='anthropic',thinking='adaptive',
                    effort='medium',provider='anthropic',providers={'anthropic':{'kind':'anthropic'}},
-                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5')
+                   fallback={'model':'claude-haiku-5-5'},advisor={'model':'claude-opus-5-5'},judge_model='claude-haiku-5-5',
+                   eyes={'provider':'anthropic','model':'claude-haiku-5-5'})
         (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
         new='local-'+uuid.uuid4().hex[:8]
         home=self.home.parent/new
@@ -1645,8 +2438,8 @@ for line in sys.stdin:
         self.assertEqual(json.loads(made.stdout)['model'],'swift-1.5')
         got=json.loads((home/'config.json').read_text())
         self.assertEqual((got['model'],got['endpoint']),('swift-1.5',url))
-        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model'):
-            self.assertNotIn(k,got,f'{k} belonged to the paid brain')
+        for k in ('relay','prices','context','api','thinking','effort','provider','fallback','advisor','judge_model','eyes'):
+            self.assertNotIn(k,got,f'{k} belonged to the paid brain')   # (eyes bill too: the owner turns them on again)
         self.assertIn('providers',got,'/model can still switch back to a paid brain')
 
     CODER_IDS=['k3-coder','k3-coder-xhigh','k3-coder-low','k3-coder-nothink']   # what the Coder's server lists
@@ -1731,6 +2524,132 @@ for line in sys.stdin:
         self.assertEqual(made.returncode,0,made.stdout+made.stderr)
         got=json.loads((self.home.parent/down/'config.json').read_text())
         self.assertEqual((got['model'],got.get('model_variants')),('coder',None))
+
+    def test_a_local_session_without_a_window_reports_its_servers_n_ctx(self):
+        # the owner's footer read "31K/0": a session on the local Coder (create --model drops the paid sibling's window,
+        # init without --context stores none) had status context null while the server's /props said n_ctx 1048574
+        self.serve_ids(self.CODER_IDS)
+        Endpoint.props[self.key].update(n_ctx=1048574,default_generation_settings=dict(n_ctx=1048574))
+        self.assertIsNone(json.loads((self.home/'config.json').read_text()).get('context'),'init without --context')
+        self.assertEqual(self.cmd('status')['context'],1048574)
+        # the switcher's path: a session made from a paid sibling (a 1M window of its own) with a local brain
+        paid='paid-'+uuid.uuid4().hex[:8]
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['create',paid,'--from',self.home.name,'--home',str(self.home.parent/paid),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        cfg=json.loads((self.home.parent/paid/'config.json').read_text())
+        cfg.update(model='deepseek-v4',relay=True,context=1048576,provider='deepinfra')
+        (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        new='local-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        made=subprocess.run(base+['create',new,'--from',paid,'--model','coder','--endpoint',url,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        self.assertNotIn('context',json.loads((home/'config.json').read_text()))
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],1048574,'the server\'s window, not the paid one\'s')
+        self.assertEqual(self.cmd('status',['--home',str(self.home.parent/paid)])['context'],1048576,'a stored window is kept')
+        # not stored: status reports a server restarted with another window as it is now (a daemon reads it again at
+        # its next start)
+        Endpoint.props[self.key].update(n_ctx=262144)
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],262144)
+        self.assertNotIn('context',json.loads((home/'config.json').read_text()))
+        # the runtime measures compaction against the same window: a turn records it in context.json, never 0 or None
+        self.replies(call('finish',dict(summary='ok')))
+        self.assertEqual(self.cmd('once',['--goal','Say ok.'])['state'],'completed')
+        note=json.loads((self.home/'context.json').read_text())
+        self.assertEqual(note['size'],262144);self.assertGreater(note['tokens'],0)
+        # llama-server keeps n_ctx under default_generation_settings only (a provider_kind local brain asks any engine)
+        conf=json.loads((self.home/'config.json').read_text());conf['provider_kind']='local'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(default_generation_settings=dict(n_ctx=32768))
+        self.assertEqual(self.cmd('status')['context'],32768)
+        # a Caminus server added as a plain openai provider: its /props names the engine, so it counts
+        conf['provider_kind']='openai';(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=1048574)
+        self.assertEqual(self.cmd('status')['context'],1048574)
+        # nobody can say (a server that is down; a loopback relay whose /props names no engine): null, never 0
+        Endpoint.props[self.key]=dict(n_ctx=65536)
+        self.assertIsNone(self.cmd('status')['context'])
+        conf.pop('provider_kind');(self.home/'config.json').write_text(json.dumps(conf))
+        self.assertIsNone(self.cmd('status')['context'])
+        conf.update(relay=True);(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=1048574)
+        self.assertIsNone(self.cmd('status')['context'],'a relayed (paid) brain is never asked')
+        conf.pop('relay')
+        conf['endpoint']='http://127.0.0.1:9/v1';(self.home/'config.json').write_text(json.dumps(conf))
+        self.assertIsNone(self.cmd('status')['context'])
+
+    def test_a_local_brains_window_is_its_servers_now_under_the_owners_cap(self):
+        # the owner's "13K/262K": a session on the Coder stored context 262144 (a catalog figure from the server's native
+        # mode, copied at /model) while the server ran its 1M mode; the runtime compacted against 262K
+        from caminus.ember.resident import model as model_mod
+        from caminus.ember.resident.model import Model
+        self.serve_ids(self.CODER_IDS)
+        Endpoint.props[self.key].update(n_ctx=1048574)
+        def conf(**kv):
+            c=json.loads((self.home/'config.json').read_text())
+            for k,v in kv.items():
+                if v is None:c.pop(k,None)
+                else:c[k]=v
+            (self.home/'config.json').write_text(json.dumps(c));return c
+        def runtime_window():
+            rt=Runtime(self.home)
+            try:return rt.model.context_size()
+            finally:rt.mail.close();rt.store.close()
+        conf(context=262144)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(1048574,1048574),
+                         'a stored figure is no limit: the server\'s window, for status and compaction alike')
+        self.replies(call('finish',dict(summary='ok')))
+        self.assertEqual(self.cmd('once',['--goal','Say ok.'])['state'],'completed')
+        self.assertEqual(json.loads((self.home/'context.json').read_text())['size'],1048574,'the turn measured against 1M')
+        # the owner's cap limits it
+        conf(context_cap=100000)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(100000,100000))
+        conf(context_cap=2000000)
+        self.assertEqual(self.cmd('status')['context'],1048574,'a cap above the server\'s window: the server\'s')
+        # a server restarted in its native mode: status at once, a running daemon after WINDOW_TTL or a failed call
+        conf(context_cap=None)
+        m=Model(json.loads((self.home/'config.json').read_text()))
+        self.assertEqual(m.context_size(),1048574)
+        Endpoint.props[self.key].update(n_ctx=262144)
+        self.assertEqual(self.cmd('status')['context'],262144)
+        self.assertEqual(m.context_size(),1048574,'kept for WINDOW_TTL')
+        m._context_at-=model_mod.WINDOW_TTL+1
+        self.assertEqual(m.context_size(),262144)
+        # a lookup that learns nothing keeps what the server said last, never the stored figure (262144 here): a /props
+        # without the engine, or a server that does not answer
+        Endpoint.props[self.key].update(n_ctx=1048574);m._context_at=0
+        self.assertEqual(m.context_size(),1048574)
+        Endpoint.props[self.key].pop('engine');m._context_at=0
+        self.assertEqual(m.context_size(),1048574)
+        def dead(req,timeout=None):raise ConnectionRefusedError('down')
+        m.opener=dead;m._context_at=0
+        self.assertEqual(m.context_size(),1048574)
+        # a server that says nothing (no Caminus engine in its /props): the stored figure
+        Endpoint.props[self.key]=dict(n_ctx=65536)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(262144,262144))
+        # a paid brain keeps its stored window whatever a loopback server says, and no cap applies to it
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=262144)
+        conf(relay=True,context=1048576,context_cap=100000)
+        self.assertEqual((self.cmd('status')['context'],runtime_window()),(1048576,1048576))
+        # init --context on a local server is the owner's cap; /model to a local entry copies no window and drops the cap
+        conf(relay=None,context=None,context_cap=None)
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        new='capped-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['init',new,'--model','k3-coder','--endpoint',url,'--context','100000','--bridge',str(self.bridge),
+                                  '--bus',str(self.home/'mail.sqlite3'),'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        self.assertEqual(json.loads((home/'config.json').read_text())['context_cap'],100000)
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],100000)
+        c=json.loads((home/'config.json').read_text())
+        c.update(providers={'coder':dict(kind='local',endpoint=url)});(home/'config.json').write_text(json.dumps(c))
+        (home/'models.json').write_text(json.dumps(dict(updated=1,providers={'coder':dict(kind='local',ok=True)},
+            models=[dict(id='k3-coder',name='k3-coder',provider='coder',context=262144,max_output=None,efforts=[],thinking='',
+                         vision=False,prices=None)])))
+        self.cmd('model',['k3-coder','--home',str(home)])
+        c=json.loads((home/'config.json').read_text())
+        self.assertNotIn('context_cap',c);self.assertNotIn('context',c,'the catalog\'s 262144 is not copied')
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],262144,'the server\'s window as it runs now')
 
     def test_a_paid_brain_through_the_relay_on_loopback_is_left_alone(self):
         # init --endpoint http://127.0.0.1:8766/v1/openai writes no provider_kind and no relay: the relay is not a
@@ -1995,6 +2914,68 @@ for line in sys.stdin:
             self.assertEqual(result['state'],'completed');self.assertIsNone(p.poll())
         status=self.cmd('status');self.assertTrue(status['daemon_alive']);self.assertEqual(len(status['goals']),2)
 
+    def test_a_daemon_waiting_for_a_message_exits_on_sigterm(self):
+        # (SIGTERM only set the daemon's stop flag, which a wait never read: one sat out its wait 340 s after a second
+        # SIGTERM, and systemd or a test had to SIGKILL it)
+        self.replies(call('wait',dict(until='message',timeout=300)))
+        p=subprocess.Popen(self.argv('run'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);self.processes.append(p)
+        self.wait(lambda:(self.home/'heartbeat.json').exists())
+        self.cmd('send',['--goal','Wait for my message.'])
+        self.wait(lambda:any(e['kind']=='assistant' for e in self.cmd('events')))
+        time.sleep(1.5)                                   # inside the wait now
+        t0=time.monotonic();p.send_signal(signal.SIGTERM)
+        try:code=p.wait(timeout=5)
+        except subprocess.TimeoutExpired:self.fail('the daemon was still waiting 5 s after SIGTERM')
+        self.assertEqual(code,0,p.stderr.read());self.assertLess(time.monotonic()-t0,5)
+        waited=[e['data']['result'] for e in self.cmd('events') if e['kind']=='tool_result' and e['data']['name']=='wait']
+        self.assertTrue(waited,'SIGTERM landed before the wait began (the test raced the daemon, not the bug)')
+        self.assertIn('stopped',waited[-1]['happened'],'the agent learns why its wait ended')
+
+    def test_a_terminal_worker_stopped_by_sigterm_reads_stopped(self):
+        t=Terminal(self.home);sid=uuid.uuid4().hex
+        out=t.call(sid,dict(command='sleep 300',yield_ms=300))
+        self.assertTrue(out['running'])
+        os.kill(out['worker'],signal.SIGTERM)
+        self.wait(lambda:t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['phase']=='stopped',10)
+        state=json.loads((self.home/'jobs'/sid/'state.json').read_text())
+        self.assertEqual(state['phase'],'stopped','the worker records its own end')
+        self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'])
+        self.wait(lambda:not os.path.exists(f'/proc/{out["pid"]}') or
+                  open(f'/proc/{out["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)   # its command ended too
+        # a worker that could not write (SIGKILL) leaves "running" behind: every reader says stopped, not running
+        # (its command ignores the pty's hang-up, so it outlives the worker: the emergency stop must still reach it)
+        sid2=uuid.uuid4().hex
+        out2=t.call(sid2,dict(command="trap '' HUP; echo TRAPPED; sleep 300",yield_ms=300))
+        # the worker dies only once the shell has set the trap: a login profile can take longer than the first poll,
+        # and a hang-up before the trap ends the command with its worker (the race CI hit)
+        self.wait(lambda:'TRAPPED' in t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=200,offset=0))['output'],20)
+        os.kill(out2['worker'],signal.SIGKILL)
+        try:
+            self.wait(lambda:json.loads((self.home/'jobs'/sid2/'state.json').read_text())['phase']=='running' and
+                      t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['phase']=='stopped',10)
+            self.assertFalse(t.call(uuid.uuid4().hex,dict(session=sid2,yield_ms=0))['running'])
+            from caminus.ember.resident import housemate
+            rt=Runtime(self.home)
+            try:
+                gid=rt.store.enqueue('Wait for the session.')
+                self.assertIn('ended',housemate.wait(rt,gid,'session',sid2,timeout=3)['happened'])
+                self.assertNotIn(sid2,[s['session'] for s in housemate.machine(rt)['my_running_sessions']])
+            finally:rt.mail.close();rt.store.close()
+            os.killpg(out2['pid'],0)                      # the command is still alive here
+            self.assertEqual(t.signal_running(signal.SIGTERM),[sid2],'the emergency stop still reaches its command')
+            self.wait(lambda:not os.path.exists(f'/proc/{out2["pid"]}') or
+                      open(f'/proc/{out2["pid"]}/stat').read().rsplit(')',1)[1].split()[0] in 'ZX',10)
+            self.assertEqual(t.signal_running(signal.SIGTERM),[],'a stopped job its worker ended is not signalled again')
+        finally:
+            try:os.killpg(out2['pid'],signal.SIGKILL)
+            except ProcessLookupError:pass
+
+    def test_a_gate_ends_when_the_runtime_stops(self):
+        from caminus.ember.resident.judge import run_gate
+        flag=[];threading.Timer(.5,lambda:flag.append(1)).start()
+        t0=time.monotonic();ok,out=run_gate(self.home,'sleep 60',stop=lambda:bool(flag))
+        self.assertFalse(ok);self.assertIn('runtime is stopping',out);self.assertLess(time.monotonic()-t0,5)
+
     def test_recovery_reuses_command_after_conversation_crash(self):
         self.replies(call('terminal',dict(command='printf once >> counter; sleep .8; printf done',yield_ms=1000)),call('finish',dict(summary='Recovered.')))
         p=subprocess.Popen(self.argv('once',['--goal','Recover this.']),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);self.processes.append(p)
@@ -2018,6 +2999,36 @@ for line in sys.stdin:
         self.assertEqual(init('di','--model','m','--endpoint','https://api.deepinfra.com/v1/openai','--context','8192')['endpoint'],'https://api.deepinfra.com/v1/openai')
         cfg=init('bare','--model','m','--endpoint','http://127.0.0.1:9')   # (init asks a local server: none listens on 9)
         self.assertEqual(cfg['endpoint'],'http://127.0.0.1:9/v1');self.assertNotIn('api',cfg)
+
+    def test_init_and_create_take_vision_from_the_catalog(self):
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        def init(name,*extra):
+            argv=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','init',name,'--home',str(self.home/name),'--json',
+                  '--bus',str(self.home/'mail.sqlite3'),'--bridge',str(self.bridge),'--endpoint',url,*extra]
+            p=subprocess.run(argv,capture_output=True,text=True,timeout=15);self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+            return json.loads((self.home/name/'config.json').read_text())
+        # the owner's Anthropic relay: the Messages API list's image_input
+        Endpoint.models[self.key]=dict(data=[dict(id='claude-sees',capabilities=dict(image_input=dict(supported=True))),
+                                             dict(id='claude-blind',capabilities=dict(image_input=dict(supported=False)))])
+        anthropic=('--api','anthropic','--context','200000')
+        self.assertTrue(init('a','--model','claude-sees',*anthropic)['vision'])
+        self.assertNotIn('vision',init('b','--model','claude-blind',*anthropic))
+        # an OpenAI-compatible relay: the list's shape names the provider (DeepInfra's tags here)
+        Endpoint.models[self.key]=dict(data=[dict(id='Qwen/VL',metadata=dict(tags=['chat','vision','vlm'])),
+                                             dict(id='GLM',metadata=dict(tags=['chat']))])
+        self.assertTrue(init('c','--model','Qwen/VL')['vision'])
+        self.assertNotIn('vision',init('d','--model','GLM'))
+        self.assertNotIn('vision',init('e','--model','gone'),'a model the list does not name: unknown is no')
+        # a new session on a local model: the sibling's catalog says whether it sees (nothing is asked)
+        (self.home/'models.json').write_text(json.dumps(dict(models=[dict(id='qwen-vl',provider='local',vision=True),
+                                                                     dict(id='swift-1.5',provider='local',vision=False)])))
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','create']
+        for model,sees in (('qwen-vl',True),('swift-1.5',False)):
+            new='s-'+uuid.uuid4().hex[:8]
+            made=subprocess.run(base+[new,'--from',self.home.name,'--model',model,'--endpoint','http://127.0.0.1:9/v1',
+                                      '--home',str(self.home.parent/new),'--json'],capture_output=True,text=True,timeout=15)
+            self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+            self.assertEqual(json.loads((self.home.parent/new/'config.json').read_text()).get('vision',False),sees,model)
 
     # ---- free time ------------------------------------------------------------------------------------------
 
@@ -2315,8 +3326,14 @@ for line in sys.stdin:
                                max_tokens=202752,pricing=dict(input_tokens=0.6000000001,output_tokens=2.2,cache_read_tokens=0.11))),
             dict(id='BAAI/bge-m3',object='model',created=1,owned_by='deepinfra',root='BAAI/bge-m3',
                  metadata=dict(description='x',tags=['embed'],pricing=dict(input_tokens=0.01)))]),
+        # Meta's list: ids only (its Model object has id, object, created, owned_by)
+        'http://relay/meta/v1/models': dict(object='list',data=[dict(id=i,object='model',created=1,owned_by='meta') for i in
+                                                                ('muse-ember-1.0','muse-spark-1.3','muse-spark-1.3-contributor','muse-image-1.0')]),
         'http://127.0.0.1:8092/v1/models': dict(data=[dict(id='k3-coder')]),
         'http://127.0.0.1:8092/props': dict(n_ctx=1048576),
+        # a llama-server with a vision projector says so in /props (caminus serve says false)
+        'http://127.0.0.1:8093/v1/models': dict(data=[dict(id='qwen-vl')]),
+        'http://127.0.0.1:8093/props': dict(n_ctx=32768,modalities=dict(vision=True,audio=False)),
     }
 
     def catalog_opener(self, seen=None):
@@ -2350,6 +3367,9 @@ for line in sys.stdin:
         self.assertEqual(glm['prices'],dict(input=0.6,output=2.2,cache_read=0.11))
         self.assertNotIn('BAAI/bge-m3',by,'an embedding model is not a brain')
         self.assertEqual(by['k3-coder']['context'],1048576,'the local window comes from /props')
+        self.assertFalse(by['k3-coder']['vision'],'no modalities.vision: no vision')
+        vl=catalog.discover('vl',dict(kind='local',endpoint='http://127.0.0.1:8093/v1'),self.catalog_opener())
+        self.assertEqual((vl[0]['id'],vl[0]['vision']),('qwen-vl',True),'a local server that reports vision gets images')
         self.assertFalse(cat['providers']['gone']['ok']);self.assertTrue(cat['providers']['deepinfra']['ok'])
         self.assertFalse(any('x-api-key' in h or 'Authorization' in h for _,h in seen),'through the relay no key is sent')
         # a provider that goes away keeps its last entries, marked stale
@@ -2372,6 +3392,7 @@ for line in sys.stdin:
         self.assertEqual((cur['model'],cur['provider'],cur['context'],cur['max_tokens'],cur.get('effort'),cur['relay']),
                          ('zai-org/GLM-5.2','deepinfra',202752,16384,None,True))
         self.assertNotIn('api',json.loads((self.home/'config.json').read_text()),'OpenAI-compatible is the default transport')
+        self.assertNotIn('vision',cur,'GLM 5.2 lists no vision tag')
         # one scale on every brain: xhigh runs as GLM's nearest, high
         out=self.cmd('effort',['xhigh'])
         self.assertEqual((out['effort'],out['runs_as']),('xhigh','high'));self.assertIn('xhigh as high',out['summary'])
@@ -2379,15 +3400,18 @@ for line in sys.stdin:
         # the level stays across /model when the new brain has effort control; Opus always thinks, so none runs as low
         out=self.cmd('model',['claude-opus-5-5'])['current']
         self.assertEqual((out['api'],out['thinking'],out['effort'],out['context']),('anthropic','adaptive','none',1000000))
+        self.assertTrue(out['vision'],"the catalog's image_input: read sends this brain images")
         self.assertEqual(self.cmd('effort',[])['runs_as'],'low')
         self.assertEqual(self.cmd('effort',['xhigh'])['effort'],'xhigh')
         # a running resident takes the new brain at its next turn, and meters a catalog model by its prices
         rt=Runtime(self.home)
         try:
+            self.assertTrue(rt.model.config['vision'])
             self.cmd('model',['zai-org/GLM-5.2'])
             gid=rt.store.enqueue('Switch.')
             rt._follow_config()
             self.assertEqual(rt.model.config['model'],'zai-org/GLM-5.2');self.assertTrue(rt.model.remote,'relayed: billed and bounded')
+            self.assertNotIn('vision',rt.model.config,'leaving a brain that sees takes images away at the next turn')
             self.assertIn('model_switched',[e['kind'] for e in rt.store.events()])
             self.assertAlmostEqual(price('zai-org/GLM-5.2',dict(prompt_tokens=1_000_000,completion_tokens=1_000_000)),2.8)
         finally:rt.mail.close();rt.store.close()
@@ -2468,11 +3492,18 @@ for line in sys.stdin:
         (fake/'homes'/'odd').mkdir();(fake/'homes'/'odd'/'heartbeat.json').write_text('[1,2]')
         (fake/'homes'/'older').mkdir();(fake/'homes'/'older'/'heartbeat.json').write_text(json.dumps(dict(pid=os.getpid(),runtime='aaaa.pyz')))
         (fake/'homes'/'older'/'update.json').write_text(json.dumps(dict(program='/x/older.pyz',now=False)))
+        venv_calls=[]
         def transport(argv,input=None,**kw):
+            if 'CAMINUS_VENV' in input:          # the venv top-up (its own test runs the script against a fake pip)
+                venv_calls.append(input)
+                return subprocess.CompletedProcess(argv,0,json.dumps(dict(made=False,present=['ddgs'],installed=[],failed={},
+                                                   skipped=[],offline=None,torch=None,weasyprint=None))+'\n','')
             return subprocess.run(['bash','-s'],input=input,capture_output=True,text=True,env=dict(os.environ,HOME=str(fake)))
         import contextlib,io as _io
-        out=_io.StringIO()
-        with contextlib.redirect_stdout(out):agent_host.main(['install'],transport)
+        out=_io.StringIO();err=_io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):agent_host.main(['install'],transport)
+        self.assertEqual(len(venv_calls),1,'an upgrade tops up the agent venv too');self.assertIn("'torch': False",venv_calls[0])
+        self.assertIn('already there: ddgs',err.getvalue(),'its report goes to stderr: stdout stays the JSON')
         res=json.loads(out.getvalue().strip().splitlines()[-1])
         self.assertEqual(res['updates_queued'],['old','older'],'live daemons on another runtime; a pending older update is replaced')
         self.assertEqual(res['updates_skipped'],[])
@@ -2481,6 +3512,14 @@ for line in sys.stdin:
         u=json.loads((fake/'homes'/'old'/'update.json').read_text())
         self.assertTrue(u['program'].endswith(res['sha256']+'.pyz'));self.assertFalse(u['now'],'between goals, never mid-goal')
         self.assertFalse((fake/'homes'/'gone'/'update.json').exists())
+        # a top-up past its hour (a very slow link) is a line on stderr: the install's JSON and exit code stay
+        def slow(argv,input=None,**kw):
+            if 'CAMINUS_VENV' in input:raise subprocess.TimeoutExpired(argv,kw.get('timeout'))
+            return transport(argv,input,**kw)
+        out=_io.StringIO();err=_io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):code=agent_host.main(['install'],slow)
+        self.assertEqual(code,0);self.assertIn('installed',json.loads(out.getvalue().strip().splitlines()[-1]))
+        self.assertIn('no answer in 3600 s',err.getvalue())
 
     def test_update_installs_a_new_runtime_between_goals_and_confirms_it(self):
         cfgdir=self.home/'xdg';units=cfgdir/'systemd/user';units.mkdir(parents=True)
@@ -3448,6 +4487,37 @@ for line in sys.stdin:
                 self.assertLessEqual(spent,full*1.01,provider)
             finally:stop()
 
+    def test_a_cut_stream_counts_an_image_by_its_tokens_not_its_base64(self):
+        # an eyes call carries a screenshot; a stream cut before its usage arrived was booked at request bytes / 4, so a
+        # 1 MB image came to ~350K phantom input tokens. Images now count by the provider's image rule.
+        import base64
+        from caminus.ember import relay
+        from caminus.ember.resident.model import image_tokens
+        big=base64.b64encode(png(1000,700)+b'\x00'*1_000_000).decode()     # (a 1000x700 header, a megabyte of payload)
+        anth=dict(model='claude-haiku-5-5',max_tokens=100,messages=[dict(role='user',content=[dict(type='text',text='What is it?'),
+              dict(type='image',source=dict(type='base64',media_type='image/png',data=big))])])
+        oai=dict(model='ministral-8b-latest',max_tokens=100,messages=[dict(role='user',content=[dict(type='text',text='What is it?'),
+             dict(type='image_url',image_url=dict(url='data:image/png;base64,'+big))])])
+        text=lambda b:len(json.dumps(b).encode().replace(big.encode(),b''))//4
+        self.assertAlmostEqual(relay.prompt_tokens(anth,'anthropic'),text(anth)+image_tokens(1000,700),delta=2)
+        self.assertAlmostEqual(relay.prompt_tokens(oai,'mistral'),text(oai)+36*25,delta=20,msg='28 px patches, no downscale')
+        self.assertLess(relay.prompt_tokens(anth,'anthropic'),5000,'not the ~350K tokens its base64 would be')
+        junk=json.loads(json.dumps(oai).replace(big,'bm90IGFuIGltYWdl'))
+        self.assertAlmostEqual(relay.prompt_tokens(junk,'mistral'),text(junk)+108*108,delta=20,
+                               msg='an image without a readable header counts as the largest read sends')
+        # through the relay: a Mistral stream cut before its usage chunk
+        pf=self.home/'mistral-prices.json';pf.write_text(json.dumps({'ministral-8b-latest':[0.15,0.15]}))
+        cut=b'data: '+json.dumps(dict(choices=[dict(delta=dict(content='a'))])).encode()+b'\n\n'
+        base,calls,ledger,log,stop=self._relay('mistral',lambda c:(200,cut,'text/event-stream'),cap=5.0,
+                                               prices=relay.OwnerPrices(str(pf),lambda m:None))
+        try:
+            self._post(base+'/v1/chat/completions',dict(oai,stream=True))
+            self.assertTrue(any('NO-USAGE' in l for l in log),log[-2:])
+            want=(relay.prompt_tokens(calls[-1]['body'],'mistral')*0.15+100*0.15)/1e6
+            self.assertAlmostEqual(ledger.spent(),want,places=6)
+            self.assertLess(ledger.spent(),len(big)/4*0.15/1e6/20,'a twentieth of what its bytes would have booked')
+        finally:stop()
+
     def test_the_mistral_relay_meters_from_the_owners_prices_and_sends_no_stream_options(self):
         from caminus.ember import relay
         pf=self.home/'mistral-prices.json';pf.write_text(json.dumps({'mistral-medium-latest':[0.4,2.0]}))
@@ -3458,7 +4528,9 @@ for line in sys.stdin:
         base,calls,ledger,log,stop=self._relay('mistral',lambda c:(200,sse,'text/event-stream'),cap=5.0,prices=prices)
         try:
             code,body=self._post(base+'/v1/chat/completions',dict(model='codestral-latest',messages=[]))
-            self.assertEqual(code,403);self.assertIn(b'--prices',body);self.assertEqual(calls,[],'an unpriced model goes nowhere')
+            self.assertEqual(code,403);self.assertEqual(calls,[],'an unpriced model goes nowhere')
+            self.assertIn(b'--prices file as \\"codestral-latest\\"',body,'the refusal names the entry')
+            self.assertNotIn(str(pf).encode(),body,'and no path of the owner\'s: the text reaches the agent')
             code,_=self._post(base+'/v1/chat/completions',dict(model='mistral-medium-latest',messages=[],stream=True))
             self.assertEqual(code,200);sent=calls[-1]
             self.assertEqual(sent['path'],'/v1/chat/completions');self.assertEqual(sent['headers']['Authorization'],'Bearer SECRET-KEY')
@@ -3482,6 +4554,278 @@ for line in sys.stdin:
         listed=dict(data=[dict(id='mistral-large-2512',aliases=['mistral-large-latest']),dict(id='other',aliases=[])])
         op=relay.OwnerPrices(str(pf),lambda m:None,fetch=lambda:listed)
         self.assertEqual(op.get('mistral-large-latest'),(0.7,2.1,0.7));self.assertIsNone(op.get('other'));self.assertIsNone(op.get('nope'))
+
+    def _fake_meta(self):
+        """A fake api.meta.ai over real HTTP: GET /v1/models lists ids only (as Meta's does); POST /v1/chat/completions
+        answers from a queue of (reply, usage): a message dict as one JSON body, or a list of deltas as SSE whose usage
+        chunk comes only when stream_options.include_usage asks for it. It refuses what Meta documents as a 400
+        (reasoning_effort none, a tool_choice other than auto). Returns (port, queue, seen, stop)."""
+        import http.server, threading
+        queue,seen=deque(),[]
+        class Meta(http.server.BaseHTTPRequestHandler):
+            def log_message(s,*a):pass
+            def send(s,status,value,ctype='application/json'):
+                raw=json.dumps(value).encode()
+                s.send_response(status);s.send_header('Content-Type',ctype);s.send_header('Content-Length',str(len(raw)))
+                s.end_headers();s.wfile.write(raw)
+            def do_GET(s):
+                seen.append(dict(method='GET',path=s.path,auth=s.headers.get('Authorization')))
+                s.send(200,dict(object='list',data=[dict(id=i,object='model',created=1,owned_by='meta') for i in
+                                                    ('muse-ember-1.0','muse-spark-1.1','muse-spark-1.3-contributor','muse-image-1.0')]))
+            def do_POST(s):
+                body=json.loads(s.rfile.read(int(s.headers['Content-Length'])))
+                seen.append(dict(method='POST',path=s.path,auth=s.headers.get('Authorization'),body=body))
+                if body.get('reasoning_effort')=='none' or body.get('tool_choice') not in (None,'auto'):
+                    return s.send(400,dict(error=dict(message='invalid request',type='invalid_request_error')))
+                reply,usage=queue.popleft()
+                if not body.get('stream'):
+                    finish='tool_calls' if reply.get('tool_calls') else 'stop'
+                    return s.send(200,dict(id='r1',object='chat.completion',model=body['model'],usage=usage,
+                                           choices=[dict(index=0,message=reply,finish_reason=finish)]))
+                s.send_response(200);s.send_header('Content-Type','text/event-stream');s.end_headers()
+                chunk=lambda c:s.wfile.write(('data: '+json.dumps(dict(id='r2',object='chat.completion.chunk',**c))+'\n\n').encode())
+                for d in reply:
+                    chunk(dict(choices=[dict(index=0,delta=d,finish_reason=None)],usage=None))
+                chunk(dict(choices=[dict(index=0,delta={},finish_reason='tool_calls' if any('tool_calls' in d for d in reply) else 'stop')],usage=None))
+                if (body.get('stream_options') or {}).get('include_usage'):
+                    chunk(dict(choices=[],usage=usage))
+                s.wfile.write(b'data: [DONE]\n\n');s.wfile.flush()
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),Meta)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        return srv.server_address[1],queue,seen,srv.shutdown
+
+    def test_muse_ember_through_the_meta_relay_chats_calls_tools_streams_and_meters(self):
+        """Muse Ember (Meta) end to end on fake keys: the transport, the meta relay and a fake Meta server over HTTP; the
+        relay's ledger and the agent's spend.json price the same usage, cached tokens and the long-prompt tier too."""
+        import http.client, http.server, threading, datetime, urllib.request
+        from caminus.ember import relay
+        from caminus.ember.resident import catalog
+        from caminus.ember.resident.model import Model, META_PRICES, price
+        port,queue,seen,stop_meta=self._fake_meta()
+        log=[]
+        ledger=relay.Ledger(self.home/'meta-ledger.json',5.0)
+        handler=relay.make_handler('meta','FAKE-META-KEY',ledger,set(),65536,log.append,META_PRICES,
+                                   lambda:http.client.HTTPConnection('127.0.0.1',port,timeout=10))
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        base='http://127.0.0.1:%d/v1' % srv.server_address[1]
+        rt=Runtime(self.home)
+        try:
+            # the catalog: Meta lists ids only; the chat models come with Meta's documented facts and prices
+            for kind in ('meta','auto'):
+                got={e['id']:e for e in catalog.discover('meta',dict(kind=kind,endpoint=base),urllib.request.urlopen)}
+                self.assertEqual(sorted(got),['muse-ember-1.0','muse-spark-1.1'],'no image model, no Contributor-mode id (%s)' % kind)
+            ember=got['muse-ember-1.0']
+            self.assertEqual((ember['name'],ember['context'],ember['max_output'],ember['vision']),
+                             ('Muse Ember (Meta)',1048576,524288,True))
+            self.assertEqual(ember['prices'],dict(input=0.10,output=0.50,cache_read=0.004))
+            self.assertIsNone(got['muse-spark-1.1']['max_output'],'Meta publishes no output cap for Spark: unknown, never guessed')
+            self.assertEqual(seen[0]['auth'],'Bearer FAKE-META-KEY','the relay adds the key; the agent sends none')
+            m=Model(dict(model='muse-ember-1.0',endpoint=base,relay=True,provider_kind='meta',context=1048576,vision=True,
+                         efforts=ember['efforts'],prices=ember['prices'],max_tokens=65536,name='t'))
+            # (the trailing system message stands for the runtime block, which changes every turn)
+            msgs=[dict(role='system',content='be brief'),dict(role='user',content='hi'),dict(role='system',content='RUNTIME: step 1')]
+            # a whole reply: chat, at Meta's default level, priced with its cached tokens
+            queue.append((dict(role='assistant',content='hello'),
+                          dict(prompt_tokens=1000,completion_tokens=50,total_tokens=1050,prompt_tokens_details=dict(cached_tokens=400),
+                               completion_tokens_details=dict(reasoning_tokens=30))))
+            self.assertEqual(m.complete(msgs)['content'],'hello')
+            sent=seen[-1]
+            self.assertEqual((sent['path'],sent['auth']),('/v1/chat/completions','Bearer FAKE-META-KEY'))
+            self.assertEqual((sent['body']['model'],sent['body']['reasoning_effort']),('muse-ember-1.0','max'))
+            self.assertNotIn('tool_choice',sent['body']);self.assertTrue(sent['body']['prompt_cache_key'].startswith('ember-'))
+            self.assertEqual([x['role'] for x in sent['body']['messages']],['system','user','user'],
+                             'no system message after the first: Meta moves them to the front, voiding the cached prefix')
+            self.assertEqual(sent['body']['messages'][-1]['content'],'[system] RUNTIME: step 1')
+            want=(600*0.10+400*0.004+50*0.50)/1e6
+            self.assertAlmostEqual(ledger.spent(),want,places=6)      # (the ledger keeps 6 decimals)
+            self.assertAlmostEqual(price('muse-ember-1.0',m.last_usage),want,places=12)
+            rt.model=m;rt._meter('g1')
+            # a streamed tool call past 200K input tokens: Meta's long-prompt rates, in the ledger and in spend.json
+            queue.append(([dict(role='assistant',content=''),
+                           dict(tool_calls=[dict(index=0,id='call_1',type='function',function=dict(name='read',arguments='{"pa'))]),
+                           dict(tool_calls=[dict(index=0,function=dict(arguments='th": "x"}'))])],
+                          dict(prompt_tokens=300_000,completion_tokens=1000,total_tokens=301_000,
+                               prompt_tokens_details=dict(cached_tokens=100_000))))
+            names=[]
+            tools=[dict(type='function',function=dict(name='read',description='read a file',
+                                                      parameters=dict(type='object',properties=dict(path=dict(type='string')))))]
+            out=m.complete(msgs,tools=tools,on_delta=lambda kind,v:names.append((kind,v)))
+            self.assertEqual(out['tool_calls'],[dict(id='call_1',type='function',function=dict(name='read',arguments='{"path": "x"}'))])
+            self.assertIn(('tool','read'),names)
+            self.assertEqual(seen[-1]['body']['stream_options'],dict(include_usage=True),'Meta reports stream usage only on request')
+            long=(200_000*0.30+100_000*0.012+1000*1.50)/1e6
+            for _ in range(100):           # (the transport stops at [DONE]; the relay books the reply just after it)
+                if ledger.spent()>want+1e-4:break
+                time.sleep(0.05)
+            self.assertAlmostEqual(ledger.spent()-want,long,places=5)
+            self.assertAlmostEqual(price('muse-ember-1.0',m.last_usage),long,places=12)
+            rt._meter('g1')
+            day=json.loads((self.home/'spend.json').read_text())['days'][datetime.date.today().isoformat()]
+            self.assertAlmostEqual(day['usd'],round(want,6)+round(long,6),places=6)
+            self.assertAlmostEqual(day['usd'],ledger.spent(),places=5,msg='the agent and the relay agree')
+            # a side call (the judge's) asks for the lowest level: minimal, never none (Meta refuses none)
+            queue.append((dict(role='assistant',content='{"verdict":"met"}'),dict(prompt_tokens=10,completion_tokens=5,total_tokens=15)))
+            m.complete(msgs,max_tokens=600)
+            self.assertEqual(seen[-1]['body']['reasoning_effort'],'minimal')
+            # the newer name of the output cap is clamped like the old one
+            queue.append((dict(role='assistant',content='ok'),dict(prompt_tokens=10,completion_tokens=5,total_tokens=15)))
+            code,_=self._post(base+'/chat/completions',dict(model='muse-ember-1.0',messages=msgs,max_completion_tokens=10**7))
+            self.assertEqual(code,200)
+            self.assertEqual(seen[-1]['body']['max_tokens'],65536);self.assertNotIn('max_completion_tokens',seen[-1]['body'])
+            # an unpriced id (Contributor mode trains on the prompts) never goes upstream
+            n=len(seen)
+            code,body=self._post(base+'/chat/completions',dict(model='muse-spark-1.3-contributor',messages=msgs))
+            self.assertEqual(code,403);self.assertIn(b'Standard mode',body);self.assertEqual(len(seen),n)
+            self.assertFalse(any('FAKE-META-KEY' in l for l in log),'the key is never logged')
+        finally:
+            rt.mail.close();rt.store.close();srv.shutdown();stop_meta()
+        # the daily cap: once spent, a refusal before anything goes upstream
+        base,calls,ledger,log,stop=self._relay('meta',lambda c:(200,b'{}','application/json'),cap=0.0,prices=META_PRICES)
+        try:
+            code,body=self._post(base+'/v1/chat/completions',dict(model='muse-ember-1.0',messages=[]))
+            self.assertEqual(code,402);self.assertIn(b'daily cap',body);self.assertEqual(calls,[])
+        finally:stop()
+
+    def test_muse_models_run_the_effort_scale_as_metas_levels(self):
+        """Ember's scale on Meta's reasoning_effort: minimal .. max natively, none (a 400 there) as minimal; Meta's own
+        default when no level is set; /model stores the levels from the catalog and /effort shows the mapping."""
+        from caminus.ember.resident import catalog, effort as eff
+        entries={e['id']:e for e in catalog.meta_entries(self.CATALOG_REPLIES['http://relay/meta/v1/models'],'meta')}
+        self.assertEqual(sorted(entries),['muse-ember-1.0','muse-spark-1.3'])
+        ember=dict(provider_kind='meta',model='muse-ember-1.0',efforts=entries['muse-ember-1.0']['efforts'])
+        for level,want in dict(none='minimal',low='low',medium='medium',high='high',xhigh='xhigh',max='max').items():
+            self.assertEqual(eff.resolve(dict(ember,effort=level))['reasoning_effort'],want,level)
+            self.assertEqual(eff.resolve(dict(ember,effort=level),short=True)['reasoning_effort'],'minimal')
+        self.assertEqual(eff.default_level(ember),'max');self.assertEqual(eff.resolve(ember)['reasoning_effort'],'max')
+        self.assertEqual(eff.resolve(ember,short=True)['reasoning_effort'],'minimal','a side call with no level set: the lowest')
+        self.assertEqual(eff.default_level(dict(ember,model='muse-spark-1.3')),'high')
+        self.assertEqual(eff.sampling(ember,True),{},'Meta asks for its own sampling defaults')
+        self.assertIn('none as minimal',eff.note(ember))
+        # Meta refuses a tool name outside [a-zA-Z0-9_.-] or with two dots (a 400): every tool the agent offers fits
+        import re
+        from caminus.ember.resident.mcp import tool_name
+        for name in [t['function']['name'] for t in TOOLS]+[tool_name('my.server','do/it.now')]:
+            self.assertTrue(re.fullmatch(r'[A-Za-z0-9_.-]+',name) and name.count('.')<2,name)
+        # through the commands: provider add, /model, /effort
+        self.cmd('provider',['add','meta','--kind','meta','--endpoint','http://relay/meta/v1','--relay'])
+        catalog.refresh(self.home,json.loads((self.home/'config.json').read_text()),opener=self.catalog_opener())
+        cur=self.cmd('model',['muse-ember-1.0'])['current']
+        self.assertEqual((cur['provider'],cur['context'],cur['max_tokens'],cur['vision'],cur['relay']),('meta',1048576,65536,True,True))
+        out=self.cmd('effort',[])
+        self.assertEqual((out['current'],out['runs_as']),('max','max'));self.assertIn("lab's default",out['summary'])
+        self.assertEqual(self.cmd('effort',['no'])['runs_as'],'minimal')
+
+    def test_a_muse_config_without_a_level_list_never_sends_none(self):
+        """agent init / fallback --effort store no level list: the Muse card's levels apply, so a side call sends
+        minimal (Meta answers none with a 400), and the reply limit is the paid cap (Meta lists none for Spark)."""
+        from caminus.ember.resident import effort as eff
+        for cfg in (dict(model='muse-ember-1.0',effort='high'),                    # agent init --effort high
+                    dict(provider_kind='meta',model='muse-spark-1.3'),              # no level at all
+                    dict(model='muse-wonder-1.0',effort='no')):
+            self.assertEqual(eff.resolve(cfg,short=True)['reasoning_effort'],'minimal',cfg)
+            self.assertNotEqual(eff.resolve(cfg)['reasoning_effort'],'none',cfg)
+        self.assertEqual(eff.resolve(dict(model='muse-ember-1.0',effort='xhigh'))['reasoning_effort'],'xhigh')
+        self.assertEqual(eff.resolve(dict(model='muse-spark-1.3'))['reasoning_effort'],'high',"Meta's default, named")
+        self.assertEqual(eff.reply_limit(dict(model='muse-spark-1.3'),True),65536)
+        self.assertEqual(eff.reply_limit(dict(model='some-other-paid-model'),True),4096,'others unchanged')
+        self.assertIsNone(eff.resolve(dict(model='some-other-paid-model'),short=True)['reasoning_effort'])
+        # compaction comes before Muse Ember (Meta)'s 3x line at 200K, not at 38 % (about 400K) of its 1M window
+        from caminus.ember.resident.runtime import paid_compaction
+        trig,targ=paid_compaction(dict(model='muse-ember-1.0',context=1048576))
+        self.assertAlmostEqual(trig,.85*200_000/1048576);self.assertAlmostEqual(targ,trig*.2)
+        self.assertEqual(int(trig*1048576)//1000,170)
+        self.assertEqual(paid_compaction(dict(model='muse-spark-1.3',context=1048576)),(.38,.38*.2),'no line: as before')
+        self.assertEqual(paid_compaction(dict(model='muse-ember-1.0',context=1048576,paid_compact_threshold=.3))[0],.3,
+                         "the owner's setting wins")
+
+    def test_meta_gets_no_system_message_after_the_first_and_tool_results_stay_paired(self):
+        from caminus.ember.resident.model import Model
+        hist=[dict(role='system',content='prompt'),dict(role='user',content='go'),
+              dict(role='assistant',content='',tool_calls=[dict(id='a',type='function',function=dict(name='read',arguments='{}')),
+                                                          dict(id='b',type='function',function=dict(name='read',arguments='{}'))]),
+              dict(role='tool',tool_call_id='a',content='1'),dict(role='system',content='steer'),
+              dict(role='tool',tool_call_id='b',content='2'),dict(role='system',content='runtime block')]
+        cfg=dict(model='muse-ember-1.0',endpoint='http://127.0.0.1:9/v1',relay=True)
+        wire=Model(dict(cfg,provider_kind='meta'))._wire(hist)
+        self.assertEqual([(m['role'],m.get('tool_call_id') or m['content'][:9]) for m in wire],
+                         [('system','prompt'),('user','go'),('assistant',''),('tool','a'),('tool','b'),
+                          ('user','[system] '),('user','[system] ')])
+        self.assertEqual([m['content'] for m in wire[-2:]],['[system] steer','[system] runtime block'])
+        self.assertEqual(Model(dict(cfg,provider_kind='mistral'))._wire(hist),hist,'other providers: as stored')
+
+    def test_a_meta_stream_times_only_what_it_shows(self):
+        """Meta streams a role chunk, then reasons unseen: the speed window opens at the first text, and the reasoning
+        tokens it never streamed are left out of the count."""
+        import types, io
+        from caminus.ember.resident import model as M
+        lines=[dict(choices=[dict(index=0,delta=dict(role='assistant',content=''))]),
+               dict(choices=[dict(index=0,delta=dict(content='Hello'))]),
+               dict(choices=[dict(index=0,delta=dict(content=' there'),finish_reason='stop')]),
+               dict(choices=[],usage=dict(prompt_tokens=10,completion_tokens=100,completion_tokens_details=dict(reasoning_tokens=60)))]
+        raw=b''.join(b'data: '+json.dumps(l).encode()+b'\n\n' for l in lines)+b'data: [DONE]\n\n'
+        class R(io.BytesIO):
+            def __enter__(s):return s
+            def __exit__(s,*a):return False
+        def opener(req,timeout=None):
+            if req.full_url.endswith('/chat/completions'):return R(raw)
+            raise OSError('no counter here')
+        m=M.Model(dict(model='muse-ember-1.0',endpoint='http://127.0.0.1:9/v1',relay=True,provider_kind='meta',
+                       context=1048576,efforts=['minimal','low','medium','high','xhigh','max']),opener=opener)
+        ticks=iter([100.0,110.0,112.0,112.0])     # the role chunk, 10 s unseen, then 2 s of text
+        fake=types.SimpleNamespace(**{k:getattr(M.time,k) for k in dir(M.time) if not k.startswith('__')})
+        fake.monotonic=lambda:next(ticks)
+        with unittest.mock.patch.object(M,'time',fake):
+            self.assertEqual(m.complete([dict(role='user',content='hi')],on_delta=lambda k,v:None)['content'],'Hello there')
+        self.assertEqual((m.last_speed['tokens'],m.last_speed['seconds'],m.last_speed['tps']),(40,2.0,20.0))
+
+    def test_a_hang_up_during_metas_hidden_reasoning_is_booked_by_time(self):
+        """Meta streams nothing while it reasons: an interrupt then was booked as about one output token. The relay now
+        books the time before the first visible piece at its ceiling rate (relay.HIDDEN_TPS), up to max_tokens."""
+        import socket, threading, http.server
+        from caminus.ember import relay
+        from caminus.ember.resident.model import META_PRICES
+        released,log=threading.Event(),[]
+        class Sock:
+            def shutdown(s,how):released.set()
+        class Resp:
+            status=200
+            def __init__(s):s.first=True
+            def getheader(s,name):return 'text/event-stream' if name=='Content-Type' else None
+            def readline(s):
+                if s.first:
+                    s.first=False
+                    return b'data: '+json.dumps(dict(choices=[dict(index=0,delta=dict(role='assistant',content=''))])).encode()+b'\n\n'
+                released.wait(20)               # reasoning, unseen, until the relay closes upstream
+                return b''
+            def read(s):return b''
+        class Conn:
+            sock=Sock()
+            def request(s,*a,**k):pass
+            def getresponse(s):return Resp()
+            def close(s):pass
+        ledger=relay.Ledger(self.home/'ledger-hidden.json',50.0)
+        handler=relay.make_handler('meta','FAKE-META-KEY',ledger,set(),65536,log.append,META_PRICES,lambda:Conn())
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        try:
+            data=json.dumps(dict(model='muse-wonder-1.0',max_tokens=65536,messages=[],stream=True)).encode()
+            s=socket.create_connection(('127.0.0.1',srv.server_address[1]),timeout=10)
+            s.sendall(b'POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % len(data)+data)
+            s.recv(4096)
+            time.sleep(1.0)                      # a second of hidden reasoning
+            s.shutdown(socket.SHUT_RDWR);s.close()
+            self.assertTrue(released.wait(3))
+            for _ in range(100):
+                if any('CLIENT-GONE' in l for l in log):break
+                time.sleep(0.05)
+            line=next(l for l in log if 'CLIENT-GONE' in l)
+            hidden=int(line.split('(+')[1].split()[0])
+            self.assertGreaterEqual(hidden,int(0.9*relay.HIDDEN_TPS),line)
+            self.assertLessEqual(hidden,65536)
+            self.assertGreaterEqual(ledger.spent(),round(hidden*20.0/1e6,6)-1e-6,'Wonder output at $20 per million')
+        finally:
+            released.set();srv.shutdown();srv.server_close()
 
     def test_mistral_typed_content_blocks_become_text_and_reasoning(self):
         from caminus.ember.resident.model import split_content, Model
@@ -3526,6 +4870,34 @@ for line in sys.stdin:
         t=Terminal(self.home);sid=uuid.uuid4().hex
         out=t.call(sid,dict(command='printf "%s" "$WORKSPACE"',yield_ms=3000))
         self.assertEqual(out['output'],str(self.home))
+
+    def test_the_gate_runs_with_the_terminal_environment(self):
+        # a real gate `cd "$WORKSPACE" && adb devices | grep -q -w device && ...` exited 0 in the terminal and failed as
+        # the gate: the gate had the daemon's environment, with no $WORKSPACE (the agent then hard-coded the path)
+        from caminus.ember.resident import judge
+        (self.home/'sub').mkdir(exist_ok=True);(self.home/'sub'/'marker').write_text('x')
+        gate='cd "$WORKSPACE/sub" && test -f marker && test -z "$CAMINUS_AGENT_API_KEY"'
+        with unittest.mock.patch.dict(os.environ,{'CAMINUS_AGENT_API_KEY':'secret'}):
+            os.environ.pop('WORKSPACE',None)
+            t=Terminal(self.home);sid=uuid.uuid4().hex
+            out=t.call(sid,dict(command=gate+'; echo "rc=$?"',yield_ms=5000))
+            text=out['output']
+            for _ in range(50):
+                if not out['running']:break
+                out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=200));text+=out['output']
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertIn('rc=0',text,'the terminal passes')
+        self.assertTrue(ok,'the gate passes where the terminal does (no model key either): '+msg)
+        # a variable unset even there is named in the result, not left to fail silently; set and assigned ones are not
+        gate=('X_MINE=1; test -n "$X_MINE" && test -d "${WORKSPACE}" && awk \'{print $NF}\' /dev/null && '
+              'cd "$NOT_SET_FOR_GATE/sub"')
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop('NOT_SET_FOR_GATE',None)
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertFalse(ok,msg)
+        self.assertIn("$NOT_SET_FOR_GATE is not set in the gate's environment",msg)
+        self.assertIn('\nbash: line',msg,'errors still read bash: ..., as in the terminal');self.assertNotIn('/bin/bash:',msg)
+        for name in ('X_MINE','WORKSPACE','NF'):self.assertNotIn('$'+name+' is not set',msg)
 
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog
@@ -3908,6 +5280,224 @@ for line in sys.stdin:
             rt.advisor.ask(gid,'Question?')
             self.assertNotIn('cache_control',json.dumps(wire.requests[0][2]),'a one-shot call would pay the write premium for nothing')
         finally:rt.mail.close();rt.store.close()
+
+    # ---- eyes -------------------------------------------------------------------------------------------------
+
+    MISTRAL='http://127.0.0.1:8767/v1'
+    ANTHROPIC='http://127.0.0.1:8765/v1'
+
+    def eyes_home(self,eyes=None,providers=('mistral',)):
+        """this fixture with the relay providers named, their catalog entries cached (no discovery call) and an image"""
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']={p:dict(kind=p,endpoint=self.MISTRAL if p=='mistral' else self.ANTHROPIC,relay=True) for p in providers}
+        if eyes is not None:conf['eyes']=eyes
+        (self.home/'config.json').write_text(json.dumps(conf))
+        (self.home/'models.json').write_text(json.dumps(dict(updated=time.time(),providers={},models=[
+            dict(id='ministral-8b-2512',aliases=['ministral-8b-latest'],provider='mistral',context=262144,vision=True,
+                 prices=dict(input=0.15,output=0.15,cache_read=0.015)),
+            dict(id='codestral-latest',provider='mistral',context=262144,vision=False,prices=dict(input=0.3,output=0.9)),
+            dict(id='claude-haiku-5-5',provider='anthropic',context=1000000,vision=True,prices=None)])))
+        (self.home/'shot.png').write_bytes(png(6,4))
+
+    def chat(self,text,usage=dict(prompt_tokens=900,completion_tokens=40)):
+        return dict(choices=[dict(message=dict(role='assistant',content=text),finish_reason='stop')],usage=usage)
+
+    def test_eyes_describe_an_image_for_a_brain_without_vision_on_the_mistral_relay(self):
+        import base64
+        from caminus.ember.resident import agenda, files
+        from caminus.ember.resident.model import Model
+        self.eyes_home(eyes=dict(provider='mistral',model='ministral-8b-latest'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('The terminal shows "make: *** [all] Error 2" in red.'))
+            gid=rt.store.enqueue('Find out why the build in shot.png failed.')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'),'What error does it show?')
+            url,headers,body=wire.requests[0]
+            self.assertEqual(url,self.MISTRAL+'/chat/completions');self.assertEqual(body['model'],'ministral-8b-latest')
+            self.assertEqual({k.lower():v for k,v in headers.items()}.get('authorization'),'Bearer caminus-local',
+                             'no key leaves the agent: the relay adds it')
+            user=body['messages'][1]
+            self.assertEqual(user['content'][1],dict(type='image_url',image_url=dict(
+                url='data:image/png;base64,'+base64.b64encode(png(6,4)).decode())))
+            self.assertIn('What error does it show?',user['content'][0]['text'])
+            self.assertIn('Find out why the build',user['content'][0]['text'],'the task gives the question its context')
+            self.assertIn('6x4 PNG',user['content'][0]['text']);self.assertNotIn('tools',body)
+            self.assertIn('Error 2',got['description']);self.assertEqual(got['image']['described_by'],'ministral-8b-latest')
+            self.assertEqual((got['image']['width'],got['image']['height']),(6,4))
+            usd=(900*0.15+40*0.15)/1e6
+            self.assertAlmostEqual(rt.eyes.spent_today(),usd,places=9,msg='priced from the relay\'s catalog price')
+            self.assertTrue(any(e['kind']=='eyes' and e['data']['usd']>0 for e in rt.store.events()))
+            self.assertEqual(agenda.budget(rt,gid)['spend']['eyes']['usd_per_day'],0.25)
+            # the stored result reaches a brain without vision as the description, with no "can't see" line after it
+            msg=dict(role='tool',tool_call_id='t1',content=json.dumps(got),image=dict(got['image'],path=got['path']))
+            m=Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',context=100000))
+            wired=m._wire([dict(role='user',content='x'),msg])
+            self.assertIn('Error 2',wired[1]['content']);self.assertNotIn("can't see images",wired[1]['content'])
+            # spent out: no call, the read still answers with why
+            state=json.loads((self.home/'eyes.json').read_text());next(iter(state.values()))['usd']=0.25
+            (self.home/'eyes.json').write_text(json.dumps(state))
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn("eyes budget ($0.25) is spent",got['eyes_error']);self.assertEqual(len(wire.requests),1)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_eyes_on_the_anthropic_relay_send_an_image_block(self):
+        import base64
+        from caminus.ember.resident import files
+        self.eyes_home(eyes=dict(provider='anthropic',model='claude-haiku-5-5'),providers=('mistral','anthropic'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(sse('A bar chart: three bars, the middle one tallest (42).'))
+            gid=rt.store.enqueue('Read the chart.')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            url,headers,body=wire.requests[0]
+            self.assertEqual(url,self.ANTHROPIC+'/messages');self.assertEqual(body['model'],'claude-haiku-5-5')
+            self.assertNotIn('x-api-key',{k.lower() for k in headers},'the relay adds the key')
+            text,image=body['messages'][0]['content']
+            self.assertIn('Describe what matters in this image for the task.',text['text'],'the default question')
+            self.assertEqual(image,dict(type='image',source=dict(type='base64',media_type='image/png',
+                                                                 data=base64.b64encode(png(6,4)).decode())))
+            self.assertIn((body.get('thinking') or {}).get('type'),(None,'disabled'),'a short call: no thinking billed')
+            self.assertNotIn('cache_control',json.dumps(body),'one image, once: no cache write premium')
+            self.assertIn('tallest',got['description']);self.assertEqual(got['image']['described_by'],'claude-haiku-5-5')
+            self.assertGreater(rt.eyes.spent_today(),0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_eyes_are_opt_in_off_without_a_block_even_with_a_relay_provider(self):
+        class Blind:
+            config={}
+            def __init__(self,replies):self.replies=list(replies)
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return self.replies.pop(0)
+        self.eyes_home(providers=('mistral','anthropic'))      # both relay providers, no eyes block
+        rt=Runtime(self.home,model=Blind([call('read',dict(path='shot.png')),dict(role='assistant',content='Done.')]))
+        try:
+            rt.eyes_opener=wire=Wire()
+            self.assertIsNone(rt.eyes.cfg,'no eyes block: off, whatever relays the session has; nothing billed')
+            gid=rt.store.enqueue('Look at shot.png.')
+            for _ in range(4):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            result=next(e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result')
+            self.assertIn('caminus ember agent eyes NAME --provider P --model M',result['note'])
+            self.assertIn('--auto',result['note']);self.assertNotIn('description',result)
+            self.assertEqual(wire.requests,[])
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)
+        try:
+            # on once the human runs `agent eyes` (it writes the block); a running resident follows it at its next turn
+            self.cmd('eyes',['--auto']);rt._follow_config()
+            self.assertEqual(rt.eyes.cfg['model'],'ministral-8b-latest','on after agent eyes --auto')
+            conf=json.loads((self.home/'config.json').read_text());conf['eyes']=False
+            (self.home/'config.json').write_text(json.dumps(conf));rt._follow_config()
+            self.assertIsNone(rt.eyes.cfg,'eyes false: off even with a relay provider')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_brain_without_vision_reads_an_image_through_the_eyes_in_the_loop(self):
+        class Blind:
+            config={}
+            def __init__(self,replies):self.replies=list(replies);self.seen=[]
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
+                self.seen.append(messages);return self.replies.pop(0)
+        self.eyes_home()
+        self.cmd('eyes',['--provider','mistral','--model','ministral-8b-latest'])
+        brain=Blind([call('read',dict(path='shot.png',question='Which line is red?')),dict(role='assistant',content='Line 3.')])
+        rt=Runtime(self.home,model=brain)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('Line 3 is red: "FAILED test_parse".'))
+            gid=rt.store.enqueue('Which test failed in shot.png?')
+            for _ in range(4):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            self.assertIn('Which line is red?',json.dumps(wire.requests[0][2]),'the read\'s question goes to the eyes')
+            tool=next(m for m in brain.seen[-1] if m['role']=='tool')
+            self.assertIn('FAILED test_parse',tool['content'])
+            result=next(e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result')
+            self.assertEqual(result['image']['described_by'],'ministral-8b-latest','the panel card names the eyes')
+            self.assertEqual(rt.store.goal(gid)['state'],'completed')
+            # the finish judge: the agent saw a description, not the image; it is the eyes model's observation
+            from caminus.ember.resident import judge
+            self.assertNotIn('seen',judge.viewed(rt,gid)[0])
+            brief=judge.evidence(rt,gid,'test_parse failed.','')
+            self.assertIn('IMAGES DESCRIBED TO THE AGENT',brief)
+            self.assertIn('shot.png (6x4 PNG) described by ministral-8b-latest',brief)
+            self.assertIn('the eyes model\'s observation',brief)
+            self.assertNotIn('COULD NOT SEE',brief);self.assertNotIn('IMAGES THE AGENT SAW',brief)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_eyes_get_at_most_600_characters_of_the_goal(self):
+        from caminus.ember.resident import files
+        self.eyes_home(eyes=dict(provider='mistral',model='ministral-8b-latest'))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(self.chat('A red line.'))
+            goal='Find the failing test. '+''.join(f'{i:04}' for i in range(200))   # 823 characters, none repeated
+            gid=rt.store.enqueue(goal)
+            rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            text=wire.requests[0][2]['messages'][1]['content'][0]['text']
+            self.assertIn(goal[:600],text);self.assertNotIn(goal[:601],text,'the goal is cut at 600 characters')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_relay_that_refuses_the_eyes_model_says_the_exact_fix(self):
+        from caminus.ember.resident import files
+        from caminus.ember.resident.advisor import eyes_refusal
+        self.eyes_home(eyes=dict(provider='anthropic',model='claude-haiku-5-5'),providers=('anthropic',))
+        new=json.dumps(dict(type='error',error=dict(type='permission_error',message=(
+            "relay: model not allowed: 'claude-haiku-5-5' (this relay allows claude-opus-5-5; to allow it too: caminus ember "
+            'relay install --provider anthropic --cap-usd 3.0 --model claude-opus-5-5 --model claude-haiku-5-5)'))))
+        old=json.dumps(dict(type='error',error=dict(type='permission_error',message="relay: model not allowed: 'claude-haiku-5-5'")))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=Wire((403,new),(403,old),(402,json.dumps(dict(error=dict(message='relay: daily cap $3.00 reached')))))
+            gid=rt.store.enqueue('x')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('Your human can fix it: caminus ember relay install --provider anthropic --cap-usd 3.0 --model '
+                          'claude-opus-5-5 --model claude-haiku-5-5',got['eyes_error'],'this relay version names the whole command')
+            self.assertNotIn('described_by',got['image'])
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('does not allow claude-haiku-5-5',got['eyes_error'])
+            self.assertIn('naming every --model it should serve',got['eyes_error'],'an older relay: how, without a command')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('spent its daily cap',got['eyes_error'])
+            self.assertTrue(any(e['kind']=='eyes_failed' for e in rt.store.events()))
+        finally:rt.mail.close();rt.store.close()
+        from caminus.ember.resident.model import ModelError
+        err=ModelError("relay: no price for 'ministral-3b-latest': it cannot be metered");err.status=403
+        text=eyes_refusal(dict(provider='mistral',model='ministral-3b-latest'),err)
+        self.assertIn('"ministral-3b-latest": [input, output]',text);self.assertIn('price file',text)
+        self.assertNotIn('--model',text,'the Mistral relay takes no --model: its price file is its model list')
+        # a model the catalog says can't see is refused before any call
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']['mistral']=dict(kind='mistral',endpoint=self.MISTRAL,relay=True)
+        conf['eyes']=dict(provider='mistral',model='codestral-latest');(self.home/'config.json').write_text(json.dumps(conf))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire()
+            got=rt.eyes.see(rt.store.enqueue('x'),files.read(self.home,'shot.png'))
+            self.assertIn("can't see images",got['eyes_error']);self.assertEqual(wire.requests,[])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_agent_eyes_turns_them_on_with_a_model_or_the_auto_pick_and_off(self):
+        self.cmd('eyes',['--auto'],code=1)                          # no relay provider: nothing to pick
+        self.eyes_home(providers=('mistral','anthropic'))
+        self.assertIsNone(self.cmd('eyes')['eyes'],'opt-in: relay providers alone turn nothing on')
+        self.cmd('eyes',['--budget-usd','0.5'],code=1)               # a budget alone names no model
+        out=self.cmd('eyes',['--auto'])
+        self.assertEqual((out['eyes']['provider'],out['eyes']['model']),('mistral','ministral-8b-latest'),'the auto pick')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['eyes'],
+                         dict(provider='mistral',model='ministral-8b-latest'),'--auto writes the pick as the block')
+        out=self.cmd('eyes',['--budget-usd','0.5'])
+        self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd']),('ministral-8b-latest',0.5),'a budget alone keeps the model')
+        out=self.cmd('eyes',['--provider','anthropic','--model','claude-haiku-5-5','--budget-usd','0.1'])
+        self.assertEqual((out['eyes']['model'],out['eyes']['budget_usd'],out['eyes']['endpoint']),('claude-haiku-5-5',0.1,self.ANTHROPIC))
+        self.cmd('eyes',['--provider','nowhere','--model','m'],code=1)
+        self.assertIsNone(self.cmd('eyes',['--off'])['eyes'])
+        self.assertFalse(json.loads((self.home/'config.json').read_text())['eyes'])
+        conf=json.loads((self.home/'config.json').read_text());conf['providers'].pop('mistral')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        self.assertEqual(self.cmd('eyes',['--auto'])['eyes']['model'],'claude-haiku-5-5','no Mistral relay: Haiku')
 
     # ---- two brains -------------------------------------------------------------------------------------------
 
@@ -4836,7 +6426,7 @@ for line in sys.stdin:
             messages=rt.store.goal(gid)['messages']
             # The bar shows the request as sent, its trailing context message included.
             tail=[c] if (c:=rt.context_message(gid)) else []
-            measured=rt.model.tokens([rt.system(),*messages,*tail],TOOLS)
+            measured=rt.model.tokens([rt.system(),*messages,*tail],rt.tools)   # (what is sent: no browser without a Chrome)
             out,compacted=rt._compact(gid,messages)
             self.assertEqual((out,compacted),(messages,False))
             note=json.loads((self.home/'context.json').read_text())
@@ -5604,6 +7194,79 @@ class AnthropicTransport(unittest.TestCase):
         url,_,body=self.wire.requests[0]
         self.assertTrue(url.endswith('/messages/count_tokens'));self.assertNotIn('max_tokens',body);self.assertNotIn('stream',body)
 
+    def image_history(self):
+        import base64
+        d=S/('img-'+uuid.uuid4().hex);d.mkdir()
+        data=png(2,3);(d/'a.png').write_bytes(data)
+        h=self.history()
+        h[2]['tool_calls'].append(dict(id='t2',type='function',function=dict(name='read',arguments='{"path":"a.png"}')))
+        h.insert(4,image_msg(d/'a.png','t2'))
+        return h,d/'a.png',base64.b64encode(data).decode()
+
+    def test_an_image_read_goes_in_its_tool_result_to_a_brain_that_sees(self):
+        h,path,b64=self.image_history()
+        m=self.model(sse('ok'),vision=True)
+        m.complete(h,None,max_tokens=16000)
+        user=self.wire.requests[0][2]['messages'][2]
+        results=[b for b in user['content'] if b['type']=='tool_result']
+        self.assertEqual([r['tool_use_id'] for r in results],['t1','t2'],'both parallel results in one user turn')
+        text,image=results[1]['content']
+        self.assertEqual(text['type'],'text');self.assertIn('"width": 2',text['text'])
+        self.assertEqual(image,dict(type='image',source=dict(type='base64',media_type='image/png',data=b64)))
+        # without vision: the plain line, no image block; a file changed since the read: a line, never the new file
+        m=self.model(sse('ok'))
+        m.complete(h,None,max_tokens=16000)
+        line=[b for b in self.wire.requests[0][2]['messages'][2]['content'] if b['type']=='tool_result'][1]['content']
+        self.assertIsInstance(line,str);self.assertIn("this model can't see images; a.png is a 2x3 PNG",line)
+        path.write_bytes(png(3,3))
+        m=self.model(sse('ok'),vision=True)
+        m.complete(h,None,max_tokens=16000)
+        line=[b for b in self.wire.requests[0][2]['messages'][2]['content'] if b['type']=='tool_result'][1]['content']
+        self.assertIn('changed or is gone since it was read',line)
+
+    def test_a_user_message_carries_its_image_too(self):
+        # the finish judge's brief: the images follow it as user messages
+        h,_,b64=self.image_history()
+        brief=[dict(role='system',content='JUDGE'),dict(role='user',content='brief'),
+               dict(role='user',content='a.png, as the agent saw it:',image=h[4]['image'])]
+        m=self.model(sse('ok'),vision=True)
+        m.complete(brief,None,max_tokens=600)
+        blocks=self.wire.requests[0][2]['messages'][0]['content']
+        self.assertEqual([b['type'] for b in blocks],['text','text','image']);self.assertEqual(blocks[2]['source']['data'],b64)
+
+    def test_an_image_counts_as_its_patches_not_its_base64(self):
+        from caminus.ember.resident.model import image_tokens
+        h,_,b64=self.image_history()
+        plain=self.model(sse('ok')).tokens(h,[])
+        seen=self.model(sse('ok'),vision=True).tokens(h,[])
+        self.assertEqual(seen-plain,image_tokens(2,3),'one 28 px patch, not the bytes')
+        self.assertEqual((image_tokens(28,28),image_tokens(1000,1000),image_tokens(3000,3000)),(1,1296,4784))
+        # the Messages API counter: the image's patches added once, its bytes never uploaded (compaction counts often)
+        m=self.model(dict(input_tokens=777),vision=True);m.counter=True
+        self.assertEqual(m.tokens(h,[]),777+image_tokens(2,3))
+        self.assertNotIn(b64,json.dumps(self.wire.requests[0][2]))
+
+    def test_an_openai_compatible_brain_gets_the_image_after_the_turns_results(self):
+        from caminus.ember.resident.model import Model
+        h,_,b64=self.image_history()
+        def wired(**cfg):
+            # (a local brain asks its server's /props for the window first: catalog.window)
+            w=Wire(dict(n_ctx=100000),dict(choices=[dict(message=dict(role='assistant',content='ok'),finish_reason='stop')]))
+            m=Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',context=100000,**cfg),opener=w);m.counter=False
+            m.complete(h,None,max_tokens=8000)
+            return w.requests[-1][2]['messages']
+        sent=wired(vision=True)
+        self.assertEqual([m['role'] for m in sent],['system','user','assistant','tool','tool','user','user','system'])
+        self.assertNotIn('image',sent[4],'the marker stays home')
+        self.assertEqual(sent[5]['content'][1],dict(type='image_url',image_url=dict(url='data:image/png;base64,'+b64)))
+        self.assertIn('t2',sent[5]['content'][0]['text'],'the image names the read it answers')
+        blind=wired()
+        self.assertEqual(len(blind),7);self.assertNotIn('image_url',json.dumps(blind))
+        self.assertIn("this model can't see images",blind[4]['content'])
+        plain=self.history()
+        self.assertIs(Model(dict(model='m',endpoint='http://127.0.0.1:9/v1',vision=True))._wire(plain),plain,
+                      'a history without images is sent as stored (the local prompt cache keeps its prefix)')
+
     def test_config_validation(self):
         from caminus.ember.resident.model import Model
         with self.assertRaises(ValueError):Model(dict(model='m',endpoint='https://api.anthropic.com/v1',api='anthropic'))
@@ -5640,6 +7303,435 @@ class RetryBudget(unittest.TestCase):
         self.assertGreaterEqual(rt.retry['g'][0]-t,119)
         e.retry_after=10_000;rt._schedule_retry('g',e)
         self.assertLessEqual(rt.retry['g'][0]-time.time(),301,'a provider cannot park the goal for hours')
+
+
+class Sandbox(unittest.TestCase):
+    """The sandbox tool's box, for real (bubblewrap; a user systemd scope where the account has one). Small limits:
+    512 MB (64 MB for the memory test), 16 processes, 2 s. Skipped, with the reason, where bubblewrap cannot make a
+    box."""
+    def setUp(self):
+        from caminus.ember.resident import sandbox
+        if (why:=sandbox.usable()):self.skipTest(why)
+        self.sb=sandbox
+        self.home=S/('box-'+uuid.uuid4().hex[:12]);(self.home/'work').mkdir(parents=True)
+        (self.home/'work'/'src.txt').write_text('hello from the work folder')
+        self.token='ghp_'+uuid.uuid4().hex             # a linked GitHub token: the worker's environment carries it
+        (self.home/'token').write_text(self.token)
+        self.conf=dict(github=dict(token_file=str(self.home/'token')),sandbox=dict(memory_mb=512,tasks=16))
+        (self.home/'config.json').write_text(json.dumps(self.conf))
+        (self.home/'agent.sqlite3').write_text('the conversation')
+        self.term=Terminal(self.home)
+    def run_box(self,command,conf=None,goal='g1',**args):
+        sid=uuid.uuid4().hex
+        args=dict(command=command,**args)
+        box=self.sb.spec(self.home,goal,args,conf or self.conf)
+        r=self.term.call(sid,dict(args,yield_ms=10000),box=box)
+        end=time.monotonic()+60
+        while r['running'] and time.monotonic()<end:
+            r=self.term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=10000),box={})
+        self.assertFalse(r['running'],r)
+        return r
+
+    def test_the_box_sees_none_of_the_home_and_no_token(self):
+        r=self.run_box(f'env; ls /home; cat {self.home}/token {self.home}/agent.sqlite3 {self.home}/config.json; '
+                       f'cat {Path.home()}/.ssh/id_ed25519; ls {self.home}; cat /work/src.txt',folder='work')
+        self.assertNotIn(self.token,r['output'],'the token never reaches the box (file or environment)')
+        self.assertNotIn('the conversation',r['output'])
+        self.assertNotIn('GH_TOKEN',r['output']);self.assertIn('HOME=/box',r['output'])
+        self.assertIn("ls: cannot access '/home'",r['output'])
+        self.assertIn('hello from the work folder',r['output'],'the work folder is there, at /work')
+        self.assertEqual(r['box'],str(self.home/'boxes'/'g1'))
+
+    def test_writing_outside_the_box_fails_and_the_box_lasts_the_goal(self):
+        r=self.run_box('for p in /work/x /usr/x /etc/x /x /tmp/../x; do touch $p 2>/dev/null && echo WROTE $p; done; '
+                       'echo built > /box/out.txt',folder='work')
+        self.assertNotIn('WROTE',r['output']);self.assertEqual(r['exit_code'],0)
+        self.assertEqual(sorted(p.name for p in (self.home/'work').iterdir()),['src.txt'])
+        r=self.run_box('cat /box/out.txt')
+        self.assertIn('built',r['output'],'a second call of the same goal finds the box as the first left it')
+        self.assertTrue(self.sb.end(self.home,'g1'));self.assertFalse((self.home/'boxes'/'g1').exists())
+
+    def test_no_network_without_hosts_and_no_gpu(self):
+        import socket
+        srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);self.addCleanup(srv.close)
+        port=srv.getsockname()[1]
+        r=self.run_box(f'python3 -c "import socket; socket.create_connection((\'127.0.0.1\',{port}),timeout=3)" 2>&1 | tail -1; '
+                       'getent hosts example.com || echo NO-DNS; ls /dev/kfd /dev/dri 2>&1')
+        self.assertIn('ConnectionRefusedError',r['output'],'a service on this machine is out of reach')
+        self.assertIn('NO-DNS',r['output'])
+        self.assertIn("cannot access '/dev/kfd'",r['output']);self.assertIn("cannot access '/dev/dri'",r['output'])
+        self.assertIsNone(r.get('connections'),'no hosts: no proxy, nothing to log')
+        self.assertEqual(r['limits']['time_s'],600)
+
+    def test_a_host_not_in_the_list_is_refused_and_logged(self):
+        r=self.run_box('curl -sS -m 10 -o /dev/null https://not-listed.invalid/ 2>&1; echo; '
+                       'curl -sS -m 10 -o /dev/null http://example.com/ 2>&1',hosts=['example.com'])
+        self.assertIn('403',r['output'])
+        verdicts={c['target']:c['verdict'] for c in r['connections']}
+        self.assertEqual(verdicts.get('not-listed.invalid:443'),'refused: not in hosts',r)
+        self.assertTrue(any(v.startswith('refused: HTTPS only') for v in verdicts.values()),'plain HTTP is refused')
+        with self.assertRaises(ValueError):self.sb.spec(self.home,'g1',dict(command='true',hosts=['1.2.3.4']),self.conf)
+
+    def test_the_proxy_refuses_what_its_rules_refuse(self):
+        import asyncio,socket
+        job=self.home/'pjob';job.mkdir()
+        sock=job/('p'*60+'.sock')                       # deeper than a Unix socket's 108 bytes: bound by its folder's fd
+        self.assertGreater(len(str(sock)),108)
+        proxy=self.sb.Proxy(sock,['example.com','localhost'],job/'log.jsonl')
+        async def fake(host,port,type=0):          # DNS without the network: localhost resolves to loopback
+            return [(0,0,0,'',('127.0.0.1' if host=='localhost' else '10.1.2.3',port))]
+        proxy.resolve=fake;proxy.start();self.addCleanup(proxy.close)
+        def ask(line):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(line.encode()+b'\r\n\r\n')
+                return s.recv(200).decode()
+        self.assertIn('403',ask('CONNECT evil.example.org:443 HTTP/1.1'))
+        self.assertIn('403',ask('CONNECT localhost:443 HTTP/1.1'))      # listed, but not a public address
+        self.assertIn('403',ask('CONNECT example.com:443 HTTP/1.1'))    # 10.x is private
+        self.assertIn('403',ask('CONNECT 93.184.215.14:443 HTTP/1.1'))  # an address, not a name
+        self.assertIn('403',ask('CONNECT example.com:80 HTTP/1.1'))
+        self.assertIn('405',ask('GET http://example.com/ HTTP/1.1'))
+        log=[json.loads(l)['verdict'] for l in (job/'log.jsonl').read_text().splitlines()]
+        self.assertEqual(len(log),6,log)
+        self.assertTrue(all(v.startswith('refused') for v in log),log)
+        self.assertEqual(sum('non-public' in v for v in log),2,log)
+
+    def test_the_web_proxy_allows_public_addresses_and_refuses_local_ones_unless_named(self):
+        import asyncio,ipaddress,socket
+        job=self.home/'wjob';job.mkdir()
+        proxy=self.sb.Proxy(job/'p.sock',[],job/'log.jsonl',web=True)
+        table={'public.example':'93.184.215.14','lan.example':'192.168.1.20','link.example':'169.254.169.254',
+               'localhost':'127.0.0.1','mapped.example':'::ffff:192.168.1.20','nat64.example':'64:ff9b::c0a8:101'}
+        mine=[a for a in self.sb.local_addresses() if a.is_global]
+        if mine:
+            table['me.example']=str(mine[0])              # this machine's own public address
+            if mine[0].version==4:table['me6.example']='::ffff:'+str(mine[0])   # and the same, spelled as IPv6
+        async def fake(host,port,type=0):return [(0,0,0,'',(table.get(host,host),port))]
+        fhost,fport=site().split(':')
+        async def connect(addr,port):                     # no network: every allowed connection reaches the fixture
+            return await asyncio.open_connection(fhost,int(fport))
+        proxy.resolve,proxy.connect=fake,connect;proxy.start();self.addCleanup(proxy.close)
+        def ask(head):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(head.encode())
+                out=b''
+                while (d:=s.recv(65536)):out+=d
+                return out.decode()
+        got=ask('GET http://public.example/echo?x=1 HTTP/1.1\r\nHost: public.example\r\nProxy-Connection: keep-alive\r\n\r\n')
+        self.assertIn(' 200 ',got.split('\r\n')[0])
+        self.assertIn('GET /echo?x=1 HTTP/1.1',got,'plain HTTP is forwarded in origin form');self.assertIn('Connection: close',got)
+        self.assertNotIn('Proxy-Connection',got.split('\r\n\r\n',1)[1],'the request upstream (the echo) drops it')
+        refused=['CONNECT lan.example:443','CONNECT link.example:80',f'GET http://localhost:{fport}/echo','CONNECT 10.0.0.1:443',
+                 'CONNECT [::1]:22','CONNECT mapped.example:443','CONNECT nat64.example:80']+(
+                 ['CONNECT me.example:443'] if mine else [])+(['CONNECT me6.example:443'] if 'me6.example' in table else [])
+        for head in refused:
+            self.assertIn(' 403 ',ask(head+' HTTP/1.1\r\n\r\n').split('\r\n')[0],head)
+        proxy.named.add(('localhost',int(fport)))         # a browser call named it
+        self.assertIn(' 200 ',ask(f'GET http://localhost:{fport}/echo HTTP/1.1\r\n\r\n').split('\r\n')[0])
+        log=[json.loads(l)['verdict'] for l in (job/'log.jsonl').read_text().splitlines()]
+        self.assertEqual((log[0],log[-1]),('allowed','allowed (named)'),log)
+        self.assertEqual(sum(v.startswith('refused') for v in log),len(refused),log)
+
+    def test_plain_http_through_the_web_proxy_is_one_request_per_connection(self):
+        # a server that ignores Connection: close must not get the browser's next request (another host's) unchecked
+        import asyncio,socket,threading
+        got=[]
+        srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);self.addCleanup(srv.close)
+        def serve():
+            c,_=srv.accept();c.settimeout(1.5);data=b''
+            try:
+                while (d:=c.recv(65536)):
+                    data+=d
+                    if data.count(b'\r\n\r\n')==1 and data.endswith(b'\r\n\r\n'):
+                        c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok')
+            except OSError:pass
+            got.append(data);c.close()
+        threading.Thread(target=serve,daemon=True).start()
+        job=self.home/'kjob';job.mkdir()
+        proxy=self.sb.Proxy(job/'p.sock',[],job/'log.jsonl',web=True)
+        async def fake(host,port,type=0):return [(0,0,0,'',('93.184.215.14',port))]
+        async def connect(addr,port):return await asyncio.open_connection('127.0.0.1',srv.getsockname()[1])
+        proxy.resolve,proxy.connect=fake,connect;proxy.start();self.addCleanup(proxy.close)
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(proxy.short);s.settimeout(10)
+            s.sendall(b'GET http://first.example/ HTTP/1.1\r\nHost: first.example\r\nProxy-Connection: keep-alive\r\n\r\n'
+                      b'GET http://other.example/secret HTTP/1.1\r\nHost: other.example\r\nCookie: s=1\r\n\r\n')
+            out=b''
+            while (d:=s.recv(65536)):out+=d
+        head=out.decode().split('\r\n\r\n')[0]
+        self.assertIn('Connection: close',head);self.assertNotIn('keep-alive',head,'the response tells the browser not to reuse it')
+        end=time.monotonic()+5
+        while not got and time.monotonic()<end:time.sleep(.05)
+        self.assertEqual(got[0].count(b'GET '),1,got);self.assertNotIn(b'other.example',got[0],'the second request never went upstream')
+
+    def test_a_folder_that_holds_the_home_or_the_state_is_refused(self):
+        other=self.home.parent/(self.home.name+'-other');(other/'notes').mkdir(parents=True);(other/'work').mkdir()
+        (other/'agent.sqlite3').write_text('another resident of this account')
+        (self.home/'jobs').mkdir(exist_ok=True)
+        for bad in ('.', str(self.home.parent), 'jobs', str(Path.home()), str(other), str(other/'notes')):
+            with self.assertRaises(ValueError,msg=bad):self.sb.check_folder(self.home,bad,self.conf)
+        self.assertEqual(self.sb.check_folder(self.home,'work',self.conf),(self.home/'work').resolve())
+        self.assertEqual(self.sb.check_folder(self.home,str(other/'work'),self.conf),(other/'work').resolve())
+
+    def test_ending_a_goal_kills_its_running_box_and_removes_what_it_left_safely(self):
+        outside=self.home/'mine.txt';outside.write_text('the agent\'s own file');outside.chmod(0o600)
+        sid=uuid.uuid4().hex
+        box=self.sb.spec(self.home,'g2',dict(command='x'),self.conf)
+        r=self.term.call(sid,dict(command=f'mkdir ro && echo x > ro/f && ln -s {outside} ro/link && chmod 500 ro && '
+                                          'echo READY && sleep 60',yield_ms=10000),box=box)
+        end=time.monotonic()+20
+        while 'READY' not in r['output'] and time.monotonic()<end:
+            r=self.term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000,offset=0),box={})
+        self.assertTrue(r['running'],r)
+        self.assertTrue(self.sb.end(self.home,'g2'));self.assertFalse((self.home/'boxes'/'g2').exists())
+        from caminus.ember.resident.terminal import read_state
+        self.assertEqual(read_state(self.home/'jobs'/sid)['phase'],'finished','the running box was killed')
+        self.assertEqual((outside.stat().st_mode&0o777,outside.read_text()),(0o600,'the agent\'s own file'),
+                         'a link the box left is removed, never followed')
+
+    def test_time_limit_kills_the_box_and_says_so(self):
+        t0=time.monotonic()
+        r=self.run_box('sleep 60 & sleep 60; echo SURVIVED',timeout=2)
+        self.assertEqual(r['limit_hit'],'time');self.assertNotIn('SURVIVED',r['output'])
+        self.assertLess(time.monotonic()-t0,30)
+        with self.assertRaises(ValueError):self.sb.spec(self.home,'g1',dict(command='true',timeout=3601),self.conf)
+
+    def test_memory_and_process_limits_kill_the_box_and_say_so(self):
+        if not self.sb.has_user_systemd():self.skipTest('no user systemd here: the rlimit fallback test covers it')
+        small=dict(self.conf,sandbox=dict(memory_mb=64,tasks=16))
+        r=self.run_box('python3 -c "b=bytearray(200<<20); print(\'SURVIVED\')"',conf=small)
+        self.assertEqual((r['limit_hit'],r['limits']['enforced']),('memory','systemd'),r)
+        self.assertNotIn('SURVIVED',r['output'])
+        r=self.run_box('for i in $(seq 40); do sleep 30 & done; wait; echo SURVIVED')
+        self.assertEqual(r['limit_hit'],'processes',r);self.assertNotIn('SURVIVED',r['output'])
+
+    def test_the_rlimit_fallback_bounds_memory_and_time(self):
+        # (RLIMIT_AS fails an allocation instead of killing; RLIMIT_NPROC counts the whole account, so the cap is
+        # added to what the account already runs: only the time limit can name itself here)
+        conf=dict(self.conf,sandbox=dict(memory_mb=256,tasks=16,limiter='rlimit'))
+        r=self.run_box('python3 -c "b=bytearray(512<<20)" 2>&1 | tail -1',conf=conf)
+        self.assertIn('MemoryError',r['output']);self.assertEqual(r['limits']['enforced'],'rlimit')
+        r=self.run_box('sleep 60',conf=conf,timeout=2)
+        self.assertEqual(r['limit_hit'],'time')
+
+    def test_an_unreadable_folder_in_the_box_is_removed_and_never_stops_the_loop(self):
+        # a box's mode-000 folder made the removal retry os.open and raise TypeError: the daemon crash-looped
+        r=self.run_box('mkdir -p a/b/c && touch a/b/c/f && chmod 000 a/b && chmod 500 a && echo DONE',goal='g9')
+        self.assertIn('DONE',r['output'])
+        self.assertTrue(self.sb.end(self.home,'g9'));self.assertFalse((self.home/'boxes'/'g9').exists())
+        # one box that will not go (whatever end raises) is reported once, and the sweep goes on
+        class Store:
+            events=[]
+            class db:
+                @staticmethod
+                def execute(q,a):
+                    class R:
+                        def fetchone(self):return ('completed',)
+                    return R()
+            def event(self,kind,data,goal=None):self.events.append(kind)
+        class RT:pass
+        rt=RT();rt.home=self.home;rt.store=Store()
+        for g in ('x1','x2'):(self.home/'boxes'/g).mkdir(parents=True)
+        real=self.sb.end
+        def broken(home,gid,store=None):raise TypeError('a box that will not go')
+        self.sb.end=broken
+        try:
+            self.sb.sweep(rt);self.sb.sweep(rt)
+        finally:self.sb.end=real
+        self.assertEqual(rt.store.events,['box_not_removed']*2,'each box once, and the second pass went on')
+
+    def test_no_user_namespace_and_bounded_tmp_and_disk(self):
+        conf=dict(self.conf,sandbox=dict(memory_mb=256,tasks=64,disk_mb=8))
+        r=self.run_box('unshare -Urn true 2>/dev/null && echo USERNS; df -m /tmp | tail -1',conf=conf)
+        self.assertNotIn('USERNS',r['output'],'no user namespace inside the box (--disable-userns)')
+        self.assertIn(' 256 ',r['output'],'the tmpfs /tmp is no bigger than the memory limit')
+        self.assertEqual(r['limits']['disk_mb'],8)
+        r=self.run_box('dd if=/dev/zero of=/box/big bs=1M count=32 2>/dev/null; sleep 20; echo SURVIVED',conf=conf)
+        self.assertEqual(r['limit_hit'],'disk',r);self.assertNotIn('SURVIVED',r['output'])
+
+    def test_public_addresses_seen_through_ipv6_forms(self):
+        for a in ('93.184.215.14','2606:4700::1','64:ff9b::808:808'):
+            self.assertTrue(self.sb.public(a),a)
+        # mapped, NAT64, 6to4 forms of LAN or loopback addresses, and the deprecated IPv4-compatible / site-local
+        for a in ('::ffff:192.168.1.1','::ffff:127.0.0.1','64:ff9b::c0a8:101','64:ff9b:1::a00:1','2002:c0a8:101::1',
+                  '::808:808','fec0::1','10.1.2.3','fe80::1%eth0'):
+            self.assertFalse(self.sb.public(a),a)
+
+    def test_the_connection_log_and_each_result_are_capped(self):
+        import socket
+        job=self.home/'cjob';job.mkdir()
+        proxy=self.sb.Proxy(job/'p.sock',['example.com'],job/'connections.jsonl')
+        proxy.start();self.addCleanup(proxy.close)
+        saved=self.sb.LOG_MAX;self.sb.LOG_MAX=3;self.addCleanup(setattr,self.sb,'LOG_MAX',saved)
+        for _ in range(6):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(b'CONNECT evil.example.org:443 HTTP/1.1\r\n\r\n');s.recv(100)
+        lines=(job/'connections.jsonl').read_text().splitlines()
+        self.assertEqual(len(lines),4,lines);self.assertIn('log is full',lines[-1])
+        # a result returns at most CONNECTIONS_MAX new ones and counts the rest
+        box=self.sb.spec(self.home,'g1',dict(command='true',hosts=['example.com']),self.conf)
+        (job/'request.json').write_text(json.dumps(dict(command='true',cwd=box['box'],box=box)))
+        (job/'connections.jsonl').write_text(''.join(json.dumps(dict(ts=0,target=f'h{i}:443',verdict='refused'))+'\n' for i in range(60)))
+        (job/'connections.cursor').unlink(missing_ok=True)
+        v=self.sb.view(job,{})
+        self.assertEqual((len(v['connections']),v['connections_more']),(self.sb.CONNECTIONS_MAX,60-self.sb.CONNECTIONS_MAX))
+        self.assertEqual(self.sb.view(job,{})['connections'],[],'what one result returned is not returned again')
+
+
+class TerminalTimeout(unittest.TestCase):
+    def test_a_terminal_timeout_kills_the_command_and_says_so(self):
+        from caminus.ember.resident.terminal import Terminal
+        home=S/('tmo-'+uuid.uuid4().hex[:12]);home.mkdir(parents=True);term=Terminal(home)
+        sid=uuid.uuid4().hex;t0=time.monotonic()
+        r=term.call(sid,dict(command='sleep 30 & sleep 30; echo SURVIVED',timeout=1,yield_ms=10000))
+        while r['running'] and time.monotonic()-t0<20:
+            r=term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        self.assertEqual(r.get('limit_hit'),'time',r);self.assertNotIn('SURVIVED',r['output'])
+        self.assertLess(time.monotonic()-t0,10)
+        r=term.call(uuid.uuid4().hex,dict(command='echo done',yield_ms=10000))
+        self.assertNotIn('limit_hit',r,'no timeout: no bound and no limit field')
+        for bad in (0,3601,True):
+            with self.assertRaises(ValueError,msg=bad):term.call(uuid.uuid4().hex,dict(command='true',timeout=bad))
+
+
+class Browser(unittest.TestCase):
+    """The browser tool for real: Chrome in a box against the local fixture sites, no other network. Skipped, with
+    the reason, where Chrome cannot run in a box here (chrome_skip)."""
+    def setUp(self):
+        chrome_skip(self)
+        from caminus.ember.resident import browser,sandbox
+        self.br,self.sb=browser,sandbox
+        self.home=S/('browser-'+uuid.uuid4().hex[:12]);self.home.mkdir(parents=True)
+        class RT:pass
+        self.rt=RT();self.rt.home=self.home;self.rt.config={};self.rt.terminal=Terminal(self.home)
+        self.addCleanup(self.sb.end,self.home,'g1')
+    def go(self,**args):
+        return self.br.call(self.rt,'g1',uuid.uuid4().hex,args)
+    def ref(self,snapshot,text):
+        return next(l.split(' [')[1].split(']')[0] for l in snapshot.splitlines() if text in l and ' [e' in l)
+
+    def test_open_snapshot_type_select_and_click_change_the_page(self):
+        self.assertEqual(self.go(action='open',url=f'http://{site()}/')['title'],'Fixture')
+        snap=self.go(action='snapshot')['snapshot']
+        for want in ('heading "Welcome" (level 1)','link "About us"','-> /about.html','textbox "Name"',
+                     'combobox "Color"','options: Red | Green','button "Send"','textbox "Secret"','(password)'):
+            self.assertIn(want,snap)
+        self.assertNotIn('text "Name"',snap,'a label is its field\'s name, not a line of its own')
+        r=self.go(action='type',ref=self.ref(snap,'textbox "Name"'),text='Ada')
+        self.assertIn('textbox "Name"',r['did']);self.assertIn('= "Ada"',r['snapshot'])
+        self.assertIn('= "Green"',self.go(action='select',ref=self.ref(snap,'combobox'),value='Green')['snapshot'])
+        r=self.go(action='click',ref=self.ref(snap,'button "Send"'))
+        self.assertEqual(r['title'],'Done');self.assertIn('who=Ada&color=g',r['url'])
+        self.assertIn('sent ?who=Ada',r['snapshot'])
+        self.assertIn('error',self.go(action='click',ref='e2'),'a ref of the page before is not on this one')
+        self.assertEqual(self.go(action='back')['title'],'Fixture')
+        log={(c['target'],c['verdict']) for c in map(json.loads,(self.home/'jobs'/r['session']/'connections.jsonl').read_text().splitlines())}
+        self.assertEqual(log,{(site(),'allowed (named)')},'only the fixture: Chrome\'s own traffic is off')
+
+    def test_a_password_field_is_never_typed_into(self):
+        pw=self.ref(self.go(action='open',url=f'http://{site()}/')['snapshot'],'(password)')
+        r=self.go(action='type',ref=pw,text='hunter2')
+        self.assertIn('password field',r['error']);self.assertIn('ask_user',r['error'])
+        self.go(action='click',ref=pw)                    # focused by a click, then typed key by key
+        self.assertIn('password field',self.go(action='press',key='x').get('error',''))
+        self.assertIn('password field',self.go(action='press',key='Control+v').get('error',''),'nor pasted into')
+        self.assertEqual(self.go(action='eval',js='document.querySelector("input[type=password]").value')['value'],'')
+        self.assertNotIn('error',self.go(action='press',key='Tab'),'a key that types nothing still works there')
+        # focus inside another site's frame: the browser cannot see the field there, so it types nothing
+        self.go(action='open',url=f'http://{site()}/',allow=[site('other')])
+        self.go(action='eval',js=f'new Promise(ok => {{ const f = document.createElement("iframe"); f.onload = ok; '
+                                 f'f.src = "http://{site("other")}/"; document.body.append(f); }}).then(() => '
+                                 'document.querySelector("iframe").focus())')
+        self.assertIn('frame from another site',self.go(action='press',key='x').get('error',''))
+
+    def test_a_local_port_is_reached_only_when_a_call_names_it(self):
+        self.go(action='open',url=f'http://{site()}/')     # (opening it names it)
+        fetch=f'fetch("http://{site("other")}/echo",{{mode:"no-cors"}}).then(()=>"ok",()=>"failed")'
+        r=self.go(action='eval',js=fetch)
+        self.assertEqual(r['network']['refused'],[f'{site("other")} (refused: LAN, loopback, link-local or this '
+                                                  'machine (not named in a browser call))'],r)
+        self.go(action='open',url=f'http://{site()}/',allow=[site('other')])
+        r=self.go(action='eval',js=fetch)
+        self.assertNotIn('refused',r['network']);self.assertGreaterEqual(r['network']['allowed'],1)
+
+    def test_ending_the_goal_removes_the_box_the_profile_and_chrome(self):
+        from caminus.ember.resident.terminal import read_state
+        r=self.go(action='open',url=f'http://{site()}/')
+        job=self.home/'jobs'/r['session']
+        def tree(root):
+            kids={}
+            for d in Path('/proc').iterdir():
+                try:
+                    stat=(d/'stat').read_text();kids.setdefault(int(stat[stat.rindex(')')+2:].split()[1]),[]).append(int(d.name))
+                except (OSError,ValueError):pass
+            out,todo=[],[root]
+            while todo:
+                p=todo.pop();out.append(p);todo+=kids.get(p,[])
+            return out
+        procs=tree(read_state(job)['pid'])
+        cmd=lambda p:Path(f'/proc/{p}/cmdline').read_bytes() if Path(f'/proc/{p}').exists() else b''
+        self.assertTrue(any(b'--remote-debugging-pipe' in cmd(p) for p in procs),'Chrome runs under the box')
+        self.assertTrue((self.home/'boxes'/'g1'/'browser'/'profile').is_dir(),'its profile is in the goal\'s box')
+        self.assertTrue(self.sb.end(self.home,'g1'))
+        self.assertFalse((self.home/'boxes'/'g1').exists(),'the box and the profile in it are gone')
+        end=time.monotonic()+10
+        while any(Path(f'/proc/{p}').exists() for p in procs) and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual([p for p in procs if Path(f'/proc/{p}').exists()],[],'Chrome\'s whole process tree is gone')
+        self.assertEqual(read_state(job)['phase'],'finished')
+
+    def test_close_then_open_starts_a_new_browser_and_says_so(self):
+        from caminus.ember.resident.terminal import read_state
+        r=self.go(action='open',url=f'http://{site()}/')
+        self.assertTrue(self.go(action='close')['closed'])
+        end=time.monotonic()+10
+        while read_state(self.home/'jobs'/r['session']).get('phase')!='finished' and time.monotonic()<end:time.sleep(.1)
+        with self.assertRaises(ValueError) as cm:self.go(action='snapshot')
+        self.assertIn('no browser is open',str(cm.exception))
+        r2=self.go(action='open',url=f'http://{site()}/about.html')
+        self.assertEqual(r2['title'],'About');self.assertNotEqual(r2['session'],r['session'])
+        self.assertIn('new one',r2['note'])
+
+    def test_a_download_lands_in_the_box(self):
+        self.go(action='open',url=f'http://{site()}/')
+        r=self.go(action='open',url=f'http://{site()}/report.txt')
+        self.assertNotIn('error',r);self.assertEqual(r['title'],'Fixture','a file opens no page: the last one stays')
+        got=self.home/'boxes'/'g1'/'downloads'/'report.txt'
+        end=time.monotonic()+10
+        while not got.exists() and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual(got.read_text(),'a downloaded file\n')
+        self.assertTrue(any('downloading report.txt to' in n for n in r.get('notes',[])),r)
+        self.assertTrue(self.sb.end(self.home,'g1'))
+        self.assertEqual((self.home/'outputs'/'g1'/'downloads'/'report.txt').read_text(),'a downloaded file\n',
+                         'the goal\'s end keeps its downloads in its outputs folder')
+
+    def test_a_browser_nobody_calls_closes_itself(self):
+        from caminus.ember.resident.terminal import read_state
+        self.rt.config=dict(sandbox=dict(browser_idle_s=2))
+        job=self.home/'jobs'/self.go(action='open',url=f'http://{site()}/')['session']
+        end=time.monotonic()+20
+        while read_state(job).get('phase')!='finished' and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual(read_state(job)['phase'],'finished','Chrome closed after 2 s without a call')
+        with self.assertRaises(ValueError) as cm:self.go(action='snapshot')
+        self.assertIn('closed itself after 2 s',str(cm.exception))
+
+    def test_an_uncapped_browser_stays_open_until_the_goal_ends(self):
+        from caminus.ember.resident.terminal import read_state
+        self.rt.config=dict(sandbox=dict(browser_idle_s=-1))
+        with self.assertRaises(ValueError) as cm:self.go(action='open',url=f'http://{site()}/')
+        self.assertIn('0 for never',str(cm.exception))
+        self.rt.config=dict(sandbox=dict(browser_idle_s=0))       # 0: never closes on its own
+        opened=self.go(action='open',url=f'http://{site()}/')
+        job=self.home/'jobs'/opened['session']
+        self.assertEqual(json.loads((job/'request.json').read_text())['browser']['idle_s'],0)
+        self.go(action='type',ref=self.ref(opened['snapshot'],'textbox "Name"'),text='Ada')
+        time.sleep(4)                                             # (twice the idle test's limit)
+        self.assertEqual(read_state(job)['phase'],'running')
+        r=self.go(action='snapshot')
+        self.assertEqual(r['session'],opened['session']);self.assertIn('= "Ada"',r['snapshot'],'the same page, kept')
+        self.assertTrue(self.sb.end(self.home,'g1'))
+        end=time.monotonic()+10
+        while read_state(job).get('phase')!='finished' and time.monotonic()<end:time.sleep(.1)
+        self.assertEqual(read_state(job)['phase'],'finished','the goal\'s end closes it')
 
 
 class WorkerEnv(unittest.TestCase):

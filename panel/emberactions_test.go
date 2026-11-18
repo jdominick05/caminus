@@ -16,7 +16,7 @@ import (
 func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 	home, cwd := "/srv/agent/homes/resident", "/srv/agent/homes/resident/work"
 	card := func(name string, args, result map[string]any) string {
-		return ansi.Strip(actionCard(name, args, result, 160, home, cwd))
+		return ansi.Strip(actionCard(name, args, result, 160, home, cwd, false))
 	}
 	cases := []struct {
 		name         string
@@ -26,6 +26,15 @@ func TestToolCardsSayWhatCameBackInPlainWords(t *testing.T) {
 		{"terminal", map[string]any{"command": "cd " + cwd + " && python3 -m unittest"}, map[string]any{"exit_code": 0.0, "output": "\x1b[32mOK\x1b[0m\n"}, "$ python3 -m unittest"},
 		{"read", map[string]any{"path": cwd + "/inventory.py"}, map[string]any{"shown": "1-20"}, "read  inventory.py"},
 		{"read", map[string]any{"path": home + "/notes/a.md"}, map[string]any{"shown": "1-2"}, "~/notes/a.md"},
+		{"search", map[string]any{"pattern": "def total", "path": cwd}, map[string]any{"matches": 2.0, "files": 1.0,
+			"text": "work/inventory.py\n    14-  \n    15:  def total_value(items):\n    16-      \"\"\"The value\"\"\"\n    --\n    40:  def total(x):"},
+			"search  “def total” under ~/work  ·  2 matches in 1 file\n  ⎿ work/inventory.py:15  def total_value(items):\n    work/inventory.py:40  def total(x):"},
+		{"search", map[string]any{"glob": "*.py"}, map[string]any{"files": 2.0, "text": "inventory.py\ntools/report.py"}, "search  *.py  ·  2 files\n  ⎿ inventory.py\n    tools/report.py"},
+		{"search", map[string]any{"pattern": "nope", "glob": "*.go"}, map[string]any{"matches": 0.0, "files": 0.0, "searched": 12.0, "text": ""}, "“nope” in *.go  ·  no matches in 12 files"},
+		{"search", map[string]any{"pattern": "("}, map[string]any{"error": "pattern is not a valid regex (missing ), unterminated subpattern at position 0)"}, "“(”  ·  pattern is not a valid regex"},
+		{"search", map[string]any{"pattern": "x", "path": "gone"}, map[string]any{"error": "[Errno 2] No such file or directory: '" + home + "/gone'"}, "“x” under gone  ·  [Errno 2] No such file or directory: '~/gone'"},
+		{"read", map[string]any{"path": cwd + "/plot.png"}, map[string]any{"path": cwd + "/plot.png", "image": map[string]any{"format": "png", "width": 640.0, "height": 480.0, "bytes": 2048.0}}, "read  plot.png  ·  image 640x480"},
+		{"read", map[string]any{"path": cwd + "/plot.png"}, map[string]any{"path": cwd + "/plot.png", "description": "A loss curve.", "image": map[string]any{"format": "png", "width": 640.0, "height": 480.0, "described_by": "ministral-8b-latest"}}, "image 640x480 · described by ministral-8b-latest"},
 		{"peers", nil, map[string]any{"peers": []any{map[string]any{"name": "lab"}}}, "1 peer: lab"},
 		{"lease", map[string]any{"action": "list"}, map[string]any{"leases": []any{}}, "no leases"},
 		{"discover", nil, map[string]any{"account": map[string]any{"user": "agent"}, "programs": map[string]any{"build": map[string]any{"make": "/usr/bin/make", "gcc": "/usr/bin/gcc"}}}, "account agent · 2 programs found"},
@@ -124,5 +133,94 @@ func TestAnErrorCardDoesNotRepeatItsFirstLine(t *testing.T) {
 	v := ansi.Strip(m.chat.eventBlock(e))
 	if strings.Count(v, "the done check is not met") != 1 || !strings.Contains(v, "the tests still fail") {
 		t.Fatalf("the reason once, then the rest:\n%s", v)
+	}
+}
+
+func TestASandboxCardIsMarkedAndSaysItsNetworkAndTheLimitHit(t *testing.T) {
+	conns := []any{map[string]any{"target": "example.com:443", "verdict": "allowed"},
+		map[string]any{"target": "www.iana.org:443", "verdict": "refused: not in hosts"}}
+	args := map[string]any{"command": "python3 build.py", "hosts": []any{"example.com"}}
+	result := map[string]any{"exit_code": -9.0, "output": "building\n", "limit_hit": "memory", "hosts": []any{"example.com"},
+		"connections": conns, "box": "/srv/agent/homes/r/boxes/g1",
+		"limits":           map[string]any{"time_s": 600.0, "memory_mb": 4096.0, "tasks": 512.0, "cpu_percent": 800.0, "disk_mb": 4096.0, "enforced": "systemd"},
+		"connections_more": 7.0}
+	v := ansi.Strip(actionCard("sandbox", args, result, 200, "", "", false))
+	for _, want := range []string{"sandbox", "$ python3 build.py", "memory limit hit: box killed", "net: example.com", "1 refused"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("want %q in the compact card:\n%s", want, v)
+		}
+	}
+	if v := ansi.Strip(actionCard("terminal", map[string]any{"command": "sleep 20"}, map[string]any{"exit_code": -9.0, "output": "", "limit_hit": "time"}, 200, "", "", false)); !strings.Contains(v, "time limit hit: command killed") {
+		t.Fatalf("a terminal timeout says so on its card:\n%s", v)
+	}
+	if v := ansi.Strip(actionCard("sandbox", map[string]any{"command": "make"}, map[string]any{"exit_code": 0.0, "output": "ok\n", "hosts": []any{}}, 200, "", "", false)); !strings.Contains(v, "no network") || strings.Contains(v, "limit hit") {
+		t.Fatalf("a box without hosts says no network, and no limit when none hit:\n%s", v)
+	}
+
+	// expanded: the call card is marked sandbox (not "terminal"), the result lists limits and every connection
+	m := chatFixture(t)
+	m.chat.expanded = true
+	call := residentEvent{Seq: 1, Goal: "original", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"id": "s1",
+		"function": map[string]any{"name": "sandbox", "arguments": `{"command":"python3 build.py","hosts":["example.com"]}`}}}}}
+	if v := ansi.Strip(m.chat.eventBlock(call)); !strings.Contains(v, "sandbox") || strings.Contains(v, "terminal") || !strings.Contains(v, "net: example.com") {
+		t.Fatalf("the call card reads sandbox with its hosts:\n%s", v)
+	}
+	res := residentEvent{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "sandbox", "call_id": "s1", "result": result}}
+	v = ansi.Strip(m.chat.eventBlock(res))
+	for _, want := range []string{"memory limit hit", "limits: 600s · 4096 MB · 512 processes · CPU 800 % · /box 4096 MB (systemd)", "… 7 more connections",
+		"connection: example.com:443  allowed", "connection: www.iana.org:443  refused: not in hosts", "building"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("want %q in the expanded result:\n%s", want, v)
+		}
+	}
+	ev := residentEvent{Seq: 3, Goal: "original", Kind: "sandbox_connections", Data: map[string]any{"session": "x", "connections": conns}}
+	if v := ansi.Strip(m.chat.eventBlock(ev)); !strings.Contains(v, "sandbox network") || !strings.Contains(v, "www.iana.org:443  refused") {
+		t.Fatalf("the connections event is its own line:\n%s", v)
+	}
+}
+
+func TestABrowserCardSaysWhatItDidThePageAndItsNetwork(t *testing.T) {
+	snap := "- heading \"Thanks\" (level 1)\n- text \"sent ?who=Ada\"\n- link \"Home\" [e6] -> /\n- button \"Again\" [e7]"
+	result := map[string]any{"did": "clicked button \"Send\"", "title": "Done", "url": "http://127.0.0.1:8000/done.html?who=Ada",
+		"snapshot": snap, "network": map[string]any{"allowed": 3.0, "refused": []any{"10.0.0.5:80 (refused: LAN)"}}}
+	v := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e5"}, result, 200, "", "", false))
+	for _, want := range []string{"browser", "clicked button \"Send\"", "Done · 127.0.0.1:8000/done.html?who=Ada", "1 refused",
+		"heading \"Thanks\"", "link \"Home\" [e6]"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("want %q in the compact card:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "button \"Again\"") {
+		t.Fatalf("the compact card shows a short excerpt of the snapshot:\n%s", v)
+	}
+	shot := ansi.Strip(actionCard("browser", map[string]any{"action": "screenshot"},
+		map[string]any{"screenshot": "/h/w/boxes/g/screenshots/shot-1.png", "title": "Done", "url": "http://x/"}, 200, "/h", "/h/w", false))
+	if !strings.Contains(shot, "screenshot") || !strings.Contains(shot, "→ boxes/g/screenshots/shot-1.png") {
+		t.Fatalf("a screenshot card names its file:\n%s", shot)
+	}
+	refused := ansi.Strip(actionCard("browser", map[string]any{"action": "type", "ref": "e4", "text": "x"},
+		map[string]any{"error": "that is a password field: the browser never types passwords"}, 200, "", "", false))
+	if !strings.Contains(refused, "password field") {
+		t.Fatalf("a refusal shows its reason:\n%s", refused)
+	}
+	skipped := ansi.Strip(actionCard("browser", map[string]any{"action": "click", "ref": "e6"},
+		map[string]any{"skipped": "an earlier browser call this turn was refused, so this one was not run"}, 200, "", "", false))
+	if !strings.Contains(skipped, "click e6") || !strings.Contains(skipped, "skipped: an earlier browser call this turn was refused") {
+		t.Fatalf("a skipped call says it never ran:\n%s", skipped)
+	}
+
+	// expanded: the whole snapshot and every connection (the event's panel field, not the model's result)
+	m := chatFixture(t)
+	m.chat.expanded = true
+	conns := []any{map[string]any{"target": "127.0.0.1:8000", "verdict": "allowed (named)"},
+		map[string]any{"target": "10.0.0.5:80", "verdict": "refused: LAN"}}
+	res := residentEvent{Seq: 2, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "browser", "call_id": "b1",
+		"result": result, "panel": map[string]any{"connections": conns}}}
+	v = ansi.Strip(m.chat.eventBlock(res))
+	for _, want := range []string{"browser", "clicked button \"Send\"", "button \"Again\" [e7]",
+		"connection: 127.0.0.1:8000  allowed (named)", "connection: 10.0.0.5:80  refused: LAN"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("want %q in the expanded card:\n%s", want, v)
+		}
 	}
 }

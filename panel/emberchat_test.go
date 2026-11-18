@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -456,6 +457,11 @@ func TestSessionSwitcherShowsCardsAndSwitches(t *testing.T) {
 	}
 	next, _ = m.chatUpdate(tea.MouseClickMsg{X: 3, Y: top + 3, Button: tea.MouseLeft})
 	m = next.(emberModel)
+	if m.agentName == "research" {
+		t.Fatal("the press only arms: a drag from a card selects its text instead of switching")
+	}
+	next, _ = m.chatUpdate(tea.MouseReleaseMsg{X: 3, Y: top + 3, Button: tea.MouseLeft})
+	m = next.(emberModel)
 	if m.agentName != "research" || m.chat.picker {
 		t.Fatalf("a click on a card switches to its session: %q", m.agentName)
 	}
@@ -653,6 +659,32 @@ func TestContextLevelAndTokenCounts(t *testing.T) {
 	}
 	if contextStateStyle("stopped").Render("#") != emberDim.Render("#") || contextStateStyle("nonsense").Render("#") != emberDim.Render("#") {
 		t.Fatal("unknown states must rest in dim")
+	}
+}
+
+// A brain whose server reports no window (status context null): the footer shows the tokens in use alone with an
+// empty bar, never "31K/0", and the context tab says the window is unknown instead of counting tokens against 0.
+func TestAnUnknownWindowShowsTheTokensInUseWithoutSlashZero(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 160
+	m.resident.Context, m.resident.ContextUsed = 0, 31_000
+	foot := ansi.Strip(m.chatFoot(m.width))
+	if !strings.Contains(foot, "31K") || strings.Contains(foot, "31K/") || strings.Contains(foot, "/0") {
+		t.Fatalf("an unknown window shows 31K alone:\n%s", foot)
+	}
+	if !strings.Contains(foot, "31K "+strings.Repeat(g.barEmpty, 8)) {
+		t.Fatalf("and an empty bar beside it:\n%s", foot)
+	}
+	pane := ansi.Strip(m.contextPane())
+	if !strings.Contains(pane, "unknown") || !strings.Contains(pane, "31K, measured") || strings.Contains(pane, "(0)") {
+		t.Fatalf("the context tab names the window unknown and counts nothing against 0:\n%s", pane)
+	}
+	if pane := ansi.Strip(m.residentSettingsPane()); !strings.Contains(pane, "unknown") || strings.Contains(pane, "0 tokens") {
+		t.Fatalf("the settings tab names the window unknown:\n%s", pane)
+	}
+	m.resident.Context = 1_048_574
+	if foot := ansi.Strip(m.chatFoot(m.width)); !strings.Contains(foot, "31K/1M") {
+		t.Fatalf("a known window is shown as before:\n%s", foot)
 	}
 }
 
@@ -903,6 +935,59 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 	if !seen {
 		t.Fatalf("the reply has no label:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A table's header and cells read in the body's text colour in every built-in theme, and that colour reads on the
+// theme's background (WCAG AA, 4.5:1): they were in the chrome grey, barely visible on a dark background.
+func TestMarkdownTablesUseTheBodyTextColourInEveryTheme(t *testing.T) {
+	themeFixture(t)
+	lum := func(hex string) float64 {
+		r, g, b, ok := hexRGB(hex)
+		if !ok {
+			return -1
+		}
+		ch := func(v uint8) float64 {
+			c := float64(v) / 255
+			if c <= 0.03928 {
+				return c / 12.92
+			}
+			return math.Pow((c+0.055)/1.055, 2.4)
+		}
+		return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b)
+	}
+	sgrBefore := func(out, word string) string { // the last colour set before word
+		i := strings.Index(out, word)
+		if i < 0 {
+			t.Fatalf("%q not rendered:\n%q", word, out)
+		}
+		j := strings.LastIndex(out[:i], "38;2;")
+		if j < 0 {
+			return ""
+		}
+		return out[j : j+strings.IndexByte(out[j:], 'm')]
+	}
+	for _, name := range themeNames() {
+		if err := themeLoad(name); err != nil {
+			t.Fatal(name, err)
+		}
+		r, err := glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(80))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := r.Render("Plainword before the table.\n\n| Headword | Other |\n|---|---|\n| Cellword | x |\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := sgrBefore(out, "Plainword")
+		if body == "" || sgrBefore(out, "Headword") != body || sgrBefore(out, "Cellword") != body {
+			t.Fatalf("%s: the table's header and cells are not in the body text colour (%q):\n%q", name, body, out)
+		}
+		if fg, bg := lum(themeRole("text")), lum(themeRole("bg")); fg >= 0 && bg >= 0 {
+			if ratio := (max(fg, bg) + 0.05) / (min(fg, bg) + 0.05); ratio < 4.5 {
+				t.Fatalf("%s: text on its background is %.2f:1, under 4.5:1", name, ratio)
+			}
+		}
 	}
 }
 
@@ -1203,14 +1288,20 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 			"path": "src/parse.c", "added": float64(1), "removed": float64(1),
 			"diff": "@@ -1,3 +1,3 @@\n int f(void) {\n-    if (n > len) return -1;\n+    if (n >= len) return -1;"}}},
 		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
-			"path": "src/parse.c", "shown": "1-40", "text": "secret body"}}},
+			"path": "src/parse.c", "shown": "1-40 of 90", "text": "secret body"}}},
+		{Seq: 4, Goal: "g1", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"id": "s1", "function": map[string]any{
+			"name": "search", "arguments": `{"pattern":"len","glob":"*.c"}`}}}}},
+		{Seq: 5, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "search", "call_id": "s1", "result": map[string]any{
+			"path": ".", "matches": float64(1), "files": float64(1), "searched": float64(3), "text": "src/parse.c\n     2:      if (n >= len) return -1;"}}},
+		{Seq: 6, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
+			"path": "plots/loss.png", "image": map[string]any{"format": "png", "width": float64(640), "height": float64(480)}}}},
 	}
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
 	// the file's line numbers from the hunk header, the marker, then the code (highlighted, so compare it stripped)
 	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "   1   int f(void) {", "   2 -     if (n > len) return -1;",
-		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
+		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40 of 90", "search  “len” in *.c  ·  1 match in 1 file", "read  plots/loss.png  ·  image 640x480"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
@@ -1218,7 +1309,7 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 	if !strings.Contains(m.chat.content, bgSeq(func() string { a, _ := diffPlates(); return a }())) {
 		t.Fatal("an added line sits on the tinted plate")
 	}
-	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 {
+	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 || strings.Contains(v, `"pattern"`) {
 		t.Fatalf("hunk headers, read bodies or a repeated call card leaked:\n%s", v)
 	}
 }
@@ -1449,11 +1540,6 @@ func TestComposerExtras(t *testing.T) {
 	if _, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); ok {
 		t.Fatal("Ctrl+E alone still folds the cards (not the editor)")
 	}
-	// !cmd: the output lands in the draft, fenced
-	m = m.bangDone(bangDoneMsg{cmd: "df -h ~", output: "/dev/x 100G 40G"})
-	if v := m.chat.compose.Value(); !strings.Contains(v, "```\n$ df -h ~\n/dev/x 100G 40G\n```") {
-		t.Fatalf("the command and its output are in the draft: %q", v)
-	}
 	// Ctrl+O: every line of the open cards
 	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
 	if !next.chat.full {
@@ -1654,6 +1740,63 @@ func TestARecoveredCutOffIsANoteNotAnError(t *testing.T) {
 	}
 }
 
+func TestAWideTerminalStreamsTheReasoningsLastLinesUntilTheText(t *testing.T) {
+	old := g
+	defer func() { g = old }()
+	g = glyphTiers["unicode"]
+	m := chatFixture(t)
+	m.width, m.height = 200, 40
+	tw := m.transcriptWidth(m.width)
+	var reasoning []string
+	for i := 1; i <= 9; i++ {
+		reasoning = append(reasoning, fmt.Sprintf("step %d of the plan", i))
+	}
+	long := "and a last thought long enough to wrap: " + strings.Repeat("word ", 40)
+	m.chat.live = residentLive{active: true, turn: "t1", reasoning: strings.Join(reasoning, "\n") + "\n" + long + "\n"}
+	m.syncChat()
+	block := m.liveInline(tw)
+	plain := strings.Split(ansi.Strip(block), "\n")
+	// the heading, then at most four dimmed gutter rows, the cursor at the end
+	if !strings.Contains(plain[0], "thinking") || len(plain) != 1+liveGistRows || !strings.HasSuffix(plain[len(plain)-1], "▌") {
+		t.Fatalf("the heading and the reasoning's last four rows:\n%s", ansi.Strip(block))
+	}
+	for _, r := range plain[1:] {
+		if !strings.HasPrefix(r, "  │ ") || ansi.StringWidth(r) > tw {
+			t.Fatalf("a dimmed gutter row inside the transcript's width (%d): %q", tw, r)
+		}
+	}
+	if !strings.Contains(block, emberDim.Render("│ step 9 of the plan")) || strings.Contains(block, "step 8") {
+		t.Fatalf("the last lines, dimmed (the wrapped thought takes the rest):\n%s", ansi.Strip(block))
+	}
+	if !strings.Contains(ansi.Strip(m.chat.transcript.View()), "step 9 of the plan") {
+		t.Fatal("the transcript shows them")
+	}
+	// a frame tick between updates leaves the block as it was (no transcript reset per frame)
+	m.tickN++
+	if again := m.liveInline(tw); again != block {
+		t.Fatalf("the block moved with the clock:\n%q\n%q", block, again)
+	}
+	// a tool call written with no reasoning says which tool is being prepared
+	m.chat.live = residentLive{active: true, turn: "t2", tools: []string{"terminal"}}
+	if b := ansi.Strip(m.liveInline(tw)); !strings.Contains(b, "preparing terminal▌") {
+		t.Fatalf("preparing the tool:\n%s", b)
+	}
+	// the reply text replaces the reasoning
+	m.chat.live = residentLive{active: true, turn: "t1", reasoning: strings.Join(reasoning, "\n"), text: "Here is the plan."}
+	m.syncChat()
+	if b := ansi.Strip(m.liveInline(tw)); !strings.Contains(b, "Here is the plan.▌") || strings.Contains(b, "step 9") || strings.Contains(b, "│") {
+		t.Fatalf("the text replaces the reasoning:\n%s", b)
+	}
+	// the landed turn folds the reasoning into the collapsed thinking line, as before
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 50, Goal: "original", Kind: "assistant",
+		Data: map[string]any{"content": "Here is the plan.", "reasoning": strings.Join(reasoning, "\n")}}}})
+	m.syncChat()
+	view := ansi.Strip(m.chat.transcript.View())
+	if m.liveInline(tw) != "" || !strings.Contains(view, "thinking · 9 lines") || strings.Contains(view, "step 9") || strings.Contains(view, "▌") {
+		t.Fatalf("landed, the reasoning folds:\n%s", view)
+	}
+}
+
 func TestAWideTerminalPutsTasksAtTheTopRight(t *testing.T) {
 	old := g
 	defer func() { g = old }()
@@ -1819,7 +1962,7 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 	m = next.(emberModel)
 	next, _ = m.chatUpdate(tea.MouseMotionMsg{X: x2, Y: y(second), Button: tea.MouseLeft})
 	m = next.(emberModel)
-	if !strings.Contains(m.highlightSelection(m.chat.transcript.View()), "\x1b[7m") {
+	if !strings.Contains(m.render(), "\x1b[7m") {
 		t.Fatal("the drag is highlighted while it goes on")
 	}
 	next, cmd := m.chatUpdate(tea.MouseReleaseMsg{X: x2, Y: y(second), Button: tea.MouseLeft})
@@ -1840,6 +1983,268 @@ func TestDragOverTheHistorySelectsAndCopiesItsText(t *testing.T) {
 	}
 }
 
+// dragOver drags the mouse through the program's Update from the first cell of from to the last cell of to (each the
+// first row of the drawn screen that holds it) and returns the model after the release and the text it copied (what
+// the release's OSC 52 command carries; the desktop tool's command beside it is never run).
+func dragOver(t *testing.T, m emberModel, from, to string) (emberModel, string) {
+	t.Helper()
+	at := func(s string, last bool) (int, int) {
+		for y, row := range strings.Split(ansi.Strip(m.render()), "\n") {
+			if i := strings.Index(row, s); i >= 0 {
+				x := ansi.StringWidth(row[:i])
+				if last {
+					x += ansi.StringWidth(s) - 1
+				}
+				return x, y
+			}
+		}
+		t.Fatalf("%q is not on the screen:\n%s", s, ansi.Strip(m.render()))
+		return 0, 0
+	}
+	x1, y1 := at(from, false)
+	x2, y2 := at(to, true)
+	for _, msg := range []tea.Msg{tea.MouseClickMsg{X: x1, Y: y1, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: x2, Y: y2, Button: tea.MouseLeft}} {
+		next, _ := m.Update(msg)
+		m = next.(emberModel)
+	}
+	if !strings.Contains(m.render(), "\x1b[7m") {
+		t.Fatal("the drag is highlighted while it goes on")
+	}
+	next, cmd := m.Update(tea.MouseReleaseMsg{X: x2, Y: y2, Button: tea.MouseLeft})
+	m = next.(emberModel)
+	var batch tea.BatchMsg
+	if cmd != nil {
+		batch, _ = cmd().(tea.BatchMsg)
+	}
+	if len(batch) == 0 || !strings.Contains(m.msg, "copied") {
+		t.Fatalf("the release copies (msg %q)", m.msg)
+	}
+	return m, fmt.Sprint(batch[0]())
+}
+
+func TestDragSelectsAndCopiesInEveryAreaOfTheScreen(t *testing.T) {
+	cases := []struct {
+		name, from, to string
+		open           func(*emberModel)
+		want           string
+		has, not       []string
+	}{
+		{name: "chat", from: "total_value starts", to: "never counts.",
+			want: "total_value starts at items[1:], so the first row never counts."},
+		{name: "folded card", from: "● terminal", to: "FAILED (failures=1)",
+			want: "● terminal  $ python3 -m unittest -q  ·  exit 1 · 7 lines\n  ⎿ Ran 4 tests in 0.002s\n\n    FAILED (failures=1)"},
+		{name: "unfolded card", from: "▾ ± edit", to: "price in items:",
+			want: "▾ ± edit  inventory.py  ·  +1 −1\n   │   16 -     for name, qty, price in items[1:]:\n   │   16 +     for name, qty, price in items:"},
+		{name: "side pane", from: "tasks  3 of 4", to: "◐ run the tests",
+			want: "tasks  3 of 4 done\n ● read inventory.py\n ● state the done check\n ● fix total_value\n ◐ run the tests",
+			not:  []string{"FAILED", "test_stock", "edit"}},
+		{name: "header", from: "CAMINUS", to: "● working", want: "CAMINUS · resident ● working"},
+		{name: "status line", from: "◈ swift-1.5", to: "42 tok/s", want: "◈ swift-1.5 · 9K/32K ▓▓░░░░░░ · ⇢ read 771 · write 42 tok/s"},
+		{name: "typing box", from: "╭─ to goal", to: "! for shell mode",
+			want: "to goal g1\n› message the agent · Enter nudges · /steer redirects · ! for shell mode"},
+		{name: "dialog", from: "goals  1 open", to: "n new goal", open: func(m *emberModel) { m.chat.goals = true },
+			not: []string{"│", "╭", "─"}},
+		{name: "session picker", from: "no goal yet", to: "Esc back", open: func(m *emberModel) { m.chat.picker = true },
+			has: []string{"+ new session", "no GitHub account\n$0.00 today in this session", "Esc back"}, not: []string{"│", "╭", "╮", "╯", "╰"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := shotEmber(t, shotWidth, shotHeight) // wide enough for the side pane
+			if c.open != nil {
+				c.open(&m)
+			}
+			m, got := dragOver(t, m, c.from, c.to)
+			if c.want != "" && got != c.want {
+				t.Fatalf("copied:\n%q\nwant:\n%q", got, c.want)
+			}
+			if !strings.HasPrefix(got, strings.TrimLeft(c.from, "╭─ ")) {
+				t.Fatalf("the copy starts where the drag did: %q", got)
+			}
+			for _, part := range c.has {
+				if !strings.Contains(got, part) {
+					t.Fatalf("the copy lost %q:\n%s", part, got)
+				}
+			}
+			for _, bad := range c.not {
+				if strings.Contains(got, bad) {
+					t.Fatalf("the copy took %q from outside its area or a frame:\n%s", bad, got)
+				}
+			}
+			t.Logf("copied from the %s:\n%s", c.name, got)
+			next, _ := m.Update(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft})
+			next, _ = next.(emberModel).Update(tea.MouseReleaseMsg{X: 1, Y: 1, Button: tea.MouseLeft})
+			if m = next.(emberModel); strings.Contains(m.render(), "\x1b[7m") {
+				t.Fatal("a click clears the selection")
+			}
+		})
+	}
+}
+
+func TestASelectionShowsOnlyWhereItsTextIs(t *testing.T) {
+	m := shotEmber(t, shotWidth, shotHeight)
+	m, _ = dragOver(t, m, "total_value starts", "never counts.")
+	m.chat.goals = true
+	if strings.Contains(m.render(), "\x1b[7m") {
+		t.Fatal("a dialog over the history hides the history's selection; it is not drawn over the dialog")
+	}
+	m.chat.goals = false
+	m, _ = dragOver(t, m, "╭─ to goal", "! for shell mode")
+	lit := strings.Split(m.render(), "\x1b[7m")[1:]
+	if len(lit) != 2 {
+		t.Fatalf("both selected rows show (%d)", len(lit))
+	}
+	for _, seg := range lit {
+		if seg = seg[:strings.Index(seg, "\x1b[")]; strings.ContainsAny(seg, "╭╮│") {
+			t.Fatalf("the composer's border is not highlighted (it is not copied): %q", seg)
+		}
+	}
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if strings.Contains(next.(emberModel).render(), "\x1b[7m") {
+		t.Fatal("a key clears a selection over the frame")
+	}
+}
+
+// twoFoldedCards is the shot's session with its second test run finished: two terminal cards that each show only
+// their last 3 output lines.
+func twoFoldedCards(t *testing.T, h int) emberModel {
+	m := shotEmber(t, shotWidth, h)
+	m.chat.live = residentLive{}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 19, Goal: "g1",
+		Kind: "tool_result", Data: map[string]any{"name": "terminal", "call_id": "c5", "result": map[string]any{
+			"session": "s2", "exit_code": 0.0, "output": "....\nall four pass\n\nRan 4 tests in 0.002s\n\nOK\n"}}}}})
+	m.chat.transcript.GotoBottom()
+	return m
+}
+
+// screenRow is the screen row (and the column) where s first shows; -1 when it is not on the screen.
+func screenRow(m emberModel, s string) (int, int) {
+	for y, row := range strings.Split(ansi.Strip(m.render()), "\n") {
+		if i := strings.Index(row, s); i >= 0 {
+			return y, ansi.StringWidth(row[:i])
+		}
+	}
+	return -1, 0
+}
+
+func click(m emberModel, x, y int) (emberModel, tea.Cmd) {
+	next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	return next.(emberModel), cmd
+}
+
+func TestAClickOpensOnlyTheCardUnderIt(t *testing.T) {
+	for _, place := range []string{"at the bottom", "scrolled up"} {
+		t.Run(place, func(t *testing.T) {
+			m := twoFoldedCards(t, 30) // (short: the history is taller than its window)
+			if place == "scrolled up" {
+				m.chat.transcript.GotoTop()
+			}
+			head := "exit 1 · 7 lines" // the first run's card; its first 4 output lines are folded away
+			y, x := screenRow(m, head)
+			tr := m.chat.transcript
+			if y < 0 || !strings.Contains(ansi.Strip(m.chat.content), "exit 0 · 6 lines") || tr.TotalLineCount() <= tr.Height() ||
+				tr.AtBottom() != (place == "at the bottom") {
+				t.Fatalf("fixture: both cards, a history taller than its window, the card on the screen:\n%s", ansi.Strip(m.render()))
+			}
+			for _, hidden := range []string{"FAIL: test_total", "all four pass"} {
+				if strings.Contains(ansi.Strip(m.chat.content), hidden) {
+					t.Fatalf("fixture: %q is folded away", hidden)
+				}
+			}
+			before := ansi.Strip(m.render())
+			m, cmd := click(m, x, y)
+			screen := ansi.Strip(m.render())
+			if !strings.Contains(screen, "FAIL: test_total") || m.chat.expanded || m.chat.cards || cmd != nil {
+				t.Fatalf("a click opens the card under it, in the compact view:\n%s", screen)
+			}
+			if strings.Contains(m.chat.content, "all four pass") || len(m.chat.opened) != 1 {
+				t.Fatalf("only that card opens, not the second (opened %v)", m.chat.opened)
+			}
+			if y2, _ := screenRow(m, head); y2 != y {
+				t.Fatalf("the card stays under the pointer: row %d, was %d", y2, y)
+			}
+			t.Logf("before the click:\n%s\nafter it:\n%s", before, screen)
+			m, _ = click(m, x, y)
+			if strings.Contains(ansi.Strip(m.render()), "FAIL: test_total") || len(m.chat.opened) != 0 {
+				t.Fatal("a second click on it folds it again")
+			}
+			m, _ = click(m, x, y)
+			next, _ := m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+			m = next.(emberModel)
+			if !m.chat.expanded || !strings.Contains(m.chat.content, "FAIL: test_total") || !strings.Contains(m.chat.content, "all four pass") {
+				t.Fatal("Ctrl+O still opens every card")
+			}
+			next, _ = m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+			if m = next.(emberModel); m.chat.expanded || strings.Contains(m.chat.content, "FAIL: test_total") {
+				t.Fatal("Ctrl+O back to compact folds every card, the one a click opened too")
+			}
+		})
+	}
+}
+
+func TestAClickOnWordsOrAShortCardDoesNothing(t *testing.T) {
+	m := twoFoldedCards(t, shotHeight)
+	m.chat.transcript.GotoTop()
+	for _, s := range []string{"total_value starts", "inventory.py  ·  lines 14-18", "define_done"} {
+		y, x := screenRow(m, s)
+		if y < 0 {
+			t.Fatalf("fixture: %q shows", s)
+		}
+		before := m.chat.content
+		next, _ := click(m, x, y)
+		if next.chat.content != before || len(next.chat.opened) != 0 {
+			t.Fatalf("a click on %q changed the history", s)
+		}
+	}
+}
+
+func TestADragOverAFoldedCardSelectsWithoutOpeningIt(t *testing.T) {
+	m := twoFoldedCards(t, shotHeight)
+	m, got := dragOver(t, m, "● terminal  $ python3 -m unittest -q  ·  exit 1", "FAILED (failures=1)")
+	if len(m.chat.opened) != 0 || m.chat.expanded || !strings.HasSuffix(got, "FAILED (failures=1)") {
+		t.Fatalf("a drag over the folded card selects (%q); it does not open it", got)
+	}
+}
+
+func TestAShakyClickStillClicks(t *testing.T) {
+	for _, path := range []struct {
+		name  string
+		moves [][2]int // pointer offsets from the press, the last one where the button comes up
+	}{
+		{"one cell over and back", [][2]int{{1, 0}, {0, 0}}},
+		{"one cell over", [][2]int{{0, 1}}},
+		{"away and back where it began", [][2]int{{4, 0}, {0, 0}}},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			m := twoFoldedCards(t, shotHeight)
+			y, x := screenRow(m, "exit 1 · 7 lines")
+			next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			for _, d := range path.moves {
+				next, _ = next.(emberModel).Update(tea.MouseMotionMsg{X: x + d[0], Y: y + d[1], Button: tea.MouseLeft})
+			}
+			last := path.moves[len(path.moves)-1]
+			next, cmd := next.(emberModel).Update(tea.MouseReleaseMsg{X: x + last[0], Y: y + last[1], Button: tea.MouseLeft})
+			if m := next.(emberModel); len(m.chat.opened) != 1 || cmd != nil || strings.Contains(m.msg, "copied") {
+				t.Fatal("a press, a move of less than 2 cells (or back to the press) and a release is a click: the card opens, nothing is copied")
+			}
+		})
+	}
+}
+
+func TestADialogsOwnBoxLinesAreCopied(t *testing.T) {
+	m := shotEmber(t, shotWidth, shotHeight)
+	m.chat.view = textView{open: true, title: "diff", lines: []string{"│ │ a table row │", "├── tree", "x ─── y"}}
+	m, got := dragOver(t, m, "│ │ a table", "x ─── y")
+	if want := "│ │ a table row │\n├── tree\nx ─── y"; got != want {
+		t.Fatalf("only the dialog's own frame is left out; the │ and ─ in its content stay:\n%q\nwant\n%q", got, want)
+	}
+	_, got = dragOver(t, m, "diff", "x ─── y") // from the title: the box's side and the rule under the title go
+	if !strings.HasPrefix(got, "diff\n") || strings.Contains(got, "────") || !strings.HasSuffix(got, "x ─── y") {
+		t.Fatalf("the frame's side and the title's underline are left out:\n%s", got)
+	}
+}
+
 func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 	m := chatFixture(t)
 	m.width, m.height = 100, 50
@@ -1847,10 +2252,12 @@ func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 		residentEvent{Seq: 990, Goal: "original", Kind: "assistant", Data: map[string]any{
 			"content": "Let me check the BL density first.",
 			"tool_calls": []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{
-				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}}}},
+				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}, map[string]any{"id": "c2", "type": "function",
+				"function": map[string]any{"name": "search", "arguments": `{"path":"src","pattern":"density\\("}`}}}}},
 		residentEvent{Seq: 991, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": "0.0256"}}})
 	box := ansi.Strip(m.liveBlock(90))
-	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") {
+	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") ||
+		!strings.Contains(box, `→ search  density\(`) {
 		t.Fatalf("without reasoning, the words and the tool calls are the chain:\n%s", box)
 	}
 	if strings.Contains(box, "no thoughts yet") {
@@ -2318,11 +2725,82 @@ func TestTheWheelScrollsHistoryAndAJumpPillBringsItBack(t *testing.T) {
 		t.Fatal("scrolled up: the jump pill shows")
 	}
 	w := max(20, m.width)
+	m.syncChat() // the pill's row as the screen draws it (the live window took rows from the history)
 	row := lipgloss.Height(m.chatHead(w)) + m.chat.transcript.Height() - 1
 	next, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.jumpPillX(m.transcriptWidth(w)) + 2, Y: row})
 	m = next.(emberModel)
+	next, _ = m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: m.jumpPillX(m.transcriptWidth(w)) + 2, Y: row})
+	m = next.(emberModel)
 	if !m.chat.transcript.AtBottom() || strings.Contains(ansi.Strip(m.View().Content), strings.TrimSpace(jumpPillText)) {
 		t.Fatal("a click on the pill goes to the newest message and the pill goes away")
+	}
+}
+
+func TestTheActivityLineCountsTheWholeTurnsTokens(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 120, 40
+	m.resident.Goals = []residentGoal{{ID: "g1", State: "working", Prompt: "x"}}
+	now := float64(time.Now().Add(-60 * time.Second).Unix())
+	m.residentEvents = []residentEvent{{Seq: 10, Ts: now, Goal: "g1", Kind: "goal_queued", Data: map[string]any{"prompt": "x"}}}
+	seq, last := 10, 0
+	shown := func(step string) int {
+		t.Helper()
+		_, _, n := m.turnTokens("g1")
+		if n < last {
+			t.Fatalf("%s: the count went back from %d to %d", step, last, n)
+		}
+		last = n
+		return n
+	}
+	live := func(turn string, chars int) { // a call writing: its live text so far
+		next, _ := m.Update(residentLiveMsg{turn: turn, text: strings.Repeat("w", chars), reset: true})
+		m = next.(emberModel)
+	}
+	land := func(tokens int, kind string) { // a call's event, with the provider's count; or a new turn's message
+		seq++
+		data := map[string]any{"content": "x", "tokens": float64(tokens)}
+		if kind != "assistant" {
+			data = map[string]any{"text": "and now this"}
+		}
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident,
+			events: []residentEvent{{Seq: seq, Ts: now + float64(seq), Goal: "g1", Kind: kind, Data: data}}})
+	}
+	// call 1 writes about 200 tokens; its live text clears and call 2 starts before call 1's event arrives (the
+	// stream is pushed, events are polled): the count holds instead of dropping back
+	live("t1", 800)
+	if n := shown("call 1 writing"); n != 200 {
+		t.Fatalf("call 1's estimate: %d", n)
+	}
+	m.chat.stopStream()
+	live("t2", 40)
+	shown("call 2 started before call 1 landed")
+	// call 1 lands at 180 real tokens, under its estimate: the line holds 200 until the real sum passes it
+	land(180, "assistant")
+	if n := shown("call 1 landed under its estimate"); n != 200 {
+		t.Fatalf("held at the peak: %d", n)
+	}
+	live("t2", 400)
+	if n := shown("call 2 writing"); n != 280 {
+		t.Fatalf("180 real + 100 estimated: %d", n)
+	}
+	// call 2 lands over its estimate: the real count replaces it
+	land(120, "assistant")
+	if n := shown("call 2 landed"); n != 300 {
+		t.Fatalf("180 + 120: %d", n)
+	}
+	live("t3", 200)
+	shown("call 3 writing")
+	land(60, "assistant")
+	if n := shown("call 3 landed"); n != 360 {
+		t.Fatalf("three calls sum to 180 + 120 + 60: %d", n)
+	}
+	if v := ansi.Strip(m.activityLine(120)); !strings.Contains(v, "↓ 360 tokens") {
+		t.Fatalf("the line shows the turn's sum: %q", v)
+	}
+	// a new turn (your message) starts the count over
+	land(0, "user_message")
+	if _, _, n := m.turnTokens("g1"); n != 0 || strings.Contains(ansi.Strip(m.activityLine(120)), "↓") {
+		t.Fatalf("a new turn resets the count: %d", n)
 	}
 }
 
@@ -2718,14 +3196,28 @@ func TestBangBangIsYourOwnShellInItsOwnColour(t *testing.T) {
 	if m.chat.shell || m.chat.hostShell {
 		t.Fatal("Backspace on the empty line leaves")
 	}
-	msg := runHostBang("echo from-the-host")().(bangDoneMsg)
+	for _, k := range []string{"!", "!"} {
+		next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: k})
+		m = next.(emberModel)
+	}
+	m.chat.compose.SetValue("echo from-the-host")
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	msg := cmd().(bangDoneMsg)
 	if msg.err != "" || msg.output != "from-the-host" || !msg.host {
 		t.Fatalf("it runs in your shell: %+v", msg)
 	}
 	m = m.bangDone(msg)
-	if !strings.Contains(m.chat.compose.Value(), "(my shell) $ echo from-the-host") {
-		t.Fatalf("the draft says the output came from your shell:\n%s", m.chat.compose.Value())
+	card := ansi.Strip(m.chat.content)
+	if m.chat.compose.Value() != "" || !strings.Contains(card, "!! my shell  $ echo from-the-host") || !strings.Contains(card, "│ from-the-host") {
+		t.Fatalf("the command and its output are a card in the chat marked as your shell, the composer empty (%q):\n%s",
+			m.chat.compose.Value(), card)
 	}
+	if hostShellStyle().Render("!! my shell") == emberShell.Render("!! my shell") ||
+		!strings.Contains(m.chat.content, hostShellStyle().Render("!! my shell")) {
+		t.Fatal("the card is in the host shell's copper, apart from the agent shell's purple")
+	}
+	t.Logf("after !! echo from-the-host:\n%s", ansi.Strip(m.render()))
 }
 
 func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {

@@ -35,7 +35,7 @@ type residentStatus struct {
 	Model            string             `json:"model"`
 	Effort           string             `json:"effort"` // the effort level that runs ('' with no effort control)
 	Context          int                `json:"context"`
-	ContextUsed      int                `json:"context_used"` // measured at the last turn boundary; 0 means never measured
+	ContextUsed      int                `json:"context_used"`     // measured at the last turn boundary; 0 means never measured
 	TokPerS          float64            `json:"tok_per_s"`        // write (generation) speed; 0 means none reported (replySpeed)
 	PromptTokPerS    float64            `json:"prompt_tok_per_s"` // read (prompt) speed, which a Caminus server reports; 0 none
 	SpeedSource      string             `json:"speed_source"`     // "engine": the Caminus server's own numbers; else Ember's estimate

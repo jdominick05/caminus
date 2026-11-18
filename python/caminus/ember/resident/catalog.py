@@ -2,7 +2,8 @@
 
 A provider is one endpoint the resident can reach (directly, or through the owner's key relay, which adds the key):
 
-- local      the Caminus server (OpenAI-compatible): GET /v1/models, the window from GET /props (n_ctx)
+- local      the Caminus server (OpenAI-compatible): GET /v1/models, the window and vision from GET /props (n_ctx,
+             modalities.vision)
 - anthropic  the Messages API: GET /v1/models gives max_input_tokens (the window), max_tokens (the output cap) and a
              capabilities tree (thinking types, effort levels). Prices are not in it: the transport's price table.
 - deepinfra  OpenAI-compatible at https://api.deepinfra.com/v1/openai: GET {base}/models gives metadata.context_length,
@@ -12,6 +13,9 @@ A provider is one endpoint the resident can reach (directly, or through the owne
              {base}/models gives capabilities (completion_chat, function_calling, vision), max_context_length and
              aliases, and no prices: the owner's relay adds each priced model's `pricing` from its price file (the
              agent's spend meter needs them). No output cap.
+- meta       the Meta Model API (the Muse models), OpenAI-compatible at https://api.meta.ai/v1 (through the owner's relay):
+             GET {base}/models gives ids only, so each Muse chat model's window, output cap and levels come from Meta's
+             docs (META_MODELS) and its prices from the transport's table (model.META_PRICES).
 - openai     any other OpenAI-compatible server: GET {base}/models, ids only.
 
 Every model is normalized to one entry: id, provider, context, max_output, efforts (the levels /effort offers, empty
@@ -26,7 +30,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'openai')
+KINDS = ('local', 'anthropic', 'deepinfra', 'mistral', 'meta', 'openai')
 TIMEOUT = 20
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 DEEPINFRA_EFFORTS = ('none', 'low', 'medium', 'high')
@@ -107,7 +111,8 @@ def mistral_efforts(model_id, caps):
 
 
 def mistral_entries(data, provider):
-    """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out."""
+    """Chat models that call tools (the agent's loop needs both); an alias of another listed id is left out, kept in
+    its entry's aliases (find takes it: ministral-8b-latest is listed as ministral-8b-2512)."""
     out, seen = [], set()
     for m in data.get('data') or []:
         caps = m.get('capabilities') or {}
@@ -121,19 +126,52 @@ def mistral_entries(data, provider):
                       cache_read=float(p.get('cache_read', p['input']))) if 'input' in p and 'output' in p else None
         out.append(dict(id=m['id'], name=m.get('name') or m['id'], provider=provider, context=m.get('max_context_length'),
                         max_output=None, efforts=mistral_efforts(m['id'], caps), thinking='', vision=bool(caps.get('vision')),
-                        prices=prices))
+                        prices=prices, aliases=[a for a in m.get('aliases') or [] if a != m['id']]))
     return out
 
 
-def openai_entries(data, provider, context=None):
-    return [dict(id=m['id'], name=m['id'], provider=provider, context=context, max_output=None, efforts=[],
+# The Muse chat models, from dev.meta.ai/docs (models, muse-ember, muse-spark, muse-wonder, reasoning), 2026-11-17. Each
+# reads images (video, audio and PDF too) and calls tools; reasoning_effort runs minimal .. max and never none (a 400:
+# they always reason; the docs list the levels for Ember, Wonder and Spark 1.3, and give Spark 1.2 / 1.1 only the
+# parameter, so their list is assumed the same). Only Muse Ember (Meta)'s output cap is published; the others' stays
+# unknown. The name says Meta's: the harness is called Ember too. A listed id not here (images, voice, segmentation,
+# Contributor mode) is not a brain.
+META_MODELS = {
+    'muse-ember-1.0': dict(name='Muse Ember (Meta)', context=1_048_576, max_output=524_288),
+    'muse-spark-1.3': dict(name='Muse Spark 1.3 (Meta)', context=1_048_576, max_output=None),
+    'muse-spark-1.2': dict(name='Muse Spark 1.2 (Meta)', context=1_048_576, max_output=None),
+    'muse-spark-1.1': dict(name='Muse Spark 1.1 (Meta)', context=1_048_576, max_output=None),
+    'muse-wonder-1.0': dict(name='Muse Wonder (Meta)', context=1_048_576, max_output=None),
+}
+
+
+def meta_entries(data, provider):
+    """The listed Muse chat models Caminus has Meta's facts and prices for; prices shows the first tier (Muse Ember's
+    long-prompt rates are metered from model.META_PRICES)."""
+    from .model import META_PRICES
+    from .effort import MUSE_EFFORTS
+    out = []
+    for m in data.get('data') or []:
+        facts = META_MODELS.get(m.get('id')) if isinstance(m, dict) else None
+        if not facts or m['id'] not in META_PRICES:
+            continue
+        first = META_PRICES[m['id']][0]
+        out.append(dict(id=m['id'], name=facts['name'], provider=provider, context=facts['context'],
+                        max_output=facts['max_output'], efforts=list(MUSE_EFFORTS), thinking='', vision=True,
+                        prices=dict(input=first[0], output=first[1], cache_read=first[2])))
+    return out
+
+
+def openai_entries(data, provider):
+    return [dict(id=m['id'], name=m['id'], provider=provider, context=None, max_output=None, efforts=[],
                  thinking='', vision=False, prices=None) for m in data.get('data') or []]
 
 
-def local_entries(data, provider, context=None):
+def local_entries(data, provider, context=None, vision=False):
     """A local Caminus server's models, one entry per base model: its -low / -xhigh / -nothink ids are that model's
     effort levels (effort.py), not models of their own. efforts lists the scale (every level runs as the nearest the
-    model has); variants maps a level to the id that runs it; max_output is the card's (the reply limit: up to 64K)."""
+    model has); variants maps a level to the id that runs it; max_output is the card's (the reply limit: up to 64K).
+    vision is /props' modalities.vision (llama-server's key; caminus serve reports false: K3 has no vision path)."""
     from . import effort
     ids = [m['id'] for m in data.get('data') or []]
     out = []
@@ -142,14 +180,14 @@ def local_entries(data, provider, context=None):
         line = effort.line(cfg)
         out.append(dict(id=base, name=base, provider=provider, context=context,
                         max_output=effort.card(base).get('max_output'), efforts=list(effort.LEVELS) if line else [],
-                        variants=variants, thinking='', vision=False, prices=None))
+                        variants=variants, thinking='', vision=vision, prices=None))
     return out
 
 
 def discover(name, spec, opener=urllib.request.urlopen, key=None):
     """One provider's entries. spec: {kind, endpoint}. key: an API key to send (none through a relay)."""
     kind, base = spec.get('kind', 'openai'), spec['endpoint'].rstrip('/')
-    if kind not in KINDS:
+    if kind not in KINDS + ('auto',):
         raise ValueError(f'unknown provider kind {kind!r}')
     if kind == 'anthropic':
         headers = {'anthropic-version': '2023-06-01', **({'x-api-key': key} if key else {})}
@@ -157,19 +195,25 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
         return anthropic_entries(data, name)
     headers = {'Authorization': 'Bearer ' + key} if key else {}
     data = _get(base + '/models', headers, opener)
+    if kind == 'auto':
+        # (agent init, before any provider is configured: model_vision) the list's own shape says whose it is
+        rows = [m for m in data.get('data') or [] if isinstance(m, dict)]
+        kind = ('deepinfra' if any(isinstance(m.get('metadata'), dict) for m in rows) else
+                'mistral' if any(isinstance(m.get('capabilities'), dict) for m in rows) else
+                'meta' if any(m.get('id') in META_MODELS for m in rows) else 'local')
     if kind == 'deepinfra':
         return deepinfra_entries(data, name)
     if kind == 'mistral':
         return mistral_entries(data, name)
-    context = None
+    if kind == 'meta':
+        return meta_entries(data, name)
     if kind == 'local':
         try:
-            context = _get(_root(base) + '/props', headers, opener).get('n_ctx')
+            props = _get(_root(base) + '/props', headers, opener)
         except (OSError, ValueError, urllib.error.HTTPError):
-            pass
-    if kind == 'local':
-        return local_entries(data, name, context)
-    return openai_entries(data, name, context)
+            props = {}
+        return local_entries(data, name, props_window(props), bool((props.get('modalities') or {}).get('vision')))
+    return openai_entries(data, name)
 
 
 def providers(config):
@@ -204,6 +248,62 @@ def caminus_props(endpoint, opener=urllib.request.urlopen, timeout=3):
     when the server cannot be reached or answers garbage, so a caller can tell "not Caminus" from "not asked"."""
     props = _get(_root(endpoint) + '/props', {}, opener, timeout, LOCAL_READ)
     return props if isinstance(props, dict) and props.get('engine') == 'caminus' else None
+
+
+def props_window(props):
+    """The context window a server's /props reports: n_ctx (caminus serve), else default_generation_settings.n_ctx
+    (llama-server keeps it only there); None unless it is an integer of at least 1024. The one reading of that field:
+    the catalog, local_window and Model.context_size use it."""
+    if not isinstance(props, dict):
+        return None
+    for n in (props.get('n_ctx'), (props.get('default_generation_settings') or {}).get('n_ctx')):
+        if isinstance(n, int) and not isinstance(n, bool) and n >= 1024:
+            return n
+    return None
+
+
+def window_candidate(config):
+    """Whether local_window asks this brain's server: a local candidate, or a plain openai provider on loopback (a
+    Caminus server added that way; its /props then decides). Never the Messages API or a relayed brain."""
+    if config.get('provider_kind') == 'openai':
+        config = dict(config, provider_kind=None)
+    return local_candidate(config)
+
+
+def local_window(config, opener=urllib.request.urlopen, timeout=2):
+    """A local brain's window as its server reports it now (props_window). None for a brain that is not a local
+    candidate, a server that cannot be reached, or one that is not Caminus (asked unless provider_kind is local: the key
+    relay listens on loopback too). A Caminus server added as a plain openai provider counts when its /props names the
+    engine. Never stored: window() combines it with the config each time it is asked."""
+    if not window_candidate(config):
+        return None
+    if config.get('provider_kind') == 'openai':
+        config = dict(config, provider_kind=None)
+    try:
+        if config.get('provider_kind') == 'local':
+            props = _get(_root(config['endpoint']) + '/props', {}, opener, timeout, LOCAL_READ)
+        else:
+            props = caminus_props(config['endpoint'], opener, timeout)
+    except (OSError, ValueError, urllib.error.HTTPError):
+        return None
+    return props_window(props)
+
+
+def window(config, served, local):
+    """The window a brain works in; status, the panel and compaction (Model.context_size) all read this one figure.
+    served: what its server reports now (local_window), or None. local: not a paid brain (Model.remote false).
+    - A local brain: the server's window, which `caminus serve` sizes per mode (262K native, 1M long), limited by
+      context_cap when the owner set one (init --context). Its stored context is a figure copied from a catalog or a
+      sibling session (/model before this, create --from), maybe from another mode of the same server: used only while
+      the server says nothing, never as a limit.
+    - A paid brain: its stored context (the catalog's maximum or the owner's), as before.
+    None when nothing is known: Model.context_size then asks the endpoint's /props whatever its engine."""
+    def valid(n):
+        return n if isinstance(n, int) and not isinstance(n, bool) and n >= 1024 else None
+    cap = valid(config.get('context_cap')) if local else None
+    if local and valid(served):
+        return min(served, cap) if cap else served
+    return cap or valid(config.get('context'))
 
 
 STATUS_VERSION = 1   # the /caminus/status layout read here (caminus serve's stats.STATUS_VERSION; the panel reads the same)
@@ -289,12 +389,35 @@ def refresh(home, config, opener=urllib.request.urlopen, only=None):
 
 
 def find(cat, model, provider=None):
-    """The entry for a model id (a provider/id form picks the provider), or None."""
+    """The entry for a model id, or for one of its aliases when no id matches (a provider/id form picks the provider),
+    or None."""
     if provider is None and '/' in model:
         head, rest = model.split('/', 1)
         if head in (cat.get('providers') or {}):
             provider, model = head, rest
-    hits = [m for m in cat.get('models', []) if m['id'] == model and (provider is None or m['provider'] == provider)]
+    ours = [m for m in cat.get('models', []) if provider is None or m['provider'] == provider]
+    hits = [m for m in ours if m['id'] == model] or [m for m in ours if model in (m.get('aliases') or ())]
     return hits[0] if len(hits) == 1 else None if not hits else \
         (_ for _ in ()).throw(ValueError(f'{model} is served by {", ".join(h["provider"] for h in hits)}: '
                                          'name the provider (provider/model)'))
+
+
+def model_vision(home, cfg, ask=True):
+    """Whether cfg's model takes images, by the catalog: home's models.json, else (ask) one short question to cfg's own
+    endpoint, since a new home has no catalog yet (agent init). Only a loopback endpoint is asked: the local server or
+    the owner's key relay, which every paid brain goes through. Unknown is no."""
+    import urllib.parse
+    from .model import LOOPBACK
+    try:
+        entry = find(load(home), cfg['model'], cfg.get('provider'))
+    except ValueError:
+        entry = None
+    if entry is None and ask and urllib.parse.urlsplit(cfg.get('endpoint') or '').hostname in LOOPBACK:
+        kind = cfg.get('provider_kind') or ('anthropic' if cfg.get('api') == 'anthropic' else 'auto')
+        try:
+            listed = discover('init', dict(kind=kind, endpoint=cfg['endpoint']),
+                              lambda req, timeout=None: urllib.request.urlopen(req, timeout=3))
+            entry = next((m for m in listed if m['id'] == cfg['model']), None)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, urllib.error.HTTPError):
+            entry = None
+    return bool(entry and entry.get('vision'))

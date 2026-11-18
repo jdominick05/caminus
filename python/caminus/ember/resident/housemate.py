@@ -14,7 +14,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from .terminal import alive, read_state
+from . import catalog
+from .terminal import ENDED, exited, read_state
 
 WAIT_MAX = 1800           # seconds one wait may block
 POLL = 1.0                # seconds between checks
@@ -27,18 +28,6 @@ def _port_open(target):
         with socket.create_connection((host or '127.0.0.1', int(port)), timeout=1):
             return True
     except (OSError, ValueError):
-        return False
-
-
-def _exited(pid):
-    """A process has exited when it is gone or a zombie (exited, not yet collected by its parent: kill(pid, 0) still
-    succeeds for one)."""
-    if not alive(pid):
-        return True
-    try:
-        stat = Path(f'/proc/{pid}/stat').read_text()
-        return stat[stat.rindex(')') + 2] in 'ZX'
-    except (OSError, ValueError, IndexError):
         return False
 
 
@@ -81,15 +70,14 @@ def wait(rt, gid, until, target='', timeout=300):
             pid = int(target)
         except (TypeError, ValueError):
             raise ValueError('for until=process, target is a process id')
-        check = lambda: _exited(pid) and f'process {pid} has exited'
+        check = lambda: exited(pid) and f'process {pid} has exited'
     elif until == 'session':
         job = home / 'jobs' / str(target)
         if not job.is_dir():
             raise ValueError('unknown terminal session (target is the session id the terminal returned)')
         def check():
             st = read_state(job)
-            if st.get('phase') in ('finished', 'interrupted') or (
-                    st.get('phase') in ('starting', 'running') and not alive(st.get('worker'))):
+            if st.get('phase') in ENDED:
                 return f'session {str(target)[:8]} ended (exit {st.get("exit_code", "?")}); poll it for the output'
             return False
     # until == 'message' has no condition of its own: the interruptions below are what it waits for.
@@ -108,6 +96,9 @@ def wait(rt, gid, until, target='', timeout=300):
         # for up to WAIT_MAX (they did; schedule is the tool that frees the loop)
         if hasattr(rt, 'stop_reason') and rt.stop_reason():
             return dict(happened='the emergency stop is on', waited_s=round(time.monotonic() - start, 1))
+        if hasattr(rt, 'stopping') and rt.stopping():
+            return dict(happened='your runtime was stopped while you waited (it was asked to exit); wait again if you '
+                                 'still need to', waited_s=round(time.monotonic() - start, 1))
         if _stopping(rt, gid):
             return dict(happened='your human paused or interrupted this goal', waited_s=round(time.monotonic() - start, 1))
         if _queued(rt, gid) > queued:
@@ -180,7 +171,7 @@ def _servers(ports=range(8092, 8102)):
         try:
             with urllib.request.urlopen(f'http://127.0.0.1:{port}/props', timeout=2) as r:
                 props = json.loads(r.read(65536))
-            entry.update(model=props.get('model_alias') or props.get('model'), n_ctx=props.get('n_ctx'))
+            entry.update(model=props.get('model_alias') or props.get('model'), n_ctx=catalog.props_window(props))
         except Exception as e:                           # a loading or foreign server: say what it answered
             entry['answer'] = type(e).__name__
         out.append(entry)
@@ -199,7 +190,7 @@ def machine(rt):
     sessions = []
     for job in sorted((home / 'jobs').glob('*'), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
         st = read_state(job)
-        if st.get('phase') in ('starting', 'running') and alive(st.get('worker')):
+        if st.get('phase') in ('starting', 'running'):
             try:
                 cmd = json.loads((job / 'request.json').read_text()).get('command', '')
             except (OSError, ValueError):

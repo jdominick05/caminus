@@ -18,6 +18,21 @@ import time
 from .store import atomic_json
 
 LOG_LIMIT = 16 * 1024 * 1024
+TIME_MAX = 3600          # a job's timeout: 1 s to an hour (a longer job runs without one and is polled)
+
+
+def check_timeout(t):
+    """A job's time bound in seconds, checked: past it the worker kills the job (terminal's process group, or the
+    whole box) and the state says limit_hit 'time'. yield_ms is something else: how long one call waits for output."""
+    if isinstance(t, bool) or not isinstance(t, int) or not 1 <= t <= TIME_MAX:
+        raise ValueError(f'timeout is 1 to {TIME_MAX} seconds (it ends the command; yield_ms only bounds how long '
+                         'one call waits for output)')
+    return t
+
+
+# A job's phases: starting, running, then one of these. stopped: its worker was signalled (it records that itself on
+# SIGTERM) or is gone without a word (SIGKILL); read_state reports the second case, so no reader says running for it.
+ENDED = ('finished', 'interrupted', 'stopped')
 
 
 def alive(pid):
@@ -28,9 +43,26 @@ def alive(pid):
         return False
 
 
+def exited(pid):
+    """A process has exited when it is gone or a zombie (exited, not yet collected by its parent: kill(pid, 0) still
+    succeeds for one; a worker is the daemon's child until something collects it)."""
+    if not alive(pid):
+        return True
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        return stat[stat.rindex(')') + 2] in 'ZX'
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def read_state(job):
     p = Path(job) / 'state.json'
-    return json.loads(p.read_text()) if p.exists() else {}
+    state = json.loads(p.read_text()) if p.exists() else {}
+    if state.get('phase') in ('starting', 'running') and exited(state.get('worker')):
+        # its worker could not write its end (SIGKILL, a crash): "running" in the file is not true
+        state.update(phase='stopped', error='the worker is gone (stopped or killed); its command may have been cut '
+                                            'short: inspect its effects before repeating it')
+    return state
 
 
 def read_cursor(job):
@@ -52,27 +84,57 @@ def worker(job):
         req = json.loads((job / 'request.json').read_text())
         state = dict(phase='starting', worker=os.getpid(), started=time.time(), cwd=req['cwd'])
         atomic_json(job / 'state.json', state)
+        # SIGTERM (an owner's stop, a lab close) ends the loop below, so the worker ends its command and records why
+        # instead of dying with "running" in its state
+        stopping = []
+        signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
+        box = None
+        if req.get('box'):
+            # a sandbox call (sandbox.py): the same job, its command inside a bubblewrap box with limits
+            from .sandbox import Supervisor
+            box = Supervisor(job, req['box'], req['command'])
+            try:
+                argv = box.prepare()
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                box.finish()
+                state.update(phase='finished', exit_code=126, error=f'the box did not start: {e}', ended=time.time())
+                atomic_json(job / 'state.json', state)
+                return 0
+        browser = None
+        if req.get('browser'):
+            # the browser (browser.py): Chrome in the box, driven over its DevTools pipe by a thread of this worker
+            from .browser import Driver
+            browser = Driver(job, req)
         pid, fd = pty.fork()
+        if pid == 0 and box is not None:
+            try:
+                box.child()
+                if browser is not None:
+                    browser.child()
+                os.execv(argv[0], argv) if argv[0].startswith('/') else os.execvp(argv[0], argv)
+            except BaseException as e:
+                os.write(2, str(e).encode())
+                os._exit(126)
         if pid == 0:
             try:
                 os.chdir(req['cwd'])
-                # $WORKSPACE: the agent's workspace, where the file tools' relative paths start (~ is the account home:
-                # an agent wrote a file by a relative path, then looked for it under ~ in the shell)
-                os.environ['WORKSPACE'] = req.get('workspace') or req['cwd']
-                script='builtin cd -- '+shlex.quote(req['cwd'])+' || exit 127\n'+req['command']
-                os.execv('/bin/bash', ['bash', '-lc', script])
+                argv = shell_argv(req['cwd'], req['command'])
+                os.execv(SHELL, argv)
             except BaseException as e:
                 os.write(2, str(e).encode())
                 os._exit(127)
         state.update(phase='running', pid=pid)
         atomic_json(job / 'state.json', state)
+        if browser is not None:
+            browser.start(box.proxy)
+        limit_s, t0, timed_out = req.get('timeout'), time.monotonic(), False
         os.set_blocking(fd, False)
         (job / 'control').mkdir(exist_ok=True)
         (job / 'ack').mkdir(exist_ok=True)
-        used, truncated, exit_status = 0, False, None
+        used, truncated, exit_status, cut = 0, False, None, False
         try:
             with (job / 'output.log').open('ab', buffering=0) as log:
-                while exit_status is None:
+                while exit_status is None and not stopping:
                     for p in sorted((job / 'control').glob('*.json')):
                         ack = job / 'ack' / p.name
                         if ack.exists():
@@ -80,6 +142,9 @@ def worker(job):
                         op = json.loads(p.read_text())
                         # Record uncertainty before a non-idempotent terminal write.
                         atomic_json(ack, dict(state='sending'))
+                        if browser is not None and 'browser' in op:
+                            browser.submit(ack, op['browser'])     # its thread writes the result into the ack
+                            continue
                         try:
                             if 'stdin' in op:
                                 data = op['stdin'].encode()
@@ -104,9 +169,25 @@ def worker(job):
                             truncated |= len(data) > take
                         except OSError:
                             pass
+                    if limit_s and not timed_out and time.monotonic() - t0 > limit_s:
+                        timed_out = True           # over its time: the job goes (a box whole, else its process group)
+                        if box is not None:
+                            box.hit = 'time'
+                            box.kill(pid)
+                        else:
+                            try:
+                                os.killpg(pid, signal.SIGKILL)
+                            except OSError:
+                                pass
+                    if box is not None and box.check(pid):
+                        box.kill(pid)              # over a limit: the whole box goes
                     done, code = os.waitpid(pid, os.WNOHANG)
                     if done:
                         exit_status = os.waitstatus_to_exitcode(code)
+                if stopping and exit_status is None:
+                    if box is not None:
+                        box.kill(pid)              # a stopped box goes whole, as on a limit (and its scope)
+                    exit_status, cut = _end(pid), True
                 # Drain bytes already emitted before exit.
                 while True:
                     try:
@@ -120,7 +201,17 @@ def worker(job):
                         break
         finally:
             os.close(fd)
-            if exit_status is None:
+            if browser is not None:
+                browser.stop()
+            if box is not None:
+                state.update(box.finish())
+            elif timed_out:
+                state['limit_hit'] = 'time'
+            if cut:
+                state.update(phase='stopped', exit_code=exit_status, ended=time.time(),
+                             error='stopped by SIGTERM; its command was ended (TERM, then KILL after '
+                                   f'{STOP_GRACE} s): inspect its effects before repeating it')
+            elif exit_status is None:
                 state.update(phase='interrupted', error='worker interrupted; command effects may already exist')
             else:
                 state.update(phase='finished', exit_code=exit_status, truncated=truncated, ended=time.time())
@@ -128,10 +219,43 @@ def worker(job):
         return 0
 
 
+STOP_GRACE = 3   # seconds a stopped worker's command gets between TERM and KILL
+
+
+def _end(pid):
+    """A stopped worker ends its command's process group: TERM, then KILL after STOP_GRACE. Its exit code, or None."""
+    for sig, wait in ((signal.SIGTERM, STOP_GRACE), (signal.SIGKILL, 1)):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            pass
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                return os.waitstatus_to_exitcode(code)
+            time.sleep(.05)
+    return None
+
+
+def shell_argv(cwd, command):
+    """A command as the agent's terminal runs it: a login bash that starts in cwd (after the profile, which may cd).
+    The done check's gate runs through this and worker_env too, so it sees what a terminal command sees. Started as
+    SHELL with argv[0] `bash`, so its errors read `bash: line 1: ...` as they always did."""
+    return ['bash', '-lc', 'builtin cd -- ' + shlex.quote(str(cwd)) + ' || exit 127\n' + command]   # run as SHELL
+
+
+SHELL = '/bin/bash'
+
+
 def worker_env(home):
-    """The daemon's environment without the model API key: the model's commands run in this worker, and a key
-    it could print is a key it could leak. (A key in a file this account can read is not protected by this.)"""
+    """The environment of the agent's commands (terminal jobs and the done check's gate): the daemon's, without the
+    model API key (a key it could print is a key it could leak; a key in a file this account can read is not protected
+    by this), with $WORKSPACE."""
     env = dict(os.environ)
+    # $WORKSPACE: the agent's workspace, where the file tools' relative paths start (~ is the account home: an agent
+    # wrote a file by a relative path, then looked for it under ~ in the shell)
+    env['WORKSPACE'] = str(home)
     try:
         name = json.loads((Path(home) / 'config.json').read_text()).get('api_key_env', 'CAMINUS_AGENT_API_KEY')
     except (OSError, ValueError, AttributeError):
@@ -240,7 +364,9 @@ class Terminal:
         for job in self.jobs.iterdir() if self.jobs.is_dir() else []:
             state = read_state(job)
             pid = state.get('pid')
-            if state.get('phase') in ('starting', 'running') and isinstance(pid, int) and alive(pid):
+            # (a job read as stopped without an end on record lost its worker, not its command: still reached)
+            if state.get('phase') in ('starting', 'running', 'stopped') and 'ended' not in state \
+                    and isinstance(pid, int) and alive(pid):
                 try:
                     os.killpg(pid, sig)
                     hit.append(job.name)
@@ -248,24 +374,38 @@ class Terminal:
                     pass
         return hit
 
-    def call(self, action, args):
+    def call(self, action, args, box=None):
+        """A terminal call; with box (sandbox.py) a sandbox call: a new command gets box (its request, from
+        sandbox.spec), a poll or input names a session that must be a box ({} is enough)."""
+        tool = 'terminal' if box is None else 'sandbox'
         session = args.get('session') or action
         if len(session) != 32 or any(c not in '0123456789abcdef' for c in session):
-            raise ValueError('invalid terminal session')
+            raise ValueError(f'invalid {tool} session')
         job = self.jobs / session
         if args.get('command'):
             if args.get('session'):
-                raise ValueError('use stdin to send commands to an existing terminal; to wait for more output from a running session, call terminal with only session (no command) and optionally yield_ms (default 1000, max 10000)')
-            cwd = Path(args.get('cwd') or self.home).expanduser().resolve()
+                raise ValueError(f'use stdin to send commands to an existing {tool} session; to wait for more output from a running session, call {tool} with only session (no command) and optionally yield_ms (default 1000, max 10000)')
+            cwd = Path(box['box'] if box else args.get('cwd') or self.home).expanduser().resolve()
             if not cwd.is_dir():
                 raise ValueError('cwd is not a directory')
             job.mkdir(exist_ok=True)
+            timeout = box['limits']['time_s'] if box else args.get('timeout')
+            if timeout is not None:
+                timeout = check_timeout(timeout)
             if not (job / 'request.json').exists():
-                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), workspace=str(self.home)))
+                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), timeout=timeout,
+                                                       **({'box': box} if box else {})))
             if not read_state(job):
                 self.launch(job)
         elif not job.is_dir():
-            raise ValueError('unknown terminal session')
+            raise ValueError(f'unknown {tool} session')
+        req = json.loads((job / 'request.json').read_text())
+        if 'browser' in req:
+            raise ValueError('that session is the browser: use the browser tool')
+        boxed = 'box' in req
+        if boxed != (box is not None):
+            raise ValueError('that session is a sandbox: call sandbox with it' if boxed else
+                             'that session is a terminal, not a sandbox: call terminal with it')
         if 'stdin' in args or args.get('signal'):
             if args.get('signal') not in (None, 'INT', 'TERM', 'KILL', 'HUP'):
                 raise ValueError('signal must be INT, TERM, KILL or HUP')
@@ -279,16 +419,14 @@ class Terminal:
             # waiting (the wait held the database's write lock for up to yield_ms)
             state = read_state(job)
             return dict(session=session, **state, output='', next_offset=read_cursor(job), no_new_output=True,
-                        running=state.get('phase') not in ('finished', 'interrupted'))
+                        running=state.get('phase') not in ENDED)
         wait = min(10000, max(0, int(args.get('yield_ms', 1000)))) / 1000
         end = time.monotonic() + wait
         while time.monotonic() < end:
-            if read_state(job).get('phase') in ('finished', 'interrupted'):
+            if read_state(job).get('phase') in ENDED:
                 break
             time.sleep(.02)
         state = read_state(job)
-        if state.get('phase') in ('starting', 'running') and not alive(state.get('worker')):
-            state.update(phase='interrupted', error='worker disappeared; inspect effects before repeating the command')
         log = job / 'output.log'
         # Without an explicit offset, a poll returns only what this session has not yet returned (the persisted
         # read cursor). An explicit offset reads from there. Either way the cursor moves to the end of what was returned.
@@ -308,5 +446,10 @@ class Terminal:
         # A PTY ends lines with \r\n. Handing that to the model put a stray \r at the end of every line, so a patch
         # built from what it read did not match the file (the local Coder lost a patch to it). Offsets stay in raw bytes.
         text = data.decode(errors='replace').replace('\r\n', '\n')
-        return dict(session=session, **state, output=text, next_offset=next_offset,
-                    no_new_output=not data, running=state.get('phase') not in ('finished', 'interrupted'))
+        out = dict(session=session, **state, output=text, next_offset=next_offset,
+                   no_new_output=not data, running=state.get('phase') not in ENDED)
+        if boxed:
+            from .sandbox import view
+            out.update(view(job, state))
+            out.pop('enforced', None)
+        return out

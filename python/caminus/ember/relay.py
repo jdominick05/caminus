@@ -21,6 +21,10 @@ Providers:
              model list carries no prices, so the owner gives them: a JSON file (--prices, default
              ~/.config/caminus/mistral-prices.json) of {"model-id": [input, output]} in USD per million tokens, re-read
              when it changes. A model without a price there is refused (it cannot be metered).
+  meta       api.meta.ai (the Meta Model API: the Muse models): POST /v1/chat/completions; GET /v1/models (the
+             catalog). Its model list carries no prices; Meta's published table is the transport's
+             (caminus.ember.resident.model.META_PRICES, with the long-prompt tier of Muse Ember (Meta)), so only the Muse chat
+             models in it are allowed (Standard mode: the Contributor-mode ids, where Meta trains on the prompts, are not).
 
 Run a separate relay (own port, key file, cap, ledger and log) for each provider and for an advisor.
 
@@ -31,6 +35,8 @@ restarts on failure, no expiry: the daily cap guards spend):
   caminus ember relay uninstall --provider deepinfra
 """
 import argparse
+import base64
+import math
 import subprocess
 import datetime
 import http.client
@@ -45,7 +51,8 @@ import sys
 import threading
 import time
 
-from .resident.model import FALLBACK_BETA, FALLBACK_MODELS, PRICES
+from .resident.files import IMAGE_HEAD, IMAGE_MAX_SIDE, image_info
+from .resident.model import FALLBACK_BETA, FALLBACK_MODELS, META_PRICES, PRICES, flat_row, image_tokens, row_cost
 
 PROVIDERS = {
     'anthropic': dict(host='api.anthropic.com', post=('/v1/messages', '/v1/messages/count_tokens'),
@@ -54,29 +61,65 @@ PROVIDERS = {
                       get=('/v1/openai/models',), port=8766, key_file='~/.config/caminus/deepinfra-key'),
     'mistral': dict(host='api.mistral.ai', post=('/v1/chat/completions',), get=('/v1/models',), port=8767,
                     key_file='~/.config/caminus/mistral-key', prices='~/.config/caminus/mistral-prices.json'),
+    'meta': dict(host='api.meta.ai', post=('/v1/chat/completions',), get=('/v1/models',), port=8768,
+                 key_file='~/.config/caminus/meta-key', hidden_reasoning=True),   # (reasoning_content comes empty)
 }
 PRICE_REFRESH = 3600
+# A decode-rate ceiling for output a stream does not show (Meta bills its models' reasoning but sends it empty), used
+# only to bound a reply cut before its usage came. Meta publishes no speed: an assumed ceiling (unverified), above the
+# decode rates hosted APIs usually report, so a hang-up errs high rather than booking one token.
+HIDDEN_TPS = 400
 
 
 def anthropic_cost(model, usage, served=None):
     row = PRICES[model]
     if served and served != model:
         row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
-    low, high, line = row
-    inp = usage.get('input_tokens') or 0
-    read = usage.get('cache_read_input_tokens') or 0
-    wrote = usage.get('cache_creation_input_tokens') or 0
-    out = usage.get('output_tokens') or 0
-    p = high if inp + read + wrote > line else low
-    return (inp * p[0] + out * p[1] + read * p[2] + wrote * p[3]) / 1e6
+    return row_cost(row, usage)
 
 
-def openai_cost(prices, usage):
-    """prices: (input, output, cache_read) USD per million; usage: OpenAI-style prompt / completion tokens."""
-    inp, out, read_rate = prices
-    total = usage.get('prompt_tokens') or 0
-    cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0
-    return (max(0, total - cached) * inp + cached * read_rate + (usage.get('completion_tokens') or 0) * out) / 1e6
+def provider_image_tokens(provider, width, height):
+    """An image's input tokens where the provider's count never came. Anthropic: Claude's rule (model.image_tokens, 28 px
+    patches after its downscale: about w*h/750). Others: 28 px patches with no downscale. Mistral's docs give no rule;
+    Ministral 3B / 8B / 14B billed four screenshots (640-860 px wide) at exactly that count plus the request's text
+    (measured 2026-11), and assuming no downscale errs high for a large image."""
+    if provider == 'anthropic':
+        return image_tokens(width, height)
+    return math.ceil(width / 28) * math.ceil(height / 28)
+
+
+def prompt_tokens(body, provider):
+    """A request's input tokens, estimated for a reply cut before its usage arrived: the JSON text at 4 bytes a token,
+    each base64 image at its image-token count (by its bytes, one 1 MB screenshot booked about 350K phantom tokens). An
+    image whose header can't be read counts as the largest read sends (files.IMAGE_MAX_SIDE a side)."""
+    images = []
+
+    def strip(x):
+        if isinstance(x, list):
+            return [strip(v) for v in x]
+        if not isinstance(x, dict):
+            return x
+        src = x.get('source')
+        if x.get('type') == 'image' and isinstance(src, dict) and isinstance(src.get('data'), str):
+            images.append(src['data'])                          # (Messages API image block)
+            return dict(x, source=dict(src, data=''))
+        url = x.get('image_url')
+        url = url.get('url') if isinstance(url, dict) else url
+        if x.get('type') == 'image_url' and isinstance(url, str) and url.startswith('data:'):
+            images.append(url.split(',', 1)[-1])                # (Chat Completions data URI)
+            return dict(x, image_url='')
+        return {k: strip(v) for k, v in x.items()}
+
+    total = len(json.dumps(strip(body)).encode()) // 4
+    for data in images:
+        size = None
+        try:
+            found = image_info(base64.b64decode(data[:(IMAGE_HEAD // 3) * 4]))
+            size = found[1:] if found else None
+        except ValueError:                                      # (binascii.Error is a ValueError)
+            pass
+        total += provider_image_tokens(provider, *(size or (IMAGE_MAX_SIDE, IMAGE_MAX_SIDE)))
+    return total
 
 
 class Ledger:
@@ -330,18 +373,29 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         hint = '; to allow it too: ' + install_command(provider, install_args, sorted(models) + [model])
                     return self.refuse(403, 'permission_error', 'model not allowed: %r (this relay allows %s%s)' % (
                         model, ', '.join(sorted(models)), hint))
-                rates = None
+                row = None
             else:
                 rates = prices.get(model) if isinstance(model, str) else None
                 if rates is None:
                     return self.refuse(403, 'permission_error', 'no price for %r: it cannot be metered%s' % (
-                        model, ' (add it to the relay\'s --prices file)' if provider == 'mistral' else ''))
+                        # (no file path: this text reaches the agent, which has no business with the owner's files)
+                        model, ' (add it to the relay\'s --prices file as "%s": [input, output] USD per million tokens; '
+                               're-read on change)' % model if provider == 'mistral' else
+                        ' (Caminus has Meta\'s published prices for the Muse chat models in Standard mode only)'
+                        if provider == 'meta' else ''))
+                # (input, output, cache_read), or a PRICES-form row with a long-prompt tier (Meta's table)
+                row = rates if isinstance(rates[0], tuple) else flat_row(*rates)
             spent = ledger.spent()
             if spent >= ledger.cap:
                 return self.refuse(402, 'billing_error', 'daily cap $%.2f reached ($%.4f spent today)' % (ledger.cap, spent))
             counting = path.endswith('count_tokens')
             beta = None
             if not counting:
+                if provider != 'anthropic' and 'max_completion_tokens' in body:
+                    # the newer name of the same cap (Meta takes both): folded into max_tokens, so the clamp below holds
+                    newer = body.pop('max_completion_tokens')
+                    if not isinstance(body.get('max_tokens'), int):
+                        body['max_tokens'] = newer
                 if not isinstance(body.get('max_tokens'), int) or body['max_tokens'] > max_tokens:
                     body['max_tokens'] = max_tokens
                 for banned in ('speed', 'service_tier', 'container', 'mcp_servers', 'n'):
@@ -352,8 +406,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     beta = FALLBACK_BETA if 'fallbacks' in body and FALLBACK_BETA in (self.headers.get('anthropic-beta') or '') else None
                     if 'fallbacks' in body and not beta:
                         body.pop('fallbacks')
-                elif body.get('stream') and provider == 'deepinfra':
-                    body['stream_options'] = dict(include_usage=True)   # the only way its stream reports usage
+                elif body.get('stream') and provider in ('deepinfra', 'meta'):
+                    body['stream_options'] = dict(include_usage=True)   # the only way their streams report usage
                     # (Mistral sends usage in its last stream chunk and refuses fields it does not know)
             raw = json.dumps(body).encode()
             conn = connect()
@@ -364,6 +418,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     headers['anthropic-version'] = self.headers.get('anthropic-version') or '2026-10-21'
                     if beta:
                         headers['anthropic-beta'] = beta
+                t_sent, t_seen = time.monotonic(), None   # t_seen: the first visible output piece (hidden_reasoning)
                 conn.request('POST', path, raw, headers)
                 # (taken now: http.client drops conn.sock in getresponse when upstream will close the connection)
                 upsock = getattr(conn, 'sock', None)
@@ -421,6 +476,8 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                                 streamed += len(d.get('content') or '') + len(d.get('reasoning_content') or '')
                                 for tc in d.get('tool_calls') or []:
                                     streamed += len(((tc or {}).get('function') or {}).get('arguments') or '')
+                            if streamed and t_seen is None:
+                                t_seen = time.monotonic()
                             continue
                         t = ev.get('type')
                         if t == 'message_start':
@@ -462,7 +519,7 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     extra += ' CLIENT-GONE'
                     if provider == 'anthropic' and not final and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         if not usage:          # gone before message_start: the prompt was still read
-                            usage = {'input_tokens': len(raw) // 4}
+                            usage = {'input_tokens': prompt_tokens(body, provider)}
                         # the final count never came (a hang-up: an interrupt, a steer, /advisor end a reply this way):
                         # charge what was streamed, about 3.5 characters a token rounded up, never the whole allowance
                         # (that put phantom spend on every interrupt and could hit the daily cap early)
@@ -479,14 +536,24 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                         usage.get('cache_creation_input_tokens'), usage.get('output_tokens'), usd, total, extra))
                 elif not counting and provider != 'anthropic' and up.status == 200:
                     if usage:
-                        usd = openai_cost(rates, usage)
+                        usd = row_cost(row, usage)
                     elif client_gone and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         # a hang-up before the usage chunk: the prompt plus what was streamed, not the whole allowance
-                        usd = (len(raw) / 4 * rates[0] + min(streamed * 2 // 7 + 1, body['max_tokens']) * rates[1]) / 1e6
+                        # (at the rates past a long-prompt line, where the row has one: an estimate errs high)
+                        out_est = streamed * 2 // 7 + 1
+                        if spec.get('hidden_reasoning'):
+                            # its reasoning is billed but never streamed: the time before the first visible piece
+                            # (prefill included, so it errs high) at a ceiling decode rate, so an interrupt during the
+                            # reasoning is not booked as one token
+                            hidden = ((t_seen or time.monotonic()) - t_sent) * HIDDEN_TPS
+                            out_est += int(hidden)
+                            extra += ' (+%d hidden-reasoning tokens by time)' % int(hidden)
+                        usd = (prompt_tokens(body, provider) * row[1][0]
+                               + min(out_est, body['max_tokens']) * row[1][1]) / 1e6
                         extra += ' (estimated: prompt + %d streamed characters)' % streamed
                     else:
                         # no usage reported (a cut stream): charge the request as if every output token was spent
-                        usd = (len(raw) / 4 * rates[0] + body['max_tokens'] * rates[1]) / 1e6
+                        usd = (prompt_tokens(body, provider) * row[1][0] + body['max_tokens'] * row[1][1]) / 1e6
                         extra += ' NO-USAGE (charged the estimate)'
                     total = ledger.add(usd, usage.get('prompt_tokens') or 0, usage.get('completion_tokens') or 0,
                                        (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
@@ -697,15 +764,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog='caminus ember relay', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--provider', choices=sorted(PROVIDERS), default='anthropic')
-    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra), 8767 (mistral)')
+    ap.add_argument('--port', type=int, help='default 8765 (anthropic), 8766 (deepinfra), 8767 (mistral), 8768 (meta)')
     ap.add_argument('--prices', help='mistral: the owner\'s price file (default ~/.config/caminus/mistral-prices.json)')
     ap.add_argument('--cap-usd', type=float, default=1.0, help='daily spend cap in USD')
     ap.add_argument('--ttl', type=float, default=1800, help='seconds before the relay exits on its own; 0 = never')
     # a request's output cap; billing is per token written and the dollar caps hold, so 64K costs nothing unused
     ap.add_argument('--max-tokens', type=int, default=65536)
     ap.add_argument('--model', action='append', help='anthropic: allowed model (repeatable); default claude-haiku-5-5')
-    ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key, ~/.config/caminus/deepinfra-key or '
-                                       '~/.config/caminus/mistral-key')
+    ap.add_argument('--key-file', help='default ~/.config/anthropic/api_key, ~/.config/caminus/deepinfra-key, '
+                                       '~/.config/caminus/mistral-key or ~/.config/caminus/meta-key')
     ap.add_argument('--ledger', help='default ~/.local/state/caminus/<provider>-relay-ledger.json')
     ap.add_argument('--log', help='default ~/.local/state/caminus/<provider>-relay.log')
     a = ap.parse_args(argv)
@@ -720,7 +787,7 @@ def main(argv=None):
         if unknown:
             sys.exit('no price for %s: add it to PRICES first' % ', '.join(sorted(unknown)))
     elif a.model:
-        sys.exit('--model is for anthropic: deepinfra and mistral allow every model with a price (the cap is the guard)')
+        sys.exit('--model is for anthropic: the other providers allow every model with a price (the cap is the guard)')
     key_file = Path(os.path.expanduser(a.key_file or spec['key_file']))
     try:
         if key_file.stat().st_mode & 0o077:
@@ -739,7 +806,7 @@ def main(argv=None):
     ledger = Ledger(ledger_path, a.cap_usd)
     prices = (DeepInfraPrices(key, log) if a.provider == 'deepinfra' else
               OwnerPrices(a.prices or spec['prices'], log, fetch=lambda: _list_models(spec, key))
-              if a.provider == 'mistral' else None)
+              if a.provider == 'mistral' else META_PRICES if a.provider == 'meta' else None)
     port = a.port or spec['port']
     # (no --key-file or --prices: the hint reaches the agent, which has no business with the owner's file paths; the
     # owner's side adds them from the installed unit, and an install without them stops at a missing default key file)

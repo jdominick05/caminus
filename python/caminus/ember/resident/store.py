@@ -421,9 +421,10 @@ class Store:
             raise ValueError('no goals yet')
         return r['id']
 
-    def model_reply(self, gid, message, reasoning=''):
+    def model_reply(self, gid, message, reasoning='', tokens=0):
         """Store one reply. reasoning is displayed with the reply but never sent back to the model:
-        it is not part of messages, so replay and the token budget are unchanged."""
+        it is not part of messages, so replay and the token budget are unchanged. tokens (the provider's count of
+        what the reply wrote, 0 when unknown) goes on the event only, for the UI's per-turn count."""
         with self.transaction():
             g = self.goal(gid)
             if g['state'] == 'cancelled':
@@ -434,7 +435,10 @@ class Store:
                 f = call['function']
                 self.db.execute('INSERT INTO actions(id,goal,call_id,name,args,state) VALUES(?,?,?,?,?,?)',
                     (uuid.uuid4().hex, gid, call['id'], f['name'], f['arguments'], 'pending'))
-            self.event('assistant', dict(message, reasoning=reasoning) if reasoning else message, gid)
+            shown = dict(message, reasoning=reasoning) if reasoning else dict(message)
+            if tokens:
+                shown['tokens'] = tokens
+            self.event('assistant', shown, gid)
         return True
 
     def _unique_calls(self, gid, message):
@@ -457,7 +461,8 @@ class Store:
             out.append(call)
         return dict(message, tool_calls=out) if changed else message
 
-    def action_result(self, action, result):
+    def action_result(self, action, result, panel=None):
+        """panel: what the event carries for the panel beside the result, never in the conversation."""
         with self.transaction():
             g = self.goal(action['goal'])
             # Only the runtime lock's owner calls this. Completed actions are never replayed.
@@ -468,11 +473,15 @@ class Store:
                 return
             self.db.execute("UPDATE actions SET state='done',result=? WHERE id=?", (json.dumps(result), action['id']))
             msg = dict(role='tool', tool_call_id=action['call_id'], content=json.dumps(result, ensure_ascii=False))
+            from .files import image_ref
+            if (ref := image_ref(action.get('name'), result)):
+                msg['image'] = ref    # an image read: the transport sends the file (model.py); the store keeps no bytes
             # A stop made while the call ran (cancel, the repeat-failure watchdog's pause, an error) stands: recording
             # the result must not set the goal back to working (it did, so the watchdog could never stop a loop).
             keep = g['state'] in ('cancelled', 'paused', 'error', 'completed')
             self.update(g['id'], messages=[*g['messages'], msg], state=g['state'] if keep else 'working')
-            self.event('tool_result', dict(name=action['name'], call_id=action['call_id'], result=result), g['id'])
+            self.event('tool_result', dict(name=action['name'], call_id=action['call_id'], result=result,
+                                           **({'panel': panel} if panel else {})), g['id'])
 
     def aim(self, gid):
         """The goal's redirected aim, or None when it still works toward its prompt (the panel's goalAim rule)."""

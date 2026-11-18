@@ -110,7 +110,7 @@ def _local_effort(cfg, keep_level=False):
 
 
 def _current(cfg):
-    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
+    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices','vision')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
 
 
@@ -209,8 +209,8 @@ def model_ops(a,home):
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking','model_variants','efforts'):
-            cfg.pop(k,None)
+        for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
+            cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
         if cfg.pop('max_tokens_auto',None):
             cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
@@ -218,7 +218,11 @@ def model_ops(a,home):
             cfg.pop('compaction_model')
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
-        if entry.get('context'):cfg['context']=int(entry['context'])
+        from .model import LOOPBACK
+        live=spec['kind']=='local' and not spec.get('relay') and urllib.parse.urlsplit(spec['endpoint']).hostname in LOOPBACK
+        if entry.get('context') and not live:
+            cfg['context']=int(entry['context'])  # (a local server's window is asked live: catalog.window)
+        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
         elif spec['kind']=='local':
@@ -284,7 +288,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -305,7 +309,8 @@ def parser():
             p.add_argument('--model',required=True)
             p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1')
             p.add_argument('--bridge',default=os.environ.get('CAMINUS_ENV_BRIDGE','/srv/caminus-env-bridge'))
-            p.add_argument('--context',type=int)
+            p.add_argument('--context',type=int,help='the window (needed for the Messages API); on a local server a cap '
+                                                     'under the window it reports (context_cap)')
             p.add_argument('--max-tokens',type=int,help='one reply\'s token limit (default: the model\'s own, effort.reply_limit)')
             p.add_argument('--compact-threshold',type=float,default=.85)
             p.add_argument('--compact-target-ratio',type=float,default=.2)
@@ -354,8 +359,9 @@ def parser():
             p.add_argument('--wait',type=float,default=0,help='seconds to wait for the daemon to come back on it')
         if op=='provider':
             p.add_argument('action',nargs='?',default='list',choices=('list','add','remove'))
-            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, mistral, ...')
-            p.add_argument('--kind',choices=('local','anthropic','deepinfra','mistral','openai'))
+            p.add_argument('provider',nargs='?',help='a short name: local, anthropic, deepinfra, mistral, meta, ...')
+            from .catalog import KINDS
+            p.add_argument('--kind',choices=KINDS)
             p.add_argument('--endpoint',help="its API root; the owner's key relay for a paid one (it adds the key)")
             p.add_argument('--relay',action='store_true',help='the endpoint is the key relay: billed, retries bounded')
         if op=='models':
@@ -380,6 +386,12 @@ def parser():
             p.add_argument('--calls-per-goal',type=int,help='advice calls one goal may make (default 5)')
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
             p.add_argument('--off',action='store_true',help='remove the advisor')
+        if op=='eyes':
+            p.add_argument('--provider',help='a configured provider (agent provider), normally your key relay: mistral, anthropic, ...')
+            p.add_argument('--model',help='a vision model it serves, e.g. ministral-8b-latest or claude-haiku-5-5')
+            p.add_argument('--budget-usd',type=float,help='dollars per day the eyes may spend (default 0.25)')
+            p.add_argument('--auto',action='store_true',help='turn eyes on with the recommended pick: ministral-8b-latest on a Mistral relay provider, else claude-haiku-5-5 on an Anthropic one')
+            p.add_argument('--off',action='store_true',help='no eyes: a brain without vision gets the image\'s size and format')
         if op=='heartbeat':
             p.add_argument('state',nargs='?',choices=('on','off','status','recap','now'),default='status',
                            help='free time: the resident lives in its account when no work is queued')
@@ -526,11 +538,14 @@ def main(argv=None,stdin=None):
                 cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
-                # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
-                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
-                          'fallback','advisor','judge_model','model_variants','efforts'):
+                # judge or advisor on the relay would bill every finish, eyes every image read; the owner adds them back on purpose)
+                for k in ('relay','prices','context','context_cap','thinking','effort','vision','provider','provider_kind','api',
+                          'compaction_model','fallback','advisor','judge_model','eyes','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
+                from . import catalog
+                # (after _local_effort: the catalog knows the base id, not an effort id such as ...-nothink)
+                if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -562,6 +577,9 @@ def main(argv=None,stdin=None):
                      compaction_model=a.compaction_model,loop_gates=not a.no_loop_gates,
                      idle_timeout=a.idle_timeout,token_budget=a.token_budget)
             if a.api!='openai':cfg['api']=a.api
+            from . import catalog
+            if a.context and catalog.local_candidate(cfg):
+                cfg['context_cap']=a.context   # the owner's limit on a local server's window (catalog.window)
             if a.effort:cfg['effort']=a.effort
             if getattr(a,'thinking',None):cfg['thinking']=a.thinking
             if a.max_model_retries is not None:
@@ -572,6 +590,7 @@ def main(argv=None,stdin=None):
             from .model import Model
             Model(cfg)                     # validate before persisting
             _local_effort(cfg)             # a local server's own id and its effort ids, when it is up
+            if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()
@@ -746,6 +765,40 @@ def main(argv=None,stdin=None):
             emit(dict(advisor={**DEFAULTS,**adv} if adv else None,
                       today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,calls=0))),a.json)
             return 0
+        if a.op=='eyes':
+            # the vision model that describes images for a brain without vision (advisor.Eyes)
+            import types
+            from .advisor import Eyes
+            from . import catalog
+            cfg=json.loads((home/'config.json').read_text())
+            eyes=cfg.get('eyes')
+            if a.off:eyes=False
+            elif a.auto or a.provider or a.model or a.budget_usd is not None:
+                eyes=dict(eyes) if isinstance(eyes,dict) else {}   # (a budget alone stays on the model set before)
+                if a.auto:                                         # (opt-in: only this command writes the pick)
+                    pick=Eyes.auto_pick(cfg)
+                    if not pick:
+                        raise ValueError('--auto needs a Mistral or Anthropic provider on your key relay, e.g. caminus '
+                                         'ember agent provider NAME add mistral --kind mistral --endpoint '
+                                         'http://127.0.0.1:8767/v1 --relay')
+                    eyes.update(pick)
+                for flag in ('provider','model','budget_usd'):
+                    v=getattr(a,flag)
+                    if v is not None:
+                        if isinstance(v,float) and v<0:raise ValueError('--budget-usd must be 0 or more')
+                        eyes[flag]=v
+                if not (eyes.get('provider') and eyes.get('model')):
+                    raise ValueError('eyes need --provider and --model, or --auto')
+                if eyes['provider'] not in catalog.providers(cfg):
+                    raise ValueError('no provider named %s: add it first (caminus ember agent provider NAME add %s '
+                                     '--kind KIND --endpoint RELAY-URL --relay)' % (eyes['provider'],eyes['provider']))
+            if eyes is not None and eyes!=cfg.get('eyes'):
+                cfg['eyes']=eyes
+                atomic_json(home/'config.json',cfg)
+            shown=Eyes(types.SimpleNamespace(config=cfg,home=home))
+            emit(dict(eyes=shown.cfg,today=shown._state().get(__import__('datetime').date.today().isoformat(),
+                                                              dict(usd=0.0,calls=0))),a.json)
+            return 0
         if a.op=='heartbeat':
             from .freetime import settings
             cfg=json.loads((home/'config.json').read_text())
@@ -810,18 +863,21 @@ def main(argv=None,stdin=None):
             elif time.time()-float(speed.get('ts') or 0)>SPEED_FRESH_S:
                 speed={}
             # the thresholds in force: a paid brain (remote, or through the key relay) compacts early
-            from .runtime import PAID_COMPACT
+            from .runtime import paid_compaction
             from .model import LOOPBACK
             paid=bool(cfg.get('relay')) or urllib.parse.urlsplit(cfg.get('endpoint') or '').hostname not in LOOPBACK
-            trig,targ=((cfg.get('paid_compact_threshold',PAID_COMPACT[0]),cfg.get('paid_compact_target_ratio',PAID_COMPACT[1]))
-                       if paid else (cfg.get('compact_threshold',.85),cfg.get('compact_target_ratio',.2)))
+            trig,targ=(paid_compaction(cfg) if paid else (cfg.get('compact_threshold',.85),cfg.get('compact_target_ratio',.2)))
             import datetime as _dt
             try:spend=json.loads((home/'spend.json').read_text())
             except (OSError,ValueError):spend={}
             today=(spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}
             spend_today=today.get('usd',0.0)
             cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
-            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
+            # the window the runtime compacts against (catalog.window): a local brain's from its server now, under the
+            # owner's cap; None only when nobody can say, and the panel then shows the tokens in use alone
+            from . import catalog
+            window=catalog.window(cfg,None if paid else catalog.local_window(cfg),not paid)
+            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=window,
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps'),prompt_tok_per_s=speed.get('prompt_tps'),
                       # engine: the Caminus server's own numbers; estimate: measured here (a record from before
@@ -1085,7 +1141,7 @@ def main(argv=None,stdin=None):
                         result=approval.withdraw(bridge,rid,gid)
                         if result.get('decision')=='executing':in_flight.append(rid)
                 store.update(gid,state='cancelled')
-                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name='terminal'",(gid,)):
+                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name IN ('terminal','sandbox')",(gid,)):
                     try:args=json.loads(act['args'])
                     except ValueError:continue
                     if not isinstance(args,dict):continue

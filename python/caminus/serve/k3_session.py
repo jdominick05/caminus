@@ -96,9 +96,10 @@ from ..prefill.driver import PrefillRefused   # (its home: the Coder's prefill m
 from ..prefill.glue import RoutingError
 from . import candsample as CS
 from .draftpolicy import DraftPolicy
-from .engine import EngineError, EngineSession, PrefillStats, common_prefix
+from .engine import EngineError, EngineSession, PrefillStats
 from .mock_engine import EngineStateError
 from ..cache.livestate import is_bail
+from ..cache.livestate import lcp, token_ids
 from ..cache.prompt import RecoveryFailed
 
 RESTORE_OF = {'live': 'live', 'vram': 'checkpoint', 'spill': 'checkpoint', 'disk': 'disk', 'cold': 'cold'}
@@ -243,6 +244,41 @@ class SessionDrafter:
 
     def __call__(self, toks, k):
         return self.s._drafts(toks, k)
+
+
+class _PassTokens:
+    """one pass's token sequence as the engines read it (len, an index, a slice, iteration): positions below i0 read the
+    cache's live log in place, positions i0 .. i0 + T - 1 the pass's own tokens (feed, drafts, filler). A slice is a plain
+    list of ints. The log only grows past i0 while a pass is out (accept appends the pass's own tokens), so the positions
+    below i0 read what a copy taken at the pass's start would hold; a copy (toks + body) cost the whole log every pass"""
+    __slots__ = ('log', 'i0', 'body')
+
+    def __init__(self, log, i0, body):
+        self.log, self.i0, self.body = log, i0, body
+
+    def __len__(self):
+        return self.i0 + len(self.body)
+
+    def __getitem__(self, i):
+        i0 = self.i0
+        if isinstance(i, slice):
+            a, b, step = i.indices(len(self))
+            if step != 1:
+                return [self[j] for j in range(a, b, step)]
+            if b <= a:
+                return []
+            if a >= i0:
+                return self.body[a - i0:b - i0]
+            return list(self.log[a:min(b, i0)]) + (self.body[:b - i0] if b > i0 else [])
+        if i < 0:
+            i += len(self)
+        if not 0 <= i < len(self):
+            raise IndexError(f'pass tokens: position {i} of {len(self)}')
+        return self.log[i] if i < i0 else self.body[i - i0]
+
+    def __iter__(self):
+        yield from self.log[:self.i0]
+        yield from self.body
 
 
 # the host-accept drafters: their draft passes are the engine's T-wide verify passes (m.ver), the host compares the greedy
@@ -461,26 +497,26 @@ class K3Session(EngineSession):
         """PromptCache.side_question_ids: the side question asked against the stored conversation, or None (as sent)"""
         return self.pc.side_question_ids([int(t) for t in ids], marks, int(max_new))
 
-    def plan(self, ids, max_new=None, hint=None):
-        ids = [int(t) for t in ids]
-        n = int(self.pc.plan(ids, side=self._route_arg(), max_new=max_new, hint=hint)['cached'])
+    def plan(self, ids, max_new=None, hint=None, ida=None):
+        ids, ida = token_ids(ids, ida)       # (converted once: the cache takes the array along for its prefix matches)
+        n = int(self.pc.plan(ids, side=self._route_arg(), max_new=max_new, hint=hint, ida=ida)['cached'])
         self._planned = (ids, n, max_new, hint)   # (the worker plans the job first; prefill reuses it for cached_known)
         return n
 
     def prefill(self, ids, cancel=None, marks=None, max_new=None, hint=None):
-        ids = [int(t) for t in ids]
+        ids, ida = token_ids(ids)
         if not ids:
             raise ValueError('empty prompt')
         clock = self.stats.clock if self.stats is not None else time.perf_counter
         t0 = clock()
         self.last_first_logits = None
         pfs = PrefillStats(prompt_n=len(ids))
-        pfs.lcp = common_prefix(self.toks, ids)
+        pfs.lcp = lcp(self.pc.live_array(), ida)
         self._pass, self._dev = None, None
         n_plan = 0
         if self.stats is not None:
             pl = self._planned
-            n_plan = pl[1] if pl is not None and pl[0] == ids and pl[2] == max_new and pl[3] == hint else self.plan(ids, max_new, hint)
+            n_plan = pl[1] if pl is not None and pl[0] == ids and pl[2] == max_new and pl[3] == hint else self.plan(ids, max_new, hint, ida)
             self.stats.cached_known(n_plan)
         self._planned = None
         last_before = getattr(self.pf, 'last', None)
@@ -495,7 +531,7 @@ class K3Session(EngineSession):
         pc = self.pc
         try:
             r = pc.prompt(ids, mk or None, side=self._route_arg(), cancel=prog, max_new=max_new, hint=hint,
-                          max_recoveries=self.max_recoveries, hooks=self._hooks)
+                          max_recoveries=self.max_recoveries, hooks=self._hooks, ida=ida)
         except NumericalFailure:
             # A partially written KV cache or non-finite state is terminal in every prompt phase.
             # Keep the original type for the worker instead of wrapping it as a recoverable EngineError below.
@@ -634,12 +670,14 @@ class K3Session(EngineSession):
         self.dr.take_h(i0, h[:n * self.m.D], toks)
 
     def _seq(self, feed, drafts):
+        """(i0, the pass's token sequence): the live tokens, then the feed, the drafts and filler to T, as a _PassTokens
+        view over the cache's log (the whole log is not copied per pass)"""
         toks = self.toks
         i0 = len(toks)
         body = [int(t) for t in feed] + [int(t) for t in drafts]
         if not 1 <= len(feed) <= self.T or len(body) > self.T:
             raise EngineStateError(f'K3Session: a pass of {len(feed)} fed + {len(drafts)} drafts with T = {self.T}')
-        return i0, toks + body + [body[-1]] * (self.T - len(body))
+        return i0, _PassTokens(toks, i0, body + [body[-1]] * (self.T - len(body)))
 
     def verify(self, feed):
         """a pass whose logits are not read (forced tool-call tokens beyond one pass): its features injected; returns None"""
@@ -884,11 +922,11 @@ class K3Session(EngineSession):
             us = [sampler.uniform(base + j) for j in range(R)]          # (host work while the cards' top-k finishes)
             V0, I0, V1, I1 = self.cards_wait(R, kp)
             tb = time.perf_counter()
-            out = CS.sample_and_match_batched(V0, I0, V1, I1, sampler, list(drafts), list(history), stop, fetch=fetch, us=us)
+            out = CS.sample_and_match_batched(V0, I0, V1, I1, sampler, list(drafts), history, stop, fetch=fetch, us=us)
         else:
             rows = self.rows_wait(R, pid, kp)
             tb = time.perf_counter()
-            out = CS.sample_and_match(rows, sampler, list(drafts), list(history), stop, fetch=fetch)
+            out = CS.sample_and_match(rows, sampler, list(drafts), history, stop, fetch=fetch)   # (copies only the penalty tail)
         self.samp_t.append(((tb - ta) * 1e3, (time.perf_counter() - tb) * 1e3, len(out)))
         return out
 

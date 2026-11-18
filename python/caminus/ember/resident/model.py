@@ -1,7 +1,11 @@
 """Model transports: OpenAI-compatible chat completions (the local server) and Anthropic's Messages API.
 Standard library only; no engine, GPU or agent-CLI dependency."""
+import base64
+import email.utils
+import hashlib
 import http.client
 import json
+import math
 import os
 import socket
 import threading
@@ -69,6 +73,10 @@ def split_content(content):
     return ''.join(text), ''.join(thinking)
 
 
+# how long a local brain's window is kept before its server is asked again (Model.context_size)
+WINDOW_TTL = 60
+
+
 class ModelError(Exception):
     pass
 
@@ -104,6 +112,14 @@ PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.6
 # have no server-side fallback). The same list as the Qwen Code advisor's ANTHROPIC_FALLBACK_MODELS.
 FALLBACK_MODELS = ('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-fable-5-1')
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+# The Meta Model API's Muse chat models, in the PRICES row form; Meta bills no cache writes (the fourth rate never
+# applies). Muse Ember's rates triple past 200K input tokens. Standard mode only: Contributor mode (the -contributor ids)
+# is cheaper because Meta trains on its prompts, files and replies, so it has no row and the relay refuses it. From
+# dev.meta.ai/docs/pricing-rate-limits as read 2026-11-17: check live pricing before budgeting on these numbers.
+_SPARK = ((1.25, 4.25, 0.15, 1.25),) * 2 + (10**9,)
+META_PRICES = {'muse-ember-1.0': ((0.10, 0.50, 0.004, 0.10), (0.30, 1.50, 0.012, 0.30), 200_000),
+               'muse-spark-1.3': _SPARK, 'muse-spark-1.2': _SPARK, 'muse-spark-1.1': _SPARK,
+               'muse-wonder-1.0': ((4.00, 20.00, 0.20, 4.00),) * 2 + (10**9,)}
 
 
 # Prices a provider published (the model catalog: DeepInfra's per-model pricing), in the PRICES row form. Filled from
@@ -111,23 +127,38 @@ FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 CATALOG_PRICES = {}
 
 
+def flat_row(inp, out, read):
+    """one price at every prompt length (USD per million: input, output, cache read), in the PRICES row form"""
+    return ((inp, out, read, inp),) * 2 + (10**9,)
+
+
 def remember_prices(model, prices):
     """prices: {input, output, cache_read} in USD per million tokens, as the catalog stores them."""
     if model and prices and prices.get('input') is not None and prices.get('output') is not None:
         inp, out = float(prices['input']), float(prices['output'])
-        read = float(prices['cache_read']) if prices.get('cache_read') is not None else inp
-        CATALOG_PRICES[model] = ((inp, out, read, inp),) * 2 + (10**9,)
+        CATALOG_PRICES[model] = flat_row(inp, out, float(prices['cache_read']) if prices.get('cache_read') is not None else inp)
+
+
+def price_row(model):
+    """the model's PRICES-form row (input, output, cache read, write; below and above a prompt-length line), or None"""
+    return PRICES.get(model) or META_PRICES.get(model) or CATALOG_PRICES.get(model)
 
 
 def price(model, usage, served=None):
     """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
     served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
-    rates when that model is not in the table: an estimate that errs high."""
-    row = PRICES.get(model) or CATALOG_PRICES.get(model)
+    rates when that model is not in the table: an estimate that errs high. Meta's published table, with Muse Ember's
+    long-prompt tier, comes before the catalog's flat copy of its first tier."""
+    row = price_row(model)
     if row is None:
         return None
     if served and served != model:
         row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
+    return row_cost(row, usage)
+
+
+def row_cost(row, usage):
+    """One call's USD cost by a PRICES-form row, from either usage style; the key relay's ledger prices with it too."""
     low, high, line = row
     usage = usage or {}
     # Anthropic reports cache reads as cache_read_input_tokens; OpenAI-style providers (DeepInfra) inside
@@ -143,6 +174,24 @@ def price(model, usage, served=None):
     return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
+# Images (files.read): a tool message names its image (store.action_result; a user message can too: the finish judge's),
+# and each request sends the file itself, so the store keeps no bytes and a brain switched mid-goal gets what it can
+# take: the image where its config says vision (the catalog's flag, copied at init and /model), a line saying it can't
+# see where not, nothing more where the eyes model already described it in the result (advisor.Eyes).
+IMAGES_PER_REQUEST = 20    # newest image results sent as images; 20 x 5 MB stays inside the API's 128 MB request
+IMAGE_CACHE = 32           # encoded files kept per brain: compaction counts the same request many times
+NO_VISION = ("this model can't see images; {name} is a {w}x{h} {fmt}; describe-by-tool options: discover topic images "
+             "lists the image tools installed here (identify, exiftool, tesseract for text in it, ...) to run in the "
+             "terminal, or ask your human")
+
+
+def image_tokens(width, height):
+    """An image's input tokens, estimated by Claude's rule (platform.claude.com vision): one token per 28x28-pixel patch,
+    after a downscale to its high-resolution tier (2576 px long edge, 4784 patches). It stands in where a provider counts
+    no tokens (Qwen-VL patches are 28 px too) and errs high for Claude's standard tier (1568 at most)."""
+    s = min(1.0, 2576 / max(width, height, 1))
+    return min(4784, math.ceil(width * s / 28) * math.ceil(height * s / 28))
+
 
 def http_error(e):
     """a ModelError carrying the status, the provider's reason (the body's first 2 KB), any retry-after and the
@@ -156,11 +205,23 @@ def http_error(e):
     err = ModelError(str(e) + (': ' + detail if detail else ''))
     err.status = e.code      # a refusal must not be retried like an outage
     err.request_id = (e.headers or {}).get('request-id')
-    try:
-        err.retry_after = float((e.headers or {}).get('retry-after') or 0) or None
-    except (TypeError, ValueError):
-        err.retry_after = None
+    err.retry_after = retry_after(e.headers) or None
     return err
+
+
+def retry_after(headers):
+    """the seconds a Retry-After header asks for (a number or an HTTP date), else None"""
+    value = (headers or {}).get('retry-after')
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(0.0, email.utils.parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
 
 
 def _recording_opener(held):
@@ -209,14 +270,15 @@ class Model:
         # A paid provider reached through the owner's key relay listens on loopback but bills like a remote one.
         self.direct = parsed.hostname not in LOOPBACK
         self.remote = self.direct or bool(config.get('relay'))
-        self.context = config.get('context')
-        if self.api == 'anthropic' and self.context is None:
+        if self.api == 'anthropic' and config.get('context') is None:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
+        self.context, self._context_at = None, 0.0   # the window context_size resolved, and when
         self.counter = True
         self.last_usage = {}
         self.last_speed = None   # the last reply's speed: engine_speed on a Caminus server, else estimated_speed
         self.caminus = None     # whether the endpoint is a Caminus server, once asked (is_caminus)
         self.last_call = {}      # the newest Messages API call: requested and serving model, fallback, stop, request id
+        self._images = {}        # (path, mtime_ns, size) -> (sha256, base64): see _image_data
 
     def _held(self, sock):
         with self._sockets_lock:
@@ -285,6 +347,7 @@ class Model:
         same port (llama-server where caminus serve was): whether the brain is Caminus is then asked again."""
         if isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError):
             self.caminus = None
+            self._context_at = 0.0   # (and its window is asked again: the server that comes back may run another mode)
         return ModelError(str(e))
 
     def is_caminus(self):
@@ -313,10 +376,31 @@ class Model:
         return estimated_speed(tokens, t_first, t_last)
 
     def context_size(self):
-        if self.context is None:
-            p = self.request(self.root + '/props')
-            self.context = p.get('n_ctx')
+        """The window (catalog.window): a local brain's from its server now, asked again every WINDOW_TTL seconds and
+        after a failed connection, so a server restarted in another mode (262K, 1M) is measured as it runs; a paid
+        brain's from its config. Nothing known: the endpoint's /props, whatever its engine (llama-server, a fixture)."""
+        if self.context is None or not self.remote and time.monotonic() - self._context_at > WINDOW_TTL:
+            from . import catalog
+            served = None
+            # (only a Caminus server, or provider_kind local, is asked each time: is_caminus remembers the answer, so a
+            # key relay on loopback is not asked every minute)
+            if not self.remote and catalog.window_candidate(self.config) and \
+                    (self.config.get('provider_kind') == 'local' or self.is_caminus()):
+                try:
+                    served = catalog.local_window(self.config, self.opener, 3)
+                except Exception:
+                    served = None   # (a window lookup never fails a turn)
+            if served is None and self.context is not None and not self.remote:
+                window = self.context   # a lookup that learns nothing keeps what the server said: never the stale config
+            else:
+                window = catalog.window(self.config, served, not self.remote)
+            if window is None:
+                window = catalog.props_window(self.request(self.root + '/props'))
+            self.context = window
+            if not self.remote:
+                self._context_at = time.monotonic()   # (a paid brain's window is its config's: never asked again)
         if isinstance(self.context, bool) or not isinstance(self.context, int) or self.context < 1024:
+            self.context = None
             raise ModelError('backend must report a positive context window, or set --context explicitly')
         return self.context
 
@@ -338,7 +422,7 @@ class Model:
         # the effort in force (effort.py): a local model takes it as the server's model id for the level, a provider
         # with reasoning_effort as that field; a short side call (the judge's) runs with thinking off
         choice = effort.resolve(self.config, short=limit < SHORT_CALL)
-        body = dict(model=model or choice['model'] or self.config['model'], messages=messages,
+        body = dict(model=model or choice['model'] or self.config['model'], messages=self._wire(messages),
                     stream=on_delta is not None, max_tokens=limit)
         # sampling: none for a local brain (its server applies the model's own defaults: a fixed 0.6 overrode the
         # Qwen3.8 cards' 1.0), a paid model's card values when known, the config's own when set
@@ -347,9 +431,10 @@ class Model:
             body['reasoning_effort'] = choice['reasoning_effort']   # (DeepInfra, Mistral; 'none' turns it off)
         if choice['thinking_off']:
             body['chat_template_kwargs'] = dict(enable_thinking=False)   # a local server with no -nothink id
-        if self.config.get('provider_kind') == 'mistral':
+        if self.config.get('provider_kind') in ('mistral', 'meta'):
             # Mistral routes requests to its prompt cache by this key (a hint, not a promise): one stable key per agent,
-            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %.
+            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %. Meta
+            # caches prefixes by itself and takes the same field (dev.meta.ai/docs/protocols/chat-completions).
             import hashlib
             body['prompt_cache_key'] = 'ember-' + hashlib.sha256(
                 ('%s|%s' % (self.config.get('name') or '', body['model'])).encode()).hexdigest()[:24]
@@ -435,7 +520,10 @@ class Model:
                         break
                     chunk = json.loads(data)
                     now = time.monotonic()
-                    if chunk.get('choices') and t_first is None:
+                    # the window opens at the first piece with text or a call in it: a role-only chunk first, then
+                    # reasoning a provider does not stream (Meta), would count that hidden time as writing
+                    if t_first is None and any(((c or {}).get('delta') or {}).get(k) for c in chunk.get('choices') or []
+                                               for k in ('content', 'reasoning_content', 'tool_calls')):
                         t_first = now
                     t_last = now
                     if chunk.get('usage'):
@@ -479,8 +567,11 @@ class Model:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             raise self._failed(e) from e
         self.last_usage = usage
-        self.last_speed = self._speed(timings, usage.get('completion_tokens') if isinstance(usage, dict) else None,
-                                      t_first, t_last)
+        written = usage.get('completion_tokens') if isinstance(usage, dict) else None
+        hidden = ((usage.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0) if isinstance(usage, dict) else 0
+        if isinstance(written, int) and not reasoning and isinstance(hidden, int) and 0 < hidden <= written:
+            written -= hidden      # reasoning billed but not streamed (Meta): not written inside the window
+        self.last_speed = self._speed(timings, written, t_first, t_last)
         try:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:
@@ -504,12 +595,14 @@ class Model:
     def tokens(self, messages, tools):
         if self.counter and self.api == 'anthropic':
             try:
-                body = self._to_anthropic(messages, tools)
+                # (without the image blocks: compaction counts one request many times, and each count would upload
+                # every image again; their cost is added once, by the same patch rule the other counters use)
+                body = self._to_anthropic([{k: v for k, v in m.items() if k != 'image'} for m in messages], tools)
                 body.pop('max_tokens', None)
                 value = self.request(self.base + '/messages/count_tokens', body)['input_tokens']
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError('invalid token count')
-                return value
+                return value + self._image_cost(messages)
             except (ModelError, KeyError, ValueError, TypeError) as e:
                 if getattr(e, 'status', 0) in (401, 402, 403):
                     raise              # a missing or refused key is not a counting problem
@@ -538,12 +631,112 @@ class Model:
                 value = result['input_tokens']
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError('invalid token count')
-                return value
+                return value + self._image_cost(messages)   # (the converted messages carry the images' text only)
             except (ModelError, KeyError, ValueError):
                 # Other compatible providers need not implement Caminus's counter.
                 # UTF8 bytes plus framing is conservative for byte-based tokenizers.
                 self.counter = False
-        return len(json.dumps(dict(messages=messages, tools=tools), ensure_ascii=False).encode()) + 256 * len(messages)
+        return (len(json.dumps(dict(messages=messages, tools=tools), ensure_ascii=False).encode()) + 256 * len(messages)
+                + self._image_cost(messages))
+
+    # ---- images ------------------------------------------------------------------------------------------------
+
+    def _image_data(self, img):
+        """the image file as base64 while it still is the file that was read (its sha256), else None"""
+        try:
+            st = os.stat(img['path'])
+            key = (img['path'], st.st_mtime_ns, st.st_size)
+            if key not in self._images:
+                with open(img['path'], 'rb') as f:
+                    raw = f.read()
+                if len(self._images) >= IMAGE_CACHE:
+                    self._images.clear()
+                self._images[key] = (hashlib.sha256(raw).hexdigest(), base64.b64encode(raw).decode())
+            sha, data = self._images[key]
+            return data if sha == img.get('sha256') else None
+        except (OSError, KeyError, TypeError):
+            return None
+
+    def _image_plan(self, messages):
+        """{index: (base64 data or None, a line for the text or None)} for each tool or user message naming an image"""
+        found = [i for i, m in enumerate(messages)
+                 if m.get('role') in ('tool', 'user') and isinstance(m.get('image'), dict)]
+        recent, plan = set(found[-IMAGES_PER_REQUEST:]), {}
+        for i in found:
+            img = messages[i]['image']
+            name = os.path.basename(str(img.get('path') or '')) or 'the file'
+            if not self.config.get('vision'):
+                plan[i] = (None, None if img.get('described_by') else NO_VISION.format(
+                    name=name, w=img.get('width'), h=img.get('height'), fmt=str(img.get('format') or '').upper()))
+            elif 'sha256' not in img:
+                plan[i] = (None, None)                       # past read's caps: the result's note says so
+            elif i not in recent:
+                plan[i] = (None, f'[{name}: not sent again; a request carries the newest {IMAGES_PER_REQUEST} images: '
+                                 'read it again to see it]')
+            else:
+                data = self._image_data(img)
+                plan[i] = (data, None) if data else (None, f'[{name} changed or is gone since it was read: no image '
+                                                           'sent; read it again]')
+        return plan
+
+    def _image_cost(self, messages):
+        return sum(image_tokens(int(messages[i]['image']['width']), int(messages[i]['image']['height']))
+                   for i, (data, _) in self._image_plan(messages).items() if data)
+
+    def _wire(self, messages):
+        """The messages as an OpenAI-compatible request sends them. A Chat Completions tool message carries text only
+        (OpenAI's spec: ChatCompletionToolMessageParam takes a string or text parts), so an image goes in a user message
+        after its turn's last tool result, never between parallel results (a user message's image joins its own text); a
+        message without an image is sent as stored."""
+        plan = self._image_plan(messages)
+        if not plan:
+            return self._system_as_user(messages)
+        out, parts = [], []
+        for i, m in enumerate(messages):
+            if parts and m.get('role') != 'tool':
+                out.append(dict(role='user', content=parts))
+                parts = []
+            if i in plan:
+                img, (data, line) = m['image'], plan[i]
+                m = {k: v for k, v in m.items() if k != 'image'}
+                if data and m['role'] == 'user':
+                    m['content'] = [dict(type='text', text=m.get('content') or ''), dict(
+                        type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif data:
+                    parts += [dict(type='text', text=f"{img['path']} (the read in call {m.get('tool_call_id')}):"),
+                              dict(type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif line:
+                    m['content'] = (m.get('content') or '') + '\n' + line
+            out.append(m)
+        if parts:
+            out.append(dict(role='user', content=parts))
+        return self._system_as_user(out)
+
+    def _system_as_user(self, messages):
+        """Meta merges every system message into the front instructions, so a trailing one (the runtime block, new each
+        turn) changed the prompt's start and voided its prefix cache on every turn. For Meta, each system message after
+        the leading ones goes as a user message marked [system], as the Messages API transport sends it, and after the
+        tool results its assistant turn still waits for (Meta refuses a message between a call and its results). Every
+        other provider gets the messages as they are."""
+        if self.config.get('provider_kind') != 'meta':
+            return messages
+        out, held, waiting, lead = [], [], set(), True
+        for m in messages:
+            lead = lead and m['role'] == 'system'
+            if lead:
+                out.append(m)
+                continue
+            if m['role'] == 'system':
+                (held if waiting else out).append(dict(role='user', content='[system] ' + str(m.get('content') or '')))
+                continue
+            if m['role'] == 'assistant':
+                waiting = {c['id'] for c in m.get('tool_calls') or []}
+            elif m['role'] == 'tool':
+                waiting.discard(m.get('tool_call_id'))
+            out.append(m)
+            if held and not waiting:
+                out, held = out + held, []
+        return out + held
 
     # ---- Anthropic Messages API ---------------------------------------------------------------------------
 
@@ -558,7 +751,15 @@ class Model:
         while rest and rest[0]['role'] == 'system':
             system.append(rest.pop(0)['content'])
         tail = rest.pop()['content'] if rest and rest[-1]['role'] == 'system' else None
-        out = []
+        out, images = [], self._image_plan(rest)
+
+        def with_image(i, text):
+            """a message's text, as blocks with its image after it, or with the line that says why none is sent"""
+            data, line = images.get(i, (None, None))
+            if data:
+                return [dict(type='text', text=text), dict(type='image', source=dict(
+                    type='base64', media_type='image/' + rest[i]['image']['format'], data=data))]
+            return text + '\n' + line if line else text
 
         def add(role, blocks):
             if not blocks:
@@ -568,12 +769,13 @@ class Model:
             else:
                 out.append(dict(role=role, content=list(blocks)))
 
-        for m in rest:
+        for i, m in enumerate(rest):
             role = m['role']
             if role == 'system':                     # a mid-history system message: kept as an operator note
                 add('user', [dict(type='text', text='[system] ' + m['content'])])
-            elif role == 'tool':
-                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=m['content'] or '')])
+            elif role == 'tool':                     # (a tool_result's content may hold image blocks)
+                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'],
+                                  content=with_image(i, m['content'] or ''))])
             elif role == 'assistant':
                 blocks = [dict(type='text', text=m['content'])] if m.get('content') else []
                 for call in m.get('tool_calls') or []:
@@ -587,7 +789,8 @@ class Model:
                     blocks.append(dict(type='tool_use', id=call['id'], name=f['name'], input=args))
                 add('assistant', blocks)
             else:
-                add('user', [dict(type='text', text=m['content'] or ' ')])
+                blocks = with_image(i, m['content'] or ' ')
+                add('user', blocks if isinstance(blocks, list) else [dict(type='text', text=blocks)])
         if out and out[0]['role'] != 'user':
             out.insert(0, dict(role='user', content=[dict(type='text', text='(conversation resumed)')]))
         if out:

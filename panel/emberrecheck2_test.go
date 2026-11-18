@@ -58,10 +58,10 @@ func TestTheRewindRecordWrapsAndTheConfirmLeadsWithTheKey(t *testing.T) {
 }
 
 func TestCopyFixes(t *testing.T) {
-	if v := ansi.Strip(actionCard("machine", nil, map[string]any{"gpus": []any{map[string]any{"vram_used_mib": 100.0, "vram_total_mib": 512.0, "busy_percent": 0.0}}}, 160, "", "")); !strings.Contains(v, "100/512 MiB") {
+	if v := ansi.Strip(actionCard("machine", nil, map[string]any{"gpus": []any{map[string]any{"vram_used_mib": 100.0, "vram_total_mib": 512.0, "busy_percent": 0.0}}}, 160, "", "", false)); !strings.Contains(v, "100/512 MiB") {
 		t.Fatalf("a small iGPU in MiB: %q", v)
 	}
-	if v := ansi.Strip(actionCard("read", map[string]any{"path": "x"}, map[string]any{"error": "[Errno 2] No such file: '/srv/agent/homes/r/work/x'"}, 160, "/srv/agent/homes/r", "")); strings.Contains(v, "/srv/agent") {
+	if v := ansi.Strip(actionCard("read", map[string]any{"path": "x"}, map[string]any{"error": "[Errno 2] No such file: '/srv/agent/homes/r/work/x'"}, 160, "/srv/agent/homes/r", "", false)); strings.Contains(v, "/srv/agent") {
 		t.Fatalf("errors read short paths: %q", v)
 	}
 	m := chatFixture(t)

@@ -9,6 +9,7 @@ package main
 // Ctrl+O switches to everything: every card in full, the thinking, every gate run.
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -26,11 +27,11 @@ type callInfo struct {
 // toolFamily is the colour a tool's label takes: the shell, files, the web, memory, messages, the done check.
 func toolFamily(name string) lipgloss.Style {
 	switch name {
-	case "terminal", "ask_root", "lease", "machine", "discover":
+	case "terminal", "sandbox", "ask_root", "lease", "machine", "discover":
 		return lipgloss.NewStyle().Foreground(cOrange).Bold(true)
-	case "read", "edit", "write", "checkpoint", "rollback":
+	case "read", "search", "edit", "write", "checkpoint", "rollback":
 		return lipgloss.NewStyle().Foreground(cPurple).Bold(true)
-	case "web_search", "web_fetch":
+	case "web_search", "web_fetch", "browser":
 		return lipgloss.NewStyle().Foreground(cTeal).Bold(true)
 	case "remember", "history_search", "todo":
 		return lipgloss.NewStyle().Foreground(cBlue).Bold(true)
@@ -40,6 +41,25 @@ func toolFamily(name string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(cGreen).Bold(true)
 	}
 	return lipgloss.NewStyle().Foreground(cText).Bold(true)
+}
+
+// readMeta is a read card's note: the lines shown, "directory", or "image WxH" for an image file (files.py image_info),
+// with "· described by MODEL" where the eyes model described it for a brain without vision (advisor.py Eyes).
+func readMeta(result map[string]any) string {
+	if img, ok := result["image"].(map[string]any); ok {
+		w, _ := img["width"].(float64)
+		h, _ := img["height"].(float64)
+		meta := fmt.Sprintf("image %dx%d", int(w), int(h))
+		if by, _ := img["described_by"].(string); by != "" {
+			meta += " · described by " + by
+		}
+		return meta
+	}
+	if d, _ := result["directory"].(bool); d {
+		return "directory"
+	}
+	shown, _ := result["shown"].(string)
+	return "lines " + shown
 }
 
 func argStr(args map[string]any, keys ...string) string {
@@ -89,8 +109,9 @@ func kOf(n float64) string {
 	return fmt.Sprintf("%.0f", n)
 }
 
-// actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths.
-func actionCard(name string, args, result map[string]any, w int, home, cwd string) string {
+// actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths. open (a
+// click on the card) shows its whole preview: the full command, every output line, hit, result or message line.
+func actionCard(name string, args, result map[string]any, w int, home, cwd string, open bool) string {
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -98,6 +119,12 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 	subject, meta := "", ""
 	var preview []string
 	state := "ok"
+	rows := func(n int) int { // the preview's rows: n folded, everything open (bounded so one card cannot stall the screen)
+		if open {
+			return 5000
+		}
+		return n
+	}
 	if errText := rs("error"); errText != "" {
 		state = "fail"
 		// the agent's own paths read short (a raw error carried the whole home path)
@@ -105,15 +132,19 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			errText = strings.ReplaceAll(errText, home+"/", "~/")
 		}
 		meta = firstLine(residentText(errText))
-		preview = lines(residentText(errText), 4)
+		preview = lines(residentText(errText), rows(4))
 		if len(preview) <= 1 {
 			preview = nil
 		}
 	}
 	switch name {
-	case "terminal":
+	case "terminal", "sandbox":
+		var more []string // open: the rest of a command of several lines, above its output
 		if cmd := argStr(args, "command"); cmd != "" {
 			subject = "$ " + firstLine(shortCommand(cmd, home, cwd))
+			if all := strings.Split(strings.TrimSpace(residentText(shortCommand(cmd, home, cwd))), "\n"); open && len(all) > 1 {
+				subject, more = "$ "+all[0], all[1:]
+			}
 		} else if argStr(args, "stdin") != "" {
 			subject = "input → session"
 		} else if _, sig := args["signal"]; sig {
@@ -144,18 +175,31 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			case n > 0:
 				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
-				preview = all[max(0, len(all)-3):]
+				preview = all[max(0, len(all)-rows(3)):]
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
 			}
+			// what stopped it (a timeout, a box's limit): the limit hit is the outcome, so it leads
+			if hit := limitHit(name, result); hit != "" {
+				meta, state = strings.TrimPrefix(hit+" · "+meta, " · "), "fail"
+			}
+			if name == "sandbox" {
+				if net := sandboxNet(args, result); net != "" {
+					meta += " · " + net
+				}
+			}
 		}
+		preview = append(more, preview...)
 	case "read":
 		subject = residentText(shortPath(argStr(args, "path"), home, cwd))
 		if state == "ok" {
-			meta = "lines " + rs("shown")
-			if d, _ := result["directory"].(bool); d {
-				meta = "directory"
-			}
+			meta = readMeta(result)
+		}
+	case "search":
+		s, m, hits := searchSummary(args, result, home, cwd)
+		subject = s
+		if state == "ok" { // (a failure keeps the error's meta from above, the home written as ~)
+			meta, preview = m, hits[:min(rows(3), len(hits))]
 		}
 	case "web_search":
 		subject = "“" + residentText(argStr(args, "query")) + "”"
@@ -164,7 +208,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			if e := rs("engine"); e != "" {
 				meta += " · " + e
 			}
-			for _, h := range hits[:min(3, len(hits))] {
+			for _, h := range hits[:min(rows(3), len(hits))] {
 				r, _ := h.(map[string]any)
 				t, _ := r["title"].(string)
 				link, _ := r["href"].(string)
@@ -181,6 +225,14 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			if t := rs("text"); t != "" {
 				meta = strings.TrimPrefix(meta+fmt.Sprintf(" · %d chars", len(t)), " · ")
 			}
+		}
+	case "browser":
+		subject = browserSubject(args, result)
+		if skipped := rs("skipped"); skipped != "" { // an earlier call of the turn was refused: this one never ran
+			meta, state = "skipped: "+firstLine(skipped), "warn"
+		} else if state == "ok" {
+			meta = browserMeta(result, home, cwd)
+			preview = browserExcerpt(result, 3)
 		}
 	case "remember":
 		if argStr(args, "action") == "tidy" {
@@ -199,7 +251,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		}
 	case "send_message":
 		subject = "→ " + residentText(argStr(args, "to"))
-		preview = lines(residentText(argStr(args, "text")), 3)
+		preview = lines(residentText(argStr(args, "text")), rows(3))
 		if strings.Contains(rs("error"), "mail bus") {
 			meta = "no session called " + residentText(argStr(args, "to")) + " gets mail here"
 		}
@@ -320,8 +372,12 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			meta = residentText(t)
 		}
 	default:
-		subject = residentText(firstLine(argStr(args, "query", "path", "check", "summary", "label", "id", "topic", "to",
-			"until", "name", "text", "evidence", "question")))
+		what := argStr(args, "query", "path", "check", "summary", "label", "id", "topic", "to", "until", "name", "text",
+			"evidence", "question")
+		subject = residentText(firstLine(what))
+		if all := strings.Split(strings.TrimSpace(residentText(what)), "\n"); open && len(all) > 1 {
+			subject, preview = all[0], append(all[1:], preview...) // open: the rest of a subject of several lines
+		}
 		if state == "ok" {
 			for _, k := range []string{"summary", "status", "state", "note"} {
 				if v := rs(k); v != "" {
@@ -358,9 +414,59 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		if i > 0 {
 			rule = "    "
 		}
-		out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
+		if !open {
+			out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
+			continue
+		}
+		// open: a long line wraps under itself instead of being cut
+		for j, part := range strings.Split(ansi.Hardwrap(terminalText(p, false), max(8, w-4), true), "\n") {
+			if j > 0 {
+				rule = "    "
+			}
+			out = append(out, rule+emberDim.Render(part))
+		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// searchSummary is a search card's subject (the pattern or glob, and where), its count, and its hits: "file:line  text"
+// for each matching line of a text search (the resident prints a file's name, then "  12:  line" per match and
+// "  13-  line" per context line), the names for a glob search.
+func searchSummary(args, result map[string]any, home, cwd string) (subject, meta string, hits []string) {
+	subject = residentText(argStr(args, "glob"))
+	if p := argStr(args, "pattern"); p != "" {
+		subject = "“" + residentText(p) + "”" + strings.TrimSuffix(" in "+residentText(argStr(args, "glob")), " in ")
+	}
+	if p := argStr(args, "path"); p != "" && p != "." {
+		subject += " under " + residentText(shortPath(p, home, cwd))
+	}
+	text, _ := result["text"].(string)
+	files, _ := result["files"].(float64)
+	m, isText := result["matches"].(float64)
+	file := ""
+	for _, ln := range strings.Split(residentText(text), "\n") {
+		switch {
+		case ln == "":
+		case !isText:
+			hits = append(hits, ln)
+		case !strings.HasPrefix(ln, " "):
+			file = ln
+		default:
+			if n, body, ok := strings.Cut(strings.TrimLeft(ln, " "), ":  "); ok && n != "" && strings.Trim(n, "0123456789") == "" {
+				hits = append(hits, file+":"+n+"  "+strings.TrimSpace(body))
+			}
+		}
+	}
+	switch {
+	case !isText:
+		meta = plural(int(files), "file", "files")
+	case m == 0:
+		searched, _ := result["searched"].(float64)
+		meta = "no matches in " + plural(int(searched), "file", "files")
+	default:
+		meta = plural(int(m), "match", "matches") + " in " + plural(int(files), "file", "files")
+	}
+	return subject, meta, hits
 }
 
 // actionBlock is the compact view's card for a tool_result event ("" when the result is drawn some other way: a
@@ -396,7 +502,7 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	}
 	id, _ := e.Data["call_id"].(string)
 	call := c.calls[id]
-	if running, _ := result["running"].(bool); running && name == "terminal" {
+	if running, _ := result["running"].(bool); running && (name == "terminal" || name == "sandbox") {
 		if sid, _ := result["session"].(string); sid != "" {
 			if code, done := c.sessionDone[sid]; done { // a later check saw it end: this card said "still running" for good
 				r2 := map[string]any{}
@@ -408,7 +514,189 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 			}
 		}
 	}
-	return actionCard(name, call.args, result, w, c.home, c.cwd)
+	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq])
+}
+
+// limitHit names the limit that killed a command or a box ("" when none did).
+func limitHit(name string, result map[string]any) string {
+	if hit, _ := result["limit_hit"].(string); hit != "" {
+		return hit + " limit hit: " + map[bool]string{true: "box", false: "command"}[name == "sandbox"] + " killed"
+	}
+	return ""
+}
+
+// sandboxNet is a box's network in a few words: none, or its hosts and how many connections were refused.
+func sandboxNet(args, result map[string]any) string {
+	hosts, _ := result["hosts"].([]any)
+	if hosts == nil {
+		hosts, _ = args["hosts"].([]any)
+	}
+	if len(hosts) == 0 {
+		return "no network"
+	}
+	var names []string
+	for _, h := range hosts {
+		names = append(names, residentText(fmt.Sprint(h)))
+	}
+	out := "net: " + strings.Join(names, ", ")
+	refused := 0
+	conns, _ := result["connections"].([]any)
+	for _, c := range conns {
+		if m, _ := c.(map[string]any); m != nil {
+			if v, _ := m["verdict"].(string); v != "allowed" {
+				refused++
+			}
+		}
+	}
+	if refused > 0 {
+		out += fmt.Sprintf(" · %d refused", refused)
+	}
+	return out
+}
+
+// sandboxLines are the expanded view's lines for a box: what it could reach, its limits, every connection.
+func sandboxLines(result map[string]any) []string {
+	var out []string
+	if box, _ := result["box"].(string); box != "" {
+		line := "box: " + residentText(box) + " (/box, writable for this goal)"
+		if f, _ := result["folder"].(string); f != "" {
+			line += " · work folder: " + residentText(f) + " (/work, read-only)"
+		}
+		out = append(out, line)
+	}
+	if l, _ := result["limits"].(map[string]any); l != nil {
+		ts, _ := l["time_s"].(float64)
+		mb, _ := l["memory_mb"].(float64)
+		tasks, _ := l["tasks"].(float64)
+		cpu, _ := l["cpu_percent"].(float64)
+		line := fmt.Sprintf("limits: %ds · %d MB · %d processes · CPU %d %%", int(ts), int(mb), int(tasks), int(cpu))
+		if disk, _ := l["disk_mb"].(float64); disk > 0 {
+			line += fmt.Sprintf(" · /box %d MB", int(disk))
+		}
+		if e, _ := l["enforced"].(string); e != "" {
+			line += " (" + residentText(e) + ")"
+		}
+		out = append(out, line)
+	}
+	if hit := limitHit("sandbox", result); hit != "" {
+		out = append(out, hit)
+	}
+	if hosts, _ := result["hosts"].([]any); len(hosts) == 0 {
+		out = append(out, "network: none")
+	}
+	for _, c := range sandboxConnections(result["connections"]) {
+		out = append(out, "connection: "+c)
+	}
+	if more, _ := result["connections_more"].(float64); more > 0 { // (a result carries at most 50 new ones)
+		out = append(out, fmt.Sprintf("… %d more connections", int(more)))
+	}
+	return out
+}
+
+// sandboxConnections are a box's connections as "target verdict" lines.
+func sandboxConnections(v any) []string {
+	var out []string
+	conns, _ := v.([]any)
+	for _, c := range conns {
+		if m, _ := c.(map[string]any); m != nil {
+			target, _ := m["target"].(string)
+			verdict, _ := m["verdict"].(string)
+			out = append(out, residentText(target)+"  "+residentText(verdict))
+		}
+	}
+	return out
+}
+
+// browserSubject is what a browser call did: the result's own line (it names the element: clicked button "Send"),
+// else the action and its target from the arguments.
+func browserSubject(args, result map[string]any) string {
+	if did, _ := result["did"].(string); did != "" {
+		return residentText(did)
+	}
+	switch act := argStr(args, "action"); act {
+	case "open":
+		return "open " + residentText(argStr(args, "url"))
+	case "eval":
+		return "eval " + firstLine(argStr(args, "js"))
+	case "":
+		if _, ok := result["screenshot"]; ok {
+			return "screenshot"
+		}
+		return "page"
+	default: // (a refused type e4 or press x says what it tried)
+		return strings.TrimSpace(act + " " + residentText(argStr(args, "ref", "key", "direction")))
+	}
+}
+
+// browserMeta is where a browser call left the page: its title and address, a screenshot's file, the console's
+// count, eval's value, and how many connections the box refused.
+func browserMeta(result map[string]any, home, cwd string) string {
+	var parts []string
+	if p, _ := result["screenshot"].(string); p != "" {
+		parts = append(parts, "→ "+residentText(shortPath(p, home, cwd)))
+	}
+	if t, _ := result["title"].(string); strings.TrimSpace(t) != "" {
+		parts = append(parts, residentText(firstLine(t)))
+	}
+	if u, _ := result["url"].(string); u != "" {
+		parts = append(parts, residentText(strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")))
+	}
+	if m, ok := result["messages"].([]any); ok {
+		parts = append(parts, plural(len(m), "console message", "console messages"))
+	}
+	if v, ok := result["value"]; ok {
+		raw, _ := json.Marshal(v)
+		parts = append(parts, "= "+firstLine(string(raw)))
+	}
+	if c, _ := result["closed"].(bool); c {
+		parts = append(parts, "closed")
+	}
+	if net, _ := result["network"].(map[string]any); net != nil {
+		if r, _ := net["refused"].([]any); len(r) > 0 {
+			parts = append(parts, fmt.Sprintf("%d refused", len(r)))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// browserExcerpt is a browser card's first n preview lines: the dialogs and notes, then the page's snapshot (or the
+// console's newest messages).
+func browserExcerpt(result map[string]any, n int) []string {
+	var out []string
+	notes, _ := result["notes"].([]any)
+	for _, x := range notes {
+		out = append(out, "! "+residentText(fmt.Sprint(x)))
+	}
+	if snap, _ := result["snapshot"].(string); snap != "" {
+		out = append(out, lines(snap, n)...)
+	}
+	msgs, _ := result["messages"].([]any)
+	for _, x := range msgs {
+		if m, _ := x.(map[string]any); m != nil {
+			out = append(out, residentText(fmt.Sprint(m["level"]))+": "+firstLine(fmt.Sprint(m["text"])))
+		}
+	}
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// browserLines are an open browser card's lines: the notes, the whole snapshot (or console, or eval's value), then
+// every connection the box made or refused for that call (the event's panel field: the model only gets a count).
+func browserLines(result, panel map[string]any) []string {
+	out := browserExcerpt(result, 1<<20)
+	for i, l := range out {
+		out[i] = "  " + l // (a snapshot line's leading "-" is not a removed line)
+	}
+	if v, ok := result["value"]; ok {
+		raw, _ := json.MarshalIndent(v, "", "  ")
+		out = append(out, lines(residentText(string(raw)), 30)...)
+	}
+	for _, c := range sandboxConnections(panel["connections"]) {
+		out = append(out, "connection: "+c)
+	}
+	return out
 }
 
 // firstLine is a text's first line, with " …" when more follows.

@@ -107,7 +107,7 @@ import numpy as np
 import torch
 from ..device import capacity
 from ..errors import NumericalFailure, NonFiniteLogits
-from .livestate import LiveState, is_bail
+from .livestate import LiveState, is_bail, lcp, token_ids
 
 FORMAT = 1
 MAGIC = b'CAMINUS-KV-CACHE'          # 16 bytes, then the header length (u64), the header's crc32 (u32), the format (u32)
@@ -226,14 +226,6 @@ def _sha(b):
 
 def tok_sha(toks):
     return _sha(np.asarray(toks, dtype=np.int32).tobytes())
-
-
-def lcp(a, b):
-    """the longest common prefix of two token sequences"""
-    n = min(len(a), len(b))
-    if n == 0: return 0
-    x = np.flatnonzero(np.asarray(a[:n], dtype=np.int64) != np.asarray(b[:n], dtype=np.int64))
-    return int(x[0]) if x.size else n
 
 
 def _up(n, a=ALIGN):
@@ -1064,7 +1056,11 @@ class PromptCache:
 
     @log.setter
     def log(self, v):
-        self.live.log = v
+        self.live.set_log(v)
+
+    def _arr(self, log):
+        """a line's tokens for lcp: the live log's kept array (LiveState.log_array), any other line as it is"""
+        return self.live.log_array() if log is self.live.log else log
 
     @property
     def st(self):
@@ -1285,22 +1281,23 @@ class PromptCache:
     def _usable(self, pos, commit, n):
         return pos <= n - 1 or (pos == n and commit >= 1)
 
-    def plan(self, ids, side=False, max_new=None, hint=None):
+    def plan(self, ids, side=False, max_new=None, hint=None, ida=None):
         """how many leading ids prepare() would reuse and from where, with no side effect (but reading disk entries' tokens):
         dict(cached, source). During a side call: what a main request's prepare() reuses after it ends the side call (the main
         line's log, state and checkpoints). side=True: what prepare(ids, side=True) reuses (the side log when it continues, else
         the main checkpoint the side call would start from, else cold); side='auto': as route(ids, max_new) decides. With side
-        True or 'auto' the dict also has side (bool) and route (route()'s decision with 'auto', else None). hint: route()'s"""
+        True or 'auto' the dict also has side (bool) and route (route()'s decision with 'auto', else None). hint: route()'s.
+        ida: the ids' array when the caller converted them (token_ids: ids, ida)"""
         self.fence()
-        ids = [int(x) for x in ids]
+        ids, ida = token_ids(ids, ida)
         r = None
         if side == 'auto':
-            r = self.route(ids, max_new, hint=hint); side = r['route'] == 'side'
+            r = self.route(ids, max_new, hint=hint, ida=ida); side = r['route'] == 'side'
         if side:
             src, reuse = self._plan_side(ids)
             return dict(cached=reuse, source=src, side=True, route=r)
         sd = self.side
-        src = self._best(ids) if sd is None else self._best(ids, sd['log'], sd['st'], sd['ckpts'])
+        src = self._best(ids, ida=ida) if sd is None else self._best(ids, sd['log'], sd['st'], sd['ckpts'], ida=ida)
         return dict(cached=src[1], source=src[0]) if r is None else dict(cached=src[1], source=src[0], side=False, route=r)
 
     def _main_line(self):
@@ -1308,7 +1305,7 @@ class PromptCache:
         sd = self.side
         return (sd['log'], sd['st'], sd['ckpts']) if sd is not None else (self.log, self.st, self.ckpts)
 
-    def route(self, ids, max_new=None, min_match=SIDE_MATCH_MIN, hint=None):
+    def route(self, ids, max_new=None, min_match=SIDE_MATCH_MIN, hint=None, ida=None):
         """M7 side-slot routing (the lead's ruling, 11-05): where prepare(ids, side='auto') sends a request of len(ids) prompt
         tokens that may generate max_new more. No side effect on the engine or the live line (like plan(), it may read disk entries'
         token lists and remove one that is refused). dict(route 'main' | 'side', reason, shared (tokens shared with the
@@ -1331,7 +1328,7 @@ class PromptCache:
                                call starts from the deepest main checkpoint inside the shared prefix); one that does not
                                fit takes the rules above
           side 'unrelated'     none of the above: a short unrelated request (a harness title / summary / next-speaker call)
-        hint: None, or 'side' (the server's side question)"""
+        hint: None, or 'side' (the server's side question). ida: ids as an array (token_ids), when the caller has it"""
         if hint not in (None, 'side'): raise ValueError(f'promptcache.route: hint {hint!r} (None or \'side\')')
         self.fence()
         n = len(ids)
@@ -1344,14 +1341,14 @@ class PromptCache:
         i0 = int(st['i0'])
         main_n = max([i0] + [ck.pos for ck in ckpts])
         root = self.main_root if self.main_root is not None else max([ck.pos for ck in ckpts if ck.kind == 'root'], default=None)
-        shared = lcp(log, ids)
+        shared = lcp(self._arr(log), ids if ida is None else ida)
         out.update(main_n=main_n, root=root, shared=shared)
         if main_n <= 0: out['reason'] = 'no_main'
         elif hint == 'side' and need is not None and need <= self.side_rows: out.update(route='side', reason='side_question')
         elif shared >= (root if root is not None else int(min_match)) or (i0 > 0 and shared >= i0): out['reason'] = 'match'
         elif need is None or need > self.side_rows: out['reason'] = 'no_fit'
         elif main_n <= n: out['reason'] = 'main_shorter'
-        elif self._best(ids, log, st, ckpts)[0] == 'disk': out['reason'] = 'parked'
+        elif self._best(ids, log, st, ckpts, ida=ida)[0] == 'disk': out['reason'] = 'parked'
         else: out.update(route='side', reason='unrelated')
         return out
 
@@ -1375,20 +1372,21 @@ class PromptCache:
         self.stats['side_question_rewritten'] += 1
         return dict(ids=new, marks=dict(root=mk['root'], user=at + int(t['trim'])), tail=t, sent=len(ids))
 
-    def _root_after(self, old_root, old_log, ids, marks):
+    def _root_after(self, old_root, old_log, ids, marks, ida=None):
         """the main line's root mark after a main request: its own marks' root, else the previous one when the request keeps it
         (shares the old line up to it), else None (route() then falls back to the line's 'root' checkpoints)"""
         R = (marks or {}).get('root')
         if isinstance(R, int) and 0 < R < len(ids): return int(R)
-        if old_root is not None and lcp(old_log, ids) >= old_root: return old_root
+        if old_root is not None and lcp(old_log, ids if ida is None else ida) >= old_root: return old_root
         return None
 
-    def _best(self, ids, log=None, st=None, ckpts=None):
+    def _best(self, ids, log=None, st=None, ckpts=None, ida=None):
         """the best restore point for ids: (source, positions reused, detail); log / st / ckpts: the line to match (default
-        the live one; plan() passes the main line's during a side call)"""
+        the live one; plan() passes the main line's during a side call); ida: ids as an array (token_ids), when known"""
         log = self.log if log is None else log; st = self.st if st is None else st; ckpts = self.ckpts if ckpts is None else ckpts
         n = len(ids)
-        mlive = lcp(log, ids)
+        ida = ids if ida is None else ida
+        mlive = lcp(self._arr(log), ida)
         i0, c0 = int(st['i0']), int(st['commit'])
         best = ('cold', 0, None)
         if i0 > 0 and mlive >= i0 and self._usable(i0, c0, n): best = ('live', i0, None)
@@ -1404,7 +1402,7 @@ class PromptCache:
         if self.store is not None:
             for nm, h in self.store.entries(self.key_sha, 'park'):
                 if h.get('layout') != self.layout.sig or max([x['pos'] for x in h['ckpts']] + [0]) <= best[1]: continue
-                try: me = lcp(self.store.tokens(nm, h), ids)
+                try: me = lcp(self.store.tokens(nm, h), ida)
                 except CacheRefused as e: self.store.remove(nm, f'refused: {e}'); continue
                 ok = [(x['pos'], j) for j, x in enumerate(h['ckpts']) if x['pos'] <= min(me, h['rows_n']) and self._usable(x['pos'], x['commit'], n)]
                 if not ok: continue
@@ -1414,7 +1412,7 @@ class PromptCache:
                 if pos > best[1] and cost < best_cost: best, best_cost = ('disk', pos, (nm, h, j)), cost
         return best
 
-    def prepare(self, ids, marks=None, side=False, cancel=None, max_new=None, hint=None):
+    def prepare(self, ids, marks=None, side=False, cancel=None, max_new=None, hint=None, ida=None):
         """make the live slot hold ids up to their prompt end (module notes). Returns dict(st: the state the caller's generation
         loop continues (positions < st['i0'] processed, ids[st['i0']:] given; i0 == len(ids) with commit >= 1 is an exact hit,
         which spec.loop / longctx rerun from n - 1), cached (positions reused), source ('live' | 'vram' | 'spill' | 'disk' |
@@ -1426,18 +1424,19 @@ class PromptCache:
         state the next request continues (plan() / prepare() source 'live').
         side: False (a main request), True (a side call), or 'auto' (M7 routing: route(ids, max_new) decides, after the
         request was validated and an engine reset outside the cache was taken in; route: its decision, else None). The caller's
-        generation must then stay within max_new tokens (a side pass past side_rows drops the main slot). hint: route()'s"""
+        generation must then stay within max_new tokens (a side pass past side_rows drops the main slot). hint: route()'s.
+        ida: the ids' array when the caller converted them (token_ids: ids, ida)"""
         self.fence(); self._check_engine()
-        ids = [int(x) for x in ids]; n = len(ids)
+        ids, ida = token_ids(ids, ida); n = len(ids)
         if n < 1: raise CacheError('promptcache: an empty request')
         from ..decode import spec
         spec.check_capacity(self.m, n, 1, self.draft)
-        self.pf.check_tokens(ids, self.draft)
+        self.pf.check_tokens(ida, self.draft)
         if numerics(self.pf) != self._num:
             raise CacheError(f'promptcache: the prefill numerics changed since the cache was built: {self._num} -> {numerics(self.pf)}')
         rt = None
         if side == 'auto':
-            rt = self.route(ids, max_new, hint=hint); side = rt['route'] == 'side'
+            rt = self.route(ids, max_new, hint=hint, ida=ida); side = rt['route'] == 'side'
             self.stats['route_side' if side else 'route_main'] += 1
             if rt['reason'] == 'side_question': self.stats['route_side_question'] += 1
             if hint == 'side':   # (a measurement: does the harness's history end the stored conversation? Routing unchanged)
@@ -1449,9 +1448,9 @@ class PromptCache:
             return out
         t0 = time.perf_counter(); ms = dict(park=0.0, restore=0.0, process=0.0)
         if self.side is not None: ms['restore'] += self._end_side()
-        old_root, old_log = self.main_root, self.log
-        src, reuse, det = self._best(ids)
-        lost = int(self.st['i0']) - lcp(self.log, ids)
+        old_root, old_log = self.main_root, self.live.log_array()
+        src, reuse, det = self._best(ids, ida=ida)
+        lost = int(self.st['i0']) - lcp(old_log, ida)
         if src != 'live' and self.store is not None and self.auto_park_min is not None and lost >= self.auto_park_min:
             tp = time.perf_counter(); self._park_quiet(); ms['park'] = (time.perf_counter() - tp) * 1e3
         tr = time.perf_counter()
@@ -1466,7 +1465,7 @@ class PromptCache:
             self._cold(); src, reuse = 'cold', 0
         ms['restore'] += (time.perf_counter() - tr) * 1e3
         tq = time.perf_counter()
-        self.main_root = self._root_after(old_root, old_log, ids, marks)
+        self.main_root = self._root_after(old_root, old_log, ids, marks, ida)
         st, taken, cut = self._process(ids, marks, cancel=cancel)
         ms['process'] = (time.perf_counter() - tq) * 1e3; ms['total'] = (time.perf_counter() - t0) * 1e3
         self.stats['requests'] += 1; self.stats['reused'] += reuse; self.stats['prompt_tokens'] += n; self.stats[f'source_{src}'] += 1
@@ -1565,21 +1564,23 @@ class PromptCache:
         self._mark()
         return dict(self.st), taken, False
 
-    def extend(self, toks, st):
+    def extend(self, toks, st, ida=None):
         """the caller ran passes from the state prepare() / a previous extend() left (its generation loop): toks = every token
         of the sequence, st = the engine state after them (longctx.generate's). The processed tokens must keep the live log
-        as a prefix (else the live slot is dropped: CacheStateError). Nothing launched"""
+        as a prefix (else the live slot is dropped: CacheStateError). Nothing launched. ida: toks' array (token_ids), when
+        known"""
         self.fence(); self._check_terminal()
-        toks = [int(x) for x in toks]; i0, commit = int(st['i0']), int(st['commit'])
+        if ida is None and toks is self.live.log: ida = self.live.log_array()   # (end of a reply: the live log itself)
+        toks, ta = token_ids(toks, ida); i0, commit = int(st['i0']), int(st['commit'])
         p0 = int(self.st['i0'])
-        if i0 < p0 - 1 or lcp(self.log, toks) < min(p0, i0) or not 0 <= commit <= min(self.T, i0) or len(toks) < i0:
+        if i0 < p0 - 1 or lcp(self.live.log_array(), ta) < min(p0, i0) or not 0 <= commit <= min(self.T, i0) or len(toks) < i0:
             self._cold(); raise CacheStateError(f'promptcache.extend: the state ({i0}, {commit}) does not continue the live log ({p0} tokens): the slot was reset')
         if self.side is not None and i0 + self.T > self.side_rows:
             self._lose_main(); raise CacheStateError(f'promptcache.extend: a side pass reached {i0 + self.T} > side_rows {self.side_rows}: the main slot was dropped')
         if self.side is not None:
             self._side_written(i0, commit, 'extend'); self._side_cover(i0 + self.T)
         self._follow(p0, i0)
-        self.log, self.st = toks[:i0], dict(i0=i0, commit=commit)
+        self.live.set_log(toks[:i0], ta[:i0]); self.st = dict(i0=i0, commit=commit)
         self._mark(); self.live.known = True; self.live.vouch(self.m)
 
     def append(self, toks, st):
@@ -1608,6 +1609,11 @@ class PromptCache:
         """the live tokens (positions < the live state's i0; the cache's own list while the state is live: read, never
         modify)"""
         return self.live.tokens()
+
+    def live_array(self):
+        """live_tokens() as an int64 array (the kept log array, LiveState.log_array; read only): for prefix matches"""
+        a, i0 = self.live.log_array(), int(self.st['i0'])
+        return a if len(a) == i0 else a[:i0]
 
     def _follow(self, lo, hi):
         """extend()'s drafter bookkeeping, host only. The cache's state before the passes (lo = its i0) is one the drafter is
@@ -1719,19 +1725,19 @@ class PromptCache:
     # decides what the live state is. Before (11-07) K3Session did all of this with its own copy of the log and its own
     # epochs (tests/e2e/test_serve_k3.py abortx / bail / side hold the behaviour; tests/cache/test_prompt_cache.py cpu
     # cpu_session the same cases on the stand-in engine).
-    def prompt(self, ids, marks=None, side=False, cancel=None, max_new=None, max_recoveries=2, hooks=None, hint=None):
+    def prompt(self, ids, marks=None, side=False, cancel=None, max_new=None, max_recoveries=2, hooks=None, hint=None, ida=None):
         """the session's prompt phase: prepare() (a pass that fails after the engine's retries: the live state dropped
         (_drop_live: in a side call only the side call's) and prepared again, at most max_recoveries times in the request),
         then the prompt's last pass (longctx.first_logits: the first logits), a failed one recovered from the prompt-end
         checkpoint (_recover_pass); the new live state reported (extend). Returns prepare()'s dict plus logits (None when
         cancelled) and ms['first'] (the last pass). The live state is not known from the start until it returns, except
         that a refusal (ContextBoundsError / PrefillRefused) before prepare() changed anything keeps the previous one (a
-        refusal: the previous state stands). self.phase is where an exception left: 'prepare' or 'first'"""
+        refusal: the previous state stands). self.phase is where an exception left: 'prepare' or 'first'. ida: as prepare's"""
         from ..engine.k3 import ContextBoundsError
         from ..prefill.driver import PrefillRefused
         from ..decode import longctx
         h = hooks or _NO_HOOKS
-        ids = [int(t) for t in ids]
+        ids, ida = token_ids(ids, ida)
         self.pe, self.prompt_ids, self.req_side, self.rec_n = None, None, False, 0
         log0, st0, known0 = self.log, dict(self.st), self.live.known
         tok0, seq0 = (self.live.marks[1] if self.live.marks else None), self.m.seq
@@ -1739,7 +1745,7 @@ class PromptCache:
         self.phase = 'prepare'
         while True:
             try:
-                r = self.prepare(ids, marks, side=side, cancel=cancel, max_new=max_new, hint=hint)
+                r = self.prepare(ids, marks, side=side, cancel=cancel, max_new=max_new, hint=hint, ida=ida)
                 break
             except (ContextBoundsError, PrefillRefused):
                 if (known0 and int(self.m.token) == tok0 and self.m.seq == seq0 and dict(self.st) == st0
@@ -1774,7 +1780,7 @@ class PromptCache:
                 st = self._recover_pass(e, ids, False, max_recoveries, h)   # (the prompt-end state: first_logits runs again from it)
         h.arm(False)
         r['ms']['first'] = (time.perf_counter() - t0) * 1e3
-        self.extend(ids, st2)
+        self.extend(ids, st2, ida=ida)
         self.phase = None
         r['logits'] = lg
         return r
@@ -2094,7 +2100,8 @@ class PromptCache:
                 for l in range(L.na): wanted[f'pool{l}.c{c}'] = [pool[l, :(pos + 3) // 4].reshape(-1)]
         self.store.read(nm, h, wanted)
         ck = Ckpt(**{k: x.get(k) for k in Ckpt.META}, disk=(nm, x['segs']))
-        self.log = [int(t) for t in toks[:pos]]
+        tp = toks[:pos].astype(np.int64)        # (the entry's int32 tokens: the log and its array from one conversion)
+        self.live.set_log(tp.tolist(), tp)
         self._load_disk(ck, min(int(h['pool_ok']), pos // 4))
         self.st = dict(i0=pos, commit=cm)
         for jj, y in enumerate(h['ckpts']):
@@ -2110,10 +2117,10 @@ class PromptCache:
         processing; dict(st, cached, source). An active side call is ended first (the main line's rows and state back), as
         prepare() does: a restore never drops the main line"""
         self.fence(); self._check_engine()
-        ids = [int(x) for x in ids]
+        ids, ida = token_ids(ids)
         if self.side is not None: self._end_side()
-        old_root, old_log = self.main_root, self.log
-        src, reuse, det = self._best(ids)
+        old_root, old_log = self.main_root, self.live.log_array()
+        src, reuse, det = self._best(ids, ida=ida)
         try:
             if src == 'disk': self._unpark(*det)
             elif src in ('vram', 'spill'): self._restore(det)
@@ -2122,7 +2129,7 @@ class PromptCache:
             self.stats['refused'] += 1; self.refusal = str(e)
             if src == 'disk': self.store.remove(det[0], f'refused: {e}')
             self._cold(); src, reuse = 'cold', 0
-        self.main_root = self._root_after(old_root, old_log, ids, None)
+        self.main_root = self._root_after(old_root, old_log, ids, None, ida)
         if self.draft is not None:   # (the caller's generation runs from here: its first inject is at i0, or i0 - 1 on an exact hit)
             self.draft.flush(); self._skip_gap(int(self.st['i0'])); self._mark()
         return dict(st=dict(self.st), cached=reuse, source=src)

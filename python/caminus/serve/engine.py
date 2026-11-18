@@ -64,6 +64,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
+from ..cache.livestate import lcp
 from .mock_engine import EngineStateError, MockEngine
 
 CACHE_SOURCE = {'live': 'live', 'checkpoint': 'vram', 'disk': 'disk', 'cold': 'cold'}
@@ -91,14 +92,6 @@ class PrefillStats:
     passes_ms: float = 0.0
     slot: str = 'main'          # 'side': the request ran in the prompt cache's side slot (K3Session's side-slot routing)
     tail: dict = None           # a side question's history against the stored conversation (cache/prompt.py tail_match), else None
-
-
-def common_prefix(a, b):
-    n = min(len(a), len(b))
-    i = 0
-    while i < n and a[i] == b[i]:
-        i += 1
-    return i
 
 
 class EngineSession:
@@ -317,7 +310,7 @@ class MockSession(EngineSession):
         """(start, source): the deepest reusable state for ids (it must leave the last prompt token to process)"""
         limit = len(ids) - 1
         n_live = len(self._log)
-        if 0 < n_live <= limit and common_prefix(self._log, ids) == n_live:
+        if 0 < n_live <= limit and lcp(self._log, ids) == n_live:
             best, src = n_live, 'live'
         else:
             best, src = 0, 'cold'
@@ -425,7 +418,7 @@ class MockSession(EngineSession):
             if len(ids) > self.max_ctx:
                 raise EngineStateError(f'prompt of {len(ids)} tokens > max_ctx {self.max_ctx}')
             st = PrefillStats(prompt_n=len(ids))
-            st.lcp = common_prefix(self._log, ids)
+            st.lcp = lcp(self._log, ids)
             start, src = self._best(ids)
             if src == 'live':
                 if self._feed is not None:
