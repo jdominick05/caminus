@@ -28,46 +28,22 @@
 
 ## Get started
 
-You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT (plus Docker to build from source). Four steps: install,
-open the panel, start the model for your cards, then set up Qwen Code.
-
-### 1. Install
-
-**Build it from source (recommended).** The build runs the release recipe inside the public build image: on the CPU, no
-GPU needed, nothing installed on your system besides Docker. Built from a release tag, the wheel is byte for byte the
-published one. Build the tag of the latest release:
+You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT. Install Caminus (build it from source, or
+`pip install caminus`), then run the wizard:
 
 ```bash
-git clone https://github.com/jdominick05/caminus.git && cd caminus
-git checkout "$(git tag -l 'v*' --sort=-v:refname | grep -v dev | head -n1)"   # the latest release's tag (not a nightly's)
-tools/release/in_image.sh tools/release/release_build.sh    # GPU code + wheel into dist/ (--untagged at any other commit)
-python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards
-pip install dist/caminus-*.whl
+caminus wizard
 ```
 
-The build needs Docker that your user can run (`docker run hello-world` works). It refuses a checkout with an old
-`dist/`: build from a fresh clone. 0.2.1 and older predate the build image: build those with
-[their own building notes](https://github.com/jdominick05/caminus/blob/v0.2.1/docs/dev/building.md).
-
-**Or install the prebuilt package.** `pip install caminus` (after the PyTorch line above) installs the same files: every
-release is built with the same recipe and signed, and its provenance can be checked against the source
-([verifying a download](docs/verifying.md); self-assessed against SLSA Build L3).
-
-### 2. Open the panel
-
-```bash
-caminus panel
-```
-
-The panel lists the models, downloads and starts them, shows your cards and running servers, and sets up the
-harnesses. If anything looks wrong, `caminus doctor` checks the machine ([troubleshooting](docs/troubleshooting.md)).
+It checks your machine, downloads and starts the model for your cards, and sets up Qwen Code, printing each command
+before it runs it (`caminus wizard --dry-run` shows the plan first). [The quickstart](docs/quickstart.md) has every step:
+the install, the wizard, and the same steps in the panel (`caminus panel`).
 
 <p align="center">
   <img src="docs/panel.svg" alt="The Caminus panel: models, running servers and Qwen Code" width="92%">
 </p>
 
-### 3. Start the model for your setup
+### The model for your setup
 
 | Your cards | What runs | Start with |
 |---|---|---|
@@ -77,30 +53,8 @@ harnesses. If anything looks wrong, `caminus doctor` checks the machine ([troubl
 | Two XTX | The same as XTX + XT. Untested: reports are welcome. | the Coder (both cards) |
 | Two XT | Two-card Swift 1.5, ThinkingCap or Qwen3-30B-A3B, or two one-card models side by side; no Coder. Untested: reports are welcome. | ThinkingCap |
 
-Download and start it from the panel, or `caminus pull MODEL && caminus start MODEL`. Qwen3-30B-A3B is the fastest
-writer on one 24 GB card, but it finishes fewer agent tasks for now. Every model, its speed and its context:
-[models](docs/models.md).
-
-### 4. Set up Qwen Code
-
-In the panel, press `i` to install Qwen Code (once), `u` to set it up for the running server, then `c` to open it. Or
-from a terminal (Qwen Code needs Node.js 22 or newer):
-
-```bash
-caminus qwen-code setup --install   # installs Qwen Code and points it at your running server
-caminus qwen                        # starts Qwen Code on that server
-```
-
-Your own Qwen Code settings in `~/.qwen` stay untouched. [Harnesses](docs/harnesses.md) has the rest: side questions,
-the optional advisor, Hermes Agent, Claude Code, and the addresses for any OpenAI- or Anthropic-compatible client. The
-[quickstart](docs/quickstart.md) walks through the panel and Qwen Code step by step.
-
-**Nightly builds.** When the `testing` branch changes, it is built overnight and published as a
-[pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
-release will have, tested less. Nightlies are on GitHub only for now, not on PyPI. To try one, copy the link of the `.whl`
-file attached to the newest pre-release and install it:
-`pip install https://github.com/jdominick05/caminus/releases/download/vX.Y.Z.devYYYYMMDD/caminus-X.Y.Z.devYYYYMMDD-py3-none-manylinux_2_17_x86_64.whl`.
-Please report what breaks.
+The wizard preselects the model in the last column. Qwen3-30B-A3B is the fastest writer on one 24 GB card, but it
+finishes fewer agent tasks for now. Every model, its speed and its context: [models](docs/models.md).
 
 ## Supported hardware
 
