@@ -320,9 +320,9 @@ def opencode_entries(data, provider):
 
 def plan_root(endpoint):
     """An OpenCode provider's root (https://opencode.ai/inference/go, or the relay's), from it or from a model's API
-    address under it."""
+    address under it (with its /v1 or, as an SDK's base URL names it, without)."""
     e = endpoint.rstrip('/')
-    for suffix in (*OPENCODE_PATHS.values(), '/v1'):
+    for suffix in (*OPENCODE_PATHS.values(), *(p[:-len('/v1')] for p in OPENCODE_PATHS.values()), '/v1'):
         if e.endswith(suffix):
             return e[:-len(suffix)]
     return e

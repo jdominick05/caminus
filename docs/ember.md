@@ -170,7 +170,7 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
 - **Spend.** `caminus ember relay status` shows each relay's spend today against its cap. The chat's status line shows
   the agent's own running cost.
 - **The advisor.** An agent can ask a stronger model for advice (`caminus ember agent advisor NAME --model
-  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Anthropic API). It goes
+  claude-opus-5-5 --endpoint http://127.0.0.1:8765/v1 --budget-usd 1`; it always speaks the Messages API). It goes
   through the same relay, so allow its model there too, with the cap restated:
   `caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5 --model claude-opus-5-5`.
   Its own daily budget is counted by the agent, inside the relay's cap. `agent advisor` warns when the relay it names
@@ -178,6 +178,17 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   advisor cannot be called (the relay refuses its model, is not running, or has spent its cap), `/advisor` opens the
   reason and the exact command to run, the agent's advisor tool says the same, and the attempt does not count against
   the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart.
+  On an OpenCode Go plan, the advisor can be one of the plan's Messages-native models (`caminus ember agent models
+  NAME --refresh` lists each with its `protocol`; a Chat Completions one is refused), through the plan's relay:
+
+  ```sh
+  caminus ember agent advisor NAME --model claude-haiku-5-5 \
+    --endpoint http://127.0.0.1:8769/inference/go/anthropic --kind opencode-go
+  ```
+
+  The command reads the plan's model list through the relay (it must be running) for the model's list price and
+  levels; each advice call is a conversation of its own to the plan (its own session id), booked at what the reply
+  says it charged. `--kind anthropic` goes back to an Anthropic relay.
 - **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
   when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
   With the image go the agent's question (read's `question` argument, else "describe what matters in this image for

@@ -177,6 +177,8 @@ def advisor_setup(args,out):
         elif kind=='no_key' and len(args)>1:
             fix='caminus ember agent advisor %s --endpoint http://127.0.0.1:%d/v1'%(
                 shlex.quote(args[1]),(relay.installed('anthropic') or {}).get('port') or relay.PROVIDERS['anthropic']['port'])
+        elif kind=='opencode_session' and len(args)>1:
+            fix='caminus ember agent advisor %s --kind opencode-go'%shlex.quote(args[1])
         # the reason is the agent's text too: one line, no control characters, capped, and that form is what the panel
         # shows (left as sent, a modified runtime could put a "Run this on your side" block of its own above the real one)
         reason=''.join(c for c in ' '.join(str(un.get('reason') or '').split()) if c.isprintable())[:300]

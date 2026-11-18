@@ -388,6 +388,9 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the advisor may spend (default 1.00)')
             p.add_argument('--calls-per-goal',type=int,help='advice calls one goal may make (default 5)')
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
+            from .catalog import OPENCODE
+            p.add_argument('--kind',choices=('anthropic',*OPENCODE),
+                           help="anthropic (the default), or opencode-go: a Messages-native model of your OpenCode Go plan through its relay")
             p.add_argument('--off',action='store_true',help='remove the advisor')
         if op=='eyes':
             p.add_argument('--provider',help='a configured provider (agent provider), normally your key relay: mistral, anthropic, ...')
@@ -746,8 +749,9 @@ def main(argv=None,stdin=None):
                       note='restart the agent (stop, start) for a change to reach a running daemon'),a.json)
             return 0
         if a.op=='advisor':
-            from .advisor import Advisor, DEFAULTS
-            from .model import price
+            from .advisor import Advisor, DEFAULTS, plan_fields
+            from .catalog import OPENCODE
+            from .model import price, remember_prices
             cfg=json.loads((home/'config.json').read_text())
             adv=dict(cfg.get('advisor') or {})
             if a.off:
@@ -757,6 +761,14 @@ def main(argv=None,stdin=None):
                 if v is not None:
                     if isinstance(v,(int,float)) and v<0:raise ValueError('--'+flag.replace('_','-')+' must be 0 or more')
                     adv[flag]=v.rstrip('/') if flag=='endpoint' else v
+            if a.kind is not None:
+                for k in ('kind','relay','prices','efforts'):adv.pop(k,None)   # (a plan model's, set below again)
+                if a.kind in OPENCODE:adv['kind']=a.kind
+            if adv.get('kind') in OPENCODE and adv.get('model') and adv.get('endpoint') and (a.kind or a.model or a.endpoint):
+                # the plan model's address, list price and levels, from its model list (asked through the relay)
+                adv.pop('prices',None)
+                adv.update(plan_fields(adv['model'],adv['endpoint']))
+                remember_prices(adv['model'],adv.get('prices'))
             if adv.get('model') and price(adv['model'],{}) is None:
                 raise ValueError('no known price for %s, so its spend cannot be limited' % adv['model'])
             if adv and not (adv.get('model') and adv.get('endpoint')):

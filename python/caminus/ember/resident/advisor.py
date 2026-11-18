@@ -10,6 +10,10 @@ Configuration, in config.json under "advisor" (absent: no advisor; the tool answ
     model          the advisor model, e.g. claude-opus-5-5 or claude-sonnet-5-5
     endpoint       the Messages API root; point it at the owner's own key relay (its own key file, model allowlist
                    and daily cap) so the advisor's key and budget stay separate from the resident's
+    kind           absent (Anthropic), or opencode-go: a Messages-native model of the owner's OpenCode Go plan through
+                   its relay (endpoint: the plan's root, or its /anthropic address); each call then names a session of
+                   its own and Ember (catalog.OPENCODE), with relay true and the model's list price (prices) and
+                   levels (efforts) from the plan's model list, stored by `agent advisor --kind opencode-go`
     api_key_env    the key variable, when the endpoint is not a local relay that adds the key itself
     budget_usd     1.00   dollars per day the runtime lets the advisor spend (priced per call)
     calls_per_goal 5      advice calls one goal may make
@@ -84,8 +88,23 @@ def unavailable(e, cfg, name='NAME'):
                                   'relay_model', model, endpoint)
     if status == 402 and 'relay:' in text:
         return AdvisorUnavailable('the key relay at %s has spent its daily cap; it resets at midnight, or the owner raises '
-                                  'it with caminus ember relay install --cap-usd (naming every --model again)' % endpoint,
+                                  'it with caminus ember relay install --cap-usd%s' % (
+                                      endpoint, '' if cfg.get('kind') in catalog.OPENCODE else ' (naming every --model again)'),
                                   '', 'relay_cap', model, endpoint)
+    # the OpenCode Go relay's refusals (and its gateway's, reached without the relay): a call without a session id (an
+    # advisor not set up as a plan model), a model Ember does not offer from the plan, a path it does not serve
+    if status == 400 and ('relay: no x-opencode-session' in text or 'MissingSessionID' in text):
+        return AdvisorUnavailable('%s is an OpenCode Go plan, which serves only calls that name a session: set the advisor '
+                                  'up as a plan model (--kind opencode-go)' % endpoint,
+                                  'caminus ember agent advisor %s --kind opencode-go' % name, 'opencode_session', model, endpoint)
+    if status == 403 and 'relay: no price for' in text and 'do not train on your prompts' in text:
+        return AdvisorUnavailable('the OpenCode Go relay at %s does not offer %s (Ember allows the plan\'s chat models that '
+                                  'call tools and do not train on your prompts; caminus ember agent models NAME --refresh '
+                                  'lists them)' % (endpoint, model), '', 'opencode_model', model, endpoint)
+    if status == 404 and 'relay: path not allowed' in text:
+        return AdvisorUnavailable('the key relay at %s does not serve the Messages API there: the advisor\'s endpoint is '
+                                  'the relay\'s Messages root (http://127.0.0.1:8765/v1 for Anthropic; an OpenCode Go plan\'s '
+                                  'root with --kind opencode-go)' % endpoint, '', 'relay_path', model, endpoint)
     reason = getattr(e, '__cause__', None)
     reason = getattr(reason, 'reason', reason)
     if local and (isinstance(reason, ConnectionRefusedError) or 'Connection refused' in text):
@@ -154,13 +173,7 @@ class Advisor:
             raise ValueError("today's advisor budget is spent; decide with what you have")
         if price(cfg['model'], {}) is None:
             raise ValueError('the advisor model %s has no known price, so its spend cannot be limited' % cfg['model'])
-        model = Model(dict(model=cfg['model'], endpoint=cfg['endpoint'], api='anthropic',
-                           context=int(cfg.get('context', 200000)), max_tokens=int(cfg['max_tokens']),
-                           api_key_env=cfg.get('api_key_env', 'CAMINUS_ADVISOR_API_KEY'), effort=cfg['effort'],
-                           thinking='adaptive', timeout=float(cfg.get('timeout', 300)),
-                           fallbacks=cfg.get('fallbacks') or None, cache=False),
-                      opener=getattr(self.rt, 'advisor_opener', None) or urllib.request.urlopen)
-        model.counter = False                     # the brief is small; no count_tokens round trip per question
+        model = self._model(cfg, int(cfg['max_tokens']), cfg['effort'])
         brief = self._brief(gid, context) + '\n\nQUESTION FROM THE AGENT:\n' + question
         messages = [dict(role='system', content=BRIEF), dict(role='user', content=brief)]
         try:
@@ -214,13 +227,7 @@ class Advisor:
         cfg = self.cfg
         if cfg is None or self.spent_today() >= float(cfg['budget_usd']) or price(cfg['model'], {}) is None:
             raise ValueError('no advisor budget')
-        model = Model(dict(model=cfg['model'], endpoint=cfg['endpoint'], api='anthropic',
-                           context=int(cfg.get('context', 200000)), max_tokens=max_tokens,
-                           api_key_env=cfg.get('api_key_env', 'CAMINUS_ADVISOR_API_KEY'), effort='low',
-                           thinking='adaptive', timeout=float(cfg.get('timeout', 300)),
-                           fallbacks=cfg.get('fallbacks') or None, cache=False),
-                      opener=getattr(self.rt, 'advisor_opener', None) or urllib.request.urlopen)
-        model.counter = False
+        model = self._model(cfg, max_tokens, 'low')
         try:
             reply = model.complete(messages, max_tokens=max_tokens)
         except ModelError as e:
@@ -236,6 +243,23 @@ class Advisor:
             raise ValueError('the advisor model did not answer: %s' % e)
         self._spend(cfg, model)
         return reply.get('content') or '', (model.last_call or {}).get('served') or cfg['model']
+
+    def _model(self, cfg, max_tokens, effort):
+        """The advisor model's transport, on the Messages API: through an Anthropic relay, or a Messages-native model of
+        an OpenCode Go plan (kind opencode-go). It is sent no session: each call is a conversation of its own, so the
+        transport names a fresh one (Model.headers)."""
+        plan = cfg.get('kind') in catalog.OPENCODE
+        levels = dict(efforts=cfg['efforts']) if 'efforts' in cfg else {}
+        model = Model(dict(model=cfg['model'], **side_transport(dict(cfg, kind=cfg.get('kind') or 'anthropic'),
+                                                                dict(protocol='anthropic', **levels)),
+                           context=int(cfg.get('context', 200000)), max_tokens=max_tokens,
+                           api_key_env=cfg.get('api_key_env', 'CAMINUS_ADVISOR_API_KEY'), effort=effort,
+                           thinking='adaptive', timeout=float(cfg.get('timeout', 300)),
+                           # (Anthropic's server-side fallback is its own API's: a plan's gateway is not sent it)
+                           fallbacks=None if plan else cfg.get('fallbacks') or None, cache=False),
+                      opener=getattr(self.rt, 'advisor_opener', None) or urllib.request.urlopen)
+        model.counter = False                     # the brief is small; no count_tokens round trip per question
+        return model
 
     def _spend(self, cfg, model):
         usd = price(cfg['model'], model.last_usage, (model.last_call or {}).get('served')) or 0.0
@@ -348,10 +372,7 @@ class Eyes(Advisor):
             remember_prices(cfg['model'], entry['prices'])
         if price(cfg['model'], {}) is None:
             raise ValueError('the eyes model %s has no known price, so its spend cannot be limited' % cfg['model'])
-        endpoint, api = catalog.transport(dict(kind=cfg['kind'], endpoint=cfg['endpoint']), entry)
-        # (an OpenCode model's own levels, so one that lists none is sent none)
-        levels = dict(efforts=list(entry.get('efforts') or [])) if cfg['kind'] in catalog.OPENCODE else {}
-        model = Model(dict(model=cfg['model'], endpoint=endpoint, provider_kind=cfg['kind'], api=api, relay=cfg['relay'], **levels,
+        model = Model(dict(model=cfg['model'], **side_transport(cfg, entry),
                            context=int(entry.get('context') or 100000), max_tokens=int(cfg['max_tokens']), vision=True,
                            api_key_env=cfg.get('api_key_env', 'CAMINUS_EYES_API_KEY'), timeout=float(cfg['timeout']),
                            cache=False, name=self.rt.config.get('name')),
@@ -376,6 +397,39 @@ class Eyes(Advisor):
         who = (model.last_call or {}).get('served') or cfg['model']
         self.rt.store.event('eyes', dict(path=result['path'], model=who, question=question[:500], usd=round(usd, 6)), gid)
         return reply.get('content') or '', who
+
+
+def plan_fields(model, endpoint, opener=urllib.request.urlopen):
+    """`agent advisor --kind opencode-go`: what the advisor's config keeps for a model of the owner's OpenCode Go plan,
+    from the plan's model list (asked at endpoint, normally the owner's relay): its Messages address, relay true, its list
+    price (the spend meter's, where a reply does not say what it charged) and its levels. ValueError for a model the plan
+    does not offer to Ember, or one it serves on Chat Completions: the advisor speaks the Messages API only."""
+    spec = dict(kind=catalog.OPENCODE[0], endpoint=catalog.plan_root(endpoint))
+    try:
+        entry = next((m for m in catalog.discover('advisor', spec, opener) if m['id'] == model), None)
+    except (OSError, ValueError, KeyError) as e:
+        raise ValueError("cannot read the plan's model list at %s/v1/models (%s): is its relay running? caminus ember "
+                         'relay status shows the relays' % (spec['endpoint'], str(e)[:200]))
+    if entry is None:
+        raise ValueError('the OpenCode Go plan at %s does not offer %s (Ember allows its chat models that call tools and '
+                         'do not train on your prompts)' % (spec['endpoint'], model))
+    if entry.get('protocol') != 'anthropic':
+        raise ValueError('%s is served on Chat Completions, and the advisor speaks the Messages API: pick a Messages-native '
+                         'plan model, e.g. claude-haiku-5-5' % model)
+    return dict(endpoint=catalog.transport(spec, entry)[0], relay=True, efforts=list(entry.get('efforts') or []),
+                **(dict(prices=entry['prices']) if entry.get('prices') else {}))
+
+
+def side_transport(cfg, entry):
+    """A side call's transport fields for its provider (cfg: kind, endpoint, relay): the endpoint and api for the
+    model's catalog entry (catalog.transport: an OpenCode model's own API under the plan's root), the kind, which an
+    OpenCode plan's session id and user agent follow, and its levels (an OpenCode model's own, so one that lists none is
+    sent none)."""
+    endpoint, api = catalog.transport(dict(kind=cfg['kind'], endpoint=cfg['endpoint']), entry)
+    out = dict(endpoint=endpoint, api=api, provider_kind=cfg['kind'], relay=bool(cfg.get('relay')))
+    if cfg['kind'] in catalog.OPENCODE and 'efforts' in entry:
+        out['efforts'] = list(entry['efforts'] or [])
+    return out
 
 
 def eyes_refusal(cfg, e):
