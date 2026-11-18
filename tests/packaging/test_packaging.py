@@ -250,6 +250,20 @@ def stage_guard_faults(S, guard):
     rc, log, stop = run('pagefault', [boot, dcn, pf])
     check('guard: a page fault beside it is still a fault: exit 99, STOP holds the fault line and not the display line',
           rc == 99 and stop is not None and pf in stop and dcn not in stop and 'GPU FAULT' in log, f'rc {rc} stop {stop!r}')
+    # in a terminal: bash's checkwinsize rewrites LINES after every external command; the guard's per-card lines must
+    # not live in that variable (they once did: card 0's line became the terminal's row count and a run started from a
+    # terminal was killed at once). Run the guard inside a 7-row terminal (util-linux `script`) on this machine's cards.
+    if shutil.which('script'):
+        d = os.path.join(S, 'faults', 'tty'); os.makedirs(d, exist_ok=True)
+        inner = (f'stty rows 7 cols 120; K3_GUARD_STOP={shlex.quote(os.path.join(d, "STOP"))} '
+                 f'CAMINUS_GPU_HIGH={shlex.quote(shutil.which("env"))} bash {shlex.quote(guard)} '
+                 f'{shlex.quote(os.path.join(d, "run.log"))} 30 sleep 3; echo rc=$?')
+        r = subprocess.run(['script', '-qc', inner, '/dev/null'], capture_output=True, text=True, timeout=60)
+        out = r.stdout.replace('\r', '')
+        check('guard: a run started from a 7-row terminal is not killed (no LINES / checkwinsize clash)',
+              'rc=0' in out and 'GUARD KILL' not in out, out[-300:])
+    else:
+        print('NOTE guard: no `script` (util-linux): the terminal check is skipped', flush=True)
     rc, log, stop = run('ring', [boot, ring])
     check('guard: a ring timeout is still a fault (exit 99)', rc == 99 and stop is not None and ring in stop, f'rc {rc} stop {stop!r}')
     mes = 'amdgpu 0000:06:00.0: MES failed to respond to msg=MISC (WAIT_REG_MEM)'
