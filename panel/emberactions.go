@@ -109,8 +109,9 @@ func kOf(n float64) string {
 	return fmt.Sprintf("%.0f", n)
 }
 
-// actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths.
-func actionCard(name string, args, result map[string]any, w int, home, cwd string) string {
+// actionCard is one tool call with its result, as a compact card w cells wide; home and cwd shorten the paths. open (a
+// click on the card) shows its whole preview: the full command, every output line, hit, result or message line.
+func actionCard(name string, args, result map[string]any, w int, home, cwd string, open bool) string {
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -118,6 +119,12 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 	subject, meta := "", ""
 	var preview []string
 	state := "ok"
+	rows := func(n int) int { // the preview's rows: n folded, everything open (bounded so one card cannot stall the screen)
+		if open {
+			return 5000
+		}
+		return n
+	}
 	if errText := rs("error"); errText != "" {
 		state = "fail"
 		// the agent's own paths read short (a raw error carried the whole home path)
@@ -125,15 +132,19 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			errText = strings.ReplaceAll(errText, home+"/", "~/")
 		}
 		meta = firstLine(residentText(errText))
-		preview = lines(residentText(errText), 4)
+		preview = lines(residentText(errText), rows(4))
 		if len(preview) <= 1 {
 			preview = nil
 		}
 	}
 	switch name {
 	case "terminal", "sandbox":
+		var more []string // open: the rest of a command of several lines, above its output
 		if cmd := argStr(args, "command"); cmd != "" {
 			subject = "$ " + firstLine(shortCommand(cmd, home, cwd))
+			if all := strings.Split(strings.TrimSpace(residentText(shortCommand(cmd, home, cwd))), "\n"); open && len(all) > 1 {
+				subject, more = "$ "+all[0], all[1:]
+			}
 		} else if argStr(args, "stdin") != "" {
 			subject = "input → session"
 		} else if _, sig := args["signal"]; sig {
@@ -164,7 +175,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			case n > 0:
 				meta = strings.TrimPrefix(meta+" · "+plural(n, "line", "lines"), " · ")
 				all := strings.Split(strings.TrimRight(residentText(out), "\n"), "\n")
-				preview = all[max(0, len(all)-3):]
+				preview = all[max(0, len(all)-rows(3)):]
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
 			}
@@ -178,6 +189,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				}
 			}
 		}
+		preview = append(more, preview...)
 	case "read":
 		subject = residentText(shortPath(argStr(args, "path"), home, cwd))
 		if state == "ok" {
@@ -187,7 +199,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		s, m, hits := searchSummary(args, result, home, cwd)
 		subject = s
 		if state == "ok" { // (a failure keeps the error's meta from above, the home written as ~)
-			meta, preview = m, hits[:min(3, len(hits))]
+			meta, preview = m, hits[:min(rows(3), len(hits))]
 		}
 	case "web_search":
 		subject = "“" + residentText(argStr(args, "query")) + "”"
@@ -196,7 +208,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			if e := rs("engine"); e != "" {
 				meta += " · " + e
 			}
-			for _, h := range hits[:min(3, len(hits))] {
+			for _, h := range hits[:min(rows(3), len(hits))] {
 				r, _ := h.(map[string]any)
 				t, _ := r["title"].(string)
 				link, _ := r["href"].(string)
@@ -239,7 +251,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		}
 	case "send_message":
 		subject = "→ " + residentText(argStr(args, "to"))
-		preview = lines(residentText(argStr(args, "text")), 3)
+		preview = lines(residentText(argStr(args, "text")), rows(3))
 		if strings.Contains(rs("error"), "mail bus") {
 			meta = "no session called " + residentText(argStr(args, "to")) + " gets mail here"
 		}
@@ -360,8 +372,12 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 			meta = residentText(t)
 		}
 	default:
-		subject = residentText(firstLine(argStr(args, "query", "path", "check", "summary", "label", "id", "topic", "to",
-			"until", "name", "text", "evidence", "question")))
+		what := argStr(args, "query", "path", "check", "summary", "label", "id", "topic", "to", "until", "name", "text",
+			"evidence", "question")
+		subject = residentText(firstLine(what))
+		if all := strings.Split(strings.TrimSpace(residentText(what)), "\n"); open && len(all) > 1 {
+			subject, preview = all[0], append(all[1:], preview...) // open: the rest of a subject of several lines
+		}
 		if state == "ok" {
 			for _, k := range []string{"summary", "status", "state", "note"} {
 				if v := rs(k); v != "" {
@@ -398,7 +414,17 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		if i > 0 {
 			rule = "    "
 		}
-		out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
+		if !open {
+			out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
+			continue
+		}
+		// open: a long line wraps under itself instead of being cut
+		for j, part := range strings.Split(ansi.Hardwrap(terminalText(p, false), max(8, w-4), true), "\n") {
+			if j > 0 {
+				rule = "    "
+			}
+			out = append(out, rule+emberDim.Render(part))
+		}
 	}
 	return strings.Join(out, "\n")
 }
@@ -488,7 +514,7 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 			}
 		}
 	}
-	return actionCard(name, call.args, result, w, c.home, c.cwd)
+	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq])
 }
 
 // limitHit names the limit that killed a command or a box ("" when none did).

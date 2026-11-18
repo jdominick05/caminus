@@ -202,6 +202,10 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		icon, st = g.collapsed, emberDim
 	case "free", "dream":
 		icon, st = g.done, emberCtxOK
+	case "shell": // a ! command in the agent's account, in its prompt's colour (setShell)
+		icon, st = "!", emberShell
+	case "my shell": // a !! command in your own shell, copper
+		icon, st = "!!", hostShellStyle()
 	}
 	label := strings.TrimSpace(icon + " " + kind)
 	fold := g.collapsed

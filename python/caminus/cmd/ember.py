@@ -84,7 +84,7 @@ def _parser():
     p.add_argument('--reason', default='', help='shown to the agents and in their events')
 
     p = sub.add_parser('relay', add_help=False,
-                       help="a spend-capped key relay for a paid provider (anthropic, deepinfra, mistral), run as the owner")
+                       help="a spend-capped key relay for a paid provider (anthropic, deepinfra, mistral, meta), run as the owner")
     p.add_argument('args', nargs=argparse.REMAINDER)
 
     p = sub.add_parser('spawn', help='start a command detached in the agent user')

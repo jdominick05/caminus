@@ -112,6 +112,14 @@ PRICES = {'claude-haiku-5-5': ((0.10, 0.50, 0.01, 0.125), (0.50, 2.50, 0.05, 0.6
 # have no server-side fallback). The same list as the Qwen Code advisor's ANTHROPIC_FALLBACK_MODELS.
 FALLBACK_MODELS = ('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-fable-5-1')
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+# The Meta Model API's Muse chat models, in the PRICES row form; Meta bills no cache writes (the fourth rate never
+# applies). Muse Ember's rates triple past 200K input tokens. Standard mode only: Contributor mode (the -contributor ids)
+# is cheaper because Meta trains on its prompts, files and replies, so it has no row and the relay refuses it. From
+# dev.meta.ai/docs/pricing-rate-limits as read 2026-11-17: check live pricing before budgeting on these numbers.
+_SPARK = ((1.25, 4.25, 0.15, 1.25),) * 2 + (10**9,)
+META_PRICES = {'muse-ember-1.0': ((0.10, 0.50, 0.004, 0.10), (0.30, 1.50, 0.012, 0.30), 200_000),
+               'muse-spark-1.3': _SPARK, 'muse-spark-1.2': _SPARK, 'muse-spark-1.1': _SPARK,
+               'muse-wonder-1.0': ((4.00, 20.00, 0.20, 4.00),) * 2 + (10**9,)}
 
 
 # Prices a provider published (the model catalog: DeepInfra's per-model pricing), in the PRICES row form. Filled from
@@ -119,23 +127,38 @@ FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 CATALOG_PRICES = {}
 
 
+def flat_row(inp, out, read):
+    """one price at every prompt length (USD per million: input, output, cache read), in the PRICES row form"""
+    return ((inp, out, read, inp),) * 2 + (10**9,)
+
+
 def remember_prices(model, prices):
     """prices: {input, output, cache_read} in USD per million tokens, as the catalog stores them."""
     if model and prices and prices.get('input') is not None and prices.get('output') is not None:
         inp, out = float(prices['input']), float(prices['output'])
-        read = float(prices['cache_read']) if prices.get('cache_read') is not None else inp
-        CATALOG_PRICES[model] = ((inp, out, read, inp),) * 2 + (10**9,)
+        CATALOG_PRICES[model] = flat_row(inp, out, float(prices['cache_read']) if prices.get('cache_read') is not None else inp)
+
+
+def price_row(model):
+    """the model's PRICES-form row (input, output, cache read, write; below and above a prompt-length line), or None"""
+    return PRICES.get(model) or META_PRICES.get(model) or CATALOG_PRICES.get(model)
 
 
 def price(model, usage, served=None):
     """the USD cost of one call's usage on a priced model, or None when the model's price is not known. When a fallback
     served the call (served differs from model), it is priced at the serving model's rates, or at the highest known
-    rates when that model is not in the table: an estimate that errs high."""
-    row = PRICES.get(model) or CATALOG_PRICES.get(model)
+    rates when that model is not in the table: an estimate that errs high. Meta's published table, with Muse Ember's
+    long-prompt tier, comes before the catalog's flat copy of its first tier."""
+    row = price_row(model)
     if row is None:
         return None
     if served and served != model:
         row = PRICES.get(served) or max(PRICES.values(), key=lambda r: r[0][1])
+    return row_cost(row, usage)
+
+
+def row_cost(row, usage):
+    """One call's USD cost by a PRICES-form row, from either usage style; the key relay's ledger prices with it too."""
     low, high, line = row
     usage = usage or {}
     # Anthropic reports cache reads as cache_read_input_tokens; OpenAI-style providers (DeepInfra) inside
@@ -408,9 +431,10 @@ class Model:
             body['reasoning_effort'] = choice['reasoning_effort']   # (DeepInfra, Mistral; 'none' turns it off)
         if choice['thinking_off']:
             body['chat_template_kwargs'] = dict(enable_thinking=False)   # a local server with no -nothink id
-        if self.config.get('provider_kind') == 'mistral':
+        if self.config.get('provider_kind') in ('mistral', 'meta'):
             # Mistral routes requests to its prompt cache by this key (a hint, not a promise): one stable key per agent,
-            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %.
+            # since its turns share the system prompt and history as their prefix. Without it the cache hit 0 %. Meta
+            # caches prefixes by itself and takes the same field (dev.meta.ai/docs/protocols/chat-completions).
             import hashlib
             body['prompt_cache_key'] = 'ember-' + hashlib.sha256(
                 ('%s|%s' % (self.config.get('name') or '', body['model'])).encode()).hexdigest()[:24]
@@ -496,7 +520,10 @@ class Model:
                         break
                     chunk = json.loads(data)
                     now = time.monotonic()
-                    if chunk.get('choices') and t_first is None:
+                    # the window opens at the first piece with text or a call in it: a role-only chunk first, then
+                    # reasoning a provider does not stream (Meta), would count that hidden time as writing
+                    if t_first is None and any(((c or {}).get('delta') or {}).get(k) for c in chunk.get('choices') or []
+                                               for k in ('content', 'reasoning_content', 'tool_calls')):
                         t_first = now
                     t_last = now
                     if chunk.get('usage'):
@@ -540,8 +567,11 @@ class Model:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             raise self._failed(e) from e
         self.last_usage = usage
-        self.last_speed = self._speed(timings, usage.get('completion_tokens') if isinstance(usage, dict) else None,
-                                      t_first, t_last)
+        written = usage.get('completion_tokens') if isinstance(usage, dict) else None
+        hidden = ((usage.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0) if isinstance(usage, dict) else 0
+        if isinstance(written, int) and not reasoning and isinstance(hidden, int) and 0 < hidden <= written:
+            written -= hidden      # reasoning billed but not streamed (Meta): not written inside the window
+        self.last_speed = self._speed(timings, written, t_first, t_last)
         try:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:
@@ -660,7 +690,7 @@ class Model:
         message without an image is sent as stored."""
         plan = self._image_plan(messages)
         if not plan:
-            return messages
+            return self._system_as_user(messages)
         out, parts = [], []
         for i, m in enumerate(messages):
             if parts and m.get('role') != 'tool':
@@ -680,7 +710,33 @@ class Model:
             out.append(m)
         if parts:
             out.append(dict(role='user', content=parts))
-        return out
+        return self._system_as_user(out)
+
+    def _system_as_user(self, messages):
+        """Meta merges every system message into the front instructions, so a trailing one (the runtime block, new each
+        turn) changed the prompt's start and voided its prefix cache on every turn. For Meta, each system message after
+        the leading ones goes as a user message marked [system], as the Messages API transport sends it, and after the
+        tool results its assistant turn still waits for (Meta refuses a message between a call and its results). Every
+        other provider gets the messages as they are."""
+        if self.config.get('provider_kind') != 'meta':
+            return messages
+        out, held, waiting, lead = [], [], set(), True
+        for m in messages:
+            lead = lead and m['role'] == 'system'
+            if lead:
+                out.append(m)
+                continue
+            if m['role'] == 'system':
+                (held if waiting else out).append(dict(role='user', content='[system] ' + str(m.get('content') or '')))
+                continue
+            if m['role'] == 'assistant':
+                waiting = {c['id'] for c in m.get('tool_calls') or []}
+            elif m['role'] == 'tool':
+                waiting.discard(m.get('tool_call_id'))
+            out.append(m)
+            if held and not waiting:
+                out, held = out + held, []
+        return out + held
 
     # ---- Anthropic Messages API ---------------------------------------------------------------------------
 
