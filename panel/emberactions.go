@@ -26,7 +26,7 @@ type callInfo struct {
 // toolFamily is the colour a tool's label takes: the shell, files, the web, memory, messages, the done check.
 func toolFamily(name string) lipgloss.Style {
 	switch name {
-	case "terminal", "ask_root", "lease", "machine", "discover":
+	case "terminal", "sandbox", "ask_root", "lease", "machine", "discover":
 		return lipgloss.NewStyle().Foreground(cOrange).Bold(true)
 	case "read", "search", "edit", "write", "checkpoint", "rollback":
 		return lipgloss.NewStyle().Foreground(cPurple).Bold(true)
@@ -137,7 +137,7 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		}
 	}
 	switch name {
-	case "terminal":
+	case "terminal", "sandbox":
 		var more []string // open: the rest of a command of several lines, above its output
 		if cmd := argStr(args, "command"); cmd != "" {
 			subject = "$ " + firstLine(shortCommand(cmd, home, cwd))
@@ -177,6 +177,15 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 				preview = all[max(0, len(all)-rows(3)):]
 			case result["no_new_output"] == true:
 				meta = strings.TrimPrefix(meta+" · nothing new", " · ")
+			}
+			// what stopped it (a timeout, a box's limit): the limit hit is the outcome, so it leads
+			if hit := limitHit(name, result); hit != "" {
+				meta, state = strings.TrimPrefix(hit+" · "+meta, " · "), "fail"
+			}
+			if name == "sandbox" {
+				if net := sandboxNet(args, result); net != "" {
+					meta += " · " + net
+				}
 			}
 		}
 		preview = append(more, preview...)
@@ -484,7 +493,7 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 	}
 	id, _ := e.Data["call_id"].(string)
 	call := c.calls[id]
-	if running, _ := result["running"].(bool); running && name == "terminal" {
+	if running, _ := result["running"].(bool); running && (name == "terminal" || name == "sandbox") {
 		if sid, _ := result["session"].(string); sid != "" {
 			if code, done := c.sessionDone[sid]; done { // a later check saw it end: this card said "still running" for good
 				r2 := map[string]any{}
@@ -497,6 +506,96 @@ func (c *residentChat) actionBlock(e residentEvent, w int) string {
 		}
 	}
 	return actionCard(name, call.args, result, w, c.home, c.cwd, c.opened[e.Seq])
+}
+
+// limitHit names the limit that killed a command or a box ("" when none did).
+func limitHit(name string, result map[string]any) string {
+	if hit, _ := result["limit_hit"].(string); hit != "" {
+		return hit + " limit hit: " + map[bool]string{true: "box", false: "command"}[name == "sandbox"] + " killed"
+	}
+	return ""
+}
+
+// sandboxNet is a box's network in a few words: none, or its hosts and how many connections were refused.
+func sandboxNet(args, result map[string]any) string {
+	hosts, _ := result["hosts"].([]any)
+	if hosts == nil {
+		hosts, _ = args["hosts"].([]any)
+	}
+	if len(hosts) == 0 {
+		return "no network"
+	}
+	var names []string
+	for _, h := range hosts {
+		names = append(names, residentText(fmt.Sprint(h)))
+	}
+	out := "net: " + strings.Join(names, ", ")
+	refused := 0
+	conns, _ := result["connections"].([]any)
+	for _, c := range conns {
+		if m, _ := c.(map[string]any); m != nil {
+			if v, _ := m["verdict"].(string); v != "allowed" {
+				refused++
+			}
+		}
+	}
+	if refused > 0 {
+		out += fmt.Sprintf(" · %d refused", refused)
+	}
+	return out
+}
+
+// sandboxLines are the expanded view's lines for a box: what it could reach, its limits, every connection.
+func sandboxLines(result map[string]any) []string {
+	var out []string
+	if box, _ := result["box"].(string); box != "" {
+		line := "box: " + residentText(box) + " (/box, writable for this goal)"
+		if f, _ := result["folder"].(string); f != "" {
+			line += " · work folder: " + residentText(f) + " (/work, read-only)"
+		}
+		out = append(out, line)
+	}
+	if l, _ := result["limits"].(map[string]any); l != nil {
+		ts, _ := l["time_s"].(float64)
+		mb, _ := l["memory_mb"].(float64)
+		tasks, _ := l["tasks"].(float64)
+		cpu, _ := l["cpu_percent"].(float64)
+		line := fmt.Sprintf("limits: %ds · %d MB · %d processes · CPU %d %%", int(ts), int(mb), int(tasks), int(cpu))
+		if disk, _ := l["disk_mb"].(float64); disk > 0 {
+			line += fmt.Sprintf(" · /box %d MB", int(disk))
+		}
+		if e, _ := l["enforced"].(string); e != "" {
+			line += " (" + residentText(e) + ")"
+		}
+		out = append(out, line)
+	}
+	if hit := limitHit("sandbox", result); hit != "" {
+		out = append(out, hit)
+	}
+	if hosts, _ := result["hosts"].([]any); len(hosts) == 0 {
+		out = append(out, "network: none")
+	}
+	for _, c := range sandboxConnections(result["connections"]) {
+		out = append(out, "connection: "+c)
+	}
+	if more, _ := result["connections_more"].(float64); more > 0 { // (a result carries at most 50 new ones)
+		out = append(out, fmt.Sprintf("… %d more connections", int(more)))
+	}
+	return out
+}
+
+// sandboxConnections are a box's connections as "target verdict" lines.
+func sandboxConnections(v any) []string {
+	var out []string
+	conns, _ := v.([]any)
+	for _, c := range conns {
+		if m, _ := c.(map[string]any); m != nil {
+			target, _ := m["target"].(string)
+			verdict, _ := m["verdict"].(string)
+			out = append(out, residentText(target)+"  "+residentText(verdict))
+		}
+	}
+	return out
 }
 
 // firstLine is a text's first line, with " …" when more follows.

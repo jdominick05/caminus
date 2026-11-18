@@ -85,7 +85,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 	case "assistant":
 		for _, call := range c.noteCalls(e) {
 			// each call becomes its own card when its result arrives (actionBlock); the line only says what still runs
-			if call.name == "terminal" {
+			if call.name == "terminal" || call.name == "sandbox" {
 				if cmd, _ := call.args["command"].(string); strings.TrimSpace(cmd) != "" {
 					g.running, g.runningSince, g.runningGoal = oneLine(residentText(cmd)), e.Ts, e.Goal
 				}
@@ -98,7 +98,7 @@ func (c *residentChat) fold(e residentEvent) bool {
 			return false
 		}
 		result, _ := e.Data["result"].(map[string]any)
-		if name == "terminal" {
+		if name == "terminal" || name == "sandbox" {
 			if running, _ := result["running"].(bool); !running {
 				g.running = ""
 			}

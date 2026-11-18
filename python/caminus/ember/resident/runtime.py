@@ -30,6 +30,7 @@ from . import web
 from .mcp import MCP
 from .brain import Brains
 from . import planning
+from . import sandbox
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # Tools that were replaced but may still be called from an older history: accepted, never advertised.
@@ -178,9 +179,13 @@ TOOLS = [
     tool('peers', 'List named resident agents on your local mail bus.', {}),
     tool('send_message', 'Send durable peer mail. Omit recipient_goal to give the peer a new goal; set it to steer an existing goal. Delivery survives offline peers and restarts. Use peers to find names, and reply_to to link replies. A peer cannot approve root or answer for your human.',
          dict(to={'type':'string'}, text={'type':'string'}, recipient_goal={'type':'string'}, reply_to={'type':'string'}), ('to','text')),
-    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal (read-only commands work any time; one that changes something needs define_done first). Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. Paths and programs are those of your Unix account.',
-         dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'},
+    tool('terminal', 'Use the Ubuntu OS through a real persistent terminal (read-only commands work any time; one that changes something needs define_done first). Start any shell command, inspect output, send input or signals. Long commands keep running; poll their session by calling terminal with only its session id (no command) and optionally yield_ms to wait for more output; a poll returns only output it has not returned before, and says no_new_output when nothing arrived. timeout (seconds, 1 to 3600, optional) ends a command that runs longer, with everything in its process group, and the result says limit_hit time; without it a command runs until it ends. yield_ms is not a timeout: it only bounds how long one call waits for output. Paths and programs are those of your Unix account.',
+         dict(command={'type':'string'}, cwd={'type':'string'}, session={'type':'string'}, stdin={'type':'string'}, timeout={'type':'integer'},
               signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, offset={'type':'integer'}, max_output={'type':'integer'})),
+    tool('sandbox', 'Run code you did not write or do not trust here, not in terminal: proof-of-concept exploits, CVE reproductions, unknown repositories, install scripts, downloaded binaries. The command runs in a box that sees none of your home (no token, no keys, no memory), /usr and /etc read-only, no GPUs and no network. folder (optional) is your work folder, mounted read-only at /work; /box is writable, starts as the command\'s folder and HOME, and is kept for this goal\'s later sandbox calls (it is boxes/GOAL in your workspace, removed when the goal completes or is cancelled; a paused or failed goal keeps it). hosts (optional) lets the box reach those names (and their subdomains) over HTTPS through a logged proxy: public addresses, port 443 only. timeout is in seconds (default 600, at most 3600; yield_ms only bounds how long one call waits for output); memory, processes, CPU and /box\'s size (4 GB) are capped too, and going over kills the whole box (the result says which limit hit). Poll a running box like a terminal session: sandbox with only its session (and yield_ms).',
+         dict(command={'type':'string'}, folder={'type':'string'}, hosts={'type':'array','items':{'type':'string'}},
+              timeout={'type':'integer'}, session={'type':'string'}, stdin={'type':'string'},
+              signal={'type':'string','enum':['INT','TERM','KILL','HUP']}, yield_ms={'type':'integer'}, max_output={'type':'integer'})),
     tool('ask_user', 'Ask your human a question; the answer returns as this tool result. It waits question_timeout '
          '(15 minutes by default) while your human is at the screen, and while they are away until question_timeout '
          'after they come back, at most question_away_max (8 hours by default). With no answer by then the question is withdrawn and you carry '
@@ -196,7 +201,7 @@ TOOLS = [
          dict(action={'type':'string','enum':['open_pr','comment','approve_ci']}, repo={'type':'string'}, head={'type':'string'},
               base={'type':'string'}, title={'type':'string'}, body={'type':'string'}, number={'type':'integer'},
               run_id={'type':'integer'}, reason={'type':'string'}), ('action','repo','reason')),
-    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run in your home) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
+    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run like a terminal command: in your workspace, with the same environment) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
@@ -342,8 +347,10 @@ REPEAT_EXEMPT = {'wait', 'todo', 'note', 'remember', 'heartbeat', 'machine', 'ma
 
 # Before define_done a goal may look but not change: these tools, and terminal commands the per-turn gate's
 # classifier calls read-only (or polls of a running one).
+# (sandbox too: a box changes nothing of the agent's outside its own folder; with hosts it can still send data to
+# them, which the human sees in its connection log)
 PRE_DONE_ALLOWED = {'read', 'search', 'discover', 'history_search', 'web_search', 'web_fetch', 'machine', 'todo', 'ask_user',
-                    'advisor', 'peers', 'mail', 'remember', 'note', 'wait'}
+                    'advisor', 'peers', 'mail', 'remember', 'note', 'wait', 'sandbox'}
 
 class Runtime:
     def __init__(self, home, model=None, terminal=None):
@@ -968,7 +975,8 @@ class Runtime:
                 self.store.event('rewind_failed', dict(error=str(e)), gid)
 
     CHANGE_TOOLS = ('edit', 'write')
-    LOOK_TOOLS = ('read', 'search', 'terminal', 'web_fetch', 'web_search', 'discover', 'machine', 'history_search', 'browser')
+    LOOK_TOOLS = ('read', 'search', 'terminal', 'sandbox', 'web_fetch', 'web_search', 'discover', 'machine',
+                  'history_search', 'browser')
 
     def _change_record(self, gid):
         """This goal's tool results in order, as the harness recorded them: (seq, name, path, ok, error). path is the
@@ -1046,6 +1054,8 @@ class Runtime:
                                               open=open_work or '',
                                               steers=len(self.store.steers(gid)),
                                               approach_changes=goal.get('approach_changes') or 0), gid)
+        if self.store.goal(gid)['state'] == 'completed':
+            sandbox.end(self.home, gid, self.store)   # its box ends with it
 
     def _action(self, action):
         refused = False
@@ -1140,7 +1150,7 @@ class Runtime:
                                  (name == 'terminal' and args.get('stdin') is None and
                                   (args.get('session') or read_only_command(args.get('command')))))):
                     raise ValueError('no done check yet: look around as much as you need (read, read-only commands, '
-                                     'search, ask your human), then call define_done with what done looks like, as '
+                                     'search, the sandbox, ask your human), then call define_done with what done looks like, as '
                                      'something you can check, before changing anything')
                 if name == 'define_done':
                     result = self._define_done(action['goal'], args['check'], args.get('gate', ''))
@@ -1187,6 +1197,10 @@ class Runtime:
                     # (launch or queue input only: reading here advanced the cursor, and the poll below then lost the
                     # output since the last poll)
                     result = self.terminal.call(action['id'],{**args,'yield_ms':0,'_prepare':True})
+                elif name == 'sandbox':
+                    # (a new box is checked and launched here, like a terminal command; its polls read below)
+                    box = sandbox.spec(self.home, action['goal'], args, self.config) if args.get('command') else {}
+                    result = self.terminal.call(action['id'], {**args, 'yield_ms': 0, '_prepare': True}, box=box)
                 elif name in ('discover', 'advisor', 'wait', 'machine', 'web_search', 'web_fetch', 'search') or name.startswith('mcp__'):
                     result = None         # catalog queries, network calls, waits and searches stay outside the write transaction
                 elif name == 'peers':
@@ -1240,10 +1254,15 @@ class Runtime:
                         raise ValueError('your todo list still has unfinished items (%s): mark them done with todo, '
                                          'or name what is left in open' % '; '.join(left[:5]))
                     result = dict(summary=args['summary'], open=args.get('open', ''))
-            if name == 'terminal':
+            if name in ('terminal', 'sandbox'):
                 # Preparation already launched or queued input. Polling must not
                 # relaunch a worker if cancellation raced after preparation.
-                result = self.terminal.call(action['id'], {k:v for k,v in args.items() if k not in ('command','stdin','signal','cwd')} | {'session':result['session']})
+                result = self.terminal.call(action['id'], {k:v for k,v in args.items() if k not in ('command','stdin','signal','cwd','folder','hosts','timeout')} | {'session':result['session']},
+                                            **({'box': {}} if name == 'sandbox' else {}))
+                if result.get('connections'):
+                    # every connection a box made or was refused, where the human sees it
+                    self.store.event('sandbox_connections', dict(session=result['session'],
+                                                                 connections=result['connections']), action['goal'])
             elif name == 'read' and 'sha256' in (result.get('image') or {}) \
                     and not (getattr(self.model, 'config', None) or {}).get('vision'):
                 # an image the brain can't see: the eyes model describes it, once, outside the write transaction (past
@@ -2254,6 +2273,7 @@ class Runtime:
                 time.sleep(max(.2,poll))
                 continue
             self.mail.receive(self.store)
+            sandbox.sweep(self)               # boxes of goals that ended elsewhere (a cancel from the command line)
             for gid in self.store.pending_requests('compact'):
                 self.compact_request(gid)
             progressed = False

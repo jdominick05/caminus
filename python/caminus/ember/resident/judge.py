@@ -2,8 +2,9 @@
 
 When a graded goal calls finish (after define_done and verify), two things run before the goal completes:
 
-1. The gate: the shell command the agent gave define_done as `gate`, if any, run in its home. A non-zero exit refuses
-   the finish and its output becomes the agent's next prompt.
+1. The gate: the shell command the agent gave define_done as `gate`, if any, run as a terminal command runs (in its
+   home, with the terminal's environment: terminal.shell_argv, worker_env). A non-zero exit refuses the finish and its
+   output becomes the agent's next prompt; a variable the gate names that is unset there is named in that output.
 2. The judge: a fresh model call with no tools that sees the goal, the done check, the human's steers, the recorded
    evidence and the recent tool results - not the agent's reasoning or its plan. Images the agent read go with it to a
    judge brain with vision; any other judge is told what the agent says an image shows is an observation (a judge that
@@ -61,17 +62,64 @@ Answer with one JSON object and nothing else:
 {"verdict": "met" | "not_yet" | "wait", "reason": "one or two sentences naming the evidence, what is missing, or what to wait for"}'''
 
 
+# Variables bash itself may leave unset before a command sets them (a cd sets OLDPWD, read sets REPLY, getopts OPTARG)
+SHELL_LATE = frozenset(('OLDPWD', 'REPLY', 'OPTARG', 'BASH_REMATCH', 'COPROC', 'MAPFILE'))
+
+
+def gate_variables(gate):
+    """The variables a gate expands that it does not set itself: $NAME and ${NAME} outside single quotes (awk's '$NF'
+    is not one), without a default (${NAME:-x} is fine unset), minus names the gate assigns (NAME=, for NAME, read)."""
+    names, i, quote = set(), 0, ''
+    while i < len(gate):
+        c = gate[i]
+        if quote == "'":
+            quote = '' if c == "'" else quote
+        elif c == '\\':
+            i += 1
+        elif c == "'" and not quote:
+            quote = "'"
+        elif c == '"':
+            quote = '' if quote else '"'
+        elif c == '$' and (m := re.match(r'\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))', gate[i:])):
+            names.add(m.group(1) or m.group(2))
+        i += 1
+    assigned = set(re.findall(r'\b([A-Za-z_]\w*)\+?=', gate)) | set(re.findall(r'\bfor\s+([A-Za-z_]\w*)', gate))
+    for m in re.finditer(r'\bread\b([^;&|\n]*)', gate):
+        assigned |= set(m.group(1).split())
+    return sorted(names - assigned - SHELL_LATE)
+
+
+def unset_variables(home, gate, env):
+    """The gate's variables that are unset in its environment, asked of the same login shell (a profile may export one)."""
+    from .terminal import SHELL, shell_argv
+    names = gate_variables(gate)
+    if not names:
+        return []
+    probe = 'for v in "$@"; do [ -n "${!v+x}" ] || printf "unset:%s\\n" "$v"; done'
+    try:
+        r = subprocess.run(shell_argv(home, probe) + ['gate'] + names, executable=SHELL, cwd=home, env=env,
+                           stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [v for v in (line[6:] for line in r.stdout.splitlines() if line.startswith('unset:')) if v in names]
+
+
 def run_gate(home, gate, timeout=GATE_TIMEOUT):
-    """Run the done check. Its output goes to a file, not a pipe: a gate that starts something in the background (a
-    server, `cmd &`) left the pipe open, so waiting for the pipe took the whole timeout and failed a gate that had
-    passed. The gate is waited for as a process, in its own process group; whatever it left running is ended after it
-    exits (and the whole group on a timeout)."""
+    """Run the done check as the agent's terminal runs a command (terminal.shell_argv in its home, worker_env): a real
+    gate `cd "$WORKSPACE" && ...` exited 0 in the terminal and failed here, where $WORKSPACE was unset. A failing gate's
+    result names each variable it expands that is unset even there. Its output goes to a file, not a pipe: a gate that
+    starts something in the background (a server, `cmd &`) left the pipe open, so waiting for the pipe took the whole
+    timeout and failed a gate that had passed. The gate is waited for as a process, in its own process group; whatever
+    it left running is ended after it exits (and the whole group on a timeout)."""
     import os
     import signal
     import tempfile
+    from .terminal import SHELL, shell_argv, worker_env
+    env = worker_env(home)
     with tempfile.TemporaryFile() as out:
-        p = subprocess.Popen(['bash', '-lc', gate], cwd=home, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
+        p = subprocess.Popen(shell_argv(home, gate), executable=SHELL, cwd=home, env=env, stdout=out, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
         try:
             code = p.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -85,7 +133,11 @@ def run_gate(home, gate, timeout=GATE_TIMEOUT):
             return False, f'the gate did not finish in {timeout} s'
         out.seek(0)
         text = out.read().decode('utf-8', errors='replace')[-4000:]
-    return code == 0, f'exit {code}\n{text}'.strip()
+    result = f'exit {code}\n{text}'.strip()
+    if code != 0:                              # last, so every reader's tail keeps it
+        result += ''.join(f"\n${v} is not set in the gate's environment (the same as a terminal command's)"
+                          for v in unset_variables(home, gate, env))
+    return code == 0, result
 
 
 def viewed(rt, gid):

@@ -1255,6 +1255,65 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
         self.assertEqual(prices.get('good'),(0.1,0.4,0.1),'a bad row is skipped, never the whole table')
         self.assertIsNone(prices.get('nullprice'))
 
+    def test_sandbox_two_calls_share_the_goals_box_and_it_goes_with_the_goal(self):
+        from caminus.ember.resident import sandbox
+        if (why:=sandbox.usable()):self.skipTest(why)
+        (self.home/'work').mkdir();(self.home/'work'/'main.c').write_text('int main(){return 0;}\n')
+        self.replies(call('sandbox',dict(command='cp /work/main.c . && echo built > artifact && ls',folder='work',yield_ms=10000)),
+                     call('sandbox',dict(command='cat artifact main.c',yield_ms=10000)),
+                     call('finish',dict(summary='Built in the box.')))
+        out=self.cmd('once',['--goal','Build it in the sandbox.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            results=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='sandbox']
+        finally:store.close()
+        self.assertEqual(len(results),2,results)
+        self.assertIn('built',results[1]['output'],'the second call sees what the first left in /box')
+        self.assertIn('int main',results[1]['output'])
+        self.assertFalse((self.home/'boxes').exists() and any((self.home/'boxes').iterdir()),'the box ended with the goal')
+
+    def test_sandbox_connections_after_the_last_poll_reach_the_human_when_the_goal_ends(self):
+        from caminus.ember.resident import sandbox
+        if (why:=sandbox.usable()):self.skipTest(why)
+        self.replies(call('sandbox',dict(command='sleep 1; curl -sS -m 5 https://not-listed.invalid/; sleep 30',
+                                         hosts=['example.com'],yield_ms=0)),
+                     call('wait',dict(until='time',target='4')),
+                     call('finish',dict(summary='Left it running.')))
+        out=self.cmd('once',['--goal','Try a host in the sandbox.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            ev=[e['data'] for e in store.events(limit=500) if e['kind']=='sandbox_connections']
+        finally:store.close()
+        self.assertEqual([c['target'] for e in ev for c in e['connections']],['not-listed.invalid:443'],ev)
+
+    def test_terminal_takes_timeout_like_sandbox(self):
+        # a real model passed timeout to terminal three times; it was dropped as unknown, the command unbounded
+        self.replies(call('terminal',dict(command='sleep 20',timeout=1,yield_ms=5000)),
+                     call('finish',dict(summary='Timed out as asked.')))
+        out=self.cmd('once',['--goal','Run a command with a timeout.'])
+        self.assertEqual(out['state'],'completed')
+        store=Store(self.home)
+        try:
+            r=[e['data']['result'] for e in store.events(limit=500) if e['kind']=='tool_result' and e['data'].get('name')=='terminal'][0]
+        finally:store.close()
+        self.assertEqual(r.get('limit_hit'),'time',r);self.assertNotIn('ignored unknown argument',r.get('note',''))
+        desc={t['function']['name']:t['function']['description'] for t in TOOLS}
+        for name in ('terminal','sandbox'):self.assertIn('yield_ms',desc[name])
+
+    def test_sandbox_of_a_cancelled_goal_is_swept(self):
+        from caminus.ember.resident import sandbox
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.');keep=rt.store.enqueue('Paused.')
+            for g in (gid,keep):sandbox.box_dir(self.home,g).mkdir(parents=True)
+            rt.store.update(gid,state='cancelled');rt.store.update(keep,state='paused')
+            sandbox.sweep(rt)
+            self.assertFalse(sandbox.box_dir(self.home,gid).exists())
+            self.assertTrue(sandbox.box_dir(self.home,keep).exists(),'a paused goal can resume: its box stays')
+        finally:rt.mail.close();rt.store.close()
+
     def test_rereview_fixes_terminal_advisor_web_cancel_state_gate(self):
         from caminus.ember.resident import advisor as adv, web, judge
         # a poll returns everything since the last poll (the preparation step read and lost the first chunk)
@@ -4121,6 +4180,34 @@ for line in sys.stdin:
         out=t.call(sid,dict(command='printf "%s" "$WORKSPACE"',yield_ms=3000))
         self.assertEqual(out['output'],str(self.home))
 
+    def test_the_gate_runs_with_the_terminal_environment(self):
+        # a real gate `cd "$WORKSPACE" && adb devices | grep -q -w device && ...` exited 0 in the terminal and failed as
+        # the gate: the gate had the daemon's environment, with no $WORKSPACE (the agent then hard-coded the path)
+        from caminus.ember.resident import judge
+        (self.home/'sub').mkdir(exist_ok=True);(self.home/'sub'/'marker').write_text('x')
+        gate='cd "$WORKSPACE/sub" && test -f marker && test -z "$CAMINUS_AGENT_API_KEY"'
+        with unittest.mock.patch.dict(os.environ,{'CAMINUS_AGENT_API_KEY':'secret'}):
+            os.environ.pop('WORKSPACE',None)
+            t=Terminal(self.home);sid=uuid.uuid4().hex
+            out=t.call(sid,dict(command=gate+'; echo "rc=$?"',yield_ms=5000))
+            text=out['output']
+            for _ in range(50):
+                if not out['running']:break
+                out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=200));text+=out['output']
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertIn('rc=0',text,'the terminal passes')
+        self.assertTrue(ok,'the gate passes where the terminal does (no model key either): '+msg)
+        # a variable unset even there is named in the result, not left to fail silently; set and assigned ones are not
+        gate=('X_MINE=1; test -n "$X_MINE" && test -d "${WORKSPACE}" && awk \'{print $NF}\' /dev/null && '
+              'cd "$NOT_SET_FOR_GATE/sub"')
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop('NOT_SET_FOR_GATE',None)
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertFalse(ok,msg)
+        self.assertIn("$NOT_SET_FOR_GATE is not set in the gate's environment",msg)
+        self.assertIn('\nbash: line',msg,'errors still read bash: ..., as in the terminal');self.assertNotIn('/bin/bash:',msg)
+        for name in ('X_MINE','WORKSPACE','NF'):self.assertNotIn('$'+name+' is not set',msg)
+
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog
         data=dict(data=[dict(id='mistral-medium-2508',aliases=['mistral-medium-latest'],max_context_length=131072,
@@ -6524,6 +6611,227 @@ class RetryBudget(unittest.TestCase):
         self.assertGreaterEqual(rt.retry['g'][0]-t,119)
         e.retry_after=10_000;rt._schedule_retry('g',e)
         self.assertLessEqual(rt.retry['g'][0]-time.time(),301,'a provider cannot park the goal for hours')
+
+
+class Sandbox(unittest.TestCase):
+    """The sandbox tool's box, for real (bubblewrap; a user systemd scope where the account has one). Small limits:
+    512 MB (64 MB for the memory test), 16 processes, 2 s. Skipped, with the reason, where bubblewrap cannot make a
+    box."""
+    def setUp(self):
+        from caminus.ember.resident import sandbox
+        if (why:=sandbox.usable()):self.skipTest(why)
+        self.sb=sandbox
+        self.home=S/('box-'+uuid.uuid4().hex[:12]);(self.home/'work').mkdir(parents=True)
+        (self.home/'work'/'src.txt').write_text('hello from the work folder')
+        self.token='ghp_'+uuid.uuid4().hex             # a linked GitHub token: the worker's environment carries it
+        (self.home/'token').write_text(self.token)
+        self.conf=dict(github=dict(token_file=str(self.home/'token')),sandbox=dict(memory_mb=512,tasks=16))
+        (self.home/'config.json').write_text(json.dumps(self.conf))
+        (self.home/'agent.sqlite3').write_text('the conversation')
+        self.term=Terminal(self.home)
+    def run_box(self,command,conf=None,goal='g1',**args):
+        sid=uuid.uuid4().hex
+        args=dict(command=command,**args)
+        box=self.sb.spec(self.home,goal,args,conf or self.conf)
+        r=self.term.call(sid,dict(args,yield_ms=10000),box=box)
+        end=time.monotonic()+60
+        while r['running'] and time.monotonic()<end:
+            r=self.term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=10000),box={})
+        self.assertFalse(r['running'],r)
+        return r
+
+    def test_the_box_sees_none_of_the_home_and_no_token(self):
+        r=self.run_box(f'env; ls /home; cat {self.home}/token {self.home}/agent.sqlite3 {self.home}/config.json; '
+                       f'cat {Path.home()}/.ssh/id_ed25519; ls {self.home}; cat /work/src.txt',folder='work')
+        self.assertNotIn(self.token,r['output'],'the token never reaches the box (file or environment)')
+        self.assertNotIn('the conversation',r['output'])
+        self.assertNotIn('GH_TOKEN',r['output']);self.assertIn('HOME=/box',r['output'])
+        self.assertIn("ls: cannot access '/home'",r['output'])
+        self.assertIn('hello from the work folder',r['output'],'the work folder is there, at /work')
+        self.assertEqual(r['box'],str(self.home/'boxes'/'g1'))
+
+    def test_writing_outside_the_box_fails_and_the_box_lasts_the_goal(self):
+        r=self.run_box('for p in /work/x /usr/x /etc/x /x /tmp/../x; do touch $p 2>/dev/null && echo WROTE $p; done; '
+                       'echo built > /box/out.txt',folder='work')
+        self.assertNotIn('WROTE',r['output']);self.assertEqual(r['exit_code'],0)
+        self.assertEqual(sorted(p.name for p in (self.home/'work').iterdir()),['src.txt'])
+        r=self.run_box('cat /box/out.txt')
+        self.assertIn('built',r['output'],'a second call of the same goal finds the box as the first left it')
+        self.assertTrue(self.sb.end(self.home,'g1'));self.assertFalse((self.home/'boxes'/'g1').exists())
+
+    def test_no_network_without_hosts_and_no_gpu(self):
+        import socket
+        srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);self.addCleanup(srv.close)
+        port=srv.getsockname()[1]
+        r=self.run_box(f'python3 -c "import socket; socket.create_connection((\'127.0.0.1\',{port}),timeout=3)" 2>&1 | tail -1; '
+                       'getent hosts example.com || echo NO-DNS; ls /dev/kfd /dev/dri 2>&1')
+        self.assertIn('ConnectionRefusedError',r['output'],'a service on this machine is out of reach')
+        self.assertIn('NO-DNS',r['output'])
+        self.assertIn("cannot access '/dev/kfd'",r['output']);self.assertIn("cannot access '/dev/dri'",r['output'])
+        self.assertIsNone(r.get('connections'),'no hosts: no proxy, nothing to log')
+        self.assertEqual(r['limits']['time_s'],600)
+
+    def test_a_host_not_in_the_list_is_refused_and_logged(self):
+        r=self.run_box('curl -sS -m 10 -o /dev/null https://not-listed.invalid/ 2>&1; echo; '
+                       'curl -sS -m 10 -o /dev/null http://example.com/ 2>&1',hosts=['example.com'])
+        self.assertIn('403',r['output'])
+        verdicts={c['target']:c['verdict'] for c in r['connections']}
+        self.assertEqual(verdicts.get('not-listed.invalid:443'),'refused: not in hosts',r)
+        self.assertTrue(any(v.startswith('refused: HTTPS only') for v in verdicts.values()),'plain HTTP is refused')
+        with self.assertRaises(ValueError):self.sb.spec(self.home,'g1',dict(command='true',hosts=['1.2.3.4']),self.conf)
+
+    def test_the_proxy_refuses_what_its_rules_refuse(self):
+        import asyncio,socket
+        job=self.home/'pjob';job.mkdir()
+        sock=job/('p'*60+'.sock')                       # deeper than a Unix socket's 108 bytes: bound by its folder's fd
+        self.assertGreater(len(str(sock)),108)
+        proxy=self.sb.Proxy(sock,['example.com','localhost'],job/'log.jsonl')
+        async def fake(host,port,type=0):          # DNS without the network: localhost resolves to loopback
+            return [(0,0,0,'',('127.0.0.1' if host=='localhost' else '10.1.2.3',port))]
+        proxy.resolve=fake;proxy.start();self.addCleanup(proxy.close)
+        def ask(line):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(line.encode()+b'\r\n\r\n')
+                return s.recv(200).decode()
+        self.assertIn('403',ask('CONNECT evil.example.org:443 HTTP/1.1'))
+        self.assertIn('403',ask('CONNECT localhost:443 HTTP/1.1'))      # listed, but not a public address
+        self.assertIn('403',ask('CONNECT example.com:443 HTTP/1.1'))    # 10.x is private
+        self.assertIn('403',ask('CONNECT 93.184.215.14:443 HTTP/1.1'))  # an address, not a name
+        self.assertIn('403',ask('CONNECT example.com:80 HTTP/1.1'))
+        self.assertIn('405',ask('GET http://example.com/ HTTP/1.1'))
+        log=[json.loads(l)['verdict'] for l in (job/'log.jsonl').read_text().splitlines()]
+        self.assertEqual(len(log),6,log)
+        self.assertTrue(all(v.startswith('refused') for v in log),log)
+        self.assertEqual(sum('non-public' in v for v in log),2,log)
+
+    def test_a_folder_that_holds_the_home_or_the_state_is_refused(self):
+        other=self.home.parent/(self.home.name+'-other');(other/'notes').mkdir(parents=True);(other/'work').mkdir()
+        (other/'agent.sqlite3').write_text('another resident of this account')
+        (self.home/'jobs').mkdir(exist_ok=True)
+        for bad in ('.', str(self.home.parent), 'jobs', str(Path.home()), str(other), str(other/'notes')):
+            with self.assertRaises(ValueError,msg=bad):self.sb.check_folder(self.home,bad,self.conf)
+        self.assertEqual(self.sb.check_folder(self.home,'work',self.conf),(self.home/'work').resolve())
+        self.assertEqual(self.sb.check_folder(self.home,str(other/'work'),self.conf),(other/'work').resolve())
+
+    def test_ending_a_goal_kills_its_running_box_and_removes_what_it_left_safely(self):
+        outside=self.home/'mine.txt';outside.write_text('the agent\'s own file');outside.chmod(0o600)
+        sid=uuid.uuid4().hex
+        box=self.sb.spec(self.home,'g2',dict(command='x'),self.conf)
+        r=self.term.call(sid,dict(command=f'mkdir ro && echo x > ro/f && ln -s {outside} ro/link && chmod 500 ro && '
+                                          'echo READY && sleep 60',yield_ms=10000),box=box)
+        end=time.monotonic()+20
+        while 'READY' not in r['output'] and time.monotonic()<end:
+            r=self.term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000,offset=0),box={})
+        self.assertTrue(r['running'],r)
+        self.assertTrue(self.sb.end(self.home,'g2'));self.assertFalse((self.home/'boxes'/'g2').exists())
+        from caminus.ember.resident.terminal import read_state
+        self.assertEqual(read_state(self.home/'jobs'/sid)['phase'],'finished','the running box was killed')
+        self.assertEqual((outside.stat().st_mode&0o777,outside.read_text()),(0o600,'the agent\'s own file'),
+                         'a link the box left is removed, never followed')
+
+    def test_time_limit_kills_the_box_and_says_so(self):
+        t0=time.monotonic()
+        r=self.run_box('sleep 60 & sleep 60; echo SURVIVED',timeout=2)
+        self.assertEqual(r['limit_hit'],'time');self.assertNotIn('SURVIVED',r['output'])
+        self.assertLess(time.monotonic()-t0,30)
+        with self.assertRaises(ValueError):self.sb.spec(self.home,'g1',dict(command='true',timeout=3601),self.conf)
+
+    def test_memory_and_process_limits_kill_the_box_and_say_so(self):
+        if not self.sb.has_user_systemd():self.skipTest('no user systemd here: the rlimit fallback test covers it')
+        small=dict(self.conf,sandbox=dict(memory_mb=64,tasks=16))
+        r=self.run_box('python3 -c "b=bytearray(200<<20); print(\'SURVIVED\')"',conf=small)
+        self.assertEqual((r['limit_hit'],r['limits']['enforced']),('memory','systemd'),r)
+        self.assertNotIn('SURVIVED',r['output'])
+        r=self.run_box('for i in $(seq 40); do sleep 30 & done; wait; echo SURVIVED')
+        self.assertEqual(r['limit_hit'],'processes',r);self.assertNotIn('SURVIVED',r['output'])
+
+    def test_the_rlimit_fallback_bounds_memory_and_time(self):
+        # (RLIMIT_AS fails an allocation instead of killing; RLIMIT_NPROC counts the whole account, so the cap is
+        # added to what the account already runs: only the time limit can name itself here)
+        conf=dict(self.conf,sandbox=dict(memory_mb=256,tasks=16,limiter='rlimit'))
+        r=self.run_box('python3 -c "b=bytearray(512<<20)" 2>&1 | tail -1',conf=conf)
+        self.assertIn('MemoryError',r['output']);self.assertEqual(r['limits']['enforced'],'rlimit')
+        r=self.run_box('sleep 60',conf=conf,timeout=2)
+        self.assertEqual(r['limit_hit'],'time')
+
+    def test_an_unreadable_folder_in_the_box_is_removed_and_never_stops_the_loop(self):
+        # a box's mode-000 folder made the removal retry os.open and raise TypeError: the daemon crash-looped
+        r=self.run_box('mkdir -p a/b/c && touch a/b/c/f && chmod 000 a/b && chmod 500 a && echo DONE',goal='g9')
+        self.assertIn('DONE',r['output'])
+        self.assertTrue(self.sb.end(self.home,'g9'));self.assertFalse((self.home/'boxes'/'g9').exists())
+        # one box that will not go (whatever end raises) is reported once, and the sweep goes on
+        class Store:
+            events=[]
+            class db:
+                @staticmethod
+                def execute(q,a):
+                    class R:
+                        def fetchone(self):return ('completed',)
+                    return R()
+            def event(self,kind,data,goal=None):self.events.append(kind)
+        class RT:pass
+        rt=RT();rt.home=self.home;rt.store=Store()
+        for g in ('x1','x2'):(self.home/'boxes'/g).mkdir(parents=True)
+        real=self.sb.end
+        def broken(home,gid,store=None):raise TypeError('a box that will not go')
+        self.sb.end=broken
+        try:
+            self.sb.sweep(rt);self.sb.sweep(rt)
+        finally:self.sb.end=real
+        self.assertEqual(rt.store.events,['box_not_removed']*2,'each box once, and the second pass went on')
+
+    def test_no_user_namespace_and_bounded_tmp_and_disk(self):
+        conf=dict(self.conf,sandbox=dict(memory_mb=256,tasks=64,disk_mb=8))
+        r=self.run_box('unshare -Urn true 2>/dev/null && echo USERNS; df -m /tmp | tail -1',conf=conf)
+        self.assertNotIn('USERNS',r['output'],'no user namespace inside the box (--disable-userns)')
+        self.assertIn(' 256 ',r['output'],'the tmpfs /tmp is no bigger than the memory limit')
+        self.assertEqual(r['limits']['disk_mb'],8)
+        r=self.run_box('dd if=/dev/zero of=/box/big bs=1M count=32 2>/dev/null; sleep 20; echo SURVIVED',conf=conf)
+        self.assertEqual(r['limit_hit'],'disk',r);self.assertNotIn('SURVIVED',r['output'])
+
+    def test_public_addresses_seen_through_ipv6_forms(self):
+        for a in ('93.184.215.14','2606:4700::1','64:ff9b::808:808'):
+            self.assertTrue(self.sb.public(a),a)
+        # mapped, NAT64, 6to4 forms of LAN or loopback addresses, and the deprecated IPv4-compatible / site-local
+        for a in ('::ffff:192.168.1.1','::ffff:127.0.0.1','64:ff9b::c0a8:101','64:ff9b:1::a00:1','2002:c0a8:101::1',
+                  '::808:808','fec0::1','10.1.2.3','fe80::1%eth0'):
+            self.assertFalse(self.sb.public(a),a)
+
+    def test_the_connection_log_and_each_result_are_capped(self):
+        import socket
+        job=self.home/'cjob';job.mkdir()
+        proxy=self.sb.Proxy(job/'p.sock',['example.com'],job/'connections.jsonl')
+        proxy.start();self.addCleanup(proxy.close)
+        saved=self.sb.LOG_MAX;self.sb.LOG_MAX=3;self.addCleanup(setattr,self.sb,'LOG_MAX',saved)
+        for _ in range(6):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(proxy.short);s.settimeout(10);s.sendall(b'CONNECT evil.example.org:443 HTTP/1.1\r\n\r\n');s.recv(100)
+        lines=(job/'connections.jsonl').read_text().splitlines()
+        self.assertEqual(len(lines),4,lines);self.assertIn('log is full',lines[-1])
+        # a result returns at most CONNECTIONS_MAX new ones and counts the rest
+        box=self.sb.spec(self.home,'g1',dict(command='true',hosts=['example.com']),self.conf)
+        (job/'request.json').write_text(json.dumps(dict(command='true',cwd=box['box'],box=box)))
+        (job/'connections.jsonl').write_text(''.join(json.dumps(dict(ts=0,target=f'h{i}:443',verdict='refused'))+'\n' for i in range(60)))
+        (job/'connections.cursor').unlink(missing_ok=True)
+        v=self.sb.view(job,{})
+        self.assertEqual((len(v['connections']),v['connections_more']),(self.sb.CONNECTIONS_MAX,60-self.sb.CONNECTIONS_MAX))
+        self.assertEqual(self.sb.view(job,{})['connections'],[],'what one result returned is not returned again')
+
+
+class TerminalTimeout(unittest.TestCase):
+    def test_a_terminal_timeout_kills_the_command_and_says_so(self):
+        from caminus.ember.resident.terminal import Terminal
+        home=S/('tmo-'+uuid.uuid4().hex[:12]);home.mkdir(parents=True);term=Terminal(home)
+        sid=uuid.uuid4().hex;t0=time.monotonic()
+        r=term.call(sid,dict(command='sleep 30 & sleep 30; echo SURVIVED',timeout=1,yield_ms=10000))
+        while r['running'] and time.monotonic()-t0<20:
+            r=term.call(uuid.uuid4().hex,dict(session=sid,yield_ms=2000))
+        self.assertEqual(r.get('limit_hit'),'time',r);self.assertNotIn('SURVIVED',r['output'])
+        self.assertLess(time.monotonic()-t0,10)
+        r=term.call(uuid.uuid4().hex,dict(command='echo done',yield_ms=10000))
+        self.assertNotIn('limit_hit',r,'no timeout: no bound and no limit field')
+        for bad in (0,3601,True):
+            with self.assertRaises(ValueError,msg=bad):term.call(uuid.uuid4().hex,dict(command='true',timeout=bad))
 
 
 class WorkerEnv(unittest.TestCase):

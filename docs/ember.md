@@ -52,6 +52,10 @@ either faster.
   cannot read your home (mode 750 by default on Ubuntu) or other users' protected files, and it is not root. It can
   read anything world-readable, like any user can, and it can use the network. This keeps it out of your files by the
   ordinary Unix rules; it is not containment against a hostile program.
+- **A box for untrusted code.** Code the agent did not write or does not trust (an exploit's proof of concept, an
+  unknown repository, an install script) goes to its `sandbox` tool, not its terminal: a bubblewrap box that sees none
+  of its home, no GPU and no network unless the call names hosts, with time, memory and process limits. Its prompt
+  asks for this; nothing forces it. What the box sees: [the tool reference](resident-agent.md#tools).
 - **Root only with your approval.** The agent asks through `ask_root` with the exact command, the goal it unblocks,
   the expected effect and how to undo it. You approve, edit or deny it in the panel; approved commands run under your
   sudo, never the agent's. A grant (`g g`) lets that exact command repeat for the rest of its goal, at most 12 hours.

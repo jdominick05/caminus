@@ -1310,10 +1310,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
 				label := "terminal" // (any call with a command read "terminal": a root request among them)
-				if name == "ask_root" {
+				body := lines(command, 40)
+				switch name {
+				case "ask_root":
 					label = "asks for root"
+				case "sandbox": // marked as the box it is, with what it may reach
+					label = "sandbox"
+					body = append(body, sandboxNet(args, nil))
 				}
-				parts = append(parts, toolCard(label, firstLine(command), "", true, open, lines(command, 40), w))
+				parts = append(parts, toolCard(label, firstLine(command), "", true, open, body, w))
 				continue
 			}
 			summary := ""
@@ -1400,7 +1405,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			code, _ := result["exit_code"].(float64)
-			return toolCard("output", residentText(str("name")), meta, code == 0, open, lines(output, 30), w)
+			body := lines(output, 30)
+			if hit := limitHit(str("name"), result); hit != "" {
+				meta, code = hit+" · "+meta, 1
+			}
+			if str("name") == "sandbox" {
+				body = append(sandboxLines(result), body...)
+			}
+			return toolCard("output", residentText(str("name")), meta, code == 0, open, body, w)
 		}
 		if str("name") == "finish" {
 			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
@@ -1519,7 +1531,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		if str("level") == "need_you" {
 			return turn("!", "needs you", cRed, c.renderMarkdown(str("text")))
 		}
-		return toolCard("note", "fyi: "+firstLine(str("text")), "", true, c.expanded, lines(str("text"), 20), w)
+		return toolCard("note", "fyi: "+firstLine(str("text")), "", true, open, lines(str("text"), 20), w)
 	case "scheduled":
 		at, _ := e.Data["wake_at"].(float64)
 		return toolCard("note", "parked until "+time.Unix(int64(at), 0).Format("15:04"), firstLine(str("note")), true, false, nil, w)
@@ -1527,13 +1539,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("note", "asked its advisor", residentText(str("model"))+" · "+firstLine(str("question")), true, false, nil, w)
 	case "advisor_review":
 		// what the advisor said, which the agent reads before its next step (a card without it said nothing)
-		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · "+firstLine(str("advice")), true, c.expanded, lines(str("advice"), 30), w)
+		return toolCard("note", "advisor review, asked for by you", residentText(str("model"))+" · "+firstLine(str("advice")), true, open, lines(str("advice"), 30), w)
 	case "watchdog_advised":
 		return toolCard("note", "the advisor stepped in", "the goal was about to pause ("+residentText(str("reason"))+"); its advice went to the agent", true, false, nil, w)
 	case "woke":
 		return toolCard("note", "woke up", firstLine(str("note")), true, false, nil, w)
 	case "brain":
 		return toolCard("note", "now answering: "+residentText(str("model")), str("brain"), true, false, nil, w)
+	case "sandbox_connections": // every connection a box made or was refused, as it happened
+		return wrappedRecord("⇄", "sandbox network: "+strings.Join(sandboxConnections(e.Data["connections"]), " · "), w)
 	}
 	return ""
 }
@@ -3290,7 +3304,7 @@ func (m emberModel) endedSessions() map[string]float64 {
 		if e.Kind != "tool_result" {
 			continue
 		}
-		if n, _ := e.Data["name"].(string); n != "terminal" {
+		if n, _ := e.Data["name"].(string); n != "terminal" && n != "sandbox" {
 			continue
 		}
 		res, _ := e.Data["result"].(map[string]any)
