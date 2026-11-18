@@ -30,10 +30,11 @@ caminus ember agent status resident --json
 caminus ember ui
 ```
 
-`install` uploads a stdlib-only, versioned zipapp over the existing SSH transport.
+`install` uploads a stdlib-only, versioned zipapp over the existing SSH transport. It has no `--help` or dry run, and
+it queues the new runtime for every running resident.
 Goals and commands execute as the agent user. `start` enables an agent-owned
-systemd user service; linger, provisioned by `env setup`, keeps it alive after
-logout. `env setup` also creates the shared leases folder (`<bridge>/leases`,
+systemd user service; linger, provisioned by `caminus ember setup`, keeps it alive after
+logout. `caminus ember setup` also creates the shared leases folder (`<bridge>/leases`,
 setgid 2770) the `lease` tool and the human's GPU windows write. Stopping the
 resident does not stop its inference server. Terminal workers
 survive a resident restart, so long commands can be inspected rather than repeated.
@@ -63,7 +64,7 @@ A message that starts with `/` is a command; `//` sends it as text instead.
 | Ctrl+C | with a draft: clear it (Up brings it back); again, or with no draft: quit |
 | Ctrl+X Ctrl+E | edit the draft in `$VISUAL` / `$EDITOR` |
 | Ctrl+O | the layout: compact (a card per action, short previews) or everything (every card in full, the thinking, every gate run); your place in the history is kept |
-| Ctrl+Y | how an open card shows Markdown, rendered (the default) or its source: an advisor's review and a report (a model's words, as a reply is), and a command's output that is clearly Markdown (two marks at line starts: a `\|` table over its `\|---\|` row counts two; a closed code fence, a `##` to `######` heading and two or more `> ` quote lines one each; and more than half of its lines are Markdown's own, so a log that prints one table stays as it is). Rendered, line breaks, `<tags>` and entities stay as written and links are plain text; other output, output nested more than 8 quote or list levels deep, folded cards and their previews always stay as they came. A drag over a rendered card copies its source; your place in the history is kept |
+| Ctrl+Y | how an open card shows Markdown, rendered (the default) or its source: an advisor's review and a report (a model's words, as a reply is), and a command's output that is clearly Markdown (two marks at line starts: a `\|` table over its `\|---\|` row counts two; a closed code fence, a `##` to `######` heading and two or more `> ` quote lines one each; and more than half of its lines are Markdown's own, so a log that prints one table stays as it is). Rendered, line breaks, `<tags>` and entities stay as written and links are plain text; other output, output nested more than 8 quote or list levels deep, folded cards and their previews always stay as they came. Dragging copies ([the mouse](ember.md#the-mouse-clicks-and-copying)); your place in the history is kept |
 | Ctrl+T, Alt+↑/↓ | hold or scroll the live reply while it is written (a narrow terminal's box under the history; on a wide one the reply streams into the history, which PgUp/PgDn and the wheel scroll) |
 | Ctrl+G, Shift+Tab, Tab | the goals overlay, the session switcher, and a waiting request (Tab answers it) |
 | `!cmd`, `!!cmd` | `!` on an empty draft: a command in the agent's account (purple); `!` again: in your own shell on this machine (copper). The command and its output show in the chat as a card in the same colour (yours marked "my shell"; the last 32 KB of a longer output, saying so), and the typing box stays empty. The output also goes to the agent with the next message you send with Enter (not `/steer`), after your words, as it is (colour codes removed, not edited, so mind secrets in `!! env` and the like): each command you ran since your last message, in order, marked as yours (`!!` as your own shell, not its account), at most its last 200 lines or 16 KB (it says when it was cut). The typing box's title counts what waits ("+1 shell output attached to your next message"). Esc stops a working agent first, as always, and the outputs stay; with nothing running, Esc on an empty typing box drops them (the cards stay). A command that finishes after you switch sessions stays out of the session you switched to. The cards are this window's only: a new session or a restart of the UI starts without them |
@@ -86,6 +87,7 @@ it; the durable blocks replace it when the turn lands.
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/panel` | the Caminus panel (models, servers, the cards) full screen inside Ember; Esc, q or e comes back to the chat as it was |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
+| `/advisor [FOCUS]`, `/help` | the advisor reviews the goal now and the agent reads it before its next step (settings: `caminus ember agent advisor NAME`); the commands and keys |
 | `/halt` | the emergency stop (`/halt clear` lifts it) |
 | `/theme` | colours, with a live preview; `g` there cycles the symbol set (nerd, unicode, ascii) |
 | `/sessions` (Shift+Tab), `/start`, `/quit` | the session switcher: a card per session (goal, time, cost, model, speed, GitHub account); Enter or a click switches; `n` or the "+ new session" card creates one on your setup's default local model (the one chosen for your cards; `/model` switches it); `x x` closes one (its service stops and its home is kept in `~/.local/share/caminus/removed-sessions`); `r` lists the closed sessions and Enter restores one (`caminus ember agent restore [NAME]` from a shell: no name lists them, `--dry-run` checks); `s` stops or starts one. `/start` runs this session's loop; `/quit` closes the UI (the agent keeps running) |
@@ -111,7 +113,7 @@ tells the agent what to do instead, filed as a steer). Esc leaves it waiting: a 
 Tab, or the next request, brings it back. Yes runs the command under your sudo; the resident never runs root. The
 transcript keeps one line for each: `⚿ root: CMD` and then `· yes` / `· no: TEXT` / `· timed out (no)`. A granted
 repeat (the same command in the same goal, within 12 hours of your approval) is honoured by `caminus ember watch`;
-`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant` work from the command line.
+`caminus ember answer ID denied "WHAT INSTEAD"` and `answer ID approved --grant --digest HASH` work from the command line.
 
 Nothing waits on you. A pending request parks only the step that needs it: the
 agent is told it is pending, works on what does not need the answer, and gets
@@ -135,10 +137,7 @@ killed is reported as stopped, never as still running. SIGTERM stops the daemon
 within about a second, also in the middle of a `wait`, a model call or a gate.
 Context compaction summarizes bounded transcript fragments before continuing.
 
-Root commands are requests, never executed by the resident. The human reviews the
-exact command and approves, edits or denies it through the existing bridge. The
-agent's open-ended shell does not grant root or access to another user's protected
-files. This is a Unix account, not a security sandbox.
+This is a Unix account, not a security sandbox.
 
 ## The loop
 
@@ -207,8 +206,8 @@ The failure ledger keys a call by tool and arguments: a call that has failed
 twice is refused before it runs and the model is told to change approach, and two
 refused repeats of it pause the goal. The watchdog pauses a goal that spends
 without moving — no progress for `idle_timeout` seconds, a prompt over
-`token_budget`, the same call failing three times, or three replies in a row cut
-off at the output limit — and records why in the goal's error, where the panel
+`token_budget`, the same call failing three times, the same call made seven times in a row, or three replies in a row cut
+off at the output limit or three plain-text replies — and records why in the goal's error, where the panel
 shows it.
 
 Compaction has two tiers. When the context passes the threshold, old tool
@@ -245,7 +244,7 @@ one call waits for output), `discover`, the loop's tools and the bridge
 
 | Tool | What it does |
 |---|---|
-| `read`, `edit`, `write` | Files without the terminal: numbered windows; exact, unique replacement (CRLF and mode kept, atomic); whole-file writes; edits return a diff |
+| `read`, `search`, `edit`, `write` | Files without the terminal: numbered windows (`start`, `lines`); file names by glob and text by regex; exact, unique replacement (CRLF and mode kept, atomic); whole-file writes; edits return a diff |
 | `todo` | The goal's checklist (see the loop) |
 | `remember`, `history_search` | A one-fact note with its index line; full-text search over the agent's own past goals, results, journal and notes |
 | `wait` | Block without model calls until a time, a file, a port, a process, a terminal session or a message; a message, cancellation or new work ends it early |
@@ -268,7 +267,8 @@ results are marked as data, never instructions.
 `STATE.md` is asked for near compaction, so it is what the agent reads after a
 compaction or a restart. An older, longer `MEMORY.md` is copied whole into
 `notes/memory-before-index.md` the first time it is seen. Answers to questions stay
-in the goal's transcript; nothing is written to memory automatically.
+in the goal's transcript; nothing is written to this memory automatically (`caminus ember answer` and `watch` append to the
+account's `~/MEMORY.md`, a different file).
 
 ## Free time
 
@@ -279,8 +279,7 @@ journal entry before it stops. It is never graded. Work preempts it at once; a
 nightly dream consolidates notes. On the local server it works in the full context
 window: before a stretch overwrites the human's conversation, the prompt cache
 parks it to disk and the human's next request restores it. `caminus ember agent
-heartbeat NAME on|off|status|recap|now`; the recap is the "while you were away" line, and `now` (the panel's
-`caminus ember agent heartbeat NAME now`) starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
+heartbeat NAME on|off|status|recap|now`; the recap is the "while you were away" line, and `now` starts a stretch at once. A stretch ends at `--stretch-minutes` (30 by default); `--stretch-steps N` adds a
 step limit (0, the default, means none); `--rest-minutes` sets the rest between stretches and `--budget-usd` the daily allowance.
 On a remote model free time spends its own allowance (`free_time.budget_usd`,
 0.50 USD a day by default).
@@ -305,10 +304,7 @@ A resident's brain is any model its providers serve. A provider is an endpoint t
 Caminus server, or a paid API through your key relay (the agent never holds the key):
 
 ```sh
-caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5   # http://127.0.0.1:8765/v1
-caminus ember relay install --provider deepinfra --cap-usd 3                              # http://127.0.0.1:8766/v1/openai
-caminus ember agent provider NAME add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
-caminus ember agent provider NAME add deepinfra --kind deepinfra --endpoint http://127.0.0.1:8766/v1/openai --relay
+# relays and providers: see Paid brains (ember.md)
 caminus ember agent models NAME --refresh        # what each provider serves: window, output cap, effort levels, prices
 caminus ember agent model NAME zai-org/GLM-5.2   # pick one (provider/id when two serve it)
 caminus ember agent effort NAME high             # among the levels that model offers
@@ -318,29 +314,16 @@ A session's `/model` also lists the local server it talks to (as `local`, once t
 session the switcher creates keeps every provider of the session it was opened from, that session's own brain among
 them, so providers are added once, not per session.
 
-Each relay reads its key from a file only you can read (`~/.config/anthropic/api_key`,
-`~/.config/caminus/deepinfra-key`; it refuses one others can read) and keeps a daily dollar cap. `relay install`
-makes it a systemd user service with no expiry (the cap guards the spend) that runs a frozen copy of its code, so
-editing or moving a checkout cannot stop it; `relay status` shows each relay and today's spend, `relay uninstall`
-removes one. (`caminus ember relay --provider P --cap-usd N --ttl SECS` runs one in the foreground instead.)
-The Anthropic relay allows the models you name; the DeepInfra relay allows any chat model DeepInfra publishes a price
-for, priced from its own list; the OpenCode Go relay allows the plan's chat models that call tools, priced from the
-plan's list, and books what each reply says it charged ([the guide](ember.md#paid-brains)). The catalog is what the providers report: Anthropic's model list gives each model's
-window, output cap, thinking and effort levels; DeepInfra's gives window, prices and whether it takes
-`reasoning_effort`. In the panel, `/model` opens the list (Enter picks) and `/effort LEVEL` sets the depth; a running
-resident takes either at its next turn.
+Relays, their key files, daily caps and which models each allows are in [Paid brains](ember.md#paid-brains); `relay status`
+shows each relay and today's spend. In the panel, `/model` opens the list (Enter picks) and `/effort LEVEL` sets the depth;
+a running resident takes either at its next turn.
 
-A paid brain resends its whole context every turn, so it compacts early: at 38 % of its window, keeping the newest
-7.6 % (on a 1M window about 400K and 80K); a model whose price rises past a prompt length compacts before it. Set `paid_compact_threshold` and `paid_compact_target_ratio` (fractions of
-the window) in the resident's config to change it; the local server keeps `compact_threshold` / `compact_target_ratio`
-(85 % / 20 %).
+A paid brain compacts early ([Defaults](ember.md#defaults)); a local one at 85 % down to 20 %.
 
 ## The advisor and two brains
 
-`caminus ember agent advisor NAME --model claude-opus-5-5 --endpoint URL` gives the
-agent an `advisor` tool on a model the owner picks, through the owner's own key
-relay, with a daily dollar cap and calls per goal (`--kind opencode-go`: a
-Messages-native model of an OpenCode Go plan; docs/ember.md, "The advisor").
+The advisor (a stronger model the agent can consult, with a daily cap and calls per goal) is set up in
+[Paid brains](ember.md#paid-brains).
 `caminus ember agent fallback NAME
 --model ... --endpoint ...` adds a second brain used only while the local server is
 down, with its own daily allowance. Every failed or refused remote call is recorded
@@ -435,9 +418,7 @@ exact reviewed request under a shared lock before approving it, then save an
 execution claim before starting sudo. A claim that wins before cancellation is
 already committed; cancellation reports its ID and does not erase its result.
 An interrupted claim requires human inspection and is never automatically rerun.
-For scriptable root approvals, pass the reviewed request's `_digest` from
-`env reqs --json` as `env answer ID approved --digest HASH`. Approving by ID alone
-is rejected. An edited command still requires its reviewed request digest.
+Scripted root approvals need `--digest` ([the contract](specs/spec-ember.md#7-the-tui-caminus-ember-ui-and-the-scriptable-cli)).
 Interactive approvals display terminal controls and Unicode formatting characters
 as visible escapes in commands, reasons and request metadata. The displayed
 escaping does not change the raw command bound to the reviewed digest.
@@ -450,6 +431,7 @@ escaping does not change the raw command bound to the reviewed digest.
 | 22 | paused by a test budget |
 | 23 | cancelled |
 | 24 | waiting for an unavailable model |
+| 25 | waiting for a plan's approval (`agent plan NAME GOAL approve\|reject`) |
 | 1 | error |
 
 For CPU fixtures or agentic tests in an isolated local home, every command also
@@ -554,9 +536,9 @@ The relay stops at its daily cap (HTTP 402) and refuses a model it cannot price;
 day or another brain. Every priced turn is metered per goal and per day, cached input at the provider's cache price
 (`agent status` reports `spend_today` and `spend_goals`; the panel's status line shows this goal's and today's).
 
-`caminus ember agent update NAME` (`/update`) installs this caminus's runtime: the resident applies it between goals
+`caminus ember agent update NAME` installs this caminus's runtime: the resident applies it between goals
 (`--now`: at the next step), restarts its own service and reports the new version in its heartbeat (`--wait SECS`
-waits for it).
+waits for it). The panel's status line says "older runtime" until then.
 
 `tools/ember_demo.py` runs all of this on a scripted model in a scratch home (no agent account, GPU, server or key):
 the quickest way to see the chat.

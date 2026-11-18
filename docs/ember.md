@@ -29,10 +29,8 @@ is open, and each tool is something the harness hands them. `caminus ember` turn
   evidence, not the agent's reasoning) checks the finish. The harness keeps its own record too: a verify needs
   something that looked after the last change, a refused edit blocks the finish until the change is made or the file
   is read, and the judge sees which files were actually changed.
-- **Nothing waits on you.** Questions and root requests are cards you answer when you can. An unanswered question
-  waits 15 minutes while you are at the screen and longer while you are away (until 15 minutes after you come back,
-  at most 8 hours); then the advisor's pick or the agent's recommended option. An unanswered permission is a no, and a
-  root request is a no after 15 minutes either way.
+- **Nothing waits on you.** Questions and root requests are cards you answer when you can; an unanswered one times
+  out ([the rules](resident-agent.md#when-you-are-away)).
 - **It has free time.** With no goal, it reads its journal, follows its own interests, keeps projects in its studio,
   and leaves you things it thinks you will like (`/studio`). Free time is never graded and spends its own
   small allowance.
@@ -63,7 +61,9 @@ Ember has been tested on one machine, Ubuntu with systemd. What you can run into
 - **The sandbox needs bubblewrap.** The `sandbox` and `browser` tools need `/usr/bin/bwrap` and unprivileged user
   namespaces. Setup does not install bubblewrap (`sudo apt install bubblewrap`) and does not change AppArmor, which
   restricts unprivileged user namespaces on Ubuntu 24.04 and later. When no box can be made, both tools refuse and say
-  why; nothing runs outside a box instead.
+  why; nothing runs outside a box instead. The `browser` tool also needs Google Chrome or a Chromium that is not a snap
+  (Ubuntu's chromium and Firefox are snaps, which bubblewrap cannot run): install Google Chrome's `.deb` from
+  google.com/chrome; without one the tool is not offered.
 - **Sandbox memory.** Each box may use 4 GB of memory, whatever is free (`sandbox.memory_mb` in the resident's
   `config.json`). Several boxes beside a large local model can run the machine out of memory; lower it on a machine with less RAM.
 - **Closing a session keeps it.** Closing a session in the switcher (`x x`) stops its service and moves its home
@@ -85,20 +85,12 @@ Ember has been tested on one machine, Ubuntu with systemd. What you can run into
   cannot read your home (mode 750 by default on Ubuntu) or other users' protected files, and it is not root. It can
   read anything world-readable, like any user can, and it can use the network. This keeps it out of your files by the
   ordinary Unix rules; it is not containment against a hostile program.
-- **A box for untrusted code.** Code the agent did not write or does not trust (an exploit's proof of concept, an
-  unknown repository, an install script) goes to its `sandbox` tool, not its terminal: a bubblewrap box that sees none
-  of its home, no GPU and no network unless the call names hosts, with time, memory and process limits. Its prompt
-  asks for this; nothing forces it. What the box sees: [the tool reference](resident-agent.md#tools).
-- **A browser in a box.** Its `browser` tool drives a headless Chrome in the same kind of box, with a fresh profile
-  per goal and no logins; public sites are open to it and logged, your LAN and this machine only when a call names
-  the address ([the tool reference](resident-agent.md#tools)). It needs Google Chrome or a Chromium that is not a
-  snap (bubblewrap cannot run snaps: Ubuntu's chromium and Firefox are snaps). Install Google Chrome's `.deb` from
-  google.com/chrome (`sudo apt install ./google-chrome-stable_current_amd64.deb`); without one the tool is not
-  offered. Its memory is bounded through a user systemd scope; an account without one runs the browser with no
-  memory limit.
+- **A box for untrusted code, and a browser in one.** The agent's `sandbox` and `browser` tools run in a bubblewrap box:
+  what they see and reach is in [the tool reference](resident-agent.md#tools); the requirements (bubblewrap, a Chrome
+  that is not a snap) are in [known limits](#known-limits). Its prompt asks for the box; nothing forces it.
 - **Root only with your approval.** The agent asks through `ask_root` with the exact command, the goal it unblocks,
   the expected effect and how to undo it. You approve, edit or deny it in the panel; approved commands run under your
-  sudo, never the agent's. A grant (`g g`) lets that exact command repeat for the rest of its goal, at most 12 hours.
+  sudo, never the agent's ([how](resident-agent.md#root-requests-and-questions)). A grant (`caminus ember answer ID approved --grant --digest HASH`) lets that exact command repeat for the rest of its goal, at most 12 hours.
   An approved command runs without input (package tools ask nothing, no pager opens), and the chat comes back when it
   exits. After 30 minutes the chat comes back anyway, and the agent hears that the command is still running and its
   pid; nothing kills it.
@@ -138,7 +130,7 @@ mkdir -p ~/.config/anthropic
 $EDITOR ~/.config/anthropic/api_key                       # the key alone, on one line
 caminus ember relay install --provider anthropic --cap-usd 3 --model claude-haiku-5-5
 caminus ember agent install
-caminus ember agent init resident --model claude-haiku-5-5 --api anthropic --endpoint http://127.0.0.1:8765/v1
+caminus ember agent init resident --model claude-haiku-5-5 --api anthropic --context N --endpoint http://127.0.0.1:8765/v1   # N: your model's context window
 caminus ember agent provider resident add anthropic --kind anthropic --endpoint http://127.0.0.1:8765/v1 --relay
 ```
 
@@ -214,7 +206,7 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   is asked (`/advisor`, or the agent's advisor tool), a popup over the typing box (the one `/btw` uses) shows who asked,
   the advisor's model and the seconds it has taken; it goes when the advice lands as a card (rendered as Markdown, as
   the agent's replies are; Ctrl+Y shows its source), and says why when the call fails (a spent budget, no calls left)
-  until Esc closes it (while the agent works, the first Esc stops the agent, as always). `/advisor` waits while a
+  until Esc closes it (while the agent works, the first Esc stops the agent, as always). When the agent's own advisor call fails at once, no popup opens; the error card in the chat says why. `/advisor` waits while a
   `/btw` answer is on its way.
   On an OpenCode Go plan, the advisor can be one of the plan's Messages-native models (`caminus ember agent models
   NAME --refresh` lists each with its `protocol`; a Chat Completions one is refused), through the plan's relay:
@@ -311,13 +303,13 @@ key of that file.
 | Key relay | your key stays with you; `relay install` asks you to name a daily cap (`--cap-usd`); a relay run by hand defaults to $1 a day | the agent spends through it and never sees the key | `caminus ember relay install --provider P --cap-usd N` |
 | Advisor | $1 a day, 5 calls per goal, effort medium | a stronger model the agent can consult | `caminus ember agent advisor NAME --budget-usd N --calls-per-goal N` |
 | Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
-| A request's wait | 15 min | a question then takes the advisor's pick or its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
-| A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min; the prompt then says "waits while you're away"; root requests keep their 15 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
-| The browser's idle close | 30 min | a browser nobody called for that long closes itself (a paused goal keeps its box, not a running Chrome); the next `open` starts a new one and says so | `sandbox.browser_idle_s` (seconds; `0`: never, it stays open until the goal ends) |
+| A request's wait | 15 min | what happens then: [the rules](resident-agent.md#when-you-are-away) | `question_timeout` (seconds) |
+| A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
+| The browser's idle close | 30 min | a browser nobody called for that long closes itself ([the browser row](resident-agent.md#tools)) | `sandbox.browser_idle_s` (seconds; `0`: never, it stays open until the goal ends) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
 | Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, Meta's docs for the Muse models, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model describes it once you turn eyes on (Eyes, above), else the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image the eyes described is listed with the eyes model's name: the description is that model's observation. One read by a brain without vision and without eyes is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
-| Eyes | off; once on, $0.25 a day | a vision model describes an image for a brain that can't see it (Eyes, above) | `caminus ember agent eyes NAME --provider P --model M` or `--auto` (ministral-8b-latest on a Mistral relay, else Claude Haiku 5.5), `--off`, `--budget-usd N`; `eyes` |
+| Eyes | off; once on, $0.25 a day | a vision model describes an image for a brain that can't see it | `caminus ember agent eyes NAME` (Eyes, above); `eyes` |
 
 Pick the effort level at the start of a chat: on the Qwen3.8 models a change re-reads the conversation once.
 A local session finds its server's effort ids by asking the server (at creation, `/model` or `/effort`); a session
@@ -399,7 +391,7 @@ index, journal or note. Hits from the running goal come last, marked "this goal"
 | Your key for its account | `~/.ssh/caminus_env_key` |
 | Your audit log | `~/.local/state/caminus/env-audit.jsonl` |
 | The setup script | `~/.local/share/caminus/env-setup.sh` |
-| Relay keys | `~/.config/caminus/deepinfra-key`, `~/.config/caminus/mistral-key`, `~/.config/caminus/meta-key`, `~/.config/caminus/opencode-key`, `~/.config/anthropic/api_key` (mode 600) |
+| Relay keys | [Paid brains](#paid-brains) |
 | Relay spend | `caminus ember relay status` |
 | The bridge | `/srv/caminus-env-bridge` (`req/`, `res/`, `notes/`, `leases/`, `STOP`) |
 
@@ -425,7 +417,7 @@ Your files never move into the agent's account unless you put them there or appr
 | `FAIL bridge` after the root script passed | Your account joined `caminus-env` but this session predates it: log out and in, or `newgrp caminus-env`. |
 | `FAIL ssh login as the agent user` | The SSH server is not running or your key is not authorized: rerun the root script; it fixes both and says which. |
 | `caminus ember ui: caminus-panel is not installed` | A source checkout: `cd panel && go build -o caminus-panel .` (the wheel ships it). |
-| The agent stopped (`stopped` in the header) | `/start` in the panel, or `caminus ember agent start NAME`. The service restarts by itself after any exit except `/stop`. |
+| The agent stopped (`stopped` in the header) | `/start` in the panel, or `caminus ember agent start NAME`. The service restarts by itself after any exit except a deliberate stop (`s` in the Shift+Tab switcher, or `caminus ember agent stop NAME`). |
 | A goal is `paused` | Its reason is on the goal (`/goals`): the watchdog (no progress, a token budget, the same call failing three times or repeated seven times), three plain replies, or three cut-off replies. Steer it, then `/resume`. |
 | HTTP 402 from the relay | The day's cap is spent: it resets at midnight, or raise it with `relay install --cap-usd N`. |
 | HTTP 403 "no published price" | The model is not on the provider's price list (or a stale model name in the config): pick one with `/model`. |
