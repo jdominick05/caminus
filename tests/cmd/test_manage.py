@@ -286,6 +286,15 @@ def main():
         held = {d for s in manage.all_servers() if manage.alive(s.get('guard_pid')) for d in s.get('devices', [])}
         check(held == {1}, f'ps: only live servers hold cards ({held})')
         check(manage.pick_port(None, {8092}) != 8092, 'ports: a taken port is skipped')
+        # a live listener holds the port; a server that just stopped (its side of a connection in TIME_WAIT) does not:
+        # port_free binds as the server does (SO_REUSEADDR), or a restart refused with 'port N is in use'
+        import socket as _so
+        ls = _so.socket(); ls.setsockopt(_so.SOL_SOCKET, _so.SO_REUSEADDR, 1); ls.bind(('127.0.0.1', 0)); ls.listen(1)
+        pt = ls.getsockname()[1]
+        check(not manage.port_free(pt), 'ports: a port with a live listener is not free')
+        cl = _so.create_connection(('127.0.0.1', pt)); sv, _ = ls.accept()
+        sv.close(); ls.close(); cl.close()                      # the server side closes first: its port enters TIME_WAIT
+        check(manage.port_free(pt), 'ports: a port whose server just stopped (TIME_WAIT) is free')
         try:
             manage.start_one('qwen3.6', name='loading')
             check(False, 'start: a name already running is refused')

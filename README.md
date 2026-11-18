@@ -28,7 +28,7 @@
 
 ## Get started
 
-You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT. Install Caminus (build it from source, or
+You need Linux on x86-64, Python 3.12 and at least one RX 7900 XTX or XT. Install Caminus ([build it from source](docs/quickstart.md#1-install-caminus), or
 `pip install caminus`), then run the wizard:
 
 ```bash
