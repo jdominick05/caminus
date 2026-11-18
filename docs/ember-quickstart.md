@@ -43,12 +43,13 @@ You joined the `caminus-env` group: log out and back in (or run `newgrp caminus-
 caminus ember setup          # installs the agent's side; every line should say PASS
 ```
 
-If the agent will commit to a repository or run its CPU tests, give it a git identity and a test interpreter (both
-optional, both safe to rerun):
+Setup also fills the agent's own Python with a standard package set ([the list](ember.md#where-things-live)). If the
+agent will commit to a repository or run its CPU tests, give it a git identity and CPU torch (both optional, both safe
+to rerun):
 
 ```sh
 caminus ember setup --git-name LOGIN --git-email LOGIN@users.noreply.github.com   # its GitHub account, for commits a CLA check can link
-caminus ember setup --test-venv                                                    # ~/.venvs/caminus-cpu: CPU torch and numpy (about 200 MB)
+caminus ember setup --test-venv                                                    # CPU torch and numpy in ~/.venvs/caminus-cpu (about 200 MB more)
 ```
 
 ## 3. Give it a brain
@@ -97,8 +98,10 @@ caminus ember ui
 
 Type a goal and press Enter: "Find out which of my Python projects have failing tests and write a short report."
 The agent first works out what done looks like (it may look around first), then works step by step in its own
-account. You see its replies, one dim line per batch of tool work, and on a wide terminal a side panel with its
-thoughts, its task list and what it is running now.
+account. You see its replies and one dim line per batch of tool work. On a wide terminal (160 columns or more) the
+reply it is writing streams into the history as its newest block, and the right column holds its task list at the top
+and what it is running now. A narrower terminal shows the reply being written in a box under the history, and the
+current task and what runs now in two lines above where you type.
 
 - **Steer**: type while it works. A message reaches it at its next step; `/steer TEXT` redirects it.
 - **Answer**: questions and root requests ask where you type: pick with the arrows and Enter (a root command is yes or
@@ -106,14 +109,16 @@ thoughts, its task list and what it is running now.
   waiting; Tab brings it back. Nothing waits on you: an
   unanswered question times out to the agent's recommended option, a permission question to no.
 - **Stop**: `/pause`, `/cancel`, or `/halt` (every resident pauses; `/halt clear` lifts it).
-- **Copy**: drag over the history; the release copies it.
+- **Copy**: drag over any text on the screen; the release copies it ([the mouse](ember.md#the-mouse-clicks-and-copying)).
 - **Leave**: `/quit` closes the panel; the agent keeps working. `caminus ember ui` brings you back to the same
   conversation.
 
 With nothing to do, the agent has free time: it reads its journal, follows its own interests and keeps a studio
 (`/studio`). `caminus ember agent heartbeat resident now` starts a stretch now (after any running work);
-`caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). Its
-thoughts run in Ember's box: its reasoning when the model shows it, else its words and the tools it calls.
+`caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). On a
+narrow terminal its thoughts run in the box under the history (the latest stay up between replies): its reasoning when
+the model shows it, else its words and the tools it calls. A wide terminal leaves the reasoning out of the history, as
+the compact view always does; Ctrl+O shows it.
 
 ## Next
 

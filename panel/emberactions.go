@@ -28,7 +28,7 @@ func toolFamily(name string) lipgloss.Style {
 	switch name {
 	case "terminal", "sandbox", "ask_root", "lease", "machine", "discover":
 		return lipgloss.NewStyle().Foreground(cOrange).Bold(true)
-	case "read", "edit", "write", "checkpoint", "rollback":
+	case "read", "search", "edit", "write", "checkpoint", "rollback":
 		return lipgloss.NewStyle().Foreground(cPurple).Bold(true)
 	case "web_search", "web_fetch":
 		return lipgloss.NewStyle().Foreground(cTeal).Bold(true)
@@ -40,6 +40,25 @@ func toolFamily(name string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(cGreen).Bold(true)
 	}
 	return lipgloss.NewStyle().Foreground(cText).Bold(true)
+}
+
+// readMeta is a read card's note: the lines shown, "directory", or "image WxH" for an image file (files.py image_info),
+// with "· described by MODEL" where the eyes model described it for a brain without vision (advisor.py Eyes).
+func readMeta(result map[string]any) string {
+	if img, ok := result["image"].(map[string]any); ok {
+		w, _ := img["width"].(float64)
+		h, _ := img["height"].(float64)
+		meta := fmt.Sprintf("image %dx%d", int(w), int(h))
+		if by, _ := img["described_by"].(string); by != "" {
+			meta += " · described by " + by
+		}
+		return meta
+	}
+	if d, _ := result["directory"].(bool); d {
+		return "directory"
+	}
+	shown, _ := result["shown"].(string)
+	return "lines " + shown
 }
 
 func argStr(args map[string]any, keys ...string) string {
@@ -161,10 +180,13 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 	case "read":
 		subject = residentText(shortPath(argStr(args, "path"), home, cwd))
 		if state == "ok" {
-			meta = "lines " + rs("shown")
-			if d, _ := result["directory"].(bool); d {
-				meta = "directory"
-			}
+			meta = readMeta(result)
+		}
+	case "search":
+		s, m, hits := searchSummary(args, result, home, cwd)
+		subject = s
+		if state == "ok" { // (a failure keeps the error's meta from above, the home written as ~)
+			meta, preview = m, hits[:min(3, len(hits))]
 		}
 	case "web_search":
 		subject = "“" + residentText(argStr(args, "query")) + "”"
@@ -370,6 +392,46 @@ func actionCard(name string, args, result map[string]any, w int, home, cwd strin
 		out = append(out, ansi.Truncate(rule+emberDim.Render(terminalText(p, false)), w, "…"))
 	}
 	return strings.Join(out, "\n")
+}
+
+// searchSummary is a search card's subject (the pattern or glob, and where), its count, and its hits: "file:line  text"
+// for each matching line of a text search (the resident prints a file's name, then "  12:  line" per match and
+// "  13-  line" per context line), the names for a glob search.
+func searchSummary(args, result map[string]any, home, cwd string) (subject, meta string, hits []string) {
+	subject = residentText(argStr(args, "glob"))
+	if p := argStr(args, "pattern"); p != "" {
+		subject = "“" + residentText(p) + "”" + strings.TrimSuffix(" in "+residentText(argStr(args, "glob")), " in ")
+	}
+	if p := argStr(args, "path"); p != "" && p != "." {
+		subject += " under " + residentText(shortPath(p, home, cwd))
+	}
+	text, _ := result["text"].(string)
+	files, _ := result["files"].(float64)
+	m, isText := result["matches"].(float64)
+	file := ""
+	for _, ln := range strings.Split(residentText(text), "\n") {
+		switch {
+		case ln == "":
+		case !isText:
+			hits = append(hits, ln)
+		case !strings.HasPrefix(ln, " "):
+			file = ln
+		default:
+			if n, body, ok := strings.Cut(strings.TrimLeft(ln, " "), ":  "); ok && n != "" && strings.Trim(n, "0123456789") == "" {
+				hits = append(hits, file+":"+n+"  "+strings.TrimSpace(body))
+			}
+		}
+	}
+	switch {
+	case !isText:
+		meta = plural(int(files), "file", "files")
+	case m == 0:
+		searched, _ := result["searched"].(float64)
+		meta = "no matches in " + plural(int(searched), "file", "files")
+	default:
+		meta = plural(int(m), "match", "matches") + " in " + plural(int(files), "file", "files")
+	}
+	return subject, meta, hits
 }
 
 // actionBlock is the compact view's card for a tool_result event ("" when the result is drawn some other way: a
