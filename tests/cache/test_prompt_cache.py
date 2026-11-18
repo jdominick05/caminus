@@ -1333,7 +1333,8 @@ def cpu_arrays(mk, base):
     its last kept token changed), lcp compares arrays as they are. (a) lcp on lists / int64 / int32 arrays == a Python
     loop, tok_sha the same bytes for a list and an array, token_ids' list and array; (b) random log operations: the kept
     array == the log converted again after each; (c) one scenario of requests (prepare / plan / append / commit, an edit
-    restored from a checkpoint, a side call, a lost live state, a park, a reset and the unpark) run with the matches on
+    restored from a checkpoint, a side call, the prompt phase (prompt: the ids' array carried to prepare and extend), a
+    commit of the live log itself, a lost live state, a park, a reset and the unpark) run with the matches on
     lists through a Python loop (the code before) and on arrays, with the requests given as lists and as int32 arrays:
     every outcome (source, cached, state, log, checkpoints, the engine state) equal"""
     from caminus.cache import livestate as L
@@ -1396,6 +1397,9 @@ def cpu_arrays(mk, base):
         o = c.prepare(give(S), side=True); tS, sS = gen(e, o['st'], S, 4); c.commit(give(tS), sS); rec('side', o)
         R4 = t3 + base[3300:3400]
         o = c.prepare(give(R4)); t4, s4 = gen(e, o['st'], R4, 4); c.commit(give(t4), s4); rec('r4', o)
+        R5 = list(c.log) + base[3500:3600]                        # (the session's prompt phase: the ids' array carried along)
+        o = c.prompt(give(R5), dict(root=300, user=len(R5) - 100)); rec('prompt r5', o)
+        c.commit(c.live_tokens(), dict(c.st)); rec('commit of the live log itself')   # (a reply's end: K3Session.end)
         c._drop_live(); rec('dropped')
         o = c.prepare(give(R4)); rec('after drop', o)
         c.park(); c.reset(); e.reset(); rec('parked, reset')
