@@ -32,9 +32,15 @@ The build needs Docker that your user can run (`docker run hello-world` works). 
 `dist/`: build from a fresh clone. 0.2.1 and older predate the build image: build those with
 [their own building notes](https://github.com/jdominick05/caminus/blob/v0.2.1/docs/dev/building.md).
 
-**Or install the prebuilt package.** `pip install caminus` (in place of the last line above, after the PyTorch line)
-installs the same files: every release is built with the same recipe and signed, and its provenance can be checked
-against the source ([verifying a download](verifying.md); self-assessed against SLSA Build L3).
+**Or install the prebuilt package.** It holds the same files: every release is built with the same recipe and signed,
+and its provenance can be checked against the source ([verifying a download](verifying.md); self-assessed against SLSA
+Build L3).
+
+```bash
+python3.12 -m venv ~/caminus-venv && source ~/caminus-venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.2   # PyTorch for AMD cards (not on PyPI)
+pip install caminus
+```
 
 **Nightly builds.** When the `testing` branch changes, it is built overnight and published as a
 [pre-release](https://github.com/jdominick05/caminus/releases) (the newest one is at the top). It has what the next
@@ -46,7 +52,7 @@ Please report what breaks.
 ## 2. Run the wizard
 
 ```bash
-caminus wizard --dry-run   # the plan: runs only the read-only checks, prints every other command
+caminus wizard --dry-run   # the plan: runs only the read-only commands (doctor, pull --dry-run, fit), prints the rest
 caminus wizard
 ```
 
@@ -59,8 +65,8 @@ It takes six steps and prints each `caminus` command before it runs it, so you l
    ([the table](../README.md#the-model-for-your-setup)) is preselected: press Enter to take it. Read each model's licence
    before any commercial use ([licences](models.md#licences)).
 3. `caminus pull MODEL` downloads it, after the wizard shows its size, the folder and the free space there.
-4. `caminus start MODEL` starts it; the first start takes about a minute. A server that runs already is kept unless you
-   choose to switch.
+4. `caminus fit` says how much context fits on your cards, then `caminus start MODEL` starts the model; the first start
+   takes about a minute. A server that runs already is kept unless you choose to switch.
 5. `caminus qwen-code setup --install` installs Qwen Code (once) and points it at your server. Your own Qwen Code
    settings in `~/.qwen` stay untouched. Without Node.js 22 the wizard says what to install and skips this step.
 6. Open Qwen Code now? Enter opens it, talking to your model. Later, `caminus qwen` does the same.

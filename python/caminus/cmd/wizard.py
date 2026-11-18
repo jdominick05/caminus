@@ -8,7 +8,8 @@ nothing here is something the CLI can't do:
   2. choose a model: the catalog, with what runs on these cards (caminus.models.SETUPS) and the model to start with on
      this setup preselected; the cards, drafter and context caminus start will use, on one line
   3. caminus pull MODEL: the size, the folder and its free space first; refused when it won't fit
-  4. caminus start MODEL: a running server is kept unless you switch (caminus stop NAME, then the start)
+  4. caminus start MODEL, after caminus fit (the context that fits, when the files are on disk); a running server is kept
+     unless you switch (caminus stop NAME, then the start)
   5. caminus qwen-code setup --server NAME (--install when Qwen Code is not installed yet)
   6. Open Qwen Code now? caminus qwen --server NAME
 Re-runnable: what is done already (the files on disk, the server running, Qwen Code set up for it) is skipped. It never
@@ -18,7 +19,8 @@ Supported cards: the RX 7900 XTX and XT; another gfx1100 card is allowed as unte
 anything else stops at step 1.
 
 --yes      every question takes its default (a running server is kept); Qwen Code is not opened: its command is printed
---dry-run  runs only the read-only steps (caminus doctor without --gpu, caminus pull --dry-run) and prints the others
+--dry-run  runs only the read-only steps (caminus doctor without --gpu, caminus pull --dry-run, caminus fit) and prints
+           the others
 The log: wizard.log in the state directory (~/.local/state/caminus): the lines shown and each command's exit code (no
 keys; nothing is sent anywhere)."""
 import argparse
@@ -73,6 +75,12 @@ def node_missing():
     if major is not None and major >= NODE_MIN and npm:
         return ''
     return ('no node' if major is None else f'Node.js {major}') + ('' if npm else ', no npm')
+
+
+def kfd_closed(root):
+    """the path of /dev/kfd under root when it exists but this user cannot open it (not in the render group), else None"""
+    kfd = os.path.join(root, 'dev', 'kfd')
+    return kfd if os.path.exists(kfd) and not os.access(kfd, os.R_OK | os.W_OK) else None
 
 
 class Wizard:
@@ -153,8 +161,8 @@ class Wizard:
         if rc != 0:
             raise Stop(1, 'caminus doctor found a FAIL: fix each FAIL line above (docs/troubleshooting.md, "Reading caminus '
                           'doctor"), then run caminus wizard again')
-        kfd = os.path.join(manage.ROOT, 'dev', 'kfd')
-        if os.path.exists(kfd) and not os.access(kfd, os.R_OK | os.W_OK):
+        kfd = kfd_closed(manage.ROOT)
+        if kfd:
             self.say(f'{kfd} is not open to this user: the GPUs need the render and video groups. Run this yourself (the '
                      'wizard never runs sudo), then log out and back in:', 'bad')
             self.say(f'  {GROUPS}', 'cmd')
@@ -195,7 +203,12 @@ class Wizard:
     def choose(self, gs):
         self.step(2, 'choose a model')
         cards = host.ranked(gs)
-        row = models.setup_of(cards)
+        try:                                    # (two-card setups only where the pair rule allows a pair: the link)
+            row = models.setup_of(host.pair(gs))
+        except host.PlacementError as e:
+            row = models.setup_of(cards[:1])
+            if len(cards) >= 2:
+                self.say(f'two-card models: {e}; the setup of the first card applies', 'warn')
         self.say('Your cards: ' + ' + '.join(host.describe(g) for g in cards)
                  + (f" (the setup \"{row['row']}\")" if row else ' (no measured setup: every model is offered, untested here)'))
         names, mark = [], {}
@@ -285,10 +298,22 @@ class Wizard:
             for s in running:
                 if self.run(['stop', s['name']]) != 0:
                     raise Stop(1, f"{s['name']} did not stop (caminus logs {s['name']})")
+        self.fit(m, nc)
         argv = ['start', m.name] + (['--cards', str(nc)] if nc != m.cards else [])
         if self.run(argv) != 0:
             raise Stop(1, f'{m.name} did not start: the lines above say why (caminus logs {m.name})')
         return m.name
+
+    def fit(self, m, nc):
+        """caminus fit on the files start will serve (read-only, the projection start places with): the context that fits
+        now. Informational: start checks again, and nothing is projected before the files are on disk"""
+        e = manage.model_entry(m)
+        if not e['present']:
+            return
+        dk = models.drafter_item(m)
+        dp = e['paths'].get(dk) if dk else None
+        if self.run(['fit', '--model', e['path'], '--cards', str(nc)] + (['--drafter', dp] if dp else []), read_only=True) != 0:
+            self.say('caminus fit could not project it here (what the cards hold now counts); caminus start checks again', 'warn')
 
     def qwen(self, server):
         self.step(5, 'set up Qwen Code')
@@ -328,7 +353,8 @@ class Wizard:
 
     def main(self):
         if self.dry:
-            self.say('Dry run: only caminus doctor and caminus pull --dry-run run; every other command is printed, not run.')
+            self.say('Dry run: only caminus doctor, caminus pull --dry-run and caminus fit run; every other command is printed, '
+                     'not run.')
         try:
             gs = self.check()
             m, nc = self.choose(gs)
@@ -357,6 +383,6 @@ class Wizard:
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='caminus wizard', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--yes', action='store_true', help='take every default (keep a running server; open nothing at the end)')
-    ap.add_argument('--dry-run', action='store_true', help='run only caminus doctor and caminus pull --dry-run; print the rest')
+    ap.add_argument('--dry-run', action='store_true', help='run only caminus doctor, pull --dry-run and fit; print the rest')
     a = ap.parse_args(argv)
     return Wizard(yes=a.yes, dry=a.dry_run).main()

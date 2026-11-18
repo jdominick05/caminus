@@ -41,15 +41,17 @@ W7900, GRE = ('0x7448', 48, 110000), ('0x744c', 16, 110000)
 RX7800 = ('0x747e', 16, 110001)
 
 
-def host_tree(root, cards):
-    """a minimal sysfs: each card's endpoint on a PCIe 4.0 x16 hop, its DRM node, its KFD node (card 1 drives the display)"""
+def host_tree(root, cards, slow=()):
+    """a minimal sysfs: each card's endpoint on a PCIe 4.0 x16 hop (a card index in slow: PCIe 1.0 x1), its DRM node, its
+    KFD node (card 1 drives the display)"""
     if os.path.isdir(root):
         shutil.rmtree(root)
     w(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', '0', 'properties'), 'simd_count 0\n')
     for i, (did, gib, gfx) in enumerate(cards):
         slot, minor, name = f'0000:{3 + 3 * i:02x}:00.0', 128 + i, f'card{i + 1}'
         ep = os.path.join(root, 'sys', 'devices', 'pci0000:00', f'0000:00:01.{i + 1}', slot)
-        for k, v in (('current_link_speed', '16.0 GT/s PCIe'), ('current_link_width', '16'), ('max_link_speed', '16.0 GT/s PCIe'),
+        gts, width = ('2.5', '1') if i in slow else ('16.0', '16')
+        for k, v in (('current_link_speed', f'{gts} GT/s PCIe'), ('current_link_width', width), ('max_link_speed', '16.0 GT/s PCIe'),
                      ('max_link_width', '16'), ('vendor', '0x1002'), ('device', did), ('mem_info_vram_total', str(gib * GIB)),
                      ('mem_info_vram_used', str(100 << 20)), ('boot_vga', '1' if i == 0 else '0'),
                      ('uevent', f'DRIVER=amdgpu\nPCI_SLOT_NAME={slot}')):
@@ -86,7 +88,7 @@ def main():
     os.environ.update(CAMINUS_MODEL_DIR=md, CAMINUS_STATE_DIR=st, CAMINUS_KV_DIR=os.path.join(S, 'kv'),
                       CAMINUS_FLIGHT_DIR=os.path.join(S, 'flight'), CAMINUS_QWEN_HOME=os.path.join(S, 'qwen-home'),
                       CAMINUS_CONFIG=os.path.join(S, 'none.toml'), XDG_DATA_HOME=os.path.join(S, 'data'),
-                      XDG_CONFIG_HOME=os.path.join(S, 'config'), HF_TOKEN='hf_secret_never_logged')
+                      XDG_CONFIG_HOME=os.path.join(S, 'config'), HF_TOKEN='never-logged-sentinel')
     for k in ('CAMINUS_CODER', 'K3_GGUF', 'CAMINUS_DFLASH', 'CAMINUS_MODEL_SEARCH', 'NO_COLOR'):
         os.environ.pop(k, None)
     from caminus import models
@@ -105,6 +107,7 @@ def main():
         TimeoutExpired = subprocess.TimeoutExpired
     manage.subprocess = qwen_code.subprocess = NoLaunch
     download.fetch = refuse('a download')
+    real_run_cmd = wizard.run_cmd
     os.execve = refuse('an exec')
     manage.unmanaged_servers = lambda proc='/proc': []     # (no /proc scan, no request to a live server on this machine)
     doctor.kfd_procs = lambda: []
@@ -112,8 +115,8 @@ def main():
     qwen_code.binary = lambda: None
     wizard.node_missing = lambda: ''
 
-    def go(cards, tag, yes=True, dry=True, answers=(), rc=None):
-        manage.ROOT = host_tree(os.path.join(S, 'hosts', tag), cards)
+    def go(cards, tag, yes=True, dry=True, answers=(), rc=None, slow=()):
+        manage.ROOT = host_tree(os.path.join(S, 'hosts', tag), cards, slow)
         runs = Runs(rc)
         wizard.run_cmd = runs
         it = iter(answers)
@@ -162,6 +165,17 @@ def main():
     check(code == 1 and 'no measured setup' in out and 'without --yes and choose one' in out,
           'a 16 GB card (no setup row): every model offered as untested; --yes stops instead of guessing')
 
+    code, calls, out = go([XTX, XT], 'slow', slow=(1,))
+    check(code == 0 and '* swift-1.5' in out and 'two-card models: ' in out and 'PCIe 1.0 x1' in out
+          and 'does not run on these cards' in out and calls[-1] == ['pull', 'swift-1.5', '--dry-run'],
+          'XTX + XT with the XT on a PCIe 1.0 x1 link: no pair, so the one-XTX setup applies (Swift 1.5), said why')
+    kfd0 = wizard.kfd_closed
+    wizard.kfd_closed = lambda root: '/dev/kfd'
+    code, calls, out = go([XTX], 'kfd', dry=False)
+    check(code == 1 and calls == [['doctor']] and wizard.GROUPS in out and 'Step 2/6' not in out,
+          '/dev/kfd closed to the user: the render-group command printed (not run), the wizard stops')
+    wizard.kfd_closed = kfd0
+
     # ---- the real flow (the seam records, nothing runs): XTX + XT, defaults taken, Qwen Code not opened
     code, calls, out = go([XTX, XT], 'run', yes=False, dry=False, answers=['', 'n'])
     check(code == 0 and calls == [['doctor'], ['doctor', '--gpu'], ['pull', 'coder'], ['start', 'coder'],
@@ -200,7 +214,14 @@ def main():
         with open(p, 'wb') as f:
             f.truncate(it.size)
     code, calls, out = go([XT], 'present', dry=False)
-    check(code == 0 and not any(c[0] == 'pull' for c in calls) and 'on disk already' in out, 'files on disk: no pull (re-runnable)')
+    tc = os.path.join(md, models.local_rel(models.BY_KEY['thinkingcap']))
+    dfl = os.path.join(md, models.local_rel(models.BY_KEY['dflash2-27b']))
+    check(code == 0 and not any(c[0] == 'pull' for c in calls) and 'on disk already' in out
+          and calls[2:4] == [['fit', '--model', tc, '--cards', '1', '--drafter', dfl], ['start', 'thinkingcap']],
+          f'files on disk: no pull (re-runnable); caminus fit on the files start serves, then the start ({calls[2:4]})')
+    code, calls, out = go([XT], 'fit-fail', dry=False, rc={'fit': 1})
+    check(code == 0 and ['start', 'thinkingcap'] in calls and 'caminus start checks again' in out,
+          'a caminus fit that cannot project is said and does not stop the start (start checks again)')
 
     # a running server: kept unless the user switches (manage.alive: the guard pid 4242 counts as alive)
     os.makedirs(os.path.join(st, 'servers', 'thinkingcap'), exist_ok=True)
@@ -240,8 +261,12 @@ def main():
 
     # ---- the log: the lines and exit codes, never a key
     log = open(os.path.join(st, 'wizard.log')).read()
-    check('$ caminus doctor' in log and '-> exit 0' in log and 'hf_secret_never_logged' not in log and '\033[' not in log,
+    check('$ caminus doctor' in log and '-> exit 0' in log and 'never-logged-sentinel' not in log and '\033[' not in log,
           'the log: commands and exit codes, no colour codes, no token')
+
+    # ---- the real seam (caminus.__main__.dispatch): a read-only command runs, a bad one returns its error code
+    check(real_run_cmd(['pull', 'thinkingcap', '--dry-run']) == 0 and real_run_cmd(['pull', 'no-such-model']) == 2,
+          'run_cmd: caminus pull --dry-run through dispatch exits 0; an unknown model, argparse\'s 2')
 
     # ---- the CLI knows the command (no torch import for its help)
     r = subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); from caminus.__main__ import main;'
