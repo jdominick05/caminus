@@ -4,6 +4,8 @@ from inside its own user; `caminus ember ctx` prints it from the harness side.""
 import json
 import urllib.request
 
+from .resident.catalog import props_window
+
 BASE_PORTS = range(8092, 8102)
 
 
@@ -16,8 +18,5 @@ def servers(ports=BASE_PORTS, opener=urllib.request.urlopen):
                 p = json.load(r)
         except Exception:
             continue
-        n_ctx = p.get('n_ctx')
-        if n_ctx is None:
-            n_ctx = (p.get('default_generation_settings') or {}).get('n_ctx')
-        out.append({'port': port, 'model': p.get('model_alias') or p.get('model'), 'n_ctx': n_ctx})
+        out.append({'port': port, 'model': p.get('model_alias') or p.get('model'), 'n_ctx': props_window(p)})
     return out

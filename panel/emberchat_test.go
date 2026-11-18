@@ -661,6 +661,32 @@ func TestContextLevelAndTokenCounts(t *testing.T) {
 	}
 }
 
+// A brain whose server reports no window (status context null): the footer shows the tokens in use alone with an
+// empty bar, never "31K/0", and the context tab says the window is unknown instead of counting tokens against 0.
+func TestAnUnknownWindowShowsTheTokensInUseWithoutSlashZero(t *testing.T) {
+	m := chatFixture(t)
+	m.width = 160
+	m.resident.Context, m.resident.ContextUsed = 0, 31_000
+	foot := ansi.Strip(m.chatFoot(m.width))
+	if !strings.Contains(foot, "31K") || strings.Contains(foot, "31K/") || strings.Contains(foot, "/0") {
+		t.Fatalf("an unknown window shows 31K alone:\n%s", foot)
+	}
+	if !strings.Contains(foot, "31K "+strings.Repeat(g.barEmpty, 8)) {
+		t.Fatalf("and an empty bar beside it:\n%s", foot)
+	}
+	pane := ansi.Strip(m.contextPane())
+	if !strings.Contains(pane, "unknown") || !strings.Contains(pane, "31K, measured") || strings.Contains(pane, "(0)") {
+		t.Fatalf("the context tab names the window unknown and counts nothing against 0:\n%s", pane)
+	}
+	if pane := ansi.Strip(m.residentSettingsPane()); !strings.Contains(pane, "unknown") || strings.Contains(pane, "0 tokens") {
+		t.Fatalf("the settings tab names the window unknown:\n%s", pane)
+	}
+	m.resident.Context = 1_048_574
+	if foot := ansi.Strip(m.chatFoot(m.width)); !strings.Contains(foot, "31K/1M") {
+		t.Fatalf("a known window is shown as before:\n%s", foot)
+	}
+}
+
 // The measured bar lands in the live footer, warning color included, without
 // pushing the frame past its width.
 func TestChatFooterCarriesTheMeasuredContextBar(t *testing.T) {
@@ -1459,11 +1485,6 @@ func TestComposerExtras(t *testing.T) {
 	}
 	if _, _, ok := m.composerKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl}); ok {
 		t.Fatal("Ctrl+E alone still folds the cards (not the editor)")
-	}
-	// !cmd: the output lands in the draft, fenced
-	m = m.bangDone(bangDoneMsg{cmd: "df -h ~", output: "/dev/x 100G 40G"})
-	if v := m.chat.compose.Value(); !strings.Contains(v, "```\n$ df -h ~\n/dev/x 100G 40G\n```") {
-		t.Fatalf("the command and its output are in the draft: %q", v)
 	}
 	// Ctrl+O: every line of the open cards
 	next, _, _ = m.composerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
@@ -3053,14 +3074,28 @@ func TestBangBangIsYourOwnShellInItsOwnColour(t *testing.T) {
 	if m.chat.shell || m.chat.hostShell {
 		t.Fatal("Backspace on the empty line leaves")
 	}
-	msg := runHostBang("echo from-the-host")().(bangDoneMsg)
+	for _, k := range []string{"!", "!"} {
+		next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: k})
+		m = next.(emberModel)
+	}
+	m.chat.compose.SetValue("echo from-the-host")
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	msg := cmd().(bangDoneMsg)
 	if msg.err != "" || msg.output != "from-the-host" || !msg.host {
 		t.Fatalf("it runs in your shell: %+v", msg)
 	}
 	m = m.bangDone(msg)
-	if !strings.Contains(m.chat.compose.Value(), "(my shell) $ echo from-the-host") {
-		t.Fatalf("the draft says the output came from your shell:\n%s", m.chat.compose.Value())
+	card := ansi.Strip(m.chat.content)
+	if m.chat.compose.Value() != "" || !strings.Contains(card, "!! my shell  $ echo from-the-host") || !strings.Contains(card, "│ from-the-host") {
+		t.Fatalf("the command and its output are a card in the chat marked as your shell, the composer empty (%q):\n%s",
+			m.chat.compose.Value(), card)
 	}
+	if hostShellStyle().Render("!! my shell") == emberShell.Render("!! my shell") ||
+		!strings.Contains(m.chat.content, hostShellStyle().Render("!! my shell")) {
+		t.Fatal("the card is in the host shell's copper, apart from the agent shell's purple")
+	}
+	t.Logf("after !! echo from-the-host:\n%s", ansi.Strip(m.render()))
 }
 
 func TestTheStatusLineShowsWhereTheAgentWorks(t *testing.T) {

@@ -867,7 +867,10 @@ def main(argv=None,stdin=None):
             today=(spend.get('days') or {}).get(_dt.date.today().isoformat()) or {}
             spend_today=today.get('usd',0.0)
             cache_hit=(today.get('cache_read',0)/today['in_tok']) if today.get('in_tok') else None
-            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context'),
+            # a local brain stored without a window (a switcher session, init without --context) shows its server's
+            # n_ctx; None only when nobody can say, and the panel then shows the tokens in use alone
+            from . import catalog
+            emit(dict(name=a.name,home=str(home),model=cfg['model'],context=cfg.get('context') or catalog.local_window(cfg),
                       context_used=measured.get('tokens') if isinstance(measured,dict) else None,
                       tok_per_s=speed.get('tps'),prompt_tok_per_s=speed.get('prompt_tps'),
                       # engine: the Caminus server's own numbers; estimate: measured here (a record from before

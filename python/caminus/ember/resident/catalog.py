@@ -174,7 +174,7 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
             props = _get(_root(base) + '/props', headers, opener)
         except (OSError, ValueError, urllib.error.HTTPError):
             props = {}
-        return local_entries(data, name, props.get('n_ctx'), bool((props.get('modalities') or {}).get('vision')))
+        return local_entries(data, name, props_window(props), bool((props.get('modalities') or {}).get('vision')))
     return openai_entries(data, name)
 
 
@@ -210,6 +210,39 @@ def caminus_props(endpoint, opener=urllib.request.urlopen, timeout=3):
     when the server cannot be reached or answers garbage, so a caller can tell "not Caminus" from "not asked"."""
     props = _get(_root(endpoint) + '/props', {}, opener, timeout, LOCAL_READ)
     return props if isinstance(props, dict) and props.get('engine') == 'caminus' else None
+
+
+def props_window(props):
+    """The context window a server's /props reports: n_ctx (caminus serve), else default_generation_settings.n_ctx
+    (llama-server keeps it only there); None unless it is an integer of at least 1024. The one reading of that field:
+    the catalog, local_window and Model.context_size use it."""
+    if not isinstance(props, dict):
+        return None
+    for n in (props.get('n_ctx'), (props.get('default_generation_settings') or {}).get('n_ctx')):
+        if isinstance(n, int) and not isinstance(n, bool) and n >= 1024:
+            return n
+    return None
+
+
+def local_window(config, opener=urllib.request.urlopen, timeout=2):
+    """A local brain's window as its server reports it now (props_window), for a config that stores none: a session
+    made by the session switcher (create --model drops the paid brain's window) or by init without --context. None for
+    a brain that is not a local candidate, a server that cannot be reached, or one that is not Caminus (asked unless
+    provider_kind is local: the key relay listens on loopback too). A Caminus server added as a plain openai provider
+    counts when its /props names the engine: the runtime reads its window there all the same. Not stored: the daemon
+    asks the server at each start (Model.context_size) and keeps that figure until its brain changes."""
+    if config.get('provider_kind') == 'openai':
+        config = dict(config, provider_kind=None)
+    if not local_candidate(config):
+        return None
+    try:
+        if config.get('provider_kind') == 'local':
+            props = _get(_root(config['endpoint']) + '/props', {}, opener, timeout, LOCAL_READ)
+        else:
+            props = caminus_props(config['endpoint'], opener, timeout)
+    except (OSError, ValueError, urllib.error.HTTPError):
+        return None
+    return props_window(props)
 
 
 STATUS_VERSION = 1   # the /caminus/status layout read here (caminus serve's stats.STATUS_VERSION; the panel reads the same)

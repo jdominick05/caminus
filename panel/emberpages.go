@@ -131,18 +131,31 @@ func (m emberModel) contextPane() string {
 		}
 	}
 	add("brain", residentText(r.Model))
-	add("window", fmt.Sprintf("%s tokens", short(r.Context)))
-	if r.ContextUsed > 0 && r.Context > 0 {
-		add("in use", fmt.Sprintf("%s (%s), measured at the last turn", short(r.ContextUsed), pct(float64(r.ContextUsed)/float64(r.Context))))
+	// (window 0: the brain's server reports none right now; the fractions below stay, with no token counts to show)
+	of := func(f float64) string {
+		if r.Context > 0 {
+			return fmt.Sprintf("%s (%s)", pct(f), short(int(f*float64(r.Context))))
+		}
+		return pct(f)
+	}
+	if r.Context > 0 {
+		add("window", fmt.Sprintf("%s tokens", short(r.Context)))
 	} else {
+		add("window", "unknown: the brain's server reports none right now")
+	}
+	switch {
+	case r.ContextUsed > 0 && r.Context > 0:
+		add("in use", fmt.Sprintf("%s (%s), measured at the last turn", short(r.ContextUsed), pct(float64(r.ContextUsed)/float64(r.Context))))
+	case r.ContextUsed > 0:
+		add("in use", fmt.Sprintf("%s, measured at the last turn", short(r.ContextUsed)))
+	default:
 		add("in use", "not measured yet")
 	}
 	if r.CompactThreshold > 0 {
-		add("compacts at", fmt.Sprintf("%s (%s)", pct(r.CompactThreshold), short(int(r.CompactThreshold*float64(r.Context)))))
+		add("compacts at", of(r.CompactThreshold))
 	}
 	if r.CompactTarget > 0 {
-		add("down to", fmt.Sprintf("%s (%s); old tool output is trimmed first, a summary only if needed", pct(r.CompactTarget),
-			short(int(r.CompactTarget*float64(r.Context)))))
+		add("down to", of(r.CompactTarget)+"; old tool output is trimmed first, a summary only if needed")
 	}
 	if r.SpendToday > 0 {
 		add("spent today", fmt.Sprintf("$%.4f", r.SpendToday))

@@ -528,14 +528,42 @@ class Resident(unittest.TestCase):
             self.assertEqual((places[c],places[a],places[b]),(1,2,3))
         finally:rt.mail.close();rt.store.close()
 
-    def test_todo_rejects_two_in_progress_and_bad_states(self):
+    def test_todo_maps_trained_shapes_and_rejects_bad_states(self):
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Plan.')
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='in_progress'),dict(text='b',state='in_progress')],[])
             with self.assertRaises(ValueError):rt._todo(gid,[dict(text='a',state='later')],[])
-            # a wrong key is refused by name ("status" was taken and every item showed as pending)
-            with self.assertRaisesRegex(ValueError,"'status'"):rt._todo(gid,[dict(text='a',status='done')],[])
+            # the shapes models are trained on map onto text / state ("status" was once taken and every item showed as
+            # pending: a mapped status must keep its state): Qwen Code's todo_write, then Claude Code's TodoWrite
+            r=rt._todo(gid,[dict(id='1',content='read the code',status='completed'),dict(id='2',content='fix it',status='in_progress'),
+                            dict(id='3',content='test it',status='pending',priority='high')],[])
+            self.assertEqual(rt.store.todo(gid)['items'],[dict(text='read the code',state='done'),dict(text='fix it',state='in_progress'),
+                                                          dict(text='test it',state='pending')])
+            self.assertEqual((r['left'],r['note']),(2,'ignored unknown field(s) id, priority: a todo item takes text and state'))
+            r=rt._todo(gid,[dict(content='read',status='completed',activeForm='Reading'),dict(content='fix',status='in-progress',activeForm='Fixing'),
+                            dict(text='ship',status='done')],[])
+            self.assertEqual([it['state'] for it in rt.store.todo(gid)['items']],['done','in_progress','done'])
+            self.assertEqual((r['left'],r['note']),(1,'ignored unknown field(s) activeForm: a todo item takes text and state'))
+            self.assertNotIn('note',rt._todo(gid,[dict(text='a',state='done')],[]))
+            # an item with both forms keeps its own key, and the note says why the other went (not "unknown")
+            r=rt._todo(gid,[dict(text='keep me',content='a copy',state='done')],[])
+            self.assertEqual((rt.store.todo(gid)['items'],r['note']),([dict(text='keep me',state='done')],'ignored content: the item also had text'))
+            # a whole Qwen Code todo_write call, as the model sends it: the list as "todos", through the dispatcher
+            rt.store.model_reply(gid,call('todo',dict(todos=[dict(id='1',content='find the bug',status='completed'),
+                                                            dict(id='2',content='fix the bug',status='in_progress'),
+                                                            dict(id='3',content='run the tests',status='pending')])))
+            rt._action(rt.store.actions(gid)[0])
+            res=[e['data']['result'] for e in rt.store.events() if e['kind']=='tool_result' and e['data']['name']=='todo'][-1]
+            self.assertNotIn('error',res)
+            self.assertEqual([(it['text'],it['state']) for it in rt.store.todo(gid)['items']],
+                             [('find the bug','done'),('fix the bug','in_progress'),('run the tests','pending')])
+            self.assertEqual((res['left'],res['note']),(2,'ignored unknown field(s) id: a todo item takes text and state · took todos as items'))
+            # real errors are still refused: an unknown state (mapped or not), a field nothing maps, a missing text
+            with self.assertRaisesRegex(ValueError,"'cancelled'"):rt._todo(gid,[dict(content='a',status='cancelled')],[])
+            with self.assertRaisesRegex(ValueError,"'title'"):rt._todo(gid,[dict(title='a',state='done')],[])
+            with self.assertRaisesRegex(ValueError,'needs its text'):rt._todo(gid,[dict(id='1',status='done')],[])
+            with self.assertRaisesRegex(ValueError,'at most 30'):rt._todo(gid,[dict(content=f'step {i}',status='pending') for i in range(31)],[])
             # an edit whose old text is absent never claims it was applied because a short new text occurs somewhere
             from caminus.ember.resident import files
             (self.home/'f.txt').write_text('x = 1\n')
@@ -2479,6 +2507,59 @@ for line in sys.stdin:
         self.assertEqual(made.returncode,0,made.stdout+made.stderr)
         got=json.loads((self.home.parent/down/'config.json').read_text())
         self.assertEqual((got['model'],got.get('model_variants')),('coder',None))
+
+    def test_a_local_session_without_a_window_reports_its_servers_n_ctx(self):
+        # the owner's footer read "31K/0": a session on the local Coder (create --model drops the paid sibling's window,
+        # init without --context stores none) had status context null while the server's /props said n_ctx 1048574
+        self.serve_ids(self.CODER_IDS)
+        Endpoint.props[self.key].update(n_ctx=1048574,default_generation_settings=dict(n_ctx=1048574))
+        self.assertIsNone(json.loads((self.home/'config.json').read_text()).get('context'),'init without --context')
+        self.assertEqual(self.cmd('status')['context'],1048574)
+        # the switcher's path: a session made from a paid sibling (a 1M window of its own) with a local brain
+        paid='paid-'+uuid.uuid4().hex[:8]
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        made=subprocess.run(base+['create',paid,'--from',self.home.name,'--home',str(self.home.parent/paid),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        cfg=json.loads((self.home.parent/paid/'config.json').read_text())
+        cfg.update(model='deepseek-v4',relay=True,context=1048576,provider='deepinfra')
+        (self.home.parent/paid/'config.json').write_text(json.dumps(cfg))
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'
+        new='local-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        made=subprocess.run(base+['create',new,'--from',paid,'--model','coder','--endpoint',url,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        self.assertNotIn('context',json.loads((home/'config.json').read_text()))
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],1048574,'the server\'s window, not the paid one\'s')
+        self.assertEqual(self.cmd('status',['--home',str(self.home.parent/paid)])['context'],1048576,'a stored window is kept')
+        # not stored: status reports a server restarted with another window as it is now (a daemon reads it again at
+        # its next start)
+        Endpoint.props[self.key].update(n_ctx=262144)
+        self.assertEqual(self.cmd('status',['--home',str(home)])['context'],262144)
+        self.assertNotIn('context',json.loads((home/'config.json').read_text()))
+        # the runtime measures compaction against the same window: a turn records it in context.json, never 0 or None
+        self.replies(call('finish',dict(summary='ok')))
+        self.assertEqual(self.cmd('once',['--goal','Say ok.'])['state'],'completed')
+        note=json.loads((self.home/'context.json').read_text())
+        self.assertEqual(note['size'],262144);self.assertGreater(note['tokens'],0)
+        # llama-server keeps n_ctx under default_generation_settings only (a provider_kind local brain asks any engine)
+        conf=json.loads((self.home/'config.json').read_text());conf['provider_kind']='local'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(default_generation_settings=dict(n_ctx=32768))
+        self.assertEqual(self.cmd('status')['context'],32768)
+        # a Caminus server added as a plain openai provider: its /props names the engine, so it counts
+        conf['provider_kind']='openai';(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=1048574)
+        self.assertEqual(self.cmd('status')['context'],1048574)
+        # nobody can say (a server that is down; a loopback relay whose /props names no engine): null, never 0
+        Endpoint.props[self.key]=dict(n_ctx=65536)
+        self.assertIsNone(self.cmd('status')['context'])
+        conf.pop('provider_kind');(self.home/'config.json').write_text(json.dumps(conf))
+        self.assertIsNone(self.cmd('status')['context'])
+        conf.update(relay=True);(self.home/'config.json').write_text(json.dumps(conf))
+        Endpoint.props[self.key]=dict(engine='caminus',n_ctx=1048574)
+        self.assertIsNone(self.cmd('status')['context'],'a relayed (paid) brain is never asked')
+        conf.pop('relay')
+        conf['endpoint']='http://127.0.0.1:9/v1';(self.home/'config.json').write_text(json.dumps(conf))
+        self.assertIsNone(self.cmd('status')['context'])
 
     def test_a_paid_brain_through_the_relay_on_loopback_is_left_alone(self):
         # init --endpoint http://127.0.0.1:8766/v1/openai writes no provider_kind and no relay: the relay is not a
