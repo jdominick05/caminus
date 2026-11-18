@@ -66,12 +66,13 @@ Ember has been tested on one machine, Ubuntu with systemd. What you can run into
   why; nothing runs outside a box instead.
 - **Sandbox memory.** Each box may use 4 GB of memory, whatever is free (`sandbox.memory_mb` in the resident's
   `config.json`). Several boxes beside a large local model can run the machine out of memory; lower it on a machine with less RAM.
-- **Closing a session keeps it, with no restore yet.** Closing a session in the switcher (`x x`) stops its service and
-  moves its home (config, memory, history, files) to `~/.local/share/caminus/removed-sessions` in the agent's account,
-  where it is kept. There is no restore command yet; one is planned.
-- **A new session's `/model` can be empty.** A session made in the switcher lists no models until you add its
-  providers: `caminus ember agent provider NAME add ...` ([Paid brains](#paid-brains); `--kind local` for a local
-  server). A fix is planned.
+- **Closing a session keeps it.** Closing a session in the switcher (`x x`) stops its service and moves its home
+  (config, memory, history, files) to `~/.local/share/caminus/removed-sessions` in the agent's account. Nothing is
+  deleted: the switcher's `r` or `caminus ember agent restore [NAME]` brings it back
+  ([the switcher](resident-agent.md)).
+- **A new session offers only what it inherits.** Its `/model` lists the local Caminus server it runs on and the
+  providers of the session it was opened from. Any other provider needs `caminus ember agent provider NAME add ...`
+  ([Paid brains](#paid-brains)).
 - **The advisor needs an Anthropic relay.** It speaks only the Anthropic Messages API ([Paid brains](#paid-brains),
   the advisor). It cannot use an OpenCode Go plan yet: its calls do not carry the session id the plan requires. A fix is
   planned.
