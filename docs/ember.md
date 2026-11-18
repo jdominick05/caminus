@@ -56,6 +56,13 @@ either faster.
   unknown repository, an install script) goes to its `sandbox` tool, not its terminal: a bubblewrap box that sees none
   of its home, no GPU and no network unless the call names hosts, with time, memory and process limits. Its prompt
   asks for this; nothing forces it. What the box sees: [the tool reference](resident-agent.md#tools).
+- **A browser in a box.** Its `browser` tool drives a headless Chrome in the same kind of box, with a fresh profile
+  per goal and no logins; public sites are open to it and logged, your LAN and this machine only when a call names
+  the address ([the tool reference](resident-agent.md#tools)). It needs Google Chrome or a Chromium that is not a
+  snap (bubblewrap cannot run snaps: Ubuntu's chromium and Firefox are snaps). Install Google Chrome's `.deb` from
+  google.com/chrome (`sudo apt install ./google-chrome-stable_current_amd64.deb`); without one the tool is not
+  offered. Its memory is bounded through a user systemd scope; an account without one runs the browser with no
+  memory limit.
 - **Root only with your approval.** The agent asks through `ask_root` with the exact command, the goal it unblocks,
   the expected effect and how to undo it. You approve, edit or deny it in the panel; approved commands run under your
   sudo, never the agent's. A grant (`g g`) lets that exact command repeat for the rest of its goal, at most 12 hours.
@@ -202,6 +209,7 @@ key of that file.
 | Fallback brain | takes over after 60 s down; $1 a day | a second brain while the first is unreachable | `caminus ember agent fallback NAME --budget-usd N --down-seconds N` |
 | A request's wait | 15 min | a question then takes the advisor's pick or its recommended answer, a root request or permission is a no; in the prompt No is preselected for root and GitHub hand-offs | `question_timeout` (seconds) |
 | A question's wait while you are away | until 15 min after you come back, at most 8 h | away = no key or mouse in the chat for 5 min; the prompt then says "waits while you're away"; root requests keep their 15 min ([the rule](specs/spec-ember.md#9-questions-steering-context)) | `question_away_max` (seconds) |
+| The browser's idle close | 30 min | a browser nobody called for that long closes itself (a paused goal keeps its box, not a running Chrome); the next `open` starts a new one and says so | `sandbox.browser_idle_s` (seconds; `0`: never, it stays open until the goal ends) |
 | Effort | the lab's recommendation for the model (below) | how hard the model thinks: none, low, medium, high, xhigh, max, each run as the model's nearest level | `/effort LEVEL`, `/effort default` |
 | Generation | per model: the lab's settings (below) | sampling, the reply limit and thinking | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `max_tokens` |
 | Images | what the catalog says the model takes (Anthropic `image_input`, DeepInfra's `vision` tag, Mistral's `vision`, a local server's `/props` `modalities.vision`); unknown is no | `read` of a PNG, JPEG, GIF or WebP file (up to 3000 px a side and 3.75 MB, else refused with how to shrink it) sends the image with the result; without vision the eyes model describes it once you turn eyes on (Eyes, above), else the agent is told it can't see it, its size and format, and which tools could describe it. Each request reads the file again: one changed since is not sent. The image counts in the context at about one token per 28 px square, at most 4,784. The finish judge gets the goal's newest four images the agent saw when its brain sees; otherwise it is told the agent's account of them is an observation. An image the eyes described is listed with the eyes model's name: the description is that model's observation. One read by a brain without vision and without eyes is listed as unseen: what the agent says it shows is not evidence | `agent init` (asking a local server or relay) and `/model` set `vision`; a new session copies it; a fallback brain: `fallback.vision` |
