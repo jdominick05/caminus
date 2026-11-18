@@ -18,6 +18,16 @@ import time
 from .store import atomic_json
 
 LOG_LIMIT = 16 * 1024 * 1024
+TIME_MAX = 3600          # a job's timeout: 1 s to an hour (a longer job runs without one and is polled)
+
+
+def check_timeout(t):
+    """A job's time bound in seconds, checked: past it the worker kills the job (terminal's process group, or the
+    whole box) and the state says limit_hit 'time'. yield_ms is something else: how long one call waits for output."""
+    if isinstance(t, bool) or not isinstance(t, int) or not 1 <= t <= TIME_MAX:
+        raise ValueError(f'timeout is 1 to {TIME_MAX} seconds (it ends the command; yield_ms only bounds how long '
+                         'one call waits for output)')
+    return t
 
 
 def alive(pid):
@@ -52,7 +62,26 @@ def worker(job):
         req = json.loads((job / 'request.json').read_text())
         state = dict(phase='starting', worker=os.getpid(), started=time.time(), cwd=req['cwd'])
         atomic_json(job / 'state.json', state)
+        box = None
+        if req.get('box'):
+            # a sandbox call (sandbox.py): the same job, its command inside a bubblewrap box with limits
+            from .sandbox import Supervisor
+            box = Supervisor(job, req['box'], req['command'])
+            try:
+                argv = box.prepare()
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                box.finish()
+                state.update(phase='finished', exit_code=126, error=f'the box did not start: {e}', ended=time.time())
+                atomic_json(job / 'state.json', state)
+                return 0
         pid, fd = pty.fork()
+        if pid == 0 and box is not None:
+            try:
+                box.child()
+                os.execv(argv[0], argv) if argv[0].startswith('/') else os.execvp(argv[0], argv)
+            except BaseException as e:
+                os.write(2, str(e).encode())
+                os._exit(126)
         if pid == 0:
             try:
                 os.chdir(req['cwd'])
@@ -63,6 +92,7 @@ def worker(job):
                 os._exit(127)
         state.update(phase='running', pid=pid)
         atomic_json(job / 'state.json', state)
+        limit_s, t0, timed_out = req.get('timeout'), time.monotonic(), False
         os.set_blocking(fd, False)
         (job / 'control').mkdir(exist_ok=True)
         (job / 'ack').mkdir(exist_ok=True)
@@ -101,6 +131,18 @@ def worker(job):
                             truncated |= len(data) > take
                         except OSError:
                             pass
+                    if limit_s and not timed_out and time.monotonic() - t0 > limit_s:
+                        timed_out = True           # over its time: the job goes (a box whole, else its process group)
+                        if box is not None:
+                            box.hit = 'time'
+                            box.kill(pid)
+                        else:
+                            try:
+                                os.killpg(pid, signal.SIGKILL)
+                            except OSError:
+                                pass
+                    if box is not None and box.check(pid):
+                        box.kill(pid)              # over a limit: the whole box goes
                     done, code = os.waitpid(pid, os.WNOHANG)
                     if done:
                         exit_status = os.waitstatus_to_exitcode(code)
@@ -117,6 +159,10 @@ def worker(job):
                         break
         finally:
             os.close(fd)
+            if box is not None:
+                state.update(box.finish())
+            elif timed_out:
+                state['limit_hit'] = 'time'
             if exit_status is None:
                 state.update(phase='interrupted', error='worker interrupted; command effects may already exist')
             else:
@@ -259,24 +305,35 @@ class Terminal:
                     pass
         return hit
 
-    def call(self, action, args):
+    def call(self, action, args, box=None):
+        """A terminal call; with box (sandbox.py) a sandbox call: a new command gets box (its request, from
+        sandbox.spec), a poll or input names a session that must be a box ({} is enough)."""
+        tool = 'terminal' if box is None else 'sandbox'
         session = args.get('session') or action
         if len(session) != 32 or any(c not in '0123456789abcdef' for c in session):
-            raise ValueError('invalid terminal session')
+            raise ValueError(f'invalid {tool} session')
         job = self.jobs / session
         if args.get('command'):
             if args.get('session'):
-                raise ValueError('use stdin to send commands to an existing terminal; to wait for more output from a running session, call terminal with only session (no command) and optionally yield_ms (default 1000, max 10000)')
-            cwd = Path(args.get('cwd') or self.home).expanduser().resolve()
+                raise ValueError(f'use stdin to send commands to an existing {tool} session; to wait for more output from a running session, call {tool} with only session (no command) and optionally yield_ms (default 1000, max 10000)')
+            cwd = Path(box['box'] if box else args.get('cwd') or self.home).expanduser().resolve()
             if not cwd.is_dir():
                 raise ValueError('cwd is not a directory')
             job.mkdir(exist_ok=True)
+            timeout = box['limits']['time_s'] if box else args.get('timeout')
+            if timeout is not None:
+                timeout = check_timeout(timeout)
             if not (job / 'request.json').exists():
-                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd)))
+                atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), timeout=timeout,
+                                                       **({'box': box} if box else {})))
             if not read_state(job):
                 self.launch(job)
         elif not job.is_dir():
-            raise ValueError('unknown terminal session')
+            raise ValueError(f'unknown {tool} session')
+        boxed = 'box' in json.loads((job / 'request.json').read_text())
+        if boxed != (box is not None):
+            raise ValueError('that session is a sandbox: call sandbox with it' if boxed else
+                             'that session is a terminal, not a sandbox: call terminal with it')
         if 'stdin' in args or args.get('signal'):
             if args.get('signal') not in (None, 'INT', 'TERM', 'KILL', 'HUP'):
                 raise ValueError('signal must be INT, TERM, KILL or HUP')
@@ -319,5 +376,10 @@ class Terminal:
         # A PTY ends lines with \r\n. Handing that to the model put a stray \r at the end of every line, so a patch
         # built from what it read did not match the file (the local Coder lost a patch to it). Offsets stay in raw bytes.
         text = data.decode(errors='replace').replace('\r\n', '\n')
-        return dict(session=session, **state, output=text, next_offset=next_offset,
-                    no_new_output=not data, running=state.get('phase') not in ('finished', 'interrupted'))
+        out = dict(session=session, **state, output=text, next_offset=next_offset,
+                   no_new_output=not data, running=state.get('phase') not in ('finished', 'interrupted'))
+        if boxed:
+            from .sandbox import view
+            out.update(view(job, state))
+            out.pop('enforced', None)
+        return out

@@ -7,9 +7,9 @@ signed record of who uploaded each file (a PEP 740 attestation). This page shows
 release yourself, so you don't have to take a download on trust.
 
 **Which files this covers.** Releases after 0.2.1 (0.1.0, 0.2.0 and 0.2.1 were built before this and carry no
-provenance). Nightly builds carry provenance once their workflow can run, after the next merge of `testing` into
-`main`; until then a nightly's files are checked only against the hashes in its tag. Replace `X.Y.Z` below with the
-version you want.
+provenance). A nightly carries provenance only when its `nightly.yml` run passed; a nightly without one (every nightly
+made before `nightly.yml` reached `main`) can be checked only against the hashes in its tag. Replace `X.Y.Z` below with
+the version you want.
 
 ## A file from a GitHub Release
 

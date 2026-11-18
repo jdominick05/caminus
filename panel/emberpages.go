@@ -147,8 +147,8 @@ func (m emberModel) contextPane() string {
 	if r.SpendToday > 0 {
 		add("spent today", fmt.Sprintf("$%.4f", r.SpendToday))
 	}
-	if r.TokPerS > 0 {
-		add("speed", fmt.Sprintf("%.0f tok/s (last reply)", r.TokPerS))
+	if sp := r.speed().long(); sp != "" {
+		add("speed", sp)
 	}
 	return strings.Join(lines, "\n")
 }
