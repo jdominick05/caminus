@@ -8,6 +8,7 @@ against Qwen Code's own thresholds, the batch matched by its call ids, silence i
 off; setup's settings merge (once, other hooks kept, the off choice remembered); the package data. Ends RESULT PASS / FAIL."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -79,8 +80,29 @@ class Hook(unittest.TestCase):
         self.assertEqual(o['hookSpecificOutput']['hookEventName'], 'PostToolBatch')
         used = 102_000 + cn.est_tokens(json.dumps([{'functionResponse': {'id': 'call_a', 'name': 'run_shell_command',
                                                                             'response': {'output': 'x' * 3000}}}]))
-        self.assertEqual(o['hookSpecificOutput']['additionalContext'],
-                         f'[context: ~{round(used / 1000)}K of 262K tokens used; ~{round((222_700 - used) / 1000)}K left before automatic compaction]')
+        self.assertRegex(o['hookSpecificOutput']['additionalContext'],
+                         r'^\[time: [A-Z][a-z]{2} \d{4}-\d\d-\d\d \d\d:\d\d \S+; ' +
+                         re.escape(f'context: ~{round(used / 1000)}K of 262K tokens used; ~{round((222_700 - used) / 1000)}K '
+                                   'left before automatic compaction]') + '$')
+
+    def test_the_line_carries_the_local_time(self):
+        """the local time on the same line (written once into the recorded tool result, so the cache keeps it):
+        weekday, date, minute and zone, from the hook's clock in its TZ"""
+        write(self.t, [assistant('call_a', 10_000, 0, 262_000)])
+        before = time.time()
+        rc, out, err = run_hook(batch(self.t, 'call_a'), env={'TZ': 'EST5EDT'})
+        after = time.time()
+        self.assertEqual(rc, 0, err)
+        line = json.loads(out)['hookSpecificOutput']['additionalContext']
+        os.environ['TZ'] = 'EST5EDT'
+        time.tzset()
+        try:
+            stamps = {time.strftime('[time: %a %Y-%m-%d %H:%M %Z; ', time.localtime(t)) for t in (before, after)}
+        finally:
+            os.environ.pop('TZ')
+            time.tzset()
+        self.assertTrue(any(line.startswith(st) for st in stamps), (line, stamps))
+        self.assertRegex(line, r'^\[time: [A-Z][a-z]{2} \d{4}-\d\d-\d\d \d\d:\d\d E[SD]T; context: ~10K of 262K')
 
     def test_the_batch_record_not_the_newest(self):
         """the record is the one holding this batch's call ids, not merely the newest"""
@@ -95,8 +117,8 @@ class Hook(unittest.TestCase):
         write(self.t, [assistant('call_a', 100_000, 0, 262_000)])
         self.assertIn('~31K left before automatic compaction', cn.note(batch(self.t, 'call_a'), s, wait_s=0))   # 131,000 - 100,000
         write(self.t, [assistant('call_a', 140_000, 0, 262_000)])
-        self.assertEqual(cn.note(batch(self.t, 'call_a'), s, wait_s=0),
-                         '[context: ~140K of 262K tokens used; automatic compaction comes before the next step]')
+        self.assertTrue(cn.note(batch(self.t, 'call_a'), s, wait_s=0).endswith(
+                        '; context: ~140K of 262K tokens used; automatic compaction comes before the next step]'))
 
     def test_record_written_late(self):
         """Qwen Code writes the transcript asynchronously: the hook waits (up to a second) for this batch's record"""

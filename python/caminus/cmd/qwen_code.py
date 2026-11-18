@@ -20,8 +20,8 @@ settings.json.bak-<time> first. The team setup also writes the
 `hands` subagent (agents/hands.md) and the brain's policy (BRAIN.md) when they are missing.
 
 setup also registers the context note (share/harness/qwen-code/context_note.py, a PostToolBatch hook copied into the
-home's hooks/): after each batch of tool calls the model reads how many tokens it has used and how many are left before
-Qwen Code compacts the conversation, appended to the batch's last tool result (cache-safe). On by default;
+home's hooks/): after each batch of tool calls the model reads the local time, how many tokens it has used and how many
+are left before Qwen Code compacts the conversation, appended to the batch's last tool result (cache-safe). On by default;
 --context-note off removes it and is remembered (a file context-note.off in the home), --context-note on brings it back;
 other hooks (the advisor's) are untouched. CAMINUS_CONTEXT_NOTE=0 silences it for one session.
 
