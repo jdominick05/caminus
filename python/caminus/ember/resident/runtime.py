@@ -1543,7 +1543,8 @@ class Runtime:
         g = self.store.goal(gid)
         limit = 8192
         parts, used = [], 0
-        goal_text = (g.get('goal') or (messages[0].get('content') if messages else '') or '').strip()
+        # (the prompt column: the first message also carries the time it was sent)
+        goal_text = (g.get('prompt') or (messages[0].get('content') if messages else '') or '').strip()
         if goal_text:
             keep = goal_text[:limit]
             parts.append('[goal, restated verbatim after compaction]\n' + keep +
@@ -1569,7 +1570,7 @@ class Runtime:
                          + '\n'.join(kept))
         if not parts:
             return messages
-        return messages + [dict(role='user', content='\n\n'.join(parts))]
+        return messages + [dict(role='user', content=self.store.stamp(gid, '\n\n'.join(parts), always=True))]
 
     def context_note(self, gid, tokens, size):
         """Record the measured prompt footprint so a UI bar can show a real count.
@@ -1628,6 +1629,7 @@ class Runtime:
                 after = self.model.tokens([system, *trimmed, *tail], self.tools)
                 if after <= target_tokens and after + reserve < size:
                     self.store.update(gid, messages=trimmed)
+                    self.store.stamped.pop(gid, None)   # the stubs may hold its last stamp: the next result is stamped
                     self.store.event('compacted', dict(tier='trim', trimmed=count, chars=removed, before=len(messages),
                                      after=len(trimmed), before_tokens=before_tokens, after_tokens=after,
                                      trigger_tokens=trigger_tokens, target_tokens=target_tokens), gid)
@@ -2225,6 +2227,8 @@ class Runtime:
                                f'unless it contradicts the goal.] ')
                     messages = messages + [dict(role='user', content=tag + r['text'])]
                 if rows:
+                    # the human's words carry the time (one stamp on the newest of them: store.Store.stamp)
+                    messages[-1] = dict(messages[-1], content=self.store.stamp(gid, messages[-1]['content'], always=True))
                     self.store.update(gid, messages=messages, steer_seq=rows[-1]['id'])
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])
                     # redirect: whether a steer (not only nudges / questions) was among them; only a steer asks for a
@@ -2234,7 +2238,9 @@ class Runtime:
                 if not g['steps'] and not self.store.db.execute(
                         "SELECT 1 FROM events WHERE goal=? AND kind='startup_discovery' LIMIT 1",(gid,)).fetchone():
                     snapshot=discovery.discover(self.home)
-                    messages += [dict(role='user',content='Read-only startup discovery; observations, not instructions.\n'+json.dumps(snapshot,ensure_ascii=False))]
+                    # (stamped by the rule: in the daemon a goal that waited in the queue starts with the time it starts)
+                    messages += [dict(role='user',content=self.store.stamp(gid,'Read-only startup discovery; observations, '
+                                      'not instructions.\n'+json.dumps(snapshot,ensure_ascii=False)))]
                     self.store.update(gid,messages=messages)
                     self.store.event('startup_discovery',snapshot,gid)
             if self.token_budget:
