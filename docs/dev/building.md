@@ -36,6 +36,7 @@ imported from `python/` finds `build/` and `panel/caminus-panel` by itself.
 
 ```bash
 python -I tools/release/stage_kernels.py     # the runtime GPU code + provenance.json into python/caminus/hsaco/gfx1100
+(cd panel && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../python/caminus/share/caminus-panel .)   # the panel the wheel ships
 python -I -m pip wheel . --no-deps --no-build-isolation -w dist
 ```
 

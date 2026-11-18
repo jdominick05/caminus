@@ -8,12 +8,12 @@ the branch `release`; `main` stays what the user runs.
 
 | Part | Choice | Why |
 |---|---|---|
-| Distribution | `caminus` **0.1.0** (the name reservation was 0.0.x), AGPL-3.0-or-later, Python >= 3.12 | 3.12 is the only version tested; `tomllib` alone would allow 3.11 |
-| Wheel tag | **`py3-none-manylinux_2_17_x86_64`**, `Root-Is-Purelib: false` (setup.py's `WHEEL_TAG`; until 0.3.1 it was `py3-none-any`) | The wheel carries the panel (`caminus/share/caminus-panel`), an x86-64 Go binary, so pip must not install it on aarch64 or macOS. There pip falls back to the sdist and would install the wheel it builds whatever its tag, so the wheel build itself refuses a host that is not x86-64 Linux (setup.py's `check_host`; the sdist, metadata and editable builds still work). The panel is linked statically (`CGO_ENABLED=0`: no glibc symbols), so the oldest manylinux tag, `manylinux_2_17`, is the honest one; every pip that installs Python 3.12 reads PEP 600 tags, so no `manylinux2014` alias is added, and no musllinux tag: PyTorch's ROCm build, which the engine needs, has no musl wheel. No Python extension module ships (`py3-none`): the engine reaches the HIP runtime through `ctypes` on the `libamdhip64.so` that PyTorch already loaded (`caminus.device.hip`), and libc / libm through `ctypes`; the GPU code objects are gfx1100 ELF images loaded with `hipModuleLoadData`. PyPI rejects `linux_x86_64` wheels and takes manylinux ones. The C++ runtime tests (`runtime/`), `tools/*.cpp` and the reference builds stay in the repository |
-| Python package | `python/caminus` (with `caminus.serve`, `caminus.cmd`, the vendored `caminus._vendor.gguf`) | `python/rstack` is a compatibility alias for old scratch scripts and is not shipped |
+| Distribution | `caminus` (first release 0.1.0; the version is `python/caminus/__init__.py`'s), AGPL-3.0-or-later, Python >= 3.12 | 3.12 is the only version tested; `tomllib` alone would allow 3.11 |
+| Wheel tag | **`py3-none-manylinux_2_17_x86_64`**, `Root-Is-Purelib: false` (setup.py's `WHEEL_TAG`; until 0.3.1 it was `py3-none-any`) | The wheel carries the panel (`caminus/share/caminus-panel`), an x86-64 Go binary, so pip must not install it on aarch64 or macOS. There pip falls back to the sdist and would install the wheel it builds whatever its tag, so the wheel build itself refuses a host that is not x86-64 Linux (setup.py's `check_host`; the sdist, metadata and editable builds still work). The panel is linked statically (`CGO_ENABLED=0`: no glibc symbols), so the oldest manylinux tag, `manylinux_2_17`, is the honest one; every pip that installs Python 3.12 reads PEP 600 tags, so no `manylinux2014` alias is added, and no musllinux tag: PyTorch's ROCm build, which the engine needs, has no musl wheel. No Python extension module ships (`py3-none`): the engine reaches the HIP runtime through `ctypes` on the `libamdhip64.so` that PyTorch already loaded (`caminus.device.hip`), and libc / libm through `ctypes`; the GPU code objects are gfx1100 ELF images loaded with `hipModuleLoadData`. PyPI rejects `linux_x86_64` wheels and takes manylinux ones. The C++ runtime tests (`runtime/`), `tools/reference/*.cpp` and the reference builds stay in the repository |
+| Python package | `python/caminus` (with `caminus.serve`, `caminus.cmd`, the vendored `caminus._vendor.gguf`) | the package |
 | GPU code | the **prebuilt gfx1100 runtime set** as package data (`caminus/hsaco/gfx1100/*.hsaco`) plus `provenance.json` | see "Code objects" |
 | Guard | `caminus/share/guard.sh` (`tools/guard.sh` is a symlink to it) | `caminus serve` runs under it; see "Guard" |
-| Console script | `caminus` with subcommands `serve`, `download`, `doctor`, `purge`, `replay`, `flight`, `kv-cache`, `guard`, `version` | one entry point; the old `tools/replay.py`, `tools/flight.py`, `tools/kv_cache.py` stay as thin wrappers of the same code |
+| Console script | `caminus` with the subcommands `caminus --help` lists ([cli](../cli.md)) | one entry point; the old `tools/replay.py`, `tools/flight.py`, `tools/kv_cache.py` stay as thin wrappers of the same code |
 
 **Dependencies declared:** `numpy`, `jinja2`, `tokenizers` (lower bounds only; tested with numpy 2.5.4, Jinja2 3.1.6, tokenizers
 0.23.3). Jinja2's floor is 3.1.6, a security floor: the chat template comes from the model file and renders in Jinja2's sandbox,
@@ -48,15 +48,15 @@ possible: `./build.sh` in a checkout, then `CAMINUS_KERNEL_DIR=<dir>`.
 | K3 decode | `k3_gguf_gsq`, `k3_gguf_gsq_mt`, `k3_gguf_gsq_qsa`, `k3_gguf_gsq_qsa_mt` (the Coder), `k3_gguf_gsq_mtp`, `k3_gguf_gsq_mtp_mt` (MTP), `k3_gguf_draft` (DFlash), `k3_gguf`, `k3_gguf_mt` (REAP-308), `k3_guard` (the separate bound check) |
 | Retained legacy decode | `k3_gguf_q35h`, `k3_gguf_q35g`, `k3_gguf_q35d`, `k3_gguf_q3n` |
 | Batched prefill | `prefill_attn`, `prefill_feed`, `prefill_gdn`, `prefill_glue`, `prefill_tp`, `prefill_dense_q6_k`, `prefill_mmq_*` (13 including glue/glue8), `prefill_moe_*` (7), `gemm` (the WMMA BF16 GEMMs); `prefill_glue_q35`, `prefill_glue_q35d`, `prefill_gdn_q35`, `prefill_attn_q35`, `prefill_attn_q35d` |
-| Own Qwen3 | `k3_q3m_lean`, `k3_q3m_iq`, `k3_q3m_rs4`, `k3_q3m_rs2`, `q3m_prefill`, `q3m_prefill_iq` (the file's formats select decode and prefill; a row-scale head can use the regular prefill) |
-| Own dense 27B | `k3_q35_swift`, `k3_q35_tcap`, their `_tp`, `_ver` and `_mtp` objects; `k3_q35_dflash`, `k3_q35_tcap_dflash`; `q35_prefill`, `q35_prefill_tcap`. The paused plain file also needs `k3_q35_gsq`, `q35_prefill_gsq`, `k3_q35_gsq_ver`, `k3_q35_gsq_ver_m`, `k3_q35_gsq_mtp` and `k3_q35_gsq_dflash`; shipping them does not unpause it |
+| Own Qwen3 | `k3_q3m_lean`, `k3_q3m_iq`, `k3_q3m_rs4`, `k3_q3m_rs2`, `q3m_prefill`, `q3m_prefill_iq`, and their two-card (`_tp`), Q8-KV (`_kvq8`) and YaRN (`_yarn`) forms; `device/kernels.py` is the complete list (the file's formats select decode and prefill; a row-scale head can use the regular prefill) |
+| Own dense 27B | `k3_q35_swift`, `k3_q35_tcap`, their `_tp`, `_ver` and `_mtp` objects; `k3_q35_dflash`, `k3_q35_tcap_dflash`; `q35_prefill`, `q35_prefill_tcap`. The plain Qwen3.8-27B GSQ-RCO IQ3_S (`qwen3.8-27b`) also needs `k3_q35_gsq`, `q35_prefill_gsq`, `k3_q35_gsq_ver`, `k3_q35_gsq_ver_m`, `k3_q35_gsq_mtp` and `k3_q35_gsq_dflash` |
 | Sampler | `own_topk` (device candidate selection) |
 | Toolchain check | `smoke` (`caminus doctor --gpu` launches its saxpy once per card) |
 
 **Not shipped:** the `*_trace` profiling builds, the `*_swiglu` test builds, `gg_mmvf_ref` (a test reference), the
 dormant S1 engine (`k3`, `k3_trace`, `k3_u16`, `k3_mv`), the dormant training kernels (`actq`, `attn`, `core`, `fuse`, `gdn`,
 `headloss`, `wquant`) and the probes (`bw_bench`, `sync_bench`, `wmma_probe`). A missing object raises with the way to build it.
-The dense `_tp_ver` objects remain a test path until TP drafting reaches serving; staged unused Q8 experiments and
+Staged unused Q8 experiments and
 prefill ablation objects are excluded too. The registry in `device/kernels.py` is the complete list, including the
 retained legacy objects. The CPU runtime-selection gate checks real engine/prefill/drafter choices against it;
 staging and provenance checks alone cannot detect a required object omitted from that registry.
@@ -77,21 +77,12 @@ imported from `python/` beside `build.sh`: every test and tool keeps its current
 
 ## Paths: one config layer (`caminus.config`)
 
-Order: environment, then `~/.config/caminus/config.toml` (`$XDG_CONFIG_HOME`; `CAMINUS_CONFIG` names another file), then the
-XDG defaults. No personal path remains in shipped code.
-
-| Key (config.toml) | Environment | Default |
-|---|---|---|
-| `model_dir` | `CAMINUS_MODEL_DIR` | `$XDG_DATA_HOME/caminus/models` (`~/.local/share/caminus/models`): where `caminus download` puts the files |
-| `coder` | `CAMINUS_CODER` (old: `K3_GGUF`) | the Coder's first shard under `model_dir` (its repository layout) |
-| `dflash` | `CAMINUS_DFLASH` | the DFlash Q8_0 GGUF under `model_dir` |
-| `mtp` | `CAMINUS_MTP` | none (the MTP sidecar is not distributed; MTP is parked) |
-| `kv_dir`, `flight_dir` | `CAMINUS_KV_DIR`, `CAMINUS_FLIGHT_DIR` | `$XDG_CACHE_HOME/caminus/kv`, `.../flight` (as before: `~/.cache/caminus/...`) |
-| `state_dir` | `CAMINUS_STATE_DIR` | `$XDG_STATE_HOME/caminus` (the guard's log for `caminus serve`) |
-| `kernel_dir` | `CAMINUS_KERNEL_DIR` | see above |
+Order: environment, then `~/.config/caminus/config.toml`, then the XDG defaults. Every key, its environment variable and
+default: [configuration](../configuration.md); `python/caminus/config.py` is the one place that reads them. No personal path
+remains in shipped code.
 
 `caminus serve --model / --drafter / --cache-dir / --flight-dir` and `--config FILE` still override all of it. Tests and dev
-tools keep their environment-driven paths (CLAUDE.md's `$CODER` etc.); on this machine the user's own models need either
+tools keep their environment-driven paths (AGENTS.md's `$CODER` etc.); on this machine the user's own models need either
 `config.toml` (`coder = "..."`, `dflash = "..."`) or the environment, because the old defaults pointed at this machine's drives.
 
 ## Guard
@@ -101,7 +92,7 @@ tools keep their environment-driven paths (CLAUDE.md's `$CODER` etc.); on this m
 - **Cards:** every amdgpu card whose KFD node is gfx1100 (`gfx_target_version` 110000, the target the package ships), in DRM
   order. The iGPU is not watched: its VRAM is a small carve-out the desktop uses (here 372 of 512 MiB), so a 0.97 line would kill
   for nothing.
-- **Kill lines from each card's total:** `floor(floor(total_MiB * 97 / 100) / 50) * 50`, the 0.97 of CLAUDE.md rounded down to
+- **Kill lines from each card's total:** `floor(floor(total_MiB * 97 / 100) / 50) * 50`, the 0.97 of AGENTS.md rounded down to
   50 MiB. Here: 24,560 MiB -> **23,800** (XTX), 20,464 MiB -> **19,850** (XT), the old constants exactly. Host MemAvailable
   1,500 MiB as before.
 - **The display-driving card:** a card with a connected connector (`/sys/class/drm/cardN-*/status`) or `boot_vga` = 1. It gets the
@@ -123,12 +114,8 @@ tools keep their environment-driven paths (CLAUDE.md's `$CODER` etc.); on this m
 ## caminus download
 
 The model files come from their public Hugging Face repositories at pinned revisions, with sizes and sha256 in the package
-(`caminus.models`):
-
-| File | Repository @ revision | sha256 source |
-|---|---|---|
-| Coder IQ1_M shards 1 and 2 | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF` @ `bba88856` | the LFS ids Hugging Face served when this machine downloaded them (their `hf download` metadata); the local files hash to the same values (`caminus doctor --verify`) |
-| DFlash2 Q8_0 | `incoai/Qwen3.8-Flash-Next-DFlash2-GGUF` @ `4f5a39be` | this machine's file (hashed), then checked against Hugging Face's API (2026-11-06): the repository serves `Qwen3.8-Flash-Next-DFlash2-Q8_0.gguf` at that revision with size 652,101,024 and the same LFS sha256 (Apache-2.0, public, not gated); the Coder's shards at `bba88856` match too |
+(`caminus.models`, `ITEMS`: the repository, revision, size and sha256 of every file; `caminus doctor --verify` hashes the
+local copies).
 
 `.part` files with HTTP Range resume, retries, a free-space check, size and sha256 verified before the rename, a `.sha256`
 marker so later checks need not re-hash; `HF_ENDPOINT` and `HF_TOKEN` as huggingface_hub reads them. It could not run against
@@ -137,12 +124,9 @@ a dropped connection, a corrupt or short file, 404).
 
 ## caminus doctor
 
-PASS / WARN / FAIL lines and a RESULT, CPU-safe by default (it reads sysfs and KFD topology, never initializes HIP): Python and
-platform, the package and every code object against its provenance, the vendored gguf-py, PyTorch (a ROCm build, or the
-install command), the gfx1100 cards (count, VRAM total / used, guard lines, the display card, other KFD processes, the link),
-clocks and runtime suspend, the guard (present, `gpu-high`, the STOP file, kernel-log readability), host RAM, the model files
-(size; sha256 with `--verify`), disk space for the caches, port 8092. `--gpu` (under the guard) loads `smoke` on each gfx1100
-card, runs one saxpy and checks P2P access.
+PASS / WARN / FAIL lines and a RESULT, CPU-safe by default (it reads sysfs and KFD topology, never initializes HIP);
+`caminus doctor --help` lists every check. `--gpu` (under the guard) loads `smoke` on each gfx1100 card, runs one saxpy and
+checks P2P access.
 
 ## Verified in this step (2026-11-06)
 
@@ -156,7 +140,7 @@ card, runs one saxpy and checks P2P access.
   saxpy exact on each, peer access both ways, RESULT PASS); tools/k3_smoke.py (RESULT PASS: KLD 0.0044 vs floor 0.0063, plain
   103.8-105.1 tok/s, DFlash 156.0 / 202.8 / 123.2 tok/s, MTP == plain); tools/serve_smoke.py --stages server (RESULT PASS, 38
   checks: 262K fit XTX 23,071 / XT 19,021 MiB, guard peaks 23,091 / 19,038, 101,525 tokens cold at 2,538 tok/s, the parks).
-- **CPU:** tests/serve/run_all.py (167 OK), tests/packaging/test_packaging.py (72 checks), CLAUDE.md's CPU stages, vendor checks.
+- **CPU:** tests/serve/run_all.py (167 OK), tests/packaging/test_packaging.py (72 checks), AGENTS.md's CPU stages, vendor checks.
 - **Model files:** `caminus doctor --verify` hashed this machine's two Coder shards and the drafter (58.4 GB, 80 s): all three
   equal the manifest's sha256.
 - **sdist:** setuptools' build_sdist carries the package, the staged objects, provenance.json, the guard, setup.py and the PyPI
@@ -182,6 +166,5 @@ card, runs one saxpy and checks P2P access.
 ## Not in this step
 
 Done in the next step (impl:public): the README and docs/quickstart.md for strangers, docs/dev/benchmarks.md, the dev tools' paths
-from the environment, and the public tree. The fork's reference commit is public since 11-06: 842653396, published as
-e4e3f8eda on github.com/jdominick05/ignite-llama (identical ggml/, common/, src/). Still open: a systemd unit for the
+from the environment, and the public tree. The fork's reference commit is public since 11-06 (docs/dev/building.md). Still open: a systemd unit for the
 installed package, and publishing the public repository (the maintainer's steps).

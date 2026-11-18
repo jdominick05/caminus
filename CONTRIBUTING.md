@@ -55,9 +55,8 @@ that line, each commit needs exactly one `Assisted-by:` line.
 - [How it works](docs/dev/architecture.md): the engine, the prompt path, the cache and the server in one page.
 - [Testing](docs/dev/testing.md): the CPU suites, the GPU tests and the accuracy gates.
 - [Adding a model](docs/dev/adding-a-model.md): what a new model family needs.
-- [GLOSSARY.md](GLOSSARY.md): the project's terms.
 - [Design choices](docs/dev/design-choices.md): what's settled and why.
-- [The design specs](docs/specs/): detailed contracts of the drafters, the prefill, the cache and the server.
+- Everything else (the terms, specs, benchmarks): the table in [AGENTS.md](AGENTS.md#where-to-look).
 
 Comments in the code cite labels from the private development history: decision numbers like D-281, step names like
 `impl:package`, and plan documents that aren't in this repository. Treat them as labels; the code and the tests are the

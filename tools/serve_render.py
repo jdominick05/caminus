@@ -13,7 +13,7 @@ from caminus.serve.normalize import anthropic_to_template, openai_chat_to_templa
 from caminus.serve.template import PromptBuilder  # noqa: E402
 from caminus.serve.tokenizer import QwenTokenizer  # noqa: E402
 
-from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
+from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: AGENTS.md, "Models and data")
 DEFAULT_GGUF = devpaths.coder()
 
 

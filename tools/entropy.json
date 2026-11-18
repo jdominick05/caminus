@@ -68,10 +68,6 @@
   "docs/dev/smoke.md": [
    "spec_k3.py"
   ],
-  "docs/dev/training-stack.md": [
-   "python/caminus/{actq,fuse,gdn,gemm,headloss,linear,qlinear,wquant}.py",
-   "tests/test_gemm*.py"
-  ],
   "docs/dev/yardsticks.md": [
    "kernels/gemm/rdna3_f16_gemm.py",
    "rdna3_int8_gemm.py"

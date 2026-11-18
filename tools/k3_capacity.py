@@ -15,7 +15,7 @@ import os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 from caminus.device import capacity  # noqa: E402
 
-from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
+from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: AGENTS.md, "Models and data")
 MODELS = dict(coder=devpaths.coder(), reap=devpaths.reap())
 SYSFS = ('/sys/class/drm/card1/device', '/sys/class/drm/card2/device')   # device 0 = the XTX (card1), 1 = the XT (card2), as guard.sh
 

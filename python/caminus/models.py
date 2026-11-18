@@ -55,7 +55,7 @@ ITEMS = ITEMS + (
 # Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
 # Face's API on 2026-11-11 (each local file's sha256 computed and equal). CATALOG names Swift 1.5 and ThinkingCap (their
 # own-code engines serve: arch.Dense35, the module from the file's formats); the drafter is part of both models' files
-# (`caminus pull` fetches it once for both; `caminus start` passes it, and `--draft dflash` uses it: the default stays off).
+# (`caminus pull` fetches it once for both; `caminus start` passes it; `--draft dflash` uses it, the default where the file is present and the context fits).
 # Licences: Swift 1.5 the Swift Open License 1.0, ThinkingCap PolyForm Small Business 1.0.0, the drafter Apache-2.0.
 ITEMS = ITEMS + (
     Item('swift-1.5', 'swift-1.5', 'ukisai/Swift-1.5-Qwen3.8-27B-GGUF', '14bfe4b42be4a925d98816db830155f476c605e7',

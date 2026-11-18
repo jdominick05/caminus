@@ -21,12 +21,12 @@
 #   kvhost          the KV cache in host memory (FlashNextTP(kv_host=True), the long-context mode's cache): the short and lc
 #                   runs again with --kv-host, every result line / non-timing number == the same stored references      (~2.5 min)
 #   all             trunk grids qsa reap multi forcebail forcebail-qsa short lc lc32 kvhost
-# Env: ARTIFACTS, CODER (both required), REAP (the reap stages), PY (a python with ROCm PyTorch; CLAUDE.md, Models and data).
+# Env: ARTIFACTS, CODER (both required), REAP (the reap stages), PY (a python with ROCm PyTorch; AGENTS.md, Models and data).
 # Ends with a SUMMARY (one line per check) and exits 0 only when every check passed.
 set -u
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-ARTIFACTS=${ARTIFACTS:?set ARTIFACTS (CLAUDE.md, Models and data)}
-CODER=${CODER:?set CODER (CLAUDE.md, Models and data)}
+ARTIFACTS=${ARTIFACTS:?set ARTIFACTS (AGENTS.md, Models and data)}
+CODER=${CODER:?set CODER (AGENTS.md, Models and data)}
 REAP=${REAP:-'$REAP'}
 PY=${PY:-$HOME/miniforge3/envs/drafter/bin/python}
 export ARTIFACTS CODER REAP

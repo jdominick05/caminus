@@ -38,7 +38,7 @@ VRAM = {0: '/sys/class/drm/card1/device/mem_info_vram_used', 1: '/sys/class/drm/
 
 
 def load_ref():
-    """tools/smoke_ref.json with its paths' $VARIABLES expanded from the environment (CLAUDE.md, "Models and data": CODER,
+    """tools/smoke_ref.json with its paths' $VARIABLES expanded from the environment (AGENTS.md, "Models and data": CODER,
     REAP, DFLASH, ARTIFACTS, REAP_DUMPS); an unset variable stays as written, so the missing-input check names it"""
     ref = json.load(open(REF_JSON))
     x = lambda p: os.path.expanduser(os.path.expandvars(p))

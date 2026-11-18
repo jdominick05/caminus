@@ -33,8 +33,8 @@ on the same file and card (`llama-bench -ngl 99 -fa 1`).
   study. A token reads 1.92 GB of weights (every dense matrix, 8 of the 128 experts per layer, the output head) plus
   98,304 bytes of KV cache per position of context. Nothing that reads every byte once per token can beat it.
 
-Through the HTTP server (`tools/serve_smoke1.py`, one request each): 238 tok/s on a short chat, 195 tok/s after a
-6,587-token prompt, 123 tok/s after a 37,659-token prompt.
+Through the HTTP server (`tools/serve_smoke1.py`, one request each): the current figures are in
+[benchmarks](benchmarks.md) (the Qwen3-30B-A3B Q4_K_M section).
 
 ### Prompt reading (the batched prefill)
 
@@ -48,7 +48,6 @@ Through the HTTP server (`tools/serve_smoke1.py`, one request each): 238 tok/s o
 `llama-bench` `pp512`, `pp4096`, `pp32768`. 512 and 4,096 are the medians of three processes on 2026-11-11, with the
 Q4_K kernel's overflow guard (below); without it the same runs read 5,214 and 6,490 tok/s, so the guard costs 0.9 %.
 32,768 was measured on 2026-11-10 without the guard and not since; an earlier form of the guard cost 0.7 % there.
-Through the server, a 37,659-token prompt takes 15.3 s to the first token.
 
 ### Accuracy
 

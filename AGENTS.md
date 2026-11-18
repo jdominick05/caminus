@@ -128,23 +128,11 @@ CLAUDE.md imports this file.
   check their inclusion; finding them in a checkout's build directory does not prove that a wheel ships them.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
-- Dense Q8 KV is staged under separate one-card `*_kvq8` objects (docs/dev/q8-kv.md); pair each new object's scalar-spill
-  count with its F16 counterpart, since objcheck cannot infer that relationship from a new filename. Qwen3-30B-A3B's is
-  `k3_q3m_lean_kvq8` (+ `q3m_prefill_kvq8` for the prefill's rows and attention; `Q3MoEOne(q8=True)`, served by
-  `caminus serve --kv q8`): rows
-  that encode the F16 object's halves with K (and q) through the head's Hadamard128 (`kernels/own_kv_rot128.h`, reference
-  `caminus.ref_kv.hadamard128`; V unrotated), its statements under `K3_Q3M_KV_Q8` / `Q3P_KV_Q8` with the F16 text in
-  `#else`; its module file also defines `K3_Q3M_ADD_RMS_PIN` (OP_OWN_ADD_RMS16's counts pinned as scalars) and
-  OP_OWN_ATTS pins its own counts under `K3_Q3M_KV_Q8`: 19 spilled scalars against the F16 object's 53, which keeps its
-  code. Its two-card form is `k3_q3m_lean_tp_kvq8` (the same two defines over `k3_q3m_lean_tp.hip`; `k3.Q3M_TP_OF` and
-  `Q3M_KV_Q8_BASE` both list it; `Q3MoETP(q8=True)`, its prefill `Q3MPrefillTP` on `q3m_prefill_kvq8`'s kernels at each
-  card's local shapes; `--cards 2 --kv q8`): 33 spilled scalars against `k3_q3m_lean_tp`'s 66. All three Q8 objects are in
-  the installed runtime set. `caminus serve --kv {f16,q8}` (default f16; `caminus start --kv`, `caminus fit --kv`) sets
-  `opt['kv']`; `serve.cli.recipe` calls `Arch.kv_check`, so every registry entry but the two qwen3moe ones refuses
-  `q8` before placement, naming the model that takes it. `f16` selects nothing on an entry without the choice: the
-  GGUF engines keep their own q8_0 cache (`Arch.kv_fixed`), the dense line F16. `/props` (`caminus.kv_cache`) and
-  `/caminus/status` report the built engine's cache (`arch.kv_cache_of`); the engine key's `tp.kv` and module keep a
-  park of one format from ever being offered to the other (`tests/engine/kv_park_rt.py`).
+- Dense Q8 KV is staged under separate one-card `*_kvq8` objects; pair each new object's scalar-spill count with its F16
+  counterpart by hand, since objcheck cannot infer that relationship from a new filename. Qwen3-30B-A3B's Q8 KV
+  (`k3_q3m_lean_kvq8`, `q3m_prefill_kvq8`, two cards `k3_q3m_lean_tp_kvq8`) is served with `caminus serve --kv {f16,q8}`
+  (default f16): its statements sit under `K3_Q3M_KV_Q8` / `Q3P_KV_Q8` with the F16 text in `#else`, all three objects are in
+  the installed runtime set, and every other registry entry refuses `q8` (`Arch.kv_check`). Detail: docs/dev/q8-kv.md.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
 - Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them
@@ -164,12 +152,9 @@ CLAUDE.md imports this file.
   `--max-ctx` past 40,960; `Arch.long_mode` resolves it in `recipe` before placement, every other entry refuses the flag;
   `_Q3MLong.long_refusal` refuses a qwen3moe file whose header is not that model's, context_length 40,960 and
   rope.freq_base 1e6, or that has codebook / row-scale tensors).
-  YaRN runs on separate objects (`k3.Q3M_YARN_OF`: `k3_q3m_lean*_yarn` under `K3_Q3M_YARN`, `q3m_prefill*_yarn` under
-  `Q3P_YARN`): the table `caminus.rope.yarn_table` (llama.cpp's rope_yarn: freq per pair, mscale on cos / sin) is appended
-  to each layer's qk_par and read by decode and prefill with the same statements; the default objects keep their code.
-  In the mode with no `kv` asked for, `placement_extra` picks F16 where the context fits, else Q8_0 where it holds more
-  (one XTX: about 80K); the engine key carries `tp.rope`. Each YaRN object's spilled scalars must equal its native peer's
-  (53 / 19 / 66 / 33): objcheck cannot pair them.
+  YaRN runs on separate objects (`k3.Q3M_YARN_OF`: `k3_q3m_lean*_yarn`, `q3m_prefill*_yarn`); the default objects keep their
+  code, and each YaRN object's spilled scalars must equal its native peer's (53 / 19 / 66 / 33): objcheck cannot pair
+  them. Detail: docs/dev/qwen3-30b-a3b.md, "The long-context mode".
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `k3_q3m_lean_tp`: kv heads and each
@@ -268,7 +253,7 @@ export HF_TOKENIZER_JSON=/path/to/tokenizer.json   # optional: two tokenizer cro
 python -I tests/ci_cpu.py --scratch DIR             # every CPU suite, as CI runs them (a FRESH DIR; skips with the reason what's missing; --jobs N suites at once)
 python -I tools/release/privacy_scan.py .           # no secrets, machine paths or session links in the tree (CI runs it)
 python -I tools/entropy.py                          # ENTROPY.md's tree checks: a path a doc names exists, every test / tool / benchmark is named somewhere, no copies (the CPU suite entropy; --prune drops fixed baseline entries)
-python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check
+python -I tools/release/vendor_gguf.py --check; python -I tools/release/vendor_mmq.py --check   # ($IGNITE or --src DIR: a clone holding the commit; releasing.md shows the CI form)
 python -I tools/gates/objcheck.py snap build -o FILE   # the built objects' code / data digests and k3_run's registers, before an edit
 python -I tools/gates/objcheck.py check FILE build --expect 'MODULE*'   # after it: only the named objects changed; registers in budget (reads files, CPU)
 python -I tools/pr_ready.py N                       # pull request N: CI and the review on its head commit, threads, gates named (reads GitHub through gh; --wait SECS; --metadata: the text only, run by CI)
@@ -280,9 +265,8 @@ tools/guard.sh LOG 600 python -I tools/k3_smoke.py --model coder          # ends
 tools/guard.sh LOG 600 python -I benchmarks/fn_bench.py 96 $CODER --tp    # decode ms/token
 tools/guard.sh LOG 3600 python -I tools/serve_smoke.py --scratch DIR      # the real server end to end (two cards)
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card N   # a one-card model end to end
-tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0,1 --cards 2   # its two-card form (swift-1.5, thinkingcap, qwen3-30b-a3b)
-tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 0 --kv q8 --restart   # qwen3-30b-a3b's 8-bit KV cache (a fresh DIR; --restart-kv: a park of the other format is not offered)
-tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~19 min)
+# the two-card, Q8-KV and drafting forms of these smokes: docs/dev/testing.md, "GPU tests"
+tools/gates/gates.sh $ARTIFACTS/<step>/gates all                          # bitwise / D-281 gates (~15-20 min)
 CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tools/gates/tp_load_only.py GGUF   # two-card weight load (qwen35 or qwen3moe), read back bit for bit
 CAMINUS_UPLOAD_LOG=ULOG HIP_VISIBLE_DEVICES=<non-display card> tools/guard.sh LOG 300 python -I tools/gates/h2d_pattern.py --seconds 180
 python -I tools/gates/sdma_classify.py ULOG ADDR --pid PID                # (CPU) a fault address: live / freed / neither upload source
@@ -295,7 +279,7 @@ counts are the ones `llvm-readelf --notes` prints); rerun the gates at `K3_PER_W
 
 ## Invariants
 
-GPU safety (a fault on the display card can take the desktop down):
+GPU safety (a fault on the display card can take the desktop down; rules and reasons: docs/dev/gpu-safety.md):
 - Every GPU process runs under `tools/guard.sh LOG SECS CMD...` (or `caminus guard`).
 - Guard exit 99 = a GPU fault: stop all GPU work, rerun nothing. Exit 98 = a fault on record
   (`~/.local/state/k3/GPU_FAULT_STOP`): a person inspects it before anything runs.
@@ -312,7 +296,7 @@ GPU safety (a fault on the display card can take the desktop down):
   `device/hip.py host_mapped`) is checked against MemAvailable and the GTT page limit (`capacity.check_host_kv`) first;
   only buffers from `host_mapped` pass the launch checker as host memory.
 
-Correctness:
+Correctness (docs/dev/testing.md, "The accuracy rules"):
 - Bitwise: a K3 change leaves logits, router ids and replicas bitwise equal to the previous reference, across `K3_PER_WGP`
   grids, with T = 4 passes equal to one-token steps.
 - D-281: a change that can't be bitwise by design keeps mean KLD vs llama.cpp's one-token decode within llama.cpp's own
@@ -334,8 +318,7 @@ Correctness:
 
 Process:
 - Speed claims: interleaved A/B, median of >= 3 runs, a difference above 0.05 ms; label every speed decode or prefill.
-- The one-card server smoke's tool check must produce parsed calls, replay all results and answer with their observation
-  codes. Text alone cannot pass; at most one explicitly reported required-tool retry uses the same model and policy.
+- The one-card server smoke's tool check must produce parsed calls and replay every result; text alone cannot pass (docs/dev/testing.md, "GPU tests").
 - Unattended agents never run commands that need a permission prompt (deletes, writes to /tmp, sudo, installs, network).
 - When an invariant or command here changes, update this file in the same commit.
 
@@ -357,9 +340,9 @@ Growth (the reasons: ENTROPY.md):
 
 - Workflow: topic branch -> pull request into `testing` -> `main` for releases (tags). Never open pull requests against
   `main`.
-- Commits: `<area> : <what>`, with the gates run and measured before / after in the body; disclose AI assistance with an
-  `Assisted-by: <model>` trailer; no session links.
-- Scope: MoE / low-active models (the dense exceptions: AREX-2 and the Qwen3.8 27B line, Swift 1.5 first); drafters are DFlash and MTP only.
+- Commits: `<area> : <what>`, with the gates run and measured before / after in the body; an `Assisted-by: <model>` trailer
+  (CONTRIBUTING.md); no session links.
+- Scope: MoE / low-active models (the dense exceptions: the Qwen3.8 27B line, Swift 1.5 first); drafters are DFlash and MTP only.
 - Keep architecture constants and model shapes out of shared kernels where it costs nothing; never generalize
   speculatively or at a speed cost before a second target exists.
 - Kernel comments carry the measured reason for each choice; keep that density.

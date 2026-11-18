@@ -63,7 +63,7 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, 'tools', 'gates'))
-import common as C   # noqa: E402  (tools/gates/common.py: CLAUDE.md's paths; CPU only)
+import common as C   # noqa: E402  (tools/gates/common.py: AGENTS.md's paths; CPU only)
 
 FAILS, NUMBERS = [], {}
 MARK = 'quokka-lantern-7731'            # in every synthetic prompt: must never appear in the metrics, the status, /slots or flight files

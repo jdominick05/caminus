@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 from caminus.serve.server import set_process_name  # noqa: E402
 
-from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
+from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: AGENTS.md, "Models and data")
 DEFAULT_GGUF = devpaths.coder()
 
 

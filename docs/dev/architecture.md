@@ -35,15 +35,15 @@ that dominates small-batch decoding.
   host refuses anything else.
 - **Two cards:** a two-card model splits each layer across both cards and exchanges partial sums twice per layer over
   PCIe. Card 0's partial is always added first, so both cards hold the same bits.
-- **Bitwise discipline:** the engine's weight-format kernels match llama.cpp's bit for bit. A speed change must leave the
-  logits bitwise equal to the previous build's; changes that can't are held to llama.cpp's own noise instead
-  ([testing](testing.md)).
+- **Bitwise discipline:** the engine's weight-format kernels match llama.cpp's bit for bit. Speed changes and the
+  accuracy rules: [testing](testing.md#the-accuracy-rules).
 
 ## Drafting
 
-The Coder has a small drafter model (DFlash) that guesses several tokens ahead; the engine checks four tokens per pass and
-keeps the ones that match. The output equals plain greedy decoding. The server measures whether drafting pays for each
-kind of text and turns it off when it doesn't (`serve/draftpolicy.py`).
+The Coder and the dense 27B models have a small drafter (DFlash / DFlash2; Swift 1.5 and ThinkingCap also their own MTP
+block) that guesses several tokens ahead; the engine checks four tokens per pass and keeps the ones that match. The output
+equals plain greedy decoding. The server measures whether drafting pays for each kind of text and turns it off when it
+doesn't (`serve/draftpolicy.py`); `--draft off` turns it off.
 
 ## The prompt path
 

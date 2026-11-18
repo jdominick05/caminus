@@ -29,11 +29,8 @@ GPU code; the CLI is replaced by a recorder.
 
 ### Staged own Q8 KV codec
 
-The internal `device.kv_codec.Q8KVCodec` writer is a foundation for new cache paths; it does not enable a model's
-Q8 mode. It stores K then V in 34-byte blocks of 32 values, without rotating inputs. The caller owns allocation,
-capacity checks and transforms. Every nonzero error word invalidates the whole append, including blocks that were
-written before another block failed. Discard or reinitialize that result before attention. The launcher leaves error
-bits sticky; initialize the error word before a new sequence and call `check` before consuming the cache.
+The internal `device.kv_codec.Q8KVCodec` writer is a foundation for new cache paths; it does not enable a model's Q8 mode.
+Its format and failure rules: [q8-kv.md](q8-kv.md#wire-format-and-rotations).
 
 `tests/io/test_own_kv_codec.py --scratch DIR` compiles the actual own header as host C++ and compares its bytes with
 the independent NumPy reference. It checks roundf boundaries, stored-scale rounding, half underflow/subnormals,
@@ -131,29 +128,9 @@ runtime set (`tests/packaging/test_runtime_kernels.py`). A plain two-card measur
 
 ## Qwen3-30B-A3B's 8-bit KV cache, served
 
-`caminus serve --kv q8` ([q8-kv.md](q8-kv.md#serving-qwen3-30b-a3b-with---kv-q8)). CPU: the two Q8 engine suites run
-the park path on the byte rows and the format mismatch both ways (`tests/engine/kv_park_rt.py`):
-
-```bash
-python -I tests/engine/test_q3moe_kvq8_cpu.py --scratch SCRATCH
-python -I tests/engine/test_q3moe_tp_kvq8_cpu.py --scratch SCRATCH
-```
-
-Served, each under the guard (the one-card runs on the XTX), each with a fresh scratch directory (the prompts are fixed:
-an earlier run's park would be restored):
-
-```bash
-# 1. one card: /props names q8, the Q8 decode object loaded (not its F16 base) with q3m_prefill_kvq8, own imports, the
-#    park restored, the restarted server's objects the Q8 ones again
-tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR1 --card 0 --kv q8 \
-  --block-imports gguf,tokenizers --restart
-# 2. two cards: the same
-CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR2 --card 0,1 \
-  --cards 2 --kv q8 --block-imports gguf,tokenizers --restart
-# 3. the mismatch: an F16 server parks (its parks must be on disk), a Q8 server on the same directories (its objects
-#    the Q8 ones) reads the long prompt from cold and leaves those parks on disk
-tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model GGUF --scratch DIR3 --card 0 --restart --restart-kv q8
-```
+`caminus serve --kv q8`: its CPU suites (`tests/engine/test_q3moe_kvq8_cpu.py`, `test_q3moe_tp_kvq8_cpu.py`) and the three
+guarded smokes (one card, two cards, the format mismatch) are listed in
+[q8-kv.md](q8-kv.md#serving-qwen3-30b-a3b-with---kv-q8).
 
 ## The accuracy rules
 

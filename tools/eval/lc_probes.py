@@ -23,7 +23,7 @@ continuation), OUT/d<D>/<probe>.ids (context + question)."""
 import glob, json, os, random, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, 'python'))
-from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
+from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: AGENTS.md, "Models and data")
 MODEL = devpaths.coder()
 GUARD = os.path.join(HERE, 'guard.sh')
 GG = os.path.join(REPO, 'build', 'gg_golden')

@@ -29,13 +29,13 @@ If the model reuses known layer types, its engine is mostly a new tape layout ov
 ## 3. The prompt path
 
 A batched prefill is optional but makes a big difference: without one, prompts are read one token per pass
-(`prefill/kpass.py`, as Qwen3-Coder-Next does today). A prefill driver subclasses `PrefillDriver` (`prefill/driver.py`)
+(`prefill/kpass.py`, as Qwen3-Coder-Next's engine does; that model is paused). A prefill driver subclasses `PrefillDriver` (`prefill/driver.py`)
 and must give the same bits as the decode engine's operations.
 
 ## 4. The catalog
 
 To make the model downloadable by name, add its files (repository, pinned revision, size, sha256) to `ITEMS` and a
-`CATALOG` entry in `python/caminus/models.py`, with measured decode and prefill speeds labelled as such.
+`_model(...)` entry to `ALL` in `python/caminus/models.py`, with measured decode and prefill speeds labelled as such.
 
 ## 5. The gates
 

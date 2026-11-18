@@ -1,6 +1,6 @@
 """Paths and small helpers shared by the gate harnesses in tools/gates (CPU-only module: nothing here touches a GPU).
 
-Every path comes from CLAUDE.md's variables (environment CODER / REAP / ARTIFACTS; unset: the placeholder '$NAME', so a
+Every path comes from AGENTS.md's variables (environment CODER / REAP / ARTIFACTS; unset: the placeholder '$NAME', so a
 read names the variable to set) or from a command-line argument; nothing reads the ephemeral job scratch dir. The stored references and their provenance
 are listed in $ARTIFACTS/refs/MANIFEST.md (sha256 list beside it)."""
 import os, sys
@@ -34,7 +34,7 @@ def opt(a, name, default, f=str):
 
 
 def proactiveness():
-    """vm.compaction_proactiveness (CLAUDE.md: recorded with every timing run; host page compaction evicts KFD queues)"""
+    """vm.compaction_proactiveness (AGENTS.md: recorded with every timing run; host page compaction evicts KFD queues)"""
     try: return open('/proc/sys/vm/compaction_proactiveness').read().strip()
     except OSError: return 'unreadable'
 

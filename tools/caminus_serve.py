@@ -4,7 +4,7 @@
     python -I tools/caminus_serve.py [--config FILE] [--port 8092] [--max-ctx 262144] ...
 
 (`python -I -m caminus serve` needs the package importable without PYTHONPATH, e.g. installed; caminus serve --help lists the
-options.) Every GPU process runs under tools/guard.sh (CLAUDE.md)."""
+options.) Every GPU process runs under tools/guard.sh (AGENTS.md)."""
 import os
 import sys
 

@@ -1,6 +1,6 @@
 # Releasing Caminus: CI, the PyPI release and the nightly builds
 
-Five GitHub Actions workflows (`.github/workflows/`) and a few tools carry a release and the nightly builds. One fact
+Five of the GitHub Actions workflows (`.github/workflows/`; the sixth, cla.yml, is the contributor-agreement bot) and a few tools carry a release and the nightly builds. One fact
 shapes all of it: the gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
 (10.2.0a20261011: amdclang++ and the offload driver's device LTO), and the gates that validated them hold their exact
 instructions and bitwise numerics (docs/dev/packaging.md, "Code objects"). That toolchain has no public URL, and a
@@ -10,7 +10,7 @@ maintainer and by CI (build.yml, with provenance self-assessed against SLSA Buil
 for byte equal (below, "SLSA").
 
 Every action the workflows use is pinned by its commit SHA, with the release tag in a trailing comment
-(`actions/checkout@08c6903c... # v5.0.0`); to update one, replace both.
+(`actions/checkout@3d3c42e5... # v7.0.1`); to update one, replace both.
 
 ## ci.yml: every push and pull request
 
@@ -24,6 +24,8 @@ On `ubuntu-24.04`, no GPU, no model files:
 | Tokenizer metadata | the first 11 MiB of the Coder's shard 1 at the manifest's pinned revision (an HTTP Range request), turned into a vocab-only GGUF by `tools/release/gguf_vocab_only.py` for tests/serve; optional: without it tests/serve is skipped |
 | CPU suites | `tests/ci_cpu.py`: tests/serve, test_packaging and the other suites that need no model weights; the suites that need the Coder's weights are skipped with the reason (`tests/ci_cpu.py --list`) |
 | sdist | `python -m build --sdist` and `twine check --strict` (CI's sdist has no code objects; the release's does) |
+| Panel | job `panel`: `go vet ./...`, `go test -count=1 ./...`, the panel build and a typing-cost benchmark |
+| Pull request text | job `pr-metadata` (pull requests only): `tools/pr_ready.py N --metadata`: title, `Assisted-by` trailers, gate block, `Reuses:` / `Removes:` |
 | Vendored code | `tools/release/vendor_gguf.py --check` against upstream llama.cpp at 5aeac37a35; `tools/release/vendor_mmq.py --check --commit e4e3f8eda` against the ignite-llama fork (github.com/jdominick05/ignite-llama): kernels/ggml_mmq's headers name the fork's development commit 842653396, published as e4e3f8eda with identical `ggml/`, `common/` and `src/`, so the check reads the files at e4e3f8eda and compares them with headers that carry the label 842653396 (`--label`, its default) |
 
 The same checks run locally, except the downloads:
@@ -155,10 +157,10 @@ version cannot be replaced or reused; the project's default size limit is 10 GB)
 
 ## Making a release (the maintainer)
 
-Before `testing` is merged into `main`, and before any release (the nightlies excepted), **every benchmark runs on the
-commit to be released**: each row of [benchmarks.md](benchmarks.md) for every catalog model, decode and prefill, one
+Before a minor release (0.x.0: `testing` merged into `main`), **every benchmark runs on the commit to be released**
+(a patch release, 0.x.y, reruns none, and its CHANGELOG entry says so; so do the nightlies): each row of [benchmarks.md](benchmarks.md) for every catalog model, decode and prefill, one
 card and two, the verify passes and the llama.cpp yardstick rows, under `tools/guard.sh`. A number that moved is updated
-everywhere it is published (README, CHANGELOG, docs/models.md, benchmarks.md) in the merge's pull request; a benchmark
+everywhere it is published (README, CHANGELOG, docs/models.md, benchmarks.md) in the release's pull request; a benchmark
 that could not run is listed there as skipped, with the reason. A published number always describes the released code. A paused model
 (`caminus.models.PAUSED`) is not offered, so its rows are not rerun: they stay in benchmarks.md, marked paused, and the model
 comes back only with them rerun.
@@ -166,8 +168,8 @@ comes back only with them rerun.
 1. **The version:** set `__version__` in `python/caminus/__init__.py` (and the docs that name it). A version can be uploaded to
    PyPI once; a fix is the next patch version. Then redraw the README's picture of the control panel,
    `python -I tools/release/panel_shot.py` (needs Go): the panel's real render of this tree's version, model catalog
-   and Qwen Code pin, in a GNOME terminal window, written to `docs/panel.svg`. tests/docs fails while the picture shows
-   another version.
+   and Qwen Code pin, in a GNOME terminal window, written to `docs/panel.svg` (and Ember's chat, on a made-up goal, to
+   `docs/ember-chat.svg`). tests/docs fails while panel.svg shows another version.
 2. **The code-object hashes** (only when kernels/ or build.sh changed since the last release): in a fresh clone,
    `tools/release/in_image.sh tools/release/release_build.sh --write-hashes`,
    review the change to `packaging/gfx1100-kernels.sha256` and commit it.
@@ -209,7 +211,7 @@ built from them. (Only `IGNITE` changing touches the 28 objects that include ggm
 `prefill_moe_*` and `prefill_dense_*`; `ROCM_PATH` changing touches every object.) The repository's own path and the temporary directory
 do not enter them. A byte-for-byte rebuild needs the same toolchain, the same fork commit at the same absolute `IGNITE` path and
 the same `ROCM_PATH` string as the release build; `packaging/gfx1100-kernels.sha256` holds the release build's hashes, and
-kernels.yml's "N of 36 equal" count is low for this reason as well as the compiler's.
+kernels.yml's "N of M equal" count is low for this reason as well as the compiler's.
 
 Moving the build into the image (from the maintainer's own paths) changed every object's bytes and none of its code:
 `tools/gates/objcheck.py check` of the image's build against a build of the same sources with the maintainer's toolchain
@@ -217,8 +219,7 @@ paths finds all 103 objects with the same code and data sections and the same k3
 that differ are symbol names, the tables built from them and `.dynamic`'s offsets into those. So the gates that validated
 the previous objects hold for these.
 
-To check a published release: clone the tag, run `tools/release/in_image.sh tools/release/release_build.sh` (with access to
-the image), and compare `dist/SHA256SUMS` with the Release's. Without the image, check its provenance (below).
+To check a published release (the rebuild in the image, or its provenance): [verify your download](../verifying.md).
 
 ## The build image
 
@@ -248,14 +249,8 @@ For users: [verify your download](../verifying.md) has the checks and the rebuil
 
 The release files meet **SLSA Build Level 3** by our own assessment (no one has audited it): build.yml builds them on GitHub-hosted runners in a reusable workflow
 (isolated from the calling workflow's steps) and GitHub signs non-forgeable provenance naming the repository, the commit,
-the workflow file and the run. Check a file:
-
-```bash
-gh attestation verify caminus-X.Y.Z-py3-none-manylinux_2_17_x86_64.whl --repo jdominick05/caminus \
-   --signer-workflow jdominick05/caminus/.github/workflows/build.yml --source-ref refs/tags/vX.Y.Z
-```
-
-`--source-ref` matters: a `ci/*` rehearsal's files are signed by the same workflow, with their branch as the source.
+the workflow file and the run. The check commands are in [verify your download](../verifying.md) (`gh attestation verify
+... --source-ref refs/tags/vX.Y.Z`). `--source-ref` matters: a `ci/*` rehearsal's files are signed by the same workflow, with their branch as the source.
 A release's source is its tag (release.yml refuses a run by hand that is not started on the tag). A nightly's source is
 `refs/heads/testing` and the commit is the head of `testing` the nightly was made from, not the nightly's tag commit:
 nightly.yml runs on `testing` for the reason above. The tag commit is that head plus the version line and the hashes

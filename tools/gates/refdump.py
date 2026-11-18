@@ -1,5 +1,5 @@
 """Bitwise reference dumps of the TP decode (FlashNextTP, ntok=1) and their comparison: the gate for any change that must
-leave target decode numerics bitwise (CLAUDE.md, bitwise discipline). Teacher forced over the first N positions of a token
+leave target decode numerics bitwise (AGENTS.md, bitwise discipline). Teacher forced over the first N positions of a token
 file; per position: the full logits (cpu float32), both cards' router ids and check_replicas().
   guard.sh LOG SECS python -I tools/gates/refdump.py save OUT.pt [--model coder|reap|PATH] [--tokens FILE] [--n 24]
                                                          [--per-wgp N] [--max-ctx N] [--qsa 0|1] [--tape dual|always]

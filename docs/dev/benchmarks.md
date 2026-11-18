@@ -11,9 +11,7 @@ reference dumps the accuracy gates compare against (llama.cpp's own tensors and 
 tools that produce and compare them are in this repository (tools/reference/gg_golden.cpp, tools/gates/, tools/k3_smoke.py,
 tools/eval/sweep_262k.py), so the numbers can be reproduced on the same hardware with references you build yourself.
 
-**The comparison:** llama.cpp at the fork the gates use (ignite-llama, commit 842653396, published as e4e3f8eda on
-[github.com/jdominick05/ignite-llama](https://github.com/jdominick05/ignite-llama) with identical `ggml/`, `common/` and
-`src/`: docs/dev/building.md; a HIP build with the same TheRock toolchain), on the same file and the same two cards: llama-server with `-sm layer -ts 550,450`, flash attention on, a q8_0 KV
+**The comparison:** llama.cpp at the fork the gates use (ignite-llama at e4e3f8eda, [github.com/jdominick05/ignite-llama](https://github.com/jdominick05/ignite-llama): docs/dev/building.md; a HIP build with the same TheRock toolchain), on the same file and the same two cards: llama-server with `-sm layer -ts 550,450`, flash attention on, a q8_0 KV
 cache, DFlash with `--spec-draft-n-max 3`; llama-bench for prompt processing. llama.cpp's numbers were measured on 2026-11-01
 unless a row says otherwise.
 
@@ -96,7 +94,7 @@ cache directories; synthetic conversations):
 ## The other models
 
 > [!NOTE]
-> Qwen3.6-35B-A3B (both files) and Qwen3-Coder-Next are **paused** for the next release (`caminus.models.PAUSED`). Their
+> Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2 are **paused** for the next release (`caminus.models.PAUSED`). Their
 > rows below and in the two-card yardstick are from 2026-11-07 / 11-11 and are not rerun until they come back.
 
 Measured 2026-11-07 on one card each (the RX 7900 XTX unless noted) or on both cards for Qwen3-Coder-Next; llama.cpp on
@@ -255,7 +253,7 @@ one card, testing's objects; not rerun for 0.3.0: inputs lost):
 code 22K: every mtp round's reply equalled the first plain round's, token for token. agent 40K: the replies agree for the
 first 73 tokens, then the mtp arm stops (EOS) while plain continues 2 tokens - the same on testing without the
 draft-policy change. Whether that is a near-tie at the end token or a verify difference is not measured yet (no margin
-was recorded), so the served default stays `--draft off` on every model until it is explained.
+was recorded), so `--draft mtp` stays opt-in until it is explained (the default is `--draft dflash`, the DFlash2 drafter, kept when its file is present and the cards still hold the context: `arch.Dense35.DRAFT_DEFAULT`).
 
 #### Speculative decoding with DFlash 2 (served)
 

@@ -1,31 +1,19 @@
-# The dense Qwen3.8-27B line on Caminus's own code (in progress)
+# The dense Qwen3.8-27B line on Caminus's own code
 
-Two finetunes of Qwen3.8-27B are being brought up on code written for this project, the way
-[Qwen3-30B-A3B](qwen3-30b-a3b.md) was: Swift 1.5 (Q4_K_M) first, then ThinkingCap (RCO, 4.2 bits per weight). Both are
-dense models of GGUF architecture `qwen35`: 64 blocks, three Gated DeltaNet blocks then one gated-attention block,
-each followed by a SwiGLU feed-forward of width 17,408 on a residual stream of 5,120.
+Swift 1.5 (Q4_K_M), ThinkingCap (RCO, 4.2 bits per weight) and the plain GSQ-RCO IQ3_S run on code written for this
+project, the way [Qwen3-30B-A3B](qwen3-30b-a3b.md) does. They are dense models of GGUF architecture `qwen35`: 64
+blocks, three Gated DeltaNet blocks then one gated-attention block, each followed by a SwiGLU feed-forward of width
+17,408 on a residual stream of 5,120.
 
-**Status: the host side, and a decode module that passes its accuracy gate on each card, untuned.**
-`caminus serve` does not serve these files. This page is updated as each part lands.
-
-| Part | State |
-|---|---|
-| Files in the catalog (`python/caminus/models.py`, files only) | done |
-| Reading the GGUF, the tokenizer, the host decoders | done, on own code |
-| float64 reference of the forward (`caminus.ref_q35`) | done; confirmed by llama.cpp's logits on the real file |
-| Swift's decode module and one-card engine (`kernels/k3_q35_swift.hip`, `engine/q35_dense.py`) | passes the tiny-model test and the G-model gate on the RX 7900 XT and on the RX 7900 XTX; speed untuned |
-| Prefill, serving, two cards, drafting, ThinkingCap's formats | not started |
+**Status: served.** One card each; Swift 1.5 and ThinkingCap also on two, with MTP and DFlash2 drafting.
+`caminus pull swift-1.5|thinkingcap|qwen3.8-27b` fetches them (the DFlash2 drafter is shared). Speeds and gates:
+[benchmarks](benchmarks.md) (the Swift 1.5, ThinkingCap and two-card sections); the models: [models](../models.md).
+The rest of this page is the bring-up record of 2026-11-11 (Swift's decode module on one card), kept as measured then.
 
 ## The files
 
-| Model | File | Size | Licence |
-|---|---|---|---|
-| Swift 1.5 | `ukisai/Swift-1.5-Qwen3.8-27B-GGUF`, Q4_K_M | 17.4 GB | Swift Open License 1.0 |
-| ThinkingCap | `bottlecapai/ThinkingCap-Qwen3.8-27B-GGUF-RCO-4.2bpw` | 14.3 GB | PolyForm Small Business 1.0.0 |
-| DFlash2 drafter of the base model | `incoai/Qwen3.8-27B-DFlash2-GGUF`, Q8_0 | 2.1 GB | Apache-2.0 |
-
-Read each licence before use: the two finetunes are not under an open-source licence. The catalog pins each file's
-revision and SHA-256. No named model downloads them yet.
+Files, sizes and licences: [models](../models.md). Read each licence before use: the two finetunes are not under an
+open-source licence. The catalog (`python/caminus/models.py`) pins each file's revision and SHA-256.
 
 ## What Swift 1.5 Q4_K_M holds
 
@@ -98,7 +86,7 @@ runs them as one segment (47 of 64 blocks); the others run two matvecs and a Swi
 | G-model against llama.cpp (`tools/gates/q35_gmodel.py`, each card) | PASS: mean KLD 2.2e-07 against llama.cpp's 2.7e-04; top token 128 of 128 against 127 of 128 |
 
 Nothing is tuned: the grid is the Qwen3-30B-A3B engine's per-card choice and the task sizes are that engine's. For
-orientation only, at under 130 positions of context, every step synchronized by the test, next to llama.cpp's
+orientation only, at bring-up (before tuning), at under 130 positions of context, every step synchronized by the test, next to llama.cpp's
 `llama-bench` on the same file and card:
 
 | Card | This module | llama.cpp |
@@ -107,7 +95,7 @@ orientation only, at under 130 positions of context, every step synchronized by 
 | RX 7900 XTX | 23.8 ms per token (42 tok/s) | 37.1 tok/s |
 
 The RX 7900 XT's `llama-bench` figure is from an earlier run the same day (same build and file); the other three
-are from one run. One token reads 16.48 GB of weights. Nothing is measured at 1K or 4K of context yet.
+are from one run. One token reads 16.48 GB of weights. Depth curves and drafted speeds: [benchmarks](benchmarks.md).
 
 ### Activation range
 

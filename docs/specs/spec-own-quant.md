@@ -1,6 +1,6 @@
 # Own quantized math: Caminus's dequant and dot kernels, and the gate that replaces "bitwise llama.cpp"
 
-Status: draft (2026-11-09). Owner: the K3 engine.
+Status: the gates are in force since 2026-11-09; of the order of work, step 3 is done (Qwen3-30B-A3B and the 27B line), steps 4-6 are open. Owner: the K3 engine.
 
 ## Goal
 

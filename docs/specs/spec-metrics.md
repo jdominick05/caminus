@@ -620,19 +620,8 @@ compared by its token.
 
 `K3Session` hands every request to `PromptCache.prepare(ids, marks, side='auto', max_new=)` (and `plan(ids, side='auto',
 max_new=)` first; the worker and `run_generation` pass the request's max_new to a session with `wants_max_new`).
-`PromptCache.route` sends a request to the **side slot** when all of these hold, else to the main slot:
-- it does not match the main line: it shares fewer tokens with the main line than the main line's root mark (the end of its
-  system + tools block, from the last main request's template marks, else its `root` checkpoint), or than
-  `promptcache.SIDE_MATCH_MIN` = 64 when no root is known (measured: unrelated chats share 2 .. 11 tokens under the template),
-  and the main line's live state is not a prefix of it. A request that matches always goes to main;
-- it fits: prompt + max_new + T <= side_rows (8192). A side pass past side_rows would drop the main slot, so a request without
-  max_tokens (the server then allows the whole context) always goes to main;
-- the main line holds more positions than the request's prompt (the deepest of its live state and its checkpoints): there is a
-  conversation to protect. This condition is the implementer's addition to the ruling (a conversation whose first turn follows
-  a short request would otherwise run in the side slot, which takes no checkpoints and cannot be parked, until it outgrows it);
-- no conversation parked on the disk tier continues into it (`parked`: what `prepare` would unpark; a side call would start
-  cold), e.g. a conversation's next turn after a long unrelated request displaced and auto-parked it. Also the implementer's
-  addition.
+`PromptCache.route` sends a request to the **side slot** or to the main slot by the rule in
+[spec-cache-api.md](spec-cache-api.md) ("Routing").
 
 The decision is counted in `caminus:cache_route_total{route,reason}` and `cache.route` (with the last decision's numbers), the
 flight recorder's `cache.slot`, `PrefillStats.slot` and `K3Session.last_route`; `caminus:cache_side_active` / `cache.route.

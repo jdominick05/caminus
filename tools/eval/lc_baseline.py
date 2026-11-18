@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
 import numpy as np
 
-from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
+from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: AGENTS.md, "Models and data")
 MODEL = devpaths.coder()
 NV = 248320
 D281_KLD, D281_TOP1 = 0.0076, 0.959   # the Coder's D-281 floor / top-1 bar at short context (M1 G4)
