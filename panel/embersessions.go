@@ -46,7 +46,7 @@ func loadSessionCards(m emberModel, names []string) tea.Cmd {
 
 type residentCreatedMsg struct{ name, model, err string }
 
-// residentDestroyedMsg: a session the switcher removed, and where its home is kept.
+// residentDestroyedMsg: a session the switcher closed, and where its home is kept.
 type residentDestroyedMsg struct{ name, kept, err string }
 
 // destroyResidentSession cancels every live goal of the session (which withdraws their open requests), then removes it:
@@ -55,11 +55,7 @@ func destroyResidentSession(m emberModel, name string, active []string) tea.Cmd 
 	return func() tea.Msg {
 		// a runtime from before `remove` refuses here, before the goal is cancelled: nothing changes half-way
 		if out, err := runResident(residentCommand(m, []string{"remove", name, "--dry-run", "--json"}, "")); err != nil {
-			text := strings.TrimSpace(string(out))
-			if strings.Contains(text, "invalid choice") {
-				text = "the agent's runtime predates destroy: run caminus ember agent install, then try again"
-			}
-			return residentDestroyedMsg{name: name, err: text}
+			return residentDestroyedMsg{name: name, err: predates(out, "close")}
 		}
 		// the goals as they are now, not as the card last read them (a card still loading, or one read minutes ago,
 		// knows none or stale ones): a status that cannot be read stops the destroy
@@ -87,6 +83,125 @@ func destroyResidentSession(m emberModel, name string, active []string) tea.Cmd 
 		}
 		return residentDestroyedMsg{name: name, kept: r.Kept}
 	}
+}
+
+// closedSession is one session a close kept in removed-sessions (`agent restore`'s list).
+type closedSession struct {
+	Name     string  `json:"name"`
+	Kept     string  `json:"kept"`
+	ClosedAt float64 `json:"closed_at"`
+	Size     int     `json:"size"`
+	Open     bool    `json:"open"` // a session of that name is open now: restore refuses it
+}
+
+type closedSessionsMsg struct {
+	closed []closedSession
+	err    string
+}
+
+// residentRestoredMsg: what a restore did, as the line the status bar shows.
+type residentRestoredMsg struct{ text string }
+
+// predates is a failed command's message: the runtime's {"error"} reason, or for a runtime older than the operation
+// (argparse's "invalid choice") the fix.
+func predates(out []byte, what string) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if jsonInto(out, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	text := cliError(out)
+	if strings.Contains(text, "invalid choice") {
+		text = "the agent's runtime predates " + what + ": run caminus ember agent install, then try again"
+	}
+	return text
+}
+
+func loadClosedSessions(m emberModel) tea.Cmd {
+	return func() tea.Msg {
+		out, err := runResident(residentCommand(m, []string{"restore", "--json"}, ""))
+		if err != nil {
+			return closedSessionsMsg{err: predates(out, "restore")}
+		}
+		var r struct {
+			Closed []closedSession `json:"closed"`
+		}
+		if err := jsonInto(out, &r); err != nil {
+			return closedSessionsMsg{err: err.Error()}
+		}
+		return closedSessionsMsg{closed: r.Closed}
+	}
+}
+
+// restoreResidentSession moves a closed session back (its home, env, mail bus name) and starts its service.
+func restoreResidentSession(m emberModel, c closedSession) tea.Cmd {
+	return func() tea.Msg {
+		out, err := runResident(residentCommand(m, []string{"restore", c.Name, "--kept", c.Kept, "--json"}, ""))
+		if err != nil {
+			return residentRestoredMsg{"restore " + residentText(c.Name) + ": " + residentText(predates(out, "restore"))}
+		}
+		var r struct {
+			Started    bool   `json:"started"`
+			StartError string `json:"start_error"`
+		}
+		_ = jsonInto(out, &r)
+		if !r.Started {
+			return residentRestoredMsg{"restored " + residentText(c.Name) + "; its service did not start (s starts it): " + residentText(r.StartError)}
+		}
+		return residentRestoredMsg{"restored " + residentText(c.Name) + "; its service is running"}
+	}
+}
+
+// restoreKey handles keys while the closed sessions are listed under the cards.
+func (m emberModel) restoreKey(k string) (tea.Model, tea.Cmd) {
+	switch k {
+	case "esc", "r":
+		m.chat.pickerRestore = false
+	case "up", "k":
+		m.chat.closedSel = max(0, m.chat.closedSel-1)
+	case "down", "j":
+		m.chat.closedSel = min(max(0, len(m.chat.closed)-1), m.chat.closedSel+1)
+	case "enter":
+		if i := m.chat.closedSel; i >= 0 && i < len(m.chat.closed) {
+			c := m.chat.closed[i]
+			if c.Open {
+				m.msg = "a session named " + residentText(c.Name) + " is open: close it first"
+				return m, nil
+			}
+			m.chat.pickerRestore = false
+			return m, restoreResidentSession(m, c)
+		}
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// closedLines lists the closed sessions under the cards: name, when it was closed, its size.
+func (m emberModel) closedLines(w int) []string {
+	lines := []string{" " + emberWarn.Render("closed sessions:") + emberDim.Render("  ↑↓ choose · Enter restores · Esc back")}
+	switch {
+	case m.chat.closedNote != "":
+		return append(lines, emberDim.Render(emberClip("   "+residentText(m.chat.closedNote), w)))
+	case len(m.chat.closed) == 0:
+		return append(lines, emberDim.Render("   none: a closed session's home is kept here until you delete it"))
+	}
+	first := max(0, min(m.chat.closedSel-3, len(m.chat.closed)-5)) // five rows around the selection
+	for i := first; i < min(len(m.chat.closed), first+5); i++ {
+		c := m.chat.closed[i]
+		mark := "   "
+		if i == m.chat.closedSel {
+			mark = " › "
+		}
+		row := mark + residentText(c.Name) + emberDim.Render(" · closed "+time.Unix(int64(c.ClosedAt), 0).Format("2006-01-02 15:04")+
+			" · "+humanBytes(c.Size))
+		if c.Open {
+			row += emberDim.Render(" · a session of that name is open")
+		}
+		lines = append(lines, emberClip(row, w))
+	}
+	return lines
 }
 
 func emberClip(text string, width int) string {
