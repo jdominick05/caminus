@@ -237,8 +237,8 @@ CLAUDE.md imports this file.
   Default Caminus setup offers API advisors only, including extra chain entries; existing configs and explicit
   `--local-only` setup keep compatibility. Agents test setup only in scratch homes with credentials/discovery stubbed.
 - `share/harness/qwen-code/context_note.py`: the context note, a PostToolBatch hook `caminus qwen-code setup` copies into
-  each Caminus Qwen home (on by default, `--context-note off`): after each tool batch, the local time and the tokens used
-  and left before Qwen Code's automatic compaction, from the transcript's usage record for that batch. Its thresholds mirror Qwen Code's
+  each Caminus Qwen home (on by default, `--context-note off`): after each tool batch, the tokens used and left before
+  Qwen Code's automatic compaction, from the transcript's usage record for that batch. Its thresholds mirror Qwen Code's
   `computeThresholds`; it always exits 0. Tests: tests/harness/test_context_note.py.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.

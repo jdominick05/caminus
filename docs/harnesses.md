@@ -47,15 +47,15 @@ positions) runs in the main slot as before.
 
 ### The context note
 
-The model can't see how full its context is, or what time it is. So after each batch of tool calls, Caminus adds one
-line to the last tool result, like this:
+The model can't see how full its context is. So after each batch of tool calls, Caminus adds one line to the last tool
+result, like this:
 
 ```text
-[time: Wed 2026-11-18 00:41 EST; context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
+[context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
 ```
 
-The model can then plan the rest of the task, finishing or writing notes before Qwen Code compacts the conversation, and
-knows how long a step took. The line stays in the conversation, so the prompt cache keeps working. The numbers come from the model's last call plus a
+The model can then plan the rest of the task, finishing or writing notes before Qwen Code compacts the conversation. The
+line stays in the conversation, so the prompt cache keeps working. The numbers come from the model's last call plus a
 high estimate of the new tool output, so the room left is never overstated.
 
 It's on in Caminus's Qwen homes. To turn it off, run `caminus qwen-code setup --context-note off` (it stays off), or set

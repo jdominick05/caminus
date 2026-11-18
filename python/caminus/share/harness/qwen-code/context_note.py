@@ -1,14 +1,11 @@
 """Qwen Code PostToolBatch hook (`caminus qwen-code setup` registers it in Caminus's Qwen homes): after each batch of tool
-calls, one line with the local time and how much context is left, appended to the batch's last tool result:
+calls, one line on how much context is left, appended to the batch's last tool result:
 
-  [time: Wed 2026-11-18 00:41 EST; context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
+  [context: ~498K of 1,048K tokens used; ~392K left before automatic compaction]
 
 A model that can't see its context budget runs out of it mid-task; told how much is left after every step, it can plan
-the rest of the work (finish, save notes) before Qwen Code compacts the conversation. The time (local, weekday and zone,
-to the minute: the words Ember's time stamp uses, ember/resident/store.py time_line) tells it how long things took and
-what day it is. The line becomes part of the tool result Qwen Code records and sends, so it is in the history from then
-on: the server's prompt cache keeps its prefix (a time in the system prompt would void it). It rides on every note: the
-line is there anyway, and the time adds about a dozen tokens.
+the rest of the work (finish, save notes) before Qwen Code compacts the conversation. The line becomes part of the tool
+result Qwen Code records and sends, so it is in the history from then on: the server's prompt cache keeps its prefix.
 
 The numbers: Qwen Code's own measure (its compaction gate): the last model call's prompt tokens plus its output tokens,
 from the session transcript's assistant record for this batch (matched by the batch's call ids), plus this batch's tool
@@ -115,10 +112,9 @@ def note(inp, settings_path=None, wait_s=WAIT_S):
                                     ensure_ascii=False, default=str)) for c in calls)
     used = base + out
     left = auto_threshold(window, settings_pct(settings_path) if settings_path else DEFAULT_PCT) - used
-    stamp = time.strftime('time: %a %Y-%m-%d %H:%M %Z', time.localtime())
     if left <= 0:
-        return f'[{stamp}; context: ~{k(used)} of {k(window)} tokens used; automatic compaction comes before the next step]'
-    return f'[{stamp}; context: ~{k(used)} of {k(window)} tokens used; ~{k(left)} left before automatic compaction]'
+        return f'[context: ~{k(used)} of {k(window)} tokens used; automatic compaction comes before the next step]'
+    return f'[context: ~{k(used)} of {k(window)} tokens used; ~{k(left)} left before automatic compaction]'
 
 
 def main(argv, raw):
