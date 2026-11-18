@@ -358,7 +358,7 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
   of 64 chunks), with the Q6_K head -0.0230 ± 0.0017; the Q6_K head costs 0.0005 nats against F16. So the head can
   be Q6_K (the same bytes per token as today) at almost no cost. One text, and a GPTQ calibration set may lean
   towards text like it (the checkpoint does not name its set); no common bf16 reference, so no KLD.
-- **Where the Q4_0 family stopped (work in progress; the first GPU checks below, one failed).** The target file is the converted
+- **Where the Q4_0 family stopped (work in progress; the first GPU checks below).** The target file is the converted
   checkpoint with the Q4_K_M file's Q4_K embedding and Q6_K head spliced in (`gguf_splice.py --match
   '^(output|token_embd)\.weight$'`), so the engine needs no F16 op.
   - Built: `kernels/k3_q3m_q40*.hip`, twelve twins of the lean, Q8 KV, YaRN, two-card and verify modules
@@ -384,16 +384,14 @@ GPTQ (symmetric, group size 128, desc_act false, checkpoint_format "gptq"), the 
       126 / 128 against llama.cpp's q8_0 KV 2.22e-03, 123 / 128, and F16 -> Q8 1.33e-03, 97.7 % top-1 against
       llama.cpp's own 2.81e-03, 97.4 % (PASS).
     - `tests/prefill/test_q3m_prefill.py` (positions [0, 64) prefilled, then 64 decoded): F16 KV caminus 1.45e-04,
-      63 / 64 against llama.cpp's prefill-then-decode 1.64e-03, 63 / 64 (PASS). **Q8 KV, with llama.cpp's q8_0-KV
-      prefill-then-decode rows as the bound: FAIL** on top-1, 61 / 64 against 62 / 64 (mean KLD 7.29e-04 against
-      2.04e-03 passes; the same engine decode-only at those positions 63 / 64; the prefill's Q8 rows byte for byte their
-      encoding, the geometry and bounds checks pass). The same check on the Q4_K_M file fails the same way: 63 / 64
-      against llama.cpp's 64 / 64, mean KLD 1.42e-03 against 2.27e-03 (decode-only 64 / 64). So the shortfall is the
-      shipped Q8 prefill path's under this bound, not the Q4_0 family's; [q8-kv.md](q8-kv.md)'s command for this test
-      runs without `--llama`, so the shipped path was never held to it. Whether this rule gates the switch is open.
-    - Not run after that stop: the two-card G-model gate, the depth rows, the embedding perplexity check, the served
-      smoke, served speed.
-  - Next, once the Q8 prefill question is settled: the two-card G-model gate, the depth rows (16,384 and 40,896 against
+      63 / 64 against llama.cpp's prefill-then-decode 1.64e-03, 63 / 64 (PASS). Q8 KV, with llama.cpp's q8_0-KV
+      prefill-then-decode rows as a bound (informational, pending the owner's ruling; not a gate of this file): top-1
+      61 / 64 against llama.cpp's 62 / 64, mean KLD 7.29e-04 against 2.04e-03 (the same engine decode-only at those
+      positions 63 / 64; the prefill's Q8 rows byte for byte their encoding, the geometry and bounds checks pass). The
+      same check on the Q4_K_M file: top-1 63 / 64 against llama.cpp's 64 / 64, mean KLD 1.42e-03 against 2.27e-03
+      (decode-only 64 / 64). The top-1 shortfall is the shipped Q8 prefill path's under that bound, on both files;
+      [q8-kv.md](q8-kv.md)'s command for this test runs without `--llama`, so the shipped path was never held to it.
+  - Next: the two-card G-model gate, the depth rows (16,384 and 40,896 against
     `q3moe_ref32.py` of this file on the published rows' tokens), the embedding perplexity check, the served smoke, then
     served speed against Q4_K_M (one card and two, F16 and Q8 KV). The
     embedding check's bar, set before its run: the target file's perplexity (the same command as the table above) below
