@@ -1,5 +1,6 @@
 """caminus COMMAND [ARGS...]   (`caminus COMMAND --help` for a command's options; python -I -m caminus works the same)
 
+  wizard    the first run, step by step: check the machine, pull and start a model, set up Qwen Code (--dry-run, --yes)
   models    the named models: on disk or not, the cards each needs, measured speeds    (pull NAME downloads one)
   fit       report the context that fits: same options as serve plus --json (CPU/sysfs only)
   start     start a server in the background: caminus start NAME [--card N] [--ctx auto|N] (--team brain-hands)
@@ -26,7 +27,7 @@ them). PyTorch is not a declared dependency: install the ROCm build (caminus.dev
 import sys
 
 COMMANDS = ('serve', 'fit', 'download', 'doctor', 'purge', 'replay', 'flight', 'kv-cache', 'guard', 'ember', 'env', 'version',
-            'models', 'pull', 'start', 'stop', 'restart', 'ps', 'logs', 'top', 'panel', 'qwen-code', 'qwen', 'advisor')
+            'models', 'pull', 'start', 'stop', 'restart', 'ps', 'logs', 'top', 'panel', 'qwen-code', 'qwen', 'advisor', 'wizard')
 MANAGE = {'models': 'cmd_models', 'pull': 'cmd_pull', 'start': 'cmd_start', 'stop': 'cmd_stop', 'restart': 'cmd_restart',
           'ps': 'cmd_ps', 'logs': 'cmd_logs', 'top': 'cmd_top', 'panel': 'cmd_panel'}
 
@@ -103,7 +104,8 @@ def dispatch(cmd, rest):
             print('usage: caminus guard LOG SECS CMD...  (SECS 0: no time limit) | caminus guard --lines', file=sys.stderr)
             return 2
         os.execvp('bash', ['bash', guarded.GUARD, *rest])
-    mod = {'download': 'download', 'doctor': 'doctor', 'purge': 'purge', 'flight': 'flight', 'kv-cache': 'kv_cache'}[cmd]
+    mod = {'download': 'download', 'doctor': 'doctor', 'purge': 'purge', 'flight': 'flight', 'kv-cache': 'kv_cache',
+           'wizard': 'wizard'}[cmd]
     import importlib
     return importlib.import_module(f'.cmd.{mod}', __package__).main(rest)
 

@@ -17,7 +17,10 @@ GFX_TARGET = 110000         # gfx1100
 DISPLAY_RESERVE_MIB = 512   # kept free below the line of a card that drives a display (the desktop's own VRAM grows)
 CAP_MARGIN_MIB = 256        # kept free below every card's guard line (caminus.device.capacity.MARGIN_MIB: allocator rounding,
                             # HIP's own growth); here so that a process without torch applies the same cap
-NAMES = {(0x744c, 23): 'XTX', (0x744c, 24): 'XTX', (0x744c, 19): 'XT', (0x744c, 20): 'XT'}   # (PCI device, total GiB) -> label
+NAMES = {(0x744c, 23): 'XTX', (0x744c, 24): 'XTX', (0x744c, 19): 'XT', (0x744c, 20): 'XT',   # (PCI device, total GiB) -> label
+         (0x744c, 15): 'GRE', (0x744c, 16): 'GRE'}   # (the RX 7900 GRE shares the XTX / XT's device id: told apart by its 16 GB)
+# the other gfx1100 cards by PCI device id alone (pci.ids): allowed as untested (caminus.device.host: status 'untested')
+UNTESTED = {0x7448: 'W7900', 0x744a: 'W7900', 0x744b: 'W7900D', 0x745e: 'W7800'}
 
 
 def _read(p):
@@ -72,7 +75,8 @@ def cards(root='/'):
         conn = any(_read(s) == 'connected' for s in glob.glob(os.path.join(drm, n + '-*', 'status')))
         display = conn or _read(os.path.join(dev, 'boot_vga')) == '1'
         did = _read(os.path.join(dev, 'device'))
-        label = NAMES.get((int(did, 16) if did else None, total_mib // 1024), n)
+        did = int(did, 16) if did else None
+        label = NAMES.get((did, total_mib // 1024)) or UNTESTED.get(did, n)
         watched = gfx == GFX_TARGET
         out.append(dict(card=n, dev=dev, pci=pci, label=label, total_mib=total_mib, gfx=gfx, watched=watched, minor=minor,
                         line_mib=line_mib(total_mib) if watched else None, display=display,

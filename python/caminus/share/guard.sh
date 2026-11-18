@@ -51,6 +51,10 @@ discover() {   # fills CARDS / DEVS / LABELS / TOTALS / LINES / DISPLAY for the 
         case "$did:$(( total / 1024 ))" in
             0x744c:23|0x744c:24) lab=XTX ;;
             0x744c:19|0x744c:20) lab=XT ;;
+            0x744c:15|0x744c:16) lab=GRE ;;
+            0x7448:*|0x744a:*) lab=W7900 ;;
+            0x744b:*) lab=W7900D ;;
+            0x745e:*) lab=W7800 ;;
             *) lab=$n ;;
         esac
         disp=0
