@@ -184,8 +184,8 @@ func (m emberModel) markdownBodies(a, b int) []mdBody {
 			continue
 		}
 		e := m.residentEvents[i]
-		text := cardOutput(e)
-		if !looksLikeMarkdown(text) {
+		text, _ := cardSource(e)
+		if c.openCardMarkdown(e) == "" { // (drawn as it is: no body to find; the drawing is cached)
 			continue
 		}
 		src := c // (a copy: drawing it changes nothing on the model)
@@ -205,16 +205,26 @@ func (m emberModel) markdownBodies(a, b int) []mdBody {
 	return out
 }
 
-// cardOutput is the text a card can draw as Markdown: a command's output (a ! card's, or a terminal result's).
-func cardOutput(e residentEvent) string {
-	out, _ := e.Data["output"].(string)
-	if e.Kind == "tool_result" {
+// cardSource is the text an open card can draw as Markdown, and whether it is a model's words (prose: Markdown, as
+// a reply is) rather than a program's output (drawn as Markdown only when looksLikeMarkdown says so): a command's
+// output (a ! card's, a terminal result's), an advisor's review, a report's text ("" for any other card).
+func cardSource(e residentEvent) (string, bool) {
+	str := func(m map[string]any, k string) string { s, _ := m[k].(string); return s }
+	output := func(s string) string { return strings.ReplaceAll(ansi.Strip(s), "\r\n", "\n") }
+	switch e.Kind {
+	case "shell":
+		return output(str(e.Data, "output")), false
+	case "tool_result":
 		result, _ := e.Data["result"].(map[string]any)
-		out, _ = result["output"].(string)
-	} else if e.Kind != "shell" {
-		return ""
+		return output(str(result, "output")), false
+	case "advisor_review":
+		return str(e.Data, "advice"), true
+	case "report":
+		if str(e.Data, "level") != "need_you" { // (the need-you report is a turn, rendered as a reply is)
+			return str(e.Data, "text"), true
+		}
 	}
-	return strings.ReplaceAll(ansi.Strip(out), "\r\n", "\n")
+	return "", false
 }
 
 // cells is what the selection takes of line i (plain): its text and the cells [start, end) that text sits in (empty

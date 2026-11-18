@@ -93,7 +93,8 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var emberNavigation = []int{7, 5, 8, 3, 4}
 
 type emberModel struct {
-	hosted         ctl // /panel: the Caminus panel component, full screen while hostedOpen (emberpanel.go)
+	advisorShut    string // the agent's advisor call whose popup you closed: it never opens again
+	hosted         ctl    // /panel: the Caminus panel component, full screen while hostedOpen (emberpanel.go)
 	hostedOpen     bool
 	notes          notifier // desktop notifications already shown (notify.go)
 	user           string
@@ -768,6 +769,28 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.receiveStudioRaw(msg), nil
 	case residentActionMsg:
 		m.msg = msg.text
+		return m, residentRefresh(m)
+	case advisorDoneMsg:
+		// /advisor's popup goes when the review is in (its card shows it), says why when it failed, and gives way to
+		// the view of an advisor the setup keeps from being called
+		review := m.chat.btw.open && m.chat.btw.advisor && m.chat.btw.call == ""
+		switch {
+		case msg.view != nil:
+			if review {
+				m.chat.btw = btwState{}
+			}
+			return m.Update(*msg.view)
+		case msg.err != "" && review:
+			m.chat.btw.loading, m.chat.btw.err = false, msg.err
+		case msg.err != "":
+			m.msg = "advisor: " + msg.err
+		default:
+			if review {
+				m.chat.btw = btwState{}
+			}
+			m.msg = msg.note
+		}
+		m.syncChat()
 		return m, residentRefresh(m)
 	case handoffDoneMsg:
 		m.msg = msg.text

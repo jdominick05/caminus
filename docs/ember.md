@@ -210,7 +210,12 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   would refuse the model, and `caminus ember relay status` lists the models each Anthropic relay allows. When the
   advisor cannot be called (the relay refuses its model, is not running, or has spent its cap), `/advisor` opens the
   reason and the exact command to run, the agent's advisor tool says the same, and the attempt does not count against
-  the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart.
+  the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart. While the advisor
+  is asked (`/advisor`, or the agent's advisor tool), a popup over the typing box (the one `/btw` uses) shows who asked,
+  the advisor's model and the seconds it has taken; it goes when the advice lands as a card (rendered as Markdown, as
+  the agent's replies are; Ctrl+Y shows its source), and says why when the call fails (a spent budget, no calls left)
+  until Esc closes it (while the agent works, the first Esc stops the agent, as always). `/advisor` waits while a
+  `/btw` answer is on its way.
   On an OpenCode Go plan, the advisor can be one of the plan's Messages-native models (`caminus ember agent models
   NAME --refresh` lists each with its `protocol`; a Chat Completions one is refused), through the plan's relay:
 

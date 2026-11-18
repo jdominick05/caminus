@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -221,11 +222,14 @@ func toolCard(kind, what, meta string, ok bool, expanded bool, body []string, w 
 		return line
 	}
 	// an open card shows everything: long lines wrap under the rule, nothing is cut
+	// dim; a command's output that is a unified diff (a hunk line in it: git diff, diff -u) in the diff's colours. Only
+	// there: a "- " list in an advisor's review read red as removed lines, and so did ls -l. (editCard draws edits.)
+	diff := (kind == "output" || kind == "shell" || kind == "my shell") && slices.ContainsFunc(body, hunkRe.MatchString)
 	out := append([]string{line}, ruled(body, cardRule(), cardRule(), w, func(b, piece string) string {
 		switch {
-		case strings.HasPrefix(b, "+"):
+		case diff && strings.HasPrefix(b, "+"):
 			return emberCtxOK.Render(piece)
-		case strings.HasPrefix(b, "-"):
+		case diff && strings.HasPrefix(b, "-"):
 			return emberCtxHot.Render(piece)
 		}
 		return emberDim.Render(piece)
