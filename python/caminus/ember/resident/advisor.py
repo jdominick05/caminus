@@ -29,15 +29,21 @@ and shows only what it built: every word of this one comes from the agent's acco
 Every failure is recorded in failures.jsonl (who 'advisor'): an error, a hard refusal (stop_reason refusal, with its
 category), a soft refusal (advice that declines in words: refusal.py, the Qwen Code advisor's detector), and a call that
 a server-side fallback rescued. Refusal records keep the brief, so the call can be rerun against other models.
+
+The eyes (Eyes, below) are the same kind of helper for a brain that can't see: when it reads an image, the runtime sends
+that one image, with the agent's question, to a vision model on the owner's relay and returns the description as the
+read's result. They keep their own ledger (eyes.json) and daily budget, priced per call as the advisor's are.
 """
 import datetime
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from .model import Model, ModelError, ModelRefused, price
+from . import catalog
+from .model import Model, ModelError, ModelRefused, price, remember_prices
 from .refusal import refusal_kind
 from .store import atomic_json, log_failure
 
@@ -93,9 +99,11 @@ def unavailable(e, cfg, name='NAME'):
 
 
 class Advisor:
+    LEDGER = 'advisor.json'
+
     def __init__(self, runtime):
         self.rt = runtime
-        self.path = runtime.home / 'advisor.json'
+        self.path = runtime.home / self.LEDGER
 
     @property
     def cfg(self):
@@ -255,3 +263,131 @@ class Advisor:
         if context:
             parts.append('AGENT NOTE:\n' + context[:2000])
         return '\n\n'.join(parts)
+
+
+# ---- eyes ---------------------------------------------------------------------------------------------------------
+
+# What `agent eyes --auto` picks: the first of these whose provider kind is configured through the owner's relay
+# (catalog providers with relay true); chosen by a lab comparison on screenshots and diagrams (docs/ember.md, "Eyes").
+EYES_AUTO = (('mistral', 'ministral-8b-latest'), ('anthropic', 'claude-haiku-5-5'))
+EYES_DEFAULTS = dict(budget_usd=0.25, max_tokens=1024, timeout=120)
+EYES_QUESTION = 'Describe what matters in this image for the task.'
+EYES_BRIEF = ('You are the eyes of an agent whose model cannot see images. It read an image file and asks you about it. '
+              'Answer its question from what the image shows. Quote text in the image exactly, give numbers, labels and '
+              'colours as shown, and say plainly when something is unreadable or not in the image; never guess. Be '
+              'concise: no preamble.')
+EYES_OFF = ('No eyes model is set up to describe images for you. Your human can turn eyes on: caminus ember agent eyes '
+            'NAME --provider P --model M (a vision model on their key relay), or --auto (ministral-8b-latest on a '
+            'Mistral relay, else Claude Haiku 5.5); see docs/ember.md, "Eyes".')
+
+
+class Eyes(Advisor):
+    """The borrowed eyes: one vision call per image a non-vision brain reads (the advisor's ledger code, its own file).
+
+    Opt-in only. Configuration, in config.json under "eyes": {provider, model} picks a configured provider
+    (`providers`, normally the owner's relay) and a vision model it serves; budget_usd (0.25 a day), max_tokens (the
+    description's length, 1024) and timeout (120 s) are optional. No block, or false: off."""
+    LEDGER = 'eyes.json'
+
+    @property
+    def cfg(self):
+        raw = self.rt.config.get('eyes')
+        if not (isinstance(raw, dict) and raw.get('provider') and raw.get('model')):
+            return None                           # opt-in only: no block (or false) is off
+        spec = catalog.providers(self.rt.config).get(raw['provider'])
+        if not spec or not spec.get('endpoint'):
+            return None
+        return {**EYES_DEFAULTS, **raw, 'kind': spec.get('kind'), 'endpoint': spec['endpoint'],
+                'relay': bool(spec.get('relay'))}
+
+    @staticmethod
+    def auto_pick(config):
+        """`agent eyes --auto`: {provider, model} for the first of EYES_AUTO whose provider kind is configured through
+        the relay, or None. Only the human's command writes it; a session never switches eyes on by itself."""
+        provs = catalog.providers(config)
+        for kind, model in EYES_AUTO:
+            name = next((n for n, s in provs.items() if s.get('kind') == kind and s.get('relay')), None)
+            if name:
+                return dict(provider=name, model=model)
+        return None
+
+    def see(self, gid, result, question=None):
+        """read's result for an image that the brain can't see: with the eyes model's description and
+        image.described_by, or eyes_error saying why there is none (the read itself still answers), or, eyes off, a
+        note saying how to turn them on."""
+        cfg = self.cfg
+        if cfg is None:
+            return dict(result, note=EYES_OFF)
+        try:
+            text, who = self._describe(gid, cfg, result, (question or '').strip() or EYES_QUESTION)
+        except ValueError as e:
+            return dict(result, eyes_error=str(e))
+        return dict(result, image=dict(result['image'], described_by=who), description=text)
+
+    def _entry(self, cfg):
+        """the eyes model's catalog entry (its price where the provider lists one, and whether it can see)"""
+        cat = catalog.load(self.rt.home)
+        entry = catalog.find(cat, cfg['model'], cfg['provider'])
+        if entry is None:
+            cat = catalog.refresh(self.rt.home, self.rt.config, only=cfg['provider'],
+                                  opener=getattr(self.rt, 'eyes_opener', None) or urllib.request.urlopen)
+            entry = catalog.find(cat, cfg['model'], cfg['provider'])
+        return entry
+
+    def _describe(self, gid, cfg, result, question):
+        if self.spent_today() >= float(cfg['budget_usd']):
+            raise ValueError("today's eyes budget ($%.2f) is spent; ask your human, or use the image tools in the "
+                             'terminal' % float(cfg['budget_usd']))
+        entry = self._entry(cfg)
+        if entry is None:
+            raise ValueError('the eyes model %s is not in the %s catalog' % (cfg['model'], cfg['provider']))
+        if not entry.get('vision'):
+            raise ValueError("the eyes model %s can't see images (its provider says so): your human can pick one that "
+                             'can: caminus ember agent eyes NAME --provider P --model M' % cfg['model'])
+        if entry.get('prices'):
+            remember_prices(cfg['model'], entry['prices'])
+        if price(cfg['model'], {}) is None:
+            raise ValueError('the eyes model %s has no known price, so its spend cannot be limited' % cfg['model'])
+        model = Model(dict(model=cfg['model'], endpoint=cfg['endpoint'], provider_kind=cfg['kind'],
+                           api='anthropic' if cfg['kind'] == 'anthropic' else 'openai', relay=cfg['relay'],
+                           context=int(entry.get('context') or 100000), max_tokens=int(cfg['max_tokens']), vision=True,
+                           api_key_env=cfg.get('api_key_env', 'CAMINUS_EYES_API_KEY'), timeout=float(cfg['timeout']),
+                           cache=False, name=self.rt.config.get('name')),
+                      opener=getattr(self.rt, 'eyes_opener', None) or urllib.request.urlopen)
+        model.counter = False                     # one image and a question: no count_tokens round trip
+        img = dict(result['image'], path=result['path'])
+        task = ((self.rt.store.goal(gid) or {}).get('prompt') or '').strip() if gid else ''
+        ask = '%s%s is a %dx%d %s. The agent asks: %s' % (
+            'The agent\'s task: %s\n\n' % task[:600] if task else '', os.path.basename(result['path']), img['width'],
+            img['height'], str(img['format']).upper(), question[:2000])
+        try:
+            reply = model.complete([dict(role='system', content=EYES_BRIEF), dict(role='user', content=ask, image=img)],
+                                   max_tokens=int(cfg['max_tokens']))
+        except ModelError as e:
+            self._spend(cfg, model)               # a failed call can still have been billed
+            log_failure(self.rt.home, dict(goal=gid, who='eyes', model=cfg['model'], error_type=type(e).__name__,
+                                           error=str(e)[:2048], status=getattr(e, 'status', None), call=model.last_call))
+            why = eyes_refusal(cfg, e)
+            self.rt.store.event('eyes_failed', dict(path=result['path'], model=cfg['model'], error=why[:500]), gid)
+            raise ValueError(why)
+        usd = self._spend(cfg, model)
+        who = (model.last_call or {}).get('served') or cfg['model']
+        self.rt.store.event('eyes', dict(path=result['path'], model=who, question=question[:500], usd=round(usd, 6)), gid)
+        return reply.get('content') or '', who
+
+
+def eyes_refusal(cfg, e):
+    """What the agent hears when the eyes call fails, with the exact fix where a relay refuses the model. The Anthropic
+    relay's refusals (model not allowed, cap spent, not running) are read by unavailable(), as the advisor's are: the
+    relay's own command where it names one, checked against SAFE_COMMAND. The Mistral relay's model list is its price
+    file, re-read on change (it takes no --model)."""
+    text, status, model = str(e), getattr(e, 'status', None), cfg['model']
+    u = unavailable(e, dict(model=model, endpoint=cfg.get('endpoint', '')))
+    if u is not None and u.kind in ('relay_model', 'relay_cap', 'relay_down'):
+        return ('the eyes model %s cannot be called: %s%s; until then, ask your human or use the image tools in the '
+                'terminal' % (model, u.reason, ('. Your human can fix it: ' + u.fix) if u.fix else ''))
+    if status == 403 and 'no price for' in text:
+        return ("your human's relay has no price for the eyes model %s, so it refuses it. They can add it to the relay's "
+                'price file (~/.config/caminus/mistral-prices.json unless its --prices names another) as "%s": [input, '
+                'output] in USD per million tokens; the relay re-reads the file, no restart' % (model, model))
+    return 'the eyes model %s did not answer: %s' % (model, text[:500])

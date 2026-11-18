@@ -56,9 +56,9 @@ def _add_root(home, path, roots):
         p = p.parent
 
 
-def _run(args, timeout):
+def _run(args, timeout, text=True):
     try:
-        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(args, capture_output=True, text=text, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
 

@@ -115,7 +115,7 @@ def open_session(a):
         ctl = d / 'driven'
         ctl.mkdir(exist_ok=True)
         p = subprocess.Popen([sys.executable, '-I', str(HERE / 'lab.py'), 'serve-driven', str(ctl), '--ttl', str(a.ttl)]
-                             + (['--judge'] if a.brain == 'driven:judge' else []),
+                             + [f'--{o}' for o in a.brain.split(':')[1:] if o in ('judge', 'caminus')],
                              stdout=subprocess.PIPE, stderr=open(d / 'driven.log', 'wb'), start_new_session=True)
         port = int(p.stdout.readline())
         s.update(driven=str(ctl), driven_pid=p.pid)
@@ -265,6 +265,8 @@ def reply(a):
     r = dict(text=a.text or '')
     if a.call:
         r.update(call=a.call, args=json.loads(a.args or '{}'))
+    if a.timings:
+        r['timings'] = json.loads(a.timings)   # (sent only by a driven:caminus brain, as caminus serve sends them)
     rep = pend[0].with_name(pend[0].name.replace('.req.', '.rep.'))
     tmp = rep.with_suffix('.tmp')
     tmp.write_text(json.dumps(r))

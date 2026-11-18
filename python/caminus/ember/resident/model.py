@@ -1,7 +1,11 @@
 """Model transports: OpenAI-compatible chat completions (the local server) and Anthropic's Messages API.
 Standard library only; no engine, GPU or agent-CLI dependency."""
+import base64
+import email.utils
+import hashlib
 import http.client
 import json
+import math
 import os
 import socket
 import threading
@@ -21,6 +25,32 @@ SHORT_CALL = 4096          # a call with less output room than this runs without
 # models that refuse thinking off (current Opus and Sonnet; the advisor runs on them): short calls keep thinking there
 THINKING_REQUIRED = frozenset(('claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5',
                                'claude-fable-5-2', 'claude-fable-5-1', 'claude-fable-5'))
+
+
+def estimated_speed(tokens, t_first, t_last):
+    """A reply's decode speed measured here: its usage token count over the client's window from the first piece to
+    the last, prefill and queueing excluded; None when the window is too short to mean anything. Only for a brain whose
+    server reports no speed of its own (engine_speed)."""
+    if isinstance(tokens, int) and tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
+        return dict(source='estimate', tokens=tokens, seconds=round(t_last - t_first, 3),
+                    tps=round(tokens / (t_last - t_first), 1))
+    return None
+
+
+def engine_speed(timings, server):
+    """A reply's speeds as a Caminus server measured them (its `timings`, as sent: predicted_per_second for writing,
+    prompt_per_second for reading the prompt's uncached part); None when it reports neither. A 0 is not a speed (a
+    prompt read wholly from the cache reads nothing) and is left out rather than shown as 0 tok/s."""
+    if not isinstance(timings, dict):
+        return None
+    def rate(key):
+        v = timings.get(key)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+    tps, prompt_tps = rate('predicted_per_second'), rate('prompt_per_second')
+    if tps is None and prompt_tps is None:
+        return None
+    return dict(source='engine', server=server, tps=tps, prompt_tps=prompt_tps, tokens=timings.get('predicted_n'),
+                prompt_n=timings.get('prompt_n'), cache_n=timings.get('cache_n'))
 
 
 def split_content(content):
@@ -117,6 +147,24 @@ def price(model, usage, served=None):
     return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
+# Images (files.read): a tool message names its image (store.action_result; a user message can too: the finish judge's),
+# and each request sends the file itself, so the store keeps no bytes and a brain switched mid-goal gets what it can
+# take: the image where its config says vision (the catalog's flag, copied at init and /model), a line saying it can't
+# see where not, nothing more where the eyes model already described it in the result (advisor.Eyes).
+IMAGES_PER_REQUEST = 20    # newest image results sent as images; 20 x 5 MB stays inside the API's 128 MB request
+IMAGE_CACHE = 32           # encoded files kept per brain: compaction counts the same request many times
+NO_VISION = ("this model can't see images; {name} is a {w}x{h} {fmt}; describe-by-tool options: discover topic images "
+             "lists the image tools installed here (identify, exiftool, tesseract for text in it, ...) to run in the "
+             "terminal, or ask your human")
+
+
+def image_tokens(width, height):
+    """An image's input tokens, estimated by Claude's rule (platform.claude.com vision): one token per 28x28-pixel patch,
+    after a downscale to its high-resolution tier (2576 px long edge, 4784 patches). It stands in where a provider counts
+    no tokens (Qwen-VL patches are 28 px too) and errs high for Claude's standard tier (1568 at most)."""
+    s = min(1.0, 2576 / max(width, height, 1))
+    return min(4784, math.ceil(width * s / 28) * math.ceil(height * s / 28))
+
 
 def http_error(e):
     """a ModelError carrying the status, the provider's reason (the body's first 2 KB), any retry-after and the
@@ -130,11 +178,23 @@ def http_error(e):
     err = ModelError(str(e) + (': ' + detail if detail else ''))
     err.status = e.code      # a refusal must not be retried like an outage
     err.request_id = (e.headers or {}).get('request-id')
-    try:
-        err.retry_after = float((e.headers or {}).get('retry-after') or 0) or None
-    except (TypeError, ValueError):
-        err.retry_after = None
+    err.retry_after = retry_after(e.headers) or None
     return err
+
+
+def retry_after(headers):
+    """the seconds a Retry-After header asks for (a number or an HTTP date), else None"""
+    value = (headers or {}).get('retry-after')
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(0.0, email.utils.parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
 
 
 def _recording_opener(held):
@@ -188,8 +248,10 @@ class Model:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
         self.counter = True
         self.last_usage = {}
-        self.last_speed = None
+        self.last_speed = None   # the last reply's speed: engine_speed on a Caminus server, else estimated_speed
+        self.caminus = None     # whether the endpoint is a Caminus server, once asked (is_caminus)
         self.last_call = {}      # the newest Messages API call: requested and serving model, fallback, stop, request id
+        self._images = {}        # (path, mtime_ns, size) -> (sha256, base64): see _image_data
 
     def _held(self, sock):
         with self._sockets_lock:
@@ -239,7 +301,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
 
     def probe(self, timeout=3.0):
         """whether the server answers at all (a local server's /props, a short timeout); a remote API is assumed up"""
@@ -249,8 +311,41 @@ class Model:
             with self.opener(urllib.request.Request(self.root + '/props', None, self.headers()), timeout=timeout) as r:
                 r.read(65536)
             return True
-        except (OSError, ValueError, urllib.error.HTTPError):
+        except (OSError, ValueError, urllib.error.HTTPError) as e:
+            self._failed(e)
             return False
+
+    def _failed(self, e):
+        """A call's transport failure as a ModelError. A connection that failed may come back as another server on the
+        same port (llama-server where caminus serve was): whether the brain is Caminus is then asked again."""
+        if isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError):
+            self.caminus = None
+        return ModelError(str(e))
+
+    def is_caminus(self):
+        """Whether this brain is a local Caminus server (catalog.caminus_props: its /props names the engine). Asked once
+        and kept until a call fails to connect (_failed); a server that cannot be reached is asked again next time,
+        never remembered as another engine. A paid brain (remote, or through the key relay) is never asked. Any failure
+        is "not now": the reply it follows is already read, and a speed lookup must never fail it."""
+        if self.caminus is None:
+            if self.remote:
+                self.caminus = False
+            else:
+                from . import catalog
+                try:
+                    self.caminus = catalog.caminus_props(self.base, self.opener, 3) is not None
+                except Exception:
+                    return False
+        return self.caminus
+
+    def _speed(self, timings, tokens=None, t_first=None, t_last=None):
+        """The reply's speed: a Caminus server's own numbers whenever the brain is one (never an estimate there, even
+        when it sent none), else the client's estimate."""
+        if timings is not None and self.is_caminus():
+            return engine_speed(timings, self.root)
+        if self.caminus:
+            return None
+        return estimated_speed(tokens, t_first, t_last)
 
     def context_size(self):
         if self.context is None:
@@ -278,7 +373,7 @@ class Model:
         # the effort in force (effort.py): a local model takes it as the server's model id for the level, a provider
         # with reasoning_effort as that field; a short side call (the judge's) runs with thinking off
         choice = effort.resolve(self.config, short=limit < SHORT_CALL)
-        body = dict(model=model or choice['model'] or self.config['model'], messages=messages,
+        body = dict(model=model or choice['model'] or self.config['model'], messages=self._wire(messages),
                     stream=on_delta is not None, max_tokens=limit)
         # sampling: none for a local brain (its server applies the model's own defaults: a fixed 0.6 overrode the
         # Qwen3.8 cards' 1.0), a paid model's card values when known, the config's own when set
@@ -302,12 +397,14 @@ class Model:
         if tools:
             body['tools'] = tools
         if on_delta is not None:
-            # usage in the final chunk gives the generated token count for a client-measured decode speed
+            # usage in the final chunk gives the generated token count for a client-measured decode speed (a Caminus
+            # server's own timings replace it: _speed)
             body['stream_options'] = dict(include_usage=True)
             return self._stream(body, on_delta)
         result = self.request(self.base + '/chat/completions', body)
         self.last_usage = result.get('usage') or {}
-        self.last_speed = None     # no decode timing without streamed pieces: nothing is reported rather than a wrong number
+        # no decode window without streamed pieces: only a server's own timings give a speed here
+        self.last_speed = self._speed(result.get('timings'))
         try:
             m = result['choices'][0]['message']
             if result['choices'][0].get('finish_reason') == 'length':
@@ -340,7 +437,7 @@ class Model:
         A backend that answers with one whole JSON body instead of a stream is accepted and reported once."""
         req = urllib.request.Request(self.base + '/chat/completions', json.dumps(body).encode(),
                                      self.headers(stream=True))
-        content, reasoning, calls, finish, usage = [], [], {}, None, {}
+        content, reasoning, calls, finish, usage, timings = [], [], {}, None, {}, None
         self.last_speed = None
         t_first = t_last = None    # decode window: first choice-chunk to the last chunk read, prefill excluded
         done_seen = False
@@ -363,6 +460,7 @@ class Model:
                             if on_delta('tool', call['function']['name']) is False:
                                 raise Cancelled()
                         self.last_usage = whole.get('usage') or {}
+                        self.last_speed = self._speed(whole.get('timings'))
                         if whole['choices'][0].get('finish_reason') == 'length':
                             raise ModelTruncated(m)
                         return self._message(m)
@@ -377,6 +475,8 @@ class Model:
                     t_last = now
                     if chunk.get('usage'):
                         usage = chunk['usage']
+                    if isinstance(chunk.get('timings'), dict):
+                        timings = chunk['timings']    # (caminus serve: on the finish chunk, before the usage chunk)
                     for choice in chunk.get('choices') or []:
                         if choice.get('finish_reason'):
                             finish = choice['finish_reason']
@@ -412,12 +512,10 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
         self.last_usage = usage
-        tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
-        if isinstance(tokens, int) and tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
-            self.last_speed = dict(tokens=tokens, seconds=round(t_last - t_first, 3),
-                                   tps=round(tokens / (t_last - t_first), 1))
+        self.last_speed = self._speed(timings, usage.get('completion_tokens') if isinstance(usage, dict) else None,
+                                      t_first, t_last)
         try:
             out = dict(role='assistant', content=''.join(content))
             if reasoning:
@@ -441,12 +539,14 @@ class Model:
     def tokens(self, messages, tools):
         if self.counter and self.api == 'anthropic':
             try:
-                body = self._to_anthropic(messages, tools)
+                # (without the image blocks: compaction counts one request many times, and each count would upload
+                # every image again; their cost is added once, by the same patch rule the other counters use)
+                body = self._to_anthropic([{k: v for k, v in m.items() if k != 'image'} for m in messages], tools)
                 body.pop('max_tokens', None)
                 value = self.request(self.base + '/messages/count_tokens', body)['input_tokens']
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError('invalid token count')
-                return value
+                return value + self._image_cost(messages)
             except (ModelError, KeyError, ValueError, TypeError) as e:
                 if getattr(e, 'status', 0) in (401, 402, 403):
                     raise              # a missing or refused key is not a counting problem
@@ -475,12 +575,86 @@ class Model:
                 value = result['input_tokens']
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError('invalid token count')
-                return value
+                return value + self._image_cost(messages)   # (the converted messages carry the images' text only)
             except (ModelError, KeyError, ValueError):
                 # Other compatible providers need not implement Caminus's counter.
                 # UTF8 bytes plus framing is conservative for byte-based tokenizers.
                 self.counter = False
-        return len(json.dumps(dict(messages=messages, tools=tools), ensure_ascii=False).encode()) + 256 * len(messages)
+        return (len(json.dumps(dict(messages=messages, tools=tools), ensure_ascii=False).encode()) + 256 * len(messages)
+                + self._image_cost(messages))
+
+    # ---- images ------------------------------------------------------------------------------------------------
+
+    def _image_data(self, img):
+        """the image file as base64 while it still is the file that was read (its sha256), else None"""
+        try:
+            st = os.stat(img['path'])
+            key = (img['path'], st.st_mtime_ns, st.st_size)
+            if key not in self._images:
+                with open(img['path'], 'rb') as f:
+                    raw = f.read()
+                if len(self._images) >= IMAGE_CACHE:
+                    self._images.clear()
+                self._images[key] = (hashlib.sha256(raw).hexdigest(), base64.b64encode(raw).decode())
+            sha, data = self._images[key]
+            return data if sha == img.get('sha256') else None
+        except (OSError, KeyError, TypeError):
+            return None
+
+    def _image_plan(self, messages):
+        """{index: (base64 data or None, a line for the text or None)} for each tool or user message naming an image"""
+        found = [i for i, m in enumerate(messages)
+                 if m.get('role') in ('tool', 'user') and isinstance(m.get('image'), dict)]
+        recent, plan = set(found[-IMAGES_PER_REQUEST:]), {}
+        for i in found:
+            img = messages[i]['image']
+            name = os.path.basename(str(img.get('path') or '')) or 'the file'
+            if not self.config.get('vision'):
+                plan[i] = (None, None if img.get('described_by') else NO_VISION.format(
+                    name=name, w=img.get('width'), h=img.get('height'), fmt=str(img.get('format') or '').upper()))
+            elif 'sha256' not in img:
+                plan[i] = (None, None)                       # past read's caps: the result's note says so
+            elif i not in recent:
+                plan[i] = (None, f'[{name}: not sent again; a request carries the newest {IMAGES_PER_REQUEST} images: '
+                                 'read it again to see it]')
+            else:
+                data = self._image_data(img)
+                plan[i] = (data, None) if data else (None, f'[{name} changed or is gone since it was read: no image '
+                                                           'sent; read it again]')
+        return plan
+
+    def _image_cost(self, messages):
+        return sum(image_tokens(int(messages[i]['image']['width']), int(messages[i]['image']['height']))
+                   for i, (data, _) in self._image_plan(messages).items() if data)
+
+    def _wire(self, messages):
+        """The messages as an OpenAI-compatible request sends them. A Chat Completions tool message carries text only
+        (OpenAI's spec: ChatCompletionToolMessageParam takes a string or text parts), so an image goes in a user message
+        after its turn's last tool result, never between parallel results (a user message's image joins its own text); a
+        message without an image is sent as stored."""
+        plan = self._image_plan(messages)
+        if not plan:
+            return messages
+        out, parts = [], []
+        for i, m in enumerate(messages):
+            if parts and m.get('role') != 'tool':
+                out.append(dict(role='user', content=parts))
+                parts = []
+            if i in plan:
+                img, (data, line) = m['image'], plan[i]
+                m = {k: v for k, v in m.items() if k != 'image'}
+                if data and m['role'] == 'user':
+                    m['content'] = [dict(type='text', text=m.get('content') or ''), dict(
+                        type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif data:
+                    parts += [dict(type='text', text=f"{img['path']} (the read in call {m.get('tool_call_id')}):"),
+                              dict(type='image_url', image_url=dict(url=f"data:image/{img['format']};base64,{data}"))]
+                elif line:
+                    m['content'] = (m.get('content') or '') + '\n' + line
+            out.append(m)
+        if parts:
+            out.append(dict(role='user', content=parts))
+        return out
 
     # ---- Anthropic Messages API ---------------------------------------------------------------------------
 
@@ -495,7 +669,15 @@ class Model:
         while rest and rest[0]['role'] == 'system':
             system.append(rest.pop(0)['content'])
         tail = rest.pop()['content'] if rest and rest[-1]['role'] == 'system' else None
-        out = []
+        out, images = [], self._image_plan(rest)
+
+        def with_image(i, text):
+            """a message's text, as blocks with its image after it, or with the line that says why none is sent"""
+            data, line = images.get(i, (None, None))
+            if data:
+                return [dict(type='text', text=text), dict(type='image', source=dict(
+                    type='base64', media_type='image/' + rest[i]['image']['format'], data=data))]
+            return text + '\n' + line if line else text
 
         def add(role, blocks):
             if not blocks:
@@ -505,12 +687,13 @@ class Model:
             else:
                 out.append(dict(role=role, content=list(blocks)))
 
-        for m in rest:
+        for i, m in enumerate(rest):
             role = m['role']
             if role == 'system':                     # a mid-history system message: kept as an operator note
                 add('user', [dict(type='text', text='[system] ' + m['content'])])
-            elif role == 'tool':
-                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'], content=m['content'] or '')])
+            elif role == 'tool':                     # (a tool_result's content may hold image blocks)
+                add('user', [dict(type='tool_result', tool_use_id=m['tool_call_id'],
+                                  content=with_image(i, m['content'] or ''))])
             elif role == 'assistant':
                 blocks = [dict(type='text', text=m['content'])] if m.get('content') else []
                 for call in m.get('tool_calls') or []:
@@ -524,7 +707,8 @@ class Model:
                     blocks.append(dict(type='tool_use', id=call['id'], name=f['name'], input=args))
                 add('assistant', blocks)
             else:
-                add('user', [dict(type='text', text=m['content'] or ' ')])
+                blocks = with_image(i, m['content'] or ' ')
+                add('user', blocks if isinstance(blocks, list) else [dict(type='text', text=blocks)])
         if out and out[0]['role'] != 'user':
             out.insert(0, dict(role='user', content=[dict(type='text', text='(conversation resumed)')]))
         if out:
@@ -578,7 +762,7 @@ class Model:
         """read a Messages API event stream into the reply shape complete() returns"""
         req = urllib.request.Request(self.base + '/messages', json.dumps(body).encode(),
                                      self.headers(stream=True, beta=FALLBACK_BETA if 'fallbacks' in body else None))
-        text, blocks, stop, usage, details = [], {}, None, {}, None
+        text, blocks, stop, usage, details, timings = [], {}, None, {}, None, None
         served, declined, fallback_ran, request_id = body.get('model'), [], False, None
         self.last_call = dict(model=body.get('model'))
         self.last_speed = None
@@ -633,6 +817,8 @@ class Model:
                         stop = (ev.get('delta') or {}).get('stop_reason') or stop
                         details = (ev.get('delta') or {}).get('stop_details') or details
                         usage.update(ev.get('usage') or {})
+                        if isinstance(ev.get('timings'), dict):
+                            timings = ev['timings']   # (caminus serve's Anthropic route: on message_delta)
                         if any((i or {}).get('type') == 'fallback_message' for i in (usage.get('iterations') or [])):
                             fallback_ran = True
                     elif kind == 'message_stop':
@@ -648,7 +834,7 @@ class Model:
         except urllib.error.HTTPError as e:
             raise http_error(e) from e
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
-            raise ModelError(str(e)) from e
+            raise self._failed(e) from e
         self.last_call = dict(model=body.get('model'), served=served, fallback_ran=fallback_ran,
                               declined_by=[m for m in declined if m], stop_reason=stop,
                               stop_category=(details or {}).get('category'), request_id=request_id)
@@ -658,9 +844,7 @@ class Model:
         self.last_usage = dict(prompt_tokens=(usage.get('input_tokens') or 0) + read + wrote,
                                completion_tokens=out_tokens, cache_read_input_tokens=read,
                                cache_creation_input_tokens=wrote)
-        if out_tokens >= SPEED_MIN_TOKENS and t_first and t_last - t_first >= SPEED_MIN_S:
-            self.last_speed = dict(tokens=out_tokens, seconds=round(t_last - t_first, 3),
-                                   tps=round(out_tokens / (t_last - t_first), 1))
+        self.last_speed = self._speed(timings, out_tokens, t_first, t_last)
         out = dict(role='assistant', content=''.join(text))
         if not done:
             raise ModelTruncated(out, 'the reply ended before it was complete; nothing was executed', retryable=True)
