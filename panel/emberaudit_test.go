@@ -6,11 +6,13 @@ package main
 // Tests for the 2026-11-16 audit's first group: what blocked use or changed what the human typed.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -97,28 +99,176 @@ func TestHistoryGivesBackWhatYouTyped(t *testing.T) {
 	}
 }
 
-func TestASecondShellCommandRunsAfterTheFirstsOutput(t *testing.T) {
+func TestAShellCommandsOutputGoesToTheChat(t *testing.T) {
 	m := chatFixture(t)
-	m.chat.compose.SetValue("```\n$ ls\nwork\n```\n")
-	m.chat.compose.MoveToEnd()
+	m.width, m.height = 120, 24
+	m.chat.cards = false      // the compact view (the default)
+	for i := 2; i < 30; i++ { // a history taller than its window, read from the top
+		m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: i, Goal: "original",
+			Kind: "assistant", Data: map[string]any{"content": fmt.Sprintf("Observation %d.", i)}}}})
+	}
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{{Seq: 30, Goal: "original",
+		Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"id": "c1", "function": map[string]any{
+			"name": "terminal", "arguments": `{"command":"make test"}`}}}}}}}) // the agent's own command, still running
+	m.chat.transcript.GotoTop()
 	next, _ := m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
 	m = next.(emberModel)
-	if !m.chat.shell || m.chat.compose.Value() != "" || m.chat.shellStash == "" {
-		t.Fatal("! on the empty last line opens shell mode with the draft held aside")
+	m.chat.compose.SetValue("echo hi")
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m = next.(emberModel); cmd == nil || m.chat.shell || m.chat.compose.Value() != "" {
+		t.Fatalf("Enter runs the command, leaves shell mode and empties the composer (%q)", m.chat.compose.Value())
 	}
-	m.setShell(false) // (Enter leaves shell mode as the command starts)
-	m = m.bangDone(bangDoneMsg{cmd: "echo hi", output: "hi"})
-	if v := m.chat.compose.Value(); !strings.Contains(v, "$ ls") || !strings.Contains(v, "$ echo hi") || strings.Contains(v, "!!") {
-		t.Fatalf("both outputs in the draft, nothing typed as text: %q", v)
+	m.chat.compose.SetValue("words typed while it ran")
+	m = m.bangDone(bangResult(m.agentName, m.residentEpoch, "echo hi", "hi", nil, false)) // (what runBang returns for it)
+	if v := m.chat.compose.Value(); v != "words typed while it ran" {
+		t.Fatalf("the output stays out of the composer; a draft typed meanwhile is kept: %q", v)
 	}
-	m.chat.compose.SetValue("```\n$ ls\nwork\n```\n")
-	m.chat.compose.MoveToEnd()
-	next, _ = m.chatKey(tea.KeyPressMsg{Code: '!', Text: "!"})
+	view := ansi.Strip(m.chat.transcript.View())
+	if !strings.Contains(view, "! shell  $ echo hi") || !strings.Contains(view, "│ hi") || strings.Contains(view, "my shell") {
+		t.Fatalf("the command and its output are a card at the bottom of the chat, scrolled into view:\n%s", view)
+	}
+	if m.chat.group.running != "make test" || !strings.Contains(view, "running: make test") {
+		t.Fatalf("your card leaves the agent's running command under it (it is still running):\n%s", view)
+	}
+	t.Logf("after ! echo hi:\n%s", ansi.Strip(m.render()))
+	m.chat.content, m.chat.rendered = "", 0 // a redraw from the start (a resize, a theme)
+	m.syncChat()
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if m = next.(emberModel); !strings.Contains(ansi.Strip(m.chat.content), "$ echo hi") {
+		t.Fatal("the card stays through a redraw and in the everything view")
+	}
+	m.chat.compose.SetValue("!echo again")
+	next, cmd = m.submitCompose()
+	if m = next.(emberModel); cmd == nil || m.chat.compose.Value() != "" {
+		t.Fatalf("a recalled !cmd sent from the composer runs and empties it too: %q", m.chat.compose.Value())
+	}
+	if m.chat.seq != 30 || m.residentEvents[len(m.residentEvents)-1].Seq >= 0 {
+		t.Fatal("the card is the panel's own event: it never moves the resident's event cursor")
+	}
+}
+
+func TestShellOutputsGoWithTheNextMessage(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 30
+	m.chat.target, m.chat.newGoal = "original", false
+	dir := t.TempDir()
+	sent := filepath.Join(dir, "sent")
+	script := filepath.Join(dir, "fake-caminus")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat > "+sent+"\necho '{\"id\":\"original\"}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.cli = []string{script}
+	ran := func(cmd, out string, host bool, err error) bangDoneMsg { // a command finished in this session
+		return bangResult(m.agentName, m.residentEpoch, cmd, out, err, host)
+	}
+	m = m.bangDone(ran("ls work", "a.py\n+b.py", false, nil)) // (a +path in the output is never attached)
+	m = m.bangDone(ran("uname", "Linux", true, fmt.Errorf("exit status 1")))
+	if got := ansi.Strip(m.chatComposer()); !strings.Contains(got, "+2 shell outputs attached to your next message (not /steer)") {
+		t.Fatalf("the composer says what goes with the next message, and that /steer does not carry it:\n%s", got)
+	}
+	next, cmd := m.sendCompose("what do you make of these?")
 	m = next.(emberModel)
+	if next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape}); len(next.(emberModel).chat.shellQueue) != 2 {
+		t.Fatal("Esc never drops outputs a message is carrying")
+	}
+	res := cmd().(residentComposeResult)
+	body, _ := os.ReadFile(sent)
+	text := string(body)
+	ls, un := strings.Index(text, "output of `! ls work` you ran in the agent's account:\n```\n$ ls work\na.py\n+b.py\n```"),
+		strings.Index(text, "output of `!! uname` you ran in your own shell on this machine (not the agent's account):\n```\n$ uname\nLinux\n```\n(exit status 1)")
+	if res.err != "" || !strings.HasPrefix(text, "what do you make of these?\n\n") || ls < 0 || un < ls {
+		t.Fatalf("your words, then each output in the order run, marked and fenced (err %q):\n%s", res.err, text)
+	}
+	m = m.bangDone(ran("date", "today", false, nil)) // (run while the message was on its way)
+	sentQueue := m.chat.shellQueue
+	m.chat.shellQueue = sentQueue[2:] // the first two gone some other way meanwhile: delivery must not take "date" by count
+	next, _ = m.finishCompose(res)
+	if m = next.(emberModel); len(m.chat.shellQueue) != 1 || !strings.Contains(m.chat.shellQueue[0].text, "`! date`") {
+		t.Fatalf("delivered: exactly the outputs it carried leave the queue, by identity; a later one waits (%d)", len(m.chat.shellQueue))
+	}
+	if !strings.Contains(ansi.Strip(m.chatComposer()), "+1 shell output attached") {
+		t.Fatal("the marker counts what still waits")
+	}
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m = next.(emberModel); cmd == nil || m.msg != "interrupting the turn…" || len(m.chat.shellQueue) != 1 {
+		t.Fatal("Esc is the stop key: with the goal working it interrupts first, and the queue stays")
+	}
+	m.resident.Goals[0].State = "paused" // nothing running now
+	m.chat.compose.SetValue("a draft")
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
-	m = next.(emberModel)
-	if m.chat.shell || !strings.Contains(m.chat.compose.Value(), "$ ls") {
-		t.Fatal("leaving shell mode gives the draft back")
+	if m = next.(emberModel); len(m.chat.shellQueue) != 1 {
+		t.Fatal("Esc with a draft keeps the queue")
+	}
+	m.chat.compose.Reset()
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m = next.(emberModel); len(m.chat.shellQueue) != 0 || !strings.Contains(m.msg, "dropped") || !strings.Contains(m.msg, "Esc interrupts first") ||
+		strings.Contains(ansi.Strip(m.chatComposer()), "attached") || !strings.Contains(ansi.Strip(m.chat.content), "$ date") {
+		t.Fatalf("with nothing running, Esc on an empty composer drops the queue, the cards stay (msg %q)", m.msg)
+	}
+	_, cmd = m.sendCompose("and now?")
+	if res := cmd().(residentComposeResult); len(res.shells) != 0 {
+		t.Fatal("nothing attached after the drop")
+	}
+	if body, _ := os.ReadFile(sent); string(body) != "and now?" {
+		t.Fatalf("the next message goes alone: %q", body)
+	}
+	// a bad byte and colour codes: the message stays valid UTF-8 (the resident decodes it strictly)
+	m = m.bangDone(ran("ls caf\xe9", "\x1b[31mred\x1b[0m caf\xe9\xff", false, nil))
+	_, cmd = m.sendCompose("look")
+	if res := cmd().(residentComposeResult); res.err != "" {
+		t.Fatal(res.err)
+	}
+	if body, _ := os.ReadFile(sent); !utf8.Valid(body) || strings.Contains(string(body), "\x1b") || !strings.Contains(string(body), "red caf"+string(utf8.RuneError)+"\n") {
+		t.Fatalf("the attached output is plain valid UTF-8: %q", body)
+	}
+}
+
+func TestALateShellResultStaysInItsSession(t *testing.T) {
+	m := chatFixture(t)
+	for _, late := range []bangDoneMsg{
+		bangResult("other", m.residentEpoch, "make test", "secret of other", nil, false), // run in session "other"
+		bangResult(m.agentName, m.residentEpoch+1, "make test", "an older visit", nil, false),
+	} {
+		next := m.bangDone(late)
+		if len(next.chat.shellQueue) != 0 || strings.Contains(ansi.Strip(next.chat.content), "make test") ||
+			!strings.Contains(next.msg, "after you left it") {
+			t.Fatalf("a result from another session is neither shown nor queued here (msg %q)", next.msg)
+		}
+	}
+	if next := m.bangDone(bangResult(m.agentName, m.residentEpoch, "make test", "ok", nil, false)); len(next.chat.shellQueue) != 1 {
+		t.Fatal("this session's own result is queued")
+	}
+}
+
+func TestALongShellOutputIsCutToItsTail(t *testing.T) {
+	var long []string
+	for i := 1; i <= 500; i++ {
+		long = append(long, fmt.Sprintf("line %d", i))
+	}
+	got := shellAttachment(bangDoneMsg{cmd: "make", output: strings.Join(long, "\n")})
+	if !strings.Contains(got, "(cut to its last 200 lines or 16 KB: the first 300 lines left out)") ||
+		strings.Contains(got, "line 300\n") || !strings.Contains(got, "line 301\n") || !strings.Contains(got, "line 500\n```") {
+		t.Fatalf("its last 200 lines, saying so:\n%.300s", got)
+	}
+	wide := shellAttachment(bangDoneMsg{cmd: "cat log", output: strings.Repeat(strings.Repeat("x", 199)+"\n", 150)})
+	if len(wide) > shellAttachBytes+500 || !strings.Contains(wide, "lines left out") {
+		t.Fatalf("at most 16 KB, whole lines first (%d bytes)", len(wide))
+	}
+	if short := shellAttachment(bangDoneMsg{cmd: "ls", output: "a"}); strings.Contains(short, "cut") {
+		t.Fatalf("a short output goes whole: %q", short)
+	}
+	// more than the panel keeps (32 KB): the card and the message both say the start is gone
+	huge := bangResult("resident", 0, "yes | head", strings.Repeat("y\n", 30000), nil, false)
+	if !huge.truncated || len(huge.output) > bangOutputMax {
+		t.Fatal("the panel keeps the last 32 KB and marks the cut")
+	}
+	if got := shellAttachment(huge); !strings.Contains(got, "it printed more than 32 KB, the start is left out") {
+		t.Fatalf("the message says the start is gone: %.200s", got)
+	}
+	m := chatFixture(t)
+	huge.agent, huge.epoch = m.agentName, m.residentEpoch
+	if m = m.bangDone(huge); !strings.Contains(ansi.Strip(m.chat.content), "the last 32 KB, the start cut") {
+		t.Fatal("the card says it shows only the last 32 KB")
 	}
 }
 

@@ -59,7 +59,7 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | Panel (`panel/`) | |
 |---|---|
 | `envui.go` | the program: flags, the model, update routing, the window title |
-| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, else the thoughts box under it), the side panel (tasks, now), the task / now line |
+| `envchat.go`, `envgroup.go` | the transcript (compact view, cards), the live reply (in the transcript at 160+ columns, with the reasoning's last lines until its words start; else the thoughts box under it), the side panel (tasks, now), the task / now line |
 | `embercomposer.go`, `embersteer.go`, `emberselect.go` | the composer, steering (interrupt, pullback, rewind), the mouse: select to copy anywhere on the screen, and a click (a release without a drag) |
 | `envapprovals.go`, `envquestion.go`, `envbridge.go` | approval cards and the overlay, questions, the root bridge and grants |
 | `envresident.go` | talking to the resident (status, stream, actions; panel controls go to the audit log) |
@@ -84,6 +84,11 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   (`cli._engine_live`, reading it through `catalog.decode_tps`, which `caminus ps` uses too). Ember's own estimate
   (`model.estimated_speed`) is for every other brain, llama-server included, and the panel labels it (`replySpeed` in
   `panel/emberresident.go`). Another brain's speedless reply drops an engine record (`runtime._throughput_note`).
+- A local brain's window is its server's `/props` n_ctx (`catalog.props_window`), asked when the config stores none
+  (`init` without `--context`, a session switcher session): the runtime at each start (`Model.context_size`), `status`
+  every time (`catalog.local_window`). It is not written to the config: a daemon keeps the figure it read at its start
+  until its brain changes, and the next start reads the server again. Status says `null` only when nobody can say; the
+  panel then shows the tokens in use alone, never `N/0`.
 
 ## Memory
 

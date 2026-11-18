@@ -372,8 +372,8 @@ class Model:
 
     def context_size(self):
         if self.context is None:
-            p = self.request(self.root + '/props')
-            self.context = p.get('n_ctx')
+            from . import catalog
+            self.context = catalog.props_window(self.request(self.root + '/props'))
         if isinstance(self.context, bool) or not isinstance(self.context, int) or self.context < 1024:
             raise ModelError('backend must report a positive context window, or set --context explicitly')
         return self.context

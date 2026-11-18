@@ -117,8 +117,10 @@ With nothing to do, the agent has free time: it reads its journal, follows its o
 (`/studio`). `caminus ember agent heartbeat resident now` starts a stretch now (after any running work);
 `caminus ember agent heartbeat resident off` turns free time off. On a paid brain it spends its own allowance (0.50 USD a day by default). On a
 narrow terminal its thoughts run in the box under the history (the latest stay up between replies): its reasoning when
-the model shows it, else its words and the tools it calls. A wide terminal leaves the reasoning out of the history, as
-the compact view always does; Ctrl+O shows it.
+the model shows it, else its words and the tools it calls. On a wide terminal, until the reply's words start, the
+streaming block shows the reasoning's last four lines dimmed (or "preparing" and the tool it is writing); the words
+replace them, and the finished reply keeps the reasoning out of the history, as the compact view always does (Ctrl+O
+shows it).
 
 ## Next
 

@@ -49,7 +49,8 @@ type residentChat struct {
 	picker                                  bool
 	pickerSel                               int
 	hostShell                               bool               // shell mode runs in your own shell on this machine (!!), not the agent's
-	shellStash                              string             // the draft held aside while a second shell command is typed
+	localSeq                                int                // the panel's own events (a ! command's card) count down from -1
+	shellQueue                              []queuedShell      // the ! / !! outputs that go with your next message, in order (bangDone)
 	prevTarget                              string             // the goal before Ctrl+N or /new (Esc goes back to it)
 	goalsFollow                             string             // the goal the overlay's selection follows after a move
 	pickedGoal                              string             // the goal picked by hand in the overlay (no refresh moves off it)
@@ -110,6 +111,7 @@ type residentLive struct {
 	active, hold          bool
 	top                   int
 	wrapText, wrapThink   *wrapCache // finished lines wrapped once per turn (body)
+	wrapGist              *wrapCache // the reasoning wrapped for the wide transcript's dimmed last lines (liveInline)
 }
 
 // wrapCache keeps the wrapped, styled lines of a growing text's finished part (everything up to its last newline),
@@ -198,6 +200,7 @@ type residentComposeResult struct {
 	agent, id, err string
 	note           string // the resident's remark on delivery (a stopped agent: it starts the goal at /start)
 	epoch          uint64
+	shells         []int // the queued shell outputs that went with the message, by id (delivered: they leave the queue)
 }
 
 func (m *emberModel) initChat() {
@@ -523,7 +526,9 @@ func (m *emberModel) syncChat() {
 			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
 		if block := m.chat.eventBlock(e); block != "" {
-			m.chat.flushGroup(w)
+			if e.Seq >= 0 { // (the panel's own card, a ! command's, leaves the agent's running line under it)
+				m.chat.flushGroup(w)
+			}
 			m.chat.content += ansi.Wrap(block, w, "") + "\n\n"
 		}
 	}
@@ -892,12 +897,36 @@ func (m emberModel) liveInline(w int) string {
 	// no spinner here: a frame that changed this block reset the whole transcript (a render works on a copy, so every
 	// tick between live updates redrew it: 5.7 against 3.2 ms a frame at 2000 events); the activity line moves instead
 	rows := []string{m.liveWho() + emberDim.Render("  live")}
-	for _, ln := range l.reply(min(max(10, w-4), readingWidth)) {
-		rows = append(rows, "  "+ln)
+	width := min(max(10, w-4), readingWidth)
+	if l.text != "" {
+		for _, ln := range l.reply(width) {
+			rows = append(rows, "  "+ln)
+		}
+	} else {
+		// no reply text yet: a model thinking or writing a tool call sent nothing the block showed, so it looked
+		// frozen for most of a turn. Its reasoning's last lines show dimmed (the text replaces them; the landed turn
+		// folds them as before), else the tool being prepared.
+		if strings.TrimSpace(l.reasoning) != "" {
+			if l.wrapGist == nil {
+				l.wrapGist = &wrapCache{} // (a fixture without one; the live handler gives each turn its own)
+			}
+			// (a tab is one cell to the wrapper and up to eight on screen; trailing newlines would show empty rows)
+			text := strings.TrimRight(strings.ReplaceAll(residentText(l.reasoning), "\t", "    "), "\n")
+			lines := l.wrapGist.wrap(text, max(8, width-2), func(s string) string { return s })
+			for _, ln := range lines[max(0, len(lines)-liveGistRows):] {
+				rows = append(rows, "  "+emberDim.Render("│ "+ln))
+			}
+		}
+		if len(l.tools) > 0 {
+			rows = append(rows, "  "+emberDim.Render("preparing ")+emberTool.Render(residentText(strings.Join(l.tools, ", "))))
+		}
 	}
 	rows[len(rows)-1] += emberBusy.Render("▌")
 	return strings.Join(rows, "\n")
 }
+
+// liveGistRows is how many of the reasoning's last lines a wide transcript shows while no reply text has come.
+const liveGistRows = 4
 
 // liveWho is the live reply's heading: who is writing (thinking while only reasoning has come).
 func (m emberModel) liveWho() string {
@@ -1261,6 +1290,28 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return all
 	}
 	switch e.Kind {
+	case "shell":
+		// a command you ran from the composer (bangDone): "!" in the agent's account, "!!" in your own shell, each in
+		// its prompt's colour, open with its output (its last 32 KB: bangResult, and the meta says when it was cut)
+		kind, out := "shell", strings.TrimRight(str("output"), "\n")
+		if host, _ := e.Data["host"].(bool); host {
+			kind = "my shell"
+		}
+		meta := plural(strings.Count(out, "\n")+1, "line", "lines")
+		if cut, _ := e.Data["truncated"].(bool); cut {
+			meta = fmt.Sprintf("the last %d KB, the start cut · ", bangOutputMax/1024) + meta
+		}
+		if strings.TrimSpace(out) == "" {
+			meta = "no output"
+		}
+		if err := str("error"); err != "" {
+			meta = err + " · " + meta
+		}
+		var body []string
+		if strings.TrimSpace(out) != "" {
+			body = lines(ansi.Strip(out), 5000)
+		}
+		return toolCard(kind, "$ "+str("command"), meta, str("error") == "", true, body, w)
 	case "goal_queued":
 		label := "you · goal " + shortGoal(e.Goal)
 		if k, _ := e.Data["kind"].(string); k == "free" || k == "dream" {
@@ -1658,6 +1709,9 @@ func (m emberModel) composerTitle() string {
 			title = "continue goal " + shortGoal(m.chat.target)
 		}
 	}
+	if n := len(m.chat.shellQueue); n > 0 && !m.chat.shell { // (/steer goes without them: residentAction, not sendCompose)
+		title += " · +" + plural(n, "shell output", "shell outputs") + " attached to your next message (not /steer)"
+	}
 	return title
 }
 
@@ -1877,7 +1931,7 @@ func helpLines(width int) []string {
 		{"Tab", "a waiting request: answer it (it shows where you type)"},
 		{"Ctrl+R", "search what you sent"},
 		{"Ctrl+O", "layout: compact (a card per action) or everything"},
-		{"!  !!", "on an empty draft: a command in the agent's account; again: in your own shell"},
+		{"!  !!", "a command in the agent's account; again: your own shell; its output: a card + your next Enter message"},
 		{"Home  End", "the top or the bottom of the history (with an empty draft)"},
 		{"Ctrl+T", "hold the live view"},
 		{"Ctrl+X Ctrl+E", "edit the draft in $EDITOR"},
@@ -2422,8 +2476,9 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.scrollLive(3)
 		return m, nil
 	case "esc":
-		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode, a draft held aside comes back
-			return m.leaveShell(), nil
+		if m.chat.shell && m.chat.compose.Value() == "" { // out of shell mode
+			m.setShell(false)
+			return m, nil
 		}
 		if !m.menuDismissed() && (m.slashMenuOpen() || m.pathMenu(m.width) != "") {
 			m.chat.menuClosed = m.chat.compose.Value() // the menu closes; the text stays (typing opens it again)
@@ -2440,8 +2495,16 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if goal := m.interruptibleGoal(); goal != "" {
-			m.msg = "interrupting the turn…"
+			m.msg = "interrupting the turn…" // (Esc is the stop key: the ! outputs waiting stay, for the message after it)
 			return m, interruptTurn(m, goal)
+		}
+		// with nothing running, Esc on an empty composer drops the ! outputs waiting to go with your next message; not
+		// while a message is on its way (it carries them: "dropped" would be untrue)
+		if len(m.chat.shellQueue) > 0 && strings.TrimSpace(m.chat.compose.Value()) == "" && !m.chat.sending {
+			m.msg = plural(len(m.chat.shellQueue), "shell output", "shell outputs") +
+				" dropped: not sent with your next message (the cards stay; while the agent works, Esc interrupts first)"
+			m.chat.shellQueue = nil
+			return m, nil
 		}
 		return m, nil // (idle, Esc does nothing else: PgUp/PgDn and the wheel scroll)
 	case "up", "down":
@@ -2488,15 +2551,6 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setShell(true)
 		return m, nil
 	}
-	// "!" on the empty last line of a draft (a command's output waits there): shell mode, the draft held aside; the
-	// next command's output joins it, and leaving shell mode gives it back. It was typed into the draft as text,
-	// and Enter sent the output and "!!cmd" as a message.
-	if k == "!" && !m.chat.shell && strings.HasSuffix(m.chat.compose.Value(), "\n") && m.chat.compose.Line() == m.chat.compose.LineCount()-1 {
-		m.chat.shellStash = strings.TrimRight(m.chat.compose.Value(), "\n")
-		m.chat.compose.Reset()
-		m.setShell(true)
-		return m, nil
-	}
 	// "!" again on the empty agent shell: the host shell, your own account on this machine (!! as in a terminal)
 	if k == "!" && m.chat.compose.Value() == "" && m.chat.shell && !m.chat.hostShell {
 		m.chat.hostShell = true
@@ -2504,7 +2558,8 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.chat.shell && m.chat.compose.Value() == "" && (k == "backspace" || k == "esc") {
-		return m.leaveShell(), nil
+		m.setShell(false)
+		return m, nil
 	}
 	if m.chat.shell && k == "enter" {
 		cmd := strings.TrimSpace(m.chat.compose.Value())
@@ -2517,7 +2572,7 @@ func (m emberModel) chatDraftKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setShell(false)
 		if host {
 			m.msg = "running in your shell…"
-			return m, runHostBang(cmd)
+			return m, runHostBang(m, cmd)
 		}
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, cmd)
@@ -2558,11 +2613,13 @@ func (m emberModel) submitCompose() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "!!") && len(strings.TrimSpace(trimmed[2:])) > 0 {
 		// your own shell, as typed in !! mode (a recalled !!cmd ran in the agent's account with a stray !)
 		saveTyped(m.agentName, trimmed)
+		m.chat.compose.Reset() // (the command and its output go to the chat: bangDone)
 		m.msg = "running in your shell…"
-		return m, runHostBang(strings.TrimSpace(trimmed[2:]))
+		return m, runHostBang(m, strings.TrimSpace(trimmed[2:]))
 	}
 	if strings.HasPrefix(trimmed, "!") && len(trimmed) > 1 {
 		saveTyped(m.agentName, trimmed)
+		m.chat.compose.Reset()
 		m.msg = "running in the agent's account…"
 		return m, runBang(m, strings.TrimSpace(trimmed[1:]))
 	}
@@ -2578,6 +2635,7 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		args = append(args, "--goal-id", m.chat.target, "--continue")
 	}
 	name, epoch := m.agentName, m.residentEpoch
+	shells := slices.Clone(m.chat.shellQueue) // the ! outputs since the last message go with this one, after your words
 	m.chat.sending = true
 	return m, func() tea.Msg {
 		if strings.ContainsAny(text, "@+") { // (it checked only "@": a message with only +path attached nothing)
@@ -2585,6 +2643,12 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 			text, problems = expandAttachmentsChecked(m, text) // +path: the file, read as the agent, goes with the message
 			if len(problems) > 0 {                             // nothing is sent; the draft stays to fix
 				return residentComposeResult{agent: name, epoch: epoch, err: "not sent: " + strings.Join(problems, " · ")}
+			}
+		}
+		if len(shells) > 0 { // (after the +path expansion: a path in a command's output is not attached)
+			text = strings.TrimRight(text, "\n")
+			for _, q := range shells {
+				text += "\n\n" + q.text
 			}
 		}
 		out, err := runResident(residentCommand(m, args, text))
@@ -2598,7 +2662,11 @@ func (m emberModel) sendCompose(text string) (tea.Model, tea.Cmd) {
 		if err = json.Unmarshal(out, &reply); err != nil || reply.ID == "" {
 			return residentComposeResult{agent: name, epoch: epoch, err: "Unrecognized delivery response; draft retained. Inspect /goals before retrying."}
 		}
-		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID, note: reply.Note}
+		var ids []int
+		for _, q := range shells {
+			ids = append(ids, q.id)
+		}
+		return residentComposeResult{agent: name, epoch: epoch, id: reply.ID, note: reply.Note, shells: ids}
 	}
 }
 
@@ -2612,6 +2680,9 @@ func (m emberModel) finishCompose(msg residentComposeResult) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	m.chat.compose.Reset()
+	m.chat.shellQueue = slices.DeleteFunc(m.chat.shellQueue, func(q queuedShell) bool { // (a run while it was sent waits)
+		return slices.Contains(msg.shells, q.id)
+	})
 	m.chat.forceNew = false
 	m.chat.target, m.chat.selectID, m.chat.newGoal = msg.id, msg.id, false
 	m.msg = "Delivered to goal " + shortGoal(msg.id)
@@ -3252,16 +3323,6 @@ func endedWord(state string) string {
 		return "failed"
 	}
 	return state
-}
-
-// leaveShell ends shell mode; a draft held aside for a second command comes back.
-func (m emberModel) leaveShell() emberModel {
-	m.setShell(false)
-	if m.chat.shellStash != "" {
-		m.chat.compose.SetValue(m.chat.shellStash + "\n")
-		m.chat.shellStash = ""
-	}
-	return m
 }
 
 // todoBlockers are the newest todo list's blockers for a goal.
