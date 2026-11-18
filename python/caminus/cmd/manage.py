@@ -486,7 +486,11 @@ def cmd_ps(argv):
 
 
 def port_free(p):
+    """True when a server could bind 127.0.0.1:p now. It binds the way the server does (SO_REUSEADDR, as http.server's
+    ThreadingHTTPServer): a port whose last server just stopped (its connections in TIME_WAIT) is free, one with a live
+    listener is not (a restart once stopped a server and then refused to start it: 'port 8092 is in use')"""
     with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(('127.0.0.1', p))
             return True
