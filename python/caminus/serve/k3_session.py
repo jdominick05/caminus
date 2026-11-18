@@ -249,8 +249,9 @@ class SessionDrafter:
 class _PassTokens:
     """one pass's token sequence as the engines read it (len, an index, a slice, iteration): positions below i0 read the
     cache's live log in place, positions i0 .. i0 + T - 1 the pass's own tokens (feed, drafts, filler). A slice is a plain
-    list of ints. The log only grows past i0 while a pass is out (accept appends the pass's own tokens), so the positions
-    below i0 read what a copy taken at the pass's start would hold; a copy (toks + body) cost the whole log every pass"""
+    list of ints. The log is only replaced or extended, never edited in place (cache/livestate.py's module note), so the
+    positions below i0 read what a copy taken at the pass's start would hold; a copy (toks + body) cost the whole log every
+    pass"""
     __slots__ = ('log', 'i0', 'body')
 
     def __init__(self, log, i0, body):

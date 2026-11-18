@@ -319,12 +319,49 @@ class TestMarksOneEncode(unittest.TestCase):
                     tk.memo_bytes = cap
                     runs[name] = [(p.ids, p.marks) for p in (b.build(copy.deepcopy(m), copy.deepcopy(t), marks=True) for m, t in convs)]
                     self.assertLessEqual(tk._memo_n, max(cap, 0), (eng, name))
-                    self.assertEqual(tk._memo_n, sum(len(f) + 4 * len(e) + 200 for f, e in tk._memo.items()), (eng, name))
+                    self.assertEqual(tk._memo_n, sum((len(f) if f.isascii() else 4 * len(f)) + 4 * len(e) + 200
+                                                     for f, e in tk._memo.items()), (eng, name))
                 for name, r in runs.items():
                     self.assertEqual(r, runs['off'], (eng, name))
                 print(f'\n[template] fragment memo ({eng}): {len(convs)} prompts and marks == memo off (filled, hit, a 4 KiB cap)')
             finally:
                 tk.memo_bytes = keep
+
+    def test_fragment_memo_bytes(self):
+        """the memo's byte count: a non-ASCII fragment's string at 4 bytes a character (an ASCII one at 1); a fragment
+        whose own count passes memo_bytes is not memoised and evicts nothing (a non-ASCII one that fits at 1 byte a
+        character but not at 4, an ASCII one 3x the cap); its ids == the memo off"""
+        wide = 'Größe café naïve 文字 ' * 15
+        for eng, b in self.builders.items():
+            tk = b.tok
+            keep = tk.memo_bytes
+            def clear():
+                with tk._memo_lock: tk._memo.clear(); tk._memo_n = 0
+            try:
+                clear()
+                ids = tk.encode(wide)
+                (f, e), = tk._memo.items()
+                self.assertFalse(f.isascii(), eng)
+                self.assertEqual(tk._memo_n, 4 * len(f) + 4 * len(e) + 200, eng)
+                self.assertEqual(ids, list(e), eng)
+                tk.memo_bytes = 0
+                off = tk.encode(wide)
+                self.assertEqual(off, ids, eng)
+                cap = len(wide) + 4 * len(off) + 200 + 10        # (fits at 1 byte a character, not at 4)
+                for big in (wide, 'plain ascii words ' * (3 * cap // 18 + 1)):
+                    tk.memo_bytes = 0
+                    want = tk.encode(big)
+                    clear(); tk.memo_bytes = cap
+                    for s in ('alpha beta', 'gamma delta', 'résumé café'): tk.encode(s)
+                    before = (list(tk._memo.items()), tk._memo_n)
+                    self.assertEqual(len(before[0]), 3, eng)
+                    self.assertEqual(tk.encode(big), want, (eng, big[:12]))
+                    self.assertEqual((list(tk._memo.items()), tk._memo_n), before, (eng, big[:12]))
+                    self.assertNotIn(big, tk._memo, (eng, big[:12]))
+                print(f'\n[template] fragment memo bytes ({eng}): non-ASCII at 4 a character; a fragment past the cap '
+                      f'({cap} bytes) skipped, the memo kept, ids == memo off')
+            finally:
+                clear(); tk.memo_bytes = keep
 
     def test_cuts_at_every_offset(self):
         texts = []

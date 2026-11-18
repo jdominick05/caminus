@@ -47,6 +47,12 @@ def unmark(s):
     return _UNMARK_RE.sub(lambda m: m.group(1) or '<', s)
 
 
+def _memo_cost(f, e):
+    """a fragment memo entry's bytes (QwenTokenizer._part_ids): its string at 1 byte a character when ASCII, else at 4
+    (the most a character takes), its ids at 4 bytes each, 200 for the entry"""
+    return (len(f) if f.isascii() else 4 * len(f)) + 4 * len(e) + 200
+
+
 def _flat(per):
     ids = []
     for e in per:
@@ -76,8 +82,8 @@ class QwenTokenizer:
         if engine not in ('hf', 'own'): raise ValueError(f'QwenTokenizer: engine {engine!r} (hf / own)')
         self.engine = engine
         # the fragment memo (_part_ids): a text fragment's ids keyed by the exact string encoded, the least recently used
-        # dropped past memo_bytes (its strings, its ids at 4 bytes each, 200 bytes an entry). Agent turns only append, so
-        # a request encodes only the fragments the last one did not have. memo_bytes 0: off
+        # dropped past memo_bytes (counted by _memo_cost); a fragment past memo_bytes on its own is not kept. Agent turns
+        # only append, so a request encodes only the fragments the last one did not have. memo_bytes 0: off
         self.memo_bytes = FRAG_MEMO_BYTES
         self._memo, self._memo_n, self._memo_lock = collections.OrderedDict(), 0, threading.Lock()
         self.vocab = vocab
@@ -173,12 +179,13 @@ class QwenTokenizer:
                 enc = [got[f] if e is None else e for f, e in zip(frags, enc)]
                 with self._memo_lock:
                     for f, e in got.items():
-                        if f not in memo:
+                        c = _memo_cost(f, e)
+                        if f not in memo and c <= self.memo_bytes:    # (one past the cap alone would evict all, then itself)
                             memo[f] = e
-                            self._memo_n += len(f) + 4 * len(e) + 200
+                            self._memo_n += c
                     while self._memo_n > self.memo_bytes and memo:
                         f, e = memo.popitem(last=False)
-                        self._memo_n -= len(f) + 4 * len(e) + 200
+                        self._memo_n -= _memo_cost(f, e)
         it = iter(enc)
         return [[p] if sp else next(it) for sp, p, _ in parts]
 
