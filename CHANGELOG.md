@@ -3,6 +3,86 @@
 Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (two-card: XTX + XT) unless a line says
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md).
 
+## 0.3.2 (2026-11-18)
+
+Faster long conversations on every model, Qwen Code as the recommended way in, and Ember (now listed under
+Experiments) with a much bigger toolset. After upgrading, run `caminus ember agent install` if you use Ember, so its
+agent picks up the new runtime.
+
+### Changed
+
+- **Qwen Code is the recommended setup.** The README's Get started now ends with Qwen Code; Ember moved to a new
+  Experiments section, and [docs/ember.md](docs/ember.md) lists its known limits (it has been tested on Ubuntu with
+  systemd only) (#301).
+- **The wheel says what it is.** It carries an x86-64 Linux binary (the panel) and gfx1100 GPU code, so it is now a
+  `manylinux_2_17_x86_64` wheel instead of `py3-none-any`: pip no longer installs it on machines it can't run on, and
+  building a wheel from the source package on another machine stops with a one-line reason (#303).
+
+### Faster
+
+- **Long conversations answer sooner.** Each request used to copy the whole history for sampling, tokenize the whole
+  conversation twice and convert the token log to arrays several times. Now the sampler reads only its penalty window,
+  the prompt is encoded once with repeated fragments remembered, and prefix matches compare arrays converted once
+  (#290, #291, #293). Measured through `caminus serve` on Qwen3-30B-A3B (Q4_K_M, F16 KV), same replies token for token:
+  - a warm turn's time to first token: 454 -> 274 ms at about 38K tokens on one card, 1,153 -> 594 ms at about 126K
+    on two cards;
+  - sampled decoding with a presence penalty: 92 -> 108 tok/s at about 39K (one card), 52 -> 71 tok/s at about 127K
+    (two cards).
+
+### New in Ember (experimental)
+
+- **Use your OpenCode Go plan as the brain** (`--kind opencode-go`): the plan's chat models, each conversation with
+  its own session id as the plan asks, spend counted from what each reply says it charged, and free time kept off the
+  plan unless you allow it (#294). The advisor can run on one of the plan's models too (`caminus ember agent advisor
+  NAME --kind opencode-go`), counted against its budget at no less than the model's list price (#300).
+- **New tools:** a sandbox for untrusted code (a bubblewrap box, #258), a browser (Chrome in a box, #261), web research
+  with search fallbacks, retries, a cache, PDFs and arXiv papers (#251), a search tool and line ranges for `read`
+  (#254), images in `read` for brains that see and borrowed eyes for brains that don't (#256, #260), command discovery
+  (#264), and memory housekeeping (#252).
+- **Meta's Model API (the Muse models)** as a brain provider (#283).
+- **The agent knows the time** from a short stamp on the newest message, without breaking the prompt cache (#296).
+- **Rendered Markdown in open cards:** command output that is clearly Markdown renders when a card is open; Ctrl+Y
+  shows the source (#295). Advice renders as Markdown too, and a popup over the typing box shows while the advisor is
+  asked, with who asked and the seconds it has taken (#302).
+- **Closed sessions come back:** closing a session in the switcher keeps it, and `r` (or `caminus ember agent
+  restore`) restores it. A new session's `/model` lists the local server it runs on (#299).
+- **A question waits while you are away,** then the advisor answers it (#255).
+- **The panel:** tasks at the top right (#267), select to copy anywhere on the screen (#268), the engine's own read and
+  write speeds (#266), the whole turn's token count (#288), reasoning lines while a reply streams on a wide terminal
+  (#276).
+
+### Fixed
+
+- A click opens or folds only the card under it, not every card (#275).
+- The `/theme` picker moves at once (#278).
+- A `!` or `!!` command's output is a card in the chat, not text in the typing box (#277).
+- A local brain's context window comes from its server, under your cap, never "31K/0" (#280, #287).
+- Markdown tables in replies use the body's text colour (#289).
+- The done-check gate runs with the terminal's environment (#270); `sed -n` and other print-only reads pass the
+  read-only check (#273); `todo` takes the shapes models are trained on (#279).
+- Stopping works: SIGTERM stops a daemon that is waiting, a stopped worker reads stopped, ending a goal kills a box whose
+  worker is gone, and the lab's close stops its workers too (#271, #281, #282).
+- The setup fills the agent's Python environment with a standard data and document package set (#265).
+
+### For contributors
+
+- The cancel-latency test holds the 4th best of five cancels to 30 ms instead of the worst (#274).
+- Qwen Code's context note stays tokens only; the time stamp is Ember's alone (#298).
+- The prefix cache's live-log rule lives in one place (#297).
+- `verify_release.py` checks the wheel's tag and that the panel inside is a static x86-64 binary; the release build pins
+  the panel to linux/amd64 (#303).
+
+### Known issues
+
+- Ember's setup assumes Debian or Ubuntu with systemd; see the known limits in docs/ember.md.
+- In Ember, a `!` shell command starts in the agent account's home, not the session's workspace.
+- `caminus serve` answers a request for a model id it doesn't serve with its own model instead of refusing it.
+- When the agent's own advisor call fails at once (no calls left, a spent budget), no popup opens; the error card in the
+  chat says why. `/advisor` shows the popup as described.
+
+Benchmarks: a patch release, so no full rerun. No kernel or engine code changed since 0.3.0; the served speedups above
+were measured A/B on 489f37a vs 3a3612e (see #290).
+
 ## 0.3.1 (2026-11-17)
 
 The fixes to 0.3.0's known issues, and the first release of 0.3 on PyPI (0.3.0's upload step failed; it is on GitHub
