@@ -57,7 +57,7 @@ which every number on this page was measured on unless it says otherwise.
   start never use it, and `caminus restart` re-points a server recorded with its path at the catalog file.
 - **Its own folder.** The new file's local path is `Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf` (`Item.local`):
   the repository name and the file name are the official file's, so without it the two would share a path.
-- **Gated on this file** (2026-11-18, the accuracy gates below against this file's own references: float64 at 128
+- **Gated on this file** (2026-11-18, the engine gates below against this file's own references: float64 at 128
   tokens, fp32 for the last 64 of 16,384 / 40,896; llama.cpp, the ignite-llama fork, on the same file as the bound):
 
   | Gate | Cards, KV | caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 |

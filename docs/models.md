@@ -92,7 +92,7 @@ full 131,072. No drafter on one card or two.
 instead of Qwen's official Q4_K_M.
 
 - **What changes:** the weights. The answers come closer to the unquantized model's: measured against the BF16 model,
-  the mean KL divergence is about 3.5 times lower than the official file's (0.0185 against 0.064 on prose, 0.028
+  the mean KL divergence is about 3.5 times lower on prose and 3.2 times on code than the official file's (0.0185 against 0.064 on prose, 0.028
   against 0.090 on code; [how it was measured](dev/qwen3-30b-a3b.md#which-file)). It is the same model with the same
   weight formats and nearly the same size, and it decodes at the same speed (measured through the server against the
   official file, one card and two).
