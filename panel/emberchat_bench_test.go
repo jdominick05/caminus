@@ -81,3 +81,25 @@ func BenchmarkResidentLiveWide(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkThemePicker: one arrow in the /theme screen and the frame it draws (the preview moves to the next theme),
+// over a history, as a keypress costs on screen.
+func BenchmarkThemePicker(b *testing.B) {
+	b.Setenv("XDG_CONFIG_HOME", b.TempDir())
+	defer func() { _ = themeLoad("caminus") }()
+	for _, events := range []int{10, 2000} {
+		b.Run(fmt.Sprintf("history_%d_events", events), func(b *testing.B) {
+			m := benchChat(b, events)
+			next, _ := m.chatSlash("/theme")
+			m = next.(emberModel)
+			residentFrameSink = m.View().Content
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+				m = next.(emberModel)
+				residentFrameSink = m.View().Content
+			}
+		})
+	}
+}
