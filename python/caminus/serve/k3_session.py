@@ -245,6 +245,41 @@ class SessionDrafter:
         return self.s._drafts(toks, k)
 
 
+class _PassTokens:
+    """one pass's token sequence as the engines read it (len, an index, a slice, iteration): positions below i0 read the
+    cache's live log in place, positions i0 .. i0 + T - 1 the pass's own tokens (feed, drafts, filler). A slice is a plain
+    list of ints. The log only grows past i0 while a pass is out (accept appends the pass's own tokens), so the positions
+    below i0 read what a copy taken at the pass's start would hold; a copy (toks + body) cost the whole log every pass"""
+    __slots__ = ('log', 'i0', 'body')
+
+    def __init__(self, log, i0, body):
+        self.log, self.i0, self.body = log, i0, body
+
+    def __len__(self):
+        return self.i0 + len(self.body)
+
+    def __getitem__(self, i):
+        i0 = self.i0
+        if isinstance(i, slice):
+            a, b, step = i.indices(len(self))
+            if step != 1:
+                return [self[j] for j in range(a, b, step)]
+            if b <= a:
+                return []
+            if a >= i0:
+                return self.body[a - i0:b - i0]
+            return list(self.log[a:min(b, i0)]) + (self.body[:b - i0] if b > i0 else [])
+        if i < 0:
+            i += len(self)
+        if not 0 <= i < len(self):
+            raise IndexError(f'pass tokens: position {i} of {len(self)}')
+        return self.log[i] if i < i0 else self.body[i - i0]
+
+    def __iter__(self):
+        yield from self.log[:self.i0]
+        yield from self.body
+
+
 # the host-accept drafters: their draft passes are the engine's T-wide verify passes (m.ver), the host compares the greedy
 # rows with the drafts (decode/mtp35.py: the MTP block, fed the passes' h; decode/dflash35.py: DFlash 2, fed their features)
 HOST_VERIFY = ('mtp', 'dflash35')
@@ -634,12 +669,14 @@ class K3Session(EngineSession):
         self.dr.take_h(i0, h[:n * self.m.D], toks)
 
     def _seq(self, feed, drafts):
+        """(i0, the pass's token sequence): the live tokens, then the feed, the drafts and filler to T, as a _PassTokens
+        view over the cache's log (the whole log is not copied per pass)"""
         toks = self.toks
         i0 = len(toks)
         body = [int(t) for t in feed] + [int(t) for t in drafts]
         if not 1 <= len(feed) <= self.T or len(body) > self.T:
             raise EngineStateError(f'K3Session: a pass of {len(feed)} fed + {len(drafts)} drafts with T = {self.T}')
-        return i0, toks + body + [body[-1]] * (self.T - len(body))
+        return i0, _PassTokens(toks, i0, body + [body[-1]] * (self.T - len(body)))
 
     def verify(self, feed):
         """a pass whose logits are not read (forced tool-call tokens beyond one pass): its features injected; returns None"""
@@ -884,11 +921,11 @@ class K3Session(EngineSession):
             us = [sampler.uniform(base + j) for j in range(R)]          # (host work while the cards' top-k finishes)
             V0, I0, V1, I1 = self.cards_wait(R, kp)
             tb = time.perf_counter()
-            out = CS.sample_and_match_batched(V0, I0, V1, I1, sampler, list(drafts), list(history), stop, fetch=fetch, us=us)
+            out = CS.sample_and_match_batched(V0, I0, V1, I1, sampler, list(drafts), history, stop, fetch=fetch, us=us)
         else:
             rows = self.rows_wait(R, pid, kp)
             tb = time.perf_counter()
-            out = CS.sample_and_match(rows, sampler, list(drafts), list(history), stop, fetch=fetch)
+            out = CS.sample_and_match(rows, sampler, list(drafts), history, stop, fetch=fetch)   # (copies only the penalty tail)
         self.samp_t.append(((tb - ta) * 1e3, (time.perf_counter() - tb) * 1e3, len(out)))
         return out
 

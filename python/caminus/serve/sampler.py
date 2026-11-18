@@ -226,10 +226,9 @@ def penalty_counts(history, last_n):
     """(ids, counts) of the penalty window: the last last_n tokens of history (-1 = all, 0 = none)"""
     if last_n == 0 or not len(history):
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
-    h = np.asarray(history, dtype=np.int64)
     if last_n > 0:
-        h = h[-last_n:]
-    return np.unique(h, return_counts=True)
+        history = history[-last_n:]              # (cut first: only the window is converted, not a long history)
+    return np.unique(np.asarray(history, dtype=np.int64), return_counts=True)
 
 
 def apply_penalties(ids, logits, history, prm):
