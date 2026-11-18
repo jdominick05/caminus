@@ -5858,6 +5858,10 @@ for line in sys.stdin:
             self.assertEqual((out['kind'],out['relay'],out['endpoint'],out['efforts']),
                              ('opencode-go',True,root+'/anthropic/v1',['low','medium','xhigh']))
             self.assertEqual(out['prices']['input'],0.15)
+            # later commands keep it (its price from the config, in a fresh process), and the printed fix restores it
+            self.assertEqual(self.cmd('advisor',['--budget-usd','0.5'])['advisor']['kind'],'opencode-go')
+            self.cmd('advisor',['--kind','anthropic'],code=1)          # (qwen3.8-flash has no Anthropic price)
+            self.assertEqual(self.cmd('advisor',['--kind','opencode-go'])['advisor'],dict(out,budget_usd=0.5))
             M.CATALOG_PRICES.pop('qwen3.8-flash',None)    # (the gate's price must come from the advisor's config)
             charged=dict(input_tokens=300,output_tokens=40,cost=0.0012,opencode=dict(billing_source='balance'))
             queue.extend([([dict(type='text',text='Check the linker flags.')],charged),
@@ -5868,11 +5872,14 @@ for line in sys.stdin:
                 got=rt.advisor.ask(gid,'Undefined sqrt at link time?')
                 self.assertIn('linker flags',got['advice']);self.assertEqual(got['usd'],0.0012,'the reply\'s own charge')
                 rt.advisor.ask(gid,'And then?')
-                p1,p2=[x for x in seen if x['method']=='POST']
+                p1,p2=[x for x in seen if x['method']=='POST'][:2]
                 self.assertEqual(p1['path'],'/inference/go/anthropic/v1/messages')
                 self.assertEqual((p1['ua'],p1['version']),('ember/'+caminus.__version__,'2023-06-01'))
                 self.assertTrue(p1['session'] and p2['session']);self.assertNotEqual(p1['session'],p2['session'],'a side call: its own session')
                 self.assertNotIn('fallbacks',p1['body']);self.assertIn(p1['body']['output_config']['effort'],out['efforts'])
+                queue.append(([dict(type='text',text='DONE')],charged))   # the harness's own call (the loop judge)
+                self.assertEqual(rt.advisor.raw(gid,[dict(role='user',content='Done?')],600)[0],'DONE')
+                self.assertTrue(seen[-1]['session']);self.assertNotIn(seen[-1]['session'],(p1['session'],p2['session']))
                 # the same plan without the kind: no session, refused, and named as a setup fix (no call counted)
                 self.cmd('advisor',['--model','claude-haiku-5-5','--kind','anthropic'])
                 rt.config['advisor']=json.loads((self.home/'config.json').read_text())['advisor']

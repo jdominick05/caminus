@@ -768,7 +768,7 @@ def main(argv=None,stdin=None):
                 # the plan model's address, list price and levels, from its model list (asked through the relay)
                 adv.pop('prices',None)
                 adv.update(plan_fields(adv['model'],adv['endpoint']))
-                remember_prices(adv['model'],adv.get('prices'))
+            remember_prices(adv.get('model'),adv.get('prices'))   # (a plan model's list price, as the runtime does)
             if adv.get('model') and price(adv['model'],{}) is None:
                 raise ValueError('no known price for %s, so its spend cannot be limited' % adv['model'])
             if adv and not (adv.get('model') and adv.get('endpoint')):
