@@ -519,6 +519,8 @@ func (m *emberModel) syncChat() {
 			if m.chat.fold(e) {
 				continue
 			}
+		} else if e.Kind == "assistant" {
+			m.chat.noteCalls(e) // (a search result's card names its pattern from the call)
 		}
 		if block := m.chat.eventBlock(e); block != "" {
 			m.chat.flushGroup(w)
@@ -1115,7 +1117,7 @@ func (m emberModel) thoughtChains(gid string) []thoughtChain {
 				_ = json.Unmarshal([]byte(s), &args)
 			}
 			what := name
-			for _, k := range []string{"command", "path", "query", "url", "check", "evidence", "summary", "question"} {
+			for _, k := range []string{"command", "pattern", "glob", "path", "query", "url", "check", "evidence", "summary", "question"} {
 				if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
 					what += "  " + oneLine(residentText(v))
 					break
@@ -1304,7 +1306,7 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			call, _ := raw.(map[string]any)
 			f, _ := call["function"].(map[string]any)
 			name, _ := f["name"].(string)
-			if name == "ask_user" || name == "read" || name == "edit" || name == "write" {
+			if name == "ask_user" || name == "read" || name == "search" || name == "edit" || name == "write" {
 				continue
 			} // the durable question gets a native UI below; a file tool's result card says what it did
 			rawArgs, _ := f["arguments"].(string)
@@ -1312,10 +1314,15 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 			_ = json.Unmarshal([]byte(rawArgs), &args)
 			if command, ok := args["command"].(string); ok {
 				label := "terminal" // (any call with a command read "terminal": a root request among them)
-				if name == "ask_root" {
+				body := lines(command, 40)
+				switch name {
+				case "ask_root":
 					label = "asks for root"
+				case "sandbox": // marked as the box it is, with what it may reach
+					label = "sandbox"
+					body = append(body, sandboxNet(args, nil))
 				}
-				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, lines(command, 40), w))
+				parts = append(parts, toolCard(label, firstLine(command), "", true, c.expanded, body, w))
 				continue
 			}
 			summary := ""
@@ -1362,12 +1369,17 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		}
 		if str("name") == "read" && result["error"] == nil {
 			path, _ := result["path"].(string)
-			shown, _ := result["shown"].(string)
-			meta := "lines " + shown
-			if dir, _ := result["directory"].(bool); dir {
-				meta = "directory"
-			}
-			return toolCard("read", residentText(path), meta, true, false, nil, w)
+			return toolCard("read", residentText(path), readMeta(result), true, false, nil, w)
+		}
+		if str("name") == "search" && result["error"] == nil {
+			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
+			text, _ := result["text"].(string)
+			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
+		}
+		if str("name") == "search" && result["error"] == nil {
+			subject, meta, _ := searchSummary(c.calls[str("call_id")].args, result, c.home, c.cwd)
+			text, _ := result["text"].(string)
+			return toolCard("search", subject, meta, true, c.expanded, lines(text, 40), w)
 		}
 		if err, ok := result["error"].(string); ok {
 			// a failed call stays open: the reason is what the reader needs (the first line is the head; the body is the rest)
@@ -1402,7 +1414,14 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 				}
 			}
 			code, _ := result["exit_code"].(float64)
-			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, lines(output, 30), w)
+			body := lines(output, 30)
+			if hit := limitHit(str("name"), result); hit != "" {
+				meta, code = hit+" · "+meta, 1
+			}
+			if str("name") == "sandbox" {
+				body = append(sandboxLines(result), body...)
+			}
+			return toolCard("output", residentText(str("name")), meta, code == 0, c.expanded, body, w)
 		}
 		if str("name") == "finish" {
 			// the "finished" block under it carries the summary: here one line, the judge's verdict, and what was left
@@ -1536,6 +1555,8 @@ func (c *residentChat) eventBlock(e residentEvent) string {
 		return toolCard("note", "woke up", firstLine(str("note")), true, false, nil, w)
 	case "brain":
 		return toolCard("note", "now answering: "+residentText(str("model")), str("brain"), true, false, nil, w)
+	case "sandbox_connections": // every connection a box made or was refused, as it happened
+		return wrappedRecord("⇄", "sandbox network: "+strings.Join(sandboxConnections(e.Data["connections"]), " · "), w)
 	}
 	return ""
 }
@@ -3291,7 +3312,7 @@ func (m emberModel) endedSessions() map[string]float64 {
 		if e.Kind != "tool_result" {
 			continue
 		}
-		if n, _ := e.Data["name"].(string); n != "terminal" {
+		if n, _ := e.Data["name"].(string); n != "terminal" && n != "sandbox" {
 			continue
 		}
 		res, _ := e.Data["result"].(map[string]any)

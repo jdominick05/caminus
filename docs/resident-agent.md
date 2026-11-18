@@ -158,8 +158,10 @@ is left named. `checkpoint` tars named paths before a destructive or
 milestone-crossing action and `rollback` puts them back.
 
 Before a graded goal completes, `finish` runs two checks. The **gate** is an
-optional shell command given to `define_done` (`gate`), run in the agent's home;
-a non-zero exit refuses the finish and its output becomes the next prompt. The
+optional shell command given to `define_done` (`gate`), run as a terminal command
+runs (in the agent's home, with the terminal's environment: `$WORKSPACE`, no model
+key); a non-zero exit refuses the finish and its output becomes the next prompt,
+naming any variable the gate uses that is not set there. The
 **judge** is a fresh model call with no tools that sees the goal, the done check,
 the human's steers and the recorded evidence, not the agent's reasoning, and
 answers met, not yet or wait. Not yet refuses the finish with what is missing;
@@ -205,8 +207,10 @@ at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
 A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
 and a terminal command runs only when every part of it is a read-only program
-(`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent
-files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
+(`ls`, `grep`, `git status`, `sed -n '1,20p' FILE`, ...) with literal arguments:
+a glob, brace, `$` or escape outside quotes could expand to a file named like a
+flag, so it counts as a change, as does anything else unclear (`find . -name
+'*.py'` and `ls "$WORKSPACE"` stay read-only). The agent files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
 `agent plan NAME GOAL approve|reject [--note TEXT]`.
 
 The emergency stop: `caminus ember stop-all [--reason TEXT]` (`/halt`) writes a
@@ -220,8 +224,10 @@ loop; real residents get the gates by default.
 
 ## Tools
 
-Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
-`ask_root`), a resident has:
+Besides `terminal` (its `timeout`, 1 to 3600 seconds, kills a command that runs
+longer and the result says so, as `sandbox`'s does; `yield_ms` only bounds how long
+one call waits for output), `discover`, the loop's tools and the bridge
+(`ask_user`, `ask_root`), a resident has:
 
 | Tool | What it does |
 |---|---|
@@ -232,7 +238,8 @@ Besides `terminal`, `discover`, the loop's tools and the bridge (`ask_user`,
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |
 | `report`, `budget`, `schedule` | fyi or need_you to the human; what the goal has used and has left; park the goal and wake it later |
-| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (installed in the agent's account: `python3 -m venv ~/.venvs/ddgs && ~/.venvs/ddgs/bin/pip install ddgs`); a page as readable text |
+| `web_search`, `web_fetch` | Search through [ddgs](https://pypi.org/project/ddgs/) (in the agent's Python, which `caminus ember setup` fills: [ember.md](ember.md#where-things-live)); a page or a PDF as readable text (retries, cache, arXiv papers: [the web tools](ember.md#the-web-tools)) |
+| `sandbox` | Code the agent did not write or does not trust (exploit proofs of concept, CVE reproductions, unknown repositories, install scripts) in a [bubblewrap](https://github.com/containers/bubblewrap) box: nothing of the agent's home, `/usr` and `/etc` read-only, a private `/tmp`, no GPUs, no D-Bus, display or host services, no capabilities. `folder` is mounted read-only at `/work` (refused: a resident's workspace or its state, the account home, a hidden folder of the account, a folder holding the token); `/box` (`boxes/GOAL` in the workspace) is writable, kept across the goal's sandbox calls and removed when the goal completes or is cancelled (a paused or failed goal keeps it, since it can resume). No user namespace can be made inside (`--disable-userns`). No network unless the call names `hosts`: then a proxy outside the box allows HTTPS (port 443) to those names and their subdomains when every address is public, and each connection shows as an event and in the card's expanded view (one made after the last poll, when the goal ends). Limits per call: `timeout` (600 s, at most 3600), 4 GB, half the CPUs, 512 processes (config.json `sandbox`: `memory_mb`, `tasks`, `cpu_percent`, `limiter`) through a user systemd scope, else rlimits; `/box` at most 4 GB on disk (`disk_mb`, checked every 2 s) and the tmpfs `/tmp` and `/run` at most the memory limit; going over kills the box and the result names the limit. The connection log keeps 1000 connections per box and a result returns at most 50 new ones (`connections_more` counts the rest). Polled like a terminal session |
 | `advisor` | A stronger model's advice, within the owner's limits (below) |
 | `mcp__SERVER__TOOL` | Tools from the agent's MCP servers (below) |
 

@@ -110,7 +110,7 @@ def _local_effort(cfg, keep_level=False):
 
 
 def _current(cfg):
-    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices')
+    keys=('model','provider','endpoint','api','context','max_tokens','effort','thinking','relay','prices','vision')
     return {k:cfg.get(k) for k in keys if cfg.get(k) is not None}
 
 
@@ -209,7 +209,7 @@ def model_ops(a,home):
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=spec['endpoint'],
                    api='anthropic' if spec['kind']=='anthropic' else 'openai')
-        for k in ('relay','prices','context','thinking','model_variants','efforts'):
+        for k in ('relay','prices','context','thinking','model_variants','efforts','vision'):
             cfg.pop(k,None)
         if cfg.pop('max_tokens_auto',None):
             cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
@@ -219,6 +219,7 @@ def model_ops(a,home):
         if spec.get('relay'):cfg['relay']=True
         if entry.get('prices'):cfg['prices']=entry['prices']
         if entry.get('context'):cfg['context']=int(entry['context'])
+        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
         if entry.get('variants'):
             cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
         elif spec['kind']=='local':
@@ -284,7 +285,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
         p=sub.add_parser(op)
         p.add_argument('name')
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -380,6 +381,12 @@ def parser():
             p.add_argument('--calls-per-goal',type=int,help='advice calls one goal may make (default 5)')
             p.add_argument('--effort',choices=('low','medium','high','xhigh','max'))
             p.add_argument('--off',action='store_true',help='remove the advisor')
+        if op=='eyes':
+            p.add_argument('--provider',help='a configured provider (agent provider), normally your key relay: mistral, anthropic, ...')
+            p.add_argument('--model',help='a vision model it serves, e.g. ministral-8b-latest or claude-haiku-5-5')
+            p.add_argument('--budget-usd',type=float,help='dollars per day the eyes may spend (default 0.25)')
+            p.add_argument('--auto',action='store_true',help='turn eyes on with the recommended pick: ministral-8b-latest on a Mistral relay provider, else claude-haiku-5-5 on an Anthropic one')
+            p.add_argument('--off',action='store_true',help='no eyes: a brain without vision gets the image\'s size and format')
         if op=='heartbeat':
             p.add_argument('state',nargs='?',choices=('on','off','status','recap','now'),default='status',
                            help='free time: the resident lives in its account when no work is queued')
@@ -526,11 +533,14 @@ def main(argv=None,stdin=None):
                 cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
-                # judge or advisor on the relay would bill every finish; the owner adds them back on purpose)
-                for k in ('relay','prices','context','thinking','effort','provider','provider_kind','api','compaction_model',
-                          'fallback','advisor','judge_model','model_variants','efforts'):
+                # judge or advisor on the relay would bill every finish, eyes every image read; the owner adds them back on purpose)
+                for k in ('relay','prices','context','thinking','effort','vision','provider','provider_kind','api','compaction_model',
+                          'fallback','advisor','judge_model','eyes','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
+                from . import catalog
+                # (after _local_effort: the catalog knows the base id, not an effort id such as ...-nothink)
+                if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
             Model(cfg)
             home.mkdir(mode=0o700)  # refuse existing sessions, including partial ones
@@ -572,6 +582,8 @@ def main(argv=None,stdin=None):
             from .model import Model
             Model(cfg)                     # validate before persisting
             _local_effort(cfg)             # a local server's own id and its effort ids, when it is up
+            from . import catalog
+            if catalog.model_vision(home,cfg):cfg['vision']=True   # (read sends images to this brain, as after /model)
             mail=Mail(cfg)
             try:mail.register(home)
             finally:mail.close()
@@ -745,6 +757,40 @@ def main(argv=None,stdin=None):
             import datetime
             emit(dict(advisor={**DEFAULTS,**adv} if adv else None,
                       today=state.get(datetime.date.today().isoformat(),dict(usd=0.0,calls=0))),a.json)
+            return 0
+        if a.op=='eyes':
+            # the vision model that describes images for a brain without vision (advisor.Eyes)
+            import types
+            from .advisor import Eyes
+            from . import catalog
+            cfg=json.loads((home/'config.json').read_text())
+            eyes=cfg.get('eyes')
+            if a.off:eyes=False
+            elif a.auto or a.provider or a.model or a.budget_usd is not None:
+                eyes=dict(eyes) if isinstance(eyes,dict) else {}   # (a budget alone stays on the model set before)
+                if a.auto:                                         # (opt-in: only this command writes the pick)
+                    pick=Eyes.auto_pick(cfg)
+                    if not pick:
+                        raise ValueError('--auto needs a Mistral or Anthropic provider on your key relay, e.g. caminus '
+                                         'ember agent provider NAME add mistral --kind mistral --endpoint '
+                                         'http://127.0.0.1:8767/v1 --relay')
+                    eyes.update(pick)
+                for flag in ('provider','model','budget_usd'):
+                    v=getattr(a,flag)
+                    if v is not None:
+                        if isinstance(v,float) and v<0:raise ValueError('--budget-usd must be 0 or more')
+                        eyes[flag]=v
+                if not (eyes.get('provider') and eyes.get('model')):
+                    raise ValueError('eyes need --provider and --model, or --auto')
+                if eyes['provider'] not in catalog.providers(cfg):
+                    raise ValueError('no provider named %s: add it first (caminus ember agent provider NAME add %s '
+                                     '--kind KIND --endpoint RELAY-URL --relay)' % (eyes['provider'],eyes['provider']))
+            if eyes is not None and eyes!=cfg.get('eyes'):
+                cfg['eyes']=eyes
+                atomic_json(home/'config.json',cfg)
+            shown=Eyes(types.SimpleNamespace(config=cfg,home=home))
+            emit(dict(eyes=shown.cfg,today=shown._state().get(__import__('datetime').date.today().isoformat(),
+                                                              dict(usd=0.0,calls=0))),a.json)
             return 0
         if a.op=='heartbeat':
             from .freetime import settings
@@ -1085,7 +1131,7 @@ def main(argv=None,stdin=None):
                         result=approval.withdraw(bridge,rid,gid)
                         if result.get('decision')=='executing':in_flight.append(rid)
                 store.update(gid,state='cancelled')
-                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name='terminal'",(gid,)):
+                for act in store.db.execute("SELECT id,args FROM actions WHERE goal=? AND name IN ('terminal','sandbox')",(gid,)):
                     try:args=json.loads(act['args'])
                     except ValueError:continue
                     if not isinstance(args,dict):continue

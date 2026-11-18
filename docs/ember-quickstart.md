@@ -43,12 +43,13 @@ You joined the `caminus-env` group: log out and back in (or run `newgrp caminus-
 caminus ember setup          # installs the agent's side; every line should say PASS
 ```
 
-If the agent will commit to a repository or run its CPU tests, give it a git identity and a test interpreter (both
-optional, both safe to rerun):
+Setup also fills the agent's own Python with a standard package set ([the list](ember.md#where-things-live)). If the
+agent will commit to a repository or run its CPU tests, give it a git identity and CPU torch (both optional, both safe
+to rerun):
 
 ```sh
 caminus ember setup --git-name LOGIN --git-email LOGIN@users.noreply.github.com   # its GitHub account, for commits a CLA check can link
-caminus ember setup --test-venv                                                    # ~/.venvs/caminus-cpu: CPU torch and numpy (about 200 MB)
+caminus ember setup --test-venv                                                    # CPU torch and numpy in ~/.venvs/caminus-cpu (about 200 MB more)
 ```
 
 ## 3. Give it a brain

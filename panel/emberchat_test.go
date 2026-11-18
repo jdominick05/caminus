@@ -1208,14 +1208,20 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 			"path": "src/parse.c", "added": float64(1), "removed": float64(1),
 			"diff": "@@ -1,3 +1,3 @@\n int f(void) {\n-    if (n > len) return -1;\n+    if (n >= len) return -1;"}}},
 		{Seq: 3, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
-			"path": "src/parse.c", "shown": "1-40", "text": "secret body"}}},
+			"path": "src/parse.c", "shown": "1-40 of 90", "text": "secret body"}}},
+		{Seq: 4, Goal: "g1", Kind: "assistant", Data: map[string]any{"tool_calls": []any{map[string]any{"id": "s1", "function": map[string]any{
+			"name": "search", "arguments": `{"pattern":"len","glob":"*.c"}`}}}}},
+		{Seq: 5, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "search", "call_id": "s1", "result": map[string]any{
+			"path": ".", "matches": float64(1), "files": float64(1), "searched": float64(3), "text": "src/parse.c\n     2:      if (n >= len) return -1;"}}},
+		{Seq: 6, Goal: "g1", Kind: "tool_result", Data: map[string]any{"name": "read", "result": map[string]any{
+			"path": "plots/loss.png", "image": map[string]any{"format": "png", "width": float64(640), "height": float64(480)}}}},
 	}
 	m.chat.rendered, m.chat.content = 0, ""
 	m.syncChat()
 	v := ansi.Strip(m.chat.content)
 	// the file's line numbers from the hunk header, the marker, then the code (highlighted, so compare it stripped)
 	for _, want := range []string{g.edit + " edit  src/parse.c  ·  +1 −1", "   1   int f(void) {", "   2 -     if (n > len) return -1;",
-		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40"} {
+		"   2 +     if (n >= len) return -1;", "read  src/parse.c  ·  lines 1-40 of 90", "search  “len” in *.c  ·  1 match in 1 file", "read  plots/loss.png  ·  image 640x480"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("missing %q:\n%s", want, v)
 		}
@@ -1223,7 +1229,7 @@ func TestFileToolsRenderAsDiffAndReadCards(t *testing.T) {
 	if !strings.Contains(m.chat.content, bgSeq(func() string { a, _ := diffPlates(); return a }())) {
 		t.Fatal("an added line sits on the tinted plate")
 	}
-	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 {
+	if strings.Contains(v, "@@") || strings.Contains(v, "secret body") || strings.Count(v, "src/parse.c") != 2 || strings.Contains(v, `"pattern"`) {
 		t.Fatalf("hunk headers, read bodies or a repeated call card leaked:\n%s", v)
 	}
 }
@@ -2047,10 +2053,12 @@ func TestEmbersBoxShowsTheThoughtChainWithoutReasoning(t *testing.T) {
 		residentEvent{Seq: 990, Goal: "original", Kind: "assistant", Data: map[string]any{
 			"content": "Let me check the BL density first.",
 			"tool_calls": []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{
-				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}}}},
+				"name": "terminal", "arguments": `{"command":"python3 density.py xbl.img"}`}}, map[string]any{"id": "c2", "type": "function",
+				"function": map[string]any{"name": "search", "arguments": `{"path":"src","pattern":"density\\("}`}}}}},
 		residentEvent{Seq: 991, Goal: "original", Kind: "tool_result", Data: map[string]any{"name": "terminal", "result": map[string]any{"output": "0.0256"}}})
 	box := ansi.Strip(m.liveBlock(90))
-	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") {
+	if !strings.Contains(box, "Let me check the BL density first.") || !strings.Contains(box, "→ terminal  python3 density.py xbl.img") ||
+		!strings.Contains(box, `→ search  density\(`) {
 		t.Fatalf("without reasoning, the words and the tool calls are the chain:\n%s", box)
 	}
 	if strings.Contains(box, "no thoughts yet") {
