@@ -10,7 +10,8 @@ Checks:
   compare    two arms over the same runs give "no difference"; the across-the-board rule on made-up cells
   session    a driven lab session: the request the model would see waits for us, our tool call reaches the resident,
              the timings a driven:caminus brain sends are the resident's engine speed, an interrupt closes the waiting call (the driven brain records the hang-up),
-             close stops the daemon
+             close stops the daemon and the job workers it leaves behind (KILL after the grace, named), never a
+             process a stale state file names
   tui        (with tmux) keys in, an exact screen and its SVG out; --read-only refuses a goal before anything runs
 """
 import argparse
@@ -128,14 +129,73 @@ for _ in range(50):
 t2 = lab('turn', 'd', '--out', str(so), '--wait', '1')
 check(t.returncode == 0 and it.returncode == 0 and '"queued": true' in it.stdout and gone and 'hung up' in t2.stdout,
       f'session: an interrupt closes the waiting call and the driven brain records the hang-up ({it.stdout.strip()} {t2.stdout.strip()[:200]})')
-lab('close', 'd', '--out', str(so))
-time.sleep(1)
+# close: box and terminal workers outlive their daemon by design, so close ends them too. Fake jobs in the session's
+# home: a worker that ignores TERM (close must KILL it), one that obeys, their commands (each its own group, as the
+# resident starts them), and a stale state.json naming a process that is not the session's (a recycled pid: left alone).
+procs = []
+
+
+def spawn(code, *args, env=None):
+    p = subprocess.Popen([sys.executable, '-I', '-c', code, *args], start_new_session=True, env=env)
+    procs.append(p)
+    return p.pid
+
+
+def gone(pid):
+    p = next((p for p in procs if p.pid == pid), None)
+    if p is not None:
+        return p.poll() is not None
+    try:
+        return open(f'/proc/{pid}/stat').read().rsplit(')', 1)[1].split()[0] in 'ZX'
+    except OSError:
+        return True
+
+
+IGNORE_TERM = 'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(120)'
+SLEEP = 'import time;time.sleep(120)'
+home = Path(s['home'])
+stubborn, polite, stale = (home / 'jobs' / (c * 32) for c in 'abc')
+command_env = {**os.environ, 'WORKSPACE': str(home)}
+jobs = {stubborn: (spawn(IGNORE_TERM, str(stubborn)), spawn(SLEEP, env=command_env)),
+        polite: (spawn(SLEEP, str(polite)), spawn(SLEEP, env=command_env)),
+        stale: (spawn(SLEEP), None)}
+for job, (worker, cmd) in jobs.items():
+    job.mkdir(parents=True)
+    (job / 'state.json').write_text(json.dumps(dict(phase='running', worker=worker, pid=cmd)))
+# and one real terminal job, started the way the resident starts it (its own worker, command and paths)
+sys.path.insert(0, str(ROOT / 'python'))
+from caminus.ember.resident.terminal import Terminal  # noqa: E402
+real = Terminal(home).call('d' * 32, dict(command='sleep 120', yield_ms=500))
+daemon = json.loads((home / 'heartbeat.json').read_text())['pid']
+time.sleep(0.5)
+t0 = time.monotonic()
+c = lab('close', 'd', '--out', str(so), timeout=120)
+took = time.monotonic() - t0
+time.sleep(0.5)
+after = c.stdout.split('had to SIGKILL')[-1]
+check(real.get('running') and c.returncode == 0
+      and all(gone(p) for p in [daemon, *jobs[stubborn], *jobs[polite], real['worker'], real['pid']]),
+      f'session: close ends the daemon, the job workers and their commands ({c.stdout.strip()} {c.stderr[-300:]})')
+check('had to SIGKILL' in c.stdout and f'worker {"a" * 8} ({jobs[stubborn][0]})' in after
+      and f'worker {"b" * 8}' not in after and took < 60,
+      f'session: close says what it had to SIGKILL after the grace, and only that ({took:.0f} s)')
+check(not gone(jobs[stale][0]), "session: close leaves alone a process a stale state.json names that is not the session's")
+check((so / 'sessions/d/session.closed.json').exists(), 'session: close files the session as closed')
 try:
     os.killpg(s['daemon_pid'], 0)
     alive = True
 except ProcessLookupError:
     alive = False
 check(not alive, 'session: close stops the daemon')
+for p in procs:                 # the test's own fake processes: the decoy, and anything a failed close left
+    if p.poll() is None:
+        p.kill()
+    p.wait()
+for pid in (real.get('worker'), real.get('pid')):
+    try:
+        os.killpg(pid, 9) if pid and not gone(pid) else None
+    except OSError:
+        pass
 
 # ---- tui
 if shutil.which('tmux'):
