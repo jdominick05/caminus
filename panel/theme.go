@@ -434,7 +434,10 @@ func emberMarkdownStyle() ansi.StyleConfig {
 	if st.Item.BlockPrefix == "" {
 		st.Item.BlockPrefix = "• "
 	}
-	st.Table.Color = color(themeRole("chrome"))
+	// a table's header and cells in the body's text colour: glamour draws the cells in this style (its borders in the
+	// terminal's own colour), and the chrome role it had (a border grey) left the words barely readable on a dark
+	// background while the rules around them were bright. glamour v2 has one style for header and cells.
+	st.Table.Color = color(themeRole("text"))
 	st.Table.CenterSeparator = color("┼")
 	st.Table.ColumnSeparator = color("│")
 	st.Table.RowSeparator = color("─")

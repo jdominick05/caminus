@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -934,6 +935,59 @@ func TestEachEventIsFramedAsACardWithItsBodyBehindARule(t *testing.T) {
 	}
 	if !seen {
 		t.Fatalf("the reply has no label:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A table's header and cells read in the body's text colour in every built-in theme, and that colour reads on the
+// theme's background (WCAG AA, 4.5:1): they were in the chrome grey, barely visible on a dark background.
+func TestMarkdownTablesUseTheBodyTextColourInEveryTheme(t *testing.T) {
+	themeFixture(t)
+	lum := func(hex string) float64 {
+		r, g, b, ok := hexRGB(hex)
+		if !ok {
+			return -1
+		}
+		ch := func(v uint8) float64 {
+			c := float64(v) / 255
+			if c <= 0.03928 {
+				return c / 12.92
+			}
+			return math.Pow((c+0.055)/1.055, 2.4)
+		}
+		return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b)
+	}
+	sgrBefore := func(out, word string) string { // the last colour set before word
+		i := strings.Index(out, word)
+		if i < 0 {
+			t.Fatalf("%q not rendered:\n%q", word, out)
+		}
+		j := strings.LastIndex(out[:i], "38;2;")
+		if j < 0 {
+			return ""
+		}
+		return out[j : j+strings.IndexByte(out[j:], 'm')]
+	}
+	for _, name := range themeNames() {
+		if err := themeLoad(name); err != nil {
+			t.Fatal(name, err)
+		}
+		r, err := glamour.NewTermRenderer(glamour.WithStyles(emberMarkdownStyle()), glamour.WithWordWrap(80))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := r.Render("Plainword before the table.\n\n| Headword | Other |\n|---|---|\n| Cellword | x |\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := sgrBefore(out, "Plainword")
+		if body == "" || sgrBefore(out, "Headword") != body || sgrBefore(out, "Cellword") != body {
+			t.Fatalf("%s: the table's header and cells are not in the body text colour (%q):\n%q", name, body, out)
+		}
+		if fg, bg := lum(themeRole("text")), lum(themeRole("bg")); fg >= 0 && bg >= 0 {
+			if ratio := (max(fg, bg) + 0.05) / (min(fg, bg) + 0.05); ratio < 4.5 {
+				t.Fatalf("%s: text on its background is %.2f:1, under 4.5:1", name, ratio)
+			}
+		}
 	}
 }
 
