@@ -15,8 +15,7 @@ WAITING = {'paused', 'waiting_user', 'waiting_root', 'waiting_plan', 'waiting_mo
 
 
 def time_line(now):
-    """the time stamp's words: local time with weekday and zone, minute resolution, e.g. [time: Wed 2026-11-18 00:41 EST]
-    (Qwen Code's context note, share/harness/qwen-code/context_note.py, writes the same)"""
+    """the time stamp's words: local time with weekday and zone, minute resolution, e.g. [time: Wed 2026-11-18 00:41 EST]"""
     return time.strftime('[time: %a %Y-%m-%d %H:%M %Z]', time.localtime(now))
 
 
