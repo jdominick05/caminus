@@ -17,7 +17,9 @@ same par block (q_norm | k_norm | theta_scale, eps | freq [64] | mscale):
 row are both byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the F16 YaRN kernel's halves.
 --tp: the two-card module's YaRN build (k3_q3m_lean_tp_yarn, or k3_q3m_lean_tp_kvq8_yarn with --kv q8) at one card's shapes of
 the two-card engine (16 query / 2 kv heads, up to 128 splits), on one card alone.
-  tools/guard.sh LOG 600 python -I tests/engine/test_q3m_yarn_rope.py [--kv q8] [--tp]
+--q40: the same builds of the Q4_0 family (k3.Q3M_Q40_OF: k3_q3m_q40_yarn, ..._kvq8_yarn, ..._tp_yarn, ..._tp_kvq8_yarn), whose
+attention statements are their bases'; the prefill row kernel is the same object.
+  tools/guard.sh LOG 600 python -I tests/engine/test_q3m_yarn_rope.py [--kv q8] [--tp] [--q40]
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>). Prints PASS / FAIL and RESULT."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -29,6 +31,7 @@ from caminus.engine import k3, q3moe_one
 from caminus.prefill import q3m_ops
 
 ap = argparse.ArgumentParser(); ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('--tp', action='store_true')
+ap.add_argument('--q40', action='store_true', help='the Q4_0 family\'s YaRN twins (k3.Q3M_Q40_OF)')
 A = ap.parse_args()
 ok = True
 
@@ -43,6 +46,7 @@ NH, NKV, HD = (16, 2, 128) if A.tp else (32, 4, 128)
 M = NKV * HD
 base = 'k3_q3m_lean_tp' if A.tp else 'k3_q3m_lean'
 NATIVE = k3.Q3M_KV_Q8_OF[base] if Q8 else base
+if A.q40: NATIVE = k3.Q3M_Q40_OF[NATIVE]
 MOD = k3.Q3M_YARN_OF[NATIVE]
 LAY = ref_kv.Q8KVLayout(NKV, HD)
 RB = LAY.row_bytes if Q8 else 2 * M * 2

@@ -13,7 +13,9 @@ the card at max_ctx 512). Prints PASS / FAIL lines and RESULT PASS | FAIL.
   HIP_VISIBLE_DEVICES=<card> tools/guard.sh LOG 900 python -I tests/engine/test_q3m_tp_probe.py GGUF --scratch DIR   (after --tiny passed)
 --kv q8: the Q8 KV builds: the reference on k3_q3m_lean_kvq8 (Q3MoEOne(q8=True)), the replays and the two ops on
 k3_q3m_lean_tp_kvq8 (its first launch, on one card: the exchange, slot sum and pinned add_rms16 of its k3_run), the logits
-bitwise the one-card Q8 module's, both error words 0."""
+bitwise the one-card Q8 module's, both error words 0.
+A file whose matrices are Q4_0 (tools/eval/gptq_to_gguf.py) runs the Q4_0 family's twins of the same modules (k3.Q3M_Q40_OF:
+k3_q3m_q40 and k3_q3m_q40_tp, with --kv q8 their Q8 builds)."""
 import argparse, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
@@ -49,14 +51,15 @@ else:
     P, max_ctx, first = A.gguf, A.max_ctx or 512, [785, 6722, 9625]
 if A.steps + 1 > max_ctx: raise SystemExit(f'--steps {A.steps} needs max_ctx > {A.steps}')
 Q8 = A.kv == 'q8'
-LEAN = k3.Q3M_KV_Q8_OF['k3_q3m_lean'] if Q8 else 'k3_q3m_lean'
-TP = k3.Q3M_TP_OF[LEAN]
 GRIDS = (3, 5, 6, 7)
 print(torch.cuda.get_device_name(0), flush=True)
 # beside the engine's projection (checked by its constructor with this): one tape per grid on the two-card module, the
 # exchange's receive slot (16 words + D floats, outside torch) and the two small checks' buffers
 own_mib = (len(GRIDS) + 1) * Q3MoEOne.TAPE_MIB + 8
 eng = Q3MoEOne(P, max_ctx=max_ctx, vram_extra_mib=own_mib, q8=Q8)
+BASE = k3.Q3M_Q40_OF['k3_q3m_lean'] if eng.q40 else 'k3_q3m_lean'   # (a Q4_0 file: the Q4_0 family's twins)
+LEAN = k3.Q3M_KV_Q8_OF[BASE] if Q8 else BASE
+TP = k3.Q3M_TP_OF[LEAN]
 D, KU, base_mod, pw0 = eng.D, eng.k_used, eng.module, eng.per_wgp
 print(f'{os.path.basename(P)}: D {D}, top-{KU}, {eng.nkv} kv heads, module {base_mod} at {pw0} per WGP ({eng.vram_mib:.0f} + {own_mib} MiB)', flush=True)
 check(base_mod == LEAN, f'the engine decodes on {LEAN} ({base_mod})')
