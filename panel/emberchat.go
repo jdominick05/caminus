@@ -2088,19 +2088,27 @@ func (m emberModel) btwSection(w int) string {
 		}
 		thinking += fmt.Sprintf("… %ds", int(time.Since(b.since).Seconds()))
 	}
-	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(residentText(b.question), textW-ansi.StringWidth(asker)-2))
+	// everything drawn here is bounded here, whoever wrote it: the question on one line, the error sanitised (a
+	// /btw failure is the CLI's raw output; the agent's tool error can carry a provider's 2 KB page) and scrolled as
+	// an answer is, the waiting line clipped
+	question := strings.Join(strings.Fields(residentText(b.question)), " ")
+	q := lipgloss.NewStyle().Foreground(cText).Render(emberClip(question, textW-ansi.StringWidth(asker)-2))
 	body := []string{emberBusy.Render(asker+" ") + q}
 	rows := m.btwRows()
 	keys := "esc closes"
 	switch {
 	case b.loading:
-		body = append(body, emberDim.Render(spin[m.tickN%len(spin)]+thinking))
-	case b.err != "":
-		for _, l := range strings.Split(ansi.Wordwrap("could not ask: "+b.err, textW, " "), "\n") {
-			body = append(body, emberCtxHot.Render(emberClip(l, textW)))
-		}
+		body = append(body, emberDim.Render(emberClip(spin[m.tickN%len(spin)]+thinking, textW)))
 	default:
 		var lines []string
+		if b.err != "" {
+			text := strings.ReplaceAll(terminalText("could not ask: "+strings.TrimSpace(b.err), true), "\t", "    ")
+			for _, l := range strings.Split(text, "\n") {
+				for _, piece := range strings.Split(ansi.Wrap(l, textW, ""), "\n") {
+					lines = append(lines, emberCtxHot.Render(piece))
+				}
+			}
+		}
 		for _, l := range b.lines {
 			lines = append(lines, strings.Split(ansi.Hardwrap(l, textW, true), "\n")...)
 		}
@@ -2588,9 +2596,15 @@ func (m emberModel) chatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" && m.chat.recap != "" && strings.TrimSpace(m.chat.compose.Value()) == "" {
 		return m.dismissRecap(), nil
 	}
-	if m.chat.btw.open {
+	if b := m.chat.btw; b.open {
 		switch k := msg.String(); {
+		case k == "esc" && strings.TrimSpace(m.chat.compose.Value()) == "" && b.call != "" && !b.escPassed && m.interruptibleGoal() != "":
+			// the agent's own advisor popup: Esc stops the working agent first, as always; the next one closes it
+			m.chat.btw.escPassed = true
 		case k == "esc" && strings.TrimSpace(m.chat.compose.Value()) == "":
+			if b.call != "" {
+				m.advisorShut = b.call
+			}
 			m.chat.btw = btwState{}
 			m.syncChat()
 			return m, nil

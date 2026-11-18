@@ -20,8 +20,8 @@ import (
 )
 
 type callInfo struct {
-	name string
-	args map[string]any
+	id, name string
+	args     map[string]any
 }
 
 // toolFamily is the colour a tool's label takes: the shell, files, the web, memory, messages, the done check.

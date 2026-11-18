@@ -93,7 +93,8 @@ var tabs = []string{"requests", "jobs", "procs", "notes & memory", "context", "a
 var emberNavigation = []int{7, 5, 8, 3, 4}
 
 type emberModel struct {
-	hosted         ctl // /panel: the Caminus panel component, full screen while hostedOpen (emberpanel.go)
+	advisorShut    string // the agent's advisor call whose popup you closed: it never opens again
+	hosted         ctl    // /panel: the Caminus panel component, full screen while hostedOpen (emberpanel.go)
 	hostedOpen     bool
 	notes          notifier // desktop notifications already shown (notify.go)
 	user           string

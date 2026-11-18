@@ -53,23 +53,32 @@ func (t *toolGroup) line(w int) string {
 
 // noteCalls keeps an assistant event's tool calls by id, so a result's card can name what was asked (both views).
 func (c *residentChat) noteCalls(e residentEvent) []callInfo {
+	calls := toolCalls(e)
+	for _, call := range calls {
+		if call.id != "" {
+			if c.calls == nil {
+				c.calls = map[string]callInfo{}
+			}
+			c.calls[call.id] = call
+		}
+	}
+	return calls
+}
+
+// toolCalls is an assistant event's tool calls: each one's id, name and arguments.
+func toolCalls(e residentEvent) []callInfo {
 	var out []callInfo
 	calls, _ := e.Data["tool_calls"].([]any)
 	for _, raw := range calls {
 		call, _ := raw.(map[string]any)
 		f, _ := call["function"].(map[string]any)
+		id, _ := call["id"].(string)
 		name, _ := f["name"].(string)
 		var args map[string]any
 		if s, _ := f["arguments"].(string); s != "" {
 			_ = json.Unmarshal([]byte(s), &args)
 		}
-		if id, _ := call["id"].(string); id != "" {
-			if c.calls == nil {
-				c.calls = map[string]callInfo{}
-			}
-			c.calls[id] = callInfo{name: name, args: args}
-		}
-		out = append(out, callInfo{name: name, args: args})
+		out = append(out, callInfo{id: id, name: name, args: args})
 	}
 	return out
 }

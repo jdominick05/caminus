@@ -180,7 +180,8 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   the goal's advisor calls. A running agent picks up an advisor you add or remove without a restart. While the advisor
   is asked (`/advisor`, or the agent's advisor tool), a popup over the typing box (the one `/btw` uses) shows who asked,
   the advisor's model and the seconds it has taken; it goes when the advice lands as a card (rendered as Markdown, as
-  the agent's replies are; Ctrl+Y shows its source), and says why when the call fails (a spent budget, no calls left).
+  the agent's replies are; Ctrl+Y shows its source), and says why when the call fails (a spent budget, no calls left) until Esc closes it (while the agent works, the
+  first Esc stops the agent, as always). `/advisor` waits while a `/btw` answer is on its way.
 - **Eyes.** A brain without vision (every local Caminus model) can still look at an image, once you turn eyes on:
   when it reads one, Ember sends that image to a vision model on your relay, and the description is the read's result.
   With the image go the agent's question (read's `question` argument, else "describe what matters in this image for
