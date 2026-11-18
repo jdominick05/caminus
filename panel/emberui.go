@@ -671,10 +671,19 @@ func (m emberModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case residentDestroyedMsg:
 		if msg.err != "" {
-			m.msg = "destroy " + residentText(msg.name) + ": " + residentText(msg.err)
+			m.msg = "close " + residentText(msg.name) + ": " + residentText(msg.err)
 		} else {
-			m.msg = "destroyed " + residentText(msg.name) + "; its home is kept in " + residentText(msg.kept)
+			m.msg = "closed " + residentText(msg.name) + "; its home is kept in " + residentText(msg.kept) +
+				" · r in the switcher restores it"
 		}
+		return m, residentSessions(m)
+	case closedSessionsMsg:
+		if m.chat.pickerRestore {
+			m.chat.closed, m.chat.closedNote, m.chat.closedSel = msg.closed, msg.err, 0
+		}
+		return m, nil
+	case residentRestoredMsg:
+		m.msg = msg.text
 		return m, residentSessions(m)
 	case modelsLoadedMsg:
 		return m.modelsLoaded(msg), nil
