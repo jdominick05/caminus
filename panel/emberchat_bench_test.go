@@ -54,30 +54,37 @@ func BenchmarkResidentTyping(b *testing.B) {
 	}
 }
 
-// BenchmarkResidentLiveWide: a wide terminal, where the reply streams into the transcript, at history sizes. snapshot
-// is one live update drawn (it sets the transcript's content again); frame is one tick drawn between live updates
-// (the spinner moves, the text does not), which must cost what typing does: with the spinner in the streamed block,
+// BenchmarkResidentLiveWide: a wide terminal, where the reply streams into the transcript, at history sizes, in its two
+// phases: text (the reply's words) and thinking (no words yet: the reasoning's last lines, dimmed). snapshot is one
+// live update drawn (it sets the transcript's content again); frame is one tick drawn between live updates (the
+// activity line moves, the block does not), which must cost what typing does: with the spinner in the streamed block,
 // every frame reset the whole transcript (5.7 against 3.2 ms at 2000 events).
 func BenchmarkResidentLiveWide(b *testing.B) {
 	for _, events := range []int{10, 500, 2000} {
-		for _, kind := range []string{"snapshot", "frame"} {
-			b.Run(fmt.Sprintf("history_%d_events/%s", events, kind), func(b *testing.B) {
-				m := benchChat(b, events)
-				m.chat.live = residentLive{active: true, turn: "t1", wrapText: &wrapCache{}, wrapThink: &wrapCache{}}
-				next, _ := m.Update(residentLiveMsg{turn: "t1", text: "tok "})
-				m = next.(emberModel)
-				b.ReportAllocs()
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					if kind == "snapshot" {
-						next, _ = m.Update(residentLiveMsg{turn: "t1", text: "tok "})
-						m = next.(emberModel)
-					} else {
-						m.tickN++
+		for _, phase := range []string{"text", "thinking"} {
+			for _, kind := range []string{"snapshot", "frame"} {
+				b.Run(fmt.Sprintf("history_%d_events/%s/%s", events, phase, kind), func(b *testing.B) {
+					m := benchChat(b, events)
+					m.chat.live = residentLive{active: true, turn: "t1", wrapText: &wrapCache{}, wrapThink: &wrapCache{}, wrapGist: &wrapCache{}}
+					delta := residentLiveMsg{turn: "t1", text: "tok "}
+					if phase == "thinking" {
+						delta = residentLiveMsg{turn: "t1", reasoning: "a thought "}
 					}
-					residentFrameSink = m.View().Content
-				}
-			})
+					next, _ := m.Update(delta)
+					m = next.(emberModel)
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						if kind == "snapshot" {
+							next, _ = m.Update(delta)
+							m = next.(emberModel)
+						} else {
+							m.tickN++
+						}
+						residentFrameSink = m.View().Content
+					}
+				})
+			}
 		}
 	}
 }
