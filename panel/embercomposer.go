@@ -7,7 +7,7 @@ package main
 //   Ctrl+X Ctrl+E   the draft in $VISUAL / $EDITOR; it comes back when the editor closes
 //   Ctrl+R          your earlier prompts that contain the draft, newest first; each press goes one further back
 //   Ctrl+O          every line of every open card (cards stop at their last 40 lines otherwise)
-//   !cmd, !!cmd     runs cmd in the agent's account (!!: your own shell); a card in the chat, and the output goes with your next message
+//   !cmd, !!cmd     runs cmd in the agent's account (!!: your own shell); a card in the chat, and the output goes with your next Enter message
 //   @path           in a message, attaches that file from the agent's account (up to 64 KB), fenced
 //   /NAME args      a custom command: ~/.config/caminus/commands/NAME.md, $ARGUMENTS replaced, sent as a message
 
@@ -27,6 +27,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type editorDoneMsg struct {
@@ -35,9 +36,19 @@ type editorDoneMsg struct {
 }
 
 type bangDoneMsg struct {
+	agent       string // the session it was run from, and that session's epoch (bangDone drops it in another)
+	epoch       uint64
 	cmd, output string
 	err         string
 	host        bool // run in your own shell (!!), not the agent's account
+	truncated   bool // the output is its last bangOutputMax bytes
+}
+
+// queuedShell is a command's output waiting to go with your next message; id is its card's Seq, so a delivered
+// message takes off exactly the outputs it carried.
+type queuedShell struct {
+	id   int
+	text string
 }
 
 // composerKey handles the extras' keys before the composer's own; ok reports whether it took the key.
@@ -221,47 +232,58 @@ func hostRun(script string) (string, error) {
 // hostRunLimit bounds a !! command (a test shortens it).
 var hostRunLimit = 30 * time.Second
 
-func runHostBang(cmd string) tea.Cmd {
+func runHostBang(m emberModel, cmd string) tea.Cmd {
+	agent, epoch := m.agentName, m.residentEpoch
 	return func() tea.Msg {
 		out, err := hostRun(cmd)
-		if len(out) > 32*1024 {
-			out = out[len(out)-32*1024:]
-		}
-		msg := bangDoneMsg{cmd: cmd, output: strings.TrimRight(out, "\n"), host: true}
-		if err != nil {
-			msg.err = err.Error()
-		}
-		return msg
+		return bangResult(agent, epoch, cmd, out, err, true)
 	}
 }
 
 func runBang(m emberModel, cmd string) tea.Cmd {
+	agent, epoch := m.agentName, m.residentEpoch
 	return func() tea.Msg {
 		out, err := agentRun(m, cmd)
-		if len(out) > 32*1024 {
-			out = out[len(out)-32*1024:]
-		}
-		msg := bangDoneMsg{cmd: cmd, output: strings.TrimRight(out, "\n")}
-		if err != nil {
-			msg.err = err.Error()
-		}
-		return msg
+		return bangResult(agent, epoch, cmd, out, err, false)
 	}
+}
+
+// bangOutputMax is the most of a ! / !! command's output the panel keeps (its card shows it; the message takes less):
+// its last 32 KB, and truncated says the start was cut.
+const bangOutputMax = 32 * 1024
+
+// bangResult is a finished command as bangDone takes it, tagged with the session it was run from: a result that
+// lands after a switch belongs to that session, never to the one now open.
+func bangResult(agent string, epoch uint64, cmd, out string, err error, host bool) bangDoneMsg {
+	msg := bangDoneMsg{agent: agent, epoch: epoch, cmd: cmd, host: host}
+	if len(out) > bangOutputMax {
+		out, msg.truncated = out[len(out)-bangOutputMax:], true
+	}
+	msg.output = strings.TrimRight(out, "\n")
+	if err != nil {
+		msg.err = err.Error()
+	}
+	return msg
 }
 
 // bangDone puts the command and its output in the chat as its own card (eventBlock's "shell"), at the bottom where
 // it can be read, and leaves the draft alone. The card is the panel's own event (a Seq below 0, never the
 // resident's) and lasts as long as this chat's history; what reaches the agent is the same output, queued to go with
-// your next message (shellAttachment; sendCompose sends it, Esc on an empty composer drops it).
+// your next message (shellAttachment; sendCompose sends it, Esc on an empty composer drops it). A result from another
+// session (it finished after a switch) is dropped with a notice: its card and output belong to that agent, not this one.
 func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
+	if msg.agent != m.agentName || msg.epoch != m.residentEpoch {
+		m.msg = "`" + oneLine(msg.cmd) + "` finished in session " + msg.agent + " after you left it: its output is not shown or sent here"
+		return m
+	}
 	m.chat.localSeq--
-	data := map[string]any{"command": msg.cmd, "output": msg.output, "host": msg.host}
+	data := map[string]any{"command": msg.cmd, "output": msg.output, "host": msg.host, "truncated": msg.truncated}
 	if msg.err != "" {
 		data["error"] = msg.err
 	}
 	m.residentEvents = append(m.residentEvents, residentEvent{Seq: m.chat.localSeq, Ts: float64(time.Now().Unix()),
 		Goal: m.chat.target, Kind: "shell", Data: data})
-	m.chat.shellQueue = append(m.chat.shellQueue, shellAttachment(msg))
+	m.chat.shellQueue = append(m.chat.shellQueue, queuedShell{m.chat.localSeq, shellAttachment(msg)})
 	m.msg = ""
 	m.syncChat()
 	m.chat.transcript.GotoBottom()
@@ -269,17 +291,21 @@ func (m emberModel) bangDone(msg bangDoneMsg) emberModel {
 }
 
 // The most of one command's output that goes with a message: its last lines, so a long build log cannot fill the
-// agent's context (the card in the chat keeps the whole output).
+// agent's context (the card in the chat shows more: up to the last bangOutputMax bytes).
 const shellAttachLines, shellAttachBytes = 200, 16 * 1024
 
 // shellAttachment is a command's output as it goes with your next message: marked as a command you ran (in your own
-// shell for !!, so the agent never takes it for its own account's), fenced, its tail when it is long, saying so.
+// shell for !!, so the agent never takes it for its own account's), fenced, its tail when it is long, saying so. It is
+// plain valid UTF-8 (colour codes stripped, a bad byte replaced): the resident decodes the message strictly, and one
+// bad byte failed every send.
 func shellAttachment(msg bangDoneMsg) string {
-	head := "output of `! " + msg.cmd + "` you ran in the agent's account:"
+	clean := func(s string) string { return strings.ToValidUTF8(ansi.Strip(s), "\uFFFD") }
+	cmd := clean(msg.cmd)
+	head := "output of `! " + cmd + "` you ran in the agent's account:"
 	if msg.host {
-		head = "output of `!! " + msg.cmd + "` you ran in your own shell on this machine (not the agent's account):"
+		head = "output of `!! " + cmd + "` you ran in your own shell on this machine (not the agent's account):"
 	}
-	out := strings.TrimRight(msg.output, "\n")
+	out := strings.TrimRight(clean(msg.output), "\n")
 	all := strings.Split(out, "\n")
 	cut := 0
 	if len(all) > shellAttachLines {
@@ -295,16 +321,19 @@ func shellAttachment(msg bangDoneMsg) string {
 		}
 		out, cut = out[i+1:], cut+1
 	}
-	if cut > 0 || chopped {
+	if cut > 0 || chopped || msg.truncated {
 		head += fmt.Sprintf(" (cut to its last %d lines or %d KB", shellAttachLines, shellAttachBytes/1024)
-		if cut > 0 {
+		switch {
+		case msg.truncated: // (the panel kept only its last 32 KB: how much came before is not known)
+			head += fmt.Sprintf(": it printed more than %d KB, the start is left out", bangOutputMax/1024)
+		case cut > 0:
 			head += ": the first " + plural(cut, "line", "lines") + " left out"
 		}
 		head += ")"
 	}
-	block := head + "\n" + fenced("$ "+msg.cmd+"\n"+out, "")
+	block := head + "\n" + fenced("$ "+cmd+"\n"+out, "")
 	if msg.err != "" {
-		block += "\n(" + msg.err + ")"
+		block += "\n(" + clean(msg.err) + ")"
 	}
 	return block
 }

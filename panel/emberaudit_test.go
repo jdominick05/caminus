@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -118,7 +119,7 @@ func TestAShellCommandsOutputGoesToTheChat(t *testing.T) {
 		t.Fatalf("Enter runs the command, leaves shell mode and empties the composer (%q)", m.chat.compose.Value())
 	}
 	m.chat.compose.SetValue("words typed while it ran")
-	m = m.bangDone(bangDoneMsg{cmd: "echo hi", output: "hi"}) // (what runBang returns for it)
+	m = m.bangDone(bangResult(m.agentName, m.residentEpoch, "echo hi", "hi", nil, false)) // (what runBang returns for it)
 	if v := m.chat.compose.Value(); v != "words typed while it ran" {
 		t.Fatalf("the output stays out of the composer; a draft typed meanwhile is kept: %q", v)
 	}
@@ -157,13 +158,19 @@ func TestShellOutputsGoWithTheNextMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.cli = []string{script}
-	m = m.bangDone(bangDoneMsg{cmd: "ls work", output: "a.py\n+b.py"}) // (a +path in the output is never attached)
-	m = m.bangDone(bangDoneMsg{cmd: "uname", output: "Linux", host: true, err: "exit status 1"})
-	if got := ansi.Strip(m.chatComposer()); !strings.Contains(got, "+2 shell outputs attached (Esc drops)") {
-		t.Fatalf("the composer says what goes with the next message:\n%s", got)
+	ran := func(cmd, out string, host bool, err error) bangDoneMsg { // a command finished in this session
+		return bangResult(m.agentName, m.residentEpoch, cmd, out, err, host)
+	}
+	m = m.bangDone(ran("ls work", "a.py\n+b.py", false, nil)) // (a +path in the output is never attached)
+	m = m.bangDone(ran("uname", "Linux", true, fmt.Errorf("exit status 1")))
+	if got := ansi.Strip(m.chatComposer()); !strings.Contains(got, "+2 shell outputs attached to your next message (not /steer)") {
+		t.Fatalf("the composer says what goes with the next message, and that /steer does not carry it:\n%s", got)
 	}
 	next, cmd := m.sendCompose("what do you make of these?")
 	m = next.(emberModel)
+	if next, _ := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape}); len(next.(emberModel).chat.shellQueue) != 2 {
+		t.Fatal("Esc never drops outputs a message is carrying")
+	}
 	res := cmd().(residentComposeResult)
 	body, _ := os.ReadFile(sent)
 	text := string(body)
@@ -172,14 +179,21 @@ func TestShellOutputsGoWithTheNextMessage(t *testing.T) {
 	if res.err != "" || !strings.HasPrefix(text, "what do you make of these?\n\n") || ls < 0 || un < ls {
 		t.Fatalf("your words, then each output in the order run, marked and fenced (err %q):\n%s", res.err, text)
 	}
-	m = m.bangDone(bangDoneMsg{cmd: "date", output: "today"}) // (run while the message was on its way)
+	m = m.bangDone(ran("date", "today", false, nil)) // (run while the message was on its way)
+	sentQueue := m.chat.shellQueue
+	m.chat.shellQueue = sentQueue[2:] // the first two gone some other way meanwhile: delivery must not take "date" by count
 	next, _ = m.finishCompose(res)
-	if m = next.(emberModel); len(m.chat.shellQueue) != 1 || !strings.Contains(m.chat.shellQueue[0], "`! date`") {
-		t.Fatalf("delivered: the outputs it carried leave the queue, a later one waits (%d)", len(m.chat.shellQueue))
+	if m = next.(emberModel); len(m.chat.shellQueue) != 1 || !strings.Contains(m.chat.shellQueue[0].text, "`! date`") {
+		t.Fatalf("delivered: exactly the outputs it carried leave the queue, by identity; a later one waits (%d)", len(m.chat.shellQueue))
 	}
 	if !strings.Contains(ansi.Strip(m.chatComposer()), "+1 shell output attached") {
 		t.Fatal("the marker counts what still waits")
 	}
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m = next.(emberModel); cmd == nil || m.msg != "interrupting the turn…" || len(m.chat.shellQueue) != 1 {
+		t.Fatal("Esc is the stop key: with the goal working it interrupts first, and the queue stays")
+	}
+	m.resident.Goals[0].State = "paused" // nothing running now
 	m.chat.compose.SetValue("a draft")
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m = next.(emberModel); len(m.chat.shellQueue) != 1 {
@@ -187,20 +201,42 @@ func TestShellOutputsGoWithTheNextMessage(t *testing.T) {
 	}
 	m.chat.compose.Reset()
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m = next.(emberModel); len(m.chat.shellQueue) != 0 || !strings.Contains(m.msg, "dropped") ||
+	if m = next.(emberModel); len(m.chat.shellQueue) != 0 || !strings.Contains(m.msg, "dropped") || !strings.Contains(m.msg, "Esc interrupts first") ||
 		strings.Contains(ansi.Strip(m.chatComposer()), "attached") || !strings.Contains(ansi.Strip(m.chat.content), "$ date") {
-		t.Fatalf("Esc on an empty composer drops the queue, the cards stay (msg %q)", m.msg)
-	}
-	if next, cmd := m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape}); !strings.Contains(m.msg, "Esc again interrupts") ||
-		cmd == nil || next.(emberModel).msg != "interrupting the turn…" {
-		t.Fatal("with the goal working, the next Esc interrupts the turn as before")
+		t.Fatalf("with nothing running, Esc on an empty composer drops the queue, the cards stay (msg %q)", m.msg)
 	}
 	_, cmd = m.sendCompose("and now?")
-	if res := cmd().(residentComposeResult); res.shells != 0 {
+	if res := cmd().(residentComposeResult); len(res.shells) != 0 {
 		t.Fatal("nothing attached after the drop")
 	}
 	if body, _ := os.ReadFile(sent); string(body) != "and now?" {
 		t.Fatalf("the next message goes alone: %q", body)
+	}
+	// a bad byte and colour codes: the message stays valid UTF-8 (the resident decodes it strictly)
+	m = m.bangDone(ran("ls caf\xe9", "\x1b[31mred\x1b[0m caf\xe9\xff", false, nil))
+	_, cmd = m.sendCompose("look")
+	if res := cmd().(residentComposeResult); res.err != "" {
+		t.Fatal(res.err)
+	}
+	if body, _ := os.ReadFile(sent); !utf8.Valid(body) || strings.Contains(string(body), "\x1b") || !strings.Contains(string(body), "red caf"+string(utf8.RuneError)+"\n") {
+		t.Fatalf("the attached output is plain valid UTF-8: %q", body)
+	}
+}
+
+func TestALateShellResultStaysInItsSession(t *testing.T) {
+	m := chatFixture(t)
+	for _, late := range []bangDoneMsg{
+		bangResult("other", m.residentEpoch, "make test", "secret of other", nil, false), // run in session "other"
+		bangResult(m.agentName, m.residentEpoch+1, "make test", "an older visit", nil, false),
+	} {
+		next := m.bangDone(late)
+		if len(next.chat.shellQueue) != 0 || strings.Contains(ansi.Strip(next.chat.content), "make test") ||
+			!strings.Contains(next.msg, "after you left it") {
+			t.Fatalf("a result from another session is neither shown nor queued here (msg %q)", next.msg)
+		}
+	}
+	if next := m.bangDone(bangResult(m.agentName, m.residentEpoch, "make test", "ok", nil, false)); len(next.chat.shellQueue) != 1 {
+		t.Fatal("this session's own result is queued")
 	}
 }
 
@@ -220,6 +256,19 @@ func TestALongShellOutputIsCutToItsTail(t *testing.T) {
 	}
 	if short := shellAttachment(bangDoneMsg{cmd: "ls", output: "a"}); strings.Contains(short, "cut") {
 		t.Fatalf("a short output goes whole: %q", short)
+	}
+	// more than the panel keeps (32 KB): the card and the message both say the start is gone
+	huge := bangResult("resident", 0, "yes | head", strings.Repeat("y\n", 30000), nil, false)
+	if !huge.truncated || len(huge.output) > bangOutputMax {
+		t.Fatal("the panel keeps the last 32 KB and marks the cut")
+	}
+	if got := shellAttachment(huge); !strings.Contains(got, "it printed more than 32 KB, the start is left out") {
+		t.Fatalf("the message says the start is gone: %.200s", got)
+	}
+	m := chatFixture(t)
+	huge.agent, huge.epoch = m.agentName, m.residentEpoch
+	if m = m.bangDone(huge); !strings.Contains(ansi.Strip(m.chat.content), "the last 32 KB, the start cut") {
+		t.Fatal("the card says it shows only the last 32 KB")
 	}
 }
 
