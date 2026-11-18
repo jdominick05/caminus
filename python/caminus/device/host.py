@@ -272,8 +272,55 @@ def link_side(cards):
     return 0 if a < b else 1
 
 
-def one(gs, fits, held=()):
-    """the card of a one-card model: the smallest free usable card that fits(card) says it fits (ties: PCI address)"""
+def gpu_users(root='/'):
+    """{render minor: [(pid, label, MiB)]}: the processes holding VRAM on each GPU now, from KFD's per-process files
+    (proc/<pid>/vram_<gpu_id>, the GPU's id from topology/nodes/<n>/gpu_id). A Caminus server is named by its model and
+    port from its command line (caminus serve --model FILE --port N), any other process by its name"""
+    from .. import models
+    kfd = os.path.join(root, 'sys', 'class', 'kfd', 'kfd')
+    minor_of = {}
+    for p in glob.glob(os.path.join(kfd, 'topology', 'nodes', '*', 'gpu_id')):
+        gid = _int(_read(p))
+        props = _read(os.path.join(os.path.dirname(p), 'properties')) or ''
+        m = re.search(r'^drm_render_minor (\d+)$', props, re.M)
+        if gid and m:
+            minor_of[gid] = int(m.group(1))
+    out = {}
+    for d in glob.glob(os.path.join(kfd, 'proc', '*')):
+        pid = os.path.basename(d)
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open(os.path.join(root, 'proc', pid, 'cmdline'), 'rb') as f:
+                argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
+        except OSError:
+            argv = []
+        flag = lambda k: argv[argv.index(k) + 1] if k in argv and argv.index(k) + 1 < len(argv) else None
+        label = _read(os.path.join(root, 'proc', pid, 'comm')) or 'a process'
+        if ('serve' in argv or any(a.endswith('caminus_serve.py') for a in argv)) and flag('--model'):
+            m = models.model_of(flag('--model'))
+            label = (m.name if m else os.path.basename(flag('--model'))) + (f" on :{flag('--port')}" if flag('--port') else '')
+        for v in glob.glob(os.path.join(d, 'vram_*')):
+            mib = (_int(_read(v)) or 0) / 2 ** 20
+            minor = minor_of.get(_int(v.rsplit('_', 1)[1]))
+            if minor is not None and mib >= 1:
+                out.setdefault(minor, []).append((int(pid), label, mib))
+    return out
+
+
+def card_text(g, users=None):
+    """one card's state for a refusal: 'XTX card1 (0000:03:00.0): 21.3 of 24.0 GB in use (thinkingcap on :8093)'.
+    users: gpu_users()'s entries for this card (the processes holding its VRAM)"""
+    used = _int(_read(os.path.join(g['dev'], 'mem_info_vram_used'))) if g.get('dev') else None
+    held = ', '.join(f'{label} {mib / 1024:.1f} GB' if len(users) > 1 else label for _, label, mib in users) if users else ''
+    return (f"{describe(g)}: " + (f"{used / 2 ** 30:.1f} of {g['total_mib'] / 1024:.1f} GB in use" if used is not None else
+            f"{g['total_mib'] / 1024:.1f} GB, use unknown") + (f' ({held})' if held else ''))
+
+
+def one(gs, fits, held=(), explain=None, root='/'):
+    """the card of a one-card model: the smallest free usable card that fits(card) says it fits (ties: PCI address). When
+    none fits, the refusal names per free card what is in use and by what (card_text) and, from explain(card), what the
+    model needs there and the most context that fits now"""
     free = sorted([g for g in usable(gs) if g['pci'] not in held], key=lambda g: (g['total_mib'], g['pci'] or g['card']))
     for g in free:
         if fits(g):
@@ -282,7 +329,16 @@ def one(gs, fits, held=()):
         raise PlacementError('no supported card (RX 7900 XTX / XT) on this host')
     if not free:
         raise PlacementError('every supported card is in use')
-    raise PlacementError('the model fits none of the free cards: ' + ', '.join(f"{describe(g)} {g['total_mib']:,} MiB" for g in free))
+    users = gpu_users(root)
+
+    def why(g):
+        try:
+            t = explain(g) if explain else ''
+        except Exception:                       # noqa: BLE001 - a projection that cannot run here: the card's state alone
+            t = ''
+        return f'; {t}' if t else ''
+    raise PlacementError('the model fits none of the free cards: ' + '. '.join(card_text(g, users.get(g.get('minor'))) + why(g)
+                                                                               for g in free))
 
 
 def hip_visible(cards):
@@ -312,13 +368,14 @@ def problems(gs):
     return out
 
 
-def place(n_cards, fits=None, env=None, root='/', split_of=None):
+def place(n_cards, fits=None, env=None, root='/', split_of=None, explain=None):
     """the cards a server runs on, chosen before the GPU runtime starts (caminus serve): dict(cards, split, hip_visible,
     note). n_cards: the architecture's card count (1 or 2). fits(cards) -> bool: the model's projection at the minimum
     context on those cards (None: every card fits; the engine's own check still runs). env: HIP_VISIBLE_DEVICES, when set,
     limits the choice to those GPUs (HIP's own indices) and is rewritten so process device i is the engine's card i: a
     two-card model's pair is put in engine order whatever order it was given in. Unsupported cards are refused by name.
-    split_of(cards): the model's own split (caminus.arch.Arch.split); default split()"""
+    split_of(cards): the model's own split (caminus.arch.Arch.split); default split(). explain(card): what a one-card model
+    needs on that card, for the refusal when it fits none (one)"""
     env = os.environ if env is None else env
     gs = gpus(root)
     given = (env.get('HIP_VISIBLE_DEVICES') or '').strip()
@@ -347,7 +404,7 @@ def place(n_cards, fits=None, env=None, root='/', split_of=None):
                                  f"context (32,768 positions) with a working prompt cache, with what they hold now (caminus ps: another "
                                  f"server or program may be using them)")
     else:
-        cards = [one(pool, lambda g: ok([g]))]
+        cards = [one(pool, lambda g: ok([g]), explain=explain, root=root)]
         sp = None
     return dict(cards=cards, split=sp, hip_visible=hip_visible(cards),
                 note=' + '.join(describe(c) for c in cards) + (', split ' + split_note(sp) if sp else ''))

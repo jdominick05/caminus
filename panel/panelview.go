@@ -23,6 +23,7 @@ import (
 	"image/color"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -48,7 +49,7 @@ func (m ctl) View(w, h int) string {
 
 	top := []string{m.header(W)}
 	top = append(top, m.hwLines(W)...)
-	bottom := []string{m.noteLine(W)}
+	bottom := strings.Split(m.noteLine(W), "\n")
 	bottom = append(bottom, strings.Split(m.keysLine(), "\n")...)
 
 	card := m.runningRows(W - 4)
@@ -72,7 +73,7 @@ func (m ctl) View(w, h int) string {
 		// (the key line under the list says whether ? turns the page: drawn again with this frame's page count, one line
 		//  either way, so the room above it is unchanged)
 		m.helpDrawn = pages
-		bottom = append([]string{m.noteLine(W)}, strings.Split(m.keysLine(), "\n")...)
+		bottom = append(strings.Split(m.noteLine(W), "\n"), strings.Split(m.keysLine(), "\n")...)
 	case viewOptions:
 		body = m.optionsLines(W, room)
 	default:
@@ -407,6 +408,22 @@ func (m ctl) recordOf(name string) *serverInfo {
 	return nil
 }
 
+// whenText is " 21:26 today", " 21:26 yesterday" or " Nov 16 21:26" for a Unix time (seconds), "" when unknown (0).
+func whenText(at float64, now time.Time) string {
+	if at <= 0 {
+		return ""
+	}
+	t := time.Unix(int64(at), 0).In(now.Location())
+	day := func(x time.Time) time.Time { return time.Date(x.Year(), x.Month(), x.Day(), 0, 0, 0, 0, x.Location()) }
+	switch d := day(now).Sub(day(t)); {
+	case d <= 0:
+		return " " + t.Format("15:04") + " today"
+	case d <= 24*time.Hour:
+		return " " + t.Format("15:04") + " yesterday"
+	}
+	return " " + t.Format("Jan 2 15:04")
+}
+
 func gbText(v float64) string { return strconv.FormatFloat(v, 'f', 0, 64) + " GB" }
 
 // nameWidth is the list's name column: the longest name, 12 cells at least.
@@ -555,8 +572,8 @@ func (m ctl) detailRows(w int) []string {
 			fg(cMuted).Render(" · started outside the panel · s says what stops it"), w, 2)...)
 	case sv != nil:
 		rows = append(rows, fg(cGreen).Render("running on :"+strconv.Itoa(sv.Port))+fg(cMuted).Render(" · s stops it"))
-	case rec != nil && rec.State == "failed" && rec.Error != "":
-		rows = append(rows, wrapped(fg(cRed).Render("last start failed: "+rec.Error), w, 2)...)
+	case rec != nil && rec.State == "failed" && rec.Error != "" && mi.Present: // (not downloaded: that line says what to do)
+		rows = append(rows, wrapped(fg(cRed).Render("last start failed"+whenText(rec.FailedAt, time.Now())+": "+rec.Error), w, 2)...)
 	case rec != nil && rec.Note != "":
 		rows = append(rows, wrapped(fg(cMuted).Render(rec.Note), w, 2)...)
 	}
@@ -788,8 +805,8 @@ func (m ctl) noteLine(W int) string {
 			c = cRed
 		}
 		return ansi.Truncate(fg(c).Render(" "+m.note), W, "…")
-	case m.nothingSetUp():
-		return ansi.Truncate(emberDim.Render(" "+wizardHint), W, "…")
+	case m.nothingSetUp(): // (wrapped to the layout's width, never cut: it is the only thing a new host has to read)
+		return strings.Join(wrapped(emberDim.Render(" "+wizardHint), W, 3), "\n")
 	}
 	return ""
 }

@@ -269,6 +269,30 @@ def main():
     ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r), 'fits none of the free cards')
     check(ok, f'place: a model too big for every card refused ({msg})')
 
+    # -- the refusal names each card's state and what holds it (KFD's per-process VRAM), and what the model needs there --
+    check('0.1 of 24.0 GB in use' in msg and '0.1 of 20.0 GB in use' in msg and '20,464 MiB' not in msg,
+          f'refusal: in use and total per card, not the totals alone ({msg})')
+    kfd = os.path.join(r, 'sys', 'class', 'kfd', 'kfd')
+    for node, gid in (('1', 1111), ('2', 2222)):                     # (the XTX is KFD node 1, the XT node 2)
+        w(os.path.join(kfd, 'topology', 'nodes', node, 'gpu_id'), f'{gid}\n')
+    for pid, gid, gib, argv, comm in ((4242, 2222, 19, ['python3', '-m', 'caminus', 'serve', '--model', '/m/x/ThinkingCap.gguf',
+                                                                     '--port', '8093'], 'caminus'),
+                                      (4343, 1111, 21, ['llama-server', '-m', 'x.gguf'], 'llama-server')):
+        w(os.path.join(kfd, 'proc', str(pid), f'vram_{gid}'), f'{gib * GIB}\n')
+        w(os.path.join(r, 'proc', str(pid), 'cmdline'), '\0'.join(argv) + '\0')
+        w(os.path.join(r, 'proc', str(pid), 'comm'), comm + '\n')
+    users = H.gpu_users(r)
+    check(users.get(129) == [(4242, 'ThinkingCap.gguf on :8093', 19 * 1024)] and users.get(128) == [(4343, 'llama-server', 21 * 1024)],
+          f'gpu_users: per card, a caminus serve named by its model and port, another process by its name ({users})')
+    ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r,
+                                      explain=lambda g: f"m needs 19.8 GB at 32,768 positions; fits {8192 if g['label'] == 'XTX' else 0:,} now"),
+                      'XT card2 (0000:06:00.0): 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093); m needs 19.8 GB at 32,768 positions',
+                      'XTX card1 (0000:03:00.0): 0.1 of 24.0 GB in use (llama-server); m needs', 'fits 8,192 now')
+    check(ok, f'refusal: each free card with what holds it and the model\'s need from explain ({msg})')
+    ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=lambda g: 1 / 0),
+                      'XT card2 (0000:06:00.0): 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093)')
+    check(ok and 'ZeroDivision' not in msg, f'refusal: an explain that cannot run leaves the card\'s state alone ({msg})')
+
     # -- gfx names ----------------------------------------------------------------------------------------------------------
     check([H.gfx_name(v) for v in (110000, 110001, 100306, 90010)] == ['gfx1100', 'gfx1101', 'gfx1036', 'gfx90a'], 'gfx names')
 

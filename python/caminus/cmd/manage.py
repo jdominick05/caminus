@@ -27,6 +27,7 @@ import contextlib
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -261,7 +262,7 @@ def server_view(s):
     v = dict(name=s['name'], model=s['model'], url=f"http://127.0.0.1:{s['port']}", port=s['port'], cards=s.get('card_names', []),
              pid=s.get('guard_pid'), log=s['log'], uptime_s=max(0.0, time.time() - s.get('started', time.time())),
              max_ctx=None, decode_tps=None, alias=s.get('alias'), busy=False, error='', kv=None, note='',
-             external=False)
+             external=False, failed_at=None)
     if alive(s.get('guard_pid')):
         code, _ = http_json(v['url'] + '/health')
         v['state'] = 'ready' if code == 200 else 'loading'
@@ -285,22 +286,27 @@ def server_view(s):
         v['state'] = 'stopped' if clean else 'failed'
         if not clean:
             v['error'] = log_error(s['log']) or 'the server exited (caminus logs ' + s['name'] + ')'
-            cleared = cleared_refusal(v['error'])
-            if cleared:                      # (the guard refused on a fault file that is gone: nothing stops a start now)
-                v['state'], v['error'], v['note'] = 'stopped', '', cleared
+            with contextlib.suppress(OSError):   # (when it failed: its log's last write; the panel shows the time)
+                v['failed_at'] = os.path.getmtime(s['log'])
+            cleared = cleared_failure(v['error'])
+            if cleared:                      # (the cause is gone: nothing it names stops a start now)
+                v['state'], v['error'], v['note'], v['failed_at'] = 'stopped', '', cleared, None
     return v
 
 
-def cleared_refusal(error):
-    """a note when error is the guard's refusal on a recorded GPU fault whose stop file no longer exists (the fault was
-    cleared: the record is a stopped server, not a failed one), else None"""
+def cleared_failure(error):
+    """a note when a failed start's cause is gone, else None: the guard's refusal on a recorded GPU fault whose stop file
+    no longer exists, or a code object that was missing and is there now (caminus.device.kernels.missing_message)"""
     head = 'GUARD REFUSED: a GPU fault was recorded ('
-    if head not in error:
+    if head in error:
+        path = error.split(head, 1)[1].split(')', 1)[0]
+        if path and not os.path.exists(os.path.expanduser(os.path.expandvars(path))):
+            return 'its last start was refused on a GPU fault that has since been cleared'
         return None
-    path = error.split(head, 1)[1].split(')', 1)[0]
-    if not path or os.path.exists(os.path.expanduser(os.path.expandvars(path))):
-        return None
-    return 'its last start was refused on a GPU fault that has since been cleared'
+    m = re.search(r'code object (\S+\.hsaco) not found in (\S+) \(', error)
+    if m and os.path.isfile(os.path.join(m.group(2), m.group(1))):
+        return f'its last start failed on a missing code object ({m.group(1)}) that is there now'
+    return None
 
 
 def card_view(gs=None):
@@ -509,13 +515,9 @@ def pick_port(want, taken):
     raise ManageError(f'no free port in {PORT0}..{PORT0 + 99}')
 
 
-def fits_fn(entry, ctx=None, kv=None, long_context=False):
-    """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
-    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects; long_context: in the model's long-context mode,
-    Arch.long_mode, whose format choice applies when kv is not given); without torch (no projection here) a size rule:
-    the file + 4 GiB within the line"""
-    size_mib = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20   # (the files it serves with: an optional drafter is not loaded by default)
-    rule = lambda g: size_mib * 1.1 + 4096 <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
+def _fit_plan(entry, ctx=None, kv=None, long_context=False):
+    """(the registry entry, its serve options) for a one-card fit of a catalog model file, or None when no projection can
+    run here (no torch, a header the projection cannot read): fits_fn and explain_fn then use the size rule"""
     try:
         from .. import arch
         A = arch.of(entry['path'])
@@ -524,8 +526,36 @@ def fits_fn(entry, ctx=None, kv=None, long_context=False):
         A.long_mode(opt)                         # (the long-context mode's cap and format: refused by start_one before here)
         A.auto_need(opt, 4)                      # (probe the projection without inventing a zero-card fit)
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
-        return rule
+        return None
+    return A, opt
+
+
+def _size_rule_mib(entry):
+    """the size rule's need on one card: the files it serves with (an optional drafter is not loaded by default) + 10 % +
+    4 GiB"""
+    return entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20 * 1.1 + 4096
+
+
+def fits_fn(entry, ctx=None, kv=None, long_context=False):
+    """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
+    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects; long_context: in the model's long-context mode,
+    Arch.long_mode, whose format choice applies when kv is not given); without torch (no projection here) a size rule:
+    the file + 4 GiB within the line"""
+    plan = _fit_plan(entry, ctx, kv, long_context)
+    if plan is None:
+        return lambda g: _size_rule_mib(entry) <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
+    A, opt = plan
     return lambda g: A.fits(opt, [g])
+
+
+def explain_fn(m, entry, ctx=None, kv=None, long_context=False):
+    """explain(card) for caminus.device.host.one's refusal: what model m needs on that card at the asked context and the
+    most that fits now (Arch.need_text), or, without a projection here, its size rule's need"""
+    plan = _fit_plan(entry, ctx, kv, long_context)
+    if plan is None:
+        return lambda g: f'{m.name} needs about {_size_rule_mib(entry) / 1024:.1f} GB by its files\' size (no projection here)'
+    A, opt = plan
+    return lambda g: A.need_text(opt, [g], m.name)
 
 
 def pair_fits(m, entry, ctx=None, cards=None, kv=None, long_context=False):
@@ -600,7 +630,8 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
     if not free:
         raise ManageError('every card is held by a Caminus server (caminus ps; caminus stop NAME)')
     try:
-        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv, long_context=long_context), held=held_pci)['pci']]]
+        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv, long_context=long_context), held=held_pci, root=ROOT,
+                                explain=explain_fn(m, entry, ctx, kv=kv, long_context=long_context))['pci']]]
     except host.PlacementError as e:
         raise ManageError(f'{m.name}: {e}') from None
 
@@ -705,6 +736,10 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     if busy:
         raise ManageError(f'VRAM in use on {", ".join(busy)} by a process Caminus did not start: stop it first')
     port = pick_port(port, {s['port'] for s in running})
+    for old in all_servers():                     # (this start supersedes an older failed or stopped record of the model,
+        if old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid')):
+            with contextlib.suppress(OSError):    #  so that failure no longer shows as the model's last start)
+                os.remove(os.path.join(server_dir(old['name']), 'server.json'))
     d = server_dir(name)
     os.makedirs(d, mode=0o700, exist_ok=True)
     logp = os.path.join(d, 'serve.log')

@@ -249,6 +249,15 @@ def main():
           'ps: a guard refusal on a fault file that is still there preserves the startup failure reason')
     check(v['guard-cleared']['state'] == 'stopped' and v['guard-cleared']['error'] == '' and 'cleared' in v['guard-cleared']['note'],
           f"ps: a guard refusal whose fault file is gone is re-checked: stopped, with a note ({v['guard-cleared']})")
+    check(isinstance(v['crashed']['failed_at'], float) and abs(v['crashed']['failed_at'] - time.time()) < 600
+          and v['clean']['failed_at'] is None, 'ps: a failed start carries when it ended (its log\'s last write) for the panel')
+    kd = os.path.join(S, 'kdir'); os.makedirs(kd, exist_ok=True)
+    put('hsaco-missing', dead.pid, f'FileNotFoundError: code object k3_gone.hsaco not found in {kd} (run ./build.sh in the checkout)\n', 18100)
+    put('hsaco-built', dead.pid, f'FileNotFoundError: code object k3_here.hsaco not found in {kd} (run ./build.sh in the checkout)\n', 18101)
+    open(os.path.join(kd, 'k3_here.hsaco'), 'w').close()
+    vm, vb = manage.server_view(manage.load_server('hsaco-missing')), manage.server_view(manage.load_server('hsaco-built'))
+    check(vm['state'] == 'failed' and vb['state'] == 'stopped' and 'k3_here.hsaco' in vb['note'] and vb['failed_at'] is None,
+          f"ps: a start that failed on a missing code object that is built now is no longer failed ({vb['note']!r})")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         manage.cmd_ps(['--json'])
@@ -307,6 +316,16 @@ def main():
             check('not downloaded' in str(err), f'start: a model not on disk is refused ({err})')
     finally:
         live.kill(); live.wait()
+    # a new start of a model supersedes its older dead records (their failure is no longer that model's last start); the
+    # launch itself is refused here (NoLaunch), after the cleanup
+    before = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    try:
+        manage.start_one('qwen3.6', name='fresh', devs_override=[0])
+    except RuntimeError:
+        pass
+    after = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    check({'crashed', 'hsaco-missing'} <= before and not after & {'crashed', 'hsaco-missing', 'guard-refused'},
+          f'start: a new start of a model clears its older failed records ({sorted(before)} -> {sorted(after)})')
 
     # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
     # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props
@@ -359,6 +378,26 @@ def main():
     finally:
         _ar.of = real_of
     check(seen == ['q8', 'q8', 'q8', 'f16', 'f16'], f'start --kv: the one-card and two-card fits project the asked cache (opt kv {seen})')
+    # the refusal's model part (caminus.device.host.one's explain): the projection's need and the most that fits now, else
+    # the size rule's need (no projection here: a file the header reader cannot open)
+    _ar.of = lambda path: Rec('rec', 'rec')
+    try:
+        g0 = H.gpus(manage.ROOT)[0]
+        t_proj = manage.explain_fn(q3, dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={}))(g0)
+    finally:
+        _ar.of = real_of
+    t_size = manage.explain_fn(q3, dict(path=os.path.join(S, 'no-such.gguf'), size_gb=18.6, need_gb=18.6, paths={}))(g0)
+    check(t_proj == 'qwen3-30b-a3b needs 0.0 GB at 32,768 positions; fits 40,960 now'
+          and t_size.startswith('qwen3-30b-a3b needs about 23.1 GB') and "files' size" in t_size,
+          f'start refusal: the projection\'s need and fit now ({t_proj!r}); the size rule\'s need without one ({t_size!r})')
+    try:
+        manage.pick_cards(models.BY_NAME['thinkingcap'], dict(path=os.path.join(S, 'no-such.gguf'), size_gb=40, need_gb=40, paths={}),
+                          None, set())
+        refusal = ''
+    except manage.ManageError as e:
+        refusal = str(e)
+    check('fits none of the free cards' in refusal and 'GB in use' in refusal and 'thinkingcap needs about' in refusal,
+          f'start: a model too big for every card names each card\'s use and the model\'s need ({refusal})')
     sv = dict(name='kvq8', model='qwen3-30b-a3b', path='/m/q3.gguf', port=18099, devices=[0], card_names=['XTX'], argv=[],
               guard_pid=1, log=os.path.join(S, 'none.log'), started=time.time(), alias='qwen3-30b-a3b', kv='q8')
     props = {'n_ctx': 40960, 'model_alias': 'qwen3-30b-a3b', 'caminus': {'kv_cache': {'type': 'q8', 'format': 'q8_0-v1:x'}}}

@@ -59,8 +59,9 @@ type serverInfo struct {
 	Alias     string   `json:"alias"`
 	Log       string   `json:"log"`
 	Error     string   `json:"error"`
-	Note      string   `json:"note"`     // why a record that looked failed is not (its guard refusal no longer applies)
-	External  bool     `json:"external"` // started outside caminus start (a script, caminus serve): watched, never controlled
+	Note      string   `json:"note"`      // why a record that looked failed is not (its cause is gone: a cleared fault, a built code object)
+	FailedAt  float64  `json:"failed_at"` // when a failed start ended (its log's last write, Unix seconds; 0 unknown)
+	External  bool     `json:"external"`  // started outside caminus start (a script, caminus serve): watched, never controlled
 	KV        string   `json:"kv"`
 }
 

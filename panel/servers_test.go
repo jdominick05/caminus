@@ -6,6 +6,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -183,5 +184,61 @@ func TestThePanelAndTopPaintTheThemeAsEmberDoes(t *testing.T) {
 	}
 	if themeCurrent["bg"] != "" && themeCurrent["bg"] == "#15181c" {
 		t.Fatal("a theme without a background does not inherit the default's")
+	}
+}
+
+// A failed start says when it ended, and its line goes where it no longer describes the model: a model that is not
+// downloaded shows its "not downloaded" line alone.
+func TestALastStartFailureSaysWhenAndGoesWhenNotDownloaded(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.Local)
+	for _, c := range []struct {
+		at   time.Time
+		want string
+	}{{time.Date(2026, 11, 18, 8, 15, 0, 0, time.Local), " 08:15 today"},
+		{time.Date(2026, 11, 17, 21, 26, 0, 0, time.Local), " 21:26 yesterday"},
+		{time.Date(2026, 11, 15, 21, 26, 0, 0, time.Local), " Nov 15 21:26"}} {
+		if got := whenText(float64(c.at.Unix()), now); got != c.want {
+			t.Fatalf("whenText(%v): %q, want %q", c.at, got, c.want)
+		}
+	}
+	if whenText(0, now) != "" {
+		t.Fatal("an unknown time (0) says nothing")
+	}
+	m := newCtl(newCtlCLI("caminus"), "")
+	m.loaded["ps"], m.loaded["models"] = true, true
+	yesterday := float64(time.Now().Add(-24 * time.Hour).Unix())
+	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, Present: true, SizeGB: 59}}
+	m.ps = psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "failed", FailedAt: yesterday,
+		Error: "FileNotFoundError: code object k3_gguf_gsq.hsaco not found"}}}
+	d := ansi.Strip(strings.Join(m.detailRows(100), "\n"))
+	if !strings.Contains(d, "last start failed ") || !strings.Contains(d, " yesterday: FileNotFoundError") {
+		t.Fatalf("the failure says when it ended:\n%s", d)
+	}
+	m.models[0].Present = false
+	d = ansi.Strip(strings.Join(m.detailRows(100), "\n"))
+	if strings.Contains(d, "last start failed") || !strings.Contains(d, "not downloaded") {
+		t.Fatalf("not downloaded: only that line, never an old failure for another reason beside it:\n%s", d)
+	}
+}
+
+// The "new here?" note wraps inside the layout instead of being cut with an ellipsis, and the screen keeps its height.
+func TestTheWizardHintWrapsInsteadOfBeingCut(t *testing.T) {
+	m := newCtl(newCtlCLI("caminus"), "")
+	m.loaded["ps"], m.loaded["models"] = true, true
+	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, SizeGB: 59}}
+	for _, w := range []int{60, 80, 120} {
+		note := ansi.Strip(m.noteLine(w))
+		if strings.Contains(note, "…") || !strings.Contains(strings.ReplaceAll(note, "\n", " "), "sets up Qwen Code") {
+			t.Fatalf("%d columns: the hint is whole, wrapped:\n%s", w, note)
+		}
+		lines := strings.Split(m.View(w, 30), "\n")
+		if len(lines) > 30 {
+			t.Fatalf("%d columns: the wrapped note pushes the screen past its height (%d lines)", w, len(lines))
+		}
+		for i, l := range lines {
+			if lw := lipgloss.Width(l); lw > w {
+				t.Fatalf("%d columns: line %d is %d cells: %q", w, i, lw, ansi.Strip(l))
+			}
+		}
 	}
 }

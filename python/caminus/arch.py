@@ -370,6 +370,24 @@ class Arch:
             want = self.min_ctx(opt)
         return plan.fits(min(want, plan.native_ctx))
 
+    def need_text(self, opt, cards, name):
+        """for a refusal on these cards (caminus.device.host dicts, as fits takes them): what model `name` needs at the asked
+        context (an explicit max_ctx, else the placement floor) and the most context that fits now, from the projection
+        fits reads: 'qwen3-30b-a3b needs 19.8 GB at 32,768 positions; fits 8,192 now'. '' without a projection here"""
+        try:
+            plan = self.context_fit(opt, cards)
+            try:
+                want = int(opt.get('max_ctx'))
+            except (TypeError, ValueError):
+                want = self.min_ctx(opt)
+            want = min(want, plan.native_ctx)
+            need = max(plan.need_mib(want))
+            most = plan.maximum()
+        except Exception:                       # noqa: BLE001 - no projection for this entry or file: the caller says less
+            return ''
+        return (f'{name} needs {need / 1024:.1f} GB at {want:,} positions; '
+                + (f'fits {most:,} now' if most else f'not even {min(AUTO_STEP, plan.native_ctx):,} positions fit now'))
+
     def draft_refusal(self, draft, path=None):
         """why this entry must not serve --draft `draft` for the GGUF at path (a sentence for the error), or None. Without a
         path (the model picker: no file is read) only what the entry knows without a file"""
