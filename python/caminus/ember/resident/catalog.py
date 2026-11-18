@@ -398,13 +398,24 @@ def discover(name, spec, opener=urllib.request.urlopen, key=None):
 
 
 def providers(config):
-    """The configured providers: config `providers` {name: {kind, endpoint}}, plus the agent's own endpoint."""
+    """The configured providers: config `providers` {name: {kind, endpoint[, relay]}}, plus the agent's own endpoint:
+    its named provider, or, for a brain with none (a session switcher session, an `agent init` one), the local server
+    it talks to, as `local`, once that server has shown it is Caminus (provider_kind local, or the effort ids
+    _local_effort read from it). Without that proof nothing is added: the key relay listens on loopback too, and a
+    /model pick from it as a local provider would drop its prices."""
     out = dict(config.get('providers') or {})
-    own = config.get('provider')
-    if own and own not in out and config.get('endpoint'):
+    own, endpoint = config.get('provider'), (config.get('endpoint') or '').rstrip('/')
+    if own and own not in out and endpoint:
         kind = config.get('provider_kind') or ('anthropic' if config.get('api') == 'anthropic' else 'openai')
         # (an OpenCode brain's endpoint is its model's API under the plan's root: the provider is the root)
-        out[own] = dict(kind=kind, endpoint=plan_root(config['endpoint']) if kind in OPENCODE else config['endpoint'])
+        out[own] = dict(kind=kind, endpoint=plan_root(endpoint) if kind in OPENCODE else endpoint,
+                        **(dict(relay=True) if config.get('relay') else {}))
+    elif (not own and endpoint and (config.get('provider_kind') == 'local' or config.get('model_variants'))
+          and local_candidate(config) and all((s.get('endpoint') or '').rstrip('/') != endpoint for s in out.values())):
+        name, n = 'local', 2
+        while name in out:                  # (a configured `local` on another server keeps its name)
+            name, n = f'local{n}', n + 1
+        out[name] = dict(kind='local', endpoint=endpoint)
     return out
 
 

@@ -240,15 +240,17 @@ func (m emberModel) pickerBox() string {
 		}
 		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, intersperse(row, " ")...))
 	}
-	if m.chat.pickerDestroy != "" {
-		lines = append(lines, emberClip(" "+emberCtxHot.Render("x again destroys "+residentText(m.chat.pickerDestroy)+":")+
-			emberDim.Render(" stops it, cancels its goal, removes the session (its home is kept in removed-sessions)"), w))
+	if m.chat.pickerRestore {
+		lines = append(lines, m.closedLines(w)...)
+	} else if m.chat.pickerDestroy != "" {
+		lines = append(lines, emberClip(" "+emberCtxHot.Render("x again closes "+residentText(m.chat.pickerDestroy)+":")+
+			emberDim.Render(" stops it and cancels its goal; its home is kept in removed-sessions, r restores it"), w))
 	} else if m.chat.pickerNew {
 		lines = append(lines, emberClip(" "+emberWarn.Render("new session:")+" "+residentText(m.chat.pickerName)+"█"+emberDim.Render("  Enter creates · Esc cancels"), w))
 	} else {
-		hint := " ←↑↓→ choose · Enter or click switches · n new · x x destroy · s start/stop · Esc back"
+		hint := " ←↑↓→ choose · Enter or click switches · n new · x x close · r restore · s start/stop · Esc back"
 		if ansi.StringWidth(hint) > w { // a narrow terminal cut it before "Esc back": the short form keeps every key
-			hint = " ↵ switch · n new · x x destroy · s start/stop · Esc back"
+			hint = " ↵ switch · n new · x x close · r restore · s start/stop · Esc back"
 		}
 		lines = append(lines, emberDim.Render(emberClip(hint, w)))
 	}

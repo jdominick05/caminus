@@ -3269,7 +3269,7 @@ func TestSwitcherCardsSayWhatIsTrueAndDestroyTakesTwoPresses(t *testing.T) {
 		{name: "research", status: "idle", goal: "review the design", aimed: true, workingS: 180}}
 	m.chat.picker = true
 	box := ansi.Strip(m.pickerBox())
-	for _, want := range []string{"55 tok/s", "↪ review the design", "worked 3m", "+ new session", "x x destroy"} {
+	for _, want := range []string{"55 tok/s", "↪ review the design", "worked 3m", "+ new session", "x x close", "r restore"} {
 		if !strings.Contains(box, want) {
 			t.Fatalf("the switcher shows %q:\n%s", want, box)
 		}
@@ -3280,8 +3280,8 @@ func TestSwitcherCardsSayWhatIsTrueAndDestroyTakesTwoPresses(t *testing.T) {
 	// x once arms and names what goes; another key disarms; x twice destroys
 	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	m = next.(emberModel)
-	if cmd != nil || m.chat.pickerDestroy != "resident" || !strings.Contains(ansi.Strip(m.pickerBox()), "x again destroys resident") {
-		t.Fatal("the first x only arms, with a warning naming the session")
+	if cmd != nil || m.chat.pickerDestroy != "resident" || !strings.Contains(ansi.Strip(m.pickerBox()), "x again closes resident") || !strings.Contains(ansi.Strip(m.pickerBox()), "r restores it") {
+		t.Fatal("the first x only arms, with a warning naming the session and the way back")
 	}
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	m = next.(emberModel)
@@ -3302,7 +3302,7 @@ func TestSwitcherCardsSayWhatIsTrueAndDestroyTakesTwoPresses(t *testing.T) {
 	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	m = next.(emberModel)
 	if m.chat.pickerDestroy != "" || !strings.Contains(m.msg, "last session") {
-		t.Fatal("the last session can't be destroyed")
+		t.Fatal("the last session can't be closed")
 	}
 	// Enter on "+ new session" asks for the name
 	m.chat.pickerSel = 1
@@ -3706,5 +3706,54 @@ func TestAMetVerdictAppearsExactlyOnceInTheTranscript(t *testing.T) {
 		if n := strings.Count(v, "The review file exists with all sections"); n != 1 {
 			t.Fatalf("cards=%v: the verdict shows %d times:\n%s", cards, n, v)
 		}
+	}
+}
+
+// r lists the closed sessions under the cards (a closed session has a way back); Enter restores the highlighted one,
+// refuses one whose name is open again, and Esc goes back to the cards. A close says where the session went.
+func TestSwitcherRestoresAClosedSession(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 150, 40
+	m.sessionCards = []sessionCard{{name: "resident", status: "listening"}}
+	m.chat.picker = true
+	next, cmd := m.chatKey(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = next.(emberModel)
+	if cmd == nil || !m.chat.pickerRestore || !strings.Contains(ansi.Strip(m.pickerBox()), "reading the closed sessions") {
+		t.Fatal("r reads the closed sessions and says so while it does")
+	}
+	next, _ = m.Update(closedSessionsMsg{closed: []closedSession{
+		{Name: "CyberExpert", Kept: "CyberExpert-20261118-091500", ClosedAt: 1795000000, Size: 3 << 20},
+		{Name: "resident", Kept: "resident-20261117-080000", ClosedAt: 1794900000, Size: 512, Open: true}}})
+	m = next.(emberModel)
+	box := ansi.Strip(m.pickerBox())
+	for _, want := range []string{"closed sessions:", "Enter restores", "CyberExpert · closed ", "3.0 MB", "a session of that name is open"} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("the list shows %q:\n%s", want, box)
+		}
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = next.(emberModel)
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	if cmd != nil || !m.chat.pickerRestore || !strings.Contains(m.msg, "is open") {
+		t.Fatal("a closed session whose name is open again is not restored over it")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	m = next.(emberModel)
+	next, cmd = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(emberModel)
+	if cmd == nil || m.chat.pickerRestore || !m.chat.picker {
+		t.Fatal("Enter restores the highlighted session and leaves the cards in view")
+	}
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = next.(emberModel)
+	next, _ = m.chatKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(emberModel)
+	if m.chat.pickerRestore || !m.chat.picker {
+		t.Fatal("Esc goes back to the cards")
+	}
+	next, _ = m.Update(residentDestroyedMsg{name: "research", kept: "/k/research-1"})
+	if msg := next.(emberModel).msg; !strings.Contains(msg, "kept in /k/research-1") || !strings.Contains(msg, "r in the switcher restores it") {
+		t.Fatalf("a close says where the session went and how to bring it back: %q", msg)
 	}
 }

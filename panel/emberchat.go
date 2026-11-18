@@ -64,7 +64,11 @@ type residentChat struct {
 	quitArmed                               time.Time          // Ctrl+C cleared a draft: a second one within 2 s quits
 	pickerNew                               bool               // the switcher is asking for a new session's name
 	pickerName                              string             // that name as typed
-	pickerDestroy                           string             // the session x armed: a second x destroys it
+	pickerDestroy                           string             // the session x armed: a second x closes it
+	pickerRestore                           bool               // r: the closed sessions under the cards, Enter restores one
+	closed                                  []closedSession    // those sessions (`agent restore`), newest first
+	closedSel                               int                // the highlighted one
+	closedNote                              string             // "reading…", an error, or "" once the list is in
 	goals, goalsDetail                      bool               // the Goals overlay, and its selected goal opened in full
 	loadingShown                            bool               // the transcript shows "loading NAME…"
 	goalsSel                                int
@@ -3206,6 +3210,9 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if k != "x" {
 		m.chat.pickerDestroy = ""
 	}
+	if m.chat.pickerRestore {
+		return m.restoreKey(k)
+	}
 	if m.chat.pickerNew {
 		switch k {
 		case "esc":
@@ -3258,14 +3265,14 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.chat.compose.Focus()
-	case "x": // destroy the selected session: armed by the first x, done by the second
+	case "x": // close the selected session: armed by the first x, done by the second (r brings it back)
 		cards := m.switcherCards()
 		i := m.chat.pickerSel
 		if i < 0 || i >= len(cards) {
 			return m, nil
 		}
 		if len(cards) < 2 {
-			m.msg = "the last session can't be destroyed"
+			m.msg = "the last session can't be closed"
 			return m, nil
 		}
 		if m.chat.pickerDestroy != cards[i].name {
@@ -3280,6 +3287,9 @@ func (m emberModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chat.picker = true
 		}
 		return m, destroyResidentSession(m, c.name, c.active)
+	case "r": // the closed sessions, to restore one
+		m.chat.pickerRestore, m.chat.closed, m.chat.closedSel, m.chat.closedNote = true, nil, 0, "reading the closed sessions…"
+		return m, loadClosedSessions(m)
 	case "n": // a new session from this one: its name on a line under the cards
 		m.chat.pickerNew, m.chat.pickerName = true, ""
 		return m, nil

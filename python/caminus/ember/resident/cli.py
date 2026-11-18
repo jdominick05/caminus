@@ -181,6 +181,8 @@ def model_ops(a,home):
             atomic_json(home/'config.json',cfg)
         emit(dict(providers=provs),a.json);return 0
     if a.op=='models':
+        if _local_effort(cfg,keep_level=True):   # (a local server that answers as Caminus is listed as `local`: catalog.providers)
+            atomic_json(home/'config.json',cfg)
         cat=catalog.load(home)
         if a.refresh or not cat.get('models'):
             cat=catalog.refresh(home,cfg,only=a.provider)
@@ -210,6 +212,7 @@ def model_ops(a,home):
         spec=catalog.providers(cfg).get(entry['provider'])
         if not spec:raise ValueError('the provider of %s is no longer configured' % entry['id'])
         endpoint,api=catalog.transport(spec,entry)   # (an OpenCode model: its own API under the plan's root)
+        cfg['providers']=catalog.providers(cfg)      # the brain being left stays one /model can go back to
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=endpoint,api=api)
         for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
             cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
@@ -290,17 +293,19 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore'):
         p=sub.add_parser(op)
-        p.add_argument('name')
+        p.add_argument('name',**(dict(nargs='?',help='the session to restore; none lists the closed ones') if op=='restore' else {}))
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
         p.add_argument('--json',action='store_true')
         if op=='create':
             p.add_argument('--from',dest='template',required=True,help='copy model settings from a sibling resident; memory/history start fresh')
             p.add_argument('--model',help='a local model instead of the sibling\'s brain (the session switcher passes the setup\'s default)')
             p.add_argument('--endpoint',default='http://127.0.0.1:8092/v1',help='with --model: the local server')
-        if op=='remove':
+        if op in ('remove','restore'):
             p.add_argument('--dry-run',action='store_true',help='check the session exists and say what would happen; change nothing')
+        if op=='restore':
+            p.add_argument('--kept',help='the kept folder to restore (from the list), when several copies of the name are kept')
         if op=='memory':
             p.add_argument('--text',help='append a note to this resident\'s MEMORY.md')
             p.add_argument('--stdin',action='store_true')
@@ -503,6 +508,96 @@ def unit_text(name,home,program=None):
             f'EnvironmentFile=-%h/.config/caminus/agents/{name}.env\n\n[Install]\nWantedBy=default.target\n')
 
 
+def _systemd(name):
+    """A session's unit name, the user manager's environment and its unit folder (start, stop, remove, restore)."""
+    env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
+    return 'caminus-agent-'+name+'.service',env,Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd/user'
+
+
+def _start(name,home):
+    unit,env,d=_systemd(name)
+    d.mkdir(parents=True,exist_ok=True)
+    (d/unit).write_text(unit_text(name,home))
+    subprocess.run(['systemctl','--user','daemon-reload'],env=env,check=True)
+    subprocess.run(['systemctl','--user','enable','--now',unit],env=env,check=True)
+
+
+def _env_file(name):
+    """The session's own environment file (unit_text's EnvironmentFile): remove keeps it in the home as agent.env."""
+    return Path.home()/'.config/caminus/agents'/(name+'.env')
+
+
+def _removed_root(home_arg):
+    """Where remove keeps closed sessions' homes (a test's --home keeps them beside it, never in the real home)."""
+    return (Path(home_arg).expanduser().resolve().parent if home_arg else Path.home()/'.local/share/caminus')/'removed-sessions'
+
+
+def restore_op(a):
+    """The way back from remove (the session switcher's close). Without a name: the kept sessions, newest first (name,
+    the folder, when it was closed, its size, whether a session of that name is open now). With one: its newest kept
+    home (or --kept FOLDER) moves back, its kept agent.env back to the agents' env folder, its name onto the mail bus,
+    and its service starts as `start` starts it. Every check runs before anything moves; --dry-run runs only them."""
+    import re
+    root=_removed_root(a.home)
+    def home_of(n):
+        return agent_home(n,a.home) if a.home and n==a.name else root.parent/n if a.home else agent_home(n)
+    kept=[]
+    for d in sorted(root.iterdir()) if root.is_dir() else ():
+        m=re.fullmatch(r'(.+)-(\d{8}-\d{6})',d.name)   # (the stamp from the right: names hold hyphens and digits)
+        if not m or not (d/'config.json').is_file():continue
+        try:closed=time.mktime(time.strptime(m.group(2),'%Y%m%d-%H%M%S'))
+        except ValueError:continue
+        size=0
+        for top,_,files in os.walk(d):
+            for f in files:
+                try:size+=os.lstat(os.path.join(top,f)).st_size
+                except OSError:pass
+        kept.append(dict(name=m.group(1),kept=d.name,closed_at=closed,size=size))
+    kept.sort(key=lambda e:-e['closed_at'])
+    if not a.name:
+        for e in kept:
+            try:e['open']=home_of(e['name']).exists()
+            except ValueError:e['open']=False
+        emit(dict(closed=kept),True);return 0
+    home=home_of(a.name)
+    picks=[e for e in kept if e['name']==a.name and (not a.kept or e['kept']==a.kept)]
+    if not picks:
+        raise ValueError('no closed session %s in removed-sessions' % (a.kept or 'named '+a.name))
+    src=root/picks[0]['kept']
+    if home.exists():
+        raise ValueError(f'a session named {a.name} is open: close it first (its home is {home})')
+    cfg=json.loads((src/'config.json').read_text())
+    if cfg.get('name')!=a.name:
+        raise ValueError(f'{src.name} holds the session {cfg.get("name")!r}, not {a.name}')
+    env_file=_env_file(a.name)
+    if (src/'agent.env').exists() and env_file.exists():
+        raise ValueError(f'{env_file} exists: move it aside first, so the kept agent.env does not replace it')
+    mail=Mail(cfg)
+    try:
+        if a.name in [p['name'] for p in mail.peers()]:
+            raise ValueError(f'the name {a.name} is on the mail bus already (another session holds it)')
+        if a.dry_run:
+            emit(dict(name=a.name,restored=False,kept=src.name,would='move its home back to '+str(home)+
+                      (', its agent.env back' if (src/'agent.env').exists() else '')+', join the mail bus, start its service'),True)
+            return 0
+        mail.register(home)                         # (first: a refusal there moves nothing)
+        try:
+            home.parent.mkdir(parents=True,exist_ok=True)
+            os.replace(src,home)
+        except OSError:
+            mail.unregister();raise
+    finally:mail.close()
+    env=(home/'agent.env').exists()
+    if env:
+        env_file.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        os.replace(home/'agent.env',env_file)
+    out=dict(name=a.name,restored=True,home=str(home),kept=src.name,env=env,started=True)
+    try:_start(a.name,home)
+    except (OSError,subprocess.CalledProcessError) as e:   # (restored all the same: `agent start NAME` retries the service)
+        out.update(started=False,start_error=str(e)[:300])
+    emit(out,True);return 0
+
+
 def emit(value,json_mode=False):
     if json_mode:
         print(json.dumps(value,ensure_ascii=False),flush=True)
@@ -531,6 +626,8 @@ def main(argv=None,stdin=None):
     try:
         if getattr(a,'max_steps',None) is not None and a.max_steps<1 or getattr(a,'max_seconds',None) is not None and a.max_seconds<=0:
             raise ValueError('test budgets must be positive')
+        if a.op=='restore':
+            return restore_op(a)
         home=agent_home(a.name,a.home)
         if a.op=='create':
             agent_home(a.template)  # validate the sibling name before joining it
@@ -539,7 +636,11 @@ def main(argv=None,stdin=None):
             cfg['name']=a.name
             if a.model:
                 # a local brain in place of the sibling's: as /model does, drop what belonged to a paid one (its relay,
-                # prices, window, thinking, effort) and keep the providers so /model can switch back
+                # prices, window, thinking, effort) and keep every provider the sibling could switch to, its own brain's
+                # among them, so /model offers the same brains (the local server is listed too: catalog.providers)
+                from . import catalog
+                provs=catalog.providers(cfg)
+                if provs:cfg['providers']=provs
                 cfg.update(model=a.model,endpoint=a.endpoint.rstrip('/'))
                 cfg.pop('max_tokens',None)   # (the new brain's own limit: effort.reply_limit)
                 # (and the paid helpers: a fallback brain would take over at once while the local server is down, and a
@@ -548,7 +649,6 @@ def main(argv=None,stdin=None):
                           'compaction_model','fallback','advisor','judge_model','eyes','model_variants','efforts'):
                     cfg.pop(k,None)
                 _local_effort(cfg)            # the server's own id and its effort ids (the lab's default level applies)
-                from . import catalog
                 # (after _local_effort: the catalog knows the base id, not an effort id such as ...-nothink)
                 if catalog.model_vision(source,cfg,ask=False):cfg['vision']=True   # (the sibling's catalog says so)
             from .model import Model
@@ -628,44 +728,37 @@ def main(argv=None,stdin=None):
             finally:mail.close()
             return 0
         if a.op=='remove':
-            # The session switcher's destroy: its service stops and is disabled, its name leaves the mail bus, and its
-            # home (config, memory, history, files) moves to removed-sessions, kept and restorable by moving it back.
+            # The session switcher's close: its service stops and is disabled, its name leaves the mail bus, and its
+            # home (config, memory, history, files) moves to removed-sessions, kept; `restore` brings it back.
             # The panel cancels a running goal first with `cancel`, which also withdraws its open requests.
             if not (home/'config.json').exists():
                 raise ValueError('no session named '+a.name)
             if a.dry_run:
                 emit(dict(name=a.name,removed=False,would='stop and disable its service, leave the mail bus, move its home to removed-sessions'),True)
                 return 0
-            unit='caminus-agent-'+a.name+'.service'
-            env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
+            unit,env,d=_systemd(a.name)
             subprocess.run(['systemctl','--user','disable','--now',unit],env=env,check=False,capture_output=True)
-            unit_file=Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd/user'/unit
+            unit_file=d/unit
             if unit_file.exists():
                 unit_file.unlink()
                 subprocess.run(['systemctl','--user','daemon-reload'],env=env,check=False,capture_output=True)
             mail=Mail(json.loads((home/'config.json').read_text()))
             try:mail.unregister()
             finally:mail.close()
-            import time as _time
-            root=(home.parent if a.home else Path.home()/'.local/share/caminus')/'removed-sessions'  # (a test's --home stays in its folder)
-            kept=root/(a.name+'-'+_time.strftime('%Y%m%d-%H%M%S'))
+            kept=_removed_root(a.home)/(a.name+'-'+time.strftime('%Y%m%d-%H%M%S'))
             kept.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             os.replace(home,kept)
-            env_file=Path.home()/'.config/caminus/agents'/(a.name+'.env')
+            env_file=_env_file(a.name)
             if env_file.exists():
                 os.replace(env_file,kept/'agent.env')
             emit(dict(name=a.name,removed=True,kept=str(kept)),True)
             return 0
         if a.op in ('unit','start','stop'):
-            unit='caminus-agent-'+a.name+'.service'
+            unit,env,_=_systemd(a.name)
             if a.op=='unit':
                 print(unit_text(a.name,home),end='');return 0
-            env=dict(os.environ,XDG_RUNTIME_DIR='/run/user/'+str(os.getuid()))
             if a.op=='start':
-                d=Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd/user';d.mkdir(parents=True,exist_ok=True)
-                (d/unit).write_text(unit_text(a.name,home))
-                subprocess.run(['systemctl','--user','daemon-reload'],env=env,check=True)
-                subprocess.run(['systemctl','--user','enable','--now',unit],env=env,check=True)
+                _start(a.name,home)
             else:
                 subprocess.run(['systemctl','--user','stop',unit],env=env,check=True)
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)

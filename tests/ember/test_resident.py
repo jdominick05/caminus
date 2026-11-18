@@ -2518,6 +2518,40 @@ for line in sys.stdin:
             self.assertNotIn(k,got,f'{k} belonged to the paid brain')   # (eyes bill too: the owner turns them on again)
         self.assertIn('providers',got,'/model can still switch back to a paid brain')
 
+    def test_a_new_session_lists_its_local_server_and_the_providers_of_its_sibling(self):
+        """The owner's empty /model: a switcher session on the local server had providers {} and the catalog listed
+        configured providers only. It lists the local server it talks to (once that answers as Caminus), keeps every
+        provider its sibling could switch to (the sibling's own relayed brain among them), and /model keeps the brain
+        it leaves. A loopback server that does not answer as Caminus (the key relay listens there too) is not listed."""
+        conf=json.loads((self.home/'config.json').read_text())
+        conf.update(model='claude-haiku-5-5',provider='anthropic',provider_kind='anthropic',api='anthropic',relay=True,
+                    endpoint='http://127.0.0.1:9/v1')   # (a closed port: the relay's catalog is not asked here)
+        (self.home/'config.json').write_text(json.dumps(conf))
+        url=f'http://127.0.0.1:{self.server.server_port}/{self.key}/v1'   # (never the machine's own server on 8092)
+        base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
+        def run(*args):
+            r=subprocess.run(base+list(args)+['--json'],capture_output=True,text=True,timeout=30)
+            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+            return json.loads(r.stdout.strip().splitlines()[-1])
+        self.serve_ids(self.CODER_IDS)
+        new='local-'+uuid.uuid4().hex[:8];home=self.home.parent/new
+        run('create',new,'--from',self.home.name,'--model','k3-coder','--endpoint',url,'--home',str(home))
+        got=json.loads((home/'config.json').read_text())
+        self.assertEqual(got['providers'],{'anthropic':dict(kind='anthropic',endpoint='http://127.0.0.1:9/v1',relay=True)},
+                         "the sibling's own brain stays one /model can pick, through its relay")
+        rows={(m['provider'],m['id']) for m in run('models',new,'--refresh','--home',str(home))['models']}
+        self.assertIn(('local','k3-coder'),rows,'the server the session talks to is in /model')
+        run('model',new,'k3-coder','--home',str(home))
+        got=json.loads((home/'config.json').read_text())
+        self.assertEqual((got['provider'],got['provider_kind']),('local','local'))
+        self.assertEqual(got['providers']['local'],dict(kind='local',endpoint=url),'kept when /model moves to another brain')
+        # a loopback server that is not Caminus: not listed as the local server
+        self.serve_ids(['some-model'],caminus=False)
+        other='relay-'+uuid.uuid4().hex[:8];home=self.home.parent/other
+        run('create',other,'--from',self.home.name,'--model','some-model','--endpoint',url,'--home',str(home))
+        rows=run('models',other,'--refresh','--home',str(home))
+        self.assertNotIn('local',rows['providers']);self.assertFalse([m for m in rows['models'] if m['provider']!='anthropic'])
+
     CODER_IDS=['k3-coder','k3-coder-xhigh','k3-coder-low','k3-coder-nothink']   # what the Coder's server lists
 
     def serve_ids(self,ids,alias=None,caminus=True):
@@ -2785,26 +2819,62 @@ for line in sys.stdin:
         self.assertIn('thinkingcap',got['args'],'--local resolves it too')
         self.assertNotIn('--local-default',got['args'])
 
-    def test_remove_takes_a_session_off_the_bus_and_keeps_its_home(self):
+    def test_remove_keeps_a_session_and_restore_brings_it_back(self):
+        """The switcher's close (remove) and its way back (restore), in a scratch HOME with a logging systemctl: the
+        home, its env file, its mail bus row and its unit all go and come back; nothing reaches the real account."""
         name='session-'+uuid.uuid4().hex
         home=self.home.parent/name
+        fake=self.home/('fakehome-'+name);bin_=fake/'bin';bin_.mkdir(parents=True)
+        calls=fake/'systemctl.log'
+        (bin_/'systemctl').write_text('#!/bin/sh\necho "$*" >> '+str(calls)+'\n');(bin_/'systemctl').chmod(0o755)
+        env=dict(os.environ,HOME=str(fake),XDG_CONFIG_HOME=str(fake/'.config'),PATH=f'{bin_}:{os.environ["PATH"]}')
         base=[sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local']
-        made=subprocess.run(base+['create',name,'--from',self.home.name,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
-        self.assertEqual(made.returncode,0,made.stdout+made.stderr)
+        def run(*args,code=0):
+            r=subprocess.run(base+list(args)+['--json'],capture_output=True,text=True,timeout=30,env=env)
+            self.assertEqual(r.returncode,code,r.stdout+r.stderr)
+            return json.loads(r.stdout.strip().splitlines()[-1])
+        run('create',name,'--from',self.home.name,'--home',str(home))
         (home/'MEMORY.md').write_text('# Persistent memory\n\nkeep me\n')
+        env_file=fake/'.config/caminus/agents'/(name+'.env')
+        env_file.parent.mkdir(parents=True);env_file.write_text('CAMINUS_AGENT_API_KEY=x\n')
         self.assertIn(name,[p['name'] for p in self.cmd('peers')])
-        dry=subprocess.run(base+['remove',name,'--dry-run','--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
-        self.assertEqual(dry.returncode,0,dry.stdout+dry.stderr)
+        run('remove',name,'--dry-run','--home',str(home))
         self.assertTrue(home.exists(),'a dry run changes nothing')
-        gone=subprocess.run(base+['remove',name,'--home',str(home),'--json'],capture_output=True,text=True,timeout=30)
-        self.assertEqual(gone.returncode,0,gone.stdout+gone.stderr)
-        kept=Path(json.loads(gone.stdout)['kept'])
+        kept=Path(run('remove',name,'--home',str(home))['kept'])
         self.assertFalse(home.exists(),'the session is gone from its place')
         self.assertIn('keep me',(kept/'MEMORY.md').read_text(),'its home is kept, not deleted')
         self.assertEqual(kept.parent,self.home.parent/'removed-sessions','a test home never moves into the real home')
+        self.assertFalse(env_file.exists());self.assertTrue((kept/'agent.env').exists(),'its env file is kept with it')
         self.assertNotIn(name,[p['name'] for p in self.cmd('peers')],'it left the mail bus')
-        again=subprocess.run(base+['remove',name,'--home',str(home),'--json'],capture_output=True,text=True,timeout=15)
-        self.assertEqual(again.returncode,1,'removing a session that is not there fails')
+        self.assertIn(f'--user disable --now caminus-agent-{name}.service',calls.read_text())
+        run('remove',name,'--home',str(home),code=1)          # removing a session that is not there fails
+        # the list: every kept session with when it was closed and its size
+        listed=[e for e in run('restore','--home',str(home))['closed'] if e['name']==name]
+        self.assertEqual([e['kept'] for e in listed],[kept.name])
+        self.assertGreater(listed[0]['size'],0);self.assertFalse(listed[0]['open'])
+        self.assertAlmostEqual(listed[0]['closed_at'],time.time(),delta=120)
+        # every check runs before anything moves: an env file in the way, then a dry run
+        env_file.write_text('NEWER=1\n')
+        self.assertIn('exists',run('restore',name,'--home',str(home),code=1)['error'])
+        env_file.unlink()
+        self.assertIn('move its home back',run('restore',name,'--dry-run','--home',str(home))['would'])
+        self.assertTrue(kept.exists());self.assertFalse(home.exists())
+        before=calls.read_text()
+        out=run('restore',name,'--home',str(home))
+        self.assertEqual((out['restored'],out['env'],out['started']),(True,True,True))
+        self.assertIn('keep me',(home/'MEMORY.md').read_text());self.assertFalse(kept.exists())
+        self.assertEqual(env_file.read_text(),'CAMINUS_AGENT_API_KEY=x\n');self.assertFalse((home/'agent.env').exists())
+        self.assertIn(name,[p['name'] for p in self.cmd('peers')],'it is back on the mail bus')
+        unit=(fake/'.config/systemd/user'/f'caminus-agent-{name}.service').read_text()
+        self.assertIn('--home '+str(home.resolve()),unit);self.assertIn(f'agents/{name}.env',unit)
+        self.assertEqual(calls.read_text()[len(before):],f'--user daemon-reload\n--user enable --now caminus-agent-{name}.service\n',
+                         'its service starts as `start` starts it')
+        # an open session of that name is never restored over
+        kept2=Path(run('remove',name,'--home',str(home))['kept'])
+        run('create',name,'--from',self.home.name,'--home',str(home))
+        self.assertIn('is open',run('restore',name,'--home',str(home),code=1)['error'])
+        self.assertTrue(kept2.exists())
+        run('restore','nobody','--home',str(self.home.parent/'nobody'),code=1)
 
     def test_status_names_what_a_redirected_goal_works_toward(self):
         from caminus.ember.resident.store import Store
