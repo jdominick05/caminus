@@ -23,7 +23,8 @@
 set -u
 # bash rewrites LINES / COLUMNS from the terminal after every external command (checkwinsize, on by default): the
 # per-card lines once lived in an array named LINES, and card 0's line became the terminal's row count in a run started
-# from a terminal (an instant GUARD KILL). They are LINE_MIB now, and the size check is off for this script.
+# from a terminal (an instant GUARD KILL). They are LINE_MIB now, and the size check is off for this script. (The display flags are DISP_FLAG for the
+# same reason: an array named DISPLAY would hide the caller's X11 DISPLAY from every guarded child.)
 shopt -u checkwinsize 2>/dev/null || true
 
 ROOT=
@@ -36,8 +37,8 @@ gfx_of_minor() {   # the gfx_target_version of the KFD node with this render min
         fi
     done
 }
-discover() {   # fills CARDS / DEVS / LABELS / TOTALS / LINE_MIB / DISPLAY for the watched cards
-    CARDS=(); DEVS=(); LABELS=(); TOTALS=(); LINE_MIB=(); DISPLAY=()
+discover() {   # fills CARDS / DEVS / LABELS / TOTALS / LINE_MIB / DISP_FLAG for the watched cards
+    CARDS=(); DEVS=(); LABELS=(); TOTALS=(); LINE_MIB=(); DISP_FLAG=()
     local c n dev minor r gfx total did lab disp s
     for c in "$ROOT"/sys/class/drm/card*; do
         n=${c##*/}
@@ -66,13 +67,13 @@ discover() {   # fills CARDS / DEVS / LABELS / TOTALS / LINE_MIB / DISPLAY for t
         for s in "$ROOT"/sys/class/drm/"$n"-*/status; do [ -r "$s" ] && [ "$(cat "$s")" = connected ] && disp=1; done
         [ "$(cat "$dev/boot_vga" 2>/dev/null)" = 1 ] && disp=1
         CARDS+=("$n"); DEVS+=("$dev"); LABELS+=("$lab"); TOTALS+=("$total")
-        LINE_MIB+=($(( (total * 97 / 100) / 50 * 50 ))); DISPLAY+=("$disp")
+        LINE_MIB+=($(( (total * 97 / 100) / 50 * 50 ))); DISP_FLAG+=("$disp")
     done
     # (in DRM order: the glob sorts card1 < card10 < card2; sort by number)
     local i j t
     for ((i = 0; i < ${#CARDS[@]}; i++)); do for ((j = i + 1; j < ${#CARDS[@]}; j++)); do
         if (( ${CARDS[j]#card} < ${CARDS[i]#card} )); then
-            for a in CARDS DEVS LABELS TOTALS LINE_MIB DISPLAY; do
+            for a in CARDS DEVS LABELS TOTALS LINE_MIB DISP_FLAG; do
                 eval "t=\${$a[i]}; $a[i]=\${$a[j]}; $a[j]=\$t"
             done
         fi
@@ -83,7 +84,7 @@ if [ "${1:-}" = --lines ]; then
     ROOT=${2:-}; ROOT=${ROOT%/}
     discover
     for ((i = 0; i < ${#CARDS[@]}; i++)); do
-        echo "${CARDS[i]} ${LABELS[i]} total ${TOTALS[i]} line ${LINE_MIB[i]} display ${DISPLAY[i]} reserve $(( DISPLAY[i] ? 512 : 0 ))"
+        echo "${CARDS[i]} ${LABELS[i]} total ${TOTALS[i]} line ${LINE_MIB[i]} display ${DISP_FLAG[i]} reserve $(( DISP_FLAG[i] ? 512 : 0 ))"
     done
     exit 0
 fi
