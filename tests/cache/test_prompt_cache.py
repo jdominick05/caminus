@@ -31,7 +31,8 @@ Stages:
           and after a restart == a live continuation from A; A's entry kept when B's lacks it), cpu_side_rows (side_rows clamped
           to max_ctx, the tier counts the clamped area), cpu_session (since live state step 3, 11-07,
           it holds the engine-reset-inside-end() case: the live state dropped, the next request cold); live state:
-          cpu_append (per-pass appends == one bulk extend), cpu_session (13 failure cases through K3Session on the stand-in:
+          cpu_append (per-pass appends == one bulk extend), cpu_arrays (the prefix matches on arrays == on lists, the kept
+          log array == the log), cpu_session (13 failure cases through K3Session on the stand-in:
           abortx's points, bails in prepare / the last prompt pass / decode, an exhausted recovery, side-call failures; the
           next request == the same requests with no failure, bitwise)
 GPU stages (both cards, under tools/guard.sh; one engine: FlashNextTP T = 4 at --max-ctx (default 33,024: the dual-tape QSA
@@ -1177,6 +1178,7 @@ def cpu_fixups(cache_dir, base, b0, mpath):
     cpu_side_rows(mk, base)
     cpu_side_grow(mk, base)
     cpu_append(mk, base)
+    cpu_arrays(mk, base)
     cpu_session(mk, base)
 
     # ---- 6. the device-accept loop resumes the cache's states (DFlashK3Drafter.resume through longctx.generate): == the generic
@@ -1323,6 +1325,102 @@ def cpu_append(mk, base):
           f'reported once by extend(): toks / st through the cache at every step {ok}, log / state / checkpoints / engine state '
           f'{same}, the next request live and equal {nxt} ({oq["source"]}, {oq["cached"]}), a non-continuing append refused '
           f'(cold) {refused} ({ref})')
+
+
+def cpu_arrays(mk, base):
+    """the prefix matches on arrays (cache/livestate.py): token_ids converts a request's ids once, LiveState.log_array keeps
+    the live log's array (extended by what the log gains in place, converted again when the log is replaced, shorter, or
+    its last kept token changed), lcp compares arrays as they are. (a) lcp on lists / int64 / int32 arrays == a Python
+    loop, tok_sha the same bytes for a list and an array, token_ids' list and array; (b) random log operations: the kept
+    array == the log converted again after each; (c) one scenario of requests (prepare / plan / append / commit, an edit
+    restored from a checkpoint, a side call, the prompt phase (prompt: the ids' array carried to prepare and extend), a
+    commit of the live log itself, a lost live state, a park, a reset and the unpark) run with the matches on
+    lists through a Python loop (the code before) and on arrays, with the requests given as lists and as int32 arrays:
+    every outcome (source, cached, state, log, checkpoints, the engine state) equal"""
+    from caminus.cache import livestate as L
+    from caminus.cache import prompt as pc
+    rng = np.random.default_rng(23)
+    def loop_lcp(a, b):
+        n, i = min(len(a), len(b)), 0
+        while i < n and int(a[i]) == int(b[i]): i += 1
+        return i
+    # (a)
+    ok_a = True
+    for it in range(300):
+        n = int(rng.integers(0, 60)); a = [int(x) for x in rng.integers(0, 5, n)]
+        b = a[:int(rng.integers(0, n + 1))] + [int(x) for x in rng.integers(0, 5, int(rng.integers(0, 8)))]
+        want = loop_lcp(a, b)
+        for x in (a, np.asarray(a, np.int64), np.asarray(a, np.int32)):
+            for y in (b, np.asarray(b, np.int64)):
+                ok_a &= L.lcp(x, y) == want
+        lst, arr = L.token_ids(np.asarray(a, np.int32))
+        ok_a &= lst == a and all(type(v) is int for v in lst) and arr.dtype == np.int64 and arr.tolist() == a
+        ok_a &= L.token_ids(lst, arr) == (lst, arr) and pc.tok_sha(a) == pc.tok_sha(arr) == pc.tok_sha(np.asarray(a, np.int32))
+    try: L.token_ids([[1, 2]]); ok_a = False
+    except TypeError: pass
+    # (b)
+    ok_b, live = True, L.LiveState()
+    for it in range(400):
+        op = int(rng.integers(0, 5))
+        if op == 0: live.set_log([int(x) for x in rng.integers(0, 9, int(rng.integers(0, 50)))])
+        elif op == 1:
+            t, ta = L.token_ids(rng.integers(0, 9, int(rng.integers(0, 50)))); k = int(rng.integers(0, len(t) + 1))
+            live.set_log(t[:k], ta[:k])
+        elif op == 2: live.log.extend(int(x) for x in rng.integers(0, 9, int(rng.integers(0, 6))))
+        elif op == 3: live.set_log(live.log[:int(rng.integers(0, len(live.log) + 1))])
+        elif live.log: live.log[-1] = (live.log[-1] + 1) % 9      # (an in-place change of the last token: converted again)
+        ok_b &= np.array_equal(live.log_array(), np.asarray(live.log, dtype=np.int64))
+        if it % 7 == 0: live.log_array()                          # (kept at varied points before the next change)
+    # (c)
+    def scenario(as_array):
+        e, p, c, _, _ = mk(n_slots=4, side=512)
+        out = []
+        def give(ids): return np.asarray(ids, dtype=np.int32) if as_array else list(ids)
+        def rec(tag, o=None):
+            out.append((tag, None if o is None else (o['source'], o['cached'], dict(o['st'])), dict(c.st), list(c.log),
+                        [(k.kind, k.pos, k.commit) for k in c.ckpts], digest(e, int(c.st['i0']))))
+            if as_array is not None:
+                out[-1] += (np.array_equal(c.live.log_array(), np.asarray(c.log, dtype=np.int64)),)
+        R1 = base[:1300]
+        o = c.prepare(give(R1), dict(root=300, user=1000)); t1, s1 = gen(e, o['st'], R1, 12); c.commit(give(t1), s1); rec('r1', o)
+        i0 = int(c.st['i0'])
+        for k in range(5):                                        # (per-pass appends, the session's accept)
+            c.append([int(base[2000 + k])], dict(i0=i0 + 1, commit=1)); i0 += 1
+        rec('appends')
+        R2 = list(c.log) + base[2100:2400]
+        out.append(('plan r2', c.plan(give(R2))))
+        o = c.prepare(give(R2), dict(root=300, user=len(R2) - 300)); t2, s2 = gen(e, o['st'], R2, 8); c.commit(give(t2), s2); rec('r2', o)
+        R3 = R1[:1100] + base[3000:3200]                          # (an edit inside the conversation: a checkpoint restored)
+        out.append(('plan r3', c.plan(give(R3))))
+        o = c.prepare(give(R3)); t3, s3 = gen(e, o['st'], R3, 6); c.commit(give(t3), s3); rec('r3', o)
+        S = base[:300] + base[4000:4100]                          # (a side call, then the main line back)
+        o = c.prepare(give(S), side=True); tS, sS = gen(e, o['st'], S, 4); c.commit(give(tS), sS); rec('side', o)
+        R4 = t3 + base[3300:3400]
+        o = c.prepare(give(R4)); t4, s4 = gen(e, o['st'], R4, 4); c.commit(give(t4), s4); rec('r4', o)
+        R5 = list(c.log) + base[3500:3600]                        # (the session's prompt phase: the ids' array carried along)
+        o = c.prompt(give(R5), dict(root=300, user=len(R5) - 100)); rec('prompt r5', o)
+        c.commit(c.live_tokens(), dict(c.st)); rec('commit of the live log itself')   # (a reply's end: K3Session.end)
+        c._drop_live(); rec('dropped')
+        o = c.prepare(give(R4)); rec('after drop', o)
+        c.park(); c.reset(); e.reset(); rec('parked, reset')
+        o = c.prepare(give(R4 + base[5000:5050])); rec('unparked', o)
+        out.append(('restore', c.restore(give(R3))['source']))
+        c.close()
+        return out
+    keep = (pc.lcp, L.LiveState.log_array)
+    pc.lcp, L.LiveState.log_array = loop_lcp, lambda self: list(self.log)      # (the reference: matches on lists, a loop)
+    try: ref = scenario(None)
+    finally: pc.lcp, L.LiveState.log_array = keep
+    got_l, got_a = scenario(False), scenario(True)
+    strip = lambda rs: [r[:6] if isinstance(r, tuple) and len(r) == 7 else r for r in rs]
+    kept = all(r[6] for r in got_l + got_a if isinstance(r, tuple) and len(r) == 7)
+    srcs = [r[1][0] for r in ref if isinstance(r, tuple) and len(r) == 6 and r[1] is not None]
+    ok_c = strip(got_l) == ref and strip(got_a) == ref and kept
+    check(ok_a and ok_b and ok_c and {'live', 'vram', 'disk'} <= set(srcs),
+          f'prefix matches on arrays: lcp / tok_sha / token_ids on lists and arrays {ok_a}; the kept log array == the log after '
+          f'400 random replacements / extensions / cuts {ok_b}; a scenario of {len(ref)} steps (sources {srcs}) with the '
+          f'matches on arrays and the requests as lists and as int32 arrays == the matches on lists through a loop {ok_c} '
+          f'(the kept array == the log after every step {kept})')
 
 
 def cpu_session(mk, base):

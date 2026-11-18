@@ -186,6 +186,13 @@ step and tries again in smaller pieces (three cut-offs in a row pause the goal).
 Every turn's context states the reply limit, which model answers, and the measured
 context use and distance to compaction.
 
+The agent knows the time from a line like `[time: Wed 2026-11-18 00:41 EST]` (local time, to the minute) at the
+end of a message. It comes with a goal's first message, with each message of yours (a nudge, a steer, an answer), with
+the goal restated after a compaction, with the first tool result after a `wait`, a pause or a restart, and otherwise on
+a tool result at most every ten minutes: about a dozen tokens each. The line is written into the message when the
+message is stored and never changes afterwards, so the prompt cache keeps the whole history. The system prompt and the
+tools carry no time.
+
 The goal's gate (the shell check `define_done` names) also runs after every turn
 that changed something (an edit, a write, a terminal command that is not
 read-only), before the next model call; the agent hears only a change (the gate

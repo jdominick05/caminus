@@ -195,7 +195,7 @@ class TerminalFailures(unittest.TestCase):
 
     def k3_prompt_session(self, error, phase='prepare'):
         sess = K3Session.__new__(K3Session)
-        sess.pc = NS(prompt=Mock(side_effect=error), phase=phase, live=NS(known=True), live_tokens=lambda: [])
+        sess.pc = NS(prompt=Mock(side_effect=error), phase=phase, live=NS(known=True), live_tokens=lambda: [], live_array=lambda: [])
         sess.stats, sess.pf = None, NS(last=None)
         sess.side_route, sess.max_recoveries, sess._hooks = False, 2, NS()
         sess._refused = Mock(side_effect=AssertionError('terminal prompt must not be reported as a recoverable refusal'))
