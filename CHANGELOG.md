@@ -79,6 +79,9 @@ agent picks up the new runtime.
 - `caminus serve` answers a request for a model id it doesn't serve with its own model instead of refusing it.
 - When the agent's own advisor call fails at once (no calls left, a spent budget), no popup opens; the error card in the
   chat says why. `/advisor` shows the popup as described.
+- Not checked by hand before this release (the maintainer was away from the keyboard): the colours of Ember's advice
+  cards (no red diff lines; a real `git diff` still red and green) and the styling of a folded card's one-line preview,
+  which keeps its Markdown marks as they came. Everything else in the release's hands-on test round passed.
 
 Benchmarks: a patch release, so no full rerun. No kernel or engine code changed since 0.3.0; the served speedups above
 were measured A/B on 489f37a vs 3a3612e (see #290).
