@@ -198,3 +198,38 @@ func TestDestroyCancelsEveryLiveGoalThenRemoves(t *testing.T) {
 		t.Fatalf("dry run, cancel each live goal, then remove: %+v\n%s", msg, calls)
 	}
 }
+
+// Restore lists the kept sessions, then restores the exact kept folder picked (not just the newest of that name), and
+// says when the service did not start; a runtime's refusal comes back as its reason, an old runtime's as the fix.
+func TestRestoreListsThenRestoresThePickedFolder(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := filepath.Join(dir, "fake-caminus")
+	body := "#!/bin/sh\nshift 2\necho \"$*\" >> " + log + "\ncase \"$2\" in\n" +
+		"  --json) echo '{\"closed\":[{\"name\":\"research\",\"kept\":\"research-20261118-091500\",\"closed_at\":1795000000,\"size\":2048,\"open\":false}]}' ;;\n" +
+		"  research) echo '{\"name\":\"research\",\"restored\":true,\"started\":false,\"start_error\":\"no user manager\"}' ;;\n" +
+		"  open) echo '{\"error\":\"a session named open is open: close it first\"}'; exit 1 ;;\n" +
+		"  *) echo 'usage: caminus ember agent: invalid choice: restore' >&2; exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := emberModel{agentName: "resident", cli: []string{script}}
+	got := loadClosedSessions(m)().(closedSessionsMsg)
+	if got.err != "" || len(got.closed) != 1 || got.closed[0].Kept != "research-20261118-091500" || got.closed[0].Size != 2048 {
+		t.Fatalf("the list: %+v", got)
+	}
+	msg := restoreResidentSession(m, got.closed[0])().(residentRestoredMsg)
+	calls, _ := os.ReadFile(log)
+	if !strings.HasSuffix(string(calls), "restore research --kept research-20261118-091500 --json\n") {
+		t.Fatalf("restore names the kept folder picked:\n%s", calls)
+	}
+	if !strings.Contains(msg.text, "restored research") || !strings.Contains(msg.text, "did not start") || !strings.Contains(msg.text, "no user manager") {
+		t.Fatalf("a restore whose service did not start says so: %q", msg.text)
+	}
+	if msg := restoreResidentSession(m, closedSession{Name: "open", Kept: "open-1"})().(residentRestoredMsg); !strings.Contains(msg.text, "is open: close it first") || strings.Contains(msg.text, "{") {
+		t.Fatalf("a refusal shows the runtime's reason, not its JSON: %q", msg.text)
+	}
+	if msg := restoreResidentSession(m, closedSession{Name: "old", Kept: "old-1"})().(residentRestoredMsg); !strings.Contains(msg.text, "agent install") {
+		t.Fatalf("a runtime without restore names the fix: %q", msg.text)
+	}
+}
