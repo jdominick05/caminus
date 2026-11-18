@@ -12,7 +12,9 @@ Network: none, unless the call names hosts. Then this module's proxy runs outsid
 bridge inside forwards 127.0.0.1:3128 to it through a bind-mounted socket: CONNECT to port 443 only, names only (no
 IP literals), a listed name or its subdomains, and only when every address the name resolves to is public. The socket
 is bound into the box only after it answers. Every connection is logged (connections.jsonl in the job folder), and
-the runtime turns new lines into a sandbox_connections event.
+the runtime turns new lines into a sandbox_connections event. The browser's box (browser.py) runs the same proxy in
+its web mode: any public address on any port, plain HTTP forwarded too, and a LAN, link-local or loopback address
+or one of this machine's own only when the browser call named that host:port.
 
 Limits per call: time (default 600 s, at most 3600), memory, a CPU share and a process cap, through a user systemd
 scope when the account has one, else rlimits in the box's first process. Going over kills the whole box; the result
@@ -72,8 +74,9 @@ async def main():
     async with srv: await srv.serve_forever()
 asyncio.run(main())
 ''' % (INSIDE_SOCK, PROXY_PORT)
-# start the bridge, wait until it listens, then the agent's command
-WRAP = ('/usr/bin/python3 -I -c "$1" & i=0; while [ $i -lt 50 ] && ! (exec 3<>/dev/tcp/127.0.0.1/%d) 2>/dev/null; '
+# start the bridge, wait until it listens, then the agent's command (the bridge never holds the browser's DevTools
+# pipe, fds 3 and 4: a copy there would keep the pipe open after Chrome exited)
+WRAP = ('/usr/bin/python3 -I -c "$1" 3>&- 4>&- & i=0; while [ $i -lt 50 ] && ! (exec 3<>/dev/tcp/127.0.0.1/%d) 2>/dev/null; '
         'do i=$((i+1)); sleep 0.1; done; cmd=$2; shift 2; exec /bin/bash -c "$cmd"' % PROXY_PORT)
 
 _usable = None
@@ -199,6 +202,8 @@ def bwrap_argv(box, command, sock=None):
             '--bind', box['box'], '/box']
     if box.get('folder'):
         argv += ['--ro-bind', box['folder'], '/work']
+    for d in box.get('ro', ()):
+        argv += ['--ro-bind', d, d]          # a program installed outside /usr (Google Chrome's /opt/google/chrome)
     if sock:
         argv += ['--ro-bind', str(sock), INSIDE_SOCK]
     # the worker's environment carries the agent's GitHub token: the box starts from an empty one
@@ -236,6 +241,27 @@ def host_ok(host, names):
     return any(n and (h == n or h.endswith('.' + n)) for n in names)
 
 
+def local_addresses():
+    """This machine's own addresses, as address objects with every IPv6 form unwrapped (address()): a public one
+    reaches this machine's services as surely as 127.0.0.1, and ::ffff: or NAT64 spelling cannot hide it."""
+    out = set()
+    try:
+        for line in Path('/proc/net/if_inet6').read_text().splitlines():
+            out.add(address(ipaddress.ip_address(bytes.fromhex(line.split()[0]))))
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        prev = ''
+        for line in Path('/proc/net/fib_trie').read_text().splitlines():
+            if '/32 host LOCAL' in line and prev.strip().startswith('|--'):
+                out.add(address(prev.strip()[3:].strip()))
+            prev = line
+    except (OSError, ValueError):
+        pass
+    out.discard(None)
+    return out
+
+
 NAT64 = (ipaddress.ip_network('64:ff9b::/96'), ipaddress.ip_network('64:ff9b:1::/48'))
 REFUSED_V6 = (ipaddress.ip_network('::/96'), ipaddress.ip_network('fec0::/10'))   # IPv4-compatible, site-local
 
@@ -252,7 +278,7 @@ def address(a):
             return ip.sixtofour
         if any(ip in n for n in NAT64):
             return ipaddress.IPv4Address(int(ip) & 0xffffffff)
-        if any(ip in n for n in REFUSED_V6):
+        if any(ip in n for n in REFUSED_V6) and not (ip.is_loopback or ip.is_unspecified):   # (::1 and :: stay)
             return None
     return ip
 
@@ -263,17 +289,37 @@ def public(a):
     return ip is not None and ip.is_global
 
 
-class Proxy:
-    """The allowlist HTTPS proxy, outside the box, on a Unix socket only the box is given."""
+def local(a, mine=None):
+    """What the browser's web mode refuses unless named: not public (LAN, loopback, link-local, the deprecated
+    forms), or one of this machine's own addresses (mine: local_addresses()), every IPv6 form unwrapped first."""
+    ip = address(a)
+    return ip is None or not ip.is_global or ip in (local_addresses() if mine is None else mine)
 
-    def __init__(self, path, names, log_path):
+
+
+def split_target(target):
+    """('host', port) of host:port or [IPv6]:port, or ValueError."""
+    host, sep, port = str(target).strip().rpartition(':')
+    if not sep or not host or not port.isdigit() or not 0 < int(port) < 65536:
+        raise ValueError(f'{target!r} is not host:port')
+    return host.strip('[]').lower().rstrip('.'), int(port)
+
+
+class Proxy:
+    """The allowlist HTTPS proxy, outside the box, on a Unix socket only the box is given. web=True is the browser's
+    mode: any public address, plain HTTP forwarded as well as CONNECT, and the named (host, port) pairs past the
+    address rule (the browser's calls add to them while it runs)."""
+
+    def __init__(self, path, names, log_path, web=False):
         self.path, self.names, self.log_path = Path(path), list(names), Path(log_path)
+        self.web, self.named = web, set()
         # bind and connect through the folder's descriptor: a Unix socket's path is capped at 108 bytes and a
         # resident's job folder can be deeper than that (bwrap's bind mount takes the full path)
         self._dir = os.open(self.path.parent, os.O_PATH | os.O_DIRECTORY)
         self.short = f'/proc/self/fd/{self._dir}/{self.path.name}'
         self.loop = self.srv = self.thread = None
         self.resolve = None          # a test replaces DNS (getaddrinfo's shape)
+        self.connect = None          # and the web mode's outgoing connection (open_connection's shape)
         self.logged = 0
 
     def log(self, target, verdict):
@@ -300,14 +346,88 @@ class Proxy:
             except Exception:
                 pass
 
+    async def _web(self, head, parts, r, w, logged):
+        """The browser's mode: CONNECT to any port, or a plain-HTTP request in absolute form (rewritten to origin
+        form, one request per connection), to a public address that is not this machine's, or to a named
+        host:port. It connects to the address it checked."""
+        from urllib.parse import urlsplit
+        if parts[0] == 'CONNECT':
+            host, port = split_target(parts[1])
+            path = None
+        else:
+            u = urlsplit(parts[1])
+            if u.scheme != 'http' or not u.hostname:
+                self.log(parts[1][:200], 'refused: not an http:// request or a CONNECT')
+                w.write(b'HTTP/1.1 405 Not a proxy request\r\n\r\n')
+                return
+            host, port = u.hostname.lower().rstrip('.'), u.port or 80
+            path = (u.path or '/') + ('?' + u.query if u.query else '')
+        target = f'{host}:{port}'
+        resolve = self.resolve or asyncio.get_running_loop().getaddrinfo
+        addrs = [i[4][0].split('%')[0] for i in await resolve(host, port, type=socket.SOCK_STREAM)]
+        named = (host, port) in self.named
+        mine = local_addresses()
+        if not named and (not addrs or any(local(a, mine) for a in addrs)):
+            self.log(target, 'refused: LAN, loopback, link-local or this machine (not named in a browser call)')
+            body = (f"Ember's browser refused {target}: a LAN, loopback or link-local address, or this machine. The "
+                    "browser reaches one only when a call names that host:port (open it as localhost or by its address, or "
+                    "list it in allow).\n")
+            w.write(b'HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: '
+                    + str(len(body)).encode() + b'\r\n\r\n' + body.encode())
+            return
+        hop = ('proxy-connection', 'proxy-authorization', 'connection', 'keep-alive')
+        lines = head.decode('latin-1').split('\r\n')[1:]
+        fields = {l.split(':', 1)[0].strip().lower(): l.split(':', 1)[1].strip() for l in lines if ':' in l}
+        if path is not None and 'chunked' in fields.get('transfer-encoding', '').lower():
+            self.log(target, 'refused: a chunked request body (one request per connection needs its length)')
+            w.write(b'HTTP/1.1 411 Length Required\r\nConnection: close\r\n\r\n')
+            return
+        ur, uw = await asyncio.wait_for((self.connect or asyncio.open_connection)(addrs[0], port), 20)
+        self.log(target, 'allowed (named)' if named else 'allowed')
+        logged.append(target)                # (a reset after this is the site's, not a second verdict)
+        if path is None:
+            w.write(b'HTTP/1.1 200 Connection established\r\n\r\n')
+            await w.drain()
+            await asyncio.gather(self._pipe(r, uw), self._pipe(ur, w))
+            return
+        # Plain HTTP: exactly one request per connection, checked and logged above. Only this request's body goes
+        # upstream and the response says Connection: close, so the browser never sends its next request (another
+        # host's, with that host's cookies) down this connection to the first server, unchecked and unlogged.
+        keep = [l for l in lines if l and l.split(':', 1)[0].strip().lower() not in hop]
+        uw.write(('\r\n'.join([f'{parts[0]} {path} {parts[2]}', *keep, 'Connection: close']) + '\r\n\r\n')
+                 .encode('latin-1'))
+        left = int(fields.get('content-length', '0') or 0)
+        while left > 0:
+            data = await r.read(min(left, 65536))
+            if not data:
+                break
+            uw.write(data)
+            left -= len(data)
+        await uw.drain()
+        try:
+            rhead = await asyncio.wait_for(ur.readuntil(b'\r\n\r\n'), 60)
+        except asyncio.IncompleteReadError as e:
+            rhead = e.partial
+        if not rhead.strip():
+            return                           # (no answer: the connection just closes)
+        rl = rhead.decode('latin-1').split('\r\n')
+        out = [rl[0], *(l for l in rl[1:] if l and l.split(':', 1)[0].strip().lower() not in hop),
+               'Connection: close', 'Proxy-Connection: close']
+        w.write(('\r\n'.join(out) + '\r\n\r\n').encode('latin-1'))
+        await self._pipe(ur, w)              # the response to its end; the client's further bytes are never read
+
     async def _handle(self, r, w):
-        target = '?'
+        target, logged = '?', []
         try:
             try:
                 head = await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 30)
             except asyncio.IncompleteReadError:
                 return                       # closed without a request (the readiness probe)
             parts = head.split(b'\r\n', 1)[0].decode('latin-1').split()
+            if self.web and len(parts) == 3:
+                target = parts[1][:200]
+                await self._web(head, parts, r, w, logged)
+                return
             if len(parts) != 3 or parts[0] != 'CONNECT':
                 self.log(' '.join(parts[:2]), 'refused: HTTPS only (CONNECT to port 443)')
                 w.write(b'HTTP/1.1 405 CONNECT only\r\n\r\n')
@@ -335,6 +455,8 @@ class Proxy:
             await w.drain()
             await asyncio.gather(self._pipe(r, uw), self._pipe(ur, w))
         except Exception as e:
+            if logged:
+                return
             self.log(target, f'error: {type(e).__name__}')
             try:
                 w.write(b'HTTP/1.1 502 Bad gateway\r\n\r\n')
@@ -457,9 +579,9 @@ class Supervisor:
                 lim = 'rlimit'
         self.limits['enforced'] = lim
         sock = None
-        if self.box['hosts']:
+        if self.box['hosts'] or self.box.get('web'):
             sock = self.job / 'proxy.sock'
-            self.proxy = Proxy(sock, self.box['hosts'], self.job / 'connections.jsonl')
+            self.proxy = Proxy(sock, self.box['hosts'], self.job / 'connections.jsonl', web=bool(self.box.get('web')))
             self.proxy.start()
         argv = bwrap_argv(self.box, self.command, sock)
         if lim == 'systemd':
@@ -471,7 +593,8 @@ class Supervisor:
 
     def child(self):
         """In the forked child, before exec: the rlimit fallback (no user systemd). RLIMIT_AS bounds the address
-        space (an allocation past it fails rather than being killed); RLIMIT_NPROC counts the whole account's
+        space (an allocation past it fails rather than being killed), except the browser's: Chrome reserves far more
+        address space than it uses and does not start under 4 GB of it. RLIMIT_NPROC counts the whole account's
         threads, so the cap is added to what the account runs now; nice stands in for the CPU share."""
         if self.limits['enforced'] != 'rlimit':
             return
@@ -481,7 +604,8 @@ class Supervisor:
             hard = resource.getrlimit(which)[1]
             n = n if hard == resource.RLIM_INFINITY else min(n, hard)
             resource.setrlimit(which, (n, n))
-        lower(resource.RLIMIT_AS, self.limits['memory_mb'] << 20)
+        if not self.box.get('web'):
+            lower(resource.RLIMIT_AS, self.limits['memory_mb'] << 20)
         uid = os.getuid()
         mine = 0
         for d in os.listdir('/proc'):
@@ -564,7 +688,7 @@ def view(job, state, consume=True):
         limits['enforced'] = state['enforced']
     out = dict(box=box['box'], folder=box['folder'] or None, hosts=box['hosts'], limits=limits,
                limit_hit=state.get('limit_hit'))
-    if box['hosts']:
+    if box['hosts'] or box.get('web'):
         new = new_connections(job, consume)
         out['connections'] = new[:CONNECTIONS_MAX]
         if len(new) > CONNECTIONS_MAX:
@@ -651,6 +775,11 @@ def end(home, gid, store=None):
             store.event('sandbox_connections', dict(session=job.name, connections=late), gid)
     d = box_dir(home, gid)
     if d.is_dir():
+        from .browser import keep
+        try:
+            keep(home, gid)             # (what the browser downloaded outlives the box, in the goal's outputs)
+        except Exception:
+            pass                        # (never a reason to keep the box, nor to raise out of a goal's end)
         _rmtree(d)
     return not d.exists()
 

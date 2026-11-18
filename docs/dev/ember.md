@@ -49,7 +49,8 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
 | `advisor.py` | the advisor (a stronger model the agent consults) and the eyes (`Eyes`: one vision call per image a brain without vision reads, its description returned as the read's result); each its own daily ledger |
 | `judge.py`, `planning.py` | the finish judge (met / not yet / wait; it never declares a goal impossible), plan-first goals |
 | `terminal.py`, `files.py`, `web.py`, `mcp.py` | persistent PTY jobs, read (text, and images by their headers: `model.py` sends them) / search / edit / write (search: ripgrep only narrows the files, and only for a plain literal with `rg -F`; the stdlib matches, so both give one result), the web tools, MCP servers |
-| `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
+| `sandbox.py` | the `sandbox` tool: a terminal job inside a bubblewrap box (what it sees, the allowlist proxy (and its web mode, the browser's) and the bridge inside it, the limits and which one hit, the goal's box folder and its removal) |
+| `browser.py` | the `browser` tool: Chrome in the goal's box as a box job (`request.json` `browser`; the box proxy in its web mode, Chrome's install folder bound read-only, no time limit, no address-space rlimit), its `Driver` thread in the worker on the DevTools pipe (fd 3 / 4: requests by id, a reader thread for every event: console, dialogs, new tabs, loads), the actions handed over through the job's `control/` and `ack/` files by action id, the accessibility-tree snapshot and its refs, the password refusal, screenshots in `outputs/GOAL/` and the downloads copied there at goal end (`keep`, from `sandbox.end`), and finding a Chrome that is not a snap (the tool is hidden without one). Every connection rides on the tool_result event's `panel` field, not in the model's result |
 | `memory.py`, `freetime.py`, `agenda.py` | notes, the index and its archive, STATE.md and history search; free time and dreams; report / budget / schedule |
 | `housemate.py`, `leases.py`, `mail.py` | waiting without tokens, machine facts, GPU / memory leases, peer mail |
 | `btw.py`, `diff.py`, `export.py`, `outputs.py` | `/btw`, `/diff`, `/export`, spilling big outputs to files |
@@ -109,6 +110,12 @@ python -I tools/ember_demo.py            # the chat on a scripted model in a scr
   `/box` refused, no network without hosts, an unlisted host refused, no GPU devices, no user namespace inside, each
   limit killing and naming itself, an unreadable folder the box left removed without stopping the loop, the capped
   connection log); it skips, saying why, where bubblewrap cannot make user namespaces.
+- `tests/ember/test_resident.py` `Browser` (and the `test_browser_*` runtime tests): real Chrome in a box against
+  local fixture sites (`site()`), no other network: open, snapshot, type, select, click; the password refusal; a local
+  port reached only once named; the box, the profile and Chrome's process tree gone at goal end; only the fixture in
+  the connection log (Chrome's own traffic off). They skip, saying why, with no usable Chrome or under an
+  address-space limit (`ulimit -v`): Chrome does not start under 4 GB of address space, so bound them with a memory
+  cgroup instead (`systemd-run --user --scope -p MemoryMax=4G`).
 - `tests/ember/test_resident.py`: the resident against an in-process OpenAI-compatible fixture (`Endpoint`, scripted
   replies; its judge says met unless a test queues a verdict). Most behaviour tests live here: add one per fix, named
   for the behaviour.
