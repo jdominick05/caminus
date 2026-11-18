@@ -154,8 +154,12 @@ caminus ember agent provider resident add anthropic --kind anthropic --endpoint 
   every request says it is Ember (`ember/VERSION`), and a refusal from the plan (a usage limit: 429, or any other 4xx)
   stops the goal with its words instead of retrying. Free time stays off the plan: it runs on your fallback brain when
   that is not a plan, else rests and says so; `caminus ember agent heartbeat NAME --on-plan yes` lets it use the plan.
+  On the plan, free time's daily dollar allowance (`--budget-usd`) does not limit it: a turn inside the Go allowance
+  costs $0, so only the stretch's time and steps bound how much of the allowance it uses.
   Each reply says what it cost: $0 inside the Go allowance, dollars from your balance past it (with Extra Usage on).
-  The daily cap counts those dollars; `relay status` shows the allowance used beside them. A reply cut before its cost
+  The daily cap counts those dollars (a charge that is not a finite amount of at least $0, a $0 billed to anything
+  but the Go allowance or a free model, or one sent before the reply ended is booked at the list price instead);
+  `relay status` shows the allowance used beside them. A reply cut before its cost
   arrived is booked at the list price times any peak-hour multiplier in force (DeepSeek costs twice as much on weekday
   peak hours), so an estimate errs high.
 - **Changing a relay.** `relay install` rewrites the service from the options you give it and restarts it (today's
@@ -278,7 +282,7 @@ made before that keeps running at medium until you pick a level.
 | DeepSeek-V4.1-Flash | the provider's | 1.0 / top_p 1.0 | the listed maximum, at most 64K |
 | Muse Ember (Meta), Muse Wonder | max (Meta's default); they have minimal, low, medium, high, xhigh and max, and always reason, so none runs as minimal | none sent (Meta's defaults) | 64K (Muse Ember lists 524K; Muse Wonder lists no maximum, and its reasoning counts inside the limit) |
 | Muse Spark | high (Meta's default); levels as above | none sent | 64K (Meta lists no maximum) |
-| OpenCode Go models | the model's own; each has the levels the plan's list names (DeepSeek V4.1 Flash low, high, max; Qwen3.8 low, medium, xhigh), each level as the nearest; a model that lists none has no effort control | its card's where Ember knows the model, else none | the listed maximum, at most 64K |
+| OpenCode Go models | on Chat Completions the model's own, on Messages medium (Ember's default there); each has the levels the plan's list names (DeepSeek V4.1 Flash low, high, max; Qwen3.8 low, medium, xhigh), each level as the nearest; a model that lists none has no effort control | its card's where Ember knows the model, else none | the listed maximum, at most 64K |
 | Any other model | the provider's (or the server's) | the provider's (or the server's) | local: 64K; paid: the listed maximum up to 64K, else 4K |
 
 A side call (the judge's check of a finish) runs with thinking off where the model can turn it off, else at its lowest

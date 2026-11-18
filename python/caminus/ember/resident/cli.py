@@ -171,7 +171,9 @@ def model_ops(a,home):
                 raise ValueError('name the provider: letters, digits, - and _')
             if a.action=='add':
                 if not a.kind or not a.endpoint:raise ValueError('provider add NAME --kind KIND --endpoint URL')
-                provs[a.provider]=dict(kind=a.kind,endpoint=a.endpoint.rstrip('/'),**(dict(relay=True) if a.relay else {}))
+                # (an OpenCode plan bills each call: it is marked so with or without --relay)
+                relay=a.relay or a.kind in catalog.OPENCODE
+                provs[a.provider]=dict(kind=a.kind,endpoint=a.endpoint.rstrip('/'),**(dict(relay=True) if relay else {}))
             elif provs.pop(a.provider,None) is None:
                 raise ValueError('no provider named '+a.provider)
             if provs:cfg['providers']=provs
@@ -830,7 +832,7 @@ def main(argv=None,stdin=None):
                     note=(f"today's free-time allowance is spent (${spent:.2f} of ${budget:.2f}): it starts tomorrow, or "
                           f"raise it: caminus ember agent heartbeat {a.name} --budget-usd N")
                 from .freetime import plan_note
-                note=plan_note(dict(cfg,name=a.name)) or note
+                note=plan_note(dict(cfg,name=a.name),spent) or note
                 emit(dict(free_time='asked',note=note,spent_today_usd=round(spent,4),budget_usd=budget),a.json)
                 return 0
             if a.state in ('on','off'):ft['enabled']=a.state=='on'
@@ -850,7 +852,7 @@ def main(argv=None,stdin=None):
             from .freetime import plan_note
             emit(dict(free_time=settings(cfg),spent_today_usd=today.get('usd',0.0),messages_today=today.get('messages',0),
                       last_start=state.get('last_start'),last_end=state.get('last_end'),last_dream=state.get('last_dream'),
-                      **({'note':n} if (n:=plan_note(dict(cfg,name=a.name))) else {})),a.json)
+                      **({'note':n} if (n:=plan_note(dict(cfg,name=a.name),today.get('usd',0.0))) else {})),a.json)
             return 0
         if a.op=='status':
             heartbeat=json.loads((home/'heartbeat.json').read_text()) if (home/'heartbeat.json').exists() else {}

@@ -61,7 +61,7 @@ import threading
 import time
 
 from .resident.files import IMAGE_HEAD, IMAGE_MAX_SIDE, image_info
-from .resident.catalog import OPENCODE_PATHS, opencode_multiplier, opencode_offered, opencode_row
+from .resident.catalog import OPENCODE_PATHS, opencode_charge, opencode_multiplier, opencode_offered, opencode_row
 from .resident.model import (FALLBACK_BETA, FALLBACK_MODELS, META_PRICES, OPENCODE_ANTHROPIC_VERSION, PRICES, USER_AGENT,
                              flat_row, image_tokens, row_cost)
 
@@ -496,17 +496,20 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     client_gone = True
                 usage, served, stop, category, fallback, errtext = {}, model, None, None, False, ''
                 rid = up.getheader('request-id') or up.getheader('x-request-id') or up.getheader('x-opencode-log-id')
+                cut, ended = None, False      # cut: an upstream read error after the headers (its name); ended below
                 if 'text/event-stream' in (up.getheader('Content-Type') or ''):
-                    watched, ended = threading.Event(), False   # ended: the reply's last event came
+                    watched = threading.Event()   # ended: the reply's last event came
                     gone = self.watch_client(upsock, watched)
                     while not client_gone:
                         try:
                             line = up.readline()
-                        except (OSError, ValueError, http.client.HTTPException):
-                            # (a chunked upstream shut mid-chunk raises IncompleteRead, an HTTPException: the hang-up is
-                            #  still metered, as for a plain socket error)
+                        except (OSError, ValueError, http.client.HTTPException) as e:
+                            # an upstream read error once the headers went out is the end of the stream (a chunked
+                            # stream shut mid-chunk raises IncompleteRead, an HTTPException; a reset or the read timeout
+                            # an OSError): it is booked below like any cut reply, an estimate where no usage came.
+                            # Raising here skipped the ledger, though upstream billed what it had sent
                             if not gone.is_set():
-                                raise
+                                cut = type(e).__name__
                             line = b''
                         if not line:
                             # (a client that closes right after the last event is not a hang-up)
@@ -557,7 +560,10 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                             streamed += sum(len(d.get(k) or '') for k in ('text', 'thinking', 'partial_json'))
                     watched.set()
                 else:
-                    data = up.read()
+                    try:
+                        data = up.read()
+                    except (OSError, http.client.HTTPException) as e:
+                        data, cut = getattr(e, 'partial', b'') or b'', type(e).__name__   # (booked as a cut reply)
                     try:
                         self.wfile.write(data)
                     except OSError:
@@ -577,8 +583,11 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     ' rid=%s' % rid if (rid and (errtext or stop == 'refusal' or fallback or spec.get('session'))) else ''))
                 if client_gone:
                     extra += ' CLIENT-GONE'
-                # (an OpenCode Messages stream that upstream cut is estimated the same way: nothing else says its output)
-                if (client_gone or spec.get('session')) and up.status == 200:
+                if cut:
+                    extra += ' UPSTREAM-CUT (%s)' % cut
+                # (a Messages stream that upstream cut, or any OpenCode one that ended early, is estimated the same way:
+                #  nothing else says its output)
+                if (client_gone or cut or spec.get('session')) and up.status == 200:
                     if anth and not final and 'text/event-stream' in (up.getheader('Content-Type') or ''):
                         if not usage:          # gone before message_start: the prompt was still read
                             usage = {'input_tokens': prompt_tokens(body, provider)}
@@ -600,9 +609,16 @@ def make_handler(provider, key, ledger, models, max_tokens, log, prices=None, co
                     # an estimate errs high at the price's peak-hour multiplier in force (OpenCode lists them; 1 else)
                     mult = prices.multiplier(model) if hasattr(prices, 'multiplier') else 1.0
                     plan = usage.get('opencode') if spec.get('session') and isinstance(usage.get('opencode'), dict) else None
-                    charged = usage.get('cost') if spec.get('session') else None
+                    # the reply's own charge (catalog.opencode_charge: finite, at least 0, a $0 only from the Go
+                    # allowance or a free model), and only from a reply that ended: a stream's final usage event
+                    charged = opencode_charge(usage) if spec.get('session') else None
                     streamed_reply = 'text/event-stream' in (up.getheader('Content-Type') or '')
-                    if isinstance(charged, (int, float)) and not isinstance(charged, bool) and (final or not anth or not streamed_reply):
+                    finished = (final if anth else ended) if streamed_reply else not cut
+                    if spec.get('session') and 'cost' in usage and (charged is None or not finished):
+                        extra += ' (charge %r %s: list estimate)' % (
+                            usage.get('cost'), 'refused' if charged is None else 'before the reply ended')
+                        charged = None
+                    if charged is not None:
                         # what the reply says it charged: 0 inside a Go allowance, dollars from the balance past it
                         usd = float(charged)
                         if plan:

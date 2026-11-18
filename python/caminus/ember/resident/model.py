@@ -167,9 +167,9 @@ def price(model, usage, served=None):
     long-prompt tier, comes before the catalog's flat copy of its first tier.
     A reply that says what it charged (an OpenCode plan's usage.cost beside usage.opencode: 0 inside a Go allowance,
     dollars from the balance past it) costs that, whatever the price table says."""
-    charged = (usage or {}).get('cost')
-    if isinstance((usage or {}).get('opencode'), dict) and isinstance(charged, (int, float)) and not isinstance(charged, bool):
-        return float(charged)
+    charged = catalog.opencode_charge(usage)
+    if charged is not None:
+        return charged
     row = price_row(model)
     if row is None:
         return None
@@ -194,6 +194,13 @@ def row_cost(row, usage):
     rate = high if fresh + read + wrote > line else low
     return (max(0, fresh) * rate[0] + out * rate[1] + read * rate[2] + wrote * rate[3]) / 1e6
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+def is_remote(config):
+    """Whether a brain bills each call (Model.remote: its retries are bounded): an endpoint off this machine, one
+    marked as the owner's key relay, or an OpenCode plan (its relay listens on loopback, --relay given or not)."""
+    host = urllib.parse.urlsplit((config.get('endpoint') or '').rstrip('/')).hostname
+    return host not in LOOPBACK or bool(config.get('relay')) or config.get('provider_kind') in catalog.OPENCODE
 
 # Images (files.read): a tool message names its image (store.action_result; a user message can too: the finish judge's),
 # and each request sends the file itself, so the store keeps no bytes and a brain switched mid-goal gets what it can
@@ -290,7 +297,7 @@ class Model:
         # A remote provider bills each call: the runtime bounds its retries (a local server is waited for).
         # A paid provider reached through the owner's key relay listens on loopback but bills like a remote one.
         self.direct = parsed.hostname not in LOOPBACK
-        self.remote = self.direct or bool(config.get('relay'))
+        self.remote = is_remote(config)
         if self.api == 'anthropic' and config.get('context') is None:
             raise ValueError('the anthropic api needs an explicit context window (--context)')
         self.context, self._context_at = None, 0.0   # the window context_size resolved, and when

@@ -82,7 +82,8 @@ caminus ember relay (systemd --user) ◀── HTTP ───   the brain calls 
   (`x-opencode-session`: a goal's own, random, kept in its `session` column; a side call gets a fresh one) and
   `model.USER_AGENT`; the relay refuses a request without the id before it goes upstream; a 4xx from the plan stops
   the goal, never a retry loop (`runtime`); background work (free time) stays off it unless the owner opts in
-  (`free_time.on_plan`). A new background caller asks `brain.Brains.plan_barred` too.
+  (`free_time.on_plan`): `brain.free_choice` is the one rule, for the daemon and for the owner's status alike. A new
+  background caller asks it too.
 - No GPU in any env test; the env suites are CPU only.
 - A speed shown for a local Caminus brain is the engine's own: the reply's `timings` (`model.engine_speed`; the brain is
   Caminus when its `/props` names the engine, `catalog.caminus_props`) and, while a reply streams, `/caminus/status`

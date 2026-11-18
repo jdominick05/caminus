@@ -188,10 +188,11 @@ def opencode_protocol(m):
 
 def opencode_offered(m):
     """Whether Ember offers (and the relay allows) a listed OpenCode model: a chat model that calls tools, reached
-    through an API Ember speaks, whose prompts train no model (go.training: the Contributor models, free ones too)."""
+    through an API Ember speaks, whose prompts the list says train no model (go.training false: a row that does not
+    say is left out with the Contributor models, free ones too)."""
     if not isinstance(m, dict) or not isinstance(m.get('id'), str) or m.get('type') != 'chat':
         return False
-    if (m.get('go') or {}).get('training') or 'contributor' in m['id']:
+    if (m.get('go') or {}).get('training') is not False or 'contributor' in m['id']:
         return False
     return bool(((m.get('capabilities') or {}).get('tools') or {}).get('supported')) and opencode_protocol(m) is not None
 
@@ -269,6 +270,25 @@ def opencode_multiplier(m, now=None):
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
     return max(factors)
+
+
+# the billing sources whose $0 is real: the Go allowance (each plan's) and a free model; any other $0 is suspect
+OPENCODE_FREE_SOURCES = ('go', 'go-plus', 'go-teams', 'free')
+
+
+def opencode_charge(usage):
+    """What an OpenCode reply says it charged (usage.cost beside usage.opencode), when it can be trusted: a finite
+    amount of at least 0, and 0 only from the Go allowance or a free model; else None, and the caller books the
+    list-price estimate (the relay's cap and the agent's meter, model.price, use this one rule)."""
+    import math
+    if not isinstance(usage, dict) or not isinstance(usage.get('opencode'), dict):
+        return None
+    cost = usage.get('cost')
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+        return None
+    if cost == 0 and usage['opencode'].get('billing_source') not in OPENCODE_FREE_SOURCES:
+        return None
+    return float(cost)
 
 
 def opencode_entries(data, provider):

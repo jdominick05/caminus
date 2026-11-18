@@ -71,15 +71,19 @@ DREAM = '''Night: a dream pass. Nothing is asked of you tonight except to consol
 Read your journal entries since the last dream ({journal}) and your notes. Merge what you learned into your notes and keep them short, link ideas that belong together, and drop what no longer matters. Then write a short dream entry in {journal}: what the day meant, and what you want to explore next. Start no new projects tonight. The free-time house rules apply. Call finish with one line when you are done.'''
 
 
-def plan_note(config):
-    """PLAN_REST for a resident whose free time has no brain but an OpenCode plan it may not use, by its config (the
-    owner's commands: heartbeat status / now), else ''."""
-    from .catalog import OPENCODE
+def plan_note(config, spent_today=0.0):
+    """PLAN_REST when free time has no brain it may use (brain.free_choice, the daemon's own rule), by the resident's
+    config and today's free-time spend (the owner's commands: heartbeat status / now), else ''."""
+    from .brain import free_choice
+    from .model import remember_prices
     fb = config.get('fallback') if isinstance(config.get('fallback'), dict) else {}
-    if settings(config)['on_plan'] or config.get('provider_kind') not in OPENCODE:
-        return ''                     # (a plan fallback serves only while the primary is down: Brains.free_brain)
-    if fb.get('model') and fb.get('endpoint') and fb.get('provider_kind') not in OPENCODE:
-        return ''                     # the fallback takes free time
+    fb = fb if fb.get('model') and fb.get('endpoint') else None
+    for cfg in (config, fb):
+        if cfg and cfg.get('prices'):
+            remember_prices(cfg.get('model'), cfg['prices'])   # (as the runtime does: a catalog model's price)
+    s = settings(config)
+    if free_choice(config, fb, bool(s['on_plan']), float(spent_today) < float(s['budget_usd'])) is not None:
+        return ''
     return PLAN_REST.format(name=config.get('name') or 'NAME')
 
 
@@ -171,7 +175,7 @@ class FreeTime:
         if free and self.rt.brains.free_brain() is None:
             # the brain became an OpenCode plan mid-stretch (/model), and free time stays off it
             for g in free:
-                self._end(g['id'], PLAN_REST.format(name=self.rt.config.get('name') or 'NAME'))
+                self.end_off_plan(g['id'])
             return None
         cfg = self.cfg
         # `heartbeat now` (the panel's /freetime): a stretch at the next pass, past the rest interval and even with
@@ -307,6 +311,10 @@ class FreeTime:
             out.append('Note: %d projects are active (%s). Finish or park some before starting another.'
                        % (len(active), ', '.join(active)))
         return out
+
+    def end_off_plan(self, gid):
+        """end a stretch that no brain may serve now (brain.free_choice: the plan is off limits to free time)"""
+        self._end(gid, PLAN_REST.format(name=self.rt.config.get('name') or 'NAME'))
 
     def _end(self, gid, why):
         with self.rt.store.transaction():

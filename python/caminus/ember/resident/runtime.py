@@ -2257,7 +2257,10 @@ class Runtime:
                     return self._watchdog(gid, 'token budget %d over %d' % (used, self.token_budget),
                                           dict(tokens=used, budget=self.token_budget))
             # the brain for this turn: the primary while it answers, the fallback while it is down (brain.py)
-            self.model = self.brains.choose(gid)
+            model = self.brains.choose(gid)
+            if model is None:
+                return True                  # a free-time stretch no brain may serve: brains.choose ended it
+            self.model = model
             messages, compacted = self._compact(gid,messages)
             with self.store.transaction():
                 if self.store.goal(gid)['state']=='cancelled':return True

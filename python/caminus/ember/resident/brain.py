@@ -24,10 +24,28 @@ import json
 import time
 
 from . import catalog
-from .model import Model, ModelContextError, ModelTruncated, price
+from .model import Model, ModelContextError, ModelTruncated, is_remote, price
 from .store import atomic_json
 
 DEFAULTS = dict(budget_usd=1.0, down_seconds=60)
+
+
+def free_choice(primary, fallback, on_plan, free_left, primary_down=False):
+    """The one rule for the brain a free-time turn may use: 'primary', 'fallback' or None. The daemon (Brains) and the
+    owner's status (freetime.plan_note) both ask it. primary / fallback: the brains' configs (None: no such brain);
+    on_plan: free_time.on_plan; free_left: today's free-time allowance holds. Never an OpenCode plan unless on_plan;
+    the fallback also needs a known price when it bills, and the allowance. The primary comes first unless it is down
+    (then it is still named when the fallback may not serve: the turn waits for it)."""
+    def ok(cfg, fallback_side):
+        if cfg is None or (cfg.get('provider_kind') in catalog.OPENCODE and not on_plan):
+            return False
+        if not fallback_side:
+            return True
+        if price(cfg.get('model'), {}) is None and is_remote(cfg):
+            return False                    # an unpriced paid fallback cannot be limited
+        return free_left
+    order = (('fallback', fallback), ('primary', primary)) if primary_down else (('primary', primary), ('fallback', fallback))
+    return next((name for name, cfg in order if ok(cfg, name == 'fallback')), None)
 
 
 class Brains:
@@ -59,12 +77,14 @@ class Brains:
         return float(self._state().get(datetime.date.today().isoformat(), {}).get('usd', 0.0))
 
     def _allowed(self, gid):
-        if self.fallback is None or self.plan_barred(self.fallback, gid):
+        """whether the fallback may take this goal's turn: a free-time turn by free_choice (never a plan it may not use);
+        a work turn while the fallback is priced (or free to run) and its daily budget holds"""
+        if self.fallback is None:
             return False
+        if self.rt.free.is_free(gid):
+            return self._free_choice(primary=None) == 'fallback'
         if price(self.fallback.config['model'], {}) is None and getattr(self.fallback, 'remote', False):
             return False                    # an unpriced remote fallback cannot be limited
-        if self.rt.free.is_free(gid):
-            return self.rt.free.spent_today() < float(self.rt.free.cfg['budget_usd'])
         return self.spent_today() < float(self.cfg['budget_usd'])
 
     def account(self, gid):
@@ -94,33 +114,36 @@ class Brains:
 
     # ---- OpenCode plans ------------------------------------------------------------------------------------
 
-    def plan_barred(self, model, gid=None):
-        """Whether a free-time turn (of goal gid, or any when None) may not run on this model: an OpenCode plan
-        while free_time.on_plan is off."""
-        if gid is not None and not self.rt.free.is_free(gid):
-            return False
-        kind = (getattr(model, 'config', None) or {}).get('provider_kind')
-        return kind in catalog.OPENCODE and not self.rt.free.cfg.get('on_plan')
+    def _free_choice(self, primary_down=False, primary=True):
+        """free_choice for this resident now: 'primary', 'fallback' or None (primary=None: the fallback alone)"""
+        if primary is True:
+            primary = getattr(self.primary if self.fallback is not None else self.rt.model, 'config', None) or {}
+        ft = self.rt.free.cfg
+        return free_choice(primary, getattr(self.fallback, 'config', None) if self.fallback is not None else None,
+                           bool(ft.get('on_plan')), self.rt.free.spent_today() < float(ft['budget_usd']), primary_down)
 
     def free_brain(self):
-        """The brain a free-time stretch would run on now: the usual one, or the other when the usual one is a plan it
-        may not use; None when neither may serve it (free time then rests)."""
+        """The brain a free-time stretch would run on now (free_choice), or None: free time then rests."""
+        name = self._free_choice(primary_down=self.fallback is not None and time.time() < self.down_until)
         if self.fallback is None:
-            return None if self.plan_barred(self.rt.model) else self.rt.model
-        usual = self.fallback if time.time() < self.down_until else self.primary
-        other = self.primary if usual is self.fallback else self.fallback
-        for m in (usual, other):
-            if not self.plan_barred(m) and (m is self.primary or self.rt.free.spent_today() < float(self.rt.free.cfg['budget_usd'])):
-                return m
-        return None
+            return self.rt.model if name else None
+        return {'primary': self.primary, 'fallback': self.fallback}.get(name)
 
     def choose(self, gid):
-        """the model for this goal's next turn"""
-        if self.fallback is None:
+        """the model for this goal's next turn; None for a free-time stretch no brain may serve (free_choice: it is
+        ended, and the turn is not run)"""
+        if self.rt.free.is_free(gid):
+            name = self._free_choice(primary_down=self.fallback is not None and not self._primary_up())
+            if name is None:
+                self.rt.free.end_off_plan(gid)
+                return None
+            if self.fallback is None:
+                return self.rt.model
+            use = name
+        elif self.fallback is None:
             return self.rt.model            # one brain: whatever the runtime holds, untouched
-        use = 'primary' if self._primary_up() or not self._allowed(gid) else 'fallback'
-        if use == 'primary' and self.plan_barred(self.primary, gid) and self._allowed(gid):
-            use = 'fallback'                # free time off an OpenCode plan, onto the other brain
+        else:
+            use = 'primary' if self._primary_up() or not self._allowed(gid) else 'fallback'
         if self.last.get(gid) != use:
             if gid in self.last or use == 'fallback':
                 model = (self.primary if use == 'primary' else self.fallback).config.get('model')

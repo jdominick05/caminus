@@ -5046,10 +5046,11 @@ for line in sys.stdin:
                 for d in reply:
                     chunk(dict(choices=[dict(index=0,delta=d,finish_reason=None)]))
                 if usage is not None:
+                    usage=dict(usage);no_done=usage.pop('_no_done',False)   # (_no_done: the usage chunk, then a cut)
                     finish='tool_calls' if any('tool_calls' in d for d in reply) else 'stop'
                     with_usage=(body.get('stream_options') or {}).get('include_usage')
                     chunk(dict(choices=[dict(index=0,delta={},finish_reason=finish)],**(dict(usage=usage) if with_usage else {})))
-                    s.wfile.write(b'data: [DONE]\n\n')
+                    if not no_done:s.wfile.write(b'data: [DONE]\n\n')
                 s.wfile.flush()
         srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),OC)
         threading.Thread(target=srv.serve_forever,daemon=True).start()
@@ -5076,6 +5077,8 @@ for line in sys.stdin:
         self.assertEqual(got['gpt-6-luna']['prices']['cache_write'],0.25,'a write rate per lifetime: the highest')
         self.assertEqual((mm['efforts'],qw['efforts'],mm['thinking']),([],['low','medium','xhigh'],'toggle'))
         self.assertEqual(got['beam-free']['prices']['input'],0.0)
+        unsaid=copy.deepcopy(next(r for r in self.OPENCODE_GO['data'] if r['id']=='beam-free'));del unsaid['go']
+        self.assertFalse(catalog.opencode_offered(unsaid),'a row that does not say its prompts train nothing is left out')
         # its levels: Qwen3.8 runs the scale as its own three; MiniMax M3 lists none, so it has no effort control
         qcfg=dict(provider_kind='opencode-go',api='anthropic',model='qwen3.8-flash',efforts=qw['efforts'])
         self.assertEqual([eff.runs_as(qcfg,l) for l in ('low','medium','high','max')],['low','medium','xhigh','xhigh'])
@@ -5314,6 +5317,182 @@ for line in sys.stdin:
         self.assertNotEqual(h1['x-opencode-session'],h2['x-opencode-session']);self.assertEqual(h3['x-opencode-session'],'x'*32)
         self.assertEqual(h1['User-Agent'],'ember/'+caminus.__version__)
         self.assertNotIn('x-opencode-session',Model(dict(model='m',endpoint='http://127.0.0.1:9/v1')).headers())
+
+    def _raw_upstream(self, body, reset=False):
+        """An upstream on a raw socket that answers one request with chunked SSE headers and `body`, then stops: a
+        plain close (a chunked stream shut mid-chunk when body ends inside a chunk) or, reset, a TCP reset. Returns its
+        port."""
+        import socket, struct
+        srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1)
+        def serve():
+            c,_=srv.accept();c.recv(65536)
+            c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n'+body)
+            if reset:
+                time.sleep(0.2)
+                c.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
+            c.close();srv.close()
+        threading.Thread(target=serve,daemon=True).start()
+        return srv.getsockname()[1]
+
+    def test_a_stream_upstream_cuts_with_a_read_error_is_still_booked(self):
+        """Upstream billed what it sent before a read error (a chunked stream cut mid-chunk, a connection reset): the
+        relay ends the stream there and books it (an estimate, no usage having come), on every provider; it used to
+        raise past the ledger."""
+        import http.client, http.server, copy, urllib.request
+        from caminus.ember import relay
+        piece=b'data: {"choices":[{"index":0,"delta":{"content":"partial reply"}}]}\n\n'
+        listing=copy.deepcopy(self.OPENCODE_GO)
+        for provider,body,reset,prices,path,model in (
+                ('opencode-go',b'%x\r\n%s' % (len(piece)+40,piece),False,
+                 relay.ListPrices(lambda *a:None,lambda:listing,relay.opencode_rates),
+                 '/inference/go/openai/v1/chat/completions','glm-5.3-missing'),
+                ('deepinfra',b'%x\r\n%s\r\n' % (len(piece),piece),True,
+                 relay.ListPrices(lambda *a:None,lambda:dict(data=[dict(id='zai-org/GLM-5.2',metadata=dict(
+                     pricing=dict(input_tokens=0.6,output_tokens=2.2)))])),'/v1/openai/chat/completions','zai-org/GLM-5.2')):
+            model='deepseek-v4.1-flash' if provider=='opencode-go' else model
+            port=self._raw_upstream(body,reset)
+            log=[];ledger=relay.Ledger(self.home/('cut-%s.json' % provider),5.0)
+            handler=relay.make_handler(provider,'K',ledger,set(),4096,log.append,prices,
+                                       lambda:http.client.HTTPConnection('127.0.0.1',port,timeout=10))
+            srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+            threading.Thread(target=srv.serve_forever,daemon=True).start()
+            try:
+                req=urllib.request.Request('http://127.0.0.1:%d%s' % (srv.server_address[1],path),
+                    json.dumps(dict(model=model,stream=True,max_tokens=4096,messages=[dict(role='user',content='hi')])).encode(),
+                    {'Content-Type':'application/json','x-opencode-session':'a'*32})
+                try:
+                    with urllib.request.urlopen(req,timeout=10) as r:r.read()
+                except Exception:
+                    pass                                  # (the client sees a cut stream)
+                for _ in range(100):
+                    if ledger.day().get('requests'):break
+                    time.sleep(0.05)
+                self.assertEqual(ledger.day().get('requests'),1,(provider,log))
+                self.assertGreater(ledger.spent(),0,provider)
+                self.assertTrue(any('UPSTREAM-CUT' in l and 'NO-USAGE' in l for l in log),(provider,log))
+            finally:srv.shutdown()
+
+    def test_the_opencode_go_relay_books_the_list_price_for_a_charge_it_cannot_trust(self):
+        """A charge that is not a finite amount of at least 0 (NaN must never switch the cap off), a $0 billed to
+        something other than the Go allowance or a free model, and one on a stream that never ended are booked at the
+        list price (times the multiplier in force); the agent's meter follows the same rule."""
+        import copy, http.client, http.server, math
+        from caminus.ember import relay
+        from caminus.ember.resident import catalog
+        from caminus.ember.resident.model import Model, price, row_cost
+        listing=copy.deepcopy(self.OPENCODE_GO)
+        ds_row=next(r for r in listing['data'] if r['id']=='deepseek-v4.1-flash')
+        ds_row['cost']['multipliers']=[]
+        port,queue,seen,stop_oc=self._fake_opencode(listing)
+        log=[];ledger=relay.Ledger(self.home/'oc-trust.json',5.0)
+        handler=relay.make_handler('opencode-go','K',ledger,set(),65536,log.append,
+                                   relay.ListPrices(log.append,lambda:listing,relay.opencode_rates),
+                                   lambda:http.client.HTTPConnection('127.0.0.1',port,timeout=10))
+        srv=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+        threading.Thread(target=srv.serve_forever,daemon=True).start()
+        spec=dict(kind='opencode-go',endpoint='http://127.0.0.1:%d/inference/go' % srv.server_address[1])
+        try:
+            ds={e['id']:e for e in catalog.opencode_entries(listing,'oc')}['deepseek-v4.1-flash']
+            m=Model(dict(model=ds['id'],endpoint=catalog.transport(spec,ds)[0],relay=True,provider_kind='opencode-go',
+                         context=ds['context'],efforts=ds['efforts'],max_tokens=65536))
+            used=dict(prompt_tokens=301,completion_tokens=68,prompt_tokens_details=dict(cached_tokens=256))
+            listed=row_cost(catalog.opencode_row(ds_row),used)
+            for cost,source,why in ((float('nan'),'go','refused'),(-0.5,'balance','refused'),(0,'balance','refused')):
+                before=ledger.spent()
+                queue.append((dict(role='assistant',content='hi'),dict(used,cost=cost,opencode=dict(billing_source=source))))
+                m.complete([dict(role='user',content='hi')],session='s'*32)
+                self.assertTrue(math.isfinite(ledger.spent()),'a NaN never reaches the day\'s total (the cap holds)')
+                self.assertAlmostEqual(ledger.spent()-before,listed,places=6,msg=(cost,source))
+                self.assertTrue(any(why in l and 'list estimate' in l for l in log[-2:]),log[-2:])
+            from caminus.ember.resident.model import remember_prices
+            remember_prices(ds['id'],dict(input=0.15,output=0.6,cache_read=0.003))
+            for cost,source in ((float('nan'),'go'),(-1,'go'),(0,'balance')):
+                self.assertAlmostEqual(price(ds['id'],dict(used,cost=cost,opencode=dict(billing_source=source))),listed,places=12)
+            self.assertEqual(price(ds['id'],dict(used,cost=0,opencode=dict(billing_source='go-plus'))),0.0)
+            # a stream whose usage chunk came but whose end ([DONE]) never did: the charge is not taken
+            before=ledger.spent()
+            queue.append(([dict(role='assistant',content='par')],dict(used,cost=0,opencode=dict(billing_source='go'),_no_done=True)))
+            m.complete([dict(role='user',content='hi')],on_delta=lambda k,v:None,session='s'*32)
+            for _ in range(100):
+                if ledger.day()['requests']>=4:break
+                time.sleep(0.05)
+            self.assertAlmostEqual(ledger.spent()-before,listed,places=6)
+            self.assertTrue(any('before the reply ended' in l for l in log),log[-2:])
+        finally:
+            srv.shutdown();stop_oc()
+
+    def test_an_opencode_provider_is_billed_and_bounded_without_relay(self):
+        """An OpenCode plan bills each call whether or not provider add was given --relay: the provider is marked, the
+        transport counts as remote, and its retries stop at the limit."""
+        from caminus.ember.resident.model import Model, ModelError
+        out=self.cmd('provider',['add','opencode','--kind','opencode-go','--endpoint','http://127.0.0.1:8769/inference/go'])
+        self.assertTrue(out['providers']['opencode']['relay'])
+        m=Model(dict(model='deepseek-v4.1-flash',endpoint='http://127.0.0.1:8769/inference/go/openai/v1',
+                     provider_kind='opencode-go',context=100000))
+        self.assertTrue(m.remote)
+        rt=Runtime(self.home)
+        try:
+            rt.model=m;gid=rt.store.enqueue('x')
+            got=[rt._schedule_retry(gid,ModelError('down')) for _ in range(9)]
+            self.assertEqual(got[-2:],[8,None],'bounded, as any paid brain')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_free_time_never_lands_on_the_plan_when_the_fallback_may_not_serve(self):
+        """The plan is the brain and the fallback may not take free time (a paid model with no known price): the pulse
+        starts no stretch, choose() never hands a stretch the plan (it ends it), and the owner's status says so, from
+        the same rule (brain.free_choice)."""
+        class Plan:
+            opencode=True;remote=True
+            def __init__(self):self.config=dict(provider_kind='opencode-go',model='deepseek-v4.1-flash')
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):raise AssertionError('free time reached the plan')
+        conf=json.loads((self.home/'config.json').read_text())
+        conf.update(model='deepseek-v4.1-flash',provider_kind='opencode-go',prices=dict(input=0.15,output=0.6,cache_read=0.003),
+                    fallback=dict(model='some-unpriced-model',endpoint='https://api.example.com/v1'))
+        (self.home/'config.json').write_text(json.dumps(conf))
+        rt=self.free_runtime(model=Plan())
+        try:
+            self.assertIsNone(rt.brains.free_brain())
+            self.assertIsNone(rt.free.pulse())
+            gid=rt.store.enqueue('a stretch from before',kind='free')
+            self.assertIsNone(rt.brains.choose(gid))
+            self.assertTrue(rt.tick(gid) in (True,False,None))
+            g=rt.store.goal(gid)
+            self.assertEqual(g['state'],'cancelled');self.assertIn('stays off an OpenCode plan',g['error'])
+            work=rt.store.enqueue('work')
+            self.assertIs(rt.brains.choose(work),rt.brains.primary,'work runs on the plan')
+        finally:rt.mail.close();rt.store.close()
+        self.assertIn('--on-plan yes',self.cmd('heartbeat')['note'],'status and the daemon agree')
+        out=self.cmd('heartbeat',['now'])
+        self.assertIn('--on-plan yes',out['note'])
+
+    def test_eyes_on_an_opencode_provider_use_the_models_api_levels_and_a_fresh_session(self):
+        """The eyes on an OpenCode plan (the owner's explicit pick): the model's own API under the plan's root, none of
+        the levels it does not list, Ember's name and a session of its own per call."""
+        from caminus.ember.resident import files
+        conf=json.loads((self.home/'config.json').read_text())
+        conf['providers']=dict(opencode=dict(kind='opencode-go',endpoint='http://relay/opencode/inference/go',relay=True))
+        conf['eyes']=dict(provider='opencode',model='minimax-m3')
+        (self.home/'config.json').write_text(json.dumps(conf))
+        from caminus.ember.resident import catalog
+        (self.home/'models.json').write_text(json.dumps(dict(updated=time.time(),providers={},
+                                                             models=catalog.opencode_entries(self.OPENCODE_GO,'opencode'))))
+        (self.home/'shot.png').write_bytes(png(6,4))
+        rt=Runtime(self.home)
+        try:
+            rt.eyes_opener=wire=Wire(sse('A chart.'),sse('A chart again.'))
+            gid=rt.store.enqueue('Read the chart.')
+            got=rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            self.assertIn('chart',got['description'])
+            rt.eyes.see(gid,files.read(self.home,'shot.png'))
+            (u1,h1,b1),(u2,h2,b2)=wire.requests
+            self.assertEqual(u1,'http://relay/opencode/inference/go/anthropic/v1/messages')
+            h1={k.lower():v for k,v in h1.items()};h2={k.lower():v for k,v in h2.items()}
+            self.assertNotEqual(h1['x-opencode-session'],h2['x-opencode-session'],'a conversation of its own per call')
+            self.assertTrue(h1['user-agent'].startswith('ember/'));self.assertEqual(h1['anthropic-version'],'2023-06-01')
+            self.assertNotIn('output_config',b1,'MiniMax M3 lists no levels')
+        finally:rt.mail.close();rt.store.close()
 
     def test_model_puts_an_opencode_model_on_its_own_api(self):
         """/model on an OpenCode plan's model: its native API under the plan's root, its levels, window and output cap;
