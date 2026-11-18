@@ -35,7 +35,8 @@ python -I tools/release/vendor_gguf.py --check --src <a llama.cpp clone holding 
 python -I tools/release/vendor_mmq.py --check --src <an ignite-llama clone holding e4e3f8eda>   # --commit e4e3f8eda --label 842653396: the defaults
 ```
 
-tests/serve's `test_cancel_latency` is timing-sensitive; on a busy shared runner it is the likeliest flake.
+tests/serve's `test_cancel_latency` is timing-sensitive: it holds the 4th best of five cancels to 30 ms, so one cancel
+stalled by a busy shared runner passes; a failure means two of the five were over 30 ms (the message lists all five).
 
 ## kernels.yml: compile-only, weekly and on demand
 

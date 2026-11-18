@@ -158,8 +158,10 @@ is left named. `checkpoint` tars named paths before a destructive or
 milestone-crossing action and `rollback` puts them back.
 
 Before a graded goal completes, `finish` runs two checks. The **gate** is an
-optional shell command given to `define_done` (`gate`), run in the agent's home;
-a non-zero exit refuses the finish and its output becomes the next prompt. The
+optional shell command given to `define_done` (`gate`), run as a terminal command
+runs (in the agent's home, with the terminal's environment: `$WORKSPACE`, no model
+key); a non-zero exit refuses the finish and its output becomes the next prompt,
+naming any variable the gate uses that is not set there. The
 **judge** is a fresh model call with no tools that sees the goal, the done check,
 the human's steers and the recorded evidence, not the agent's reasoning, and
 answers met, not yet or wait. Not yet refuses the finish with what is missing;
@@ -205,8 +207,10 @@ at 38 % of its window down to 7.6 % (`paid_compact_threshold`,
 A plan-first goal (`send --plan`, `/plan TEXT`) explores before it changes
 anything: `write`, `edit`, `checkpoint`, `rollback` and `ask_root` are refused,
 and a terminal command runs only when every part of it is a read-only program
-(`ls`, `grep`, `git status`, ...; anything unclear counts as a change). The agent
-files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
+(`ls`, `grep`, `git status`, `sed -n '1,20p' FILE`, ...) with literal arguments:
+a glob, brace, `$` or escape outside quotes could expand to a file named like a
+flag, so it counts as a change, as does anything else unclear (`find . -name
+'*.py'` and `ls "$WORKSPACE"` stay read-only). The agent files its plan with `propose_plan` and waits (`waiting_plan`, no timeout) until
 `agent plan NAME GOAL approve|reject [--note TEXT]`.
 
 The emergency stop: `caminus ember stop-all [--reason TEXT]` (`/halt`) writes a

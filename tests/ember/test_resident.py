@@ -1507,6 +1507,44 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
             self.assertLess(time.time()-rt.progress[gid],5,'the idle clock starts over so the nudge can land')
         finally:rt.mail.close();rt.store.close()
 
+    def test_sed_n_and_other_reads_pass_the_read_only_classifier(self):
+        # a goal's first look, `sed -n '1,20p' file`, was refused before define_done and in plan mode as a change
+        from caminus.ember.resident import runtime as R
+        reads=("sed -n '1,20p' notes.txt","sed -n 5p notes.txt","sed -n -e 1p -e '$p' notes.txt","sed -n '/^b/,/^d/p' notes.txt",
+               "sed 3q notes.txt","sed -n '$=' notes.txt",'sed -n "2,3p" notes.txt',"sed -n l notes.txt","sed '/^#/d' notes.txt",
+               "sed -nE '2,+1p' notes.txt","cat notes.txt | sed -n 2p","sed -n --expression=1p -- notes.txt",
+               "awk '{print $1}' notes.txt","awk -F: '{print $1, $2}' notes.txt","awk 'NR==2' notes.txt",
+               "awk '/b/ {print $NF}' notes.txt","nl notes.txt","tac notes.txt","head -5 notes.txt | nl","rev notes.txt")
+        for cmd in reads:
+            self.assertTrue(R.read_only_command(cmd),cmd)
+        # they read and print, nothing else: run each in a folder and find it unchanged
+        d=self.home/('ro-'+uuid.uuid4().hex);d.mkdir()
+        (d/'notes.txt').write_text('a:1 x\nb:2 y\n#c:3 z\nd:4 w\ne:5 v\nf:6 u\n')
+        before=sorted((p.name,p.read_bytes()) for p in d.iterdir())
+        for cmd in reads:
+            r=subprocess.run(['bash','-c',cmd],cwd=d,capture_output=True,text=True,timeout=10)
+            self.assertEqual(r.returncode,0,cmd+': '+r.stderr);self.assertTrue(r.stdout,cmd)
+        self.assertEqual(sorted((p.name,p.read_bytes()) for p in d.iterdir()),before,'the folder is unchanged')
+        for cmd in ("sed -i 's/a/b/' f","sed -i.bak 1d f","sed --in-place 1d f","sed -ni 1p f","sed -s -i 1d f",
+                    "sed -n 'w out' f","sed -n '1w out' f","sed -n 'W out' f","sed -n '1p' f > out","sed -e 's/a/b/w x' f",
+                    "sed '1e date' f","sed e f","sed -f prog.sed f","sed -n \"$X\" f","sed -n $X f","sed -n 1p *",
+                    "sed -n 1p {-i,f}","sed -n '1p;w out' f","sed -n '1p;5p' f","sed -n 'r /etc/passwd' f",
+                    "sed --expression=1p --in-pl f","sed -n '1p' \\-i f",
+                    "awk '{system(\"rm x\")}' f","awk '{print > \"out\"}' f","awk '{print | \"sh\"}' f","awk -f prog.awk f",
+                    "awk -i inplace '{print}' f","awk '{getline; print}' f","awk -v x=1 '{print}' f",
+                    "awk \"{print \\$1}\" f","awk '{print $1}' *"):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        # the review: a glob outside quotes can expand to a file named like a flag for every program here, not only sed
+        # (a file named --pre=sh made `rg foo *` run every file through sh; -oout.txt made `sort *` write out.txt), and
+        # quotes can splice a flag the raw text hides
+        for cmd in ('rg foo *','sort *','find *','find . -name x *','xxd *','uniq *','tar -tf *','cat ./{a,b}','ls @(-i)',
+                    'sort !(x)','grep x ?','ls [-]*','ls $X','echo $HOME',"find . \"-delete\"","find . -del''ete",
+                    "rg --pr''e=sh foo .",'sort "-o" out in','ls \\*'):
+            self.assertFalse(R.read_only_command(cmd),cmd)
+        for cmd in ('find . -name "*.py"',"rg 'foo*' src",'ls "$WORKSPACE"','cat "${WORKSPACE}/a b"','ls -la ~/work',
+                    'sort -k2,2 -t, in'):
+            self.assertTrue(R.read_only_command(cmd),cmd)
+
     def test_a_handoff_with_private_text_is_never_posted(self):
         from caminus.ember.resident import github
         base=dict(action='comment',repo='jdominick05/caminus',number=5)
@@ -4303,6 +4341,34 @@ for line in sys.stdin:
         t=Terminal(self.home);sid=uuid.uuid4().hex
         out=t.call(sid,dict(command='printf "%s" "$WORKSPACE"',yield_ms=3000))
         self.assertEqual(out['output'],str(self.home))
+
+    def test_the_gate_runs_with_the_terminal_environment(self):
+        # a real gate `cd "$WORKSPACE" && adb devices | grep -q -w device && ...` exited 0 in the terminal and failed as
+        # the gate: the gate had the daemon's environment, with no $WORKSPACE (the agent then hard-coded the path)
+        from caminus.ember.resident import judge
+        (self.home/'sub').mkdir(exist_ok=True);(self.home/'sub'/'marker').write_text('x')
+        gate='cd "$WORKSPACE/sub" && test -f marker && test -z "$CAMINUS_AGENT_API_KEY"'
+        with unittest.mock.patch.dict(os.environ,{'CAMINUS_AGENT_API_KEY':'secret'}):
+            os.environ.pop('WORKSPACE',None)
+            t=Terminal(self.home);sid=uuid.uuid4().hex
+            out=t.call(sid,dict(command=gate+'; echo "rc=$?"',yield_ms=5000))
+            text=out['output']
+            for _ in range(50):
+                if not out['running']:break
+                out=t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=200));text+=out['output']
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertIn('rc=0',text,'the terminal passes')
+        self.assertTrue(ok,'the gate passes where the terminal does (no model key either): '+msg)
+        # a variable unset even there is named in the result, not left to fail silently; set and assigned ones are not
+        gate=('X_MINE=1; test -n "$X_MINE" && test -d "${WORKSPACE}" && awk \'{print $NF}\' /dev/null && '
+              'cd "$NOT_SET_FOR_GATE/sub"')
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop('NOT_SET_FOR_GATE',None)
+            ok,msg=judge.run_gate(str(self.home),gate,timeout=60)
+        self.assertFalse(ok,msg)
+        self.assertIn("$NOT_SET_FOR_GATE is not set in the gate's environment",msg)
+        self.assertIn('\nbash: line',msg,'errors still read bash: ..., as in the terminal');self.assertNotIn('/bin/bash:',msg)
+        for name in ('X_MINE','WORKSPACE','NF'):self.assertNotIn('$'+name+' is not set',msg)
 
     def test_the_mistral_catalog_keeps_chat_models_that_call_tools(self):
         from caminus.ember.resident import catalog

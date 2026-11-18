@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import time
+import shlex
 import subprocess
 import sys
 import uuid
@@ -53,7 +54,9 @@ READ_ONLY = frozenset(('ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd',
                        # cd only moves this shell; the rest only print what they read (a CTF's first look at a binary
                        # or an archive was refused as a change before the done check)
                        'cd', 'strings', 'xxd', 'od', 'hexdump', 'readelf', 'objdump', 'nm', 'sha256sum', 'sha1sum',
-                       'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath'))
+                       'md5sum', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath',
+                       # (their --help lists no flag that writes a file or runs a program)
+                       'nl', 'tac', 'rev', 'cmp', 'comm', 'paste', 'fold'))
 # Archive tools in their listing-only forms (any other form extracts or writes)
 LISTING = {'unzip': ('-l', '-v', '-Z', '-Z1'), '7z': ('l',), 'tar': ('-t', '-tf', '-tvf', '-tzf', '-tjf', '-tJf', 't', 'tf', 'tvf')}
 READ_ONLY_GIT = frozenset(('status', 'log', 'diff', 'show', 'rev-parse', 'blame', 'ls-files', 'shortlog', 'describe',
@@ -67,6 +70,86 @@ CHANGING = re.compile(r'>|\$\(|`|\btee\b|(^|\s)-(exec|execdir|ok|okdir|delete|fp
 # The flags of xxd and uniq that take a value: that value is not a file (xxd -l 64 f reads one file).
 VALUE_FLAGS = {'xxd': ('-l', '-s', '-c', '-g', '-o', '-n', '-len', '-seek', '-cols', '-groupsize', '-offset', '-name'),
                'uniq': ('-f', '-s', '-w')}
+
+
+# sed and awk read only in a narrow form, checked word by word (shlex) on an exact grammar; anything else is a change.
+# sed: these flags (-i / --in-place writes, -f reads a script that may write), each script one address (a line, $, a
+# step, /regex/, a range) and one command that only prints or stops: p = l q Q d (w, W, e, s///w, r ... are refused)
+SED_FLAGS = frozenset(('-n', '--quiet', '--silent', '-E', '-r', '--regexp-extended', '-s', '--separate', '-u',
+                       '--unbuffered', '-z', '--null-data', '--posix', '--'))
+_SED_ADDR = r'(?:\d+(?:~\d+)?|\$|/(?:[^/\\\n]|\\.)*/[IM]?)'
+SED_PRINT = re.compile(rf'\s*(?:{_SED_ADDR}(?:\s*,\s*(?:{_SED_ADDR}|[+~]\d+))?)?\s*!?\s*(?:[p=dqQ]|l\s*\d*|[qQ]\s*\d+)\s*')
+# awk: an optional -F separator and one program of a pattern (/regex/ or NR / NF compared with a number) and / or
+# {print FIELDS}: no function call, getline, redirection or pipe can appear (system(), getline, print > f, -f, -i ...)
+_AWK_FIELDS = r'(?:\$(?:\d+|NF)|NR|NF)(?:\s*,?\s*(?:\$(?:\d+|NF)|NR|NF))*'
+AWK_PRINT = re.compile(rf'\s*(?:/(?:[^/\\\n]|\\.)*/|(?:NR|NF)\s*(?:==|!=|<=?)\s*\d+)?\s*'
+                       rf'(?:\{{\s*print(?:\s+{_AWK_FIELDS})?\s*;?\s*\}})?\s*')
+
+
+def _plain_words(part, variables=True):
+    """The words of one command as the shell will pass them, or None if the shell could change them. Every check runs on
+    these words: a glob, brace or extglob (`(`) outside quotes can expand to a file named like a flag (with a file named
+    --pre=sh, `rg foo *` ran every file through sh; -oout.txt made `sort *` write), an unquoted $ expansion splits into
+    words, and quotes can splice a flag the raw text hides (`find . "-delete"`). Refused: those characters and escapes
+    outside quotes, backquotes, unbalanced quotes, and with variables false any $ (sed and awk read a $ as their own).
+    Allowed: anything single-quoted, and inside double quotes a plain "$NAME" / "${NAME}" (one word, from the
+    harness's environment: `ls "$WORKSPACE"`)."""
+    quote, i = '', 0
+    while i < len(part):
+        c = part[i]
+        if quote == "'":
+            quote = '' if c == "'" else quote
+        elif c == '`' or (not quote and c in '$\\*?[{('):
+            return None
+        elif c == '\\':
+            i += 1                        # (inside double quotes: the next character is literal, a \" included)
+        elif c == '$' and not (variables and re.match(r'\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})', part[i:])):
+            return None
+        elif c in '\'"':
+            quote = '' if quote == c else (quote or c)
+        i += 1
+    try:
+        return shlex.split(part)
+    except ValueError:
+        return None
+
+
+def _sed_reads(words):
+    """sed in a print-only form (SED_FLAGS, SED_PRINT): `sed -n '1,20p' f` was refused before the done check."""
+    scripts, operands, i, opts = [], [], 1, True     # (words[0] is sed)
+    while i < len(words):
+        w = words[i]
+        if opts and w == '--':
+            opts = False
+        elif opts and w in ('-e', '--expression') and i + 1 < len(words):
+            scripts.append(words[i + 1]); i += 1
+        elif opts and w.startswith('--expression='):
+            scripts.append(w.split('=', 1)[1])
+        elif opts and re.fullmatch(r'-[nErsuz]+e', w) and i + 1 < len(words):
+            scripts.append(words[i + 1]); i += 1
+        elif opts and w.startswith('-') and w != '-':
+            if w not in SED_FLAGS and not re.fullmatch(r'-[nErsuz]+', w):
+                return False
+        else:
+            operands.append(w)
+        i += 1
+    if not scripts:
+        if not operands:
+            return False
+        scripts.append(operands.pop(0))
+    return all(SED_PRINT.fullmatch(x) for x in scripts)
+
+
+def _awk_reads(words):
+    """awk in the AWK_PRINT form only (awk '{print $1}' f, awk -F: 'NR==2' f)."""
+    args = words[1:]
+    if args[:1] == ['-F'] and len(args) > 1:
+        args = args[2:]
+    elif args[:1] and args[0].startswith('-F') and len(args[0]) > 2:
+        args = args[1:]
+    if not args or args[0].startswith('-') or not args[0].strip():
+        return False
+    return bool(AWK_PRINT.fullmatch(args[0])) and not any(a.startswith('-') and a != '-' for a in args[1:])
 
 
 def _sort_writes(w):
@@ -103,10 +186,15 @@ def read_only_command(cmd):
     if CHANGING.search(cmd) or '<(' in cmd:
         return False                      # (a process substitution runs a command: `cat <(rm -f x)`)
     for part in re.split(r'\|\||&&|[|;&\n]', cmd):
-        words = part.split()
-        if not words:
+        if not part.split():
             continue
-        if words[0] == 'git':
+        words = _plain_words(part)
+        if not words or CHANGING.search(' '.join(words)):
+            return False                  # (CHANGING again on the words: a quoted "-delete" or --pr''e is one)
+        if words[0] in ('sed', 'awk'):
+            if not _plain_words(part, variables=False) or not (_sed_reads if words[0] == 'sed' else _awk_reads)(words):
+                return False
+        elif words[0] == 'git':
             sub = words[1:2]
             if sub == ['branch'] and all(w in ('-a', '-r', '-v', '-vv', '--list', '--show-current') for w in words[2:]):
                 continue                  # listing branches; with any other argument it creates or deletes one
@@ -211,7 +299,7 @@ TOOLS = [
          dict(action={'type':'string','enum':['open_pr','comment','approve_ci']}, repo={'type':'string'}, head={'type':'string'},
               base={'type':'string'}, title={'type':'string'}, body={'type':'string'}, number={'type':'integer'},
               run_id={'type':'integer'}, reason={'type':'string'}), ('action','repo','reason')),
-    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run in your home) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
+    tool('define_done', 'State what done looks like as something checkable, at the start of a goal. Nothing else runs until this exists. Optionally give gate: a shell command (run like a terminal command: in your workspace, with the same environment) that exits 0 only when done, e.g. a test suite; finish runs it first. A judge then checks your finish against the evidence.',
          dict(check={'type':'string'}, gate={'type':'string'}), ('check',)),
     tool('verify', 'Record that the done check was run and what it showed. Finish requires one after the last steer.',
          dict(evidence={'type':'string'}), ('evidence',)),
