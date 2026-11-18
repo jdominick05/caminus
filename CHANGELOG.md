@@ -5,7 +5,7 @@ otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/
 
 ## 0.3.2 (2026-11-18)
 
-Faster long conversations on every model, Qwen Code as the recommended way in, and Ember (now listed under
+Faster long conversations (measured on Qwen3-30B-A3B), Qwen Code as the recommended way in, and Ember (now listed under
 Experiments) with a much bigger toolset. After upgrading, run `caminus ember agent install` if you use Ember, so its
 agent picks up the new runtime.
 
@@ -24,7 +24,7 @@ agent picks up the new runtime.
   conversation twice and convert the token log to arrays several times. Now the sampler reads only its penalty window,
   the prompt is encoded once with repeated fragments remembered, and prefix matches compare arrays converted once
   (#290, #291, #293). Measured through `caminus serve` on Qwen3-30B-A3B (Q4_K_M, F16 KV), same replies token for token:
-  - a warm turn's time to first token: 454 -> 274 ms at about 38K tokens on one card, 1,153 -> 594 ms at about 126K
+  - a warm turn's time to first token (a turn that restores a cached checkpoint): 454 -> 274 ms at about 38K tokens on one card, 1,153 -> 594 ms at about 126K
     on two cards;
   - sampled decoding with a presence penalty: 92 -> 108 tok/s at about 39K (one card), 52 -> 71 tok/s at about 127K
     (two cards).
