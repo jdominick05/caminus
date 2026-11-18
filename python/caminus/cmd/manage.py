@@ -663,28 +663,45 @@ def serve_argv(m, e, name, port, ctx=None, extra=(), long_context=False):
     return serve + list(extra)
 
 
-def restart_argv(argv, e, port):
-    """a restart's serve flags: the argv saved at start with the port picked now, and --model at the catalog file found now
-    (model_entry e). A catalog file that moved since the record was written (Qwen3-30B-A3B's switch to unsloth's file in
-    its own folder) is served from its new place, never from the old path"""
+def catalog_arg(value, m, recorded=None):
+    """whether a recorded --model value names catalog model m's own file: the path start wrote (recorded: the record's
+    'path'), or a file models.model_of takes for m (its catalog file or one of its PREVIOUS_FILES). Anything else is a
+    user's own file (`caminus start NAME -- --model X`)"""
+    if recorded is not None and value == recorded:
+        return True
+    mm = models.model_of(value)
+    return mm is not None and mm.name == m.name
+
+
+def needs_catalog(argv, m, recorded=None):
+    """whether a recorded argv serves catalog model m's own file: its last --model (the one serve takes) is catalog_arg"""
+    vals = [argv[i + 1] for i, x in enumerate(argv[:-1]) if x == '--model']
+    return not vals or catalog_arg(vals[-1], m, recorded)
+
+
+def restart_argv(argv, e, port, m, recorded=None):
+    """a restart's serve flags: the argv saved at start with the port picked now. A --model naming m's own file
+    (catalog_arg) points at the catalog file found now (model_entry e): a catalog file that moved since the record was
+    written (Qwen3-30B-A3B's switch to unsloth's file in its own folder) is served from its new place, never from the old
+    path. Any other --model (a user's own file) is kept as it is"""
     serve = list(argv)
     for i, x in enumerate(serve[:-1]):
         if x == '--port':
             serve[i + 1] = str(port)
-        elif x == '--model':
+        elif x == '--model' and e['path'] and catalog_arg(serve[i + 1], m, recorded):
             serve[i + 1] = e['path']
     return serve
 
 
 def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), wait=True, log=print, argv_override=None, devs_override=None,
-              cards=None, kv=None, long_context=False):
+              cards=None, kv=None, long_context=False, recorded_path=None):
     if models.paused(model_name):
         raise ManageError(models.paused(model_name))
     if model_name not in models.BY_NAME:
         raise ManageError(f'unknown model {model_name!r} (caminus models: {", ".join(models.BY_NAME)})')
     m = models.BY_NAME[model_name]
     e = model_entry(m)
-    if not e['present']:
+    if not e['present'] and (argv_override is None or needs_catalog(argv_override, m, recorded_path)):
         raise ManageError(f'{m.name} is not downloaded (caminus pull {m.name})')
     name = name or m.name
     running = [s for s in all_servers() if alive(s.get('guard_pid'))]
@@ -718,7 +735,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     os.makedirs(d, mode=0o700, exist_ok=True)
     logp = os.path.join(d, 'serve.log')
     if argv_override is not None:
-        serve = restart_argv(argv_override, e, port)
+        serve = restart_argv(argv_override, e, port, m, recorded_path)
     else:
         serve = serve_argv(m, e, name, port, ctx, extra, long_context=long_context)
     cmd = guarded.command_reloading('serve', serve, logp, 0)   # (exit 75, a broken engine: reloaded once)
@@ -730,7 +747,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
         g.write(f"== start {time.strftime('%F %T')} {shlex.join(cmd)}\n".encode())
         g.flush()
         p = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=g, stderr=subprocess.STDOUT, start_new_session=True)
-    s = dict(name=name, model=m.name, path=e['path'], port=port, devices=devs, card_names=[cs.get(i, str(i)) for i in devs],
+    s = dict(name=name, model=m.name, path=e['path'] or recorded_path, port=port, devices=devs, card_names=[cs.get(i, str(i)) for i in devs],
              pcis=[view[i]['pci'] for i in devs],
              argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias, **({'kv': kv} if kv else {}))
     with open(os.path.join(d, 'server.json'), 'w') as f:
@@ -869,10 +886,12 @@ def cmd_restart(argv):
         if s is None:
             raise ManageError(f'no server named {a.name!r} (caminus ps)')
         m = models.BY_NAME.get(s['model'])
-        if m is not None and not model_entry(m)['present']:   # (refused before the stop: a working server is never left down)
+        if m is not None and not model_entry(m)['present'] and needs_catalog(s['argv'], m, s.get('path')):
+            # (refused before the stop, a working server is never left down; a server on a user's own --model file needs none)
             raise ManageError(f'{m.name} is not downloaded (caminus pull {m.name}); {a.name} keeps running')
         stop_one(a.name, log=say)
-        n = start_one(s['model'], name=s['name'], port=s['port'], argv_override=s['argv'], devs_override=s['devices'], log=say)
+        n = start_one(s['model'], name=s['name'], port=s['port'], argv_override=s['argv'], devs_override=s['devices'], log=say,
+                      recorded_path=s.get('path'))
         return f"{n['name']} restarted at http://127.0.0.1:{n['port']}"
     return run_action(a, go)
 

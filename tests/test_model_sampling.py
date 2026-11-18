@@ -106,29 +106,41 @@ def template_checks(S):
         check(ChatTemplate(shipped).render(msgs, **kw) == ChatTemplate(body).render(msgs, **kw),
               f'qwen3-30b-a3b: the comment header renders to nothing {kw or ""}')
     base = os.path.basename(it.path)
-    # the official file's header outside the catalog (another size): its own template and ids, the reference for the prompts
-    ref = tokenizer_gguf(os.path.join(S, 'tpl', 'official', base), body, ids=OFFICIAL_IDS)
-    # unsloth's header (its own template, no bos key, pad 151654) at the catalog's size: served with the official ones
-    uns = tokenizer_gguf(os.path.join(S, 'tpl', 'catalog', base), 'OWN {{ messages }}', size=it.size, ids=UNSLOTH_IDS)
-    # the official file kept by path (its name and size, a PREVIOUS_FILES entry): the catalog model's, all of it
-    prev = tokenizer_gguf(os.path.join(S, 'tpl', 'previous', base), body, size=models.PREVIOUS_FILES['qwen3-30b-a3b'][0][1],
-                          ids=OFFICIAL_IDS)
-    vr, vu, vp = load_gguf_vocab(ref), load_gguf_vocab(uns), load_gguf_vocab(prev)
-    check(models.model_of(ref) is None and (vr.bos_id, vr.eos_id, vr.pad_id) == (151643, 151645, 151643) and vr.chat_template == body,
-          'the official header outside the catalog: its own template and ids (bos 151643, eos 151645, pad 151643)')
-    check(vu.chat_template == shipped and (vu.bos_id, vu.eos_id, vu.pad_id) == (151643, 151645, 151643) and len(vu.tokens) == 151646,
-          'qwen3-30b-a3b catalog file with unsloth\'s header: served with the shipped template and the official ids '
-          f'({vu.bos_id}, {vu.eos_id}, {vu.pad_id}), the rest of the vocabulary read')
-    for label, p in (('the catalog file (unsloth\'s header)', uns), ('the official file kept by path', prev)):
-        ok = True
-        for kw in (None, {'enable_thinking': False}):
-            a = PromptBuilder.from_tokenizer(QwenTokenizer.from_gguf(ref, engine='own')).build(msgs, client_kwargs=kw).ids
-            b = PromptBuilder.from_tokenizer(QwenTokenizer.from_gguf(p, engine='own')).build(msgs, client_kwargs=kw).ids
-            ok = ok and a == b and a[:2] == [151643, 151644]
-        check(ok, f'qwen3-30b-a3b, {label}: the served prompt ids equal the official header\'s, BOS 151643 first, thinking on and off')
-    check(models.model_of(prev) is models.BY_NAME['qwen3-30b-a3b'] and models.sampling_of(prev) == models.SAMPLING['qwen3-30b-a3b']
-          and models.chat_template_of(prev) == shipped,
-          'the official file kept by path (PREVIOUS_FILES): still the catalog model, its sampling and template')
+    # the fixtures stay small (a sparse file of the catalog's 18.6 GB would be memory-mapped whole by the reader): model_of
+    # takes them for the catalog model through a PREVIOUS_FILES entry of their own size for the length of the check
+    # the official file's header outside the catalog (another name): its own template and ids, the reference for the prompts
+    ref = tokenizer_gguf(os.path.join(S, 'tpl', 'official', 'official.gguf'), body, ids=OFFICIAL_IDS)
+    # unsloth's header (its own template, no bos key, pad 151654) as the catalog's file: served with the official ones
+    uns = tokenizer_gguf(os.path.join(S, 'tpl', 'catalog', base), 'OWN {{ messages }}', ids=UNSLOTH_IDS)
+    # the official header under the catalog's file name (the official file kept by path): the catalog model's, all of it
+    prev = tokenizer_gguf(os.path.join(S, 'tpl', 'previous', base), body, ids=OFFICIAL_IDS)
+    saved = models.PREVIOUS_FILES
+    models.PREVIOUS_FILES = dict(saved, **{'qwen3-30b-a3b': saved['qwen3-30b-a3b'] + tuple(
+        (base, os.path.getsize(f)) for f in (uns, prev))})
+    try:
+        vr, vu = load_gguf_vocab(ref), load_gguf_vocab(uns)
+        check(models.model_of(ref) is None and (vr.bos_id, vr.eos_id, vr.pad_id) == (151643, 151645, 151643) and vr.chat_template == body,
+              'the official header outside the catalog: its own template and ids (bos 151643, eos 151645, pad 151643)')
+        check(vu.chat_template == shipped and (vu.bos_id, vu.eos_id, vu.pad_id) == (151643, 151645, 151643) and len(vu.tokens) == 151646,
+              'qwen3-30b-a3b catalog file with unsloth\'s header: served with the shipped template and the official ids '
+              f'({vu.bos_id}, {vu.eos_id}, {vu.pad_id}), the rest of the vocabulary read')
+        for label, p in (('the catalog file (unsloth\'s header)', uns), ('the official file kept by path', prev)):
+            ok = True
+            for kw in (None, {'enable_thinking': False}):
+                a = PromptBuilder.from_tokenizer(QwenTokenizer.from_gguf(ref, engine='own')).build(msgs, client_kwargs=kw).ids
+                b = PromptBuilder.from_tokenizer(QwenTokenizer.from_gguf(p, engine='own')).build(msgs, client_kwargs=kw).ids
+                ok = ok and a == b and a[:2] == [151643, 151644]
+            check(ok, f'qwen3-30b-a3b, {label}: the served prompt ids equal the official header\'s, BOS 151643 first, thinking on and off')
+    finally:
+        models.PREVIOUS_FILES = saved
+    # the real PREVIOUS_FILES entry: the official file's name and size (a sparse file, never opened: model_of reads its size)
+    kept = os.path.join(S, 'tpl', 'kept', base)
+    os.makedirs(os.path.dirname(kept), exist_ok=True)
+    with open(kept, 'wb') as f:
+        f.truncate(saved['qwen3-30b-a3b'][0][1])
+    check(models.model_of(kept) is models.BY_NAME['qwen3-30b-a3b'] and models.sampling_of(kept) == models.SAMPLING['qwen3-30b-a3b']
+          and models.chat_template_of(kept) == shipped and models.special_ids_of(kept) == models.SPECIAL_IDS['qwen3-30b-a3b'],
+          'the official file kept by path (PREVIOUS_FILES, its name and size): still the catalog model, its sampling, template and ids')
     p = tokenizer_gguf(os.path.join(S, 'tpl', 'other', 'x', base), 'OWN {{ messages }}', ids=UNSLOTH_IDS)
     v = load_gguf_vocab(p)
     check(v.chat_template == 'OWN {{ messages }}' and v.bos_id == -1 and v.pad_id == 151654,
