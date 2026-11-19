@@ -16,10 +16,12 @@ expert), CPU only, no model file:
     expert width is refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/test_ref_q35.py --scratch DIR"""
-import argparse, os, re, struct, sys
+import argparse, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # tests/tiny_gguf.py
 import numpy as np
 from caminus import ref_q35
+from tiny_gguf import gdn_definition, write_gguf
 
 ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True); A = ap.parse_args()
 os.makedirs(A.scratch, exist_ok=True)
@@ -29,36 +31,6 @@ ok = True
 def check(c, msg):
     global ok
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
-
-
-# ---- a minimal GGUF v3 writer (F32 tensors; the value types this file needs) -------------------------------------------
-U32, I32, F32, BOOL, STR, ARR = 4, 5, 6, 7, 8, 9
-
-
-def _s(x):
-    b = x.encode(); return struct.pack('<Q', len(b)) + b
-
-
-def _val(v):
-    if isinstance(v, bool): return struct.pack('<I?', BOOL, v)
-    if isinstance(v, int): return struct.pack('<II', U32, v)
-    if isinstance(v, float): return struct.pack('<If', F32, v)
-    if isinstance(v, str): return struct.pack('<I', STR) + _s(v)
-    et = BOOL if isinstance(v[0], bool) else I32
-    return struct.pack('<IIQ', ARR, et, len(v)) + b''.join(struct.pack('<?' if et == BOOL else '<i', e) for e in v)
-
-
-def write_gguf(path, meta, tensors):
-    """tensors: name -> float32 array [rows, K] (written with dims innermost first) or [n]"""
-    head = struct.pack('<4sIQQ', b'GGUF', 3, len(tensors), len(meta)) + b''.join(_s(k) + _val(v) for k, v in meta.items())
-    info, data = b'', b''
-    for name, a in tensors.items():
-        a = np.ascontiguousarray(a, np.float32); dims = a.shape[::-1]
-        info += _s(name) + struct.pack('<I', len(dims)) + b''.join(struct.pack('<Q', d) for d in dims) + struct.pack('<IQ', 0, len(data))
-        data += a.tobytes(); data += b'\0' * (-len(data) % 32)
-    blob = head + info
-    with open(path, 'wb') as f:
-        f.write(blob + b'\0' * (-len(blob) % 32) + data)
 
 
 D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 32, 40, 50, 4, 2, 4, 4, 2, 8, 4, 4
@@ -116,22 +88,7 @@ silu = lambda y: y / (1 + np.exp(-y)); sig = lambda y: 1 / (1 + np.exp(-y))
 rms = lambda y, g: y / np.sqrt(np.mean(y * y) + eps) * g
 Wd = lambda n: T[n].astype(np.float64)
 m.reset(); hs = rng.standard_normal((5, D))
-got = m._gdn(0, hs)
-want = np.empty_like(got); hist = [np.zeros(CH)] * (DC - 1); St = np.zeros((NV, S, S))
-for n in range(5):
-    h = hs[n]; mix = Wd('blk.0.attn_qkv.weight') @ h; win = hist + [mix]; hist = win[1:]
-    c = silu(np.array([sum(win[j][ch] * Wd('blk.0.ssm_conv1d.weight')[ch, j] for j in range(DC)) for ch in range(CH)]))
-    beta = sig(Wd('blk.0.ssm_beta.weight') @ h)
-    g = np.log1p(np.exp(Wd('blk.0.ssm_alpha.weight') @ h + Wd('blk.0.ssm_dt.bias'))) * Wd('blk.0.ssm_a')
-    z = Wd('blk.0.attn_gate.weight') @ h; fin = np.empty(NV * S)
-    for j in range(NV):
-        kh = j % NK
-        q = c[kh * S:(kh + 1) * S]; k = c[NK * S + kh * S:NK * S + (kh + 1) * S]; v = c[2 * NK * S + j * S:2 * NK * S + (j + 1) * S]
-        q = q / np.sqrt(np.sum(q * q) + eps) / np.sqrt(S); k = k / np.sqrt(np.sum(k * k) + eps)
-        St[j] = St[j] * np.exp(g[j])
-        St[j] = St[j] + np.outer((v - St[j] @ k) * beta[j], k)
-        fin[j * S:(j + 1) * S] = rms(St[j] @ q, Wd('blk.0.ssm_norm.weight')) * silu(z[j * S:(j + 1) * S])
-    want[n] = Wd('blk.0.ssm_out.weight') @ fin
+got = m._gdn(0, hs); want = gdn_definition(Wd, 'blk.0.', hs, NK, NV, S, DC, eps, silu)
 check(rel(got, want) < 1e-12, f'a Gated DeltaNet block over 5 tokens == its definition per value head (rel {rel(got, want):.1e})')
 
 m.reset(); pos = np.arange(5, dtype=np.float64)

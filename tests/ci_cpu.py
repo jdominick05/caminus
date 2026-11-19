@@ -65,6 +65,7 @@ SUITES = [
     ('coder_kv_formats', ['tests/prefill/test_coder_kv_formats_cpu.py'], {'torch'}),
     ('own_kv_codec', ['tests/io/test_own_kv_codec.py', '--scratch', '{scratch}'], {'cxx'}),
     ('ref_q35', ['tests/test_ref_q35.py', '--scratch', '{scratch}'], set()),
+    ('ref_coder', ['tests/test_ref_coder.py', '--scratch', '{scratch}'], {'torch'}),
     ('q35_tape', ['tests/engine/test_q35_tape_cpu.py', '--scratch', '{scratch}'], {'torch'}),
     ('numerical_state', ['tests/cache/test_numerical_state.py'], {'torch'}),
     ('dense_q8_tape', ['tests/engine/test_dense_q8_tape.py'], {'torch'}),

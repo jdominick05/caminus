@@ -155,7 +155,7 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False, n_ctx=4096):
             'qwen35.context_length': int(n_ctx), 'qwen35.embedding_length': D, 'qwen35.feed_forward_length': FF,
             'qwen35.attention.head_count': H, 'qwen35.attention.head_count_kv': HKV, 'qwen35.attention.key_length': HD,
             'qwen35.attention.value_length': HD, 'qwen35.attention.layer_norm_rms_epsilon': 1e-6, 'qwen35.rope.freq_base': 1e7,
-            'qwen35.rope.dimension_count': NROT, 'qwen35.rope.dimension_sections': [16, 16, 0, 0],
+            'qwen35.rope.dimension_count': NROT, 'qwen35.rope.dimension_sections': [11, 11, 10, 0],
             'qwen35.ssm.conv_kernel': DC, 'qwen35.ssm.group_count': NK, 'qwen35.ssm.inner_size': NV * S,
             'qwen35.ssm.state_size': S, 'qwen35.ssm.time_step_rank': NV, 'qwen35.full_attention_interval': 4,
             'qwen35.attention.recurrent_layers': KINDS + [False]}
