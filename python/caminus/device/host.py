@@ -291,9 +291,10 @@ def argv_flag(argv, k):
 
 
 def gpu_users(root='/'):
-    """{render minor: [(pid, label, MiB)]}: the processes holding VRAM on each GPU now, from KFD's per-process files
+    """{render minor: [(pid, label, MiB, port)]}: the processes holding VRAM on each GPU now, from KFD's per-process files
     (proc/<pid>/vram_<gpu_id>, the GPU's id from topology/nodes/<n>/gpu_id). A Caminus server is named by its model and
-    port from its command line (caminus serve --model FILE --port N), any other process by its name"""
+    port from its command line (caminus serve --model FILE --port N; port: that number), any other process by its name
+    (port None)"""
     from .. import models
     kfd = os.path.join(root, 'sys', 'class', 'kfd', 'kfd')
     minor_of = {}
@@ -314,14 +315,16 @@ def gpu_users(root='/'):
         except OSError:
             argv = []
         label = _read(os.path.join(root, 'proc', pid, 'comm')) or 'a process'
-        model, port = argv_flag(argv, '--model'), argv_flag(argv, '--port')
-        if serve_argv_of(argv) and model:
+        model, port = argv_flag(argv, '--model'), _int(argv_flag(argv, '--port'))
+        if not (serve_argv_of(argv) and model):
+            port = None
+        else:
             label = models.model_name(model) + (f' on :{port}' if port else '')
         for v in glob.glob(os.path.join(d, 'vram_*')):
             mib = (_int(_read(v)) or 0) / 2 ** 20
             minor = minor_of.get(_int(v.rsplit('_', 1)[1]))
             if minor is not None and mib >= 1:
-                out.setdefault(minor, []).append((int(pid), label, mib))
+                out.setdefault(minor, []).append((int(pid), label, mib, port))
     return out
 
 
@@ -331,14 +334,15 @@ def used_mib(g):
     return None if used is None or used < 0 else used / 2 ** 20
 
 
-def card_text(g, users=None, holder=None):
+def card_text(g, users=None, holder=None, port=None):
     """one card's state for a refusal: 'XTX card1: 21.3 of 24.0 GB in use (llama-server)' (the DRM name tells the cards
     apart; the PCI address is left out to keep a two-card refusal readable on one panel row each). users: gpu_users()'s
     entries for this card (the processes holding its VRAM). holder: the Caminus server that holds it (caminus start's
-    registry, '<model> on :<port>'): '...; held by thinkingcap on :8093', and that server is not repeated from users"""
+    registry, '<model> on :<port>'): '...; held by thinkingcap on :8093'; port: its port, so that server is not named
+    again from users (by port, not by name: its --model path may be another spelling of the registry's)"""
     used = used_mib(g)
-    users = [u for u in users or () if u[1] != holder]
-    held = ', '.join(f'{label} {mib / 1024:.1f} GB' if len(users) > 1 else label for _, label, mib in users)
+    users = [u for u in users or () if port is None or u[3] != port]
+    held = ', '.join(f'{label} {mib / 1024:.1f} GB' if len(users) > 1 else label for _, label, mib, _ in users)
     return (f"{describe(g, pci=False)}: " + (f"{used / 1024:.1f} of {g['total_mib'] / 1024:.1f} GB in use" if used is not None else
             f"{g['total_mib'] / 1024:.1f} GB, use unknown") + (f' ({held})' if held else '') + (f'; held by {holder}' if holder else ''))
 
@@ -349,20 +353,20 @@ def need_text(need_mib, room_mib, free_mib, ctx=None, most=None, lowest=None):
     free_mib less the room room_mib the need was compared with, so the guard line's gap below the total, the margins, a
     display's or the prompt cache's reserve, the projection's slack, a drafter) and how far short it is, rounded up, so
     the figures never read as fitting when each is rounded: 'needs 19.8 GB + 1.9 GB reserved at 32,768 positions, 0.4 GB
-    short; fits 8,192 now'. ctx: the context asked for (None: a size rule by the files, no projection here); most: the
-    most context that fits now (None: not even lowest positions)"""
+    short; fits 8,192 now'. ctx: the context asked for (None: a size rule by the files, no projection here, which no
+    smaller context changes); most: the most context that fits now (None: not even lowest positions)"""
     short = math.ceil(round((need_mib - room_mib) / 1024 * 10, 6)) / 10   # (round first: 0.3 GB is not 0.30000000000000004)
     head = (f"needs {'about ' if ctx is None else ''}{need_mib / 1024:.1f} GB + {max(0.0, free_mib - room_mib) / 1024:.1f} GB "
-            f"reserved" + (f' at {ctx:,} positions' if ctx is not None else " by its files' size (no projection here)")
+            f"reserved" + (f' at {ctx:,} positions' if ctx is not None else " by its files' size")
             + (f', {short:.1f} GB short' if short > 0 else ''))
     if ctx is None:
-        return head
+        return head + '; no context fits by that rule (no projection here)'
     return head + '; ' + (f'fits {most:,} now' if most else f'not even {lowest:,} positions fit now')
 
 
 def one(gs, fits, held=(), explain=None, root='/'):
     """the card of a one-card model: the smallest free usable card that fits(card) says it fits (ties: PCI address). held:
-    the PCI addresses other servers hold, or {pci: the holder's label} (caminus start). When none fits, the refusal names
+    the PCI addresses other servers hold, or {pci: (the holder's label, its port)} (caminus start). When none fits, the refusal names
     every usable card: a free one with what is in use and by what (card_text) and, from explain(card), what the model
     needs there and the most context that fits now (need_text); a held one with its holder"""
     cards = sorted(usable(gs), key=lambda g: (g['total_mib'], g['pci'] or g['card']))
@@ -378,8 +382,8 @@ def one(gs, fits, held=(), explain=None, root='/'):
 
     def text(g):
         if g['pci'] in held:
-            return card_text(g, users.get(g.get('minor')), (held.get(g['pci']) if isinstance(held, dict) else None)
-                             or 'another Caminus server')
+            label, port = (held.get(g['pci']) if isinstance(held, dict) else None) or ('another Caminus server', None)
+            return card_text(g, users.get(g.get('minor')), label, port)
         try:
             t = explain(g) if explain else ''
         except Exception:                       # noqa: BLE001 - a projection that cannot run here: the card's state alone

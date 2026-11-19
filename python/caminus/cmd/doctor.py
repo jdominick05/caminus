@@ -125,8 +125,8 @@ def check_gpus(R, root='/'):
     R.add('PASS' if u else 'FAIL', 'gpu', f'{len(u)} supported card(s)' + ('' if u else
           ': Caminus runs on AMD RX 7900 XTX / XT (gfx1100) cards; other AMD hardware: please send a hardware report'))
     for c in u:
-        used = _read(os.path.join(c['dev'], 'mem_info_vram_used'))
-        used = int(used) >> 20 if used else None
+        used = host.used_mib(c)
+        used = int(used) if used is not None else None
         lvl = 'PASS' if used is not None and used < 1024 else 'WARN'
         R.add(lvl, 'gpu', f'{host.describe(c)}: {c["total_mib"]} MiB, {used} MiB in use'
               + (' (something holds VRAM: another engine or test? Caminus needs the cards idle)' if lvl == 'WARN' else '')

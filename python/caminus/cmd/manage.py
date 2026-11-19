@@ -348,9 +348,8 @@ def card_view(gs=None):
     and the panel use; pci = the card's identity; hip = its HIP index (HIP_VISIBLE_DEVICES)"""
     out = []
     for i, c in enumerate(host.usable(host.gpus(ROOT) if gs is None else gs)):
-        used = machine._read(os.path.join(c['dev'], 'mem_info_vram_used'))
         out.append(dict(index=i, name=c['label'], card=c['card'], pci=c['pci'], hip=c['hip'], status=c['status'],
-                        used_mib=(int(used) >> 20) if used else 0, line_mib=c['line_mib'], total_mib=c['total_mib'],
+                        used_mib=int(host.used_mib(c) or 0), line_mib=c['line_mib'], total_mib=c['total_mib'],
                         display=c['display'], link=host.link_text(c['link']), link_ok=c['link_ok']))
     return out
 
@@ -555,7 +554,7 @@ def card_fit(m, entry, ctx=None, kv=None, long_context=False):
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
         need = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20 * 1.1 + 4096
         room = lambda g: g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
-        return (lambda g: need <= room(g)), (lambda g: host.need_text(need, room(g), g['total_mib']))   # (the rule ignores what is in use)
+        return (lambda g: need <= room(g)), (lambda g: host.need_text(need, room(g), g['total_mib'] - (host.used_mib(g) or 0)))
     return (lambda g: A.fits(opt, [g])), (lambda g: A.need_text(opt, g))
 
 
@@ -605,9 +604,9 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
     # (held cards by PCI address, each with its server from the registry for one()'s refusal: a server still loading holds
     #  no VRAM yet, so KFD's per-process files cannot name it)
     # (named as host.gpu_users names the same process, by its file: a GGUF outside the catalog is not named twice)
-    holder = {d: f"{models.model_name(s['path']) if s.get('path') else s['model']} on :{s['port']}"
+    holder = {d: (f"{models.model_name(s['path']) if s.get('path') else s['model']} on :{s['port']}", s['port'])
               for s in all_servers() if alive(s.get('guard_pid')) for d in s.get('devices', [])}
-    held_pci = {c['pci']: holder.get(c['index']) for c in cs if c['index'] in held}
+    held_pci = {c['pci']: holder.get(c['index']) for c in cs if c['index'] in held}   # (label, port), or None
     free = [c for c in cs if c['index'] not in held]
     if (cards or m.cards) >= 2:
         try:

@@ -479,8 +479,9 @@ def main():
     fits, explain = manage.card_fit(q3, dict(path=os.path.join(S, 'no-such.gguf'), size_gb=18.6, need_gb=18.6, paths={}))
     t_size = explain(g0)
     n, r = nums(t_size)
-    check(not fits(g0) and n + r > g0['total_mib'] / 1024 and t_size.startswith('needs about 23.1 GB + 1.3 GB reserved')
-          and "files' size" in t_size, f'start refusal: the size rule\'s need and reserve without a projection ({t_size!r})')
+    check(not fits(g0) and used0 + n + r > g0['total_mib'] / 1024 and t_size.startswith('needs about 23.1 GB + 1.2 GB reserved')
+          and t_size.endswith("; no context fits by that rule (no projection here)"),
+          f'start refusal: the size rule\'s need and reserve against the card\'s free memory, as card_text\'s in use reads ({t_size!r})')
     # the refusal names every card: a free one with its use and the model's need, a held one with the server that holds it
     # (from the registry: one still loading holds no VRAM yet); a card nobody holds says nothing of a holder
     tc = (models.BY_NAME['thinkingcap'], dict(path=os.path.join(S, 'no-such.gguf'), size_gb=40, need_gb=40, paths={}))
