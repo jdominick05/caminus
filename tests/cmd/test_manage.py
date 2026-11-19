@@ -360,20 +360,42 @@ def main():
         @staticmethod
         def Popen(*a, **k):
             return argparse.Namespace(pid=dead.pid)
-    manage.subprocess = Launched
+    crashed_json = open(os.path.join(manage.server_dir('crashed'), 'server.json')).read()
+    # (a record removed while the start runs, between its scan and its mark (caminus stop OLD): never brought back)
+    real_all = manage.all_servers
+
+    def scan_then_stop():
+        got = real_all()
+        if os.path.exists(os.path.join(manage.server_dir('fresh'), 'server.json')):   # (the scan after the new record)
+            os.remove(os.path.join(manage.server_dir('clean'), 'server.json'))
+        return got
+    manage.subprocess, manage.all_servers = Launched, scan_then_stop
     try:
         manage.start_one('qwen3.6', name='fresh', devs_override=[0], wait=False, log=lambda *a: None)
     finally:
-        manage.subprocess = NoLaunch
+        manage.subprocess, manage.all_servers = NoLaunch, real_all
     after = {x['name']: manage.server_view(x) for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
-    crashed = manage.load_server('crashed')
-    check(set(after) == before | {'fresh'} and all(v['state'] == 'stopped' and v['error'] == '' for n, v in after.items() if n != 'fresh')
-          and crashed['argv'] == ['--model', p] and crashed['superseded_at'] == manage.load_server('fresh')['started'],
-          f'start: a new start of a model supersedes its older failed records, kept with their settings for caminus restart NAME '
-          f'({sorted((n, v["state"]) for n, v in after.items())})')
-    for n in after:
-        with contextlib.suppress(OSError):
-            os.remove(os.path.join(manage.server_dir(n), 'server.json'))
+    check(set(after) == before - {'clean'} | {'fresh'} and all(v['state'] == 'stopped' and v['error'] == '' for n, v in after.items() if n != 'fresh')
+          and open(os.path.join(manage.server_dir('crashed'), 'server.json')).read() == crashed_json
+          and os.path.exists(os.path.join(manage.server_dir('crashed'), manage.SUPERSEDED))
+          and not os.path.exists(os.path.join(manage.server_dir('fresh'), manage.SUPERSEDED)),
+          f'start: a new start of a model supersedes its older failed records by a marker, their server.json (settings for '
+          f'caminus restart NAME) untouched ({sorted((n, v["state"]) for n, v in after.items())})')
+    check(not os.path.exists(os.path.join(manage.server_dir('clean'), 'server.json')),
+          'start: a record removed between the scan and the mark stays removed (no server.json brought back)')
+    # (a later start under a superseded name is that name's own start again: its marker goes)
+    manage.subprocess = Launched
+    try:
+        manage.start_one('qwen3.6', name='crashed', devs_override=[0], wait=False, log=lambda *a: None)
+    finally:
+        manage.subprocess = NoLaunch
+    check(not os.path.exists(os.path.join(manage.server_dir('crashed'), manage.SUPERSEDED))
+          and os.path.exists(os.path.join(manage.server_dir('fresh'), manage.SUPERSEDED)),
+          'start: a start under a superseded name clears its marker and supersedes the others')
+    for n in set(after) | {'crashed'}:
+        for f in ('server.json', manage.SUPERSEDED):
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(manage.server_dir(n), f))
 
     # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
     # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props

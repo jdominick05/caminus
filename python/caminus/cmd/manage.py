@@ -198,6 +198,12 @@ def server_dir(name):
     return os.path.join(servers_root(), name)
 
 
+# A marker file in a dead record's folder: a later start of its model superseded it (ps shows it stopped, its failure no
+# longer the model's last start; its server.json, with its settings for caminus restart NAME, is never rewritten by
+# another process). Created with exclusive create: a record removed meanwhile (caminus stop) is never brought back.
+SUPERSEDED = 'superseded'
+
+
 def load_server(name):
     try:
         with open(os.path.join(server_dir(name), 'server.json')) as f:
@@ -309,7 +315,7 @@ def server_view(s):
         except OSError:
             clean = False
         # (superseded: a later start of the model replaced it, so its failure is no longer the model's last start)
-        v['state'] = 'stopped' if clean or s.get('superseded_at') else 'failed'
+        v['state'] = 'stopped' if clean or os.path.exists(os.path.join(server_dir(s['name']), SUPERSEDED)) else 'failed'
         if v['state'] == 'failed':
             line = log_error(s['log'], keep=None)  # (the whole line for the check below: a long path pushes its head out of 300)
             v['error'] = line[-300:] or 'the server exited (caminus logs ' + s['name'] + ')'
@@ -792,13 +798,15 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     s = dict(name=name, model=m.name, path=e['path'] or recorded_path, port=port, devices=devs, card_names=[cs.get(i, str(i)) for i in devs],
              pcis=[view[i]['pci'] for i in devs],
              argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias, **({'kv': kv} if kv else {}))
+    with contextlib.suppress(FileNotFoundError):  # (this name's own start: no longer superseded)
+        os.remove(os.path.join(d, SUPERSEDED))
     with open(os.path.join(d, 'server.json'), 'w') as f:
         json.dump(s, f, indent=1)
     for old in all_servers():                     # (this start, its record written, supersedes an older dead record of the
-        if (old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid'))   # model: kept, so
-                and not old.get('superseded_at')):  # caminus restart NAME still has its settings, but no longer failed)
-            with contextlib.suppress(OSError), open(os.path.join(server_dir(old['name']), 'server.json'), 'w') as f:
-                json.dump(dict(old, superseded_at=s['started']), f, indent=1)
+        if old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid')):   # model: see SUPERSEDED
+            with contextlib.suppress(FileNotFoundError, FileExistsError), \
+                    open(os.path.join(server_dir(old['name']), SUPERSEDED), 'x') as f:
+                f.write(f"{s['started']}\n")
     log(f"{name}: starting {m.name} on {'+'.join(s['card_names'])} at http://127.0.0.1:{port} (log: caminus logs {name})")
     if wait:
         t0 = time.time()
