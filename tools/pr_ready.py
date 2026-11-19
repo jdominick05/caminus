@@ -1,9 +1,9 @@
-"""Is a pull request into `testing` ready to merge? (Reads GitHub through the `gh` CLI; changes nothing, posts nothing.)
+"""Is a pull request into `testing` (or `ember-next`) ready to merge? (Reads GitHub through the `gh` CLI; changes nothing, posts nothing.)
 
   python -I tools/pr_ready.py N [-R OWNER/REPO] [--wait SECS] [--reviewer LOGIN] [--allow-base-merges]
 
 Checks, each printed PASS / FAIL, then RESULT PASS / RESULT FAIL (exit 0 / 1):
-- base: the pull request targets `testing`, is open, is not a draft and has no merge conflict;
+- base: the pull request targets one of `BASES` (testing, or ember-next for the Ember harness), is open, is not a draft and has no merge conflict;
 - ci: every check on the head commit has finished and succeeded;
 - review: the review bot has looked at the HEAD commit and left nothing open there. It does not look again after a push:
   a head it has not seen needs a comment asking for a review (the script names the commit it last saw). A merge of
@@ -77,12 +77,17 @@ def bot_reviews(pr, login):
     return out
 
 
+# The branches a pull request may target: testing (everything that ships), and ember-next, the Ember harness's
+# integration branch, which lands in testing as one reviewed pull request after the release it waits for.
+BASES = ('testing', 'ember-next')
+
+
 def look(a):
     """({check: (ok, text)}, the checks that are only pending)"""
     pr = gh('pr', 'view', str(a.n), '-R', a.repo, '--json',
             'baseRefName,headRefOid,state,isDraft,mergeable,title,body,author,files,commits,comments,reviews,statusCheckRollup')
     head, res, pending = pr['headRefOid'], {}, set()
-    bad = [w for w, ok in (('base is ' + pr['baseRefName'], pr['baseRefName'] == 'testing'), ('state ' + pr['state'], pr['state'] in ('OPEN', 'MERGED')),
+    bad = [w for w, ok in (('base is ' + pr['baseRefName'], pr['baseRefName'] in BASES), ('state ' + pr['state'], pr['state'] in ('OPEN', 'MERGED')),
                            ('a draft', not pr['isDraft']), ('merge conflict', pr['mergeable'] != 'CONFLICTING')) if not ok]
     res['base'] = (not bad, f'into {pr["baseRefName"]}, head {head[:10]}' + (': ' + ', '.join(bad) if bad else ''))
     if a.metadata:   # the text checks only: no CI, review or thread wait, so CI can run it without the review bot
