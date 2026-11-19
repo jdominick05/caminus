@@ -176,5 +176,7 @@ for i, (path, F, name, cut) in enumerate(C):
     del W; torch.cuda.empty_cache()
 if A.save:
     if os.path.exists(A.save): sys.exit(f'--save: {A.save} appeared during the run: refusing to overwrite')
-    torch.save(saved, A.save); print(f'saved {A.save}: {len(saved["cases"])} cases (run --check on it for the exact check)')
+    torch.save(saved, A.save); print(f'saved {A.save}: {len(saved["cases"])} cases')
+print('PENDING the exact check (1e-6 of sum |w||x|) is not part of this RESULT: ' +
+      (f'run --check {A.save} on the CPU' if A.save else 'rerun with --save FILE, then --check FILE on the CPU'))
 print('RESULT', 'PASS' if ok_all else 'FAIL'); sys.exit(0 if ok_all else 1)

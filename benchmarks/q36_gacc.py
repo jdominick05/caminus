@@ -79,10 +79,14 @@ if A.record:
                 b = m.site_bufs[(il, 'ffn')]
                 for x, q in (('mixed', 'mq'), ('h', 'hq')):
                     y = G.quantize_q8_1(b[x]); bad[f'{q} = q8_1({x})'] = bad.get(f'{q} = q8_1({x})', 0) + (not torch.equal(y, b[q][:y.numel()]))
-                for n in ('mixed', 'h', 'ids', 'wts'): rec.setdefault(f'L{il}.ffn.{n}', []).append(b[n].cpu().clone())
+                for n in ('mixed', 'h', 'ids', 'wts'): rec.setdefault(f'L{il}.ffn.{n}', []).append(b[n].reshape(-1).cpu().clone())   # (flat rows)
     print(f'recorded in {time.time() - t0:.0f} s', flush=True)
     for kind, nb in sorted(bad.items()): check(nb == 0, f'record: {kind}: {nb} of {len(texts) * A.positions * m.nl} rows differ')
     if not ok_all: print('--record: a recording check failed: nothing saved'); print('RESULT FAIL'); sys.exit(1)
+    nv = len(texts) * A.positions
+    for il in range(m.nl):   # [vectors, row]: mixed [D] (the experts' gate / up input), h [k_used * ffn], ids / wts [k_used]
+        for n, w in (('mixed', m.D), ('h', m.k_used * m.ffn), ('ids', m.k_used), ('wts', m.k_used)):
+            assert len(rec[f'L{il}.ffn.{n}']) == nv and rec[f'L{il}.ffn.{n}'][0].shape == (w,), (il, n, rec[f'L{il}.ffn.{n}'][0].shape, w)
     out = dict(meta=dict(model=os.path.basename(A.gguf), texts=[os.path.relpath(p, ROOT) for p in TEXTS], positions=A.positions,
                          nl=int(m.nl), k_used=int(m.k_used), ffn=int(m.ffn), module=str(m.module), tool='benchmarks/q36_gacc.py --record'),
                sites={k: torch.stack(v) for k, v in rec.items()})
@@ -155,6 +159,10 @@ def record_tensor(src, name, op, sets, nvec):
 R_ = torch.load(A.acts, weights_only=False); meta, sites = R_['meta'], R_['sites']
 F = ggufio.GGUFFile(A.gguf)
 KU, FFN, NL = meta['k_used'], meta['ffn'], meta['nl']
+NV = sites['L0.ffn.mixed'].shape[0]; D_ = int(F.T['blk.0.ffn_gate_exps.weight'].shape[0])
+for il in range(NL):
+    for n, w in (('mixed', D_), ('h', KU * FFN), ('ids', KU)):
+        assert tuple(sites[f'L{il}.ffn.{n}'].shape) == (NV, w), (f'L{il}.ffn.{n}', tuple(sites[f'L{il}.ffn.{n}'].shape), (NV, w))
 print(f'{torch.cuda.get_device_name(0)}  {os.path.basename(A.gguf)}  recording {os.path.basename(A.acts)} ({meta["texts"]}, '
       f'{meta["positions"]} positions each)', flush=True)
 ROLES = (('ffn_gate_exps', 'MOE_GU', 'mixed'), ('ffn_up_exps', 'MOE_GU', 'mixed'), ('ffn_down_exps', 'MOE_DOWN', 'h'))
@@ -212,7 +220,7 @@ lsp = [il for il in range(NL) if F.T[f'blk.{il}.ffn_gate_exps.weight'].type == '
 lsp = [lsp[round(k * (len(lsp) - 1) / (GACC_SPEED_LAYERS - 1))] for k in range(GACC_SPEED_LAYERS)]
 T3 = [{r: F.T[f'blk.{il}.{r}.weight'] for r, _, _ in ROLES} for il in lsp]
 capacity.check([0], [sum(t.n_bytes for L in T3 for t in L.values()) / 2 ** 20 + 256], f'q36_gacc speed: {len(lsp)} layers of experts')
-Wd = [{r: torch.from_numpy(np.array(t.data())).to(dev) for r, t in L.items()} for L in T3]
+Wd = [{r: torch.from_numpy(np.array(t.data())).reshape(-1).to(dev) for r, t in L.items()} for L in T3]   # (flat bytes)
 tg, td = T3[0]['ffn_gate_exps'], T3[0]['ffn_down_exps']
 Kg, Rg, E = tg.shape; Kd, Rd, _ = td.shape
 rbg, rbd = Kg // 64 * 18, Kd // 64 * 18
