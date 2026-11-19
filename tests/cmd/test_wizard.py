@@ -11,6 +11,7 @@ import argparse
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -147,8 +148,8 @@ def main():
           f'SETUPS: catalog names, two-card forms the registry has, the start model among what runs ({bad})')
     pkg = os.path.join(PY, 'caminus')
     copies = [os.path.relpath(os.path.join(d, f), pkg) for d, _, fs in os.walk(pkg) for f in fs if f.endswith('.py')
-              and f != 'models.py' and any(t in open(os.path.join(d, f), encoding='utf-8').read() for t in ('22 * 1024', '22528', '22 << 10'))]
-    check(not copies, f'the 24 GB card rule lives in models.CLASS_MIB only (doctor and arch.Coder read card_class) ({copies})')
+              and f != 'models.py' and re.search(r'\b22\s*\*\s*1024\b|\b22528\b|\b22\s*<<\s*10\b', open(os.path.join(d, f), encoding='utf-8').read())]
+    check(not copies, f'the 24 GB card rule lives in models.CLASS_MIB only (doctor and arch.Coder read card_class; this scan covers python/caminus .py files) ({copies})')
     check(models.card_class(22528) == 'XTX' and models.card_class(22527) == 'XT',
           'card_class: 22,528 MiB is a 24 GB card, 22,527 is not (the edge doctor and arch.Coder.fits now read)')
     cls = lambda *mib: models.setup_of([dict(total_mib=x) for x in mib])

@@ -538,8 +538,8 @@ def stage_doctor(S):
         R = D.Report()
         D.check_gpus(R, root)
         warned = any('needs a 24 GB' in m for lv, area, m in R.rows if area == 'gpu' and lv == 'WARN')
-        check(f'doctor: a pair with a {card0:,} MiB card 0: the Coder warning follows models.card_class',
-              warned == (M.card_class(card0) != 'XTX'), str(R.rows)[-300:])
+        check(f'doctor: a pair with a {card0:,} MiB card 0: the Coder warning below 22,528 MiB (the 24 GB line), not above',
+              warned == (card0 < 22528), str(R.rows)[-300:])
     rj = subprocess.run(cam('doctor', '--json'), capture_output=True, text=True, env=env, timeout=300)
     try:
         js = json.loads(rj.stdout); ok = js['result'] == 'FAIL' and all(set(c) == {'level', 'area', 'message'} for c in js['checks'])
