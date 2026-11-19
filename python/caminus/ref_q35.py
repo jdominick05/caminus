@@ -39,6 +39,7 @@ query heads on 2 KV heads, 8 per KV head):
   python -I -m caminus.ref_q35 GGUF "prompt" [--new 2] [--threads 16]"""
 import argparse
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -74,8 +75,11 @@ class Q35Ref:
         self.F = F = ggufio.GGUFFile(path)
         if F.arch not in ('qwen35', 'qwen35moe'): raise ValueError(f'ref_q35: architecture {F.arch!r} (qwen35 and qwen35moe only)')
         self.moe = F.arch == 'qwen35moe'
-        routers = sum(n.endswith('ffn_gate_inp.weight') for n in F.T)
-        if not self.moe and routers: raise ValueError('ref_q35: a router tensor in a qwen35 file: not the dense line')
+        if not self.moe and any(n.endswith('ffn_gate_inp.weight') for n in F.T):
+            raise ValueError('ref_q35: a router tensor in a qwen35 file: not the dense line')
+        unread = sorted(n for n in F.T if re.search(r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?)$', n))
+        if unread:   # (scale tensors and fused gate|up experts: forms this reference does not read)
+            raise ValueError(f'ref_q35: tensors this reference does not read: {unread[:4]}{" ..." if len(unread) > 4 else ""}')
         self.L, self.D = trunk_blocks(F), int(F.hp('embedding_length'))
         self.H, self.HKV, self.HD = int(F.hp('attention.head_count')), int(F.hp('attention.head_count_kv')), int(F.hp('attention.key_length'))
         self.NK, self.NV, self.S, self.DC = int(F.hp('ssm.group_count')), int(F.hp('ssm.time_step_rank')), int(F.hp('ssm.state_size')), int(F.hp('ssm.conv_kernel'))
@@ -85,10 +89,13 @@ class Q35Ref:
         if int(F.hp('ssm.inner_size')) != self.NV * self.S or self.NV % self.NK or self.H % self.HKV or self.nrot > self.HD or self.nrot % 2:
             raise ValueError('ref_q35: head counts / sizes this reference does not read')
         if self.moe:
+            if any(np.ndim(F.hp(k)) for k in ('expert_count', 'expert_used_count', 'expert_feed_forward_length', 'expert_shared_feed_forward_length')):
+                raise ValueError('ref_q35: per-block expert counts or widths (an array-valued expert key)')
+            routers = sum(f'blk.{i}.ffn_gate_inp.weight' in F.T for i in range(self.L))   # (the trunk's: not an MTP block's)
             self.E, self.KU = int(F.hp('expert_count')), int(F.hp('expert_used_count'))
             self.FF, self.FFS = int(F.hp('expert_feed_forward_length')), int(F.hp('expert_shared_feed_forward_length'))
             if routers != self.L or not 0 < self.KU <= self.E:
-                raise ValueError(f'ref_q35: {routers} router tensors for {self.L} blocks, {self.KU} of {self.E} experts')
+                raise ValueError(f'ref_q35: {routers} router tensors in {self.L} trunk blocks, {self.KU} of {self.E} experts')
         sec = F.hp('rope.dimension_sections')
         if sec is not None and 2 * sum(int(v) for v in sec) != self.nrot:
             raise ValueError(f'ref_q35: rope sections {list(sec)} do not cover the {self.nrot} rotated dims')

@@ -11,8 +11,9 @@ expert), CPU only, no model file:
   - one Gated DeltaNet step and one attention step against the block's definition written out per head and per value here
   - qwen35moe: the state carries as above (one chunk == token by token == uneven pieces), the MoE FFN over 5 tokens
     against its definition written out per token and per expert here (softmax router, top 2, renormalized weights, the
-    shared expert gated by a sigmoid), the routes feed() reports are those, and a qwen35moe file without its routers is
-    refused
+    shared expert gated by a sigmoid), the routes feed() reports are those; a multi-token-prediction block's router is
+    not counted; a file with a block missing its router, a scale tensor, fused gate|up experts or an array-valued
+    expert width is refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/test_ref_q35.py --scratch DIR"""
 import argparse, os, re, struct, sys
@@ -196,9 +197,17 @@ for n in range(5):
     s_ = silu(Wd('blk.1.ffn_gate_shexp.weight') @ h) * (Wd('blk.1.ffn_up_shexp.weight') @ h)
     want[n] = y + sig(Wd('blk.1.ffn_gate_inp_shexp.weight')[0] @ h) * (Wd('blk.1.ffn_down_shexp.weight') @ s_)
 check(ok_routes and rel(got, want) < 1e-12, f'qwen35moe: the MoE FFN over 5 tokens == its definition per token and per expert, routes too (rel {rel(got, want):.1e})')
-PM2 = os.path.join(A.scratch, 'tiny-q35moe-norouter.gguf'); write_gguf(PM2, META_M, {k: v for k, v in TM.items() if k != 'blk.2.ffn_gate_inp.weight'})
-try: ref_q35.Q35Ref(PM2); refused = False
-except ValueError: refused = True
-check(refused, 'a qwen35moe file with a block missing its router is refused')
+PM1 = os.path.join(A.scratch, 'tiny-q35moe-mtp.gguf')
+write_gguf(PM1, META_M, dict(TM, **{f'blk.{len(KINDS)}.ffn_gate_inp.weight': w(E, D), f'blk.{len(KINDS)}.attn_norm.weight': 1 + w(D, sc=0.1)}))
+m1 = ref_q35.Q35Ref(PM1, threads=2)
+check(m1.L == len(KINDS) and np.array_equal(m1.feed(ids), fm), 'qwen35moe: a multi-token-prediction block with its own router is accepted and not read (the same logits)')
+for what, meta, tens in (('a block missing its router', META_M, {k: v for k, v in TM.items() if k != 'blk.2.ffn_gate_inp.weight'}),
+                         ('a scale tensor (ffn_down_exps_s)', META_M, dict(TM, **{'blk.0.ffn_down_exps_s.weight': w(E, D)})),
+                         ('a fused ffn_gate_up_exps', META_M, dict(TM, **{'blk.0.ffn_gate_up_exps.weight': w(E, 2 * FFE, D)})),
+                         ('an array-valued expert_feed_forward_length', dict(META_M, **{'qwen35moe.expert_feed_forward_length': [FFE] * len(KINDS)}), TM)):
+    PM2 = os.path.join(A.scratch, 'tiny-q35moe-bad.gguf'); write_gguf(PM2, meta, tens)
+    try: ref_q35.Q35Ref(PM2); refused = False
+    except ValueError: refused = True
+    check(refused, f'a qwen35moe file with {what} is refused')
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
