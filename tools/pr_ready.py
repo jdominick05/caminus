@@ -1,9 +1,9 @@
-"""Is a pull request into `testing` ready to merge? (Reads GitHub through the `gh` CLI; changes nothing, posts nothing.)
+"""Is a pull request into `testing` (or `ember-next`) ready to merge? (Reads GitHub through the `gh` CLI; changes nothing, posts nothing.)
 
   python -I tools/pr_ready.py N [-R OWNER/REPO] [--wait SECS] [--reviewer LOGIN] [--allow-base-merges]
 
 Checks, each printed PASS / FAIL, then RESULT PASS / RESULT FAIL (exit 0 / 1):
-- base: the pull request targets `testing`, is open, is not a draft and has no merge conflict;
+- base: the pull request targets one of `BASES` (testing, or ember-next for the Ember harness), is open, is not a draft and has no merge conflict;
 - ci: every check on the head commit has finished and succeeded;
 - review: the review bot has looked at the HEAD commit and left nothing open there. It does not look again after a push:
   a head it has not seen needs a comment asking for a review (the script names the commit it last saw). A merge of

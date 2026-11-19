@@ -227,7 +227,7 @@ check(rc == 1 and 'base is main' in line(out, 'base'), '--metadata still checks 
 rc, out, _, _ = run(view(baseRefName='main'))
 check(rc == 1 and 'base is main' in line(out, 'base'), 'a pull request into another branch fails')
 rc, out, _, _ = run(view(baseRefName='ember-next'), '--metadata')
-check('PASS base' in out or line(out, 'base').startswith('PASS'), 'a pull request into ember-next (the Ember integration branch) passes the base check')
+check(line(out, 'base').startswith('PASS'), 'a pull request into ember-next (the Ember integration branch) passes the base check')
 rc, out, _, _ = run(view(isDraft=True, mergeable='CONFLICTING'))
 check(rc == 1 and 'a draft' in line(out, 'base') and 'merge conflict' in line(out, 'base'), 'a draft with a conflict fails on both')
 rc, out, _, _ = run(view(state='MERGED'))
