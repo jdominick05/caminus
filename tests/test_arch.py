@@ -9,13 +9,16 @@ needs Qwen35One's shapes of a real model: tools/serve_smoke1.py covers it on the
 import argparse
 import importlib.util
 import os
-import struct
 import sys
 import time
 import types
 
+import numpy as np
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'python'))
+sys.path.insert(0, os.path.join(ROOT, 'tests'))   # tests/tiny_gguf.py
+import tiny_gguf  # noqa: E402
 os.environ['CAMINUS_ALLOW_PAUSED'] = '1'   # (the paused models' entries are fixtures here: tests/cmd/test_manage.py checks the pause)
 
 FAILS = []
@@ -27,33 +30,10 @@ def check(ok, what):
         FAILS.append(what)
 
 
-def gguf_str(s):
-    b = s.encode()
-    return struct.pack('<Q', len(b)) + b
-
-
-def gguf_value(v):
-    if isinstance(v, str): return struct.pack('<I', 8) + gguf_str(v)
-    if isinstance(v, float): return struct.pack('<If', 6, v)
-    return struct.pack('<II', 4, int(v))
-
-
 def write_gguf(path, arch, kv, tensors):
-    """a GGUF v3 file: general.architecture = arch, kv {key: int (u32) | float (f32) | str}, tensors [(name, ne0, ne1)] in
-    F32 (zeros)"""
-    kvs = [('general.architecture', arch)] + list(kv.items())
-    out = b'GGUF' + struct.pack('<IQQ', 3, len(tensors), len(kvs))
-    for k, v in kvs:
-        out += gguf_str(k) + gguf_value(v)
-    off = 0
-    for name, ne0, ne1 in tensors:
-        out += gguf_str(name) + struct.pack('<IQQIQ', 2, ne0, ne1, 0, off)
-        off += (ne0 * ne1 * 4 + 31) // 32 * 32
-    out += b'\0' * ((-len(out)) % 32)
-    for name, ne0, ne1 in tensors:
-        out += b'\0' * ((ne0 * ne1 * 4 + 31) // 32 * 32)
-    with open(path, 'wb') as f:
-        f.write(out)
+    """tests/tiny_gguf.py's file: general.architecture = arch, kv {key: int (u32) | float (f32) | str}, tensors
+    [(name, ne0, ne1)] in F32 (zeros)"""
+    tiny_gguf.write_gguf(path, dict({'general.architecture': arch}, **kv), {n: np.zeros((ne1, ne0), np.float32) for n, ne0, ne1 in tensors})
 
 
 def main():

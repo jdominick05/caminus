@@ -35,8 +35,19 @@ class Golden:
         r = [r for r in self.idx if int(r[0]) == step and r[2] == name][nth]; ne = [int(v) for v in r[4:8]]
         return np.fromfile(f'{self.gd}/{r[8]}', dtype=np.float32 if r[3] == 'f32' else np.int32).reshape(ne[::-1]).squeeze()
 
+    def get(self, step, name, nth=0):
+        """golden(step, name, nth), or None when the dump lacks it (a layer not dumped, a non-contiguous view it skipped)"""
+        r = [r for r in self.idx if int(r[0]) == step and r[2] == name]
+        return None if len(r) <= nth or r[nth][8].startswith('skipped') else self(step, name, nth)
+
     def tokens(self):
         return [int(v) for v in open(f'{self.gd}/tokens.txt').read().split()]
+
+
+def nrel(a, b):
+    """the largest over positions (the first axis) of ||a - b|| / ||b||: a block's error against llama.cpp's at each step"""
+    a = np.asarray(a, np.float64).reshape(len(a), -1); b = np.asarray(b, np.float64).reshape(len(b), -1)
+    return float(max(np.linalg.norm(x - y) / max(np.linalg.norm(y), 1e-30) for x, y in zip(a, b)))
 
 
 class Model:

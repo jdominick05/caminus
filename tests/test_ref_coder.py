@@ -7,15 +7,20 @@ positions), CPU only, no model file:
   - causality: a position's logits do not depend on later tokens; reset() returns to the start
   - the same model written as two shards (the PLE table alone in the second, as the Coder's file) gives the same bits
   - the hyper-connection mix and combine, and the PLE parts over 6 tokens (an EOS among them: the n-gram cut), against
-    their definitions written out per token, per stream and per tap here (the n-gram hash in Python integers)
+    their definitions written out per token, per stream and per tap here (the n-gram hash in Python integers); one Gated
+    DeltaNet block over 5 tokens against tests/tiny_gguf.py's per-head definition with the Coder's SIGMOID output gate
+    (and not with qwen35's silu: the check sees the gate)
   - dense attention is the model's only up to top_k + ratio - 1 positions: a feed past that is refused, one up to it is not
-  - a qwen35 file and a file with two PLE layers are refused
+  - refused: a qwen35 file, two PLE layers, a multi-token-prediction block (declared, or its tensors present), a .scale
+    tensor, an output_norm, rope.scaling keys, IMRoPE sections that leave a rotated pair out, a grouped PLE table
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/test_ref_coder.py --scratch DIR"""
-import argparse, os, struct, sys
+import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # tests/tiny_gguf.py
 import numpy as np
 from caminus import ref_coder
+from tiny_gguf import gdn_definition, write_gguf
 
 ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True); A = ap.parse_args()
 os.makedirs(A.scratch, exist_ok=True)
@@ -25,38 +30,6 @@ ok = True
 def check(c, msg):
     global ok
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
-
-
-# ---- a minimal GGUF v3 writer (F32 tensors; the value types this file needs) -------------------------------------------
-U32, I32, F32, BOOL, STR, ARR, U64 = 4, 5, 6, 7, 8, 9, 10
-
-
-def _s(x):
-    b = x.encode(); return struct.pack('<Q', len(b)) + b
-
-
-def _val(v):
-    if isinstance(v, bool): return struct.pack('<I?', BOOL, v)
-    if isinstance(v, int): return struct.pack('<II', U32, v)
-    if isinstance(v, float): return struct.pack('<If', F32, v)
-    if isinstance(v, str): return struct.pack('<I', STR) + _s(v)
-    if isinstance(v, tuple):   # (a uint64 array)
-        return struct.pack('<IIQ', ARR, U64, len(v)) + b''.join(struct.pack('<Q', e) for e in v)
-    et = BOOL if isinstance(v[0], bool) else I32
-    return struct.pack('<IIQ', ARR, et, len(v)) + b''.join(struct.pack('<?' if et == BOOL else '<i', e) for e in v)
-
-
-def write_gguf(path, meta, tensors):
-    """tensors: name -> float32 array [rows, K] (written with dims innermost first) or [n]"""
-    head = struct.pack('<4sIQQ', b'GGUF', 3, len(tensors), len(meta)) + b''.join(_s(k) + _val(v) for k, v in meta.items())
-    info, data = b'', b''
-    for name, a in tensors.items():
-        a = np.ascontiguousarray(a, np.float32); dims = a.shape[::-1]
-        info += _s(name) + struct.pack('<I', len(dims)) + b''.join(struct.pack('<Q', d) for d in dims) + struct.pack('<IQ', 0, len(data))
-        data += a.tobytes(); data += b'\0' * (-len(data) % 32)
-    blob = head + info
-    with open(path, 'wb') as f:
-        f.write(blob + b'\0' * (-len(blob) % 32) + data)
 
 
 D, V, S, NK, NV, H, HKV, HD, NROT, DC = 16, 50, 4, 2, 4, 4, 2, 8, 4, 4
@@ -173,16 +146,29 @@ for n in range(6):
 check(rel(gv, wgv) < 1e-12 and rel(co, wco) < 1e-12,
       f'the PLE gated value and conv (taps {NG} apart, an EOS cut) == their definitions per token ({rel(gv, wgv):.1e}, {rel(co, wco):.1e})')
 
+m.reset(); hs = rng.standard_normal((5, D)); got = m._gdn(0, hs)
+want = gdn_definition(Wd, 'blk.0.', hs, NK, NV, S, DC, eps, sig); other_gate = gdn_definition(Wd, 'blk.0.', hs, NK, NV, S, DC, eps, silu)
+check(rel(got, want) < 1e-12 and rel(got, other_gate) > 1e-2,
+      f'a Gated DeltaNet block over 5 tokens == its per-head definition with a sigmoid output gate ({rel(got, want):.1e}; silu: {rel(got, other_gate):.1e})')
+
 # ---- the dense-exact limit and the refusals --------------------------------------------------------------------------
 m.reset(); m.feed(ids)
 try: m.feed([4]); refused = False
 except ValueError as e: refused = 'depth reference' in str(e)
 check(refused, f'position {m.limit} (past top_k + ratio - 1) is refused, naming the depth reference; positions 0 .. {m.limit - 1} were not')
-P3 = os.path.join(A.scratch, 'tiny-qwen35.gguf'); write_gguf(P3, dict(META, **{'general.architecture': 'qwen35'}), T)
-P4 = os.path.join(A.scratch, 'tiny-coder-2ple.gguf'); write_gguf(P4, dict(META, **{A_ + 'ple.layers': [1, 2]}), T)
-for path, what in ((P3, 'a qwen35 file'), (P4, 'a file with two PLE layers')):
-    try: ref_coder.CoderRef(path); refused = False
-    except ValueError: refused = True
-    check(refused, f'{what} is refused')
+bad = [('a qwen35 file', {'general.architecture': 'qwen35'}, {}),
+       ('a file with two PLE layers', {A_ + 'ple.layers': [1, 2]}, {}),
+       ('a declared multi-token-prediction block', {A_ + 'nextn_predict_layers': 1}, {}),
+       ('a multi-token-prediction block\'s tensors', {}, {f'blk.{len(KINDS)}.ffn_gate_inp.weight': w(E, D)}),
+       ('a .scale tensor', {}, {'blk.0.ffn_down_exps.scale': w(E)}),
+       ('an output_norm', {}, {'output_norm.weight': w(D)}),
+       ('rope.scaling keys', {A_ + 'rope.scaling.type': 'yarn', A_ + 'rope.scaling.factor': 4.0}, {}),
+       ('IMRoPE sections that leave pair 1 unturned', {A_ + 'rope.dimension_sections': [2, 0, 0, 0]}, {}),
+       ('a grouped PLE table (rows of two heads)', {}, {tab: w(sum(VOC) // 2, 2 * PDIM, sc=1.0)})]
+for k, (what, meta, extra) in enumerate(bad):
+    path = os.path.join(A.scratch, f'tiny-coder-bad{k}.gguf'); write_gguf(path, dict(META, **meta), dict(T, **extra))
+    try: ref_coder.CoderRef(path); refused = ''
+    except ValueError as e: refused = str(e)
+    check(refused, f'{what} is refused ({refused[:90]})')
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)

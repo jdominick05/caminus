@@ -38,18 +38,16 @@ The math (x the streams [N, 4, D], float64; rms over D per stream, eps the file'
   n-gram ids (PLE, caminus.prefill.feed.NgramIds): context token s back = EOS (ple.eos_token_id) from the first one before
   the sequence start or equal to EOS on; mixed = XOR_j (ctx_j * mult_j) mod 2^64; row = mixed % vocab_h + offset_h.
 
-  python -I -m caminus.ref_coder GGUF "prompt" [--new 2] [--threads 16]"""
-import argparse
+  python -I -m caminus.ref_coder GGUF "prompt" [--new 2] [--threads 16]     (caminus.ref_q35's command line)"""
 import os
 import re
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from caminus import ggufio, own_dequant
-from caminus.ref_q35 import HEAD_ROWS, Q35Ref, sigmoid, silu
+from caminus.ref_q35 import Q35Ref, sigmoid, silu
 
 
 def shards(path):
@@ -63,6 +61,7 @@ def shards(path):
 
 class CoderRef(Q35Ref):
     gdn_gate = staticmethod(sigmoid)     # build_norm_gated: the Coder's one numerical difference from Qwen3.5's GDN
+    UNREAD = Q35Ref.UNREAD[:-2] + r'|output_norm\.weight)$'   # (and an output norm: the Coder's head is the output_hc mix)
 
     def __init__(self, path, threads=None):
         paths = shards(path)
@@ -78,31 +77,11 @@ class CoderRef(Q35Ref):
         if int(F.meta.get('split.tensors.count', len(F.T))) != len(F.T):
             raise ValueError(f'ref_coder: {len(F.T)} tensors, the header says {F.meta["split.tensors.count"]}')
         hp = F.hp
-        self.L, self.D = int(hp('block_count')), int(hp('embedding_length'))
-        if int(hp('nextn_predict_layers') or 0) or any(n.startswith(f'blk.{self.L}.') for n in F.T):
+        L = int(hp('block_count'))
+        if int(hp('nextn_predict_layers') or 0) or any(n.startswith(f'blk.{L}.') for n in F.T):
             raise ValueError('ref_coder: a multi-token-prediction block (this reference reads the trunk only)')
-        self.H, self.HKV, self.HD = int(hp('attention.head_count')), int(hp('attention.head_count_kv')), int(hp('attention.key_length'))
-        self.NK, self.NV, self.S, self.DC = int(hp('ssm.group_count')), int(hp('ssm.time_step_rank')), int(hp('ssm.state_size')), int(hp('ssm.conv_kernel'))
-        self.eps, self.base, self.nrot = float(hp('attention.layer_norm_rms_epsilon')), float(hp('rope.freq_base')), int(hp('rope.dimension_count'))
-        rec = hp('attention.recurrent_layers'); fai = int(hp('full_attention_interval', 4))
-        self.gdn = [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(self.L)]
-        if int(hp('ssm.inner_size')) != self.NV * self.S or self.NV % self.NK or self.H % self.HKV or self.nrot > self.HD or self.nrot % 2:
-            raise ValueError('ref_coder: head counts / sizes this reference does not read')
-        if int(hp('attention.value_length', self.HD)) != self.HD: raise ValueError('ref_coder: value_length != key_length')
-        sec = hp('rope.dimension_sections')
-        if sec is not None and 2 * sum(int(v) for v in sec) != self.nrot:
-            raise ValueError(f'ref_coder: rope sections {list(sec)} do not cover the {self.nrot} rotated dims')
-        if any(k.startswith(f'{F.arch}.rope.scaling') for k in F.meta): raise ValueError('ref_coder: rope.scaling keys (not read)')
-        unread = sorted(n for n in F.T if re.search(r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?|output_norm\.weight)$', n))
-        if unread: raise ValueError(f'ref_coder: tensors this reference does not read: {unread[:4]}')
-        # the MoE FFN (Q35Ref._moe reads E, KU, FF, D)
-        if any(np.ndim(hp(k)) for k in ('expert_count', 'expert_used_count', 'expert_feed_forward_length', 'expert_shared_feed_forward_length')):
-            raise ValueError('ref_coder: per-block expert counts or widths (an array-valued expert key)')
-        self.moe = True
-        self.E, self.KU = int(hp('expert_count')), int(hp('expert_used_count'))
-        self.FF, self.FFS = int(hp('expert_feed_forward_length')), int(hp('expert_shared_feed_forward_length'))
-        if not 0 < self.KU <= self.E or any(f'blk.{i}.ffn_gate_inp.weight' not in F.T for i in range(self.L)):
-            raise ValueError(f'ref_coder: {self.KU} of {self.E} experts, or a block without its router')
+        self._trunk('ref_coder', L)
+        self.moe = True; self._experts('ref_coder')
         # hyper-connections
         self.HC, self.HLR = int(hp('hyper_connection.count')), int(hp('hyper_connection.low_rank'))
         if self.HC < 2: raise ValueError(f'ref_coder: hyper_connection.count {self.HC}')
@@ -136,15 +115,11 @@ class CoderRef(Q35Ref):
         self.ple_c = np.zeros((self.ple_hist, self.HC * self.D)) if self.ple_layers else None   # the PLE conv's earlier rows
 
     # -- hyper-connections -----------------------------------------------------------------------------------------------
-    def hc_rms(self, x, w):
-        """x [N, HC, D] normed over D per stream, times the [HC, D] gamma (w: the tensor name)"""
-        return x / np.sqrt((x * x).mean(axis=-1, keepdims=True) + self.eps) * self.vec(w).reshape(self.HC, self.D)
-
     def hc_mix(self, x, p, inject=True):
         """(the block input [N, D], the stream weights' logits [N, HC] or None) from the streams x [N, HC, D]; p: the tensor
         prefix ('blk.3.hc_attn', 'blk.3.hc_ffn', 'output_hc')"""
         N, HC = x.shape[0], self.HC
-        xn = self.hc_rms(x, p + '_norm.weight'); f = xn.reshape(N, HC * self.D)
+        xn = self.rms(x, self.vec(p + '_norm.weight').reshape(HC, self.D)); f = xn.reshape(N, HC * self.D)
         self._see('hc down / inject input (hc_norm)', f)
         lo = silu((f @ self.W(p + '_down.weight').T) / HC)
         gate = (lo @ self.W(p + '_up.weight').T).reshape(N, HC, self.D)
@@ -173,11 +148,11 @@ class CoderRef(Q35Ref):
         """(the gated value, silu(conv)), each [N, HC, D]; the conv's history moves on by N rows"""
         p, N, HC, D = f'blk.{il}.', x.shape[0], self.HC, self.D
         emb = self.ple_rows(p0, p0 + N)
-        key = self.hc_rms((emb @ self.W(p + 'ple_key.weight').T).reshape(N, HC, D), p + 'ple_norm_key.weight')
-        query = self.hc_rms(x, p + 'ple_norm_query.weight')
+        key = self.rms((emb @ self.W(p + 'ple_key.weight').T).reshape(N, HC, D), self.vec(p + 'ple_norm_key.weight').reshape(HC, D))
+        query = self.rms(x, self.vec(p + 'ple_norm_query.weight').reshape(HC, D))
         s = (key * query).sum(axis=-1) / np.sqrt(D)                          # [N, HC]
         gated = (emb @ self.W(p + 'ple_value.weight').T)[:, None, :] * sigmoid(np.sign(s) * np.sqrt(np.maximum(np.abs(s), 1e-6)))[:, :, None]
-        c = self.hc_rms(gated, p + 'ple_norm_conv.weight').reshape(N, HC * D)
+        c = self.rms(gated, self.vec(p + 'ple_norm_conv.weight').reshape(HC, D)).reshape(N, HC * D)
         win = np.concatenate([self.ple_c, c])                                # the earlier rows, then this chunk's
         w = self.W(p + 'ple_conv1d.weight')                                  # [channels, taps]
         G, K = self.ngram.n_gram, self.ple_kern
@@ -213,30 +188,9 @@ class CoderRef(Q35Ref):
         self.pos += N
         M = N if last is None else min(N, int(last))
         hN, _ = self.hc_mix(x[N - M:], 'output_hc', inject=False); self._see('head input (output_hc mix)', hN)
-        R, _ = self.F.T['output.weight'].rows()
-        return np.concatenate([hN @ self.W('output.weight', r0, min(R, r0 + HEAD_ROWS)).T for r0 in range(0, R, HEAD_ROWS)], axis=1)
-
-
-def main(argv=None):
-    from caminus.bpe import BPE
-    ap = argparse.ArgumentParser(description="float64 host forward of the Coder (qwen4exp GGUF) on Caminus's own reader and decoders")
-    ap.add_argument('gguf'); ap.add_argument('prompt'); ap.add_argument('--new', type=int, default=2)
-    ap.add_argument('--threads', type=int, default=None)
-    A = ap.parse_args(argv)
-    m = CoderRef(A.gguf, threads=A.threads); tk = BPE(m.F.meta)
-    ids = tk.encode(A.prompt)
-    print(f'prompt {A.prompt!r} -> {len(ids)} tokens {ids}; {m.L} layers ({sum(m.gdn)} Gated DeltaNet, {m.L - sum(m.gdn)} attention)', flush=True)
-    t0 = time.time(); out = []; chunk = ids
-    for i in range(A.new):
-        lg = m.feed(chunk, last=1)[0]
-        pr = np.exp(lg - lg.max()); pr /= pr.sum()
-        top = np.argsort(-lg)[:5]
-        print(f'  next token {i}: ' + ', '.join(f'{tk.decode([int(j)])!r} {pr[j]:.3f}' for j in top) +
-              f'   ({time.time() - t0:.0f} s)', flush=True)
-        nxt = int(top[0]); out.append(nxt); chunk = [nxt]
-        if nxt == tk.eos: break
-    print(f'greedy: {A.prompt!r} + {tk.decode(out)!r}')
+        return self.head(hN)
 
 
 if __name__ == '__main__':
+    from caminus.ref_q35 import main   # (it picks this forward for a qwen4exp file)
     sys.exit(main())

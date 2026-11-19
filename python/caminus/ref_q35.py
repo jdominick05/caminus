@@ -36,7 +36,7 @@ query heads on 2 KV heads, 8 per KV head):
       + sigmoid(Wsg . h) Wdown_s (silu(Wgate_s h) * (Wup_s h))     (Wsg: ffn_gate_inp_shexp, one row)
   logits = Whead (rms(x) * output_norm)
 
-  python -I -m caminus.ref_q35 GGUF "prompt" [--new 2] [--threads 16]"""
+  python -I -m caminus.ref_q35 GGUF "prompt" [--new 2] [--threads 16]     (a qwen4exp file: caminus.ref_coder's forward)"""
 import argparse
 import os
 import re
@@ -70,8 +70,18 @@ def trunk_blocks(F):
     return int(F.hp('block_count')) - int(F.hp('nextn_predict_layers') or 0)
 
 
+def rope_sections_ok(sec, nrot):
+    """does IMRoPE with these sections rotate every rotated pair of a text position? llama.cpp's rope_multi (imrope) gives
+    pair s (s < nrot / 2) section s % 3 only while s < 3 * sections[s % 3], else the fourth position component, which a text
+    token holds as 0 (pair s then does not turn); the three sections' positions are a text token's own position, so a file
+    whose sections cover every pair is NEOX RoPE on text (what rope() computes), and one that leaves a pair out is not"""
+    sec = [int(v) for v in sec]
+    return 2 * sum(sec) == nrot and all(s < 3 * sec[s % 3] for s in range(nrot // 2))
+
+
 class Q35Ref:
     gdn_gate = staticmethod(silu)   # the Gated DeltaNet output gate on z (the Coder's reference, caminus.ref_coder: sigmoid)
+    UNREAD = r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?)$'   # tensor names of forms no reference here reads
 
     def __init__(self, path, threads=None):
         self.F = F = ggufio.GGUFFile(path)
@@ -79,31 +89,43 @@ class Q35Ref:
         self.moe = F.arch == 'qwen35moe'
         if not self.moe and any(n.endswith('ffn_gate_inp.weight') for n in F.T):
             raise ValueError('ref_q35: a router tensor in a qwen35 file: not the dense line')
-        unread = sorted(n for n in F.T if re.search(r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?)$', n))
-        if unread:   # (scale tensors and fused gate|up experts: forms this reference does not read)
-            raise ValueError(f'ref_q35: tensors this reference does not read: {unread[:4]}{" ..." if len(unread) > 4 else ""}')
-        self.L, self.D = trunk_blocks(F), int(F.hp('embedding_length'))
-        self.H, self.HKV, self.HD = int(F.hp('attention.head_count')), int(F.hp('attention.head_count_kv')), int(F.hp('attention.key_length'))
-        self.NK, self.NV, self.S, self.DC = int(F.hp('ssm.group_count')), int(F.hp('ssm.time_step_rank')), int(F.hp('ssm.state_size')), int(F.hp('ssm.conv_kernel'))
-        self.eps, self.base, self.nrot = float(F.hp('attention.layer_norm_rms_epsilon')), float(F.hp('rope.freq_base')), int(F.hp('rope.dimension_count'))
-        rec = F.hp('attention.recurrent_layers'); fai = int(F.hp('full_attention_interval', 4))
-        self.gdn = [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(self.L)]
-        if int(F.hp('ssm.inner_size')) != self.NV * self.S or self.NV % self.NK or self.H % self.HKV or self.nrot > self.HD or self.nrot % 2:
-            raise ValueError('ref_q35: head counts / sizes this reference does not read')
-        if self.moe:
-            if any(np.ndim(F.hp(k)) for k in ('expert_count', 'expert_used_count', 'expert_feed_forward_length', 'expert_shared_feed_forward_length')):
-                raise ValueError('ref_q35: per-block expert counts or widths (an array-valued expert key)')
-            routers = sum(f'blk.{i}.ffn_gate_inp.weight' in F.T for i in range(self.L))   # (the trunk's: not an MTP block's)
-            self.E, self.KU = int(F.hp('expert_count')), int(F.hp('expert_used_count'))
-            self.FF, self.FFS = int(F.hp('expert_feed_forward_length')), int(F.hp('expert_shared_feed_forward_length'))
-            if routers != self.L or not 0 < self.KU <= self.E:
-                raise ValueError(f'ref_q35: {routers} router tensors in {self.L} trunk blocks, {self.KU} of {self.E} experts')
-        sec = F.hp('rope.dimension_sections')
-        if sec is not None and 2 * sum(int(v) for v in sec) != self.nrot:
-            raise ValueError(f'ref_q35: rope sections {list(sec)} do not cover the {self.nrot} rotated dims')
+        self._trunk('ref_q35', trunk_blocks(F))
+        if self.moe: self._experts('ref_q35')
         self.pool = ThreadPoolExecutor(threads or min(16, os.cpu_count() or 1))
         self.census = None   # a dict: gets the largest |value| of each matvec input kind (and of the residual stream)
         self.reset()
+
+    def _trunk(self, tag, L):
+        """the trunk's header (L blocks): the sizes, the block kinds and the RoPE; refuses forms this reference does not read
+        (tag: the error messages' module)"""
+        F, hp = self.F, self.F.hp
+        unread = sorted(n for n in F.T if re.search(self.UNREAD, n))
+        if unread:   # (scale tensors, fused gate|up experts; the Coder's subclass adds output_norm)
+            raise ValueError(f'{tag}: tensors this reference does not read: {unread[:4]}{" ..." if len(unread) > 4 else ""}')
+        self.L, self.D = L, int(hp('embedding_length'))
+        self.H, self.HKV, self.HD = int(hp('attention.head_count')), int(hp('attention.head_count_kv')), int(hp('attention.key_length'))
+        self.NK, self.NV, self.S, self.DC = int(hp('ssm.group_count')), int(hp('ssm.time_step_rank')), int(hp('ssm.state_size')), int(hp('ssm.conv_kernel'))
+        self.eps, self.base, self.nrot = float(hp('attention.layer_norm_rms_epsilon')), float(hp('rope.freq_base')), int(hp('rope.dimension_count'))
+        rec = hp('attention.recurrent_layers'); fai = int(hp('full_attention_interval', 4))
+        self.gdn = [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(self.L)]
+        if int(hp('ssm.inner_size')) != self.NV * self.S or self.NV % self.NK or self.H % self.HKV or self.nrot > self.HD or self.nrot % 2:
+            raise ValueError(f'{tag}: head counts / sizes this reference does not read')
+        if int(hp('attention.value_length', self.HD)) != self.HD: raise ValueError(f'{tag}: value_length != key_length')
+        sec = hp('rope.dimension_sections')
+        if sec is not None and not rope_sections_ok(sec, self.nrot):
+            raise ValueError(f'{tag}: rope sections {[int(v) for v in sec]} do not rotate all {self.nrot // 2} pairs of a text position')
+        if any(k.startswith(f'{F.arch}.rope.scaling') for k in F.meta): raise ValueError(f'{tag}: rope.scaling keys (not read)')
+
+    def _experts(self, tag):
+        """the MoE FFN's header (Q35Ref._moe reads E, KU, FF, FFS): one count and width for every block, a router in each"""
+        F, hp = self.F, self.F.hp
+        if any(np.ndim(hp(k)) for k in ('expert_count', 'expert_used_count', 'expert_feed_forward_length', 'expert_shared_feed_forward_length')):
+            raise ValueError(f'{tag}: per-block expert counts or widths (an array-valued expert key)')
+        routers = sum(f'blk.{i}.ffn_gate_inp.weight' in F.T for i in range(self.L))   # (the trunk's: not an MTP block's)
+        self.E, self.KU = int(hp('expert_count')), int(hp('expert_used_count'))
+        self.FF, self.FFS = int(hp('expert_feed_forward_length')), int(hp('expert_shared_feed_forward_length'))
+        if routers != self.L or not 0 < self.KU <= self.E:
+            raise ValueError(f'{tag}: {routers} router tensors in {self.L} trunk blocks, {self.KU} of {self.E} experts')
 
     def reset(self):
         self.pos = 0
@@ -246,16 +268,30 @@ class Q35Ref:
         self.pos += N
         M = N if last is None else min(N, int(last))
         hN = self.rms(x[N - M:], self.vec('output_norm.weight')); self._see('head input (output_norm)', hN)
+        return self.head(hN)
+
+    def head(self, hN):
+        """the logits [M, vocab] of the head's inputs hN [M, D] (output.weight in HEAD_ROWS pieces)"""
         R, _ = self.F.T['output.weight'].rows()
         return np.concatenate([hN @ self.W('output.weight', r0, min(R, r0 + HEAD_ROWS)).T for r0 in range(0, R, HEAD_ROWS)], axis=1)
 
 
+def reference(path, threads=None):
+    """the float64 reference of a GGUF, by its architecture: Q35Ref (qwen35, qwen35moe) or caminus.ref_coder.CoderRef
+    (qwen4exp, the Coder)"""
+    F = ggufio.GGUFFile(path); arch = F.arch; F.close()
+    if arch == 'qwen4exp':
+        from caminus.ref_coder import CoderRef
+        return CoderRef(path, threads=threads)
+    return Q35Ref(path, threads=threads)
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="float64 host forward of a qwen35 / qwen35moe GGUF on Caminus's own reader, decoders and tokenizer")
+    ap = argparse.ArgumentParser(description="float64 host forward of a qwen35 / qwen35moe / qwen4exp GGUF on Caminus's own reader, decoders and tokenizer")
     ap.add_argument('gguf'); ap.add_argument('prompt'); ap.add_argument('--new', type=int, default=2)
     ap.add_argument('--threads', type=int, default=None)
     A = ap.parse_args(argv)
-    m = Q35Ref(A.gguf, threads=A.threads); tk = BPE(m.F.meta)
+    m = reference(A.gguf, threads=A.threads); tk = BPE(m.F.meta)
     ids = tk.encode(A.prompt)
     print(f'prompt {A.prompt!r} -> {len(ids)} tokens {ids}; {m.L} blocks ({sum(m.gdn)} Gated DeltaNet, {m.L - sum(m.gdn)} attention)', flush=True)
     t0 = time.time(); out = []; chunk = ids

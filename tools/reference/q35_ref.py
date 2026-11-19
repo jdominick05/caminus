@@ -4,7 +4,7 @@ float64; the file's architecture picks the forward) for the first N tokens of a 
 q3moe_ref.py's, through the own tokenizer) or of a token file (--tokens: ids separated by whitespace, as gg_golden's
 tokens.txt; the Coder's gate texts are the stored short llama.cpp dumps' e2e_{code,prose,shell}_decode/tokens.txt
 (tools/gates/common.py names their directory), whose one-token-decode logits sit beside them), teacher-forced in one
-layer-major pass. The reference of the model gates (tools/gates/q35_gmodel.py, tools/gates/coder_gmodel.py). CPU only, a
+layer-major pass. The reference of the model gates (tools/gates/q35_gmodel.py: the qwen35 line and the Coder). CPU only, a
 few minutes whatever N is (each matrix is decoded once); it reads the whole file: never run it beside a GPU timing or gate
 (its file reads and page faults evict GPU queues).
   python -I tools/reference/q35_ref.py GGUF OUT.npz [N=128] [--tokens FILE] [--threads T] [--trace] [--census]
@@ -18,10 +18,8 @@ import os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
 import numpy as np
-from caminus import ggufio
 from caminus.bpe import BPE
-from caminus.ref_coder import CoderRef
-from caminus.ref_q35 import Q35Ref
+from caminus.ref_q35 import reference
 from q3moe_ref import TEXT
 
 
@@ -36,8 +34,7 @@ if __name__ == '__main__':
     args = [a for a in sys.argv[1:] if a not in ('--trace', '--census')]; trace = [] if '--trace' in sys.argv else None
     tokfile, threads = opt(args, '--tokens'), opt(args, '--threads')
     path, out = args[0], args[1]; N = int(args[2]) if len(args) > 2 else 128
-    F = ggufio.GGUFFile(path); arch = F.arch; F.close()
-    m = (CoderRef if arch == 'qwen4exp' else Q35Ref)(path, threads=int(threads) if threads else None)
+    m = reference(path, threads=int(threads) if threads else None)
     seq = [int(v) for v in open(tokfile).read().split()][:N] if tokfile else BPE(m.F.meta).encode(TEXT)[:N]
     if len(seq) < N: raise SystemExit(f'the {"token file" if tokfile else "text"} has {len(seq)} tokens < {N}')
     if '--census' in sys.argv: m.census = {}

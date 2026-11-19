@@ -14,7 +14,7 @@ Per dumped layer L (inputs: hc_init, or llama.cpp's l_last of layer L - 1 when i
     KLD does not), the output's ||d|| / ||llama||
   - the head (when layer 47 is dumped): result_norm (the output_hc mix) from l_last-47
 Then the whole forward (CoderRef.feed on the dump's tokens): the streams after each dumped layer (||ref - llama|| /
-||ref|| under the layer's line), the forward's top-10 against llama.cpp's, and the logits (mean KLD(ref || llama) < 0.01,
+||llama|| under the layer's line), the forward's top-10 against llama.cpp's, and the logits (mean KLD(ref || llama) < KLD,
 the same top token at 7 of 8 positions or more).
 The stored q8_0 dump of a code text (8 positions, layers 0, 1, 6-11, 20, 21) is another text: run it with --text none.
 Coverage: the dump must hold NEED (the PLE layer and its neighbours, attention layers early and late, both expert-down
@@ -31,59 +31,49 @@ import os
 import sys
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path[:0] = [os.path.join(HERE, '..', '..', 'python'), os.path.join(HERE, '..', '..', 'tools', 'reference')]
+sys.path[:0] = [os.path.join(HERE, '..', '..', 'python'), os.path.join(HERE, '..', '..', 'tools', 'reference'), HERE]
 from caminus.ref_coder import CoderRef   # noqa: E402
+from golden_util import Golden, nrel   # noqa: E402  (the dump reader; python -I drops the script's directory)
 
 ap = argparse.ArgumentParser(usage=__doc__); ap.add_argument('golden'); ap.add_argument('gguf')
 ap.add_argument('--text', default='public', help="'public': tools/reference/q3moe_ref.py's TEXT; 'none': skip the token check")
 ap.add_argument('--threads', type=int, default=None)
 A = ap.parse_args()
 G = A.golden
-rows = [l.rstrip('\n').split('\t') for l in open(f'{G}/index.tsv')]
+GD = Golden(G)
 RES = []
 NEED = (0, 1, 2, 3, 20, 21, 35, 36, 45, 46, 47)
-# lines: about twice the worst values measured on llama.cpp's stored q8_0-KV dump of layers 0, 1, 6-11, 20, 21 (8 positions of
-# a code text; 2026-11-19): mix / inject 1.4e-7, PLE 2.0e-7, combine 9.0e-8 (float32 rounding: no quantized step), the mixer
-# 2.0e-2 (attention) / 1.2e-2 (GDN), the FFN 1.2e-2 (llama.cpp's q8_1 activations), the forward's drift 3.7e-2 at layer 21,
-# logits KLD 2.8e-4 with 8 / 8. The head and the layers past 21 were not in that dump: RESID is set wider (4x) for them
-TOL = dict(mix=1e-6, inject=1e-6, ple=1e-6, combine=1e-6, mixer=0.05, ffn=0.03, head=1e-6)
-RESID = 0.15          # the forward's streams vs llama.cpp's l_last at any dumped layer
+# lines: about twice the worst values measured (2026-11-19) on two llama.cpp dumps of this file: (s) the stored q8_0-KV dump,
+# 8 positions of a code text, layers 0, 1, 6-11, 20, 21; (d) an f16-KV dump, 12 positions of q3moe_ref's TEXT, the NEED
+# layers (the command above). Measured s / d: mix 1.4e-7 / 1.4e-7, inject 1.4e-7 / 2.4e-7, PLE 2.0e-7 / 2.2e-7, combine
+# 9.0e-8 / 8.6e-8, head - / 8.3e-8 (float32 rounding: no quantized step); the mixer 2.0e-2 / 2.6e-2, the FFN 1.2e-2 / 1.2e-2
+# (llama.cpp's q8_1 activations); the forward's drift 2.5e-2 (s, layers <= 11) and 1.5e-2 (d, layers <= 3), 3.7e-2 (s) and
+# 7.7e-2 (d) at layers 20-21, 1.2e-1 (d, layer 35) past it; logits mean KLD 2.8e-4 (s) and 2.3e-3 (d, prose: llama.cpp's
+# own noise is larger there), top token 8 / 8 and 12 / 12
+TOL = dict(mix=5e-7, inject=5e-7, ple=5e-7, combine=2e-7, mixer=0.055, ffn=0.025, head=2e-7)
+RESID = ((11, 0.05), (21, 0.15), (10 ** 9, 0.25))   # the forward's streams vs llama.cpp's l_last: (up to layer, line)
+KLD = 5e-3            # the forward's logits: mean KLD(ref || llama.cpp) (2 x the f16 dump's; the q8_0 dump's is 10x under it)
 
 
 def ok(name, cond, info=''):
     RES.append(bool(cond)); print(f'{"ok  " if cond else "FAIL"} {name} {info}', flush=True)
 
 
-def get(step, name, k=0):
-    """the k-th tensor named `name` at `step` (names repeat: a layer's two hc mixes), numpy [ne3, ne2, ne1, ne0] squeezed"""
-    hits = [r for r in rows if int(r[0]) == step and r[2] == name]
-    if len(hits) <= k or hits[k][8].startswith('skipped'): return None
-    r = hits[k]; ne = [int(v) for v in r[4:8]]
-    a = np.fromfile(f'{G}/{r[8]}', dtype=np.int32 if r[3] == 'i32' else np.float32)
-    return a.reshape(ne[::-1]).squeeze()
-
-
 def stack(name, k=0):
     """[NS, ...] float64 of a tensor over the dump's steps (None when a step lacks it)"""
-    v = [get(st, name, k) for st in range(NS)]
+    v = [GD.get(st, name, k) for st in range(NS)]
     return None if any(x is None for x in v) else np.stack(v).astype(np.float64)
 
 
-def nrel(a, b):
-    """max over positions of ||a - b|| / ||b||"""
-    a = np.asarray(a, np.float64).reshape(len(a), -1); b = np.asarray(b, np.float64).reshape(len(b), -1)
-    return float(max(np.linalg.norm(x - y) / max(np.linalg.norm(y), 1e-30) for x, y in zip(a, b)))
-
-
 ref = CoderRef(A.gguf, threads=A.threads)
-toks = [int(v) for v in open(f'{G}/tokens.txt').read().split()]
+toks = GD.tokens()
 NS = len(toks); HC, D = ref.HC, ref.D
 if A.text != 'none':
     from caminus.bpe import BPE
     from q3moe_ref import TEXT
     mine = BPE(ref.F.meta).encode(TEXT)[:NS]
     ok(f'the dump\'s {NS} tokens are the own BPE\'s ids of the public text (llama.cpp\'s tokenizer == ours)', mine == toks, f'({toks} / {mine})')
-layers = sorted({int(r[2].rsplit('-', 1)[1]) for r in rows if r[2].startswith('l_last-')})
+layers = sorted({int(r[2].rsplit('-', 1)[1]) for r in GD.idx if r[2].startswith('l_last-')})
 ok(f'the dump holds layers {list(NEED)} (it has {layers})', set(NEED) <= set(layers) and NS >= 10, f'({NS} positions, >= 10)')
 ref.toks = list(toks)          # (the n-gram context of the PLE checks: the dump's tokens)
 hc_init = stack('hc_init')
@@ -118,7 +108,7 @@ for L in layers:
             if ref.gdn[L]: blk = ref._gdn(L, hm_l); blk_l = stack(f'linear_attn_out-{L}')
             else:
                 blk = ref._attn(L, hm_l, np.arange(NS, dtype=np.float64))
-                blk_l = np.stack([[a for a in [get(st, f'attn_output-{L}', k) for k in range(3)] if a is not None and a.size == D][-1] for st in range(NS)]).astype(np.float64)
+                blk_l = np.stack([[a for a in [GD.get(st, f'attn_output-{L}', k) for k in range(3)] if a is not None and a.size == D][-1] for st in range(NS)]).astype(np.float64)
             e = nrel(blk, blk_l); worst['mixer'] = max(worst['mixer'], e)
             ok(f'layer {L}: the {"Gated DeltaNet (sigmoid gate)" if ref.gdn[L] else "attention"} block on llama.cpp\'s hc_mixed', e < TOL['mixer'], f'(||d|| / ||llama|| {e:.2e})')
             after = stack(f'hc_combine-{L}')
@@ -127,7 +117,7 @@ for L in layers:
             e = nrel(y, blk_l); worst['ffn'] = max(worst['ffn'], e)
             same = 0
             for st in range(NS):
-                tk = get(st, f'ffn_moe_topk-{L}').reshape(-1); wn = get(st, f'ffn_moe_weights_norm-{L}').reshape(-1).astype(np.float64)
+                tk = GD.get(st, f'ffn_moe_topk-{L}').reshape(-1); wn = GD.get(st, f'ffn_moe_weights_norm-{L}').reshape(-1).astype(np.float64)
                 pairs += 1
                 if len(tk) == len(top[st]) and set(tk.tolist()) == set(top[st].tolist()):
                     same += 1; ids_same += 1; at = {int(v): i for i, v in enumerate(top[st])}
@@ -150,19 +140,19 @@ print('worst per kind (llama.cpp\'s own inputs; 0 = not in the dump): ' + ', '.j
 ref.reset(); tr, ro = [], []; lg = ref.feed(toks, trace=tr, routes=ro)
 same = pairs = 0; least = ref.KU
 for L in layers:
-    e = nrel(tr[L], stack(f'l_last-{L}'))
-    ok(f'layer {L}: the forward\'s streams vs llama.cpp\'s l_last, max ||d|| / ||llama|| {e:.2e} (< {RESID})', e < RESID)
+    e = nrel(tr[L], stack(f'l_last-{L}')); line = next(v for top, v in RESID if L <= top)
+    ok(f'layer {L}: the forward\'s streams vs llama.cpp\'s l_last, max ||d|| / ||llama|| {e:.2e} (< {line})', e < line)
     for st in range(NS):
-        n = len(set(ro[L][0][st].tolist()) & set(get(st, f'ffn_moe_topk-{L}').reshape(-1).tolist()))
+        n = len(set(ro[L][0][st].tolist()) & set(GD.get(st, f'ffn_moe_topk-{L}').reshape(-1).tolist()))
         same += n == ref.KU; pairs += 1; least = min(least, n)
 ok(f'the forward\'s top-{ref.KU} experts: the same set at {same} of {pairs} (layer, position) pairs (>= 3 / 4), at least {least} in common (>= {ref.KU - 3})',
    same * 4 >= pairs * 3 and least >= ref.KU - 3)
 kl, t1 = [], 0
 for st in range(NS):
     lr = lg[st] - lg[st].max(); lr -= np.log(np.exp(lr).sum())
-    ll = get(st, 'result_output').astype(np.float64); ll -= ll.max(); ll -= np.log(np.exp(ll).sum())
+    ll = GD.get(st, 'result_output').astype(np.float64); ll -= ll.max(); ll -= np.log(np.exp(ll).sum())
     kl.append(float(np.sum(np.exp(lr) * (lr - ll)))); t1 += int(np.argmax(lr) == np.argmax(ll))
-ok(f'logits: mean KLD(ref || llama.cpp) {np.mean(kl):.2e} (< 0.01; max {max(kl):.2e}), the same top token at {t1} of {NS} (>= 7 / 8)',
-   np.mean(kl) < 0.01 and t1 * 8 >= NS * 7)
+ok(f'logits: mean KLD(ref || llama.cpp) {np.mean(kl):.2e} (< {KLD}; max {max(kl):.2e}), the same top token at {t1} of {NS} (>= 7 / 8)',
+   np.mean(kl) < KLD and t1 * 8 >= NS * 7)
 print(f'RESULT {sum(RES)} ok, {len(RES) - sum(RES)} FAIL')
 sys.exit(0 if all(RES) else 1)
