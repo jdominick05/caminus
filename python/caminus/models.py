@@ -194,7 +194,7 @@ def special_ids_of(path):
 # kept on disk and served by path keeps the model's sampling, model id, chat template and special ids. Download, pull and
 # start never use them (manage.locate_item matches the current item's size). Qwen3-30B-A3B: Qwen's official Q4_K_M
 # (Qwen/Qwen3-30B-A3B-GGUF e4d4bafdfb96a411a163846265362aceb0b9c63a, sha256 0d003f66...a8f5), the catalog's file up to
-# 0.3.2. A kept old identity (AGENTS.md, Growth): the Qwen3-30B-A3B entry is removed in the 0.4.0 release, together with
+# 0.3.2. A kept old identity (AGENTS.md, Growth): the Qwen3-30B-A3B entry is removed in the 0.5.0 release, together with
 # its switch notes (docs/models.md, "Switching from the official qwen3-30b-a3b file") and manage.locate_previous's message.
 PREVIOUS_FILES = {'qwen3-30b-a3b': (('Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824),)}
 
