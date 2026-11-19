@@ -30,6 +30,7 @@ type camModel struct {
 	Modes            []serveMode `json:"serve_modes"`
 	MissingDrafter   string      `json:"missing_drafter"`
 	MissingDrafterGB float64     `json:"missing_drafter_gb"`
+	Previous         string      `json:"previous"` // a file the model was served from before, on disk (caminus.models.PREVIOUS_FILES)
 }
 
 // serveMode is the architecture registry's supported card count and explicit drafter choices. Auto is the absence of

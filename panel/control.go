@@ -1015,6 +1015,10 @@ func (m ctl) modelsKey(s string) (ctl, tea.Cmd) {
 			m.setNote(e, true)
 			return m, nil
 		}
+		if !mi.Present && mi.Previous != "" {
+			m.setNote(mi.Name+": the catalog now uses another file and the previous one is on disk: p to pull the new one", true)
+			return m, nil
+		}
 		if !mi.Present {
 			m.setNote(mi.Name+" is not downloaded: p to pull it", true)
 			return m, nil

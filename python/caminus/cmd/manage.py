@@ -118,6 +118,31 @@ def serving_modes(m):
     return out
 
 
+def locate_previous(m):
+    """a file catalog model m was served from before (models.PREVIOUS_FILES: its name and size) under the search
+    directories, or None: the file an upgrade left on disk when the catalog's file changed (locate_item never returns it:
+    it matches the current item's size)"""
+    for name, size in models.PREVIOUS_FILES.get(m.name, ()):
+        for d in search_dirs():
+            for depth in ('', '*', '*/*', '*/*/*'):
+                for p in sorted(glob.glob(os.path.join(d, depth, name))):
+                    try:
+                        if os.path.getsize(p) == size:
+                            return p
+                    except OSError:
+                        continue
+    return None
+
+
+def missing_text(m, e):
+    """why catalog model m (model_entry e) can't start: not downloaded; or, when the file it was served from before is on
+    disk (e['previous']), that the catalog's file changed and how to get the new one"""
+    if e.get('previous'):
+        return (f'{m.name}: the catalog now uses another file and the previous one is on disk ({e["previous"]}); '
+                f'caminus pull {m.name} fetches the new one (docs/models.md, "Switching from the official qwen3-30b-a3b file")')
+    return f'{m.name} is not downloaded (caminus pull {m.name})'
+
+
 def model_entry(m):
     paths = {k: locate_item(models.BY_KEY[k]) for k in m.items}
     dk = models.drafter_item(m)
@@ -126,6 +151,7 @@ def model_entry(m):
     need_b = sum(models.BY_KEY[k].size for k in need)   # (what a card must hold without the optional drafter: the fit rule's size)
     return dict(name=m.name, title=m.title, arch=m.arch, cards=m.cards, size_gb=round(size / 1e9, 1), need_gb=round(need_b / 1e9, 1),
                 present=all(paths[k] for k in need), path=paths[m.items[0]], paths=paths, alias=m.alias,
+                previous=None if all(paths[k] for k in need) else locate_previous(m),
                 speed=m.speed, notes=m.notes, serve_modes=serving_modes(m),
                 missing_drafter='dflash' if dk and not paths[dk] else None,
                 missing_drafter_gb=round(models.BY_KEY[dk].size / 1e9, 1) if dk and not paths[dk] else 0)
@@ -140,7 +166,8 @@ def cmd_models(argv):
         print(json.dumps({'models': rows}))
         return 0
     for r in rows:
-        mark = 'on disk' if r['present'] else 'not downloaded (caminus pull ' + r['name'] + ')'
+        mark = 'on disk' if r['present'] else ('new file not downloaded, the previous one is on disk (caminus pull ' + r['name'] + ')'
+                                               if r['previous'] else 'not downloaded (caminus pull ' + r['name'] + ')')
         print(f"{r['name']:<18} {r['title']:<52} {r['cards']} card{'s' if r['cards'] > 1 else ' '}  {r['size_gb']:>5.1f} GB  {mark}")
         print(f"{'':<18} {r['speed']}")
     return 0
@@ -678,22 +705,26 @@ def catalog_arg(value, m, recorded=None):
 
 
 def needs_catalog(argv, m, recorded=None):
-    """whether a recorded argv serves catalog model m's own file: its last --model (the one serve takes) is catalog_arg"""
-    vals = [argv[i + 1] for i, x in enumerate(argv[:-1]) if x == '--model']
-    return not vals or catalog_arg(vals[-1], m, recorded)
+    """whether a recorded argv serves catalog model m's own file: its last --model (the one serve takes, either spelling:
+    _serve_arg) is catalog_arg"""
+    v = _serve_arg(argv, '--model')
+    return v is None or catalog_arg(v, m, recorded)
 
 
 def restart_argv(argv, e, port, m, recorded=None):
-    """a restart's serve flags: the argv saved at start with the port picked now. A --model naming m's own file
-    (catalog_arg) points at the catalog file found now (model_entry e): a catalog file that moved since the record was
-    written (Qwen3-30B-A3B's switch to unsloth's file in its own folder) is served from its new place, never from the old
-    path. Any other --model (a user's own file) is kept as it is"""
-    serve = list(argv)
+    """a restart's serve flags: the argv saved at start with the port picked now. Its first --model (the one serve_argv
+    writes), when it names m's own file (catalog_arg), points at the catalog file found now (model_entry e): a catalog
+    file that moved since the record was written (Qwen3-30B-A3B's switch to unsloth's file in its own folder) is served
+    from its new place, never from the old path. Every later --model (a user's own `caminus start NAME -- --model X`, the
+    one serve takes) is kept as it is, whatever file it names"""
+    serve, first = list(argv), True
     for i, x in enumerate(serve[:-1]):
         if x == '--port':
             serve[i + 1] = str(port)
-        elif x == '--model' and e['path'] and catalog_arg(serve[i + 1], m, recorded):
-            serve[i + 1] = e['path']
+        elif x == '--model':
+            if first and e['path'] and catalog_arg(serve[i + 1], m, recorded):
+                serve[i + 1] = e['path']
+            first = False
     return serve
 
 
@@ -706,7 +737,7 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     m = models.BY_NAME[model_name]
     e = model_entry(m)
     if not e['present'] and (argv_override is None or needs_catalog(argv_override, m, recorded_path)):
-        raise ManageError(f'{m.name} is not downloaded (caminus pull {m.name})')
+        raise ManageError(missing_text(m, e))
     name = name or m.name
     running = [s for s in all_servers() if alive(s.get('guard_pid'))]
     if any(s['name'] == name for s in running):
@@ -889,10 +920,15 @@ def cmd_restart(argv):
         s = load_server(a.name)
         if s is None:
             raise ManageError(f'no server named {a.name!r} (caminus ps)')
+        # every refusal start_one would make comes before the stop: a working server is never left down
+        if models.paused(s['model']):     # (a paused model's server, started with CAMINUS_ALLOW_PAUSED=1, the variable unset since)
+            raise ManageError(f'{models.paused(s["model"])}; {a.name} keeps running')
         m = models.BY_NAME.get(s['model'])
-        if m is not None and not model_entry(m)['present'] and needs_catalog(s['argv'], m, s.get('path')):
-            # (refused before the stop, a working server is never left down; a server on a user's own --model file needs none)
-            raise ManageError(f'{m.name} is not downloaded (caminus pull {m.name}); {a.name} keeps running')
+        if m is None:
+            raise ManageError(f'unknown model {s["model"]!r} (caminus models: {", ".join(models.BY_NAME)}); {a.name} keeps running')
+        e = model_entry(m)
+        if not e['present'] and needs_catalog(s['argv'], m, s.get('path')):   # (a server on a user's own --model file needs none)
+            raise ManageError(f'{missing_text(m, e)}; {a.name} keeps running')
         stop_one(a.name, log=say)
         n = start_one(s['model'], name=s['name'], port=s['port'], argv_override=s['argv'], devs_override=s['devices'], log=say,
                       recorded_path=s.get('path'))
