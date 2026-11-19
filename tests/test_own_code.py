@@ -5,7 +5,7 @@
     ggml include path (their compile lines are the generic loop's or the k3_q3m case, not the k3_gguf one)
   - the serve path for the architecture imports neither gguf (gguf-py) nor tokenizers: the modules caminus serve loads
     for it, imported under a hook that refuses both, and arch.Q3MoE selects the own BPE ('own')
-  - with a qwen3moe GGUF given (--model; skipped otherwise): its header facts (arch.meta) and vocabulary through
+  - with a qwen3moe or qwen35moe GGUF given (--model; skipped otherwise): its header facts (arch.meta) and vocabulary through
     caminus.ggufio equal gguf-py's, and QwenTokenizer(engine='own') gives the 'hf' engine's ids on every source file of
     this tree (4 KB chunks) and a Unicode stress set, special tokens parsed and not
 The end-to-end form: tools/serve_smoke1.py --block-imports gguf,tokenizers (a GPU run: the server under an import hook, and
@@ -109,7 +109,7 @@ check(dt < 5.0, f'an unbroken run of 40,000 letters merges in {dt:.2f} s (< 5 s;
 ap = argparse.ArgumentParser(); ap.add_argument('--model', default=None)
 A = ap.parse_args()
 if not A.model or not os.path.isfile(A.model):
-    print('SKIP the model checks: no --model qwen3moe GGUF')
+    print('SKIP the model checks: no --model GGUF (qwen3moe or qwen35moe)')
 else:
     from caminus import arch, config
     from caminus.serve import vocab
