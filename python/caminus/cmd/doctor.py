@@ -146,7 +146,7 @@ def check_gpus(R, root='/'):
             cs = arch.CODER.split(pr)
             R.add('PASS', 'gpu', f'two-card models on {" + ".join(host.describe(c) for c in pr)} (card 0 first); the Coder\'s split '
                   f'{cs["gdn_keys"]} / {cs["moe_blocks"]}')
-            if pr[0]['total_mib'] < 22 * 1024:
+            if models.card_class(pr[0]['total_mib']) != 'XTX':      # (the one 24 GB rule: caminus.models.CLASS_MIB)
                 R.add('WARN', 'gpu', 'the Coder needs a 24 GB RX 7900 XTX as card 0 (it holds the bigger share of its split); '
                       'two-card Swift 1.5, ThinkingCap and Qwen3-30B-A3B, and the one-card models, run on this pair')
         except host.PlacementError as e:

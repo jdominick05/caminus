@@ -11,6 +11,7 @@ import argparse
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -145,6 +146,12 @@ def main():
     check(not bad and all(s['start'] in s['runs'] for s in models.SETUPS)
           and all(set(s['cards']) <= {'XTX', 'XT'} for s in models.SETUPS),
           f'SETUPS: catalog names, two-card forms the registry has, the start model among what runs ({bad})')
+    pkg = os.path.join(PY, 'caminus')
+    copies = [os.path.relpath(os.path.join(d, f), pkg) for d, _, fs in os.walk(pkg) for f in fs if f.endswith('.py')
+              and f != 'models.py' and re.search(r'\b22\s*\*\s*1024\b|\b22528\b|\b22\s*<<\s*10\b', open(os.path.join(d, f), encoding='utf-8').read())]
+    check(not copies, f'the 24 GB card rule lives in models.CLASS_MIB only (doctor and arch.Coder read card_class; this scan covers python/caminus .py files) ({copies})')
+    check(models.card_class(22528) == 'XTX' and models.card_class(22527) == 'XT',
+          'card_class: 22,528 MiB is a 24 GB card, 22,527 is not (the edge doctor and arch.Coder.fits now read)')
     cls = lambda *mib: models.setup_of([dict(total_mib=x) for x in mib])
     check(cls(24560)['start'] == 'swift-1.5' and cls(20464)['start'] == 'thinkingcap' and cls(24560, 20464)['start'] == 'coder'
           and cls(20464, 20464)['row'] == 'Two XT' and cls(49136)['row'] == 'One XTX' and cls(24560, 16368)['row'] == 'One XTX'
@@ -208,14 +215,29 @@ def main():
     class Interrupt(Runs):
         def __call__(self, argv):
             super().__call__(argv)
-            if argv[0] == 'pull':
+            if argv[0] == 'start':
                 raise KeyboardInterrupt
             return 0
-    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-pull'), [XTX, XT])
+    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-start'), [XTX, XT])
     wizard.run_cmd, out = Interrupt(), io.StringIO()
     code = wizard.Wizard(yes=True, out=out).main()
-    check(code == 130 and ['start', 'coder'] not in wizard.run_cmd.calls and 'interrupted' in out.getvalue(),
-          'Ctrl+C during a command (the download): exit 130, nothing after it runs')
+    check(code == 130 and not any(c[0] == 'qwen-code' for c in wizard.run_cmd.calls) and 'interrupted' in out.getvalue(),
+          'Ctrl+C during a command that lets it through (the start\'s wait): exit 130, nothing after it runs')
+
+    # Ctrl+C during the download, the real path: caminus pull (through caminus.__main__.main) catches it and returns 130
+    class RealPull(Runs):
+        def __call__(self, argv):
+            return real_run_cmd(argv) if argv[0] == 'pull' else super().__call__(argv)
+
+    def ctrl_c(*a, **k):
+        raise KeyboardInterrupt
+    manage.ROOT = host_tree(os.path.join(S, 'hosts', 'ctrl-c-pull'), [XTX, XT])
+    download.fetch, wizard.run_cmd, out = ctrl_c, RealPull(), io.StringIO()
+    code = wizard.Wizard(yes=True, out=out).main()
+    download.fetch = refuse('a download')
+    check(code == 130 and ['start', 'coder'] not in wizard.run_cmd.calls and 'resume the download' in out.getvalue()
+          and 'did not finish' not in out.getvalue(),
+          'Ctrl+C during the download (caminus pull returns 130): exit 130, "interrupted", not a failed download')
     code, calls, out = go([XTX, XT], 'pull-fail', dry=False, rc={'pull': 1})
     check(code == 1 and ['start', 'coder'] not in calls and 'the download did not finish' in out and 'Done' not in out,
           'a caminus pull that fails: the wizard stops before the start')
@@ -278,10 +300,10 @@ def main():
           '--yes with a server running: its model preselected, kept: no download, no start; Qwen Code set up for it '
           '(a re-run while it still loads: setup waits for it)')
     code, calls, out = go([XTX, XT], 'keep-other', yes=False, dry=False, answers=['coder', '', 'n'])
-    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls) and '(stops thinkingcap first)? [K/s]' in out
+    check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls) and 'Switch to coder? This stops thinkingcap (:8092). [y/N]' in out
           and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
           'another model chosen, then keep: asked before any download, no pull, Qwen Code set up for the kept server')
-    code, calls, out = go([XTX, XT], 'switch', yes=False, dry=False, answers=['coder', 's', 'n'])
+    code, calls, out = go([XTX, XT], 'switch', yes=False, dry=False, answers=['coder', 'y', 'n'])
     check(calls[1:] == [['pull', 'coder'], ['stop', 'thinkingcap'], ['start', 'coder'],
                         ['qwen-code', 'setup', '--server', 'coder', '--install']],
           f'switch: the download first, then caminus stop, then caminus start ({calls[1:]})')
@@ -298,12 +320,13 @@ def main():
           'a dry run shows the same skip (status() only reads)')
     qwen_code.binary, qwen_code.status = (lambda: None), qs0
     server('qwen3-30b-a3b', 4243, 'XTX')                    # (two servers: qwen3-30b-a3b sorts first)
-    code, calls, out = go([XTX, XT], 'two-keep', yes=False, dry=False, answers=['coder', '2', 'n'])
+    code, calls, out = go([XTX, XT], 'two-keep', yes=False, dry=False, answers=['coder', '', '2', 'n'])
     check(code == 0 and not any(c[0] in ('pull', 'start', 'stop') for c in calls)
-          and '(stops qwen3-30b-a3b, thinkingcap first)? [1]' in out
+          and 'Switch to coder? This stops qwen3-30b-a3b (:8093), thinkingcap (:8092). [y/N]' in out
+          and 'Set Qwen Code up for which server (1-2)? [1]' in out
           and calls[-1] == ['qwen-code', 'setup', '--server', 'thinkingcap', '--install'],
           'two servers: the switch question names both; keeping, Qwen Code is set up for the one chosen (2: thinkingcap)')
-    code, calls, out = go([XTX, XT], 'two-stop-fail', yes=False, dry=False, answers=['coder', 's'],
+    code, calls, out = go([XTX, XT], 'two-stop-fail', yes=False, dry=False, answers=['coder', 'yes'],
                           rc={'stop thinkingcap': 1})
     check(code == 1 and not any(c[0] == 'start' for c in calls)
           and 'stopped qwen3-30b-a3b; thinkingcap did not stop' in out and 'still running: thinkingcap. Nothing was started' in out,

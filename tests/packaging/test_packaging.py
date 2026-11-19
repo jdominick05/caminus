@@ -529,6 +529,17 @@ def stage_doctor(S):
         msgs = [m for lv, area, m in R.rows if area == 'gpu']
         check(f'doctor: {name}: says what runs on it', any(want in m for m in msgs), str(msgs)[-300:])
         check(f'doctor: {name}: names no paused model', not any(x in m for m in msgs for x in ('Qwen3.6', 'AREX', 'Coder-Next')), str(msgs)[-300:])
+    # the Coder's 24 GB card 0 rule on a pair: caminus.models.card_class's line (22 GiB), the one copy
+    from caminus import models as M
+    for card0 in (22 * 1024 - 1, 22 * 1024):
+        root = os.path.join(S, f'sysfs-pair-{card0}')
+        fixture(root, [('card0', card0, '0x744c', 128, 0, {}, A, '0000:03:00.0'), ('card1', 20464, '0x744c', 129, 0, {}, A, '0000:06:00.0')],
+                [(128, 110000), (129, 110000)])
+        R = D.Report()
+        D.check_gpus(R, root)
+        warned = any('needs a 24 GB' in m for lv, area, m in R.rows if area == 'gpu' and lv == 'WARN')
+        check(f'doctor: a pair with a {card0:,} MiB card 0: the Coder warning below 22,528 MiB (the 24 GB line), not above',
+              warned == (card0 < 22528), str(R.rows)[-300:])
     rj = subprocess.run(cam('doctor', '--json'), capture_output=True, text=True, env=env, timeout=300)
     try:
         js = json.loads(rj.stdout); ok = js['result'] == 'FAIL' and all(set(c) == {'level', 'area', 'message'} for c in js['checks'])

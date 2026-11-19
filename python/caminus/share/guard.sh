@@ -60,7 +60,7 @@ discover() {   # fills CARDS / DEVS / LABELS / TOTALS / LINE_MIB / DISP_FLAG for
             0x7448:*|0x744a:*) lab=W7900 ;;
             0x744b:*) lab=W7900D ;;
             0x745e:*) lab=W7800 ;;
-            0x7449:*) lab=W7800-48GB ;;
+            0x7449:*) lab=W7800-48GB ;;   # (upstream pci.ids: Radeon Pro W7800 48GB)
             *) lab=$n ;;
         esac
         disp=0

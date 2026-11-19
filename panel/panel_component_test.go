@@ -887,6 +887,16 @@ func TestTheWizardHintShowsOnlyWhileNothingIsSetUp(t *testing.T) {
 	if got := ansi.Strip(m.noteLine(200)); !strings.Contains(got, "run `caminus wizard` in a terminal") {
 		t.Fatalf("nothing on disk, nothing running: the hint, got %q", got)
 	}
+	m.readErr["models"] = fmt.Errorf("caminus models: exit 1")
+	if strings.Contains(m.noteLine(200), "caminus wizard") {
+		t.Fatal("a failed models read (marked loaded so its area can say so) is not an empty host: no hint")
+	}
+	m.readErr["models"] = nil
+	m.readErr["ps"] = fmt.Errorf("caminus ps: exit 1")
+	if strings.Contains(m.noteLine(200), "caminus wizard") {
+		t.Fatal("a failed servers read is not an empty host: no hint")
+	}
+	m.readErr["ps"] = nil
 	m.setNote("pulled", false)
 	if strings.Contains(m.noteLine(200), "caminus wizard") {
 		t.Fatal("a note of the panel's own comes first")

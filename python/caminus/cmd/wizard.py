@@ -41,7 +41,7 @@ GROUPS = 'sudo usermod -aG render,video $USER'     # (docs/quickstart.md "What y
 
 
 class Stop(Exception):
-    """the wizard ends here: rc 1, a step failed or was refused"""
+    """the wizard ends here: rc 1 (a step failed or was refused) or 130 (interrupted)"""
 
     def __init__(self, rc, text):
         super().__init__(text)
@@ -266,21 +266,19 @@ class Wizard:
         if not running:
             return 'start', []
         names = [s['name'] for s in running]
-        stops = ', '.join(names)
-        if len(running) == 1:
-            got = self.ask(f'Keep {names[0]} (no download, no start; Qwen Code is set up for it), or switch to {m.name} '
-                           f'(stops {stops} first)? [K/s]', 'k', valid=lambda x: x.lower() in ('k', 's', 'keep', 'switch'))
-            if got.lower() in ('k', 'keep'):
-                return 'keep', names[0]
+        stops = ', '.join(f"{s['name']} (:{s['port']})" for s in running)
+        got = self.ask(f'Switch to {m.name}? This stops {stops}. [y/N]', 'n',
+                       valid=lambda x: x.lower() in ('y', 'n', 'yes', 'no'))
+        if got.lower() in ('y', 'yes'):
             return 'start', names
+        if len(running) == 1:
+            self.say(f'kept {names[0]}: no download, no start; Qwen Code is set up for it next (step 5)')
+            return 'keep', names[0]
         for i, s in enumerate(running, 1):
-            self.say(f"  {i}. keep {s['name']} ({s['model']}) and set Qwen Code up for it")
-        got = self.ask(f'Keep the servers and set Qwen Code up for which one (1-{len(running)}), or s to switch to {m.name} '
-                       f'(stops {stops} first)? [1]', '1',
-                       valid=lambda x: x.lower() in ('s', 'switch') or (x.isdigit() and 1 <= int(x) <= len(running)))
-        if got.isdigit():
-            return 'keep', names[int(got) - 1]
-        return 'start', names
+            self.say(f"  {i}. {s['name']} ({s['model']})")
+        got = self.ask(f'Set Qwen Code up for which server (1-{len(running)})? [1]', '1',
+                       valid=lambda x: x.isdigit() and 1 <= int(x) <= len(running))
+        return 'keep', names[int(got) - 1]
 
     def pull(self, m):
         self.step(3, f'download {m.name}')
@@ -302,6 +300,8 @@ class Wizard:
             raise Stop(1, f'not enough disk: {need / 1e9:.1f} GB + 1 GiB needed, {free / 1e9:.1f} GB free. Free some space, or '
                           'set model_dir to a bigger disk (docs/configuration.md), then run caminus wizard again')
         rc = self.run(['pull', m.name, '--dry-run'], read_only=True) if self.dry else self.run(['pull', m.name])
+        if rc == 130:                           # (caminus pull catches Ctrl+C itself and returns 130: an interruption)
+            raise Stop(130, 'interrupted: run caminus wizard again to resume the download (it skips what is done)')
         if rc != 0:
             raise Stop(1, 'the download did not finish: the lines above say why (after a dropped connection, run caminus '
                           'wizard again: the download resumes)')
@@ -400,7 +400,7 @@ class Wizard:
                 self.skip(6, 'Qwen Code is not set up')
         except Stop as e:
             self.say()
-            self.say(str(e), 'bad' if e.rc else None)
+            self.say(str(e), 'warn' if e.rc == 130 else 'bad' if e.rc else None)
             return e.rc
         except KeyboardInterrupt:
             self.say()
