@@ -3,3 +3,6 @@ contact_links:
   - name: Troubleshooting guide
     url: https://github.com/jdominick05/caminus/blob/main/docs/troubleshooting.md
     about: Common errors and what to do about them.
+  - name: Report a security problem
+    url: https://github.com/jdominick05/caminus/security/advisories/new
+    about: Privately, never in a public issue (SECURITY.md).
