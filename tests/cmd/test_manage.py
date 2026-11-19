@@ -365,10 +365,15 @@ def main():
         manage.start_one('qwen3.6', name='fresh', devs_override=[0], wait=False, log=lambda *a: None)
     finally:
         manage.subprocess = NoLaunch
-    after = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
-    check(after == {'fresh'}, f'start: a new start of a model clears its older failed records ({sorted(before)} -> {sorted(after)})')
-    with contextlib.suppress(OSError):
-        os.remove(os.path.join(manage.server_dir('fresh'), 'server.json'))
+    after = {x['name']: manage.server_view(x) for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    crashed = manage.load_server('crashed')
+    check(set(after) == before | {'fresh'} and all(v['state'] == 'stopped' and v['error'] == '' for n, v in after.items() if n != 'fresh')
+          and crashed['argv'] == ['--model', p] and crashed['superseded_at'] == manage.load_server('fresh')['started'],
+          f'start: a new start of a model supersedes its older failed records, kept with their settings for caminus restart NAME '
+          f'({sorted((n, v["state"]) for n, v in after.items())})')
+    for n in after:
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(manage.server_dir(n), 'server.json'))
 
     # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
     # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props
@@ -440,8 +445,14 @@ def main():
         finally:
             _ar.of = real_of
         n, r = nums(t_proj)
-        check(ok is not refused and (used0 + n + r > g0['total_mib'] / 1024) is refused
-              and f" at 32,768 positions; fits {28672 if refused else 40960:,} now" in t_proj,
+        _ar.of = lambda path: Big('big', 'big')
+        try:   # (the context it says fits is one a start with --ctx takes)
+            again = manage.card_fit(q3, dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={}), ctx=28672)[0](g0)
+        finally:
+            _ar.of = real_of
+        check(ok is not refused and (used0 + n + r > g0['total_mib'] / 1024) is refused and again
+              and (' GB short;' in t_proj) is refused
+              and f" at 32,768 positions{', 0.5 GB short' if refused else ''}; fits {28672 if refused else 40960:,} now" in t_proj,
               f'start refusal: in use {used0:.1f} + need + reserved vs the card\'s {g0["total_mib"] / 1024:.1f} GB says what fits says ({t_proj!r})')
     fits, explain = manage.card_fit(q3, dict(path=os.path.join(S, 'no-such.gguf'), size_gb=18.6, need_gb=18.6, paths={}))
     t_size = explain(g0)
@@ -453,10 +464,11 @@ def main():
     tc = (models.BY_NAME['thinkingcap'], dict(path=os.path.join(S, 'no-such.gguf'), size_gb=40, need_gb=40, paths={}))
     refusal = {}
     real_all, real_alive = manage.all_servers, manage.alive
-    manage.all_servers = lambda: [dict(name='tcap', model='thinkingcap', port=8093, devices=[1], guard_pid=4242)]
+    manage.all_servers = lambda: [dict(name='tcap', model='thinkingcap', port=8093, devices=[1], guard_pid=4242),
+                                  dict(name='mine', model='thinkingcap', path='/m/my-model.gguf', port=8094, devices=[0], guard_pid=4242)]
     manage.alive = lambda pid: pid == 4242
     try:
-        for what, held in (('free', set()), ('held', {1})):
+        for what, held in (('free', set()), ('held', {1}), ('own file', {0})):
             try:
                 manage.pick_cards(*tc, None, held)
                 refusal[what] = ''
@@ -464,6 +476,9 @@ def main():
                 refusal[what] = str(e)
     finally:
         manage.all_servers, manage.alive = real_all, real_alive
+    # (a server of a file outside the catalog is named by that file, as KFD's process list names it: never twice)
+    own = refusal.pop('own file')
+    check('XTX card1: 0.1 of 24.0 GB in use; held by my-model.gguf on :8094' in own, f'start: a held card of a non-catalog file ({own})')
     check(all('fits none of the free cards' in t and 'XTX card1: 0.1 of 24.0 GB in use; needs about' in t for t in refusal.values())
           and 'XT card2: 0.1 of 20.0 GB in use; needs' in refusal['free'] and 'held by' not in refusal['free']
           and 'XT card2: 0.1 of 20.0 GB in use; held by thinkingcap on :8093' in refusal['held']
@@ -682,6 +697,7 @@ def unmanaged_checks(S):
     """unmanaged_servers() scans /proc for caminus_serve.py processes outside the registry and never raises, even on a
     machine with none running (CI): every entry is a dict with the keys cmd_ps and cmd_top read"""
     from caminus.cmd import manage
+    from caminus.device import host as H
     try:
         found = manage.unmanaged_servers()
     except Exception as e:
@@ -695,11 +711,11 @@ def unmanaged_checks(S):
     ports = [s['port'] for s in found]
     check(ports == sorted(ports) and len(ports) == len(set(ports)),
           f'unmanaged: one entry per server, sorted by port ({ports})')
-    check(manage.serve_argv_of(['python', '-I', 'tools/caminus_serve.py', '--model', 'x.gguf'])
-          and manage.serve_argv_of(['/usr/bin/caminus', 'serve', '--port', '8100'])
-          and manage.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'serve'])
-          and not manage.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'ps', '--json'])
-          and not manage.serve_argv_of(['nginx', 'serve']),
+    check(H.serve_argv_of(['python', '-I', 'tools/caminus_serve.py', '--model', 'x.gguf'])
+          and H.serve_argv_of(['/usr/bin/caminus', 'serve', '--port', '8100'])
+          and H.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'serve'])
+          and not H.serve_argv_of(['python', '-I', '-c', 'from caminus.__main__ import main', 'ps', '--json'])
+          and not H.serve_argv_of(['nginx', 'serve']),
           'unmanaged: caminus_serve.py and the CLI\'s serve command are servers; other caminus commands and programs are not')
     # a fake /proc: a server started by a script without --port (it listens on 8092), its wrapper, and a guard's command
     # line; the port comes from the socket table, the catalog name from /props' model path (none here: the file label)

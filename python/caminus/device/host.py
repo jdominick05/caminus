@@ -25,6 +25,7 @@ Placement (the rules the user settled, G1-G5):
   addressing card 0 / card 1 by role.
 A refusal is a PlacementError whose message names the card and the reason (the panel and doctor show it as is)."""
 import glob
+import math
 import os
 import re
 
@@ -272,6 +273,23 @@ def link_side(cards):
     return 0 if a < b else 1
 
 
+def serve_argv_of(argv):
+    """whether a command line runs the Caminus server: tools/caminus_serve.py, or the caminus CLI's serve command
+    (`caminus serve`, `python -m caminus serve`, a boot script importing caminus.__main__); never another tool's `serve`"""
+    if any(a.endswith('caminus_serve.py') for a in argv):
+        return True
+    if 'serve' not in argv:
+        return False
+    head = argv[:argv.index('serve')]
+    return any(os.path.basename(a) == 'caminus' or a == 'caminus' or 'caminus.__main__' in a for a in head)
+
+
+def argv_flag(argv, k):
+    """the value after flag k in a command line, None when k is absent or last"""
+    i = argv.index(k) if k in argv else -1
+    return argv[i + 1] if 0 <= i < len(argv) - 1 else None
+
+
 def gpu_users(root='/'):
     """{render minor: [(pid, label, MiB)]}: the processes holding VRAM on each GPU now, from KFD's per-process files
     (proc/<pid>/vram_<gpu_id>, the GPU's id from topology/nodes/<n>/gpu_id). A Caminus server is named by its model and
@@ -295,10 +313,10 @@ def gpu_users(root='/'):
                 argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
         except OSError:
             argv = []
-        flag = lambda k: argv[argv.index(k) + 1] if k in argv and argv.index(k) + 1 < len(argv) else None
         label = _read(os.path.join(root, 'proc', pid, 'comm')) or 'a process'
-        if ('serve' in argv or any(a.endswith('caminus_serve.py') for a in argv)) and flag('--model'):
-            label = models.model_name(flag('--model')) + (f" on :{flag('--port')}" if flag('--port') else '')
+        model, port = argv_flag(argv, '--model'), argv_flag(argv, '--port')
+        if serve_argv_of(argv) and model:
+            label = models.model_name(model) + (f' on :{port}' if port else '')
         for v in glob.glob(os.path.join(d, 'vram_*')):
             mib = (_int(_read(v)) or 0) / 2 ** 20
             minor = minor_of.get(_int(v.rsplit('_', 1)[1]))
@@ -325,17 +343,21 @@ def card_text(g, users=None, holder=None):
             f"{g['total_mib'] / 1024:.1f} GB, use unknown") + (f' ({held})' if held else '') + (f'; held by {holder}' if holder else ''))
 
 
-def need_text(need_mib, reserved_mib, ctx=None, most=None, lowest=None):
+def need_text(need_mib, room_mib, free_mib, ctx=None, most=None, lowest=None):
     """what the model needs on one card, for one()'s refusal (an explain(card) returns it; the refusal's head and the
-    command name the model): the need and what the fit keeps beside it on that card (reserved_mib: the guard line's gap
-    below the total, the margins, a display's or the prompt cache's reserve, the projection's slack, a drafter), so in
-    use + need + reserved past the card's total is the refusal itself: 'needs 19.8 GB + 1.9 GB reserved at 32,768
-    positions; fits 8,192 now'. ctx: the context asked for (None: a size rule by the files, no projection here); most: the
+    command name the model): the need, what the fit keeps beside it on that card ("reserved": the card's free memory
+    free_mib less the room room_mib the need was compared with, so the guard line's gap below the total, the margins, a
+    display's or the prompt cache's reserve, the projection's slack, a drafter) and how far short it is, rounded up, so
+    the figures never read as fitting when each is rounded: 'needs 19.8 GB + 1.9 GB reserved at 32,768 positions, 0.4 GB
+    short; fits 8,192 now'. ctx: the context asked for (None: a size rule by the files, no projection here); most: the
     most context that fits now (None: not even lowest positions)"""
-    head = f"needs {'about ' if ctx is None else ''}{need_mib / 1024:.1f} GB + {max(0.0, reserved_mib) / 1024:.1f} GB reserved"
+    short = math.ceil(round((need_mib - room_mib) / 1024 * 10, 6)) / 10   # (round first: 0.3 GB is not 0.30000000000000004)
+    head = (f"needs {'about ' if ctx is None else ''}{need_mib / 1024:.1f} GB + {max(0.0, free_mib - room_mib) / 1024:.1f} GB "
+            f"reserved" + (f' at {ctx:,} positions' if ctx is not None else " by its files' size (no projection here)")
+            + (f', {short:.1f} GB short' if short > 0 else ''))
     if ctx is None:
-        return head + " by its files' size (no projection here)"
-    return head + f' at {ctx:,} positions; ' + (f'fits {most:,} now' if most else f'not even {lowest:,} positions fit now')
+        return head
+    return head + '; ' + (f'fits {most:,} now' if most else f'not even {lowest:,} positions fit now')
 
 
 def one(gs, fits, held=(), explain=None, root='/'):

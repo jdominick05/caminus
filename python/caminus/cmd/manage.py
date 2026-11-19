@@ -285,8 +285,9 @@ def server_view(s):
                 clean = 'stopped in' in f.read()[-4000:]
         except OSError:
             clean = False
-        v['state'] = 'stopped' if clean else 'failed'
-        if not clean:
+        # (superseded: a later start of the model replaced it, so its failure is no longer the model's last start)
+        v['state'] = 'stopped' if clean or s.get('superseded_at') else 'failed'
+        if v['state'] == 'failed':
             line = log_error(s['log'], keep=None)  # (the whole line for the check below: a long path pushes its head out of 300)
             v['error'] = line[-300:] or 'the server exited (caminus logs ' + s['name'] + ')'
             with contextlib.suppress(OSError):   # (when it failed: its log's last write; the panel shows the time)
@@ -362,17 +363,6 @@ def listen_ports(pid, proc='/proc'):
     return sorted(ports)
 
 
-def serve_argv_of(argv):
-    """whether a command line runs the Caminus server: tools/caminus_serve.py, or the caminus CLI's serve command
-    (`caminus serve`, `python -m caminus serve`, a boot script importing caminus.__main__)"""
-    if any(a.endswith('caminus_serve.py') for a in argv):
-        return True
-    if 'serve' not in argv:
-        return False
-    head = argv[:argv.index('serve')]
-    return any(os.path.basename(a) == 'caminus' or a == 'caminus' or 'caminus.__main__' in a for a in head)
-
-
 def unmanaged_servers(proc='/proc'):
     """Live Caminus servers no slot in the registry owns (started by a script or `caminus serve` directly): watched
     read-only, never controlled (no start/stop/restart, no qwen attach); the panel shows them as started outside it.
@@ -401,9 +391,9 @@ def unmanaged_servers(proc='/proc'):
                 argv = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
         except OSError:
             continue
-        if not serve_argv_of(argv) or any(os.path.basename(a) == 'guard.sh' for a in argv):
+        if not host.serve_argv_of(argv) or any(os.path.basename(a) == 'guard.sh' for a in argv):
             continue                          # (a guard's own command line: its server is a slot's, or its child is seen)
-        flag = lambda k: argv[argv.index(k) + 1] if k in argv and argv.index(k) + 1 < len(argv) else None
+        flag = lambda k: host.argv_flag(argv, k)
         ports = listen_ports(pid, proc)
         try:
             port = ports[0] if ports else int(flag('--port') or 8092)
@@ -536,7 +526,7 @@ def card_fit(m, entry, ctx=None, kv=None, long_context=False):
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
         need = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20 * 1.1 + 4096
         room = lambda g: g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
-        return (lambda g: need <= room(g)), (lambda g: host.need_text(need, g['total_mib'] - room(g)))
+        return (lambda g: need <= room(g)), (lambda g: host.need_text(need, room(g), g['total_mib']))   # (the rule ignores what is in use)
     return (lambda g: A.fits(opt, [g])), (lambda g: A.need_text(opt, g))
 
 
@@ -585,7 +575,9 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
     by_pci = {c['pci']: c['index'] for c in cs}
     # (held cards by PCI address, each with its server from the registry for one()'s refusal: a server still loading holds
     #  no VRAM yet, so KFD's per-process files cannot name it)
-    holder = {d: f"{s['model']} on :{s['port']}" for s in all_servers() if alive(s.get('guard_pid')) for d in s.get('devices', [])}
+    # (named as host.gpu_users names the same process, by its file: a GGUF outside the catalog is not named twice)
+    holder = {d: f"{models.model_name(s['path']) if s.get('path') else s['model']} on :{s['port']}"
+              for s in all_servers() if alive(s.get('guard_pid')) for d in s.get('devices', [])}
     held_pci = {c['pci']: holder.get(c['index']) for c in cs if c['index'] in held}
     free = [c for c in cs if c['index'] not in held]
     if (cards or m.cards) >= 2:
@@ -745,10 +737,11 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
              argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias, **({'kv': kv} if kv else {}))
     with open(os.path.join(d, 'server.json'), 'w') as f:
         json.dump(s, f, indent=1)
-    for old in all_servers():                     # (this start, its record written, supersedes an older failed or stopped
-        if old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid')):
-            with contextlib.suppress(OSError):    #  record of the model, so that failure no longer shows as its last start)
-                os.remove(os.path.join(server_dir(old['name']), 'server.json'))
+    for old in all_servers():                     # (this start, its record written, supersedes an older dead record of the
+        if (old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid'))   # model: kept, so
+                and not old.get('superseded_at')):  # caminus restart NAME still has its settings, but no longer failed)
+            with contextlib.suppress(OSError), open(os.path.join(server_dir(old['name']), 'server.json'), 'w') as f:
+                json.dump(dict(old, superseded_at=s['started']), f, indent=1)
     log(f"{name}: starting {m.name} on {'+'.join(s['card_names'])} at http://127.0.0.1:{port} (log: caminus logs {name})")
     if wait:
         t0 = time.time()

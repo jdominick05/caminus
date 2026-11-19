@@ -281,17 +281,28 @@ def main():
         w(os.path.join(kfd, 'proc', str(pid), f'vram_{gid}'), f'{gib * GIB}\n')
         w(os.path.join(r, 'proc', str(pid), 'cmdline'), '\0'.join(argv) + '\0')
         w(os.path.join(r, 'proc', str(pid), 'comm'), comm + '\n')
+    w(os.path.join(kfd, 'proc', '4444', 'vram_1111'), f'{8 * GIB}\n')             # (another tool's `serve`: not Caminus)
+    w(os.path.join(r, 'proc', '4444', 'cmdline'), '\0'.join(['vllm', 'serve', '--model', '/m/Qwen3-30B-A3B-Q4_K_M.gguf', '--port', '8000']) + '\0')
+    w(os.path.join(r, 'proc', '4444', 'comm'), 'vllm\n')
     users = H.gpu_users(r)
-    check(users.get(129) == [(4242, 'ThinkingCap.gguf on :8093', 19 * 1024)] and users.get(128) == [(4343, 'llama-server', 21 * 1024)],
-          f'gpu_users: per card, a caminus serve named by its model and port, another process by its name ({users})')
-    explain = lambda g: H.need_text(19.8 * 1024, 1.9 * 1024, 32768, 8192 if g['label'] == 'XTX' else None, 4096)
+    check(users.get(129) == [(4242, 'ThinkingCap.gguf on :8093', 19 * 1024)]
+          and sorted(users.get(128, [])) == [(4343, 'llama-server', 21 * 1024), (4444, 'vllm', 8 * 1024)],
+          f'gpu_users: per card, a caminus serve named by its model and port, another process (vllm serve too) by its name ({users})')
+    os.remove(os.path.join(kfd, 'proc', '4444', 'vram_1111'))
+    explain = lambda g: H.need_text(19.8 * 1024, 19.5 * 1024, 21.4 * 1024, 32768, 8192 if g['label'] == 'XTX' else None, 4096)
     ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=explain),
                       'XT card2: 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093); needs 19.8 GB + 1.9 GB reserved at 32,768 '
-                      'positions; not even 4,096 positions fit now. XTX card1: 0.1 of 24.0 GB in use (llama-server); needs',
+                      'positions, 0.3 GB short; not even 4,096 positions fit now. XTX card1: 0.1 of 24.0 GB in use (llama-server); needs',
                       'fits 8,192 now')
     check(ok and '0000:0' not in msg, f'refusal: each free card with what holds it and the model\'s need from explain ({msg})')
-    check(H.need_text(23.1 * 1024, 1.3 * 1024) == "needs about 23.1 GB + 1.3 GB reserved by its files' size (no projection here)",
-          'refusal: the size rule\'s need, from the same formatter')
+    check(H.need_text(23.1 * 1024, 22.0 * 1024, 23.3 * 1024) == "needs about 23.1 GB + 1.3 GB reserved by its files' size (no projection "
+          "here), 1.1 GB short", 'refusal: the size rule\'s need, from the same formatter')
+    # refused by 10 MiB: rounded to 0.1 GB, in use + needs + reserved reads 23.9 of 24.0; the shortfall, rounded up, says
+    # it does not fit (a card of 24,576 MiB, 3,020 in use, need 19,500, room 19,490)
+    t = H.need_text(19500, 19490, 24576 - 3020, 32768, None, 4096)
+    check(t.startswith('needs 19.0 GB + 2.0 GB reserved at 32,768 positions, 0.1 GB short;') and
+          'short' not in H.need_text(19480, 19490, 24576 - 3020, 32768, 36864, 4096),
+          f'refusal: 10 MiB short says 0.1 GB short; one that fits says no shortfall ({t!r})')
     ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=lambda g: 1 / 0),
                       'XT card2: 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093)')
     check(ok and 'ZeroDivision' not in msg, f'refusal: an explain that cannot run leaves the card\'s state alone ({msg})')

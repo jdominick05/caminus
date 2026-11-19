@@ -375,20 +375,19 @@ class Arch:
         return min(want, plan.native_ctx)
 
     def need_text(self, opt, card):
-        """for a refusal on one card (a caminus.device.host dict): what the model needs there at the context fits checks
-        and what the fit keeps beside it (the card's free memory less the room fits compares the need with), and the most
-        context that fits now, from the projection fits reads (caminus.device.host.need_text words it). '' without a
-        projection here"""
+        """for a refusal on one card (a caminus.device.host dict): what the model needs there at the context fits checks,
+        the room fits compares it with and the card's free memory, and the most context that fits now, from the
+        projection fits reads (caminus.device.host.need_text words it). '' without a projection here"""
         from .device import host
         try:
             plan = self.context_fit(opt, [card])
             want = self.asked_ctx(opt, plan)
             need, = plan.need_mib(want)
-            reserved = card['total_mib'] - host.used_mib(card) - plan.room_mib[0]
+            free = card['total_mib'] - host.used_mib(card)
             most = plan.maximum()
         except Exception:                       # noqa: BLE001 - no projection for this entry or file: the caller says less
             return ''
-        return host.need_text(need, reserved, want, most, min(AUTO_STEP, plan.native_ctx))
+        return host.need_text(need, plan.room_mib[0], free, want, most, min(AUTO_STEP, plan.native_ctx))
 
     def draft_refusal(self, draft, path=None):
         """why this entry must not serve --draft `draft` for the GGUF at path (a sentence for the error), or None. Without a
