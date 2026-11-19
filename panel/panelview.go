@@ -416,9 +416,10 @@ func (m ctl) recordOf(name string) *serverInfo {
 }
 
 // fitLines is the most lines the fit row wraps to: a refusal names every card (its use, holder, the model's need and the
-// context that fits there), two cards' worth whole in the detail column at 80 columns (48 cells: 7 lines). On a short
-// screen it takes only what the rows under it leave (detailRows' room), 2 lines at least.
-const fitLines = 8
+// context that fits there), two cards' worth whole in the detail column at 80 columns (48 cells: 8-9 lines with need_text's
+// real wording and a second holder on a card), with headroom. On a short screen it takes only what the rows under it
+// leave (detailRows' room), 2 lines at least.
+const fitLines = 10
 
 // whenText is " 21:26 today", " 21:26 yesterday" or " Nov 16 21:26" for a Unix time (seconds), "" when unknown (0).
 func whenText(at float64, now time.Time) string {

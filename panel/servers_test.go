@@ -218,7 +218,7 @@ func TestALastStartFailureSaysWhenAndGoesWhenNotDownloaded(t *testing.T) {
 	}
 	m := newCtl(newCtlCLI("caminus"), "")
 	m.loaded["ps"], m.loaded["models"] = true, true
-	yesterday := float64(time.Now().Add(-24 * time.Hour).Unix())
+	yesterday := float64(time.Now().AddDate(0, 0, -1).Unix()) // (a calendar day: 24 h is "today" or two days back on DST days)
 	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, Present: true, SizeGB: 59}}
 	m.ps = psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "failed", FailedAt: yesterday,
 		Error: "FileNotFoundError: code object k3_gguf_gsq.hsaco not found"}}}
@@ -264,8 +264,8 @@ func TestTheWizardHintWrapsInsteadOfBeingCut(t *testing.T) {
 // in the model detail each card's part is whole, at the widest layout and at 80 columns, and the row under it still shows.
 func TestTheFitRefusalShowsEveryCard(t *testing.T) {
 	const refusal = "the model fits none of the free cards: XT card2: 19.4 of 20.0 GB in use (thinkingcap on :8093); " +
-		"needs 19.8 GB + 1.9 GB reserved at 32,768 positions; not even 4,096 positions fit now. XTX card1: 21.3 of 24.0 GB " +
-		"in use (llama-server); needs 19.8 GB + 2.0 GB reserved at 32,768 positions; fits 8,192 now"
+		"needs 19.8 GB + 1.9 GB reserved at 32,768 positions, 1.3 GB short; not even 4,096 positions fit now. XTX card1: 21.3 of 24.0 GB " +
+		"in use (ollama, python3); needs 19.8 GB + 2.0 GB reserved at 32,768 positions, 0.9 GB short; fits 8,192 now"
 	m := newCtl(newCtlCLI("caminus"), "")
 	mi := camModel{Name: "qwen3-30b-a3b", Title: "Qwen3-30B-A3B", Cards: 1, Present: true, SizeGB: 19,
 		Modes: []serveMode{{Cards: 1, Drafts: []string{"off"}, KV: []string{"f16", "q8"}, Long: true}, {Cards: 2, Drafts: []string{"off"}}}}
@@ -282,7 +282,7 @@ func TestTheFitRefusalShowsEveryCard(t *testing.T) {
 		}
 		flat := strings.Join(strings.Fields(strings.Join(det, " ")), " ")
 		for _, part := range []string{"XT card2: 19.4 of 20.0 GB in use (thinkingcap on :8093)", "not even 4,096 positions fit now",
-			"XTX card1: 21.3 of 24.0 GB in use (llama-server)", "2.0 GB reserved at 32,768 positions; fits 8,192 now"} {
+			"XTX card1: 21.3 of 24.0 GB in use (ollama, python3)", "0.9 GB short; fits 8,192 now"} {
 			if !strings.Contains(flat, part) {
 				t.Fatalf("%d columns: %q is cut from the fit row:\n%s", w, part, screen)
 			}
@@ -310,7 +310,7 @@ func TestTheFitRefusalShowsEveryCard(t *testing.T) {
 				t.Fatalf("%dx24: %q is off the screen:\n%s", w, part, screen)
 			}
 		}
-		if !strings.Contains(flat, "reserved at 32,768 positions; fits 8,192 now") != (w == 80) {
+		if !strings.Contains(flat, "0.9 GB short; fits 8,192 now") != (w == 80) {
 			t.Fatalf("%dx24: the fit row is whole where the room holds it (120) and cut where it does not (80):\n%s", w, screen)
 		}
 	}
