@@ -1,7 +1,72 @@
 # Changelog
 
 Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (two-card: XTX + XT) unless a line says
-otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md).
+otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md). Patch releases (0.x.y)
+do not rerun the benchmarks; a number in a patch release's entry cites the pull request that measured it.
+
+## 0.3.3 (2026-11-19)
+
+A first-run guide, `caminus wizard`, takes an installed package to a served model and Qwen Code; the rest are
+improvements and fixes. Qwen3-30B-A3B now downloads a more accurate file in the same formats: after upgrading, run
+`caminus pull qwen3-30b-a3b`.
+
+### New
+
+- **`caminus wizard`, a first-run guide.** Six steps from an installed package to a served model and Qwen Code, each a
+  `caminus` command printed before it runs, so you learn the commands as you go: `caminus doctor` (and `caminus doctor
+  --gpu` while no other program uses a card), the model for your cards (the one to start with on your setup is
+  preselected), `caminus pull`, `caminus fit` and `caminus start`, `caminus qwen-code setup`, and "Open Qwen Code now?".
+  While a server runs, its model is preselected; choosing another asks, before anything downloads, "Switch to MODEL?
+  This stops SERVER (:PORT). [y/N]", and Enter keeps the server. Run it again any time: it skips what is done. It never
+  runs `sudo` (a step that needs root prints the command), says before `caminus fit` that it may take a while, and
+  Ctrl+C, during the download too, exits 130 (run the wizard again to resume the download). `--dry-run` runs only the
+  read-only steps and prints the rest; `--yes` takes every default. On a gfx1100 card Caminus hasn't been tested on
+  (W7800, W7900, 7900 GRE), it goes on and asks for a hardware report. While no model is on disk and nothing runs, the
+  panel shows a one-line hint to run it. [The quickstart](docs/quickstart.md) is now the one setup page: the install,
+  the wizard, and the same steps in the panel (#319, #323, #329).
+
+### Changed
+
+- **Qwen3-30B-A3B serves unsloth's Q4_K_M, made with an importance matrix.** The same tensors in the same formats and
+  nearly the same size, closer to the BF16 model: mean KL divergence 0.0185 instead of 0.064 on prose (wikitext-2) and
+  0.028 instead of 0.090 on code (#321; [switching from the official file](docs/models.md#switching-from-the-official-qwen3-30b-a3b-file)).
+  The prompts stay the same token for token: the server keeps the official chat template and special token ids. After
+  upgrading, run `caminus pull qwen3-30b-a3b`; the new file goes to its own folder, so the old one can stay until you
+  delete it. Until then `caminus start` asks you to pull it, `caminus restart` leaves the running server alone, and
+  `caminus start`, `caminus models` and the panel say the catalog's file changed and the previous one is on disk. Served
+  by path (`caminus serve --model`), the old file is still recognised as this model.
+- **A start that doesn't fit says why.** "The model fits none of the free cards" now names each card: the memory in use
+  now and what holds it (another Caminus server by its model and port, another program by its name), what the model
+  needs at the context asked for plus what Caminus keeps free beside it ("reserved"), how far short it falls, and the
+  most context that fits now. The terminal, the panel's fit line and the wizard word it the same way;
+  [troubleshooting](docs/troubleshooting.md) explains each part (#333).
+- **The panel's "last start failed" line says when** it happened ("last start failed 21:26 yesterday: ..."), and it goes
+  away once a later start of the model replaces it or its cause is gone, such as a missing code object that is now
+  where a start would load it from (#333).
+
+### Fixed
+
+- `caminus restart` no longer stops a server and then refuses its port: the port check now binds as the server does,
+  so a port whose recent connections are still closing (TIME_WAIT) counts as free (#328).
+- The GPU guard's per-card memory lines no longer clash with bash's `LINES`: in a run started from a terminal
+  (`caminus serve`, `caminus doctor --gpu`, `caminus replay`), card 0's line was set to the terminal's row count, and
+  the run was killed at once (#324).
+- `caminus start --card N` that the server refuses now says why (#333).
+- The README's "build it from source" links to the quickstart's install steps (#327).
+
+### For contributors
+
+- One table for the model to start with on each setup (`models.SETUPS`): the wizard, Ember's default brain and
+  `caminus doctor` read it, and tests/docs checks the README's table against it (#319).
+- One 24 GB card rule (`models.card_class`), read by `caminus doctor` and the Coder's fit check (#329).
+- A catalog model can carry its own chat template and special token ids (`models.CHAT_TEMPLATES`,
+  `models.SPECIAL_IDS`), and a previous catalog file stays recognised by name and size (`models.PREVIOUS_FILES`) (#321).
+- `host.used_mib` is the one reader of a card's memory in use on the start path, and `host.gpu_users` names who holds
+  each card from KFD (#333).
+
+Benchmarks: a patch release, so no rerun. kernels/ and build.sh are unchanged since 0.3.2. The KL divergence figures
+above are #321's measurement; the published Qwen3-30B-A3B speeds were measured on Qwen's official file, which has the
+same tensors in the same formats ([docs/dev/qwen3-30b-a3b.md](docs/dev/qwen3-30b-a3b.md#which-file)).
 
 ## 0.3.2 (2026-11-18)
 
