@@ -3,9 +3,10 @@ Coder: the host forward on Caminus's own reader and decoders, every quantized we
 float64; the file's architecture picks the forward) for the first N tokens of a fixed public text (tools/reference/
 q3moe_ref.py's, through the own tokenizer) or of a token file (--tokens: ids separated by whitespace, as gg_golden's
 tokens.txt; the Coder's gate texts are the stored short llama.cpp dumps' e2e_{code,prose,shell}_decode/tokens.txt
-(tools/gates/common.py names their directory), whose one-token-decode logits sit beside them), teacher-forced in one layer-major pass. The reference of the model gates
-(tools/gates/q35_gmodel.py, tools/gates/coder_gmodel.py). CPU only, a few minutes whatever N is (each matrix is decoded
-once); it reads the whole file: never run it beside a GPU timing or gate (its file reads and page faults evict GPU queues).
+(tools/gates/common.py names their directory), whose one-token-decode logits sit beside them), teacher-forced in one
+layer-major pass. The reference of the model gates (tools/gates/q35_gmodel.py, tools/gates/coder_gmodel.py). CPU only, a
+few minutes whatever N is (each matrix is decoded once); it reads the whole file: never run it beside a GPU timing or gate
+(its file reads and page faults evict GPU queues).
   python -I tools/reference/q35_ref.py GGUF OUT.npz [N=128] [--tokens FILE] [--threads T] [--trace] [--census]
 OUT.npz: seq (int64 [N]), logits (float32 [N, vocab]); --trace adds resid (float32 [blocks, N, D]: the residual stream
 after each block; the Coder's [blocks, N, 4, D]: its four streams), and for a MoE file (qwen35moe, qwen4exp) topk (int16
