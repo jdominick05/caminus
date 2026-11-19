@@ -77,12 +77,17 @@ def bot_reviews(pr, login):
     return out
 
 
+# The branches a pull request may target: testing (everything that ships), and ember-next, the Ember harness's
+# integration branch, which lands in testing as one reviewed pull request after the release it waits for.
+BASES = ('testing', 'ember-next')
+
+
 def look(a):
     """({check: (ok, text)}, the checks that are only pending)"""
     pr = gh('pr', 'view', str(a.n), '-R', a.repo, '--json',
             'baseRefName,headRefOid,state,isDraft,mergeable,title,body,author,files,commits,comments,reviews,statusCheckRollup')
     head, res, pending = pr['headRefOid'], {}, set()
-    bad = [w for w, ok in (('base is ' + pr['baseRefName'], pr['baseRefName'] == 'testing'), ('state ' + pr['state'], pr['state'] in ('OPEN', 'MERGED')),
+    bad = [w for w, ok in (('base is ' + pr['baseRefName'], pr['baseRefName'] in BASES), ('state ' + pr['state'], pr['state'] in ('OPEN', 'MERGED')),
                            ('a draft', not pr['isDraft']), ('merge conflict', pr['mergeable'] != 'CONFLICTING')) if not ok]
     res['base'] = (not bad, f'into {pr["baseRefName"]}, head {head[:10]}' + (': ' + ', '.join(bad) if bad else ''))
     if a.metadata:   # the text checks only: no CI, review or thread wait, so CI can run it without the review bot
