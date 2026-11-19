@@ -599,6 +599,11 @@ def restart_checks(S):
     # needs_catalog reads the last --model in either spelling (serve's argparse takes both)
     check(not manage.needs_catalog(['--model', old, '--model=' + own], m, old) and manage.needs_catalog(['--model=' + old], m, old),
           'restart: needs_catalog sees --model=X (a user file there needs no catalog file; the recorded one does)')
+    # a later --model is the user's own even when it names the previous (official) file: serve takes it, so the restart
+    # needs no catalog file (as restart_argv keeps it); a sole recorded --model still does
+    prev = os.path.join(S, 'prev-' + models.PREVIOUS_FILES['qwen3-30b-a3b'][0][0])
+    check(not manage.needs_catalog(['--model', old, '--model', prev], m, old) and manage.needs_catalog(['--model', old], m, old),
+          'restart: a later --model (even the previous file) needs no catalog file; the sole recorded one does')
     # the catalog file missing while the previous file is on disk: the refusal says so and points at the pull
     os.remove(new)
     e2 = manage.model_entry(m)

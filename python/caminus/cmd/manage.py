@@ -121,16 +121,12 @@ def serving_modes(m):
 def locate_previous(m):
     """a file catalog model m was served from before (models.PREVIOUS_FILES: its name and size) under the search
     directories, or None: the file an upgrade left on disk when the catalog's file changed (locate_item never returns it:
-    it matches the current item's size)"""
+    it matches the current item's size). The search is locate_item's own, on the item with the previous name and size"""
+    it = models.BY_KEY[m.items[0]]
     for name, size in models.PREVIOUS_FILES.get(m.name, ()):
-        for d in search_dirs():
-            for depth in ('', '*', '*/*', '*/*/*'):
-                for p in sorted(glob.glob(os.path.join(d, depth, name))):
-                    try:
-                        if os.path.getsize(p) == size:
-                            return p
-                    except OSError:
-                        continue
+        p = locate_item(it._replace(path=name, size=size, local=None))
+        if p:
+            return p
     return None
 
 
@@ -705,10 +701,13 @@ def catalog_arg(value, m, recorded=None):
 
 
 def needs_catalog(argv, m, recorded=None):
-    """whether a recorded argv serves catalog model m's own file: its last --model (the one serve takes, either spelling:
-    _serve_arg) is catalog_arg"""
-    v = _serve_arg(argv, '--model')
-    return v is None or catalog_arg(v, m, recorded)
+    """whether a recorded argv serves catalog model m's own file. As restart_argv reads it: a later --model (either
+    spelling) is the user's own file (`caminus start NAME -- --model X`) and is what serve takes, so it needs no catalog
+    file; otherwise the one --model (the one serve_argv writes) needs it when it is catalog_arg"""
+    vals = [argv[i + 1] for i, x in enumerate(argv[:-1]) if x == '--model'] + [x.split('=', 1)[1] for x in argv if x.startswith('--model=')]
+    if len(vals) > 1:
+        return False
+    return not vals or catalog_arg(vals[0], m, recorded)
 
 
 def restart_argv(argv, e, port, m, recorded=None):
