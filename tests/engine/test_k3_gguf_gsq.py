@@ -36,11 +36,13 @@ checks
       --cards 0 [--gacc-out GACC.json] [--gacc-layers ends | all]"""
 import ctypes, json, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'gates'))
 import numpy as np
 import torch
 from caminus.engine import gguf as G, k3
 from caminus.engine.flashnext import DirectReader
 from gguf import quants, GGML_QUANT_SIZES
+import gacc  # noqa: E402  (tools/gates/gacc.py: G-acc's shared pieces)
 
 a = sys.argv[1:]
 def opt(name, default):
@@ -78,12 +80,6 @@ def full(name):
     """the whole tensor's raw bytes on cuda:0 (O_DIRECT), shaped [..., row bytes]"""
     t = TT[name]; w = DR.read(int(t.data_offset), int(t.n_bytes))
     return w.view(*t.data.shape), t.tensor_type
-
-
-def cols(w, qt, b0, b1):
-    """block columns [b0, b1) of every row of raw rows w [..., rb] (a K split)"""
-    ts = GGML_QUANT_SIZES[qt][1]; sh = w.shape
-    return w.view(*sh[:-1], sh[-1] // ts, ts)[..., b0:b1, :].reshape(*sh[:-1], (b1 - b0) * ts).contiguous()
 
 
 def ncols(w, qt):
@@ -176,12 +172,8 @@ def np_(t):
 
 
 def ref_q8(x):
-    """x fp32 [n] (cuda) -> q8_1 blocks with build/gg_mv_ref.hsaco's quantizer (it writes a block for every launched lane:
-    the buffer holds them all, as G.quantize_q8_1's)"""
-    n = x.numel(); nb = (n + 31) // 32; ng = (nb * 32 + 255) // 256
-    y = torch.empty(ng * 8 * G.Q8_1_BYTES, dtype=torch.uint8, device=x.device)
-    G._m('gg_mv_ref').gg_ref_quantize_q8_1((ng,), (256,), x.contiguous(), y, ctypes.c_int(n))
-    return y[:nb * G.Q8_1_BYTES]
+    """x fp32 [n] (cuda) -> q8_1 blocks with build/gg_mv_ref.hsaco's quantizer (tools/gates/gacc.py)"""
+    return gacc.ref_q8_1(G._m('gg_mv_ref'), x)
 
 
 def ref_mv(w, qt, n, K, yq):
@@ -207,7 +199,7 @@ def mv_cases():
     for name, splits in MV_CASES:
         w, qt = full(name)
         if splits is None: cs = [(name, w)]
-        else: cs = [(f'{name}[blocks {b0}:{b1}]', cols(w, qt, b0, b1)) for b0, b1 in splits]
+        else: cs = [(f'{name}[blocks {b0}:{b1}]', gacc.block_cols(w, GGML_QUANT_SIZES[qt][1], b0, b1)) for b0, b1 in splits]
         for label, wc in cs:
             if ONLY is None or ONLY in label: yield label, wc, qt
 
@@ -309,7 +301,7 @@ def run_moe_down(card):
         d0, qt = full(f'blk.{il}.ffn_down_exps.weight')
         qk = GGML_QUANT_SIZES[qt][0]
         for c0, c1 in ((0, 640), (0, 384), (384, 640)):          # whole rows, then the TP K split (moe_blocks 12)
-            dw = cols(d0, qt, c0 // qk, c1 // qk).to(dev); E, R, rb = dw.shape; K = c1 - c0; slab = R * rb
+            dw = gacc.block_cols(d0, GGML_QUANT_SIZES[qt][1], c0 // qk, c1 // qk).to(dev); E, R, rb = dw.shape; K = c1 - c0; slab = R * rb
             gen = torch.Generator(device=dev).manual_seed(3000 + K)
             Hx = torch.randn(4, K_USED * K, device=dev, generator=gen) * 0.5
             hq = [G.quantize_q8_1(Hx[t]) for t in range(4)]
@@ -481,7 +473,7 @@ GACC_CLASSES = [   # (tensor class, op, its input (layer part, name), how K3 spl
     ('ffn_down_shexp', 'MV', ('ffn', 'shd'), 'cols'),
     ('ffn_gate_exps', 'MOE_GU', ('ffn', 'mixed'), 'experts'), ('ffn_up_exps', 'MOE_GU', ('ffn', 'mixed'), 'experts'),
     ('ffn_down_exps', 'MOE_DOWN', ('ffn', 'h'), 'exp_cols')]
-GACC_ROWS, GACC_EXP_ROWS = 256, 32   # rows sampled per matrix, and per routed expert
+GACC_ROWS, GACC_EXP_ROWS = 256, gacc.EXP_ROWS   # rows sampled per matrix, and per routed expert
 
 
 def gacc_cases(nl):
@@ -497,12 +489,6 @@ def gacc_cases(nl):
             for il in (ls if GACC_LAYERS == 'all' else sorted({ls[0], ls[-1]})):
                 out.append((f'blk.{il}.{cls}.weight', op, f'L{il}.{part}.{x}', split))
     return out + [('output.weight', 'MV', 'head.mixed', 'rows')]
-
-
-def kcols(raw, qt, ranges):
-    """the blocks holding K values `ranges` (in order) of each row of raw [r, rb]: a card's K shard, as K3 cuts it"""
-    bs, ts = GGML_QUANT_SIZES[qt]; v = raw.reshape(raw.shape[0], -1, ts)
-    return np.ascontiguousarray(np.concatenate([v[:, k0 // bs:k1 // bs] for k0, k1 in ranges], 1)).reshape(raw.shape[0], -1)
 
 
 def run_gacc(card):
@@ -524,18 +510,14 @@ def run_gacc(card):
             rows = np.sort(rng.choice(data.shape[0], min(GACC_ROWS, data.shape[0]), replace=False)); raw = data[rows]
             if split == 'rows': sets.append((raw, int(t.shape[0]), sites[site], rows))
             else:
-                for c in (0, 1): sets.append((kcols(raw, qt, shards[name]['ranges'][c]), None, sites[f'{site}.c{c}'], rows))
+                for c in (0, 1): sets.append((gacc.kcols(raw, shards[name]['ranges'][c], *GGML_QUANT_SIZES[qt]), None, sites[f'{site}.c{c}'], rows))
         else:
-            il = int(name.split('.')[1]); ids = sites[f'L{il}.ffn.ids'].numpy(); E, Rw = data.shape[:2]
-            for e in np.unique(ids):
-                rows = np.sort(np.random.default_rng(e).choice(Rw, GACC_EXP_ROWS, replace=False)); raw = data[e][rows]
-                hit = [(v, j) for v in range(ids.shape[0]) for j in range(K_USED) if ids[v, j] == e]
-                if split == 'experts': sets.append((raw, int(t.shape[0]), sites[site][[v for v, _ in hit]], e * Rw + rows))
-                else:
-                    for c in (0, 1):
-                        X = sites[f'{site}.c{c}']; kc = X.shape[1] // K_USED
-                        sets.append((kcols(raw, qt, shards[name]['ranges'][c]), None,
-                                     torch.stack([X[v, j * kc:(j + 1) * kc] for v, j in hit]), e * Rw + rows))
+            il = int(name.split('.')[1]); ids = sites[f'L{il}.ffn.ids'].numpy()
+            if split == 'experts': sets = [(raw, int(t.shape[0]), X, rr) for raw, X, rr in gacc.expert_sets(data, ids, sites[site], False)]
+            else:   # (per expert, card 0's shard then card 1's: the order the stored baselines were computed in)
+                for c0, c1 in zip(*[gacc.expert_sets(data, ids, sites[f'{site}.c{c}'], True, ranges=shards[name]['ranges'][c],
+                                                     bs=GGML_QUANT_SIZES[qt][0], ts=GGML_QUANT_SIZES[qt][1]) for c in (0, 1)]):
+                    sets += [(c0[0], None, c0[1], c0[2]), (c1[0], None, c1[1], c1[2])]
         errs, seen, xbad, nd = [], set(), 0, 0
         for raw, K, X, rows in sets:
             K = K or X.shape[1]; r = raw.shape[0]
@@ -543,13 +525,12 @@ def run_gacc(card):
             assert W.shape[1] == K, (name, W.shape, K)
             w = torch.from_numpy(np.ascontiguousarray(raw)).to(dev).reshape(-1); Xd = X.to(dev)
             Y = W @ X.double().numpy().T                                   # [r, v]
+            y = np.empty_like(Y)
             for v in range(X.shape[0]):
-                x = Xd[v].contiguous(); yq = ref_q8(x); y = np_(ref_mv(w, qt, r, K, yq).double())
+                x = Xd[v].contiguous(); yq = ref_q8(x); y[:, v] = np_(ref_mv(w, qt, r, K, yq).double())
                 if v == 0:
                     xq = G.quantize_q8_1(x); xbad += not (torch.equal(xq, yq) and torch.equal(G.matvec(w, qt, r, K, xq), ref_mv(w, qt, r, K, yq)))
-                sc = float(np.sqrt(np.mean(Y[:, v] ** 2)))
-                if sc > 0: errs.append(np.abs(y - Y[:, v]) / sc)
-                else: nd += 1
+            e_, z_ = gacc.rel_errors(Y, y); errs.append(e_); nd += z_
             seen.update(int(q) for q in rows)
         err = np.concatenate(errs); mean, p99 = float(err.mean()), float(np.percentile(err, 99))
         n_vec_site = sites[site if split in ('rows', 'experts') else f'{site}.c0'].shape[0]

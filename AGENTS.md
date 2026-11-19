@@ -126,6 +126,9 @@ CLAUDE.md imports this file.
   Its MTP module uses the Q6_K block and Q4_K head; its DFlash module includes that head without staging IQ grids.
   All four verify/drafter objects belong to the explicit installed runtime. CPU tape/selector and staging tests
   check their inclusion; finding them in a checkout's build directory does not prove that a wheel ships them.
+- `kernels/own_quant_q2_0.h`: the own Q2_0 tile (the GGUF blocks read in place, any K % 64; half-wave rows at K <= 512),
+  for Qwen3.6's routed experts and the Coder's Q2_0 down; no decode module includes it yet. `kernels/own_mv_q2_0.hip` holds
+  its standalone plain and grouped forms (`tests/engine/test_own_q2_0.py`, `benchmarks/q36_gacc.py`).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects; pair each new object's scalar-spill count with its F16
