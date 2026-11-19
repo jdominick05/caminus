@@ -63,9 +63,8 @@ It takes six steps and prints each `caminus` command before it runs it, so you l
    then run the wizard again.
 2. Pick a model. The list says which models run on your cards, and the one to start with on your setup
    ([the table](../README.md#the-model-for-your-setup)) is preselected: press Enter to take it. While a server runs, its
-   model is preselected; choosing another asks, before anything downloads, whether to keep the server or switch (the
-   question names each server a switch stops). Read each model's licence before any commercial use
-   ([licences](models.md#licences)).
+   model is preselected; choosing another asks, before anything downloads, "Switch to MODEL? This stops SERVER (:PORT).
+   [y/N]": Enter keeps the server. Read each model's licence before any commercial use ([licences](models.md#licences)).
 3. `caminus pull MODEL` downloads it, after the wizard shows its size, the folder and the free space there.
 4. `caminus fit` says how much context fits on your cards, then `caminus start MODEL` starts the model; the first start
    takes about a minute.

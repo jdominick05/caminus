@@ -552,7 +552,8 @@ class Coder(Arch):
 
     def fits(self, opt, cards):
         ok = super().fits(opt, cards)
-        if not ok and len(cards) >= 2 and cards[0]['total_mib'] < 22 * 1024:
+        from . import models                    # (the one 24 GB rule: models.CLASS_MIB; models imports this module)
+        if not ok and len(cards) >= 2 and models.card_class(cards[0]['total_mib']) != 'XTX':
             from .device import host
             raise host.PlacementError(f"the Coder needs a 24 GB RX 7900 XTX as card 0 (it holds the bigger share of the split): "
                                       f"{' + '.join(host.describe(c) for c in cards)} is too small")

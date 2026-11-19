@@ -814,9 +814,11 @@ func (m ctl) noteLine(W int) string {
 // wizardHint is the note line while nothing is set up: caminus wizard walks a first run from a terminal.
 const wizardHint = "new here? run `caminus wizard` in a terminal: it checks the machine, then pulls and starts a model and sets up Qwen Code"
 
-// nothingSetUp is whether this host has nothing to show yet: the model list read, no model on disk, no server running.
+// nothingSetUp is whether this host has nothing to show yet: the model list and the servers read without an error, no
+// model on disk, no server running.
 func (m ctl) nothingSetUp() bool {
-	if !m.loaded["models"] || !m.loaded["ps"] || len(m.liveServers()) > 0 {
+	// (a failed read also counts as loaded: readDone marks it so its area can say "couldn't read")
+	if !m.loaded["models"] || !m.loaded["ps"] || m.readErr["models"] != nil || m.readErr["ps"] != nil || len(m.liveServers()) > 0 {
 		return false
 	}
 	for _, mi := range m.models {
