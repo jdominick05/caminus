@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 
 from .. import config, models
-from ..device import host, machine
+from ..device import host, kernels, machine
 from . import guarded
 from ..ember.resident.catalog import decode_tps   # (the one reading of /caminus/status's decode speed)
 
@@ -243,16 +243,18 @@ def find_key(d, key):
     return None
 
 
-def log_error(path):
-    """the last error-looking line of a server log ('' when none)"""
+def log_error(path, keep=300):
+    """the last error-looking line of a server log ('' when none), its last `keep` characters (None: the whole line). A
+    placement refusal counts (caminus serve's 'fits none of the free cards', for a start given its card)"""
     try:
         with open(path, errors='replace') as f:
             lines = f.read().splitlines()[-200:]
     except OSError:
         return ''
     for l in reversed(lines):
-        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'GUARD REFUSED', 'killed')):
-            return l.strip()[-300:]
+        if any(w in l for w in ('Error', 'error:', 'refusing', 'Traceback', 'GPU FAULT', 'GUARD REFUSED', 'killed',
+                                'fits none of the free cards')):
+            return l.strip()[-keep:] if keep else l.strip()
     return ''
 
 
@@ -285,10 +287,11 @@ def server_view(s):
             clean = False
         v['state'] = 'stopped' if clean else 'failed'
         if not clean:
-            v['error'] = log_error(s['log']) or 'the server exited (caminus logs ' + s['name'] + ')'
+            line = log_error(s['log'], keep=None)  # (the whole line for the check below: a long path pushes its head out of 300)
+            v['error'] = line[-300:] or 'the server exited (caminus logs ' + s['name'] + ')'
             with contextlib.suppress(OSError):   # (when it failed: its log's last write; the panel shows the time)
                 v['failed_at'] = os.path.getmtime(s['log'])
-            cleared = cleared_failure(v['error'])
+            cleared = cleared_failure(line)
             if cleared:                      # (the cause is gone: nothing it names stops a start now)
                 v['state'], v['error'], v['note'], v['failed_at'] = 'stopped', '', cleared, None
     return v
@@ -296,15 +299,16 @@ def server_view(s):
 
 def cleared_failure(error):
     """a note when a failed start's cause is gone, else None: the guard's refusal on a recorded GPU fault whose stop file
-    no longer exists, or a code object that was missing and is there now (caminus.device.kernels.missing_message)"""
+    no longer exists, or a code object that was missing (caminus.device.kernels.missing_message) and is now in the
+    directory a start would load it from (kernels.kernel_dir: wherever the old message looked)"""
     head = 'GUARD REFUSED: a GPU fault was recorded ('
     if head in error:
         path = error.split(head, 1)[1].split(')', 1)[0]
         if path and not os.path.exists(os.path.expanduser(os.path.expandvars(path))):
             return 'its last start was refused on a GPU fault that has since been cleared'
         return None
-    m = re.search(r'code object (\S+\.hsaco) not found in (\S+) \(', error)
-    if m and os.path.isfile(os.path.join(m.group(2), m.group(1))):
+    m = re.search(r'code object (\S+\.hsaco) not found in ', error)
+    if m and os.path.isfile(os.path.join(kernels.kernel_dir()[0], m.group(1))):
         return f'its last start failed on a missing code object ({m.group(1)}) that is there now'
     return None
 
@@ -717,10 +721,6 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
     if busy:
         raise ManageError(f'VRAM in use on {", ".join(busy)} by a process Caminus did not start: stop it first')
     port = pick_port(port, {s['port'] for s in running})
-    for old in all_servers():                     # (this start supersedes an older failed or stopped record of the model,
-        if old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid')):
-            with contextlib.suppress(OSError):    #  so that failure no longer shows as the model's last start)
-                os.remove(os.path.join(server_dir(old['name']), 'server.json'))
     d = server_dir(name)
     os.makedirs(d, mode=0o700, exist_ok=True)
     logp = os.path.join(d, 'serve.log')
@@ -745,6 +745,10 @@ def start_one(model_name, name=None, card=None, port=None, ctx=None, extra=(), w
              argv=serve, guard_pid=p.pid, log=logp, started=time.time(), alias=m.alias, **({'kv': kv} if kv else {}))
     with open(os.path.join(d, 'server.json'), 'w') as f:
         json.dump(s, f, indent=1)
+    for old in all_servers():                     # (this start, its record written, supersedes an older failed or stopped
+        if old.get('model') == m.name and old['name'] != name and not alive(old.get('guard_pid')):
+            with contextlib.suppress(OSError):    #  record of the model, so that failure no longer shows as its last start)
+                os.remove(os.path.join(server_dir(old['name']), 'server.json'))
     log(f"{name}: starting {m.name} on {'+'.join(s['card_names'])} at http://127.0.0.1:{port} (log: caminus logs {name})")
     if wait:
         t0 = time.time()

@@ -251,13 +251,42 @@ def main():
           f"ps: a guard refusal whose fault file is gone is re-checked: stopped, with a note ({v['guard-cleared']})")
     check(isinstance(v['crashed']['failed_at'], float) and abs(v['crashed']['failed_at'] - time.time()) < 600
           and v['clean']['failed_at'] is None, 'ps: a failed start carries when it ended (its log\'s last write) for the panel')
-    kd = os.path.join(S, 'kdir'); os.makedirs(kd, exist_ok=True)
+    # a code object that was missing: cleared once it is in the directory a start would load from now (kernels.kernel_dir,
+    # here CAMINUS_KERNEL_DIR at scratch), whatever directory the old message named, and from the whole log line (an
+    # installed package's message is longer than the 300 characters ps keeps)
+    from caminus.device import kernels as K
+    kd, old_kd = os.path.join(S, 'kdir'), os.path.join(S, 'kdir-then')
+    os.makedirs(kd, exist_ok=True); os.makedirs(old_kd, exist_ok=True)
+    keep_kd = os.environ.get('CAMINUS_KERNEL_DIR')
+    os.environ['CAMINUS_KERNEL_DIR'] = kd
+    wheel = os.path.join(S, 'home', 'u', '.local', 'lib', 'python3.13', 'site-packages', 'caminus', 'hsaco', 'gfx1100',
+                         'a-longer-install-prefix' * 3)
     put('hsaco-missing', dead.pid, f'FileNotFoundError: code object k3_gone.hsaco not found in {kd} (run ./build.sh in the checkout)\n', 18100)
     put('hsaco-built', dead.pid, f'FileNotFoundError: code object k3_here.hsaco not found in {kd} (run ./build.sh in the checkout)\n', 18101)
+    put('hsaco-elsewhere', dead.pid, f'FileNotFoundError: {K.missing_message("k3_here", old_kd, "env CAMINUS_KERNEL_DIR")}\n', 18102)
+    put('hsaco-wheel', dead.pid, f'FileNotFoundError: {K.missing_message("k3_here", wheel, "package")}\n', 18103)
     open(os.path.join(kd, 'k3_here.hsaco'), 'w').close()
-    vm, vb = manage.server_view(manage.load_server('hsaco-missing')), manage.server_view(manage.load_server('hsaco-built'))
+    try:
+        vm, vb, ve, vw = (manage.server_view(manage.load_server(n)) for n in ('hsaco-missing', 'hsaco-built', 'hsaco-elsewhere', 'hsaco-wheel'))
+        os.environ['CAMINUS_KERNEL_DIR'] = old_kd
+        vgone = manage.server_view(manage.load_server('hsaco-built'))
+    finally:
+        os.environ.pop('CAMINUS_KERNEL_DIR', None)
+        if keep_kd is not None:
+            os.environ['CAMINUS_KERNEL_DIR'] = keep_kd
     check(vm['state'] == 'failed' and vb['state'] == 'stopped' and 'k3_here.hsaco' in vb['note'] and vb['failed_at'] is None,
           f"ps: a start that failed on a missing code object that is built now is no longer failed ({vb['note']!r})")
+    check(ve['state'] == 'stopped' and vgone['state'] == 'failed',
+          f"ps: the code object is looked for where a start would load it now, not where the old message looked ({ve['state']}, {vgone['state']})")
+    check(len(manage.log_error(manage.load_server('hsaco-wheel')['log'], keep=None)) > 400 and len(vw['error']) <= 300
+          and vw['state'] == 'stopped', f"ps: an installed package's long message (its head past 300 characters) still clears ({vw['state']})")
+    # a start given its card (--card N: no fit before the launch) that the server refuses: its refusal is the error start
+    # and the panel show, not 'the server exited'
+    serve_refusal = ('caminus serve: the model fits none of the free cards: XT card2: 0.1 of 20.0 GB in use; needs 19.8 GB + '
+                     '1.9 GB reserved at 40,960 positions; fits 32,768 now')
+    put('card-refused', dead.pid, f'caminus serve: loading\n{serve_refusal}\nGUARD: rc=2 after 3 s\n', 18104)
+    vr = manage.server_view(manage.load_server('card-refused'))
+    check(vr['state'] == 'failed' and vr['error'] == serve_refusal, f"ps: caminus serve's placement refusal is the failure shown ({vr['error']!r})")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         manage.cmd_ps(['--json'])
@@ -316,16 +345,30 @@ def main():
             check('not downloaded' in str(err), f'start: a model not on disk is refused ({err})')
     finally:
         live.kill(); live.wait()
-    # a new start of a model supersedes its older dead records (their failure is no longer that model's last start); the
-    # launch itself is refused here (NoLaunch), after the cleanup
+    # a new start of a model supersedes its older dead records (their failure is no longer that model's last start), once
+    # its own record is written: a launch that fails (NoLaunch refuses it here) leaves them for ps and the panel
     before = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
     try:
         manage.start_one('qwen3.6', name='fresh', devs_override=[0])
     except RuntimeError:
         pass
+    kept = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
+    check({'crashed', 'hsaco-missing'} <= before and kept == before,
+          f'start: a launch that fails keeps the older records ({sorted(before)} -> {sorted(kept)})')
+
+    class Launched(NoLaunch):                   # (a launch that "starts": the pid of an exited child, no process runs)
+        @staticmethod
+        def Popen(*a, **k):
+            return argparse.Namespace(pid=dead.pid)
+    manage.subprocess = Launched
+    try:
+        manage.start_one('qwen3.6', name='fresh', devs_override=[0], wait=False, log=lambda *a: None)
+    finally:
+        manage.subprocess = NoLaunch
     after = {x['name'] for x in manage.all_servers() if x.get('model') == 'qwen3.6'}
-    check({'crashed', 'hsaco-missing'} <= before and not after & {'crashed', 'hsaco-missing', 'guard-refused'},
-          f'start: a new start of a model clears its older failed records ({sorted(before)} -> {sorted(after)})')
+    check(after == {'fresh'}, f'start: a new start of a model clears its older failed records ({sorted(before)} -> {sorted(after)})')
+    with contextlib.suppress(OSError):
+        os.remove(os.path.join(manage.server_dir('fresh'), 'server.json'))
 
     # ---- --kv (caminus start --kv, or `-- --kv`): checked against the model's entry before any card is picked (only
     # qwen3-30b-a3b takes q8, one card or two), threaded into the card fit's projection, shown by ps from /props
