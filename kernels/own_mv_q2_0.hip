@@ -29,7 +29,8 @@ __device__ __forceinline__ bool q2_grouped_rows(const int * ids, int nslots, int
 }
 
 // the experts' gate | up on one input x16 [K]: y16[s * R + r] = fp16(silu(gate . x) * (up . x)), the K3 OWN_GU expression;
-// gs / us (or nullptr): the two tiles' fp32 sums as well (the op test compares them with the plain rows bit for bit)
+// gs / us: the two tiles' fp32 sums as well, or both nullptr (one alone is not checked: the hosts pass both or neither;
+// the op test compares them with the plain rows bit for bit)
 extern "C" __global__ void __launch_bounds__(256) own_moe_gu_q2_0(const uint8_t * Wg, const uint8_t * Wu, const int * ids,
         int nslots, int R, int E, int K, const _Float16 * x16, _Float16 * y16, float * gs, float * us) {
     int row, grow, lim;

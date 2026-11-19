@@ -67,6 +67,8 @@ tests/engine/test_k3_gguf_gsq.py, check (e).
 Qwen3.6's recording (Qwen35One under the same `K3_TEST_HOOKS=gacc-sites` hook) and the own Q2_0 tile against llama.cpp
 on it and on the Coder's Q2_0 down: benchmarks/q36_gacc.py; the tile's strict exact-dot check (every row, 1e-6 of
 sum |w| |x|) and its grouped forms: tests/engine/test_own_q2_0.py.
+The error, the per-expert row sampling, the K-shard cut and the reference q8_1 quantizer these harnesses (and
+benchmarks/q35_mtp_gacc.py) share are tools/gates/gacc.py, so every G-acc number is computed one way.
 
 **G-model, end to end.** A reference mode of the engine runs every quantized op with fp32 activations (per-op error
 about 1e-7 above). On the gate prompts: mean KLD of the candidate against the reference mode must not exceed llama.cpp's

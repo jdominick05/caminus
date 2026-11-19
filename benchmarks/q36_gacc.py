@@ -7,7 +7,7 @@ the GSQ-RCO Coder's Q2_0 expert down (K 640 cut 384 / 256 over its two cards), p
   per layer the FFN half's input (mixed: the experts' gate / up read it), each slot's h (the experts' down input), the
   router's ids and weights. Checked while recording: each fp32 row quantizes to the q8_1 copy the op read (so the rows are
   the ops' inputs). A recording is a reference: an existing ACTS is never overwritten.
---acts ACTS: per tensor (each Q2_0 expert role, its first and last layer; --layers all: every layer), on GACC_EXP_ROWS
+--acts ACTS: per tensor (each Q2_0 expert role, its first and last layer; --layers all: every layer), on 32
   sampled rows of each routed expert with the vectors routed to it: |y - y_ref| / rms(y_ref), y_ref the float64 dot of
   caminus.own_dequant's rows with the recorded fp32 row; mean and p99 per tensor and pooled per (op, format), for
   own (fp16 activations, own_mv_q2_0_k3: the tile in K3's form) and llama.cpp (ggml-cuda's vec_dot_q2_0_q8_1 on q8_1
@@ -24,12 +24,13 @@ bandwidth ceiling); not the module's time (G-speed is the module A/B).
 New kernel code: run it on a non-display card alone first. Prints PASS / FAIL lines and RESULT PASS | FAIL."""
 import argparse, ctypes, json, os, sys, time
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-sys.path.insert(0, os.path.join(ROOT, 'python'))
+sys.path.insert(0, os.path.join(ROOT, 'python')); sys.path.insert(0, os.path.join(ROOT, 'tools', 'gates'))
 import numpy as np
 import torch
 from caminus import ggufio, own_dequant
 from caminus.device import capacity
 from caminus.device.hip import Module
+import gacc  # noqa: E402  (tools/gates/gacc.py: G-acc's shared pieces)
 
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf')
@@ -45,7 +46,6 @@ ap.add_argument('--rounds', type=int, default=7)
 A = ap.parse_args()
 TEXTS = [os.path.join(ROOT, 'docs', 'dev', 'architecture.md'), os.path.join(ROOT, 'python', 'caminus', 'arch.py'),
          os.path.join(ROOT, 'README.md')]
-GACC_EXP_ROWS = 32            # rows sampled per routed expert (tests/engine/test_k3_gguf_gsq.py's)
 GACC_SPEED_LAYERS = 4         # whole tensors the speed read rotates over (Qwen3.6: 4 x 226 MB, past the Infinity Cache)
 ok_all = True
 dev = torch.device('cuda:0')
@@ -102,38 +102,25 @@ OWN = Module('own_mv_q2_0'); GG = Module('gg_mv_ref'); RD = Module('own_mv')   #
 sink = torch.zeros(1, dtype=torch.int32, device=dev)
 
 
-def q8_1(x32):
-    """q8_1 blocks of x fp32 [K] (cuda) with gg_mv_ref's quantizer (it writes a block for every launched lane)"""
-    K = x32.numel(); ng = (K + 255) // 256; y = torch.zeros(ng * 8 * 36, dtype=torch.uint8, device=dev)
-    GG.gg_ref_quantize_q8_1((ng,), (256,), x32, y, ctypes.c_int(K)); return y[:K // 32 * 36]
-
-
 def arms(raw, K, X):
-    """(own, llama) outputs [v, r] float64 of raw rows [r, rb] on each recorded fp32 row of X [v, K]"""
+    """(own, llama) outputs [r, v] float64 of raw rows [r, rb] on each recorded fp32 row of X [v, K]"""
     r = raw.shape[0]; w = torch.from_numpy(np.ascontiguousarray(raw)).to(dev).reshape(-1)
     o = torch.empty(2, r, device=dev); own, ll = [], []
     for x in X:
         x32 = x.to(dev).float().contiguous()
         OWN.own_mv_q2_0_k3(((r + 15) // 16,), (256,), w, ctypes.c_int(r), ctypes.c_int(K), x32.half(), o[0])
-        GG.gg_ref_mv_q2_0(((r + 3) // 4,), (32, 4), w, q8_1(x32), o[1], ctypes.c_int(r), ctypes.c_int(K))
+        GG.gg_ref_mv_q2_0(((r + 3) // 4,), (32, 4), w, gacc.ref_q8_1(GG, x32), o[1], ctypes.c_int(r), ctypes.c_int(K))
         own.append(o[0].double().cpu().numpy()); ll.append(o[1].double().cpu().numpy())
-    return np.array(own), np.array(ll)
+    return np.array(own).T, np.array(ll).T
 
 
 def errors(raw, K, X):
-    """(own, llama) relative errors of one row set, per (vector, row)"""
+    """(own, llama) G-acc errors of one row set, and its zero-reference count (tools/gates/gacc.py rel_errors)"""
     W = own_dequant.dequant(raw.reshape(-1), 'Q2_0', raw.shape[0] * K).astype(np.float64).reshape(raw.shape[0], K)
-    Y = X.double().numpy() @ W.T                                     # [v, r]
+    Y = W @ X.double().numpy().T                                     # [r, v]
     own, ll = arms(raw, K, X)
-    sc = np.sqrt((Y ** 2).mean(1, keepdims=True))
-    keep = sc[:, 0] > 0
-    return (np.abs(own - Y) / np.where(sc > 0, sc, 1))[keep].ravel(), (np.abs(ll - Y) / np.where(sc > 0, sc, 1))[keep].ravel(), int((~keep).sum())
-
-
-def kcols(raw, ranges):
-    """the blocks holding K values `ranges` of each row of raw [r, rb]: a card's K shard (test_k3_gguf_gsq.py's)"""
-    v = raw.reshape(raw.shape[0], -1, 18)
-    return np.ascontiguousarray(np.concatenate([v[:, k0 // 64:k1 // 64] for k0, k1 in ranges], 1)).reshape(raw.shape[0], -1)
+    (eo, nz), (el, _) = gacc.rel_errors(Y, own), gacc.rel_errors(Y, ll)
+    return eo, el, nz
 
 
 pooled, tensors = {}, []
@@ -145,8 +132,7 @@ def record_tensor(src, name, op, sets, nvec):
     for raw, K, X, rows in sets:
         a, b, z = errors(raw, K, X); eo.append(a); el.append(b); nz += z; seen.update(int(q) for q in rows)
     eo, el = np.concatenate(eo), np.concatenate(el)
-    r = dict(src=src, tensor=name, op=op, fmt='Q2_0', rows=len(seen), vectors=nvec, dots=int(eo.size),
-             own=dict(mean=float(eo.mean()), p99=float(np.percentile(eo, 99))), llama=dict(mean=float(el.mean()), p99=float(np.percentile(el, 99))))
+    r = dict(src=src, tensor=name, op=op, fmt='Q2_0', rows=len(seen), vectors=nvec, dots=int(eo.size), own=gacc.summary(eo), llama=gacc.summary(el))
     check(nvec >= 64 and len(seen) >= 256 and bool(np.isfinite(eo).all() and np.isfinite(el).all()) and nz == 0,
           f'{src} {op} Q2_0 {name}: {nvec} vectors (>= 64), {len(seen)} distinct rows (>= 256), finite errors, {nz} zero references')
     print(f'  {src} G-acc {op:8s} Q2_0 {name:28s} {len(seen):6d} rows {eo.size:7d} dots: own mean {r["own"]["mean"]:.2e} p99 '
@@ -172,36 +158,27 @@ for role, op, x in ROLES:
         name = f'blk.{il}.{role}.weight'; t = F.T[name]; K, Rw, E = t.shape
         data = np.asarray(t.data()).reshape(E, Rw, -1)
         ids = sites[f'L{il}.ffn.ids'].numpy(); X = sites[f'L{il}.ffn.{x}']
-        sets = []
-        for e in np.unique(ids):
-            rows = np.sort(np.random.default_rng(int(e)).choice(Rw, GACC_EXP_ROWS, replace=False))
-            hit = [(v, j) for v in range(ids.shape[0]) for j in range(KU) if ids[v, j] == e]
-            Xe = X[[v for v, _ in hit]] if op == 'MOE_GU' else torch.stack([X[v, j * FFN:(j + 1) * FFN] for v, j in hit])
-            sets.append((np.array(data[e][rows]), K, Xe, e * Rw + rows))
+        sets = [(raw, K, Xe, rr) for raw, Xe, rr in gacc.expert_sets(data, ids, X, op == 'MOE_DOWN')]
         record_tensor('qwen3.6', name, op, sets, X.shape[0])
 
 # the Coder's MOE_DOWN Q2_0 sets (its recording and its (e)'s sampling)
 if A.coder_acts:
     if not A.coder: sys.exit('--coder-acts: name the Coder shard with --coder')
     C_ = torch.load(A.coder_acts, weights_only=False); cm, cs, csh = C_['meta'], C_['sites'], C_['shards']
-    CF = ggufio.GGUFFile(A.coder); CKU = int(cs[f"L0.ffn.ids"].shape[1])
+    CF = ggufio.GGUFFile(A.coder)
     ls = [il for il in range(cm['nl']) if f'blk.{il}.ffn_down_exps.weight' in CF.T and CF.T[f'blk.{il}.ffn_down_exps.weight'].type == 'Q2_0']
     for il in (ls if A.layers == 'all' else sorted({ls[0], ls[-1]})):
         name = f'blk.{il}.ffn_down_exps.weight'; t = CF.T[name]; K, Rw, E = t.shape
         data = np.asarray(t.data()).reshape(E, Rw, -1); ids = cs[f'L{il}.ffn.ids'].numpy()
-        sets = []
-        for e in np.unique(ids):
-            rows = np.sort(np.random.default_rng(e).choice(Rw, GACC_EXP_ROWS, replace=False)); raw = np.array(data[e][rows])
-            hit = [(v, j) for v in range(ids.shape[0]) for j in range(CKU) if ids[v, j] == e]
-            for c in (0, 1):
-                Xc = cs[f'L{il}.ffn.h.c{c}']; kc = Xc.shape[1] // CKU
-                sets.append((kcols(raw, csh[name]['ranges'][c]), kc, torch.stack([Xc[v, j * kc:(j + 1) * kc] for v, j in hit]), e * Rw + rows))
+        sets = []   # (per expert, card 0's shard then card 1's: the stored baseline's order)
+        for c0, c1 in zip(*[gacc.expert_sets(data, ids, cs[f'L{il}.ffn.h.c{c}'], True, ranges=csh[name]['ranges'][c], bs=64, ts=18)
+                            for c in (0, 1)]):
+            sets += [(raw, raw.shape[1] // 18 * 64, Xe, rr) for raw, Xe, rr in (c0, c1)]
         record_tensor('coder', name, 'MOE_DOWN', sets, cs[f'L{il}.ffn.h.c0'].shape[0])
 pairs = {}
 for (src, op), (eo, el) in sorted(pooled.items()):
     eo, el = np.concatenate(eo), np.concatenate(el)
-    p = dict(own=dict(mean=float(eo.mean()), p99=float(np.percentile(eo, 99))), llama=dict(mean=float(el.mean()), p99=float(np.percentile(el, 99))),
-             dots=int(eo.size), tensors=len(pooled[(src, op)][0]))
+    p = dict(own=gacc.summary(eo), llama=gacc.summary(el), dots=int(eo.size), tensors=len(pooled[(src, op)][0]))
     pairs[f'{src} {op} Q2_0'] = p
     check(p['own']['mean'] <= p['llama']['mean'] and p['own']['p99'] <= p['llama']['p99'],
           f'G-acc {src} {op} Q2_0 pooled ({p["dots"]} dots, {p["tensors"]} tensors): own mean {p["own"]["mean"]:.2e} p99 {p["own"]["p99"]:.2e} '
@@ -224,6 +201,7 @@ Wd = [{r: torch.from_numpy(np.array(t.data())).reshape(-1).to(dev) for r, t in L
 tg, td = T3[0]['ffn_gate_exps'], T3[0]['ffn_down_exps']
 Kg, Rg, E = tg.shape; Kd, Rd, _ = td.shape
 rbg, rbd = Kg // 64 * 18, Kd // 64 * 18
+assert Rg % 2 == 0 and Rd % 2 == 0 and E > 0, (Rg, Rd, E)   # (the grouped kernels' row pairs and id clamp assume them)
 x16 = sites[f'L{lsp[0]}.ffn.mixed'][0].to(dev).half().contiguous()
 h16 = torch.from_numpy(np.random.default_rng(0).standard_normal(KU * Kd)).to(dev).half()
 y16 = torch.empty(KU * Rg, dtype=torch.float16, device=dev); yd = torch.empty(KU * Rd, device=dev)
@@ -234,7 +212,7 @@ bg, bd = KU * 2 * Rg * rbg, KU * Rd * rbd                           # bytes the 
 
 def read(w, nbytes, k):
     off = (k * 7919 % max(1, (w.numel() - nbytes) // 4096)) * 4096
-    n16 = nbytes // 16; RD.own_read((min(4096, (n16 + 255) // 256),), (256,), w[off:off + nbytes], ctypes.c_long(n16), sink)
+    gacc.own_read(RD, w[off:off + nbytes], sink)
 
 
 ops = {'gate|up': lambda L, ids, k: OWN.own_moe_gu_q2_0(((KU * Rg + 15) // 16,), (256,), L['ffn_gate_exps'], L['ffn_up_exps'], ids,
@@ -259,7 +237,7 @@ if A.gacc_out:
     if os.path.exists(A.gacc_out): sys.exit(f'--gacc-out: {A.gacc_out} appeared during the run: refusing to overwrite')
     with open(A.gacc_out, 'w') as f:
         json.dump(dict(acts=os.path.basename(A.acts), acts_meta=meta, coder_acts=A.coder_acts and os.path.basename(A.coder_acts), layers=A.layers,
-                       exp_rows=GACC_EXP_ROWS, arms=dict(own='build/own_mv_q2_0.hsaco own_mv_q2_0_k3 (fp16)', llama='build/gg_mv_ref.hsaco (q8_1)'),
+                       exp_rows=gacc.EXP_ROWS, arms=dict(own='build/own_mv_q2_0.hsaco own_mv_q2_0_k3 (fp16)', llama='build/gg_mv_ref.hsaco (q8_1)'),
                        pairs=pairs, tensors=tensors, speed_us=us), f, indent=1)
     print(f'wrote {A.gacc_out}')
 print('RESULT', 'PASS' if ok_all else 'FAIL'); sys.exit(0 if ok_all else 1)
