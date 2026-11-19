@@ -1,0 +1,64 @@
+# Posts the Ember agent's GitHub activity (the caminus-agent-ember account) to a Discord channel: its pull requests
+# opened, updated, merged or closed, the issues it opens and its comments. Nobody else's activity is posted.
+# The channel's webhook URL is the repository secret DISCORD_WEBHOOK; without it the job does nothing.
+# It never checks out or runs the pull request's code (pull_request_target runs this file from the default branch with
+# the repository's secrets, so it must not), it needs no token, and event text reaches the shell only through
+# environment variables, encoded by jq. Mentions in a title or comment never ping anyone (allowed_mentions empty).
+name: ember-discord
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, closed]
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  post:
+    name: Post Ember activity to Discord
+    if: >-
+      github.repository == 'jdominick05/caminus' && (
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'caminus-agent-ember') ||
+      (github.event_name == 'issues' && github.event.issue.user.login == 'caminus-agent-ember') ||
+      (github.event_name == 'issue_comment' && github.event.comment.user.login == 'caminus-agent-ember'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          [ -n "$WEBHOOK" ] || { echo "DISCORD_WEBHOOK is not set: nothing posted"; exit 0; }
+          case "$EVENT/$ACTION" in
+            pull_request_target/opened)      head="opened PR #$PR_NUMBER into $PR_BASE"; url=$PR_URL; title=$PR_TITLE ;;
+            pull_request_target/reopened)    head="reopened PR #$PR_NUMBER"; url=$PR_URL; title=$PR_TITLE ;;
+            pull_request_target/synchronize) head="pushed to PR #$PR_NUMBER ($PR_COMMITS commits)"; url=$PR_URL; title=$PR_TITLE ;;
+            pull_request_target/closed)
+              if [ "$MERGED" = true ]; then head="PR #$PR_NUMBER merged into $PR_BASE"; else head="PR #$PR_NUMBER closed unmerged"; fi
+              url=$PR_URL; title=$PR_TITLE ;;
+            issues/opened)                   head="opened issue #$ISSUE_NUMBER"; url=$ISSUE_URL; title=$ISSUE_TITLE ;;
+            issue_comment/created)           head="commented on #$ISSUE_NUMBER"; url=$COMMENT_URL; title=$ISSUE_TITLE ;;
+            *) exit 0 ;;
+          esac
+          body=$(printf '%s' "$COMMENT_BODY" | head -c 600)
+          [ "${#COMMENT_BODY}" -gt 600 ] && body="$body..."
+          jq -n --arg head "Ember $head" --arg title "$title" --arg url "$url" --arg body "$body" '{
+            username: "Ember", allowed_mentions: {parse: []},
+            embeds: [{title: ($head + ": " + $title)[0:250], url: $url, description: $body}]
+          }' | curl -fsS --max-time 20 -H 'Content-Type: application/json' --data-binary @- "$WEBHOOK"

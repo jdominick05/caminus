@@ -1,6 +1,6 @@
 # Releasing Caminus: CI, the PyPI release and the nightly builds
 
-Five of the GitHub Actions workflows (`.github/workflows/`; the sixth, cla.yml, is the contributor-agreement bot) and a few tools carry a release and the nightly builds. One fact
+Five of the GitHub Actions workflows (`.github/workflows/`; the other two are cla.yml, the contributor-agreement bot, and ember-discord.yml, which posts the Ember agent's pull requests and comments to a Discord channel) and a few tools carry a release and the nightly builds. One fact
 shapes all of it: the gfx1100 code objects in the wheel were built and validated with a TheRock ROCm nightly
 (10.2.0a20261011: amdclang++ and the offload driver's device LTO), and the gates that validated them hold their exact
 instructions and bitwise numerics (docs/dev/packaging.md, "Code objects"). That toolchain has no public URL, and a
