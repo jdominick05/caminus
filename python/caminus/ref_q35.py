@@ -71,6 +71,8 @@ def trunk_blocks(F):
 
 
 class Q35Ref:
+    gdn_gate = staticmethod(silu)   # the Gated DeltaNet output gate on z (the Coder's reference, caminus.ref_coder: sigmoid)
+
     def __init__(self, path, threads=None):
         self.F = F = ggufio.GGUFFile(path)
         if F.arch not in ('qwen35', 'qwen35moe'): raise ValueError(f'ref_q35: architecture {F.arch!r} (qwen35 and qwen35moe only)')
@@ -162,7 +164,7 @@ class Q35Ref:
             o[n] = np.einsum('jvk,jk->jv', St, qd)
         self.state[il] = St
         z = (h @ self.W(p + 'attn_gate.weight').T).reshape(N, NV, S)
-        fin = self.rms(o, self.vec(p + 'ssm_norm.weight')) * silu(z)
+        fin = self.rms(o, self.vec(p + 'ssm_norm.weight')) * self.gdn_gate(z)
         self._see('ssm_out input', fin)
         return fin.reshape(N, NV * S) @ self.W(p + 'ssm_out.weight').T
 

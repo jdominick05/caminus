@@ -234,6 +234,8 @@ CLAUDE.md imports this file.
   `computeThresholds`; it always exits 0. Tests: tests/harness/test_context_note.py.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.
+- `python/caminus/ref_q3moe.py`, `ref_q35.py`, `ref_coder.py`: the float64 host forwards (own reader and decoders) the G-model
+  gates score against: Qwen3-30B-A3B, the qwen35 line and qwen35moe, the Coder (on `ref_q35`'s blocks; up to 2,051 positions).
 
 ## Models and data
 

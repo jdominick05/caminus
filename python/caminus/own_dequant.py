@@ -1,7 +1,7 @@
 """Caminus's own host-side decoders of GGUF blocks to float32 (numpy), written from the block formats
 (docs/specs/spec-own-quant.md); gguf-py's dequantize is the test oracle (tests/io/test_own_dequant.py: bitwise equal).
 The arithmetic follows the formats' definition in float32: Q4_K and Q5_K y = (d * sc) * q - (dmin * m); Q6_K
-y = (d * sc) * q; the codebook formats (their tables: caminus.iq_tables) IQ4_XS y = (d * (ls - 32)) * kv[q];
+y = (d * sc) * q; the codebook formats (their tables: caminus.iq_tables) IQ4_XS y = (d * (ls - 32)) * kv[q]; IQ4_NL y = d * kv[q];
 IQ3_XXS y = ((d * (0.5 + s)) * 0.5) * grid * sign; IQ3_S y = (d * (1 + 2 s)) * grid * sign; IQ2_XXS, IQ2_XS and IQ2_S
 y = ((d * (0.5 + s)) * 0.25) * grid * sign; IQ1_M y = (d * (2 s + 1)) * (grid +- 0.125); Q2_K y = (d * sc) * q - (dmin * m); the plain block formats Q8_0 y = d * q (int8), Q4_0 y = d * (q - 8),
 Q4_1 y = d * q + m, Q2_0 (ggml type 42) y = d * (q - 1); BF16 y = the value's 16 bits as the high half of a float32 (exact).
@@ -82,6 +82,15 @@ def iq4_xs(raw):
     qs = b[:, 8:136].reshape(n, 8, 16)
     q = iq_tables.KVALUES_IQ4[np.concatenate([qs & 0xF, qs >> 4], axis=2)].astype(np.float32)
     return (dl * q).reshape(-1)
+
+
+def iq4_nl(raw):
+    """IQ4_NL: 18-byte blocks of 32: d (fp16), qs[16]: value j in the low nibble of byte j, value j + 16 in its high one;
+    the codebook is IQ4_XS's (iq_tables.KVALUES_IQ4)"""
+    b = np.asarray(raw, dtype=np.uint8).reshape(-1, 18)
+    qs = b[:, 2:18]
+    q = iq_tables.KVALUES_IQ4[np.concatenate([qs & 0xF, qs >> 4], axis=1)].astype(np.float32)
+    return (_f16(b[:, 0:2].copy()).reshape(-1, 1) * q).reshape(-1)
 
 
 def _su32(b):
@@ -233,7 +242,7 @@ def q2_0(raw):
 
 
 DECODERS = {'Q4_K': (256, 144, q4_k), 'Q6_K': (256, 210, q6_k), 'Q5_K': (256, 176, q5_k),
-            'IQ4_XS': (256, 136, iq4_xs), 'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s),
+            'IQ4_XS': (256, 136, iq4_xs), 'IQ4_NL': (32, 18, iq4_nl), 'IQ3_XXS': (256, 98, iq3_xxs), 'IQ3_S': (256, 110, iq3_s),
             'IQ2_XXS': (256, 66, iq2_xxs), 'IQ2_XS': (256, 74, iq2_xs), 'IQ2_S': (256, 82, iq2_s), 'Q2_K': (256, 84, q2_k),
             'IQ1_M': (256, 56, iq1_m), 'Q8_0': (32, 34, q8_0), 'Q4_0': (32, 18, q4_0), 'Q4_1': (32, 20, q4_1),
             'Q2_0': (64, 18, q2_0), 'BF16': (1, 2, bf16)}
