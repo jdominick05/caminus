@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from . import k3
 from .flashnext import EPS, DirectReader
+from .flashnext_tp import GACC_SITE_HOOKS, GACC_SITES
 from gguf import quants                                # (gguf-py on the path through caminus.engine.flashnext)
 
 MODULE = 'k3_gguf_q35h'
@@ -194,6 +195,24 @@ class Qwen35One:
                  h=B(Tn * max(1, self.k_used) * ffn), hq=q8b(Tn * max(1, self.k_used) * ffn), moe=B(Tn * D), shh=B(Tn * ffn), shu=B(Tn * ffn),
                  shq=q8b(Tn * ffn), shx=B(Tn * D), sgl=B(Tn), ffp=B(Tn * D))
         self.E, self.S, self.res, self.pos = E, s, [res], pos
+        # TEST-ONLY (K3_TEST_HOOKS=gacc-sites, FlashNextTP's hook: the recorded activations of docs/specs/spec-own-quant.md's
+        # G-acc, benchmarks/q36_gacc.py --record): every layer's attention half, FFN half and the head read and write the
+        # buffers of GACC_SITES through copies of their own (site_bufs[(layer, 'attn' | 'ffn') or ('head',)][name]), so
+        # every layer's rows stay readable after a pass. Only those pointers differ, every op, operand and order is the
+        # default tape's. Off by default
+        self.gacc_sites = os.environ.get('K3_TEST_HOOKS') == GACC_SITE_HOOKS
+        self.site_bufs = {}
+        if self.gacc_sites:
+            from ..device import capacity
+            per = sum(k * sum(s[n].numel() * s[n].element_size() for n in GACC_SITES[part])
+                      for part, k in (('attn', self.nl_build), ('ffn', self.nl_build), ('head', 1)))
+            capacity.check([self.dev], [per / 2 ** 20], f'Qwen35One K3_TEST_HOOKS={GACC_SITE_HOOKS} (every layer its own site rows)')
+
+        def site(key, part):
+            """under the gacc-sites hook: s's GACC_SITES[part] buffers become fresh copies, kept as site_bufs[key]"""
+            if not self.gacc_sites: return
+            own = {n: torch.zeros_like(s[n]) for n in GACC_SITES[part]}
+            self.site_bufs[key] = own; s.update(own)
         self.state, self.layer_seg, self.seg_names = {}, [], {}
         self.attn_cells = self.max_ctx
         self._attn_part = None
@@ -234,6 +253,7 @@ class Qwen35One:
         for il in range(self.nl_build):
             p = f'blk.{il}'
             self.layer_seg.append((il, len(E.segs)))
+            site((il, 'attn'), 'attn')
             M = norm(f'{p}.attn_norm.weight', dep)
             if il % self.fai != self.fai - 1:                  # Gated DeltaNet (value head h reads key head h % 16)
                 qkv = self._mat(f'{p}.attn_qkv.weight'); assert qkv['rows'] == CH, (qkv['rows'], CH)
@@ -284,6 +304,7 @@ class Qwen35One:
                 L = dict(kind='attn', q=aq, k=ak, v=av, qn=qn_, kn=kn_, o=ao, kv=cache)
             # res += block (llama.cpp's attn_residual; no exchange on one card), then the post-attention norm
             r_ = E.add_sum(s['blk'], s['zero'], res.reshape(-1), dep=blk_)
+            site((il, 'ffn'), 'ffn')
             M = norm(f'{p}.post_attention_norm.weight', r_)
             if self.dense:                                       # one dense FFN: gate / up matvecs, the fused swiglu q8_1, down
                 fg, fu, fd = self._mat(f'{p}.ffn_gate.weight'), self._mat(f'{p}.ffn_up.weight'), self._mat(f'{p}.ffn_down.weight')
@@ -315,6 +336,7 @@ class Qwen35One:
                      router=rw, sgate=sw, sg=sg, su=su, sd=sd, g=g, u=u, d=d)
             self.pw.append(L)
         self.layer_seg.append(('head', len(E.segs)))
+        site(('head',), 'head')
         M = norm('output_norm.weight', dep)
         out = self._mat('output.weight')
         self.vocab = out['rows']
