@@ -220,6 +220,9 @@ CLAUDE.md imports this file.
   providers bind `capabilities.reasoning.profile` to `qwen-chat-template`; effort stays pinned by the server's model id.
   Setup migrates owned model endpoint pins and removed fast/compaction selectors, preserving external provider routes.
 - `share/guard.sh` (linked as `tools/guard.sh`): the GPU guard, shipped in the package.
+- `share/templates/`: chat templates a catalog model is served with instead of its file's (`models.CHAT_TEMPLATES`, with its
+  special ids `models.SPECIAL_IDS`, both applied by `serve/vocab.py load_gguf_vocab`): Qwen3-30B-A3B keeps the official GGUF's
+  template and ids on unsloth's file (THIRD_PARTY.md); `models.PREVIOUS_FILES` keeps the official file a catalog model by path.
 - `share/harness/qwen-code/advisor/`: the Qwen Code advisor add-on (`caminus advisor`, docs/advisor.md), shipped as
   package data and installed as a copy into `$XDG_DATA_HOME/qwen-advisor/app`. Its hook must always exit 0 and add text
   to the newest message only (cache-safe); the local provider is standard library only. Tests: tests/harness/test_advisor.py.

@@ -121,7 +121,7 @@ else:
     m2 = dict(arch=a, hp={h: f[f'{a}.{h}'].contents() for h in arch.HP_KEYS if f'{a}.{h}' in f},
               weights=sum(int(t.n_bytes) for t in rd.tensors if t.name != 'token_embd.weight'))
     check(m1 == m2, f'arch.meta through caminus.ggufio == gguf-py\'s ({m1["arch"]}, {len(m1["hp"])} keys, {m1["weights"]} B)')
-    check(vocab.load_gguf_vocab(A.model) == vocab._load_gguf_vocab_ggufpy(A.model), 'the vocabulary through caminus.ggufio == gguf-py\'s')
+    check(vocab._load_gguf_vocab_own(A.model) == vocab._load_gguf_vocab_ggufpy(A.model), 'the vocabulary through caminus.ggufio == gguf-py\'s')
     own, hf = QwenTokenizer.from_gguf(A.model, engine='own'), QwenTokenizer.from_gguf(A.model)
     texts = []
     for d, _, fs in os.walk(ROOT):

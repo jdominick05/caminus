@@ -2,7 +2,8 @@
 
 Nothing here is redistributed: the files are downloaded from their public Hugging Face repositories at the pinned revisions.
 The local layout under the model directory (caminus.config.model_dir) is `<repository name>/<path in the repository>`, so the
-Coder's two shards share a directory (the loader finds shard 2 from shard 1's name).
+Coder's two shards share a directory (the loader finds shard 2 from shard 1's name). An item whose repository name would
+put it where another catalog file of the same name lived names its own directory (Item.local).
 
 Sources of the numbers (2026-11-06):
   * the Coder's shards: the revision and the LFS sha256 Hugging Face served when this machine downloaded them (the
@@ -18,7 +19,8 @@ from collections import namedtuple
 
 from . import arch as _arch
 
-Item = namedtuple('Item', 'key role repo revision path size sha256 source')
+# local: the item's directory under the model directory, when not its repository's name (None: the repository's name)
+Item = namedtuple('Item', 'key role repo revision path size sha256 source local', defaults=(None,))
 
 ITEMS = (
     Item('coder-1', 'coder', 'ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF', 'bba88856f8c3c0c9e40e45f82d05e228b814ac43',
@@ -45,12 +47,17 @@ ITEMS = (
          'Qwen3-Coder-Next-UD-IQ3_S.gguf', 29690687488,
          'fddff90a6e3b9f0aee320a2710024c458cd5f3b07f0b7bdfb33fcf23c08e5389', 'hf-lfs'),
 )
-# Qwen3-30B-A3B (11-10): the official Q4_K_M; revision, size and LFS sha256 from Hugging Face's API on 2026-11-10 (the
-# local file's sha256 computed and equal)
+# Qwen3-30B-A3B (11-18): unsloth's Q4_K_M, made with an importance matrix (Apache-2.0, not gated): the same tensors in the
+# same formats as Qwen's official Q4_K_M (Q4_K + Q6_K, tensor for tensor), about a third of its distance to BF16
+# (docs/dev/qwen3-30b-a3b.md, "Which file"). Revision, size and LFS sha256 from Hugging Face's API (paths-info at the
+# pinned revision) on 2026-11-18 (the local file's sha256 computed and equal). Its own local directory: the repository's
+# name is the official file's (Qwen/Qwen3-30B-A3B-GGUF, same file name), so both files can stay side by side and
+# `caminus pull` / `start` find this one with the old file still in place (docs/models.md, "Switching from the official
+# file"). It is served with the official file's chat template (CHAT_TEMPLATES).
 ITEMS = ITEMS + (
-    Item('qwen3-30b-a3b', 'qwen3-30b-a3b', 'Qwen/Qwen3-30B-A3B-GGUF', 'e4d4bafdfb96a411a163846265362aceb0b9c63a',
-         'Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824,
-         '0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5', 'hf-lfs'),
+    Item('qwen3-30b-a3b', 'qwen3-30b-a3b', 'unsloth/Qwen3-30B-A3B-GGUF', 'd5b1d57bd0b504ac62ae6c725904e96ef228dc74',
+         'Qwen3-30B-A3B-Q4_K_M.gguf', 18556686912,
+         '9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48', 'hf-lfs', local='Qwen3-30B-A3B-GGUF-unsloth'),
 )
 # Two dense Qwen3.8-27B finetunes and the DFlash2 drafter of their base (11-11): revision, size and LFS sha256 from Hugging
 # Face's API on 2026-11-11 (each local file's sha256 computed and equal). CATALOG names Swift 1.5 and ThinkingCap (their
@@ -103,8 +110,9 @@ ALL = (
     _model('qwen3.8-27b', 'Qwen3.8 27B dense GSQ-RCO IQ3_S (own code end to end)', 'qwen35-own', ('qwen3.8-27b', 'dflash2-27b'),
            'qwen3.8-27b', '55 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
            'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
-    _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
-           '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
+    _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M, unsloth imatrix (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
+           '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row, '
+           'measured on the official Q4_K_M: the same formats)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
 )
 # Each served model's recommended sampling for agentic work (thinking on), from its model card: what caminus serve uses as a
 # request's defaults (caminus.serve.sampler.model_defaults: these first, then the GGUF's general.sampling.* where a field is
@@ -150,6 +158,45 @@ def sampling_of(path):
     None: a file outside the catalog, or a model with no entry (the paused ones)"""
     m = model_of(path)
     return SAMPLING.get(m.name) if m is not None else None
+
+
+# The chat template a catalog model is served with instead of its file's tokenizer.chat_template (a file under
+# share/templates/; caminus.serve.vocab.load_gguf_vocab applies it). Qwen3-30B-A3B: the official GGUF's template, copied
+# unchanged below a comment header (its sha256 in the file's header), so the prompts stay the official file's whichever
+# Q4_K_M is served; unsloth's file carries its own edit of it (two edge cases differ: docs/dev/qwen3-30b-a3b.md).
+CHAT_TEMPLATES = {'qwen3-30b-a3b': 'qwen3-30b-a3b.jinja'}
+
+
+def chat_template_of(path):
+    """the chat template text the catalog model whose first file this is (model_of) is served with, or None: the file's own"""
+    m = model_of(path)
+    name = CHAT_TEMPLATES.get(m.name) if m is not None else None
+    if name is None:
+        return None
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'share', 'templates', name), encoding='utf-8') as f:
+        return f.read()
+
+
+# The special token ids a catalog model is served with instead of its file's tokenizer.ggml.* ids (caminus.serve.vocab
+# load_gguf_vocab sets them beside the template). Qwen3-30B-A3B: the official GGUF's (bos 151643 '<|endoftext|>', eos 151645
+# '<|im_end|>', padding 151643). unsloth's file has no bos_token_id and pads with 151654, so without this every served
+# prompt would lose the BOS id the official file's prompts start with (and /props would report no bos_token).
+SPECIAL_IDS = {'qwen3-30b-a3b': dict(bos_id=151643, eos_id=151645, pad_id=151643)}
+
+
+def special_ids_of(path):
+    """{field: id} of the serve vocabulary the catalog model whose first file this is (model_of) pins, or None"""
+    m = model_of(path)
+    return dict(SPECIAL_IDS[m.name]) if m is not None and m.name in SPECIAL_IDS else None
+
+
+# Files a catalog model was served from before, as (file name, size): model_of still takes them for that model, so a file
+# kept on disk and served by path keeps the model's sampling, model id, chat template and special ids. Download, pull and
+# start never use them (manage.locate_item matches the current item's size). Qwen3-30B-A3B: Qwen's official Q4_K_M
+# (Qwen/Qwen3-30B-A3B-GGUF e4d4bafdfb96a411a163846265362aceb0b9c63a, sha256 0d003f66...a8f5), the catalog's file up to
+# 0.3.2. A kept old identity (AGENTS.md, Growth): the Qwen3-30B-A3B entry is removed in the 0.5.0 release, together with
+# its switch notes (docs/models.md, "Switching from the official qwen3-30b-a3b file") and manage.locate_previous's message.
+PREVIOUS_FILES = {'qwen3-30b-a3b': (('Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824),)}
 
 
 # Paused models: in the tree (their engines, kernels and files stay) but not offered: `caminus models`, `caminus pull`,
@@ -231,7 +278,7 @@ def paused(name):
 
 def model_of(path):
     """the catalog model whose first file this is (the same file name and size: what caminus start finds and passes as
-    --model), or None"""
+    --model; or one of the model's PREVIOUS_FILES), or None"""
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -239,7 +286,7 @@ def model_of(path):
     base = os.path.basename(path)
     for m in ALL:
         it = BY_KEY[m.items[0]]
-        if os.path.basename(it.path) == base and it.size == size:
+        if (os.path.basename(it.path) == base and it.size == size) or (base, size) in PREVIOUS_FILES.get(m.name, ()):
             return m
     return None
 
@@ -259,5 +306,5 @@ def drafter_item(m):
 
 
 def local_rel(it):
-    """an item's path under the model directory"""
-    return it.repo.split('/', 1)[1] + '/' + it.path
+    """an item's path under the model directory: its own directory (Item.local) or its repository's name, then its path"""
+    return (it.local or it.repo.split('/', 1)[1]) + '/' + it.path

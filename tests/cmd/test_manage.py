@@ -627,6 +627,7 @@ def main():
     paused_checks(S)
     unmanaged_checks(S)
     reload_checks(S)
+    restart_checks(S)
     print(f'RESULT {"PASS" if not FAILS else "FAIL (" + str(len(FAILS)) + ")"}')
     return 0 if not FAILS else 1
 
@@ -647,6 +648,132 @@ out['team'] = manage.cmd_start(['--team', 'brain-hands', '--json'])
 out['serve'] = {a: arch.paused(arch.ARCHS[a]) for a in ('qwen35moe', 'qwen3next', 'qwen35', 'qwen35-own', 'qwen3moe', 'qwen4exp')}
 print(json.dumps(out))
 '''
+
+
+def restart_checks(S):
+    """caminus restart of a server recorded before its catalog file moved (Qwen3-30B-A3B: the official file's path, before the
+    switch to unsloth's file in its own folder): refused before the stop while the catalog file is missing; with it, the
+    restart serves the catalog file, not the recorded path. A user's own --model (`caminus start NAME -- --model X`, serve
+    takes the last one) survives a restart, and needs no catalog file"""
+    from caminus import models
+    from caminus.cmd import manage
+    m = models.BY_NAME['qwen3-30b-a3b']
+    it = models.BY_KEY['qwen3-30b-a3b']
+    old = os.path.join(S, 'old-models', 'Qwen3-30B-A3B-GGUF', os.path.basename(it.path))
+    own = os.path.join(S, 'own-models', 'Qwen3-30B-A3B-Q5_K_M.gguf')
+    os.makedirs(os.path.dirname(own), exist_ok=True)
+    with open(own, 'wb') as f:
+        f.write(b'GGUF')
+    kv = ['--cache-dir', os.path.join(S, 'kv', 'q3-restart')]
+    recs = dict(plain=dict(name='q3-restart', argv=['--model', old, '--port', '8100'] + kv),
+                own=dict(name='q3-own', argv=['--model', old, '--port', '8100'] + kv + ['--model', own]))
+    for r in recs.values():
+        r.update(model='qwen3-30b-a3b', path=old, port=8100, devices=[0], guard_pid=999999999)
+        d = manage.server_dir(r['name']); os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'server.json'), 'w') as f:
+            json.dump(r, f)
+    calls = []
+    real_stop, real_start = manage.stop_one, manage.start_one
+    manage.stop_one = lambda n, log=print: calls.append(('stop', n))
+    manage.start_one = lambda *x, **k: calls.append(('start', x, k)) or dict(name=k.get('name'), port=8101)
+
+    def restart(name):
+        calls.clear()
+        with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
+            return manage.cmd_restart([name])
+    new = os.path.join(os.environ['CAMINUS_MODEL_DIR'], models.local_rel(it))
+    try:
+        if os.path.exists(new): os.remove(new)
+        rc = restart('q3-restart')
+        check(rc != 0 and calls == [], f'restart: the catalog file missing: refused before the stop, the server keeps running ({rc}, {calls})')
+        rc = restart('q3-own')
+        check(rc == 0 and [c[0] for c in calls] == ['stop', 'start'] and calls[1][2]['recorded_path'] == old,
+              f'restart: the catalog file missing, a user\'s own --model: restarted, no catalog file needed ({rc}, {[c[0] for c in calls]})')
+        e0 = manage.model_entry(m)
+        check(not e0['present'] and manage.restart_argv(recs['own']['argv'], e0, 8102, m, old) ==
+              ['--model', old, '--port', '8102'] + kv + ['--model', own] and not manage.needs_catalog(recs['own']['argv'], m, old),
+              'restart: without the catalog file the argv is kept (only the port changes); it does not depend on the catalog file')
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        with open(new, 'wb') as f:
+            f.truncate(it.size)
+        rc = restart('q3-restart')
+        check(rc == 0 and [c[0] for c in calls] == ['stop', 'start'] and calls[1][2]['argv_override'] == recs['plain']['argv'],
+              f'restart: stop, then start with the recorded argv ({[c[0] for c in calls]})')
+    finally:
+        manage.stop_one, manage.start_one = real_stop, real_start
+    e = manage.model_entry(m)
+    got = manage.restart_argv(recs['plain']['argv'], e, 8102, m, old)
+    check(e['path'] == new and got == ['--model', new, '--port', '8102'] + kv,
+          f'restart: --model at the catalog file found now ({models.local_rel(it)}), not the recorded old path; the new port')
+    got = manage.restart_argv(recs['own']['argv'], e, 8102, m, old)
+    check(got == ['--model', new, '--port', '8102'] + kv + ['--model', own],
+          'restart: a user\'s own --model survives (the catalog one re-pointed, the user\'s last one kept: serve takes the last)')
+    # a recorded --model the catalog identifies by its file (the official file kept, a PREVIOUS_FILES entry), whatever the
+    # record's path says, is re-pointed too
+    prev = os.path.join(S, 'prev-models', models.PREVIOUS_FILES['qwen3-30b-a3b'][0][0])
+    os.makedirs(os.path.dirname(prev), exist_ok=True)
+    with open(prev, 'wb') as f:
+        f.truncate(models.PREVIOUS_FILES['qwen3-30b-a3b'][0][1])
+    check(manage.restart_argv(['--model', prev], e, 1, m, None) == ['--model', new] and manage.catalog_arg(new, m)
+          and not manage.catalog_arg(own, m),
+          'restart: a --model model_of takes for this model (its catalog file, the official file kept) is re-pointed; a user file is not')
+    # only the first --model (serve_argv's) is re-pointed: a user's later one is kept even when it names the official file
+    argv = ['--model', old, '--port', '8100'] + kv + ['--model', prev]
+    check(manage.restart_argv(argv, e, 8102, m, old) == ['--model', new, '--port', '8102'] + kv + ['--model', prev],
+          'restart: a user\'s later --model holding the official file (a PREVIOUS_FILES file) survives; only serve_argv\'s is re-pointed')
+    # needs_catalog reads the last --model in either spelling (serve's argparse takes both)
+    check(not manage.needs_catalog(['--model', old, '--model=' + own], m, old) and manage.needs_catalog(['--model=' + old], m, old),
+          'restart: needs_catalog sees --model=X (a user file there needs no catalog file; the recorded one does)')
+    # a later --model is the user's own even when it names the previous (official) file: serve takes it, so the restart
+    # needs no catalog file (as restart_argv keeps it); a sole recorded --model still does
+    prev = os.path.join(S, 'prev-' + models.PREVIOUS_FILES['qwen3-30b-a3b'][0][0])
+    check(not manage.needs_catalog(['--model', old, '--model', prev], m, old) and manage.needs_catalog(['--model', old], m, old),
+          'restart: a later --model (even the previous file) needs no catalog file; the sole recorded one does')
+    # the catalog file missing while the previous file is on disk: the refusal says so and points at the pull
+    os.remove(new)
+    e2 = manage.model_entry(m)
+    txt = manage.missing_text(m, e2)
+    check(not e2['present'] and e2['previous'] is None and 'is not downloaded' in txt,
+          f'missing: no previous file in the search dirs: "not downloaded" ({txt})')
+    pd = os.path.join(os.environ['CAMINUS_MODEL_DIR'], 'Qwen3-30B-A3B-GGUF', models.PREVIOUS_FILES['qwen3-30b-a3b'][0][0])
+    os.makedirs(os.path.dirname(pd), exist_ok=True)
+    with open(pd, 'wb') as f:
+        f.truncate(models.PREVIOUS_FILES['qwen3-30b-a3b'][0][1])
+    e2 = manage.model_entry(m)
+    txt = manage.missing_text(m, e2)
+    with contextlib.redirect_stdout(open(os.path.join(S, 'models.txt'), 'w')):
+        manage.cmd_models([])
+    listing = open(os.path.join(S, 'models.txt')).read()
+    check(not e2['present'] and e2['previous'] == pd and 'previous one is on disk' in txt and 'caminus pull qwen3-30b-a3b' in txt
+          and 'the previous one is on disk' in listing,
+          f'missing: the previous file on disk: start and caminus models say so and point at the pull ({txt})')
+    calls.clear()
+    manage.stop_one = lambda n, log=print: calls.append(('stop', n))
+    try:
+        with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
+            rc = manage.cmd_restart(['q3-restart', '--json'])
+    finally:
+        manage.stop_one = real_stop
+    check(rc != 0 and calls == [], 'restart: refused before the stop, with the previous file on disk')
+    os.remove(pd)
+    with open(new, 'wb') as f:
+        f.truncate(it.size)
+    # a paused model's server (started with CAMINUS_ALLOW_PAUSED=1, the variable unset since): refused before the stop
+    r = dict(name='ax-restart', model='arex-2', path='/m/a.gguf', port=8110, devices=[0], guard_pid=999999999,
+             argv=['--model', '/m/a.gguf', '--port', '8110'])
+    d = manage.server_dir(r['name']); os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'server.json'), 'w') as f:
+        json.dump(r, f)
+    calls.clear()
+    manage.stop_one = lambda n, log=print: calls.append(('stop', n))
+    allow = os.environ.pop('CAMINUS_ALLOW_PAUSED', None)
+    try:
+        with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
+            rc = manage.cmd_restart([r['name']])
+    finally:
+        manage.stop_one = real_stop
+        if allow is not None: os.environ['CAMINUS_ALLOW_PAUSED'] = allow
+    check(rc != 0 and calls == [], f'restart: a paused model\'s server is refused before the stop, it keeps running ({rc}, {calls})')
 
 
 def reload_checks(S):

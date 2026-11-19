@@ -54,7 +54,7 @@ def resolve(model_name, placement='auto', ctx=None):
         raise ServeError(f'unknown model {model_name!r} (caminus models: {", ".join(models.BY_NAME)})')
     e = manage.model_entry(m)
     if not e['present']:
-        raise ServeError(f'{m.name} is not downloaded (caminus pull {m.name})')
+        raise ServeError(manage.missing_text(m, e))
     running = [s for s in manage.all_servers() if manage.alive(s.get('guard_pid'))]
     held = {d for s in running for d in s.get('devices', [])}
     if placement in ('0', '1') and m.cards >= 2:

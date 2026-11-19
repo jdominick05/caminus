@@ -592,6 +592,8 @@ func (m ctl) detailRows(w, room int) []string {
 		rows = append(rows, wrapped(fg(cMuted).Render(rec.Note), w, 2)...)
 	}
 	switch {
+	case !mi.Present && mi.Previous != "": // (the catalog's file changed: the old one is on disk, the new one not yet)
+		rows = append(rows, wrapped(fg(cYellow).Render("new file not downloaded")+fg(cMuted).Render(" · the previous one is on disk · p downloads the new one ("+gbText(mi.SizeGB)+")"), w, 2)...)
 	case !mi.Present:
 		rows = append(rows, wrapped(fg(cYellow).Render("not downloaded")+fg(cMuted).Render(" · p downloads it ("+gbText(mi.SizeGB)+")"), w, 2)...)
 	case m.psDown() && m.liveOf(mi.Name) == nil: // (enter starts nothing until what runs is known)

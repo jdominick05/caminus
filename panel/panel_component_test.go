@@ -307,6 +307,25 @@ func TestEmptyStates(t *testing.T) {
 	}
 }
 
+// A catalog file that changed (caminus.models.PREVIOUS_FILES): the previous file on disk, the new one not; the row and
+// enter say so and point at the pull.
+func TestPreviousFileState(t *testing.T) {
+	m := fixturePanel()
+	m.ps.Servers = nil
+	for i := range m.models {
+		m.models[i].Present = false
+		m.models[i].Previous = "/m/old/Qwen3-30B-A3B-Q4_K_M.gguf"
+	}
+	out := ansi.Strip(m.View(100, 30))
+	if !strings.Contains(out, "new file not downloaded") || !strings.Contains(out, "the previous one is on disk") {
+		t.Fatalf("a changed catalog file shows the previous one on disk:\n%s", out)
+	}
+	m, _ = m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !strings.Contains(m.note, "previous one is on disk") || !strings.Contains(m.note, "p to pull the new one") {
+		t.Fatalf("enter on a changed catalog file says what to do: %q", m.note)
+	}
+}
+
 // TestPanelGoldenFrames: the fixture's frames at the sizes the panel is checked at (LLMTOP_GOLDEN=update after a
 // deliberate change; the files are what a reviewer reads to audit the screen).
 func TestPanelGoldenFrames(t *testing.T) {

@@ -1,7 +1,7 @@
 # Qwen3-30B-A3B on Caminus's own code
 
-Caminus serves the official Qwen3-30B-A3B Q4_K_M GGUF on one RX 7900 XTX with code written for this project at every
-step, from reading the file to the output token. No llama.cpp code runs or is compiled into that path. This page says
+Caminus serves a Qwen3-30B-A3B Q4_K_M GGUF (unsloth's, made with an importance matrix: [which file](#which-file)) on
+one RX 7900 XTX with code written for this project at every step, from reading the file to the output token. No llama.cpp code runs or is compiled into that path. This page says
 what "own code" covers, how fast and how accurate it is, where the remaining time goes, and how to reproduce every
 number.
 
@@ -9,9 +9,83 @@ It is the follow-up to [rdna3-decode-floor](https://github.com/jdominick05/rdna3
 the matrix-vector products of one decode token of this model cost on the same card. That study timed the token's 1,393 matvecs
 in isolation. This is the whole model: attention over the context, the tokenizer, the sampler and the HTTP server.
 
+## Which file
+
+The catalog's file is unsloth's `Qwen3-30B-A3B-Q4_K_M.gguf`
+([unsloth/Qwen3-30B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF)), quantized with an importance
+matrix. Until 2026-11-18 it was Qwen's official Q4_K_M ([Qwen/Qwen3-30B-A3B-GGUF](https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF)),
+which every number on this page was measured on unless it says otherwise.
+
+- **The same tensors in the same formats.** Both files hold the same 579 tensors, each in the same format (289 Q4_K,
+  49 Q6_K, 241 F32) and shape; the tokenizer's tokens, merges and types, the context length and the RoPE keys are
+  equal. So the engine, its kernels and the speed are the same.
+- **The header keys that differ**, and whether they reach serving:
+
+  | Key | Official | unsloth | Reaches serving |
+  |---|---|---|---|
+  | `tokenizer.chat_template` | Qwen's | unsloth's edit | yes: pinned to the official one (below) |
+  | `tokenizer.ggml.bos_token_id` | 151643 | absent | yes, every prompt starts with it: pinned to 151643 (below) |
+  | `tokenizer.ggml.padding_token_id` | 151643 | 151654 | read, unused by the server: pinned to 151643 anyway |
+  | `general.name`, `general.basename`, `general.size_label`, `general.finetune`, `general.quantized_by`, `general.repo_url` | | | no (display metadata; the engine key fingerprints the file itself) |
+  | `quantize.imatrix.*` (4 keys, unsloth only) | | | no |
+
+  The same in both: `tokenizer.ggml.eos_token_id` 151645, `add_bos_token` false, `model` gpt2, `pre` qwen2.
+- **Closer to BF16.** Mean KL divergence from the BF16 model, measured with stock llama.cpp against the BF16 model's
+  logits, 64 chunks of 4,096 tokens of each text:
+
+  | File | wikitext-2 (test) | A code text |
+  |---|---|---|
+  | Official Q4_K_M | 0.064 | 0.090 |
+  | Q4_K_M made with an importance matrix | 0.0185 | 0.028 |
+
+  unsloth's published file gives that Q4_K_M's p99 KL divergence and top-1 agreement exactly. The
+  [follow-up studies](#follow-up-studies-the-experts-weight-format) found the same thing for the experts alone.
+- **The official prompts stay.** unsloth's file carries its own edit of the template. Through Caminus's request
+  normalization the two give the same prompt for system prompts, tools, tool calls and results, multi-step tool chains
+  and reasoning in earlier turns, with thinking on and off, but not in two edge cases: an earlier assistant turn whose
+  reasoning is only whitespace (unsloth's drops the empty think block) and a user message that holds a
+  `<tool_response>` block without starting and ending with one (unsloth's takes it for the user's question, the
+  official one for a tool result). Its missing BOS key would drop the first id of every prompt (151643). So only the
+  weights change: the catalog serves this model with the official file's template (`caminus.models.CHAT_TEMPLATES`, the
+  file `python/caminus/share/templates/qwen3-30b-a3b.jinja`, the official text unchanged below a comment header) and its
+  special ids (`caminus.models.SPECIAL_IDS`), both applied when the server reads the vocabulary
+  (`caminus.serve.vocab.load_gguf_vocab`). On the real files the served prompt ids are equal. `tests/test_model_sampling.py`
+  checks the template copy against the official text's sha256, and that a file with unsloth's header keys at the catalog's
+  size is served the same prompt ids as one with the official header's.
+- **The official file kept by path** stays this model (`caminus.models.PREVIOUS_FILES`, matched by its name and size): served
+  with `caminus serve --model` it keeps the model id, the sampling defaults, the template and the ids. Download, pull and
+  start never use it, and `caminus restart` re-points a server recorded with its path at the catalog file.
+- **Its own folder.** The new file's local path is `Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf` (`Item.local`):
+  the repository name and the file name are the official file's, so without it the two would share a path.
+- **Gated on this file** (2026-11-18, the engine gates below against this file's own references: float64 at 128
+  tokens, fp32 for the last 64 of 16,384 / 40,896; llama.cpp, the ignite-llama fork, on the same file as the bound):
+
+  | Gate | Cards, KV | caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 |
+  |---|---|---|---|
+  | 128 tokens | XT, F16 | 3.40e-05, 128 / 128 | 2.40e-03, 128 / 128 |
+  | 128 tokens | XT, Q8 | 1.14e-03, 127 / 128 | 2.65e-03 (q8_0 KV), 127 / 128 |
+  | 128 tokens | XTX + XT, F16 | 2.42e-04, 128 / 128 | 2.40e-03, 128 / 128 |
+  | 128 tokens | XTX + XT, Q8 | 1.34e-03, 127 / 128 | 2.65e-03 (q8_0 KV), 127 / 128 |
+  | Last 64 of 16,384 | XTX, F16 | 1.96e-03, 63 / 64 | 7.94e-03, 63 / 64 |
+  | Last 64 of 40,896 | XTX, F16 | 8.56e-04, 64 / 64 | 3.85e-03, 61 / 64 |
+  | Last 64 of 16,384 | XTX + XT, F16 | 1.34e-03, 63 / 64 | 7.94e-03, 63 / 64 |
+  | Last 64 of 40,896 | XTX + XT, F16 | 1.07e-03, 63 / 64 | 3.85e-03, 61 / 64 |
+
+  The Q8 rows also pass against the F16 cache (mean KLD 1.16e-03 one card, 1.28e-03 two, top-1 99.2 %; llama.cpp's own
+  F16 to q8_0 cost 2.46e-03, 98.2 %); the two-card rows' replicas are equal after every token. These gates measure the
+  engine's fidelity to a float64 (fp32 at depth) computation of the same quantized file, not the file's accuracy: that
+  is the BF16 comparison above. The official file's 128-token gate, rerun the same day on the same build, still reads
+  4.66e-04 (llama.cpp 2.83e-03); why the engine sits about 14 times closer to this file's reference than to the official
+  file's at 128 tokens is an open question about the engine's rounding, not measured further. Through the server
+  (`tools/serve_smoke1.py`, own code only, three alternating runs of each file, medians), decode is the same: one XTX
+  196.7 against 195.1 tok/s after a 6.6K-token prompt and 126.7 against 126.5 after 37.7K; XTX + XT 182.5 against
+  181.7 and 142.8 against 142.7.
+- Switching an existing install: [models](../models.md#switching-from-the-official-qwen3-30b-a3b-file).
+
 ## Results
 
-All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, 2026-11-10. llama.cpp is the
+All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, 2026-11-10, on the official Q4_K_M
+file ([which file](#which-file)). llama.cpp is the
 [ignite-llama](https://github.com/jdominick05/ignite-llama) fork at e4e3f8eda, a HIP build with the same toolchain,
 on the same file and card (`llama-bench -ngl 99 -fa 1`).
 
@@ -314,7 +388,8 @@ reads), with their predictions written down before the first timed run, and meas
   bandwidth bound is the per-stage cost described above, which no weight format changes.
 - The official file's experts are not the most accurate at their size: IQ4_XS, or Q4_0 made with an importance matrix,
   is about half its distance to a reference with Q8_0 experts (the official file may also come from other source
-  weights; that split is not measured).
+  weights; that split is not measured). This is why the catalog now serves an importance-matrix Q4_K_M
+  ([which file](#which-file)).
 
 ## The long-context mode (YaRN x4, opt-in)
 
@@ -394,7 +469,9 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
 - One card with 24 GB: the full 40,960-token context needs 22.4 GB (past it: the long-context mode above). A 20 GB card can't hold 32,768 tokens of it, which
   is the server's minimum. Two cards are offered too (`--cards 2`, an XTX + XT: the bigger card first); one card stays
   the default. See [models](../models.md).
-- One model file is tested: `Qwen/Qwen3-30B-A3B-GGUF`, `Qwen3-30B-A3B-Q4_K_M.gguf`. The kernels cover Q4_K and Q6_K.
+- Two model files, with the same tensors and formats: `unsloth/Qwen3-30B-A3B-GGUF` (the catalog's) and
+  `Qwen/Qwen3-30B-A3B-GGUF` (the one most numbers here come from), both `Qwen3-30B-A3B-Q4_K_M.gguf`
+  ([which file](#which-file)). The kernels cover Q4_K and Q6_K.
 - Speculative decoding is measured, not enabled (see above): `caminus serve` decodes this model one token per pass.
 - An 8-bit (Q8_0) KV cache on one card (`Q3MoEOne(q8=True)`, decode and the batched prefill) and on two
   (`Q3MoETP(q8=True)`, the same format over each card's kv heads), served with `caminus serve --kv q8` (F16 stays the
@@ -409,7 +486,7 @@ guard ([gpu-safety](gpu-safety.md)).
 
 ```bash
 caminus pull qwen3-30b-a3b
-M=~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf
+M=~/.local/share/caminus/models/Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf
 ./build.sh
 
 python -I tests/test_own_code.py --model $M                       # the own-code checks (CPU)
