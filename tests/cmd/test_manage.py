@@ -373,31 +373,59 @@ def main():
     _ar.of = lambda path: Rec('rec', 'rec')
     try:
         ent = dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={})
-        manage.fits_fn(ent, kv='q8')(dict(line_mib=24000, display=False)); manage.pair_fits(q3, ent, cards=2, kv='q8')([{}, {}])
-        manage.fits_fn(ent)(dict(line_mib=24000, display=False))
+        manage.card_fit(q3, ent, kv='q8')[0](dict(line_mib=24000, display=False)); manage.pair_fits(q3, ent, cards=2, kv='q8')([{}, {}])
+        manage.card_fit(q3, ent)[0](dict(line_mib=24000, display=False))
     finally:
         _ar.of = real_of
     check(seen == ['q8', 'q8', 'q8', 'f16', 'f16'], f'start --kv: the one-card and two-card fits project the asked cache (opt kv {seen})')
-    # the refusal's model part (caminus.device.host.one's explain): the projection's need and the most that fits now, else
-    # the size rule's need (no projection here: a file the header reader cannot open)
-    _ar.of = lambda path: Rec('rec', 'rec')
+    # the refusal's model part (caminus.device.host.one's explain), built with fits from one projection: the need and what
+    # the fit keeps beside it, so in use + need + reserved past the card's total is exactly the refusal (the numbers never
+    # read as fitting), and the most that fits now; without a projection the size rule's, worded by the same formatter
+    import re as _re
+    nums = lambda t: [float(x) for x in _re.search(r'needs (?:about )?([0-9.]+) GB \+ ([0-9.]+) GB reserved', t).groups()]
+    g0 = H.gpus(manage.ROOT)[0]
+    used0 = H.used_mib(g0) / 1024
+    for need_mib, refused in ((g0['total_mib'] * 0.93, True), (g0['total_mib'] * 0.5, False)):
+        class Big(_ar.Arch):
+            cards = 1
+            def auto_need(self, opt, slots, cards=None): return 40960, [0], 1.0, lambda c: [need_mib if c >= 32768 else 1.0]
+            def variant(self, cards): return self
+        _ar.of = lambda path: Big('big', 'big')
+        try:
+            fits, explain = manage.card_fit(q3, dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={}))
+            ok, t_proj = fits(g0), explain(g0)
+        finally:
+            _ar.of = real_of
+        n, r = nums(t_proj)
+        check(ok is not refused and (used0 + n + r > g0['total_mib'] / 1024) is refused
+              and f" at 32,768 positions; fits {28672 if refused else 40960:,} now" in t_proj,
+              f'start refusal: in use {used0:.1f} + need + reserved vs the card\'s {g0["total_mib"] / 1024:.1f} GB says what fits says ({t_proj!r})')
+    fits, explain = manage.card_fit(q3, dict(path=os.path.join(S, 'no-such.gguf'), size_gb=18.6, need_gb=18.6, paths={}))
+    t_size = explain(g0)
+    n, r = nums(t_size)
+    check(not fits(g0) and n + r > g0['total_mib'] / 1024 and t_size.startswith('needs about 23.1 GB + 1.3 GB reserved')
+          and "files' size" in t_size, f'start refusal: the size rule\'s need and reserve without a projection ({t_size!r})')
+    # the refusal names every card: a free one with its use and the model's need, a held one with the server that holds it
+    # (from the registry: one still loading holds no VRAM yet); a card nobody holds says nothing of a holder
+    tc = (models.BY_NAME['thinkingcap'], dict(path=os.path.join(S, 'no-such.gguf'), size_gb=40, need_gb=40, paths={}))
+    refusal = {}
+    real_all, real_alive = manage.all_servers, manage.alive
+    manage.all_servers = lambda: [dict(name='tcap', model='thinkingcap', port=8093, devices=[1], guard_pid=4242)]
+    manage.alive = lambda pid: pid == 4242
     try:
-        g0 = H.gpus(manage.ROOT)[0]
-        t_proj = manage.explain_fn(q3, dict(path='/m/q3.gguf', size_gb=18.6, need_gb=18.6, paths={}))(g0)
+        for what, held in (('free', set()), ('held', {1})):
+            try:
+                manage.pick_cards(*tc, None, held)
+                refusal[what] = ''
+            except manage.ManageError as e:
+                refusal[what] = str(e)
     finally:
-        _ar.of = real_of
-    t_size = manage.explain_fn(q3, dict(path=os.path.join(S, 'no-such.gguf'), size_gb=18.6, need_gb=18.6, paths={}))(g0)
-    check(t_proj == 'qwen3-30b-a3b needs 0.0 GB at 32,768 positions; fits 40,960 now'
-          and t_size.startswith('qwen3-30b-a3b needs about 23.1 GB') and "files' size" in t_size,
-          f'start refusal: the projection\'s need and fit now ({t_proj!r}); the size rule\'s need without one ({t_size!r})')
-    try:
-        manage.pick_cards(models.BY_NAME['thinkingcap'], dict(path=os.path.join(S, 'no-such.gguf'), size_gb=40, need_gb=40, paths={}),
-                          None, set())
-        refusal = ''
-    except manage.ManageError as e:
-        refusal = str(e)
-    check('fits none of the free cards' in refusal and 'GB in use' in refusal and 'thinkingcap needs about' in refusal,
-          f'start: a model too big for every card names each card\'s use and the model\'s need ({refusal})')
+        manage.all_servers, manage.alive = real_all, real_alive
+    check(all('fits none of the free cards' in t and 'XTX card1: 0.1 of 24.0 GB in use; needs about' in t for t in refusal.values())
+          and 'XT card2: 0.1 of 20.0 GB in use; needs' in refusal['free'] and 'held by' not in refusal['free']
+          and 'XT card2: 0.1 of 20.0 GB in use; held by thinkingcap on :8093' in refusal['held']
+          and refusal['held'].count('needs') == 1 and refusal['held'].startswith('thinkingcap: '),
+          f'start: the refusal names each card, its use and the model\'s need, a held one by its server ({refusal})')
     sv = dict(name='kvq8', model='qwen3-30b-a3b', path='/m/q3.gguf', port=18099, devices=[0], card_names=['XTX'], argv=[],
               guard_pid=1, log=os.path.join(S, 'none.log'), started=time.time(), alias='qwen3-30b-a3b', kv='q8')
     props = {'n_ctx': 40960, 'model_alias': 'qwen3-30b-a3b', 'caminus': {'kv_cache': {'type': 'q8', 'format': 'q8_0-v1:x'}}}

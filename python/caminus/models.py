@@ -244,6 +244,12 @@ def model_of(path):
     return None
 
 
+def model_name(path):
+    """the catalog name of a model file (model_of), else the file's name: how a refusal or a holder label names it"""
+    m = model_of(path)
+    return m.name if m else os.path.basename(path)
+
+
 def drafter_item(m):
     """the ITEMS key of the drafter file m's architecture loads (its role is a drafter's name: 'dflash'; the architecture's
     own drafter or one of its optional ones, Arch.drafters: the dense 27B line's --draft dflash), or None"""

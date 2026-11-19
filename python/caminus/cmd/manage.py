@@ -515,9 +515,13 @@ def pick_port(want, taken):
     raise ManageError(f'no free port in {PORT0}..{PORT0 + 99}')
 
 
-def _fit_plan(entry, ctx=None, kv=None, long_context=False):
-    """(the registry entry, its serve options) for a one-card fit of a catalog model file, or None when no projection can
-    run here (no torch, a header the projection cannot read): fits_fn and explain_fn then use the size rule"""
+def card_fit(m, entry, ctx=None, kv=None, long_context=False):
+    """(fits(card), explain(card)) for a one-card catalog model m's file, from one projection: fits, the registry's
+    projection at 32K positions (or --ctx) on that card now (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it
+    projects; long_context: in the model's long-context mode, Arch.long_mode, whose format choice applies when kv is not
+    given); explain, for caminus.device.host.one's refusal, what it needs on the card and the most that fits now
+    (Arch.need_text). Without torch or with a header the projection cannot read, a size rule: the files it serves with
+    (an optional drafter is not loaded by default) + 10 % + 4 GiB within the line less a display's reserve or 256 MiB"""
     try:
         from .. import arch
         A = arch.of(entry['path'])
@@ -526,36 +530,10 @@ def _fit_plan(entry, ctx=None, kv=None, long_context=False):
         A.long_mode(opt)                         # (the long-context mode's cap and format: refused by start_one before here)
         A.auto_need(opt, 4)                      # (probe the projection without inventing a zero-card fit)
     except Exception:                            # (no torch, or a header the projection cannot read: the server's own check decides)
-        return None
-    return A, opt
-
-
-def _size_rule_mib(entry):
-    """the size rule's need on one card: the files it serves with (an optional drafter is not loaded by default) + 10 % +
-    4 GiB"""
-    return entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20 * 1.1 + 4096
-
-
-def fits_fn(entry, ctx=None, kv=None, long_context=False):
-    """fits(card) for a one-card model file: the registry's projection at 32K positions (or --ctx) on that card now
-    (caminus.arch.Arch.fits, sysfs only; kv: --kv, the cache it projects; long_context: in the model's long-context mode,
-    Arch.long_mode, whose format choice applies when kv is not given); without torch (no projection here) a size rule:
-    the file + 4 GiB within the line"""
-    plan = _fit_plan(entry, ctx, kv, long_context)
-    if plan is None:
-        return lambda g: _size_rule_mib(entry) <= g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
-    A, opt = plan
-    return lambda g: A.fits(opt, [g])
-
-
-def explain_fn(m, entry, ctx=None, kv=None, long_context=False):
-    """explain(card) for caminus.device.host.one's refusal: what model m needs on that card at the asked context and the
-    most that fits now (Arch.need_text), or, without a projection here, its size rule's need"""
-    plan = _fit_plan(entry, ctx, kv, long_context)
-    if plan is None:
-        return lambda g: f'{m.name} needs about {_size_rule_mib(entry) / 1024:.1f} GB by its files\' size (no projection here)'
-    A, opt = plan
-    return lambda g: A.need_text(opt, [g], m.name)
+        need = entry.get('need_gb', entry['size_gb']) * 1e9 / 2 ** 20 * 1.1 + 4096
+        room = lambda g: g['line_mib'] - (machine.DISPLAY_RESERVE_MIB if g['display'] else 256)
+        return (lambda g: need <= room(g)), (lambda g: host.need_text(need, g['total_mib'] - room(g)))
+    return (lambda g: A.fits(opt, [g])), (lambda g: A.need_text(opt, g))
 
 
 def pair_fits(m, entry, ctx=None, cards=None, kv=None, long_context=False):
@@ -601,7 +579,10 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
     if not cs:
         raise ManageError('no supported GPU (RX 7900 XTX / XT; caminus doctor)')
     by_pci = {c['pci']: c['index'] for c in cs}
-    held_pci = {c['pci'] for c in cs if c['index'] in held}
+    # (held cards by PCI address, each with its server from the registry for one()'s refusal: a server still loading holds
+    #  no VRAM yet, so KFD's per-process files cannot name it)
+    holder = {d: f"{s['model']} on :{s['port']}" for s in all_servers() if alive(s.get('guard_pid')) for d in s.get('devices', [])}
+    held_pci = {c['pci']: holder.get(c['index']) for c in cs if c['index'] in held}
     free = [c for c in cs if c['index'] not in held]
     if (cards or m.cards) >= 2:
         try:
@@ -629,9 +610,9 @@ def pick_cards(m, entry, card, held, ctx=None, cards=None, kv=None, long_context
         return [i]
     if not free:
         raise ManageError('every card is held by a Caminus server (caminus ps; caminus stop NAME)')
+    fits, explain = card_fit(m, entry, ctx, kv=kv, long_context=long_context)
     try:
-        return [by_pci[host.one(gs, fits_fn(entry, ctx, kv=kv, long_context=long_context), held=held_pci, root=ROOT,
-                                explain=explain_fn(m, entry, ctx, kv=kv, long_context=long_context))['pci']]]
+        return [by_pci[host.one(gs, fits, held=held_pci, root=ROOT, explain=explain)['pci']]]
     except host.PlacementError as e:
         raise ManageError(f'{m.name}: {e}') from None
 

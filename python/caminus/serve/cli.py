@@ -340,13 +340,6 @@ def keep_default_draft(A, opt, place, log=print):
     opt['draft_floor'] = want    # (the real placement and max_ctx auto keep this floor: Dense35.min_ctx)
 
 
-def model_name(path):
-    """the catalog name of a model file (caminus.models.model_of), else the file's name: how a refusal names the model"""
-    from .. import models
-    m = models.model_of(path)
-    return m.name if m else os.path.basename(path)
-
-
 def fit_report(argv):
     """Read-only companion to serve: same recipe and placement, no device initialization.
 
@@ -364,8 +357,7 @@ def fit_report(argv):
 
     def project(o):
         keep_default_draft(A, o, lambda fits: host.place(A.cards, fits=fits, split_of=A.split), log=lambda *a, **kw: None)
-        placement = host.place(A.cards, fits=lambda cs: A.fits(o, cs), split_of=A.split,
-                               explain=lambda g: A.need_text(o, [g], model_name(o['model'])))
+        placement = host.place(A.cards, fits=lambda cs: A.fits(o, cs), split_of=A.split, explain=lambda g: A.need_text(o, g))
         plan = A.context_fit(o, placement['cards'])
         if o['max_ctx'] != 'auto' and o['max_ctx'] > plan.native_ctx:
             raise ValueError(f'fit currently reports native context only (at most {plan.native_ctx} positions)')
@@ -442,8 +434,7 @@ def main(argv=None):
     from ..device import host as _host
     keep_default_draft(A, opt, lambda fits: _host.place(A.cards, fits=fits, split_of=A.split))
     try:
-        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split,
-                         explain=lambda g: A.need_text(opt, [g], model_name(opt['model'])))
+        pl = _host.place(A.cards, fits=lambda cs: A.fits(opt, cs), split_of=A.split, explain=lambda g: A.need_text(opt, g))
         pl_extra = A.placement_extra(opt, pl['cards'])   # (decided once here; build reads it back: the drafter's card)
     except (_host.PlacementError, ValueError) as e:     # (ValueError: a refusal raised while fitting, e.g. no MTP block)
         print(f'caminus serve: {e}', file=sys.stderr)

@@ -64,9 +64,11 @@ group and log in again.
 **"would use ... MiB > its cap" when you start**: something else is using the card: another model, a game, or a server that's still
 shutting down. `caminus ps` and `caminus doctor` show what's using each card. Stop it and try again.
 
-**"the model fits none of the free cards"**: the refusal names, per card, the memory in use now and what holds it (a
-Caminus server by its model and port, or another program by its name), what the model needs at the context asked for,
-and the most context that fits now. Stop what holds the card, or start with a smaller `--ctx`.
+**"the model fits none of the free cards"**: the refusal names each card: the memory in use now and what holds it (a
+Caminus server by its model and port, or another program by its name), what the model needs at the context asked for
+plus what Caminus keeps free beside it ("reserved": the guard's line, a margin, the desktop's share on a display card,
+the prompt cache's working room), and the most context that fits now. In use + needs + reserved is more than the card
+holds. Stop what holds the card, or start with a smaller `--ctx`.
 
 **"Loading model" (HTTP 503)** for the first minute: the model is still loading. `caminus logs NAME` shows its progress.
 

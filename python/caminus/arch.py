@@ -364,29 +364,31 @@ class Arch:
             plan = self.context_fit(opt, cards)
         except NotImplementedError:
             return True
+        return plan.fits(self.asked_ctx(opt, plan))
+
+    def asked_ctx(self, opt, plan):
+        """the context fits checks: an explicit --max-ctx, else (auto) the architecture's floor, at most the model's own"""
         try:
-            want = int(opt.get('max_ctx'))              # an explicit --max-ctx: that context; auto: the architecture's floor
+            want = int(opt.get('max_ctx'))
         except (TypeError, ValueError):
             want = self.min_ctx(opt)
-        return plan.fits(min(want, plan.native_ctx))
+        return min(want, plan.native_ctx)
 
-    def need_text(self, opt, cards, name):
-        """for a refusal on these cards (caminus.device.host dicts, as fits takes them): what model `name` needs at the asked
-        context (an explicit max_ctx, else the placement floor) and the most context that fits now, from the projection
-        fits reads: 'qwen3-30b-a3b needs 19.8 GB at 32,768 positions; fits 8,192 now'. '' without a projection here"""
+    def need_text(self, opt, card):
+        """for a refusal on one card (a caminus.device.host dict): what the model needs there at the context fits checks
+        and what the fit keeps beside it (the card's free memory less the room fits compares the need with), and the most
+        context that fits now, from the projection fits reads (caminus.device.host.need_text words it). '' without a
+        projection here"""
+        from .device import host
         try:
-            plan = self.context_fit(opt, cards)
-            try:
-                want = int(opt.get('max_ctx'))
-            except (TypeError, ValueError):
-                want = self.min_ctx(opt)
-            want = min(want, plan.native_ctx)
-            need = max(plan.need_mib(want))
+            plan = self.context_fit(opt, [card])
+            want = self.asked_ctx(opt, plan)
+            need, = plan.need_mib(want)
+            reserved = card['total_mib'] - host.used_mib(card) - plan.room_mib[0]
             most = plan.maximum()
         except Exception:                       # noqa: BLE001 - no projection for this entry or file: the caller says less
             return ''
-        return (f'{name} needs {need / 1024:.1f} GB at {want:,} positions; '
-                + (f'fits {most:,} now' if most else f'not even {min(AUTO_STEP, plan.native_ctx):,} positions fit now'))
+        return host.need_text(need, reserved, want, most, min(AUTO_STEP, plan.native_ctx))
 
     def draft_refusal(self, draft, path=None):
         """why this entry must not serve --draft `draft` for the GGUF at path (a sentence for the error), or None. Without a

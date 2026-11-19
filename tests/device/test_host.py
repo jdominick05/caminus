@@ -284,14 +284,31 @@ def main():
     users = H.gpu_users(r)
     check(users.get(129) == [(4242, 'ThinkingCap.gguf on :8093', 19 * 1024)] and users.get(128) == [(4343, 'llama-server', 21 * 1024)],
           f'gpu_users: per card, a caminus serve named by its model and port, another process by its name ({users})')
-    ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r,
-                                      explain=lambda g: f"m needs 19.8 GB at 32,768 positions; fits {8192 if g['label'] == 'XTX' else 0:,} now"),
-                      'XT card2 (0000:06:00.0): 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093); m needs 19.8 GB at 32,768 positions',
-                      'XTX card1 (0000:03:00.0): 0.1 of 24.0 GB in use (llama-server); m needs', 'fits 8,192 now')
-    check(ok, f'refusal: each free card with what holds it and the model\'s need from explain ({msg})')
+    explain = lambda g: H.need_text(19.8 * 1024, 1.9 * 1024, 32768, 8192 if g['label'] == 'XTX' else None, 4096)
+    ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=explain),
+                      'XT card2: 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093); needs 19.8 GB + 1.9 GB reserved at 32,768 '
+                      'positions; not even 4,096 positions fit now. XTX card1: 0.1 of 24.0 GB in use (llama-server); needs',
+                      'fits 8,192 now')
+    check(ok and '0000:0' not in msg, f'refusal: each free card with what holds it and the model\'s need from explain ({msg})')
+    check(H.need_text(23.1 * 1024, 1.3 * 1024) == "needs about 23.1 GB + 1.3 GB reserved by its files' size (no projection here)",
+          'refusal: the size rule\'s need, from the same formatter')
     ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=lambda g: 1 / 0),
-                      'XT card2 (0000:06:00.0): 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093)')
+                      'XT card2: 0.1 of 20.0 GB in use (ThinkingCap.gguf on :8093)')
     check(ok and 'ZeroDivision' not in msg, f'refusal: an explain that cannot run leaves the card\'s state alone ({msg})')
+    # held / not held: a card another Caminus server holds is named with that server (caminus start passes the registry's
+    # label; the same server is not named twice from KFD's files), a plain held set says another server holds it
+    gs = H.gpus(r)
+    ok, msg = refuses(lambda: H.one(gs, lambda g: False, held={'0000:06:00.0': 'ThinkingCap.gguf on :8093'}, root=r, explain=explain),
+                      'XT card2: 0.1 of 20.0 GB in use; held by ThinkingCap.gguf on :8093. XTX card1: 0.1 of 24.0 GB in use (llama-server); needs')
+    check(ok and msg.count('needs') == 1, f'refusal: a held card named with its holder, the model\'s need only on the free one ({msg})')
+    ok, msg = refuses(lambda: H.one(gs, lambda g: False, held={'0000:06:00.0'}, root=r), 'held by another Caminus server')
+    check(ok, f'refusal: a held card without a label ({msg})')
+    # comm is the name cut at 15 bytes: maybe inside a character; the refusal still names the card
+    with open(os.path.join(r, 'proc', '4343', 'comm'), 'wb') as f:
+        f.write('llama-serv\u00e9\u00e9\u00e9'.encode()[:15] + b'\n')
+    users = H.gpu_users(r)
+    check(users.get(128, [(0, '')])[0][1].startswith('llama-serv') and '\ufffd' in users[128][0][1],
+          f'gpu_users: a process name cut inside a character reads with a replacement, no UnicodeDecodeError ({users.get(128)})')
 
     # -- gfx names ----------------------------------------------------------------------------------------------------------
     check([H.gfx_name(v) for v in (110000, 110001, 100306, 90010)] == ['gfx1100', 'gfx1101', 'gfx1036', 'gfx90a'], 'gfx names')
