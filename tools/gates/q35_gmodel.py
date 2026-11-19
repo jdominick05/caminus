@@ -6,10 +6,12 @@ KLD(ref || candidate), top-1 agreement and |logit difference|; the gate: mean KL
                                     # cards after every token
   python -I tools/gates/q35_gmodel.py --ref REF.npz --llama LLAMA.bin --ref-only     # the reference against llama.cpp, no card
 LLAMA.bin: llama.cpp's one-token-decode logits rows of the same tokens, f32 [N, vocab] (build/gg_golden MODEL --lc JOBS with
-the lines 'nctx N+64', 'kv f16', 'onecard', 'tfx ref TOKENS.txt 0 N 1 1 OUT'). --ref-only is the check that can catch a
-wrong reading of the model in the reference itself (the engine and the reference share that reading): the reference
-is confirmed when llama.cpp's mean KLD against it is under --confirm (0.01: llama.cpp's quantized activations cost
-about 1e-3, a wrong reading of a block costs 0.1 or more) and its top-1 agrees at 15 positions of 16 or more. Prints PASS / FAIL and RESULT; exit 0 only on PASS."""
+the lines 'nctx N+64', 'kv f16', 'onecard', 'tfx ref TOKENS.txt 0 N 1 1 OUT'). --ref-only checks the reference's own
+reading of the model (the engine and the reference share that reading): the reference passes when llama.cpp's mean KLD
+against it is under --confirm (0.01: llama.cpp's quantized activations cost about 1e-3, a gross misreading of a block
+0.1 or more) and its top-1 agrees at 15 positions of 16 or more. A subtle misreading can pass it: on Qwen3.6-35B-A3B,
+sigmoid instead of softmax router weights (KLD 1.6e-3) and 7 experts instead of 8 (9.2e-3) both do, so a qwen35moe
+reference also needs tests/engine/test_q36_golden_cpu.py (each block from llama.cpp's own input). Prints PASS / FAIL and RESULT; exit 0 only on PASS."""
 import argparse, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)

@@ -1,6 +1,7 @@
-"""caminus.ref_q35 (the float64 reference of the dense qwen35 line) on a tiny synthetic qwen35 GGUF written here (random F32
+"""caminus.ref_q35 (the float64 reference of the qwen35 line) on a tiny synthetic qwen35 GGUF written here (random F32
 weights; 4 trunk blocks: 3 Gated DeltaNet + 1 attention, and a declared multi-token-prediction block whose tensors are not
-in the file), CPU only, no model file:
+in the file), and on its qwen35moe twin (the same trunk, each FFN 6 routed experts with 2 used plus a gated shared
+expert), CPU only, no model file:
   - the state carries: a text fed in one chunk, token by token, and in uneven pieces gives the same logits (the conv window,
     the delta state, the KV cache and the causal mask across feeds)
   - causality: a position's logits do not depend on later tokens; reset() returns to the start
@@ -8,9 +9,14 @@ in the file), CPU only, no model file:
   - the declared multi-token-prediction block is not read (the file has no tensors for it), and a qwen35 file with a
     router tensor (the MoE line) is refused
   - one Gated DeltaNet step and one attention step against the block's definition written out per head and per value here
+  - qwen35moe: the state carries as above (one chunk == token by token == uneven pieces), the MoE FFN over 5 tokens
+    against its definition written out per token and per expert here (softmax router, top 2, renormalized weights, the
+    shared expert gated by a sigmoid), the routes feed() reports are those; a multi-token-prediction block's router is
+    not counted; a file with a block missing its router, a scale tensor, fused gate|up experts or an array-valued
+    expert width is refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/test_ref_q35.py --scratch DIR"""
-import argparse, os, struct, sys
+import argparse, os, re, struct, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
 from caminus import ref_q35
@@ -152,5 +158,56 @@ for n in range(5):
         out[hh] = sum(pr[t] * Vs[t][kv] for t in range(n + 1)) * sig(qf[hh, HD:])
     want[n] = Wd('blk.2.attn_output.weight') @ out.reshape(-1)
 check(rel(got, want) < 1e-12, f'an attention block over 5 tokens == its definition per head (rel {rel(got, want):.1e})')
+
+# ---- qwen35moe: the same trunk, routed experts + a gated shared expert in every block -----------------------------------
+E, KU, FFE, FFS = 6, 2, 12, 10
+TM = {k: v for k, v in T.items() if not re.search(r'\.ffn_(gate|up|down)\.weight$', k)}
+for il in range(len(KINDS)):
+    p = f'blk.{il}.'
+    TM.update({p + 'ffn_gate_inp.weight': w(E, D, sc=1.0), p + 'ffn_gate_exps.weight': w(E, FFE, D), p + 'ffn_up_exps.weight': w(E, FFE, D),
+               p + 'ffn_down_exps.weight': w(E, D, FFE), p + 'ffn_gate_shexp.weight': w(FFS, D), p + 'ffn_up_shexp.weight': w(FFS, D),
+               p + 'ffn_down_shexp.weight': w(D, FFS), p + 'ffn_gate_inp_shexp.weight': w(1, D)})
+META_M = {k.replace('qwen35.', 'qwen35moe.', 1): v for k, v in META.items()}
+META_M.update({'general.architecture': 'qwen35moe', 'qwen35moe.expert_count': E, 'qwen35moe.expert_used_count': KU,
+               'qwen35moe.expert_feed_forward_length': FFE, 'qwen35moe.expert_shared_feed_forward_length': FFS})
+PM = os.path.join(A.scratch, 'tiny-q35moe.gguf'); write_gguf(PM, META_M, TM)
+mm = ref_q35.Q35Ref(PM, threads=2)
+check(mm.moe and mm.L == len(KINDS) and mm.gdn == KINDS and (mm.E, mm.KU, mm.FF, mm.FFS) == (E, KU, FFE, FFS),
+      f'qwen35moe: {mm.L} trunk blocks, kinds {mm.gdn}, {mm.KU} of {mm.E} experts ({mm.FF} wide), shared {mm.FFS}')
+routes = []; fm = mm.feed(ids, routes=routes)
+mm.reset(); om = np.concatenate([mm.feed([t]) for t in ids])
+mm.reset(); pm = np.concatenate([mm.feed(ids[a:b]) for a, b in zip(cuts, cuts[1:])])
+check(fm.shape == (len(ids), V) and np.isfinite(fm).all() and rel(om, fm) < 1e-9 and rel(pm, fm) < 1e-9,
+      f'qwen35moe: one chunk == token by token == uneven pieces (rel {rel(om, fm):.1e}, {rel(pm, fm):.1e})')
+used = np.unique(np.concatenate([r[0].reshape(-1) for r in routes]))
+check(len(routes) == mm.L and all(r[0].shape == (len(ids), KU) for r in routes) and len(used) > KU,
+      f'qwen35moe: feed reports one route per block; {len(used)} of {E} experts used over the text')
+Wd = lambda n: TM[n].astype(np.float64)
+hs = rng.standard_normal((5, D)); got, gtop, gw = mm._moe(1, hs)
+want = np.empty_like(got); ok_routes = True
+for n in range(5):
+    h = hs[n]; lg = Wd('blk.1.ffn_gate_inp.weight') @ h
+    pr = np.exp(lg - lg.max()); pr /= pr.sum()
+    top = sorted(range(E), key=lambda e: -pr[e])[:KU]; ws = [pr[e] / sum(pr[j] for j in top) for e in top]
+    ok_routes &= list(gtop[n]) == top and np.allclose(gw[n], ws, rtol=1e-14, atol=0)
+    y = np.zeros(D)
+    for e, we in zip(top, ws):
+        g = Wd('blk.1.ffn_gate_exps.weight')[e] @ h; u = Wd('blk.1.ffn_up_exps.weight')[e] @ h
+        y += we * (Wd('blk.1.ffn_down_exps.weight')[e] @ (silu(g) * u))
+    s_ = silu(Wd('blk.1.ffn_gate_shexp.weight') @ h) * (Wd('blk.1.ffn_up_shexp.weight') @ h)
+    want[n] = y + sig(Wd('blk.1.ffn_gate_inp_shexp.weight')[0] @ h) * (Wd('blk.1.ffn_down_shexp.weight') @ s_)
+check(ok_routes and rel(got, want) < 1e-12, f'qwen35moe: the MoE FFN over 5 tokens == its definition per token and per expert, routes too (rel {rel(got, want):.1e})')
+PM1 = os.path.join(A.scratch, 'tiny-q35moe-mtp.gguf')
+write_gguf(PM1, META_M, dict(TM, **{f'blk.{len(KINDS)}.ffn_gate_inp.weight': w(E, D), f'blk.{len(KINDS)}.attn_norm.weight': 1 + w(D, sc=0.1)}))
+m1 = ref_q35.Q35Ref(PM1, threads=2)
+check(m1.L == len(KINDS) and np.array_equal(m1.feed(ids), fm), 'qwen35moe: a multi-token-prediction block with its own router is accepted and not read (the same logits)')
+for what, meta, tens in (('a block missing its router', META_M, {k: v for k, v in TM.items() if k != 'blk.2.ffn_gate_inp.weight'}),
+                         ('a scale tensor (ffn_down_exps_s)', META_M, dict(TM, **{'blk.0.ffn_down_exps_s.weight': w(E, D)})),
+                         ('a fused ffn_gate_up_exps', META_M, dict(TM, **{'blk.0.ffn_gate_up_exps.weight': w(E, 2 * FFE, D)})),
+                         ('an array-valued expert_feed_forward_length', dict(META_M, **{'qwen35moe.expert_feed_forward_length': [FFE] * len(KINDS)}), TM)):
+    PM2 = os.path.join(A.scratch, 'tiny-q35moe-bad.gguf'); write_gguf(PM2, meta, tens)
+    try: ref_q35.Q35Ref(PM2); refused = False
+    except ValueError: refused = True
+    check(refused, f'a qwen35moe file with {what} is refused')
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
