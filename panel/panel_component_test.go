@@ -226,7 +226,7 @@ func TestOptionsEditorKeepsTheAdvancedChoices(t *testing.T) {
 	if m.view != viewMain || m.vals["max_ctx"] != "8192" || m.card != "0" {
 		t.Fatalf("the edits are kept: view %d vals %v card %q", m.view, m.vals, m.card)
 	}
-	if d := ansi.Strip(strings.Join(m.detailRows(90), "\n")); !strings.Contains(d, "options  --max-ctx 8192 --card 0") {
+	if d := ansi.Strip(strings.Join(m.detailRows(90, 0), "\n")); !strings.Contains(d, "options  --max-ctx 8192 --card 0") {
 		t.Fatalf("what goes to the next start is on the main screen:\n%s", d)
 	}
 	if got := strings.Join(m.startArgs(m.models[1]), " "); got != "start swift-1.5 --card 0 -- --max-ctx 8192" {
@@ -252,7 +252,7 @@ func TestChoicesChangeWithTheArrows(t *testing.T) {
 	if _, d := m.modelMode(m.models[1]); d != "off" {
 		t.Fatalf("← steps back: %s", d)
 	}
-	if d := ansi.Strip(strings.Join(m.detailRows(90), "\n")); !strings.Contains(d, "cards    1 [2]") || !strings.Contains(d, "drafter  auto [off] mtp dflash") {
+	if d := ansi.Strip(strings.Join(m.detailRows(90, 0), "\n")); !strings.Contains(d, "cards    1 [2]") || !strings.Contains(d, "drafter  auto [off] mtp dflash") {
 		t.Fatalf("the choices show their values:\n%s", d)
 	}
 }

@@ -397,19 +397,27 @@ func (m ctl) liveOf(name string) *serverInfo {
 	return nil
 }
 
-// recordOf is the registry's record of the model's server that does not run (a failed or stopped start), nil if none.
+// recordOf is the registry's record of the model's server that does not run, nil if none: its failed start first, else
+// a stopped one with a note. (Records a later start superseded stay for caminus restart NAME, stopped and with nothing
+// to say: one of them never hides the model's own failure.)
 func (m ctl) recordOf(name string) *serverInfo {
+	var stopped *serverInfo
 	for i := range m.ps.Servers {
 		s := m.ps.Servers[i]
-		if s.Model == name && !s.External && (s.State == "failed" || s.State == "stopped") {
+		switch {
+		case s.Model != name || s.External:
+		case s.State == "failed":
 			return &s
+		case s.State == "stopped" && (stopped == nil || stopped.Note == ""):
+			stopped = &s
 		}
 	}
-	return nil
+	return stopped
 }
 
 // fitLines is the most lines the fit row wraps to: a refusal names every card (its use, holder, the model's need and the
-// context that fits there), two cards' worth whole in the detail column at 80 columns (48 cells: 7 lines).
+// context that fits there), two cards' worth whole in the detail column at 80 columns (48 cells: 7 lines). On a short
+// screen it takes only what the rows under it leave (detailRows' room), 2 lines at least.
 const fitLines = 8
 
 // whenText is " 21:26 today", " 21:26 yesterday" or " Nov 16 21:26" for a Unix time (seconds), "" when unknown (0).
@@ -503,8 +511,9 @@ func (m ctl) choiceLine(label string, on bool, values []string, chosen string) s
 }
 
 // detailRows are the selected model's details, w cells wide: what it is, how fast, its choices, the context that fits,
-// the edited options, what runs or failed, and what enter and p do.
-func (m ctl) detailRows(w int) []string {
+// the edited options, what runs or failed, and what enter and p do. room: the lines the screen has for them (0: no
+// limit); the fit row gives up lines first, so what failed and what enter does stay on a short screen.
+func (m ctl) detailRows(w, room int) []string {
 	mi := m.selModel()
 	if mi == nil {
 		return nil
@@ -563,8 +572,9 @@ func (m ctl) detailRows(w int) []string {
 		}
 		rows = append(rows, line)
 	}
+	fitAt, fitRow := -1, ""
 	if fr := m.fitRow(*mi); fr != "" && m.liveOf(mi.Name) == nil { // (a running model's own memory is in the cards' figure)
-		rows = append(rows, wrapped(fr, w, fitLines)...)
+		fitAt, fitRow = len(rows), fr
 	}
 	if o := m.editedText(*mi); o != "" {
 		rows = append(rows, wrapped(fg(cMuted).Render("options  ")+bold(cAccent).Render(o)+fg(cMuted).Render(" · o edits"), w, 2)...)
@@ -595,6 +605,13 @@ func (m ctl) detailRows(w int) []string {
 			fg(cYellow).Render(mi.MissingDrafter+" missing")+fg(cMuted).Render(fmt.Sprintf(": p downloads it (%.1f GB)", mi.MissingDrafterGB)), w, 2)...)
 	case m.liveOf(mi.Name) == nil:
 		rows = append(rows, wrapped(bold(cAccent).Render("enter")+fg(cMuted).Render(m.startsText()), w, 2)...)
+	}
+	if fitAt >= 0 { // (the fit row last: as many lines as the room leaves after every other row, at most fitLines)
+		n := fitLines
+		if room > 0 {
+			n = min(n, max(2, room-len(rows)))
+		}
+		rows = append(rows[:fitAt], append(wrapped(fitRow, w, n), rows[fitAt:]...)...)
 	}
 	return rows
 }
@@ -652,7 +669,7 @@ func (m ctl) modelsLines(W, room int) []string {
 	}
 	if W >= twoColumnsAt {
 		dw := W - listW - 1
-		det := m.detailRows(dw)
+		det := m.detailRows(dw, max(3, room-1))
 		n := max(len(list), len(det))
 		n = min(n, max(3, room-1))
 		lo := window(m.curM, len(list), n)
@@ -672,7 +689,11 @@ func (m ctl) modelsLines(W, room int) []string {
 		}
 		return out
 	}
-	det := m.detailRows(W - 3)
+	detRoom := room - 2 - min(len(list), 3) // (the head, the name row and at least three list rows; a stale line is in room)
+	if stale != "" {
+		detRoom--
+	}
+	det := m.detailRows(W-3, max(1, detRoom))
 	nl := min(len(list), max(3, room-2-len(det)))
 	lo := window(m.curM, len(list), nl)
 	out := []string{head}

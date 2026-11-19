@@ -28,7 +28,7 @@ func TestModelPickerBasicChoices(t *testing.T) {
 	if got := m.startArgs(mi); !reflect.DeepEqual(got, []string{"start", "dense"}) {
 		t.Fatalf("auto leaves the measured default to serve: %v", got)
 	}
-	if d := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(d, "drafter") || !strings.Contains(d, "cards") ||
+	if d := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); !strings.Contains(d, "drafter") || !strings.Contains(d, "cards") ||
 		!strings.Contains(m.keysLine(), "choice") {
 		t.Fatalf("both choices are on the screen, and the key line says how to change them:\n%s\n%s", d, ansi.Strip(m.keysLine()))
 	}
@@ -50,7 +50,7 @@ func TestModelPickerBasicChoices(t *testing.T) {
 			t.Fatalf("drafter not passed: %s", args)
 		}
 	}
-	if rows := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(rows, "[auto] off mtp dflash") {
+	if rows := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); !strings.Contains(rows, "[auto] off mtp dflash") {
 		t.Fatalf("the next start is visible: %s", rows)
 	}
 }
@@ -159,7 +159,7 @@ func TestModelPickerMissingOptionalDrafter(t *testing.T) {
 	if cmd != nil || m.confirm == nil || m.confirm.run == nil || !strings.Contains(m.confirm.q, "dflash drafter (2.1 GB)") {
 		t.Fatalf("an installed model can fetch its missing drafter after confirmation: %+v", m.confirm)
 	}
-	if rows := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(rows, "dflash missing") {
+	if rows := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); !strings.Contains(rows, "dflash missing") {
 		t.Fatalf("the missing optional file is visible: %s", rows)
 	}
 }
@@ -246,7 +246,7 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 	m.prefs = filepath.Join(t.TempDir(), "prefs.json")
 	mi := q3mModel()
 	m.models, m.loaded["models"] = []camModel{mi}, true
-	if d := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(d, "KV cache") || !strings.Contains(d, "context") ||
+	if d := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); !strings.Contains(d, "KV cache") || !strings.Contains(d, "context") ||
 		!strings.Contains(ansi.Strip(m.keysLine()), "tab ←→ choice") {
 		t.Fatalf("both choices are discoverable for the 30B:\n%s", d)
 	}
@@ -276,7 +276,7 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 	if _, fa := m.fitArgs(mi); !strings.Contains(strings.Join(fa, " "), "--cards 1 --kv q8 --long-context --json") {
 		t.Fatalf("fit projects the same choice: %v", fa)
 	}
-	if rows := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(rows, "auto F16 [Q8]") ||
+	if rows := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); !strings.Contains(rows, "auto F16 [Q8]") ||
 		!strings.Contains(rows, "native [long] YaRN x4, as far as the card holds") {
 		t.Fatalf("the next start shows the choice: %s", rows)
 	}
@@ -297,7 +297,7 @@ func TestModelPickerKVAndLongContext(t *testing.T) {
 	// a model without the choices shows neither key and ignores both
 	d := pickerModel()
 	m.models = []camModel{d}
-	if k := ansi.Strip(strings.Join(m.detailRows(80), "\n")); strings.Contains(k, "KV cache") || strings.Contains(k, "context ") {
+	if k := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); strings.Contains(k, "KV cache") || strings.Contains(k, "context ") {
 		t.Fatalf("no KV or long-context choice for a model without them: %s", k)
 	}
 	m.cycleExtra(d, false)

@@ -34,7 +34,7 @@ func TestRunningCardFollowsTheServerInUse(t *testing.T) {
 	if p := m.primary(); p == nil || p.Name != "qwen3-30b-a3b" {
 		t.Fatalf("stop / restart act on the ready server: %+v", p)
 	}
-	if d := ansi.Strip(strings.Join(m.detailRows(80), "\n")); !strings.Contains(d, "last start failed: RuntimeError: old") {
+	if d := ansi.Strip(strings.Join(m.detailRows(80, 0), "\n")); !strings.Contains(d, "last start failed: RuntimeError: old") {
 		t.Fatalf("the failed record stays readable on its own model's details:\n%s", d)
 	}
 	m.ps.Servers = append(m.ps.Servers, serverInfo{Name: "swift-1.5", Model: "swift-1.5", State: "ready", URL: "http://127.0.0.1:8092", Port: 8092})
@@ -222,12 +222,17 @@ func TestALastStartFailureSaysWhenAndGoesWhenNotDownloaded(t *testing.T) {
 	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, Present: true, SizeGB: 59}}
 	m.ps = psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "failed", FailedAt: yesterday,
 		Error: "FileNotFoundError: code object k3_gguf_gsq.hsaco not found"}}}
-	d := ansi.Strip(strings.Join(m.detailRows(100), "\n"))
+	d := ansi.Strip(strings.Join(m.detailRows(100, 0), "\n"))
 	if !strings.Contains(d, "last start failed ") || !strings.Contains(d, " yesterday: FileNotFoundError") {
 		t.Fatalf("the failure says when it ended:\n%s", d)
 	}
+	// a record a later start superseded (kept stopped for caminus restart NAME) listed first never hides the failure
+	m.ps.Servers = append([]serverInfo{{Name: "work", Model: "coder", State: "stopped"}}, m.ps.Servers...)
+	if d := ansi.Strip(strings.Join(m.detailRows(100, 0), "\n")); !strings.Contains(d, "last start failed ") {
+		t.Fatalf("a superseded stopped record hides the model's failure:\n%s", d)
+	}
 	m.models[0].Present = false
-	d = ansi.Strip(strings.Join(m.detailRows(100), "\n"))
+	d = ansi.Strip(strings.Join(m.detailRows(100, 0), "\n"))
 	if strings.Contains(d, "last start failed") || !strings.Contains(d, "not downloaded") {
 		t.Fatalf("not downloaded: only that line, never an old failure for another reason beside it:\n%s", d)
 	}
@@ -284,6 +289,29 @@ func TestTheFitRefusalShowsEveryCard(t *testing.T) {
 		}
 		if strings.Contains(flat, "now …") || !strings.Contains(screen, "enter starts it") {
 			t.Fatalf("%d columns: the refusal is whole and the start line under it stays:\n%s", w, screen)
+		}
+	}
+	// a short screen (80x24, hands-on step 1: ThinkingCap running, an older failed start of the model): the fit row gives
+	// up lines first (cut with …), so the failure and what enter does stay whole
+	m.ps = psInfo{Servers: []serverInfo{
+		{Name: "thinkingcap", Model: "thinkingcap", State: "ready", URL: "http://127.0.0.1:8093", Port: 8093, Cards: []string{"XT"}},
+		{Name: "qwen3-30b-a3b", Model: "qwen3-30b-a3b", State: "failed", FailedAt: float64(time.Now().Unix()),
+			Error: "caminus serve: the model fits none of the free cards: XTX card1: 21.3 of 24.0 GB in use"}}}
+	m.models[0].Speed = "~150 tok/s decode on an XTX; prefill ~3,000 tok/s"
+	for _, w := range []int{80, 120} {
+		screen := ansi.Strip(m.View(w, 24))
+		if lines := strings.Split(screen, "\n"); len(lines) > 24 {
+			t.Fatalf("%dx24: %d lines", w, len(lines))
+		}
+		flat := strings.Join(strings.Fields(screen), " ")
+		for _, part := range []string{"enter stops thinkingcap and starts it (asks first)", "context that fits: the model fits none",
+			"last start failed"} {
+			if !strings.Contains(flat, part) {
+				t.Fatalf("%dx24: %q is off the screen:\n%s", w, part, screen)
+			}
+		}
+		if !strings.Contains(flat, "reserved at 32,768 positions; fits 8,192 now") != (w == 80) {
+			t.Fatalf("%dx24: the fit row is whole where the room holds it (120) and cut where it does not (80):\n%s", w, screen)
 		}
 	}
 }
