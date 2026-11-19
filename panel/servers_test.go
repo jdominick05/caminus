@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // (a DST zone for whenText's fall-back day, on a host without the zone files too)
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -204,6 +205,17 @@ func TestALastStartFailureSaysWhenAndGoesWhenNotDownloaded(t *testing.T) {
 	if whenText(0, now) != "" {
 		t.Fatal("an unknown time (0) says nothing")
 	}
+	// a DST fall-back day is 25 h long: last evening is still yesterday the morning after (calendar dates, not 24 h spans)
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := whenText(float64(time.Date(2026, 11, 1, 21, 26, 0, 0, ny).Unix()), time.Date(2026, 11, 2, 9, 0, 0, 0, ny)); got != " 21:26 yesterday" {
+		t.Fatalf("the day after the fall-back: %q, want \" 21:26 yesterday\"", got)
+	}
+	if got := whenText(float64(time.Date(2026, 3, 7, 23, 50, 0, 0, ny).Unix()), time.Date(2026, 3, 9, 0, 10, 0, 0, ny)); got != " Mar 7 23:50" {
+		t.Fatalf("two dates back across the spring-forward day (23 h): %q, want a date", got)
+	}
 	m := newCtl(newCtlCLI("caminus"), "")
 	m.loaded["ps"], m.loaded["models"] = true, true
 	yesterday := float64(time.Now().Add(-24 * time.Hour).Unix())
@@ -226,7 +238,7 @@ func TestTheWizardHintWrapsInsteadOfBeingCut(t *testing.T) {
 	m := newCtl(newCtlCLI("caminus"), "")
 	m.loaded["ps"], m.loaded["models"] = true, true
 	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, SizeGB: 59}}
-	for _, w := range []int{60, 80, 120} {
+	for _, w := range []int{40, 60, 80, 120} {
 		note := ansi.Strip(m.noteLine(w))
 		if strings.Contains(note, "…") || !strings.Contains(strings.ReplaceAll(note, "\n", " "), "sets up Qwen Code") {
 			t.Fatalf("%d columns: the hint is whole, wrapped:\n%s", w, note)
@@ -239,6 +251,39 @@ func TestTheWizardHintWrapsInsteadOfBeingCut(t *testing.T) {
 			if lw := lipgloss.Width(l); lw > w {
 				t.Fatalf("%d columns: line %d is %d cells: %q", w, i, lw, ansi.Strip(l))
 			}
+		}
+	}
+}
+
+// caminus fit's refusal names every card (its use, what holds it, what the model needs there and the context that fits):
+// in the model detail each card's part is whole, at the widest layout and at 80 columns, and the row under it still shows.
+func TestTheFitRefusalShowsEveryCard(t *testing.T) {
+	const refusal = "the model fits none of the free cards: XT card2: 19.4 of 20.0 GB in use (thinkingcap on :8093); " +
+		"needs 19.8 GB + 1.9 GB reserved at 32,768 positions; not even 4,096 positions fit now. XTX card1: 21.3 of 24.0 GB " +
+		"in use (llama-server); needs 19.8 GB + 2.0 GB reserved at 32,768 positions; fits 8,192 now"
+	m := newCtl(newCtlCLI("caminus"), "")
+	mi := camModel{Name: "qwen3-30b-a3b", Title: "Qwen3-30B-A3B", Cards: 1, Present: true, SizeGB: 19,
+		Modes: []serveMode{{Cards: 1, Drafts: []string{"off"}, KV: []string{"f16", "q8"}, Long: true}, {Cards: 2, Drafts: []string{"off"}}}}
+	m.models, m.loaded["models"], m.loaded["ps"] = []camModel{mi, {Name: "qwen3-coder-next", Cards: 2, Present: true}}, true, true
+	key, _ := m.fitArgs(mi)
+	m.fits[key] = fitEntry{done: true, info: fitInfo{Error: refusal}}
+	for _, w := range []int{80, 120} {
+		screen := ansi.Strip(m.View(w, 40))
+		var det []string // (the detail column: right of the list on each line)
+		for _, l := range strings.Split(screen, "\n") {
+			if i := strings.Index(l, "    "); i >= 0 {
+				det = append(det, strings.TrimSpace(l[i:]))
+			}
+		}
+		flat := strings.Join(strings.Fields(strings.Join(det, " ")), " ")
+		for _, part := range []string{"XT card2: 19.4 of 20.0 GB in use (thinkingcap on :8093)", "not even 4,096 positions fit now",
+			"XTX card1: 21.3 of 24.0 GB in use (llama-server)", "2.0 GB reserved at 32,768 positions; fits 8,192 now"} {
+			if !strings.Contains(flat, part) {
+				t.Fatalf("%d columns: %q is cut from the fit row:\n%s", w, part, screen)
+			}
+		}
+		if strings.Contains(flat, "now …") || !strings.Contains(screen, "enter starts it") {
+			t.Fatalf("%d columns: the refusal is whole and the start line under it stays:\n%s", w, screen)
 		}
 	}
 }

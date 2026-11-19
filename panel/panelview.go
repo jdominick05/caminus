@@ -408,17 +408,21 @@ func (m ctl) recordOf(name string) *serverInfo {
 	return nil
 }
 
+// fitLines is the most lines the fit row wraps to: a refusal names every card (its use, holder, the model's need and the
+// context that fits there), two cards' worth whole in the detail column at 80 columns (48 cells: 7 lines).
+const fitLines = 8
+
 // whenText is " 21:26 today", " 21:26 yesterday" or " Nov 16 21:26" for a Unix time (seconds), "" when unknown (0).
 func whenText(at float64, now time.Time) string {
 	if at <= 0 {
 		return ""
 	}
 	t := time.Unix(int64(at), 0).In(now.Location())
-	day := func(x time.Time) time.Time { return time.Date(x.Year(), x.Month(), x.Day(), 0, 0, 0, 0, x.Location()) }
-	switch d := day(now).Sub(day(t)); {
-	case d <= 0:
+	date := func(x time.Time) string { return x.Format("2006-01-02") } // (calendar dates: a DST change makes a day 23 or 25 h)
+	switch {
+	case date(t) >= date(now):
 		return " " + t.Format("15:04") + " today"
-	case d <= 24*time.Hour:
+	case date(t) == date(now.AddDate(0, 0, -1)):
 		return " " + t.Format("15:04") + " yesterday"
 	}
 	return " " + t.Format("Jan 2 15:04")
@@ -560,7 +564,7 @@ func (m ctl) detailRows(w int) []string {
 		rows = append(rows, line)
 	}
 	if fr := m.fitRow(*mi); fr != "" && m.liveOf(mi.Name) == nil { // (a running model's own memory is in the cards' figure)
-		rows = append(rows, wrapped(fr, w, 2)...)
+		rows = append(rows, wrapped(fr, w, fitLines)...)
 	}
 	if o := m.editedText(*mi); o != "" {
 		rows = append(rows, wrapped(fg(cMuted).Render("options  ")+bold(cAccent).Render(o)+fg(cMuted).Render(" · o edits"), w, 2)...)
@@ -579,7 +583,7 @@ func (m ctl) detailRows(w int) []string {
 	}
 	switch {
 	case !mi.Present:
-		rows = append(rows, fg(cYellow).Render("not downloaded")+fg(cMuted).Render(" · p downloads it ("+gbText(mi.SizeGB)+")"))
+		rows = append(rows, wrapped(fg(cYellow).Render("not downloaded")+fg(cMuted).Render(" · p downloads it ("+gbText(mi.SizeGB)+")"), w, 2)...)
 	case m.psDown() && m.liveOf(mi.Name) == nil: // (enter starts nothing until what runs is known)
 		rows = append(rows, wrapped(fg(cYellow).Render("no start until the running servers can be read")+rAgain(), w, 2)...)
 		if mi.MissingDrafter != "" {
@@ -812,7 +816,7 @@ func (m ctl) noteLine(W int) string {
 }
 
 // wizardHint is the note line while nothing is set up: caminus wizard walks a first run from a terminal.
-const wizardHint = "new here? run `caminus wizard` in a terminal: it checks the machine, then pulls and starts a model and sets up Qwen Code"
+const wizardHint = "new here? run `caminus wizard` in a terminal: it checks the machine, starts a model and sets up Qwen Code"
 
 // nothingSetUp is whether this host has nothing to show yet: the model list and the servers read without an error, no
 // model on disk, no server running.
