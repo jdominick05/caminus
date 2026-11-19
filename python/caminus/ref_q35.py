@@ -1,19 +1,24 @@
-"""A float64 host forward of the dense qwen35 line (Qwen3.8-27B finetunes: Swift 1.5, ThinkingCap, AREX-2) on Caminus's own
-reader (caminus.ggufio), decoders (caminus.own_dequant) and tokenizer (caminus.bpe): the test oracle of the own-kernel
-engine and prefill for these models (exact weights, float64 activations: the 'fp64 reference mode' of
-docs/specs/spec-own-quant.md).
+"""A float64 host forward of the qwen35 line on Caminus's own reader (caminus.ggufio), decoders (caminus.own_dequant) and
+tokenizer (caminus.bpe): the dense models (architecture qwen35: the Qwen3.8-27B finetunes Swift 1.5, ThinkingCap, AREX-2)
+and the MoE one (qwen35moe: Qwen3.6-35B-A3B). The test oracle of the own-kernel engine and prefill for these models (exact
+weights, float64 activations: the 'fp64 reference mode' of docs/specs/spec-own-quant.md).
 
 Layer-major over a chunk of tokens: a dense model reads every weight for every token (16.5 GB for Swift's Q4_K_M), so a
 token at a time would decode the file once per token. feed(ids) decodes each matrix once and applies it to the whole chunk;
 the per-layer state (the KV cache of an attention block; the conv window and the delta state of a Gated DeltaNet block)
 carries to the next feed. One matrix is in memory at a time (float64: 0.7 GB for a 17408 x 5120 FFN matrix), the head in
-16K-row pieces. About 5 minutes per feed on 16 threads, whatever the chunk's length up to a few hundred tokens.
+16K-row pieces. About 5 minutes per feed on 16 threads, whatever the chunk's length up to a few hundred tokens. The MoE
+FFN never decodes a whole expert tensor (256 experts: 2.1 GB as float64): it decodes one expert's rows at a time, for the
+experts the chunk's tokens picked, and applies them to those tokens only (Qwen3.6-35B-A3B's 2-bit GSQ file: 128 positions
+in 30 s, under 1 GB of anonymous memory).
 
 The trunk is blocks 0 .. block_count - nextn_predict_layers - 1; a multi-token-prediction block after it (Swift's blk.64)
 is not part of the model's forward and is not read here. A block is Gated DeltaNet where attention.recurrent_layers says
 so (without that key: every block but each full_attention_interval-th).
 
-The math (x the residual stream [N, D], float64; rms(y) = y / sqrt(mean(y^2) + eps); per block):
+The math (x the residual stream [N, D], float64; rms(y) = y / sqrt(mean(y^2) + eps); per block; the head counts and
+channel ranges are Swift's, the code reads them from the header: Qwen3.6-35B-A3B has D 2048, 32 value heads and 16
+query heads on 2 KV heads, 8 per KV head):
   h = rms(x) * attn_norm
   Gated DeltaNet block (16 key heads, 48 value heads, 128 wide):
     c = silu(conv4(Wqkv h))                 a causal 4-tap filter per channel over the last 4 tokens (tap 3 = this token)
@@ -26,11 +31,15 @@ The math (x the residual stream [N, D], float64; rms(y) = y / sqrt(mean(y^2) + e
     theta_i = pos * base^(-2 i / n));  softmax(q . k / sqrt(256)) over the positions so far, 6 query heads per KV head
     x += Wo (attention * sigmoid(gate))
   h = rms(x) * post_attention_norm;  x += Wdown (silu(Wgate h) * (Wup h))
+    qwen35moe (256 experts, 8 used, one shared expert):  p = softmax(Wr h) over the experts;  the 8 largest p (ties: the
+    lower id), weights w = p / sum(p of the 8);  x += sum_e w_e Wdown_e (silu(Wgate_e h) * (Wup_e h))
+      + sigmoid(Wsg . h) Wdown_s (silu(Wgate_s h) * (Wup_s h))     (Wsg: ffn_gate_inp_shexp, one row)
   logits = Whead (rms(x) * output_norm)
 
   python -I -m caminus.ref_q35 GGUF "prompt" [--new 2] [--threads 16]"""
 import argparse
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -64,8 +73,13 @@ def trunk_blocks(F):
 class Q35Ref:
     def __init__(self, path, threads=None):
         self.F = F = ggufio.GGUFFile(path)
-        if F.arch != 'qwen35': raise ValueError(f'ref_q35: architecture {F.arch!r} (qwen35 only)')
-        if any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError('ref_q35: a router tensor: not the dense line')
+        if F.arch not in ('qwen35', 'qwen35moe'): raise ValueError(f'ref_q35: architecture {F.arch!r} (qwen35 and qwen35moe only)')
+        self.moe = F.arch == 'qwen35moe'
+        if not self.moe and any(n.endswith('ffn_gate_inp.weight') for n in F.T):
+            raise ValueError('ref_q35: a router tensor in a qwen35 file: not the dense line')
+        unread = sorted(n for n in F.T if re.search(r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?)$', n))
+        if unread:   # (scale tensors and fused gate|up experts: forms this reference does not read)
+            raise ValueError(f'ref_q35: tensors this reference does not read: {unread[:4]}{" ..." if len(unread) > 4 else ""}')
         self.L, self.D = trunk_blocks(F), int(F.hp('embedding_length'))
         self.H, self.HKV, self.HD = int(F.hp('attention.head_count')), int(F.hp('attention.head_count_kv')), int(F.hp('attention.key_length'))
         self.NK, self.NV, self.S, self.DC = int(F.hp('ssm.group_count')), int(F.hp('ssm.time_step_rank')), int(F.hp('ssm.state_size')), int(F.hp('ssm.conv_kernel'))
@@ -74,6 +88,14 @@ class Q35Ref:
         self.gdn = [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(self.L)]
         if int(F.hp('ssm.inner_size')) != self.NV * self.S or self.NV % self.NK or self.H % self.HKV or self.nrot > self.HD or self.nrot % 2:
             raise ValueError('ref_q35: head counts / sizes this reference does not read')
+        if self.moe:
+            if any(np.ndim(F.hp(k)) for k in ('expert_count', 'expert_used_count', 'expert_feed_forward_length', 'expert_shared_feed_forward_length')):
+                raise ValueError('ref_q35: per-block expert counts or widths (an array-valued expert key)')
+            routers = sum(f'blk.{i}.ffn_gate_inp.weight' in F.T for i in range(self.L))   # (the trunk's: not an MTP block's)
+            self.E, self.KU = int(F.hp('expert_count')), int(F.hp('expert_used_count'))
+            self.FF, self.FFS = int(F.hp('expert_feed_forward_length')), int(F.hp('expert_shared_feed_forward_length'))
+            if routers != self.L or not 0 < self.KU <= self.E:
+                raise ValueError(f'ref_q35: {routers} router tensors in {self.L} trunk blocks, {self.KU} of {self.E} experts')
         sec = F.hp('rope.dimension_sections')
         if sec is not None and 2 * sum(int(v) for v in sec) != self.nrot:
             raise ValueError(f'ref_q35: rope sections {list(sec)} do not cover the {self.nrot} rotated dims')
@@ -165,10 +187,43 @@ class Q35Ref:
         att *= sigmoid(gate); self._see('attn_output input', att)
         return att.reshape(N, H * HD) @ self.W(p + 'attn_output.weight').T
 
+    # -- the two FFN kinds ------------------------------------------------------------------------------------------------
+    def _ffn(self, il, h):
+        p = f'blk.{il}.'
+        a = silu(h @ self.W(p + 'ffn_gate.weight').T)
+        a *= h @ self.W(p + 'ffn_up.weight').T; self._see('ffn_down input', a)
+        return a @ self.W(p + 'ffn_down.weight').T
+
+    def _moe(self, il, h):
+        """(the MoE FFN's output [N, D], the chosen experts [N, KU], their weights [N, KU])"""
+        p, N, FF, D = f'blk.{il}.', h.shape[0], self.FF, self.D
+        lg = h @ self.W(p + 'ffn_gate_inp.weight').T                              # [N, E]
+        pr = np.exp(lg - lg.max(axis=1, keepdims=True)); pr /= pr.sum(axis=1, keepdims=True)
+        top = np.argsort(-pr, axis=1, kind='stable')[:, :self.KU]                 # (stable: a tie keeps the lower id)
+        w = np.take_along_axis(pr, top, axis=1); w /= w.sum(axis=1, keepdims=True)
+        T = {k: self.F.T[p + f'ffn_{k}_exps.weight'] for k in ('gate', 'up', 'down')}
+
+        def expert(e):          # one expert's rows (8 MB of float64 a matrix), on the tokens that picked it
+            n, slot = np.nonzero(top == e)
+            g = h[n] @ own_dequant.rows(T['gate'], e * FF, (e + 1) * FF).astype(np.float64).T
+            a = silu(g) * (h[n] @ own_dequant.rows(T['up'], e * FF, (e + 1) * FF).astype(np.float64).T)
+            y = a @ own_dequant.rows(T['down'], e * D, (e + 1) * D).astype(np.float64).T
+            return n, w[n, slot][:, None] * y, float(np.abs(a).max())
+
+        out = np.zeros((N, D))
+        for n, y, amax in self.pool.map(expert, np.unique(top)):                  # (in expert order: the same sum every run)
+            out[n] += y
+            if self.census is not None: self._see('expert ffn_down input', np.array(amax))
+        a = silu(h @ self.W(p + 'ffn_gate_shexp.weight').T)
+        a *= h @ self.W(p + 'ffn_up_shexp.weight').T; self._see('shared ffn_down input', a)
+        out += sigmoid(h @ self.vec(p + 'ffn_gate_inp_shexp.weight'))[:, None] * (a @ self.W(p + 'ffn_down_shexp.weight').T)
+        return out, top, w
+
     # -- a chunk of tokens -----------------------------------------------------------------------------------------------
-    def feed(self, ids, last=None, trace=None, log=None):
+    def feed(self, ids, last=None, trace=None, log=None, routes=None):
         """the float64 logits [M, vocab] after the last M (default: all) of these tokens, which follow every token fed
-        before; trace: a list that gets each block's output residual [N, D]"""
+        before; trace: a list that gets each block's output residual [N, D]; routes (qwen35moe): a list that gets each
+        block's (chosen experts [N, KU], their weights [N, KU])"""
         ids = [int(t) for t in ids]; N = len(ids)
         emb = self.F.T['token_embd.weight']
         x = np.concatenate([own_dequant.rows(emb, t, t + 1) for t in ids]).astype(np.float64)
@@ -178,9 +233,12 @@ class Q35Ref:
             h = self.rms(x, self.vec(p + 'attn_norm.weight')); self._see('block input (attn_norm)', h)
             x = x + (self._gdn(il, h) if self.gdn[il] else self._attn(il, h, pos))
             h = self.rms(x, self.vec(p + 'post_attention_norm.weight')); self._see('FFN input (post_attention_norm)', h)
-            a = silu(h @ self.W(p + 'ffn_gate.weight').T)
-            a *= h @ self.W(p + 'ffn_up.weight').T; self._see('ffn_down input', a)
-            x = x + a @ self.W(p + 'ffn_down.weight').T; self._see('residual stream', x)
+            if self.moe:
+                y, top, w = self._moe(il, h)
+                if routes is not None: routes.append((top, w))
+            else:
+                y = self._ffn(il, h)
+            x = x + y; self._see('residual stream', x)
             if trace is not None: trace.append(x.copy())
             if log: log(il)
         self.pos += N
@@ -191,7 +249,7 @@ class Q35Ref:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="float64 host forward of a dense qwen35 GGUF on Caminus's own reader, decoders and tokenizer")
+    ap = argparse.ArgumentParser(description="float64 host forward of a qwen35 / qwen35moe GGUF on Caminus's own reader, decoders and tokenizer")
     ap.add_argument('gguf'); ap.add_argument('prompt'); ap.add_argument('--new', type=int, default=2)
     ap.add_argument('--threads', type=int, default=None)
     A = ap.parse_args(argv)

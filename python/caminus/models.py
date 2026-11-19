@@ -164,6 +164,13 @@ def sampling_of(path):
 # share/templates/; caminus.serve.vocab.load_gguf_vocab applies it). Qwen3-30B-A3B: the official GGUF's template, copied
 # unchanged below a comment header (its sha256 in the file's header), so the prompts stay the official file's whichever
 # Q4_K_M is served; unsloth's file carries its own edit of it (two edge cases differ: docs/dev/qwen3-30b-a3b.md).
+# Qwen3.6-35B-A3B has none (not pinned): its GSQ file's template (sha256
+# e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259) is Qwen's official chat_template.jinja
+# (Qwen/Qwen3.6-35B-A3B at revision 345d467b117d1fd5eda9b879a5988de9ae5f47a7, sha256
+# 1b8361565cc35d47551d342214cff341c0f1a9685ce529c7ce31de0ed3616248) with its two {% generation %} markers removed
+# (transformers' assistant-mask tags, which this Jinja environment refuses) and the strings around them regrouped; a
+# text diff of the two shows nothing else. The file's special ids and its 33 added tokens are the official ones. A
+# re-uploaded file with another template sha256 needs this comparison again.
 CHAT_TEMPLATES = {'qwen3-30b-a3b': 'qwen3-30b-a3b.jinja'}
 
 
