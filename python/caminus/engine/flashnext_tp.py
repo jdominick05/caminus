@@ -28,6 +28,9 @@ from .tp_slots import Slots, _hip                     # noqa: E402,F401  (re-exp
 
 
 QSA_LAYER_HOOKS = 'qsa-scores'   # K3_TEST_HOOKS value: every QSA layer its own SCORE / indexer-query rows (test-only, tools/eval/qsa_depth.py)
+GACC_SITE_HOOKS = 'gacc-sites'   # K3_TEST_HOOKS value: every layer its own quantized-op input rows (test-only, tests/engine/test_k3_gguf_gsq.py --record)
+GACC_SITES = {'attn': ('mixed', 'mq', 'fin', 'gat', 'fq'), 'ffn': ('mixed', 'mq', 'shh', 'shu', 'shq', 'h', 'hq', 'ids', 'wts'),
+              'head': ('mixed', 'mq')}   # the buffers each part of a layer gets its own copy of under that hook
 
 
 QSA_SCORE_NTASK = 384   # the indexer score's tasks: 64 left the 12 layers' scoring latency-bound at depth (T = 4 pass at 131K
@@ -471,6 +474,30 @@ class FlashNextTP(FlashNextK3):
         # tape's. Off by default: one SCORE buffer and one query scratch per card, as above
         self.qsa_layer_bufs = bool(self.qsa) and os.environ.get('K3_TEST_HOOKS') == QSA_LAYER_HOOKS
         self.qsa_score_l, self.qsa_q_l = [[], []], [[], []]
+        # TEST-ONLY (K3_TEST_HOOKS=gacc-sites; the recorded activations of docs/specs/spec-own-quant.md's G-acc): every layer's
+        # attention half, FFN half and the head read and write the buffers of GACC_SITES through copies of their own
+        # (site_bufs[card][(layer, 'attn' | 'ffn') or ('head',)][name]): the rows each quantized op reads (mixed and its q8_1
+        # copy mq, the GDN norm's fin / the gated attention's gat and their q8_1 copy fq, the shared expert's shh / shu / shq,
+        # the routed h / hq) with the router's ids / wts stay readable after a pass for all 48 layers. Only those pointers
+        # differ, every op, operand and order is the default tape's. The trunk tape only (no QSA). Off by default
+        self.gacc_sites = os.environ.get('K3_TEST_HOOKS') == GACC_SITE_HOOKS
+        self.site_bufs = [{}, {}]
+        if self.gacc_sites:
+            if self.qsa: raise ValueError(f'K3_TEST_HOOKS={GACC_SITE_HOOKS}: the trunk tape only (max_ctx <= {capacity.QSA_EXACT}, no QSA)')
+            def nbytes(c, n): return 4 * Tn * ffc[c] if n == 'shu' else S[c][n].numel() * S[c][n].element_size()   # (shu: made below)
+            per = [sum(k * sum(nbytes(c, n) for n in GACC_SITES[part]) for part, k in (('attn', self.nl), ('ffn', self.nl), ('head', 1)))
+                   + 4 * Tn * ffc[c] for c in (0, 1)]
+            capacity.check(self.devs, [b / 2 ** 20 for b in per], f'FlashNextTP K3_TEST_HOOKS={GACC_SITE_HOOKS} (every layer its own site rows)')
+            for c in (0, 1):
+                with ON(c): S[c].setdefault('shu', torch.zeros(Tn * ffc[c], device='cuda'))
+
+        def site(key, part):
+            """under the gacc-sites hook: S[c]'s GACC_SITES[part] buffers become fresh copies, kept as site_bufs[c][key]"""
+            if not self.gacc_sites: return
+            for c in (0, 1):
+                with ON(c):
+                    own = {n: torch.zeros_like(S[c][n]) for n in GACC_SITES[part]}
+                    self.site_bufs[c][key] = own; S[c].update(own)
         # the second tape (two-tape QSA) shares everything above and the states / weights below: st_ allocates a state once,
         # and the weight loaders are memoized for the build (the same tensors in both tapes, read once)
         st_ = lambda key, make: self.state[key] if key in self.state else self.state.setdefault(key, make())
@@ -599,6 +626,7 @@ class FlashNextTP(FlashNextK3):
             for il in range(self.nl):
                 p = f'blk.{il}'
                 for c in (0, 1): self.layer_seg[c].append((il, len(E[c].segs)))
+                site((il, 'attn'), 'attn')
                 if il in self.ple_layers:                       # replicated (one layer, small)
                     kw, vw = self._rep(f'{p}.ple_key.weight'), self._rep(f'{p}.ple_value.weight')
                     nk_, nq_, nc_ = (self._rep_f32(f'{p}.ple_norm_{n}.weight', (HC, D)) for n in ('key', 'query', 'conv'))
@@ -724,6 +752,7 @@ class FlashNextTP(FlashNextK3):
                 for c in (0, 1):
                     with ON(c): XB.append(xchg(c, S[c]['blkp'], S[c]['blk'], 2 * il, BLK[c]))
                 # ffn: routed (router replicated, experts split by intermediate rows) beside the shared expert (split the same way)
+                site((il, 'ffn'), 'ffn')
                 M, inj = hc_mix(f'{p}.hc_ffn', None, post=('blk', XB, inj))
                 rw = self._router_w(f'{p}.ffn_gate_inp.weight', self.n_exp); sw = self._router_w(f'{p}.ffn_gate_inp_shexp.weight', 1)
                 rr = [[(32 * b0, 32 * b1)] for b0, b1 in mb]
@@ -771,6 +800,7 @@ class FlashNextTP(FlashNextK3):
                         with ON(c): dep[c] = E[c].also(E[c].hc_post(S[c]['ffo'], S[c]['inj'], res[c], res[c], dep=FF[c]), inj[c])
                     post = None
             for c in (0, 1): self.layer_seg[c].append(('head', len(E[c].segs)))
+            site(('head',), 'head')
             M, _ = hc_mix('output_hc', dep, inject=False)
             nv = int(self.T['output.weight'].shape[1]); vh = int(round(nv * self.vocab_share))
             out = self._rows('output.weight', [[(0, vh)], [(vh, nv)]])

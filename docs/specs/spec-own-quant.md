@@ -62,7 +62,8 @@ Applies to every change of quantized math. Pairs still on llama.cpp's math keep 
 **G-acc, per op.** For each (op, format) pair of every catalog model: at least 256 real rows per tensor and at least 64
 activation vectors recorded at that op site during a fixed decode (prompts in the gate tool), the activation exactly as
 the op receives it. Mean and p99 of |y - y_ref| / rms(y_ref) must not exceed llama.cpp's on the same inputs, measured
-with its own kernel on the GPU. Both numbers go in the pull request.
+with its own kernel on the GPU. Both numbers go in the pull request. The Coder's recording and llama.cpp's numbers per pair (kernels/gg_mv_ref.hip):
+tests/engine/test_k3_gguf_gsq.py, check (e).
 
 **G-model, end to end.** A reference mode of the engine runs every quantized op with fp32 activations (per-op error
 about 1e-7 above). On the gate prompts: mean KLD of the candidate against the reference mode must not exceed llama.cpp's
