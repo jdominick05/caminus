@@ -344,7 +344,8 @@ Growth (the reasons: ENTROPY.md):
 - One fact lives in one file and the rest point to it; a second copy of a file is a link (as `tools/guard.sh` is).
 - Merge what is the same today, not what might be tomorrow, and never across code objects: a variant is a define
   over one source, and merging kernel or tape code is a kernel change with every gate above. Test scripts keep their
-  own helpers.
+  own helpers, except where scripts' results are compared with each other or they build the same fixture: that code
+  is shared, one copy (`tools/gates/gacc.py`, `tests/tiny_gguf.py`).
 - This file is the map: a new module gets one line here, its detail in its docs/dev file.
 - A pull request that adds more lines than it removes says what it reused and removed (`tools/pr_ready.py`, `size`).
 
