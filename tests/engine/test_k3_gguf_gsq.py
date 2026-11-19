@@ -8,7 +8,8 @@ checks
       silu (gg_silu_mul) or summed in llama.cpp's mul-then-add order) at 3 / 5 / 6 / 7 / 8 workgroups per WGP, every card;
       Every case also checks build/gg_mv_ref.hsaco (llama.cpp's matvec as a test object: the G-acc yardstick, which stays
       when the engine modules stop including the ggml headers) bitwise the module's standalone gg_mv_* and quantizer.
-  (b) T = 2 / 3 / 4 (the _mt module; T = 2 and 3 leave partial token groups) rows are bitwise the T = 1 rows (different
+  (b) T = 2 / 3 / 4 (the _mt module, named explicitly: k3.module_for sends k3_gguf_gsq at T > 1 to k3_gguf_gsq_qsa_mt; T = 2
+      and 3 leave partial token groups) rows are bitwise the T = 1 rows (different
       expert ids per token, some repeated);
   (c) float64 (gguf-py's dequantizer, the same q8_1 activations), over EVERY row of the MV matrices and EVERY expert of the
       MoE tensors at full width: rel = max |out - ref| / sum |w| |xq| (as tests/engine/test_gguf_mv.py)
@@ -235,7 +236,7 @@ def run_mv(card):
                 e.build().run()
                 n_all += 1; n_ok += check(torch.equal(out, ref[0]), f'card {card} MV {fmt} {label} wgp {nw} {mode}: engine != standalone')
             for T in TS:           # (b) T tokens (multi-token module) vs T = 1 rows
-                e = k3.Engine(module=M1, grid=grid(MT, nw), T=T); assert e.module == MT
+                e = k3.Engine(module=MT, grid=grid(MT, nw), T=T); assert e.module == MT
                 out4 = torch.full((T * N,), float('nan'), device=dev)
                 e.gg_matvec(w.reshape(-1), fmt, N, K, rb, torch.cat(xq[:T]), out4, rows_per_task=16)
                 e.build().run()
@@ -291,7 +292,7 @@ def run_moe_gu(card):
                         good = torch.equal(h, G.quantize_q8_1(href[0])) if hq8 else torch.equal(h, href[0])
                         n_all += 1; n_ok += check(good, f'card {card} MOE_GU {fmt} rows {r0}:{r1} wgp {nw} {mode} h_q8 {hq8}: engine != standalone')
                 for T in TS:
-                    e = k3.Engine(module=M1, grid=grid(MT, nw), T=T); assert e.module == MT
+                    e = k3.Engine(module=MT, grid=grid(MT, nw), T=T); assert e.module == MT
                     h4 = torch.full((T * K_USED * F,), float('nan'), device=dev)
                     e.gg_moe_gu(g.reshape(-1), u.reshape(-1), fmt, slab, F, D, torch.cat(ids[:T]), torch.cat(xq[:T]), h4, rows_per_task=8, up_fmt=fmt)
                     e.build().run()
@@ -337,7 +338,7 @@ def run_moe_down(card):
                     e.build().run()
                     n_all += 1; n_ok += check(torch.equal(out, ref[0]), f'card {card} MOE_DOWN {fmt} K {K} wgp {nw} {mode}: engine != standalone')
                 for T in TS:
-                    e = k3.Engine(module=M1, grid=grid(MT, nw), T=T); assert e.module == MT
+                    e = k3.Engine(module=MT, grid=grid(MT, nw), T=T); assert e.module == MT
                     out4 = torch.full((T * D,), float('nan'), device=dev)
                     e.gg_moe_down(dw.reshape(-1), fmt, slab, K, D, torch.cat(ids[:T]), torch.cat(wts[:T]), torch.cat(hq[:T]), out4, rows_per_task=8)
                     e.build().run()
@@ -365,7 +366,7 @@ def run_refuse(card):
         ids = torch.tensor(sum(IDS[:T], []), dtype=torch.int32, device=dev); wts = torch.full((T * K_USED,), 0.1, device=dev)
         for op, fmt in UNLISTED:
             def mk():
-                e = k3.Engine(module=M1, grid=grid(MT if T > 1 else M1, 8), T=T)
+                e = k3.Engine(module=MT if T > 1 else M1, grid=grid(MT if T > 1 else M1, 8), T=T)
                 if op == 'MV':
                     out = torch.full((T * F,), SENT, device=dev); e.gg_matvec(w, fmt, F, D, D // 32 * 36, xq, out, rows_per_task=16)
                 elif op == 'MOE_GU':
