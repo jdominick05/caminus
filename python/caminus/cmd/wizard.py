@@ -174,11 +174,11 @@ class Wizard:
         return out
 
     def gpu_holders(self):
-        """what holds a GPU context now (other processes, running Caminus servers), as text; '' when nothing"""
-        ps = doctor.kfd_procs(manage.ROOT) or []
+        """what holds the cards now (other processes, running Caminus servers), as text; '' when nothing"""
+        ps = host.holder_procs(manage.ROOT)
         servers = [s['name'] for s in manage.all_servers() if manage.alive(s.get('guard_pid'))]
         servers += [o['name'] for o in manage.unmanaged_servers()]
-        parts = ([f'{len(ps)} process(es) hold a GPU context'] if ps else []) + ([f"server(s) {', '.join(servers)}"] if servers else [])
+        parts = ([f'{len(ps)} process(es) hold VRAM'] if ps else []) + ([f"server(s) {', '.join(servers)}"] if servers else [])
         return '; '.join(parts)
 
     def running(self):

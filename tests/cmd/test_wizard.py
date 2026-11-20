@@ -44,12 +44,12 @@ RX7800 = ('0x747e', 16, 110001)
 
 def host_tree(root, cards, slow=(), holders=()):
     """a minimal sysfs: each card's endpoint on a PCIe 4.0 x16 hop (a card index in slow: PCIe 1.0 x1), its DRM node, its
-    KFD node (card 1 drives the display); holders: pids in KFD's process list (processes holding a GPU context)"""
+    KFD node (card 1 drives the display); holders: pids holding VRAM on card 1's KFD gpu (host.holder_procs reads them)"""
     if os.path.isdir(root):
         shutil.rmtree(root)
     w(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', '0', 'properties'), 'simd_count 0\n')
     for pid in holders:
-        os.makedirs(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'proc', str(pid)), exist_ok=True)
+        w(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'proc', str(pid), 'vram_900'), f'{2 * GIB}\n')
     for i, (did, gib, gfx) in enumerate(cards):
         slot, minor, name = f'0000:{3 + 3 * i:02x}:00.0', 128 + i, f'card{i + 1}'
         ep = os.path.join(root, 'sys', 'devices', 'pci0000:00', f'0000:00:01.{i + 1}', slot)
@@ -64,6 +64,7 @@ def host_tree(root, cards, slow=(), holders=()):
         os.symlink(ep, os.path.join(root, 'sys', 'class', 'drm', name, 'device'))
         w(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', str(i + 1), 'properties'),
           f'simd_count 96\ngfx_target_version {gfx}\ndrm_render_minor {minor}\n')
+        w(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', str(i + 1), 'gpu_id'), f'{900 + i}\n')
     return root
 
 

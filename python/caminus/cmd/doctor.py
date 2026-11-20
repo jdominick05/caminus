@@ -102,13 +102,6 @@ def check_torch(R):
     R.add('PASS' if ok else 'FAIL', 'torch', detail)
 
 
-def kfd_procs(root='/'):
-    """the other processes holding a GPU context (KFD's process list under the sysfs root), or None when unreadable"""
-    d = os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'proc')
-    try:
-        return sorted(int(p) for p in os.listdir(d) if p.isdigit() and int(p) != os.getpid())
-    except OSError:
-        return None
 
 
 def check_gpus(R, root='/'):
@@ -157,14 +150,12 @@ def check_gpus(R, root='/'):
     for c in gs:
         if c['status'] == 'unsupported' and c['integrated']:
             R.add('INFO', 'gpu', f'{host.describe(c)}: integrated GPU ({c["total_mib"]} MiB), not used')
-    ps = kfd_procs()
+    ps = host.holder_procs(root)
     if ps:
-        names = []
-        for p in ps[:6]:
-            names.append(f'{p} ({_read(f"/proc/{p}/comm") or "?"})')
-        R.add('WARN', 'gpu', f'{len(ps)} other process(es) hold a GPU context: {", ".join(names)} (only one engine at a time)')
-    elif ps is not None:
-        R.add('PASS', 'gpu', 'no other process holds a GPU context')
+        names = [f'{pid} ({label})' for pid, label in sorted(ps.items())][:6]
+        R.add('WARN', 'gpu', f'{len(ps)} other process(es) hold VRAM: {", ".join(names)} (only one engine at a time)')
+    else:
+        R.add('PASS', 'gpu', 'no other process holds VRAM')
     return w
 
 

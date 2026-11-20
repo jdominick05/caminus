@@ -92,17 +92,11 @@ def api():
 def proc_vram(devs):
     """this process's own device memory per device in devs, MiB (KFD's /sys/class/kfd/kfd/proc/PID/vram_GPUID, matched to
     the device by its PCI location): unlike hipMemGetInfo it excludes other processes (the XTX drives the desktop; one
-    structure read +16 MiB through hipMemGetInfo, 11-04, while this counter stayed flat); None where it cannot be read"""
+    structure read +16 MiB through hipMemGetInfo, 11-04, while this counter stayed flat); None where it cannot be read.
+    The topology (location_id -> gpu_id) comes from caminus.device.machine.kfd_nodes, the one KFD reader"""
+    from ..device.machine import kfd_nodes
+    loc = {n['location_id']: n['gpu_id'] for n in kfd_nodes() if n['location_id'] is not None and n['gpu_id'] is not None}
     out = []
-    try:
-        loc = {}
-        base = '/sys/class/kfd/kfd/topology/nodes'
-        for n in os.listdir(base):
-            props = dict(l.split() for l in open(f'{base}/{n}/properties') if len(l.split()) == 2)
-            gid = int(open(f'{base}/{n}/gpu_id').read())
-            if gid: loc[int(props.get('location_id', -1))] = gid
-    except OSError:
-        loc = {}
     for d in devs:
         try:
             pr = torch.cuda.get_device_properties(d)

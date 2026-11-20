@@ -39,18 +39,38 @@ def line_mib(total_mib):
     return (int(total_mib) * 97 // 100) // 50 * 50
 
 
-def _kfd_targets(root):
-    """{render minor: gfx_target_version} from the KFD topology"""
-    out = {}
-    for p in glob.glob(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', '*', 'properties')):
+def kfd_nodes(root='/'):
+    """THE KFD topology reader (the one place Caminus parses <root>/sys/class/kfd/kfd/topology/nodes: gpu_users, hip_order,
+    proc_vram and cards read it here): the nodes by numeric node id, dicts (node, gpu_id, minor, gfx, simd_count,
+    location_id). gpu_id from the node's gpu_id file (None when missing, unreadable or 0: no device bound); minor
+    (drm_render_minor), gfx (gfx_target_version) and location_id from its properties file (None when the file or the key
+    is missing); simd_count 0 when missing. A node without a readable properties file is skipped"""
+    base = os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes')
+    try:
+        ids = sorted(int(n) for n in os.listdir(base) if n.isdigit())
+    except OSError:
+        return []
+    out = []
+    for i in ids:
+        p = os.path.join(base, str(i))
         kv = {}
-        for line in (_read(p) or '').splitlines():
+        for line in (_read(os.path.join(p, 'properties')) or '').splitlines():
             w = line.split()
             if len(w) == 2 and w[1].lstrip('-').isdigit():
                 kv[w[0]] = int(w[1])
-        if kv.get('drm_render_minor') and kv.get('gfx_target_version'):
-            out[kv['drm_render_minor']] = kv['gfx_target_version']
+        gid = _read(os.path.join(p, 'gpu_id'))
+        try:
+            gid = int(gid)
+        except (TypeError, ValueError):
+            gid = None
+        out.append(dict(node=i, gpu_id=gid or None, minor=kv.get('drm_render_minor'), gfx=kv.get('gfx_target_version'),
+                        simd_count=kv.get('simd_count', 0), location_id=kv.get('location_id')))
     return out
+
+
+def _kfd_targets(root):
+    """{render minor: gfx_target_version} of the KFD topology nodes (kfd_nodes)"""
+    return {n['minor']: n['gfx'] for n in kfd_nodes(root) if n['minor'] and n['gfx']}
 
 
 def cards(root='/'):

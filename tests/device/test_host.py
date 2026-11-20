@@ -288,6 +288,20 @@ def main():
     check(users.get(129) == [(4242, 'ThinkingCap.gguf on :8093', 19 * 1024, 8093)]
           and sorted(users.get(128, [])) == [(4343, 'llama-server', 21 * 1024, None), (4444, 'vllm', 8 * 1024, None)],
           f'gpu_users: per card, a caminus serve named by its model and port, another process (vllm serve too) by its name ({users})')
+    # the one KFD reader (issue #339: kfd_nodes carries gpu_id; gpu_users, hip_order, proc_vram and cards read it here)
+    nodes = machine.kfd_nodes(r)
+    check([(n['node'], n['gpu_id'], n['minor'], n['gfx'], n['simd_count'], n['location_id']) for n in nodes] ==
+          [(0, None, 0, 0, 0, None), (1, 1111, 128, 110000, 96, None), (2, 2222, 129, 110000, 96, None),
+           (3, None, 130, 100306, 4, None)],
+          f'kfd_nodes: the topology parsed once, by node id; gpu_id None without a gpu_id file, location_id None without the key ({nodes})')
+    w(os.path.join(kfd, 'topology', 'nodes', '4', 'properties'),
+      'cpu_cores_count 0\nsimd_count 96\ngfx_target_version 110000\ndrm_render_minor 131\nlocation_id 4864\n')
+    w(os.path.join(kfd, 'topology', 'nodes', '4', 'gpu_id'), '3333\n')
+    check(machine.kfd_nodes(r)[-1] == dict(node=4, gpu_id=3333, minor=131, gfx=110000, simd_count=96, location_id=4864)
+          and H.hip_order(r) == {128: 0, 129: 1, 130: 2, 131: 3},
+          f"kfd_nodes: location_id and gpu_id carried (proc_vram's device match), hip_order over the simd nodes by node id ({machine.kfd_nodes(r)[-1]}, {H.hip_order(r)})")
+    check(H.holder_procs(r) == {4242: 'ThinkingCap.gguf on :8093', 4343: 'llama-server', 4444: 'vllm'},
+          f'holder_procs: one entry per process, named as gpu_users names it (doctor\'s process line, the wizard\'s holder note) ({H.holder_procs(r)})')
     os.remove(os.path.join(kfd, 'proc', '4444', 'vram_1111'))
     explain = lambda g: H.need_text(19.8 * 1024, 19.5 * 1024, 21.4 * 1024, 32768, 8192 if g['label'] == 'XTX' else None, 4096)
     ok, msg = refuses(lambda: H.place(1, fits=lambda cs: False, env={}, root=r, explain=explain),
