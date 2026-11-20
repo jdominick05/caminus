@@ -261,7 +261,7 @@ OWN_BLOCK.update({'RS4': 128, 'RS2': 64})
 # the ThinkingCap module's own tiles (kernels/k3_q35t_ops.h, Q35T_MODULES only): OP_OWN_MV in the K3 form for every matrix
 # format but Q8_0 (IQ4_XS, Q5_K: blocks in place; IQ3_XXS, IQ3_S, IQ2_S: the record layout and their grids staged at the
 # launch's start, OWN_Q35T_STAGE bits in the embedding's Seg.out_f32; Q6_K: planes); no gate|up fusion. Seg.work: the GG numbers
-OWN_Q35T_FMT = {'IQ2_S': 7, 'Q5_K': 5, 'BF16': 16}   # (BF16: the qwen35moe module's token_embd, kernels/k3_q35_ops.h own_op_emb_bf16)
+OWN_Q35T_FMT = {'IQ2_S': 7, 'Q5_K': 5}
 OWN_Q35T_1RT = ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S', 'Q5_K', 'Q6_K')
 OWN_Q35T_STAGE = {OWN_IQ_FMT['IQ3_XXS']: 1, OWN_IQ_FMT['IQ3_S']: 2, OWN_Q35T_FMT['IQ2_S']: 8}
 OWN_BLOCK.update({'IQ2_S': 82, 'Q5_K': 176})
@@ -303,7 +303,8 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT
 # matrices as the Q8_0 rows tile, the glue. Declared for the served file's formats only: another file's formats are added
 # here with the tiles that run them (a pair outside this set is refused at build)
 OWN_Q35MOE_1RT = ('Q2_0',)
-OWN_Q35MOE_FMT = {'Q2_0': 9}   # (= kernels/k3_own_ops.h OWN_Q2_0: the grouped expert tile's Seg.work)
+OWN_Q35MOE_FMT = {'Q2_0': 9, 'BF16': 16}   # (Q2_0 = kernels/k3_own_ops.h OWN_Q2_0, the grouped tile's Seg.work;
+#                                                 BF16 = the module's token_embd, own_op_emb_bf16)
 OWN_BLOCK['Q2_0'] = 72   # (64 values per block: fp16 d + 16 code bytes = 18, so 4 blocks = 72 per 256 weights)
 MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_Q35MOE_1RT for g in ('', '_gu')} |
                                  {('OWN_MV16', 'Q8_0'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'),
@@ -943,7 +944,7 @@ class Engine:
         assert tok.numel() >= tokens
         self.keep += [w, tok, x]
         self.segs.append(Seg(OP_OWN_EMB, tokens, dep, 1, w.data_ptr(), None, tok.data_ptr(), None, x.data_ptr(), 0.0, D, rb, 0,
-                             OWN_FMT[fmt] if fmt in OWN_FMT else OWN_Q35T_FMT[fmt], team, 1 if key else 0, vocab))
+                             OWN_FMT[fmt] if fmt in OWN_FMT else OWN_Q35T_FMT[fmt] if fmt in OWN_Q35T_FMT else OWN_Q35MOE_FMT[fmt], team, 1 if key else 0, vocab))
         return len(self.segs) - 1
 
     def own_argmax(self, logits, n, key, rows_per_task=8192, dep=-1, team=-1):

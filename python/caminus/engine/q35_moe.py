@@ -44,10 +44,6 @@ from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1
 from .q3moe_one import card_per_wgp
 
 MODULE = 'k3_q35_moe'
-MODULE_TCAP = 'k3_q35_tcap'   # (ThinkingCap's formats: kernels/k3_q35t_ops.h)
-MODULE_GSQ = 'k3_q35_gsq'     # (the Qwen3.8-27B GSQ-RCO files: ThinkingCap's formats + IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K)
-GSQ_ONLY_FMT = frozenset({'IQ2_XS', 'Q2_K', 'IQ1_M', 'IQ2_XXS'})   # (a trunk matrix in one of these: the GSQ module)
-SWIFT_FMT = frozenset({'Q4_K', 'Q6_K', 'Q8_0', 'Q5_K', 'F32'})   # (the matrices the Swift module's tiles read)
 
 
 def module_of(F):
@@ -376,7 +372,7 @@ class Moe35Own:
         s = self.buf = dict(x=B(D), h=B(D), h16=B(D, f16), blk=B(D),
                           d=B((KU + 1) * D), wts=B(KU + 1), ids=B(KU, torch.int32), logit=B(self.n_exp), sgl=B(1),
                           g=B(KU * FF), u=B(KU * FF), a16=B(KU * FF, f16),
-                          shg=B(FS), shu=B(FS), sha16=B(FS, f16), shx=B(D),
+                          shg=B(FS), shu=B(FS), sha16=B(FS, f16),
                           al=B(NV), be=B(NV), gates=B(2 * NV), qkv=B(CH), conv=B(CH), qk=B(2 * KD), z=B(VD), o=B(VD),
                           fin16=B(VD, f16), qf=B(2 * QH), kr=B(nkv * hd), vr=B(nkv * hd), qo=B(QH), ko=B(nkv * hd),
                           att=B(QH), gat16=B(QH, f16), logits=B(self.vocab))
