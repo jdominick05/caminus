@@ -47,8 +47,8 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3moe-tp', 'qwen3next', 'qwen4exp'],
-          f'archs: the six served, the dense own line\'s and Qwen3-30B-A3B\'s two-card forms ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen35moe-own', 'qwen3moe', 'qwen3moe-tp', 'qwen3next', 'qwen4exp'],
+          f'archs: the served entries, the dense own line\'s, the qwen35moe own path\'s and Qwen3-30B-A3B\'s two-card forms ({sorted(arch.ARCHS)})')
     check(arch.ARCHS['qwen35-own'].variant(2) is arch.ARCHS['qwen35-own-tp'] and arch.ARCHS['qwen35-own'].variant(1) is arch.ARCHS['qwen35-own']
           and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own']
           and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp', 'qwen3moe': 'qwen3moe-tp'},
@@ -82,7 +82,8 @@ def main():
           f'qwen3moe-tp pair: XTX + XT and equal cards pass; a smaller card 0 is refused, by placement too ({why})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
-                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
+                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen35moe-own': ('one-card', 1, 1, 'off'),
+                    'qwen3next': ('tp', 2, 1, None),
                     'qwen35-own-tp': ('tp', 2, 1, 'mtp'), 'qwen3moe-tp': ('tp', 2, 1, None)},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
@@ -188,7 +189,8 @@ def main():
           'rope keys: meta keeps every rope.scaling.* key the vendored gguf-py names')
     yarn = {'rope.scaling.type': 'yarn', 'rope.scaling.factor': 4.0, 'rope.scaling.original_context_length': 32768}
     by_header = {'qwen4exp': 'qwen4exp', 'qwen35moe': 'qwen35moe', 'qwen35': 'qwen35', 'qwen3moe': 'qwen3moe',
-                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35', 'qwen3moe-tp': 'qwen3moe'}
+                 'qwen35-own': 'qwen35', 'qwen35moe-own': 'qwen35moe', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35',
+                 'qwen3moe-tp': 'qwen3moe'}
     check(sorted(by_header) == sorted(arch.ARCHS), 'rope keys: every entry has a header architecture below')
 
     def rope_file(a, kv, tag):
@@ -291,7 +293,8 @@ def main():
     q8s = {n: (a.kv_formats, a.kv_fixed) for n, a in arch.ARCHS.items()}
     check(cli.parse([])['kv'] is None and not arch.kv_q8(cli.parse([])) and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
           and q8s == {'qwen4exp': (('f16',), 'q8_0'), 'qwen35moe': (('f16',), 'q8_0'), 'qwen35': (('f16',), 'q8_0'),
-                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen3next': (('f16',), 'q8_0'),
+                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen35moe-own': (('f16',), None),
+                      'qwen3next': (('f16',), 'q8_0'),
                       'qwen35-own-tp': (('f16',), None), 'qwen3moe-tp': (('f16', 'q8'), None)}
           and q8_default('flashnext_tp.py', 'FlashNextTP') is True and q8_default('qwen35_one.py', 'Qwen35One') is True
           and q8_default('qwen3next_tp.py', 'Qwen3NextTP') is True
@@ -380,6 +383,7 @@ def main():
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
+                        'qwen35moe-own': 'Moe35Own',
                         'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen3moe-tp': 'Q3MoETP'},
               f'engine_class: every entry\'s engine imports ({names})')
         # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
