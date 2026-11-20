@@ -17,9 +17,15 @@ enum { OWN_Q4_0 = 14 };   // (k3.py OWN_MTP_FMT)
 #ifdef K3_Q3M_IQ
 #include "own_quant_iq.h"   // the codebook formats' tiles (the IQ study module, kernels/k3_q3m_iq.hip)
 #endif
+#ifdef K3_OWN_Q2_0
+#include "own_quant_q2_0.h"   // the Q2_0 one-round-trip tile (kernels/k3_q35_moe.hip: the qwen35moe routed experts)
+#endif
 enum { OP_OWN_MV = 44 };
 enum { OWN_IQ3_XXS = 0, OWN_IQ4_XS = 6, OWN_IQ3_S = 8, OWN_IQ2_XXS = 11 };   // (K3_Q3M_IQ only; GG_* numbers, IQ2_XXS: its own)
 enum { OWN_Q6_K = 2, OWN_Q4_K = 4, OWN_Q8_0 = 3 };   // (the GG_* numbers of the same formats: k3.py GG_FMT)
+#ifdef K3_OWN_Q2_0
+enum { OWN_Q2_0 = 9 };   // (K3_OWN_Q2_0 only; the GG_* number of the format, as OWN_Q6_K / OWN_Q4_K / OWN_Q8_0)
+#endif
 #ifdef K3_Q3M_RS
 #include "own_quant_rs.h"   // row-scaled integer codes (the row-scale study's modules)
 enum { OWN_RS4 = 12, OWN_RS2 = 13 };   // (K3_Q3M_RS only; k3.py OWN_RS_FMT)
@@ -83,6 +89,9 @@ __device__ __forceinline__ void own_1rt_acc(const uint8_t * W, const Seg & sg, i
 #endif
 #ifndef OWN_K3_NO_Q6
     if (sg.work == OWN_Q6_K) own_rows_q6k_planes<0, OWN_K3_RW, 1, 1>(W, total, grow, lim, x, nullptr, lane, sg.K, res);
+#endif
+#ifdef K3_OWN_Q2_0   // (the qwen35moe routed experts: Q2_0 blocks in place, one tile for every K % 64)
+    if (sg.work == OWN_Q2_0) own_rows_q2_0_1rt<0, OWN_K3_RW, 1, 1>(W, grow, lim, x, nullptr, lane, sg.K, res);
 #endif
 #ifdef K3_Q3M_RS   // (the row-scale study's modules, kernels/k3_q3m_rs4.hip / _rs2.hip: ONE bit width per code object)
     if (sg.work == (K3_Q3M_RS == 4 ? OWN_RS4 : OWN_RS2)) {
@@ -315,6 +324,9 @@ enum { OP_OWN_ADD_RMS16 = 49 };
 #ifndef OWN_ADD_S
 #define OWN_ADD_S 1   // slots per round trip of the add (x 8 elements of loads in flight); 2 spilled k3_run (15 VGPRs), 4: 23
 #endif
+#ifndef OWN_ADD_MAX_S
+#define OWN_ADD_MAX_S 8   // slots the add covers; the qwen35moe module's gated shared expert is a 9th (kernels/k3_q35_moe.hip)
+#endif
 #ifdef K3_Q3M_VER   // (task tk = token tk: its rows d [tk][S][N], w [tk][S], x / h / h16 [tk][N]; nw shared)
 __device__ __forceinline__ void own_op_add_rms16(const Seg & sg, int tk) {
     __shared__ float part[8];
@@ -341,7 +353,7 @@ __device__ __forceinline__ void own_op_add_rms16(const Seg & sg) {
 #pragma unroll
     for (int j = 0; j < 8; j++) acc[j] = 0.0f;
 #pragma unroll
-    for (int s0 = 0; s0 < 8; s0 += OWN_ADD_S) {
+    for (int s0 = 0; s0 < OWN_ADD_MAX_S; s0 += OWN_ADD_S) {
         if (s0 >= S) continue;
         float wv[OWN_ADD_S], dv[OWN_ADD_S][8];
 #pragma unroll

@@ -89,6 +89,7 @@ src = open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_ops.h')).read()
 TPB = r'#ifdef K3_TP[^\n]*\n(.*?)#endif'   # (the two-card modules' exchange: k3.Q35_TP_MODULES only)
 MTPB = r'#ifdef K3_Q35_MTP[^\n]*\n(.*?)#endif'   # (the drafter module's argmax: k3.Q35M_MODULES only)
 DFB = r'#ifdef K3_Q35_DF[^\n]*\n(.*?)#endif'   # (the DFlash drafter module's ops: k3.Q35DF_MODULES only)
+MOEB = r'#ifdef K3_Q35_MOE[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (the qwen35moe module's extra ops; #else the dense dispatch)
 Q8B = r'#ifdef K3_Q35_KV_Q8[^\n]*\n.*?#else[^\n]*\n(.*?)#endif'   # retain the F16 dispatch in this suite
 SPB = r'#ifdef K3_Q35_ATTN_SPLIT[^\n]*\n(.*?)#else[^\n]*\n(.*?)#endif'   # (decode attention: the split pair; #else the DFlash module's OP_ATTN_DEC)
 disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
@@ -96,11 +97,17 @@ disp = re.sub(Q8B, lambda mm: mm.group(1), disp, flags=re.S)
 tp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(TPB, disp, re.S))))
 mtp_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(MTPB, disp, re.S))))
 df_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', ''.join(re.findall(DFB, disp, re.S))))
+moe_m = re.findall(MOEB, disp, re.S)
+moe_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', moe_m[0][0])) if moe_m else set()
+disp = re.sub(MOEB, lambda mm: mm.group(2), disp, flags=re.S)   # (this suite's tape is the dense line's: keep the #else)
 disp = re.sub(DFB, '', disp, flags=re.S)
 sp_ops = [tuple(set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', g)) for g in m) for m in re.findall(SPB, disp, re.S)]
 dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(SPB, lambda mm: mm.group(1), re.sub(MTPB, '', re.sub(TPB, '', disp, flags=re.S), flags=re.S), flags=re.S)))
 host_ops = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35S_OPS and k != 'OP_NOP'}
 check(dev_ops == host_ops and tp_ops == {'OP_XCHG'}, f'kernels/k3_q35_ops.h dispatches k3.Q35S_OPS ({len(dev_ops)} ops beside the core\'s no-op), and OP_XCHG under K3_TP')
+moe_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35MOE_OPS} - {'OP_NOP'}
+check(moe_ops <= moe_host and (moe_ops - host_ops) == (moe_host - host_ops) == {'OP_ROUTER'},
+      f'under K3_Q35_MOE: the qwen35moe module\'s extra ops ({sorted(moe_ops - host_ops)}), all in k3.Q35MOE_OPS and none in k3.Q35S_OPS')
 df_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35DF_OPS} - {'OP_NOP'}
 check(df_ops == {'OP_DF_CONV', 'OP_DF_TOPK', 'OP_DF_SELECT', 'OP_KV_APPEND', 'OP_ATTN_DEC'} and df_ops <= df_host,
       f'under K3_Q35_DF: the DFlash drafter\'s own ops (conv / top-k / select, the ring append, its attention), all in k3.Q35DF_OPS')
