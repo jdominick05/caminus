@@ -1023,22 +1023,28 @@ class Q35MoE(OneCard):
         need = lambda c: [Moe35Own.projection_mib(path, c) + (slots + 2) * slot]
         return n_ctx, [0], slot, need
 
-    def _yarn(self):
+    def _yarn(self, n=None):
+        """the smallest factor the card names that covers n positions. x2 = 524,288 is the one that fits one XTX (22.5 GiB
+        projected with F16 KV, ~17.5 GiB at 8-bit); x4 = 1,048,576 needs 33 GiB, so it is for a bigger card"""
         from .rope import YarnMode
-        return YarnMode(4.0, self.rope_facts.native_ctx)   # (the card's recipe: x4 from the trained 262,144 = 1,048,576)
+        modes = [YarnMode(f, self.rope_facts.native_ctx) for f in self.rope_facts.card_factors]
+        if n is None: return modes[0]
+        for m in modes:
+            if m.max_ctx >= int(n): return m
+        return modes[-1]
 
     def rope_mode(self, opt):
-        return self._yarn() if opt.get('rope') == 'yarn' else None
+        return self._yarn(opt.get('max_ctx')) if opt.get('rope') == 'yarn' else None
 
     def long_mode(self, opt):
-        """an explicit max_ctx past the trained 262,144 (or --long-context): YaRN x4 to 1,048,576. The rope op reads the
+        """an explicit max_ctx past the trained 262,144 (or --long-context): the smallest YaRN factor that covers it. The rope op reads the
         per-dim table from Seg.aux (kernels/k3_q35_ops.h, K3_Q35_YARN), so the mode is a 32-float table and a scale on
         cos / sin — not a second rope, and no cost per position"""
         n, gguf_ctx = _explicit_ctx(opt), int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
         if not (opt.get('long_context') or (n is not None and n > gguf_ctx)):
             opt.pop('rope', None)
             return None
-        mode = self._yarn()
+        mode = self._yarn(n)
         if n is not None and n > mode.max_ctx:
             raise ValueError(f'--max-ctx {n:,}: {self.alias} serves at most {mode.max_ctx:,} positions (its long-context '
                              f'mode, YaRN x{mode.factor:g} from {mode.n_ctx_orig:,})')
