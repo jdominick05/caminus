@@ -990,6 +990,38 @@ class Dense35(OneCard):
         return m, pf, m.mtp35 if dr is not None else None, dr
 
 
+class Q35MoE(OneCard):
+    """qwen35moe (Qwen3.6-35B-A3B) on Caminus's own code: Moe35Own's tape on one card, T = 1 (kernels/k3_q35_moe.hip:
+    the router, the BF16 embedding, the grouped Q2_0 expert tiles), the own reader and tokenizer. The prompt runs as K3
+    passes (KPassOnly: there is no batched MoE prefill yet), so a prompt costs one decode pass a token — correct and slow;
+    the batched expert prefill is the next piece of work. No drafter for this line yet."""
+    engine = 'engine.q35_moe:Moe35Own'
+    rope_facts = QWEN35_ROPE
+    kv_fixed = None            # (F16 KV: the module has no q8 cache)
+    drafter = 'off'
+    tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
+
+    def build(self, opt, log=print, T=None):
+        self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
+        from .engine.q35_moe import Moe35Own
+        from .prefill.kpass import KPassOnly
+        m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
+        return m, KPassOnly(m), None, None
+
+    def auto_need(self, opt, slots, cards=None):
+        """max_ctx auto's projection: Moe35Own's own statics, not the ggml engine's. The inherited OneCard.auto_need builds
+        Qwen35One's shape, which reads the embedding row on the host (this engine uploads the whole BF16 table) and counts
+        a q8 cache (this one is F16 only): 2.0 GiB low at 4096 and 4.3 GiB at 262,144, so the default serve could place a
+        context the own build then refuses. No batched prefill (KPassOnly), so there are no prefill buffers to count."""
+        self.kv_check(opt)
+        from .engine.q35_moe import Moe35Own
+        path = opt['model']
+        n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
+        slot = (Moe35Own.recurrent_mib(path) + Moe35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: states + tail rows)
+        need = lambda c: [Moe35Own.projection_mib(path, c) + (slots + 2) * slot]
+        return n_ctx, [0], slot, need
+
+
 class Dense35TP(Arch):
     """the dense qwen35 line on Caminus's own code on TWO cards (caminus serve --cards 2 for swift-1.5 / thinkingcap): Dense35TP
     (engine/q35_dense_tp.py: tensor parallelism, the two-card build of the file's module), T = 1, its own two-card prefill
@@ -1292,6 +1324,7 @@ class TwoCardTP(Arch):
 
 ARCHS = {a.name: a for a in (Coder('qwen4exp', 'k3-coder'), OneCard('qwen35moe', 'qwen3.6'), OneCard('qwen35', 'qwen3.5'),
                              Q3MoE('qwen3moe', 'qwen3-30b-a3b'), Dense35('qwen35-own', 'swift-1.5'),
+                             Q35MoE('qwen35moe-own', 'qwen3.6-own'),
                              TwoCardTP('qwen3next', 'qwen3-coder-next'), Dense35TP('qwen35-own-tp', 'swift-1.5'),
                              Q3MoETP('qwen3moe-tp', 'qwen3-30b-a3b'))}
 # a one-card architecture's two-card form: Arch.variant(2), caminus serve --cards 2. Offered, never the default: a model's own
