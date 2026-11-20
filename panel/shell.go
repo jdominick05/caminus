@@ -122,20 +122,21 @@ func stateStyle(state string) (string, lipgloss.Style) {
 	return g.idle, lipgloss.NewStyle().Foreground(cMuted)
 }
 
-// shellHeader: the agent, its state, what it is doing, and on the right the step count.
+// shellHeader: the agent, its state, what it is doing, and on the right the step count. The brand is the harness's
+// own name: an Ember session says EMBER, never CAMINUS (the Caminus panel and its top screen keep CAMINUS).
 func shellHeader(agent, state, goal string, steps, w int) string {
 	icon, st := stateStyle(state)
 	detail := ""
 	if goal != "" {
 		detail = lipgloss.NewStyle().Foreground(cBlue).Render(goal)
 	}
-	return screenHeader(agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(plural(steps, "step", "steps")), w)
+	return screenHeader("EMBER", agent, icon+" "+strings.ReplaceAll(state, "_", " "), st, detail, emberDim.Render(plural(steps, "step", "steps")), w)
 }
 
-// screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): CAMINUS · what · its
+// screenHeader is every screen's first two lines (the env chat, caminus panel, caminus top): the brand · what · its
 // state in its one colour · dim details, something on the right, and a chrome rule under it.
-func screenHeader(what, state string, st lipgloss.Style, detail, right string, w int) string {
-	left := emberTitle.Render("CAMINUS") + emberDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(what)
+func screenHeader(brand, what, state string, st lipgloss.Style, detail, right string, w int) string {
+	left := emberTitle.Render(brand) + emberDim.Render(" · ") + lipgloss.NewStyle().Foreground(cText).Render(what)
 	if state != "" {
 		left += " " + st.Render(state)
 	}

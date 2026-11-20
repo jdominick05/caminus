@@ -1994,7 +1994,7 @@ func TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere(t *testing.T) {
 	m.reqs = append(m.reqs, emberReq{ID: "new", Cmd: "apt-get install jq"})
 	m.notifyRequests()
 	m.notifyRequests()
-	if len(got) != 1 || !strings.Contains(got[0], "critical|Caminus: root approval needed|apt-get install jq") {
+	if len(got) != 1 || !strings.Contains(got[0], "critical|Ember: root approval needed|apt-get install jq") {
 		t.Fatalf("one notification for the new root request: %v", got)
 	}
 	m.notifyResident(nil) // first pass: silent
@@ -2536,7 +2536,7 @@ func TestDragSelectsAndCopiesInEveryAreaOfTheScreen(t *testing.T) {
 		{name: "side pane", from: "tasks  3 of 4", to: "◐ run the tests",
 			want: "tasks  3 of 4 done\n ● read inventory.py\n ● state the done check\n ● fix total_value\n ◐ run the tests",
 			not:  []string{"FAILED", "test_stock", "edit"}},
-		{name: "header", from: "CAMINUS", to: "● working", want: "CAMINUS · resident ● working"},
+		{name: "header", from: "EMBER", to: "● working", want: "EMBER · resident ● working"},
 		{name: "status line", from: "◈ swift-1.5", to: "42 tok/s", want: "◈ swift-1.5 · 9K/32K ▓▓░░░░░░ · ⇢ read 771 · write 42 tok/s"},
 		{name: "typing box", from: "╭─ to goal", to: "! for shell mode",
 			want: "to goal g1\n› message the agent · Enter nudges · /steer redirects · ! for shell mode"},
@@ -3424,6 +3424,51 @@ func TestHeaderShowsWhatAReAimedGoalWorksTowardNow(t *testing.T) {
 	}
 	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "block breaking") {
 		t.Fatalf("the header shows the redirect, not the first prompt: %s", h)
+	}
+	// A steer redirects the plan inside the goal it was sent to; it never becomes what the goal works toward, even
+	// when a new done check follows it. A denial redirect (the human says "no, do this instead" to a root request)
+	// is written kind='steer', via='denial' by the runtime and is a steer too: the header keeps the goal.
+	m.receiveResident(residentMsg{agent: "resident", status: m.resident, events: []residentEvent{
+		{Seq: 20, Goal: "original", Kind: "user_message",
+			Data: map[string]any{"text": "Two process changes from the maintainer, one of them urgent.", "kind": "steer"}},
+		{Seq: 21, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "the urgent change is in"}},
+		{Seq: 22, Goal: "original", Kind: "user_message",
+			Data: map[string]any{"text": "use the static binary instead", "kind": "steer", "via": "denial"}},
+		{Seq: 23, Goal: "original", Kind: "done_check", Data: map[string]any{"check": "no apt package is added"}},
+	}})
+	if aim, re := m.goalAim(&g); !re || aim != "review caminus and embers design" {
+		t.Fatalf("a steer or a denial redirect redirects the plan, not the goal: %q %v", aim, re)
+	}
+	if h := ansi.Strip(m.chatHead(140)); !strings.Contains(h, "↪ review caminus") || strings.Contains(h, "static binary") {
+		t.Fatalf("the header keeps the goal, and no steer replaces it: %s", h)
+	}
+	// the steer itself is not lost: it shows once, in the transcript, marked as the human's steer
+	m.render() // (the transcript is built as it is drawn)
+	body := ansi.Strip(m.chat.content)
+	if !strings.Contains(body, "you · steer") || strings.Count(body, "Two process changes") != 1 {
+		t.Fatalf("the steer shows once in the transcript:\n%s", body)
+	}
+}
+
+// An Ember session names itself EMBER wherever it draws it: the header and the drawn frame. The Caminus panel and
+// the top screen keep CAMINUS, which is the engine's name, not the harness's (issue #340). A notification's title
+// is checked once, in TestNotificationsOncePerItemAndNotForWhatWasAlreadyThere.
+func TestAnEmberSessionNamesItselfEmber(t *testing.T) {
+	m := chatFixture(t)
+	m.width, m.height = 140, 30
+	head := ansi.Strip(m.chatHead(140))
+	if !strings.HasPrefix(head, "EMBER · resident") {
+		t.Fatalf("the header's brand is the harness's own name:\n%s", head)
+	}
+	if strings.Contains(head, "CAMINUS") {
+		t.Fatalf("an Ember session still calls itself CAMINUS:\n%s", head)
+	}
+	if frame := ansi.Strip(m.render()); strings.Contains(frame, "CAMINUS · resident") {
+		t.Fatalf("the drawn session calls itself CAMINUS:\n%s", frame)
+	}
+	// the engine's own screens keep their name (the top screen draws CAMINUS · top)
+	if top := ansi.Strip(screenHeader("CAMINUS", "top", "idle", lipgloss.NewStyle(), "", "", 80)); !strings.HasPrefix(top, "CAMINUS · top idle") {
+		t.Fatalf("the Caminus top screen is still CAMINUS:\n%s", top)
 	}
 }
 

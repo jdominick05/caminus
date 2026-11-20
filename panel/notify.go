@@ -24,7 +24,7 @@ var notifyRun = func(urgency, title, body string) {
 		return
 	}
 	if path, err := exec.LookPath("notify-send"); err == nil {
-		_ = exec.Command(path, "-a", "Caminus", "-u", urgency, title, body).Start()
+		_ = exec.Command(path, "-a", "Ember", "-u", urgency, title, body).Start()
 	}
 }
 
@@ -65,10 +65,10 @@ func clip(s string, n int) string {
 // notifyRequests: every bridge request not seen before.
 func (m *emberModel) notifyRequests() {
 	for _, r := range m.reqs {
-		title := "Caminus: a question from the agent"
+		title := "Ember: a question from the agent"
 		body := r.Text
 		if r.Kind != "question" { // an empty kind is a root request
-			title, body = "Caminus: root approval needed", r.Cmd
+			title, body = "Ember: root approval needed", r.Cmd
 		}
 		m.notes.note("requests", "req:"+r.ID, "critical", title, body)
 	}
@@ -81,16 +81,16 @@ func (m *emberModel) notifyResident(events []residentEvent) {
 	for _, e := range events {
 		if e.Kind == "report" && e.Data["level"] == "need_you" {
 			text, _ := e.Data["text"].(string)
-			m.notes.note("resident:"+agent, "ev:"+agent+":"+itoa(e.Seq), "critical", "Caminus "+agent+" needs you", text)
+			m.notes.note("resident:"+agent, "ev:"+agent+":"+itoa(e.Seq), "critical", "Ember "+agent+" needs you", text)
 		}
 	}
 	for _, g := range m.resident.Goals {
 		key := "goal:" + agent + ":" + g.ID + ":" + g.State
 		switch g.State {
 		case "completed":
-			m.notes.note("resident:"+agent, key, "normal", "Caminus "+agent+": goal done", firstNonEmpty(g.Summary, g.Prompt))
+			m.notes.note("resident:"+agent, key, "normal", "Ember "+agent+": goal done", firstNonEmpty(g.Summary, g.Prompt))
 		case "paused", "error":
-			m.notes.note("resident:"+agent, key, "critical", "Caminus "+agent+": goal "+g.State, firstNonEmpty(g.Error, g.Prompt))
+			m.notes.note("resident:"+agent, key, "critical", "Ember "+agent+": goal "+g.State, firstNonEmpty(g.Error, g.Prompt))
 		}
 	}
 	m.notes.prime("resident:" + agent)

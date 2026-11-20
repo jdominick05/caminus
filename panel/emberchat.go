@@ -617,9 +617,10 @@ func (m emberModel) bodyHeight() int {
 
 // chatHead is the header with the whole goal: beside the agent and its state when it fits, else on its own lines
 // under them (three at most). The goal was cut at 47 characters before.
-// goalAim is what a goal works toward now: its prompt, or, once a message from its human was followed by a new done
+// goalAim is what a goal works toward now: its prompt, or, once a nudge from its human was followed by a new done
 // check (the goal re-aimed: a user started a block-breaker game and then asked for a design review in the same goal),
-// that message. redirected says which.
+// that message. redirected says which. A steer never re-aims the goal: it redirects the plan inside the goal it was
+// sent to, so the goal stays in the header and the steer keeps its one marked line in the transcript.
 func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
 	text, msg, checked := g.Prompt, "", false
 	for _, e := range m.residentEvents {
@@ -628,6 +629,9 @@ func (m emberModel) goalAim(g *residentGoal) (text string, redirected bool) {
 		}
 		switch e.Kind {
 		case "user_message":
+			if k, _ := e.Data["kind"].(string); k == "steer" {
+				continue // (the header showed the steer's words in place of the goal)
+			}
 			if t, _ := e.Data["text"].(string); strings.TrimSpace(t) != "" && checked {
 				msg = t // (a message before the first done check refines the prompt; it does not redirect it)
 			}

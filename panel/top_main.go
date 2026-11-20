@@ -1141,7 +1141,7 @@ func (m model) render() string {
 		slots = fmt.Sprintf(" · slot id %d · %d slots, %d busy", sl.ID, srv.NSlots, srv.Busy)
 	}
 	clock := fg(cMuted).Render(version + "  " + time.Now().Format("15:04:05"))
-	header := screenHeader("top", pill, lipgloss.NewStyle(), fg(cMuted).Render(fmt.Sprintf("%s · %s · %s%s", alias, mdl, host, slots)), clock, W)
+	header := screenHeader("CAMINUS", "top", pill, lipgloss.NewStyle(), fg(cMuted).Render(fmt.Sprintf("%s · %s · %s%s", alias, mdl, host, slots)), clock, W)
 	header, _, _ = strings.Cut(header, "\n") // no rule: the status line under it does that job on the densest screen
 	statusLine := " " + fit(status, W-2)
 
