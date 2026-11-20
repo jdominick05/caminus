@@ -34,8 +34,12 @@ enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
 // walking every position: 26-31x the bandwidth floor at every depth, 64 ms of a token at 32K on the XTX) is not in these
 // modules; caminus.k3.Engine.attn_dec emits the pair on them. Not bitwise OP_ATTN_DEC (another summation order);
 // bitwise k3_gguf_q35d's pair on the same cache, and the same bits at T = 1 and T = 4.
+#ifndef ATTN_G   // (kernels/k3_q35_moe.hip: qwen35moe's 8 query heads per kv head; the dense line's 6)
 #define ATTN_G 6
+#endif
+#ifndef ATTN_VH   // (one V pass over every query head: 6 here, 8 in the qwen35moe module)
 #define ATTN_VH 6
+#endif
 #define K3_ATTN_COMB_FAST
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #include "k3_attn_split.h"
@@ -458,7 +462,14 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_ATTN_DEC && sg.pad2) { df_op_attn(sg, t); return true; }
 #endif
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
+#ifdef K3_Q35_MOE   // (kernels/k3_q35_moe.hip: qwen35moe's tape. Its add_rms16 is the k3_own_ops.h form, whose weighted
+    // sum takes the routed experts' slots plus the gated shared expert as a 9th (OWN_ADD_MAX_S); the dense line's
+    // any-length form below has no slots or weights. OP_ROUTER is the 30B's softmax top-k, renormalised.)
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg OWN_TK_ARG); return true; }
+    if (sg.op == OP_ROUTER) { op_router(sg, t); return true; }
+#else
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
+#endif
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_GDN_CONV) { q35_op_gdn_conv(sg, t); return true; }
     if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
