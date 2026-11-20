@@ -302,6 +302,17 @@ class Moe35Own:
         a = t.pread(0, t.n_bytes).view(np.float32).reshape(rows, cols)
         return self.h2d.up(np.ascontiguousarray(a), name, 0, 'mat')
 
+    def _wexp(self, name, rows, cols):
+        """a routed expert matrix: the whole tensor on the card (experts x rows x cols), the tile told rows = one
+        expert's row count (total_rows = experts x rows). The grouped tile indexes ids[e] * rows + r, which is exactly
+        the GGUF layout ([cols, rows, experts] read as rows x cols)."""
+        t = self.F.T[name]
+        R, _ = t.rows()
+        if int(t.shape[0]) != cols or R % rows or R != rows * int(t.shape[2]):
+            raise ValueError(f'Moe35Own: {name} is {list(t.shape)}, the tape needs [{cols}, {rows}, {R // rows}]')
+        fmt, b = self._w_host(name)
+        return dict(name=name, fmt=fmt, rows=rows, K=cols, w=self.h2d.up(b, name, 0, 'mat'))
+
     def _load(self):
         D, hd, nh, nkv, S, NK, NV, ffn = self.D, self.hd, self.nh, self.nkv, self.S, self.NK, self.NV, self.ffn
         CH = 2 * S * NK + S * NV
@@ -315,8 +326,9 @@ class Moe35Own:
                      sh_gate=self._w(p + 'ffn_gate_shexp.weight', self.ffn_shexp, D),
                      sh_up=self._w(p + 'ffn_up_shexp.weight', self.ffn_shexp, D),
                      sh_down=self._w(p + 'ffn_down_shexp.weight', D, self.ffn_shexp),
-                     ffn_gate_exps=self._w(p + 'ffn_gate_exps.weight'), ffn_up_exps=self._w(p + 'ffn_up_exps.weight'),
-                     ffn_down_exps=self._w(p + 'ffn_down_exps.weight'))
+                     ffn_gate_exps=self._wexp(p + 'ffn_gate_exps.weight', self.ffn, D),
+                     ffn_up_exps=self._wexp(p + 'ffn_up_exps.weight', self.ffn, D),
+                     ffn_down_exps=self._wexp(p + 'ffn_down_exps.weight', D, self.ffn))
             if self.gdn[il]:
                 d.update(kind='gdn', qkv=self._w(p + 'attn_qkv.weight', CH, D), z=self._w(p + 'attn_gate.weight', NV * S, D),
                          al=self._w(p + 'ssm_alpha.weight', NV, D), be=self._w(p + 'ssm_beta.weight', NV, D),
