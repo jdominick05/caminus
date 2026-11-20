@@ -973,6 +973,18 @@ class Engine:
                              E, 0, 1, 0, team, k, 0))
         return len(self.segs) - 1
 
+    def router_shexp(self, logits, k, ids, wts, shared_logit, clamp=6.103515625e-5, dep=-1, team=-1):
+        """the qwen35moe module's OP_ROUTER (kernels/k3_q35_ops.h op_router_shexp): router()'s softmax top-k, then the
+        gated shared expert's weight written as slot k, so own_add_rms16's 9-slot sum reads it. The shared gate logit
+        arrives in Seg.W, one fp32; wts is k + 1 wide. T = 1 (the op's slot stride is the router's k)."""
+        if self.module not in Q35MOE_MODULES: raise ValueError(f'router_shexp: {self.module} is not a qwen35moe module')
+        nt = self.T
+        E = logits.numel() // nt; assert E <= 1024 and k <= 64 and ids.numel() >= nt * k and wts.numel() >= nt * (k + 1)
+        self.keep += [logits, ids, wts, shared_logit]
+        self.segs.append(Seg(OP_ROUTER, nt, dep, 0, shared_logit.data_ptr(), wts.data_ptr(), logits.data_ptr(), None,
+                             ids.data_ptr(), clamp, E, 0, 1, 0, team, k, 0))
+        return len(self.segs) - 1
+
     def shexp_add(self, moe, shexp, gate_logit, out, rows_per_task=1024, dep=-1, team=-1):
         """out = moe + shexp * sigmoid(gate_logit[0])"""
         n = out.numel(); self.keep += [moe, shexp, gate_logit, out]
