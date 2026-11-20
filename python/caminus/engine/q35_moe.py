@@ -215,6 +215,9 @@ class Moe35Own:
         self.yarn = yarn_table(self.theta_scale, self.nrot, float(yarn), n_ctx=n_ctx) if yarn is not None \
             else (np.ones(self.nrot // 2, dtype=np.float32), 1.0)
         self.yarn_factor = yarn
+        # (the engine key must tell a native park from a YaRN one: the module name is the same in both modes, so without
+        #  this the disk tier could restore KV rows rotated by the other rope into a live slot)
+        self.rope_key = None if yarn is None else f'yarn{float(yarn):g}'
         if yarn is not None: n_ctx = int(n_ctx * float(yarn))   # (YaRN stretches the window by its factor)
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or not 1 <= max_ctx <= n_ctx:
             raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')

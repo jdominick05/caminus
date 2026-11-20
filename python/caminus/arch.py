@@ -1034,7 +1034,9 @@ class Q35MoE(OneCard):
         return modes[-1]
 
     def rope_mode(self, opt):
-        return self._yarn(opt.get('max_ctx')) if opt.get('rope') == 'yarn' else None
+        # (max_ctx is still the string 'auto' when recipe() runs, before placement resolves it: _explicit_ctx reads it
+        #  as None, and None picks the smallest factor, which is what an auto serve extends to)
+        return self._yarn(_explicit_ctx(opt)) if opt.get('rope') == 'yarn' else None
 
     def long_mode(self, opt):
         """an explicit max_ctx past the trained 262,144 (or --long-context): the smallest YaRN factor that covers it. The rope op reads the
