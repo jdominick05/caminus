@@ -356,11 +356,24 @@ __device__ __forceinline__ void q35_op_qk_nr(const Seg & sg, int t) {
     for (int i = tid; i < D; i += blockDim.x) nrm[i] = (scale * x[i]) * w[i];
     __syncthreads();
     const float pos = (float)(((const int *)sg.asum)[0] + t / (sg.N / seg_T(sg)));   // task t = token * heads + head
+#ifdef K3_Q35_YARN
+    // (YaRN: Seg.aux = the per-dim frequency factor m[j] (fp32 [n_rot / 2]), Seg.work = the magnitude scale's bits;
+    //  aux NULL: the plain rope, bit for bit. theta = pos * rs^j * m[j], cos / sin scaled by mscale: llama.cpp's
+    //  rope_yarn with theta_interp * (1 - ramp) + theta_extrap * ramp folded into m. Both are loop-invariant: hoisted,
+    //  or the extra live values cost this object a spilled SGPR over its pin)
+    const float * mt = (const float *)sg.aux;   // (always present in this module: the host passes all-ones for the plain rope)
+    const float ms = __builtin_bit_cast(float, sg.work);
+#endif
     for (int i = tid; i < D; i += blockDim.x) {
         if (i >= nrot) { y[i] = nrm[i]; continue; }
         const int j = i < nrot / 2 ? i : i - nrot / 2;
+#ifdef K3_Q35_YARN
+        const float theta = pos * powf(sg.rs, (float)j) * mt[j];
+        const float c = cosf(theta) * ms, sn = sinf(theta) * ms;
+#else
         const float theta = pos * powf(sg.rs, (float)j);
         const float c = cosf(theta), sn = sinf(theta);
+#endif
         const float x0 = nrm[j], x1 = nrm[j + nrot / 2];
         y[i] = i < nrot / 2 ? x0 * c - x1 * sn : x0 * sn + x1 * c;
     }
