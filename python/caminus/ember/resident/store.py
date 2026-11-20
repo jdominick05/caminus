@@ -13,6 +13,14 @@ STAMP_EVERY_S = 600     # tool results get a time stamp at most this often while
 # Time passes in these states: the next message a goal stores after one of them carries the time (Store.stamp).
 WAITING = {'paused', 'waiting_user', 'waiting_root', 'waiting_plan', 'waiting_model', 'error'}
 
+TODO_MARKS = {'done': '[x]', 'in_progress': '[>]', 'pending': '[ ]'}
+
+
+def todo_mark(state):
+    """A todo item's mark in the plan every brief and loop line shows: done, in progress, or open. An unknown state
+    reads as open: a mark that said done for a state nothing understands would claim work that was never finished."""
+    return TODO_MARKS.get(state, '[ ]')
+
 
 def time_line(now):
     """the time stamp's words: local time with weekday and zone, minute resolution, e.g. [time: Wed 2026-11-18 00:41 EST]"""

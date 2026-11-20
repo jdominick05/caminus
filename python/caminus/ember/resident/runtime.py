@@ -13,7 +13,7 @@ import sys
 import uuid
 
 from .model import Model, ModelError, ModelTruncated, ModelContextError, Cancelled, remember_prices, price, price_row
-from .store import log_failure, Store, atomic_json
+from .store import log_failure, todo_mark, Store, atomic_json
 from .terminal import Terminal
 from .mail import Mail
 from . import approval, discovery
@@ -624,8 +624,7 @@ class Runtime:
                          % (r['count'], (r['last_error'] or '')[:120]))
         todo = self.store.todo(gid)
         if todo['items']:
-            mark = {'done': '[x]', 'in_progress': '[>]', 'pending': '[ ]'}
-            lines.append('TODO: ' + ' | '.join(mark.get(it['state'], '[ ]') + ' ' + it['text'] for it in todo['items']))
+            lines.append('TODO: ' + ' | '.join(todo_mark(it['state']) + ' ' + it['text'] for it in todo['items']))
             if any(it['state'] != 'done' for it in todo['items']):
                 # a gentle nudge, only when the list has gone stale: an agent did all the work and ticked every item
                 # at the end, so its human's tasks panel read 0 of 6 throughout, and a compaction would resume from it
@@ -640,15 +639,21 @@ class Runtime:
                 # transcript away. A 5-of-6-open finish spent fewer than TODO_STALE steps between its last todo
                 # update and its verify, so the count alone never mentioned it.
                 opened = len([it for it in todo['items'] if it['state'] != 'done'])
-                for what in ('verified', 'compacted'):
-                    if self.store.db.execute(
-                            'SELECT 1 FROM events WHERE goal=? AND kind=? AND seq > COALESCE('
-                            "(SELECT MAX(seq) FROM events WHERE goal=? AND kind='todo'),0) LIMIT 1",
-                            (gid, what, gid)).fetchone():
-                        lines.append(f'LOOP: you {what} after your last todo update and {opened} '
-                                     f'{"item" if opened == 1 else "items"} still open: mark the ones you finished '
-                                     'done (todo) before you finish, or name them in finish\'s open.')
-                        break
+                # Once per event, not once per turn: the nudge names the newest verify or compaction after the last
+                # todo update, and only the turn right after it (an event older than the turn's own reply was
+                # already mentioned). Repeating it every step until the next todo update read as a stuck runtime
+                # rather than a reminder.
+                last = self.store.db.execute(
+                    "SELECT (SELECT MAX(seq) FROM events WHERE goal=? AND kind IN ('verified','compacted')) AS trig,"
+                    " (SELECT kind FROM events WHERE goal=? AND kind IN ('verified','compacted')"
+                    " ORDER BY seq DESC LIMIT 1) AS what,"
+                    " COALESCE((SELECT MAX(seq) FROM events WHERE goal=? AND kind='assistant'),0) AS said,"
+                    " COALESCE((SELECT MAX(seq) FROM events WHERE goal=? AND kind='todo'),0) AS todo",
+                    (gid, gid, gid, gid)).fetchone()
+                if last['trig'] and last['trig'] > last['todo'] and last['trig'] > last['said']:
+                    lines.append(f'LOOP: you {last["what"]} after your last todo update and {opened} '
+                                 f'{"item" if opened == 1 else "items"} still open: mark the ones you finished '
+                                 'done (todo) before you finish, or name them in finish\'s open.')
         else:
             # #318: the stale nudge above lives inside `if todo['items']`, so it can only fire for a goal that
             # already did the right thing: a 170-call, 35-minute review goal with no list was never asked for one.
@@ -1218,7 +1223,7 @@ class Runtime:
                 last[path] = None             # (a failed read counts too: "not found" or "not text" is what is there)
         return [v for v in last.values() if v]
 
-    def _finish(self, gid, summary, open_work=''):
+    def _finish(self, gid, summary, open_work='', open_left=None, verdict=''):
         # Serialize completion with send --goal-id. Steering accepted while the
         # model was in flight must be observed before the goal can finish.
         with self.store.transaction():
@@ -1228,6 +1233,13 @@ class Runtime:
                 self.store.event('completion_deferred',dict(reason='human steering is waiting'),gid)
                 return
             self.store.update(gid,state='completed',summary=summary)
+            if open_left:
+                # A finish that left todo items open, on the record: a successful finish ends the goal, so the model
+                # never reads it back, but the event is what makes a 5-of-6-open finish auditable after the fact. It
+                # sits after state='completed' and not where finish was called: the goal can still be deferred
+                # (completion_deferred, when human steering waits) or found cancelled, and recorded there the event
+                # claimed a finish with items open that never happened while the goal carried on working.
+                self.store.event('finish_open_todo', dict(left=open_left, verdict=verdict), gid)
             self.store.end_grants(gid)      # grants end with the goal
             if goal.get('kind','work') in FREE_KINDS:
                 self.free.ended(gid, summary)
@@ -1248,6 +1260,7 @@ class Runtime:
         refused = False
         ignored = ''          # the note naming arguments taken under a trained name or dropped as unknown
         signature = None
+        open_left = None      # the todo items a finish leaves open, recorded after the verdict (see below)
         # STATE.md is the goal's whose action runs now: it moved only when a model turn started, so when two goals
         # interleaved, A's 'write STATE.md' landed in B's file and was filed as B's state at A's next turn
         if getattr(self, 'memory', None) is not None:
@@ -1458,13 +1471,12 @@ class Runtime:
                                          'or name what is left in open' % '; '.join(left[:5]))
                     result = dict(summary=args['summary'], open=args.get('open', ''))
                     if graded and left:
-                        # The judge sees the list too (judge.evidence), and this note is on the record: a successful
-                        # finish ends the goal, so the model never reads it back, but the tool_result and the event
-                        # below are what make a 5-of-6-open finish auditable after the fact.
+                        # The judge sees the list too (judge.evidence): a finish that leaves items open still has to
+                        # get past it, so the note says what it is looking at.
                         result['todo_open'] = ('%d todo item%s still open (%s): the judge sees them, so name each in '
                                                'open or mark it done' % (len(left), '' if len(left) == 1 else 's',
                                                                          '; '.join(left[:5])))
-                        self.store.event('finish_open_todo', dict(left=left[:20]), action['goal'])
+                        open_left = left[:20]
             if name in ('terminal', 'sandbox'):
                 # Preparation already launched or queued input. Polling must not
                 # relaunch a worker if cancellation raced after preparation.
@@ -1572,7 +1584,10 @@ class Runtime:
         if 'error' not in result:
             self.progress[action['goal']] = time.time()
         if action['name'] == 'finish' and 'error' not in result:
-            self._finish(action['goal'],result['summary'],result.get('open',''))
+            # open_left goes with the summary: _finish writes the event once the goal is completed, so a finish the
+            # judge refused, a completion deferred by waiting steering, or a cancelled goal leaves it unrecorded.
+            self._finish(action['goal'],result['summary'],result.get('open',''),
+                         open_left, str(result.get('judge', ''))[:500])
         elif action['name'] == 'propose_plan' and 'error' not in result:
             # The plan is in: park until the human approves (plan approve) or sends a revision.
             with self.store.transaction():

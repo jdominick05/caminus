@@ -520,8 +520,8 @@ class Resident(unittest.TestCase):
         self.assertTrue(any('todo list still has unfinished items (check it)' in b for b in bodies),'finish refused while an item is open')
 
     def test_the_judge_sees_the_todo_list_and_a_finish_names_what_is_still_open(self):
-        # #322: the done gate passed with 5 of 6 items open, because the one thing that decides "done" (the judge)
-        # was never shown the agent's own plan: nothing in its brief said an item was still open.
+        # The done gate passed with 5 of 6 items open, because the one thing that decides "done" (the judge) was
+        # never shown the agent's own plan: nothing in its brief said an item was still open.
         self.gates_on()
         Endpoint.judge_seen.clear()
         self.replies(call('define_done',dict(check='the file exists')),
@@ -541,9 +541,51 @@ class Resident(unittest.TestCase):
         events=[e for e in self.cmd('events') if e['kind']=='finish_open_todo']
         self.assertTrue(events,'the finish with an item still open is on the record')
 
+    def test_a_refused_finish_leaves_no_open_todo_event(self):
+        # #344 item 1: the event was written when finish was called, before the judge ruled, so a finish it refused
+        # was on the record as a finish with items open that never happened. It belongs after the verdict, and
+        # carries that verdict.
+        self.gates_on()
+        self.verdicts(dict(verdict='not_yet',reason='check it first'),dict(verdict='met',reason='it is checked'))
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('todo',dict(items=[dict(text='write it',state='done'),dict(text='check it',state='pending')])),
+                     call('verify',dict(evidence='the file is there')),
+                     call('finish',dict(summary='Wrote the file.',open='check it: left for the human')),   # refused
+                     call('verify',dict(evidence='the file is there')),
+                     call('finish',dict(summary='Wrote the file.',open='check it: left for the human')))   # met
+        self.assertEqual(self.cmd('once',['--goal','Write the file.'])['state'],'completed')
+        events=[e for e in self.cmd('events') if e['kind']=='finish_open_todo']
+        self.assertEqual(len(events),1,'only the finish the judge accepted is on the record, not the refused one')
+        self.assertEqual(events[0]['data']['left'],['check it'])
+        self.assertTrue(events[0]['data']['verdict'].startswith('met'),events[0]['data'])
+
+    def test_a_finish_deferred_by_a_waiting_message_leaves_no_open_todo_event(self):
+        # A second way a finish does not happen: _finish defers the completion while human steering waits in the
+        # inbox (completion_deferred). The event was written where finish was called, so a deferred finish was on
+        # the record with items open while the goal carried on working. It belongs in _finish, after state='completed':
+        # one event for the finish that happened, none for the one that did not.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Write the file.')
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'Check the edge case too.','steer'))
+            rt._finish(gid,'Wrote the file.','check it: left for the human',['check it'],'met: it is checked')
+            events=rt.store.events()
+            self.assertNotEqual(rt.store.goal(gid)['state'],'completed','a waiting steer defers the completion')
+            self.assertTrue(any(e['kind']=='completion_deferred' for e in events))
+            self.assertFalse([e for e in events if e['kind']=='finish_open_todo'],
+                             'a deferred finish is not on the record with items open')
+            rt.store.db.execute("UPDATE inbox SET consumed=1 WHERE goal=?",(gid,))
+            rt._finish(gid,'Wrote the file.','check it: left for the human',['check it'],'met: it is checked')
+            self.assertEqual(rt.store.goal(gid)['state'],'completed')
+            events=[e for e in rt.store.events() if e['kind']=='finish_open_todo']
+            self.assertEqual(len(events),1,'the finish that completed is on the record once')
+            self.assertEqual(events[0]['data']['left'],['check it'])
+            self.assertTrue(events[0]['data']['verdict'].startswith('met'))
+        finally:rt.mail.close();rt.store.close()
+
     def test_the_todo_nudge_fires_after_a_verify_or_a_compaction_with_items_open(self):
-        # #322 point 2: the stale nudge waits TODO_STALE steps, so a short goal can verify and finish with every
-        # item still open and never be prompted; a compaction loses the list the same way.
+        # The stale nudge waits TODO_STALE steps, so a short goal can verify and finish with every item still open
+        # and never be prompted; a compaction loses the list the same way. This is the nudge at those two moments.
         rt=Runtime(self.home)
         try:
             gid=rt.store.enqueue('Make x.')
@@ -557,6 +599,23 @@ class Resident(unittest.TestCase):
             self.assertNotIn('still open',rt.context_message(gid)['content'],'all done: nothing to nudge')
             rt._todo(gid,[dict(text='one',state='in_progress')],[])
             self.assertNotIn('still open',rt.context_message(gid)['content'])
+            rt.store.event('compacted',dict(before=10,after=2),gid)
+            self.assertIn('compacted after your last todo update',rt.context_message(gid)['content'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_todo_nudge_after_a_verify_fires_once_not_on_every_turn(self):
+        # #344 item 3: the nudge repeated on every turn until the next todo update, which read as a stuck runtime
+        # rather than a reminder. It belongs to the turn right after the verify or compaction it names.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Make x.')
+            rt._todo(gid,[dict(text='one',state='in_progress'),dict(text='two',state='pending')],[])
+            rt.store.event('verified',dict(evidence='the file is there'),gid)
+            self.assertIn('verified after your last todo update',rt.context_message(gid)['content'])
+            rt.store.event('assistant',dict(role='assistant',content='Checked it.'),gid)
+            self.assertNotIn('still open',rt.context_message(gid)['content'],
+                             'after the turn that saw it, not on every turn until the next todo update')
+            # a later event of its own is a new moment, and gets its one turn too
             rt.store.event('compacted',dict(before=10,after=2),gid)
             self.assertIn('compacted after your last todo update',rt.context_message(gid)['content'])
         finally:rt.mail.close();rt.store.close()

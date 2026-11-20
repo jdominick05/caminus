@@ -32,6 +32,8 @@ import re
 import subprocess
 import time
 
+from .store import todo_mark
+
 GATE_TIMEOUT = 600
 JUDGE_LIMIT = 3
 WAIT_LIMIT = 6
@@ -182,10 +184,9 @@ def evidence(rt, gid, summary, open_work, images=None, sees=False):
     # work the agent itself says is not done.
     todo = rt.store.todo(gid)
     if todo['items']:
-        mark = {'done': '[x]', 'in_progress': '[>]', 'pending': '[ ]'}
         left = [it for it in todo['items'] if it['state'] != 'done']
         parts.append("The agent's own plan (its todo list; it writes and updates this):\n"
-                     + '\n'.join('- ' + mark.get(it['state'], '[ ]') + ' ' + it['text'] for it in todo['items'])
+                     + '\n'.join('- ' + todo_mark(it['state']) + ' ' + it['text'] for it in todo['items'])
                      + (f'\n{len(left)} still open' if left else '\nall done'))
         if todo['blockers']:
             parts.append('WHAT THE AGENT SAYS BLOCKS IT NOW:\n' + '\n'.join('- ' + str(b)[:300] for b in todo['blockers']))
