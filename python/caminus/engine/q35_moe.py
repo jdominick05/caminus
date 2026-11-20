@@ -107,31 +107,18 @@ def block_kinds(F):
     return [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(trunk_blocks(F))]
 
 
-def yarn_table(theta_scale, n_rot, factor, beta_fast=32.0, beta_slow=1.0, n_ctx=None):
-    """YaRN's per-dim frequency factors and magnitude scale (llama.cpp's rope_yarn, yarn_find_correction_range).
+def yarn_table(theta_scale, n_rot, factor, n_ctx=None):
+    """The rope op's per-dim multipliers and magnitude scale, from caminus.rope's one YaRN recipe.
 
-    theta_scale is the rope op's base (freq_base ** (-2 / n_rot)), so dim pair j's frequency is theta_scale ** j. The
-    factor ramps between extrapolate (the short wavelengths keep their frequency) and interpolate (the long ones are
-    stretched by `factor`), with the crossover found by the dim whose wavelength is beta_fast / beta_slow tokens:
-
-        ramp(j) = clamp((hi - j) / (hi - lo), 0, 1)     1: extrapolate, 0: interpolate
-        m(j)    = (1 - ramp) / factor + ramp
-
-    Returns (m fp32 [n_rot / 2], mscale): the op multiplies its angle by m(j) and cos / sin by mscale.
+    `rope.yarn_freqs` gives each pair's frequency (the angle at position p is p * freq_j); this op computes
+    theta_scale**j = base**(-2j/n_rot) itself, so the multiplier it multiplies in is freq_j divided by that. Returns
+    (m fp32 [n_rot / 2], mscale): the op multiplies its angle by m(j) and cos / sin by mscale.
     """
-    half = n_rot // 2
-    base = theta_scale ** (-n_rot / 2.0)   # (the op's theta_scale ** j is base ** (-2j / n_rot): invert it back)
-
-    def inv_dim(beta):
-        return (n_rot * math.log(n_ctx / (beta * 2 * math.pi))) / (2 * math.log(base))
-    lo = max(0.0, math.floor(inv_dim(beta_fast)))
-    hi = min(float(half - 1), math.ceil(inv_dim(beta_slow)))
-    if lo >= hi: hi = lo + 0.001
-    m = np.empty(half, dtype=np.float32)
-    for j in range(half):
-        ramp = 0.0 if j >= hi else 1.0 if j <= lo else (hi - j) / (hi - lo)
-        m[j] = (1.0 - ramp) / factor + ramp
-    return m, 0.1 * math.log(factor) + 1.0
+    from ..rope import yarn_freqs, mscale
+    base = theta_scale ** (-n_rot / 2.0)   # (theta_scale = base ** (-2 / n_rot))
+    j = np.arange(n_rot // 2, dtype=np.float64)
+    inv = base ** (-2.0 * j / n_rot)
+    return (yarn_freqs(n_rot, base, factor, n_ctx) / inv).astype(np.float32), mscale(factor)
 
 
 def _shapes(F):
