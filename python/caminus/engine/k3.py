@@ -304,7 +304,7 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_1RT
 # here with the tiles that run them (a pair outside this set is refused at build)
 OWN_Q35MOE_1RT = ('Q2_0',)
 OWN_Q35MOE_FMT = {'Q2_0': 9}   # (= kernels/k3_own_ops.h OWN_Q2_0: the grouped expert tile's Seg.work)
-OWN_BLOCK['Q2_0'] = 18   # (64 values per block: fp16 d + 16 bytes of 2-bit codes, kernels/own_quant_q2_0.h)
+OWN_BLOCK['Q2_0'] = 72   # (64 values per block: fp16 d + 16 code bytes = 18, so 4 blocks = 72 per 256 weights)
 MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt{g}') for f in OWN_Q35MOE_1RT for g in ('', '_gu')} |
                                  {('OWN_MV16', 'Q8_0'), ('OWN_ADD_RMS16', '-'), ('OWN_SWIGLU16', '-'),
                                   ('F32_MV', 'F32'), ('OWN_EMB', 'BF16')}) for m in Q35MOE_MODULES})
@@ -314,8 +314,8 @@ MODULE_CAPS.update({m: frozenset({('OWN_MV', f'{f}/a16_1rt') for f in OWN_Q35T_1
 MODULE_CAPS.update({m: MODULE_CAPS[m] | {('OWN_MV', f'{f}/a16_1rt') for f in OWN_Q35R_1RT} for m in Q35R_MODULES})
 Q35S_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_MV16, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, OP_OWN_EMB, OP_F32_MV, OP_GDN_CONV, OP_GDN_L2,
             OP_GDN_GATES, OP_GDN_STEP, OP_GDN_SAVE, OP_GDN_NORM16, OP_QK_NR, OP_KV_APPEND, OP_ATTN_PART, OP_ATTN_COMB, OP_GATE_MUL16}
-# (the qwen35moe module: the same tape plus OP_ROUTER, and no OP_OWN_EMB: the embedding row is read on the host, so no
-# 0.95 GiB of BF16 rows sits on the card)
+# (the qwen35moe module: the same tape plus OP_ROUTER and OP_OWN_EMB in its BF16 form (own_op_emb_bf16): this line
+# uploads the whole token_embd table, ~0.95 GiB, which its VRAM projection has to count)
 Q35MOE_OPS = Q35S_OPS | {OP_ROUTER}   # (OP_OWN_EMB: the BF16 form, kernels/k3_q35_ops.h own_op_emb_bf16)
 # (decode attention: the split pair OP_ATTN_PART / COMB, Q35_SPLIT_MODULES; OP_ATTN_DEC is the drafter module's only, Q35M_OPS)
 # (the verify modules: the T-token forms and not the fused gate | up, which no verify tape runs and no gate has run there)
@@ -987,7 +987,10 @@ class Engine:
         arrives in Seg.W, one fp32; wts is k + 1 wide. T = 1 (the op's slot stride is the router's k)."""
         if self.module not in Q35MOE_MODULES: raise ValueError(f'router_shexp: {self.module} is not a qwen35moe module')
         nt = self.T
-        E = logits.numel() // nt; assert E <= 1024 and k <= 64 and ids.numel() >= nt * k and wts.numel() >= nt * (k + 1)
+        E = logits.numel() // nt
+        if E > ROUTER_NE.get(self.module, 1024):   # (the op ranks in local memory: more experts would write past its words)
+            raise ValueError(f'router_shexp: {E} experts on {self.module} (its router ranks {ROUTER_NE.get(self.module, 1024)})')
+        assert E <= 1024 and k <= 64 and ids.numel() >= nt * k and wts.numel() >= nt * (k + 1)
         self.keep += [logits, ids, wts, shared_logit]
         self.segs.append(Seg(OP_ROUTER, nt, dep, 0, shared_logit.data_ptr(), wts.data_ptr(), logits.data_ptr(), None,
                              ids.data_ptr(), clamp, E, 0, 1, 0, team, k, 0))

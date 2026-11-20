@@ -1,9 +1,10 @@
-"""The dense qwen35 line (Qwen3.8-27B finetunes: Swift 1.5 Q4_K_M first) decoding on one card on Caminus's own code from
-the GGUF file to the logits: our reader (caminus.ggufio), our weight layout (engine/own_layout.py: Q6_K planes), our
-matvec tiles on fp16 activations (the one-round-trip tiles for Q4_K / Q6_K, the general rows tiles for Q8_0 / Q5_K), the
-embedding row decoded on the device, and the K3 engine's own Gated DeltaNet and gated-attention ops built without
-llama.cpp's headers (kernels/k3_q35_ops.h; module k3_q35_swift). One token per pass (T = 1). The test oracle is
-caminus.ref_q35 (float64, the same reading of the model).
+"""The qwen35moe line (Qwen3.6-35B-A3B: 40 blocks, 256 routed experts top-8 plus a gated shared expert) decoding on one
+card on Caminus's own code from the GGUF file to the logits: our reader (caminus.ggufio), our matvec tiles on fp16
+activations (the grouped one-round-trip Q2_0 expert tile, the general rows tile for the trunk's Q8_0), the BF16 embedding
+table decoded on the device, and the K3 engine's own Gated DeltaNet and gated-attention ops built without llama.cpp's
+headers (kernels/k3_q35_ops.h; module k3_q35_moe). One token per pass (T = 1). The correctness baseline is the ggml
+engine (caminus.engine.qwen35_one) on the same file: one token's argmax and top-10 agree, twelve greedy tokens are
+identical.
 
 Per block (fp32 residual x; h = rms(x) * norm, h16 = fp16(h): the matvecs' input):
   Gated DeltaNet (three blocks of four):
@@ -15,7 +16,13 @@ Per block (fp32 residual x; h = rms(x) * norm, h16 = fp16(h): the matvecs' input
     k, v = W h16;  k: per-head rms * k_norm + RoPE (the first n_rot dims);  KV append (f16 cache, [K | V] per position)
     q rows per head [q | gate] = W_q h16;  q: rms * q_norm + RoPE;  attention over 0 .. pos (6 query heads per kv head)
     y16 = fp16(att * sigmoid(gate));  x += W_o y16
-  h16 = fp16(rms(x) * post_attention_norm);  a16 = fp16(silu(W_gate h16) * (W_up h16));  x += W_down a16
+  the mixture of experts (every block):
+    logits = W_router h;  the top 8 experts (softmax over all 256, renormalised), and the shared expert's weight
+    = sigmoid(W_shared_gate h) written into slot 8 of the 9-slot add
+    routed: g = W_gate[e] h16, u = W_up[e] h16 (grouped by the router's ids), a16 = fp16(silu(g) * u),
+            x[slot e] = W_down[e] a16   (each expert its own input)
+    shared: g, u, a16, then x[slot 8] = W_shared_down a16
+    h16 = fp16(rms(x) * post_attention_norm) reads all 9 slots, weighted by their router weights
 Then rms(x) * output_norm -> fp16 -> the head -> logits (fp32 [vocab]).
 
 The file's blocks past the trunk (block_count less nextn_predict_layers: a multi-token-prediction block) are not read.
@@ -54,16 +61,16 @@ RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV 
 def kv_module(F, module=None, q8=False):
     """Resolve staged cache-specialized objects separately from weight-format selection."""
     if type(q8) is not bool:
-        raise ValueError('Dense35Own: q8 must be a bool')
+        raise ValueError('Moe35Own: q8 must be a bool')
     selected = module or module_of(F)
     if q8:
         if selected in k3.Q35_KV_Q8_MODULES:
             return selected
         if selected not in k3.Q35_KV_Q8_OF:
-            raise ValueError(f'Dense35Own: no Q8 KV specialization for {selected}')
+            raise ValueError(f'Moe35Own: no Q8 KV specialization for {selected}')
         return k3.Q35_KV_Q8_OF[selected]
     if selected in k3.Q35_KV_Q8_MODULES:
-        raise ValueError(f'Dense35Own: {selected} requires q8=True')
+        raise ValueError(f'Moe35Own: {selected} requires q8=True')
     return selected
 
 
@@ -125,12 +132,13 @@ def attn_part_elems(T, heads, cells):
 
 def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
     """bytes the engine allocates on its card: every trunk tensor (the embedding and the head too), the selected KV cache of
-    every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Dense35Own's spec_T), the decode
+    every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Moe35Own's spec_T), the decode
     tape's split attention records (attn_part_elems)"""
     c = _shapes(F); nl = c['nl']
     mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
     w = sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp))
-    w += sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp) and t.type == 'BF16')   # (widened to F32 on load)
+    w += sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp) and t.type == 'BF16'
+             and t.name != 'token_embd.weight')   # (token_embd goes up as BF16: never widened)   # (widened to F32 on load)
     w += IQ_PAD * sum(1 for t in F.tensors if not t.name.startswith(mtp) and (t.type in IQ_REC or t.type in ('Q2_K', 'IQ1_M')))   # (the record layout's tail)
     w += sum(t.n_bytes // 56 * 10 for t in F.tensors if not t.name.startswith(mtp) and t.type == 'IQ1_M')   # (its records: 66 bytes per 56-byte block)
     n_attn = sum(1 for g in block_kinds(F) if not g)
@@ -190,7 +198,7 @@ class Moe35Own:
         self.module = kv_module(F, module, q8)
         self.q8 = q8
         if q8 and (self.hd != 256 or self.nh != 6 * self.nkv):
-            raise ValueError('Dense35Own: staged Q8 kernels require head_dim 256 and six query heads per KV head')
+            raise ValueError('Moe35Own: staged Q8 kernels require head_dim 256 and six query heads per KV head')
         if q8:
             self.kv_format_id = 'q8_0-v1:qk-hadamard256:v-hadamard64-v1'
         self.tcap = False
@@ -207,10 +215,10 @@ class Moe35Own:
         # VRAM, checked against the card's cap before a byte is read (vram_extra_mib: what the caller adds right after)
         self.vram_mib = _projection_bytes(F, self.max_ctx, self.spec_T, q8) / 2 ** 20 + 256
         # (CAMINUS_H2D: how the weights reach the card, engine/upload.py; peer is refused on one card)
-        self.h2d = upload.Uploader([self.dev], upload.mode_of(), upload.UploadLog.from_env(), what=f'Dense35Own {os.path.basename(path)}')
+        self.h2d = upload.Uploader([self.dev], upload.mode_of(), upload.UploadLog.from_env(), what=f'Moe35Own {os.path.basename(path)}')
         if vram_check:
             capacity.check([self.dev], [self.vram_mib + float(vram_extra_mib)],
-                           f'Dense35Own {os.path.basename(path)} (max_ctx {self.max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
+                           f'Moe35Own {os.path.basename(path)} (max_ctx {self.max_ctx}: {self.vram_mib:.0f} MiB + {float(vram_extra_mib):.0f} MiB after it)')
         torch.cuda.set_device(self.dev)
         if self.per_wgp == 'card': self.per_wgp = card_per_wgp()
         self.pos_host = 0
@@ -227,7 +235,7 @@ class Moe35Own:
         self.qsa_from = None
         fl = [int(l) for l in feature_layers]
         if any(not 1 <= l < self.nl_build for l in fl) or len(set(fl)) != len(fl):
-            raise ValueError(f'Dense35Own: feature_layers {fl} (distinct, 1 .. {self.nl_build - 1})')
+            raise ValueError(f'Moe35Own: feature_layers {fl} (distinct, 1 .. {self.nl_build - 1})')
         self.feature_layers, self.feature_card, self.features, self.ple_layers = fl, 0, None, None
         self.gdn_keys = self.moe_blocks = 0; self.vocab_share = 1.0
         self._during = None
@@ -269,7 +277,7 @@ class Moe35Own:
         never the file's mapping"""
         t = self.F.T[name]; K = int(t.shape[0]); R, _ = t.rows()
         if (rows is not None and R != rows) or (cols is not None and K != cols):
-            raise ValueError(f'Dense35Own: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
+            raise ValueError(f'Moe35Own: {name} is [{R}, {K}], the tape needs [{rows}, {cols}]')
         fmt, b = self._w_host(name)
         return dict(name=name, fmt=fmt, rows=R, K=K, w=self.h2d.up(b, name, 0, 'mat'))
 
@@ -281,7 +289,7 @@ class Moe35Own:
             f = b.view(np.float32) if t.type == 'F32' else (b.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
             return 'F32', f.reshape(R, K).copy()
         ok = self.one_rt + ('Q8_0',)
-        if t.type not in ok: raise ValueError(f'Dense35Own: {name} is {t.type} ({ok} on module {self.module}, or F32 / BF16 alpha / beta)')
+        if t.type not in ok: raise ValueError(f'Moe35Own: {name} is {t.type} ({ok} on module {self.module}, or F32 / BF16 alpha / beta)')
         if t.type == 'Q6_K': b = q6k_planes(b, R, K)
         elif t.type in IQ_REC: b = iq_records(b, R, K, t.type)
         elif t.type == 'Q2_K': b = q2k_records(b, R, K)
@@ -290,7 +298,7 @@ class Moe35Own:
 
     def _f32(self, name, n):
         t = self.F.T[name]
-        if t.type != 'F32' or t.n_values != n: raise ValueError(f'Dense35Own: {name} is {t.type} {list(t.shape)}, the tape needs F32 [{n}]')
+        if t.type != 'F32' or t.n_values != n: raise ValueError(f'Moe35Own: {name} is {t.type} {list(t.shape)}, the tape needs F32 [{n}]')
         return self.h2d.up(t.pread(0, t.n_bytes).view(np.float32), name, 0, 'vec')
 
     def _f32m(self, name, rows, cols):
@@ -351,7 +359,7 @@ class Moe35Own:
 
     def _load_logged(self):
         """_load in the upload log's frame (engine/upload.py; Dense35TP._load_logged)"""
-        self.h2d.begin('Dense35Own', self.path)
+        self.h2d.begin('Moe35Own', self.path)
         try: self._load()
         except BaseException as e:
             self.h2d.failed(e); raise
@@ -526,7 +534,7 @@ class Moe35Own:
             raise k3.ContextBoundsError(f'{what}: position {i0} but {len(tokens)} tokens')
 
     def _stage(self, tok, i0):
-        if not 0 <= tok < self.vocab: raise ValueError(f'Dense35Own: token {tok} outside the vocabulary ({self.vocab})')
+        if not 0 <= tok < self.vocab: raise ValueError(f'Moe35Own: token {tok} outside the vocabulary ({self.vocab})')
         self.hstage[16] = tok; self.hstage[17] = int(i0)
 
     def step_token(self, tokens, i):
@@ -545,7 +553,7 @@ class Moe35Own:
     def launch_tokens(self, tokens, i0, commit):
         """verify()'s pass launched without waiting or reading anything back (the device sampler queues behind it); then
         finish_pass(i0, commit)"""
-        self._check(tokens, i0, commit, 'Dense35Own pass')
+        self._check(tokens, i0, commit, 'Moe35Own pass')
         self._stage(int(tokens[i0]), i0); self._tok = False; self.fresh = False
         self._pass_launch(i0, commit)
 
@@ -566,11 +574,11 @@ class Moe35Own:
         raise RuntimeError(f'k3 qwen35: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
 
     def _run(self, tokens, i0, commit, tok):
-        self._check(tokens, i0, commit, 'Dense35Own pass')
+        self._check(tokens, i0, commit, 'Moe35Own pass')
         return self._run_tok(int(tokens[i0]), i0, commit, tok)
 
     def _run_tok(self, token, i0, commit, tok, trace=None):
-        self._check(None, i0, commit, 'Dense35Own pass')
+        self._check(None, i0, commit, 'Moe35Own pass')
         self._stage(token, i0); self.fresh = False; self._tok = tok
         for attempt in range(self.max_retries + 1):
             bad = self._pass(i0, commit if attempt == 0 else 0, trace)   # (a bailed pass committed already: its rerun commits nothing)
@@ -590,8 +598,8 @@ class Moe35Own:
 
     def _pass_launch(self, i0, commit, trace=None):
         """the launch from the staged block (and the logits' argmax read back when self._tok)"""
-        self._check(None, i0, commit, 'Dense35Own._pass')
-        if int(self.hstage[17]) != i0: raise k3.ContextBoundsError(f'Dense35Own._pass: staged position {int(self.hstage[17])} != {i0}')
+        self._check(None, i0, commit, 'Moe35Own._pass')
+        if int(self.hstage[17]) != i0: raise k3.ContextBoundsError(f'Moe35Own._pass: staged position {int(self.hstage[17])} != {i0}')
         self.token += 1; self.last_T = 1
         self.hstage[1] = int(commit)
         with torch.cuda.device(self.dev):
@@ -659,7 +667,7 @@ class Moe35Own:
         self.broken, self._broken_error = why, error_cls   # sticky even if diagnostics fail
         rep = why
         if issubclass(error_cls, k3.InvalidKVEncoding):
-            raise error_cls(f'Dense35Own: {rep}')
+            raise error_cls(f'Moe35Own: {rep}')
         try:
             now = self.weight_sums()
             changed = [n for n, v in now.items() if self.wsum0.get(n) != v]
@@ -673,7 +681,7 @@ class Moe35Own:
         except Exception as e:                       # noqa: BLE001 - the report must not hide the failure
             rep += f'; the weight check failed ({type(e).__name__}: {e})'
         self.broken = rep
-        raise error_cls(f'Dense35Own: {rep}')
+        raise error_cls(f'Moe35Own: {rep}')
 
     def selfcheck(self, toks=(248044, 9707, 11, 1879, 374)):
         """at startup: a few fixed tokens through the decode tape on fresh states (finite logits), then reset(); raises

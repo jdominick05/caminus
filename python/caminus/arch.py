@@ -1008,6 +1008,19 @@ class Q35MoE(OneCard):
         m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
         return m, KPassOnly(m), None, None
 
+    def auto_need(self, opt, slots, cards=None):
+        """max_ctx auto's projection: Moe35Own's own statics, not the ggml engine's. The inherited OneCard.auto_need builds
+        Qwen35One's shape, which reads the embedding row on the host (this engine uploads the whole BF16 table) and counts
+        a q8 cache (this one is F16 only): 2.0 GiB low at 4096 and 4.3 GiB at 262,144, so the default serve could place a
+        context the own build then refuses. No batched prefill (KPassOnly), so there are no prefill buffers to count."""
+        self.kv_check(opt)
+        from .engine.q35_moe import Moe35Own
+        path = opt['model']
+        n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
+        slot = (Moe35Own.recurrent_mib(path) + Moe35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: states + tail rows)
+        need = lambda c: [Moe35Own.projection_mib(path, c) + (slots + 2) * slot]
+        return n_ctx, [0], slot, need
+
 
 class Dense35TP(Arch):
     """the dense qwen35 line on Caminus's own code on TWO cards (caminus serve --cards 2 for swift-1.5 / thinkingcap): Dense35TP
