@@ -172,6 +172,9 @@ Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MO
 # head, ATTN_SS 32, the dense weight families), none of which hold here (eight heads, its own tape and ops whitelist).
 Q35MOE_KV_Q8_OF = {'k3_q35_moe': 'k3_q35_moe_kvq8'}
 Q35MOE_KV_Q8_MODULES = tuple(Q35MOE_KV_Q8_OF.values())
+# its K3_TRACE build (per-segment timestamps; measurement only: benchmarks/q3moe_trace.py --engine q35moe)
+Q35MOE_TRACE_MODULES = ('k3_q35_moe_kvq8_trace',)
+Q35MOE_KV_Q8_MODULES += Q35MOE_TRACE_MODULES
 Q35MOE_MODULES += Q35MOE_KV_Q8_MODULES
 # Every runtime check that asks "does this module keep a Q8 KV cache" uses this: the dense table above stays the dense
 # table (its own tests pin its members and their geometry), and the MoE object joins here.
@@ -201,6 +204,7 @@ ATTN_SS_OF = {m: ATTN_SS for m in ATTN_SPLIT_MODULES}
 # keeps ATTN_SS and its .text.
 ATTN_SS_OF['k3_q35_moe'] = 128
 ATTN_SS_OF['k3_q35_moe_kvq8'] = 128
+ATTN_SS_OF['k3_q35_moe_kvq8_trace'] = 128
 # GGUF block formats (Seg.work of the GG ops), = the enum in kernels/k3_gguf_ops.h. 4-9 (the GSQ-RCO Coder's) are
 # instantiated only in the k3_gguf_gsq modules, per op (the REAP-308 module's dispatch would decode them as Q8_0): each
 # module's capability set below lists its pairs, and Engine.build / run refuse a tape outside it
