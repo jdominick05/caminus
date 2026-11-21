@@ -1005,7 +1005,8 @@ class Q35MoE(OneCard):
         self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_moe import Moe35Own
         from .prefill.kpass import KPassOnly
-        m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']))
+        mode = self.rope_mode(opt)
+        m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']), yarn=None if mode is None else mode.factor)
         return m, KPassOnly(m), None, None
 
     def auto_need(self, opt, slots, cards=None):
@@ -1016,10 +1017,41 @@ class Q35MoE(OneCard):
         self.kv_check(opt)
         from .engine.q35_moe import Moe35Own
         path = opt['model']
-        n_ctx = int(meta(path)['hp'].get('context_length') or 262144)
+        mode = self.rope_mode(opt)   # (the long-context mode raises the ceiling: YaRN x2 serves 524,288, x4 1,048,576)
+        n_ctx = mode.max_ctx if mode is not None else int(meta(path)['hp'].get('context_length') or 262144)
         slot = (Moe35Own.recurrent_mib(path) + Moe35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: states + tail rows)
         need = lambda c: [Moe35Own.projection_mib(path, c) + (slots + 2) * slot]
         return n_ctx, [0], slot, need
+
+    def _yarn(self, n=None):
+        """the smallest factor the card names that covers n positions. x2 = 524,288 is the one that fits one XTX (22.5 GiB
+        projected with F16 KV, ~17.5 GiB at 8-bit); x4 = 1,048,576 needs 33 GiB, so it is for a bigger card"""
+        from .rope import YarnMode
+        modes = [YarnMode(f, self.rope_facts.native_ctx) for f in self.rope_facts.card_factors]
+        if n is None: return modes[0]
+        for m in modes:
+            if m.max_ctx >= int(n): return m
+        return modes[-1]
+
+    def rope_mode(self, opt):
+        # (max_ctx is still the string 'auto' when recipe() runs, before placement resolves it: _explicit_ctx reads it
+        #  as None, and None picks the smallest factor, which is what an auto serve extends to)
+        return self._yarn(_explicit_ctx(opt)) if opt.get('rope') == 'yarn' else None
+
+    def long_mode(self, opt):
+        """an explicit max_ctx past the trained 262,144 (or --long-context): the smallest YaRN factor that covers it. The rope op reads the
+        per-dim table from Seg.aux (kernels/k3_q35_ops.h, K3_Q35_YARN), so the mode is a 32-float table and a scale on
+        cos / sin — not a second rope, and no cost per position"""
+        n, gguf_ctx = _explicit_ctx(opt), int(meta(opt['model'])['hp'].get('context_length') or self.rope_facts.gguf_ctx)
+        if not (opt.get('long_context') or (n is not None and n > gguf_ctx)):
+            opt.pop('rope', None)
+            return None
+        mode = self._yarn(n)
+        if n is not None and n > mode.max_ctx:
+            raise ValueError(f'--max-ctx {n:,}: {self.alias} serves at most {mode.max_ctx:,} positions (its long-context '
+                             f'mode, YaRN x{mode.factor:g} from {mode.n_ctx_orig:,})')
+        opt['long_context'], opt['rope'] = True, 'yarn'
+        return f'YaRN x{mode.factor:g}'
 
 
 class Dense35TP(Arch):
