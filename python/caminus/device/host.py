@@ -165,19 +165,8 @@ def link_lowered(lk):
 def hip_order(root='/'):
     """{render minor: HIP device index} with HIP_VISIBLE_DEVICES unset: HIP numbers the KFD GPU nodes (simd_count > 0) by
     node id, an iGPU included"""
-    nodes = []
-    for p in glob.glob(os.path.join(root, 'sys', 'class', 'kfd', 'kfd', 'topology', 'nodes', '*', 'properties')):
-        n = os.path.basename(os.path.dirname(p))
-        if not n.isdigit():
-            continue
-        kv = {}
-        for line in (_read(p) or '').splitlines():
-            w = line.split()
-            if len(w) == 2 and w[1].lstrip('-').isdigit():
-                kv[w[0]] = int(w[1])
-        if kv.get('simd_count', 0) > 0:
-            nodes.append((int(n), kv.get('drm_render_minor')))
-    return {minor: i for i, (_, minor) in enumerate(sorted(nodes)) if minor is not None}
+    nodes = [(n['node'], n['minor']) for n in machine.kfd_nodes(root) if n['simd_count'] > 0]
+    return {minor: i for i, (_, minor) in enumerate(nodes) if minor is not None}
 
 
 def gfx_name(v):
@@ -297,13 +286,7 @@ def gpu_users(root='/'):
     (port None)"""
     from .. import models
     kfd = os.path.join(root, 'sys', 'class', 'kfd', 'kfd')
-    minor_of = {}
-    for p in glob.glob(os.path.join(kfd, 'topology', 'nodes', '*', 'gpu_id')):
-        gid = _int(_read(p))
-        props = _read(os.path.join(os.path.dirname(p), 'properties')) or ''
-        m = re.search(r'^drm_render_minor (\d+)$', props, re.M)
-        if gid and m:
-            minor_of[gid] = int(m.group(1))
+    minor_of = {n['gpu_id']: n['minor'] for n in machine.kfd_nodes(root) if n['gpu_id'] and n['minor'] is not None}
     out = {}
     for d in glob.glob(os.path.join(kfd, 'proc', '*')):
         pid = os.path.basename(d)
@@ -325,6 +308,17 @@ def gpu_users(root='/'):
             minor = minor_of.get(_int(v.rsplit('_', 1)[1]))
             if minor is not None and mib >= 1:
                 out.setdefault(minor, []).append((int(pid), label, mib, port))
+    return out
+
+
+def holder_procs(root='/'):
+    """{pid: label} of the processes holding VRAM on any GPU now, one entry per process (gpu_users named by card:
+    doctor's process line and the wizard's holder note reuse it; a Caminus server is named by its model and port, any
+    other process by its name)"""
+    out = {}
+    for entries in gpu_users(root).values():
+        for pid, label, _, _ in entries:
+            out[pid] = label
     return out
 
 

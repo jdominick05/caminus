@@ -4,7 +4,7 @@
 
 Six steps. The wizard only orchestrates: each step is a caminus command, printed (`$ caminus ...`) before it runs, so
 nothing here is something the CLI can't do:
-  1. check the machine: caminus doctor, then caminus doctor --gpu unless a process holds a GPU context already
+  1. check the machine: caminus doctor, then caminus doctor --gpu unless a process holds VRAM already
   2. choose a model: the catalog, with what runs on these cards (caminus.models.SETUPS) and the model to start with on
      this setup preselected (while a server runs: its model); the cards, drafter and context caminus start will use, on
      one line. A running server is kept unless you switch to another model (asked here, before any download: the
@@ -33,7 +33,7 @@ import time
 
 from .. import config, models
 from ..device import host
-from . import doctor, download, manage, qwen_code
+from . import download, manage, qwen_code
 
 STEPS = 6
 REPORT = 'https://github.com/jdominick05/caminus/issues/new?template=hardware_report.yml'
@@ -174,11 +174,11 @@ class Wizard:
         return out
 
     def gpu_holders(self):
-        """what holds a GPU context now (other processes, running Caminus servers), as text; '' when nothing"""
-        ps = doctor.kfd_procs(manage.ROOT) or []
+        """what holds the cards now (other processes, running Caminus servers), as text; '' when nothing"""
+        ps = host.holder_procs(manage.ROOT)
         servers = [s['name'] for s in manage.all_servers() if manage.alive(s.get('guard_pid'))]
         servers += [o['name'] for o in manage.unmanaged_servers()]
-        parts = ([f'{len(ps)} process(es) hold a GPU context'] if ps else []) + ([f"server(s) {', '.join(servers)}"] if servers else [])
+        parts = ([f'{len(ps)} process(es) hold VRAM'] if ps else []) + ([f"server(s) {', '.join(servers)}"] if servers else [])
         return '; '.join(parts)
 
     def running(self):
