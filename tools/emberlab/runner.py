@@ -52,15 +52,24 @@ class Arm:
         self.runtime_sha = None
 
     def describe(self):
-        return dict(name=self.name, commit=self.commit, dirty=self.dirty, config=self.config, env=sorted(self.env),
-                    runtime_sha=self.runtime_sha)
+        """One arm in the shape both plan.json and an `--arms` file read: everything that makes it this arm.
+
+        `checkout` and the `config`/`env` dicts are here because `load_arms` must be able to run from a file this
+        writes, and the commit and dirty flag are here because a run id is task.brain.arm.rN and carries no record
+        id, so a folder whose checkout moved would reuse the previous rows by id.
+        """
+        return dict(name=self.name, checkout=str(self.checkout), commit=self.commit, dirty=self.dirty,
+                    config=dict(self.config), env=dict(self.env), runtime_sha=self.runtime_sha)
 
 
 def load_arms(specs, arms_file):
     """--arm NAME[=CHECKOUT] (repeatable) and/or --arms FILE ({"NAME": {"checkout", "config", "env"}})"""
     arms = []
     if arms_file:
-        for name, v in json.loads(Path(arms_file).read_text()).items():
+        spec = json.loads(Path(arms_file).read_text())
+        # `proposal.py` writes {"arms": ..., "plan": ...}: the plan keeps a folder to one experiment, and the arms
+        # are `describe()` dicts, so this file and plan.json speak one shape. A hand-written --arms file is the map.
+        for name, v in (spec['arms'] if isinstance(spec.get('arms'), dict) else spec).items():
             arms.append(Arm(name, v.get('checkout') or REPO, v.get('config'), v.get('env')))
     for s in specs or []:
         name, _, path = s.partition('=')

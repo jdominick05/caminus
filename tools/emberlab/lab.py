@@ -8,6 +8,10 @@ Batch (measure):
              [--host local|agent] [--only KEY,...] [--jobs N] [--timeout S]
   lab.py report DIR [--md FILE]                one table per brain x arm, and per task
   lab.py compare DIR --base A --arm B          the A/B verdict: better only if better across the board
+  lab.py propose --sim-home HOME --record ID --brain BRAIN [--config JSON | --arm-checkout DIR] ...
+                                               a `proposed` SIM record becomes two arms; the runs close it (Haiku
+                                               through the owner's relay is the tool A/B brain; billed runs need
+                                               --approve-paid; see proposal.py)
 
 Sessions (design with the agent):
   lab.py open NAME --brain BRAIN --out DIR [--host agent] [--fixture SUITE]   a lab agent, its daemon up
@@ -37,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brains as brains_mod    # noqa: E402
 import hosts as hosts_mod      # noqa: E402
+import proposal as proposal_mod  # noqa: E402
 import report as report_mod    # noqa: E402
 import runner                  # noqa: E402
 import sessions                # noqa: E402
@@ -46,9 +51,13 @@ def cmd_run(a):
     suite = runner.load_suite(a.suite)
     arms = runner.load_arms(a.arm, a.arms)
     bs = [brains_mod.parse(s, a.parallel) for s in a.brain]
-    host_kind = a.host or ('agent' if any(b.real for b in bs) else 'local')
-    if host_kind == 'local' and any(b.real for b in bs) and not a.unsafe_local:
-        raise SystemExit('a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)')
+    host_kind = hosts_mod.kind(a.host, bs)
+    # one rule for both commands (hosts.local_refusal): `propose` accepts --unsafe-free as the same permission, so
+    # `run` must too, or the two answer `--unsafe-free` differently (#385 review)
+    why = hosts_mod.local_refusal(a.host, bs, unsafe_local=a.unsafe_local,
+                                  unsafe_free=getattr(a, 'unsafe_free', False))
+    if why:
+        raise SystemExit(why)
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     host = hosts_mod.make(host_kind, out, runner.REPO)
@@ -118,12 +127,14 @@ def main(argv=None):
     p.add_argument('--suite', required=True, help='a suite name under benchmarks/ember/suites, or a folder')
     p.add_argument('--brain', action='append', required=True)
     p.add_argument('--arm', action='append', help='NAME[=CHECKOUT] (default: base = this checkout)')
-    p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}')
+    p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}, or the arms.json `propose` writes')
     p.add_argument('--out', required=True)
     p.add_argument('--repeats', type=int, default=1)
     p.add_argument('--only', help='comma-separated task keys')
     p.add_argument('--host', choices=('local', 'agent'))
     p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
+    p.add_argument('--unsafe-free', action='store_true',
+                   help='the same permission under the name an unattended run uses (hosts.local_refusal reads both)')
     p.add_argument('--jobs', type=int, default=4, help='runs at once (each brain still caps its own: --parallel)')
     p.add_argument('--parallel', type=int, help="override every brain's parallel cap")
     p.add_argument('--timeout', type=int, help='seconds per goal (default: the suite\'s)')
@@ -136,6 +147,38 @@ def main(argv=None):
     p.add_argument('--base', required=True)
     p.add_argument('--arm', required=True)
     p.add_argument('--json', action='store_true')
+
+    p = sub.add_parser('propose')
+    p.add_argument('--sim-home', required=True,
+                   help="the resident's home whose SIM log holds the record (it may be live: each write is one "
+                        'BEGIN IMMEDIATE transaction, WAL, busy_timeout, the path `caminus ember agent sim` uses)')
+    p.add_argument('--record', required=True, help='the id of a `proposed` SIM record')
+    p.add_argument('--suite', default='basic')
+    p.add_argument('--brain', action='append', required=True)
+    p.add_argument('--repeats', type=int, default=3,
+                   help='runs per cell (default 3: report.compare calls fewer noise-prone)')
+    p.add_argument('--only', help='comma-separated task keys')
+    p.add_argument('--host', choices=('local', 'agent'))
+    p.add_argument('--jobs', type=int, default=4)
+    p.add_argument('--parallel', type=int)
+    p.add_argument('--out', help='default: SIM-HOME/emberlab/sim-ab/RECORD')
+    p.add_argument('--config', help="the proposal as config.json keys for arm, JSON")
+    p.add_argument('--env', help="the proposal as environment variables for arm, JSON")
+    p.add_argument('--base-config', help='config.json keys for base (rarely: base runs as it runs now)')
+    p.add_argument('--base-env')
+    p.add_argument('--arm-checkout', help='the checkout with the proposed code (default: this checkout)')
+    p.add_argument('--base-checkout')
+    p.add_argument('--dry-run', action='store_true', help='print the plan and create nothing')
+    p.add_argument('--approve-paid', action='store_true',
+                   help="run a brain billed through the owner's relay (the plan names it first)")
+    p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
+    p.add_argument('--unsafe-free', action='store_true', help='the same, named for an unattended run')
+    p.add_argument('--prediction-error', help='where the prediction was wrong, filled in after the run; a review '
+                                             'says whether the miss is understood, so leave it empty unless it is - '
+                                             "sim.observe treats a non-empty value as the record's final answer on "
+                                             'why the prediction missed and the log is append-only, so a typo is '
+                                             'permanent')
+    p.add_argument('--goal', help="the goal id the observation lives in (default: the record's)")
 
     p = sub.add_parser('open')
     p.add_argument('name')
@@ -179,7 +222,9 @@ def main(argv=None):
     if a.cmd == 'serve-driven':
         brains_mod.serve_driven(a.ctl, a.judge, a.ttl, a.caminus)
         return 0
-    return dict(run=cmd_run, report=cmd_report, compare=cmd_compare, open=sessions.open_session, say=sessions.say,
+    return dict(run=cmd_run, report=cmd_report, compare=cmd_compare,
+                propose=lambda a: proposal_mod.cmd_propose(a, cmd_run),
+                open=sessions.open_session, say=sessions.say,
                 turn=sessions.turn, reply=sessions.reply, events=sessions.events, status=sessions.status,
                 close=sessions.close)[a.cmd](a)
 
