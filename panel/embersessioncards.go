@@ -28,6 +28,40 @@ type sessionCard struct {
 	speed                             replySpeed
 	ctxUsed, ctx                      int
 	lastTS                            float64
+	workers                           []residentWorker // the delegate children, when the session has any
+}
+
+// workersRow is what the card says about delegation (#342): the children running, and what they spent of their caps.
+// An empty string when there is nothing to say, the way an older resident's status reads. The cap counts money and
+// the OpenCode plan's allowance, so the row shows the sum (a Go turn costs $0 of money).
+func workersRow(ws []residentWorker) string {
+	if len(ws) == 0 {
+		return ""
+	}
+	running, spent, cap := 0, 0.0, 0.0
+	for _, w := range ws {
+		if w.Running {
+			running++
+			spent += w.SpendUSD + w.AllowanceUSD
+			cap += w.CapUSD
+		}
+	}
+	if running > 0 {
+		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)
+	}
+	// The status sorts running children first and then newest first, so the first finished one is the last child.
+	w := ws[0]
+	for _, c := range ws {
+		if !c.Running {
+			w = c
+			break
+		}
+	}
+	out := w.Outcome
+	if out == "" {
+		out = "done"
+	}
+	return fmt.Sprintf("no children running · last %s $%.4f", out, w.SpendUSD+w.AllowanceUSD)
 }
 
 const cardW = 46 // a card's width with its frame: two fit a 100-column terminal, three a 140
@@ -47,6 +81,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 		return c
 	}
 	c.model, c.spendToday, c.ctx, c.ctxUsed = withEffort(st.Model, st.Effort), st.SpendToday, st.Context, st.ContextUsed
+	c.workers = st.Workers
 	c.speed = st.speed()
 	c.status = "listening" // (the word the header uses for the same state)
 	if !st.DaemonAlive {
@@ -168,6 +203,9 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 		emberDim.Render(emberClip(residentText(c.model)+" · "+speed+ctx, inner-2)),
 		emberDim.Render(emberClip(residentText(gh), inner-2)),
 		emberDim.Render(emberClip(fmt.Sprintf("$%.2f today in this session", c.spendToday), inner-2)),
+	}
+	if w := workersRow(c.workers); w != "" { // (#342) only when the session has children
+		rows = append(rows, emberDim.Render(emberClip(residentText(w), inner-2)))
 	}
 	out := []string{top}
 	for _, r := range rows {

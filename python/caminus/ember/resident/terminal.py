@@ -374,9 +374,11 @@ class Terminal:
                     pass
         return hit
 
-    def call(self, action, args, box=None):
+    def call(self, action, args, box=None, goal=None, child=False):
         """A terminal call; with box (sandbox.py) a sandbox call: a new command gets box (its request, from
-        sandbox.spec), a poll or input names a session that must be a box ({} is enough)."""
+        sandbox.spec), a poll or input names a session that must be a box ({} is enough). `goal` is the goal the
+        call runs for: a new job records it, and a delegate child (child=True) may use only the sessions its own
+        goal opened (#382 review: a read-only child could signal another goal's job, and machine() lists ids)."""
         tool = 'terminal' if box is None else 'sandbox'
         session = args.get('session') or action
         if len(session) != 32 or any(c not in '0123456789abcdef' for c in session):
@@ -394,12 +396,16 @@ class Terminal:
                 timeout = check_timeout(timeout)
             if not (job / 'request.json').exists():
                 atomic_json(job / 'request.json', dict(command=args['command'], cwd=str(cwd), timeout=timeout,
-                                                       **({'box': box} if box else {})))
+                                                       **({'box': box} if box else {}),
+                                                       **({'goal': goal} if goal else {})))
             if not read_state(job):
                 self.launch(job)
         elif not job.is_dir():
             raise ValueError(f'unknown {tool} session')
         req = json.loads((job / 'request.json').read_text())
+        if child and req.get('goal') != goal:
+            raise ValueError('that %s session belongs to another goal: a delegate child may use only the sessions '
+                             'it opened itself' % tool)
         if 'browser' in req:
             raise ValueError('that session is the browser: use the browser tool')
         boxed = 'box' in req

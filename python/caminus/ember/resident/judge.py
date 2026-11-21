@@ -259,6 +259,13 @@ def review(rt, gid, result):
     g = rt.store.goal(gid)
     gate = g.get('gate')
     if gate:
+        from . import delegate
+        if delegate.is_child(rt.store, gid):
+            # a child has no host shell at all (#382 review, fourth round): a gate runs in one, and even a
+            # "read-only" gate cannot be told from a writing one by a filter. One stored before this refusal
+            # must not run either.
+            return dict(error='a delegate child is read-only: it has no gate, because a gate runs in a shell on '
+                               'this machine. Report what you checked in sandbox and what you could not')
         ok, out = run_gate(rt.home, gate, stop=getattr(rt, 'stopping', None))
         if not ok and getattr(rt, 'stopping', lambda: False)():
             return dict(error='your runtime was stopped while the gate ran, so nothing was decided: finish again')
