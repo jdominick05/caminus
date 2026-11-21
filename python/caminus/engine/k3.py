@@ -173,6 +173,9 @@ Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MO
 Q35MOE_KV_Q8_OF = {'k3_q35_moe': 'k3_q35_moe_kvq8'}
 Q35MOE_KV_Q8_MODULES = tuple(Q35MOE_KV_Q8_OF.values())
 Q35MOE_MODULES += Q35MOE_KV_Q8_MODULES
+# Every runtime check that asks "does this module keep a Q8 KV cache" uses this: the dense table above stays the dense
+# table (its own tests pin its members and their geometry), and the MoE object joins here.
+Q35_KV_Q8_ALL = Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES
 Q35R_MODULES += (Q35_KV_Q8_OF['k3_q35_gsq'],)
 Q35SV_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'],)
 Q35TV_MODULES += (Q35_KV_Q8_OF['k3_q35_tcap_ver'],)
@@ -606,7 +609,7 @@ class Engine:
         self.grid = grid or 4 * props.multi_processor_count   # multiProcessorCount = WGPs on gfx11
         self.limit_us = limit_us   # a stuck wait gives up after this (keeps the XTX's desktop compositor alive)
         self.module = module_for(module, T); self.mv_u = 16 if module == 'k3_u16' else 8; self.teams = teams
-        q8 = self.module in Q35_KV_Q8_MODULES + Q3M_KV_Q8_MODULES
+        q8 = self.module in Q35_KV_Q8_ALL + Q3M_KV_Q8_MODULES
         if q8 and (isinstance(T, (bool, np.bool_)) or not isinstance(T, (int, np.integer)) or not 1 <= T <= 4
                    or (T != 1 and self.module not in Q35V_MODULES) or teams is not None):
             raise ValueError('k3 Q8 KV: decode T = 1, verify T = 1 .. 4, k3_run tapes only')
@@ -1141,7 +1144,7 @@ class Engine:
 
     def _dense_kv_format(self, q8):
         if getattr(self, 'module', None) in Q35_MODULES + Q35MOE_MODULES:
-            want = self.module in Q35_KV_Q8_MODULES
+            want = self.module in Q35_KV_Q8_ALL
             if not isinstance(q8, (bool, np.bool_)) or bool(q8) != want:
                 raise ValueError(f'k3: module {self.module}: {"Q8" if want else "F16"} KV cache only')
 
@@ -1295,7 +1298,7 @@ class Engine:
     def hadamard(self, x, n, rows_per_task=1, dep=-1, team=-1):
         """in place: the orthonormal Walsh-Hadamard transform of each contiguous chunk of n values (64 <= n <= 256)"""
         assert n in (64, 128, 256) and x.numel() % n == 0
-        if self.module in Q35_KV_Q8_MODULES:
+        if self.module in Q35_KV_Q8_ALL:
             if (isinstance(rows_per_task, (bool, np.bool_)) or not isinstance(rows_per_task, (int, np.integer))
                     or not 1 <= rows_per_task < 2 ** 31 or not 0 < x.numel() // n < 2 ** 31):
                 raise ValueError('k3 Q8 Hadamard: positive int32 chunk/task counts required')
@@ -1548,8 +1551,8 @@ class Engine:
             raise ValueError(f'k3 {self.module}: attention runs only as the split pair here (head dim {ATTN_D}, {G} '
                              f'query heads per kv head); got dim {dim}, heads {heads}, kv_heads {kv_heads}')
         self._dense_kv_format(q8)
-        rows = self._dense_q8_rows(cache, kv_heads * dim) if self.module in Q35_KV_Q8_MODULES else kv_rows(cache, kv_heads * dim, q8)
-        if self.module in Q35_KV_Q8_MODULES and rows < self.T:
+        rows = self._dense_q8_rows(cache, kv_heads * dim) if self.module in Q35_KV_Q8_ALL else kv_rows(cache, kv_heads * dim, q8)
+        if self.module in Q35_KV_Q8_ALL and rows < self.T:
             raise ValueError('k3 Q8 attention: fewer physical cache rows than pass tokens')
         longest = min(rows, 4 * QSA_TOPK + 3) if sel is not None else rows
         mc = longest if max_cells is None else max_cells
@@ -1567,7 +1570,7 @@ class Engine:
         if packed and (sel is not None or q8 or self.T > ATTN_PACK_T):
             raise ValueError(f'attn split on {self.module} (the packed PART): the identity list, f16 cache, T <= {ATTN_PACK_T} '
                              f'(sel {sel is not None}, q8 {bool(q8)}, T {self.T})')
-        if self.module in Q35_KV_Q8_MODULES:
+        if self.module in Q35_KV_Q8_ALL:
             if sel is not None: raise ValueError('k3 Q8 dense attention: identity list only')
             from ..device.bufcheck import LaunchCheck
             LaunchCheck('k3 Q8 KV', align=4)(self.sync.device, 'attention',
@@ -1663,11 +1666,11 @@ class Engine:
         if self.module in Q35_MODULES + Q35MOE_MODULES:   # (as the lean qwen3moe module: an op outside its dispatch would run as a no-op)
             for i, sg in enumerate(self.segs):
                 ops = Q35MOE_OPS if self.module in Q35MOE_MODULES else Q35TM_OPS if self.module in Q35TM_MODULES else Q35M_OPS if self.module in Q35M_MODULES else Q35DF_OPS if self.module in Q35DF_ALL else Q35S_OPS
-                if self.module in Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES: ops = ops | {OP_HADAMARD}
+                if self.module in Q35_KV_Q8_ALL: ops = ops | {OP_HADAMARD}
                 if sg.op not in ops and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES + Q35TPV_MODULES):
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(ops)}')
                 if sg.op in (OP_KV_APPEND, OP_ATTN_DEC, OP_ATTN_PART, OP_ATTN_COMB):
-                    want = self.module in Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES
+                    want = self.module in Q35_KV_Q8_ALL
                     if sg.work != int(want):
                         raise ValueError(f'k3: module {self.module}: {"Q8" if want else "F16"} KV cache only (segment {i})')
                     if want and sg.op == OP_KV_APPEND and sg.gs != self.kv_error.data_ptr():
