@@ -293,7 +293,7 @@ def main():
     q8s = {n: (a.kv_formats, a.kv_fixed) for n, a in arch.ARCHS.items()}
     check(cli.parse([])['kv'] is None and not arch.kv_q8(cli.parse([])) and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
           and q8s == {'qwen4exp': (('f16',), 'q8_0'), 'qwen35moe': (('f16',), 'q8_0'), 'qwen35': (('f16',), 'q8_0'),
-                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen35moe-own': (('f16',), None),
+                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen35moe-own': (('f16', 'q8'), None),
                       'qwen3next': (('f16',), 'q8_0'),
                       'qwen35-own-tp': (('f16',), None), 'qwen3moe-tp': (('f16', 'q8'), None)}
           and q8_default('flashnext_tp.py', 'FlashNextTP') is True and q8_default('qwen35_one.py', 'Qwen35One') is True
@@ -305,7 +305,7 @@ def main():
           and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id='f16-v1:x')) == {'type': 'f16', 'format': 'f16-v1:x'}
           and arch.kv_q8_built(types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[1])) and not arch.kv_q8_built(object())
           and not arch.kv_q8_built(types.SimpleNamespace(kv_format_id='f16-v1:x'))
-          and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two)',
+          and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two), qwen3.6-own (one card)',
           f'cli: --kv unset by default (F16; the long-context mode may choose) / f16 / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
 
     # every kv_format_id an engine assigns is a Q8 id listed in arch.KV_Q8_FORMATS, under `if q8` (serve's startup check

@@ -60,12 +60,12 @@ def kv_module(F, module=None, q8=False):
         raise ValueError('Moe35Own: q8 must be a bool')
     selected = module or module_of(F)
     if q8:
-        if selected in k3.Q35_KV_Q8_MODULES:
+        if selected in k3.Q35MOE_KV_Q8_MODULES:
             return selected
-        if selected not in k3.Q35_KV_Q8_OF:
+        if selected not in k3.Q35MOE_KV_Q8_OF:
             raise ValueError(f'Moe35Own: no Q8 KV specialization for {selected}')
-        return k3.Q35_KV_Q8_OF[selected]
-    if selected in k3.Q35_KV_Q8_MODULES:
+        return k3.Q35MOE_KV_Q8_OF[selected]
+    if selected in k3.Q35MOE_KV_Q8_MODULES or selected in k3.Q35_KV_Q8_MODULES:
         raise ValueError(f'Moe35Own: {selected} requires q8=True')
     return selected
 

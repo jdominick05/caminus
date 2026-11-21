@@ -360,15 +360,17 @@ check(abs(sq - (Q3MoEOne.kv_pos_mib(P, True) * 1.05 + 1.0)) < 1e-12 and needq(MC
 
 bad = []
 for name, a in arch.ARCHS.items():
-    if name in ('qwen3moe', 'qwen3moe-tp'): continue   # (the two-card entry builds Q8 too: tests/engine/test_q3moe_tp_kvq8_cpu.py)
+    # (the two-card entry builds Q8 too: tests/engine/test_q3moe_tp_kvq8_cpu.py; the own MoE line has its own Q8 object)
+    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen35moe-own'): continue
     for what, fn in (('build', lambda: a.build({'kv': 'q8'})), ('auto_need', lambda: a.auto_need({'kv': 'q8'}, 4))):
         try: fn(); bad.append((name, what, 'no error'))
         except ValueError as e:
             if "kv 'q8'" not in str(e): bad.append((name, what, str(e)[:80]))
         except Exception as e: bad.append((name, what, type(e).__name__ + ' ' + str(e)[:80]))
 check(not bad and all(a.kv_check({}) is False and a.kv_check({'kv': 'f16'}) is False for a in arch.ARCHS.values())
-      and arch.ARCHS['qwen3moe'].kv_check({'kv': 'q8'}) is True and arch.ARCHS['qwen3moe-tp'].kv_check({'kv': 'q8'}) is True,
-      f"every other registry entry ({len(arch.ARCHS) - 2}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything; "
+      and arch.ARCHS['qwen3moe'].kv_check({'kv': 'q8'}) is True and arch.ARCHS['qwen3moe-tp'].kv_check({'kv': 'q8'}) is True
+      and arch.ARCHS['qwen35moe-own'].kv_check({'kv': 'q8'}) is True,
+      f"every other registry entry ({len(arch.ARCHS) - 3}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything; "
       f"'f16' and no kv pass everywhere" + (f' (wrong: {bad})' if bad else ''))
 
 # ---- the gates' --against (tools/gates/kv_against.py) ---------------------------------------------------------------------------

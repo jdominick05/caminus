@@ -163,13 +163,16 @@ Q35MOE_MODULES = ('k3_q35_moe',)
 # Verify starts with the unpacked PART, independent of the F16 packed reader.
 # One card only: the two-card Q8 objects wait for their own fault investigation.
 Q35_KV_Q8_BASE = {name + '_kvq8': name for name in (
-    'k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_gsq', 'k3_q35_moe')}
+    'k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_gsq')}
 Q35_KV_Q8_OF = {base: name for name, base in Q35_KV_Q8_BASE.items()}
 Q35_KV_Q8_MODULES = tuple(Q35_KV_Q8_BASE)
 Q35S_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35S_MODULES)
 Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MODULES)
-# (the MoE line's Q8 object is a MoE module, not a dense one: it must keep Q35MOE_OPS and the MoE tape checks)
-Q35MOE_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35MOE_MODULES)
+# The MoE line's Q8 object is its own table: Q35_KV_Q8_BASE carries the dense line's invariants (six query heads per KV
+# head, ATTN_SS 32, the dense weight families), none of which hold here (eight heads, its own tape and ops whitelist).
+Q35MOE_KV_Q8_OF = {'k3_q35_moe': 'k3_q35_moe_kvq8'}
+Q35MOE_KV_Q8_MODULES = tuple(Q35MOE_KV_Q8_OF.values())
+Q35MOE_MODULES += Q35MOE_KV_Q8_MODULES
 Q35R_MODULES += (Q35_KV_Q8_OF['k3_q35_gsq'],)
 Q35SV_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'],)
 Q35TV_MODULES += (Q35_KV_Q8_OF['k3_q35_tcap_ver'],)
@@ -1660,11 +1663,11 @@ class Engine:
         if self.module in Q35_MODULES + Q35MOE_MODULES:   # (as the lean qwen3moe module: an op outside its dispatch would run as a no-op)
             for i, sg in enumerate(self.segs):
                 ops = Q35MOE_OPS if self.module in Q35MOE_MODULES else Q35TM_OPS if self.module in Q35TM_MODULES else Q35M_OPS if self.module in Q35M_MODULES else Q35DF_OPS if self.module in Q35DF_ALL else Q35S_OPS
-                if self.module in Q35_KV_Q8_MODULES: ops = ops | {OP_HADAMARD}
+                if self.module in Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES: ops = ops | {OP_HADAMARD}
                 if sg.op not in ops and not (sg.op == OP_XCHG and self.module in Q35_TP_MODULES + Q35TPV_MODULES):
                     raise ValueError(f'k3: module {self.module} has no op {sg.op} (segment {i}): it runs only {sorted(ops)}')
                 if sg.op in (OP_KV_APPEND, OP_ATTN_DEC, OP_ATTN_PART, OP_ATTN_COMB):
-                    want = self.module in Q35_KV_Q8_MODULES
+                    want = self.module in Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES
                     if sg.work != int(want):
                         raise ValueError(f'k3: module {self.module}: {"Q8" if want else "F16"} KV cache only (segment {i})')
                     if want and sg.op == OP_KV_APPEND and sg.gs != self.kv_error.data_ptr():
