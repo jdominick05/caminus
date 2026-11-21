@@ -44,6 +44,7 @@ import (
 // a content line; elsewhere (screen) it is a row of the drawn frame.
 type chatSelection struct {
 	dragging, moved, shown bool   // moved: the pointer went 2 or more cells from the press (less is a shaky click)
+	cleared                bool   // this press cleared a copy the screen still showed: the click after it only clears
 	edges                  []int  // over the screen: the columns where the area's boxes draw their sides
 	screen                 bool   // over the frame's rows, not the transcript's content
 	x0, x1, y0, y1         int    // the area the drag began in: cells [x0, x1); for the screen, rows [y0, y1)
@@ -130,8 +131,10 @@ func (m emberModel) selectionPos(s chatSelection, x, y int) [2]int {
 func (m emberModel) selectedText() string {
 	s := m.chat.sel
 	source := m.chat.transcript.GetContent()
+	headH := 0
 	if s.screen {
 		source = m.render()
+		headH = lipgloss.Height(m.chatHead(max(20, m.width)))
 	}
 	lines := strings.Split(source, "\n")
 	a, b := s.ordered()
@@ -139,8 +142,21 @@ func (m emberModel) selectedText() string {
 	if !s.screen {
 		bodies = m.markdownBodies(a[0], b[0])
 	}
+	// The header's goal is drawn cut, or rendered (its Markdown reflowed): a copy that touches it takes the goal
+	// whole, as the agent wrote it, the way an open card's body copies its source (markdownBodies) (#316).
+	goalAt, goalTo, goal := -1, -1, ""
+	if s.screen && headH > 2 && a[0] < headH-1 && b[0] >= 1 {
+		if g := strings.TrimSpace(m.headGoalText()); g != "" {
+			goalAt, goalTo, goal = max(1, a[0]), headH-1, ansi.Strip(g)
+		}
+	}
 	var out []string
 	for i := max(0, a[0]); i <= b[0] && i < len(lines); i++ {
+		if goalAt >= 0 && i >= goalAt && i < goalTo {
+			out = append(out, goal) // the whole goal, not the lines the header had room for
+			i = goalTo - 1
+			continue
+		}
 		if k := slices.IndexFunc(bodies, func(md mdBody) bool { return i >= md.from && i < md.to }); k >= 0 {
 			out = append(out, bodies[k].source) // a rendered card's body: its source, whole (the copy keeps it)
 			i = bodies[k].to - 1
@@ -310,8 +326,10 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 		if ev.Button != tea.MouseLeft {
 			return m, nil, false
 		}
-		m.syncChat() // the areas as the screen draws them now (opening the session picker shortens the transcript)
+		was := m.chat.sel.shown // a shown copy: the click that clears it must not also toggle what it covers
+		m.syncChat()            // the areas as the screen draws them now (opening the session picker shortens the transcript)
 		m.chat.sel = m.selectionAt(ev.X, ev.Y)
+		m.chat.sel.cleared = was
 		return m, nil, true
 	case tea.MouseMotionMsg:
 		s := m.chat.sel
@@ -360,6 +378,13 @@ func (m emberModel) selectMouse(msg tea.Msg) (emberModel, tea.Cmd, bool) {
 // only: Ctrl+O opens them all); anywhere else it only clears.
 func (m emberModel) clickAt(s chatSelection) (emberModel, tea.Cmd) {
 	x, y := s.at[0], s.at[1]
+	// a click on the header opens the whole goal under the title, or closes it again (#316); it is the header's
+	// own rows only, so a click in the transcript is untouched. The click that clears a copy the screen still shows
+	// only clears: the drag that made it ended where the goal's header is, and opening it there would be a surprise.
+	if m.transcriptShown() && !s.cleared && y < lipgloss.Height(m.chatHead(max(20, m.width))) {
+		next, _ := m.toggleHead()
+		return next.(emberModel), nil
+	}
 	if m.chat.picker {
 		if i := m.cardAt(x, y); i >= 0 {
 			if i == len(m.switcherCards()) {
