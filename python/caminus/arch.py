@@ -997,7 +997,8 @@ class Q35MoE(OneCard):
     the batched expert prefill is the next piece of work. No drafter for this line yet."""
     engine = 'engine.q35_moe:Moe35Own'
     rope_facts = QWEN35_ROPE
-    kv_fixed = None            # (F16 KV: the module has no q8 cache)
+    kv_formats = ('f16', 'q8')  # (the Q8 KV object: kernels/k3_q35_moe_kvq8.hip, half the bytes per position)
+    kv_fixed = None            # (F16 unless --kv q8: the choice builds k3_q35_moe_kvq8)
     drafter = 'off'
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
 
@@ -1006,7 +1007,8 @@ class Q35MoE(OneCard):
         from .engine.q35_moe import Moe35Own
         from .prefill.kpass import KPassOnly
         mode = self.rope_mode(opt)
-        m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']), yarn=None if mode is None else mode.factor)
+        m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']), yarn=None if mode is None else mode.factor,
+                     q8=opt.get('kv') == 'q8')
         return m, KPassOnly(m), None, None
 
     def auto_need(self, opt, slots, cards=None):
@@ -1019,8 +1021,9 @@ class Q35MoE(OneCard):
         path = opt['model']
         mode = self.rope_mode(opt)   # (the long-context mode raises the ceiling: YaRN x2 serves 524,288, x4 1,048,576)
         n_ctx = mode.max_ctx if mode is not None else int(meta(path)['hp'].get('context_length') or 262144)
-        slot = (Moe35Own.recurrent_mib(path) + Moe35Own.kv_pos_mib(path)) * 1.05 + 1.0   # (a checkpoint: states + tail rows)
-        need = lambda c: [Moe35Own.projection_mib(path, c) + (slots + 2) * slot]
+        q8 = opt.get('kv') == 'q8'
+        slot = (Moe35Own.recurrent_mib(path) + Moe35Own.kv_pos_mib(path, q8)) * 1.05 + 1.0   # (a checkpoint: states + tail rows)
+        need = lambda c: [Moe35Own.projection_mib(path, c, q8=q8) + (slots + 2) * slot]
         return n_ctx, [0], slot, need
 
     def _yarn(self, n=None):

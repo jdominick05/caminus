@@ -60,12 +60,12 @@ def kv_module(F, module=None, q8=False):
         raise ValueError('Moe35Own: q8 must be a bool')
     selected = module or module_of(F)
     if q8:
-        if selected in k3.Q35_KV_Q8_MODULES:
+        if selected in k3.Q35MOE_KV_Q8_MODULES:
             return selected
-        if selected not in k3.Q35_KV_Q8_OF:
+        if selected not in k3.Q35MOE_KV_Q8_OF:
             raise ValueError(f'Moe35Own: no Q8 KV specialization for {selected}')
-        return k3.Q35_KV_Q8_OF[selected]
-    if selected in k3.Q35_KV_Q8_MODULES:
+        return k3.Q35MOE_KV_Q8_OF[selected]
+    if selected in k3.Q35MOE_KV_Q8_MODULES or selected in k3.Q35_KV_Q8_MODULES:
         raise ValueError(f'Moe35Own: {selected} requires q8=True')
     return selected
 
@@ -216,8 +216,8 @@ class Moe35Own:
         self.kv_rows = self.max_ctx + self.spec_T - 1
         self.module = kv_module(F, module, q8)
         self.q8 = q8
-        if q8 and (self.hd != 256 or self.nh != 6 * self.nkv):
-            raise ValueError('Moe35Own: staged Q8 kernels require head_dim 256 and six query heads per KV head')
+        if q8 and (self.hd != 256 or self.nh != 8 * self.nkv):
+            raise ValueError('Moe35Own: staged Q8 kernels require head_dim 256 and eight query heads per KV head')
         if q8:
             self.kv_format_id = 'q8_0-v1:qk-hadamard256:v-hadamard64-v1'
         self.tcap = False
