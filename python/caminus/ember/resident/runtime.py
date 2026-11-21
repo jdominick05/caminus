@@ -33,6 +33,7 @@ from .brain import Brains
 from . import planning
 from . import sandbox
 from . import sim
+from . import reflect
 from . import browser
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -1243,6 +1244,9 @@ class Runtime:
                                               approach_changes=goal.get('approach_changes') or 0), gid)
         if self.store.goal(gid)['state'] == 'completed':
             sandbox.end(self.home, gid, self.store)   # its box ends with it
+            # Post-goal reflection (#341): one cheap call outside the transaction, writing a 'proposed' SIM
+            # record; it reads the goal it just closed, and never raises.
+            reflect.maybe(self, gid, summary, open_work)
 
     def _action(self, action):
         refused = False
@@ -2198,6 +2202,9 @@ class Runtime:
             if k in fresh:
                 if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
                     self._tools = None        # an off session is not offered the sim tool, and an on one is
+                self.config[k] = fresh[k]
+        for k in ('reflect',):                    # `agent reflect`: the next finished goal reflects, or does not
+            if k in fresh:
                 self.config[k] = fresh[k]
         for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
             if k in fresh:
