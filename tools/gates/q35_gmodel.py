@@ -127,7 +127,7 @@ if __name__ == '__main__':
         from caminus.engine.q35_moe import Moe35Own
         print(torch.cuda.get_device_name(0), flush=True)
         eng = Moe35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module, yarn=A.yarn, q8=A.kv == 'q8')
-        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}; kv {eng.kv_format_id or "f16"}', flush=True)
+        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}; kv {getattr(eng, "kv_format_id", None) or "f16"}', flush=True)
         ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
     else:
         from caminus.engine.q35_dense import Dense35Own
