@@ -3036,6 +3036,34 @@ func TestAStoppedDaemonShowsStoppedNotItsGoalsLastState(t *testing.T) {
 	}
 }
 
+func TestTheTabTitleIsGlyphNameStateAndEmber(t *testing.T) {
+	saved := g
+	defer func() { g = saved }()
+	g = glyphTiers["unicode"] // (the default tier: a saved choice in the human's config is not this test's input)
+	m := chatFixture(t)
+	cases := []struct {
+		name string
+		set  func(*emberModel)
+		want string
+	}{
+		{"loading", func(m *emberModel) { m.statusAt = time.Time{} }, "◌ resident · loading · ember"},
+		{"working", func(m *emberModel) {}, "● resident · working · ember"},
+		{"thinking", func(m *emberModel) { m.chat.live = residentLive{active: true} }, "● resident · thinking · ember"},
+		{"writing", func(m *emberModel) { m.chat.live = residentLive{active: true, text: "a reply"} }, "● resident · writing · ember"},
+		{"idle", func(m *emberModel) { m.resident.Goals = nil }, "○ resident · idle · ember"},
+		{"stopped", func(m *emberModel) { m.resident.DaemonAlive = false }, "○ resident · stopped · ember"},
+		{"needs you", func(m *emberModel) { m.resident.Goals = []residentGoal{{ID: "g", State: "waiting_user"}} }, "✗ resident · needs you · ember"},
+	}
+	for _, c := range cases {
+		mm := m
+		mm.resident.Goals = append([]residentGoal(nil), m.resident.Goals...)
+		c.set(&mm)
+		if got := ansi.Strip(mm.windowTitle()); got != c.want {
+			t.Fatalf("%s: tab title %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestTheBadgeKeepsThePillWhole(t *testing.T) {
 	saved := g
 	defer func() { g = saved }()

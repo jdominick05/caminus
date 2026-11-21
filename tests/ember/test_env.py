@@ -466,6 +466,27 @@ def main():
           and cmd_env._parser().parse_args(['jobs']).sub == 'jobs'
           and cmd_env._parser().parse_args(['stop', 'x']).sub == 'stop', 'cli: spawn/jobs/stop subcommands')
 
+    # `caminus ember ui` execs the panel as just `caminus ember`: a terminal that shows the foreground command line
+    # shows that, never the bridge, audit and ssh key paths (issue #317). The five settings travel in the environment.
+    seen_ui = {}
+    _pb, _execve = _manage.panel_binary, os.execve
+    _manage.panel_binary = lambda: '/opt/caminus-panel'
+    os.execve = lambda path, argv, env: seen_ui.update(path=path, argv=argv, env=env)
+    try:
+        rc = cmd_env._ui()
+    finally:
+        os.execve, _manage.panel_binary = _execve, _pb   # (put both back: `del` would remove os.execve for good)
+    check(rc is None and seen_ui.get('path') == '/opt/caminus-panel' and seen_ui.get('argv') == ['caminus', 'ember']
+          and not any('/' in a for a in seen_ui['argv']),
+          'ui: execs the panel as `caminus ember`, with no path in the argv a terminal shows')
+    ui_env = seen_ui.get('env') or {}
+    check(ui_env.get('CAMINUS_ENV_USER') == settings.user() and ui_env.get('CAMINUS_ENV_BRIDGE') == settings.bridge_dir()
+          and ui_env.get('CAMINUS_ENV_AUDIT') == settings.audit_path() and ui_env.get('CAMINUS_ENV_KEY') == settings.key_path()
+          and json.loads(ui_env.get('CAMINUS_EMBER_CLI') or '[]') == _manage.cli_argv(),
+          'ui: the user, bridge, audit, key and the CLI argv travel in the environment')
+    check(settings.key_path() not in ' '.join(seen_ui.get('argv') or []),
+          'ui: the ssh key path is never in the argv')
+
     # pending() distinguishes a missing bridge from an unreadable one
     unreadable = os.path.join(S, 'noperm')
     os.makedirs(os.path.join(unreadable, 'req'))

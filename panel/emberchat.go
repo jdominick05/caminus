@@ -700,7 +700,7 @@ func (m emberModel) chatHead(w int) string {
 // at the tab bar says it (Claude Code's own tab shows a glyph and the session name the same way).
 func (m emberModel) windowTitle() string {
 	if m.statusAt.IsZero() {
-		return "◌ " + residentText(m.agentName) + " · loading — caminus ember"
+		return "◌ " + residentText(m.agentName) + " · loading · ember"
 	}
 	state := "stopped"
 	if m.resident.DaemonAlive {
@@ -735,7 +735,7 @@ func (m emberModel) windowTitle() string {
 	case state == "waiting_user" || state == "waiting_root":
 		now = "needs you"
 	}
-	return strings.TrimSpace(icon + " " + residentText(m.agentName) + " · " + now + " — caminus ember")
+	return strings.TrimSpace(icon + " " + residentText(m.agentName) + " · " + now + " · ember")
 }
 
 // liveHeight is the live window's content lines (its label included): half the body less the border, so the

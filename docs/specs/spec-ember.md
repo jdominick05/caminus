@@ -102,10 +102,17 @@ root (`~/bin/ask-root CMD...`), that everything is audit-logged, and where the l
 
 ## 7. The TUI (`caminus ember ui`) and the scriptable CLI
 
-`caminus ember ui` execs `caminus-panel ember --user ... --bridge ... --audit ... --key ... --cli ...` (panel/emberui.go,
-same binary and build as the control panel): the chat of [Resident agents](../resident-agent.md), with root requests and
-questions as prompts where you type. Answer files and audit lines use the same JSON schema as `bridge.py` /
-`audit.py`, so `caminus ember watch` / `audit` and the panel are interchangeable.
+`caminus ember ui` execs `caminus-panel` as `caminus ember` (panel/emberui.go, same binary and build as the control
+panel), with the settings in the environment (`CAMINUS_ENV_USER`, `CAMINUS_ENV_BRIDGE`, `CAMINUS_ENV_AUDIT`,
+`CAMINUS_ENV_KEY`, `CAMINUS_EMBER_CLI`); flags of the same names still win when given. Those five names are this
+command's reserved input: nothing else may export them into a shell that starts the panel, and a name added later
+must join this list rather than reuse one of them for another meaning. `-demo` outranks the environment for the two
+settings it has an opinion about (`user` becomes `demo`, `key` becomes `none`), so a demo started from a shell set
+up for a real agent still opens the demo. A terminal that shows the
+foreground command line therefore shows `caminus ember`, never a bridge, audit or ssh key path. This is the chat of
+[Resident agents](../resident-agent.md), with root requests and questions as prompts where you type. Answer files and
+audit lines use the same JSON schema as `bridge.py` / `audit.py`, so `caminus ember watch` / `audit` and the panel are
+interchangeable.
 
 For scripts and tests, everything is callable without the TUI: `caminus ember reqs --json`, `caminus ember answer ID
 approved|edited TEXT|denied|answered TEXT [--json] [--digest HASH]`, `jobs --json`, `ctx --json`, `audit --json`,
