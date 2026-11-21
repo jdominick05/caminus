@@ -9,14 +9,14 @@
 //                   OWN_X_PER_SLOT, OWN_GU) on the own Q2_0 tile (kernels/own_quant_q2_0.h, K3_OWN_Q2_0), and the
 //                   k3_own_ops.h OP_OWN_ADD_RMS16, whose weighted slot sum takes the eight routed experts and the gated
 //                   shared expert as a 9th (OWN_ADD_MAX_S: the dense line's any-length form has no slots)
-// What it does NOT have, deliberately: no ggml format tiles, no Q8 KV (that is #81's object, as for the dense line), no
-// verify (T-token) forms and no drafter ops. The host refuses a tape outside its set (caminus.k3.Q35MOE_OPS and
-// MODULE_CAPS).
+// What it does NOT have, deliberately: no ggml format tiles, no verify (T-token) forms and no drafter ops. The Q8 KV
+// cache is its own object (kernels/k3_q35_moe_kvq8.hip, #define K3_Q35_KV_Q8), as on the dense line. The host refuses a
+// tape outside its set (caminus.k3.Q35MOE_OPS and MODULE_CAPS).
 //
-// Compile only for now: this object exists to answer the register question before the engine is written. One k3_run body
-// holds the trunk's ~18 ops plus OP_ROUTER and the 9-slot add, against the 30B lean module's 7; an op inlined into
-// k3_run adds live scalars, and past the SGPRs every segment hop of every wave pays the reloads (qwen3moe: 190 spilled
-// scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid). Budget: 96 VGPRs, 0 spills (tools/gates/objcheck.py).
+// One k3_run body holds the trunk's ~18 ops plus OP_ROUTER and the 9-slot add, against the 30B lean module's 7; an op
+// inlined into k3_run adds live scalars, and past the SGPRs every segment hop of every wave pays the reloads (qwen3moe:
+// 190 spilled scalars -> 79, XT 5.33 -> 4.78 ms per token at the same grid). Budget: 96 VGPRs, 0 spills
+// (tools/gates/objcheck.py).
 #define K3_OWN
 #define K3_OWN_Q3M
 #define K3_OWN_Q2_0
@@ -27,6 +27,8 @@
 #define K3_MAX_VGPR 96
 #define ATTN_G 8
 #define ATTN_VH 8
+#define ATTN_SS 128          // list positions per split: 32 -> 64 -> 128 measured at 49,901 depth, 9.252 -> 8.730 ->
+                             // 8.362 ms (-10.6 %), and 5.644 -> 5.561 at short context; 128 is the split header's max
 #define OWN_ADD_MAX_S 9
 #define K3_Q35_MOE
 #define K3_Q35_YARN          // (OP_QK_NR's YaRN form: Seg.aux = the per-dim factor table, Seg.work = mscale's bits)
