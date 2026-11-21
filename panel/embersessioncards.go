@@ -28,6 +28,89 @@ type sessionCard struct {
 	speed                             replySpeed
 	ctxUsed, ctx                      int
 	lastTS                            float64
+	workers                           []residentWorker // the delegate children, when the session has any
+}
+
+// workersRow is what the card says about delegation (#342): the children running, and what they spent of their caps.
+// An empty string when there is nothing to say, the way an older resident's status reads. The cap counts money and
+// the OpenCode plan's allowance, so the row shows the sum (a Go turn costs $0 of money).
+func workersRow(ws []residentWorker) string {
+	if len(ws) == 0 {
+		return ""
+	}
+	// Every child the card lists, not only the running ones: a finished child's spend vanished from the row the
+	// moment it stopped, so the total the card showed moved backwards while the children below it still read
+	// theirs (#384 review). The label counts the running ones; the money is all of them.
+	// The cap is the running children's: a finished child's cap is not a limit anything is still under, and the
+	// store returns at most 20 rows, so summing every row's cap drifted upward over a session with no children
+	// running and named a "$Y" the parent could never spend (#384 review).
+	// The spend is the listed children's, not the session's lifetime: store.workers() keeps the newest 20 rows, so a
+	// session with more children shows its newest 20 and their sum (#384 review follow-up).
+	running, spent, cap := 0, 0.0, 0.0
+	for _, w := range ws {
+		spent += w.SpendUSD + w.AllowanceUSD
+		if w.Running {
+			running++
+			cap += w.CapUSD
+		}
+	}
+	if running > 0 {
+		return fmt.Sprintf("%s · $%.4f of $%.2f", plural(running, "child", "children"), spent, cap)
+	}
+	// Running children sort first, then newest first: the first non-running entry is the newest finished child.
+	w := ws[0]
+	for _, c := range ws {
+		if !c.Running {
+			w = c
+			break
+		}
+	}
+	out := w.Outcome
+	if out == "" {
+		out = "done"
+	}
+	return fmt.Sprintf("no children running · last %s $%.4f", out, w.SpendUSD+w.AllowanceUSD)
+}
+
+// workersLines is one line per child for the session card (#342 full): what it may do, the goal it was given, the
+// steps and spend it used of its caps, and for a writing child the worktree branch it changes. Running children
+// come first (the status sorts them so); the card shows at most `room` of them and says how many more there are.
+// An older resident sends no permissions, and the line then says "child" rather than guessing read-only.
+func workersLines(ws []residentWorker, room int) []string {
+	if len(ws) == 0 || room <= 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(ws), room))
+	for i, w := range ws {
+		if i == room {
+			out = append(out, fmt.Sprintf("+%d more children", len(ws)-room))
+			break
+		}
+		what := w.Permissions
+		if what == "" {
+			what = "child"
+		}
+		if w.Branch != "" {
+			what += " " + w.Branch
+		}
+		state := w.Outcome
+		if w.Running {
+			state = "running"
+		} else if state == "" {
+			state = "done"
+		}
+		steps := ""
+		if w.Steps > 0 {
+			steps = fmt.Sprintf(" · %d steps", w.Steps)
+		}
+		goal := w.Goal
+		if goal == "" {
+			goal = w.Child
+		}
+		out = append(out, fmt.Sprintf("%s · %s · %s%s · $%.4f of $%.2f", what, state, goal, steps,
+			w.SpendUSD+w.AllowanceUSD, w.CapUSD))
+	}
+	return out
 }
 
 const cardW = 46 // a card's width with its frame: two fit a 100-column terminal, three a 140
@@ -47,6 +130,7 @@ func loadSessionCard(m emberModel, name string) sessionCard {
 		return c
 	}
 	c.model, c.spendToday, c.ctx, c.ctxUsed = withEffort(st.Model, st.Effort), st.SpendToday, st.Context, st.ContextUsed
+	c.workers = st.Workers
 	c.speed = st.speed()
 	c.status = "listening" // (the word the header uses for the same state)
 	if !st.DaemonAlive {
@@ -168,6 +252,12 @@ func (m emberModel) sessionCardView(c sessionCard, selected bool, cw int) []stri
 		emberDim.Render(emberClip(residentText(c.model)+" · "+speed+ctx, inner-2)),
 		emberDim.Render(emberClip(residentText(gh), inner-2)),
 		emberDim.Render(emberClip(fmt.Sprintf("$%.2f today in this session", c.spendToday), inner-2)),
+	}
+	if w := workersRow(c.workers); w != "" { // (#342) only when the session has children
+		rows = append(rows, emberDim.Render(emberClip(residentText(w), inner-2)))
+		for _, line := range workersLines(c.workers, 3) { // (#342 full) a line per child, three at most
+			rows = append(rows, emberDim.Render(emberClip(residentText(line), inner-2)))
+		}
 	}
 	out := []string{top}
 	for _, r := range rows {

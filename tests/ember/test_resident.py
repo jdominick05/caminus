@@ -1136,10 +1136,13 @@ class Resident(unittest.TestCase):
 
     def test_first_looks_are_read_only_and_a_refusal_before_the_done_check_does_not_trip_the_watchdog(self):
         from caminus.ember.resident.runtime import read_only_command as ro
-        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head','tar -tf x.tar',
+        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head',
                   '7z l x.7z','readelf -h bin','sha256sum f','sort a | uniq -c'):
             self.assertTrue(ro(c),c)
-        for c in ('unzip handout.zip','tar -xf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f','sort a > b'):
+        # tar is not a read any more: even listing runs -z / -j / -J / -Z's decompressor and its option surface is
+        # the largest of all (#382 review, fourth round). unzip -l and 7z l still list.
+        for c in ('unzip handout.zip','tar -xf x.tar','tar -tf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f',
+                  'sort a > b'):
             self.assertFalse(ro(c),c)
         self.gates_on()
         self.verdicts(dict(verdict='met',reason='x exists'))
@@ -1625,11 +1628,15 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
-        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort -S1ofile in','sort -k2,2o in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
+        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
                     'sort --compress-program=sh in','sort in | uniq - out.txt',
                     'xxd - out.bin','xxd -rp dump bin'):
             self.assertFalse(R.read_only_command(cmd),cmd)
-        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in','sort --numeric-sort in'):
+        # -S and -k consume the next letters as their value, so these carry no -o flag at all: sort itself rejects them
+        # ("invalid suffix in --buffer-size argument '1ofile'", "stray character in field spec") and writes nothing.
+        # The old deny-list refused any letter `o` anywhere, which was a refusal of reads; the parser does not.
+        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in',
+                    'sort --numeric-sort in','sort -S1ofile in','sort -k2,2o in'):
             self.assertTrue(R.read_only_command(cmd),cmd)
         rt=Runtime(self.home)
         try:
@@ -2635,6 +2642,737 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('sim',['--record','--change','x','--predicted','y'])['record']['status'],'recorded')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
         self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
+    def test_delegate_runs_a_read_only_child_and_reports_back(self):
+        # The parent states what done looks like, delegates a read to a child, and reads a short report: the child
+        # cannot write, its write attempt is refused, and the parent's own status shows the child and its spend.
+        (self.home/'f.txt').write_text('first\nmarker line\nlast\n')
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the marker line is quoted from f.txt')),
+            call('delegate',dict(task='Find the marker line in f.txt and quote it.',
+                                 done_check='the text of the marker line is in the summary')),
+            # the child's own turns: a write is refused (it is read-only), then it reads and finishes
+            call('write',dict(path=str(self.home/'child.txt'),content='x')),
+            call('terminal',dict(command='grep -n marker f.txt')),
+            call('define_done',dict(check='f.txt has a marker line')),
+            call('verify',dict(evidence='grep printed 2:marker line')),
+            call('finish',dict(summary='f.txt line 2 is "marker line".')),
+            # back in the parent: the delegate result was the child's report
+            call('verify',dict(evidence='the child quoted line 2 of f.txt')),
+            call('finish',dict(summary='The marker line is "marker line" (f.txt line 2).')))
+        goal=self.cmd('once',['--goal','Ask a child what the marker line says.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertFalse((self.home/'child.txt').exists(),'the child could not write')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        reports=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertTrue(reports and reports[-1].get('outcome')=='completed',reports)
+        self.assertEqual(reports[-1]['steps'],5,'the child ran five of its own turns')
+        self.assertTrue(reports[-1]['verified'])
+        self.assertGreaterEqual(reports[-1]['cap_usd'],0.0)
+        self.assertIn('marker line',reports[-1]['summary'])
+        # the refused write names the rule and is the child's own result, not the parent's
+        refused=[r['data']['result'] for r in events if r['data'].get('name')=='write']
+        self.assertEqual(len(refused),1)
+        self.assertIn('read-only',refused[0]['error'])
+        # the status a UI reads shows the child, its brain and the spend its cap reads
+        st=self.cmd('status')
+        self.assertEqual(len(st['workers']),1)
+        self.assertEqual(st['workers'][0]['child'],reports[-1]['child'])
+        self.assertFalse(st['workers'][0]['running'])
+        self.assertEqual(st['workers'][0]['outcome'],'completed')
+
+    def test_parallel_children_run_in_the_background_and_collect_reads_them(self):
+        # wait=false: the child is an ordinary queued goal. The parent parks (waiting_children) and the loop's
+        # settle wakes it with one message naming the reports; collect hands it the structured ones. The child's
+        # own turns run between the parent's, on the same one loop.
+        (self.home/'a.txt').write_text('alpha\nbeta\n')
+        (self.home/'b.txt').write_text('gamma\n')
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='each child quoted its file')),
+            call('delegate',dict(task='Quote the second line of a.txt.',done_check='a.txt line 2 is quoted',
+                                 wait=False)),
+            # the child's own turns: it reads and finishes (the parent is parked meanwhile)
+            call('define_done',dict(check='a.txt second line is quoted')),
+            call('terminal',dict(command='sed -n 2p a.txt')),
+            call('verify',dict(evidence='sed printed beta')),
+            call('finish',dict(summary='a.txt line 2 is beta.')),
+            # the parent wakes with the report in its inbox and reads the structured one
+            call('collect',dict()),
+            call('verify',dict(evidence='collect shows the child completed with its summary')),
+            call('finish',dict(summary='The child quoted beta from a.txt.')))
+        goal=self.cmd('once',['--goal','Have a child quote a.txt.'])
+        self.assertEqual(goal['state'],'completed')
+        events=[e for e in self.cmd('events')]
+        started=[e for e in events if e['kind']=='delegate_started']
+        self.assertEqual(len(started),1)
+        self.assertFalse(started[0]['data']['wait'])
+        parked=[e for e in events if e['kind']=='delegate_parked']
+        self.assertEqual(len(parked),1,'the parent parked on its running child')
+        woken=[e for e in events if e['kind']=='delegate_reports']
+        self.assertEqual(len(woken),1,'settle woke the parent with the report')
+        results=[e['data']['result'] for e in events if e['kind']=='tool_result' and e['data'].get('name')=='collect']
+        self.assertEqual(len(results),1)
+        self.assertEqual(len(results[0]['children']),1)
+        self.assertEqual(results[0]['children'][0]['outcome'],'completed')
+        self.assertIn('beta',results[0]['children'][0]['summary'])
+        self.assertEqual(results[0]['running'],[])
+
+    def test_a_writing_child_changes_only_its_worktree(self):
+        # permissions=write: the delegate makes a worktree off HEAD, the child writes inside it, and its report
+        # names the branch, the changed file and the merge / discard commands. A path outside the worktree, and a
+        # command that would leave it, are refused; the parent's tree never changes.
+        repo=self.home/'repo'
+        repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the child wrote a file in its worktree')),
+            call('delegate',dict(task='Add NOTES.md with one line.',done_check='NOTES.md has one line',
+                                 permissions='write',repo=str(repo),wait=True)),
+            # the child's own turns: its done check first (a change before it is refused), then an absolute path
+            # outside the worktree is refused, then it writes and reads inside it (a relative path is the worktree's)
+            call('define_done',dict(check='NOTES.md has one line')),
+            call('write',dict(path=str(self.home/'escape.txt'),content='x')),
+            call('write',dict(path='NOTES.md',content='one line\n')),
+            call('read',dict(path='NOTES.md')),
+            call('verify',dict(evidence='read printed "one line" from the worktree')),
+            call('finish',dict(summary='Wrote NOTES.md in the worktree.')),
+            call('verify',dict(evidence='the report names NOTES.md and the branch')),
+            call('finish',dict(summary='The child wrote NOTES.md on its branch.')))
+        goal=self.cmd('once',['--goal','Have a writing child add NOTES.md.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertFalse((self.home/'escape.txt').exists(),'the absolute path outside the worktree was refused')
+        self.assertFalse((repo/'NOTES.md').exists(),'the parent\'s tree is untouched until it merges')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        refused=[r['data']['result'] for r in events if r['data'].get('name')=='write']
+        self.assertTrue(refused and 'worktree' in refused[0]['error'],refused)
+        reports=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        rep=reports[-1]
+        self.assertEqual(rep['outcome'],'completed',rep)
+        self.assertEqual(rep['permissions'],'write')
+        self.assertTrue(rep['worktree'].startswith(str(self.home/'worktrees')),rep['worktree'])
+        self.assertIn('NOTES.md',rep['files'])
+        self.assertTrue(rep['branch'].startswith('delegate/'))
+        self.assertIn('git -C',rep['merge'])
+        self.assertIn('worktree remove',rep['discard'])
+        self.assertIn('NOTES.md',rep['diffstat'])
+        self.assertEqual(rep['base'],subprocess.run(['git','-C',str(repo),'rev-parse','HEAD'],
+                                                     capture_output=True,text=True).stdout.strip())
+
+    def test_a_writing_child_cannot_leave_its_worktree_with_a_command(self):
+        # a writing child's terminal command must start inside its worktree and stay there: `cd ..` and an absolute
+        # path out of it are refused before anything runs
+        repo=self.home/'repo2'
+        repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the escaping command was refused')),
+            call('delegate',dict(task='Try to write outside your worktree.',done_check='the escape failed',
+                                 permissions='write',repo=str(repo))),
+            call('terminal',dict(command='cd %s && echo x > escape.txt' % self.home)),
+            call('terminal',dict(command='cd . && touch ..%sgone.txt' % os.sep)),
+            call('define_done',dict(check='both escape attempts were refused')),
+            call('verify',dict(evidence='both errors name the worktree')),
+            call('finish',dict(summary='Both attempts were refused.')),
+            call('verify',dict(evidence='the child reported both refusals')),
+            call('finish',dict(summary='The child could not leave its worktree.')))
+        self.cmd('once',['--goal','Have a writing child try to escape.'])
+        self.assertFalse((self.home/'escape.txt').exists())
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        errs=[r['data']['result'].get('error','') for r in events if r['data'].get('name')=='terminal']
+        self.assertTrue(any('worktree' in e for e in errs),errs)
+
+    def test_a_writing_child_cannot_climb_out_with_a_dotdot_path(self):
+        # #384 review: the worktree check was `path.startswith(wt + '/')`, which accepted `<wt>/../x`, so a
+        # relative `../x` path - and a redirect glued to it (`echo x>../x`) - left the worktree. The path, the
+        # cwd, a checkpoint and every command word are normalised now, so `..`, `.` and doubled slashes cannot
+        # climb out, while a path that resolves back inside (`sub/../ok.txt`) still works.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'abcd1234')
+        row=dict(permissions='write',worktree=wt)
+        for path in ('../escape.txt','../../../../tmp/escape.txt','sub/../../escape.txt','..','./../x'):
+            args=delegate.in_worktree(row,'write',dict(path=path))
+            why=delegate.refused('write',args,row)
+            self.assertTrue(why and 'worktree' in why,(path,args,why))
+        for path in ('ok.txt','sub/../ok.txt',wt+'/deep/../ok.txt'):
+            self.assertIsNone(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
+        for cmd in ('cd %s && echo x > ../escape.txt'%wt,'cd %s && echo x>../escape.txt'%wt,
+                    'cd %s && cat<../passwd'%wt,'cd %s && echo hi 2>../err'%wt,
+                    'cd %s && echo x > /tmp/escape.txt'%wt,'cd %s && cd .. && touch escape.txt'%wt,
+                    'cd %s && echo x >/tmp/escape2.txt'%wt,'cd %s && echo x >~/escape3'%wt,
+                    'cd %s && sh -c "echo x > /tmp/escape4"'%wt,'cd %s && bash -c "echo x > /tmp/escape4"'%wt,
+                    'cd %s && eval "echo x > /tmp/escape5"'%wt,'cd %s && /bin/sh -c x'%wt,
+                    'cd %s && xargs touch'%wt,'cd %s && echo x --out=/tmp/escape6'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        # a `cd ..` that then *reads* is refused like any other read outside (#384 review P1: a writing child's
+        # read-only command is checked too, so `cd W && cd .. && ls` would list the parent); only a command that
+        # changes something and stays inside is allowed to move around
+        why=delegate.refused('terminal',dict(command='cd %s && cd .. && ls' % wt),row)
+        self.assertTrue(why and 'reads only inside its worktree' in why,(why,))
+        self.assertIsNone(delegate.refused('terminal',dict(
+            command='cd %s && touch ok.txt && cat sub/../ok.txt 2>&1'%wt),row))
+        self.assertTrue(delegate.refused('terminal',dict(command='ls',cwd=wt+'/..'),row),'a cwd that climbs out')
+        self.assertIsNone(delegate.refused('terminal',dict(command='ls',cwd=wt+'/sub'),row))
+        self.assertTrue(delegate.refused('checkpoint',dict(paths=['../x']),row))
+        self.assertIsNone(delegate.refused('checkpoint',dict(paths=['ok.txt','sub/../ok.txt']),row))
+
+    def test_a_writing_childs_read_only_command_is_path_checked_too(self):
+        # #384 review, P1: `refused()` ran the worktree check only when `not read_only(cmd)`, so a writing child's
+        # `cd W && cat ../parent_secret.txt` - or `grep -r a /abs/parent/tree` - read the parent's tree with the
+        # check skipped, while the `read` tool refuses the same path. Every command is path-checked now, and only
+        # the checks against a *change* through git's shared metadata depend on the command changing something.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.runtime import read_only_command as ro
+        wt=str(self.home/'worktrees'/'abcd1234')
+        (self.home/'parent_secret.txt').write_text('secret\n')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ('cd %s && cat ../parent_secret.txt'%wt,'cd %s && cat %s/parent_secret.txt'%(wt,self.home),
+                    'cd %s && grep -r a %s'%(wt,self.home),'cd %s && head -1 ../parent_secret.txt 2>/dev/null'%wt):
+            self.assertTrue(ro(cmd),'the probe command is read-only: %s'%cmd)
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'reads only inside its worktree' in why,(cmd,why))
+        # ...and the reads that stay inside still work; a `cwd` inside the worktree needs no `cd W && ` prefix
+        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && cat sub/../ok.txt'%wt),row))
+        self.assertIsNone(delegate.refused('terminal',dict(command='cat ../ok.txt',cwd=wt+'/sub'),row))
+        self.assertTrue(delegate.refused('terminal',dict(command='cat ../../x',cwd=wt+'/sub'),row))
+        # a read-only command may read git's metadata (it changes nothing); a writing one may not use it to run
+        self.assertIsNone(delegate.refused('terminal',dict(command='cd %s && cat .git'%wt),row),
+                          'a read-only command naming .git reads the pointer and changes nothing')
+        self.assertTrue(delegate.refused('terminal',dict(command='cd %s && echo x > .git'%wt),row))
+        self.assertTrue(delegate.refused('terminal',dict(command='cd %s && git config core.pager x'%wt),row))
+        # a redirect to a stream is not a path outside the worktree (#384 review, P2: `ls 2>/dev/null` was refused)
+        for cmd in ('cd %s && ls 2>/dev/null'%wt,'cd %s && ls 2>/dev/stdout'%wt,'cd %s && ls 2>/dev/stderr'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+        self.assertTrue(delegate.refused('terminal',dict(command='cd %s && cat ../x 2>/dev/null'%wt),row),
+                        'the stream exception does not excuse a real path outside')
+
+    def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
+        # #384 review, P2: count(*) counted every child the parent ever made, so after 4 finished children it could
+        # never delegate again, while the refusal said finishing one frees a slot (the same P2 #382 fixed).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate_max_children']=2
+            parent=rt.store.enqueue('p')
+            def prep():return dict(task='t',done='d',role='worker',permissions='read',cap_usd=.5,max_steps=4,
+                                   max_seconds=60,model=rt.model,who={},wait=True)
+            kids=[delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['child']
+                  for _ in range(2)]
+            with self.assertRaises(ValueError) as caught:
+                delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+            self.assertIn('2 delegate children still running',str(caught.exception))
+            rt.store.delegate_done(kids[0],'completed',dict(outcome='completed'))
+            delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_wake_nudge_names_every_report_the_parent_has_not_seen(self):
+        # #384 review: the nudge took the last eight delegates rows, so with more reports than that in one parked
+        # generation the earliest were never named - not in that wake, and not in a later one (the window only
+        # moves forward as rows arrive). The wake now carries every child the parent has not been shown yet: the
+        # delegate_reports events are the record of what each earlier wake delivered.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            kids=[]
+            for i in range(10):
+                child=rt.store._enqueue('c%d'%i,kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',0.5)
+                rt.store.delegate_done(child,'completed',dict(outcome='completed',summary='report %d'%i,steps=i))
+                kids.append(child)
+            with rt.store.transaction():rt.store.update(parent,state='waiting_children')
+            # an earlier wake named the first four; the old window would have named children 2..9 here
+            rt.store.event('delegate_reports',dict(children=kids[:4]),parent)
+            self.assertTrue(delegate.settle(rt))
+            nudge=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(parent,))]
+            self.assertEqual(len(nudge),1,nudge)
+            for child in kids[4:]:self.assertIn(child[:8],nudge[0],'the report of %s is named'%child[:8])
+            for child in kids[:4]:self.assertNotIn(child[:8],nudge[0],'a report already delivered is not repeated')
+            self.assertEqual(rt.store.goal(parent)['state'],'working')
+            woke=[json.loads(r['data']) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='delegate_reports' ORDER BY seq",(parent,))]
+            self.assertEqual(woke[-1]['children'],kids[4:],'the event names exactly what this wake delivered')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_wake_with_more_reports_than_the_cap_counts_the_rest_and_collect_reads_them(self):
+        # #384 review: the wake text grew ~300 chars per child with no cap, so a parent with many children got a
+        # turn-sized message. The text now names WAKE_LINES children, counts the rest and points at collect; every
+        # id still goes in the delegate_reports event, so nothing is lost and a later wake's shown-set stays right.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            kids=[]
+            for i in range(delegate.WAKE_LINES+2):
+                child=rt.store._enqueue('c%d'%i,kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',0.5)
+                rt.store.delegate_done(child,'completed',
+                                       dict(outcome='completed',summary='report %d of the run'%i,steps=i))
+                kids.append(child)
+            with rt.store.transaction():rt.store.update(parent,state='waiting_children')
+            self.assertTrue(delegate.settle(rt))
+            text=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(parent,))][0]
+            self.assertEqual(sum(1 for k in kids if k[:8] in text),delegate.WAKE_LINES,text)
+            self.assertIn('- and 2 more reports: collect reads them',text)
+            self.assertLess(len(text),delegate.WAKE_LINES*350+400,'the text stays bounded')
+            woke=[json.loads(r['data']) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='delegate_reports' ORDER BY seq",(parent,))]
+            self.assertEqual(woke[-1]['children'],kids,'every id is in the event, named or counted')
+            self.assertEqual(len(delegate.collect(rt,parent)['children']),len(kids),'collect reads them all')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_failed_commit_is_in_the_report_next_to_the_merge_command(self):
+        # #384 review: _commit swallowed every failure while _survey printed a merge command anyway - the branch
+        # could still be the base commit with the child's files uncommitted, so the parent's merge merged nothing
+        # and the report did not say so. The failure now reaches the report as commit_failed, and a commit that
+        # works leaves the field out.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo3';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        wt=self.home/'worktrees'/'feed1234'
+        subprocess.run(['git','-C',str(repo),'worktree','add','-q','-b','delegate/feed1234',str(wt),'HEAD'],check=True)
+        (wt/'NOTES.md').write_text('one line\n')
+        hook=repo/'.git'/'hooks'/'pre-commit'
+        hook.write_text('#!/bin/sh\necho the hook says no >&2\nexit 1\n');hook.chmod(0o755)
+        base=subprocess.run(['git','-C',str(repo),'rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()
+        row=dict(child='feed1234',worktree=str(wt),repo=str(repo),branch='delegate/feed1234',base=base)
+        rep=delegate._survey(row)
+        self.assertIn('commit_failed',rep,rep)
+        self.assertIn('the hook says no',rep['commit_failed'])
+        self.assertIn('NOTES.md',rep['files'])
+        self.assertIn('git -C',rep['merge'])
+        hook.unlink()
+        rep=delegate._survey(row)
+        self.assertNotIn('commit_failed',rep,rep)
+        shown=subprocess.run(['git','-C',str(wt),'show','--stat','--name-only','HEAD'],
+                             capture_output=True,text=True).stdout
+        self.assertIn('NOTES.md',shown,'the second survey committed the file onto the branch the merge names')
+
+    def test_a_writing_child_cannot_reach_the_parent_repository_through_git_metadata(self):
+        # #384 review: `NESTED` names shell-like programs, so `git -c alias.x='!cmd' x`, `git -c core.pager=...`
+        # and `awk 'BEGIN{system(...)}'` ran a command with `_escaping` returning '' - and so did
+        # `git config core.fsmonitor '<cmd>'`, which is worse: a worktree's .git is a FILE naming
+        # <parent>/.git/worktrees/<name>, so that writes the PARENT repo's config and every later `git status`
+        # there runs <cmd> (reproduced). The worktree is not a jail (awk, make and python3 -c still write
+        # anywhere), but the two exact ways an ordinary command reaches the parent's repository are refused now,
+        # and so is rewriting the .git pointer itself.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'abcd1234')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ("cd %s && git config core.fsmonitor 'touch /tmp/pwn'"%wt,
+                    'cd %s && git config core.pager "sh -c ls"'%wt,
+                    'cd %s && git -C . config core.fsmonitor x'%wt,
+                    "cd %s && git -c alias.x='!touch /tmp/pwn' x"%wt,
+                    "cd %s && git -c core.pager='sh -c ls' log"%wt,
+                    'cd %s && git --exec-path=/tmp log'%wt,
+                    'cd %s && git --config-env=core.pager=E log'%wt,
+                    # `git -c` by another spelling: the GIT_CONFIG_* environment, which ran <cmd> from a worktree.
+                    # The rule is the GIT_ namespace, not a list of names, and it holds wherever the word stands:
+                    # `export GIT_CONFIG_COUNT=1 ...; git status` sets the same variable one word before the
+                    # command, in the one shell the whole command string runs in.
+                    "cd %s && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
+                    "GIT_CONFIG_VALUE_0='touch /tmp/pwn' git status"%wt,
+                    'cd %s && GIT_EXEC_PATH=/tmp git status'%wt,
+                    'cd %s && git status && GIT_CONFIG_GLOBAL=/tmp/gc git log'%wt,
+                    "cd %s && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager "
+                    "GIT_CONFIG_VALUE_0='sh -c ls'; git status"%wt,
+                    'cd %s && export GIT_EXEC_PATH=/tmp && git status'%wt,
+                    'cd %s && declare -x GIT_CONFIG_GLOBAL=/tmp/gc && git log'%wt,
+                    'cd %s && typeset GIT_PAGER=x && git log'%wt,
+                    'cd %s && local GIT_SSH_COMMAND=x && git fetch'%wt,
+                    'cd %s && set -a; GIT_CONFIG_COUNT=1; git status'%wt,
+                    'cd %s && echo x > .git'%wt, 'cd %s && rm .git'%wt,
+                    'cd %s && echo hi > .git/config'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        # the work a writing child exists for still runs: build, test, commit, log - and `-c` AFTER the
+        # subcommand means something else (`git switch -c x` creates a branch, `git commit -c HEAD` re-edits a
+        # message), so it is not refused (#384: my guard refused both until I probed it)
+        for cmd in ('cd %s && make test'%wt,'cd %s && python3 -m pytest -q'%wt,
+                    'cd %s && git status --short'%wt,'cd %s && git add -A && git commit -m x'%wt,
+                    'cd %s && git log --oneline -5'%wt,'cd %s && touch ok.txt'%wt,
+                    'cd %s && cat .git'%wt,'cd %s && touch gitignore'%wt,
+                    'cd %s && cat .github/workflows/x.yml'%wt,
+                    'cd %s && git switch -c x'%wt,'cd %s && git commit -c HEAD'%wt,
+                    'cd %s && git commit -C HEAD'%wt,'cd %s && git checkout -b y'%wt,
+                    'cd %s && git log -c'%wt,'cd %s && FOO=1 make test'%wt,
+                    # a word that merely contains `GIT_`, without `=`, is not an assignment
+                    'cd %s && grep GIT_ notes.txt'%wt,'cd %s && grep -r GIT_ .'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+        # the .git pointer is not a file a writing child may rewrite, by either file tool; `.github` and
+        # `gitignore` are ordinary files and stay writable
+        for path in ('.git','sub/.git','.git/config','sub/../.git'):
+            self.assertTrue(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
+            self.assertTrue(delegate.refused('edit',delegate.in_worktree(row,'edit',dict(path=path)),row),path)
+        for path in ('.github/x.yml','ok.txt','sub/notes.txt','gitignore'):
+            self.assertIsNone(delegate.refused('write',delegate.in_worktree(row,'write',dict(path=path)),row),path)
+        # and the guard says what it is: a tripwire that names awk by way of what it cannot see, not a jail
+        self.assertIsNone(delegate.refused('terminal',dict(command="cd %s && awk 'BEGIN{system(\"ls\")}'"%wt),row),
+                          'a run-time program is not claimed to be caught (the docstring says best effort)')
+
+    def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
+        # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the child was asked to overstep')),
+            call('delegate',dict(task='Ask your human whether to continue.',done_check='the answer is known')),
+            call('ask_user',dict(question='Shall I continue?',choices=['yes','no'])),
+            call('delegate',dict(task='Ask a grandchild.',done_check='a grandchild answered')),
+            call('define_done',dict(check='both calls were refused')),
+            call('verify',dict(evidence='both errors say so')),
+            call('finish',dict(summary='Both were refused: a child is read-only and one level deep.')),
+            call('verify',dict(evidence='the child reported both refusals')),
+            call('finish',dict(summary='The child could neither ask nor delegate.')))
+        self.cmd('once',['--goal','Have a child try to ask and delegate.'])
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        asked=[r['data']['result'] for r in events if r['data'].get('name')=='ask_user']
+        self.assertEqual(len(asked),1)
+        self.assertIn('delegate child',asked[0]['error'])
+        inner=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertIn('delegate child',inner[0]['error'],'a child cannot delegate again')
+        self.assertEqual(inner[-1]['outcome'],'completed')
+
+    def test_delegate_rejects_a_zero_cap(self):
+        # cap_usd=0 used to disable the cap (#382 review: `if not cap` read a zero as "no cap"), so a child could
+        # run uncapped. A cap is positive now, and a row from before the fix (cap 0) pauses instead of running.
+        from caminus.ember.resident import delegate
+        self.gates_on()
+        (self.home/'f.txt').write_text('x\n')
+        self.replies(
+            call('define_done',dict(check='the zero cap was refused')),
+            call('delegate',dict(task='Read f.txt.',done_check='f.txt was read',cap_usd=0)),
+            call('terminal',dict(command='ls')),
+            call('verify',dict(evidence='the delegate error says cap_usd must be more than 0')),
+            call('finish',dict(summary='The zero cap was refused.')))
+        goal=self.cmd('once',['--goal','Try to delegate with no cap.'])
+        self.assertEqual(goal['state'],'completed')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        res=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertEqual(len(res),1)
+        self.assertIn('cap_usd must be more than 0',res[0]['error'])
+        self.assertEqual(self.cmd('status')['workers'],[],'no child ran')
+        rt=Runtime(self.home)
+        try:
+            parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
+            rt.store.delegate_add(child,parent,'','','worker',0.0)
+            self.assertTrue(delegate.capped(rt,child),'a stored $0 cap is a cap, not "unlimited"')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+            with self.assertRaises(ValueError):
+                delegate._caps(rt,dict(cap_usd=0))
+            self.assertEqual(delegate._caps(rt,dict(cap_usd=0.25))[0],0.25)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_cannot_type_into_or_signal_a_terminal(self):
+        # A read-only child could send `signal`/`stdin` to a session another goal opened, and machine() hands out
+        # session ids (#382 review): input and signals are refused for a child, before the tool runs.
+        from caminus.ember.resident import delegate
+        sid='a'*32
+        for args in (dict(signal='TERM'),dict(session=sid,stdin='echo pwned\n'),dict(session=sid,signal='KILL')):
+            why=delegate.refused('terminal',args)
+            self.assertTrue(why and 'read-only' in why,args)
+        self.assertIsNone(delegate.refused('terminal',dict(session=sid)),'a poll of its own session is still reading')
+
+    def test_a_terminal_session_belongs_to_the_goal_that_opened_it(self):
+        # the other half of #382's P1: a job records the goal that opened it, and a delegate child may use only the
+        # sessions its own goal opened (a legacy job with no owner is not a child's either)
+        t=Terminal(self.home);jobs=self.home/'jobs'
+        sid=uuid.uuid4().hex
+        t.call(sid,dict(command='sleep 30',yield_ms=300),goal='goal-a')
+        legacy=uuid.uuid4().hex
+        t.call(legacy,dict(command='sleep 30',yield_ms=300))
+        try:
+            self.assertEqual(json.loads((jobs/sid/'request.json').read_text())['goal'],'goal-a')
+            with self.assertRaises(ValueError) as caught:
+                t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-b',child=True)
+            self.assertIn('another goal',str(caught.exception))
+            self.assertTrue(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-a',child=True)['running'],
+                            'a child may poll the session its own goal opened')
+            self.assertIn('phase',t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-b'),
+                          'a top-level goal is not restricted')
+            with self.assertRaises(ValueError):
+                t.call(uuid.uuid4().hex,dict(session=legacy,yield_ms=0),goal='goal-a',child=True)
+        finally:
+            t.signal_running(signal.SIGTERM)
+            self.wait(lambda:not t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'],10)
+
+    def test_a_child_gate_must_be_a_read_only_command(self):
+        # define_done's gate runs any shell command at finish (and after a change turn): a child called
+        # define_done(gate='touch gate_pwned && grep -q x f.txt'), finish ran it, and the report said completed
+        # (#382 review). A child's gate must read only, and a stored one is refused at finish too.
+        from caminus.ember.resident import delegate, judge
+        why=delegate.refused('define_done',dict(check='x',gate='touch gate_pwned && grep -q x f.txt'))
+        self.assertTrue(why and 'read-only command' in why,why)
+        self.assertIsNone(delegate.refused('define_done',dict(check='x',gate='grep -q x f.txt')))
+        self.assertIsNone(delegate.refused('define_done',dict(check='x')),'no gate is fine')
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            rt.store.update(child,gate="touch gate_pwned")
+            out=judge.review(rt,child,dict(summary='x'))
+            self.assertIn('read-only command',out['error'])
+            self.assertFalse((self.home/'gate_pwned').exists(),'the stored gate did not run')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_read_only_commands_cannot_run_programs(self):
+        # the filter is the only thing keeping a child's terminal read-only (#382 review): tar's checkpoint actions
+        # and compress programs, git grep -O and git ls-remote --upload-pack ran a script through it.
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for cmd in ("tar -tf t.tar --checkpoint=1 '--checkpoint-action=exec=touch tar_pwned'",
+                    'tar -tf x --checkpoint-action=exec=sh',
+                    'tar -Iprog -cf out.tar x',
+                    'tar --use-compress-program=prog -cf out.tar x',
+                    'git grep -Oprog x',
+                    'git grep --open-files-in-pager=sh x',
+                    'git ls-remote --upload-pack=prog origin',
+                    'git ls-remote --rsh-command=prog origin',
+                    # a GPU reset takes the owner's monitors or their model down (#382 review: READ_ONLY held
+                    # rocm-smi and amd-smi whole, so any flag at all classified as a read)
+                    'amd-smi reset -g 0',
+                    'amd-smi set -g 0 --fan 100',
+                    'amd-smi partition set -g 0',
+                    'rocm-smi --gpureset -d 0',
+                    'rocm-smi --resetclocks',
+                    'rocm-smi --setfan 100',
+                    'rocm-smi -d 0 --setpoweroverdrive 200',
+                    # flags that write a file or run a program on read-only programs (#382 review, third round)
+                    'git log --output=x',
+                    'git log --out=x',              # (git abbreviates long options: --out= is --output=)
+                    'git log --ext-diff',
+                    'git show --textconv HEAD',
+                    'git cat-file --filters blob HEAD:f',
+                    'git grep --textconv x',
+                    'git grep --op=sh x',
+                    'awk \'BEGIN{system("touch awk_pwned")}\' f',
+                    'awk \'{print | "sh"}\' f',
+                    'rg --pre sh x',
+                    'rg --hostname-bin sh x',
+                    'rg -z x',
+                    'file -C -m x',
+                    'file --compile -m x',
+                    'file -z x.gz',
+                    'date -s 2020-01-01',
+                    'date --set=2020-01-01',
+                    'date 010100002020',
+                    # --plugin dlopens a shared object: verified live, `nm --plugin evil.so a.out` ran its constructor
+                    'nm --plugin x.so a.out',
+                    'nm --pl=x a.out',
+                    'objdump --plugin x.so -d a.out',
+                    'readelf --plugin=x.so -h a.out'):
+            self.assertFalse(ro(cmd),cmd)
+        for cmd in ('git grep -n marker f.txt','git ls-remote origin','test -f f.txt',
+                    'git log -1 --stat','git show HEAD','git cat-file -p HEAD','git grep -n x',
+                    'rocm-smi','rocm-smi -a --json','rocm-smi -d 0 --showtemp','rocm-smi --showuse',
+                    'amd-smi list','amd-smi static --clock','amd-smi metric -g 0 --temp',
+                    'awk \'{print $1}\' f','awk -F: \'NR==2\' f','rg -n x','rg -n x f.txt',
+                    'file x','file -b x','date','date -u','date +%F','date -d yesterday','date -r f','date -Iseconds',
+                    'date --iso-8601','sed -n 1p f','nm a.out','objdump -d a.out','readelf -h a.out'):
+            self.assertTrue(ro(cmd),cmd)
+
+    def test_read_only_allow_lists_refuse_abbreviations_and_clusters(self):
+        # #382 review, fourth round: a deny-list can only lose. getopt accepts any unambiguous abbreviation of a long
+        # name (`tar --use=` is --use-compress-program, `--rsh=` is --rsh-command) and a short cluster can hide an
+        # option (`git grep -iOprog`). So each program names the options a read may pass and every other word - an
+        # unlisted flag, an abbreviation, a cluster with one unlisted letter - is a change. These are the review's
+        # reproductions, then an abbreviation of each long option the old deny-lists knew by full name.
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for cmd in ("tar --use=sh -cf out.tar x", "tar --rsh=sh -cf out.tar x",
+                    "tar --rmt-command=sh -cf out.tar x", "tar --index-file=/tmp/x -cf out.tar x",
+                    "git grep -iO'prog' x", 'git grep -iOprog x',
+                    # tar did all of these through a listing form; it is not a read at all now
+                    'tar -tf x.tar', 'tar -tf x.tar --checkpoint=1 --checkpoint-action=exec=sh', 'tar -Iprog -cf o x',
+                    # abbreviations of each long option the third round refused by its full spelling
+                    'git log --out=x', 'git log --o=x', 'git log --ext-d=x', 'git show --textc HEAD',
+                    'git cat-file --filter blob HEAD:f', 'git grep --op=sh x', 'git log --exec=x',
+                    'git log --upload-p=x', 'git log --show-sign=x', 'git log -1 --no-ext-dif',
+                    'rg --pre sh x', 'rg --pr=sh x', 'rg --hostname-bin sh x', 'rg --search-zip x', 'rg --search-z',
+                    'file --comp -m x', 'file --uncomp x.gz', 'nm --plug=x.so a.out', 'objdump --pl x.so -d a.out',
+                    'sort --out=/x/f in', 'sort --compress-p=sh in', 'sort --compress=sh in',
+                    'xxd --revert dump bin', 'xxd -rp dump bin', 'xxd -r dump bin',
+                    'unzip --he x.zip',               # (a lone --help lists nothing)
+                    # a value-taking long name whose value begins with '-', and a cluster that hides a refused letter
+                    'sort --output -x in', 'ls -laZ', 'head -5n f',
+                    # operands that are not read: a second file is the output the program writes
+                    'uniq a b', 'xxd a b',
+                    # git subcommands that write, and a bare git
+                    'git', 'git add x', 'git commit -m x', 'git checkout -b y', 'git branch newname', 'git branch -D main',
+                    'git remote add x y', 'git remote set-url origin z', 'git stash', 'git reflog expire --all'):
+            self.assertFalse(ro(cmd),cmd)
+        # and the reads these programs really do, including clustered short flags, `--` before a dash operand, and
+        # explicit no-<driver> options (which turn a driver off rather than run one)
+        for cmd in ('git grep -in x', 'git grep -n -- -x f', 'grep -- -x f', 'git log --no-ext-diff -1',
+                    'git diff --no-textconv --stat', 'git log --oneline -5', 'git log --pretty=oneline -3',
+                    'sort -rn in', 'sort -k2,2 -t, in', 'sort --reverse in', 'xxd -l 64 f', 'xxd -s 16 -c 8 f',
+                    'uniq -c f', 'uniq -f 1 f', 'cut -d: -f1 f', 'fold -w 40 f', 'file -b x', 'file --mime-type x',
+                    'find . -maxdepth 2 -name "*.py"', 'find . -type f -newer a', 'ls --color=never -la',
+                    'head -n 20 f', 'head -5 f', 'tail -n 5 f', 'unzip -l x.zip', '7z l x.7z',
+                    'git status --porcelain', 'git branch -a', 'git branch --list', 'git remote -v',
+                    'git remote show origin', 'git rev-parse --short HEAD', 'git describe --tags --always',
+                    'date -u', 'date +%F', 'date -d yesterday', 'date --iso-8601', 'ps aux', 'df -h', 'du -sh .',
+                    'free -h', 'readelf -h a.out', 'objdump -d a.out', 'nm a.out', 'strings -n 4 a.out'):
+            self.assertTrue(ro(cmd),cmd)
+
+    def test_cancelling_the_parent_stops_the_child(self):
+        # _stop is the daemon's stop, so a cancelled parent's child ran on (#382 review): the child's stop watches
+        # the parent, and a child stopped that way reports incomplete rather than running on its own brain later.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='cancelled')
+            report=delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertEqual(report['outcome'],'incomplete')
+            self.assertEqual(rt.store.goal(child)['state'],'cancelled')
+            self.assertIn('parent was cancelled',rt.store.goal(child)['error'])
+            self.assertEqual(rt.store.delegate(child)['outcome'],'incomplete')
+            with rt.store.transaction():
+                rt.store.update(child,state='paused')
+            with self.assertRaises(ValueError) as caught:
+                resume_goal(rt.store,child)
+            self.assertIn('delegate child',str(caught.exception),'a resumed child would run uncapped on the parent brain')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_writing_childs_worktree_is_named_by_its_whole_id(self):
+        # #384 review: branch and checkout were `delegate/<child[:8]>`, so two ids sharing eight characters
+        # collided, and `git worktree add -b` fails on a branch an earlier, un-merged child left behind. The whole
+        # id names both, so a leftover branch is just another branch.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo4';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        rt=Runtime(self.home)
+        try:
+            a='abc12345'+'0'*24;b='abc12345'+'1'*24     # two ids that share their first eight characters
+            top,base,wt_a,branch_a=delegate._worktree(rt,a,repo)
+            self.assertEqual(branch_a,'delegate/'+a)
+            self.assertEqual(wt_a,str(self.home/'worktrees'/a))
+            # the checkout goes, its branch stays - the state an un-merged child leaves behind
+            subprocess.run(['git','-C',str(repo),'worktree','remove','--force',wt_a],check=True)
+            top,base,wt_b,branch_b=delegate._worktree(rt,b,repo)
+            self.assertEqual(branch_b,'delegate/'+b)
+            self.assertEqual(wt_b,str(self.home/'worktrees'/b))
+            self.assertNotEqual(branch_a,branch_b)
+            self.assertTrue(os.path.isdir(wt_b))
+            # before the fix the second `worktree add -b delegate/abc12345` died on the first one's branch
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_assignment_value_is_checked_where_it_is_an_assignment(self):
+        # #384 review: `at_cmd and '=' in w: continue` skipped every check for a command-position assignment, so
+        # `X=~ make` and `X=../x make` named a home or a parent directory where `~` and `../x` alone are refused.
+        # A value is checked like any other word; a value holding `$` is left alone, and a word that only looks
+        # like an assignment (`grep X=~ f`) is not one.
+        from caminus.ember.resident import delegate
+        wt=str(self.home/'worktrees'/'feed5678')
+        row=dict(permissions='write',worktree=wt)
+        for cmd in ('cd %s && X=~ make'%wt,'cd %s && X=~/notes make test'%wt,
+                    'cd %s && X=../x make'%wt,'cd %s && make && Y=../../y make'%wt,
+                    'cd %s && export X=~/x'%wt):
+            why=delegate.refused('terminal',dict(command=cmd),row)
+            self.assertTrue(why and 'worktree' in why,(cmd,why))
+        for cmd in ('cd %s && FOO=1 make test'%wt,'cd %s && PATH=./bin:$PATH make'%wt,
+                    'cd %s && grep X=~ notes.txt'%wt,'cd %s && X=sub/../ok make'%wt,
+                    'cd %s && Y=ok.txt make'%wt):
+            self.assertIsNone(delegate.refused('terminal',dict(command=cmd),row),cmd)
+
+    def test_a_parent_stopped_while_its_child_runs_is_not_a_cap(self):
+        # #384 review: a child ended by its parent's PAUSE was reported `capped` whenever the pause text carried
+        # 'delegate' or 'budget' (the old _report read the words), so the parent read that a spend limit had ended
+        # a child its own pause ended. The stop is named in the child's state and the outcome is incomplete.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='paused',error='paused from the panel while the delegate ran')
+            report=delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertEqual(report['outcome'],'incomplete',report)
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('its parent stopped (paused)',rt.store.goal(child)['error'])
+            self.assertEqual(rt.store.delegate(child)['outcome'],'incomplete')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_stopped_childs_unchanged_worktree_is_removed_when_it_closes(self):
+        # #384 review: a stopped parent's writing child left its checkout and branch in the parent's repo, and only
+        # the report's discard line named them. _close removes both when the child changed nothing; a child that
+        # did change something keeps its checkout and the merge and discard commands.
+        from caminus.ember.resident import delegate
+        repo=self.home/'repo5';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'-c','user.email=a@b','-c','user.name=A','commit','-q','--allow-empty',
+                        '-m','base'],check=True)
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            for changed in (False,True):
+                child=rt.store._enqueue('c',kind='delegate')
+                top,base,wt,branch=delegate._worktree(rt,child,repo)
+                rt.store.delegate_add(child,parent,'','','worker',0.5,permissions='write',worktree=wt,branch=branch,
+                                      base=base,repo=top)
+                if changed:(Path(wt)/'NOTES.md').write_text('one line\n')
+                with rt.store.transaction():
+                    rt.store.update(child,state='paused',error='paused from the panel while the delegate ran')
+                report=delegate._close(rt,parent,delegate._report(rt,rt.store.delegate(child),
+                                                                  rt.store.goal(child),'incomplete'))
+                if changed:
+                    self.assertTrue(os.path.isdir(wt),'a child that changed something keeps its checkout')
+                    self.assertIn('NOTES.md',report['files'])
+                    self.assertIn('merge',report)
+                    self.assertNotIn('worktree_removed',report)
+                else:
+                    self.assertFalse(os.path.isdir(wt),'a child that changed nothing leaves no checkout behind')
+                    self.assertIn('worktree_removed',report)
+                    self.assertNotIn('merge',report)
+                    left=subprocess.run(['git','-C',str(repo),'branch','--list','delegate/'+child],
+                                        capture_output=True,text=True).stdout
+                    self.assertEqual(left.strip(),'','its branch is gone too')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_finished_delegate_child_cannot_be_continued(self):
+        # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
+        # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():rt.store.update(child,state='completed')
+        finally:rt.mail.close();rt.store.close()
+        refused=self.cmd('send',['--goal-id',child,'--continue','--stdin'],code=1,stdin='Keep going.')
+        self.assertIn('delegate child',refused['error'])
+        store=Store(self.home)
+        try:self.assertEqual(store.goal(child)['state'],'completed','the refused continue must not revive the child')
+        finally:store.close()
+
+    def test_a_wait_is_clipped_to_the_goals_time_budget(self):
+        # one wait could block for its full 30 minutes against a 600 s child cap; the deadline was read only at the
+        # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800.
+        from caminus.ember.resident import housemate
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait.',max_seconds=2)
+            t0=time.monotonic()
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,6)
+            self.assertEqual(r['happened'],'timeout')
+        finally:rt.mail.close();rt.store.close()
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
@@ -6971,7 +7709,8 @@ for line in sys.stdin:
         # overflowed the window (the goal paused on a context error, and resuming repeated it).
         from caminus.ember.resident.model import ModelContextError
         class BoundedModel:
-            def context_size(self):return 16384
+            size=16384
+            def context_size(self):return self.size
             def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
             def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                 if self.tokens(messages,tools or [])+256>self.context_size():
@@ -6979,19 +7718,31 @@ for line in sys.stdin:
                 if tools:return call('finish',dict(summary='Compacted and continued.'))
                 return dict(role='assistant',content='Prior work verified; continue.')
         (self.home/'MEMORY.md').write_text('# memory\n'+'remembered fact. '*1700)
-        rt=Runtime(self.home,model=BoundedModel())
+        model=BoundedModel()
+        rt=Runtime(self.home,model=model)
         try:
             gid=rt.store.enqueue('Continue the long task.')
             rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
+            # The window is sized from the measured head, not fixed: MEMORY.md is clipped to INDEX_CAP, so a
+            # smaller file does not shrink the pinned head (the prompt, the tool schemas, the goal and the
+            # trailing context). A fixed 16K window left the summary 174 tokens of room, and one more prompt
+            # section (delegate's, #342) turned the compaction into a refusal instead of a summary.
+            while True:
+                size=model.size
+                reserve=min(rt._reply_limit(),size//4)
+                summary=max(2048,min(16384,size//64))
+                head=rt.model.tokens([rt.system(gid),rt.store.goal(gid)['messages'][0],rt.context_message(gid)],TOOLS)
+                if size-reserve-256-head-512>=summary:break
+                model.size*=2
             # The filler is sized from the measured request without it, so the precondition below (the history
             # alone fits with the reply budget, only the trailing context overflows) holds as tools are added.
             base=rt.store.goal(gid)['messages']+[dict(role='assistant',content='observation '*20) for _ in range(10)]
-            room=16384-4096-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
+            room=size-reserve-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
             messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*(room*4))]+base[len(rt.store.goal(gid)['messages']):]
             rt.store.update(gid,messages=messages)
             history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
             # The history alone leaves room for the reply budget too, so only the trailing context overflows.
-            self.assertLess(history+4096,16384,'the history alone fits with the reply budget')
+            self.assertLess(history+reserve,size,'the history alone fits with the reply budget')
             result=rt.run(target=gid)
             self.assertEqual(result['state'],'completed',[(e['kind'],str(e['data'])[:160]) for e in rt.store.events()])
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))

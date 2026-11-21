@@ -81,6 +81,15 @@ def wait(rt, gid, until, target='', timeout=300):
                 return f'session {str(target)[:8]} ended (exit {st.get("exit_code", "?")}); poll it for the output'
             return False
     # until == 'message' has no condition of its own: the interruptions below are what it waits for.
+    # A goal's own time budget bounds the wait too: one wait blocked for its full 30 minutes against a 600 s child
+    # cap, and the deadline was checked only at the next tick (#382 review).
+    g = rt.store.goal(gid)
+    if g.get('deadline'):
+        left = g['deadline'] - time.time()
+        if left <= 0:
+            return dict(happened='the goal\'s time budget is used up', waited_s=0,
+                        note='the goal pauses at its next step; do not wait again')
+        timeout = max(1, min(timeout, int(left) + 1))
     seen_inbox = _inbox_count(rt, gid)
     queued = _queued(rt, gid)
     while True:

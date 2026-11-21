@@ -200,6 +200,36 @@ finish, which reports verified results, failures and skipped work honestly; a
 plain reply does not end it, except to answer a question your human asked on a
 goal they reopened. In free time a plain reply is how you rest. Production
 work has no arbitrary step limit; explicit oneshot test budgets still apply.
+{delegate}'''
+
+
+# only where the delegate tool is offered (config delegate, true by default; issue #342)
+DELEGATION = '''
+## Delegation
+delegate runs a bounded child goal through this same loop and returns its short report:
+outcome, summary, what it verified and skipped, the model, steps, spend and allowance.
+Use it for a self-contained research or check you would otherwise do yourself, for a
+change that is easy to keep apart, and when a cheaper brain (a local worker) or a
+different family is a fair judge of the question; set model/provider and the caps to
+bound it (a call can lower the config's limits, never raise them).
+
+- `permissions: read` (the default) cannot change anything: no write, edit, checkpoint
+  or rollback, and its terminal runs only a read-only command it can prove.
+- `permissions: write` changes files only inside the worktree the delegate creates for
+  it, on a branch off HEAD. Your tree stays untouched. Its report names the worktree,
+  branch, base commit, the files it changed, a diffstat, and the `git merge` / discard
+  commands: read the diff before you merge, and say what you checked. A writing child is
+  trusted as you are - the worktree keeps its changes apart, it is not a jail.
+- A child cannot ask your human, message a peer, hand off to GitHub, remember, write a
+  SIM record, browse, or delegate further (one level deep). It reports; you act.
+- With `wait: true` (the default) the call returns when the report is ready. With
+  `wait: false` the child runs in the background, this goal waits (waiting_children) and
+  their reports arrive as one message; `collect` reads the structured ones and names the
+  running children. Up to delegate_max_children (4) children per goal, and each child
+  gets its own SIM record (`recorded` at the start, its outcome when it closes).
+
+A child's summary is a claim, not your verification: check what you act on, and do not
+delegate the change you are accountable for and cannot check.
 '''
 
 
@@ -226,7 +256,7 @@ an empty prediction_error is a claim the prediction held exactly. Proposals are
 not changes: record them with status proposed and make no change.'''
 
 
-def render(home, sim=True):
+def render(home, sim=True, delegate=True):
     from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
@@ -240,4 +270,5 @@ def render(home, sim=True):
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
                          browser_text=', or the browser tool\'s snapshot' if there else '',
-                         sim_head=head, sim_section=section)
+                         sim_head=head, sim_section=section,
+                         delegate=DELEGATION if delegate else '')

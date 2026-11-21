@@ -259,6 +259,13 @@ def review(rt, gid, result):
     g = rt.store.goal(gid)
     gate = g.get('gate')
     if gate:
+        from . import delegate
+        if rt.store.delegate(gid) and not delegate.read_only(gate):
+            # a child's gate runs in a shell here (and after a change turn): one stored before the refusal
+            # existed must not run either (#382 review)
+            return dict(error='a delegate child is read-only: its gate must be a read-only command, because it '
+                               'runs in a shell when the goal finishes. Run the check in the terminal and report '
+                               'what it showed')
         ok, out = run_gate(rt.home, gate, stop=getattr(rt, 'stopping', None))
         if not ok and getattr(rt, 'stopping', lambda: False)():
             return dict(error='your runtime was stopped while the gate ran, so nothing was decided: finish again')

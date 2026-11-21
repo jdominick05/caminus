@@ -11,6 +11,41 @@ import (
 	"testing"
 )
 
+// The workers row (#342, #382 review): the status sorts running children first and then newest first, so the
+// "last" child is the first finished one, not ws[len-1] (the oldest); and the cap counts money and the Go plan's
+// allowance, so the row shows their sum.
+func TestWorkersRowNamesTheNewestFinishedChildAndCountsAllowance(t *testing.T) {
+	if got := workersRow(nil); got != "" {
+		t.Fatalf("no children: %q", got)
+	}
+	ws := []residentWorker{
+		{Child: "b", SpendUSD: 0.01, AllowanceUSD: 0.02, CapUSD: 0.5, Outcome: "completed"},
+		{Child: "a", SpendUSD: 0.03, AllowanceUSD: 0, CapUSD: 0.5, Outcome: "capped"},
+	}
+	if got, want := workersRow(ws), "no children running · last completed $0.0300"; got != want {
+		t.Fatalf("last row: %q, want %q", got, want)
+	}
+	ws = []residentWorker{
+		{Child: "r1", SpendUSD: 0, AllowanceUSD: 0.01, CapUSD: 0.5, Running: true},
+		{Child: "r2", SpendUSD: 0.02, AllowanceUSD: 0.02, CapUSD: 0.25, Running: true},
+	}
+	if got, want := workersRow(ws), "2 children · $0.0500 of $0.75"; got != want {
+		t.Fatalf("running row: %q, want %q", got, want)
+	}
+	// #384 review: with one child still running, a finished child's spend vanished from the row (the loop
+	// added only the running ones), so the total the card showed fell while the finished card below it still
+	// read its own spend. The label counts the running children; the money is every child the card lists. The
+	// cap is the running children's alone: a finished child's cap is not a limit anything is still under, and
+	// summing all rows drifted the "$Y" upward over a session (#384 review).
+	ws = []residentWorker{
+		{Child: "r1", SpendUSD: 0.01, CapUSD: 0.5, Running: true},
+		{Child: "f1", SpendUSD: 0.02, CapUSD: 0.25, Outcome: "completed"},
+	}
+	if got, want := workersRow(ws), "1 child · $0.0300 of $0.50"; got != want {
+		t.Fatalf("mixed row: %q, want %q", got, want)
+	}
+}
+
 func TestResidentGoalCommandUsesStdin(t *testing.T) {
 	m := emberModel{cli: []string{"caminus"}, agentName: "resident"}
 	c := residentCommand(m, []string{"send", "resident", "--stdin", "--json"}, "goal with $(shell) and secrets")
