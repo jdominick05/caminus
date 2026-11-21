@@ -290,7 +290,7 @@ check(extra == {'kv': 'q8'} and ox['kv'] == 'q8' and 'Q8_0' in note and 'chosen 
 arch.Arch.context_fit = _ARCH_FIT
 bad = []
 for name, a in arch.ARCHS.items():
-    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen4exp'): continue
+    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen4exp', 'qwen35moe-own'): continue
     try: a.long_mode(dict(model=P, long_context=True)); bad.append(name)
     except ValueError as e:
         if '--long-context' not in str(e): bad.append(name)

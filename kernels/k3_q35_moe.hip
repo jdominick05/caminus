@@ -29,6 +29,7 @@
 #define ATTN_VH 8
 #define OWN_ADD_MAX_S 9
 #define K3_Q35_MOE
+#define K3_Q35_YARN          // (OP_QK_NR's YaRN form: Seg.aux = the per-dim factor table, Seg.work = mscale's bits)
 #define K3_Q35_ATTN_SPLIT   // decode attention as the split pair (kernels/k3_attn_split.h), as the dense line's modules
 // The two pins the other modules found for this budget (measured on this object, compile only):
 //   K3_Q3M_ADD_RMS_PIN    OP_OWN_ADD_RMS16 derives its row length and slot count itself instead of leaving values made

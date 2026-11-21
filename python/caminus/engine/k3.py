@@ -1096,12 +1096,16 @@ class Engine:
                              S, 1, 0, team, 0, 0))
         return len(self.segs) - 1
 
-    def qk_nr(self, x, head_stride, heads, dim, w, pos, out, n_rot, theta_scale, eps, dep=-1, team=-1):
-        """per head: rms_norm(x) * w, then NEOX RoPE on the first n_rot dims at position pos (int32 [1] on the device)"""
-        self.keep += [x, w, pos, out]
+    def qk_nr(self, x, head_stride, heads, dim, w, pos, out, n_rot, theta_scale, eps, dep=-1, team=-1, yarn=None):
+        """per head: rms_norm(x) * w, then NEOX RoPE on the first n_rot dims at position pos (int32 [1] on the device).
+        yarn: (table fp32 [n_rot / 2] on the device, mscale) for the YaRN form the qwen35moe module compiles
+        (kernels/k3_q35_ops.h OP_QK_NR, K3_Q35_YARN): theta = pos * theta_scale^j * table[j], cos / sin * mscale"""
+        self.keep += [x, w, pos, out] + ([] if yarn is None else [yarn[0]])
         eb = int(np.array([eps], dtype=np.float32).view(np.int32)[0])
+        wb = 0 if yarn is None else int(np.array([yarn[1]], dtype=np.float32).view(np.int32)[0])
         self.segs.append(Seg(OP_QK_NR, self.T * heads, dep, 1, w.data_ptr(), None, x.data_ptr(), pos.data_ptr(), out.data_ptr(),
-                             theta_scale, self.T * heads, dim, n_rot, 0, team, head_stride, eb))
+                             theta_scale, self.T * heads, dim, n_rot, wb, team, head_stride, eb, 0,
+                             0 if yarn is None else yarn[0].data_ptr()))
         return len(self.segs) - 1
 
     def kv_append(self, k, v, cache, pos, q8=False, dep=-1, team=-1):

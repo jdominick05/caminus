@@ -63,6 +63,9 @@ if __name__ == '__main__':
     ap.add_argument('--llama-kv', default=None, choices=('f16', 'q8_0'), help="llama.cpp's KV type in --llama (default: the engine's)")
     ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--ffn-share', type=float, default=0.5)
     ap.add_argument('--dump', default=None, help='save our logits rows (npy) for a bitwise comparison of two builds')
+    ap.add_argument('--yarn', type=float, default=None,
+                    help='the YaRN factor (qwen35moe only): the engine builds the long-context rope from it, so the '
+                         'reference and llama.cpp must be run in the same mode for the rows to be comparable')
     ap.add_argument('--speed', type=int, default=0, help='then this many greedy passes (step_token) after the rows: median ms per token')
     A = ap.parse_args()
     arch = None
@@ -117,6 +120,14 @@ if __name__ == '__main__':
         ours = np.stack(rows); rep_ok = not bad
         print(('PASS' if rep_ok else 'FAIL') + f' the replicated residual is the same bits on both cards after every token'
               + ('' if rep_ok else f' (differs at positions {bad[:8]})'), flush=True)
+    elif arch == 'qwen35moe':
+        # (the MoE line on own code: Moe35Own's tape. --yarn F builds the long-context rope the same way the serve does,
+        #  so a YaRN run is gated against a YaRN reference and a YaRN llama.cpp, never against native rows)
+        from caminus.engine.q35_moe import Moe35Own
+        print(torch.cuda.get_device_name(0), flush=True)
+        eng = Moe35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module, yarn=A.yarn)
+        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}', flush=True)
+        ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
     else:
         from caminus.engine.q35_dense import Dense35Own
         print(torch.cuda.get_device_name(0), flush=True)

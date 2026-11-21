@@ -107,6 +107,20 @@ def block_kinds(F):
     return [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(trunk_blocks(F))]
 
 
+def yarn_table(theta_scale, n_rot, factor, n_ctx=None):
+    """The rope op's per-dim multipliers and magnitude scale, from caminus.rope's one YaRN recipe.
+
+    `rope.yarn_freqs` gives each pair's frequency (the angle at position p is p * freq_j); this op computes
+    theta_scale**j = base**(-2j/n_rot) itself, so the multiplier it multiplies in is freq_j divided by that. Returns
+    (m fp32 [n_rot / 2], mscale): the op multiplies its angle by m(j) and cos / sin by mscale.
+    """
+    from ..rope import yarn_freqs, mscale
+    base = theta_scale ** (-n_rot / 2.0)   # (theta_scale = base ** (-2 / n_rot))
+    j = np.arange(n_rot // 2, dtype=np.float64)
+    inv = base ** (-2.0 * j / n_rot)
+    return (yarn_freqs(n_rot, base, factor, n_ctx) / inv).astype(np.float32), mscale(factor)
+
+
 def _shapes(F):
     """the header's shapes the engine and its projection read (qwen35moe: no dense feed_forward_length; the experts'
     and the shared expert's widths are separate keys)"""
@@ -149,7 +163,7 @@ class Moe35Own:
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
                  rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1,
-                 feature_layers=(), q8=False):
+                 feature_layers=(), q8=False, yarn=None):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
@@ -183,6 +197,15 @@ class Moe35Own:
         libm = ctypes.CDLL('libm.so.6'); libm.powf.restype = ctypes.c_float; libm.powf.argtypes = [ctypes.c_float, ctypes.c_float]
         self.theta_scale = libm.powf(float(hp('rope.freq_base')), -2.0 / self.nrot)
         n_ctx = int(hp('context_length'))
+        # (the module always reads a table: all-ones and mscale 1.0 is the plain rope bit for bit, so the op needs no
+        #  NULL branch and keeps its register pin)
+        self.yarn = yarn_table(self.theta_scale, self.nrot, float(yarn), n_ctx=n_ctx) if yarn is not None \
+            else (np.ones(self.nrot // 2, dtype=np.float32), 1.0)
+        self.yarn_factor = yarn
+        # (the engine key must tell a native park from a YaRN one: the module name is the same in both modes, so without
+        #  this the disk tier could restore KV rows rotated by the other rope into a live slot)
+        self.rope_key = None if yarn is None else f'yarn{float(yarn):g}'
+        if yarn is not None: n_ctx = int(n_ctx * float(yarn))   # (YaRN stretches the window by its factor)
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or not 1 <= max_ctx <= n_ctx:
             raise ValueError(f'max_ctx {max_ctx!r}: 1 .. {n_ctx}')
         if isinstance(spec_T, bool) or not isinstance(spec_T, (int, np.integer)) or not 1 <= spec_T <= 4:
@@ -367,6 +390,8 @@ class Moe35Own:
         D, hd, nh, nkv, S, NK, NV, ffn = self.D, self.hd, self.nh, self.nkv, self.S, self.NK, self.NV, self.ffn
         CH, KD, VD, QH = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd
         B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device='cuda')
+        # (the YaRN table on the card once: the rope ops read it by pointer, Seg.aux)
+        yy = (torch.tensor(self.yarn[0], dtype=torch.float32, device='cuda'), self.yarn[1])
         f16 = torch.float16
         KU, FF, FS = self.k_used, self.ffn, self.ffn_shexp
         s = self.buf = dict(x=B(D), h=B(D), h16=B(D, f16), blk=B(D),
@@ -442,13 +467,13 @@ class Moe35Own:
                 o_ = E.also(mv(d['so'], s['fin16'], s['blk'], nm), sv)
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
-                kd = E.qk_nr(s['kr'], hd, nkv, hd, d['kn'], self.pos, s['ko'], self.nrot, self.theta_scale, self.eps, dep=k_)
+                kd = E.qk_nr(s['kr'], hd, nkv, hd, d['kn'], self.pos, s['ko'], self.nrot, self.theta_scale, self.eps, dep=k_, yarn=yy)
                 if q8:
                     kd = E.hadamard(s['ko'], 256, dep=kd)
                     v_ = E.hadamard(s['vr'], 64, dep=v_)
                 ap = E.also(E.kv_append(s['ko'], s['vr'], d['cache'], self.pos, q8=q8, dep=kd), v_)
                 q_ = mv(d['q'], s['h16'], s['qf'], n1)
-                qd = E.qk_nr(s['qf'], 2 * hd, nh, hd, d['qn'], self.pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_)
+                qd = E.qk_nr(s['qf'], 2 * hd, nh, hd, d['qn'], self.pos, s['qo'], self.nrot, self.theta_scale, self.eps, dep=q_, yarn=yy)
                 if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
                                        q8=q8, **akw()), qd)
