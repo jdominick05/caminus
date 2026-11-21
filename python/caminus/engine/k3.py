@@ -163,11 +163,13 @@ Q35MOE_MODULES = ('k3_q35_moe',)
 # Verify starts with the unpacked PART, independent of the F16 packed reader.
 # One card only: the two-card Q8 objects wait for their own fault investigation.
 Q35_KV_Q8_BASE = {name + '_kvq8': name for name in (
-    'k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_gsq')}
+    'k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_gsq', 'k3_q35_moe')}
 Q35_KV_Q8_OF = {base: name for name, base in Q35_KV_Q8_BASE.items()}
 Q35_KV_Q8_MODULES = tuple(Q35_KV_Q8_BASE)
 Q35S_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35S_MODULES)
 Q35T_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35T_MODULES)
+# (the MoE line's Q8 object is a MoE module, not a dense one: it must keep Q35MOE_OPS and the MoE tape checks)
+Q35MOE_MODULES += tuple(m for m, base in Q35_KV_Q8_BASE.items() if base in Q35MOE_MODULES)
 Q35R_MODULES += (Q35_KV_Q8_OF['k3_q35_gsq'],)
 Q35SV_MODULES += (Q35_KV_Q8_OF['k3_q35_swift_ver'],)
 Q35TV_MODULES += (Q35_KV_Q8_OF['k3_q35_tcap_ver'],)

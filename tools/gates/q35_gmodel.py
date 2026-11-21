@@ -75,7 +75,8 @@ if __name__ == '__main__':
         F = ggufio.GGUFFile(A.gguf); arch = F.arch; F.close()
         coder = arch == 'qwen4exp'
         kv = A.kv or ('q8' if coder else 'f16')
-        if not coder and kv != 'f16': ap.error(f'--kv {kv}: the dense line\'s gate runs the F16 cache only')
+        if not coder and kv != 'f16' and arch != 'qwen35moe':
+            ap.error(f'--kv {kv}: the dense line\'s gate runs the F16 cache only')
         if coder and not A.llama: ap.error('the Coder\'s gate needs --llama (its bound and the reference\'s confirmation)')
         lkv = A.llama_kv or {'q8': 'q8_0', 'f16': 'f16'}[kv]
         if A.llama and {'q8': 'q8_0', 'f16': 'f16'}[kv] != lkv:
@@ -125,8 +126,8 @@ if __name__ == '__main__':
         #  so a YaRN run is gated against a YaRN reference and a YaRN llama.cpp, never against native rows)
         from caminus.engine.q35_moe import Moe35Own
         print(torch.cuda.get_device_name(0), flush=True)
-        eng = Moe35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module, yarn=A.yarn)
-        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}', flush=True)
+        eng = Moe35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module, yarn=A.yarn, q8=A.kv == 'q8')
+        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}; kv {eng.kv_format_id or "f16"}', flush=True)
         ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
     else:
         from caminus.engine.q35_dense import Dense35Own
