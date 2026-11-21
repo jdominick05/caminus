@@ -6,6 +6,8 @@ step() wall time against the launch's GPU time (events) on the plain module.
   tools/guard.sh LOG 900 python -I benchmarks/q3moe_trace.py GGUF [--warm 8] [--tokens 10]
 --engine dense35: the same for the dense qwen35 line's Dense35Own (engine/q35_dense.py; Swift 1.5, module
 k3_q35_swift_trace): per-stage hop and span in Caminus's own persistent engine, the stage cost a model is sized on.
+--engine q35moe: the same for the qwen35moe line's Moe35Own (engine/q35_moe.py; Qwen3.6-35B-A3B, module
+k3_q35_moe_kvq8_trace: its Q8 KV tape; the segments carry the tensor names the engine built the tape with).
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -15,19 +17,23 @@ from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q3moe_one import Q3MoEOne
 from caminus.engine.q35_dense import Dense35Own
+from caminus.engine.q35_moe import Moe35Own
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--warm', type=int, default=8)
 ap.add_argument('--tokens', type=int, default=10)
 ap.add_argument('--detail', type=int, default=None, help='print this layer\'s segments (last traced token)')
 ap.add_argument('--modules', nargs='+', default=None, help='one engine per run: the card holds one copy (default: the '
                                                            'engine\'s _trace module)')
-ap.add_argument('--engine', choices=('q3moe', 'dense35'), default='q3moe')
+ap.add_argument('--engine', choices=('q3moe', 'dense35', 'q35moe'), default='q3moe')
 A = ap.parse_args()
-if A.modules is None: A.modules = ['k3_q35_swift_trace' if A.engine == 'dense35' else 'k3_q3m_lean_trace']
-ENG = Dense35Own if A.engine == 'dense35' else Q3MoEOne
+if A.modules is None: A.modules = ['k3_q35_swift_trace' if A.engine == 'dense35' else
+                                   'k3_q35_moe_kvq8_trace' if A.engine == 'q35moe' else 'k3_q3m_lean_trace']
+ENG = {'q3moe': Q3MoEOne, 'dense35': Dense35Own, 'q35moe': Moe35Own}[A.engine]
+KW = {'q35moe': dict(q8=True)}.get(A.engine, {})   # (the qwen35moe trace and plain modules are its Q8 KV objects)
 OPN = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int)}
 
 
-def seg_name(sg):
+def seg_name(sg, nm=None):
+    if nm: return nm.split('.', 2)[-1] if nm.startswith('blk.') else nm   # (the q35moe engine names matvecs by tensor)
     n = OPN.get(sg.op, str(sg.op))
     if n == 'OWN_MV':
         role = {(4096, 2048): 'q', (512, 2048): 'k|v', (2048, 4096): 'o', (151936, 2048): 'head'}.get((sg.N, sg.K))
@@ -40,8 +46,9 @@ def seg_name(sg):
 
 print(torch.cuda.get_device_name(0), flush=True)
 for module in A.modules:
-    eng = ENG(A.gguf, max_ctx=256, module=module); E = eng.E
-    S = len(E.segs); G = E.grid; names = [seg_name(sg) for sg in E.segs]
+    eng = ENG(A.gguf, max_ctx=256, module=module, **KW); E = eng.E
+    S = len(E.segs); G = E.grid
+    names = [seg_name(sg, (getattr(eng, 'seg_names', None) or {}).get(i)) for i, sg in enumerate(E.segs)]
     tok = 785
     for _ in range(A.warm): tok = int(torch.argmax(eng.step(tok)))
     if module.endswith('_trace'):
@@ -63,16 +70,18 @@ for module in A.modules:
                 dd[s] = max((end[d] for d in deps), default=0.0)
             per_seg.append((start, end, dd)); totals.append(end.max())
             if A.detail is not None and len(totals) == A.tokens:      # the last traced token, one layer's segments
-                per = (S - 3) // len(eng.L); n0 = 1 + per * A.detail      # (the embedding, then per segments per layer)
+                ls = getattr(eng, 'layer_seg', None)
+                if ls: n0, n1 = ls[A.detail][1], (ls[A.detail + 1][1] if A.detail + 1 < len(ls) else S)
+                else: per = (S - 3) // len(eng.L); n0, n1 = 1 + per * A.detail, 1 + per * (A.detail + 1)   # (the embedding, then per segments per layer)
                 print(f'\nlayer {A.detail}, last traced token (us from the token start): seg name ntask nWG | claim min/med | '
                       f'wait end min/med | first task end min | last publish | deps end')
-                for s_ in range(max(0, n0), min(S, n0 + per + 2)):
+                for s_ in range(max(0, n0), min(S, n1 + 2)):
                     ran = T[:, s_, 4] < E.segs[s_].ntask; c = (T[ran, s_, 0] - t0) / 100; w = (T[ran, s_, 1] - t0) / 100
                     f = (T[ran, s_, 2] - t0) / 100
                     p7 = (T[ran, s_, 7] - t0) / 100      # each workgroup's last publish in this segment
                     op1 = (T[ran, s_, 2] - T[ran, s_, 1]) / 100; pb1 = (T[ran, s_, 3] - T[ran, s_, 2]) / 100   # first task: op, publish
                     q = lambda a: f'{np.median(a):5.1f} {np.percentile(a, 90):5.1f} {a.max():5.1f}'
-                    print(f'  {s_:4d} {names[s_]:13s} {E.segs[s_].ntask:5d} {int(ran.sum()):4d} | {c.min():8.1f} {np.median(c):8.1f} | '
+                    print(f'  {s_:4d} {names[s_]:18s} {E.segs[s_].ntask:5d} {int(ran.sum()):4d} | {c.min():8.1f} {np.median(c):8.1f} | '
                           f'{w.min():8.1f} {np.median(w):8.1f} | {f.min():8.1f} | {end[s_]:8.1f} | {dd[s_]:8.1f} | WG done '
                           f'p50 {np.median(p7):8.1f} p90 {np.percentile(p7, 90):8.1f} | 1st task op p50/p90/max {q(op1)} | publish {q(pb1)}')
         st = np.median(np.stack([p[0] for p in per_seg]), 0); en = np.median(np.stack([p[1] for p in per_seg]), 0)
