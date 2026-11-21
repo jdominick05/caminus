@@ -34,6 +34,7 @@ from . import planning
 from . import sandbox
 from . import sim
 from . import browser
+from . import language
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # The todo shapes models are trained on (Qwen Code's todo_write: id, content, status; Claude Code's TodoWrite: content,
@@ -548,7 +549,8 @@ class Runtime:
         agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, and the measured
         budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
         to invalidate the cache at the first token and force a full re-read of the whole transcript."""
-        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self)))
+        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self),
+                                                         language=language.owner(self)['name']))
 
     def context_message(self,gid=None):
         """What the model knows about itself, delivered after the history so the cached prefix survives.
@@ -1825,14 +1827,32 @@ class Runtime:
             if k=='assistant':break
         return ''
 
+    def _plain_dispatch(self, gid):
+        """(how, turn, count) for a plain reply, the one place `_plain_reply`'s branches live.
+
+        `_plain_reply` dispatches on this and the language check reads `turn` from it, so a change to one branch
+        cannot leave the other saying a turn comes when none does (review P2: the two were written twice, and a
+        nudge queued for a turn that never comes defers the `_finish` on the same tick). `turn` is whether a turn
+        follows this reply: a reopened goal's first plain reply is prompted on, its second finishes; an answer to
+        the human's question is told to carry on; otherwise the third plain reply in a row pauses the goal.
+        `count` is the reply's place in a plain run (0 for the two answer branches), which `_plain_reply` records.
+        """
+        how = self._answering(gid)
+        if how == 'reopened':
+            return how, gid not in self.__dict__.get('_reopen_prompted', set()), 0
+        if how == 'asked':
+            return how, True, 0
+        count = self.plain_replies.get(gid, 0) + 1
+        return how, count < PLAIN_TEXT_LIMIT, count
+
     def _plain_reply(self, gid):
         """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal. A reply to the
         human is not that: on a finished goal they reopened with a message, the answer ends the turn and the goal is
         complete again (it was nudged back to work instead, and with nothing left to do it re-ran its done check in a
         loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted."""
-        how=self._answering(gid)
+        how, turn, count = self._plain_dispatch(gid)
         prompted=self.__dict__.setdefault('_reopen_prompted',set())
-        if how=='reopened' and gid not in prompted:
+        if how=='reopened' and turn:
             # The agent decides, not a guess from its words: a reopened goal is either a question (the answer is
             # the whole job) or new work ("now do step 6", answered "Sure, I'll start"). One gentle prompt; a second
             # plain reply in a row completes it, so the old loop cannot come back.
@@ -1862,8 +1882,7 @@ class Runtime:
                 self.store.update(gid,messages=messages)
                 self.store.event('plain_answer',{},gid)
             return True
-        count=self.plain_replies.get(gid,0)+1
-        self.plain_replies[gid]=count
+        count=self.plain_replies[gid]=count
         with self.store.transaction():
             if self.store.goal(gid)['state']=='cancelled':return True
             if count>=PLAIN_TEXT_LIMIT:
@@ -2199,8 +2218,8 @@ class Runtime:
                 if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
                     self._tools = None        # an off session is not offered the sim tool, and an on one is
                 self.config[k] = fresh[k]
-        for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
-            if k in fresh:
+        for k in ('eyes', 'providers', 'language'):   # (`agent eyes` / `agent provider` take effect at the next image
+            if k in fresh:                            #  read, `agent language` at the next turn)
                 self.config[k] = fresh[k]
             else:
                 self.config.pop(k, None)
@@ -2353,11 +2372,26 @@ class Runtime:
             reasoning = reply.pop('reasoning_content','')
             if not self.store.model_reply(gid,reply,reasoning=reasoning,tokens=self._reply_tokens()):
                 return True
+            # A reply that slid into another language is an event every turn, and one nudge to the goal's next
+            # turn when it is due (issue #354); the prompt names the language, this is what holds a brain that
+            # drifts past it anyway. `due` is whether a turn follows this reply. Tool calls do; a plain reply
+            # ends the goal only on the paths below that finish or pause it, and a loop-gated one leaves the
+            # plain-text nudge behind, so its drift is nudged rather than recorded one turn late (review P2).
+            # A nudge for a turn that never comes is worse than late: the unconsumed inbox row would defer the
+            # completion `_finish` makes on this very tick.
+            plain = not reply.get('tool_calls')
+            follows = True
+            if plain:
+                kind = self.store.goal(gid).get('kind', 'work')
+                follows = kind not in FREE_KINDS and self.loop_gates and self._plain_dispatch(gid)[1]
+            if (note := language.check(self, gid, reply.get('content') or '', due=follows)):
+                with self.store.transaction():
+                    self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
             self.progress[gid] = time.time()
-            if not reply.get('tool_calls'):
+            if plain:
                 # A goal ends only through the finish tool, which runs the done check. Plain text is not
                 # completion: nudge the agent back to the work, and pause the goal after three in a row.
-                if self.store.goal(gid).get('kind','work') in FREE_KINDS:
+                if kind in FREE_KINDS:
                     # Free time is not graded: a plain reply is the resident choosing to rest.
                     self._finish(gid,reply['content'])
                 elif self.loop_gates:

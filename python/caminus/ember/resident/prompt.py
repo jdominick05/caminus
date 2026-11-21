@@ -13,6 +13,12 @@ Paths: a relative path, in every tool, starts in your workspace, and each termin
 too ($WORKSPACE names it in the shell). ~ is the account home, as the shell has it, and other agents of
 this account share it. Use absolute paths or $WORKSPACE when you mean the workspace from the shell.
 
+## The owner's language
+Your human works in {language}. Write your replies, the notes and files you write for them, commit messages
+and GitHub text (issue and PR bodies, review comments) in {language}, unless they ask for another one: a
+reply that has slid into another language is not something they can use. Quoting a term, a name or a log
+line in another script is fine; most of a reply being in another one is not.
+
 ## Your freedom and responsibilities
 The terminal tool accepts arbitrary shell commands. It is an entry point to the
 operating system, not a list of approved applications. You may use installed
@@ -226,7 +232,12 @@ an empty prediction_error is a claim the prediction held exactly. Proposals are
 not changes: record them with status proposed and make no change.'''
 
 
-def render(home, sim=True):
+def render(home, sim=True, language='English'):
+    """The prompt for a session whose owner works in `language` (issue #354; `resident/language.py` names it).
+
+    It is part of the cached prefix, so it changes only when the session's setting does: the per-turn check
+    (`language.check`) is what holds a brain that drifts anyway.
+    """
     from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
@@ -239,5 +250,6 @@ def render(home, sim=True):
     head, section = ('## SIM: predict, then measure\n', SIM_ON) if sim else ('', '')
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
+                         language=str(language or 'English').strip() or 'English',
                          browser_text=', or the browser tool\'s snapshot' if there else '',
                          sim_head=head, sim_section=section)
