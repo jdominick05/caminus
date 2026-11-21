@@ -133,11 +133,12 @@ def _shapes(F):
                 d_conv=int(hp('ssm.conv_kernel')), d_inner=int(hp('ssm.inner_size')))
 
 
-def attn_part_elems(T, heads, cells):
+def attn_part_elems(T, heads, cells, module='k3_q35_moe'):
     """floats of the split attention pair's records (kernels/k3_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
     for T pass rows of `heads` query heads over lists of up to `cells` cache rows: one record of k3.ATTN_RS floats per
     (row, head, ATTN_SS-cell split); one buffer shared by a tape's attention blocks (they run one after another)"""
-    return int(T) * int(heads) * ((int(cells) + k3.ATTN_SS - 1) // k3.ATTN_SS) * k3.ATTN_RS
+    SS = k3.ATTN_SS_OF.get(module, k3.ATTN_SS)   # (this line is 128: kernels/k3_q35_moe.hip sets ATTN_SS)
+    return int(T) * int(heads) * ((int(cells) + SS - 1) // SS) * k3.ATTN_RS
 
 
 def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
@@ -154,7 +155,8 @@ def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
     n_attn = sum(1 for g in block_kinds(F) if not g)
     CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
     gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
-    part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1)
+    part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1,
+                               module=k3.Q35MOE_KV_Q8_OF['k3_q35_moe'] if q8 else 'k3_q35_moe')
     return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
 
 
@@ -439,7 +441,7 @@ class Moe35Own:
             """the attention segments' arguments: the split pair's records (one buffer for every block of the tape) on the
             split modules, else the one-head op's batched loads"""
             if not E.split_attn(): return dict(batched=True)
-            if self._attn_part is None: self._attn_part = B(attn_part_elems(1, nh, rows))
+            if self._attn_part is None: self._attn_part = B(attn_part_elems(1, nh, rows, module=self.module))
             return dict(max_cells=rows, part=self._attn_part)
 
         self._attn_part = None
