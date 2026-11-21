@@ -195,6 +195,12 @@ ATTN_SPLIT_MODULES = ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_
 ATTN_G_OF = {m: (8 if m in Q3N_MODULES + Q35H_MODULES + Q35G_MODULES + Q35MOE_MODULES else 6 if m in Q35D_MODULES + OWN_MODULES + Q35_SPLIT_MODULES else ATTN_G) for m in ATTN_SPLIT_MODULES}   # query heads per kv head (= the module's ATTN_G)
 # cells per split (= the module's ATTN_SS): the Coder's modules 32; the qwen3next / qwen35moe modules set their own (kernels/k3_gguf_q3n.hip ...)
 ATTN_SS_OF = {m: ATTN_SS for m in ATTN_SPLIT_MODULES}
+# the qwen35moe line's split records: 128 cells per split (kernels/k3_q35_moe.hip sets ATTN_SS). Measured at 49,901
+# positions 32 -> 64 -> 128 = 9.252 -> 8.730 -> 8.362 ms per token (-10.6 %), short context 5.644 -> 5.561; the split
+# header's static_assert allows 32, 64 or 128, so this is its ceiling. Only this line moves: every other split module
+# keeps ATTN_SS and its .text.
+ATTN_SS_OF['k3_q35_moe'] = 128
+ATTN_SS_OF['k3_q35_moe_kvq8'] = 128
 # GGUF block formats (Seg.work of the GG ops), = the enum in kernels/k3_gguf_ops.h. 4-9 (the GSQ-RCO Coder's) are
 # instantiated only in the k3_gguf_gsq modules, per op (the REAP-308 module's dispatch would decode them as Q8_0): each
 # module's capability set below lists its pairs, and Engine.build / run refuse a tape outside it
