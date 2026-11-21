@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import numpy as np, torch
 from caminus import ggufio
 from caminus.device import capacity
+from caminus.engine import upload
+from caminus.engine import k3
 from caminus.engine.q35_dense import Dense35Own
 from caminus.prefill import q35own
 
@@ -35,7 +37,9 @@ blocks = [int(n.split('.')[1]) for n in F.T if n.startswith('blk.') and n.endswi
 ab = blocks[0]; gb = 0 if ab != 0 else 1
 NAMES = [(gb, 'attn_qkv', 48), (gb, 'attn_gate', 48), (gb, 'ssm_out', 48), (gb, 'ffn_gate', 48), (gb, 'ffn_up', 48), (gb, 'ffn_down', 48),
          (ab, 'attn_q', 16), (ab, 'attn_k', 16), (ab, 'attn_v', 16), (ab, 'attn_output', 16), (ab, 'ffn_gate', 16), (ab, 'ffn_up', 16), (ab, 'ffn_down', 16)]
-fake = types.SimpleNamespace(F=F, tcap=False, module='k3_q35_swift')
+fake = types.SimpleNamespace(F=F, tcap=False, module='k3_q35_swift', one_rt=k3.OWN_1RT_FMT,
+                             h2d=upload.Uploader([dev.index or 0], upload.mode_of(), upload.UploadLog.from_env(), what='q35_prefill_gemm'))
+fake._w_host = types.MethodType(Dense35Own._w_host, fake)   # (_w reads the host layout through the engine)
 fly_f16 = fly_i8 = None
 if 'flydsl' in ARMS:
     if not A.flydsl_src: sys.exit('q35_prefill_gemm: --arms flydsl needs --flydsl-src (a FlyDSL source checkout matching the installed package)')
@@ -79,6 +83,8 @@ CMP_ROWS = 256   # rows per block of the FlyDSL-vs-torch output comparison
 tot = {}
 for M in MS:
     for b, nm, cnt in NAMES:
+        if f'blk.{b}.{nm}.weight' not in F.T: continue   # (a mixture-of-experts file has no dense ffn_*: the
+            # experts are grouped tiles, not one matrix - benchmarks/q3moe_prefill.py times those)
         t = F.T[f'blk.{b}.{nm}.weight']; K = int(t.shape[0]); R, _ = t.rows()
         dense = R * K * 2 + M * R * 2 if set(ARMS) & {'torch', 'flydsl'} else 0          # (fp16 weights; torch's fp16 output)
         fly = (M * R * 4 + M * K + R * K + M * R * 4 + 3 * min(M, CMP_ROWS) * R * 4) if 'flydsl' in ARMS else 0   # (fp32 output; int8
