@@ -107,13 +107,15 @@ class Q35Ref:
         self.H, self.HKV, self.HD = int(hp('attention.head_count')), int(hp('attention.head_count_kv')), int(hp('attention.key_length'))
         self.NK, self.NV, self.S, self.DC = int(hp('ssm.group_count')), int(hp('ssm.time_step_rank')), int(hp('ssm.state_size')), int(hp('ssm.conv_kernel'))
         self.eps, self.base, self.nrot = float(hp('attention.layer_norm_rms_epsilon')), float(hp('rope.freq_base')), int(hp('rope.dimension_count'))
-        # (YaRN: the same recipe and the same native context the engine uses, so both sides of a gate row rotate alike)
+        # (YaRN: the same recipe and the same native context the engine uses, so both sides of a gate row rotate alike.
+        #  getattr: a subclass (the Coder's CoderRef) sets up its own trunk and need not take the factor at all)
         self.yarn_m = None
-        if self.yarn:
+        yarn = getattr(self, 'yarn', None)
+        if yarn:
             from caminus.rope import yarn_freqs
             j = np.arange(self.nrot // 2, dtype=np.float64)
             n_ctx = int(hp('context_length'))
-            self.yarn_m = (yarn_freqs(self.nrot, self.base, float(self.yarn), n_ctx)
+            self.yarn_m = (yarn_freqs(self.nrot, self.base, float(yarn), n_ctx)
                            / self.base ** (-2.0 * j / self.nrot)).astype(np.float64)
         rec = hp('attention.recurrent_layers'); fai = int(hp('full_attention_interval', 4))
         self.gdn = [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(self.L)]
