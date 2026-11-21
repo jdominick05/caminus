@@ -179,6 +179,10 @@ class Brains:
             return False
         if isinstance(e, ModelContextError) or (isinstance(e, ModelTruncated) and not getattr(e, 'retryable', False)):
             return False                    # the request itself, not the server: another brain would not help
+        if getattr(e, 'relay_refusal', False):
+            # the relay's own 503 (a price it cannot know yet, relay._cannot_price): the agent waits that out on its
+            # own retry budget, it does not move to the fallback brain because a price file has not loaded
+            return False
         status = getattr(e, 'status', None)
         unreachable = status in (None, 0, 502, 503, 504)
         if not unreachable or not self._allowed(gid):

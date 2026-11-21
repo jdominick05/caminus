@@ -231,6 +231,17 @@ def image_tokens(width, height):
     return min(4784, math.ceil(width * s / 28) * math.ceil(height * s / 28))
 
 
+def header(headers, name):
+    """One header's value whatever case the sender used: an HTTPMessage is case-insensitive, a plain dict is not, and
+    a refusal must not hinge on the case a proxy chose."""
+    value = (headers or {}).get(name)
+    if value is None:
+        for k, v in (headers or {}).items():
+            if isinstance(k, str) and k.lower() == name:
+                return v
+    return value
+
+
 def http_error(e):
     """a ModelError carrying the status, the provider's reason (the body's first 2 KB), any retry-after and the
     provider's request id (for a support ticket)"""
@@ -242,14 +253,17 @@ def http_error(e):
         e.close()
     err = ModelError(str(e) + (': ' + detail if detail else ''))
     err.status = e.code      # a refusal must not be retried like an outage
-    err.request_id = (e.headers or {}).get('request-id')
+    # a 503 this relay answered itself (a price it cannot know yet), not the provider being down: the resident's
+    # fallback logic reads a bare 503 as an outage and moves the goal to the fallback brain (brain.Brains.on_failure)
+    err.relay_refusal = bool(header(e.headers, 'x-relay-refusal'))
+    err.request_id = header(e.headers, 'request-id')
     err.retry_after = retry_after(e.headers) or None
     return err
 
 
 def retry_after(headers):
     """the seconds a Retry-After header asks for (a number or an HTTP date), else None"""
-    value = (headers or {}).get('retry-after')
+    value = header(headers, 'retry-after')
     if not value:
         return None
     try:
