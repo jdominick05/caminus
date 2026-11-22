@@ -399,7 +399,11 @@ class Moe35Own(Q35Host):
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt, dep=dep, **kw),
                              W['name'])
             assert up is None
-            return named(E.own_matvec16(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt16, dep=dep), W['name'])
+            # Q8_0 at K = 1024 n: the module's wave-per-row tile (kernels/own_quant.h own_row_q8_0_w), its tasks sized to about
+            # one per workgroup in rows of 8 (a wave per row); the 4-rows tile (rpt16) for the rest (the shared expert's down, K 512)
+            rpt, row = self.rpt16, W['fmt'] == 'Q8_0' and W['K'] % 1024 == 0
+            if row: rpt = -(-(-(-W['rows'] // E.grid)) // 8) * 8
+            return named(E.own_matvec16(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=rpt, dep=dep, row=row), W['name'])
 
         rows = self.max_ctx + self.spec_T - 1   # (the cache rows: the split pair's longest list)
 

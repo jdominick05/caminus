@@ -777,18 +777,22 @@ class Engine:
                              x.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_FMT[fmt], team, OWN_ACT[act], 0))
         return len(self.segs) - 1
 
-    def own_matvec16(self, w, fmt, nrows, ncols, x16, out, rows_per_task=32, dep=-1, team=-1, tokens=1):
+    def own_matvec16(self, w, fmt, nrows, ncols, x16, out, rows_per_task=32, dep=-1, team=-1, tokens=1, row=False):
         """the general rows tiles on an fp16 activation buffer (OP_OWN_MV16, the dense qwen35 own module): raw GGUF blocks w
         of nrows contiguous rows (Q8_0 / Q5_K: the formats without a one-round-trip tile) times x16 [ncols] -> fp32 out
         [nrows]. T = 1; rows_per_task a multiple of 4 (a wave takes 4 rows). The verify module (Q35V_MODULES): tokens = the
         engine's T (1 .. 4: the tiles' OWN_MT), x16 [tokens, ncols] -> out [tokens, nrows], each token's rows the one-token
-        tile's bits"""
+        tile's bits. row: the qwen35moe modules' wave-per-row Q8_0 tile (kernels/own_quant.h own_row_q8_0_w; K = 1024 n, T = 1;
+        Seg.pad1 bit 16): wave w of a task takes its rows w, w + 8, ..., so rows_per_task in 8s fills the workgroup"""
         # (ThinkingCap's MTP drafter: its Q8_0 head, one token on a T-row tape: the rows tile's one-token form, Seg.pad1 = 0)
         if self.module not in Q35_MODULES + Q35MOE_MODULES or (self.T != 1 or tokens != 1) and not (self.module in Q35V_MODULES and tokens == self.T and 1 <= tokens <= 4) \
                 and not (self.module in Q35TM_MODULES and tokens == 1):
             raise ValueError(f'own_matvec16: T = 1 on {Q35_MODULES}; tokens = T on {Q35V_MODULES} (module {self.module}, T {self.T}, tokens {tokens})')
         if fmt not in OWN_MV16_FMT: raise ValueError(f'own_matvec16: {fmt} ({sorted(OWN_MV16_FMT)})')
         if rows_per_task % 4 or rows_per_task < 4: raise ValueError(f'own_matvec16: rows_per_task {rows_per_task} (a multiple of 4)')
+        if row and (self.module not in Q35MOE_MODULES or fmt != 'Q8_0' or ncols % 1024 or tokens != 1):
+            raise ValueError(f'own_matvec16: the wave-per-row tile is Q8_0 at K = 1024 n, T = 1, on {Q35MOE_MODULES} '
+                             f'({fmt}, K {ncols}, tokens {tokens}, module {self.module})')
         qk, bs = {'Q8_0': (32, 34), 'Q5_K': (256, 176)}[fmt]
         if ncols % qk: raise ValueError(f'own_matvec16: K {ncols} is not a multiple of {fmt} blocks ({qk})')
         assert x16.dtype == torch.float16 and x16.numel() >= tokens * ncols and x16.data_ptr() % 16 == 0, (x16.dtype, x16.numel())
@@ -799,7 +803,7 @@ class Engine:
         strides = (ncols | (nrows << 32)) if tokens > 1 else None   # (Seg.gs: x / out token strides, low | high half)
         self.segs.append(Seg(OP_OWN_MV16, (nrows + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), strides,
                              x16.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_MV16_FMT[fmt], team,
-                             (tokens << 8) if tokens > 1 else 0, 0))
+                             ((tokens << 8) if tokens > 1 else 0) | (1 << 16 if row else 0), 0))
         return len(self.segs) - 1
 
     def own_matvec_1rt(self, w, fmt, rows, ncols, x16, out, ids=None, total_rows=None, x_per_slot=False, rows_per_task=16,

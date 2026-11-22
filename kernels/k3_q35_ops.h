@@ -54,7 +54,8 @@ __device__ __forceinline__ float q35_silu(float x) { return x / (1.0f + expf(-x)
 // A row's sum does not depend on the grid or the task size. T = 1; the verify module (K3_Q3M_VER) also takes the T-token
 // form of OP_OWN_MV: Seg.pad1 bits 8 .. 11 = tokens NT, token tk reads x at Seg.a + tk * xs (fp16 values) and writes its
 // rows at Seg.y + tk * ys (xs / ys: the low / high half of Seg.gs); each token's rows are the one-token tile's statements
-// (the same bits), NT <= OWN_MT (host-checked).
+// (the same bits), NT <= OWN_MT (host-checked). K3_Q35_MV16_ROW (the qwen35moe module): Seg.pad1 bit 16 = Q8_0 at K = 1024 n
+// as own_row_q8_0_w, a wave per row (wave w: rows r0 + w, r0 + w + 8, ...; host-set: Engine.own_matvec16 row=True).
 __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
     const int wave = K3WAVE, lane = K3TID % 32;
     const int r0 = t * sg.rows_per_task, r1 = min(sg.N, r0 + sg.rows_per_task);
@@ -73,6 +74,16 @@ __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
         else own_rows_q8_0_mt(W, row, r1, sg.K, (const _Float16 *)x, xs, NT, y, ys, lane);
     }
 #else
+#ifdef K3_Q35_MV16_ROW
+    if ((sg.pad1 >> 16) & 1) {   // (Seg.pad1 bit 16, host-set for Q8_0 at K = 1024 n: own_row_q8_0_w, a wave per row, wave w rows
+        const size_t rb = (size_t)(sg.K / 32) * 34;  //  r0 + w, r0 + w + 8, ...; the host sizes these tasks for it)
+        for (int row = r0 + wave; row < r1; row += 8) {
+            const float s = own_row_q8_0_w(W + (size_t)row * rb, sg.K / 32, x, lane);
+            if (lane == 0) y[row] = s;
+        }
+        return;
+    }
+#endif
     for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
         if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
         else own_rows_q8_0_1rt<2>(W, row, r1, sg.K, x, y, lane);   // (own_rows_q8_0's bits, 2 block steps' loads per pass)
