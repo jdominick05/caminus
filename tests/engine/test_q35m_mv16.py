@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import torch  # noqa: E402
 
 from caminus import ggufio, own_dequant  # noqa: E402
+from caminus.device import capacity  # noqa: E402
 from caminus.engine import k3  # noqa: E402
 
 FAILS = []
@@ -32,6 +33,10 @@ def main():
     kinds = {}
     for t in F.tensors:   # (one tensor per kind: layer 0's, the first layer that has it, the head)
         if t.type == 'Q8_0': kinds.setdefault(t.name.split('.', 2)[-1] if t.name.startswith('blk.') else t.name, t)
+    # one matrix on the card at a time (the vocab head the largest, 515 MiB): its blocks, x, the fp32 rows of the arms
+    # alive at once, each arm's tape; checked before anything is allocated
+    peak = max(t.n_bytes + int(t.shape[0]) * 2 + 4 * t.rows()[0] * 4 for t in kinds.values())
+    capacity.check([torch.cuda.current_device()], [peak / 2 ** 20 + 16], 'test_q35m_mv16: one Q8_0 matrix, its activations and outputs')
     grid = k3.Engine(module='k3_q35_moe').grid   # (the default grid: 4 workgroups per WGP)
     for kind, t in kinds.items():
         R, _ = t.rows(); K = int(t.shape[0])
