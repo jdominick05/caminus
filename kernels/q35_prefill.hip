@@ -706,6 +706,25 @@ extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float *
     }
 }
 
+#ifdef Q35P_KV_Q8
+// q35p_kv_append_q8 (the Q8 KV object, kernels/q35m_prefill_kvq8.hip): OP_KV_APPEND's Q8_0 rows, the decode Q8 module's
+// (k3_q35_kvq8_ops.h q35_op_kv_append_q8: one thread per block, own_kv_q8_encode): cache[pos0 + t] = the blocks of k[t]
+// then of v[t], fp32 (the host rotates them first: K by Hadamard256, V by Hadamard64). A refused block ORs 2 into *err
+// and keeps its bytes; a row at or past `rows` is not written and ORs 1. Grid T.
+extern "C" __global__ void __launch_bounds__(256) q35p_kv_append_q8(const float * __restrict__ k, int ldk, const float * __restrict__ v,
+                                                                    int ldv, uint8_t * __restrict__ cache, int M, int pos0, int rows,
+                                                                    int * __restrict__ err) {
+    const int tt = blockIdx.x, pos = pos0 + tt;
+    if (pos < 0 || pos >= rows) { if (threadIdx.x == 0) atomicOr(err, 1); return; }
+    OwnKvQ8Block * dst = (OwnKvQ8Block *)(cache + (size_t)pos * own_kv_q8_row_bytes(M));
+    const int nb = M / 32;
+    for (int b = threadIdx.x; b < 2 * nb; b += blockDim.x) {
+        const float * x = (b < nb ? k + (size_t)tt * ldk : v + (size_t)tt * ldv) + (size_t)(b % nb) * 32;
+        if (!own_kv_q8_encode(x, dst + b)) atomicOr(err, 2);
+    }
+}
+#endif
+
 // q35p_attn16: OP_ATTN_DEC over a chunk's rows (own_op_attn_dec's batched form on the f16 cache, k3_own_ops.h): one
 // workgroup per (row, query head), the decode's task index h = row * heads + head; row r sees cache positions 0 .. pos0 + r.
 // The same statements in the same order: 512-position chunks, a wave scores positions t and t + 8 (4 K loads of each in
@@ -803,7 +822,18 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn16(const float * __re
 #define AW_D 256
 #define AW_KP (AW_D + 8)
 #define AW_VP (AW_C + 8)
-extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __restrict__ qin, const _Float16 * __restrict__ cache,
+#ifdef Q35P_KV_Q8
+// q35p_attn_wm_q8 (the Q8 KV object): the same kernel over Q8_0 rows (K and q rotated by Hadamard256 on the host, V and
+// the output by Hadamard64: the kernel itself is rotation-blind): thread (sp, sq) stages block sq of its position's K and
+// V (kernels/q3m_prefill.hip q3p_q8_stage: float code * float scale, exact, then rounded to fp16 for the WMMA operands,
+// one rounding more than the decode's reader: gated by the model gate, not bitwise)
+#define Q35P_AW_NAME q35p_attn_wm_q8
+#define Q35P_AW_CACHE uint8_t
+#else
+#define Q35P_AW_NAME q35p_attn_wm
+#define Q35P_AW_CACHE _Float16
+#endif
+extern "C" __global__ void __launch_bounds__(256) Q35P_AW_NAME(const float * __restrict__ qin, const Q35P_AW_CACHE * __restrict__ cache,
                                                                int pos0, int n, int blk0, int heads, int nkv, float scale_log2,
                                                                float * __restrict__ out) {
     __shared__ _Float16 Ks[AW_C * AW_KP];
@@ -838,11 +868,29 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __r
     const int sp = tid >> 3, sq = tid & 7;              // staging: position sp of the chunk, dims 32 sq .. 32 sq + 31
     for (int c0 = 0; c0 < npos; c0 += AW_C) {
         const int prow = min(c0 + sp, npos - 1);       // (rows past the end: a valid row; never in a written column's sum)
+#ifdef Q35P_KV_Q8
+        u32x4_t kv[4], vv[4];
+        {
+            const uint8_t * rw = cache + (size_t)prow * own_kv_q8_row_bytes((int)M);
+            _Float16 hk[32], hv[32];
+            q3p_q8_stage(rw + ((size_t)g * (AW_D / 32) + sq) * 34, hk);
+            q3p_q8_stage(rw + (M / 32 + (size_t)g * (AW_D / 32) + sq) * 34, hv);
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                kv[j] = (u32x4_t){as_u((h2_t){hk[8 * j], hk[8 * j + 1]}), as_u((h2_t){hk[8 * j + 2], hk[8 * j + 3]}),
+                                  as_u((h2_t){hk[8 * j + 4], hk[8 * j + 5]}), as_u((h2_t){hk[8 * j + 6], hk[8 * j + 7]})};
+                vv[j] = (u32x4_t){as_u((h2_t){hv[8 * j], hv[8 * j + 1]}), as_u((h2_t){hv[8 * j + 2], hv[8 * j + 3]}),
+                                  as_u((h2_t){hv[8 * j + 4], hv[8 * j + 5]}), as_u((h2_t){hv[8 * j + 6], hv[8 * j + 7]})};
+            }
+        }
+        (void)RS;
+#else
         const u32x4_t * kp = (const u32x4_t *)(cache + (size_t)prow * RS + (size_t)g * AW_D + sq * 32);
         const u32x4_t * vp = (const u32x4_t *)(cache + (size_t)prow * RS + M + (size_t)g * AW_D + sq * 32);
         u32x4_t kv[4], vv[4];
 #pragma unroll
         for (int j = 0; j < 4; j++) { kv[j] = kp[j]; vv[j] = vp[j]; }
+#endif
         __syncthreads();
         u32x4_t * kd = (u32x4_t *)(Ks + sp * AW_KP + sq * 32);
 #pragma unroll
