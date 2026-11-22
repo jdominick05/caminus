@@ -341,6 +341,34 @@ class RuntimeKernels(unittest.TestCase):
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime([one, 'q3m_prefill', 'q3m_prefill_yarn'])
 
+    def test_q35moe_serve_selects_shipped_objects(self):
+        # caminus serve for Qwen3.6-35B-A3B (arch.Q35MoE): the decode module from the file (module_of / kv_module: F16 and
+        # --kv q8) and the batched prefill's constructor loads (the Q8 rows and attention object only with a Q8 engine);
+        # all are in the installed runtime set and each one's removal is caught
+        from caminus.engine import q35_moe
+        from caminus.prefill import q35moe
+        f16 = q35_moe.kv_module(None, module=q35_moe.module_of(None))
+        q8 = q35_moe.kv_module(None, module=q35_moe.module_of(None), q8=True)
+        self.assertEqual((f16, q8), ('k3_q35_moe', 'k3_q35_moe_kvq8'))
+        mm = lambda f: dict(fmt=f)
+        layer = lambda kind: dict(kind=kind, **{k: mm('Q8_0') for k in q35moe.Q35MoEPrefill.MM_KEYS[kind] + q35moe.Q35MoEPrefill.SH_KEYS},
+                                  **{k: mm('Q2_0') for k in q35moe.Q35MoEPrefill.EXP_KEYS}, al=mm('F32'), be=mm('F32'))
+        names = {}
+        for q8_ in (False, True):
+            m = NS(dev=0, q8=q8_, yarn_factor=None, nl=2, nl_build=2, D=2048, nh=16, nkv=2, hd=256, k_used=8, n_exp=256,
+                   ffn=512, ffn_shexp=512, S=128, NK=16, NV=32, vocab=64, emb=NS(type='BF16'), L=[layer('gdn'), layer('attn')])
+            start = len(self.loads)
+            q35moe.Q35MoEPrefill(m, chunk=16, check=False)
+            names[q8_] = self.loads[start:]
+        self.assertNotIn('q35m_prefill_kvq8', names[False])
+        self.assertEqual(sorted(set(names[True]) - set(names[False])), ['q35m_prefill_kvq8'])
+        want = [f16, q8] + names[False] + names[True]
+        self.require_runtime(want)
+        for name in (f16, q8, 'q35m_prefill', 'q35m_prefill_kvq8'):
+            without = tuple(n for n in kernels.RUNTIME_SET if n != name)
+            with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                self.require_runtime(want)
+
     def test_lazy_sampler_and_guard_are_included(self):
         # Exercise the lazy sampler module selection, without allocating candidates.
         with patch.dict(topk._mods, {}, clear=True):
