@@ -292,10 +292,12 @@ class Q35Host:
             if not self.broken: self.reset()
 
     def physics_bytes(self):
-        """per card (one): the weight bytes one decode pass reads (every trunk matrix and norm once; the embedding is one
-        row), for the bandwidth bound"""
+        """per card (one): the weight bytes one decode pass reads (every trunk matrix and norm once, the routed experts
+        (Moe35Own) at k_used / n_exp of their bytes: the average token; the embedding is one row), for the bandwidth bound"""
         mtp = tuple(f'blk.{i}.' for i in range(self.nl, int(self.F.hp('block_count'))))
-        tot = sum(t.n_bytes for t in self.F.tensors if not t.name.startswith(mtp) and t.name != 'token_embd.weight')
+        ex = self.k_used / self.n_exp if getattr(self, 'n_exp', 0) else 1.0
+        tot = sum(t.n_bytes * (ex if '_exps.' in t.name else 1.0) for t in self.F.tensors
+                  if not t.name.startswith(mtp) and t.name != 'token_embd.weight')
         return (float(tot + self.D * 144 // 256),)
 
     def check_replicas(self):
