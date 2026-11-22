@@ -164,11 +164,47 @@ __device__ __forceinline__ void q35_op_add_rms16(const Seg & sg) {
 //   [in[1..3]]. Seg.a = x [C] (the qkv matvec's output), Seg.W = fp32 w [C, 4], Seg.gs = fp32 state [C, 3] (updated in
 //   place), Seg.aux = the previous pass's inputs [T, C], Seg.asum = int32 pass params ([1] = mprev: the previous pass's
 //   accepted tokens, committed first), Seg.y = out [C]; N = C; a task = rows_per_task channels.
+// K3_Q35_CONV_L2 (the qwen35moe module), Seg.K = the head dim (0: the plain op): the conv with OP_GDN_L2 fused for the
+//   q | k channels [0, Seg.pad1): each normed in place (out[c] = (scale x) / sqrt(K), the separate op's statements and
+//   sum order: a head's 128 channels are 4 waves of the task, its sum 0 + their 4 wave sums, then the op's zeros), the
+//   v channels as before. Host-checked: T = 1, 256 channels per task (one per thread), K 128, Seg.pad1 a multiple of 256,
+//   Seg.rs = eps / K. One segment and one hop less per Gated DeltaNet block.
 __device__ __forceinline__ void q35_op_gdn_conv(const Seg & sg, int t) {
     const int c0 = t * sg.rows_per_task, c1 = min(sg.N, c0 + sg.rows_per_task);
     const float * x = (const float *)sg.a, * w = (const float *)sg.W;
     float * st = (float *)sg.gs, * xp = (float *)sg.aux;
     const int C = sg.N, T = seg_T(sg), mprev = ((const int *)sg.asum)[1];
+#ifdef K3_Q35_CONV_L2
+    if (sg.K) {
+        __shared__ float part[8];
+        const int tid = K3TID, lane = tid % 32, wave = tid / 32, c = c0 + tid;
+        GF * stg = (GF *)st + (size_t)c * 3;
+        float s0 = stg[0], s1 = stg[1], s2 = stg[2];
+        const float4 w4 = *(const __attribute__((address_space(1))) float4 *)(w + (size_t)c * 4);
+        const float x0 = ((GF *)x)[c], xp0 = ((GF *)xp)[c];
+        __builtin_amdgcn_sched_barrier(0);
+        for (int j = 0; j < mprev; j++) { s0 = s1; s1 = s2; s2 = j == 0 ? xp0 : xp[(size_t)j * C + c]; }   // commit the accepted tokens
+        GW * stw = (GW *)st + (size_t)c * 3;
+        stw[0] = s0; stw[1] = s1; stw[2] = s2;
+        const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
+        const float in[4] = {s0, s1, s2, x0};
+        float sumf = 0.0f;
+        for (int j = 0; j < 4; j++) sumf += in[j] * wv[j];
+        const float v = q35_silu(sumf);
+        ((GW *)xp)[c] = x0;                                          // this pass's input, for the next pass's commit
+        if (c0 < sg.pad1) {                                          // (workgroup-uniform: q | k heads)
+            float ss = v * v; asm volatile("" : "+v"(ss));   // (rounded, as the separate op's loop: not fused into the sum's fma)
+            ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+            const int h0 = wave & ~3;
+            float tot = 0.0f; for (int q = 0; q < 4; q++) tot += part[h0 + q];
+            for (int q = 0; q < 4; q++) tot += 0.0f;                 // (the separate op's other four waves: zeros)
+            const float scale = rsqrtf(tot / sg.K + sg.rs), s2n = 1.0f / sqrtf((float)sg.K);
+            ((GW *)sg.y)[c] = (scale * v) * s2n;
+            __syncthreads();
+        } else ((GW *)sg.y)[c] = v;
+        return;
+    }
+#endif
     for (int c = c0 + (int)K3TID; c < c1; c += blockDim.x) {
         GF * stg = (GF *)st + (size_t)c * 3;
         float s0 = stg[0], s1 = stg[1], s2 = stg[2];

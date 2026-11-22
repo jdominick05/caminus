@@ -434,12 +434,16 @@ class Moe35Own(Q35Host):
                 if sv_prev is not None: b_ = E.also(b_, sv_prev)
                 gt = E.also(E.gdn_gates(s['al'], s['be'], d['dt'], d['a'], s['gates'], dep=a_), b_)
                 q_ = mv(d['qkv'], s['h16'], s['qkv'], n1)
-                c_ = E.gdn_conv(s['qkv'], d['conv_w'], d['conv_st'], s['conv'], d['convx'], dep=q_)
+                # (T = 1: the conv also L2-norms the q | k heads in place, so they are read from conv: k3 gdn_conv l2)
+                fl2 = E.T == 1
+                c_ = E.gdn_conv(s['qkv'], d['conv_w'], d['conv_st'], s['conv'], d['convx'], dep=q_,
+                                l2=(2 * KD, S, self.eps) if fl2 else None)
                 if sv_prev is not None: c_ = E.also(c_, sv_prev)
-                l_ = E.gdn_l2(s['conv'], s['qk'], 2 * NK, S, self.eps, x_stride=CH, dep=c_)
+                l_ = c_ if fl2 else E.gdn_l2(s['conv'], s['qk'], 2 * NK, S, self.eps, x_stride=CH, dep=c_)
+                qk = s['conv'] if fl2 else s['qk']
                 z_ = mv(d['z'], s['h16'], s['z'], n1)
-                st = E.also(E.gdn_step(s['qk'], s['conv'][2 * KD:], s['gates'], d['gdn'], s['o'], NV, S, NK, CH, dep=l_), gt)
-                sv = E.gdn_save(s['qk'], s['conv'][2 * KD:], s['gates'], d['gdn'], NV, S, NK, CH, dep=st)
+                st = E.also(E.gdn_step(qk, s['conv'][2 * KD:], s['gates'], d['gdn'], s['o'], NV, S, NK, CH, dep=l_), gt)
+                sv = E.gdn_save(qk, s['conv'][2 * KD:], s['gates'], d['gdn'], NV, S, NK, CH, dep=st)
                 nm = E.also(E.gdn_norm16(s['o'], d['nw'], s['z'], s['fin16'], NV, S, self.eps, dep=st), z_)
                 o_ = mv(d['so'], s['fin16'], s['blk'], nm); sv_prev = sv
             else:

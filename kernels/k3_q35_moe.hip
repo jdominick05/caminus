@@ -35,6 +35,7 @@
 #define K3_Q35_MOE
 #define K3_Q35_YARN          // (OP_QK_NR's YaRN form: Seg.aux = the per-dim factor table, Seg.work = mscale's bits)
 #define K3_Q35_ATTN_SPLIT   // decode attention as the split pair (kernels/k3_attn_split.h), as the dense line's modules
+#define K3_Q35_CONV_L2       // (k3_q35_ops.h: the GDN conv with the q | k heads' L2 norm in one segment)
 #define K3_Q35_MV16_ROW     // OP_OWN_MV16's Q8_0 at K = 1024 n as a wave per row (kernels/own_quant.h own_row_q8_0_w)
 // The two pins the other modules found for this budget (measured on this object, compile only):
 //   K3_Q3M_ADD_RMS_PIN    OP_OWN_ADD_RMS16 derives its row length and slot count itself instead of leaving values made

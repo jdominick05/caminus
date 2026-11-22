@@ -1060,12 +1060,20 @@ class Engine:
                              n if self.T > 1 else 0, 0))
         return len(self.segs) - 1
 
-    def gdn_conv(self, x, w, state, out, xprev, rows_per_task=256, dep=-1, team=-1):
-        """GDN short conv: out = silu(conv4([state, x])) per channel; state [C, 3] shifts in place; w [C, 4]"""
+    def gdn_conv(self, x, w, state, out, xprev, rows_per_task=256, dep=-1, team=-1, l2=None):
+        """GDN short conv: out = silu(conv4([state, x])) per channel; state [C, 3] shifts in place; w [C, 4].
+        l2 = (qk channels, head dim, eps) (the qwen35moe modules, T = 1): the first qk channels are also L2-normed per head
+        in place (gdn_l2's statements: out then holds q | k as gdn_l2 would write them), one segment instead of two"""
         C = x.numel() // self.T; assert xprev.numel() >= x.numel(); self.keep += [x, w, state, out, xprev]
+        qkc, hd, eps = l2 if l2 is not None else (0, 0, 0.0)
+        if l2 is not None and (self.module not in Q35MOE_MODULES or self.T != 1 or rows_per_task != 256 or hd != 128
+                               or qkc % 256 or not 0 < qkc <= C):
+            raise ValueError(f'gdn_conv: the fused L2 norm runs on {Q35MOE_MODULES} at T = 1, 256 channels per task, head dim 128, '
+                             f'qk channels a multiple of 256 (module {self.module}, T {self.T}, rpt {rows_per_task}, dim {hd}, qk {qkc} of {C})')
         self._guard_replay()   # the replay reads params[1] rows of the previous pass's inputs (bounded by the guard)
         sg = Seg(OP_GDN_CONV, (C + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(),
-                 state.data_ptr(), x.data_ptr(), self.params.data_ptr(), out.data_ptr(), 0.0, C, 0, 1, 0, team, 0, 0)
+                 state.data_ptr(), x.data_ptr(), self.params.data_ptr(), out.data_ptr(), eps / hd if hd else 0.0, C, hd, 1, 0,
+                 team, qkc, 0)
         sg.aux = xprev.data_ptr(); self.segs.append(sg)
         return len(self.segs) - 1
 
