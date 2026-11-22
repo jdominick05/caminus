@@ -42,7 +42,7 @@ from ..device import capacity
 from . import k3, upload
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1m_records
 from .q3moe_one import card_per_wgp
-from .q35_dense import _wsum, _wsum_np, block_kinds, trunk_blocks   # (the same weight checks and block layout as the dense line)
+from .q35_dense import RECURRENT, Q35Host, _wsum, _wsum_np, block_kinds, trunk_blocks   # (the dense line's host pass lifecycle, weight checks and block layout)
 
 MODULE = 'k3_q35_moe'
 
@@ -52,7 +52,6 @@ def module_of(F):
     experts are Q2_0, its trunk matrices Q8_0, its router F32 and its alpha / beta BF16: one module reads all of them,
     so there is nothing to pick between."""
     return MODULE
-RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV rows are written before any pass reads them)
 
 
 def kv_module(F, module=None, q8=False):
@@ -127,7 +126,7 @@ def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
     return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
 
 
-class Moe35Own:
+class Moe35Own(Q35Host):
     TAPE_MIB = 8   # an upper bound of one tape's buffers (S, the stage, the logits): what a further tape on the same engine adds
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
@@ -471,74 +470,10 @@ class Moe35Own:
         mv(self.head, s['h16'], s['logits'], nf)
         E.build(); self._server_buffers()
 
-    def _server_buffers(self):
-        """the server contract's views and staging: logits [1, vocab] and its two column halves (the device sampler's
-        shards, on this card), the argmax read-back, the status words, the done event"""
-        self.logits = self.buf['logits'].view(1, self.vocab)
-        self.vh = self.vocab // 2
-        self.logits_half = [self.logits[:, :self.vh], self.logits[:, self.vh:]]
-        self.shard_devs = [self.dev, self.dev]
-        self.d_max = (torch.zeros(1, device='cuda'), torch.zeros(1, dtype=torch.int64, device='cuda'))
-        self.h_max = (torch.zeros(1, pin_memory=True), torch.zeros(1, dtype=torch.int64, pin_memory=True))
-        self.h_st = torch.zeros(k3.STATUS_WORDS, dtype=torch.int32, pin_memory=True)
-        self.ev_done = torch.cuda.Event()
-        self.engines = [self.E]
-
     # -- decode ------------------------------------------------------------------------------------------------------------
-    @property
-    def staged(self):
-        """the position the staging block holds for the next launch"""
-        return int(self.hstage[17])
-
-    def reset(self):
-        """a new sequence: zero every recurrent state (positions restart at 0; every KV row is written before any pass
-        reads it); clears poisoned"""
-        with torch.cuda.device(self.dev):
-            for (_, _, kind), t in self.state.items():
-                if kind in RECURRENT: t.zero_()
-        self.pos_host = 0; self.last_T = 0
-        self.seq += 1; self.fresh = True; self.poisoned = None
-
-    def prefetch(self, tokens, positions):
-        """nothing to read ahead: the speculative loop's hook"""
-
-    def step(self, tok, trace=None):
-        """one token at the next position (the previous token committed into the recurrent states): its logits (fp32
-        [vocab], on the device; valid until the next step); trace: an int64 buffer [grid * segments * 8] for a _trace
-        module's timestamps (benchmarks/q3moe_trace.py --engine dense35)"""
-        i0 = self.pos_host
-        self._run_tok(int(tok), i0, 0 if self.fresh else 1, False, trace)
-        return self.buf['logits']
-
-    def commit_max(self):
-        """the most the next pass on these states may commit: 1 on the served engine (spec_T 1, as before verify tapes
-        existed); with spec_T > 1 the tokens of the last pass launched on them (0 after a reset or a prefill)"""
-        if self.spec_T == 1: return 1
-        return 0 if self.fresh else self.last_T
-
-    def _check(self, tokens, i0, commit, what):
-        if self.broken: raise getattr(self, '_broken_error', k3.NonFiniteLogits)(f'{what}: refused: {self.broken}')
-        if self.poisoned: raise k3.ContextBoundsError(f'{what}: refused until reset(): {self.poisoned}')
-        k3.check_span(i0, 1, self.max_ctx, commit=commit, ntok=self.commit_max(), what=what)
-        if tokens is not None and len(tokens) < i0 + 1:
-            raise k3.ContextBoundsError(f'{what}: position {i0} but {len(tokens)} tokens')
-
     def _stage(self, tok, i0):
         if not 0 <= tok < self.vocab: raise ValueError(f'Moe35Own: token {tok} outside the vocabulary ({self.vocab})')
         self.hstage[16] = tok; self.hstage[17] = int(i0)
-
-    def step_token(self, tokens, i):
-        """position i; returns only the greedy next token (argmax on the card, the first index on ties)"""
-        return self._run(tokens, i, 0 if self.fresh else 1, True)[0]
-
-    def verify(self, tokens, i0, commit):
-        """position i0 in one pass, after committing the previous pass's first `commit` tokens (0 or 1) into the recurrent
-        states; returns logits [1, vocab] (a fresh tensor per pass)"""
-        self._run(tokens, i0, commit, False)
-        return self.logits.clone()
-
-    def verify_tokens(self, tokens, i0, commit):
-        return self._run(tokens, i0, commit, True)
 
     def launch_tokens(self, tokens, i0, commit):
         """verify()'s pass launched without waiting or reading anything back (the device sampler queues behind it); then
@@ -546,22 +481,6 @@ class Moe35Own:
         self._check(tokens, i0, commit, 'Moe35Own pass')
         self._stage(int(tokens[i0]), i0); self._tok = False; self.fresh = False
         self._pass_launch(i0, commit)
-
-    def finish_pass(self, i0, commit):
-        """wait for launch_tokens' pass; a bailed pass runs again before returning. True when it was rerun (whatever was
-        queued behind the first launch read a bailed pass's outputs and must run again)"""
-        bad = self._pass_wait(i0)
-        if not bad:
-            self.pos_host = i0 + 1; return False
-        for attempt in range(1, self.max_retries + 1):
-            self.bails.append((i0, attempt - 1, bad))
-            print(f'k3 qwen35: a wait gave up at position {i0} (attempt {attempt}), running the pass again: ' + '; '.join(bad),
-                  file=sys.stderr, flush=True)
-            bad = self._pass(i0, 0)                    # (a bailed pass committed already: its rerun commits nothing)
-            if not bad:
-                self.pos_host = i0 + 1; return True
-        self.bails.append((i0, self.max_retries, bad))
-        raise RuntimeError(f'k3 qwen35: a wait gave up at position {i0} in {self.max_retries + 1} attempts: ' + '; '.join(bad))
 
     def _run(self, tokens, i0, commit, tok):
         self._check(tokens, i0, commit, 'Moe35Own pass')
@@ -582,10 +501,6 @@ class Moe35Own:
         if not tok: return None
         return [int(self.h_max[1][0])]
 
-    def _pass(self, i0, commit, trace=None):
-        self._pass_launch(i0, commit, trace)
-        return self._pass_wait(i0)
-
     def _pass_launch(self, i0, commit, trace=None):
         """the launch from the staged block (and the logits' argmax read back when self._tok)"""
         self._check(None, i0, commit, 'Moe35Own._pass')
@@ -602,54 +517,7 @@ class Moe35Own:
             self.h_st.copy_(self.E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
             self.ev_done.record()
 
-    def _pass_wait(self, i0):
-        """wait for the launch, read its status; the bounds guard poisons and raises, a wait that gave up is returned as
-        its report"""
-        self.ev_done.synchronize()
-        if getattr(self, 'q8', False):
-            try:
-                self.E.check_kv_error()
-            except k3.InvalidKVEncoding as exc:
-                self.mark_broken(str(exc), error_cls=k3.InvalidKVEncoding)
-        st = self.h_st.tolist()
-        b = k3.bounds_status(st)
-        if b:
-            with torch.cuda.device(self.dev): torch.cuda.synchronize(); self.E.sync.zero_()
-            self.poisoned = f'the device bound guard caught an out-of-range value at pass position {i0}: {b}'
-            raise k3.ContextBoundsError(f'k3 qwen35: {self.poisoned}')
-        if self._tok and not math.isfinite(float(self.h_max[0][0])):
-            self.mark_broken(f'non-finite logits (max {float(self.h_max[0][0])}) at pass position {i0}')
-        if st[1]:
-            with torch.cuda.device(self.dev):
-                torch.cuda.synchronize()
-                names = {v: k for k, v in vars(k3).items() if k.startswith('OP_')}
-                rep = (f'segment {st[2]} = {names.get(self.E.segs[st[2]].op)} {self.seg_names.get(st[2], "")} (seen {st[3]}); '
-                       f'{self.E.stall_report()}')
-                self.E.sync.zero_()
-            return [rep]
-        return []
-
     # -- weight integrity -------------------------------------------------------------------------------------------------
-    def weight_sums(self):
-        """{tensor name: int64 sum of its device bytes as int32 words (byte-padded)}: a cheap fingerprint of every weight
-        on the card (~16 GB at the card's read rate: tens of ms), taken at load and again when the engine breaks, so a
-        change says the weights were corrupted after the upload"""
-        out = {}
-        with torch.cuda.device(self.dev):
-            for d in self.L:
-                for v in d.values():
-                    if isinstance(v, dict) and 'w' in v: out[v['name']] = _wsum(v['w'])
-            out['output.weight'] = _wsum(self.head['w']); out['token_embd.weight'] = _wsum(self.emb_dev)
-        return out
-
-    def host_sums(self, names):
-        """the same fingerprint computed from the file's bytes as _w lays them out (the upload's source), for names"""
-        out = {}
-        for nm in names:
-            b = self.emb.pread(0, self.emb.n_bytes) if nm == 'token_embd.weight' else self._w_host(nm)[1]
-            out[nm] = _wsum_np(np.ascontiguousarray(b).view(np.uint8).reshape(-1))
-        return out
-
     def mark_broken(self, why, error_cls=k3.NonFiniteLogits):
         """terminal numerical failure: refuse every later pass (reset() keeps this). For non-finite logits, report which
         weights changed since load (corrupted on the card) or, when none did, which differ from the file (corrupted by
@@ -672,27 +540,3 @@ class Moe35Own:
             rep += f'; the weight check failed ({type(e).__name__}: {e})'
         self.broken = rep
         raise error_cls(f'Moe35Own: {rep}')
-
-    def selfcheck(self, toks=(248044, 9707, 11, 1879, 374)):
-        """at startup: a few fixed tokens through the decode tape on fresh states (finite logits), then reset(); raises
-        NonFiniteLogits (and marks the engine broken) when the load left poisoned weights"""
-        self.reset()
-        try:
-            for t in toks:
-                lg = self.step(int(t))
-                with torch.cuda.device(self.dev):
-                    if not bool(torch.isfinite(lg).all()):
-                        self.mark_broken(f'startup self-check: non-finite logits after token {t}')
-        finally:
-            if not self.broken: self.reset()
-
-    def physics_bytes(self):
-        """per card (one): the weight bytes one decode pass reads (every trunk matrix and norm once; the embedding is one
-        row), for the bandwidth bound"""
-        mtp = tuple(f'blk.{i}.' for i in range(self.nl, int(self.F.hp('block_count'))))
-        tot = sum(t.n_bytes for t in self.F.tensors if not t.name.startswith(mtp) and t.name != 'token_embd.weight')
-        return (float(tot + self.D * 144 // 256),)
-
-    def check_replicas(self):
-        """one card: no replicas: always (True, True)"""
-        return True, True
