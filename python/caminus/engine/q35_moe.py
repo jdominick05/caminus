@@ -42,6 +42,7 @@ from ..device import capacity
 from . import k3, upload
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1m_records
 from .q3moe_one import card_per_wgp
+from .q35_dense import _wsum, _wsum_np, block_kinds, trunk_blocks   # (the same weight checks and block layout as the dense line)
 
 MODULE = 'k3_q35_moe'
 
@@ -71,40 +72,6 @@ def kv_module(F, module=None, q8=False):
 
 
 WSUM_WORDS = 1 << 20   # int32 words per checksum chunk: its int64 cast is the only scratch (8 MiB, inside the 256 MiB working allowance)
-
-
-def _wsum(t):
-    """int64 sum of a device tensor's bytes as int32 words (the tail bytes zero-padded, summed on the host): a weight
-    fingerprint, computed in WSUM_WORDS chunks so the card never holds more than one chunk's int64 cast (no whole-tensor
-    copy: a 1 GB embedding would need 2 GB of unprojected scratch)"""
-    b = t.reshape(-1).view(torch.uint8)
-    nw = b.numel() // 4
-    tot = 0
-    if nw:
-        w = b[:nw * 4].view(torch.int32)
-        for i in range(0, nw, WSUM_WORDS):
-            tot += int(w[i:i + WSUM_WORDS].to(torch.int64).sum())
-    if b.numel() > nw * 4:
-        tot += _wsum_np(b[nw * 4:].cpu().numpy())
-    return tot
-
-
-def _wsum_np(b):
-    pad = (-b.size) % 4
-    if pad: b = np.concatenate([b, np.zeros(pad, np.uint8)])
-    return int(b.view(np.int32).astype(np.int64).sum())
-
-
-def trunk_blocks(F):
-    """the number of blocks of the model's forward: block_count less the multi-token-prediction blocks after them"""
-    return int(F.hp('block_count')) - int(F.hp('nextn_predict_layers') or 0)
-
-
-def block_kinds(F):
-    """per trunk block: True = Gated DeltaNet, False = gated attention (attention.recurrent_layers where the file has
-    it; without that key every block but each full_attention_interval-th)"""
-    rec = F.hp('attention.recurrent_layers'); fai = int(F.hp('full_attention_interval', 4))
-    return [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(trunk_blocks(F))]
 
 
 def yarn_table(theta_scale, n_rot, factor, n_ctx=None):
