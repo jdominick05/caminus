@@ -432,7 +432,7 @@ class Moe35Own(Q35Host):
             if self.prefetch:
                 wt = lambda m: m['w'] if isinstance(m, dict) else m
                 # (the last block: the first block's, for the next token; the head's row-tile loads allocate no cache lines)
-                nxt = self.L[(il + 1) % len(self.L)]
+                nxt = self.L[(il + 1) % self.nl_build]
                 ws = [wt(d[k]) for k in ('router', 'sh_inp', 'sh_gate', 'sh_up', 'sh_down')]
                 ws += [wt(nxt[k]) for k in (('al', 'be', 'qkv', 'z', 'so') if nxt['kind'] == 'gdn' else ('q', 'k', 'v', 'o'))]
                 pf = E.prefetch(ws, self.prefetch, threads=self.prefetch_threads, dep=n1)
