@@ -6,7 +6,7 @@ line's (those are tests/prefill/test_q35_prefill_ops.py's), over a chunk's rows,
              on random h, plus rows with a tie and a logit spread past fp32's exp range
   norm       q3p_add_rms16 over the 9 weighted slots == OP_OWN_ADD_RMS16 (Engine.own_add_rms16, slots 9, w), BITWISE
   embedding  q35mp_emb_bf16 == OP_OWN_EMB on the BF16 table (Engine.own_emb), BITWISE
-  experts    q35mp_mm_q2_0 grouped by q35mp_group9 (gate K 2048 and down K 512 of a block's experts): every (token, slot)
+  experts    q35mp_mm_q2_0 grouped by q3p_group's Q3P_GROUP_Y9 form (gate K 2048 and down K 512 of a block's experts): every (token, slot)
              row against float64 of the exact weights (the blocks decoded on the host) and the fp16 inputs: max |error|
              within 1e-4 of the row's rms (fp32 sums; a layout or scatter bug is O(1)); the pairs' rows land where
              group9's three indices say (yp, y9), and an id out of range sets the routing flag

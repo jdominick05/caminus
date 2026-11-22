@@ -489,9 +489,17 @@ extern "C" __global__ void __launch_bounds__(32) q3p_topk(const float * __restri
 // expert (the GEMMs' blockIdx.x), their count in *nitems. An id outside [0, E) sets err and counts as expert 0 (the chunk
 // is refused by the host before its result is used). The order inside an expert's list follows the atomics, which changes
 // no bit: each output row of the GEMMs depends on its own input row only.
+// Q3P_GROUP_Y9 (the qwen35moe prefill object only, kernels/q35m_prefill.hip): a third index y9[i] = token (k + 1) + slot,
+// the pair's row in a down buffer of k + 1 slots per token (the shared expert's in slot k); the other objects' code is
+// unchanged.
+#ifdef Q3P_GROUP_Y9
+#define Q3P_Y9_PAR int * __restrict__ y9,
+#else
+#define Q3P_Y9_PAR
+#endif
 extern "C" __global__ void __launch_bounds__(1024) q3p_group(const int * __restrict__ ids, int npairs, int k, int E, int * __restrict__ xs,
-                                                             int * __restrict__ yd, MMItem * __restrict__ items, int * __restrict__ nitems,
-                                                             int * __restrict__ err) {
+                                                             int * __restrict__ yd, Q3P_Y9_PAR MMItem * __restrict__ items,
+                                                             int * __restrict__ nitems, int * __restrict__ err) {
     __shared__ int cnt[1024], off[1024], cur[1024], ioff[1024];
     const int tid = threadIdx.x;
     if (tid < E) { cnt[tid] = 0; cur[tid] = 0; }
@@ -512,6 +520,9 @@ extern "C" __global__ void __launch_bounds__(1024) q3p_group(const int * __restr
         int e = ids[p]; if (e < 0 || e >= E) e = 0;
         const int sl = off[e] + atomicAdd(&cur[e], 1);
         xs[sl] = p / k; yd[sl] = p;
+#ifdef Q3P_GROUP_Y9
+        y9[sl] = (p / k) * (k + 1) + p % k;
+#endif
     }
     if (tid < E) {
         const int c = cnt[tid];
