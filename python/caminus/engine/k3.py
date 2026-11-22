@@ -339,7 +339,8 @@ Q35S_OPS = {OP_NOP, OP_OWN_MV, OP_OWN_MV16, OP_OWN_ADD_RMS16, OP_OWN_SWIGLU16, O
             OP_GDN_GATES, OP_GDN_STEP, OP_GDN_SAVE, OP_GDN_NORM16, OP_QK_NR, OP_KV_APPEND, OP_ATTN_PART, OP_ATTN_COMB, OP_GATE_MUL16}
 # (the qwen35moe module: the same tape plus OP_ROUTER and OP_OWN_EMB in its BF16 form (own_op_emb_bf16): this line
 # uploads the whole token_embd table, ~0.95 GiB, which its VRAM projection has to count)
-Q35MOE_OPS = Q35S_OPS | {OP_ROUTER}   # (OP_OWN_EMB: the BF16 form, kernels/k3_q35_ops.h own_op_emb_bf16)
+OP_PREFETCH = 57   # = kernels/k3_q35_ops.h (under K3_Q35_MOE: the qwen35moe modules): weights into the Infinity Cache, no output
+Q35MOE_OPS = Q35S_OPS | {OP_ROUTER, OP_PREFETCH}   # (OP_OWN_EMB: the BF16 form, kernels/k3_q35_ops.h own_op_emb_bf16)
 # (decode attention: the split pair OP_ATTN_PART / COMB, Q35_SPLIT_MODULES; OP_ATTN_DEC is the drafter module's only, Q35M_OPS)
 # (the verify modules: the T-token forms and not the fused gate | up, which no verify tape runs and no gate has run there)
 MODULE_CAPS.update({m: (MODULE_CAPS[m] - {('OWN_MV', f'{f}/a16_1rt_gu') for f in OWN_1RT_FMT}) | {('OWN_MV', f'{f}/a16_1rt_mt') for f in OWN_1RT_FMT}
@@ -1286,6 +1287,26 @@ class Engine:
         if q8 is not None: assert n % 32 == 0 and rows_per_task % 32 == 0; self.keep.append(q8)
         self.segs.append(Seg(OP_GATE_MUL, (n + rows_per_task - 1) // rows_per_task, dep, rows_per_task, gate.data_ptr(), None,
                              a.data_ptr(), None if q8 is None else q8.data_ptr(), out.data_ptr(), 0.0, n, dim, 1, 0, team, head_stride, offset))
+        return len(self.segs) - 1
+
+    def prefetch(self, ws, ntask, threads=0, dep=-1, team=-1):
+        """OP_PREFETCH: the bytes of the device tensors ws (each contiguous; its base rounded down to 128 bytes) into the
+        Infinity Cache by ntask tasks, each a contiguous share of all their 128-byte lines, loaded by `threads` of the
+        workgroup's (0: all); no output (kernels/k3_q35_ops.h, the qwen35moe modules only). Returns the segment, or None"""
+        if self.module not in Q35MOE_MODULES: raise ValueError(f'prefetch: the qwen35moe modules only ({Q35MOE_MODULES})')
+        rec = []
+        for w in ws:
+            assert w.is_contiguous()
+            a = w.data_ptr() & ~127; e = w.data_ptr() + w.numel() * w.element_size()
+            rec += [a, (e - a + 127) // 128]
+        lines = sum(rec[1::2])
+        if not lines or int(ntask) < 1: return None
+        assert lines < 2 ** 31
+        dev = ws[0].device
+        R = torch.tensor(rec, dtype=torch.int64, device=dev); sink = torch.zeros(1, dtype=torch.int32, device=dev)
+        self.keep += list(ws) + [R, sink]
+        self.segs.append(Seg(OP_PREFETCH, int(ntask), dep, int(threads), R.data_ptr(), None, None, None, sink.data_ptr(), 0.0, lines,
+                             len(ws), 0, 0, team, 0, 0))
         return len(self.segs) - 1
 
     def gate_mul16(self, a, gate, head_stride, offset, out16, dim, rows_per_task=256, dep=-1, team=-1):

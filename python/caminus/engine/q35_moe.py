@@ -131,7 +131,7 @@ class Moe35Own(Q35Host):
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=32,
                  rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1,
-                 feature_layers=(), q8=False, yarn=None):
+                 feature_layers=(), q8=False, yarn=None, prefetch=16, prefetch_threads=16):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
@@ -194,6 +194,12 @@ class Moe35Own(Q35Host):
         if self.module not in k3.Q35MOE_MODULES: raise ValueError(f'Moe35Own: module {self.module} ({k3.Q35MOE_MODULES})')
         # (no gate | up fusion on the ThinkingCap module: its feed-forward's gate and up differ in format in most blocks)
         self.per_wgp, self.rpt, self.rpt16 = per_wgp, int(rpt), int(rpt16)
+        # prefetch: workgroups that stream weights into the Infinity Cache during each block (OP_PREFETCH, 0 = off), each
+        # with prefetch_threads loading threads: from the block's norm on, the block's router and shared expert, then the
+        # next block's trunk matrices (the last block: the first block's, for the next token). XT, F16 KV, short context:
+        # 5.87 -> 5.03 ms per token at 16 x 16 (4 x 64 5.35, 2 x 256 5.62; 16 x 16 is about 256 misses in flight: more
+        # slow the latency-bound ops beside them), the same bits at every setting
+        self.prefetch, self.prefetch_threads = int(prefetch), int(prefetch_threads)
         self.nl_build = self.nl if debug_layers is None else int(debug_layers)
         assert 1 <= self.nl_build <= self.nl, debug_layers
         self.emb = F.T['token_embd.weight']
@@ -423,6 +429,14 @@ class Moe35Own(Q35Host):
             # the block's norm, after the previous block's feed-forward is added to the residual (block 0: no add)
             n1 = E.own_add_rms16(s['x'], d['attn_norm'], s['h'], s['h16'], self.eps, d=s['d'] if il else None,
                                  slots=(KU + 1) if il else 0, w=s['wts'] if il else None, dep=prev)
+            if self.prefetch:
+                wt = lambda m: m['w'] if isinstance(m, dict) else m
+                # (the last block: the first block's, for the next token; the head's row-tile loads allocate no cache lines)
+                nxt = self.L[(il + 1) % len(self.L)]
+                ws = [wt(d[k]) for k in ('router', 'sh_inp', 'sh_gate', 'sh_up', 'sh_down')]
+                ws += [wt(nxt[k]) for k in (('al', 'be', 'qkv', 'z', 'so') if nxt['kind'] == 'gdn' else ('q', 'k', 'v', 'o'))]
+                pf = E.prefetch(ws, self.prefetch, threads=self.prefetch_threads, dep=n1)
+                if pf is not None: named(pf, f'prefetch.{il}')
             fc = None
             if il in fslot:   # (feat (zeroed per pass) += x: the residual entering block il, exactly; ordered before n2 rewrites x)
                 k = fslot[il]

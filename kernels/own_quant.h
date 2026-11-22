@@ -311,7 +311,9 @@ __device__ __forceinline__ void own_rows_q8_0_1rt(const uint8_t * __restrict__ W
 // the 9 aligned dwords from (34 l) & ~3 (an even l's block starts on a dword, its quants 2 bytes past one: alignbit; an
 // odd l's d is the first dword's high half, its quants the next 8 dwords), and its 32 fp16 activations (64 contiguous
 // bytes). Per block t = its 8 groups' dot4s in order, acc = fma(d, t, acc) pass by pass, then the wave sum. All 32
-// lanes active (the shuffles). Returns the row's sum (every lane).
+// lanes active (the shuffles). Returns the row's sum (every lane). OWN_ROW_W_NT (the qwen35moe decode module): the
+// weight dwords as nontemporal loads (slc dlc): they hit lines OP_PREFETCH brought into the Infinity Cache but allocate
+// none, so a streamed matrix (the 515 MB head) does not evict the next block's prefetched weights.
 __device__ __forceinline__ float own_row_q8_0_w(const uint8_t * __restrict__ Wrow, int nb, const void * __restrict__ x,
                                                 int lane) {
     const bool ev = !(lane & 1);
@@ -323,7 +325,11 @@ __device__ __forceinline__ float own_row_q8_0_w(const uint8_t * __restrict__ Wro
         uint32_t w[9];
         uint4 a[4];
 #pragma unroll
+#ifdef OWN_ROW_W_NT
+        for (int i = 0; i < 9; i++) w[i] = __builtin_nontemporal_load(p + i);
+#else
         for (int i = 0; i < 9; i++) w[i] = p[i];
+#endif
 #pragma unroll
         for (int i = 0; i < 4; i++) a[i] = xa[i];
         float t = 0.0f;
