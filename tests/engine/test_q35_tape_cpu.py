@@ -158,6 +158,20 @@ check(refused(lambda: e_m.own_matvec_1rt(torch.zeros(8 * 144, dtype=torch.uint8)
       refused(lambda: e_s.own_emb(torch.zeros(64 * 144, dtype=torch.uint8), 'Q4_K', 64, 256, torch.zeros(1, dtype=torch.int64), B(256), key=True)) and
       refused(lambda: e_s.own_add_rms16(B(256), B(256), B(256), B(512, torch.float16), 1e-6, h16_stride=512)),
       'the drafter module refuses Q4_K; the Swift module refuses Q4_0, the argmax, the key embedding and the h16 stride')
+# the qwen35moe module's experts tile at 4 rows per wave: the host's table matches the module file, and the fused gate | up
+# refuses tasks whose gate and up rows would fall to different waves (16 rows there: NaN logits, a race on the gate sums)
+rw_src = int(re.search(r'^#define OWN_K3_RW (\d+)', open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_moe.hip')).read(), re.M).group(1))
+e_q = k3.Engine(module='k3_q35_moe'); q2 = lambda r, kk: torch.zeros(r * kk // 64 * 18 + 64, dtype=torch.uint8)
+ids8 = torch.zeros(8, dtype=torch.int32)
+def gu_ok(rpt):   # (past the host's argument checks: a CPU stand-in then stops at the device asserts)
+    try: e_q.own_matvec_1rt(q2(1024, 2048), 'Q2_0', 512, 2048, B(2048, torch.float16), B(8 * 512, torch.float16), ids=ids8,
+                            total_rows=1024, up=q2(1024, 2048), rows_per_task=rpt)
+    except ValueError: return False
+    except AssertionError: return True
+    return True
+check(rw_src == k3.OWN_K3_RW_OF['k3_q35_moe'] == 4 and all(k3.OWN_K3_RW_OF.get(m) == 4 for m in k3.Q35MOE_MODULES)
+      and gu_ok(32) and gu_ok(64) and not gu_ok(16) and not gu_ok(48),
+      f'the qwen35moe modules: OWN_K3_RW {rw_src} (k3.OWN_K3_RW_OF), the fused gate | up at 32 / 64 rows per task, refused at 16 / 48')
 e_m.own_matvec_1rt(q4(8, 256), 'Q4_0', 8, 256, B(256, torch.float16), B(8)); e_m.own_argmax(B(300), 300, torch.zeros(1, dtype=torch.int64))
 e_m.build()
 check(set(e_m.inventory()) == {('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_ARGMAX', '-')} and not e_m.unsupported(), 'the drafter module builds a Q4_0 matvec and the argmax')

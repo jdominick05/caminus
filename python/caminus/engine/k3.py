@@ -176,6 +176,10 @@ Q35MOE_KV_Q8_MODULES = tuple(Q35MOE_KV_Q8_OF.values())
 Q35MOE_TRACE_MODULES = ('k3_q35_moe_kvq8_trace',)
 Q35MOE_KV_Q8_MODULES += Q35MOE_TRACE_MODULES
 Q35MOE_MODULES += Q35MOE_KV_Q8_MODULES
+# rows per wave of the one-round-trip tiles (kernels/k3_own_ops.h OWN_K3_RW; 2 where a module file does not set it): the
+# qwen35moe modules take 4 (kernels/k3_q35_moe.hip). OWN_GU's gate and up rows of a task must fall to the same wave (the
+# gate sums wait in that wave's LDS slots, unsynchronised): rows_per_task a multiple of 8 waves x this.
+OWN_K3_RW_OF = dict.fromkeys(Q35MOE_MODULES, 4)
 # Every runtime check that asks "does this module keep a Q8 KV cache" uses this: the dense table above stays the dense
 # table (its own tests pin its members and their geometry), and the MoE object joins here.
 Q35_KV_Q8_ALL = Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES
@@ -856,6 +860,10 @@ class Engine:
         if (scales is not None) != rs: raise ValueError(f'own_matvec_1rt: scales are the row-scale formats\' ({sorted(OWN_RS_FMT)}), and they need them (fmt {fmt})')
         if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:
             raise ValueError(f'own_matvec_1rt: K {ncols} (a multiple of 256), rows {rows} (even), rows_per_task {rows_per_task}')
+        gu_m = 8 * OWN_K3_RW_OF.get(self.module, 2)   # (a task's gate and up rows on the same wave; the LDS slots: OWN_GU_RPT)
+        if up is not None and (rows_per_task % gu_m or rows_per_task > 64):
+            raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of {gu_m} on {self.module}, at most 64 '
+                             f'(got {rows_per_task})')
         S = 1 if ids is None else ids.numel()
         total = rows if ids is None else int(total_rows)
         if total % rows: raise ValueError(f'own_matvec_1rt: total_rows {total} is not experts x {rows}')
@@ -872,8 +880,6 @@ class Engine:
             assert scales.dtype == torch.float32 and scales.is_cuda and scales.numel() >= total * (2 if up is not None else 1), (scales.numel(), total)
             assert scales.data_ptr() % 4 == 0
         if ids is not None: assert ids.dtype == torch.int32 and ids.is_cuda
-        if up is not None and (rows_per_task % 16 or rows_per_task > 64):   # (the gate sums' LDS slots: OWN_GU_RPT)
-            raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of 16, at most 64 (got {rows_per_task})')
         pad1 = (OWN_A16_1RT | (OWN_GROUPED if ids is not None else 0) | (OWN_X_PER_SLOT if x_per_slot else 0)
                 | (OWN_GU if up is not None else 0) | (OWN_X_PER_TOKEN if x_per_token else 0) | (OWN_UNION if union else 0)
                 | ((tokens << 8) if tokens > 1 else 0))
