@@ -30,6 +30,8 @@
 #define ATTN_SS 128          // list positions per split: 32 -> 64 -> 128 measured at 49,901 depth, 9.252 -> 8.730 ->
                              // 8.362 ms (-10.6 %), and 5.644 -> 5.561 at short context; 128 is the split header's max
 #define OWN_ADD_MAX_S 9
+#define OWN_ADD_S 3           // the 9-slot add's slots per load round trip (kernels/k3_own_ops.h): 1 -> 3 measured (XT,
+                             // q35_gmodel --speed) 6.27 -> 6.20 ms per token, the same bits, +1 spilled SGPR; 5: 6.25, +6 VGPRs
 #define K3_Q35_MOE
 #define K3_Q35_YARN          // (OP_QK_NR's YaRN form: Seg.aux = the per-dim factor table, Seg.work = mscale's bits)
 #define K3_Q35_ATTN_SPLIT   // decode attention as the split pair (kernels/k3_attn_split.h), as the dense line's modules
