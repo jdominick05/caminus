@@ -42,5 +42,12 @@
 // VGPR spills either way.
 #define K3_Q3M_ADD_RMS_PIN
 #define K3_Q35_GDN_LOCAL_BASE
+// The routed experts' tile (OP_OWN_MV, Q2_0) at 4 rows per wave: twice the bytes in flight per pass (the experts' down,
+// K 512, one pass per row: latency-bound at 2 rows); a row's sum does not depend on RW (the logits bitwise at 2 and 4).
+// XT: down 17.9 -> 12.3 us, gate | up 17.0 -> 13.8; 8 rows spill 55 VGPRs (8.0 ms per token). No Q4_K / Q6_K tiles:
+// the line's files hold none (k3.OWN_Q35MOE_1RT); without them k3_run 88 -> 78 VGPRs, 78 -> 66 spilled SGPRs.
+#define OWN_K3_RW 4
+#define OWN_K3_NO_Q4
+#define OWN_K3_NO_Q6
 #define K3_EXTRA_OPS_HEADER "k3_q35_ops.h"
 #include "k3.hip"

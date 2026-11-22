@@ -129,16 +129,16 @@ def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
 class Moe35Own(Q35Host):
     TAPE_MIB = 8   # an upper bound of one tape's buffers (S, the stage, the logits): what a further tape on the same engine adds
 
-    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', gu=True, rpt=16,
+    def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=32,
                  rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1,
                  feature_layers=(), q8=False, yarn=None):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
         torch / HIP device index. max_ctx: KV cache positions. per_wgp: workgroups per WGP ('card': the qwen3moe engine's
-        per-card grid; a number for the grid tests). gu: the feed-forward's gate, up and SwiGLU as one segment where the
-        two matrices share a one-round-trip format (False: three segments everywhere). rpt / rpt16: rows per task of the
-        one-round-trip / the general rows matvecs. debug_layers: TEST-ONLY, the first n blocks, then the output norm and
+        per-card grid; a number for the grid tests). rpt / rpt16: rows per task of the one-round-trip (the routed experts:
+        32 = 4 rows per wave, the module's OWN_K3_RW) / the general rows matvecs (the wave-per-row Q8_0 tile sizes its
+        own). debug_layers: TEST-ONLY, the first n blocks, then the output norm and
         the head; after a pass buf['x'] is block n - 1's output residual. spec_T: the most tokens a verify pass on this
         engine's state runs (engine/q35_dense_verify.py; 1 .. 4): each Gated DeltaNet block keeps that many tokens' saved
         inputs, and a pass after a verify pass commits up to spec_T of them (1: the decode engine as served).
@@ -193,7 +193,7 @@ class Moe35Own(Q35Host):
         self.one_rt = k3.OWN_Q35MOE_1RT
         if self.module not in k3.Q35MOE_MODULES: raise ValueError(f'Moe35Own: module {self.module} ({k3.Q35MOE_MODULES})')
         # (no gate | up fusion on the ThinkingCap module: its feed-forward's gate and up differ in format in most blocks)
-        self.per_wgp, self.gu, self.rpt, self.rpt16 = per_wgp, bool(gu) and not self.tcap, int(rpt), int(rpt16)
+        self.per_wgp, self.rpt, self.rpt16 = per_wgp, int(rpt), int(rpt16)
         self.nl_build = self.nl if debug_layers is None else int(debug_layers)
         assert 1 <= self.nl_build <= self.nl, debug_layers
         self.emb = F.T['token_embd.weight']
@@ -364,7 +364,7 @@ class Moe35Own(Q35Host):
         KU, FF, FS = self.k_used, self.ffn, self.ffn_shexp
         s = self.buf = dict(x=B(D), h=B(D), h16=B(D, f16), blk=B(D),
                           d=B((KU + 1) * D), wts=B(KU + 1), ids=B(KU, torch.int32), logit=B(self.n_exp), sgl=B(1),
-                          g=B(KU * FF), u=B(KU * FF), a16=B(KU * FF, f16),
+                          a16=B(KU * FF, f16),
                           shg=B(FS), shu=B(FS), sha16=B(FS, f16),
                           al=B(NV), be=B(NV), gates=B(2 * NV), qkv=B(CH), conv=B(CH), qk=B(2 * KD), z=B(VD), o=B(VD),
                           fin16=B(VD, f16), qf=B(2 * QH), kr=B(nkv * hd), vr=B(nkv * hd), qo=B(QH), ko=B(nkv * hd),
@@ -392,8 +392,9 @@ class Moe35Own(Q35Host):
             if W['fmt'] == 'F32':
                 return named(E.f32_mv(W['w'], x32, out, rows_per_task=4, dep=dep), W['name'])
             if ids is not None:
+                kw = {} if up is None else dict(up=up['w'])
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, ids=ids, total_rows=total_rows,
-                                              x_per_slot=x_per_slot, rows_per_task=self.rpt, dep=dep), W['name'])
+                                              x_per_slot=x_per_slot, rows_per_task=self.rpt, dep=dep, **kw), W['name'])
             if W['fmt'] in self.one_rt:
                 kw = {} if up is None else dict(up=up['w'])
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt, dep=dep, **kw),
@@ -462,10 +463,9 @@ class Moe35Own(Q35Host):
             sg_ = mv(d['sh_gate'], s['h16'], s['shg'], n2); su_ = mv(d['sh_up'], s['h16'], s['shu'], n2)
             ssw = E.also(E.own_swiglu16(s['shg'], s['shu'], s['sha16'], dep=su_), sg_)
             sh_ = mv(d['sh_down'], s['sha16'], s['d'][KU * D:(KU + 1) * D], ssw)
-            # the routed experts: gate / up grouped by the router's ids, the down pass each slot its own input
-            g_ = mv(d['ffn_gate_exps'], s['h16'], s['g'], ro, ids=s['ids'], total_rows=self.n_exp * FF)
-            u_ = mv(d['ffn_up_exps'], s['h16'], s['u'], ro, ids=s['ids'], total_rows=self.n_exp * FF)
-            sw = E.also(E.own_swiglu16(s['g'], s['u'], s['a16'], dep=u_), g_)
+            # the routed experts: gate | up and their SwiGLU as one segment grouped by the router's ids (OWN_GU: the up's
+            # rows no longer queue behind the gate's, no SwiGLU hand-off), the down pass each slot its own input
+            sw = mv(d['ffn_gate_exps'], s['h16'], s['a16'], ro, up=d['ffn_up_exps'], ids=s['ids'], total_rows=self.n_exp * FF)
             prev = mv(d['ffn_down_exps'], s['a16'], s['d'][:KU * D], sw, ids=s['ids'], total_rows=self.n_exp * D,
                       x_per_slot=True)
             E.also(prev, sh_)   # (the next block's add reads every slot: it waits for the shared expert's too)
