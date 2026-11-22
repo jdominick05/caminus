@@ -36,6 +36,7 @@ for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_kvq8.hip', 
             'own_mv_q2_0.hip',                                # (the standalone own Q2_0 tiles: Qwen3.6's experts, the Coder's down)
             'k3_q35_tcap.hip', 'k3_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
             'k3_q35_moe.hip',                                 # (the qwen35moe decode module: the same rule, its Q2_0 tile included)
+            'q35m_prefill.hip', 'prefill_attn_q35.hip', 'prefill_glue_q35.hip',   # (its batched prefill's objects)
             'q35_prefill_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
             'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip',
             'kv_codec.hip',    # (staged own Q8 KV codec and cache-specialized dense modules)
@@ -54,7 +55,7 @@ check(re.search(r'kernels/k3_q3m\*\.hip\|kernels/k3_q35_\*\.hip\)\s*extra=\(-mll
 # the serve path under an import hook refusing gguf and tokenizers
 MODS = ('caminus.serve.cli', 'caminus.serve.server', 'caminus.serve.k3_session', 'caminus.serve.worker', 'caminus.serve.generate',
         'caminus.cache.prompt', 'caminus.decode.longctx', 'caminus.engine.q3moe_one', 'caminus.prefill.q3m', 'caminus.serve.tokenizer',
-        'caminus.engine.q35_dense', 'caminus.engine.q35_moe', 'caminus.prefill.q35own',
+        'caminus.engine.q35_dense', 'caminus.engine.q35_moe', 'caminus.prefill.q35own', 'caminus.prefill.q35moe',
         'caminus.device.kv_codec')   # (+ the dense qwen35 line and staged own KV codec)
 code = f'''import sys, importlib.abc
 class B(importlib.abc.MetaPathFinder):

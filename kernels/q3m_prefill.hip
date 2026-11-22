@@ -410,7 +410,14 @@ extern "C" __global__ void __launch_bounds__(256) q3p_add_rms16(float * __restri
         if (j < NI) {
             const float v = (xv[j] * scale) * nw[tid + 256 * j];
             if (h) h[(size_t)t * N + tid + 256 * j] = v;
+#ifdef Q3P_ADD_RMS16_MIX
+            // (the qwen35moe decode module's h16: its compiler fuses the last multiply into the fp16 conversion (a mixed
+            //  fma, one rounding of the exact product), so an fp32 tie rounds the other way: 5 of 75,776 values. The
+            //  product of two fp32 values is exact in fp64, then one rounding to fp16: the same bits)
+            h16[(size_t)t * N + tid + 256 * j] = (_Float16)((double)(xv[j] * scale) * (double)nw[tid + 256 * j]);
+#else
             h16[(size_t)t * N + tid + 256 * j] = (_Float16)v;
+#endif
         }
 }
 

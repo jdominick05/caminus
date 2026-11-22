@@ -1,5 +1,6 @@
-"""The dense qwen35 line's own batched prefill (caminus.prefill.q35own.Q35OwnPrefill on Dense35Own: Swift 1.5 Q4_K_M) end
-to end against the float64 reference (tools/reference/q35_ref.py: N teacher-forced positions of a public text):
+"""The qwen35 lines' own batched prefills end to end (the file's architecture picks them: qwen35, the dense line,
+caminus.prefill.q35own.Q35OwnPrefill on Dense35Own: Swift 1.5 Q4_K_M; qwen35moe, caminus.prefill.q35moe.Q35MoEPrefill on
+Moe35Own: Qwen3.6-35B-A3B, F16 KV) against the float64 reference (tools/reference/q35_ref.py: N teacher-forced positions of a public text):
 
   G-model    positions [0, P) prefilled, then P .. N - 1 one K3 pass each: KLD(ref || ours) and top-1 at those positions,
              against the decode-only engine at the same positions and against llama.cpp's own prefill-then-decode (its
@@ -16,9 +17,8 @@ import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import numpy as np, torch
 from caminus.device import capacity
-from caminus.engine.q35_dense import Dense35Own
+from caminus import ggufio
 from caminus.prefill.driver import PrefillRefused
-from caminus.prefill.q35own import Q35OwnPrefill, buffer_need_mib, shapes_of
 
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--ref', required=True)
 ap.add_argument('--llama', default=None); ap.add_argument('--from', dest='P', type=int, default=64)
@@ -45,8 +45,16 @@ def score(rows, cand):
 
 max_ctx = max(N + 64, A.speed + 64)
 CHUNK = 2048 if A.speed else 128
-eng = Dense35Own(A.gguf, max_ctx=max_ctx, vram_extra_mib=buffer_need_mib(shapes_of(A.gguf), CHUNK))
-pf = Q35OwnPrefill(eng, chunk=CHUNK)
+_F = ggufio.GGUFFile(A.gguf); ARCH = _F.arch; _F.close()
+if ARCH == 'qwen35moe':
+    from caminus.engine.q35_moe import Moe35Own as Engine
+    from caminus.prefill.q35moe import Q35MoEPrefill as Prefill, buffer_need_mib, shapes_of
+elif ARCH == 'qwen35':
+    from caminus.engine.q35_dense import Dense35Own as Engine
+    from caminus.prefill.q35own import Q35OwnPrefill as Prefill, buffer_need_mib, shapes_of
+else: sys.exit(f'test_q35_prefill: architecture {ARCH!r} (qwen35, qwen35moe)')
+eng = Engine(A.gguf, max_ctx=max_ctx, vram_extra_mib=buffer_need_mib(shapes_of(A.gguf), CHUNK))
+pf = Prefill(eng, chunk=CHUNK)
 NVSS = eng.NV * eng.S * eng.S
 attn_L = [L for L in eng.L if L['kind'] == 'attn']; gdn_L = [L for L in eng.L if L['kind'] == 'gdn']
 conv_n = gdn_L[0]['conv_st'].numel()
