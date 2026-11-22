@@ -417,6 +417,7 @@ class Moe35Own(Q35Host):
 
         self._attn_part = None
         prev = E.own_emb(self.emb_dev, self.emb.type, self.vocab, D, self.tok, s['x'])
+        sv_prev = None   # (the last GDN block's gdn_save)
         for il, d in enumerate(self.L):
             self.layer_seg.append((il, len(E.segs)))
             # the block's norm, after the previous block's feed-forward is added to the residual (block 0: no add)
@@ -427,17 +428,20 @@ class Moe35Own(Q35Host):
                 k = fslot[il]
                 fc = E.own_add_rms16(s['feat'][k * D:(k + 1) * D], d['attn_norm'], s['fh'], s['fh16'], self.eps, d=s['x'], slots=1, dep=n1)
             if d['kind'] == 'gdn':
+                # (the previous GDN block's save reads gates / conv / qk: their writers here wait for it, gates through beta's
+                #  matvec, l2 through conv; the output matvec of that block does not, so the save is off the critical path)
                 a_ = mv(d['al'], s['h16'], s['al'], n1, x32=s['h']); b_ = mv(d['be'], s['h16'], s['be'], n1, x32=s['h'])
+                if sv_prev is not None: b_ = E.also(b_, sv_prev)
                 gt = E.also(E.gdn_gates(s['al'], s['be'], d['dt'], d['a'], s['gates'], dep=a_), b_)
                 q_ = mv(d['qkv'], s['h16'], s['qkv'], n1)
                 c_ = E.gdn_conv(s['qkv'], d['conv_w'], d['conv_st'], s['conv'], d['convx'], dep=q_)
+                if sv_prev is not None: c_ = E.also(c_, sv_prev)
                 l_ = E.gdn_l2(s['conv'], s['qk'], 2 * NK, S, self.eps, x_stride=CH, dep=c_)
                 z_ = mv(d['z'], s['h16'], s['z'], n1)
                 st = E.also(E.gdn_step(s['qk'], s['conv'][2 * KD:], s['gates'], d['gdn'], s['o'], NV, S, NK, CH, dep=l_), gt)
                 sv = E.gdn_save(s['qk'], s['conv'][2 * KD:], s['gates'], d['gdn'], NV, S, NK, CH, dep=st)
                 nm = E.also(E.gdn_norm16(s['o'], d['nw'], s['z'], s['fin16'], NV, S, self.eps, dep=st), z_)
-                # (the output matvec also waits for the save: the next block rewrites the buffers the save reads)
-                o_ = E.also(mv(d['so'], s['fin16'], s['blk'], nm), sv)
+                o_ = mv(d['so'], s['fin16'], s['blk'], nm); sv_prev = sv
             else:
                 k_ = mv(d['k'], s['h16'], s['kr'], n1); v_ = mv(d['v'], s['h16'], s['vr'], n1)
                 kd = E.qk_nr(s['kr'], hd, nkv, hd, d['kn'], self.pos, s['ko'], self.nrot, self.theta_scale, self.eps, dep=k_, yarn=yy)
