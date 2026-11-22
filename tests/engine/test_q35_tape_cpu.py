@@ -447,5 +447,16 @@ except k3.ContextBoundsError: multi = 'bounds'
 check(multi == 'kv' and not qv2.bails and qb.broken and not qb.poisoned and int(e2.kv_error[0]) == 2,
       f'a later launch\'s refused encoding is reported before the first launch\'s bound and timeout (got {multi})')
 
+# Q35Host.physics_bytes (the server's bandwidth floor): the routed experts count at k_used / n_exp (a token reads k_used
+# of each layer's n_exp), everything else once, MTP blocks and the embedding table out (one row instead)
+T_ = lambda n, b: types.SimpleNamespace(name=n, n_bytes=b)
+Fm = types.SimpleNamespace(hp=lambda k: 3, tensors=[T_('token_embd.weight', 10 ** 6), T_('blk.0.attn_qkv.weight', 1000),
+     T_('blk.0.ffn_gate_exps.weight', 256_000), T_('blk.0.ffn_down_exps.weight', 512_000), T_('blk.0.ffn_up_shexp.weight', 300),
+     T_('blk.1.ffn_gate_exps.weight', 256_000), T_('blk.2.ffn_gate_exps.weight', 10 ** 7), T_('output.weight', 5000)])
+moe_pb = q35_dense.Q35Host.physics_bytes(types.SimpleNamespace(F=Fm, nl=2, D=256, k_used=8, n_exp=256))[0]
+dense_pb = q35_dense.Q35Host.physics_bytes(types.SimpleNamespace(F=Fm, nl=2, D=256))[0]
+check(moe_pb == 1000 + 300 + 5000 + (256_000 + 512_000 + 256_000) * 8 / 256 + 144 and dense_pb == 1000 + 300 + 5000 + 1_024_000 + 144,
+      f'physics_bytes: routed experts at k_used / n_exp ({moe_pb:.0f} bytes), all of them without n_exp ({dense_pb:.0f})')
+
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)
