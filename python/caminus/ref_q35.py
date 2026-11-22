@@ -82,6 +82,7 @@ def rope_sections_ok(sec, nrot):
 class Q35Ref:
     gdn_gate = staticmethod(silu)   # the Gated DeltaNet output gate on z (the Coder's reference, caminus.ref_coder: sigmoid)
     UNREAD = r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?)$'   # tensor names of forms no reference here reads
+    yarn_m, yarn_s = None, 1.0      # (the native rope; __init__ sets YaRN's per-pair multipliers and cos / sin magnitude)
 
     def __init__(self, path, threads=None, yarn=None):
         self.yarn = yarn          # (the long-context factor; _trunk builds the rope table from it)
@@ -109,10 +110,10 @@ class Q35Ref:
         self.eps, self.base, self.nrot = float(hp('attention.layer_norm_rms_epsilon')), float(hp('rope.freq_base')), int(hp('rope.dimension_count'))
         # (YaRN: the same recipe and the same native context the engine uses, so both sides of a gate row rotate alike.
         #  getattr: a subclass (the Coder's CoderRef) sets up its own trunk and need not take the factor at all)
-        self.yarn_m = None
         yarn = getattr(self, 'yarn', None)
         if yarn:
-            from caminus.rope import yarn_freqs
+            from caminus.rope import mscale, yarn_freqs
+            self.yarn_s = mscale(float(yarn))   # (the magnitude on cos / sin of the rotated dims: the engine's op scales both)
             j = np.arange(self.nrot // 2, dtype=np.float64)
             n_ctx = int(hp('context_length'))
             self.yarn_m = (yarn_freqs(self.nrot, self.base, float(yarn), n_ctx)
@@ -171,7 +172,7 @@ class Q35Ref:
         half = self.nrot // 2
         th = pos[:, None, None] * self.base ** (-2.0 * np.arange(half) / self.nrot)
         if self.yarn_m is not None: th = th * self.yarn_m
-        c, s = np.cos(th), np.sin(th)
+        c, s = np.cos(th) * self.yarn_s, np.sin(th) * self.yarn_s
         a, b = x[..., :half], x[..., half:self.nrot]
         return np.concatenate([a * c - b * s, a * s + b * c, x[..., self.nrot:]], axis=-1)
 
