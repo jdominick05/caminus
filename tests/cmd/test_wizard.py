@@ -202,7 +202,7 @@ def main():
           f'a run: doctor, doctor --gpu, pull, start, qwen-code setup --install, in that order ({calls})')
     code, calls, _ = go([XTX, XT], 'open', yes=False, dry=False, answers=['', 'y'])
     check(calls[-1] == ['qwen', '--server', 'coder'], 'Open Qwen Code now? y: caminus qwen on that server')
-    code, calls, out = go([XT], 'pick', yes=False, dry=False, answers=['coder', '4', 'n'])
+    code, calls, out = go([XT], 'pick', yes=False, dry=False, answers=['coder', '5', 'n'])
     check(code == 0 and ['start', 'qwen3.8-27b'] in calls and "'coder': not one of the choices" in out,
           'one XT: a model that does not run there is refused, a number picks from the list')
     code, calls, _ = go([XT, XT], 'two-xt', yes=False, dry=False, answers=['swift-1.5', 'n'])
