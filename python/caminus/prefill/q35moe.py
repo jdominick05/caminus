@@ -15,7 +15,7 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
   h, h16 = add_rms16(x += block, post_attention_norm)
   MoE       router logits (F32 [256], pf_f32_mv_k2048) and the shared expert's gate logit (F32 [1]); the top 8 with the
             gated shared weight as slot 8 (q35mp_router_sh: OP_ROUTER on the qwen35moe module); the shared expert (Q8_0
-            gate / up GEMMs, fp16 swiglu, down GEMM into slot 8); the (token, slot) pairs grouped by expert (q35mp_group9),
+            gate / up GEMMs, fp16 swiglu, down GEMM into slot 8); the (token, slot) pairs grouped by expert (q3p_group with its y9 index),
             the routed experts' Q2_0 gate / up (q35mp_mm_q2_0, grouped), fp16 swiglu, down into slots 0 .. 7
             -> the 9 slots are summed, weighted, at the next layer's norm
 The last layer stops after its cache rows: its output feeds only the prompt's logits, which a prefill never returns (the
@@ -77,7 +77,7 @@ class Ops(q35own.Ops):
 
     def group9(self, ids, npairs, k, E, xs, yp, y9, items, nitems, err):
         if E > 1024: raise ValueError(f'q35moe group9: E {E} (<= 1024)')
-        self.mod.q35mp_group9((1,), (1024,), ids, I(npairs), I(k), I(E), xs, yp, y9, items, nitems, err)
+        self.mod.q3p_group((1,), (1024,), ids, I(npairs), I(k), I(E), xs, yp, y9, items, nitems, err)   # (Q3P_GROUP_Y9's form)
 
     def emb_bf16(self, W, vocab, toks, x, n, N):
         self.mod.q35mp_emb_bf16((int(n),), (256,), W, I(vocab), toks, x, I(N))

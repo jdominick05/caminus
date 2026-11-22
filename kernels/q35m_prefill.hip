@@ -1,19 +1,20 @@
 // The batched prefill of the qwen35moe line (Qwen3.6-35B-A3B) on Caminus's own kernels (python/caminus/prefill/q35moe.py):
 // no ggml-cuda code. This object holds q35_prefill.hip's kernels (the dense qwen35 line's GEMMs, GDN glue and attention
-// tiles, and q3m_prefill.hip's under them: included as they are, so neither file's own object changes) and the four ops
-// the MoE line adds:
+// tiles, and q3m_prefill.hip's under them: included as they are, so neither file's own object changes) and the ops the MoE
+// line adds:
 //
 //   q35mp_mm_q2_0    the routed experts' Q2_0 GEMM (grouped by expert, q3p_mm_q4k's interface and tiling)
 //   q35mp_router_sh  the router's softmax top-k plus the gated shared expert's weight (the decode's OP_ROUTER on the
 //                    qwen35moe module, kernels/k3_q35_ops.h op_router_shexp), one token per workgroup
-//   q35mp_group9     q3p_group with a third index: each (token, slot) pair's row in the 9-slot down buffer
+//   q3p_group        built here with Q3P_GROUP_Y9: a third index, each (token, slot) pair's row in the 9-slot down buffer
 //   q35mp_emb_bf16   the BF16 embedding rows (kernels/k3_q35_ops.h own_op_emb_bf16's statements)
 //
 // The feed-forward's combine is q3p_add_rms16 over 9 slots: the 8 routed experts' down rows, then the shared expert's
 // in slot 8, weighted by q35mp_router_sh's [n][9] weights (the decode's own_op_add_rms16 9-slot form: fma in slot order).
 // q3p_add_rms16 writes h16 as the qwen35moe decode module's mixed fma does (one rounding of the exact product): only in this
-// object, so q3m_prefill's and q35_prefill's code stays unchanged
+// object, so q3m_prefill's and q35_prefill's code stays unchanged; likewise q3p_group's third index (Q3P_GROUP_Y9)
 #define Q3P_ADD_RMS16_MIX
+#define Q3P_GROUP_Y9
 #include "q35_prefill.hip"
 
 // ---- q35mp_mm_q2_0: Y[ydst[i]][r] = X[xsrc[i]] . W[e][r] in fp32 ------------------------------------------------------
@@ -26,7 +27,7 @@
 // 72 * 4 / 4), so every row and every step starts 4-byte aligned: 18 dword loads, the next step's issued before this
 // step's WMMAs. In place: the GGUF's [E][R][K] blocks as they are (expert e's row r at (e R + r) * row bytes).
 // Grid (work items or tokens / 64, rows / 128), block 256; X fp16 [ntok][ldx], Y fp32 [.][ldy]; items: q3p_group's /
-// q35mp_group9's (null: dense rows of expert 0).
+// q3p_group's (null: dense rows of expert 0).
 __device__ __forceinline__ h16_t q2_0_b(uint32_t v) {
     const h2_t o2 = {(_Float16)(-1025.0f), (_Float16)(-1025.0f)};   // fp16 (1024 + q) - 1025 = q - 1, exact
     uint32_t o[8];
@@ -189,42 +190,6 @@ extern "C" __global__ void __launch_bounds__(256) q35mp_router_sh(const float * 
     }
     if (tid == 0) wts_out[k] = 1.0f / (1.0f + expf(-sgl[t]));
     if (bad) atomicOr(err, 1);
-}
-
-// ---- q35mp_group9: q3p_group, plus each pair's row in the down buffer of k + 1 slots per token -------------------------
-// xs[i] = the token, yp[i] = the pair (token k + slot), y9[i] = token (k + 1) + slot, for the pairs of expert e at
-// [off_e, off_e + cnt_e); work items of <= 64 pairs per expert, their count in *nitems. The gate / up GEMMs read x row xs
-// and write row yp; the down GEMM reads row yp and writes row y9, so q3p_add_rms16 sums the token's k + 1 rows in slot
-// order with the shared expert's in slot k. An id outside [0, E) sets err bit 2 and counts as expert 0. One workgroup of
-// 1024 (E <= 1024); the order inside an expert's list follows the atomics, which changes no bit.
-extern "C" __global__ void __launch_bounds__(1024) q35mp_group9(const int * __restrict__ ids, int npairs, int k, int E, int * __restrict__ xs,
-                                                                int * __restrict__ yp, int * __restrict__ y9, MMItem * __restrict__ items,
-                                                                int * __restrict__ nitems, int * __restrict__ err) {
-    __shared__ int cnt[1024], off[1024], cur[1024], ioff[1024];
-    const int tid = threadIdx.x;
-    if (tid < E) { cnt[tid] = 0; cur[tid] = 0; }
-    __syncthreads();
-    for (int p = tid; p < npairs; p += 1024) {
-        int e = ids[p];
-        if (e < 0 || e >= E) { atomicOr(err, 2); e = 0; }
-        atomicAdd(&cnt[e], 1);
-    }
-    __syncthreads();
-    if (tid == 0) {
-        int o = 0, io = 0;
-        for (int e = 0; e < E; e++) { off[e] = o; ioff[e] = io; o += cnt[e]; io += (cnt[e] + MM_M - 1) / MM_M; }
-        *nitems = io;
-    }
-    __syncthreads();
-    for (int p = tid; p < npairs; p += 1024) {
-        int e = ids[p]; if (e < 0 || e >= E) e = 0;
-        const int sl = off[e] + atomicAdd(&cur[e], 1);
-        xs[sl] = p / k; yp[sl] = p; y9[sl] = (p / k) * (k + 1) + p % k;
-    }
-    if (tid < E) {
-        const int c = cnt[tid];
-        for (int j = 0; j * MM_M < c; j++) { MMItem it; it.e = tid; it.off = off[tid] + j * MM_M; it.cnt = min(MM_M, c - j * MM_M); it.pad = 0; items[ioff[tid] + j] = it; }
-    }
 }
 
 // ---- q35mp_emb_bf16: x [n][N] fp32 = the BF16 rows toks[i] (own_op_emb_bf16's statements: bf16 -> f32 is a shift) ------
