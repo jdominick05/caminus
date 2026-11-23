@@ -138,6 +138,9 @@ CLAUDE.md imports this file.
 - `kernels/own_quant_q2_0.h`: the own Q2_0 tile (the GGUF blocks read in place, any K % 64; half-wave rows at K <= 512),
   for Qwen3.6's routed experts and the Coder's Q2_0 down; no decode module includes it yet. `kernels/own_mv_q2_0.hip` holds
   its standalone plain and grouped forms (`tests/engine/test_own_q2_0.py`, `benchmarks/q36_gacc.py`).
+- `kernels/dec_q35m_attn.hip`: Qwen3.6-35B-A3B's decode attention (T 1, F16 / Q8_0 KV, split-KV with a fused merge) as its own
+  launch outside k3_run, through `engine/dec_q35m_attn.py`; no tape uses it yet (`tests/engine/test_dec_q35m_attn.py`,
+  `benchmarks/attn_bench.py --new`; docs/dev/yardsticks.md). Not in the installed runtime set.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects; pair each new object's scalar-spill count with its F16

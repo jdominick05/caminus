@@ -171,6 +171,7 @@ no code copied; measured as a yardstick only (docs/dev/yardsticks.md, `benchmark
 
 | Where | What follows rocKE |
 |---|---|
+| `kernels/dec_q35m_attn.hip` | the gfx11 split-KV decode design of `library/kernels/gfx1151/wmma_fmha_decode.py`: splits taking interleaved runs of tiles, scores as S^T = K Q^T with K as the A operand loaded by lane halves and swapped with permlanex16, O^T = V^T P with V transposed through a per-wave LDS tile, the output dims split over two workgroups and a merge through a workspace. The kernel is written from that description (its Q8_0 decode, the fp16 hi / lo split of Q and P and the fused last-workgroup merge are Caminus's); the notice is in the kernel's header |
 | `kernels/q35_prefill.hip` (`q35p_attn_wm`) | the split of a head width above 128 across a wave pair (two waves per 16 query rows, each holding half of Q's and O's dims), from rocKE's RDNA attention body (`platform/python/rocke/helpers/rdna_attention.py`); the kernel is written from that description on Caminus's own head-dim-128 kernel (`q3p_attn`). The notice is in the kernel's comment |
 
 ```
