@@ -659,8 +659,10 @@ LAST_SCAN = {}   # tape_pointers' last scan: live engines and addresses found
 
 class Engine:
     """a tape of segments run by one persistent kernel launch; status checked after every run"""
-    def __init__(self, grid=None, limit_us=20_000, module='k3', teams=None, T=1):
-        """teams = None: k3_run; a list of up to 4 team sizes summing to the grid: k3_run2 (segments carry team -1 or an index)"""
+    def __init__(self, grid=None, limit_us=20_000, module='k3', teams=None, T=1, sync=None):
+        """teams = None: k3_run; a list of up to 4 team sizes summing to the grid: k3_run2 (segments carry team -1 or an index).
+        sync: an int32 device view to hold the sync block (at least SYNC_WORDS words, + 1 on a Q8 KV module; split's rows),
+        None: allocated here"""
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         self.grid = grid or 4 * props.multi_processor_count   # multiProcessorCount = WGPs on gfx11
         self.limit_us = limit_us   # a stuck wait gives up after this (keeps the XTX's desktop compositor alive)
@@ -669,7 +671,9 @@ class Engine:
         if q8 and (isinstance(T, (bool, np.bool_)) or not isinstance(T, (int, np.integer)) or not 1 <= T <= 4
                    or (T != 1 and self.module not in Q35V_MODULES) or teams is not None):
             raise ValueError('k3 Q8 KV: decode T = 1, verify T = 1 .. 4, k3_run tapes only')
-        self.sync = torch.zeros(SYNC_WORDS + int(q8), dtype=torch.int32, device='cuda')
+        if sync is None: sync = torch.zeros(SYNC_WORDS + int(q8), dtype=torch.int32, device='cuda')
+        assert sync.dtype == torch.int32 and sync.is_contiguous() and sync.numel() >= SYNC_WORDS + int(q8), (sync.dtype, sync.numel())
+        self.sync = sync
         # Outside Sync's ABI: a sticky numerical failure, never the timeout word.
         self.kv_error = self.sync[SYNC_WORDS:SYNC_WORDS + 1] if q8 else None
         self.segs, self.keep = [], []
@@ -1688,6 +1692,43 @@ class Engine:
         assert tgt == seg or self.segs[tgt].dep2p1 == 0, f'also: the split PART {tgt} waits for {self.segs[tgt].dep2p1 - 1} already'
         self.segs[tgt].dep2p1 = dep2 + 1
         return seg
+
+    def split(self, cuts):
+        """this built tape as consecutive launches: cuts = increasing segment indices (0 < c < len(segs)) where a launch ends
+        and the next begins, so launch j runs segments [b_j, b_j+1) in this tape's order, on an Engine of its own (the same
+        module, grid, bound, pass parameters, device bound guard and Q8 error word; its own sync block, a row of one
+        tensor, which its last workgroup resets as k3_run does). Run one after another on one stream they are this tape:
+        a dependency inside a launch is renumbered to its index there, one on an earlier launch becomes none (stream
+        order: that launch finished before this one started), so every task reads the same inputs and the launches give
+        this tape's bits (tests/engine/test_q35m_slices.py). A caller may run a launch of its own in place of one of them
+        (Moe35Own: its decode attention kernel in place of the split pair's two segments). The cost is the launch
+        boundaries: each launch's last task ends before the next launch's first starts, where one launch lets idle
+        workgroups claim and prefetch the next segments while a slow one finishes.
+        Returns (launches, block): block int32 [launches, SYNC_WORDS + 8] holds their sync blocks, one row each (the
+        8 words past a row's Sync are free for the caller: zeroed with the row), so one copy reads every launch's
+        status words; each launch's .base is its first segment's index here."""
+        assert self.teams is None and hasattr(self, 'tape'), 'split: a built k3_run tape'
+        n = len(self.segs); b = [0] + [int(c) for c in cuts] + [n]
+        if any(not b[i] < b[i + 1] for i in range(len(b) - 1)): raise ValueError(f'split: cuts {list(cuts)} must increase inside (0, {n})')
+        q8 = self.kv_error is not None
+        block = torch.zeros(len(b) - 1, SYNC_WORDS + 8, dtype=torch.int32, device=self.sync.device)
+        out = []
+        for j in range(len(b) - 1):
+            lo, hi = b[j], b[j + 1]
+            e = Engine(grid=self.grid, limit_us=self.limit_us, module=self.module, T=self.T, sync=block[j])
+            assert e.module == self.module, (e.module, self.module)
+            e.params, e.keep, e.base = self.params, self.keep, lo
+            if q8: e.kv_error = self.kv_error   # (one sticky word per pass: the appends' Seg.gs names it, build checks it)
+            e.guard_caps, e.guard_commit, e.guard_T, e.guard_launch = dict(self.guard_caps), self.guard_commit, self.guard_T, self.guard_launch
+            e.team_fixed = {i - lo for i in self.team_fixed if lo <= i < hi}
+            for i in range(lo, hi):
+                sg = Seg.from_buffer_copy(self.segs[i])
+                sg.dep = sg.dep - lo if sg.dep >= lo else -1
+                sg.dep2p1 = sg.dep2p1 - lo if sg.dep2p1 - 1 >= lo else 0
+                e.segs.append(sg)
+            e.build()
+            out.append(e)
+        return out, block
 
     def nop(self, ntask, work, dep=-1, team=-1):
         sink = torch.zeros(1, device='cuda'); self.keep.append(sink)

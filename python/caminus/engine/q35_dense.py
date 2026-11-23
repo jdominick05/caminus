@@ -240,23 +240,35 @@ class Q35Host:
                 self.E.check_kv_error()
             except k3.InvalidKVEncoding as exc:
                 self.mark_broken(str(exc), error_cls=k3.InvalidKVEncoding)
-        st = self.h_st.tolist()
-        b = k3.bounds_status(st)
-        if b:
-            with torch.cuda.device(self.dev): torch.cuda.synchronize(); self.E.sync.zero_()
-            self.poisoned = f'the device bound guard caught an out-of-range value at pass position {i0}: {b}'
-            raise k3.ContextBoundsError(f'k3 qwen35: {self.poisoned}')
+        runs = self._pass_runs()
+        for _, st, _ in runs:
+            b = k3.bounds_status(st)
+            if b:
+                with torch.cuda.device(self.dev):
+                    torch.cuda.synchronize()
+                    for E, _, _ in runs: E.sync.zero_()
+                self.poisoned = f'the device bound guard caught an out-of-range value at pass position {i0}: {b}'
+                raise k3.ContextBoundsError(f'k3 qwen35: {self.poisoned}')
         if self._tok and not math.isfinite(float(self.h_max[0][0])):
             self.mark_broken(f'non-finite logits (max {float(self.h_max[0][0])}) at pass position {i0}')
-        if st[1]:
+        bad = []
+        for i, (E, st, seg_names) in enumerate(runs):
+            if st[1]:
+                with torch.cuda.device(self.dev):
+                    torch.cuda.synchronize()
+                    names = {v: k for k, v in vars(k3).items() if k.startswith('OP_')}
+                    launch = f'launch {i + 1} of {len(runs)}: ' if len(runs) > 1 else ''
+                    bad.append(f'{launch}segment {st[2]} = {names.get(E.segs[st[2]].op)} {seg_names.get(st[2], "")} (seen {st[3]}); '
+                               f'{E.stall_report()}')
+        if bad:
             with torch.cuda.device(self.dev):
-                torch.cuda.synchronize()
-                names = {v: k for k, v in vars(k3).items() if k.startswith('OP_')}
-                rep = (f'segment {st[2]} = {names.get(self.E.segs[st[2]].op)} {self.seg_names.get(st[2], "")} (seen {st[3]}); '
-                       f'{self.E.stall_report()}')
-                self.E.sync.zero_()
-            return [rep]
-        return []
+                for E, _, _ in runs: E.sync.zero_()
+        return bad
+
+    def _pass_runs(self):
+        """(engine, its status words, its segment names) of each launch the last pass ran, in order: the tape alone here
+        (Moe35Own: its slices past a depth)"""
+        return [(self.E, self.h_st.tolist(), self.seg_names)]
 
     def weight_sums(self):
         """{tensor name: int64 sum of its device bytes as int32 words (byte-padded)}: a cheap fingerprint of every weight

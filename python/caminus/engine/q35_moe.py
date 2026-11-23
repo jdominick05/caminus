@@ -39,7 +39,7 @@ import torch
 
 from .. import ggufio
 from ..device import capacity
-from . import k3, upload
+from . import k3, upload, dec_q35m_attn
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1m_records
 from .q3moe_one import card_per_wgp
 from .q35_dense import RECURRENT, Q35Host, _wsum, _wsum_np, block_kinds, trunk_blocks   # (the dense line's host pass lifecycle, weight checks and block layout)
@@ -123,7 +123,26 @@ def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
     gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
     part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1,
                                module=k3.Q35MOE_KV_Q8_OF['k3_q35_moe'] if q8 else 'k3_q35_moe')
-    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
+    return (w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
+            + sliced_bytes(n_attn))
+
+
+def sliced_bytes(n_attn):
+    """bytes the sliced pass adds beside the single-launch tape (Moe35Own._build_slices): the 2 n_attn + 1 launches' sync
+    rows (k3.Engine.split), their copy of the tape (at most MAXSEG segments in all) and the attention kernel's workspace
+    (engine/dec_q35m_attn.py, NS_MAX splits); its error word lies in the first sync row"""
+    return ((2 * n_attn + 1) * (k3.SYNC_WORDS + 8) * 4 + k3.MAXSEG * ctypes.sizeof(k3.Seg)
+            + dec_q35m_attn.workspace_floats(dec_q35m_attn.NS_MAX) * 4)
+
+
+# From this position on a pass runs as slices around each attention layer with the attention as its own kernel
+# (Moe35Own._build_slices); below it, as one launch. Keyed by Q8 KV. Measured with benchmarks/q3moe_depth.py --engine
+# q35moe (XT, 210 workgroups, interleaved, median of 3 rounds, two runs per format): the sliced pass costs 0.69-0.73
+# ms/token more at depth 0 (21 k3_run launches + 10 attention launches for one) and gains with depth (its slope 0.029
+# us per position per token F16, 0.027 Q8, against the single launch's 0.047 / 0.050). F16: +0.17 ms at 40,960, a tie
+# at 49,152 (-0.03), -0.15 at 57,344, -1.25 at 131,072 (9.58 vs 10.83 ms). Q8: a tie at 32,768 (+0.006), -0.16 at
+# 40,960, -2.28 at 131,072 (8.51 vs 10.79). The switch sits at each format's tie.
+ATTN_FROM = {False: 49152, True: 32768}
 
 
 class Moe35Own(Q35Host):
@@ -131,7 +150,8 @@ class Moe35Own(Q35Host):
 
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, per_wgp='card', rpt=32,
                  rpt16=32, vram_check=True, vram_extra_mib=0.0, max_retries=8, debug_layers=None, spec_T=1,
-                 feature_layers=(), q8=False, yarn=None, prefetch=16, prefetch_threads=16):
+                 feature_layers=(), q8=False, yarn=None, prefetch=16, prefetch_threads=16, attn_from=None, attn_launch='kernel',
+                 attn_splits=None):
         """path: a dense qwen35 GGUF whose matrices are Q4_K / Q6_K / Q8_0 / Q5_K (alpha / beta may be F32; the Swift module)
         or IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0 (alpha / beta BF16; the ThinkingCap module): module None
         picks it from the file's formats (module_of). device: the
@@ -145,7 +165,12 @@ class Moe35Own(Q35Host):
         feature_layers: layers whose entering residual each pass copies to self.features [len, 1, D] fp32 (a DFlash
         drafter's target layers, as Dense35Verify(feature_layers=) exports them, so a one-token pass feeds the drafter
         too); the copy changes no other bit. q8: staged internal Q8 target-cache path, with Q/K Hadamard256 and
-        V/output Hadamard64; no served option or matching batched prefill yet (docs/dev/q8-kv.md)."""
+        V/output Hadamard64; no served option or matching batched prefill yet (docs/dev/q8-kv.md).
+        attn_from: the first position whose pass runs sliced (None: ATTN_FROM for the KV format): the tape cut at each attention layer's
+        split pair, the layer's attention as its own kernel between the slices (engine/dec_q35m_attn.py; past the
+        switch the pair's in-launch attention costs more than the launch boundaries). attn_launch / attn_splits are
+        TEST-ONLY: 'pair' runs the pair's own two segments as the launch between the slices (the single launch's bits:
+        tests/engine/test_q35m_slices.py), attn_splits the kernel's splits (None: dec_q35m_attn.splits of the depth)."""
         self.F = F = ggufio.GGUFFile(path); self.path = path
         if F.arch != 'qwen35moe': raise ValueError(f'Moe35Own: {path} is a {F.arch!r} GGUF, not qwen35moe')
         if not any(n.endswith('ffn_gate_inp.weight') for n in F.T): raise ValueError(f'Moe35Own: {path} has no router tensor: not qwen35moe')
@@ -200,6 +225,9 @@ class Moe35Own(Q35Host):
         # 5.87 -> 5.03 ms per token at 16 x 16 (4 x 64 5.35, 2 x 256 5.62; 16 x 16 is about 256 misses in flight: more
         # slow the latency-bound ops beside them), the same bits at every setting
         self.prefetch, self.prefetch_threads = int(prefetch), int(prefetch_threads)
+        self.attn_from = ATTN_FROM[bool(q8)] if attn_from is None else int(attn_from)
+        if attn_launch not in ('kernel', 'pair'): raise ValueError(f"Moe35Own: attn_launch {attn_launch!r} ('kernel' or 'pair')")
+        self.attn_launch, self.attn_splits = attn_launch, attn_splits
         self.nl_build = self.nl if debug_layers is None else int(debug_layers)
         assert 1 <= self.nl_build <= self.nl, debug_layers
         self.emb = F.T['token_embd.weight']
@@ -422,6 +450,7 @@ class Moe35Own(Q35Host):
             return dict(max_cells=rows, part=self._attn_part)
 
         self._attn_part = None
+        self.attn_caches = []   # (each attention block's cache, in tape order: the sliced pass's kernel launches read them)
         prev = E.own_emb(self.emb_dev, self.emb.type, self.vocab, D, self.tok, s['x'])
         sv_prev = None   # (the last GDN block's gdn_save)
         for il, d in enumerate(self.L):
@@ -472,6 +501,7 @@ class Moe35Own(Q35Host):
                 if q8: qd = E.hadamard(s['qo'], 256, dep=qd)
                 a_ = E.also(E.attn_dec(s['qo'], d['cache'], self.pos, s['att'], nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap,
                                        q8=q8, **akw()), qd)
+                self.attn_caches.append(d['cache'])
                 if q8: a_ = E.hadamard(s['att'], 64, dep=a_)
                 g_ = E.gate_mul16(s['att'], s['qf'], 2 * hd, hd, s['gat16'], hd, dep=a_)
                 o_ = mv(d['o'], s['gat16'], s['blk'], g_)
@@ -494,7 +524,29 @@ class Moe35Own(Q35Host):
         self.layer_seg.append(('head', len(E.segs)))
         nf = E.own_add_rms16(s['x'], self.out_norm, s['h'], s['h16'], self.eps, d=s['d'], slots=KU + 1, w=s['wts'], dep=prev)
         mv(self.head, s['h16'], s['logits'], nf)
-        E.build(); self._server_buffers()
+        E.build(); self._server_buffers(); self._build_slices()
+
+    def _build_slices(self):
+        """the sliced pass: the tape cut before each attention block's split pair (OP_ATTN_PART, then its OP_ATTN_COMB)
+        and after it (k3.Engine.split), so a pass is 2 n + 1 launches: the trunk slices, and between them the pair's
+        own launch, in whose place the pass runs the attention kernel (same inputs: q after its rope (and the Q8 tape's
+        rotation), the block's cache, the position word; same output). One sync row per launch; the kernel's error word
+        sits in the first row's free words, so the pass's one status copy reads it too"""
+        E = self.E
+        parts = [i for i, sg in enumerate(E.segs) if sg.op == k3.OP_ATTN_PART]
+        assert len(parts) == len(self.attn_caches) and all(E.segs[i + 1].op == k3.OP_ATTN_COMB and E.segs[i + 1].dep == i
+                                                            for i in parts), parts
+        launches, self.slice_block = E.split([c for i in parts for c in (i, i + 2)])
+        self.slices, self.pair_slices = launches[0::2], launches[1::2]
+        self._tapes = {'one': [E], 'sliced': launches}   # (every engine of the pass's two forms: forcebail, the pass police)
+        self.slice_names = [{i - e.base: n for i, n in self.seg_names.items() if e.base <= i < e.base + len(e.segs)}
+                            for e in launches]
+        self.h_sts = torch.zeros(len(launches), k3.STATUS_WORDS + 2, dtype=torch.int32, pin_memory=True)
+        self.attn = None
+        if torch.cuda.is_available():   # (a CPU stand-in builds the tape only: no code object to load)
+            self.attn = dec_q35m_attn.DecQ35mAttn(self.q8, err=self.slice_block[0, k3.SYNC_WORDS + 1:k3.SYNC_WORDS + 2])
+        self._wgps = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+        self.sliced = False   # (the last pass's form: _pass_runs reads its launches)
 
     # -- decode ------------------------------------------------------------------------------------------------------------
     def _stage(self, tok, i0):
@@ -533,15 +585,41 @@ class Moe35Own(Q35Host):
         if int(self.hstage[17]) != i0: raise k3.ContextBoundsError(f'Moe35Own._pass: staged position {int(self.hstage[17])} != {i0}')
         self.token += 1; self.last_T = 1
         self.hstage[1] = int(commit)
+        self.sliced = trace is None and i0 >= self.attn_from
         with torch.cuda.device(self.dev):
             self.dstage.copy_(self.hstage, non_blocking=True)   # (the pinned block is rewritten only after the wait below)
             if self.features is not None: self.features.zero_()   # (the copy segments add into it)
-            self.E.run(check=False) if trace is None else self.E.run(check=False, trace=trace)
+            if self.sliced:
+                ns = dec_q35m_attn.splits(i0 + 1, self._wgps) if self.attn_splits is None else self.attn_splits
+                s, scale = self.buf, 1.0 / np.sqrt(self.hd)
+                for j, e in enumerate(self.slices):
+                    e.run(check=False)
+                    if j == len(self.pair_slices): break
+                    if self.attn_launch == 'pair': self.pair_slices[j].run(check=False)
+                    else: self.attn(s['qo'], self.attn_caches[j], self.pos, s['att'], scale, ns=ns)
+            else:
+                self.E.run(check=False) if trace is None else self.E.run(check=False, trace=trace)
             if self._tok:
                 torch.max(self.logits, dim=1, out=self.d_max)
                 self.h_max[0].copy_(self.d_max[0], non_blocking=True); self.h_max[1].copy_(self.d_max[1], non_blocking=True)
-            self.h_st.copy_(self.E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
+            if self.sliced:   # (every launch's status words and the kernel's error word: one copy of the rows' tails)
+                self.h_sts.copy_(self.slice_block[:, 2 * k3.MAXSEG:k3.SYNC_WORDS + 2], non_blocking=True)
+            else:
+                self.h_st.copy_(self.E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS], non_blocking=True)
             self.ev_done.record()
+
+    def _pass_runs(self):
+        """the launches of the last pass with their status words (Q35Host._pass_wait): the tape, or every slice and pair
+        launch of a sliced one (a pair launch that did not run reads zeros). The attention kernel's error word (its
+        position past the cache's rows) reads as the bound guard's report on the first launch: k3_run's own guard sees
+        the same position and cache rows first, so this is a third check behind the host's and the guard's"""
+        if not self.sliced: return super()._pass_runs()
+        st = self.h_sts.tolist()
+        launches = self._tapes['sliced']
+        runs = [(e, row[:k3.STATUS_WORDS], nm) for e, row, nm in zip(launches, st, self.slice_names)]
+        if st[0][k3.STATUS_WORDS + 1] and not k3.bounds_status(runs[0][1]):
+            runs[0] = (launches[0], runs[0][1][:4] + [1, -1, self.staged, self.kv_rows], runs[0][2])
+        return runs
 
     # -- weight integrity -------------------------------------------------------------------------------------------------
     def mark_broken(self, why, error_cls=k3.NonFiniteLogits):

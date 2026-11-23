@@ -202,6 +202,12 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
   Not tuned yet: the Q staging loop, no K / V prefetch (V is loaded after the scores), few splits at 4K. Q8 reads 0.42-0.53 TB/s at
   depth against F16's 0.69-0.82: its in-register decode is the likely limit (not profiled).
 
+- In the engine (`Moe35Own`, `benchmarks/q3moe_depth.py --engine q35moe`, XT, ms per token, interleaved, median of 3): the
+  tape in slices around the kernel pays about 0.7 ms a token for its launch boundaries (the split pair launched alone
+  between the slices: 5.39 against 4.60 F16, 5.46 against 4.77 Q8 at depth 0; about 35 us per k3_run boundary, not the
+  ~7 us of a bare launch), so it wins only from 49,152 (F16) / 32,768 (Q8) on: 131,072 9.57 against 10.87 F16, 8.50
+  against 10.77 Q8. The switch and its numbers: `q35_moe.ATTN_FROM`.
+
 ## Summary: where the outside kernels say we stand (XT)
 
 | Op | ours | best yardstick measured | gap |
