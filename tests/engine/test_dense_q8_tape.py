@@ -38,7 +38,7 @@ class DenseQ8Tape(unittest.TestCase):
         self.stack.enter_context(patch.object(torch.Tensor, 'cuda', lambda t: t))
         self.launch = Mock(return_value=0)
         self.stack.enter_context(patch.object(hip, 'hip', return_value=NS(hipModuleLaunchKernel=self.launch)))
-        self.module = self.stack.enter_context(patch.object(k3, '_m', return_value=NS(k3_run=NS(fn=123, lds_bytes=lambda: 1024))))
+        self.module = self.stack.enter_context(patch.object(k3, '_m', return_value=NS(k3_run=NS(fn=123, lds_bytes=lambda: 1024, vgprs=lambda: 96))))
 
     def engine(self, module='k3_q35_swift_kvq8', T=1):
         return k3.Engine(module=module, T=T, grid=2)
@@ -252,7 +252,7 @@ class DenseQ8Tape(unittest.TestCase):
     def test_residency_uses_q8_compiled_metadata_and_refuses_excess_grid(self):
         module = 'k3_q35_tcap_ver_kvq8'
         lds = 20 * 1024
-        self.module.return_value = NS(k3_run=NS(lds_bytes=lambda: lds))
+        self.module.return_value = NS(k3_run=NS(lds_bytes=lambda: lds, vgprs=lambda: 96))
         with patch.object(torch.cuda, 'is_available', return_value=True), patch.object(k3, '_RESIDENT_OK', set()):
             self.assertEqual(k3.resident_grid(module, 6), 12)
             with self.assertRaises(ValueError):
