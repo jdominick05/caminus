@@ -88,6 +88,13 @@ for src in kernels/*.hip; do
          -mcode-object-version=5 -O3 -std=$std -Ikernels "${extra[@]}" -o "$out" "$src")
     logcmd "$out" "${cmd[*]}"
     slot "$out"; { "${cmd[@]}" > "$(joblog "$out")" 2>&1 && : > "$(jobok "$out")"; } &
+    # the own decode modules once more for a 4-workgroups-per-WGP grid (the XTX): <name>_w4, VGPR cap 192 instead of 144
+    # (kernels/k3.hip K3_PER_WGP); caminus.engine.k3 loads it on a card whose grid is 4 per WGP
+    case "$src" in kernels/k3_q3m_*.hip|kernels/k3_q35_moe*.hip)
+        o4=${out%.hsaco}_w4.hsaco; c4=("${cmd[@]:0:${#cmd[@]}-3}" -DK3_PER_WGP=4 -o "$o4" "$src")
+        logcmd "$o4" "${c4[*]}"
+        slot "$o4"; { "${c4[@]}" > "$(joblog "$o4")" 2>&1 && : > "$(jobok "$o4")"; } & ;;
+    esac
 done
 # kernels/prefill_mmq.hip (the batched prefill's quantized GEMMs: ggml-cuda's MMQ vendored in kernels/ggml_mmq, MIT): one
 # code object per format and one for the glue, each built the way ignite builds the same kernels (its compile_commands

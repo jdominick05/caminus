@@ -202,14 +202,14 @@ check(sh, f'each card\'s matrices have its share\'s shapes (expert rows {m.exp_r
       f'its KV cache holds its kv heads at max_ctx + {k3.Engine.ATS_PAD} rows; the attention takes splits_for(its kv heads) = {m.splits}')
 grids = []
 n_slots = FakeSlots.n_made; slots0 = [s.base for s in m.slots]
-for pw in (3, 6, 7):
+for pw in (3, 4, 5):   # (grids an XT-cap object holds: kernels/k3.hip K3_PER_WGP 5)
     m.per_wgp = pw; m._build_tapes()
     grids.append(([e.grid for e in m.E], m.splits[:], [[(sg.op, sg.ntask, sg.dep, sg.K, sg.N) for sg in e.segs] for e in m.E]))
 m.per_wgp = 'card'; m._build_tapes()
 base = [[(sg.op, sg.ntask, sg.dep, sg.K, sg.N) for sg in e.segs] for e in m.E]
 check(FakeSlots.n_made == n_slots and [s.base for s in m.slots] == slots0 and all(g[1] == m.splits and g[2] == base for g in grids)
-      and [g[0][0] for g in grids] == [3 * 42, 6 * 42, 7 * 42],
-      'the tapes build again at 3 / 6 / 7 per WGP on the same receive slots, with the same segments and attention splits (the grid alone changes)')
+      and [g[0][0] for g in grids] == [3 * 42, 4 * 42, 5 * 42],
+      'the tapes build again at 3 / 4 / 5 per WGP on the same receive slots, with the same segments and attention splits (the grid alone changes)')
 # the splits cap: 128 lets each card's 2 kv heads take its whole grid (the stand-in's 42 WGPs at 5 per WGP: 105 splits)
 m.splits_cap = 128; m._build_tapes()
 seg128 = [[sg for sg in e.segs if sg.op == k3.OP_OWN_ATTS] for e in m.E]

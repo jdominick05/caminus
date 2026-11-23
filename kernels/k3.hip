@@ -251,6 +251,17 @@ __device__ __forceinline__ uint32_t * k3_extra_warm(const Seg &) { return nullpt
 #ifndef K3_WAVES_PER_EU
 #define K3_WAVES_PER_EU 1
 #endif
+// K3_PER_WGP: the workgroups per WGP the module's grid keeps resident (python/caminus/engine/k3.py resident_grid). Its
+// VGPR cap follows from it: 256 threads = 2 wave32 waves on each of a WGP's 4 SIMDs, 1536 VGPRs per SIMD lane, granule
+// 24, so 4 -> 192, 5 -> 144, 6 -> 120, 8 -> 96. The count is kept in the object (k3_resident_per_wgp) for
+// tools/gates/objcheck.py (the budget) and the engine (the grid it refuses past)
+#if defined(K3_PER_WGP)
+#if defined(K3_MAX_VGPR)
+#error "K3_PER_WGP sets the VGPR cap: define one of K3_PER_WGP and K3_MAX_VGPR"
+#endif
+#define K3_MAX_VGPR (1536 / (2 * (K3_PER_WGP)) / 24 * 24)
+extern "C" __device__ __attribute__((used)) const int k3_resident_per_wgp = K3_PER_WGP;
+#endif
 #if defined(K3_MAX_VGPR)   // a VGPR cap: gfx11 allocates VGPRs in granules of 24 (wave32), so 120 = 12 waves / SIMD, 144 = 10
 #define K3_RUN_ATTR __attribute__((amdgpu_num_vgpr(K3_MAX_VGPR)))
 #elif defined(K3_MIN_WAVES)   // waves per SIMD the register allocator must allow (caps VGPRs at 1536 / K3_MIN_WAVES)
