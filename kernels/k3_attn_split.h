@@ -464,7 +464,10 @@ __device__ __forceinline__ void op_attn_comb(const Seg & sg, int q) {
 #pragma unroll
     for (int w = 1; w < 8; w++) m = fmaxf(m, comb_m[w]);
     __syncthreads();
-    constexpr int COMB_U = 8;
+#ifndef ATTN_COMB_U
+#define ATTN_COMB_U 8
+#endif
+    constexpr int COMB_U = ATTN_COMB_U;
     float l = 0.0f, acc = 0.0f;
     int u = 0;
 #pragma unroll 1
