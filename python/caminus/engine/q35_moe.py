@@ -136,13 +136,15 @@ def sliced_bytes(n_attn):
 
 
 # From this position on a pass runs as slices around each attention layer with the attention as its own kernel
-# (Moe35Own._build_slices); below it, as one launch. Keyed by Q8 KV. Measured with benchmarks/q3moe_depth.py --engine
-# q35moe (XT, 210 workgroups, interleaved, median of 3 rounds, two runs per format): the sliced pass costs 0.69-0.73
-# ms/token more at depth 0 (21 k3_run launches + 10 attention launches for one) and gains with depth (its slope 0.029
-# us per position per token F16, 0.027 Q8, against the single launch's 0.047 / 0.050). F16: +0.17 ms at 40,960, a tie
-# at 49,152 (-0.03), -0.15 at 57,344, -1.25 at 131,072 (9.58 vs 10.83 ms). Q8: a tie at 32,768 (+0.006), -0.16 at
-# 40,960, -2.28 at 131,072 (8.51 vs 10.79). The switch sits at each format's tie.
-ATTN_FROM = {False: 49152, True: 32768}
+# (Moe35Own._build_slices, each attention block's prefetch behind its pair); below it, as one launch. Keyed by Q8 KV.
+# Measured with benchmarks/q3moe_depth.py --engine q35moe (XT, 210 workgroups, interleaved, median of 3 rounds): the
+# sliced pass costs 0.26 ms/token more at depth 0 (21 k3_run launches + 10 attention launches for one; a bare launch
+# boundary is ~5 us, plus the tasks one launch overlaps with the next segments) and gains with depth (its slope 0.029
+# us per position per token F16, 0.020 Q8, against the single launch's 0.046 / 0.045). F16 sliced - one: +0.24 ms at
+# 8,192, +0.02 at 16,384, -0.10 at 24,576, -0.39 at 32,768, -2.01 at 131,072 (8.83 vs 10.83 ms). Q8: +0.13 at 12,288,
+# -0.03 at 16,384, -0.06 at 20,480, -0.48 at 32,768, -3.02 at 131,072 (7.74 vs 10.76). The switch sits at each format's
+# first depth with a gain past 0.05 ms.
+ATTN_FROM = {False: 24576, True: 20480}
 
 
 class Moe35Own(Q35Host):
@@ -536,11 +538,23 @@ class Moe35Own(Q35Host):
         parts = [i for i, sg in enumerate(E.segs) if sg.op == k3.OP_ATTN_PART]
         assert len(parts) == len(self.attn_caches) and all(E.segs[i + 1].op == k3.OP_ATTN_COMB and E.segs[i + 1].dep == i
                                                             for i in parts), parts
-        launches, self.slice_block = E.split([c for i in parts for c in (i, i + 2)])
+        # each attention block's prefetch segment (OP_PREFETCH, it writes nothing) runs behind the block's pair: in one
+        # launch its tasks stream the weights while the attention runs, but a launch ends only when every task has, so in
+        # front of the cut the attention waited for them. XT, Q8 KV, prefetch 16 x 16, ms per token sliced as is / moved:
+        # 5.55 / 5.10 at position 0, 5.95 / 5.53 at 16K, 6.39 / 5.86 at 32K, the same bits (the single launch keeps its
+        # order: 4.87 as is, 4.92 moved, at position 0)
+        order = list(range(len(E.segs)))
+        pfs = [i for i, sg in enumerate(E.segs) if sg.op == k3.OP_PREFETCH]
+        for i in parts:
+            mine = [p for p in pfs if p < i]
+            if not mine: continue
+            order.remove(mine[-1]); order.insert(order.index(i + 1) + 1, mine[-1])
+        at = {o: k for k, o in enumerate(order)}
+        launches, self.slice_block = E.split([c for i in parts for c in (at[i], at[i] + 2)], order=order)
         self.slices, self.pair_slices = launches[0::2], launches[1::2]
+        assert all(e.segs[0].op == k3.OP_ATTN_PART and len(e.segs) == 2 for e in self.pair_slices)
         self._tapes = {'one': [E], 'sliced': launches}   # (every engine of the pass's two forms: forcebail, the pass police)
-        self.slice_names = [{i - e.base: n for i, n in self.seg_names.items() if e.base <= i < e.base + len(e.segs)}
-                            for e in launches]
+        self.slice_names = [{k: self.seg_names[i] for k, i in enumerate(e.orig) if i in self.seg_names} for e in launches]
         self.h_sts = torch.zeros(len(launches), k3.STATUS_WORDS + 2, dtype=torch.int32, pin_memory=True)
         self.attn = None
         if torch.cuda.is_available():   # (a CPU stand-in builds the tape only: no code object to load)

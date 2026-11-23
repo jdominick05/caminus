@@ -204,6 +204,21 @@ check(len(lns) == 3 and tuple(blk.shape) == (3, k3.SYNC_WORDS + 8) and all(e.syn
       and refused(lambda: e_sp.split([3, 1])) and refused(lambda: e_sp.split([0])) and refused(lambda: e_sp.split([5])),
       f'k3.Engine.split: 3 launches on rows of one sync block, dependencies {dd}, the tape\'s guard, parameters and Q8 error '
       f'word; the tape itself unchanged; cuts out of order or outside (0, 5) refused')
+# split(cuts, order): the launches run the tape in another order (Moe35Own: each attention block's prefetch behind its
+# pair); cuts are positions in it, dependencies renumbered through it, .orig the tape indices; an order that puts a
+# segment before its dependency, or is not a permutation, refused
+e_so = k3.Engine(module='k3_q35_moe_kvq8')
+ao_ = e_so.kv_append(B(M_), B(M_), cache_, pos_, q8=True)
+pf_ = e_so.prefetch([B(4096)], 4, dep=ao_)
+co_ = e_so.also(e_so.attn_dec(B(16 * 256), cache_, pos_, B(16 * 256), 16, 2, 256, 0.0625, q8=True, dep=ao_, max_cells=R_), ao_)
+go_ = e_so.gate_mul16(B(16 * 256), B(2 * 16 * 256), 512, 256, B(16 * 256, torch.float16), 256, dep=co_)
+e_so.build()
+lo_, _ = e_so.split([1, 3], order=[0, 2, 3, 1, 4])
+do_ = [[(sg.op, sg.dep, sg.dep2p1) for sg in e.segs] for e in lo_]
+check(pf_ == 1 and [e.orig for e in lo_] == [[0], [2, 3], [1, 4]] and [e.base for e in lo_] == [0, 1, 3]
+      and do_ == [[(k3.OP_KV_APPEND, -1, 0)], [(k3.OP_ATTN_PART, -1, 0), (k3.OP_ATTN_COMB, 0, 0)], [(k3.OP_PREFETCH, -1, 0), (k3.OP_GATE_MUL16, -1, 0)]]
+      and refused(lambda: e_so.split([1, 3], order=[0, 3, 2, 1, 4])) and refused(lambda: e_so.split([1, 3], order=[0, 2, 3, 1, 1])),
+      f'k3.Engine.split(order): the prefetch moved behind the pair, launches {do_}; an order against a dependency or with a repeat refused')
 e_m.own_matvec_1rt(q4(8, 256), 'Q4_0', 8, 256, B(256, torch.float16), B(8)); e_m.own_argmax(B(300), 300, torch.zeros(1, dtype=torch.int64))
 e_m.build()
 check(set(e_m.inventory()) == {('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_ARGMAX', '-')} and not e_m.unsupported(), 'the drafter module builds a Q4_0 matvec and the argmax')

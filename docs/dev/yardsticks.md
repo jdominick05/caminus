@@ -203,10 +203,13 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
   depth against F16's 0.69-0.82: its in-register decode is the likely limit (not profiled).
 
 - In the engine (`Moe35Own`, `benchmarks/q3moe_depth.py --engine q35moe`, XT, ms per token, interleaved, median of 3): the
-  tape in slices around the kernel pays about 0.7 ms a token for its launch boundaries (the split pair launched alone
-  between the slices: 5.39 against 4.60 F16, 5.46 against 4.77 Q8 at depth 0; about 35 us per k3_run boundary, not the
-  ~7 us of a bare launch), so it wins only from 49,152 (F16) / 32,768 (Q8) on: 131,072 9.57 against 10.87 F16, 8.50
-  against 10.77 Q8. The switch and its numbers: `q35_moe.ATTN_FROM`.
+  tape in slices around the kernel pays for its launch boundaries. A bare boundary is ~5 us; the rest is the work one
+  launch overlaps. At first it paid about 0.7 ms a token (~35 us per k3_run boundary): each attention block's prefetch
+  segment (OP_PREFETCH, 16 tasks streaming weights into the Infinity Cache) ran in front of the cut, so the trunk's
+  launch could not end before it had, and the attention waited (the gap after a trunk launch 19 us, after a no-op one 5).
+  With that segment behind the block's pair (the same bits) the sliced pass pays 0.26 ms at depth 0 and wins from
+  24,576 (F16) / 20,480 (Q8) on: 131,072 8.83 against 10.83 F16, 7.74 against 10.76 Q8. The switch and its numbers:
+  `q35_moe.ATTN_FROM`.
 
 ## Summary: where the outside kernels say we stand (XT)
 

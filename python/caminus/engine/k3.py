@@ -1693,9 +1693,10 @@ class Engine:
         self.segs[tgt].dep2p1 = dep2 + 1
         return seg
 
-    def split(self, cuts):
-        """this built tape as consecutive launches: cuts = increasing segment indices (0 < c < len(segs)) where a launch ends
-        and the next begins, so launch j runs segments [b_j, b_j+1) in this tape's order, on an Engine of its own (the same
+    def split(self, cuts, order=None):
+        """this built tape as consecutive launches: cuts = increasing positions (0 < c < len(segs)) in `order` (a permutation
+        of the segment indices, each segment after every one it depends on; None: the tape's own order) where a launch ends
+        and the next begins, so launch j runs segments order[b_j:b_j+1], on an Engine of its own (the same
         module, grid, bound, pass parameters, device bound guard and Q8 error word; its own sync block, a row of one
         tensor, which its last workgroup resets as k3_run does). Run one after another on one stream they are this tape:
         a dependency inside a launch is renumbered to its index there, one on an earlier launch becomes none (stream
@@ -1706,10 +1707,19 @@ class Engine:
         workgroups claim and prefetch the next segments while a slow one finishes.
         Returns (launches, block): block int32 [launches, SYNC_WORDS + 8] holds their sync blocks, one row each (the
         8 words past a row's Sync are free for the caller: zeroed with the row), so one copy reads every launch's
-        status words; each launch's .base is its first segment's index here."""
+        status words; each launch's .base is its first position in `order`, its .orig the tape indices of its segments
+        (Moe35Own moves each attention block's prefetch segment, which writes nothing, behind its split pair: a launch
+        cannot end before its prefetch tasks have streamed their weights)."""
         assert self.teams is None and hasattr(self, 'tape'), 'split: a built k3_run tape'
         n = len(self.segs); b = [0] + [int(c) for c in cuts] + [n]
         if any(not b[i] < b[i + 1] for i in range(len(b) - 1)): raise ValueError(f'split: cuts {list(cuts)} must increase inside (0, {n})')
+        order = list(range(n)) if order is None else [int(i) for i in order]
+        if sorted(order) != list(range(n)): raise ValueError('split: order must be a permutation of the segment indices')
+        at = {o: k for k, o in enumerate(order)}
+        for k, o in enumerate(order):
+            sg = self.segs[o]
+            for d in (sg.dep, sg.dep2p1 - 1):
+                if d >= 0 and at[d] >= k: raise ValueError(f'split: order puts segment {o} before its dependency {d}')
         q8 = self.kv_error is not None
         block = torch.zeros(len(b) - 1, SYNC_WORDS + 8, dtype=torch.int32, device=self.sync.device)
         out = []
@@ -1717,14 +1727,15 @@ class Engine:
             lo, hi = b[j], b[j + 1]
             e = Engine(grid=self.grid, limit_us=self.limit_us, module=self.module, T=self.T, sync=block[j])
             assert e.module == self.module, (e.module, self.module)
-            e.params, e.keep, e.base = self.params, self.keep, lo
+            e.params, e.keep, e.base, e.orig = self.params, self.keep, lo, order[lo:hi]
             if q8: e.kv_error = self.kv_error   # (one sticky word per pass: the appends' Seg.gs names it, build checks it)
             e.guard_caps, e.guard_commit, e.guard_T, e.guard_launch = dict(self.guard_caps), self.guard_commit, self.guard_T, self.guard_launch
-            e.team_fixed = {i - lo for i in self.team_fixed if lo <= i < hi}
-            for i in range(lo, hi):
+            e.team_fixed = {at[i] - lo for i in self.team_fixed if lo <= at[i] < hi}
+            for i in order[lo:hi]:
                 sg = Seg.from_buffer_copy(self.segs[i])
-                sg.dep = sg.dep - lo if sg.dep >= lo else -1
-                sg.dep2p1 = sg.dep2p1 - lo if sg.dep2p1 - 1 >= lo else 0
+                d, d2 = (at[sg.dep] if sg.dep >= 0 else -1), (at[sg.dep2p1 - 1] if sg.dep2p1 > 0 else -1)
+                sg.dep = d - lo if d >= lo else -1
+                sg.dep2p1 = d2 - lo + 1 if d2 >= lo else 0
                 e.segs.append(sg)
             e.build()
             out.append(e)
