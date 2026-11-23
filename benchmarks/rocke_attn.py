@@ -1,5 +1,6 @@
 """Yardstick: rocKE's RDNA WMMA attention (ROCm/rocm-libraries, dnn-providers/hip-kernel-provider/rocke; MIT) on the dense
-qwen35 geometry (24 query heads over 4 kv heads, head dim 256, fp16), the shapes benchmarks/attn_depth.py and
+qwen35 geometry by default (24 query heads over 4 kv heads, head dim 256, fp16; --heads / --kv-heads / --hd for others:
+Qwen3.6-35B-A3B 16 / 2 / 256, Qwen3-30B-A3B 32 / 4 / 128), the shapes benchmarks/attn_depth.py and
 benchmarks/q35_prefill_attn.py measure for our kernels:
   decode   T = 1 and T = 4 query rows over P cache positions (T 4: bottom-right causal, a verify pass)
   prefill  a 2048-row chunk at depth P0 over P0 + 2048 positions (bottom-right causal)
@@ -11,6 +12,7 @@ minutes on the CPU; those rows are timed unchecked, marked so).
 Needs rocKE installed in the running interpreter (its platform/ and library/ packages, editable) and its library on the
 path: run it with that environment's python, never the server's.
   tools/guard.sh LOG SECS python -I benchmarks/rocke_attn.py [--ctx 1024,4096,16384,32768,49152] [--p0 0,8192,30720]
+                [--heads 24 --kv-heads 4 --hd 256] [--n 2048] [--prefill-only]
 Run it on the XT alone first."""
 import argparse, os, statistics, sys
 from contextlib import ExitStack
@@ -26,8 +28,11 @@ from benchmarks.gfx1151.attention.cases import SdpaCase, make_inputs, reference
 ap = argparse.ArgumentParser()
 ap.add_argument('--ctx', default='1024,4096,16384,32768,49152'); ap.add_argument('--p0', default='0,8192,30720')
 ap.add_argument('--graph-count', type=int, default=16); ap.add_argument('--repeats', type=int, default=5)
+ap.add_argument('--heads', type=int, default=24); ap.add_argument('--kv-heads', type=int, default=4)
+ap.add_argument('--hd', type=int, default=256); ap.add_argument('--n', type=int, default=2048)
+ap.add_argument('--prefill-only', action='store_true')
 A = ap.parse_args()
-H, NKV, D, N = 24, 4, 256, 2048
+H, NKV, D, N = A.heads, A.kv_heads, A.hd, A.n
 dev = get_device_target_id(); arch = generic_arch_from_target_id(dev or '')
 print(f'device {dev} (rocKE target {arch}) | {H} q heads / {NKV} kv heads x {D}, fp16', flush=True)
 
@@ -89,7 +94,7 @@ def room(case):
 
 rt = Runtime(); kernels = RockeKernels(rt, arch)
 try:
-    for T in (1, 4):
+    for T in (() if A.prefill_only else (1, 4)):
         for P in [int(v) for v in A.ctx.split(',')]:
             c = SdpaCase(name=f'dec_T{T}_P{P}', group='caminus', dtype='fp16', batch=1, seqlen_q=T, seqlen_k=P, heads_q=H,
                          heads_kv=NKV, head_dim=D, mask='none' if T == 1 else 'causal_bottomright')

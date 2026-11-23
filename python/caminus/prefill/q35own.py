@@ -166,24 +166,29 @@ class Ops(q3m_ops.Ops):
         self.mod.q35p_attn16(((r1 - r0) * heads,), (256,), ctypes.c_void_p(q.data_ptr() + off * es), cache, I(pos0), I(r0),
                              I(heads), I(nkv), I(D), F(scale), ctypes.c_void_p(out.data_ptr() + off * es))
 
+    # the tiled attention's kernels by cache format (f16, q8: None = not in this object)
+    WM_KERNEL = ('q35p_attn_wm', None)
+
     def attn_wm(self, q, cache, pos0, n, heads, nkv, D, scale, out, rows, b0=None, b1=None):
         """the tiled attention (kernels/q35_prefill.hip q35p_attn_wm) of a chunk at positions pos0 .. pos0 + n - 1, the
         8-position blocks b0 .. b1 - 1 of attn_blocks() (one launch): out[r, h] = the attention of q[r, h] over cache
         positions 0 .. pos0 + r, for the chunk's rows in those blocks. q / out: the chunk's [n, heads, D] fp32 (whole
         buffers: the kernel addresses rows by position). A row's bits do not depend on the chunking or the launch split.
-        A uint8 cache is Q8_0 rows: q35p_attn_wm_q8 from the subclass's Q8 object (self.kvmod: caminus.prefill.q35moe)"""
+        The kernels are WM_KERNEL's (caminus.prefill.q35moe's subclass: q35mp_attn, and a uint8 cache's Q8_0 rows from
+        its Q8 object, self.kvmod)"""
         B0, B1 = self._wm_span(pos0, n)
         b0 = B0 if b0 is None else int(b0); b1 = B1 if b1 is None else int(b1)
         if not self.attn_wm_ok(heads, nkv, D) or not B0 <= b0 < b1 <= B1:
             raise ValueError(f'q35 attn_wm: D {D} (only {ATTN_WM_D}), heads {heads} / nkv {nkv} (at most 8 per kv head), blocks [{b0}, {b1}) of [{B0}, {B1})')
         q8 = cache.dtype == torch.uint8
-        if q8 and getattr(self, 'kvmod', None) is None: raise ValueError('q35 attn_wm: a Q8 cache needs the Q8 KV object')
+        name = self.WM_KERNEL[q8]
+        if name is None or (q8 and getattr(self, 'kvmod', None) is None): raise ValueError(f'q35 attn_wm: no {"Q8" if q8 else "F16"} cache kernel here')
         alloc = k3.kv_rows(cache, nkv * D, q8)
         if not 0 < int(rows) <= alloc: raise ValueError(f'q35 attn_wm: rows {rows} of a cache of {alloc}')
         k3.check_span(pos0, n, int(rows), what='q35 attn_wm')
         if q.numel() < n * heads * D or out.numel() < n * heads * D: raise ValueError('q35 attn_wm: q / out smaller than the chunk')
         assert q.dtype == out.dtype and q.element_size() == 4 and q.data_ptr() % 16 == 0 and cache.data_ptr() % 16 == 0
-        fn = self.kvmod.q35p_attn_wm_q8 if q8 else self.mod.q35p_attn_wm
+        fn = getattr(self.kvmod if q8 else self.mod, name)
         fn((b1 - b0, int(nkv)), (256,), q, cache, I(pos0), I(n), I(b0), I(heads), I(nkv), F(float(scale) * 1.4426950408889634), out)
 
     @staticmethod
