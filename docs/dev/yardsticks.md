@@ -311,6 +311,19 @@ the last layer's KV rows bitwise equal):
 | 12,288 | F16 | 4,517 tok/s | 4,090 tok/s | 1.10x |
 | 24,576 | Q8 | 3,259 tok/s | 3,031 tok/s | 1.08x |
 
+Short prompts, the same way:
+
+| Length | KV | wide | narrow | speed-up |
+|---|---|---|---|---|
+| 128 | F16 | 2,480 tok/s | 1,719 tok/s | 1.44x |
+| 512 | F16 | 5,009 tok/s | 3,876 tok/s | 1.29x |
+| 1,024 | F16 | 5,846 tok/s | 4,914 tok/s | 1.19x |
+
+A dense GEMM goes wide only from half the card's compute units in workgroups (`q3m_ops.Ops.wide_min_wg`; 42 on the
+XT). At 512 tokens the k / v projections have 16 wide workgroups and ran 1.6-1.8x slower wide (attn_k 4.72 vs 3.01 ms
+a chunk); attn_output's 64 ran faster (10.58 vs 11.51). With the rule, a 512-token chunk's GEMMs take 82.0 ms against
+110.8 narrow.
+
 At 12K F16 (`--ops`), attention is 35.1 % of the prefill and the fused gate | up 22.0 %. The 35B's GEMMs are unchanged:
 its Q8_0 and Q2_0 kernels are not touched. A wide grouped Q2_0 tile is next.
 

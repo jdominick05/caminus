@@ -25,7 +25,7 @@ expert, work items, their fill. --ref-module NAME (an object in the kernel dir, 
 q3m_prefill.hsaco as q3m_prefill_base.hsaco): ours on both objects, interleaved rep by rep, every output compared bitwise.
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_gemm.py GGUF --engine --tokens REF.npz [--M 2048]
       [--arms own,torch,flydsl] [--ref-module NAME] [--set A=1,..] [--ref-set A=0,..] [--only REGEX] [--tokens-from GGUF]
---set / --ref-set set Ops attributes (the A / B flags: q3m_ops.Ops wide, gu) on the own / ref arm; a ref arm
+--set / --ref-set set Ops attributes (the A / B flags: q3m_ops.Ops wide, gu, wide_min_wg) on the own / ref arm; a ref arm
 without the fused gate | up replays a fused launch as the gate GEMM, the up GEMM and q3p_swiglu.
 FlyDSL picks its tiles by its heuristic, or by a search with FLYDSL_AUTOTUNE=1 (FLYDSL_AUTOTUNE_CACHE_DIR keeps them)."""
 import argparse, collections, os, re, sys, types

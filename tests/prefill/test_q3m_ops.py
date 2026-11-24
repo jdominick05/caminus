@@ -39,6 +39,7 @@ need_mib = sum(F.T[name].n_bytes for name in TENSORS) / 2 ** 20 + WORK_MIB + CON
 capacity.check([0], [need_mib], f'test_q3m_ops ({need_mib:.0f} MiB projected)')
 print(f'projected {need_mib:.0f} MiB', flush=True)
 O = Ops(dev)
+O.wide_min_wg = 0   # (the dense cases' small grids on the wide tiles too: narrow() below compares them)
 g = np.random.default_rng(5)
 ok = True
 

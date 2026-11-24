@@ -55,10 +55,13 @@ class Ops:
         self.dev = torch.device(dev) if not isinstance(dev, torch.device) else dev
         self.module, self.q8, self.yarn = module, bool(q8), bool(yarn)
         if self.yarn and module != 'q3m_prefill': raise ValueError(f'q3m Ops: the long-context mode runs with q3m_prefill only (not {module})')
-        # the wide tiles (two row tiles per wave, bitwise the narrow tiles' rows; on the XT faster at every 30B shape,
-        # dense and grouped: docs/dev/yardsticks.md) and the fused gate | up (+ swiglu); the attributes switch them per
-        # launch (benchmarks' A / B) once the object is loaded
+        # the wide tiles (two row tiles per wave, bitwise the narrow tiles' rows) and the fused gate | up (+ swiglu); the
+        # attributes switch them per launch (benchmarks' A / B) once the object is loaded. A dense GEMM goes wide from
+        # wide_min_wg workgroups (half the card's compute units): on the XT the grouped experts and every dense 30B shape
+        # are faster wide at 64+ workgroups (a 2048-token chunk; attn_output at 512 tokens, 64), the k / v projections at
+        # 512 tokens (16 workgroups) 1.6-1.8x slower (docs/dev/yardsticks.md)
         self.wide = self.gu = (module == 'q3m_prefill') if wide is None else bool(wide)
+        self.wide_min_wg = torch.cuda.get_device_properties(self.dev).multi_processor_count // 2
         with torch.cuda.device(self.dev):
             self.mod = hip.Module(module)
             self.wmod = hip.Module(WIDE_MODULE) if self.wide else None
@@ -80,7 +83,7 @@ class Ops:
             items, nitems, bound, xs, yd = work
             ntok = 0
         grid = (int(bound), -(-R // MM_N))
-        if self.wide and fmt in BLOCK_BYTES:
+        if self.wide and fmt in BLOCK_BYTES and (work is not None or int(bound) * -(-R // MMW_N) >= self.wide_min_wg):
             gw = (int(bound), -(-R // MMW_N))
             if fmt == 'Q4_K':
                 self.wmod.q3p_mm_q4k_w(gw, (256,), wb, I(R), I(K), x16, I(ldx), xs, y, I(ldy), yd, items, nitems, I(ntok))
