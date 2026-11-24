@@ -11,6 +11,9 @@
 //         the nibble | bit s of qh[l] << 4 for value l of sub-block s): B = sc * q (<= 63 x 31 = 1953: exact), then Q4_K's
 //         acc += d * P - dmin * MS with the same sub-block sums and the same rare overflow branch
 // so a product's only rounding is the fp32 accumulation, as in q3p_mm_q4k / q3p_mm_q6k.
+// Q3P_ATTN_OLD: q3m_prefill.hip's old q3p_attn (no qwen35 object launches it) in place of the 30B's q3mp_attn, so these
+// objects keep their code (and the qwen35moe objects, which include this file, define their own q35mp_attn)
+#define Q3P_ATTN_OLD
 #include "q3m_prefill.hip"
 
 // ---- Q8_0 ------------------------------------------------------------------------------------------------------------

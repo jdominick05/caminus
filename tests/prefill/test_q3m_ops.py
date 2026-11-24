@@ -9,7 +9,7 @@ against the card's guard line before the first transfer).
             other token bitwise its rows without them
   glue      q3p_emb bitwise caminus.own_dequant's rows; add_rms16, router, swiglu vs float64; topk's ids equal numpy's
             ranking of the same float32 probabilities and its weights within float32 rounding
-  attention q3p_qk_rope vs float64 (norm + RoPE; the cache rows) and q3p_attn vs float64 causal attention over random
+  attention q3p_qk_rope vs float64 (norm + RoPE; the cache rows) and q3mp_attn vs float64 causal attention over random
             fp16 rows below the chunk, at a depth with partial chunks; and the same output when launched in token splits;
             a span outside the cache is refused by the launch wrappers before any launch
   tools/guard.sh LOG 600 python -I tests/prefill/test_q3m_ops.py GGUF

@@ -19,7 +19,7 @@ from ..engine.own_layout import IQ_REC, IQ_PAD
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MM_M, MM_N = 64, 128        # a GEMM workgroup: tokens x rows
-AT_T = 16                   # q3p_attn: tokens per workgroup
+AT_T = 16                   # q3mp_attn: tokens per workgroup
 BLOCK_BYTES = {'Q4_K': 144, 'Q6_K': 210}
 KVQ8_MODULE = 'q3m_prefill_kvq8'                                  # the Q8 KV cache's qk_rope / attn (kernels/q3m_prefill_kvq8.hip)
 # the long-context mode's qk_rope (YaRN: Q3P_YARN, the frequency table and attention factor after eps in par): F16 and Q8
@@ -139,7 +139,7 @@ class Ops:
         rope.q3p_qk_rope((n, nh + nkv), (128,), qkv, I(ldq), I(nh), I(nkv), par, I(pos0), q16, cache)
 
     def attn_blocks(self, pos0, n):
-        """the 16-position blocks q3p_attn runs for a chunk at positions [pos0, pos0 + n): (first block, count)"""
+        """the 16-position blocks q3mp_attn runs for a chunk at positions [pos0, pos0 + n): (first block, count)"""
         b0 = pos0 // AT_T
         return b0, (pos0 + n - 1) // AT_T - b0 + 1
 
@@ -154,8 +154,8 @@ class Ops:
         import math
         if getattr(self, 'q8', False):
             if not cache.is_contiguous() or cache.data_ptr() % 4: raise ValueError('q3m attn: the Q8 cache must be contiguous and 4-byte aligned')
-            self.kvmod.q3p_attn_q8((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(nkv),
-                                   F(scale * math.log2(math.e)), out16)
+            self.kvmod.q3mp_attn_q8((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(8 * nkv), I(nkv),
+                                    F(scale * math.log2(math.e)), out16)
             return
-        self.mod.q3p_attn((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(nkv),
-                          F(scale * math.log2(math.e)), out16)
+        self.mod.q3mp_attn((i1 - i0, nkv), (256,), q16, cache, I(pos0), I(n), I(b0 + i0), I(8 * nkv), I(nkv),
+                           F(scale * math.log2(math.e)), out16)
