@@ -15,6 +15,10 @@ line's (those are tests/prefill/test_q35_prefill_ops.py's), over a chunk's rows,
              row against float64 of the exact weights (the blocks decoded on the host) and the fp16 inputs: max |error|
              within 1e-4 of the row's rms (fp32 sums; a layout or scatter bug is O(1)); the pairs' rows land where
              group9's three indices say (yp, y9), and an id out of range sets the routing flag
+  wide       the wide tiles (kernels/q35m_prefill_mm.hip, what Ops serves) against the narrow q35mp_mm_q2_0
+             (Ops(wide=False)), BITWISE: gate and down, and the fused gate | up (q35mp_mm_q2_0_gu) against gate, up and
+             q3p_swiglu; on the 37-token routing (partial items only) and on 150 tokens: 4 experts with full 64-pair items,
+             4 with 5, 20, 40 and 60 pairs (partial items of 1, 2, 3 and 4 token tiles)
   tools/guard.sh LOG 600 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35m_prefill_ops.py GGUF
 Prints PASS / FAIL lines and RESULT PASS | FAIL."""
 import os
@@ -67,8 +71,10 @@ def main():
     print(f'NOTE device: {torch.cuda.get_device_name(dev)} (HIP_VISIBLE_DEVICES={os.environ.get("HIP_VISIBLE_DEVICES")}); '
           f'D {D}, {KU} of {E} experts of {FF}', flush=True)
     T, NE, V = 37, 8, 4096                         # rows; experts uploaded (ids drawn from them); embedding rows read
+    T2 = 150                                       # (the wide tiles' second routing: full work items)
     RB_G, RB_D = D // 64 * 18, FF // 64 * 18
-    mib = (NE * FF * (RB_G * 2) + NE * D * RB_D + V * D * 2 + T * (E + 4 * (KU + 1) * D + 4 * KU * FF) * 4 + E * D * 4) / capacity.MIB
+    mib = (NE * FF * (RB_G * 2) + NE * D * RB_D + V * D * 2 + T * (E + 4 * (KU + 1) * D + 4 * KU * FF) * 4 + E * D * 4
+           + T2 * (D * 2 + KU * FF * (3 * 4 + 2 * 2) + 2 * (KU + 1) * D * 4 + 16 * KU)) / capacity.MIB
     capacity.check([dev.index], [mib * 1.5 + 64], 'q35m prefill G1 buffers')    # (before anything is allocated)
     from caminus.prefill.q35moe import Ops, ROUTER_FLOOR
     from caminus.prefill import q3m_ops
@@ -236,6 +242,38 @@ def main():
               f'({missing} missing), max |error| {worst:.2e} of the row rms vs float64 (< 1e-4)')
         if name == 'ffn_down_exps':                     # (slot 8 of every token is the shared expert's: untouched)
             check(bool(torch.isnan(y.view(T, KU + 1, D)[:, KU]).all()), 'down: slot 8 of every token untouched (the shared expert\'s row)')
+
+    # ---- the wide tiles against the narrow one, bitwise ------------------------------------------------------------------
+    On = Ops(dev, wide=False)
+    check(O.wide and O.gu and not On.wide and not On.gu, 'Ops serves the wide tiles and the fused gate | up; Ops(wide=False) the narrow')
+    Wg = dict(fmt='Q2_0', rows=FF, K=D, w=experts('ffn_gate_exps', FF, D)[0])
+    Wu = dict(fmt='Q2_0', rows=FF, K=D, w=experts('ffn_up_exps', FF, D)[0])
+    Wn = dict(fmt='Q2_0', rows=D, K=FF, w=experts('ffn_down_exps', D, FF)[0])
+    ids_b = rng.integers(0, 4, size=(T2, KU)).astype(np.int32)   # (experts 0 .. 3: ~280 pairs each, full items and a partial)
+    ids_b.reshape(-1)[:125] = [4] * 5 + [5] * 20 + [6] * 40 + [7] * 60   # (partial items of 1, 2, 3 and 4 token tiles)
+    for what, Tn, idn in (('37 tokens', T, ids), (f'{T2} tokens', T2, ids_b)):
+        Pn = Tn * KU
+        xs_, yp_, y9_ = (z(Pn, dt=torch.int32) for _ in range(3))
+        it_, ni_ = z(4 * q3m_ops.items_bound(Pn, NE), dt=torch.int32), z(1, dt=torch.int32)
+        err.zero_(); O.group9(put(idn.reshape(-1)), Pn, KU, NE, xs_, yp_, y9_, it_, ni_, err)
+        cnt = np.bincount(idn.reshape(-1), minlength=NE)
+        wk = (it_, ni_, q3m_ops.items_bound(Pn, NE), xs_, yp_)
+        xg = put((rng.standard_normal((Tn, D)) * 1.0).astype(np.float16)).view(-1)
+        nan = lambda c, dt=torch.float32: torch.full((c,), float('nan'), dtype=dt, device=dev)
+        gw, gn, un = nan(Pn * FF), nan(Pn * FF), nan(Pn * FF)
+        O.mm_q2_0(Wg, xg, D, gw, FF, wk); On.mm_q2_0(Wg, xg, D, gn, FF, wk); On.mm_q2_0(Wu, xg, D, un, FF, wk)
+        an, aw = nan(Pn * FF, torch.float16), nan(Pn * FF, torch.float16)
+        On.swiglu(gn, un, an, Pn * FF); O.mm_gu(Wg, Wu, xg, D, aw, FF, wk); torch.cuda.synchronize(dev)
+        print(f'NOTE {what}: pairs per expert {cnt.tolist()}, {int(ni_.item())} work items', flush=True)
+        same(f'wide, {what}: gate (Q2_0 {FF} x {D}) against q35mp_mm_q2_0', gw, gn)
+        same(f'wide, {what}: fused gate | up + swiglu against gate, up and q3p_swiglu', aw, an)
+        dw, dnn = nan(Tn * (KU + 1) * D), nan(Tn * (KU + 1) * D)
+        wd = (it_, ni_, q3m_ops.items_bound(Pn, NE), yp_, y9_)
+        O.mm_q2_0(Wn, an, FF, dw, D, wd); On.mm_q2_0(Wn, an, FF, dnn, D, wd); torch.cuda.synchronize(dev)
+        same(f'wide, {what}: down (Q2_0 {D} x {FF}) against q35mp_mm_q2_0', dw, dnn)
+        check(bool(torch.isfinite(gw).all()) and bool(torch.isfinite(aw).all()) and int(torch.isfinite(dw).sum()) == Pn * D,
+              f'wide, {what}: every pair row written (gate, gate | up, down)')
+    del On
     bad_ids = ids.copy().reshape(-1); bad_ids[5] = NE + 7
     err.zero_(); O.group9(put(bad_ids), P, KU, NE, xs, yp, y9, items, nitems, err); torch.cuda.synchronize(dev)
     check(int(err.item()) & 2 == 2, 'group9: an id out of range sets the routing flag (bit 2)')

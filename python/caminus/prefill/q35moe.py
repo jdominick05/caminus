@@ -16,7 +16,9 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
   MoE       router logits (F32 [256], pf_f32_mv_k2048) and the shared expert's gate logit (F32 [1]); the top 8 with the
             gated shared weight as slot 8 (q35mp_router_sh: OP_ROUTER on the qwen35moe module); the shared expert (Q8_0
             gate / up GEMMs, fp16 swiglu, down GEMM into slot 8); the (token, slot) pairs grouped by expert (q3p_group with its y9 index),
-            the routed experts' Q2_0 gate / up (q35mp_mm_q2_0, grouped), fp16 swiglu, down into slots 0 .. 7
+            the routed experts' Q2_0 gate | up with the fp16 swiglu in one launch, then down into slots 0 .. 7 (the wide
+            tiles of kernels/q35m_prefill_mm.hip: q35mp_mm_q2_0_gu, q35mp_mm_q2_0_w; each row bitwise q35mp_mm_q2_0's
+            gate, up and q3p_swiglu, the narrow arm Ops(wide=False) the benchmarks and the G1 test compare them with)
             -> the 9 slots are summed, weighted, at the next layer's norm
 The last layer stops after its cache rows: its output feeds only the prompt's logits, which a prefill never returns (the
 last prompt token goes through a K3 pass). Every op but the GEMMs and the attention is its K3 decode op's statements on
@@ -42,6 +44,7 @@ I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MODULE = 'q35m_prefill'
 KVQ8_MODULE = 'q35m_prefill_kvq8'   # the Q8 KV cache's append and attention (kernels/q35m_prefill_kvq8.hip)
+WIDE_MODULE = 'q35m_prefill_mm'   # the routed experts' wide Q2_0 tiles and fused gate | up (kernels/q35m_prefill_mm.hip)
 ROUTER_FLOOR = 6.103515625e-5   # (the router's clamp on the top-k sum: Moe35Own's router_shexp default)
 # T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Unmeasured: q35own's value until a speed
 # test sets it
@@ -55,13 +58,27 @@ class Ops(q35own.Ops):
     # tiles; attn_wm's contract), q35mp_attn_q8 from the Q8 object
     WM_KERNEL = ('q35mp_attn', 'q35mp_attn_q8')
 
-    def __init__(self, dev, module=MODULE, q8=False):
+    def __init__(self, dev, module=MODULE, q8=False, wide=None):
         """q8: the KV cache is Q8_0 rows (kernels/own_kv_codec.h): kv_append_q8 and attn_wm's Q8 kernel run KVQ8_MODULE's
-        kernels, every other kernel stays on `module`"""
+        kernels, every other kernel stays on `module`. wide: the routed experts' Q2_0 GEMMs on WIDE_MODULE's wide tiles and
+        their gate | up fused with the swiglu, and the dense Q8_0 GEMMs wide from q8_wide_min_wg (None: with module
+        q35m_prefill; False: q35mp_mm_q2_0, gate, up, swiglu apart and the dense line's rule, the narrow arm the G1 test and
+        the benchmarks compare bitwise). The attributes wide / gu switch them per
+        launch once the object is loaded (q3m_ops.Ops's names: benchmarks/q35_prefill_gemm.py --set)"""
         super().__init__(dev, module)
         self.q8 = bool(q8)
-        if self.q8:
-            with torch.cuda.device(dev): self.kvmod = hip.Module(KVQ8_MODULE)
+        self.wide = self.gu = (module == MODULE) if wide is None else bool(wide)
+        with torch.cuda.device(dev):
+            if self.q8: self.kvmod = hip.Module(KVQ8_MODULE)
+            self.wmod = hip.Module(WIDE_MODULE) if self.wide else None
+
+    def q8_wide_min_wg(self):
+        """the dense Q8_0 GEMMs go wide from half the card's compute units in workgroups (q3m_ops.Ops.wide_min_wg, the 30B's
+        rule) where the dense line's rule asks for 4 per unit: on the XT at 2048 tokens the shared expert's gate / up and
+        the k / v projections (512 x 2048, 64 workgroups) take 11.85 ms a chunk wide against 12.97 (Q8_0 alone); at 512
+        tokens ssm_out (2048 x 4096, 64) 8.77 against 9.75 and the shared expert's down (2048 x 512, 64) 1.39 against 1.47,
+        while the 512 x 2048 GEMMs (16) ran 6.35 against 4.23 and stay narrow. wide = False: the dense line's rule (the narrow arm)"""
+        return self.wide_min_wg if self.wide else super().q8_wide_min_wg()
 
     def kv_append_q8(self, k, ldk, v, ldv, cache, M, pos0, n, rows, err):
         """cache rows pos0 .. pos0 + n - 1 = the Q8_0 blocks of (k, v), fp32 (the decode's own_kv_q8_encode); a refused block
@@ -85,8 +102,26 @@ class Ops(q35own.Ops):
         R, K = int(W['rows']), int(W['K'])
         if K % 256: raise ValueError(f'q35moe mm_q2_0: K {K} is not a multiple of 256')
         items, nitems, bound, xs, yd = work
+        if self.wide:   # (kernels/q35m_prefill_mm.hip q35mp_mm_q2_0_w: 256 rows a workgroup, each row bitwise q35mp_mm_q2_0's)
+            self.wmod.q35mp_mm_q2_0_w((int(bound), -(-R // q3m_ops.MMW_N)), (256,), W['w'], I(R), I(K), x16, I(ldx), xs, y, I(ldy),
+                                      yd, items, nitems, I(0))
+            return
         self.mod.q35mp_mm_q2_0((int(bound), -(-R // q3m_ops.MM_N)), (256,), W['w'], I(R), I(K), x16, I(ldx), xs, y, I(ldy),
                                yd, items, nitems, I(0))
+
+    def mm_gu(self, Wg, Wu, x16, ldx, y16, ldy, work):
+        """y16[yd] = fp16(silu(Wg x16[xs]) (Wu x16[xs])) for the grouped pairs (work from group9()): the gate GEMM, the up GEMM
+        and q3p_swiglu in one launch (kernels/q35m_prefill_mm.hip q35mp_mm_q2_0_gu: the same bits). Wg, Wu: Moe35Own's Q2_0
+        expert dicts of one shape"""
+        if not self.gu: raise ValueError(f'q35moe mm_gu: not on {self.module} (gu off)')
+        (fg, R, K), (fu, Ru, Ku) = ((W['fmt'], int(W['rows']), int(W['K'])) for W in (Wg, Wu))
+        if fg != 'Q2_0' or fu != 'Q2_0' or (R, K) != (Ru, Ku) or Wg['w'].numel() != Wu['w'].numel():
+            raise ValueError(f'q35moe mm_gu: gate {fg} [{R} x {K}], up {fu} [{Ru} x {Ku}] (two Q2_0 tensors of one shape)')
+        if K % 256: raise ValueError(f'q35moe mm_gu: K {K} is not a multiple of 256')
+        if y16.dtype != torch.float16: raise ValueError(f'q35moe mm_gu: y16 is {y16.dtype} (fp16)')
+        items, nitems, bound, xs, yd = work
+        self.wmod.q35mp_mm_q2_0_gu((int(bound), -(-R // q3m_ops.MM_N)), (256,), Wg['w'], Wu['w'], I(R), I(K), x16, I(ldx), xs,
+                                   y16, I(ldy), yd, items, nitems)
 
     def router_sh(self, logits, sgl, E, k, floor_, ids, wts, err, n):
         """ids [n][k], wts [n][k + 1]: the softmax top k of each row's E logits (weights over their sum clamped at floor_),
@@ -112,7 +147,7 @@ def layout(m, T):
     att = 2 * QH + 3 * nkv * hd + 2 * QH                 # qf, kr, vr, ko, qo, att
     P = T * k
     f32 = dict(x=T * D, h=T * D, blk=T * D, al=T * NV, be=T * NV, gates=T * 2 * NV, work=T * max(gdn, att),
-               logits=T * E, sgl=T, wts=T * (k + 1), dn=T * (k + 1) * D, shg=T * fs, shu=T * fs, g=P * ff, u=P * ff)
+               logits=T * E, sgl=T, wts=T * (k + 1), dn=T * (k + 1) * D, shg=T * fs, shu=T * fs)
     f16 = dict(h16=T * D, x16=T * max(VD, QH, fs), a16=P * ff)
     i32 = dict(toks=T, err=1, rerr=1, ids=P, xs=P, yp=P, y9=P, items=4 * q3m_ops.items_bound(P, E), nitems=1)
     return f32, f16, i32
@@ -121,6 +156,12 @@ def layout(m, T):
 def buffer_need_mib(m, T):
     f32, f16, i32 = layout(m, T)
     return (4 * sum(f32.values()) + 2 * sum(f16.values()) + 4 * sum(i32.values())) / capacity.MIB
+
+
+def narrow_need_mib(m, T):
+    """the narrow arm's extra buffers (the experts' fp32 gate and up outputs: Ops(wide=False) / gu off, benchmarks and tests
+    only), allocated on its first chunk"""
+    return 2 * 4 * T * m.k_used * m.ffn / capacity.MIB
 
 
 def shapes_of(path):
@@ -204,7 +245,7 @@ class Q35MoEPrefill(PrefillDriver):
         x, h, blk, h16, x16 = self.x[:n * D], self.h[:n * D], self.blk[:n * D], self.h16[:n * D], self.x16
         P = n * k
         lg, sgl, ids, wts, dn = self.logits[:n * E], self.sgl[:n], self.ids[:P], self.wts[:n * (k + 1)], self.dn[:n * (k + 1) * D]
-        shg, shu, g, u, a16 = self.shg[:n * fs], self.shu[:n * fs], self.g[:P * ff], self.u[:P * ff], self.a16[:P * ff]
+        shg, shu, a16 = self.shg[:n * fs], self.shu[:n * fs], self.a16[:P * ff]
         xs, yp, y9 = self.xs[:P], self.yp[:P], self.y9[:P]
         bound = q3m_ops.items_bound(P, E)
         work_gu = (self.items, self.nitems, bound, xs, yp)
@@ -267,10 +308,21 @@ class Q35MoEPrefill(PrefillDriver):
             O.mm(L['sh_down'], x16, fs, dn[k * D:], (k + 1) * D, n=n)
             # the routed experts: the pairs grouped by expert, gate / up, swiglu, down into slots 0 .. k - 1
             O.group9(ids, P, k, E, xs, yp, y9, self.items, self.nitems, self.rerr)
-            O.mm_q2_0(L['ffn_gate_exps'], h16, D, g, ff, work_gu)
-            O.mm_q2_0(L['ffn_up_exps'], h16, D, u, ff, work_gu)
-            O.swiglu(g, u, a16, P * ff)
+            if O.gu: O.mm_gu(L['ffn_gate_exps'], L['ffn_up_exps'], h16, D, a16, ff, work_gu)
+            else:   # (the narrow arm: gate, up, swiglu apart)
+                g, u = self._narrow_bufs()
+                O.mm_q2_0(L['ffn_gate_exps'], h16, D, g[:P * ff], ff, work_gu)
+                O.mm_q2_0(L['ffn_up_exps'], h16, D, u[:P * ff], ff, work_gu)
+                O.swiglu(g, u, a16, P * ff)
             O.mm_q2_0(L['ffn_down_exps'], a16, ff, dn, D, work_d)
+
+    def _narrow_bufs(self):
+        if getattr(self, 'gu_bufs', None) is None:
+            need = narrow_need_mib(self.m, self.chunk)
+            capacity.check([self.dev.index], [need], f'Q35MoEPrefill narrow arm\'s gate / up outputs (chunk {self.chunk})')
+            with torch.cuda.device(self.dev):
+                self.gu_bufs = torch.zeros(2, self.chunk * self.m.k_used * self.m.ffn, dtype=torch.float32, device=self.dev)
+        return self.gu_bufs[0], self.gu_bufs[1]
 
     def check_flags(self, what='prefill'):
         e, r = int(self.err.item()), int(self.rerr.item())

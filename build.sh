@@ -77,9 +77,10 @@ for src in kernels/*.hip; do
     # spilled SGPRs; F16 short 4.75 -> 4.74 ms, Q8 32K 6.36 -> 6.38, Q8 128K 11.07 -> 10.94. The default scheduler: 5.27 /
     # 7.18 / 13.08 (it issues the matvec loads one wait at a time)
     case "$src" in kernels/k3_q35_moe*.hip) extra=(-mllvm -amdgpu-sched-strategy=max-memory-clause) ;; esac
-    # q3m_prefill_mm (the 30B's wide prefill GEMM tiles): max-ilp too (the Q4_K GEMMs 216 -> 205 ms a 2048-token chunk, the
-    # same bits); q3m_prefill itself stays on the default scheduler (its q3p_mm_q4k and attention spill under max-ilp)
-    case "$src" in kernels/q3m_prefill_mm.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp) ;; esac
+    # q3m_prefill_mm / q35m_prefill_mm (the 30B's and the 35B's wide prefill GEMM tiles): max-ilp too (a 2048-token chunk's
+    # 30B Q4_K GEMMs 216 -> 205 ms, the 35B's Q2_0 experts 92.3 -> 91.6 ms; the same bits); q3m_prefill and q35m_prefill
+    # stay on the default scheduler (their narrow GEMMs and attention spill under max-ilp)
+    case "$src" in kernels/q3m_prefill_mm.hip|kernels/q35m_prefill_mm.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp) ;; esac
     case "$src" in *k3_gguf*.hip|*gg_mv_ref.hip) extra=(-DGGML_USE_HIP -D__HIP_PLATFORM_AMD__ -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda" -mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;
     # gg_mmvf_ref: ignite's mmvf.cu as is, with ignite's compile flags (build-hip-therock compile_commands.json): the BF16
     # matvec reference of tests/test_k3_bf16_mv.py

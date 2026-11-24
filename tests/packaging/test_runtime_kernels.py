@@ -348,7 +348,7 @@ class RuntimeKernels(unittest.TestCase):
 
     def test_q35moe_serve_selects_shipped_objects(self):
         # caminus serve for Qwen3.6-35B-A3B (arch.Q35MoE): the decode module from the file (module_of / kv_module: F16 and
-        # --kv q8) and the batched prefill's constructor loads in every mode (the Q8 rows and attention object only with a
+        # --kv q8) and the batched prefill's constructor loads in every mode (its wide expert tiles always; the Q8 rows and attention object only with a
         # Q8 engine, the YaRN attention object only in the long-context mode); all are in the installed runtime set and
         # each one's removal is caught
         from caminus.engine import q35_moe
@@ -370,6 +370,7 @@ class RuntimeKernels(unittest.TestCase):
             names[q8_, yarn] = self.loads[start:]
             self.assertEqual('rope' in pf.numerics(), yarn is not None)
         base = names[False, None]
+        self.assertIn('q35m_prefill_mm', base)   # (the experts' wide tiles and fused gate | up: every mode)
         self.assertNotIn('q35m_prefill_kvq8', base); self.assertNotIn('prefill_attn_q35_yarn', base)
         self.assertEqual(sorted(set(names[True, None]) - set(base)), ['q35m_prefill_kvq8'])
         self.assertEqual(sorted(set(names[False, 4.0]) - set(base)), ['prefill_attn_q35_yarn'])
@@ -377,7 +378,7 @@ class RuntimeKernels(unittest.TestCase):
         self.assertEqual(sorted(set(names[True, 4.0]) - set(base)), ['prefill_attn_q35_yarn', 'q35m_prefill_kvq8'])
         want = [f16, q8] + [n for v in names.values() for n in v]
         self.require_runtime(want)
-        for name in (f16, q8, 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn'):
+        for name in (f16, q8, 'q35m_prefill', 'q35m_prefill_mm', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn'):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime(want)

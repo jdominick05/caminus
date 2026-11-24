@@ -1,4 +1,5 @@
-"""Qwen3-30B-A3B batched prefill speed (caminus.prefill.q3m.Q3MPrefill): positions [0, L) of random tokens per length,
+"""Qwen3-30B-A3B batched prefill speed (caminus.prefill.q3m.Q3MPrefill; a qwen35moe file, Qwen3.6-35B-A3B: caminus.prefill.
+q35moe.Q35MoEPrefill on Moe35Own, one card, without --ops / --prefill-module): positions [0, L) of random tokens per length,
 medians over --rounds, prompt tok/s = L / seconds (prefill only: the last token's K3 pass is the decode's). With --ops,
 one more run per length with every launch timed by HIP events (the time per op kind: GEMM by matrix, attention, glue).
 --cards 2: the two-card prefill (caminus.prefill.q3m_tp.Q3MPrefillTP on Q3MoETP, torch devices 0 and 1, card 0 first;
@@ -8,7 +9,7 @@ per length in turn (interleaved), so the exchange's exposed cost is overlap or s
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops] [--prefill-module M]
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 [--modes overlap,serial,local] [--micro 2]
 --ab (one card): every round also on the narrow tiles (Ops.wide / gu False), interleaved, both arms' medians printed and
-the last layer's KV rows of the last round compared bitwise (RESULT FAIL if they differ).
+the last attention layer's KV rows of the last round compared bitwise (RESULT FAIL if they differ).
 --kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True); with --cards 2 Q3MoETP(q8=True) and
 Q3MPrefillTP's Q8 path); runs alternated with an F16 run for the A/B (both caches do not fit at depth)."""
 import argparse, collections, os, sys, time
@@ -57,9 +58,22 @@ if A.cards == 2:
     print('RESULT DONE')
     sys.exit(0)
 print(torch.cuda.get_device_name(0), flush=True)
-eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8')
-pf = Q3MPrefill(eng, chunk=A.chunk, module=A.prefill_module)
-print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
+from caminus import ggufio
+_F = ggufio.GGUFFile(A.gguf); ARCH = _F.arch; _F.close()
+if ARCH == 'qwen35moe':
+    from caminus.engine.q35_moe import Moe35Own
+    from caminus.prefill import q35moe
+    if A.ops or A.prefill_module: raise SystemExit('a qwen35moe file: no --ops / --prefill-module (the 30B\'s)')
+    sh = q35moe.shapes_of(A.gguf)   # (the narrow arm's gate / up outputs projected with the engine when --ab runs it)
+    eng = Moe35Own(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8',
+                   vram_extra_mib=q35moe.buffer_need_mib(sh, A.chunk) + (q35moe.narrow_need_mib(sh, A.chunk) if A.ab else 0))
+    pf = q35moe.Q35MoEPrefill(eng, chunk=A.chunk); pf.ops = pf.O
+    print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, KV {A.kv}, decode module {eng.module}, prefill objects {pf.ops.module} + '
+          f'{q35moe.WIDE_MODULE}: prefill buffers {pf.need_mib:.0f} MiB', flush=True)
+else:
+    eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8')
+    pf = Q3MPrefill(eng, chunk=A.chunk, module=A.prefill_module)
+    print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
 g = np.random.default_rng(0)
 arms = (True, False) if A.ab else (pf.ops.wide,)
 bad = False
@@ -72,7 +86,7 @@ for L in Ls:
             pf.ops.wide = pf.ops.gu = a
             eng.reset(); torch.cuda.synchronize(); t0 = time.perf_counter()
             pf.run(toks, 0, 0, L); torch.cuda.synchronize(); ts[a].append(time.perf_counter() - t0)
-            if A.ab and r == A.rounds: last[a] = eng.L[-1]['cache'].cpu()   # (host memory: the last layer's rows)
+            if A.ab and r == A.rounds: last[a] = [L for L in eng.L if 'cache' in L][-1]['cache'].cpu()   # (host memory: the last attention layer's rows)
     for a in arms:
         s = float(np.median(ts[a][1:]))
         print(f'  L {L:6d}' + ((' wide  ' if a else ' narrow') if A.ab else '') + f': {s * 1e3:9.1f} ms = {L / s:7.0f} tok/s prefill '

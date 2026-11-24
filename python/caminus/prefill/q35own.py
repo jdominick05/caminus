@@ -122,13 +122,17 @@ class Ops(q3m_ops.Ops):
         if work is not None or n is None: raise ValueError(f'q35 mm: {fmt} takes dense rows (n) only')
         n = int(n)
         if (fmt == 'Q8_0' and self.module in WIDE_MODULES and not self.q8_narrow
-                and (-(-n // q3m_ops.MM_M) * -(-R // MMW_N) >= MMW_MIN_PER_CU * self.cus or self.q8_force_wide)):
+                and (-(-n // q3m_ops.MM_M) * -(-R // MMW_N) >= self.q8_wide_min_wg() or self.q8_force_wide)):
             # the wide tile (kernels/q35_prefill.hip q35p_mm_q8_0_w, bitwise q35p_mm_q8_0's rows; the same grid-size rule; Swift
             # only for now: ThinkingCap's Q8_0 tensors stay on q35p_mm_q8_0; q8_narrow / q8_force_wide for --arms ab)
             self.mod.q35p_mm_q8_0_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
             return
         grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
         getattr(self.mod, MM_KERNEL[fmt])(grid, (256,), wb, I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
+
+    def q8_wide_min_wg(self):
+        """the grid (workgroups) from which a dense Q8_0 GEMM runs on the wide tile"""
+        return MMW_MIN_PER_CU * self.cus
 
     def emb_iq2s(self, W, rb, vocab, toks, x, n, N):
         """x [n][N] = the IQ2_S embedding rows toks[i] (OP_OWN_EMB's IQ2_S statements: bitwise the host decoder)"""

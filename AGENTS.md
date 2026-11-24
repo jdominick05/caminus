@@ -197,7 +197,9 @@ CLAUDE.md imports this file.
   9-slot grouping (`q3p_group` under `Q3P_GROUP_Y9`) and the grouped Q2_0 expert GEMM to `q35_prefill.hip`'s; `tests/prefill/test_q35m_prefill_ops.py` (G1)
   and `tests/prefill/test_q35_prefill.py` (G-model, both lines)) are the exceptions: their own WMMA GEMMs
   (`kernels/q3m_prefill.hip` with the 30B's wide tiles and fused gate | up in their own max-ilp object `kernels/q3m_prefill_mm.hip`
-  (bitwise the narrow tiles' rows, one card only: `Ops(wide=False)` on two), `kernels/q35_prefill.hip`; ThinkingCap's
+  (bitwise the narrow tiles' rows, one card only: `Ops(wide=False)` on two), the 35B's wide Q2_0 expert tiles and fused gate | up
+  likewise in `kernels/q35m_prefill_mm.hip` (`q35moe.Ops(wide=False)`: the narrow arm, test and benchmark only), both on
+  `kernels/prefill_mm_w.h`'s work item, rows and stores, `kernels/q35_prefill.hip`; ThinkingCap's
   `kernels/q35_prefill_tcap.hip` adds the IQ GEMMs) and
   WMMA attention tiles (`q35p_attn_wm`, head dim 256; the 35B's `q35mp_attn` and the 30B's `q3mp_attn` (head dim 128), one source `kernels/prefill_attn_g8.h` after rocKE's pipeline; the dense objects keep the old `q3p_attn` under `Q3P_ATTN_OLD`, never launched) are G-model gated, not bitwise (q35own's other
   ops are bitwise their decode ops); chunk geometry still changes no bit (RDNA3's WMMA is not exact for a zero product: see q3m_prefill's attention).

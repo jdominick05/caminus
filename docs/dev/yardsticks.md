@@ -366,8 +366,55 @@ XT). At 512 tokens the k / v projections have 16 wide workgroups and ran 1.6-1.8
 a chunk); attn_output's 64 ran faster (10.58 vs 11.51). With the rule, a 512-token chunk's GEMMs take 82.0 ms against
 110.8 narrow.
 
-At 12K F16 (`--ops`), attention is 35.1 % of the prefill and the fused gate | up 22.0 %. The 35B's GEMMs are unchanged:
-its Q8_0 and Q2_0 kernels are not touched. A wide grouped Q2_0 tile is next.
+At 12K F16 (`--ops`), attention is 35.1 % of the prefill and the fused gate | up 22.0 %.
+
+The 35B's wide tiles (`kernels/q35m_prefill_mm.hip`, the 30B's skeleton from `kernels/prefill_mm_w.h` with the Q2_0
+statements of `q35mp_mm_q2_0` per row). Each step was measured interleaved against the one before, every output bitwise;
+the times are the routed experts' GEMMs (gate | up and down) of one 2048-token chunk on the XT:
+
+| Step | expert GEMMs per chunk |
+|---|---|
+| narrow tiles; gate, up, swiglu apart (the swiglu launch counted) | 136.8 ms |
+| wide tiles + fused gate \| up, every token tile's WMMAs (56 VGPRs spilled) | 141.9 ms |
+| a partial item's empty 16-token tiles skip their WMMAs (no spills) | 107.6 ms |
+| the weights half a step ahead in a two-half register ring (36 registers where a step and the next took 72) | 101.9 ms |
+| its own object under max-ilp | 101.6 ms |
+| the Q2_0 B operand by v_perm, a mask and one packed fma (about half the VALU instructions) | **91.3 ms** |
+
+- Fusing gate | up is worth 8.5 ms of it (the final tile with `gu` off: 66.8 against 58.3 ms for gate and up).
+- The final tile under the default scheduler: 92.3 ms (max-ilp 91.6 in the same run; 36.1 against 35.7 at 512 tokens).
+- Registers: `q35mp_mm_q2_0_w` and `q35mp_mm_q2_0_gu` 211 VGPRs, 0 spills, 33,792 B of LDS (the narrow tile: 256 under max-ilp, 44 spilled).
+- The dense Q8_0 GEMMs go wide from half the card's compute units in workgroups, the 30B's rule (`q35moe.Ops.q8_wide_min_wg`).
+  At 2048 tokens that moves the shared expert's gate / up and the k / v projections (512 x 2048): 12.97 -> 11.84 ms (Q8_0-only runs; 13.22 -> 12.11 in the full run below).
+  At 512 tokens it moves ssm_out (9.91 -> 8.92) and the shared expert's down (1.47 -> 1.39) and leaves the 512 x 2048
+  GEMMs narrow (16 workgroups: 4.23 narrow, 6.35 wide). The dense Q8_0 tile under max-ilp spills 18 VGPRs, so it stays
+  in `q35m_prefill`.
+
+The 35B after, ms per chunk (one run on the final build: before = `Ops(wide=False)`, the narrow tiles and the dense line's
+rule, interleaved with the wide tiles, every output bitwise):
+
+| Group (R x K) | before | after | FlyDSL fp16 | after / FlyDSL |
+|---|---|---|---|---|
+| Q8_0 8192 x 2048 | 51.22 | 51.22 | 36.78 | 1.39x |
+| Q8_0 4096 x 2048 | 20.81 | 20.81 | 15.03 | 1.38x |
+| Q8_0 2048 x 4096 | 28.83 | 28.83 | 21.03 | 1.37x |
+| Q8_0 512 x 2048 | 13.22 | 12.11 | 9.76 | 1.24x |
+| Q8_0 2048 x 512 | 4.23 | 4.23 | 3.19 | 1.33x |
+| gate \| up experts Q2_0 512 x 2048 (before: two GEMMs + swiglu) | 91.54 | 58.17 (46.1 TF) | 39.21 (no swiglu) | 1.48x |
+| down experts Q2_0 2048 x 512 | 45.21 | 33.01 (40.6 TF) | 19.53 | 1.69x |
+| **per chunk** | **255.1** | **208.4** | **144.5** | **1.44x** |
+
+End to end, the 35B (`benchmarks/q3moe_prefill.py GGUF35 --chunk 2048 --ab`: prefill from empty, the wide arm against
+`Ops(wide=False)` interleaved, median of 3, the last attention layer's KV rows bitwise equal at every length):
+
+| Length | KV | after | before | speed-up |
+|---|---|---|---|---|
+| 128 | F16 | 2,767 tok/s | 1,858 tok/s | 1.49x |
+| 512 | F16 | 4,984 tok/s | 3,779 tok/s | 1.32x |
+| 4,096 | F16 | 6,235 tok/s | 5,461 tok/s | 1.14x |
+| 16,384 | F16 | 5,552 tok/s | 4,936 tok/s | 1.12x |
+| 16,384 | Q8 | 5,423 tok/s | 4,833 tok/s | 1.12x |
+| 32,768 | Q8 | 4,764 tok/s | 4,301 tok/s | 1.11x |
 
 ## Summary: where the outside kernels say we stand (XT)
 
@@ -379,7 +426,7 @@ its Q8_0 and Q2_0 kernels are not touched. A wide grouped Q2_0 tile is next.
 | Verify attention (T 4), split pair, 32K | 1.29 ms / layer with the packed PART (1.52 ms before; T 1: 0.48 ms) | rocKE, GQA-packed: 0.22 ms | 5.9x (each row's arithmetic is still its own: decode's bits) |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
 | Prefill GEMMs, 30B chunk of 2048 (grouped experts) | 243.4 ms, swiglu inside (283.0 ms before, 292.1 with its swiglu launch) | FlyDSL fp16 at the aggregate M: 160.8 ms | 1.51x (1.76x before) |
-| Prefill GEMMs, 35B chunk of 2048 (grouped experts) | 250.4 ms | FlyDSL fp16 at the aggregate M: 143.8 ms | 1.74x |
+| Prefill GEMMs, 35B chunk of 2048 (grouped experts) | 208.4 ms, swiglu inside (250.4 ms before, 255.1 with its swiglu launch) | FlyDSL fp16 at the aggregate M: 144.5 ms | 1.44x (1.74x before) |
 | Prefill attention, chunk at 30K | 79.7 ms (964 ms before the tiles) | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.6 ms) | 2.8x (34x before) |
 | Prefill attention, 35B chunk at 30K | 20.95 ms (`q35mp_attn`; 41.3 ms before) | rocKE WMMA prefill: 19.60 ms | 1.07x (2.1x before) |
 | Prefill attention, 30B chunk at 30K | 17.38 ms (`q3mp_attn`; 30.0 ms before) | rocKE d128: 18.62 ms | 0.93x (1.6x before) |
