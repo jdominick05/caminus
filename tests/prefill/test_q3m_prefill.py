@@ -11,7 +11,7 @@
   rows       (--kv q8) the prefill's Q8 rows of the last layer byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of
              the halves the F16 row kernel stores for the same q | k | v (the chunk's own last-layer buffer)
   tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz [--llama LL.bin] [--from P] [--kv q8]
---kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True): q3p_qk_rope_q8 / q3p_attn_q8 and
+--kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True): q3p_qk_rope_q8 / q3mp_attn_q8 and
 k3_q3m_lean_kvq8); the same G-model, geometry and bounds checks.
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys

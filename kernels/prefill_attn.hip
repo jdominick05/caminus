@@ -103,8 +103,14 @@ __device__ __forceinline__ size_t kv_pos_bytes(int M) { return (size_t)2 * (M / 
 // ---- pf_qk_nr: OP_QK_NR over rows: block t = row * heads + head (the decode's task index) ---------------------------------
 //   x: [rows, heads] heads at head_stride floats (the q GEMM's [q | gate] head pairs: stride 2 D), w: the norm [D], out
 //   [rows, heads, D]; position of row r: pos0 + r. D <= 512, 256 threads
+//   PF_QK_YARN (prefill_attn_q35_yarn.hip): the qwen35moe decode op's YaRN form (k3_q35_ops.h, K3_Q35_YARN): mt = the per-dim
+//   frequency factor [n_rot / 2], ms = the magnitude scale; theta = pos * theta_scale^j * mt[j], cos / sin times ms
 extern "C" __global__ void __launch_bounds__(256) pf_qk_nr(const float * xin, int head_stride, int heads, const float * w, int D,
-                                                           int nrot, float theta_scale, float eps, int pos0, float * out) {
+                                                           int nrot, float theta_scale, float eps, int pos0, float * out
+#ifdef PF_QK_YARN
+                                                           , const float * __restrict__ mt, float ms
+#endif
+                                                           ) {
     __shared__ float part[8]; __shared__ float nrm[512];
     const int t = blockIdx.x;
     const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
@@ -121,8 +127,13 @@ extern "C" __global__ void __launch_bounds__(256) pf_qk_nr(const float * xin, in
     for (int i = tid; i < D; i += blockDim.x) {
         if (i >= nrot) { y[i] = nrm[i]; continue; }
         const int j = i < nrot / 2 ? i : i - nrot / 2;
+#ifdef PF_QK_YARN
+        const float theta = pos * powf(theta_scale, (float)j) * mt[j];
+        const float c = cosf(theta) * ms, sn = sinf(theta) * ms;
+#else
         const float theta = pos * powf(theta_scale, (float)j);
         const float c = cosf(theta), sn = sinf(theta);
+#endif
         const float x0 = nrm[j], x1 = nrm[j + nrot / 2];
         y[i] = i < nrot / 2 ? x0 * c - x1 * sn : x0 * sn + x1 * c;
     }

@@ -19,7 +19,7 @@ tp=True: 4 kv heads, 2 per card).
     the words not cleared), the engine stays broken across reset() and refuses every pass with that class; non-finite
     logits still mark it with NonFiniteLogits
   - the prefill on a Q8 engine: each card's Ops with q8 (q3m_prefill_kvq8 beside q3m_prefill), qk_rope / attn launched as
-    q3p_qk_rope_q8 (with that card's KV error word) / q3p_attn_q8 over 2 kv heads, no F16 row or attention kernel, rows
+    q3p_qk_rope_q8 (with that card's KV error word) / q3mp_attn_q8 over 2 kv heads, no F16 row or attention kernel, rows
     checked against the byte caches; numerics() names the cache (F16: unchanged); either card's error word set: the
     settle raises InvalidKVEncoding before the routing flags, the engine is broken, the next chunk is refused
   - the prompt cache: the checkpoint layout's row on each card is that card's Q8 row; the engine key carries the KV format
@@ -119,8 +119,9 @@ class Rec:
 
 class FakeOps(q3m_ops.Ops):
     """q3m_ops.Ops with its code objects recorders (its launch wrappers' host checks run)"""
-    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False):
+    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False, wide=None):
         self.dev, self.module, self.q8, self.yarn = torch.device(dev), module, bool(q8), bool(yarn)
+        self.wide = self.gu = bool(wide)   # (the two-card prefill passes False: the narrow tiles)
         card = int(str(dev).split(':')[1])
         self.mod = Rec(card, module); self.kvmod = Rec(card, q3m_ops.KVQ8_MODULE) if self.q8 else None
         self.ropemod = Rec(card, q3m_ops.YARN_MODULE[self.q8]) if self.yarn else (self.kvmod if self.q8 else self.mod)
@@ -255,13 +256,13 @@ check(pf.q8 and all(o.q8 and o.module == 'q3m_prefill' and o.kvmod.name == 'q3m_
 LOG.clear()
 seq = list(range(1, 41))
 pf._chunk(seq, 0, 40)
-rope = [e for e in LOG if e[2].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[2].startswith('q3p_attn')]
+rope = [e for e in LOG if e[2].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[2].startswith('q3mp_attn')]
 check(rope and all(e[1] == 'q3m_prefill_kvq8' and e[2] == 'q3p_qk_rope_q8' and e[4][-1] is pf.B[e[0]]['kverr'] and e[3][1] == 16 + 2 for e in rope)
-      and att and all(e[1] == 'q3m_prefill_kvq8' and e[2] == 'q3p_attn_q8' and e[3][1] == 2 for e in att)
-      and sorted(e[0] for e in rope) == [0] * mp.nl + [1] * mp.nl and not any(e[2] in ('q3p_qk_rope', 'q3p_attn') for e in LOG)
+      and att and all(e[1] == 'q3m_prefill_kvq8' and e[2] == 'q3mp_attn_q8' and e[3][1] == 2 for e in att)
+      and sorted(e[0] for e in rope) == [0] * mp.nl + [1] * mp.nl and not any(e[2] in ('q3p_qk_rope', 'q3mp_attn') for e in LOG)
       and all(e[4][7] is mp.L[il][e[0]]['cache'] for il, e in zip([i for i in range(mp.nl) for _ in (0, 1)], rope)),
       f'a chunk: {len(rope)} q3p_qk_rope_q8 (16 + 2 heads, the card\'s own KV error word, its layer\'s byte cache) and {len(att)} '
-      f'q3p_attn_q8 (2 kv heads) launches; no F16 row or attention kernel')
+      f'q3mp_attn_q8 (2 kv heads) launches; no F16 row or attention kernel')
 pf.B[1]['kverr'].fill_(2); pf.B[0]['err'].fill_(1)   # (a routing flag too: the KV word is read first)
 check(raises(pf._run_settle, errors.InvalidKVEncoding) and mp.broken and mp._broken_error is errors.InvalidKVEncoding and 'card 1' in mp.broken
       and int(pf.B[0]['err'].item()) == 1 and raises(lambda: pf._chunk(seq, 0, 40), errors.InvalidKVEncoding),

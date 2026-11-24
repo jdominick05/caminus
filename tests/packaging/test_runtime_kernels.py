@@ -255,8 +255,12 @@ class RuntimeKernels(unittest.TestCase):
         for fmt in ('Q4_K', 'Q6_K') + tuple(q3m_ops.IQ_KERNEL):
             with self.subTest(fmt=fmt):
                 names = self.q3_prefill(fmt)
-                self.assertEqual(names, [q3m_ops.IQ_MODULE if fmt in q3m_ops.IQ_KERNEL else 'q3m_prefill'])
+                # (q3m_prefill's wide GEMM tiles are their own object: the IQ study object runs the narrow tiles)
+                self.assertEqual(names, [q3m_ops.IQ_MODULE] if fmt in q3m_ops.IQ_KERNEL else ['q3m_prefill', q3m_ops.WIDE_MODULE])
                 self.require_runtime(names)
+        without = tuple(n for n in kernels.RUNTIME_SET if n != q3m_ops.WIDE_MODULE)
+        with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+            self.require_runtime(self.q3_prefill('Q4_K'))
         for fmt in q3moe_one.MODULE_RS:
             with self.subTest(fmt=fmt), self.assertRaises(ValueError):
                 self.q3_prefill(fmt)
@@ -302,7 +306,7 @@ class RuntimeKernels(unittest.TestCase):
         self.assertEqual(tp, 'k3_q3m_lean_tp_kvq8')
         self.assertEqual(q3_engine().module, q3moe_one.MODULE_LEAN)   # (the F16 default unchanged)
         names1 = self.q3_prefill('Q4_K', q8=True)
-        self.assertEqual(sorted(set(names1)), ['q3m_prefill', 'q3m_prefill_kvq8'])
+        self.assertEqual(sorted(set(names1)), ['q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_mm'])
         names2 = self.q3_prefill_tp(q8=True)
         self.assertEqual(sorted(set(names2)), ['prefill_tp', 'q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_tp'])
         self.assertEqual(names2.count('q3m_prefill_kvq8'), 2)   # (one per card)
@@ -332,7 +336,8 @@ class RuntimeKernels(unittest.TestCase):
                 start = len(self.loads)
                 q3m.Q3MPrefill(m, chunk=16, check=False)
                 names = self.loads[start:]
-                want = ['q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_kvq8_yarn'] if q8_ else ['q3m_prefill', 'q3m_prefill_yarn']
+                want = (['q3m_prefill', 'q3m_prefill_mm', 'q3m_prefill_kvq8', 'q3m_prefill_kvq8_yarn'] if q8_
+                        else ['q3m_prefill', 'q3m_prefill_mm', 'q3m_prefill_yarn'])
                 self.assertEqual(names, want)
                 self.require_runtime(names)
         self.require_runtime([one, q8] + tps)
@@ -340,6 +345,42 @@ class RuntimeKernels(unittest.TestCase):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime([one, 'q3m_prefill', 'q3m_prefill_yarn'])
+
+    def test_q35moe_serve_selects_shipped_objects(self):
+        # caminus serve for Qwen3.6-35B-A3B (arch.Q35MoE): the decode module from the file (module_of / kv_module: F16 and
+        # --kv q8) and the batched prefill's constructor loads in every mode (the Q8 rows and attention object only with a
+        # Q8 engine, the YaRN attention object only in the long-context mode); all are in the installed runtime set and
+        # each one's removal is caught
+        from caminus.engine import q35_moe
+        from caminus.prefill import q35moe
+        f16 = q35_moe.kv_module(None, module=q35_moe.module_of(None))
+        q8 = q35_moe.kv_module(None, module=q35_moe.module_of(None), q8=True)
+        self.assertEqual((f16, q8), ('k3_q35_moe', 'k3_q35_moe_kvq8'))
+        mm = lambda f: dict(fmt=f)
+        layer = lambda kind: dict(kind=kind, **{k: mm('Q8_0') for k in q35moe.Q35MoEPrefill.MM_KEYS[kind] + q35moe.Q35MoEPrefill.SH_KEYS},
+                                  **{k: mm('Q2_0') for k in q35moe.Q35MoEPrefill.EXP_KEYS}, al=mm('F32'), be=mm('F32'))
+        names = {}
+        tensor = torch.tensor
+        self.stack.enter_context(patch.object(torch, 'tensor', side_effect=lambda *a, **kw: tensor(*a, **{k: v for k, v in kw.items() if k != 'device'})))
+        for q8_, yarn in ((False, None), (True, None), (False, 4.0), (True, 4.0)):
+            m = NS(dev=0, q8=q8_, yarn_factor=yarn, yarn=([1.0] * 32, 1.1), rope_key='yarn4', kv_format_id='q8', nl=2, nl_build=2, D=2048, nh=16, nkv=2, hd=256, k_used=8, n_exp=256,
+                   ffn=512, ffn_shexp=512, S=128, NK=16, NV=32, vocab=64, emb=NS(type='BF16'), L=[layer('gdn'), layer('attn')])
+            start = len(self.loads)
+            pf = q35moe.Q35MoEPrefill(m, chunk=16, check=False)
+            names[q8_, yarn] = self.loads[start:]
+            self.assertEqual('rope' in pf.numerics(), yarn is not None)
+        base = names[False, None]
+        self.assertNotIn('q35m_prefill_kvq8', base); self.assertNotIn('prefill_attn_q35_yarn', base)
+        self.assertEqual(sorted(set(names[True, None]) - set(base)), ['q35m_prefill_kvq8'])
+        self.assertEqual(sorted(set(names[False, 4.0]) - set(base)), ['prefill_attn_q35_yarn'])
+        self.assertNotIn('prefill_attn_q35', names[False, 4.0])   # (the YaRN object replaces the native one)
+        self.assertEqual(sorted(set(names[True, 4.0]) - set(base)), ['prefill_attn_q35_yarn', 'q35m_prefill_kvq8'])
+        want = [f16, q8] + [n for v in names.values() for n in v]
+        self.require_runtime(want)
+        for name in (f16, q8, 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn'):
+            without = tuple(n for n in kernels.RUNTIME_SET if n != name)
+            with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                self.require_runtime(want)
 
     def test_lazy_sampler_and_guard_are_included(self):
         # Exercise the lazy sampler module selection, without allocating candidates.

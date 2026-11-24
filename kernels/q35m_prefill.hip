@@ -8,6 +8,9 @@
 //                    qwen35moe module, kernels/k3_q35_ops.h op_router_shexp), one token per workgroup
 //   q3p_group        built here with Q3P_GROUP_Y9: a third index, each (token, slot) pair's row in the 9-slot down buffer
 //   q35mp_emb_bf16   the BF16 embedding rows (kernels/k3_q35_ops.h own_op_emb_bf16's statements)
+//   q35mp_attn       the chunk's attention tiles (q35_prefill.hip's q35p_attn_wm, which this object leaves out:
+//                    Q35P_NO_ATTN_WM, reworked after rocKE's prefill pipeline: kernels/prefill_attn_g8.h; q35mp_attn_q8
+//                    in the Q8 object)
 //
 // The feed-forward's combine is q3p_add_rms16 over 9 slots: the 8 routed experts' down rows, then the shared expert's
 // in slot 8, weighted by q35mp_router_sh's [n][9] weights (the decode's own_op_add_rms16 9-slot form: fma in slot order).
@@ -15,6 +18,7 @@
 // object, so q3m_prefill's and q35_prefill's code stays unchanged; likewise q3p_group's third index (Q3P_GROUP_Y9)
 #define Q3P_ADD_RMS16_MIX
 #define Q3P_GROUP_Y9
+#define Q35P_NO_ATTN_WM
 #include "q35_prefill.hip"
 
 // ---- q35mp_mm_q2_0: Y[ydst[i]][r] = X[xsrc[i]] . W[e][r] in fp32 ------------------------------------------------------
@@ -202,3 +206,16 @@ extern "C" __global__ void __launch_bounds__(256) q35mp_emb_bf16(const uint16_t 
     float * xr = x + (size_t)t * N;
     for (int i = threadIdx.x; i < N; i += 256) xr[i] = __builtin_bit_cast(float, (uint32_t)row[i] << 16);
 }
+
+// ---- q35mp_attn: the chunk's causal attention as WMMA tiles at head dim 256 (q fp32 in, out fp32): kernels/prefill_attn_g8.h,
+// the 30B's q3mp_attn's source too (head dim 128); q35mp_attn_q8 over Q8_0 rows in the Q8 object (K and q rotated by
+// Hadamard256 on the host, V and the output by Hadamard64)
+#ifdef Q35P_KV_Q8
+#define PA_NAME q35mp_attn_q8
+#else
+#define PA_NAME q35mp_attn
+#endif
+#define PA_D 256
+#define PA_QT float
+#define PA_OT float
+#include "prefill_attn_g8.h"

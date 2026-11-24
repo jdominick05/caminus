@@ -124,11 +124,30 @@ The second checks verify passes on a Q8 cache bitwise against Q8 one-token decod
 None of these has run on a GPU. Still missing after them: model accuracy at depth (KLD against the F16 cache),
 speed, matching prefill, cache park/restore, the GSQ verify objects and two cards.
 
+## Qwen3.6-35B-A3B (one card)
+
+`Moe35Own(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q35_moe_kvq8` (`k3.Q35MOE_KV_Q8_OF`), with the dense
+line's format and rotations above (`kv_format_id` `q8_0-v1:qk-hadamard256:v-hadamard64-v1`; eight query heads per KV
+head). Its batched prefill `Q35MoEPrefill` follows the engine: the rotations run as `prefill_attn_q35`'s `pf_hadamard`
+(the decode op's butterflies), `kernels/q35m_prefill_kvq8.hip` (`kernels/q35_prefill.hip` and `kernels/q35m_prefill.hip` under `Q35P_KV_Q8`) adds the
+append (`q35p_kv_append_q8`: the decode's `own_kv_q8_encode`, one thread per block) and the tiled attention over the rows
+(`q35mp_attn_q8`: each staged value fp16(code x scale), one rounding more than the decode's reader; at F16's speed, 48 TF
+at 30K: docs/dev/yardsticks.md). A
+refused block sets error bit 2 and marks the engine broken (`k3.InvalidKVEncoding`). `caminus serve --kv q8` takes the
+batched prefill in either rope mode (YaRN: `prefill_attn_q35_yarn`, `PF_QK_YARN`: the decode op's table and magnitude
+scale; prefill-then-decode against the float64 YaRN x2 reference 3.61e-4 / 64 of 64, decode-only 4.45e-4).
+
+Gates (RX 7900 XT): `tests/prefill/test_q35m_prefill_ops.py` (the append bitwise the decode module's, the refusals);
+prefill of positions 0 .. 63 then decode of 64 .. 127 against the float64 reference (`tests/prefill/test_q35_prefill.py
+--kv q8`): mean KLD 2.41e-4, top-1 64/64, decode-only on the same rows 2.49e-4, 64/64 (F16: 3.35e-4 / 3.45e-4); chunk
+geometry and prompt-cache stops change no logit and no cache byte; 16,384 tokens from empty in 3.37 s (4,856 tok/s; F16
+3.30 s).
+
 ## Qwen3-30B-A3B (one card)
 
 `Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to
 `k3_q3m_lean`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
-`q3p_qk_rope_q8` and `q3p_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
+`q3p_qk_rope_q8` and `q3mp_attn_q8` from `q3m_prefill_kvq8` write and read the rows, every other kernel stays on
 `q3m_prefill`. Served: `caminus serve --kv q8` (or `caminus start --kv q8`) sets `opt['kv']`, which the registry's
 projection and build read (`Arch.kv_check`, `arch.kv_q8`); both objects are in the installed runtime set. The long-context mode
 (YaRN) picks the Q8 rows by itself on one card where only they hold its context (no `--kv` given), on
@@ -145,7 +164,7 @@ wave's lane holds a head's dims l, l + 32, l + 64, l + 96; the stages h = 1 .. 1
 registers, and every wave of a head computes all four quarters: no LDS and no barrier added (the decode op's 15,748 bytes
 are what eight workgroups per WGP leave room for). The decode op rotates q per head in its RoPE step and the position's
 own fp16-rounded k before its encode; the prefill's `q3p_qk_rope_q8` writes rotated K rows and writes q16 as
-fp16(H fp16(q)), the F16 kernel's q16 rotated (q16 has no other reader), so `q3p_attn_q8` is unchanged and
+fp16(H fp16(q)), the F16 kernel's q16 rotated (q16 has no other reader), so `q3mp_attn_q8` is unchanged and
 rotation-blind. The engine key carries the format id, so the unrotated rows of the first draft (never merged) never
 restore into this engine.
 
@@ -229,8 +248,8 @@ gave logits bit for bit the shipped object's and the same speed (at most 1.2 tok
 gain at depth is the format's (half the KV bytes read per position), not the pins'; at 8 positions Q8 pays its encode,
 rotation and decode with nothing to save yet. The pins were not shipped on the F16 object: it keeps its code.
 
-The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs, `q3p_attn_q8` 226 (F16: 25 and 223), no spills; the rotation left both
-counts as they were.
+The prefill kernels: `q3p_qk_rope_q8` 29 VGPRs, `q3mp_attn_q8` 239 (F16: 25 and 227), no spills; the rotation left the
+rope kernel's count as it was (it was measured on the earlier attention, `q3p_attn_q8` 226 / 223).
 
 Gates (a non-display card first):
 
@@ -260,7 +279,7 @@ four K blocks. The bound is per element: 2 fp16 ulps of the reference plus 1e-5 
 bound plus the output's fp16 rounding. A CPU fp32 emulation of the op's summation order on the test's inputs stays
 within one ulp + 1e-7 x max |V|. Faults injected into it (a neighbouring block's V scale, chunk 1 shifted by a row, one
 V row from its neighbour) fail the bound; a 4e-3 x max |V| bound passed all three. It also runs fixed fp16 edge blocks (+-65,504, exact ties, a scale that rounds to zero, zeros),
-checks `q3p_qk_rope_q8`'s rows and refusal, and `q3p_attn_q8` bit for bit against `q3p_attn` over fp16(decoded rows). The G-model gates score the Q8 run against the fp32 reference with the usual rule against
+checks `q3p_qk_rope_q8`'s rows and refusal, and `q3mp_attn_q8` bit for bit against `q3mp_attn` over fp16(decoded rows). The G-model gates score the Q8 run against the fp32 reference with the usual rule against
 the `--llama` rows given: llama.cpp's q8_0-KV rows (`kv q8_0` in gg_golden's job file, `--llama-kv q8_0`) are the like
 for like bound. `--save-logits` on the F16 run and `--against` on the Q8 run gate the KLD and top-1 agreement between
 the two caches (`tools/gates/kv_against.py`). The bar is the floor rule's shape: our F16 to Q8 mean KLD at most
@@ -290,7 +309,7 @@ that row.
 the one-card Q8 module's two defines. `k3.Q3M_KV_Q8_BASE` maps it to `k3_q3m_lean_tp`, `k3.Q3M_TP_OF` maps
 `k3_q3m_lean_kvq8` to it, so it takes the two-card modules' ops, pairs, push-only check and 128 attention splits, and
 the Q8 modules' error word and byte cache. Its batched prefill `Q3MPrefillTP` runs the one-card Q8 kernels
-(`q3m_prefill_kvq8`'s `q3p_qk_rope_q8` and `q3p_attn_q8`, both of which take the kv head count) at each card's local
+(`q3m_prefill_kvq8`'s `q3p_qk_rope_q8` and `q3mp_attn_q8`, both of which take the kv head count) at each card's local
 shapes; there is no new prefill object. Served: `caminus serve --cards 2 --kv q8`; the registry's `qwen3moe-tp` entry
 takes `opt['kv'] = 'q8'` (`kv_formats`), so its projection, checkpoint slots and build follow it, and the module (with
 `q3m_prefill_kvq8`) is in the installed runtime set.

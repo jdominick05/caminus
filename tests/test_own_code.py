@@ -36,7 +36,7 @@ for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_kvq8.hip', 
             'own_mv_q2_0.hip',                                # (the standalone own Q2_0 tiles: Qwen3.6's experts, the Coder's down)
             'k3_q35_tcap.hip', 'k3_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
             'k3_q35_moe.hip',                                 # (the qwen35moe decode module: the same rule, its Q2_0 tile included)
-            'q35m_prefill.hip', 'prefill_attn_q35.hip', 'prefill_glue_q35.hip',   # (its batched prefill's objects)
+            'q35m_prefill.hip', 'q35m_prefill_kvq8.hip', 'prefill_attn_q35.hip', 'prefill_attn_q35_yarn.hip', 'prefill_glue_q35.hip',   # (its batched prefill's objects)
             'q35_prefill_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
             'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip',
             'kv_codec.hip',    # (staged own Q8 KV codec and cache-specialized dense modules)

@@ -167,7 +167,52 @@ What it says:
 - What the tiles leave on the table, against rocKE's design: one 16-column WMMA tile holds 2 positions x 6 heads (12 of
   16 columns used: GQA packing by absolute position pairs, which keeps the chunk geometry bit-exact); V^T is staged by
   scalar LDS writes; one LDS buffer (two barriers per 32 positions) where rocKE double-buffers and prefetches the next
-  tile into registers; scores exchanged through LDS between the pair. CK's gfx1100 FMHA is not measured.
+  tile into registers; scores exchanged through LDS between the pair. CK's gfx1100 FMHA is not measured. Qwen3.6-35B-A3B's
+  `q35mp_attn` (next section) takes the pipeline items; run at this geometry from its object it is 1.39 / 11.9 / 41.1 ms
+  (37-39 TF, 2.0x these tiles; the 12-of-16 columns stay). The dense line keeps `q35p_attn_wm` until its own gates rerun.
+
+## Prefill attention at depth (Qwen3.6-35B-A3B and Qwen3-30B-A3B geometry)
+
+`benchmarks/q35_prefill_attn.py` (`--heads 16 --kv-heads 2 --module q35m_prefill`, `--kv q8`; `--hd 128 --heads 32
+--kv-heads 4` for the 30B) and `benchmarks/rocke_attn.py --heads 16 --kv-heads 2 --prefill-only` (`--hd 128 --heads 32
+--kv-heads 4`), RX 7900 XT alone, one 2048-row chunk, the tables above's conventions. The 35B: 16 query heads over 2 kv
+heads, head dim 256, 8 query heads per kv head (all 16 WMMA columns used); the 30B: 32 over 4, head dim 128 (`q3mp_attn`;
+`tests/prefill/test_q35_prefill_attn.py --kernel q3m,q3m-q8 --speed`, interleaved against the old `q3p_attn`).
+
+| P0 | 35B before: `q35p_attn_wm` (F16 / Q8) | 35B now: `q35mp_attn` (F16 / Q8) | rocKE `wmma_fmha_fwd_v2` d256 | torch SDPA tiled |
+|---|---|---|---|---|
+| 0 | 1.49 / 1.57 ms (23.0 / 21.9 TF) | 0.80 / 0.78 ms (43.2 / 44.1 TF) | 0.64 ms (53.6 TF) | 1.63 ms (21.0 TF) |
+| 8,192 | 11.95 / 12.45 ms (25.9 / 24.8 TF) | 6.27 / 6.39 ms (49.4 / 48.4 TF) | 5.68 ms (54.4 TF) | 9.07 ms (34.1 TF) |
+| 30,720 | 41.30 / 43.00 ms (25.8 / 24.8 TF) | 20.95 / 22.10 ms (50.8 / 48.2 TF) | 19.60 ms (54.3 TF) | 29.08 ms (36.6 TF) |
+
+| P0 | 30B before: `q3p_attn` (F16 / Q8, 1 << 24 launches) | 30B now: `q3mp_attn` (F16 / Q8, one launch) | rocKE d128 (m128 n32) | torch SDPA tiled |
+|---|---|---|---|---|
+| 0 | 0.96 / 0.95 ms (35.8 / 36.1 TF) | 0.64 / 0.67 ms (53.5 / 51.4 TF) | 0.63 ms (54.9 TF) | 1.16 ms |
+| 8,192 | 6.98 / 7.19 ms (44.3 / 43.0 TF, 2 launches) | 5.11 / 5.33 ms (60.6 / 58.0 TF) | 5.41 ms (57.1 TF) | 6.46 ms |
+| 30,720 | 30.02 / 30.24 ms (35.5 / 35.2 TF, 4 launches) | 17.38 / 18.18 ms (61.3 / 58.6 TF) | 18.62 ms (57.2 TF) | 20.82 ms |
+
+What it says:
+- `q35mp_attn` (kernels/q35m_prefill.hip) is `q35p_attn_wm`'s absolute-position tiles with rocKE's pipeline: the next
+  tile's K / V in registers during the current one, two LDS-only barriers per tile (`__syncthreads` would wait for that
+  prefetch), V^T staged by 4-position runs, each wave reading only its partner's score partial, per-column lazy rescale.
+  1.9-2.0x the old kernel and 0.93x rocKE at 30K (F16), the same bits at every chunk geometry and launch split; 230 / 233
+  VGPRs (F16 / Q8), 0 spills, 53,760 B of LDS. Q8 decodes codes with packed fp16 math (the same bits as fp32
+  conversions; 44.8 -> 48.2 TF at 30K, interleaved).
+- The 35B end to end (prefill from empty, chunk 2048, median of 3, interleaved against the old attention):
+  F16 4,096 positions 787 -> 746 ms (5,203 -> 5,488 tok/s, 1.05x), 16,384 3.73 -> 3.30 s (1.13x), 32,768 9.03 -> 7.46 s
+  (3,630 -> 4,393 tok/s, 1.21x); Q8 4,096 811 -> 768 ms (1.06x), 16,384 3.85 -> 3.37 s (1.14x), 32,768 9.32 -> 7.58 s
+  (3,516 -> 4,322 tok/s, 1.23x). At 32K attention was ~37 % of the prefill, now ~23 %.
+- `q3mp_attn` (kernels/q3m_prefill.hip) is `q35mp_attn`'s source (`kernels/prefill_attn_g8.h`) at head dim 128: each
+  wave holds its own query pair (no partner exchange), 16 positions a workgroup, 64-position tiles (the same 4 + 4
+  staging chunks a thread as the 35B's 32 x 256); 227 / 239 VGPRs (F16 / Q8), 0 spills, 35,840 B of LDS (three
+  workgroups per WGP by both). The old kernel run in one launch is 23.1 ms at 30K: the rest of the gain is the launch
+  split (`q3m.ATTN_TP` 1 << 24 -> 1 << 27, one launch per chunk up to 64K positions): 4 launches of 128 workgroups each
+  left a second, nearly empty round on the XT's 126 resident slots (the new kernel 22.6 ms at 4 launches, 19.0 at 2, 17.3
+  at 1). The slowest launch: 17.4 ms at 30K; 40.7 ms at 131,072 (Q8, two launches of 64 blocks).
+- The 30B end to end (prefill from empty, chunk 2048, median of 3, interleaved against the old attention at its old
+  split, XT): F16 4,096 839 -> 792 ms (4,882 -> 5,175 tok/s, 1.06x), 12,288 3.40 -> 3.01 s (3,618 -> 4,089 tok/s,
+  1.13x); Q8 4,096 850 -> 805 ms (1.06x), 12,288 3.45 -> 3.07 s (1.12x), 24,576 9.76 -> 8.10 s (2,518 -> 3,034 tok/s,
+  1.21x). At 12K (F16, `benchmarks/q3moe_prefill.py --ops`) attention is now 31.8 % of the prefill.
 
 ## Decode attention as its own kernel (qwen35moe geometry)
 
@@ -211,6 +256,119 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
   24,576 (F16) / 20,480 (Q8) on: 131,072 8.83 against 10.83 F16, 7.74 against 10.76 Q8. The switch and its numbers:
   `q35_moe.ATTN_FROM`.
 
+## Prefill GEMMs (Qwen3-30B-A3B and Qwen3.6-35B-A3B, grouped experts)
+
+`benchmarks/q35_prefill_gemm.py GGUF --engine --tokens REF.npz --M 2048`, RX 7900 XT alone. It records every GEMM of one
+real 2048-token chunk of the engine's own prefill: the 30B on `ref32_16384.npz`'s text, the 35B on the same text
+re-encoded (`--tokens-from`). It then times each group of launches by format, shape and role, replaying the recorded
+launches from a HIP graph.
+
+The arms:
+- ours (the grouped expert GEMMs at their real routing);
+- torch fp16 and FlyDSL 0.5.0 fp16 / int8 on dense operands at the group's total M (as if grouping were free);
+- per expert (`/exp`): torch and FlyDSL fp16 once per routed expert at its own M, from the middle layer's routing,
+  padded to 32 for FlyDSL.
+
+Routing at 2048 tokens, top 8 (16,384 pairs a layer):
+
+| | experts | pairs per expert (median / p90 / max) | experts unused | work items a layer | fill |
+|---|---|---|---|---|---|
+| 30B | 128 | 61 / 291 / 1,814 | 11.9 % | 324 | 79 % |
+| 35B | 256 | 23 / 156 / 1,378 | 10.7 % | 404 | 63 % |
+
+The 30B before this change, ms per chunk (TF):
+
+| Group (R x K) | launches | ours | torch | FlyDSL fp16 | FlyDSL int8 | torch / exp | FlyDSL / exp |
+|---|---|---|---|---|---|---|---|
+| attn_q Q4_K 4096 x 2048 | 48 | 34.98 (47.1) | 33.66 | 24.07 (68.5) | 22.72 | | |
+| attn_k Q4_K 512 x 2048 | 72 | 9.43 (32.8) | 9.81 | 6.50 (47.6) | 5.96 | | |
+| attn_v Q6_K 512 x 2048 | 24 | 3.60 (28.6) | 3.33 | 2.16 (47.7) | 1.98 | | |
+| attn_output Q4_K 2048 x 4096 | 47 | 35.58 (45.4) | 41.91 | 25.25 (63.9) | 22.75 | | |
+| gate + up experts Q4_K 768 x 2048 | 94 | 129.48 (37.4) | 100.43 | 68.69 (70.5) | 65.54 | 246.37 | 244.27 |
+| down experts Q6_K 2048 x 768 | 23 | 35.91 (33.0) | 18.81 | 16.69 (71.0) | 16.15 | 43.46 | 45.98 |
+| down experts Q4_K 2048 x 768 | 24 | 34.05 (36.3) | 19.64 | 17.42 (71.0) | 16.85 | 45.29 | 47.97 |
+| **all GEMMs of a chunk** | 332 | **283.0** | 227.6 | 160.8 | 151.9 | 335.1 | 338.2 |
+
+The 35B, ms per chunk:
+
+| Group | launches | ours | torch | FlyDSL fp16 | FlyDSL int8 |
+|---|---|---|---|---|---|
+| Q8_0 8192 x 2048 | 39 | 51.31 (52.2) | 46.75 | 36.80 (72.8) | 35.49 |
+| Q8_0 4096 x 2048 | 30 | 20.80 | 20.71 | 15.06 | 14.23 |
+| Q8_0 2048 x 4096 | 39 | 28.82 | 34.89 | 21.09 | 18.88 |
+| Q8_0 512 x 2048 | 98 | 13.10 | 13.27 | 8.88 | 8.11 |
+| Q8_0 2048 x 512 | 39 | 4.41 | 5.97 | 3.20 | 2.89 |
+| gate / up experts Q2_0 512 x 2048 | 78 | 86.74 (30.9) | 58.27 | 39.27 (68.3) | 37.00 |
+| down experts Q2_0 2048 x 512 | 39 | 45.24 (29.6) | 26.72 | 19.47 (68.8) | 18.45 |
+| **all GEMMs of a chunk** | 362 | **250.4** | 206.6 | 143.8 | 135.1 |
+
+Per expert, the 35B's experts take 367.7 ms (torch) and 396.5 ms (FlyDSL).
+
+What it says:
+- Our grouped expert GEMMs already beat a dense GEMM run once per expert, torch's or FlyDSL's (30B 283 vs 335 ms, 35B
+  250 vs 368 ms). Most experts get 20-60 tokens, too few for a dense tile.
+- The bar is FlyDSL at the aggregate M: 1.76x ours on the 30B and 1.74x on the 35B. The experts are where ours trails
+  most: 1.9-2.2x on the 30B's down GEMMs, 2.2-2.3x on the 35B's Q2_0.
+
+The 30B's wide tiles (`kernels/q3m_prefill_mm.hip`). Every step was measured interleaved against the one before, every
+output bitwise:
+
+| Step | GEMMs per chunk |
+|---|---|
+| narrow tiles; gate, up, swiglu apart (the swiglu launch counted) | 292.1 ms |
+| the dense line's wide tile (two 16-row tiles per wave, 256 rows a workgroup) on every Q4_K / Q6_K GEMM, dense and grouped; the experts' gate and up in one launch with the swiglu epilogue (`q3p_mm_q4k_gu`) | 265.4 ms |
+| a partial item's empty 16-token tiles skip their WMMAs | 256.5 ms |
+| Q4_K weights one chunk ahead in a two-chunk register ring (48 registers where the whole block took 72) | 253.6 ms |
+| the three kernels in their own object under LLVM's max-ilp scheduler (`q3m_prefill` keeps its code: its `q3p_mm_q4k` and attention spill under it) | **243.4 ms** |
+
+Registers (VGPRs, no spills; LDS): `q3p_mm_q4k_w` and `q3p_mm_q4k_gu` 239, 36,100 B; `q3p_mm_q6k_w` 253, 33,792 B (the
+narrow `q3p_mm_q4k` 191, `q3p_mm_q6k` 154).
+
+Tried and dropped:
+- weight prefetch of the next block's half (13-15 spills);
+- an A-operand ping-pong across token tiles and k-steps (48 spills by default, 51 under max-ilp);
+- max-ilp on the whole `q3m_prefill` object (`q3p_mm_q4k` 57 spills, `q3mp_attn` 198);
+- the max-memory-clause scheduler (no change);
+- the 30B's body on the dense line's objects (Swift's GEMMs 0.8 % slower: the dense line keeps its own tiles).
+
+After, per group: attn_q 32.91 ms (50.1 TF), attn_k 8.69, attn_v 3.43, attn_output 34.30, gate | up with swiglu 101.30
+(47.8 TF; 139.00 before), down Q6_K 34.03, down Q4_K 28.75 (43.0 TF).
+
+Still behind FlyDSL fp16 at the aggregate M: 1.51x per chunk.
+
+| Group | how far behind |
+|---|---|
+| attn_q, attn_k, attn_output | 1.34-1.37x |
+| attn_v | 1.59x |
+| gate \| up | 1.47x (with its swiglu) |
+| down Q4_K | 1.65x |
+| down Q6_K | 2.04x |
+
+End to end (`benchmarks/q3moe_prefill.py --chunk 2048 --ab`: prefill from empty, wide and narrow interleaved, median of 3,
+the last layer's KV rows bitwise equal):
+
+| Length | KV | wide | narrow | speed-up |
+|---|---|---|---|---|
+| 4,096 | F16 | 5,893 tok/s | 5,182 tok/s | 1.14x |
+| 12,288 | F16 | 4,517 tok/s | 4,090 tok/s | 1.10x |
+| 24,576 | Q8 | 3,259 tok/s | 3,031 tok/s | 1.08x |
+
+Short prompts, the same way:
+
+| Length | KV | wide | narrow | speed-up |
+|---|---|---|---|---|
+| 128 | F16 | 2,480 tok/s | 1,719 tok/s | 1.44x |
+| 512 | F16 | 5,009 tok/s | 3,876 tok/s | 1.29x |
+| 1,024 | F16 | 5,846 tok/s | 4,914 tok/s | 1.19x |
+
+A dense GEMM goes wide only from half the card's compute units in workgroups (`q3m_ops.Ops.wide_min_wg`; 42 on the
+XT). At 512 tokens the k / v projections have 16 wide workgroups and ran 1.6-1.8x slower wide (attn_k 4.72 vs 3.01 ms
+a chunk); attn_output's 64 ran faster (10.58 vs 11.51). With the rule, a 512-token chunk's GEMMs take 82.0 ms against
+110.8 narrow.
+
+At 12K F16 (`--ops`), attention is 35.1 % of the prefill and the fused gate | up 22.0 %. The 35B's GEMMs are unchanged:
+its Q8_0 and Q2_0 kernels are not touched. A wide grouped Q2_0 tile is next.
+
 ## Summary: where the outside kernels say we stand (XT)
 
 | Op | ours | best yardstick measured | gap |
@@ -220,4 +378,8 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
 | Decode attention, qwen35moe, own kernel (`dec_q35m_attn`), 32K F16 warm | 81.9 us / layer (split pair: 153.8 us) | rocKE split-KV decode: 61.9 us | 1.32x (128K: 389.0 vs 385 us, 1.01x) |
 | Verify attention (T 4), split pair, 32K | 1.29 ms / layer with the packed PART (1.52 ms before; T 1: 0.48 ms) | rocKE, GQA-packed: 0.22 ms | 5.9x (each row's arithmetic is still its own: decode's bits) |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
+| Prefill GEMMs, 30B chunk of 2048 (grouped experts) | 243.4 ms, swiglu inside (283.0 ms before, 292.1 with its swiglu launch) | FlyDSL fp16 at the aggregate M: 160.8 ms | 1.51x (1.76x before) |
+| Prefill GEMMs, 35B chunk of 2048 (grouped experts) | 250.4 ms | FlyDSL fp16 at the aggregate M: 143.8 ms | 1.74x |
 | Prefill attention, chunk at 30K | 79.7 ms (964 ms before the tiles) | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.6 ms) | 2.8x (34x before) |
+| Prefill attention, 35B chunk at 30K | 20.95 ms (`q35mp_attn`; 41.3 ms before) | rocKE WMMA prefill: 19.60 ms | 1.07x (2.1x before) |
+| Prefill attention, 30B chunk at 30K | 17.38 ms (`q3mp_attn`; 30.0 ms before) | rocKE d128: 18.62 ms | 0.93x (1.6x before) |

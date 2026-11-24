@@ -30,7 +30,7 @@ exchange each change a summation order); G-model gated as the one-card prefill (
 prefill then two-card decode against the float64 / fp32 references, llama.cpp as the bound. Served as
 the prompt path of `caminus serve --cards 2` for Qwen3-30B-A3B (caminus.arch.Q3MoETP). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here).
 A Q8 KV engine (Q3MoETP(q8=True), caminus serve --cards 2 --kv q8): the same chunk, each card's rows written and read as Q8_0 blocks by the
-one-card Q8 kernels at that card's local shapes (q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: both take the kv head
+one-card Q8 kernels at that card's local shapes (q3m_prefill_kvq8's q3p_qk_rope_q8 / q3mp_attn_q8: both take the kv head
 count, so its 2 kv heads and their 16 query heads; the one-card engine's format, q3moe_one.KV_FORMAT_Q8). Each card has
 its own KV error word (the layout's kverr): the settle reads both before the routing flags, and a refused block raises
 caminus.errors.InvalidKVEncoding with the engine marked broken."""
@@ -146,7 +146,7 @@ class Q3MPrefillTP(PrefillDriver):
         if getattr(m, 'local_only', False): raise ValueError('Q3MPrefillTP: a local_only engine is refused (its numbers are not the model\'s)')
         if getattr(m, 'broken', None): raise ValueError(f'Q3MPrefillTP: the engine is broken ({m.broken})')
         self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache format: the Q8 row and attention kernels, never F16 ones)
-        if m.nh != 8 * m.nkv or m.hd != 128: raise ValueError(f'Q3MPrefillTP: {m.nh} / {m.nkv} heads of {m.hd} (8 query heads per kv head of 128: q3p_attn)')
+        if m.nh != 8 * m.nkv or m.hd != 128: raise ValueError(f'Q3MPrefillTP: {m.nh} / {m.nkv} heads of {m.hd} (8 query heads per kv head of 128: q3mp_attn)')
         self.mode, self.micro, self.min_piece = mode, int(micro), int(min_piece)
         self.devs = [torch.device(f'cuda:{d}') for d in m.devs]
         self.crossover = CROSSOVER if crossover is None else int(crossover)
@@ -165,7 +165,9 @@ class Q3MPrefillTP(PrefillDriver):
             dev = self.devs[c]
             f32, f16, i32 = layout_tp(self.sh[c], T)
             with torch.cuda.device(dev):
-                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8, yarn=self.yarn)); self.S.append(SlotSum(dev))
+                # (wide False: the narrow tiles; the wide ones and the fused gate | up keep each row's bits but have not run
+                # on two cards)
+                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8, yarn=self.yarn, wide=False)); self.S.append(SlotSum(dev))
                 b = {}
                 for n, k in f32.items(): b[n] = torch.zeros(k, dtype=torch.float32, device=dev)
                 for n, k in f16.items(): b[n] = torch.zeros(k, dtype=torch.float16, device=dev)

@@ -181,11 +181,12 @@ toks = list(range(1, 41))
 seen = {}
 for name_, p_ in (('f16', pf), ('q8', pq), ('native', pn)):
     LOG.clear(); p_._chunk(toks, 0, 40)
-    seen[name_] = ({(e[0], e[1]) for e in LOG if e[1].startswith('q3p_qk_rope')}, {(e[0], e[1]) for e in LOG if e[1].startswith('q3p_attn')},
-                   {e[0] for e in LOG if not e[1].startswith(('q3p_qk_rope', 'q3p_attn'))})
-check(seen['f16'] == ({('q3m_prefill_yarn', 'q3p_qk_rope')}, {('q3m_prefill', 'q3p_attn')}, {'q3m_prefill'})
-      and seen['q8'] == ({('q3m_prefill_kvq8_yarn', 'q3p_qk_rope_q8')}, {('q3m_prefill_kvq8', 'q3p_attn_q8')}, {'q3m_prefill'})
-      and seen['native'] == ({('q3m_prefill', 'q3p_qk_rope')}, {('q3m_prefill', 'q3p_attn')}, {'q3m_prefill'}),
+    seen[name_] = ({(e[0], e[1]) for e in LOG if e[1].startswith('q3p_qk_rope')}, {(e[0], e[1]) for e in LOG if e[1].startswith('q3mp_attn')},
+                   {e[0] for e in LOG if not e[1].startswith(('q3p_qk_rope', 'q3mp_attn'))})
+rest = {'q3m_prefill', q3m_ops.WIDE_MODULE}   # (the glue and narrow GEMMs; the wide GEMM tiles and fused gate | up)
+check(seen['f16'] == ({('q3m_prefill_yarn', 'q3p_qk_rope')}, {('q3m_prefill', 'q3mp_attn')}, rest)
+      and seen['q8'] == ({('q3m_prefill_kvq8_yarn', 'q3p_qk_rope_q8')}, {('q3m_prefill_kvq8', 'q3mp_attn_q8')}, rest)
+      and seen['native'] == ({('q3m_prefill', 'q3p_qk_rope')}, {('q3m_prefill', 'q3mp_attn')}, rest),
       'prefill: q3p_qk_rope from q3m_prefill_yarn (Q8: q3p_qk_rope_q8 from q3m_prefill_kvq8_yarn), the attention and every other '
       'kernel on their own objects; the native prefill unchanged')
 check(pf.numerics().get('rope') == Y.key() and pq.numerics().get('rope') == Y.key() and 'rope' not in pn.numerics()
