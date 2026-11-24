@@ -9,9 +9,10 @@ tensor stays in host memory; nothing is launched).
     op numbers are k3's
   - the options: gu=False has no fused segment, debug_layers builds a prefix, the projection grows by the KV row
   - refusals: the new ops on another module, a long add-and-norm row with weights, the q8 KV cache on this module
+  - OP_PREFETCH (the qwen35moe modules): one segment over its ranges, 128-byte lines from each rounded-down base
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q35_tape_cpu.py --scratch DIR"""
-import argparse, contextlib, os, re, sys, types
+import argparse, contextlib, ctypes, os, re, sys, types
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'python')); sys.path.insert(0, HERE)
 import numpy as np
@@ -106,7 +107,7 @@ dev_ops = set(re.findall(r'sg\.op == (OP_[A-Z0-9_]+)', re.sub(SPB, lambda mm: mm
 host_ops = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35S_OPS and k != 'OP_NOP'}
 check(dev_ops == host_ops and tp_ops == {'OP_XCHG'}, f'kernels/k3_q35_ops.h dispatches k3.Q35S_OPS ({len(dev_ops)} ops beside the core\'s no-op), and OP_XCHG under K3_TP')
 moe_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35MOE_OPS} - {'OP_NOP'}
-check(moe_ops <= moe_host and (moe_ops - host_ops) == (moe_host - host_ops) == {'OP_ROUTER'},
+check(moe_ops <= moe_host and (moe_ops - host_ops) == (moe_host - host_ops) == {'OP_ROUTER', 'OP_PREFETCH'},
       f'under K3_Q35_MOE: the qwen35moe module\'s extra ops ({sorted(moe_ops - host_ops)}), all in k3.Q35MOE_OPS and none in k3.Q35S_OPS')
 df_host = {k for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int) and v in k3.Q35DF_OPS} - {'OP_NOP'}
 check(df_ops == {'OP_DF_CONV', 'OP_DF_TOPK', 'OP_DF_SELECT', 'OP_KV_APPEND', 'OP_ATTN_DEC'} and df_ops <= df_host,
@@ -121,7 +122,8 @@ check(guard is not None and guard.group(1).strip() == '!defined(K3_Q35_DF)',
       'the MTP module (K3_Q35_MTP) has it, as k3.Q35M_OPS says')
 enum = dict(re.findall(r'(OP_[A-Z0-9_]+) = (\d+)', src))
 check({k: int(v) for k, v in enum.items()} == {'OP_OWN_MV16': k3.OP_OWN_MV16, 'OP_GDN_NORM16': k3.OP_GDN_NORM16, 'OP_GATE_MUL16': k3.OP_GATE_MUL16,
-                                               'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX, 'OP_ATTN_PART': k3.OP_ATTN_PART, 'OP_ATTN_COMB': k3.OP_ATTN_COMB},
+                                               'OP_OWN_ARGMAX': k3.OP_OWN_ARGMAX, 'OP_ATTN_PART': k3.OP_ATTN_PART, 'OP_ATTN_COMB': k3.OP_ATTN_COMB,
+                                               'OP_PREFETCH': k3.OP_PREFETCH},
       f'the header\'s new op numbers are k3\'s ({enum})')
 
 # ---- options --------------------------------------------------------------------------------------------------------------
@@ -158,6 +160,29 @@ check(refused(lambda: e_m.own_matvec_1rt(torch.zeros(8 * 144, dtype=torch.uint8)
       refused(lambda: e_s.own_emb(torch.zeros(64 * 144, dtype=torch.uint8), 'Q4_K', 64, 256, torch.zeros(1, dtype=torch.int64), B(256), key=True)) and
       refused(lambda: e_s.own_add_rms16(B(256), B(256), B(256), B(512, torch.float16), 1e-6, h16_stride=512)),
       'the drafter module refuses Q4_K; the Swift module refuses Q4_0, the argmax, the key embedding and the h16 stride')
+# the qwen35moe module's experts tile at 4 rows per wave: the host's table matches the module file, and the fused gate | up
+# refuses tasks whose gate and up rows would fall to different waves (16 rows there: NaN logits, a race on the gate sums)
+rw_src = int(re.search(r'^#define OWN_K3_RW (\d+)', open(os.path.join(HERE, '..', '..', 'kernels', 'k3_q35_moe.hip')).read(), re.M).group(1))
+e_q = k3.Engine(module='k3_q35_moe'); q2 = lambda r, kk: torch.zeros(r * kk // 64 * 18 + 64, dtype=torch.uint8)
+ids8 = torch.zeros(8, dtype=torch.int32)
+def gu_ok(rpt):   # (past the host's argument checks: a CPU stand-in then stops at the device asserts)
+    try: e_q.own_matvec_1rt(q2(1024, 2048), 'Q2_0', 512, 2048, B(2048, torch.float16), B(8 * 512, torch.float16), ids=ids8,
+                            total_rows=1024, up=q2(1024, 2048), rows_per_task=rpt)
+    except ValueError: return False
+    except AssertionError: return True
+    return True
+check(rw_src == k3.OWN_K3_RW_OF['k3_q35_moe'] == 4 and all(k3.OWN_K3_RW_OF.get(m) == 4 for m in k3.Q35MOE_MODULES)
+      and gu_ok(32) and gu_ok(64) and not gu_ok(16) and not gu_ok(48),
+      f'the qwen35moe modules: OWN_K3_RW {rw_src} (k3.OWN_K3_RW_OF), the fused gate | up at 32 / 64 rows per task, refused at 16 / 48')
+# OP_PREFETCH: one segment over every range, its 128-byte lines from each base rounded down; the qwen35moe modules only
+pw = [B(1000, torch.uint8), B(64)]
+pf = e_q.prefetch(pw, 16, threads=16, dep=3); sg = e_q.segs[pf]
+rec = [int(v) for v in (ctypes.c_int64 * 4).from_address(sg.W)]
+lines = lambda w: (w.data_ptr() + w.numel() * w.element_size() - (w.data_ptr() & ~127) + 127) // 128
+check(sg.op == k3.OP_PREFETCH and (sg.ntask, sg.dep, sg.rows_per_task, sg.K) == (16, 3, 16, 2)
+      and rec == [pw[0].data_ptr() & ~127, lines(pw[0]), pw[1].data_ptr() & ~127, lines(pw[1])] and sg.N == rec[1] + rec[3]
+      and e_q.prefetch([B(0)], 16) is None and refused(lambda: e_s.prefetch(pw, 16)),
+      f'OP_PREFETCH: one segment, 16 tasks x 16 threads over {sg.N} lines of two ranges; nothing for no bytes; the dense module refuses it')
 e_m.own_matvec_1rt(q4(8, 256), 'Q4_0', 8, 256, B(256, torch.float16), B(8)); e_m.own_argmax(B(300), 300, torch.zeros(1, dtype=torch.int64))
 e_m.build()
 check(set(e_m.inventory()) == {('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_ARGMAX', '-')} and not e_m.unsupported(), 'the drafter module builds a Q4_0 matvec and the argmax')

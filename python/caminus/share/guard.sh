@@ -160,7 +160,13 @@ while kill -0 $P 2>/dev/null; do
   sleep 1
 done
 wait $P; rc=$?
-[ -e "$STOP" ] && [ -n "$(faults)" ] && rc=99
+# once more after the run: a fault that ends the process (a HIP illegal address returns at once and the program exits)
+# lands between two polls of the loop above, and the kernel log may record it a moment after the exit
+sleep 1; F=$(faults | head -3)
+if [ -n "$F" ]; then
+    grep -qxF "$(echo "$F" | head -1)" "$STOP" 2>/dev/null || { echo "$F" >> "$STOP"; echo "GPU FAULT: $F -- seen as the run ended; STOP all GPU work, do not re-run, report to the lead." | tee -a "$LOG"; }
+    rc=99
+fi
 peaks=; for ((i = 0; i < ${#CARDS[@]}; i++)); do peaks+=" peak ${LABELS[i]} ${PEAK[i]} MiB"; done
 echo "rc=$rc wall=$(echo "$(date +%s.%N) - $t0" | bc) s$peaks min avail ${mina} MiB"
 exit $rc
