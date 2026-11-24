@@ -10,7 +10,7 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
             attn_gate (GEMM), the recurrence (the decode's state in place), the output norm with the SiLU gate as fp16,
             ssm_out (GEMM)
   attention attn_q / k / v (GEMMs); k norm + RoPE, the f16 KV append, q norm + RoPE, the attention over positions
-            0 .. pos (q35p_attn_wm: WMMA tiles; 8 query heads per kv head, head dim 256), the output gate as fp16,
+            0 .. pos (q35mp_attn: WMMA tiles; 8 query heads per kv head, head dim 256), the output gate as fp16,
             attn_output (GEMM)
   h, h16 = add_rms16(x += block, post_attention_norm)
   MoE       router logits (F32 [256], pf_f32_mv_k2048) and the shared expert's gate logit (F32 [1]); the top 8 with the
@@ -51,8 +51,12 @@ CROSSOVER = q35own.CROSSOVER
 class Ops(q35own.Ops):
     """kernels/q35m_prefill.hip's launchers: q35_prefill's (included as they are) + the MoE line's own"""
 
+    # the tiled attention: q35mp_attn (kernels/q35m_prefill.hip: rocKE's gfx11 pipeline on q35p_attn_wm's absolute-position
+    # tiles; attn_wm's contract), q35mp_attn_q8 from the Q8 object
+    WM_KERNEL = ('q35mp_attn', 'q35mp_attn_q8')
+
     def __init__(self, dev, module=MODULE, q8=False):
-        """q8: the KV cache is Q8_0 rows (kernels/own_kv_codec.h): kv_append_q8 and attn_wm's Q8 form run KVQ8_MODULE's
+        """q8: the KV cache is Q8_0 rows (kernels/own_kv_codec.h): kv_append_q8 and attn_wm's Q8 kernel run KVQ8_MODULE's
         kernels, every other kernel stays on `module`"""
         super().__init__(dev, module)
         self.q8 = bool(q8)
