@@ -35,6 +35,7 @@ PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'pref
 # tests/packaging/test_runtime_kernels.py checks the real host selections against
 # this list without a GPU. Adding a serving module requires extending both.
 Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq',
+          'q3m_prefill_mm',   # (the one-card prefill's wide GEMM tiles: caminus.prefill.q3m_ops.WIDE_MODULE)
           # its two-card serve (caminus serve --cards 2: engine/q3moe_tp.py's decode module, prefill/q3m_tp.py's slot sum;
           # the exchange's add is prefill_tp, in PREFILL)
           'k3_q3m_lean_tp', 'q3m_prefill_tp',

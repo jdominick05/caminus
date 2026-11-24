@@ -163,9 +163,12 @@ class Q3MPrefill(PrefillDriver):
             O.router(h, L['router'], E, D, self.logits, n)
             O.topk(self.logits, E, k, ROUTER_FLOOR, ids, wts, self.err, n)
             O.group(ids, P, k, E, xs, yd, self.items, self.nitems, self.err)
-            O.mm(L['ffn_gate_exps'], h16, D, g, ff, work=work_gu)
-            O.mm(L['ffn_up_exps'], h16, D, u, ff, work=work_gu)
-            O.swiglu(g, u, a16, P * ff)
+            if O.gu and L['ffn_gate_exps'][0] == L['ffn_up_exps'][0] == 'Q4_K':
+                O.mm_gu(L['ffn_gate_exps'], L['ffn_up_exps'], h16, D, a16, ff, work_gu)
+            else:
+                O.mm(L['ffn_gate_exps'], h16, D, g, ff, work=work_gu)
+                O.mm(L['ffn_up_exps'], h16, D, u, ff, work=work_gu)
+                O.swiglu(g, u, a16, P * ff)
             O.mm(L['ffn_down_exps'], a16, ff, dn, D, work=work_d)
 
     def check_flags(self, what='prefill'):

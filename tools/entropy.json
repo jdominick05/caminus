@@ -36,7 +36,6 @@
   "tests/engine/test_q35_nonfinite.py",
   "tests/engine/test_qsa_ops.py",
   "tests/io/test_ggufio.py",
-  "tests/prefill/test_q3m_ops.py",
   "tests/train/test_gdn_layer.py",
   "tools/eval/q3m_dflash_feats.py"
  ],

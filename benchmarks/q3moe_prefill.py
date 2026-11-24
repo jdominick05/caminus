@@ -7,6 +7,8 @@ local (local: no exchange, each card's own partials: the compute floor, not the 
 per length in turn (interleaved), so the exchange's exposed cost is overlap or serial minus local in the same process.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops] [--prefill-module M]
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 [--modes overlap,serial,local] [--micro 2]
+--ab (one card): every round also on the narrow tiles (Ops.wide / gu False), interleaved, both arms' medians printed and
+the last layer's KV rows of the last round compared bitwise (RESULT FAIL if they differ).
 --kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True); with --cards 2 Q3MoETP(q8=True) and
 Q3MPrefillTP's Q8 path); runs alternated with an F16 run for the A/B (both caches do not fit at depth)."""
 import argparse, collections, os, sys, time
@@ -22,6 +24,8 @@ ap.add_argument('--prefill-module', default=None, help='the prefill code object 
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--modes', default='overlap')
 ap.add_argument('--micro', type=int, default=None); ap.add_argument('--min-piece', type=int, default=None)
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
+ap.add_argument('--ab', action='store_true', help='one card: each round also on the narrow tiles (Ops.wide / gu False: the '
+                'q3m_prefill_mm wide tiles and fused gate | up off), interleaved; the last layer\'s KV rows of both arms bitwise')
 A = ap.parse_args()
 Ls = [int(x) for x in A.lengths.split(',')]
 if A.cards == 2:
@@ -57,31 +61,47 @@ eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8')
 pf = Q3MPrefill(eng, chunk=A.chunk, module=A.prefill_module)
 print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
 g = np.random.default_rng(0)
+arms = (True, False) if A.ab else (pf.ops.wide,)
+bad = False
+if A.ab and not pf.ops.wide: raise SystemExit(f'--ab: the prefill object {pf.ops.module} has no wide tiles')
 for L in Ls:
     toks = g.integers(0, 151000, L).tolist()
-    ts = []
+    ts, last = {a: [] for a in arms}, {}
     for r in range(A.rounds + 1):
-        eng.reset(); torch.cuda.synchronize(); t0 = time.perf_counter()
-        pf.run(toks, 0, 0, L); torch.cuda.synchronize(); ts.append(time.perf_counter() - t0)
-    s = float(np.median(ts[1:]))
-    print(f'  L {L:6d}: {s * 1e3:9.1f} ms = {L / s:7.0f} tok/s prefill (rounds {min(ts[1:]) * 1e3:.1f} .. {max(ts[1:]) * 1e3:.1f})', flush=True)
+        for a in arms:
+            pf.ops.wide = pf.ops.gu = a
+            eng.reset(); torch.cuda.synchronize(); t0 = time.perf_counter()
+            pf.run(toks, 0, 0, L); torch.cuda.synchronize(); ts[a].append(time.perf_counter() - t0)
+            if A.ab and r == A.rounds: last[a] = eng.L[-1]['cache'].cpu()   # (host memory: the last layer's rows)
+    for a in arms:
+        s = float(np.median(ts[a][1:]))
+        print(f'  L {L:6d}' + ((' wide  ' if a else ' narrow') if A.ab else '') + f': {s * 1e3:9.1f} ms = {L / s:7.0f} tok/s prefill '
+              f'(rounds {min(ts[a][1:]) * 1e3:.1f} .. {max(ts[a][1:]) * 1e3:.1f})', flush=True)
+    if A.ab:
+        same = torch.equal(last[True], last[False])
+        print(f'  L {L:6d}: the last layer\'s KV rows {"bitwise equal" if same else "DIFFER"} (wide vs narrow)', flush=True)
+        if not same: bad = True
+    pf.ops.wide = pf.ops.gu = arms[0]
     if A.ops:
         acc = collections.defaultdict(float); evs = []
         O = pf.ops
-        for name in ('mm', 'emb', 'add_rms16', 'router', 'topk', 'group', 'swiglu', 'qk_rope', 'attn'):
+        for name in ('mm', 'mm_gu', 'emb', 'add_rms16', 'router', 'topk', 'group', 'swiglu', 'qk_rope', 'attn'):
             f = getattr(O, name)
             def wrap(*a, _f=f, _n=name, **kw):
                 key = _n
                 if _n == 'mm':
                     W = a[0]; key = f'mm {W[0]} {W[1]}x{W[2]}' + (' experts' if 'work' in kw else '')
+                elif _n == 'mm_gu':
+                    W = a[0]; key = f'mm_gu {W[0]} 2x{W[1]}x{W[2]} experts'
                 e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                 e0.record(); _f(*a, **kw); e1.record(); evs.append((key, e0, e1))
             setattr(O, name, wrap)
         eng.reset(); pf.run(toks, 0, 0, L); torch.cuda.synchronize()
         for k, e0, e1 in evs: acc[k] += e0.elapsed_time(e1)
-        for name in ('mm', 'emb', 'add_rms16', 'router', 'topk', 'group', 'swiglu', 'qk_rope', 'attn'):
+        for name in ('mm', 'mm_gu', 'emb', 'add_rms16', 'router', 'topk', 'group', 'swiglu', 'qk_rope', 'attn'):
             delattr(O, name)
         tot = sum(acc.values())
         for k, v in sorted(acc.items(), key=lambda kv: -kv[1]):
             print(f'      {k:34s} {v:9.2f} ms  {100 * v / tot:5.1f} %', flush=True)
-print('RESULT DONE')
+print('RESULT FAIL (the arms\' KV rows differ)' if bad else 'RESULT DONE')
+sys.exit(1 if bad else 0)
