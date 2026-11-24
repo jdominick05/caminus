@@ -85,6 +85,8 @@ print(f'{torch.cuda.get_device_name(0)} | {KV} cache | pair on {MOD} (grid {k3.r
       f'batch {BATCH}, median of {REPS} rounds, interleaved', flush=True)
 
 
+FILL_MIB = 3 * 3072 * 3072 * 4 / 2 ** 20                           # (108 MiB: projected before it is allocated)
+capacity.check([0], [FILL_MIB], 'attn_bench --new filler')
 FILL = [torch.randn(3072, 3072, device='cuda') for _ in range(3)]   # (a ~2-5 ms matmul holds the stream while the host queues)
 
 
@@ -110,7 +112,7 @@ for P in CTX:
             c = torch.randint(0, 256, (nb,), dtype=torch.uint8, device='cuda')
             c.view(-1, 34)[:, :2] = torch.tensor([0.01], dtype=torch.float16).view(torch.uint8).to('cuda')
         else:
-            c = torch.randn(nb // 2, device='cuda').to(torch.float16)
+            c = torch.empty(nb // 2, dtype=torch.float16, device='cuda').normal_()   # (in place: no fp32 temporary)
         caches.append(c)
     q = torch.randn(H * D, device='cuda'); out = torch.zeros(H * D, device='cuda'); pos = torch.full((1,), P - 1, dtype=torch.int32, device='cuda')
     pairs = [pair(c, q, out, pos, P) for c in caches]
