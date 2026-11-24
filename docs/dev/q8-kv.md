@@ -133,7 +133,8 @@ head). Its batched prefill `Q35MoEPrefill` follows the engine: the rotations run
 append (`q35p_kv_append_q8`: the decode's `own_kv_q8_encode`, one thread per block) and the tiled attention over the rows
 (`q35p_attn_wm_q8`: each staged block decoded and rounded to fp16, one rounding more than the decode's reader). A
 refused block sets error bit 2 and marks the engine broken (`k3.InvalidKVEncoding`). `caminus serve --kv q8` takes the
-batched prefill in the native rope; the YaRN mode still runs K3 passes.
+batched prefill in either rope mode (YaRN: `prefill_attn_q35_yarn`, `PF_QK_YARN`: the decode op's table and magnitude
+scale; prefill-then-decode against the float64 YaRN x2 reference 3.61e-4 / 64 of 64, decode-only 4.45e-4).
 
 Gates (RX 7900 XT): `tests/prefill/test_q35m_prefill_ops.py` (the append bitwise the decode module's, the refusals);
 prefill of positions 0 .. 63 then decode of 64 .. 127 against the float64 reference: mean KLD 2.34e-4, top-1 64/64,

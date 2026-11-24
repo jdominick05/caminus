@@ -50,9 +50,10 @@ DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35
                'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash')   # paused plain 27B: packaging does not unpause the catalog
 # The two-card verify objects (*_tp_ver) serve two-card drafting; its drafters are the one-card MTP / DFlash objects.
 # Trace, ablation and standalone probes are deliberately outside the runtime set.
-# Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (the YaRN mode
-# keeps the same objects: its table is a buffer), the prefill's own object and its Q8 rows and attention
-Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8')
+# Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (their YaRN
+# mode is the same objects: the table is a buffer), the prefill's own object, its Q8 rows and attention, and the prefill
+# attention object's YaRN build (pf_qk_nr's table)
+Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn')
 RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + Q35MOE_OWN + ('own_topk', 'smoke')
 
 

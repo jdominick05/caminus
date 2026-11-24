@@ -130,13 +130,12 @@ def shapes_of(path):
 
 
 class Q35MoEPrefill(PrefillDriver):
-    """the batched prefill of a Moe35Own engine m (F16 or Q8 KV, native rope), chunks of up to `chunk` tokens; buffers
+    """the batched prefill of a Moe35Own engine m (F16 or Q8 KV, native rope or YaRN), chunks of up to `chunk` tokens; buffers
     preallocated (checked against the card's guard line first: capacity.check)"""
 
     def __init__(self, m, chunk=2048, crossover=None, check=True):
-        if getattr(m, 'yarn_factor', None) is not None:
-            raise ValueError('Q35MoEPrefill: the YaRN mode has no batched prefill yet (the prefill rope has no YaRN table)')
         self.m, self.chunk = m, int(chunk)
+        self.yarn = getattr(m, 'yarn_factor', None) is not None   # (the long-context mode: pf_qk_nr's YaRN form)
         self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache: Q8_0 rows, its Hadamard transforms; never F16 kernels)
         if self.q8 and (m.hd != 256 or m.nh != 8 * m.nkv):
             raise ValueError(f'Q35MoEPrefill: the Q8 cache needs head dim 256 and 8 query heads per kv head ({m.hd}, {m.nh} / {m.nkv})')
@@ -162,7 +161,9 @@ class Q35MoEPrefill(PrefillDriver):
             self.O = Ops(dev, q8=self.q8)
             self.Gl = Glue(dev, module='prefill_glue_q35')
             self.Gd = Gdn(dev, module='prefill_gdn_q35')
-            self.A = Attn(dev, name='prefill_attn_q35')
+            self.A = Attn(dev, name='prefill_attn_q35_yarn' if self.yarn else 'prefill_attn_q35')
+            # (the YaRN mode: the decode tape's table and magnitude scale, the same fp32 values: Moe35Own.yarn)
+            self.ytab = None if not self.yarn else (torch.tensor(m.yarn[0], dtype=torch.float32, device=dev), float(m.yarn[1]))
             for n, c in f32.items(): setattr(self, n, torch.zeros(c, dtype=torch.float32, device=dev))
             for n, c in f16.items(): setattr(self, n, torch.zeros(c, dtype=torch.float16, device=dev))
             for n, c in i32.items(): setattr(self, n, torch.zeros(c, dtype=torch.int32, device=dev))
@@ -180,9 +181,9 @@ class Q35MoEPrefill(PrefillDriver):
 
     def numerics(self):
         """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the F32 router; a Q8 engine's
-        rows (the decode's encode of the rotated k / v)"""
+        rows (the decode's encode of the rotated k / v); a YaRN engine's rope key"""
         return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='none', dense='own-wmma',
-                    **({'kv': self.m.kv_format_id} if self.q8 else {}))
+                    **({'kv': self.m.kv_format_id} if self.q8 else {}), **({'rope': self.m.rope_key} if self.yarn else {}))
 
     def _chunk(self, toks, a, b):
         m, O, Gl, Gd, A = self.m, self.O, self.Gl, self.Gd, self.A
@@ -238,14 +239,14 @@ class Q35MoEPrefill(PrefillDriver):
                 qo = W[o0:o0 + n * QH]; o0 += n * QH
                 att = W[o0:o0 + n * QH]
                 O.mm(L['k'], h16, D, kr, M, n=n); O.mm(L['v'], h16, D, vr, M, n=n)
-                A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n)
+                A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n, yarn=self.ytab)
                 if self.q8:   # (the decode Q8 tape's transforms: K and q by Hadamard256, V and the output by Hadamard64)
                     A.hadamard(ko, 256, n * M // 256); A.hadamard(vr, 64, n * M // 64)
                     O.kv_append_q8(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
                 else: O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
                 if il == last: break                       # (the last layer: only its cache rows are needed)
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
-                A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
+                A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n, yarn=self.ytab)
                 if self.q8: A.hadamard(qo, 256, n * QH // 256)
                 for b0, b1 in O.attn_blocks(p, n):
                     O.attn_wm(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, b0, b1)

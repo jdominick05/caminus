@@ -183,7 +183,7 @@ CLAUDE.md imports this file.
   stays Q8 in either mode. F16 target append and split attention use `prefill_attn_f16`; keep the default Q8 object
   unchanged. `tests/prefill/test_prefill_attn.py` / `test_prefill_qsa.py --kv f16` are its bitwise gates.
   `q3m.py` (qwen3moe), `q35own.py` (the dense qwen35 line on own code) and `q35moe.py` (qwen35moe: Qwen3.6-35B-A3B on
-  `Moe35Own`, F16 or Q8 KV (`kernels/q35m_prefill_kvq8.hip`: docs/dev/q8-kv.md) and the native rope; `kernels/q35m_prefill.hip` adds the router with the gated shared weight, the
+  `Moe35Own`, F16 or Q8 KV (`kernels/q35m_prefill_kvq8.hip`: docs/dev/q8-kv.md), the native rope or YaRN (`kernels/prefill_attn_q35_yarn.hip`: `pf_qk_nr` under `PF_QK_YARN`); `kernels/q35m_prefill.hip` adds the router with the gated shared weight, the
   9-slot grouping (`q3p_group` under `Q3P_GROUP_Y9`) and the grouped Q2_0 expert GEMM to `q35_prefill.hip`'s; `tests/prefill/test_q35m_prefill_ops.py` (G1)
   and `tests/prefill/test_q35_prefill.py` (G-model, both lines)) are the exceptions: their own WMMA GEMMs
   (`kernels/q3m_prefill.hip`, `kernels/q35_prefill.hip`; ThinkingCap's `kernels/q35_prefill_tcap.hip` adds the IQ GEMMs) and
